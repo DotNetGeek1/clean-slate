@@ -1416,11 +1416,14 @@ fn set_privilege_stack(stack_top: u64) -> Result<(), &'static str> {
 
 #[cfg(feature = "m3-self-test")]
 fn activate_process_slot(slot: usize) -> Result<(), &'static str> {
-    let process = process_table_mut()[slot];
-    set_privilege_stack(process.kernel_stack_top)?;
+    let (page_table_root, kernel_stack_top) = {
+        let process = &process_table_mut()[slot];
+        (process.page_table_root, process.kernel_stack_top)
+    };
+    set_privilege_stack(kernel_stack_top)?;
     unsafe {
         Cr3::write(
-            PhysFrame::containing_address(PhysAddr::new(process.page_table_root)),
+            PhysFrame::containing_address(PhysAddr::new(page_table_root)),
             Cr3Flags::empty(),
         );
     }
@@ -1556,6 +1559,32 @@ struct InterruptContext {
     rip: u64,
     cs: u64,
     rflags: u64,
+}
+
+impl InterruptContext {
+    #[cfg(test)]
+    const ZERO: Self = Self {
+        r15: 0,
+        r14: 0,
+        r13: 0,
+        r12: 0,
+        r11: 0,
+        r10: 0,
+        r9: 0,
+        r8: 0,
+        rdi: 0,
+        rsi: 0,
+        rbp: 0,
+        rbx: 0,
+        rdx: 0,
+        rcx: 0,
+        rax: 0,
+        vector: 0,
+        error_code: 0,
+        rip: 0,
+        cs: 0,
+        rflags: 0,
+    };
 }
 
 #[repr(C, packed)]
@@ -2203,28 +2232,41 @@ fn next_expected_fault(
 }
 
 #[cfg(feature = "m3-self-test")]
-fn handle_m3_expected_page_fault(context: &mut InterruptContext) -> Option<u64> {
-    let fault_address = Cr2::read()
-        .expect("CR2 must contain a canonical fault address")
-        .as_u64();
-    let process = current_process_mut().ok()?;
+fn recover_expected_page_fault(
+    process: &mut Process,
+    context: &mut InterruptContext,
+    fault_address: u64,
+) -> bool {
     if bit(context.error_code, 2) == 0 {
-        return None;
+        return false;
     }
 
     let present = bit(context.error_code, 0) != 0;
-    let (next_fault, marker) = next_expected_fault(
+    let Some((next_fault, marker)) = next_expected_fault(
         process.expected_fault,
         fault_address,
         process.kernel_probe_address,
         process.peer_probe_address,
         present,
-    )?;
+    ) else {
+        return false;
+    };
     kernel_log_line(marker);
     process.expected_fault = next_fault;
-
     context.rip = context.rip.wrapping_add(M3_FAULT_SKIP_LEN);
     context.rax = 0;
+    true
+}
+
+#[cfg(feature = "m3-self-test")]
+fn handle_m3_expected_page_fault(context: &mut InterruptContext) -> Option<u64> {
+    let fault_address = Cr2::read()
+        .expect("CR2 must contain a canonical fault address")
+        .as_u64();
+    let process = current_process_mut().ok()?;
+    if !recover_expected_page_fault(process, context, fault_address) {
+        return None;
+    }
     if activate_current_process().is_err() {
         return None;
     }
@@ -3158,5 +3200,40 @@ mod tests {
             ),
             Some((ExpectedFault::None, "[SEC ] cross-process read denied"))
         );
+    }
+
+    #[cfg(feature = "m3-self-test")]
+    #[test]
+    fn m3_fault_recovery_advances_state_and_skips_faulting_instruction() {
+        let mut process = Process {
+            expected_fault: ExpectedFault::KernelMemoryRead,
+            kernel_probe_address: 0x4000,
+            peer_probe_address: 0x5000,
+            ..Process::EMPTY
+        };
+        let kernel_probe = process.kernel_probe_address;
+        let peer_probe = process.peer_probe_address;
+        let mut context = InterruptContext {
+            rip: 0x1000,
+            error_code: 0b101,
+            ..InterruptContext::ZERO
+        };
+
+        assert!(recover_expected_page_fault(&mut process, &mut context, kernel_probe));
+        assert_eq!(process.expected_fault, ExpectedFault::CrossProcessRead);
+        assert_eq!(context.rip, 0x1000 + M3_FAULT_SKIP_LEN);
+
+        let mut supervisor_context = InterruptContext {
+            rip: 0x2000,
+            error_code: 0b001,
+            ..InterruptContext::ZERO
+        };
+        assert!(!recover_expected_page_fault(
+            &mut process,
+            &mut supervisor_context,
+            peer_probe
+        ));
+        assert_eq!(process.expected_fault, ExpectedFault::CrossProcessRead);
+        assert_eq!(supervisor_context.rip, 0x2000);
     }
 }
