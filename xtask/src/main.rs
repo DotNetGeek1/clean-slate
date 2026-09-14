@@ -16,6 +16,7 @@ const M1_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_DOUBLE_FAULT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_TIMER_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M3_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[BOOT] UEFI memory map acquired",
     "[BOOT] ExitBootServices OK",
@@ -54,6 +55,15 @@ const M2_TIMER_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[TIME] ticks=",
     "[TIME] PASS",
 ];
+const M3_ACCEPTANCE_MARKERS: [&str; 7] = [
+    "[USER] process 1 entered ring3",
+    "[SYSC] syscall entry OK",
+    "[IPC ] granted channel send OK",
+    "[SEC ] kernel-memory read denied",
+    "[SEC ] cross-process read denied",
+    "[PROC] teardown OK",
+    "[M3  ] PASS",
+];
 
 fn main() -> ExitCode {
     match run(env::args_os()) {
@@ -73,6 +83,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::Run => run_vm(),
         ParsedCommand::TestM1 => run_m1_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
+        ParsedCommand::TestM3 => run_m3_acceptance(),
         ParsedCommand::RunGdb => run_vm_with_gdb(false),
         ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
         ParsedCommand::Build => build_kernel(false, false, &[]),
@@ -126,6 +137,15 @@ fn run_m2_acceptance() -> Result<(), XtaskError> {
         false,
         &["m2-self-test"],
         Some((&M2_ACCEPTANCE_MARKERS, M2_ACCEPTANCE_TIMEOUT)),
+    )
+}
+
+fn run_m3_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m3-self-test"],
+        Some((&M3_ACCEPTANCE_MARKERS, M3_ACCEPTANCE_TIMEOUT)),
     )
 }
 
@@ -494,6 +514,7 @@ fn print_help() {
     println!("  run          Build kernel and launch QEMU for normal development boot");
     println!("  test-m1      Build the M1 self-test kernel, run QEMU, and validate PASS markers");
     println!("  test-m2      Build the M2 self-test kernel, run QEMU, and validate PASS markers");
+    println!("  test-m3      Build the M3 self-test kernel, run QEMU, and validate PASS markers");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
     println!("  build        Build debug UEFI kernel only");
@@ -511,6 +532,7 @@ enum ParsedCommand {
     Run,
     TestM1,
     TestM2,
+    TestM3,
     RunGdb,
     RunGdbEntry,
     Build,
@@ -524,6 +546,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "run" => ParsedCommand::Run,
         Some(cmd) if cmd == "test-m1" => ParsedCommand::TestM1,
         Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,
+        Some(cmd) if cmd == "test-m3" => ParsedCommand::TestM3,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
         Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
         Some(cmd) if cmd == "build" => ParsedCommand::Build,
@@ -619,6 +642,10 @@ mod tests {
         assert_eq!(
             parse_command(Some("test-m2".as_ref())),
             ParsedCommand::TestM2
+        );
+        assert_eq!(
+            parse_command(Some("test-m3".as_ref())),
+            ParsedCommand::TestM3
         );
         assert_eq!(
             parse_command(Some("run-gdb-entry".as_ref())),

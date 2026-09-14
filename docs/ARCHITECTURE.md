@@ -190,6 +190,12 @@ Single-core correctness is the M2 target, but the design should not bake `curren
 
 That division keeps the M2 task model reusable when SMP arrives: only ownership and synchronization mechanics need to expand, not the saved-context format or the interrupt ABI.
 
+## M3 userspace bring-up direction
+
+The first M3 execution path should extend the existing x86-64 interrupt/GDT/TSS foundation rather than replacing it. Ring-3 entry can therefore reuse a carefully constructed `iretq` frame, while the GDT/TSS grows only enough to add userspace code/data selectors plus an `rsp0` privilege stack for user-to-kernel transitions.
+
+The initial native syscall ABI should stay deliberately tiny and architecture-specific: one DPL3 interrupt gate, fixed register arguments, and explicit capability checks in Rust before any service action occurs. Each process should carry its own page-table root, user code page, and user stack mapping so that kernel mappings remain supervisor-only and unrelated user pages stay inaccessible across domains.
+
 ## Language strategy
 
 The kernel and first-party low-level services should primarily use Rust.
