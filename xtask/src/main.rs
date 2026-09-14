@@ -5,6 +5,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -12,6 +13,9 @@ const KERNEL_PACKAGE: &str = "clean-slate-kernel";
 const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
 const QEMU_DEBUG_EXIT_SUCCESS: i32 = 33;
 const M1_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M2_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M2_DOUBLE_FAULT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M2_TIMER_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[BOOT] UEFI memory map acquired",
     "[BOOT] ExitBootServices OK",
@@ -21,6 +25,34 @@ const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[PF  ] page fault",
     "[PF  ] rip=0x",
     "[M1  ] PASS",
+];
+const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
+    "[INT ] double-fault IST initialized",
+    "[DF  ] double fault",
+    "[DF  ] emergency stack OK",
+    "[DF  ] PASS",
+];
+const M2_ACCEPTANCE_MARKERS: [&str; 12] = [
+    "[BOOT] UEFI memory map acquired",
+    "[BOOT] ExitBootServices OK",
+    "[MEM ] physical allocator initialized",
+    "[INT ] IDT initialized",
+    "[TIME] timer initialized",
+    "[TASK] task 1 started",
+    "[TASK] task 2 started",
+    "[SCHED] preemption observed",
+    "[TASK] task 1 progress=",
+    "[TASK] task 2 progress=",
+    "[TIME] ticks=",
+    "[M2  ] PASS",
+];
+const M2_TIMER_ACCEPTANCE_MARKERS: [&str; 6] = [
+    "[INT ] IDT initialized",
+    "[TIME] timer initialized",
+    "[TIME] contract=lapic periodic divide=16 initial_count=10000000 tick-rate=uncalibrated",
+    "[TIME] tick=1",
+    "[TIME] ticks=",
+    "[TIME] PASS",
 ];
 
 fn main() -> ExitCode {
@@ -40,10 +72,11 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
     match parse_command(args.next().as_deref()) {
         ParsedCommand::Run => run_vm(),
         ParsedCommand::TestM1 => run_m1_acceptance(),
+        ParsedCommand::TestM2 => run_m2_acceptance(),
         ParsedCommand::RunGdb => run_vm_with_gdb(false),
         ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
-        ParsedCommand::Build => build_kernel(false, false, false),
-        ParsedCommand::BuildRelease => build_kernel(true, false, false),
+        ParsedCommand::Build => build_kernel(false, false, &[]),
+        ParsedCommand::BuildRelease => build_kernel(true, false, &[]),
         ParsedCommand::Help => {
             print_help();
             Ok(())
@@ -56,24 +89,54 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
 }
 
 fn run_vm() -> Result<(), XtaskError> {
-    run_vm_inner(false, false, false)
+    run_vm_inner(false, false, &[], None)
 }
 
 fn run_vm_with_gdb(debug_entry: bool) -> Result<(), XtaskError> {
-    run_vm_inner(true, debug_entry, false)
+    run_vm_inner(true, debug_entry, &[], None)
 }
 
 fn run_m1_acceptance() -> Result<(), XtaskError> {
-    run_vm_inner(false, false, true)
+    run_vm_inner(
+        false,
+        false,
+        &["m1-self-test"],
+        Some((&M1_ACCEPTANCE_MARKERS, M1_ACCEPTANCE_TIMEOUT)),
+    )
+}
+
+fn run_m2_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m2-double-fault-self-test"],
+        Some((
+            &M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS,
+            M2_DOUBLE_FAULT_ACCEPTANCE_TIMEOUT,
+        )),
+    )?;
+    run_vm_inner(
+        false,
+        false,
+        &["m2-timer-self-test"],
+        Some((&M2_TIMER_ACCEPTANCE_MARKERS, M2_TIMER_ACCEPTANCE_TIMEOUT)),
+    )?;
+    run_vm_inner(
+        false,
+        false,
+        &["m2-self-test"],
+        Some((&M2_ACCEPTANCE_MARKERS, M2_ACCEPTANCE_TIMEOUT)),
+    )
 }
 
 fn run_vm_inner(
     wait_for_gdb: bool,
     debug_entry: bool,
-    m1_self_test: bool,
+    features: &[&str],
+    acceptance: Option<(&[&str], Duration)>,
 ) -> Result<(), XtaskError> {
     let release = false;
-    build_kernel(release, debug_entry, m1_self_test)?;
+    build_kernel(release, debug_entry, features)?;
 
     let kernel = kernel_artifact(release);
     if !kernel.is_file() {
@@ -118,14 +181,13 @@ fn run_vm_inner(
         qemu.arg("-S").arg("-s");
     }
 
-    if m1_self_test {
-        run_acceptance_command(&mut qemu, &M1_ACCEPTANCE_MARKERS, M1_ACCEPTANCE_TIMEOUT)
-    } else {
-        run_command(&mut qemu)
+    match acceptance {
+        Some((markers, timeout)) => run_acceptance_command(&mut qemu, markers, timeout),
+        None => run_command(&mut qemu),
     }
 }
 
-fn build_kernel(release: bool, debug_entry: bool, m1_self_test: bool) -> Result<(), XtaskError> {
+fn build_kernel(release: bool, debug_entry: bool, features: &[&str]) -> Result<(), XtaskError> {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(workspace_root())
         .arg("build")
@@ -137,15 +199,13 @@ fn build_kernel(release: bool, debug_entry: bool, m1_self_test: bool) -> Result<
     if release {
         cmd.arg("--release");
     }
-    let mut features = Vec::new();
+    let mut feature_list = Vec::new();
     if debug_entry {
-        features.push("gdb-entry");
+        feature_list.push("gdb-entry");
     }
-    if m1_self_test {
-        features.push("m1-self-test");
-    }
-    if !features.is_empty() {
-        cmd.arg("--features").arg(features.join(","));
+    feature_list.extend(features.iter().copied());
+    if !feature_list.is_empty() {
+        cmd.arg("--features").arg(feature_list.join(","));
     }
 
     run_command(&mut cmd)
@@ -236,56 +296,85 @@ fn run_acceptance_command(
 
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture child stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture child stderr"))?;
+    let (tx, rx) = mpsc::channel();
+    let stdout_handle = spawn_output_reader(stdout, false, tx.clone());
+    let stderr_handle = spawn_output_reader(stderr, true, tx);
+
+    let mut tracker = MarkerTracker::new(markers);
+    let mut output = String::new();
+    let mut readers_finished = 0usize;
+    let mut authoritative_pass = false;
+    let mut child_status = None;
 
     loop {
-        if child.try_wait()?.is_some() {
-            break;
-        }
-
-        if start.elapsed() >= timeout {
-            child.kill()?;
+        if start.elapsed() >= timeout && !authoritative_pass {
+            terminate_child(&mut child)?;
             let _ = child.wait();
-            let mut stdout = String::new();
-            if let Some(mut handle) = child.stdout.take() {
-                handle.read_to_string(&mut stdout)?;
-            }
-            let mut stderr = String::new();
-            if let Some(mut handle) = child.stderr.take() {
-                handle.read_to_string(&mut stderr)?;
-            }
-            if !stdout.is_empty() {
-                print!("{stdout}");
-            }
-            if !stderr.is_empty() {
-                eprint!("{stderr}");
-            }
+            join_output_reader(stdout_handle);
+            join_output_reader(stderr_handle);
+            drain_output_events(&rx, &mut output);
             return Err(XtaskError::CommandTimedOut {
                 command: command_display,
                 timeout: timeout.as_secs(),
             });
         }
 
-        thread::sleep(Duration::from_millis(100));
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(OutputEvent::Chunk(chunk)) => {
+                if chunk.is_stderr {
+                    eprint!("{}", chunk.text);
+                } else {
+                    print!("{}", chunk.text);
+                }
+                output.push_str(&chunk.text);
+                if tracker.consume(&output) && !authoritative_pass {
+                    authoritative_pass = true;
+                    terminate_child(&mut child)?;
+                    child_status = Some(child.wait()?);
+                }
+            }
+            Ok(OutputEvent::Finished) => {
+                readers_finished += 1;
+            }
+            Ok(OutputEvent::ReadError(error)) => {
+                terminate_child(&mut child).ok();
+                let _ = child.wait();
+                join_output_reader(stdout_handle);
+                join_output_reader(stderr_handle);
+                return Err(XtaskError::Io(error));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                readers_finished = 2;
+            }
+        }
+
+        if child_status.is_none() {
+            child_status = child.try_wait()?;
+        }
+
+        if readers_finished == 2 && child_status.is_some() {
+            break;
+        }
     }
 
-    let mut stdout = String::new();
-    if let Some(mut handle) = child.stdout.take() {
-        handle.read_to_string(&mut stdout)?;
-    }
-    let mut stderr = String::new();
-    if let Some(mut handle) = child.stderr.take() {
-        handle.read_to_string(&mut stderr)?;
-    }
-    let output = if stderr.is_empty() {
-        stdout.clone()
-    } else if stdout.is_empty() {
-        stderr.clone()
-    } else {
-        format!("{stdout}{stderr}")
-    };
-    print!("{output}");
+    join_output_reader(stdout_handle);
+    join_output_reader(stderr_handle);
+    drain_output_events(&rx, &mut output);
 
-    let status = child.wait()?;
+    if authoritative_pass {
+        return Ok(());
+    }
+
+    let status = child_status.unwrap_or(child.wait()?);
     if !(status.success() || status.code() == Some(QEMU_DEBUG_EXIT_SUCCESS)) {
         return Err(XtaskError::CommandFailed {
             command: command_display,
@@ -297,21 +386,114 @@ fn run_acceptance_command(
 }
 
 fn validate_output_markers(output: &str, markers: &[&str]) -> Result<(), XtaskError> {
-    let mut search_start = 0usize;
-    for marker in markers {
-        let Some(offset) = output[search_start..].find(marker) else {
-            return Err(XtaskError::MissingMarker((*marker).to_owned()));
-        };
-        search_start += offset + marker.len();
+    let mut tracker = MarkerTracker::new(markers);
+    if tracker.consume(output) {
+        Ok(())
+    } else {
+        Err(XtaskError::MissingMarker(
+            markers[tracker.next_marker].to_owned(),
+        ))
+    }
+}
+
+struct MarkerTracker<'a> {
+    markers: &'a [&'a str],
+    next_marker: usize,
+    search_start: usize,
+}
+
+impl<'a> MarkerTracker<'a> {
+    fn new(markers: &'a [&'a str]) -> Self {
+        Self {
+            markers,
+            next_marker: 0,
+            search_start: 0,
+        }
     }
 
-    Ok(())
+    fn consume(&mut self, output: &str) -> bool {
+        while self.next_marker < self.markers.len() {
+            let marker = self.markers[self.next_marker];
+            let Some(offset) = output[self.search_start..].find(marker) else {
+                break;
+            };
+            self.search_start += offset + marker.len();
+            self.next_marker += 1;
+        }
+        self.next_marker == self.markers.len()
+    }
+}
+
+struct OutputChunk {
+    is_stderr: bool,
+    text: String,
+}
+
+enum OutputEvent {
+    Chunk(OutputChunk),
+    Finished,
+    ReadError(std::io::Error),
+}
+
+fn spawn_output_reader<R: Read + Send + 'static>(
+    mut reader: R,
+    is_stderr: bool,
+    tx: mpsc::Sender<OutputEvent>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buffer = [0u8; 1024];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = tx.send(OutputEvent::Finished);
+                    break;
+                }
+                Ok(bytes_read) => {
+                    let text = String::from_utf8_lossy(&buffer[..bytes_read]).into_owned();
+                    let _ = tx.send(OutputEvent::Chunk(OutputChunk { is_stderr, text }));
+                }
+                Err(error) => {
+                    let _ = tx.send(OutputEvent::ReadError(error));
+                    break;
+                }
+            }
+        }
+    })
+}
+
+fn terminate_child(child: &mut std::process::Child) -> Result<(), XtaskError> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    match child.kill() {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => Ok(()),
+        Err(error) => Err(XtaskError::Io(error)),
+    }
+}
+
+fn join_output_reader(handle: thread::JoinHandle<()>) {
+    let _ = handle.join();
+}
+
+fn drain_output_events(receiver: &mpsc::Receiver<OutputEvent>, output: &mut String) {
+    while let Ok(event) = receiver.try_recv() {
+        if let OutputEvent::Chunk(chunk) = event {
+            if chunk.is_stderr {
+                eprint!("{}", chunk.text);
+            } else {
+                print!("{}", chunk.text);
+            }
+            output.push_str(&chunk.text);
+        }
+    }
 }
 
 fn print_help() {
     println!("Usage: cargo xtask <command>");
     println!("  run          Build kernel and launch QEMU for normal development boot");
     println!("  test-m1      Build the M1 self-test kernel, run QEMU, and validate PASS markers");
+    println!("  test-m2      Build the M2 self-test kernel, run QEMU, and validate PASS markers");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
     println!("  build        Build debug UEFI kernel only");
@@ -328,6 +510,7 @@ struct OvmfPaths {
 enum ParsedCommand {
     Run,
     TestM1,
+    TestM2,
     RunGdb,
     RunGdbEntry,
     Build,
@@ -340,6 +523,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
     match command {
         Some(cmd) if cmd == "run" => ParsedCommand::Run,
         Some(cmd) if cmd == "test-m1" => ParsedCommand::TestM1,
+        Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
         Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
         Some(cmd) if cmd == "build" => ParsedCommand::Build,
@@ -433,6 +617,10 @@ mod tests {
             ParsedCommand::TestM1
         );
         assert_eq!(
+            parse_command(Some("test-m2".as_ref())),
+            ParsedCommand::TestM2
+        );
+        assert_eq!(
             parse_command(Some("run-gdb-entry".as_ref())),
             ParsedCommand::RunGdbEntry
         );
@@ -502,5 +690,35 @@ mod tests {
 [MEM ] physical allocator initialized\n\
 [BOOT] ExitBootServices OK\n";
         assert!(validate_output_markers(invalid, &M1_ACCEPTANCE_MARKERS).is_err());
+    }
+
+    #[test]
+    fn marker_tracker_detects_ordered_markers_incrementally() {
+        let mut tracker = MarkerTracker::new(&M2_ACCEPTANCE_MARKERS);
+        assert!(!tracker.consume("[BOOT] UEFI memory map acquired\n[TIME] timer initialized\n"));
+        assert!(!tracker.consume(
+            "[BOOT] UEFI memory map acquired\n\
+[BOOT] ExitBootServices OK\n\
+[MEM ] physical allocator initialized\n\
+[INT ] IDT initialized\n\
+[TIME] timer initialized\n\
+[TASK] task 1 started\n\
+[TASK] task 2 started\n\
+[SCHED] preemption observed\n"
+        ));
+        assert!(tracker.consume(
+            "[BOOT] UEFI memory map acquired\n\
+[BOOT] ExitBootServices OK\n\
+[MEM ] physical allocator initialized\n\
+[INT ] IDT initialized\n\
+[TIME] timer initialized\n\
+[TASK] task 1 started\n\
+[TASK] task 2 started\n\
+[SCHED] preemption observed\n\
+[TASK] task 1 progress=1\n\
+[TASK] task 2 progress=1\n\
+[TIME] ticks=4\n\
+[M2  ] PASS\n"
+        ));
     }
 }
