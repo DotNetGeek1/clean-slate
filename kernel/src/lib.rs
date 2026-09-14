@@ -770,24 +770,6 @@ fn reserve_mapping_page_tables(
 }
 
 static mut EXPECTED_PAGE_FAULT_ADDRESS: u64 = 0;
-#[cfg(feature = "m1-self-test")]
-static mut EXPECTED_PAGE_FAULT_RIP: u64 = 0;
-
-#[cfg(feature = "m1-self-test")]
-fn trigger_expected_page_fault(address: *const u64) -> ! {
-    unsafe {
-        EXPECTED_PAGE_FAULT_ADDRESS = address as u64;
-        EXPECTED_PAGE_FAULT_RIP = page_fault_probe as usize as u64;
-        page_fault_probe(address);
-    }
-}
-
-#[cfg(feature = "m1-self-test")]
-#[inline(never)]
-unsafe fn page_fault_probe(address: *const u64) -> ! {
-    let _ = unsafe { ptr::read_volatile(address) };
-    qemu_exit(QEMU_EXIT_FAILURE)
-}
 
 #[repr(C)]
 struct PageFaultContext {
@@ -813,6 +795,7 @@ global_asm!(
     r#"
     .global clean_slate_page_fault_entry
 clean_slate_page_fault_entry:
+    mov r11, rsp
     push rax
     push rcx
     push rdx
@@ -828,10 +811,14 @@ clean_slate_page_fault_entry:
     push r13
     push r14
     push r15
-    mov rdi, rsp
-    mov r8, rsp
-    and r8, 8
-    sub rsp, r8
+    mov rcx, rsp
+    mov rdx, [r11 + 8]
+    mov r8, [r11 + 16]
+    mov r9, [r11 + 24]
+    mov rax, rsp
+    and rax, 8
+    sub rsp, 32
+    sub rsp, rax
     call clean_slate_page_fault_handler
     ud2
 "#
@@ -842,7 +829,12 @@ unsafe extern "C" {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn clean_slate_page_fault_handler(context: *const PageFaultContext) -> ! {
+extern "C" fn clean_slate_page_fault_handler(
+    context: *const PageFaultContext,
+    rip: u64,
+    cs: u64,
+    rflags: u64,
+) -> ! {
     let context = unsafe { &*context };
     let fault_address = Cr2::read()
         .expect("CR2 must contain a canonical fault address")
@@ -851,14 +843,10 @@ extern "C" fn clean_slate_page_fault_handler(context: *const PageFaultContext) -
     let expected = unsafe { EXPECTED_PAGE_FAULT_ADDRESS };
 
     serial_write_line("[PF  ] page fault");
-    if expected == fault_address {
-        #[cfg(feature = "m1-self-test")]
-        serial_write_fmt(format_args!("[PF  ] rip={:#018x}\n", unsafe {
-            EXPECTED_PAGE_FAULT_RIP
-        }));
-    } else {
-        serial_write_line("[PF  ] rip=<unavailable>");
-    }
+    serial_write_fmt(format_args!(
+        "[PF  ] rip={:#018x} cs={:#06x} rflags={:#018x}\n",
+        rip, cs, rflags
+    ));
     serial_write_fmt(format_args!(
         "[PF  ] cr2={:#018x} cr3={:#018x} err={:#x} present={} write={} user={} instruction_fetch={}\n",
         fault_address,
@@ -876,6 +864,21 @@ extern "C" fn clean_slate_page_fault_handler(context: *const PageFaultContext) -
     }
 
     serial_write_line("[PF  ] unexpected page fault");
+    qemu_exit(QEMU_EXIT_FAILURE)
+}
+
+#[cfg(feature = "m1-self-test")]
+fn trigger_expected_page_fault(address: *const u64) -> ! {
+    unsafe {
+        EXPECTED_PAGE_FAULT_ADDRESS = address as u64;
+        page_fault_probe(address);
+    }
+}
+
+#[cfg(feature = "m1-self-test")]
+#[inline(never)]
+unsafe fn page_fault_probe(address: *const u64) -> ! {
+    let _ = unsafe { ptr::read_volatile(address) };
     qemu_exit(QEMU_EXIT_FAILURE)
 }
 

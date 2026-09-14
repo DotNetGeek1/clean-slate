@@ -12,13 +12,14 @@ const KERNEL_PACKAGE: &str = "clean-slate-kernel";
 const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
 const QEMU_DEBUG_EXIT_SUCCESS: i32 = 33;
 const M1_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M1_ACCEPTANCE_MARKERS: [&str; 7] = [
+const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[BOOT] UEFI memory map acquired",
     "[BOOT] ExitBootServices OK",
     "[MEM ] physical allocator initialized",
     "[MM  ] page-fault diagnostics installed",
     "[MM  ] scratch page map/unmap OK",
     "[PF  ] page fault",
+    "[PF  ] rip=0x",
     "[M1  ] PASS",
 ];
 
@@ -492,6 +493,7 @@ mod tests {
 [MM  ] page-fault diagnostics installed\n\
 [MM  ] scratch page map/unmap OK\n\
 [PF  ] page fault\n\
+[PF  ] rip=0x0000000012345678 cs=0x0038 rflags=0x0000000000000002\n\
 [M1  ] PASS\n";
         assert!(validate_output_markers(valid, &M1_ACCEPTANCE_MARKERS).is_ok());
 
