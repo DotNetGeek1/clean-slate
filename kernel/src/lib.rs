@@ -871,7 +871,6 @@ struct UserspaceEntryFrame {
 #[cfg(feature = "m3-entry-self-test")]
 #[derive(Clone, Copy)]
 struct UserspaceTestState {
-    user_code_address: u64,
     privileged_instruction_rip: u64,
 }
 
@@ -1083,6 +1082,32 @@ struct InterruptContext {
     rip: u64,
     cs: u64,
     rflags: u64,
+}
+
+#[cfg(test)]
+impl InterruptContext {
+    const ZERO: Self = Self {
+        r15: 0,
+        r14: 0,
+        r13: 0,
+        r12: 0,
+        r11: 0,
+        r10: 0,
+        r9: 0,
+        r8: 0,
+        rdi: 0,
+        rsi: 0,
+        rbp: 0,
+        rbx: 0,
+        rdx: 0,
+        rcx: 0,
+        rax: 0,
+        vector: 0,
+        error_code: 0,
+        rip: 0,
+        cs: 0,
+        rflags: 0,
+    };
 }
 
 #[repr(C, packed)]
@@ -1603,12 +1628,39 @@ fn map_userspace_page(
 }
 
 #[cfg(feature = "m3-entry-self-test")]
-fn page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'static str> {
+fn unmap_userspace_page(
+    mapper: &mut OffsetPageTable<'_>,
+    page: Page<Size4KiB>,
+) -> Result<PhysFrame<Size4KiB>, &'static str> {
+    without_write_protect(|| mapper.unmap(page))
+        .map(|(frame, flush)| {
+            flush.flush();
+            frame
+        })
+        .map_err(|_| "failed to unmap userspace page")
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+unsafe fn free_frame(allocator: &mut PageAllocator, frame: u64) -> Result<(), &'static str> {
+    unsafe { allocator.free_page(frame) }
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+struct PageWalkFlags {
+    path: PageTableFlags,
+    leaf: PageTableFlags,
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn walk_page_flags(address: VirtAddr) -> Result<PageWalkFlags, &'static str> {
     let (level_4_frame, _) = Cr3::read();
     let level_4_table = unsafe {
         &*((level_4_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
     };
     let level_4_entry = &level_4_table[address.p4_index()];
+    if level_4_entry.is_unused() {
+        return Err("virtual address was not backed by a valid level-4 entry");
+    }
     let level_3_frame = level_4_entry
         .frame()
         .map_err(|_| "virtual address was not backed by a valid level-3 frame")?;
@@ -1618,7 +1670,10 @@ fn page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'static 
     };
     let level_3_entry = &level_3_table[address.p3_index()];
     if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
-        return Ok(level_4_entry.flags() | level_3_entry.flags());
+        return Ok(PageWalkFlags {
+            path: level_4_entry.flags() | level_3_entry.flags(),
+            leaf: level_3_entry.flags(),
+        });
     }
     let level_2_frame = level_3_entry
         .frame()
@@ -1629,7 +1684,10 @@ fn page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'static 
     };
     let level_2_entry = &level_2_table[address.p2_index()];
     if level_2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
-        return Ok(level_4_entry.flags() | level_3_entry.flags() | level_2_entry.flags());
+        return Ok(PageWalkFlags {
+            path: level_4_entry.flags() | level_3_entry.flags() | level_2_entry.flags(),
+            leaf: level_2_entry.flags(),
+        });
     }
     let level_1_frame = level_2_entry
         .frame()
@@ -1642,50 +1700,20 @@ fn page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'static 
     if level_1_entry.is_unused() {
         return Err("virtual address was not mapped");
     }
-    Ok(level_4_entry.flags() | level_3_entry.flags() | level_2_entry.flags() | level_1_entry.flags())
+    Ok(PageWalkFlags {
+        path: level_4_entry.flags() | level_3_entry.flags() | level_2_entry.flags() | level_1_entry.flags(),
+        leaf: level_1_entry.flags(),
+    })
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'static str> {
+    Ok(walk_page_flags(address)?.path)
 }
 
 #[cfg(feature = "m3-entry-self-test")]
 fn leaf_page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'static str> {
-    let (level_4_frame, _) = Cr3::read();
-    let level_4_table = unsafe {
-        &*((level_4_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
-    };
-    let level_4_entry = &level_4_table[address.p4_index()];
-    let level_3_frame = level_4_entry
-        .frame()
-        .map_err(|_| "virtual address was not backed by a valid level-3 frame")?;
-
-    let level_3_table = unsafe {
-        &*((level_3_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
-    };
-    let level_3_entry = &level_3_table[address.p3_index()];
-    if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
-        return Ok(level_3_entry.flags());
-    }
-    let level_2_frame = level_3_entry
-        .frame()
-        .map_err(|_| "virtual address was not backed by a valid level-2 frame")?;
-
-    let level_2_table = unsafe {
-        &*((level_2_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
-    };
-    let level_2_entry = &level_2_table[address.p2_index()];
-    if level_2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
-        return Ok(level_2_entry.flags());
-    }
-    let level_1_frame = level_2_entry
-        .frame()
-        .map_err(|_| "virtual address was not backed by a valid level-1 frame")?;
-
-    let level_1_table = unsafe {
-        &*((level_1_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
-    };
-    let level_1_entry = &level_1_table[address.p1_index()];
-    if level_1_entry.is_unused() {
-        return Err("virtual address was not mapped");
-    }
-    Ok(level_1_entry.flags())
+    Ok(walk_page_flags(address)?.leaf)
 }
 
 #[cfg(feature = "m3-entry-self-test")]
@@ -1768,9 +1796,17 @@ fn install_userspace_payload(allocator: &mut PageAllocator) -> Result<(), &'stat
     let code_frame_address = allocator
         .allocate_page()
         .ok_or("allocator could not provide a code page for userspace entry")?;
-    let stack_frame_address = allocator
-        .allocate_page()
-        .ok_or("allocator could not provide a stack page for userspace entry")?;
+    let stack_frame_address = match allocator.allocate_page() {
+        Some(frame) => frame,
+        None => {
+            unsafe {
+                free_frame(allocator, code_frame_address)?;
+            }
+            return Err("allocator could not provide a stack page for userspace entry");
+        }
+    };
+    let code_page = Page::<Size4KiB>::containing_address(VirtAddr::new(USER_TEST_CODE_ADDRESS));
+    let stack_page = Page::<Size4KiB>::containing_address(VirtAddr::new(USER_TEST_STACK_ADDRESS));
     zero_page(code_frame_address);
     zero_page(stack_frame_address);
     unsafe {
@@ -1781,27 +1817,47 @@ fn install_userspace_payload(allocator: &mut PageAllocator) -> Result<(), &'stat
         );
     }
 
-    map_userspace_page(
+    if let Err(message) = map_userspace_page(
         &mut mapper,
-        Page::<Size4KiB>::containing_address(VirtAddr::new(USER_TEST_CODE_ADDRESS)),
+        code_page,
         PhysFrame::containing_address(PhysAddr::new(code_frame_address)),
         PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
         allocator,
-    )?;
-    map_userspace_page(
+    ) {
+        unsafe {
+            free_frame(allocator, stack_frame_address)?;
+            free_frame(allocator, code_frame_address)?;
+        }
+        return Err(message);
+    }
+    if let Err(message) = map_userspace_page(
         &mut mapper,
-        Page::<Size4KiB>::containing_address(VirtAddr::new(USER_TEST_STACK_ADDRESS)),
+        stack_page,
         PhysFrame::containing_address(PhysAddr::new(stack_frame_address)),
         PageTableFlags::PRESENT
             | PageTableFlags::WRITABLE
             | PageTableFlags::NO_EXECUTE
             | PageTableFlags::USER_ACCESSIBLE,
         allocator,
-    )?;
-    validate_userspace_mappings()?;
+    ) {
+        let _ = unmap_userspace_page(&mut mapper, code_page);
+        unsafe {
+            free_frame(allocator, stack_frame_address)?;
+            free_frame(allocator, code_frame_address)?;
+        }
+        return Err(message);
+    }
+    if let Err(message) = validate_userspace_mappings() {
+        let _ = unmap_userspace_page(&mut mapper, stack_page);
+        let _ = unmap_userspace_page(&mut mapper, code_page);
+        unsafe {
+            free_frame(allocator, stack_frame_address)?;
+            free_frame(allocator, code_frame_address)?;
+        }
+        return Err(message);
+    }
     unsafe {
         *USERSPACE_TEST_STATE.get() = Some(UserspaceTestState {
-            user_code_address: USER_TEST_CODE_ADDRESS,
             privileged_instruction_rip: USER_TEST_CODE_ADDRESS
                 + userspace_test_privileged_instruction_offset(),
         });
@@ -1835,24 +1891,30 @@ fn selector_rpl(selector: u64) -> u64 {
 }
 
 #[cfg(feature = "m3-entry-self-test")]
+fn validate_userspace_entry_trap(context: &InterruptContext, expected_rip: u64) -> Result<(), &'static str> {
+    if selector_rpl(context.cs) != 3 {
+        return Err("userspace entry trap did not originate from CPL3");
+    }
+    if context.rip != expected_rip {
+        return Err("userspace entry trap returned to an unexpected RIP");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "m3-entry-self-test")]
 fn userspace_frame(context: &InterruptContext) -> &UserspaceEntryFrame {
     unsafe { &*(context as *const InterruptContext as *const UserspaceEntryFrame) }
 }
 
 #[cfg(feature = "m3-entry-self-test")]
 fn handle_userspace_entry_trap(context: &InterruptContext) -> Result<u64, &'static str> {
-    if selector_rpl(context.cs) != 3 {
-        return Err("userspace entry trap did not originate from CPL3");
-    }
-    let frame = userspace_frame(context);
     let state = userspace_test_state()?;
-    if context.rip != state.privileged_instruction_rip {
-        return Err("userspace entry trap returned to an unexpected RIP");
-    }
+    validate_userspace_entry_trap(context, state.privileged_instruction_rip)?;
+    let frame = userspace_frame(context);
     USERSPACE_ENTRY_OBSERVED.store(true, Ordering::Relaxed);
     kernel_log_fmt(format_args!(
         "[USER] entered ring3 rip={:#018x} rsp={:#018x} cs={:#06x} ss={:#06x} rflags={:#018x} if={}\n",
-        state.user_code_address,
+        context.rip,
         frame.user_stack_pointer,
         context.cs,
         frame.user_stack_segment,
@@ -2802,5 +2864,34 @@ mod tests {
     fn userspace_test_payload_stays_within_one_page() {
         assert!(userspace_test_size() <= PAGE_SIZE as usize);
         assert!(userspace_test_privileged_instruction_offset() < userspace_test_size() as u64);
+    }
+
+    #[cfg(feature = "m3-entry-self-test")]
+    #[test]
+    fn userspace_entry_trap_validation_requires_cpl3_and_expected_rip() {
+        let valid = InterruptContext {
+            cs: 0x001b,
+            rip: 0x4002,
+            ..InterruptContext::ZERO
+        };
+        assert_eq!(validate_userspace_entry_trap(&valid, 0x4002), Ok(()));
+
+        let wrong_cpl = InterruptContext {
+            cs: 0x0008,
+            ..valid
+        };
+        assert_eq!(
+            validate_userspace_entry_trap(&wrong_cpl, 0x4002),
+            Err("userspace entry trap did not originate from CPL3")
+        );
+
+        let wrong_rip = InterruptContext {
+            rip: 0x4004,
+            ..valid
+        };
+        assert_eq!(
+            validate_userspace_entry_trap(&wrong_rip, 0x4002),
+            Err("userspace entry trap returned to an unexpected RIP")
+        );
     }
 }
