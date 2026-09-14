@@ -66,16 +66,25 @@ const SPURIOUS_VECTOR: usize = 33;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 const USER_TEST_VECTOR: usize = 0x80;
 const APIC_BASE_MSR: u32 = 0x1b;
-#[cfg(feature = "m3-syscall-self-test")]
 const IA32_EFER_MSR: u32 = 0xc000_0080;
-#[cfg(feature = "m3-syscall-self-test")]
 const IA32_STAR_MSR: u32 = 0xc000_0081;
-#[cfg(feature = "m3-syscall-self-test")]
 const IA32_LSTAR_MSR: u32 = 0xc000_0082;
-#[cfg(feature = "m3-syscall-self-test")]
 const IA32_FMASK_MSR: u32 = 0xc000_0084;
-#[cfg(feature = "m3-syscall-self-test")]
 const IA32_EFER_SCE: u64 = 1;
+const RFLAGS_TRAP_FLAG_BIT: u64 = 8;
+const RFLAGS_INTERRUPT_ENABLE_BIT: u64 = 9;
+const RFLAGS_DIRECTION_FLAG_BIT: u64 = 10;
+const RFLAGS_IOPL_SHIFT: u64 = 12;
+const RFLAGS_NESTED_TASK_BIT: u64 = 14;
+const RFLAGS_RESUME_FLAG_BIT: u64 = 16;
+const RFLAGS_ALIGNMENT_CHECK_BIT: u64 = 18;
+const SYSCALL_ENTRY_RFLAGS_MASK: u64 = (1u64 << RFLAGS_TRAP_FLAG_BIT)
+    | (1u64 << RFLAGS_INTERRUPT_ENABLE_BIT)
+    | (1u64 << RFLAGS_DIRECTION_FLAG_BIT)
+    | (0b11u64 << RFLAGS_IOPL_SHIFT)
+    | (1u64 << RFLAGS_NESTED_TASK_BIT)
+    | (1u64 << RFLAGS_RESUME_FLAG_BIT)
+    | (1u64 << RFLAGS_ALIGNMENT_CHECK_BIT);
 const APIC_BASE_ADDRESS_MASK: u64 = 0xffff_f000;
 const APIC_ENABLE: u64 = 1 << 11;
 const APIC_SPURIOUS_INTERRUPT_VECTOR: u32 = 0x100 | (SPURIOUS_VECTOR as u32);
@@ -95,8 +104,6 @@ const TASK_COUNT: usize = 2;
 const TASK_STACK_SIZE: usize = 64 * 1024;
 const TASK_REQUIRED_PREEMPTIONS: u64 = 2;
 const TASK_PROGRESS_CHUNK: u64 = 4_096;
-#[cfg(feature = "m3-syscall-self-test")]
-const RFLAGS_INTERRUPT_ENABLE_BIT: u64 = 9;
 #[cfg(feature = "m2-timer-self-test")]
 const TIMER_SELF_TEST_REQUIRED_TICKS: u64 = 4;
 #[cfg(feature = "m2-double-fault-self-test")]
@@ -127,26 +134,22 @@ const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 const ADDRESS_SPACE_SWITCH_OK_MARKER: &str = "[MM  ] address-space switch OK";
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 const USER_TEST_RFLAGS: u64 = 0x202;
-#[cfg(feature = "m3-syscall-self-test")]
 const USER_CANONICAL_TOP_EXCLUSIVE: u64 = 1 << 47;
-#[cfg(feature = "m3-syscall-self-test")]
-const SYSCALL_PASS_MARKER: &str = "[SYSC] syscall entry/return PASS";
-#[cfg(feature = "m3-syscall-self-test")]
 const SYSCALL_ABI_VERSION: u64 = 1;
-#[cfg(feature = "m3-syscall-self-test")]
 const SYSCALL_NR_VERSION: u64 = 0;
-#[cfg(feature = "m3-syscall-self-test")]
 const SYSCALL_NR_READ_U64: u64 = 1;
-#[cfg(feature = "m3-syscall-self-test")]
 const SYSCALL_NR_FINISH: u64 = 2;
-#[cfg(feature = "m3-syscall-self-test")]
 const SYSCALL_ENOSYS: u64 = u64::MAX - 37;
 #[cfg(feature = "m3-syscall-self-test")]
 const SYSCALL_EINVAL: u64 = u64::MAX - 21;
 #[cfg(feature = "m3-syscall-self-test")]
+const SYSCALL_PASS_MARKER: &str = "[SYSC] syscall entry/return PASS";
+#[cfg(feature = "m3-syscall-self-test")]
 const SYSCALL_TEST_EXPECTED_VALUE: u64 = 0x5359_5343_4f4c_4c21;
 #[cfg(feature = "m3-syscall-self-test")]
 const SYSCALL_TEST_REQUIRED_CALLS: u64 = 256;
+#[cfg(feature = "m3-syscall-self-test")]
+const SYSCALL_DF_SANITIZED_MARKER: &str = "[SYSC] entry flag mask OK";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryRegionKind {
@@ -696,6 +699,12 @@ fn run_inner() -> Result<(), &'static str> {
     serial_write_line("[INT ] IDT initialized");
     serial_write_line("[INT ] double-fault IST initialized");
     serial_write_line("[MM  ] page-fault diagnostics installed");
+    let syscall_kernel_stack_top = unsafe {
+        let stacks = &*TASK_STACKS.get();
+        task_stack_top(&stacks[0])
+    };
+    set_privilege_stack(syscall_kernel_stack_top)?;
+    initialize_syscall_abi(syscall_kernel_stack_top)?;
 
     let inspected = inspect_current_mapping()?;
     serial_write_fmt(format_args!(
@@ -971,7 +980,6 @@ struct UserspaceSyscallTestState {
     user_stack_segment: u64,
 }
 
-#[cfg(feature = "m3-syscall-self-test")]
 #[repr(C)]
 struct SyscallContext {
     rax: u64,
@@ -1397,12 +1405,11 @@ struct GdtState {
     table: GlobalDescriptorTable,
     code_selector: SegmentSelector,
     data_selector: SegmentSelector,
+    user_sysret_selector_base: SegmentSelector,
     #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
     user_code_selector: SegmentSelector,
     #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
     user_data_selector: SegmentSelector,
-    #[cfg(feature = "m3-syscall-self-test")]
-    user_sysret_selector_base: SegmentSelector,
     tss_selector: SegmentSelector,
 }
 
@@ -1446,6 +1453,8 @@ static mut SYSCALL_KERNEL_STACK_TOP: u64 = 0;
 static mut SYSCALL_SCRATCH_USER_RSP: u64 = 0;
 #[cfg(feature = "m3-syscall-self-test")]
 static SYSCALL_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "m3-syscall-self-test")]
+static SYSCALL_DF_SANITIZED_OBSERVED: AtomicBool = AtomicBool::new(false);
 #[unsafe(no_mangle)]
 static mut NEXT_TASK_STACK_POINTER: u64 = 0;
 #[unsafe(no_mangle)]
@@ -1533,9 +1542,12 @@ unsafe extern "C" {
     static clean_slate_user_test_end: u8;
 }
 
-#[cfg(feature = "m3-syscall-self-test")]
 unsafe extern "C" {
     fn clean_slate_syscall_entry();
+}
+
+#[cfg(feature = "m3-syscall-self-test")]
+unsafe extern "C" {
     static clean_slate_user_syscall_test_start: u8;
     static clean_slate_user_syscall_test_end: u8;
 }
@@ -1699,13 +1711,17 @@ clean_slate_user_test_end:
 
     .global clean_slate_user_syscall_test_start
 clean_slate_user_syscall_test_start:
+    std
     mov rax, 0
     syscall
+    cld
     cmp rax, 1
     jne clean_slate_user_syscall_test_fail
 
+    std
     mov rax, 0xffff
     syscall
+    cld
     mov rbx, -38
     cmp rax, rbx
     jne clean_slate_user_syscall_test_fail
@@ -1738,22 +1754,22 @@ clean_slate_user_syscall_test_end:
 clean_slate_syscall_entry:
     mov [rip + SYSCALL_SCRATCH_USER_RSP], rsp
     mov rsp, [rip + SYSCALL_KERNEL_STACK_TOP]
-    push rax
-    push rdx
-    push rbx
-    push rbp
-    push rsi
-    push rdi
-    push r8
-    push r9
-    push r10
-    push r12
-    push r13
-    push r14
-    push r15
-    push rcx
-    push r11
     push qword ptr [rip + SYSCALL_SCRATCH_USER_RSP]
+    push r11
+    push rcx
+    push r15
+    push r14
+    push r13
+    push r12
+    push r10
+    push r9
+    push r8
+    push rdi
+    push rsi
+    push rbp
+    push rbx
+    push rdx
+    push rax
     mov rdi, rsp
     mov r12, rsp
     and r12, 8
@@ -1761,22 +1777,25 @@ clean_slate_syscall_entry:
     sub rsp, r12
     call clean_slate_syscall_dispatch
     mov rsp, rax
-    pop rsp
-    pop r11
-    pop rcx
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r10
-    pop r9
-    pop r8
-    pop rdi
-    pop rsi
-    pop rbp
-    pop rbx
-    pop rdx
+    mov r12, [rsp + 120]
+    mov [rip + SYSCALL_SCRATCH_USER_RSP], r12
     pop rax
+    pop rdx
+    pop rbx
+    pop rbp
+    pop rsi
+    pop rdi
+    pop r8
+    pop r9
+    pop r10
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    pop rcx
+    pop r11
+    add rsp, 8
+    mov rsp, [rip + SYSCALL_SCRATCH_USER_RSP]
     sysretq
 
     CLEAN_SLATE_INTERRUPT_NO_ERROR 0
@@ -1855,42 +1874,21 @@ fn initialize_gdt_and_tss() {
     let mut table = GlobalDescriptorTable::new();
     let code_selector = table.append(Descriptor::kernel_code_segment());
     let data_selector = table.append(Descriptor::kernel_data_segment());
-    #[cfg(all(
-        any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"),
-        feature = "m3-syscall-self-test"
-    ))]
     let user_sysret_selector_base = table.append(Descriptor::user_code_segment());
-    #[cfg(all(
-        any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"),
-        feature = "m3-syscall-self-test"
-    ))]
-    let user_data_selector = table.append(Descriptor::user_data_segment());
-    #[cfg(all(
-        any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"),
-        feature = "m3-syscall-self-test"
-    ))]
+    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
     let user_code_selector = table.append(Descriptor::user_code_segment());
-    #[cfg(all(
-        any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"),
-        not(feature = "m3-syscall-self-test")
-    ))]
-    let user_code_selector = table.append(Descriptor::user_code_segment());
-    #[cfg(all(
-        any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"),
-        not(feature = "m3-syscall-self-test")
-    ))]
+    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
     let user_data_selector = table.append(Descriptor::user_data_segment());
     let tss_selector = table.append(Descriptor::tss_segment(tss_ref));
     *gdt_slot = Some(GdtState {
         table,
         code_selector,
         data_selector,
+        user_sysret_selector_base,
         #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
         user_code_selector,
         #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
         user_data_selector,
-        #[cfg(feature = "m3-syscall-self-test")]
-        user_sysret_selector_base,
         tss_selector,
     });
 
@@ -2022,7 +2020,6 @@ fn userspace_syscall_test_state() -> Result<&'static UserspaceSyscallTestState, 
     }
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 fn set_privilege_stack(stack_pointer: u64) -> Result<(), &'static str> {
     let tss = unsafe {
         (&mut *TSS_STATE.get())
@@ -2075,13 +2072,17 @@ unsafe fn free_frame(allocator: &mut PageAllocator, frame: u64) -> Result<(), &'
     unsafe { allocator.free_page(frame) }
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test",
+    feature = "m3-syscall-self-test"
+))]
 struct PageWalkFlags {
     path: PageTableFlags,
     leaf: PageTableFlags,
+    all_levels_user_accessible: bool,
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 fn userspace_gdt_state() -> Result<&'static GdtState, &'static str> {
     unsafe {
         (&*GDT_STATE.get())
@@ -2110,7 +2111,11 @@ unsafe fn page_table_mut(frame_address: u64) -> &'static mut PageTable {
     unsafe { &mut *((frame_address + PHYSICAL_MEMORY_OFFSET) as *mut PageTable) }
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test",
+    feature = "m3-syscall-self-test"
+))]
 fn walk_page_flags_in_root(
     root_frame: u64,
     address: VirtAddr,
@@ -2131,10 +2136,17 @@ fn walk_page_flags_in_root(
     if level_3_entry.is_unused() {
         return Err("virtual address was not backed by a valid level-3 entry");
     }
+    let mut all_levels_user_accessible = level_4_entry
+        .flags()
+        .contains(PageTableFlags::USER_ACCESSIBLE)
+        && level_3_entry
+            .flags()
+            .contains(PageTableFlags::USER_ACCESSIBLE);
     if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
         return Ok(PageWalkFlags {
             path: level_4_entry.flags() | level_3_entry.flags(),
             leaf: level_3_entry.flags(),
+            all_levels_user_accessible,
         });
     }
     let level_2_frame = level_3_entry
@@ -2148,10 +2160,15 @@ fn walk_page_flags_in_root(
     if level_2_entry.is_unused() {
         return Err("virtual address was not backed by a valid level-2 entry");
     }
+    all_levels_user_accessible = all_levels_user_accessible
+        && level_2_entry
+            .flags()
+            .contains(PageTableFlags::USER_ACCESSIBLE);
     if level_2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
         return Ok(PageWalkFlags {
             path: level_4_entry.flags() | level_3_entry.flags() | level_2_entry.flags(),
             leaf: level_2_entry.flags(),
+            all_levels_user_accessible,
         });
     }
     let level_1_frame = level_2_entry
@@ -2165,26 +2182,43 @@ fn walk_page_flags_in_root(
     if level_1_entry.is_unused() {
         return Err("virtual address was not mapped");
     }
+    all_levels_user_accessible = all_levels_user_accessible
+        && level_1_entry
+            .flags()
+            .contains(PageTableFlags::USER_ACCESSIBLE);
     Ok(PageWalkFlags {
         path: level_4_entry.flags()
             | level_3_entry.flags()
             | level_2_entry.flags()
             | level_1_entry.flags(),
         leaf: level_1_entry.flags(),
+        all_levels_user_accessible,
     })
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test",
+    feature = "m3-syscall-self-test"
+))]
 fn walk_page_flags(address: VirtAddr) -> Result<PageWalkFlags, &'static str> {
     walk_page_flags_in_root(current_root_frame_address(), address)
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test",
+    feature = "m3-syscall-self-test"
+))]
 fn page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'static str> {
     Ok(walk_page_flags(address)?.path)
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test",
+    feature = "m3-syscall-self-test"
+))]
 fn leaf_page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'static str> {
     Ok(walk_page_flags(address)?.leaf)
 }
@@ -2462,11 +2496,11 @@ fn install_userspace_syscall_payload(allocator: &mut PageAllocator) -> Result<()
         });
     }
     SYSCALL_CALL_COUNT.store(0, Ordering::Relaxed);
+    SYSCALL_DF_SANITIZED_OBSERVED.store(false, Ordering::Relaxed);
     KERNEL_TICKS.store(0, Ordering::Relaxed);
     Ok(())
 }
 
-#[cfg(feature = "m3-syscall-self-test")]
 fn initialize_syscall_abi(kernel_stack_top: u64) -> Result<(), &'static str> {
     if kernel_stack_top % 16 != 0 {
         return Err("syscall kernel stack top must be 16-byte aligned");
@@ -2481,12 +2515,11 @@ fn initialize_syscall_abi(kernel_stack_top: u64) -> Result<(), &'static str> {
     }
     write_msr(IA32_STAR_MSR, star);
     write_msr(IA32_LSTAR_MSR, clean_slate_syscall_entry as usize as u64);
-    write_msr(IA32_FMASK_MSR, 1u64 << RFLAGS_INTERRUPT_ENABLE_BIT);
+    write_msr(IA32_FMASK_MSR, SYSCALL_ENTRY_RFLAGS_MASK);
     write_msr(IA32_EFER_MSR, read_msr(IA32_EFER_MSR) | IA32_EFER_SCE);
     Ok(())
 }
 
-#[cfg(feature = "m3-syscall-self-test")]
 fn validate_canonical_user_return_state(frame: &SyscallContext) -> Result<(), &'static str> {
     if frame.user_rip >= USER_CANONICAL_TOP_EXCLUSIVE {
         return Err("syscall return RIP was not a canonical userspace address");
@@ -2512,11 +2545,10 @@ fn validate_user_pointer_range(pointer: u64, length: u64) -> Result<(), &'static
     let mut cursor = align_down(pointer, PAGE_SIZE);
     let end_page = align_down(end_inclusive, PAGE_SIZE);
     loop {
-        let flags = page_flags_for_address(VirtAddr::new(cursor))?;
-        let leaf_flags = leaf_page_flags_for_address(VirtAddr::new(cursor))?;
-        if !flags.contains(PageTableFlags::USER_ACCESSIBLE)
-            || !leaf_flags.contains(PageTableFlags::PRESENT)
-            || !leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE)
+        let walk = walk_page_flags(VirtAddr::new(cursor))?;
+        if !walk.all_levels_user_accessible
+            || !walk.leaf.contains(PageTableFlags::PRESENT)
+            || !walk.leaf.contains(PageTableFlags::USER_ACCESSIBLE)
         {
             return Err("userspace pointer range was not mapped as user accessible");
         }
@@ -2545,6 +2577,19 @@ fn handle_syscall_read_u64(frame: &mut SyscallContext) {
 }
 
 #[cfg(feature = "m3-syscall-self-test")]
+fn maybe_validate_syscall_entry_flags(frame: &SyscallContext) {
+    if bit(frame.user_rflags, RFLAGS_DIRECTION_FLAG_BIT as u32) == 0 {
+        return;
+    }
+
+    if bit(read_rflags(), RFLAGS_DIRECTION_FLAG_BIT as u32) != 0 {
+        fatal_kernel_error("syscall entry did not clear DF before running kernel code");
+    }
+    if !SYSCALL_DF_SANITIZED_OBSERVED.swap(true, Ordering::Relaxed) {
+        kernel_log_line(SYSCALL_DF_SANITIZED_MARKER);
+    }
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 {
     let frame = unsafe { &mut *context };
@@ -2553,8 +2598,16 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
     }
 
     match frame.rax {
-        SYSCALL_NR_VERSION => frame.rax = SYSCALL_ABI_VERSION,
+        SYSCALL_NR_VERSION => {
+            #[cfg(feature = "m3-syscall-self-test")]
+            maybe_validate_syscall_entry_flags(frame);
+            frame.rax = SYSCALL_ABI_VERSION;
+        }
+        #[cfg(feature = "m3-syscall-self-test")]
         SYSCALL_NR_READ_U64 => handle_syscall_read_u64(frame),
+        #[cfg(not(feature = "m3-syscall-self-test"))]
+        SYSCALL_NR_READ_U64 => frame.rax = SYSCALL_ENOSYS,
+        #[cfg(feature = "m3-syscall-self-test")]
         SYSCALL_NR_FINISH => {
             let state = match userspace_syscall_test_state() {
                 Ok(state) => state,
@@ -2570,22 +2623,21 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
             }
             let call_count = SYSCALL_CALL_COUNT.load(Ordering::Relaxed);
             let ticks = KERNEL_TICKS.load(Ordering::Relaxed);
-            if call_count >= SYSCALL_TEST_REQUIRED_CALLS && ticks >= TASK_REQUIRED_PREEMPTIONS {
+            if call_count >= SYSCALL_TEST_REQUIRED_CALLS
+                && ticks >= TASK_REQUIRED_PREEMPTIONS
+                && SYSCALL_DF_SANITIZED_OBSERVED.load(Ordering::Relaxed)
+            {
                 kernel_log_line(SYSCALL_PASS_MARKER);
                 qemu_exit(QEMU_EXIT_SUCCESS)
             }
             frame.rax = 0;
         }
+        #[cfg(not(feature = "m3-syscall-self-test"))]
+        SYSCALL_NR_FINISH => frame.rax = SYSCALL_ENOSYS,
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 
     frame as *mut SyscallContext as u64
-}
-
-#[cfg(not(feature = "m3-syscall-self-test"))]
-#[unsafe(no_mangle)]
-extern "C" fn clean_slate_syscall_dispatch(context: *mut u8) -> u64 {
-    context as u64
 }
 
 #[cfg(feature = "m3-entry-self-test")]
@@ -3853,11 +3905,15 @@ fn without_interrupts<T>(f: impl FnOnce() -> T) -> T {
 }
 
 fn interrupts_enabled() -> bool {
+    bit(read_rflags(), RFLAGS_INTERRUPT_ENABLE_BIT as u32) != 0
+}
+
+fn read_rflags() -> u64 {
     let rflags: u64;
     unsafe {
         asm!("pushfq", "pop {}", out(reg) rflags, options(nomem, preserves_flags));
     }
-    bit(rflags, 9) != 0
+    rflags
 }
 
 fn enable_interrupts() {
@@ -4514,5 +4570,95 @@ mod tests {
             validate_canonical_user_return_state(&bad_rsp),
             Err("syscall return RSP was not a canonical userspace address")
         );
+    }
+
+    #[test]
+    fn syscall_context_layout_matches_entry_stub_contract() {
+        assert_eq!(size_of::<SyscallContext>(), 16 * size_of::<u64>());
+        assert_eq!(core::mem::offset_of!(SyscallContext, rax), 0);
+        assert_eq!(core::mem::offset_of!(SyscallContext, rdx), 8);
+        assert_eq!(core::mem::offset_of!(SyscallContext, rbx), 16);
+        assert_eq!(core::mem::offset_of!(SyscallContext, rbp), 24);
+        assert_eq!(core::mem::offset_of!(SyscallContext, rsi), 32);
+        assert_eq!(core::mem::offset_of!(SyscallContext, rdi), 40);
+        assert_eq!(core::mem::offset_of!(SyscallContext, r8), 48);
+        assert_eq!(core::mem::offset_of!(SyscallContext, r9), 56);
+        assert_eq!(core::mem::offset_of!(SyscallContext, r10), 64);
+        assert_eq!(core::mem::offset_of!(SyscallContext, r12), 72);
+        assert_eq!(core::mem::offset_of!(SyscallContext, r13), 80);
+        assert_eq!(core::mem::offset_of!(SyscallContext, r14), 88);
+        assert_eq!(core::mem::offset_of!(SyscallContext, r15), 96);
+        assert_eq!(core::mem::offset_of!(SyscallContext, user_rip), 104);
+        assert_eq!(core::mem::offset_of!(SyscallContext, user_rflags), 112);
+        assert_eq!(core::mem::offset_of!(SyscallContext, user_rsp), 120);
+    }
+
+    #[test]
+    fn syscall_entry_fmask_clears_unsafe_user_flags() {
+        assert_ne!(
+            SYSCALL_ENTRY_RFLAGS_MASK & (1u64 << RFLAGS_INTERRUPT_ENABLE_BIT),
+            0
+        );
+        assert_ne!(
+            SYSCALL_ENTRY_RFLAGS_MASK & (1u64 << RFLAGS_DIRECTION_FLAG_BIT),
+            0
+        );
+        assert_ne!(
+            SYSCALL_ENTRY_RFLAGS_MASK & (1u64 << RFLAGS_TRAP_FLAG_BIT),
+            0
+        );
+        assert_ne!(
+            SYSCALL_ENTRY_RFLAGS_MASK & (1u64 << RFLAGS_NESTED_TASK_BIT),
+            0
+        );
+        assert_ne!(
+            SYSCALL_ENTRY_RFLAGS_MASK & (1u64 << RFLAGS_RESUME_FLAG_BIT),
+            0
+        );
+        assert_ne!(
+            SYSCALL_ENTRY_RFLAGS_MASK & (1u64 << RFLAGS_ALIGNMENT_CHECK_BIT),
+            0
+        );
+        assert_eq!(
+            SYSCALL_ENTRY_RFLAGS_MASK & (0b11u64 << RFLAGS_IOPL_SHIFT),
+            0b11u64 << RFLAGS_IOPL_SHIFT
+        );
+    }
+
+    #[cfg(any(
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-syscall-self-test"
+    ))]
+    #[test]
+    fn user_access_requires_user_bit_on_each_page_table_level() {
+        let virtual_address = VirtAddr::new(USER_TEST_CODE_ADDRESS);
+        let mut level_4 = Box::new(PageTable::new());
+        let mut level_3 = Box::new(PageTable::new());
+        let mut level_2 = Box::new(PageTable::new());
+        let mut level_1 = Box::new(PageTable::new());
+
+        level_4[virtual_address.p4_index()].set_addr(
+            PhysAddr::new((&*level_3 as *const PageTable) as u64),
+            PageTableFlags::PRESENT,
+        );
+        level_3[virtual_address.p3_index()].set_addr(
+            PhysAddr::new((&*level_2 as *const PageTable) as u64),
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+        );
+        level_2[virtual_address.p2_index()].set_addr(
+            PhysAddr::new((&*level_1 as *const PageTable) as u64),
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+        );
+        level_1[virtual_address.p1_index()].set_addr(
+            PhysAddr::new(0x4000),
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+        );
+
+        let walk = walk_page_flags_in_root((&*level_4 as *const PageTable) as u64, virtual_address)
+            .expect("walked mapping");
+        assert!(walk.path.contains(PageTableFlags::USER_ACCESSIBLE));
+        assert!(walk.leaf.contains(PageTableFlags::USER_ACCESSIBLE));
+        assert!(!walk.all_levels_user_accessible);
     }
 }

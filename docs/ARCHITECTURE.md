@@ -207,7 +207,7 @@ CR3 switching and page-table construction should stay behind narrow memory-manag
 M3.3 uses the x86-64 `syscall/sysretq` mechanism (not Linux ABI) as the first native userspace/kernel call boundary.
 
 - `IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK`, and `IA32_EFER.SCE` are initialized before the first userspace syscall.
-- `IA32_FMASK` masks `RFLAGS.IF` on entry so kernel syscall handling is non-preemptible at the entry boundary.
+- `IA32_FMASK` masks unsafe userspace flags on entry (`IF`, `DF`, `TF`, `IOPL`, `NT`, `RF`, `AC`) so Rust kernel code does not inherit user-controlled execution flags.
 - The syscall entry stub immediately switches from untrusted userspace `RSP` to a trusted kernel stack before calling Rust.
 - The entry/save frame preserves userspace `RIP` (`RCX`), `RSP`, and `RFLAGS` (`R11`) so `sysretq` can restore userspace deterministically.
 - Return validation rejects non-canonical or non-userspace return `RIP`/`RSP` before `sysretq`.

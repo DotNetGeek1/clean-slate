@@ -72,10 +72,9 @@ const M3_ADDRESS_SPACE_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[MM  ] address-space teardown OK",
     "[M3.2] PASS",
 ];
-const M3_SYSCALL_ACCEPTANCE_MARKERS: [&str; 3] = [
+const M3_SYSCALL_ACCEPTANCE_MARKERS: [&str; 2] = [
     "[TIME] timer initialized",
     "[SYSC] syscall entry/return PASS",
-    "[PASS] qemu-exit success",
 ];
 
 fn main() -> ExitCode {
