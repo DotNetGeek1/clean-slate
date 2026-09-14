@@ -32,26 +32,33 @@ Physical hardware remains essential later because firmware, interrupt routing, p
 
 ## First development loop
 
-The ideal loop should eventually be one command, for example:
+The current loop is one command:
 
 ```bash
 cargo xtask run
 ```
 
-or later:
+This command:
+
+1. builds the Rust `#![no_std]` UEFI kernel artifact;
+2. creates an EFI boot directory at `target/esp/EFI/BOOT/BOOTX64.EFI`;
+3. launches QEMU with OVMF firmware;
+4. connects serial output to the host terminal.
+
+To launch paused for debugger attach:
 
 ```bash
-cs dev
+cargo xtask run-gdb
 ```
 
-The command should:
+That mode enables a GDB endpoint on `localhost:1234` and starts with CPU execution paused.
 
-1. build loader/kernel artifacts;
-2. build a bootable test image;
-3. launch QEMU with OVMF;
-4. attach serial output to the terminal;
-5. optionally expose a GDB endpoint;
-6. return a useful exit status for automated tests.
+If OVMF is not installed in common distro paths, set:
+
+```bash
+export OVMF_CODE=/path/to/OVMF_CODE.fd
+export OVMF_VARS=/path/to/OVMF_VARS.fd
+```
 
 ## Diagnostics first
 
