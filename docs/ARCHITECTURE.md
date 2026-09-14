@@ -172,6 +172,14 @@ M1 keeps paging and physical-memory policy inside the kernel. The initial implem
 
 This keeps M1 trustworthy while leaving a clear path to a richer higher-half kernel layout once dedicated bootstrap page tables and stacks exist.
 
+## M2 interrupt and scheduling direction
+
+M2 extends the kernel beyond the M1 page-fault-only path with a reusable IDT/exception foundation, a post-`ExitBootServices` timer source, and a minimal preemptive scheduler.
+
+Keep interrupt entry/exit stubs, timer acknowledgement, and context-restore assembly narrowly scoped to the x86-64 architectural boundary. Task state, run-queue policy, and completion bookkeeping should remain ordinary Rust data structures so they can evolve independently of the interrupt ABI details.
+
+Single-core correctness is the M2 target, but the design should not bake `current task` or timer ownership into a single global scheduling policy forever. A later SMP step should be able to split CPU-local execution state from shared task metadata without replacing the task model itself.
+
 ## Language strategy
 
 The kernel and first-party low-level services should primarily use Rust.

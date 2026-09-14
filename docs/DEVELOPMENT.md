@@ -53,6 +53,14 @@ cargo xtask test-m1
 
 This command builds the kernel with the M1 self-test mode enabled, boots QEMU headlessly, enforces a timeout, and validates the required serial markers including the deliberate page-fault diagnostic and `[M1  ] PASS`.
 
+For the bounded M2 timer/scheduler acceptance path:
+
+```bash
+cargo xtask test-m2
+```
+
+This command builds the kernel with the M2 self-test mode enabled, boots QEMU headlessly, and validates deterministic serial markers proving reusable interrupt setup, timer-driven preemption, two kernel tasks making progress, and `[M2  ] PASS`.
+
 To launch paused for debugger attach:
 
 ```bash
@@ -219,6 +227,8 @@ A successful test should prove recovery of the affected service without rebootin
 QEMU profiles should cover one CPU and many CPUs early.
 
 Scheduler, allocator, IPC, capability, and locking code must not accidentally rely on single-core execution.
+
+M2 intentionally targets one running CPU, but task bookkeeping should stay separable from CPU-local execution state so a later SMP step can move `current task`, timer source, and interrupt-entry scratch state per-CPU without redesigning the runnable task model.
 
 ## Graphics progression
 

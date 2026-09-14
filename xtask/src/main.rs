@@ -12,6 +12,7 @@ const KERNEL_PACKAGE: &str = "clean-slate-kernel";
 const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
 const QEMU_DEBUG_EXIT_SUCCESS: i32 = 33;
 const M1_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M2_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[BOOT] UEFI memory map acquired",
     "[BOOT] ExitBootServices OK",
@@ -21,6 +22,19 @@ const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[PF  ] page fault",
     "[PF  ] rip=0x",
     "[M1  ] PASS",
+];
+const M2_ACCEPTANCE_MARKERS: [&str; 11] = [
+    "[BOOT] UEFI memory map acquired",
+    "[BOOT] ExitBootServices OK",
+    "[MEM ] physical allocator initialized",
+    "[INT ] IDT initialized",
+    "[TIME] timer initialized",
+    "[TASK] task 1 started",
+    "[TASK] task 2 started",
+    "[SCHED] preemption observed",
+    "[TASK] task 1 progress=",
+    "[TASK] task 2 progress=",
+    "[M2  ] PASS",
 ];
 
 fn main() -> ExitCode {
@@ -40,10 +54,11 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
     match parse_command(args.next().as_deref()) {
         ParsedCommand::Run => run_vm(),
         ParsedCommand::TestM1 => run_m1_acceptance(),
+        ParsedCommand::TestM2 => run_m2_acceptance(),
         ParsedCommand::RunGdb => run_vm_with_gdb(false),
         ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
-        ParsedCommand::Build => build_kernel(false, false, false),
-        ParsedCommand::BuildRelease => build_kernel(true, false, false),
+        ParsedCommand::Build => build_kernel(false, false, false, false),
+        ParsedCommand::BuildRelease => build_kernel(true, false, false, false),
         ParsedCommand::Help => {
             print_help();
             Ok(())
@@ -56,24 +71,29 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
 }
 
 fn run_vm() -> Result<(), XtaskError> {
-    run_vm_inner(false, false, false)
+    run_vm_inner(false, false, false, false)
 }
 
 fn run_vm_with_gdb(debug_entry: bool) -> Result<(), XtaskError> {
-    run_vm_inner(true, debug_entry, false)
+    run_vm_inner(true, debug_entry, false, false)
 }
 
 fn run_m1_acceptance() -> Result<(), XtaskError> {
-    run_vm_inner(false, false, true)
+    run_vm_inner(false, false, true, false)
+}
+
+fn run_m2_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(false, false, false, true)
 }
 
 fn run_vm_inner(
     wait_for_gdb: bool,
     debug_entry: bool,
     m1_self_test: bool,
+    m2_self_test: bool,
 ) -> Result<(), XtaskError> {
     let release = false;
-    build_kernel(release, debug_entry, m1_self_test)?;
+    build_kernel(release, debug_entry, m1_self_test, m2_self_test)?;
 
     let kernel = kernel_artifact(release);
     if !kernel.is_file() {
@@ -120,12 +140,19 @@ fn run_vm_inner(
 
     if m1_self_test {
         run_acceptance_command(&mut qemu, &M1_ACCEPTANCE_MARKERS, M1_ACCEPTANCE_TIMEOUT)
+    } else if m2_self_test {
+        run_acceptance_command(&mut qemu, &M2_ACCEPTANCE_MARKERS, M2_ACCEPTANCE_TIMEOUT)
     } else {
         run_command(&mut qemu)
     }
 }
 
-fn build_kernel(release: bool, debug_entry: bool, m1_self_test: bool) -> Result<(), XtaskError> {
+fn build_kernel(
+    release: bool,
+    debug_entry: bool,
+    m1_self_test: bool,
+    m2_self_test: bool,
+) -> Result<(), XtaskError> {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(workspace_root())
         .arg("build")
@@ -143,6 +170,9 @@ fn build_kernel(release: bool, debug_entry: bool, m1_self_test: bool) -> Result<
     }
     if m1_self_test {
         features.push("m1-self-test");
+    }
+    if m2_self_test {
+        features.push("m2-self-test");
     }
     if !features.is_empty() {
         cmd.arg("--features").arg(features.join(","));
@@ -312,6 +342,7 @@ fn print_help() {
     println!("Usage: cargo xtask <command>");
     println!("  run          Build kernel and launch QEMU for normal development boot");
     println!("  test-m1      Build the M1 self-test kernel, run QEMU, and validate PASS markers");
+    println!("  test-m2      Build the M2 self-test kernel, run QEMU, and validate PASS markers");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
     println!("  build        Build debug UEFI kernel only");
@@ -328,6 +359,7 @@ struct OvmfPaths {
 enum ParsedCommand {
     Run,
     TestM1,
+    TestM2,
     RunGdb,
     RunGdbEntry,
     Build,
@@ -340,6 +372,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
     match command {
         Some(cmd) if cmd == "run" => ParsedCommand::Run,
         Some(cmd) if cmd == "test-m1" => ParsedCommand::TestM1,
+        Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
         Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
         Some(cmd) if cmd == "build" => ParsedCommand::Build,
