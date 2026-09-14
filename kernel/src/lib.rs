@@ -36,10 +36,11 @@ const MAX_BOOT_RESERVED_RANGES: usize = 16;
 const EARLY_STACK_RESERVE_SIZE: u64 = 64 * 1024;
 const PAGE_FAULT_VECTOR: usize = 14;
 const TIMER_VECTOR: usize = 32;
+const SPURIOUS_VECTOR: usize = 33;
 const APIC_BASE_MSR: u32 = 0x1b;
 const APIC_BASE_ADDRESS_MASK: u64 = 0xffff_f000;
 const APIC_ENABLE: u64 = 1 << 11;
-const APIC_SPURIOUS_INTERRUPT_VECTOR: u32 = 0x1ff;
+const APIC_SPURIOUS_INTERRUPT_VECTOR: u32 = 0x100 | (SPURIOUS_VECTOR as u32);
 const APIC_REGISTER_TPR: usize = 0x80;
 const APIC_REGISTER_EOI: usize = 0xb0;
 const APIC_REGISTER_SVR: usize = 0xf0;
@@ -1111,9 +1112,10 @@ declare_interrupt_entries!(
     clean_slate_interrupt_30,
     clean_slate_interrupt_31,
     clean_slate_interrupt_32,
+    clean_slate_interrupt_33,
 );
 
-static INTERRUPT_HANDLERS: [unsafe extern "C" fn(); TIMER_VECTOR + 1] = [
+static INTERRUPT_HANDLERS: [unsafe extern "C" fn(); SPURIOUS_VECTOR + 1] = [
     clean_slate_interrupt_0,
     clean_slate_interrupt_1,
     clean_slate_interrupt_2,
@@ -1147,6 +1149,7 @@ static INTERRUPT_HANDLERS: [unsafe extern "C" fn(); TIMER_VECTOR + 1] = [
     clean_slate_interrupt_30,
     clean_slate_interrupt_31,
     clean_slate_interrupt_32,
+    clean_slate_interrupt_33,
 ];
 
 global_asm!(
@@ -1270,6 +1273,7 @@ clean_slate_task_two_bootstrap_entry:
     CLEAN_SLATE_INTERRUPT_WITH_ERROR 30
     CLEAN_SLATE_INTERRUPT_NO_ERROR 31
     CLEAN_SLATE_INTERRUPT_NO_ERROR 32
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 33
 "#
 );
 
@@ -1334,11 +1338,16 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
     let stack_pointer = context as u64;
     let context = unsafe { &*context };
     if context.vector as usize == TIMER_VECTOR {
-        acknowledge_timer_interrupt();
-        return match unsafe { (&mut *SCHEDULER.get()).on_timer_interrupt(stack_pointer) } {
+        let next_stack_pointer = match unsafe { (&mut *SCHEDULER.get()).on_timer_interrupt(stack_pointer) } {
             Ok(next_stack_pointer) => next_stack_pointer,
             Err(message) => fatal_kernel_error(message),
         };
+        acknowledge_timer_interrupt();
+        return next_stack_pointer;
+    }
+
+    if context.vector as usize == SPURIOUS_VECTOR {
+        return stack_pointer;
     }
 
     handle_exception(context)
@@ -1527,7 +1536,23 @@ fn task_exit() -> ! {
         Err(message) => fatal_kernel_error(message),
     };
     match next {
-        Some(stack_pointer) => unsafe { restore_task_context(stack_pointer) },
+        Some(stack_pointer) => {
+            let (started, entry_point) = unsafe {
+                let scheduler = &mut *SCHEDULER.get();
+                let current = scheduler.current_task.expect("next task must exist");
+                let task = &mut scheduler.tasks[current];
+                let started = task.started;
+                if !started {
+                    task.started = true;
+                }
+                (started, task.launch_entry)
+            };
+            if started {
+                unsafe { restore_task_context(stack_pointer) }
+            } else {
+                unsafe { start_first_task(stack_pointer, entry_point) }
+            }
+        }
         None => {
             if unsafe { (&*SCHEDULER.get()).all_finished() } {
                 emit_m2_pass_and_stop()
