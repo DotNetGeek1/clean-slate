@@ -202,6 +202,26 @@ The next M3 step should give each userspace process its own page-table root whil
 
 CR3 switching and page-table construction should stay behind narrow memory-management helpers rather than spreading raw register handling into scheduler or process policy. A bounded self-test should prove that two processes can use the same user virtual address for different private frames, that ring 3 cannot read kernel-private mappings, and that process-owned page-table frames and user frames are reclaimed deterministically during teardown.
 
+## M3.3 native syscall boundary direction
+
+M3.3 uses the x86-64 `syscall/sysretq` mechanism (not Linux ABI) as the first native userspace/kernel call boundary.
+
+- `IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK`, and `IA32_EFER.SCE` are initialized before the first userspace syscall.
+- The GDT SYSRET selector triplet is ordered deliberately as `base`, `base+8` (user data/SS), `base+16` (user code/CS) so STAR-derived selectors are valid in normal builds.
+- `IA32_FMASK` masks unsafe userspace flags on entry (`IF`, `DF`, `TF`, `IOPL`, `NT`, `RF`, `AC`) so Rust kernel code does not inherit user-controlled execution flags.
+- The syscall entry stub immediately switches from untrusted userspace `RSP` to a trusted kernel stack before calling Rust.
+- The entry/save frame preserves userspace `RIP` (`RCX`), `RSP`, and `RFLAGS` (`R11`) so `sysretq` can restore userspace deterministically.
+- Return validation rejects non-canonical or non-userspace return `RIP`/`RSP` before `sysretq`.
+
+The initial ABI is intentionally tiny and versioned for M3 testing:
+
+- `rax=0` → ABI version (`1`)
+- `rax=1` → validated userspace-pointer read of a `u64` (`rdi=ptr`, `rsi=len`)
+- `rax=2` → self-test completion probe (`0` until criteria are met)
+- unknown syscall numbers return deterministic `-ENOSYS`
+
+This keeps assembly/unsafe logic isolated in the x86-64 boundary while exposing only a narrowly auditable contract for early userspace validation.
+
 ## Language strategy
 
 The kernel and first-party low-level services should primarily use Rust.
