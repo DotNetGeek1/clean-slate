@@ -47,6 +47,7 @@ const QEMU_EXIT_PORT: u16 = 0xf4;
 const QEMU_EXIT_SUCCESS: u32 = 0x10;
 const QEMU_EXIT_FAILURE: u32 = 0x11;
 const MAX_MEMORY_REGIONS: usize = 256;
+const MAX_RESERVED_RANGES: usize = MAX_MEMORY_REGIONS + 1;
 const MAX_BOOT_RESERVED_RANGES: usize = 16;
 const EARLY_STACK_RESERVE_SIZE: u64 = 64 * 1024;
 const DOUBLE_FAULT_VECTOR: usize = 8;
@@ -141,6 +142,8 @@ impl ReservedRange {
         self.start >= self.end
     }
 }
+
+const RESERVED_PHYSICAL_ZERO_PAGE: ReservedRange = ReservedRange::new(0, PAGE_SIZE);
 
 struct BootReservedRanges {
     ranges: [ReservedRange; MAX_BOOT_RESERVED_RANGES],
@@ -273,12 +276,20 @@ impl PageAllocator {
 
         for region in memory_map.regions() {
             if region.kind == MemoryRegionKind::Usable {
+                let start = region.start.max(PAGE_SIZE);
+                if start >= region.end {
+                    continue;
+                }
                 if allocator.usable_region_count == MAX_MEMORY_REGIONS {
                     return Err("allocator usable-region capacity exceeded");
                 }
-                allocator.usable_regions[allocator.usable_region_count] = *region;
+                allocator.usable_regions[allocator.usable_region_count] = MemoryRegion {
+                    start,
+                    end: region.end,
+                    kind: MemoryRegionKind::Usable,
+                };
                 allocator.usable_region_count += 1;
-                allocator.total_pages += region.len() / PAGE_SIZE;
+                allocator.total_pages += (region.end - start) / PAGE_SIZE;
             }
         }
 
@@ -526,26 +537,38 @@ fn sort_descriptors(descriptors: &mut [Option<RawDescriptor>; MAX_MEMORY_REGIONS
 
 fn collect_reserved_ranges(
     reserved_ranges: &[ReservedRange],
-) -> Result<[Option<ReservedRange>; MAX_MEMORY_REGIONS], &'static str> {
-    let mut collected = [None; MAX_MEMORY_REGIONS];
+) -> Result<[Option<ReservedRange>; MAX_RESERVED_RANGES], &'static str> {
+    let mut collected = [None; MAX_RESERVED_RANGES];
     let mut count = 0usize;
+
+    collected[count] = Some(RESERVED_PHYSICAL_ZERO_PAGE);
+    count += 1;
+
     for range in reserved_ranges {
+        let range = ReservedRange {
+            start: align_down(range.start, PAGE_SIZE),
+            end: align_up(range.end, PAGE_SIZE),
+        };
         if range.is_empty() {
             continue;
         }
-        if count == MAX_MEMORY_REGIONS {
+        if collected[..count]
+            .iter()
+            .flatten()
+            .any(|existing| existing.start == range.start && existing.end == range.end)
+        {
+            continue;
+        }
+        if count == MAX_RESERVED_RANGES {
             return Err("reserved range capacity exceeded");
         }
-        collected[count] = Some(ReservedRange {
-            start: align_down(range.start, PAGE_SIZE),
-            end: align_up(range.end, PAGE_SIZE),
-        });
+        collected[count] = Some(range);
         count += 1;
     }
     Ok(collected)
 }
 
-fn sort_reserved_ranges(ranges: &mut [Option<ReservedRange>; MAX_MEMORY_REGIONS]) {
+fn sort_reserved_ranges(ranges: &mut [Option<ReservedRange>; MAX_RESERVED_RANGES]) {
     for index in 1..ranges.len() {
         let current = ranges[index];
         let Some(current) = current else {
@@ -2798,6 +2821,41 @@ mod tests {
                     kind: MemoryRegionKind::Usable,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn normalize_reserves_physical_frame_zero_when_firmware_reports_it_usable() {
+        let descriptors = [descriptor(MemoryType::CONVENTIONAL, 0, 3)];
+        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
+
+        assert_eq!(
+            map.regions(),
+            &[
+                MemoryRegion {
+                    start: 0,
+                    end: PAGE_SIZE,
+                    kind: MemoryRegionKind::Reserved,
+                },
+                MemoryRegion {
+                    start: PAGE_SIZE,
+                    end: PAGE_SIZE * 3,
+                    kind: MemoryRegionKind::Usable,
+                },
+            ]
+        );
+
+        let mut allocator = PageAllocator::new(&map).expect("allocator");
+        assert_eq!(allocator.allocate_page(), Some(PAGE_SIZE));
+        assert_eq!(allocator.allocate_page(), Some(PAGE_SIZE * 2));
+        assert_eq!(allocator.allocate_page(), None);
+        assert_eq!(
+            allocator.stats(),
+            PageAllocatorStats {
+                total_pages: 2,
+                allocated_pages: 2,
+                free_pages: 0,
+            }
         );
     }
 
