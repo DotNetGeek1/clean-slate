@@ -8,9 +8,17 @@ authors.workspace = true
 [features]
 gdb-entry = []
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "clean-slate-kernel"
 path = "src/main.rs"
+test = false
+
+[dependencies]
+uefi = "0.37.0"
+x86_64 = { version = "0.15.5", default-features = false, features = ["instructions"] }
 
 [lints]
 workspace = true

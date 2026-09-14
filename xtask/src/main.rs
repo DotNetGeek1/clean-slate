@@ -68,8 +68,7 @@ fn run_vm_inner(wait_for_gdb: bool, debug_entry: bool) -> Result<(), XtaskError>
     }
 
     let mut qemu = Command::new("qemu-system-x86_64");
-    qemu
-        .arg("-machine")
+    qemu.arg("-machine")
         .arg("q35")
         .arg("-m")
         .arg("512M")
@@ -79,8 +78,13 @@ fn run_vm_inner(wait_for_gdb: bool, debug_entry: bool) -> Result<(), XtaskError>
         .arg("none")
         .arg("-no-reboot")
         .arg("-no-shutdown")
+        .arg("-device")
+        .arg("isa-debug-exit,iobase=0xf4,iosize=0x04")
         .arg("-drive")
-        .arg(format!("if=pflash,format=raw,readonly=on,file={}", ovmf.code.display()))
+        .arg(format!(
+            "if=pflash,format=raw,readonly=on,file={}",
+            ovmf.code.display()
+        ))
         .arg("-drive")
         .arg(format!("if=pflash,format=raw,file={}", vars_copy.display()))
         .arg("-drive")
@@ -136,6 +140,10 @@ fn find_ovmf() -> Result<OvmfPaths, XtaskError> {
             vars_template: PathBuf::from("/usr/share/OVMF/OVMF_VARS.fd"),
         },
         OvmfPaths {
+            code: PathBuf::from("/usr/share/OVMF/OVMF_CODE_4M.fd"),
+            vars_template: PathBuf::from("/usr/share/OVMF/OVMF_VARS_4M.fd"),
+        },
+        OvmfPaths {
             code: PathBuf::from("/usr/share/edk2/ovmf/OVMF_CODE.fd"),
             vars_template: PathBuf::from("/usr/share/edk2/ovmf/OVMF_VARS.fd"),
         },
@@ -149,7 +157,9 @@ fn find_ovmf() -> Result<OvmfPaths, XtaskError> {
 }
 
 fn workspace_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask in workspace")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask in workspace")
 }
 
 fn run_command(command: &mut Command) -> Result<(), XtaskError> {
@@ -163,7 +173,7 @@ fn run_command(command: &mut Command) -> Result<(), XtaskError> {
             .join(" ")
     );
     let status = command.status()?;
-    if status.success() {
+    if status.success() || status.code() == Some(33) {
         Ok(())
     } else {
         Err(XtaskError::CommandFailed {
@@ -222,7 +232,9 @@ fn ovmf_from_env(code: Option<OsString>, vars: Option<OsString>) -> Option<OvmfP
     }
 }
 
-fn select_ovmf_from_candidates(candidates: impl IntoIterator<Item = OvmfPaths>) -> Option<OvmfPaths> {
+fn select_ovmf_from_candidates(
+    candidates: impl IntoIterator<Item = OvmfPaths>,
+) -> Option<OvmfPaths> {
     candidates
         .into_iter()
         .find(|ovmf| ovmf.code.is_file() && ovmf.vars_template.is_file())
