@@ -53,13 +53,21 @@ cargo xtask test-m1
 
 This command builds the kernel with the M1 self-test mode enabled, boots QEMU headlessly, enforces a timeout, and validates the required serial markers including the deliberate page-fault diagnostic and `[M1  ] PASS`.
 
-For the bounded M2 timer/scheduler acceptance path:
+For the bounded M2 interrupt/timer/scheduler acceptance path:
 
 ```bash
 cargo xtask test-m2
 ```
 
-This command builds the kernel with the M2 self-test mode enabled, boots QEMU headlessly, and validates deterministic serial markers proving reusable interrupt setup, timer-driven preemption, two kernel tasks making progress, and `[M2  ] PASS`.
+This command runs three bounded headless QEMU boots:
+
+1. a double-fault acceptance path that proves vector 8 runs on its dedicated IST emergency stack;
+2. a standalone timer acceptance path that proves the kernel receives a bounded minimum number of monotonic LAPIC ticks;
+3. the scheduler/preemption acceptance path that proves reusable interrupt setup, timer-driven preemption, and two kernel tasks making progress before `[M2  ] PASS`.
+
+The shared acceptance runner treats the ordered serial PASS markers as authoritative, terminates QEMU from the host as soon as those markers arrive, and only falls back to `isa-debug-exit` or the timeout path if the expected sequence never completes. This keeps the test reliable on hosts where the guest can print PASS but QEMU does not shut down cleanly on its own.
+
+M2 intentionally treats the LAPIC timer as an uncalibrated periodic tick source for now. The contract is in ticks, not Hertz: the kernel reports the divide configuration and initial count, exposes a monotonic `[TIME] ticks=<n>` counter, and the standalone timer acceptance requires at least the documented minimum number of ticks within the bounded test window.
 
 To launch paused for debugger attach:
 

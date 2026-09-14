@@ -1,5 +1,12 @@
 #![cfg_attr(not(test), no_std)]
-#![cfg_attr(feature = "m1-self-test", allow(dead_code))]
+#![cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test"
+    ),
+    allow(dead_code)
+)]
 
 use core::arch::{asm, global_asm};
 use core::cell::UnsafeCell;
@@ -7,6 +14,9 @@ use core::fmt::{self, Write};
 use core::hint::spin_loop;
 use core::mem::{size_of, MaybeUninit};
 use core::ptr;
+use core::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "m2-double-fault-self-test")]
+use core::sync::atomic::AtomicBool;
 use uefi::boot;
 use uefi::mem::memory_map::{MemoryDescriptor, MemoryMap, MemoryMapMut, MemoryType};
 use uefi::proto::loaded_image::LoadedImage;
@@ -14,9 +24,13 @@ use uefi::Status;
 #[cfg(feature = "m1-self-test")]
 use x86_64::registers::control::{Cr0, Cr0Flags};
 use x86_64::registers::control::{Cr2, Cr3};
+use x86_64::instructions::segmentation::{CS, DS, ES, SS, Segment};
+use x86_64::instructions::tables::load_tss;
+use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::paging::{
     FrameAllocator, OffsetPageTable, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate,
 };
+use x86_64::structures::tss::TaskStateSegment;
 #[cfg(feature = "m1-self-test")]
 use x86_64::structures::paging::{Mapper, Page};
 use x86_64::{PhysAddr, VirtAddr};
@@ -34,6 +48,9 @@ const QEMU_EXIT_FAILURE: u32 = 0x11;
 const MAX_MEMORY_REGIONS: usize = 256;
 const MAX_BOOT_RESERVED_RANGES: usize = 16;
 const EARLY_STACK_RESERVE_SIZE: u64 = 64 * 1024;
+const DOUBLE_FAULT_VECTOR: usize = 8;
+const DOUBLE_FAULT_IST_INDEX: u16 = 1;
+const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
 const PAGE_FAULT_VECTOR: usize = 14;
 const TIMER_VECTOR: usize = 32;
 const SPURIOUS_VECTOR: usize = 33;
@@ -57,6 +74,12 @@ const TASK_COUNT: usize = 2;
 const TASK_STACK_SIZE: usize = 64 * 1024;
 const TASK_REQUIRED_PREEMPTIONS: u64 = 2;
 const TASK_PROGRESS_CHUNK: u64 = 4_096;
+#[cfg(feature = "m2-timer-self-test")]
+const TIMER_SELF_TEST_REQUIRED_TICKS: u64 = 4;
+#[cfg(feature = "m2-double-fault-self-test")]
+const DOUBLE_FAULT_TEST_PRIMARY_ADDRESS: u64 = 0xffff_8000_0000_1000;
+#[cfg(feature = "m2-double-fault-self-test")]
+const DOUBLE_FAULT_TEST_SECONDARY_ADDRESS: u64 = 0xffff_8000_0000_2000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryRegionKind {
@@ -582,6 +605,7 @@ fn run_inner() -> Result<(), &'static str> {
 
     install_interrupt_handlers();
     serial_write_line("[INT ] IDT initialized");
+    serial_write_line("[INT ] double-fault IST initialized");
     serial_write_line("[MM  ] page-fault diagnostics installed");
 
     let inspected = inspect_current_mapping()?;
@@ -604,11 +628,29 @@ fn run_inner() -> Result<(), &'static str> {
         trigger_expected_page_fault(SCRATCH_PAGE_ADDRESS as *const u64);
     }
 
-    #[cfg(not(feature = "m1-self-test"))]
+    #[cfg(feature = "m2-double-fault-self-test")]
+    {
+        trigger_double_fault_self_test();
+    }
+
+    #[cfg(feature = "m2-timer-self-test")]
+    {
+        initialize_timer();
+        serial_write_line("[TIME] timer initialized");
+        report_timer_contract();
+        start_timer_self_test_task()
+    }
+
+    #[cfg(all(
+        not(feature = "m1-self-test"),
+        not(feature = "m2-double-fault-self-test"),
+        not(feature = "m2-timer-self-test")
+    ))]
     {
         initialize_scheduler()?;
         initialize_timer();
         serial_write_line("[TIME] timer initialized");
+        report_timer_contract();
         serial_write_line("[KERN] scheduler initialized");
         start_scheduler()
     }
@@ -982,6 +1024,9 @@ impl Scheduler {
 #[repr(align(16))]
 struct TaskStack([u8; TASK_STACK_SIZE]);
 
+#[repr(align(16))]
+struct DoubleFaultStack([u8; DOUBLE_FAULT_STACK_SIZE]);
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct InterruptContext {
@@ -1029,10 +1074,14 @@ impl IdtEntry {
     };
 
     fn set_handler(&mut self, handler: unsafe extern "C" fn()) {
+        self.set_handler_with_ist(handler, 0);
+    }
+
+    fn set_handler_with_ist(&mut self, handler: unsafe extern "C" fn(), ist_index: u16) {
         let address = handler as usize as u64;
         self.offset_low = address as u16;
         self.selector = read_code_segment();
-        self.options = 0x8e00;
+        self.options = 0x8e00 | (ist_index & 0x7);
         self.offset_middle = (address >> 16) as u16;
         self.offset_high = (address >> 32) as u32;
         self.reserved = 0;
@@ -1047,6 +1096,13 @@ struct InterruptDescriptorTable {
 static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable {
     entries: [IdtEntry::MISSING; 256],
 };
+
+struct GdtState {
+    table: GlobalDescriptorTable,
+    code_selector: SegmentSelector,
+    data_selector: SegmentSelector,
+    tss_selector: SegmentSelector,
+}
 
 struct GlobalCell<T>(UnsafeCell<T>);
 
@@ -1065,10 +1121,17 @@ impl<T> GlobalCell<T> {
 static SCHEDULER: GlobalCell<Scheduler> = GlobalCell::new(Scheduler::new());
 static TASK_STACKS: GlobalCell<[TaskStack; TASK_COUNT]> =
     GlobalCell::new([const { TaskStack([0; TASK_STACK_SIZE]) }; TASK_COUNT]);
+static DOUBLE_FAULT_STACK: GlobalCell<DoubleFaultStack> =
+    GlobalCell::new(DoubleFaultStack([0; DOUBLE_FAULT_STACK_SIZE]));
+static GDT_STATE: GlobalCell<Option<GdtState>> = GlobalCell::new(None);
+static TSS_STATE: GlobalCell<Option<TaskStateSegment>> = GlobalCell::new(None);
 #[unsafe(no_mangle)]
 static mut NEXT_TASK_STACK_POINTER: u64 = 0;
 #[unsafe(no_mangle)]
 static mut NEXT_TASK_ENTRY_POINT: u64 = 0;
+static KERNEL_TICKS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "m2-double-fault-self-test")]
+static DOUBLE_FAULT_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[repr(C, packed)]
 struct DescriptorTablePointer {
@@ -1078,11 +1141,13 @@ struct DescriptorTablePointer {
 
 macro_rules! declare_interrupt_entries {
     ($($name:ident),+ $(,)?) => {
+        #[allow(dead_code)]
         unsafe extern "C" {
             $(fn $name();)+
             fn clean_slate_restore_context() -> !;
             fn clean_slate_task_one_bootstrap_entry();
             fn clean_slate_task_two_bootstrap_entry();
+            fn clean_slate_timer_self_test_bootstrap_entry();
         }
     };
 }
@@ -1249,6 +1314,15 @@ clean_slate_task_two_bootstrap_entry:
     call clean_slate_task_two
     ud2
 
+    .global clean_slate_timer_self_test_bootstrap_entry
+clean_slate_timer_self_test_bootstrap_entry:
+    mov rax, rsp
+    and rax, 8
+    sub rsp, 32
+    sub rsp, rax
+    call clean_slate_timer_self_test_task
+    ud2
+
     CLEAN_SLATE_INTERRUPT_NO_ERROR 0
     CLEAN_SLATE_INTERRUPT_NO_ERROR 1
     CLEAN_SLATE_INTERRUPT_NO_ERROR 2
@@ -1287,15 +1361,61 @@ clean_slate_task_two_bootstrap_entry:
 );
 
 fn install_interrupt_handlers() {
+    initialize_gdt_and_tss();
     unsafe {
         for (vector, handler) in INTERRUPT_HANDLERS.iter().enumerate() {
             IDT.entries[vector].set_handler(*handler);
         }
+        IDT.entries[DOUBLE_FAULT_VECTOR]
+            .set_handler_with_ist(clean_slate_interrupt_8, DOUBLE_FAULT_IST_INDEX);
         let pointer = DescriptorTablePointer {
             limit: (size_of::<InterruptDescriptorTable>() - 1) as u16,
             base: (&raw const IDT) as *const _ as u64,
         };
         asm!("lidt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags));
+    }
+}
+
+fn initialize_gdt_and_tss() {
+    let double_fault_stack_top = {
+        let stack = unsafe { &*DOUBLE_FAULT_STACK.get() };
+        VirtAddr::from_ptr(stack.0.as_ptr_range().end)
+    };
+
+    let tss_slot = unsafe { &mut *TSS_STATE.get() };
+    let mut tss = TaskStateSegment::new();
+    tss.interrupt_stack_table[(DOUBLE_FAULT_IST_INDEX - 1) as usize] = double_fault_stack_top;
+    *tss_slot = Some(tss);
+
+    let tss_ref = unsafe {
+        (&*TSS_STATE.get())
+            .as_ref()
+            .expect("TSS must be initialized before GDT")
+    };
+    let gdt_slot = unsafe { &mut *GDT_STATE.get() };
+    let mut table = GlobalDescriptorTable::new();
+    let code_selector = table.append(Descriptor::kernel_code_segment());
+    let data_selector = table.append(Descriptor::kernel_data_segment());
+    let tss_selector = table.append(Descriptor::tss_segment(tss_ref));
+    *gdt_slot = Some(GdtState {
+        table,
+        code_selector,
+        data_selector,
+        tss_selector,
+    });
+
+    let gdt_state = unsafe {
+        (&*GDT_STATE.get())
+            .as_ref()
+            .expect("GDT state must be initialized")
+    };
+    gdt_state.table.load();
+    unsafe {
+        CS::set_reg(gdt_state.code_selector);
+        SS::set_reg(gdt_state.data_selector);
+        DS::set_reg(gdt_state.data_selector);
+        ES::set_reg(gdt_state.data_selector);
+        load_tss(gdt_state.tss_selector);
     }
 }
 
@@ -1347,12 +1467,23 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
     let stack_pointer = context as u64;
     let context = unsafe { &*context };
     if context.vector as usize == TIMER_VECTOR {
-        let next_stack_pointer = match unsafe { (&mut *SCHEDULER.get()).on_timer_interrupt(stack_pointer) } {
-            Ok(next_stack_pointer) => next_stack_pointer,
-            Err(message) => fatal_kernel_error(message),
-        };
-        acknowledge_timer_interrupt();
-        return next_stack_pointer;
+        #[cfg(feature = "m2-timer-self-test")]
+        {
+            KERNEL_TICKS.fetch_add(1, Ordering::Relaxed);
+            acknowledge_timer_interrupt();
+            return stack_pointer;
+        }
+        #[cfg(not(feature = "m2-timer-self-test"))]
+        {
+            KERNEL_TICKS.fetch_add(1, Ordering::Relaxed);
+            let next_stack_pointer =
+                match unsafe { (&mut *SCHEDULER.get()).on_timer_interrupt(stack_pointer) } {
+                    Ok(next_stack_pointer) => next_stack_pointer,
+                    Err(message) => fatal_kernel_error(message),
+                };
+            acknowledge_timer_interrupt();
+            return next_stack_pointer;
+        }
     }
 
     if context.vector as usize == SPURIOUS_VECTOR {
@@ -1363,7 +1494,15 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
 }
 
 fn handle_exception(context: &InterruptContext) -> ! {
+    if context.vector as usize == DOUBLE_FAULT_VECTOR {
+        handle_double_fault(context)
+    }
+
     if context.vector as usize == PAGE_FAULT_VECTOR {
+        #[cfg(feature = "m2-double-fault-self-test")]
+        if DOUBLE_FAULT_TEST_ACTIVE.load(Ordering::Relaxed) {
+            trigger_nested_double_fault();
+        }
         let fault_address = Cr2::read()
             .expect("CR2 must contain a canonical fault address")
             .as_u64();
@@ -1392,6 +1531,27 @@ fn handle_exception(context: &InterruptContext) -> ! {
         }
 
         kernel_log_line("[PF  ] unexpected page fault");
+        qemu_exit(QEMU_EXIT_FAILURE)
+    }
+
+    fn handle_double_fault(context: &InterruptContext) -> ! {
+        kernel_log_line("[DF  ] double fault");
+        kernel_log_fmt(format_args!(
+            "[DF  ] rip={:#018x} cs={:#06x} rflags={:#018x} err={:#x}\n",
+            context.rip, context.cs, context.rflags, context.error_code
+        ));
+
+        #[cfg(feature = "m2-double-fault-self-test")]
+        if DOUBLE_FAULT_TEST_ACTIVE.load(Ordering::Relaxed) {
+            if double_fault_stack_contains(context as *const _ as u64) {
+                kernel_log_line("[DF  ] emergency stack OK");
+                kernel_log_line("[DF  ] PASS");
+                qemu_exit(QEMU_EXIT_SUCCESS)
+            }
+            kernel_log_line("[DF  ] emergency stack missing");
+            qemu_exit(QEMU_EXIT_FAILURE)
+        }
+
         qemu_exit(QEMU_EXIT_FAILURE)
     }
 
@@ -1569,6 +1729,10 @@ fn emit_m2_pass_and_stop() -> ! {
     unsafe {
         if !(&*SCHEDULER.get()).pass_emitted {
             (&mut *SCHEDULER.get()).pass_emitted = true;
+            kernel_log_fmt(format_args!(
+                "[TIME] ticks={}\n",
+                KERNEL_TICKS.load(Ordering::Relaxed)
+            ));
             kernel_log_line("[M2  ] PASS");
         }
     }
@@ -1636,6 +1800,74 @@ fn program_local_apic_timer() {
 
 fn acknowledge_timer_interrupt() {
     local_apic_write(APIC_REGISTER_EOI, 0);
+}
+
+fn report_timer_contract() {
+    serial_write_fmt(format_args!(
+        "[TIME] contract=lapic periodic divide=16 initial_count={} tick-rate=uncalibrated\n",
+        APIC_TIMER_INITIAL_COUNT
+    ));
+}
+
+#[cfg(feature = "m2-timer-self-test")]
+fn start_timer_self_test_task() -> ! {
+    let stack_pointer = unsafe {
+        let stacks = &*TASK_STACKS.get();
+        task_stack_top(&stacks[0])
+    };
+    unsafe { start_first_task(stack_pointer, clean_slate_timer_self_test_bootstrap_entry as usize as u64) }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn clean_slate_timer_self_test_task() -> ! {
+    #[cfg(feature = "m2-timer-self-test")]
+    {
+    enable_interrupts();
+    let mut first_tick_logged = false;
+    loop {
+        let ticks = KERNEL_TICKS.load(Ordering::Relaxed);
+        if ticks >= 1 && !first_tick_logged {
+            first_tick_logged = true;
+            serial_write_line("[TIME] tick=1");
+        }
+        if ticks >= TIMER_SELF_TEST_REQUIRED_TICKS {
+            serial_write_fmt(format_args!("[TIME] ticks={ticks}\n"));
+            serial_write_line("[TIME] PASS");
+            qemu_exit(QEMU_EXIT_SUCCESS)
+        }
+        unsafe {
+            asm!("hlt", options(nomem, nostack, preserves_flags));
+        }
+    }
+    }
+
+    #[cfg(not(feature = "m2-timer-self-test"))]
+    {
+        halt_loop()
+    }
+}
+
+#[cfg(feature = "m2-double-fault-self-test")]
+fn trigger_double_fault_self_test() -> ! {
+    DOUBLE_FAULT_TEST_ACTIVE.store(true, Ordering::Relaxed);
+    unsafe { ptr::read_volatile(DOUBLE_FAULT_TEST_PRIMARY_ADDRESS as *const u64) };
+    qemu_exit(QEMU_EXIT_FAILURE)
+}
+
+#[cfg(feature = "m2-double-fault-self-test")]
+fn trigger_nested_double_fault() -> ! {
+    unsafe {
+        ptr::read_volatile(DOUBLE_FAULT_TEST_SECONDARY_ADDRESS as *const u64);
+    }
+    qemu_exit(QEMU_EXIT_FAILURE)
+}
+
+#[cfg(feature = "m2-double-fault-self-test")]
+fn double_fault_stack_contains(address: u64) -> bool {
+    let stack = unsafe { &*DOUBLE_FAULT_STACK.get() };
+    let start = stack.0.as_ptr() as u64;
+    let end = start + stack.0.len() as u64;
+    address >= start && address < end
 }
 
 fn local_apic_write(offset: usize, value: u32) {
