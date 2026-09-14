@@ -2,11 +2,26 @@ use std::env;
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
+use std::thread;
+use std::time::Duration;
 
 const KERNEL_PACKAGE: &str = "clean-slate-kernel";
 const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
+const QEMU_DEBUG_EXIT_SUCCESS: i32 = 33;
+const M1_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
+    "[BOOT] UEFI memory map acquired",
+    "[BOOT] ExitBootServices OK",
+    "[MEM ] physical allocator initialized",
+    "[MM  ] page-fault diagnostics installed",
+    "[MM  ] scratch page map/unmap OK",
+    "[PF  ] page fault",
+    "[PF  ] rip=0x",
+    "[M1  ] PASS",
+];
 
 fn main() -> ExitCode {
     match run(env::args_os()) {
@@ -24,10 +39,11 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
 
     match parse_command(args.next().as_deref()) {
         ParsedCommand::Run => run_vm(),
+        ParsedCommand::TestM1 => run_m1_acceptance(),
         ParsedCommand::RunGdb => run_vm_with_gdb(false),
         ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
-        ParsedCommand::Build => build_kernel(false, false),
-        ParsedCommand::BuildRelease => build_kernel(true, false),
+        ParsedCommand::Build => build_kernel(false, false, false),
+        ParsedCommand::BuildRelease => build_kernel(true, false, false),
         ParsedCommand::Help => {
             print_help();
             Ok(())
@@ -40,16 +56,24 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
 }
 
 fn run_vm() -> Result<(), XtaskError> {
-    run_vm_inner(false, false)
+    run_vm_inner(false, false, false)
 }
 
 fn run_vm_with_gdb(debug_entry: bool) -> Result<(), XtaskError> {
-    run_vm_inner(true, debug_entry)
+    run_vm_inner(true, debug_entry, false)
 }
 
-fn run_vm_inner(wait_for_gdb: bool, debug_entry: bool) -> Result<(), XtaskError> {
+fn run_m1_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(false, false, true)
+}
+
+fn run_vm_inner(
+    wait_for_gdb: bool,
+    debug_entry: bool,
+    m1_self_test: bool,
+) -> Result<(), XtaskError> {
     let release = false;
-    build_kernel(release, debug_entry)?;
+    build_kernel(release, debug_entry, m1_self_test)?;
 
     let kernel = kernel_artifact(release);
     if !kernel.is_file() {
@@ -68,8 +92,7 @@ fn run_vm_inner(wait_for_gdb: bool, debug_entry: bool) -> Result<(), XtaskError>
     }
 
     let mut qemu = Command::new("qemu-system-x86_64");
-    qemu
-        .arg("-machine")
+    qemu.arg("-machine")
         .arg("q35")
         .arg("-m")
         .arg("512M")
@@ -79,8 +102,13 @@ fn run_vm_inner(wait_for_gdb: bool, debug_entry: bool) -> Result<(), XtaskError>
         .arg("none")
         .arg("-no-reboot")
         .arg("-no-shutdown")
+        .arg("-device")
+        .arg("isa-debug-exit,iobase=0xf4,iosize=0x04")
         .arg("-drive")
-        .arg(format!("if=pflash,format=raw,readonly=on,file={}", ovmf.code.display()))
+        .arg(format!(
+            "if=pflash,format=raw,readonly=on,file={}",
+            ovmf.code.display()
+        ))
         .arg("-drive")
         .arg(format!("if=pflash,format=raw,file={}", vars_copy.display()))
         .arg("-drive")
@@ -90,10 +118,14 @@ fn run_vm_inner(wait_for_gdb: bool, debug_entry: bool) -> Result<(), XtaskError>
         qemu.arg("-S").arg("-s");
     }
 
-    run_command(&mut qemu)
+    if m1_self_test {
+        run_acceptance_command(&mut qemu, &M1_ACCEPTANCE_MARKERS, M1_ACCEPTANCE_TIMEOUT)
+    } else {
+        run_command(&mut qemu)
+    }
 }
 
-fn build_kernel(release: bool, debug_entry: bool) -> Result<(), XtaskError> {
+fn build_kernel(release: bool, debug_entry: bool, m1_self_test: bool) -> Result<(), XtaskError> {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(workspace_root())
         .arg("build")
@@ -105,8 +137,15 @@ fn build_kernel(release: bool, debug_entry: bool) -> Result<(), XtaskError> {
     if release {
         cmd.arg("--release");
     }
+    let mut features = Vec::new();
     if debug_entry {
-        cmd.arg("--features").arg("gdb-entry");
+        features.push("gdb-entry");
+    }
+    if m1_self_test {
+        features.push("m1-self-test");
+    }
+    if !features.is_empty() {
+        cmd.arg("--features").arg(features.join(","));
     }
 
     run_command(&mut cmd)
@@ -136,6 +175,10 @@ fn find_ovmf() -> Result<OvmfPaths, XtaskError> {
             vars_template: PathBuf::from("/usr/share/OVMF/OVMF_VARS.fd"),
         },
         OvmfPaths {
+            code: PathBuf::from("/usr/share/OVMF/OVMF_CODE_4M.fd"),
+            vars_template: PathBuf::from("/usr/share/OVMF/OVMF_VARS_4M.fd"),
+        },
+        OvmfPaths {
             code: PathBuf::from("/usr/share/edk2/ovmf/OVMF_CODE.fd"),
             vars_template: PathBuf::from("/usr/share/edk2/ovmf/OVMF_VARS.fd"),
         },
@@ -149,7 +192,9 @@ fn find_ovmf() -> Result<OvmfPaths, XtaskError> {
 }
 
 fn workspace_root() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask in workspace")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask in workspace")
 }
 
 fn run_command(command: &mut Command) -> Result<(), XtaskError> {
@@ -163,7 +208,7 @@ fn run_command(command: &mut Command) -> Result<(), XtaskError> {
             .join(" ")
     );
     let status = command.status()?;
-    if status.success() {
+    if status.success() || status.code() == Some(QEMU_DEBUG_EXIT_SUCCESS) {
         Ok(())
     } else {
         Err(XtaskError::CommandFailed {
@@ -173,9 +218,100 @@ fn run_command(command: &mut Command) -> Result<(), XtaskError> {
     }
 }
 
+fn run_acceptance_command(
+    command: &mut Command,
+    markers: &[&str],
+    timeout: Duration,
+) -> Result<(), XtaskError> {
+    let start = std::time::Instant::now();
+    let command_display = format!(
+        "{} {}",
+        command.get_program().to_string_lossy(),
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+
+        if start.elapsed() >= timeout {
+            child.kill()?;
+            let _ = child.wait();
+            let mut stdout = String::new();
+            if let Some(mut handle) = child.stdout.take() {
+                handle.read_to_string(&mut stdout)?;
+            }
+            let mut stderr = String::new();
+            if let Some(mut handle) = child.stderr.take() {
+                handle.read_to_string(&mut stderr)?;
+            }
+            if !stdout.is_empty() {
+                print!("{stdout}");
+            }
+            if !stderr.is_empty() {
+                eprint!("{stderr}");
+            }
+            return Err(XtaskError::CommandTimedOut {
+                command: command_display,
+                timeout: timeout.as_secs(),
+            });
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let mut stdout = String::new();
+    if let Some(mut handle) = child.stdout.take() {
+        handle.read_to_string(&mut stdout)?;
+    }
+    let mut stderr = String::new();
+    if let Some(mut handle) = child.stderr.take() {
+        handle.read_to_string(&mut stderr)?;
+    }
+    let output = if stderr.is_empty() {
+        stdout.clone()
+    } else if stdout.is_empty() {
+        stderr.clone()
+    } else {
+        format!("{stdout}{stderr}")
+    };
+    print!("{output}");
+
+    let status = child.wait()?;
+    if !(status.success() || status.code() == Some(QEMU_DEBUG_EXIT_SUCCESS)) {
+        return Err(XtaskError::CommandFailed {
+            command: command_display,
+            status: status.to_string(),
+        });
+    }
+
+    validate_output_markers(&output, markers)
+}
+
+fn validate_output_markers(output: &str, markers: &[&str]) -> Result<(), XtaskError> {
+    let mut search_start = 0usize;
+    for marker in markers {
+        let Some(offset) = output[search_start..].find(marker) else {
+            return Err(XtaskError::MissingMarker((*marker).to_owned()));
+        };
+        search_start += offset + marker.len();
+    }
+
+    Ok(())
+}
+
 fn print_help() {
     println!("Usage: cargo xtask <command>");
-    println!("  run          Build kernel and launch QEMU");
+    println!("  run          Build kernel and launch QEMU for normal development boot");
+    println!("  test-m1      Build the M1 self-test kernel, run QEMU, and validate PASS markers");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
     println!("  build        Build debug UEFI kernel only");
@@ -191,6 +327,7 @@ struct OvmfPaths {
 #[derive(Debug, PartialEq, Eq)]
 enum ParsedCommand {
     Run,
+    TestM1,
     RunGdb,
     RunGdbEntry,
     Build,
@@ -202,6 +339,7 @@ enum ParsedCommand {
 fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
     match command {
         Some(cmd) if cmd == "run" => ParsedCommand::Run,
+        Some(cmd) if cmd == "test-m1" => ParsedCommand::TestM1,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
         Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
         Some(cmd) if cmd == "build" => ParsedCommand::Build,
@@ -222,7 +360,9 @@ fn ovmf_from_env(code: Option<OsString>, vars: Option<OsString>) -> Option<OvmfP
     }
 }
 
-fn select_ovmf_from_candidates(candidates: impl IntoIterator<Item = OvmfPaths>) -> Option<OvmfPaths> {
+fn select_ovmf_from_candidates(
+    candidates: impl IntoIterator<Item = OvmfPaths>,
+) -> Option<OvmfPaths> {
     candidates
         .into_iter()
         .find(|ovmf| ovmf.code.is_file() && ovmf.vars_template.is_file())
@@ -231,8 +371,10 @@ fn select_ovmf_from_candidates(candidates: impl IntoIterator<Item = OvmfPaths>) 
 #[derive(Debug)]
 enum XtaskError {
     CommandFailed { command: String, status: String },
+    CommandTimedOut { command: String, timeout: u64 },
     InvalidCommand(String),
     Io(std::io::Error),
+    MissingMarker(String),
     MissingFile(PathBuf),
     MissingOvmf,
 }
@@ -243,8 +385,14 @@ impl Display for XtaskError {
             XtaskError::CommandFailed { command, status } => {
                 write!(f, "command `{command}` failed with status {status}")
             }
+            XtaskError::CommandTimedOut { command, timeout } => {
+                write!(f, "command `{command}` timed out after {timeout}s")
+            }
             XtaskError::InvalidCommand(command) => write!(f, "unknown command `{command}`"),
             XtaskError::Io(error) => write!(f, "{error}"),
+            XtaskError::MissingMarker(marker) => {
+                write!(f, "acceptance output missing required marker `{marker}`")
+            }
             XtaskError::MissingFile(path) => write!(f, "missing file: {}", path.display()),
             XtaskError::MissingOvmf => write!(
                 f,
@@ -280,6 +428,10 @@ mod tests {
     #[test]
     fn parse_known_command() {
         assert_eq!(parse_command(Some("run".as_ref())), ParsedCommand::Run);
+        assert_eq!(
+            parse_command(Some("test-m1".as_ref())),
+            ParsedCommand::TestM1
+        );
         assert_eq!(
             parse_command(Some("run-gdb-entry".as_ref())),
             ParsedCommand::RunGdbEntry
@@ -330,5 +482,25 @@ mod tests {
         assert_eq!(selected.vars_template, valid.vars_template);
 
         fs::remove_dir_all(base).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn acceptance_marker_validation_requires_ordered_sequence() {
+        let valid = "\
+[BOOT] UEFI memory map acquired\n\
+[BOOT] ExitBootServices OK\n\
+[MEM ] physical allocator initialized\n\
+[MM  ] page-fault diagnostics installed\n\
+[MM  ] scratch page map/unmap OK\n\
+[PF  ] page fault\n\
+[PF  ] rip=0x0000000012345678 cs=0x0038 rflags=0x0000000000000002\n\
+[M1  ] PASS\n";
+        assert!(validate_output_markers(valid, &M1_ACCEPTANCE_MARKERS).is_ok());
+
+        let invalid = "\
+[BOOT] UEFI memory map acquired\n\
+[MEM ] physical allocator initialized\n\
+[BOOT] ExitBootServices OK\n";
+        assert!(validate_output_markers(invalid, &M1_ACCEPTANCE_MARKERS).is_err());
     }
 }

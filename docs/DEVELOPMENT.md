@@ -43,7 +43,15 @@ This command:
 1. builds the Rust `#![no_std]` UEFI kernel artifact;
 2. creates an EFI boot directory at `target/esp/EFI/BOOT/BOOTX64.EFI`;
 3. launches QEMU with OVMF firmware;
-4. connects serial output to the host terminal.
+4. connects serial output to the host terminal for a normal interactive boot.
+
+For the bounded M1 memory acceptance path:
+
+```bash
+cargo xtask test-m1
+```
+
+This command builds the kernel with the M1 self-test mode enabled, boots QEMU headlessly, enforces a timeout, and validates the required serial markers including the deliberate page-fault diagnostic and `[M1  ] PASS`.
 
 To launch paused for debugger attach:
 

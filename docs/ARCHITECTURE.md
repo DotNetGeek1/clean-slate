@@ -161,6 +161,17 @@ Examples of repair actions:
 - test a candidate repair in a disposable cloned environment;
 - promote a repair only after health checks pass.
 
+## M1 virtual memory layout
+
+M1 keeps paging and physical-memory policy inside the kernel. The initial implementation intentionally stays conservative:
+
+- only `EfiConventionalMemory` pages from the post-`ExitBootServices` UEFI map are considered allocator-usable;
+- the running kernel image and the current early stack are reserved explicitly before allocator setup;
+- the kernel relies on the firmware-provided early identity mapping (`phys + 0`) to inspect existing page tables and bootstrap new mappings;
+- a high-half test slot at `0xffff_8000_0000_0000` is reserved for controlled map/unmap and page-fault diagnostics.
+
+This keeps M1 trustworthy while leaving a clear path to a richer higher-half kernel layout once dedicated bootstrap page tables and stacks exist.
+
 ## Language strategy
 
 The kernel and first-party low-level services should primarily use Rust.
