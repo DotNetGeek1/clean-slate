@@ -151,6 +151,7 @@ const SYSCALL_TEST_REQUIRED_CALLS: u64 = 256;
 #[cfg(feature = "m3-syscall-self-test")]
 const SYSCALL_DF_SANITIZED_MARKER: &str = "[SYSC] entry flag mask OK";
 const KERNEL_PROCESS_ID: u64 = 0;
+const PROCESS_REGISTRY_CAPACITY: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProcessState {
@@ -211,7 +212,7 @@ fn begin_thread_exit(
     thread: &mut Thread,
     status: u64,
     faulted: bool,
-) -> Result<(), &'static str> {
+) -> Result<bool, &'static str> {
     if thread.owner_process_id != process.id {
         return Err("thread owner did not match process during exit");
     }
@@ -226,10 +227,16 @@ fn begin_thread_exit(
         ProcessState::Exiting
     };
     process.live_threads -= 1;
-    process.exit_status = Some(status);
     thread.state = ThreadState::Exited;
-    process.state = ProcessState::Exited;
-    Ok(())
+    if process.live_threads == 0 {
+        process.exit_status = Some(status);
+        process.state = ProcessState::Exited;
+        return Ok(true);
+    }
+    if !faulted {
+        process.state = ProcessState::Running;
+    }
+    Ok(false)
 }
 
 fn reap_process(process: &mut Process, thread: &mut Thread) -> Result<(), &'static str> {
@@ -245,6 +252,60 @@ fn reap_process(process: &mut Process, thread: &mut Thread) -> Result<(), &'stat
     thread.state = ThreadState::Reaped;
     process.state = ProcessState::Reaped;
     Ok(())
+}
+
+fn finalize_process_exit(process: &mut Process, status: u64) -> Result<(), &'static str> {
+    if process.live_threads != 0 {
+        return Err("process could not finalize exit while threads remained");
+    }
+    process.exit_status = Some(status);
+    process.state = ProcessState::Exited;
+    Ok(())
+}
+
+struct ProcessRegistry {
+    processes: [Process; PROCESS_REGISTRY_CAPACITY],
+}
+
+impl ProcessRegistry {
+    const fn new() -> Self {
+        Self {
+            processes: [Process::EMPTY; PROCESS_REGISTRY_CAPACITY],
+        }
+    }
+
+    fn clear(&mut self) {
+        self.processes = [Process::EMPTY; PROCESS_REGISTRY_CAPACITY];
+    }
+
+    fn insert(&mut self, process: Process) -> Result<(), &'static str> {
+        if self
+            .processes
+            .iter()
+            .any(|entry| entry.id == process.id && entry.state != ProcessState::Empty)
+        {
+            return Err("process id already existed in registry");
+        }
+        let slot = self
+            .processes
+            .iter_mut()
+            .find(|entry| entry.state == ProcessState::Empty)
+            .ok_or("process registry capacity exceeded")?;
+        *slot = process;
+        Ok(())
+    }
+
+    fn get(&self, process_id: u64) -> Option<&Process> {
+        self.processes
+            .iter()
+            .find(|entry| entry.id == process_id && entry.state != ProcessState::Empty)
+    }
+
+    fn get_mut(&mut self, process_id: u64) -> Option<&mut Process> {
+        self.processes
+            .iter_mut()
+            .find(|entry| entry.id == process_id && entry.state != ProcessState::Empty)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -834,6 +895,7 @@ fn run_inner() -> Result<(), &'static str> {
     };
     unsafe {
         *ID_ALLOCATOR.get() = IdAllocator::new();
+        (&mut *PROCESS_REGISTRY.get()).clear();
     }
     set_privilege_stack(syscall_kernel_stack_top)?;
     initialize_syscall_abi(syscall_kernel_stack_top)?;
@@ -1381,6 +1443,24 @@ impl Scheduler {
         Ok(thread.id)
     }
 
+    fn retire_sibling_threads_for_process(
+        &mut self,
+        process_id: u64,
+        keep_thread_id: u64,
+    ) -> usize {
+        let mut retired = 0usize;
+        for thread in &mut self.threads {
+            if thread.owner_process_id != process_id || thread.id == keep_thread_id {
+                continue;
+            }
+            if matches!(thread.state, ThreadState::Ready | ThreadState::Running) {
+                thread.state = ThreadState::Exited;
+                retired += 1;
+            }
+        }
+        retired
+    }
+
     fn on_timer_interrupt(&mut self, current_stack_pointer: u64) -> Result<u64, &'static str> {
         let current = self
             .current_thread
@@ -1630,6 +1710,7 @@ impl<T> GlobalCell<T> {
 
 static SCHEDULER: GlobalCell<Scheduler> = GlobalCell::new(Scheduler::new());
 static ID_ALLOCATOR: GlobalCell<IdAllocator> = GlobalCell::new(IdAllocator::new());
+static PROCESS_REGISTRY: GlobalCell<ProcessRegistry> = GlobalCell::new(ProcessRegistry::new());
 static TASK_STACKS: GlobalCell<[TaskStack; TASK_COUNT]> =
     GlobalCell::new([const { TaskStack([0; TASK_STACK_SIZE]) }; TASK_COUNT]);
 static DOUBLE_FAULT_STACK: GlobalCell<DoubleFaultStack> =
@@ -2248,27 +2329,15 @@ fn set_syscall_kernel_stack(stack_pointer: u64) -> Result<(), &'static str> {
 }
 
 fn userspace_process_root_frame(process_id: u64) -> Result<u64, &'static str> {
-    #[cfg(feature = "m3-address-space-self-test")]
-    {
-        let state = userspace_address_space_test_state()?;
-        for process in &state.processes {
-            if process.process.id == process_id {
-                if matches!(
-                    process.process.state,
-                    ProcessState::Reaped | ProcessState::Empty
-                ) {
-                    return Err("userspace process was not dispatchable");
-                }
-                return Ok(process.address_space.root_frame);
-            }
-        }
-        Err("userspace process id was not registered")
+    let process = unsafe {
+        (&*PROCESS_REGISTRY.get())
+            .get(process_id)
+            .ok_or("userspace process id was not registered")?
+    };
+    if !matches!(process.state, ProcessState::Ready | ProcessState::Running) {
+        return Err("userspace process was not dispatchable");
     }
-    #[cfg(not(feature = "m3-address-space-self-test"))]
-    {
-        let _ = process_id;
-        Err("userspace process lookup was unavailable in this build")
-    }
+    Ok(process.address_space_root)
 }
 
 fn prepare_thread_dispatch(thread: Thread) -> Result<(), &'static str> {
@@ -3339,6 +3408,8 @@ fn create_userspace_process(
             observed_progress: 0,
         };
         process.state = ProcessState::Ready;
+        process.address_space_root = address_space.root_frame;
+        unsafe { (&mut *PROCESS_REGISTRY.get()).insert(process)? };
         Ok(UserspaceProcess {
             process,
             thread,
@@ -3490,11 +3561,16 @@ fn terminate_current_userspace_process(
     status: u64,
     faulted: bool,
 ) -> Result<Option<u64>, &'static str> {
-    let (thread_id, process_id) = without_interrupts(|| unsafe {
+    let (thread_id, process_id, retired_siblings) = without_interrupts(|| unsafe {
         let scheduler = &mut *SCHEDULER.get();
         let thread_id = scheduler.mark_current_thread_exiting()?;
         let process_id = scheduler.current_thread_descriptor()?.owner_process_id;
-        Ok::<(u64, u64), &'static str>((thread_id, process_id))
+        let retired_siblings = if faulted {
+            scheduler.retire_sibling_threads_for_process(process_id, thread_id)
+        } else {
+            0
+        };
+        Ok::<(u64, u64, usize), &'static str>((thread_id, process_id, retired_siblings))
     })?;
 
     let process_index = state
@@ -3503,23 +3579,64 @@ fn terminate_current_userspace_process(
         .position(|process| process.process.id == process_id)
         .ok_or("exiting thread owner process was not registered")?;
 
-    {
+    let last_thread_exited = {
         let process = &mut state.processes[process_index];
-        begin_thread_exit(&mut process.process, &mut process.thread, status, faulted)?;
+        let process_record = unsafe {
+            (&mut *PROCESS_REGISTRY.get())
+                .get_mut(process_id)
+                .ok_or("exiting process was missing from registry")?
+        };
+        let last_thread_exited =
+            begin_thread_exit(process_record, &mut process.thread, status, faulted)?;
+        process.process = *process_record;
+        last_thread_exited
+    };
+
+    if faulted && retired_siblings != 0 {
+        let process_record = unsafe {
+            (&mut *PROCESS_REGISTRY.get())
+                .get_mut(process_id)
+                .ok_or("faulting process was missing from registry")?
+        };
+        let retired_siblings_u16 = u16::try_from(retired_siblings)
+            .map_err(|_| "retired sibling thread count overflowed process accounting")?;
+        if process_record.live_threads < retired_siblings_u16 {
+            return Err("process thread accounting underflow during fault sibling retirement");
+        }
+        process_record.live_threads -= retired_siblings_u16;
+        if process_record.live_threads == 0 {
+            finalize_process_exit(process_record, status)?;
+        }
+        state.processes[process_index].process = *process_record;
+    }
+    if faulted {
+        let process_record = unsafe {
+            (&mut *PROCESS_REGISTRY.get())
+                .get_mut(process_id)
+                .ok_or("faulting process was missing from registry after retirement")?
+        };
+        if process_record.live_threads != 0 {
+            return Err("faulted process still had live threads after sibling retirement");
+        }
     }
 
     let next_stack_pointer =
         without_interrupts(|| unsafe { (&mut *SCHEDULER.get()).finish_current_thread() })?;
 
-    activate_address_space_root(state.kernel_root_frame);
-    destroy_process_address_space(&state.processes[process_index].address_space, allocator)?;
-    reap_process(
-        &mut state.processes[process_index].process,
-        &mut state.processes[process_index].thread,
-    )?;
-    without_interrupts(|| unsafe {
-        (&mut *SCHEDULER.get()).set_thread_state(thread_id, ThreadState::Reaped)
-    })?;
+    if last_thread_exited || (faulted && state.processes[process_index].process.live_threads == 0) {
+        activate_address_space_root(state.kernel_root_frame);
+        destroy_process_address_space(&state.processes[process_index].address_space, allocator)?;
+        let process_record = unsafe {
+            (&mut *PROCESS_REGISTRY.get())
+                .get_mut(process_id)
+                .ok_or("process missing from registry during reap")?
+        };
+        reap_process(process_record, &mut state.processes[process_index].thread)?;
+        state.processes[process_index].process = *process_record;
+        without_interrupts(|| unsafe {
+            (&mut *SCHEDULER.get()).set_thread_state(thread_id, ThreadState::Reaped)
+        })?;
+    }
 
     if next_stack_pointer.is_some() {
         prepare_current_scheduler_thread_dispatch()?;
@@ -4863,7 +4980,9 @@ mod tests {
             observed_progress: 0,
         };
 
-        begin_thread_exit(&mut process, &mut thread, 1, true).expect("fault exit transition");
+        assert!(
+            begin_thread_exit(&mut process, &mut thread, 1, true).expect("fault exit transition")
+        );
         reap_process(&mut process, &mut thread).expect("reap transition");
 
         assert_eq!(process.state, ProcessState::Reaped);
@@ -4871,6 +4990,126 @@ mod tests {
         assert_eq!(process.exit_status, Some(1));
         assert_eq!(process.live_threads, 0);
         assert_eq!(thread.owner_process_id, process.id);
+    }
+
+    #[test]
+    fn first_thread_exit_keeps_multi_thread_process_alive() {
+        let mut process = Process {
+            id: 5,
+            state: ProcessState::Running,
+            address_space_root: 0x3000,
+            resource_domain: ResourceDomain { id: 5 },
+            live_threads: 2,
+            exit_status: None,
+        };
+        let mut thread = Thread {
+            id: 41,
+            owner_process_id: process.id,
+            kind: ThreadKind::User,
+            kernel_stack_top: 0x5000,
+            saved_stack_pointer: 0x5000,
+            launch_entry: 0x6000,
+            started: true,
+            state: ThreadState::Running,
+            progress_logged: false,
+            preemptions: 0,
+            observed_progress: 0,
+        };
+
+        assert!(!begin_thread_exit(&mut process, &mut thread, 0, false).expect("thread exit"));
+        assert_eq!(thread.state, ThreadState::Exited);
+        assert_eq!(process.live_threads, 1);
+        assert_eq!(process.state, ProcessState::Running);
+        assert_eq!(process.exit_status, None);
+
+        let mut final_thread = Thread {
+            id: 42,
+            owner_process_id: process.id,
+            kind: ThreadKind::User,
+            kernel_stack_top: 0x7000,
+            saved_stack_pointer: 0x7000,
+            launch_entry: 0x8000,
+            started: true,
+            state: ThreadState::Running,
+            progress_logged: false,
+            preemptions: 0,
+            observed_progress: 0,
+        };
+        assert!(begin_thread_exit(&mut process, &mut final_thread, 9, false)
+            .expect("final thread exit"));
+        assert_eq!(process.live_threads, 0);
+        assert_eq!(process.state, ProcessState::Exited);
+        assert_eq!(process.exit_status, Some(9));
+    }
+
+    #[test]
+    fn process_registry_lookup_and_dispatchability_follow_process_state() {
+        let mut registry = ProcessRegistry::new();
+        let mut process = Process {
+            id: 17,
+            state: ProcessState::Ready,
+            address_space_root: 0x9000,
+            resource_domain: ResourceDomain { id: 17 },
+            live_threads: 1,
+            exit_status: None,
+        };
+        registry.insert(process).expect("insert");
+        assert_eq!(
+            registry
+                .get(process.id)
+                .expect("process")
+                .address_space_root,
+            0x9000
+        );
+        assert!(matches!(
+            registry.get(process.id).expect("process").state,
+            ProcessState::Ready
+        ));
+
+        process.state = ProcessState::Exited;
+        *registry.get_mut(17).expect("mut process") = process;
+        assert!(matches!(
+            registry.get(17).expect("process").state,
+            ProcessState::Exited
+        ));
+    }
+
+    #[test]
+    fn fault_termination_requires_sibling_retirement_before_final_exit() {
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .configure_thread(0, 90, 33, ThreadKind::User, 0x1000, 0x1000, 0x1000)
+            .expect("thread one");
+        scheduler
+            .configure_thread(1, 91, 33, ThreadKind::User, 0x2000, 0x2000, 0x2000)
+            .expect("thread two");
+        scheduler.current_thread = Some(0);
+        scheduler.threads[0].state = ThreadState::Running;
+        scheduler.threads[1].state = ThreadState::Ready;
+
+        let mut process = Process {
+            id: 33,
+            state: ProcessState::Running,
+            address_space_root: 0x9000,
+            resource_domain: ResourceDomain { id: 33 },
+            live_threads: 2,
+            exit_status: None,
+        };
+        let mut current = scheduler.threads[0];
+        assert!(
+            !begin_thread_exit(&mut process, &mut current, 1, true).expect("fault current thread")
+        );
+        assert_eq!(process.state, ProcessState::Faulted);
+        assert_eq!(process.live_threads, 1);
+
+        let retired = scheduler.retire_sibling_threads_for_process(33, 90);
+        assert_eq!(retired, 1);
+        assert_eq!(scheduler.threads[1].state, ThreadState::Exited);
+        process.live_threads -= retired as u16;
+        finalize_process_exit(&mut process, 1).expect("finalize process exit");
+        assert_eq!(process.live_threads, 0);
+        assert_eq!(process.state, ProcessState::Exited);
+        assert_eq!(process.exit_status, Some(1));
     }
 
     #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
