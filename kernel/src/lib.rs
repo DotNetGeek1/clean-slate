@@ -8,18 +8,22 @@ use uefi::boot;
 use uefi::mem::memory_map::{MemoryDescriptor, MemoryMap, MemoryMapMut, MemoryType};
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::Status;
-use x86_64::registers::control::{Cr0, Cr0Flags, Cr2, Cr3};
+#[cfg(feature = "m1-self-test")]
+use x86_64::registers::control::{Cr0, Cr0Flags};
+use x86_64::registers::control::{Cr2, Cr3};
 use x86_64::structures::paging::{
-    mapper::{MappedFrame, TranslateResult},
-    FrameAllocator, Mapper, OffsetPageTable, Page, PageSize, PageTable, PageTableFlags, PhysFrame,
-    Size1GiB, Size2MiB, Size4KiB, Translate,
+    FrameAllocator, OffsetPageTable, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate,
 };
+#[cfg(feature = "m1-self-test")]
+use x86_64::structures::paging::{Mapper, Page};
 use x86_64::{PhysAddr, VirtAddr};
 
 const COM1: u16 = 0x3F8;
 const PAGE_SIZE: u64 = 4096;
 const PHYSICAL_MEMORY_OFFSET: u64 = 0;
-const FAULT_PROBE_ADDRESS: u64 = 0xffff_8000_0000_0000;
+#[cfg(feature = "m1-self-test")]
+const SCRATCH_PAGE_ADDRESS: u64 = 0xffff_8000_0000_0000;
+#[cfg(feature = "m1-self-test")]
 const TEST_PAGE_VALUE: u64 = 0x434c_4541_4e53_4c41;
 const QEMU_EXIT_PORT: u16 = 0xf4;
 const QEMU_EXIT_SUCCESS: u32 = 0x10;
@@ -185,6 +189,15 @@ pub struct PageAllocator {
     current_region: usize,
     next_page: u64,
     free_list_head: Option<u64>,
+    total_pages: u64,
+    available_pages: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageAllocatorStats {
+    pub total_pages: u64,
+    pub allocated_pages: u64,
+    pub free_pages: u64,
 }
 
 impl PageAllocator {
@@ -195,6 +208,8 @@ impl PageAllocator {
             current_region: 0,
             next_page: 0,
             free_list_head: None,
+            total_pages: 0,
+            available_pages: 0,
         };
 
         for region in memory_map.regions() {
@@ -204,6 +219,7 @@ impl PageAllocator {
                 }
                 allocator.usable_regions[allocator.usable_region_count] = *region;
                 allocator.usable_region_count += 1;
+                allocator.total_pages += region.len() / PAGE_SIZE;
             }
         }
 
@@ -212,11 +228,13 @@ impl PageAllocator {
         }
 
         allocator.next_page = allocator.usable_regions[0].start;
+        allocator.available_pages = allocator.total_pages;
         Ok(allocator)
     }
 
     pub fn allocate_page(&mut self) -> Option<u64> {
         if let Some(frame) = self.pop_free_page() {
+            self.available_pages -= 1;
             return Some(frame);
         }
 
@@ -225,6 +243,7 @@ impl PageAllocator {
             if self.next_page < region.end {
                 let frame = self.next_page;
                 self.next_page = self.next_page.saturating_add(PAGE_SIZE);
+                self.available_pages -= 1;
                 return Some(frame);
             }
 
@@ -244,6 +263,9 @@ impl PageAllocator {
         if !self.contains_usable_frame(frame) {
             return Err("attempted to free a frame outside usable memory");
         }
+        if !self.was_ever_allocated(frame) {
+            return Err("attempted to free a frame that was never allocated");
+        }
         if self.free_list_contains(frame) {
             return Err("attempted to free an already-free frame");
         }
@@ -258,7 +280,16 @@ impl PageAllocator {
             );
         }
         self.free_list_head = Some(frame);
+        self.available_pages += 1;
         Ok(())
+    }
+
+    pub fn stats(&self) -> PageAllocatorStats {
+        PageAllocatorStats {
+            total_pages: self.total_pages,
+            allocated_pages: self.total_pages - self.available_pages,
+            free_pages: self.available_pages,
+        }
     }
 
     fn pop_free_page(&mut self) -> Option<u64> {
@@ -273,6 +304,24 @@ impl PageAllocator {
         self.usable_regions[..self.usable_region_count]
             .iter()
             .any(|region| frame >= region.start && frame < region.end)
+    }
+
+    fn was_ever_allocated(&self, frame: u64) -> bool {
+        let Some(region_index) = self.region_index_containing(frame) else {
+            return false;
+        };
+
+        if region_index < self.current_region {
+            return true;
+        }
+
+        region_index == self.current_region && frame < self.next_page
+    }
+
+    fn region_index_containing(&self, frame: u64) -> Option<usize> {
+        self.usable_regions[..self.usable_region_count]
+            .iter()
+            .position(|region| frame >= region.start && frame < region.end)
     }
 
     fn free_list_contains(&self, frame: u64) -> bool {
@@ -471,16 +520,21 @@ pub fn run() -> Status {
         qemu_exit_failure();
     }
 
-    Status::SUCCESS
+    halt_loop()
 }
 
 fn run_inner() -> Result<(), &'static str> {
-    let reserved_ranges = collect_reserved_ranges_from_firmware()?;
+    let mut reserved_ranges = collect_reserved_ranges_from_firmware()?;
 
     let mut memory_map = unsafe { boot::exit_boot_services(None) };
     memory_map.sort();
     serial_write_line("[BOOT] UEFI memory map acquired");
     serial_write_line("[BOOT] ExitBootServices OK");
+
+    reserved_ranges.push(ReservedRange::from_base_and_size(
+        memory_map.buffer().as_ptr() as u64,
+        memory_map.buffer().len() as u64,
+    ))?;
 
     let normalized = normalize_memory_map(memory_map.entries(), reserved_ranges.as_slice())?;
     drop(memory_map);
@@ -493,8 +547,12 @@ fn run_inner() -> Result<(), &'static str> {
         normalized.reserved_bytes() / (1024 * 1024)
     ));
 
-    let mut allocator = PageAllocator::new(&normalized)?;
-    exercise_allocator(&mut allocator)?;
+    let allocator = PageAllocator::new(&normalized)?;
+    let stats = allocator.stats();
+    serial_write_fmt(format_args!(
+        "[MEM ] pages: total={} allocated={} free={}\n",
+        stats.total_pages, stats.allocated_pages, stats.free_pages
+    ));
     serial_write_line("[MEM ] physical allocator initialized");
 
     install_page_fault_handler();
@@ -506,9 +564,25 @@ fn run_inner() -> Result<(), &'static str> {
         inspected.0, inspected.1
     ));
 
-    exercise_mapping(&normalized, reserved_ranges.as_slice(), &mut allocator)?;
+    #[cfg(feature = "m1-self-test")]
+    {
+        let mut allocator = allocator;
+        exercise_mapping(&mut allocator)?;
+        serial_write_line("[MM  ] scratch page map/unmap OK");
+    }
+
     serial_write_line("[MM  ] paging initialized");
-    trigger_expected_page_fault(FAULT_PROBE_ADDRESS as *const u64)
+
+    #[cfg(feature = "m1-self-test")]
+    {
+        trigger_expected_page_fault(SCRATCH_PAGE_ADDRESS as *const u64);
+    }
+
+    #[cfg(not(feature = "m1-self-test"))]
+    {
+        serial_write_line("[KERN] initialization complete");
+        Ok(())
+    }
 }
 
 fn collect_reserved_ranges_from_firmware() -> Result<BootReservedRanges, &'static str> {
@@ -542,144 +616,72 @@ fn inspect_current_mapping() -> Result<(u64, u64), &'static str> {
     Ok((virtual_address.as_u64(), physical_address.as_u64()))
 }
 
-fn exercise_allocator(allocator: &mut PageAllocator) -> Result<(), &'static str> {
-    let frame = allocator
-        .allocate_page()
-        .ok_or("allocator could not provide an initial 4 KiB page")?;
-    unsafe {
-        allocator.free_page(frame)?;
-    }
-    Ok(())
-}
-
-fn exercise_mapping(
-    memory_map: &NormalizedMemoryMap,
-    reserved_ranges: &[ReservedRange],
-    allocator: &mut PageAllocator,
-) -> Result<(), &'static str> {
+#[cfg(feature = "m1-self-test")]
+fn exercise_mapping(allocator: &mut PageAllocator) -> Result<(), &'static str> {
     let mut mapper = unsafe { current_offset_page_table() };
-    let candidate = select_test_mapping(memory_map, reserved_ranges, &mapper)?;
-    let frame_address = candidate.access_address();
-    let flags = candidate.flags();
-
-    unsafe {
-        ptr::write_volatile(frame_address as *mut u64, TEST_PAGE_VALUE);
+    let scratch_page = Page::<Size4KiB>::containing_address(VirtAddr::new(SCRATCH_PAGE_ADDRESS));
+    if mapper
+        .translate_addr(scratch_page.start_address())
+        .is_some()
+    {
+        return Err("scratch virtual address was already mapped");
     }
-    let observed = unsafe { ptr::read_volatile(frame_address as *const u64) };
+
+    let frame_address = allocator
+        .allocate_page()
+        .ok_or("allocator could not provide a 4 KiB frame for the scratch mapping test")?;
+    let frame = PhysFrame::containing_address(PhysAddr::new(frame_address));
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+
+    map_scratch_page(&mut mapper, scratch_page, frame, flags, allocator)?;
+
+    let scratch_address = scratch_page.start_address().as_u64();
+    unsafe { ptr::write_volatile(scratch_address as *mut u64, TEST_PAGE_VALUE) };
+    let observed = unsafe { ptr::read_volatile(scratch_address as *const u64) };
     if observed != TEST_PAGE_VALUE {
+        unmap_scratch_page(&mut mapper, scratch_page)?;
+        unsafe {
+            allocator.free_page(frame_address)?;
+        }
         return Err("mapped page did not preserve the test value");
     }
 
-    candidate.unmap(&mut mapper)?;
-    candidate.remap(&mut mapper, flags, allocator)?;
-
-    let restored = unsafe { ptr::read_volatile(frame_address as *const u64) };
-    if restored != TEST_PAGE_VALUE {
-        return Err("restored page mapping did not preserve the test value");
+    let unmapped_frame = unmap_scratch_page(&mut mapper, scratch_page)?;
+    if unmapped_frame.start_address().as_u64() != frame_address {
+        return Err("scratch unmap returned a different physical frame");
     }
 
+    unsafe { allocator.free_page(frame_address)? };
     Ok(())
 }
 
-fn select_test_mapping(
-    memory_map: &NormalizedMemoryMap,
-    reserved_ranges: &[ReservedRange],
-    mapper: &OffsetPageTable<'_>,
-) -> Result<TestMapping, &'static str> {
-    if let Some(candidate) = find_2m_mapping(memory_map, reserved_ranges, mapper) {
-        return Ok(candidate);
-    }
-    if let Some(candidate) = find_1g_mapping(memory_map, reserved_ranges, mapper) {
-        return Ok(candidate);
-    }
-    if let Some(candidate) = find_4k_mapping(memory_map, reserved_ranges, mapper) {
-        return Ok(candidate);
-    }
-
-    Err("failed to find a safe identity-mapped page-table test target")
+#[cfg(feature = "m1-self-test")]
+fn map_scratch_page(
+    mapper: &mut OffsetPageTable<'_>,
+    page: Page<Size4KiB>,
+    frame: PhysFrame<Size4KiB>,
+    flags: PageTableFlags,
+    allocator: &mut PageAllocator,
+) -> Result<(), &'static str> {
+    without_write_protect(|| unsafe { mapper.map_to(page, frame, flags, allocator) })
+        .map(|flush| flush.flush())
+        .map_err(|_| "failed to map the scratch virtual page")
 }
 
-enum TestMapping {
-    Size4KiB {
-        page: Page<Size4KiB>,
-        frame: PhysFrame<Size4KiB>,
-        access_address: u64,
-        flags: PageTableFlags,
-    },
-    Size2MiB {
-        page: Page<Size2MiB>,
-        frame: PhysFrame<Size2MiB>,
-        access_address: u64,
-        flags: PageTableFlags,
-    },
-    Size1GiB {
-        page: Page<Size1GiB>,
-        frame: PhysFrame<Size1GiB>,
-        access_address: u64,
-        flags: PageTableFlags,
-    },
-}
-
-impl TestMapping {
-    fn access_address(&self) -> u64 {
-        match *self {
-            Self::Size4KiB { access_address, .. }
-            | Self::Size2MiB { access_address, .. }
-            | Self::Size1GiB { access_address, .. } => access_address,
-        }
-    }
-
-    fn flags(&self) -> PageTableFlags {
-        match *self {
-            Self::Size4KiB { flags, .. }
-            | Self::Size2MiB { flags, .. }
-            | Self::Size1GiB { flags, .. } => flags,
-        }
-    }
-
-    fn unmap(&self, mapper: &mut OffsetPageTable<'_>) -> Result<(), &'static str> {
-        without_write_protect(|| match *self {
-            Self::Size4KiB { page, .. } => mapper
-                .unmap(page)
-                .map(|(_, flush)| flush.flush())
-                .map_err(|_| "failed to remove the 4 KiB test mapping"),
-            Self::Size2MiB { page, .. } => mapper
-                .unmap(page)
-                .map(|(_, flush)| flush.flush())
-                .map_err(|_| "failed to remove the 2 MiB test mapping"),
-            Self::Size1GiB { page, .. } => mapper
-                .unmap(page)
-                .map(|(_, flush)| flush.flush())
-                .map_err(|_| "failed to remove the 1 GiB test mapping"),
+#[cfg(feature = "m1-self-test")]
+fn unmap_scratch_page(
+    mapper: &mut OffsetPageTable<'_>,
+    page: Page<Size4KiB>,
+) -> Result<PhysFrame<Size4KiB>, &'static str> {
+    without_write_protect(|| mapper.unmap(page))
+        .map(|(frame, flush)| {
+            flush.flush();
+            frame
         })
-    }
-
-    fn remap(
-        &self,
-        mapper: &mut OffsetPageTable<'_>,
-        flags: PageTableFlags,
-        allocator: &mut PageAllocator,
-    ) -> Result<(), &'static str> {
-        without_write_protect(|| match *self {
-            Self::Size4KiB { page, frame, .. } => {
-                unsafe { mapper.map_to(page, frame, flags, allocator) }
-                    .map(|flush| flush.flush())
-                    .map_err(|_| "failed to restore the 4 KiB test mapping")
-            }
-            Self::Size2MiB { page, frame, .. } => {
-                unsafe { mapper.map_to(page, frame, flags, allocator) }
-                    .map(|flush| flush.flush())
-                    .map_err(|_| "failed to restore the 2 MiB test mapping")
-            }
-            Self::Size1GiB { page, frame, .. } => {
-                unsafe { mapper.map_to(page, frame, flags, allocator) }
-                    .map(|flush| flush.flush())
-                    .map_err(|_| "failed to restore the 1 GiB test mapping")
-            }
-        })
-    }
+        .map_err(|_| "failed to unmap the scratch virtual page")
 }
 
+#[cfg(feature = "m1-self-test")]
 fn without_write_protect<T>(f: impl FnOnce() -> T) -> T {
     let original = Cr0::read();
     let mut writable = original;
@@ -692,147 +694,16 @@ fn without_write_protect<T>(f: impl FnOnce() -> T) -> T {
     result
 }
 
+#[cfg(feature = "m1-self-test")]
 struct Cr0RestoreGuard(Cr0Flags);
 
+#[cfg(feature = "m1-self-test")]
 impl Drop for Cr0RestoreGuard {
     fn drop(&mut self) {
         unsafe {
             Cr0::write(self.0);
         }
     }
-}
-
-fn find_4k_mapping(
-    memory_map: &NormalizedMemoryMap,
-    reserved_ranges: &[ReservedRange],
-    mapper: &OffsetPageTable<'_>,
-) -> Option<TestMapping> {
-    for region in memory_map.regions() {
-        if region.kind != MemoryRegionKind::Usable {
-            continue;
-        }
-
-        let mut address = region.start;
-        while address < region.end {
-            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(address));
-            match mapper.translate(page.start_address()) {
-                TranslateResult::Mapped {
-                    frame: MappedFrame::Size4KiB(frame),
-                    flags,
-                    ..
-                } if frame.start_address().as_u64() == page.start_address().as_u64()
-                    && !range_overlaps_reserved(
-                        address,
-                        address + Size4KiB::SIZE,
-                        reserved_ranges,
-                    ) =>
-                {
-                    return Some(TestMapping::Size4KiB {
-                        page,
-                        frame,
-                        access_address: address,
-                        flags,
-                    });
-                }
-                _ => {}
-            }
-
-            address += Size4KiB::SIZE;
-        }
-    }
-
-    None
-}
-
-fn find_2m_mapping(
-    memory_map: &NormalizedMemoryMap,
-    reserved_ranges: &[ReservedRange],
-    mapper: &OffsetPageTable<'_>,
-) -> Option<TestMapping> {
-    for region in memory_map.regions() {
-        if region.kind != MemoryRegionKind::Usable {
-            continue;
-        }
-
-        let mut address = align_up(region.start, Size2MiB::SIZE);
-        while address.saturating_add(Size2MiB::SIZE) <= region.end {
-            let page = Page::<Size2MiB>::containing_address(VirtAddr::new(address));
-            match mapper.translate(page.start_address()) {
-                TranslateResult::Mapped {
-                    frame: MappedFrame::Size2MiB(frame),
-                    flags,
-                    ..
-                } if frame.start_address().as_u64() == page.start_address().as_u64()
-                    && !range_overlaps_reserved(
-                        address,
-                        address + Size2MiB::SIZE,
-                        reserved_ranges,
-                    ) =>
-                {
-                    return Some(TestMapping::Size2MiB {
-                        page,
-                        frame,
-                        access_address: address,
-                        flags,
-                    });
-                }
-                _ => {}
-            }
-
-            address += Size2MiB::SIZE;
-        }
-    }
-
-    None
-}
-
-fn find_1g_mapping(
-    memory_map: &NormalizedMemoryMap,
-    reserved_ranges: &[ReservedRange],
-    mapper: &OffsetPageTable<'_>,
-) -> Option<TestMapping> {
-    for region in memory_map.regions() {
-        if region.kind != MemoryRegionKind::Usable {
-            continue;
-        }
-
-        let mut address = align_up(region.start, Size1GiB::SIZE);
-        while address.saturating_add(Size1GiB::SIZE) <= region.end {
-            let page = Page::<Size1GiB>::containing_address(VirtAddr::new(address));
-            match mapper.translate(page.start_address()) {
-                TranslateResult::Mapped {
-                    frame: MappedFrame::Size1GiB(frame),
-                    flags,
-                    ..
-                } if frame.start_address().as_u64() == page.start_address().as_u64()
-                    && !range_overlaps_reserved(
-                        address,
-                        address + Size1GiB::SIZE,
-                        reserved_ranges,
-                    ) =>
-                {
-                    return Some(TestMapping::Size1GiB {
-                        page,
-                        frame,
-                        access_address: address,
-                        flags,
-                    });
-                }
-                _ => {}
-            }
-
-            address += Size1GiB::SIZE;
-        }
-    }
-
-    None
-}
-
-fn range_overlaps_reserved(start: u64, end: u64, reserved_ranges: &[ReservedRange]) -> bool {
-    reserved_ranges
-        .iter()
-        .filter(|range| !range.is_empty())
-        .any(|range| start < range.end && range.start < end)
 }
 
 unsafe fn current_offset_page_table() -> OffsetPageTable<'static> {
@@ -899,12 +770,22 @@ fn reserve_mapping_page_tables(
 }
 
 static mut EXPECTED_PAGE_FAULT_ADDRESS: u64 = 0;
+#[cfg(feature = "m1-self-test")]
+static mut EXPECTED_PAGE_FAULT_RIP: u64 = 0;
 
+#[cfg(feature = "m1-self-test")]
 fn trigger_expected_page_fault(address: *const u64) -> ! {
     unsafe {
         EXPECTED_PAGE_FAULT_ADDRESS = address as u64;
-        let _ = ptr::read_volatile(address);
+        EXPECTED_PAGE_FAULT_RIP = page_fault_probe as usize as u64;
+        page_fault_probe(address);
     }
+}
+
+#[cfg(feature = "m1-self-test")]
+#[inline(never)]
+unsafe fn page_fault_probe(address: *const u64) -> ! {
+    let _ = unsafe { ptr::read_volatile(address) };
     qemu_exit(QEMU_EXIT_FAILURE)
 }
 
@@ -926,9 +807,6 @@ struct PageFaultContext {
     rcx: u64,
     rax: u64,
     error_code: u64,
-    rip: u64,
-    cs: u64,
-    rflags: u64,
 }
 
 global_asm!(
@@ -951,28 +829,11 @@ clean_slate_page_fault_entry:
     push r14
     push r15
     mov rdi, rsp
-    mov rax, rsp
-    and rax, 8
-    sub rsp, rax
+    mov r8, rsp
+    and r8, 8
+    sub rsp, r8
     call clean_slate_page_fault_handler
-    add rsp, rax
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rdi
-    pop rsi
-    pop rbp
-    pop rbx
-    pop rdx
-    pop rcx
-    pop rax
-    add rsp, 8
-    iretq
+    ud2
 "#
 );
 
@@ -981,7 +842,7 @@ unsafe extern "C" {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn clean_slate_page_fault_handler(context: *mut PageFaultContext) {
+extern "C" fn clean_slate_page_fault_handler(context: *const PageFaultContext) -> ! {
     let context = unsafe { &*context };
     let fault_address = Cr2::read()
         .expect("CR2 must contain a canonical fault address")
@@ -989,6 +850,15 @@ extern "C" fn clean_slate_page_fault_handler(context: *mut PageFaultContext) {
     let cr3 = Cr3::read().0.start_address().as_u64();
     let expected = unsafe { EXPECTED_PAGE_FAULT_ADDRESS };
 
+    serial_write_line("[PF  ] page fault");
+    if expected == fault_address {
+        #[cfg(feature = "m1-self-test")]
+        serial_write_fmt(format_args!("[PF  ] rip={:#018x}\n", unsafe {
+            EXPECTED_PAGE_FAULT_RIP
+        }));
+    } else {
+        serial_write_line("[PF  ] rip=<unavailable>");
+    }
     serial_write_fmt(format_args!(
         "[PF  ] cr2={:#018x} cr3={:#018x} err={:#x} present={} write={} user={} instruction_fetch={}\n",
         fault_address,
@@ -1259,6 +1129,15 @@ mod tests {
         }
         let recycled = allocator.allocate_page().expect("recycled page");
         assert_eq!(recycled, first);
+
+        assert_eq!(
+            allocator.stats(),
+            PageAllocatorStats {
+                total_pages: 4,
+                allocated_pages: 2,
+                free_pages: 2,
+            }
+        );
     }
 
     #[test]
@@ -1275,6 +1154,51 @@ mod tests {
         }
         let second_free = unsafe { allocator.free_page(frame) };
         assert_eq!(second_free, Err("attempted to free an already-free frame"));
+    }
+
+    #[test]
+    fn allocator_rejects_unallocated_and_unaligned_frees() {
+        let mut pages = AlignedPages([0; (PAGE_SIZE as usize) * 4]);
+        let base = pages.0.as_mut_ptr() as u64;
+        let descriptors = [descriptor(MemoryType::CONVENTIONAL, base, 4)];
+        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
+        let mut allocator = PageAllocator::new(&map).expect("allocator");
+
+        let never_allocated = unsafe { allocator.free_page(base + PAGE_SIZE) };
+        assert_eq!(
+            never_allocated,
+            Err("attempted to free a frame that was never allocated")
+        );
+
+        let unaligned = unsafe { allocator.free_page(base + 1) };
+        assert_eq!(unaligned, Err("attempted to free a non-page-aligned frame"));
+    }
+
+    #[test]
+    fn allocator_exhaustion_and_reserved_exclusion_are_tracked() {
+        let descriptors = [
+            descriptor(MemoryType::CONVENTIONAL, 0x1000, 4),
+            descriptor(MemoryType::ACPI_NON_VOLATILE, 0x5000, 2),
+            descriptor(MemoryType::CONVENTIONAL, 0x7000, 2),
+        ];
+        let reserved = [ReservedRange::from_base_and_size(0x2000, PAGE_SIZE)];
+        let map = normalize_memory_map(descriptors.iter(), &reserved).expect("normalize map");
+        let mut allocator = PageAllocator::new(&map).expect("allocator");
+
+        let mut allocated = Vec::new();
+        while let Some(frame) = allocator.allocate_page() {
+            allocated.push(frame);
+        }
+
+        assert_eq!(allocated, vec![0x1000, 0x3000, 0x4000, 0x7000, 0x8000]);
+        assert_eq!(
+            allocator.stats(),
+            PageAllocatorStats {
+                total_pages: 5,
+                allocated_pages: 5,
+                free_pages: 0,
+            }
+        );
     }
 
     #[test]
