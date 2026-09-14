@@ -134,6 +134,8 @@ Normal applications should not care about the current internal implementation of
 
 A language-neutral ABI underneath the Rust bindings avoids coupling Clean-Slate's ecosystem permanently to one implementation language.
 
+During M3 bring-up, the kernel may expose a deliberately tiny versioned native syscall ABI strictly for boundary testing. That low-level ABI is intentionally narrow and may evolve; SDK-facing service protocols remain the durable application contract.
+
 ## Application packages
 
 A future package format may use a `.csapp` container.

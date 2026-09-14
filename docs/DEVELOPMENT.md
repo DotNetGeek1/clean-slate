@@ -93,6 +93,14 @@ This command builds the kernel with the M3.2 address-space self-test enabled, bo
 2. a successful switch between those address spaces while the same user virtual address resolves to different private frames;
 3. a ring-3 kernel-memory read denial and a cross-process private-memory read denial before `[M3.2] PASS`.
 
+For the bounded M3.3 native-syscall acceptance path:
+
+```bash
+cargo xtask test-m3-syscall
+```
+
+This command builds the kernel with the M3.3 syscall self-test enabled, boots QEMU headlessly, and validates the ordered markers proving timer-enabled repeated ring-3 `syscall/sysretq` round-trips and `[SYSC] syscall entry/return PASS`.
+
 To launch paused for debugger attach:
 
 ```bash
