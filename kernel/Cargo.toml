@@ -1,0 +1,16 @@
+[package]
+name = "clean-slate-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+gdb-entry = []
+
+[[bin]]
+name = "clean-slate-kernel"
+path = "src/main.rs"
+
+[lints]
+workspace = true

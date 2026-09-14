@@ -32,26 +32,41 @@ Physical hardware remains essential later because firmware, interrupt routing, p
 
 ## First development loop
 
-The ideal loop should eventually be one command, for example:
+The current loop is one command:
 
 ```bash
 cargo xtask run
 ```
 
-or later:
+This command:
+
+1. builds the Rust `#![no_std]` UEFI kernel artifact;
+2. creates an EFI boot directory at `target/esp/EFI/BOOT/BOOTX64.EFI`;
+3. launches QEMU with OVMF firmware;
+4. connects serial output to the host terminal.
+
+To launch paused for debugger attach:
 
 ```bash
-cs dev
+cargo xtask run-gdb
 ```
 
-The command should:
+That mode enables a GDB endpoint on `localhost:1234` and starts with CPU execution paused.
 
-1. build loader/kernel artifacts;
-2. build a bootable test image;
-3. launch QEMU with OVMF;
-4. attach serial output to the terminal;
-5. optionally expose a GDB endpoint;
-6. return a useful exit status for automated tests.
+To make kernel-entry stop reproducible in M0:
+
+```bash
+cargo xtask run-gdb-entry
+```
+
+This builds the kernel with a debug-entry trap at the start of `efi_main`, then launches paused with GDB endpoint `localhost:1234`.
+
+If OVMF is not installed in common distro paths, set:
+
+```bash
+export OVMF_CODE=/path/to/OVMF_CODE.fd
+export OVMF_VARS=/path/to/OVMF_VARS.fd
+```
 
 ## Diagnostics first
 
@@ -77,6 +92,29 @@ QEMU should support launching paused with a debugger endpoint.
 Debug symbols must be preserved in development builds so GDB (or a later Rust-friendly debugger) can resolve functions and stack traces.
 
 Expected workflows include breakpoints in kernel entry, page-fault handlers, scheduler paths, syscalls, and device initialization.
+
+### Reproducible kernel-entry handoff (M0)
+
+1. Start QEMU with debug-entry mode:
+
+   ```bash
+   cargo xtask run-gdb-entry
+   ```
+
+2. In another terminal, start GDB with the built image:
+
+   ```bash
+   gdb target/x86_64-unknown-uefi/debug/clean-slate-kernel.efi
+   ```
+
+3. Attach and continue:
+
+   ```gdb
+   target remote :1234
+   continue
+   ```
+
+4. GDB will stop on a trap once `efi_main` is executing (`SIGTRAP`). From there, single-step or set additional breakpoints.
 
 ## Test layers
 
