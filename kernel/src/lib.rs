@@ -467,7 +467,8 @@ pub fn run() -> Status {
     gdb_entry_handoff();
 
     if let Err(message) = run_inner() {
-        panic!("{message}");
+        serial_write_fmt(format_args!("[FAIL] {message}\n"));
+        qemu_exit_failure();
     }
 
     Status::SUCCESS
@@ -482,6 +483,7 @@ fn run_inner() -> Result<(), &'static str> {
     serial_write_line("[BOOT] ExitBootServices OK");
 
     let normalized = normalize_memory_map(memory_map.entries(), reserved_ranges.as_slice())?;
+    drop(memory_map);
     serial_write_fmt(format_args!(
         "[MEM ] usable: {} MiB\n",
         normalized.usable_bytes() / (1024 * 1024)
@@ -584,13 +586,13 @@ fn select_test_mapping(
     reserved_ranges: &[ReservedRange],
     mapper: &OffsetPageTable<'_>,
 ) -> Result<TestMapping, &'static str> {
-    if let Some(candidate) = find_4k_mapping(memory_map, reserved_ranges, mapper) {
-        return Ok(candidate);
-    }
     if let Some(candidate) = find_2m_mapping(memory_map, reserved_ranges, mapper) {
         return Ok(candidate);
     }
     if let Some(candidate) = find_1g_mapping(memory_map, reserved_ranges, mapper) {
+        return Ok(candidate);
+    }
+    if let Some(candidate) = find_4k_mapping(memory_map, reserved_ranges, mapper) {
         return Ok(candidate);
     }
 
@@ -988,7 +990,7 @@ extern "C" fn clean_slate_page_fault_handler(context: *mut PageFaultContext) {
     let expected = unsafe { EXPECTED_PAGE_FAULT_ADDRESS };
 
     serial_write_fmt(format_args!(
-        "[PF  ] cr2={:#018x} cr3={:#018x} err={:#x} present={} write={} user={} exec={}\n",
+        "[PF  ] cr2={:#018x} cr3={:#018x} err={:#x} present={} write={} user={} instruction_fetch={}\n",
         fault_address,
         cr3,
         context.error_code,
@@ -1155,6 +1157,10 @@ fn qemu_exit(value: u32) -> ! {
         asm!("out dx, eax", in("dx") QEMU_EXIT_PORT, in("eax") value, options(nostack, nomem, preserves_flags));
     }
     halt_loop()
+}
+
+pub fn qemu_exit_failure() -> ! {
+    qemu_exit(QEMU_EXIT_FAILURE)
 }
 
 pub fn halt_loop() -> ! {

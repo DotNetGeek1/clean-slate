@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use clean_slate_kernel::{halt_loop, run, serial_write_line};
+use clean_slate_kernel::{qemu_exit_failure, run, serial_write_line};
 use core::panic::PanicInfo;
 use uefi::{entry, Status};
 
@@ -14,5 +14,5 @@ fn efi_main() -> Status {
 fn panic(info: &PanicInfo<'_>) -> ! {
     serial_write_line("PANIC: kernel halted");
     clean_slate_kernel::serial_write_fmt(format_args!("PANIC: {info}\n"));
-    halt_loop()
+    qemu_exit_failure()
 }
