@@ -81,6 +81,18 @@ This command builds the kernel with the M3.1 userspace-entry self-test enabled, 
 2. a controlled return to the kernel through the dedicated DPL3 rendezvous gate; and
 3. a deterministic privileged-instruction (`cli`) denial from ring 3 with useful fault context before `[M3.1] PASS`.
 
+For the bounded M3.2 address-space isolation acceptance path:
+
+```bash
+cargo xtask test-m3-address-space
+```
+
+This command builds the kernel with the M3.2 address-space self-test enabled, boots QEMU headlessly, and validates the ordered markers for:
+
+1. creation of two distinct per-process address-space roots;
+2. a successful switch between those address spaces while the same user virtual address resolves to different private frames;
+3. a ring-3 kernel-memory read denial and a cross-process private-memory read denial before `[M3.2] PASS`.
+
 To launch paused for debugger attach:
 
 ```bash

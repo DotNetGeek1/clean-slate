@@ -16,6 +16,7 @@ const M1_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_DOUBLE_FAULT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_TIMER_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M3_ADDRESS_SPACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_ENTRY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[BOOT] UEFI memory map acquired",
@@ -61,6 +62,15 @@ const M3_ENTRY_ACCEPTANCE_MARKERS: [&str; 4] = [
     "cpl=3",
     "[M3.1] PASS",
 ];
+const M3_ADDRESS_SPACE_ACCEPTANCE_MARKERS: [&str; 7] = [
+    "[MM  ] process address space created pid=1",
+    "[MM  ] process address space created pid=2",
+    "[MM  ] address-space switch OK",
+    "[SEC ] kernel-memory read denied",
+    "[SEC ] cross-process read denied",
+    "[MM  ] address-space teardown OK",
+    "[M3.2] PASS",
+];
 
 fn main() -> ExitCode {
     match run(env::args_os()) {
@@ -80,6 +90,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::Run => run_vm(),
         ParsedCommand::TestM1 => run_m1_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
+        ParsedCommand::TestM3AddressSpace => run_m3_address_space_acceptance(),
         ParsedCommand::TestM3Entry => run_m3_entry_acceptance(),
         ParsedCommand::RunGdb => run_vm_with_gdb(false),
         ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
@@ -143,6 +154,18 @@ fn run_m3_entry_acceptance() -> Result<(), XtaskError> {
         false,
         &["m3-entry-self-test"],
         Some((&M3_ENTRY_ACCEPTANCE_MARKERS, M3_ENTRY_ACCEPTANCE_TIMEOUT)),
+    )
+}
+
+fn run_m3_address_space_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m3-address-space-self-test"],
+        Some((
+            &M3_ADDRESS_SPACE_ACCEPTANCE_MARKERS,
+            M3_ADDRESS_SPACE_ACCEPTANCE_TIMEOUT,
+        )),
     )
 }
 
@@ -511,6 +534,7 @@ fn print_help() {
     println!("  run          Build kernel and launch QEMU for normal development boot");
     println!("  test-m1      Build the M1 self-test kernel, run QEMU, and validate PASS markers");
     println!("  test-m2      Build the M2 self-test kernel, run QEMU, and validate PASS markers");
+    println!("  test-m3-address-space Build the M3.2 address-space kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-entry Build the M3.1 userspace-entry kernel, run QEMU, and validate PASS markers");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
@@ -529,6 +553,7 @@ enum ParsedCommand {
     Run,
     TestM1,
     TestM2,
+    TestM3AddressSpace,
     TestM3Entry,
     RunGdb,
     RunGdbEntry,
@@ -543,6 +568,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "run" => ParsedCommand::Run,
         Some(cmd) if cmd == "test-m1" => ParsedCommand::TestM1,
         Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,
+        Some(cmd) if cmd == "test-m3-address-space" => ParsedCommand::TestM3AddressSpace,
         Some(cmd) if cmd == "test-m3-entry" => ParsedCommand::TestM3Entry,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
         Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
@@ -639,6 +665,10 @@ mod tests {
         assert_eq!(
             parse_command(Some("test-m2".as_ref())),
             ParsedCommand::TestM2
+        );
+        assert_eq!(
+            parse_command(Some("test-m3-address-space".as_ref())),
+            ParsedCommand::TestM3AddressSpace
         );
         assert_eq!(
             parse_command(Some("test-m3-entry".as_ref())),
