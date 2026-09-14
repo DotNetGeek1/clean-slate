@@ -11,6 +11,7 @@ m1-self-test = []
 m2-double-fault-self-test = []
 m2-self-test = []
 m2-timer-self-test = []
+m3-entry-self-test = []
 
 [lib]
 path = "src/lib.rs"
