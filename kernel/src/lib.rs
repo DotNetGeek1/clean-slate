@@ -4,7 +4,7 @@
         feature = "m1-self-test",
         feature = "m2-double-fault-self-test",
         feature = "m2-timer-self-test",
-        feature = "m3-self-test"
+        feature = "m3-entry-self-test"
     ),
     allow(dead_code)
 )]
@@ -16,28 +16,24 @@ use core::hint::spin_loop;
 use core::mem::{size_of, MaybeUninit};
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
-#[cfg(feature = "m2-double-fault-self-test")]
+#[cfg(any(feature = "m2-double-fault-self-test", feature = "m3-entry-self-test"))]
 use core::sync::atomic::AtomicBool;
 use uefi::boot;
 use uefi::mem::memory_map::{MemoryDescriptor, MemoryMap, MemoryMapMut, MemoryType};
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::Status;
-#[cfg(feature = "m1-self-test")]
+#[cfg(any(feature = "m1-self-test", feature = "m3-entry-self-test"))]
 use x86_64::registers::control::{Cr0, Cr0Flags};
 use x86_64::registers::control::{Cr2, Cr3};
-#[cfg(feature = "m3-self-test")]
-use x86_64::registers::control::Cr3Flags;
 use x86_64::instructions::segmentation::{CS, DS, ES, SS, Segment};
 use x86_64::instructions::tables::load_tss;
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::paging::{
     FrameAllocator, OffsetPageTable, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate,
 };
-#[cfg(any(feature = "m1-self-test", feature = "m3-self-test"))]
-use x86_64::structures::paging::Page;
 use x86_64::structures::tss::TaskStateSegment;
-#[cfg(feature = "m1-self-test")]
-use x86_64::structures::paging::Mapper;
+#[cfg(any(feature = "m1-self-test", feature = "m3-entry-self-test"))]
+use x86_64::structures::paging::{Mapper, Page};
 use x86_64::{PhysAddr, VirtAddr};
 
 const COM1: u16 = 0x3F8;
@@ -57,10 +53,12 @@ const DOUBLE_FAULT_VECTOR: usize = 8;
 const DOUBLE_FAULT_IST_INDEX: u16 = 1;
 const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
 const PAGE_FAULT_VECTOR: usize = 14;
+#[cfg(feature = "m3-entry-self-test")]
+const GENERAL_PROTECTION_VECTOR: usize = 13;
 const TIMER_VECTOR: usize = 32;
 const SPURIOUS_VECTOR: usize = 33;
-#[cfg(feature = "m3-self-test")]
-const SYSCALL_VECTOR: usize = 0x80;
+#[cfg(feature = "m3-entry-self-test")]
+const USER_TEST_VECTOR: usize = 0x80;
 const APIC_BASE_MSR: u32 = 0x1b;
 const APIC_BASE_ADDRESS_MASK: u64 = 0xffff_f000;
 const APIC_ENABLE: u64 = 1 << 11;
@@ -81,44 +79,18 @@ const TASK_COUNT: usize = 2;
 const TASK_STACK_SIZE: usize = 64 * 1024;
 const TASK_REQUIRED_PREEMPTIONS: u64 = 2;
 const TASK_PROGRESS_CHUNK: u64 = 4_096;
-#[cfg(feature = "m3-self-test")]
-const M3_PROCESS_COUNT: usize = TASK_COUNT;
-#[cfg(feature = "m3-self-test")]
-const M3_MAX_OWNED_FRAMES: usize = 8;
-#[cfg(feature = "m3-self-test")]
-const M3_CONSOLE_CAPABILITY_ID: u64 = 1;
-#[cfg(feature = "m3-self-test")]
-const M3_USER_REGION_BASE: u64 = 0x0000_4000_0000_0000;
-#[cfg(feature = "m3-self-test")]
-const M3_USER_REGION_STRIDE: u64 = 0x0000_0000_0020_0000;
-#[cfg(feature = "m3-self-test")]
-const M3_USER_CODE_OFFSET: u64 = 0x0000;
-#[cfg(feature = "m3-self-test")]
-const M3_USER_STACK_OFFSET: u64 = PAGE_SIZE;
-#[cfg(feature = "m3-self-test")]
-const M3_FAULT_SKIP_LEN: u64 = 3;
-#[cfg(feature = "m3-self-test")]
-const M3_SCRIPT_IPC_SEND: u64 = 1 << 0;
-#[cfg(feature = "m3-self-test")]
-const M3_SCRIPT_KERNEL_READ: u64 = 1 << 1;
-#[cfg(feature = "m3-self-test")]
-const M3_SCRIPT_PEER_READ: u64 = 1 << 2;
-#[cfg(feature = "m3-self-test")]
-const M3_RFLAGS: u64 = 0x202;
-#[cfg(feature = "m3-self-test")]
-const M3_SYSCALL_REPORT_RING3: u64 = 0;
-#[cfg(feature = "m3-self-test")]
-const M3_SYSCALL_PING: u64 = 1;
-#[cfg(feature = "m3-self-test")]
-const M3_SYSCALL_CONSOLE_SEND: u64 = 2;
-#[cfg(feature = "m3-self-test")]
-const M3_SYSCALL_EXIT: u64 = 3;
 #[cfg(feature = "m2-timer-self-test")]
 const TIMER_SELF_TEST_REQUIRED_TICKS: u64 = 4;
 #[cfg(feature = "m2-double-fault-self-test")]
 const DOUBLE_FAULT_TEST_PRIMARY_ADDRESS: u64 = 0xffff_8000_0000_1000;
 #[cfg(feature = "m2-double-fault-self-test")]
 const DOUBLE_FAULT_TEST_SECONDARY_ADDRESS: u64 = 0xffff_8000_0000_2000;
+#[cfg(feature = "m3-entry-self-test")]
+const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
+#[cfg(feature = "m3-entry-self-test")]
+const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE;
+#[cfg(feature = "m3-entry-self-test")]
+const USER_TEST_RFLAGS: u64 = 0x202;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryRegionKind {
@@ -680,19 +652,17 @@ fn run_inner() -> Result<(), &'static str> {
         start_timer_self_test_task()
     }
 
-    #[cfg(feature = "m3-self-test")]
+    #[cfg(feature = "m3-entry-self-test")]
     {
-        unsafe {
-            *PAGE_ALLOCATOR_STATE.get() = Some(allocator);
-        }
-        start_m3_self_test()
+        let mut allocator = allocator;
+        start_userspace_entry_self_test(&mut allocator)
     }
 
     #[cfg(all(
         not(feature = "m1-self-test"),
         not(feature = "m2-double-fault-self-test"),
         not(feature = "m2-timer-self-test"),
-        not(feature = "m3-self-test")
+        not(feature = "m3-entry-self-test")
     ))]
     {
         initialize_scheduler()?;
@@ -800,7 +770,7 @@ fn unmap_scratch_page(
         .map_err(|_| "failed to unmap the scratch virtual page")
 }
 
-#[cfg(feature = "m1-self-test")]
+#[cfg(any(feature = "m1-self-test", feature = "m3-entry-self-test"))]
 fn without_write_protect<T>(f: impl FnOnce() -> T) -> T {
     let original = Cr0::read();
     let mut writable = original;
@@ -813,10 +783,10 @@ fn without_write_protect<T>(f: impl FnOnce() -> T) -> T {
     result
 }
 
-#[cfg(feature = "m1-self-test")]
+#[cfg(any(feature = "m1-self-test", feature = "m3-entry-self-test"))]
 struct Cr0RestoreGuard(Cr0Flags);
 
-#[cfg(feature = "m1-self-test")]
+#[cfg(any(feature = "m1-self-test", feature = "m3-entry-self-test"))]
 impl Drop for Cr0RestoreGuard {
     fn drop(&mut self) {
         unsafe {
@@ -890,101 +860,19 @@ fn reserve_mapping_page_tables(
 
 static mut EXPECTED_PAGE_FAULT_ADDRESS: u64 = 0;
 
-#[cfg(feature = "m3-self-test")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CapabilityKind {
-    ConsoleSend,
-}
-
-#[cfg(feature = "m3-self-test")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Capability {
-    id: u64,
-    kind: CapabilityKind,
-}
-
-#[cfg(feature = "m3-self-test")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProcessScript {
-    Full,
-    ExitOnly,
-}
-
-#[cfg(feature = "m3-self-test")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExpectedFault {
-    None,
-    KernelMemoryRead,
-    CrossProcessRead,
-}
-
-#[cfg(feature = "m3-self-test")]
-#[repr(C)]
+#[cfg(feature = "m3-entry-self-test")]
 #[derive(Clone, Copy)]
-struct UserTaskContext {
+struct UserspaceEntryFrame {
     interrupt: InterruptContext,
     user_stack_pointer: u64,
     user_stack_segment: u64,
 }
 
-#[cfg(feature = "m3-self-test")]
+#[cfg(feature = "m3-entry-self-test")]
 #[derive(Clone, Copy)]
-struct Process {
-    id: usize,
-    page_table_root: u64,
-    kernel_stack_top: u64,
+struct UserspaceTestState {
     user_code_address: u64,
-    user_stack_top: u64,
-    kernel_probe_address: u64,
-    peer_probe_address: u64,
-    script: ProcessScript,
-    capabilities: [Option<Capability>; 1],
-    expected_fault: ExpectedFault,
-    owned_frames: [u64; M3_MAX_OWNED_FRAMES],
-    owned_frame_count: usize,
-    exited: bool,
-}
-
-#[cfg(feature = "m3-self-test")]
-impl Process {
-    const EMPTY: Self = Self {
-        id: 0,
-        page_table_root: 0,
-        kernel_stack_top: 0,
-        user_code_address: 0,
-        user_stack_top: 0,
-        kernel_probe_address: 0,
-        peer_probe_address: 0,
-        script: ProcessScript::ExitOnly,
-        capabilities: [None],
-        expected_fault: ExpectedFault::None,
-        owned_frames: [0; M3_MAX_OWNED_FRAMES],
-        owned_frame_count: 0,
-        exited: false,
-    };
-
-    fn owns_capability(&self, capability_id: u64, kind: CapabilityKind) -> bool {
-        self.capabilities
-            .iter()
-            .flatten()
-            .any(|capability| capability.id == capability_id && capability.kind == kind)
-    }
-
-    fn push_owned_frame(&mut self, frame: u64) -> Result<(), &'static str> {
-        if self.owned_frame_count == self.owned_frames.len() {
-            return Err("process owned-frame capacity exceeded");
-        }
-        self.owned_frames[self.owned_frame_count] = frame;
-        self.owned_frame_count += 1;
-        Ok(())
-    }
-
-    fn contains_user_range(&self, start: u64, len: u64) -> bool {
-        let Some(end) = start.checked_add(len) else {
-            return false;
-        };
-        start >= self.user_code_address && end <= self.user_stack_top && start <= end
-    }
+    privileged_instruction_rip: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1166,370 +1054,6 @@ impl Scheduler {
     }
 }
 
-#[cfg(feature = "m3-self-test")]
-fn m3_user_region_base(slot: usize) -> u64 {
-    M3_USER_REGION_BASE + (slot as u64) * M3_USER_REGION_STRIDE
-}
-
-#[cfg(feature = "m3-self-test")]
-fn m3_user_code_address(slot: usize) -> u64 {
-    m3_user_region_base(slot) + M3_USER_CODE_OFFSET
-}
-
-#[cfg(feature = "m3-self-test")]
-fn m3_user_stack_page_address(slot: usize) -> u64 {
-    m3_user_region_base(slot) + M3_USER_STACK_OFFSET
-}
-
-#[cfg(feature = "m3-self-test")]
-fn m3_user_stack_top(slot: usize) -> u64 {
-    m3_user_stack_page_address(slot) + PAGE_SIZE
-}
-
-#[cfg(feature = "m3-self-test")]
-fn m3_user_process_size() -> usize {
-    (&raw const clean_slate_user_process_end as usize)
-        .saturating_sub(&raw const clean_slate_user_process_start as usize)
-}
-
-#[cfg(feature = "m3-self-test")]
-fn m3_user_process_message_offset() -> u64 {
-    ((&raw const clean_slate_user_process_message_start as usize)
-        .saturating_sub(&raw const clean_slate_user_process_start as usize)) as u64
-}
-
-#[cfg(feature = "m3-self-test")]
-fn m3_user_process_message_len() -> u64 {
-    ((&raw const clean_slate_user_process_end as usize)
-        .saturating_sub(&raw const clean_slate_user_process_message_start as usize)) as u64
-}
-
-#[cfg(feature = "m3-self-test")]
-fn m3_script_flags(script: ProcessScript) -> u64 {
-    match script {
-        ProcessScript::Full => M3_SCRIPT_IPC_SEND | M3_SCRIPT_KERNEL_READ | M3_SCRIPT_PEER_READ,
-        ProcessScript::ExitOnly => 0,
-    }
-}
-
-#[cfg(feature = "m3-self-test")]
-fn current_root_page_table_address() -> u64 {
-    Cr3::read().0.start_address().as_u64()
-}
-
-#[cfg(feature = "m3-self-test")]
-fn process_table_mut() -> &'static mut [Process; M3_PROCESS_COUNT] {
-    unsafe { &mut *PROCESS_TABLE.get() }
-}
-
-#[cfg(feature = "m3-self-test")]
-fn page_allocator_mut() -> Result<&'static mut PageAllocator, &'static str> {
-    unsafe {
-        (&mut *PAGE_ALLOCATOR_STATE.get())
-            .as_mut()
-            .ok_or("page allocator not available for m3 self-test")
-    }
-}
-
-#[cfg(feature = "m3-self-test")]
-fn zero_frame(frame: u64) {
-    unsafe {
-        ptr::write_bytes(
-            (PHYSICAL_MEMORY_OFFSET + frame) as *mut u8,
-            0,
-            PAGE_SIZE as usize,
-        );
-    }
-}
-
-#[cfg(feature = "m3-self-test")]
-unsafe fn page_table_from_frame(frame: u64) -> &'static mut PageTable {
-    unsafe { &mut *((PHYSICAL_MEMORY_OFFSET + frame) as *mut PageTable) }
-}
-
-#[cfg(feature = "m3-self-test")]
-fn allocate_process_frame(process: &mut Process) -> Result<u64, &'static str> {
-    let allocator = page_allocator_mut()?;
-    let frame = allocator
-        .allocate_page()
-        .ok_or("allocator could not provide an M3 process frame")?;
-    zero_frame(frame);
-    process.push_owned_frame(frame)?;
-    Ok(frame)
-}
-
-#[cfg(feature = "m3-self-test")]
-fn create_user_page_tables(process: &mut Process) -> Result<(), &'static str> {
-    let root = allocate_process_frame(process)?;
-    let current_root = current_root_page_table_address();
-    unsafe {
-        ptr::copy_nonoverlapping(
-            (PHYSICAL_MEMORY_OFFSET + current_root) as *const PageTable,
-            (PHYSICAL_MEMORY_OFFSET + root) as *mut PageTable,
-            1,
-        );
-    }
-    process.page_table_root = root;
-    Ok(())
-}
-
-#[cfg(feature = "m3-self-test")]
-fn map_process_user_page(
-    process: &mut Process,
-    virtual_address: u64,
-    frame: u64,
-    flags: PageTableFlags,
-) -> Result<(), &'static str> {
-    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virtual_address));
-    let user_table_flags =
-        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
-    let root = unsafe { page_table_from_frame(process.page_table_root) };
-
-    let p4_entry = &mut root[page.p4_index()];
-    if p4_entry.is_unused() {
-        let new_frame = allocate_process_frame(process)?;
-        p4_entry.set_addr(PhysAddr::new(new_frame), user_table_flags);
-    }
-    if !p4_entry.flags().contains(PageTableFlags::USER_ACCESSIBLE) {
-        return Err("user page collided with a supervisor-only PML4 entry");
-    }
-
-    let p3_table = unsafe { page_table_from_frame(p4_entry.addr().as_u64()) };
-    let p3_entry = &mut p3_table[page.p3_index()];
-    if p3_entry.is_unused() {
-        let new_frame = allocate_process_frame(process)?;
-        p3_entry.set_addr(PhysAddr::new(new_frame), user_table_flags);
-    }
-    if !p3_entry.flags().contains(PageTableFlags::USER_ACCESSIBLE) {
-        return Err("user page collided with a supervisor-only PDPT entry");
-    }
-
-    let p2_table = unsafe { page_table_from_frame(p3_entry.addr().as_u64()) };
-    let p2_entry = &mut p2_table[page.p2_index()];
-    if p2_entry.is_unused() {
-        let new_frame = allocate_process_frame(process)?;
-        p2_entry.set_addr(PhysAddr::new(new_frame), user_table_flags);
-    }
-    if !p2_entry.flags().contains(PageTableFlags::USER_ACCESSIBLE) {
-        return Err("user page collided with a supervisor-only PD entry");
-    }
-
-    let p1_table = unsafe { page_table_from_frame(p2_entry.addr().as_u64()) };
-    let p1_entry = &mut p1_table[page.p1_index()];
-    if !p1_entry.is_unused() {
-        return Err("user page virtual address was already mapped");
-    }
-    p1_entry.set_addr(PhysAddr::new(frame), flags | PageTableFlags::PRESENT);
-    Ok(())
-}
-
-#[cfg(feature = "m3-self-test")]
-fn install_user_payload(process: &mut Process, slot: usize) -> Result<(), &'static str> {
-    let code_frame = allocate_process_frame(process)?;
-    let stack_frame = allocate_process_frame(process)?;
-    let payload_size = m3_user_process_size();
-    if payload_size > PAGE_SIZE as usize {
-        return Err("user payload exceeded one page");
-    }
-
-    unsafe {
-        ptr::copy_nonoverlapping(
-            &raw const clean_slate_user_process_start,
-            (PHYSICAL_MEMORY_OFFSET + code_frame) as *mut u8,
-            payload_size,
-        );
-    }
-
-    process.user_code_address = m3_user_code_address(slot);
-    process.user_stack_top = m3_user_stack_top(slot);
-    map_process_user_page(
-        process,
-        process.user_code_address,
-        code_frame,
-        PageTableFlags::USER_ACCESSIBLE,
-    )?;
-    map_process_user_page(
-        process,
-        m3_user_stack_page_address(slot),
-        stack_frame,
-        PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE | PageTableFlags::USER_ACCESSIBLE,
-    )?;
-    Ok(())
-}
-
-#[cfg(feature = "m3-self-test")]
-fn build_user_task_context(process: &Process) -> Result<u64, &'static str> {
-    let gdt_state = unsafe {
-        (&*GDT_STATE.get())
-            .as_ref()
-            .ok_or("gdt must exist before building a user context")?
-    };
-    let context_address =
-        align_down(process.kernel_stack_top - size_of::<UserTaskContext>() as u64, 16);
-    let message_pointer = process.user_code_address + m3_user_process_message_offset();
-    let capability_id = process
-        .capabilities
-        .iter()
-        .flatten()
-        .next()
-        .map_or(0, |capability| capability.id);
-    let context = UserTaskContext {
-        interrupt: InterruptContext {
-            r15: message_pointer,
-            r14: capability_id,
-            r13: m3_script_flags(process.script),
-            r12: process.id as u64,
-            r11: process.peer_probe_address,
-            r10: 0,
-            r9: 0,
-            r8: 0,
-            rdi: 0,
-            rsi: 0,
-            rbp: process.kernel_probe_address,
-            rbx: m3_user_process_message_len(),
-            rdx: 0,
-            rcx: 0,
-            rax: 0,
-            vector: 0,
-            error_code: 0,
-            rip: process.user_code_address,
-            cs: gdt_state.user_code_selector.0 as u64,
-            rflags: M3_RFLAGS,
-        },
-        user_stack_pointer: process.user_stack_top,
-        user_stack_segment: gdt_state.user_data_selector.0 as u64,
-    };
-    unsafe { ptr::write(context_address as *mut UserTaskContext, context) };
-    Ok(context_address)
-}
-
-#[cfg(feature = "m3-self-test")]
-fn set_privilege_stack(stack_top: u64) -> Result<(), &'static str> {
-    let tss = unsafe {
-        (&mut *TSS_STATE.get())
-            .as_mut()
-            .ok_or("tss must exist before setting the privilege stack")?
-    };
-    tss.privilege_stack_table[0] = VirtAddr::new(stack_top);
-    Ok(())
-}
-
-#[cfg(feature = "m3-self-test")]
-fn activate_process_slot(slot: usize) -> Result<(), &'static str> {
-    let (page_table_root, kernel_stack_top) = {
-        let process = &process_table_mut()[slot];
-        (process.page_table_root, process.kernel_stack_top)
-    };
-    set_privilege_stack(kernel_stack_top)?;
-    unsafe {
-        Cr3::write(
-            PhysFrame::containing_address(PhysAddr::new(page_table_root)),
-            Cr3Flags::empty(),
-        );
-    }
-    Ok(())
-}
-
-#[cfg(feature = "m3-self-test")]
-fn activate_kernel_address_space() {
-    unsafe {
-        Cr3::write(
-            PhysFrame::containing_address(PhysAddr::new(
-                KERNEL_ROOT_PAGE_TABLE.load(Ordering::Relaxed),
-            )),
-            Cr3Flags::empty(),
-        );
-    }
-}
-
-#[cfg(feature = "m3-self-test")]
-fn initialize_m3_processes() -> Result<(), &'static str> {
-    if M3_PROCESS_COUNT < 2 {
-        return Err("m3 self-test requires at least two isolated processes");
-    }
-    KERNEL_ROOT_PAGE_TABLE.store(current_root_page_table_address(), Ordering::Relaxed);
-    let task_stacks = unsafe { &*TASK_STACKS.get() };
-    let kernel_probe_address = run as usize as u64;
-    let process_table = process_table_mut();
-    *process_table = [Process::EMPTY; M3_PROCESS_COUNT];
-
-    for slot in 0..M3_PROCESS_COUNT {
-        process_table[slot].id = slot + 1;
-        process_table[slot].kernel_stack_top = task_stack_top(&task_stacks[slot]);
-        process_table[slot].kernel_probe_address = kernel_probe_address;
-        process_table[slot].peer_probe_address = m3_user_stack_page_address((slot + 1) % M3_PROCESS_COUNT);
-        process_table[slot].script = if slot == 0 {
-            ProcessScript::Full
-        } else {
-            ProcessScript::ExitOnly
-        };
-        if slot == 0 {
-            process_table[slot].capabilities = [Some(Capability {
-                id: M3_CONSOLE_CAPABILITY_ID,
-                kind: CapabilityKind::ConsoleSend,
-            })];
-        }
-        create_user_page_tables(&mut process_table[slot])?;
-        install_user_payload(&mut process_table[slot], slot)?;
-        process_table[slot].expected_fault = if slot == 0 {
-            ExpectedFault::KernelMemoryRead
-        } else {
-            ExpectedFault::None
-        };
-    }
-
-    let scheduler = unsafe { &mut *SCHEDULER.get() };
-    *scheduler = Scheduler::new();
-    for slot in 0..M3_PROCESS_COUNT {
-        let saved_stack_pointer = build_user_task_context(&process_table[slot])?;
-        scheduler.configure_task(slot, process_table[slot].id, saved_stack_pointer, 0)?;
-        scheduler.tasks[slot].started = true;
-    }
-    Ok(())
-}
-
-#[cfg(feature = "m3-self-test")]
-fn start_m3_self_test() -> ! {
-    if let Err(message) = initialize_m3_processes() {
-        fatal_kernel_error(message);
-    }
-
-    let first_stack_pointer = match unsafe { (&mut *SCHEDULER.get()).start() } {
-        Ok(stack_pointer) => stack_pointer,
-        Err(message) => fatal_kernel_error(message),
-    };
-    let current_slot = unsafe { (&*SCHEDULER.get()).current_task.expect("m3 task must exist") };
-    if let Err(message) = activate_process_slot(current_slot) {
-        fatal_kernel_error(message);
-    }
-    unsafe { restore_task_context(first_stack_pointer) }
-}
-
-#[cfg(feature = "m3-self-test")]
-fn teardown_m3_processes() -> Result<(), &'static str> {
-    activate_kernel_address_space();
-    let process_table = process_table_mut();
-    let allocator = page_allocator_mut()?;
-    let mut released_frames = 0usize;
-    let mut released_capabilities = 0usize;
-    for process in process_table.iter_mut() {
-        for frame in process.owned_frames[..process.owned_frame_count]
-            .iter()
-            .copied()
-            .rev()
-        {
-            unsafe { allocator.free_page(frame)? };
-            released_frames += 1;
-        }
-        released_capabilities += process.capabilities.iter().flatten().count();
-        *process = Process::EMPTY;
-    }
-    if released_frames == 0 || released_capabilities == 0 {
-        return Err("m3 teardown did not release expected resources");
-    }
-    Ok(())
-}
-
 #[repr(align(16))]
 struct TaskStack([u8; TASK_STACK_SIZE]);
 
@@ -1561,32 +1085,6 @@ struct InterruptContext {
     rflags: u64,
 }
 
-impl InterruptContext {
-    #[cfg(test)]
-    const ZERO: Self = Self {
-        r15: 0,
-        r14: 0,
-        r13: 0,
-        r12: 0,
-        r11: 0,
-        r10: 0,
-        r9: 0,
-        r8: 0,
-        rdi: 0,
-        rsi: 0,
-        rbp: 0,
-        rbx: 0,
-        rdx: 0,
-        rcx: 0,
-        rax: 0,
-        vector: 0,
-        error_code: 0,
-        rip: 0,
-        cs: 0,
-        rflags: 0,
-    };
-}
-
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct IdtEntry {
@@ -1612,7 +1110,7 @@ impl IdtEntry {
         self.set_handler_with_privilege(handler, 0, 0);
     }
 
-    #[cfg(feature = "m3-self-test")]
+    #[cfg(feature = "m3-entry-self-test")]
     fn set_user_handler(&mut self, handler: unsafe extern "C" fn()) {
         self.set_handler_with_privilege(handler, 0, 3);
     }
@@ -1650,9 +1148,9 @@ struct GdtState {
     table: GlobalDescriptorTable,
     code_selector: SegmentSelector,
     data_selector: SegmentSelector,
-    #[cfg(feature = "m3-self-test")]
+    #[cfg(feature = "m3-entry-self-test")]
     user_code_selector: SegmentSelector,
-    #[cfg(feature = "m3-self-test")]
+    #[cfg(feature = "m3-entry-self-test")]
     user_data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
 }
@@ -1678,19 +1176,16 @@ static DOUBLE_FAULT_STACK: GlobalCell<DoubleFaultStack> =
     GlobalCell::new(DoubleFaultStack([0; DOUBLE_FAULT_STACK_SIZE]));
 static GDT_STATE: GlobalCell<Option<GdtState>> = GlobalCell::new(None);
 static TSS_STATE: GlobalCell<Option<TaskStateSegment>> = GlobalCell::new(None);
-#[cfg(feature = "m3-self-test")]
-static PAGE_ALLOCATOR_STATE: GlobalCell<Option<PageAllocator>> = GlobalCell::new(None);
-#[cfg(feature = "m3-self-test")]
-static PROCESS_TABLE: GlobalCell<[Process; M3_PROCESS_COUNT]> =
-    GlobalCell::new([Process::EMPTY; M3_PROCESS_COUNT]);
-#[cfg(feature = "m3-self-test")]
-static KERNEL_ROOT_PAGE_TABLE: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "m3-entry-self-test")]
+static USERSPACE_TEST_STATE: GlobalCell<Option<UserspaceTestState>> = GlobalCell::new(None);
+#[cfg(feature = "m3-entry-self-test")]
+static USERSPACE_ENTRY_OBSERVED: AtomicBool = AtomicBool::new(false);
 #[unsafe(no_mangle)]
 static mut NEXT_TASK_STACK_POINTER: u64 = 0;
 #[unsafe(no_mangle)]
 static mut NEXT_TASK_ENTRY_POINT: u64 = 0;
 static KERNEL_TICKS: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "m2-double-fault-self-test")]
+#[cfg(any(feature = "m2-double-fault-self-test", feature = "m3-entry-self-test"))]
 static DOUBLE_FAULT_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[repr(C, packed)]
@@ -1747,14 +1242,14 @@ declare_interrupt_entries!(
     clean_slate_interrupt_31,
     clean_slate_interrupt_32,
     clean_slate_interrupt_33,
-    clean_slate_interrupt_128,
 );
 
-#[cfg(feature = "m3-self-test")]
+#[cfg(feature = "m3-entry-self-test")]
 unsafe extern "C" {
-    static clean_slate_user_process_start: u8;
-    static clean_slate_user_process_message_start: u8;
-    static clean_slate_user_process_end: u8;
+    fn clean_slate_interrupt_128();
+    static clean_slate_user_test_start: u8;
+    static clean_slate_user_test_privileged_instruction: u8;
+    static clean_slate_user_test_end: u8;
 }
 
 static INTERRUPT_HANDLERS: [unsafe extern "C" fn(); SPURIOUS_VECTOR + 1] = [
@@ -1891,46 +1386,15 @@ clean_slate_timer_self_test_bootstrap_entry:
     call clean_slate_timer_self_test_task
     ud2
 
-    .global clean_slate_user_process_start
-clean_slate_user_process_start:
-    mov ax, cs
-    and eax, 3
-    mov rdi, r12
-    mov rsi, rax
-    mov eax, 0
+    .global clean_slate_user_test_start
+clean_slate_user_test_start:
     int 0x80
-
-    mov eax, 1
-    int 0x80
-
-    test r13, 1
-    jz 1f
-    mov eax, 2
-    mov rdi, r14
-    mov rsi, r15
-    mov rdx, rbx
-    int 0x80
-1:
-    test r13, 2
-    jz 2f
-    mov rax, rbp
-    mov rax, [rax]
-2:
-    test r13, 4
-    jz 3f
-    mov rax, r11
-    mov rax, [rax]
-3:
-    mov eax, 3
-    int 0x80
+    .global clean_slate_user_test_privileged_instruction
+clean_slate_user_test_privileged_instruction:
+    cli
     ud2
-
-    .global clean_slate_user_process_message_start
-clean_slate_user_process_message_start:
-    .ascii "[IPC ] granted channel send OK\n"
-
-    .global clean_slate_user_process_end
-clean_slate_user_process_end:
+    .global clean_slate_user_test_end
+clean_slate_user_test_end:
 
     CLEAN_SLATE_INTERRUPT_NO_ERROR 0
     CLEAN_SLATE_INTERRUPT_NO_ERROR 1
@@ -1978,8 +1442,8 @@ fn install_interrupt_handlers() {
         }
         IDT.entries[DOUBLE_FAULT_VECTOR]
             .set_handler_with_ist(clean_slate_interrupt_8, DOUBLE_FAULT_IST_INDEX);
-        #[cfg(feature = "m3-self-test")]
-        IDT.entries[SYSCALL_VECTOR].set_user_handler(clean_slate_interrupt_128);
+        #[cfg(feature = "m3-entry-self-test")]
+        IDT.entries[USER_TEST_VECTOR].set_user_handler(clean_slate_interrupt_128);
         let pointer = DescriptorTablePointer {
             limit: (size_of::<InterruptDescriptorTable>() - 1) as u16,
             base: (&raw const IDT) as *const _ as u64,
@@ -2008,18 +1472,18 @@ fn initialize_gdt_and_tss() {
     let mut table = GlobalDescriptorTable::new();
     let code_selector = table.append(Descriptor::kernel_code_segment());
     let data_selector = table.append(Descriptor::kernel_data_segment());
-    #[cfg(feature = "m3-self-test")]
+    #[cfg(feature = "m3-entry-self-test")]
     let user_code_selector = table.append(Descriptor::user_code_segment());
-    #[cfg(feature = "m3-self-test")]
+    #[cfg(feature = "m3-entry-self-test")]
     let user_data_selector = table.append(Descriptor::user_data_segment());
     let tss_selector = table.append(Descriptor::tss_segment(tss_ref));
     *gdt_slot = Some(GdtState {
         table,
         code_selector,
         data_selector,
-        #[cfg(feature = "m3-self-test")]
+        #[cfg(feature = "m3-entry-self-test")]
         user_code_selector,
-        #[cfg(feature = "m3-self-test")]
+        #[cfg(feature = "m3-entry-self-test")]
         user_data_selector,
         tss_selector,
     });
@@ -2082,10 +1546,357 @@ fn task_stack_top(stack: &TaskStack) -> u64 {
     align_down(((stack.0.as_ptr() as usize) + stack.0.len()) as u64, 16)
 }
 
+#[cfg(feature = "m3-entry-self-test")]
+fn userspace_test_size() -> usize {
+    (&raw const clean_slate_user_test_end as usize)
+        .saturating_sub(&raw const clean_slate_user_test_start as usize)
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn userspace_test_privileged_instruction_offset() -> u64 {
+    ((&raw const clean_slate_user_test_privileged_instruction as usize)
+        .saturating_sub(&raw const clean_slate_user_test_start as usize)) as u64
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn userspace_test_state() -> Result<&'static UserspaceTestState, &'static str> {
+    unsafe {
+        (&*USERSPACE_TEST_STATE.get())
+            .as_ref()
+            .ok_or("userspace self-test state was not initialized")
+    }
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn set_privilege_stack(stack_pointer: u64) -> Result<(), &'static str> {
+    let tss = unsafe {
+        (&mut *TSS_STATE.get())
+            .as_mut()
+            .ok_or("TSS must exist before entering userspace")?
+    };
+    tss.privilege_stack_table[0] = VirtAddr::new(stack_pointer);
+    Ok(())
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn zero_page(frame: u64) {
+    unsafe {
+        ptr::write_bytes(
+            (PHYSICAL_MEMORY_OFFSET + frame) as *mut u8,
+            0,
+            PAGE_SIZE as usize,
+        );
+    }
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn map_userspace_page(
+    mapper: &mut OffsetPageTable<'_>,
+    page: Page<Size4KiB>,
+    frame: PhysFrame<Size4KiB>,
+    flags: PageTableFlags,
+    allocator: &mut PageAllocator,
+) -> Result<(), &'static str> {
+    without_write_protect(|| unsafe { mapper.map_to(page, frame, flags, allocator) })
+        .map(|flush| flush.flush())
+        .map_err(|_| "failed to map userspace page")
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'static str> {
+    let (level_4_frame, _) = Cr3::read();
+    let level_4_table = unsafe {
+        &*((level_4_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
+    };
+    let level_4_entry = &level_4_table[address.p4_index()];
+    let level_3_frame = level_4_entry
+        .frame()
+        .map_err(|_| "virtual address was not backed by a valid level-3 frame")?;
+
+    let level_3_table = unsafe {
+        &*((level_3_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
+    };
+    let level_3_entry = &level_3_table[address.p3_index()];
+    if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return Ok(level_4_entry.flags() | level_3_entry.flags());
+    }
+    let level_2_frame = level_3_entry
+        .frame()
+        .map_err(|_| "virtual address was not backed by a valid level-2 frame")?;
+
+    let level_2_table = unsafe {
+        &*((level_2_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
+    };
+    let level_2_entry = &level_2_table[address.p2_index()];
+    if level_2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return Ok(level_4_entry.flags() | level_3_entry.flags() | level_2_entry.flags());
+    }
+    let level_1_frame = level_2_entry
+        .frame()
+        .map_err(|_| "virtual address was not backed by a valid level-1 frame")?;
+
+    let level_1_table = unsafe {
+        &*((level_1_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
+    };
+    let level_1_entry = &level_1_table[address.p1_index()];
+    if level_1_entry.is_unused() {
+        return Err("virtual address was not mapped");
+    }
+    Ok(level_4_entry.flags() | level_3_entry.flags() | level_2_entry.flags() | level_1_entry.flags())
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn leaf_page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'static str> {
+    let (level_4_frame, _) = Cr3::read();
+    let level_4_table = unsafe {
+        &*((level_4_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
+    };
+    let level_4_entry = &level_4_table[address.p4_index()];
+    let level_3_frame = level_4_entry
+        .frame()
+        .map_err(|_| "virtual address was not backed by a valid level-3 frame")?;
+
+    let level_3_table = unsafe {
+        &*((level_3_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
+    };
+    let level_3_entry = &level_3_table[address.p3_index()];
+    if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return Ok(level_3_entry.flags());
+    }
+    let level_2_frame = level_3_entry
+        .frame()
+        .map_err(|_| "virtual address was not backed by a valid level-2 frame")?;
+
+    let level_2_table = unsafe {
+        &*((level_2_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
+    };
+    let level_2_entry = &level_2_table[address.p2_index()];
+    if level_2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return Ok(level_2_entry.flags());
+    }
+    let level_1_frame = level_2_entry
+        .frame()
+        .map_err(|_| "virtual address was not backed by a valid level-1 frame")?;
+
+    let level_1_table = unsafe {
+        &*((level_1_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
+    };
+    let level_1_entry = &level_1_table[address.p1_index()];
+    if level_1_entry.is_unused() {
+        return Err("virtual address was not mapped");
+    }
+    Ok(level_1_entry.flags())
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn validate_userspace_mappings() -> Result<(), &'static str> {
+    let code_path_flags = page_flags_for_address(VirtAddr::new(USER_TEST_CODE_ADDRESS))?;
+    let code_leaf_flags = leaf_page_flags_for_address(VirtAddr::new(USER_TEST_CODE_ADDRESS))?;
+    if !code_path_flags.contains(PageTableFlags::USER_ACCESSIBLE)
+        || code_leaf_flags.contains(PageTableFlags::WRITABLE)
+        || code_leaf_flags.contains(PageTableFlags::NO_EXECUTE)
+    {
+        return Err("userspace code mapping flags were incorrect");
+    }
+
+    let stack_path_flags = page_flags_for_address(VirtAddr::new(USER_TEST_STACK_ADDRESS))?;
+    let stack_leaf_flags = leaf_page_flags_for_address(VirtAddr::new(USER_TEST_STACK_ADDRESS))?;
+    if !stack_path_flags.contains(PageTableFlags::USER_ACCESSIBLE)
+        || !stack_leaf_flags.contains(PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE)
+        || !stack_leaf_flags.contains(PageTableFlags::NO_EXECUTE)
+    {
+        return Err("userspace stack mapping flags were incorrect");
+    }
+
+    let kernel_flags = page_flags_for_address(VirtAddr::from_ptr(run as *const ()))?;
+    if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+        return Err("kernel mapping unexpectedly became user accessible");
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn build_userspace_entry_frame(kernel_stack_top: u64) -> Result<u64, &'static str> {
+    let gdt_state = unsafe {
+        (&*GDT_STATE.get())
+            .as_ref()
+            .ok_or("GDT must exist before entering userspace")?
+    };
+    let frame_address =
+        align_down(kernel_stack_top - size_of::<UserspaceEntryFrame>() as u64, 16);
+    let frame = UserspaceEntryFrame {
+        interrupt: InterruptContext {
+            r15: 0,
+            r14: 0,
+            r13: 0,
+            r12: 0,
+            r11: 0,
+            r10: 0,
+            r9: 0,
+            r8: 0,
+            rdi: 0,
+            rsi: 0,
+            rbp: 0,
+            rbx: 0,
+            rdx: 0,
+            rcx: 0,
+            rax: 0,
+            vector: 0,
+            error_code: 0,
+            rip: USER_TEST_CODE_ADDRESS,
+            cs: gdt_state.user_code_selector.0 as u64,
+            rflags: USER_TEST_RFLAGS,
+        },
+        user_stack_pointer: USER_TEST_STACK_ADDRESS + PAGE_SIZE,
+        user_stack_segment: gdt_state.user_data_selector.0 as u64,
+    };
+    unsafe {
+        ptr::write(frame_address as *mut UserspaceEntryFrame, frame);
+    }
+    Ok(frame_address)
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn install_userspace_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
+    let mut mapper = unsafe { current_offset_page_table() };
+    let payload_size = userspace_test_size();
+    if payload_size > PAGE_SIZE as usize {
+        return Err("userspace self-test payload exceeded one page");
+    }
+
+    let code_frame_address = allocator
+        .allocate_page()
+        .ok_or("allocator could not provide a code page for userspace entry")?;
+    let stack_frame_address = allocator
+        .allocate_page()
+        .ok_or("allocator could not provide a stack page for userspace entry")?;
+    zero_page(code_frame_address);
+    zero_page(stack_frame_address);
+    unsafe {
+        ptr::copy_nonoverlapping(
+            &raw const clean_slate_user_test_start,
+            (PHYSICAL_MEMORY_OFFSET + code_frame_address) as *mut u8,
+            payload_size,
+        );
+    }
+
+    map_userspace_page(
+        &mut mapper,
+        Page::<Size4KiB>::containing_address(VirtAddr::new(USER_TEST_CODE_ADDRESS)),
+        PhysFrame::containing_address(PhysAddr::new(code_frame_address)),
+        PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+        allocator,
+    )?;
+    map_userspace_page(
+        &mut mapper,
+        Page::<Size4KiB>::containing_address(VirtAddr::new(USER_TEST_STACK_ADDRESS)),
+        PhysFrame::containing_address(PhysAddr::new(stack_frame_address)),
+        PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::NO_EXECUTE
+            | PageTableFlags::USER_ACCESSIBLE,
+        allocator,
+    )?;
+    validate_userspace_mappings()?;
+    unsafe {
+        *USERSPACE_TEST_STATE.get() = Some(UserspaceTestState {
+            user_code_address: USER_TEST_CODE_ADDRESS,
+            privileged_instruction_rip: USER_TEST_CODE_ADDRESS
+                + userspace_test_privileged_instruction_offset(),
+        });
+    }
+    USERSPACE_ENTRY_OBSERVED.store(false, Ordering::Relaxed);
+    Ok(())
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn start_userspace_entry_self_test(allocator: &mut PageAllocator) -> ! {
+    if let Err(message) = install_userspace_payload(allocator) {
+        fatal_kernel_error(message);
+    }
+    let kernel_stack_top = unsafe {
+        let stacks = &*TASK_STACKS.get();
+        task_stack_top(&stacks[0])
+    };
+    if let Err(message) = set_privilege_stack(kernel_stack_top) {
+        fatal_kernel_error(message);
+    }
+    let frame_pointer = match build_userspace_entry_frame(kernel_stack_top) {
+        Ok(frame_pointer) => frame_pointer,
+        Err(message) => fatal_kernel_error(message),
+    };
+    unsafe { restore_task_context(frame_pointer) }
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn selector_rpl(selector: u64) -> u64 {
+    selector & 0x3
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn userspace_frame(context: &InterruptContext) -> &UserspaceEntryFrame {
+    unsafe { &*(context as *const InterruptContext as *const UserspaceEntryFrame) }
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn handle_userspace_entry_trap(context: &InterruptContext) -> Result<u64, &'static str> {
+    if selector_rpl(context.cs) != 3 {
+        return Err("userspace entry trap did not originate from CPL3");
+    }
+    let frame = userspace_frame(context);
+    let state = userspace_test_state()?;
+    if context.rip != state.privileged_instruction_rip {
+        return Err("userspace entry trap returned to an unexpected RIP");
+    }
+    USERSPACE_ENTRY_OBSERVED.store(true, Ordering::Relaxed);
+    kernel_log_fmt(format_args!(
+        "[USER] entered ring3 rip={:#018x} rsp={:#018x} cs={:#06x} ss={:#06x} rflags={:#018x} if={}\n",
+        state.user_code_address,
+        frame.user_stack_pointer,
+        context.cs,
+        frame.user_stack_segment,
+        context.rflags,
+        bit(context.rflags, 9),
+    ));
+    Ok(context as *const InterruptContext as u64)
+}
+
+#[cfg(feature = "m3-entry-self-test")]
+fn handle_userspace_privileged_fault(context: &InterruptContext) -> ! {
+    if !USERSPACE_ENTRY_OBSERVED.load(Ordering::Relaxed) {
+        fatal_kernel_error("userspace privileged-instruction fault arrived before ring3 entry");
+    }
+    if selector_rpl(context.cs) != 3 {
+        fatal_kernel_error("userspace privileged-instruction fault did not originate from CPL3");
+    }
+    let state = match userspace_test_state() {
+        Ok(state) => state,
+        Err(message) => fatal_kernel_error(message),
+    };
+    if context.rip != state.privileged_instruction_rip {
+        fatal_kernel_error("general-protection fault did not point at the expected privileged instruction");
+    }
+    let frame = userspace_frame(context);
+    kernel_log_line("[GP  ] privileged instruction denied");
+    kernel_log_fmt(format_args!(
+        "[GP  ] rip={:#018x} rsp={:#018x} cs={:#06x} ss={:#06x} err={:#x} cpl={} origin=user if={}\n",
+        context.rip,
+        frame.user_stack_pointer,
+        context.cs,
+        frame.user_stack_segment,
+        context.error_code,
+        selector_rpl(context.cs),
+        bit(context.rflags, 9),
+    ));
+    kernel_log_line("[M3.1] PASS");
+    qemu_exit(QEMU_EXIT_SUCCESS)
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> u64 {
     let stack_pointer = context as u64;
-    let context = unsafe { &mut *context };
+    let context = unsafe { &*context };
     if context.vector as usize == TIMER_VECTOR {
         #[cfg(feature = "m2-timer-self-test")]
         {
@@ -2110,172 +1921,25 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         return stack_pointer;
     }
 
-    #[cfg(feature = "m3-self-test")]
-    {
-        if context.vector as usize == SYSCALL_VECTOR {
-            return match handle_m3_syscall(context) {
-                Ok(next_stack_pointer) => next_stack_pointer,
-                Err(message) => fatal_kernel_error(message),
-            };
-        }
-
-        if context.vector as usize == PAGE_FAULT_VECTOR {
-            if let Some(next_stack_pointer) = handle_m3_expected_page_fault(context) {
-                return next_stack_pointer;
-            }
-        }
+    #[cfg(feature = "m3-entry-self-test")]
+    if context.vector as usize == USER_TEST_VECTOR {
+        return match handle_userspace_entry_trap(context) {
+            Ok(next_stack_pointer) => next_stack_pointer,
+            Err(message) => fatal_kernel_error(message),
+        };
     }
 
     handle_exception(context)
 }
 
-#[cfg(feature = "m3-self-test")]
-fn current_process_slot() -> Result<usize, &'static str> {
-    unsafe {
-        (&*SCHEDULER.get())
-            .current_task
-            .ok_or("m3 interrupt arrived without a current process")
-    }
-}
-
-#[cfg(feature = "m3-self-test")]
-fn current_process_mut() -> Result<&'static mut Process, &'static str> {
-    let slot = current_process_slot()?;
-    Ok(&mut process_table_mut()[slot])
-}
-
-#[cfg(feature = "m3-self-test")]
-fn activate_current_process() -> Result<(), &'static str> {
-    activate_process_slot(current_process_slot()?)
-}
-
-#[cfg(feature = "m3-self-test")]
-fn handle_m3_syscall(context: &mut InterruptContext) -> Result<u64, &'static str> {
-    let process = current_process_mut()?;
-    match context.rax {
-        M3_SYSCALL_REPORT_RING3 => {
-            if context.rsi != 3 {
-                return Err("userspace did not report CPL3");
-            }
-            if process.id == 1 {
-                kernel_log_line("[USER] process 1 entered ring3");
-            }
-            context.rax = 0;
-        }
-        M3_SYSCALL_PING => {
-            if process.id == 1 {
-                kernel_log_line("[SYSC] syscall entry OK");
-            }
-            context.rax = 0;
-        }
-        M3_SYSCALL_CONSOLE_SEND => {
-            if !process.owns_capability(context.rdi, CapabilityKind::ConsoleSend) {
-                return Err("userspace attempted an unauthorized console send");
-            }
-            if !process.contains_user_range(context.rsi, context.rdx) {
-                return Err("userspace console buffer was outside the granted user range");
-            }
-            let message = unsafe {
-                core::slice::from_raw_parts(context.rsi as *const u8, context.rdx as usize)
-            };
-            let text = core::str::from_utf8(message)
-                .map_err(|_| "userspace provided a non-utf8 console message")?;
-            serial_write_fmt(format_args!("{text}"));
-            context.rax = 0;
-        }
-        M3_SYSCALL_EXIT => {
-            process.exited = true;
-            let scheduler = unsafe { &mut *SCHEDULER.get() };
-            let next = scheduler.finish_current_task()?;
-            return match next {
-                Some(next_stack_pointer) => {
-                    activate_current_process()?;
-                    Ok(next_stack_pointer)
-                }
-                None => {
-                    if !scheduler.all_finished() {
-                        return Err("scheduler ended before all m3 processes finished");
-                    }
-                    teardown_m3_processes()?;
-                    kernel_log_line("[PROC] teardown OK");
-                    kernel_log_line("[M3  ] PASS");
-                    qemu_exit(QEMU_EXIT_SUCCESS)
-                }
-            };
-        }
-        _ => return Err("userspace requested an unknown syscall"),
-    }
-
-    activate_current_process()?;
-    Ok(context as *mut InterruptContext as u64)
-}
-
-#[cfg(feature = "m3-self-test")]
-fn next_expected_fault(
-    expected_fault: ExpectedFault,
-    fault_address: u64,
-    kernel_probe_address: u64,
-    peer_probe_address: u64,
-    present: bool,
-) -> Option<(ExpectedFault, &'static str)> {
-    match expected_fault {
-        ExpectedFault::KernelMemoryRead
-            if fault_address == kernel_probe_address && present =>
-        {
-            Some((ExpectedFault::CrossProcessRead, "[SEC ] kernel-memory read denied"))
-        }
-        ExpectedFault::CrossProcessRead if fault_address == peer_probe_address && !present => {
-            Some((ExpectedFault::None, "[SEC ] cross-process read denied"))
-        }
-        _ => None,
-    }
-}
-
-#[cfg(feature = "m3-self-test")]
-fn recover_expected_page_fault(
-    process: &mut Process,
-    context: &mut InterruptContext,
-    fault_address: u64,
-) -> bool {
-    if bit(context.error_code, 2) == 0 {
-        return false;
-    }
-
-    let present = bit(context.error_code, 0) != 0;
-    let Some((next_fault, marker)) = next_expected_fault(
-        process.expected_fault,
-        fault_address,
-        process.kernel_probe_address,
-        process.peer_probe_address,
-        present,
-    ) else {
-        return false;
-    };
-    kernel_log_line(marker);
-    process.expected_fault = next_fault;
-    context.rip = context.rip.wrapping_add(M3_FAULT_SKIP_LEN);
-    context.rax = 0;
-    true
-}
-
-#[cfg(feature = "m3-self-test")]
-fn handle_m3_expected_page_fault(context: &mut InterruptContext) -> Option<u64> {
-    let fault_address = Cr2::read()
-        .expect("CR2 must contain a canonical fault address")
-        .as_u64();
-    let process = current_process_mut().ok()?;
-    if !recover_expected_page_fault(process, context, fault_address) {
-        return None;
-    }
-    if activate_current_process().is_err() {
-        return None;
-    }
-    Some(context as *mut InterruptContext as u64)
-}
-
 fn handle_exception(context: &InterruptContext) -> ! {
     if context.vector as usize == DOUBLE_FAULT_VECTOR {
         handle_double_fault(context)
+    }
+
+    #[cfg(feature = "m3-entry-self-test")]
+    if context.vector as usize == GENERAL_PROTECTION_VECTOR && selector_rpl(context.cs) == 3 {
+        handle_userspace_privileged_fault(context)
     }
 
     if context.vector as usize == PAGE_FAULT_VECTOR {
@@ -3126,114 +2790,17 @@ mod tests {
         assert!(scheduler.all_finished());
     }
 
-    #[cfg(feature = "m3-self-test")]
+    #[cfg(feature = "m3-entry-self-test")]
     #[test]
-    fn m3_process_tracks_capabilities_and_owned_frames() {
-        let mut process = Process {
-            id: 1,
-            user_code_address: m3_user_code_address(0),
-            user_stack_top: m3_user_stack_top(0),
-            capabilities: [Some(Capability {
-                id: M3_CONSOLE_CAPABILITY_ID,
-                kind: CapabilityKind::ConsoleSend,
-            })],
-            ..Process::EMPTY
-        };
-
-        assert!(process.owns_capability(M3_CONSOLE_CAPABILITY_ID, CapabilityKind::ConsoleSend));
-        assert!(!process.owns_capability(99, CapabilityKind::ConsoleSend));
-
-        for index in 0..M3_MAX_OWNED_FRAMES {
-            process
-                .push_owned_frame((index as u64 + 1) * PAGE_SIZE)
-                .expect("frame recorded");
-        }
-        assert_eq!(
-            process.push_owned_frame(0xdead_0000),
-            Err("process owned-frame capacity exceeded")
-        );
+    fn userspace_selector_rpl_reports_ring3() {
+        assert_eq!(selector_rpl(0x001b), 3);
+        assert_eq!(selector_rpl(0x0008), 0);
     }
 
-    #[cfg(feature = "m3-self-test")]
+    #[cfg(feature = "m3-entry-self-test")]
     #[test]
-    fn m3_script_flags_match_expected_sequences() {
-        assert_eq!(
-            m3_script_flags(ProcessScript::Full),
-            M3_SCRIPT_IPC_SEND | M3_SCRIPT_KERNEL_READ | M3_SCRIPT_PEER_READ
-        );
-        assert_eq!(m3_script_flags(ProcessScript::ExitOnly), 0);
-    }
-
-    #[cfg(feature = "m3-self-test")]
-    #[test]
-    fn m3_expected_fault_progression_requires_matching_fault_type() {
-        let kernel_probe = 0x1000;
-        let peer_probe = 0x2000;
-
-        assert_eq!(
-            next_expected_fault(
-                ExpectedFault::KernelMemoryRead,
-                kernel_probe,
-                kernel_probe,
-                peer_probe,
-                true,
-            ),
-            Some((ExpectedFault::CrossProcessRead, "[SEC ] kernel-memory read denied"))
-        );
-        assert_eq!(
-            next_expected_fault(
-                ExpectedFault::KernelMemoryRead,
-                kernel_probe,
-                kernel_probe,
-                peer_probe,
-                false,
-            ),
-            None
-        );
-        assert_eq!(
-            next_expected_fault(
-                ExpectedFault::CrossProcessRead,
-                peer_probe,
-                kernel_probe,
-                peer_probe,
-                false,
-            ),
-            Some((ExpectedFault::None, "[SEC ] cross-process read denied"))
-        );
-    }
-
-    #[cfg(feature = "m3-self-test")]
-    #[test]
-    fn m3_fault_recovery_advances_state_and_skips_faulting_instruction() {
-        let mut process = Process {
-            expected_fault: ExpectedFault::KernelMemoryRead,
-            kernel_probe_address: 0x4000,
-            peer_probe_address: 0x5000,
-            ..Process::EMPTY
-        };
-        let kernel_probe = process.kernel_probe_address;
-        let peer_probe = process.peer_probe_address;
-        let mut context = InterruptContext {
-            rip: 0x1000,
-            error_code: 0b101,
-            ..InterruptContext::ZERO
-        };
-
-        assert!(recover_expected_page_fault(&mut process, &mut context, kernel_probe));
-        assert_eq!(process.expected_fault, ExpectedFault::CrossProcessRead);
-        assert_eq!(context.rip, 0x1000 + M3_FAULT_SKIP_LEN);
-
-        let mut supervisor_context = InterruptContext {
-            rip: 0x2000,
-            error_code: 0b001,
-            ..InterruptContext::ZERO
-        };
-        assert!(!recover_expected_page_fault(
-            &mut process,
-            &mut supervisor_context,
-            peer_probe
-        ));
-        assert_eq!(process.expected_fault, ExpectedFault::CrossProcessRead);
-        assert_eq!(supervisor_context.rip, 0x2000);
+    fn userspace_test_payload_stays_within_one_page() {
+        assert!(userspace_test_size() <= PAGE_SIZE as usize);
+        assert!(userspace_test_privileged_instruction_offset() < userspace_test_size() as u64);
     }
 }

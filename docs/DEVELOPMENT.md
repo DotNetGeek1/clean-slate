@@ -69,19 +69,17 @@ The shared acceptance runner treats the ordered serial PASS markers as authorita
 
 M2 intentionally treats the LAPIC timer as an uncalibrated periodic tick source for now. The contract is in ticks, not Hertz: the kernel reports the divide configuration and initial count, exposes a monotonic `[TIME] ticks=<n>` counter, and the standalone timer acceptance requires at least the documented minimum number of ticks within the bounded test window.
 
-For the bounded M3 userspace/isolation acceptance path:
+For the bounded M3.1 userspace-entry acceptance path:
 
 ```bash
-cargo xtask test-m3
+cargo xtask test-m3-entry
 ```
 
-This command builds the kernel with the M3 self-test mode enabled, boots QEMU headlessly, and validates the ordered serial markers for:
+This command builds the kernel with the M3.1 userspace-entry self-test enabled, boots QEMU headlessly, and validates the ordered markers for:
 
-1. an explicit ring-3 entry proof (`[USER] process 1 entered ring3`);
-2. the native syscall boundary (`[SYSC] syscall entry OK`);
-3. capability-backed IPC/console send (`[IPC ] granted channel send OK`);
-4. deliberate kernel-memory and cross-process access denials handled without hanging; and
-5. deterministic process teardown before `[M3  ] PASS`.
+1. explicit CPL3 entry with a deliberate user `RIP`, `RSP`, `CS`, `SS`, and `RFLAGS`;
+2. a controlled return to the kernel through the dedicated DPL3 rendezvous gate; and
+3. a deterministic privileged-instruction (`cli`) denial from ring 3 with useful fault context before `[M3.1] PASS`.
 
 To launch paused for debugger attach:
 

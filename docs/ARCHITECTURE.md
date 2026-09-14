@@ -190,11 +190,11 @@ Single-core correctness is the M2 target, but the design should not bake `curren
 
 That division keeps the M2 task model reusable when SMP arrives: only ownership and synchronization mechanics need to expand, not the saved-context format or the interrupt ABI.
 
-## M3 userspace bring-up direction
+## M3.1 userspace-entry direction
 
-The first M3 execution path should extend the existing x86-64 interrupt/GDT/TSS foundation rather than replacing it. Ring-3 entry can therefore reuse a carefully constructed `iretq` frame, while the GDT/TSS grows only enough to add userspace code/data selectors plus an `rsp0` privilege stack for user-to-kernel transitions.
+The first M3.1 step should keep privilege-transition code narrow and x86-64 specific. Extend the existing GDT/TSS only enough to add ring-3 code/data selectors and an `rsp0` privilege stack, then construct a single explicit `iretq` frame for a small purpose-built userspace payload.
 
-The initial native syscall ABI should stay deliberately tiny and architecture-specific: one DPL3 interrupt gate, fixed register arguments, and explicit capability checks in Rust before any service action occurs. Each process should carry its own page-table root, user code page, and user stack mapping so that kernel mappings remain supervisor-only and unrelated user pages stay inaccessible across domains.
+That initial path should prove the CPU boundary itself before broader process or capability policy exists: the kernel owns the userspace code/stack mappings, marks them explicitly `USER_ACCESSIBLE`, returns through a controlled DPL3 gate only for test bring-up, and treats a ring-3 privileged-instruction fault as a first-class diagnostic rather than a hang or triple fault.
 
 ## Language strategy
 
