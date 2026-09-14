@@ -872,6 +872,8 @@ struct UserspaceEntryFrame {
 #[derive(Clone, Copy)]
 struct UserspaceTestState {
     privileged_instruction_rip: u64,
+    user_stack_pointer: u64,
+    user_stack_segment: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1669,6 +1671,9 @@ fn walk_page_flags(address: VirtAddr) -> Result<PageWalkFlags, &'static str> {
         &*((level_3_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
     };
     let level_3_entry = &level_3_table[address.p3_index()];
+    if level_3_entry.is_unused() {
+        return Err("virtual address was not backed by a valid level-3 entry");
+    }
     if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
         return Ok(PageWalkFlags {
             path: level_4_entry.flags() | level_3_entry.flags(),
@@ -1683,6 +1688,9 @@ fn walk_page_flags(address: VirtAddr) -> Result<PageWalkFlags, &'static str> {
         &*((level_2_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
     };
     let level_2_entry = &level_2_table[address.p2_index()];
+    if level_2_entry.is_unused() {
+        return Err("virtual address was not backed by a valid level-2 entry");
+    }
     if level_2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
         return Ok(PageWalkFlags {
             path: level_4_entry.flags() | level_3_entry.flags() | level_2_entry.flags(),
@@ -1856,10 +1864,17 @@ fn install_userspace_payload(allocator: &mut PageAllocator) -> Result<(), &'stat
         }
         return Err(message);
     }
+    let gdt_state = unsafe {
+        (&*GDT_STATE.get())
+            .as_ref()
+            .ok_or("GDT must exist before storing userspace test state")?
+    };
     unsafe {
         *USERSPACE_TEST_STATE.get() = Some(UserspaceTestState {
             privileged_instruction_rip: USER_TEST_CODE_ADDRESS
                 + userspace_test_privileged_instruction_offset(),
+            user_stack_pointer: USER_TEST_STACK_ADDRESS + PAGE_SIZE,
+            user_stack_segment: gdt_state.user_data_selector.0 as u64,
         });
     }
     USERSPACE_ENTRY_OBSERVED.store(false, Ordering::Relaxed);
@@ -1891,12 +1906,24 @@ fn selector_rpl(selector: u64) -> u64 {
 }
 
 #[cfg(feature = "m3-entry-self-test")]
-fn validate_userspace_entry_trap(context: &InterruptContext, expected_rip: u64) -> Result<(), &'static str> {
+fn validate_userspace_entry_trap(
+    context: &InterruptContext,
+    frame: &UserspaceEntryFrame,
+    expected_rip: u64,
+    expected_rsp: u64,
+    expected_ss: u64,
+) -> Result<(), &'static str> {
     if selector_rpl(context.cs) != 3 {
         return Err("userspace entry trap did not originate from CPL3");
     }
     if context.rip != expected_rip {
         return Err("userspace entry trap returned to an unexpected RIP");
+    }
+    if frame.user_stack_pointer != expected_rsp {
+        return Err("userspace entry trap returned with an unexpected RSP");
+    }
+    if frame.user_stack_segment != expected_ss {
+        return Err("userspace entry trap returned with an unexpected SS");
     }
     Ok(())
 }
@@ -1909,8 +1936,14 @@ fn userspace_frame(context: &InterruptContext) -> &UserspaceEntryFrame {
 #[cfg(feature = "m3-entry-self-test")]
 fn handle_userspace_entry_trap(context: &InterruptContext) -> Result<u64, &'static str> {
     let state = userspace_test_state()?;
-    validate_userspace_entry_trap(context, state.privileged_instruction_rip)?;
     let frame = userspace_frame(context);
+    validate_userspace_entry_trap(
+        context,
+        frame,
+        state.privileged_instruction_rip,
+        state.user_stack_pointer,
+        state.user_stack_segment,
+    )?;
     USERSPACE_ENTRY_OBSERVED.store(true, Ordering::Relaxed);
     kernel_log_fmt(format_args!(
         "[USER] entered ring3 rip={:#018x} rsp={:#018x} cs={:#06x} ss={:#06x} rflags={:#018x} if={}\n",
@@ -2869,29 +2902,90 @@ mod tests {
     #[cfg(feature = "m3-entry-self-test")]
     #[test]
     fn userspace_entry_trap_validation_requires_cpl3_and_expected_rip() {
-        let valid = InterruptContext {
-            cs: 0x001b,
-            rip: 0x4002,
-            ..InterruptContext::ZERO
+        let valid = UserspaceEntryFrame {
+            interrupt: InterruptContext {
+                cs: 0x001b,
+                rip: 0x4002,
+                ..InterruptContext::ZERO
+            },
+            user_stack_pointer: USER_TEST_STACK_ADDRESS + PAGE_SIZE,
+            user_stack_segment: 0x0023,
         };
-        assert_eq!(validate_userspace_entry_trap(&valid, 0x4002), Ok(()));
+        assert_eq!(
+            validate_userspace_entry_trap(
+                &valid.interrupt,
+                &valid,
+                0x4002,
+                USER_TEST_STACK_ADDRESS + PAGE_SIZE,
+                0x0023,
+            ),
+            Ok(())
+        );
 
-        let wrong_cpl = InterruptContext {
-            cs: 0x0008,
+        let wrong_cpl = UserspaceEntryFrame {
+            interrupt: InterruptContext {
+                cs: 0x0008,
+                ..valid.interrupt
+            },
             ..valid
         };
         assert_eq!(
-            validate_userspace_entry_trap(&wrong_cpl, 0x4002),
+            validate_userspace_entry_trap(
+                &wrong_cpl.interrupt,
+                &wrong_cpl,
+                0x4002,
+                USER_TEST_STACK_ADDRESS + PAGE_SIZE,
+                0x0023,
+            ),
             Err("userspace entry trap did not originate from CPL3")
         );
 
-        let wrong_rip = InterruptContext {
-            rip: 0x4004,
+        let wrong_rip = UserspaceEntryFrame {
+            interrupt: InterruptContext {
+                rip: 0x4004,
+                ..valid.interrupt
+            },
             ..valid
         };
         assert_eq!(
-            validate_userspace_entry_trap(&wrong_rip, 0x4002),
+            validate_userspace_entry_trap(
+                &wrong_rip.interrupt,
+                &wrong_rip,
+                0x4002,
+                USER_TEST_STACK_ADDRESS + PAGE_SIZE,
+                0x0023,
+            ),
             Err("userspace entry trap returned to an unexpected RIP")
+        );
+
+        let wrong_rsp = UserspaceEntryFrame {
+            user_stack_pointer: 0x1000,
+            ..valid
+        };
+        assert_eq!(
+            validate_userspace_entry_trap(
+                &wrong_rsp.interrupt,
+                &wrong_rsp,
+                0x4002,
+                USER_TEST_STACK_ADDRESS + PAGE_SIZE,
+                0x0023,
+            ),
+            Err("userspace entry trap returned with an unexpected RSP")
+        );
+
+        let wrong_ss = UserspaceEntryFrame {
+            user_stack_segment: 0x0010,
+            ..valid
+        };
+        assert_eq!(
+            validate_userspace_entry_trap(
+                &wrong_ss.interrupt,
+                &wrong_ss,
+                0x4002,
+                USER_TEST_STACK_ADDRESS + PAGE_SIZE,
+                0x0023,
+            ),
+            Err("userspace entry trap returned with an unexpected SS")
         );
     }
 }
