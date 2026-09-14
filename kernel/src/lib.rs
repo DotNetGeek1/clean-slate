@@ -2008,6 +2008,15 @@ fn leaf_page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'st
     Ok(walk_page_flags(address)?.leaf)
 }
 
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+fn relevant_userspace_leaf_flags(flags: PageTableFlags) -> PageTableFlags {
+    flags
+        & (PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::NO_EXECUTE
+            | PageTableFlags::USER_ACCESSIBLE)
+}
+
 #[cfg(feature = "m3-entry-self-test")]
 fn validate_userspace_mappings() -> Result<(), &'static str> {
     let code_path_flags = page_flags_for_address(VirtAddr::new(USER_TEST_CODE_ADDRESS))?;
@@ -2021,9 +2030,12 @@ fn validate_userspace_mappings() -> Result<(), &'static str> {
 
     let stack_path_flags = page_flags_for_address(VirtAddr::new(USER_TEST_STACK_ADDRESS))?;
     let stack_leaf_flags = leaf_page_flags_for_address(VirtAddr::new(USER_TEST_STACK_ADDRESS))?;
+    let expected_stack_flags = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_EXECUTE
+        | PageTableFlags::USER_ACCESSIBLE;
     if !stack_path_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-        || !stack_leaf_flags.contains(PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE)
-        || !stack_leaf_flags.contains(PageTableFlags::NO_EXECUTE)
+        || relevant_userspace_leaf_flags(stack_leaf_flags) != expected_stack_flags
     {
         return Err("userspace stack mapping flags were incorrect");
     }
@@ -2511,6 +2523,10 @@ fn create_userspace_process(
 
 #[cfg(feature = "m3-address-space-self-test")]
 fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'static str> {
+    let expected_read_write_user_leaf_flags = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_EXECUTE
+        | PageTableFlags::USER_ACCESSIBLE;
     let code_path_flags = page_flags_for_address_in_root(
         process.address_space.root_frame,
         VirtAddr::new(USER_TEST_CODE_ADDRESS),
@@ -2535,9 +2551,7 @@ fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'st
         VirtAddr::new(USER_TEST_DATA_ADDRESS),
     )?;
     if !data_path_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-        || !data_leaf_flags.contains(
-            PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE | PageTableFlags::USER_ACCESSIBLE,
-        )
+        || relevant_userspace_leaf_flags(data_leaf_flags) != expected_read_write_user_leaf_flags
     {
         return Err("process data mapping flags were incorrect");
     }
@@ -2551,9 +2565,7 @@ fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'st
         VirtAddr::new(USER_TEST_PROCESS_STACK_ADDRESS),
     )?;
     if !stack_path_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-        || !stack_leaf_flags.contains(
-            PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE | PageTableFlags::USER_ACCESSIBLE,
-        )
+        || relevant_userspace_leaf_flags(stack_leaf_flags) != expected_read_write_user_leaf_flags
     {
         return Err("process stack mapping flags were incorrect");
     }
