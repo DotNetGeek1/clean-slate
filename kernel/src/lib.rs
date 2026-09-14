@@ -2041,7 +2041,10 @@ fn validate_userspace_mappings() -> Result<(), &'static str> {
     }
 
     let kernel_flags = page_flags_for_address(VirtAddr::from_ptr(run as *const ()))?;
-    if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+    let kernel_leaf_flags = leaf_page_flags_for_address(VirtAddr::from_ptr(run as *const ()))?;
+    if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE)
+        || kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE)
+    {
         return Err("kernel mapping unexpectedly became user accessible");
     }
 
@@ -2574,7 +2577,13 @@ fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'st
         process.address_space.root_frame,
         VirtAddr::from_ptr(run as *const ()),
     )?;
-    if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+    let kernel_leaf_flags = leaf_page_flags_for_address_in_root(
+        process.address_space.root_frame,
+        VirtAddr::from_ptr(run as *const ()),
+    )?;
+    if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE)
+        || kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE)
+    {
         return Err("kernel mapping unexpectedly became user accessible in a process root");
     }
 
@@ -2594,7 +2603,7 @@ fn switch_to_userspace_process(
 }
 
 #[cfg(feature = "m3-address-space-self-test")]
-fn validate_process_private_aliases(
+fn validate_process_address_space_isolation(
     state: &UserspaceAddressSpaceTestState,
 ) -> Result<(), &'static str> {
     let first = translate_address_in_root(
@@ -2668,7 +2677,7 @@ fn start_userspace_address_space_self_test(mut allocator: PageAllocator) -> ! {
         stage: UserspaceAddressSpaceStage::AwaitProcessOneEntry,
         processes: [process_one, process_two],
     };
-    if let Err(message) = validate_process_private_aliases(&initial_state) {
+    if let Err(message) = validate_process_address_space_isolation(&initial_state) {
         activate_address_space_root(kernel_root_frame);
         let _ = destroy_process_address_space(&process_two.address_space, &mut allocator);
         let _ = destroy_process_address_space(&process_one.address_space, &mut allocator);
@@ -2713,7 +2722,7 @@ fn handle_userspace_address_space_entry(context: &InterruptContext) -> Result<u6
             switch_to_userspace_process(state, 1)
         }
         UserspaceAddressSpaceStage::AwaitProcessTwoEntry if process.id == 2 => {
-            validate_process_private_aliases(state)?;
+            validate_process_address_space_isolation(state)?;
             kernel_log_line(ADDRESS_SPACE_SWITCH_OK_MARKER);
             state.stage = UserspaceAddressSpaceStage::AwaitKernelMemoryFault;
             switch_to_userspace_process(state, 0)
