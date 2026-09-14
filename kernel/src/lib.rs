@@ -25,6 +25,7 @@ const QEMU_EXIT_PORT: u16 = 0xf4;
 const QEMU_EXIT_SUCCESS: u32 = 0x10;
 const QEMU_EXIT_FAILURE: u32 = 0x11;
 const MAX_MEMORY_REGIONS: usize = 256;
+const MAX_BOOT_RESERVED_RANGES: usize = 16;
 const EARLY_STACK_RESERVE_SIZE: u64 = 64 * 1024;
 const PAGE_FAULT_VECTOR: usize = 14;
 
@@ -60,6 +61,8 @@ pub struct ReservedRange {
 }
 
 impl ReservedRange {
+    const EMPTY: Self = Self { start: 0, end: 0 };
+
     pub const fn new(start: u64, end: u64) -> Self {
         Self { start, end }
     }
@@ -73,6 +76,42 @@ impl ReservedRange {
 
     fn is_empty(self) -> bool {
         self.start >= self.end
+    }
+}
+
+struct BootReservedRanges {
+    ranges: [ReservedRange; MAX_BOOT_RESERVED_RANGES],
+    count: usize,
+}
+
+impl BootReservedRanges {
+    fn new() -> Self {
+        Self {
+            ranges: [ReservedRange::EMPTY; MAX_BOOT_RESERVED_RANGES],
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, range: ReservedRange) -> Result<(), &'static str> {
+        if range.is_empty() {
+            return Ok(());
+        }
+        if self.ranges[..self.count]
+            .iter()
+            .any(|existing| existing.start == range.start && existing.end == range.end)
+        {
+            return Ok(());
+        }
+        if self.count == MAX_BOOT_RESERVED_RANGES {
+            return Err("boot reservation capacity exceeded");
+        }
+        self.ranges[self.count] = range;
+        self.count += 1;
+        Ok(())
+    }
+
+    fn as_slice(&self) -> &[ReservedRange] {
+        &self.ranges[..self.count]
     }
 }
 
@@ -205,6 +244,9 @@ impl PageAllocator {
         if !self.contains_usable_frame(frame) {
             return Err("attempted to free a frame outside usable memory");
         }
+        if self.free_list_contains(frame) {
+            return Err("attempted to free an already-free frame");
+        }
 
         let node_ptr = (PHYSICAL_MEMORY_OFFSET + frame) as *mut FreePageNode;
         unsafe {
@@ -232,6 +274,19 @@ impl PageAllocator {
             .iter()
             .any(|region| frame >= region.start && frame < region.end)
     }
+
+    fn free_list_contains(&self, frame: u64) -> bool {
+        let mut current = self.free_list_head;
+        while let Some(candidate) = current {
+            if candidate == frame {
+                return true;
+            }
+            let node_ptr = (PHYSICAL_MEMORY_OFFSET + candidate) as *const FreePageNode;
+            let node = unsafe { ptr::read(node_ptr) };
+            current = node.next;
+        }
+        false
+    }
 }
 
 #[repr(C)]
@@ -254,7 +309,7 @@ pub fn normalize_memory_map<'a>(
     let mut descriptors = collect_descriptors(descriptors)?;
     sort_descriptors(&mut descriptors);
 
-    let mut ranges = collect_reserved_ranges(reserved_ranges);
+    let mut ranges = collect_reserved_ranges(reserved_ranges)?;
     sort_reserved_ranges(&mut ranges);
 
     let mut normalized = NormalizedMemoryMap::default();
@@ -363,7 +418,7 @@ fn sort_descriptors(descriptors: &mut [Option<RawDescriptor>; MAX_MEMORY_REGIONS
 
 fn collect_reserved_ranges(
     reserved_ranges: &[ReservedRange],
-) -> [Option<ReservedRange>; MAX_MEMORY_REGIONS] {
+) -> Result<[Option<ReservedRange>; MAX_MEMORY_REGIONS], &'static str> {
     let mut collected = [None; MAX_MEMORY_REGIONS];
     let mut count = 0usize;
     for range in reserved_ranges {
@@ -371,7 +426,7 @@ fn collect_reserved_ranges(
             continue;
         }
         if count == MAX_MEMORY_REGIONS {
-            break;
+            return Err("reserved range capacity exceeded");
         }
         collected[count] = Some(ReservedRange {
             start: align_down(range.start, PAGE_SIZE),
@@ -379,7 +434,7 @@ fn collect_reserved_ranges(
         });
         count += 1;
     }
-    collected
+    Ok(collected)
 }
 
 fn sort_reserved_ranges(ranges: &mut [Option<ReservedRange>; MAX_MEMORY_REGIONS]) {
@@ -426,7 +481,7 @@ fn run_inner() -> Result<(), &'static str> {
     serial_write_line("[BOOT] UEFI memory map acquired");
     serial_write_line("[BOOT] ExitBootServices OK");
 
-    let normalized = normalize_memory_map(memory_map.entries(), &reserved_ranges)?;
+    let normalized = normalize_memory_map(memory_map.entries(), reserved_ranges.as_slice())?;
     serial_write_fmt(format_args!(
         "[MEM ] usable: {} MiB\n",
         normalized.usable_bytes() / (1024 * 1024)
@@ -449,25 +504,31 @@ fn run_inner() -> Result<(), &'static str> {
         inspected.0, inspected.1
     ));
 
-    exercise_mapping(&normalized, &reserved_ranges, &mut allocator)?;
+    exercise_mapping(&normalized, reserved_ranges.as_slice(), &mut allocator)?;
     serial_write_line("[MM  ] paging initialized");
     trigger_expected_page_fault(FAULT_PROBE_ADDRESS as *const u64)
 }
 
-fn collect_reserved_ranges_from_firmware() -> Result<[ReservedRange; 2], &'static str> {
+fn collect_reserved_ranges_from_firmware() -> Result<BootReservedRanges, &'static str> {
     let loaded_image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle())
         .map_err(|_| "failed to open LoadedImage protocol")?;
     let (image_base, image_size) = loaded_image.info();
     drop(loaded_image);
 
-    let kernel_range = ReservedRange::from_base_and_size(image_base as u64, image_size);
+    let mut ranges = BootReservedRanges::new();
+    let kernel_base = image_base as u64;
+    let kernel_range = ReservedRange::from_base_and_size(kernel_base, image_size);
     let stack_pointer = read_stack_pointer();
     let stack_range = ReservedRange::from_base_and_size(
         stack_pointer.saturating_sub(EARLY_STACK_RESERVE_SIZE),
         EARLY_STACK_RESERVE_SIZE,
     );
+    ranges.push(kernel_range)?;
+    ranges.push(stack_range)?;
+    reserve_mapping_page_tables(&mut ranges, kernel_base)?;
+    reserve_mapping_page_tables(&mut ranges, stack_pointer)?;
 
-    Ok([kernel_range, stack_range])
+    Ok(ranges)
 }
 
 fn inspect_current_mapping() -> Result<(u64, u64), &'static str> {
@@ -621,14 +682,22 @@ fn without_write_protect<T>(f: impl FnOnce() -> T) -> T {
     let original = Cr0::read();
     let mut writable = original;
     writable.remove(Cr0Flags::WRITE_PROTECT);
+    let _guard = Cr0RestoreGuard(original);
     unsafe {
         Cr0::write(writable);
     }
     let result = f();
-    unsafe {
-        Cr0::write(original);
-    }
     result
+}
+
+struct Cr0RestoreGuard(Cr0Flags);
+
+impl Drop for Cr0RestoreGuard {
+    fn drop(&mut self) {
+        unsafe {
+            Cr0::write(self.0);
+        }
+    }
 }
 
 fn find_4k_mapping(
@@ -769,6 +838,62 @@ unsafe fn current_offset_page_table() -> OffsetPageTable<'static> {
     let level_4_address = level_4_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET;
     let level_4_table = unsafe { &mut *(level_4_address as *mut PageTable) };
     unsafe { OffsetPageTable::new(level_4_table, VirtAddr::new(PHYSICAL_MEMORY_OFFSET)) }
+}
+
+fn reserve_mapping_page_tables(
+    ranges: &mut BootReservedRanges,
+    virtual_address: u64,
+) -> Result<(), &'static str> {
+    let address = VirtAddr::new(virtual_address);
+    let (level_4_frame, _) = Cr3::read();
+    ranges.push(ReservedRange::from_base_and_size(
+        level_4_frame.start_address().as_u64(),
+        PAGE_SIZE,
+    ))?;
+
+    let level_4_table = unsafe {
+        &*((level_4_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
+    };
+    let level_3_frame = level_4_table[address.p4_index()]
+        .frame()
+        .map_err(|_| "kernel address was not backed by a valid level-3 page-table frame")?;
+    ranges.push(ReservedRange::from_base_and_size(
+        level_3_frame.start_address().as_u64(),
+        PAGE_SIZE,
+    ))?;
+
+    let level_3_table = unsafe {
+        &*((level_3_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
+    };
+    let level_3_entry = &level_3_table[address.p3_index()];
+    if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return Ok(());
+    }
+
+    let level_2_frame = level_3_entry
+        .frame()
+        .map_err(|_| "kernel address was not backed by a valid level-2 page-table frame")?;
+    ranges.push(ReservedRange::from_base_and_size(
+        level_2_frame.start_address().as_u64(),
+        PAGE_SIZE,
+    ))?;
+
+    let level_2_table = unsafe {
+        &*((level_2_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
+    };
+    let level_2_entry = &level_2_table[address.p2_index()];
+    if level_2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return Ok(());
+    }
+
+    let level_1_frame = level_2_entry
+        .frame()
+        .map_err(|_| "kernel address was not backed by a valid level-1 page-table frame")?;
+    ranges.push(ReservedRange::from_base_and_size(
+        level_1_frame.start_address().as_u64(),
+        PAGE_SIZE,
+    ))?;
+    Ok(())
 }
 
 static mut EXPECTED_PAGE_FAULT_ADDRESS: u64 = 0;
@@ -1053,6 +1178,7 @@ fn gdb_entry_handoff() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::vec::Vec;
     use uefi::mem::memory_map::MemoryAttribute;
 
     fn descriptor(ty: MemoryType, start: u64, pages: u64) -> MemoryDescriptor {
@@ -1127,5 +1253,91 @@ mod tests {
         }
         let recycled = allocator.allocate_page().expect("recycled page");
         assert_eq!(recycled, first);
+    }
+
+    #[test]
+    fn allocator_rejects_double_free() {
+        let mut pages = AlignedPages([0; (PAGE_SIZE as usize) * 4]);
+        let base = pages.0.as_mut_ptr() as u64;
+        let descriptors = [descriptor(MemoryType::CONVENTIONAL, base, 4)];
+        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
+        let mut allocator = PageAllocator::new(&map).expect("allocator");
+
+        let frame = allocator.allocate_page().expect("allocated page");
+        unsafe {
+            allocator.free_page(frame).expect("first free");
+        }
+        let second_free = unsafe { allocator.free_page(frame) };
+        assert_eq!(second_free, Err("attempted to free an already-free frame"));
+    }
+
+    #[test]
+    fn normalize_handles_multiple_reserved_ranges() {
+        let descriptors = [descriptor(MemoryType::CONVENTIONAL, 0x1000, 8)];
+        let reserved = [
+            ReservedRange::from_base_and_size(0x2000, PAGE_SIZE),
+            ReservedRange::from_base_and_size(0x5000, PAGE_SIZE * 2),
+        ];
+
+        let map = normalize_memory_map(descriptors.iter(), &reserved).expect("normalize map");
+        assert_eq!(
+            map.regions(),
+            &[
+                MemoryRegion {
+                    start: 0x1000,
+                    end: 0x2000,
+                    kind: MemoryRegionKind::Usable,
+                },
+                MemoryRegion {
+                    start: 0x2000,
+                    end: 0x3000,
+                    kind: MemoryRegionKind::Reserved,
+                },
+                MemoryRegion {
+                    start: 0x3000,
+                    end: 0x5000,
+                    kind: MemoryRegionKind::Usable,
+                },
+                MemoryRegion {
+                    start: 0x5000,
+                    end: 0x7000,
+                    kind: MemoryRegionKind::Reserved,
+                },
+                MemoryRegion {
+                    start: 0x7000,
+                    end: 0x9000,
+                    kind: MemoryRegionKind::Usable,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_reserved_range_overflow() {
+        let descriptors = [descriptor(MemoryType::CONVENTIONAL, 0x1000, 1)];
+        let mut reserved = vec![ReservedRange::EMPTY; MAX_MEMORY_REGIONS + 1];
+        for (index, range) in reserved.iter_mut().enumerate() {
+            let start = ((index as u64) + 1) * PAGE_SIZE;
+            *range = ReservedRange::new(start, start + PAGE_SIZE);
+        }
+
+        let error = normalize_memory_map(descriptors.iter(), &reserved).unwrap_err();
+        assert_eq!(error, "reserved range capacity exceeded");
+    }
+
+    #[test]
+    fn normalize_rejects_descriptor_overflow() {
+        let descriptors: Vec<_> = (0..=MAX_MEMORY_REGIONS)
+            .map(|index| {
+                descriptor(
+                    MemoryType::CONVENTIONAL,
+                    ((index as u64) + 1) * PAGE_SIZE,
+                    1,
+                )
+            })
+            .collect();
+
+        let error = normalize_memory_map(descriptors.iter(), &[]).unwrap_err();
+        assert_eq!(error, "UEFI memory map exceeded fixed descriptor capacity");
     }
 }
