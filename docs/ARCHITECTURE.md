@@ -196,6 +196,12 @@ The first M3.1 step should keep privilege-transition code narrow and x86-64 spec
 
 That initial path should prove the CPU boundary itself before broader process or capability policy exists: the kernel owns the userspace code/stack mappings, marks them explicitly `USER_ACCESSIBLE`, returns through a controlled DPL3 gate only for test bring-up, and treats a ring-3 privileged-instruction fault as a first-class diagnostic rather than a hang or triple fault.
 
+## M3.2 per-process address-space direction
+
+The next M3 step should give each userspace process its own page-table root while preserving the kernel mappings required for controlled entry, exceptions, and teardown. Those inherited kernel mappings must remain supervisor-only, and user code/data/stack pages must be mapped explicitly with `USER_ACCESSIBLE` only inside the owning process root.
+
+CR3 switching and page-table construction should stay behind narrow memory-management helpers rather than spreading raw register handling into scheduler or process policy. A bounded self-test should prove that two processes can use the same user virtual address for different private frames, that ring 3 cannot read kernel-private mappings, and that process-owned page-table frames and user frames are reclaimed deterministically during teardown.
+
 ## Language strategy
 
 The kernel and first-party low-level services should primarily use Rust.
