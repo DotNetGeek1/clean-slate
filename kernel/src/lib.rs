@@ -978,6 +978,13 @@ impl Process {
         self.owned_frame_count += 1;
         Ok(())
     }
+
+    fn contains_user_range(&self, start: u64, len: u64) -> bool {
+        let Some(end) = start.checked_add(len) else {
+            return false;
+        };
+        start >= self.user_code_address && end <= self.user_stack_top && start <= end
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1293,12 +1300,18 @@ fn map_process_user_page(
         let new_frame = allocate_process_frame(process)?;
         p3_entry.set_addr(PhysAddr::new(new_frame), user_table_flags);
     }
+    if !p3_entry.flags().contains(PageTableFlags::USER_ACCESSIBLE) {
+        return Err("user page collided with a supervisor-only PDPT entry");
+    }
 
     let p2_table = unsafe { page_table_from_frame(p3_entry.addr().as_u64()) };
     let p2_entry = &mut p2_table[page.p2_index()];
     if p2_entry.is_unused() {
         let new_frame = allocate_process_frame(process)?;
         p2_entry.set_addr(PhysAddr::new(new_frame), user_table_flags);
+    }
+    if !p2_entry.flags().contains(PageTableFlags::USER_ACCESSIBLE) {
+        return Err("user page collided with a supervisor-only PD entry");
     }
 
     let p1_table = unsafe { page_table_from_frame(p2_entry.addr().as_u64()) };
@@ -1428,6 +1441,9 @@ fn activate_kernel_address_space() {
 
 #[cfg(feature = "m3-self-test")]
 fn initialize_m3_processes() -> Result<(), &'static str> {
+    if M3_PROCESS_COUNT < 2 {
+        return Err("m3 self-test requires at least two isolated processes");
+    }
     KERNEL_ROOT_PAGE_TABLE.store(current_root_page_table_address(), Ordering::Relaxed);
     let task_stacks = unsafe { &*TASK_STACKS.get() };
     let kernel_probe_address = run as usize as u64;
@@ -2127,6 +2143,9 @@ fn handle_m3_syscall(context: &mut InterruptContext) -> Result<u64, &'static str
             if !process.owns_capability(context.rdi, CapabilityKind::ConsoleSend) {
                 return Err("userspace attempted an unauthorized console send");
             }
+            if !process.contains_user_range(context.rsi, context.rdx) {
+                return Err("userspace console buffer was outside the granted user range");
+            }
             let message = unsafe {
                 core::slice::from_raw_parts(context.rsi as *const u8, context.rdx as usize)
             };
@@ -2163,6 +2182,27 @@ fn handle_m3_syscall(context: &mut InterruptContext) -> Result<u64, &'static str
 }
 
 #[cfg(feature = "m3-self-test")]
+fn next_expected_fault(
+    expected_fault: ExpectedFault,
+    fault_address: u64,
+    kernel_probe_address: u64,
+    peer_probe_address: u64,
+    present: bool,
+) -> Option<(ExpectedFault, &'static str)> {
+    match expected_fault {
+        ExpectedFault::KernelMemoryRead
+            if fault_address == kernel_probe_address && present =>
+        {
+            Some((ExpectedFault::CrossProcessRead, "[SEC ] kernel-memory read denied"))
+        }
+        ExpectedFault::CrossProcessRead if fault_address == peer_probe_address && !present => {
+            Some((ExpectedFault::None, "[SEC ] cross-process read denied"))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "m3-self-test")]
 fn handle_m3_expected_page_fault(context: &mut InterruptContext) -> Option<u64> {
     let fault_address = Cr2::read()
         .expect("CR2 must contain a canonical fault address")
@@ -2172,17 +2212,16 @@ fn handle_m3_expected_page_fault(context: &mut InterruptContext) -> Option<u64> 
         return None;
     }
 
-    match process.expected_fault {
-        ExpectedFault::KernelMemoryRead if fault_address == process.kernel_probe_address => {
-            kernel_log_line("[SEC ] kernel-memory read denied");
-            process.expected_fault = ExpectedFault::CrossProcessRead;
-        }
-        ExpectedFault::CrossProcessRead if fault_address == process.peer_probe_address => {
-            kernel_log_line("[SEC ] cross-process read denied");
-            process.expected_fault = ExpectedFault::None;
-        }
-        _ => return None,
-    }
+    let present = bit(context.error_code, 0) != 0;
+    let (next_fault, marker) = next_expected_fault(
+        process.expected_fault,
+        fault_address,
+        process.kernel_probe_address,
+        process.peer_probe_address,
+        present,
+    )?;
+    kernel_log_line(marker);
+    process.expected_fault = next_fault;
 
     context.rip = context.rip.wrapping_add(M3_FAULT_SKIP_LEN);
     context.rax = 0;
@@ -3050,6 +3089,8 @@ mod tests {
     fn m3_process_tracks_capabilities_and_owned_frames() {
         let mut process = Process {
             id: 1,
+            user_code_address: m3_user_code_address(0),
+            user_stack_top: m3_user_stack_top(0),
             capabilities: [Some(Capability {
                 id: M3_CONSOLE_CAPABILITY_ID,
                 kind: CapabilityKind::ConsoleSend,
@@ -3068,6 +3109,54 @@ mod tests {
         assert_eq!(
             process.push_owned_frame(0xdead_0000),
             Err("process owned-frame capacity exceeded")
+        );
+    }
+
+    #[cfg(feature = "m3-self-test")]
+    #[test]
+    fn m3_script_flags_match_expected_sequences() {
+        assert_eq!(
+            m3_script_flags(ProcessScript::Full),
+            M3_SCRIPT_IPC_SEND | M3_SCRIPT_KERNEL_READ | M3_SCRIPT_PEER_READ
+        );
+        assert_eq!(m3_script_flags(ProcessScript::ExitOnly), 0);
+    }
+
+    #[cfg(feature = "m3-self-test")]
+    #[test]
+    fn m3_expected_fault_progression_requires_matching_fault_type() {
+        let kernel_probe = 0x1000;
+        let peer_probe = 0x2000;
+
+        assert_eq!(
+            next_expected_fault(
+                ExpectedFault::KernelMemoryRead,
+                kernel_probe,
+                kernel_probe,
+                peer_probe,
+                true,
+            ),
+            Some((ExpectedFault::CrossProcessRead, "[SEC ] kernel-memory read denied"))
+        );
+        assert_eq!(
+            next_expected_fault(
+                ExpectedFault::KernelMemoryRead,
+                kernel_probe,
+                kernel_probe,
+                peer_probe,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            next_expected_fault(
+                ExpectedFault::CrossProcessRead,
+                peer_probe,
+                kernel_probe,
+                peer_probe,
+                false,
+            ),
+            Some((ExpectedFault::None, "[SEC ] cross-process read denied"))
         );
     }
 }
