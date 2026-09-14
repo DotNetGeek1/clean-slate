@@ -9,6 +9,7 @@ const EFI_SUCCESS: usize = 0;
 
 #[no_mangle]
 pub extern "efiapi" fn efi_main(_image_handle: usize, _system_table: usize) -> usize {
+    gdb_entry_handoff();
     serial_init();
     serial_write_line("CLEAN-SLATE 0.0.1");
     serial_write_line("x86_64");
@@ -65,3 +66,13 @@ fn cpu_halt() {
         asm!("hlt", options(nomem, nostack));
     }
 }
+
+#[cfg(feature = "gdb-entry")]
+fn gdb_entry_handoff() {
+    unsafe {
+        asm!("int3", options(nomem, nostack));
+    }
+}
+
+#[cfg(not(feature = "gdb-entry"))]
+fn gdb_entry_handoff() {}

@@ -53,6 +53,14 @@ cargo xtask run-gdb
 
 That mode enables a GDB endpoint on `localhost:1234` and starts with CPU execution paused.
 
+To make kernel-entry stop reproducible in M0:
+
+```bash
+cargo xtask run-gdb-entry
+```
+
+This builds the kernel with a debug-entry trap at the start of `efi_main`, then launches paused with GDB endpoint `localhost:1234`.
+
 If OVMF is not installed in common distro paths, set:
 
 ```bash
@@ -84,6 +92,29 @@ QEMU should support launching paused with a debugger endpoint.
 Debug symbols must be preserved in development builds so GDB (or a later Rust-friendly debugger) can resolve functions and stack traces.
 
 Expected workflows include breakpoints in kernel entry, page-fault handlers, scheduler paths, syscalls, and device initialization.
+
+### Reproducible kernel-entry handoff (M0)
+
+1. Start QEMU with debug-entry mode:
+
+   ```bash
+   cargo xtask run-gdb-entry
+   ```
+
+2. In another terminal, start GDB with the built image:
+
+   ```bash
+   gdb target/x86_64-unknown-uefi/debug/clean-slate-kernel.efi
+   ```
+
+3. Attach and continue:
+
+   ```gdb
+   target remote :1234
+   continue
+   ```
+
+4. GDB will stop on a trap once `efi_main` is executing (`SIGTRAP`). From there, single-step or set additional breakpoints.
 
 ## Test layers
 

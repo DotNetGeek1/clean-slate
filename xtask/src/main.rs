@@ -24,9 +24,10 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
 
     match parse_command(args.next().as_deref()) {
         ParsedCommand::Run => run_vm(),
-        ParsedCommand::RunGdb => run_vm_with_gdb(),
-        ParsedCommand::Build => build_kernel(false),
-        ParsedCommand::BuildRelease => build_kernel(true),
+        ParsedCommand::RunGdb => run_vm_with_gdb(false),
+        ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
+        ParsedCommand::Build => build_kernel(false, false),
+        ParsedCommand::BuildRelease => build_kernel(true, false),
         ParsedCommand::Help => {
             print_help();
             Ok(())
@@ -39,16 +40,16 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
 }
 
 fn run_vm() -> Result<(), XtaskError> {
-    run_vm_inner(false)
+    run_vm_inner(false, false)
 }
 
-fn run_vm_with_gdb() -> Result<(), XtaskError> {
-    run_vm_inner(true)
+fn run_vm_with_gdb(debug_entry: bool) -> Result<(), XtaskError> {
+    run_vm_inner(true, debug_entry)
 }
 
-fn run_vm_inner(wait_for_gdb: bool) -> Result<(), XtaskError> {
+fn run_vm_inner(wait_for_gdb: bool, debug_entry: bool) -> Result<(), XtaskError> {
     let release = false;
-    build_kernel(release)?;
+    build_kernel(release, debug_entry)?;
 
     let kernel = kernel_artifact(release);
     if !kernel.is_file() {
@@ -92,7 +93,7 @@ fn run_vm_inner(wait_for_gdb: bool) -> Result<(), XtaskError> {
     run_command(&mut qemu)
 }
 
-fn build_kernel(release: bool) -> Result<(), XtaskError> {
+fn build_kernel(release: bool, debug_entry: bool) -> Result<(), XtaskError> {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(workspace_root())
         .arg("build")
@@ -103,6 +104,9 @@ fn build_kernel(release: bool) -> Result<(), XtaskError> {
 
     if release {
         cmd.arg("--release");
+    }
+    if debug_entry {
+        cmd.arg("--features").arg("gdb-entry");
     }
 
     run_command(&mut cmd)
@@ -173,6 +177,7 @@ fn print_help() {
     println!("Usage: cargo xtask <command>");
     println!("  run          Build kernel and launch QEMU");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
+    println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
     println!("  build        Build debug UEFI kernel only");
     println!("  build-release  Build release UEFI kernel only");
 }
@@ -187,6 +192,7 @@ struct OvmfPaths {
 enum ParsedCommand {
     Run,
     RunGdb,
+    RunGdbEntry,
     Build,
     BuildRelease,
     Help,
@@ -197,6 +203,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
     match command {
         Some(cmd) if cmd == "run" => ParsedCommand::Run,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
+        Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
         Some(cmd) if cmd == "build" => ParsedCommand::Build,
         Some(cmd) if cmd == "build-release" => ParsedCommand::BuildRelease,
         Some(cmd) if cmd == "help" || cmd == "--help" || cmd == "-h" => ParsedCommand::Help,
@@ -273,6 +280,10 @@ mod tests {
     #[test]
     fn parse_known_command() {
         assert_eq!(parse_command(Some("run".as_ref())), ParsedCommand::Run);
+        assert_eq!(
+            parse_command(Some("run-gdb-entry".as_ref())),
+            ParsedCommand::RunGdbEntry
+        );
     }
 
     #[test]
