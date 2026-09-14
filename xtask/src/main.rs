@@ -22,14 +22,18 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
     let mut args = args.into_iter();
     let _exe = args.next();
 
-    match args.next().as_deref() {
-        Some(cmd) if cmd == "run" => run_vm(),
-        Some(cmd) if cmd == "run-gdb" => run_vm_with_gdb(),
-        Some(cmd) if cmd == "build" => build_kernel(false),
-        Some(cmd) if cmd == "build-release" => build_kernel(true),
-        Some(_) | None => {
+    match parse_command(args.next().as_deref()) {
+        ParsedCommand::Run => run_vm(),
+        ParsedCommand::RunGdb => run_vm_with_gdb(),
+        ParsedCommand::Build => build_kernel(false),
+        ParsedCommand::BuildRelease => build_kernel(true),
+        ParsedCommand::Help => {
             print_help();
             Ok(())
+        }
+        ParsedCommand::Invalid(command) => {
+            print_help();
+            Err(XtaskError::InvalidCommand(command))
         }
     }
 }
@@ -58,7 +62,9 @@ fn run_vm_inner(wait_for_gdb: bool) -> Result<(), XtaskError> {
 
     let ovmf = find_ovmf()?;
     let vars_copy = workspace_root().join("target").join("OVMF_VARS.fd");
-    fs::copy(&ovmf.vars_template, &vars_copy)?;
+    if !vars_copy.is_file() {
+        fs::copy(&ovmf.vars_template, &vars_copy)?;
+    }
 
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu
@@ -112,14 +118,12 @@ fn kernel_artifact(release: bool) -> PathBuf {
 }
 
 fn find_ovmf() -> Result<OvmfPaths, XtaskError> {
-    if let (Some(code), Some(vars)) = (
-        env::var_os("OVMF_CODE"),
-        env::var_os("OVMF_VARS"),
-    ) {
-        return Ok(OvmfPaths {
-            code: PathBuf::from(code),
-            vars_template: PathBuf::from(vars),
-        });
+    let env_ovmf = ovmf_from_env(env::var_os("OVMF_CODE"), env::var_os("OVMF_VARS"));
+    if let Some(ovmf) = env_ovmf {
+        if ovmf.code.is_file() && ovmf.vars_template.is_file() {
+            return Ok(ovmf);
+        }
+        return Err(XtaskError::MissingOvmf);
     }
 
     let candidates = [
@@ -137,10 +141,7 @@ fn find_ovmf() -> Result<OvmfPaths, XtaskError> {
         },
     ];
 
-    candidates
-        .into_iter()
-        .find(|ovmf| ovmf.code.is_file() && ovmf.vars_template.is_file())
-        .ok_or(XtaskError::MissingOvmf)
+    select_ovmf_from_candidates(candidates.into_iter()).ok_or(XtaskError::MissingOvmf)
 }
 
 fn workspace_root() -> &'static Path {
@@ -176,15 +177,54 @@ fn print_help() {
     println!("  build-release  Build release UEFI kernel only");
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct OvmfPaths {
     code: PathBuf,
     vars_template: PathBuf,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ParsedCommand {
+    Run,
+    RunGdb,
+    Build,
+    BuildRelease,
+    Help,
+    Invalid(String),
+}
+
+fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
+    match command {
+        Some(cmd) if cmd == "run" => ParsedCommand::Run,
+        Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
+        Some(cmd) if cmd == "build" => ParsedCommand::Build,
+        Some(cmd) if cmd == "build-release" => ParsedCommand::BuildRelease,
+        Some(cmd) if cmd == "help" || cmd == "--help" || cmd == "-h" => ParsedCommand::Help,
+        Some(cmd) => ParsedCommand::Invalid(cmd.to_string_lossy().into_owned()),
+        None => ParsedCommand::Help,
+    }
+}
+
+fn ovmf_from_env(code: Option<OsString>, vars: Option<OsString>) -> Option<OvmfPaths> {
+    match (code, vars) {
+        (Some(code), Some(vars)) => Some(OvmfPaths {
+            code: PathBuf::from(code),
+            vars_template: PathBuf::from(vars),
+        }),
+        _ => None,
+    }
+}
+
+fn select_ovmf_from_candidates(candidates: impl IntoIterator<Item = OvmfPaths>) -> Option<OvmfPaths> {
+    candidates
+        .into_iter()
+        .find(|ovmf| ovmf.code.is_file() && ovmf.vars_template.is_file())
+}
+
 #[derive(Debug)]
 enum XtaskError {
     CommandFailed { command: String, status: String },
+    InvalidCommand(String),
     Io(std::io::Error),
     MissingFile(PathBuf),
     MissingOvmf,
@@ -196,6 +236,7 @@ impl Display for XtaskError {
             XtaskError::CommandFailed { command, status } => {
                 write!(f, "command `{command}` failed with status {status}")
             }
+            XtaskError::InvalidCommand(command) => write!(f, "unknown command `{command}`"),
             XtaskError::Io(error) => write!(f, "{error}"),
             XtaskError::MissingFile(path) => write!(f, "missing file: {}", path.display()),
             XtaskError::MissingOvmf => write!(
@@ -215,6 +256,7 @@ impl From<std::io::Error> for XtaskError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn kernel_debug_artifact_path_is_expected() {
@@ -226,5 +268,56 @@ mod tests {
     fn kernel_release_artifact_path_is_expected() {
         let artifact = kernel_artifact(true);
         assert!(artifact.ends_with("target/x86_64-unknown-uefi/release/clean-slate-kernel.efi"));
+    }
+
+    #[test]
+    fn parse_known_command() {
+        assert_eq!(parse_command(Some("run".as_ref())), ParsedCommand::Run);
+    }
+
+    #[test]
+    fn parse_unknown_command() {
+        assert_eq!(
+            parse_command(Some("wat".as_ref())),
+            ParsedCommand::Invalid("wat".to_owned())
+        );
+    }
+
+    #[test]
+    fn prefer_env_ovmf_when_both_set() {
+        let ovmf = ovmf_from_env(Some("code.fd".into()), Some("vars.fd".into()));
+        assert!(ovmf.is_some());
+        let ovmf = ovmf.expect("must return env ovmf");
+        assert_eq!(ovmf.code, PathBuf::from("code.fd"));
+        assert_eq!(ovmf.vars_template, PathBuf::from("vars.fd"));
+    }
+
+    #[test]
+    fn select_existing_ovmf_candidate() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time works")
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("clean-slate-ovmf-test-{unique}"));
+        fs::create_dir_all(&base).expect("create temp dir");
+
+        let missing = OvmfPaths {
+            code: base.join("missing_code.fd"),
+            vars_template: base.join("missing_vars.fd"),
+        };
+        let valid = OvmfPaths {
+            code: base.join("OVMF_CODE.fd"),
+            vars_template: base.join("OVMF_VARS.fd"),
+        };
+        fs::write(&valid.code, b"code").expect("write code");
+        fs::write(&valid.vars_template, b"vars").expect("write vars");
+
+        let selected = select_ovmf_from_candidates([missing.clone(), valid.clone()]);
+        assert!(selected.is_some());
+        let selected = selected.expect("must select valid candidate");
+        assert_eq!(selected.code, valid.code);
+        assert_eq!(selected.vars_template, valid.vars_template);
+
+        fs::remove_dir_all(base).expect("cleanup temp dir");
     }
 }

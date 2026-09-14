@@ -5,6 +5,7 @@ use core::arch::asm;
 use core::panic::PanicInfo;
 
 const COM1: u16 = 0x3F8;
+const EFI_SUCCESS: usize = 0;
 
 #[no_mangle]
 pub extern "efiapi" fn efi_main(_image_handle: usize, _system_table: usize) -> usize {
@@ -12,10 +13,7 @@ pub extern "efiapi" fn efi_main(_image_handle: usize, _system_table: usize) -> u
     serial_write_line("CLEAN-SLATE 0.0.1");
     serial_write_line("x86_64");
     serial_write_line("Hello world.");
-
-    loop {
-        cpu_halt();
-    }
+    EFI_SUCCESS
 }
 
 #[panic_handler]
