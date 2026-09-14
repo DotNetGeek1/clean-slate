@@ -949,7 +949,16 @@ impl Scheduler {
 
         self.current_task = Some(next);
         self.tasks[next].state = TaskState::Running;
-        Ok(Some(self.tasks[next].saved_stack_pointer))
+        if !self.tasks[next].started {
+            self.tasks[next].started = true;
+            unsafe {
+                NEXT_TASK_STACK_POINTER = self.tasks[next].saved_stack_pointer;
+                NEXT_TASK_ENTRY_POINT = self.tasks[next].launch_entry;
+            }
+            Ok(Some(FRESH_TASK_SENTINEL))
+        } else {
+            Ok(Some(self.tasks[next].saved_stack_pointer))
+        }
     }
 
     fn all_finished(&self) -> bool {
@@ -1537,20 +1546,13 @@ fn task_exit() -> ! {
     };
     match next {
         Some(stack_pointer) => {
-            let (started, entry_point) = unsafe {
-                let scheduler = &mut *SCHEDULER.get();
-                let current = scheduler.current_task.expect("next task must exist");
-                let task = &mut scheduler.tasks[current];
-                let started = task.started;
-                if !started {
-                    task.started = true;
-                }
-                (started, task.launch_entry)
-            };
-            if started {
-                unsafe { restore_task_context(stack_pointer) }
+            if stack_pointer == FRESH_TASK_SENTINEL {
+                let (fresh_stack_pointer, entry_point) = unsafe {
+                    (NEXT_TASK_STACK_POINTER, NEXT_TASK_ENTRY_POINT)
+                };
+                unsafe { start_first_task(fresh_stack_pointer, entry_point) }
             } else {
-                unsafe { start_first_task(stack_pointer, entry_point) }
+                unsafe { restore_task_context(stack_pointer) }
             }
         }
         None => {
@@ -2097,9 +2099,13 @@ mod tests {
         scheduler.current_task = Some(0);
         scheduler.tasks[0].state = TaskState::Running;
         scheduler.tasks[0].observed_progress = 7;
-        assert_eq!(scheduler.finish_current_task().expect("finish"), Some(0x2000));
+        assert_eq!(
+            scheduler.finish_current_task().expect("finish"),
+            Some(FRESH_TASK_SENTINEL)
+        );
         assert_eq!(scheduler.current_task, Some(1));
         assert_eq!(scheduler.tasks[0].state, TaskState::Finished);
+        assert!(scheduler.tasks[1].started);
 
         scheduler.tasks[1].state = TaskState::Running;
         scheduler.current_task = Some(1);
