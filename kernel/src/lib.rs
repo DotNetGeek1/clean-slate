@@ -29,22 +29,12 @@ use uefi::proto::loaded_image::LoadedImage;
 use uefi::Status;
 use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
 use x86_64::instructions::tables::load_tss;
-#[cfg(any(
-    feature = "m1-self-test",
-    feature = "m3-address-space-self-test",
-    feature = "m3-entry-self-test"
-))]
 use x86_64::registers::control::{Cr0, Cr0Flags};
 use x86_64::registers::control::{Cr2, Cr3};
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::paging::{
     FrameAllocator, OffsetPageTable, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate,
 };
-#[cfg(any(
-    feature = "m1-self-test",
-    feature = "m3-address-space-self-test",
-    feature = "m3-entry-self-test"
-))]
 use x86_64::structures::paging::{Mapper, Page};
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::{PhysAddr, VirtAddr};
@@ -117,9 +107,7 @@ const USER_TEST_PROCESS_COUNT: usize = 2;
 const USER_TEST_PROCESS_ONE_VALUE: u64 = 0x5052_4f43_4553_5331;
 #[cfg(feature = "m3-address-space-self-test")]
 const USER_TEST_PROCESS_TWO_VALUE: u64 = 0x5052_4f43_4553_5332;
-#[cfg(feature = "m3-address-space-self-test")]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
-#[cfg(feature = "m3-address-space-self-test")]
 const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 #[cfg(feature = "m3-address-space-self-test")]
 const ADDRESS_SPACE_SWITCH_OK_MARKER: &str = "[MM  ] address-space switch OK";
@@ -832,11 +820,7 @@ fn unmap_scratch_page(
         .map_err(|_| "failed to unmap the scratch virtual page")
 }
 
-#[cfg(any(
-    feature = "m1-self-test",
-    feature = "m3-address-space-self-test",
-    feature = "m3-entry-self-test"
-))]
+#[allow(dead_code)]
 fn without_write_protect<T>(f: impl FnOnce() -> T) -> T {
     let original = Cr0::read();
     let mut writable = original;
@@ -849,18 +833,10 @@ fn without_write_protect<T>(f: impl FnOnce() -> T) -> T {
     result
 }
 
-#[cfg(any(
-    feature = "m1-self-test",
-    feature = "m3-address-space-self-test",
-    feature = "m3-entry-self-test"
-))]
+#[allow(dead_code)]
 struct Cr0RestoreGuard(Cr0Flags);
 
-#[cfg(any(
-    feature = "m1-self-test",
-    feature = "m3-address-space-self-test",
-    feature = "m3-entry-self-test"
-))]
+#[allow(dead_code)]
 impl Drop for Cr0RestoreGuard {
     fn drop(&mut self) {
         unsafe {
@@ -954,14 +930,12 @@ struct UserspaceAddressSpaceTestPage {
     probe_address: u64,
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
 #[derive(Clone, Copy)]
 struct OwnedUserMapping {
     virtual_address: u64,
     frame_address: u64,
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
 impl OwnedUserMapping {
     const EMPTY: Self = Self {
         virtual_address: 0,
@@ -969,7 +943,7 @@ impl OwnedUserMapping {
     };
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct ProcessAddressSpace {
     root_frame: u64,
@@ -979,7 +953,7 @@ struct ProcessAddressSpace {
     user_mapping_count: usize,
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[allow(dead_code)]
 impl ProcessAddressSpace {
     fn new(root_frame: u64) -> Result<Self, &'static str> {
         let mut address_space = Self {
@@ -1852,7 +1826,7 @@ fn set_privilege_stack(stack_pointer: u64) -> Result<(), &'static str> {
     Ok(())
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[allow(dead_code)]
 fn zero_page(frame: u64) {
     unsafe {
         ptr::write_bytes(
@@ -1863,7 +1837,7 @@ fn zero_page(frame: u64) {
     }
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[allow(dead_code)]
 fn map_userspace_page(
     mapper: &mut OffsetPageTable<'_>,
     page: Page<Size4KiB>,
@@ -1876,7 +1850,7 @@ fn map_userspace_page(
         .map_err(|_| "failed to map userspace page")
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[allow(dead_code)]
 fn unmap_userspace_page(
     mapper: &mut OffsetPageTable<'_>,
     page: Page<Size4KiB>,
@@ -1889,7 +1863,7 @@ fn unmap_userspace_page(
         .map_err(|_| "failed to unmap userspace page")
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[allow(dead_code)]
 unsafe fn free_frame(allocator: &mut PageAllocator, frame: u64) -> Result<(), &'static str> {
     unsafe { allocator.free_page(frame) }
 }
@@ -1919,12 +1893,12 @@ unsafe fn offset_page_table_for_root(root_frame: u64) -> OffsetPageTable<'static
     unsafe { OffsetPageTable::new(level_4_table, VirtAddr::new(PHYSICAL_MEMORY_OFFSET)) }
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[allow(dead_code)]
 unsafe fn page_table_ref(frame_address: u64) -> &'static PageTable {
     unsafe { &*((frame_address + PHYSICAL_MEMORY_OFFSET) as *const PageTable) }
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[allow(dead_code)]
 unsafe fn page_table_mut(frame_address: u64) -> &'static mut PageTable {
     unsafe { &mut *((frame_address + PHYSICAL_MEMORY_OFFSET) as *mut PageTable) }
 }
@@ -2226,13 +2200,13 @@ fn selector_rpl(selector: u64) -> u64 {
     selector & 0x3
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[allow(dead_code)]
 struct AddressSpaceFrameAllocator<'a, 'space> {
     allocator: &'a mut PageAllocator,
     address_space: &'space mut ProcessAddressSpace,
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[allow(dead_code)]
 impl<'a, 'space> AddressSpaceFrameAllocator<'a, 'space> {
     fn new(
         allocator: &'a mut PageAllocator,
@@ -2245,7 +2219,7 @@ impl<'a, 'space> AddressSpaceFrameAllocator<'a, 'space> {
     }
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[allow(dead_code)]
 unsafe impl FrameAllocator<Size4KiB> for AddressSpaceFrameAllocator<'_, '_> {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         let frame_address = self.allocator.allocate_page()?;
@@ -2263,7 +2237,7 @@ unsafe impl FrameAllocator<Size4KiB> for AddressSpaceFrameAllocator<'_, '_> {
     }
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[allow(dead_code)]
 fn activate_address_space_root(root_frame: u64) {
     let flags = Cr3::read().1;
     unsafe {
@@ -2274,20 +2248,58 @@ fn activate_address_space_root(root_frame: u64) {
     }
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
-fn clone_kernel_mappings_into_address_space(root_frame: u64) {
+#[allow(dead_code)]
+fn sanitize_kernel_root_entries(root: &mut PageTable, user_region_base: VirtAddr) {
+    let user_slot_index = ((user_region_base.as_u64() >> 39) & 0x1ff) as usize;
+    for (index, entry) in root.iter_mut().enumerate() {
+        if index == user_slot_index {
+            entry.set_unused();
+            continue;
+        }
+        if entry.is_unused() {
+            continue;
+        }
+        entry.set_addr(
+            entry.addr(),
+            entry.flags() & !PageTableFlags::USER_ACCESSIBLE,
+        );
+    }
+}
+
+#[allow(dead_code)]
+fn validate_supervisor_only_kernel_root_entries(
+    root: &PageTable,
+    user_region_base: VirtAddr,
+) -> Result<(), &'static str> {
+    let user_slot_index = ((user_region_base.as_u64() >> 39) & 0x1ff) as usize;
+    for (index, entry) in root.iter().enumerate() {
+        if index == user_slot_index || entry.is_unused() {
+            continue;
+        }
+        if entry.flags().contains(PageTableFlags::USER_ACCESSIBLE) {
+            return Err("inherited kernel root entry remained user accessible");
+        }
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn clone_kernel_mappings_into_address_space(
+    root_frame: u64,
+    user_region_base: VirtAddr,
+) -> Result<(), &'static str> {
     let source_root = unsafe { page_table_ref(current_root_frame_address()) };
     let destination_root = unsafe { page_table_mut(root_frame) };
     destination_root.zero();
     destination_root.clone_from(source_root);
-    destination_root
-        [Page::<Size4KiB>::containing_address(VirtAddr::new(USER_TEST_CODE_ADDRESS)).p4_index()]
-    .set_unused();
+    sanitize_kernel_root_entries(destination_root, user_region_base);
+    validate_supervisor_only_kernel_root_entries(destination_root, user_region_base)
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[allow(dead_code)]
 fn create_process_address_space(
     allocator: &mut PageAllocator,
+    user_region_base: VirtAddr,
 ) -> Result<ProcessAddressSpace, &'static str> {
     let root_frame = allocator
         .allocate_page()
@@ -2300,11 +2312,16 @@ fn create_process_address_space(
         }
     }
     let address_space = address_space?;
-    clone_kernel_mappings_into_address_space(root_frame);
+    if let Err(message) = clone_kernel_mappings_into_address_space(root_frame, user_region_base) {
+        unsafe {
+            let _ = allocator.free_page(root_frame);
+        }
+        return Err(message);
+    }
     Ok(address_space)
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[allow(dead_code)]
 fn map_process_page(
     address_space: &mut ProcessAddressSpace,
     virtual_address: u64,
@@ -2326,7 +2343,7 @@ fn map_process_page(
     address_space.record_user_mapping(virtual_address, frame_address)
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[allow(dead_code)]
 fn translate_address_in_root(root_frame: u64, address: VirtAddr) -> Result<u64, &'static str> {
     let mapper = unsafe { offset_page_table_for_root(root_frame) };
     mapper
@@ -2365,7 +2382,7 @@ fn copy_userspace_address_space_payload(frame_address: u64) {
     }
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[allow(dead_code)]
 fn destroy_process_address_space(
     address_space: &ProcessAddressSpace,
     allocator: &mut PageAllocator,
@@ -2410,7 +2427,8 @@ fn create_userspace_process(
         return Err("userspace address-space test payload exceeded one page");
     }
 
-    let mut address_space = create_process_address_space(allocator)?;
+    let mut address_space =
+        create_process_address_space(allocator, VirtAddr::new(USER_TEST_CODE_ADDRESS))?;
     let setup_result = (|| -> Result<UserspaceProcess, &'static str> {
         let code_frame_address = allocator
             .allocate_page()
@@ -2530,6 +2548,10 @@ fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'st
         | PageTableFlags::WRITABLE
         | PageTableFlags::NO_EXECUTE
         | PageTableFlags::USER_ACCESSIBLE;
+    validate_supervisor_only_kernel_root_entries(
+        unsafe { page_table_ref(process.address_space.root_frame) },
+        VirtAddr::new(USER_TEST_CODE_ADDRESS),
+    )?;
     let code_path_flags = page_flags_for_address_in_root(
         process.address_space.root_frame,
         VirtAddr::new(USER_TEST_CODE_ADDRESS),
@@ -3841,6 +3863,48 @@ mod tests {
     fn userspace_selector_rpl_reports_ring3() {
         assert_eq!(selector_rpl(0x001b), 3);
         assert_eq!(selector_rpl(0x0008), 0);
+    }
+
+    #[test]
+    fn kernel_root_sanitization_clears_user_flags_and_user_slot() {
+        let user_region_base = VirtAddr::new(0x0000_4000_0000_0000);
+        let user_slot_index = ((user_region_base.as_u64() >> 39) & 0x1ff) as usize;
+        let mut root = PageTable::new();
+        root[0].set_addr(
+            PhysAddr::new(0x1000),
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+        );
+        root[user_slot_index].set_addr(
+            PhysAddr::new(0x2000),
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+        );
+
+        sanitize_kernel_root_entries(&mut root, user_region_base);
+
+        assert!(!root[0].flags().contains(PageTableFlags::USER_ACCESSIBLE));
+        assert!(root[0].flags().contains(PageTableFlags::WRITABLE));
+        assert!(root[user_slot_index].is_unused());
+        assert_eq!(
+            validate_supervisor_only_kernel_root_entries(&root, user_region_base),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn kernel_root_validation_rejects_inherited_user_accessible_entry() {
+        let user_region_base = VirtAddr::new(0x0000_4000_0000_0000);
+        let user_slot_index = ((user_region_base.as_u64() >> 39) & 0x1ff) as usize;
+        let mut root = PageTable::new();
+        root[user_slot_index].set_unused();
+        root[511].set_addr(
+            PhysAddr::new(0x3000),
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+        );
+
+        assert_eq!(
+            validate_supervisor_only_kernel_root_entries(&root, user_region_base),
+            Err("inherited kernel root entry remained user accessible")
+        );
     }
 
     #[cfg(feature = "m3-entry-self-test")]
