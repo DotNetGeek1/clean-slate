@@ -148,11 +148,23 @@ fn workspace_root() -> &'static Path {
 }
 
 fn run_command(command: &mut Command) -> Result<(), XtaskError> {
+    let command_display = format!(
+        "{} {}",
+        command.get_program().to_string_lossy(),
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     let status = command.status()?;
     if status.success() {
         Ok(())
     } else {
-        Err(XtaskError::CommandFailed(status.to_string()))
+        Err(XtaskError::CommandFailed {
+            command: command_display,
+            status: status.to_string(),
+        })
     }
 }
 
@@ -161,7 +173,7 @@ fn print_help() {
     println!("  run          Build kernel and launch QEMU");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  build        Build debug UEFI kernel only");
-    println!("  build-release Build release UEFI kernel only");
+    println!("  build-release  Build release UEFI kernel only");
 }
 
 #[derive(Debug)]
@@ -172,7 +184,7 @@ struct OvmfPaths {
 
 #[derive(Debug)]
 enum XtaskError {
-    CommandFailed(String),
+    CommandFailed { command: String, status: String },
     Io(std::io::Error),
     MissingFile(PathBuf),
     MissingOvmf,
@@ -181,7 +193,9 @@ enum XtaskError {
 impl Display for XtaskError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            XtaskError::CommandFailed(status) => write!(f, "command failed with status {status}"),
+            XtaskError::CommandFailed { command, status } => {
+                write!(f, "command `{command}` failed with status {status}")
+            }
             XtaskError::Io(error) => write!(f, "{error}"),
             XtaskError::MissingFile(path) => write!(f, "missing file: {}", path.display()),
             XtaskError::MissingOvmf => write!(
@@ -206,5 +220,11 @@ mod tests {
     fn kernel_debug_artifact_path_is_expected() {
         let artifact = kernel_artifact(false);
         assert!(artifact.ends_with("target/x86_64-unknown-uefi/debug/clean-slate-kernel.efi"));
+    }
+
+    #[test]
+    fn kernel_release_artifact_path_is_expected() {
+        let artifact = kernel_artifact(true);
+        assert!(artifact.ends_with("target/x86_64-unknown-uefi/release/clean-slate-kernel.efi"));
     }
 }
