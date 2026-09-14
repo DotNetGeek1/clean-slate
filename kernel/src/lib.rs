@@ -1406,9 +1406,7 @@ struct GdtState {
     code_selector: SegmentSelector,
     data_selector: SegmentSelector,
     user_sysret_selector_base: SegmentSelector,
-    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
     user_code_selector: SegmentSelector,
-    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
     user_data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
 }
@@ -1874,20 +1872,18 @@ fn initialize_gdt_and_tss() {
     let mut table = GlobalDescriptorTable::new();
     let code_selector = table.append(Descriptor::kernel_code_segment());
     let data_selector = table.append(Descriptor::kernel_data_segment());
+    // SYSRET in long mode derives user SS=STAR[63:48]+8 and user CS=STAR[63:48]+16.
+    // Keep this triplet contiguous in that order.
     let user_sysret_selector_base = table.append(Descriptor::user_code_segment());
-    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-    let user_code_selector = table.append(Descriptor::user_code_segment());
-    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
     let user_data_selector = table.append(Descriptor::user_data_segment());
+    let user_code_selector = table.append(Descriptor::user_code_segment());
     let tss_selector = table.append(Descriptor::tss_segment(tss_ref));
     *gdt_slot = Some(GdtState {
         table,
         code_selector,
         data_selector,
         user_sysret_selector_base,
-        #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
         user_code_selector,
-        #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
         user_data_selector,
         tss_selector,
     });
@@ -2507,6 +2503,11 @@ fn initialize_syscall_abi(kernel_stack_top: u64) -> Result<(), &'static str> {
     }
 
     let gdt_state = userspace_gdt_state()?;
+    validate_sysret_selector_triplet(
+        gdt_state.user_sysret_selector_base,
+        gdt_state.user_data_selector,
+        gdt_state.user_code_selector,
+    )?;
     let star = ((gdt_state.user_sysret_selector_base.0 as u64) << 48)
         | ((gdt_state.code_selector.0 as u64) << 32);
     unsafe {
@@ -2517,6 +2518,27 @@ fn initialize_syscall_abi(kernel_stack_top: u64) -> Result<(), &'static str> {
     write_msr(IA32_LSTAR_MSR, clean_slate_syscall_entry as usize as u64);
     write_msr(IA32_FMASK_MSR, SYSCALL_ENTRY_RFLAGS_MASK);
     write_msr(IA32_EFER_MSR, read_msr(IA32_EFER_MSR) | IA32_EFER_SCE);
+    Ok(())
+}
+
+fn validate_sysret_selector_triplet(
+    base: SegmentSelector,
+    user_data: SegmentSelector,
+    user_code: SegmentSelector,
+) -> Result<(), &'static str> {
+    let base_bits = base.0 as u64;
+    let expected_user_data = base_bits
+        .checked_add(8)
+        .ok_or("SYSRET selector base overflowed while validating SS offset")?;
+    let expected_user_code = base_bits
+        .checked_add(16)
+        .ok_or("SYSRET selector base overflowed while validating CS offset")?;
+    if (user_data.0 as u64) != expected_user_data {
+        return Err("GDT SYSRET user data selector was not base+8");
+    }
+    if (user_code.0 as u64) != expected_user_code {
+        return Err("GDT SYSRET user code selector was not base+16");
+    }
     Ok(())
 }
 
@@ -4622,6 +4644,36 @@ mod tests {
         assert_eq!(
             SYSCALL_ENTRY_RFLAGS_MASK & (0b11u64 << RFLAGS_IOPL_SHIFT),
             0b11u64 << RFLAGS_IOPL_SHIFT
+        );
+    }
+
+    #[test]
+    fn sysret_selector_triplet_requires_base_plus_offsets() {
+        let valid = validate_sysret_selector_triplet(
+            SegmentSelector(0x001b),
+            SegmentSelector(0x0023),
+            SegmentSelector(0x002b),
+        );
+        assert_eq!(valid, Ok(()));
+
+        let bad_data = validate_sysret_selector_triplet(
+            SegmentSelector(0x001b),
+            SegmentSelector(0x002b),
+            SegmentSelector(0x002b),
+        );
+        assert_eq!(
+            bad_data,
+            Err("GDT SYSRET user data selector was not base+8")
+        );
+
+        let bad_code = validate_sysret_selector_triplet(
+            SegmentSelector(0x001b),
+            SegmentSelector(0x0023),
+            SegmentSelector(0x0033),
+        );
+        assert_eq!(
+            bad_code,
+            Err("GDT SYSRET user code selector was not base+16")
         );
     }
 
