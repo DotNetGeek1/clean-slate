@@ -181,7 +181,7 @@ pub(crate) unsafe fn process_registry_mut() -> &'static mut ProcessRegistry {
 
 pub(super) fn userspace_process_root_frame(process_id: u64) -> Result<u64, &'static str> {
     let process = unsafe {
-        (&*process_registry_mut())
+        process_registry_mut()
             .get(process_id)
             .ok_or("userspace process id was not registered")?
     };

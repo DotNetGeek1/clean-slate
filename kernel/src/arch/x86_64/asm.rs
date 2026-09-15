@@ -15,6 +15,7 @@
 //! - statics `NEXT_TASK_STACK_POINTER`, `NEXT_TASK_ENTRY_POINT`
 //!   (`context_switch`), `SYSCALL_KERNEL_STACK_TOP`, `SYSCALL_SCRATCH_USER_RSP`
 //!   (this file).
+//!
 //! The block is assembled unconditionally; feature-gated Rust only decides
 //! which payload labels are referenced.
 

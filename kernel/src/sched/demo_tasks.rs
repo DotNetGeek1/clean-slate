@@ -134,7 +134,7 @@ fn task_exit() -> ! {
 
 fn emit_m2_pass_and_stop() -> ! {
     unsafe {
-        if !(&*scheduler_mut()).pass_emitted {
+        if !scheduler_mut().pass_emitted {
             scheduler_mut().pass_emitted = true;
             kernel_log_fmt(format_args!("[TIME] ticks={}\n", kernel_ticks()));
             kernel_log_line("[M2  ] PASS");
