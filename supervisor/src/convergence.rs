@@ -193,6 +193,15 @@ where
         Ok(())
     }
 
+    pub fn poll_lifecycle_event(
+        &mut self,
+        service: ServiceId,
+    ) -> Result<Option<LifecycleEvent>, ConvergedSupervisorError> {
+        self.supervisor
+            .poll_event(service)
+            .map_err(ConvergedSupervisorError::Supervisor)
+    }
+
     pub fn request_start(&mut self, service: ServiceId) -> Result<(), ConvergedSupervisorError> {
         self.ensure_start_ready(service)?;
         self.supervisor

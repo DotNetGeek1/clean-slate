@@ -199,7 +199,13 @@ cargo test -p clean-slate-supervisor restart_policy
 cargo xtask test-m4-restart-policy
 ```
 
-`ConvergedSupervisor` composes the M4.3 registry/control path with M4.4 health tracking, M4.5 dependency readiness, and bounded userspace restart policy (`RestartPolicy`, crash-loop backoff, `[SUP ] failure/restart/restarted/suppressed` markers). The `#36` lifecycle control path is invoked via `issue_restart_sequence` / `ControlRequestKind::Restart` then `Start`. Stale instance events remain rejected by the shared lifecycle state machine. Individual M4 self-test kernel features (`m4-supervisor-self-test`, `m4-crash-service-self-test`, etc.) remain separate boots; aggregate `cargo xtask test-m4` is tracked in #42.
+`ConvergedSupervisor` composes the M4.3 registry/control path with M4.4 health tracking, M4.5 dependency readiness, and bounded userspace restart policy (`RestartPolicy`, crash-loop backoff, `[SUP ] failure/restart/restarted/suppressed` markers). The `#36` lifecycle control path is invoked via `issue_restart_sequence` / `ControlRequestKind::Restart` then `Start`. Stale instance events remain rejected by the shared lifecycle state machine. For the authoritative M4.8 recovery acceptance (CPL3 converged supervisor, real lifecycle syscall transport, crash fixture, production teardown):
+
+```bash
+cargo xtask test-m4
+```
+
+The aggregate runs `test-m4-recovery` (QEMU) plus M4.6 host restart-policy tests, then prints `[M4  ] PASS`. Constituent `cargo xtask test-m4-recovery` expects ordered markers including `[SUP ]`, `[SVC ]`, `[HLTH]`, `[PROC] teardown pid=… resources=0`, `[TEST] unrelated workload progress=`, and `[M4  ] PASS`. Individual M4 self-test kernel features remain separate debugging boots.
 
 For the M4.7 supervised crash-service fixture (host tests + optional QEMU self-test):
 

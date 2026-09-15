@@ -82,6 +82,7 @@ declare_interrupt_entries!(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 ))]
 unsafe extern "C" {
@@ -92,6 +93,7 @@ unsafe extern "C" {
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m4-service-lifecycle-self-test"
 ))]
 unsafe extern "C" {

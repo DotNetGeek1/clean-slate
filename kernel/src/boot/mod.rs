@@ -91,6 +91,8 @@ use crate::selftest::m3_resources::start_userspace_resources_self_test;
 use crate::selftest::m3_syscall::start_userspace_syscall_self_test;
 #[cfg(feature = "m4-crash-service-self-test")]
 use crate::selftest::m4_crash_service::start_crash_service_self_test;
+#[cfg(feature = "m4-recovery-self-test")]
+use crate::selftest::m4_recovery::start_recovery_self_test;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
 use crate::selftest::m4_service_lifecycle::start_service_lifecycle_self_test;
 #[cfg(feature = "m4-supervisor-self-test")]
@@ -245,6 +247,14 @@ fn run_inner() -> Result<(), &'static str> {
         start_crash_service_self_test(allocator)
     }
 
+    #[cfg(feature = "m4-recovery-self-test")]
+    {
+        initialize_timer();
+        serial_write_line("[TIME] timer initialized");
+        report_timer_contract();
+        start_recovery_self_test(allocator)
+    }
+
     #[cfg(all(
         not(feature = "m1-self-test"),
         not(feature = "m2-double-fault-self-test"),
@@ -252,6 +262,7 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m3-address-space-self-test"),
         not(feature = "m3-resources-self-test"),
         not(feature = "m4-crash-service-self-test"),
+        not(feature = "m4-recovery-self-test"),
         not(feature = "m3-entry-self-test")
     ))]
     {

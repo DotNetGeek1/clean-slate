@@ -96,6 +96,8 @@ $AllTests = [ordered]@{
     "test-m4-crash-service" = @{ Aliases = @("m4-crash-service", "crash-service", "m4.7"); Description = "M4.7 supervised crash-service fixture acceptance"; Role = "Constituent" }
     "test-m4-service-lifecycle" = @{ Aliases = @("m4-service-lifecycle", "service-lifecycle", "m4.2"); Description = "M4.2 kernel service lifecycle control acceptance"; Role = "Constituent" }
     "test-m4-restart-policy"    = @{ Aliases = @("m4-restart-policy", "restart-policy", "m4.6"); Description = "M4.6 supervisor restart-policy convergence (host + userspace image build)"; Role = "Constituent" }
+    "test-m4"                   = @{ Aliases = @("m4", "m4.8"); Description = "M4 milestone gate (recovery QEMU boot + M4.6 host policy tests)"; Role = "Aggregate" }
+    "test-m4-recovery"          = @{ Aliases = @("m4-recovery", "recovery", "m4.8-qemu"); Description = "M4.8 authoritative recovery QEMU acceptance"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {

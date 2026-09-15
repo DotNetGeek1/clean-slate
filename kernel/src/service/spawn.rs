@@ -32,7 +32,10 @@ pub(crate) struct SpawnedServiceInstance {
     pub(crate) scheduler_slot: usize,
 }
 
-#[cfg(not(feature = "m4-service-lifecycle-self-test"))]
+#[cfg(not(any(
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m4-recovery-self-test"
+)))]
 pub(crate) fn launch_builtin_service(
     _allocator: &mut PageAllocator,
     _kernel_stack_top: u64,
@@ -42,7 +45,10 @@ pub(crate) fn launch_builtin_service(
     Err("built-in service launch requires a userspace self-test feature build")
 }
 
-#[cfg(feature = "m4-service-lifecycle-self-test")]
+#[cfg(any(
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m4-recovery-self-test"
+))]
 pub(crate) fn launch_builtin_service(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
@@ -57,6 +63,7 @@ pub(crate) fn launch_builtin_service(
     use crate::mm::address_space::create_process_address_space;
     use crate::mm::address_space::map_process_page;
     use crate::mm::paging::zero_page;
+    use crate::mm::PAGE_SIZE;
     use crate::mm::PHYSICAL_MEMORY_OFFSET;
     use crate::process::id_allocator::id_allocator_mut;
     use crate::process::process_registry_mut;

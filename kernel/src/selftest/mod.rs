@@ -23,6 +23,7 @@ pub(crate) mod m3_address_space;
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 ))]
 pub(crate) mod m3_entry;
@@ -34,6 +35,8 @@ pub(crate) mod m3_resources;
 pub(crate) mod m3_syscall;
 #[cfg(feature = "m4-crash-service-self-test")]
 pub(crate) mod m4_crash_service;
+#[cfg(feature = "m4-recovery-self-test")]
+pub(crate) mod m4_recovery;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
 pub(crate) mod m4_service_lifecycle;
 #[cfg(feature = "m4-supervisor-self-test")]
@@ -42,6 +45,7 @@ pub(crate) mod m4_supervisor;
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 ))]
 use crate::mm::PAGE_SIZE;
@@ -50,6 +54,7 @@ use crate::mm::PAGE_SIZE;
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 ))]
 pub(super) const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
@@ -57,6 +62,7 @@ pub(super) const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 ))]
 const USER_TEST_DATA_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE;
@@ -72,6 +78,17 @@ pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SI
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m3-ipc-self-test",
-    feature = "m4-supervisor-self-test"
+    feature = "m4-supervisor-self-test",
+    feature = "m4-recovery-self-test"
 ))]
 pub(super) const USER_TEST_PROCESS_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + (PAGE_SIZE * 2);
+#[cfg(feature = "m4-recovery-self-test")]
+pub(super) const RECOVERY_SUPERVISOR_MAX_CODE_PAGES: u64 = 8;
+#[cfg(feature = "m4-recovery-self-test")]
+pub(super) const RECOVERY_SUPERVISOR_BOOTSTRAP_ADDRESS: u64 =
+    USER_TEST_CODE_ADDRESS + RECOVERY_SUPERVISOR_MAX_CODE_PAGES * PAGE_SIZE;
+#[cfg(feature = "m4-recovery-self-test")]
+pub(super) const RECOVERY_SUPERVISOR_STACK_ADDRESS: u64 =
+    RECOVERY_SUPERVISOR_BOOTSTRAP_ADDRESS + PAGE_SIZE;
+#[cfg(feature = "m4-recovery-self-test")]
+pub(super) const RECOVERY_SUPERVISOR_STACK_PAGES: u64 = 4;

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "M4.3 userspace supervisor runtime and bounded service registry"
+build = "build.rs"
 
 [lib]
 path = "src/lib.rs"
@@ -17,6 +18,11 @@ required-features = ["userspace"]
 [[bin]]
 name = "clean-slate-supervisor-restart-policy-userspace"
 path = "src/bin/restart_policy_userspace.rs"
+required-features = ["userspace"]
+
+[[bin]]
+name = "clean-slate-supervisor-recovery-userspace"
+path = "src/bin/recovery_userspace.rs"
 required-features = ["userspace"]
 
 [features]

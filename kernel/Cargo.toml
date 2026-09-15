@@ -19,6 +19,7 @@ m3-ipc-self-test = ["m3-entry-self-test"]
 m4-crash-service-self-test = []
 m4-service-lifecycle-self-test = ["m3-entry-self-test"]
 m4-supervisor-self-test = ["m3-entry-self-test"]
+m4-recovery-self-test = []
 
 [lib]
 path = "src/lib.rs"

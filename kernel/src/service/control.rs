@@ -24,6 +24,7 @@ use clean_slate_service_lifecycle::TransitionError;
 use clean_slate_service_lifecycle::TransitionInput;
 
 const SERVICE_REGISTRY_CAPACITY: usize = 4;
+const SERVICE_PENDING_EVENTS: usize = 8;
 const SERVICE_TERMINATE_STATUS: u64 = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +78,8 @@ pub(crate) struct LifecycleControlResult {
 pub(crate) struct ServiceLifecycleController {
     capabilities: super::capability::LifecycleControlCapabilityTable,
     services: [ServiceRecord; SERVICE_REGISTRY_CAPACITY],
+    pending: [Option<LifecycleEvent>; SERVICE_PENDING_EVENTS],
+    pending_len: usize,
     next_scheduler_slot: usize,
     kernel_root_frame: u64,
     kernel_stack_top: u64,
@@ -87,6 +90,8 @@ impl ServiceLifecycleController {
         Self {
             capabilities: super::capability::LifecycleControlCapabilityTable::new(),
             services: [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY],
+            pending: [None; SERVICE_PENDING_EVENTS],
+            pending_len: 0,
             next_scheduler_slot: 2,
             kernel_root_frame: 0,
             kernel_stack_top: 0,
@@ -96,7 +101,103 @@ impl ServiceLifecycleController {
     pub(crate) fn clear(&mut self) {
         self.capabilities.clear();
         self.services = [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY];
+        self.pending = [None; SERVICE_PENDING_EVENTS];
+        self.pending_len = 0;
         self.next_scheduler_slot = 2;
+    }
+
+    fn push_pending(&mut self, event: LifecycleEvent) -> Result<(), LifecycleControlError> {
+        if self.pending_len >= SERVICE_PENDING_EVENTS {
+            return Err(LifecycleControlError::InvalidMessage(
+                clean_slate_service_lifecycle::DecodeError::BufferTooShort {
+                    actual: 0,
+                    required: 1,
+                },
+            ));
+        }
+        self.pending[self.pending_len] = Some(event);
+        self.pending_len += 1;
+        Ok(())
+    }
+
+    pub(crate) fn poll_pending_event(
+        &mut self,
+        service: ServiceId,
+    ) -> Result<Option<LifecycleEvent>, LifecycleControlError> {
+        for index in 0..self.pending_len {
+            let event = self.pending[index].expect("pending slot");
+            if event.instance.service == service {
+                self.pending[index] = None;
+                return Ok(Some(event));
+            }
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn notify_instance_ready(
+        &mut self,
+        service_id: ServiceId,
+    ) -> Result<(), LifecycleControlError> {
+        let record = self
+            .find_service_mut(service_id)
+            .ok_or(LifecycleControlError::UnknownService)?;
+        let live = record.live.ok_or(LifecycleControlError::ServiceNotLive)?;
+        let instance = ServiceInstanceId::new(
+            service_id,
+            live.generation,
+            ProcessId(live.pid),
+            DomainId(live.domain_id),
+        );
+        let (next_state, _) = apply_transition(
+            record.state,
+            record.authoritative_generation,
+            TransitionInput::Event(LifecycleEventKind::Ready),
+            Some(instance),
+        )
+        .map_err(LifecycleControlError::InvalidTransition)?;
+        record.state = next_state;
+        self.push_pending(LifecycleEvent::new(instance, LifecycleEventKind::Ready))
+    }
+
+    pub(crate) fn notify_instance_faulted(
+        &mut self,
+        service_id: ServiceId,
+        pid: u64,
+    ) -> Result<LifecycleEvent, LifecycleControlError> {
+        let record = self
+            .find_service_mut(service_id)
+            .ok_or(LifecycleControlError::UnknownService)?;
+        let live = record
+            .live
+            .take()
+            .ok_or(LifecycleControlError::ServiceNotLive)?;
+        if live.pid != pid {
+            return Err(LifecycleControlError::StaleInstance(
+                ServiceInstanceId::new(
+                    service_id,
+                    live.generation,
+                    ProcessId(pid),
+                    DomainId(live.domain_id),
+                ),
+            ));
+        }
+        let instance = ServiceInstanceId::new(
+            service_id,
+            live.generation,
+            ProcessId(live.pid),
+            DomainId(live.domain_id),
+        );
+        let (next_state, _) = apply_transition(
+            record.state,
+            record.authoritative_generation,
+            TransitionInput::Event(LifecycleEventKind::Faulted),
+            Some(instance),
+        )
+        .map_err(LifecycleControlError::InvalidTransition)?;
+        record.state = next_state;
+        let event = LifecycleEvent::new(instance, LifecycleEventKind::Faulted);
+        self.push_pending(event)?;
+        Ok(event)
     }
 
     pub(crate) fn configure_launch_context(
@@ -133,6 +234,19 @@ impl ServiceLifecycleController {
     ) -> Result<u64, &'static str> {
         self.capabilities
             .grant_lifecycle_control_capability(holder_pid)
+    }
+
+    pub(crate) fn authoritative_generation(
+        &self,
+        service: ServiceId,
+    ) -> Option<InstanceGeneration> {
+        self.find_service(service)
+            .map(|record| record.authoritative_generation)
+    }
+
+    pub(crate) fn live_pid(&self, service: ServiceId) -> Option<u64> {
+        self.find_service(service)
+            .and_then(|record| record.live.map(|live| live.pid))
     }
 
     fn find_service(&self, service: ServiceId) -> Option<&ServiceRecord> {
@@ -183,9 +297,27 @@ impl ServiceLifecycleController {
             .allocate_scheduler_slot()
             .map_err(LifecycleControlError::SpawnFailed)?;
         let generation = self.services[service_index].authoritative_generation;
-        let spawned =
+        let spawned = if service_id.0 == 0x0000_4100 {
+            #[cfg(feature = "m4-recovery-self-test")]
+            {
+                super::recovery_launch::spawn_crash_service(
+                    allocator,
+                    kernel_stack_top,
+                    scheduler_slot,
+                    service_id,
+                )
+                .map_err(LifecycleControlError::SpawnFailed)?
+            }
+            #[cfg(not(feature = "m4-recovery-self-test"))]
+            {
+                return Err(LifecycleControlError::SpawnFailed(
+                    "crash service launch requires m4-recovery-self-test",
+                ));
+            }
+        } else {
             launch_builtin_service(allocator, kernel_stack_top, scheduler_slot, service_id)
-                .map_err(LifecycleControlError::SpawnFailed)?;
+                .map_err(LifecycleControlError::SpawnFailed)?
+        };
         let instance = ServiceInstanceId::new(
             service_id,
             generation,
@@ -356,6 +488,7 @@ impl ServiceLifecycleController {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn validate_instance_handle(
         &self,
         instance: ServiceInstanceId,

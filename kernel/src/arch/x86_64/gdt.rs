@@ -122,6 +122,7 @@ pub(crate) fn userspace_gdt_state() -> Result<&'static GdtState, &'static str> {
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 ))]
 pub(crate) fn selector_rpl(selector: u64) -> u64 {
@@ -132,6 +133,7 @@ pub(crate) fn selector_rpl(selector: u64) -> u64 {
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 ))]
 #[cfg(test)]

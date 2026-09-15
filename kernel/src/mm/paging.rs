@@ -141,7 +141,8 @@ pub(super) fn leaf_page_flags_for_address(
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test"
+    feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test"
 ))]
 pub(crate) fn page_flags_for_address_in_root(
     root_frame: u64,
@@ -153,7 +154,8 @@ pub(crate) fn page_flags_for_address_in_root(
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test"
+    feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test"
 ))]
 pub(crate) fn leaf_page_flags_for_address_in_root(
     root_frame: u64,
@@ -248,6 +250,7 @@ mod tests {
         feature = "m3-address-space-self-test",
         feature = "m3-resources-self-test",
         feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
         feature = "m3-entry-self-test"
     ))]
     use super::*;
@@ -255,6 +258,7 @@ mod tests {
         feature = "m3-address-space-self-test",
         feature = "m3-resources-self-test",
         feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
         feature = "m3-entry-self-test"
     ))]
     use crate::selftest::USER_TEST_CODE_ADDRESS;
@@ -262,6 +266,7 @@ mod tests {
         feature = "m3-address-space-self-test",
         feature = "m3-resources-self-test",
         feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
         feature = "m3-entry-self-test"
     ))]
     use x86_64::PhysAddr;
@@ -270,6 +275,7 @@ mod tests {
         feature = "m3-address-space-self-test",
         feature = "m3-resources-self-test",
         feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
         feature = "m3-entry-self-test",
         feature = "m3-syscall-self-test"
     ))]

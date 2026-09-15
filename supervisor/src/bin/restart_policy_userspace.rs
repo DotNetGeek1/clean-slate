@@ -4,8 +4,8 @@
 #![no_main]
 
 use clean_slate_service_lifecycle::{
-    DomainId, InstanceGeneration, LifecycleEvent, LifecycleEventKind, ProcessId, ServiceId,
-    ServiceInstanceId, LivenessConfig,
+    DomainId, InstanceGeneration, LifecycleEvent, LifecycleEventKind, LivenessConfig, ProcessId,
+    ServiceId, ServiceInstanceId,
 };
 use clean_slate_supervisor::{
     BoundedRestart, ConvergedSupervisor, DiagnosticSink, FakeLifecycleControl,
@@ -101,9 +101,7 @@ pub extern "C" fn _start() -> ! {
         LivenessConfig::new(100),
     );
 
-    if supervisor.start().is_err()
-        || supervisor.register_service(service, policy).is_err()
-    {
+    if supervisor.start().is_err() || supervisor.register_service(service, policy).is_err() {
         unsafe {
             core::arch::asm!("ud2", options(noreturn));
         }
@@ -122,11 +120,7 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    ipc_send(
-        config.console_capability,
-        b"[M4.6] PASS\n",
-    )
-    .ok();
+    ipc_send(config.console_capability, b"[M4.6] PASS\n").ok();
 
     unsafe {
         core::arch::asm!("int 0x80", options(noreturn));

@@ -14,6 +14,7 @@ use core::mem::size_of;
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 ))]
 use crate::arch::x86_64::asm::clean_slate_interrupt_128;
@@ -37,6 +38,7 @@ use crate::arch::x86_64::gdt::initialize_gdt_and_tss;
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 ))]
 use crate::arch::x86_64::USER_TEST_VECTOR;
@@ -73,6 +75,7 @@ impl IdtEntry {
         feature = "m3-address-space-self-test",
         feature = "m3-resources-self-test",
         feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
         feature = "m3-entry-self-test"
     ))]
     fn set_user_handler(&mut self, handler: unsafe extern "C" fn()) {
@@ -163,6 +166,7 @@ pub(crate) fn install_interrupt_handlers() {
             feature = "m3-address-space-self-test",
             feature = "m3-resources-self-test",
             feature = "m4-crash-service-self-test",
+            feature = "m4-recovery-self-test",
             feature = "m3-entry-self-test"
         ))]
         IDT.entries[USER_TEST_VECTOR].set_user_handler(clean_slate_interrupt_128);

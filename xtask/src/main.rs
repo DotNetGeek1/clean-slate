@@ -24,6 +24,24 @@ const M3_IPC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_RESOURCES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_CRASH_SERVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M4_SUPERVISOR_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M4_RECOVERY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+const M4_RECOVERY_ACCEPTANCE_MARKERS: [&str; 15] = [
+    "[CAP ] supervisor console capability granted pid=1",
+    "[SUP ] started pid=1",
+    "[DEP ] service=16640 ready",
+    "[SVC ] launch service=16640 pid=",
+    "[HLTH] service=16640 healthy gen=1",
+    "[TEST] crash-service injecting fault",
+    "[PROC] fault pid=",
+    "[SUP ] failure service=16640 pid=",
+    "[PROC] teardown pid=",
+    "[SUP ] restart service=16640 attempt=1",
+    "[SVC ] launch service=16640 pid=",
+    "[HLTH] service=16640 healthy gen=2",
+    "[TEST] unrelated workload progress=",
+    "[SUP ] stale-instance ignored",
+    "[M4  ] PASS",
+];
 const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[BOOT] UEFI memory map acquired",
     "[BOOT] ExitBootServices OK",
@@ -192,6 +210,8 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM4ServiceLifecycle => run_m4_service_lifecycle_acceptance(),
         ParsedCommand::TestM4Supervisor => run_m4_supervisor_acceptance(),
         ParsedCommand::TestM4RestartPolicy => run_m4_restart_policy_acceptance(),
+        ParsedCommand::TestM4 => run_m4_acceptance(),
+        ParsedCommand::TestM4Recovery => run_m4_recovery_acceptance(),
         ParsedCommand::RunGdb => run_vm_with_gdb(false),
         ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
         ParsedCommand::Build => build_kernel(false, false, &[]),
@@ -370,6 +390,47 @@ fn run_m4_supervisor_acceptance() -> Result<(), XtaskError> {
             M4_SUPERVISOR_ACCEPTANCE_TIMEOUT,
         )),
     )
+}
+
+fn build_recovery_userspace(release: bool) -> Result<(), XtaskError> {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build")
+        .arg("-p")
+        .arg("clean-slate-supervisor")
+        .arg("--bin")
+        .arg("clean-slate-supervisor-recovery-userspace")
+        .arg("--features")
+        .arg("userspace")
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,compiler_builtins");
+    if release {
+        cmd.arg("--release");
+    }
+    cmd.env("RUSTC_BOOTSTRAP", "1");
+    run_command(&mut cmd)?;
+    Ok(())
+}
+
+fn run_m4_recovery_acceptance() -> Result<(), XtaskError> {
+    build_recovery_userspace(true)?;
+    run_vm_inner(
+        false,
+        false,
+        &["m4-recovery-self-test"],
+        Some((
+            &M4_RECOVERY_ACCEPTANCE_MARKERS,
+            M4_RECOVERY_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn run_m4_acceptance() -> Result<(), XtaskError> {
+    run_m4_recovery_acceptance()?;
+    run_m4_restart_policy_acceptance()?;
+    println!("[M4  ] PASS");
+    Ok(())
 }
 
 fn run_m4_restart_policy_acceptance() -> Result<(), XtaskError> {
@@ -803,6 +864,8 @@ fn print_help() {
     println!("  test-m4-service-lifecycle Build the M4.2 service lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m4-supervisor Build the M4.3 supervisor userspace image and QEMU integration self-test");
     println!("  test-m4-restart-policy Run M4.6 host restart-policy convergence tests and build the CPL3 image");
+    println!("  test-m4-recovery Build the M4.8 recovery supervisor kernel boot and validate ordered markers");
+    println!("  test-m4       M4 milestone gate: recovery QEMU boot plus M4.6 host policy tests");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
     println!("  build        Build debug UEFI kernel only");
@@ -831,6 +894,8 @@ enum ParsedCommand {
     TestM4ServiceLifecycle,
     TestM4Supervisor,
     TestM4RestartPolicy,
+    TestM4,
+    TestM4Recovery,
     RunGdb,
     RunGdbEntry,
     Build,
@@ -855,6 +920,8 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m4-service-lifecycle" => ParsedCommand::TestM4ServiceLifecycle,
         Some(cmd) if cmd == "test-m4-supervisor" => ParsedCommand::TestM4Supervisor,
         Some(cmd) if cmd == "test-m4-restart-policy" => ParsedCommand::TestM4RestartPolicy,
+        Some(cmd) if cmd == "test-m4" => ParsedCommand::TestM4,
+        Some(cmd) if cmd == "test-m4-recovery" => ParsedCommand::TestM4Recovery,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
         Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
         Some(cmd) if cmd == "build" => ParsedCommand::Build,

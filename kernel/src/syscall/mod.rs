@@ -34,6 +34,8 @@ use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::interrupt::timer::kernel_ticks;
+#[cfg(feature = "m4-recovery-self-test")]
+use crate::interrupt::timer::kernel_ticks;
 use crate::ipc::endpoint_table_mut;
 use crate::ipc::IpcEndpointKind;
 use crate::ipc::IpcSendError;
@@ -42,10 +44,13 @@ use crate::ipc::IPC_MAX_MESSAGE_BYTES;
 use crate::ipc::USERSPACE_IPC_TEST_PID;
 #[cfg(feature = "m3-ipc-self-test")]
 use crate::ipc::USERSPACE_IPC_UNAUTHORIZED_TEST_PID;
-#[cfg(feature = "m4-service-lifecycle-self-test")]
-use crate::mm::frame_allocator::PageAllocator;
-#[cfg(feature = "m4-supervisor-self-test")]
+#[cfg(any(feature = "m4-supervisor-self-test", feature = "m4-recovery-self-test"))]
 use crate::ipc::USERSPACE_SUPERVISOR_TEST_PID;
+#[cfg(any(
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m4-recovery-self-test"
+))]
+use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::user_mapping::validate_user_pointer_range;
 #[cfg(feature = "m3-syscall-self-test")]
@@ -70,14 +75,26 @@ use crate::selftest::m3_syscall::SYSCALL_DF_SANITIZED_OBSERVED;
 use crate::selftest::m3_syscall::SYSCALL_PASS_MARKER;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::m3_syscall::SYSCALL_TEST_REQUIRED_CALLS;
+#[cfg(feature = "m4-recovery-self-test")]
+use crate::selftest::m4_recovery::observe_recovery_supervisor_line;
+#[cfg(feature = "m4-recovery-self-test")]
+use crate::selftest::m4_recovery::recovery_complete_and_exit;
+#[cfg(feature = "m4-recovery-self-test")]
+use crate::selftest::m4_recovery::RECOVERY_BOOTSTRAP;
 #[cfg(feature = "m4-supervisor-self-test")]
 use crate::selftest::m4_supervisor::observe_supervisor_console_line;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::USER_TEST_CODE_ADDRESS;
-#[cfg(feature = "m4-service-lifecycle-self-test")]
+#[cfg(any(
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m4-recovery-self-test"
+))]
 use crate::service::service_lifecycle_controller_mut;
 use crate::service::LifecycleControlError;
-#[cfg(feature = "m4-service-lifecycle-self-test")]
+#[cfg(any(
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m4-recovery-self-test"
+))]
 use crate::sync::global_cell::GlobalCell;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::syscall::validation::maybe_validate_syscall_entry_flags;
@@ -85,8 +102,13 @@ use crate::syscall::validation::maybe_validate_syscall_entry_flags;
 use crate::syscall::validation::syscall_return_rflags_match;
 use crate::syscall::validation::validate_canonical_user_return_state;
 use crate::syscall::validation::validate_sysret_selector_triplet;
-#[cfg(feature = "m4-service-lifecycle-self-test")]
+#[cfg(any(
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m4-recovery-self-test"
+))]
 use clean_slate_service_lifecycle::LifecycleMessage;
+#[cfg(feature = "m4-recovery-self-test")]
+use clean_slate_service_lifecycle::ServiceId;
 use clean_slate_service_lifecycle::LIFECYCLE_WIRE_MAX_BYTES;
 use core::ptr;
 #[cfg(feature = "m3-syscall-self-test")]
@@ -106,6 +128,7 @@ const SYSCALL_NR_READ_U64: u64 = 1;
 const SYSCALL_NR_FINISH: u64 = 2;
 const SYSCALL_NR_IPC_SEND: u64 = 3;
 const SYSCALL_NR_LIFECYCLE_CONTROL: u64 = 4;
+const SYSCALL_NR_LIFECYCLE_POLL: u64 = 5;
 const SYSCALL_ENOSYS: u64 = u64::MAX - 37;
 pub(super) const SYSCALL_EACCES: u64 = u64::MAX - 12;
 const SYSCALL_EINVAL: u64 = u64::MAX - 21;
@@ -186,6 +209,10 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
                 if sender_pid == USERSPACE_SUPERVISOR_TEST_PID {
                     observe_supervisor_console_line(sender_pid, message.trim_end());
                 }
+                #[cfg(feature = "m4-recovery-self-test")]
+                if sender_pid == USERSPACE_SUPERVISOR_TEST_PID {
+                    observe_recovery_supervisor_line(sender_pid, message.trim_end());
+                }
             }
             #[cfg(feature = "m3-ipc-self-test")]
             if let Some(state) = unsafe { (&mut *USERSPACE_IPC_TEST_STATE.get()).as_mut() } {
@@ -222,16 +249,25 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
     }
 }
 
-#[cfg(feature = "m4-service-lifecycle-self-test")]
+#[cfg(any(
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m4-recovery-self-test"
+))]
 static SERVICE_LIFECYCLE_SYSCALL_ALLOCATOR: GlobalCell<Option<PageAllocator>> =
     GlobalCell::new(None);
 
-#[cfg(feature = "m4-service-lifecycle-self-test")]
+#[cfg(any(
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m4-recovery-self-test"
+))]
 pub(super) fn service_lifecycle_syscall_allocator_mut() -> &'static mut Option<PageAllocator> {
     unsafe { &mut *SERVICE_LIFECYCLE_SYSCALL_ALLOCATOR.get() }
 }
 
-#[cfg(feature = "m4-service-lifecycle-self-test")]
+#[cfg(any(
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m4-recovery-self-test"
+))]
 pub(super) fn install_service_lifecycle_syscall_allocator(allocator: PageAllocator) {
     *service_lifecycle_syscall_allocator_mut() = Some(allocator);
 }
@@ -297,12 +333,18 @@ fn handle_syscall_lifecycle_control(frame: &mut SyscallContext) {
     unsafe {
         ptr::copy_nonoverlapping(frame.rsi as *const u8, message.as_mut_ptr(), message_length);
     }
-    #[cfg(not(feature = "m4-service-lifecycle-self-test"))]
+    #[cfg(not(any(
+        feature = "m4-service-lifecycle-self-test",
+        feature = "m4-recovery-self-test"
+    )))]
     {
         let _ = (sender_pid, message);
         frame.rax = SYSCALL_ENOSYS;
     }
-    #[cfg(feature = "m4-service-lifecycle-self-test")]
+    #[cfg(any(
+        feature = "m4-service-lifecycle-self-test",
+        feature = "m4-recovery-self-test"
+    ))]
     {
         let allocator = unsafe { (&mut *SERVICE_LIFECYCLE_SYSCALL_ALLOCATOR.get()).as_mut() };
         let Some(allocator) = allocator else {
@@ -325,6 +367,37 @@ fn handle_syscall_lifecycle_control(frame: &mut SyscallContext) {
             }
             Err(error) => frame.rax = lifecycle_control_syscall_error(error),
         }
+    }
+}
+
+#[cfg(any(
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m4-recovery-self-test"
+))]
+fn handle_syscall_lifecycle_poll(frame: &mut SyscallContext) {
+    let service = ServiceId(frame.rdi as u32);
+    if validate_user_pointer_range(frame.r10, frame.r8).is_err() || frame.r8 < 33 {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    let _caller = match current_syscall_caller_pid() {
+        Ok(pid) => pid,
+        Err(_) => {
+            frame.rax = SYSCALL_EACCES;
+            return;
+        }
+    };
+    let controller = unsafe { service_lifecycle_controller_mut() };
+    match controller.poll_pending_event(service) {
+        Ok(Some(event)) => {
+            let encoded = LifecycleMessage::LifecycleEvent(event).encode();
+            unsafe {
+                ptr::copy_nonoverlapping(encoded.as_ptr(), frame.r10 as *mut u8, encoded.len());
+            }
+            frame.rax = encoded.len() as u64;
+        }
+        Ok(None) => frame.rax = 0,
+        Err(error) => frame.rax = lifecycle_control_syscall_error(error),
     }
 }
 
@@ -373,10 +446,31 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
             }
             frame.rax = 0;
         }
-        #[cfg(not(feature = "m3-syscall-self-test"))]
+        #[cfg(all(
+            not(feature = "m3-syscall-self-test"),
+            not(feature = "m4-recovery-self-test")
+        ))]
         SYSCALL_NR_FINISH => frame.rax = SYSCALL_ENOSYS,
+        #[cfg(feature = "m4-recovery-self-test")]
+        SYSCALL_NR_FINISH => {
+            if let Some(bootstrap) = unsafe { (&mut *RECOVERY_BOOTSTRAP.get()).as_mut() } {
+                bootstrap.kernel_ticks = kernel_ticks();
+            }
+            recovery_complete_and_exit();
+            frame.rax = 0;
+        }
         SYSCALL_NR_IPC_SEND => handle_syscall_ipc_send(frame),
         SYSCALL_NR_LIFECYCLE_CONTROL => handle_syscall_lifecycle_control(frame),
+        #[cfg(any(
+            feature = "m4-service-lifecycle-self-test",
+            feature = "m4-recovery-self-test"
+        ))]
+        SYSCALL_NR_LIFECYCLE_POLL => handle_syscall_lifecycle_poll(frame),
+        #[cfg(not(any(
+            feature = "m4-service-lifecycle-self-test",
+            feature = "m4-recovery-self-test"
+        )))]
+        SYSCALL_NR_LIFECYCLE_POLL => frame.rax = SYSCALL_ENOSYS,
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 
