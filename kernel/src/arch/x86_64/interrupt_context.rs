@@ -58,7 +58,12 @@ impl InterruptContext {
     };
 }
 
+/// The `iretq` frame used to enter ring 3: the saved-register block followed
+/// by the user `RSP`/`SS` pair the CPU pops after `RIP`/`CS`/`RFLAGS`.
+/// `repr(C)` is required because the frame is written raw onto a kernel stack
+/// and consumed by hardware, not by Rust.
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub(crate) struct UserspaceEntryFrame {
     // Written by `context_switch::build_userspace_entry_frame` and consumed by
@@ -113,5 +118,23 @@ mod tests {
         assert_eq!(core::mem::offset_of!(SyscallContext, user_rip), 104);
         assert_eq!(core::mem::offset_of!(SyscallContext, user_rflags), 112);
         assert_eq!(core::mem::offset_of!(SyscallContext, user_rsp), 120);
+    }
+
+    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+    #[test]
+    fn userspace_entry_frame_layout_matches_iretq_contract() {
+        // InterruptContext (15 GPRs + vector + error_code + rip/cs/rflags)
+        // followed immediately by the user RSP/SS pair that `iretq` pops.
+        assert_eq!(size_of::<InterruptContext>(), 20 * size_of::<u64>());
+        assert_eq!(size_of::<UserspaceEntryFrame>(), 22 * size_of::<u64>());
+        assert_eq!(core::mem::offset_of!(UserspaceEntryFrame, interrupt), 0);
+        assert_eq!(
+            core::mem::offset_of!(UserspaceEntryFrame, user_stack_pointer),
+            size_of::<InterruptContext>()
+        );
+        assert_eq!(
+            core::mem::offset_of!(UserspaceEntryFrame, user_stack_segment),
+            size_of::<InterruptContext>() + 8
+        );
     }
 }
