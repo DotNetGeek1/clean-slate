@@ -232,6 +232,18 @@ M3.4 separates process ownership from thread scheduling state:
 
 PID/TID assignment is monotonic and non-reusing for the life of a boot session. On userspace faults, ownership-aware diagnostics identify the faulting PID and the kernel transitions that process/thread through faulted → exited → reaped cleanup while preserving kernel control flow and unrelated runnable work.
 
+## M3.5 initial capability-authorized IPC direction
+
+The first IPC primitive should keep policy narrow and explicit:
+
+- kernel-owned endpoint objects have explicit create/teardown lifecycle;
+- send permission is represented by an endpoint capability handle bound to one PID;
+- syscall-side handle lookup validates slot, generation, and endpoint identity so stale handles cannot silently name reused objects;
+- bounded message length and userspace pointer-range checks happen before any kernel dereference/copy;
+- endpoint teardown revokes outstanding capabilities by generation, making later sends fail deterministically.
+
+This initial implementation uses copying and intentionally defers shared-memory/zero-copy optimization to later milestones.
+
 ## Language strategy
 
 The kernel and first-party low-level services should primarily use Rust.

@@ -109,6 +109,14 @@ cargo xtask test-m3-lifecycle
 
 This command builds the kernel with the M3 userspace address-space self-test path, boots QEMU headlessly, and validates ownership-aware process/thread lifecycle markers including deterministic creation (`[PROC] created pid=... tid=...`), fault attribution (`[PROC] fault pid=...`), and teardown (`[PROC] pid=... exited status=...`) before `[M3.4] PASS`.
 
+For the bounded M3.5 capability-authorized IPC acceptance path:
+
+```bash
+cargo xtask test-m3-ipc
+```
+
+This command builds the kernel with the M3.5 IPC self-test enabled, boots QEMU headlessly, and validates ordered capability and IPC markers proving explicit grant (`[CAP ] endpoint capability granted pid=1`), successful bounded send (`[IPC ] send OK bytes=...`), deterministic unauthorized denial (`[CAP ] unauthorized send denied pid=2`), and endpoint lifecycle completion before `[M3.5] PASS`.
+
 To launch paused for debugger attach:
 
 ```bash
