@@ -33,6 +33,6 @@ pub(crate) fn spawn_crash_service(
     scheduler_slot: usize,
     service: ServiceId,
 ) -> Result<SpawnedServiceInstance, &'static str> {
-    let hook = unsafe { (*CRASH_SPAWN_HOOK.get()) }.ok_or("crash spawn hook was not installed")?;
+    let hook = unsafe { *CRASH_SPAWN_HOOK.get() }.ok_or("crash spawn hook was not installed")?;
     hook(allocator, kernel_stack_top, scheduler_slot, service)
 }

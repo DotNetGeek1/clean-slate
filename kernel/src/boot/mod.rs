@@ -49,6 +49,7 @@ use crate::process::process_registry_mut;
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 )))]
 use crate::sched::dispatch::initialize_scheduler;
@@ -59,6 +60,7 @@ use crate::sched::dispatch::initialize_scheduler;
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 )))]
 use crate::sched::dispatch::start_scheduler;

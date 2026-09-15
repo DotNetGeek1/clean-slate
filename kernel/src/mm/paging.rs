@@ -144,6 +144,13 @@ pub(super) fn leaf_page_flags_for_address(
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test"
 ))]
+#[cfg_attr(
+    any(
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn page_flags_for_address_in_root(
     root_frame: u64,
     address: VirtAddr,
@@ -157,6 +164,13 @@ pub(crate) fn page_flags_for_address_in_root(
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test"
 ))]
+#[cfg_attr(
+    any(
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn leaf_page_flags_for_address_in_root(
     root_frame: u64,
     address: VirtAddr,

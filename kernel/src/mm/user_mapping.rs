@@ -84,6 +84,13 @@ pub(crate) fn unmap_userspace_page(
     feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 ))]
+#[cfg_attr(
+    any(
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn relevant_userspace_leaf_flags(flags: PageTableFlags) -> PageTableFlags {
     flags
         & (PageTableFlags::PRESENT

@@ -227,12 +227,7 @@ fn write_u64(image: &mut [u8], load_base: u64, vaddr: u64, value: u64) -> Result
     Ok(())
 }
 
-fn section_header(
-    elf: &[u8],
-    shoff: u64,
-    shentsize: u64,
-    index: u64,
-) -> Result<&[u8], String> {
+fn section_header(elf: &[u8], shoff: u64, shentsize: u64, index: u64) -> Result<&[u8], String> {
     let start = shoff + index * shentsize;
     let end = start + shentsize;
     if end > elf.len() as u64 {
