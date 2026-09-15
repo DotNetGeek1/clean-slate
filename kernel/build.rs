@@ -9,12 +9,7 @@ fn main() {
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let profile = env::var("PROFILE").expect("PROFILE");
-    let elf = manifest_dir
-        .join("..")
-        .join("target")
-        .join("x86_64-unknown-none")
-        .join(profile)
-        .join("clean-slate-supervisor-userspace");
+    let elf = supervisor_userspace_elf(&manifest_dir, &profile);
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let raw_image = out_dir.join("supervisor_userspace.bin");
 
@@ -45,6 +40,27 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest_dir.join("build.rs").display()
     );
+}
+
+fn supervisor_userspace_elf(manifest_dir: &Path, profile: &str) -> PathBuf {
+    let base = manifest_dir
+        .join("..")
+        .join("target")
+        .join("x86_64-unknown-none");
+    for profile in [profile, "release"] {
+        let candidate = base.join(profile).join("clean-slate-supervisor-userspace");
+        if candidate.is_file() {
+            return candidate;
+        }
+        if env::consts::OS == "windows" {
+            let mut with_exe = candidate.clone();
+            with_exe.set_extension("exe");
+            if with_exe.is_file() {
+                return with_exe;
+            }
+        }
+    }
+    base.join(profile).join("clean-slate-supervisor-userspace")
 }
 
 fn llvm_objcopy_path() -> PathBuf {

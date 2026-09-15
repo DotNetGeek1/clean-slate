@@ -137,12 +137,12 @@ impl<const N: usize> DependencyGraph<N> {
             .metadata(service)
             .ok_or(DependencyGraphError::UnknownService)?;
         for edge in metadata_edges(metadata) {
-            let record = lifecycle.record(edge.depends_on).ok_or(
+            let record = lifecycle.record(edge.depends_on).map_err(|_| {
                 DependencyGraphError::UnknownDependency {
                     service,
                     depends_on: edge.depends_on,
-                },
-            )?;
+                }
+            })?;
             if let Some(reason) = edge_blocks_start(edge, record, health) {
                 return Ok(StartReadiness::Blocked(reason));
             }

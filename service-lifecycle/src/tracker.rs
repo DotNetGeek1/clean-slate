@@ -117,11 +117,6 @@ impl<const N: usize> ServiceLifecycleTracker<N> {
             .ok_or(TrackerError::UnknownService)
     }
 
-    pub fn record(&self, service: ServiceId) -> Option<&ServiceLifecycleRecord> {
-        self.find(service)
-            .and_then(|index| self.records[index].as_ref())
-    }
-
     fn find(&self, service: ServiceId) -> Option<usize> {
         self.records
             .iter()

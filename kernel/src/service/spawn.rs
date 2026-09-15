@@ -1,13 +1,7 @@
 //! Built-in supervised service images launched through production M3 process APIs.
 
 use crate::mm::frame_allocator::PageAllocator;
-#[cfg(any(
-    feature = "m4-service-lifecycle-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m3-ipc-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m3-address-space-self-test"
-))]
+#[cfg(feature = "m4-service-lifecycle-self-test")]
 use crate::mm::PAGE_SIZE;
 use clean_slate_service_lifecycle::ServiceId;
 
@@ -38,13 +32,7 @@ pub(crate) struct SpawnedServiceInstance {
     pub(crate) scheduler_slot: usize,
 }
 
-#[cfg(not(any(
-    feature = "m4-service-lifecycle-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m3-ipc-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m3-address-space-self-test"
-)))]
+#[cfg(not(feature = "m4-service-lifecycle-self-test"))]
 pub(crate) fn launch_builtin_service(
     _allocator: &mut PageAllocator,
     _kernel_stack_top: u64,
@@ -54,13 +42,7 @@ pub(crate) fn launch_builtin_service(
     Err("built-in service launch requires a userspace self-test feature build")
 }
 
-#[cfg(any(
-    feature = "m4-service-lifecycle-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m3-ipc-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m3-address-space-self-test"
-))]
+#[cfg(feature = "m4-service-lifecycle-self-test")]
 pub(crate) fn launch_builtin_service(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
