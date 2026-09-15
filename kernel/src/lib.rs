@@ -80,6 +80,20 @@ const RFLAGS_IOPL_SHIFT: u64 = 12;
 const RFLAGS_NESTED_TASK_BIT: u64 = 14;
 const RFLAGS_RESUME_FLAG_BIT: u64 = 16;
 const RFLAGS_ALIGNMENT_CHECK_BIT: u64 = 18;
+const RFLAGS_CARRY_FLAG_BIT: u64 = 0;
+const RFLAGS_PARITY_FLAG_BIT: u64 = 2;
+const RFLAGS_AUXILIARY_CARRY_FLAG_BIT: u64 = 4;
+const RFLAGS_ZERO_FLAG_BIT: u64 = 6;
+const RFLAGS_SIGN_FLAG_BIT: u64 = 7;
+const RFLAGS_OVERFLOW_FLAG_BIT: u64 = 11;
+/// Arithmetic status flags that user code legitimately changes between syscalls
+/// (e.g. via `cmp`/`test`); they must be ignored when validating return RFLAGS.
+const RFLAGS_STATUS_FLAGS_MASK: u64 = (1u64 << RFLAGS_CARRY_FLAG_BIT)
+    | (1u64 << RFLAGS_PARITY_FLAG_BIT)
+    | (1u64 << RFLAGS_AUXILIARY_CARRY_FLAG_BIT)
+    | (1u64 << RFLAGS_ZERO_FLAG_BIT)
+    | (1u64 << RFLAGS_SIGN_FLAG_BIT)
+    | (1u64 << RFLAGS_OVERFLOW_FLAG_BIT);
 const SYSCALL_ENTRY_RFLAGS_MASK: u64 = (1u64 << RFLAGS_TRAP_FLAG_BIT)
     | (1u64 << RFLAGS_INTERRUPT_ENABLE_BIT)
     | (1u64 << RFLAGS_DIRECTION_FLAG_BIT)
@@ -118,7 +132,7 @@ const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
 const USER_TEST_DATA_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE;
-#[cfg(feature = "m3-address-space-self-test")]
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 const USER_TEST_PROCESS_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + (PAGE_SIZE * 2);
 #[cfg(feature = "m3-address-space-self-test")]
 const USER_TEST_PROCESS_ONE_PRIVATE_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + (PAGE_SIZE * 3);
@@ -165,12 +179,19 @@ const IPC_TEST_MESSAGE: &[u8] = b"hello from pid 1";
 const IPC_MAX_MESSAGE_BYTES: usize = 64;
 const IPC_ENDPOINT_CAPACITY: usize = 4;
 const IPC_CAPABILITY_CAPACITY: usize = 8;
+#[cfg(any(feature = "m3-ipc-self-test", test))]
 const USERSPACE_IPC_TEST_PID: u64 = 1;
+#[cfg(any(feature = "m3-ipc-self-test", test))]
 const USERSPACE_IPC_UNAUTHORIZED_TEST_PID: u64 = 2;
+#[cfg(feature = "m3-ipc-self-test")]
 const USERSPACE_IPC_TEST_PROCESS_COUNT: usize = 2;
 const KERNEL_PROCESS_ID: u64 = 0;
 const PROCESS_REGISTRY_CAPACITY: usize = 8;
 
+// Process/thread lifecycle, IPC, and scheduler infrastructure below is only
+// exercised end-to-end by the M3 self-test features today; the normal boot path
+// will pick it up in later milestones.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProcessState {
     Empty,
@@ -183,6 +204,7 @@ enum ProcessState {
     Reaped,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ThreadState {
     Empty,
@@ -225,6 +247,7 @@ impl Process {
     };
 }
 
+#[allow(dead_code)]
 fn begin_thread_exit(
     process: &mut Process,
     thread: &mut Thread,
@@ -257,6 +280,7 @@ fn begin_thread_exit(
     Ok(false)
 }
 
+#[allow(dead_code)]
 fn reap_process(process: &mut Process, thread: &mut Thread) -> Result<(), &'static str> {
     if thread.owner_process_id != process.id {
         return Err("thread owner did not match process during reap");
@@ -272,6 +296,7 @@ fn reap_process(process: &mut Process, thread: &mut Thread) -> Result<(), &'stat
     Ok(())
 }
 
+#[allow(dead_code)]
 fn finalize_process_exit(process: &mut Process, status: u64) -> Result<(), &'static str> {
     if process.live_threads != 0 {
         return Err("process could not finalize exit while threads remained");
@@ -285,6 +310,7 @@ struct ProcessRegistry {
     processes: [Process; PROCESS_REGISTRY_CAPACITY],
 }
 
+#[allow(dead_code)]
 impl ProcessRegistry {
     const fn new() -> Self {
         Self {
@@ -334,6 +360,7 @@ impl ProcessRegistry {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IpcEndpointState {
     Vacant,
@@ -389,6 +416,7 @@ struct EndpointCapabilityHandleParts {
     endpoint_generation: u16,
 }
 
+#[allow(dead_code)]
 impl EndpointCapabilityHandleParts {
     fn encode(self) -> u64 {
         u64::from(self.capability_slot)
@@ -421,6 +449,7 @@ struct IpcEndpointTable {
     capabilities: [EndpointCapability; IPC_CAPABILITY_CAPACITY],
 }
 
+#[allow(dead_code)]
 impl IpcEndpointTable {
     const fn new() -> Self {
         Self {
@@ -616,6 +645,7 @@ struct IdAllocator {
     next_tid: u64,
 }
 
+#[allow(dead_code)]
 impl IdAllocator {
     const fn new() -> Self {
         Self {
@@ -1680,6 +1710,7 @@ struct Scheduler {
     pass_emitted: bool,
 }
 
+#[allow(dead_code)]
 impl Scheduler {
     const fn new() -> Self {
         Self {
@@ -2432,7 +2463,7 @@ clean_slate_syscall_entry:
     push rbx
     push rdx
     push rax
-    mov rdi, rsp
+    mov rcx, rsp
     mov r12, rsp
     and r12, 8
     sub rsp, 32
@@ -2830,6 +2861,7 @@ unsafe fn free_frame(allocator: &mut PageAllocator, frame: u64) -> Result<(), &'
 }
 
 struct PageWalkFlags {
+    #[allow(dead_code)]
     path: PageTableFlags,
     leaf: PageTableFlags,
     all_levels_user_accessible: bool,
@@ -3297,9 +3329,11 @@ fn create_userspace_ipc_process(
             .allocate_page()
             .ok_or("allocator could not provide a stack page for userspace IPC test process")?;
         zero_page(stack_frame_address);
+        // The data page lives at USER_TEST_DATA_ADDRESS (code + 1 page), so the
+        // stack must use its own page (code + 2 pages), as in the M3.2 test.
         if let Err(message) = map_process_page(
             &mut address_space,
-            USER_TEST_STACK_ADDRESS,
+            USER_TEST_PROCESS_STACK_ADDRESS,
             stack_frame_address,
             PageTableFlags::PRESENT
                 | PageTableFlags::WRITABLE
@@ -3346,7 +3380,7 @@ fn create_userspace_ipc_process(
             return Err(message);
         }
 
-        let user_stack_pointer = USER_TEST_STACK_ADDRESS + PAGE_SIZE;
+        let user_stack_pointer = USER_TEST_PROCESS_STACK_ADDRESS + PAGE_SIZE;
         let saved_stack_pointer = build_userspace_entry_frame(
             kernel_stack_top,
             USER_TEST_CODE_ADDRESS,
@@ -3487,6 +3521,13 @@ fn validate_sysret_selector_triplet(
         return Err("GDT SYSRET user code selector was not base+16");
     }
     Ok(())
+}
+
+/// Compares user RFLAGS captured at syscall entry against an expected value while
+/// ignoring the arithmetic status flags, which user code changes freely.
+#[allow(dead_code)]
+fn syscall_return_rflags_match(observed: u64, expected: u64) -> bool {
+    (observed & !RFLAGS_STATUS_FLAGS_MASK) == (expected & !RFLAGS_STATUS_FLAGS_MASK)
 }
 
 fn validate_canonical_user_return_state(frame: &SyscallContext) -> Result<(), &'static str> {
@@ -3643,7 +3684,9 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
                 Ok(state) => state,
                 Err(message) => fatal_kernel_error(message),
             };
-            if frame.user_rsp != state.user_stack_pointer || frame.user_rflags != USER_TEST_RFLAGS {
+            if frame.user_rsp != state.user_stack_pointer
+                || !syscall_return_rflags_match(frame.user_rflags, USER_TEST_RFLAGS)
+            {
                 fatal_kernel_error("syscall return frame contained unexpected userspace state");
             }
             if frame.user_rip < USER_TEST_CODE_ADDRESS
@@ -6243,6 +6286,29 @@ mod tests {
         assert_eq!(core::mem::offset_of!(SyscallContext, user_rip), 104);
         assert_eq!(core::mem::offset_of!(SyscallContext, user_rflags), 112);
         assert_eq!(core::mem::offset_of!(SyscallContext, user_rsp), 120);
+    }
+
+    #[test]
+    fn syscall_return_rflags_ignore_arithmetic_status_flags() {
+        let base = 0x202u64;
+        // ZF | PF set by a preceding `cmp` with equal operands.
+        assert!(syscall_return_rflags_match(base | 0x40 | 0x4, base));
+        // All status flags set.
+        assert!(syscall_return_rflags_match(
+            base | RFLAGS_STATUS_FLAGS_MASK,
+            base
+        ));
+        // DF, TF, or a cleared IF must still be rejected.
+        assert!(!syscall_return_rflags_match(
+            base | (1u64 << RFLAGS_DIRECTION_FLAG_BIT),
+            base
+        ));
+        assert!(!syscall_return_rflags_match(
+            base | (1u64 << RFLAGS_TRAP_FLAG_BIT),
+            base
+        ));
+        assert!(!syscall_return_rflags_match(0x2, base));
+        assert_eq!(RFLAGS_STATUS_FLAGS_MASK, 0x8d5);
     }
 
     #[test]
