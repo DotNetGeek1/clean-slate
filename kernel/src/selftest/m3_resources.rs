@@ -546,7 +546,7 @@ pub(crate) fn handle_userspace_resource_entry(
             let baseline = state.baseline;
             let kernel_root_frame = state.kernel_root_frame;
             let teardown = teardown_current_process(allocator, kernel_root_frame, 0, false)?;
-            if !resource_snapshot(teardown.process_id).is_err() {
+            if resource_snapshot(teardown.process_id).is_ok() {
                 return Err("released process unexpectedly remained snapshot-visible");
             }
             verify_process_cleanup(process)?;
