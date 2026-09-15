@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Run Clean-Slate QEMU xtask acceptance tests and report failures.
 #
-# By default runs test-m1, test-m2, test-m3. Use --exhaustive for all nine
-# xtask acceptance commands. OVMF is discovered by xtask on Linux when
+# By default runs test-m1, test-m2, test-m3, test-m4 (milestone gates and
+# aggregates). Use --exhaustive for every registered xtask acceptance command.
+# OVMF is discovered by xtask on Linux when
 # OVMF_CODE/OVMF_VARS are unset; override with env vars or --ovmf-code/--ovmf-vars.
 set -euo pipefail
 
@@ -28,14 +29,18 @@ TEST_NAMES=(
   test-m3-resources
   test-m4-crash-service
   test-m4-service-lifecycle
+  test-m4-restart-policy
+  test-m4-supervisor
+  test-m4
+  test-m4-recovery
 )
 
 test_role() {
   case "$1" in
-    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle)
+    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor)
       echo Constituent
       ;;
-    test-m3)
+    test-m3 | test-m4)
       echo Aggregate
       ;;
     *)
@@ -57,6 +62,10 @@ test_description() {
     test-m3-resources) echo "M3.6 domain resource accounting/teardown acceptance" ;;
     test-m4-crash-service) echo "M4.7 supervised crash-service fixture acceptance" ;;
     test-m4-service-lifecycle) echo "M4.2 kernel service lifecycle control acceptance" ;;
+    test-m4-restart-policy) echo "M4.6 supervisor restart-policy convergence (host + userspace image build)" ;;
+    test-m4-supervisor) echo "M4.3 userspace supervisor runtime QEMU integration acceptance" ;;
+    test-m4) echo "M4 milestone gate (recovery QEMU boot + M4.6 host policy tests)" ;;
+    test-m4-recovery) echo "M4.8 authoritative recovery QEMU acceptance" ;;
     *) echo "" ;;
   esac
 }
@@ -74,6 +83,10 @@ test_aliases() {
     test-m3-resources) echo "m3-resources resources m3.6" ;;
     test-m4-crash-service) echo "m4-crash-service crash-service m4.7" ;;
     test-m4-service-lifecycle) echo "m4-service-lifecycle service-lifecycle m4.2" ;;
+    test-m4-restart-policy) echo "m4-restart-policy restart-policy m4.6" ;;
+    test-m4-supervisor) echo "m4-supervisor supervisor m4.3" ;;
+    test-m4) echo "m4 m4.8" ;;
+    test-m4-recovery) echo "m4-recovery recovery m4.8-qemu" ;;
     *) echo "" ;;
   esac
 }
@@ -161,7 +174,7 @@ show_test_list() {
   done
   echo ""
   echo "--exhaustive:    ${TEST_NAMES[*]}"
-  echo "Constituents are the per-boundary debugging workflows behind the test-m3 aggregate."
+  echo "Constituents are the per-boundary debugging workflows behind the test-m3 and test-m4 aggregates."
 }
 
 resolve_test_name() {
