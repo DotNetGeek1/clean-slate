@@ -34,6 +34,8 @@ pub(crate) mod m3_resources;
 pub(crate) mod m3_syscall;
 #[cfg(feature = "m4-crash-service-self-test")]
 pub(crate) mod m4_crash_service;
+#[cfg(feature = "m4-service-lifecycle-self-test")]
+pub(crate) mod m4_service_lifecycle;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",

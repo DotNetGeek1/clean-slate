@@ -35,7 +35,10 @@ pub use health_tracker::{
     LifecycleFailureOutcome, ServiceHealthRecord, ServiceHealthTracker,
 };
 pub use identity::{DomainId, InstanceGeneration, ProcessId, ServiceId, ServiceInstanceId};
-pub use state::{LifecycleEvent, LifecycleEventKind, ServiceLifecycleState, TransitionError};
+pub use state::{
+    apply_transition, LifecycleEvent, LifecycleEventKind, ServiceLifecycleState, TransitionError,
+    TransitionInput,
+};
 pub use time::{ticks_add, ticks_reached, LivenessConfig, MonotonicTicks};
 pub use tracker::{ServiceLifecycleRecord, ServiceLifecycleTracker};
 pub use wire::{

@@ -15,14 +15,16 @@ use core::arch::asm;
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m4-service-lifecycle-self-test"
 ))]
 use core::mem::size_of;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m4-service-lifecycle-self-test"
 ))]
 use core::ptr;
 
@@ -31,14 +33,16 @@ use crate::arch::x86_64::asm::clean_slate_restore_context;
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m4-service-lifecycle-self-test"
 ))]
 use crate::arch::x86_64::gdt::userspace_gdt_state;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m4-service-lifecycle-self-test"
 ))]
 use crate::arch::x86_64::interrupt_context::{InterruptContext, UserspaceEntryFrame};
 
@@ -57,7 +61,8 @@ pub(crate) const TASK_STACK_SIZE: usize = 64 * 1024;
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m4-service-lifecycle-self-test"
 ))]
 pub(crate) const USER_TEST_RFLAGS: u64 = 0x202;
 
@@ -125,7 +130,8 @@ pub(crate) unsafe fn start_first_task(stack_pointer: u64, entry_point: u64) -> !
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m4-service-lifecycle-self-test"
 ))]
 pub(crate) fn build_userspace_entry_frame(
     kernel_stack_top: u64,

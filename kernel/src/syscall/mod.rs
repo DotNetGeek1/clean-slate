@@ -42,6 +42,8 @@ use crate::ipc::IPC_MAX_MESSAGE_BYTES;
 use crate::ipc::USERSPACE_IPC_TEST_PID;
 #[cfg(feature = "m3-ipc-self-test")]
 use crate::ipc::USERSPACE_IPC_UNAUTHORIZED_TEST_PID;
+#[cfg(feature = "m4-service-lifecycle-self-test")]
+use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::user_mapping::validate_user_pointer_range;
 #[cfg(feature = "m3-syscall-self-test")]
@@ -68,12 +70,20 @@ use crate::selftest::m3_syscall::SYSCALL_PASS_MARKER;
 use crate::selftest::m3_syscall::SYSCALL_TEST_REQUIRED_CALLS;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::USER_TEST_CODE_ADDRESS;
+#[cfg(feature = "m4-service-lifecycle-self-test")]
+use crate::service::service_lifecycle_controller_mut;
+use crate::service::LifecycleControlError;
+#[cfg(feature = "m4-service-lifecycle-self-test")]
+use crate::sync::global_cell::GlobalCell;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::syscall::validation::maybe_validate_syscall_entry_flags;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::syscall::validation::syscall_return_rflags_match;
 use crate::syscall::validation::validate_canonical_user_return_state;
 use crate::syscall::validation::validate_sysret_selector_triplet;
+#[cfg(feature = "m4-service-lifecycle-self-test")]
+use clean_slate_service_lifecycle::LifecycleMessage;
+use clean_slate_service_lifecycle::LIFECYCLE_WIRE_MAX_BYTES;
 use core::ptr;
 #[cfg(feature = "m3-syscall-self-test")]
 use core::sync::atomic::Ordering;
@@ -91,6 +101,7 @@ const SYSCALL_NR_VERSION: u64 = 0;
 const SYSCALL_NR_READ_U64: u64 = 1;
 const SYSCALL_NR_FINISH: u64 = 2;
 const SYSCALL_NR_IPC_SEND: u64 = 3;
+const SYSCALL_NR_LIFECYCLE_CONTROL: u64 = 4;
 const SYSCALL_ENOSYS: u64 = u64::MAX - 37;
 pub(super) const SYSCALL_EACCES: u64 = u64::MAX - 12;
 const SYSCALL_EINVAL: u64 = u64::MAX - 21;
@@ -203,6 +214,112 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
     }
 }
 
+#[cfg(feature = "m4-service-lifecycle-self-test")]
+static SERVICE_LIFECYCLE_SYSCALL_ALLOCATOR: GlobalCell<Option<PageAllocator>> =
+    GlobalCell::new(None);
+
+#[cfg(feature = "m4-service-lifecycle-self-test")]
+pub(super) fn service_lifecycle_syscall_allocator_mut() -> &'static mut Option<PageAllocator> {
+    unsafe { &mut *SERVICE_LIFECYCLE_SYSCALL_ALLOCATOR.get() }
+}
+
+#[cfg(feature = "m4-service-lifecycle-self-test")]
+pub(super) fn install_service_lifecycle_syscall_allocator(allocator: PageAllocator) {
+    *service_lifecycle_syscall_allocator_mut() = Some(allocator);
+}
+
+#[allow(dead_code)]
+fn lifecycle_control_syscall_error(error: LifecycleControlError) -> u64 {
+    match error {
+        LifecycleControlError::Unauthorized => SYSCALL_EACCES,
+        LifecycleControlError::StaleHandle | LifecycleControlError::StaleInstance(_) => {
+            SYSCALL_ESTALE
+        }
+        LifecycleControlError::InvalidHandle
+        | LifecycleControlError::InvalidMessage(_)
+        | LifecycleControlError::InvalidTransition(_)
+        | LifecycleControlError::UnknownService
+        | LifecycleControlError::ServiceAlreadyLive
+        | LifecycleControlError::ServiceNotLive
+        | LifecycleControlError::SpawnFailed(_)
+        | LifecycleControlError::TeardownFailed(_) => SYSCALL_EINVAL,
+    }
+}
+
+#[allow(dead_code)]
+fn handle_syscall_lifecycle_control(frame: &mut SyscallContext) {
+    let message_length = match usize::try_from(frame.rdx) {
+        Ok(length) => length,
+        Err(_) => {
+            frame.rax = SYSCALL_EINVAL;
+            return;
+        }
+    };
+    if message_length == 0 || message_length > LIFECYCLE_WIRE_MAX_BYTES {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    if validate_user_pointer_range(frame.rsi, frame.rdx).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    let reply_capacity = match usize::try_from(frame.r8) {
+        Ok(length) => length,
+        Err(_) => {
+            frame.rax = SYSCALL_EINVAL;
+            return;
+        }
+    };
+    if reply_capacity < 33 {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    if validate_user_pointer_range(frame.r10, frame.r8).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    let sender_pid = match current_syscall_caller_pid() {
+        Ok(sender_pid) => sender_pid,
+        Err(_) => {
+            frame.rax = SYSCALL_EACCES;
+            return;
+        }
+    };
+    let mut message = [0u8; LIFECYCLE_WIRE_MAX_BYTES];
+    unsafe {
+        ptr::copy_nonoverlapping(frame.rsi as *const u8, message.as_mut_ptr(), message_length);
+    }
+    #[cfg(not(feature = "m4-service-lifecycle-self-test"))]
+    {
+        let _ = (sender_pid, message);
+        frame.rax = SYSCALL_ENOSYS;
+    }
+    #[cfg(feature = "m4-service-lifecycle-self-test")]
+    {
+        let allocator = unsafe { (&mut *SERVICE_LIFECYCLE_SYSCALL_ALLOCATOR.get()).as_mut() };
+        let Some(allocator) = allocator else {
+            frame.rax = SYSCALL_ENOSYS;
+            return;
+        };
+        let controller = unsafe { service_lifecycle_controller_mut() };
+        match controller.handle_control_message(
+            allocator,
+            sender_pid,
+            frame.rdi,
+            &message[..message_length],
+        ) {
+            Ok(result) => {
+                let encoded = LifecycleMessage::LifecycleEvent(result.event).encode();
+                unsafe {
+                    ptr::copy_nonoverlapping(encoded.as_ptr(), frame.r10 as *mut u8, encoded.len());
+                }
+                frame.rax = encoded.len() as u64;
+            }
+            Err(error) => frame.rax = lifecycle_control_syscall_error(error),
+        }
+    }
+}
+
 // Consumed by arch/x86_64/asm.rs (clean_slate_syscall_entry calls this with the saved frame).
 #[unsafe(no_mangle)]
 extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 {
@@ -251,6 +368,7 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
         #[cfg(not(feature = "m3-syscall-self-test"))]
         SYSCALL_NR_FINISH => frame.rax = SYSCALL_ENOSYS,
         SYSCALL_NR_IPC_SEND => handle_syscall_ipc_send(frame),
+        SYSCALL_NR_LIFECYCLE_CONTROL => handle_syscall_lifecycle_control(frame),
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 

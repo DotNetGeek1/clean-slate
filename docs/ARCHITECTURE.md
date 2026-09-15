@@ -294,7 +294,17 @@ Suggested serial diagnostics (`format_health_*_line`, `format_dependency_*_line`
 [DEP ] service=<id> ready
 [SVC ] declared service=<id>
 [SVC ] instance service=<id> pid=<pid> gen=<n>
+[SVC ] launch service=<id> pid=<pid> gen=<n>
+[SVC ] terminate service=<id> pid=<pid>
+[SVC ] reaped service=<id> pid=<pid>
 ```
+
+M4.2 adds kernel-owned lifecycle control:
+
+- a dedicated **lifecycle-control capability** (distinct from IPC send capabilities) authorizes `SYSCALL_NR_LIFECYCLE_CONTROL` (4) and bounded M4.1 wire control requests;
+- authorized **Start** / **Terminate** / **Restart** requests spawn or tear down built-in service images through production M3 process/domain APIs and `teardown_process_by_id` (#24 coordinator path);
+- **Restart** is terminate-then-launch with a bumped `InstanceGeneration` and monotonic PID allocation (IDs are never reused);
+- stale instance handles fail through generation checks in the controller and `SYSCALL_ESTALE`.
 
 ## Language strategy
 

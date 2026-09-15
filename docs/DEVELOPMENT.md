@@ -158,6 +158,16 @@ cargo test -p clean-slate-service-lifecycle
 
 This crate is `no_std` outside unit tests and is the shared contract for supervisor, kernel control, and service fixtures in later M4 issues.
 
+For M4.2 kernel lifecycle control (host tests + optional QEMU acceptance):
+
+```bash
+cargo test -p clean-slate-kernel service::
+cargo test -p clean-slate-kernel --features m4-service-lifecycle-self-test
+cargo xtask test-m4-service-lifecycle
+```
+
+The `m4-service-lifecycle-self-test` feature boots a bounded launch/terminate/restart path and emits `[M4.2] PASS` when fresh PID/generation invariants hold.
+
 M4.4 health/liveness tracking (host-tested, no QEMU) exercises `ServiceHealthTracker` deadline math with explicit tick values — no real-time sleeps:
 
 ```bash

@@ -23,6 +23,7 @@ enum IpcEndpointState {
 pub(crate) enum IpcEndpointKind {
     Mailbox,
     ConsoleSink,
+    LifecycleControl,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +148,13 @@ impl IpcEndpointTable {
 
     pub(super) fn create_console_sink(&mut self, owner_pid: u64) -> Result<usize, &'static str> {
         self.create_endpoint_with_kind(owner_pid, IpcEndpointKind::ConsoleSink)
+    }
+
+    pub(super) fn create_lifecycle_control_endpoint(
+        &mut self,
+        owner_pid: u64,
+    ) -> Result<usize, &'static str> {
+        self.create_endpoint_with_kind(owner_pid, IpcEndpointKind::LifecycleControl)
     }
 
     fn create_endpoint_with_kind(

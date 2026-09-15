@@ -8,6 +8,7 @@ mod ipc;
 mod mm;
 mod process;
 mod sched;
+mod service;
 // Milestone self-tests exit QEMU before the normal boot tail runs, so each
 // feature build leaves parts of its own scaffolding unreferenced. The
 // allowance is scoped to this module only; production modules must stay
@@ -22,7 +23,8 @@ mod sched;
         feature = "m3-resources-self-test",
         feature = "m4-crash-service-self-test",
         feature = "m3-syscall-self-test",
-        feature = "m3-ipc-self-test"
+        feature = "m3-ipc-self-test",
+        feature = "m4-service-lifecycle-self-test"
     ),
     allow(dead_code)
 )]
