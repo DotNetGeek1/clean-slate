@@ -1,5 +1,5 @@
 [workspace]
-members = ["kernel", "xtask"]
+members = ["kernel", "service-lifecycle", "xtask"]
 default-members = ["xtask"]
 resolver = "2"
 

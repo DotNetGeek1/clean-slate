@@ -247,6 +247,31 @@ The first IPC primitive should keep policy narrow and explicit:
 
 This initial implementation uses copying and intentionally defers shared-memory/zero-copy optimization to later milestones.
 
+## M4.1 service lifecycle protocol direction
+
+M4.1 defines the shared contract between the userspace supervisor, supervised services, and the kernel lifecycle-control path before implementation lanes fan out. The canonical types and wire encoding live in the workspace crate `clean-slate-service-lifecycle` (`service-lifecycle/`).
+
+Ownership boundaries:
+
+- **Kernel (M4.2+):** authoritative process spawn/teardown, capability-gated control IPC, and emission of lifecycle events tied to real PIDs/domains.
+- **Supervisor (M4.3+):** service registry, dependency-aware orchestration, and translation between policy and control requests — but not reinterpretation of stale instance identity.
+- **Services / fixtures (M4.7+):** report `Ready`, health, and fault/exit events for their own instance generation only.
+
+Model highlights:
+
+- `ServiceId` is the stable logical identity; `ServiceInstanceId` binds `(service, generation, pid, domain)` so replacements never reuse stale instance handles silently.
+- Lifecycle states are explicit (`Declared`, `Starting`, `Running`, `Stopping`, `Exited`, `Faulted`, `RestartPending`) with deterministic transition validation (`apply_transition` / `ServiceLifecycleRecord`).
+- Control requests (`Start`, `Stop`, `Terminate`, `Restart`) are policy-free envelopes; restart backoff and dependency evaluation stay in later milestones.
+- Wire messages are versioned (`LIFECYCLE_PROTOCOL_VERSION = 1`), bounded to 64 bytes (matching M3 IPC), and reject unknown versions/kinds before interpretation.
+- `HealthReport` and `DependencyMetadata` provide stable extension fields for M4.4/M4.5 without embedding their algorithms here.
+
+Suggested serial diagnostics (see `format_declared_line` / `format_instance_line`):
+
+```text
+[SVC ] declared service=<id>
+[SVC ] instance service=<id> pid=<pid> gen=<n>
+```
+
 ## Language strategy
 
 The kernel and first-party low-level services should primarily use Rust.
