@@ -101,6 +101,14 @@ cargo xtask test-m3-syscall
 
 This command builds the kernel with the M3.3 syscall self-test enabled, boots QEMU headlessly, and validates the ordered markers proving timer-enabled repeated ring-3 `syscall/sysretq` round-trips and `[SYSC] syscall entry/return PASS`.
 
+For the bounded M3.4 process/thread lifecycle acceptance path:
+
+```bash
+cargo xtask test-m3-lifecycle
+```
+
+This command builds the kernel with the M3 userspace address-space self-test path, boots QEMU headlessly, and validates ownership-aware process/thread lifecycle markers including deterministic creation (`[PROC] created pid=... tid=...`), fault attribution (`[PROC] fault pid=...`), and teardown (`[PROC] pid=... exited status=...`) before `[M3.4] PASS`.
+
 To launch paused for debugger attach:
 
 ```bash

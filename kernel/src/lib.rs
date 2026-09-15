@@ -150,6 +150,196 @@ const SYSCALL_TEST_EXPECTED_VALUE: u64 = 0x5359_5343_4f4c_4c21;
 const SYSCALL_TEST_REQUIRED_CALLS: u64 = 256;
 #[cfg(feature = "m3-syscall-self-test")]
 const SYSCALL_DF_SANITIZED_MARKER: &str = "[SYSC] entry flag mask OK";
+const KERNEL_PROCESS_ID: u64 = 0;
+const PROCESS_REGISTRY_CAPACITY: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessState {
+    Empty,
+    Creating,
+    Ready,
+    Running,
+    Faulted,
+    Exiting,
+    Exited,
+    Reaped,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadState {
+    Empty,
+    Ready,
+    Running,
+    Exiting,
+    Exited,
+    Reaped,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadKind {
+    Kernel,
+    User,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResourceDomain {
+    id: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Process {
+    id: u64,
+    state: ProcessState,
+    address_space_root: u64,
+    resource_domain: ResourceDomain,
+    live_threads: u16,
+    exit_status: Option<u64>,
+}
+
+impl Process {
+    const EMPTY: Self = Self {
+        id: 0,
+        state: ProcessState::Empty,
+        address_space_root: 0,
+        resource_domain: ResourceDomain { id: 0 },
+        live_threads: 0,
+        exit_status: None,
+    };
+}
+
+fn begin_thread_exit(
+    process: &mut Process,
+    thread: &mut Thread,
+    status: u64,
+    faulted: bool,
+) -> Result<bool, &'static str> {
+    if thread.owner_process_id != process.id {
+        return Err("thread owner did not match process during exit");
+    }
+    if process.live_threads == 0 {
+        return Err("process thread accounting underflow during exit");
+    }
+
+    thread.state = ThreadState::Exiting;
+    process.state = if faulted {
+        ProcessState::Faulted
+    } else {
+        ProcessState::Exiting
+    };
+    process.live_threads -= 1;
+    thread.state = ThreadState::Exited;
+    if process.live_threads == 0 {
+        process.exit_status = Some(status);
+        process.state = ProcessState::Exited;
+        return Ok(true);
+    }
+    if !faulted {
+        process.state = ProcessState::Running;
+    }
+    Ok(false)
+}
+
+fn reap_process(process: &mut Process, thread: &mut Thread) -> Result<(), &'static str> {
+    if thread.owner_process_id != process.id {
+        return Err("thread owner did not match process during reap");
+    }
+    if process.live_threads != 0 {
+        return Err("process could not be reaped while threads remained");
+    }
+    if thread.state != ThreadState::Exited {
+        return Err("thread must be exited before reap");
+    }
+    thread.state = ThreadState::Reaped;
+    process.state = ProcessState::Reaped;
+    Ok(())
+}
+
+fn finalize_process_exit(process: &mut Process, status: u64) -> Result<(), &'static str> {
+    if process.live_threads != 0 {
+        return Err("process could not finalize exit while threads remained");
+    }
+    process.exit_status = Some(status);
+    process.state = ProcessState::Exited;
+    Ok(())
+}
+
+struct ProcessRegistry {
+    processes: [Process; PROCESS_REGISTRY_CAPACITY],
+}
+
+impl ProcessRegistry {
+    const fn new() -> Self {
+        Self {
+            processes: [Process::EMPTY; PROCESS_REGISTRY_CAPACITY],
+        }
+    }
+
+    fn clear(&mut self) {
+        self.processes = [Process::EMPTY; PROCESS_REGISTRY_CAPACITY];
+    }
+
+    fn insert(&mut self, process: Process) -> Result<(), &'static str> {
+        if self
+            .processes
+            .iter()
+            .any(|entry| entry.id == process.id && entry.state != ProcessState::Empty)
+        {
+            return Err("process id already existed in registry");
+        }
+        let slot = self
+            .processes
+            .iter_mut()
+            .find(|entry| entry.state == ProcessState::Empty)
+            .ok_or("process registry capacity exceeded")?;
+        *slot = process;
+        Ok(())
+    }
+
+    fn get(&self, process_id: u64) -> Option<&Process> {
+        self.processes
+            .iter()
+            .find(|entry| entry.id == process_id && entry.state != ProcessState::Empty)
+    }
+
+    fn get_mut(&mut self, process_id: u64) -> Option<&mut Process> {
+        self.processes
+            .iter_mut()
+            .find(|entry| entry.id == process_id && entry.state != ProcessState::Empty)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IdAllocator {
+    next_pid: u64,
+    next_tid: u64,
+}
+
+impl IdAllocator {
+    const fn new() -> Self {
+        Self {
+            next_pid: 1,
+            next_tid: 1,
+        }
+    }
+
+    fn allocate_pid(&mut self) -> Result<u64, &'static str> {
+        let pid = self.next_pid;
+        self.next_pid = self
+            .next_pid
+            .checked_add(1)
+            .ok_or("process id space exhausted; IDs are not reused")?;
+        Ok(pid)
+    }
+
+    fn allocate_tid(&mut self) -> Result<u64, &'static str> {
+        let tid = self.next_tid;
+        self.next_tid = self
+            .next_tid
+            .checked_add(1)
+            .ok_or("thread id space exhausted; IDs are not reused")?;
+        Ok(tid)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryRegionKind {
@@ -703,6 +893,10 @@ fn run_inner() -> Result<(), &'static str> {
         let stacks = &*TASK_STACKS.get();
         task_stack_top(&stacks[0])
     };
+    unsafe {
+        *ID_ALLOCATOR.get() = IdAllocator::new();
+        (&mut *PROCESS_REGISTRY.get()).clear();
+    }
     set_privilege_stack(syscall_kernel_stack_top)?;
     initialize_syscall_abi(syscall_kernel_stack_top)?;
 
@@ -720,6 +914,7 @@ fn run_inner() -> Result<(), &'static str> {
     }
 
     serial_write_line("[MM  ] paging initialized");
+    KERNEL_ROOT_FRAME.store(current_root_frame_address(), Ordering::Relaxed);
 
     #[cfg(feature = "m1-self-test")]
     {
@@ -1082,12 +1277,11 @@ enum UserspaceAddressSpaceStage {
 #[cfg(feature = "m3-address-space-self-test")]
 #[derive(Clone, Copy)]
 struct UserspaceProcess {
-    id: usize,
+    process: Process,
+    thread: Thread,
     expected_value: u64,
     expected_probe_address: u64,
     expected_fault_present: bool,
-    kernel_stack_top: u64,
-    saved_stack_pointer: u64,
     expected_entry_rip: u64,
     user_stack_pointer: u64,
     user_stack_segment: u64,
@@ -1098,38 +1292,35 @@ struct UserspaceProcess {
 #[derive(Clone, Copy)]
 struct UserspaceAddressSpaceTestState {
     kernel_root_frame: u64,
-    current_process: usize,
     stage: UserspaceAddressSpaceStage,
     processes: [UserspaceProcess; USER_TEST_PROCESS_COUNT],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TaskState {
-    Empty,
-    Ready,
-    Running,
-    Finished,
-}
-
 #[derive(Clone, Copy)]
-struct Task {
-    id: usize,
+struct Thread {
+    id: u64,
+    owner_process_id: u64,
+    kind: ThreadKind,
+    kernel_stack_top: u64,
     saved_stack_pointer: u64,
     launch_entry: u64,
     started: bool,
-    state: TaskState,
+    state: ThreadState,
     progress_logged: bool,
     preemptions: u64,
     observed_progress: u64,
 }
 
-impl Task {
+impl Thread {
     const EMPTY: Self = Self {
         id: 0,
+        owner_process_id: 0,
+        kind: ThreadKind::Kernel,
+        kernel_stack_top: 0,
         saved_stack_pointer: 0,
         launch_entry: 0,
         started: false,
-        state: TaskState::Empty,
+        state: ThreadState::Empty,
         progress_logged: false,
         preemptions: 0,
         observed_progress: 0,
@@ -1137,8 +1328,8 @@ impl Task {
 }
 
 struct Scheduler {
-    tasks: [Task; TASK_COUNT],
-    current_task: Option<usize>,
+    threads: [Thread; TASK_COUNT],
+    current_thread: Option<usize>,
     preemption_observed: bool,
     preemption_logged: bool,
     pass_emitted: bool,
@@ -1147,30 +1338,54 @@ struct Scheduler {
 impl Scheduler {
     const fn new() -> Self {
         Self {
-            tasks: [Task::EMPTY; TASK_COUNT],
-            current_task: None,
+            threads: [Thread::EMPTY; TASK_COUNT],
+            current_thread: None,
             preemption_observed: false,
             preemption_logged: false,
             pass_emitted: false,
         }
     }
 
-    fn configure_task(
+    fn configure_kernel_thread(
         &mut self,
         slot: usize,
-        id: usize,
+        id: u64,
         saved_stack_pointer: u64,
         launch_entry: u64,
     ) -> Result<(), &'static str> {
-        if slot >= self.tasks.len() {
-            return Err("task slot exceeded fixed scheduler capacity");
-        }
-        self.tasks[slot] = Task {
+        self.configure_thread(
+            slot,
             id,
+            KERNEL_PROCESS_ID,
+            ThreadKind::Kernel,
+            saved_stack_pointer,
+            saved_stack_pointer,
+            launch_entry,
+        )
+    }
+
+    fn configure_thread(
+        &mut self,
+        slot: usize,
+        id: u64,
+        owner_process_id: u64,
+        kind: ThreadKind,
+        kernel_stack_top: u64,
+        saved_stack_pointer: u64,
+        launch_entry: u64,
+    ) -> Result<(), &'static str> {
+        if slot >= self.threads.len() {
+            return Err("thread slot exceeded fixed scheduler capacity");
+        }
+        self.threads[slot] = Thread {
+            id,
+            owner_process_id,
+            kind,
+            kernel_stack_top,
             saved_stack_pointer,
             launch_entry,
             started: false,
-            state: TaskState::Ready,
+            state: ThreadState::Ready,
             progress_logged: false,
             preemptions: 0,
             observed_progress: 0,
@@ -1181,102 +1396,170 @@ impl Scheduler {
     fn start(&mut self) -> Result<u64, &'static str> {
         let next = self
             .next_runnable_from(None)
-            .ok_or("scheduler had no runnable kernel tasks")?;
-        self.current_task = Some(next);
-        self.tasks[next].started = true;
-        self.tasks[next].state = TaskState::Running;
-        Ok(self.tasks[next].saved_stack_pointer)
+            .ok_or("scheduler had no runnable threads")?;
+        self.current_thread = Some(next);
+        self.threads[next].started = true;
+        self.threads[next].state = ThreadState::Running;
+        Ok(self.threads[next].saved_stack_pointer)
+    }
+
+    fn current_thread_descriptor(&self) -> Result<Thread, &'static str> {
+        let index = self
+            .current_thread
+            .ok_or("scheduler had no current thread to dispatch")?;
+        Ok(self.threads[index])
+    }
+
+    fn set_thread_state(&mut self, thread_id: u64, state: ThreadState) -> Result<(), &'static str> {
+        let thread = self
+            .threads
+            .iter_mut()
+            .find(|thread| thread.id == thread_id)
+            .ok_or("thread id did not exist in scheduler")?;
+        thread.state = state;
+        Ok(())
+    }
+
+    fn update_thread_saved_stack(
+        &mut self,
+        thread_id: u64,
+        saved_stack_pointer: u64,
+    ) -> Result<(), &'static str> {
+        let thread = self
+            .threads
+            .iter_mut()
+            .find(|thread| thread.id == thread_id)
+            .ok_or("thread id did not exist while updating saved stack")?;
+        thread.saved_stack_pointer = saved_stack_pointer;
+        Ok(())
+    }
+
+    fn mark_current_thread_exiting(&mut self) -> Result<u64, &'static str> {
+        let index = self
+            .current_thread
+            .ok_or("scheduler had no current thread to mark exiting")?;
+        let thread = &mut self.threads[index];
+        thread.state = ThreadState::Exiting;
+        Ok(thread.id)
+    }
+
+    fn retire_sibling_threads_for_process(
+        &mut self,
+        process_id: u64,
+        keep_thread_id: u64,
+    ) -> usize {
+        let mut retired = 0usize;
+        for thread in &mut self.threads {
+            if thread.owner_process_id != process_id || thread.id == keep_thread_id {
+                continue;
+            }
+            if matches!(thread.state, ThreadState::Ready | ThreadState::Running) {
+                thread.state = ThreadState::Exited;
+                retired += 1;
+            }
+        }
+        retired
     }
 
     fn on_timer_interrupt(&mut self, current_stack_pointer: u64) -> Result<u64, &'static str> {
         let current = self
-            .current_task
-            .ok_or("timer interrupt arrived before a current task existed")?;
+            .current_thread
+            .ok_or("timer interrupt arrived before a current thread existed")?;
 
         {
-            let task = &mut self.tasks[current];
-            task.saved_stack_pointer = current_stack_pointer;
-            task.preemptions += 1;
-            if task.state == TaskState::Running {
-                task.state = TaskState::Ready;
+            let thread = &mut self.threads[current];
+            thread.saved_stack_pointer = current_stack_pointer;
+            thread.preemptions += 1;
+            if thread.state == ThreadState::Running {
+                thread.state = ThreadState::Ready;
             }
         }
 
         let next = self
             .next_runnable_from(Some(current))
-            .ok_or("scheduler lost all runnable tasks during timer interrupt")?;
-        self.current_task = Some(next);
-        self.tasks[next].state = TaskState::Running;
+            .ok_or("scheduler lost all runnable threads during timer interrupt")?;
+        self.current_thread = Some(next);
+        self.threads[next].state = ThreadState::Running;
         if next != current && !self.preemption_observed {
             self.preemption_observed = true;
         }
 
-        if !self.tasks[next].started {
-            self.tasks[next].started = true;
-            unsafe {
-                NEXT_TASK_STACK_POINTER = self.tasks[next].saved_stack_pointer;
-                NEXT_TASK_ENTRY_POINT = self.tasks[next].launch_entry;
-            }
-            return Ok(FRESH_TASK_SENTINEL);
-        }
-
-        Ok(self.tasks[next].saved_stack_pointer)
-    }
-
-    fn note_progress(&mut self, task_id: usize, progress: u64) {
-        if let Some(task) = self.tasks.iter_mut().find(|task| task.id == task_id) {
-            if progress > task.observed_progress {
-                task.observed_progress = progress;
+        if !self.threads[next].started {
+            self.threads[next].started = true;
+            if self.threads[next].kind == ThreadKind::Kernel {
+                unsafe {
+                    NEXT_TASK_STACK_POINTER = self.threads[next].saved_stack_pointer;
+                    NEXT_TASK_ENTRY_POINT = self.threads[next].launch_entry;
+                }
+                return Ok(FRESH_TASK_SENTINEL);
             }
         }
+
+        Ok(self.threads[next].saved_stack_pointer)
     }
 
-    fn task_should_exit(&self, task_id: usize) -> bool {
-        self.tasks
+    fn note_progress(&mut self, thread_id: u64, progress: u64) {
+        if let Some(thread) = self
+            .threads
+            .iter_mut()
+            .find(|thread| thread.id == thread_id)
+        {
+            if progress > thread.observed_progress {
+                thread.observed_progress = progress;
+            }
+        }
+    }
+
+    fn thread_should_exit(&self, thread_id: u64) -> bool {
+        self.threads
             .iter()
-            .find(|task| task.id == task_id)
-            .is_some_and(|task| task.preemptions >= TASK_REQUIRED_PREEMPTIONS)
+            .find(|thread| thread.id == thread_id)
+            .is_some_and(|thread| thread.preemptions >= TASK_REQUIRED_PREEMPTIONS)
     }
 
-    fn finish_current_task(&mut self) -> Result<Option<u64>, &'static str> {
+    fn finish_current_thread(&mut self) -> Result<Option<u64>, &'static str> {
         let current = self
-            .current_task
-            .ok_or("task exit occurred without a current task")?;
+            .current_thread
+            .ok_or("thread exit occurred without a current thread")?;
 
-        self.tasks[current].state = TaskState::Finished;
+        self.threads[current].state = ThreadState::Exited;
 
         let Some(next) = self.next_runnable_from(Some(current)) else {
-            self.current_task = None;
+            self.current_thread = None;
             return Ok(None);
         };
 
-        self.current_task = Some(next);
-        self.tasks[next].state = TaskState::Running;
-        if !self.tasks[next].started {
-            self.tasks[next].started = true;
-            unsafe {
-                NEXT_TASK_STACK_POINTER = self.tasks[next].saved_stack_pointer;
-                NEXT_TASK_ENTRY_POINT = self.tasks[next].launch_entry;
+        self.current_thread = Some(next);
+        self.threads[next].state = ThreadState::Running;
+        if !self.threads[next].started {
+            self.threads[next].started = true;
+            if self.threads[next].kind == ThreadKind::Kernel {
+                unsafe {
+                    NEXT_TASK_STACK_POINTER = self.threads[next].saved_stack_pointer;
+                    NEXT_TASK_ENTRY_POINT = self.threads[next].launch_entry;
+                }
+                Ok(Some(FRESH_TASK_SENTINEL))
+            } else {
+                Ok(Some(self.threads[next].saved_stack_pointer))
             }
-            Ok(Some(FRESH_TASK_SENTINEL))
         } else {
-            Ok(Some(self.tasks[next].saved_stack_pointer))
+            Ok(Some(self.threads[next].saved_stack_pointer))
         }
     }
 
     fn all_finished(&self) -> bool {
-        self.tasks
+        self.threads
             .iter()
-            .all(|task| matches!(task.state, TaskState::Finished))
+            .all(|thread| matches!(thread.state, ThreadState::Exited))
     }
 
     fn next_runnable_from(&self, current: Option<usize>) -> Option<usize> {
-        let start = current.map_or(0, |index| (index + 1) % self.tasks.len());
-        for offset in 0..self.tasks.len() {
-            let index = (start + offset) % self.tasks.len();
+        let start = current.map_or(0, |index| (index + 1) % self.threads.len());
+        for offset in 0..self.threads.len() {
+            let index = (start + offset) % self.threads.len();
             if matches!(
-                self.tasks[index].state,
-                TaskState::Ready | TaskState::Running
+                self.threads[index].state,
+                ThreadState::Ready | ThreadState::Running
             ) {
                 return Some(index);
             }
@@ -1426,6 +1709,8 @@ impl<T> GlobalCell<T> {
 }
 
 static SCHEDULER: GlobalCell<Scheduler> = GlobalCell::new(Scheduler::new());
+static ID_ALLOCATOR: GlobalCell<IdAllocator> = GlobalCell::new(IdAllocator::new());
+static PROCESS_REGISTRY: GlobalCell<ProcessRegistry> = GlobalCell::new(ProcessRegistry::new());
 static TASK_STACKS: GlobalCell<[TaskStack; TASK_COUNT]> =
     GlobalCell::new([const { TaskStack([0; TASK_STACK_SIZE]) }; TASK_COUNT]);
 static DOUBLE_FAULT_STACK: GlobalCell<DoubleFaultStack> =
@@ -1458,6 +1743,7 @@ static mut NEXT_TASK_STACK_POINTER: u64 = 0;
 #[unsafe(no_mangle)]
 static mut NEXT_TASK_ENTRY_POINT: u64 = 0;
 static KERNEL_TICKS: AtomicU64 = AtomicU64::new(0);
+static KERNEL_ROOT_FRAME: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(
     feature = "m2-double-fault-self-test",
     feature = "m3-address-space-self-test",
@@ -1918,15 +2204,18 @@ fn initialize_scheduler() -> Result<(), &'static str> {
 
     let scheduler = unsafe { &mut *SCHEDULER.get() };
     *scheduler = Scheduler::new();
-    scheduler.configure_task(
+    let id_allocator = unsafe { &mut *ID_ALLOCATOR.get() };
+    let thread_one = id_allocator.allocate_tid()?;
+    let thread_two = id_allocator.allocate_tid()?;
+    scheduler.configure_kernel_thread(
         0,
-        1,
+        thread_one,
         task_stack_pointers[0],
         clean_slate_task_one_bootstrap_entry as usize as u64,
     )?;
-    scheduler.configure_task(
+    scheduler.configure_kernel_thread(
         1,
-        2,
+        thread_two,
         task_stack_pointers[1],
         clean_slate_task_two_bootstrap_entry as usize as u64,
     )?;
@@ -1937,11 +2226,14 @@ fn start_scheduler() -> ! {
     let (stack_pointer, entry_point) = match unsafe { (&mut *SCHEDULER.get()).start() } {
         Ok(stack_pointer) => {
             let scheduler = unsafe { &*SCHEDULER.get() };
-            let current = scheduler.current_task.expect("started task must exist");
-            (stack_pointer, scheduler.tasks[current].launch_entry)
+            let current = scheduler.current_thread.expect("started thread must exist");
+            (stack_pointer, scheduler.threads[current].launch_entry)
         }
         Err(message) => fatal_kernel_error(message),
     };
+    if let Err(message) = prepare_current_scheduler_thread_dispatch() {
+        fatal_kernel_error(message);
+    }
     unsafe { start_first_task(stack_pointer, entry_point) }
 }
 
@@ -2024,6 +2316,51 @@ fn set_privilege_stack(stack_pointer: u64) -> Result<(), &'static str> {
     };
     tss.privilege_stack_table[0] = VirtAddr::new(stack_pointer);
     Ok(())
+}
+
+fn set_syscall_kernel_stack(stack_pointer: u64) -> Result<(), &'static str> {
+    if stack_pointer % 16 != 0 {
+        return Err("syscall kernel stack top must be 16-byte aligned");
+    }
+    unsafe {
+        SYSCALL_KERNEL_STACK_TOP = stack_pointer;
+    }
+    Ok(())
+}
+
+fn userspace_process_root_frame(process_id: u64) -> Result<u64, &'static str> {
+    let process = unsafe {
+        (&*PROCESS_REGISTRY.get())
+            .get(process_id)
+            .ok_or("userspace process id was not registered")?
+    };
+    if !matches!(process.state, ProcessState::Ready | ProcessState::Running) {
+        return Err("userspace process was not dispatchable");
+    }
+    Ok(process.address_space_root)
+}
+
+fn prepare_thread_dispatch(thread: Thread) -> Result<(), &'static str> {
+    let root_frame = match thread.kind {
+        ThreadKind::Kernel => {
+            let frame = KERNEL_ROOT_FRAME.load(Ordering::Relaxed);
+            if frame == 0 {
+                return Err("kernel address-space root was not initialized");
+            }
+            frame
+        }
+        ThreadKind::User => userspace_process_root_frame(thread.owner_process_id)?,
+    };
+
+    activate_address_space_root(root_frame);
+    set_privilege_stack(thread.kernel_stack_top)?;
+    set_syscall_kernel_stack(thread.kernel_stack_top)?;
+    Ok(())
+}
+
+fn prepare_current_scheduler_thread_dispatch() -> Result<(), &'static str> {
+    let thread = without_interrupts(|| unsafe { (&*SCHEDULER.get()).current_thread_descriptor() })?;
+    prepare_thread_dispatch(thread)
 }
 
 #[allow(dead_code)]
@@ -2510,8 +2847,8 @@ fn initialize_syscall_abi(kernel_stack_top: u64) -> Result<(), &'static str> {
     )?;
     let star = ((gdt_state.user_sysret_selector_base.0 as u64) << 48)
         | ((gdt_state.code_selector.0 as u64) << 32);
+    set_syscall_kernel_stack(kernel_stack_top)?;
     unsafe {
-        SYSCALL_KERNEL_STACK_TOP = kernel_stack_top;
         SYSCALL_SCRATCH_USER_RSP = 0;
     }
     write_msr(IA32_STAR_MSR, star);
@@ -2940,7 +3277,7 @@ fn destroy_process_address_space(
 #[cfg(feature = "m3-address-space-self-test")]
 fn create_userspace_process(
     allocator: &mut PageAllocator,
-    id: usize,
+    slot_id: usize,
     kernel_stack_top: u64,
     expected_value: u64,
     probe_address: u64,
@@ -2953,6 +3290,18 @@ fn create_userspace_process(
 
     let mut address_space =
         create_process_address_space(allocator, VirtAddr::new(USER_TEST_CODE_ADDRESS))?;
+    let (pid, tid) = {
+        let ids = unsafe { &mut *ID_ALLOCATOR.get() };
+        (ids.allocate_pid()?, ids.allocate_tid()?)
+    };
+    let mut process = Process {
+        id: pid,
+        state: ProcessState::Creating,
+        address_space_root: address_space.root_frame,
+        resource_domain: ResourceDomain { id: pid },
+        live_threads: 1,
+        exit_status: None,
+    };
     let setup_result = (|| -> Result<UserspaceProcess, &'static str> {
         let code_frame_address = allocator
             .allocate_page()
@@ -3045,13 +3394,28 @@ fn create_userspace_process(
             user_stack_pointer,
         )?;
         let gdt_state = userspace_gdt_state()?;
-        Ok(UserspaceProcess {
-            id,
-            expected_value,
-            expected_probe_address: probe_address,
-            expected_fault_present: id == 1,
+        let thread = Thread {
+            id: tid,
+            owner_process_id: process.id,
+            kind: ThreadKind::User,
             kernel_stack_top,
             saved_stack_pointer,
+            launch_entry: USER_TEST_CODE_ADDRESS,
+            started: false,
+            state: ThreadState::Ready,
+            progress_logged: false,
+            preemptions: 0,
+            observed_progress: 0,
+        };
+        process.state = ProcessState::Ready;
+        process.address_space_root = address_space.root_frame;
+        unsafe { (&mut *PROCESS_REGISTRY.get()).insert(process)? };
+        Ok(UserspaceProcess {
+            process,
+            thread,
+            expected_value,
+            expected_probe_address: probe_address,
+            expected_fault_present: slot_id == 1,
             expected_entry_rip: USER_TEST_CODE_ADDRESS
                 + userspace_address_space_test_after_entry_offset(),
             user_stack_pointer,
@@ -3137,18 +3501,6 @@ fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'st
 }
 
 #[cfg(feature = "m3-address-space-self-test")]
-fn switch_to_userspace_process(
-    state: &mut UserspaceAddressSpaceTestState,
-    next_process: usize,
-) -> Result<u64, &'static str> {
-    let process = &state.processes[next_process];
-    activate_address_space_root(process.address_space.root_frame);
-    set_privilege_stack(process.kernel_stack_top)?;
-    state.current_process = next_process;
-    Ok(process.saved_stack_pointer)
-}
-
-#[cfg(feature = "m3-address-space-self-test")]
 fn validate_process_address_space_isolation(
     state: &UserspaceAddressSpaceTestState,
 ) -> Result<(), &'static str> {
@@ -3175,6 +3527,124 @@ fn validate_process_address_space_isolation(
 }
 
 #[cfg(feature = "m3-address-space-self-test")]
+fn current_userspace_process_index(
+    state: &UserspaceAddressSpaceTestState,
+) -> Result<usize, &'static str> {
+    let thread = without_interrupts(|| unsafe { (&*SCHEDULER.get()).current_thread_descriptor() })?;
+    state
+        .processes
+        .iter()
+        .position(|process| process.process.id == thread.owner_process_id)
+        .ok_or("current scheduler thread did not map to a registered userspace process")
+}
+
+#[cfg(feature = "m3-address-space-self-test")]
+fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'static str> {
+    let next_stack_pointer = without_interrupts(|| unsafe {
+        (&mut *SCHEDULER.get()).on_timer_interrupt(current_stack_pointer)
+    })?;
+    prepare_current_scheduler_thread_dispatch()?;
+    Ok(next_stack_pointer)
+}
+
+#[cfg(feature = "m3-address-space-self-test")]
+fn start_current_scheduler_thread() -> Result<u64, &'static str> {
+    let stack_pointer = without_interrupts(|| unsafe { (&mut *SCHEDULER.get()).start() })?;
+    prepare_current_scheduler_thread_dispatch()?;
+    Ok(stack_pointer)
+}
+
+#[cfg(feature = "m3-address-space-self-test")]
+fn terminate_current_userspace_process(
+    state: &mut UserspaceAddressSpaceTestState,
+    allocator: &mut PageAllocator,
+    status: u64,
+    faulted: bool,
+) -> Result<Option<u64>, &'static str> {
+    let (thread_id, process_id, retired_siblings) = without_interrupts(|| unsafe {
+        let scheduler = &mut *SCHEDULER.get();
+        let thread_id = scheduler.mark_current_thread_exiting()?;
+        let process_id = scheduler.current_thread_descriptor()?.owner_process_id;
+        let retired_siblings = if faulted {
+            scheduler.retire_sibling_threads_for_process(process_id, thread_id)
+        } else {
+            0
+        };
+        Ok::<(u64, u64, usize), &'static str>((thread_id, process_id, retired_siblings))
+    })?;
+
+    let process_index = state
+        .processes
+        .iter()
+        .position(|process| process.process.id == process_id)
+        .ok_or("exiting thread owner process was not registered")?;
+
+    let last_thread_exited = {
+        let process = &mut state.processes[process_index];
+        let process_record = unsafe {
+            (&mut *PROCESS_REGISTRY.get())
+                .get_mut(process_id)
+                .ok_or("exiting process was missing from registry")?
+        };
+        let last_thread_exited =
+            begin_thread_exit(process_record, &mut process.thread, status, faulted)?;
+        process.process = *process_record;
+        last_thread_exited
+    };
+
+    if faulted && retired_siblings != 0 {
+        let process_record = unsafe {
+            (&mut *PROCESS_REGISTRY.get())
+                .get_mut(process_id)
+                .ok_or("faulting process was missing from registry")?
+        };
+        let retired_siblings_u16 = u16::try_from(retired_siblings)
+            .map_err(|_| "retired sibling thread count overflowed process accounting")?;
+        if process_record.live_threads < retired_siblings_u16 {
+            return Err("process thread accounting underflow during fault sibling retirement");
+        }
+        process_record.live_threads -= retired_siblings_u16;
+        if process_record.live_threads == 0 {
+            finalize_process_exit(process_record, status)?;
+        }
+        state.processes[process_index].process = *process_record;
+    }
+    if faulted {
+        let process_record = unsafe {
+            (&mut *PROCESS_REGISTRY.get())
+                .get_mut(process_id)
+                .ok_or("faulting process was missing from registry after retirement")?
+        };
+        if process_record.live_threads != 0 {
+            return Err("faulted process still had live threads after sibling retirement");
+        }
+    }
+
+    let next_stack_pointer =
+        without_interrupts(|| unsafe { (&mut *SCHEDULER.get()).finish_current_thread() })?;
+
+    if last_thread_exited || (faulted && state.processes[process_index].process.live_threads == 0) {
+        activate_address_space_root(state.kernel_root_frame);
+        destroy_process_address_space(&state.processes[process_index].address_space, allocator)?;
+        let process_record = unsafe {
+            (&mut *PROCESS_REGISTRY.get())
+                .get_mut(process_id)
+                .ok_or("process missing from registry during reap")?
+        };
+        reap_process(process_record, &mut state.processes[process_index].thread)?;
+        state.processes[process_index].process = *process_record;
+        without_interrupts(|| unsafe {
+            (&mut *SCHEDULER.get()).set_thread_state(thread_id, ThreadState::Reaped)
+        })?;
+    }
+
+    if next_stack_pointer.is_some() {
+        prepare_current_scheduler_thread_dispatch()?;
+    }
+    Ok(next_stack_pointer)
+}
+
+#[cfg(feature = "m3-address-space-self-test")]
 fn start_userspace_address_space_self_test(mut allocator: PageAllocator) -> ! {
     let kernel_root_frame = current_root_frame_address();
     let stacks = unsafe { &*TASK_STACKS.get() };
@@ -3189,7 +3659,14 @@ fn start_userspace_address_space_self_test(mut allocator: PageAllocator) -> ! {
         Ok(process) => process,
         Err(message) => fatal_kernel_error(message),
     };
-    kernel_log_line("[MM  ] process address space created pid=1");
+    kernel_log_fmt(format_args!(
+        "[PROC] created pid={} tid={}\n",
+        process_one.process.id, process_one.thread.id
+    ));
+    kernel_log_fmt(format_args!(
+        "[MM  ] process address space created pid={}\n",
+        process_one.process.id
+    ));
     if let Err(message) = validate_process_address_space(&process_one) {
         fatal_kernel_error(message);
     }
@@ -3209,7 +3686,14 @@ fn start_userspace_address_space_self_test(mut allocator: PageAllocator) -> ! {
             fatal_kernel_error(message)
         }
     };
-    kernel_log_line("[MM  ] process address space created pid=2");
+    kernel_log_fmt(format_args!(
+        "[PROC] created pid={} tid={}\n",
+        process_two.process.id, process_two.thread.id
+    ));
+    kernel_log_fmt(format_args!(
+        "[MM  ] process address space created pid={}\n",
+        process_two.process.id
+    ));
     if let Err(message) = validate_process_address_space(&process_two) {
         activate_address_space_root(kernel_root_frame);
         let _ = destroy_process_address_space(&process_two.address_space, &mut allocator);
@@ -3219,7 +3703,6 @@ fn start_userspace_address_space_self_test(mut allocator: PageAllocator) -> ! {
 
     let initial_state = UserspaceAddressSpaceTestState {
         kernel_root_frame,
-        current_process: 0,
         stage: UserspaceAddressSpaceStage::AwaitProcessOneEntry,
         processes: [process_one, process_two],
     };
@@ -3234,9 +3717,32 @@ fn start_userspace_address_space_self_test(mut allocator: PageAllocator) -> ! {
         *USERSPACE_ADDRESS_SPACE_TEST_ALLOCATOR.get() = Some(allocator);
     }
 
-    let frame_pointer = match userspace_address_space_test_state()
-        .and_then(|state| switch_to_userspace_process(state, 0))
-    {
+    let scheduler = unsafe { &mut *SCHEDULER.get() };
+    *scheduler = Scheduler::new();
+    if let Err(message) = scheduler.configure_thread(
+        0,
+        process_one.thread.id,
+        process_one.thread.owner_process_id,
+        process_one.thread.kind,
+        process_one.thread.kernel_stack_top,
+        process_one.thread.saved_stack_pointer,
+        process_one.thread.launch_entry,
+    ) {
+        fatal_kernel_error(message);
+    }
+    if let Err(message) = scheduler.configure_thread(
+        1,
+        process_two.thread.id,
+        process_two.thread.owner_process_id,
+        process_two.thread.kind,
+        process_two.thread.kernel_stack_top,
+        process_two.thread.saved_stack_pointer,
+        process_two.thread.launch_entry,
+    ) {
+        fatal_kernel_error(message);
+    }
+
+    let frame_pointer = match start_current_scheduler_thread() {
         Ok(frame_pointer) => frame_pointer,
         Err(message) => fatal_kernel_error(message),
     };
@@ -3247,7 +3753,7 @@ fn start_userspace_address_space_self_test(mut allocator: PageAllocator) -> ! {
 fn handle_userspace_address_space_entry(context: &InterruptContext) -> Result<u64, &'static str> {
     let frame = userspace_frame(context);
     let state = userspace_address_space_test_state()?;
-    let current_process = state.current_process;
+    let current_process = current_userspace_process_index(state)?;
     let process = state.processes[current_process];
     validate_userspace_entry_trap(
         context,
@@ -3260,18 +3766,26 @@ fn handle_userspace_address_space_entry(context: &InterruptContext) -> Result<u6
         return Err("userspace process observed an unexpected value at its private user address");
     }
 
-    state.processes[current_process].saved_stack_pointer =
-        context as *const InterruptContext as u64;
+    let saved_stack_pointer = context as *const InterruptContext as u64;
+    state.processes[current_process].thread.saved_stack_pointer = saved_stack_pointer;
+    without_interrupts(|| unsafe {
+        let scheduler = &mut *SCHEDULER.get();
+        scheduler.update_thread_saved_stack(process.thread.id, saved_stack_pointer)
+    })?;
     match state.stage {
-        UserspaceAddressSpaceStage::AwaitProcessOneEntry if process.id == 1 => {
+        UserspaceAddressSpaceStage::AwaitProcessOneEntry if process.process.id == 1 => {
+            state.processes[current_process].process.state = ProcessState::Ready;
+            state.processes[current_process].thread.state = ThreadState::Ready;
             state.stage = UserspaceAddressSpaceStage::AwaitProcessTwoEntry;
-            switch_to_userspace_process(state, 1)
+            schedule_next_thread(saved_stack_pointer)
         }
-        UserspaceAddressSpaceStage::AwaitProcessTwoEntry if process.id == 2 => {
+        UserspaceAddressSpaceStage::AwaitProcessTwoEntry if process.process.id == 2 => {
+            state.processes[current_process].process.state = ProcessState::Ready;
+            state.processes[current_process].thread.state = ThreadState::Ready;
             validate_process_address_space_isolation(state)?;
             kernel_log_line(ADDRESS_SPACE_SWITCH_OK_MARKER);
             state.stage = UserspaceAddressSpaceStage::AwaitKernelMemoryFault;
-            switch_to_userspace_process(state, 0)
+            schedule_next_thread(saved_stack_pointer)
         }
         _ => Err("userspace address-space self-test reached an unexpected rendezvous"),
     }
@@ -3289,7 +3803,10 @@ fn handle_userspace_address_space_page_fault(context: &InterruptContext) -> ! {
         Ok(state) => state,
         Err(message) => fatal_kernel_error(message),
     };
-    let current_process = state.current_process;
+    let current_process = match current_userspace_process_index(state) {
+        Ok(current_process) => current_process,
+        Err(message) => fatal_kernel_error(message),
+    };
     let process = state.processes[current_process];
     if fault_address != process.expected_probe_address {
         fatal_kernel_error("userspace process faulted at an unexpected virtual address");
@@ -3306,34 +3823,44 @@ fn handle_userspace_address_space_page_fault(context: &InterruptContext) -> ! {
         Err(message) => fatal_kernel_error(message),
     };
     match state.stage {
-        UserspaceAddressSpaceStage::AwaitKernelMemoryFault if process.id == 1 => {
+        UserspaceAddressSpaceStage::AwaitKernelMemoryFault if process.process.id == 1 => {
             kernel_log_line("[SEC ] kernel-memory read denied");
+            kernel_log_fmt(format_args!("[PROC] fault pid={}\n", process.process.id));
             state.stage = UserspaceAddressSpaceStage::AwaitCrossProcessFault;
-            let next_stack_pointer = match switch_to_userspace_process(state, 1) {
-                Ok(next_stack_pointer) => next_stack_pointer,
-                Err(message) => fatal_kernel_error(message),
-            };
+            let next_stack_pointer =
+                match terminate_current_userspace_process(state, allocator, 1, true) {
+                    Ok(Some(next_stack_pointer)) => next_stack_pointer,
+                    Ok(None) => {
+                        fatal_kernel_error("userspace lifecycle lost remaining runnable work")
+                    }
+                    Err(message) => fatal_kernel_error(message),
+                };
+            kernel_log_fmt(format_args!(
+                "[PROC] pid={} exited status={}\n",
+                process.process.id, 1
+            ));
             unsafe { restore_task_context(next_stack_pointer) }
         }
-        UserspaceAddressSpaceStage::AwaitCrossProcessFault if process.id == 2 => {
+        UserspaceAddressSpaceStage::AwaitCrossProcessFault if process.process.id == 2 => {
             kernel_log_line("[SEC ] cross-process read denied");
-            activate_address_space_root(state.kernel_root_frame);
-            if let Err(message) =
-                destroy_process_address_space(&state.processes[1].address_space, allocator)
-            {
-                fatal_kernel_error(message);
+            match terminate_current_userspace_process(state, allocator, 0, false) {
+                Ok(None) => {}
+                Ok(Some(_)) => fatal_kernel_error(
+                    "userspace lifecycle left runnable work after final process exit",
+                ),
+                Err(message) => fatal_kernel_error(message),
             }
-            if let Err(message) =
-                destroy_process_address_space(&state.processes[0].address_space, allocator)
-            {
-                fatal_kernel_error(message);
-            }
+            kernel_log_fmt(format_args!(
+                "[PROC] pid={} exited status={}\n",
+                process.process.id, 0
+            ));
             unsafe {
                 *USERSPACE_ADDRESS_SPACE_TEST_STATE.get() = None;
                 *USERSPACE_ADDRESS_SPACE_TEST_ALLOCATOR.get() = None;
             }
             kernel_log_line("[MM  ] address-space teardown OK");
             kernel_log_line("[M3.2] PASS");
+            kernel_log_line("[M3.4] PASS");
             qemu_exit(QEMU_EXIT_SUCCESS)
         }
         _ => fatal_kernel_error(
@@ -3456,6 +3983,9 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
                     Ok(next_stack_pointer) => next_stack_pointer,
                     Err(message) => fatal_kernel_error(message),
                 };
+            if let Err(message) = prepare_current_scheduler_thread_dispatch() {
+                fatal_kernel_error(message);
+            }
             acknowledge_timer_interrupt();
             return next_stack_pointer;
         }
@@ -3633,7 +4163,7 @@ extern "C" fn clean_slate_task_two() -> ! {
     run_demo_task(2)
 }
 
-fn run_demo_task(task_id: usize) -> ! {
+fn run_demo_task(task_id: u64) -> ! {
     let mut progress = 0u64;
     loop {
         for _ in 0..TASK_PROGRESS_CHUNK {
@@ -3648,7 +4178,7 @@ fn run_demo_task(task_id: usize) -> ! {
     }
 }
 
-fn flush_scheduler_markers(task_id: usize) {
+fn flush_scheduler_markers(task_id: u64) {
     let (preemption_log, progress_log) = without_interrupts(|| unsafe {
         let scheduler = &mut *SCHEDULER.get();
         let preemption_log = if scheduler.preemption_observed && !scheduler.preemption_logged {
@@ -3659,16 +4189,16 @@ fn flush_scheduler_markers(task_id: usize) {
         };
 
         let progress_log = scheduler
-            .tasks
+            .threads
             .iter_mut()
-            .find(|task| task.id == task_id)
-            .and_then(|task| {
-                if task.preemptions >= TASK_REQUIRED_PREEMPTIONS
-                    && !task.progress_logged
-                    && task.observed_progress != 0
+            .find(|thread| thread.id == task_id)
+            .and_then(|thread| {
+                if thread.preemptions >= TASK_REQUIRED_PREEMPTIONS
+                    && !thread.progress_logged
+                    && thread.observed_progress != 0
                 {
-                    task.progress_logged = true;
-                    Some(task.observed_progress)
+                    thread.progress_logged = true;
+                    Some(thread.observed_progress)
                 } else {
                     None
                 }
@@ -3689,24 +4219,27 @@ fn flush_scheduler_markers(task_id: usize) {
     }
 }
 
-fn note_task_progress(task_id: usize, progress: u64) {
+fn note_task_progress(task_id: u64, progress: u64) {
     without_interrupts(|| unsafe {
         (&mut *SCHEDULER.get()).note_progress(task_id, progress);
     });
 }
 
-fn task_should_exit(task_id: usize) -> bool {
-    without_interrupts(|| unsafe { (&*SCHEDULER.get()).task_should_exit(task_id) })
+fn task_should_exit(task_id: u64) -> bool {
+    without_interrupts(|| unsafe { (&*SCHEDULER.get()).thread_should_exit(task_id) })
 }
 
 fn task_exit() -> ! {
     disable_interrupts();
-    let next = match unsafe { (&mut *SCHEDULER.get()).finish_current_task() } {
+    let next = match unsafe { (&mut *SCHEDULER.get()).finish_current_thread() } {
         Ok(next) => next,
         Err(message) => fatal_kernel_error(message),
     };
     match next {
         Some(stack_pointer) => {
+            if let Err(message) = prepare_current_scheduler_thread_dispatch() {
+                fatal_kernel_error(message);
+            }
             if stack_pointer == FRESH_TASK_SENTINEL {
                 let (fresh_stack_pointer, entry_point) =
                     unsafe { (NEXT_TASK_STACK_POINTER, NEXT_TASK_ENTRY_POINT) };
@@ -3719,7 +4252,7 @@ fn task_exit() -> ! {
             if unsafe { (&*SCHEDULER.get()).all_finished() } {
                 emit_m2_pass_and_stop()
             } else {
-                fatal_kernel_error("scheduler had no runnable task during task exit")
+                fatal_kernel_error("scheduler had no runnable thread during task exit")
             }
         }
     }
@@ -4339,10 +4872,10 @@ mod tests {
     fn scheduler_round_robins_and_tracks_preemption_progress() {
         let mut scheduler = Scheduler::new();
         scheduler
-            .configure_task(0, 1, 0x1000, 0x1000)
+            .configure_kernel_thread(0, 1, 0x1000, 0x1000)
             .expect("task 1");
         scheduler
-            .configure_task(1, 2, 0x2000, 0x2000)
+            .configure_kernel_thread(1, 2, 0x2000, 0x2000)
             .expect("task 2");
 
         assert_eq!(scheduler.start().expect("start"), 0x1000);
@@ -4363,37 +4896,220 @@ mod tests {
         );
 
         assert!(scheduler.preemption_observed);
-        assert!(scheduler.task_should_exit(1));
-        assert!(!scheduler.task_should_exit(2));
+        assert!(scheduler.thread_should_exit(1));
+        assert!(!scheduler.thread_should_exit(2));
     }
 
     #[test]
     fn scheduler_removes_finished_tasks_without_losing_remaining_work() {
         let mut scheduler = Scheduler::new();
         scheduler
-            .configure_task(0, 1, 0x1000, 0x1000)
+            .configure_kernel_thread(0, 1, 0x1000, 0x1000)
             .expect("task 1");
         scheduler
-            .configure_task(1, 2, 0x2000, 0x2000)
+            .configure_kernel_thread(1, 2, 0x2000, 0x2000)
             .expect("task 2");
 
         scheduler.start().expect("start");
-        scheduler.current_task = Some(0);
-        scheduler.tasks[0].state = TaskState::Running;
-        scheduler.tasks[0].observed_progress = 7;
+        scheduler.current_thread = Some(0);
+        scheduler.threads[0].state = ThreadState::Running;
+        scheduler.threads[0].observed_progress = 7;
         assert_eq!(
-            scheduler.finish_current_task().expect("finish"),
+            scheduler.finish_current_thread().expect("finish"),
             Some(FRESH_TASK_SENTINEL)
         );
-        assert_eq!(scheduler.current_task, Some(1));
-        assert_eq!(scheduler.tasks[0].state, TaskState::Finished);
-        assert!(scheduler.tasks[1].started);
+        assert_eq!(scheduler.current_thread, Some(1));
+        assert_eq!(scheduler.threads[0].state, ThreadState::Exited);
+        assert!(scheduler.threads[1].started);
 
-        scheduler.tasks[1].state = TaskState::Running;
-        scheduler.current_task = Some(1);
-        scheduler.tasks[1].observed_progress = 9;
-        assert_eq!(scheduler.finish_current_task().expect("finish"), None);
+        scheduler.threads[1].state = ThreadState::Running;
+        scheduler.current_thread = Some(1);
+        scheduler.threads[1].observed_progress = 9;
+        assert_eq!(scheduler.finish_current_thread().expect("finish"), None);
         assert!(scheduler.all_finished());
+    }
+
+    #[test]
+    fn scheduler_can_track_user_and_kernel_thread_ownership_independently() {
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .configure_thread(0, 11, 0, ThreadKind::Kernel, 0x1000, 0x1000, 0x1000)
+            .expect("kernel thread");
+        scheduler
+            .configure_thread(1, 22, 7, ThreadKind::User, 0x2000, 0x2000, 0x2000)
+            .expect("user thread");
+
+        assert_eq!(scheduler.threads[0].kind, ThreadKind::Kernel);
+        assert_eq!(scheduler.threads[0].owner_process_id, 0);
+        assert_eq!(scheduler.threads[1].kind, ThreadKind::User);
+        assert_eq!(scheduler.threads[1].owner_process_id, 7);
+        assert_eq!(scheduler.start().expect("start"), 0x1000);
+        assert_eq!(scheduler.on_timer_interrupt(0x1010).expect("tick"), 0x2000);
+    }
+
+    #[test]
+    fn id_allocator_issues_monotonic_non_reused_ids() {
+        let mut ids = IdAllocator::new();
+        assert_eq!(ids.allocate_pid().expect("pid 1"), 1);
+        assert_eq!(ids.allocate_pid().expect("pid 2"), 2);
+        assert_eq!(ids.allocate_tid().expect("tid 1"), 1);
+        assert_eq!(ids.allocate_tid().expect("tid 2"), 2);
+    }
+
+    #[test]
+    fn process_and_thread_lifecycle_transitions_cover_fault_exit_and_reap() {
+        let mut process = Process {
+            id: 9,
+            state: ProcessState::Running,
+            address_space_root: 0x2000,
+            resource_domain: ResourceDomain { id: 9 },
+            live_threads: 1,
+            exit_status: None,
+        };
+        let mut thread = Thread {
+            id: 13,
+            owner_process_id: process.id,
+            kind: ThreadKind::User,
+            kernel_stack_top: 0x3000,
+            saved_stack_pointer: 0x3000,
+            launch_entry: 0x4000,
+            started: true,
+            state: ThreadState::Running,
+            progress_logged: false,
+            preemptions: 0,
+            observed_progress: 0,
+        };
+
+        assert!(
+            begin_thread_exit(&mut process, &mut thread, 1, true).expect("fault exit transition")
+        );
+        reap_process(&mut process, &mut thread).expect("reap transition");
+
+        assert_eq!(process.state, ProcessState::Reaped);
+        assert_eq!(thread.state, ThreadState::Reaped);
+        assert_eq!(process.exit_status, Some(1));
+        assert_eq!(process.live_threads, 0);
+        assert_eq!(thread.owner_process_id, process.id);
+    }
+
+    #[test]
+    fn first_thread_exit_keeps_multi_thread_process_alive() {
+        let mut process = Process {
+            id: 5,
+            state: ProcessState::Running,
+            address_space_root: 0x3000,
+            resource_domain: ResourceDomain { id: 5 },
+            live_threads: 2,
+            exit_status: None,
+        };
+        let mut thread = Thread {
+            id: 41,
+            owner_process_id: process.id,
+            kind: ThreadKind::User,
+            kernel_stack_top: 0x5000,
+            saved_stack_pointer: 0x5000,
+            launch_entry: 0x6000,
+            started: true,
+            state: ThreadState::Running,
+            progress_logged: false,
+            preemptions: 0,
+            observed_progress: 0,
+        };
+
+        assert!(!begin_thread_exit(&mut process, &mut thread, 0, false).expect("thread exit"));
+        assert_eq!(thread.state, ThreadState::Exited);
+        assert_eq!(process.live_threads, 1);
+        assert_eq!(process.state, ProcessState::Running);
+        assert_eq!(process.exit_status, None);
+
+        let mut final_thread = Thread {
+            id: 42,
+            owner_process_id: process.id,
+            kind: ThreadKind::User,
+            kernel_stack_top: 0x7000,
+            saved_stack_pointer: 0x7000,
+            launch_entry: 0x8000,
+            started: true,
+            state: ThreadState::Running,
+            progress_logged: false,
+            preemptions: 0,
+            observed_progress: 0,
+        };
+        assert!(begin_thread_exit(&mut process, &mut final_thread, 9, false)
+            .expect("final thread exit"));
+        assert_eq!(process.live_threads, 0);
+        assert_eq!(process.state, ProcessState::Exited);
+        assert_eq!(process.exit_status, Some(9));
+    }
+
+    #[test]
+    fn process_registry_lookup_and_dispatchability_follow_process_state() {
+        let mut registry = ProcessRegistry::new();
+        let mut process = Process {
+            id: 17,
+            state: ProcessState::Ready,
+            address_space_root: 0x9000,
+            resource_domain: ResourceDomain { id: 17 },
+            live_threads: 1,
+            exit_status: None,
+        };
+        registry.insert(process).expect("insert");
+        assert_eq!(
+            registry
+                .get(process.id)
+                .expect("process")
+                .address_space_root,
+            0x9000
+        );
+        assert!(matches!(
+            registry.get(process.id).expect("process").state,
+            ProcessState::Ready
+        ));
+
+        process.state = ProcessState::Exited;
+        *registry.get_mut(17).expect("mut process") = process;
+        assert!(matches!(
+            registry.get(17).expect("process").state,
+            ProcessState::Exited
+        ));
+    }
+
+    #[test]
+    fn fault_termination_requires_sibling_retirement_before_final_exit() {
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .configure_thread(0, 90, 33, ThreadKind::User, 0x1000, 0x1000, 0x1000)
+            .expect("thread one");
+        scheduler
+            .configure_thread(1, 91, 33, ThreadKind::User, 0x2000, 0x2000, 0x2000)
+            .expect("thread two");
+        scheduler.current_thread = Some(0);
+        scheduler.threads[0].state = ThreadState::Running;
+        scheduler.threads[1].state = ThreadState::Ready;
+
+        let mut process = Process {
+            id: 33,
+            state: ProcessState::Running,
+            address_space_root: 0x9000,
+            resource_domain: ResourceDomain { id: 33 },
+            live_threads: 2,
+            exit_status: None,
+        };
+        let mut current = scheduler.threads[0];
+        assert!(
+            !begin_thread_exit(&mut process, &mut current, 1, true).expect("fault current thread")
+        );
+        assert_eq!(process.state, ProcessState::Faulted);
+        assert_eq!(process.live_threads, 1);
+
+        let retired = scheduler.retire_sibling_threads_for_process(33, 90);
+        assert_eq!(retired, 1);
+        assert_eq!(scheduler.threads[1].state, ThreadState::Exited);
+        process.live_threads -= retired as u16;
+        finalize_process_exit(&mut process, 1).expect("finalize process exit");
+        assert_eq!(process.live_threads, 0);
+        assert_eq!(process.state, ProcessState::Exited);
+        assert_eq!(process.exit_status, Some(1));
     }
 
     #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]

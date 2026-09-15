@@ -222,6 +222,16 @@ The initial ABI is intentionally tiny and versioned for M3 testing:
 
 This keeps assembly/unsafe logic isolated in the x86-64 boundary while exposing only a narrowly auditable contract for early userspace validation.
 
+## M3.4 process/thread lifecycle direction
+
+M3.4 separates process ownership from thread scheduling state:
+
+- `Process` owns address-space root identity and a resource-domain container ID.
+- `Thread` owns schedulable CPU context (`saved_stack_pointer`, launch entry) and kernel-stack identity.
+- Scheduler run-queue decisions operate on `Thread` state (`Ready`/`Running`/`Exited`) without conflating ownership (`owner_process_id`) with dispatch policy.
+
+PID/TID assignment is monotonic and non-reusing for the life of a boot session. On userspace faults, ownership-aware diagnostics identify the faulting PID and the kernel transitions that process/thread through faulted → exited → reaped cleanup while preserving kernel control flow and unrelated runnable work.
+
 ## Language strategy
 
 The kernel and first-party low-level services should primarily use Rust.
