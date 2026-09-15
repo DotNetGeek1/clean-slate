@@ -29,7 +29,7 @@ fn interrupts_enabled() -> bool {
     bit(read_rflags(), RFLAGS_INTERRUPT_ENABLE_BIT as u32) != 0
 }
 
-fn read_rflags() -> u64 {
+pub(crate) fn read_rflags() -> u64 {
     let rflags: u64;
     unsafe {
         asm!("pushfq", "pop {}", out(reg) rflags, options(nomem, preserves_flags));

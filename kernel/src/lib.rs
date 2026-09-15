@@ -21,16 +21,78 @@ mod sync;
 pub use diagnostics::qemu::qemu_exit_failure;
 pub use diagnostics::serial::{serial_write_fmt, serial_write_line};
 
+use crate::arch::x86_64::apic::acknowledge_timer_interrupt;
+use crate::arch::x86_64::apic::enable_local_apic;
+use crate::arch::x86_64::apic::mask_legacy_pic;
+use crate::arch::x86_64::apic::program_local_apic_timer;
+use crate::arch::x86_64::apic::APIC_TIMER_INITIAL_COUNT;
+use crate::arch::x86_64::asm::clean_slate_syscall_entry;
+use crate::arch::x86_64::asm::clean_slate_task_one_bootstrap_entry;
+use crate::arch::x86_64::asm::clean_slate_task_two_bootstrap_entry;
+#[cfg(feature = "m2-timer-self-test")]
+use crate::arch::x86_64::asm::clean_slate_timer_self_test_bootstrap_entry;
+#[cfg(feature = "m3-address-space-self-test")]
+use crate::arch::x86_64::asm::clean_slate_user_address_space_test_after_entry;
+#[cfg(feature = "m3-address-space-self-test")]
+use crate::arch::x86_64::asm::clean_slate_user_address_space_test_end;
+#[cfg(feature = "m3-address-space-self-test")]
+use crate::arch::x86_64::asm::clean_slate_user_address_space_test_start;
+#[cfg(feature = "m3-ipc-self-test")]
+use crate::arch::x86_64::asm::clean_slate_user_ipc_test_after_send;
+#[cfg(feature = "m3-ipc-self-test")]
+use crate::arch::x86_64::asm::clean_slate_user_ipc_test_end;
+#[cfg(feature = "m3-ipc-self-test")]
+use crate::arch::x86_64::asm::clean_slate_user_ipc_test_start;
+#[cfg(feature = "m3-syscall-self-test")]
+use crate::arch::x86_64::asm::clean_slate_user_syscall_test_end;
+#[cfg(feature = "m3-syscall-self-test")]
+use crate::arch::x86_64::asm::clean_slate_user_syscall_test_start;
+#[cfg(feature = "m3-entry-self-test")]
+use crate::arch::x86_64::asm::clean_slate_user_test_end;
+#[cfg(feature = "m3-entry-self-test")]
+use crate::arch::x86_64::asm::clean_slate_user_test_privileged_instruction;
+#[cfg(feature = "m3-entry-self-test")]
+use crate::arch::x86_64::asm::clean_slate_user_test_start;
+use crate::arch::x86_64::asm::SYSCALL_SCRATCH_USER_RSP;
 use crate::arch::x86_64::bit;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
+use crate::arch::x86_64::context_switch::restore_task_context;
+use crate::arch::x86_64::context_switch::start_first_task;
+use crate::arch::x86_64::context_switch::task_stack_top;
+use crate::arch::x86_64::context_switch::TaskStack;
+use crate::arch::x86_64::context_switch::FRESH_TASK_SENTINEL;
+use crate::arch::x86_64::context_switch::NEXT_TASK_ENTRY_POINT;
+use crate::arch::x86_64::context_switch::NEXT_TASK_STACK_POINTER;
+use crate::arch::x86_64::context_switch::TASK_STACK_SIZE;
+#[cfg(feature = "m3-syscall-self-test")]
+use crate::arch::x86_64::context_switch::USER_TEST_RFLAGS;
 use crate::arch::x86_64::cpu::disable_interrupts;
 use crate::arch::x86_64::cpu::enable_interrupts;
-use crate::arch::x86_64::cpu::read_code_segment;
+#[cfg(feature = "m3-syscall-self-test")]
+use crate::arch::x86_64::cpu::read_rflags;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::cpu::without_write_protect;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+use crate::arch::x86_64::gdt::selector_rpl;
+use crate::arch::x86_64::gdt::set_privilege_stack;
+use crate::arch::x86_64::gdt::set_syscall_kernel_stack;
+use crate::arch::x86_64::gdt::userspace_gdt_state;
+#[cfg(feature = "m2-double-fault-self-test")]
+use crate::arch::x86_64::gdt::DOUBLE_FAULT_STACK;
+#[cfg(feature = "m3-entry-self-test")]
+use crate::arch::x86_64::gdt::GDT_STATE;
+use crate::arch::x86_64::idt::exception_name;
+use crate::arch::x86_64::idt::install_interrupt_handlers;
+use crate::arch::x86_64::interrupt_context::InterruptContext;
+use crate::arch::x86_64::interrupt_context::SyscallContext;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+use crate::arch::x86_64::interrupt_context::UserspaceEntryFrame;
 use crate::arch::x86_64::msr::read_msr;
 use crate::arch::x86_64::msr::write_msr;
-use crate::arch::x86_64::port::port_out;
 use crate::arch::x86_64::DOUBLE_FAULT_VECTOR;
+#[cfg(feature = "m3-entry-self-test")]
+use crate::arch::x86_64::GENERAL_PROTECTION_VECTOR;
 use crate::arch::x86_64::IA32_EFER_MSR;
 use crate::arch::x86_64::IA32_EFER_SCE;
 use crate::arch::x86_64::IA32_FMASK_MSR;
@@ -47,6 +109,8 @@ use crate::arch::x86_64::RFLAGS_STATUS_FLAGS_MASK;
 use crate::arch::x86_64::RFLAGS_TRAP_FLAG_BIT;
 use crate::arch::x86_64::SPURIOUS_VECTOR;
 use crate::arch::x86_64::TIMER_VECTOR;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+use crate::arch::x86_64::USER_TEST_VECTOR;
 use crate::boot::uefi::collect_reserved_ranges_from_firmware;
 use crate::boot::uefi::normalize_memory_map;
 use crate::boot::uefi::BootReservedRanges;
@@ -67,9 +131,9 @@ use crate::mm::PAGE_SIZE;
 use crate::mm::PHYSICAL_MEMORY_OFFSET;
 use crate::mm::USER_CANONICAL_TOP_EXCLUSIVE;
 use crate::sync::global_cell::GlobalCell;
-use core::arch::{asm, global_asm};
+#[cfg(feature = "m2-timer-self-test")]
+use core::arch::asm;
 use core::hint::spin_loop;
-use core::mem::size_of;
 use core::ptr;
 #[cfg(any(
     feature = "m2-double-fault-self-test",
@@ -82,24 +146,18 @@ use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU64, Ordering};
 use uefi::mem::memory_map::{MemoryMap, MemoryMapMut};
 use uefi::Status;
-use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
-use x86_64::instructions::tables::load_tss;
 use x86_64::registers::control::{Cr2, Cr3};
-use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
+use x86_64::structures::gdt::SegmentSelector;
 use x86_64::structures::paging::{
     FrameAllocator, OffsetPageTable, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate,
 };
 use x86_64::structures::paging::{Mapper, Page};
-use x86_64::structures::tss::TaskStateSegment;
 use x86_64::{PhysAddr, VirtAddr};
 
 #[cfg(feature = "m1-self-test")]
 const SCRATCH_PAGE_ADDRESS: u64 = 0xffff_8000_0000_0000;
 #[cfg(feature = "m1-self-test")]
 const TEST_PAGE_VALUE: u64 = 0x434c_4541_4e53_4c41;
-const DOUBLE_FAULT_IST_INDEX: u16 = 1;
-const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
-const APIC_BASE_MSR: u32 = 0x1b;
 const SYSCALL_ENTRY_RFLAGS_MASK: u64 = (1u64 << RFLAGS_TRAP_FLAG_BIT)
     | (1u64 << RFLAGS_INTERRUPT_ENABLE_BIT)
     | (1u64 << RFLAGS_DIRECTION_FLAG_BIT)
@@ -107,23 +165,7 @@ const SYSCALL_ENTRY_RFLAGS_MASK: u64 = (1u64 << RFLAGS_TRAP_FLAG_BIT)
     | (1u64 << RFLAGS_NESTED_TASK_BIT)
     | (1u64 << RFLAGS_RESUME_FLAG_BIT)
     | (1u64 << RFLAGS_ALIGNMENT_CHECK_BIT);
-const APIC_BASE_ADDRESS_MASK: u64 = 0xffff_f000;
-const APIC_ENABLE: u64 = 1 << 11;
-const APIC_SPURIOUS_INTERRUPT_VECTOR: u32 = 0x100 | (SPURIOUS_VECTOR as u32);
-const APIC_REGISTER_TPR: usize = 0x80;
-const APIC_REGISTER_EOI: usize = 0xb0;
-const APIC_REGISTER_SVR: usize = 0xf0;
-const APIC_REGISTER_LVT_TIMER: usize = 0x320;
-const APIC_REGISTER_INITIAL_COUNT: usize = 0x380;
-const APIC_REGISTER_DIVIDE_CONFIGURATION: usize = 0x3e0;
-const APIC_TIMER_PERIODIC: u32 = 1 << 17;
-const APIC_TIMER_DIVIDE_BY_16: u32 = 0x03;
-const APIC_TIMER_INITIAL_COUNT: u32 = 10_000_000;
-const FRESH_TASK_SENTINEL: u64 = u64::MAX;
-const PIC_MASTER_DATA: u16 = 0x21;
-const PIC_SLAVE_DATA: u16 = 0xa1;
 const TASK_COUNT: usize = 2;
-const TASK_STACK_SIZE: usize = 64 * 1024;
 const TASK_REQUIRED_PREEMPTIONS: u64 = 2;
 const TASK_PROGRESS_CHUNK: u64 = 4_096;
 #[cfg(feature = "m2-timer-self-test")]
@@ -154,8 +196,6 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
 const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 #[cfg(feature = "m3-address-space-self-test")]
 const ADDRESS_SPACE_SWITCH_OK_MARKER: &str = "[MM  ] address-space switch OK";
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-const USER_TEST_RFLAGS: u64 = 0x202;
 const SYSCALL_ABI_VERSION: u64 = 1;
 const SYSCALL_NR_VERSION: u64 = 0;
 const SYSCALL_NR_READ_U64: u64 = 1;
@@ -949,14 +989,6 @@ fn reserve_mapping_page_tables(
 
 static mut EXPECTED_PAGE_FAULT_ADDRESS: u64 = 0;
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-#[derive(Clone, Copy)]
-struct UserspaceEntryFrame {
-    interrupt: InterruptContext,
-    user_stack_pointer: u64,
-    user_stack_segment: u64,
-}
-
 #[cfg(feature = "m3-entry-self-test")]
 #[derive(Clone, Copy)]
 struct UserspaceTestState {
@@ -1006,26 +1038,6 @@ struct UserspaceIpcPayloadData {
     message_len: u64,
     expected_return: u64,
     message: [u8; IPC_MAX_MESSAGE_BYTES],
-}
-
-#[repr(C)]
-struct SyscallContext {
-    rax: u64,
-    rdx: u64,
-    rbx: u64,
-    rbp: u64,
-    rsi: u64,
-    rdi: u64,
-    r8: u64,
-    r9: u64,
-    r10: u64,
-    r12: u64,
-    r13: u64,
-    r14: u64,
-    r15: u64,
-    user_rip: u64,
-    user_rflags: u64,
-    user_rsp: u64,
 }
 
 #[cfg(feature = "m3-address-space-self-test")]
@@ -1402,142 +1414,12 @@ impl Scheduler {
     }
 }
 
-#[repr(align(16))]
-struct TaskStack([u8; TASK_STACK_SIZE]);
-
-#[repr(align(16))]
-struct DoubleFaultStack([u8; DOUBLE_FAULT_STACK_SIZE]);
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct InterruptContext {
-    r15: u64,
-    r14: u64,
-    r13: u64,
-    r12: u64,
-    r11: u64,
-    r10: u64,
-    r9: u64,
-    r8: u64,
-    rdi: u64,
-    rsi: u64,
-    rbp: u64,
-    rbx: u64,
-    rdx: u64,
-    rcx: u64,
-    rax: u64,
-    vector: u64,
-    error_code: u64,
-    rip: u64,
-    cs: u64,
-    rflags: u64,
-}
-
-#[cfg(test)]
-impl InterruptContext {
-    const ZERO: Self = Self {
-        r15: 0,
-        r14: 0,
-        r13: 0,
-        r12: 0,
-        r11: 0,
-        r10: 0,
-        r9: 0,
-        r8: 0,
-        rdi: 0,
-        rsi: 0,
-        rbp: 0,
-        rbx: 0,
-        rdx: 0,
-        rcx: 0,
-        rax: 0,
-        vector: 0,
-        error_code: 0,
-        rip: 0,
-        cs: 0,
-        rflags: 0,
-    };
-}
-
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-struct IdtEntry {
-    offset_low: u16,
-    selector: u16,
-    options: u16,
-    offset_middle: u16,
-    offset_high: u32,
-    reserved: u32,
-}
-
-impl IdtEntry {
-    const MISSING: Self = Self {
-        offset_low: 0,
-        selector: 0,
-        options: 0,
-        offset_middle: 0,
-        offset_high: 0,
-        reserved: 0,
-    };
-
-    fn set_handler(&mut self, handler: unsafe extern "C" fn()) {
-        self.set_handler_with_privilege(handler, 0, 0);
-    }
-
-    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-    fn set_user_handler(&mut self, handler: unsafe extern "C" fn()) {
-        self.set_handler_with_privilege(handler, 0, 3);
-    }
-
-    fn set_handler_with_ist(&mut self, handler: unsafe extern "C" fn(), ist_index: u16) {
-        self.set_handler_with_privilege(handler, ist_index, 0);
-    }
-
-    fn set_handler_with_privilege(
-        &mut self,
-        handler: unsafe extern "C" fn(),
-        ist_index: u16,
-        privilege_level: u16,
-    ) {
-        let address = handler as usize as u64;
-        self.offset_low = address as u16;
-        self.selector = read_code_segment();
-        self.options = 0x8e00 | ((privilege_level & 0x3) << 13) | (ist_index & 0x7);
-        self.offset_middle = (address >> 16) as u16;
-        self.offset_high = (address >> 32) as u32;
-        self.reserved = 0;
-    }
-}
-
-#[repr(C, align(16))]
-struct InterruptDescriptorTable {
-    entries: [IdtEntry; 256],
-}
-
-static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable {
-    entries: [IdtEntry::MISSING; 256],
-};
-
-struct GdtState {
-    table: GlobalDescriptorTable,
-    code_selector: SegmentSelector,
-    data_selector: SegmentSelector,
-    user_sysret_selector_base: SegmentSelector,
-    user_code_selector: SegmentSelector,
-    user_data_selector: SegmentSelector,
-    tss_selector: SegmentSelector,
-}
-
 static SCHEDULER: GlobalCell<Scheduler> = GlobalCell::new(Scheduler::new());
 static ID_ALLOCATOR: GlobalCell<IdAllocator> = GlobalCell::new(IdAllocator::new());
 static PROCESS_REGISTRY: GlobalCell<ProcessRegistry> = GlobalCell::new(ProcessRegistry::new());
 static IPC_ENDPOINT_TABLE: GlobalCell<IpcEndpointTable> = GlobalCell::new(IpcEndpointTable::new());
 static TASK_STACKS: GlobalCell<[TaskStack; TASK_COUNT]> =
     GlobalCell::new([const { TaskStack([0; TASK_STACK_SIZE]) }; TASK_COUNT]);
-static DOUBLE_FAULT_STACK: GlobalCell<DoubleFaultStack> =
-    GlobalCell::new(DoubleFaultStack([0; DOUBLE_FAULT_STACK_SIZE]));
-static GDT_STATE: GlobalCell<Option<GdtState>> = GlobalCell::new(None);
-static TSS_STATE: GlobalCell<Option<TaskStateSegment>> = GlobalCell::new(None);
 #[cfg(feature = "m3-address-space-self-test")]
 static USERSPACE_ADDRESS_SPACE_TEST_ALLOCATOR: GlobalCell<Option<PageAllocator>> =
     GlobalCell::new(None);
@@ -1553,18 +1435,10 @@ static USERSPACE_SYSCALL_TEST_STATE: GlobalCell<Option<UserspaceSyscallTestState
     GlobalCell::new(None);
 #[cfg(feature = "m3-ipc-self-test")]
 static USERSPACE_IPC_TEST_STATE: GlobalCell<Option<UserspaceIpcTestState>> = GlobalCell::new(None);
-#[unsafe(no_mangle)]
-static mut SYSCALL_KERNEL_STACK_TOP: u64 = 0;
-#[unsafe(no_mangle)]
-static mut SYSCALL_SCRATCH_USER_RSP: u64 = 0;
 #[cfg(feature = "m3-syscall-self-test")]
 static SYSCALL_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "m3-syscall-self-test")]
 static SYSCALL_DF_SANITIZED_OBSERVED: AtomicBool = AtomicBool::new(false);
-#[unsafe(no_mangle)]
-static mut NEXT_TASK_STACK_POINTER: u64 = 0;
-#[unsafe(no_mangle)]
-static mut NEXT_TASK_ENTRY_POINT: u64 = 0;
 static KERNEL_TICKS: AtomicU64 = AtomicU64::new(0);
 static KERNEL_ROOT_FRAME: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(
@@ -1573,474 +1447,6 @@ static KERNEL_ROOT_FRAME: AtomicU64 = AtomicU64::new(0);
     feature = "m3-entry-self-test"
 ))]
 static DOUBLE_FAULT_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-#[repr(C, packed)]
-struct DescriptorTablePointer {
-    limit: u16,
-    base: u64,
-}
-
-macro_rules! declare_interrupt_entries {
-    ($($name:ident),+ $(,)?) => {
-        #[allow(dead_code)]
-        unsafe extern "C" {
-            $(fn $name();)+
-            fn clean_slate_restore_context() -> !;
-            fn clean_slate_task_one_bootstrap_entry();
-            fn clean_slate_task_two_bootstrap_entry();
-            fn clean_slate_timer_self_test_bootstrap_entry();
-        }
-    };
-}
-
-declare_interrupt_entries!(
-    clean_slate_interrupt_0,
-    clean_slate_interrupt_1,
-    clean_slate_interrupt_2,
-    clean_slate_interrupt_3,
-    clean_slate_interrupt_4,
-    clean_slate_interrupt_5,
-    clean_slate_interrupt_6,
-    clean_slate_interrupt_7,
-    clean_slate_interrupt_8,
-    clean_slate_interrupt_9,
-    clean_slate_interrupt_10,
-    clean_slate_interrupt_11,
-    clean_slate_interrupt_12,
-    clean_slate_interrupt_13,
-    clean_slate_interrupt_14,
-    clean_slate_interrupt_15,
-    clean_slate_interrupt_16,
-    clean_slate_interrupt_17,
-    clean_slate_interrupt_18,
-    clean_slate_interrupt_19,
-    clean_slate_interrupt_20,
-    clean_slate_interrupt_21,
-    clean_slate_interrupt_22,
-    clean_slate_interrupt_23,
-    clean_slate_interrupt_24,
-    clean_slate_interrupt_25,
-    clean_slate_interrupt_26,
-    clean_slate_interrupt_27,
-    clean_slate_interrupt_28,
-    clean_slate_interrupt_29,
-    clean_slate_interrupt_30,
-    clean_slate_interrupt_31,
-    clean_slate_interrupt_32,
-    clean_slate_interrupt_33,
-);
-
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-unsafe extern "C" {
-    fn clean_slate_interrupt_128();
-}
-
-#[cfg(feature = "m3-address-space-self-test")]
-unsafe extern "C" {
-    static clean_slate_user_address_space_test_start: u8;
-    static clean_slate_user_address_space_test_after_entry: u8;
-    static clean_slate_user_address_space_test_end: u8;
-}
-
-#[cfg(feature = "m3-entry-self-test")]
-unsafe extern "C" {
-    static clean_slate_user_test_start: u8;
-    static clean_slate_user_test_privileged_instruction: u8;
-    static clean_slate_user_test_end: u8;
-}
-
-unsafe extern "C" {
-    fn clean_slate_syscall_entry();
-}
-
-#[cfg(feature = "m3-syscall-self-test")]
-unsafe extern "C" {
-    static clean_slate_user_syscall_test_start: u8;
-    static clean_slate_user_syscall_test_end: u8;
-}
-
-#[cfg(feature = "m3-ipc-self-test")]
-unsafe extern "C" {
-    static clean_slate_user_ipc_test_start: u8;
-    static clean_slate_user_ipc_test_after_send: u8;
-    static clean_slate_user_ipc_test_end: u8;
-}
-
-static INTERRUPT_HANDLERS: [unsafe extern "C" fn(); SPURIOUS_VECTOR + 1] = [
-    clean_slate_interrupt_0,
-    clean_slate_interrupt_1,
-    clean_slate_interrupt_2,
-    clean_slate_interrupt_3,
-    clean_slate_interrupt_4,
-    clean_slate_interrupt_5,
-    clean_slate_interrupt_6,
-    clean_slate_interrupt_7,
-    clean_slate_interrupt_8,
-    clean_slate_interrupt_9,
-    clean_slate_interrupt_10,
-    clean_slate_interrupt_11,
-    clean_slate_interrupt_12,
-    clean_slate_interrupt_13,
-    clean_slate_interrupt_14,
-    clean_slate_interrupt_15,
-    clean_slate_interrupt_16,
-    clean_slate_interrupt_17,
-    clean_slate_interrupt_18,
-    clean_slate_interrupt_19,
-    clean_slate_interrupt_20,
-    clean_slate_interrupt_21,
-    clean_slate_interrupt_22,
-    clean_slate_interrupt_23,
-    clean_slate_interrupt_24,
-    clean_slate_interrupt_25,
-    clean_slate_interrupt_26,
-    clean_slate_interrupt_27,
-    clean_slate_interrupt_28,
-    clean_slate_interrupt_29,
-    clean_slate_interrupt_30,
-    clean_slate_interrupt_31,
-    clean_slate_interrupt_32,
-    clean_slate_interrupt_33,
-];
-
-global_asm!(
-    r#"
-    .macro CLEAN_SLATE_INTERRUPT_NO_ERROR vector
-    .global clean_slate_interrupt_\vector
-clean_slate_interrupt_\vector:
-    push 0
-    push \vector
-    jmp clean_slate_interrupt_common
-    .endm
-
-    .macro CLEAN_SLATE_INTERRUPT_WITH_ERROR vector
-    .global clean_slate_interrupt_\vector
-clean_slate_interrupt_\vector:
-    push \vector
-    jmp clean_slate_interrupt_common
-    .endm
-
-    .global clean_slate_interrupt_common
-clean_slate_interrupt_common:
-    push rax
-    push rcx
-    push rdx
-    push rbx
-    push rbp
-    push rsi
-    push rdi
-    push r8
-    push r9
-    push r10
-    push r11
-    push r12
-    push r13
-    push r14
-    push r15
-    mov rcx, rsp
-    mov r12, rsp
-    and r12, 8
-    sub rsp, 32
-    sub rsp, r12
-    call clean_slate_interrupt_dispatch
-    cmp rax, -1
-    je clean_slate_start_fresh_task
-    mov rsp, rax
-    jmp clean_slate_restore_context
-
-    .global clean_slate_start_fresh_task
-clean_slate_start_fresh_task:
-    mov rsp, [rip + NEXT_TASK_STACK_POINTER]
-    jmp [rip + NEXT_TASK_ENTRY_POINT]
-
-    .global clean_slate_restore_context
-clean_slate_restore_context:
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
-    pop rdi
-    pop rsi
-    pop rbp
-    pop rbx
-    pop rdx
-    pop rcx
-    pop rax
-    add rsp, 16
-    iretq
-
-    .global clean_slate_task_one_bootstrap_entry
-clean_slate_task_one_bootstrap_entry:
-    mov rax, rsp
-    and rax, 8
-    sub rsp, 32
-    sub rsp, rax
-    call clean_slate_task_one
-    ud2
-
-    .global clean_slate_task_two_bootstrap_entry
-clean_slate_task_two_bootstrap_entry:
-    mov rax, rsp
-    and rax, 8
-    sub rsp, 32
-    sub rsp, rax
-    call clean_slate_task_two
-    ud2
-
-    .global clean_slate_timer_self_test_bootstrap_entry
-clean_slate_timer_self_test_bootstrap_entry:
-    mov rax, rsp
-    and rax, 8
-    sub rsp, 32
-    sub rsp, rax
-    call clean_slate_timer_self_test_task
-    ud2
-
-    .global clean_slate_user_address_space_test_start
-clean_slate_user_address_space_test_start:
-    movabs rax, 0x0000400000001000
-    mov rdi, [rax]
-    int 0x80
-    .global clean_slate_user_address_space_test_after_entry
-clean_slate_user_address_space_test_after_entry:
-    mov rax, [rax + 8]
-    mov rax, [rax]
-    ud2
-    .global clean_slate_user_address_space_test_end
-clean_slate_user_address_space_test_end:
-
-    .global clean_slate_user_test_start
-clean_slate_user_test_start:
-    int 0x80
-    .global clean_slate_user_test_privileged_instruction
-clean_slate_user_test_privileged_instruction:
-    cli
-    ud2
-    .global clean_slate_user_test_end
-clean_slate_user_test_end:
-
-    .global clean_slate_user_syscall_test_start
-clean_slate_user_syscall_test_start:
-    std
-    mov rax, 0
-    syscall
-    cld
-    cmp rax, 1
-    jne clean_slate_user_syscall_test_fail
-
-    std
-    mov rax, 0xffff
-    syscall
-    cld
-    mov rbx, -38
-    cmp rax, rbx
-    jne clean_slate_user_syscall_test_fail
-
-clean_slate_user_syscall_test_loop:
-    mov rax, 1
-    lea rdi, [rip + clean_slate_user_syscall_test_value]
-    mov rsi, 8
-    syscall
-    mov rbx, 0x535953434f4c4c21
-    cmp rax, rbx
-    jne clean_slate_user_syscall_test_fail
-
-    mov rax, 2
-    syscall
-    test rax, rax
-    jz clean_slate_user_syscall_test_loop
-    ud2
-
-clean_slate_user_syscall_test_fail:
-    ud2
-
-    .balign 8
-clean_slate_user_syscall_test_value:
-    .quad 0x535953434f4c4c21
-    .global clean_slate_user_syscall_test_end
-clean_slate_user_syscall_test_end:
-
-    .global clean_slate_user_ipc_test_start
-clean_slate_user_ipc_test_start:
-    movabs rbx, 0x0000400000001000
-    mov rdi, [rbx]
-    lea rsi, [rbx + 24]
-    mov rdx, [rbx + 8]
-    mov rax, 3
-    syscall
-    mov rcx, [rbx + 16]
-    cmp rax, rcx
-    jne clean_slate_user_ipc_test_fail
-
-    int 0x80
-    .global clean_slate_user_ipc_test_after_send
-clean_slate_user_ipc_test_after_send:
-    ud2
-
-clean_slate_user_ipc_test_fail:
-    ud2
-
-    .global clean_slate_user_ipc_test_end
-clean_slate_user_ipc_test_end:
-
-    .global clean_slate_syscall_entry
-clean_slate_syscall_entry:
-    mov [rip + SYSCALL_SCRATCH_USER_RSP], rsp
-    mov rsp, [rip + SYSCALL_KERNEL_STACK_TOP]
-    push qword ptr [rip + SYSCALL_SCRATCH_USER_RSP]
-    push r11
-    push rcx
-    push r15
-    push r14
-    push r13
-    push r12
-    push r10
-    push r9
-    push r8
-    push rdi
-    push rsi
-    push rbp
-    push rbx
-    push rdx
-    push rax
-    mov rcx, rsp
-    mov r12, rsp
-    and r12, 8
-    sub rsp, 32
-    sub rsp, r12
-    call clean_slate_syscall_dispatch
-    mov rsp, rax
-    mov r12, [rsp + 120]
-    mov [rip + SYSCALL_SCRATCH_USER_RSP], r12
-    pop rax
-    pop rdx
-    pop rbx
-    pop rbp
-    pop rsi
-    pop rdi
-    pop r8
-    pop r9
-    pop r10
-    pop r12
-    pop r13
-    pop r14
-    pop r15
-    pop rcx
-    pop r11
-    add rsp, 8
-    mov rsp, [rip + SYSCALL_SCRATCH_USER_RSP]
-    sysretq
-
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 0
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 1
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 2
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 3
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 4
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 5
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 6
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 7
-    CLEAN_SLATE_INTERRUPT_WITH_ERROR 8
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 9
-    CLEAN_SLATE_INTERRUPT_WITH_ERROR 10
-    CLEAN_SLATE_INTERRUPT_WITH_ERROR 11
-    CLEAN_SLATE_INTERRUPT_WITH_ERROR 12
-    CLEAN_SLATE_INTERRUPT_WITH_ERROR 13
-    CLEAN_SLATE_INTERRUPT_WITH_ERROR 14
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 15
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 16
-    CLEAN_SLATE_INTERRUPT_WITH_ERROR 17
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 18
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 19
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 20
-    CLEAN_SLATE_INTERRUPT_WITH_ERROR 21
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 22
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 23
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 24
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 25
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 26
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 27
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 28
-    CLEAN_SLATE_INTERRUPT_WITH_ERROR 29
-    CLEAN_SLATE_INTERRUPT_WITH_ERROR 30
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 31
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 32
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 33
-    CLEAN_SLATE_INTERRUPT_NO_ERROR 128
-"#,
-);
-
-fn install_interrupt_handlers() {
-    initialize_gdt_and_tss();
-    unsafe {
-        for (vector, handler) in INTERRUPT_HANDLERS.iter().enumerate() {
-            IDT.entries[vector].set_handler(*handler);
-        }
-        IDT.entries[DOUBLE_FAULT_VECTOR]
-            .set_handler_with_ist(clean_slate_interrupt_8, DOUBLE_FAULT_IST_INDEX);
-        #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-        IDT.entries[USER_TEST_VECTOR].set_user_handler(clean_slate_interrupt_128);
-        let pointer = DescriptorTablePointer {
-            limit: (size_of::<InterruptDescriptorTable>() - 1) as u16,
-            base: (&raw const IDT) as *const _ as u64,
-        };
-        asm!("lidt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags));
-    }
-}
-
-fn initialize_gdt_and_tss() {
-    let double_fault_stack_top = {
-        let stack = unsafe { &*DOUBLE_FAULT_STACK.get() };
-        VirtAddr::from_ptr(stack.0.as_ptr_range().end)
-    };
-
-    let tss_slot = unsafe { &mut *TSS_STATE.get() };
-    let mut tss = TaskStateSegment::new();
-    tss.interrupt_stack_table[(DOUBLE_FAULT_IST_INDEX - 1) as usize] = double_fault_stack_top;
-    *tss_slot = Some(tss);
-
-    let tss_ref = unsafe {
-        (&*TSS_STATE.get())
-            .as_ref()
-            .expect("TSS must be initialized before GDT")
-    };
-    let gdt_slot = unsafe { &mut *GDT_STATE.get() };
-    let mut table = GlobalDescriptorTable::new();
-    let code_selector = table.append(Descriptor::kernel_code_segment());
-    let data_selector = table.append(Descriptor::kernel_data_segment());
-    // SYSRET in long mode derives user SS=STAR[63:48]+8 and user CS=STAR[63:48]+16.
-    // Keep this triplet contiguous in that order.
-    let user_sysret_selector_base = table.append(Descriptor::user_code_segment());
-    let user_data_selector = table.append(Descriptor::user_data_segment());
-    let user_code_selector = table.append(Descriptor::user_code_segment());
-    let tss_selector = table.append(Descriptor::tss_segment(tss_ref));
-    *gdt_slot = Some(GdtState {
-        table,
-        code_selector,
-        data_selector,
-        user_sysret_selector_base,
-        user_code_selector,
-        user_data_selector,
-        tss_selector,
-    });
-
-    let gdt_state = unsafe {
-        (&*GDT_STATE.get())
-            .as_ref()
-            .expect("GDT state must be initialized")
-    };
-    gdt_state.table.load();
-    unsafe {
-        CS::set_reg(gdt_state.code_selector);
-        SS::set_reg(gdt_state.data_selector);
-        DS::set_reg(gdt_state.data_selector);
-        ES::set_reg(gdt_state.data_selector);
-        load_tss(gdt_state.tss_selector);
-    }
-}
 
 fn initialize_timer() {
     mask_legacy_pic();
@@ -2088,10 +1494,6 @@ fn start_scheduler() -> ! {
         fatal_kernel_error(message);
     }
     unsafe { start_first_task(stack_pointer, entry_point) }
-}
-
-fn task_stack_top(stack: &TaskStack) -> u64 {
-    align_down(((stack.0.as_ptr() as usize) + stack.0.len()) as u64, 16)
 }
 
 #[cfg(feature = "m3-entry-self-test")]
@@ -2207,26 +1609,6 @@ fn current_syscall_caller_pid() -> Result<u64, &'static str> {
     Ok(process.id)
 }
 
-fn set_privilege_stack(stack_pointer: u64) -> Result<(), &'static str> {
-    let tss = unsafe {
-        (&mut *TSS_STATE.get())
-            .as_mut()
-            .ok_or("TSS must exist before entering userspace")?
-    };
-    tss.privilege_stack_table[0] = VirtAddr::new(stack_pointer);
-    Ok(())
-}
-
-fn set_syscall_kernel_stack(stack_pointer: u64) -> Result<(), &'static str> {
-    if stack_pointer % 16 != 0 {
-        return Err("syscall kernel stack top must be 16-byte aligned");
-    }
-    unsafe {
-        SYSCALL_KERNEL_STACK_TOP = stack_pointer;
-    }
-    Ok(())
-}
-
 fn userspace_process_root_frame(process_id: u64) -> Result<u64, &'static str> {
     let process = unsafe {
         (&*PROCESS_REGISTRY.get())
@@ -2304,14 +1686,6 @@ struct PageWalkFlags {
     path: PageTableFlags,
     leaf: PageTableFlags,
     all_levels_user_accessible: bool,
-}
-
-fn userspace_gdt_state() -> Result<&'static GdtState, &'static str> {
-    unsafe {
-        (&*GDT_STATE.get())
-            .as_ref()
-            .ok_or("GDT must exist before entering userspace")
-    }
 }
 
 fn current_root_frame_address() -> u64 {
@@ -2493,49 +1867,6 @@ fn leaf_page_flags_for_address_in_root(
     address: VirtAddr,
 ) -> Result<PageTableFlags, &'static str> {
     Ok(walk_page_flags_in_root(root_frame, address)?.leaf)
-}
-
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-fn build_userspace_entry_frame(
-    kernel_stack_top: u64,
-    instruction_pointer: u64,
-    user_stack_pointer: u64,
-) -> Result<u64, &'static str> {
-    let gdt_state = userspace_gdt_state()?;
-    let frame_address = align_down(
-        kernel_stack_top - size_of::<UserspaceEntryFrame>() as u64,
-        16,
-    );
-    let frame = UserspaceEntryFrame {
-        interrupt: InterruptContext {
-            r15: 0,
-            r14: 0,
-            r13: 0,
-            r12: 0,
-            r11: 0,
-            r10: 0,
-            r9: 0,
-            r8: 0,
-            rdi: 0,
-            rsi: 0,
-            rbp: 0,
-            rbx: 0,
-            rdx: 0,
-            rcx: 0,
-            rax: 0,
-            vector: 0,
-            error_code: 0,
-            rip: instruction_pointer,
-            cs: gdt_state.user_code_selector.0 as u64,
-            rflags: USER_TEST_RFLAGS,
-        },
-        user_stack_pointer,
-        user_stack_segment: gdt_state.user_data_selector.0 as u64,
-    };
-    unsafe {
-        ptr::write(frame_address as *mut UserspaceEntryFrame, frame);
-    }
-    Ok(frame_address)
 }
 
 #[cfg(feature = "m3-entry-self-test")]
@@ -3232,11 +2563,6 @@ fn start_userspace_ipc_self_test(allocator: &mut PageAllocator) -> ! {
         Err(message) => fatal_kernel_error(message),
     };
     unsafe { restore_task_context(frame_pointer) }
-}
-
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-fn selector_rpl(selector: u64) -> u64 {
-    selector & 0x3
 }
 
 #[allow(dead_code)]
@@ -4356,37 +3682,6 @@ fn handle_exception(context: &InterruptContext) -> ! {
     qemu_exit(QEMU_EXIT_FAILURE)
 }
 
-fn exception_name(vector: usize) -> &'static str {
-    match vector {
-        0 => "divide error",
-        1 => "debug",
-        2 => "nmi",
-        3 => "breakpoint",
-        4 => "overflow",
-        5 => "bound range exceeded",
-        6 => "invalid opcode",
-        7 => "device not available",
-        8 => "double fault",
-        9 => "coprocessor segment overrun",
-        10 => "invalid tss",
-        11 => "segment not present",
-        12 => "stack segment fault",
-        13 => "general protection fault",
-        14 => "page fault",
-        16 => "x87 floating point",
-        17 => "alignment check",
-        18 => "machine check",
-        19 => "simd floating point",
-        20 => "virtualization",
-        21 => "control protection",
-        28 => "hypervisor injection",
-        29 => "vmm communication",
-        30 => "security exception",
-        32 => "timer interrupt",
-        _ => "reserved",
-    }
-}
-
 #[cfg(feature = "m1-self-test")]
 fn trigger_expected_page_fault(address: *const u64) -> ! {
     unsafe {
@@ -4534,55 +3829,6 @@ fn emit_m2_pass_and_stop() -> ! {
     }
 }
 
-unsafe fn restore_task_context(stack_pointer: u64) -> ! {
-    unsafe {
-        asm!(
-            "mov rsp, {stack_pointer}",
-            "jmp {restore}",
-            stack_pointer = in(reg) stack_pointer,
-            restore = sym clean_slate_restore_context,
-            options(noreturn)
-        );
-    }
-}
-
-unsafe fn start_first_task(stack_pointer: u64, entry_point: u64) -> ! {
-    unsafe {
-        asm!(
-            "mov rsp, {stack_pointer}",
-            "jmp {entry_point}",
-            stack_pointer = in(reg) stack_pointer,
-            entry_point = in(reg) entry_point,
-            options(noreturn)
-        );
-    }
-}
-
-fn mask_legacy_pic() {
-    port_out(PIC_MASTER_DATA, 0xff);
-    port_out(PIC_SLAVE_DATA, 0xff);
-}
-
-fn enable_local_apic() {
-    let apic_base = read_msr(APIC_BASE_MSR) | APIC_ENABLE;
-    write_msr(APIC_BASE_MSR, apic_base);
-    local_apic_write(APIC_REGISTER_TPR, 0);
-    local_apic_write(APIC_REGISTER_SVR, APIC_SPURIOUS_INTERRUPT_VECTOR);
-}
-
-fn program_local_apic_timer() {
-    local_apic_write(APIC_REGISTER_DIVIDE_CONFIGURATION, APIC_TIMER_DIVIDE_BY_16);
-    local_apic_write(
-        APIC_REGISTER_LVT_TIMER,
-        APIC_TIMER_PERIODIC | (TIMER_VECTOR as u32),
-    );
-    local_apic_write(APIC_REGISTER_INITIAL_COUNT, APIC_TIMER_INITIAL_COUNT);
-}
-
-fn acknowledge_timer_interrupt() {
-    local_apic_write(APIC_REGISTER_EOI, 0);
-}
-
 fn report_timer_contract() {
     serial_write_fmt(format_args!(
         "[TIME] contract=lapic periodic divide=16 initial_count={} tick-rate=uncalibrated\n",
@@ -4654,18 +3900,6 @@ fn double_fault_stack_contains(address: u64) -> bool {
     let start = stack.0.as_ptr() as u64;
     let end = start + stack.0.len() as u64;
     address >= start && address < end
-}
-
-fn local_apic_write(offset: usize, value: u32) {
-    let register = (local_apic_base() + offset as u64) as *mut u32;
-    unsafe {
-        ptr::write_volatile(register, value);
-        ptr::read_volatile(register);
-    }
-}
-
-fn local_apic_base() -> u64 {
-    read_msr(APIC_BASE_MSR) & APIC_BASE_ADDRESS_MASK
 }
 
 #[cfg(test)]
@@ -5059,13 +4293,6 @@ mod tests {
         assert_eq!(process.exit_status, Some(1));
     }
 
-    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-    #[test]
-    fn userspace_selector_rpl_reports_ring3() {
-        assert_eq!(selector_rpl(0x001b), 3);
-        assert_eq!(selector_rpl(0x0008), 0);
-    }
-
     #[test]
     fn kernel_root_sanitization_clears_user_flags_and_user_slot() {
         let user_region_base = VirtAddr::new(0x0000_4000_0000_0000);
@@ -5255,27 +4482,6 @@ mod tests {
             validate_canonical_user_return_state(&bad_rsp),
             Err("syscall return RSP was not a canonical userspace address")
         );
-    }
-
-    #[test]
-    fn syscall_context_layout_matches_entry_stub_contract() {
-        assert_eq!(size_of::<SyscallContext>(), 16 * size_of::<u64>());
-        assert_eq!(core::mem::offset_of!(SyscallContext, rax), 0);
-        assert_eq!(core::mem::offset_of!(SyscallContext, rdx), 8);
-        assert_eq!(core::mem::offset_of!(SyscallContext, rbx), 16);
-        assert_eq!(core::mem::offset_of!(SyscallContext, rbp), 24);
-        assert_eq!(core::mem::offset_of!(SyscallContext, rsi), 32);
-        assert_eq!(core::mem::offset_of!(SyscallContext, rdi), 40);
-        assert_eq!(core::mem::offset_of!(SyscallContext, r8), 48);
-        assert_eq!(core::mem::offset_of!(SyscallContext, r9), 56);
-        assert_eq!(core::mem::offset_of!(SyscallContext, r10), 64);
-        assert_eq!(core::mem::offset_of!(SyscallContext, r12), 72);
-        assert_eq!(core::mem::offset_of!(SyscallContext, r13), 80);
-        assert_eq!(core::mem::offset_of!(SyscallContext, r14), 88);
-        assert_eq!(core::mem::offset_of!(SyscallContext, r15), 96);
-        assert_eq!(core::mem::offset_of!(SyscallContext, user_rip), 104);
-        assert_eq!(core::mem::offset_of!(SyscallContext, user_rflags), 112);
-        assert_eq!(core::mem::offset_of!(SyscallContext, user_rsp), 120);
     }
 
     #[test]

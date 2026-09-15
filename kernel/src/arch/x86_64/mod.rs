@@ -5,18 +5,24 @@
 //! `selftest`). The assembly in `asm.rs` reaches Rust policy code by symbol
 //! name only.
 
+pub(crate) mod apic;
+pub(crate) mod asm;
+pub(crate) mod context_switch;
 pub(crate) mod cpu;
+pub(crate) mod gdt;
+pub(crate) mod idt;
+pub(crate) mod interrupt_context;
 pub(crate) mod msr;
 pub(crate) mod port;
 
 pub(crate) const DOUBLE_FAULT_VECTOR: usize = 8;
 pub(crate) const PAGE_FAULT_VECTOR: usize = 14;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-const GENERAL_PROTECTION_VECTOR: usize = 13;
+pub(crate) const GENERAL_PROTECTION_VECTOR: usize = 13;
 pub(crate) const TIMER_VECTOR: usize = 32;
 pub(crate) const SPURIOUS_VECTOR: usize = 33;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-const USER_TEST_VECTOR: usize = 0x80;
+pub(crate) const USER_TEST_VECTOR: usize = 0x80;
 pub(crate) const IA32_EFER_MSR: u32 = 0xc000_0080;
 pub(crate) const IA32_STAR_MSR: u32 = 0xc000_0081;
 pub(crate) const IA32_LSTAR_MSR: u32 = 0xc000_0082;

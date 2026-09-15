@@ -1,0 +1,112 @@
+//! Kernel task stacks and the raw stack-switch primitives.
+//!
+//! Why unsafe: `restore_task_context`/`start_first_task` replace RSP and jump,
+//! abandoning the current Rust frame; `build_userspace_entry_frame` writes a
+//! synthetic interrupt frame onto another thread's kernel stack. Callers must
+//! pass stack pointers that hold a frame laid out exactly as
+//! `interrupt_context::InterruptContext` (plus the user RSP/SS pair for ring-3
+//! returns) and must have already switched CR3/TSS for the target thread.
+//! Link contracts: `NEXT_TASK_STACK_POINTER` / `NEXT_TASK_ENTRY_POINT` are read
+//! by `clean_slate_start_fresh_task` in `asm.rs`, and `FRESH_TASK_SENTINEL`
+//! is the `-1` compared against `rax` by `clean_slate_interrupt_common`.
+
+use core::arch::asm;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+use core::mem::size_of;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+use core::ptr;
+
+use crate::arch::x86_64::asm::clean_slate_restore_context;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+use crate::arch::x86_64::gdt::userspace_gdt_state;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+use crate::arch::x86_64::interrupt_context::{InterruptContext, UserspaceEntryFrame};
+use crate::mm::align_down;
+
+pub(crate) const FRESH_TASK_SENTINEL: u64 = u64::MAX;
+
+pub(crate) const TASK_STACK_SIZE: usize = 64 * 1024;
+
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+pub(crate) const USER_TEST_RFLAGS: u64 = 0x202;
+
+#[repr(align(16))]
+pub(crate) struct TaskStack(pub(crate) [u8; TASK_STACK_SIZE]);
+
+// Consumed by arch/x86_64/asm.rs (bootstrap trampolines read the next task's RSP).
+#[unsafe(no_mangle)]
+pub(crate) static mut NEXT_TASK_STACK_POINTER: u64 = 0;
+// Consumed by arch/x86_64/asm.rs (bootstrap trampolines jump to this entry point).
+#[unsafe(no_mangle)]
+pub(crate) static mut NEXT_TASK_ENTRY_POINT: u64 = 0;
+
+pub(crate) fn task_stack_top(stack: &TaskStack) -> u64 {
+    align_down(((stack.0.as_ptr() as usize) + stack.0.len()) as u64, 16)
+}
+
+pub(crate) unsafe fn restore_task_context(stack_pointer: u64) -> ! {
+    unsafe {
+        asm!(
+            "mov rsp, {stack_pointer}",
+            "jmp {restore}",
+            stack_pointer = in(reg) stack_pointer,
+            restore = sym clean_slate_restore_context,
+            options(noreturn)
+        );
+    }
+}
+
+pub(crate) unsafe fn start_first_task(stack_pointer: u64, entry_point: u64) -> ! {
+    unsafe {
+        asm!(
+            "mov rsp, {stack_pointer}",
+            "jmp {entry_point}",
+            stack_pointer = in(reg) stack_pointer,
+            entry_point = in(reg) entry_point,
+            options(noreturn)
+        );
+    }
+}
+
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+pub(crate) fn build_userspace_entry_frame(
+    kernel_stack_top: u64,
+    instruction_pointer: u64,
+    user_stack_pointer: u64,
+) -> Result<u64, &'static str> {
+    let gdt_state = userspace_gdt_state()?;
+    let frame_address = align_down(
+        kernel_stack_top - size_of::<UserspaceEntryFrame>() as u64,
+        16,
+    );
+    let frame = UserspaceEntryFrame {
+        interrupt: InterruptContext {
+            r15: 0,
+            r14: 0,
+            r13: 0,
+            r12: 0,
+            r11: 0,
+            r10: 0,
+            r9: 0,
+            r8: 0,
+            rdi: 0,
+            rsi: 0,
+            rbp: 0,
+            rbx: 0,
+            rdx: 0,
+            rcx: 0,
+            rax: 0,
+            vector: 0,
+            error_code: 0,
+            rip: instruction_pointer,
+            cs: gdt_state.user_code_selector.0 as u64,
+            rflags: USER_TEST_RFLAGS,
+        },
+        user_stack_pointer,
+        user_stack_segment: gdt_state.user_data_selector.0 as u64,
+    };
+    unsafe {
+        ptr::write(frame_address as *mut UserspaceEntryFrame, frame);
+    }
+    Ok(frame_address)
+}
