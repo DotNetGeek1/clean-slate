@@ -6,7 +6,8 @@
         feature = "m2-timer-self-test",
         feature = "m3-address-space-self-test",
         feature = "m3-entry-self-test",
-        feature = "m3-syscall-self-test"
+        feature = "m3-syscall-self-test",
+        feature = "m3-ipc-self-test"
     ),
     allow(dead_code)
 )]
@@ -21,7 +22,8 @@ use core::ptr;
     feature = "m2-double-fault-self-test",
     feature = "m3-address-space-self-test",
     feature = "m3-entry-self-test",
-    feature = "m3-syscall-self-test"
+    feature = "m3-syscall-self-test",
+    feature = "m3-ipc-self-test"
 ))]
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -139,9 +141,11 @@ const SYSCALL_ABI_VERSION: u64 = 1;
 const SYSCALL_NR_VERSION: u64 = 0;
 const SYSCALL_NR_READ_U64: u64 = 1;
 const SYSCALL_NR_FINISH: u64 = 2;
+const SYSCALL_NR_IPC_SEND: u64 = 3;
 const SYSCALL_ENOSYS: u64 = u64::MAX - 37;
-#[cfg(feature = "m3-syscall-self-test")]
+const SYSCALL_EACCES: u64 = u64::MAX - 12;
 const SYSCALL_EINVAL: u64 = u64::MAX - 21;
+const SYSCALL_ESTALE: u64 = u64::MAX - 116;
 #[cfg(feature = "m3-syscall-self-test")]
 const SYSCALL_PASS_MARKER: &str = "[SYSC] syscall entry/return PASS";
 #[cfg(feature = "m3-syscall-self-test")]
@@ -150,6 +154,20 @@ const SYSCALL_TEST_EXPECTED_VALUE: u64 = 0x5359_5343_4f4c_4c21;
 const SYSCALL_TEST_REQUIRED_CALLS: u64 = 256;
 #[cfg(feature = "m3-syscall-self-test")]
 const SYSCALL_DF_SANITIZED_MARKER: &str = "[SYSC] entry flag mask OK";
+#[cfg(feature = "m3-ipc-self-test")]
+const IPC_SEND_PASS_MARKER: &str = "[IPC ] send OK bytes=";
+#[cfg(feature = "m3-ipc-self-test")]
+const IPC_CAPABILITY_GRANTED_MARKER: &str = "[CAP ] endpoint capability granted pid=1";
+#[cfg(feature = "m3-ipc-self-test")]
+const IPC_UNAUTHORIZED_DENIED_MARKER: &str = "[CAP ] unauthorized send denied pid=2";
+#[cfg(feature = "m3-ipc-self-test")]
+const IPC_TEST_MESSAGE: &[u8] = b"hello from pid 1";
+const IPC_MAX_MESSAGE_BYTES: usize = 64;
+const IPC_ENDPOINT_CAPACITY: usize = 4;
+const IPC_CAPABILITY_CAPACITY: usize = 8;
+const USERSPACE_IPC_TEST_PID: u64 = 1;
+const USERSPACE_IPC_UNAUTHORIZED_TEST_PID: u64 = 2;
+const USERSPACE_IPC_TEST_PROCESS_COUNT: usize = 2;
 const KERNEL_PROCESS_ID: u64 = 0;
 const PROCESS_REGISTRY_CAPACITY: usize = 8;
 
@@ -305,6 +323,290 @@ impl ProcessRegistry {
         self.processes
             .iter_mut()
             .find(|entry| entry.id == process_id && entry.state != ProcessState::Empty)
+    }
+
+    fn find_by_address_space_root(&self, root_frame: u64) -> Option<&Process> {
+        self.processes.iter().find(|entry| {
+            entry.state != ProcessState::Empty
+                && entry.state != ProcessState::Reaped
+                && entry.address_space_root == root_frame
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IpcEndpointState {
+    Vacant,
+    Active,
+    Retired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IpcEndpoint {
+    owner_pid: u64,
+    generation: u16,
+    state: IpcEndpointState,
+    last_message_len: u16,
+    last_message: [u8; IPC_MAX_MESSAGE_BYTES],
+}
+
+impl IpcEndpoint {
+    const EMPTY: Self = Self {
+        owner_pid: 0,
+        generation: 0,
+        state: IpcEndpointState::Vacant,
+        last_message_len: 0,
+        last_message: [0; IPC_MAX_MESSAGE_BYTES],
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EndpointCapability {
+    holder_pid: u64,
+    generation: u16,
+    endpoint_slot: u16,
+    endpoint_generation: u16,
+    active: bool,
+    retired: bool,
+}
+
+impl EndpointCapability {
+    const EMPTY: Self = Self {
+        holder_pid: 0,
+        generation: 0,
+        endpoint_slot: 0,
+        endpoint_generation: 0,
+        active: false,
+        retired: false,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EndpointCapabilityHandleParts {
+    capability_slot: u16,
+    capability_generation: u16,
+    endpoint_slot: u16,
+    endpoint_generation: u16,
+}
+
+impl EndpointCapabilityHandleParts {
+    fn encode(self) -> u64 {
+        u64::from(self.capability_slot)
+            | (u64::from(self.capability_generation) << 16)
+            | (u64::from(self.endpoint_slot) << 32)
+            | (u64::from(self.endpoint_generation) << 48)
+    }
+
+    fn decode(raw: u64) -> Self {
+        Self {
+            capability_slot: raw as u16,
+            capability_generation: (raw >> 16) as u16,
+            endpoint_slot: (raw >> 32) as u16,
+            endpoint_generation: (raw >> 48) as u16,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IpcSendError {
+    InvalidCapability,
+    Unauthorized,
+    StaleCapability,
+    InvalidMessageLength,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IpcEndpointTable {
+    endpoints: [IpcEndpoint; IPC_ENDPOINT_CAPACITY],
+    capabilities: [EndpointCapability; IPC_CAPABILITY_CAPACITY],
+}
+
+impl IpcEndpointTable {
+    const fn new() -> Self {
+        Self {
+            endpoints: [IpcEndpoint::EMPTY; IPC_ENDPOINT_CAPACITY],
+            capabilities: [EndpointCapability::EMPTY; IPC_CAPABILITY_CAPACITY],
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::new();
+    }
+
+    fn next_generation(current: u16) -> Option<u16> {
+        if current == u16::MAX {
+            None
+        } else {
+            Some(current + 1)
+        }
+    }
+
+    fn create_endpoint(&mut self, owner_pid: u64) -> Result<usize, &'static str> {
+        for (slot, endpoint) in self.endpoints.iter_mut().enumerate() {
+            if endpoint.state != IpcEndpointState::Vacant {
+                continue;
+            }
+            endpoint.owner_pid = owner_pid;
+            if endpoint.generation == 0 {
+                endpoint.generation = 1;
+            }
+            endpoint.state = IpcEndpointState::Active;
+            endpoint.last_message_len = 0;
+            endpoint.last_message = [0; IPC_MAX_MESSAGE_BYTES];
+            return Ok(slot);
+        }
+        Err("ipc endpoint table capacity exceeded or generation exhausted")
+    }
+
+    fn endpoint_generation(&self, endpoint_slot: usize) -> Result<u16, &'static str> {
+        let endpoint = self
+            .endpoints
+            .get(endpoint_slot)
+            .ok_or("ipc endpoint slot was out of range")?;
+        if endpoint.state != IpcEndpointState::Active {
+            return Err("ipc endpoint was not active");
+        }
+        Ok(endpoint.generation)
+    }
+
+    fn grant_send_capability(
+        &mut self,
+        holder_pid: u64,
+        endpoint_slot: usize,
+    ) -> Result<u64, &'static str> {
+        let endpoint_generation = self.endpoint_generation(endpoint_slot)?;
+        for (slot, capability) in self.capabilities.iter_mut().enumerate() {
+            if capability.active || capability.retired {
+                continue;
+            }
+            let next_generation = match Self::next_generation(capability.generation) {
+                Some(next_generation) => next_generation,
+                None => {
+                    capability.retired = true;
+                    continue;
+                }
+            };
+            capability.holder_pid = holder_pid;
+            capability.generation = next_generation;
+            capability.endpoint_slot = u16::try_from(endpoint_slot)
+                .map_err(|_| "ipc endpoint slot exceeded u16 handle field")?;
+            capability.endpoint_generation = endpoint_generation;
+            capability.active = true;
+            return Ok(EndpointCapabilityHandleParts {
+                capability_slot: u16::try_from(slot)
+                    .map_err(|_| "ipc capability slot exceeded u16 handle field")?,
+                capability_generation: capability.generation,
+                endpoint_slot: capability.endpoint_slot,
+                endpoint_generation,
+            }
+            .encode());
+        }
+        Err("ipc capability table capacity exceeded or generation exhausted")
+    }
+
+    fn lookup_send_capability(
+        &self,
+        sender_pid: u64,
+        raw_handle: u64,
+    ) -> Result<usize, IpcSendError> {
+        let handle = EndpointCapabilityHandleParts::decode(raw_handle);
+        let capability = match self.capabilities.get(handle.capability_slot as usize) {
+            Some(capability) => capability,
+            None => return Err(IpcSendError::InvalidCapability),
+        };
+        if capability.generation == 0 {
+            return Err(IpcSendError::InvalidCapability);
+        }
+        if capability.generation != handle.capability_generation {
+            return Err(IpcSendError::StaleCapability);
+        }
+        if !capability.active {
+            return Err(IpcSendError::StaleCapability);
+        }
+        if capability.holder_pid != sender_pid {
+            return Err(IpcSendError::Unauthorized);
+        }
+        if capability.endpoint_slot != handle.endpoint_slot
+            || capability.endpoint_generation != handle.endpoint_generation
+        {
+            return Err(IpcSendError::StaleCapability);
+        }
+        let endpoint = match self.endpoints.get(capability.endpoint_slot as usize) {
+            Some(endpoint) => endpoint,
+            None => return Err(IpcSendError::StaleCapability),
+        };
+        if endpoint.state != IpcEndpointState::Active
+            || endpoint.generation != capability.endpoint_generation
+        {
+            return Err(IpcSendError::StaleCapability);
+        }
+        Ok(capability.endpoint_slot as usize)
+    }
+
+    fn send_message(
+        &mut self,
+        sender_pid: u64,
+        raw_handle: u64,
+        message: &[u8],
+    ) -> Result<usize, IpcSendError> {
+        if message.is_empty() || message.len() > IPC_MAX_MESSAGE_BYTES {
+            return Err(IpcSendError::InvalidMessageLength);
+        }
+        let endpoint_slot = self.lookup_send_capability(sender_pid, raw_handle)?;
+        let endpoint = self
+            .endpoints
+            .get_mut(endpoint_slot)
+            .ok_or(IpcSendError::StaleCapability)?;
+        endpoint.last_message = [0; IPC_MAX_MESSAGE_BYTES];
+        endpoint.last_message[..message.len()].copy_from_slice(message);
+        endpoint.last_message_len = message.len() as u16;
+        Ok(message.len())
+    }
+
+    fn teardown_endpoint(&mut self, endpoint_slot: usize) -> Result<(), &'static str> {
+        let endpoint = self
+            .endpoints
+            .get_mut(endpoint_slot)
+            .ok_or("ipc endpoint slot was out of range during teardown")?;
+        if endpoint.state != IpcEndpointState::Active {
+            return Err("ipc endpoint was not active during teardown");
+        }
+        let retired_generation = endpoint.generation;
+        endpoint.state = match Self::next_generation(endpoint.generation) {
+            Some(next_generation) => {
+                endpoint.generation = next_generation;
+                IpcEndpointState::Vacant
+            }
+            None => IpcEndpointState::Retired,
+        };
+        endpoint.owner_pid = 0;
+        endpoint.last_message_len = 0;
+        endpoint.last_message = [0; IPC_MAX_MESSAGE_BYTES];
+        let endpoint_slot_u16 = u16::try_from(endpoint_slot)
+            .map_err(|_| "ipc endpoint slot exceeded u16 handle field")?;
+        for capability in &mut self.capabilities {
+            if capability.active
+                && capability.endpoint_slot == endpoint_slot_u16
+                && capability.endpoint_generation == retired_generation
+            {
+                capability.active = false;
+                if let Some(next_generation) = Self::next_generation(capability.generation) {
+                    capability.generation = next_generation;
+                } else {
+                    capability.retired = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn endpoint_message(&self, endpoint_slot: usize) -> Option<&[u8]> {
+        let endpoint = self.endpoints.get(endpoint_slot)?;
+        if endpoint.state != IpcEndpointState::Active {
+            return None;
+        }
+        Some(&endpoint.last_message[..usize::from(endpoint.last_message_len)])
     }
 }
 
@@ -937,11 +1239,18 @@ fn run_inner() -> Result<(), &'static str> {
     #[cfg(feature = "m3-entry-self-test")]
     {
         let mut allocator = allocator;
-        #[cfg(feature = "m3-syscall-self-test")]
+        #[cfg(feature = "m3-ipc-self-test")]
+        {
+            start_userspace_ipc_self_test(&mut allocator)
+        }
+        #[cfg(all(not(feature = "m3-ipc-self-test"), feature = "m3-syscall-self-test"))]
         {
             start_userspace_syscall_self_test(&mut allocator)
         }
-        #[cfg(not(feature = "m3-syscall-self-test"))]
+        #[cfg(all(
+            not(feature = "m3-ipc-self-test"),
+            not(feature = "m3-syscall-self-test")
+        ))]
         {
             start_userspace_entry_self_test(&mut allocator)
         }
@@ -1173,6 +1482,42 @@ struct UserspaceTestState {
 struct UserspaceSyscallTestState {
     user_stack_pointer: u64,
     user_stack_segment: u64,
+}
+
+#[cfg(feature = "m3-ipc-self-test")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UserspaceIpcStage {
+    AwaitAuthorizedSend,
+    AwaitUnauthorizedSend,
+}
+
+#[cfg(feature = "m3-ipc-self-test")]
+#[derive(Clone, Copy)]
+struct UserspaceIpcProcess {
+    process: Process,
+    thread: Thread,
+    expected_entry_rip: u64,
+    user_stack_pointer: u64,
+    user_stack_segment: u64,
+}
+
+#[cfg(feature = "m3-ipc-self-test")]
+struct UserspaceIpcTestState {
+    stage: UserspaceIpcStage,
+    endpoint_slot: usize,
+    granted_capability: u64,
+    processes: [UserspaceIpcProcess; USERSPACE_IPC_TEST_PROCESS_COUNT],
+    send_ok_observed: bool,
+    unauthorized_syscall_observed: bool,
+}
+
+#[cfg(feature = "m3-ipc-self-test")]
+#[repr(C)]
+struct UserspaceIpcPayloadData {
+    capability: u64,
+    message_len: u64,
+    expected_return: u64,
+    message: [u8; IPC_MAX_MESSAGE_BYTES],
 }
 
 #[repr(C)]
@@ -1711,6 +2056,7 @@ impl<T> GlobalCell<T> {
 static SCHEDULER: GlobalCell<Scheduler> = GlobalCell::new(Scheduler::new());
 static ID_ALLOCATOR: GlobalCell<IdAllocator> = GlobalCell::new(IdAllocator::new());
 static PROCESS_REGISTRY: GlobalCell<ProcessRegistry> = GlobalCell::new(ProcessRegistry::new());
+static IPC_ENDPOINT_TABLE: GlobalCell<IpcEndpointTable> = GlobalCell::new(IpcEndpointTable::new());
 static TASK_STACKS: GlobalCell<[TaskStack; TASK_COUNT]> =
     GlobalCell::new([const { TaskStack([0; TASK_STACK_SIZE]) }; TASK_COUNT]);
 static DOUBLE_FAULT_STACK: GlobalCell<DoubleFaultStack> =
@@ -1730,6 +2076,8 @@ static USERSPACE_ENTRY_OBSERVED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "m3-syscall-self-test")]
 static USERSPACE_SYSCALL_TEST_STATE: GlobalCell<Option<UserspaceSyscallTestState>> =
     GlobalCell::new(None);
+#[cfg(feature = "m3-ipc-self-test")]
+static USERSPACE_IPC_TEST_STATE: GlobalCell<Option<UserspaceIpcTestState>> = GlobalCell::new(None);
 #[unsafe(no_mangle)]
 static mut SYSCALL_KERNEL_STACK_TOP: u64 = 0;
 #[unsafe(no_mangle)]
@@ -1834,6 +2182,13 @@ unsafe extern "C" {
 unsafe extern "C" {
     static clean_slate_user_syscall_test_start: u8;
     static clean_slate_user_syscall_test_end: u8;
+}
+
+#[cfg(feature = "m3-ipc-self-test")]
+unsafe extern "C" {
+    static clean_slate_user_ipc_test_start: u8;
+    static clean_slate_user_ipc_test_after_send: u8;
+    static clean_slate_user_ipc_test_end: u8;
 }
 
 static INTERRUPT_HANDLERS: [unsafe extern "C" fn(); SPURIOUS_VECTOR + 1] = [
@@ -2033,6 +2388,29 @@ clean_slate_user_syscall_test_value:
     .quad 0x535953434f4c4c21
     .global clean_slate_user_syscall_test_end
 clean_slate_user_syscall_test_end:
+
+    .global clean_slate_user_ipc_test_start
+clean_slate_user_ipc_test_start:
+    movabs rbx, 0x0000400000001000
+    mov rdi, [rbx]
+    lea rsi, [rbx + 24]
+    mov rdx, [rbx + 8]
+    mov rax, 3
+    syscall
+    mov rcx, [rbx + 16]
+    cmp rax, rcx
+    jne clean_slate_user_ipc_test_fail
+
+    int 0x80
+    .global clean_slate_user_ipc_test_after_send
+clean_slate_user_ipc_test_after_send:
+    ud2
+
+clean_slate_user_ipc_test_fail:
+    ud2
+
+    .global clean_slate_user_ipc_test_end
+clean_slate_user_ipc_test_end:
 
     .global clean_slate_syscall_entry
 clean_slate_syscall_entry:
@@ -2253,6 +2631,18 @@ fn userspace_syscall_test_size() -> usize {
         .saturating_sub(&raw const clean_slate_user_syscall_test_start as usize)
 }
 
+#[cfg(feature = "m3-ipc-self-test")]
+fn userspace_ipc_test_size() -> usize {
+    (&raw const clean_slate_user_ipc_test_end as usize)
+        .saturating_sub(&raw const clean_slate_user_ipc_test_start as usize)
+}
+
+#[cfg(feature = "m3-ipc-self-test")]
+fn userspace_ipc_test_after_send_offset() -> u64 {
+    ((&raw const clean_slate_user_ipc_test_after_send as usize)
+        .saturating_sub(&raw const clean_slate_user_ipc_test_start as usize)) as u64
+}
+
 #[cfg(feature = "m3-address-space-self-test")]
 fn userspace_address_space_test_size() -> usize {
     (&raw const clean_slate_user_address_space_test_end as usize)
@@ -2306,6 +2696,40 @@ fn userspace_syscall_test_state() -> Result<&'static UserspaceSyscallTestState, 
             .as_ref()
             .ok_or("userspace syscall self-test state was not initialized")
     }
+}
+
+#[cfg(feature = "m3-ipc-self-test")]
+fn userspace_ipc_test_state() -> Result<&'static mut UserspaceIpcTestState, &'static str> {
+    unsafe {
+        (&mut *USERSPACE_IPC_TEST_STATE.get())
+            .as_mut()
+            .ok_or("userspace IPC self-test state was not initialized")
+    }
+}
+
+fn current_syscall_caller_pid() -> Result<u64, &'static str> {
+    let thread = without_interrupts(|| unsafe { (&*SCHEDULER.get()).current_thread_descriptor() })?;
+    if thread.kind != ThreadKind::User {
+        return Err("syscall caller thread was not userspace");
+    }
+    if thread.owner_process_id == KERNEL_PROCESS_ID {
+        return Err("syscall caller process id was invalid");
+    }
+    let registry = unsafe { &*PROCESS_REGISTRY.get() };
+    let process = registry
+        .get(thread.owner_process_id)
+        .ok_or("syscall caller process was not present in registry")?;
+    let active_root = current_root_frame_address();
+    if process.address_space_root != active_root {
+        return Err("syscall caller process did not match active address space");
+    }
+    let process_for_root = registry
+        .find_by_address_space_root(active_root)
+        .ok_or("active address space did not map to a registered process")?;
+    if process_for_root.id != process.id {
+        return Err("syscall caller thread process did not match active owner root");
+    }
+    Ok(process.id)
 }
 
 fn set_privilege_stack(stack_pointer: u64) -> Result<(), &'static str> {
@@ -2405,11 +2829,6 @@ unsafe fn free_frame(allocator: &mut PageAllocator, frame: u64) -> Result<(), &'
     unsafe { allocator.free_page(frame) }
 }
 
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m3-syscall-self-test"
-))]
 struct PageWalkFlags {
     path: PageTableFlags,
     leaf: PageTableFlags,
@@ -2444,11 +2863,6 @@ unsafe fn page_table_mut(frame_address: u64) -> &'static mut PageTable {
     unsafe { &mut *((frame_address + PHYSICAL_MEMORY_OFFSET) as *mut PageTable) }
 }
 
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m3-syscall-self-test"
-))]
 fn walk_page_flags_in_root(
     root_frame: u64,
     address: VirtAddr,
@@ -2529,11 +2943,6 @@ fn walk_page_flags_in_root(
     })
 }
 
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m3-syscall-self-test"
-))]
 fn walk_page_flags(address: VirtAddr) -> Result<PageWalkFlags, &'static str> {
     walk_page_flags_in_root(current_root_frame_address(), address)
 }
@@ -2834,6 +3243,207 @@ fn install_userspace_syscall_payload(allocator: &mut PageAllocator) -> Result<()
     Ok(())
 }
 
+#[cfg(feature = "m3-ipc-self-test")]
+fn create_userspace_ipc_process(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    capability: u64,
+    expected_return: u64,
+) -> Result<UserspaceIpcProcess, &'static str> {
+    let payload_size = userspace_ipc_test_size();
+    if payload_size > PAGE_SIZE as usize {
+        return Err("userspace IPC self-test payload exceeded one page");
+    }
+    let mut address_space =
+        create_process_address_space(allocator, VirtAddr::new(USER_TEST_CODE_ADDRESS))?;
+    let (pid, tid) = {
+        let ids = unsafe { &mut *ID_ALLOCATOR.get() };
+        (ids.allocate_pid()?, ids.allocate_tid()?)
+    };
+    let mut process = Process {
+        id: pid,
+        state: ProcessState::Creating,
+        address_space_root: address_space.root_frame,
+        resource_domain: ResourceDomain { id: pid },
+        live_threads: 1,
+        exit_status: None,
+    };
+    let setup_result = (|| -> Result<UserspaceIpcProcess, &'static str> {
+        let code_frame_address = allocator
+            .allocate_page()
+            .ok_or("allocator could not provide a code page for userspace IPC test process")?;
+        zero_page(code_frame_address);
+        unsafe {
+            ptr::copy_nonoverlapping(
+                &raw const clean_slate_user_ipc_test_start,
+                (PHYSICAL_MEMORY_OFFSET + code_frame_address) as *mut u8,
+                payload_size,
+            );
+        }
+        if let Err(message) = map_process_page(
+            &mut address_space,
+            USER_TEST_CODE_ADDRESS,
+            code_frame_address,
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+            allocator,
+        ) {
+            unsafe {
+                free_frame(allocator, code_frame_address)?;
+            }
+            return Err(message);
+        }
+
+        let stack_frame_address = allocator
+            .allocate_page()
+            .ok_or("allocator could not provide a stack page for userspace IPC test process")?;
+        zero_page(stack_frame_address);
+        if let Err(message) = map_process_page(
+            &mut address_space,
+            USER_TEST_STACK_ADDRESS,
+            stack_frame_address,
+            PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::NO_EXECUTE
+                | PageTableFlags::USER_ACCESSIBLE,
+            allocator,
+        ) {
+            unsafe {
+                free_frame(allocator, stack_frame_address)?;
+            }
+            return Err(message);
+        }
+
+        let data_frame_address = allocator
+            .allocate_page()
+            .ok_or("allocator could not provide a data page for userspace IPC test process")?;
+        let mut payload_data = UserspaceIpcPayloadData {
+            capability,
+            message_len: IPC_TEST_MESSAGE.len() as u64,
+            expected_return,
+            message: [0; IPC_MAX_MESSAGE_BYTES],
+        };
+        payload_data.message[..IPC_TEST_MESSAGE.len()].copy_from_slice(IPC_TEST_MESSAGE);
+        zero_page(data_frame_address);
+        unsafe {
+            ptr::write(
+                (PHYSICAL_MEMORY_OFFSET + data_frame_address) as *mut UserspaceIpcPayloadData,
+                payload_data,
+            );
+        }
+        if let Err(message) = map_process_page(
+            &mut address_space,
+            USER_TEST_DATA_ADDRESS,
+            data_frame_address,
+            PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::NO_EXECUTE
+                | PageTableFlags::USER_ACCESSIBLE,
+            allocator,
+        ) {
+            unsafe {
+                free_frame(allocator, data_frame_address)?;
+            }
+            return Err(message);
+        }
+
+        let user_stack_pointer = USER_TEST_STACK_ADDRESS + PAGE_SIZE;
+        let saved_stack_pointer = build_userspace_entry_frame(
+            kernel_stack_top,
+            USER_TEST_CODE_ADDRESS,
+            user_stack_pointer,
+        )?;
+        let gdt_state = userspace_gdt_state()?;
+        let thread = Thread {
+            id: tid,
+            owner_process_id: process.id,
+            kind: ThreadKind::User,
+            kernel_stack_top,
+            saved_stack_pointer,
+            launch_entry: USER_TEST_CODE_ADDRESS,
+            started: false,
+            state: ThreadState::Ready,
+            progress_logged: false,
+            preemptions: 0,
+            observed_progress: 0,
+        };
+        process.state = ProcessState::Ready;
+        process.address_space_root = address_space.root_frame;
+        unsafe { (&mut *PROCESS_REGISTRY.get()).insert(process)? };
+        Ok(UserspaceIpcProcess {
+            process,
+            thread,
+            expected_entry_rip: USER_TEST_CODE_ADDRESS + userspace_ipc_test_after_send_offset(),
+            user_stack_pointer,
+            user_stack_segment: gdt_state.user_data_selector.0 as u64,
+        })
+    })();
+    if setup_result.is_err() {
+        let _ = destroy_process_address_space(&address_space, allocator);
+    }
+    setup_result
+}
+
+#[cfg(feature = "m3-ipc-self-test")]
+fn install_userspace_ipc_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
+    unsafe {
+        (&mut *PROCESS_REGISTRY.get()).clear();
+        *ID_ALLOCATOR.get() = IdAllocator::new();
+        *IPC_ENDPOINT_TABLE.get() = IpcEndpointTable::new();
+    }
+    let table = unsafe { &mut *IPC_ENDPOINT_TABLE.get() };
+    table.clear();
+    let endpoint_slot = table.create_endpoint(KERNEL_PROCESS_ID)?;
+    let granted_capability = table.grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)?;
+    kernel_log_line(IPC_CAPABILITY_GRANTED_MARKER);
+
+    let stacks = unsafe { &*TASK_STACKS.get() };
+    let process_one = create_userspace_ipc_process(
+        allocator,
+        task_stack_top(&stacks[0]),
+        granted_capability,
+        IPC_TEST_MESSAGE.len() as u64,
+    )?;
+    let process_two = create_userspace_ipc_process(
+        allocator,
+        task_stack_top(&stacks[1]),
+        granted_capability,
+        SYSCALL_EACCES,
+    )?;
+
+    let scheduler = unsafe { &mut *SCHEDULER.get() };
+    *scheduler = Scheduler::new();
+    scheduler.configure_thread(
+        0,
+        process_one.thread.id,
+        process_one.thread.owner_process_id,
+        process_one.thread.kind,
+        process_one.thread.kernel_stack_top,
+        process_one.thread.saved_stack_pointer,
+        process_one.thread.launch_entry,
+    )?;
+    scheduler.configure_thread(
+        1,
+        process_two.thread.id,
+        process_two.thread.owner_process_id,
+        process_two.thread.kind,
+        process_two.thread.kernel_stack_top,
+        process_two.thread.saved_stack_pointer,
+        process_two.thread.launch_entry,
+    )?;
+
+    unsafe {
+        *USERSPACE_IPC_TEST_STATE.get() = Some(UserspaceIpcTestState {
+            stage: UserspaceIpcStage::AwaitAuthorizedSend,
+            endpoint_slot,
+            granted_capability,
+            processes: [process_one, process_two],
+            send_ok_observed: false,
+            unauthorized_syscall_observed: false,
+        });
+    }
+    Ok(())
+}
+
 fn initialize_syscall_abi(kernel_stack_top: u64) -> Result<(), &'static str> {
     if kernel_stack_top % 16 != 0 {
         return Err("syscall kernel stack top must be 16-byte aligned");
@@ -2889,7 +3499,6 @@ fn validate_canonical_user_return_state(frame: &SyscallContext) -> Result<(), &'
     Ok(())
 }
 
-#[cfg(feature = "m3-syscall-self-test")]
 fn validate_user_pointer_range(pointer: u64, length: u64) -> Result<(), &'static str> {
     if length == 0 {
         return Err("userspace pointer range length must be non-zero");
@@ -2933,6 +3542,68 @@ fn handle_syscall_read_u64(frame: &mut SyscallContext) {
     }
     frame.rax = unsafe { ptr::read_unaligned(frame.rdi as *const u64) };
     SYSCALL_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
+    let length = match usize::try_from(frame.rdx) {
+        Ok(length) => length,
+        Err(_) => {
+            frame.rax = SYSCALL_EINVAL;
+            return;
+        }
+    };
+    if length == 0 || length > IPC_MAX_MESSAGE_BYTES {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    if validate_user_pointer_range(frame.rsi, frame.rdx).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    let mut copied = [0u8; IPC_MAX_MESSAGE_BYTES];
+    unsafe {
+        ptr::copy_nonoverlapping(frame.rsi as *const u8, copied.as_mut_ptr(), length);
+    }
+    let sender_pid = match current_syscall_caller_pid() {
+        Ok(sender_pid) => sender_pid,
+        Err(_) => {
+            frame.rax = SYSCALL_EACCES;
+            return;
+        }
+    };
+    let table = unsafe { &mut *IPC_ENDPOINT_TABLE.get() };
+    match table.send_message(sender_pid, frame.rdi, &copied[..length]) {
+        Ok(sent) => {
+            #[cfg(feature = "m3-ipc-self-test")]
+            if let Some(state) = unsafe { (&mut *USERSPACE_IPC_TEST_STATE.get()).as_mut() } {
+                if sender_pid == USERSPACE_IPC_TEST_PID && !state.send_ok_observed {
+                    kernel_log_fmt(format_args!("{IPC_SEND_PASS_MARKER}{sent}\n"));
+                    state.send_ok_observed = true;
+                }
+            }
+            frame.rax = sent as u64;
+        }
+        Err(IpcSendError::Unauthorized) => {
+            #[cfg(feature = "m3-ipc-self-test")]
+            if let Some(state) = unsafe { (&mut *USERSPACE_IPC_TEST_STATE.get()).as_mut() } {
+                if sender_pid == USERSPACE_IPC_UNAUTHORIZED_TEST_PID {
+                    state.unauthorized_syscall_observed = true;
+                }
+            }
+            frame.rax = SYSCALL_EACCES;
+        }
+        Err(IpcSendError::InvalidCapability) => {
+            #[cfg(feature = "m3-ipc-self-test")]
+            if let Some(state) = unsafe { (&mut *USERSPACE_IPC_TEST_STATE.get()).as_mut() } {
+                if sender_pid == USERSPACE_IPC_UNAUTHORIZED_TEST_PID {
+                    state.unauthorized_syscall_observed = true;
+                }
+            }
+            frame.rax = SYSCALL_EACCES;
+        }
+        Err(IpcSendError::StaleCapability) => frame.rax = SYSCALL_ESTALE,
+        Err(IpcSendError::InvalidMessageLength) => frame.rax = SYSCALL_EINVAL,
+    }
 }
 
 #[cfg(feature = "m3-syscall-self-test")]
@@ -2993,6 +3664,7 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
         }
         #[cfg(not(feature = "m3-syscall-self-test"))]
         SYSCALL_NR_FINISH => frame.rax = SYSCALL_ENOSYS,
+        SYSCALL_NR_IPC_SEND => handle_syscall_ipc_send(frame),
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 
@@ -3050,6 +3722,30 @@ fn start_userspace_syscall_self_test(allocator: &mut PageAllocator) -> ! {
         USER_TEST_CODE_ADDRESS,
         state.user_stack_pointer,
     ) {
+        Ok(frame_pointer) => frame_pointer,
+        Err(message) => fatal_kernel_error(message),
+    };
+    unsafe { restore_task_context(frame_pointer) }
+}
+
+#[cfg(feature = "m3-ipc-self-test")]
+fn start_userspace_ipc_self_test(allocator: &mut PageAllocator) -> ! {
+    if let Err(message) = install_userspace_ipc_payload(allocator) {
+        fatal_kernel_error(message);
+    }
+
+    let kernel_stack_top = unsafe {
+        let stacks = &*TASK_STACKS.get();
+        task_stack_top(&stacks[0])
+    };
+    if let Err(message) = set_privilege_stack(kernel_stack_top) {
+        fatal_kernel_error(message);
+    }
+    if let Err(message) = initialize_syscall_abi(kernel_stack_top) {
+        fatal_kernel_error(message);
+    }
+
+    let frame_pointer = match start_current_scheduler_thread() {
         Ok(frame_pointer) => frame_pointer,
         Err(message) => fatal_kernel_error(message),
     };
@@ -3538,7 +4234,7 @@ fn current_userspace_process_index(
         .ok_or("current scheduler thread did not map to a registered userspace process")
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'static str> {
     let next_stack_pointer = without_interrupts(|| unsafe {
         (&mut *SCHEDULER.get()).on_timer_interrupt(current_stack_pointer)
@@ -3547,7 +4243,7 @@ fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'static str>
     Ok(next_stack_pointer)
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 fn start_current_scheduler_thread() -> Result<u64, &'static str> {
     let stack_pointer = without_interrupts(|| unsafe { (&mut *SCHEDULER.get()).start() })?;
     prepare_current_scheduler_thread_dispatch()?;
@@ -3796,6 +4492,7 @@ fn handle_userspace_address_space_page_fault(context: &InterruptContext) -> ! {
     if selector_rpl(context.cs) != 3 {
         fatal_kernel_error("userspace page fault did not originate from CPL3");
     }
+
     let fault_address = Cr2::read()
         .expect("CR2 must contain a canonical fault address")
         .as_u64();
@@ -3866,6 +4563,72 @@ fn handle_userspace_address_space_page_fault(context: &InterruptContext) -> ! {
         _ => fatal_kernel_error(
             "userspace address-space self-test observed an unexpected page fault",
         ),
+    }
+}
+
+#[cfg(feature = "m3-ipc-self-test")]
+fn userspace_ipc_process_index(state: &UserspaceIpcTestState) -> Result<usize, &'static str> {
+    let thread = without_interrupts(|| unsafe { (&*SCHEDULER.get()).current_thread_descriptor() })?;
+    state
+        .processes
+        .iter()
+        .position(|process| process.thread.id == thread.id)
+        .ok_or("current scheduler thread did not map to an IPC self-test process")
+}
+
+#[cfg(feature = "m3-ipc-self-test")]
+fn handle_userspace_ipc_entry(context: &InterruptContext) -> Result<u64, &'static str> {
+    let frame = userspace_frame(context);
+    let state = userspace_ipc_test_state()?;
+    let current_process = userspace_ipc_process_index(state)?;
+    let process = state.processes[current_process];
+    validate_userspace_entry_trap(
+        context,
+        frame,
+        process.expected_entry_rip,
+        process.user_stack_pointer,
+        process.user_stack_segment,
+    )?;
+
+    let saved_stack_pointer = context as *const InterruptContext as u64;
+    state.processes[current_process].thread.saved_stack_pointer = saved_stack_pointer;
+    without_interrupts(|| unsafe {
+        let scheduler = &mut *SCHEDULER.get();
+        scheduler.update_thread_saved_stack(process.thread.id, saved_stack_pointer)
+    })?;
+
+    match state.stage {
+        UserspaceIpcStage::AwaitAuthorizedSend if process.process.id == USERSPACE_IPC_TEST_PID => {
+            if !state.send_ok_observed {
+                return Err("IPC self-test did not observe authorized send before user rendezvous");
+            }
+            state.stage = UserspaceIpcStage::AwaitUnauthorizedSend;
+            schedule_next_thread(saved_stack_pointer)
+        }
+        UserspaceIpcStage::AwaitUnauthorizedSend
+            if process.process.id == USERSPACE_IPC_UNAUTHORIZED_TEST_PID =>
+        {
+            if !state.unauthorized_syscall_observed {
+                return Err(
+                    "IPC self-test did not observe unauthorized send before second rendezvous",
+                );
+            }
+            kernel_log_line(IPC_UNAUTHORIZED_DENIED_MARKER);
+            let table = unsafe { &mut *IPC_ENDPOINT_TABLE.get() };
+            table.teardown_endpoint(state.endpoint_slot)?;
+            match table.send_message(USERSPACE_IPC_TEST_PID, state.granted_capability, b"stale") {
+                Err(IpcSendError::StaleCapability) => {}
+                _ => {
+                    return Err("endpoint teardown did not invalidate outstanding capability");
+                }
+            }
+            unsafe {
+                *USERSPACE_IPC_TEST_STATE.get() = None;
+            }
+            kernel_log_line("[M3.5] PASS");
+            qemu_exit(QEMU_EXIT_SUCCESS)
+        }
+        _ => Err("userspace IPC self-test reached an unexpected rendezvous stage"),
     }
 }
 
@@ -3993,6 +4756,14 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
 
     if context.vector as usize == SPURIOUS_VECTOR {
         return stack_pointer;
+    }
+
+    #[cfg(feature = "m3-ipc-self-test")]
+    if context.vector as usize == USER_TEST_VECTOR {
+        return match handle_userspace_ipc_entry(context) {
+            Ok(next_stack_pointer) => next_stack_pointer,
+            Err(message) => fatal_kernel_error(message),
+        };
     }
 
     #[cfg(feature = "m3-address-space-self-test")]
@@ -5072,6 +5843,149 @@ mod tests {
             registry.get(17).expect("process").state,
             ProcessState::Exited
         ));
+    }
+
+    #[test]
+    fn ipc_capability_authorizes_only_granted_process() {
+        let mut table = IpcEndpointTable::new();
+        let endpoint_slot = table
+            .create_endpoint(KERNEL_PROCESS_ID)
+            .expect("create endpoint");
+        let handle = table
+            .grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)
+            .expect("grant capability");
+
+        assert_eq!(
+            table
+                .send_message(USERSPACE_IPC_TEST_PID, handle, b"hi")
+                .expect("authorized send"),
+            2
+        );
+        assert_eq!(table.endpoint_message(endpoint_slot), Some(&b"hi"[..]));
+        assert_eq!(
+            table.send_message(USERSPACE_IPC_UNAUTHORIZED_TEST_PID, handle, b"hi"),
+            Err(IpcSendError::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn ipc_lookup_rejects_invalid_capability_handle() {
+        let mut table = IpcEndpointTable::new();
+        let endpoint_slot = table
+            .create_endpoint(KERNEL_PROCESS_ID)
+            .expect("create endpoint");
+        let _handle = table
+            .grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)
+            .expect("grant capability");
+        let invalid_handle = EndpointCapabilityHandleParts {
+            capability_slot: IPC_CAPABILITY_CAPACITY as u16,
+            capability_generation: 1,
+            endpoint_slot: 0,
+            endpoint_generation: 1,
+        }
+        .encode();
+
+        assert_eq!(
+            table.send_message(USERSPACE_IPC_TEST_PID, invalid_handle, b"x"),
+            Err(IpcSendError::InvalidCapability)
+        );
+    }
+
+    #[test]
+    fn ipc_teardown_makes_stale_handles_fail_after_slot_reuse() {
+        let mut table = IpcEndpointTable::new();
+        let endpoint_slot = table
+            .create_endpoint(KERNEL_PROCESS_ID)
+            .expect("create endpoint");
+        let stale_handle = table
+            .grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)
+            .expect("grant capability");
+        table
+            .teardown_endpoint(endpoint_slot)
+            .expect("teardown endpoint");
+        assert_eq!(
+            table.send_message(USERSPACE_IPC_TEST_PID, stale_handle, b"x"),
+            Err(IpcSendError::StaleCapability)
+        );
+
+        let reused_slot = table
+            .create_endpoint(KERNEL_PROCESS_ID)
+            .expect("reuse endpoint slot");
+        assert_eq!(reused_slot, endpoint_slot);
+        assert_eq!(
+            table.send_message(USERSPACE_IPC_TEST_PID, stale_handle, b"x"),
+            Err(IpcSendError::StaleCapability)
+        );
+    }
+
+    #[test]
+    fn ipc_send_rejects_empty_or_oversized_messages() {
+        let mut table = IpcEndpointTable::new();
+        let endpoint_slot = table
+            .create_endpoint(KERNEL_PROCESS_ID)
+            .expect("create endpoint");
+        let handle = table
+            .grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)
+            .expect("grant capability");
+
+        assert_eq!(
+            table.send_message(USERSPACE_IPC_TEST_PID, handle, b""),
+            Err(IpcSendError::InvalidMessageLength)
+        );
+        let oversized = [0u8; IPC_MAX_MESSAGE_BYTES + 1];
+        assert_eq!(
+            table.send_message(USERSPACE_IPC_TEST_PID, handle, &oversized),
+            Err(IpcSendError::InvalidMessageLength)
+        );
+    }
+
+    #[test]
+    fn ipc_endpoint_generation_near_wrap_never_aliases_stale_handles() {
+        let mut table = IpcEndpointTable::new();
+        let endpoint_slot = table
+            .create_endpoint(KERNEL_PROCESS_ID)
+            .expect("create endpoint");
+        table.endpoints[endpoint_slot].generation = u16::MAX - 1;
+        let stale_handle = table
+            .grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)
+            .expect("grant near-wrap capability");
+
+        table
+            .teardown_endpoint(endpoint_slot)
+            .expect("teardown at max-1");
+        let reused_slot = table
+            .create_endpoint(KERNEL_PROCESS_ID)
+            .expect("reuse endpoint slot at max generation");
+        assert_eq!(reused_slot, endpoint_slot);
+        assert_eq!(
+            table.send_message(USERSPACE_IPC_TEST_PID, stale_handle, b"x"),
+            Err(IpcSendError::StaleCapability)
+        );
+
+        table
+            .teardown_endpoint(endpoint_slot)
+            .expect("teardown at max generation retires slot");
+        assert_eq!(
+            table.endpoints[endpoint_slot].state,
+            IpcEndpointState::Retired
+        );
+    }
+
+    #[test]
+    fn ipc_capability_generation_exhaustion_retires_slot() {
+        let mut table = IpcEndpointTable::new();
+        let endpoint_slot = table
+            .create_endpoint(KERNEL_PROCESS_ID)
+            .expect("create endpoint");
+        table.capabilities[0].generation = u16::MAX;
+        for capability in table.capabilities.iter_mut().skip(1) {
+            capability.retired = true;
+        }
+
+        assert!(table
+            .grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)
+            .is_err());
+        assert!(table.capabilities[0].retired);
     }
 
     #[test]
