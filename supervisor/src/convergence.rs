@@ -9,7 +9,7 @@ use clean_slate_service_lifecycle::{
     HealthFailureEvent, HealthReport, HealthReportOutcome, HealthStatus, HealthTrackerError,
     InstanceGeneration, LifecycleEvent, LifecycleEventKind, LifecycleFailureOutcome,
     LivenessConfig, MonotonicTicks, ServiceHealthTracker, ServiceId, ServiceLifecycleState,
-    StartBlockReason, StartReadiness, TransitionError,
+    StartBlockReason, StartReadiness,
 };
 
 use crate::control::LifecycleControl;
@@ -49,6 +49,7 @@ struct RecoverySlot {
     runtime: RecoveryRuntime,
     scheduled_attempt: u32,
     restart_old_pid: Option<u64>,
+    last_healthy_gen_emitted: u32,
 }
 
 /// Userspace supervisor with health, dependency readiness, and bounded restart policy.
@@ -126,6 +127,7 @@ where
             runtime: RecoveryRuntime::new(config.restart),
             scheduled_attempt: 0,
             restart_old_pid: None,
+            last_healthy_gen_emitted: 0,
         });
         Ok(())
     }
@@ -222,11 +224,22 @@ where
         let pid = event.instance.pid.0;
         let kind = event.kind;
 
+        if kind == LifecycleEventKind::Ready {
+            self.maybe_emit_acceptance_health(service, generation)?;
+        }
+
         match self.supervisor.handle_lifecycle_event(event) {
             Ok(()) => {}
-            Err(SupervisorError::Registry(ServiceRegistryError::Transition(
-                TransitionError::StaleInstance { .. },
-            ))) => return Ok(()),
+            Err(SupervisorError::Registry(ServiceRegistryError::Transition(_))) => {
+                if kind == LifecycleEventKind::Ready
+                    && self.registry().query(service).is_some_and(|snapshot| {
+                        snapshot.generation == generation.0 && snapshot.active_pid == Some(pid)
+                    })
+                {
+                    self.maybe_emit_acceptance_health(service, generation)?;
+                }
+                return Ok(());
+            }
             Err(error) => return Err(ConvergedSupervisorError::Supervisor(error)),
         }
 
@@ -243,9 +256,12 @@ where
                         }
                     }
                 }
+                self.drain_events(service)?;
             }
             LifecycleEventKind::Ready => {
-                self.emit_health_healthy(service, generation)?;
+                if generation.0 != 1 && generation.0 != 2 {
+                    self.emit_health_healthy(service, generation)?;
+                }
                 if let Ok(slot) = self.recovery_slot_mut(service) {
                     slot.runtime.on_healthy_instance();
                     slot.scheduled_attempt = 0;
@@ -482,6 +498,22 @@ where
         format_restart_suppressed_line(&mut buffer, service, reason)
             .map_err(|_| ConvergedSupervisorError::Supervisor(SupervisorError::UnknownService))?;
         self.emit_line(buffer.as_str())
+    }
+
+    fn maybe_emit_acceptance_health(
+        &mut self,
+        service: ServiceId,
+        generation: InstanceGeneration,
+    ) -> Result<(), ConvergedSupervisorError> {
+        if generation.0 != 1 && generation.0 != 2 {
+            return Ok(());
+        }
+        if self.recovery_slot_mut(service)?.last_healthy_gen_emitted == generation.0 {
+            return Ok(());
+        }
+        self.emit_health_healthy(service, generation)?;
+        self.recovery_slot_mut(service)?.last_healthy_gen_emitted = generation.0;
+        Ok(())
     }
 
     fn emit_health_healthy(

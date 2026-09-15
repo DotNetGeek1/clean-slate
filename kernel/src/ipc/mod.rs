@@ -15,6 +15,7 @@ pub(super) const USERSPACE_IPC_UNAUTHORIZED_TEST_PID: u64 = 2;
     feature = "m4-recovery-self-test",
     test
 ))]
+#[allow(dead_code)]
 pub(crate) const USERSPACE_SUPERVISOR_TEST_PID: u64 = 1;
 
 #[allow(dead_code)]

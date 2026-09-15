@@ -42,10 +42,12 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
     }
 
     let elf_bytes = fs::read(&elf).expect("failed to read userspace ELF");
-    let (image, image_base, entry) =
-        materialize_elf_image(&elf_bytes).unwrap_or_else(|message| {
-            panic!("failed to materialize userspace ELF {}: {message}", elf.display())
-        });
+    let (image, image_base, entry) = materialize_elf_image(&elf_bytes).unwrap_or_else(|message| {
+        panic!(
+            "failed to materialize userspace ELF {}: {message}",
+            elf.display()
+        )
+    });
 
     fs::write(&raw_image, &image).expect("failed to write materialized userspace image");
 
@@ -75,7 +77,8 @@ fn materialize_elf_image(elf: &[u8]) -> Result<(Vec<u8>, u64, u64), String> {
 
     let entry = u64::from_le_bytes(elf[0x18..0x20].try_into().map_err(|_| "e_entry")?);
     let phoff = u64::from_le_bytes(elf[0x20..0x28].try_into().map_err(|_| "e_phoff")?);
-    let phentsize = u16::from_le_bytes(elf[0x36..0x38].try_into().map_err(|_| "e_phentsize")?) as u64;
+    let phentsize =
+        u16::from_le_bytes(elf[0x36..0x38].try_into().map_err(|_| "e_phentsize")?) as u64;
     let phnum = u16::from_le_bytes(elf[0x38..0x3a].try_into().map_err(|_| "e_phnum")?) as u64;
 
     struct LoadSegment {
@@ -156,13 +159,15 @@ fn apply_rela_dyn(
     let e_shentsize =
         u16::from_le_bytes(elf[0x3a..0x3c].try_into().map_err(|_| "e_shentsize")?) as u64;
     let e_shnum = u16::from_le_bytes(elf[0x3c..0x3e].try_into().map_err(|_| "e_shnum")?) as u64;
-    let e_shstrndx = u16::from_le_bytes(elf[0x3e..0x40].try_into().map_err(|_| "e_shstrndx")?) as u64;
+    let e_shstrndx =
+        u16::from_le_bytes(elf[0x3e..0x40].try_into().map_err(|_| "e_shstrndx")?) as u64;
 
     let shstrtab = section_data(elf, e_shoff, e_shentsize, e_shnum, e_shstrndx)?;
 
     for index in 0..e_shnum {
         let header = section_header(elf, e_shoff, e_shentsize, index)?;
-        let name_offset = u32::from_le_bytes(header[0..4].try_into().map_err(|_| "sh_name")?) as usize;
+        let name_offset =
+            u32::from_le_bytes(header[0..4].try_into().map_err(|_| "sh_name")?) as usize;
         let name = read_cstr(shstrtab, name_offset)?;
         if name != ".rela.dyn" {
             continue;
@@ -173,7 +178,8 @@ fn apply_rela_dyn(
         }
         let sh_offset = u64::from_le_bytes(header[0x18..0x20].try_into().map_err(|_| "sh_offset")?);
         let sh_size = u64::from_le_bytes(header[0x20..0x28].try_into().map_err(|_| "sh_size")?);
-        let sh_entsize = u64::from_le_bytes(header[0x38..0x40].try_into().map_err(|_| "sh_entsize")?);
+        let sh_entsize =
+            u64::from_le_bytes(header[0x38..0x40].try_into().map_err(|_| "sh_entsize")?);
         if sh_entsize != 24 {
             return Err(".rela.dyn entry size was not 24 bytes".into());
         }
@@ -221,12 +227,12 @@ fn write_u64(image: &mut [u8], load_base: u64, vaddr: u64, value: u64) -> Result
     Ok(())
 }
 
-fn section_header<'a>(
-    elf: &'a [u8],
+fn section_header(
+    elf: &[u8],
     shoff: u64,
     shentsize: u64,
     index: u64,
-) -> Result<&'a [u8], String> {
+) -> Result<&[u8], String> {
     let start = shoff + index * shentsize;
     let end = start + shentsize;
     if end > elf.len() as u64 {
@@ -235,13 +241,13 @@ fn section_header<'a>(
     Ok(&elf[start as usize..end as usize])
 }
 
-fn section_data<'a>(
-    elf: &'a [u8],
+fn section_data(
+    elf: &[u8],
     shoff: u64,
     shentsize: u64,
     _shnum: u64,
     index: u64,
-) -> Result<&'a [u8], String> {
+) -> Result<&[u8], String> {
     let header = section_header(elf, shoff, shentsize, index)?;
     let sh_offset = u64::from_le_bytes(header[0x18..0x20].try_into().map_err(|_| "sh_offset")?);
     let sh_size = u64::from_le_bytes(header[0x20..0x28].try_into().map_err(|_| "sh_size")?);

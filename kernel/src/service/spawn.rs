@@ -55,11 +55,11 @@ pub(crate) fn launch_builtin_service(
     scheduler_slot: usize,
     service: ServiceId,
 ) -> Result<SpawnedServiceInstance, &'static str> {
-    use crate::diagnostics::log::kernel_log_fmt;
     use crate::arch::x86_64::asm::clean_slate_user_address_space_test_end;
     use crate::arch::x86_64::asm::clean_slate_user_address_space_test_start;
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
     use crate::arch::x86_64::gdt::userspace_gdt_state;
+    use crate::diagnostics::log::kernel_log_fmt;
     use crate::ipc::endpoint_table_mut;
     use crate::mm::address_space::create_process_address_space;
     use crate::mm::address_space::map_process_page;
@@ -138,11 +138,10 @@ pub(crate) fn launch_builtin_service(
         &mut address_space,
         code_address,
         code_frame,
-        PageTableFlags::PRESENT
-            | PageTableFlags::WRITABLE
-            | PageTableFlags::USER_ACCESSIBLE,
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
         allocator,
-    ).map_err(|message| {
+    )
+    .map_err(|message| {
         kernel_log_fmt(format_args!(
             "[FAIL] map code service={} va={:#x} err={message}\n",
             service.0, code_address

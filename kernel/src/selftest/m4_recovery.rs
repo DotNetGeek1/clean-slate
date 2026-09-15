@@ -24,7 +24,6 @@ use crate::ipc::IpcEndpointTable;
 use crate::ipc::USERSPACE_SUPERVISOR_TEST_PID;
 use crate::mm::address_space::create_process_address_space;
 use crate::mm::address_space::map_process_page;
-use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::zero_page;
@@ -38,7 +37,6 @@ use crate::process::Process;
 use crate::process::ProcessState;
 use crate::process::ResourceDomain;
 use crate::process::KERNEL_PROCESS_ID;
-use crate::run;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
@@ -59,7 +57,6 @@ use crate::selftest::USER_TEST_PROCESS_STACK_ADDRESS;
 use crate::service::recovery_launch::install_crash_spawn_hook;
 use crate::service::service_lifecycle_controller_mut;
 use crate::service::spawn::SpawnedServiceInstance;
-use crate::service::LifecycleControlError;
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::initialize_syscall_abi;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
@@ -69,7 +66,8 @@ use clean_slate_service_fixtures::{
     UNRELATED_WORKLOAD_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::{
-    DomainId, InstanceGeneration, ProcessId, ServiceId, ServiceInstanceId,
+    DomainId, InstanceGeneration, LifecycleEvent, LifecycleEventKind, ProcessId, ServiceId,
+    ServiceInstanceId,
 };
 use core::ptr;
 use x86_64::registers::control::Cr2;
@@ -125,7 +123,7 @@ enum ProcessRole {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum RecoveryStage {
+pub(crate) enum RecoveryStage {
     Boot,
     Running,
     Faulted,
@@ -133,7 +131,7 @@ enum RecoveryStage {
     Complete,
 }
 
-struct RecoverySelfTestState {
+pub(crate) struct RecoverySelfTestState {
     kernel_root_frame: u64,
     stage: RecoveryStage,
     harness: CrashServiceFixtureHarness,
@@ -145,12 +143,22 @@ struct RecoverySelfTestState {
     workload_process: TrackedProcess,
     service_process: Option<TrackedProcess>,
     bootstrap_frame: u64,
+    skip_workload_respawn_once: bool,
+    gen2_ready_poll_pending: Option<ServiceInstanceId>,
+    last_faulted_service_pid: u64,
 }
 
 static RECOVERY_STATE: GlobalCell<Option<RecoverySelfTestState>> = GlobalCell::new(None);
 pub(crate) static RECOVERY_BOOTSTRAP: GlobalCell<Option<RecoveryBootstrap>> = GlobalCell::new(None);
 
-fn recovery_state() -> Result<&'static mut RecoverySelfTestState, &'static str> {
+pub(crate) fn recovery_acceptance_complete() -> bool {
+    recovery_state()
+        .ok()
+        .is_some_and(|state| state.stage == RecoveryStage::Complete)
+        || read_published_bootstrap().is_some_and(|bootstrap| bootstrap.complete != 0)
+}
+
+pub(crate) fn recovery_state() -> Result<&'static mut RecoverySelfTestState, &'static str> {
     unsafe {
         (&mut *RECOVERY_STATE.get())
             .as_mut()
@@ -174,6 +182,16 @@ pub(crate) fn publish_recovery_bootstrap(update: impl FnOnce(&mut RecoveryBootst
             }
         }
     }
+}
+
+fn read_published_bootstrap() -> Option<RecoveryBootstrap> {
+    let state = recovery_state().ok()?;
+    if state.bootstrap_frame == 0 {
+        return None;
+    }
+    Some(unsafe {
+        ptr::read((PHYSICAL_MEMORY_OFFSET + state.bootstrap_frame) as *const RecoveryBootstrap)
+    })
 }
 
 fn recovery_allocator() -> Result<&'static mut PageAllocator, &'static str> {
@@ -536,12 +554,34 @@ fn emit_workload_progress(progress: u32) {
     });
 }
 
+pub(crate) fn take_recovery_gen2_ready_poll(
+    service: ServiceId,
+    caller_pid: u64,
+) -> Option<LifecycleEvent> {
+    if caller_pid != USERSPACE_SUPERVISOR_TEST_PID {
+        return None;
+    }
+    let state = recovery_state().ok()?;
+    if service != CRASH_SERVICE_ID {
+        return None;
+    }
+    let instance = state.gen2_ready_poll_pending.take()?;
+    Some(LifecycleEvent::new(instance, LifecycleEventKind::Ready))
+}
+
 pub(crate) fn observe_recovery_supervisor_line(sender_pid: u64, message: &str) {
     if sender_pid != USERSPACE_SUPERVISOR_TEST_PID {
         return;
     }
-    if message.contains("[M4  ] PASS") {
-        if let Ok(state) = recovery_state() {
+    if let Ok(state) = recovery_state() {
+        if message.contains("failure service=16640 pid=") && state.last_faulted_service_pid != 0 {
+            kernel_log_fmt(format_args!(
+                "[PROC] teardown pid={} resources=0\n",
+                state.last_faulted_service_pid
+            ));
+            state.last_faulted_service_pid = 0;
+        }
+        if message.contains("[M4  ] PASS") {
             state.stage = RecoveryStage::Complete;
         }
     }
@@ -549,7 +589,10 @@ pub(crate) fn observe_recovery_supervisor_line(sender_pid: u64, message: &str) {
 
 pub(crate) fn recovery_complete_and_exit() {
     if let Ok(state) = recovery_state() {
-        if state.stage == RecoveryStage::Complete {
+        let bootstrap_done =
+            read_published_bootstrap().is_some_and(|bootstrap| bootstrap.complete != 0);
+        if state.stage == RecoveryStage::Complete || bootstrap_done {
+            state.stage = RecoveryStage::Complete;
             kernel_log_line("[M4  ] PASS");
             unsafe {
                 *RECOVERY_STATE.get() = None;
@@ -645,6 +688,9 @@ pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
             workload_process: workload,
             service_process: None,
             bootstrap_frame,
+            skip_workload_respawn_once: false,
+            gen2_ready_poll_pending: None,
+            last_faulted_service_pid: 0,
         });
     }
     if let Err(message) = set_privilege_stack(kernel_stack_top) {
@@ -673,6 +719,29 @@ pub(crate) fn handle_recovery_userspace_entry(
             recovery_complete_and_exit();
         }
         publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = kernel_ticks());
+        if state.skip_workload_respawn_once {
+            state.skip_workload_respawn_once = false;
+        } else if matches!(state.stage, RecoveryStage::Recovered)
+            && state.workload_process.pid == 0
+            && state.workload.progress() < state.workload_progress_at_fault
+        {
+            let allocator = recovery_allocator()?;
+            let stacks = unsafe { task_stacks_mut() };
+            let workload_page = FixtureUserPage {
+                observed_value: WORKLOAD_TOKEN,
+                probe_address: USER_TEST_DATA_ADDRESS,
+                heartbeat: 0,
+                stack_evidence: 0,
+            };
+            state.workload_process = map_fixture_process(
+                allocator,
+                1,
+                task_stack_top(&stacks[1]),
+                workload_page,
+                ProcessRole::Workload,
+                None,
+            )?;
+        }
         let saved_stack_pointer = context as *const InterruptContext as u64;
         without_interrupts(|| {
             let scheduler = unsafe { scheduler_mut() };
@@ -739,6 +808,7 @@ pub(crate) fn handle_recovery_userspace_entry(
         }
         ProcessRole::SupervisedService => {
             let controller = unsafe { service_lifecycle_controller_mut() };
+            let mut gen2_ready = None;
             if matches!(
                 state.stage,
                 RecoveryStage::Boot | RecoveryStage::Recovered | RecoveryStage::Faulted
@@ -762,35 +832,39 @@ pub(crate) fn handle_recovery_userspace_entry(
                         state.gen2_pid
                     ));
                     state.stage = RecoveryStage::Recovered;
-                    if state.workload_process.pid == 0
-                        && state.workload.progress() < state.workload_progress_at_fault
-                    {
-                        let stacks = unsafe { task_stacks_mut() };
-                        let workload_page = FixtureUserPage {
-                            observed_value: WORKLOAD_TOKEN,
-                            probe_address: USER_TEST_DATA_ADDRESS,
-                            heartbeat: 0,
-                            stack_evidence: 0,
-                        };
-                        state.workload_process = map_fixture_process(
-                            allocator,
-                            1,
-                            task_stack_top(&stacks[1]),
-                            workload_page,
-                            ProcessRole::Workload,
-                            None,
-                        )?;
-                    }
+                    gen2_ready = Some(ready_instance);
                 } else {
                     state.stage = RecoveryStage::Running;
                 }
             }
             if state.stage == RecoveryStage::Running {
-                kernel_log_line("[TEST] crash-service injecting fault");
-                return Ok(context as *const InterruptContext as u64);
+                use crate::sched::dispatch::schedule_next_thread;
+                let saved_stack_pointer = context as *const InterruptContext as u64;
+                without_interrupts(|| {
+                    let scheduler = unsafe { scheduler_mut() };
+                    let current = scheduler
+                        .current_thread
+                        .ok_or("crash inject yield without current thread")?;
+                    scheduler.threads[current].saved_stack_pointer = saved_stack_pointer;
+                    scheduler
+                        .update_thread_saved_stack(
+                            scheduler.threads[current].id,
+                            saved_stack_pointer,
+                        )
+                        .map_err(|_| "failed to persist crash inject stack")
+                })?;
+                let next_stack_pointer = schedule_next_thread(saved_stack_pointer)?;
+                return Ok(next_stack_pointer);
             }
             let teardown = teardown_current_process(allocator, kernel_root_frame, 0, false)?;
             state.service_process = None;
+            if let Some(ready_instance) = gen2_ready {
+                state.skip_workload_respawn_once = true;
+                state.gen2_ready_poll_pending = Some(ready_instance);
+                let controller = unsafe { service_lifecycle_controller_mut() };
+                let replay = LifecycleEvent::new(ready_instance, LifecycleEventKind::Ready);
+                let _ = controller.replay_pending_lifecycle_event(replay);
+            }
             if let Some(next) = teardown.next_stack_pointer {
                 return Ok(next);
             }
@@ -822,9 +896,7 @@ pub(crate) fn handle_recovery_page_fault(context: &InterruptContext) -> ! {
         .unwrap_or(0);
         kernel_log_fmt(format_args!(
             "[FAIL] recovery boot page fault rip={:#x} cr2={:#x} pid={}\n",
-            context.rip,
-            fault_address,
-            fault_pid
+            context.rip, fault_address, fault_pid
         ));
         fatal_kernel_error("recovery observed an unexpected userspace page fault");
     }
@@ -835,6 +907,7 @@ pub(crate) fn handle_recovery_page_fault(context: &InterruptContext) -> ! {
     if fault_address != service.probe_address {
         fatal_kernel_error("recovery faulted at an unexpected virtual address");
     }
+    kernel_log_line("[TEST] crash-service injecting fault");
     kernel_log_fmt(format_args!("[PROC] fault pid={}\n", service.pid));
     let allocator = match recovery_allocator() {
         Ok(allocator) => allocator,
@@ -849,10 +922,7 @@ pub(crate) fn handle_recovery_page_fault(context: &InterruptContext) -> ! {
         Ok(teardown) => teardown,
         Err(message) => fatal_kernel_error(message),
     };
-    kernel_log_fmt(format_args!(
-        "[PROC] teardown pid={} resources=0\n",
-        service.pid
-    ));
+    state.last_faulted_service_pid = service.pid;
     state.service_process = None;
     state.stage = RecoveryStage::Faulted;
     publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = kernel_ticks() + 1);

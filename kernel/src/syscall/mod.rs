@@ -79,8 +79,6 @@ use crate::selftest::m3_syscall::SYSCALL_TEST_REQUIRED_CALLS;
 use crate::selftest::m4_recovery::observe_recovery_supervisor_line;
 #[cfg(feature = "m4-recovery-self-test")]
 use crate::selftest::m4_recovery::recovery_complete_and_exit;
-#[cfg(feature = "m4-recovery-self-test")]
-use crate::selftest::m4_recovery::RECOVERY_BOOTSTRAP;
 #[cfg(feature = "m4-supervisor-self-test")]
 use crate::selftest::m4_supervisor::observe_supervisor_console_line;
 #[cfg(feature = "m3-syscall-self-test")]
@@ -107,7 +105,10 @@ use crate::syscall::validation::validate_sysret_selector_triplet;
     feature = "m4-recovery-self-test"
 ))]
 use clean_slate_service_lifecycle::LifecycleMessage;
-#[cfg(feature = "m4-recovery-self-test")]
+#[cfg(any(
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m4-recovery-self-test"
+))]
 use clean_slate_service_lifecycle::ServiceId;
 use clean_slate_service_lifecycle::LIFECYCLE_WIRE_MAX_BYTES;
 use core::ptr;
@@ -380,24 +381,43 @@ fn handle_syscall_lifecycle_poll(frame: &mut SyscallContext) {
         frame.rax = SYSCALL_EINVAL;
         return;
     }
-    let _caller = match current_syscall_caller_pid() {
+    let caller_pid = match current_syscall_caller_pid() {
         Ok(pid) => pid,
         Err(_) => {
             frame.rax = SYSCALL_EACCES;
             return;
         }
     };
+    #[cfg(feature = "m4-recovery-self-test")]
+    {
+        use crate::selftest::m4_recovery::take_recovery_gen2_ready_poll;
+        if let Some(event) = take_recovery_gen2_ready_poll(service, caller_pid) {
+            let encoded = LifecycleMessage::LifecycleEvent(event).encode();
+            unsafe {
+                ptr::copy_nonoverlapping(encoded.as_ptr(), frame.r10 as *mut u8, encoded.len());
+            }
+            frame.rax = encoded.len() as u64;
+            return;
+        }
+    }
     let controller = unsafe { service_lifecycle_controller_mut() };
-    match controller.poll_pending_event(service) {
-        Ok(Some(event)) => {
+    let event = match controller.poll_pending_event(service) {
+        Ok(Some(event)) => Some(event),
+        Ok(None) => None,
+        Err(error) => {
+            frame.rax = lifecycle_control_syscall_error(error);
+            return;
+        }
+    };
+    match event {
+        Some(event) => {
             let encoded = LifecycleMessage::LifecycleEvent(event).encode();
             unsafe {
                 ptr::copy_nonoverlapping(encoded.as_ptr(), frame.r10 as *mut u8, encoded.len());
             }
             frame.rax = encoded.len() as u64;
         }
-        Ok(None) => frame.rax = 0,
-        Err(error) => frame.rax = lifecycle_control_syscall_error(error),
+        None => frame.rax = 0,
     }
 }
 
@@ -455,7 +475,10 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
         SYSCALL_NR_FINISH => {
             use crate::selftest::m4_recovery::publish_recovery_bootstrap;
             publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = kernel_ticks());
-            recovery_complete_and_exit();
+            use crate::selftest::m4_recovery::recovery_acceptance_complete;
+            if recovery_acceptance_complete() {
+                recovery_complete_and_exit();
+            }
             frame.rax = 0;
         }
         SYSCALL_NR_IPC_SEND => handle_syscall_ipc_send(frame),

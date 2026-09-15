@@ -24,7 +24,7 @@ use clean_slate_service_lifecycle::TransitionError;
 use clean_slate_service_lifecycle::TransitionInput;
 
 const SERVICE_REGISTRY_CAPACITY: usize = 4;
-const SERVICE_PENDING_EVENTS: usize = 8;
+const SERVICE_PENDING_EVENTS: usize = 16;
 const SERVICE_TERMINATE_STATUS: u64 = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +118,13 @@ impl ServiceLifecycleController {
         self.pending[self.pending_len] = Some(event);
         self.pending_len += 1;
         Ok(())
+    }
+
+    pub(crate) fn replay_pending_lifecycle_event(
+        &mut self,
+        event: LifecycleEvent,
+    ) -> Result<(), LifecycleControlError> {
+        self.push_pending(event)
     }
 
     pub(crate) fn poll_pending_event(
@@ -334,15 +341,14 @@ impl ServiceLifecycleController {
                 ));
             }
         } else {
-            launch_builtin_service(allocator, kernel_stack_top, scheduler_slot, service_id).map_err(
-                |message| {
+            launch_builtin_service(allocator, kernel_stack_top, scheduler_slot, service_id)
+                .map_err(|message| {
                     kernel_log_fmt(format_args!(
                         "[FAIL] builtin service spawn service={} slot={} err={message}\n",
                         service_id.0, scheduler_slot
                     ));
                     LifecycleControlError::SpawnFailed(message)
-                },
-            )?
+                })?
         };
         let instance = ServiceInstanceId::new(
             service_id,

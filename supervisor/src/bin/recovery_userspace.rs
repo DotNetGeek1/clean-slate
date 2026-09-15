@@ -4,8 +4,7 @@
 #![no_main]
 
 use clean_slate_service_lifecycle::{
-    single_dependency, InstanceGeneration, LifecycleEvent, LifecycleEventKind, LivenessConfig,
-    ProcessId, ServiceId, ServiceInstanceId, ServiceLifecycleState,
+    single_dependency, LivenessConfig, ProcessId, ServiceId, ServiceLifecycleState,
 };
 use clean_slate_supervisor::{
     BoundedRestart, ConvergedSupervisor, ConvergedSupervisorError, DiagnosticSink, RestartPolicy,
@@ -15,6 +14,7 @@ use clean_slate_supervisor::{
 /// After the kernel's max recovery code mapping (12 pages) at `USER_TEST_CODE_ADDRESS`.
 const BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0000_C000;
 const SYSCALL_NR_IPC_SEND: u64 = 3;
+const SYSCALL_NR_FINISH: u64 = 2;
 /// Logical id for the built-in dependency fixture (must match kernel declaration).
 const DEPENDENCY_SERVICE_ID: ServiceId = ServiceId(1);
 /// Supervised crash fixture (`CRASH_SERVICE_ID` in service-fixtures).
@@ -73,19 +73,10 @@ fn syscall_yield() -> Result<(), ()> {
     Ok(())
 }
 
-fn instance(service: u32, gen: u32, pid: u64) -> ServiceInstanceId {
-    ServiceInstanceId::new(
-        ServiceId(service),
-        InstanceGeneration(gen),
-        ProcessId(pid),
-        clean_slate_service_lifecycle::DomainId(pid),
-    )
-}
-
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     let config = bootstrap();
-    let mut control = SyscallLifecycleControl::<16>::new(config.lifecycle_capability);
+    let control = SyscallLifecycleControl::<16>::new(config.lifecycle_capability);
     let mut supervisor = ConvergedSupervisor::<_, _, 4>::new(
         ProcessId(config.self_pid),
         control,
@@ -165,6 +156,8 @@ pub extern "C" fn _start() -> ! {
         if syscall_yield().is_err() {
             fail();
         }
+        drain_service(&mut supervisor, CRASH_SERVICE_ID);
+        drain_service(&mut supervisor, DEPENDENCY_SERVICE_ID);
     }
 
     ipc_send(
@@ -174,7 +167,11 @@ pub extern "C" fn _start() -> ! {
     .ok();
     ipc_send(config.console_capability, b"[M4  ] PASS\n").ok();
     unsafe {
-        core::arch::asm!("int 0x80", options(noreturn));
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYSCALL_NR_FINISH,
+            options(noreturn),
+        );
     }
 }
 
@@ -182,7 +179,7 @@ fn drain_service(
     supervisor: &mut ConvergedSupervisor<SyscallLifecycleControl<16>, IpcConsoleSink, 4>,
     service: ServiceId,
 ) {
-    for _ in 0..8 {
+    for _ in 0..32 {
         let event = match supervisor.poll_lifecycle_event(service) {
             Ok(event) => event,
             Err(_) => break,

@@ -79,6 +79,7 @@ pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SI
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m3-ipc-self-test",
+    feature = "m4-service-lifecycle-self-test",
     feature = "m4-supervisor-self-test",
     feature = "m4-recovery-self-test"
 ))]
