@@ -2,7 +2,8 @@
 //!
 //! Shared, host-testable contract for the userspace supervisor, kernel lifecycle
 //! control path, and supervised services. Policy (restart backoff, dependency
-//! evaluation, health timeouts) stays out of this layer.
+//! evaluation, restart backoff) stays out of this layer. M4.4 health timeout
+//! evaluation lives in `health_tracker` without restart policy.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -10,17 +11,27 @@ mod control;
 mod dependency;
 mod diagnostics;
 mod health;
+mod health_tracker;
 mod identity;
 mod state;
+mod time;
 mod tracker;
 mod wire;
 
 pub use control::{ControlRequest, ControlRequestKind};
 pub use dependency::{DependencyEdge, DependencyMetadata, MAX_INLINE_DEPENDENCIES};
-pub use diagnostics::{format_declared_line, format_instance_line};
+pub use diagnostics::{
+    format_declared_line, format_health_healthy_line, format_health_unhealthy_line,
+    format_instance_line,
+};
 pub use health::{HealthReport, HealthStatus};
+pub use health_tracker::{
+    HealthFailureEvent, HealthFailureReason, HealthReportOutcome, HealthTrackerError,
+    LifecycleFailureOutcome, ServiceHealthRecord, ServiceHealthTracker,
+};
 pub use identity::{DomainId, InstanceGeneration, ProcessId, ServiceId, ServiceInstanceId};
 pub use state::{LifecycleEvent, LifecycleEventKind, ServiceLifecycleState, TransitionError};
+pub use time::{ticks_add, ticks_reached, LivenessConfig, MonotonicTicks};
 pub use tracker::{ServiceLifecycleRecord, ServiceLifecycleTracker};
 pub use wire::{
     DecodeError, LifecycleMessage, LifecycleMessageKind, LIFECYCLE_PROTOCOL_VERSION,

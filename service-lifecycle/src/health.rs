@@ -1,4 +1,4 @@
-//! Health/liveness report envelope (detection policy lives in M4.4).
+//! Health/liveness report envelope (supervisor detection in `health_tracker`).
 
 use crate::identity::{InstanceGeneration, ServiceId};
 

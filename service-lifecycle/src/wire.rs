@@ -262,9 +262,7 @@ mod tests {
             LifecycleEventKind::Exited,
         );
         let encoded = LifecycleMessage::LifecycleEvent(event).encode();
-        let decoded = LifecycleMessage::decode(&encoded)
-            .expect("decode")
-            .0;
+        let decoded = LifecycleMessage::decode(&encoded).expect("decode").0;
         let LifecycleMessage::LifecycleEvent(decoded) = decoded else {
             panic!("expected lifecycle event");
         };
