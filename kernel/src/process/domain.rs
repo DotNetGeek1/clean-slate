@@ -60,49 +60,39 @@ pub(crate) fn teardown_current_process(
     status: u64,
     faulted: bool,
 ) -> Result<DomainTeardownResult, &'static str> {
-    let (_thread_id, process_id, retired_siblings) = without_interrupts(|| unsafe {
+    let process_id = without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
-        let current = scheduler.current_thread_descriptor()?;
+        let current_index = scheduler
+            .current_thread
+            .ok_or("process teardown required a current scheduler thread")?;
+        let current = scheduler.threads[current_index];
         if current.kind != ThreadKind::User {
             return Err("process teardown required a userspace current thread");
         }
-        let thread_id = scheduler.mark_current_thread_exiting()?;
         let retired_siblings =
-            scheduler.retire_sibling_threads_for_process(current.owner_process_id, thread_id);
-        Ok::<(u64, u64, usize), &'static str>((
-            thread_id,
-            current.owner_process_id,
-            retired_siblings,
-        ))
-    })?;
-
-    let should_destroy = {
-        let process_record = unsafe {
-            process_registry_mut()
-                .get_mut(process_id)
-                .ok_or("teardown process was missing from registry")?
-        };
-        let mut current_thread = without_interrupts(|| {
-            with_scheduler(|scheduler| scheduler.current_thread_descriptor())
-        })?;
-        let _ = begin_thread_exit(process_record, &mut current_thread, status, faulted)?;
+            scheduler.retire_sibling_threads_for_process(current.owner_process_id, current.id);
+        let process_record = process_registry_mut()
+            .get_mut(current.owner_process_id)
+            .ok_or("teardown process was missing from registry")?;
+        let current_thread = &mut scheduler.threads[current_index];
+        let should_destroy = begin_thread_exit(process_record, current_thread, status, faulted)?;
         let retired_siblings_u16 = u16::try_from(retired_siblings)
             .map_err(|_| "retired sibling thread count overflowed process accounting")?;
         if process_record.live_threads < retired_siblings_u16 {
             return Err("process thread accounting underflow during teardown");
         }
         process_record.live_threads -= retired_siblings_u16;
-        if process_record.live_threads == 0 {
+        if process_record.live_threads == 0 && !should_destroy {
             finalize_process_exit(process_record, status)?;
         }
-        process_record.live_threads == 0
-    };
+        if process_record.live_threads != 0 {
+            return Err("process teardown left live threads after sibling retirement");
+        }
+        Ok::<u64, &'static str>(current.owner_process_id)
+    })?;
 
     let next_stack_pointer =
         without_interrupts(|| with_scheduler(|scheduler| scheduler.finish_current_thread()))?;
-    if !should_destroy {
-        return Err("process teardown left live threads after sibling retirement");
-    }
     let released_resources = resource_snapshot(process_id)?;
     activate_address_space_root(kernel_root_frame);
     let released_ipc: IpcProcessResources =
@@ -110,7 +100,10 @@ pub(crate) fn teardown_current_process(
     let reaped_threads: ThreadProcessResources = without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
         let resources = scheduler.resources_for_process(process_id);
-        let _ = scheduler.reap_threads_for_process(process_id)?;
+        let reaped_threads = scheduler.reap_threads_for_process(process_id)?;
+        if reaped_threads != resources.threads {
+            return Err("scheduler thread cleanup count diverged from teardown snapshot");
+        }
         Ok::<ThreadProcessResources, &'static str>(resources)
     })?;
     {
@@ -128,15 +121,16 @@ pub(crate) fn teardown_current_process(
         reap_process_record(process_record)?;
     }
     unsafe { process_registry_mut().release_reaped(process_id)? };
-    debug_assert_eq!(
-        released_ipc.owned_endpoints,
-        released_resources.ipc_endpoints
-    );
-    debug_assert_eq!(
-        released_ipc.held_capabilities,
-        released_resources.ipc_handles
-    );
-    debug_assert_eq!(reaped_threads.threads, released_resources.threads);
+    if released_ipc.owned_endpoints != released_resources.ipc_endpoints
+        || released_ipc.held_capabilities != released_resources.ipc_handles
+    {
+        return Err("IPC teardown counts diverged from the recorded process snapshot");
+    }
+    if reaped_threads.threads != released_resources.threads
+        || reaped_threads.kernel_stacks != released_resources.kernel_stacks
+    {
+        return Err("scheduler teardown counts diverged from the recorded process snapshot");
+    }
     Ok(DomainTeardownResult {
         process_id,
         exit_status: status,

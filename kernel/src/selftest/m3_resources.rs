@@ -120,6 +120,8 @@ struct UserspaceResourcesState {
     normal_cycles_completed: usize,
     fault_cycle_started: bool,
     total_created_processes: u64,
+    first_pid: u64,
+    first_tid: u64,
     last_pid: u64,
     last_tid: u64,
     stage: ResourceScenarioStage,
@@ -401,6 +403,10 @@ fn launch_next_scenario() -> Result<u64, &'static str> {
             VirtAddr::from_ptr(run as *const ()).as_u64(),
         )?;
         state.total_created_processes += 1;
+        if state.first_pid == 0 {
+            state.first_pid = process.process_id;
+            state.first_tid = process.thread_id;
+        }
         state.last_pid = process.process_id;
         state.last_tid = process.thread_id;
         state.stage = ResourceScenarioStage::NormalExit;
@@ -428,6 +434,10 @@ fn launch_next_scenario() -> Result<u64, &'static str> {
             VirtAddr::from_ptr(run as *const ()).as_u64(),
         )?;
         state.total_created_processes += 2;
+        if state.first_pid == 0 {
+            state.first_pid = fault_process.process_id;
+            state.first_tid = fault_process.thread_id;
+        }
         state.last_pid = companion_process.process_id;
         state.last_tid = companion_process.thread_id;
         state.fault_cycle_started = true;
@@ -445,8 +455,16 @@ fn launch_next_scenario() -> Result<u64, &'static str> {
     }
 
     if state.total_created_processes != TOTAL_EXPECTED_PROCESS_CREATIONS
-        || state.last_pid != TOTAL_EXPECTED_PROCESS_CREATIONS
-        || state.last_tid != TOTAL_EXPECTED_PROCESS_CREATIONS
+        || state
+            .last_pid
+            .saturating_sub(state.first_pid)
+            .saturating_add(1)
+            != TOTAL_EXPECTED_PROCESS_CREATIONS
+        || state
+            .last_tid
+            .saturating_sub(state.first_tid)
+            .saturating_add(1)
+            != TOTAL_EXPECTED_PROCESS_CREATIONS
     {
         return Err("resources test did not complete the required monotonic create/reap cycles");
     }
@@ -477,6 +495,8 @@ pub(crate) fn start_userspace_resources_self_test(allocator: PageAllocator) -> !
             normal_cycles_completed: 0,
             fault_cycle_started: false,
             total_created_processes: 0,
+            first_pid: 0,
+            first_tid: 0,
             last_pid: 0,
             last_tid: 0,
             stage: ResourceScenarioStage::NormalExit,
