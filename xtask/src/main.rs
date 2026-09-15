@@ -99,6 +99,38 @@ const M3_RESOURCES_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[PROC] teardown pid=1 resources=0",
     "[M3.6] PASS",
 ];
+/// Merged M3.2 + M3.4 markers in the order the `m3-address-space-self-test`
+/// boot actually emits them, so the aggregate gate proves isolation and
+/// fault/lifecycle behaviour from a single boot.
+const M3_ADDRESS_SPACE_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 13] = [
+    "[PROC] created pid=1 tid=1",
+    "[MM  ] process address space created pid=1",
+    "[PROC] created pid=2 tid=2",
+    "[MM  ] process address space created pid=2",
+    "[MM  ] address-space switch OK",
+    "[SEC ] kernel-memory read denied",
+    "[PROC] fault pid=1",
+    "[PROC] pid=1 exited status=1",
+    "[SEC ] cross-process read denied",
+    "[PROC] pid=2 exited status=0",
+    "[MM  ] address-space teardown OK",
+    "[M3.2] PASS",
+    "[M3.4] PASS",
+];
+/// Ordered constituent boots of the M3 milestone gate (`cargo xtask test-m3`).
+/// Order is data, not prose: the aggregate runs these top to bottom and aborts
+/// on the first failure.
+type M3MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
+const M3_MILESTONE_STEPS: [M3MilestoneStep; 5] = [
+    ("test-m3-entry", run_m3_entry_acceptance),
+    ("test-m3-syscall", run_m3_syscall_acceptance),
+    (
+        "test-m3-address-space+lifecycle",
+        run_m3_address_space_lifecycle_acceptance,
+    ),
+    ("test-m3-ipc", run_m3_ipc_acceptance),
+    ("test-m3-resources", run_m3_resources_acceptance),
+];
 
 fn main() -> ExitCode {
     match run(env::args_os()) {
@@ -118,6 +150,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::Run => run_vm(),
         ParsedCommand::TestM1 => run_m1_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
+        ParsedCommand::TestM3 => run_m3_acceptance(),
         ParsedCommand::TestM3AddressSpace => run_m3_address_space_acceptance(),
         ParsedCommand::TestM3Entry => run_m3_entry_acceptance(),
         ParsedCommand::TestM3Syscall => run_m3_syscall_acceptance(),
@@ -244,6 +277,31 @@ fn run_m3_resources_acceptance() -> Result<(), XtaskError> {
             M3_RESOURCES_ACCEPTANCE_TIMEOUT,
         )),
     )
+}
+
+fn run_m3_address_space_lifecycle_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m3-address-space-self-test"],
+        Some((
+            &M3_ADDRESS_SPACE_LIFECYCLE_ACCEPTANCE_MARKERS,
+            M3_ADDRESS_SPACE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+/// M3 milestone gate: runs every constituent M3 acceptance boot in
+/// [`M3_MILESTONE_STEPS`] order. The first failure propagates and no PASS is
+/// printed; `[M3  ] PASS` is emitted host-side only after all steps succeed.
+fn run_m3_acceptance() -> Result<(), XtaskError> {
+    let total = M3_MILESTONE_STEPS.len();
+    for (index, (name, step)) in M3_MILESTONE_STEPS.iter().enumerate() {
+        println!("[M3  ] step {}/{total} {name}", index + 1);
+        step()?;
+    }
+    println!("[M3  ] PASS");
+    Ok(())
 }
 
 fn run_vm_inner(
@@ -611,6 +669,7 @@ fn print_help() {
     println!("  run          Build kernel and launch QEMU for normal development boot");
     println!("  test-m1      Build the M1 self-test kernel, run QEMU, and validate PASS markers");
     println!("  test-m2      Build the M2 self-test kernel, run QEMU, and validate PASS markers");
+    println!("  test-m3      M3 milestone gate: run all M3 acceptance boots in order, print [M3  ] PASS only if all pass");
     println!("  test-m3-address-space Build the M3.2 address-space kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-entry Build the M3.1 userspace-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-syscall Build the M3.3 syscall-entry kernel, run QEMU, and validate PASS markers");
@@ -634,6 +693,7 @@ enum ParsedCommand {
     Run,
     TestM1,
     TestM2,
+    TestM3,
     TestM3AddressSpace,
     TestM3Entry,
     TestM3Syscall,
@@ -653,6 +713,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "run" => ParsedCommand::Run,
         Some(cmd) if cmd == "test-m1" => ParsedCommand::TestM1,
         Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,
+        Some(cmd) if cmd == "test-m3" => ParsedCommand::TestM3,
         Some(cmd) if cmd == "test-m3-address-space" => ParsedCommand::TestM3AddressSpace,
         Some(cmd) if cmd == "test-m3-entry" => ParsedCommand::TestM3Entry,
         Some(cmd) if cmd == "test-m3-syscall" => ParsedCommand::TestM3Syscall,
@@ -754,6 +815,10 @@ mod tests {
         assert_eq!(
             parse_command(Some("test-m2".as_ref())),
             ParsedCommand::TestM2
+        );
+        assert_eq!(
+            parse_command(Some("test-m3".as_ref())),
+            ParsedCommand::TestM3
         );
         assert_eq!(
             parse_command(Some("test-m3-address-space".as_ref())),
@@ -879,5 +944,67 @@ mod tests {
 [TIME] ticks=4\n\
 [M2  ] PASS\n"
         ));
+    }
+
+    const M3_ADDRESS_SPACE_LIFECYCLE_TRANSCRIPT: &str = "\
+[PROC] created pid=1 tid=1\n\
+[MM  ] process address space created pid=1\n\
+[PROC] created pid=2 tid=2\n\
+[MM  ] process address space created pid=2\n\
+[MM  ] address-space switch OK\n\
+[SEC ] kernel-memory read denied\n\
+[PROC] fault pid=1\n\
+[PROC] pid=1 exited status=1\n\
+[SEC ] cross-process read denied\n\
+[PROC] pid=2 exited status=0\n\
+[MM  ] address-space teardown OK\n\
+[M3.2] PASS\n\
+[M3.4] PASS\n";
+
+    #[test]
+    fn merged_address_space_lifecycle_markers_accept_real_transcript() {
+        assert!(validate_output_markers(
+            M3_ADDRESS_SPACE_LIFECYCLE_TRANSCRIPT,
+            &M3_ADDRESS_SPACE_LIFECYCLE_ACCEPTANCE_MARKERS
+        )
+        .is_ok());
+        // The merged list must remain a superset of both individual lists.
+        assert!(validate_output_markers(
+            M3_ADDRESS_SPACE_LIFECYCLE_TRANSCRIPT,
+            &M3_ADDRESS_SPACE_ACCEPTANCE_MARKERS
+        )
+        .is_ok());
+        assert!(validate_output_markers(
+            M3_ADDRESS_SPACE_LIFECYCLE_TRANSCRIPT,
+            &M3_LIFECYCLE_ACCEPTANCE_MARKERS
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn merged_address_space_lifecycle_markers_reject_missing_lifecycle_pass() {
+        let missing_m3_4 = M3_ADDRESS_SPACE_LIFECYCLE_TRANSCRIPT.replace("[M3.4] PASS\n", "");
+        match validate_output_markers(
+            &missing_m3_4,
+            &M3_ADDRESS_SPACE_LIFECYCLE_ACCEPTANCE_MARKERS,
+        ) {
+            Err(XtaskError::MissingMarker(marker)) => assert_eq!(marker, "[M3.4] PASS"),
+            other => panic!("expected missing [M3.4] PASS marker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn m3_milestone_steps_have_deterministic_order() {
+        let names: Vec<&str> = M3_MILESTONE_STEPS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "test-m3-entry",
+                "test-m3-syscall",
+                "test-m3-address-space+lifecycle",
+                "test-m3-ipc",
+                "test-m3-resources",
+            ]
+        );
     }
 }

@@ -4,13 +4,22 @@
 
 .DESCRIPTION
     Sets OVMF_CODE / OVMF_VARS when they are not already in the environment,
-    then runs one or more `cargo xtask` acceptance tests. By default the full
-    suite runs. Pass test names (or short aliases) to target a subset.
+    then runs one or more `cargo xtask` acceptance tests. By default the
+    milestone gates run (test-m1, test-m2, test-m3); the individual test-m3-*
+    boots are constituents of the test-m3 aggregate and are skipped unless
+    named explicitly or -Exhaustive is given. Pass test names (or short
+    aliases) to target a subset.
 
 .PARAMETER Test
     One or more tests to run. Accepts full xtask names or short aliases:
-      m1, m2, entry / m3.1, address-space / m3.2, syscall / m3.3,
-      lifecycle / m3.4, ipc / m3.5
+      m1, m2, m3 / m3.7 (aggregate),
+      entry / m3.1, address-space / m3.2, syscall / m3.3,
+      lifecycle / m3.4, ipc / m3.5, resources / m3.6
+
+.PARAMETER Exhaustive
+    Run every known test (milestone gates plus each individual M3
+    constituent) instead of the default suite. Ignored when explicit test
+    names are given.
 
 .PARAMETER List
     Print the available tests and exit.
@@ -32,6 +41,12 @@
 
 .EXAMPLE
     .\scripts\run-tests.ps1 -Test lifecycle, ipc
+
+.EXAMPLE
+    .\scripts\run-tests.ps1 m3
+
+.EXAMPLE
+    .\scripts\run-tests.ps1 -Exhaustive
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(
@@ -42,6 +57,8 @@ param(
     [string[]]$RemainingTests,
 
     [switch]$List,
+
+    [switch]$Exhaustive,
 
     [string]$OvmfCode,
 
@@ -61,23 +78,44 @@ if (-not $ReportPath) {
 $DefaultOvmfCode = "C:\Program Files\qemu\share\edk2-x86_64-code.fd"
 $DefaultOvmfVars = "C:\Program Files\qemu\share\edk2-i386-vars.fd"
 
+# Role controls suite membership:
+#   Milestone   - runs in the default suite.
+#   Aggregate   - runs in the default suite; orchestrates the Constituent entries.
+#   Constituent - debugging workflow for one boundary; only runs when named
+#                 explicitly or with -Exhaustive.
 $AllTests = [ordered]@{
-    "test-m1"               = @{ Aliases = @("m1"); Description = "M1 memory acceptance" }
-    "test-m2"               = @{ Aliases = @("m2"); Description = "M2 interrupt/timer/scheduler acceptance" }
-    "test-m3-entry"         = @{ Aliases = @("m3-entry", "entry", "m3.1"); Description = "M3.1 userspace-entry acceptance" }
-    "test-m3-address-space" = @{ Aliases = @("m3-address-space", "address-space", "m3.2"); Description = "M3.2 address-space isolation acceptance" }
-    "test-m3-syscall"       = @{ Aliases = @("m3-syscall", "syscall", "m3.3"); Description = "M3.3 native-syscall acceptance" }
-    "test-m3-lifecycle"     = @{ Aliases = @("m3-lifecycle", "lifecycle", "m3.4"); Description = "M3.4 process/thread lifecycle acceptance" }
-    "test-m3-ipc"           = @{ Aliases = @("m3-ipc", "ipc", "m3.5"); Description = "M3.5 capability-authorized IPC acceptance" }
+    "test-m1"               = @{ Aliases = @("m1"); Description = "M1 memory acceptance"; Role = "Milestone" }
+    "test-m2"               = @{ Aliases = @("m2"); Description = "M2 interrupt/timer/scheduler acceptance"; Role = "Milestone" }
+    "test-m3"               = @{ Aliases = @("m3", "m3.7"); Description = "M3 milestone gate (aggregate of all M3 acceptance boots)"; Role = "Aggregate" }
+    "test-m3-entry"         = @{ Aliases = @("m3-entry", "entry", "m3.1"); Description = "M3.1 userspace-entry acceptance"; Role = "Constituent" }
+    "test-m3-address-space" = @{ Aliases = @("m3-address-space", "address-space", "m3.2"); Description = "M3.2 address-space isolation acceptance"; Role = "Constituent" }
+    "test-m3-syscall"       = @{ Aliases = @("m3-syscall", "syscall", "m3.3"); Description = "M3.3 native-syscall acceptance"; Role = "Constituent" }
+    "test-m3-lifecycle"     = @{ Aliases = @("m3-lifecycle", "lifecycle", "m3.4"); Description = "M3.4 process/thread lifecycle acceptance"; Role = "Constituent" }
+    "test-m3-ipc"           = @{ Aliases = @("m3-ipc", "ipc", "m3.5"); Description = "M3.5 capability-authorized IPC acceptance"; Role = "Constituent" }
+    "test-m3-resources"     = @{ Aliases = @("m3-resources", "resources", "m3.6"); Description = "M3.6 domain resource accounting/teardown acceptance"; Role = "Constituent" }
+}
+
+function Get-DefaultSuite {
+    return @($AllTests.Keys | Where-Object { $AllTests[$_].Role -ne "Constituent" })
 }
 
 function Show-TestList {
     Write-Host "Available tests:"
     foreach ($name in $AllTests.Keys) {
-        $aliases = ($AllTests[$name].Aliases -join ", ")
-        Write-Host ("  {0,-24} {1}" -f $name, $AllTests[$name].Description)
-        Write-Host ("  {0,-24} aliases: {1}" -f "", $aliases)
+        $entry = $AllTests[$name]
+        $aliases = ($entry.Aliases -join ", ")
+        $tag = switch ($entry.Role) {
+            "Aggregate"   { "[aggregate]  " }
+            "Constituent" { "[constituent]" }
+            default       { "[milestone]  " }
+        }
+        Write-Host ("  {0,-24} {1} {2}" -f $name, $tag, $entry.Description)
+        Write-Host ("  {0,-24} {1} aliases: {2}" -f "", "", $aliases)
     }
+    Write-Host ""
+    Write-Host "Default suite:  $((Get-DefaultSuite) -join ', ')"
+    Write-Host "-Exhaustive:    $(@($AllTests.Keys) -join ', ')"
+    Write-Host "Constituents are the per-boundary debugging workflows behind the test-m3 aggregate."
 }
 
 function Resolve-TestName {
@@ -233,8 +271,11 @@ if ($requested.Count -gt 0) {
     }
     $selected = @($selected | Select-Object -Unique)
 }
-else {
+elseif ($Exhaustive) {
     $selected = @($AllTests.Keys)
+}
+else {
+    $selected = Get-DefaultSuite
 }
 
 Set-OvmfEnvironment

@@ -69,6 +69,24 @@ The shared acceptance runner treats the ordered serial PASS markers as authorita
 
 M2 intentionally treats the LAPIC timer as an uncalibrated periodic tick source for now. The contract is in ticks, not Hertz: the kernel reports the divide configuration and initial count, exposes a monotonic `[TIME] ticks=<n>` counter, and the standalone timer acceptance requires at least the documented minimum number of ticks within the bounded test window.
 
+For the aggregate M3 milestone gate:
+
+```bash
+cargo xtask test-m3
+```
+
+This command runs five bounded headless QEMU boots in a fixed order, each with the same 20-second timeout and ordered serial-marker validation as its standalone counterpart:
+
+1. `m3-entry-self-test`, validated against the M3.1 markers (CPL3 entry and privileged-instruction denial);
+2. `m3-entry` plus `m3-syscall` self-test, validated against the M3.3 markers (`syscall/sysretq` round-trip);
+3. `m3-address-space-self-test` once, validated against a merged M3.2 and M3.4 marker list (kernel-memory read denied, cross-process read denied, faulting `pid=1` terminated while `pid=2` exits cleanly, address-space teardown OK, then `[M3.2] PASS` followed by `[M3.4] PASS`);
+4. `m3-ipc-self-test`, validated against the M3.5 markers (granted endpoint send OK, unauthorized send denied);
+5. `m3-resources-self-test`, validated against the M3.6 markers (`teardown ... resources=0` and `[M3.6] PASS`).
+
+Step 3 deliberately boots the address-space self-test only once: that single boot already proves both isolation (M3.2) and fault attribution/lifecycle (M3.4), so the gate reuses it rather than booting the same image twice. The host prints `[M3  ] step i/5 <name>` before each boot and `[M3  ] PASS` only after all five succeed. Any build failure, QEMU failure, missing or out-of-order marker, or timeout aborts the run with an error and no `[M3  ] PASS` is printed. Guest-emitted milestone markers remain authoritative for each boot; the host marker is the aggregate result. `cargo xtask run` is unchanged.
+
+The individual M3.1–M3.6 commands below are the per-boundary debugging workflows: use them when the gate reports a failing step or when a specific boundary regresses.
+
 For the bounded M3.1 userspace-entry acceptance path:
 
 ```bash
@@ -131,6 +149,8 @@ This command builds the kernel with the dedicated M3.6 resource self-test enable
 4. repeated create/run/exit plus create/run/fault cycles that exceed the fixed process-table lifetime capacity before `[M3.6] PASS`.
 
 If the M3.6 run fails, start from the last emitted `[RES ]` or `[PROC]` marker to see which phase leaked or failed to reap. For deeper debugging, rerun with `cargo xtask run-gdb` and break in `process::domain::teardown_current_process`, `ipc::IpcEndpointTable::teardown_resources_for_pid`, or `sched::Scheduler::reap_threads_for_process`.
+
+On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, which covers every milestone without repeating the boots the M3 gate already performs. `-Exhaustive` additionally runs every individual `test-m3-*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
 
 To launch paused for debugger attach:
 
