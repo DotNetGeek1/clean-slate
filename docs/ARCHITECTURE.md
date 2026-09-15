@@ -163,6 +163,21 @@ Examples of repair actions:
 - test a candidate repair in a disposable cloned environment;
 - promote a repair only after health checks pass.
 
+## M4 supervisor/recovery prototype
+
+The first M4 prototype can stay intentionally narrow:
+
+- one userspace supervisor process owns restart authority for one logical
+  built-in test service;
+- logical service identity is stable across restarts and distinct from the
+  per-instance PID/process identity;
+- the service reports explicit lifecycle states (`Starting`, `Running`,
+  `Failed`, `Restarting`) through a versioned protocol surface;
+- a faulted instance is torn down through the existing M3 teardown path before a
+  replacement instance is accepted as running;
+- a bounded restart budget prevents an immediate crash loop from spinning
+  forever.
+
 ## M1 virtual memory layout
 
 M1 keeps paging and physical-memory policy inside the kernel. The initial implementation intentionally stays conservative:

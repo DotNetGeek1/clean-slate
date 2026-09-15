@@ -118,7 +118,8 @@ pub(crate) fn prepare_current_scheduler_thread_dispatch() -> Result<(), &'static
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m3-ipc-self-test"
+    feature = "m3-ipc-self-test",
+    feature = "m4-self-test"
 ))]
 pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'static str> {
     let next_stack_pointer = without_interrupts(|| unsafe {
@@ -131,7 +132,8 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m3-ipc-self-test"
+    feature = "m3-ipc-self-test",
+    feature = "m4-self-test"
 ))]
 pub(crate) fn start_current_scheduler_thread() -> Result<u64, &'static str> {
     let stack_pointer = without_interrupts(|| with_scheduler(|scheduler| scheduler.start()))?;

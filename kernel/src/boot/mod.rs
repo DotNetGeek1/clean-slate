@@ -21,7 +21,8 @@ use crate::diagnostics::serial::serial_write_line;
     feature = "m2-double-fault-self-test",
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m4-self-test"
 )))]
 use crate::interrupt::timer::initialize_timer;
 #[cfg(not(any(
@@ -29,9 +30,12 @@ use crate::interrupt::timer::initialize_timer;
     feature = "m2-double-fault-self-test",
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m4-self-test"
 )))]
 use crate::interrupt::timer::report_timer_contract;
+#[cfg(feature = "m4-self-test")]
+use crate::interrupt::timer::{initialize_timer, report_timer_contract};
 use crate::mm::address_space::set_kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
@@ -74,7 +78,8 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
 #[cfg(all(
     feature = "m3-entry-self-test",
     not(feature = "m3-ipc-self-test"),
-    not(feature = "m3-syscall-self-test")
+    not(feature = "m3-syscall-self-test"),
+    not(feature = "m4-self-test")
 ))]
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
 #[cfg(feature = "m3-ipc-self-test")]
@@ -83,6 +88,8 @@ use crate::selftest::m3_ipc::start_userspace_ipc_self_test;
 use crate::selftest::m3_resources::start_userspace_resources_self_test;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::m3_syscall::start_userspace_syscall_self_test;
+#[cfg(feature = "m4-self-test")]
+use crate::selftest::m4_supervisor::start_userspace_supervisor_self_test;
 use crate::syscall::initialize_syscall_abi;
 use ::uefi::mem::memory_map::{MemoryMap, MemoryMapMut};
 use ::uefi::Status;
@@ -180,7 +187,7 @@ fn run_inner() -> Result<(), &'static str> {
         start_timer_self_test_task()
     }
 
-    #[cfg(feature = "m3-entry-self-test")]
+    #[cfg(all(feature = "m3-entry-self-test", not(feature = "m4-self-test")))]
     {
         let mut allocator = allocator;
         #[cfg(feature = "m3-ipc-self-test")]
@@ -210,13 +217,22 @@ fn run_inner() -> Result<(), &'static str> {
         start_userspace_resources_self_test(allocator)
     }
 
+    #[cfg(feature = "m4-self-test")]
+    {
+        initialize_timer();
+        serial_write_line("[TIME] timer initialized");
+        report_timer_contract();
+        start_userspace_supervisor_self_test(allocator)
+    }
+
     #[cfg(all(
         not(feature = "m1-self-test"),
         not(feature = "m2-double-fault-self-test"),
         not(feature = "m2-timer-self-test"),
         not(feature = "m3-address-space-self-test"),
         not(feature = "m3-resources-self-test"),
-        not(feature = "m3-entry-self-test")
+        not(feature = "m3-entry-self-test"),
+        not(feature = "m4-self-test")
     ))]
     {
         initialize_scheduler()?;

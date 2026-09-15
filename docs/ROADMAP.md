@@ -85,6 +85,10 @@ service restarts
 system continues without reboot
 ```
 
+The first authoritative prototype may use a kernel-known built-in test service
+image rather than a persistent executable loader, provided the supervisor stays
+in userspace and restart authority remains explicit.
+
 ## M5 — Storage
 
 **Goal:** Persist data across a reboot in QEMU.

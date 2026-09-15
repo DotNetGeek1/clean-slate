@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Run Clean-Slate QEMU xtask acceptance tests and report failures.
 #
-# By default runs test-m1, test-m2, test-m3. Use --exhaustive for all nine
-# xtask acceptance commands. OVMF is discovered by xtask on Linux when
+# By default runs test-m1, test-m2, test-m3, test-m4. Use --exhaustive for all
+# ten xtask acceptance commands. OVMF is discovered by xtask on Linux when
 # OVMF_CODE/OVMF_VARS are unset; override with env vars or --ovmf-code/--ovmf-vars.
 set -euo pipefail
 
@@ -26,6 +26,7 @@ TEST_NAMES=(
   test-m3-lifecycle
   test-m3-ipc
   test-m3-resources
+  test-m4
 )
 
 test_role() {
@@ -53,6 +54,7 @@ test_description() {
     test-m3-lifecycle) echo "M3.4 process/thread lifecycle acceptance" ;;
     test-m3-ipc) echo "M3.5 capability-authorized IPC acceptance" ;;
     test-m3-resources) echo "M3.6 domain resource accounting/teardown acceptance" ;;
+    test-m4) echo "M4 supervisor and recovery acceptance" ;;
     *) echo "" ;;
   esac
 }
@@ -68,6 +70,7 @@ test_aliases() {
     test-m3-lifecycle) echo "m3-lifecycle lifecycle m3.4" ;;
     test-m3-ipc) echo "m3-ipc ipc m3.5" ;;
     test-m3-resources) echo "m3-resources resources m3.6" ;;
+    test-m4) echo "m4 m4.8" ;;
     *) echo "" ;;
   esac
 }
