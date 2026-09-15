@@ -117,7 +117,6 @@ pub(crate) fn prepare_current_scheduler_thread_dispatch() -> Result<(), &'static
 
 #[cfg(any(
     feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
     feature = "m3-ipc-self-test",
     feature = "m4-self-test"
 ))]

@@ -71,7 +71,6 @@ pub(crate) fn unmap_userspace_page(
 
 #[cfg(any(
     feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
     feature = "m3-entry-self-test"
 ))]
 pub(crate) fn relevant_userspace_leaf_flags(flags: PageTableFlags) -> PageTableFlags {
