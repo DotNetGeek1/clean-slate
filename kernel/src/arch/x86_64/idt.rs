@@ -10,7 +10,11 @@
 use core::arch::asm;
 use core::mem::size_of;
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m3-entry-self-test"
+))]
 use crate::arch::x86_64::asm::clean_slate_interrupt_128;
 use crate::arch::x86_64::asm::{
     clean_slate_interrupt_0, clean_slate_interrupt_1, clean_slate_interrupt_10,
@@ -28,7 +32,11 @@ use crate::arch::x86_64::asm::{
 };
 use crate::arch::x86_64::cpu::read_code_segment;
 use crate::arch::x86_64::gdt::initialize_gdt_and_tss;
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m3-entry-self-test"
+))]
 use crate::arch::x86_64::USER_TEST_VECTOR;
 use crate::arch::x86_64::{DOUBLE_FAULT_VECTOR, SPURIOUS_VECTOR};
 
@@ -59,7 +67,11 @@ impl IdtEntry {
         self.set_handler_with_privilege(handler, 0, 0);
     }
 
-    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+    #[cfg(any(
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m3-entry-self-test"
+    ))]
     fn set_user_handler(&mut self, handler: unsafe extern "C" fn()) {
         self.set_handler_with_privilege(handler, 0, 3);
     }
@@ -144,7 +156,11 @@ pub(crate) fn install_interrupt_handlers() {
         }
         IDT.entries[DOUBLE_FAULT_VECTOR]
             .set_handler_with_ist(clean_slate_interrupt_8, DOUBLE_FAULT_IST_INDEX);
-        #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+        #[cfg(any(
+            feature = "m3-address-space-self-test",
+            feature = "m3-resources-self-test",
+            feature = "m3-entry-self-test"
+        ))]
         IDT.entries[USER_TEST_VECTOR].set_user_handler(clean_slate_interrupt_128);
         let pointer = DescriptorTablePointer {
             limit: (size_of::<InterruptDescriptorTable>() - 1) as u16,

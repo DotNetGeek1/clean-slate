@@ -6,17 +6,25 @@ use crate::mm::align_down;
 use crate::mm::frame_allocator::PageAllocator;
 #[cfg(any(
     feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
     feature = "m3-entry-self-test",
     feature = "m3-syscall-self-test"
 ))]
-#[cfg(not(feature = "m3-address-space-self-test"))]
+#[cfg(not(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test"
+)))]
 use crate::mm::paging::leaf_page_flags_for_address;
 #[cfg(any(
     feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
     feature = "m3-entry-self-test",
     feature = "m3-syscall-self-test"
 ))]
-#[cfg(not(feature = "m3-address-space-self-test"))]
+#[cfg(not(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test"
+)))]
 use crate::mm::paging::page_flags_for_address;
 use crate::mm::paging::walk_page_flags;
 use crate::mm::PAGE_SIZE;
@@ -61,7 +69,11 @@ pub(crate) fn unmap_userspace_page(
         .map_err(|_| "failed to unmap userspace page")
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m3-entry-self-test"
+))]
 pub(crate) fn relevant_userspace_leaf_flags(flags: PageTableFlags) -> PageTableFlags {
     flags
         & (PageTableFlags::PRESENT

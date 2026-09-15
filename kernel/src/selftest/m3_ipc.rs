@@ -27,7 +27,6 @@ use crate::ipc::USERSPACE_IPC_TEST_PID;
 #[cfg(any(feature = "m3-ipc-self-test", test))]
 use crate::ipc::USERSPACE_IPC_UNAUTHORIZED_TEST_PID;
 use crate::mm::address_space::create_process_address_space;
-use crate::mm::address_space::destroy_process_address_space;
 use crate::mm::address_space::map_process_page;
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
@@ -88,7 +87,7 @@ enum UserspaceIpcStage {
 #[cfg(feature = "m3-ipc-self-test")]
 #[derive(Clone, Copy)]
 struct UserspaceIpcProcess {
-    process: Process,
+    process_id: u64,
     thread: Thread,
     expected_entry_rip: u64,
     user_stack_pointer: u64,
@@ -156,15 +155,7 @@ fn create_userspace_ipc_process(
         let ids = unsafe { id_allocator_mut() };
         (ids.allocate_pid()?, ids.allocate_tid()?)
     };
-    let mut process = Process {
-        id: pid,
-        state: ProcessState::Creating,
-        address_space_root: address_space.root_frame,
-        resource_domain: ResourceDomain { id: pid },
-        live_threads: 1,
-        exit_status: None,
-    };
-    let setup_result = (|| -> Result<UserspaceIpcProcess, &'static str> {
+    (|| -> Result<UserspaceIpcProcess, &'static str> {
         let code_frame_address = allocator
             .allocate_page()
             .ok_or("allocator could not provide a code page for userspace IPC test process")?;
@@ -253,7 +244,7 @@ fn create_userspace_ipc_process(
         let gdt_state = userspace_gdt_state()?;
         let thread = Thread {
             id: tid,
-            owner_process_id: process.id,
+            owner_process_id: pid,
             kind: ThreadKind::User,
             kernel_stack_top,
             saved_stack_pointer,
@@ -264,21 +255,25 @@ fn create_userspace_ipc_process(
             preemptions: 0,
             observed_progress: 0,
         };
-        process.state = ProcessState::Ready;
-        process.address_space_root = address_space.root_frame;
-        unsafe { process_registry_mut().insert(process)? };
+        unsafe {
+            process_registry_mut()
+                .insert(Process {
+                    id: pid,
+                    state: ProcessState::Ready,
+                    resource_domain: ResourceDomain::with_address_space(pid, address_space),
+                    live_threads: 1,
+                    exit_status: None,
+                })
+                .expect("fresh IPC self-test process should fit in the registry")
+        };
         Ok(UserspaceIpcProcess {
-            process,
+            process_id: pid,
             thread,
             expected_entry_rip: USER_TEST_CODE_ADDRESS + userspace_ipc_test_after_send_offset(),
             user_stack_pointer,
             user_stack_segment: gdt_state.user_data_selector.0 as u64,
         })
-    })();
-    if setup_result.is_err() {
-        let _ = destroy_process_address_space(&address_space, allocator);
-    }
-    setup_result
+    })()
 }
 
 #[cfg(feature = "m3-ipc-self-test")]
@@ -399,7 +394,7 @@ pub(crate) fn handle_userspace_ipc_entry(context: &InterruptContext) -> Result<u
     })?;
 
     match state.stage {
-        UserspaceIpcStage::AwaitAuthorizedSend if process.process.id == USERSPACE_IPC_TEST_PID => {
+        UserspaceIpcStage::AwaitAuthorizedSend if process.process_id == USERSPACE_IPC_TEST_PID => {
             if !state.send_ok_observed {
                 return Err("IPC self-test did not observe authorized send before user rendezvous");
             }
@@ -407,7 +402,7 @@ pub(crate) fn handle_userspace_ipc_entry(context: &InterruptContext) -> Result<u
             schedule_next_thread(saved_stack_pointer)
         }
         UserspaceIpcStage::AwaitUnauthorizedSend
-            if process.process.id == USERSPACE_IPC_UNAUTHORIZED_TEST_PID =>
+            if process.process_id == USERSPACE_IPC_UNAUTHORIZED_TEST_PID =>
         {
             if !state.unauthorized_syscall_observed {
                 return Err(

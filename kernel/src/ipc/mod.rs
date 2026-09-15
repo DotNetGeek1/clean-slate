@@ -67,6 +67,12 @@ struct EndpointCapabilityHandleParts {
     endpoint_generation: u16,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct IpcProcessResources {
+    pub(crate) owned_endpoints: usize,
+    pub(crate) held_capabilities: usize,
+}
+
 #[allow(dead_code)]
 impl EndpointCapabilityHandleParts {
     fn encode(self) -> u64 {
@@ -147,6 +153,16 @@ impl IpcEndpointTable {
             return Err("ipc endpoint was not active");
         }
         Ok(endpoint.generation)
+    }
+
+    fn retire_capability(capability: &mut EndpointCapability) {
+        capability.active = false;
+        capability.holder_pid = 0;
+        if let Some(next_generation) = Self::next_generation(capability.generation) {
+            capability.generation = next_generation;
+        } else {
+            capability.retired = true;
+        }
     }
 
     pub(super) fn grant_send_capability(
@@ -243,6 +259,73 @@ impl IpcEndpointTable {
         Ok(message.len())
     }
 
+    pub(crate) fn resources_for_pid(&self, pid: u64) -> IpcProcessResources {
+        let owned_endpoints = self
+            .endpoints
+            .iter()
+            .filter(|endpoint| {
+                endpoint.state == IpcEndpointState::Active && endpoint.owner_pid == pid
+            })
+            .count();
+        let held_capabilities = self
+            .capabilities
+            .iter()
+            .filter(|capability| capability.active && capability.holder_pid == pid)
+            .count();
+        IpcProcessResources {
+            owned_endpoints,
+            held_capabilities,
+        }
+    }
+
+    pub(crate) fn active_resources(&self) -> IpcProcessResources {
+        IpcProcessResources {
+            owned_endpoints: self
+                .endpoints
+                .iter()
+                .filter(|endpoint| endpoint.state == IpcEndpointState::Active)
+                .count(),
+            held_capabilities: self
+                .capabilities
+                .iter()
+                .filter(|capability| capability.active)
+                .count(),
+        }
+    }
+
+    pub(crate) fn revoke_capabilities_held_by(&mut self, holder_pid: u64) -> usize {
+        let mut revoked = 0;
+        for capability in &mut self.capabilities {
+            if capability.active && capability.holder_pid == holder_pid {
+                Self::retire_capability(capability);
+                revoked += 1;
+            }
+        }
+        revoked
+    }
+
+    pub(crate) fn teardown_resources_for_pid(
+        &mut self,
+        pid: u64,
+    ) -> Result<IpcProcessResources, &'static str> {
+        let revoked = self.revoke_capabilities_held_by(pid);
+        let mut owned_slots = [usize::MAX; IPC_ENDPOINT_CAPACITY];
+        let mut owned_count = 0;
+        for (slot, endpoint) in self.endpoints.iter().enumerate() {
+            if endpoint.state == IpcEndpointState::Active && endpoint.owner_pid == pid {
+                owned_slots[owned_count] = slot;
+                owned_count += 1;
+            }
+        }
+        for slot in owned_slots.into_iter().take(owned_count) {
+            self.teardown_endpoint(slot)?;
+        }
+        Ok(IpcProcessResources {
+            owned_endpoints: owned_count,
+            held_capabilities: revoked,
+        })
+    }
+
     pub(super) fn teardown_endpoint(&mut self, endpoint_slot: usize) -> Result<(), &'static str> {
         let endpoint = self
             .endpoints
@@ -269,12 +352,7 @@ impl IpcEndpointTable {
                 && capability.endpoint_slot == endpoint_slot_u16
                 && capability.endpoint_generation == retired_generation
             {
-                capability.active = false;
-                if let Some(next_generation) = Self::next_generation(capability.generation) {
-                    capability.generation = next_generation;
-                } else {
-                    capability.retired = true;
-                }
+                Self::retire_capability(capability);
             }
         }
         Ok(())
@@ -447,5 +525,45 @@ mod tests {
             .grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)
             .is_err());
         assert!(table.capabilities[0].retired);
+    }
+
+    #[test]
+    fn ipc_process_helpers_count_and_revoke_owned_resources() {
+        let mut table = IpcEndpointTable::new();
+        let endpoint_slot = table
+            .create_endpoint(USERSPACE_IPC_TEST_PID)
+            .expect("create endpoint");
+        let handle = table
+            .grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)
+            .expect("grant capability");
+        let other_handle = table
+            .grant_send_capability(USERSPACE_IPC_UNAUTHORIZED_TEST_PID, endpoint_slot)
+            .expect("grant other capability");
+
+        assert_eq!(
+            table.resources_for_pid(USERSPACE_IPC_TEST_PID),
+            IpcProcessResources {
+                owned_endpoints: 1,
+                held_capabilities: 1,
+            }
+        );
+        assert_eq!(table.revoke_capabilities_held_by(USERSPACE_IPC_TEST_PID), 1);
+        assert_eq!(
+            table.send_message(USERSPACE_IPC_TEST_PID, handle, b"x"),
+            Err(IpcSendError::StaleCapability)
+        );
+        assert_eq!(
+            table
+                .teardown_resources_for_pid(USERSPACE_IPC_TEST_PID)
+                .expect("teardown pid resources"),
+            IpcProcessResources {
+                owned_endpoints: 1,
+                held_capabilities: 0,
+            }
+        );
+        assert_eq!(
+            table.send_message(USERSPACE_IPC_UNAUTHORIZED_TEST_PID, other_handle, b"x"),
+            Err(IpcSendError::StaleCapability)
+        );
     }
 }
