@@ -188,6 +188,55 @@ Expected workflows include breakpoints in kernel entry, page-fault handlers, sch
 
 4. GDB will stop on a trap once `efi_main` is executing (`SIGTRAP`). From there, single-step or set additional breakpoints.
 
+## Kernel source layout
+
+`kernel/src/lib.rs` is a thin crate-composition file: crate attributes, the module list, the three `pub` re-exports `main.rs` needs (`serial_write_line`, `serial_write_fmt`, `qemu_exit_failure`) and `pub fn run()`, which forwards to `boot::run`. Everything else lives in subsystem modules inside the same `clean-slate-kernel` crate; there are no extra workspace crates.
+
+```text
+kernel/src
+├── lib.rs                 crate attrs, mod list, 3 pub re-exports, run()
+├── main.rs                UEFI entry; unchanged by the layout
+├── arch/x86_64/           CPU mechanism only (no policy)
+│   ├── port.rs, msr.rs    port and MSR wrappers
+│   ├── cpu.rs             interrupt enable/disable, halt, CR0.WP toggling, bit helpers
+│   ├── interrupt_context.rs  InterruptContext, UserspaceEntryFrame, SyscallContext layouts
+│   ├── idt.rs, gdt.rs     IDT install, GDT/TSS/IST, userspace selectors, DOUBLE_FAULT_STACK
+│   ├── apic.rs            LAPIC/PIC register access and timer programming
+│   ├── context_switch.rs  TaskStack, task frames, NEXT_TASK_* hand-off (set_next_task/next_task)
+│   └── asm.rs             the single global_asm! block and the extern "C" symbol declarations
+├── boot/
+│   ├── mod.rs             run/run_inner, boot ordering, feature-gated dispatch into selftest
+│   └── uefi.rs            memory-map normalization and reserved-range collection
+├── mm/
+│   ├── mod.rs             PAGE_SIZE, PHYSICAL_MEMORY_OFFSET
+│   ├── region.rs          MemoryRegion, ReservedRange, NormalizedMemoryMap
+│   ├── frame_allocator.rs PageAllocator (physical frames)
+│   ├── paging.rs          page-table walking, current root frame, zero_page
+│   ├── address_space.rs   per-process roots, kernel-root sanitization/validation
+│   └── user_mapping.rs    map/unmap of userspace pages and mapping validation
+├── process/               Process, ResourceDomain, ProcessRegistry, lifecycle; id_allocator.rs
+├── sched/                 Thread, Scheduler, TASK_STACKS; dispatch.rs (start/schedule), demo_tasks.rs
+├── ipc/                   endpoint table, capabilities, send path
+├── syscall/               syscall dispatch (mod.rs) and return-state validation (validation.rs)
+├── interrupt/             exception/IRQ dispatch and handlers (mod.rs), timer tick policy (timer.rs)
+├── diagnostics/           serial.rs, log.rs, qemu.rs (exit codes, halt_loop, fatal error), gdb.rs
+├── sync/global_cell.rs    GlobalCell<T>
+└── selftest/              milestone acceptance scaffolding, one file per milestone
+    ├── mod.rs             feature-gated mod decls; shared USER_TEST_* address constants
+    ├── m1_memory.rs, m2_double_fault.rs, m2_timer.rs
+    └── m3_entry.rs, m3_address_space.rs, m3_syscall.rs, m3_ipc.rs
+```
+
+Conventions:
+
+- **Visibility.** The crate's `pub` surface is exactly the four items `main.rs` imports. Everything shared across modules is `pub(crate)`; items shared only within a subsystem are `pub(super)`; everything else is private. Adding a new `pub(crate)` is a reviewed decision.
+- **Dependency direction.** `arch::x86_64` provides mechanism and must not import `sched`, `process`, `ipc`, `syscall`, `interrupt` or `selftest`. Policy modules depend downward on `arch`, `mm`, `sync` and `diagnostics`. The assembly block calls `clean_slate_interrupt_dispatch`, `clean_slate_syscall_dispatch`, `clean_slate_task_one`/`two` and `clean_slate_timer_self_test_task` by symbol only; those Rust functions live in `interrupt`, `syscall`, `sched::demo_tasks` and `selftest::m2_timer`.
+- **State ownership.** Global state lives with the subsystem that owns it; there is no central `state.rs`. Cross-module access goes through narrow owner accessors rather than `pub(crate)` statics: `sched::{with_scheduler, scheduler_mut, task_stacks_mut}`, `process::process_registry_mut`, `process::id_allocator::id_allocator_mut`, `ipc::endpoint_table_mut`, `arch::x86_64::context_switch::{set_next_task, next_task}`, `mm::address_space::{kernel_root_frame, set_kernel_root_frame}`, `interrupt::set_expected_page_fault_address`, `interrupt::timer::{kernel_ticks, reset_kernel_ticks}`. The `*_mut` accessors are `unsafe fn` and preserve the exact `&'static mut` access pattern the call sites already had. Statics that assembly reads or writes directly (`NEXT_TASK_*`, `SYSCALL_KERNEL_STACK_TOP`, `SYSCALL_SCRATCH_USER_RSP`) stay `#[no_mangle]` next to their consumers and are never renamed.
+- **Self-test hooks.** Production code reaches `selftest` from exactly three places: `boot::run_inner`, `interrupt` dispatch/exception handling, and the `syscall` handlers. `mod selftest` itself is always compiled because `selftest::m2_timer` owns the `clean_slate_timer_self_test_task` symbol that the assembly trampoline references unconditionally; every other selftest submodule is gated on its milestone feature. Reusable logic is not moved into `selftest` just because only tests use it today.
+- **Tests.** `#[cfg(test)] mod tests` sits beside the implementation it exercises (`boot::uefi`, `mm::frame_allocator`, `mm::paging`, `mm::address_space`, `process`, `process::id_allocator`, `sched`, `ipc`, `syscall::validation`, `arch::x86_64::{gdt, interrupt_context}`). The tests that exercise feature-gated code live in their `selftest/m3_*.rs` under the same feature gate. Run `cargo test -p clean-slate-kernel` for the default set and add `--features <milestone>` to include the gated ones.
+- **`unsafe` and assembly.** New `unsafe fn` items carry a `# Safety` section. `global_asm!` is confined to `arch/x86_64/asm.rs`, whose header lists each label the block defines and the Rust symbol or static it consumes. `extern "C"` declarations for assembly labels live next to the block; the Rust side of each contract (`no_mangle` functions) lives with its owning module.
+- **File size.** Roughly 800 lines is a soft signal that a module wants splitting, not a rule; `selftest/m3_address_space.rs` is the deliberate exception.
+
 ## Test layers
 
 ### Host unit tests

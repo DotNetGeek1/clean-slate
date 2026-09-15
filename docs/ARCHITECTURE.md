@@ -24,6 +24,8 @@ The kernel should own only the mechanisms that genuinely require privileged exec
 
 Everything that can reasonably live outside the kernel should be considered for userspace.
 
+The kernel crate's module layout, visibility rules and dependency direction are documented in [DEVELOPMENT.md — Kernel source layout](DEVELOPMENT.md#kernel-source-layout).
+
 ## Userspace services
 
 Expected services include:
