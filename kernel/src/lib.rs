@@ -12,11 +12,53 @@
     allow(dead_code)
 )]
 
+mod arch;
+mod diagnostics;
+mod sync;
+
+pub use diagnostics::qemu::qemu_exit_failure;
+pub use diagnostics::serial::{serial_write_fmt, serial_write_line};
+
+use crate::arch::x86_64::bit;
+use crate::arch::x86_64::cpu::disable_interrupts;
+use crate::arch::x86_64::cpu::enable_interrupts;
+use crate::arch::x86_64::cpu::read_code_segment;
+use crate::arch::x86_64::cpu::read_stack_pointer;
+use crate::arch::x86_64::cpu::without_interrupts;
+use crate::arch::x86_64::cpu::without_write_protect;
+use crate::arch::x86_64::msr::read_msr;
+use crate::arch::x86_64::msr::write_msr;
+use crate::arch::x86_64::port::port_out;
+use crate::arch::x86_64::DOUBLE_FAULT_VECTOR;
+use crate::arch::x86_64::IA32_EFER_MSR;
+use crate::arch::x86_64::IA32_EFER_SCE;
+use crate::arch::x86_64::IA32_FMASK_MSR;
+use crate::arch::x86_64::IA32_LSTAR_MSR;
+use crate::arch::x86_64::IA32_STAR_MSR;
+use crate::arch::x86_64::PAGE_FAULT_VECTOR;
+use crate::arch::x86_64::RFLAGS_ALIGNMENT_CHECK_BIT;
+use crate::arch::x86_64::RFLAGS_DIRECTION_FLAG_BIT;
+use crate::arch::x86_64::RFLAGS_INTERRUPT_ENABLE_BIT;
+use crate::arch::x86_64::RFLAGS_IOPL_SHIFT;
+use crate::arch::x86_64::RFLAGS_NESTED_TASK_BIT;
+use crate::arch::x86_64::RFLAGS_RESUME_FLAG_BIT;
+use crate::arch::x86_64::RFLAGS_STATUS_FLAGS_MASK;
+use crate::arch::x86_64::RFLAGS_TRAP_FLAG_BIT;
+use crate::arch::x86_64::SPURIOUS_VECTOR;
+use crate::arch::x86_64::TIMER_VECTOR;
+use crate::diagnostics::gdb::gdb_entry_handoff;
+use crate::diagnostics::log::kernel_log_fmt;
+use crate::diagnostics::log::kernel_log_line;
+use crate::diagnostics::qemu::fatal_kernel_error;
+use crate::diagnostics::qemu::halt_loop;
+use crate::diagnostics::qemu::qemu_exit;
+use crate::diagnostics::qemu::QEMU_EXIT_FAILURE;
+use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
+use crate::diagnostics::serial::serial_init;
+use crate::sync::global_cell::GlobalCell;
 use core::arch::{asm, global_asm};
-use core::cell::UnsafeCell;
-use core::fmt::{self, Write};
 use core::hint::spin_loop;
-use core::mem::{size_of, MaybeUninit};
+use core::mem::size_of;
 use core::ptr;
 #[cfg(any(
     feature = "m2-double-fault-self-test",
@@ -33,7 +75,6 @@ use uefi::proto::loaded_image::LoadedImage;
 use uefi::Status;
 use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
 use x86_64::instructions::tables::load_tss;
-use x86_64::registers::control::{Cr0, Cr0Flags};
 use x86_64::registers::control::{Cr2, Cr3};
 use x86_64::structures::gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector};
 use x86_64::structures::paging::{
@@ -43,57 +84,19 @@ use x86_64::structures::paging::{Mapper, Page};
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::{PhysAddr, VirtAddr};
 
-const COM1: u16 = 0x3F8;
 const PAGE_SIZE: u64 = 4096;
 const PHYSICAL_MEMORY_OFFSET: u64 = 0;
 #[cfg(feature = "m1-self-test")]
 const SCRATCH_PAGE_ADDRESS: u64 = 0xffff_8000_0000_0000;
 #[cfg(feature = "m1-self-test")]
 const TEST_PAGE_VALUE: u64 = 0x434c_4541_4e53_4c41;
-const QEMU_EXIT_PORT: u16 = 0xf4;
-const QEMU_EXIT_SUCCESS: u32 = 0x10;
-const QEMU_EXIT_FAILURE: u32 = 0x11;
 const MAX_MEMORY_REGIONS: usize = 256;
 const MAX_RESERVED_RANGES: usize = MAX_MEMORY_REGIONS + 1;
 const MAX_BOOT_RESERVED_RANGES: usize = 16;
 const EARLY_STACK_RESERVE_SIZE: u64 = 64 * 1024;
-const DOUBLE_FAULT_VECTOR: usize = 8;
 const DOUBLE_FAULT_IST_INDEX: u16 = 1;
 const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
-const PAGE_FAULT_VECTOR: usize = 14;
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-const GENERAL_PROTECTION_VECTOR: usize = 13;
-const TIMER_VECTOR: usize = 32;
-const SPURIOUS_VECTOR: usize = 33;
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-const USER_TEST_VECTOR: usize = 0x80;
 const APIC_BASE_MSR: u32 = 0x1b;
-const IA32_EFER_MSR: u32 = 0xc000_0080;
-const IA32_STAR_MSR: u32 = 0xc000_0081;
-const IA32_LSTAR_MSR: u32 = 0xc000_0082;
-const IA32_FMASK_MSR: u32 = 0xc000_0084;
-const IA32_EFER_SCE: u64 = 1;
-const RFLAGS_TRAP_FLAG_BIT: u64 = 8;
-const RFLAGS_INTERRUPT_ENABLE_BIT: u64 = 9;
-const RFLAGS_DIRECTION_FLAG_BIT: u64 = 10;
-const RFLAGS_IOPL_SHIFT: u64 = 12;
-const RFLAGS_NESTED_TASK_BIT: u64 = 14;
-const RFLAGS_RESUME_FLAG_BIT: u64 = 16;
-const RFLAGS_ALIGNMENT_CHECK_BIT: u64 = 18;
-const RFLAGS_CARRY_FLAG_BIT: u64 = 0;
-const RFLAGS_PARITY_FLAG_BIT: u64 = 2;
-const RFLAGS_AUXILIARY_CARRY_FLAG_BIT: u64 = 4;
-const RFLAGS_ZERO_FLAG_BIT: u64 = 6;
-const RFLAGS_SIGN_FLAG_BIT: u64 = 7;
-const RFLAGS_OVERFLOW_FLAG_BIT: u64 = 11;
-/// Arithmetic status flags that user code legitimately changes between syscalls
-/// (e.g. via `cmp`/`test`); they must be ignored when validating return RFLAGS.
-const RFLAGS_STATUS_FLAGS_MASK: u64 = (1u64 << RFLAGS_CARRY_FLAG_BIT)
-    | (1u64 << RFLAGS_PARITY_FLAG_BIT)
-    | (1u64 << RFLAGS_AUXILIARY_CARRY_FLAG_BIT)
-    | (1u64 << RFLAGS_ZERO_FLAG_BIT)
-    | (1u64 << RFLAGS_SIGN_FLAG_BIT)
-    | (1u64 << RFLAGS_OVERFLOW_FLAG_BIT);
 const SYSCALL_ENTRY_RFLAGS_MASK: u64 = (1u64 << RFLAGS_TRAP_FLAG_BIT)
     | (1u64 << RFLAGS_INTERRUPT_ENABLE_BIT)
     | (1u64 << RFLAGS_DIRECTION_FLAG_BIT)
@@ -1404,31 +1407,6 @@ fn unmap_scratch_page(
         .map_err(|_| "failed to unmap the scratch virtual page")
 }
 
-#[allow(dead_code)]
-fn without_write_protect<T>(f: impl FnOnce() -> T) -> T {
-    let original = Cr0::read();
-    let mut writable = original;
-    writable.remove(Cr0Flags::WRITE_PROTECT);
-    let _guard = Cr0RestoreGuard(original);
-    unsafe {
-        Cr0::write(writable);
-    }
-    let result = f();
-    result
-}
-
-#[allow(dead_code)]
-struct Cr0RestoreGuard(Cr0Flags);
-
-#[allow(dead_code)]
-impl Drop for Cr0RestoreGuard {
-    fn drop(&mut self) {
-        unsafe {
-            Cr0::write(self.0);
-        }
-    }
-}
-
 unsafe fn current_offset_page_table() -> OffsetPageTable<'static> {
     unsafe { offset_page_table_for_root(current_root_frame_address()) }
 }
@@ -2068,20 +2046,6 @@ struct GdtState {
     user_code_selector: SegmentSelector,
     user_data_selector: SegmentSelector,
     tss_selector: SegmentSelector,
-}
-
-struct GlobalCell<T>(UnsafeCell<T>);
-
-unsafe impl<T> Sync for GlobalCell<T> {}
-
-impl<T> GlobalCell<T> {
-    const fn new(value: T) -> Self {
-        Self(UnsafeCell::new(value))
-    }
-
-    fn get(&self) -> *mut T {
-        self.0.get()
-    }
 }
 
 static SCHEDULER: GlobalCell<Scheduler> = GlobalCell::new(Scheduler::new());
@@ -5095,11 +5059,6 @@ fn emit_m2_pass_and_stop() -> ! {
     }
 }
 
-fn fatal_kernel_error(message: &'static str) -> ! {
-    serial_write_fmt(format_args!("[FAIL] {message}\n"));
-    qemu_exit_failure()
-}
-
 unsafe fn restore_task_context(stack_pointer: u64) -> ! {
     unsafe {
         asm!(
@@ -5234,105 +5193,6 @@ fn local_apic_base() -> u64 {
     read_msr(APIC_BASE_MSR) & APIC_BASE_ADDRESS_MASK
 }
 
-fn read_msr(msr: u32) -> u64 {
-    let low: u32;
-    let high: u32;
-    unsafe {
-        asm!(
-            "rdmsr",
-            in("ecx") msr,
-            out("eax") low,
-            out("edx") high,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    ((high as u64) << 32) | (low as u64)
-}
-
-fn write_msr(msr: u32, value: u64) {
-    unsafe {
-        asm!(
-            "wrmsr",
-            in("ecx") msr,
-            in("eax") value as u32,
-            in("edx") (value >> 32) as u32,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-}
-
-fn without_interrupts<T>(f: impl FnOnce() -> T) -> T {
-    let restore = interrupts_enabled();
-    if restore {
-        disable_interrupts();
-    }
-    let result = f();
-    if restore {
-        enable_interrupts();
-    }
-    result
-}
-
-fn interrupts_enabled() -> bool {
-    bit(read_rflags(), RFLAGS_INTERRUPT_ENABLE_BIT as u32) != 0
-}
-
-fn read_rflags() -> u64 {
-    let rflags: u64;
-    unsafe {
-        asm!("pushfq", "pop {}", out(reg) rflags, options(nomem, preserves_flags));
-    }
-    rflags
-}
-
-fn enable_interrupts() {
-    unsafe {
-        asm!("sti", options(nomem, nostack, preserves_flags));
-    }
-}
-
-fn disable_interrupts() {
-    unsafe {
-        asm!("cli", options(nomem, nostack, preserves_flags));
-    }
-}
-
-#[cfg(test)]
-fn kernel_log_line(_message: &str) {}
-
-#[cfg(not(test))]
-fn kernel_log_line(message: &str) {
-    serial_write_line(message);
-}
-
-#[cfg(test)]
-fn kernel_log_fmt(_arguments: fmt::Arguments<'_>) {}
-
-#[cfg(not(test))]
-fn kernel_log_fmt(arguments: fmt::Arguments<'_>) {
-    serial_write_fmt(arguments);
-}
-
-fn read_code_segment() -> u16 {
-    let mut selector = MaybeUninit::<u16>::uninit();
-    unsafe {
-        asm!(
-            "mov {0:x}, cs",
-            out(reg) * selector.as_mut_ptr(),
-            options(nomem, nostack, preserves_flags)
-        );
-        selector.assume_init()
-    }
-}
-
-fn read_stack_pointer() -> u64 {
-    let value: u64;
-    unsafe {
-        asm!("mov {}, rsp", out(reg) value, options(nomem, nostack, preserves_flags));
-    }
-    value
-}
-
 const fn align_down(value: u64, align: u64) -> u64 {
     value & !(align - 1)
 }
@@ -5344,88 +5204,6 @@ const fn align_up(value: u64, align: u64) -> u64 {
         (value + align - 1) & !(align - 1)
     }
 }
-
-const fn bit(value: u64, index: u32) -> u8 {
-    ((value >> index) & 1) as u8
-}
-
-pub fn serial_init() {
-    port_out(COM1 + 1, 0x00);
-    port_out(COM1 + 3, 0x80);
-    port_out(COM1, 0x03);
-    port_out(COM1 + 1, 0x00);
-    port_out(COM1 + 3, 0x03);
-    port_out(COM1 + 2, 0xc7);
-    port_out(COM1 + 4, 0x0b);
-}
-
-pub fn serial_write_line(message: &str) {
-    serial_write_fmt(format_args!("{message}\n"));
-}
-
-pub fn serial_write_fmt(arguments: fmt::Arguments<'_>) {
-    let mut port = SerialPort;
-    let _ = port.write_fmt(arguments);
-}
-
-struct SerialPort;
-
-impl Write for SerialPort {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for byte in s.bytes() {
-            serial_write_byte(byte);
-        }
-        Ok(())
-    }
-}
-
-fn serial_write_byte(byte: u8) {
-    while (port_in(COM1 + 5) & 0x20) == 0 {}
-    port_out(COM1, byte);
-}
-
-fn port_out(port: u16, value: u8) {
-    unsafe {
-        asm!("out dx, al", in("dx") port, in("al") value, options(nostack, nomem, preserves_flags));
-    }
-}
-
-fn port_in(port: u16) -> u8 {
-    let value: u8;
-    unsafe {
-        asm!("in al, dx", in("dx") port, out("al") value, options(nostack, nomem, preserves_flags));
-    }
-    value
-}
-
-fn qemu_exit(value: u32) -> ! {
-    unsafe {
-        asm!("out dx, eax", in("dx") QEMU_EXIT_PORT, in("eax") value, options(nostack, nomem, preserves_flags));
-    }
-    halt_loop()
-}
-
-pub fn qemu_exit_failure() -> ! {
-    qemu_exit(QEMU_EXIT_FAILURE)
-}
-
-pub fn halt_loop() -> ! {
-    loop {
-        unsafe {
-            asm!("hlt", options(nomem, nostack, preserves_flags));
-        }
-    }
-}
-
-#[cfg(feature = "gdb-entry")]
-fn gdb_entry_handoff() {
-    unsafe {
-        asm!("int3", options(nomem, nostack, preserves_flags));
-    }
-}
-
-#[cfg(not(feature = "gdb-entry"))]
-fn gdb_entry_handoff() {}
 
 #[cfg(test)]
 mod tests {
