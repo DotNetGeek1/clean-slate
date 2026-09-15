@@ -26,12 +26,35 @@ pub(super) fn increment_kernel_ticks() -> u64 {
     KERNEL_TICKS.fetch_add(1, Ordering::Relaxed)
 }
 
+// Boot-tail entry point: self-test builds exit QEMU before reaching it.
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn initialize_timer() {
     mask_legacy_pic();
     enable_local_apic();
     program_local_apic_timer();
 }
 
+// Boot-tail entry point: self-test builds exit QEMU before reaching it.
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-syscall-self-test",
+        feature = "m3-ipc-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn report_timer_contract() {
     serial_write_fmt(format_args!(
         "[TIME] contract=lapic periodic divide=16 initial_count={} tick-rate=uncalibrated\n",

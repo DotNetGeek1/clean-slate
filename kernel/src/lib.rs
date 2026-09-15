@@ -1,5 +1,18 @@
 #![cfg_attr(not(test), no_std)]
-#![cfg_attr(
+
+mod arch;
+mod boot;
+mod diagnostics;
+mod interrupt;
+mod ipc;
+mod mm;
+mod process;
+mod sched;
+// Milestone self-tests exit QEMU before the normal boot tail runs, so each
+// feature build leaves parts of its own scaffolding unreferenced. The
+// allowance is scoped to this module only; production modules must stay
+// warning-clean in every configuration.
+#[cfg_attr(
     any(
         feature = "m1-self-test",
         feature = "m2-double-fault-self-test",
@@ -11,15 +24,6 @@
     ),
     allow(dead_code)
 )]
-
-mod arch;
-mod boot;
-mod diagnostics;
-mod interrupt;
-mod ipc;
-mod mm;
-mod process;
-mod sched;
 mod selftest;
 mod sync;
 mod syscall;

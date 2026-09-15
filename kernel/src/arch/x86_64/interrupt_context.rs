@@ -61,6 +61,9 @@ impl InterruptContext {
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 #[derive(Clone, Copy)]
 pub(crate) struct UserspaceEntryFrame {
+    // Written by `context_switch::build_userspace_entry_frame` and consumed by
+    // the CPU on `iretq`; Rust only reads it back in host tests.
+    #[allow(dead_code)]
     pub(crate) interrupt: InterruptContext,
     pub(crate) user_stack_pointer: u64,
     pub(crate) user_stack_segment: u64,

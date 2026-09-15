@@ -21,6 +21,19 @@ use crate::sched::Scheduler;
 use crate::sched::Thread;
 use crate::sched::ThreadKind;
 
+// Boot-tail entry point: self-test builds exit QEMU before reaching it.
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-syscall-self-test",
+        feature = "m3-ipc-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn initialize_scheduler() -> Result<(), &'static str> {
     let task_stacks = unsafe { task_stacks_mut() };
     let task_stack_pointers = [
@@ -48,6 +61,19 @@ pub(crate) fn initialize_scheduler() -> Result<(), &'static str> {
     Ok(())
 }
 
+// Boot-tail entry point: self-test builds exit QEMU before reaching it.
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-syscall-self-test",
+        feature = "m3-ipc-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn start_scheduler() -> ! {
     let (stack_pointer, entry_point) = match with_scheduler(|scheduler| scheduler.start()) {
         Ok(stack_pointer) => {
