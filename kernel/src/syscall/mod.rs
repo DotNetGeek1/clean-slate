@@ -52,28 +52,28 @@ use crate::sched::with_scheduler;
 use crate::sched::ThreadKind;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::sched::TASK_REQUIRED_PREEMPTIONS;
+#[cfg(feature = "m3-ipc-self-test")]
+use crate::selftest::m3_ipc::IPC_SEND_PASS_MARKER;
+#[cfg(feature = "m3-ipc-self-test")]
+use crate::selftest::m3_ipc::USERSPACE_IPC_TEST_STATE;
+#[cfg(feature = "m3-syscall-self-test")]
+use crate::selftest::m3_syscall::userspace_syscall_test_state;
+#[cfg(feature = "m3-syscall-self-test")]
+use crate::selftest::m3_syscall::SYSCALL_CALL_COUNT;
+#[cfg(feature = "m3-syscall-self-test")]
+use crate::selftest::m3_syscall::SYSCALL_DF_SANITIZED_OBSERVED;
+#[cfg(feature = "m3-syscall-self-test")]
+use crate::selftest::m3_syscall::SYSCALL_PASS_MARKER;
+#[cfg(feature = "m3-syscall-self-test")]
+use crate::selftest::m3_syscall::SYSCALL_TEST_REQUIRED_CALLS;
+#[cfg(feature = "m3-syscall-self-test")]
+use crate::selftest::USER_TEST_CODE_ADDRESS;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::syscall::validation::maybe_validate_syscall_entry_flags;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::syscall::validation::syscall_return_rflags_match;
 use crate::syscall::validation::validate_canonical_user_return_state;
 use crate::syscall::validation::validate_sysret_selector_triplet;
-#[cfg(feature = "m3-syscall-self-test")]
-use crate::userspace_syscall_test_state;
-#[cfg(feature = "m3-ipc-self-test")]
-use crate::IPC_SEND_PASS_MARKER;
-#[cfg(feature = "m3-syscall-self-test")]
-use crate::SYSCALL_CALL_COUNT;
-#[cfg(feature = "m3-syscall-self-test")]
-use crate::SYSCALL_DF_SANITIZED_OBSERVED;
-#[cfg(feature = "m3-syscall-self-test")]
-use crate::SYSCALL_PASS_MARKER;
-#[cfg(feature = "m3-syscall-self-test")]
-use crate::SYSCALL_TEST_REQUIRED_CALLS;
-#[cfg(feature = "m3-ipc-self-test")]
-use crate::USERSPACE_IPC_TEST_STATE;
-#[cfg(feature = "m3-syscall-self-test")]
-use crate::USER_TEST_CODE_ADDRESS;
 use core::ptr;
 #[cfg(feature = "m3-syscall-self-test")]
 use core::sync::atomic::Ordering;

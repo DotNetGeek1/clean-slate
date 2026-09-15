@@ -15,9 +15,9 @@ use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::mm::USER_CANONICAL_TOP_EXCLUSIVE;
 #[cfg(feature = "m3-syscall-self-test")]
-use crate::SYSCALL_DF_SANITIZED_MARKER;
+use crate::selftest::m3_syscall::SYSCALL_DF_SANITIZED_MARKER;
 #[cfg(feature = "m3-syscall-self-test")]
-use crate::SYSCALL_DF_SANITIZED_OBSERVED;
+use crate::selftest::m3_syscall::SYSCALL_DF_SANITIZED_OBSERVED;
 #[cfg(feature = "m3-syscall-self-test")]
 use core::sync::atomic::Ordering;
 use x86_64::structures::gdt::SegmentSelector;
@@ -50,7 +50,7 @@ pub(super) fn syscall_return_rflags_match(observed: u64, expected: u64) -> bool 
     (observed & !RFLAGS_STATUS_FLAGS_MASK) == (expected & !RFLAGS_STATUS_FLAGS_MASK)
 }
 
-pub(super) fn validate_canonical_user_return_state(
+pub(crate) fn validate_canonical_user_return_state(
     frame: &SyscallContext,
 ) -> Result<(), &'static str> {
     if frame.user_rip >= USER_CANONICAL_TOP_EXCLUSIVE {

@@ -246,6 +246,10 @@ pub(crate) fn zero_page(frame: u64) {
 mod tests {
     #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
     use super::*;
+    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+    use crate::selftest::USER_TEST_CODE_ADDRESS;
+    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+    use x86_64::PhysAddr;
 
     #[cfg(any(
         feature = "m3-address-space-self-test",

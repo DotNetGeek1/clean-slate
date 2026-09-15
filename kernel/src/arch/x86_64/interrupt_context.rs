@@ -34,7 +34,7 @@ pub(crate) struct InterruptContext {
 
 #[cfg(test)]
 impl InterruptContext {
-    const ZERO: Self = Self {
+    pub(crate) const ZERO: Self = Self {
         r15: 0,
         r14: 0,
         r13: 0,

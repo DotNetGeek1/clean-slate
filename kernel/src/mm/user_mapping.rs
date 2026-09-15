@@ -24,9 +24,9 @@ use crate::mm::USER_CANONICAL_TOP_EXCLUSIVE;
 #[cfg(feature = "m3-entry-self-test")]
 use crate::run;
 #[cfg(feature = "m3-entry-self-test")]
-use crate::USER_TEST_CODE_ADDRESS;
+use crate::selftest::USER_TEST_CODE_ADDRESS;
 #[cfg(feature = "m3-entry-self-test")]
-use crate::USER_TEST_STACK_ADDRESS;
+use crate::selftest::USER_TEST_STACK_ADDRESS;
 use x86_64::structures::paging::Mapper;
 use x86_64::structures::paging::OffsetPageTable;
 use x86_64::structures::paging::Page;

@@ -24,25 +24,15 @@ use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_FAILURE;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
-#[cfg(feature = "m2-double-fault-self-test")]
-use crate::double_fault_stack_contains;
-#[cfg(feature = "m3-address-space-self-test")]
-use crate::handle_userspace_address_space_entry;
-#[cfg(feature = "m3-address-space-self-test")]
-use crate::handle_userspace_address_space_page_fault;
-#[cfg(feature = "m3-entry-self-test")]
-use crate::handle_userspace_entry_trap;
-#[cfg(feature = "m3-ipc-self-test")]
-use crate::handle_userspace_ipc_entry;
-#[cfg(feature = "m3-entry-self-test")]
-use crate::handle_userspace_privileged_fault;
 use crate::interrupt::timer::increment_kernel_ticks;
 #[cfg(not(any(feature = "m2-timer-self-test", feature = "m3-syscall-self-test")))]
 use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 #[cfg(not(any(feature = "m2-timer-self-test", feature = "m3-syscall-self-test")))]
 use crate::sched::with_scheduler;
 #[cfg(feature = "m2-double-fault-self-test")]
-use crate::trigger_nested_double_fault;
+use crate::selftest::m2_double_fault::double_fault_stack_contains;
+#[cfg(feature = "m2-double-fault-self-test")]
+use crate::selftest::m2_double_fault::trigger_nested_double_fault;
 #[cfg(any(
     feature = "m2-double-fault-self-test",
     feature = "m3-address-space-self-test",
@@ -54,7 +44,17 @@ use crate::trigger_nested_double_fault;
     feature = "m3-ipc-self-test",
     feature = "m3-syscall-self-test"
 )))]
-use crate::DOUBLE_FAULT_TEST_ACTIVE;
+use crate::selftest::m2_double_fault::DOUBLE_FAULT_TEST_ACTIVE;
+#[cfg(feature = "m3-address-space-self-test")]
+use crate::selftest::m3_address_space::handle_userspace_address_space_entry;
+#[cfg(feature = "m3-address-space-self-test")]
+use crate::selftest::m3_address_space::handle_userspace_address_space_page_fault;
+#[cfg(feature = "m3-entry-self-test")]
+use crate::selftest::m3_entry::handle_userspace_entry_trap;
+#[cfg(feature = "m3-entry-self-test")]
+use crate::selftest::m3_entry::handle_userspace_privileged_fault;
+#[cfg(feature = "m3-ipc-self-test")]
+use crate::selftest::m3_ipc::handle_userspace_ipc_entry;
 #[cfg(feature = "m2-double-fault-self-test")]
 use core::sync::atomic::Ordering;
 use x86_64::registers::control::Cr2;
