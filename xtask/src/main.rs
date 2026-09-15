@@ -87,8 +87,9 @@ const M3_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[PROC] pid=2 exited status=0",
     "[M3.4] PASS",
 ];
-const M3_IPC_ACCEPTANCE_MARKERS: [&str; 4] = [
+const M3_IPC_ACCEPTANCE_MARKERS: [&str; 5] = [
     "[CAP ] endpoint capability granted pid=1",
+    "[IPC ] console pid=1: hello from pid 1",
     "[IPC ] send OK bytes=",
     "[CAP ] unauthorized send denied pid=2",
     "[M3.5] PASS",

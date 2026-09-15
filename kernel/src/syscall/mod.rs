@@ -24,7 +24,6 @@ use crate::arch::x86_64::RFLAGS_IOPL_SHIFT;
 use crate::arch::x86_64::RFLAGS_NESTED_TASK_BIT;
 use crate::arch::x86_64::RFLAGS_RESUME_FLAG_BIT;
 use crate::arch::x86_64::RFLAGS_TRAP_FLAG_BIT;
-#[cfg(feature = "m3-ipc-self-test")]
 use crate::diagnostics::log::kernel_log_fmt;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::diagnostics::log::kernel_log_line;
@@ -36,6 +35,7 @@ use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::interrupt::timer::kernel_ticks;
 use crate::ipc::endpoint_table_mut;
+use crate::ipc::IpcEndpointKind;
 use crate::ipc::IpcSendError;
 use crate::ipc::IPC_MAX_MESSAGE_BYTES;
 #[cfg(feature = "m3-ipc-self-test")]
@@ -163,15 +163,22 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
     };
     let table = unsafe { endpoint_table_mut() };
     match table.send_message(sender_pid, frame.rdi, &copied[..length]) {
-        Ok(sent) => {
+        Ok(result) => {
+            if result.endpoint_kind == IpcEndpointKind::ConsoleSink {
+                let message = core::str::from_utf8(&copied[..length]).unwrap_or("<non-utf8>");
+                kernel_log_fmt(format_args!("[IPC ] console pid={sender_pid}: {message}\n"));
+            }
             #[cfg(feature = "m3-ipc-self-test")]
             if let Some(state) = unsafe { (&mut *USERSPACE_IPC_TEST_STATE.get()).as_mut() } {
                 if sender_pid == USERSPACE_IPC_TEST_PID && !state.send_ok_observed {
-                    kernel_log_fmt(format_args!("{IPC_SEND_PASS_MARKER}{sent}\n"));
+                    kernel_log_fmt(format_args!(
+                        "{IPC_SEND_PASS_MARKER}{}\n",
+                        result.bytes_sent
+                    ));
                     state.send_ok_observed = true;
                 }
             }
-            frame.rax = sent as u64;
+            frame.rax = result.bytes_sent as u64;
         }
         Err(IpcSendError::Unauthorized) => {
             #[cfg(feature = "m3-ipc-self-test")]
