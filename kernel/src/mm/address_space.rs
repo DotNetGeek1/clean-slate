@@ -60,7 +60,7 @@ pub(crate) struct AddressSpaceResourceCounts {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ProcessAddressSpace {
     pub(crate) root_frame: u64,
     page_table_frames: [u64; MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES],

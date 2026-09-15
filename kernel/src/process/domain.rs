@@ -8,6 +8,7 @@ use crate::ipc::IpcProcessResources;
 use crate::mm::address_space::activate_address_space_root;
 use crate::mm::address_space::destroy_process_address_space;
 use crate::mm::frame_allocator::PageAllocator;
+use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 use crate::sched::scheduler_mut;
 use crate::sched::with_scheduler;
 use crate::sched::ThreadKind;
@@ -33,13 +34,13 @@ pub(crate) struct DomainTeardownResult {
 }
 
 pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'static str> {
-    let process = unsafe {
+    let address_space = unsafe {
         process_registry_mut()
             .get(process_id)
             .ok_or("resource snapshot process was not registered")?
-            .clone()
+            .resource_domain
+            .address_space_resource_counts()
     };
-    let address_space = process.resource_domain.address_space_resource_counts();
     let thread_resources =
         without_interrupts(|| unsafe { scheduler_mut().resources_for_process(process_id) });
     let ipc_resources = unsafe { endpoint_table_mut().resources_for_pid(process_id) };
@@ -117,8 +118,10 @@ pub(crate) fn teardown_current_process(
             .take_address_space()
             .ok_or("process address space was missing during teardown")?;
         destroy_process_address_space(&address_space, allocator)?;
-        process_record.address_space_root = 0;
         reap_process_record(process_record)?;
+    }
+    if next_stack_pointer.is_some() {
+        prepare_current_scheduler_thread_dispatch()?;
     }
     unsafe { process_registry_mut().release_reaped(process_id)? };
     if released_ipc.owned_endpoints != released_resources.ipc_endpoints

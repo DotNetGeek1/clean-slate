@@ -23,9 +23,7 @@ use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
-use crate::mm::address_space::activate_address_space_root;
 use crate::mm::address_space::create_process_address_space;
-use crate::mm::address_space::destroy_process_address_space;
 use crate::mm::address_space::map_process_page;
 use crate::mm::address_space::translate_address_in_root;
 use crate::mm::address_space::validate_supervisor_only_kernel_root_entries;
@@ -40,16 +38,13 @@ use crate::mm::paging::zero_page;
 use crate::mm::user_mapping::relevant_userspace_leaf_flags;
 use crate::mm::PAGE_SIZE;
 use crate::mm::PHYSICAL_MEMORY_OFFSET;
-use crate::process::begin_thread_exit;
-use crate::process::finalize_process_exit;
+use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::process_registry_mut;
-use crate::process::reap_process;
 use crate::process::Process;
 use crate::process::ProcessState;
 use crate::process::ResourceDomain;
 use crate::run;
-use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 use crate::sched::dispatch::schedule_next_thread;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 use crate::sched::dispatch::start_current_scheduler_thread;
@@ -105,7 +100,7 @@ enum UserspaceAddressSpaceStage {
 #[cfg(feature = "m3-address-space-self-test")]
 #[derive(Clone, Copy)]
 struct UserspaceProcess {
-    process: Process,
+    process_id: u64,
     thread: Thread,
     expected_value: u64,
     expected_probe_address: u64,
@@ -113,7 +108,6 @@ struct UserspaceProcess {
     expected_entry_rip: u64,
     user_stack_pointer: u64,
     user_stack_segment: u64,
-    address_space: ProcessAddressSpace,
 }
 
 #[cfg(feature = "m3-address-space-self-test")]
@@ -212,14 +206,6 @@ fn create_userspace_process(
         let ids = unsafe { id_allocator_mut() };
         (ids.allocate_pid()?, ids.allocate_tid()?)
     };
-    let mut process = Process {
-        id: pid,
-        state: ProcessState::Creating,
-        address_space_root: address_space.root_frame,
-        resource_domain: ResourceDomain::with_address_space(pid, address_space),
-        live_threads: 1,
-        exit_status: None,
-    };
     let setup_result = (|| -> Result<UserspaceProcess, &'static str> {
         let code_frame_address = allocator
             .allocate_page()
@@ -314,7 +300,7 @@ fn create_userspace_process(
         let gdt_state = userspace_gdt_state()?;
         let thread = Thread {
             id: tid,
-            owner_process_id: process.id,
+            owner_process_id: pid,
             kind: ThreadKind::User,
             kernel_stack_top,
             saved_stack_pointer,
@@ -325,11 +311,17 @@ fn create_userspace_process(
             preemptions: 0,
             observed_progress: 0,
         };
-        process.state = ProcessState::Ready;
-        process.address_space_root = process.resource_domain.address_space_root();
-        unsafe { process_registry_mut().insert(process.clone())? };
+        unsafe {
+            process_registry_mut().insert(Process {
+                id: pid,
+                state: ProcessState::Ready,
+                resource_domain: ResourceDomain::with_address_space(pid, address_space),
+                live_threads: 1,
+                exit_status: None,
+            })?
+        };
         Ok(UserspaceProcess {
-            process,
+            process_id: pid,
             thread,
             expected_value,
             expected_probe_address: probe_address,
@@ -338,32 +330,39 @@ fn create_userspace_process(
                 + userspace_address_space_test_after_entry_offset(),
             user_stack_pointer,
             user_stack_segment: gdt_state.user_data_selector.0 as u64,
-            address_space,
         })
     })();
 
     if setup_result.is_err() {
-        let _ = destroy_process_address_space(&address_space, allocator);
+        let _ = crate::mm::address_space::destroy_process_address_space(&address_space, allocator);
     }
     setup_result
 }
 
 #[cfg(feature = "m3-address-space-self-test")]
 fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'static str> {
+    let address_space = unsafe {
+        process_registry_mut()
+            .get(process.process_id)
+            .ok_or("address-space test process was not registered")?
+            .resource_domain
+            .address_space()
+            .ok_or("address-space test process did not retain its address space")?
+    };
     let expected_read_write_user_leaf_flags = PageTableFlags::PRESENT
         | PageTableFlags::WRITABLE
         | PageTableFlags::NO_EXECUTE
         | PageTableFlags::USER_ACCESSIBLE;
     validate_supervisor_only_kernel_root_entries(
-        unsafe { page_table_ref(process.address_space.root_frame) },
+        unsafe { page_table_ref(address_space.root_frame) },
         VirtAddr::new(USER_TEST_CODE_ADDRESS),
     )?;
     let code_path_flags = page_flags_for_address_in_root(
-        process.address_space.root_frame,
+        address_space.root_frame,
         VirtAddr::new(USER_TEST_CODE_ADDRESS),
     )?;
     let code_leaf_flags = leaf_page_flags_for_address_in_root(
-        process.address_space.root_frame,
+        address_space.root_frame,
         VirtAddr::new(USER_TEST_CODE_ADDRESS),
     )?;
     if !code_path_flags.contains(PageTableFlags::USER_ACCESSIBLE)
@@ -374,11 +373,11 @@ fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'st
     }
 
     let data_path_flags = page_flags_for_address_in_root(
-        process.address_space.root_frame,
+        address_space.root_frame,
         VirtAddr::new(USER_TEST_DATA_ADDRESS),
     )?;
     let data_leaf_flags = leaf_page_flags_for_address_in_root(
-        process.address_space.root_frame,
+        address_space.root_frame,
         VirtAddr::new(USER_TEST_DATA_ADDRESS),
     )?;
     if !data_path_flags.contains(PageTableFlags::USER_ACCESSIBLE)
@@ -388,11 +387,11 @@ fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'st
     }
 
     let stack_path_flags = page_flags_for_address_in_root(
-        process.address_space.root_frame,
+        address_space.root_frame,
         VirtAddr::new(USER_TEST_PROCESS_STACK_ADDRESS),
     )?;
     let stack_leaf_flags = leaf_page_flags_for_address_in_root(
-        process.address_space.root_frame,
+        address_space.root_frame,
         VirtAddr::new(USER_TEST_PROCESS_STACK_ADDRESS),
     )?;
     if !stack_path_flags.contains(PageTableFlags::USER_ACCESSIBLE)
@@ -402,11 +401,11 @@ fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'st
     }
 
     let kernel_flags = page_flags_for_address_in_root(
-        process.address_space.root_frame,
+        address_space.root_frame,
         VirtAddr::from_ptr(run as *const ()),
     )?;
     let kernel_leaf_flags = leaf_page_flags_for_address_in_root(
-        process.address_space.root_frame,
+        address_space.root_frame,
         VirtAddr::from_ptr(run as *const ()),
     )?;
     if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE)
@@ -423,23 +422,37 @@ fn validate_process_address_space_isolation(
     state: &UserspaceAddressSpaceTestState,
 ) -> Result<(), &'static str> {
     let first = translate_address_in_root(
-        state.processes[0].address_space.root_frame,
+        userspace_process_address_space(state.processes[0].process_id)?.root_frame,
         VirtAddr::new(USER_TEST_DATA_ADDRESS),
     )?;
     let second = translate_address_in_root(
-        state.processes[1].address_space.root_frame,
+        userspace_process_address_space(state.processes[1].process_id)?.root_frame,
         VirtAddr::new(USER_TEST_DATA_ADDRESS),
     )?;
     if first == second {
         return Err("two processes aliased the same physical page at the shared user address");
     }
     if translate_address_in_root(
-        state.processes[1].address_space.root_frame,
+        userspace_process_address_space(state.processes[1].process_id)?.root_frame,
         VirtAddr::new(USER_TEST_PROCESS_ONE_PRIVATE_ADDRESS),
     )
     .is_ok()
     {
         return Err("process two unexpectedly mapped process one's private address");
+    }
+
+    #[cfg(feature = "m3-address-space-self-test")]
+    fn userspace_process_address_space(
+        process_id: u64,
+    ) -> Result<&'static ProcessAddressSpace, &'static str> {
+        unsafe {
+            process_registry_mut()
+                .get(process_id)
+                .ok_or("userspace process was not registered")?
+                .resource_domain
+                .address_space()
+                .ok_or("userspace process address space was not retained in its domain")
+        }
     }
     Ok(())
 }
@@ -453,7 +466,7 @@ fn current_userspace_process_index(
     state
         .processes
         .iter()
-        .position(|process| process.process.id == thread.owner_process_id)
+        .position(|process| process.process_id == thread.owner_process_id)
         .ok_or("current scheduler thread did not map to a registered userspace process")
 }
 
@@ -464,87 +477,17 @@ fn terminate_current_userspace_process(
     status: u64,
     faulted: bool,
 ) -> Result<Option<u64>, &'static str> {
-    let (thread_id, process_id, retired_siblings) = without_interrupts(|| unsafe {
-        let scheduler = scheduler_mut();
-        let thread_id = scheduler.mark_current_thread_exiting()?;
-        let process_id = scheduler.current_thread_descriptor()?.owner_process_id;
-        let retired_siblings = if faulted {
-            scheduler.retire_sibling_threads_for_process(process_id, thread_id)
-        } else {
-            0
-        };
-        Ok::<(u64, u64, usize), &'static str>((thread_id, process_id, retired_siblings))
-    })?;
-
+    let process_id =
+        without_interrupts(|| with_scheduler(|scheduler| scheduler.current_thread_descriptor()))?
+            .owner_process_id;
     let process_index = state
         .processes
         .iter()
-        .position(|process| process.process.id == process_id)
+        .position(|process| process.process_id == process_id)
         .ok_or("exiting thread owner process was not registered")?;
-
-    let last_thread_exited = {
-        let process = &mut state.processes[process_index];
-        let process_record = unsafe {
-            process_registry_mut()
-                .get_mut(process_id)
-                .ok_or("exiting process was missing from registry")?
-        };
-        let last_thread_exited =
-            begin_thread_exit(process_record, &mut process.thread, status, faulted)?;
-        process.process = process_record.clone();
-        last_thread_exited
-    };
-
-    if faulted && retired_siblings != 0 {
-        let process_record = unsafe {
-            process_registry_mut()
-                .get_mut(process_id)
-                .ok_or("faulting process was missing from registry")?
-        };
-        let retired_siblings_u16 = u16::try_from(retired_siblings)
-            .map_err(|_| "retired sibling thread count overflowed process accounting")?;
-        if process_record.live_threads < retired_siblings_u16 {
-            return Err("process thread accounting underflow during fault sibling retirement");
-        }
-        process_record.live_threads -= retired_siblings_u16;
-        if process_record.live_threads == 0 {
-            finalize_process_exit(process_record, status)?;
-        }
-        state.processes[process_index].process = process_record.clone();
-    }
-    if faulted {
-        let process_record = unsafe {
-            process_registry_mut()
-                .get_mut(process_id)
-                .ok_or("faulting process was missing from registry after retirement")?
-        };
-        if process_record.live_threads != 0 {
-            return Err("faulted process still had live threads after sibling retirement");
-        }
-    }
-
-    let next_stack_pointer =
-        without_interrupts(|| with_scheduler(|scheduler| scheduler.finish_current_thread()))?;
-
-    if last_thread_exited || (faulted && state.processes[process_index].process.live_threads == 0) {
-        activate_address_space_root(state.kernel_root_frame);
-        destroy_process_address_space(&state.processes[process_index].address_space, allocator)?;
-        let process_record = unsafe {
-            process_registry_mut()
-                .get_mut(process_id)
-                .ok_or("process missing from registry during reap")?
-        };
-        reap_process(process_record, &mut state.processes[process_index].thread)?;
-        state.processes[process_index].process = process_record.clone();
-        without_interrupts(|| unsafe {
-            scheduler_mut().set_thread_state(thread_id, ThreadState::Reaped)
-        })?;
-    }
-
-    if next_stack_pointer.is_some() {
-        prepare_current_scheduler_thread_dispatch()?;
-    }
-    Ok(next_stack_pointer)
+    let teardown = teardown_current_process(allocator, state.kernel_root_frame, status, faulted)?;
+    state.processes[process_index].thread.state = ThreadState::Reaped;
+    Ok(teardown.next_stack_pointer)
 }
 
 #[cfg(feature = "m3-address-space-self-test")]
@@ -564,11 +507,11 @@ pub(crate) fn start_userspace_address_space_self_test(mut allocator: PageAllocat
     };
     kernel_log_fmt(format_args!(
         "[PROC] created pid={} tid={}\n",
-        process_one.process.id, process_one.thread.id
+        process_one.process_id, process_one.thread.id
     ));
     kernel_log_fmt(format_args!(
         "[MM  ] process address space created pid={}\n",
-        process_one.process.id
+        process_one.process_id
     ));
     if let Err(message) = validate_process_address_space(&process_one) {
         fatal_kernel_error(message);
@@ -583,24 +526,17 @@ pub(crate) fn start_userspace_address_space_self_test(mut allocator: PageAllocat
         USER_TEST_PROCESS_TWO_PRIVATE_ADDRESS,
     ) {
         Ok(process) => process,
-        Err(message) => {
-            activate_address_space_root(kernel_root_frame);
-            let _ = destroy_process_address_space(&process_one.address_space, &mut allocator);
-            fatal_kernel_error(message)
-        }
+        Err(message) => fatal_kernel_error(message),
     };
     kernel_log_fmt(format_args!(
         "[PROC] created pid={} tid={}\n",
-        process_two.process.id, process_two.thread.id
+        process_two.process_id, process_two.thread.id
     ));
     kernel_log_fmt(format_args!(
         "[MM  ] process address space created pid={}\n",
-        process_two.process.id
+        process_two.process_id
     ));
     if let Err(message) = validate_process_address_space(&process_two) {
-        activate_address_space_root(kernel_root_frame);
-        let _ = destroy_process_address_space(&process_two.address_space, &mut allocator);
-        let _ = destroy_process_address_space(&process_one.address_space, &mut allocator);
         fatal_kernel_error(message);
     }
 
@@ -610,9 +546,6 @@ pub(crate) fn start_userspace_address_space_self_test(mut allocator: PageAllocat
         processes: [process_one, process_two],
     };
     if let Err(message) = validate_process_address_space_isolation(&initial_state) {
-        activate_address_space_root(kernel_root_frame);
-        let _ = destroy_process_address_space(&process_two.address_space, &mut allocator);
-        let _ = destroy_process_address_space(&process_one.address_space, &mut allocator);
         fatal_kernel_error(message);
     }
     unsafe {
@@ -678,14 +611,12 @@ pub(crate) fn handle_userspace_address_space_entry(
         scheduler.update_thread_saved_stack(process.thread.id, saved_stack_pointer)
     })?;
     match state.stage {
-        UserspaceAddressSpaceStage::AwaitProcessOneEntry if process.process.id == 1 => {
-            state.processes[current_process].process.state = ProcessState::Ready;
+        UserspaceAddressSpaceStage::AwaitProcessOneEntry if process.process_id == 1 => {
             state.processes[current_process].thread.state = ThreadState::Ready;
             state.stage = UserspaceAddressSpaceStage::AwaitProcessTwoEntry;
             schedule_next_thread(saved_stack_pointer)
         }
-        UserspaceAddressSpaceStage::AwaitProcessTwoEntry if process.process.id == 2 => {
-            state.processes[current_process].process.state = ProcessState::Ready;
+        UserspaceAddressSpaceStage::AwaitProcessTwoEntry if process.process_id == 2 => {
             state.processes[current_process].thread.state = ThreadState::Ready;
             validate_process_address_space_isolation(state)?;
             kernel_log_line(ADDRESS_SPACE_SWITCH_OK_MARKER);
@@ -729,9 +660,9 @@ pub(crate) fn handle_userspace_address_space_page_fault(context: &InterruptConte
         Err(message) => fatal_kernel_error(message),
     };
     match state.stage {
-        UserspaceAddressSpaceStage::AwaitKernelMemoryFault if process.process.id == 1 => {
+        UserspaceAddressSpaceStage::AwaitKernelMemoryFault if process.process_id == 1 => {
             kernel_log_line("[SEC ] kernel-memory read denied");
-            kernel_log_fmt(format_args!("[PROC] fault pid={}\n", process.process.id));
+            kernel_log_fmt(format_args!("[PROC] fault pid={}\n", process.process_id));
             state.stage = UserspaceAddressSpaceStage::AwaitCrossProcessFault;
             let next_stack_pointer =
                 match terminate_current_userspace_process(state, allocator, 1, true) {
@@ -743,11 +674,11 @@ pub(crate) fn handle_userspace_address_space_page_fault(context: &InterruptConte
                 };
             kernel_log_fmt(format_args!(
                 "[PROC] pid={} exited status={}\n",
-                process.process.id, 1
+                    process.process_id, 1
             ));
             unsafe { restore_task_context(next_stack_pointer) }
         }
-        UserspaceAddressSpaceStage::AwaitCrossProcessFault if process.process.id == 2 => {
+        UserspaceAddressSpaceStage::AwaitCrossProcessFault if process.process_id == 2 => {
             kernel_log_line("[SEC ] cross-process read denied");
             match terminate_current_userspace_process(state, allocator, 0, false) {
                 Ok(None) => {}
@@ -758,7 +689,7 @@ pub(crate) fn handle_userspace_address_space_page_fault(context: &InterruptConte
             }
             kernel_log_fmt(format_args!(
                 "[PROC] pid={} exited status={}\n",
-                process.process.id, 0
+                process.process_id, 0
             ));
             unsafe {
                 *USERSPACE_ADDRESS_SPACE_TEST_STATE.get() = None;

@@ -270,7 +270,6 @@ fn create_resource_process(
     let process = Process {
         id: pid,
         state: ProcessState::Ready,
-        address_space_root: address_space.root_frame,
         resource_domain: ResourceDomain::with_address_space(pid, address_space),
         live_threads: 1,
         exit_status: None,

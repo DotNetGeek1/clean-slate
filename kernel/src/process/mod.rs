@@ -29,21 +29,32 @@ pub(super) enum ProcessState {
     Reaped,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) struct ResourceDomain {
     pub(crate) id: u64,
+    root_frame: u64,
     address_space: Option<ProcessAddressSpace>,
 }
 
 impl ResourceDomain {
     pub(crate) const EMPTY: Self = Self {
         id: 0,
+        root_frame: 0,
         address_space: None,
     };
 
     pub(crate) const fn new(id: u64) -> Self {
         Self {
             id,
+            root_frame: 0,
+            address_space: None,
+        }
+    }
+
+    pub(crate) const fn with_root_frame(id: u64, root_frame: u64) -> Self {
+        Self {
+            id,
+            root_frame,
             address_space: None,
         }
     }
@@ -51,14 +62,13 @@ impl ResourceDomain {
     pub(crate) fn with_address_space(id: u64, address_space: ProcessAddressSpace) -> Self {
         Self {
             id,
+            root_frame: address_space.root_frame,
             address_space: Some(address_space),
         }
     }
 
     pub(crate) fn address_space_root(&self) -> u64 {
-        self.address_space
-            .as_ref()
-            .map_or(0, |address_space| address_space.root_frame)
+        self.root_frame
     }
 
     pub(crate) fn address_space(&self) -> Option<&ProcessAddressSpace> {
@@ -73,15 +83,15 @@ impl ResourceDomain {
     }
 
     pub(crate) fn take_address_space(&mut self) -> Option<ProcessAddressSpace> {
+        self.root_frame = 0;
         self.address_space.take()
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Process {
     pub(crate) id: u64,
     pub(crate) state: ProcessState,
-    pub(crate) address_space_root: u64,
     pub(crate) resource_domain: ResourceDomain,
     pub(crate) live_threads: u16,
     pub(crate) exit_status: Option<u64>,
@@ -91,11 +101,14 @@ impl Process {
     const EMPTY: Self = Self {
         id: 0,
         state: ProcessState::Empty,
-        address_space_root: 0,
         resource_domain: ResourceDomain::EMPTY,
         live_threads: 0,
         exit_status: None,
     };
+
+    pub(crate) fn address_space_root(&self) -> u64 {
+        self.resource_domain.address_space_root()
+    }
 }
 
 #[allow(dead_code)]
@@ -231,7 +244,7 @@ impl ProcessRegistry {
         self.processes.iter().find(|entry| {
             entry.state != ProcessState::Empty
                 && entry.state != ProcessState::Reaped
-                && entry.address_space_root == root_frame
+                && entry.address_space_root() == root_frame
         })
     }
 }
@@ -256,7 +269,7 @@ pub(super) fn userspace_process_root_frame(process_id: u64) -> Result<u64, &'sta
     if !matches!(process.state, ProcessState::Ready | ProcessState::Running) {
         return Err("userspace process was not dispatchable");
     }
-    Ok(process.address_space_root)
+    Ok(process.address_space_root())
 }
 
 #[cfg(test)]
@@ -270,8 +283,7 @@ mod tests {
         let mut process = Process {
             id: 9,
             state: ProcessState::Running,
-            address_space_root: 0x2000,
-            resource_domain: ResourceDomain::new(9),
+            resource_domain: ResourceDomain::with_root_frame(9, 0x2000),
             live_threads: 1,
             exit_status: None,
         };
@@ -306,8 +318,7 @@ mod tests {
         let mut process = Process {
             id: 5,
             state: ProcessState::Running,
-            address_space_root: 0x3000,
-            resource_domain: ResourceDomain::new(5),
+            resource_domain: ResourceDomain::with_root_frame(5, 0x3000),
             live_threads: 2,
             exit_status: None,
         };
@@ -357,17 +368,13 @@ mod tests {
         let mut process = Process {
             id: 17,
             state: ProcessState::Ready,
-            address_space_root: 0x9000,
-            resource_domain: ResourceDomain::new(17),
+            resource_domain: ResourceDomain::with_root_frame(17, 0x9000),
             live_threads: 1,
             exit_status: None,
         };
-        registry.insert(process.clone()).expect("insert");
+        registry.insert(process).expect("insert");
         assert_eq!(
-            registry
-                .get(process.id)
-                .expect("process")
-                .address_space_root,
+            registry.get(17).expect("process").address_space_root(),
             0x9000
         );
         assert!(matches!(
@@ -375,8 +382,7 @@ mod tests {
             ProcessState::Ready
         ));
 
-        process.state = ProcessState::Exited;
-        *registry.get_mut(17).expect("mut process") = process;
+        registry.get_mut(17).expect("mut process").state = ProcessState::Exited;
         assert!(matches!(
             registry.get(17).expect("process").state,
             ProcessState::Exited
@@ -389,8 +395,7 @@ mod tests {
         let mut process = Process {
             id: 17,
             state: ProcessState::Exited,
-            address_space_root: 0x9000,
-            resource_domain: ResourceDomain::new(17),
+            resource_domain: ResourceDomain::with_root_frame(17, 0x9000),
             live_threads: 0,
             exit_status: Some(0),
         };
@@ -403,8 +408,7 @@ mod tests {
             .insert(Process {
                 id: 18,
                 state: ProcessState::Ready,
-                address_space_root: 0xa000,
-                resource_domain: ResourceDomain::new(18),
+                resource_domain: ResourceDomain::with_root_frame(18, 0xa000),
                 live_threads: 1,
                 exit_status: None,
             })
@@ -427,8 +431,7 @@ mod tests {
         let mut process = Process {
             id: 33,
             state: ProcessState::Running,
-            address_space_root: 0x9000,
-            resource_domain: ResourceDomain::new(33),
+            resource_domain: ResourceDomain::with_root_frame(33, 0x9000),
             live_threads: 2,
             exit_status: None,
         };
