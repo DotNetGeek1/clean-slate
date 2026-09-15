@@ -15,21 +15,17 @@
 mod arch;
 mod boot;
 mod diagnostics;
+mod interrupt;
 mod ipc;
 mod mm;
 mod process;
 mod sched;
 mod sync;
+mod syscall;
 
 pub use diagnostics::qemu::qemu_exit_failure;
 pub use diagnostics::serial::{serial_write_fmt, serial_write_line};
 
-use crate::arch::x86_64::apic::acknowledge_timer_interrupt;
-use crate::arch::x86_64::apic::enable_local_apic;
-use crate::arch::x86_64::apic::mask_legacy_pic;
-use crate::arch::x86_64::apic::program_local_apic_timer;
-use crate::arch::x86_64::apic::APIC_TIMER_INITIAL_COUNT;
-use crate::arch::x86_64::asm::clean_slate_syscall_entry;
 #[cfg(feature = "m2-timer-self-test")]
 use crate::arch::x86_64::asm::clean_slate_timer_self_test_bootstrap_entry;
 #[cfg(feature = "m3-address-space-self-test")]
@@ -54,7 +50,7 @@ use crate::arch::x86_64::asm::clean_slate_user_test_end;
 use crate::arch::x86_64::asm::clean_slate_user_test_privileged_instruction;
 #[cfg(feature = "m3-entry-self-test")]
 use crate::arch::x86_64::asm::clean_slate_user_test_start;
-use crate::arch::x86_64::asm::SYSCALL_SCRATCH_USER_RSP;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 use crate::arch::x86_64::bit;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
@@ -63,80 +59,138 @@ use crate::arch::x86_64::context_switch::restore_task_context;
 #[cfg(feature = "m2-timer-self-test")]
 use crate::arch::x86_64::context_switch::start_first_task;
 use crate::arch::x86_64::context_switch::task_stack_top;
-#[cfg(feature = "m3-syscall-self-test")]
-use crate::arch::x86_64::context_switch::USER_TEST_RFLAGS;
 #[cfg(feature = "m2-timer-self-test")]
 use crate::arch::x86_64::cpu::enable_interrupts;
-#[cfg(feature = "m3-syscall-self-test")]
-use crate::arch::x86_64::cpu::read_rflags;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 use crate::arch::x86_64::cpu::without_interrupts;
+#[cfg(feature = "m1-self-test")]
 use crate::arch::x86_64::cpu::without_write_protect;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 use crate::arch::x86_64::gdt::selector_rpl;
 use crate::arch::x86_64::gdt::set_privilege_stack;
-use crate::arch::x86_64::gdt::set_syscall_kernel_stack;
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-ipc-self-test",
+    feature = "m3-syscall-self-test"
+))]
 use crate::arch::x86_64::gdt::userspace_gdt_state;
 #[cfg(feature = "m2-double-fault-self-test")]
 use crate::arch::x86_64::gdt::DOUBLE_FAULT_STACK;
 #[cfg(feature = "m3-entry-self-test")]
 use crate::arch::x86_64::gdt::GDT_STATE;
-use crate::arch::x86_64::idt::exception_name;
 use crate::arch::x86_64::idt::install_interrupt_handlers;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 use crate::arch::x86_64::interrupt_context::InterruptContext;
-use crate::arch::x86_64::interrupt_context::SyscallContext;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 use crate::arch::x86_64::interrupt_context::UserspaceEntryFrame;
-use crate::arch::x86_64::msr::read_msr;
-use crate::arch::x86_64::msr::write_msr;
-use crate::arch::x86_64::DOUBLE_FAULT_VECTOR;
-#[cfg(feature = "m3-entry-self-test")]
-use crate::arch::x86_64::GENERAL_PROTECTION_VECTOR;
-use crate::arch::x86_64::IA32_EFER_MSR;
-use crate::arch::x86_64::IA32_EFER_SCE;
-use crate::arch::x86_64::IA32_FMASK_MSR;
-use crate::arch::x86_64::IA32_LSTAR_MSR;
-use crate::arch::x86_64::IA32_STAR_MSR;
-use crate::arch::x86_64::PAGE_FAULT_VECTOR;
-use crate::arch::x86_64::RFLAGS_ALIGNMENT_CHECK_BIT;
-use crate::arch::x86_64::RFLAGS_DIRECTION_FLAG_BIT;
-use crate::arch::x86_64::RFLAGS_INTERRUPT_ENABLE_BIT;
-use crate::arch::x86_64::RFLAGS_IOPL_SHIFT;
-use crate::arch::x86_64::RFLAGS_NESTED_TASK_BIT;
-use crate::arch::x86_64::RFLAGS_RESUME_FLAG_BIT;
-use crate::arch::x86_64::RFLAGS_STATUS_FLAGS_MASK;
-use crate::arch::x86_64::RFLAGS_TRAP_FLAG_BIT;
-use crate::arch::x86_64::SPURIOUS_VECTOR;
-use crate::arch::x86_64::TIMER_VECTOR;
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-use crate::arch::x86_64::USER_TEST_VECTOR;
 use crate::boot::uefi::collect_reserved_ranges_from_firmware;
 use crate::boot::uefi::normalize_memory_map;
-use crate::boot::uefi::BootReservedRanges;
 use crate::diagnostics::gdb::gdb_entry_handoff;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 use crate::diagnostics::log::kernel_log_fmt;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 use crate::diagnostics::log::kernel_log_line;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::halt_loop;
+#[cfg(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test",
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test"
+))]
 use crate::diagnostics::qemu::qemu_exit;
+#[cfg(any(feature = "m1-self-test", feature = "m2-double-fault-self-test"))]
 use crate::diagnostics::qemu::QEMU_EXIT_FAILURE;
+#[cfg(any(
+    feature = "m2-timer-self-test",
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test"
+))]
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::diagnostics::serial::serial_init;
+#[cfg(feature = "m1-self-test")]
+use crate::interrupt::set_expected_page_fault_address;
+#[cfg(any(
+    not(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test"
+    )),
+    feature = "m3-syscall-self-test"
+))]
+use crate::interrupt::timer::initialize_timer;
+#[cfg(feature = "m2-timer-self-test")]
+use crate::interrupt::timer::kernel_ticks;
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test",
+    feature = "m3-ipc-self-test",
+    feature = "m3-syscall-self-test"
+)))]
+use crate::interrupt::timer::report_timer_contract;
+#[cfg(feature = "m3-syscall-self-test")]
+use crate::interrupt::timer::reset_kernel_ticks;
+#[cfg(feature = "m3-ipc-self-test")]
 use crate::ipc::endpoint_table_mut;
 #[cfg(feature = "m3-ipc-self-test")]
 use crate::ipc::IpcEndpointTable;
+#[cfg(feature = "m3-ipc-self-test")]
 use crate::ipc::IpcSendError;
+#[cfg(feature = "m3-ipc-self-test")]
 use crate::ipc::IPC_MAX_MESSAGE_BYTES;
 #[cfg(feature = "m3-ipc-self-test")]
 use crate::ipc::USERSPACE_IPC_TEST_PID;
 #[cfg(feature = "m3-ipc-self-test")]
 use crate::ipc::USERSPACE_IPC_UNAUTHORIZED_TEST_PID;
-use crate::mm::align_down;
+#[cfg(feature = "m3-address-space-self-test")]
+use crate::mm::address_space::activate_address_space_root;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
+use crate::mm::address_space::create_process_address_space;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
+use crate::mm::address_space::destroy_process_address_space;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
+use crate::mm::address_space::map_process_page;
+use crate::mm::address_space::set_kernel_root_frame;
+#[cfg(feature = "m3-address-space-self-test")]
+use crate::mm::address_space::translate_address_in_root;
+#[cfg(feature = "m3-address-space-self-test")]
+use crate::mm::address_space::validate_supervisor_only_kernel_root_entries;
+#[cfg(feature = "m3-address-space-self-test")]
+use crate::mm::address_space::ProcessAddressSpace;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
+#[cfg(any(feature = "m1-self-test", feature = "m3-entry-self-test"))]
+use crate::mm::paging::current_offset_page_table;
+use crate::mm::paging::current_root_frame_address;
+use crate::mm::paging::inspect_current_mapping;
+#[cfg(feature = "m3-address-space-self-test")]
+use crate::mm::paging::leaf_page_flags_for_address_in_root;
+#[cfg(feature = "m3-address-space-self-test")]
+use crate::mm::paging::page_flags_for_address_in_root;
+#[cfg(feature = "m3-address-space-self-test")]
+use crate::mm::paging::page_table_ref;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+use crate::mm::paging::zero_page;
 use crate::mm::region::ReservedRange;
+#[cfg(feature = "m3-entry-self-test")]
+use crate::mm::user_mapping::map_userspace_page;
+#[cfg(feature = "m3-address-space-self-test")]
+use crate::mm::user_mapping::relevant_userspace_leaf_flags;
+#[cfg(feature = "m3-entry-self-test")]
+use crate::mm::user_mapping::unmap_userspace_page;
+#[cfg(feature = "m3-entry-self-test")]
+use crate::mm::user_mapping::validate_userspace_mappings;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 use crate::mm::PAGE_SIZE;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 use crate::mm::PHYSICAL_MEMORY_OFFSET;
-use crate::mm::USER_CANONICAL_TOP_EXCLUSIVE;
 #[cfg(feature = "m3-address-space-self-test")]
 use crate::process::begin_thread_exit;
 #[cfg(feature = "m3-address-space-self-test")]
@@ -152,6 +206,7 @@ use crate::process::Process;
 use crate::process::ProcessState;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 use crate::process::ResourceDomain;
+#[cfg(feature = "m3-ipc-self-test")]
 use crate::process::KERNEL_PROCESS_ID;
 #[cfg(not(any(
     feature = "m1-self-test",
@@ -163,7 +218,7 @@ use crate::process::KERNEL_PROCESS_ID;
     feature = "m3-syscall-self-test"
 )))]
 use crate::sched::dispatch::initialize_scheduler;
-#[cfg(not(any(feature = "m2-timer-self-test", feature = "m3-syscall-self-test")))]
+#[cfg(feature = "m3-address-space-self-test")]
 use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 use crate::sched::dispatch::schedule_next_thread;
@@ -182,20 +237,29 @@ use crate::sched::dispatch::start_scheduler;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 use crate::sched::with_scheduler;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 use crate::sched::Scheduler;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 use crate::sched::Thread;
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 use crate::sched::ThreadKind;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 use crate::sched::ThreadState;
-#[cfg(feature = "m3-syscall-self-test")]
-use crate::sched::TASK_REQUIRED_PREEMPTIONS;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 use crate::sync::global_cell::GlobalCell;
+use crate::syscall::initialize_syscall_abi;
+#[cfg(feature = "m3-ipc-self-test")]
+use crate::syscall::SYSCALL_EACCES;
 #[cfg(feature = "m2-timer-self-test")]
 use core::arch::asm;
+#[cfg(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test"
+))]
 use core::ptr;
 #[cfg(any(
     feature = "m2-double-fault-self-test",
@@ -205,28 +269,45 @@ use core::ptr;
     feature = "m3-ipc-self-test"
 ))]
 use core::sync::atomic::AtomicBool;
-use core::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "m3-syscall-self-test")]
+use core::sync::atomic::AtomicU64;
+#[cfg(any(feature = "m2-double-fault-self-test", feature = "m3-entry-self-test"))]
+use core::sync::atomic::Ordering;
 use uefi::mem::memory_map::{MemoryMap, MemoryMapMut};
 use uefi::Status;
-use x86_64::registers::control::{Cr2, Cr3};
-use x86_64::structures::gdt::SegmentSelector;
-use x86_64::structures::paging::{
-    FrameAllocator, OffsetPageTable, PageTable, PageTableFlags, PhysFrame, Size4KiB, Translate,
-};
-use x86_64::structures::paging::{Mapper, Page};
-use x86_64::{PhysAddr, VirtAddr};
+#[cfg(feature = "m3-address-space-self-test")]
+use x86_64::registers::control::Cr2;
+#[cfg(feature = "m1-self-test")]
+use x86_64::structures::paging::Mapper;
+#[cfg(feature = "m1-self-test")]
+use x86_64::structures::paging::OffsetPageTable;
+#[cfg(any(feature = "m1-self-test", feature = "m3-entry-self-test"))]
+use x86_64::structures::paging::Page;
+#[cfg(any(
+    feature = "m1-self-test",
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test"
+))]
+use x86_64::structures::paging::PageTableFlags;
+#[cfg(any(feature = "m1-self-test", feature = "m3-entry-self-test"))]
+use x86_64::structures::paging::PhysFrame;
+#[cfg(any(feature = "m1-self-test", feature = "m3-entry-self-test"))]
+use x86_64::structures::paging::Size4KiB;
+#[cfg(feature = "m1-self-test")]
+use x86_64::structures::paging::Translate;
+#[cfg(any(feature = "m1-self-test", feature = "m3-entry-self-test"))]
+use x86_64::PhysAddr;
+#[cfg(any(
+    feature = "m1-self-test",
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test"
+))]
+use x86_64::VirtAddr;
 
 #[cfg(feature = "m1-self-test")]
 const SCRATCH_PAGE_ADDRESS: u64 = 0xffff_8000_0000_0000;
 #[cfg(feature = "m1-self-test")]
 const TEST_PAGE_VALUE: u64 = 0x434c_4541_4e53_4c41;
-const SYSCALL_ENTRY_RFLAGS_MASK: u64 = (1u64 << RFLAGS_TRAP_FLAG_BIT)
-    | (1u64 << RFLAGS_INTERRUPT_ENABLE_BIT)
-    | (1u64 << RFLAGS_DIRECTION_FLAG_BIT)
-    | (0b11u64 << RFLAGS_IOPL_SHIFT)
-    | (1u64 << RFLAGS_NESTED_TASK_BIT)
-    | (1u64 << RFLAGS_RESUME_FLAG_BIT)
-    | (1u64 << RFLAGS_ALIGNMENT_CHECK_BIT);
 #[cfg(feature = "m2-timer-self-test")]
 const TIMER_SELF_TEST_REQUIRED_TICKS: u64 = 4;
 #[cfg(feature = "m2-double-fault-self-test")]
@@ -251,19 +332,8 @@ const USER_TEST_PROCESS_COUNT: usize = 2;
 const USER_TEST_PROCESS_ONE_VALUE: u64 = 0x5052_4f43_4553_5331;
 #[cfg(feature = "m3-address-space-self-test")]
 const USER_TEST_PROCESS_TWO_VALUE: u64 = 0x5052_4f43_4553_5332;
-const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
-const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 #[cfg(feature = "m3-address-space-self-test")]
 const ADDRESS_SPACE_SWITCH_OK_MARKER: &str = "[MM  ] address-space switch OK";
-const SYSCALL_ABI_VERSION: u64 = 1;
-const SYSCALL_NR_VERSION: u64 = 0;
-const SYSCALL_NR_READ_U64: u64 = 1;
-const SYSCALL_NR_FINISH: u64 = 2;
-const SYSCALL_NR_IPC_SEND: u64 = 3;
-const SYSCALL_ENOSYS: u64 = u64::MAX - 37;
-const SYSCALL_EACCES: u64 = u64::MAX - 12;
-const SYSCALL_EINVAL: u64 = u64::MAX - 21;
-const SYSCALL_ESTALE: u64 = u64::MAX - 116;
 #[cfg(feature = "m3-syscall-self-test")]
 const SYSCALL_PASS_MARKER: &str = "[SYSC] syscall entry/return PASS";
 #[cfg(feature = "m3-syscall-self-test")]
@@ -356,7 +426,7 @@ fn run_inner() -> Result<(), &'static str> {
     }
 
     serial_write_line("[MM  ] paging initialized");
-    KERNEL_ROOT_FRAME.store(current_root_frame_address(), Ordering::Relaxed);
+    set_kernel_root_frame(current_root_frame_address());
 
     #[cfg(feature = "m1-self-test")]
     {
@@ -416,15 +486,6 @@ fn run_inner() -> Result<(), &'static str> {
         serial_write_line("[KERN] scheduler initialized");
         start_scheduler()
     }
-}
-
-fn inspect_current_mapping() -> Result<(u64, u64), &'static str> {
-    let mapper = unsafe { current_offset_page_table() };
-    let virtual_address = VirtAddr::from_ptr(run as *const ());
-    let physical_address = mapper
-        .translate_addr(virtual_address)
-        .ok_or("failed to inspect the current kernel mapping")?;
-    Ok((virtual_address.as_u64(), physical_address.as_u64()))
 }
 
 #[cfg(feature = "m1-self-test")]
@@ -492,68 +553,6 @@ fn unmap_scratch_page(
         .map_err(|_| "failed to unmap the scratch virtual page")
 }
 
-unsafe fn current_offset_page_table() -> OffsetPageTable<'static> {
-    unsafe { offset_page_table_for_root(current_root_frame_address()) }
-}
-
-fn reserve_mapping_page_tables(
-    ranges: &mut BootReservedRanges,
-    virtual_address: u64,
-) -> Result<(), &'static str> {
-    let address = VirtAddr::new(virtual_address);
-    let (level_4_frame, _) = Cr3::read();
-    ranges.push(ReservedRange::from_base_and_size(
-        level_4_frame.start_address().as_u64(),
-        PAGE_SIZE,
-    ))?;
-
-    let level_4_table = unsafe {
-        &*((level_4_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
-    };
-    let level_3_frame = level_4_table[address.p4_index()]
-        .frame()
-        .map_err(|_| "kernel address was not backed by a valid level-3 page-table frame")?;
-    ranges.push(ReservedRange::from_base_and_size(
-        level_3_frame.start_address().as_u64(),
-        PAGE_SIZE,
-    ))?;
-
-    let level_3_table = unsafe {
-        &*((level_3_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
-    };
-    let level_3_entry = &level_3_table[address.p3_index()];
-    if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
-        return Ok(());
-    }
-
-    let level_2_frame = level_3_entry
-        .frame()
-        .map_err(|_| "kernel address was not backed by a valid level-2 page-table frame")?;
-    ranges.push(ReservedRange::from_base_and_size(
-        level_2_frame.start_address().as_u64(),
-        PAGE_SIZE,
-    ))?;
-
-    let level_2_table = unsafe {
-        &*((level_2_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
-    };
-    let level_2_entry = &level_2_table[address.p2_index()];
-    if level_2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
-        return Ok(());
-    }
-
-    let level_1_frame = level_2_entry
-        .frame()
-        .map_err(|_| "kernel address was not backed by a valid level-1 page-table frame")?;
-    ranges.push(ReservedRange::from_base_and_size(
-        level_1_frame.start_address().as_u64(),
-        PAGE_SIZE,
-    ))?;
-    Ok(())
-}
-
-static mut EXPECTED_PAGE_FAULT_ADDRESS: u64 = 0;
-
 #[cfg(feature = "m3-entry-self-test")]
 #[derive(Clone, Copy)]
 struct UserspaceTestState {
@@ -612,69 +611,6 @@ struct UserspaceAddressSpaceTestPage {
     probe_address: u64,
 }
 
-#[derive(Clone, Copy)]
-struct OwnedUserMapping {
-    virtual_address: u64,
-    frame_address: u64,
-}
-
-impl OwnedUserMapping {
-    const EMPTY: Self = Self {
-        virtual_address: 0,
-        frame_address: 0,
-    };
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy)]
-struct ProcessAddressSpace {
-    root_frame: u64,
-    page_table_frames: [u64; MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES],
-    page_table_frame_count: usize,
-    user_mappings: [OwnedUserMapping; MAX_ADDRESS_SPACE_USER_MAPPINGS],
-    user_mapping_count: usize,
-}
-
-#[allow(dead_code)]
-impl ProcessAddressSpace {
-    fn new(root_frame: u64) -> Result<Self, &'static str> {
-        let mut address_space = Self {
-            root_frame,
-            page_table_frames: [0; MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES],
-            page_table_frame_count: 0,
-            user_mappings: [OwnedUserMapping::EMPTY; MAX_ADDRESS_SPACE_USER_MAPPINGS],
-            user_mapping_count: 0,
-        };
-        address_space.record_page_table_frame(root_frame)?;
-        Ok(address_space)
-    }
-
-    fn record_page_table_frame(&mut self, frame_address: u64) -> Result<(), &'static str> {
-        if self.page_table_frame_count == self.page_table_frames.len() {
-            return Err("process address-space page-table tracking capacity exceeded");
-        }
-        self.page_table_frames[self.page_table_frame_count] = frame_address;
-        self.page_table_frame_count += 1;
-        Ok(())
-    }
-
-    fn record_user_mapping(
-        &mut self,
-        virtual_address: u64,
-        frame_address: u64,
-    ) -> Result<(), &'static str> {
-        if self.user_mapping_count == self.user_mappings.len() {
-            return Err("process address-space mapping tracking capacity exceeded");
-        }
-        self.user_mappings[self.user_mapping_count] = OwnedUserMapping {
-            virtual_address,
-            frame_address,
-        };
-        self.user_mapping_count += 1;
-        Ok(())
-    }
-}
-
 #[cfg(feature = "m3-address-space-self-test")]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UserspaceAddressSpaceStage {
@@ -725,20 +661,12 @@ static USERSPACE_IPC_TEST_STATE: GlobalCell<Option<UserspaceIpcTestState>> = Glo
 static SYSCALL_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "m3-syscall-self-test")]
 static SYSCALL_DF_SANITIZED_OBSERVED: AtomicBool = AtomicBool::new(false);
-static KERNEL_TICKS: AtomicU64 = AtomicU64::new(0);
-static KERNEL_ROOT_FRAME: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(
     feature = "m2-double-fault-self-test",
     feature = "m3-address-space-self-test",
     feature = "m3-entry-self-test"
 ))]
 static DOUBLE_FAULT_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-fn initialize_timer() {
-    mask_legacy_pic();
-    enable_local_apic();
-    program_local_apic_timer();
-}
 
 #[cfg(feature = "m3-entry-self-test")]
 fn userspace_test_size() -> usize {
@@ -826,257 +754,6 @@ fn userspace_ipc_test_state() -> Result<&'static mut UserspaceIpcTestState, &'st
             .as_mut()
             .ok_or("userspace IPC self-test state was not initialized")
     }
-}
-
-fn current_syscall_caller_pid() -> Result<u64, &'static str> {
-    let thread =
-        without_interrupts(|| with_scheduler(|scheduler| scheduler.current_thread_descriptor()))?;
-    if thread.kind != ThreadKind::User {
-        return Err("syscall caller thread was not userspace");
-    }
-    if thread.owner_process_id == KERNEL_PROCESS_ID {
-        return Err("syscall caller process id was invalid");
-    }
-    let registry = unsafe { &*process_registry_mut() };
-    let process = registry
-        .get(thread.owner_process_id)
-        .ok_or("syscall caller process was not present in registry")?;
-    let active_root = current_root_frame_address();
-    if process.address_space_root != active_root {
-        return Err("syscall caller process did not match active address space");
-    }
-    let process_for_root = registry
-        .find_by_address_space_root(active_root)
-        .ok_or("active address space did not map to a registered process")?;
-    if process_for_root.id != process.id {
-        return Err("syscall caller thread process did not match active owner root");
-    }
-    Ok(process.id)
-}
-
-#[allow(dead_code)]
-fn zero_page(frame: u64) {
-    unsafe {
-        ptr::write_bytes(
-            (PHYSICAL_MEMORY_OFFSET + frame) as *mut u8,
-            0,
-            PAGE_SIZE as usize,
-        );
-    }
-}
-
-#[allow(dead_code)]
-fn map_userspace_page(
-    mapper: &mut OffsetPageTable<'_>,
-    page: Page<Size4KiB>,
-    frame: PhysFrame<Size4KiB>,
-    flags: PageTableFlags,
-    allocator: &mut PageAllocator,
-) -> Result<(), &'static str> {
-    without_write_protect(|| unsafe { mapper.map_to(page, frame, flags, allocator) })
-        .map(|flush| flush.flush())
-        .map_err(|_| "failed to map userspace page")
-}
-
-#[allow(dead_code)]
-fn unmap_userspace_page(
-    mapper: &mut OffsetPageTable<'_>,
-    page: Page<Size4KiB>,
-) -> Result<PhysFrame<Size4KiB>, &'static str> {
-    without_write_protect(|| mapper.unmap(page))
-        .map(|(frame, flush)| {
-            flush.flush();
-            frame
-        })
-        .map_err(|_| "failed to unmap userspace page")
-}
-
-struct PageWalkFlags {
-    #[allow(dead_code)]
-    path: PageTableFlags,
-    leaf: PageTableFlags,
-    all_levels_user_accessible: bool,
-}
-
-fn current_root_frame_address() -> u64 {
-    Cr3::read().0.start_address().as_u64()
-}
-
-unsafe fn offset_page_table_for_root(root_frame: u64) -> OffsetPageTable<'static> {
-    let level_4_address = root_frame + PHYSICAL_MEMORY_OFFSET;
-    let level_4_table = unsafe { &mut *(level_4_address as *mut PageTable) };
-    unsafe { OffsetPageTable::new(level_4_table, VirtAddr::new(PHYSICAL_MEMORY_OFFSET)) }
-}
-
-#[allow(dead_code)]
-unsafe fn page_table_ref(frame_address: u64) -> &'static PageTable {
-    unsafe { &*((frame_address + PHYSICAL_MEMORY_OFFSET) as *const PageTable) }
-}
-
-#[allow(dead_code)]
-unsafe fn page_table_mut(frame_address: u64) -> &'static mut PageTable {
-    unsafe { &mut *((frame_address + PHYSICAL_MEMORY_OFFSET) as *mut PageTable) }
-}
-
-fn walk_page_flags_in_root(
-    root_frame: u64,
-    address: VirtAddr,
-) -> Result<PageWalkFlags, &'static str> {
-    let level_4_table = unsafe { page_table_ref(root_frame) };
-    let level_4_entry = &level_4_table[address.p4_index()];
-    if level_4_entry.is_unused() {
-        return Err("virtual address was not backed by a valid level-4 entry");
-    }
-    let level_3_frame = level_4_entry
-        .frame()
-        .map_err(|_| "virtual address was not backed by a valid level-3 frame")?;
-
-    let level_3_table = unsafe {
-        &*((level_3_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
-    };
-    let level_3_entry = &level_3_table[address.p3_index()];
-    if level_3_entry.is_unused() {
-        return Err("virtual address was not backed by a valid level-3 entry");
-    }
-    let mut all_levels_user_accessible = level_4_entry
-        .flags()
-        .contains(PageTableFlags::USER_ACCESSIBLE)
-        && level_3_entry
-            .flags()
-            .contains(PageTableFlags::USER_ACCESSIBLE);
-    if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
-        return Ok(PageWalkFlags {
-            path: level_4_entry.flags() | level_3_entry.flags(),
-            leaf: level_3_entry.flags(),
-            all_levels_user_accessible,
-        });
-    }
-    let level_2_frame = level_3_entry
-        .frame()
-        .map_err(|_| "virtual address was not backed by a valid level-2 frame")?;
-
-    let level_2_table = unsafe {
-        &*((level_2_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
-    };
-    let level_2_entry = &level_2_table[address.p2_index()];
-    if level_2_entry.is_unused() {
-        return Err("virtual address was not backed by a valid level-2 entry");
-    }
-    all_levels_user_accessible = all_levels_user_accessible
-        && level_2_entry
-            .flags()
-            .contains(PageTableFlags::USER_ACCESSIBLE);
-    if level_2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
-        return Ok(PageWalkFlags {
-            path: level_4_entry.flags() | level_3_entry.flags() | level_2_entry.flags(),
-            leaf: level_2_entry.flags(),
-            all_levels_user_accessible,
-        });
-    }
-    let level_1_frame = level_2_entry
-        .frame()
-        .map_err(|_| "virtual address was not backed by a valid level-1 frame")?;
-
-    let level_1_table = unsafe {
-        &*((level_1_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
-    };
-    let level_1_entry = &level_1_table[address.p1_index()];
-    if level_1_entry.is_unused() {
-        return Err("virtual address was not mapped");
-    }
-    all_levels_user_accessible = all_levels_user_accessible
-        && level_1_entry
-            .flags()
-            .contains(PageTableFlags::USER_ACCESSIBLE);
-    Ok(PageWalkFlags {
-        path: level_4_entry.flags()
-            | level_3_entry.flags()
-            | level_2_entry.flags()
-            | level_1_entry.flags(),
-        leaf: level_1_entry.flags(),
-        all_levels_user_accessible,
-    })
-}
-
-fn walk_page_flags(address: VirtAddr) -> Result<PageWalkFlags, &'static str> {
-    walk_page_flags_in_root(current_root_frame_address(), address)
-}
-
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m3-syscall-self-test"
-))]
-fn page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'static str> {
-    Ok(walk_page_flags(address)?.path)
-}
-
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m3-syscall-self-test"
-))]
-fn leaf_page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'static str> {
-    Ok(walk_page_flags(address)?.leaf)
-}
-
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-fn relevant_userspace_leaf_flags(flags: PageTableFlags) -> PageTableFlags {
-    flags
-        & (PageTableFlags::PRESENT
-            | PageTableFlags::WRITABLE
-            | PageTableFlags::NO_EXECUTE
-            | PageTableFlags::USER_ACCESSIBLE)
-}
-
-#[cfg(feature = "m3-entry-self-test")]
-fn validate_userspace_mappings() -> Result<(), &'static str> {
-    let code_path_flags = page_flags_for_address(VirtAddr::new(USER_TEST_CODE_ADDRESS))?;
-    let code_leaf_flags = leaf_page_flags_for_address(VirtAddr::new(USER_TEST_CODE_ADDRESS))?;
-    if !code_path_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-        || code_leaf_flags.contains(PageTableFlags::WRITABLE)
-        || code_leaf_flags.contains(PageTableFlags::NO_EXECUTE)
-    {
-        return Err("userspace code mapping flags were incorrect");
-    }
-
-    let stack_path_flags = page_flags_for_address(VirtAddr::new(USER_TEST_STACK_ADDRESS))?;
-    let stack_leaf_flags = leaf_page_flags_for_address(VirtAddr::new(USER_TEST_STACK_ADDRESS))?;
-    let expected_stack_flags = PageTableFlags::PRESENT
-        | PageTableFlags::WRITABLE
-        | PageTableFlags::NO_EXECUTE
-        | PageTableFlags::USER_ACCESSIBLE;
-    if !stack_path_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-        || relevant_userspace_leaf_flags(stack_leaf_flags) != expected_stack_flags
-    {
-        return Err("userspace stack mapping flags were incorrect");
-    }
-
-    let kernel_flags = page_flags_for_address(VirtAddr::from_ptr(run as *const ()))?;
-    let kernel_leaf_flags = leaf_page_flags_for_address(VirtAddr::from_ptr(run as *const ()))?;
-    if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-        || kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-    {
-        return Err("kernel mapping unexpectedly became user accessible");
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "m3-address-space-self-test")]
-fn page_flags_for_address_in_root(
-    root_frame: u64,
-    address: VirtAddr,
-) -> Result<PageTableFlags, &'static str> {
-    Ok(walk_page_flags_in_root(root_frame, address)?.path)
-}
-
-#[cfg(feature = "m3-address-space-self-test")]
-fn leaf_page_flags_for_address_in_root(
-    root_frame: u64,
-    address: VirtAddr,
-) -> Result<PageTableFlags, &'static str> {
-    Ok(walk_page_flags_in_root(root_frame, address)?.leaf)
 }
 
 #[cfg(feature = "m3-entry-self-test")]
@@ -1251,7 +928,7 @@ fn install_userspace_syscall_payload(allocator: &mut PageAllocator) -> Result<()
     }
     SYSCALL_CALL_COUNT.store(0, Ordering::Relaxed);
     SYSCALL_DF_SANITIZED_OBSERVED.store(false, Ordering::Relaxed);
-    KERNEL_TICKS.store(0, Ordering::Relaxed);
+    reset_kernel_ticks();
     Ok(())
 }
 
@@ -1458,242 +1135,6 @@ fn install_userspace_ipc_payload(allocator: &mut PageAllocator) -> Result<(), &'
     Ok(())
 }
 
-fn initialize_syscall_abi(kernel_stack_top: u64) -> Result<(), &'static str> {
-    if kernel_stack_top % 16 != 0 {
-        return Err("syscall kernel stack top must be 16-byte aligned");
-    }
-
-    let gdt_state = userspace_gdt_state()?;
-    validate_sysret_selector_triplet(
-        gdt_state.user_sysret_selector_base,
-        gdt_state.user_data_selector,
-        gdt_state.user_code_selector,
-    )?;
-    let star = ((gdt_state.user_sysret_selector_base.0 as u64) << 48)
-        | ((gdt_state.code_selector.0 as u64) << 32);
-    set_syscall_kernel_stack(kernel_stack_top)?;
-    unsafe {
-        SYSCALL_SCRATCH_USER_RSP = 0;
-    }
-    write_msr(IA32_STAR_MSR, star);
-    write_msr(IA32_LSTAR_MSR, clean_slate_syscall_entry as usize as u64);
-    write_msr(IA32_FMASK_MSR, SYSCALL_ENTRY_RFLAGS_MASK);
-    write_msr(IA32_EFER_MSR, read_msr(IA32_EFER_MSR) | IA32_EFER_SCE);
-    Ok(())
-}
-
-fn validate_sysret_selector_triplet(
-    base: SegmentSelector,
-    user_data: SegmentSelector,
-    user_code: SegmentSelector,
-) -> Result<(), &'static str> {
-    let base_bits = base.0 as u64;
-    let expected_user_data = base_bits
-        .checked_add(8)
-        .ok_or("SYSRET selector base overflowed while validating SS offset")?;
-    let expected_user_code = base_bits
-        .checked_add(16)
-        .ok_or("SYSRET selector base overflowed while validating CS offset")?;
-    if (user_data.0 as u64) != expected_user_data {
-        return Err("GDT SYSRET user data selector was not base+8");
-    }
-    if (user_code.0 as u64) != expected_user_code {
-        return Err("GDT SYSRET user code selector was not base+16");
-    }
-    Ok(())
-}
-
-/// Compares user RFLAGS captured at syscall entry against an expected value while
-/// ignoring the arithmetic status flags, which user code changes freely.
-#[allow(dead_code)]
-fn syscall_return_rflags_match(observed: u64, expected: u64) -> bool {
-    (observed & !RFLAGS_STATUS_FLAGS_MASK) == (expected & !RFLAGS_STATUS_FLAGS_MASK)
-}
-
-fn validate_canonical_user_return_state(frame: &SyscallContext) -> Result<(), &'static str> {
-    if frame.user_rip >= USER_CANONICAL_TOP_EXCLUSIVE {
-        return Err("syscall return RIP was not a canonical userspace address");
-    }
-    if frame.user_rsp >= USER_CANONICAL_TOP_EXCLUSIVE {
-        return Err("syscall return RSP was not a canonical userspace address");
-    }
-    Ok(())
-}
-
-fn validate_user_pointer_range(pointer: u64, length: u64) -> Result<(), &'static str> {
-    if length == 0 {
-        return Err("userspace pointer range length must be non-zero");
-    }
-    let end_inclusive = pointer
-        .checked_add(length - 1)
-        .ok_or("userspace pointer range overflowed")?;
-    if pointer >= USER_CANONICAL_TOP_EXCLUSIVE || end_inclusive >= USER_CANONICAL_TOP_EXCLUSIVE {
-        return Err("userspace pointer range was outside canonical userspace");
-    }
-
-    let mut cursor = align_down(pointer, PAGE_SIZE);
-    let end_page = align_down(end_inclusive, PAGE_SIZE);
-    loop {
-        let walk = walk_page_flags(VirtAddr::new(cursor))?;
-        if !walk.all_levels_user_accessible
-            || !walk.leaf.contains(PageTableFlags::PRESENT)
-            || !walk.leaf.contains(PageTableFlags::USER_ACCESSIBLE)
-        {
-            return Err("userspace pointer range was not mapped as user accessible");
-        }
-        if cursor == end_page {
-            break;
-        }
-        cursor = cursor
-            .checked_add(PAGE_SIZE)
-            .ok_or("userspace pointer range page walk overflowed")?;
-    }
-    Ok(())
-}
-
-#[cfg(feature = "m3-syscall-self-test")]
-fn handle_syscall_read_u64(frame: &mut SyscallContext) {
-    if frame.rsi != size_of::<u64>() as u64 {
-        frame.rax = SYSCALL_EINVAL;
-        return;
-    }
-    if validate_user_pointer_range(frame.rdi, frame.rsi).is_err() {
-        frame.rax = SYSCALL_EINVAL;
-        return;
-    }
-    frame.rax = unsafe { ptr::read_unaligned(frame.rdi as *const u64) };
-    SYSCALL_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
-}
-
-fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
-    let length = match usize::try_from(frame.rdx) {
-        Ok(length) => length,
-        Err(_) => {
-            frame.rax = SYSCALL_EINVAL;
-            return;
-        }
-    };
-    if length == 0 || length > IPC_MAX_MESSAGE_BYTES {
-        frame.rax = SYSCALL_EINVAL;
-        return;
-    }
-    if validate_user_pointer_range(frame.rsi, frame.rdx).is_err() {
-        frame.rax = SYSCALL_EINVAL;
-        return;
-    }
-    let mut copied = [0u8; IPC_MAX_MESSAGE_BYTES];
-    unsafe {
-        ptr::copy_nonoverlapping(frame.rsi as *const u8, copied.as_mut_ptr(), length);
-    }
-    let sender_pid = match current_syscall_caller_pid() {
-        Ok(sender_pid) => sender_pid,
-        Err(_) => {
-            frame.rax = SYSCALL_EACCES;
-            return;
-        }
-    };
-    let table = unsafe { endpoint_table_mut() };
-    match table.send_message(sender_pid, frame.rdi, &copied[..length]) {
-        Ok(sent) => {
-            #[cfg(feature = "m3-ipc-self-test")]
-            if let Some(state) = unsafe { (&mut *USERSPACE_IPC_TEST_STATE.get()).as_mut() } {
-                if sender_pid == USERSPACE_IPC_TEST_PID && !state.send_ok_observed {
-                    kernel_log_fmt(format_args!("{IPC_SEND_PASS_MARKER}{sent}\n"));
-                    state.send_ok_observed = true;
-                }
-            }
-            frame.rax = sent as u64;
-        }
-        Err(IpcSendError::Unauthorized) => {
-            #[cfg(feature = "m3-ipc-self-test")]
-            if let Some(state) = unsafe { (&mut *USERSPACE_IPC_TEST_STATE.get()).as_mut() } {
-                if sender_pid == USERSPACE_IPC_UNAUTHORIZED_TEST_PID {
-                    state.unauthorized_syscall_observed = true;
-                }
-            }
-            frame.rax = SYSCALL_EACCES;
-        }
-        Err(IpcSendError::InvalidCapability) => {
-            #[cfg(feature = "m3-ipc-self-test")]
-            if let Some(state) = unsafe { (&mut *USERSPACE_IPC_TEST_STATE.get()).as_mut() } {
-                if sender_pid == USERSPACE_IPC_UNAUTHORIZED_TEST_PID {
-                    state.unauthorized_syscall_observed = true;
-                }
-            }
-            frame.rax = SYSCALL_EACCES;
-        }
-        Err(IpcSendError::StaleCapability) => frame.rax = SYSCALL_ESTALE,
-        Err(IpcSendError::InvalidMessageLength) => frame.rax = SYSCALL_EINVAL,
-    }
-}
-
-#[cfg(feature = "m3-syscall-self-test")]
-fn maybe_validate_syscall_entry_flags(frame: &SyscallContext) {
-    if bit(frame.user_rflags, RFLAGS_DIRECTION_FLAG_BIT as u32) == 0 {
-        return;
-    }
-
-    if bit(read_rflags(), RFLAGS_DIRECTION_FLAG_BIT as u32) != 0 {
-        fatal_kernel_error("syscall entry did not clear DF before running kernel code");
-    }
-    if !SYSCALL_DF_SANITIZED_OBSERVED.swap(true, Ordering::Relaxed) {
-        kernel_log_line(SYSCALL_DF_SANITIZED_MARKER);
-    }
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 {
-    let frame = unsafe { &mut *context };
-    if let Err(message) = validate_canonical_user_return_state(frame) {
-        fatal_kernel_error(message);
-    }
-
-    match frame.rax {
-        SYSCALL_NR_VERSION => {
-            #[cfg(feature = "m3-syscall-self-test")]
-            maybe_validate_syscall_entry_flags(frame);
-            frame.rax = SYSCALL_ABI_VERSION;
-        }
-        #[cfg(feature = "m3-syscall-self-test")]
-        SYSCALL_NR_READ_U64 => handle_syscall_read_u64(frame),
-        #[cfg(not(feature = "m3-syscall-self-test"))]
-        SYSCALL_NR_READ_U64 => frame.rax = SYSCALL_ENOSYS,
-        #[cfg(feature = "m3-syscall-self-test")]
-        SYSCALL_NR_FINISH => {
-            let state = match userspace_syscall_test_state() {
-                Ok(state) => state,
-                Err(message) => fatal_kernel_error(message),
-            };
-            if frame.user_rsp != state.user_stack_pointer
-                || !syscall_return_rflags_match(frame.user_rflags, USER_TEST_RFLAGS)
-            {
-                fatal_kernel_error("syscall return frame contained unexpected userspace state");
-            }
-            if frame.user_rip < USER_TEST_CODE_ADDRESS
-                || frame.user_rip >= USER_TEST_CODE_ADDRESS + PAGE_SIZE
-            {
-                fatal_kernel_error("syscall return RIP escaped the userspace code page");
-            }
-            let call_count = SYSCALL_CALL_COUNT.load(Ordering::Relaxed);
-            let ticks = KERNEL_TICKS.load(Ordering::Relaxed);
-            if call_count >= SYSCALL_TEST_REQUIRED_CALLS
-                && ticks >= TASK_REQUIRED_PREEMPTIONS
-                && SYSCALL_DF_SANITIZED_OBSERVED.load(Ordering::Relaxed)
-            {
-                kernel_log_line(SYSCALL_PASS_MARKER);
-                qemu_exit(QEMU_EXIT_SUCCESS)
-            }
-            frame.rax = 0;
-        }
-        #[cfg(not(feature = "m3-syscall-self-test"))]
-        SYSCALL_NR_FINISH => frame.rax = SYSCALL_ENOSYS,
-        SYSCALL_NR_IPC_SEND => handle_syscall_ipc_send(frame),
-        _ => frame.rax = SYSCALL_ENOSYS,
-    }
-
-    frame as *mut SyscallContext as u64
-}
-
 #[cfg(feature = "m3-entry-self-test")]
 fn start_userspace_entry_self_test(allocator: &mut PageAllocator) -> ! {
     if let Err(message) = install_userspace_payload(allocator) {
@@ -1775,158 +1216,6 @@ fn start_userspace_ipc_self_test(allocator: &mut PageAllocator) -> ! {
     unsafe { restore_task_context(frame_pointer) }
 }
 
-#[allow(dead_code)]
-struct AddressSpaceFrameAllocator<'a, 'space> {
-    allocator: &'a mut PageAllocator,
-    address_space: &'space mut ProcessAddressSpace,
-}
-
-#[allow(dead_code)]
-impl<'a, 'space> AddressSpaceFrameAllocator<'a, 'space> {
-    fn new(
-        allocator: &'a mut PageAllocator,
-        address_space: &'space mut ProcessAddressSpace,
-    ) -> Self {
-        Self {
-            allocator,
-            address_space,
-        }
-    }
-}
-
-#[allow(dead_code)]
-unsafe impl FrameAllocator<Size4KiB> for AddressSpaceFrameAllocator<'_, '_> {
-    fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
-        let frame_address = self.allocator.allocate_page()?;
-        if self
-            .address_space
-            .record_page_table_frame(frame_address)
-            .is_err()
-        {
-            unsafe {
-                let _ = self.allocator.free_page(frame_address);
-            }
-            return None;
-        }
-        Some(PhysFrame::containing_address(PhysAddr::new(frame_address)))
-    }
-}
-
-#[allow(dead_code)]
-fn activate_address_space_root(root_frame: u64) {
-    let flags = Cr3::read().1;
-    unsafe {
-        Cr3::write(
-            PhysFrame::containing_address(PhysAddr::new(root_frame)),
-            flags,
-        );
-    }
-}
-
-#[allow(dead_code)]
-fn sanitize_kernel_root_entries(root: &mut PageTable, user_region_base: VirtAddr) {
-    let user_slot_index = ((user_region_base.as_u64() >> 39) & 0x1ff) as usize;
-    for (index, entry) in root.iter_mut().enumerate() {
-        if index == user_slot_index {
-            entry.set_unused();
-            continue;
-        }
-        if entry.is_unused() {
-            continue;
-        }
-        entry.set_addr(
-            entry.addr(),
-            entry.flags() & !PageTableFlags::USER_ACCESSIBLE,
-        );
-    }
-}
-
-#[allow(dead_code)]
-fn validate_supervisor_only_kernel_root_entries(
-    root: &PageTable,
-    user_region_base: VirtAddr,
-) -> Result<(), &'static str> {
-    let user_slot_index = ((user_region_base.as_u64() >> 39) & 0x1ff) as usize;
-    for (index, entry) in root.iter().enumerate() {
-        if index == user_slot_index || entry.is_unused() {
-            continue;
-        }
-        if entry.flags().contains(PageTableFlags::USER_ACCESSIBLE) {
-            return Err("inherited kernel root entry remained user accessible");
-        }
-    }
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn clone_kernel_mappings_into_address_space(
-    root_frame: u64,
-    user_region_base: VirtAddr,
-) -> Result<(), &'static str> {
-    let source_root = unsafe { page_table_ref(current_root_frame_address()) };
-    let destination_root = unsafe { page_table_mut(root_frame) };
-    destination_root.zero();
-    destination_root.clone_from(source_root);
-    sanitize_kernel_root_entries(destination_root, user_region_base);
-    validate_supervisor_only_kernel_root_entries(destination_root, user_region_base)
-}
-
-#[allow(dead_code)]
-fn create_process_address_space(
-    allocator: &mut PageAllocator,
-    user_region_base: VirtAddr,
-) -> Result<ProcessAddressSpace, &'static str> {
-    let root_frame = allocator
-        .allocate_page()
-        .ok_or("allocator could not provide a page-table root for a process")?;
-    zero_page(root_frame);
-    let address_space = ProcessAddressSpace::new(root_frame);
-    if address_space.is_err() {
-        unsafe {
-            let _ = allocator.free_page(root_frame);
-        }
-    }
-    let address_space = address_space?;
-    if let Err(message) = clone_kernel_mappings_into_address_space(root_frame, user_region_base) {
-        unsafe {
-            let _ = allocator.free_page(root_frame);
-        }
-        return Err(message);
-    }
-    Ok(address_space)
-}
-
-#[allow(dead_code)]
-fn map_process_page(
-    address_space: &mut ProcessAddressSpace,
-    virtual_address: u64,
-    frame_address: u64,
-    flags: PageTableFlags,
-    allocator: &mut PageAllocator,
-) -> Result<(), &'static str> {
-    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virtual_address));
-    let frame = PhysFrame::containing_address(PhysAddr::new(frame_address));
-    let mut mapper = unsafe { offset_page_table_for_root(address_space.root_frame) };
-    {
-        let mut tracking_allocator = AddressSpaceFrameAllocator::new(allocator, address_space);
-        without_write_protect(|| unsafe {
-            mapper.map_to(page, frame, flags, &mut tracking_allocator)
-        })
-        .map(|flush| flush.flush())
-        .map_err(|_| "failed to map an address-space page")?;
-    }
-    address_space.record_user_mapping(virtual_address, frame_address)
-}
-
-#[allow(dead_code)]
-fn translate_address_in_root(root_frame: u64, address: VirtAddr) -> Result<u64, &'static str> {
-    let mapper = unsafe { offset_page_table_for_root(root_frame) };
-    mapper
-        .translate_addr(address)
-        .map(|translated| translated.as_u64())
-        .ok_or("virtual address was not translated in the target address space")
-}
-
 #[cfg(feature = "m3-address-space-self-test")]
 fn initialize_userspace_address_space_page(
     frame_address: u64,
@@ -1955,37 +1244,6 @@ fn copy_userspace_address_space_payload(frame_address: u64) {
             payload_size,
         );
     }
-}
-
-#[allow(dead_code)]
-fn destroy_process_address_space(
-    address_space: &ProcessAddressSpace,
-    allocator: &mut PageAllocator,
-) -> Result<(), &'static str> {
-    let mut mapper = unsafe { offset_page_table_for_root(address_space.root_frame) };
-    for mapping in address_space.user_mappings[..address_space.user_mapping_count]
-        .iter()
-        .rev()
-    {
-        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(mapping.virtual_address));
-        let frame = unmap_userspace_page(&mut mapper, page)?;
-        if frame.start_address().as_u64() != mapping.frame_address {
-            return Err("address-space teardown unmapped an unexpected frame");
-        }
-        unsafe {
-            free_frame(allocator, mapping.frame_address)?;
-        }
-    }
-    drop(mapper);
-    for frame_address in address_space.page_table_frames[..address_space.page_table_frame_count]
-        .iter()
-        .rev()
-    {
-        unsafe {
-            free_frame(allocator, *frame_address)?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(feature = "m3-address-space-self-test")]
@@ -2721,167 +1979,10 @@ fn handle_userspace_privileged_fault(context: &InterruptContext) -> ! {
     qemu_exit(QEMU_EXIT_SUCCESS)
 }
 
-#[unsafe(no_mangle)]
-extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> u64 {
-    let stack_pointer = context as u64;
-    let context = unsafe { &*context };
-    if context.vector as usize == TIMER_VECTOR {
-        #[cfg(feature = "m3-syscall-self-test")]
-        {
-            KERNEL_TICKS.fetch_add(1, Ordering::Relaxed);
-            acknowledge_timer_interrupt();
-            return stack_pointer;
-        }
-
-        #[cfg(not(feature = "m3-syscall-self-test"))]
-        #[cfg(feature = "m2-timer-self-test")]
-        {
-            KERNEL_TICKS.fetch_add(1, Ordering::Relaxed);
-            acknowledge_timer_interrupt();
-            return stack_pointer;
-        }
-
-        #[cfg(not(feature = "m3-syscall-self-test"))]
-        #[cfg(not(feature = "m2-timer-self-test"))]
-        {
-            KERNEL_TICKS.fetch_add(1, Ordering::Relaxed);
-            let next_stack_pointer =
-                match with_scheduler(|scheduler| scheduler.on_timer_interrupt(stack_pointer)) {
-                    Ok(next_stack_pointer) => next_stack_pointer,
-                    Err(message) => fatal_kernel_error(message),
-                };
-            if let Err(message) = prepare_current_scheduler_thread_dispatch() {
-                fatal_kernel_error(message);
-            }
-            acknowledge_timer_interrupt();
-            return next_stack_pointer;
-        }
-    }
-
-    if context.vector as usize == SPURIOUS_VECTOR {
-        return stack_pointer;
-    }
-
-    #[cfg(feature = "m3-ipc-self-test")]
-    if context.vector as usize == USER_TEST_VECTOR {
-        return match handle_userspace_ipc_entry(context) {
-            Ok(next_stack_pointer) => next_stack_pointer,
-            Err(message) => fatal_kernel_error(message),
-        };
-    }
-
-    #[cfg(feature = "m3-address-space-self-test")]
-    if context.vector as usize == USER_TEST_VECTOR {
-        return match handle_userspace_address_space_entry(context) {
-            Ok(next_stack_pointer) => next_stack_pointer,
-            Err(message) => fatal_kernel_error(message),
-        };
-    }
-
-    #[cfg(feature = "m3-entry-self-test")]
-    if context.vector as usize == USER_TEST_VECTOR {
-        return match handle_userspace_entry_trap(context) {
-            Ok(next_stack_pointer) => next_stack_pointer,
-            Err(message) => fatal_kernel_error(message),
-        };
-    }
-
-    handle_exception(context)
-}
-
-fn handle_exception(context: &InterruptContext) -> ! {
-    if context.vector as usize == DOUBLE_FAULT_VECTOR {
-        handle_double_fault(context)
-    }
-
-    #[cfg(feature = "m3-entry-self-test")]
-    if context.vector as usize == GENERAL_PROTECTION_VECTOR && selector_rpl(context.cs) == 3 {
-        handle_userspace_privileged_fault(context)
-    }
-
-    if context.vector as usize == PAGE_FAULT_VECTOR {
-        #[cfg(feature = "m3-address-space-self-test")]
-        if selector_rpl(context.cs) == 3 {
-            handle_userspace_address_space_page_fault(context)
-        }
-
-        #[cfg(feature = "m2-double-fault-self-test")]
-        if DOUBLE_FAULT_TEST_ACTIVE.load(Ordering::Relaxed) {
-            trigger_nested_double_fault();
-        }
-        let fault_address = Cr2::read()
-            .expect("CR2 must contain a canonical fault address")
-            .as_u64();
-        let cr3 = Cr3::read().0.start_address().as_u64();
-        let expected = unsafe { EXPECTED_PAGE_FAULT_ADDRESS };
-
-        kernel_log_line("[PF  ] page fault");
-        kernel_log_fmt(format_args!(
-            "[PF  ] rip={:#018x} cs={:#06x} rflags={:#018x}\n",
-            context.rip, context.cs, context.rflags
-        ));
-        kernel_log_fmt(format_args!(
-            "[PF  ] cr2={:#018x} cr3={:#018x} err={:#x} present={} write={} user={} instruction_fetch={}\n",
-            fault_address,
-            cr3,
-            context.error_code,
-            bit(context.error_code, 0),
-            bit(context.error_code, 1),
-            bit(context.error_code, 2),
-            bit(context.error_code, 4),
-        ));
-
-        if expected == fault_address {
-            kernel_log_line("[M1  ] PASS");
-            qemu_exit(QEMU_EXIT_SUCCESS)
-        }
-
-        kernel_log_line("[PF  ] unexpected page fault");
-        qemu_exit(QEMU_EXIT_FAILURE)
-    }
-
-    fn handle_double_fault(context: &InterruptContext) -> ! {
-        kernel_log_line("[DF  ] double fault");
-        kernel_log_fmt(format_args!(
-            "[DF  ] rip={:#018x} cs={:#06x} rflags={:#018x} err={:#x}\n",
-            context.rip, context.cs, context.rflags, context.error_code
-        ));
-
-        #[cfg(feature = "m2-double-fault-self-test")]
-        if DOUBLE_FAULT_TEST_ACTIVE.load(Ordering::Relaxed) {
-            if double_fault_stack_contains(context as *const _ as u64) {
-                kernel_log_line("[DF  ] emergency stack OK");
-                kernel_log_line("[DF  ] PASS");
-                qemu_exit(QEMU_EXIT_SUCCESS)
-            }
-            kernel_log_line("[DF  ] emergency stack missing");
-            qemu_exit(QEMU_EXIT_FAILURE)
-        }
-
-        qemu_exit(QEMU_EXIT_FAILURE)
-    }
-
-    kernel_log_fmt(format_args!(
-        "[EXC ] vector={} name={} err={:#x}\n",
-        context.vector,
-        exception_name(context.vector as usize),
-        context.error_code
-    ));
-    kernel_log_fmt(format_args!(
-        "[EXC ] rip={:#018x} cs={:#06x} rflags={:#018x}\n",
-        context.rip, context.cs, context.rflags
-    ));
-    kernel_log_fmt(format_args!(
-        "[EXC ] rax={:#018x} rbx={:#018x} rcx={:#018x} rdx={:#018x}\n",
-        context.rax, context.rbx, context.rcx, context.rdx
-    ));
-    qemu_exit(QEMU_EXIT_FAILURE)
-}
-
 #[cfg(feature = "m1-self-test")]
 fn trigger_expected_page_fault(address: *const u64) -> ! {
     unsafe {
-        EXPECTED_PAGE_FAULT_ADDRESS = address as u64;
+        set_expected_page_fault_address(address as u64);
         page_fault_probe(address);
     }
 }
@@ -2891,13 +1992,6 @@ fn trigger_expected_page_fault(address: *const u64) -> ! {
 unsafe fn page_fault_probe(address: *const u64) -> ! {
     let _ = unsafe { ptr::read_volatile(address) };
     qemu_exit(QEMU_EXIT_FAILURE)
-}
-
-fn report_timer_contract() {
-    serial_write_fmt(format_args!(
-        "[TIME] contract=lapic periodic divide=16 initial_count={} tick-rate=uncalibrated\n",
-        APIC_TIMER_INITIAL_COUNT
-    ));
 }
 
 #[cfg(feature = "m2-timer-self-test")]
@@ -2921,7 +2015,7 @@ extern "C" fn clean_slate_timer_self_test_task() -> ! {
         enable_interrupts();
         let mut first_tick_logged = false;
         loop {
-            let ticks = KERNEL_TICKS.load(Ordering::Relaxed);
+            let ticks = kernel_ticks();
             if ticks >= 1 && !first_tick_logged {
                 first_tick_logged = true;
                 serial_write_line("[TIME] tick=1");
@@ -2968,49 +2062,8 @@ fn double_fault_stack_contains(address: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
     use super::*;
-
-    #[test]
-    fn kernel_root_sanitization_clears_user_flags_and_user_slot() {
-        let user_region_base = VirtAddr::new(0x0000_4000_0000_0000);
-        let user_slot_index = ((user_region_base.as_u64() >> 39) & 0x1ff) as usize;
-        let mut root = PageTable::new();
-        root[0].set_addr(
-            PhysAddr::new(0x1000),
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-        );
-        root[user_slot_index].set_addr(
-            PhysAddr::new(0x2000),
-            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
-        );
-
-        sanitize_kernel_root_entries(&mut root, user_region_base);
-
-        assert!(!root[0].flags().contains(PageTableFlags::USER_ACCESSIBLE));
-        assert!(root[0].flags().contains(PageTableFlags::WRITABLE));
-        assert!(root[user_slot_index].is_unused());
-        assert_eq!(
-            validate_supervisor_only_kernel_root_entries(&root, user_region_base),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn kernel_root_validation_rejects_inherited_user_accessible_entry() {
-        let user_region_base = VirtAddr::new(0x0000_4000_0000_0000);
-        let user_slot_index = ((user_region_base.as_u64() >> 39) & 0x1ff) as usize;
-        let mut root = PageTable::new();
-        root[user_slot_index].set_unused();
-        root[511].set_addr(
-            PhysAddr::new(0x3000),
-            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
-        );
-
-        assert_eq!(
-            validate_supervisor_only_kernel_root_entries(&root, user_region_base),
-            Err("inherited kernel root entry remained user accessible")
-        );
-    }
 
     #[cfg(feature = "m3-entry-self-test")]
     #[test]
@@ -3159,127 +2212,5 @@ mod tests {
             validate_canonical_user_return_state(&bad_rsp),
             Err("syscall return RSP was not a canonical userspace address")
         );
-    }
-
-    #[test]
-    fn syscall_return_rflags_ignore_arithmetic_status_flags() {
-        let base = 0x202u64;
-        // ZF | PF set by a preceding `cmp` with equal operands.
-        assert!(syscall_return_rflags_match(base | 0x40 | 0x4, base));
-        // All status flags set.
-        assert!(syscall_return_rflags_match(
-            base | RFLAGS_STATUS_FLAGS_MASK,
-            base
-        ));
-        // DF, TF, or a cleared IF must still be rejected.
-        assert!(!syscall_return_rflags_match(
-            base | (1u64 << RFLAGS_DIRECTION_FLAG_BIT),
-            base
-        ));
-        assert!(!syscall_return_rflags_match(
-            base | (1u64 << RFLAGS_TRAP_FLAG_BIT),
-            base
-        ));
-        assert!(!syscall_return_rflags_match(0x2, base));
-        assert_eq!(RFLAGS_STATUS_FLAGS_MASK, 0x8d5);
-    }
-
-    #[test]
-    fn syscall_entry_fmask_clears_unsafe_user_flags() {
-        assert_ne!(
-            SYSCALL_ENTRY_RFLAGS_MASK & (1u64 << RFLAGS_INTERRUPT_ENABLE_BIT),
-            0
-        );
-        assert_ne!(
-            SYSCALL_ENTRY_RFLAGS_MASK & (1u64 << RFLAGS_DIRECTION_FLAG_BIT),
-            0
-        );
-        assert_ne!(
-            SYSCALL_ENTRY_RFLAGS_MASK & (1u64 << RFLAGS_TRAP_FLAG_BIT),
-            0
-        );
-        assert_ne!(
-            SYSCALL_ENTRY_RFLAGS_MASK & (1u64 << RFLAGS_NESTED_TASK_BIT),
-            0
-        );
-        assert_ne!(
-            SYSCALL_ENTRY_RFLAGS_MASK & (1u64 << RFLAGS_RESUME_FLAG_BIT),
-            0
-        );
-        assert_ne!(
-            SYSCALL_ENTRY_RFLAGS_MASK & (1u64 << RFLAGS_ALIGNMENT_CHECK_BIT),
-            0
-        );
-        assert_eq!(
-            SYSCALL_ENTRY_RFLAGS_MASK & (0b11u64 << RFLAGS_IOPL_SHIFT),
-            0b11u64 << RFLAGS_IOPL_SHIFT
-        );
-    }
-
-    #[test]
-    fn sysret_selector_triplet_requires_base_plus_offsets() {
-        let valid = validate_sysret_selector_triplet(
-            SegmentSelector(0x001b),
-            SegmentSelector(0x0023),
-            SegmentSelector(0x002b),
-        );
-        assert_eq!(valid, Ok(()));
-
-        let bad_data = validate_sysret_selector_triplet(
-            SegmentSelector(0x001b),
-            SegmentSelector(0x002b),
-            SegmentSelector(0x002b),
-        );
-        assert_eq!(
-            bad_data,
-            Err("GDT SYSRET user data selector was not base+8")
-        );
-
-        let bad_code = validate_sysret_selector_triplet(
-            SegmentSelector(0x001b),
-            SegmentSelector(0x0023),
-            SegmentSelector(0x0033),
-        );
-        assert_eq!(
-            bad_code,
-            Err("GDT SYSRET user code selector was not base+16")
-        );
-    }
-
-    #[cfg(any(
-        feature = "m3-address-space-self-test",
-        feature = "m3-entry-self-test",
-        feature = "m3-syscall-self-test"
-    ))]
-    #[test]
-    fn user_access_requires_user_bit_on_each_page_table_level() {
-        let virtual_address = VirtAddr::new(USER_TEST_CODE_ADDRESS);
-        let mut level_4 = Box::new(PageTable::new());
-        let mut level_3 = Box::new(PageTable::new());
-        let mut level_2 = Box::new(PageTable::new());
-        let mut level_1 = Box::new(PageTable::new());
-
-        level_4[virtual_address.p4_index()].set_addr(
-            PhysAddr::new((&*level_3 as *const PageTable) as u64),
-            PageTableFlags::PRESENT,
-        );
-        level_3[virtual_address.p3_index()].set_addr(
-            PhysAddr::new((&*level_2 as *const PageTable) as u64),
-            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
-        );
-        level_2[virtual_address.p2_index()].set_addr(
-            PhysAddr::new((&*level_1 as *const PageTable) as u64),
-            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
-        );
-        level_1[virtual_address.p1_index()].set_addr(
-            PhysAddr::new(0x4000),
-            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
-        );
-
-        let walk = walk_page_flags_in_root((&*level_4 as *const PageTable) as u64, virtual_address)
-            .expect("walked mapping");
-        assert!(walk.path.contains(PageTableFlags::USER_ACCESSIBLE));
-        assert!(walk.leaf.contains(PageTableFlags::USER_ACCESSIBLE));
-        assert!(!walk.all_levels_user_accessible);
     }
 }

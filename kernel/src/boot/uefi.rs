@@ -3,12 +3,12 @@ use uefi::mem::memory_map::{MemoryDescriptor, MemoryType};
 use uefi::proto::loaded_image::LoadedImage;
 
 use crate::arch::x86_64::cpu::read_stack_pointer;
+use crate::mm::paging::reserve_mapping_page_tables;
 use crate::mm::region::{
     MemoryRegion, MemoryRegionKind, NormalizedMemoryMap, ReservedRange, MAX_MEMORY_REGIONS,
     MAX_RESERVED_RANGES, RESERVED_PHYSICAL_ZERO_PAGE,
 };
 use crate::mm::{align_down, align_up, PAGE_SIZE};
-use crate::reserve_mapping_page_tables;
 
 const MAX_BOOT_RESERVED_RANGES: usize = 16;
 const EARLY_STACK_RESERVE_SIZE: u64 = 64 * 1024;

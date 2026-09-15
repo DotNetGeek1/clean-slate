@@ -1,5 +1,8 @@
+pub(crate) mod address_space;
 pub(crate) mod frame_allocator;
+pub(crate) mod paging;
 pub(crate) mod region;
+pub(crate) mod user_mapping;
 
 pub(super) const PAGE_SIZE: u64 = 4096;
 pub(super) const PHYSICAL_MEMORY_OFFSET: u64 = 0;

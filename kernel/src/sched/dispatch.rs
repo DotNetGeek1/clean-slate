@@ -2,7 +2,6 @@
 //! first thread, and switching address-space roots and kernel stacks before a
 //! thread runs.
 
-use crate::activate_address_space_root;
 use crate::arch::x86_64::asm::clean_slate_task_one_bootstrap_entry;
 use crate::arch::x86_64::asm::clean_slate_task_two_bootstrap_entry;
 use crate::arch::x86_64::context_switch::start_first_task;
@@ -11,6 +10,8 @@ use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::arch::x86_64::gdt::set_syscall_kernel_stack;
 use crate::diagnostics::qemu::fatal_kernel_error;
+use crate::mm::address_space::activate_address_space_root;
+use crate::mm::address_space::kernel_root_frame;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::userspace_process_root_frame;
 use crate::sched::scheduler_mut;
@@ -19,8 +20,6 @@ use crate::sched::with_scheduler;
 use crate::sched::Scheduler;
 use crate::sched::Thread;
 use crate::sched::ThreadKind;
-use crate::KERNEL_ROOT_FRAME;
-use core::sync::atomic::Ordering;
 
 pub(crate) fn initialize_scheduler() -> Result<(), &'static str> {
     let task_stacks = unsafe { task_stacks_mut() };
@@ -67,7 +66,7 @@ pub(crate) fn start_scheduler() -> ! {
 fn prepare_thread_dispatch(thread: Thread) -> Result<(), &'static str> {
     let root_frame = match thread.kind {
         ThreadKind::Kernel => {
-            let frame = KERNEL_ROOT_FRAME.load(Ordering::Relaxed);
+            let frame = kernel_root_frame();
             if frame == 0 {
                 return Err("kernel address-space root was not initialized");
             }
