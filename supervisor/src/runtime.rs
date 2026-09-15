@@ -94,6 +94,36 @@ where
     }
 
     pub fn request_restart(&mut self, service: ServiceId) -> Result<(), SupervisorError> {
+        self.issue_restart_sequence(service)?;
+        self.drain_events_for(service)?;
+        self.log_service_state(service)?;
+        Ok(())
+    }
+
+    pub fn issue_control(&mut self, request: ControlRequest) -> Result<(), SupervisorError> {
+        self.control
+            .issue_control(request)
+            .map_err(SupervisorError::Control)?;
+        self.registry
+            .apply_control(request)
+            .map_err(SupervisorError::Registry)?;
+        Ok(())
+    }
+
+    pub fn poll_event(
+        &mut self,
+        service: ServiceId,
+    ) -> Result<Option<LifecycleEvent>, SupervisorError> {
+        self.control
+            .poll_event(service)
+            .map_err(SupervisorError::Control)
+    }
+
+    pub fn emit_diagnostic(&mut self, line: &str) -> Result<(), SupervisorError> {
+        self.diagnostics.emit_line(line)
+    }
+
+    pub fn issue_restart_sequence(&mut self, service: ServiceId) -> Result<(), SupervisorError> {
         let restart = ControlRequest::new(service, ControlRequestKind::Restart);
         self.control
             .issue_control(restart)
@@ -109,8 +139,6 @@ where
         self.registry
             .apply_control(start)
             .map_err(SupervisorError::Registry)?;
-        self.drain_events_for(service)?;
-        self.log_service_state(service)?;
         Ok(())
     }
 
@@ -125,6 +153,10 @@ where
             }
         }
         Ok(())
+    }
+
+    pub fn log_service_state_public(&mut self, service: ServiceId) -> Result<(), SupervisorError> {
+        self.log_service_state(service)
     }
 
     fn log_service_state(&mut self, service: ServiceId) -> Result<(), SupervisorError> {

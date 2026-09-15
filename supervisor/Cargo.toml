@@ -14,6 +14,11 @@ name = "clean-slate-supervisor-userspace"
 path = "src/bin/userspace.rs"
 required-features = ["userspace"]
 
+[[bin]]
+name = "clean-slate-supervisor-restart-policy-userspace"
+path = "src/bin/restart_policy_userspace.rs"
+required-features = ["userspace"]
+
 [features]
 default = []
 userspace = []

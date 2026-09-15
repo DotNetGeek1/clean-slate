@@ -1,9 +1,10 @@
 //! M4.1 service lifecycle protocol and state model.
 //!
 //! Shared, host-testable contract for the userspace supervisor, kernel lifecycle
-//! control path, and supervised services. Restart backoff stays out of this layer.
-//! M4.4 health timeout evaluation lives in `health_tracker` without restart policy.
+//! control path, and supervised services.
+//! M4.4 health timeout evaluation lives in `health_tracker`.
 //! M4.5 dependency evaluation is host-testable in `dependency_graph`.
+//! M4.6 restart/backoff policy is implemented in `clean-slate-supervisor`.
 
 #![cfg_attr(not(test), no_std)]
 

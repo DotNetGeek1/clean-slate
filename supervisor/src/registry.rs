@@ -70,6 +70,10 @@ impl<const N: usize> ServiceRegistry<N> {
         }
         out
     }
+
+    pub fn lifecycle_tracker(&self) -> &ServiceLifecycleTracker<N> {
+        &self.tracker
+    }
 }
 
 fn snapshot_from_record(record: &ServiceLifecycleRecord) -> ServiceQueryEntry {

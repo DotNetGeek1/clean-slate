@@ -191,6 +191,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM4CrashService => run_m4_crash_service_acceptance(),
         ParsedCommand::TestM4ServiceLifecycle => run_m4_service_lifecycle_acceptance(),
         ParsedCommand::TestM4Supervisor => run_m4_supervisor_acceptance(),
+        ParsedCommand::TestM4RestartPolicy => run_m4_restart_policy_acceptance(),
         ParsedCommand::RunGdb => run_vm_with_gdb(false),
         ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
         ParsedCommand::Build => build_kernel(false, false, &[]),
@@ -369,6 +370,36 @@ fn run_m4_supervisor_acceptance() -> Result<(), XtaskError> {
             M4_SUPERVISOR_ACCEPTANCE_TIMEOUT,
         )),
     )
+}
+
+fn run_m4_restart_policy_acceptance() -> Result<(), XtaskError> {
+    let mut test = Command::new("cargo");
+    test.arg("test").arg("-p").arg("clean-slate-supervisor");
+    run_command(&mut test)?;
+    build_restart_policy_userspace(true)?;
+    println!("[M4.6] PASS (host restart-policy convergence tests)");
+    Ok(())
+}
+
+fn build_restart_policy_userspace(release: bool) -> Result<(), XtaskError> {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build")
+        .arg("-p")
+        .arg("clean-slate-supervisor")
+        .arg("--bin")
+        .arg("clean-slate-supervisor-restart-policy-userspace")
+        .arg("--features")
+        .arg("userspace")
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,compiler_builtins");
+    if release {
+        cmd.arg("--release");
+    }
+    cmd.env("RUSTC_BOOTSTRAP", "1");
+    run_command(&mut cmd)?;
+    Ok(())
 }
 
 fn run_m3_address_space_lifecycle_acceptance() -> Result<(), XtaskError> {
@@ -771,6 +802,7 @@ fn print_help() {
     println!("  test-m4-crash-service Build the M4.7 crash-service fixture kernel, run QEMU, and validate PASS markers");
     println!("  test-m4-service-lifecycle Build the M4.2 service lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m4-supervisor Build the M4.3 supervisor userspace image and QEMU integration self-test");
+    println!("  test-m4-restart-policy Run M4.6 host restart-policy convergence tests and build the CPL3 image");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
     println!("  build        Build debug UEFI kernel only");
@@ -798,6 +830,7 @@ enum ParsedCommand {
     TestM4CrashService,
     TestM4ServiceLifecycle,
     TestM4Supervisor,
+    TestM4RestartPolicy,
     RunGdb,
     RunGdbEntry,
     Build,
@@ -821,6 +854,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m4-crash-service" => ParsedCommand::TestM4CrashService,
         Some(cmd) if cmd == "test-m4-service-lifecycle" => ParsedCommand::TestM4ServiceLifecycle,
         Some(cmd) if cmd == "test-m4-supervisor" => ParsedCommand::TestM4Supervisor,
+        Some(cmd) if cmd == "test-m4-restart-policy" => ParsedCommand::TestM4RestartPolicy,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
         Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
         Some(cmd) if cmd == "build" => ParsedCommand::Build,

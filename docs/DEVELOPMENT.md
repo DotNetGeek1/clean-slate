@@ -190,7 +190,16 @@ For M4.5 dependency metadata and start-readiness evaluation (host-tested):
 cargo test -p clean-slate-service-lifecycle dependency_graph
 ```
 
-The `dependency_graph` module provides `DependencyGraph`, `evaluate_start_readiness`, and `[DEP ]` diagnostic formatters for supervisor integration (#37). `ServiceHealthTracker` and `DependencyHealthSnapshot` compose at the supervisor (#37); restart backoff (#40) remains separate.
+The `dependency_graph` module provides `DependencyGraph`, `evaluate_start_readiness`, and `[DEP ]` diagnostic formatters for supervisor integration (#37). `ServiceHealthTracker` and `DependencyHealthSnapshot` compose in `ConvergedSupervisor` (#40).
+
+For M4.6 restart policy and Wave 2 supervisor convergence (host-tested; CPL3 image build):
+
+```bash
+cargo test -p clean-slate-supervisor restart_policy
+cargo xtask test-m4-restart-policy
+```
+
+`ConvergedSupervisor` composes the M4.3 registry/control path with M4.4 health tracking, M4.5 dependency readiness, and bounded userspace restart policy (`RestartPolicy`, crash-loop backoff, `[SUP ] failure/restart/restarted/suppressed` markers). The `#36` lifecycle control path is invoked via `issue_restart_sequence` / `ControlRequestKind::Restart` then `Start`. Stale instance events remain rejected by the shared lifecycle state machine. Individual M4 self-test kernel features (`m4-supervisor-self-test`, `m4-crash-service-self-test`, etc.) remain separate boots; aggregate `cargo xtask test-m4` is tracked in #42.
 
 For the M4.7 supervised crash-service fixture (host tests + optional QEMU self-test):
 
