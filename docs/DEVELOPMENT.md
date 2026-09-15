@@ -150,7 +150,73 @@ This command builds the kernel with the dedicated M3.6 resource self-test enable
 
 If the M3.6 run fails, start from the last emitted `[RES ]` or `[PROC]` marker to see which phase leaked or failed to reap. For deeper debugging, rerun with `cargo xtask run-gdb` and break in `process::domain::teardown_current_process`, `ipc::IpcEndpointTable::teardown_resources_for_pid`, or `sched::Scheduler::reap_threads_for_process`.
 
-On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, which covers every milestone without repeating the boots the M3 gate already performs. `-Exhaustive` additionally runs every individual `test-m3-*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
+For the M4.1 service lifecycle protocol (host-tested, no QEMU boot required):
+
+```bash
+cargo test -p clean-slate-service-lifecycle
+```
+
+This crate is `no_std` outside unit tests and is the shared contract for supervisor, kernel control, and service fixtures in later M4 issues.
+
+For M4.2 kernel lifecycle control (host tests + optional QEMU acceptance):
+
+```bash
+cargo test -p clean-slate-kernel service::
+cargo test -p clean-slate-kernel --features m4-service-lifecycle-self-test
+cargo xtask test-m4-service-lifecycle
+```
+
+The `m4-service-lifecycle-self-test` feature boots a bounded launch/terminate/restart path and emits `[M4.2] PASS` when fresh PID/generation invariants hold.
+
+For the M4.3 userspace supervisor runtime (host-tested registry/control + optional QEMU integration):
+
+```bash
+cargo test -p clean-slate-supervisor
+cargo xtask test-m4-supervisor
+```
+
+The `clean-slate-supervisor` crate (`supervisor/`) owns the bounded service registry and supervisor runtime. Lifecycle control is behind the mockable `LifecycleControl` trait so host tests and the CPL3 integration image can run before the kernel syscall 4 lifecycle-control path (#36) is wired end-to-end. The QEMU self-test maps a release `clean-slate-supervisor-userspace` image into pid 1, grants a console IPC capability, and validates `[SUP ]` diagnostics plus `[M4.3] PASS`.
+
+M4.4 health/liveness tracking (host-tested, no QEMU) exercises `ServiceHealthTracker` deadline math with explicit tick values — no real-time sleeps:
+
+```bash
+cargo test -p clean-slate-service-lifecycle health_tracker
+cargo test -p clean-slate-service-lifecycle hlth_lines
+```
+
+For M4.5 dependency metadata and start-readiness evaluation (host-tested):
+
+```bash
+cargo test -p clean-slate-service-lifecycle dependency_graph
+```
+
+The `dependency_graph` module provides `DependencyGraph`, `evaluate_start_readiness`, and `[DEP ]` diagnostic formatters for supervisor integration (#37). `ServiceHealthTracker` and `DependencyHealthSnapshot` compose in `ConvergedSupervisor` (#40).
+
+For M4.6 restart policy and Wave 2 supervisor convergence (host-tested; CPL3 image build):
+
+```bash
+cargo test -p clean-slate-supervisor restart_policy
+cargo xtask test-m4-restart-policy
+```
+
+`ConvergedSupervisor` composes the M4.3 registry/control path with M4.4 health tracking, M4.5 dependency readiness, and bounded userspace restart policy (`RestartPolicy`, crash-loop backoff, `[SUP ] failure/restart/restarted/suppressed` markers). The `#36` lifecycle control path is invoked via `issue_restart_sequence` / `ControlRequestKind::Restart` then `Start`. Stale instance events remain rejected by the shared lifecycle state machine. For the authoritative M4.8 recovery acceptance (CPL3 converged supervisor, real lifecycle syscall transport, crash fixture, production teardown):
+
+```bash
+cargo xtask test-m4
+```
+
+The aggregate runs `test-m4-recovery` (QEMU) plus M4.6 host restart-policy tests, then prints `[M4  ] PASS`. Constituent `cargo xtask test-m4-recovery` expects ordered markers including `[SUP ]`, `[SVC ]`, `[HLTH]`, `[PROC] teardown pid=… resources=0`, `[TEST] unrelated workload progress=`, and `[M4  ] PASS`. Individual M4 self-test kernel features remain separate debugging boots.
+
+For the M4.7 supervised crash-service fixture (host tests + optional QEMU self-test):
+
+```bash
+cargo test -p clean-slate-service-fixtures
+cargo xtask test-m4-crash-service
+```
+
+The `clean-slate-service-fixtures` crate holds launch metadata encoding, `[TEST]` diagnostics helpers, and a host-side lifecycle harness. The `m4-crash-service-self-test` kernel feature exercises production userspace teardown, authoritative `Faulted` lifecycle events, deterministic fault injection, and unrelated workload progress without rebooting.
+
+On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, which covers every milestone gate without repeating the boots the M3/M4 aggregates already perform. `-Exhaustive` additionally runs every individual `test-m3-*` and `test-m4-*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
 
 On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases. OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`.
 

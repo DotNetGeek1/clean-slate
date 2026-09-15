@@ -140,8 +140,17 @@ pub(super) fn leaf_page_flags_for_address(
 
 #[cfg(any(
     feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test"
+    feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test"
 ))]
+#[cfg_attr(
+    any(
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn page_flags_for_address_in_root(
     root_frame: u64,
     address: VirtAddr,
@@ -151,8 +160,17 @@ pub(crate) fn page_flags_for_address_in_root(
 
 #[cfg(any(
     feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test"
+    feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test"
 ))]
+#[cfg_attr(
+    any(
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn leaf_page_flags_for_address_in_root(
     root_frame: u64,
     address: VirtAddr,
@@ -245,18 +263,24 @@ mod tests {
     #[cfg(any(
         feature = "m3-address-space-self-test",
         feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
         feature = "m3-entry-self-test"
     ))]
     use super::*;
     #[cfg(any(
         feature = "m3-address-space-self-test",
         feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
         feature = "m3-entry-self-test"
     ))]
     use crate::selftest::USER_TEST_CODE_ADDRESS;
     #[cfg(any(
         feature = "m3-address-space-self-test",
         feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
         feature = "m3-entry-self-test"
     ))]
     use x86_64::PhysAddr;
@@ -264,6 +288,8 @@ mod tests {
     #[cfg(any(
         feature = "m3-address-space-self-test",
         feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
         feature = "m3-entry-self-test",
         feature = "m3-syscall-self-test"
     ))]

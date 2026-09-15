@@ -247,6 +247,65 @@ The first IPC primitive should keep policy narrow and explicit:
 
 This initial implementation uses copying and intentionally defers shared-memory/zero-copy optimization to later milestones.
 
+## M4.1 service lifecycle protocol direction
+
+M4.1 defines the shared contract between the userspace supervisor, supervised services, and the kernel lifecycle-control path before implementation lanes fan out. The canonical types and wire encoding live in the workspace crate `clean-slate-service-lifecycle` (`service-lifecycle/`).
+
+Ownership boundaries:
+
+- **Kernel (M4.2+):** authoritative process spawn/teardown, capability-gated control IPC, and emission of lifecycle events tied to real PIDs/domains.
+- **Supervisor (M4.3+):** service registry, dependency-aware orchestration, and translation between policy and control requests — but not reinterpretation of stale instance identity. The first implementation lives in `clean-slate-supervisor` (`supervisor/`): bounded `ServiceRegistry`, `Supervisor` runtime, `[SUP ]` diagnostics, and a narrow `LifecycleControl` transport (fake/scripted backends for host and QEMU tests; kernel IPC in #36).
+- **Services / fixtures (M4.7+):** report `Ready`, health, and fault/exit events for their own instance generation only.
+
+Model highlights:
+
+- `ServiceId` is the stable logical identity; `ServiceInstanceId` binds `(service, generation, pid, domain)` so replacements never reuse stale instance handles silently.
+- Lifecycle states are explicit (`Declared`, `Starting`, `Running`, `Stopping`, `Exited`, `Faulted`, `RestartPending`) with deterministic transition validation (`apply_transition` / `ServiceLifecycleRecord`).
+- Control requests (`Start`, `Stop`, `Terminate`, `Restart`) are policy-free envelopes; restart backoff and dependency evaluation stay in later milestones.
+- Wire messages are versioned (`LIFECYCLE_PROTOCOL_VERSION = 1`), bounded to 64 bytes (matching M3 IPC), and reject unknown versions/kinds before interpretation.
+- `HealthReport` and `DependencyMetadata` provide stable extension fields for M4.4/M4.5 without embedding their algorithms here.
+
+## M4.4 service health/liveness direction
+
+M4.4 adds supervisor-side liveness tracking in `service-lifecycle` (`health_tracker`, `time`) without restart policy (#40). Dependency evaluation is M4.5 (#39).
+
+- Health reports use the M4.1 `LifecycleMessage::HealthReport` envelope over explicit IPC.
+- `ServiceHealthRecord` / `ServiceHealthTracker` track the active `InstanceGeneration`, last valid report, and a finite `deadline_ticks` derived from `LivenessConfig::report_period_ticks`.
+- `MonotonicTicks` is an opaque `u64` mapped from kernel LAPIC ticks (`kernel_ticks()` today; userspace syscall later). Deadlines use saturating tick arithmetic only — no wall-clock time.
+- Stale-generation reports are ignored and cannot refresh a replacement instance's deadline.
+- `notify_lifecycle_failure` maps `Exited` / `Faulted` lifecycle events to immediate unhealthy state with distinct reasons (`exit`, `fault`, `timeout`, `self_reported`).
+- `HealthFailureEvent` and `HealthReportOutcome` are narrow integration surfaces for the M4.3 supervisor (#37); they do not encode restart actions.
+
+## M4.5 service dependency evaluation direction
+
+M4.5 adds supervisor-owned, in-memory dependency metadata and deterministic start-readiness evaluation in `clean-slate-service-lifecycle` (`dependency_graph` module). The kernel does not interpret dependency graphs.
+
+- **Supervisor (#37):** declares services in `DependencyGraph`, attaches bounded `DependencyMetadata` per logical `ServiceId`, and calls `evaluate_start_readiness` before issuing start side effects.
+- **Evaluation inputs:** current lifecycle snapshots from `ServiceLifecycleTracker` plus optional `DependencyHealthSnapshot` (unhealthy upstream blocks even when lifecycle is `Running`; timeout policy remains M4.4).
+- **Validation:** unknown dependency targets, self-dependencies, duplicate edges, inline edge overflow, and cycles are rejected at `set_dependencies` time.
+- **Identity:** dependency keys are always logical `ServiceId`; PIDs and instance generations are never dependency identifiers.
+
+Suggested serial diagnostics (`format_health_*_line`, `format_dependency_*_line`, `format_declared_line`, `format_instance_line`):
+
+```text
+[HLTH] service=<id> healthy gen=<n>
+[HLTH] service=<id> unhealthy reason=<timeout|exit|fault|self_reported>
+[DEP ] service=<id> blocked-by=<dep>
+[DEP ] service=<id> ready
+[SVC ] declared service=<id>
+[SVC ] instance service=<id> pid=<pid> gen=<n>
+[SVC ] launch service=<id> pid=<pid> gen=<n>
+[SVC ] terminate service=<id> pid=<pid>
+[SVC ] reaped service=<id> pid=<pid>
+```
+
+M4.2 adds kernel-owned lifecycle control:
+
+- a dedicated **lifecycle-control capability** (distinct from IPC send capabilities) authorizes `SYSCALL_NR_LIFECYCLE_CONTROL` (4) and bounded M4.1 wire control requests;
+- authorized **Start** / **Terminate** / **Restart** requests spawn or tear down built-in service images through production M3 process/domain APIs and `teardown_process_by_id` (#24 coordinator path);
+- **Restart** is terminate-then-launch with a bumped `InstanceGeneration` and monotonic PID allocation (IDs are never reused);
+- stale instance handles fail through generation checks in the controller and `SYSCALL_ESTALE`.
+
 ## Language strategy
 
 The kernel and first-party low-level services should primarily use Rust.

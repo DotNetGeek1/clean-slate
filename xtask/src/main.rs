@@ -22,6 +22,26 @@ const M3_SYSCALL_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_LIFECYCLE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_IPC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_RESOURCES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M4_CRASH_SERVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
+const M4_SUPERVISOR_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M4_RECOVERY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+const M4_RECOVERY_ACCEPTANCE_MARKERS: [&str; 15] = [
+    "[CAP ] supervisor console capability granted pid=1",
+    "[SUP ] started pid=1",
+    "[DEP ] service=16640 ready",
+    "[SVC ] launch service=16640 pid=",
+    "[HLTH] service=16640 healthy gen=1",
+    "[TEST] crash-service injecting fault",
+    "[PROC] fault pid=",
+    "[SUP ] failure service=16640 pid=",
+    "[PROC] teardown pid=",
+    "[SUP ] restart service=16640 attempt=1",
+    "[SVC ] launch service=16640 pid=",
+    "[HLTH] service=16640 healthy gen=2",
+    "[TEST] unrelated workload progress=",
+    "[SUP ] stale-instance ignored",
+    "[M4  ] PASS",
+];
 const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[BOOT] UEFI memory map acquired",
     "[BOOT] ExitBootServices OK",
@@ -100,6 +120,34 @@ const M3_RESOURCES_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[PROC] teardown pid=1 resources=0",
     "[M3.6] PASS",
 ];
+const M4_CRASH_SERVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
+    "[SVC ] declared service=16640",
+    "[TEST] unrelated workload progress=1",
+    "[TEST] unrelated workload progress=2",
+    "[TEST] crash-service started pid=",
+    "[TEST] crash-service injecting fault",
+    "[PROC] fault pid=",
+    "[SVC ] lifecycle fault service=16640",
+    "[TEST] unrelated workload progress=3",
+    "[TEST] crash-service replacement healthy pid=",
+    "[TEST] unrelated workload progress=4",
+    "[M4.7] PASS",
+];
+const M4_SERVICE_LIFECYCLE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M4_SERVICE_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 4] = [
+    "[SVC ] declared service=2",
+    "[SVC ] launch service=2 pid=",
+    "[M4.2] unauthorized denied",
+    "[M4.2] PASS",
+];
+const M4_SUPERVISOR_ACCEPTANCE_MARKERS: [&str; 6] = [
+    "[CAP ] supervisor console capability granted pid=1",
+    "[SUP ] started pid=1",
+    "[SUP ] registered service=1",
+    "[SUP ] service=1 state=2 pid=201 gen=1",
+    "[IPC ] console pid=1: [SUP ]",
+    "[M4.3] PASS",
+];
 /// Merged M3.2 + M3.4 markers in the order the `m3-address-space-self-test`
 /// boot actually emits them, so the aggregate gate proves isolation and
 /// fault/lifecycle behaviour from a single boot.
@@ -158,6 +206,12 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM3Lifecycle => run_m3_lifecycle_acceptance(),
         ParsedCommand::TestM3Ipc => run_m3_ipc_acceptance(),
         ParsedCommand::TestM3Resources => run_m3_resources_acceptance(),
+        ParsedCommand::TestM4CrashService => run_m4_crash_service_acceptance(),
+        ParsedCommand::TestM4ServiceLifecycle => run_m4_service_lifecycle_acceptance(),
+        ParsedCommand::TestM4Supervisor => run_m4_supervisor_acceptance(),
+        ParsedCommand::TestM4RestartPolicy => run_m4_restart_policy_acceptance(),
+        ParsedCommand::TestM4 => run_m4_acceptance(),
+        ParsedCommand::TestM4Recovery => run_m4_recovery_acceptance(),
         ParsedCommand::RunGdb => run_vm_with_gdb(false),
         ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
         ParsedCommand::Build => build_kernel(false, false, &[]),
@@ -278,6 +332,135 @@ fn run_m3_resources_acceptance() -> Result<(), XtaskError> {
             M3_RESOURCES_ACCEPTANCE_TIMEOUT,
         )),
     )
+}
+
+fn run_m4_crash_service_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m4-crash-service-self-test"],
+        Some((
+            &M4_CRASH_SERVICE_ACCEPTANCE_MARKERS,
+            M4_CRASH_SERVICE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn run_m4_service_lifecycle_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m4-service-lifecycle-self-test"],
+        Some((
+            &M4_SERVICE_LIFECYCLE_ACCEPTANCE_MARKERS,
+            M4_SERVICE_LIFECYCLE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn build_supervisor_userspace(release: bool) -> Result<(), XtaskError> {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build")
+        .arg("-p")
+        .arg("clean-slate-supervisor")
+        .arg("--bin")
+        .arg("clean-slate-supervisor-userspace")
+        .arg("--features")
+        .arg("userspace")
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,compiler_builtins");
+    if release {
+        cmd.arg("--release");
+    }
+    cmd.env("RUSTC_BOOTSTRAP", "1");
+    run_command(&mut cmd)?;
+    Ok(())
+}
+
+fn run_m4_supervisor_acceptance() -> Result<(), XtaskError> {
+    build_supervisor_userspace(true)?;
+    run_vm_inner(
+        true,
+        false,
+        &["m3-entry-self-test", "m4-supervisor-self-test"],
+        Some((
+            &M4_SUPERVISOR_ACCEPTANCE_MARKERS,
+            M4_SUPERVISOR_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn build_recovery_userspace(release: bool) -> Result<(), XtaskError> {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build")
+        .arg("-p")
+        .arg("clean-slate-supervisor")
+        .arg("--bin")
+        .arg("clean-slate-supervisor-recovery-userspace")
+        .arg("--features")
+        .arg("userspace")
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,compiler_builtins");
+    if release {
+        cmd.arg("--release");
+    }
+    cmd.env("RUSTC_BOOTSTRAP", "1");
+    run_command(&mut cmd)?;
+    Ok(())
+}
+
+fn run_m4_recovery_acceptance() -> Result<(), XtaskError> {
+    build_recovery_userspace(true)?;
+    run_vm_inner(
+        false,
+        false,
+        &["m4-recovery-self-test"],
+        Some((
+            &M4_RECOVERY_ACCEPTANCE_MARKERS,
+            M4_RECOVERY_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn run_m4_acceptance() -> Result<(), XtaskError> {
+    run_m4_recovery_acceptance()?;
+    run_m4_restart_policy_acceptance()?;
+    println!("[M4  ] PASS");
+    Ok(())
+}
+
+fn run_m4_restart_policy_acceptance() -> Result<(), XtaskError> {
+    let mut test = Command::new("cargo");
+    test.arg("test").arg("-p").arg("clean-slate-supervisor");
+    run_command(&mut test)?;
+    build_restart_policy_userspace(true)?;
+    println!("[M4.6] PASS (host restart-policy convergence tests)");
+    Ok(())
+}
+
+fn build_restart_policy_userspace(release: bool) -> Result<(), XtaskError> {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build")
+        .arg("-p")
+        .arg("clean-slate-supervisor")
+        .arg("--bin")
+        .arg("clean-slate-supervisor-restart-policy-userspace")
+        .arg("--features")
+        .arg("userspace")
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,compiler_builtins");
+    if release {
+        cmd.arg("--release");
+    }
+    cmd.env("RUSTC_BOOTSTRAP", "1");
+    run_command(&mut cmd)?;
+    Ok(())
 }
 
 fn run_m3_address_space_lifecycle_acceptance() -> Result<(), XtaskError> {
@@ -677,6 +860,12 @@ fn print_help() {
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
+    println!("  test-m4-crash-service Build the M4.7 crash-service fixture kernel, run QEMU, and validate PASS markers");
+    println!("  test-m4-service-lifecycle Build the M4.2 service lifecycle kernel, run QEMU, and validate PASS markers");
+    println!("  test-m4-supervisor Build the M4.3 supervisor userspace image and QEMU integration self-test");
+    println!("  test-m4-restart-policy Run M4.6 host restart-policy convergence tests and build the CPL3 image");
+    println!("  test-m4-recovery Build the M4.8 recovery supervisor kernel boot and validate ordered markers");
+    println!("  test-m4       M4 milestone gate: recovery QEMU boot plus M4.6 host policy tests");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
     println!("  build        Build debug UEFI kernel only");
@@ -701,6 +890,12 @@ enum ParsedCommand {
     TestM3Lifecycle,
     TestM3Ipc,
     TestM3Resources,
+    TestM4CrashService,
+    TestM4ServiceLifecycle,
+    TestM4Supervisor,
+    TestM4RestartPolicy,
+    TestM4,
+    TestM4Recovery,
     RunGdb,
     RunGdbEntry,
     Build,
@@ -721,6 +916,12 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m3-lifecycle" => ParsedCommand::TestM3Lifecycle,
         Some(cmd) if cmd == "test-m3-ipc" => ParsedCommand::TestM3Ipc,
         Some(cmd) if cmd == "test-m3-resources" => ParsedCommand::TestM3Resources,
+        Some(cmd) if cmd == "test-m4-crash-service" => ParsedCommand::TestM4CrashService,
+        Some(cmd) if cmd == "test-m4-service-lifecycle" => ParsedCommand::TestM4ServiceLifecycle,
+        Some(cmd) if cmd == "test-m4-supervisor" => ParsedCommand::TestM4Supervisor,
+        Some(cmd) if cmd == "test-m4-restart-policy" => ParsedCommand::TestM4RestartPolicy,
+        Some(cmd) if cmd == "test-m4" => ParsedCommand::TestM4,
+        Some(cmd) if cmd == "test-m4-recovery" => ParsedCommand::TestM4Recovery,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
         Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
         Some(cmd) if cmd == "build" => ParsedCommand::Build,

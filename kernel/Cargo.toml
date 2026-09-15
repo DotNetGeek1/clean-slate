@@ -16,6 +16,10 @@ m3-entry-self-test = []
 m3-resources-self-test = []
 m3-syscall-self-test = ["m3-entry-self-test"]
 m3-ipc-self-test = ["m3-entry-self-test"]
+m4-crash-service-self-test = []
+m4-service-lifecycle-self-test = ["m3-entry-self-test"]
+m4-supervisor-self-test = ["m3-entry-self-test"]
+m4-recovery-self-test = []
 
 [lib]
 path = "src/lib.rs"
@@ -26,6 +30,8 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
+clean-slate-service-fixtures = { path = "../service-fixtures" }
+clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 uefi = "0.37.0"
 x86_64 = { version = "0.15.5", default-features = false, features = ["instructions"] }
 

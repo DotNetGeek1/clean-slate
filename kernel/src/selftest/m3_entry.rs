@@ -229,6 +229,8 @@ pub(crate) fn start_userspace_entry_self_test(allocator: &mut PageAllocator) -> 
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 ))]
 pub(super) fn validate_userspace_entry_trap(
@@ -256,6 +258,8 @@ pub(super) fn validate_userspace_entry_trap(
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 ))]
 pub(super) fn userspace_frame(context: &InterruptContext) -> &UserspaceEntryFrame {
@@ -335,6 +339,8 @@ mod tests {
     #[cfg(any(
         feature = "m3-address-space-self-test",
         feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
         feature = "m3-entry-self-test"
     ))]
     #[test]

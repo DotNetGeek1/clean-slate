@@ -2,12 +2,15 @@ use super::begin_thread_exit;
 use super::finalize_process_exit;
 use super::process_registry_mut;
 use super::reap_process_record;
+use super::ProcessState;
+use super::KERNEL_PROCESS_ID;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::ipc::endpoint_table_mut;
 use crate::ipc::IpcProcessResources;
 use crate::mm::address_space::activate_address_space_root;
 use crate::mm::address_space::destroy_process_address_space;
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::paging::current_root_frame_address;
 use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 use crate::sched::scheduler_mut;
 use crate::sched::with_scheduler;
@@ -145,5 +148,103 @@ pub(crate) fn teardown_current_process(
         exit_status: status,
         released_resources,
         next_stack_pointer,
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn teardown_process_by_id(
+    allocator: &mut PageAllocator,
+    kernel_root_frame: u64,
+    process_id: u64,
+    status: u64,
+    faulted: bool,
+) -> Result<DomainTeardownResult, &'static str> {
+    if process_id == KERNEL_PROCESS_ID {
+        return Err("kernel process cannot be torn down through lifecycle control");
+    }
+    if faulted {
+        return Err("supervisor-initiated teardown does not model faulted exit yet");
+    }
+
+    without_interrupts(|| unsafe {
+        let scheduler = scheduler_mut();
+        let current_process = scheduler.current_userspace_process_id()?;
+        if current_process == process_id {
+            return Err("cannot externally teardown the currently running userspace process");
+        }
+        let process_record = process_registry_mut()
+            .get_mut(process_id)
+            .ok_or("teardown target process was missing from registry")?;
+        if !matches!(
+            process_record.state,
+            ProcessState::Ready
+                | ProcessState::Running
+                | ProcessState::Faulted
+                | ProcessState::Exiting
+        ) {
+            return Err("teardown target process was not live");
+        }
+        let exited_threads = scheduler.force_exit_all_threads_for_process(process_id)?;
+        if process_record.live_threads
+            < u16::try_from(exited_threads)
+                .map_err(|_| "force-exit thread count overflowed process live thread accounting")?
+        {
+            return Err("process thread accounting underflow during external teardown");
+        }
+        process_record.live_threads -= u16::try_from(exited_threads)
+            .map_err(|_| "force-exit thread count overflowed process live thread accounting")?;
+        if process_record.live_threads != 0 {
+            return Err("external teardown left live threads after force-exit");
+        }
+        finalize_process_exit(process_record, status)?;
+        Ok::<(), &'static str>(())
+    })?;
+
+    let caller_root = current_root_frame_address();
+    let released_resources = resource_snapshot(process_id)?;
+    activate_address_space_root(kernel_root_frame);
+    let released_ipc: IpcProcessResources =
+        unsafe { endpoint_table_mut().teardown_resources_for_pid(process_id)? };
+    let reaped_threads: ThreadProcessResources = without_interrupts(|| unsafe {
+        let scheduler = scheduler_mut();
+        let resources = scheduler.resources_for_process(process_id);
+        let reaped_threads = scheduler.reap_threads_for_process(process_id)?;
+        if reaped_threads != resources.threads {
+            return Err("scheduler thread cleanup count diverged from external teardown snapshot");
+        }
+        Ok::<ThreadProcessResources, &'static str>(resources)
+    })?;
+    {
+        let process_record = unsafe {
+            process_registry_mut()
+                .get_mut(process_id)
+                .ok_or("process missing from registry during external resource teardown")?
+        };
+        let address_space = process_record
+            .resource_domain
+            .take_address_space()
+            .ok_or("process address space was missing during external teardown")?;
+        destroy_process_address_space(&address_space, allocator)?;
+        reap_process_record(process_record)?;
+    }
+    activate_address_space_root(caller_root);
+    unsafe { process_registry_mut().release_reaped(process_id)? };
+    if released_ipc.owned_endpoints != released_resources.ipc_endpoints
+        || released_ipc.held_capabilities != released_resources.ipc_handles
+    {
+        return Err("IPC teardown counts diverged from the recorded external teardown snapshot");
+    }
+    if reaped_threads.threads != released_resources.threads
+        || reaped_threads.kernel_stacks != released_resources.kernel_stacks
+    {
+        return Err(
+            "scheduler teardown counts diverged from the recorded external teardown snapshot",
+        );
+    }
+    Ok(DomainTeardownResult {
+        process_id,
+        exit_status: status,
+        released_resources,
+        next_stack_pointer: None,
     })
 }
