@@ -33,7 +33,8 @@ pub(super) fn increment_kernel_ticks() -> u64 {
         feature = "m2-double-fault-self-test",
         feature = "m3-address-space-self-test",
         feature = "m3-entry-self-test",
-        feature = "m3-ipc-self-test"
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
     ),
     allow(dead_code)
 )]
@@ -51,7 +52,8 @@ pub(crate) fn initialize_timer() {
         feature = "m3-address-space-self-test",
         feature = "m3-entry-self-test",
         feature = "m3-syscall-self-test",
-        feature = "m3-ipc-self-test"
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
     ),
     allow(dead_code)
 )]

@@ -3,7 +3,7 @@
 
 use crate::sync::global_cell::GlobalCell;
 
-pub(super) const IPC_MAX_MESSAGE_BYTES: usize = 64;
+pub(crate) const IPC_MAX_MESSAGE_BYTES: usize = 64;
 const IPC_ENDPOINT_CAPACITY: usize = 4;
 const IPC_CAPABILITY_CAPACITY: usize = 8;
 #[cfg(any(feature = "m3-ipc-self-test", test))]

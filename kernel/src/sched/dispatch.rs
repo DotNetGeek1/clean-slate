@@ -115,11 +115,7 @@ pub(crate) fn prepare_current_scheduler_thread_dispatch() -> Result<(), &'static
     prepare_thread_dispatch(thread)
 }
 
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m3-ipc-self-test"
-))]
+#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
 pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'static str> {
     let next_stack_pointer = without_interrupts(|| unsafe {
         scheduler_mut().on_timer_interrupt(current_stack_pointer)

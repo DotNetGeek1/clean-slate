@@ -10,6 +10,11 @@ use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_FAILURE;
 #[cfg(feature = "m2-double-fault-self-test")]
 use core::ptr;
+#[cfg(any(
+    feature = "m2-double-fault-self-test",
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test"
+))]
 use core::sync::atomic::AtomicBool;
 #[cfg(feature = "m2-double-fault-self-test")]
 use core::sync::atomic::Ordering;

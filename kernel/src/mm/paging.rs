@@ -138,10 +138,7 @@ pub(super) fn leaf_page_flags_for_address(
     Ok(walk_page_flags(address)?.leaf)
 }
 
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test"
-))]
+#[cfg(feature = "m3-address-space-self-test")]
 pub(crate) fn page_flags_for_address_in_root(
     root_frame: u64,
     address: VirtAddr,
@@ -149,10 +146,7 @@ pub(crate) fn page_flags_for_address_in_root(
     Ok(walk_page_flags_in_root(root_frame, address)?.path)
 }
 
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test"
-))]
+#[cfg(feature = "m3-address-space-self-test")]
 pub(crate) fn leaf_page_flags_for_address_in_root(
     root_frame: u64,
     address: VirtAddr,

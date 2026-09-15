@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Run Clean-Slate QEMU xtask acceptance tests and report failures.
 #
-# By default runs test-m1, test-m2, test-m3. Use --exhaustive for all nine
-# xtask acceptance commands. OVMF is discovered by xtask on Linux when
+# By default runs test-m1, test-m2, test-m3. Use --exhaustive for all
+# nine xtask acceptance commands. OVMF is discovered by xtask on Linux when
 # OVMF_CODE/OVMF_VARS are unset; override with env vars or --ovmf-code/--ovmf-vars.
 set -euo pipefail
 

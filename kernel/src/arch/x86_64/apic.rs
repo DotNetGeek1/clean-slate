@@ -14,26 +14,180 @@ use crate::arch::x86_64::{SPURIOUS_VECTOR, TIMER_VECTOR};
 const APIC_BASE_MSR: u32 = 0x1b;
 
 const APIC_BASE_ADDRESS_MASK: u64 = 0xffff_f000;
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 const APIC_ENABLE: u64 = 1 << 11;
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 const APIC_SPURIOUS_INTERRUPT_VECTOR: u32 = 0x100 | (SPURIOUS_VECTOR as u32);
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 const APIC_REGISTER_TPR: usize = 0x80;
 const APIC_REGISTER_EOI: usize = 0xb0;
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 const APIC_REGISTER_SVR: usize = 0xf0;
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 const APIC_REGISTER_LVT_TIMER: usize = 0x320;
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 const APIC_REGISTER_INITIAL_COUNT: usize = 0x380;
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 const APIC_REGISTER_DIVIDE_CONFIGURATION: usize = 0x3e0;
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 const APIC_TIMER_PERIODIC: u32 = 1 << 17;
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 const APIC_TIMER_DIVIDE_BY_16: u32 = 0x03;
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) const APIC_TIMER_INITIAL_COUNT: u32 = 10_000_000;
 
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 const PIC_MASTER_DATA: u16 = 0x21;
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 const PIC_SLAVE_DATA: u16 = 0xa1;
 
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn mask_legacy_pic() {
     port_out(PIC_MASTER_DATA, 0xff);
     port_out(PIC_SLAVE_DATA, 0xff);
 }
 
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn enable_local_apic() {
     let apic_base = read_msr(APIC_BASE_MSR) | APIC_ENABLE;
     write_msr(APIC_BASE_MSR, apic_base);
@@ -41,6 +195,17 @@ pub(crate) fn enable_local_apic() {
     local_apic_write(APIC_REGISTER_SVR, APIC_SPURIOUS_INTERRUPT_VECTOR);
 }
 
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test",
+        feature = "m3-resources-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn program_local_apic_timer() {
     local_apic_write(APIC_REGISTER_DIVIDE_CONFIGURATION, APIC_TIMER_DIVIDE_BY_16);
     local_apic_write(
