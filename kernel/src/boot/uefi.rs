@@ -122,9 +122,7 @@ fn collect_descriptors<'a>(
     descriptors: impl IntoIterator<Item = &'a MemoryDescriptor>,
 ) -> Result<[Option<RawDescriptor>; MAX_MEMORY_REGIONS], &'static str> {
     let mut collected = [None; MAX_MEMORY_REGIONS];
-    let mut count = 0usize;
-
-    for descriptor in descriptors {
+    for (count, descriptor) in descriptors.into_iter().enumerate() {
         if count == MAX_MEMORY_REGIONS {
             return Err("UEFI memory map exceeded fixed descriptor capacity");
         }
@@ -136,7 +134,6 @@ fn collect_descriptors<'a>(
                 .saturating_add(descriptor.page_count.saturating_mul(PAGE_SIZE)),
             ty: descriptor.ty,
         });
-        count += 1;
     }
 
     Ok(collected)

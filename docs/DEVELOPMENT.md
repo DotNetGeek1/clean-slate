@@ -152,6 +152,8 @@ If the M3.6 run fails, start from the last emitted `[RES ]` or `[PROC]` marker t
 
 On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, which covers every milestone without repeating the boots the M3 gate already performs. `-Exhaustive` additionally runs every individual `test-m3-*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
 
+On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases. OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`.
+
 To launch paused for debugger attach:
 
 ```bash

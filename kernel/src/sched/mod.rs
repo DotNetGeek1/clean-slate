@@ -107,6 +107,7 @@ impl Scheduler {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn configure_thread(
         &mut self,
         slot: usize,

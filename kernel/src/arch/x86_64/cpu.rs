@@ -78,8 +78,7 @@ pub(crate) fn without_write_protect<T>(f: impl FnOnce() -> T) -> T {
     unsafe {
         Cr0::write(writable);
     }
-    let result = f();
-    result
+    f()
 }
 
 #[allow(dead_code)]

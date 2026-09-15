@@ -36,6 +36,7 @@ pub(super) struct ResourceDomain {
     address_space: Option<ProcessAddressSpace>,
 }
 
+#[allow(dead_code)]
 impl ResourceDomain {
     pub(crate) const EMPTY: Self = Self {
         id: 0,

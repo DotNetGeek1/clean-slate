@@ -423,7 +423,7 @@ fn find_ovmf() -> Result<OvmfPaths, XtaskError> {
         },
     ];
 
-    select_ovmf_from_candidates(candidates.into_iter()).ok_or(XtaskError::MissingOvmf)
+    select_ovmf_from_candidates(candidates).ok_or(XtaskError::MissingOvmf)
 }
 
 fn workspace_root() -> &'static Path {

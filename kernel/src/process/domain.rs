@@ -14,6 +14,9 @@ use crate::sched::with_scheduler;
 use crate::sched::ThreadKind;
 use crate::sched::ThreadProcessResources;
 
+// Process teardown and resource accounting are only exercised end-to-end by
+// the M3 self-test features today; the normal boot path picks them up later.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ResourceSnapshot {
     pub(crate) user_pages: usize,
@@ -25,6 +28,7 @@ pub(crate) struct ResourceSnapshot {
     pub(crate) runnable_threads: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DomainTeardownResult {
     pub(crate) process_id: u64,
@@ -33,6 +37,7 @@ pub(crate) struct DomainTeardownResult {
     pub(crate) next_stack_pointer: Option<u64>,
 }
 
+#[allow(dead_code)]
 pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'static str> {
     let address_space = unsafe {
         process_registry_mut()
@@ -55,6 +60,7 @@ pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'s
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn teardown_current_process(
     allocator: &mut PageAllocator,
     kernel_root_frame: u64,

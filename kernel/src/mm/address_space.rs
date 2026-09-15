@@ -290,7 +290,6 @@ pub(crate) fn destroy_process_address_space(
             free_frame(allocator, mapping.frame_address)?;
         }
     }
-    drop(mapper);
     for frame_address in address_space.page_table_frames[..address_space.page_table_frame_count]
         .iter()
         .rev()

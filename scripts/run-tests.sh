@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+# Run Clean-Slate QEMU xtask acceptance tests and report failures.
+#
+# By default runs test-m1, test-m2, test-m3. Use --exhaustive for all nine
+# xtask acceptance commands. OVMF is discovered by xtask on Linux when
+# OVMF_CODE/OVMF_VARS are unset; override with env vars or --ovmf-code/--ovmf-vars.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPORT_PATH="${REPORT_PATH:-$REPO_ROOT/target/xtask-test-report.txt}"
+
+EXHAUSTIVE=0
+LIST=0
+OVMF_CODE_OVERRIDE=""
+OVMF_VARS_OVERRIDE=""
+REQUESTED=()
+
+# Ordered registry (matches scripts/run-tests.ps1).
+TEST_NAMES=(
+  test-m1
+  test-m2
+  test-m3
+  test-m3-entry
+  test-m3-address-space
+  test-m3-syscall
+  test-m3-lifecycle
+  test-m3-ipc
+  test-m3-resources
+)
+
+test_role() {
+  case "$1" in
+    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources)
+      echo Constituent
+      ;;
+    test-m3)
+      echo Aggregate
+      ;;
+    *)
+      echo Milestone
+      ;;
+  esac
+}
+
+test_description() {
+  case "$1" in
+    test-m1) echo "M1 memory acceptance" ;;
+    test-m2) echo "M2 interrupt/timer/scheduler acceptance" ;;
+    test-m3) echo "M3 milestone gate (aggregate of all M3 acceptance boots)" ;;
+    test-m3-entry) echo "M3.1 userspace-entry acceptance" ;;
+    test-m3-address-space) echo "M3.2 address-space isolation acceptance" ;;
+    test-m3-syscall) echo "M3.3 native-syscall acceptance" ;;
+    test-m3-lifecycle) echo "M3.4 process/thread lifecycle acceptance" ;;
+    test-m3-ipc) echo "M3.5 capability-authorized IPC acceptance" ;;
+    test-m3-resources) echo "M3.6 domain resource accounting/teardown acceptance" ;;
+    *) echo "" ;;
+  esac
+}
+
+test_aliases() {
+  case "$1" in
+    test-m1) echo "m1" ;;
+    test-m2) echo "m2" ;;
+    test-m3) echo "m3 m3.7" ;;
+    test-m3-entry) echo "m3-entry entry m3.1" ;;
+    test-m3-address-space) echo "m3-address-space address-space m3.2" ;;
+    test-m3-syscall) echo "m3-syscall syscall m3.3" ;;
+    test-m3-lifecycle) echo "m3-lifecycle lifecycle m3.4" ;;
+    test-m3-ipc) echo "m3-ipc ipc m3.5" ;;
+    test-m3-resources) echo "m3-resources resources m3.6" ;;
+    *) echo "" ;;
+  esac
+}
+
+usage() {
+  sed -n '2,20p' "$0" | sed 's/^# \?//'
+  echo ""
+  echo "Options:"
+  echo "  --exhaustive       Run every known test"
+  echo "  --list             List tests and exit"
+  echo "  --ovmf-code PATH   Set OVMF_CODE"
+  echo "  --ovmf-vars PATH   Set OVMF_VARS"
+  echo "  --report PATH      Report file (default: target/xtask-test-report.txt)"
+  echo "  -h, --help         Show this help"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --exhaustive)
+      EXHAUSTIVE=1
+      shift
+      ;;
+    --list)
+      LIST=1
+      shift
+      ;;
+    --ovmf-code)
+      OVMF_CODE_OVERRIDE="$2"
+      shift 2
+      ;;
+    --ovmf-vars)
+      OVMF_VARS_OVERRIDE="$2"
+      shift 2
+      ;;
+    --report)
+      REPORT_PATH="$2"
+      shift 2
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        REQUESTED+=("$1")
+        shift
+      done
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      REQUESTED+=("$1")
+      shift
+      ;;
+  esac
+done
+
+show_test_list() {
+  echo "Available tests:"
+  for name in "${TEST_NAMES[@]}"; do
+    role="$(test_role "$name")"
+    case "$role" in
+      Aggregate) tag="[aggregate]  " ;;
+      Constituent) tag="[constituent]" ;;
+      *) tag="[milestone]  " ;;
+    esac
+    desc="$(test_description "$name")"
+    aliases="$(test_aliases "$name")"
+    printf "  %-24s %s %s\n" "$name" "$tag" "$desc"
+    printf "  %-24s %s aliases: %s\n" "" "" "$aliases"
+  done
+  echo ""
+  echo -n "Default suite:  "
+  first=1
+  for name in "${TEST_NAMES[@]}"; do
+    if [[ "$(test_role "$name")" != Constituent ]]; then
+      [[ $first -eq 0 ]] && echo -n ", "
+      echo -n "$name"
+      first=0
+    fi
+  done
+  echo ""
+  echo "--exhaustive:    ${TEST_NAMES[*]}"
+  echo "Constituents are the per-boundary debugging workflows behind the test-m3 aggregate."
+}
+
+resolve_test_name() {
+  local requested="${1,,}"
+  local name aliases alias
+  for name in "${TEST_NAMES[@]}"; do
+    if [[ "$requested" == "$name" ]]; then
+      echo "$name"
+      return 0
+    fi
+    read -r -a aliases <<< "$(test_aliases "$name")"
+    for alias in "${aliases[@]}"; do
+      if [[ "$requested" == "${alias,,}" ]]; then
+        echo "$name"
+        return 0
+      fi
+    done
+  done
+  echo "Unknown test '$1'." >&2
+  echo -n "Known names: " >&2
+  local known=()
+  for name in "${TEST_NAMES[@]}"; do
+    known+=("$name")
+    read -r -a aliases <<< "$(test_aliases "$name")"
+    known+=("${aliases[@]}")
+  done
+  echo "${known[*]}" >&2
+  exit 1
+}
+
+format_duration() {
+  local total_ms="$1"
+  local mins=$((total_ms / 60000))
+  local secs=$(((total_ms % 60000) / 1000))
+  local frac=$(((total_ms % 1000) / 100))
+  if [[ $mins -ge 1 ]]; then
+    printf "%dm %d.%ds" "$mins" "$secs" "$frac"
+  else
+    printf "%d.%ds" "$secs" "$frac"
+  fi
+}
+
+get_failure_details() {
+  local file="$1"
+  local patterns=(
+    "error:"
+    "ERROR"
+    "failed with status"
+    "timed out"
+    "missing required marker"
+    "OVMF firmware not found"
+    "unknown command"
+    "FAIL"
+  )
+  local hits=()
+  local line pattern trimmed
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    for pattern in "${patterns[@]}"; do
+      if [[ "$line" == *"$pattern"* ]]; then
+        trimmed="${line#"${line%%[![:space:]]*}"}"
+        trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+        if [[ -n "$trimmed" ]]; then
+          hits+=("$trimmed")
+        fi
+        break
+      fi
+    done
+  done <"$file"
+  if [[ ${#hits[@]} -gt 0 ]]; then
+    local start=$(( ${#hits[@]} > 12 ? ${#hits[@]} - 12 : 0 ))
+    for ((i = start; i < ${#hits[@]}; i++)); do
+      echo "${hits[$i]}"
+    done
+    return
+  fi
+  tail -n 15 "$file" | sed '/^[[:space:]]*$/d' || true
+  if [[ ! -s "$file" ]]; then
+    echo "No captured output."
+  fi
+}
+
+if [[ $LIST -eq 1 ]]; then
+  show_test_list
+  exit 0
+fi
+
+SELECTED=()
+if [[ ${#REQUESTED[@]} -gt 0 ]]; then
+  declare -A seen=()
+  for item in "${REQUESTED[@]}"; do
+    name="$(resolve_test_name "$item")"
+    if [[ -z "${seen[$name]+x}" ]]; then
+      SELECTED+=("$name")
+      seen[$name]=1
+    fi
+  done
+elif [[ $EXHAUSTIVE -eq 1 ]]; then
+  SELECTED=("${TEST_NAMES[@]}")
+else
+  for name in "${TEST_NAMES[@]}"; do
+    if [[ "$(test_role "$name")" != Constituent ]]; then
+      SELECTED+=("$name")
+    fi
+  done
+fi
+
+if [[ -n "$OVMF_CODE_OVERRIDE" ]]; then
+  export OVMF_CODE="$OVMF_CODE_OVERRIDE"
+fi
+if [[ -n "$OVMF_VARS_OVERRIDE" ]]; then
+  export OVMF_VARS="$OVMF_VARS_OVERRIDE"
+fi
+
+cd "$REPO_ROOT"
+
+echo ""
+echo "Clean-Slate xtask suite"
+echo "  repo     $REPO_ROOT"
+if [[ -n "${OVMF_CODE:-}" ]]; then
+  echo "  OVMF_CODE  $OVMF_CODE"
+fi
+if [[ -n "${OVMF_VARS:-}" ]]; then
+  echo "  OVMF_VARS  $OVMF_VARS"
+fi
+echo "  tests    ${SELECTED[*]}"
+echo ""
+
+started_at="$(date '+%Y-%m-%d %H:%M:%S')"
+started_epoch="$(date +%s)"
+
+declare -a result_names=()
+declare -a result_passed=()
+declare -a result_exit=()
+declare -a result_duration_ms=()
+declare -a result_log_files=()
+
+for name in "${SELECTED[@]}"; do
+  echo "======== $name ========"
+  log_file="$(mktemp)"
+  result_log_files+=("$log_file")
+  start_ms="$(date +%s%3N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1000))')"
+  set +e
+  cargo xtask "$name" 2>&1 | tee "$log_file"
+  exit_code="${PIPESTATUS[0]}"
+  set -e
+  end_ms="$(date +%s%3N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1000))')"
+  duration_ms=$((end_ms - start_ms))
+
+  result_names+=("$name")
+  result_exit+=("$exit_code")
+  result_duration_ms+=("$duration_ms")
+
+  if [[ $exit_code -eq 0 ]]; then
+    result_passed+=(1)
+    echo "PASS  $name  ($(format_duration "$duration_ms"))"
+  else
+    result_passed+=(0)
+    echo "FAIL  $name  ($(format_duration "$duration_ms"), exit $exit_code)"
+  fi
+  echo ""
+done
+
+finished_epoch="$(date +%s)"
+total_ms=$(((finished_epoch - started_epoch) * 1000))
+
+passed_count=0
+failed_count=0
+for p in "${result_passed[@]}"; do
+  if [[ $p -eq 1 ]]; then
+    passed_count=$((passed_count + 1))
+  else
+    failed_count=$((failed_count + 1))
+  fi
+done
+
+mkdir -p "$(dirname "$REPORT_PATH")"
+{
+  echo "Clean-Slate xtask test report"
+  echo "Started:  $started_at"
+  echo "Finished: $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "Duration: $(format_duration "$total_ms")"
+  [[ -n "${OVMF_CODE:-}" ]] && echo "OVMF_CODE: $OVMF_CODE"
+  [[ -n "${OVMF_VARS:-}" ]] && echo "OVMF_VARS: $OVMF_VARS"
+  echo ""
+  for i in "${!result_names[@]}"; do
+    if [[ ${result_passed[$i]} -eq 1 ]]; then
+      status="PASS"
+    else
+      status="FAIL"
+    fi
+    printf "%s  %-24s %s\n" "$status" "${result_names[$i]}" "$(format_duration "${result_duration_ms[$i]}")"
+    if [[ ${result_passed[$i]} -eq 0 ]]; then
+      echo "  exit code: ${result_exit[$i]}"
+      while IFS= read -r err_line; do
+        [[ -n "$err_line" ]] && echo "  $err_line"
+      done < <(get_failure_details "${result_log_files[$i]}")
+    fi
+  done
+  echo ""
+  echo "$passed_count passed, $failed_count failed, ${#result_names[@]} run"
+} >"$REPORT_PATH"
+
+echo "======== summary ========"
+for i in "${!result_names[@]}"; do
+  if [[ ${result_passed[$i]} -eq 1 ]]; then
+    printf "PASS  %-24s %s\n" "${result_names[$i]}" "$(format_duration "${result_duration_ms[$i]}")"
+  else
+    printf "FAIL  %-24s %s\n" "${result_names[$i]}" "$(format_duration "${result_duration_ms[$i]}")"
+    echo "      exit code: ${result_exit[$i]}"
+    while IFS= read -r err_line; do
+      [[ -n "$err_line" ]] && echo "      $err_line"
+    done < <(get_failure_details "${result_log_files[$i]}")
+  fi
+done
+
+for log_file in "${result_log_files[@]}"; do
+  rm -f "$log_file"
+done
+
+echo ""
+echo "$passed_count passed, $failed_count failed  ($(format_duration "$total_ms"))"
+echo "Report: $REPORT_PATH"
+
+if [[ $failed_count -gt 0 ]]; then
+  exit 1
+fi
+exit 0
