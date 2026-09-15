@@ -2,7 +2,8 @@
 
 use clean_slate_service_lifecycle::{
     ControlRequest, ControlRequestKind, DomainId, HealthReport, HealthStatus, InstanceGeneration,
-    LifecycleEvent, LifecycleEventKind, ProcessId, ServiceInstanceId,     ServiceLifecycleState, ServiceLifecycleTracker,
+    LifecycleEvent, LifecycleEventKind, ProcessId, ServiceInstanceId, ServiceLifecycleState,
+    ServiceLifecycleTracker,
 };
 
 use crate::config::{CrashServiceLaunchConfig, CrashServiceMode};

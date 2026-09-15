@@ -4,6 +4,6 @@ pub(crate) mod capability;
 pub(crate) mod control;
 pub(crate) mod spawn;
 
-pub(crate) use control::LifecycleControlError;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
 pub(crate) use control::service_lifecycle_controller_mut;
+pub(crate) use control::LifecycleControlError;

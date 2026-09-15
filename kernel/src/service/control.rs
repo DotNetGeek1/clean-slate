@@ -183,8 +183,9 @@ impl ServiceLifecycleController {
             .allocate_scheduler_slot()
             .map_err(LifecycleControlError::SpawnFailed)?;
         let generation = self.services[service_index].authoritative_generation;
-        let spawned = launch_builtin_service(allocator, kernel_stack_top, scheduler_slot, service_id)
-            .map_err(LifecycleControlError::SpawnFailed)?;
+        let spawned =
+            launch_builtin_service(allocator, kernel_stack_top, scheduler_slot, service_id)
+                .map_err(LifecycleControlError::SpawnFailed)?;
         let instance = ServiceInstanceId::new(
             service_id,
             generation,
@@ -246,9 +247,7 @@ impl ServiceLifecycleController {
     fn log_launch(&self, instance: ServiceInstanceId) {
         kernel_log_fmt(format_args!(
             "[SVC ] launch service={} pid={} gen={}\n",
-            instance.service.0,
-            instance.pid.0,
-            instance.generation.0
+            instance.service.0, instance.pid.0, instance.generation.0
         ));
     }
 

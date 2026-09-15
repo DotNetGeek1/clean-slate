@@ -56,9 +56,8 @@ use clean_slate_service_fixtures::{
     UNRELATED_WORKLOAD_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::{
-    DomainId, InstanceGeneration, ProcessId, ServiceInstanceId, ServiceLifecycleState,
-    format_declared_line,
-    format_instance_line,
+    format_declared_line, format_instance_line, DomainId, InstanceGeneration, ProcessId,
+    ServiceInstanceId, ServiceLifecycleState,
 };
 use core::fmt::Write;
 use core::ptr;
