@@ -35,10 +35,32 @@ pub(crate) struct TaskStack(pub(crate) [u8; TASK_STACK_SIZE]);
 
 // Consumed by arch/x86_64/asm.rs (bootstrap trampolines read the next task's RSP).
 #[unsafe(no_mangle)]
-pub(crate) static mut NEXT_TASK_STACK_POINTER: u64 = 0;
+static mut NEXT_TASK_STACK_POINTER: u64 = 0;
 // Consumed by arch/x86_64/asm.rs (bootstrap trampolines jump to this entry point).
 #[unsafe(no_mangle)]
-pub(crate) static mut NEXT_TASK_ENTRY_POINT: u64 = 0;
+static mut NEXT_TASK_ENTRY_POINT: u64 = 0;
+
+/// Publishes the stack pointer and entry point the bootstrap trampoline will
+/// load for the next fresh kernel task.
+///
+/// # Safety
+/// Interrupts must be disabled (or the caller must otherwise guarantee no
+/// concurrent dispatch) until the trampoline has consumed the values.
+pub(crate) unsafe fn set_next_task(stack_pointer: u64, entry_point: u64) {
+    unsafe {
+        NEXT_TASK_STACK_POINTER = stack_pointer;
+        NEXT_TASK_ENTRY_POINT = entry_point;
+    }
+}
+
+/// Reads back the `(stack_pointer, entry_point)` pair published by
+/// [`set_next_task`].
+///
+/// # Safety
+/// Same as [`set_next_task`]: no concurrent writer may be active.
+pub(crate) unsafe fn next_task() -> (u64, u64) {
+    unsafe { (NEXT_TASK_STACK_POINTER, NEXT_TASK_ENTRY_POINT) }
+}
 
 pub(crate) fn task_stack_top(stack: &TaskStack) -> u64 {
     align_down(((stack.0.as_ptr() as usize) + stack.0.len()) as u64, 16)
