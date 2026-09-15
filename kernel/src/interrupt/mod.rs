@@ -8,6 +8,7 @@ use crate::arch::x86_64::bit;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
     feature = "m3-entry-self-test"
 ))]
 use crate::arch::x86_64::gdt::selector_rpl;
@@ -22,6 +23,7 @@ use crate::arch::x86_64::TIMER_VECTOR;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
     feature = "m3-entry-self-test"
 ))]
 use crate::arch::x86_64::USER_TEST_VECTOR;
@@ -69,6 +71,10 @@ use crate::selftest::m3_ipc::handle_userspace_ipc_entry;
 use crate::selftest::m3_resources::handle_userspace_resource_entry;
 #[cfg(feature = "m3-resources-self-test")]
 use crate::selftest::m3_resources::handle_userspace_resource_page_fault;
+#[cfg(feature = "m4-crash-service-self-test")]
+use crate::selftest::m4_crash_service::handle_crash_service_page_fault;
+#[cfg(feature = "m4-crash-service-self-test")]
+use crate::selftest::m4_crash_service::handle_crash_service_userspace_entry;
 #[cfg(feature = "m2-double-fault-self-test")]
 use core::sync::atomic::Ordering;
 use x86_64::registers::control::Cr2;
@@ -152,6 +158,14 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         };
     }
 
+    #[cfg(feature = "m4-crash-service-self-test")]
+    if context.vector as usize == USER_TEST_VECTOR {
+        return match handle_crash_service_userspace_entry(context) {
+            Ok(next_stack_pointer) => next_stack_pointer,
+            Err(message) => fatal_kernel_error(message),
+        };
+    }
+
     #[cfg(feature = "m3-entry-self-test")]
     if context.vector as usize == USER_TEST_VECTOR {
         return match handle_userspace_entry_trap(context) {
@@ -182,6 +196,11 @@ fn handle_exception(context: &InterruptContext) -> ! {
         #[cfg(feature = "m3-resources-self-test")]
         if selector_rpl(context.cs) == 3 {
             handle_userspace_resource_page_fault(context)
+        }
+
+        #[cfg(feature = "m4-crash-service-self-test")]
+        if selector_rpl(context.cs) == 3 {
+            handle_crash_service_page_fault(context)
         }
 
         #[cfg(feature = "m2-double-fault-self-test")]

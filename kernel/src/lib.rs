@@ -20,6 +20,7 @@ mod sched;
         feature = "m3-address-space-self-test",
         feature = "m3-entry-self-test",
         feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
         feature = "m3-syscall-self-test",
         feature = "m3-ipc-self-test"
     ),

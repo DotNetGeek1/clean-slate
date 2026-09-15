@@ -93,6 +93,7 @@ $AllTests = [ordered]@{
     "test-m3-lifecycle"     = @{ Aliases = @("m3-lifecycle", "lifecycle", "m3.4"); Description = "M3.4 process/thread lifecycle acceptance"; Role = "Constituent" }
     "test-m3-ipc"           = @{ Aliases = @("m3-ipc", "ipc", "m3.5"); Description = "M3.5 capability-authorized IPC acceptance"; Role = "Constituent" }
     "test-m3-resources"     = @{ Aliases = @("m3-resources", "resources", "m3.6"); Description = "M3.6 domain resource accounting/teardown acceptance"; Role = "Constituent" }
+    "test-m4-crash-service" = @{ Aliases = @("m4-crash-service", "crash-service", "m4.7"); Description = "M4.7 supervised crash-service fixture acceptance"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {

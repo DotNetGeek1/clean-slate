@@ -24,6 +24,7 @@ pub(crate) const SPURIOUS_VECTOR: usize = 33;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
     feature = "m3-entry-self-test"
 ))]
 pub(crate) const USER_TEST_VECTOR: usize = 0x80;

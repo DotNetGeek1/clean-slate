@@ -26,11 +26,12 @@ TEST_NAMES=(
   test-m3-lifecycle
   test-m3-ipc
   test-m3-resources
+  test-m4-crash-service
 )
 
 test_role() {
   case "$1" in
-    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources)
+    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service)
       echo Constituent
       ;;
     test-m3)
@@ -53,6 +54,7 @@ test_description() {
     test-m3-lifecycle) echo "M3.4 process/thread lifecycle acceptance" ;;
     test-m3-ipc) echo "M3.5 capability-authorized IPC acceptance" ;;
     test-m3-resources) echo "M3.6 domain resource accounting/teardown acceptance" ;;
+    test-m4-crash-service) echo "M4.7 supervised crash-service fixture acceptance" ;;
     *) echo "" ;;
   esac
 }
@@ -68,6 +70,7 @@ test_aliases() {
     test-m3-lifecycle) echo "m3-lifecycle lifecycle m3.4" ;;
     test-m3-ipc) echo "m3-ipc ipc m3.5" ;;
     test-m3-resources) echo "m3-resources resources m3.6" ;;
+    test-m4-crash-service) echo "m4-crash-service crash-service m4.7" ;;
     *) echo "" ;;
   esac
 }

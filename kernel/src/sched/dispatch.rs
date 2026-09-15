@@ -29,6 +29,7 @@ use crate::sched::ThreadKind;
         feature = "m2-timer-self-test",
         feature = "m3-address-space-self-test",
         feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
         feature = "m3-entry-self-test",
         feature = "m3-syscall-self-test",
         feature = "m3-ipc-self-test"
@@ -70,6 +71,7 @@ pub(crate) fn initialize_scheduler() -> Result<(), &'static str> {
         feature = "m2-timer-self-test",
         feature = "m3-address-space-self-test",
         feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
         feature = "m3-entry-self-test",
         feature = "m3-syscall-self-test",
         feature = "m3-ipc-self-test"
@@ -118,6 +120,7 @@ pub(crate) fn prepare_current_scheduler_thread_dispatch() -> Result<(), &'static
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
     feature = "m3-ipc-self-test"
 ))]
 pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'static str> {
@@ -131,6 +134,7 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
     feature = "m3-ipc-self-test"
 ))]
 pub(crate) fn start_current_scheduler_thread() -> Result<u64, &'static str> {
