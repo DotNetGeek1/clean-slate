@@ -1,7 +1,8 @@
-//! Suggested `[SVC ]` / `[HLTH]` serial markers for M4 acceptance paths.
+//! Suggested `[SVC ]` / `[HLTH]` / `[DEP ]` serial markers for M4 acceptance paths.
 
 use core::fmt::Write;
 
+use crate::dependency_graph::StartBlockReason;
 use crate::health_tracker::HealthFailureReason;
 use crate::identity::{InstanceGeneration, ServiceId, ServiceInstanceId};
 
@@ -49,10 +50,38 @@ pub fn format_health_unhealthy_line<W: Write>(
     )
 }
 
+/// Writes `[DEP ] service=<id> ready\n` into `out`.
+pub fn format_dependency_ready_line<W: Write>(
+    out: &mut W,
+    service: ServiceId,
+) -> core::fmt::Result {
+    writeln!(out, "[DEP ] service={} ready", service.0)
+}
+
+/// Writes `[DEP ] service=<id> blocked-by=<dep>\n` into `out`.
+pub fn format_dependency_blocked_line<W: Write>(
+    out: &mut W,
+    service: ServiceId,
+    reason: StartBlockReason,
+) -> core::fmt::Result {
+    let blocked_by = match reason {
+        StartBlockReason::DependencyNotReady { dependency, .. }
+        | StartBlockReason::DependencyFailed { dependency, .. }
+        | StartBlockReason::DependencyUnhealthy { dependency, .. } => dependency,
+    };
+    writeln!(
+        out,
+        "[DEP ] service={} blocked-by={}",
+        service.0, blocked_by.0
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dependency_graph::StartBlockReason;
     use crate::health_tracker::HealthFailureReason;
+    use crate::state::ServiceLifecycleState;
 
     #[test]
     fn hlth_lines_match_suggested_diagnostics() {
@@ -64,5 +93,28 @@ mod tests {
         format_health_unhealthy_line(&mut buf, ServiceId(3), HealthFailureReason::LivenessTimeout)
             .expect("unhealthy");
         assert_eq!(buf, "[HLTH] service=3 unhealthy reason=timeout\n");
+    }
+
+    #[test]
+    fn dependency_ready_line_matches_spec() {
+        let mut out = String::new();
+        format_dependency_ready_line(&mut out, ServiceId(7)).expect("write");
+        assert_eq!(out, "[DEP ] service=7 ready\n");
+    }
+
+    #[test]
+    fn dependency_blocked_line_uses_first_blocker_id() {
+        let mut out = String::new();
+        format_dependency_blocked_line(
+            &mut out,
+            ServiceId(2),
+            StartBlockReason::DependencyNotReady {
+                dependency: ServiceId(1),
+                observed: ServiceLifecycleState::Declared,
+                required: ServiceLifecycleState::Running,
+            },
+        )
+        .expect("write");
+        assert_eq!(out, "[DEP ] service=2 blocked-by=1\n");
     }
 }

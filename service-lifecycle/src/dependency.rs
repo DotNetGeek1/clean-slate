@@ -1,4 +1,4 @@
-//! Dependency metadata envelope (graph evaluation is M4.5).
+//! Dependency metadata envelope (evaluation lives in `dependency_graph`).
 
 use crate::identity::ServiceId;
 use crate::state::ServiceLifecycleState;

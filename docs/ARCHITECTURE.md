@@ -267,7 +267,7 @@ Model highlights:
 
 ## M4.4 service health/liveness direction
 
-M4.4 adds supervisor-side liveness tracking in `service-lifecycle` (`health_tracker`, `time`) without restart policy (#40) or dependency evaluation (#39).
+M4.4 adds supervisor-side liveness tracking in `service-lifecycle` (`health_tracker`, `time`) without restart policy (#40). Dependency evaluation is M4.5 (#39).
 
 - Health reports use the M4.1 `LifecycleMessage::HealthReport` envelope over explicit IPC.
 - `ServiceHealthRecord` / `ServiceHealthTracker` track the active `InstanceGeneration`, last valid report, and a finite `deadline_ticks` derived from `LivenessConfig::report_period_ticks`.
@@ -276,11 +276,22 @@ M4.4 adds supervisor-side liveness tracking in `service-lifecycle` (`health_trac
 - `notify_lifecycle_failure` maps `Exited` / `Faulted` lifecycle events to immediate unhealthy state with distinct reasons (`exit`, `fault`, `timeout`, `self_reported`).
 - `HealthFailureEvent` and `HealthReportOutcome` are narrow integration surfaces for the M4.3 supervisor (#37); they do not encode restart actions.
 
-Suggested serial diagnostics (`format_health_*_line`, `format_declared_line`, `format_instance_line`):
+## M4.5 service dependency evaluation direction
+
+M4.5 adds supervisor-owned, in-memory dependency metadata and deterministic start-readiness evaluation in `clean-slate-service-lifecycle` (`dependency_graph` module). The kernel does not interpret dependency graphs.
+
+- **Supervisor (#37):** declares services in `DependencyGraph`, attaches bounded `DependencyMetadata` per logical `ServiceId`, and calls `evaluate_start_readiness` before issuing start side effects.
+- **Evaluation inputs:** current lifecycle snapshots from `ServiceLifecycleTracker` plus optional `DependencyHealthSnapshot` (unhealthy upstream blocks even when lifecycle is `Running`; timeout policy remains M4.4).
+- **Validation:** unknown dependency targets, self-dependencies, duplicate edges, inline edge overflow, and cycles are rejected at `set_dependencies` time.
+- **Identity:** dependency keys are always logical `ServiceId`; PIDs and instance generations are never dependency identifiers.
+
+Suggested serial diagnostics (`format_health_*_line`, `format_dependency_*_line`, `format_declared_line`, `format_instance_line`):
 
 ```text
 [HLTH] service=<id> healthy gen=<n>
 [HLTH] service=<id> unhealthy reason=<timeout|exit|fault|self_reported>
+[DEP ] service=<id> blocked-by=<dep>
+[DEP ] service=<id> ready
 [SVC ] declared service=<id>
 [SVC ] instance service=<id> pid=<pid> gen=<n>
 ```
