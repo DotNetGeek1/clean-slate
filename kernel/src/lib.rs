@@ -13,7 +13,9 @@
 )]
 
 mod arch;
+mod boot;
 mod diagnostics;
+mod mm;
 mod sync;
 
 pub use diagnostics::qemu::qemu_exit_failure;
@@ -23,7 +25,6 @@ use crate::arch::x86_64::bit;
 use crate::arch::x86_64::cpu::disable_interrupts;
 use crate::arch::x86_64::cpu::enable_interrupts;
 use crate::arch::x86_64::cpu::read_code_segment;
-use crate::arch::x86_64::cpu::read_stack_pointer;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::cpu::without_write_protect;
 use crate::arch::x86_64::msr::read_msr;
@@ -46,6 +47,9 @@ use crate::arch::x86_64::RFLAGS_STATUS_FLAGS_MASK;
 use crate::arch::x86_64::RFLAGS_TRAP_FLAG_BIT;
 use crate::arch::x86_64::SPURIOUS_VECTOR;
 use crate::arch::x86_64::TIMER_VECTOR;
+use crate::boot::uefi::collect_reserved_ranges_from_firmware;
+use crate::boot::uefi::normalize_memory_map;
+use crate::boot::uefi::BootReservedRanges;
 use crate::diagnostics::gdb::gdb_entry_handoff;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
@@ -55,6 +59,13 @@ use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_FAILURE;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::diagnostics::serial::serial_init;
+use crate::mm::align_down;
+use crate::mm::frame_allocator::free_frame;
+use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::region::ReservedRange;
+use crate::mm::PAGE_SIZE;
+use crate::mm::PHYSICAL_MEMORY_OFFSET;
+use crate::mm::USER_CANONICAL_TOP_EXCLUSIVE;
 use crate::sync::global_cell::GlobalCell;
 use core::arch::{asm, global_asm};
 use core::hint::spin_loop;
@@ -69,9 +80,7 @@ use core::ptr;
 ))]
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU64, Ordering};
-use uefi::boot;
-use uefi::mem::memory_map::{MemoryDescriptor, MemoryMap, MemoryMapMut, MemoryType};
-use uefi::proto::loaded_image::LoadedImage;
+use uefi::mem::memory_map::{MemoryMap, MemoryMapMut};
 use uefi::Status;
 use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
 use x86_64::instructions::tables::load_tss;
@@ -84,16 +93,10 @@ use x86_64::structures::paging::{Mapper, Page};
 use x86_64::structures::tss::TaskStateSegment;
 use x86_64::{PhysAddr, VirtAddr};
 
-const PAGE_SIZE: u64 = 4096;
-const PHYSICAL_MEMORY_OFFSET: u64 = 0;
 #[cfg(feature = "m1-self-test")]
 const SCRATCH_PAGE_ADDRESS: u64 = 0xffff_8000_0000_0000;
 #[cfg(feature = "m1-self-test")]
 const TEST_PAGE_VALUE: u64 = 0x434c_4541_4e53_4c41;
-const MAX_MEMORY_REGIONS: usize = 256;
-const MAX_RESERVED_RANGES: usize = MAX_MEMORY_REGIONS + 1;
-const MAX_BOOT_RESERVED_RANGES: usize = 16;
-const EARLY_STACK_RESERVE_SIZE: u64 = 64 * 1024;
 const DOUBLE_FAULT_IST_INDEX: u16 = 1;
 const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
 const APIC_BASE_MSR: u32 = 0x1b;
@@ -153,7 +156,6 @@ const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 const ADDRESS_SPACE_SWITCH_OK_MARKER: &str = "[MM  ] address-space switch OK";
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 const USER_TEST_RFLAGS: u64 = 0x202;
-const USER_CANONICAL_TOP_EXCLUSIVE: u64 = 1 << 47;
 const SYSCALL_ABI_VERSION: u64 = 1;
 const SYSCALL_NR_VERSION: u64 = 0;
 const SYSCALL_NR_READ_U64: u64 = 1;
@@ -676,506 +678,6 @@ impl IdAllocator {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MemoryRegionKind {
-    Usable,
-    Reserved,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MemoryRegion {
-    pub start: u64,
-    pub end: u64,
-    pub kind: MemoryRegionKind,
-}
-
-impl MemoryRegion {
-    const EMPTY: Self = Self {
-        start: 0,
-        end: 0,
-        kind: MemoryRegionKind::Reserved,
-    };
-
-    pub const fn len(self) -> u64 {
-        self.end.saturating_sub(self.start)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReservedRange {
-    start: u64,
-    end: u64,
-}
-
-impl ReservedRange {
-    const EMPTY: Self = Self { start: 0, end: 0 };
-
-    pub const fn new(start: u64, end: u64) -> Self {
-        Self { start, end }
-    }
-
-    fn from_base_and_size(base: u64, size: u64) -> Self {
-        Self {
-            start: align_down(base, PAGE_SIZE),
-            end: align_up(base.saturating_add(size), PAGE_SIZE),
-        }
-    }
-
-    fn is_empty(self) -> bool {
-        self.start >= self.end
-    }
-}
-
-const RESERVED_PHYSICAL_ZERO_PAGE: ReservedRange = ReservedRange::new(0, PAGE_SIZE);
-
-struct BootReservedRanges {
-    ranges: [ReservedRange; MAX_BOOT_RESERVED_RANGES],
-    count: usize,
-}
-
-impl BootReservedRanges {
-    fn new() -> Self {
-        Self {
-            ranges: [ReservedRange::EMPTY; MAX_BOOT_RESERVED_RANGES],
-            count: 0,
-        }
-    }
-
-    fn push(&mut self, range: ReservedRange) -> Result<(), &'static str> {
-        if range.is_empty() {
-            return Ok(());
-        }
-        if self.ranges[..self.count]
-            .iter()
-            .any(|existing| existing.start == range.start && existing.end == range.end)
-        {
-            return Ok(());
-        }
-        if self.count == MAX_BOOT_RESERVED_RANGES {
-            return Err("boot reservation capacity exceeded");
-        }
-        self.ranges[self.count] = range;
-        self.count += 1;
-        Ok(())
-    }
-
-    fn as_slice(&self) -> &[ReservedRange] {
-        &self.ranges[..self.count]
-    }
-}
-
-#[derive(Debug)]
-pub struct NormalizedMemoryMap {
-    regions: [MemoryRegion; MAX_MEMORY_REGIONS],
-    region_count: usize,
-    usable_bytes: u64,
-    reserved_bytes: u64,
-}
-
-impl NormalizedMemoryMap {
-    pub fn regions(&self) -> &[MemoryRegion] {
-        &self.regions[..self.region_count]
-    }
-
-    pub const fn usable_bytes(&self) -> u64 {
-        self.usable_bytes
-    }
-
-    pub const fn reserved_bytes(&self) -> u64 {
-        self.reserved_bytes
-    }
-
-    fn push_region(&mut self, region: MemoryRegion) -> Result<(), &'static str> {
-        if region.len() == 0 {
-            return Ok(());
-        }
-
-        if let Some(previous) = self.regions[..self.region_count].last_mut() {
-            if previous.kind == region.kind && previous.end == region.start {
-                previous.end = region.end;
-                self.bump_totals(region.kind, region.len());
-                return Ok(());
-            }
-        }
-
-        if self.region_count == MAX_MEMORY_REGIONS {
-            return Err("normalized memory map exceeded fixed region capacity");
-        }
-
-        self.regions[self.region_count] = region;
-        self.region_count += 1;
-        self.bump_totals(region.kind, region.len());
-        Ok(())
-    }
-
-    fn bump_totals(&mut self, kind: MemoryRegionKind, len: u64) {
-        match kind {
-            MemoryRegionKind::Usable => self.usable_bytes += len,
-            MemoryRegionKind::Reserved => self.reserved_bytes += len,
-        }
-    }
-}
-
-impl Default for NormalizedMemoryMap {
-    fn default() -> Self {
-        Self {
-            regions: [MemoryRegion::EMPTY; MAX_MEMORY_REGIONS],
-            region_count: 0,
-            usable_bytes: 0,
-            reserved_bytes: 0,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct PageAllocator {
-    usable_regions: [MemoryRegion; MAX_MEMORY_REGIONS],
-    usable_region_count: usize,
-    current_region: usize,
-    next_page: u64,
-    free_list_head: Option<u64>,
-    total_pages: u64,
-    available_pages: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PageAllocatorStats {
-    pub total_pages: u64,
-    pub allocated_pages: u64,
-    pub free_pages: u64,
-}
-
-impl PageAllocator {
-    pub fn new(memory_map: &NormalizedMemoryMap) -> Result<Self, &'static str> {
-        let mut allocator = Self {
-            usable_regions: [MemoryRegion::EMPTY; MAX_MEMORY_REGIONS],
-            usable_region_count: 0,
-            current_region: 0,
-            next_page: 0,
-            free_list_head: None,
-            total_pages: 0,
-            available_pages: 0,
-        };
-
-        for region in memory_map.regions() {
-            if region.kind == MemoryRegionKind::Usable {
-                let start = region.start.max(PAGE_SIZE);
-                if start >= region.end {
-                    continue;
-                }
-                if allocator.usable_region_count == MAX_MEMORY_REGIONS {
-                    return Err("allocator usable-region capacity exceeded");
-                }
-                allocator.usable_regions[allocator.usable_region_count] = MemoryRegion {
-                    start,
-                    end: region.end,
-                    kind: MemoryRegionKind::Usable,
-                };
-                allocator.usable_region_count += 1;
-                allocator.total_pages += (region.end - start) / PAGE_SIZE;
-            }
-        }
-
-        if allocator.usable_region_count == 0 {
-            return Err("no usable physical memory regions available");
-        }
-
-        allocator.next_page = allocator.usable_regions[0].start;
-        allocator.available_pages = allocator.total_pages;
-        Ok(allocator)
-    }
-
-    pub fn allocate_page(&mut self) -> Option<u64> {
-        if let Some(frame) = self.pop_free_page() {
-            self.available_pages -= 1;
-            return Some(frame);
-        }
-
-        while self.current_region < self.usable_region_count {
-            let region = self.usable_regions[self.current_region];
-            if self.next_page < region.end {
-                let frame = self.next_page;
-                self.next_page = self.next_page.saturating_add(PAGE_SIZE);
-                self.available_pages -= 1;
-                return Some(frame);
-            }
-
-            self.current_region += 1;
-            if self.current_region < self.usable_region_count {
-                self.next_page = self.usable_regions[self.current_region].start;
-            }
-        }
-
-        None
-    }
-
-    pub unsafe fn free_page(&mut self, frame: u64) -> Result<(), &'static str> {
-        if frame % PAGE_SIZE != 0 {
-            return Err("attempted to free a non-page-aligned frame");
-        }
-        if !self.contains_usable_frame(frame) {
-            return Err("attempted to free a frame outside usable memory");
-        }
-        if !self.was_ever_allocated(frame) {
-            return Err("attempted to free a frame that was never allocated");
-        }
-        if self.free_list_contains(frame) {
-            return Err("attempted to free an already-free frame");
-        }
-
-        let node_ptr = (PHYSICAL_MEMORY_OFFSET + frame) as *mut FreePageNode;
-        unsafe {
-            ptr::write(
-                node_ptr,
-                FreePageNode {
-                    next: self.free_list_head,
-                },
-            );
-        }
-        self.free_list_head = Some(frame);
-        self.available_pages += 1;
-        Ok(())
-    }
-
-    pub fn stats(&self) -> PageAllocatorStats {
-        PageAllocatorStats {
-            total_pages: self.total_pages,
-            allocated_pages: self.total_pages - self.available_pages,
-            free_pages: self.available_pages,
-        }
-    }
-
-    fn pop_free_page(&mut self) -> Option<u64> {
-        let frame = self.free_list_head?;
-        let node_ptr = (PHYSICAL_MEMORY_OFFSET + frame) as *const FreePageNode;
-        let node = unsafe { ptr::read(node_ptr) };
-        self.free_list_head = node.next;
-        Some(frame)
-    }
-
-    fn contains_usable_frame(&self, frame: u64) -> bool {
-        self.usable_regions[..self.usable_region_count]
-            .iter()
-            .any(|region| frame >= region.start && frame < region.end)
-    }
-
-    fn was_ever_allocated(&self, frame: u64) -> bool {
-        let Some(region_index) = self.region_index_containing(frame) else {
-            return false;
-        };
-
-        if region_index < self.current_region {
-            return true;
-        }
-
-        region_index == self.current_region && frame < self.next_page
-    }
-
-    fn region_index_containing(&self, frame: u64) -> Option<usize> {
-        self.usable_regions[..self.usable_region_count]
-            .iter()
-            .position(|region| frame >= region.start && frame < region.end)
-    }
-
-    fn free_list_contains(&self, frame: u64) -> bool {
-        let mut current = self.free_list_head;
-        while let Some(candidate) = current {
-            if candidate == frame {
-                return true;
-            }
-            let node_ptr = (PHYSICAL_MEMORY_OFFSET + candidate) as *const FreePageNode;
-            let node = unsafe { ptr::read(node_ptr) };
-            current = node.next;
-        }
-        false
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct FreePageNode {
-    next: Option<u64>,
-}
-
-unsafe impl FrameAllocator<Size4KiB> for PageAllocator {
-    fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
-        self.allocate_page()
-            .map(|address| PhysFrame::containing_address(PhysAddr::new(address)))
-    }
-}
-
-pub fn normalize_memory_map<'a>(
-    descriptors: impl IntoIterator<Item = &'a MemoryDescriptor>,
-    reserved_ranges: &[ReservedRange],
-) -> Result<NormalizedMemoryMap, &'static str> {
-    let mut descriptors = collect_descriptors(descriptors)?;
-    sort_descriptors(&mut descriptors);
-
-    let mut ranges = collect_reserved_ranges(reserved_ranges)?;
-    sort_reserved_ranges(&mut ranges);
-
-    let mut normalized = NormalizedMemoryMap::default();
-    for descriptor in descriptors.iter().flatten() {
-        let start = align_up(descriptor.start, PAGE_SIZE);
-        let end = align_down(descriptor.end, PAGE_SIZE);
-        if start >= end {
-            continue;
-        }
-
-        if is_usable_memory_type(descriptor.ty) {
-            let mut cursor = start;
-            for reserved in ranges.iter().flatten() {
-                if reserved.end <= cursor || reserved.start >= end {
-                    continue;
-                }
-
-                if cursor < reserved.start {
-                    normalized.push_region(MemoryRegion {
-                        start: cursor,
-                        end: reserved.start,
-                        kind: MemoryRegionKind::Usable,
-                    })?;
-                }
-
-                let reserved_start = reserved.start.max(cursor);
-                let reserved_end = reserved.end.min(end);
-                normalized.push_region(MemoryRegion {
-                    start: reserved_start,
-                    end: reserved_end,
-                    kind: MemoryRegionKind::Reserved,
-                })?;
-                cursor = reserved_end;
-            }
-
-            if cursor < end {
-                normalized.push_region(MemoryRegion {
-                    start: cursor,
-                    end,
-                    kind: MemoryRegionKind::Usable,
-                })?;
-            }
-        } else {
-            normalized.push_region(MemoryRegion {
-                start,
-                end,
-                kind: MemoryRegionKind::Reserved,
-            })?;
-        }
-    }
-
-    Ok(normalized)
-}
-
-#[derive(Clone, Copy)]
-struct RawDescriptor {
-    start: u64,
-    end: u64,
-    ty: MemoryType,
-}
-
-fn collect_descriptors<'a>(
-    descriptors: impl IntoIterator<Item = &'a MemoryDescriptor>,
-) -> Result<[Option<RawDescriptor>; MAX_MEMORY_REGIONS], &'static str> {
-    let mut collected = [None; MAX_MEMORY_REGIONS];
-    let mut count = 0usize;
-
-    for descriptor in descriptors {
-        if count == MAX_MEMORY_REGIONS {
-            return Err("UEFI memory map exceeded fixed descriptor capacity");
-        }
-
-        collected[count] = Some(RawDescriptor {
-            start: descriptor.phys_start,
-            end: descriptor
-                .phys_start
-                .saturating_add(descriptor.page_count.saturating_mul(PAGE_SIZE)),
-            ty: descriptor.ty,
-        });
-        count += 1;
-    }
-
-    Ok(collected)
-}
-
-fn sort_descriptors(descriptors: &mut [Option<RawDescriptor>; MAX_MEMORY_REGIONS]) {
-    for index in 1..descriptors.len() {
-        let current = descriptors[index];
-        let Some(current) = current else {
-            break;
-        };
-
-        let mut position = index;
-        while position > 0 {
-            match descriptors[position - 1] {
-                Some(previous) if previous.start > current.start => {
-                    descriptors[position] = Some(previous);
-                    position -= 1;
-                }
-                _ => break,
-            }
-        }
-        descriptors[position] = Some(current);
-    }
-}
-
-fn collect_reserved_ranges(
-    reserved_ranges: &[ReservedRange],
-) -> Result<[Option<ReservedRange>; MAX_RESERVED_RANGES], &'static str> {
-    let mut collected = [None; MAX_RESERVED_RANGES];
-    let mut count = 0usize;
-
-    collected[count] = Some(RESERVED_PHYSICAL_ZERO_PAGE);
-    count += 1;
-
-    for range in reserved_ranges {
-        let range = ReservedRange {
-            start: align_down(range.start, PAGE_SIZE),
-            end: align_up(range.end, PAGE_SIZE),
-        };
-        if range.is_empty() {
-            continue;
-        }
-        if collected[..count]
-            .iter()
-            .flatten()
-            .any(|existing| existing.start == range.start && existing.end == range.end)
-        {
-            continue;
-        }
-        if count == MAX_RESERVED_RANGES {
-            return Err("reserved range capacity exceeded");
-        }
-        collected[count] = Some(range);
-        count += 1;
-    }
-    Ok(collected)
-}
-
-fn sort_reserved_ranges(ranges: &mut [Option<ReservedRange>; MAX_RESERVED_RANGES]) {
-    for index in 1..ranges.len() {
-        let current = ranges[index];
-        let Some(current) = current else {
-            break;
-        };
-
-        let mut position = index;
-        while position > 0 {
-            match ranges[position - 1] {
-                Some(previous) if previous.start > current.start => {
-                    ranges[position] = Some(previous);
-                    position -= 1;
-                }
-                _ => break,
-            }
-        }
-        ranges[position] = Some(current);
-    }
-}
-
-fn is_usable_memory_type(memory_type: MemoryType) -> bool {
-    memory_type == MemoryType::CONVENTIONAL
-}
-
 pub fn run() -> Status {
     serial_init();
     gdb_entry_handoff();
@@ -1191,7 +693,7 @@ pub fn run() -> Status {
 fn run_inner() -> Result<(), &'static str> {
     let mut reserved_ranges = collect_reserved_ranges_from_firmware()?;
 
-    let mut memory_map = unsafe { boot::exit_boot_services(None) };
+    let mut memory_map = unsafe { uefi::boot::exit_boot_services(None) };
     memory_map.sort();
     serial_write_line("[BOOT] UEFI memory map acquired");
     serial_write_line("[BOOT] ExitBootServices OK");
@@ -1309,28 +811,6 @@ fn run_inner() -> Result<(), &'static str> {
         serial_write_line("[KERN] scheduler initialized");
         start_scheduler()
     }
-}
-
-fn collect_reserved_ranges_from_firmware() -> Result<BootReservedRanges, &'static str> {
-    let loaded_image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle())
-        .map_err(|_| "failed to open LoadedImage protocol")?;
-    let (image_base, image_size) = loaded_image.info();
-    drop(loaded_image);
-
-    let mut ranges = BootReservedRanges::new();
-    let kernel_base = image_base as u64;
-    let kernel_range = ReservedRange::from_base_and_size(kernel_base, image_size);
-    let stack_pointer = read_stack_pointer();
-    let stack_range = ReservedRange::from_base_and_size(
-        stack_pointer.saturating_sub(EARLY_STACK_RESERVE_SIZE),
-        EARLY_STACK_RESERVE_SIZE,
-    );
-    ranges.push(kernel_range)?;
-    ranges.push(stack_range)?;
-    reserve_mapping_page_tables(&mut ranges, kernel_base)?;
-    reserve_mapping_page_tables(&mut ranges, stack_pointer)?;
-
-    Ok(ranges)
 }
 
 fn inspect_current_mapping() -> Result<(u64, u64), &'static str> {
@@ -2817,11 +2297,6 @@ fn unmap_userspace_page(
             frame
         })
         .map_err(|_| "failed to unmap userspace page")
-}
-
-#[allow(dead_code)]
-unsafe fn free_frame(allocator: &mut PageAllocator, frame: u64) -> Result<(), &'static str> {
-    unsafe { allocator.free_page(frame) }
 }
 
 struct PageWalkFlags {
@@ -5193,272 +4668,9 @@ fn local_apic_base() -> u64 {
     read_msr(APIC_BASE_MSR) & APIC_BASE_ADDRESS_MASK
 }
 
-const fn align_down(value: u64, align: u64) -> u64 {
-    value & !(align - 1)
-}
-
-const fn align_up(value: u64, align: u64) -> u64 {
-    if value & (align - 1) == 0 {
-        value
-    } else {
-        (value + align - 1) & !(align - 1)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::vec::Vec;
-    use uefi::mem::memory_map::MemoryAttribute;
-
-    fn descriptor(ty: MemoryType, start: u64, pages: u64) -> MemoryDescriptor {
-        MemoryDescriptor {
-            ty,
-            phys_start: start,
-            virt_start: 0,
-            page_count: pages,
-            att: MemoryAttribute::empty(),
-        }
-    }
-
-    #[repr(align(4096))]
-    struct AlignedPages([u8; (PAGE_SIZE as usize) * 4]);
-
-    #[test]
-    fn normalize_sorts_and_reserves_requested_ranges() {
-        let descriptors = [
-            descriptor(MemoryType::ACPI_NON_VOLATILE, 0x9000, 1),
-            descriptor(MemoryType::CONVENTIONAL, 0x3000, 4),
-            descriptor(MemoryType::CONVENTIONAL, 0x1000, 2),
-        ];
-        let reserved = [ReservedRange::from_base_and_size(0x4000, PAGE_SIZE)];
-
-        let map = normalize_memory_map(descriptors.iter(), &reserved).expect("normalize map");
-        assert_eq!(
-            map.regions(),
-            &[
-                MemoryRegion {
-                    start: 0x1000,
-                    end: 0x4000,
-                    kind: MemoryRegionKind::Usable,
-                },
-                MemoryRegion {
-                    start: 0x4000,
-                    end: 0x5000,
-                    kind: MemoryRegionKind::Reserved,
-                },
-                MemoryRegion {
-                    start: 0x5000,
-                    end: 0x7000,
-                    kind: MemoryRegionKind::Usable,
-                },
-                MemoryRegion {
-                    start: 0x9000,
-                    end: 0xa000,
-                    kind: MemoryRegionKind::Reserved,
-                },
-            ]
-        );
-        assert_eq!(map.usable_bytes(), 0x5000);
-        assert_eq!(map.reserved_bytes(), 0x2000);
-    }
-
-    #[test]
-    fn allocator_allocates_and_reuses_freed_pages() {
-        let mut pages = AlignedPages([0; (PAGE_SIZE as usize) * 4]);
-        let base = pages.0.as_mut_ptr() as u64;
-        assert_eq!(base % PAGE_SIZE, 0);
-
-        let descriptors = [descriptor(MemoryType::CONVENTIONAL, base, 4)];
-        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
-        let mut allocator = PageAllocator::new(&map).expect("allocator");
-
-        let first = allocator.allocate_page().expect("first page");
-        let second = allocator.allocate_page().expect("second page");
-        assert_eq!(first, base);
-        assert_eq!(second, base + PAGE_SIZE);
-
-        unsafe {
-            allocator.free_page(first).expect("free page");
-        }
-        let recycled = allocator.allocate_page().expect("recycled page");
-        assert_eq!(recycled, first);
-
-        assert_eq!(
-            allocator.stats(),
-            PageAllocatorStats {
-                total_pages: 4,
-                allocated_pages: 2,
-                free_pages: 2,
-            }
-        );
-    }
-
-    #[test]
-    fn allocator_rejects_double_free() {
-        let mut pages = AlignedPages([0; (PAGE_SIZE as usize) * 4]);
-        let base = pages.0.as_mut_ptr() as u64;
-        let descriptors = [descriptor(MemoryType::CONVENTIONAL, base, 4)];
-        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
-        let mut allocator = PageAllocator::new(&map).expect("allocator");
-
-        let frame = allocator.allocate_page().expect("allocated page");
-        unsafe {
-            allocator.free_page(frame).expect("first free");
-        }
-        let second_free = unsafe { allocator.free_page(frame) };
-        assert_eq!(second_free, Err("attempted to free an already-free frame"));
-    }
-
-    #[test]
-    fn allocator_rejects_unallocated_and_unaligned_frees() {
-        let mut pages = AlignedPages([0; (PAGE_SIZE as usize) * 4]);
-        let base = pages.0.as_mut_ptr() as u64;
-        let descriptors = [descriptor(MemoryType::CONVENTIONAL, base, 4)];
-        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
-        let mut allocator = PageAllocator::new(&map).expect("allocator");
-
-        let never_allocated = unsafe { allocator.free_page(base + PAGE_SIZE) };
-        assert_eq!(
-            never_allocated,
-            Err("attempted to free a frame that was never allocated")
-        );
-
-        let unaligned = unsafe { allocator.free_page(base + 1) };
-        assert_eq!(unaligned, Err("attempted to free a non-page-aligned frame"));
-    }
-
-    #[test]
-    fn allocator_exhaustion_and_reserved_exclusion_are_tracked() {
-        let descriptors = [
-            descriptor(MemoryType::CONVENTIONAL, 0x1000, 4),
-            descriptor(MemoryType::ACPI_NON_VOLATILE, 0x5000, 2),
-            descriptor(MemoryType::CONVENTIONAL, 0x7000, 2),
-        ];
-        let reserved = [ReservedRange::from_base_and_size(0x2000, PAGE_SIZE)];
-        let map = normalize_memory_map(descriptors.iter(), &reserved).expect("normalize map");
-        let mut allocator = PageAllocator::new(&map).expect("allocator");
-
-        let mut allocated = Vec::new();
-        while let Some(frame) = allocator.allocate_page() {
-            allocated.push(frame);
-        }
-
-        assert_eq!(allocated, vec![0x1000, 0x3000, 0x4000, 0x7000, 0x8000]);
-        assert_eq!(
-            allocator.stats(),
-            PageAllocatorStats {
-                total_pages: 5,
-                allocated_pages: 5,
-                free_pages: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn normalize_handles_multiple_reserved_ranges() {
-        let descriptors = [descriptor(MemoryType::CONVENTIONAL, 0x1000, 8)];
-        let reserved = [
-            ReservedRange::from_base_and_size(0x2000, PAGE_SIZE),
-            ReservedRange::from_base_and_size(0x5000, PAGE_SIZE * 2),
-        ];
-
-        let map = normalize_memory_map(descriptors.iter(), &reserved).expect("normalize map");
-        assert_eq!(
-            map.regions(),
-            &[
-                MemoryRegion {
-                    start: 0x1000,
-                    end: 0x2000,
-                    kind: MemoryRegionKind::Usable,
-                },
-                MemoryRegion {
-                    start: 0x2000,
-                    end: 0x3000,
-                    kind: MemoryRegionKind::Reserved,
-                },
-                MemoryRegion {
-                    start: 0x3000,
-                    end: 0x5000,
-                    kind: MemoryRegionKind::Usable,
-                },
-                MemoryRegion {
-                    start: 0x5000,
-                    end: 0x7000,
-                    kind: MemoryRegionKind::Reserved,
-                },
-                MemoryRegion {
-                    start: 0x7000,
-                    end: 0x9000,
-                    kind: MemoryRegionKind::Usable,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn normalize_reserves_physical_frame_zero_when_firmware_reports_it_usable() {
-        let descriptors = [descriptor(MemoryType::CONVENTIONAL, 0, 3)];
-        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
-
-        assert_eq!(
-            map.regions(),
-            &[
-                MemoryRegion {
-                    start: 0,
-                    end: PAGE_SIZE,
-                    kind: MemoryRegionKind::Reserved,
-                },
-                MemoryRegion {
-                    start: PAGE_SIZE,
-                    end: PAGE_SIZE * 3,
-                    kind: MemoryRegionKind::Usable,
-                },
-            ]
-        );
-
-        let mut allocator = PageAllocator::new(&map).expect("allocator");
-        assert_eq!(allocator.allocate_page(), Some(PAGE_SIZE));
-        assert_eq!(allocator.allocate_page(), Some(PAGE_SIZE * 2));
-        assert_eq!(allocator.allocate_page(), None);
-        assert_eq!(
-            allocator.stats(),
-            PageAllocatorStats {
-                total_pages: 2,
-                allocated_pages: 2,
-                free_pages: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn normalize_rejects_reserved_range_overflow() {
-        let descriptors = [descriptor(MemoryType::CONVENTIONAL, 0x1000, 1)];
-        let mut reserved = vec![ReservedRange::EMPTY; MAX_MEMORY_REGIONS + 1];
-        for (index, range) in reserved.iter_mut().enumerate() {
-            let start = ((index as u64) + 1) * PAGE_SIZE;
-            *range = ReservedRange::new(start, start + PAGE_SIZE);
-        }
-
-        let error = normalize_memory_map(descriptors.iter(), &reserved).unwrap_err();
-        assert_eq!(error, "reserved range capacity exceeded");
-    }
-
-    #[test]
-    fn normalize_rejects_descriptor_overflow() {
-        let descriptors: Vec<_> = (0..=MAX_MEMORY_REGIONS)
-            .map(|index| {
-                descriptor(
-                    MemoryType::CONVENTIONAL,
-                    ((index as u64) + 1) * PAGE_SIZE,
-                    1,
-                )
-            })
-            .collect();
-
-        let error = normalize_memory_map(descriptors.iter(), &[]).unwrap_err();
-        assert_eq!(error, "UEFI memory map exceeded fixed descriptor capacity");
-    }
 
     #[test]
     fn scheduler_round_robins_and_tracks_preemption_progress() {
