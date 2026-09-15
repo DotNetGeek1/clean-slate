@@ -36,6 +36,8 @@ pub(crate) mod m3_syscall;
 pub(crate) mod m4_crash_service;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
 pub(crate) mod m4_service_lifecycle;
+#[cfg(feature = "m4-supervisor-self-test")]
+pub(crate) mod m4_supervisor;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
@@ -69,6 +71,7 @@ pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SI
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
-    feature = "m3-ipc-self-test"
+    feature = "m3-ipc-self-test",
+    feature = "m4-supervisor-self-test"
 ))]
-const USER_TEST_PROCESS_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + (PAGE_SIZE * 2);
+pub(super) const USER_TEST_PROCESS_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + (PAGE_SIZE * 2);

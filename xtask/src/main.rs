@@ -23,6 +23,7 @@ const M3_LIFECYCLE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_IPC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_RESOURCES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_CRASH_SERVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
+const M4_SUPERVISOR_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[BOOT] UEFI memory map acquired",
     "[BOOT] ExitBootServices OK",
@@ -121,6 +122,14 @@ const M4_SERVICE_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[M4.2] unauthorized denied",
     "[M4.2] PASS",
 ];
+const M4_SUPERVISOR_ACCEPTANCE_MARKERS: [&str; 6] = [
+    "[CAP ] supervisor console capability granted pid=1",
+    "[SUP ] started pid=1",
+    "[SUP ] registered service=1",
+    "[SUP ] service=1 state=2 pid=201 gen=1",
+    "[IPC ] console pid=1: [SUP ]",
+    "[M4.3] PASS",
+];
 /// Merged M3.2 + M3.4 markers in the order the `m3-address-space-self-test`
 /// boot actually emits them, so the aggregate gate proves isolation and
 /// fault/lifecycle behaviour from a single boot.
@@ -181,6 +190,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM3Resources => run_m3_resources_acceptance(),
         ParsedCommand::TestM4CrashService => run_m4_crash_service_acceptance(),
         ParsedCommand::TestM4ServiceLifecycle => run_m4_service_lifecycle_acceptance(),
+        ParsedCommand::TestM4Supervisor => run_m4_supervisor_acceptance(),
         ParsedCommand::RunGdb => run_vm_with_gdb(false),
         ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
         ParsedCommand::Build => build_kernel(false, false, &[]),
@@ -323,6 +333,40 @@ fn run_m4_service_lifecycle_acceptance() -> Result<(), XtaskError> {
         Some((
             &M4_SERVICE_LIFECYCLE_ACCEPTANCE_MARKERS,
             M4_SERVICE_LIFECYCLE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn build_supervisor_userspace(release: bool) -> Result<(), XtaskError> {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build")
+        .arg("-p")
+        .arg("clean-slate-supervisor")
+        .arg("--bin")
+        .arg("clean-slate-supervisor-userspace")
+        .arg("--features")
+        .arg("userspace")
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,compiler_builtins");
+    if release {
+        cmd.arg("--release");
+    }
+    cmd.env("RUSTC_BOOTSTRAP", "1");
+    run_command(&mut cmd)?;
+    Ok(())
+}
+
+fn run_m4_supervisor_acceptance() -> Result<(), XtaskError> {
+    build_supervisor_userspace(true)?;
+    run_vm_inner(
+        true,
+        false,
+        &["m3-entry-self-test", "m4-supervisor-self-test"],
+        Some((
+            &M4_SUPERVISOR_ACCEPTANCE_MARKERS,
+            M4_SUPERVISOR_ACCEPTANCE_TIMEOUT,
         )),
     )
 }
@@ -726,6 +770,7 @@ fn print_help() {
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
     println!("  test-m4-crash-service Build the M4.7 crash-service fixture kernel, run QEMU, and validate PASS markers");
     println!("  test-m4-service-lifecycle Build the M4.2 service lifecycle kernel, run QEMU, and validate PASS markers");
+    println!("  test-m4-supervisor Build the M4.3 supervisor userspace image and QEMU integration self-test");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
     println!("  build        Build debug UEFI kernel only");
@@ -752,6 +797,7 @@ enum ParsedCommand {
     TestM3Resources,
     TestM4CrashService,
     TestM4ServiceLifecycle,
+    TestM4Supervisor,
     RunGdb,
     RunGdbEntry,
     Build,
@@ -774,6 +820,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m3-resources" => ParsedCommand::TestM3Resources,
         Some(cmd) if cmd == "test-m4-crash-service" => ParsedCommand::TestM4CrashService,
         Some(cmd) if cmd == "test-m4-service-lifecycle" => ParsedCommand::TestM4ServiceLifecycle,
+        Some(cmd) if cmd == "test-m4-supervisor" => ParsedCommand::TestM4Supervisor,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
         Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
         Some(cmd) if cmd == "build" => ParsedCommand::Build,

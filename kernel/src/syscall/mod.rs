@@ -44,6 +44,8 @@ use crate::ipc::USERSPACE_IPC_TEST_PID;
 use crate::ipc::USERSPACE_IPC_UNAUTHORIZED_TEST_PID;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
 use crate::mm::frame_allocator::PageAllocator;
+#[cfg(feature = "m4-supervisor-self-test")]
+use crate::ipc::USERSPACE_SUPERVISOR_TEST_PID;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::user_mapping::validate_user_pointer_range;
 #[cfg(feature = "m3-syscall-self-test")]
@@ -68,6 +70,8 @@ use crate::selftest::m3_syscall::SYSCALL_DF_SANITIZED_OBSERVED;
 use crate::selftest::m3_syscall::SYSCALL_PASS_MARKER;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::m3_syscall::SYSCALL_TEST_REQUIRED_CALLS;
+#[cfg(feature = "m4-supervisor-self-test")]
+use crate::selftest::m4_supervisor::observe_supervisor_console_line;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::USER_TEST_CODE_ADDRESS;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
@@ -178,6 +182,10 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
             if result.endpoint_kind == IpcEndpointKind::ConsoleSink {
                 let message = core::str::from_utf8(&copied[..length]).unwrap_or("<non-utf8>");
                 kernel_log_fmt(format_args!("[IPC ] console pid={sender_pid}: {message}\n"));
+                #[cfg(feature = "m4-supervisor-self-test")]
+                if sender_pid == USERSPACE_SUPERVISOR_TEST_PID {
+                    observe_supervisor_console_line(sender_pid, message.trim_end());
+                }
             }
             #[cfg(feature = "m3-ipc-self-test")]
             if let Some(state) = unsafe { (&mut *USERSPACE_IPC_TEST_STATE.get()).as_mut() } {

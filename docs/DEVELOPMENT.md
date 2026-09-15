@@ -168,6 +168,15 @@ cargo xtask test-m4-service-lifecycle
 
 The `m4-service-lifecycle-self-test` feature boots a bounded launch/terminate/restart path and emits `[M4.2] PASS` when fresh PID/generation invariants hold.
 
+For the M4.3 userspace supervisor runtime (host-tested registry/control + optional QEMU integration):
+
+```bash
+cargo test -p clean-slate-supervisor
+cargo xtask test-m4-supervisor
+```
+
+The `clean-slate-supervisor` crate (`supervisor/`) owns the bounded service registry and supervisor runtime. Lifecycle control is behind the mockable `LifecycleControl` trait so host tests and the CPL3 integration image can run before the kernel syscall 4 lifecycle-control path (#36) is wired end-to-end. The QEMU self-test maps a release `clean-slate-supervisor-userspace` image into pid 1, grants a console IPC capability, and validates `[SUP ]` diagnostics plus `[M4.3] PASS`.
+
 M4.4 health/liveness tracking (host-tested, no QEMU) exercises `ServiceHealthTracker` deadline math with explicit tick values — no real-time sleeps:
 
 ```bash

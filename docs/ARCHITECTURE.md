@@ -254,7 +254,7 @@ M4.1 defines the shared contract between the userspace supervisor, supervised se
 Ownership boundaries:
 
 - **Kernel (M4.2+):** authoritative process spawn/teardown, capability-gated control IPC, and emission of lifecycle events tied to real PIDs/domains.
-- **Supervisor (M4.3+):** service registry, dependency-aware orchestration, and translation between policy and control requests — but not reinterpretation of stale instance identity.
+- **Supervisor (M4.3+):** service registry, dependency-aware orchestration, and translation between policy and control requests — but not reinterpretation of stale instance identity. The first implementation lives in `clean-slate-supervisor` (`supervisor/`): bounded `ServiceRegistry`, `Supervisor` runtime, `[SUP ]` diagnostics, and a narrow `LifecycleControl` transport (fake/scripted backends for host and QEMU tests; kernel IPC in #36).
 - **Services / fixtures (M4.7+):** report `Ready`, health, and fault/exit events for their own instance generation only.
 
 Model highlights:

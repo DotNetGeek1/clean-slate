@@ -10,6 +10,8 @@ const IPC_CAPABILITY_CAPACITY: usize = 8;
 pub(super) const USERSPACE_IPC_TEST_PID: u64 = 1;
 #[cfg(any(feature = "m3-ipc-self-test", test))]
 pub(super) const USERSPACE_IPC_UNAUTHORIZED_TEST_PID: u64 = 2;
+#[cfg(any(feature = "m4-supervisor-self-test", test))]
+pub(super) const USERSPACE_SUPERVISOR_TEST_PID: u64 = 1;
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

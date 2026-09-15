@@ -40,7 +40,7 @@ pub use state::{
     TransitionInput,
 };
 pub use time::{ticks_add, ticks_reached, LivenessConfig, MonotonicTicks};
-pub use tracker::{ServiceLifecycleRecord, ServiceLifecycleTracker};
+pub use tracker::{ServiceLifecycleRecord, ServiceLifecycleTracker, TrackerError};
 pub use wire::{
     DecodeError, LifecycleMessage, LifecycleMessageKind, LIFECYCLE_PROTOCOL_VERSION,
     LIFECYCLE_WIRE_MAX_BYTES,

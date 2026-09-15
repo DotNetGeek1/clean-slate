@@ -75,6 +75,8 @@ use crate::selftest::m3_resources::handle_userspace_resource_page_fault;
 use crate::selftest::m4_crash_service::handle_crash_service_page_fault;
 #[cfg(feature = "m4-crash-service-self-test")]
 use crate::selftest::m4_crash_service::handle_crash_service_userspace_entry;
+#[cfg(feature = "m4-supervisor-self-test")]
+use crate::selftest::m4_supervisor::handle_userspace_supervisor_entry;
 #[cfg(feature = "m2-double-fault-self-test")]
 use core::sync::atomic::Ordering;
 use x86_64::registers::control::Cr2;
@@ -132,6 +134,14 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
 
     if context.vector as usize == SPURIOUS_VECTOR {
         return stack_pointer;
+    }
+
+    #[cfg(feature = "m4-supervisor-self-test")]
+    if context.vector as usize == USER_TEST_VECTOR {
+        return match handle_userspace_supervisor_entry(context) {
+            Ok(next_stack_pointer) => next_stack_pointer,
+            Err(message) => fatal_kernel_error(message),
+        };
     }
 
     #[cfg(feature = "m3-ipc-self-test")]

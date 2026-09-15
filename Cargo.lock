@@ -42,6 +42,13 @@ name = "clean-slate-service-lifecycle"
 version = "0.0.1"
 
 [[package]]
+name = "clean-slate-supervisor"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-service-lifecycle",
+]
+
+[[package]]
 name = "const_fn"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

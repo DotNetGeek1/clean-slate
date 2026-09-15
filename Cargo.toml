@@ -1,5 +1,11 @@
 [workspace]
-members = ["kernel", "service-fixtures", "service-lifecycle", "xtask"]
+members = [
+    "kernel",
+    "service-fixtures",
+    "service-lifecycle",
+    "supervisor",
+    "xtask",
+]
 default-members = ["xtask"]
 resolver = "2"
 

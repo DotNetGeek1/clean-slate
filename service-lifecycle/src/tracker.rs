@@ -100,6 +100,13 @@ impl<const N: usize> ServiceLifecycleTracker<N> {
         Ok(())
     }
 
+    pub fn record(&self, service: ServiceId) -> Result<&ServiceLifecycleRecord, TrackerError> {
+        let index = self.find(service).ok_or(TrackerError::UnknownService)?;
+        self.records[index]
+            .as_ref()
+            .ok_or(TrackerError::UnknownService)
+    }
+
     pub fn record_mut(
         &mut self,
         service: ServiceId,
@@ -119,6 +126,11 @@ impl<const N: usize> ServiceLifecycleTracker<N> {
         self.records
             .iter()
             .position(|entry| matches!(entry, Some(record) if record.service == service))
+    }
+
+    /// Read-only view of registry slots for query/debug surfaces.
+    pub fn entries(&self) -> &[Option<ServiceLifecycleRecord>; N] {
+        &self.records
     }
 }
 
