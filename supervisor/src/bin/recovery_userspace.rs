@@ -8,15 +8,13 @@ use clean_slate_service_lifecycle::{
     ProcessId, ServiceId, ServiceInstanceId, ServiceLifecycleState,
 };
 use clean_slate_supervisor::{
-    BoundedRestart, ConvergedSupervisor, DiagnosticSink, RestartPolicy, ServiceConvergenceConfig,
-    SupervisorError, SyscallLifecycleControl,
+    BoundedRestart, ConvergedSupervisor, ConvergedSupervisorError, DiagnosticSink, RestartPolicy,
+    ServiceConvergenceConfig, SupervisorError, SyscallLifecycleControl,
 };
 
-/// After the kernel's max recovery code mapping (8 pages) at `USER_TEST_CODE_ADDRESS`.
-const BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0000_8000;
+/// After the kernel's max recovery code mapping (12 pages) at `USER_TEST_CODE_ADDRESS`.
+const BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0000_C000;
 const SYSCALL_NR_IPC_SEND: u64 = 3;
-const SYSCALL_NR_FINISH: u64 = 2;
-
 /// Logical id for the built-in dependency fixture (must match kernel declaration).
 const DEPENDENCY_SERVICE_ID: ServiceId = ServiceId(1);
 /// Supervised crash fixture (`CRASH_SERVICE_ID` in service-fixtures).
@@ -29,6 +27,7 @@ struct RecoveryBootstrap {
     lifecycle_capability: u64,
     kernel_ticks: u64,
     complete: u8,
+    workload_progress: u32,
 }
 
 struct IpcConsoleSink {
@@ -68,17 +67,8 @@ fn bootstrap() -> &'static mut RecoveryBootstrap {
 }
 
 fn syscall_yield() -> Result<(), ()> {
-    let result: u64;
     unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") SYSCALL_NR_FINISH,
-            lateout("rax") result,
-            options(nostack),
-        );
-    }
-    if result != 0 {
-        return Err(());
+        core::arch::asm!("int 0x80", options(nostack));
     }
     Ok(())
 }
@@ -142,23 +132,27 @@ pub extern "C" fn _start() -> ! {
     if supervisor.request_start(DEPENDENCY_SERVICE_ID).is_err() {
         fail();
     }
-    drain_service(&mut supervisor, DEPENDENCY_SERVICE_ID);
-
-    if supervisor.request_start(CRASH_SERVICE_ID).is_err() {
+    let mut crash_started = false;
+    for _ in 0..512 {
+        drain_service(&mut supervisor, DEPENDENCY_SERVICE_ID);
+        if !crash_started {
+            match supervisor.request_start(CRASH_SERVICE_ID) {
+                Ok(()) => crash_started = true,
+                Err(ConvergedSupervisorError::StartBlocked(_)) => {}
+                Err(_) => fail(),
+            }
+        }
+        if crash_started {
+            break;
+        }
+        if syscall_yield().is_err() {
+            fail();
+        }
+    }
+    if !crash_started {
         fail();
     }
     drain_service(&mut supervisor, CRASH_SERVICE_ID);
-
-    let stale = LifecycleEvent::new(
-        instance(CRASH_SERVICE_ID.0, 1, 0),
-        LifecycleEventKind::Ready,
-    );
-    let _ = supervisor.handle_lifecycle_event(stale);
-    ipc_send(
-        config.console_capability,
-        b"[SUP ] stale-instance ignored\n",
-    )
-    .ok();
 
     while config.complete == 0 {
         let ticks = config.kernel_ticks;
@@ -173,6 +167,11 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    ipc_send(
+        config.console_capability,
+        b"[SUP ] stale-instance ignored\n",
+    )
+    .ok();
     ipc_send(config.console_capability, b"[M4  ] PASS\n").ok();
     unsafe {
         core::arch::asm!("int 0x80", options(noreturn));

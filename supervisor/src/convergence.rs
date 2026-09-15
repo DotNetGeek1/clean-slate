@@ -390,7 +390,9 @@ where
             .map_err(ConvergedSupervisorError::Dependencies)?;
         match readiness {
             StartReadiness::Ready => {
-                self.emit_dependency_ready(service)?;
+                if self.dependencies.has_dependencies(service) {
+                    self.emit_dependency_ready(service)?;
+                }
                 Ok(())
             }
             StartReadiness::Blocked(reason) => {

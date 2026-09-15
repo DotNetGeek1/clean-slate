@@ -55,6 +55,7 @@ pub(crate) fn launch_builtin_service(
     scheduler_slot: usize,
     service: ServiceId,
 ) -> Result<SpawnedServiceInstance, &'static str> {
+    use crate::diagnostics::log::kernel_log_fmt;
     use crate::arch::x86_64::asm::clean_slate_user_address_space_test_end;
     use crate::arch::x86_64::asm::clean_slate_user_address_space_test_start;
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
@@ -75,11 +76,11 @@ pub(crate) fn launch_builtin_service(
     use crate::sched::ThreadKind;
     use crate::sched::ThreadState;
     use crate::selftest::USER_TEST_CODE_ADDRESS;
+    use crate::selftest::USER_TEST_DATA_ADDRESS;
+    use crate::selftest::USER_TEST_PROCESS_STACK_ADDRESS;
     use core::ptr;
     use x86_64::structures::paging::PageTableFlags;
     use x86_64::VirtAddr;
-
-    const SERVICE_USER_STACK_ADDRESS: u64 = SERVICE_USER_CODE_ADDRESS + PAGE_SIZE;
 
     #[repr(C)]
     struct ImmediateExitPage {
@@ -108,7 +109,7 @@ pub(crate) fn launch_builtin_service(
         BuiltinServiceImage::ImmediateExit => SERVICE_USER_CODE_ADDRESS,
     };
     let stack_address = match image {
-        BuiltinServiceImage::M3UserTestPayload => SERVICE_USER_STACK_ADDRESS,
+        BuiltinServiceImage::M3UserTestPayload => USER_TEST_PROCESS_STACK_ADDRESS,
         BuiltinServiceImage::ImmediateExit => SERVICE_USER_CODE_ADDRESS + PAGE_SIZE,
     };
 
@@ -137,9 +138,17 @@ pub(crate) fn launch_builtin_service(
         &mut address_space,
         code_address,
         code_frame,
-        PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+        PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::USER_ACCESSIBLE,
         allocator,
-    )?;
+    ).map_err(|message| {
+        kernel_log_fmt(format_args!(
+            "[FAIL] map code service={} va={:#x} err={message}\n",
+            service.0, code_address
+        ));
+        message
+    })?;
 
     let stack_frame = allocator
         .allocate_page()
@@ -155,6 +164,23 @@ pub(crate) fn launch_builtin_service(
             | PageTableFlags::USER_ACCESSIBLE,
         allocator,
     )?;
+
+    if matches!(image, BuiltinServiceImage::M3UserTestPayload) {
+        let data_frame = allocator
+            .allocate_page()
+            .ok_or("allocator could not provide a data page for supervised service")?;
+        zero_page(data_frame);
+        map_process_page(
+            &mut address_space,
+            USER_TEST_DATA_ADDRESS,
+            data_frame,
+            PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::NO_EXECUTE
+                | PageTableFlags::USER_ACCESSIBLE,
+            allocator,
+        )?;
+    }
 
     let user_stack_pointer = stack_address + PAGE_SIZE;
     let saved_stack_pointer =

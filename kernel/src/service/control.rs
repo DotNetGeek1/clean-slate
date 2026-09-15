@@ -125,7 +125,9 @@ impl ServiceLifecycleController {
         service: ServiceId,
     ) -> Result<Option<LifecycleEvent>, LifecycleControlError> {
         for index in 0..self.pending_len {
-            let event = self.pending[index].expect("pending slot");
+            let Some(event) = self.pending[index] else {
+                continue;
+            };
             if event.instance.service == service {
                 self.pending[index] = None;
                 return Ok(Some(event));
@@ -287,15 +289,32 @@ impl ServiceLifecycleController {
         if self.services[service_index].live.is_some() {
             return Err(LifecycleControlError::ServiceAlreadyLive);
         }
-        if self.kernel_stack_top == 0 {
-            return Err(LifecycleControlError::SpawnFailed(
-                "service launch context was not configured",
-            ));
-        }
-        let kernel_stack_top = self.kernel_stack_top;
         let scheduler_slot = self
             .allocate_scheduler_slot()
             .map_err(LifecycleControlError::SpawnFailed)?;
+        let kernel_stack_top = {
+            #[cfg(feature = "m4-recovery-self-test")]
+            {
+                use crate::arch::x86_64::context_switch::task_stack_top;
+                use crate::sched::task_stacks_mut;
+                let stacks = unsafe { task_stacks_mut() };
+                if scheduler_slot >= stacks.len() {
+                    return Err(LifecycleControlError::SpawnFailed(
+                        "recovery scheduler slot exceeds task stack table",
+                    ));
+                }
+                task_stack_top(&stacks[scheduler_slot])
+            }
+            #[cfg(not(feature = "m4-recovery-self-test"))]
+            {
+                if self.kernel_stack_top == 0 {
+                    return Err(LifecycleControlError::SpawnFailed(
+                        "service launch context was not configured",
+                    ));
+                }
+                self.kernel_stack_top
+            }
+        };
         let generation = self.services[service_index].authoritative_generation;
         let spawned = if service_id.0 == 0x0000_4100 {
             #[cfg(feature = "m4-recovery-self-test")]
@@ -315,8 +334,15 @@ impl ServiceLifecycleController {
                 ));
             }
         } else {
-            launch_builtin_service(allocator, kernel_stack_top, scheduler_slot, service_id)
-                .map_err(LifecycleControlError::SpawnFailed)?
+            launch_builtin_service(allocator, kernel_stack_top, scheduler_slot, service_id).map_err(
+                |message| {
+                    kernel_log_fmt(format_args!(
+                        "[FAIL] builtin service spawn service={} slot={} err={message}\n",
+                        service_id.0, scheduler_slot
+                    ));
+                    LifecycleControlError::SpawnFailed(message)
+                },
+            )?
         };
         let instance = ServiceInstanceId::new(
             service_id,

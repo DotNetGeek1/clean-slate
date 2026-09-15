@@ -10,6 +10,9 @@ use crate::arch::x86_64::context_switch::TASK_STACK_SIZE;
 use crate::process::KERNEL_PROCESS_ID;
 use crate::sync::global_cell::GlobalCell;
 
+#[cfg(feature = "m4-recovery-self-test")]
+const TASK_COUNT: usize = 6;
+#[cfg(not(feature = "m4-recovery-self-test"))]
 const TASK_COUNT: usize = 2;
 pub(super) const TASK_REQUIRED_PREEMPTIONS: u64 = 2;
 const TASK_PROGRESS_CHUNK: u64 = 4_096;

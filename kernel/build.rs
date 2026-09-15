@@ -1,7 +1,10 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+const PT_LOAD: u32 = 1;
+const SHT_RELA: u32 = 4;
+const R_X86_64_RELATIVE: u32 = 8;
 
 fn main() {
     if env::var("CARGO_FEATURE_M4_SUPERVISOR_SELF_TEST").is_ok() {
@@ -38,20 +41,18 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
         );
     }
 
-    let objcopy = llvm_objcopy_path();
-    let status = Command::new(&objcopy)
-        .arg("-O")
-        .arg("binary")
-        .arg(&elf)
-        .arg(&raw_image)
-        .status()
-        .expect("failed to run llvm-objcopy");
-    if !status.success() {
-        panic!("llvm-objcopy failed with status {status}");
-    }
+    let elf_bytes = fs::read(&elf).expect("failed to read userspace ELF");
+    let (image, image_base, entry) =
+        materialize_elf_image(&elf_bytes).unwrap_or_else(|message| {
+            panic!("failed to materialize userspace ELF {}: {message}", elf.display())
+        });
+
+    fs::write(&raw_image, &image).expect("failed to write materialized userspace image");
 
     if record_entry_offset {
-        let entry_offset = elf_image_entry_offset(&elf);
+        let entry_offset = entry
+            .checked_sub(image_base)
+            .expect("ELF entry point was below the image base");
         let generated = out_dir.join("recovery_userspace_entry.rs");
         fs::write(
             &generated,
@@ -65,6 +66,205 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
         "cargo:rerun-if-changed={}",
         manifest_dir.join("build.rs").display()
     );
+}
+
+fn materialize_elf_image(elf: &[u8]) -> Result<(Vec<u8>, u64, u64), String> {
+    if elf.len() < 0x40 || &elf[0..4] != b"\x7fELF" || elf[4] != 2 || elf[5] != 1 {
+        return Err("expected a little-endian ELF64 file".into());
+    }
+
+    let entry = u64::from_le_bytes(elf[0x18..0x20].try_into().map_err(|_| "e_entry")?);
+    let phoff = u64::from_le_bytes(elf[0x20..0x28].try_into().map_err(|_| "e_phoff")?);
+    let phentsize = u16::from_le_bytes(elf[0x36..0x38].try_into().map_err(|_| "e_phentsize")?) as u64;
+    let phnum = u16::from_le_bytes(elf[0x38..0x3a].try_into().map_err(|_| "e_phnum")?) as u64;
+
+    struct LoadSegment {
+        vaddr: u64,
+        offset: u64,
+        filesz: u64,
+        _memsz: u64,
+    }
+
+    let mut segments = Vec::new();
+    let mut image_base = u64::MAX;
+    let mut image_end = 0u64;
+
+    for index in 0..phnum {
+        let start = phoff + index * phentsize;
+        let end = start + phentsize;
+        if end > elf.len() as u64 {
+            break;
+        }
+        let header = &elf[start as usize..end as usize];
+        let p_type = u32::from_le_bytes(header[0..4].try_into().map_err(|_| "p_type")?);
+        if p_type != PT_LOAD {
+            continue;
+        }
+        let p_offset = u64::from_le_bytes(header[0x08..0x10].try_into().map_err(|_| "p_offset")?);
+        let p_vaddr = u64::from_le_bytes(header[0x10..0x18].try_into().map_err(|_| "p_vaddr")?);
+        let p_filesz = u64::from_le_bytes(header[0x20..0x28].try_into().map_err(|_| "p_filesz")?);
+        let p_memsz = u64::from_le_bytes(header[0x28..0x30].try_into().map_err(|_| "p_memsz")?);
+        image_base = image_base.min(p_vaddr);
+        image_end = image_end.max(p_vaddr.saturating_add(p_memsz));
+        segments.push(LoadSegment {
+            vaddr: p_vaddr,
+            offset: p_offset,
+            filesz: p_filesz,
+            _memsz: p_memsz,
+        });
+    }
+
+    if segments.is_empty() {
+        return Err("ELF had no PT_LOAD segments".into());
+    }
+
+    let image_size = usize::try_from(image_end.saturating_sub(image_base))
+        .map_err(|_| "userspace image span exceeded addressable size")?;
+    let mut image = vec![0u8; image_size];
+
+    for segment in &segments {
+        let dest_start = usize::try_from(segment.vaddr.saturating_sub(image_base))
+            .map_err(|_| "segment virtual address underflow")?;
+        let dest_end = dest_start
+            .checked_add(segment.filesz as usize)
+            .ok_or("segment file copy overflow")?;
+        if dest_end > image.len() {
+            return Err("segment file range exceeded materialized image".into());
+        }
+        let src_start = segment.offset as usize;
+        let src_end = src_start
+            .checked_add(segment.filesz as usize)
+            .ok_or("segment file read overflow")?;
+        if src_end > elf.len() {
+            return Err("segment file range exceeded ELF file".into());
+        }
+        image[dest_start..dest_end].copy_from_slice(&elf[src_start..src_end]);
+    }
+
+    apply_rela_dyn(elf, &mut image, image_base, image_base)?;
+
+    Ok((image, image_base, entry))
+}
+
+fn apply_rela_dyn(
+    elf: &[u8],
+    image: &mut [u8],
+    link_base: u64,
+    load_base: u64,
+) -> Result<(), String> {
+    let e_shoff = u64::from_le_bytes(elf[0x28..0x30].try_into().map_err(|_| "e_shoff")?);
+    let e_shentsize =
+        u16::from_le_bytes(elf[0x3a..0x3c].try_into().map_err(|_| "e_shentsize")?) as u64;
+    let e_shnum = u16::from_le_bytes(elf[0x3c..0x3e].try_into().map_err(|_| "e_shnum")?) as u64;
+    let e_shstrndx = u16::from_le_bytes(elf[0x3e..0x40].try_into().map_err(|_| "e_shstrndx")?) as u64;
+
+    let shstrtab = section_data(elf, e_shoff, e_shentsize, e_shnum, e_shstrndx)?;
+
+    for index in 0..e_shnum {
+        let header = section_header(elf, e_shoff, e_shentsize, index)?;
+        let name_offset = u32::from_le_bytes(header[0..4].try_into().map_err(|_| "sh_name")?) as usize;
+        let name = read_cstr(shstrtab, name_offset)?;
+        if name != ".rela.dyn" {
+            continue;
+        }
+        let sh_type = u32::from_le_bytes(header[4..8].try_into().map_err(|_| "sh_type")?);
+        if sh_type != SHT_RELA {
+            return Err(".rela.dyn section had an unexpected type".into());
+        }
+        let sh_offset = u64::from_le_bytes(header[0x18..0x20].try_into().map_err(|_| "sh_offset")?);
+        let sh_size = u64::from_le_bytes(header[0x20..0x28].try_into().map_err(|_| "sh_size")?);
+        let sh_entsize = u64::from_le_bytes(header[0x38..0x40].try_into().map_err(|_| "sh_entsize")?);
+        if sh_entsize != 24 {
+            return Err(".rela.dyn entry size was not 24 bytes".into());
+        }
+        let count = sh_size / sh_entsize;
+        for entry_index in 0..count {
+            let entry_offset = sh_offset + entry_index * sh_entsize;
+            let entry_end = entry_offset + sh_entsize;
+            if entry_end > elf.len() as u64 {
+                return Err("relocation entry exceeded ELF bounds".into());
+            }
+            let entry = &elf[entry_offset as usize..entry_end as usize];
+            let r_offset = u64::from_le_bytes(entry[0..8].try_into().map_err(|_| "r_offset")?);
+            let r_info = u64::from_le_bytes(entry[8..16].try_into().map_err(|_| "r_info")?);
+            let r_addend = i64::from_le_bytes(entry[16..24].try_into().map_err(|_| "r_addend")?);
+            let r_type = (r_info & 0xff_ff_ff_ff) as u32;
+            match r_type {
+                R_X86_64_RELATIVE => {
+                    // lld stores absolute virtual addends for this fixed-base PIE link script.
+                    let value = (r_addend as u64)
+                        .wrapping_sub(link_base)
+                        .wrapping_add(load_base);
+                    write_u64(image, load_base, r_offset, value)?;
+                }
+                _ => {
+                    return Err(format!(
+                        "unsupported relocation type {r_type} in .rela.dyn (only R_X86_64_RELATIVE is supported)"
+                    ));
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    Ok(())
+}
+
+fn write_u64(image: &mut [u8], load_base: u64, vaddr: u64, value: u64) -> Result<(), String> {
+    let offset = usize::try_from(vaddr.saturating_sub(load_base))
+        .map_err(|_| "relocation virtual address underflow")?;
+    let end = offset.checked_add(8).ok_or("relocation write overflow")?;
+    if end > image.len() {
+        return Err("relocation write exceeded materialized image".into());
+    }
+    image[offset..end].copy_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn section_header<'a>(
+    elf: &'a [u8],
+    shoff: u64,
+    shentsize: u64,
+    index: u64,
+) -> Result<&'a [u8], String> {
+    let start = shoff + index * shentsize;
+    let end = start + shentsize;
+    if end > elf.len() as u64 {
+        return Err("section header exceeded ELF bounds".into());
+    }
+    Ok(&elf[start as usize..end as usize])
+}
+
+fn section_data<'a>(
+    elf: &'a [u8],
+    shoff: u64,
+    shentsize: u64,
+    _shnum: u64,
+    index: u64,
+) -> Result<&'a [u8], String> {
+    let header = section_header(elf, shoff, shentsize, index)?;
+    let sh_offset = u64::from_le_bytes(header[0x18..0x20].try_into().map_err(|_| "sh_offset")?);
+    let sh_size = u64::from_le_bytes(header[0x20..0x28].try_into().map_err(|_| "sh_size")?);
+    let start = sh_offset as usize;
+    let end = start
+        .checked_add(sh_size as usize)
+        .ok_or("section data overflow")?;
+    if end > elf.len() {
+        return Err("section data exceeded ELF bounds".into());
+    }
+    Ok(&elf[start..end])
+}
+
+fn read_cstr(table: &[u8], offset: usize) -> Result<&str, String> {
+    if offset >= table.len() {
+        return Err("section name offset exceeded string table".into());
+    }
+    let tail = &table[offset..];
+    let end = tail
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or("section name was not NUL-terminated")?;
+    std::str::from_utf8(&tail[..end]).map_err(|_| "section name was not valid UTF-8".into())
 }
 
 fn userspace_elf(manifest_dir: &Path, profile: &str, bin_name: &str) -> PathBuf {
@@ -86,74 +286,4 @@ fn userspace_elf(manifest_dir: &Path, profile: &str, bin_name: &str) -> PathBuf 
         }
     }
     base.join(profile).join(bin_name)
-}
-
-fn llvm_objcopy_path() -> PathBuf {
-    let sysroot = rustc_sysroot();
-    let host = env::var("HOST").expect("HOST");
-    let mut candidate = Path::new(&sysroot)
-        .join("lib")
-        .join("rustlib")
-        .join(host)
-        .join("bin")
-        .join("llvm-objcopy");
-    if env::consts::OS == "windows" {
-        candidate.set_extension("exe");
-    }
-    if candidate.is_file() {
-        return candidate;
-    }
-    panic!(
-        "llvm-objcopy not found at {}; install the llvm-tools rustup component",
-        candidate.display()
-    );
-}
-
-fn elf_image_entry_offset(elf: &Path) -> u64 {
-    let bytes = fs::read(elf).expect("failed to read userspace ELF");
-    if bytes.len() < 0x40 || &bytes[0..4] != b"\x7fELF" || bytes[4] != 2 || bytes[5] != 1 {
-        panic!(
-            "userspace ELF at {} was not a little-endian ELF64 file",
-            elf.display()
-        );
-    }
-    let entry = u64::from_le_bytes(bytes[0x18..0x20].try_into().expect("e_entry"));
-    let phoff = u64::from_le_bytes(bytes[0x20..0x28].try_into().expect("e_phoff"));
-    let phentsize = u16::from_le_bytes(bytes[0x36..0x38].try_into().expect("e_phentsize")) as u64;
-    let phnum = u16::from_le_bytes(bytes[0x38..0x3a].try_into().expect("e_phnum")) as u64;
-    let mut image_base: Option<u64> = None;
-    for index in 0..phnum {
-        let start = phoff + index * phentsize;
-        let end = start + phentsize;
-        if end > bytes.len() as u64 {
-            break;
-        }
-        let header = &bytes[start as usize..end as usize];
-        let p_type = u32::from_le_bytes(header[0..4].try_into().expect("p_type"));
-        if p_type != 1 {
-            continue;
-        }
-        let p_vaddr = u64::from_le_bytes(header[0x10..0x18].try_into().expect("p_vaddr"));
-        image_base = Some(match image_base {
-            Some(current) => current.min(p_vaddr),
-            None => p_vaddr,
-        });
-    }
-    let image_base = image_base.expect("userspace ELF had no PT_LOAD program headers");
-    entry - image_base
-}
-
-fn rustc_sysroot() -> String {
-    let output = Command::new("rustc")
-        .arg("--print")
-        .arg("sysroot")
-        .output()
-        .expect("failed to run rustc --print sysroot");
-    if !output.status.success() {
-        panic!("rustc --print sysroot failed");
-    }
-    String::from_utf8(output.stdout)
-        .expect("sysroot utf8")
-        .trim()
-        .to_string()
 }

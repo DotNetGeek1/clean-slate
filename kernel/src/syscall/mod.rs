@@ -453,9 +453,8 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
         SYSCALL_NR_FINISH => frame.rax = SYSCALL_ENOSYS,
         #[cfg(feature = "m4-recovery-self-test")]
         SYSCALL_NR_FINISH => {
-            if let Some(bootstrap) = unsafe { (&mut *RECOVERY_BOOTSTRAP.get()).as_mut() } {
-                bootstrap.kernel_ticks = kernel_ticks();
-            }
+            use crate::selftest::m4_recovery::publish_recovery_bootstrap;
+            publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = kernel_ticks());
             recovery_complete_and_exit();
             frame.rax = 0;
         }

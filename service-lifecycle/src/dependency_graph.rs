@@ -124,6 +124,11 @@ impl<const N: usize> DependencyGraph<N> {
             .and_then(|index| self.metadata[index].as_ref())
     }
 
+    pub fn has_dependencies(&self, service: ServiceId) -> bool {
+        self.metadata(service)
+            .is_some_and(|metadata| metadata.edge_count > 0)
+    }
+
     /// Evaluates start eligibility from current lifecycle (and optional health) snapshots.
     ///
     /// Does not mutate metadata; dependency recovery only requires upstream state to change.

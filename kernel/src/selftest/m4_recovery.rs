@@ -50,6 +50,7 @@ use crate::sched::ThreadState;
 use crate::selftest::m3_entry::userspace_frame;
 use crate::selftest::m3_entry::validate_userspace_entry_trap;
 use crate::selftest::RECOVERY_SUPERVISOR_BOOTSTRAP_ADDRESS;
+use crate::selftest::RECOVERY_SUPERVISOR_MAX_CODE_PAGES;
 use crate::selftest::RECOVERY_SUPERVISOR_STACK_ADDRESS;
 use crate::selftest::RECOVERY_SUPERVISOR_STACK_PAGES;
 use crate::selftest::USER_TEST_CODE_ADDRESS;
@@ -63,8 +64,9 @@ use crate::sync::global_cell::GlobalCell;
 use crate::syscall::initialize_syscall_abi;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use clean_slate_service_fixtures::{
-    CrashServiceFixtureHarness, CrashServiceLaunchConfig, UnrelatedWorkloadFixture,
-    UnrelatedWorkloadLaunchConfig, CRASH_SERVICE_ID, UNRELATED_WORKLOAD_SERVICE_ID,
+    CrashServiceFixtureHarness, CrashServiceFixtureRole, CrashServiceLaunchConfig,
+    UnrelatedWorkloadFixture, UnrelatedWorkloadLaunchConfig, CRASH_SERVICE_ID,
+    UNRELATED_WORKLOAD_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::{
     DomainId, InstanceGeneration, ProcessId, ServiceId, ServiceInstanceId,
@@ -76,7 +78,7 @@ use x86_64::VirtAddr;
 
 const RECOVERY_SUPERVISOR_IMAGE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/recovery_userspace.bin"));
-const FAULT_PROBE_ADDRESS: u64 = 0x0000_4000_0000_0F00;
+const FAULT_PROBE_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE * 4;
 const GEN1_STACK_EVIDENCE: u64 = 0x4353_4701_0000_0001;
 const GEN2_STACK_EVIDENCE: u64 = 0x4353_4702_0000_0002;
 const WORKLOAD_TOKEN: u64 = 0x574C_444C_0000_0001;
@@ -90,6 +92,7 @@ pub(crate) struct RecoveryBootstrap {
     lifecycle_capability: u64,
     pub(crate) kernel_ticks: u64,
     pub(crate) complete: u8,
+    pub(crate) workload_progress: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -152,6 +155,24 @@ fn recovery_state() -> Result<&'static mut RecoverySelfTestState, &'static str> 
         (&mut *RECOVERY_STATE.get())
             .as_mut()
             .ok_or("recovery self-test state was not initialized")
+    }
+}
+
+pub(crate) fn publish_recovery_bootstrap(update: impl FnOnce(&mut RecoveryBootstrap)) {
+    let Some(bootstrap) = (unsafe { (&mut *RECOVERY_BOOTSTRAP.get()).as_mut() }) else {
+        return;
+    };
+    update(bootstrap);
+    let published = *bootstrap;
+    if let Ok(state) = recovery_state() {
+        if state.bootstrap_frame != 0 {
+            unsafe {
+                ptr::write(
+                    (PHYSICAL_MEMORY_OFFSET + state.bootstrap_frame) as *mut RecoveryBootstrap,
+                    published,
+                );
+            }
+        }
     }
 }
 
@@ -247,7 +268,7 @@ fn map_fixture_process(
             | PageTableFlags::USER_ACCESSIBLE,
         allocator,
     )?;
-    let user_stack_pointer = RECOVERY_SUPERVISOR_STACK_ADDRESS + PAGE_SIZE;
+    let user_stack_pointer = USER_TEST_PROCESS_STACK_ADDRESS + PAGE_SIZE;
     let saved_stack_pointer =
         build_userspace_entry_frame(kernel_stack_top, USER_TEST_CODE_ADDRESS, user_stack_pointer)?;
     let gdt_state = userspace_gdt_state()?;
@@ -300,9 +321,9 @@ fn map_supervisor_process(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
     bootstrap: RecoveryBootstrap,
-) -> Result<TrackedProcess, &'static str> {
+) -> Result<(TrackedProcess, u64), &'static str> {
     let image_pages = RECOVERY_SUPERVISOR_IMAGE.len().div_ceil(PAGE_SIZE as usize);
-    if image_pages > 8 {
+    if image_pages > RECOVERY_SUPERVISOR_MAX_CODE_PAGES as usize {
         return Err("recovery supervisor image exceeded mapped code budget");
     }
     let mut address_space =
@@ -412,17 +433,20 @@ fn map_supervisor_process(
         thread.saved_stack_pointer,
         thread.launch_entry,
     )?;
-    Ok(TrackedProcess {
-        pid,
-        tid,
-        role: ProcessRole::Supervisor,
-        expected_entry_rip: entry_rip,
-        user_stack_pointer,
-        user_stack_segment: gdt_state.user_data_selector.0 as u64,
-        stack_evidence: 0,
-        probe_address: 0,
-        observed_value: 0,
-    })
+    Ok((
+        TrackedProcess {
+            pid,
+            tid,
+            role: ProcessRole::Supervisor,
+            expected_entry_rip: entry_rip,
+            user_stack_pointer,
+            user_stack_segment: gdt_state.user_data_selector.0 as u64,
+            stack_evidence: 0,
+            probe_address: 0,
+            observed_value: 0,
+        },
+        data_frame,
+    ))
 }
 
 fn crash_spawn_hook(
@@ -437,7 +461,7 @@ fn crash_spawn_hook(
             .authoritative_generation(CRASH_SERVICE_ID)
             .ok_or("crash service generation missing")?
     };
-    let (stack_evidence, config) = if generation.0 <= 1 {
+    let (stack_evidence, config, role) = if generation.0 <= 1 {
         (
             GEN1_STACK_EVIDENCE,
             CrashServiceLaunchConfig::crash_after_heartbeats(
@@ -446,6 +470,7 @@ fn crash_spawn_hook(
                 GEN1_STACK_EVIDENCE,
                 FAULT_PROBE_ADDRESS,
             ),
+            CrashServiceFixtureRole::Primary,
         )
     } else {
         (
@@ -455,8 +480,10 @@ fn crash_spawn_hook(
                 GEN2_STACK_EVIDENCE,
                 FAULT_PROBE_ADDRESS,
             ),
+            CrashServiceFixtureRole::Replacement,
         )
     };
+    let _planned_instance = state.harness.start_launch(&config, 0, role);
     let page = FixtureUserPage {
         observed_value: stack_evidence,
         probe_address: FAULT_PROBE_ADDRESS,
@@ -501,6 +528,12 @@ fn emit_workload_progress(progress: u32) {
         "[TEST] unrelated workload progress={}\n",
         progress
     ));
+    publish_recovery_bootstrap(|bootstrap| {
+        bootstrap.workload_progress = progress;
+        if progress >= 2 {
+            bootstrap.complete = 1;
+        }
+    });
 }
 
 pub(crate) fn observe_recovery_supervisor_line(sender_pid: u64, message: &str) {
@@ -566,13 +599,14 @@ pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
         lifecycle_capability,
         kernel_ticks: 0,
         complete: 0,
+        workload_progress: 0,
     };
     unsafe {
         *RECOVERY_BOOTSTRAP.get() = Some(bootstrap);
     }
     let workload_launch =
         UnrelatedWorkloadLaunchConfig::new(UNRELATED_WORKLOAD_SERVICE_ID, WORKLOAD_TOKEN);
-    let supervisor = {
+    let (supervisor, bootstrap_frame) = {
         let page_allocator =
             recovery_allocator().unwrap_or_else(|message| fatal_kernel_error(message));
         map_supervisor_process(page_allocator, kernel_stack_top, bootstrap)
@@ -580,7 +614,7 @@ pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
     .unwrap_or_else(|message| fatal_kernel_error(message));
     let workload_page = FixtureUserPage {
         observed_value: WORKLOAD_TOKEN,
-        probe_address: VirtAddr::from_ptr(run as *const ()).as_u64(),
+        probe_address: USER_TEST_DATA_ADDRESS,
         heartbeat: 0,
         stack_evidence: 0,
     };
@@ -610,7 +644,7 @@ pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
             supervisor,
             workload_process: workload,
             service_process: None,
-            bootstrap_frame: 0,
+            bootstrap_frame,
         });
     }
     if let Err(message) = set_privilege_stack(kernel_stack_top) {
@@ -633,6 +667,26 @@ pub(crate) fn handle_recovery_userspace_entry(
     let thread =
         without_interrupts(|| with_scheduler(|scheduler| scheduler.current_thread_descriptor()))?;
     let pid = thread.owner_process_id;
+    if pid == state.supervisor.pid {
+        use crate::sched::dispatch::schedule_next_thread;
+        if state.stage == RecoveryStage::Complete {
+            recovery_complete_and_exit();
+        }
+        publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = kernel_ticks());
+        let saved_stack_pointer = context as *const InterruptContext as u64;
+        without_interrupts(|| {
+            let scheduler = unsafe { scheduler_mut() };
+            let current = scheduler
+                .current_thread
+                .ok_or("recovery supervisor yield without current thread")?;
+            scheduler.threads[current].saved_stack_pointer = saved_stack_pointer;
+            scheduler
+                .update_thread_saved_stack(thread.id, saved_stack_pointer)
+                .map_err(|_| "failed to persist supervisor yield stack")
+        })?;
+        let next_stack_pointer = schedule_next_thread(saved_stack_pointer)?;
+        unsafe { restore_task_context(next_stack_pointer) }
+    }
     let controller = unsafe { service_lifecycle_controller_mut() };
     if controller.live_pid(DEPENDENCY_SERVICE_ID) == Some(pid) {
         controller
@@ -685,18 +739,47 @@ pub(crate) fn handle_recovery_userspace_entry(
         }
         ProcessRole::SupervisedService => {
             let controller = unsafe { service_lifecycle_controller_mut() };
-            if state.stage == RecoveryStage::Boot || state.stage == RecoveryStage::Recovered {
+            if matches!(
+                state.stage,
+                RecoveryStage::Boot | RecoveryStage::Recovered | RecoveryStage::Faulted
+            ) {
                 controller
                     .notify_instance_ready(CRASH_SERVICE_ID)
                     .map_err(|_| "failed to notify crash service ready")?;
-                if state.gen2_pid != 0 {
+                let generation = controller
+                    .authoritative_generation(CRASH_SERVICE_ID)
+                    .ok_or("crash service generation missing after ready")?;
+                let ready_instance = ServiceInstanceId::new(
+                    CRASH_SERVICE_ID,
+                    generation,
+                    ProcessId(process.pid),
+                    DomainId(process.pid),
+                );
+                state.harness.on_ready(ready_instance);
+                if process.pid == state.gen2_pid && state.gen2_pid != 0 {
                     kernel_log_fmt(format_args!(
                         "[TEST] crash-service replacement healthy pid={} gen=2\n",
                         state.gen2_pid
                     ));
                     state.stage = RecoveryStage::Recovered;
-                    if let Some(bootstrap) = unsafe { (&mut *RECOVERY_BOOTSTRAP.get()).as_mut() } {
-                        bootstrap.complete = 1;
+                    if state.workload_process.pid == 0
+                        && state.workload.progress() < state.workload_progress_at_fault
+                    {
+                        let stacks = unsafe { task_stacks_mut() };
+                        let workload_page = FixtureUserPage {
+                            observed_value: WORKLOAD_TOKEN,
+                            probe_address: USER_TEST_DATA_ADDRESS,
+                            heartbeat: 0,
+                            stack_evidence: 0,
+                        };
+                        state.workload_process = map_fixture_process(
+                            allocator,
+                            1,
+                            task_stack_top(&stacks[1]),
+                            workload_page,
+                            ProcessRole::Workload,
+                            None,
+                        )?;
                     }
                 } else {
                     state.stage = RecoveryStage::Running;
@@ -728,6 +811,21 @@ pub(crate) fn handle_recovery_page_fault(context: &InterruptContext) -> ! {
         Err(message) => fatal_kernel_error(message),
     };
     if state.stage != RecoveryStage::Running {
+        let fault_pid = without_interrupts(|| {
+            with_scheduler(|scheduler| {
+                scheduler
+                    .current_thread
+                    .map(|index| scheduler.threads[index].owner_process_id)
+                    .ok_or("recovery page fault without current thread")
+            })
+        })
+        .unwrap_or(0);
+        kernel_log_fmt(format_args!(
+            "[FAIL] recovery boot page fault rip={:#x} cr2={:#x} pid={}\n",
+            context.rip,
+            fault_address,
+            fault_pid
+        ));
         fatal_kernel_error("recovery observed an unexpected userspace page fault");
     }
     let service = state
@@ -743,9 +841,10 @@ pub(crate) fn handle_recovery_page_fault(context: &InterruptContext) -> ! {
         Err(message) => fatal_kernel_error(message),
     };
     let controller = unsafe { service_lifecycle_controller_mut() };
-    let _fault_event = controller
+    let fault_event = controller
         .notify_instance_faulted(CRASH_SERVICE_ID, service.pid)
         .unwrap_or_else(|_| fatal_kernel_error("failed to record supervised fault"));
+    state.harness.on_faulted(fault_event.instance);
     let teardown = match teardown_current_process(allocator, state.kernel_root_frame, 1, true) {
         Ok(teardown) => teardown,
         Err(message) => fatal_kernel_error(message),
@@ -756,9 +855,7 @@ pub(crate) fn handle_recovery_page_fault(context: &InterruptContext) -> ! {
     ));
     state.service_process = None;
     state.stage = RecoveryStage::Faulted;
-    if let Some(bootstrap) = unsafe { (&mut *RECOVERY_BOOTSTRAP.get()).as_mut() } {
-        bootstrap.kernel_ticks = kernel_ticks() + 1;
-    }
+    publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = kernel_ticks() + 1);
     unsafe {
         restore_task_context(
             teardown

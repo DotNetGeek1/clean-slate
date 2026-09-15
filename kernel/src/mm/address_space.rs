@@ -26,11 +26,11 @@ use x86_64::PhysAddr;
 use x86_64::VirtAddr;
 
 #[cfg(feature = "m4-recovery-self-test")]
-const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 24;
+const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
 #[cfg(not(feature = "m4-recovery-self-test"))]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
 #[cfg(feature = "m4-recovery-self-test")]
-const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 24;
+const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
 #[cfg(not(feature = "m4-recovery-self-test"))]
 const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 
