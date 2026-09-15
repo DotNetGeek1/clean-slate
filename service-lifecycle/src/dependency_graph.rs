@@ -363,12 +363,8 @@ mod tests {
         record
             .apply_control(ControlRequest::new(service, ControlRequestKind::Start))
             .expect("start");
-        let instance = ServiceInstanceId::new(
-            service,
-            InstanceGeneration(1),
-            ProcessId(100),
-            DomainId(1),
-        );
+        let instance =
+            ServiceInstanceId::new(service, InstanceGeneration(1), ProcessId(100), DomainId(1));
         record
             .apply_event(crate::state::LifecycleEvent::new(
                 instance,
