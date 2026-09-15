@@ -20,6 +20,7 @@ use crate::diagnostics::serial::serial_write_line;
     feature = "m1-self-test",
     feature = "m2-double-fault-self-test",
     feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
     feature = "m3-entry-self-test"
 )))]
 use crate::interrupt::timer::initialize_timer;
@@ -27,6 +28,7 @@ use crate::interrupt::timer::initialize_timer;
     feature = "m1-self-test",
     feature = "m2-double-fault-self-test",
     feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
     feature = "m3-entry-self-test"
 )))]
 use crate::interrupt::timer::report_timer_contract;
@@ -43,6 +45,7 @@ use crate::process::process_registry_mut;
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test",
     feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
     feature = "m3-entry-self-test"
 )))]
 use crate::sched::dispatch::initialize_scheduler;
@@ -51,6 +54,7 @@ use crate::sched::dispatch::initialize_scheduler;
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test",
     feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
     feature = "m3-entry-self-test"
 )))]
 use crate::sched::dispatch::start_scheduler;
@@ -75,6 +79,8 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
 #[cfg(feature = "m3-ipc-self-test")]
 use crate::selftest::m3_ipc::start_userspace_ipc_self_test;
+#[cfg(feature = "m3-resources-self-test")]
+use crate::selftest::m3_resources::start_userspace_resources_self_test;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::m3_syscall::start_userspace_syscall_self_test;
 use crate::syscall::initialize_syscall_abi;
@@ -199,11 +205,17 @@ fn run_inner() -> Result<(), &'static str> {
         start_userspace_address_space_self_test(allocator)
     }
 
+    #[cfg(feature = "m3-resources-self-test")]
+    {
+        start_userspace_resources_self_test(allocator)
+    }
+
     #[cfg(all(
         not(feature = "m1-self-test"),
         not(feature = "m2-double-fault-self-test"),
         not(feature = "m2-timer-self-test"),
         not(feature = "m3-address-space-self-test"),
+        not(feature = "m3-resources-self-test"),
         not(feature = "m3-entry-self-test")
     ))]
     {

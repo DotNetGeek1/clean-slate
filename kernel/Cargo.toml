@@ -13,6 +13,7 @@ m2-self-test = []
 m2-timer-self-test = []
 m3-address-space-self-test = []
 m3-entry-self-test = []
+m3-resources-self-test = []
 m3-syscall-self-test = ["m3-entry-self-test"]
 m3-ipc-self-test = ["m3-entry-self-test"]
 

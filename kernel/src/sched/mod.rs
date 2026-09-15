@@ -46,6 +46,13 @@ pub(super) struct Thread {
     pub(crate) observed_progress: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ThreadProcessResources {
+    pub(crate) threads: usize,
+    pub(crate) runnable_threads: usize,
+    pub(crate) kernel_stacks: usize,
+}
+
 impl Thread {
     const EMPTY: Self = Self {
         id: 0,
@@ -199,6 +206,58 @@ impl Scheduler {
             }
         }
         retired
+    }
+
+    pub(crate) fn resources_for_process(&self, process_id: u64) -> ThreadProcessResources {
+        let mut resources = ThreadProcessResources::default();
+        for thread in &self.threads {
+            if thread.owner_process_id != process_id || thread.state == ThreadState::Empty {
+                continue;
+            }
+            resources.threads += 1;
+            resources.kernel_stacks += 1;
+            if matches!(thread.state, ThreadState::Ready | ThreadState::Running) {
+                resources.runnable_threads += 1;
+            }
+        }
+        resources
+    }
+
+    pub(crate) fn occupied_thread_slots(&self) -> usize {
+        self.threads
+            .iter()
+            .filter(|thread| thread.state != ThreadState::Empty)
+            .count()
+    }
+
+    pub(crate) fn reap_threads_for_process(
+        &mut self,
+        process_id: u64,
+    ) -> Result<usize, &'static str> {
+        for thread in &self.threads {
+            if thread.owner_process_id != process_id || thread.state == ThreadState::Empty {
+                continue;
+            }
+            if matches!(
+                thread.state,
+                ThreadState::Ready | ThreadState::Running | ThreadState::Exiting
+            ) {
+                return Err("thread remained runnable during process teardown");
+            }
+        }
+
+        let mut reaped = 0usize;
+        for (index, thread) in self.threads.iter_mut().enumerate() {
+            if thread.owner_process_id != process_id || thread.state == ThreadState::Empty {
+                continue;
+            }
+            *thread = Thread::EMPTY;
+            if self.current_thread == Some(index) {
+                self.current_thread = None;
+            }
+            reaped += 1;
+        }
+        Ok(reaped)
     }
 
     pub(super) fn on_timer_interrupt(
@@ -428,5 +487,36 @@ mod tests {
         assert_eq!(scheduler.threads[1].owner_process_id, 7);
         assert_eq!(scheduler.start().expect("start"), 0x1000);
         assert_eq!(scheduler.on_timer_interrupt(0x1010).expect("tick"), 0x2000);
+    }
+
+    #[test]
+    fn process_resource_helpers_count_and_reap_owned_threads() {
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .configure_thread(0, 11, 7, ThreadKind::User, 0x1000, 0x1000, 0x1000)
+            .expect("thread one");
+        scheduler
+            .configure_thread(1, 12, 7, ThreadKind::User, 0x2000, 0x2000, 0x2000)
+            .expect("thread two");
+        scheduler.threads[0].state = ThreadState::Exited;
+        scheduler.threads[1].state = ThreadState::Ready;
+        scheduler.current_thread = Some(1);
+
+        let resources = scheduler.resources_for_process(7);
+        assert_eq!(resources.threads, 2);
+        assert_eq!(resources.runnable_threads, 1);
+        assert_eq!(resources.kernel_stacks, 2);
+        assert_eq!(
+            scheduler.reap_threads_for_process(7),
+            Err("thread remained runnable during process teardown")
+        );
+
+        scheduler.threads[1].state = ThreadState::Exited;
+        assert_eq!(scheduler.reap_threads_for_process(7).expect("reap"), 2);
+        assert!(scheduler.current_thread.is_none());
+        assert_eq!(
+            scheduler.resources_for_process(7),
+            ThreadProcessResources::default()
+        );
     }
 }

@@ -216,7 +216,7 @@ fn create_userspace_process(
         id: pid,
         state: ProcessState::Creating,
         address_space_root: address_space.root_frame,
-        resource_domain: ResourceDomain { id: pid },
+        resource_domain: ResourceDomain::with_address_space(pid, address_space),
         live_threads: 1,
         exit_status: None,
     };
@@ -326,8 +326,8 @@ fn create_userspace_process(
             observed_progress: 0,
         };
         process.state = ProcessState::Ready;
-        process.address_space_root = address_space.root_frame;
-        unsafe { process_registry_mut().insert(process)? };
+        process.address_space_root = process.resource_domain.address_space_root();
+        unsafe { process_registry_mut().insert(process.clone())? };
         Ok(UserspaceProcess {
             process,
             thread,
@@ -491,7 +491,7 @@ fn terminate_current_userspace_process(
         };
         let last_thread_exited =
             begin_thread_exit(process_record, &mut process.thread, status, faulted)?;
-        process.process = *process_record;
+        process.process = process_record.clone();
         last_thread_exited
     };
 
@@ -510,7 +510,7 @@ fn terminate_current_userspace_process(
         if process_record.live_threads == 0 {
             finalize_process_exit(process_record, status)?;
         }
-        state.processes[process_index].process = *process_record;
+        state.processes[process_index].process = process_record.clone();
     }
     if faulted {
         let process_record = unsafe {
@@ -535,7 +535,7 @@ fn terminate_current_userspace_process(
                 .ok_or("process missing from registry during reap")?
         };
         reap_process(process_record, &mut state.processes[process_index].thread)?;
-        state.processes[process_index].process = *process_record;
+        state.processes[process_index].process = process_record.clone();
         without_interrupts(|| unsafe {
             scheduler_mut().set_thread_state(thread_id, ThreadState::Reaped)
         })?;

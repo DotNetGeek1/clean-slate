@@ -21,6 +21,7 @@ const M3_ENTRY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_SYSCALL_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_LIFECYCLE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_IPC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M3_RESOURCES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[BOOT] UEFI memory map acquired",
     "[BOOT] ExitBootServices OK",
@@ -92,6 +93,12 @@ const M3_IPC_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[CAP ] unauthorized send denied pid=2",
     "[M3.5] PASS",
 ];
+const M3_RESOURCES_ACCEPTANCE_MARKERS: [&str; 4] = [
+    "[RES ] baseline pages=",
+    "[RES ] pid=1 pages=",
+    "[PROC] teardown pid=1 resources=0",
+    "[M3.6] PASS",
+];
 
 fn main() -> ExitCode {
     match run(env::args_os()) {
@@ -116,6 +123,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM3Syscall => run_m3_syscall_acceptance(),
         ParsedCommand::TestM3Lifecycle => run_m3_lifecycle_acceptance(),
         ParsedCommand::TestM3Ipc => run_m3_ipc_acceptance(),
+        ParsedCommand::TestM3Resources => run_m3_resources_acceptance(),
         ParsedCommand::RunGdb => run_vm_with_gdb(false),
         ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
         ParsedCommand::Build => build_kernel(false, false, &[]),
@@ -223,6 +231,18 @@ fn run_m3_ipc_acceptance() -> Result<(), XtaskError> {
         false,
         &["m3-ipc-self-test"],
         Some((&M3_IPC_ACCEPTANCE_MARKERS, M3_IPC_ACCEPTANCE_TIMEOUT)),
+    )
+}
+
+fn run_m3_resources_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m3-resources-self-test"],
+        Some((
+            &M3_RESOURCES_ACCEPTANCE_MARKERS,
+            M3_RESOURCES_ACCEPTANCE_TIMEOUT,
+        )),
     )
 }
 
@@ -596,6 +616,7 @@ fn print_help() {
     println!("  test-m3-syscall Build the M3.3 syscall-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
+    println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
     println!("  build        Build debug UEFI kernel only");
@@ -618,6 +639,7 @@ enum ParsedCommand {
     TestM3Syscall,
     TestM3Lifecycle,
     TestM3Ipc,
+    TestM3Resources,
     RunGdb,
     RunGdbEntry,
     Build,
@@ -636,6 +658,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m3-syscall" => ParsedCommand::TestM3Syscall,
         Some(cmd) if cmd == "test-m3-lifecycle" => ParsedCommand::TestM3Lifecycle,
         Some(cmd) if cmd == "test-m3-ipc" => ParsedCommand::TestM3Ipc,
+        Some(cmd) if cmd == "test-m3-resources" => ParsedCommand::TestM3Resources,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
         Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
         Some(cmd) if cmd == "build" => ParsedCommand::Build,
@@ -751,6 +774,10 @@ mod tests {
         assert_eq!(
             parse_command(Some("test-m3-ipc".as_ref())),
             ParsedCommand::TestM3Ipc
+        );
+        assert_eq!(
+            parse_command(Some("test-m3-resources".as_ref())),
+            ParsedCommand::TestM3Resources
         );
         assert_eq!(
             parse_command(Some("run-gdb-entry".as_ref())),

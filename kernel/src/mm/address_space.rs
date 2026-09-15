@@ -40,7 +40,7 @@ pub(crate) fn set_kernel_root_frame(frame: u64) {
     KERNEL_ROOT_FRAME.store(frame, Ordering::Relaxed);
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct OwnedUserMapping {
     virtual_address: u64,
     frame_address: u64,
@@ -53,8 +53,14 @@ impl OwnedUserMapping {
     };
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AddressSpaceResourceCounts {
+    pub(crate) user_pages: usize,
+    pub(crate) page_table_frames: usize,
+}
+
 #[allow(dead_code)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ProcessAddressSpace {
     pub(crate) root_frame: u64,
     page_table_frames: [u64; MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES],
@@ -100,6 +106,13 @@ impl ProcessAddressSpace {
         };
         self.user_mapping_count += 1;
         Ok(())
+    }
+
+    pub(crate) fn resource_counts(&self) -> AddressSpaceResourceCounts {
+        AddressSpaceResourceCounts {
+            user_pages: self.user_mapping_count,
+            page_table_frames: self.page_table_frame_count,
+        }
     }
 }
 

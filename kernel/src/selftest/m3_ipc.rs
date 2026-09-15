@@ -160,7 +160,7 @@ fn create_userspace_ipc_process(
         id: pid,
         state: ProcessState::Creating,
         address_space_root: address_space.root_frame,
-        resource_domain: ResourceDomain { id: pid },
+        resource_domain: ResourceDomain::with_address_space(pid, address_space),
         live_threads: 1,
         exit_status: None,
     };
@@ -265,8 +265,8 @@ fn create_userspace_ipc_process(
             observed_progress: 0,
         };
         process.state = ProcessState::Ready;
-        process.address_space_root = address_space.root_frame;
-        unsafe { process_registry_mut().insert(process)? };
+        process.address_space_root = process.resource_domain.address_space_root();
+        unsafe { process_registry_mut().insert(process.clone())? };
         Ok(UserspaceIpcProcess {
             process,
             thread,

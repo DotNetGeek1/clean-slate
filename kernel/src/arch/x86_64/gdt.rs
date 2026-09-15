@@ -118,12 +118,20 @@ pub(crate) fn userspace_gdt_state() -> Result<&'static GdtState, &'static str> {
     }
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m3-entry-self-test"
+))]
 pub(crate) fn selector_rpl(selector: u64) -> u64 {
     selector & 0x3
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m3-entry-self-test"
+))]
 #[cfg(test)]
 mod tests {
     use super::*;

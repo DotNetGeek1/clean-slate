@@ -62,7 +62,11 @@ impl InterruptContext {
 /// by the user `RSP`/`SS` pair the CPU pops after `RIP`/`CS`/`RFLAGS`.
 /// `repr(C)` is required because the frame is written raw onto a kernel stack
 /// and consumed by hardware, not by Rust.
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m3-entry-self-test"
+))]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(crate) struct UserspaceEntryFrame {
@@ -120,7 +124,11 @@ mod tests {
         assert_eq!(core::mem::offset_of!(SyscallContext, user_rsp), 120);
     }
 
-    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+    #[cfg(any(
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m3-entry-self-test"
+    ))]
     #[test]
     fn userspace_entry_frame_layout_matches_iretq_contract() {
         // InterruptContext (15 GPRs + vector + error_code + rip/cs/rflags)

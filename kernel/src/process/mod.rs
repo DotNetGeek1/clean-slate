@@ -2,7 +2,10 @@
 //! registry and the exit/reap transitions shared by the scheduler and the
 //! self-tests. Owns `PROCESS_REGISTRY`.
 
+pub(crate) mod domain;
 pub(crate) mod id_allocator;
+use crate::mm::address_space::AddressSpaceResourceCounts;
+use crate::mm::address_space::ProcessAddressSpace;
 use crate::sched::Thread;
 use crate::sched::ThreadState;
 use crate::sync::global_cell::GlobalCell;
@@ -14,7 +17,7 @@ const PROCESS_REGISTRY_CAPACITY: usize = 8;
 // exercised end-to-end by the M3 self-test features today; the normal boot path
 // will pick it up in later milestones.
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ProcessState {
     Empty,
     Creating,
@@ -26,12 +29,55 @@ pub(super) enum ProcessState {
     Reaped,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ResourceDomain {
     pub(crate) id: u64,
+    address_space: Option<ProcessAddressSpace>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl ResourceDomain {
+    pub(crate) const EMPTY: Self = Self {
+        id: 0,
+        address_space: None,
+    };
+
+    pub(crate) const fn new(id: u64) -> Self {
+        Self {
+            id,
+            address_space: None,
+        }
+    }
+
+    pub(crate) fn with_address_space(id: u64, address_space: ProcessAddressSpace) -> Self {
+        Self {
+            id,
+            address_space: Some(address_space),
+        }
+    }
+
+    pub(crate) fn address_space_root(&self) -> u64 {
+        self.address_space
+            .as_ref()
+            .map_or(0, |address_space| address_space.root_frame)
+    }
+
+    pub(crate) fn address_space(&self) -> Option<&ProcessAddressSpace> {
+        self.address_space.as_ref()
+    }
+
+    pub(crate) fn address_space_resource_counts(&self) -> AddressSpaceResourceCounts {
+        self.address_space.as_ref().map_or(
+            AddressSpaceResourceCounts::default(),
+            ProcessAddressSpace::resource_counts,
+        )
+    }
+
+    pub(crate) fn take_address_space(&mut self) -> Option<ProcessAddressSpace> {
+        self.address_space.take()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Process {
     pub(crate) id: u64,
     pub(crate) state: ProcessState,
@@ -46,7 +92,7 @@ impl Process {
         id: 0,
         state: ProcessState::Empty,
         address_space_root: 0,
-        resource_domain: ResourceDomain { id: 0 },
+        resource_domain: ResourceDomain::EMPTY,
         live_threads: 0,
         exit_status: None,
     };
@@ -90,13 +136,17 @@ pub(super) fn reap_process(process: &mut Process, thread: &mut Thread) -> Result
     if thread.owner_process_id != process.id {
         return Err("thread owner did not match process during reap");
     }
-    if process.live_threads != 0 {
-        return Err("process could not be reaped while threads remained");
-    }
     if thread.state != ThreadState::Exited {
         return Err("thread must be exited before reap");
     }
     thread.state = ThreadState::Reaped;
+    reap_process_record(process)
+}
+
+pub(super) fn reap_process_record(process: &mut Process) -> Result<(), &'static str> {
+    if process.live_threads != 0 {
+        return Err("process could not be reaped while threads remained");
+    }
     process.state = ProcessState::Reaped;
     Ok(())
 }
@@ -122,12 +172,12 @@ pub(crate) struct ProcessRegistry {
 impl ProcessRegistry {
     const fn new() -> Self {
         Self {
-            processes: [Process::EMPTY; PROCESS_REGISTRY_CAPACITY],
+            processes: [const { Process::EMPTY }; PROCESS_REGISTRY_CAPACITY],
         }
     }
 
     pub(super) fn clear(&mut self) {
-        self.processes = [Process::EMPTY; PROCESS_REGISTRY_CAPACITY];
+        self.processes = [const { Process::EMPTY }; PROCESS_REGISTRY_CAPACITY];
     }
 
     pub(super) fn insert(&mut self, process: Process) -> Result<(), &'static str> {
@@ -157,6 +207,24 @@ impl ProcessRegistry {
         self.processes
             .iter_mut()
             .find(|entry| entry.id == process_id && entry.state != ProcessState::Empty)
+    }
+
+    pub(super) fn release_reaped(&mut self, process_id: u64) -> Result<(), &'static str> {
+        let process = self
+            .get_mut(process_id)
+            .ok_or("process missing from registry during release")?;
+        if process.state != ProcessState::Reaped {
+            return Err("process registry slot could not be reused before reap");
+        }
+        *process = Process::EMPTY;
+        Ok(())
+    }
+
+    pub(crate) fn occupied_slots(&self) -> usize {
+        self.processes
+            .iter()
+            .filter(|entry| entry.state != ProcessState::Empty)
+            .count()
     }
 
     pub(super) fn find_by_address_space_root(&self, root_frame: u64) -> Option<&Process> {
@@ -203,7 +271,7 @@ mod tests {
             id: 9,
             state: ProcessState::Running,
             address_space_root: 0x2000,
-            resource_domain: ResourceDomain { id: 9 },
+            resource_domain: ResourceDomain::new(9),
             live_threads: 1,
             exit_status: None,
         };
@@ -239,7 +307,7 @@ mod tests {
             id: 5,
             state: ProcessState::Running,
             address_space_root: 0x3000,
-            resource_domain: ResourceDomain { id: 5 },
+            resource_domain: ResourceDomain::new(5),
             live_threads: 2,
             exit_status: None,
         };
@@ -290,11 +358,11 @@ mod tests {
             id: 17,
             state: ProcessState::Ready,
             address_space_root: 0x9000,
-            resource_domain: ResourceDomain { id: 17 },
+            resource_domain: ResourceDomain::new(17),
             live_threads: 1,
             exit_status: None,
         };
-        registry.insert(process).expect("insert");
+        registry.insert(process.clone()).expect("insert");
         assert_eq!(
             registry
                 .get(process.id)
@@ -316,6 +384,34 @@ mod tests {
     }
 
     #[test]
+    fn process_registry_releases_reaped_slots_for_reuse() {
+        let mut registry = ProcessRegistry::new();
+        let mut process = Process {
+            id: 17,
+            state: ProcessState::Exited,
+            address_space_root: 0x9000,
+            resource_domain: ResourceDomain::new(17),
+            live_threads: 0,
+            exit_status: Some(0),
+        };
+        reap_process_record(&mut process).expect("reap");
+        registry.insert(process).expect("insert");
+        assert_eq!(registry.occupied_slots(), 1);
+        registry.release_reaped(17).expect("release slot");
+        assert_eq!(registry.occupied_slots(), 0);
+        registry
+            .insert(Process {
+                id: 18,
+                state: ProcessState::Ready,
+                address_space_root: 0xa000,
+                resource_domain: ResourceDomain::new(18),
+                live_threads: 1,
+                exit_status: None,
+            })
+            .expect("reuse slot");
+    }
+
+    #[test]
     fn fault_termination_requires_sibling_retirement_before_final_exit() {
         let mut scheduler = Scheduler::new();
         scheduler
@@ -332,7 +428,7 @@ mod tests {
             id: 33,
             state: ProcessState::Running,
             address_space_root: 0x9000,
-            resource_domain: ResourceDomain { id: 33 },
+            resource_domain: ResourceDomain::new(33),
             live_threads: 2,
             exit_status: None,
         };

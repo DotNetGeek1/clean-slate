@@ -78,12 +78,19 @@ declare_interrupt_entries!(
     clean_slate_interrupt_33,
 );
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m3-entry-self-test"
+))]
 unsafe extern "C" {
     pub(crate) fn clean_slate_interrupt_128();
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test"
+))]
 unsafe extern "C" {
     pub(crate) static clean_slate_user_address_space_test_start: u8;
     pub(crate) static clean_slate_user_address_space_test_after_entry: u8;

@@ -5,7 +5,11 @@
 pub(crate) mod timer;
 use crate::arch::x86_64::apic::acknowledge_timer_interrupt;
 use crate::arch::x86_64::bit;
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m3-entry-self-test"
+))]
 use crate::arch::x86_64::gdt::selector_rpl;
 use crate::arch::x86_64::idt::exception_name;
 use crate::arch::x86_64::interrupt_context::InterruptContext;
@@ -15,7 +19,11 @@ use crate::arch::x86_64::GENERAL_PROTECTION_VECTOR;
 use crate::arch::x86_64::PAGE_FAULT_VECTOR;
 use crate::arch::x86_64::SPURIOUS_VECTOR;
 use crate::arch::x86_64::TIMER_VECTOR;
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m3-entry-self-test"
+))]
 use crate::arch::x86_64::USER_TEST_VECTOR;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
@@ -36,10 +44,12 @@ use crate::selftest::m2_double_fault::trigger_nested_double_fault;
 #[cfg(any(
     feature = "m2-double-fault-self-test",
     feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
     feature = "m3-entry-self-test"
 ))]
 #[cfg(not(any(
     feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
     feature = "m3-entry-self-test",
     feature = "m3-ipc-self-test",
     feature = "m3-syscall-self-test"
@@ -55,6 +65,10 @@ use crate::selftest::m3_entry::handle_userspace_entry_trap;
 use crate::selftest::m3_entry::handle_userspace_privileged_fault;
 #[cfg(feature = "m3-ipc-self-test")]
 use crate::selftest::m3_ipc::handle_userspace_ipc_entry;
+#[cfg(feature = "m3-resources-self-test")]
+use crate::selftest::m3_resources::handle_userspace_resource_entry;
+#[cfg(feature = "m3-resources-self-test")]
+use crate::selftest::m3_resources::handle_userspace_resource_page_fault;
 #[cfg(feature = "m2-double-fault-self-test")]
 use core::sync::atomic::Ordering;
 use x86_64::registers::control::Cr2;
@@ -130,6 +144,14 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         };
     }
 
+    #[cfg(feature = "m3-resources-self-test")]
+    if context.vector as usize == USER_TEST_VECTOR {
+        return match handle_userspace_resource_entry(context) {
+            Ok(next_stack_pointer) => next_stack_pointer,
+            Err(message) => fatal_kernel_error(message),
+        };
+    }
+
     #[cfg(feature = "m3-entry-self-test")]
     if context.vector as usize == USER_TEST_VECTOR {
         return match handle_userspace_entry_trap(context) {
@@ -155,6 +177,11 @@ fn handle_exception(context: &InterruptContext) -> ! {
         #[cfg(feature = "m3-address-space-self-test")]
         if selector_rpl(context.cs) == 3 {
             handle_userspace_address_space_page_fault(context)
+        }
+
+        #[cfg(feature = "m3-resources-self-test")]
+        if selector_rpl(context.cs) == 3 {
+            handle_userspace_resource_page_fault(context)
         }
 
         #[cfg(feature = "m2-double-fault-self-test")]

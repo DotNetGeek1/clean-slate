@@ -117,6 +117,21 @@ cargo xtask test-m3-ipc
 
 This command builds the kernel with the M3.5 IPC self-test enabled, boots QEMU headlessly, and validates ordered capability and IPC markers proving explicit grant (`[CAP ] endpoint capability granted pid=1`), successful bounded send (`[IPC ] send OK bytes=...`), deterministic unauthorized denial (`[CAP ] unauthorized send denied pid=2`), and endpoint lifecycle completion before `[M3.5] PASS`.
 
+For the bounded M3.6 domain resource-accounting and teardown acceptance path:
+
+```bash
+cargo xtask test-m3-resources
+```
+
+This command builds the kernel with the dedicated M3.6 resource self-test enabled, boots QEMU headlessly, and validates ordered markers proving:
+
+1. baseline resource accounting (`[RES ] baseline pages=...`);
+2. live per-domain ownership snapshots (`[RES ] pid=... pages=... handles=... threads=...`);
+3. production teardown returning each terminated domain to zero owned scheduler/IPC state (`[PROC] teardown pid=... resources=0`); and
+4. repeated create/run/exit plus create/run/fault cycles that exceed the fixed process-table lifetime capacity before `[M3.6] PASS`.
+
+If the M3.6 run fails, start from the last emitted `[RES ]` or `[PROC]` marker to see which phase leaked or failed to reap. For deeper debugging, rerun with `cargo xtask run-gdb` and break in `process::domain::teardown_current_process`, `ipc::IpcEndpointTable::teardown_resources_for_pid`, or `sched::Scheduler::reap_threads_for_process`.
+
 To launch paused for debugger attach:
 
 ```bash
@@ -214,7 +229,7 @@ kernel/src
 │   ├── paging.rs          page-table walking, current root frame, zero_page
 │   ├── address_space.rs   per-process roots, kernel-root sanitization/validation
 │   └── user_mapping.rs    map/unmap of userspace pages and mapping validation
-├── process/               Process, ResourceDomain, ProcessRegistry, lifecycle; id_allocator.rs
+├── process/               Process, ResourceDomain, ProcessRegistry, teardown coordinator; id_allocator.rs, domain.rs
 ├── sched/                 Thread, Scheduler, TASK_STACKS; dispatch.rs (start/schedule), demo_tasks.rs
 ├── ipc/                   endpoint table, capabilities, send path
 ├── syscall/               syscall dispatch (mod.rs) and return-state validation (validation.rs)
@@ -224,7 +239,7 @@ kernel/src
 └── selftest/              milestone acceptance scaffolding, one file per milestone
     ├── mod.rs             feature-gated mod decls; shared USER_TEST_* address constants
     ├── m1_memory.rs, m2_double_fault.rs, m2_timer.rs
-    └── m3_entry.rs, m3_address_space.rs, m3_syscall.rs, m3_ipc.rs
+    └── m3_entry.rs, m3_address_space.rs, m3_resources.rs, m3_syscall.rs, m3_ipc.rs
 ```
 
 Conventions:

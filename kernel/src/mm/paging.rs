@@ -138,7 +138,10 @@ pub(super) fn leaf_page_flags_for_address(
     Ok(walk_page_flags(address)?.leaf)
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test"
+))]
 pub(crate) fn page_flags_for_address_in_root(
     root_frame: u64,
     address: VirtAddr,
@@ -146,7 +149,10 @@ pub(crate) fn page_flags_for_address_in_root(
     Ok(walk_page_flags_in_root(root_frame, address)?.path)
 }
 
-#[cfg(feature = "m3-address-space-self-test")]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test"
+))]
 pub(crate) fn leaf_page_flags_for_address_in_root(
     root_frame: u64,
     address: VirtAddr,
@@ -236,15 +242,28 @@ pub(crate) fn zero_page(frame: u64) {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+    #[cfg(any(
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m3-entry-self-test"
+    ))]
     use super::*;
-    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+    #[cfg(any(
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m3-entry-self-test"
+    ))]
     use crate::selftest::USER_TEST_CODE_ADDRESS;
-    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+    #[cfg(any(
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m3-entry-self-test"
+    ))]
     use x86_64::PhysAddr;
 
     #[cfg(any(
         feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
         feature = "m3-entry-self-test",
         feature = "m3-syscall-self-test"
     ))]

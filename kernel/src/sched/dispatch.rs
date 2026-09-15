@@ -28,6 +28,7 @@ use crate::sched::ThreadKind;
         feature = "m2-double-fault-self-test",
         feature = "m2-timer-self-test",
         feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
         feature = "m3-entry-self-test",
         feature = "m3-syscall-self-test",
         feature = "m3-ipc-self-test"
@@ -68,6 +69,7 @@ pub(crate) fn initialize_scheduler() -> Result<(), &'static str> {
         feature = "m2-double-fault-self-test",
         feature = "m2-timer-self-test",
         feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
         feature = "m3-entry-self-test",
         feature = "m3-syscall-self-test",
         feature = "m3-ipc-self-test"
@@ -113,7 +115,11 @@ pub(crate) fn prepare_current_scheduler_thread_dispatch() -> Result<(), &'static
     prepare_thread_dispatch(thread)
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m3-ipc-self-test"
+))]
 pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'static str> {
     let next_stack_pointer = without_interrupts(|| unsafe {
         scheduler_mut().on_timer_interrupt(current_stack_pointer)
@@ -122,7 +128,11 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
     Ok(next_stack_pointer)
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-ipc-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m3-ipc-self-test"
+))]
 pub(crate) fn start_current_scheduler_thread() -> Result<u64, &'static str> {
     let stack_pointer = without_interrupts(|| with_scheduler(|scheduler| scheduler.start()))?;
     prepare_current_scheduler_thread_dispatch()?;

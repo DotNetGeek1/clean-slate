@@ -226,7 +226,11 @@ pub(crate) fn start_userspace_entry_self_test(allocator: &mut PageAllocator) -> 
     unsafe { restore_task_context(frame_pointer) }
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m3-entry-self-test"
+))]
 pub(super) fn validate_userspace_entry_trap(
     context: &InterruptContext,
     frame: &UserspaceEntryFrame,
@@ -249,7 +253,11 @@ pub(super) fn validate_userspace_entry_trap(
     Ok(())
 }
 
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+#[cfg(any(
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m3-entry-self-test"
+))]
 pub(super) fn userspace_frame(context: &InterruptContext) -> &UserspaceEntryFrame {
     unsafe { &*(context as *const InterruptContext as *const UserspaceEntryFrame) }
 }
@@ -324,7 +332,11 @@ mod tests {
         assert!(userspace_test_privileged_instruction_offset() < userspace_test_size() as u64);
     }
 
-    #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
+    #[cfg(any(
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m3-entry-self-test"
+    ))]
     #[test]
     fn userspace_entry_trap_validation_requires_cpl3_and_expected_rip() {
         let valid = UserspaceEntryFrame {
