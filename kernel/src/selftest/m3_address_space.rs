@@ -206,7 +206,7 @@ fn create_userspace_process(
         let ids = unsafe { id_allocator_mut() };
         (ids.allocate_pid()?, ids.allocate_tid()?)
     };
-    let setup_result = (|| -> Result<UserspaceProcess, &'static str> {
+    (|| -> Result<UserspaceProcess, &'static str> {
         let code_frame_address = allocator
             .allocate_page()
             .ok_or("allocator could not provide a code page for a process")?;
@@ -312,13 +312,15 @@ fn create_userspace_process(
             observed_progress: 0,
         };
         unsafe {
-            process_registry_mut().insert(Process {
-                id: pid,
-                state: ProcessState::Ready,
-                resource_domain: ResourceDomain::with_address_space(pid, address_space),
-                live_threads: 1,
-                exit_status: None,
-            })?
+            process_registry_mut()
+                .insert(Process {
+                    id: pid,
+                    state: ProcessState::Ready,
+                    resource_domain: ResourceDomain::with_address_space(pid, address_space),
+                    live_threads: 1,
+                    exit_status: None,
+                })
+                .expect("fresh address-space self-test process should fit in the registry")
         };
         Ok(UserspaceProcess {
             process_id: pid,
@@ -331,12 +333,7 @@ fn create_userspace_process(
             user_stack_pointer,
             user_stack_segment: gdt_state.user_data_selector.0 as u64,
         })
-    })();
-
-    if setup_result.is_err() {
-        let _ = crate::mm::address_space::destroy_process_address_space(&address_space, allocator);
-    }
-    setup_result
+    })()
 }
 
 #[cfg(feature = "m3-address-space-self-test")]
@@ -674,7 +671,7 @@ pub(crate) fn handle_userspace_address_space_page_fault(context: &InterruptConte
                 };
             kernel_log_fmt(format_args!(
                 "[PROC] pid={} exited status={}\n",
-                    process.process_id, 1
+                process.process_id, 1
             ));
             unsafe { restore_task_context(next_stack_pointer) }
         }

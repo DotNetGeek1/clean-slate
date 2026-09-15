@@ -365,26 +365,30 @@ mod tests {
     #[test]
     fn process_registry_lookup_and_dispatchability_follow_process_state() {
         let mut registry = ProcessRegistry::new();
-        let mut process = Process {
-            id: 17,
+        let process_id = 17;
+        let process = Process {
+            id: process_id,
             state: ProcessState::Ready,
-            resource_domain: ResourceDomain::with_root_frame(17, 0x9000),
+            resource_domain: ResourceDomain::with_root_frame(process_id, 0x9000),
             live_threads: 1,
             exit_status: None,
         };
         registry.insert(process).expect("insert");
         assert_eq!(
-            registry.get(17).expect("process").address_space_root(),
+            registry
+                .get(process_id)
+                .expect("process")
+                .address_space_root(),
             0x9000
         );
         assert!(matches!(
-            registry.get(process.id).expect("process").state,
+            registry.get(process_id).expect("process").state,
             ProcessState::Ready
         ));
 
-        registry.get_mut(17).expect("mut process").state = ProcessState::Exited;
+        registry.get_mut(process_id).expect("mut process").state = ProcessState::Exited;
         assert!(matches!(
-            registry.get(17).expect("process").state,
+            registry.get(process_id).expect("process").state,
             ProcessState::Exited
         ));
     }

@@ -27,7 +27,6 @@ use crate::ipc::USERSPACE_IPC_TEST_PID;
 #[cfg(any(feature = "m3-ipc-self-test", test))]
 use crate::ipc::USERSPACE_IPC_UNAUTHORIZED_TEST_PID;
 use crate::mm::address_space::create_process_address_space;
-use crate::mm::address_space::destroy_process_address_space;
 use crate::mm::address_space::map_process_page;
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
@@ -156,7 +155,7 @@ fn create_userspace_ipc_process(
         let ids = unsafe { id_allocator_mut() };
         (ids.allocate_pid()?, ids.allocate_tid()?)
     };
-    let setup_result = (|| -> Result<UserspaceIpcProcess, &'static str> {
+    (|| -> Result<UserspaceIpcProcess, &'static str> {
         let code_frame_address = allocator
             .allocate_page()
             .ok_or("allocator could not provide a code page for userspace IPC test process")?;
@@ -257,13 +256,15 @@ fn create_userspace_ipc_process(
             observed_progress: 0,
         };
         unsafe {
-            process_registry_mut().insert(Process {
-                id: pid,
-                state: ProcessState::Ready,
-                resource_domain: ResourceDomain::with_address_space(pid, address_space),
-                live_threads: 1,
-                exit_status: None,
-            })?
+            process_registry_mut()
+                .insert(Process {
+                    id: pid,
+                    state: ProcessState::Ready,
+                    resource_domain: ResourceDomain::with_address_space(pid, address_space),
+                    live_threads: 1,
+                    exit_status: None,
+                })
+                .expect("fresh IPC self-test process should fit in the registry")
         };
         Ok(UserspaceIpcProcess {
             process_id: pid,
@@ -272,11 +273,7 @@ fn create_userspace_ipc_process(
             user_stack_pointer,
             user_stack_segment: gdt_state.user_data_selector.0 as u64,
         })
-    })();
-    if setup_result.is_err() {
-        let _ = destroy_process_address_space(&address_space, allocator);
-    }
-    setup_result
+    })()
 }
 
 #[cfg(feature = "m3-ipc-self-test")]
