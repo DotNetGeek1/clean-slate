@@ -163,20 +163,31 @@ Examples of repair actions:
 - test a candidate repair in a disposable cloned environment;
 - promote a repair only after health checks pass.
 
-## M4 supervisor/recovery prototype
+## M4.1 shared lifecycle protocol boundary
 
-The first M4 prototype can stay intentionally narrow:
+The first M4 step is a shared contract, not a full restart implementation.
 
-- one userspace supervisor process owns restart authority for one logical
-  built-in test service;
-- logical service identity is stable across restarts and distinct from the
-  per-instance PID/process identity;
-- the service reports explicit lifecycle states (`Starting`, `Running`,
-  `Failed`, `Restarting`) through a versioned protocol surface;
-- a faulted instance is torn down through the existing M3 teardown path before a
-  replacement instance is accepted as running;
-- a bounded restart budget prevents an immediate crash loop from spinning
-  forever.
+- The kernel, supervisor, and supervised services must share one normal-build
+  protocol module rather than feature-gated self-test-only copies.
+- Logical service identity is separate from per-instance identity
+  (`service_id` vs `pid` + `generation`) so a replacement instance cannot be
+  mistaken for the failed one.
+- Wire messages stay fixed-size and versioned so the existing bounded IPC path
+  can validate version, kind, and length before use and reject unknown values
+  deterministically.
+- The protocol carries mechanism-level lifecycle state, control intent, health
+  envelopes, and dependency metadata only. Restart budgets, backoff, and other
+  policy decisions remain in userspace supervisor logic for later milestones.
+- Lifecycle transitions are explicit and invalid transitions fail instead of
+  being silently coerced.
+
+The initial contract includes:
+
+- lifecycle states `Declared`, `Starting`, `Running`, `Stopping`, `Exited`,
+  `Faulted`, and `RestartPending`;
+- control requests `Start`, `Stop`, and `Restart`;
+- lifecycle events such as `Started`, `Ready`, `Exited`, and `Faulted`;
+- stable extension envelopes for health and dependency metadata.
 
 ## M1 virtual memory layout
 

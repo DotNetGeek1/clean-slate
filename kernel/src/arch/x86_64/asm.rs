@@ -81,8 +81,7 @@ declare_interrupt_entries!(
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m4-self-test"
+    feature = "m3-entry-self-test"
 ))]
 unsafe extern "C" {
     pub(crate) fn clean_slate_interrupt_128();
@@ -120,15 +119,6 @@ unsafe extern "C" {
     pub(crate) static clean_slate_user_ipc_test_start: u8;
     pub(crate) static clean_slate_user_ipc_test_after_send: u8;
     pub(crate) static clean_slate_user_ipc_test_end: u8;
-}
-
-#[cfg(feature = "m4-self-test")]
-unsafe extern "C" {
-    pub(crate) static clean_slate_user_service_test_start: u8;
-    pub(crate) static clean_slate_user_service_test_after_entry: u8;
-    pub(crate) static clean_slate_user_service_test_end: u8;
-    pub(crate) static clean_slate_user_supervisor_test_start: u8;
-    pub(crate) static clean_slate_user_supervisor_test_end: u8;
 }
 
 global_asm!(
@@ -314,80 +304,6 @@ clean_slate_user_ipc_test_fail:
 
     .global clean_slate_user_ipc_test_end
 clean_slate_user_ipc_test_end:
-
-    .global clean_slate_user_service_test_start
-clean_slate_user_service_test_start:
-    xor rdi, rdi
-    int 0x80
-    .global clean_slate_user_service_test_after_entry
-clean_slate_user_service_test_after_entry:
-    movabs rbx, 0x0000400000001000
-    cmp qword ptr [rbx + 8], 0
-    je clean_slate_user_service_test_spin
-    mov rax, [rbx + 16]
-    mov rax, [rax]
-    ud2
-
-clean_slate_user_service_test_spin:
-    pause
-    jmp clean_slate_user_service_test_spin
-
-    .global clean_slate_user_service_test_end
-clean_slate_user_service_test_end:
-
-    .global clean_slate_user_supervisor_test_start
-clean_slate_user_supervisor_test_start:
-    movabs rbx, 0x0000400000001000
-clean_slate_user_supervisor_wait_fault:
-    mov rax, 4
-    mov rdi, [rbx + 8]
-    syscall
-    test rax, rax
-    jnz clean_slate_user_supervisor_restart
-    xor rdi, rdi
-    int 0x80
-    jmp clean_slate_user_supervisor_wait_fault
-
-clean_slate_user_supervisor_restart:
-    mov [rbx + 16], rax
-    mov rax, 5
-    mov rdi, [rbx]
-    mov rsi, [rbx + 8]
-    mov rdx, [rbx + 16]
-    syscall
-    test rax, rax
-    jz clean_slate_user_supervisor_fail
-    mov [rbx + 24], rax
-    xor rdi, rdi
-    int 0x80
-
-clean_slate_user_supervisor_wait_running:
-    mov rax, 6
-    mov rdi, [rbx + 8]
-    syscall
-    mov rcx, rax
-    and rcx, 0xff
-    cmp rcx, 2
-    jne clean_slate_user_supervisor_yield_running
-    mov rcx, rax
-    shr rcx, 16
-    cmp rcx, [rbx + 24]
-    jne clean_slate_user_supervisor_yield_running
-    cmp rcx, [rbx + 16]
-    je clean_slate_user_supervisor_fail
-    mov rdi, 1
-    int 0x80
-
-clean_slate_user_supervisor_yield_running:
-    xor rdi, rdi
-    int 0x80
-    jmp clean_slate_user_supervisor_wait_running
-
-clean_slate_user_supervisor_fail:
-    ud2
-
-    .global clean_slate_user_supervisor_test_end
-clean_slate_user_supervisor_test_end:
 
     .global clean_slate_syscall_entry
 clean_slate_syscall_entry:

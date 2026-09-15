@@ -66,12 +66,6 @@ use crate::selftest::m3_syscall::SYSCALL_DF_SANITIZED_OBSERVED;
 use crate::selftest::m3_syscall::SYSCALL_PASS_MARKER;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::m3_syscall::SYSCALL_TEST_REQUIRED_CALLS;
-#[cfg(feature = "m4-self-test")]
-use crate::selftest::m4_supervisor::query_service_status;
-#[cfg(feature = "m4-self-test")]
-use crate::selftest::m4_supervisor::supervisor_restart_service;
-#[cfg(feature = "m4-self-test")]
-use crate::selftest::m4_supervisor::supervisor_wait_fault_event;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::USER_TEST_CODE_ADDRESS;
 #[cfg(feature = "m3-syscall-self-test")]
@@ -97,9 +91,6 @@ const SYSCALL_NR_VERSION: u64 = 0;
 const SYSCALL_NR_READ_U64: u64 = 1;
 const SYSCALL_NR_FINISH: u64 = 2;
 const SYSCALL_NR_IPC_SEND: u64 = 3;
-const SYSCALL_NR_M4_WAIT_FAULT: u64 = 4;
-const SYSCALL_NR_M4_RESTART: u64 = 5;
-const SYSCALL_NR_M4_QUERY_STATUS: u64 = 6;
 const SYSCALL_ENOSYS: u64 = u64::MAX - 37;
 pub(super) const SYSCALL_EACCES: u64 = u64::MAX - 12;
 const SYSCALL_EINVAL: u64 = u64::MAX - 21;
@@ -212,39 +203,6 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
     }
 }
 
-#[cfg(feature = "m4-self-test")]
-fn handle_syscall_m4_wait_fault(frame: &mut SyscallContext) {
-    frame.rax = match supervisor_wait_fault_event(frame.rdi) {
-        Ok(event) => event,
-        Err(_) => SYSCALL_EINVAL,
-    };
-}
-
-#[cfg(feature = "m4-self-test")]
-fn handle_syscall_m4_restart(frame: &mut SyscallContext) {
-    let holder_pid = match current_syscall_caller_pid() {
-        Ok(pid) => pid,
-        Err(_) => {
-            frame.rax = SYSCALL_EACCES;
-            return;
-        }
-    };
-    frame.rax = match supervisor_restart_service(holder_pid, frame.rdi, frame.rsi, frame.rdx) {
-        Ok(new_pid) => new_pid,
-        Err(message) if message.contains("stale") => SYSCALL_ESTALE,
-        Err(message) if message.contains("unauthorized") => SYSCALL_EACCES,
-        Err(_) => SYSCALL_EINVAL,
-    };
-}
-
-#[cfg(feature = "m4-self-test")]
-fn handle_syscall_m4_query_status(frame: &mut SyscallContext) {
-    frame.rax = match query_service_status(frame.rdi) {
-        Ok(status) => status,
-        Err(_) => SYSCALL_EINVAL,
-    };
-}
-
 // Consumed by arch/x86_64/asm.rs (clean_slate_syscall_entry calls this with the saved frame).
 #[unsafe(no_mangle)]
 extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 {
@@ -293,18 +251,6 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
         #[cfg(not(feature = "m3-syscall-self-test"))]
         SYSCALL_NR_FINISH => frame.rax = SYSCALL_ENOSYS,
         SYSCALL_NR_IPC_SEND => handle_syscall_ipc_send(frame),
-        #[cfg(feature = "m4-self-test")]
-        SYSCALL_NR_M4_WAIT_FAULT => handle_syscall_m4_wait_fault(frame),
-        #[cfg(not(feature = "m4-self-test"))]
-        SYSCALL_NR_M4_WAIT_FAULT => frame.rax = SYSCALL_ENOSYS,
-        #[cfg(feature = "m4-self-test")]
-        SYSCALL_NR_M4_RESTART => handle_syscall_m4_restart(frame),
-        #[cfg(not(feature = "m4-self-test"))]
-        SYSCALL_NR_M4_RESTART => frame.rax = SYSCALL_ENOSYS,
-        #[cfg(feature = "m4-self-test")]
-        SYSCALL_NR_M4_QUERY_STATUS => handle_syscall_m4_query_status(frame),
-        #[cfg(not(feature = "m4-self-test"))]
-        SYSCALL_NR_M4_QUERY_STATUS => frame.rax = SYSCALL_ENOSYS,
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 

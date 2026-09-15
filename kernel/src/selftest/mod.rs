@@ -30,41 +30,34 @@ pub(crate) mod m3_ipc;
 pub(crate) mod m3_resources;
 #[cfg(feature = "m3-syscall-self-test")]
 pub(crate) mod m3_syscall;
-#[cfg(feature = "m4-self-test")]
-pub(crate) mod m4_supervisor;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m4-self-test"
+    feature = "m3-entry-self-test"
 ))]
 use crate::mm::PAGE_SIZE;
 
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m4-self-test"
+    feature = "m3-entry-self-test"
 ))]
 pub(super) const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m4-self-test"
+    feature = "m3-entry-self-test"
 ))]
 const USER_TEST_DATA_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m4-self-test"
+    feature = "m3-entry-self-test"
 ))]
 pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m3-ipc-self-test",
-    feature = "m4-self-test"
+    feature = "m3-ipc-self-test"
 ))]
 const USER_TEST_PROCESS_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + (PAGE_SIZE * 2);

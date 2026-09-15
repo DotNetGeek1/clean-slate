@@ -150,27 +150,24 @@ This command builds the kernel with the dedicated M3.6 resource self-test enable
 
 If the M3.6 run fails, start from the last emitted `[RES ]` or `[PROC]` marker to see which phase leaked or failed to reap. For deeper debugging, rerun with `cargo xtask run-gdb` and break in `process::domain::teardown_current_process`, `ipc::IpcEndpointTable::teardown_resources_for_pid`, or `sched::Scheduler::reap_threads_for_process`.
 
-On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, which covers each current milestone without repeating the boots the M3 gate already performs. `-Exhaustive` additionally runs every individual `test-m3-*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
+On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, which covers each current milestone without repeating the boots the M3 gate already performs. `-Exhaustive` additionally runs every individual `test-m3-*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
 
 On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases. OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`.
 
-For the bounded M4 supervisor/recovery acceptance path:
+M4.1 is currently covered by host unit tests in `kernel/src/service/protocol.rs`
+rather than a QEMU acceptance boot. Use:
 
 ```bash
-cargo xtask test-m4
+cargo test -p clean-slate-kernel service::protocol
 ```
 
-This command builds the dedicated M4 self-test kernel, initializes the timer so
-unrelated kernel work continues, then boots a userspace supervisor together with
-a built-in crash-once service. The ordered markers prove explicit userspace
-supervision, deliberate fault detection, M3-path resource teardown before
-replacement, stable logical service identity across a new PID/process instance,
-and continued timer progress before `[M4  ] PASS`.
-
-The prototype intentionally defers persistent executable loading, general
-capability delegation, and multi-service dependency policy until later
-milestones. `scripts/run-tests.sh` / `scripts/run-tests.ps1` expose the same
-command as `test-m4` (`m4`, `m4.8`) and include it in the default suite.
+Those tests validate the shared lifecycle/state contract directly: fixed-size
+wire messages, deterministic version/kind/length rejection, explicit lifecycle
+transition rules, stale-instance-event rejection, and stable health/dependency
+extension envelopes. The end-to-end userspace supervisor recovery gate is
+deferred to the later M4 convergence issues once the kernel control path,
+supervisor runtime, health, dependencies, and crash fixture all consume the same
+contract.
 
 To launch paused for debugger attach:
 
@@ -274,6 +271,7 @@ kernel/src
 ├── ipc/                   endpoint table, capabilities, send path
 ├── syscall/               syscall dispatch (mod.rs) and return-state validation (validation.rs)
 ├── interrupt/             exception/IRQ dispatch and handlers (mod.rs), timer tick policy (timer.rs)
+├── service/               shared M4 service protocol/state model (protocol.rs)
 ├── diagnostics/           serial.rs, log.rs, qemu.rs (exit codes, halt_loop, fatal error), gdb.rs
 ├── sync/global_cell.rs    GlobalCell<T>
 └── selftest/              milestone acceptance scaffolding, one file per milestone

@@ -5,14 +5,14 @@
 .DESCRIPTION
     Sets OVMF_CODE / OVMF_VARS when they are not already in the environment,
     then runs one or more `cargo xtask` acceptance tests. By default the
-    milestone gates run (test-m1, test-m2, test-m3, test-m4); the individual test-m3-*
+    milestone gates run (test-m1, test-m2, test-m3); the individual test-m3-*
     boots are constituents of the test-m3 aggregate and are skipped unless
     named explicitly or -Exhaustive is given. Pass test names (or short
     aliases) to target a subset.
 
 .PARAMETER Test
     One or more tests to run. Accepts full xtask names or short aliases:
-      m1, m2, m3 / m3.7 (aggregate), m4 / m4.8,
+      m1, m2, m3 / m3.7 (aggregate),
       entry / m3.1, address-space / m3.2, syscall / m3.3,
       lifecycle / m3.4, ipc / m3.5, resources / m3.6
 
@@ -93,7 +93,6 @@ $AllTests = [ordered]@{
     "test-m3-lifecycle"     = @{ Aliases = @("m3-lifecycle", "lifecycle", "m3.4"); Description = "M3.4 process/thread lifecycle acceptance"; Role = "Constituent" }
     "test-m3-ipc"           = @{ Aliases = @("m3-ipc", "ipc", "m3.5"); Description = "M3.5 capability-authorized IPC acceptance"; Role = "Constituent" }
     "test-m3-resources"     = @{ Aliases = @("m3-resources", "resources", "m3.6"); Description = "M3.6 domain resource accounting/teardown acceptance"; Role = "Constituent" }
-    "test-m4"               = @{ Aliases = @("m4", "m4.8"); Description = "M4 supervisor and recovery acceptance"; Role = "Milestone" }
 }
 
 function Get-DefaultSuite {

@@ -8,14 +8,13 @@ use crate::arch::x86_64::bit;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m4-self-test"
+    feature = "m3-entry-self-test"
 ))]
 use crate::arch::x86_64::gdt::selector_rpl;
 use crate::arch::x86_64::idt::exception_name;
 use crate::arch::x86_64::interrupt_context::InterruptContext;
 use crate::arch::x86_64::DOUBLE_FAULT_VECTOR;
-#[cfg(all(feature = "m3-entry-self-test", not(feature = "m4-self-test")))]
+#[cfg(feature = "m3-entry-self-test")]
 use crate::arch::x86_64::GENERAL_PROTECTION_VECTOR;
 use crate::arch::x86_64::PAGE_FAULT_VECTOR;
 use crate::arch::x86_64::SPURIOUS_VECTOR;
@@ -23,8 +22,7 @@ use crate::arch::x86_64::TIMER_VECTOR;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m4-self-test"
+    feature = "m3-entry-self-test"
 ))]
 use crate::arch::x86_64::USER_TEST_VECTOR;
 use crate::diagnostics::log::kernel_log_fmt;
@@ -61,9 +59,9 @@ use crate::selftest::m2_double_fault::DOUBLE_FAULT_TEST_ACTIVE;
 use crate::selftest::m3_address_space::handle_userspace_address_space_entry;
 #[cfg(feature = "m3-address-space-self-test")]
 use crate::selftest::m3_address_space::handle_userspace_address_space_page_fault;
-#[cfg(all(feature = "m3-entry-self-test", not(feature = "m4-self-test")))]
+#[cfg(feature = "m3-entry-self-test")]
 use crate::selftest::m3_entry::handle_userspace_entry_trap;
-#[cfg(all(feature = "m3-entry-self-test", not(feature = "m4-self-test")))]
+#[cfg(feature = "m3-entry-self-test")]
 use crate::selftest::m3_entry::handle_userspace_privileged_fault;
 #[cfg(feature = "m3-ipc-self-test")]
 use crate::selftest::m3_ipc::handle_userspace_ipc_entry;
@@ -71,10 +69,6 @@ use crate::selftest::m3_ipc::handle_userspace_ipc_entry;
 use crate::selftest::m3_resources::handle_userspace_resource_entry;
 #[cfg(feature = "m3-resources-self-test")]
 use crate::selftest::m3_resources::handle_userspace_resource_page_fault;
-#[cfg(feature = "m4-self-test")]
-use crate::selftest::m4_supervisor::handle_userspace_supervisor_entry;
-#[cfg(feature = "m4-self-test")]
-use crate::selftest::m4_supervisor::handle_userspace_supervisor_page_fault;
 #[cfg(feature = "m2-double-fault-self-test")]
 use core::sync::atomic::Ordering;
 use x86_64::registers::control::Cr2;
@@ -158,15 +152,7 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         };
     }
 
-    #[cfg(feature = "m4-self-test")]
-    if context.vector as usize == USER_TEST_VECTOR {
-        return match handle_userspace_supervisor_entry(context) {
-            Ok(next_stack_pointer) => next_stack_pointer,
-            Err(message) => fatal_kernel_error(message),
-        };
-    }
-
-    #[cfg(all(feature = "m3-entry-self-test", not(feature = "m4-self-test")))]
+    #[cfg(feature = "m3-entry-self-test")]
     if context.vector as usize == USER_TEST_VECTOR {
         return match handle_userspace_entry_trap(context) {
             Ok(next_stack_pointer) => next_stack_pointer,
@@ -182,7 +168,7 @@ fn handle_exception(context: &InterruptContext) -> ! {
         handle_double_fault(context)
     }
 
-    #[cfg(all(feature = "m3-entry-self-test", not(feature = "m4-self-test")))]
+    #[cfg(feature = "m3-entry-self-test")]
     if context.vector as usize == GENERAL_PROTECTION_VECTOR && selector_rpl(context.cs) == 3 {
         handle_userspace_privileged_fault(context)
     }
@@ -196,11 +182,6 @@ fn handle_exception(context: &InterruptContext) -> ! {
         #[cfg(feature = "m3-resources-self-test")]
         if selector_rpl(context.cs) == 3 {
             handle_userspace_resource_page_fault(context)
-        }
-
-        #[cfg(feature = "m4-self-test")]
-        if selector_rpl(context.cs) == 3 {
-            handle_userspace_supervisor_page_fault(context)
         }
 
         #[cfg(feature = "m2-double-fault-self-test")]

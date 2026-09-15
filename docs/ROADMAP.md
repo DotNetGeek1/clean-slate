@@ -85,9 +85,12 @@ service restarts
 system continues without reboot
 ```
 
-The first authoritative prototype may use a kernel-known built-in test service
-image rather than a persistent executable loader, provided the supervisor stays
-in userspace and restart authority remains explicit.
+The first M4 landing should define the shared lifecycle protocol and state model
+first so the later kernel-control, supervisor, health, dependency, crash-fixture,
+and acceptance lanes can build against one contract. A later authoritative
+prototype may still use a kernel-known built-in test service image rather than a
+persistent executable loader, provided the supervisor stays in userspace and
+restart authority remains explicit.
 
 ## M5 — Storage
 
