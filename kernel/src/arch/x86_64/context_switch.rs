@@ -21,9 +21,15 @@ use crate::arch::x86_64::asm::clean_slate_restore_context;
 use crate::arch::x86_64::gdt::userspace_gdt_state;
 #[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
 use crate::arch::x86_64::interrupt_context::{InterruptContext, UserspaceEntryFrame};
-use crate::mm::align_down;
 
 pub(crate) const FRESH_TASK_SENTINEL: u64 = u64::MAX;
+
+/// Stack frames handed to the CPU must be 16-byte aligned; this is the only
+/// alignment the architecture layer needs, so it stays local rather than
+/// depending upward on `mm`.
+const fn align_down(value: u64, align: u64) -> u64 {
+    value & !(align - 1)
+}
 
 pub(crate) const TASK_STACK_SIZE: usize = 64 * 1024;
 
