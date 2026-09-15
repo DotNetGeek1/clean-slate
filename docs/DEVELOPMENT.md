@@ -133,7 +133,7 @@ For the bounded M3.5 capability-authorized IPC acceptance path:
 cargo xtask test-m3-ipc
 ```
 
-This command builds the kernel with the M3.5 IPC self-test enabled, boots QEMU headlessly, and validates ordered capability and IPC markers proving explicit grant (`[CAP ] endpoint capability granted pid=1`), successful bounded send (`[IPC ] send OK bytes=...`), deterministic unauthorized denial (`[CAP ] unauthorized send denied pid=2`), and endpoint lifecycle completion before `[M3.5] PASS`.
+This command builds the kernel with the M3.5 IPC self-test enabled, boots QEMU headlessly, and validates ordered capability and IPC markers proving explicit grant (`[CAP ] endpoint capability granted pid=1`), userspace payload delivery through the kernel-owned console sink (`[IPC ] console pid=1: hello from pid 1`), successful bounded send (`[IPC ] send OK bytes=...`), deterministic unauthorized denial (`[CAP ] unauthorized send denied pid=2`), and endpoint lifecycle completion before `[M3.5] PASS`.
 
 For the bounded M3.6 domain resource-accounting and teardown acceptance path:
 
