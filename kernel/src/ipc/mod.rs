@@ -20,10 +20,17 @@ enum IpcEndpointState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IpcEndpointKind {
+    Mailbox,
+    ConsoleSink,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct IpcEndpoint {
     owner_pid: u64,
     generation: u16,
     state: IpcEndpointState,
+    kind: IpcEndpointKind,
     last_message_len: u16,
     last_message: [u8; IPC_MAX_MESSAGE_BYTES],
 }
@@ -33,6 +40,7 @@ impl IpcEndpoint {
         owner_pid: 0,
         generation: 0,
         state: IpcEndpointState::Vacant,
+        kind: IpcEndpointKind::Mailbox,
         last_message_len: 0,
         last_message: [0; IPC_MAX_MESSAGE_BYTES],
     };
@@ -101,6 +109,12 @@ pub(super) enum IpcSendError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IpcSendResult {
+    pub(crate) bytes_sent: usize,
+    pub(crate) endpoint_kind: IpcEndpointKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct IpcEndpointTable {
     endpoints: [IpcEndpoint; IPC_ENDPOINT_CAPACITY],
     capabilities: [EndpointCapability; IPC_CAPABILITY_CAPACITY],
@@ -128,6 +142,18 @@ impl IpcEndpointTable {
     }
 
     pub(super) fn create_endpoint(&mut self, owner_pid: u64) -> Result<usize, &'static str> {
+        self.create_endpoint_with_kind(owner_pid, IpcEndpointKind::Mailbox)
+    }
+
+    pub(super) fn create_console_sink(&mut self, owner_pid: u64) -> Result<usize, &'static str> {
+        self.create_endpoint_with_kind(owner_pid, IpcEndpointKind::ConsoleSink)
+    }
+
+    fn create_endpoint_with_kind(
+        &mut self,
+        owner_pid: u64,
+        kind: IpcEndpointKind,
+    ) -> Result<usize, &'static str> {
         for (slot, endpoint) in self.endpoints.iter_mut().enumerate() {
             if endpoint.state != IpcEndpointState::Vacant {
                 continue;
@@ -137,6 +163,7 @@ impl IpcEndpointTable {
                 endpoint.generation = 1;
             }
             endpoint.state = IpcEndpointState::Active;
+            endpoint.kind = kind;
             endpoint.last_message_len = 0;
             endpoint.last_message = [0; IPC_MAX_MESSAGE_BYTES];
             return Ok(slot);
@@ -244,7 +271,7 @@ impl IpcEndpointTable {
         sender_pid: u64,
         raw_handle: u64,
         message: &[u8],
-    ) -> Result<usize, IpcSendError> {
+    ) -> Result<IpcSendResult, IpcSendError> {
         if message.is_empty() || message.len() > IPC_MAX_MESSAGE_BYTES {
             return Err(IpcSendError::InvalidMessageLength);
         }
@@ -256,7 +283,10 @@ impl IpcEndpointTable {
         endpoint.last_message = [0; IPC_MAX_MESSAGE_BYTES];
         endpoint.last_message[..message.len()].copy_from_slice(message);
         endpoint.last_message_len = message.len() as u16;
-        Ok(message.len())
+        Ok(IpcSendResult {
+            bytes_sent: message.len(),
+            endpoint_kind: endpoint.kind,
+        })
     }
 
     pub(crate) fn resources_for_pid(&self, pid: u64) -> IpcProcessResources {
@@ -343,6 +373,7 @@ impl IpcEndpointTable {
             None => IpcEndpointState::Retired,
         };
         endpoint.owner_pid = 0;
+        endpoint.kind = IpcEndpointKind::Mailbox;
         endpoint.last_message_len = 0;
         endpoint.last_message = [0; IPC_MAX_MESSAGE_BYTES];
         let endpoint_slot_u16 = u16::try_from(endpoint_slot)
@@ -398,13 +429,58 @@ mod tests {
             table
                 .send_message(USERSPACE_IPC_TEST_PID, handle, b"hi")
                 .expect("authorized send"),
-            2
+            IpcSendResult {
+                bytes_sent: 2,
+                endpoint_kind: IpcEndpointKind::Mailbox,
+            }
         );
         assert_eq!(table.endpoint_message(endpoint_slot), Some(&b"hi"[..]));
         assert_eq!(
             table.send_message(USERSPACE_IPC_UNAUTHORIZED_TEST_PID, handle, b"hi"),
             Err(IpcSendError::Unauthorized)
         );
+    }
+
+    #[test]
+    fn ipc_console_sink_reports_console_delivery_for_authorized_process() {
+        let mut table = IpcEndpointTable::new();
+        let endpoint_slot = table
+            .create_console_sink(KERNEL_PROCESS_ID)
+            .expect("create console sink");
+        let handle = table
+            .grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)
+            .expect("grant capability");
+
+        assert_eq!(
+            table
+                .send_message(USERSPACE_IPC_TEST_PID, handle, b"hello from pid 1")
+                .expect("authorized console send"),
+            IpcSendResult {
+                bytes_sent: 16,
+                endpoint_kind: IpcEndpointKind::ConsoleSink,
+            }
+        );
+        assert_eq!(
+            table.endpoint_message(endpoint_slot),
+            Some(&b"hello from pid 1"[..])
+        );
+    }
+
+    #[test]
+    fn ipc_console_sink_denies_process_without_capability() {
+        let mut table = IpcEndpointTable::new();
+        let endpoint_slot = table
+            .create_console_sink(KERNEL_PROCESS_ID)
+            .expect("create console sink");
+        let handle = table
+            .grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)
+            .expect("grant capability");
+
+        assert_eq!(
+            table.send_message(USERSPACE_IPC_UNAUTHORIZED_TEST_PID, handle, b"hello"),
+            Err(IpcSendError::Unauthorized)
+        );
+        assert_eq!(table.endpoint_message(endpoint_slot), Some(&b""[..]));
     }
 
     #[test]

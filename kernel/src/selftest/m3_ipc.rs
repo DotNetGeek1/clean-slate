@@ -285,7 +285,7 @@ fn install_userspace_ipc_payload(allocator: &mut PageAllocator) -> Result<(), &'
     }
     let table = unsafe { endpoint_table_mut() };
     table.clear();
-    let endpoint_slot = table.create_endpoint(KERNEL_PROCESS_ID)?;
+    let endpoint_slot = table.create_console_sink(KERNEL_PROCESS_ID)?;
     let granted_capability = table.grant_send_capability(USERSPACE_IPC_TEST_PID, endpoint_slot)?;
     kernel_log_line(IPC_CAPABILITY_GRANTED_MARKER);
 

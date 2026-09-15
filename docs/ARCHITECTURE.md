@@ -239,10 +239,11 @@ PID/TID assignment is monotonic and non-reusing for the life of a boot session. 
 The first IPC primitive should keep policy narrow and explicit:
 
 - kernel-owned endpoint objects have explicit create/teardown lifecycle;
+- kernel-owned endpoints may expose a narrow sink kind (for M3, a console/test sink) while keeping dispatch policy explicit and non-ambient;
 - send permission is represented by an endpoint capability handle bound to one PID;
 - syscall-side handle lookup validates slot, generation, and endpoint identity so stale handles cannot silently name reused objects;
 - bounded message length and userspace pointer-range checks happen before any kernel dereference/copy;
-- endpoint teardown revokes outstanding capabilities by generation, making later sends fail deterministically.
+- endpoint teardown revokes outstanding capabilities by generation, making later sends fail deterministically even if a slot is later reused for a new sink instance.
 
 This initial implementation uses copying and intentionally defers shared-memory/zero-copy optimization to later milestones.
 
