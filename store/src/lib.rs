@@ -298,7 +298,10 @@ fn validate_geometry(geometry: BlockGeometry) -> Result<BlockGeometry, StoreErro
         }
     })?;
     let min_block_size = HEADER_BYTES + (ENTRY_BYTES * MAX_OBJECTS);
-    if logical_block_size < min_block_size || geometry.block_count() < SUPERBLOCK_SLOTS {
+    if logical_block_size < min_block_size
+        || geometry.block_count() < SUPERBLOCK_SLOTS
+        || geometry.max_transfer_blocks() == 0
+    {
         return Err(StoreError::UnsupportedGeometry {
             logical_block_size: geometry.logical_block_size(),
             block_count: geometry.block_count(),
@@ -338,8 +341,12 @@ fn select_superblock<D: BlockDevice>(
         },
         (Ok(left), Err(_)) => Ok((0, left)),
         (Err(_), Ok(right)) => Ok((1, right)),
-        (Err(SlotDecodeError::Incompatible(err)), Err(_)) => Err(StoreError::Incompatible(err)),
-        (Err(SlotDecodeError::Corrupt(err)), Err(_)) => Err(StoreError::Corrupt(err)),
+        (Err(left), Err(right)) => match (left, right) {
+            (SlotDecodeError::Incompatible(err), _) | (_, SlotDecodeError::Incompatible(err)) => {
+                Err(StoreError::Incompatible(err))
+            }
+            (SlotDecodeError::Corrupt(err), _) => Err(StoreError::Corrupt(err)),
+        },
     }
 }
 
@@ -779,6 +786,10 @@ mod tests {
         BlockGeometry::new(BlockDeviceId::new(12), 512, 4, 2, false).unwrap()
     }
 
+    fn single_block_transfer_geometry() -> BlockGeometry {
+        BlockGeometry::new(BlockDeviceId::new(13), 512, 32, 1, false).unwrap()
+    }
+
     fn reboot(store: ObjectStore<FakeBlockDevice>) -> ObjectStore<FakeBlockDevice> {
         let device = store.into_inner();
         let rebooted =
@@ -828,6 +839,19 @@ mod tests {
         assert_eq!(store.read_object_by_id(1).unwrap(), b"replacement-data");
         assert_eq!(store.read_object_by_id(2).unwrap(), b"keep-me");
         assert_eq!(store.committed_generation(), 2);
+    }
+
+    #[test]
+    fn multi_chunk_commit_and_read_round_trip() {
+        let device = FakeBlockDevice::new(single_block_transfer_geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        let payload = vec![0x5a; 1300];
+
+        store.write_object(7, "chunked", &payload).unwrap();
+        store.commit().unwrap();
+
+        let store = reboot(store);
+        assert_eq!(store.read_object_by_id(7).unwrap(), payload);
     }
 
     #[test]
