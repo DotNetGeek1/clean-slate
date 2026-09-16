@@ -3,6 +3,7 @@ members = [ "block",
     "kernel",
     "service-fixtures",
     "service-lifecycle",
+    "store",
     "supervisor",
     "xtask",
 ]
