@@ -224,9 +224,26 @@ cargo xtask test-m5-block
 
 This command builds the kernel with `m5-block-self-test`, creates a disposable raw disk image under `target/m5-block.img`, boots QEMU with a legacy (`disable-modern=on`) `virtio-blk-pci` device, and validates ordered discovery/write/flush/read markers through `[M5.2] PASS`.
 
-On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, which covers every milestone gate without repeating the boots the M3/M4 aggregates already perform. `-Exhaustive` additionally runs every individual `test-m3-*` and `test-m4-*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
+For M5.5 persistent block-harness plumbing (QEMU fixture + host sentinel):
 
-On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases. OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`.
+```bash
+cargo xtask test-m5
+cargo xtask test-m5-persistence
+```
+
+`test-m5` currently aliases `test-m5-persistence`: it runs two bounded QEMU boots, reuses the same raw disk at `target/m5/m5-data.img`, copies fresh OVMF vars per boot (so firmware variable state is not used as a persistence substitute), writes a host-side sentinel after boot 1, and verifies the same bytes after boot 2. Use `--keep-disk` to preserve `target/m5/m5-data.img` after the run for debugging.
+
+For explicit disk lifecycle while debugging:
+
+```bash
+cargo xtask m5-disk-inspect
+cargo xtask m5-disk-create
+cargo xtask m5-disk-reset
+```
+
+On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, which covers every milestone gate without repeating the boots the M3/M4 aggregates already perform. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, and `test-m5*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5`, `m5-block`, `m5-persistence`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
+
+On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m5`, `m5-block`, `m5-persistence`). OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`.
 
 To launch paused for debugger attach:
 

@@ -33,11 +33,14 @@ TEST_NAMES=(
   test-m4-supervisor
   test-m4
   test-m4-recovery
+  test-m5
+  test-m5-block
+  test-m5-persistence
 )
 
 test_role() {
   case "$1" in
-    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor)
+    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5 | test-m5-block | test-m5-persistence)
       echo Constituent
       ;;
     test-m3 | test-m4)
@@ -66,6 +69,9 @@ test_description() {
     test-m4-supervisor) echo "M4.3 userspace supervisor runtime QEMU integration acceptance" ;;
     test-m4) echo "M4 milestone gate (recovery QEMU boot + M4.6 host policy tests)" ;;
     test-m4-recovery) echo "M4.8 authoritative recovery QEMU acceptance" ;;
+    test-m5) echo "M5 persistence harness aggregate (two boots, persistent disk)" ;;
+    test-m5-block) echo "M5.2 VirtIO block transport QEMU acceptance" ;;
+    test-m5-persistence) echo "M5 two-boot persistence sentinel validation" ;;
     *) echo "" ;;
   esac
 }
@@ -87,6 +93,9 @@ test_aliases() {
     test-m4-supervisor) echo "m4-supervisor supervisor m4.3" ;;
     test-m4) echo "m4 m4.8" ;;
     test-m4-recovery) echo "m4-recovery recovery m4.8-qemu" ;;
+    test-m5) echo "m5 m5.5" ;;
+    test-m5-block) echo "m5-block block-attach" ;;
+    test-m5-persistence) echo "m5-persistence persistence" ;;
     *) echo "" ;;
   esac
 }
@@ -174,7 +183,7 @@ show_test_list() {
   done
   echo ""
   echo "--exhaustive:    ${TEST_NAMES[*]}"
-  echo "Constituents are the per-boundary debugging workflows behind the test-m3 and test-m4 aggregates."
+  echo "Constituents are per-boundary debugging workflows behind aggregate milestone commands and standalone acceptance lanes."
 }
 
 resolve_test_name() {
