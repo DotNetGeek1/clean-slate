@@ -5,7 +5,8 @@
 //!
 //! - LBA 0: superblock slot A
 //! - LBA 1: superblock slot B
-//! - LBA 2..: committed object payload blocks
+//! - LBA 2..: two alternating committed object-payload arenas selected by the
+//!   active superblock slot
 //!
 //! Each superblock occupies exactly one logical block and contains:
 //!
@@ -95,6 +96,7 @@ pub enum StoreError {
     },
     NotFound,
     IdentityConflict,
+    GenerationExhausted,
     Incompatible(IncompatibleFormatError),
     Corrupt(CorruptFormatError),
 }
@@ -247,13 +249,16 @@ impl<D: BlockDevice> ObjectStore<D> {
     }
 
     pub fn commit(&mut self) -> Result<(), StoreError> {
-        let object_layout = build_object_layout(self.geometry, &self.objects)?;
+        let next_slot = (self.active_slot + 1) % SUPERBLOCK_SLOTS;
+        let next_generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(StoreError::GenerationExhausted)?;
+        let object_layout = build_object_layout(self.geometry, next_slot, &self.objects)?;
         for object in &object_layout {
             write_object_data(&mut self.device, self.geometry, object)?;
         }
 
-        let next_slot = (self.active_slot + 1) % SUPERBLOCK_SLOTS;
-        let next_generation = self.generation + 1;
         let superblock = Superblock {
             generation: next_generation,
             object_count: u32::try_from(object_layout.len())
@@ -306,10 +311,13 @@ fn validate_geometry(geometry: BlockGeometry) -> Result<BlockGeometry, StoreErro
         }
     })?;
     let min_block_size = HEADER_BYTES + (ENTRY_BYTES * MAX_OBJECTS);
-    if logical_block_size < min_block_size
-        || geometry.block_count() < SUPERBLOCK_SLOTS
-        || geometry.max_transfer_blocks() == 0
-    {
+    if logical_block_size < min_block_size || geometry.max_transfer_blocks() == 0 {
+        return Err(StoreError::UnsupportedGeometry {
+            logical_block_size: geometry.logical_block_size(),
+            block_count: geometry.block_count(),
+        });
+    }
+    if data_arena_blocks(geometry) == 0 {
         return Err(StoreError::UnsupportedGeometry {
             logical_block_size: geometry.logical_block_size(),
             block_count: geometry.block_count(),
@@ -373,10 +381,14 @@ fn read_superblock_slot<D: BlockDevice>(
     device
         .read_blocks(slot, 1, &mut bytes)
         .map_err(SlotLoadError::Block)?;
-    decode_superblock(geometry, &bytes).map_err(SlotLoadError::Decode)
+    decode_superblock(geometry, slot, &bytes).map_err(SlotLoadError::Decode)
 }
 
-fn decode_superblock(geometry: BlockGeometry, bytes: &[u8]) -> Result<Superblock, SlotDecodeError> {
+fn decode_superblock(
+    geometry: BlockGeometry,
+    slot: u64,
+    bytes: &[u8],
+) -> Result<Superblock, SlotDecodeError> {
     let magic = read_u32(bytes, 0);
     if magic != STORE_MAGIC {
         return Err(SlotDecodeError::Incompatible(
@@ -459,7 +471,7 @@ fn decode_superblock(geometry: BlockGeometry, bytes: &[u8]) -> Result<Superblock
         ));
     }
 
-    validate_layouts(geometry, &objects).map_err(SlotDecodeError::Corrupt)?;
+    validate_layouts(geometry, slot, &objects).map_err(SlotDecodeError::Corrupt)?;
 
     Ok(Superblock {
         generation,
@@ -470,8 +482,10 @@ fn decode_superblock(geometry: BlockGeometry, bytes: &[u8]) -> Result<Superblock
 
 fn validate_layouts(
     geometry: BlockGeometry,
+    slot: u64,
     objects: &[ObjectLayout],
 ) -> Result<(), CorruptFormatError> {
+    let arena = slot_data_arena(geometry, slot);
     for (left_index, left) in objects.iter().enumerate() {
         if objects[..left_index]
             .iter()
@@ -487,10 +501,7 @@ fn validate_layouts(
         }
 
         if left.data_len == 0 {
-            if left.block_count != 0
-                || left.start_lba < DATA_START_LBA
-                || left.start_lba > geometry.block_count()
-            {
+            if left.block_count != 0 || left.start_lba < arena.start || left.start_lba > arena.end {
                 return Err(CorruptFormatError::InvalidObjectExtent);
             }
             continue;
@@ -509,7 +520,7 @@ fn validate_layouts(
             .start_lba
             .checked_add(u64::from(left.block_count))
             .ok_or(CorruptFormatError::InvalidObjectExtent)?;
-        if left.start_lba < DATA_START_LBA || end_lba > geometry.block_count() {
+        if left.start_lba < arena.start || end_lba > arena.end {
             return Err(CorruptFormatError::InvalidObjectExtent);
         }
     }
@@ -554,10 +565,12 @@ fn load_objects<D: BlockDevice>(
 
 fn build_object_layout(
     geometry: BlockGeometry,
+    slot: u64,
     objects: &[StoredObject],
 ) -> Result<Vec<ObjectLayout>, StoreError> {
     let block_size = u64::from(geometry.logical_block_size());
-    let mut next_lba = DATA_START_LBA;
+    let arena = slot_data_arena(geometry, slot);
+    let mut next_lba = arena.start;
     let mut layouts = Vec::with_capacity(objects.len());
 
     for object in objects {
@@ -583,7 +596,7 @@ fn build_object_layout(
             .checked_add(u64::from(block_count))
             .ok_or(StoreError::StorageFull {
                 required_blocks: u64::MAX,
-                available_blocks: geometry.block_count().saturating_sub(DATA_START_LBA),
+                available_blocks: data_arena_blocks(geometry),
             })?;
 
         layouts.push(ObjectLayout {
@@ -596,9 +609,9 @@ fn build_object_layout(
         });
     }
 
-    let available_blocks = geometry.block_count().saturating_sub(DATA_START_LBA);
-    let required_blocks = next_lba.saturating_sub(DATA_START_LBA);
-    if required_blocks > available_blocks {
+    let available_blocks = data_arena_blocks(geometry);
+    let required_blocks = next_lba.saturating_sub(arena.start);
+    if next_lba > arena.end {
         return Err(StoreError::StorageFull {
             required_blocks,
             available_blocks,
@@ -688,6 +701,20 @@ fn write_object_data<D: BlockDevice>(
     }
 
     Ok(())
+}
+
+fn data_arena_blocks(geometry: BlockGeometry) -> u64 {
+    geometry
+        .block_count()
+        .saturating_sub(DATA_START_LBA)
+        .checked_div(SUPERBLOCK_SLOTS)
+        .expect("constant non-zero slot count")
+}
+
+fn slot_data_arena(geometry: BlockGeometry, slot: u64) -> core::ops::Range<u64> {
+    let arena_blocks = data_arena_blocks(geometry);
+    let start = DATA_START_LBA + (slot * arena_blocks);
+    start..(start + arena_blocks)
 }
 
 fn read_object_data<D: BlockDevice>(
@@ -802,6 +829,12 @@ mod tests {
         ObjectStore::mount(rebooted).unwrap()
     }
 
+    fn durable_slot(device: &mut FakeBlockDevice, slot: u64) -> Vec<u8> {
+        let mut bytes = vec![0; block_size_bytes(device.geometry())];
+        device.read_blocks(slot, 1, &mut bytes).unwrap();
+        bytes
+    }
+
     #[test]
     fn format_commit_and_remount_round_trip_two_objects() {
         let device = FakeBlockDevice::new(geometry()).unwrap();
@@ -847,6 +880,37 @@ mod tests {
     }
 
     #[test]
+    fn commits_alternate_disjoint_payload_arenas() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+
+        store.write_object(1, "alpha", &[0x11; 700]).unwrap();
+        store.commit().unwrap();
+        let mut device = store.into_inner();
+        let first_slot = durable_slot(&mut device, 1);
+        let first = decode_superblock(geometry(), 1, &first_slot).unwrap();
+        let first_extent = (
+            first.objects[0].start_lba,
+            first.objects[0].start_lba + u64::from(first.objects[0].block_count),
+        );
+
+        let mut store = ObjectStore::mount(device).unwrap();
+        store.write_object(1, "alpha", &[0x22; 700]).unwrap();
+        store.commit().unwrap();
+        let mut device = store.into_inner();
+        let second_slot = durable_slot(&mut device, 0);
+        let second = decode_superblock(geometry(), 0, &second_slot).unwrap();
+        let second_extent = (
+            second.objects[0].start_lba,
+            second.objects[0].start_lba + u64::from(second.objects[0].block_count),
+        );
+
+        assert!(first_extent.1 <= second_extent.0 || second_extent.1 <= first_extent.0);
+        assert_eq!(first_extent.0, slot_data_arena(geometry(), 1).start);
+        assert_eq!(second_extent.0, slot_data_arena(geometry(), 0).start);
+    }
+
+    #[test]
     fn multi_chunk_commit_and_read_round_trip() {
         let device = FakeBlockDevice::new(single_block_transfer_geometry()).unwrap();
         let mut store = ObjectStore::format(device).unwrap();
@@ -882,9 +946,18 @@ mod tests {
             store.commit(),
             Err(StoreError::StorageFull {
                 required_blocks: 3,
-                available_blocks: 2,
+                available_blocks: 1,
             })
         );
+    }
+
+    #[test]
+    fn commit_rejects_generation_exhaustion() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.generation = u64::MAX;
+
+        assert_eq!(store.commit(), Err(StoreError::GenerationExhausted));
     }
 
     #[test]

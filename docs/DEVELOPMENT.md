@@ -350,7 +350,7 @@ For M5 storage, keep the layering narrow and split:
 - future persistent-store code for on-disk policy with no kernel/VirtIO imports;
 - `xtask`/`scripts` for persistence harness orchestration.
 
-Run `cargo test -p clean-slate-store` for the M5 host-side object-store format and persistence tests.
+Run `cargo test -p clean-slate-store` for the M5 host-side object-store format, copy-on-write persistence, and remount tests.
 
 ## Test layers
 
