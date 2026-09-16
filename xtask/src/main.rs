@@ -274,16 +274,7 @@ fn run_m5_block_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
             reason: error.to_string(),
         })
     })();
-
-    if options.keep_disk {
-        return run_result;
-    }
-    let cleanup_result = remove_m5_data_disk_image();
-    match (run_result, cleanup_result) {
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
-    }
+    finalize_m5_disk_lifecycle(run_result, options.keep_disk)
 }
 
 fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
@@ -310,7 +301,6 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
         })?;
 
         write_m5_host_sentinel(&disk)?;
-        let sentinel_before = read_m5_host_sentinel(&disk)?;
 
         println!("[M5  ] phase 2/2 boot");
         run_vm_inner_with_config(
@@ -326,22 +316,13 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
         })?;
 
         let sentinel_after = read_m5_host_sentinel(&disk)?;
-        if sentinel_before != sentinel_after {
+        if sentinel_after.as_slice() != M5_HOST_SENTINEL {
             return Err(XtaskError::M5SentinelMismatch);
         }
         println!("[M5  ] PASS");
         Ok(())
     })();
-
-    if options.keep_disk {
-        return run_result;
-    }
-    let cleanup_result = remove_m5_data_disk_image();
-    match (run_result, cleanup_result) {
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
-    }
+    finalize_m5_disk_lifecycle(run_result, options.keep_disk)
 }
 
 fn run_m1_acceptance() -> Result<(), XtaskError> {
@@ -778,6 +759,21 @@ fn remove_m5_data_disk_image() -> Result<(), XtaskError> {
 fn reset_m5_data_disk_image() -> Result<(), XtaskError> {
     remove_m5_data_disk_image()?;
     create_m5_data_disk_image()
+}
+
+fn finalize_m5_disk_lifecycle(
+    run_result: Result<(), XtaskError>,
+    keep_disk: bool,
+) -> Result<(), XtaskError> {
+    if keep_disk {
+        return run_result;
+    }
+    let cleanup_result = remove_m5_data_disk_image();
+    match (run_result, cleanup_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 fn inspect_m5_data_disk_image() -> Result<(), XtaskError> {
@@ -1326,7 +1322,15 @@ impl From<std::io::Error> for XtaskError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn m5_disk_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("m5 disk test lock poisoned")
+    }
 
     #[test]
     fn kernel_debug_artifact_path_is_expected() {
@@ -1580,5 +1584,36 @@ mod tests {
         assert!(ensure_m5_disk_path_is_test_owned(&owned).is_ok());
         let outside = workspace_root().join("target").join("OVMF_VARS.fd");
         assert!(ensure_m5_disk_path_is_test_owned(&outside).is_err());
+    }
+
+    #[test]
+    fn m5_finalize_cleanup_removes_disk_when_keep_disabled() {
+        let _guard = m5_disk_test_guard();
+        reset_m5_data_disk_image().expect("reset disk");
+        let disk = m5_data_disk_path();
+        assert!(disk.exists());
+        finalize_m5_disk_lifecycle(Ok(()), false).expect("cleanup should succeed");
+        assert!(!disk.exists());
+    }
+
+    #[test]
+    fn m5_finalize_cleanup_preserves_disk_when_keep_enabled() {
+        let _guard = m5_disk_test_guard();
+        reset_m5_data_disk_image().expect("reset disk");
+        let disk = m5_data_disk_path();
+        assert!(disk.exists());
+        finalize_m5_disk_lifecycle(Ok(()), true).expect("keep mode should succeed");
+        assert!(disk.exists());
+        remove_m5_data_disk_image().expect("cleanup after test");
+    }
+
+    #[test]
+    fn m5_finalize_cleanup_keeps_original_error() {
+        let _guard = m5_disk_test_guard();
+        reset_m5_data_disk_image().expect("reset disk");
+        let disk = m5_data_disk_path();
+        let result = finalize_m5_disk_lifecycle(Err(XtaskError::InvalidCommand("x".into())), false);
+        assert!(matches!(result, Err(XtaskError::InvalidCommand(command)) if command == "x"));
+        assert!(!disk.exists());
     }
 }
