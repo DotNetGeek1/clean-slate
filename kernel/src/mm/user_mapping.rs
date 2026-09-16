@@ -86,6 +86,7 @@ pub(crate) fn unmap_userspace_page(
 ))]
 #[cfg_attr(
     any(
+        feature = "m3-resources-self-test",
         feature = "m4-crash-service-self-test",
         feature = "m4-recovery-self-test"
     ),

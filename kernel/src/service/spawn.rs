@@ -13,12 +13,26 @@ pub(crate) enum BuiltinServiceImage {
     /// Minimal ring-3 image that exits immediately (used by lifecycle host tests in QEMU).
     ImmediateExit,
     /// Reuses the M3 user-test payload mapped at the canonical test code address.
+    #[cfg(any(
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
+        feature = "m4-service-lifecycle-self-test"
+    ))]
     M3UserTestPayload,
 }
 
 impl BuiltinServiceImage {
     pub(crate) const fn for_service(service: ServiceId) -> Self {
         match service.0 {
+            #[cfg(any(
+                feature = "m3-address-space-self-test",
+                feature = "m3-resources-self-test",
+                feature = "m4-crash-service-self-test",
+                feature = "m4-recovery-self-test",
+                feature = "m4-service-lifecycle-self-test"
+            ))]
             1 => Self::M3UserTestPayload,
             _ => Self::ImmediateExit,
         }
@@ -33,13 +47,46 @@ pub(crate) struct SpawnedServiceInstance {
     pub(crate) scheduler_slot: usize,
 }
 
+#[cfg(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+))]
+pub(crate) fn launch_builtin_service(
+    _allocator: &mut PageAllocator,
+    _kernel_stack_top: u64,
+    _scheduler_slot: usize,
+    _service: ServiceId,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    Err("built-in service launch is unavailable in early self-test builds")
+}
+
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 pub(crate) fn launch_builtin_service(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
     scheduler_slot: usize,
     service: ServiceId,
 ) -> Result<SpawnedServiceInstance, &'static str> {
+    #[cfg(any(
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
+        feature = "m4-service-lifecycle-self-test"
+    ))]
     use crate::arch::x86_64::asm::clean_slate_user_address_space_test_end;
+    #[cfg(any(
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
+        feature = "m4-service-lifecycle-self-test"
+    ))]
     use crate::arch::x86_64::asm::clean_slate_user_address_space_test_start;
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
     use crate::arch::x86_64::gdt::userspace_gdt_state;
@@ -68,6 +115,13 @@ pub(crate) fn launch_builtin_service(
         halt_instruction: u16,
     }
 
+    #[cfg(any(
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
+        feature = "m4-service-lifecycle-self-test"
+    ))]
     fn copy_m3_user_test_payload(frame_address: u64) -> Result<(), &'static str> {
         let payload_size = (&raw const clean_slate_user_address_space_test_end as usize)
             .saturating_sub(&raw const clean_slate_user_address_space_test_start as usize);
@@ -86,10 +140,24 @@ pub(crate) fn launch_builtin_service(
 
     let image = BuiltinServiceImage::for_service(service);
     let code_address = match image {
+        #[cfg(any(
+            feature = "m3-address-space-self-test",
+            feature = "m3-resources-self-test",
+            feature = "m4-crash-service-self-test",
+            feature = "m4-recovery-self-test",
+            feature = "m4-service-lifecycle-self-test"
+        ))]
         BuiltinServiceImage::M3UserTestPayload => SERVICE_USER_CODE_ADDRESS,
         BuiltinServiceImage::ImmediateExit => SERVICE_USER_CODE_ADDRESS,
     };
     let stack_address = match image {
+        #[cfg(any(
+            feature = "m3-address-space-self-test",
+            feature = "m3-resources-self-test",
+            feature = "m4-crash-service-self-test",
+            feature = "m4-recovery-self-test",
+            feature = "m4-service-lifecycle-self-test"
+        ))]
         BuiltinServiceImage::M3UserTestPayload => SERVICE_USER_STACK_ADDRESS,
         BuiltinServiceImage::ImmediateExit => SERVICE_USER_CODE_ADDRESS + PAGE_SIZE,
     };
@@ -113,6 +181,13 @@ pub(crate) fn launch_builtin_service(
                 },
             );
         },
+        #[cfg(any(
+            feature = "m3-address-space-self-test",
+            feature = "m3-resources-self-test",
+            feature = "m4-crash-service-self-test",
+            feature = "m4-recovery-self-test",
+            feature = "m4-service-lifecycle-self-test"
+        ))]
         BuiltinServiceImage::M3UserTestPayload => copy_m3_user_test_payload(code_frame)?,
     }
     map_process_page(
@@ -122,12 +197,11 @@ pub(crate) fn launch_builtin_service(
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
         allocator,
     )
-    .map_err(|message| {
+    .inspect_err(|&message| {
         kernel_log_fmt(format_args!(
             "[FAIL] map code service={} va={:#x} err={message}\n",
             service.0, code_address
         ));
-        message
     })?;
 
     let stack_frame = allocator
@@ -145,6 +219,13 @@ pub(crate) fn launch_builtin_service(
         allocator,
     )?;
 
+    #[cfg(any(
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
+        feature = "m4-service-lifecycle-self-test"
+    ))]
     if matches!(image, BuiltinServiceImage::M3UserTestPayload) {
         let data_frame = allocator
             .allocate_page()

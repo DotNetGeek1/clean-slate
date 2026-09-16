@@ -156,6 +156,7 @@ pub(super) fn leaf_page_flags_for_address(
 ))]
 #[cfg_attr(
     any(
+        feature = "m3-resources-self-test",
         feature = "m4-crash-service-self-test",
         feature = "m4-recovery-self-test"
     ),
@@ -176,6 +177,7 @@ pub(crate) fn page_flags_for_address_in_root(
 ))]
 #[cfg_attr(
     any(
+        feature = "m3-resources-self-test",
         feature = "m4-crash-service-self-test",
         feature = "m4-recovery-self-test"
     ),

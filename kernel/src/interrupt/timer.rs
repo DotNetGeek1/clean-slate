@@ -1,3 +1,8 @@
+#![cfg_attr(
+    not(any(feature = "m2-timer-self-test", feature = "m4-recovery-self-test")),
+    allow(dead_code)
+)]
+
 //! Timer bring-up and the kernel tick counter. Owns `KERNEL_TICKS`.
 
 use crate::arch::x86_64::apic::enable_local_apic;

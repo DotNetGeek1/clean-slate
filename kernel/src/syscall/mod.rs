@@ -121,23 +121,6 @@ pub(super) fn initialize_syscall_abi(kernel_stack_top: u64) -> Result<(), &'stat
         return Err("syscall kernel stack top must be 16-byte aligned");
     }
 
-    fn copy_lifecycle_reply_to_user(frame: &mut SyscallContext, event: LifecycleMessage) -> bool {
-        let encoded = event.encode();
-        if encoded.len() > LIFECYCLE_WIRE_MAX_BYTES {
-            frame.rax = SYSCALL_EINVAL;
-            return false;
-        }
-        unsafe {
-            ptr::copy_nonoverlapping(encoded.as_ptr(), frame.r10 as *mut u8, encoded.len());
-        }
-        frame.rax = encoded.len() as u64;
-        true
-    }
-
-    fn lifecycle_reply_capacity_is_valid(reply_capacity: usize) -> bool {
-        reply_capacity >= LIFECYCLE_WIRE_MAX_BYTES
-    }
-
     let gdt_state = userspace_gdt_state()?;
     validate_sysret_selector_triplet(
         gdt_state.user_sysret_selector_base,
@@ -251,10 +234,12 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
 static SERVICE_LIFECYCLE_SYSCALL_ALLOCATOR: GlobalCell<Option<PageAllocator>> =
     GlobalCell::new(None);
 
+#[allow(dead_code)]
 pub(super) fn service_lifecycle_syscall_allocator_mut() -> &'static mut Option<PageAllocator> {
     unsafe { &mut *SERVICE_LIFECYCLE_SYSCALL_ALLOCATOR.get() }
 }
 
+#[allow(dead_code)]
 pub(super) fn install_service_lifecycle_syscall_allocator(allocator: PageAllocator) {
     *service_lifecycle_syscall_allocator_mut() = Some(allocator);
 }
@@ -275,6 +260,23 @@ fn lifecycle_control_syscall_error(error: LifecycleControlError) -> u64 {
         | LifecycleControlError::SpawnFailed(_)
         | LifecycleControlError::TeardownFailed(_) => SYSCALL_EINVAL,
     }
+}
+
+fn copy_lifecycle_reply_to_user(frame: &mut SyscallContext, event: LifecycleMessage) -> bool {
+    let encoded = event.encode();
+    if encoded.len() > LIFECYCLE_WIRE_MAX_BYTES {
+        frame.rax = SYSCALL_EINVAL;
+        return false;
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(encoded.as_ptr(), frame.r10 as *mut u8, encoded.len());
+    }
+    frame.rax = encoded.len() as u64;
+    true
+}
+
+fn lifecycle_reply_capacity_is_valid(reply_capacity: usize) -> bool {
+    reply_capacity >= LIFECYCLE_WIRE_MAX_BYTES
 }
 
 #[allow(dead_code)]
@@ -465,24 +467,6 @@ fn current_syscall_caller_pid() -> Result<u64, &'static str> {
     if thread.kind != ThreadKind::User {
         return Err("syscall caller thread was not userspace");
     }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn lifecycle_reply_capacity_rejects_short_buffers() {
-            assert!(!lifecycle_reply_capacity_is_valid(33));
-            assert!(!lifecycle_reply_capacity_is_valid(
-                LIFECYCLE_WIRE_MAX_BYTES - 1
-            ));
-        }
-
-        #[test]
-        fn lifecycle_reply_capacity_accepts_wire_max_buffer() {
-            assert!(lifecycle_reply_capacity_is_valid(LIFECYCLE_WIRE_MAX_BYTES));
-        }
-    }
     if thread.owner_process_id == KERNEL_PROCESS_ID {
         return Err("syscall caller process id was invalid");
     }
@@ -501,4 +485,22 @@ fn current_syscall_caller_pid() -> Result<u64, &'static str> {
         return Err("syscall caller thread process did not match active owner root");
     }
     Ok(process.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_reply_capacity_rejects_short_buffers() {
+        assert!(!lifecycle_reply_capacity_is_valid(33));
+        assert!(!lifecycle_reply_capacity_is_valid(
+            LIFECYCLE_WIRE_MAX_BYTES - 1
+        ));
+    }
+
+    #[test]
+    fn lifecycle_reply_capacity_accepts_wire_max_buffer() {
+        assert!(lifecycle_reply_capacity_is_valid(LIFECYCLE_WIRE_MAX_BYTES));
+    }
 }
