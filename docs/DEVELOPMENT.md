@@ -216,6 +216,14 @@ cargo xtask test-m4-crash-service
 
 The `clean-slate-service-fixtures` crate holds launch metadata encoding, `[TEST]` diagnostics helpers, and a host-side lifecycle harness. The `m4-crash-service-self-test` kernel feature exercises production userspace teardown, authoritative `Faulted` lifecycle events, deterministic fault injection, and unrelated workload progress without rebooting.
 
+For the bounded M5.2 VirtIO block transport acceptance path:
+
+```bash
+cargo xtask test-m5-block
+```
+
+This command builds the kernel with `m5-block-self-test`, creates a disposable raw disk image under `target/m5-block.img`, boots QEMU with a legacy (`disable-modern=on`) `virtio-blk-pci` device, and validates ordered discovery/write/flush/read markers through `[M5.2] PASS`.
+
 On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, which covers every milestone gate without repeating the boots the M3/M4 aggregates already perform. `-Exhaustive` additionally runs every individual `test-m3-*` and `test-m4-*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
 
 On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases. OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`.

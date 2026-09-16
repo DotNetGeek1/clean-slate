@@ -2,6 +2,7 @@
 
 mod arch;
 mod boot;
+mod device;
 mod diagnostics;
 mod interrupt;
 mod ipc;
@@ -25,7 +26,8 @@ mod service;
         feature = "m4-recovery-self-test",
         feature = "m3-syscall-self-test",
         feature = "m3-ipc-self-test",
-        feature = "m4-service-lifecycle-self-test"
+        feature = "m4-service-lifecycle-self-test",
+        feature = "m5-block-self-test"
     ),
     allow(dead_code)
 )]

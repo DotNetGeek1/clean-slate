@@ -25,6 +25,8 @@ const M3_RESOURCES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_CRASH_SERVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M4_SUPERVISOR_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_RECOVERY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
+const M5_BLOCK_DISK_BYTES: u64 = 16 * 1024 * 1024;
 const M4_RECOVERY_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[CAP ] supervisor console capability granted pid=1",
     "[SUP ] started pid=1",
@@ -148,6 +150,14 @@ const M4_SUPERVISOR_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[IPC ] console pid=1: [SUP ]",
     "[M4.3] PASS",
 ];
+const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
+    "[VIRT] block device found",
+    "[BLK ] virtio-block ready blocks=",
+    "[BLK ] write lba=",
+    "[BLK ] flush complete",
+    "[BLK ] read lba=",
+    "[M5.2] PASS",
+];
 /// Merged M3.2 + M3.4 markers in the order the `m3-address-space-self-test`
 /// boot actually emits them, so the aggregate gate proves isolation and
 /// fault/lifecycle behaviour from a single boot.
@@ -212,6 +222,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM4RestartPolicy => run_m4_restart_policy_acceptance(),
         ParsedCommand::TestM4 => run_m4_acceptance(),
         ParsedCommand::TestM4Recovery => run_m4_recovery_acceptance(),
+        ParsedCommand::TestM5Block => run_m5_block_acceptance(),
         ParsedCommand::RunGdb => run_vm_with_gdb(false),
         ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
         ParsedCommand::Build => build_kernel(false, false, &[]),
@@ -433,6 +444,16 @@ fn run_m4_acceptance() -> Result<(), XtaskError> {
     Ok(())
 }
 
+fn run_m5_block_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner_with_options(
+        false,
+        false,
+        &["m5-block-self-test"],
+        Some((&M5_BLOCK_ACCEPTANCE_MARKERS, M5_BLOCK_ACCEPTANCE_TIMEOUT)),
+        true,
+    )
+}
+
 fn run_m4_restart_policy_acceptance() -> Result<(), XtaskError> {
     let mut test = Command::new("cargo");
     test.arg("test").arg("-p").arg("clean-slate-supervisor");
@@ -494,6 +515,16 @@ fn run_vm_inner(
     features: &[&str],
     acceptance: Option<(&[&str], Duration)>,
 ) -> Result<(), XtaskError> {
+    run_vm_inner_with_options(wait_for_gdb, debug_entry, features, acceptance, false)
+}
+
+fn run_vm_inner_with_options(
+    wait_for_gdb: bool,
+    debug_entry: bool,
+    features: &[&str],
+    acceptance: Option<(&[&str], Duration)>,
+    add_m5_block_device: bool,
+) -> Result<(), XtaskError> {
     let release = false;
     build_kernel(release, debug_entry, features)?;
 
@@ -512,6 +543,12 @@ fn run_vm_inner(
     if !vars_copy.is_file() {
         fs::copy(&ovmf.vars_template, &vars_copy)?;
     }
+
+    let m5_disk = if add_m5_block_device {
+        Some(ensure_m5_block_disk_image()?)
+    } else {
+        None
+    };
 
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.arg("-machine")
@@ -536,6 +573,15 @@ fn run_vm_inner(
         .arg("-drive")
         .arg(format!("format=raw,file=fat:rw:{}", esp_dir.display()));
 
+    if let Some(disk) = m5_disk {
+        qemu.arg("-drive").arg(format!(
+            "if=none,id=m5disk,format=raw,file={}",
+            disk.display()
+        ));
+        qemu.arg("-device")
+            .arg("virtio-blk-pci,drive=m5disk,disable-modern=on");
+    }
+
     if wait_for_gdb {
         qemu.arg("-S").arg("-s");
     }
@@ -544,6 +590,15 @@ fn run_vm_inner(
         Some((markers, timeout)) => run_acceptance_command(&mut qemu, markers, timeout),
         None => run_command(&mut qemu),
     }
+}
+
+fn ensure_m5_block_disk_image() -> Result<PathBuf, XtaskError> {
+    let path = workspace_root().join("target").join("m5-block.img");
+    if !path.is_file() {
+        let file = fs::File::create(&path)?;
+        file.set_len(M5_BLOCK_DISK_BYTES)?;
+    }
+    Ok(path)
 }
 
 fn build_kernel(release: bool, debug_entry: bool, features: &[&str]) -> Result<(), XtaskError> {
@@ -866,6 +921,7 @@ fn print_help() {
     println!("  test-m4-restart-policy Run M4.6 host restart-policy convergence tests and build the CPL3 image");
     println!("  test-m4-recovery Build the M4.8 recovery supervisor kernel boot and validate ordered markers");
     println!("  test-m4       M4 milestone gate: recovery QEMU boot plus M4.6 host policy tests");
+    println!("  test-m5-block Build the M5.2 virtio-block kernel, run QEMU, and validate ordered markers");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
     println!("  build        Build debug UEFI kernel only");
@@ -896,6 +952,7 @@ enum ParsedCommand {
     TestM4RestartPolicy,
     TestM4,
     TestM4Recovery,
+    TestM5Block,
     RunGdb,
     RunGdbEntry,
     Build,
@@ -922,6 +979,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m4-restart-policy" => ParsedCommand::TestM4RestartPolicy,
         Some(cmd) if cmd == "test-m4" => ParsedCommand::TestM4,
         Some(cmd) if cmd == "test-m4-recovery" => ParsedCommand::TestM4Recovery,
+        Some(cmd) if cmd == "test-m5-block" => ParsedCommand::TestM5Block,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
         Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
         Some(cmd) if cmd == "build" => ParsedCommand::Build,
@@ -1045,6 +1103,10 @@ mod tests {
         assert_eq!(
             parse_command(Some("test-m3-resources".as_ref())),
             ParsedCommand::TestM3Resources
+        );
+        assert_eq!(
+            parse_command(Some("test-m5-block".as_ref())),
+            ParsedCommand::TestM5Block
         );
         assert_eq!(
             parse_command(Some("run-gdb-entry".as_ref())),
