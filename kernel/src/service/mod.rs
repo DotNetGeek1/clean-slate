@@ -6,6 +6,7 @@
     allow(dead_code)
 )]
 
+pub(crate) mod block_bridge;
 pub(crate) mod capability;
 pub(crate) mod control;
 pub(crate) mod spawn;

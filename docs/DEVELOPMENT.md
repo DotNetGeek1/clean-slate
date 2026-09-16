@@ -177,6 +177,16 @@ cargo xtask test-m4-supervisor
 
 The `clean-slate-supervisor` crate (`supervisor/`) owns the bounded service registry and supervisor runtime. Lifecycle control is behind the mockable `LifecycleControl` trait so host tests and the CPL3 integration image can run before the kernel syscall 4 lifecycle-control path (#36) is wired end-to-end. The QEMU self-test maps a release `clean-slate-supervisor-userspace` image into pid 1, grants a console IPC capability, and validates `[SUP ]` diagnostics plus `[M4.3] PASS`.
 
+For M5.3 userspace storage-service seam (host transport tests + bounded CPL3 integration):
+
+```bash
+cargo test -p clean-slate-service-fixtures block_transport
+cargo test -p clean-slate-kernel service::
+cargo xtask test-m5-storage
+```
+
+The M5.3 lane keeps a bounded block wire contract between userspace storage policy and the kernel-hosted bootstrap backend. The bootstrap backend grants raw-block authority only to the declared storage service instance; other userspace callers are denied deterministically. Later driver-domain work should replace the backend without changing this wire contract.
+
 M4.4 health/liveness tracking (host-tested, no QEMU) exercises `ServiceHealthTracker` deadline math with explicit tick values — no real-time sleeps:
 
 ```bash
@@ -345,7 +355,7 @@ For M5 storage, keep the layering narrow and split:
 
 - `clean-slate-block` for the transport-independent geometry/read-write/flush/error contract and fake host backend;
 - kernel storage/virtio code for hardware transport only;
-- future userspace storage service code for IPC and authority boundaries;
+- userspace storage service code for request/response IPC/syscall boundary and explicit authority checks;
 - future persistent-store code for on-disk policy with no kernel/VirtIO imports;
 - `xtask`/`scripts` for persistence harness orchestration.
 

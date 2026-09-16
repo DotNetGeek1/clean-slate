@@ -5,11 +5,18 @@
 
 #![cfg_attr(not(test), no_std)]
 
+mod block_transport;
 mod config;
 mod crash_service;
 mod diagnostics;
 mod unrelated_workload;
 
+pub use block_transport::{
+    handle_block_request, BlockTransportDecodeError, BlockTransportOp, BlockTransportRequest,
+    BlockTransportResponse, BlockTransportStatus, BLOCK_TRANSPORT_MAGIC,
+    BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES, BLOCK_TRANSPORT_REQUEST_BYTES,
+    BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION, STORAGE_BLOCK_DEVICE_ID,
+};
 pub use config::{
     ConfigDecodeError, ConfigEncodeError, CrashServiceLaunchConfig, CrashServiceMode,
     UnrelatedWorkloadLaunchConfig, CRASH_SERVICE_LAUNCH_MAGIC, CRASH_SERVICE_LAUNCH_VERSION,
@@ -26,3 +33,5 @@ pub use clean_slate_service_lifecycle::ServiceId;
 
 /// Stable logical identity for the supervised crash-service fixture.
 pub const CRASH_SERVICE_ID: ServiceId = ServiceId(0x0000_4100);
+/// Stable logical identity for the M5 userspace storage service.
+pub const STORAGE_SERVICE_ID: ServiceId = ServiceId(0x0000_5100);

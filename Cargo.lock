@@ -28,6 +28,7 @@ version = "0.0.1"
 name = "clean-slate-kernel"
 version = "0.0.1"
 dependencies = [
+ "clean-slate-block",
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
  "uefi",
@@ -38,6 +39,7 @@ dependencies = [
 name = "clean-slate-service-fixtures"
 version = "0.0.1"
 dependencies = [
+ "clean-slate-block",
  "clean-slate-service-lifecycle",
 ]
 

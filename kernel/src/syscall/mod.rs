@@ -80,6 +80,7 @@ use crate::selftest::m4_recovery::recovery_complete_and_exit;
 use crate::selftest::m4_supervisor::observe_supervisor_console_line;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::USER_TEST_CODE_ADDRESS;
+use crate::service::block_bridge::handle_kernel_block_request;
 use crate::service::service_lifecycle_controller_mut;
 use crate::service::LifecycleControlError;
 use crate::sync::global_cell::GlobalCell;
@@ -89,6 +90,11 @@ use crate::syscall::validation::maybe_validate_syscall_entry_flags;
 use crate::syscall::validation::syscall_return_rflags_match;
 use crate::syscall::validation::validate_canonical_user_return_state;
 use crate::syscall::validation::validate_sysret_selector_triplet;
+use clean_slate_service_fixtures::{
+    BlockTransportOp, BlockTransportRequest, BlockTransportResponse, BlockTransportStatus,
+    BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES, BLOCK_TRANSPORT_REQUEST_BYTES,
+    BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION,
+};
 use clean_slate_service_lifecycle::LifecycleMessage;
 use clean_slate_service_lifecycle::ServiceId;
 use clean_slate_service_lifecycle::LIFECYCLE_WIRE_MAX_BYTES;
@@ -111,6 +117,8 @@ const SYSCALL_NR_FINISH: u64 = 2;
 const SYSCALL_NR_IPC_SEND: u64 = 3;
 const SYSCALL_NR_LIFECYCLE_CONTROL: u64 = 4;
 const SYSCALL_NR_LIFECYCLE_POLL: u64 = 5;
+const SYSCALL_NR_BLOCK_CAPABILITY: u64 = 6;
+const SYSCALL_NR_BLOCK_REQUEST: u64 = 7;
 const SYSCALL_ENOSYS: u64 = u64::MAX - 37;
 pub(super) const SYSCALL_EACCES: u64 = u64::MAX - 12;
 const SYSCALL_EINVAL: u64 = u64::MAX - 21;
@@ -392,6 +400,185 @@ fn handle_syscall_lifecycle_poll(frame: &mut SyscallContext) {
     }
 }
 
+fn handle_syscall_block_capability(frame: &mut SyscallContext) {
+    if frame.rsi != u64::from(BLOCK_TRANSPORT_VERSION) {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    let caller_pid = match current_syscall_caller_pid() {
+        Ok(pid) => pid,
+        Err(_) => {
+            frame.rax = SYSCALL_EACCES;
+            return;
+        }
+    };
+    let controller = unsafe { service_lifecycle_controller_mut() };
+    match controller.acquire_block_device_capability(caller_pid, frame.rdi) {
+        Ok(handle) => frame.rax = handle,
+        Err(LifecycleControlError::Unauthorized) => frame.rax = SYSCALL_EACCES,
+        Err(LifecycleControlError::StaleHandle | LifecycleControlError::StaleInstance(_)) => {
+            frame.rax = SYSCALL_ESTALE
+        }
+        Err(_) => frame.rax = SYSCALL_EINVAL,
+    }
+}
+
+fn handle_syscall_block_request(frame: &mut SyscallContext) {
+    if frame.rdx != BLOCK_TRANSPORT_REQUEST_BYTES as u64 {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    if validate_user_pointer_range(frame.rsi, frame.rdx).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    if validate_user_writable_pointer_range(frame.r10, BLOCK_TRANSPORT_RESPONSE_BYTES as u64)
+        .is_err()
+    {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    let payload_len = match usize::try_from(frame.r9) {
+        Ok(len) => len,
+        Err(_) => {
+            frame.rax = SYSCALL_EINVAL;
+            return;
+        }
+    };
+    if payload_len > BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    if payload_len > 0 && validate_user_writable_pointer_range(frame.r8, frame.r9).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+
+    let mut request_bytes = [0u8; BLOCK_TRANSPORT_REQUEST_BYTES];
+    unsafe {
+        ptr::copy_nonoverlapping(
+            frame.rsi as *const u8,
+            request_bytes.as_mut_ptr(),
+            request_bytes.len(),
+        );
+    }
+    let request = match BlockTransportRequest::decode(&request_bytes) {
+        Ok(request) => request,
+        Err(_) => {
+            let response = BlockTransportResponse {
+                request_id: 0,
+                device_id: 0,
+                operation: BlockTransportOp::Geometry,
+                status: BlockTransportStatus::InvalidProtocol,
+                logical_block_size: 0,
+                block_count: 0,
+                max_transfer_blocks: 0,
+                transferred_bytes: 0,
+            }
+            .encode();
+            unsafe {
+                ptr::copy_nonoverlapping(response.as_ptr(), frame.r10 as *mut u8, response.len());
+            }
+            frame.rax = BLOCK_TRANSPORT_RESPONSE_BYTES as u64;
+            return;
+        }
+    };
+
+    if u64::from(request.buffer_len) != frame.r9 {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    let caller_pid = match current_syscall_caller_pid() {
+        Ok(pid) => pid,
+        Err(_) => {
+            frame.rax = SYSCALL_EACCES;
+            return;
+        }
+    };
+    let controller = unsafe { service_lifecycle_controller_mut() };
+    match controller.authorize_block_device_request(caller_pid, frame.rdi, request.device_id) {
+        Ok(()) => {}
+        Err(LifecycleControlError::Unauthorized) => {
+            frame.rax = SYSCALL_EACCES;
+            return;
+        }
+        Err(LifecycleControlError::StaleHandle | LifecycleControlError::StaleInstance(_)) => {
+            frame.rax = SYSCALL_ESTALE;
+            return;
+        }
+        Err(_) => {
+            frame.rax = SYSCALL_EINVAL;
+            return;
+        }
+    }
+    let mut payload = [0u8; BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES];
+    if payload_len > 0 {
+        unsafe {
+            ptr::copy_nonoverlapping(frame.r8 as *const u8, payload.as_mut_ptr(), payload_len);
+        }
+    }
+    kernel_log_fmt(format_args!(
+        "[BLK ] request op={} id={}\n",
+        block_op_name(request.operation),
+        request.request_id
+    ));
+    let response_bytes = handle_kernel_block_request(&request_bytes, &mut payload[..payload_len]);
+    let response =
+        BlockTransportResponse::decode(&response_bytes).unwrap_or(BlockTransportResponse {
+            request_id: request.request_id,
+            device_id: request.device_id,
+            operation: request.operation,
+            status: BlockTransportStatus::InvalidProtocol,
+            logical_block_size: 0,
+            block_count: 0,
+            max_transfer_blocks: 0,
+            transferred_bytes: 0,
+        });
+    if matches!(request.operation, BlockTransportOp::Read)
+        && matches!(response.status, BlockTransportStatus::Ok)
+        && payload_len > 0
+    {
+        unsafe {
+            ptr::copy_nonoverlapping(payload.as_ptr(), frame.r8 as *mut u8, payload_len);
+        }
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(
+            response_bytes.as_ptr(),
+            frame.r10 as *mut u8,
+            response_bytes.len(),
+        );
+    }
+    kernel_log_fmt(format_args!(
+        "[BLK ] completion id={} status={}\n",
+        request.request_id,
+        block_status_name(response.status as u8)
+    ));
+    frame.rax = BLOCK_TRANSPORT_RESPONSE_BYTES as u64;
+}
+
+fn block_op_name(op: BlockTransportOp) -> &'static str {
+    match op {
+        BlockTransportOp::Geometry => "geometry",
+        BlockTransportOp::Read => "read",
+        BlockTransportOp::Write => "write",
+        BlockTransportOp::Flush => "flush",
+    }
+}
+
+fn block_status_name(raw: u8) -> &'static str {
+    match raw {
+        0 => "ok",
+        1 => "invalid-protocol",
+        2 => "invalid-request",
+        3 => "unsupported",
+        4 => "device-fault",
+        5 => "timeout",
+        6 => "reset-required",
+        _ => "unknown",
+    }
+}
+
 // Consumed by arch/x86_64/asm.rs (clean_slate_syscall_entry calls this with the saved frame).
 #[unsafe(no_mangle)]
 extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 {
@@ -455,6 +642,8 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
         SYSCALL_NR_IPC_SEND => handle_syscall_ipc_send(frame),
         SYSCALL_NR_LIFECYCLE_CONTROL => handle_syscall_lifecycle_control(frame),
         SYSCALL_NR_LIFECYCLE_POLL => handle_syscall_lifecycle_poll(frame),
+        SYSCALL_NR_BLOCK_CAPABILITY => handle_syscall_block_capability(frame),
+        SYSCALL_NR_BLOCK_REQUEST => handle_syscall_block_request(frame),
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 

@@ -20,6 +20,7 @@ m4-crash-service-self-test = []
 m4-service-lifecycle-self-test = ["m3-entry-self-test"]
 m4-supervisor-self-test = ["m3-entry-self-test"]
 m4-recovery-self-test = []
+m5-storage-self-test = ["m3-entry-self-test"]
 
 [lib]
 path = "src/lib.rs"
@@ -30,6 +31,7 @@ path = "src/main.rs"
 test = false
 
 [dependencies]
+clean-slate-block = { path = "../block" }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 uefi = "0.37.0"

@@ -25,6 +25,7 @@ const M3_RESOURCES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_CRASH_SERVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M4_SUPERVISOR_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_RECOVERY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+const M5_STORAGE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_RECOVERY_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[CAP ] supervisor console capability granted pid=1",
     "[SUP ] started pid=1",
@@ -148,6 +149,14 @@ const M4_SUPERVISOR_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[IPC ] console pid=1: [SUP ]",
     "[M4.3] PASS",
 ];
+const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 6] = [
+    "[SVC ] declared service=20736",
+    "[STOR] service started pid=",
+    "[BLK ] authority granted pid=",
+    "[BLK ] request op=geometry id=1",
+    "[BLK ] completion id=1 status=ok",
+    "[M5.3] PASS",
+];
 /// Merged M3.2 + M3.4 markers in the order the `m3-address-space-self-test`
 /// boot actually emits them, so the aggregate gate proves isolation and
 /// fault/lifecycle behaviour from a single boot.
@@ -212,6 +221,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM4RestartPolicy => run_m4_restart_policy_acceptance(),
         ParsedCommand::TestM4 => run_m4_acceptance(),
         ParsedCommand::TestM4Recovery => run_m4_recovery_acceptance(),
+        ParsedCommand::TestM5Storage => run_m5_storage_acceptance(),
         ParsedCommand::RunGdb => run_vm_with_gdb(false),
         ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
         ParsedCommand::Build => build_kernel(false, false, &[]),
@@ -431,6 +441,18 @@ fn run_m4_acceptance() -> Result<(), XtaskError> {
     run_m4_restart_policy_acceptance()?;
     println!("[M4  ] PASS");
     Ok(())
+}
+
+fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m5-storage-self-test"],
+        Some((
+            &M5_STORAGE_ACCEPTANCE_MARKERS,
+            M5_STORAGE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
 }
 
 fn run_m4_restart_policy_acceptance() -> Result<(), XtaskError> {
@@ -866,6 +888,7 @@ fn print_help() {
     println!("  test-m4-restart-policy Run M4.6 host restart-policy convergence tests and build the CPL3 image");
     println!("  test-m4-recovery Build the M4.8 recovery supervisor kernel boot and validate ordered markers");
     println!("  test-m4       M4 milestone gate: recovery QEMU boot plus M4.6 host policy tests");
+    println!("  test-m5-storage Build the M5.3 userspace storage-service boundary acceptance boot");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
     println!("  build        Build debug UEFI kernel only");
@@ -896,6 +919,7 @@ enum ParsedCommand {
     TestM4RestartPolicy,
     TestM4,
     TestM4Recovery,
+    TestM5Storage,
     RunGdb,
     RunGdbEntry,
     Build,
@@ -922,6 +946,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m4-restart-policy" => ParsedCommand::TestM4RestartPolicy,
         Some(cmd) if cmd == "test-m4" => ParsedCommand::TestM4,
         Some(cmd) if cmd == "test-m4-recovery" => ParsedCommand::TestM4Recovery,
+        Some(cmd) if cmd == "test-m5-storage" => ParsedCommand::TestM5Storage,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
         Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
         Some(cmd) if cmd == "build" => ParsedCommand::Build,
@@ -1045,6 +1070,10 @@ mod tests {
         assert_eq!(
             parse_command(Some("test-m3-resources".as_ref())),
             ParsedCommand::TestM3Resources
+        );
+        assert_eq!(
+            parse_command(Some("test-m5-storage".as_ref())),
+            ParsedCommand::TestM5Storage
         );
         assert_eq!(
             parse_command(Some("run-gdb-entry".as_ref())),
