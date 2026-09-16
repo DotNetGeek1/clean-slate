@@ -24,7 +24,6 @@ use crate::arch::x86_64::TIMER_VECTOR;
 use crate::arch::x86_64::USER_TEST_VECTOR;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
-#[cfg(not(feature = "m2-timer-self-test"))]
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_FAILURE;

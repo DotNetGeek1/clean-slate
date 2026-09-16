@@ -471,10 +471,9 @@ fn launch_dual_processes(state: &mut CrashServiceSelfTestState) -> Result<u64, &
         GEN1_STACK_EVIDENCE,
         FAULT_PROBE_ADDRESS,
     );
-    let instance = state
+    let _instance = state
         .harness
         .start_launch(&gen1_config, 0, CrashServiceFixtureRole::Primary);
-    state.gen1_instance = Some(instance);
 
     let crash_page = CrashServiceUserPage {
         observed_value: GEN1_STACK_EVIDENCE,
@@ -491,6 +490,7 @@ fn launch_dual_processes(state: &mut CrashServiceSelfTestState) -> Result<u64, &
         DomainId(crash_process.process_id),
     );
     state.harness.on_instance_spawned(actual_instance);
+    state.gen1_instance = Some(actual_instance);
     state.gen1_pid = crash_process.process_id;
     emit_instance_line(actual_instance);
     emit_started(crash_process.process_id, 1);
