@@ -63,13 +63,11 @@ impl InterruptContext {
 /// by the user `RSP`/`SS` pair the CPU pops after `RIP`/`CS`/`RFLAGS`.
 /// `repr(C)` is required because the frame is written raw onto a kernel stack
 /// and consumed by hardware, not by Rust.
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub(crate) struct UserspaceEntryFrame {
