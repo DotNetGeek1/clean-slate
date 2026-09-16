@@ -58,6 +58,7 @@ const VIRTQ_ALIGN: usize = 4096;
 const VIRTQ_QUEUE_SELECT_0: u16 = 0;
 const VIRTQ_QUEUE_MAX_ENTRIES: u16 = 256;
 const VIRTQ_MEMORY_BYTES: usize = 16 * 1024;
+const DMA_DATA_BUFFER_BYTES: usize = 8 * 1024;
 const COMPLETION_SPIN_LIMIT: usize = 20_000_000;
 const LOGICAL_SECTOR_BYTES: u32 = 512;
 
@@ -321,6 +322,7 @@ pub(crate) struct VirtioBlockDevice {
     request: RequestState,
     geometry: BlockGeometry,
     sectors_per_block: u64,
+    dma_data: [u8; DMA_DATA_BUFFER_BYTES],
 }
 
 impl VirtioBlockDevice {
@@ -362,8 +364,7 @@ impl VirtioBlockDevice {
         queue.clear_ring();
 
         let queue_physical = virtual_to_physical_address(memory_base as *const u8)?;
-        let queue_pfn = u32::try_from(queue_physical >> 12)
-            .map_err(|_| "virtio queue PFN does not fit in legacy register")?;
+        let queue_pfn = queue_pfn_from_physical_address(queue_physical)?;
         registers.write_u16(VIRTIO_PCI_QUEUE_SEL, VIRTQ_QUEUE_SELECT_0);
         registers.write_u32(VIRTIO_PCI_QUEUE_PFN, queue_pfn);
 
@@ -383,6 +384,7 @@ impl VirtioBlockDevice {
             },
             geometry,
             sectors_per_block,
+            dma_data: [0; DMA_DATA_BUFFER_BYTES],
         })
     }
 
@@ -407,12 +409,36 @@ impl VirtioBlockDevice {
                     },
                 ))?;
 
+        if data_len > self.dma_data.len() {
+            return Err(BlockIoError::InvalidRequest(
+                BlockRequestError::BufferLengthOverflow,
+            ));
+        }
+
+        if !device_writes_data {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data as *const u8,
+                    self.dma_data.as_mut_ptr(),
+                    data_len,
+                );
+            }
+        }
+
         self.request.header = VirtioBlkReqHeader {
             request_type,
             reserved: 0,
             sector,
         };
         self.request.status = 0xff;
+
+        let header_physical =
+            virtual_to_physical_address(&self.request.header as *const _ as *const u8)
+                .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
+        let status_physical = virtual_to_physical_address(&self.request.status as *const u8)
+            .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
+        let dma_physical = physical_address_for_contiguous_range(self.dma_data.as_ptr(), data_len)
+            .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
 
         let mut data_flags = VIRTQ_DESC_F_NEXT;
         if device_writes_data {
@@ -422,7 +448,7 @@ impl VirtioBlockDevice {
         self.queue.write_desc(
             0,
             VirtqDesc {
-                addr: &self.request.header as *const VirtioBlkReqHeader as u64,
+                addr: header_physical,
                 len: size_of::<VirtioBlkReqHeader>() as u32,
                 flags: VIRTQ_DESC_F_NEXT,
                 next: 1,
@@ -431,7 +457,7 @@ impl VirtioBlockDevice {
         self.queue.write_desc(
             1,
             VirtqDesc {
-                addr: data as u64,
+                addr: dma_physical,
                 len: data_len_u32,
                 flags: data_flags,
                 next: 2,
@@ -440,7 +466,7 @@ impl VirtioBlockDevice {
         self.queue.write_desc(
             2,
             VirtqDesc {
-                addr: &self.request.status as *const u8 as u64,
+                addr: status_physical,
                 len: 1,
                 flags: VIRTQ_DESC_F_WRITE,
                 next: 0,
@@ -453,7 +479,15 @@ impl VirtioBlockDevice {
         if used.id != 0 {
             return Err(BlockIoError::Transport(BlockTransportError::ResetRequired));
         }
-        self.map_completion_status(request_type)
+        self.map_completion_status(request_type)?;
+
+        if device_writes_data {
+            unsafe {
+                core::ptr::copy_nonoverlapping(self.dma_data.as_ptr(), data, data_len);
+            }
+        }
+
+        Ok(())
     }
 
     fn execute_flush(&mut self) -> Result<(), BlockIoError> {
@@ -464,10 +498,16 @@ impl VirtioBlockDevice {
         };
         self.request.status = 0xff;
 
+        let header_physical =
+            virtual_to_physical_address(&self.request.header as *const _ as *const u8)
+                .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
+        let status_physical = virtual_to_physical_address(&self.request.status as *const u8)
+            .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
+
         self.queue.write_desc(
             0,
             VirtqDesc {
-                addr: &self.request.header as *const VirtioBlkReqHeader as u64,
+                addr: header_physical,
                 len: size_of::<VirtioBlkReqHeader>() as u32,
                 flags: VIRTQ_DESC_F_NEXT,
                 next: 1,
@@ -476,7 +516,7 @@ impl VirtioBlockDevice {
         self.queue.write_desc(
             1,
             VirtqDesc {
-                addr: &self.request.status as *const u8 as u64,
+                addr: status_physical,
                 len: 1,
                 flags: VIRTQ_DESC_F_WRITE,
                 next: 0,
@@ -647,8 +687,45 @@ fn virtual_to_physical_address(pointer: *const u8) -> Result<u64, &'static str> 
     translate_address_in_root(current_root_frame_address(), VirtAddr::new(pointer as u64))
 }
 
+fn physical_address_for_contiguous_range(base: *const u8, len: usize) -> Result<u64, &'static str> {
+    if len == 0 {
+        return virtual_to_physical_address(base);
+    }
+
+    let first = virtual_to_physical_address(base)?;
+    let mut checked = 0usize;
+    while checked < len {
+        let virtual_page = (base as usize)
+            .checked_add(checked)
+            .ok_or("virtio DMA virtual range overflow")?;
+        let translated = virtual_to_physical_address(virtual_page as *const u8)?;
+        let expected = first
+            .checked_add(u64::try_from(checked).map_err(|_| "virtio DMA range size overflow")?)
+            .ok_or("virtio DMA physical range overflow")?;
+        if translated != expected {
+            return Err("virtio DMA range is not physically contiguous");
+        }
+        let page_offset = virtual_page & (VIRTQ_ALIGN - 1);
+        let step = core::cmp::min(VIRTQ_ALIGN - page_offset, len - checked);
+        checked = checked
+            .checked_add(step)
+            .ok_or("virtio DMA range progress overflow")?;
+    }
+
+    Ok(first)
+}
+
+fn queue_pfn_from_physical_address(physical: u64) -> Result<u32, &'static str> {
+    if physical % (VIRTQ_ALIGN as u64) != 0 {
+        return Err("virtio queue physical address is not 4KiB aligned");
+    }
+    u32::try_from(physical >> 12).map_err(|_| "virtio queue PFN does not fit in legacy register")
+}
+
 fn calculate_max_transfer_blocks(block_size: u32) -> Result<u32, &'static str> {
-    let max_blocks = u32::MAX / block_size;
+    let dma_bytes =
+        u32::try_from(DMA_DATA_BUFFER_BYTES).map_err(|_| "DMA buffer length overflow")?;
+    let max_blocks = dma_bytes / block_size;
     if max_blocks == 0 {
         return Err("virtio block size exceeded descriptor length limit");
     }
@@ -753,5 +830,12 @@ mod tests {
         let aligned = block_count_from_capacity(16, 4096).expect("aligned");
         assert_eq!(aligned, (2, 8));
         assert!(block_count_from_capacity(17, 4096).is_err());
+    }
+
+    #[test]
+    fn queue_pfn_requires_aligned_and_fitting_physical_address() {
+        assert_eq!(queue_pfn_from_physical_address(0x4000).unwrap(), 4);
+        assert!(queue_pfn_from_physical_address(0x4001).is_err());
+        assert!(queue_pfn_from_physical_address((u64::from(u32::MAX) + 1) << 12).is_err());
     }
 }
