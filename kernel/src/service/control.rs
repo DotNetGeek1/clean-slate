@@ -125,7 +125,10 @@ impl ServiceLifecycleController {
         Ok(())
     }
 
-    fn push_terminal_pending(&mut self, event: LifecycleEvent) -> Result<(), LifecycleControlError> {
+    fn push_terminal_pending(
+        &mut self,
+        event: LifecycleEvent,
+    ) -> Result<(), LifecycleControlError> {
         debug_assert!(matches!(
             event.kind,
             LifecycleEventKind::Faulted | LifecycleEventKind::Exited
@@ -161,10 +164,12 @@ impl ServiceLifecycleController {
     }
 
     const fn event_queue_full_error() -> LifecycleControlError {
-        LifecycleControlError::InvalidMessage(clean_slate_service_lifecycle::DecodeError::BufferTooShort {
-            actual: 0,
-            required: 1,
-        })
+        LifecycleControlError::InvalidMessage(
+            clean_slate_service_lifecycle::DecodeError::BufferTooShort {
+                actual: 0,
+                required: 1,
+            },
+        )
     }
 
     #[allow(dead_code)]
@@ -934,11 +939,9 @@ mod tests {
         let record = controller.find_service(ServiceId(13)).expect("record");
         assert_eq!(record.state, ServiceLifecycleState::Faulted);
         assert!(record.live.is_none());
-        assert!(controller
-            .pending
-            .iter()
-            .flatten()
-            .any(|queued| queued.kind == LifecycleEventKind::Faulted && queued.instance.pid.0 == 55));
+        assert!(controller.pending.iter().flatten().any(|queued| queued.kind
+            == LifecycleEventKind::Faulted
+            && queued.instance.pid.0 == 55));
     }
 
     #[test]

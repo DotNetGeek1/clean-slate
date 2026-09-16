@@ -896,7 +896,9 @@ pub(crate) fn observe_recovery_fault_before_containment(
         ));
         return Err("recovery observed an unexpected userspace page fault");
     }
-    let service = state.service_process.ok_or("fault without supervised service")?;
+    let service = state
+        .service_process
+        .ok_or("fault without supervised service")?;
     if service.pid != pid {
         return Err("recovery fault pid did not match tracked service");
     }
