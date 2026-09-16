@@ -316,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_reports_device_errors_for_bad_request() {
+    fn transport_rejects_wrong_device_as_invalid_request() {
         let mut backend = fake();
         let request = BlockTransportRequest {
             request_id: 12,

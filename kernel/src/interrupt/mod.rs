@@ -153,7 +153,15 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         };
     }
 
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(all(
+        feature = "m5-storage-self-test",
+        not(feature = "m4-supervisor-self-test"),
+        not(feature = "m3-ipc-self-test"),
+        not(feature = "m3-address-space-self-test"),
+        not(feature = "m3-resources-self-test"),
+        not(feature = "m4-crash-service-self-test"),
+        not(feature = "m4-recovery-self-test")
+    ))]
     if context.vector as usize == USER_TEST_VECTOR {
         return handle_userspace_storage_entry();
     }

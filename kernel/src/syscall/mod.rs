@@ -538,16 +538,21 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
         request.request_id
     ));
     let response_bytes = handle_kernel_block_request(&request_bytes, &mut payload[..payload_len]);
-    let response =
-        BlockTransportResponse::decode(&response_bytes).unwrap_or(BlockTransportResponse {
-            request_id: request.request_id,
-            device_id: request.device_id,
-            operation: request.operation,
-            status: BlockTransportStatus::InvalidProtocol,
-            logical_block_size: 0,
-            block_count: 0,
-            max_transfer_blocks: 0,
-        });
+    let (response, response_wire) = match BlockTransportResponse::decode(&response_bytes) {
+        Ok(decoded) => (decoded, response_bytes),
+        Err(_) => {
+            let fallback = BlockTransportResponse {
+                request_id: request.request_id,
+                device_id: request.device_id,
+                operation: request.operation,
+                status: BlockTransportStatus::InvalidProtocol,
+                logical_block_size: 0,
+                block_count: 0,
+                max_transfer_blocks: 0,
+            };
+            (fallback, fallback.encode())
+        }
+    };
     if matches!(request.operation, BlockTransportOp::Read)
         && matches!(response.status, BlockTransportStatus::Ok)
         && payload_len > 0
@@ -558,9 +563,9 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
     }
     unsafe {
         ptr::copy_nonoverlapping(
-            response_bytes.as_ptr(),
+            response_wire.as_ptr(),
             frame.r10 as *mut u8,
-            response_bytes.len(),
+            response_wire.len(),
         );
     }
     kernel_log_fmt(format_args!(
