@@ -111,6 +111,27 @@ The IOMMU must restrict device DMA to authorized memory.
 
 A driver crash should ordinarily become a driver-domain failure rather than a kernel failure.
 
+## M5 storage layering
+
+M5 introduces a Clean-Slate-native block contract between hardware-specific block transports and persistent-store logic.
+
+- `clean-slate-block` is the narrow reusable layer. It owns device identity, geometry, bounded block read/write validation, transport-vs-request error separation, and the explicit `flush` durability barrier.
+- Persistent-store code must depend only on this contract. It must not import VirtIO queue structures, PCI configuration details, MMIO register layouts, or raw DMA descriptors.
+- The initial real backend may live in the kernel for bring-up, but that is an implementation detail. The long-term direction remains a restricted driver/service domain once MMIO/IRQ/DMA capabilities exist.
+- A successful `flush` is the only M5 durability guarantee. Callers may assume that writes completed before the flush survive the backend's reboot/crash model only after the flush succeeds; successful writes without a later successful flush are readable but not yet durable.
+- Buffer ownership remains synchronous and call-scoped: backends may inspect caller slices only for the duration of `read_blocks`/`write_blocks` and must not retain raw userspace pointers after the call returns.
+
+Wave-1 storage boundaries should remain split so parallel lanes avoid shared-file conflicts:
+
+```text
+clean-slate-block           shared geometry/read-write/flush/error contract
+kernel VirtIO block area    hardware transport implementation
+userspace storage service   IPC/service boundary
+persistent store crate      on-disk policy using only clean-slate-block
+host storage test kit       fake/fault backends and crash-model tests
+xtask/scripts               QEMU persistence harness
+```
+
 ## Driver description experiment
 
 A long-term research direction is a declarative device description format describing registers, queues, interrupts, DMA structures, reset/power sequences, and protocol semantics.

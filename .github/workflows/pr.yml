@@ -3,6 +3,7 @@ name: PR validation
 on:
   pull_request:
     paths:
+      - "block/**"
       - "kernel/**"
       - "xtask/**"
       - "scripts/**"
@@ -14,6 +15,7 @@ on:
     branches:
       - main
     paths:
+      - "block/**"
       - "kernel/**"
       - "xtask/**"
       - "scripts/**"
@@ -54,6 +56,9 @@ jobs:
       - name: Clippy (xtask)
         run: cargo clippy -p xtask --all-targets -- -D warnings
 
+      - name: Clippy (block contract)
+        run: cargo clippy -p clean-slate-block --all-targets --features alloc -- -D warnings
+
       - name: Clippy (kernel UEFI)
         run: cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi -- -D warnings
 
@@ -63,12 +68,14 @@ jobs:
       - name: Build
         run: |
           cargo build -p xtask
+          cargo build -p clean-slate-block --features alloc
           cargo build -p clean-slate-kernel --target x86_64-unknown-uefi
           cargo xtask build
 
       - name: Host unit tests
         run: |
           cargo test -p xtask
+          cargo test -p clean-slate-block
           cargo test -p clean-slate-kernel
           cargo test -p clean-slate-kernel --features m3-entry-self-test
           cargo test -p clean-slate-kernel --features m3-address-space-self-test
