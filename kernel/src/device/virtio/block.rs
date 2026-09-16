@@ -1,4 +1,4 @@
-#![cfg_attr(not(any(test, feature = "m5-block-self-test")), allow(dead_code))]
+#![cfg_attr(not(feature = "m5-block-self-test"), allow(dead_code))]
 
 use core::convert::TryFrom;
 use core::hint::spin_loop;
