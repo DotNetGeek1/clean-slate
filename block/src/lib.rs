@@ -257,7 +257,12 @@ pub enum BlockTransportError {
 
 /// Synchronous block device contract shared by kernel bring-up and host tests.
 ///
-/// Implementations may borrow caller buffers only for the duration of the call
+/// Even read requests take `&mut self`: real transports may consume and recycle
+/// descriptors, advance completion state, or update reset/error bookkeeping
+/// while servicing a read. The shared contract keeps that exclusive transport
+/// ownership explicit instead of forcing interior mutability into backends.
+///
+/// Implementations may borrow caller buffers only for the duration of a call
 /// and must not retain raw pointers or references after returning.
 ///
 /// Successful `write_blocks` makes the new bytes visible to subsequent
@@ -270,7 +275,8 @@ pub enum BlockTransportError {
 pub trait BlockDevice {
     fn geometry(&self) -> BlockGeometry;
 
-    fn read_blocks(&self, lba: u64, blocks: u32, buffer: &mut [u8]) -> Result<(), BlockIoError>;
+    fn read_blocks(&mut self, lba: u64, blocks: u32, buffer: &mut [u8])
+        -> Result<(), BlockIoError>;
 
     fn write_blocks(&mut self, lba: u64, blocks: u32, buffer: &[u8]) -> Result<(), BlockIoError>;
 

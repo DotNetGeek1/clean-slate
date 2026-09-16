@@ -44,7 +44,12 @@ impl BlockDevice for FakeBlockDevice {
         self.geometry
     }
 
-    fn read_blocks(&self, lba: u64, blocks: u32, buffer: &mut [u8]) -> Result<(), BlockIoError> {
+    fn read_blocks(
+        &mut self,
+        lba: u64,
+        blocks: u32,
+        buffer: &mut [u8],
+    ) -> Result<(), BlockIoError> {
         let range = self.geometry.validate_read(lba, blocks, buffer.len())?;
         buffer.copy_from_slice(&self.live_bytes[range]);
         Ok(())
