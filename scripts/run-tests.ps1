@@ -100,7 +100,7 @@ $AllTests = [ordered]@{
     "test-m4-supervisor"        = @{ Aliases = @("m4-supervisor", "supervisor", "m4.3"); Description = "M4.3 userspace supervisor runtime QEMU integration acceptance"; Role = "Constituent" }
     "test-m4"                   = @{ Aliases = @("m4", "m4.8"); Description = "M4 milestone gate (recovery QEMU boot + M4.6 host policy tests)"; Role = "Aggregate" }
     "test-m4-recovery"          = @{ Aliases = @("m4-recovery", "recovery", "m4.8-qemu"); Description = "M4.8 authoritative recovery QEMU acceptance"; Role = "Constituent" }
-    "test-m5"                   = @{ Aliases = @("m5", "m5.5"); Description = "M5 persistence harness aggregate (two boots, persistent disk)"; Role = "Constituent" }
+    "test-m5"                   = @{ Aliases = @("m5", "m5.5"); Description = "M5 persistence harness entry command (aliases two-boot persistence)"; Role = "Constituent" }
     "test-m5-block"             = @{ Aliases = @("m5-block", "block-attach"); Description = "M5.2 VirtIO block transport QEMU acceptance"; Role = "Constituent" }
     "test-m5-persistence"       = @{ Aliases = @("m5-persistence", "persistence"); Description = "M5 two-boot persistence sentinel validation"; Role = "Constituent" }
 }
