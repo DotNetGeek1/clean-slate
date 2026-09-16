@@ -26,6 +26,10 @@ use clean_slate_service_lifecycle::TransitionInput;
 const SERVICE_REGISTRY_CAPACITY: usize = 4;
 const SERVICE_PENDING_EVENTS: usize = 16;
 const SERVICE_TERMINATE_STATUS: u64 = 0;
+#[cfg(feature = "m4-recovery-self-test")]
+const SERVICE_SCHEDULER_SLOT_START: usize = 2;
+#[cfg(not(feature = "m4-recovery-self-test"))]
+const SERVICE_SCHEDULER_SLOT_START: usize = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LiveServiceInstance {
@@ -92,7 +96,7 @@ impl ServiceLifecycleController {
             services: [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY],
             pending: [None; SERVICE_PENDING_EVENTS],
             pending_count: 0,
-            next_scheduler_slot: 2,
+            next_scheduler_slot: SERVICE_SCHEDULER_SLOT_START,
             kernel_root_frame: 0,
             kernel_stack_top: 0,
         }
@@ -103,7 +107,7 @@ impl ServiceLifecycleController {
         self.services = [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY];
         self.pending = [None; SERVICE_PENDING_EVENTS];
         self.pending_count = 0;
-        self.next_scheduler_slot = 2;
+        self.next_scheduler_slot = SERVICE_SCHEDULER_SLOT_START;
     }
 
     #[allow(dead_code)]
@@ -298,11 +302,11 @@ impl ServiceLifecycleController {
     }
 
     fn allocate_scheduler_slot(&mut self) -> Result<usize, &'static str> {
-        let slot = self.next_scheduler_slot;
-        self.next_scheduler_slot = self
-            .next_scheduler_slot
-            .checked_add(1)
-            .ok_or("supervised service scheduler slot space exhausted")?;
+        let scheduler = unsafe { crate::sched::scheduler_mut() };
+        let slot = scheduler
+            .first_empty_slot_from(self.next_scheduler_slot)
+            .ok_or("thread slot exceeded fixed scheduler capacity")?;
+        self.next_scheduler_slot = (slot + 1) % scheduler.thread_capacity();
         Ok(slot)
     }
 
@@ -601,6 +605,7 @@ pub(crate) unsafe fn service_lifecycle_controller_mut() -> &'static mut ServiceL
 mod tests {
     use super::*;
     use crate::mm::frame_allocator::PageAllocator;
+    use crate::sched::ThreadKind;
 
     #[test]
     fn unauthorized_supervisor_cannot_control_services() {
@@ -691,5 +696,20 @@ mod tests {
         assert_eq!(starting, ServiceLifecycleState::Starting);
         assert_eq!(bumped, InstanceGeneration(4));
         let _ = &mut controller;
+    }
+
+    #[cfg(not(feature = "m4-recovery-self-test"))]
+    #[test]
+    fn allocate_scheduler_slot_wraps_and_finds_empty_slot() {
+        unsafe {
+            *crate::sched::scheduler_mut() = crate::sched::Scheduler::new();
+            crate::sched::scheduler_mut()
+                .configure_thread(0, 1, 1, ThreadKind::User, 0x1000, 0x1000, 0x1000)
+                .expect("occupy slot zero");
+        }
+
+        let mut controller = ServiceLifecycleController::new();
+        controller.next_scheduler_slot = 2;
+        assert_eq!(controller.allocate_scheduler_slot().expect("allocate"), 1);
     }
 }

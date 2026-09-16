@@ -268,6 +268,24 @@ impl Scheduler {
             .count()
     }
 
+    pub(crate) fn thread_capacity(&self) -> usize {
+        self.threads.len()
+    }
+
+    pub(crate) fn first_empty_slot_from(&self, start: usize) -> Option<usize> {
+        if self.threads.is_empty() {
+            return None;
+        }
+        let start = start % self.threads.len();
+        for offset in 0..self.threads.len() {
+            let index = (start + offset) % self.threads.len();
+            if self.threads[index].state == ThreadState::Empty {
+                return Some(index);
+            }
+        }
+        None
+    }
+
     pub(crate) fn reap_threads_for_process(
         &mut self,
         process_id: u64,

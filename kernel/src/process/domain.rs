@@ -168,8 +168,8 @@ pub(crate) fn teardown_process_by_id(
 
     without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
-        let current_process = scheduler.current_userspace_process_id()?;
-        if current_process == process_id {
+        let current_process = scheduler.current_userspace_process_id().ok();
+        if current_process == Some(process_id) {
             return Err("cannot externally teardown the currently running userspace process");
         }
         let process_record = process_registry_mut()

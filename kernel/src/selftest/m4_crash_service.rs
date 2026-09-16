@@ -65,7 +65,7 @@ use x86_64::registers::control::Cr2;
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
-const FAULT_PROBE_ADDRESS: u64 = 0x0000_4000_0000_0F00;
+const FAULT_PROBE_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE * 4;
 const GEN1_STACK_EVIDENCE: u64 = 0x4353_4701_0000_0001;
 const GEN2_STACK_EVIDENCE: u64 = 0x4353_4702_0000_0002;
 const WORKLOAD_TOKEN: u64 = 0x574C_444C_0000_0001;

@@ -11,7 +11,7 @@ use clean_slate_supervisor::{
     DiagnosticSink, FakeLifecycleControl, LifecycleControlError, Supervisor, SupervisorError,
 };
 
-const BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0000_1000;
+const BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0000_C000;
 const SYSCALL_NR_IPC_SEND: u64 = 3;
 
 #[repr(C)]

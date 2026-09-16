@@ -382,7 +382,7 @@ fn build_supervisor_userspace(release: bool) -> Result<(), XtaskError> {
 fn run_m4_supervisor_acceptance() -> Result<(), XtaskError> {
     build_supervisor_userspace(true)?;
     run_vm_inner(
-        true,
+        false,
         false,
         &["m3-entry-self-test", "m4-supervisor-self-test"],
         Some((

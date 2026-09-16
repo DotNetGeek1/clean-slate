@@ -11,7 +11,7 @@ fn main() {
         embed_userspace_image(
             "supervisor_userspace.bin",
             "clean-slate-supervisor-userspace",
-            false,
+            true,
         );
     }
     if env::var("CARGO_FEATURE_M4_RECOVERY_SELF_TEST").is_ok() {
@@ -55,12 +55,20 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
         let entry_offset = entry
             .checked_sub(image_base)
             .expect("ELF entry point was below the image base");
-        let generated = out_dir.join("recovery_userspace_entry.rs");
+        let (generated_file, generated_const) = if raw_name == "supervisor_userspace.bin" {
+            (
+                "supervisor_userspace_entry.rs",
+                "SUPERVISOR_USERSPACE_ENTRY_OFFSET",
+            )
+        } else {
+            ("recovery_userspace_entry.rs", "RECOVERY_SUPERVISOR_ENTRY_OFFSET")
+        };
+        let generated = out_dir.join(generated_file);
         fs::write(
             &generated,
-            format!("pub(super) const RECOVERY_SUPERVISOR_ENTRY_OFFSET: u64 = {entry_offset};\n"),
+            format!("pub(super) const {generated_const}: u64 = {entry_offset};\n"),
         )
-        .expect("failed to write recovery_userspace_entry.rs");
+        .expect("failed to write userspace_entry metadata");
     }
 
     println!("cargo:rerun-if-changed={}", elf.display());

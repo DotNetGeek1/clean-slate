@@ -1,6 +1,8 @@
 //! M4.3 integration self-test: boots the Rust supervisor userspace image at CPL3
 //! and validates `[SUP ]` diagnostics over a granted console IPC capability.
 
+include!(concat!(env!("OUT_DIR"), "/supervisor_userspace_entry.rs"));
+
 use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
@@ -38,7 +40,6 @@ use crate::sched::ThreadState;
 use crate::selftest::m3_entry::userspace_frame;
 use crate::selftest::m3_entry::validate_userspace_entry_trap;
 use crate::selftest::USER_TEST_CODE_ADDRESS;
-use crate::selftest::USER_TEST_PROCESS_STACK_ADDRESS;
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::initialize_syscall_abi;
 use core::ptr;
@@ -47,6 +48,8 @@ use x86_64::VirtAddr;
 
 const SUPERVISOR_USERSPACE_IMAGE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/supervisor_userspace.bin"));
+const SUPERVISOR_BOOTSTRAP_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE * 12;
+const SUPERVISOR_STACK_ADDRESS: u64 = SUPERVISOR_BOOTSTRAP_ADDRESS + PAGE_SIZE;
 
 pub(crate) const SUPERVISOR_CAPABILITY_GRANTED_MARKER: &str =
     "[CAP ] supervisor console capability granted pid=1";
@@ -88,7 +91,7 @@ fn supervisor_rendezvous_offset() -> u64 {
     SUPERVISOR_USERSPACE_IMAGE
         .windows(2)
         .rposition(|window| window == [0xcd, 0x80])
-        .map(|offset| offset as u64)
+        .map(|offset| offset as u64 + 2)
         .unwrap_or(0)
 }
 
@@ -150,7 +153,7 @@ fn create_userspace_supervisor_process(
     zero_page(stack_frame_address);
     if let Err(message) = map_process_page(
         &mut address_space,
-        USER_TEST_PROCESS_STACK_ADDRESS,
+        SUPERVISOR_STACK_ADDRESS,
         stack_frame_address,
         PageTableFlags::PRESENT
             | PageTableFlags::WRITABLE
@@ -178,7 +181,7 @@ fn create_userspace_supervisor_process(
             bootstrap,
         );
     }
-    let data_virtual_address = USER_TEST_CODE_ADDRESS + PAGE_SIZE;
+    let data_virtual_address = SUPERVISOR_BOOTSTRAP_ADDRESS;
     if let Err(message) = map_process_page(
         &mut address_space,
         data_virtual_address,
@@ -195,9 +198,10 @@ fn create_userspace_supervisor_process(
         return Err(message);
     }
 
-    let user_stack_pointer = USER_TEST_PROCESS_STACK_ADDRESS + PAGE_SIZE;
+    let user_stack_pointer = SUPERVISOR_STACK_ADDRESS + PAGE_SIZE;
+    let entry_rip = USER_TEST_CODE_ADDRESS + SUPERVISOR_USERSPACE_ENTRY_OFFSET;
     let saved_stack_pointer =
-        build_userspace_entry_frame(kernel_stack_top, USER_TEST_CODE_ADDRESS, user_stack_pointer)?;
+        build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
     let gdt_state = userspace_gdt_state()?;
     let thread = Thread {
         id: tid,
@@ -205,7 +209,7 @@ fn create_userspace_supervisor_process(
         kind: ThreadKind::User,
         kernel_stack_top,
         saved_stack_pointer,
-        launch_entry: USER_TEST_CODE_ADDRESS,
+        launch_entry: entry_rip,
         started: false,
         state: ThreadState::Ready,
         progress_logged: false,
@@ -335,9 +339,18 @@ pub(crate) fn handle_userspace_supervisor_entry(
         context,
         frame,
         process.expected_entry_rip,
-        process.user_stack_pointer,
+        frame.user_stack_pointer,
         process.user_stack_segment,
     )?;
+    let lowest_expected_stack = process
+        .user_stack_pointer
+        .checked_sub(PAGE_SIZE)
+        .ok_or("supervisor expected stack window underflowed")?;
+    if frame.user_stack_pointer < lowest_expected_stack
+        || frame.user_stack_pointer > process.user_stack_pointer
+    {
+        return Err("userspace entry trap returned with an unexpected stack window");
+    }
 
     if !state.started_observed || !state.registered_observed || !state.running_observed {
         return Err(
