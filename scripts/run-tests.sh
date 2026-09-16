@@ -69,7 +69,7 @@ test_description() {
     test-m4-supervisor) echo "M4.3 userspace supervisor runtime QEMU integration acceptance" ;;
     test-m4) echo "M4 milestone gate (recovery QEMU boot + M4.6 host policy tests)" ;;
     test-m4-recovery) echo "M4.8 authoritative recovery QEMU acceptance" ;;
-    test-m5) echo "M5 persistence harness aggregate (two boots, persistent disk)" ;;
+    test-m5) echo "M5 persistence harness entry command (aliases two-boot persistence)" ;;
     test-m5-block) echo "M5 persistent VirtIO block attach smoke boot" ;;
     test-m5-persistence) echo "M5 two-boot persistence sentinel validation" ;;
     *) echo "" ;;

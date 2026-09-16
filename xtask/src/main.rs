@@ -255,76 +255,93 @@ fn run_m5_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
 
 fn run_m5_block_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
     let options = parse_m5_cli_options(args)?;
-    create_m5_data_disk_image()?;
-    let disk = m5_data_disk_path();
-    let config = VmLaunchConfig {
-        m5_data_disk: Some(disk),
-        reset_ovmf_vars: true,
-    };
-    let result = run_vm_inner_with_config(
-        false,
-        false,
-        &["m1-self-test"],
-        Some((&M1_ACCEPTANCE_MARKERS, M5_BLOCK_ACCEPTANCE_TIMEOUT)),
-        config,
-    )
-    .map_err(|error| XtaskError::M5PhaseFailed {
-        phase: "m5-block boot".to_owned(),
-        reason: error.to_string(),
-    });
-    if !options.keep_disk {
-        let _ = remove_m5_data_disk_image();
+    let run_result = (|| -> Result<(), XtaskError> {
+        create_m5_data_disk_image()?;
+        let disk = m5_data_disk_path();
+        let config = VmLaunchConfig {
+            m5_data_disk: Some(disk),
+            reset_ovmf_vars: true,
+        };
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m1-self-test"],
+            Some((&M1_ACCEPTANCE_MARKERS, M5_BLOCK_ACCEPTANCE_TIMEOUT)),
+            config,
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "m5-block boot".to_owned(),
+            reason: error.to_string(),
+        })
+    })();
+
+    if options.keep_disk {
+        return run_result;
     }
-    result
+    let cleanup_result = remove_m5_data_disk_image();
+    match (run_result, cleanup_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
     let options = parse_m5_cli_options(args)?;
-    reset_m5_data_disk_image()?;
-    let disk = m5_data_disk_path();
-    let config = VmLaunchConfig {
-        m5_data_disk: Some(disk.clone()),
-        reset_ovmf_vars: true,
-    };
+    let run_result = (|| -> Result<(), XtaskError> {
+        reset_m5_data_disk_image()?;
+        let disk = m5_data_disk_path();
+        let config = VmLaunchConfig {
+            m5_data_disk: Some(disk.clone()),
+            reset_ovmf_vars: true,
+        };
 
-    println!("[M5  ] phase 1/2 boot");
-    run_vm_inner_with_config(
-        false,
-        false,
-        &["m1-self-test"],
-        Some((&M1_ACCEPTANCE_MARKERS, M5_PERSISTENCE_ACCEPTANCE_TIMEOUT)),
-        config.clone(),
-    )
-    .map_err(|error| XtaskError::M5PhaseFailed {
-        phase: "persistence boot 1".to_owned(),
-        reason: error.to_string(),
-    })?;
+        println!("[M5  ] phase 1/2 boot");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m1-self-test"],
+            Some((&M1_ACCEPTANCE_MARKERS, M5_PERSISTENCE_ACCEPTANCE_TIMEOUT)),
+            config.clone(),
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "persistence boot 1".to_owned(),
+            reason: error.to_string(),
+        })?;
 
-    write_m5_host_sentinel(&disk)?;
-    let sentinel_before = read_m5_host_sentinel(&disk)?;
+        write_m5_host_sentinel(&disk)?;
+        let sentinel_before = read_m5_host_sentinel(&disk)?;
 
-    println!("[M5  ] phase 2/2 boot");
-    run_vm_inner_with_config(
-        false,
-        false,
-        &["m1-self-test"],
-        Some((&M1_ACCEPTANCE_MARKERS, M5_PERSISTENCE_ACCEPTANCE_TIMEOUT)),
-        config,
-    )
-    .map_err(|error| XtaskError::M5PhaseFailed {
-        phase: "persistence boot 2".to_owned(),
-        reason: error.to_string(),
-    })?;
+        println!("[M5  ] phase 2/2 boot");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m1-self-test"],
+            Some((&M1_ACCEPTANCE_MARKERS, M5_PERSISTENCE_ACCEPTANCE_TIMEOUT)),
+            config,
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "persistence boot 2".to_owned(),
+            reason: error.to_string(),
+        })?;
 
-    let sentinel_after = read_m5_host_sentinel(&disk)?;
-    if sentinel_before != sentinel_after {
-        return Err(XtaskError::M5SentinelMismatch);
+        let sentinel_after = read_m5_host_sentinel(&disk)?;
+        if sentinel_before != sentinel_after {
+            return Err(XtaskError::M5SentinelMismatch);
+        }
+        println!("[M5  ] PASS");
+        Ok(())
+    })();
+
+    if options.keep_disk {
+        return run_result;
     }
-    println!("[M5  ] PASS");
-    if !options.keep_disk {
-        remove_m5_data_disk_image()?;
+    let cleanup_result = remove_m5_data_disk_image();
+    match (run_result, cleanup_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
     }
-    Ok(())
 }
 
 fn run_m1_acceptance() -> Result<(), XtaskError> {
