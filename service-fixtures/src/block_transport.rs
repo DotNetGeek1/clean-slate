@@ -120,7 +120,6 @@ pub struct BlockTransportResponse {
     pub logical_block_size: u32,
     pub block_count: u64,
     pub max_transfer_blocks: u32,
-    pub transferred_bytes: u32,
 }
 
 impl BlockTransportResponse {
@@ -167,7 +166,6 @@ impl BlockTransportResponse {
             logical_block_size: u32::from_le_bytes(bytes[24..28].try_into().expect("slice")),
             block_count: u64::from_le_bytes(bytes[28..36].try_into().expect("slice")),
             max_transfer_blocks: u32::from_le_bytes(bytes[36..40].try_into().expect("slice")),
-            transferred_bytes: 0,
         })
     }
 }
@@ -188,7 +186,6 @@ pub fn handle_block_request<B: BlockDevice>(
                 logical_block_size: 0,
                 block_count: 0,
                 max_transfer_blocks: 0,
-                transferred_bytes: 0,
             }
             .encode();
         }
@@ -202,7 +199,6 @@ pub fn handle_block_request<B: BlockDevice>(
         logical_block_size: geometry.logical_block_size(),
         block_count: geometry.block_count(),
         max_transfer_blocks: geometry.max_transfer_blocks(),
-        transferred_bytes: 0,
     };
     if decoded.device_id != geometry.device_id().get() {
         response.status = BlockTransportStatus::InvalidRequest;
@@ -220,14 +216,8 @@ pub fn handle_block_request<B: BlockDevice>(
             }
             Ok(())
         }
-        BlockTransportOp::Read => {
-            response.transferred_bytes = decoded.buffer_len;
-            backend.read_blocks(decoded.lba, decoded.blocks, payload)
-        }
-        BlockTransportOp::Write => {
-            response.transferred_bytes = decoded.buffer_len;
-            backend.write_blocks(decoded.lba, decoded.blocks, payload)
-        }
+        BlockTransportOp::Read => backend.read_blocks(decoded.lba, decoded.blocks, payload),
+        BlockTransportOp::Write => backend.write_blocks(decoded.lba, decoded.blocks, payload),
         BlockTransportOp::Flush => {
             if decoded.blocks != 0 || decoded.lba != 0 || decoded.buffer_len != 0 {
                 response.status = BlockTransportStatus::InvalidRequest;

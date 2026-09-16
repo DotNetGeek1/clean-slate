@@ -449,11 +449,6 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
         frame.rax = SYSCALL_EINVAL;
         return;
     }
-    if payload_len > 0 && validate_user_writable_pointer_range(frame.r8, frame.r9).is_err() {
-        frame.rax = SYSCALL_EINVAL;
-        return;
-    }
-
     let mut request_bytes = [0u8; BLOCK_TRANSPORT_REQUEST_BYTES];
     unsafe {
         ptr::copy_nonoverlapping(
@@ -473,7 +468,6 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
                 logical_block_size: 0,
                 block_count: 0,
                 max_transfer_blocks: 0,
-                transferred_bytes: 0,
             }
             .encode();
             unsafe {
@@ -487,6 +481,27 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
     if u64::from(request.buffer_len) != frame.r9 {
         frame.rax = SYSCALL_EINVAL;
         return;
+    }
+    match request.operation {
+        BlockTransportOp::Geometry | BlockTransportOp::Flush => {
+            if payload_len != 0 {
+                frame.rax = SYSCALL_EINVAL;
+                return;
+            }
+        }
+        BlockTransportOp::Read => {
+            if payload_len > 0 && validate_user_writable_pointer_range(frame.r8, frame.r9).is_err()
+            {
+                frame.rax = SYSCALL_EINVAL;
+                return;
+            }
+        }
+        BlockTransportOp::Write => {
+            if payload_len > 0 && validate_user_pointer_range(frame.r8, frame.r9).is_err() {
+                frame.rax = SYSCALL_EINVAL;
+                return;
+            }
+        }
     }
     let caller_pid = match current_syscall_caller_pid() {
         Ok(pid) => pid,
@@ -512,7 +527,7 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
         }
     }
     let mut payload = [0u8; BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES];
-    if payload_len > 0 {
+    if matches!(request.operation, BlockTransportOp::Write) && payload_len > 0 {
         unsafe {
             ptr::copy_nonoverlapping(frame.r8 as *const u8, payload.as_mut_ptr(), payload_len);
         }
@@ -532,7 +547,6 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
             logical_block_size: 0,
             block_count: 0,
             max_transfer_blocks: 0,
-            transferred_bytes: 0,
         });
     if matches!(request.operation, BlockTransportOp::Read)
         && matches!(response.status, BlockTransportStatus::Ok)

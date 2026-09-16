@@ -181,7 +181,8 @@ For M5.3 userspace storage-service seam (host transport tests + bounded CPL3 int
 
 ```bash
 cargo test -p clean-slate-service-fixtures block_transport
-cargo test -p clean-slate-kernel service::
+cargo test -p clean-slate-kernel service::capability::tests
+cargo test -p clean-slate-kernel service::control::tests::block_capability
 cargo xtask test-m5-storage
 ```
 
