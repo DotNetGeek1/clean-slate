@@ -203,31 +203,40 @@ pub(crate) fn teardown_process_by_id(
     let caller_root = current_root_frame_address();
     let released_resources = resource_snapshot(process_id)?;
     activate_address_space_root(kernel_root_frame);
-    let released_ipc: IpcProcessResources =
-        unsafe { endpoint_table_mut().teardown_resources_for_pid(process_id)? };
-    let reaped_threads: ThreadProcessResources = without_interrupts(|| unsafe {
-        let scheduler = scheduler_mut();
-        let resources = scheduler.resources_for_process(process_id);
-        let reaped_threads = scheduler.reap_threads_for_process(process_id)?;
-        if reaped_threads != resources.threads {
-            return Err("scheduler thread cleanup count diverged from external teardown snapshot");
+    let teardown_result = (|| {
+        let released_ipc: IpcProcessResources =
+            unsafe { endpoint_table_mut().teardown_resources_for_pid(process_id)? };
+        let reaped_threads: ThreadProcessResources = without_interrupts(|| unsafe {
+            let scheduler = scheduler_mut();
+            let resources = scheduler.resources_for_process(process_id);
+            let reaped_threads = scheduler.reap_threads_for_process(process_id)?;
+            if reaped_threads != resources.threads {
+                return Err(
+                    "scheduler thread cleanup count diverged from external teardown snapshot",
+                );
+            }
+            Ok::<ThreadProcessResources, &'static str>(resources)
+        })?;
+        {
+            let process_record = unsafe {
+                process_registry_mut()
+                    .get_mut(process_id)
+                    .ok_or("process missing from registry during external resource teardown")?
+            };
+            let address_space = process_record
+                .resource_domain
+                .take_address_space()
+                .ok_or("process address space was missing during external teardown")?;
+            destroy_process_address_space(&address_space, allocator)?;
+            reap_process_record(process_record)?;
         }
-        Ok::<ThreadProcessResources, &'static str>(resources)
-    })?;
-    {
-        let process_record = unsafe {
-            process_registry_mut()
-                .get_mut(process_id)
-                .ok_or("process missing from registry during external resource teardown")?
-        };
-        let address_space = process_record
-            .resource_domain
-            .take_address_space()
-            .ok_or("process address space was missing during external teardown")?;
-        destroy_process_address_space(&address_space, allocator)?;
-        reap_process_record(process_record)?;
-    }
+        Ok::<(IpcProcessResources, ThreadProcessResources), &'static str>((
+            released_ipc,
+            reaped_threads,
+        ))
+    })();
     activate_address_space_root(caller_root);
+    let (released_ipc, reaped_threads) = teardown_result?;
     unsafe { process_registry_mut().release_reaped(process_id)? };
     if released_ipc.owned_endpoints != released_resources.ipc_endpoints
         || released_ipc.held_capabilities != released_resources.ipc_handles

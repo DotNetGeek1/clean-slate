@@ -268,6 +268,11 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m3-entry-self-test")
     ))]
     {
+        let kernel_root_frame = current_root_frame_address();
+        crate::syscall::install_service_lifecycle_syscall_allocator(allocator);
+        let controller = unsafe { crate::service::service_lifecycle_controller_mut() };
+        controller.clear();
+        controller.configure_launch_context(kernel_root_frame, syscall_kernel_stack_top);
         initialize_scheduler()?;
         initialize_timer();
         serial_write_line("[TIME] timer initialized");

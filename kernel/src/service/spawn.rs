@@ -1,11 +1,12 @@
 //! Built-in supervised service images launched through production M3 process APIs.
 
 use crate::mm::frame_allocator::PageAllocator;
-#[cfg(feature = "m4-service-lifecycle-self-test")]
 use crate::mm::PAGE_SIZE;
 use clean_slate_service_lifecycle::ServiceId;
 
 const SERVICE_USER_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
+const SERVICE_USER_DATA_ADDRESS: u64 = SERVICE_USER_CODE_ADDRESS + PAGE_SIZE;
+const SERVICE_USER_STACK_ADDRESS: u64 = SERVICE_USER_CODE_ADDRESS + (PAGE_SIZE * 2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BuiltinServiceImage {
@@ -32,23 +33,6 @@ pub(crate) struct SpawnedServiceInstance {
     pub(crate) scheduler_slot: usize,
 }
 
-#[cfg(not(any(
-    feature = "m4-service-lifecycle-self-test",
-    feature = "m4-recovery-self-test"
-)))]
-pub(crate) fn launch_builtin_service(
-    _allocator: &mut PageAllocator,
-    _kernel_stack_top: u64,
-    _scheduler_slot: usize,
-    _service: ServiceId,
-) -> Result<SpawnedServiceInstance, &'static str> {
-    Err("built-in service launch requires a userspace self-test feature build")
-}
-
-#[cfg(any(
-    feature = "m4-service-lifecycle-self-test",
-    feature = "m4-recovery-self-test"
-))]
 pub(crate) fn launch_builtin_service(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
@@ -75,9 +59,6 @@ pub(crate) fn launch_builtin_service(
     use crate::sched::Thread;
     use crate::sched::ThreadKind;
     use crate::sched::ThreadState;
-    use crate::selftest::USER_TEST_CODE_ADDRESS;
-    use crate::selftest::USER_TEST_DATA_ADDRESS;
-    use crate::selftest::USER_TEST_PROCESS_STACK_ADDRESS;
     use core::ptr;
     use x86_64::structures::paging::PageTableFlags;
     use x86_64::VirtAddr;
@@ -105,11 +86,11 @@ pub(crate) fn launch_builtin_service(
 
     let image = BuiltinServiceImage::for_service(service);
     let code_address = match image {
-        BuiltinServiceImage::M3UserTestPayload => USER_TEST_CODE_ADDRESS,
+        BuiltinServiceImage::M3UserTestPayload => SERVICE_USER_CODE_ADDRESS,
         BuiltinServiceImage::ImmediateExit => SERVICE_USER_CODE_ADDRESS,
     };
     let stack_address = match image {
-        BuiltinServiceImage::M3UserTestPayload => USER_TEST_PROCESS_STACK_ADDRESS,
+        BuiltinServiceImage::M3UserTestPayload => SERVICE_USER_STACK_ADDRESS,
         BuiltinServiceImage::ImmediateExit => SERVICE_USER_CODE_ADDRESS + PAGE_SIZE,
     };
 
@@ -171,7 +152,7 @@ pub(crate) fn launch_builtin_service(
         zero_page(data_frame);
         map_process_page(
             &mut address_space,
-            USER_TEST_DATA_ADDRESS,
+            SERVICE_USER_DATA_ADDRESS,
             data_frame,
             PageTableFlags::PRESENT
                 | PageTableFlags::WRITABLE

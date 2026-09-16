@@ -134,6 +134,21 @@ pub(crate) fn validate_userspace_mappings() -> Result<(), &'static str> {
 }
 
 pub(crate) fn validate_user_pointer_range(pointer: u64, length: u64) -> Result<(), &'static str> {
+    validate_user_pointer_range_with_permissions(pointer, length, false)
+}
+
+pub(crate) fn validate_user_writable_pointer_range(
+    pointer: u64,
+    length: u64,
+) -> Result<(), &'static str> {
+    validate_user_pointer_range_with_permissions(pointer, length, true)
+}
+
+fn validate_user_pointer_range_with_permissions(
+    pointer: u64,
+    length: u64,
+    require_writable: bool,
+) -> Result<(), &'static str> {
     if length == 0 {
         return Err("userspace pointer range length must be non-zero");
     }
@@ -148,11 +163,11 @@ pub(crate) fn validate_user_pointer_range(pointer: u64, length: u64) -> Result<(
     let end_page = align_down(end_inclusive, PAGE_SIZE);
     loop {
         let walk = walk_page_flags(VirtAddr::new(cursor))?;
-        if !walk.all_levels_user_accessible
-            || !walk.leaf.contains(PageTableFlags::PRESENT)
-            || !walk.leaf.contains(PageTableFlags::USER_ACCESSIBLE)
-        {
+        if !user_walk_is_user_accessible(&walk) {
             return Err("userspace pointer range was not mapped as user accessible");
+        }
+        if require_writable && !user_walk_is_writable(&walk) {
+            return Err("userspace pointer range was not mapped as user writable");
         }
         if cursor == end_page {
             break;
@@ -162,4 +177,49 @@ pub(crate) fn validate_user_pointer_range(pointer: u64, length: u64) -> Result<(
             .ok_or("userspace pointer range page walk overflowed")?;
     }
     Ok(())
+}
+
+fn user_walk_is_user_accessible(walk: &crate::mm::paging::PageWalkFlags) -> bool {
+    walk.all_levels_user_accessible
+        && walk.leaf.contains(PageTableFlags::PRESENT)
+        && walk.leaf.contains(PageTableFlags::USER_ACCESSIBLE)
+}
+
+fn user_walk_is_writable(walk: &crate::mm::paging::PageWalkFlags) -> bool {
+    walk.all_levels_writable && walk.leaf.contains(PageTableFlags::WRITABLE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mm::paging::PageWalkFlags;
+
+    fn walk_flags(all_levels_writable: bool, leaf: PageTableFlags) -> PageWalkFlags {
+        PageWalkFlags {
+            path: PageTableFlags::PRESENT,
+            leaf,
+            all_levels_user_accessible: true,
+            all_levels_writable,
+        }
+    }
+
+    #[test]
+    fn writable_walk_rejects_read_only_leaf() {
+        let walk = walk_flags(
+            true,
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
+        );
+        assert!(user_walk_is_user_accessible(&walk));
+        assert!(!user_walk_is_writable(&walk));
+    }
+
+    #[test]
+    fn writable_walk_rejects_non_writable_path() {
+        let walk = walk_flags(
+            false,
+            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE,
+        );
+        assert!(user_walk_is_user_accessible(&walk));
+        assert!(!user_walk_is_writable(&walk));
+    }
 }

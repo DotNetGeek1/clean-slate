@@ -61,7 +61,10 @@ impl<const MAX_EVENTS: usize> SyscallLifecycleControl<MAX_EVENTS> {
         if result == SYSCALL_ESTALE {
             return Err(LifecycleControlError::TransportFailed);
         }
-        if result == 0 || result > reply.len() as u64 {
+        if result == 0 {
+            return Ok(None);
+        }
+        if result > reply.len() as u64 {
             return Err(LifecycleControlError::TransportFailed);
         }
         let (decoded, _) = LifecycleMessage::decode(&reply[..result as usize])
@@ -83,6 +86,7 @@ impl<const MAX_EVENTS: usize> SyscallLifecycleControl<MAX_EVENTS> {
                 "syscall",
                 in("rax") SYSCALL_NR_LIFECYCLE_POLL,
                 in("rdi") service.0,
+                in("rsi") self.capability,
                 in("r8") reply.len(),
                 in("r10") reply.as_mut_ptr(),
                 lateout("rax") result,

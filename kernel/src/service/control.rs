@@ -72,7 +72,7 @@ pub(crate) enum LifecycleControlError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LifecycleControlResult {
-    pub(crate) event: LifecycleEvent,
+    pub(crate) event: Option<LifecycleEvent>,
 }
 
 pub(crate) struct ServiceLifecycleController {
@@ -106,6 +106,7 @@ impl ServiceLifecycleController {
         self.next_scheduler_slot = 2;
     }
 
+    #[allow(dead_code)]
     fn push_pending(&mut self, event: LifecycleEvent) -> Result<(), LifecycleControlError> {
         if self.pending_len >= SERVICE_PENDING_EVENTS {
             return Err(LifecycleControlError::InvalidMessage(
@@ -120,6 +121,7 @@ impl ServiceLifecycleController {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn replay_pending_lifecycle_event(
         &mut self,
         event: LifecycleEvent,
@@ -143,6 +145,17 @@ impl ServiceLifecycleController {
         Ok(None)
     }
 
+    pub(crate) fn poll_pending_event_authorized(
+        &mut self,
+        supervisor_pid: u64,
+        capability_handle: u64,
+        service: ServiceId,
+    ) -> Result<Option<LifecycleEvent>, LifecycleControlError> {
+        self.authorize_lifecycle_control(supervisor_pid, capability_handle)?;
+        self.poll_pending_event(service)
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn notify_instance_ready(
         &mut self,
         service_id: ServiceId,
@@ -168,6 +181,7 @@ impl ServiceLifecycleController {
         self.push_pending(LifecycleEvent::new(instance, LifecycleEventKind::Ready))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn notify_instance_faulted(
         &mut self,
         service_id: ServiceId,
@@ -245,6 +259,7 @@ impl ServiceLifecycleController {
             .grant_lifecycle_control_capability(holder_pid)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn authoritative_generation(
         &self,
         service: ServiceId,
@@ -253,6 +268,7 @@ impl ServiceLifecycleController {
             .map(|record| record.authoritative_generation)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn live_pid(&self, service: ServiceId) -> Option<u64> {
         self.find_service(service)
             .and_then(|record| record.live.map(|live| live.pid))
@@ -365,7 +381,10 @@ impl ServiceLifecycleController {
         });
         self.log_launch(instance);
         Ok(LifecycleControlResult {
-            event: LifecycleEvent::new(instance, LifecycleEventKind::InstanceSpawned),
+            event: Some(LifecycleEvent::new(
+                instance,
+                LifecycleEventKind::InstanceSpawned,
+            )),
         })
     }
 
@@ -404,7 +423,7 @@ impl ServiceLifecycleController {
             DomainId(live.domain_id),
         );
         Ok(LifecycleControlResult {
-            event: LifecycleEvent::new(instance, LifecycleEventKind::Exited),
+            event: Some(LifecycleEvent::new(instance, LifecycleEventKind::Exited)),
         })
     }
 
@@ -429,13 +448,11 @@ impl ServiceLifecycleController {
         ));
     }
 
-    pub(crate) fn handle_control_message(
-        &mut self,
-        allocator: &mut PageAllocator,
+    fn authorize_lifecycle_control(
+        &self,
         supervisor_pid: u64,
         capability_handle: u64,
-        message: &[u8],
-    ) -> Result<LifecycleControlResult, LifecycleControlError> {
+    ) -> Result<(), LifecycleControlError> {
         self.capabilities
             .authorize_lifecycle_control(supervisor_pid, capability_handle)
             .map_err(|error| match error {
@@ -446,7 +463,17 @@ impl ServiceLifecycleController {
                 LifecycleControlCapabilityError::InvalidHandle => {
                     LifecycleControlError::InvalidHandle
                 }
-            })?;
+            })
+    }
+
+    pub(crate) fn handle_control_message(
+        &mut self,
+        allocator: &mut PageAllocator,
+        supervisor_pid: u64,
+        capability_handle: u64,
+        message: &[u8],
+    ) -> Result<LifecycleControlResult, LifecycleControlError> {
+        self.authorize_lifecycle_control(supervisor_pid, capability_handle)?;
         let (decoded, _) =
             LifecycleMessage::decode(message).map_err(LifecycleControlError::InvalidMessage)?;
         let LifecycleMessage::ControlRequest(request) = decoded else {
@@ -496,26 +523,32 @@ impl ServiceLifecycleController {
                 self.terminate_service(allocator, service_id)
             }
             ControlRequestKind::Restart => {
-                if self
+                let live_instance = self
                     .find_service(service_id)
-                    .and_then(|record| record.live)
-                    .is_some()
-                {
-                    self.terminate_service(allocator, service_id)?;
+                    .ok_or(LifecycleControlError::UnknownService)?
+                    .live;
+                if let Some(live) = live_instance {
+                    self.log_terminate(service_id, live.pid);
+                    teardown_process_by_id(
+                        allocator,
+                        self.kernel_root_frame,
+                        live.pid,
+                        SERVICE_TERMINATE_STATUS,
+                        false,
+                    )
+                    .map_err(LifecycleControlError::TeardownFailed)?;
+                    self.log_reaped(service_id, live.pid);
+                    if unsafe { process_registry_mut().get(live.pid) }.is_some() {
+                        return Err(LifecycleControlError::TeardownFailed(
+                            "process registry retained a reaped supervised service",
+                        ));
+                    }
+                    let record = self
+                        .find_service_mut(service_id)
+                        .ok_or(LifecycleControlError::UnknownService)?;
+                    record.live = None;
                 }
-                let record = self
-                    .find_service_mut(service_id)
-                    .ok_or(LifecycleControlError::UnknownService)?;
-                let (next_state, next_generation) = apply_transition(
-                    record.state,
-                    record.authoritative_generation,
-                    TransitionInput::Control(ControlRequestKind::Start),
-                    None,
-                )
-                .map_err(LifecycleControlError::InvalidTransition)?;
-                record.state = next_state;
-                record.authoritative_generation = next_generation;
-                self.start_service(allocator, service_id)
+                Ok(LifecycleControlResult { event: None })
             }
         }
     }

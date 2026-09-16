@@ -17,9 +17,10 @@ use x86_64::VirtAddr;
 
 pub(crate) struct PageWalkFlags {
     #[allow(dead_code)]
-    path: PageTableFlags,
+    pub(super) path: PageTableFlags,
     pub(super) leaf: PageTableFlags,
     pub(super) all_levels_user_accessible: bool,
+    pub(super) all_levels_writable: bool,
 }
 
 pub(crate) fn current_root_frame_address() -> u64 {
@@ -68,11 +69,14 @@ fn walk_page_flags_in_root(
         && level_3_entry
             .flags()
             .contains(PageTableFlags::USER_ACCESSIBLE);
+    let mut all_levels_writable = level_4_entry.flags().contains(PageTableFlags::WRITABLE)
+        && level_3_entry.flags().contains(PageTableFlags::WRITABLE);
     if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
         return Ok(PageWalkFlags {
             path: level_4_entry.flags() | level_3_entry.flags(),
             leaf: level_3_entry.flags(),
             all_levels_user_accessible,
+            all_levels_writable,
         });
     }
     let level_2_frame = level_3_entry
@@ -90,11 +94,14 @@ fn walk_page_flags_in_root(
         && level_2_entry
             .flags()
             .contains(PageTableFlags::USER_ACCESSIBLE);
+    all_levels_writable =
+        all_levels_writable && level_2_entry.flags().contains(PageTableFlags::WRITABLE);
     if level_2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
         return Ok(PageWalkFlags {
             path: level_4_entry.flags() | level_3_entry.flags() | level_2_entry.flags(),
             leaf: level_2_entry.flags(),
             all_levels_user_accessible,
+            all_levels_writable,
         });
     }
     let level_1_frame = level_2_entry
@@ -112,6 +119,8 @@ fn walk_page_flags_in_root(
         && level_1_entry
             .flags()
             .contains(PageTableFlags::USER_ACCESSIBLE);
+    all_levels_writable =
+        all_levels_writable && level_1_entry.flags().contains(PageTableFlags::WRITABLE);
     Ok(PageWalkFlags {
         path: level_4_entry.flags()
             | level_3_entry.flags()
@@ -119,6 +128,7 @@ fn walk_page_flags_in_root(
             | level_1_entry.flags(),
         leaf: level_1_entry.flags(),
         all_levels_user_accessible,
+        all_levels_writable,
     })
 }
 

@@ -127,7 +127,7 @@ pub(crate) fn prepare_current_scheduler_thread_dispatch() -> Result<(), &'static
     feature = "m3-ipc-self-test",
     feature = "m4-supervisor-self-test"
 ))]
-#[cfg_attr(feature = "m4-crash-service-self-test", allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'static str> {
     let next_stack_pointer = without_interrupts(|| unsafe {
         scheduler_mut().on_timer_interrupt(current_stack_pointer)

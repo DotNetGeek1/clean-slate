@@ -85,6 +85,9 @@ pub(crate) fn start_service_lifecycle_self_test(allocator: PageAllocator) -> ! {
             ControlRequest::new(ServiceId(2), ControlRequestKind::Start),
         )
         .unwrap_or_else(|_| fatal_kernel_error("service lifecycle launch failed"));
+    let first_event = first
+        .event
+        .unwrap_or_else(|| fatal_kernel_error("first launch event missing"));
     controller
         .handle_control_request(
             allocator,
@@ -99,14 +102,27 @@ pub(crate) fn start_service_lifecycle_self_test(allocator: PageAllocator) -> ! {
             ControlRequest::new(ServiceId(2), ControlRequestKind::Restart),
         )
         .unwrap_or_else(|_| fatal_kernel_error("service lifecycle restart failed"));
-    if first.event.instance.pid == restarted.event.instance.pid {
+    if restarted.event.is_some() {
+        fatal_kernel_error("restart control unexpectedly returned an immediate lifecycle event");
+    }
+    let replacement = controller
+        .handle_control_request(
+            allocator,
+            SUPERVISOR_TEST_PID,
+            ControlRequest::new(ServiceId(2), ControlRequestKind::Start),
+        )
+        .unwrap_or_else(|_| fatal_kernel_error("service lifecycle restart start failed"));
+    let replacement_event = replacement
+        .event
+        .unwrap_or_else(|| fatal_kernel_error("restart start did not return spawn event"));
+    if first_event.instance.pid == replacement_event.instance.pid {
         fatal_kernel_error("service restart reused the previous pid");
     }
-    if restarted.event.instance.generation.0 <= first.event.instance.generation.0 {
+    if replacement_event.instance.generation.0 <= first_event.instance.generation.0 {
         fatal_kernel_error("service restart did not advance instance generation");
     }
     if controller
-        .validate_instance_handle(first.event.instance)
+        .validate_instance_handle(first_event.instance)
         .is_ok()
     {
         fatal_kernel_error("stale pre-restart instance handle remained valid");
