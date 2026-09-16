@@ -27,11 +27,14 @@ const M4_SUPERVISOR_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_RECOVERY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M5_BLOCK_DISK_BYTES: u64 = 16 * 1024 * 1024;
-const M5_PERSISTENCE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M5_DISK_HARNESS_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_DATA_DISK_FILENAME: &str = "m5-data.img";
 const M5_DATA_DISK_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 const M5_HOST_SENTINEL_OFFSET: u64 = 4096;
 const M5_HOST_SENTINEL: &[u8] = b"CLEAN-SLATE-M5-PERSISTENCE-SENTINEL-v1";
+const M5_QEMU_DISK_ID: &str = "m5disk";
+const M5_QEMU_DEVICE: &str =
+    "virtio-blk-pci,drive=m5disk,serial=clean-slate-m5-data,disable-modern=on";
 const M4_RECOVERY_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[CAP ] supervisor console capability granted pid=1",
     "[SUP ] started pid=1",
@@ -229,9 +232,8 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM4RestartPolicy => run_m4_restart_policy_acceptance(),
         ParsedCommand::TestM4 => run_m4_acceptance(),
         ParsedCommand::TestM4Recovery => run_m4_recovery_acceptance(),
-        ParsedCommand::TestM5 => run_m5_acceptance(&trailing_args),
         ParsedCommand::TestM5Block => run_m5_block_acceptance(),
-        ParsedCommand::TestM5Persistence => run_m5_persistence_acceptance(&trailing_args),
+        ParsedCommand::TestM5DiskHarness => run_m5_disk_harness(&trailing_args),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -258,10 +260,6 @@ fn run_vm_with_gdb(debug_entry: bool) -> Result<(), XtaskError> {
     run_vm_inner(true, debug_entry, &[], None)
 }
 
-fn run_m5_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
-    run_m5_persistence_acceptance(args)
-}
-
 fn run_m5_block_acceptance() -> Result<(), XtaskError> {
     let disk = ensure_m5_block_disk_image()?;
     run_vm_inner_with_config(
@@ -272,12 +270,11 @@ fn run_m5_block_acceptance() -> Result<(), XtaskError> {
         VmLaunchConfig {
             m5_data_disk: Some(disk),
             reset_ovmf_vars: false,
-            virtio_legacy: true,
         },
     )
 }
 
-fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
+fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
     let options = parse_m5_cli_options(args)?;
     let run_result = (|| -> Result<(), XtaskError> {
         reset_m5_data_disk_image()?;
@@ -285,15 +282,14 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
         let config = VmLaunchConfig {
             m5_data_disk: Some(disk.clone()),
             reset_ovmf_vars: true,
-            virtio_legacy: false,
         };
 
-        println!("[M5  ] phase 1/2 boot");
+        println!("[M5.H] phase 1/2 boot");
         run_vm_inner_with_config(
             false,
             false,
             &["m1-self-test"],
-            Some((&M1_ACCEPTANCE_MARKERS, M5_PERSISTENCE_ACCEPTANCE_TIMEOUT)),
+            Some((&M1_ACCEPTANCE_MARKERS, M5_DISK_HARNESS_TIMEOUT)),
             config.clone(),
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
@@ -303,12 +299,12 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
 
         write_m5_host_sentinel(&disk)?;
 
-        println!("[M5  ] phase 2/2 boot");
+        println!("[M5.H] phase 2/2 boot");
         run_vm_inner_with_config(
             false,
             false,
             &["m1-self-test"],
-            Some((&M1_ACCEPTANCE_MARKERS, M5_PERSISTENCE_ACCEPTANCE_TIMEOUT)),
+            Some((&M1_ACCEPTANCE_MARKERS, M5_DISK_HARNESS_TIMEOUT)),
             config,
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
@@ -320,7 +316,7 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
         if sentinel_after.as_slice() != M5_HOST_SENTINEL {
             return Err(XtaskError::M5SentinelMismatch);
         }
-        println!("[M5  ] PASS");
+        println!("[M5.H] PASS");
         Ok(())
     })();
     finalize_m5_disk_lifecycle(run_result, options.keep_disk)
@@ -583,7 +579,6 @@ fn run_m3_acceptance() -> Result<(), XtaskError> {
 struct VmLaunchConfig {
     m5_data_disk: Option<PathBuf>,
     reset_ovmf_vars: bool,
-    virtio_legacy: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -665,17 +660,7 @@ fn run_vm_inner_with_config(
         .arg("-drive")
         .arg(format!("format=raw,file=fat:rw:{}", esp_dir.display()));
     if let Some(m5_data_disk) = config.m5_data_disk {
-        qemu.arg("-drive")
-            .arg(format!(
-                "if=none,format=raw,id=m5disk,file={}",
-                m5_data_disk.display()
-            ))
-            .arg("-device")
-            .arg(if config.virtio_legacy {
-                "virtio-blk-pci,drive=m5disk,disable-modern=on"
-            } else {
-                "virtio-blk-pci,drive=m5disk,serial=clean-slate-m5-data"
-            });
+        append_m5_disk_args(&mut qemu, &m5_data_disk);
     }
 
     if wait_for_gdb {
@@ -709,6 +694,17 @@ fn parse_m5_cli_options(args: &[OsString]) -> Result<M5CliOptions, XtaskError> {
         ));
     }
     Ok(options)
+}
+
+fn append_m5_disk_args(qemu: &mut Command, m5_data_disk: &Path) {
+    qemu.arg("-drive")
+        .arg(format!(
+            "if=none,format=raw,id={},file={}",
+            M5_QEMU_DISK_ID,
+            m5_data_disk.display()
+        ))
+        .arg("-device")
+        .arg(M5_QEMU_DEVICE);
 }
 
 fn m5_fixture_dir() -> PathBuf {
@@ -752,7 +748,7 @@ fn create_m5_data_disk_image() -> Result<(), XtaskError> {
     image.set_len(M5_DATA_DISK_SIZE_BYTES)?;
     image.flush()?;
     println!(
-        "[M5  ] created data disk {} ({} bytes)",
+        "[M5.H] created data disk {} ({} bytes)",
         disk.display(),
         M5_DATA_DISK_SIZE_BYTES
     );
@@ -794,12 +790,12 @@ fn finalize_m5_disk_lifecycle(
 fn inspect_m5_data_disk_image() -> Result<(), XtaskError> {
     let disk = m5_data_disk_path();
     if !disk.exists() {
-        println!("[M5  ] disk missing: {}", disk.display());
+        println!("[M5.H] disk missing: {}", disk.display());
         return Ok(());
     }
     let metadata = fs::metadata(&disk)?;
     println!(
-        "[M5  ] disk: {} bytes={} expected={} sentinel_offset={}",
+        "[M5.H] disk: {} bytes={} expected={} sentinel_offset={}",
         disk.display(),
         metadata.len(),
         M5_DATA_DISK_SIZE_BYTES,
@@ -1146,10 +1142,10 @@ fn print_help() {
     println!("  test-m4-restart-policy Run M4.6 host restart-policy convergence tests and build the CPL3 image");
     println!("  test-m4-recovery Build the M4.8 recovery supervisor kernel boot and validate ordered markers");
     println!("  test-m4       M4 milestone gate: recovery QEMU boot plus M4.6 host policy tests");
-    println!("  test-m5       M5 persistence gate: two QEMU boots with one persistent VirtIO block image");
     println!("  test-m5-block Build the M5.2 virtio-block kernel, run QEMU, and validate ordered markers");
+    println!("  test-m5-disk-harness Two-boot M5 disk harness with host-side sentinel validation");
     println!(
-        "  test-m5-persistence Two-boot M5 persistence harness with host-side sentinel validation"
+        "                 Uses M1 markers only; does not assert milestone-level storage behavior"
     );
     println!("  m5-disk-create Create deterministic M5 data disk if missing (preserve existing)");
     println!("  m5-disk-reset Recreate deterministic blank M5 data disk");
@@ -1184,9 +1180,8 @@ enum ParsedCommand {
     TestM4RestartPolicy,
     TestM4,
     TestM4Recovery,
-    TestM5,
     TestM5Block,
-    TestM5Persistence,
+    TestM5DiskHarness,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -1216,9 +1211,8 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m4-restart-policy" => ParsedCommand::TestM4RestartPolicy,
         Some(cmd) if cmd == "test-m4" => ParsedCommand::TestM4,
         Some(cmd) if cmd == "test-m4-recovery" => ParsedCommand::TestM4Recovery,
-        Some(cmd) if cmd == "test-m5" => ParsedCommand::TestM5,
         Some(cmd) if cmd == "test-m5-block" => ParsedCommand::TestM5Block,
-        Some(cmd) if cmd == "test-m5-persistence" => ParsedCommand::TestM5Persistence,
+        Some(cmd) if cmd == "test-m5-disk-harness" => ParsedCommand::TestM5DiskHarness,
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
         Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,
@@ -1403,16 +1397,12 @@ mod tests {
             ParsedCommand::RunGdbEntry
         );
         assert_eq!(
-            parse_command(Some("test-m5".as_ref())),
-            ParsedCommand::TestM5
-        );
-        assert_eq!(
             parse_command(Some("test-m5-block".as_ref())),
             ParsedCommand::TestM5Block
         );
         assert_eq!(
-            parse_command(Some("test-m5-persistence".as_ref())),
-            ParsedCommand::TestM5Persistence
+            parse_command(Some("test-m5-disk-harness".as_ref())),
+            ParsedCommand::TestM5DiskHarness
         );
         assert_eq!(
             parse_command(Some("m5-disk-create".as_ref())),
