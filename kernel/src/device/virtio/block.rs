@@ -12,6 +12,9 @@ use clean_slate_block::{
 use crate::arch::x86_64::port::{
     port_in, port_in_u16, port_in_u32, port_out, port_out_u16, port_out_u32,
 };
+use crate::mm::address_space::translate_address_in_root;
+use crate::mm::paging::current_root_frame_address;
+use x86_64::VirtAddr;
 
 const PCI_CONFIG_ADDRESS_PORT: u16 = 0x0cf8;
 const PCI_CONFIG_DATA_PORT: u16 = 0x0cfc;
@@ -358,7 +361,8 @@ impl VirtioBlockDevice {
         };
         queue.clear_ring();
 
-        let queue_pfn = u32::try_from((memory_base as usize) >> 12)
+        let queue_physical = virtual_to_physical_address(memory_base as *const u8)?;
+        let queue_pfn = u32::try_from(queue_physical >> 12)
             .map_err(|_| "virtio queue PFN does not fit in legacy register")?;
         registers.write_u16(VIRTIO_PCI_QUEUE_SEL, VIRTQ_QUEUE_SELECT_0);
         registers.write_u32(VIRTIO_PCI_QUEUE_PFN, queue_pfn);
@@ -494,9 +498,9 @@ impl VirtioBlockDevice {
             VIRTIO_BLK_S_UNSUPP if request_type == VIRTIO_BLK_T_FLUSH => Err(
                 BlockIoError::Unsupported(BlockUnsupportedError::FlushUnsupported),
             ),
-            VIRTIO_BLK_S_IOERR | VIRTIO_BLK_S_UNSUPP | _ => {
-                Err(BlockIoError::Transport(BlockTransportError::DeviceFault))
-            }
+            VIRTIO_BLK_S_IOERR => Err(BlockIoError::Transport(BlockTransportError::DeviceFault)),
+            VIRTIO_BLK_S_UNSUPP => Err(BlockIoError::Transport(BlockTransportError::DeviceFault)),
+            _ => Err(BlockIoError::Transport(BlockTransportError::DeviceFault)),
         }
     }
 }
@@ -619,6 +623,13 @@ fn read_block_count(
     block_size: u32,
 ) -> Result<(u64, u64), &'static str> {
     let capacity_sectors = registers.read_u64(VIRTIO_PCI_DEVICE_CONFIG);
+    block_count_from_capacity(capacity_sectors, block_size)
+}
+
+fn block_count_from_capacity(
+    capacity_sectors: u64,
+    block_size: u32,
+) -> Result<(u64, u64), &'static str> {
     if capacity_sectors == 0 {
         return Err("virtio block capacity was zero sectors");
     }
@@ -630,6 +641,10 @@ fn read_block_count(
         return Err("virtio block capacity does not align to logical block size");
     }
     Ok((capacity_sectors / sectors_per_block, sectors_per_block))
+}
+
+fn virtual_to_physical_address(pointer: *const u8) -> Result<u64, &'static str> {
+    translate_address_in_root(current_root_frame_address(), VirtAddr::new(pointer as u64))
 }
 
 fn calculate_max_transfer_blocks(block_size: u32) -> Result<u32, &'static str> {
@@ -735,25 +750,8 @@ mod tests {
 
     #[test]
     fn block_count_conversion_requires_alignment() {
-        let aligned = read_block_count_for_test(16, 4096).expect("aligned");
+        let aligned = block_count_from_capacity(16, 4096).expect("aligned");
         assert_eq!(aligned, (2, 8));
-        assert!(read_block_count_for_test(17, 4096).is_err());
-    }
-
-    fn read_block_count_for_test(
-        capacity_sectors: u64,
-        block_size: u32,
-    ) -> Result<(u64, u64), &'static str> {
-        if capacity_sectors == 0 {
-            return Err("virtio block capacity was zero sectors");
-        }
-        let sectors_per_block = u64::from(block_size / LOGICAL_SECTOR_BYTES);
-        if sectors_per_block == 0 {
-            return Err("virtio block sectors per block was zero");
-        }
-        if capacity_sectors % sectors_per_block != 0 {
-            return Err("virtio block capacity does not align to logical block size");
-        }
-        Ok((capacity_sectors / sectors_per_block, sectors_per_block))
+        assert!(block_count_from_capacity(17, 4096).is_err());
     }
 }
