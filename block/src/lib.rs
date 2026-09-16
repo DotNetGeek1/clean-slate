@@ -210,7 +210,6 @@ pub enum BlockGeometryError {
     ZeroBlockCount,
     ZeroMaxTransferBlocks,
     CapacityOverflow,
-    CapacityExceedsHostAddressSpace,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

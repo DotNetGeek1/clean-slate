@@ -76,6 +76,7 @@ jobs:
         run: |
           cargo test -p xtask
           cargo test -p clean-slate-block
+          cargo test -p clean-slate-block --features alloc
           cargo test -p clean-slate-kernel
           cargo test -p clean-slate-kernel --features m3-entry-self-test
           cargo test -p clean-slate-kernel --features m3-address-space-self-test

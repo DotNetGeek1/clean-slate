@@ -1,7 +1,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::{BlockDevice, BlockGeometry, BlockGeometryError, BlockIoError};
+use crate::{BlockDevice, BlockGeometry, BlockIoError};
 
 /// Deterministic fixed-size in-memory backend for host tests.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -12,10 +12,15 @@ pub struct FakeBlockDevice {
     flush_count: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FakeBlockDeviceError {
+    CapacityExceedsHostAddressSpace,
+}
+
 impl FakeBlockDevice {
-    pub fn new(geometry: BlockGeometry) -> Result<Self, BlockGeometryError> {
+    pub fn new(geometry: BlockGeometry) -> Result<Self, FakeBlockDeviceError> {
         let len = usize::try_from(geometry.capacity_bytes())
-            .map_err(|_| BlockGeometryError::CapacityExceedsHostAddressSpace)?;
+            .map_err(|_| FakeBlockDeviceError::CapacityExceedsHostAddressSpace)?;
 
         Ok(Self {
             geometry,
