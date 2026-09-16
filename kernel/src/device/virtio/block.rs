@@ -1,3 +1,5 @@
+#![cfg_attr(not(any(test, feature = "m5-block-self-test")), allow(dead_code))]
+
 use core::convert::TryFrom;
 use core::hint::spin_loop;
 use core::mem::{align_of, size_of};
