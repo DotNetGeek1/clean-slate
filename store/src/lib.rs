@@ -206,10 +206,12 @@ impl<D: BlockDevice> ObjectStore<D> {
 
         match target_index {
             Some(index) => {
-                self.objects[index].name.clear();
-                self.objects[index].name.push_str(name);
-                self.objects[index].data.clear();
-                self.objects[index].data.extend_from_slice(data);
+                let replacement = StoredObject {
+                    id,
+                    name: String::from(name),
+                    data: data.to_vec(),
+                };
+                self.objects[index] = replacement;
             }
             None => {
                 if self.objects.len() == MAX_OBJECTS {
@@ -290,6 +292,12 @@ enum SlotDecodeError {
     Corrupt(CorruptFormatError),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SlotLoadError {
+    Block(BlockIoError),
+    Decode(SlotDecodeError),
+}
+
 fn validate_geometry(geometry: BlockGeometry) -> Result<BlockGeometry, StoreError> {
     let logical_block_size = usize::try_from(geometry.logical_block_size()).map_err(|_| {
         StoreError::UnsupportedGeometry {
@@ -342,10 +350,16 @@ fn select_superblock<D: BlockDevice>(
         (Ok(left), Err(_)) => Ok((0, left)),
         (Err(_), Ok(right)) => Ok((1, right)),
         (Err(left), Err(right)) => match (left, right) {
-            (SlotDecodeError::Incompatible(err), _) | (_, SlotDecodeError::Incompatible(err)) => {
+            (SlotLoadError::Block(error), _) | (_, SlotLoadError::Block(error)) => {
+                Err(StoreError::Block(error))
+            }
+            (SlotLoadError::Decode(SlotDecodeError::Incompatible(err)), _)
+            | (_, SlotLoadError::Decode(SlotDecodeError::Incompatible(err))) => {
                 Err(StoreError::Incompatible(err))
             }
-            (SlotDecodeError::Corrupt(err), _) => Err(StoreError::Corrupt(err)),
+            (SlotLoadError::Decode(SlotDecodeError::Corrupt(err)), _) => {
+                Err(StoreError::Corrupt(err))
+            }
         },
     }
 }
@@ -354,21 +368,12 @@ fn read_superblock_slot<D: BlockDevice>(
     device: &mut D,
     geometry: BlockGeometry,
     slot: u64,
-) -> Result<Superblock, SlotDecodeError> {
+) -> Result<Superblock, SlotLoadError> {
     let mut bytes = vec![0; block_size_bytes(geometry)];
     device
         .read_blocks(slot, 1, &mut bytes)
-        .map_err(|error| SlotDecodeError::Corrupt(map_block_error(error)))?;
-    decode_superblock(geometry, &bytes)
-}
-
-fn map_block_error(error: BlockIoError) -> CorruptFormatError {
-    match error {
-        BlockIoError::InvalidRequest(_) => CorruptFormatError::InvalidObjectExtent,
-        BlockIoError::Unsupported(_) | BlockIoError::Transport(_) => {
-            CorruptFormatError::InvalidHeader
-        }
-    }
+        .map_err(SlotLoadError::Block)?;
+    decode_superblock(geometry, &bytes).map_err(SlotLoadError::Decode)
 }
 
 fn decode_superblock(geometry: BlockGeometry, bytes: &[u8]) -> Result<Superblock, SlotDecodeError> {
@@ -1016,5 +1021,27 @@ mod tests {
             ObjectStore::mount(device).unwrap_err(),
             StoreError::Corrupt(CorruptFormatError::InvalidObjectLength)
         );
+    }
+
+    #[test]
+    fn mount_uses_valid_slot_when_other_slot_is_incompatible() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.write_object(1, "alpha", b"committed").unwrap();
+        store.commit().unwrap();
+
+        let mut device = store.into_inner();
+        let mut stale_slot = vec![0; 512];
+        device.read_blocks(0, 1, &mut stale_slot).unwrap();
+        stale_slot[0..4].copy_from_slice(b"BAD!");
+        stale_slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&0u32.to_le_bytes());
+        let sum = checksum(&stale_slot);
+        stale_slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&sum.to_le_bytes());
+        device.write_blocks(0, 1, &stale_slot).unwrap();
+        device.flush().unwrap();
+
+        let store = ObjectStore::mount(device).unwrap();
+        assert_eq!(store.read_object_by_id(1).unwrap(), b"committed");
+        assert_eq!(store.committed_generation(), 1);
     }
 }
