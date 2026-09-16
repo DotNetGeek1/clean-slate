@@ -320,19 +320,27 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
         pid, context.vector, context.error_code
     ));
 
-    let allocator = service_lifecycle_syscall_allocator_mut()
-        .as_mut()
-        .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));
     let controller = unsafe { service_lifecycle_controller_mut() };
-    let maybe_fault_event = controller
-        .notify_faulted_live_process(pid, context.error_code as u32)
-        .unwrap_or_else(|_| fatal_kernel_error("failed to publish supervised fault event"));
+    let maybe_fault_event =
+        match controller.notify_faulted_live_process(pid, context.error_code as u32) {
+            Ok(event) => event,
+            Err(error) => {
+                kernel_log_fmt(format_args!(
+                    "[FAIL] supervised fault publication failed pid={} err={:?}\n",
+                    pid, error
+                ));
+                fatal_kernel_error("failed to publish supervised fault event")
+            }
+        };
     if maybe_fault_event.is_none() {
         kernel_log_fmt(format_args!(
             "[PROC] unsupervised fault pid={} proceeding with teardown\n",
             pid
         ));
     }
+    let allocator = service_lifecycle_syscall_allocator_mut()
+        .as_mut()
+        .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 1, true)
         .unwrap_or_else(|message| fatal_kernel_error(message));
     teardown
