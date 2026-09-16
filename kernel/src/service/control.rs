@@ -79,7 +79,7 @@ pub(crate) struct ServiceLifecycleController {
     capabilities: super::capability::LifecycleControlCapabilityTable,
     services: [ServiceRecord; SERVICE_REGISTRY_CAPACITY],
     pending: [Option<LifecycleEvent>; SERVICE_PENDING_EVENTS],
-    pending_len: usize,
+    pending_count: usize,
     next_scheduler_slot: usize,
     kernel_root_frame: u64,
     kernel_stack_top: u64,
@@ -91,7 +91,7 @@ impl ServiceLifecycleController {
             capabilities: super::capability::LifecycleControlCapabilityTable::new(),
             services: [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY],
             pending: [None; SERVICE_PENDING_EVENTS],
-            pending_len: 0,
+            pending_count: 0,
             next_scheduler_slot: 2,
             kernel_root_frame: 0,
             kernel_stack_top: 0,
@@ -102,13 +102,13 @@ impl ServiceLifecycleController {
         self.capabilities.clear();
         self.services = [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY];
         self.pending = [None; SERVICE_PENDING_EVENTS];
-        self.pending_len = 0;
+        self.pending_count = 0;
         self.next_scheduler_slot = 2;
     }
 
     #[allow(dead_code)]
     fn push_pending(&mut self, event: LifecycleEvent) -> Result<(), LifecycleControlError> {
-        if self.pending_len >= SERVICE_PENDING_EVENTS {
+        if self.pending_count >= SERVICE_PENDING_EVENTS {
             return Err(LifecycleControlError::InvalidMessage(
                 clean_slate_service_lifecycle::DecodeError::BufferTooShort {
                     actual: 0,
@@ -116,8 +116,18 @@ impl ServiceLifecycleController {
                 },
             ));
         }
-        self.pending[self.pending_len] = Some(event);
-        self.pending_len += 1;
+        let slot = self
+            .pending
+            .iter_mut()
+            .find(|entry| entry.is_none())
+            .ok_or(LifecycleControlError::InvalidMessage(
+                clean_slate_service_lifecycle::DecodeError::BufferTooShort {
+                    actual: 0,
+                    required: 1,
+                },
+            ))?;
+        *slot = Some(event);
+        self.pending_count += 1;
         Ok(())
     }
 
@@ -133,12 +143,13 @@ impl ServiceLifecycleController {
         &mut self,
         service: ServiceId,
     ) -> Result<Option<LifecycleEvent>, LifecycleControlError> {
-        for index in 0..self.pending_len {
-            let Some(event) = self.pending[index] else {
+        for entry in &mut self.pending {
+            let Some(event) = *entry else {
                 continue;
             };
             if event.instance.service == service {
-                self.pending[index] = None;
+                *entry = None;
+                self.pending_count = self.pending_count.saturating_sub(1);
                 return Ok(Some(event));
             }
         }

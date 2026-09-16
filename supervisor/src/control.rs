@@ -24,8 +24,7 @@ pub struct FakeLifecycleControl<const MAX_EVENTS: usize = 16> {
     issued: [Option<ControlRequest>; MAX_EVENTS],
     issued_len: usize,
     pending: [Option<LifecycleEvent>; MAX_EVENTS],
-    pending_len: usize,
-    pending_cursor: usize,
+    pending_count: usize,
 }
 
 impl<const MAX_EVENTS: usize> Default for FakeLifecycleControl<MAX_EVENTS> {
@@ -40,18 +39,20 @@ impl<const MAX_EVENTS: usize> FakeLifecycleControl<MAX_EVENTS> {
             issued: [None; MAX_EVENTS],
             issued_len: 0,
             pending: [None; MAX_EVENTS],
-            pending_len: 0,
-            pending_cursor: 0,
+            pending_count: 0,
         }
     }
 
     pub fn push_pending(&mut self, event: LifecycleEvent) -> Result<(), LifecycleControlError> {
-        if self.pending_len >= MAX_EVENTS {
+        if self.pending_count >= MAX_EVENTS {
             return Err(LifecycleControlError::TransportFailed);
         }
-        self.pending[self.pending_len] = Some(event);
-        self.pending_len += 1;
-        Ok(())
+        if let Some(slot) = self.pending.iter_mut().find(|entry| entry.is_none()) {
+            *slot = Some(event);
+            self.pending_count += 1;
+            return Ok(());
+        }
+        Err(LifecycleControlError::TransportFailed)
     }
 
     pub fn issued_requests(&self) -> impl Iterator<Item = ControlRequest> + '_ {
@@ -75,10 +76,13 @@ impl<const MAX_EVENTS: usize> LifecycleControl for FakeLifecycleControl<MAX_EVEN
         &mut self,
         service: ServiceId,
     ) -> Result<Option<LifecycleEvent>, LifecycleControlError> {
-        for index in self.pending_cursor..self.pending_len {
-            let event = self.pending[index].expect("pending slot");
+        for entry in &mut self.pending {
+            let Some(event) = *entry else {
+                continue;
+            };
             if event.instance.service == service {
-                self.pending_cursor = index + 1;
+                *entry = None;
+                self.pending_count = self.pending_count.saturating_sub(1);
                 return Ok(Some(event));
             }
         }
