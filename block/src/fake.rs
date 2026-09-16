@@ -54,6 +54,16 @@ impl FakeBlockDevice {
     pub fn durable_bytes(&self) -> &[u8] {
         &self.durable_bytes
     }
+
+    pub fn durable_bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.durable_bytes
+    }
+
+    /// Model a reboot: live state is discarded and reloaded from the durable
+    /// image, so anything written but not yet flushed is lost.
+    pub fn rebooted(&self) -> Result<Self, FakeBlockDeviceError> {
+        Self::from_durable_bytes(self.geometry, &self.durable_bytes)
+    }
 }
 
 impl BlockDevice for FakeBlockDevice {
