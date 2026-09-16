@@ -149,12 +149,13 @@ const M4_SUPERVISOR_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[IPC ] console pid=1: [SUP ]",
     "[M4.3] PASS",
 ];
-const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 6] = [
+const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[SVC ] declared service=20736",
     "[STOR] service started pid=",
     "[BLK ] authority granted pid=",
-    "[BLK ] request op=geometry id=1",
+    "[BLK ] request op=write id=1",
     "[BLK ] completion id=1 status=ok",
+    "[BLK ] unauthorized denied pid=",
     "[M5.3] PASS",
 ];
 /// Merged M3.2 + M3.4 markers in the order the `m3-address-space-self-test`

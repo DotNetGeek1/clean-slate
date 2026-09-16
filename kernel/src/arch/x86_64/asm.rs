@@ -324,25 +324,34 @@ clean_slate_user_storage_test_start:
     movabs rbx, 0x0000400000001000
     mov rdi, [rbx]
     mov rsi, [rbx + 8]
+    mov r13, [rbx + 16]
     mov rax, 6
     syscall
+    cmp r13, 0
+    jne clean_slate_user_storage_test_unauthorized
     mov rcx, -4096
     cmp rax, rcx
     jae clean_slate_user_storage_test_fail
     mov r12, rax
 
     mov rdi, r12
-    lea rsi, [rbx + 16]
+    lea rsi, [rbx + 24]
     mov rdx, 40
-    lea r8, [rbx + 96]
-    mov r9, [rbx + 88]
-    lea r10, [rbx + 56]
+    lea r8, [rbx + 112]
+    mov r9, [rbx + 104]
+    lea r10, [rbx + 64]
     mov rax, 7
     syscall
     mov rcx, 40
     cmp rax, rcx
     jne clean_slate_user_storage_test_fail
-    cmp byte ptr [rbx + 63], 0
+    cmp byte ptr [rbx + 71], 0
+    jne clean_slate_user_storage_test_fail
+    int 0x80
+
+clean_slate_user_storage_test_unauthorized:
+    mov rcx, -13
+    cmp rax, rcx
     jne clean_slate_user_storage_test_fail
     int 0x80
     .global clean_slate_user_storage_test_after_request

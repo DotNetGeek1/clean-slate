@@ -35,3 +35,5 @@ pub use clean_slate_service_lifecycle::ServiceId;
 pub const CRASH_SERVICE_ID: ServiceId = ServiceId(0x0000_4100);
 /// Stable logical identity for the M5 userspace storage service.
 pub const STORAGE_SERVICE_ID: ServiceId = ServiceId(0x0000_5100);
+/// Stable logical identity for an unrelated userspace process used by M5 denial tests.
+pub const STORAGE_UNAUTHORIZED_SERVICE_ID: ServiceId = ServiceId(0x0000_5101);

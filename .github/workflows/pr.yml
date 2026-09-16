@@ -61,6 +61,9 @@ jobs:
       - name: Clippy (block contract)
         run: cargo clippy -p clean-slate-block --all-targets --features alloc -- -D warnings
 
+      - name: Clippy (service fixtures)
+        run: cargo clippy -p clean-slate-service-fixtures --all-targets -- -D warnings
+
       - name: Clippy (kernel UEFI)
         run: cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi -- -D warnings
 
@@ -79,6 +82,7 @@ jobs:
           cargo test -p xtask
           cargo test -p clean-slate-block
           cargo test -p clean-slate-block --features alloc
+          cargo test -p clean-slate-service-fixtures
           cargo test -p clean-slate-kernel
           cargo test -p clean-slate-kernel --features m3-entry-self-test
           cargo test -p clean-slate-kernel --features m3-address-space-self-test

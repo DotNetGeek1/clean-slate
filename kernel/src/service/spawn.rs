@@ -4,8 +4,9 @@ use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::PAGE_SIZE;
 #[cfg(feature = "m5-storage-self-test")]
 use clean_slate_service_fixtures::{
-    BlockTransportRequest, BLOCK_TRANSPORT_REQUEST_BYTES, BLOCK_TRANSPORT_RESPONSE_BYTES,
-    BLOCK_TRANSPORT_VERSION, STORAGE_BLOCK_DEVICE_ID, STORAGE_SERVICE_ID,
+    BlockTransportOp, BlockTransportRequest, BLOCK_TRANSPORT_REQUEST_BYTES,
+    BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION, STORAGE_BLOCK_DEVICE_ID,
+    STORAGE_SERVICE_ID, STORAGE_UNAUTHORIZED_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::ServiceId;
 
@@ -43,6 +44,8 @@ impl BuiltinServiceImage {
             1 => Self::M3UserTestPayload,
             #[cfg(feature = "m5-storage-self-test")]
             id if id == STORAGE_SERVICE_ID.0 => Self::StorageProbePayload,
+            #[cfg(feature = "m5-storage-self-test")]
+            id if id == STORAGE_UNAUTHORIZED_SERVICE_ID.0 => Self::StorageProbePayload,
             _ => Self::ImmediateExit,
         }
     }
@@ -156,11 +159,37 @@ pub(crate) fn launch_builtin_service(
     struct StorageProbeBootstrap {
         device_id: u64,
         protocol_version: u64,
+        mode: u64,
         request: [u8; BLOCK_TRANSPORT_REQUEST_BYTES],
         response: [u8; BLOCK_TRANSPORT_RESPONSE_BYTES],
         payload_len: u64,
         payload: [u8; 512],
     }
+
+    #[cfg(feature = "m5-storage-self-test")]
+    const STORAGE_PROBE_MODE_AUTHORIZED: u64 = 0;
+    #[cfg(feature = "m5-storage-self-test")]
+    const STORAGE_PROBE_MODE_EXPECT_EACCES: u64 = 1;
+    #[cfg(feature = "m5-storage-self-test")]
+    const STORAGE_PROBE_REQUEST_OFFSET: usize =
+        core::mem::offset_of!(StorageProbeBootstrap, request);
+    #[cfg(feature = "m5-storage-self-test")]
+    const STORAGE_PROBE_RESPONSE_OFFSET: usize =
+        core::mem::offset_of!(StorageProbeBootstrap, response);
+    #[cfg(feature = "m5-storage-self-test")]
+    const STORAGE_PROBE_PAYLOAD_LEN_OFFSET: usize =
+        core::mem::offset_of!(StorageProbeBootstrap, payload_len);
+    #[cfg(feature = "m5-storage-self-test")]
+    const STORAGE_PROBE_PAYLOAD_OFFSET: usize =
+        core::mem::offset_of!(StorageProbeBootstrap, payload);
+    #[cfg(feature = "m5-storage-self-test")]
+    const _: [(); 24] = [(); STORAGE_PROBE_REQUEST_OFFSET];
+    #[cfg(feature = "m5-storage-self-test")]
+    const _: [(); 64] = [(); STORAGE_PROBE_RESPONSE_OFFSET];
+    #[cfg(feature = "m5-storage-self-test")]
+    const _: [(); 104] = [(); STORAGE_PROBE_PAYLOAD_LEN_OFFSET];
+    #[cfg(feature = "m5-storage-self-test")]
+    const _: [(); 112] = [(); STORAGE_PROBE_PAYLOAD_OFFSET];
 
     #[cfg(feature = "m5-storage-self-test")]
     fn copy_storage_probe_payload(frame_address: u64) -> Result<(), &'static str> {
@@ -295,14 +324,37 @@ pub(crate) fn launch_builtin_service(
             .allocate_page()
             .ok_or("allocator could not provide a storage bootstrap page")?;
         zero_page(data_frame);
-        let request = BlockTransportRequest::geometry(1, STORAGE_BLOCK_DEVICE_ID).encode();
+        let (mode, request, payload_len, payload) = if service == STORAGE_SERVICE_ID {
+            (
+                STORAGE_PROBE_MODE_AUTHORIZED,
+                BlockTransportRequest {
+                    request_id: 1,
+                    device_id: STORAGE_BLOCK_DEVICE_ID,
+                    operation: BlockTransportOp::Write,
+                    lba: 0,
+                    blocks: 1,
+                    buffer_len: 512,
+                }
+                .encode(),
+                512,
+                [0x5a; 512],
+            )
+        } else {
+            (
+                STORAGE_PROBE_MODE_EXPECT_EACCES,
+                BlockTransportRequest::geometry(2, STORAGE_BLOCK_DEVICE_ID).encode(),
+                0,
+                [0; 512],
+            )
+        };
         let bootstrap = StorageProbeBootstrap {
             device_id: STORAGE_BLOCK_DEVICE_ID,
             protocol_version: u64::from(BLOCK_TRANSPORT_VERSION),
+            mode,
             request,
             response: [0; BLOCK_TRANSPORT_RESPONSE_BYTES],
-            payload_len: 0,
-            payload: [0; 512],
+            payload_len,
+            payload,
         };
         unsafe {
             ptr::write(

@@ -441,6 +441,17 @@ impl ServiceLifecycleController {
             ProcessId(spawned.pid),
             DomainId(spawned.domain_id),
         );
+        let kernel_root_frame = self.kernel_root_frame;
+        self.grant_storage_block_capability_with_rollback(spawned.pid, service_id, |pid| {
+            teardown_process_by_id(
+                allocator,
+                kernel_root_frame,
+                pid,
+                SERVICE_TERMINATE_STATUS,
+                false,
+            )
+            .map(|_| ())
+        })?;
         self.services[service_index].live = Some(LiveServiceInstance {
             pid: spawned.pid,
             tid: spawned.tid,
@@ -448,15 +459,6 @@ impl ServiceLifecycleController {
             generation,
             scheduler_slot,
         });
-        if service_id == STORAGE_SERVICE_ID {
-            self.block_capabilities
-                .grant_block_device_capability(spawned.pid, STORAGE_BLOCK_DEVICE_ID)
-                .map_err(LifecycleControlError::SpawnFailed)?;
-            kernel_log_fmt(format_args!(
-                "[BLK ] authority granted pid={} device={}\n",
-                spawned.pid, STORAGE_BLOCK_DEVICE_ID
-            ));
-        }
         self.log_launch(instance);
         Ok(LifecycleControlResult {
             event: Some(LifecycleEvent::new(
@@ -464,6 +466,40 @@ impl ServiceLifecycleController {
                 LifecycleEventKind::InstanceSpawned,
             )),
         })
+    }
+
+    fn grant_storage_block_capability_with_rollback<F>(
+        &mut self,
+        pid: u64,
+        service_id: ServiceId,
+        mut rollback_spawn: F,
+    ) -> Result<(), LifecycleControlError>
+    where
+        F: FnMut(u64) -> Result<(), &'static str>,
+    {
+        if service_id != STORAGE_SERVICE_ID {
+            return Ok(());
+        }
+        if let Err(message) = self
+            .block_capabilities
+            .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
+        {
+            kernel_log_fmt(format_args!(
+                "[FAIL] block capability grant failed pid={} service={} err={message}\n",
+                pid, service_id.0
+            ));
+            rollback_spawn(pid).map_err(|_| {
+                LifecycleControlError::SpawnFailed(
+                    "storage service block-capability rollback teardown failed",
+                )
+            })?;
+            return Err(LifecycleControlError::SpawnFailed(message));
+        }
+        kernel_log_fmt(format_args!(
+            "[BLK ] authority granted pid={} device={}\n",
+            pid, STORAGE_BLOCK_DEVICE_ID
+        ));
+        Ok(())
     }
 
     fn terminate_service(
@@ -837,6 +873,62 @@ mod tests {
         assert_eq!(record.state, ServiceLifecycleState::Declared);
         assert_eq!(record.authoritative_generation, InstanceGeneration(0));
         assert!(record.live.is_none());
+    }
+
+    #[cfg(not(feature = "m4-recovery-self-test"))]
+    #[test]
+    fn storage_grant_capacity_failure_rolls_back_spawned_instance() {
+        let mut controller = ServiceLifecycleController::new();
+        let mut pid = 100_u64;
+        loop {
+            if controller
+                .block_capabilities
+                .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
+                .is_err()
+            {
+                break;
+            }
+            pid += 1;
+        }
+
+        let mut rollback_pid = 0_u64;
+        let err = controller
+            .grant_storage_block_capability_with_rollback(77, STORAGE_SERVICE_ID, |pid| {
+                rollback_pid = pid;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(err, LifecycleControlError::SpawnFailed(_)));
+        assert_eq!(rollback_pid, 77);
+    }
+
+    #[cfg(not(feature = "m4-recovery-self-test"))]
+    #[test]
+    fn storage_grant_rollback_error_is_reported() {
+        let mut controller = ServiceLifecycleController::new();
+        let mut pid = 100_u64;
+        loop {
+            if controller
+                .block_capabilities
+                .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
+                .is_err()
+            {
+                break;
+            }
+            pid += 1;
+        }
+
+        let err = controller
+            .grant_storage_block_capability_with_rollback(77, STORAGE_SERVICE_ID, |_| {
+                Err("teardown failed")
+            })
+            .unwrap_err();
+        assert_eq!(
+            err,
+            LifecycleControlError::SpawnFailed(
+                "storage service block-capability rollback teardown failed"
+            )
+        );
     }
 
     #[test]
