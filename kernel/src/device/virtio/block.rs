@@ -2,7 +2,7 @@ use core::convert::TryFrom;
 use core::hint::spin_loop;
 use core::mem::{align_of, size_of};
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{compiler_fence, Ordering};
+use core::sync::atomic::{compiler_fence, fence, Ordering};
 
 use clean_slate_block::{
     BlockDevice, BlockDeviceId, BlockGeometry, BlockGeometryError, BlockIoError, BlockRequestError,
@@ -323,6 +323,7 @@ pub(crate) struct VirtioBlockDevice {
     geometry: BlockGeometry,
     sectors_per_block: u64,
     dma_data: [u8; DMA_DATA_BUFFER_BYTES],
+    queue_poisoned: bool,
 }
 
 impl VirtioBlockDevice {
@@ -363,7 +364,10 @@ impl VirtioBlockDevice {
         };
         queue.clear_ring();
 
-        let queue_physical = virtual_to_physical_address(memory_base as *const u8)?;
+        let queue_physical = physical_address_for_contiguous_range(
+            memory_base as *const u8,
+            queue.layout.total_bytes,
+        )?;
         let queue_pfn = queue_pfn_from_physical_address(queue_physical)?;
         registers.write_u16(VIRTIO_PCI_QUEUE_SEL, VIRTQ_QUEUE_SELECT_0);
         registers.write_u32(VIRTIO_PCI_QUEUE_PFN, queue_pfn);
@@ -385,6 +389,7 @@ impl VirtioBlockDevice {
             geometry,
             sectors_per_block,
             dma_data: [0; DMA_DATA_BUFFER_BYTES],
+            queue_poisoned: false,
         })
     }
 
@@ -397,6 +402,7 @@ impl VirtioBlockDevice {
         data_len: usize,
         device_writes_data: bool,
     ) -> Result<(), BlockIoError> {
+        self.ensure_queue_available()?;
         let data_len_u32 = u32::try_from(data_len)
             .map_err(|_| BlockIoError::InvalidRequest(BlockRequestError::BufferLengthOverflow))?;
         let sector =
@@ -475,11 +481,8 @@ impl VirtioBlockDevice {
 
         self.queue.submit_head(0);
         self.registers.write_u16(VIRTIO_PCI_QUEUE_NOTIFY, 0);
-        let used = self.queue.wait_for_completion()?;
-        if used.id != 0 {
-            return Err(BlockIoError::Transport(BlockTransportError::ResetRequired));
-        }
-        self.map_completion_status(request_type)?;
+        let min_used_len = minimum_used_len_for_rw(device_writes_data, data_len_u32)?;
+        self.complete_submission(request_type, min_used_len)?;
 
         if device_writes_data {
             unsafe {
@@ -491,6 +494,7 @@ impl VirtioBlockDevice {
     }
 
     fn execute_flush(&mut self) -> Result<(), BlockIoError> {
+        self.ensure_queue_available()?;
         self.request.header = VirtioBlkReqHeader {
             request_type: VIRTIO_BLK_T_FLUSH,
             reserved: 0,
@@ -525,15 +529,46 @@ impl VirtioBlockDevice {
 
         self.queue.submit_head(0);
         self.registers.write_u16(VIRTIO_PCI_QUEUE_NOTIFY, 0);
-        let used = self.queue.wait_for_completion()?;
-        if used.id != 0 {
+        self.complete_submission(VIRTIO_BLK_T_FLUSH, 1)
+    }
+
+    fn ensure_queue_available(&self) -> Result<(), BlockIoError> {
+        if self.queue_poisoned {
             return Err(BlockIoError::Transport(BlockTransportError::ResetRequired));
         }
-        self.map_completion_status(VIRTIO_BLK_T_FLUSH)
+        Ok(())
+    }
+
+    fn complete_submission(
+        &mut self,
+        request_type: u32,
+        minimum_used_len: u32,
+    ) -> Result<(), BlockIoError> {
+        let used = match self.queue.wait_for_completion() {
+            Ok(used) => used,
+            Err(BlockIoError::Transport(BlockTransportError::Timeout)) => {
+                self.queue_poisoned = true;
+                return Err(BlockIoError::Transport(BlockTransportError::ResetRequired));
+            }
+            Err(error) => return Err(error),
+        };
+        if used.id != 0 {
+            self.queue_poisoned = true;
+            return Err(BlockIoError::Transport(BlockTransportError::ResetRequired));
+        }
+        if used.len < minimum_used_len {
+            self.queue_poisoned = true;
+            return Err(BlockIoError::Transport(BlockTransportError::DeviceFault));
+        }
+
+        fence(Ordering::Acquire);
+        compiler_fence(Ordering::Acquire);
+        self.map_completion_status(request_type)
     }
 
     fn map_completion_status(&self, request_type: u32) -> Result<(), BlockIoError> {
-        match self.request.status {
+        let status = unsafe { read_volatile(core::ptr::addr_of!(self.request.status)) };
+        match status {
             VIRTIO_BLK_S_OK => Ok(()),
             VIRTIO_BLK_S_UNSUPP if request_type == VIRTIO_BLK_T_FLUSH => Err(
                 BlockIoError::Unsupported(BlockUnsupportedError::FlushUnsupported),
@@ -722,6 +757,21 @@ fn queue_pfn_from_physical_address(physical: u64) -> Result<u32, &'static str> {
     u32::try_from(physical >> 12).map_err(|_| "virtio queue PFN does not fit in legacy register")
 }
 
+fn minimum_used_len_for_rw(
+    device_writes_data: bool,
+    data_len_u32: u32,
+) -> Result<u32, BlockIoError> {
+    if device_writes_data {
+        data_len_u32
+            .checked_add(1)
+            .ok_or(BlockIoError::InvalidRequest(
+                BlockRequestError::BufferLengthOverflow,
+            ))
+    } else {
+        Ok(1)
+    }
+}
+
 fn calculate_max_transfer_blocks(block_size: u32) -> Result<u32, &'static str> {
     let dma_bytes =
         u32::try_from(DMA_DATA_BUFFER_BYTES).map_err(|_| "DMA buffer length overflow")?;
@@ -837,5 +887,16 @@ mod tests {
         assert_eq!(queue_pfn_from_physical_address(0x4000).unwrap(), 4);
         assert!(queue_pfn_from_physical_address(0x4001).is_err());
         assert!(queue_pfn_from_physical_address((u64::from(u32::MAX) + 1) << 12).is_err());
+    }
+
+    #[test]
+    fn minimum_used_len_for_rw_matches_direction() {
+        assert_eq!(minimum_used_len_for_rw(false, 4096).unwrap(), 1);
+        assert_eq!(minimum_used_len_for_rw(true, 4096).unwrap(), 4097);
+    }
+
+    #[test]
+    fn minimum_used_len_for_rw_rejects_overflow() {
+        assert!(minimum_used_len_for_rw(true, u32::MAX).is_err());
     }
 }
