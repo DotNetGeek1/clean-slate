@@ -472,13 +472,9 @@ fn crash_spawn_hook(
     kernel_stack_top: u64,
     scheduler_slot: usize,
     _service: ServiceId,
+    generation: InstanceGeneration,
 ) -> Result<SpawnedServiceInstance, &'static str> {
     let state = recovery_state()?;
-    let generation = unsafe {
-        service_lifecycle_controller_mut()
-            .authoritative_generation(CRASH_SERVICE_ID)
-            .ok_or("crash service generation missing")?
-    };
     let (stack_evidence, config, role) = if generation.0 <= 1 {
         (
             GEN1_STACK_EVIDENCE,

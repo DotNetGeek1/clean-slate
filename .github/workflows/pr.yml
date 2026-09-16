@@ -10,6 +10,17 @@ on:
       - "rust-toolchain.toml"
       - ".cargo/**"
       - ".github/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "kernel/**"
+      - "xtask/**"
+      - "scripts/**"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".github/**"
   workflow_dispatch:
 
 concurrency:

@@ -4,8 +4,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use clean_slate_service_lifecycle::{
-    single_dependency, DomainId, InstanceGeneration, LifecycleEvent, LifecycleEventKind,
-    LivenessConfig, ProcessId, ServiceId, ServiceInstanceId, ServiceLifecycleState,
+    single_dependency, DomainId, HealthReport, HealthStatus, InstanceGeneration, LifecycleEvent,
+    LifecycleEventKind, LivenessConfig, ProcessId, ServiceId, ServiceInstanceId,
+    ServiceLifecycleState,
 };
 use clean_slate_supervisor::{
     BoundedRestart, ConvergedSupervisor, ConvergedSupervisorError, DiagnosticSink,
@@ -38,6 +39,13 @@ fn instance(service: u32, gen: u32, pid: u64) -> ServiceInstanceId {
 fn on_failure_config() -> ServiceConvergenceConfig {
     ServiceConvergenceConfig::new(
         RestartPolicy::OnFailure(BoundedRestart::new(3, 5)),
+        LivenessConfig::new(100),
+    )
+}
+
+fn on_failure_no_backoff_config() -> ServiceConvergenceConfig {
+    ServiceConvergenceConfig::new(
+        RestartPolicy::OnFailure(BoundedRestart::new(3, 0)),
         LivenessConfig::new(100),
     )
 }
@@ -260,7 +268,7 @@ fn dependency_blocks_start_until_upstream_running() {
 }
 
 #[test]
-fn healthy_replacement_resets_retry_state() {
+fn explicit_healthy_report_resets_retry_state() {
     let service = ServiceId(6);
     let mut control = FakeLifecycleControl::<16>::new();
     control
@@ -299,6 +307,18 @@ fn healthy_replacement_resets_retry_state() {
             LifecycleEventKind::Ready,
         ))
         .expect("ready3");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(6, 4, 83),
+            LifecycleEventKind::InstanceSpawned,
+        ))
+        .expect("spawn4");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(6, 4, 83),
+            LifecycleEventKind::Ready,
+        ))
+        .expect("ready4");
 
     let capture = LineCapture::default();
     let mut sup = ConvergedSupervisor::<_, _, 4>::new(
@@ -308,7 +328,7 @@ fn healthy_replacement_resets_retry_state() {
         LivenessConfig::new(50),
     );
     sup.set_virtual_ticks(0);
-    sup.register_service(service, on_failure_config())
+    sup.register_service(service, on_failure_no_backoff_config())
         .expect("register");
     sup.request_start(service).expect("start");
     sup.handle_lifecycle_event(LifecycleEvent::new(
@@ -320,7 +340,18 @@ fn healthy_replacement_resets_retry_state() {
         instance(6, 2, 81),
         LifecycleEventKind::Faulted,
     ))
-    .expect("fault2 after healthy reset");
+    .expect("fault2 without reset");
+    sup.apply_health_report(HealthReport::new(
+        service,
+        InstanceGeneration(3),
+        HealthStatus::Ok,
+    ))
+    .expect("healthy report resets crash history");
+    sup.handle_lifecycle_event(LifecycleEvent::new(
+        instance(6, 3, 82),
+        LifecycleEventKind::Faulted,
+    ))
+    .expect("fault3 after healthy report reset");
 
     let output = lines(&capture);
     assert_eq!(
@@ -330,4 +361,104 @@ fn healthy_replacement_resets_retry_state() {
             .count(),
         2
     );
+}
+
+#[test]
+fn ready_then_immediate_fault_loop_exhausts_retry_budget() {
+    let service = ServiceId(7);
+    let mut control = FakeLifecycleControl::<32>::new();
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(7, 1, 101),
+            LifecycleEventKind::InstanceSpawned,
+        ))
+        .expect("spawn1");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(7, 1, 101),
+            LifecycleEventKind::Ready,
+        ))
+        .expect("ready1");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(7, 2, 102),
+            LifecycleEventKind::InstanceSpawned,
+        ))
+        .expect("spawn2");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(7, 2, 102),
+            LifecycleEventKind::Ready,
+        ))
+        .expect("ready2");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(7, 3, 103),
+            LifecycleEventKind::InstanceSpawned,
+        ))
+        .expect("spawn3");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(7, 3, 103),
+            LifecycleEventKind::Ready,
+        ))
+        .expect("ready3");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(7, 4, 104),
+            LifecycleEventKind::InstanceSpawned,
+        ))
+        .expect("spawn4");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(7, 4, 104),
+            LifecycleEventKind::Ready,
+        ))
+        .expect("ready4");
+
+    let capture = LineCapture::default();
+    let mut sup = ConvergedSupervisor::<_, _, 4>::new(
+        ProcessId(1),
+        control,
+        capture.clone(),
+        LivenessConfig::new(50),
+    );
+    sup.set_virtual_ticks(0);
+    sup.register_service(service, on_failure_no_backoff_config())
+        .expect("register");
+    sup.request_start(service).expect("start");
+    sup.handle_lifecycle_event(LifecycleEvent::new(
+        instance(7, 1, 101),
+        LifecycleEventKind::Faulted,
+    ))
+    .expect("fault1");
+    sup.handle_lifecycle_event(LifecycleEvent::new(
+        instance(7, 2, 102),
+        LifecycleEventKind::Faulted,
+    ))
+    .expect("fault2");
+    sup.handle_lifecycle_event(LifecycleEvent::new(
+        instance(7, 3, 103),
+        LifecycleEventKind::Faulted,
+    ))
+    .expect("fault3");
+    sup.handle_lifecycle_event(LifecycleEvent::new(
+        instance(7, 4, 104),
+        LifecycleEventKind::Faulted,
+    ))
+    .expect("fault4");
+
+    let output = lines(&capture);
+    assert!(output
+        .iter()
+        .any(|line| line.contains("[SUP ] restart service=7 attempt=1")));
+    assert!(output
+        .iter()
+        .any(|line| line.contains("[SUP ] restart service=7 attempt=2")));
+    assert!(output
+        .iter()
+        .any(|line| line.contains("[SUP ] restart service=7 attempt=3")));
+    assert!(output
+        .iter()
+        .any(|line| line.contains("[SUP ] restart suppressed service=7 reason=exhausted")));
 }

@@ -184,9 +184,17 @@ where
             }
             HealthReportOutcome::AcceptedHealthy { generation } => {
                 self.emit_health_healthy(service, generation)?;
+                if let Ok(slot) = self.recovery_slot_mut(service) {
+                    slot.runtime.on_healthy_instance();
+                    slot.scheduled_attempt = 0;
+                }
             }
             HealthReportOutcome::AcceptedDegraded { generation } => {
                 self.emit_health_healthy(service, generation)?;
+                if let Ok(slot) = self.recovery_slot_mut(service) {
+                    slot.runtime.on_healthy_instance();
+                    slot.scheduled_attempt = 0;
+                }
             }
             HealthReportOutcome::IgnoredStale { .. }
             | HealthReportOutcome::IgnoredNoActiveInstance
@@ -261,10 +269,6 @@ where
             LifecycleEventKind::Ready => {
                 if generation.0 != 1 && generation.0 != 2 {
                     self.emit_health_healthy(service, generation)?;
-                }
-                if let Ok(slot) = self.recovery_slot_mut(service) {
-                    slot.runtime.on_healthy_instance();
-                    slot.scheduled_attempt = 0;
                 }
             }
             LifecycleEventKind::Exited | LifecycleEventKind::Faulted => {

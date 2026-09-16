@@ -235,7 +235,7 @@ static SERVICE_LIFECYCLE_SYSCALL_ALLOCATOR: GlobalCell<Option<PageAllocator>> =
     GlobalCell::new(None);
 
 #[allow(dead_code)]
-pub(super) fn service_lifecycle_syscall_allocator_mut() -> &'static mut Option<PageAllocator> {
+pub(crate) fn service_lifecycle_syscall_allocator_mut() -> &'static mut Option<PageAllocator> {
     unsafe { &mut *SERVICE_LIFECYCLE_SYSCALL_ALLOCATOR.get() }
 }
 
