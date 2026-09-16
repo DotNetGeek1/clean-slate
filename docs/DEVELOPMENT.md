@@ -293,7 +293,7 @@ Expected workflows include breakpoints in kernel entry, page-fault handlers, sch
 
 ## Kernel source layout
 
-`kernel/src/lib.rs` is a thin crate-composition file: crate attributes, the module list, the three `pub` re-exports `main.rs` needs (`serial_write_line`, `serial_write_fmt`, `qemu_exit_failure`) and `pub fn run()`, which forwards to `boot::run`. Everything else lives in subsystem modules inside the same `clean-slate-kernel` crate; there are no extra workspace crates.
+`kernel/src/lib.rs` is a thin crate-composition file: crate attributes, the module list, the three `pub` re-exports `main.rs` needs (`serial_write_line`, `serial_write_fmt`, `qemu_exit_failure`) and `pub fn run()`, which forwards to `boot::run`. Kernel-internal mechanism and policy still live in subsystem modules inside the same `clean-slate-kernel` crate, while transport-independent shared contracts that need host tests can live in separate workspace crates such as `clean-slate-block`.
 
 ```text
 kernel/src
@@ -341,6 +341,14 @@ Conventions:
 - **`unsafe` and assembly.** New `unsafe fn` items carry a `# Safety` section. `global_asm!` is confined to `arch/x86_64/asm.rs`, whose header lists each label the block defines and the Rust symbol or static it consumes. `extern "C"` declarations for assembly labels live next to the block; the Rust side of each contract (`no_mangle` functions) lives with its owning module.
 - **File size.** Roughly 800 lines is a soft signal that a module wants splitting, not a rule; `selftest/m3_address_space.rs` is the deliberate exception.
 
+For M5 storage, keep the layering narrow and split:
+
+- `clean-slate-block` for the transport-independent geometry/read-write/flush/error contract and fake host backend;
+- kernel storage/virtio code for hardware transport only;
+- future userspace storage service code for IPC and authority boundaries;
+- future persistent-store code for on-disk policy with no kernel/VirtIO imports;
+- `xtask`/`scripts` for persistence harness orchestration.
+
 ## Test layers
 
 ### Host unit tests
@@ -351,6 +359,7 @@ Examples:
 
 - parsers;
 - capability tables;
+- block and persistence contracts;
 - object/reference management;
 - allocators where possible;
 - filesystem data structures;

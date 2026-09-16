@@ -1,0 +1,15 @@
+[package]
+name = "clean-slate-block"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Shared M5 block I/O contract and fake host-test backend"
+
+[features]
+alloc = []
+
+[dependencies]
+
+[lints]
+workspace = true
