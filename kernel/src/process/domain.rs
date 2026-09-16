@@ -168,7 +168,13 @@ pub(crate) fn teardown_process_by_id(
 
     without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
-        let current_process = scheduler.current_userspace_process_id().ok();
+        let current_process = match scheduler.current_userspace_process_id() {
+            Ok(pid) => Some(pid),
+            Err("scheduler had no current thread") | Err("current thread was not userspace") => {
+                None
+            }
+            Err(message) => return Err(message),
+        };
         if current_process == Some(process_id) {
             return Err("cannot externally teardown the currently running userspace process");
         }
