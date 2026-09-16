@@ -76,9 +76,11 @@ use crate::selftest::m4_crash_service::handle_crash_service_page_fault;
 #[cfg(feature = "m4-crash-service-self-test")]
 use crate::selftest::m4_crash_service::handle_crash_service_userspace_entry;
 #[cfg(feature = "m4-recovery-self-test")]
-use crate::selftest::m4_recovery::handle_recovery_page_fault;
-#[cfg(feature = "m4-recovery-self-test")]
 use crate::selftest::m4_recovery::handle_recovery_userspace_entry;
+#[cfg(feature = "m4-recovery-self-test")]
+use crate::selftest::m4_recovery::observe_recovery_fault_after_containment;
+#[cfg(feature = "m4-recovery-self-test")]
+use crate::selftest::m4_recovery::observe_recovery_fault_before_containment;
 #[cfg(feature = "m4-supervisor-self-test")]
 use crate::selftest::m4_supervisor::handle_userspace_supervisor_entry;
 use crate::service::service_lifecycle_controller_mut;
@@ -227,11 +229,6 @@ fn handle_exception(context: &InterruptContext) -> u64 {
             handle_crash_service_page_fault(context)
         }
 
-        #[cfg(feature = "m4-recovery-self-test")]
-        if selector_rpl(context.cs) == 3 {
-            handle_recovery_page_fault(context)
-        }
-
         if selector_rpl(context.cs) == 3 {
             return handle_faulted_userspace_exception(context);
         }
@@ -315,6 +312,9 @@ fn handle_exception(context: &InterruptContext) -> u64 {
 
 fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
     let pid = current_userspace_fault_pid().unwrap_or_else(|message| fatal_kernel_error(message));
+    #[cfg(feature = "m4-recovery-self-test")]
+    observe_recovery_fault_before_containment(context, pid)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
     kernel_log_fmt(format_args!(
         "[PROC] fault pid={} vector={} err={:#x}\n",
         pid, context.vector, context.error_code
@@ -342,6 +342,9 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 1, true)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
+    #[cfg(feature = "m4-recovery-self-test")]
+    observe_recovery_fault_after_containment(pid, maybe_fault_event)
         .unwrap_or_else(|message| fatal_kernel_error(message));
     teardown
         .next_stack_pointer

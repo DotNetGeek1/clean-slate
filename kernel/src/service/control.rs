@@ -113,26 +113,58 @@ impl ServiceLifecycleController {
     #[allow(dead_code)]
     fn push_pending(&mut self, event: LifecycleEvent) -> Result<(), LifecycleControlError> {
         if self.pending_count >= SERVICE_PENDING_EVENTS {
-            return Err(LifecycleControlError::InvalidMessage(
-                clean_slate_service_lifecycle::DecodeError::BufferTooShort {
-                    actual: 0,
-                    required: 1,
-                },
-            ));
+            return Err(Self::event_queue_full_error());
         }
         let slot = self
             .pending
             .iter_mut()
             .find(|entry| entry.is_none())
-            .ok_or(LifecycleControlError::InvalidMessage(
-                clean_slate_service_lifecycle::DecodeError::BufferTooShort {
-                    actual: 0,
-                    required: 1,
-                },
-            ))?;
+            .ok_or(Self::event_queue_full_error())?;
         *slot = Some(event);
         self.pending_count += 1;
         Ok(())
+    }
+
+    fn push_terminal_pending(&mut self, event: LifecycleEvent) -> Result<(), LifecycleControlError> {
+        debug_assert!(matches!(
+            event.kind,
+            LifecycleEventKind::Faulted | LifecycleEventKind::Exited
+        ));
+        if self.push_pending(event).is_ok() {
+            return Ok(());
+        }
+        for pending in &mut self.pending {
+            let Some(queued) = *pending else {
+                continue;
+            };
+            if queued.instance.service == event.instance.service
+                || !matches!(
+                    queued.kind,
+                    LifecycleEventKind::Faulted | LifecycleEventKind::Exited
+                )
+            {
+                *pending = Some(event);
+                return Ok(());
+            }
+        }
+        if let Some(slot) = self.pending.iter_mut().find(|entry| entry.is_none()) {
+            *slot = Some(event);
+            self.pending_count = self.pending_count.saturating_add(1);
+            return Ok(());
+        }
+        if let Some(slot) = self.pending.first_mut() {
+            *slot = Some(event);
+            self.pending_count = SERVICE_PENDING_EVENTS;
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    const fn event_queue_full_error() -> LifecycleControlError {
+        LifecycleControlError::InvalidMessage(clean_slate_service_lifecycle::DecodeError::BufferTooShort {
+            actual: 0,
+            required: 1,
+        })
     }
 
     #[allow(dead_code)]
@@ -595,7 +627,7 @@ impl ServiceLifecycleController {
         .map_err(LifecycleControlError::InvalidTransition)?;
         let mut event = LifecycleEvent::new(instance, LifecycleEventKind::Faulted);
         event.status_code = status_code;
-        self.push_pending(event)?;
+        self.push_terminal_pending(event)?;
         self.services[service_index].state = next_state;
         self.services[service_index].live = None;
         Ok(event)
@@ -868,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn fault_notification_queue_failure_does_not_commit_state() {
+    fn fault_notification_queue_full_still_commits_terminal_fault_event() {
         let mut controller = ServiceLifecycleController::new();
         controller.services[0] = ServiceRecord {
             service: ServiceId(13),
@@ -894,13 +926,19 @@ mod tests {
         controller.pending = [Some(full_event); SERVICE_PENDING_EVENTS];
         controller.pending_count = SERVICE_PENDING_EVENTS;
 
-        let err = controller
+        let event = controller
             .notify_instance_faulted(ServiceId(13), 55)
-            .unwrap_err();
-        assert!(matches!(err, LifecycleControlError::InvalidMessage(_)));
+            .expect("faulted event");
+        assert_eq!(event.kind, LifecycleEventKind::Faulted);
+        assert_eq!(event.instance.pid.0, 55);
         let record = controller.find_service(ServiceId(13)).expect("record");
-        assert_eq!(record.state, ServiceLifecycleState::Running);
-        assert_eq!(record.live.expect("live").pid, 55);
+        assert_eq!(record.state, ServiceLifecycleState::Faulted);
+        assert!(record.live.is_none());
+        assert!(controller
+            .pending
+            .iter()
+            .flatten()
+            .any(|queued| queued.kind == LifecycleEventKind::Faulted && queued.instance.pid.0 == 55));
     }
 
     #[test]

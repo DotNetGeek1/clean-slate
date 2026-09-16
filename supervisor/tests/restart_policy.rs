@@ -346,7 +346,13 @@ fn explicit_healthy_report_resets_retry_state() {
         InstanceGeneration(3),
         HealthStatus::Ok,
     ))
-    .expect("healthy report resets crash history");
+    .expect("first healthy report");
+    sup.apply_health_report(HealthReport::new(
+        service,
+        InstanceGeneration(3),
+        HealthStatus::Ok,
+    ))
+    .expect("second healthy report resets crash history");
     sup.handle_lifecycle_event(LifecycleEvent::new(
         instance(6, 3, 82),
         LifecycleEventKind::Faulted,
@@ -461,4 +467,128 @@ fn ready_then_immediate_fault_loop_exhausts_retry_budget() {
     assert!(output
         .iter()
         .any(|line| line.contains("[SUP ] restart suppressed service=7 reason=exhausted")));
+}
+
+#[test]
+fn immediate_single_health_report_then_fault_still_exhausts() {
+    let service = ServiceId(8);
+    let mut control = FakeLifecycleControl::<32>::new();
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(8, 1, 201),
+            LifecycleEventKind::InstanceSpawned,
+        ))
+        .expect("spawn1");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(8, 1, 201),
+            LifecycleEventKind::Ready,
+        ))
+        .expect("ready1");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(8, 2, 202),
+            LifecycleEventKind::InstanceSpawned,
+        ))
+        .expect("spawn2");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(8, 2, 202),
+            LifecycleEventKind::Ready,
+        ))
+        .expect("ready2");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(8, 3, 203),
+            LifecycleEventKind::InstanceSpawned,
+        ))
+        .expect("spawn3");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(8, 3, 203),
+            LifecycleEventKind::Ready,
+        ))
+        .expect("ready3");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(8, 4, 204),
+            LifecycleEventKind::InstanceSpawned,
+        ))
+        .expect("spawn4");
+    control
+        .push_pending(LifecycleEvent::new(
+            instance(8, 4, 204),
+            LifecycleEventKind::Ready,
+        ))
+        .expect("ready4");
+
+    let capture = LineCapture::default();
+    let mut sup = ConvergedSupervisor::<_, _, 4>::new(
+        ProcessId(1),
+        control,
+        capture.clone(),
+        LivenessConfig::new(50),
+    );
+    sup.set_virtual_ticks(0);
+    sup.register_service(service, on_failure_no_backoff_config())
+        .expect("register");
+    sup.request_start(service).expect("start");
+    sup.apply_health_report(HealthReport::new(
+        service,
+        InstanceGeneration(1),
+        HealthStatus::Ok,
+    ))
+    .expect("single report g1");
+    sup.handle_lifecycle_event(LifecycleEvent::new(
+        instance(8, 1, 201),
+        LifecycleEventKind::Faulted,
+    ))
+    .expect("fault1");
+    sup.apply_health_report(HealthReport::new(
+        service,
+        InstanceGeneration(2),
+        HealthStatus::Ok,
+    ))
+    .expect("single report g2");
+    sup.handle_lifecycle_event(LifecycleEvent::new(
+        instance(8, 2, 202),
+        LifecycleEventKind::Faulted,
+    ))
+    .expect("fault2");
+    sup.apply_health_report(HealthReport::new(
+        service,
+        InstanceGeneration(3),
+        HealthStatus::Ok,
+    ))
+    .expect("single report g3");
+    sup.handle_lifecycle_event(LifecycleEvent::new(
+        instance(8, 3, 203),
+        LifecycleEventKind::Faulted,
+    ))
+    .expect("fault3");
+    sup.apply_health_report(HealthReport::new(
+        service,
+        InstanceGeneration(4),
+        HealthStatus::Ok,
+    ))
+    .expect("single report g4");
+    sup.handle_lifecycle_event(LifecycleEvent::new(
+        instance(8, 4, 204),
+        LifecycleEventKind::Faulted,
+    ))
+    .expect("fault4");
+
+    let output = lines(&capture);
+    assert!(output
+        .iter()
+        .any(|line| line.contains("[SUP ] restart service=8 attempt=1")));
+    assert!(output
+        .iter()
+        .any(|line| line.contains("[SUP ] restart service=8 attempt=2")));
+    assert!(output
+        .iter()
+        .any(|line| line.contains("[SUP ] restart service=8 attempt=3")));
+    assert!(output
+        .iter()
+        .any(|line| line.contains("[SUP ] restart suppressed service=8 reason=exhausted")));
 }

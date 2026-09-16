@@ -50,10 +50,9 @@ impl ServiceLifecycleRecord {
         if event.instance.service != self.service {
             return Err(TransitionError::InstanceMismatch);
         }
-        if !matches!(event.kind, LifecycleEventKind::InstanceSpawned)
-            && self
-                .active_instance
-                .is_some_and(|active| active != event.instance)
+        if self
+            .active_instance
+            .is_some_and(|active| active != event.instance)
         {
             return Err(TransitionError::ActiveInstanceMismatch {
                 expected: self.active_instance.expect("checked above"),
@@ -300,5 +299,46 @@ mod tests {
         ));
         assert_eq!(record.active_instance, Some(spawned));
         assert_eq!(record.state, ServiceLifecycleState::Starting);
+    }
+
+    #[test]
+    fn duplicate_instance_spawned_with_different_identity_is_rejected() {
+        let service = ServiceId(33);
+        let mut record = ServiceLifecycleRecord::declared(service);
+        record
+            .apply_control(ControlRequest::new(service, ControlRequestKind::Start))
+            .expect("start");
+        let first = ServiceInstanceId::new(
+            service,
+            InstanceGeneration(1),
+            ProcessId(701),
+            DomainId(701),
+        );
+        record
+            .apply_event(LifecycleEvent::new(
+                first,
+                LifecycleEventKind::InstanceSpawned,
+            ))
+            .expect("first spawn");
+        let replacement = ServiceInstanceId::new(
+            service,
+            InstanceGeneration(1),
+            ProcessId(702),
+            DomainId(702),
+        );
+        let err = record
+            .apply_event(LifecycleEvent::new(
+                replacement,
+                LifecycleEventKind::InstanceSpawned,
+            ))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            TransitionError::ActiveInstanceMismatch {
+                expected: first,
+                observed: replacement,
+            }
+        );
+        assert_eq!(record.active_instance, Some(first));
     }
 }
