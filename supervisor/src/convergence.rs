@@ -22,6 +22,8 @@ use crate::restart_policy::{
 };
 use crate::runtime::{DiagnosticSink, Supervisor, SupervisorError};
 
+const STABLE_HEALTH_REPORTS_REQUIRED: u32 = 2;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConvergedSupervisorError {
     Supervisor(SupervisorError),
@@ -50,6 +52,7 @@ struct RecoverySlot {
     scheduled_attempt: u32,
     restart_old_pid: Option<u64>,
     last_healthy_gen_emitted: u32,
+    healthy_reports_since_spawn: u32,
 }
 
 /// Userspace supervisor with health, dependency readiness, and bounded restart policy.
@@ -128,6 +131,7 @@ where
             scheduled_attempt: 0,
             restart_old_pid: None,
             last_healthy_gen_emitted: 0,
+            healthy_reports_since_spawn: 0,
         });
         Ok(())
     }
@@ -184,9 +188,25 @@ where
             }
             HealthReportOutcome::AcceptedHealthy { generation } => {
                 self.emit_health_healthy(service, generation)?;
+                if let Ok(slot) = self.recovery_slot_mut(service) {
+                    slot.healthy_reports_since_spawn =
+                        slot.healthy_reports_since_spawn.saturating_add(1);
+                    if slot.healthy_reports_since_spawn >= STABLE_HEALTH_REPORTS_REQUIRED {
+                        slot.runtime.on_healthy_instance();
+                        slot.scheduled_attempt = 0;
+                    }
+                }
             }
             HealthReportOutcome::AcceptedDegraded { generation } => {
                 self.emit_health_healthy(service, generation)?;
+                if let Ok(slot) = self.recovery_slot_mut(service) {
+                    slot.healthy_reports_since_spawn =
+                        slot.healthy_reports_since_spawn.saturating_add(1);
+                    if slot.healthy_reports_since_spawn >= STABLE_HEALTH_REPORTS_REQUIRED {
+                        slot.runtime.on_healthy_instance();
+                        slot.scheduled_attempt = 0;
+                    }
+                }
             }
             HealthReportOutcome::IgnoredStale { .. }
             | HealthReportOutcome::IgnoredNoActiveInstance
@@ -250,6 +270,7 @@ where
                     .map_err(ConvergedSupervisorError::Health)?
                     .begin_instance(generation, self.now, self.default_liveness);
                 if let Ok(slot) = self.recovery_slot_mut(service) {
+                    slot.healthy_reports_since_spawn = 0;
                     if let Some(old_pid) = slot.restart_old_pid.take() {
                         if old_pid != pid {
                             self.emit_restarted(service, old_pid, pid)?;
@@ -262,12 +283,11 @@ where
                 if generation.0 != 1 && generation.0 != 2 {
                     self.emit_health_healthy(service, generation)?;
                 }
-                if let Ok(slot) = self.recovery_slot_mut(service) {
-                    slot.runtime.on_healthy_instance();
-                    slot.scheduled_attempt = 0;
-                }
             }
             LifecycleEventKind::Exited | LifecycleEventKind::Faulted => {
+                if let Ok(slot) = self.recovery_slot_mut(service) {
+                    slot.healthy_reports_since_spawn = 0;
+                }
                 let outcome = self
                     .health
                     .record_mut(service)

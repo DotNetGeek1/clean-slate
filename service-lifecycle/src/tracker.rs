@@ -50,6 +50,15 @@ impl ServiceLifecycleRecord {
         if event.instance.service != self.service {
             return Err(TransitionError::InstanceMismatch);
         }
+        if self
+            .active_instance
+            .is_some_and(|active| active != event.instance)
+        {
+            return Err(TransitionError::ActiveInstanceMismatch {
+                expected: self.active_instance.expect("checked above"),
+                observed: event.instance,
+            });
+        }
         let (next, generation) = apply_transition(
             self.state,
             self.authoritative_generation,
@@ -210,5 +219,126 @@ mod tests {
         assert_eq!(active.logical_service(), ServiceId(42));
         assert_eq!(active.pid, pid);
         assert_ne!(active.pid.0, active.logical_service().0 as u64);
+    }
+
+    #[test]
+    fn same_generation_different_pid_is_rejected() {
+        let service = ServiceId(42);
+        let mut record = ServiceLifecycleRecord::declared(service);
+        record
+            .apply_control(ControlRequest::new(service, ControlRequestKind::Start))
+            .expect("start");
+        let spawned = ServiceInstanceId::new(
+            service,
+            InstanceGeneration(1),
+            ProcessId(9001),
+            DomainId(77),
+        );
+        record
+            .apply_event(LifecycleEvent::new(
+                spawned,
+                LifecycleEventKind::InstanceSpawned,
+            ))
+            .expect("spawn");
+        let err = record
+            .apply_event(LifecycleEvent::new(
+                ServiceInstanceId::new(
+                    service,
+                    InstanceGeneration(1),
+                    ProcessId(9002),
+                    DomainId(77),
+                ),
+                LifecycleEventKind::Ready,
+            ))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            TransitionError::ActiveInstanceMismatch {
+                expected: spawned,
+                observed: ServiceInstanceId::new(
+                    service,
+                    InstanceGeneration(1),
+                    ProcessId(9002),
+                    DomainId(77),
+                ),
+            }
+        );
+        assert_eq!(record.active_instance, Some(spawned));
+        assert_eq!(record.state, ServiceLifecycleState::Starting);
+    }
+
+    #[test]
+    fn same_generation_different_domain_is_rejected() {
+        let service = ServiceId(24);
+        let mut record = ServiceLifecycleRecord::declared(service);
+        record
+            .apply_control(ControlRequest::new(service, ControlRequestKind::Start))
+            .expect("start");
+        let spawned =
+            ServiceInstanceId::new(service, InstanceGeneration(1), ProcessId(501), DomainId(11));
+        record
+            .apply_event(LifecycleEvent::new(
+                spawned,
+                LifecycleEventKind::InstanceSpawned,
+            ))
+            .expect("spawn");
+        let err = record
+            .apply_event(LifecycleEvent::new(
+                ServiceInstanceId::new(
+                    service,
+                    InstanceGeneration(1),
+                    ProcessId(501),
+                    DomainId(12),
+                ),
+                LifecycleEventKind::Ready,
+            ))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            TransitionError::ActiveInstanceMismatch { .. }
+        ));
+        assert_eq!(record.active_instance, Some(spawned));
+        assert_eq!(record.state, ServiceLifecycleState::Starting);
+    }
+
+    #[test]
+    fn duplicate_instance_spawned_with_different_identity_is_rejected() {
+        let service = ServiceId(33);
+        let mut record = ServiceLifecycleRecord::declared(service);
+        record
+            .apply_control(ControlRequest::new(service, ControlRequestKind::Start))
+            .expect("start");
+        let first = ServiceInstanceId::new(
+            service,
+            InstanceGeneration(1),
+            ProcessId(701),
+            DomainId(701),
+        );
+        record
+            .apply_event(LifecycleEvent::new(
+                first,
+                LifecycleEventKind::InstanceSpawned,
+            ))
+            .expect("first spawn");
+        let replacement = ServiceInstanceId::new(
+            service,
+            InstanceGeneration(1),
+            ProcessId(702),
+            DomainId(702),
+        );
+        let err = record
+            .apply_event(LifecycleEvent::new(
+                replacement,
+                LifecycleEventKind::InstanceSpawned,
+            ))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            TransitionError::ActiveInstanceMismatch {
+                expected: first,
+                observed: replacement,
+            }
+        );
+        assert_eq!(record.active_instance, Some(first));
     }
 }

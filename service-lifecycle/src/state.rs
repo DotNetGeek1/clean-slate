@@ -82,6 +82,13 @@ pub enum TransitionError {
         observed: InstanceGeneration,
         authoritative: InstanceGeneration,
     },
+    ActiveInstanceMismatch {
+        expected: ServiceInstanceId,
+        observed: ServiceInstanceId,
+    },
+    GenerationExhausted {
+        current: InstanceGeneration,
+    },
     InstanceMismatch,
 }
 
@@ -115,16 +122,21 @@ fn apply_control(
 ) -> Result<(ServiceLifecycleState, InstanceGeneration), TransitionError> {
     let input = TransitionInput::Control(kind);
     match (state, kind) {
-        (ServiceLifecycleState::Declared, ControlRequestKind::Start) => {
-            Ok((ServiceLifecycleState::Starting, bump_generation(generation)))
-        }
+        (ServiceLifecycleState::Declared, ControlRequestKind::Start) => Ok((
+            ServiceLifecycleState::Starting,
+            bump_generation(generation)?,
+        )),
         (
             ServiceLifecycleState::Exited | ServiceLifecycleState::Faulted,
             ControlRequestKind::Start,
-        ) => Ok((ServiceLifecycleState::Starting, bump_generation(generation))),
-        (ServiceLifecycleState::RestartPending, ControlRequestKind::Start) => {
-            Ok((ServiceLifecycleState::Starting, bump_generation(generation)))
-        }
+        ) => Ok((
+            ServiceLifecycleState::Starting,
+            bump_generation(generation)?,
+        )),
+        (ServiceLifecycleState::RestartPending, ControlRequestKind::Start) => Ok((
+            ServiceLifecycleState::Starting,
+            bump_generation(generation)?,
+        )),
         (
             ServiceLifecycleState::Running,
             ControlRequestKind::Stop | ControlRequestKind::Terminate,
@@ -195,8 +207,13 @@ fn apply_event(
     }
 }
 
-fn bump_generation(generation: InstanceGeneration) -> InstanceGeneration {
-    InstanceGeneration(generation.0.saturating_add(1))
+fn bump_generation(generation: InstanceGeneration) -> Result<InstanceGeneration, TransitionError> {
+    if generation.0 == u32::MAX {
+        return Err(TransitionError::GenerationExhausted {
+            current: generation,
+        });
+    }
+    Ok(InstanceGeneration(generation.0 + 1))
 }
 
 #[cfg(test)]
@@ -272,5 +289,22 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn generation_exhaustion_is_rejected() {
+        let err = apply_transition(
+            ServiceLifecycleState::Declared,
+            InstanceGeneration(u32::MAX),
+            TransitionInput::Control(ControlRequestKind::Start),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            TransitionError::GenerationExhausted {
+                current: InstanceGeneration(u32::MAX),
+            }
+        );
     }
 }

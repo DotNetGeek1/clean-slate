@@ -61,7 +61,10 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
                 "SUPERVISOR_USERSPACE_ENTRY_OFFSET",
             )
         } else {
-            ("recovery_userspace_entry.rs", "RECOVERY_SUPERVISOR_ENTRY_OFFSET")
+            (
+                "recovery_userspace_entry.rs",
+                "RECOVERY_SUPERVISOR_ENTRY_OFFSET",
+            )
         };
         let generated = out_dir.join(generated_file);
         fs::write(

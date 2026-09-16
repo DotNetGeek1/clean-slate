@@ -5,14 +5,7 @@
 pub(crate) mod timer;
 use crate::arch::x86_64::apic::acknowledge_timer_interrupt;
 use crate::arch::x86_64::bit;
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test"
-))]
-use crate::arch::x86_64::gdt::selector_rpl;
+use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::idt::exception_name;
 use crate::arch::x86_64::interrupt_context::InterruptContext;
 use crate::arch::x86_64::DOUBLE_FAULT_VECTOR;
@@ -31,14 +24,18 @@ use crate::arch::x86_64::TIMER_VECTOR;
 use crate::arch::x86_64::USER_TEST_VECTOR;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
-#[cfg(not(feature = "m2-timer-self-test"))]
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_FAILURE;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::interrupt::timer::increment_kernel_ticks;
+use crate::mm::address_space::kernel_root_frame;
+use crate::mm::paging::current_root_frame_address;
+use crate::process::domain::teardown_current_process;
+use crate::process::process_registry_mut;
 #[cfg(not(any(feature = "m2-timer-self-test", feature = "m3-syscall-self-test")))]
 use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
+use crate::sched::scheduler_mut;
 #[cfg(not(any(feature = "m2-timer-self-test", feature = "m3-syscall-self-test")))]
 use crate::sched::with_scheduler;
 #[cfg(feature = "m2-double-fault-self-test")]
@@ -78,11 +75,15 @@ use crate::selftest::m4_crash_service::handle_crash_service_page_fault;
 #[cfg(feature = "m4-crash-service-self-test")]
 use crate::selftest::m4_crash_service::handle_crash_service_userspace_entry;
 #[cfg(feature = "m4-recovery-self-test")]
-use crate::selftest::m4_recovery::handle_recovery_page_fault;
-#[cfg(feature = "m4-recovery-self-test")]
 use crate::selftest::m4_recovery::handle_recovery_userspace_entry;
+#[cfg(feature = "m4-recovery-self-test")]
+use crate::selftest::m4_recovery::observe_recovery_fault_after_containment;
+#[cfg(feature = "m4-recovery-self-test")]
+use crate::selftest::m4_recovery::observe_recovery_fault_before_containment;
 #[cfg(feature = "m4-supervisor-self-test")]
 use crate::selftest::m4_supervisor::handle_userspace_supervisor_entry;
+use crate::service::service_lifecycle_controller_mut;
+use crate::syscall::service_lifecycle_syscall_allocator_mut;
 #[cfg(feature = "m2-double-fault-self-test")]
 use core::sync::atomic::Ordering;
 use x86_64::registers::control::Cr2;
@@ -201,7 +202,7 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
     handle_exception(context)
 }
 
-fn handle_exception(context: &InterruptContext) -> ! {
+fn handle_exception(context: &InterruptContext) -> u64 {
     if context.vector as usize == DOUBLE_FAULT_VECTOR {
         handle_double_fault(context)
     }
@@ -227,9 +228,8 @@ fn handle_exception(context: &InterruptContext) -> ! {
             handle_crash_service_page_fault(context)
         }
 
-        #[cfg(feature = "m4-recovery-self-test")]
         if selector_rpl(context.cs) == 3 {
-            handle_recovery_page_fault(context)
+            return handle_faulted_userspace_exception(context);
         }
 
         #[cfg(feature = "m2-double-fault-self-test")]
@@ -288,6 +288,10 @@ fn handle_exception(context: &InterruptContext) -> ! {
         qemu_exit(QEMU_EXIT_FAILURE)
     }
 
+    if selector_rpl(context.cs) == 3 {
+        return handle_faulted_userspace_exception(context);
+    }
+
     kernel_log_fmt(format_args!(
         "[EXC ] vector={} name={} err={:#x}\n",
         context.vector,
@@ -303,4 +307,68 @@ fn handle_exception(context: &InterruptContext) -> ! {
         context.rax, context.rbx, context.rcx, context.rdx
     ));
     qemu_exit(QEMU_EXIT_FAILURE)
+}
+
+fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
+    let pid = current_userspace_fault_pid().unwrap_or_else(|message| fatal_kernel_error(message));
+    #[cfg(feature = "m4-recovery-self-test")]
+    observe_recovery_fault_before_containment(context, pid)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
+    kernel_log_fmt(format_args!(
+        "[PROC] fault pid={} vector={} err={:#x}\n",
+        pid, context.vector, context.error_code
+    ));
+
+    let controller = unsafe { service_lifecycle_controller_mut() };
+    let maybe_fault_event =
+        match controller.notify_faulted_live_process(pid, context.error_code as u32) {
+            Ok(event) => event,
+            Err(error) => {
+                kernel_log_fmt(format_args!(
+                    "[FAIL] supervised fault publication failed pid={} err={:?}\n",
+                    pid, error
+                ));
+                fatal_kernel_error("failed to publish supervised fault event")
+            }
+        };
+    if maybe_fault_event.is_none() {
+        kernel_log_fmt(format_args!(
+            "[PROC] unsupervised fault pid={} proceeding with teardown\n",
+            pid
+        ));
+    }
+    let allocator = service_lifecycle_syscall_allocator_mut()
+        .as_mut()
+        .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));
+    let teardown = teardown_current_process(allocator, kernel_root_frame(), 1, true)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
+    #[cfg(feature = "m4-recovery-self-test")]
+    observe_recovery_fault_after_containment(pid, maybe_fault_event)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
+    teardown
+        .next_stack_pointer
+        .unwrap_or_else(|| fatal_kernel_error("no runnable thread remained after userspace fault"))
+}
+
+fn current_userspace_fault_pid() -> Result<u64, &'static str> {
+    let pid = without_interrupts(|| unsafe { scheduler_mut().current_userspace_process_id() })?;
+    let registry = unsafe { &*process_registry_mut() };
+    let process = registry
+        .get(pid)
+        .ok_or("faulted userspace process was missing from process registry")?;
+    let active_root = current_root_frame_address();
+    if process.address_space_root() != active_root {
+        return Err("faulted userspace process did not match active address space");
+    }
+    let process_for_root = registry
+        .find_by_address_space_root(active_root)
+        .ok_or("active address space did not map to a registered process")?;
+    if process_for_root.id != process.id {
+        return Err("faulted userspace process did not match active root owner");
+    }
+    Ok(process.id)
+}
+
+const fn selector_rpl(selector: u64) -> u64 {
+    selector & 0b11
 }

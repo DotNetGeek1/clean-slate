@@ -113,26 +113,63 @@ impl ServiceLifecycleController {
     #[allow(dead_code)]
     fn push_pending(&mut self, event: LifecycleEvent) -> Result<(), LifecycleControlError> {
         if self.pending_count >= SERVICE_PENDING_EVENTS {
-            return Err(LifecycleControlError::InvalidMessage(
-                clean_slate_service_lifecycle::DecodeError::BufferTooShort {
-                    actual: 0,
-                    required: 1,
-                },
-            ));
+            return Err(Self::event_queue_full_error());
         }
         let slot = self
             .pending
             .iter_mut()
             .find(|entry| entry.is_none())
-            .ok_or(LifecycleControlError::InvalidMessage(
-                clean_slate_service_lifecycle::DecodeError::BufferTooShort {
-                    actual: 0,
-                    required: 1,
-                },
-            ))?;
+            .ok_or(Self::event_queue_full_error())?;
         *slot = Some(event);
         self.pending_count += 1;
         Ok(())
+    }
+
+    fn push_terminal_pending(
+        &mut self,
+        event: LifecycleEvent,
+    ) -> Result<(), LifecycleControlError> {
+        debug_assert!(matches!(
+            event.kind,
+            LifecycleEventKind::Faulted | LifecycleEventKind::Exited
+        ));
+        if self.push_pending(event).is_ok() {
+            return Ok(());
+        }
+        for pending in &mut self.pending {
+            let Some(queued) = *pending else {
+                continue;
+            };
+            if queued.instance.service == event.instance.service
+                || !matches!(
+                    queued.kind,
+                    LifecycleEventKind::Faulted | LifecycleEventKind::Exited
+                )
+            {
+                *pending = Some(event);
+                return Ok(());
+            }
+        }
+        if let Some(slot) = self.pending.iter_mut().find(|entry| entry.is_none()) {
+            *slot = Some(event);
+            self.pending_count = self.pending_count.saturating_add(1);
+            return Ok(());
+        }
+        if let Some(slot) = self.pending.first_mut() {
+            *slot = Some(event);
+            self.pending_count = SERVICE_PENDING_EVENTS;
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    const fn event_queue_full_error() -> LifecycleControlError {
+        LifecycleControlError::InvalidMessage(
+            clean_slate_service_lifecycle::DecodeError::BufferTooShort {
+                actual: 0,
+                required: 1,
+            },
+        )
     }
 
     #[allow(dead_code)]
@@ -175,9 +212,10 @@ impl ServiceLifecycleController {
         &mut self,
         service_id: ServiceId,
     ) -> Result<(), LifecycleControlError> {
-        let record = self
-            .find_service_mut(service_id)
+        let service_index = self
+            .service_index(service_id)
             .ok_or(LifecycleControlError::UnknownService)?;
+        let record = self.services[service_index];
         let live = record.live.ok_or(LifecycleControlError::ServiceNotLive)?;
         let instance = ServiceInstanceId::new(
             service_id,
@@ -192,8 +230,9 @@ impl ServiceLifecycleController {
             Some(instance),
         )
         .map_err(LifecycleControlError::InvalidTransition)?;
-        record.state = next_state;
-        self.push_pending(LifecycleEvent::new(instance, LifecycleEventKind::Ready))
+        self.push_pending(LifecycleEvent::new(instance, LifecycleEventKind::Ready))?;
+        self.services[service_index].state = next_state;
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -202,40 +241,24 @@ impl ServiceLifecycleController {
         service_id: ServiceId,
         pid: u64,
     ) -> Result<LifecycleEvent, LifecycleControlError> {
-        let record = self
-            .find_service_mut(service_id)
-            .ok_or(LifecycleControlError::UnknownService)?;
-        let live = record
-            .live
-            .take()
-            .ok_or(LifecycleControlError::ServiceNotLive)?;
-        if live.pid != pid {
-            return Err(LifecycleControlError::StaleInstance(
-                ServiceInstanceId::new(
-                    service_id,
-                    live.generation,
-                    ProcessId(pid),
-                    DomainId(live.domain_id),
-                ),
-            ));
-        }
-        let instance = ServiceInstanceId::new(
-            service_id,
-            live.generation,
-            ProcessId(live.pid),
-            DomainId(live.domain_id),
-        );
-        let (next_state, _) = apply_transition(
-            record.state,
-            record.authoritative_generation,
-            TransitionInput::Event(LifecycleEventKind::Faulted),
-            Some(instance),
-        )
-        .map_err(LifecycleControlError::InvalidTransition)?;
-        record.state = next_state;
-        let event = LifecycleEvent::new(instance, LifecycleEventKind::Faulted);
-        self.push_pending(event)?;
-        Ok(event)
+        self.notify_instance_faulted_with_status(service_id, pid, 0)
+    }
+
+    pub(crate) fn notify_faulted_live_process(
+        &mut self,
+        pid: u64,
+        status_code: u32,
+    ) -> Result<Option<LifecycleEvent>, LifecycleControlError> {
+        let Some(service_index) = self
+            .services
+            .iter()
+            .position(|entry| entry.live.is_some_and(|live| live.pid == pid))
+        else {
+            return Ok(None);
+        };
+        let service_id = self.services[service_index].service;
+        let event = self.notify_instance_faulted_with_status(service_id, pid, status_code)?;
+        Ok(Some(event))
     }
 
     pub(crate) fn configure_launch_context(
@@ -295,12 +318,6 @@ impl ServiceLifecycleController {
             .find(|entry| entry.service == service && entry.service.0 != 0)
     }
 
-    fn find_service_mut(&mut self, service: ServiceId) -> Option<&mut ServiceRecord> {
-        self.services
-            .iter_mut()
-            .find(|entry| entry.service == service && entry.service.0 != 0)
-    }
-
     fn allocate_scheduler_slot(&mut self) -> Result<usize, &'static str> {
         let scheduler = unsafe { crate::sched::scheduler_mut() };
         let slot = scheduler
@@ -320,6 +337,7 @@ impl ServiceLifecycleController {
         &mut self,
         allocator: &mut PageAllocator,
         service_id: ServiceId,
+        generation: InstanceGeneration,
     ) -> Result<LifecycleControlResult, LifecycleControlError> {
         let service_index = self
             .service_index(service_id)
@@ -353,7 +371,6 @@ impl ServiceLifecycleController {
                 self.kernel_stack_top
             }
         };
-        let generation = self.services[service_index].authoritative_generation;
         let spawned = if service_id.0 == 0x0000_4100 {
             #[cfg(feature = "m4-recovery-self-test")]
             {
@@ -362,6 +379,7 @@ impl ServiceLifecycleController {
                     kernel_stack_top,
                     scheduler_slot,
                     service_id,
+                    generation,
                 )
                 .map_err(LifecycleControlError::SpawnFailed)?
             }
@@ -413,7 +431,6 @@ impl ServiceLifecycleController {
             .ok_or(LifecycleControlError::UnknownService)?;
         let live = self.services[service_index]
             .live
-            .take()
             .ok_or(LifecycleControlError::ServiceNotLive)?;
         self.log_terminate(service_id, live.pid);
         teardown_process_by_id(
@@ -430,6 +447,7 @@ impl ServiceLifecycleController {
                 "process registry retained a reaped supervised service",
             ));
         }
+        self.services[service_index].live = None;
         self.services[service_index].state = ServiceLifecycleState::Exited;
         let instance = ServiceInstanceId::new(
             service_id,
@@ -507,41 +525,32 @@ impl ServiceLifecycleController {
     ) -> Result<LifecycleControlResult, LifecycleControlError> {
         let service_id = request.service;
         let kind = request.kind;
-        let record = self
-            .find_service_mut(service_id)
+        let service_index = self
+            .service_index(service_id)
             .ok_or(LifecycleControlError::UnknownService)?;
-        if kind != ControlRequestKind::Restart {
-            let (next_state, next_generation) = apply_transition(
-                record.state,
-                record.authoritative_generation,
-                TransitionInput::Control(kind),
-                None,
-            )
-            .map_err(LifecycleControlError::InvalidTransition)?;
-            record.state = next_state;
-            record.authoritative_generation = next_generation;
-        } else {
-            let (next_state, next_generation) = apply_transition(
-                record.state,
-                record.authoritative_generation,
-                TransitionInput::Control(ControlRequestKind::Restart),
-                None,
-            )
-            .map_err(LifecycleControlError::InvalidTransition)?;
-            record.state = next_state;
-            record.authoritative_generation = next_generation;
-        }
+        let record = self.services[service_index];
+        let (next_state, next_generation) = apply_transition(
+            record.state,
+            record.authoritative_generation,
+            TransitionInput::Control(kind),
+            None,
+        )
+        .map_err(LifecycleControlError::InvalidTransition)?;
 
         match kind {
-            ControlRequestKind::Start => self.start_service(allocator, service_id),
+            ControlRequestKind::Start => {
+                let result = self.start_service(allocator, service_id, next_generation)?;
+                self.services[service_index].state = next_state;
+                self.services[service_index].authoritative_generation = next_generation;
+                Ok(result)
+            }
             ControlRequestKind::Terminate | ControlRequestKind::Stop => {
-                self.terminate_service(allocator, service_id)
+                let result = self.terminate_service(allocator, service_id)?;
+                self.services[service_index].authoritative_generation = next_generation;
+                Ok(result)
             }
             ControlRequestKind::Restart => {
-                let live_instance = self
-                    .find_service(service_id)
-                    .ok_or(LifecycleControlError::UnknownService)?
-                    .live;
+                let live_instance = self.services[service_index].live;
                 if let Some(live) = live_instance {
                     self.log_terminate(service_id, live.pid);
                     teardown_process_by_id(
@@ -558,11 +567,10 @@ impl ServiceLifecycleController {
                             "process registry retained a reaped supervised service",
                         ));
                     }
-                    let record = self
-                        .find_service_mut(service_id)
-                        .ok_or(LifecycleControlError::UnknownService)?;
-                    record.live = None;
                 }
+                self.services[service_index].state = next_state;
+                self.services[service_index].authoritative_generation = next_generation;
+                self.services[service_index].live = None;
                 Ok(LifecycleControlResult { event: None })
             }
         }
@@ -587,6 +595,48 @@ impl ServiceLifecycleController {
         }
         Ok(())
     }
+
+    fn notify_instance_faulted_with_status(
+        &mut self,
+        service_id: ServiceId,
+        pid: u64,
+        status_code: u32,
+    ) -> Result<LifecycleEvent, LifecycleControlError> {
+        let service_index = self
+            .service_index(service_id)
+            .ok_or(LifecycleControlError::UnknownService)?;
+        let record = self.services[service_index];
+        let live = record.live.ok_or(LifecycleControlError::ServiceNotLive)?;
+        if live.pid != pid {
+            return Err(LifecycleControlError::StaleInstance(
+                ServiceInstanceId::new(
+                    service_id,
+                    live.generation,
+                    ProcessId(pid),
+                    DomainId(live.domain_id),
+                ),
+            ));
+        }
+        let instance = ServiceInstanceId::new(
+            service_id,
+            live.generation,
+            ProcessId(live.pid),
+            DomainId(live.domain_id),
+        );
+        let (next_state, _) = apply_transition(
+            record.state,
+            record.authoritative_generation,
+            TransitionInput::Event(LifecycleEventKind::Faulted),
+            Some(instance),
+        )
+        .map_err(LifecycleControlError::InvalidTransition)?;
+        let mut event = LifecycleEvent::new(instance, LifecycleEventKind::Faulted);
+        event.status_code = status_code;
+        self.push_terminal_pending(event)?;
+        self.services[service_index].state = next_state;
+        self.services[service_index].live = None;
+        Ok(event)
+    }
 }
 
 static SERVICE_LIFECYCLE_CONTROLLER: GlobalCell<ServiceLifecycleController> =
@@ -607,18 +657,10 @@ mod tests {
     use crate::mm::frame_allocator::PageAllocator;
     use crate::sched::ThreadKind;
 
-    #[test]
-    fn unauthorized_supervisor_cannot_control_services() {
+    fn test_allocator() -> PageAllocator {
         use crate::boot::uefi::normalize_memory_map;
         use uefi::mem::memory_map::{MemoryAttribute, MemoryDescriptor, MemoryType};
 
-        let mut controller = ServiceLifecycleController::new();
-        controller
-            .declare_service(ServiceId(7))
-            .expect("declare service");
-        let capability = controller
-            .grant_lifecycle_control_capability(100)
-            .expect("grant capability");
         #[repr(align(4096))]
         struct AlignedPages([u8; crate::mm::PAGE_SIZE as usize * 4]);
         let mut pages = AlignedPages([0; crate::mm::PAGE_SIZE as usize * 4]);
@@ -631,7 +673,19 @@ mod tests {
             att: MemoryAttribute::empty(),
         }];
         let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
-        let mut allocator = PageAllocator::new(&map).expect("allocator");
+        PageAllocator::new(&map).expect("allocator")
+    }
+
+    #[test]
+    fn unauthorized_supervisor_cannot_control_services() {
+        let mut controller = ServiceLifecycleController::new();
+        controller
+            .declare_service(ServiceId(7))
+            .expect("declare service");
+        let capability = controller
+            .grant_lifecycle_control_capability(100)
+            .expect("grant capability");
+        let mut allocator = test_allocator();
         controller.configure_launch_context(0x1000, 0x2000);
         let request = ControlRequest::new(ServiceId(7), ControlRequestKind::Start);
         let message = LifecycleMessage::ControlRequest(request).encode();
@@ -711,5 +765,206 @@ mod tests {
         let mut controller = ServiceLifecycleController::new();
         controller.next_scheduler_slot = 2;
         assert_eq!(controller.allocate_scheduler_slot().expect("allocate"), 1);
+    }
+
+    #[test]
+    fn start_failure_rolls_back_transition_and_generation() {
+        let mut controller = ServiceLifecycleController::new();
+        controller
+            .declare_service(ServiceId(2))
+            .expect("declare service");
+        let mut allocator = test_allocator();
+        let err = controller
+            .handle_control_request(
+                &mut allocator,
+                0,
+                ControlRequest::new(ServiceId(2), ControlRequestKind::Start),
+            )
+            .unwrap_err();
+        assert!(matches!(err, LifecycleControlError::SpawnFailed(_)));
+        let record = controller.find_service(ServiceId(2)).expect("record");
+        assert_eq!(record.state, ServiceLifecycleState::Declared);
+        assert_eq!(record.authoritative_generation, InstanceGeneration(0));
+        assert!(record.live.is_none());
+    }
+
+    #[test]
+    fn terminate_failure_preserves_live_instance() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = ServiceRecord {
+            service: ServiceId(9),
+            state: ServiceLifecycleState::Running,
+            authoritative_generation: InstanceGeneration(1),
+            live: Some(LiveServiceInstance {
+                pid: 0,
+                tid: 7,
+                domain_id: 0,
+                generation: InstanceGeneration(1),
+                scheduler_slot: 1,
+            }),
+        };
+        let mut allocator = test_allocator();
+        let err = controller
+            .handle_control_request(
+                &mut allocator,
+                0,
+                ControlRequest::new(ServiceId(9), ControlRequestKind::Terminate),
+            )
+            .unwrap_err();
+        assert!(matches!(err, LifecycleControlError::TeardownFailed(_)));
+        let record = controller.find_service(ServiceId(9)).expect("record");
+        assert_eq!(record.state, ServiceLifecycleState::Running);
+        assert_eq!(record.live.expect("live").pid, 0);
+    }
+
+    #[test]
+    fn restart_failure_preserves_live_instance_and_state() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = ServiceRecord {
+            service: ServiceId(10),
+            state: ServiceLifecycleState::Running,
+            authoritative_generation: InstanceGeneration(2),
+            live: Some(LiveServiceInstance {
+                pid: 0,
+                tid: 7,
+                domain_id: 0,
+                generation: InstanceGeneration(2),
+                scheduler_slot: 2,
+            }),
+        };
+        let mut allocator = test_allocator();
+        let err = controller
+            .handle_control_request(
+                &mut allocator,
+                0,
+                ControlRequest::new(ServiceId(10), ControlRequestKind::Restart),
+            )
+            .unwrap_err();
+        assert!(matches!(err, LifecycleControlError::TeardownFailed(_)));
+        let record = controller.find_service(ServiceId(10)).expect("record");
+        assert_eq!(record.state, ServiceLifecycleState::Running);
+        assert_eq!(record.live.expect("live").pid, 0);
+    }
+
+    #[test]
+    fn ready_notification_queue_failure_does_not_commit_state() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = ServiceRecord {
+            service: ServiceId(11),
+            state: ServiceLifecycleState::Starting,
+            authoritative_generation: InstanceGeneration(1),
+            live: Some(LiveServiceInstance {
+                pid: 44,
+                tid: 5,
+                domain_id: 44,
+                generation: InstanceGeneration(1),
+                scheduler_slot: 0,
+            }),
+        };
+        let full_event = LifecycleEvent::new(
+            ServiceInstanceId::new(
+                ServiceId(11),
+                InstanceGeneration(1),
+                ProcessId(44),
+                DomainId(44),
+            ),
+            LifecycleEventKind::Ready,
+        );
+        controller.pending = [Some(full_event); SERVICE_PENDING_EVENTS];
+        controller.pending_count = SERVICE_PENDING_EVENTS;
+
+        let err = controller.notify_instance_ready(ServiceId(11)).unwrap_err();
+        assert!(matches!(err, LifecycleControlError::InvalidMessage(_)));
+        let record = controller.find_service(ServiceId(11)).expect("record");
+        assert_eq!(record.state, ServiceLifecycleState::Starting);
+    }
+
+    #[test]
+    fn stale_pid_fault_notification_cannot_clear_live_instance() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = ServiceRecord {
+            service: ServiceId(12),
+            state: ServiceLifecycleState::Running,
+            authoritative_generation: InstanceGeneration(4),
+            live: Some(LiveServiceInstance {
+                pid: 123,
+                tid: 9,
+                domain_id: 123,
+                generation: InstanceGeneration(4),
+                scheduler_slot: 2,
+            }),
+        };
+
+        let err = controller
+            .notify_instance_faulted(ServiceId(12), 777)
+            .unwrap_err();
+        assert!(matches!(err, LifecycleControlError::StaleInstance(_)));
+        let record = controller.find_service(ServiceId(12)).expect("record");
+        assert_eq!(record.state, ServiceLifecycleState::Running);
+        assert_eq!(record.live.expect("live").pid, 123);
+    }
+
+    #[test]
+    fn fault_notification_queue_full_still_commits_terminal_fault_event() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = ServiceRecord {
+            service: ServiceId(13),
+            state: ServiceLifecycleState::Running,
+            authoritative_generation: InstanceGeneration(1),
+            live: Some(LiveServiceInstance {
+                pid: 55,
+                tid: 5,
+                domain_id: 55,
+                generation: InstanceGeneration(1),
+                scheduler_slot: 0,
+            }),
+        };
+        let full_event = LifecycleEvent::new(
+            ServiceInstanceId::new(
+                ServiceId(13),
+                InstanceGeneration(1),
+                ProcessId(55),
+                DomainId(55),
+            ),
+            LifecycleEventKind::Ready,
+        );
+        controller.pending = [Some(full_event); SERVICE_PENDING_EVENTS];
+        controller.pending_count = SERVICE_PENDING_EVENTS;
+
+        let event = controller
+            .notify_instance_faulted(ServiceId(13), 55)
+            .expect("faulted event");
+        assert_eq!(event.kind, LifecycleEventKind::Faulted);
+        assert_eq!(event.instance.pid.0, 55);
+        let record = controller.find_service(ServiceId(13)).expect("record");
+        assert_eq!(record.state, ServiceLifecycleState::Faulted);
+        assert!(record.live.is_none());
+        assert!(controller.pending.iter().flatten().any(|queued| queued.kind
+            == LifecycleEventKind::Faulted
+            && queued.instance.pid.0 == 55));
+    }
+
+    #[test]
+    fn faulting_live_process_lookup_returns_supervised_fault_event() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = ServiceRecord {
+            service: ServiceId(14),
+            state: ServiceLifecycleState::Running,
+            authoritative_generation: InstanceGeneration(3),
+            live: Some(LiveServiceInstance {
+                pid: 300,
+                tid: 1,
+                domain_id: 300,
+                generation: InstanceGeneration(3),
+                scheduler_slot: 0,
+            }),
+        };
+        let event = controller
+            .notify_faulted_live_process(300, 17)
+            .expect("notify")
+            .expect("event");
+        assert_eq!(event.kind, LifecycleEventKind::Faulted);
+        assert_eq!(event.status_code, 17);
+        assert_eq!(controller.live_pid(ServiceId(14)), None);
     }
 }

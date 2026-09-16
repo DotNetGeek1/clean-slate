@@ -472,13 +472,9 @@ fn crash_spawn_hook(
     kernel_stack_top: u64,
     scheduler_slot: usize,
     _service: ServiceId,
+    generation: InstanceGeneration,
 ) -> Result<SpawnedServiceInstance, &'static str> {
     let state = recovery_state()?;
-    let generation = unsafe {
-        service_lifecycle_controller_mut()
-            .authoritative_generation(CRASH_SERVICE_ID)
-            .ok_or("crash service generation missing")?
-    };
     let (stack_evidence, config, role) = if generation.0 <= 1 {
         (
             GEN1_STACK_EVIDENCE,
@@ -873,17 +869,17 @@ pub(crate) fn handle_recovery_userspace_entry(
     }
 }
 
-pub(crate) fn handle_recovery_page_fault(context: &InterruptContext) -> ! {
+pub(crate) fn observe_recovery_fault_before_containment(
+    context: &InterruptContext,
+    pid: u64,
+) -> Result<(), &'static str> {
     if context.cs & 3 != 3 {
-        fatal_kernel_error("recovery page fault did not originate from CPL3");
+        return Ok(());
     }
     let fault_address = Cr2::read()
         .expect("CR2 must contain a canonical fault address")
         .as_u64();
-    let state = match recovery_state() {
-        Ok(state) => state,
-        Err(message) => fatal_kernel_error(message),
-    };
+    let state = recovery_state()?;
     if state.stage != RecoveryStage::Running {
         let fault_pid = without_interrupts(|| {
             with_scheduler(|scheduler| {
@@ -898,39 +894,37 @@ pub(crate) fn handle_recovery_page_fault(context: &InterruptContext) -> ! {
             "[FAIL] recovery boot page fault rip={:#x} cr2={:#x} pid={}\n",
             context.rip, fault_address, fault_pid
         ));
-        fatal_kernel_error("recovery observed an unexpected userspace page fault");
+        return Err("recovery observed an unexpected userspace page fault");
     }
     let service = state
         .service_process
-        .ok_or("fault without supervised service")
-        .unwrap_or_else(|message| fatal_kernel_error(message));
+        .ok_or("fault without supervised service")?;
+    if service.pid != pid {
+        return Err("recovery fault pid did not match tracked service");
+    }
     if fault_address != service.probe_address {
-        fatal_kernel_error("recovery faulted at an unexpected virtual address");
+        return Err("recovery faulted at an unexpected virtual address");
     }
     kernel_log_line("[TEST] crash-service injecting fault");
-    kernel_log_fmt(format_args!("[PROC] fault pid={}\n", service.pid));
-    let allocator = match recovery_allocator() {
-        Ok(allocator) => allocator,
-        Err(message) => fatal_kernel_error(message),
-    };
-    let controller = unsafe { service_lifecycle_controller_mut() };
-    let fault_event = controller
-        .notify_instance_faulted(CRASH_SERVICE_ID, service.pid)
-        .unwrap_or_else(|_| fatal_kernel_error("failed to record supervised fault"));
+    Ok(())
+}
+
+pub(crate) fn observe_recovery_fault_after_containment(
+    pid: u64,
+    fault_event: Option<LifecycleEvent>,
+) -> Result<(), &'static str> {
+    let state = recovery_state()?;
+    let fault_event = fault_event.ok_or("recovery fault was not published as supervised event")?;
+    if fault_event.instance.service != CRASH_SERVICE_ID {
+        return Err("recovery fault event used an unexpected service id");
+    }
+    if fault_event.instance.pid.0 != pid {
+        return Err("recovery fault event pid diverged from faulted process");
+    }
     state.harness.on_faulted(fault_event.instance);
-    let teardown = match teardown_current_process(allocator, state.kernel_root_frame, 1, true) {
-        Ok(teardown) => teardown,
-        Err(message) => fatal_kernel_error(message),
-    };
-    state.last_faulted_service_pid = service.pid;
+    state.last_faulted_service_pid = pid;
     state.service_process = None;
     state.stage = RecoveryStage::Faulted;
     publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = kernel_ticks() + 1);
-    unsafe {
-        restore_task_context(
-            teardown
-                .next_stack_pointer
-                .expect("workload survives fault"),
-        )
-    }
+    Ok(())
 }
