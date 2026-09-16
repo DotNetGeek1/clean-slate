@@ -1,3 +1,8 @@
+#![cfg_attr(
+    not(any(feature = "m2-timer-self-test", feature = "m4-recovery-self-test")),
+    allow(dead_code)
+)]
+
 //! Timer bring-up and the kernel tick counter. Owns `KERNEL_TICKS`.
 
 use crate::arch::x86_64::apic::enable_local_apic;
@@ -10,7 +15,10 @@ use core::sync::atomic::Ordering;
 
 static KERNEL_TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Current tick count (relaxed load, as at the original call sites).
+/// Current monotonic tick count (relaxed load, as at the original call sites).
+///
+/// Supervisors map this value to `clean_slate_service_lifecycle::MonotonicTicks`
+/// for M4.4 health deadlines until a dedicated userspace syscall exists.
 pub(crate) fn kernel_ticks() -> u64 {
     KERNEL_TICKS.load(Ordering::Relaxed)
 }

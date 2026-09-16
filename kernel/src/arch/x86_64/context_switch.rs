@@ -11,31 +11,31 @@
 //! is the `-1` compared against `rax` by `clean_slate_interrupt_common`.
 
 use core::arch::asm;
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 use core::mem::size_of;
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 use core::ptr;
 
 use crate::arch::x86_64::asm::clean_slate_restore_context;
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 use crate::arch::x86_64::gdt::userspace_gdt_state;
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 use crate::arch::x86_64::interrupt_context::{InterruptContext, UserspaceEntryFrame};
 
 pub(crate) const FRESH_TASK_SENTINEL: u64 = u64::MAX;
@@ -49,11 +49,11 @@ const fn align_down(value: u64, align: u64) -> u64 {
 
 pub(crate) const TASK_STACK_SIZE: usize = 64 * 1024;
 
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 pub(crate) const USER_TEST_RFLAGS: u64 = 0x202;
 
 #[repr(align(16))]
@@ -116,11 +116,11 @@ pub(crate) unsafe fn start_first_task(stack_pointer: u64, entry_point: u64) -> !
     }
 }
 
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m3-entry-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 pub(crate) fn build_userspace_entry_frame(
     kernel_stack_top: u64,
     instruction_pointer: u64,

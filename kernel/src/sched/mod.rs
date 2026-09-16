@@ -10,6 +10,9 @@ use crate::arch::x86_64::context_switch::TASK_STACK_SIZE;
 use crate::process::KERNEL_PROCESS_ID;
 use crate::sync::global_cell::GlobalCell;
 
+#[cfg(feature = "m4-recovery-self-test")]
+const TASK_COUNT: usize = 6;
+#[cfg(not(feature = "m4-recovery-self-test"))]
 const TASK_COUNT: usize = 2;
 pub(super) const TASK_REQUIRED_PREEMPTIONS: u64 = 2;
 const TASK_PROGRESS_CHUNK: u64 = 4_096;
@@ -209,6 +212,40 @@ impl Scheduler {
         retired
     }
 
+    pub(crate) fn force_exit_all_threads_for_process(
+        &mut self,
+        process_id: u64,
+    ) -> Result<usize, &'static str> {
+        let mut exited = 0usize;
+        for thread in &mut self.threads {
+            if thread.owner_process_id != process_id || thread.state == ThreadState::Empty {
+                continue;
+            }
+            if matches!(
+                thread.state,
+                ThreadState::Ready | ThreadState::Running | ThreadState::Exiting
+            ) {
+                thread.state = ThreadState::Exited;
+                exited += 1;
+            }
+        }
+        if exited == 0 {
+            return Err("process had no live threads to force-exit");
+        }
+        Ok(exited)
+    }
+
+    pub(crate) fn current_userspace_process_id(&self) -> Result<u64, &'static str> {
+        let index = self
+            .current_thread
+            .ok_or("scheduler had no current thread")?;
+        let thread = &self.threads[index];
+        if thread.kind != ThreadKind::User {
+            return Err("current thread was not userspace");
+        }
+        Ok(thread.owner_process_id)
+    }
+
     pub(crate) fn resources_for_process(&self, process_id: u64) -> ThreadProcessResources {
         let mut resources = ThreadProcessResources::default();
         for thread in &self.threads {
@@ -229,6 +266,24 @@ impl Scheduler {
             .iter()
             .filter(|thread| thread.state != ThreadState::Empty)
             .count()
+    }
+
+    pub(crate) fn thread_capacity(&self) -> usize {
+        self.threads.len()
+    }
+
+    pub(crate) fn first_empty_slot_from(&self, start: usize) -> Option<usize> {
+        if self.threads.is_empty() {
+            return None;
+        }
+        let start = start % self.threads.len();
+        for offset in 0..self.threads.len() {
+            let index = (start + offset) % self.threads.len();
+            if self.threads[index].state == ThreadState::Empty {
+                return Some(index);
+            }
+        }
+        None
     }
 
     pub(crate) fn reap_threads_for_process(

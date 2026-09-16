@@ -1,5 +1,11 @@
 [workspace]
-members = ["kernel", "xtask"]
+members = [
+    "kernel",
+    "service-fixtures",
+    "service-lifecycle",
+    "supervisor",
+    "xtask",
+]
 default-members = ["xtask"]
 resolver = "2"
 
@@ -20,3 +26,6 @@ debug = 2
 panic = "abort"
 codegen-units = 1
 lto = "thin"
+
+[profile.release.package.clean-slate-supervisor]
+opt-level = "z"

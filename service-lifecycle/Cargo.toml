@@ -1,0 +1,13 @@
+[package]
+name = "clean-slate-service-lifecycle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "M4.1 shared service lifecycle protocol, state model, and bounded wire messages"
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

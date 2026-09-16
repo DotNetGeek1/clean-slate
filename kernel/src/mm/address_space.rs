@@ -25,7 +25,25 @@ use x86_64::structures::paging::Translate;
 use x86_64::PhysAddr;
 use x86_64::VirtAddr;
 
+#[cfg(any(
+    feature = "m4-recovery-self-test",
+    feature = "m4-supervisor-self-test"
+))]
+const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
+#[cfg(not(any(
+    feature = "m4-recovery-self-test",
+    feature = "m4-supervisor-self-test"
+)))]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
+#[cfg(any(
+    feature = "m4-recovery-self-test",
+    feature = "m4-supervisor-self-test"
+))]
+const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
+#[cfg(not(any(
+    feature = "m4-recovery-self-test",
+    feature = "m4-supervisor-self-test"
+)))]
 const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 
 static KERNEL_ROOT_FRAME: AtomicU64 = AtomicU64::new(0);

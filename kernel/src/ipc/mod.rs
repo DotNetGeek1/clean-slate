@@ -10,6 +10,13 @@ const IPC_CAPABILITY_CAPACITY: usize = 8;
 pub(super) const USERSPACE_IPC_TEST_PID: u64 = 1;
 #[cfg(any(feature = "m3-ipc-self-test", test))]
 pub(super) const USERSPACE_IPC_UNAUTHORIZED_TEST_PID: u64 = 2;
+#[cfg(any(
+    feature = "m4-supervisor-self-test",
+    feature = "m4-recovery-self-test",
+    test
+))]
+#[allow(dead_code)]
+pub(crate) const USERSPACE_SUPERVISOR_TEST_PID: u64 = 1;
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +30,7 @@ enum IpcEndpointState {
 pub(crate) enum IpcEndpointKind {
     Mailbox,
     ConsoleSink,
+    LifecycleControl,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +155,13 @@ impl IpcEndpointTable {
 
     pub(super) fn create_console_sink(&mut self, owner_pid: u64) -> Result<usize, &'static str> {
         self.create_endpoint_with_kind(owner_pid, IpcEndpointKind::ConsoleSink)
+    }
+
+    pub(super) fn create_lifecycle_control_endpoint(
+        &mut self,
+        owner_pid: u64,
+    ) -> Result<usize, &'static str> {
+        self.create_endpoint_with_kind(owner_pid, IpcEndpointKind::LifecycleControl)
     }
 
     fn create_endpoint_with_kind(

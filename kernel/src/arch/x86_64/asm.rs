@@ -81,6 +81,8 @@ declare_interrupt_entries!(
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test"
 ))]
 unsafe extern "C" {
@@ -89,10 +91,14 @@ unsafe extern "C" {
 
 #[cfg(any(
     feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test"
+    feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
+    feature = "m4-service-lifecycle-self-test"
 ))]
 unsafe extern "C" {
     pub(crate) static clean_slate_user_address_space_test_start: u8;
+    #[allow(dead_code)]
     pub(crate) static clean_slate_user_address_space_test_after_entry: u8;
     pub(crate) static clean_slate_user_address_space_test_end: u8;
 }

@@ -5,8 +5,8 @@
 .DESCRIPTION
     Sets OVMF_CODE / OVMF_VARS when they are not already in the environment,
     then runs one or more `cargo xtask` acceptance tests. By default the
-    milestone gates run (test-m1, test-m2, test-m3); the individual test-m3-*
-    boots are constituents of the test-m3 aggregate and are skipped unless
+    milestone gates run (test-m1, test-m2, test-m3, test-m4); the individual
+    test-m3-* and test-m4-* boots are constituents of those aggregates and are skipped unless
     named explicitly or -Exhaustive is given. Pass test names (or short
     aliases) to target a subset.
 
@@ -17,7 +17,7 @@
       lifecycle / m3.4, ipc / m3.5, resources / m3.6
 
 .PARAMETER Exhaustive
-    Run every known test (milestone gates plus each individual M3
+    Run every known test (milestone gates plus each individual M3/M4
     constituent) instead of the default suite. Ignored when explicit test
     names are given.
 
@@ -93,6 +93,12 @@ $AllTests = [ordered]@{
     "test-m3-lifecycle"     = @{ Aliases = @("m3-lifecycle", "lifecycle", "m3.4"); Description = "M3.4 process/thread lifecycle acceptance"; Role = "Constituent" }
     "test-m3-ipc"           = @{ Aliases = @("m3-ipc", "ipc", "m3.5"); Description = "M3.5 capability-authorized IPC acceptance"; Role = "Constituent" }
     "test-m3-resources"     = @{ Aliases = @("m3-resources", "resources", "m3.6"); Description = "M3.6 domain resource accounting/teardown acceptance"; Role = "Constituent" }
+    "test-m4-crash-service" = @{ Aliases = @("m4-crash-service", "crash-service", "m4.7"); Description = "M4.7 supervised crash-service fixture acceptance"; Role = "Constituent" }
+    "test-m4-service-lifecycle" = @{ Aliases = @("m4-service-lifecycle", "service-lifecycle", "m4.2"); Description = "M4.2 kernel service lifecycle control acceptance"; Role = "Constituent" }
+    "test-m4-restart-policy"    = @{ Aliases = @("m4-restart-policy", "restart-policy", "m4.6"); Description = "M4.6 supervisor restart-policy convergence (host + userspace image build)"; Role = "Constituent" }
+    "test-m4-supervisor"        = @{ Aliases = @("m4-supervisor", "supervisor", "m4.3"); Description = "M4.3 userspace supervisor runtime QEMU integration acceptance"; Role = "Constituent" }
+    "test-m4"                   = @{ Aliases = @("m4", "m4.8"); Description = "M4 milestone gate (recovery QEMU boot + M4.6 host policy tests)"; Role = "Aggregate" }
+    "test-m4-recovery"          = @{ Aliases = @("m4-recovery", "recovery", "m4.8-qemu"); Description = "M4.8 authoritative recovery QEMU acceptance"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {

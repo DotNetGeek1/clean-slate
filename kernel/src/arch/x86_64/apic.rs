@@ -1,3 +1,8 @@
+#![cfg_attr(
+    not(any(feature = "m2-timer-self-test", feature = "m4-recovery-self-test")),
+    allow(dead_code)
+)]
+
 //! Local APIC timer/EOI programming and legacy PIC masking.
 //!
 //! Why unsafe: MMIO writes to the APIC register page and MSR writes to
