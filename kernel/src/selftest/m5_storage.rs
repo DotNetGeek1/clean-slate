@@ -449,16 +449,16 @@ fn run_interrupted_commit_boot(
         &PERSISTENCE_ALPHA_V2,
     )?;
     verify_named_object(store, OBJECT_BETA_ID, OBJECT_BETA_NAME, OBJECT_BETA_V1)?;
+    arm_crash_after_write(CRASH_AFTER_WRITE);
+    kernel_log_fmt(format_args!(
+        "[CRSH] armed trigger=after-write={CRASH_AFTER_WRITE}\n"
+    ));
     write_named_object(
         store,
         OBJECT_ALPHA_ID,
         OBJECT_ALPHA_NAME,
         &PERSISTENCE_ALPHA_V3,
     )?;
-    arm_crash_after_write(CRASH_AFTER_WRITE);
-    kernel_log_fmt(format_args!(
-        "[CRSH] armed trigger=after-write={CRASH_AFTER_WRITE}\n"
-    ));
     store.commit().map_err(map_store_error)?;
     Err("deterministic crash point did not interrupt commit")
 }

@@ -29,6 +29,7 @@ const M5_STORAGE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M5_CRASH_MATRIX_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_PERSISTENCE_BOOT_TIMEOUT: Duration = Duration::from_secs(20);
+const M5_CRASH_RECOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_BLOCK_DISK_BYTES: u64 = 16 * 1024 * 1024;
 const M5_DISK_HARNESS_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_DATA_DISK_FILENAME: &str = "m5-data.img";
@@ -210,8 +211,8 @@ const M5_CRASH_ARM_MARKERS: [&str; 6] = [
     "[STOR] recovered generation=2",
     "[STOR] read object=alpha id=1 bytes=",
     "[STOR] read object=beta id=2 bytes=",
-    "[STOR] write object=alpha id=1 bytes=",
     "[CRSH] armed trigger=after-write=1",
+    "[STOR] write object=alpha id=1 bytes=",
     "[CRSH] inject after-write=1",
 ];
 const M5_CRASH_RECOVERY_MARKERS: [&str; 5] = [
@@ -437,7 +438,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             false,
             &["m5-crash-recovery-self-test"],
-            Some((&M5_CRASH_RECOVERY_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            Some((&M5_CRASH_RECOVERY_MARKERS, M5_CRASH_RECOVERY_TIMEOUT)),
             config,
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
