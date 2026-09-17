@@ -533,7 +533,6 @@ fn run_m4_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
-    let disk = m5_data_disk_path();
     create_m5_data_disk_image()?;
     run_vm_inner_with_config(
         false,
@@ -543,11 +542,15 @@ fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
             &M5_STORAGE_ACCEPTANCE_MARKERS,
             M5_STORAGE_ACCEPTANCE_TIMEOUT,
         )),
-        VmLaunchConfig {
-            m5_data_disk: Some(disk),
-            reset_ovmf_vars: true,
-        },
+        m5_storage_vm_config(),
     )
+}
+
+fn m5_storage_vm_config() -> VmLaunchConfig {
+    VmLaunchConfig {
+        m5_data_disk: Some(m5_data_disk_path()),
+        reset_ovmf_vars: true,
+    }
 }
 
 fn run_m4_restart_policy_acceptance() -> Result<(), XtaskError> {
@@ -1626,6 +1629,16 @@ mod tests {
         assert!(ensure_m5_disk_path_is_test_owned(&owned).is_ok());
         let outside = workspace_root().join("target").join("OVMF_VARS.fd");
         assert!(ensure_m5_disk_path_is_test_owned(&outside).is_err());
+    }
+
+    #[test]
+    fn m5_storage_vm_config_attaches_persistent_disk_and_resets_vars() {
+        let config = m5_storage_vm_config();
+        assert!(config.reset_ovmf_vars);
+        assert_eq!(
+            config.m5_data_disk.as_deref(),
+            Some(m5_data_disk_path().as_path())
+        );
     }
 
     #[test]

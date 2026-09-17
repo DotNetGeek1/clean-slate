@@ -83,6 +83,14 @@ impl KernelBlockBackend {
             BlockIoError::Transport(BlockTransportError::ResetRequired)
         }
     }
+
+    fn transport_faulted(&self) -> bool {
+        self.transport_faulted
+    }
+
+    fn fallback_geometry(&self) -> BlockGeometry {
+        self.geometry()
+    }
 }
 
 impl BlockDevice for KernelBlockBackend {
@@ -179,5 +187,47 @@ pub(crate) fn handle_kernel_block_request(
 ) -> [u8; BLOCK_TRANSPORT_RESPONSE_BYTES] {
     let backend = unsafe { &mut *BLOCK_BACKEND.get() };
     backend.ensure_transport();
+    if backend.transport_faulted() {
+        let mut fault_backend = FaultBlockBackend::new(backend.fallback_geometry());
+        return handle_block_request(&mut fault_backend, request, payload);
+    }
     handle_block_request(backend, request, payload)
+}
+
+struct FaultBlockBackend {
+    geometry: BlockGeometry,
+}
+
+impl FaultBlockBackend {
+    fn new(geometry: BlockGeometry) -> Self {
+        Self { geometry }
+    }
+}
+
+impl BlockDevice for FaultBlockBackend {
+    fn geometry(&self) -> BlockGeometry {
+        self.geometry
+    }
+
+    fn read_blocks(
+        &mut self,
+        _lba: u64,
+        _blocks: u32,
+        _buffer: &mut [u8],
+    ) -> Result<(), BlockIoError> {
+        Err(BlockIoError::Transport(BlockTransportError::DeviceFault))
+    }
+
+    fn write_blocks(
+        &mut self,
+        _lba: u64,
+        _blocks: u32,
+        _buffer: &[u8],
+    ) -> Result<(), BlockIoError> {
+        Err(BlockIoError::Transport(BlockTransportError::DeviceFault))
+    }
+
+    fn flush(&mut self) -> Result<(), BlockIoError> {
+        Err(BlockIoError::Transport(BlockTransportError::DeviceFault))
+    }
 }
