@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 const PT_LOAD: u32 = 1;
 const SHT_RELA: u32 = 4;
 const R_X86_64_RELATIVE: u32 = 8;
+const USERSPACE_IMAGE_LOAD_BASE: u64 = 0x0000_4000_0000_0000;
 
 fn main() {
     if env::var("CARGO_FEATURE_M4_SUPERVISOR_SELF_TEST").is_ok() {
@@ -18,6 +19,18 @@ fn main() {
         embed_userspace_image(
             "recovery_userspace.bin",
             "clean-slate-supervisor-recovery-userspace",
+            true,
+        );
+    }
+    if env::var("CARGO_FEATURE_M5_STORAGE_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M5_PERSISTENCE_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M5_CRASH_EARLY_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M5_CRASH_LATE_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M5_CRASH_RECOVERY_SELF_TEST").is_ok()
+    {
+        embed_userspace_image(
+            "storage_userspace.bin",
+            "clean-slate-storage-userspace",
             true,
         );
     }
@@ -55,16 +68,20 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
         let entry_offset = entry
             .checked_sub(image_base)
             .expect("ELF entry point was below the image base");
-        let (generated_file, generated_const) = if raw_name == "supervisor_userspace.bin" {
-            (
+        let (generated_file, generated_const) = match raw_name {
+            "supervisor_userspace.bin" => (
                 "supervisor_userspace_entry.rs",
                 "SUPERVISOR_USERSPACE_ENTRY_OFFSET",
-            )
-        } else {
-            (
+            ),
+            "recovery_userspace.bin" => (
                 "recovery_userspace_entry.rs",
                 "RECOVERY_SUPERVISOR_ENTRY_OFFSET",
-            )
+            ),
+            "storage_userspace.bin" => (
+                "storage_userspace_entry.rs",
+                "STORAGE_USERSPACE_ENTRY_OFFSET",
+            ),
+            _ => panic!("unexpected userspace image {raw_name}"),
         };
         let generated = out_dir.join(generated_file);
         fs::write(
@@ -155,7 +172,7 @@ fn materialize_elf_image(elf: &[u8]) -> Result<(Vec<u8>, u64, u64), String> {
         image[dest_start..dest_end].copy_from_slice(&elf[src_start..src_end]);
     }
 
-    apply_rela_dyn(elf, &mut image, image_base, image_base)?;
+    apply_rela_dyn(elf, &mut image, image_base, USERSPACE_IMAGE_LOAD_BASE)?;
 
     Ok((image, image_base, entry))
 }

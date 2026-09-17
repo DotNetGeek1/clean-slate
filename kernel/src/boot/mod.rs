@@ -90,6 +90,8 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(any(
         feature = "m5-storage-self-test",
         feature = "m5-persistence-self-test",
+        feature = "m5-crash-early-self-test",
+        feature = "m5-crash-late-self-test",
         feature = "m5-crash-recovery-self-test"
     ))
 ))]
@@ -113,6 +115,8 @@ use crate::selftest::m5_block::run_m5_block_self_test;
 #[cfg(any(
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
     feature = "m5-crash-recovery-self-test"
 ))]
 use crate::selftest::m5_storage::start_m5_storage_self_test;
@@ -233,6 +237,8 @@ fn run_inner() -> Result<(), &'static str> {
             any(
                 feature = "m5-storage-self-test",
                 feature = "m5-persistence-self-test",
+                feature = "m5-crash-early-self-test",
+                feature = "m5-crash-late-self-test",
                 feature = "m5-crash-recovery-self-test"
             )
         ))]
@@ -245,6 +251,8 @@ fn run_inner() -> Result<(), &'static str> {
             not(any(
                 feature = "m5-storage-self-test",
                 feature = "m5-persistence-self-test",
+                feature = "m5-crash-early-self-test",
+                feature = "m5-crash-late-self-test",
                 feature = "m5-crash-recovery-self-test"
             ))
         ))]

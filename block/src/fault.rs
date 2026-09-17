@@ -1,4 +1,5 @@
 use alloc::rc::Rc;
+use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use crate::fake::{FakeBlockDevice, FakeBlockDeviceError};
@@ -39,12 +40,13 @@ pub struct FaultController {
     state: Rc<RefCell<FaultState>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct FaultState {
     write_count: u64,
     flush_count: u64,
     plan: Option<FaultPlan>,
     powered_off: bool,
+    early_persist_writes: Vec<u64>,
 }
 
 impl FaultController {
@@ -55,6 +57,7 @@ impl FaultController {
                 flush_count: 0,
                 plan: None,
                 powered_off: false,
+                early_persist_writes: Vec::new(),
             })),
         }
     }
@@ -63,6 +66,12 @@ impl FaultController {
         let mut state = self.state.borrow_mut();
         state.plan = Some(plan);
         state.powered_off = false;
+    }
+
+    pub fn set_early_persist_writes(&self, writes: &[u64]) {
+        let mut state = self.state.borrow_mut();
+        state.early_persist_writes.clear();
+        state.early_persist_writes.extend_from_slice(writes);
     }
 
     pub fn write_count(&self) -> u64 {
@@ -80,20 +89,22 @@ impl FaultController {
         Ok(())
     }
 
-    fn next_write_plan(&self) -> Result<Option<FaultAction>, BlockIoError> {
+    fn next_write_plan(&self) -> Result<(u64, bool, Option<FaultAction>), BlockIoError> {
         let mut state = self.state.borrow_mut();
         if state.powered_off {
             return Err(power_loss_error());
         }
         state.write_count += 1;
+        let write_count = state.write_count;
+        let persist_early = state.early_persist_writes.contains(&write_count);
         let Some(plan) = state.plan else {
-            return Ok(None);
+            return Ok((write_count, persist_early, None));
         };
-        if plan.trigger != FaultTrigger::AfterWrite(state.write_count) {
-            return Ok(None);
+        if plan.trigger != FaultTrigger::AfterWrite(write_count) {
+            return Ok((write_count, persist_early, None));
         }
         state.plan = None;
-        Ok(Some(plan.action))
+        Ok((write_count, persist_early, Some(plan.action)))
     }
 
     fn next_flush_plan(&self) -> Result<Option<FaultAction>, BlockIoError> {
@@ -173,14 +184,24 @@ impl BlockDevice for FaultInjectingBlockDevice {
     }
 
     fn write_blocks(&mut self, lba: u64, blocks: u32, buffer: &[u8]) -> Result<(), BlockIoError> {
-        match self.controller.next_write_plan()? {
+        let (_, persist_early, action) = self.controller.next_write_plan()?;
+        match action {
             Some(FaultAction::IoError(error)) => Err(error),
             Some(FaultAction::PowerLoss) => {
                 self.inner.write_blocks(lba, blocks, buffer)?;
+                if persist_early {
+                    self.inner.persist_blocks(lba, blocks)?;
+                }
                 self.controller.power_off();
                 Err(power_loss_error())
             }
-            None => self.inner.write_blocks(lba, blocks, buffer),
+            None => {
+                self.inner.write_blocks(lba, blocks, buffer)?;
+                if persist_early {
+                    self.inner.persist_blocks(lba, blocks)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -225,6 +246,18 @@ mod tests {
 
         assert_eq!(result, Err(power_loss_error()));
         assert!(device.durable_bytes().iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn configured_write_can_persist_before_flush() {
+        let inner = FakeBlockDevice::new(geometry()).unwrap();
+        let mut device = FaultInjectingBlockDevice::new(inner);
+        device.controller().set_early_persist_writes(&[1]);
+
+        device.write_blocks(0, 1, &vec![0x33; 512]).unwrap();
+
+        assert_eq!(&device.durable_bytes()[..512], &vec![0x33; 512]);
+        assert!(device.durable_bytes()[512..].iter().all(|byte| *byte == 0));
     }
 
     #[test]

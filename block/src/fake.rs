@@ -59,6 +59,18 @@ impl FakeBlockDevice {
         &mut self.durable_bytes
     }
 
+    pub fn persist_blocks(&mut self, lba: u64, blocks: u32) -> Result<(), BlockIoError> {
+        let block_size =
+            usize::try_from(self.geometry.logical_block_size()).expect("block size fits usize");
+        let byte_len = usize::try_from(blocks)
+            .expect("block count fits usize")
+            .checked_mul(block_size)
+            .expect("validated device byte length fits usize");
+        let range = self.geometry.validate_read(lba, blocks, byte_len)?;
+        self.durable_bytes[range.clone()].copy_from_slice(&self.live_bytes[range]);
+        Ok(())
+    }
+
     /// Model a reboot: live state is discarded and reloaded from the durable
     /// image, so anything written but not yet flushed is lost.
     pub fn rebooted(&self) -> Result<Self, FakeBlockDeviceError> {

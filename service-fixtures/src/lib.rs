@@ -9,6 +9,7 @@ mod block_transport;
 mod config;
 mod crash_service;
 mod diagnostics;
+mod storage_service;
 mod unrelated_workload;
 
 pub use block_transport::{
@@ -26,6 +27,15 @@ pub use crash_service::{CrashServiceFixtureHarness, CrashServiceFixtureRole};
 pub use diagnostics::{
     format_crash_service_injecting_line, format_crash_service_replacement_healthy_line,
     format_crash_service_started_line, format_unrelated_workload_progress_line,
+};
+pub use storage_service::{
+    StorageServiceBootstrap, STORAGE_SERVICE_BOOTSTRAP_ADDRESS,
+    STORAGE_SERVICE_MODE_CRASH_ARM_EARLY, STORAGE_SERVICE_MODE_CRASH_ARM_LATE,
+    STORAGE_SERVICE_MODE_CRASH_RECOVERY, STORAGE_SERVICE_MODE_INTEGRATION_INITIAL,
+    STORAGE_SERVICE_MODE_INTEGRATION_RESTART, STORAGE_SERVICE_MODE_PERSISTENCE,
+    STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE, STORAGE_SERVICE_RESULT_ERROR,
+    STORAGE_SERVICE_RESULT_OK, STORAGE_SERVICE_RESULT_PENDING,
+    STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
 };
 pub use unrelated_workload::{UnrelatedWorkloadFixture, UNRELATED_WORKLOAD_SERVICE_ID};
 

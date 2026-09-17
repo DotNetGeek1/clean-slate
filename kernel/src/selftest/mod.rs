@@ -46,6 +46,8 @@ pub(crate) mod m5_block;
 #[cfg(any(
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
     feature = "m5-crash-recovery-self-test"
 ))]
 pub(crate) mod m5_storage;
@@ -66,6 +68,8 @@ use crate::mm::PAGE_SIZE;
     feature = "m3-entry-self-test",
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
     feature = "m5-crash-recovery-self-test"
 ))]
 pub(super) const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
@@ -78,6 +82,8 @@ pub(super) const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
     feature = "m3-entry-self-test",
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
     feature = "m5-crash-recovery-self-test"
 ))]
 pub(super) const USER_TEST_DATA_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE;
@@ -98,6 +104,8 @@ pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SI
     feature = "m4-recovery-self-test",
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
     feature = "m5-crash-recovery-self-test"
 ))]
 pub(super) const USER_TEST_PROCESS_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + (PAGE_SIZE * 2);

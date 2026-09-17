@@ -9,8 +9,17 @@ description = "M5 minimal persistent object store with an explicit versioned on-
 [lib]
 path = "src/lib.rs"
 
+[features]
+userspace = []
+
+[[bin]]
+name = "clean-slate-storage-userspace"
+path = "src/bin/userspace.rs"
+required-features = ["userspace"]
+
 [dependencies]
 clean-slate-block = { path = "../block", features = ["alloc"] }
+clean-slate-service-fixtures = { path = "../service-fixtures" }
 
 [lints]
 workspace = true

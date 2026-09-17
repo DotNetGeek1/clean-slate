@@ -23,6 +23,8 @@ m4-recovery-self-test = []
 m5-block-self-test = []
 m5-storage-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
 m5-persistence-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
+m5-crash-early-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
+m5-crash-late-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
 m5-crash-recovery-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
 
 [lib]

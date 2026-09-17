@@ -78,6 +78,14 @@ use crate::selftest::m4_recovery::observe_recovery_supervisor_line;
 use crate::selftest::m4_recovery::recovery_complete_and_exit;
 #[cfg(feature = "m4-supervisor-self-test")]
 use crate::selftest::m4_supervisor::observe_supervisor_console_line;
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
+use crate::selftest::m5_storage::observe_userspace_block_operation;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::USER_TEST_CODE_ADDRESS;
 use crate::service::block_bridge::handle_kernel_block_request;
@@ -573,6 +581,16 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
         request.request_id,
         block_status_name(response.status as u8)
     ));
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-early-self-test",
+        feature = "m5-crash-late-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
+    if matches!(response.status, BlockTransportStatus::Ok) {
+        observe_userspace_block_operation(request.operation);
+    }
     frame.rax = BLOCK_TRANSPORT_RESPONSE_BYTES as u64;
 }
 
