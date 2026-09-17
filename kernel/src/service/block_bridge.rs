@@ -76,14 +76,6 @@ impl KernelBlockBackend {
         }
     }
 
-    fn transport_error(&self) -> BlockIoError {
-        if self.transport_faulted {
-            BlockIoError::Transport(BlockTransportError::DeviceFault)
-        } else {
-            BlockIoError::Transport(BlockTransportError::ResetRequired)
-        }
-    }
-
     fn transport_faulted(&self) -> bool {
         self.transport_faulted
     }
@@ -98,7 +90,7 @@ impl BlockDevice for KernelBlockBackend {
         #[cfg(feature = "m5-storage-self-test")]
         {
             if let Some(device) = self.virtio.as_ref() {
-                return device.geometry();
+                return publish_contract_geometry(device.geometry());
             }
             BlockGeometry::new(
                 BlockDeviceId::new(STORAGE_BLOCK_DEVICE_ID),
@@ -134,7 +126,7 @@ impl BlockDevice for KernelBlockBackend {
             if let Some(device) = self.virtio.as_mut() {
                 return device.read_blocks(lba, blocks, buffer);
             }
-            return Err(self.transport_error());
+            return Err(BlockIoError::Transport(BlockTransportError::DeviceFault));
         }
         #[cfg(not(feature = "m5-storage-self-test"))]
         let range = self.geometry().validate_read(lba, blocks, buffer.len())?;
@@ -151,7 +143,7 @@ impl BlockDevice for KernelBlockBackend {
             if let Some(device) = self.virtio.as_mut() {
                 return device.write_blocks(lba, blocks, buffer);
             }
-            return Err(self.transport_error());
+            return Err(BlockIoError::Transport(BlockTransportError::DeviceFault));
         }
         #[cfg(not(feature = "m5-storage-self-test"))]
         let range = self.geometry().validate_write(lba, blocks, buffer.len())?;
@@ -168,7 +160,7 @@ impl BlockDevice for KernelBlockBackend {
             if let Some(device) = self.virtio.as_mut() {
                 return device.flush();
             }
-            return Err(self.transport_error());
+            return Err(BlockIoError::Transport(BlockTransportError::DeviceFault));
         }
         #[cfg(not(feature = "m5-storage-self-test"))]
         {
@@ -230,4 +222,16 @@ impl BlockDevice for FaultBlockBackend {
     fn flush(&mut self) -> Result<(), BlockIoError> {
         Err(BlockIoError::Transport(BlockTransportError::DeviceFault))
     }
+}
+
+#[cfg(feature = "m5-storage-self-test")]
+fn publish_contract_geometry(transport_geometry: BlockGeometry) -> BlockGeometry {
+    BlockGeometry::new(
+        BlockDeviceId::new(STORAGE_BLOCK_DEVICE_ID),
+        transport_geometry.logical_block_size(),
+        transport_geometry.block_count(),
+        transport_geometry.max_transfer_blocks(),
+        transport_geometry.is_read_only(),
+    )
+    .expect("virtio geometry should stay valid when published with contract device id")
 }
