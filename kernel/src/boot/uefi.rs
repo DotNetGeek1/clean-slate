@@ -3,7 +3,6 @@ use uefi::mem::memory_map::{MemoryDescriptor, MemoryType};
 use uefi::proto::loaded_image::LoadedImage;
 
 use crate::arch::x86_64::cpu::read_stack_pointer;
-use crate::arch::x86_64::gdt::userspace_dispatch_state_addresses;
 use crate::mm::paging::reserve_mapping_page_tables;
 use crate::mm::region::{
     MemoryRegion, MemoryRegionKind, NormalizedMemoryMap, ReservedRange, MAX_MEMORY_REGIONS,
@@ -13,7 +12,6 @@ use crate::mm::{align_down, align_up, PAGE_SIZE};
 
 const MAX_BOOT_RESERVED_RANGES: usize = 16;
 const EARLY_STACK_RESERVE_SIZE: u64 = 64 * 1024;
-const BOOTSTRAP_PAGE_TABLE_RESERVE_SIZE: u64 = 5 * PAGE_SIZE;
 
 pub(crate) struct BootReservedRanges {
     ranges: [ReservedRange; MAX_BOOT_RESERVED_RANGES],
@@ -230,20 +228,14 @@ pub(crate) fn collect_reserved_ranges_from_firmware() -> Result<BootReservedRang
     let kernel_base = image_base as u64;
     let kernel_range = ReservedRange::from_base_and_size(kernel_base, image_size);
     let stack_pointer = read_stack_pointer();
-    let (gdt_state_address, tss_state_address) = userspace_dispatch_state_addresses();
     let stack_range = ReservedRange::from_base_and_size(
         stack_pointer.saturating_sub(EARLY_STACK_RESERVE_SIZE),
         EARLY_STACK_RESERVE_SIZE,
     );
-    let bootstrap_page_tables =
-        ReservedRange::from_base_and_size(PAGE_SIZE, BOOTSTRAP_PAGE_TABLE_RESERVE_SIZE);
     ranges.push(kernel_range)?;
     ranges.push(stack_range)?;
-    ranges.push(bootstrap_page_tables)?;
     reserve_mapping_page_tables(&mut ranges, kernel_base)?;
     reserve_mapping_page_tables(&mut ranges, stack_pointer)?;
-    reserve_mapping_page_tables(&mut ranges, gdt_state_address)?;
-    reserve_mapping_page_tables(&mut ranges, tss_state_address)?;
 
     Ok(ranges)
 }

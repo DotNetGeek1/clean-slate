@@ -3,14 +3,6 @@
 //! address space down. Owns `KERNEL_ROOT_FRAME`.
 
 use crate::arch::x86_64::cpu::without_write_protect;
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
-))]
-use crate::diagnostics::log::kernel_log_fmt;
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::offset_page_table_for_root;
@@ -32,16 +24,20 @@ use x86_64::structures::paging::Translate;
 use x86_64::PhysAddr;
 use x86_64::VirtAddr;
 
+// `ProcessAddressSpace` is a fixed-size value type that is moved by value
+// through the spawn path while running on a 64 KiB per-thread kernel stack, so
+// these tables must stay small: every extra mapping slot costs 16 bytes in
+// each of the several copies that live on the stack during a launch.
+#[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
+const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
 #[cfg(any(
-    feature = "m4-recovery-self-test",
-    feature = "m4-supervisor-self-test",
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
     feature = "m5-crash-recovery-self-test"
 ))]
-const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 64;
+const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
 #[cfg(not(any(
     feature = "m4-recovery-self-test",
     feature = "m4-supervisor-self-test",
@@ -52,16 +48,18 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 64;
     feature = "m5-crash-recovery-self-test"
 )))]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
+#[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
+/// The storage userspace image maps up to 64 code pages plus its stack and
+/// bootstrap pages; `service::spawn` asserts its budget against this value.
 #[cfg(any(
-    feature = "m4-recovery-self-test",
-    feature = "m4-supervisor-self-test",
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
     feature = "m5-crash-recovery-self-test"
 ))]
-const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 160;
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 80;
 #[cfg(not(any(
     feature = "m4-recovery-self-test",
     feature = "m4-supervisor-self-test",
@@ -71,7 +69,7 @@ const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 160;
     feature = "m5-crash-late-self-test",
     feature = "m5-crash-recovery-self-test"
 )))]
-const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 
 static KERNEL_ROOT_FRAME: AtomicU64 = AtomicU64::new(0);
 
@@ -132,17 +130,6 @@ impl ProcessAddressSpace {
         if self.page_table_frame_count == self.page_table_frames.len() {
             return Err("process address-space page-table tracking capacity exceeded");
         }
-        #[cfg(any(
-            feature = "m5-storage-self-test",
-            feature = "m5-persistence-self-test",
-            feature = "m5-crash-early-self-test",
-            feature = "m5-crash-late-self-test",
-            feature = "m5-crash-recovery-self-test"
-        ))]
-        kernel_log_fmt(format_args!(
-            "[STOR] page-table-frame[{}]={frame_address:#x}\n",
-            self.page_table_frame_count
-        ));
         self.page_table_frames[self.page_table_frame_count] = frame_address;
         self.page_table_frame_count += 1;
         Ok(())
@@ -260,21 +247,15 @@ fn clone_kernel_mappings_into_address_space(
     root_frame: u64,
     user_region_base: VirtAddr,
 ) -> Result<(), &'static str> {
-    let source_root_frame = kernel_root_frame();
-    #[cfg(any(
-        feature = "m5-storage-self-test",
-        feature = "m5-persistence-self-test",
-        feature = "m5-crash-early-self-test",
-        feature = "m5-crash-late-self-test",
-        feature = "m5-crash-recovery-self-test"
-    ))]
-    kernel_log_fmt(format_args!(
-        "[STOR] clone-kernel-mappings src={source_root_frame:#x} dst={root_frame:#x}\n"
-    ));
-    let source_root = unsafe { page_table_ref(source_root_frame) };
+    // Always clone from the kernel's own root rather than whatever CR3 holds:
+    // a launch may be triggered while another process's root is active.
+    let source_root = unsafe { page_table_ref(kernel_root_frame()) };
     let destination_root = unsafe { page_table_mut(root_frame) };
-    destination_root.zero();
-    destination_root.clone_from(source_root);
+    // Copy entry-by-entry instead of `clone_from`, which materialises a
+    // 4 KiB `PageTable` temporary on the (kernel-thread) stack.
+    for (destination, source) in destination_root.iter_mut().zip(source_root.iter()) {
+        destination.set_addr(source.addr(), source.flags());
+    }
     sanitize_kernel_root_entries(destination_root, user_region_base);
     validate_supervisor_only_kernel_root_entries(destination_root, user_region_base)
 }
@@ -353,17 +334,6 @@ pub(crate) fn destroy_process_address_space(
         if frame.start_address().as_u64() != mapping.frame_address {
             return Err("address-space teardown unmapped an unexpected frame");
         }
-        #[cfg(any(
-            feature = "m5-storage-self-test",
-            feature = "m5-persistence-self-test",
-            feature = "m5-crash-early-self-test",
-            feature = "m5-crash-late-self-test",
-            feature = "m5-crash-recovery-self-test"
-        ))]
-        kernel_log_fmt(format_args!(
-            "[STOR] free user-frame={:#x}\n",
-            mapping.frame_address
-        ));
         unsafe {
             free_frame(allocator, mapping.frame_address)?;
         }
@@ -372,14 +342,6 @@ pub(crate) fn destroy_process_address_space(
         .iter()
         .rev()
     {
-        #[cfg(any(
-            feature = "m5-storage-self-test",
-            feature = "m5-persistence-self-test",
-            feature = "m5-crash-early-self-test",
-            feature = "m5-crash-late-self-test",
-            feature = "m5-crash-recovery-self-test"
-        ))]
-        kernel_log_fmt(format_args!("[STOR] free pt-frame={frame_address:#x}\n"));
         unsafe {
             free_frame(allocator, *frame_address)?;
         }

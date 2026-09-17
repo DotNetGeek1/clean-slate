@@ -272,41 +272,6 @@ impl Scheduler {
         self.threads.len()
     }
 
-    #[cfg(any(
-        feature = "m5-storage-self-test",
-        feature = "m5-persistence-self-test",
-        feature = "m5-crash-early-self-test",
-        feature = "m5-crash-late-self-test",
-        feature = "m5-crash-recovery-self-test"
-    ))]
-    pub(crate) fn current_thread_debug(&self) -> Result<(usize, u64), &'static str> {
-        let current_index = self
-            .current_thread
-            .ok_or("scheduler had no current thread")?;
-        let current = self
-            .threads
-            .get(current_index)
-            .ok_or("scheduler current thread slot exceeded fixed scheduler capacity")?;
-        Ok((current_index, current.owner_process_id))
-    }
-
-    #[cfg(any(
-        feature = "m5-storage-self-test",
-        feature = "m5-persistence-self-test",
-        feature = "m5-crash-early-self-test",
-        feature = "m5-crash-late-self-test",
-        feature = "m5-crash-recovery-self-test"
-    ))]
-    pub(crate) fn thread_debug_for_process(&self, process_id: u64) -> Option<(usize, u64)> {
-        self.threads
-            .iter()
-            .enumerate()
-            .find(|(_, thread)| {
-                thread.owner_process_id == process_id && thread.state != ThreadState::Empty
-            })
-            .map(|(index, thread)| (index, thread.saved_stack_pointer))
-    }
-
     pub(crate) fn first_empty_slot_from(&self, start: usize) -> Option<usize> {
         if self.threads.is_empty() {
             return None;

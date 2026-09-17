@@ -20,9 +20,6 @@ use crate::arch::x86_64::idt::DOUBLE_FAULT_IST_INDEX;
 use crate::sync::global_cell::GlobalCell;
 
 const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
-const USER_SYSRET_SELECTOR_BASE_RAW: u16 = 0x1b;
-const USER_DATA_SELECTOR_RAW: u16 = USER_SYSRET_SELECTOR_BASE_RAW + 0x08;
-const USER_CODE_SELECTOR_RAW: u16 = USER_SYSRET_SELECTOR_BASE_RAW + 0x10;
 
 #[repr(align(16))]
 pub(crate) struct DoubleFaultStack(pub(crate) [u8; DOUBLE_FAULT_STACK_SIZE]);
@@ -42,7 +39,7 @@ pub(crate) static DOUBLE_FAULT_STACK: GlobalCell<DoubleFaultStack> =
 pub(crate) static GDT_STATE: GlobalCell<Option<GdtState>> = GlobalCell::new(None);
 static TSS_STATE: GlobalCell<Option<TaskStateSegment>> = GlobalCell::new(None);
 
-pub(crate) fn initialize_gdt_and_tss() {
+pub(super) fn initialize_gdt_and_tss() {
     let double_fault_stack_top = {
         let stack = unsafe { &*DOUBLE_FAULT_STACK.get() };
         VirtAddr::from_ptr(stack.0.as_ptr_range().end)
@@ -68,9 +65,6 @@ pub(crate) fn initialize_gdt_and_tss() {
     let user_data_selector = table.append(Descriptor::user_data_segment());
     let user_code_selector = table.append(Descriptor::user_code_segment());
     let tss_selector = table.append(Descriptor::tss_segment(tss_ref));
-    debug_assert_eq!(user_sysret_selector_base.0, USER_SYSRET_SELECTOR_BASE_RAW);
-    debug_assert_eq!(user_data_selector.0, USER_DATA_SELECTOR_RAW);
-    debug_assert_eq!(user_code_selector.0, USER_CODE_SELECTOR_RAW);
     *gdt_slot = Some(GdtState {
         table,
         code_selector,
@@ -122,33 +116,6 @@ pub(crate) fn userspace_gdt_state() -> Result<&'static GdtState, &'static str> {
             .as_ref()
             .ok_or("GDT must exist before entering userspace")
     }
-}
-
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
-))]
-pub(crate) fn userspace_dispatch_state_status() -> (bool, bool) {
-    unsafe { ((&*GDT_STATE.get()).is_some(), (&*TSS_STATE.get()).is_some()) }
-}
-
-pub(crate) fn userspace_dispatch_state_addresses() -> (u64, u64) {
-    (
-        (&raw const GDT_STATE as *const _ as usize) as u64,
-        (&raw const TSS_STATE as *const _ as usize) as u64,
-    )
-}
-
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test"
-)))]
-pub(crate) fn userspace_selectors() -> Result<(u16, u16), &'static str> {
-    Ok((USER_CODE_SELECTOR_RAW, USER_DATA_SELECTOR_RAW))
 }
 
 #[cfg(any(

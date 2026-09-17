@@ -173,11 +173,11 @@ const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 16] = [
     "[STOR] write object=1 bytes=8",
     "[STOR] write object=2 bytes=11",
     "[STOR] commit generation=1",
+    "[BLK ] unauthorized denied pid=",
     "[BLK ] stale handle denied pid=",
     "[STOR] mounted generation=1",
     "[STOR] commit generation=2",
     "[STOR] malformed media rejected",
-    "[BLK ] unauthorized denied pid=",
     "[M5.7] PASS",
 ];
 const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
@@ -198,11 +198,11 @@ const M5_PERSISTENCE_WRITE_MARKERS: [&str; 7] = [
     "[TEST] persistence phase=write PASS",
 ];
 const M5_PERSISTENCE_READ_MARKERS: [&str; 9] = [
+    "[BLK ] flush complete",
     "[STOR] recovered generation=1",
     "[STOR] read object=alpha id=1 bytes=",
     "[STOR] read object=beta id=2 bytes=",
     "[STOR] write object=alpha id=1 bytes=",
-    "[BLK ] flush complete",
     "[STOR] commit generation=2",
     "[STOR] recovered generation=2",
     "[STOR] read object=beta id=2 bytes=",
