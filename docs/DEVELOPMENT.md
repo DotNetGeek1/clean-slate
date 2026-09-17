@@ -243,6 +243,14 @@ cargo xtask test-m6-audit
 
 `test-m6-audit` builds the M6 fixture userspace image and requires ordered `[AUD ] seq=` … `outcome=allowed`, `[AUD ] seq=` … `outcome=` (a denial such as `invalid-handle` or `wrong-holder`), then `[M6.7] PASS` (90s timeout). Aliases: `m6-audit`, `m6.7`.
 
+For M6.8 capability convergence acceptance (constituent QEMU boot):
+
+```bash
+cargo xtask test-m6-capabilities
+```
+
+`test-m6-capabilities` resets the M5 data disk, builds storage and M6 fixture userspace images, and requires ordered markers across object grant/allow/deny (`missing-right`, `no-authority`), delegation (`rights=read`, `depth=1`), revocation (`revoke branch`, `stale denied`), process-control grant/allow/deny/teardown/stale, audit serial lines (`[AUD ]` allowed and denied from distinct actors), `[TEST] unrelated workload progress=`, then `[M6.8] PASS` (180s timeout). Aliases: `m6-capabilities`, `m6.8`.
+
 M4.4 health/liveness tracking (host-tested, no QEMU) exercises `ServiceHealthTracker` deadline math with explicit tick values — no real-time sleeps:
 
 ```bash

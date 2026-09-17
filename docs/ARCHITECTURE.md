@@ -392,7 +392,13 @@ Implementation lives in `capability/src/revocation.rs` (generic graph) and `kern
 - **Legacy IPC endpoint send capabilities:** `kernel/src/ipc` — per-endpoint capability table predating M6; kept until M6.8 migration re-homes grants onto the unified table.
 - **Legacy lifecycle-control and block-device capabilities:** `kernel/src/service/capability.rs` — service-spawn grants for supervisor fixtures; kept until M6.8.
 
-No new semantics were added to the legacy paths in M6.2; they remain bounded debt tracked for **M6.8** (unified table + adapter cutover).
+No new semantics were added to the legacy paths in M6.2; they remain **bounded migration debt** tracked for a future cutover (not performed in M6.8 — see below).
+
+### M6.8 capability convergence (integration)
+
+M6.8 is a single bounded QEMU constituent (`cargo xtask test-m6-capabilities`) that exercises the **production** M6 substrate in one boot: M5 object-service storage path, `SYSCALL_NR_CAP_OBJECT` / `CAP_DELEGATE` / `CAP_REVOKE` / `CAP_PROCESS_CONTROL` / `CAP_AUDIT_READ`, bootstrap grants, revocation on subtree and process teardown, and serial audit echo. Scripted CPL3 fixtures (`m6_fixture_userspace`) play owner, reader, unrelated, controller, target, auditor, and intruder roles; the kernel registers grants and orchestrates lifecycle only through existing `grant_*` / `register_bootstrap_grant` helpers.
+
+**Explicit deferred debt (document only):** legacy per-endpoint IPC send capabilities (`kernel/src/ipc`), lifecycle/block tables in `kernel/src/service/capability.rs`, and M3/M4/M5 service-spawn capability paths are **not** migrated onto the unified `kernel/src/capability/` table in M6.8; they continue to serve their original milestones until a later adapter cutover.
 
 ### M6.5 delegation and attenuation
 

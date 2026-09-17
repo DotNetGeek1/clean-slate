@@ -12,16 +12,18 @@ use crate::sync::global_cell::GlobalCell;
 
 #[cfg(feature = "m6-revocation-self-test")]
 const TASK_COUNT: usize = 8;
+#[cfg(feature = "m6-capabilities-self-test")]
+const TASK_COUNT: usize = 9;
 #[cfg(all(
     not(feature = "m6-revocation-self-test"),
+    not(feature = "m6-capabilities-self-test"),
     any(
         feature = "m4-recovery-self-test",
         feature = "m6-fixture-smoke-self-test",
         feature = "m6-process-control-self-test",
         feature = "m6-delegation-self-test",
         feature = "m6-object-self-test",
-        feature = "m6-audit-self-test",
-        feature = "m6-capabilities-self-test"
+        feature = "m6-audit-self-test"
     )
 ))]
 const TASK_COUNT: usize = 6;

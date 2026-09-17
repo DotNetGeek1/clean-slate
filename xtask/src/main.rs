@@ -32,6 +32,7 @@ const M6_PROCESS_CONTROL_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M6_DELEGATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M6_REVOCATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 const M6_AUDIT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
+const M6_CAPABILITIES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(180);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M5_CRASH_MATRIX_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_PERSISTENCE_BOOT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -221,6 +222,39 @@ const M6_REVOCATION_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[TEST] unrelated workload progress=",
     "[M6.6] PASS",
 ];
+const M6_CAPABILITIES_ACCEPTANCE_MARKERS: [&str; 31] = [
+    "[STOR] object-service started pid=",
+    "[CAP ] object grant holder=3 object=7",
+    "[TEST] unrelated workload progress=1",
+    "[CAP ] process-control denied holder=6 target=? op=terminate reason=invalid-handle",
+    "[CAP ] object allowed holder=3 object=7 op=write",
+    "[CAP ] deny holder=5 object=7 op=read reason=no-authority",
+    "[CAP ] object allowed holder=3 object=7 op=read",
+    "[CAP ] delegate from=3 to=4",
+    "rights=read",
+    "depth=1",
+    "[CAP ] object allowed holder=4 object=7 op=read",
+    "[CAP ] deny holder=4 object=7 op=write reason=missing-right",
+    "[CAP ] process-control allowed holder=7 target=2 op=observe",
+    "[CAP ] process-control denied holder=7 target=2 op=terminate reason=missing-right",
+    "[CAP ] process-control allowed holder=7 target=2 op=terminate",
+    "[PROC] teardown pid=",
+    "[CAP ] process-control denied holder=7 target=? op=observe reason=stale",
+    "[TEST] unrelated workload progress=3",
+    "[CAP ] revoke branch=",
+    "[CAP ] stale denied holder=4 reason=revoked",
+    "[CAP ] object allowed holder=3 object=7 op=read",
+    "[AUD ] seq=",
+    "actor=8 class=audit",
+    "outcome=allowed",
+    "[AUD ] seq=",
+    "actor=9 class=audit",
+    "outcome=invalid-handle",
+    "[AUD ] seq=",
+    "actor=9 class=audit",
+    "outcome=wrong-holder",
+    "[M6.8] PASS",
+];
 const M6_PROCESS_CONTROL_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[CAP ] process-control grant holder=",
     "[CAP ] process-control allowed holder=",
@@ -384,6 +418,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM6Delegation => run_m6_delegation_acceptance(),
         ParsedCommand::TestM6Revocation => run_m6_revocation_acceptance(),
         ParsedCommand::TestM6Audit => run_m6_audit_acceptance(),
+        ParsedCommand::TestM6Capabilities => run_m6_capabilities_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -880,6 +915,22 @@ fn run_m6_audit_acceptance() -> Result<(), XtaskError> {
         "m6-audit-self-test",
         &M6_AUDIT_ACCEPTANCE_MARKERS,
         M6_AUDIT_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+fn run_m6_capabilities_acceptance() -> Result<(), XtaskError> {
+    reset_m5_data_disk_image()?;
+    build_m6_fixture_userspace(true)?;
+    build_storage_userspace(true)?;
+    run_vm_inner_with_config(
+        false,
+        false,
+        &["m6-capabilities-self-test"],
+        Some((
+            &M6_CAPABILITIES_ACCEPTANCE_MARKERS,
+            M6_CAPABILITIES_ACCEPTANCE_TIMEOUT,
+        )),
+        m5_storage_vm_config(),
     )
 }
 
@@ -1706,6 +1757,9 @@ fn print_help() {
     println!(
         "  test-m6-audit Build M6 capability audit constituent boot and validate ordered markers"
     );
+    println!(
+        "  test-m6-capabilities Build M6.8 capability convergence boot and validate ordered markers"
+    );
     println!("  m5-disk-create Create deterministic M5 data disk if missing (preserve existing)");
     println!("  m5-disk-reset Recreate deterministic blank M5 data disk");
     println!("  m5-disk-inspect Print M5 data disk path and size");
@@ -1752,6 +1806,7 @@ enum ParsedCommand {
     TestM6Delegation,
     TestM6Revocation,
     TestM6Audit,
+    TestM6Capabilities,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -1796,6 +1851,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
             ParsedCommand::TestM6Revocation
         }
         Some(cmd) if cmd == "test-m6-audit" => ParsedCommand::TestM6Audit,
+        Some(cmd) if cmd == "test-m6-capabilities" || cmd == "m6-capabilities" || cmd == "m6.8" => {
+            ParsedCommand::TestM6Capabilities
+        }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
         Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,
@@ -2085,6 +2143,15 @@ mod tests {
 [MEM ] physical allocator initialized\n\
 [BOOT] ExitBootServices OK\n";
         assert!(validate_output_markers(invalid, &M1_ACCEPTANCE_MARKERS).is_err());
+    }
+
+    #[test]
+    fn marker_tracker_requires_later_occurrence_for_repeated_markers() {
+        let markers = &["alpha", "beta", "alpha", "gamma"];
+        let output = "alpha\nbeta\nmiddle\nalpha tail\ngamma\n";
+        assert!(validate_output_markers(output, markers).is_ok());
+        let too_early = "alpha\nalpha\nbeta\ngamma\n";
+        assert!(validate_output_markers(too_early, markers).is_err());
     }
 
     #[test]

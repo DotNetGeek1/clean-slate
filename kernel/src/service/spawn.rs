@@ -784,7 +784,19 @@ fn launch_storage_userspace_service(
     let bootstrap = {
         #[cfg(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test"))]
         {
-            let mut bootstrap = crate::selftest::m6_object::storage_service_bootstrap(service)?;
+            let mut bootstrap = {
+                #[cfg(feature = "m6-capabilities-self-test")]
+                {
+                    crate::selftest::m6_capabilities::storage_service_bootstrap(service)?
+                }
+                #[cfg(all(
+                    feature = "m6-object-self-test",
+                    not(feature = "m6-capabilities-self-test")
+                ))]
+                {
+                    crate::selftest::m6_object::storage_service_bootstrap(service)?
+                }
+            };
             use clean_slate_capability::HolderId;
             use clean_slate_service_fixtures::STORAGE_SERVICE_MODE_OBJECT_SERVICE;
             if bootstrap.mode == STORAGE_SERVICE_MODE_OBJECT_SERVICE {

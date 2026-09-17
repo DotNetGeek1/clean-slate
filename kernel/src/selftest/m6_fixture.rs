@@ -19,8 +19,8 @@ use clean_slate_service_lifecycle::ServiceId;
 
 pub(crate) const M6_FIXTURE_SERVICE_ID_BASE: u64 = 0x6000;
 
-const MAX_FIXTURE_REGISTRY: usize = 8;
-const MAX_FIXTURE_REPORTS: usize = 8;
+const MAX_FIXTURE_REGISTRY: usize = 12;
+const MAX_FIXTURE_REPORTS: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FixtureReportAction {

@@ -13,6 +13,9 @@ use crate::sched::ThreadState;
 use crate::sync::global_cell::GlobalCell;
 
 pub(super) const KERNEL_PROCESS_ID: u64 = 0;
+#[cfg(feature = "m6-capabilities-self-test")]
+const PROCESS_REGISTRY_CAPACITY: usize = 12;
+#[cfg(not(feature = "m6-capabilities-self-test"))]
 const PROCESS_REGISTRY_CAPACITY: usize = 8;
 
 /// Trusted userspace process id from the current scheduler thread (never from syscall args).

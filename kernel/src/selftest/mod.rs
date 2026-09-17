@@ -60,6 +60,8 @@ pub(crate) mod m5_block;
 pub(crate) mod m5_storage;
 #[cfg(feature = "m6-audit-self-test")]
 pub(crate) mod m6_audit;
+#[cfg(feature = "m6-capabilities-self-test")]
+pub(crate) mod m6_capabilities;
 #[cfg(feature = "m6-delegation-self-test")]
 pub(crate) mod m6_delegation;
 #[cfg(any(
