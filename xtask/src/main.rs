@@ -159,14 +159,22 @@ const M4_SUPERVISOR_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[IPC ] console pid=1: [SUP ]",
     "[M4.3] PASS",
 ];
-const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 7] = [
+const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[SVC ] declared service=20736",
     "[BLK ] authority granted pid=",
     "[STOR] service started pid=",
-    "[BLK ] request op=write id=1",
+    "[BLK ] request op=geometry id=1",
+    "[BLK ] virtio-block ready blocks=",
     "[BLK ] completion id=1 status=ok",
+    "[STOR] format generation=0",
+    "[STOR] write object=1 bytes=8",
+    "[STOR] write object=2 bytes=11",
+    "[STOR] commit generation=1",
+    "[STOR] mounted generation=1",
+    "[STOR] commit generation=2",
+    "[STOR] malformed media rejected",
     "[BLK ] unauthorized denied pid=",
-    "[M5.3] PASS",
+    "[M5.7] PASS",
 ];
 const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[VIRT] block device found",
@@ -532,7 +540,8 @@ fn run_m4_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
-    run_vm_inner(
+    reset_m5_data_disk_image()?;
+    run_vm_inner_with_config(
         false,
         false,
         &["m5-storage-self-test"],
@@ -540,7 +549,15 @@ fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
             &M5_STORAGE_ACCEPTANCE_MARKERS,
             M5_STORAGE_ACCEPTANCE_TIMEOUT,
         )),
+        m5_storage_vm_config(),
     )
+}
+
+fn m5_storage_vm_config() -> VmLaunchConfig {
+    VmLaunchConfig {
+        m5_data_disk: Some(m5_data_disk_path()),
+        reset_ovmf_vars: true,
+    }
 }
 
 fn run_m4_restart_policy_acceptance() -> Result<(), XtaskError> {
@@ -1166,7 +1183,7 @@ fn print_help() {
     println!("  test-m4-recovery Build the M4.8 recovery supervisor kernel boot and validate ordered markers");
     println!("  test-m4       M4 milestone gate: recovery QEMU boot plus M4.6 host policy tests");
     println!("  test-m5-block Build the M5.2 virtio-block kernel, run QEMU, and validate ordered markers");
-    println!("  test-m5-storage Build the M5.3 userspace storage-service boundary acceptance boot");
+    println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-disk-harness Two-boot M5 disk harness with host-side sentinel validation");
     println!(
         "                 Uses M1 markers only; does not assert milestone-level storage behavior"
@@ -1619,6 +1636,16 @@ mod tests {
         assert!(ensure_m5_disk_path_is_test_owned(&owned).is_ok());
         let outside = workspace_root().join("target").join("OVMF_VARS.fd");
         assert!(ensure_m5_disk_path_is_test_owned(&outside).is_err());
+    }
+
+    #[test]
+    fn m5_storage_vm_config_attaches_persistent_disk_and_resets_vars() {
+        let config = m5_storage_vm_config();
+        assert!(config.reset_ovmf_vars);
+        assert_eq!(
+            config.m5_data_disk.as_deref(),
+            Some(m5_data_disk_path().as_path())
+        );
     }
 
     #[test]
