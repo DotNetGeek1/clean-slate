@@ -116,6 +116,7 @@ A driver crash should ordinarily become a driver-domain failure rather than a ke
 M5 introduces a Clean-Slate-native block contract between hardware-specific block transports and persistent-store logic.
 
 - `clean-slate-block` is the narrow reusable layer. It owns device identity, geometry, bounded block read/write validation, transport-vs-request error separation, and the explicit `flush` durability barrier.
+- `clean-slate-store` is the first transport-independent on-disk policy layer. Version 1 uses two redundant one-block superblocks at LBA 0 and 1, each containing magic/version/geometry/checksum fields plus a fixed object table; committed object data lives in two disjoint copy-on-write arenas after LBA 1 so a newer generation never overwrites payload blocks still referenced by the currently committed superblock.
 - Persistent-store code must depend only on this contract. It must not import VirtIO queue structures, PCI configuration details, MMIO register layouts, or raw DMA descriptors.
 - The initial real backend may live in the kernel for bring-up, but that is an implementation detail. The long-term direction remains a restricted driver/service domain once MMIO/IRQ/DMA capabilities exist.
 - M5 uses a bounded request/response block wire contract between the userspace storage service and a kernel-hosted bootstrap backend. The public wire format carries only protocol/version/op/request-id/device-id/LBA/count/length/status/geometry fields, never kernel pointers or physical addresses.

@@ -15,6 +15,7 @@ pub struct FakeBlockDevice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FakeBlockDeviceError {
     CapacityExceedsHostAddressSpace,
+    DurableBytesLengthMismatch { expected: usize, actual: usize },
 }
 
 impl FakeBlockDevice {
@@ -28,6 +29,22 @@ impl FakeBlockDevice {
             durable_bytes: vec![0; len],
             flush_count: 0,
         })
+    }
+
+    pub fn from_durable_bytes(
+        geometry: BlockGeometry,
+        durable_bytes: &[u8],
+    ) -> Result<Self, FakeBlockDeviceError> {
+        let mut device = Self::new(geometry)?;
+        if device.durable_bytes.len() != durable_bytes.len() {
+            return Err(FakeBlockDeviceError::DurableBytesLengthMismatch {
+                expected: device.durable_bytes.len(),
+                actual: durable_bytes.len(),
+            });
+        }
+        device.live_bytes.copy_from_slice(durable_bytes);
+        device.durable_bytes.copy_from_slice(durable_bytes);
+        Ok(device)
     }
 
     pub fn flush_count(&self) -> u64 {

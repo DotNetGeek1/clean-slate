@@ -379,10 +379,13 @@ Conventions:
 For M5 storage, keep the layering narrow and split:
 
 - `clean-slate-block` for the transport-independent geometry/read-write/flush/error contract and fake host backend;
+- `clean-slate-store` for the host-testable versioned object-store format on top of that contract;
 - kernel storage/virtio code for hardware transport only;
 - userspace storage service code for request/response IPC/syscall boundary and explicit authority checks;
 - future persistent-store code for on-disk policy with no kernel/VirtIO imports;
 - `xtask`/`scripts` for persistence harness orchestration.
+
+Run `cargo test -p clean-slate-store` for the M5 host-side object-store format, copy-on-write persistence, and remount tests.
 
 ## Test layers
 
