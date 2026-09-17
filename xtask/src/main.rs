@@ -161,8 +161,8 @@ const M4_SUPERVISOR_ACCEPTANCE_MARKERS: [&str; 6] = [
 ];
 const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[SVC ] declared service=20736",
-    "[STOR] service started pid=",
     "[BLK ] authority granted pid=",
+    "[STOR] service started pid=",
     "[BLK ] request op=write id=1",
     "[BLK ] completion id=1 status=ok",
     "[BLK ] unauthorized denied pid=",
