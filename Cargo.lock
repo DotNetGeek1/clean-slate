@@ -46,6 +46,7 @@ name = "clean-slate-service-fixtures"
 version = "0.0.1"
 dependencies = [
  "clean-slate-block",
+ "clean-slate-capability",
  "clean-slate-service-lifecycle",
 ]
 
@@ -58,6 +59,7 @@ name = "clean-slate-store"
 version = "0.0.1"
 dependencies = [
  "clean-slate-block",
+ "clean-slate-capability",
  "clean-slate-service-fixtures",
 ]
 
@@ -65,6 +67,7 @@ dependencies = [
 name = "clean-slate-supervisor"
 version = "0.0.1"
 dependencies = [
+ "clean-slate-capability",
  "clean-slate-service-lifecycle",
 ]
 

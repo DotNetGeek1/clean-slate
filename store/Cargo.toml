@@ -19,6 +19,7 @@ required-features = ["userspace"]
 
 [dependencies]
 clean-slate-block = { path = "../block", features = ["alloc"] }
+clean-slate-capability = { path = "../capability" }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 
 [lints]

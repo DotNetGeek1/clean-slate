@@ -30,6 +30,7 @@ default = []
 userspace = []
 
 [dependencies]
+clean-slate-capability = { path = "../capability" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 
 [lints]

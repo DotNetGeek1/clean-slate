@@ -9,6 +9,8 @@ mod block_transport;
 mod config;
 mod crash_service;
 mod diagnostics;
+/// M6.3 object-capability protocol (lane-owned).
+pub mod object_capability;
 mod storage_service;
 mod unrelated_workload;
 

@@ -1,4 +1,14 @@
 //! M6.2 production capability-space substrate (global table + trusted identity helpers).
+//!
+//! Lane-owned submodules (one per M6 issue; each owns exactly its file):
+//! `object` (M6.3), `process_control` (M6.4), `delegation` (M6.5), `revocation` (M6.6),
+//! `audit` (M6.7). Syscall dispatch arms for them live in `syscall/mod.rs`.
+
+pub(crate) mod audit;
+pub(crate) mod delegation;
+pub(crate) mod object;
+pub(crate) mod process_control;
+pub(crate) mod revocation;
 
 use clean_slate_capability::{
     CapabilityError, CapabilityHandle, CapabilityRecord, CapabilityTable, HolderId, Provenance,

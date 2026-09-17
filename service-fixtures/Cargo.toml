@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 clean-slate-block = { path = "../block" }
+clean-slate-capability = { path = "../capability" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 
 [dev-dependencies]

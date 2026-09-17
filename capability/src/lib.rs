@@ -6,13 +6,19 @@
 #![cfg_attr(not(test), no_std)]
 
 mod audit;
+/// M6.7 bounded audit ring (lane-owned).
+pub mod audit_log;
 mod authorize;
+/// M6.5 delegation/attenuation over `CapabilityTable` (lane-owned).
+pub mod delegation;
 mod error;
 mod handle;
 mod holder;
 mod provenance;
 mod record;
 mod resource;
+/// M6.6 subtree/holder/resource revocation over `CapabilityTable` (lane-owned).
+pub mod revocation;
 mod rights;
 mod state;
 mod table;
