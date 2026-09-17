@@ -2,7 +2,11 @@
 
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::PAGE_SIZE;
-#[cfg(feature = "m5-storage-self-test")]
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
 use clean_slate_service_fixtures::{
     BlockTransportRequest, BLOCK_TRANSPORT_REQUEST_BYTES, BLOCK_TRANSPORT_RESPONSE_BYTES,
     BLOCK_TRANSPORT_VERSION, STORAGE_BLOCK_DEVICE_ID, STORAGE_SERVICE_ID,
@@ -27,7 +31,11 @@ pub(crate) enum BuiltinServiceImage {
         feature = "m4-service-lifecycle-self-test"
     ))]
     M3UserTestPayload,
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     StorageProbePayload,
 }
 
@@ -42,9 +50,17 @@ impl BuiltinServiceImage {
                 feature = "m4-service-lifecycle-self-test"
             ))]
             1 => Self::M3UserTestPayload,
-            #[cfg(feature = "m5-storage-self-test")]
+            #[cfg(any(
+                feature = "m5-storage-self-test",
+                feature = "m5-persistence-self-test",
+                feature = "m5-crash-recovery-self-test"
+            ))]
             id if id == STORAGE_SERVICE_ID.0 => Self::StorageProbePayload,
-            #[cfg(feature = "m5-storage-self-test")]
+            #[cfg(any(
+                feature = "m5-storage-self-test",
+                feature = "m5-persistence-self-test",
+                feature = "m5-crash-recovery-self-test"
+            ))]
             id if id == STORAGE_UNAUTHORIZED_SERVICE_ID.0 => Self::StorageProbePayload,
             _ => Self::ImmediateExit,
         }
@@ -100,9 +116,17 @@ pub(crate) fn launch_builtin_service(
         feature = "m4-service-lifecycle-self-test"
     ))]
     use crate::arch::x86_64::asm::clean_slate_user_address_space_test_start;
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     use crate::arch::x86_64::asm::clean_slate_user_storage_test_end;
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     use crate::arch::x86_64::asm::clean_slate_user_storage_test_start;
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
     use crate::arch::x86_64::gdt::userspace_gdt_state;
@@ -154,7 +178,11 @@ pub(crate) fn launch_builtin_service(
         Ok(())
     }
 
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     #[repr(C)]
     struct StorageProbeBootstrap {
         device_id: u64,
@@ -166,32 +194,76 @@ pub(crate) fn launch_builtin_service(
         payload: [u8; 512],
     }
 
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     const STORAGE_PROBE_MODE_AUTHORIZED: u64 = 0;
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     const STORAGE_PROBE_MODE_EXPECT_EACCES: u64 = 1;
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     const STORAGE_PROBE_REQUEST_OFFSET: usize =
         core::mem::offset_of!(StorageProbeBootstrap, request);
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     const STORAGE_PROBE_RESPONSE_OFFSET: usize =
         core::mem::offset_of!(StorageProbeBootstrap, response);
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     const STORAGE_PROBE_PAYLOAD_LEN_OFFSET: usize =
         core::mem::offset_of!(StorageProbeBootstrap, payload_len);
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     const STORAGE_PROBE_PAYLOAD_OFFSET: usize =
         core::mem::offset_of!(StorageProbeBootstrap, payload);
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     const _: [(); 24] = [(); STORAGE_PROBE_REQUEST_OFFSET];
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     const _: [(); 64] = [(); STORAGE_PROBE_RESPONSE_OFFSET];
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     const _: [(); 104] = [(); STORAGE_PROBE_PAYLOAD_LEN_OFFSET];
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     const _: [(); 112] = [(); STORAGE_PROBE_PAYLOAD_OFFSET];
 
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     fn copy_storage_probe_payload(frame_address: u64) -> Result<(), &'static str> {
         let payload_size = (&raw const clean_slate_user_storage_test_end as usize)
             .saturating_sub(&raw const clean_slate_user_storage_test_start as usize);
@@ -218,7 +290,11 @@ pub(crate) fn launch_builtin_service(
             feature = "m4-service-lifecycle-self-test"
         ))]
         BuiltinServiceImage::M3UserTestPayload => SERVICE_USER_CODE_ADDRESS,
-        #[cfg(feature = "m5-storage-self-test")]
+        #[cfg(any(
+            feature = "m5-storage-self-test",
+            feature = "m5-persistence-self-test",
+            feature = "m5-crash-recovery-self-test"
+        ))]
         BuiltinServiceImage::StorageProbePayload => SERVICE_USER_CODE_ADDRESS,
         BuiltinServiceImage::ImmediateExit => SERVICE_USER_CODE_ADDRESS,
     };
@@ -231,7 +307,11 @@ pub(crate) fn launch_builtin_service(
             feature = "m4-service-lifecycle-self-test"
         ))]
         BuiltinServiceImage::M3UserTestPayload => SERVICE_USER_STACK_ADDRESS,
-        #[cfg(feature = "m5-storage-self-test")]
+        #[cfg(any(
+            feature = "m5-storage-self-test",
+            feature = "m5-persistence-self-test",
+            feature = "m5-crash-recovery-self-test"
+        ))]
         BuiltinServiceImage::StorageProbePayload => SERVICE_USER_STACK_ADDRESS,
         BuiltinServiceImage::ImmediateExit => SERVICE_USER_CODE_ADDRESS + PAGE_SIZE,
     };
@@ -263,7 +343,11 @@ pub(crate) fn launch_builtin_service(
             feature = "m4-service-lifecycle-self-test"
         ))]
         BuiltinServiceImage::M3UserTestPayload => copy_m3_user_test_payload(code_frame)?,
-        #[cfg(feature = "m5-storage-self-test")]
+        #[cfg(any(
+            feature = "m5-storage-self-test",
+            feature = "m5-persistence-self-test",
+            feature = "m5-crash-recovery-self-test"
+        ))]
         BuiltinServiceImage::StorageProbePayload => copy_storage_probe_payload(code_frame)?,
     }
     map_process_page(
@@ -318,7 +402,11 @@ pub(crate) fn launch_builtin_service(
             allocator,
         )?;
     }
-    #[cfg(feature = "m5-storage-self-test")]
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     if matches!(image, BuiltinServiceImage::StorageProbePayload) {
         let data_frame = allocator
             .allocate_page()

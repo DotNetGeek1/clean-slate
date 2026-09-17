@@ -5,7 +5,7 @@
 .DESCRIPTION
     Sets OVMF_CODE / OVMF_VARS when they are not already in the environment,
     then runs one or more `cargo xtask` acceptance tests. By default the
-    milestone gates run (test-m1, test-m2, test-m3, test-m4); the individual
+    milestone gates run (test-m1, test-m2, test-m3, test-m4, test-m5); the individual
     test-m3-* and test-m4-* boots are constituents of those aggregates and are skipped unless
     named explicitly or -Exhaustive is given. Pass test names (or short
     aliases) to target a subset.
@@ -15,7 +15,12 @@
       m1, m2, m3 / m3.7 (aggregate),
       entry / m3.1, address-space / m3.2, syscall / m3.3,
       lifecycle / m3.4, ipc / m3.5, resources / m3.6,
-      m5-block / block-attach, m5-storage / m5.3, m5-disk-harness / m5-harness
+      m5 / test-m5,
+      m5-block / block-attach, m5-storage / m5.7,
+      m5-crash-matrix / crash-matrix / m5.6,
+      m5-persistence / reboot-persistence,
+      m5-crash-recovery / crash-recovery,
+      m5-disk-harness / m5-harness
 
 .PARAMETER Exhaustive
     Run every known test (milestone gates plus each individual M3/M4
@@ -100,8 +105,12 @@ $AllTests = [ordered]@{
     "test-m4-supervisor"        = @{ Aliases = @("m4-supervisor", "supervisor", "m4.3"); Description = "M4.3 userspace supervisor runtime QEMU integration acceptance"; Role = "Constituent" }
     "test-m4"                   = @{ Aliases = @("m4", "m4.8"); Description = "M4 milestone gate (recovery QEMU boot + M4.6 host policy tests)"; Role = "Aggregate" }
     "test-m4-recovery"          = @{ Aliases = @("m4-recovery", "recovery", "m4.8-qemu"); Description = "M4.8 authoritative recovery QEMU acceptance"; Role = "Constituent" }
+    "test-m5"                   = @{ Aliases = @("m5"); Description = "M5 milestone gate (block I/O, storage integration, reboot persistence, crash recovery)"; Role = "Aggregate" }
     "test-m5-block"             = @{ Aliases = @("m5-block", "block-attach"); Description = "M5.2 VirtIO block transport QEMU acceptance"; Role = "Constituent" }
-    "test-m5-storage"           = @{ Aliases = @("m5-storage", "m5.3"); Description = "M5.3 userspace storage-service seam acceptance"; Role = "Constituent" }
+    "test-m5-storage"           = @{ Aliases = @("m5-storage", "m5.7"); Description = "M5.7 integrated storage-path acceptance"; Role = "Constituent" }
+    "test-m5-crash-matrix"      = @{ Aliases = @("m5-crash-matrix", "crash-matrix", "m5.6"); Description = "M5.6 host crash-consistency matrix"; Role = "Constituent" }
+    "test-m5-persistence"       = @{ Aliases = @("m5-persistence", "reboot-persistence"); Description = "M5 reboot-persistence acceptance on the persistent QEMU disk"; Role = "Constituent" }
+    "test-m5-crash-recovery"    = @{ Aliases = @("m5-crash-recovery", "crash-recovery"); Description = "M5 abrupt-stop crash-recovery acceptance on the persistent QEMU disk"; Role = "Constituent" }
     "test-m5-disk-harness"      = @{ Aliases = @("m5-disk-harness", "m5-harness"); Description = "M5 harness-only two-boot disk fixture validation (host sentinel)"; Role = "Constituent" }
 }
 

@@ -235,6 +235,38 @@ cargo xtask test-m5-block
 
 This command builds the kernel with `m5-block-self-test`, creates a disposable raw disk image under `target/m5-block.img`, boots QEMU with a legacy (`disable-modern=on`) `virtio-blk-pci` device, and validates ordered discovery/write/flush/read markers through `[M5.2] PASS`.
 
+For the host-side M5.6 crash-consistency matrix:
+
+```bash
+cargo xtask test-m5-crash-matrix
+```
+
+This bounded host prerequisite runs `cargo test -p clean-slate-store crash_consistency` under `xtask` timeout control and exercises the full deterministic write/flush fault matrix from #58 before the QEMU abrupt-stop lane is trusted.
+
+For the two-boot M5 reboot-persistence acceptance:
+
+```bash
+cargo xtask test-m5-persistence
+```
+
+This command resets `target/m5/m5-data.img`, boots the `m5-persistence-self-test` kernel twice with fresh copied OVMF vars, preserves the exact same VirtIO disk image across the reboot, and requires ordered markers proving: fresh mount/format, deterministic writes of `alpha` and `beta`, a durable commit with `[BLK ] flush complete`, reboot on the same image, exact recovery of both objects, and a post-reboot overwrite where `beta` remains intact. Pass `--keep-disk` to preserve `target/m5/m5-data.img` on success or failure for debugging.
+
+For the four-boot M5 abrupt-stop crash-recovery acceptance:
+
+```bash
+cargo xtask test-m5-crash-recovery
+```
+
+This command also resets `target/m5/m5-data.img`, rebuilds the known committed baseline on the same disk, then reboots into a deterministic crash boot that halts after the first counted store write of the interrupted commit. `xtask` kills QEMU at that crash marker (no clean storage shutdown or extra flush), then reboots the same disk with `m5-crash-recovery-self-test` and accepts only the documented old-or-new coherent recovery states. Pass `--keep-disk` to retain the failing image for investigation.
+
+For the aggregate M5 milestone gate:
+
+```bash
+cargo xtask test-m5
+```
+
+The aggregate runs `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, and `test-m5-crash-recovery` in order, then prints `[M5  ] PASS`. The host emits `[TEST] rebooting with persistent disk` between QEMU phases; the recovery boot emits `[CRSH] recovery outcome=<previous-commit|new-commit>` once it has validated that no torn object/metadata state was accepted.
+
 For M5.5 persistent block-harness plumbing (QEMU fixture + host sentinel):
 
 ```bash
@@ -251,9 +283,9 @@ cargo xtask m5-disk-create
 cargo xtask m5-disk-reset
 ```
 
-On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, which covers milestone gates already wired into the aggregate flows. M5 commands are intentionally not in the default suite yet; run them explicitly (`test-m5-block`, `test-m5-storage`, `test-m5-disk-harness`) or via `-Exhaustive`. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, `test-m5-block`, `test-m5-storage`, and `test-m5-disk-harness` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-disk-harness`/`m5-harness`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
+On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, `test-m5`, which covers the milestone gates already wired into the aggregate flows without redundantly rerunning constituents. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, `test-m5-crash-recovery`, and `test-m5-disk-harness` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `m5`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, `m5-disk-harness`/`m5-harness`), for example `.\scripts\run-tests.ps1 -Test m5`; `-List` prints the available names.
 
-On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m5-block`/`block-attach`, `m5-storage`/`m5.7`, and `m5-disk-harness`/`m5-harness`). OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive includes `test-m5-block`, `test-m5-storage`, and the harness command `test-m5-disk-harness`.
+On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m5`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, and `m5-disk-harness`/`m5-harness`). OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive therefore exercises the new M5 crash/persistence constituents with the existing `qemu-system-x86` and `ovmf` package setup from `.github/workflows/pr.yml`.
 
 To launch paused for debugger attach:
 

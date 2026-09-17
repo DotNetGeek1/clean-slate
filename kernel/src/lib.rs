@@ -1,10 +1,22 @@
 #![cfg_attr(not(test), no_std)]
 
-#[cfg(feature = "m5-storage-self-test")]
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
 use core::alloc::{GlobalAlloc, Layout};
-#[cfg(feature = "m5-storage-self-test")]
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
 use core::ptr::null_mut;
-#[cfg(feature = "m5-storage-self-test")]
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 mod arch;
@@ -35,7 +47,9 @@ mod service;
         feature = "m3-ipc-self-test",
         feature = "m4-service-lifecycle-self-test",
         feature = "m5-block-self-test",
-        feature = "m5-storage-self-test"
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-recovery-self-test"
     ),
     allow(dead_code)
 )]
@@ -46,24 +60,52 @@ mod syscall;
 pub use diagnostics::qemu::qemu_exit_failure;
 pub use diagnostics::serial::{serial_write_fmt, serial_write_line};
 
-#[cfg(feature = "m5-storage-self-test")]
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
 struct M5BumpAllocator;
 
-#[cfg(feature = "m5-storage-self-test")]
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
 const M5_HEAP_BYTES: usize = 1024 * 1024;
-#[cfg(feature = "m5-storage-self-test")]
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
 static M5_HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-#[cfg(feature = "m5-storage-self-test")]
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
 #[repr(align(16))]
 struct M5Heap([u8; M5_HEAP_BYTES]);
-#[cfg(feature = "m5-storage-self-test")]
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
 static mut M5_HEAP: M5Heap = M5Heap([0; M5_HEAP_BYTES]);
 
-#[cfg(feature = "m5-storage-self-test")]
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
 #[global_allocator]
 static M5_ALLOCATOR: M5BumpAllocator = M5BumpAllocator;
 
-#[cfg(feature = "m5-storage-self-test")]
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
 unsafe impl GlobalAlloc for M5BumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let align = layout.align();

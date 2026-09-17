@@ -27,6 +27,8 @@ const M4_SUPERVISOR_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_RECOVERY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M5_STORAGE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
+const M5_CRASH_MATRIX_TIMEOUT: Duration = Duration::from_secs(20);
+const M5_PERSISTENCE_BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_BLOCK_DISK_BYTES: u64 = 16 * 1024 * 1024;
 const M5_DISK_HARNESS_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_DATA_DISK_FILENAME: &str = "m5-data.img";
@@ -184,6 +186,41 @@ const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[BLK ] read lba=",
     "[M5.2] PASS",
 ];
+const M5_PERSISTENCE_WRITE_MARKERS: [&str; 7] = [
+    "[BLK ] virtio-block ready blocks=",
+    "[STOR] mounted generation=fresh",
+    "[STOR] write object=alpha id=1 bytes=",
+    "[STOR] write object=beta id=2 bytes=",
+    "[BLK ] flush complete",
+    "[STOR] commit generation=1",
+    "[TEST] persistence phase=write PASS",
+];
+const M5_PERSISTENCE_READ_MARKERS: [&str; 9] = [
+    "[STOR] recovered generation=1",
+    "[STOR] read object=alpha id=1 bytes=",
+    "[STOR] read object=beta id=2 bytes=",
+    "[STOR] write object=alpha id=1 bytes=",
+    "[BLK ] flush complete",
+    "[STOR] commit generation=2",
+    "[STOR] recovered generation=2",
+    "[STOR] read object=beta id=2 bytes=",
+    "[TEST] persistence phase=read PASS",
+];
+const M5_CRASH_ARM_MARKERS: [&str; 6] = [
+    "[STOR] recovered generation=2",
+    "[STOR] read object=alpha id=1 bytes=",
+    "[STOR] read object=beta id=2 bytes=",
+    "[STOR] write object=alpha id=1 bytes=",
+    "[CRSH] armed trigger=after-write=1",
+    "[CRSH] inject after-write=1",
+];
+const M5_CRASH_RECOVERY_MARKERS: [&str; 5] = [
+    "[BLK ] virtio-block ready blocks=",
+    "[STOR] recovered generation=",
+    "[STOR] read object=beta id=2 bytes=",
+    "[CRSH] recovery outcome=",
+    "[TEST] crash recovery PASS",
+];
 /// Merged M3.2 + M3.4 markers in the order the `m3-address-space-self-test`
 /// boot actually emits them, so the aggregate gate proves isolation and
 /// fault/lifecycle behaviour from a single boot.
@@ -215,6 +252,17 @@ const M3_MILESTONE_STEPS: [M3MilestoneStep; 5] = [
     ),
     ("test-m3-ipc", run_m3_ipc_acceptance),
     ("test-m3-resources", run_m3_resources_acceptance),
+];
+type M5MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
+const M5_MILESTONE_STEPS: [M5MilestoneStep; 5] = [
+    ("test-m5-block", run_m5_block_acceptance),
+    ("test-m5-storage", run_m5_storage_acceptance),
+    ("test-m5-crash-matrix", run_m5_crash_matrix),
+    ("test-m5-persistence", run_m5_persistence_acceptance_default),
+    (
+        "test-m5-crash-recovery",
+        run_m5_crash_recovery_acceptance_default,
+    ),
 ];
 
 fn main() -> ExitCode {
@@ -250,8 +298,12 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM4RestartPolicy => run_m4_restart_policy_acceptance(),
         ParsedCommand::TestM4 => run_m4_acceptance(),
         ParsedCommand::TestM4Recovery => run_m4_recovery_acceptance(),
+        ParsedCommand::TestM5 => run_m5_acceptance(),
         ParsedCommand::TestM5Block => run_m5_block_acceptance(),
         ParsedCommand::TestM5Storage => run_m5_storage_acceptance(),
+        ParsedCommand::TestM5CrashMatrix => run_m5_crash_matrix(),
+        ParsedCommand::TestM5Persistence => run_m5_persistence_acceptance(&trailing_args),
+        ParsedCommand::TestM5CrashRecovery => run_m5_crash_recovery_acceptance(&trailing_args),
         ParsedCommand::TestM5DiskHarness => run_m5_disk_harness(&trailing_args),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
@@ -291,6 +343,111 @@ fn run_m5_block_acceptance() -> Result<(), XtaskError> {
             reset_ovmf_vars: false,
         },
     )
+}
+
+fn run_m5_persistence_acceptance_default() -> Result<(), XtaskError> {
+    run_m5_persistence_acceptance(&[])
+}
+
+fn run_m5_crash_recovery_acceptance_default() -> Result<(), XtaskError> {
+    run_m5_crash_recovery_acceptance(&[])
+}
+
+fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
+    let options = parse_m5_cli_options(args)?;
+    let run_result = (|| -> Result<(), XtaskError> {
+        reset_m5_data_disk_image()?;
+        let config = m5_storage_vm_config();
+        println!("[M5.P] phase 1/2 boot");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m5-persistence-self-test"],
+            Some((&M5_PERSISTENCE_WRITE_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            config.clone(),
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "persistence boot 1".to_owned(),
+            reason: error.to_string(),
+        })?;
+        println!("[TEST] rebooting with persistent disk");
+        println!("[M5.P] phase 2/2 boot");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m5-persistence-self-test"],
+            Some((&M5_PERSISTENCE_READ_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            config,
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "persistence boot 2".to_owned(),
+            reason: error.to_string(),
+        })?;
+        println!("[M5.P] PASS");
+        Ok(())
+    })();
+    finalize_m5_disk_lifecycle(run_result, options.keep_disk)
+}
+
+fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
+    let options = parse_m5_cli_options(args)?;
+    let run_result = (|| -> Result<(), XtaskError> {
+        reset_m5_data_disk_image()?;
+        let config = m5_storage_vm_config();
+        println!("[M5.C] baseline boot 1/4");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m5-persistence-self-test"],
+            Some((&M5_PERSISTENCE_WRITE_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            config.clone(),
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "crash baseline boot 1".to_owned(),
+            reason: error.to_string(),
+        })?;
+        println!("[TEST] rebooting with persistent disk");
+        println!("[M5.C] baseline boot 2/4");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m5-persistence-self-test"],
+            Some((&M5_PERSISTENCE_READ_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            config.clone(),
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "crash baseline boot 2".to_owned(),
+            reason: error.to_string(),
+        })?;
+        println!("[M5.C] abrupt-stop boot 3/4");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m5-persistence-self-test"],
+            Some((&M5_CRASH_ARM_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            config.clone(),
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "crash injection boot".to_owned(),
+            reason: error.to_string(),
+        })?;
+        println!("[TEST] rebooting with persistent disk");
+        println!("[M5.C] recovery boot 4/4");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m5-crash-recovery-self-test"],
+            Some((&M5_CRASH_RECOVERY_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            config,
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "crash recovery boot".to_owned(),
+            reason: error.to_string(),
+        })?;
+        println!("[M5.C] PASS");
+        Ok(())
+    })();
+    finalize_m5_disk_lifecycle(run_result, options.keep_disk)
 }
 
 fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
@@ -539,6 +696,19 @@ fn run_m4_acceptance() -> Result<(), XtaskError> {
     Ok(())
 }
 
+fn run_m5_crash_matrix() -> Result<(), XtaskError> {
+    let mut test = Command::new("cargo");
+    test.current_dir(workspace_root())
+        .arg("test")
+        .arg("-p")
+        .arg("clean-slate-store")
+        .arg("--test")
+        .arg("crash_consistency");
+    run_timed_command(&mut test, M5_CRASH_MATRIX_TIMEOUT)?;
+    println!("[M5.6] PASS (host crash-consistency matrix)");
+    Ok(())
+}
+
 fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
     reset_m5_data_disk_image()?;
     run_vm_inner_with_config(
@@ -551,6 +721,16 @@ fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
         )),
         m5_storage_vm_config(),
     )
+}
+
+fn run_m5_acceptance() -> Result<(), XtaskError> {
+    let total = M5_MILESTONE_STEPS.len();
+    for (index, (name, step)) in M5_MILESTONE_STEPS.iter().enumerate() {
+        println!("[M5  ] step {}/{} {}", index + 1, total, name);
+        step()?;
+    }
+    println!("[M5  ] PASS");
+    Ok(())
 }
 
 fn m5_storage_vm_config() -> VmLaunchConfig {
@@ -953,6 +1133,90 @@ fn run_command(command: &mut Command) -> Result<(), XtaskError> {
     }
 }
 
+fn run_timed_command(command: &mut Command, timeout: Duration) -> Result<(), XtaskError> {
+    let start = std::time::Instant::now();
+    let command_display = format!(
+        "{} {}",
+        command.get_program().to_string_lossy(),
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture child stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture child stderr"))?;
+    let (tx, rx) = mpsc::channel();
+    let stdout_handle = spawn_output_reader(stdout, false, tx.clone());
+    let stderr_handle = spawn_output_reader(stderr, true, tx);
+    let mut output = String::new();
+    let mut readers_finished = 0usize;
+    let mut child_status = None;
+
+    loop {
+        if start.elapsed() >= timeout {
+            terminate_child(&mut child)?;
+            let _ = child.wait();
+            join_output_reader(stdout_handle);
+            join_output_reader(stderr_handle);
+            drain_output_events(&rx, &mut output);
+            return Err(XtaskError::CommandTimedOut {
+                command: command_display,
+                timeout: timeout.as_secs(),
+            });
+        }
+
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(OutputEvent::Chunk(chunk)) => {
+                if chunk.is_stderr {
+                    eprint!("{}", chunk.text);
+                } else {
+                    print!("{}", chunk.text);
+                }
+                output.push_str(&chunk.text);
+            }
+            Ok(OutputEvent::Finished) => readers_finished += 1,
+            Ok(OutputEvent::ReadError(error)) => {
+                terminate_child(&mut child).ok();
+                let _ = child.wait();
+                join_output_reader(stdout_handle);
+                join_output_reader(stderr_handle);
+                return Err(XtaskError::Io(error));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => readers_finished = 2,
+        }
+
+        if child_status.is_none() {
+            child_status = child.try_wait()?;
+        }
+        if readers_finished == 2 && child_status.is_some() {
+            break;
+        }
+    }
+
+    join_output_reader(stdout_handle);
+    join_output_reader(stderr_handle);
+    drain_output_events(&rx, &mut output);
+
+    let status = child_status.unwrap_or(child.wait()?);
+    if status.success() || status.code() == Some(QEMU_DEBUG_EXIT_SUCCESS) {
+        Ok(())
+    } else {
+        Err(XtaskError::CommandFailed {
+            command: command_display,
+            status: status.to_string(),
+        })
+    }
+}
 fn run_acceptance_command(
     command: &mut Command,
     markers: &[&str],
@@ -1182,8 +1446,13 @@ fn print_help() {
     println!("  test-m4-restart-policy Run M4.6 host restart-policy convergence tests and build the CPL3 image");
     println!("  test-m4-recovery Build the M4.8 recovery supervisor kernel boot and validate ordered markers");
     println!("  test-m4       M4 milestone gate: recovery QEMU boot plus M4.6 host policy tests");
+    println!("  test-m5       M5 milestone gate: block, storage, persistence, and crash-recovery acceptance");
     println!("  test-m5-block Build the M5.2 virtio-block kernel, run QEMU, and validate ordered markers");
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
+    println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
+    println!("  test-m5-persistence Two-boot persistent-disk M5 acceptance using the production storage path");
+    println!("  test-m5-crash-recovery Four-boot abrupt-stop crash-recovery M5 acceptance");
+    println!("                 Pass --keep-disk to preserve target/m5/m5-data.img for debugging");
     println!("  test-m5-disk-harness Two-boot M5 disk harness with host-side sentinel validation");
     println!(
         "                 Uses M1 markers only; does not assert milestone-level storage behavior"
@@ -1221,8 +1490,12 @@ enum ParsedCommand {
     TestM4RestartPolicy,
     TestM4,
     TestM4Recovery,
+    TestM5,
     TestM5Block,
     TestM5Storage,
+    TestM5CrashMatrix,
+    TestM5Persistence,
+    TestM5CrashRecovery,
     TestM5DiskHarness,
     M5DiskCreate,
     M5DiskReset,
@@ -1253,8 +1526,12 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m4-restart-policy" => ParsedCommand::TestM4RestartPolicy,
         Some(cmd) if cmd == "test-m4" => ParsedCommand::TestM4,
         Some(cmd) if cmd == "test-m4-recovery" => ParsedCommand::TestM4Recovery,
+        Some(cmd) if cmd == "test-m5" => ParsedCommand::TestM5,
         Some(cmd) if cmd == "test-m5-block" => ParsedCommand::TestM5Block,
         Some(cmd) if cmd == "test-m5-storage" => ParsedCommand::TestM5Storage,
+        Some(cmd) if cmd == "test-m5-crash-matrix" => ParsedCommand::TestM5CrashMatrix,
+        Some(cmd) if cmd == "test-m5-persistence" => ParsedCommand::TestM5Persistence,
+        Some(cmd) if cmd == "test-m5-crash-recovery" => ParsedCommand::TestM5CrashRecovery,
         Some(cmd) if cmd == "test-m5-disk-harness" => ParsedCommand::TestM5DiskHarness,
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
@@ -1436,8 +1713,24 @@ mod tests {
             ParsedCommand::TestM3Resources
         );
         assert_eq!(
+            parse_command(Some("test-m5".as_ref())),
+            ParsedCommand::TestM5
+        );
+        assert_eq!(
             parse_command(Some("test-m5-storage".as_ref())),
             ParsedCommand::TestM5Storage
+        );
+        assert_eq!(
+            parse_command(Some("test-m5-crash-matrix".as_ref())),
+            ParsedCommand::TestM5CrashMatrix
+        );
+        assert_eq!(
+            parse_command(Some("test-m5-persistence".as_ref())),
+            ParsedCommand::TestM5Persistence
+        );
+        assert_eq!(
+            parse_command(Some("test-m5-crash-recovery".as_ref())),
+            ParsedCommand::TestM5CrashRecovery
         );
         assert_eq!(
             parse_command(Some("run-gdb-entry".as_ref())),
@@ -1619,6 +1912,21 @@ mod tests {
                 "test-m3-address-space+lifecycle",
                 "test-m3-ipc",
                 "test-m3-resources",
+            ]
+        );
+    }
+
+    #[test]
+    fn m5_milestone_steps_have_deterministic_order() {
+        let names: Vec<&str> = M5_MILESTONE_STEPS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "test-m5-block",
+                "test-m5-storage",
+                "test-m5-crash-matrix",
+                "test-m5-persistence",
+                "test-m5-crash-recovery",
             ]
         );
     }
