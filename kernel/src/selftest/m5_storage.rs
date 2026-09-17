@@ -156,9 +156,6 @@ pub(crate) fn handle_userspace_storage_entry() -> u64 {
         state.authorized_done = true;
     } else if pid == state.unauthorized_pid {
         state.unauthorized_done = true;
-        kernel_log_fmt(format_args!(
-            "{M5_STORAGE_UNAUTHORIZED_DENIED_MARKER}{pid}\n"
-        ));
     } else {
         fatal_kernel_error("unexpected process reached m5 storage entry trap");
     }
@@ -169,6 +166,10 @@ pub(crate) fn handle_userspace_storage_entry() -> u64 {
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 0, false)
         .unwrap_or_else(|message| fatal_kernel_error(message));
     if complete {
+        kernel_log_fmt(format_args!(
+            "{M5_STORAGE_UNAUTHORIZED_DENIED_MARKER}{}\n",
+            state.unauthorized_pid
+        ));
         unsafe {
             *M5_STORAGE_SELF_TEST_STATE.get() = None;
         }
