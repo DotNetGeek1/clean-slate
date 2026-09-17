@@ -690,6 +690,7 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
         cap_abi::SYSCALL_NR_CAP_DELEGATE => crate::capability::delegation::handle_syscall(frame),
         cap_abi::SYSCALL_NR_CAP_REVOKE => crate::capability::revocation::handle_syscall(frame),
         cap_abi::SYSCALL_NR_CAP_AUDIT_READ => crate::capability::audit::handle_syscall(frame),
+        cap_abi::SYSCALL_NR_CAP_GRANT => crate::capability::bootstrap_grant::handle_syscall(frame),
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 
