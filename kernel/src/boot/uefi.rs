@@ -3,7 +3,6 @@ use uefi::mem::memory_map::{MemoryDescriptor, MemoryType};
 use uefi::proto::loaded_image::LoadedImage;
 
 use crate::arch::x86_64::cpu::read_stack_pointer;
-use crate::mm::paging::reserve_active_page_table_frames;
 use crate::mm::paging::reserve_mapping_page_tables;
 use crate::mm::region::{
     MemoryRegion, MemoryRegionKind, NormalizedMemoryMap, ReservedRange, MAX_MEMORY_REGIONS,
@@ -11,7 +10,7 @@ use crate::mm::region::{
 };
 use crate::mm::{align_down, align_up, PAGE_SIZE};
 
-const MAX_BOOT_RESERVED_RANGES: usize = MAX_RESERVED_RANGES;
+const MAX_BOOT_RESERVED_RANGES: usize = 16;
 const EARLY_STACK_RESERVE_SIZE: u64 = 64 * 1024;
 
 pub(crate) struct BootReservedRanges {
@@ -235,7 +234,6 @@ pub(crate) fn collect_reserved_ranges_from_firmware() -> Result<BootReservedRang
     );
     ranges.push(kernel_range)?;
     ranges.push(stack_range)?;
-    reserve_active_page_table_frames(&mut ranges)?;
     reserve_mapping_page_tables(&mut ranges, kernel_base)?;
     reserve_mapping_page_tables(&mut ranges, stack_pointer)?;
 

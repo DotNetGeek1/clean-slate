@@ -9,7 +9,6 @@
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::cpu::without_interrupts;
-use crate::arch::x86_64::gdt::userspace_gdt_state;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
@@ -257,16 +256,6 @@ fn current_userspace_pid() -> Result<u64, &'static str> {
 pub(crate) fn handle_userspace_storage_entry() -> u64 {
     let pid = current_userspace_pid().unwrap_or_else(|message| fatal_kernel_error(message));
     let report = unsafe { &*(STORAGE_SERVICE_BOOTSTRAP_ADDRESS as *const StorageServiceBootstrap) };
-    kernel_log_fmt(format_args!(
-        "[STOR] report mode={} result={} aux={} handle={} mounted={} committed={} remounted={}\n",
-        report.mode,
-        report.result_code,
-        report.aux_status,
-        report.capability_handle,
-        report.mounted_generation,
-        report.committed_generation,
-        report.remounted_generation
-    ));
     let state = unsafe {
         (&mut *M5_STORAGE_SELF_TEST_STATE.get())
             .as_mut()
@@ -299,10 +288,6 @@ pub(crate) fn handle_userspace_storage_entry() -> u64 {
             }
             _ => fatal_kernel_error("storage service exit publication failed"),
         });
-    kernel_log_fmt(format_args!(
-        "[STOR] gdt-before-next-phase initialized={}\n",
-        userspace_gdt_state().is_ok()
-    ));
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 0, false)
         .unwrap_or_else(|message| fatal_kernel_error(message));
     if next_phase.is_none() {

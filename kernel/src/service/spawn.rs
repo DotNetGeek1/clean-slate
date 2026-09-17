@@ -165,13 +165,10 @@ pub(crate) fn launch_builtin_service(
     ))]
     use crate::arch::x86_64::asm::clean_slate_user_address_space_test_start;
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
-    use crate::arch::x86_64::gdt::static_storage_bounds as gdt_static_storage_bounds;
-    use crate::arch::x86_64::gdt::userspace_gdt_state;
     use crate::diagnostics::log::kernel_log_fmt;
     use crate::ipc::endpoint_table_mut;
     use crate::mm::address_space::create_process_address_space;
     use crate::mm::address_space::map_process_page;
-    use crate::mm::frame_allocator::free_frame;
     use crate::mm::paging::zero_page;
     use crate::mm::PAGE_SIZE;
     use crate::mm::PHYSICAL_MEMORY_OFFSET;
@@ -235,11 +232,6 @@ pub(crate) fn launch_builtin_service(
         }
         let mut address_space =
             create_process_address_space(allocator, VirtAddr::new(SERVICE_USER_CODE_ADDRESS))?;
-        let (gdt_base, gdt_size) = gdt_static_storage_bounds();
-        kernel_log_fmt(format_args!(
-            "[STOR] gdt-bounds base={:#018x} size={:#x}\n",
-            gdt_base, gdt_size
-        ));
         let (pid, tid) = {
             let ids = unsafe { id_allocator_mut() };
             (ids.allocate_pid()?, ids.allocate_tid()?)
@@ -248,12 +240,6 @@ pub(crate) fn launch_builtin_service(
             let frame_address = allocator
                 .allocate_page()
                 .ok_or("allocator could not provide a storage code page")?;
-            if page_index < 4 {
-                kernel_log_fmt(format_args!(
-                    "[STOR] code-frame service={} page={} frame={:#018x}\n",
-                    service.0, page_index, frame_address
-                ));
-            }
             zero_page(frame_address);
             let offset = page_index * PAGE_SIZE as usize;
             let chunk_end = (offset + PAGE_SIZE as usize).min(STORAGE_USERSPACE_IMAGE.len());
@@ -275,7 +261,7 @@ pub(crate) fn launch_builtin_service(
                 allocator,
             ) {
                 unsafe {
-                    free_frame(allocator, frame_address)?;
+                    crate::mm::frame_allocator::free_frame(allocator, frame_address)?;
                 }
                 return Err(message);
             }
@@ -284,12 +270,6 @@ pub(crate) fn launch_builtin_service(
             let stack_frame = allocator
                 .allocate_page()
                 .ok_or("allocator could not provide a storage stack page")?;
-            if stack_page < 2 {
-                kernel_log_fmt(format_args!(
-                    "[STOR] stack-frame service={} page={} frame={:#018x}\n",
-                    service.0, stack_page, stack_frame
-                ));
-            }
             zero_page(stack_frame);
             map_process_page(
                 &mut address_space,
@@ -305,10 +285,6 @@ pub(crate) fn launch_builtin_service(
         let data_frame = allocator
             .allocate_page()
             .ok_or("allocator could not provide a storage bootstrap page")?;
-        kernel_log_fmt(format_args!(
-            "[STOR] data-frame service={} frame={:#018x}\n",
-            service.0, data_frame
-        ));
         zero_page(data_frame);
         let bootstrap = crate::selftest::m5_storage::storage_service_bootstrap(service)?;
         unsafe {
@@ -330,11 +306,6 @@ pub(crate) fn launch_builtin_service(
         let user_stack_pointer =
             STORAGE_SERVICE_STACK_ADDRESS + STORAGE_SERVICE_STACK_PAGES * PAGE_SIZE;
         let entry_rip = SERVICE_USER_CODE_ADDRESS + STORAGE_USERSPACE_ENTRY_OFFSET;
-        kernel_log_fmt(format_args!(
-            "[STOR] spawn-pre-entry service={} gdt={}\n",
-            service.0,
-            userspace_gdt_state().is_ok()
-        ));
         let saved_stack_pointer =
             build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
         let thread = Thread {

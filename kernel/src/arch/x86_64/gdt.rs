@@ -135,19 +135,6 @@ pub(crate) fn userspace_selectors() -> Result<(u16, u16), &'static str> {
     ))
 }
 
-pub(crate) fn static_storage_bounds() -> (u64, u64) {
-    let double_fault_stack_start = DOUBLE_FAULT_STACK.get() as u64;
-    let gdt_state_start = GDT_STATE.get() as u64;
-    let tss_state_start = TSS_STATE.get() as u64;
-    let start = double_fault_stack_start
-        .min(gdt_state_start)
-        .min(tss_state_start);
-    let end = (double_fault_stack_start + core::mem::size_of::<DoubleFaultStack>() as u64)
-        .max(gdt_state_start + core::mem::size_of::<GlobalCell<Option<GdtState>>>() as u64)
-        .max(tss_state_start + core::mem::size_of::<GlobalCell<Option<TaskStateSegment>>>() as u64);
-    (start, end.saturating_sub(start))
-}
-
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
