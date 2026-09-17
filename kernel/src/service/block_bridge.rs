@@ -3,6 +3,8 @@ use crate::device::virtio::block::VirtioBlockDevice;
 #[cfg(feature = "m5-storage-self-test")]
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::sync::global_cell::GlobalCell;
+#[cfg(feature = "m5-storage-self-test")]
+use clean_slate_block::BlockTransportError;
 use clean_slate_block::{BlockDevice, BlockDeviceId, BlockGeometry, BlockIoError};
 use clean_slate_service_fixtures::{
     handle_block_request, BlockTransportOp, BlockTransportRequest, BlockTransportResponse,
@@ -165,16 +167,17 @@ pub(crate) fn handle_kernel_block_request(
     let backend = unsafe { &mut *BLOCK_BACKEND.get() };
     backend.ensure_transport();
     if backend.transport_faulted() {
-        return transport_fault_response(request);
+        let decoded = BlockTransportRequest::decode(request);
+        return transport_fault_response(decoded);
     }
     handle_block_request(backend, request, payload)
 }
 
 fn transport_fault_response(
-    request: &[u8; BLOCK_TRANSPORT_REQUEST_BYTES],
+    request: Result<BlockTransportRequest, clean_slate_service_fixtures::BlockTransportDecodeError>,
 ) -> [u8; BLOCK_TRANSPORT_RESPONSE_BYTES] {
     let contract_geometry = contract_geometry_fallback();
-    let response = match BlockTransportRequest::decode(request) {
+    let response = match request {
         Ok(request) => BlockTransportResponse {
             request_id: request.request_id,
             device_id: request.device_id,
@@ -214,8 +217,10 @@ mod tests {
 
     #[test]
     fn transport_fault_response_marks_device_fault_for_valid_request() {
-        let request = BlockTransportRequest::geometry(7, STORAGE_BLOCK_DEVICE_ID).encode();
-        let response = transport_fault_response(&request);
+        let request = BlockTransportRequest::decode(
+            &BlockTransportRequest::geometry(7, STORAGE_BLOCK_DEVICE_ID).encode(),
+        );
+        let response = transport_fault_response(request);
         let decoded = BlockTransportResponse::decode(&response).expect("decode");
         assert_eq!(decoded.request_id, 7);
         assert_eq!(decoded.device_id, STORAGE_BLOCK_DEVICE_ID);
@@ -225,12 +230,24 @@ mod tests {
 
     #[test]
     fn transport_fault_response_marks_invalid_protocol_for_malformed_request() {
-        let mut request = BlockTransportRequest::geometry(9, STORAGE_BLOCK_DEVICE_ID).encode();
-        request[0] = 0;
-        let response = transport_fault_response(&request);
+        let mut request_wire = BlockTransportRequest::geometry(9, STORAGE_BLOCK_DEVICE_ID).encode();
+        request_wire[0] = 0;
+        let request = BlockTransportRequest::decode(&request_wire);
+        let response = transport_fault_response(request);
         let decoded = BlockTransportResponse::decode(&response).expect("decode");
         assert_eq!(decoded.status, BlockTransportStatus::InvalidProtocol);
         assert_eq!(decoded.request_id, 0);
+    }
+
+    #[test]
+    fn transport_fault_response_marks_invalid_protocol_for_invalid_operation() {
+        let mut request_wire =
+            BlockTransportRequest::geometry(10, STORAGE_BLOCK_DEVICE_ID).encode();
+        request_wire[6] = 99;
+        let request = BlockTransportRequest::decode(&request_wire);
+        let response = transport_fault_response(request);
+        let decoded = BlockTransportResponse::decode(&response).expect("decode");
+        assert_eq!(decoded.status, BlockTransportStatus::InvalidProtocol);
     }
 }
 
