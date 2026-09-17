@@ -7,6 +7,7 @@ pub(crate) mod uefi;
 
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::gdt::set_privilege_stack;
+use crate::arch::x86_64::gdt::static_storage_bounds as gdt_static_storage_bounds;
 use crate::arch::x86_64::idt::install_interrupt_handlers;
 use crate::boot::uefi::collect_reserved_ranges_from_firmware;
 use crate::boot::uefi::normalize_memory_map;
@@ -40,6 +41,7 @@ use crate::mm::address_space::set_kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::inspect_current_mapping;
+use crate::mm::paging::reserve_mapping_page_tables;
 use crate::mm::region::ReservedRange;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
@@ -68,6 +70,7 @@ use crate::sched::dispatch::initialize_scheduler;
     feature = "m5-block-self-test"
 )))]
 use crate::sched::dispatch::start_scheduler;
+use crate::sched::static_storage_bounds as scheduler_static_storage_bounds;
 use crate::sched::task_stacks_mut;
 #[cfg(feature = "m1-self-test")]
 use crate::selftest::m1_memory::exercise_mapping;
@@ -138,6 +141,20 @@ pub(crate) fn run() -> Status {
 
 fn run_inner() -> Result<(), &'static str> {
     let mut reserved_ranges = collect_reserved_ranges_from_firmware()?;
+    let (gdt_base, gdt_size) = gdt_static_storage_bounds();
+    reserved_ranges.push(ReservedRange::from_base_and_size(gdt_base, gdt_size))?;
+    reserve_mapping_page_tables(&mut reserved_ranges, gdt_base)?;
+    reserve_mapping_page_tables(&mut reserved_ranges, gdt_base + gdt_size.saturating_sub(1))?;
+    let (scheduler_base, scheduler_size) = scheduler_static_storage_bounds();
+    reserved_ranges.push(ReservedRange::from_base_and_size(
+        scheduler_base,
+        scheduler_size,
+    ))?;
+    reserve_mapping_page_tables(&mut reserved_ranges, scheduler_base)?;
+    reserve_mapping_page_tables(
+        &mut reserved_ranges,
+        scheduler_base + scheduler_size.saturating_sub(1),
+    )?;
 
     let mut memory_map = unsafe { ::uefi::boot::exit_boot_services(None) };
     memory_map.sort();

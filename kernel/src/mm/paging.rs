@@ -250,6 +250,37 @@ pub(crate) fn reserve_mapping_page_tables(
     Ok(())
 }
 
+pub(crate) fn reserve_active_page_table_frames(
+    ranges: &mut BootReservedRanges,
+) -> Result<(), &'static str> {
+    fn reserve_table(
+        ranges: &mut BootReservedRanges,
+        frame_address: u64,
+        level: u8,
+    ) -> Result<(), &'static str> {
+        ranges.push(ReservedRange::from_base_and_size(frame_address, PAGE_SIZE))?;
+        if level == 1 {
+            return Ok(());
+        }
+        let table = unsafe { page_table_ref(frame_address) };
+        for entry in table.iter() {
+            let Ok(frame) = entry.frame() else {
+                continue;
+            };
+            if level > 2 && entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+                continue;
+            }
+            if level == 2 && entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+                continue;
+            }
+            reserve_table(ranges, frame.start_address().as_u64(), level - 1)?;
+        }
+        Ok(())
+    }
+
+    reserve_table(ranges, current_root_frame_address(), 4)
+}
+
 pub(crate) fn inspect_current_mapping() -> Result<(u64, u64), &'static str> {
     let mapper = unsafe { current_offset_page_table() };
     let virtual_address = VirtAddr::from_ptr(run as *const ());

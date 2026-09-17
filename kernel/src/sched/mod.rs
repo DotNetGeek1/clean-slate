@@ -462,6 +462,16 @@ pub(crate) unsafe fn task_stacks_mut() -> &'static mut [TaskStack; TASK_COUNT] {
     unsafe { &mut *TASK_STACKS.get() }
 }
 
+pub(crate) fn static_storage_bounds() -> (u64, u64) {
+    let scheduler_start = SCHEDULER.get() as u64;
+    let task_stacks_start = TASK_STACKS.get() as u64;
+    let start = scheduler_start.min(task_stacks_start);
+    let end = (scheduler_start + core::mem::size_of::<GlobalCell<Scheduler>>() as u64).max(
+        task_stacks_start + core::mem::size_of::<GlobalCell<[TaskStack; TASK_COUNT]>>() as u64,
+    );
+    (start, end.saturating_sub(start))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

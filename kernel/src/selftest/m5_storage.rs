@@ -9,6 +9,7 @@
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::cpu::without_interrupts;
+use crate::arch::x86_64::gdt::userspace_gdt_state;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
@@ -298,10 +299,10 @@ pub(crate) fn handle_userspace_storage_entry() -> u64 {
             }
             _ => fatal_kernel_error("storage service exit publication failed"),
         });
-    if let Some(phase) = next_phase {
-        state.phase = phase;
-        launch_current_phase(controller, allocator);
-    }
+    kernel_log_fmt(format_args!(
+        "[STOR] gdt-before-next-phase initialized={}\n",
+        userspace_gdt_state().is_ok()
+    ));
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 0, false)
         .unwrap_or_else(|message| fatal_kernel_error(message));
     if next_phase.is_none() {
@@ -314,9 +315,12 @@ pub(crate) fn handle_userspace_storage_entry() -> u64 {
         }
         qemu_exit(QEMU_EXIT_SUCCESS)
     }
-    teardown
-        .next_stack_pointer
-        .unwrap_or_else(|| fatal_kernel_error("no runnable thread remained during m5 self-test"))
+    let phase = next_phase.expect("checked next phase before continuing");
+    state.phase = phase;
+    launch_current_phase(controller, allocator);
+    teardown.next_stack_pointer.unwrap_or_else(|| {
+        start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message))
+    })
 }
 
 fn handle_integration_phase(

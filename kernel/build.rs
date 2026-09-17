@@ -229,7 +229,7 @@ fn apply_rela_dyn(
                     let value = (r_addend as u64)
                         .wrapping_sub(link_base)
                         .wrapping_add(load_base);
-                    write_u64(image, load_base, r_offset, value)?;
+                    write_u64(image, link_base, r_offset, value)?;
                 }
                 _ => {
                     return Err(format!(

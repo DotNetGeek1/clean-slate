@@ -38,6 +38,7 @@ pub(crate) static DOUBLE_FAULT_STACK: GlobalCell<DoubleFaultStack> =
     GlobalCell::new(DoubleFaultStack([0; DOUBLE_FAULT_STACK_SIZE]));
 pub(crate) static GDT_STATE: GlobalCell<Option<GdtState>> = GlobalCell::new(None);
 static TSS_STATE: GlobalCell<Option<TaskStateSegment>> = GlobalCell::new(None);
+static USERSPACE_SELECTORS: GlobalCell<Option<(u16, u16)>> = GlobalCell::new(None);
 
 pub(super) fn initialize_gdt_and_tss() {
     let double_fault_stack_top = {
@@ -74,6 +75,9 @@ pub(super) fn initialize_gdt_and_tss() {
         user_data_selector,
         tss_selector,
     });
+    unsafe {
+        *USERSPACE_SELECTORS.get() = Some((user_code_selector.0, user_data_selector.0));
+    }
 
     let gdt_state = unsafe {
         (&*GDT_STATE.get())
@@ -116,6 +120,32 @@ pub(crate) fn userspace_gdt_state() -> Result<&'static GdtState, &'static str> {
             .as_ref()
             .ok_or("GDT must exist before entering userspace")
     }
+}
+
+pub(crate) fn userspace_selectors() -> Result<(u16, u16), &'static str> {
+    unsafe {
+        if let Some(selectors) = *USERSPACE_SELECTORS.get() {
+            return Ok(selectors);
+        }
+    }
+    let gdt_state = userspace_gdt_state()?;
+    Ok((
+        gdt_state.user_code_selector.0,
+        gdt_state.user_data_selector.0,
+    ))
+}
+
+pub(crate) fn static_storage_bounds() -> (u64, u64) {
+    let double_fault_stack_start = DOUBLE_FAULT_STACK.get() as u64;
+    let gdt_state_start = GDT_STATE.get() as u64;
+    let tss_state_start = TSS_STATE.get() as u64;
+    let start = double_fault_stack_start
+        .min(gdt_state_start)
+        .min(tss_state_start);
+    let end = (double_fault_stack_start + core::mem::size_of::<DoubleFaultStack>() as u64)
+        .max(gdt_state_start + core::mem::size_of::<GlobalCell<Option<GdtState>>>() as u64)
+        .max(tss_state_start + core::mem::size_of::<GlobalCell<Option<TaskStateSegment>>>() as u64);
+    (start, end.saturating_sub(start))
 }
 
 #[cfg(any(

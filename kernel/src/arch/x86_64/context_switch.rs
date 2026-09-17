@@ -30,7 +30,7 @@ use crate::arch::x86_64::asm::clean_slate_restore_context;
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
-use crate::arch::x86_64::gdt::userspace_gdt_state;
+use crate::arch::x86_64::gdt::userspace_selectors;
 #[cfg(not(any(
     feature = "m1-self-test",
     feature = "m2-double-fault-self-test",
@@ -126,7 +126,7 @@ pub(crate) fn build_userspace_entry_frame(
     instruction_pointer: u64,
     user_stack_pointer: u64,
 ) -> Result<u64, &'static str> {
-    let gdt_state = userspace_gdt_state()?;
+    let (user_code_selector, user_data_selector) = userspace_selectors()?;
     let frame_address = align_down(
         kernel_stack_top - size_of::<UserspaceEntryFrame>() as u64,
         16,
@@ -151,11 +151,11 @@ pub(crate) fn build_userspace_entry_frame(
             vector: 0,
             error_code: 0,
             rip: instruction_pointer,
-            cs: gdt_state.user_code_selector.0 as u64,
+            cs: user_code_selector as u64,
             rflags: USER_TEST_RFLAGS,
         },
         user_stack_pointer,
-        user_stack_segment: gdt_state.user_data_selector.0 as u64,
+        user_stack_segment: user_data_selector as u64,
     };
     unsafe {
         ptr::write(frame_address as *mut UserspaceEntryFrame, frame);
