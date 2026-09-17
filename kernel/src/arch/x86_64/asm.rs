@@ -127,7 +127,11 @@ unsafe extern "C" {
     pub(crate) static clean_slate_user_ipc_test_end: u8;
 }
 
-#[cfg(feature = "m5-storage-self-test")]
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
 unsafe extern "C" {
     pub(crate) static clean_slate_user_storage_test_start: u8;
     #[allow(dead_code)]

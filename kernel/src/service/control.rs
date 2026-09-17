@@ -385,7 +385,12 @@ impl ServiceLifecycleController {
             .allocate_scheduler_slot()
             .map_err(LifecycleControlError::SpawnFailed)?;
         let kernel_stack_top = {
-            #[cfg(any(feature = "m4-recovery-self-test", feature = "m5-storage-self-test"))]
+            #[cfg(any(
+                feature = "m4-recovery-self-test",
+                feature = "m5-storage-self-test",
+                feature = "m5-persistence-self-test",
+                feature = "m5-crash-recovery-self-test"
+            ))]
             {
                 use crate::arch::x86_64::context_switch::task_stack_top;
                 use crate::sched::task_stacks_mut;
@@ -397,7 +402,12 @@ impl ServiceLifecycleController {
                 }
                 task_stack_top(&stacks[scheduler_slot])
             }
-            #[cfg(not(any(feature = "m4-recovery-self-test", feature = "m5-storage-self-test")))]
+            #[cfg(not(any(
+                feature = "m4-recovery-self-test",
+                feature = "m5-storage-self-test",
+                feature = "m5-persistence-self-test",
+                feature = "m5-crash-recovery-self-test"
+            )))]
             {
                 if self.kernel_stack_top == 0 {
                     return Err(LifecycleControlError::SpawnFailed(

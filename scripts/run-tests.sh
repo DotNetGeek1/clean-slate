@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run Clean-Slate QEMU xtask acceptance tests and report failures.
 #
-# By default runs test-m1, test-m2, test-m3, test-m4 (milestone gates and
+# By default runs test-m1, test-m2, test-m3, test-m4, test-m5 (milestone gates and
 # aggregates). Use --exhaustive for every registered xtask acceptance command.
 # OVMF is discovered by xtask on Linux when
 # OVMF_CODE/OVMF_VARS are unset; override with env vars or --ovmf-code/--ovmf-vars.
@@ -33,17 +33,21 @@ TEST_NAMES=(
   test-m4-supervisor
   test-m4
   test-m4-recovery
+  test-m5
   test-m5-block
   test-m5-storage
+  test-m5-crash-matrix
+  test-m5-persistence
+  test-m5-crash-recovery
   test-m5-disk-harness
 )
 
 test_role() {
   case "$1" in
-    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-disk-harness)
+    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness)
       echo Constituent
       ;;
-    test-m3 | test-m4)
+    test-m3 | test-m4 | test-m5)
       echo Aggregate
       ;;
     *)
@@ -69,8 +73,12 @@ test_description() {
     test-m4-supervisor) echo "M4.3 userspace supervisor runtime QEMU integration acceptance" ;;
     test-m4) echo "M4 milestone gate (recovery QEMU boot + M4.6 host policy tests)" ;;
     test-m4-recovery) echo "M4.8 authoritative recovery QEMU acceptance" ;;
+    test-m5) echo "M5 milestone gate (block I/O, storage integration, reboot persistence, crash recovery)" ;;
     test-m5-block) echo "M5.2 VirtIO block transport QEMU acceptance" ;;
-    test-m5-storage) echo "M5.3 userspace storage-service seam acceptance" ;;
+    test-m5-storage) echo "M5.7 integrated storage-path acceptance" ;;
+    test-m5-crash-matrix) echo "M5.6 host crash-consistency matrix" ;;
+    test-m5-persistence) echo "M5 reboot-persistence acceptance on the persistent QEMU disk" ;;
+    test-m5-crash-recovery) echo "M5 abrupt-stop crash-recovery acceptance on the persistent QEMU disk" ;;
     test-m5-disk-harness) echo "M5 harness-only two-boot disk fixture validation (host sentinel)" ;;
     *) echo "" ;;
   esac
@@ -93,8 +101,12 @@ test_aliases() {
     test-m4-supervisor) echo "m4-supervisor supervisor m4.3" ;;
     test-m4) echo "m4 m4.8" ;;
     test-m4-recovery) echo "m4-recovery recovery m4.8-qemu" ;;
+    test-m5) echo "m5" ;;
     test-m5-block) echo "m5-block block-attach" ;;
-    test-m5-storage) echo "m5-storage m5.3" ;;
+    test-m5-storage) echo "m5-storage m5.7" ;;
+    test-m5-crash-matrix) echo "m5-crash-matrix crash-matrix m5.6" ;;
+    test-m5-persistence) echo "m5-persistence reboot-persistence" ;;
+    test-m5-crash-recovery) echo "m5-crash-recovery crash-recovery" ;;
     test-m5-disk-harness) echo "m5-disk-harness m5-harness" ;;
     *) echo "" ;;
   esac

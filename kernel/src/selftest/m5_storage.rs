@@ -1,6 +1,9 @@
-//! M5.7 integration self-test: launch storage + unrelated userspace processes,
-//! validate authority boundaries, and exercise format/mount/write/commit/read
-//! over the real block transport through the shared contract.
+//! M5 storage self-tests over the production block bridge and VirtIO backend.
+//!
+//! The existing M5.7 lane validates the storage-service authority seam and
+//! single-boot store integration. The newer M5 milestone lanes reuse the same
+//! `KernelStorageBlockAdapter` path for deterministic reboot persistence and
+//! abrupt-stop crash recovery on the persistent QEMU disk.
 
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
@@ -8,6 +11,7 @@ use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
+use crate::diagnostics::qemu::halt_loop;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::mm::address_space::kernel_root_frame;
@@ -48,26 +52,46 @@ const OBJECT_BETA_NAME: &str = "beta";
 const OBJECT_ALPHA_V1: &[u8] = b"alpha-v1";
 const OBJECT_ALPHA_V2: &[u8] = b"alpha-v2";
 const OBJECT_BETA_V1: &[u8] = b"beta-stable";
+const PERSISTENCE_ALPHA_V1: [u8; 1300] = [0x11; 1300];
+const PERSISTENCE_ALPHA_V2: [u8; 900] = [0x22; 900];
+const PERSISTENCE_ALPHA_V3: [u8; 700] = [0x33; 700];
+const CRASH_AFTER_WRITE: u64 = 1;
 
 pub(crate) const M5_STORAGE_UNAUTHORIZED_DENIED_MARKER: &str = "[BLK ] unauthorized denied pid=";
 pub(crate) const M5_STORAGE_PASS_MARKER: &str = "[M5.7] PASS";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum M5StorageSelfTestMode {
+    Integration,
+    Persistence,
+    CrashRecovery,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct M5StorageSelfTestState {
+    mode: M5StorageSelfTestMode,
     authorized_pid: u64,
-    unauthorized_pid: u64,
+    unauthorized_pid: Option<u64>,
     authorized_done: bool,
     unauthorized_done: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct M5CrashPlan {
+    after_write: u64,
+    writes_seen: u64,
+}
+
 static M5_STORAGE_SELF_TEST_STATE: GlobalCell<Option<M5StorageSelfTestState>> =
     GlobalCell::new(None);
+static M5_CRASH_PLAN: GlobalCell<Option<M5CrashPlan>> = GlobalCell::new(None);
 
 pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
     unsafe {
         *id_allocator_mut() = IdAllocator::new();
         process_registry_mut().clear();
         *scheduler_mut() = Scheduler::new();
+        *M5_CRASH_PLAN.get() = None;
     }
     let kernel_root = current_root_frame_address();
     let kernel_stack_top = unsafe {
@@ -81,9 +105,12 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
     controller
         .declare_service(STORAGE_SERVICE_ID)
         .unwrap_or_else(|message| fatal_kernel_error(message));
-    controller
-        .declare_service(STORAGE_UNAUTHORIZED_SERVICE_ID)
-        .unwrap_or_else(|message| fatal_kernel_error(message));
+    let mode = active_self_test_mode();
+    if mode == M5StorageSelfTestMode::Integration {
+        controller
+            .declare_service(STORAGE_UNAUTHORIZED_SERVICE_ID)
+            .unwrap_or_else(|message| fatal_kernel_error(message));
+    }
     let capability = controller
         .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID)
         .unwrap_or_else(|message| fatal_kernel_error(message));
@@ -92,23 +119,34 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
         .unwrap_or_else(|| fatal_kernel_error("storage self-test allocator was missing"));
     let controller = unsafe { service_lifecycle_controller_mut() };
     start_service(controller, allocator, capability, STORAGE_SERVICE_ID);
-    start_service(
-        controller,
-        allocator,
-        capability,
-        STORAGE_UNAUTHORIZED_SERVICE_ID,
-    );
+    if mode == M5StorageSelfTestMode::Integration {
+        start_service(
+            controller,
+            allocator,
+            capability,
+            STORAGE_UNAUTHORIZED_SERVICE_ID,
+        );
+    }
     let authorized_pid = controller
         .live_pid(STORAGE_SERVICE_ID)
         .unwrap_or_else(|| fatal_kernel_error("storage service did not become live"));
-    let unauthorized_pid = controller
-        .live_pid(STORAGE_UNAUTHORIZED_SERVICE_ID)
-        .unwrap_or_else(|| fatal_kernel_error("unauthorized probe service did not become live"));
+    let unauthorized_pid = if mode == M5StorageSelfTestMode::Integration {
+        Some(
+            controller
+                .live_pid(STORAGE_UNAUTHORIZED_SERVICE_ID)
+                .unwrap_or_else(|| {
+                    fatal_kernel_error("unauthorized probe service did not become live")
+                }),
+        )
+    } else {
+        None
+    };
     kernel_log_fmt(format_args!(
         "[STOR] service started pid={authorized_pid}\n"
     ));
     unsafe {
         *M5_STORAGE_SELF_TEST_STATE.get() = Some(M5StorageSelfTestState {
+            mode,
             authorized_pid,
             unauthorized_pid,
             authorized_done: false,
@@ -118,6 +156,18 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
     let frame_pointer =
         start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
     unsafe { restore_task_context(frame_pointer) }
+}
+
+fn active_self_test_mode() -> M5StorageSelfTestMode {
+    if cfg!(feature = "m5-storage-self-test") {
+        M5StorageSelfTestMode::Integration
+    } else if cfg!(feature = "m5-persistence-self-test") {
+        M5StorageSelfTestMode::Persistence
+    } else if cfg!(feature = "m5-crash-recovery-self-test") {
+        M5StorageSelfTestMode::CrashRecovery
+    } else {
+        fatal_kernel_error("no M5 storage self-test mode was enabled")
+    }
 }
 
 fn start_service(
@@ -152,28 +202,40 @@ pub(crate) fn handle_userspace_storage_entry() -> u64 {
             .unwrap_or_else(|| fatal_kernel_error("m5 storage self-test state was not initialized"))
     };
     if pid == state.authorized_pid {
-        run_store_integration().unwrap_or_else(|message| fatal_kernel_error(message));
+        match state.mode {
+            M5StorageSelfTestMode::Integration => {
+                run_store_integration().unwrap_or_else(|message| fatal_kernel_error(message));
+            }
+            M5StorageSelfTestMode::Persistence => {
+                run_persistence_flow().unwrap_or_else(|message| fatal_kernel_error(message));
+            }
+            M5StorageSelfTestMode::CrashRecovery => {
+                run_crash_recovery_flow().unwrap_or_else(|message| fatal_kernel_error(message));
+            }
+        }
         state.authorized_done = true;
-    } else if pid == state.unauthorized_pid {
+    } else if Some(pid) == state.unauthorized_pid {
         state.unauthorized_done = true;
     } else {
         fatal_kernel_error("unexpected process reached m5 storage entry trap");
     }
-    let complete = state.authorized_done && state.unauthorized_done;
+    let complete =
+        state.authorized_done && (state.unauthorized_pid.is_none() || state.unauthorized_done);
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 0, false)
         .unwrap_or_else(|message| fatal_kernel_error(message));
     if complete {
-        kernel_log_fmt(format_args!(
-            "{M5_STORAGE_UNAUTHORIZED_DENIED_MARKER}{}\n",
-            state.unauthorized_pid
-        ));
+        if let Some(unauthorized_pid) = state.unauthorized_pid {
+            kernel_log_fmt(format_args!(
+                "{M5_STORAGE_UNAUTHORIZED_DENIED_MARKER}{unauthorized_pid}\n{M5_STORAGE_PASS_MARKER}\n"
+            ));
+        }
         unsafe {
             *M5_STORAGE_SELF_TEST_STATE.get() = None;
+            *M5_CRASH_PLAN.get() = None;
         }
-        kernel_log_line(M5_STORAGE_PASS_MARKER);
         qemu_exit(QEMU_EXIT_SUCCESS)
     }
     teardown
@@ -294,6 +356,221 @@ fn run_store_integration() -> Result<(), &'static str> {
     Ok(())
 }
 
+fn run_persistence_flow() -> Result<(), &'static str> {
+    match ObjectStore::mount(KernelStorageBlockAdapter::attach()?) {
+        Ok(mut store) => match store.committed_generation() {
+            1 => run_persistence_recovery_boot(&mut store),
+            2 => run_interrupted_commit_boot(&mut store),
+            generation => {
+                kernel_log_fmt(format_args!("[STOR] recovered generation={generation}\n"));
+                Err("unexpected committed generation for persistence self-test")
+            }
+        },
+        Err(StoreError::Incompatible(IncompatibleFormatError::BadMagic)) => {
+            run_persistence_write_boot()
+        }
+        Err(error) => Err(map_store_error(error)),
+    }
+}
+
+fn run_persistence_write_boot() -> Result<(), &'static str> {
+    let mut store =
+        ObjectStore::format(KernelStorageBlockAdapter::attach()?).map_err(map_store_error)?;
+    kernel_log_line("[STOR] mounted generation=fresh");
+    write_named_object(
+        &mut store,
+        OBJECT_ALPHA_ID,
+        OBJECT_ALPHA_NAME,
+        &PERSISTENCE_ALPHA_V1,
+    )?;
+    write_named_object(&mut store, OBJECT_BETA_ID, OBJECT_BETA_NAME, OBJECT_BETA_V1)?;
+    store.commit().map_err(map_store_error)?;
+    kernel_log_fmt(format_args!(
+        "[STOR] commit generation={}\n",
+        store.committed_generation()
+    ));
+    kernel_log_line("[TEST] persistence phase=write PASS");
+    Ok(())
+}
+
+fn run_persistence_recovery_boot(
+    store: &mut ObjectStore<KernelStorageBlockAdapter>,
+) -> Result<(), &'static str> {
+    kernel_log_fmt(format_args!(
+        "[STOR] recovered generation={}\n",
+        store.committed_generation()
+    ));
+    verify_named_object(
+        store,
+        OBJECT_ALPHA_ID,
+        OBJECT_ALPHA_NAME,
+        &PERSISTENCE_ALPHA_V1,
+    )?;
+    verify_named_object(store, OBJECT_BETA_ID, OBJECT_BETA_NAME, OBJECT_BETA_V1)?;
+    write_named_object(
+        store,
+        OBJECT_ALPHA_ID,
+        OBJECT_ALPHA_NAME,
+        &PERSISTENCE_ALPHA_V2,
+    )?;
+    store.commit().map_err(map_store_error)?;
+    kernel_log_fmt(format_args!(
+        "[STOR] commit generation={}\n",
+        store.committed_generation()
+    ));
+    let remounted =
+        ObjectStore::mount(KernelStorageBlockAdapter::attach()?).map_err(map_store_error)?;
+    kernel_log_fmt(format_args!(
+        "[STOR] recovered generation={}\n",
+        remounted.committed_generation()
+    ));
+    verify_named_object(
+        &remounted,
+        OBJECT_ALPHA_ID,
+        OBJECT_ALPHA_NAME,
+        &PERSISTENCE_ALPHA_V2,
+    )?;
+    verify_named_object(&remounted, OBJECT_BETA_ID, OBJECT_BETA_NAME, OBJECT_BETA_V1)?;
+    kernel_log_line("[TEST] persistence phase=read PASS");
+    Ok(())
+}
+
+fn run_interrupted_commit_boot(
+    store: &mut ObjectStore<KernelStorageBlockAdapter>,
+) -> Result<(), &'static str> {
+    kernel_log_fmt(format_args!(
+        "[STOR] recovered generation={}\n",
+        store.committed_generation()
+    ));
+    verify_named_object(
+        store,
+        OBJECT_ALPHA_ID,
+        OBJECT_ALPHA_NAME,
+        &PERSISTENCE_ALPHA_V2,
+    )?;
+    verify_named_object(store, OBJECT_BETA_ID, OBJECT_BETA_NAME, OBJECT_BETA_V1)?;
+    arm_crash_after_write(CRASH_AFTER_WRITE);
+    kernel_log_fmt(format_args!(
+        "[CRSH] armed trigger=after-write={CRASH_AFTER_WRITE}\n"
+    ));
+    write_named_object(
+        store,
+        OBJECT_ALPHA_ID,
+        OBJECT_ALPHA_NAME,
+        &PERSISTENCE_ALPHA_V3,
+    )?;
+    store.commit().map_err(map_store_error)?;
+    Err("deterministic crash point did not interrupt commit")
+}
+
+fn run_crash_recovery_flow() -> Result<(), &'static str> {
+    let store =
+        ObjectStore::mount(KernelStorageBlockAdapter::attach()?).map_err(map_store_error)?;
+    let generation = store.committed_generation();
+    kernel_log_fmt(format_args!("[STOR] recovered generation={generation}\n"));
+    match generation {
+        2 => {
+            verify_named_object(
+                &store,
+                OBJECT_ALPHA_ID,
+                OBJECT_ALPHA_NAME,
+                &PERSISTENCE_ALPHA_V2,
+            )?;
+            verify_named_object(&store, OBJECT_BETA_ID, OBJECT_BETA_NAME, OBJECT_BETA_V1)?;
+            kernel_log_line("[CRSH] recovery outcome=previous-commit");
+        }
+        3 => {
+            verify_named_object(
+                &store,
+                OBJECT_ALPHA_ID,
+                OBJECT_ALPHA_NAME,
+                &PERSISTENCE_ALPHA_V3,
+            )?;
+            verify_named_object(&store, OBJECT_BETA_ID, OBJECT_BETA_NAME, OBJECT_BETA_V1)?;
+            kernel_log_line("[CRSH] recovery outcome=new-commit");
+        }
+        _ => return Err("unexpected recovered generation after crash"),
+    }
+    kernel_log_line("[TEST] crash recovery PASS");
+    Ok(())
+}
+
+fn write_named_object(
+    store: &mut ObjectStore<KernelStorageBlockAdapter>,
+    id: u64,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), &'static str> {
+    store
+        .write_object(id, name, bytes)
+        .map_err(map_store_error)?;
+    kernel_log_fmt(format_args!(
+        "[STOR] write object={name} id={id} bytes={} checksum={:08x}\n",
+        bytes.len(),
+        checksum(bytes)
+    ));
+    Ok(())
+}
+
+fn verify_named_object(
+    store: &ObjectStore<KernelStorageBlockAdapter>,
+    id: u64,
+    name: &str,
+    expected: &[u8],
+) -> Result<(), &'static str> {
+    let actual = store.read_object_by_id(id).map_err(map_store_error)?;
+    let ok = actual.as_slice() == expected;
+    kernel_log_fmt(format_args!(
+        "[STOR] read object={name} id={id} bytes={} checksum={:08x} match={}\n",
+        actual.len(),
+        checksum(actual.as_slice()),
+        if ok { "yes" } else { "no" }
+    ));
+    if !ok {
+        return Err("persistent object contents did not match expected bytes");
+    }
+    Ok(())
+}
+
+fn checksum(bytes: &[u8]) -> u32 {
+    bytes
+        .iter()
+        .fold(0u32, |sum, byte| sum.wrapping_add(u32::from(*byte)))
+}
+
+fn arm_crash_after_write(after_write: u64) {
+    unsafe {
+        *M5_CRASH_PLAN.get() = Some(M5CrashPlan {
+            after_write,
+            writes_seen: 0,
+        });
+    }
+}
+
+fn observe_write_completion(after_write: u64) -> ! {
+    kernel_log_fmt(format_args!("[CRSH] inject after-write={after_write}\n"));
+    halt_loop()
+}
+
+fn observe_block_operation(operation: BlockTransportOp) {
+    match operation {
+        BlockTransportOp::Write => {
+            let plan = unsafe { &mut *M5_CRASH_PLAN.get() };
+            let Some(crash_plan) = plan.as_mut() else {
+                return;
+            };
+            crash_plan.writes_seen = crash_plan.writes_seen.saturating_add(1);
+            if crash_plan.writes_seen == crash_plan.after_write {
+                let after_write = crash_plan.after_write;
+                *plan = None;
+                observe_write_completion(after_write);
+            }
+        }
+        BlockTransportOp::Flush => kernel_log_line("[BLK ] flush complete"),
+        BlockTransportOp::Geometry | BlockTransportOp::Read => {}
+    }
+}
+
 fn assert_malformed_media_rejected() -> Result<(), &'static str> {
     let mut device = KernelStorageBlockAdapter::attach()?;
     let block_size = usize::try_from(device.geometry().logical_block_size())
@@ -401,7 +678,9 @@ impl KernelStorageBlockAdapter {
         };
         self.next_request_id = self.next_request_id.saturating_add(1);
         let response = issue_block_request(request, payload)?;
-        map_transport_status(response.status)
+        map_transport_status(response.status)?;
+        observe_block_operation(operation);
+        Ok(())
     }
 }
 
