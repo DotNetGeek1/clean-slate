@@ -350,7 +350,8 @@ clean_slate_user_storage_test_start:
     int 0x80
 
 clean_slate_user_storage_test_unauthorized:
-    mov rcx, -13
+    // Must match SYSCALL_EACCES (u64::MAX - 12) in syscall/mod.rs.
+    mov rcx, -12
     cmp rax, rcx
     jne clean_slate_user_storage_test_fail
     int 0x80
