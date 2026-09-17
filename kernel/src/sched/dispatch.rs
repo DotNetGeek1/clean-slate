@@ -33,7 +33,8 @@ use crate::sched::ThreadKind;
         feature = "m4-recovery-self-test",
         feature = "m3-entry-self-test",
         feature = "m3-syscall-self-test",
-        feature = "m3-ipc-self-test"
+        feature = "m3-ipc-self-test",
+        feature = "m5-block-self-test"
     ),
     allow(dead_code)
 )]
@@ -76,7 +77,8 @@ pub(crate) fn initialize_scheduler() -> Result<(), &'static str> {
         feature = "m4-recovery-self-test",
         feature = "m3-entry-self-test",
         feature = "m3-syscall-self-test",
-        feature = "m3-ipc-self-test"
+        feature = "m3-ipc-self-test",
+        feature = "m5-block-self-test"
     ),
     allow(dead_code)
 )]
@@ -125,7 +127,8 @@ pub(crate) fn prepare_current_scheduler_thread_dispatch() -> Result<(), &'static
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
     feature = "m3-ipc-self-test",
-    feature = "m4-supervisor-self-test"
+    feature = "m4-supervisor-self-test",
+    feature = "m5-storage-self-test"
 ))]
 #[allow(dead_code)]
 pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'static str> {
@@ -142,7 +145,8 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
     feature = "m3-ipc-self-test",
-    feature = "m4-supervisor-self-test"
+    feature = "m4-supervisor-self-test",
+    feature = "m5-storage-self-test"
 ))]
 pub(crate) fn start_current_scheduler_thread() -> Result<u64, &'static str> {
     let stack_pointer = without_interrupts(|| with_scheduler(|scheduler| scheduler.start()))?;

@@ -177,6 +177,17 @@ cargo xtask test-m4-supervisor
 
 The `clean-slate-supervisor` crate (`supervisor/`) owns the bounded service registry and supervisor runtime. Lifecycle control is behind the mockable `LifecycleControl` trait so host tests and the CPL3 integration image can run before the kernel syscall 4 lifecycle-control path (#36) is wired end-to-end. The QEMU self-test maps a release `clean-slate-supervisor-userspace` image into pid 1, grants a console IPC capability, and validates `[SUP ]` diagnostics plus `[M4.3] PASS`.
 
+For M5.3 userspace storage-service seam (host transport tests + bounded CPL3 integration):
+
+```bash
+cargo test -p clean-slate-service-fixtures block_transport
+cargo test -p clean-slate-kernel service::capability::tests
+cargo test -p clean-slate-kernel service::control::tests::block_capability
+cargo xtask test-m5-storage
+```
+
+The M5.3 lane keeps a bounded block wire contract between userspace storage policy and the kernel-hosted bootstrap backend. The bootstrap backend grants raw-block authority only to the declared storage service instance; other userspace callers are denied deterministically. Later driver-domain work should replace the backend without changing this wire contract.
+
 M4.4 health/liveness tracking (host-tested, no QEMU) exercises `ServiceHealthTracker` deadline math with explicit tick values — no real-time sleeps:
 
 ```bash
@@ -216,9 +227,33 @@ cargo xtask test-m4-crash-service
 
 The `clean-slate-service-fixtures` crate holds launch metadata encoding, `[TEST]` diagnostics helpers, and a host-side lifecycle harness. The `m4-crash-service-self-test` kernel feature exercises production userspace teardown, authoritative `Faulted` lifecycle events, deterministic fault injection, and unrelated workload progress without rebooting.
 
-On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, which covers every milestone gate without repeating the boots the M3/M4 aggregates already perform. `-Exhaustive` additionally runs every individual `test-m3-*` and `test-m4-*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
+For the bounded M5.2 VirtIO block transport acceptance path:
 
-On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases. OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`.
+```bash
+cargo xtask test-m5-block
+```
+
+This command builds the kernel with `m5-block-self-test`, creates a disposable raw disk image under `target/m5-block.img`, boots QEMU with a legacy (`disable-modern=on`) `virtio-blk-pci` device, and validates ordered discovery/write/flush/read markers through `[M5.2] PASS`.
+
+For M5.5 persistent block-harness plumbing (QEMU fixture + host sentinel):
+
+```bash
+cargo xtask test-m5-disk-harness
+```
+
+`test-m5-disk-harness` is intentionally harness-only: it runs two bounded QEMU boots with M1 marker validation, reuses the same raw disk at `target/m5/m5-data.img`, copies fresh OVMF vars per boot (so firmware variable state is not used as a persistence substitute), writes a host-side sentinel after boot 1, and verifies those bytes after boot 2. It emits `[M5.H] PASS` (harness marker), not the milestone marker. Use `--keep-disk` to preserve `target/m5/m5-data.img` after the run for debugging.
+
+For explicit disk lifecycle while debugging:
+
+```bash
+cargo xtask m5-disk-inspect
+cargo xtask m5-disk-create
+cargo xtask m5-disk-reset
+```
+
+On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, which covers milestone gates already wired into the aggregate flows. M5 commands are intentionally not in the default suite yet; run them explicitly (`test-m5-block`, `test-m5-storage`, `test-m5-disk-harness`) or via `-Exhaustive`. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, `test-m5-block`, `test-m5-storage`, and `test-m5-disk-harness` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.3`, `m5-disk-harness`/`m5-harness`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
+
+On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m5-block`/`block-attach`, `m5-storage`/`m5.3`, and `m5-disk-harness`/`m5-harness`). OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive includes `test-m5-block`, `test-m5-storage`, and the harness command `test-m5-disk-harness`.
 
 To launch paused for debugger attach:
 
@@ -346,7 +381,7 @@ For M5 storage, keep the layering narrow and split:
 - `clean-slate-block` for the transport-independent geometry/read-write/flush/error contract and fake host backend;
 - `clean-slate-store` for the host-testable versioned object-store format on top of that contract;
 - kernel storage/virtio code for hardware transport only;
-- future userspace storage service code for IPC and authority boundaries;
+- userspace storage service code for request/response IPC/syscall boundary and explicit authority checks;
 - future persistent-store code for on-disk policy with no kernel/VirtIO imports;
 - `xtask`/`scripts` for persistence harness orchestration.
 

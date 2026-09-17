@@ -127,6 +127,14 @@ unsafe extern "C" {
     pub(crate) static clean_slate_user_ipc_test_end: u8;
 }
 
+#[cfg(feature = "m5-storage-self-test")]
+unsafe extern "C" {
+    pub(crate) static clean_slate_user_storage_test_start: u8;
+    #[allow(dead_code)]
+    pub(crate) static clean_slate_user_storage_test_after_request: u8;
+    pub(crate) static clean_slate_user_storage_test_end: u8;
+}
+
 global_asm!(
     r#"
     .macro CLEAN_SLATE_INTERRUPT_NO_ERROR vector
@@ -310,6 +318,53 @@ clean_slate_user_ipc_test_fail:
 
     .global clean_slate_user_ipc_test_end
 clean_slate_user_ipc_test_end:
+
+    .global clean_slate_user_storage_test_start
+clean_slate_user_storage_test_start:
+    movabs rbx, 0x0000400000001000
+    mov rdi, [rbx]
+    mov rsi, [rbx + 8]
+    mov r13, [rbx + 16]
+    mov rax, 6
+    syscall
+    cmp r13, 0
+    jne clean_slate_user_storage_test_unauthorized
+    mov rcx, -4096
+    cmp rax, rcx
+    jae clean_slate_user_storage_test_fail
+    mov r12, rax
+
+    mov rdi, r12
+    lea rsi, [rbx + 24]
+    mov rdx, 40
+    lea r8, [rbx + 112]
+    mov r9, [rbx + 104]
+    lea r10, [rbx + 64]
+    mov rax, 7
+    syscall
+    mov rcx, 40
+    cmp rax, rcx
+    jne clean_slate_user_storage_test_fail
+    cmp byte ptr [rbx + 71], 0
+    jne clean_slate_user_storage_test_fail
+    int 0x80
+
+clean_slate_user_storage_test_unauthorized:
+    // Must match SYSCALL_EACCES in syscall/mod.rs: u64::MAX - 12 is
+    // 0xFFFF_FFFF_FFFF_FFF3, which is -13 as a signed immediate.
+    mov rcx, -13
+    cmp rax, rcx
+    jne clean_slate_user_storage_test_fail
+    int 0x80
+    .global clean_slate_user_storage_test_after_request
+clean_slate_user_storage_test_after_request:
+    ud2
+
+clean_slate_user_storage_test_fail:
+    ud2
+
+    .global clean_slate_user_storage_test_end
+clean_slate_user_storage_test_end:
 
     .global clean_slate_syscall_entry
 clean_slate_syscall_entry:

@@ -41,6 +41,10 @@ pub(crate) mod m4_recovery;
 pub(crate) mod m4_service_lifecycle;
 #[cfg(feature = "m4-supervisor-self-test")]
 pub(crate) mod m4_supervisor;
+#[cfg(feature = "m5-block-self-test")]
+pub(crate) mod m5_block;
+#[cfg(feature = "m5-storage-self-test")]
+pub(crate) mod m5_storage;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
@@ -55,7 +59,8 @@ use crate::mm::PAGE_SIZE;
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m5-storage-self-test"
 ))]
 pub(super) const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
 #[cfg(any(
@@ -64,7 +69,8 @@ pub(super) const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
     feature = "m4-service-lifecycle-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m5-storage-self-test"
 ))]
 pub(super) const USER_TEST_DATA_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE;
 #[cfg(any(
@@ -81,7 +87,8 @@ pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SI
     feature = "m3-ipc-self-test",
     feature = "m4-service-lifecycle-self-test",
     feature = "m4-supervisor-self-test",
-    feature = "m4-recovery-self-test"
+    feature = "m4-recovery-self-test",
+    feature = "m5-storage-self-test"
 ))]
 pub(super) const USER_TEST_PROCESS_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + (PAGE_SIZE * 2);
 #[cfg(feature = "m4-recovery-self-test")]

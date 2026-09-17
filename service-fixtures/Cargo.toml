@@ -10,7 +10,11 @@ description = "M4.7 deterministic supervised crash/fault-injection service fixtu
 path = "src/lib.rs"
 
 [dependencies]
+clean-slate-block = { path = "../block" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
+
+[dev-dependencies]
+clean-slate-block = { path = "../block", features = ["alloc"] }
 
 [lints]
 workspace = true

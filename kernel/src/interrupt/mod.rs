@@ -82,6 +82,8 @@ use crate::selftest::m4_recovery::observe_recovery_fault_after_containment;
 use crate::selftest::m4_recovery::observe_recovery_fault_before_containment;
 #[cfg(feature = "m4-supervisor-self-test")]
 use crate::selftest::m4_supervisor::handle_userspace_supervisor_entry;
+#[cfg(feature = "m5-storage-self-test")]
+use crate::selftest::m5_storage::handle_userspace_storage_entry;
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 #[cfg(feature = "m2-double-fault-self-test")]
@@ -149,6 +151,19 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
             Ok(next_stack_pointer) => next_stack_pointer,
             Err(message) => fatal_kernel_error(message),
         };
+    }
+
+    #[cfg(all(
+        feature = "m5-storage-self-test",
+        not(feature = "m4-supervisor-self-test"),
+        not(feature = "m3-ipc-self-test"),
+        not(feature = "m3-address-space-self-test"),
+        not(feature = "m3-resources-self-test"),
+        not(feature = "m4-crash-service-self-test"),
+        not(feature = "m4-recovery-self-test")
+    ))]
+    if context.vector as usize == USER_TEST_VECTOR {
+        return handle_userspace_storage_entry();
     }
 
     #[cfg(feature = "m3-ipc-self-test")]

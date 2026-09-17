@@ -5,8 +5,10 @@ use crate::mm::frame_allocator::PageAllocator;
 use crate::process::domain::teardown_process_by_id;
 use crate::process::process_registry_mut;
 use crate::service::capability::LifecycleControlCapabilityError;
+use crate::service::capability::{BlockDeviceCapabilityError, BlockDeviceCapabilityTable};
 use crate::service::spawn::launch_builtin_service;
 use crate::sync::global_cell::GlobalCell;
+use clean_slate_service_fixtures::{STORAGE_BLOCK_DEVICE_ID, STORAGE_SERVICE_ID};
 use clean_slate_service_lifecycle::apply_transition;
 use clean_slate_service_lifecycle::ControlRequest;
 use clean_slate_service_lifecycle::ControlRequestKind;
@@ -81,6 +83,7 @@ pub(crate) struct LifecycleControlResult {
 
 pub(crate) struct ServiceLifecycleController {
     capabilities: super::capability::LifecycleControlCapabilityTable,
+    block_capabilities: BlockDeviceCapabilityTable,
     services: [ServiceRecord; SERVICE_REGISTRY_CAPACITY],
     pending: [Option<LifecycleEvent>; SERVICE_PENDING_EVENTS],
     pending_count: usize,
@@ -93,6 +96,7 @@ impl ServiceLifecycleController {
     const fn new() -> Self {
         Self {
             capabilities: super::capability::LifecycleControlCapabilityTable::new(),
+            block_capabilities: BlockDeviceCapabilityTable::new(),
             services: [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY],
             pending: [None; SERVICE_PENDING_EVENTS],
             pending_count: 0,
@@ -104,6 +108,7 @@ impl ServiceLifecycleController {
 
     pub(crate) fn clear(&mut self) {
         self.capabilities.clear();
+        self.block_capabilities.clear();
         self.services = [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY];
         self.pending = [None; SERVICE_PENDING_EVENTS];
         self.pending_count = 0;
@@ -297,6 +302,37 @@ impl ServiceLifecycleController {
             .grant_lifecycle_control_capability(holder_pid)
     }
 
+    pub(crate) fn acquire_block_device_capability(
+        &self,
+        holder_pid: u64,
+        device_id: u64,
+    ) -> Result<u64, LifecycleControlError> {
+        self.block_capabilities
+            .block_device_handle_for(holder_pid, device_id)
+            .map_err(|error| match error {
+                BlockDeviceCapabilityError::Unauthorized => LifecycleControlError::Unauthorized,
+                BlockDeviceCapabilityError::InvalidHandle => LifecycleControlError::InvalidHandle,
+                BlockDeviceCapabilityError::StaleHandle => LifecycleControlError::StaleHandle,
+                BlockDeviceCapabilityError::WrongDevice => LifecycleControlError::InvalidHandle,
+            })
+    }
+
+    pub(crate) fn authorize_block_device_request(
+        &self,
+        holder_pid: u64,
+        capability_handle: u64,
+        device_id: u64,
+    ) -> Result<(), LifecycleControlError> {
+        self.block_capabilities
+            .authorize_block_device_access(holder_pid, capability_handle, device_id)
+            .map_err(|error| match error {
+                BlockDeviceCapabilityError::Unauthorized => LifecycleControlError::Unauthorized,
+                BlockDeviceCapabilityError::StaleHandle => LifecycleControlError::StaleHandle,
+                BlockDeviceCapabilityError::InvalidHandle
+                | BlockDeviceCapabilityError::WrongDevice => LifecycleControlError::InvalidHandle,
+            })
+    }
+
     #[allow(dead_code)]
     pub(crate) fn authoritative_generation(
         &self,
@@ -349,19 +385,19 @@ impl ServiceLifecycleController {
             .allocate_scheduler_slot()
             .map_err(LifecycleControlError::SpawnFailed)?;
         let kernel_stack_top = {
-            #[cfg(feature = "m4-recovery-self-test")]
+            #[cfg(any(feature = "m4-recovery-self-test", feature = "m5-storage-self-test"))]
             {
                 use crate::arch::x86_64::context_switch::task_stack_top;
                 use crate::sched::task_stacks_mut;
                 let stacks = unsafe { task_stacks_mut() };
                 if scheduler_slot >= stacks.len() {
                     return Err(LifecycleControlError::SpawnFailed(
-                        "recovery scheduler slot exceeds task stack table",
+                        "service scheduler slot exceeds task stack table",
                     ));
                 }
                 task_stack_top(&stacks[scheduler_slot])
             }
-            #[cfg(not(feature = "m4-recovery-self-test"))]
+            #[cfg(not(any(feature = "m4-recovery-self-test", feature = "m5-storage-self-test")))]
             {
                 if self.kernel_stack_top == 0 {
                     return Err(LifecycleControlError::SpawnFailed(
@@ -405,6 +441,17 @@ impl ServiceLifecycleController {
             ProcessId(spawned.pid),
             DomainId(spawned.domain_id),
         );
+        let kernel_root_frame = self.kernel_root_frame;
+        self.grant_storage_block_capability_with_rollback(spawned.pid, service_id, |pid| {
+            teardown_process_by_id(
+                allocator,
+                kernel_root_frame,
+                pid,
+                SERVICE_TERMINATE_STATUS,
+                false,
+            )
+            .map(|_| ())
+        })?;
         self.services[service_index].live = Some(LiveServiceInstance {
             pid: spawned.pid,
             tid: spawned.tid,
@@ -419,6 +466,40 @@ impl ServiceLifecycleController {
                 LifecycleEventKind::InstanceSpawned,
             )),
         })
+    }
+
+    fn grant_storage_block_capability_with_rollback<F>(
+        &mut self,
+        pid: u64,
+        service_id: ServiceId,
+        mut rollback_spawn: F,
+    ) -> Result<(), LifecycleControlError>
+    where
+        F: FnMut(u64) -> Result<(), &'static str>,
+    {
+        if service_id != STORAGE_SERVICE_ID {
+            return Ok(());
+        }
+        if let Err(message) = self
+            .block_capabilities
+            .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
+        {
+            kernel_log_fmt(format_args!(
+                "[FAIL] block capability grant failed pid={} service={} err={message}\n",
+                pid, service_id.0
+            ));
+            rollback_spawn(pid).map_err(|_| {
+                LifecycleControlError::SpawnFailed(
+                    "storage service block-capability rollback teardown failed",
+                )
+            })?;
+            return Err(LifecycleControlError::SpawnFailed(message));
+        }
+        kernel_log_fmt(format_args!(
+            "[BLK ] authority granted pid={} device={}\n",
+            pid, STORAGE_BLOCK_DEVICE_ID
+        ));
+        Ok(())
     }
 
     fn terminate_service(
@@ -447,6 +528,8 @@ impl ServiceLifecycleController {
                 "process registry retained a reaped supervised service",
             ));
         }
+        self.block_capabilities
+            .revoke_capabilities_for_pid(live.pid);
         self.services[service_index].live = None;
         self.services[service_index].state = ServiceLifecycleState::Exited;
         let instance = ServiceInstanceId::new(
@@ -567,6 +650,8 @@ impl ServiceLifecycleController {
                             "process registry retained a reaped supervised service",
                         ));
                     }
+                    self.block_capabilities
+                        .revoke_capabilities_for_pid(live.pid);
                 }
                 self.services[service_index].state = next_state;
                 self.services[service_index].authoritative_generation = next_generation;
@@ -634,6 +719,8 @@ impl ServiceLifecycleController {
         event.status_code = status_code;
         self.push_terminal_pending(event)?;
         self.services[service_index].state = next_state;
+        self.block_capabilities
+            .revoke_capabilities_for_pid(live.pid);
         self.services[service_index].live = None;
         Ok(event)
     }
@@ -786,6 +873,62 @@ mod tests {
         assert_eq!(record.state, ServiceLifecycleState::Declared);
         assert_eq!(record.authoritative_generation, InstanceGeneration(0));
         assert!(record.live.is_none());
+    }
+
+    #[cfg(not(feature = "m4-recovery-self-test"))]
+    #[test]
+    fn storage_grant_capacity_failure_rolls_back_spawned_instance() {
+        let mut controller = ServiceLifecycleController::new();
+        let mut pid = 100_u64;
+        loop {
+            if controller
+                .block_capabilities
+                .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
+                .is_err()
+            {
+                break;
+            }
+            pid += 1;
+        }
+
+        let mut rollback_pid = 0_u64;
+        let err = controller
+            .grant_storage_block_capability_with_rollback(77, STORAGE_SERVICE_ID, |pid| {
+                rollback_pid = pid;
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(err, LifecycleControlError::SpawnFailed(_)));
+        assert_eq!(rollback_pid, 77);
+    }
+
+    #[cfg(not(feature = "m4-recovery-self-test"))]
+    #[test]
+    fn storage_grant_rollback_error_is_reported() {
+        let mut controller = ServiceLifecycleController::new();
+        let mut pid = 100_u64;
+        loop {
+            if controller
+                .block_capabilities
+                .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
+                .is_err()
+            {
+                break;
+            }
+            pid += 1;
+        }
+
+        let err = controller
+            .grant_storage_block_capability_with_rollback(77, STORAGE_SERVICE_ID, |_| {
+                Err("teardown failed")
+            })
+            .unwrap_err();
+        assert_eq!(
+            err,
+            LifecycleControlError::SpawnFailed(
+                "storage service block-capability rollback teardown failed"
+            )
+        );
     }
 
     #[test]
@@ -966,5 +1109,76 @@ mod tests {
         assert_eq!(event.kind, LifecycleEventKind::Faulted);
         assert_eq!(event.status_code, 17);
         assert_eq!(controller.live_pid(ServiceId(14)), None);
+    }
+
+    #[test]
+    fn block_capability_is_revoked_when_live_service_faults() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = ServiceRecord {
+            service: STORAGE_SERVICE_ID,
+            state: ServiceLifecycleState::Running,
+            authoritative_generation: InstanceGeneration(1),
+            live: Some(LiveServiceInstance {
+                pid: 77,
+                tid: 1,
+                domain_id: 77,
+                generation: InstanceGeneration(1),
+                scheduler_slot: 0,
+            }),
+        };
+        controller
+            .block_capabilities
+            .grant_block_device_capability(77, STORAGE_BLOCK_DEVICE_ID)
+            .expect("grant");
+        let handle = controller
+            .acquire_block_device_capability(77, STORAGE_BLOCK_DEVICE_ID)
+            .expect("acquire");
+        controller
+            .notify_faulted_live_process(77, 0)
+            .expect("faulted lookup")
+            .expect("event");
+        assert_eq!(
+            controller.authorize_block_device_request(77, handle, STORAGE_BLOCK_DEVICE_ID),
+            Err(LifecycleControlError::StaleHandle)
+        );
+    }
+
+    #[test]
+    fn block_capability_does_not_transfer_to_replacement_instance() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = ServiceRecord {
+            service: STORAGE_SERVICE_ID,
+            state: ServiceLifecycleState::Running,
+            authoritative_generation: InstanceGeneration(2),
+            live: Some(LiveServiceInstance {
+                pid: 80,
+                tid: 1,
+                domain_id: 80,
+                generation: InstanceGeneration(2),
+                scheduler_slot: 0,
+            }),
+        };
+        let handle = controller
+            .block_capabilities
+            .grant_block_device_capability(80, STORAGE_BLOCK_DEVICE_ID)
+            .expect("grant");
+        controller
+            .block_capabilities
+            .revoke_capabilities_for_pid(80);
+        controller.services[0].live = Some(LiveServiceInstance {
+            pid: 81,
+            tid: 2,
+            domain_id: 81,
+            generation: InstanceGeneration(3),
+            scheduler_slot: 1,
+        });
+        controller
+            .block_capabilities
+            .grant_block_device_capability(81, STORAGE_BLOCK_DEVICE_ID)
+            .expect("grant replacement");
+        assert_eq!(
+            controller.authorize_block_device_request(81, handle, STORAGE_BLOCK_DEVICE_ID),
+            Err(LifecycleControlError::StaleHandle)
+        );
     }
 }
