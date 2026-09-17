@@ -37,6 +37,7 @@ test = false
 
 [dependencies]
 clean-slate-block = { path = "../block" }
+clean-slate-capability = { path = "../capability" }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 clean-slate-store = { path = "../store", optional = true }

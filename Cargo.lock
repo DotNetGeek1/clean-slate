@@ -33,6 +33,7 @@ name = "clean-slate-kernel"
 version = "0.0.1"
 dependencies = [
  "clean-slate-block",
+ "clean-slate-capability",
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
  "clean-slate-store",

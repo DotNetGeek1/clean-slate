@@ -358,7 +358,7 @@ M6.1 defines the shared capability contract in workspace crate `clean-slate-capa
 - **Holder exit** revokes every capability that lists the exiting holder, and therefore each holder’s delegation subtrees.
 - **Resource destruction** revokes every capability whose `ResourceRef` matches (class, id, and instance generation when applicable).
 - Revocation is **idempotent**; repeating revoke on an already-revoked slot is a no-op aside from audit.
-- When a slot is revoked, its **generation is bumped** so previously issued handles remain stale even if the slot is later reused for a different resource (reuse policy is separate from `Retired` slots, which are never reused).
+- A revoked slot keeps its generation, holder, resource, and provenance (rights are cleared) until it is **released**, so the original handle deterministically reports `Revoked` and revocation code can still walk descendants. Releasing the slot back to `Empty` **bumps the generation**, so previously issued handles report `StaleHandle` even if the slot is later reused for a different resource (`Retired` slots, whose generation is exhausted, are never reused).
 
 ### Module ownership (M6.2–M6.7)
 
@@ -371,6 +371,14 @@ M6.1 defines the shared capability contract in workspace crate `clean-slate-capa
 | M6.6 | Revocation graph |
 | M6.7 | Audit sink |
 | Legacy | `kernel/src/service/capability.rs` and `kernel/src/ipc` endpoint tables — migrate into the unified model |
+
+### Capability substrate migration map (M6.2)
+
+- **Production substrate (M6.2):** `kernel/src/capability/` — global `CapabilityTable<MAX_SLOTS>`, trusted `current_holder()` from scheduler context, and teardown hooks that revoke holder- and process-resource capabilities. **New M6 protected operations must use this module** (not ad-hoc tables).
+- **Legacy IPC endpoint send capabilities:** `kernel/src/ipc` — per-endpoint capability table predating M6; kept until M6.8 migration re-homes grants onto the unified table.
+- **Legacy lifecycle-control and block-device capabilities:** `kernel/src/service/capability.rs` — service-spawn grants for supervisor fixtures; kept until M6.8.
+
+No new semantics were added to the legacy paths in M6.2; they remain bounded debt tracked for **M6.8** (unified table + adapter cutover).
 
 ## Language strategy
 

@@ -15,6 +15,7 @@ mod record;
 mod resource;
 mod rights;
 mod state;
+mod table;
 
 pub use audit::{
     authorize_audited, AuditEvent, AuditOutcome, AuditSink, NullAuditSink, AUDIT_EVENT_SIZE_BYTES,
@@ -29,6 +30,7 @@ pub use record::CapabilityRecord;
 pub use resource::{ResourceClass, ResourceRef};
 pub use rights::Rights;
 pub use state::CapabilityState;
+pub use table::CapabilityTable;
 
 #[cfg(test)]
 extern crate alloc;

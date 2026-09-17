@@ -281,7 +281,7 @@ fn current_service(state: &M5StorageSelfTestState) -> ServiceId {
 }
 
 fn current_userspace_pid() -> Result<u64, &'static str> {
-    without_interrupts(|| unsafe { scheduler_mut().current_userspace_process_id() })
+    crate::process::current_process_id()
 }
 
 /// `USER_TEST_VECTOR` handler: a storage-service instance has finished its

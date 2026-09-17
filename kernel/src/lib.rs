@@ -27,6 +27,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 mod arch;
 mod boot;
+mod capability;
 mod device;
 mod diagnostics;
 mod interrupt;
