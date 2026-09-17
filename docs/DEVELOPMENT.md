@@ -249,7 +249,7 @@ For the two-boot M5 reboot-persistence acceptance:
 cargo xtask test-m5-persistence
 ```
 
-This command resets `target/m5/m5-data.img`, boots the `m5-persistence-self-test` kernel twice with fresh copied OVMF vars, preserves the exact same VirtIO disk image across the reboot, and requires ordered markers proving: fresh mount/format, deterministic writes of `alpha` and `beta`, a durable commit with `[BLK ] flush complete`, reboot on the same image, exact recovery of both objects, and a post-reboot overwrite where `beta` remains intact. Pass `--keep-disk` to preserve `target/m5/m5-data.img` on success or failure for debugging.
+This command resets `target/m5/m5-data.img` by default, boots the `m5-persistence-self-test` kernel twice with fresh copied OVMF vars, preserves the exact same VirtIO disk image across the reboot, and requires ordered markers proving: fresh mount/format, deterministic writes of `alpha` and `beta`, a durable commit with `[BLK ] flush complete`, reboot on the same image, exact recovery of both objects, and a post-reboot overwrite where `beta` remains intact. Pass `--keep-disk` to preserve `target/m5/m5-data.img` after the run and to reuse that kept image instead of resetting it on the next debugging invocation.
 
 For the four-boot M5 abrupt-stop crash-recovery acceptance:
 
@@ -257,7 +257,7 @@ For the four-boot M5 abrupt-stop crash-recovery acceptance:
 cargo xtask test-m5-crash-recovery
 ```
 
-This command also resets `target/m5/m5-data.img`, rebuilds the known committed baseline on the same disk, then reboots into a deterministic crash boot that halts after the first counted store write of the interrupted commit. `xtask` kills QEMU at that crash marker (no clean storage shutdown or extra flush), then reboots the same disk with `m5-crash-recovery-self-test` and accepts only the documented old-or-new coherent recovery states. Pass `--keep-disk` to retain the failing image for investigation.
+This command also resets `target/m5/m5-data.img` by default, rebuilds the known committed baseline on the same disk, then reboots into a deterministic crash boot that halts after the first counted store write of the interrupted commit. `xtask` kills QEMU at that crash marker (no clean storage shutdown or extra flush), then reboots the same disk with `m5-crash-recovery-self-test` and accepts only the documented old-or-new coherent recovery states. Pass `--keep-disk` to retain the image and reuse that kept disk on the next debugging invocation instead of recreating it.
 
 For the aggregate M5 milestone gate:
 

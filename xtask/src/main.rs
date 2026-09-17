@@ -357,7 +357,7 @@ fn run_m5_crash_recovery_acceptance_default() -> Result<(), XtaskError> {
 fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
     let options = parse_m5_cli_options(args)?;
     let run_result = (|| -> Result<(), XtaskError> {
-        reset_m5_data_disk_image()?;
+        prepare_m5_data_disk_image(options.keep_disk)?;
         let config = m5_storage_vm_config();
         println!("[M5.P] phase 1/2 boot");
         run_vm_inner_with_config(
@@ -393,7 +393,7 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
 fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
     let options = parse_m5_cli_options(args)?;
     let run_result = (|| -> Result<(), XtaskError> {
-        reset_m5_data_disk_image()?;
+        prepare_m5_data_disk_image(options.keep_disk)?;
         let config = m5_storage_vm_config();
         println!("[M5.C] baseline boot 1/4");
         run_vm_inner_with_config(
@@ -974,6 +974,28 @@ fn create_m5_data_disk_image() -> Result<(), XtaskError> {
         M5_DATA_DISK_SIZE_BYTES
     );
     Ok(())
+}
+
+fn prepare_m5_data_disk_image(reuse_existing: bool) -> Result<(), XtaskError> {
+    let disk = m5_data_disk_path();
+    ensure_m5_disk_path_is_test_owned(&disk)?;
+    if reuse_existing && disk.is_file() {
+        let actual = fs::metadata(&disk)?.len();
+        if actual != M5_DATA_DISK_SIZE_BYTES {
+            return Err(XtaskError::InvalidDiskSize {
+                path: disk.clone(),
+                expected: M5_DATA_DISK_SIZE_BYTES,
+                actual,
+            });
+        }
+        println!(
+            "[M5.H] reusing data disk {} ({} bytes)",
+            disk.display(),
+            actual
+        );
+        return Ok(());
+    }
+    reset_m5_data_disk_image()
 }
 
 fn remove_m5_data_disk_image() -> Result<(), XtaskError> {
@@ -1965,6 +1987,26 @@ mod tests {
         assert!(disk.exists());
         finalize_m5_disk_lifecycle(Ok(()), false).expect("cleanup should succeed");
         assert!(!disk.exists());
+    }
+
+    #[test]
+    fn prepare_m5_disk_reuses_existing_image_in_keep_mode() {
+        let _guard = m5_disk_test_guard();
+        reset_m5_data_disk_image().expect("reset disk");
+        let disk = m5_data_disk_path();
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&disk)
+            .expect("open disk");
+        file.write_all(&[0x5a; 16]).expect("overwrite prefix");
+        file.flush().expect("flush disk prefix");
+        prepare_m5_data_disk_image(true).expect("reuse should succeed");
+        let mut file = fs::File::open(&disk).expect("open disk");
+        let mut prefix = [0u8; 16];
+        file.read_exact(&mut prefix).expect("read disk prefix");
+        assert_eq!(prefix, [0x5a; 16]);
+        remove_m5_data_disk_image().expect("cleanup after test");
     }
 
     #[test]
