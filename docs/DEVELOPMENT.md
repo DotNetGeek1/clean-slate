@@ -158,6 +158,12 @@ cargo test -p clean-slate-service-lifecycle
 
 This crate is `no_std` outside unit tests and is the shared contract for supervisor, kernel control, and service fixtures in later M4 issues.
 
+For the M6.1 capability contract (host-tested):
+
+```bash
+cargo test -p clean-slate-capability
+```
+
 For M4.2 kernel lifecycle control (host tests + optional QEMU acceptance):
 
 ```bash

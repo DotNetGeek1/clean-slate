@@ -333,6 +333,45 @@ M4.2 adds kernel-owned lifecycle control:
 - **Restart** is terminate-then-launch with a bumped `InstanceGeneration` and monotonic PID allocation (IDs are never reused);
 - stale instance handles fail through generation checks in the controller and `SYSCALL_ESTALE`.
 
+## M6.1 capability model
+
+M6.1 defines the shared capability contract in workspace crate `clean-slate-capability` (`capability/`). Later milestones implement the kernel table, adapters, delegation protocol, revocation graph, and audit sink; this section fixes vocabulary and invariants only.
+
+### Vocabulary
+
+- **Handle** (`CapabilityHandle`): opaque slot + generation presented by userspace. Knowing a raw handle value is not authority until the kernel validates it against the live table record.
+- **Resource** (`ResourceRef`): stable identity of the protected object or control target (class, id, optional instance generation). Separate from handle identity — the same resource may have many capabilities over time in different slots.
+- **Holder** (`HolderId`): trusted process identity for who may exercise a capability. Supplied only by the kernel from the current process context, never from an untrusted syscall argument.
+
+### Invariants
+
+- Knowing a PID or object id is **not** authority; only a matching live capability grants access.
+- Caller-supplied identity is never trusted for authorization decisions.
+- Rights only **shrink** across delegation (`attenuate` / subset checks); widening is rejected.
+- When generation advancement reaches `u32::MAX`, the slot moves to **Retired** and is never reused.
+- Resource ownership (e.g. which process created an object) is distinct from capability ownership (who holds delegable rights).
+- Boot-local authority: root grants originate from the kernel bootstrap path (`HolderId::KERNEL` / trusted grant syscalls), not from userspace self-assertion.
+
+### Revocation model (M6.6 implements the graph)
+
+- **Revoking a capability** revokes its entire **delegation subtree**: every descendant linked via `Provenance.parent` chains is revoked. Siblings and ancestors are unaffected.
+- **Holder exit** revokes every capability that lists the exiting holder, and therefore each holder’s delegation subtrees.
+- **Resource destruction** revokes every capability whose `ResourceRef` matches (class, id, and instance generation when applicable).
+- Revocation is **idempotent**; repeating revoke on an already-revoked slot is a no-op aside from audit.
+- When a slot is revoked, its **generation is bumped** so previously issued handles remain stale even if the slot is later reused for a different resource (reuse policy is separate from `Retired` slots, which are never reused).
+
+### Module ownership (M6.2–M6.7)
+
+| Milestone | Owner |
+|-----------|--------|
+| M6.2 | Production capability table in `kernel/src/capability/` |
+| M6.3 | Persistent-object adapter (`service-fixtures` / `store` userspace) |
+| M6.4 | Process-control adapter in `kernel/src/process/` |
+| M6.5 | Delegation protocol |
+| M6.6 | Revocation graph |
+| M6.7 | Audit sink |
+| Legacy | `kernel/src/service/capability.rs` and `kernel/src/ipc` endpoint tables — migrate into the unified model |
+
 ## Language strategy
 
 The kernel and first-party low-level services should primarily use Rust.

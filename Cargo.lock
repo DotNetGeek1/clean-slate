@@ -25,6 +25,10 @@ name = "clean-slate-block"
 version = "0.0.1"
 
 [[package]]
+name = "clean-slate-capability"
+version = "0.0.1"
+
+[[package]]
 name = "clean-slate-kernel"
 version = "0.0.1"
 dependencies = [

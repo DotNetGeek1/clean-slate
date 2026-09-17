@@ -1,0 +1,13 @@
+[package]
+name = "clean-slate-capability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "M6.1 shared capability handles, rights, provenance, and authorization contract"
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
