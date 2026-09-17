@@ -41,6 +41,8 @@ pub(crate) mod m4_recovery;
 pub(crate) mod m4_service_lifecycle;
 #[cfg(feature = "m4-supervisor-self-test")]
 pub(crate) mod m4_supervisor;
+#[cfg(feature = "m5-block-self-test")]
+pub(crate) mod m5_block;
 #[cfg(feature = "m5-storage-self-test")]
 pub(crate) mod m5_storage;
 #[cfg(any(

@@ -20,6 +20,7 @@ m4-crash-service-self-test = []
 m4-service-lifecycle-self-test = ["m3-entry-self-test"]
 m4-supervisor-self-test = ["m3-entry-self-test"]
 m4-recovery-self-test = []
+m5-block-self-test = []
 m5-storage-self-test = ["m3-entry-self-test"]
 
 [lib]

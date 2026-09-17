@@ -22,7 +22,8 @@ use crate::diagnostics::serial::serial_write_line;
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m5-block-self-test"
 )))]
 use crate::interrupt::timer::initialize_timer;
 #[cfg(not(any(
@@ -31,7 +32,8 @@ use crate::interrupt::timer::initialize_timer;
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m5-block-self-test"
 )))]
 use crate::interrupt::timer::report_timer_contract;
 use crate::mm::address_space::set_kernel_root_frame;
@@ -50,7 +52,8 @@ use crate::process::process_registry_mut;
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m5-block-self-test"
 )))]
 use crate::sched::dispatch::initialize_scheduler;
 #[cfg(not(any(
@@ -61,7 +64,8 @@ use crate::sched::dispatch::initialize_scheduler;
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m5-block-self-test"
 )))]
 use crate::sched::dispatch::start_scheduler;
 use crate::sched::task_stacks_mut;
@@ -100,6 +104,8 @@ use crate::selftest::m4_recovery::start_recovery_self_test;
 use crate::selftest::m4_service_lifecycle::start_service_lifecycle_self_test;
 #[cfg(feature = "m4-supervisor-self-test")]
 use crate::selftest::m4_supervisor::start_userspace_supervisor_self_test;
+#[cfg(feature = "m5-block-self-test")]
+use crate::selftest::m5_block::run_m5_block_self_test;
 #[cfg(feature = "m5-storage-self-test")]
 use crate::selftest::m5_storage::start_m5_storage_self_test;
 use crate::syscall::initialize_syscall_abi;
@@ -269,6 +275,11 @@ fn run_inner() -> Result<(), &'static str> {
         start_recovery_self_test(allocator)
     }
 
+    #[cfg(feature = "m5-block-self-test")]
+    {
+        run_m5_block_self_test()
+    }
+
     #[cfg(all(
         not(feature = "m1-self-test"),
         not(feature = "m2-double-fault-self-test"),
@@ -277,7 +288,8 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m3-resources-self-test"),
         not(feature = "m4-crash-service-self-test"),
         not(feature = "m4-recovery-self-test"),
-        not(feature = "m3-entry-self-test")
+        not(feature = "m3-entry-self-test"),
+        not(feature = "m5-block-self-test")
     ))]
     {
         let kernel_root_frame = current_root_frame_address();
