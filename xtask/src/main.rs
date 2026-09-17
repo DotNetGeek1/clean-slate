@@ -164,8 +164,8 @@ const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[BLK ] authority granted pid=",
     "[STOR] service started pid=",
     "[BLK ] request op=geometry id=1",
-    "[BLK ] completion id=1 status=ok",
     "[BLK ] virtio-block ready blocks=",
+    "[BLK ] completion id=1 status=ok",
     "[BLK ] unauthorized denied pid=",
     "[M5.7] PASS",
 ];
