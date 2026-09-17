@@ -15,6 +15,8 @@ use core::ops::Range;
 
 #[cfg(any(test, feature = "alloc"))]
 pub mod fake;
+#[cfg(any(test, feature = "alloc"))]
+pub mod fault;
 
 /// Stable logical identity for a single boot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

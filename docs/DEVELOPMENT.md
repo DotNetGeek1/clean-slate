@@ -382,10 +382,20 @@ For M5 storage, keep the layering narrow and split:
 - `clean-slate-store` for the host-testable versioned object-store format on top of that contract;
 - kernel storage/virtio code for hardware transport only;
 - userspace storage service code for request/response IPC/syscall boundary and explicit authority checks;
-- future persistent-store code for on-disk policy with no kernel/VirtIO imports;
+- `clean-slate-block::fault` for the deterministic host fault-injection backend (counted write/flush power-loss and I/O-error triggers) used by crash-model tests;
 - `xtask`/`scripts` for persistence harness orchestration.
 
-Run `cargo test -p clean-slate-store` for the M5 host-side object-store format, copy-on-write persistence, and remount tests.
+The host crash-consistency contract is explicit:
+
+- writes become durable only after `flush` succeeds;
+- `clean-slate-store` commits by writing object data into the inactive copy-on-write arena, then the next-generation superblock into the inactive superblock slot, then `flush`;
+- the exact commit point is the successful return from that final `flush`;
+- recovery must choose either the last previously committed generation or the fully committed new generation, never a mixed/torn combination.
+
+Useful fast M5 host commands:
+
+- `cargo test -p clean-slate-block` for the block contract, fake backend, and fault-injection backend;
+- `cargo test -p clean-slate-store` for the M5 host-side object-store format, copy-on-write persistence, remount, and crash-consistency tests.
 
 ## Test layers
 

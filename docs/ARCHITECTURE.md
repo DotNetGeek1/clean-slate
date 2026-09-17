@@ -123,6 +123,8 @@ M5 introduces a Clean-Slate-native block contract between hardware-specific bloc
 - Bootstrap compromise: only the dedicated storage service instance receives raw-block authority at launch time. Ordinary userspace processes must not gain raw block access through generic syscalls or IPC.
 - Future direction: replace the kernel-hosted bootstrap backend with a restricted driver domain that speaks the same bounded block wire contract so persistent-store code is unchanged.
 - A successful `flush` is the only M5 durability guarantee. Callers may assume that writes completed before the flush survive the backend's reboot/crash model only after the flush succeeds; successful writes without a later successful flush are readable but not yet durable.
+- The `clean-slate-store` commit point is the successful return from the `flush` issued after the next-generation superblock write. Because object data for a new generation is written only into the inactive copy-on-write arena and the superblock only into the inactive slot, recovery may expose either the previously committed generation or the new generation, but never metadata from one generation paired with object data from another.
+- Host crash tests inject deterministic power loss or I/O failure only at counted block write/flush boundaries via `clean_slate_block::fault::FaultInjectingBlockDevice`, covering every boundary between the first object-data write and the commit flush. Recovery must validate superblock magic/version/checksum, geometry, generation, and object extents/lengths before selecting a committed state, and a corrupted newer superblock must fall back to the older valid one.
 - Buffer ownership remains synchronous and call-scoped: backends may inspect caller slices only for the duration of `read_blocks`/`write_blocks` and must not retain raw userspace pointers after the call returns.
 
 Wave-1 storage boundaries should remain split so parallel lanes avoid shared-file conflicts:
@@ -131,7 +133,7 @@ Wave-1 storage boundaries should remain split so parallel lanes avoid shared-fil
 clean-slate-block           shared geometry/read-write/flush/error contract
 kernel VirtIO block area    hardware transport implementation
 userspace storage service   IPC/service boundary
-persistent store crate      on-disk policy using only clean-slate-block
+persistent store crate      dual-superblock object-store policy using only clean-slate-block
 host storage test kit       fake/fault backends and crash-model tests
 xtask/scripts               QEMU persistence harness
 ```
