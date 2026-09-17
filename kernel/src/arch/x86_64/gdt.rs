@@ -20,6 +20,9 @@ use crate::arch::x86_64::idt::DOUBLE_FAULT_IST_INDEX;
 use crate::sync::global_cell::GlobalCell;
 
 const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
+const USER_SYSRET_SELECTOR_BASE_RAW: u16 = 0x1b;
+const USER_DATA_SELECTOR_RAW: u16 = USER_SYSRET_SELECTOR_BASE_RAW + 0x08;
+const USER_CODE_SELECTOR_RAW: u16 = USER_SYSRET_SELECTOR_BASE_RAW + 0x10;
 
 #[repr(align(16))]
 pub(crate) struct DoubleFaultStack(pub(crate) [u8; DOUBLE_FAULT_STACK_SIZE]);
@@ -38,9 +41,8 @@ pub(crate) static DOUBLE_FAULT_STACK: GlobalCell<DoubleFaultStack> =
     GlobalCell::new(DoubleFaultStack([0; DOUBLE_FAULT_STACK_SIZE]));
 pub(crate) static GDT_STATE: GlobalCell<Option<GdtState>> = GlobalCell::new(None);
 static TSS_STATE: GlobalCell<Option<TaskStateSegment>> = GlobalCell::new(None);
-static USERSPACE_SELECTORS: GlobalCell<Option<(u16, u16)>> = GlobalCell::new(None);
 
-pub(super) fn initialize_gdt_and_tss() {
+pub(crate) fn initialize_gdt_and_tss() {
     let double_fault_stack_top = {
         let stack = unsafe { &*DOUBLE_FAULT_STACK.get() };
         VirtAddr::from_ptr(stack.0.as_ptr_range().end)
@@ -66,6 +68,9 @@ pub(super) fn initialize_gdt_and_tss() {
     let user_data_selector = table.append(Descriptor::user_data_segment());
     let user_code_selector = table.append(Descriptor::user_code_segment());
     let tss_selector = table.append(Descriptor::tss_segment(tss_ref));
+    debug_assert_eq!(user_sysret_selector_base.0, USER_SYSRET_SELECTOR_BASE_RAW);
+    debug_assert_eq!(user_data_selector.0, USER_DATA_SELECTOR_RAW);
+    debug_assert_eq!(user_code_selector.0, USER_CODE_SELECTOR_RAW);
     *gdt_slot = Some(GdtState {
         table,
         code_selector,
@@ -75,9 +80,6 @@ pub(super) fn initialize_gdt_and_tss() {
         user_data_selector,
         tss_selector,
     });
-    unsafe {
-        *USERSPACE_SELECTORS.get() = Some((user_code_selector.0, user_data_selector.0));
-    }
 
     let gdt_state = unsafe {
         (&*GDT_STATE.get())
@@ -123,16 +125,7 @@ pub(crate) fn userspace_gdt_state() -> Result<&'static GdtState, &'static str> {
 }
 
 pub(crate) fn userspace_selectors() -> Result<(u16, u16), &'static str> {
-    unsafe {
-        if let Some(selectors) = *USERSPACE_SELECTORS.get() {
-            return Ok(selectors);
-        }
-    }
-    let gdt_state = userspace_gdt_state()?;
-    Ok((
-        gdt_state.user_code_selector.0,
-        gdt_state.user_data_selector.0,
-    ))
+    Ok((USER_CODE_SELECTOR_RAW, USER_DATA_SELECTOR_RAW))
 }
 
 #[cfg(any(

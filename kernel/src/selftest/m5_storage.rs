@@ -9,6 +9,7 @@
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::cpu::without_interrupts;
+use crate::arch::x86_64::gdt::initialize_gdt_and_tss;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
@@ -22,6 +23,7 @@ use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
+use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
@@ -216,7 +218,7 @@ fn launch_current_phase(
             .unwrap_or_else(|| fatal_kernel_error("m5 storage self-test state was not initialized"))
     };
     let service = current_service(state);
-    controller
+    let result = controller
         .handle_control_message(
             allocator,
             SUPERVISOR_TEST_PID,
@@ -228,9 +230,10 @@ fn launch_current_phase(
             .encode(),
         )
         .unwrap_or_else(|_| fatal_kernel_error("storage self-test service launch failed"));
-    let pid = controller
-        .live_pid(service)
-        .unwrap_or_else(|| fatal_kernel_error("storage service did not become live"));
+    let pid = result
+        .event
+        .map(|event| event.instance.pid.0)
+        .unwrap_or_else(|| fatal_kernel_error("storage service launch did not report an instance"));
     kernel_log_fmt(format_args!("[STOR] service started pid={pid}\n"));
 }
 
@@ -288,6 +291,10 @@ pub(crate) fn handle_userspace_storage_entry() -> u64 {
             }
             _ => fatal_kernel_error("storage service exit publication failed"),
         });
+    if let Some(phase) = next_phase {
+        state.phase = phase;
+        launch_current_phase(controller, allocator);
+    }
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 0, false)
         .unwrap_or_else(|message| fatal_kernel_error(message));
     if next_phase.is_none() {
@@ -300,9 +307,9 @@ pub(crate) fn handle_userspace_storage_entry() -> u64 {
         }
         qemu_exit(QEMU_EXIT_SUCCESS)
     }
-    let phase = next_phase.expect("checked next phase before continuing");
-    state.phase = phase;
-    launch_current_phase(controller, allocator);
+    initialize_gdt_and_tss();
+    prepare_current_scheduler_thread_dispatch()
+        .unwrap_or_else(|message| fatal_kernel_error(message));
     teardown.next_stack_pointer.unwrap_or_else(|| {
         start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message))
     })
