@@ -5,7 +5,6 @@
 use crate::arch::x86_64::cpu::without_write_protect;
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::offset_page_table_for_root;
 use crate::mm::paging::page_table_mut;
 use crate::mm::paging::page_table_ref;
@@ -25,14 +24,52 @@ use x86_64::structures::paging::Translate;
 use x86_64::PhysAddr;
 use x86_64::VirtAddr;
 
+// `ProcessAddressSpace` is a fixed-size value type that is moved by value
+// through the spawn path while running on a 64 KiB per-thread kernel stack, so
+// these tables must stay small: every extra mapping slot costs 16 bytes in
+// each of the several copies that live on the stack during a launch.
 #[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
-#[cfg(not(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test")))]
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
+const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
+#[cfg(not(any(
+    feature = "m4-recovery-self-test",
+    feature = "m4-supervisor-self-test",
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
+    feature = "m5-crash-recovery-self-test"
+)))]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
 #[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
-const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
-#[cfg(not(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test")))]
-const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
+/// The storage userspace image maps up to 64 code pages plus its stack and
+/// bootstrap pages; `service::spawn` asserts its budget against this value.
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 80;
+#[cfg(not(any(
+    feature = "m4-recovery-self-test",
+    feature = "m4-supervisor-self-test",
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
+    feature = "m5-crash-recovery-self-test"
+)))]
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 
 static KERNEL_ROOT_FRAME: AtomicU64 = AtomicU64::new(0);
 
@@ -210,10 +247,15 @@ fn clone_kernel_mappings_into_address_space(
     root_frame: u64,
     user_region_base: VirtAddr,
 ) -> Result<(), &'static str> {
-    let source_root = unsafe { page_table_ref(current_root_frame_address()) };
+    // Always clone from the kernel's own root rather than whatever CR3 holds:
+    // a launch may be triggered while another process's root is active.
+    let source_root = unsafe { page_table_ref(kernel_root_frame()) };
     let destination_root = unsafe { page_table_mut(root_frame) };
-    destination_root.zero();
-    destination_root.clone_from(source_root);
+    // Copy entry-by-entry instead of `clone_from`, which materialises a
+    // 4 KiB `PageTable` temporary on the (kernel-thread) stack.
+    for (destination, source) in destination_root.iter_mut().zip(source_root.iter()) {
+        destination.set_addr(source.addr(), source.flags());
+    }
     sanitize_kernel_root_entries(destination_root, user_region_base);
     validate_supervisor_only_kernel_root_entries(destination_root, user_region_base)
 }

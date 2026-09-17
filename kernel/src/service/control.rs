@@ -266,6 +266,48 @@ impl ServiceLifecycleController {
         Ok(Some(event))
     }
 
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-early-self-test",
+        feature = "m5-crash-late-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
+    pub(crate) fn notify_exited_live_process(
+        &mut self,
+        pid: u64,
+    ) -> Result<Option<LifecycleEvent>, LifecycleControlError> {
+        let Some(service_index) = self
+            .services
+            .iter()
+            .position(|entry| entry.live.is_some_and(|live| live.pid == pid))
+        else {
+            return Ok(None);
+        };
+        let record = self.services[service_index];
+        let live = record.live.ok_or(LifecycleControlError::ServiceNotLive)?;
+        let instance = ServiceInstanceId::new(
+            record.service,
+            live.generation,
+            ProcessId(live.pid),
+            DomainId(live.domain_id),
+        );
+        let (next_state, _) = apply_transition(
+            record.state,
+            record.authoritative_generation,
+            TransitionInput::Event(LifecycleEventKind::Exited),
+            Some(instance),
+        )
+        .map_err(LifecycleControlError::InvalidTransition)?;
+        let event = LifecycleEvent::new(instance, LifecycleEventKind::Exited);
+        self.push_terminal_pending(event)?;
+        self.services[service_index].state = next_state;
+        self.block_capabilities
+            .revoke_capabilities_for_pid(live.pid);
+        self.services[service_index].live = None;
+        Ok(Some(event))
+    }
+
     pub(crate) fn configure_launch_context(
         &mut self,
         kernel_root_frame: u64,
@@ -385,7 +427,14 @@ impl ServiceLifecycleController {
             .allocate_scheduler_slot()
             .map_err(LifecycleControlError::SpawnFailed)?;
         let kernel_stack_top = {
-            #[cfg(any(feature = "m4-recovery-self-test", feature = "m5-storage-self-test"))]
+            #[cfg(any(
+                feature = "m4-recovery-self-test",
+                feature = "m5-storage-self-test",
+                feature = "m5-persistence-self-test",
+                feature = "m5-crash-early-self-test",
+                feature = "m5-crash-late-self-test",
+                feature = "m5-crash-recovery-self-test"
+            ))]
             {
                 use crate::arch::x86_64::context_switch::task_stack_top;
                 use crate::sched::task_stacks_mut;
@@ -397,7 +446,14 @@ impl ServiceLifecycleController {
                 }
                 task_stack_top(&stacks[scheduler_slot])
             }
-            #[cfg(not(any(feature = "m4-recovery-self-test", feature = "m5-storage-self-test")))]
+            #[cfg(not(any(
+                feature = "m4-recovery-self-test",
+                feature = "m5-storage-self-test",
+                feature = "m5-persistence-self-test",
+                feature = "m5-crash-early-self-test",
+                feature = "m5-crash-late-self-test",
+                feature = "m5-crash-recovery-self-test"
+            )))]
             {
                 if self.kernel_stack_top == 0 {
                     return Err(LifecycleControlError::SpawnFailed(

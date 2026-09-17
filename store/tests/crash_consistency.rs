@@ -3,9 +3,10 @@
 //! The commit protocol is: object data into the inactive arena, then the
 //! next-generation superblock into the inactive slot, then `flush`. The commit
 //! point is the successful return from that `flush`. These tests inject a
-//! deterministic power loss or I/O error at every counted write boundary and
-//! at the flush boundary, then reboot from the durable image and assert that
-//! recovery exposes exactly the previous generation or exactly the new one.
+//! deterministic power loss or I/O error at every counted write/flush boundary,
+//! model legal partial pre-flush persistence, then reboot from the durable
+//! image and assert that recovery exposes exactly the previous generation or
+//! exactly the new one.
 
 use clean_slate_block::fake::FakeBlockDevice;
 use clean_slate_block::fault::{
@@ -119,6 +120,23 @@ fn commit_under_fault(include_alpha: bool, plan: FaultPlan) -> FaultStore {
     remounted
 }
 
+fn commit_under_fault_with_early_persistence(
+    include_alpha: bool,
+    early_persist_writes: &[u64],
+    plan: FaultPlan,
+) -> FaultStore {
+    let (mut store, controller) = build_baseline(include_alpha);
+    stage_alpha_update(&mut store);
+    controller.set_early_persist_writes(early_persist_writes);
+    controller.arm(plan);
+
+    let result = store.commit();
+    assert_eq!(result, Err(fault_error()), "plan {plan:?}");
+
+    let (remounted, _) = reboot_and_mount(&store.into_inner());
+    remounted
+}
+
 fn crash_matrix(include_alpha: bool) {
     let commit_writes = count_commit_writes(include_alpha);
     // At least one data chunk for each object plus the superblock write.
@@ -218,4 +236,49 @@ fn successful_commit_after_recovered_crash_reuses_the_freed_arena() {
 
     let (remounted, _) = reboot_and_mount(&store.into_inner());
     assert_new_generation(&remounted);
+}
+
+#[test]
+fn partial_preflush_payload_persistence_without_metadata_keeps_previous_generation() {
+    let store = commit_under_fault_with_early_persistence(
+        true,
+        &[1],
+        FaultPlan {
+            trigger: FaultTrigger::AfterWrite(2),
+            action: FaultAction::PowerLoss,
+        },
+    );
+
+    assert_previous_generation(&store, true);
+}
+
+#[test]
+fn newer_metadata_with_incomplete_persisted_payload_falls_back_to_previous_generation() {
+    let commit_writes = count_commit_writes(true);
+    let store = commit_under_fault_with_early_persistence(
+        true,
+        &[1, commit_writes],
+        FaultPlan {
+            trigger: FaultTrigger::AfterWrite(commit_writes),
+            action: FaultAction::PowerLoss,
+        },
+    );
+
+    assert_previous_generation(&store, true);
+}
+
+#[test]
+fn late_power_loss_with_fully_persisted_payload_and_metadata_recovers_new_generation() {
+    let commit_writes = count_commit_writes(true);
+    let early_persist_writes = (1..=commit_writes).collect::<Vec<_>>();
+    let store = commit_under_fault_with_early_persistence(
+        true,
+        &early_persist_writes,
+        FaultPlan {
+            trigger: FaultTrigger::AfterWrite(commit_writes),
+            action: FaultAction::PowerLoss,
+        },
+    );
+
+    assert_new_generation(&store);
 }

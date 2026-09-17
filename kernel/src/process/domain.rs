@@ -75,7 +75,10 @@ pub(crate) fn teardown_current_process(
         let current_index = scheduler
             .current_thread
             .ok_or("process teardown required a current scheduler thread")?;
-        let current = scheduler.threads[current_index];
+        let current = *scheduler
+            .threads
+            .get(current_index)
+            .ok_or("scheduler current thread slot exceeded fixed scheduler capacity")?;
         if current.kind != ThreadKind::User {
             return Err("process teardown required a userspace current thread");
         }
@@ -84,7 +87,10 @@ pub(crate) fn teardown_current_process(
         let process_record = process_registry_mut()
             .get_mut(current.owner_process_id)
             .ok_or("teardown process was missing from registry")?;
-        let current_thread = &mut scheduler.threads[current_index];
+        let current_thread = scheduler
+            .threads
+            .get_mut(current_index)
+            .ok_or("scheduler current thread slot exceeded fixed scheduler capacity")?;
         let should_destroy = begin_thread_exit(process_record, current_thread, status, faulted)?;
         let retired_siblings_u16 = u16::try_from(retired_siblings)
             .map_err(|_| "retired sibling thread count overflowed process accounting")?;
