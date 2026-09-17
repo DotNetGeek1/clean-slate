@@ -177,7 +177,7 @@ cargo xtask test-m4-supervisor
 
 The `clean-slate-supervisor` crate (`supervisor/`) owns the bounded service registry and supervisor runtime. Lifecycle control is behind the mockable `LifecycleControl` trait so host tests and the CPL3 integration image can run before the kernel syscall 4 lifecycle-control path (#36) is wired end-to-end. The QEMU self-test maps a release `clean-slate-supervisor-userspace` image into pid 1, grants a console IPC capability, and validates `[SUP ]` diagnostics plus `[M4.3] PASS`.
 
-For M5.3 userspace storage-service seam (host transport tests + bounded CPL3 integration):
+For M5.7 integrated userspace storage path (host transport tests + bounded CPL3 integration):
 
 ```bash
 cargo test -p clean-slate-service-fixtures block_transport
@@ -186,7 +186,7 @@ cargo test -p clean-slate-kernel service::control::tests::block_capability
 cargo xtask test-m5-storage
 ```
 
-The M5.3 lane keeps a bounded block wire contract between userspace storage policy and the kernel-hosted bootstrap backend. The bootstrap backend grants raw-block authority only to the declared storage service instance; other userspace callers are denied deterministically. Later driver-domain work should replace the backend without changing this wire contract.
+`test-m5-storage` now boots with the persistent M5 data disk fixture and requires the capability-gated userspace storage-service block handshake against the real VirtIO-backed bridge before `[M5.7] PASS`. The storage path keeps the transport-neutral block contract while preserving explicit unauthorized denial for unrelated userspace callers.
 
 M4.4 health/liveness tracking (host-tested, no QEMU) exercises `ServiceHealthTracker` deadline math with explicit tick values — no real-time sleeps:
 
@@ -251,9 +251,9 @@ cargo xtask m5-disk-create
 cargo xtask m5-disk-reset
 ```
 
-On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, which covers milestone gates already wired into the aggregate flows. M5 commands are intentionally not in the default suite yet; run them explicitly (`test-m5-block`, `test-m5-storage`, `test-m5-disk-harness`) or via `-Exhaustive`. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, `test-m5-block`, `test-m5-storage`, and `test-m5-disk-harness` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.3`, `m5-disk-harness`/`m5-harness`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
+On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, which covers milestone gates already wired into the aggregate flows. M5 commands are intentionally not in the default suite yet; run them explicitly (`test-m5-block`, `test-m5-storage`, `test-m5-disk-harness`) or via `-Exhaustive`. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, `test-m5-block`, `test-m5-storage`, and `test-m5-disk-harness` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-disk-harness`/`m5-harness`), for example `.\scripts\run-tests.ps1 -Test lifecycle, ipc`; `-List` prints the available names.
 
-On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m5-block`/`block-attach`, `m5-storage`/`m5.3`, and `m5-disk-harness`/`m5-harness`). OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive includes `test-m5-block`, `test-m5-storage`, and the harness command `test-m5-disk-harness`.
+On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m5-block`/`block-attach`, `m5-storage`/`m5.7`, and `m5-disk-harness`/`m5-harness`). OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive includes `test-m5-block`, `test-m5-storage`, and the harness command `test-m5-disk-harness`.
 
 To launch paused for debugger attach:
 

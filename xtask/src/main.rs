@@ -159,14 +159,15 @@ const M4_SUPERVISOR_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[IPC ] console pid=1: [SUP ]",
     "[M4.3] PASS",
 ];
-const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 7] = [
+const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[SVC ] declared service=20736",
     "[BLK ] authority granted pid=",
     "[STOR] service started pid=",
-    "[BLK ] request op=write id=1",
+    "[BLK ] request op=geometry id=1",
     "[BLK ] completion id=1 status=ok",
+    "[BLK ] virtio-block ready blocks=",
     "[BLK ] unauthorized denied pid=",
-    "[M5.3] PASS",
+    "[M5.7] PASS",
 ];
 const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[VIRT] block device found",
@@ -532,7 +533,9 @@ fn run_m4_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
-    run_vm_inner(
+    let disk = m5_data_disk_path();
+    create_m5_data_disk_image()?;
+    run_vm_inner_with_config(
         false,
         false,
         &["m5-storage-self-test"],
@@ -540,6 +543,10 @@ fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
             &M5_STORAGE_ACCEPTANCE_MARKERS,
             M5_STORAGE_ACCEPTANCE_TIMEOUT,
         )),
+        VmLaunchConfig {
+            m5_data_disk: Some(disk),
+            reset_ovmf_vars: true,
+        },
     )
 }
 
@@ -1166,7 +1173,7 @@ fn print_help() {
     println!("  test-m4-recovery Build the M4.8 recovery supervisor kernel boot and validate ordered markers");
     println!("  test-m4       M4 milestone gate: recovery QEMU boot plus M4.6 host policy tests");
     println!("  test-m5-block Build the M5.2 virtio-block kernel, run QEMU, and validate ordered markers");
-    println!("  test-m5-storage Build the M5.3 userspace storage-service boundary acceptance boot");
+    println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-disk-harness Two-boot M5 disk harness with host-side sentinel validation");
     println!(
         "                 Uses M1 markers only; does not assert milestone-level storage behavior"

@@ -32,7 +32,7 @@ use clean_slate_service_lifecycle::{
 
 const SUPERVISOR_TEST_PID: u64 = 50;
 pub(crate) const M5_STORAGE_UNAUTHORIZED_DENIED_MARKER: &str = "[BLK ] unauthorized denied pid=";
-pub(crate) const M5_STORAGE_PASS_MARKER: &str = "[M5.3] PASS";
+pub(crate) const M5_STORAGE_PASS_MARKER: &str = "[M5.7] PASS";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct M5StorageSelfTestState {

@@ -4,9 +4,9 @@ use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::PAGE_SIZE;
 #[cfg(feature = "m5-storage-self-test")]
 use clean_slate_service_fixtures::{
-    BlockTransportOp, BlockTransportRequest, BLOCK_TRANSPORT_REQUEST_BYTES,
-    BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION, STORAGE_BLOCK_DEVICE_ID,
-    STORAGE_SERVICE_ID, STORAGE_UNAUTHORIZED_SERVICE_ID,
+    BlockTransportRequest, BLOCK_TRANSPORT_REQUEST_BYTES, BLOCK_TRANSPORT_RESPONSE_BYTES,
+    BLOCK_TRANSPORT_VERSION, STORAGE_BLOCK_DEVICE_ID, STORAGE_SERVICE_ID,
+    STORAGE_UNAUTHORIZED_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::ServiceId;
 
@@ -327,17 +327,9 @@ pub(crate) fn launch_builtin_service(
         let (mode, request, payload_len, payload) = if service == STORAGE_SERVICE_ID {
             (
                 STORAGE_PROBE_MODE_AUTHORIZED,
-                BlockTransportRequest {
-                    request_id: 1,
-                    device_id: STORAGE_BLOCK_DEVICE_ID,
-                    operation: BlockTransportOp::Write,
-                    lba: 0,
-                    blocks: 1,
-                    buffer_len: 512,
-                }
-                .encode(),
-                512,
-                [0x5a; 512],
+                BlockTransportRequest::geometry(1, STORAGE_BLOCK_DEVICE_ID).encode(),
+                0,
+                [0; 512],
             )
         } else {
             (
