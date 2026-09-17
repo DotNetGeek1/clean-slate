@@ -31,6 +31,7 @@ dependencies = [
  "clean-slate-block",
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
+ "clean-slate-store",
  "uefi",
  "x86_64",
 ]

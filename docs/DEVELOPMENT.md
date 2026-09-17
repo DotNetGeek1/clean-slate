@@ -186,7 +186,7 @@ cargo test -p clean-slate-kernel service::control::tests::block_capability
 cargo xtask test-m5-storage
 ```
 
-`test-m5-storage` now boots with the persistent M5 data disk fixture and requires the capability-gated userspace storage-service block handshake against the real VirtIO-backed bridge before `[M5.7] PASS`. The storage path keeps the transport-neutral block contract while preserving explicit unauthorized denial for unrelated userspace callers.
+`test-m5-storage` now resets the M5 data disk to blank media for each run, then requires capability-gated userspace storage handshake plus store format/write/commit/remount/overwrite and malformed-media rejection markers before `[M5.7] PASS`. The storage path keeps the transport-neutral block contract while preserving explicit unauthorized denial for unrelated userspace callers.
 
 M4.4 health/liveness tracking (host-tested, no QEMU) exercises `ServiceHealthTracker` deadline math with explicit tick values — no real-time sleeps:
 

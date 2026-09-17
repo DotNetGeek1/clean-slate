@@ -159,13 +159,20 @@ const M4_SUPERVISOR_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[IPC ] console pid=1: [SUP ]",
     "[M4.3] PASS",
 ];
-const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 8] = [
+const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[SVC ] declared service=20736",
     "[BLK ] authority granted pid=",
     "[STOR] service started pid=",
     "[BLK ] request op=geometry id=1",
     "[BLK ] virtio-block ready blocks=",
     "[BLK ] completion id=1 status=ok",
+    "[STOR] format generation=0",
+    "[STOR] write object=1 bytes=8",
+    "[STOR] write object=2 bytes=11",
+    "[STOR] commit generation=1",
+    "[STOR] mounted generation=1",
+    "[STOR] commit generation=2",
+    "[STOR] malformed media rejected",
     "[BLK ] unauthorized denied pid=",
     "[M5.7] PASS",
 ];
@@ -533,7 +540,7 @@ fn run_m4_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
-    create_m5_data_disk_image()?;
+    reset_m5_data_disk_image()?;
     run_vm_inner_with_config(
         false,
         false,
