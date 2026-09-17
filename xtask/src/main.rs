@@ -162,7 +162,7 @@ const M4_SUPERVISOR_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[IPC ] console pid=1: [SUP ]",
     "[M4.3] PASS",
 ];
-const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 15] = [
+const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 16] = [
     "[SVC ] declared service=20736",
     "[BLK ] authority granted pid=",
     "[STOR] service started pid=",
@@ -173,10 +173,11 @@ const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[STOR] write object=1 bytes=8",
     "[STOR] write object=2 bytes=11",
     "[STOR] commit generation=1",
+    "[BLK ] unauthorized denied pid=",
+    "[BLK ] stale handle denied pid=",
     "[STOR] mounted generation=1",
     "[STOR] commit generation=2",
     "[STOR] malformed media rejected",
-    "[BLK ] unauthorized denied pid=",
     "[M5.7] PASS",
 ];
 const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
@@ -189,31 +190,39 @@ const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
 ];
 const M5_PERSISTENCE_WRITE_MARKERS: [&str; 7] = [
     "[BLK ] virtio-block ready blocks=",
+    "[BLK ] flush complete",
     "[STOR] mounted generation=fresh",
     "[STOR] write object=alpha id=1 bytes=",
     "[STOR] write object=beta id=2 bytes=",
-    "[BLK ] flush complete",
     "[STOR] commit generation=1",
     "[TEST] persistence phase=write PASS",
 ];
 const M5_PERSISTENCE_READ_MARKERS: [&str; 9] = [
+    "[BLK ] flush complete",
     "[STOR] recovered generation=1",
     "[STOR] read object=alpha id=1 bytes=",
     "[STOR] read object=beta id=2 bytes=",
     "[STOR] write object=alpha id=1 bytes=",
-    "[BLK ] flush complete",
     "[STOR] commit generation=2",
     "[STOR] recovered generation=2",
     "[STOR] read object=beta id=2 bytes=",
     "[TEST] persistence phase=read PASS",
 ];
-const M5_CRASH_ARM_MARKERS: [&str; 6] = [
+const M5_CRASH_ARM_EARLY_MARKERS: [&str; 6] = [
     "[STOR] recovered generation=2",
     "[STOR] read object=alpha id=1 bytes=",
     "[STOR] read object=beta id=2 bytes=",
     "[CRSH] armed trigger=after-write=1",
     "[STOR] write object=alpha id=1 bytes=",
     "[CRSH] inject after-write=1",
+];
+const M5_CRASH_ARM_LATE_MARKERS: [&str; 6] = [
+    "[STOR] recovered generation=2",
+    "[STOR] read object=alpha id=1 bytes=",
+    "[STOR] read object=beta id=2 bytes=",
+    "[CRSH] armed trigger=after-write=3",
+    "[STOR] write object=alpha id=1 bytes=",
+    "[CRSH] inject after-write=3",
 ];
 const M5_CRASH_RECOVERY_MARKERS: [&str; 5] = [
     "[BLK ] virtio-block ready blocks=",
@@ -357,7 +366,8 @@ fn run_m5_crash_recovery_acceptance_default() -> Result<(), XtaskError> {
 fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
     let options = parse_m5_cli_options(args)?;
     let run_result = (|| -> Result<(), XtaskError> {
-        prepare_m5_data_disk_image(options.keep_disk)?;
+        build_storage_userspace(true)?;
+        prepare_m5_data_disk_image(options.reuse_disk)?;
         let config = m5_storage_vm_config();
         println!("[M5.P] phase 1/2 boot");
         run_vm_inner_with_config(
@@ -393,7 +403,8 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
 fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
     let options = parse_m5_cli_options(args)?;
     let run_result = (|| -> Result<(), XtaskError> {
-        prepare_m5_data_disk_image(options.keep_disk)?;
+        build_storage_userspace(true)?;
+        prepare_m5_data_disk_image(options.reuse_disk)?;
         let config = m5_storage_vm_config();
         println!("[M5.C] baseline boot 1/4");
         run_vm_inner_with_config(
@@ -420,20 +431,45 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             phase: "crash baseline boot 2".to_owned(),
             reason: error.to_string(),
         })?;
-        println!("[M5.C] abrupt-stop boot 3/4");
+        println!("[M5.C] abrupt-stop early boot 3/6");
         run_vm_inner_with_config(
             false,
             false,
-            &["m5-persistence-self-test"],
-            Some((&M5_CRASH_ARM_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            &["m5-crash-early-self-test"],
+            Some((&M5_CRASH_ARM_EARLY_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
             config.clone(),
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
-            phase: "crash injection boot".to_owned(),
+            phase: "early crash injection boot".to_owned(),
             reason: error.to_string(),
         })?;
         println!("[TEST] rebooting with persistent disk");
-        println!("[M5.C] recovery boot 4/4");
+        println!("[M5.C] early recovery boot 4/6");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m5-crash-recovery-self-test"],
+            Some((&M5_CRASH_RECOVERY_MARKERS, M5_CRASH_RECOVERY_TIMEOUT)),
+            config.clone(),
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "early crash recovery boot".to_owned(),
+            reason: error.to_string(),
+        })?;
+        println!("[M5.C] abrupt-stop late boot 5/6");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m5-crash-late-self-test"],
+            Some((&M5_CRASH_ARM_LATE_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            config.clone(),
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "late crash injection boot".to_owned(),
+            reason: error.to_string(),
+        })?;
+        println!("[TEST] rebooting with persistent disk");
+        println!("[M5.C] late recovery boot 6/6");
         run_vm_inner_with_config(
             false,
             false,
@@ -442,7 +478,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             config,
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
-            phase: "crash recovery boot".to_owned(),
+            phase: "late crash recovery boot".to_owned(),
             reason: error.to_string(),
         })?;
         println!("[M5.C] PASS");
@@ -711,6 +747,7 @@ fn run_m5_crash_matrix() -> Result<(), XtaskError> {
 }
 
 fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
+    build_storage_userspace(true)?;
     reset_m5_data_disk_image()?;
     run_vm_inner_with_config(
         false,
@@ -771,6 +808,27 @@ fn build_restart_policy_userspace(release: bool) -> Result<(), XtaskError> {
     Ok(())
 }
 
+fn build_storage_userspace(release: bool) -> Result<(), XtaskError> {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build")
+        .arg("-p")
+        .arg("clean-slate-store")
+        .arg("--bin")
+        .arg("clean-slate-storage-userspace")
+        .arg("--features")
+        .arg("userspace")
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,alloc,compiler_builtins");
+    if release {
+        cmd.arg("--release");
+    }
+    cmd.env("RUSTC_BOOTSTRAP", "1");
+    run_command(&mut cmd)?;
+    Ok(())
+}
+
 fn run_m3_address_space_lifecycle_acceptance() -> Result<(), XtaskError> {
     run_vm_inner(
         false,
@@ -805,6 +863,7 @@ struct VmLaunchConfig {
 #[derive(Clone, Copy, Debug, Default)]
 struct M5CliOptions {
     keep_disk: bool,
+    reuse_disk: bool,
 }
 
 fn run_vm_inner(
@@ -908,6 +967,10 @@ fn parse_m5_cli_options(args: &[OsString]) -> Result<M5CliOptions, XtaskError> {
     for arg in args {
         if arg == OsStr::new("--keep-disk") {
             options.keep_disk = true;
+            continue;
+        }
+        if arg == OsStr::new("--reuse-disk") {
+            options.reuse_disk = true;
             continue;
         }
         return Err(XtaskError::InvalidOption(
@@ -1958,6 +2021,10 @@ mod tests {
     fn m5_cli_options_accept_keep_disk_only() {
         let options = parse_m5_cli_options(&[OsString::from("--keep-disk")]).expect("valid args");
         assert!(options.keep_disk);
+        assert!(!options.reuse_disk);
+        let options = parse_m5_cli_options(&[OsString::from("--reuse-disk")]).expect("valid args");
+        assert!(options.reuse_disk);
+        assert!(!options.keep_disk);
         assert!(parse_m5_cli_options(&[OsString::from("--unknown")]).is_err());
     }
 

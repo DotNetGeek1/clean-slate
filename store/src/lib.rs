@@ -17,7 +17,8 @@
 //! - generation number for slot selection;
 //! - fixed table capacity and active object count;
 //! - a fixed object table whose entries store object id, UTF-8 name, exact byte
-//!   length, and validated data extent.
+//!   length, validated data extent, and a payload checksum used to reject a
+//!   superblock whose referenced data is only partially durable.
 //!
 //! Commits never need in-place multi-block metadata mutation: object data is
 //! written first, then a complete next-generation superblock is written to the
@@ -124,6 +125,7 @@ pub enum CorruptFormatError {
     InvalidObjectLength,
     InvalidObjectExtent,
     OverlappingObjectExtents,
+    ObjectChecksumMismatch,
 }
 
 #[derive(Debug)]
@@ -159,8 +161,7 @@ impl<D: BlockDevice> ObjectStore<D> {
 
     pub fn mount(mut device: D) -> Result<Self, StoreError> {
         let geometry = validate_geometry(device.geometry())?;
-        let (active_slot, superblock) = select_superblock(&mut device, geometry)?;
-        let objects = load_objects(&mut device, geometry, &superblock.objects)?;
+        let (active_slot, superblock, objects) = select_committed_state(&mut device, geometry)?;
 
         Ok(Self {
             device,
@@ -282,6 +283,7 @@ struct ObjectLayout {
     data_len: u32,
     start_lba: u64,
     block_count: u32,
+    data_checksum: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -343,32 +345,54 @@ fn block_size_bytes(geometry: BlockGeometry) -> usize {
     usize::try_from(geometry.logical_block_size()).expect("validated block size fits in usize")
 }
 
-fn select_superblock<D: BlockDevice>(
+fn select_committed_state<D: BlockDevice>(
     device: &mut D,
     geometry: BlockGeometry,
-) -> Result<(u64, Superblock), StoreError> {
+) -> Result<(u64, Superblock, Vec<StoredObject>), StoreError> {
     let slot0 = read_superblock_slot(device, geometry, 0);
     let slot1 = read_superblock_slot(device, geometry, 1);
 
-    match (slot0, slot1) {
-        (Ok(left), Ok(right)) => match left.generation.cmp(&right.generation) {
-            Ordering::Greater | Ordering::Equal => Ok((0, left)),
-            Ordering::Less => Ok((1, right)),
+    let mut candidates = Vec::new();
+    let mut block_error = None;
+    let mut incompatible_error = None;
+    let mut corrupt_error = None;
+    for (slot, result) in [(0, slot0), (1, slot1)] {
+        match result {
+            Ok(superblock) => candidates.push((slot, superblock)),
+            Err(SlotLoadError::Block(error)) => block_error = Some(error),
+            Err(SlotLoadError::Decode(SlotDecodeError::Incompatible(error))) => {
+                incompatible_error = Some(error)
+            }
+            Err(SlotLoadError::Decode(SlotDecodeError::Corrupt(error))) => {
+                corrupt_error = Some(error)
+            }
+        }
+    }
+
+    candidates.sort_unstable_by(
+        |left, right| match right.1.generation.cmp(&left.1.generation) {
+            Ordering::Equal => left.0.cmp(&right.0),
+            order => order,
         },
-        (Ok(left), Err(_)) => Ok((0, left)),
-        (Err(_), Ok(right)) => Ok((1, right)),
-        (Err(left), Err(right)) => match (left, right) {
-            (SlotLoadError::Block(error), _) | (_, SlotLoadError::Block(error)) => {
-                Err(StoreError::Block(error))
-            }
-            (SlotLoadError::Decode(SlotDecodeError::Incompatible(err)), _)
-            | (_, SlotLoadError::Decode(SlotDecodeError::Incompatible(err))) => {
-                Err(StoreError::Incompatible(err))
-            }
-            (SlotLoadError::Decode(SlotDecodeError::Corrupt(err)), _) => {
-                Err(StoreError::Corrupt(err))
-            }
-        },
+    );
+    for (slot, superblock) in candidates {
+        match load_objects(device, geometry, &superblock.objects) {
+            Ok(objects) => return Ok((slot, superblock, objects)),
+            Err(StoreError::Corrupt(error)) => corrupt_error = Some(error),
+            Err(StoreError::Block(error)) => block_error = Some(error),
+            Err(StoreError::Incompatible(error)) => incompatible_error = Some(error),
+            Err(other) => return Err(other),
+        }
+    }
+
+    if let Some(error) = block_error {
+        Err(StoreError::Block(error))
+    } else if let Some(error) = incompatible_error {
+        Err(StoreError::Incompatible(error))
+    } else if let Some(error) = corrupt_error {
+        Err(StoreError::Corrupt(error))
+    } else {
+        Err(StoreError::Incompatible(IncompatibleFormatError::BadMagic))
     }
 }
 
@@ -460,6 +484,7 @@ fn decode_superblock(
             data_len: read_u32(bytes, start + 4),
             start_lba: read_u64(bytes, start + 8),
             block_count: read_u32(bytes, start + 16),
+            data_checksum: read_u32(bytes, start + 20),
         });
     }
 
@@ -606,6 +631,7 @@ fn build_object_layout(
             data_len: data_len_u32,
             start_lba: object_start,
             block_count,
+            data_checksum: checksum(object.data.as_slice()),
         });
     }
 
@@ -661,6 +687,7 @@ fn encode_superblock(
         write_u32(&mut bytes, start + 4, object.data_len);
         write_u64(&mut bytes, start + 8, object.start_lba);
         write_u32(&mut bytes, start + 16, object.block_count);
+        write_u32(&mut bytes, start + 20, object.data_checksum);
         write_u64(&mut bytes, start + 24, object.id);
         let name_bytes = object.name.as_bytes();
         bytes[(start + 32)..(start + 32 + name_bytes.len())].copy_from_slice(name_bytes);
@@ -740,6 +767,11 @@ fn read_object_data<D: BlockDevice>(
         &mut bytes,
     )?;
     bytes.truncate(usize::try_from(object.data_len).expect("data length fits"));
+    if checksum(bytes.as_slice()) != object.data_checksum {
+        return Err(StoreError::Corrupt(
+            CorruptFormatError::ObjectChecksumMismatch,
+        ));
+    }
     Ok(bytes)
 }
 
@@ -1116,5 +1148,29 @@ mod tests {
         let store = ObjectStore::mount(device).unwrap();
         assert_eq!(store.read_object_by_id(1).unwrap(), b"committed");
         assert_eq!(store.committed_generation(), 1);
+    }
+
+    #[test]
+    fn mount_falls_back_to_previous_generation_when_newer_payload_checksum_mismatches() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.write_object(1, "alpha", &[0x11; 700]).unwrap();
+        store.commit().unwrap();
+        store.write_object(1, "alpha", &[0x22; 700]).unwrap();
+        store.commit().unwrap();
+
+        let mut device = store.into_inner();
+        let slot = durable_slot(&mut device, 0);
+        let generation_two = decode_superblock(geometry(), 0, &slot).unwrap();
+        let payload_offset = usize::try_from(
+            generation_two.objects[0].start_lba * u64::from(geometry().logical_block_size()),
+        )
+        .unwrap();
+        device.durable_bytes_mut()[payload_offset] ^= 0xff;
+        let rebooted =
+            FakeBlockDevice::from_durable_bytes(geometry(), device.durable_bytes()).unwrap();
+        let store = ObjectStore::mount(rebooted).unwrap();
+        assert_eq!(store.committed_generation(), 1);
+        assert_eq!(store.read_object_by_id(1).unwrap(), vec![0x11; 700]);
     }
 }
