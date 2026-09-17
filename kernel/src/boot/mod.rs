@@ -86,7 +86,8 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m3-ipc-self-test"),
     not(feature = "m3-syscall-self-test"),
     not(feature = "m4-service-lifecycle-self-test"),
-    not(feature = "m4-supervisor-self-test")
+    not(feature = "m4-supervisor-self-test"),
+    not(feature = "m5-storage-self-test")
 ))]
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
 #[cfg(feature = "m3-ipc-self-test")]
@@ -105,6 +106,8 @@ use crate::selftest::m4_service_lifecycle::start_service_lifecycle_self_test;
 use crate::selftest::m4_supervisor::start_userspace_supervisor_self_test;
 #[cfg(feature = "m5-block-self-test")]
 use crate::selftest::m5_block::run_m5_block_self_test;
+#[cfg(feature = "m5-storage-self-test")]
+use crate::selftest::m5_storage::start_m5_storage_self_test;
 use crate::syscall::initialize_syscall_abi;
 use ::uefi::mem::memory_map::{MemoryMap, MemoryMapMut};
 use ::uefi::Status;
@@ -218,7 +221,16 @@ fn run_inner() -> Result<(), &'static str> {
         }
         #[cfg(all(
             not(feature = "m4-service-lifecycle-self-test"),
-            not(feature = "m4-supervisor-self-test")
+            not(feature = "m4-supervisor-self-test"),
+            feature = "m5-storage-self-test"
+        ))]
+        {
+            start_m5_storage_self_test(allocator)
+        }
+        #[cfg(all(
+            not(feature = "m4-service-lifecycle-self-test"),
+            not(feature = "m4-supervisor-self-test"),
+            not(feature = "m5-storage-self-test")
         ))]
         {
             let mut allocator = allocator;

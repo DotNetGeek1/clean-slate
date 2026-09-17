@@ -25,6 +25,7 @@ const M3_RESOURCES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_CRASH_SERVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M4_SUPERVISOR_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_RECOVERY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+const M5_STORAGE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M5_BLOCK_DISK_BYTES: u64 = 16 * 1024 * 1024;
 const M5_DISK_HARNESS_TIMEOUT: Duration = Duration::from_secs(20);
@@ -158,6 +159,15 @@ const M4_SUPERVISOR_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[IPC ] console pid=1: [SUP ]",
     "[M4.3] PASS",
 ];
+const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 7] = [
+    "[SVC ] declared service=20736",
+    "[BLK ] authority granted pid=",
+    "[STOR] service started pid=",
+    "[BLK ] request op=write id=1",
+    "[BLK ] completion id=1 status=ok",
+    "[BLK ] unauthorized denied pid=",
+    "[M5.3] PASS",
+];
 const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[VIRT] block device found",
     "[BLK ] virtio-block ready blocks=",
@@ -233,6 +243,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM4 => run_m4_acceptance(),
         ParsedCommand::TestM4Recovery => run_m4_recovery_acceptance(),
         ParsedCommand::TestM5Block => run_m5_block_acceptance(),
+        ParsedCommand::TestM5Storage => run_m5_storage_acceptance(),
         ParsedCommand::TestM5DiskHarness => run_m5_disk_harness(&trailing_args),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
@@ -518,6 +529,18 @@ fn run_m4_acceptance() -> Result<(), XtaskError> {
     run_m4_restart_policy_acceptance()?;
     println!("[M4  ] PASS");
     Ok(())
+}
+
+fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m5-storage-self-test"],
+        Some((
+            &M5_STORAGE_ACCEPTANCE_MARKERS,
+            M5_STORAGE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
 }
 
 fn run_m4_restart_policy_acceptance() -> Result<(), XtaskError> {
@@ -1143,6 +1166,7 @@ fn print_help() {
     println!("  test-m4-recovery Build the M4.8 recovery supervisor kernel boot and validate ordered markers");
     println!("  test-m4       M4 milestone gate: recovery QEMU boot plus M4.6 host policy tests");
     println!("  test-m5-block Build the M5.2 virtio-block kernel, run QEMU, and validate ordered markers");
+    println!("  test-m5-storage Build the M5.3 userspace storage-service boundary acceptance boot");
     println!("  test-m5-disk-harness Two-boot M5 disk harness with host-side sentinel validation");
     println!(
         "                 Uses M1 markers only; does not assert milestone-level storage behavior"
@@ -1181,6 +1205,7 @@ enum ParsedCommand {
     TestM4,
     TestM4Recovery,
     TestM5Block,
+    TestM5Storage,
     TestM5DiskHarness,
     M5DiskCreate,
     M5DiskReset,
@@ -1212,6 +1237,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m4" => ParsedCommand::TestM4,
         Some(cmd) if cmd == "test-m4-recovery" => ParsedCommand::TestM4Recovery,
         Some(cmd) if cmd == "test-m5-block" => ParsedCommand::TestM5Block,
+        Some(cmd) if cmd == "test-m5-storage" => ParsedCommand::TestM5Storage,
         Some(cmd) if cmd == "test-m5-disk-harness" => ParsedCommand::TestM5DiskHarness,
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
@@ -1391,6 +1417,10 @@ mod tests {
         assert_eq!(
             parse_command(Some("test-m3-resources".as_ref())),
             ParsedCommand::TestM3Resources
+        );
+        assert_eq!(
+            parse_command(Some("test-m5-storage".as_ref())),
+            ParsedCommand::TestM5Storage
         );
         assert_eq!(
             parse_command(Some("run-gdb-entry".as_ref())),

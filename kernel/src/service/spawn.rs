@@ -2,6 +2,12 @@
 
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::PAGE_SIZE;
+#[cfg(feature = "m5-storage-self-test")]
+use clean_slate_service_fixtures::{
+    BlockTransportOp, BlockTransportRequest, BLOCK_TRANSPORT_REQUEST_BYTES,
+    BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION, STORAGE_BLOCK_DEVICE_ID,
+    STORAGE_SERVICE_ID, STORAGE_UNAUTHORIZED_SERVICE_ID,
+};
 use clean_slate_service_lifecycle::ServiceId;
 
 const SERVICE_USER_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
@@ -21,6 +27,8 @@ pub(crate) enum BuiltinServiceImage {
         feature = "m4-service-lifecycle-self-test"
     ))]
     M3UserTestPayload,
+    #[cfg(feature = "m5-storage-self-test")]
+    StorageProbePayload,
 }
 
 impl BuiltinServiceImage {
@@ -34,6 +42,10 @@ impl BuiltinServiceImage {
                 feature = "m4-service-lifecycle-self-test"
             ))]
             1 => Self::M3UserTestPayload,
+            #[cfg(feature = "m5-storage-self-test")]
+            id if id == STORAGE_SERVICE_ID.0 => Self::StorageProbePayload,
+            #[cfg(feature = "m5-storage-self-test")]
+            id if id == STORAGE_UNAUTHORIZED_SERVICE_ID.0 => Self::StorageProbePayload,
             _ => Self::ImmediateExit,
         }
     }
@@ -88,6 +100,10 @@ pub(crate) fn launch_builtin_service(
         feature = "m4-service-lifecycle-self-test"
     ))]
     use crate::arch::x86_64::asm::clean_slate_user_address_space_test_start;
+    #[cfg(feature = "m5-storage-self-test")]
+    use crate::arch::x86_64::asm::clean_slate_user_storage_test_end;
+    #[cfg(feature = "m5-storage-self-test")]
+    use crate::arch::x86_64::asm::clean_slate_user_storage_test_start;
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
     use crate::arch::x86_64::gdt::userspace_gdt_state;
     use crate::diagnostics::log::kernel_log_fmt;
@@ -138,6 +154,60 @@ pub(crate) fn launch_builtin_service(
         Ok(())
     }
 
+    #[cfg(feature = "m5-storage-self-test")]
+    #[repr(C)]
+    struct StorageProbeBootstrap {
+        device_id: u64,
+        protocol_version: u64,
+        mode: u64,
+        request: [u8; BLOCK_TRANSPORT_REQUEST_BYTES],
+        response: [u8; BLOCK_TRANSPORT_RESPONSE_BYTES],
+        payload_len: u64,
+        payload: [u8; 512],
+    }
+
+    #[cfg(feature = "m5-storage-self-test")]
+    const STORAGE_PROBE_MODE_AUTHORIZED: u64 = 0;
+    #[cfg(feature = "m5-storage-self-test")]
+    const STORAGE_PROBE_MODE_EXPECT_EACCES: u64 = 1;
+    #[cfg(feature = "m5-storage-self-test")]
+    const STORAGE_PROBE_REQUEST_OFFSET: usize =
+        core::mem::offset_of!(StorageProbeBootstrap, request);
+    #[cfg(feature = "m5-storage-self-test")]
+    const STORAGE_PROBE_RESPONSE_OFFSET: usize =
+        core::mem::offset_of!(StorageProbeBootstrap, response);
+    #[cfg(feature = "m5-storage-self-test")]
+    const STORAGE_PROBE_PAYLOAD_LEN_OFFSET: usize =
+        core::mem::offset_of!(StorageProbeBootstrap, payload_len);
+    #[cfg(feature = "m5-storage-self-test")]
+    const STORAGE_PROBE_PAYLOAD_OFFSET: usize =
+        core::mem::offset_of!(StorageProbeBootstrap, payload);
+    #[cfg(feature = "m5-storage-self-test")]
+    const _: [(); 24] = [(); STORAGE_PROBE_REQUEST_OFFSET];
+    #[cfg(feature = "m5-storage-self-test")]
+    const _: [(); 64] = [(); STORAGE_PROBE_RESPONSE_OFFSET];
+    #[cfg(feature = "m5-storage-self-test")]
+    const _: [(); 104] = [(); STORAGE_PROBE_PAYLOAD_LEN_OFFSET];
+    #[cfg(feature = "m5-storage-self-test")]
+    const _: [(); 112] = [(); STORAGE_PROBE_PAYLOAD_OFFSET];
+
+    #[cfg(feature = "m5-storage-self-test")]
+    fn copy_storage_probe_payload(frame_address: u64) -> Result<(), &'static str> {
+        let payload_size = (&raw const clean_slate_user_storage_test_end as usize)
+            .saturating_sub(&raw const clean_slate_user_storage_test_start as usize);
+        if payload_size > PAGE_SIZE as usize {
+            return Err("built-in storage probe payload exceeded one page");
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(
+                &raw const clean_slate_user_storage_test_start,
+                (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
+                payload_size,
+            );
+        }
+        Ok(())
+    }
+
     let image = BuiltinServiceImage::for_service(service);
     let code_address = match image {
         #[cfg(any(
@@ -148,6 +218,8 @@ pub(crate) fn launch_builtin_service(
             feature = "m4-service-lifecycle-self-test"
         ))]
         BuiltinServiceImage::M3UserTestPayload => SERVICE_USER_CODE_ADDRESS,
+        #[cfg(feature = "m5-storage-self-test")]
+        BuiltinServiceImage::StorageProbePayload => SERVICE_USER_CODE_ADDRESS,
         BuiltinServiceImage::ImmediateExit => SERVICE_USER_CODE_ADDRESS,
     };
     let stack_address = match image {
@@ -159,6 +231,8 @@ pub(crate) fn launch_builtin_service(
             feature = "m4-service-lifecycle-self-test"
         ))]
         BuiltinServiceImage::M3UserTestPayload => SERVICE_USER_STACK_ADDRESS,
+        #[cfg(feature = "m5-storage-self-test")]
+        BuiltinServiceImage::StorageProbePayload => SERVICE_USER_STACK_ADDRESS,
         BuiltinServiceImage::ImmediateExit => SERVICE_USER_CODE_ADDRESS + PAGE_SIZE,
     };
 
@@ -189,6 +263,8 @@ pub(crate) fn launch_builtin_service(
             feature = "m4-service-lifecycle-self-test"
         ))]
         BuiltinServiceImage::M3UserTestPayload => copy_m3_user_test_payload(code_frame)?,
+        #[cfg(feature = "m5-storage-self-test")]
+        BuiltinServiceImage::StorageProbePayload => copy_storage_probe_payload(code_frame)?,
     }
     map_process_page(
         &mut address_space,
@@ -231,6 +307,61 @@ pub(crate) fn launch_builtin_service(
             .allocate_page()
             .ok_or("allocator could not provide a data page for supervised service")?;
         zero_page(data_frame);
+        map_process_page(
+            &mut address_space,
+            SERVICE_USER_DATA_ADDRESS,
+            data_frame,
+            PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::NO_EXECUTE
+                | PageTableFlags::USER_ACCESSIBLE,
+            allocator,
+        )?;
+    }
+    #[cfg(feature = "m5-storage-self-test")]
+    if matches!(image, BuiltinServiceImage::StorageProbePayload) {
+        let data_frame = allocator
+            .allocate_page()
+            .ok_or("allocator could not provide a storage bootstrap page")?;
+        zero_page(data_frame);
+        let (mode, request, payload_len, payload) = if service == STORAGE_SERVICE_ID {
+            (
+                STORAGE_PROBE_MODE_AUTHORIZED,
+                BlockTransportRequest {
+                    request_id: 1,
+                    device_id: STORAGE_BLOCK_DEVICE_ID,
+                    operation: BlockTransportOp::Write,
+                    lba: 0,
+                    blocks: 1,
+                    buffer_len: 512,
+                }
+                .encode(),
+                512,
+                [0x5a; 512],
+            )
+        } else {
+            (
+                STORAGE_PROBE_MODE_EXPECT_EACCES,
+                BlockTransportRequest::geometry(2, STORAGE_BLOCK_DEVICE_ID).encode(),
+                0,
+                [0; 512],
+            )
+        };
+        let bootstrap = StorageProbeBootstrap {
+            device_id: STORAGE_BLOCK_DEVICE_ID,
+            protocol_version: u64::from(BLOCK_TRANSPORT_VERSION),
+            mode,
+            request,
+            response: [0; BLOCK_TRANSPORT_RESPONSE_BYTES],
+            payload_len,
+            payload,
+        };
+        unsafe {
+            ptr::write(
+                (PHYSICAL_MEMORY_OFFSET + data_frame) as *mut StorageProbeBootstrap,
+                bootstrap,
+            );
+        }
         map_process_page(
             &mut address_space,
             SERVICE_USER_DATA_ADDRESS,
