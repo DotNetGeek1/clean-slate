@@ -14,7 +14,8 @@
     One or more tests to run. Accepts full xtask names or short aliases:
       m1, m2, m3 / m3.7 (aggregate),
       entry / m3.1, address-space / m3.2, syscall / m3.3,
-      lifecycle / m3.4, ipc / m3.5, resources / m3.6
+      lifecycle / m3.4, ipc / m3.5, resources / m3.6,
+      m5-block / block-attach, m5-disk-harness / m5-harness
 
 .PARAMETER Exhaustive
     Run every known test (milestone gates plus each individual M3/M4
@@ -99,6 +100,8 @@ $AllTests = [ordered]@{
     "test-m4-supervisor"        = @{ Aliases = @("m4-supervisor", "supervisor", "m4.3"); Description = "M4.3 userspace supervisor runtime QEMU integration acceptance"; Role = "Constituent" }
     "test-m4"                   = @{ Aliases = @("m4", "m4.8"); Description = "M4 milestone gate (recovery QEMU boot + M4.6 host policy tests)"; Role = "Aggregate" }
     "test-m4-recovery"          = @{ Aliases = @("m4-recovery", "recovery", "m4.8-qemu"); Description = "M4.8 authoritative recovery QEMU acceptance"; Role = "Constituent" }
+    "test-m5-block"             = @{ Aliases = @("m5-block", "block-attach"); Description = "M5.2 VirtIO block transport QEMU acceptance"; Role = "Constituent" }
+    "test-m5-disk-harness"      = @{ Aliases = @("m5-disk-harness", "m5-harness"); Description = "M5 harness-only two-boot disk fixture validation (host sentinel)"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {
@@ -121,7 +124,7 @@ function Show-TestList {
     Write-Host ""
     Write-Host "Default suite:  $((Get-DefaultSuite) -join ', ')"
     Write-Host "-Exhaustive:    $(@($AllTests.Keys) -join ', ')"
-    Write-Host "Constituents are the per-boundary debugging workflows behind the test-m3 aggregate."
+    Write-Host "Constituents are per-boundary debugging workflows behind aggregate milestone commands and standalone acceptance lanes."
 }
 
 function Resolve-TestName {

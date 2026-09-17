@@ -1,8 +1,8 @@
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt::{Display, Formatter};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::mpsc;
@@ -27,6 +27,14 @@ const M4_SUPERVISOR_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_RECOVERY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M5_BLOCK_DISK_BYTES: u64 = 16 * 1024 * 1024;
+const M5_DISK_HARNESS_TIMEOUT: Duration = Duration::from_secs(20);
+const M5_DATA_DISK_FILENAME: &str = "m5-data.img";
+const M5_DATA_DISK_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+const M5_HOST_SENTINEL_OFFSET: u64 = 4096;
+const M5_HOST_SENTINEL: &[u8] = b"CLEAN-SLATE-M5-PERSISTENCE-SENTINEL-v1";
+const M5_QEMU_DISK_ID: &str = "m5disk";
+const M5_QEMU_DEVICE: &str =
+    "virtio-blk-pci,drive=m5disk,serial=clean-slate-m5-data,disable-modern=on";
 const M4_RECOVERY_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[CAP ] supervisor console capability granted pid=1",
     "[SUP ] started pid=1",
@@ -204,8 +212,10 @@ fn main() -> ExitCode {
 fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
     let mut args = args.into_iter();
     let _exe = args.next();
+    let command = parse_command(args.next().as_deref());
+    let trailing_args: Vec<OsString> = args.collect();
 
-    match parse_command(args.next().as_deref()) {
+    match command {
         ParsedCommand::Run => run_vm(),
         ParsedCommand::TestM1 => run_m1_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
@@ -223,6 +233,10 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM4 => run_m4_acceptance(),
         ParsedCommand::TestM4Recovery => run_m4_recovery_acceptance(),
         ParsedCommand::TestM5Block => run_m5_block_acceptance(),
+        ParsedCommand::TestM5DiskHarness => run_m5_disk_harness(&trailing_args),
+        ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
+        ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
+        ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
         ParsedCommand::RunGdb => run_vm_with_gdb(false),
         ParsedCommand::RunGdbEntry => run_vm_with_gdb(true),
         ParsedCommand::Build => build_kernel(false, false, &[]),
@@ -244,6 +258,68 @@ fn run_vm() -> Result<(), XtaskError> {
 
 fn run_vm_with_gdb(debug_entry: bool) -> Result<(), XtaskError> {
     run_vm_inner(true, debug_entry, &[], None)
+}
+
+fn run_m5_block_acceptance() -> Result<(), XtaskError> {
+    let disk = ensure_m5_block_disk_image()?;
+    run_vm_inner_with_config(
+        false,
+        false,
+        &["m5-block-self-test"],
+        Some((&M5_BLOCK_ACCEPTANCE_MARKERS, M5_BLOCK_ACCEPTANCE_TIMEOUT)),
+        VmLaunchConfig {
+            m5_data_disk: Some(disk),
+            reset_ovmf_vars: false,
+        },
+    )
+}
+
+fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
+    let options = parse_m5_cli_options(args)?;
+    let run_result = (|| -> Result<(), XtaskError> {
+        reset_m5_data_disk_image()?;
+        let disk = m5_data_disk_path();
+        let config = VmLaunchConfig {
+            m5_data_disk: Some(disk.clone()),
+            reset_ovmf_vars: true,
+        };
+
+        println!("[M5.H] phase 1/2 boot");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m1-self-test"],
+            Some((&M1_ACCEPTANCE_MARKERS, M5_DISK_HARNESS_TIMEOUT)),
+            config.clone(),
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "persistence boot 1".to_owned(),
+            reason: error.to_string(),
+        })?;
+
+        write_m5_host_sentinel(&disk)?;
+
+        println!("[M5.H] phase 2/2 boot");
+        run_vm_inner_with_config(
+            false,
+            false,
+            &["m1-self-test"],
+            Some((&M1_ACCEPTANCE_MARKERS, M5_DISK_HARNESS_TIMEOUT)),
+            config,
+        )
+        .map_err(|error| XtaskError::M5PhaseFailed {
+            phase: "persistence boot 2".to_owned(),
+            reason: error.to_string(),
+        })?;
+
+        let sentinel_after = read_m5_host_sentinel(&disk)?;
+        if sentinel_after.as_slice() != M5_HOST_SENTINEL {
+            return Err(XtaskError::M5SentinelMismatch);
+        }
+        println!("[M5.H] PASS");
+        Ok(())
+    })();
+    finalize_m5_disk_lifecycle(run_result, options.keep_disk)
 }
 
 fn run_m1_acceptance() -> Result<(), XtaskError> {
@@ -444,16 +520,6 @@ fn run_m4_acceptance() -> Result<(), XtaskError> {
     Ok(())
 }
 
-fn run_m5_block_acceptance() -> Result<(), XtaskError> {
-    run_vm_inner_with_options(
-        false,
-        false,
-        &["m5-block-self-test"],
-        Some((&M5_BLOCK_ACCEPTANCE_MARKERS, M5_BLOCK_ACCEPTANCE_TIMEOUT)),
-        true,
-    )
-}
-
 fn run_m4_restart_policy_acceptance() -> Result<(), XtaskError> {
     let mut test = Command::new("cargo");
     test.arg("test").arg("-p").arg("clean-slate-supervisor");
@@ -509,21 +575,38 @@ fn run_m3_acceptance() -> Result<(), XtaskError> {
     Ok(())
 }
 
+#[derive(Clone, Debug, Default)]
+struct VmLaunchConfig {
+    m5_data_disk: Option<PathBuf>,
+    reset_ovmf_vars: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct M5CliOptions {
+    keep_disk: bool,
+}
+
 fn run_vm_inner(
     wait_for_gdb: bool,
     debug_entry: bool,
     features: &[&str],
     acceptance: Option<(&[&str], Duration)>,
 ) -> Result<(), XtaskError> {
-    run_vm_inner_with_options(wait_for_gdb, debug_entry, features, acceptance, false)
+    run_vm_inner_with_config(
+        wait_for_gdb,
+        debug_entry,
+        features,
+        acceptance,
+        VmLaunchConfig::default(),
+    )
 }
 
-fn run_vm_inner_with_options(
+fn run_vm_inner_with_config(
     wait_for_gdb: bool,
     debug_entry: bool,
     features: &[&str],
     acceptance: Option<(&[&str], Duration)>,
-    add_m5_block_device: bool,
+    config: VmLaunchConfig,
 ) -> Result<(), XtaskError> {
     let release = false;
     build_kernel(release, debug_entry, features)?;
@@ -539,16 +622,20 @@ fn run_vm_inner_with_options(
     fs::copy(&kernel, esp_boot_dir.join("BOOTX64.EFI"))?;
 
     let ovmf = find_ovmf()?;
-    let vars_copy = workspace_root().join("target").join("OVMF_VARS.fd");
-    if !vars_copy.is_file() {
+    let vars_copy = if config.reset_ovmf_vars {
+        workspace_root()
+            .join("target")
+            .join("m5")
+            .join("OVMF_VARS.fd")
+    } else {
+        workspace_root().join("target").join("OVMF_VARS.fd")
+    };
+    if config.reset_ovmf_vars || !vars_copy.is_file() {
+        if let Some(parent) = vars_copy.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::copy(&ovmf.vars_template, &vars_copy)?;
     }
-
-    let m5_disk = if add_m5_block_device {
-        Some(ensure_m5_block_disk_image()?)
-    } else {
-        None
-    };
 
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.arg("-machine")
@@ -572,14 +659,8 @@ fn run_vm_inner_with_options(
         .arg(format!("if=pflash,format=raw,file={}", vars_copy.display()))
         .arg("-drive")
         .arg(format!("format=raw,file=fat:rw:{}", esp_dir.display()));
-
-    if let Some(disk) = m5_disk {
-        qemu.arg("-drive").arg(format!(
-            "if=none,id=m5disk,format=raw,file={}",
-            disk.display()
-        ));
-        qemu.arg("-device")
-            .arg("virtio-blk-pci,drive=m5disk,disable-modern=on");
+    if let Some(m5_data_disk) = config.m5_data_disk {
+        append_m5_disk_args(&mut qemu, &m5_data_disk);
     }
 
     if wait_for_gdb {
@@ -599,6 +680,146 @@ fn ensure_m5_block_disk_image() -> Result<PathBuf, XtaskError> {
         file.set_len(M5_BLOCK_DISK_BYTES)?;
     }
     Ok(path)
+}
+
+fn parse_m5_cli_options(args: &[OsString]) -> Result<M5CliOptions, XtaskError> {
+    let mut options = M5CliOptions::default();
+    for arg in args {
+        if arg == OsStr::new("--keep-disk") {
+            options.keep_disk = true;
+            continue;
+        }
+        return Err(XtaskError::InvalidOption(
+            arg.to_string_lossy().into_owned(),
+        ));
+    }
+    Ok(options)
+}
+
+fn append_m5_disk_args(qemu: &mut Command, m5_data_disk: &Path) {
+    qemu.arg("-drive")
+        .arg(format!(
+            "if=none,format=raw,id={},file={}",
+            M5_QEMU_DISK_ID,
+            m5_data_disk.display()
+        ))
+        .arg("-device")
+        .arg(M5_QEMU_DEVICE);
+}
+
+fn m5_fixture_dir() -> PathBuf {
+    workspace_root().join("target").join("m5")
+}
+
+fn m5_data_disk_path() -> PathBuf {
+    m5_fixture_dir().join(M5_DATA_DISK_FILENAME)
+}
+
+fn ensure_m5_disk_path_is_test_owned(path: &Path) -> Result<(), XtaskError> {
+    if path.parent() != Some(m5_fixture_dir().as_path())
+        || path.file_name() != Some(OsStr::new(M5_DATA_DISK_FILENAME))
+    {
+        return Err(XtaskError::UnsafePath(path.to_path_buf()));
+    }
+    Ok(())
+}
+
+fn create_m5_data_disk_image() -> Result<(), XtaskError> {
+    let disk = m5_data_disk_path();
+    if disk.is_file() {
+        let actual = fs::metadata(&disk)?.len();
+        if actual != M5_DATA_DISK_SIZE_BYTES {
+            return Err(XtaskError::InvalidDiskSize {
+                path: disk,
+                expected: M5_DATA_DISK_SIZE_BYTES,
+                actual,
+            });
+        }
+        return Ok(());
+    }
+    if let Some(parent) = disk.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut image = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&disk)?;
+    image.set_len(M5_DATA_DISK_SIZE_BYTES)?;
+    image.flush()?;
+    println!(
+        "[M5.H] created data disk {} ({} bytes)",
+        disk.display(),
+        M5_DATA_DISK_SIZE_BYTES
+    );
+    Ok(())
+}
+
+fn remove_m5_data_disk_image() -> Result<(), XtaskError> {
+    let disk = m5_data_disk_path();
+    ensure_m5_disk_path_is_test_owned(&disk)?;
+    if disk.exists() && !disk.is_file() {
+        return Err(XtaskError::UnsafePath(disk));
+    }
+    if disk.is_file() {
+        fs::remove_file(&disk)?;
+    }
+    Ok(())
+}
+
+fn reset_m5_data_disk_image() -> Result<(), XtaskError> {
+    remove_m5_data_disk_image()?;
+    create_m5_data_disk_image()
+}
+
+fn finalize_m5_disk_lifecycle(
+    run_result: Result<(), XtaskError>,
+    keep_disk: bool,
+) -> Result<(), XtaskError> {
+    if keep_disk {
+        return run_result;
+    }
+    let cleanup_result = remove_m5_data_disk_image();
+    match (run_result, cleanup_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+fn inspect_m5_data_disk_image() -> Result<(), XtaskError> {
+    let disk = m5_data_disk_path();
+    if !disk.exists() {
+        println!("[M5.H] disk missing: {}", disk.display());
+        return Ok(());
+    }
+    let metadata = fs::metadata(&disk)?;
+    println!(
+        "[M5.H] disk: {} bytes={} expected={} sentinel_offset={}",
+        disk.display(),
+        metadata.len(),
+        M5_DATA_DISK_SIZE_BYTES,
+        M5_HOST_SENTINEL_OFFSET
+    );
+    Ok(())
+}
+
+fn write_m5_host_sentinel(path: &Path) -> Result<(), XtaskError> {
+    ensure_m5_disk_path_is_test_owned(path)?;
+    let mut file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+    file.seek(SeekFrom::Start(M5_HOST_SENTINEL_OFFSET))?;
+    file.write_all(M5_HOST_SENTINEL)?;
+    file.flush()?;
+    Ok(())
+}
+
+fn read_m5_host_sentinel(path: &Path) -> Result<Vec<u8>, XtaskError> {
+    ensure_m5_disk_path_is_test_owned(path)?;
+    let mut file = fs::OpenOptions::new().read(true).open(path)?;
+    file.seek(SeekFrom::Start(M5_HOST_SENTINEL_OFFSET))?;
+    let mut sentinel = vec![0u8; M5_HOST_SENTINEL.len()];
+    file.read_exact(&mut sentinel)?;
+    Ok(sentinel)
 }
 
 fn build_kernel(release: bool, debug_entry: bool, features: &[&str]) -> Result<(), XtaskError> {
@@ -922,6 +1143,13 @@ fn print_help() {
     println!("  test-m4-recovery Build the M4.8 recovery supervisor kernel boot and validate ordered markers");
     println!("  test-m4       M4 milestone gate: recovery QEMU boot plus M4.6 host policy tests");
     println!("  test-m5-block Build the M5.2 virtio-block kernel, run QEMU, and validate ordered markers");
+    println!("  test-m5-disk-harness Two-boot M5 disk harness with host-side sentinel validation");
+    println!(
+        "                 Uses M1 markers only; does not assert milestone-level storage behavior"
+    );
+    println!("  m5-disk-create Create deterministic M5 data disk if missing (preserve existing)");
+    println!("  m5-disk-reset Recreate deterministic blank M5 data disk");
+    println!("  m5-disk-inspect Print M5 data disk path and size");
     println!("  run-gdb      Build kernel, launch paused with gdb endpoint (:1234)");
     println!("  run-gdb-entry Build debug-entry kernel, pause QEMU, trap in efi_main");
     println!("  build        Build debug UEFI kernel only");
@@ -953,6 +1181,10 @@ enum ParsedCommand {
     TestM4,
     TestM4Recovery,
     TestM5Block,
+    TestM5DiskHarness,
+    M5DiskCreate,
+    M5DiskReset,
+    M5DiskInspect,
     RunGdb,
     RunGdbEntry,
     Build,
@@ -980,6 +1212,10 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m4" => ParsedCommand::TestM4,
         Some(cmd) if cmd == "test-m4-recovery" => ParsedCommand::TestM4Recovery,
         Some(cmd) if cmd == "test-m5-block" => ParsedCommand::TestM5Block,
+        Some(cmd) if cmd == "test-m5-disk-harness" => ParsedCommand::TestM5DiskHarness,
+        Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
+        Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
+        Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,
         Some(cmd) if cmd == "run-gdb" => ParsedCommand::RunGdb,
         Some(cmd) if cmd == "run-gdb-entry" => ParsedCommand::RunGdbEntry,
         Some(cmd) if cmd == "build" => ParsedCommand::Build,
@@ -1010,13 +1246,31 @@ fn select_ovmf_from_candidates(
 
 #[derive(Debug)]
 enum XtaskError {
-    CommandFailed { command: String, status: String },
-    CommandTimedOut { command: String, timeout: u64 },
+    CommandFailed {
+        command: String,
+        status: String,
+    },
+    CommandTimedOut {
+        command: String,
+        timeout: u64,
+    },
     InvalidCommand(String),
+    InvalidOption(String),
     Io(std::io::Error),
+    InvalidDiskSize {
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
+    },
+    M5PhaseFailed {
+        phase: String,
+        reason: String,
+    },
+    M5SentinelMismatch,
     MissingMarker(String),
     MissingFile(PathBuf),
     MissingOvmf,
+    UnsafePath(PathBuf),
 }
 
 impl Display for XtaskError {
@@ -1029,7 +1283,28 @@ impl Display for XtaskError {
                 write!(f, "command `{command}` timed out after {timeout}s")
             }
             XtaskError::InvalidCommand(command) => write!(f, "unknown command `{command}`"),
+            XtaskError::InvalidOption(option) => {
+                write!(f, "unknown option `{option}`")
+            }
             XtaskError::Io(error) => write!(f, "{error}"),
+            XtaskError::InvalidDiskSize {
+                path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "disk image {} has size {} bytes, expected {} bytes",
+                path.display(),
+                actual,
+                expected
+            ),
+            XtaskError::M5PhaseFailed { phase, reason } => {
+                write!(f, "M5 phase `{phase}` failed: {reason}")
+            }
+            XtaskError::M5SentinelMismatch => write!(
+                f,
+                "M5 host sentinel changed between phases; persistence image was not reused as expected"
+            ),
             XtaskError::MissingMarker(marker) => {
                 write!(f, "acceptance output missing required marker `{marker}`")
             }
@@ -1037,6 +1312,11 @@ impl Display for XtaskError {
             XtaskError::MissingOvmf => write!(
                 f,
                 "OVMF firmware not found. Set OVMF_CODE and OVMF_VARS or install OVMF."
+            ),
+            XtaskError::UnsafePath(path) => write!(
+                f,
+                "refusing to modify non-test-owned disk path {}",
+                path.display()
             ),
         }
     }
@@ -1051,7 +1331,15 @@ impl From<std::io::Error> for XtaskError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn m5_disk_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("m5 disk test lock poisoned")
+    }
 
     #[test]
     fn kernel_debug_artifact_path_is_expected() {
@@ -1105,12 +1393,28 @@ mod tests {
             ParsedCommand::TestM3Resources
         );
         assert_eq!(
+            parse_command(Some("run-gdb-entry".as_ref())),
+            ParsedCommand::RunGdbEntry
+        );
+        assert_eq!(
             parse_command(Some("test-m5-block".as_ref())),
             ParsedCommand::TestM5Block
         );
         assert_eq!(
-            parse_command(Some("run-gdb-entry".as_ref())),
-            ParsedCommand::RunGdbEntry
+            parse_command(Some("test-m5-disk-harness".as_ref())),
+            ParsedCommand::TestM5DiskHarness
+        );
+        assert_eq!(
+            parse_command(Some("m5-disk-create".as_ref())),
+            ParsedCommand::M5DiskCreate
+        );
+        assert_eq!(
+            parse_command(Some("m5-disk-reset".as_ref())),
+            ParsedCommand::M5DiskReset
+        );
+        assert_eq!(
+            parse_command(Some("m5-disk-inspect".as_ref())),
+            ParsedCommand::M5DiskInspect
         );
     }
 
@@ -1270,5 +1574,51 @@ mod tests {
                 "test-m3-resources",
             ]
         );
+    }
+
+    #[test]
+    fn m5_cli_options_accept_keep_disk_only() {
+        let options = parse_m5_cli_options(&[OsString::from("--keep-disk")]).expect("valid args");
+        assert!(options.keep_disk);
+        assert!(parse_m5_cli_options(&[OsString::from("--unknown")]).is_err());
+    }
+
+    #[test]
+    fn m5_disk_path_is_scoped_to_target_m5() {
+        let owned = m5_data_disk_path();
+        assert!(ensure_m5_disk_path_is_test_owned(&owned).is_ok());
+        let outside = workspace_root().join("target").join("OVMF_VARS.fd");
+        assert!(ensure_m5_disk_path_is_test_owned(&outside).is_err());
+    }
+
+    #[test]
+    fn m5_finalize_cleanup_removes_disk_when_keep_disabled() {
+        let _guard = m5_disk_test_guard();
+        reset_m5_data_disk_image().expect("reset disk");
+        let disk = m5_data_disk_path();
+        assert!(disk.exists());
+        finalize_m5_disk_lifecycle(Ok(()), false).expect("cleanup should succeed");
+        assert!(!disk.exists());
+    }
+
+    #[test]
+    fn m5_finalize_cleanup_preserves_disk_when_keep_enabled() {
+        let _guard = m5_disk_test_guard();
+        reset_m5_data_disk_image().expect("reset disk");
+        let disk = m5_data_disk_path();
+        assert!(disk.exists());
+        finalize_m5_disk_lifecycle(Ok(()), true).expect("keep mode should succeed");
+        assert!(disk.exists());
+        remove_m5_data_disk_image().expect("cleanup after test");
+    }
+
+    #[test]
+    fn m5_finalize_cleanup_keeps_original_error() {
+        let _guard = m5_disk_test_guard();
+        reset_m5_data_disk_image().expect("reset disk");
+        let disk = m5_data_disk_path();
+        let result = finalize_m5_disk_lifecycle(Err(XtaskError::InvalidCommand("x".into())), false);
+        assert!(matches!(result, Err(XtaskError::InvalidCommand(command)) if command == "x"));
+        assert!(!disk.exists());
     }
 }
