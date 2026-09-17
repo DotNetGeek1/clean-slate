@@ -1,0 +1,129 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `target/debug/xtask test-m5-storage`
+    Finished `release` profile [optimized] target(s) in 0.05s
+[M5.H] created data disk /home/runner/work/clean-slate/clean-slate/target/m5/m5-data.img (67108864 bytes)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: failed to load Boot0001 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x3,0x0): Not Found
+BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+[BOOT] UEFI memory map acquired
+[BOOT] ExitBootServices OK
+[MEM ] usable: 461 MiB
+[MEM ] reserved: 12598 MiB
+[MEM ] pages: total=118089 allocated=0 free=118089
+[MEM ] physical allocator initialized
+[INT ] IDT initialized
+[INT ] double-fault IST initialized
+[MM  ] page-fault diagnostics installed
+[MM  ] current mapping: 0x000000001dc4a7c0 -> 0x000000001dc4a7c0
+[MM  ] paging initialized
+[SVC ] declared service=20736
+[SVC ] declared service=20737
+[STOR] dispatch-state addrs gdt=0x1dcd3960 tss=0x1dcd39c0
+[STOR] handoff launch current-slot=none owner-pid=none phase=InitialAuthorized service=20736
+[STOR] page-table-frame[0]=0x6000
+[STOR] clone-kernel-mappings src=0x1f801000 dst=0x6000
+[STOR] spawn code-frame[0]=0x7000
+[STOR] page-table-frame[1]=0x8000
+[STOR] page-table-frame[2]=0x9000
+[STOR] page-table-frame[3]=0xa000
+[STOR] spawn stack-frame[0]=0x29000
+[STOR] spawn bootstrap-frame=0x31000
+[BLK ] authority granted pid=1 device=1
+[SVC ] launch service=20736 pid=1 gen=1
+[STOR] service started pid=1 next-slot=0 next-sp=0x1dceb270
+[STOR] post-launch current-slot=none owner-pid=none
+[BLK ] request op=geometry id=1
+[BLK ] virtio-block ready blocks=131072 block-size=512
+[BLK ] completion id=1 status=ok
+[BLK ] request op=read id=2
+[BLK ] completion id=2 status=ok
+[BLK ] request op=read id=3
+[BLK ] completion id=3 status=ok
+[BLK ] request op=geometry id=1
+[BLK ] completion id=1 status=ok
+[BLK ] request op=write id=2
+[BLK ] completion id=2 status=ok
+[BLK ] request op=write id=3
+[BLK ] completion id=3 status=ok
+[BLK ] request op=flush id=4
+[BLK ] completion id=4 status=ok
+[BLK ] flush complete
+[BLK ] request op=write id=5
+[BLK ] completion id=5 status=ok
+[BLK ] request op=write id=6
+[BLK ] completion id=6 status=ok
+[BLK ] request op=write id=7
+[BLK ] completion id=7 status=ok
+[BLK ] request op=flush id=8
+[BLK ] completion id=8 status=ok
+[BLK ] flush complete
+[STOR] user-vector entry current-slot=0 owner-pid=1 phase=InitialAuthorized pid=1
+[STOR] format generation=0
+[STOR] write object=1 bytes=8
+[STOR] write object=2 bytes=11
+[STOR] commit generation=1
+[STOR] pre-teardown current-slot=0 owner-pid=1
+[STOR] dispatch-state pre-teardown root=0x6000 gdt=true tss=true gdt-phys=0x1dcd3960 tss-phys=0x1dcd39c0
+[STOR] teardown finish current-slot=0 owner-pid=1 next-slot=None next-pid=None next-sp=0x0
+[STOR] free user-frame=0x31000
+[STOR] free user-frame=0x30000
+[STOR] free user-frame=0x2f000
+[STOR] free user-frame=0x2e000
+[STOR] free user-frame=0x2d000
+[STOR] free user-frame=0x2c000
+[STOR] free user-frame=0x2b000
+[STOR] free user-frame=0x2a000
+[STOR] free user-frame=0x29000
+[STOR] free user-frame=0x28000
+[STOR] free user-frame=0x27000
+[STOR] free user-frame=0x26000
+[STOR] free user-frame=0x25000
+[STOR] free user-frame=0x24000
+[STOR] free user-frame=0x23000
+[STOR] free user-frame=0x22000
+[STOR] free user-frame=0x21000
+[STOR] free user-frame=0x20000
+[STOR] free user-frame=0x1f000
+[STOR] free user-frame=0x1e000
+[STOR] free user-frame=0x1d000
+[STOR] free user-frame=0x1c000
+[STOR] free user-frame=0x1b000
+[STOR] free user-frame=0x1a000
+[STOR] free user-frame=0x19000
+[STOR] free user-frame=0x18000
+[STOR] free user-frame=0x17000
+[STOR] free user-frame=0x16000
+[STOR] free user-frame=0x15000
+[STOR] free user-frame=0x14000
+[STOR] free user-frame=0x13000
+[STOR] free user-frame=0x12000
+[STOR] free user-frame=0x11000
+[STOR] free user-frame=0x10000
+[STOR] free user-frame=0xf000
+[STOR] free user-frame=0xe000
+[STOR] free user-frame=0xd000
+[STOR] free user-frame=0xc000
+[STOR] free user-frame=0xb000
+[STOR] free user-frame=0x7000
+[STOR] free pt-frame=0xa000
+[STOR] free pt-frame=0x9000
+[STOR] free pt-frame=0x8000
+[STOR] free pt-frame=0x6000
+[STOR] dispatch-state post-teardown root=0x1f801000 gdt=true tss=true gdt-phys=0x1dcd3960 tss-phys=0x1dcd39c0
+[STOR] handoff launch current-slot=none owner-pid=none phase=UnauthorizedProbe service=20737
+[STOR] page-table-frame[0]=0x6000
+[STOR] clone-kernel-mappings src=0x1f801000 dst=0x6000
+[STOR] spawn code-frame[0]=0x8000
+[STOR] page-table-frame[1]=0x9000
+[STOR] page-table-frame[2]=0xa000
+[STOR] page-table-frame[3]=0x7000
+[STOR] spawn stack-frame[0]=0x29000
+[STOR] spawn bootstrap-frame=0x31000
+[SVC ] launch service=20737 pid=2 gen=1
+[STOR] service started pid=2 next-slot=1 next-sp=0x1dcfb270
+[STOR] post-launch current-slot=none owner-pid=none
+[STOR] dispatch-state post-launch root=0x1f801000 gdt=false tss=false gdt-phys=0x1dcd3960 tss-phys=0x1dcd39c0
+[STOR] dispatch-state post-gdt-reinit root=0x1f801000 gdt=true tss=true gdt-phys=0x1dcd3960 tss-phys=0x1dcd39c0
+[STOR] user-vector return current-slot=none owner-pid=none next-sp=0x1dcfb270
+error: command `qemu-system-x86_64 -machine q35 -m 512M -serial stdio -display none -no-reboot -no-shutdown -device isa-debug-exit,iobase=0xf4,iosize=0x04 -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd -drive if=pflash,format=raw,file=/home/runner/work/clean-slate/clean-slate/target/m5/OVMF_VARS.fd -drive format=raw,file=fat:rw:/home/runner/work/clean-slate/clean-slate/target/esp -drive if=none,format=raw,id=m5disk,file=/home/runner/work/clean-slate/clean-slate/target/m5/m5-data.img -device virtio-blk-pci,drive=m5disk,serial=clean-slate-m5-data,disable-modern=on` timed out after 20s

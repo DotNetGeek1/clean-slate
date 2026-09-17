@@ -3,9 +3,16 @@
 //! address space down. Owns `KERNEL_ROOT_FRAME`.
 
 use crate::arch::x86_64::cpu::without_write_protect;
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
+use crate::diagnostics::log::kernel_log_fmt;
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::offset_page_table_for_root;
 use crate::mm::paging::page_table_mut;
 use crate::mm::paging::page_table_ref;
@@ -125,6 +132,17 @@ impl ProcessAddressSpace {
         if self.page_table_frame_count == self.page_table_frames.len() {
             return Err("process address-space page-table tracking capacity exceeded");
         }
+        #[cfg(any(
+            feature = "m5-storage-self-test",
+            feature = "m5-persistence-self-test",
+            feature = "m5-crash-early-self-test",
+            feature = "m5-crash-late-self-test",
+            feature = "m5-crash-recovery-self-test"
+        ))]
+        kernel_log_fmt(format_args!(
+            "[STOR] page-table-frame[{}]={frame_address:#x}\n",
+            self.page_table_frame_count
+        ));
         self.page_table_frames[self.page_table_frame_count] = frame_address;
         self.page_table_frame_count += 1;
         Ok(())
@@ -242,7 +260,18 @@ fn clone_kernel_mappings_into_address_space(
     root_frame: u64,
     user_region_base: VirtAddr,
 ) -> Result<(), &'static str> {
-    let source_root = unsafe { page_table_ref(current_root_frame_address()) };
+    let source_root_frame = kernel_root_frame();
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-early-self-test",
+        feature = "m5-crash-late-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
+    kernel_log_fmt(format_args!(
+        "[STOR] clone-kernel-mappings src={source_root_frame:#x} dst={root_frame:#x}\n"
+    ));
+    let source_root = unsafe { page_table_ref(source_root_frame) };
     let destination_root = unsafe { page_table_mut(root_frame) };
     destination_root.zero();
     destination_root.clone_from(source_root);
@@ -324,6 +353,17 @@ pub(crate) fn destroy_process_address_space(
         if frame.start_address().as_u64() != mapping.frame_address {
             return Err("address-space teardown unmapped an unexpected frame");
         }
+        #[cfg(any(
+            feature = "m5-storage-self-test",
+            feature = "m5-persistence-self-test",
+            feature = "m5-crash-early-self-test",
+            feature = "m5-crash-late-self-test",
+            feature = "m5-crash-recovery-self-test"
+        ))]
+        kernel_log_fmt(format_args!(
+            "[STOR] free user-frame={:#x}\n",
+            mapping.frame_address
+        ));
         unsafe {
             free_frame(allocator, mapping.frame_address)?;
         }
@@ -332,6 +372,14 @@ pub(crate) fn destroy_process_address_space(
         .iter()
         .rev()
     {
+        #[cfg(any(
+            feature = "m5-storage-self-test",
+            feature = "m5-persistence-self-test",
+            feature = "m5-crash-early-self-test",
+            feature = "m5-crash-late-self-test",
+            feature = "m5-crash-recovery-self-test"
+        ))]
+        kernel_log_fmt(format_args!("[STOR] free pt-frame={frame_address:#x}\n"));
         unsafe {
             free_frame(allocator, *frame_address)?;
         }

@@ -190,10 +190,10 @@ const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
 ];
 const M5_PERSISTENCE_WRITE_MARKERS: [&str; 7] = [
     "[BLK ] virtio-block ready blocks=",
+    "[BLK ] flush complete",
     "[STOR] mounted generation=fresh",
     "[STOR] write object=alpha id=1 bytes=",
     "[STOR] write object=beta id=2 bytes=",
-    "[BLK ] flush complete",
     "[STOR] commit generation=1",
     "[TEST] persistence phase=write PASS",
 ];

@@ -10,6 +10,8 @@ use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::gdt::initialize_gdt_and_tss;
+use crate::arch::x86_64::gdt::userspace_dispatch_state_addresses;
+use crate::arch::x86_64::gdt::userspace_dispatch_state_status;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
@@ -17,13 +19,13 @@ use crate::diagnostics::qemu::halt_loop;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::mm::address_space::kernel_root_frame;
+use crate::mm::address_space::translate_address_in_root;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
-use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
@@ -95,6 +97,8 @@ struct M5CrashPlan {
 
 static M5_STORAGE_SELF_TEST_STATE: GlobalCell<Option<M5StorageSelfTestState>> =
     GlobalCell::new(None);
+static M5_STORAGE_BOOTSTRAP_STATE: GlobalCell<Option<M5StorageSelfTestState>> =
+    GlobalCell::new(None);
 static M5_CRASH_PLAN: GlobalCell<Option<M5CrashPlan>> = GlobalCell::new(None);
 
 pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
@@ -102,6 +106,7 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
         *id_allocator_mut() = IdAllocator::new();
         process_registry_mut().clear();
         *scheduler_mut() = Scheduler::new();
+        *M5_STORAGE_BOOTSTRAP_STATE.get() = None;
         *M5_CRASH_PLAN.get() = None;
     }
     let kernel_root = current_root_frame_address();
@@ -110,20 +115,26 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
         task_stack_top(&stacks[0])
     };
     install_service_lifecycle_syscall_allocator(allocator);
-    let controller = unsafe { service_lifecycle_controller_mut() };
-    controller.clear();
-    controller.configure_launch_context(kernel_root, kernel_stack_top);
-    controller
-        .declare_service(STORAGE_SERVICE_ID)
-        .unwrap_or_else(|message| fatal_kernel_error(message));
-    if active_self_test_mode() == M5StorageSelfTestMode::Integration {
+    let capability = {
+        let controller = unsafe { service_lifecycle_controller_mut() };
+        controller.clear();
+        controller.configure_launch_context(kernel_root, kernel_stack_top);
         controller
-            .declare_service(STORAGE_UNAUTHORIZED_SERVICE_ID)
+            .declare_service(STORAGE_SERVICE_ID)
             .unwrap_or_else(|message| fatal_kernel_error(message));
-    }
-    let capability = controller
-        .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID)
-        .unwrap_or_else(|message| fatal_kernel_error(message));
+        if active_self_test_mode() == M5StorageSelfTestMode::Integration {
+            controller
+                .declare_service(STORAGE_UNAUTHORIZED_SERVICE_ID)
+                .unwrap_or_else(|message| fatal_kernel_error(message));
+        }
+        controller
+            .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID)
+            .unwrap_or_else(|message| fatal_kernel_error(message))
+    };
+    let (gdt_state_address, tss_state_address) = userspace_dispatch_state_addresses();
+    kernel_log_fmt(format_args!(
+        "[STOR] dispatch-state addrs gdt={gdt_state_address:#x} tss={tss_state_address:#x}\n"
+    ));
     unsafe {
         *M5_STORAGE_SELF_TEST_STATE.get() = Some(M5StorageSelfTestState {
             mode: active_self_test_mode(),
@@ -146,7 +157,14 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("storage self-test allocator was missing"));
-    launch_current_phase(unsafe { service_lifecycle_controller_mut() }, allocator);
+    let initial_state = unsafe {
+        (&*M5_STORAGE_SELF_TEST_STATE.get())
+            .as_ref()
+            .copied()
+            .unwrap_or_else(|| fatal_kernel_error("m5 storage self-test state was not initialized"))
+    };
+    let controller = unsafe { service_lifecycle_controller_mut() };
+    launch_current_phase(initial_state, controller, allocator);
     let frame_pointer =
         start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
     unsafe { restore_task_context(frame_pointer) }
@@ -172,7 +190,7 @@ pub(crate) fn storage_service_bootstrap(
     service: ServiceId,
 ) -> Result<StorageServiceBootstrap, &'static str> {
     let state = unsafe {
-        (&*M5_STORAGE_SELF_TEST_STATE.get())
+        (&*M5_STORAGE_BOOTSTRAP_STATE.get())
             .as_ref()
             .ok_or("m5 storage self-test state was not initialized")?
     };
@@ -209,15 +227,27 @@ pub(crate) fn storage_service_bootstrap(
 }
 
 fn launch_current_phase(
+    state: M5StorageSelfTestState,
     controller: &mut crate::service::control::ServiceLifecycleController,
     allocator: &mut PageAllocator,
 ) {
-    let state = unsafe {
-        (&*M5_STORAGE_SELF_TEST_STATE.get())
-            .as_ref()
-            .unwrap_or_else(|| fatal_kernel_error("m5 storage self-test state was not initialized"))
-    };
-    let service = current_service(state);
+    let service = current_service(&state);
+    match current_scheduler_thread_debug() {
+        Ok((current_slot, current_owner_pid)) => kernel_log_fmt(format_args!(
+            "[STOR] handoff launch current-slot={current_slot} owner-pid={current_owner_pid} phase={:?} service={}\n",
+            state.phase, service.0
+        )),
+        Err("scheduler had no current thread") => {
+            kernel_log_fmt(format_args!(
+                "[STOR] handoff launch current-slot=none owner-pid=none phase={:?} service={}\n",
+                state.phase, service.0
+            ));
+        }
+        Err(message) => fatal_kernel_error(message),
+    }
+    unsafe {
+        *M5_STORAGE_BOOTSTRAP_STATE.get() = Some(state);
+    }
     let result = controller
         .handle_control_message(
             allocator,
@@ -230,11 +260,29 @@ fn launch_current_phase(
             .encode(),
         )
         .unwrap_or_else(|_| fatal_kernel_error("storage self-test service launch failed"));
+    unsafe {
+        *M5_STORAGE_BOOTSTRAP_STATE.get() = None;
+    }
     let pid = result
         .event
         .map(|event| event.instance.pid.0)
         .unwrap_or_else(|| fatal_kernel_error("storage service launch did not report an instance"));
-    kernel_log_fmt(format_args!("[STOR] service started pid={pid}\n"));
+    let (next_slot, next_stack_pointer) =
+        scheduler_thread_debug_for_process(pid).unwrap_or_else(|| {
+            fatal_kernel_error("storage service launch did not produce a runnable thread")
+        });
+    kernel_log_fmt(format_args!(
+        "[STOR] service started pid={pid} next-slot={next_slot} next-sp={next_stack_pointer:#x}\n"
+    ));
+    match current_scheduler_thread_debug() {
+        Ok((current_slot, current_owner_pid)) => kernel_log_fmt(format_args!(
+            "[STOR] post-launch current-slot={current_slot} owner-pid={current_owner_pid}\n"
+        )),
+        Err("scheduler had no current thread") => {
+            kernel_log_line("[STOR] post-launch current-slot=none owner-pid=none")
+        }
+        Err(message) => fatal_kernel_error(message),
+    }
 }
 
 fn current_service(state: &M5StorageSelfTestState) -> ServiceId {
@@ -260,11 +308,18 @@ pub(crate) fn handle_userspace_storage_entry() -> u64 {
     let pid = current_userspace_pid().unwrap_or_else(|message| fatal_kernel_error(message));
     let report = unsafe { &*(STORAGE_SERVICE_BOOTSTRAP_ADDRESS as *const StorageServiceBootstrap) };
     let state = unsafe {
-        (&mut *M5_STORAGE_SELF_TEST_STATE.get())
-            .as_mut()
+        (&*M5_STORAGE_SELF_TEST_STATE.get())
+            .as_ref()
+            .copied()
             .unwrap_or_else(|| fatal_kernel_error("m5 storage self-test state was not initialized"))
     };
-    let next_phase = match state.mode {
+    let (entry_slot, entry_owner_pid) =
+        current_scheduler_thread_debug().unwrap_or_else(|message| fatal_kernel_error(message));
+    kernel_log_fmt(format_args!(
+        "[STOR] user-vector entry current-slot={entry_slot} owner-pid={entry_owner_pid} phase={:?} pid={pid}\n",
+        state.phase
+    ));
+    let next_state = match state.mode {
         M5StorageSelfTestMode::Integration => handle_integration_phase(state, pid, report),
         M5StorageSelfTestMode::Persistence => {
             validate_persistence(report).unwrap_or_else(|message| fatal_kernel_error(message));
@@ -291,47 +346,74 @@ pub(crate) fn handle_userspace_storage_entry() -> u64 {
             }
             _ => fatal_kernel_error("storage service exit publication failed"),
         });
-    if let Some(phase) = next_phase {
-        state.phase = phase;
-        launch_current_phase(controller, allocator);
+    match current_scheduler_thread_debug() {
+        Ok((current_slot, current_owner_pid)) => kernel_log_fmt(format_args!(
+            "[STOR] pre-teardown current-slot={current_slot} owner-pid={current_owner_pid}\n"
+        )),
+        Err("scheduler had no current thread") => {
+            kernel_log_line("[STOR] pre-teardown current-slot=none owner-pid=none")
+        }
+        Err(message) => fatal_kernel_error(message),
     }
+    log_dispatch_state("pre-teardown");
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 0, false)
         .unwrap_or_else(|message| fatal_kernel_error(message));
-    if next_phase.is_none() {
+    log_dispatch_state("post-teardown");
+    if next_state.is_none() {
         if matches!(state.mode, M5StorageSelfTestMode::Integration) {
             kernel_log_line(M5_STORAGE_PASS_MARKER);
         }
         unsafe {
             *M5_STORAGE_SELF_TEST_STATE.get() = None;
+            *M5_STORAGE_BOOTSTRAP_STATE.get() = None;
             *M5_CRASH_PLAN.get() = None;
         }
         qemu_exit(QEMU_EXIT_SUCCESS)
     }
-    initialize_gdt_and_tss();
-    prepare_current_scheduler_thread_dispatch()
-        .unwrap_or_else(|message| fatal_kernel_error(message));
-    teardown.next_stack_pointer.unwrap_or_else(|| {
-        start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message))
-    })
+    let next_state =
+        next_state.unwrap_or_else(|| fatal_kernel_error("missing next M5 storage phase"));
+    if teardown.next_stack_pointer.is_some() {
+        fatal_kernel_error(
+            "storage self-test teardown returned an unexpected next scheduler stack",
+        );
+    }
+    unsafe {
+        *M5_STORAGE_SELF_TEST_STATE.get() = Some(next_state);
+    }
+    launch_current_phase(next_state, controller, allocator);
+    log_dispatch_state("post-launch");
+    if userspace_dispatch_state_status() != (true, true) {
+        initialize_gdt_and_tss();
+        log_dispatch_state("post-gdt-reinit");
+    }
+    let frame_pointer =
+        start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
+    kernel_log_fmt(format_args!(
+        "[STOR] user-vector return current-slot=none owner-pid=none next-sp={frame_pointer:#x}\n",
+    ));
+    frame_pointer
 }
 
 fn handle_integration_phase(
-    state: &mut M5StorageSelfTestState,
+    state: M5StorageSelfTestState,
     pid: u64,
     report: &StorageServiceBootstrap,
-) -> Option<IntegrationPhase> {
+) -> Option<M5StorageSelfTestState> {
     match state.phase {
         IntegrationPhase::InitialAuthorized => {
-            if current_service(state) != STORAGE_SERVICE_ID {
+            if current_service(&state) != STORAGE_SERVICE_ID {
                 fatal_kernel_error("expected authorized storage service phase")
             }
             validate_integration_initial(report)
                 .unwrap_or_else(|message| fatal_kernel_error(message));
-            state.previous_handle = report.capability_handle;
-            Some(IntegrationPhase::UnauthorizedProbe)
+            Some(M5StorageSelfTestState {
+                phase: IntegrationPhase::UnauthorizedProbe,
+                previous_handle: report.capability_handle,
+                ..state
+            })
         }
         IntegrationPhase::UnauthorizedProbe => {
-            if current_service(state) != STORAGE_UNAUTHORIZED_SERVICE_ID {
+            if current_service(&state) != STORAGE_UNAUTHORIZED_SERVICE_ID {
                 fatal_kernel_error("expected unauthorized probe phase")
             }
             validate_unauthorized_probe(report)
@@ -339,7 +421,10 @@ fn handle_integration_phase(
             kernel_log_fmt(format_args!(
                 "{M5_STORAGE_UNAUTHORIZED_DENIED_MARKER}{pid}\n"
             ));
-            Some(IntegrationPhase::RestartAuthorized)
+            Some(M5StorageSelfTestState {
+                phase: IntegrationPhase::RestartAuthorized,
+                ..state
+            })
         }
         IntegrationPhase::RestartAuthorized => {
             validate_integration_restart(pid, report)
@@ -347,6 +432,28 @@ fn handle_integration_phase(
             None
         }
     }
+}
+
+fn current_scheduler_thread_debug() -> Result<(usize, u64), &'static str> {
+    without_interrupts(|| unsafe { scheduler_mut().current_thread_debug() })
+}
+
+fn scheduler_thread_debug_for_process(process_id: u64) -> Option<(usize, u64)> {
+    without_interrupts(|| unsafe { scheduler_mut().thread_debug_for_process(process_id) })
+}
+
+fn log_dispatch_state(label: &str) {
+    let (gdt_ready, tss_ready) = userspace_dispatch_state_status();
+    let root_frame = current_root_frame_address();
+    let (gdt_state_address, tss_state_address) = userspace_dispatch_state_addresses();
+    let gdt_phys = translate_address_in_root(root_frame, x86_64::VirtAddr::new(gdt_state_address))
+        .unwrap_or(0);
+    let tss_phys = translate_address_in_root(root_frame, x86_64::VirtAddr::new(tss_state_address))
+        .unwrap_or(0);
+    kernel_log_fmt(format_args!(
+        "[STOR] dispatch-state {label} root={root_frame:#x} gdt={} tss={} gdt-phys={gdt_phys:#x} tss-phys={tss_phys:#x}\n",
+        gdt_ready, tss_ready
+    ));
 }
 
 pub(crate) fn observe_userspace_block_operation(operation: BlockTransportOp) {

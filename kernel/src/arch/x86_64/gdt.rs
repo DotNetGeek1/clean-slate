@@ -124,6 +124,29 @@ pub(crate) fn userspace_gdt_state() -> Result<&'static GdtState, &'static str> {
     }
 }
 
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
+    feature = "m5-crash-recovery-self-test"
+))]
+pub(crate) fn userspace_dispatch_state_status() -> (bool, bool) {
+    unsafe { ((&*GDT_STATE.get()).is_some(), (&*TSS_STATE.get()).is_some()) }
+}
+
+pub(crate) fn userspace_dispatch_state_addresses() -> (u64, u64) {
+    (
+        (&raw const GDT_STATE as *const _ as usize) as u64,
+        (&raw const TSS_STATE as *const _ as usize) as u64,
+    )
+}
+
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 pub(crate) fn userspace_selectors() -> Result<(u16, u16), &'static str> {
     Ok((USER_CODE_SELECTOR_RAW, USER_DATA_SELECTOR_RAW))
 }

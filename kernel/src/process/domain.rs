@@ -70,12 +70,15 @@ pub(crate) fn teardown_current_process(
     status: u64,
     faulted: bool,
 ) -> Result<DomainTeardownResult, &'static str> {
-    let process_id = without_interrupts(|| unsafe {
+    let teardown_context = without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
         let current_index = scheduler
             .current_thread
             .ok_or("process teardown required a current scheduler thread")?;
-        let current = scheduler.threads[current_index];
+        let current = *scheduler
+            .threads
+            .get(current_index)
+            .ok_or("scheduler current thread slot exceeded fixed scheduler capacity")?;
         if current.kind != ThreadKind::User {
             return Err("process teardown required a userspace current thread");
         }
@@ -84,7 +87,10 @@ pub(crate) fn teardown_current_process(
         let process_record = process_registry_mut()
             .get_mut(current.owner_process_id)
             .ok_or("teardown process was missing from registry")?;
-        let current_thread = &mut scheduler.threads[current_index];
+        let current_thread = scheduler
+            .threads
+            .get_mut(current_index)
+            .ok_or("scheduler current thread slot exceeded fixed scheduler capacity")?;
         let should_destroy = begin_thread_exit(process_record, current_thread, status, faulted)?;
         let retired_siblings_u16 = u16::try_from(retired_siblings)
             .map_err(|_| "retired sibling thread count overflowed process accounting")?;
@@ -98,11 +104,52 @@ pub(crate) fn teardown_current_process(
         if process_record.live_threads != 0 {
             return Err("process teardown left live threads after sibling retirement");
         }
-        Ok::<u64, &'static str>(current.owner_process_id)
+        Ok::<(u64, usize, u64), &'static str>((
+            current.owner_process_id,
+            current_index,
+            current.owner_process_id,
+        ))
     })?;
+    let process_id = teardown_context.0;
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-early-self-test",
+        feature = "m5-crash-late-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
+    let (current_slot, current_owner_pid) = (teardown_context.1, teardown_context.2);
 
     let next_stack_pointer =
         without_interrupts(|| with_scheduler(|scheduler| scheduler.finish_current_thread()))?;
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-early-self-test",
+        feature = "m5-crash-late-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
+    {
+        use crate::diagnostics::log::kernel_log_fmt;
+
+        let (next_slot, next_pid) = without_interrupts(|| unsafe {
+            Ok::<(Option<usize>, Option<u64>), &'static str>(
+                match scheduler_mut().current_thread_debug() {
+                    Ok((slot, owner_pid)) => (Some(slot), Some(owner_pid)),
+                    Err("scheduler had no current thread") => (None, None),
+                    Err(message) => return Err(message),
+                },
+            )
+        })?;
+        kernel_log_fmt(format_args!(
+            "[STOR] teardown finish current-slot={} owner-pid={} next-slot={:?} next-pid={:?} next-sp={:#x}\n",
+            current_slot,
+            current_owner_pid,
+            next_slot,
+            next_pid,
+            next_stack_pointer.unwrap_or(0),
+        ));
+    }
     let released_resources = resource_snapshot(process_id)?;
     activate_address_space_root(kernel_root_frame);
     let released_ipc: IpcProcessResources =

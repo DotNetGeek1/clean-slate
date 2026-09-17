@@ -240,6 +240,11 @@ pub(crate) fn launch_builtin_service(
             let frame_address = allocator
                 .allocate_page()
                 .ok_or("allocator could not provide a storage code page")?;
+            if page_index == 0 {
+                kernel_log_fmt(format_args!(
+                    "[STOR] spawn code-frame[0]={frame_address:#x}\n"
+                ));
+            }
             zero_page(frame_address);
             let offset = page_index * PAGE_SIZE as usize;
             let chunk_end = (offset + PAGE_SIZE as usize).min(STORAGE_USERSPACE_IMAGE.len());
@@ -270,6 +275,11 @@ pub(crate) fn launch_builtin_service(
             let stack_frame = allocator
                 .allocate_page()
                 .ok_or("allocator could not provide a storage stack page")?;
+            if stack_page == 0 {
+                kernel_log_fmt(format_args!(
+                    "[STOR] spawn stack-frame[0]={stack_frame:#x}\n"
+                ));
+            }
             zero_page(stack_frame);
             map_process_page(
                 &mut address_space,
@@ -285,6 +295,9 @@ pub(crate) fn launch_builtin_service(
         let data_frame = allocator
             .allocate_page()
             .ok_or("allocator could not provide a storage bootstrap page")?;
+        kernel_log_fmt(format_args!(
+            "[STOR] spawn bootstrap-frame={data_frame:#x}\n"
+        ));
         zero_page(data_frame);
         let bootstrap = crate::selftest::m5_storage::storage_service_bootstrap(service)?;
         unsafe {

@@ -247,6 +247,16 @@ pub(crate) fn reserve_mapping_page_tables(
         level_1_frame.start_address().as_u64(),
         PAGE_SIZE,
     ))?;
+    let level_1_table = unsafe {
+        &*((level_1_frame.start_address().as_u64() + PHYSICAL_MEMORY_OFFSET) as *const PageTable)
+    };
+    let mapped_frame = level_1_table[address.p1_index()]
+        .frame()
+        .map_err(|_| "kernel address was not backed by a valid leaf frame")?;
+    ranges.push(ReservedRange::from_base_and_size(
+        mapped_frame.start_address().as_u64(),
+        PAGE_SIZE,
+    ))?;
     Ok(())
 }
 

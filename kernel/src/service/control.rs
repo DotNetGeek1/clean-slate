@@ -266,6 +266,13 @@ impl ServiceLifecycleController {
         Ok(Some(event))
     }
 
+    #[cfg(any(
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-early-self-test",
+        feature = "m5-crash-late-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     pub(crate) fn notify_exited_live_process(
         &mut self,
         pid: u64,
@@ -424,6 +431,8 @@ impl ServiceLifecycleController {
                 feature = "m4-recovery-self-test",
                 feature = "m5-storage-self-test",
                 feature = "m5-persistence-self-test",
+                feature = "m5-crash-early-self-test",
+                feature = "m5-crash-late-self-test",
                 feature = "m5-crash-recovery-self-test"
             ))]
             {
@@ -441,6 +450,8 @@ impl ServiceLifecycleController {
                 feature = "m4-recovery-self-test",
                 feature = "m5-storage-self-test",
                 feature = "m5-persistence-self-test",
+                feature = "m5-crash-early-self-test",
+                feature = "m5-crash-late-self-test",
                 feature = "m5-crash-recovery-self-test"
             )))]
             {
