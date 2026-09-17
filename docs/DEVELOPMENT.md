@@ -249,7 +249,7 @@ For M6.8 capability convergence acceptance (constituent QEMU boot):
 cargo xtask test-m6-capabilities
 ```
 
-`test-m6-capabilities` resets the M5 data disk, builds storage and M6 fixture userspace images, and requires ordered markers across object grant/allow/deny (`missing-right`, `no-authority`), delegation (`rights=read`, `depth=1`), revocation (`revoke branch`, `stale denied`), process-control grant/allow/deny/teardown/stale, audit serial lines (`[AUD ]` allowed and denied from distinct actors), `[TEST] unrelated workload progress=`, then `[M6.8] PASS` (180s timeout). Aliases: `m6-capabilities`, `m6.8`.
+`test-m6-capabilities` resets the M5 data disk, builds storage and M6 fixture userspace images, and requires ordered markers through object, delegation, revocation, and process-control phases, then `[M6.8] PASS` once the kernel has validated auditor and intruder fixtures (serial `[AUD ]` lines are not part of the ordered marker list because fixture scheduling is concurrent; M6.7 covers audit constituent markers). Timeout: 300s. Aliases: `m6-capabilities`, `m6.8`.
 
 For the aggregate M6 milestone gate (M6.9):
 
