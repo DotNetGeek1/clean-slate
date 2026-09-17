@@ -5,7 +5,7 @@
 .DESCRIPTION
     Sets OVMF_CODE / OVMF_VARS when they are not already in the environment,
     then runs one or more `cargo xtask` acceptance tests. By default the
-    milestone gates run (test-m1, test-m2, test-m3, test-m4, test-m5); the individual
+    milestone gates run (test-m1, test-m2, test-m3, test-m4, test-m5, test-m6); the individual
     test-m3-* and test-m4-* boots are constituents of those aggregates and are skipped unless
     named explicitly or -Exhaustive is given. Pass test names (or short
     aliases) to target a subset.
@@ -21,6 +21,10 @@
       m5-persistence / reboot-persistence,
       m5-crash-recovery / crash-recovery,
       m5-disk-harness / m5-harness
+      m6 / test-m6,
+      m6-fixture-smoke, m6-object / m6.3, m6-process-control / m6.4,
+      m6-delegation / m6.5, m6-revocation / m6.6, m6-audit / m6.7,
+      m6-capabilities / m6.8
 
 .PARAMETER Exhaustive
     Run every known test (milestone gates plus each individual M3/M4
@@ -112,6 +116,7 @@ $AllTests = [ordered]@{
     "test-m5-persistence"       = @{ Aliases = @("m5-persistence", "reboot-persistence"); Description = "M5 reboot-persistence acceptance on the persistent QEMU disk"; Role = "Constituent" }
     "test-m5-crash-recovery"    = @{ Aliases = @("m5-crash-recovery", "crash-recovery"); Description = "M5 abrupt-stop crash-recovery acceptance on the persistent QEMU disk"; Role = "Constituent" }
     "test-m5-disk-harness"      = @{ Aliases = @("m5-disk-harness", "m5-harness"); Description = "M5 harness-only two-boot disk fixture validation (host sentinel)"; Role = "Constituent" }
+    "test-m6"                   = @{ Aliases = @("m6", "m6.9"); Description = "M6 milestone gate (capability host tests, fixture smoke, constituents, convergence)"; Role = "Aggregate" }
     "test-m6-fixture-smoke"     = @{ Aliases = @("m6-fixture-smoke"); Description = "M6 scripted fixture harness smoke (constituent)"; Role = "Constituent" }
     "test-m6-object"            = @{ Aliases = @("m6-object", "m6.3"); Description = "M6.3 object-capability constituent acceptance"; Role = "Constituent" }
     "test-m6-process-control"   = @{ Aliases = @("m6-process-control", "m6.4"); Description = "M6.4 process-control capability constituent acceptance"; Role = "Constituent" }

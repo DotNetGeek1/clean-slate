@@ -371,6 +371,24 @@ const M5_MILESTONE_STEPS: [M5MilestoneStep; 5] = [
         run_m5_crash_recovery_acceptance_default,
     ),
 ];
+type M6MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
+const M6_MILESTONE_STEPS: [M6MilestoneStep; 9] = [
+    (
+        "clean-slate-capability (host)",
+        run_m6_capability_crate_host_tests,
+    ),
+    (
+        "clean-slate-kernel capability (host)",
+        run_m6_kernel_capability_host_tests,
+    ),
+    ("test-m6-fixture-smoke", run_m6_fixture_smoke_acceptance),
+    ("test-m6-object", run_m6_object_acceptance),
+    ("test-m6-process-control", run_m6_process_control_acceptance),
+    ("test-m6-delegation", run_m6_delegation_acceptance),
+    ("test-m6-revocation", run_m6_revocation_acceptance),
+    ("test-m6-audit", run_m6_audit_acceptance),
+    ("test-m6-capabilities", run_m6_capabilities_acceptance),
+];
 
 fn main() -> ExitCode {
     match run(env::args_os()) {
@@ -419,6 +437,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM6Revocation => run_m6_revocation_acceptance(),
         ParsedCommand::TestM6Audit => run_m6_audit_acceptance(),
         ParsedCommand::TestM6Capabilities => run_m6_capabilities_acceptance(),
+        ParsedCommand::TestM6 => run_m6_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -837,6 +856,18 @@ fn run_m4_acceptance() -> Result<(), XtaskError> {
     Ok(())
 }
 
+fn run_cargo_package_tests(package: &str, filter: &[&str]) -> Result<(), XtaskError> {
+    let mut test = Command::new("cargo");
+    test.current_dir(workspace_root())
+        .arg("test")
+        .arg("-p")
+        .arg(package);
+    for arg in filter {
+        test.arg(arg);
+    }
+    run_command(&mut test)
+}
+
 fn run_m5_crash_matrix() -> Result<(), XtaskError> {
     let mut test = Command::new("cargo");
     test.current_dir(workspace_root())
@@ -847,6 +878,18 @@ fn run_m5_crash_matrix() -> Result<(), XtaskError> {
         .arg("crash_consistency");
     run_timed_command(&mut test, M5_CRASH_MATRIX_TIMEOUT)?;
     println!("[M5.6] PASS (host crash-consistency matrix)");
+    Ok(())
+}
+
+fn run_m6_capability_crate_host_tests() -> Result<(), XtaskError> {
+    run_cargo_package_tests("clean-slate-capability", &[])?;
+    println!("[M6.1] PASS (host capability contract tests)");
+    Ok(())
+}
+
+fn run_m6_kernel_capability_host_tests() -> Result<(), XtaskError> {
+    run_cargo_package_tests("clean-slate-kernel", &["capability"])?;
+    println!("[M6.2] PASS (host kernel capability module tests)");
     Ok(())
 }
 
@@ -972,6 +1015,20 @@ fn run_m5_acceptance() -> Result<(), XtaskError> {
         step()?;
     }
     println!("[M5  ] PASS");
+    Ok(())
+}
+
+/// M6 milestone gate: host capability prerequisites, then every M6 QEMU
+/// constituent in [`M6_MILESTONE_STEPS`] order. The first failure propagates
+/// and no PASS is printed; `[M6  ] PASS` is emitted host-side only after all
+/// steps succeed.
+fn run_m6_acceptance() -> Result<(), XtaskError> {
+    let total = M6_MILESTONE_STEPS.len();
+    for (index, (name, step)) in M6_MILESTONE_STEPS.iter().enumerate() {
+        println!("[M6  ] step {}/{} {}", index + 1, total, name);
+        step()?;
+    }
+    println!("[M6  ] PASS");
     Ok(())
 }
 
@@ -1747,6 +1804,9 @@ fn print_help() {
     println!(
         "                 Uses M1 markers only; does not assert milestone-level storage behavior"
     );
+    println!(
+        "  test-m6       M6 milestone gate: capability host tests plus fixture smoke and QEMU constituents"
+    );
     println!("  test-m6-fixture-smoke Build M6 fixture/storage images and validate harness smoke markers");
     println!(
         "  test-m6-object Build M6 object-capability constituent boot and validate ordered markers"
@@ -1807,6 +1867,7 @@ enum ParsedCommand {
     TestM6Revocation,
     TestM6Audit,
     TestM6Capabilities,
+    TestM6,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -1854,6 +1915,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m6-capabilities" || cmd == "m6-capabilities" || cmd == "m6.8" => {
             ParsedCommand::TestM6Capabilities
         }
+        Some(cmd) if cmd == "test-m6" || cmd == "m6" || cmd == "m6.9" => ParsedCommand::TestM6,
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
         Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,
@@ -2037,6 +2099,11 @@ mod tests {
             parse_command(Some("test-m5".as_ref())),
             ParsedCommand::TestM5
         );
+        assert_eq!(
+            parse_command(Some("test-m6".as_ref())),
+            ParsedCommand::TestM6
+        );
+        assert_eq!(parse_command(Some("m6.9".as_ref())), ParsedCommand::TestM6);
         assert_eq!(
             parse_command(Some("test-m5-storage".as_ref())),
             ParsedCommand::TestM5Storage
@@ -2257,6 +2324,25 @@ mod tests {
                 "test-m5-crash-matrix",
                 "test-m5-persistence",
                 "test-m5-crash-recovery",
+            ]
+        );
+    }
+
+    #[test]
+    fn m6_milestone_steps_have_deterministic_order() {
+        let names: Vec<&str> = M6_MILESTONE_STEPS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "clean-slate-capability (host)",
+                "clean-slate-kernel capability (host)",
+                "test-m6-fixture-smoke",
+                "test-m6-object",
+                "test-m6-process-control",
+                "test-m6-delegation",
+                "test-m6-revocation",
+                "test-m6-audit",
+                "test-m6-capabilities",
             ]
         );
     }

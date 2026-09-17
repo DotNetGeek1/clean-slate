@@ -251,6 +251,24 @@ cargo xtask test-m6-capabilities
 
 `test-m6-capabilities` resets the M5 data disk, builds storage and M6 fixture userspace images, and requires ordered markers across object grant/allow/deny (`missing-right`, `no-authority`), delegation (`rights=read`, `depth=1`), revocation (`revoke branch`, `stale denied`), process-control grant/allow/deny/teardown/stale, audit serial lines (`[AUD ]` allowed and denied from distinct actors), `[TEST] unrelated workload progress=`, then `[M6.8] PASS` (180s timeout). Aliases: `m6-capabilities`, `m6.8`.
 
+For the aggregate M6 milestone gate (M6.9):
+
+```bash
+cargo xtask test-m6
+```
+
+The aggregate runs host prerequisites first (`cargo test -p clean-slate-capability`, then `cargo test -p clean-slate-kernel capability`), then orchestrates QEMU constituents in order: `test-m6-fixture-smoke` (`[M6.F] PASS`), `test-m6-object` (`[M6.3] PASS`), `test-m6-process-control` (`[M6.4] PASS`), `test-m6-delegation` (`[M6.5] PASS`), `test-m6-revocation` (`[M6.6] PASS`), `test-m6-audit` (`[M6.7] PASS`), and finally `test-m6-capabilities` (`[M6.8] PASS`). Only after every step succeeds does xtask print `[M6  ] PASS`. Aliases: `m6`, `m6.9`.
+
+When a constituent fails inside the aggregate, xtask stops at the first failing step (the `[M6  ] step N/9 …` line names the phase). Re-run that constituent alone, for example `cargo xtask test-m6-revocation` or `cargo xtask test-m6-capabilities`. Serial output from the last QEMU boot is captured under `target/` as for other xtask acceptance commands (see the failure banner from `scripts/run-tests.ps1`, which points at `target/xtask-test-report.txt` when using the wrapper).
+
+Milestone regression gate (local or before a large M6 change):
+
+```bash
+.\scripts\run-tests.ps1 -Test @("m3","m4","m5","m6")
+```
+
+On Linux/WSL: `./scripts/run-tests.sh m3 m4 m5 m6`. Each name runs the corresponding aggregate only; constituents are not duplicated unless you pass `-Exhaustive` / `--exhaustive`.
+
 M4.4 health/liveness tracking (host-tested, no QEMU) exercises `ServiceHealthTracker` deadline math with explicit tick values — no real-time sleeps:
 
 ```bash
@@ -346,9 +364,9 @@ cargo xtask m5-disk-create
 cargo xtask m5-disk-reset
 ```
 
-On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, `test-m5`, which covers the milestone gates already wired into the aggregate flows without redundantly rerunning constituents. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, `test-m5-crash-recovery`, and `test-m5-disk-harness` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `m5`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, `m5-disk-harness`/`m5-harness`), for example `.\scripts\run-tests.ps1 -Test m5`; `-List` prints the available names.
+On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, `test-m5`, and `test-m6`, which covers the milestone gates already wired into the aggregate flows without redundantly rerunning constituents. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, `test-m5-crash-recovery`, `test-m5-disk-harness`, and each `test-m6-*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `m5`, `m6`/`m6.9`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, `m5-disk-harness`/`m5-harness`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, `m6-capabilities`/`m6.8`), for example `.\scripts\run-tests.ps1 -Test m6`; `-List` prints the available names.
 
-On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m5`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, and `m5-disk-harness`/`m5-harness`). OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive therefore exercises the new M5 crash/persistence constituents with the existing `qemu-system-x86` and `ovmf` package setup from `.github/workflows/pr.yml`.
+On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m6`/`m6.9`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, and `m6-capabilities`/`m6.8`). OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests including `clean-slate-capability`) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive therefore exercises every M3–M6 constituent plus all milestone aggregates with the existing `qemu-system-x86` and `ovmf` package setup from `.github/workflows/pr.yml`.
 
 To launch paused for debugger attach:
 
