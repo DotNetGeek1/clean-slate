@@ -24,9 +24,12 @@ mod state;
 mod table;
 
 pub use audit::{
-    authorize_audited, AuditEvent, AuditOutcome, AuditSink, NullAuditSink, AUDIT_EVENT_SIZE_BYTES,
+    authorize_audited, event_for, format_audit_line, AuditEvent, AuditOutcome, AuditSink,
+    NullAuditSink, AUDIT_EVENT_SIZE_BYTES,
 };
+pub use audit_log::BoundedAuditLog;
 pub use authorize::{authorize, validate_delegation};
+pub use delegation::{delegate, delegation_depth, list_holder};
 pub use error::syscall_abi;
 pub use error::CapabilityError;
 pub use handle::{CapabilityHandle, Generation, MAX_DELEGATION_DEPTH, MAX_SLOTS};
@@ -34,6 +37,9 @@ pub use holder::HolderId;
 pub use provenance::Provenance;
 pub use record::CapabilityRecord;
 pub use resource::{ResourceClass, ResourceRef};
+pub use revocation::{
+    authorize_revoke, release_revoked, revoke_holder_tree, revoke_resource_tree, revoke_subtree,
+};
 pub use rights::Rights;
 pub use state::CapabilityState;
 pub use table::CapabilityTable;

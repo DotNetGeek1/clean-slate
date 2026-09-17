@@ -11,14 +11,17 @@ use clean_slate_block::{
 };
 use clean_slate_service_fixtures::{
     BlockTransportOp, BlockTransportRequest, BlockTransportResponse, BlockTransportStatus,
-    StorageServiceBootstrap, BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES, BLOCK_TRANSPORT_REQUEST_BYTES,
-    BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION, STORAGE_BLOCK_DEVICE_ID,
+    ObjectServiceRequest, StorageServiceBootstrap, BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES,
+    BLOCK_TRANSPORT_REQUEST_BYTES, BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION,
+    OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_SERVICE_REQUEST_BYTES,
+    OBJECT_STATUS_NOT_FOUND, OBJECT_STATUS_OK, OBJECT_STATUS_STORE_ERROR, OBJECT_STATUS_TOO_LARGE,
+    OBJECT_SUBOP_SERVICE_COMPLETE, OBJECT_SUBOP_SERVICE_NEXT, STORAGE_BLOCK_DEVICE_ID,
     STORAGE_SERVICE_BOOTSTRAP_ADDRESS as BOOTSTRAP_ADDRESS, STORAGE_SERVICE_MODE_CRASH_ARM_EARLY,
     STORAGE_SERVICE_MODE_CRASH_ARM_LATE, STORAGE_SERVICE_MODE_CRASH_RECOVERY,
     STORAGE_SERVICE_MODE_INTEGRATION_INITIAL, STORAGE_SERVICE_MODE_INTEGRATION_RESTART,
-    STORAGE_SERVICE_MODE_PERSISTENCE, STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE,
-    STORAGE_SERVICE_RESULT_ERROR, STORAGE_SERVICE_RESULT_OK,
-    STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
+    STORAGE_SERVICE_MODE_OBJECT_SERVICE, STORAGE_SERVICE_MODE_PERSISTENCE,
+    STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE, STORAGE_SERVICE_RESULT_ERROR,
+    STORAGE_SERVICE_RESULT_OK, STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
 };
 use clean_slate_store::{IncompatibleFormatError, ObjectStore, StoreError};
 use core::alloc::{GlobalAlloc, Layout};
@@ -27,6 +30,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 const SYSCALL_NR_BLOCK_CAPABILITY: u64 = 6;
 const SYSCALL_NR_BLOCK_REQUEST: u64 = 7;
+const SYSCALL_NR_CAP_OBJECT: u64 = 8;
+const SYSCALL_NR_VERSION: u64 = 0;
 const SYSCALL_EACCES: u64 = u64::MAX - 12;
 const SYSCALL_ESTALE: u64 = u64::MAX - 116;
 
@@ -137,8 +142,143 @@ fn run(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> {
         STORAGE_SERVICE_MODE_CRASH_ARM_EARLY => run_crash_arm(bootstrap, 1),
         STORAGE_SERVICE_MODE_CRASH_ARM_LATE => run_crash_arm(bootstrap, 3),
         STORAGE_SERVICE_MODE_CRASH_RECOVERY => run_crash_recovery(bootstrap),
+        STORAGE_SERVICE_MODE_OBJECT_SERVICE => run_object_service(bootstrap),
         _ => Err(0),
     }
+}
+
+fn run_object_service(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> {
+    let role_handle = bootstrap.object_role_handle;
+    if role_handle == 0 {
+        return Err(0);
+    }
+    let mut store = match ObjectStore::mount(SyscallBlockDevice::attach(bootstrap)?) {
+        Ok(store) => store,
+        Err(StoreError::Incompatible(IncompatibleFormatError::BadMagic)) => {
+            ObjectStore::format(SyscallBlockDevice::attach(bootstrap)?).map_err(store_error_code)?
+        }
+        Err(error) => return Err(store_error_code(error)),
+    };
+    bootstrap.mounted_generation = store.committed_generation();
+    let mut request_buf = [0u8; OBJECT_SERVICE_REQUEST_BYTES];
+    loop {
+        let found = object_service_next(role_handle, &mut request_buf)?;
+        if found == 0 {
+            let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
+            continue;
+        }
+        let request = ObjectServiceRequest::decode(&request_buf).map_err(|_| 0u64)?;
+        let len = usize::try_from(request.len).map_err(|_| 0u64)?;
+        if len > OBJECT_MAX_PAYLOAD_BYTES {
+            object_service_complete(
+                role_handle,
+                request.request_id,
+                OBJECT_STATUS_TOO_LARGE,
+                &[],
+            )?;
+            continue;
+        }
+        let status = match request.op {
+            OBJECT_OP_READ => match store.read_object_by_id(request.object_id) {
+                Ok(bytes) => {
+                    let payload = bytes.as_slice();
+                    if payload.len() > OBJECT_MAX_PAYLOAD_BYTES {
+                        OBJECT_STATUS_TOO_LARGE
+                    } else {
+                        object_service_complete(
+                            role_handle,
+                            request.request_id,
+                            OBJECT_STATUS_OK,
+                            payload,
+                        )?;
+                        continue;
+                    }
+                }
+                Err(StoreError::NotFound) => OBJECT_STATUS_NOT_FOUND,
+                Err(_) => OBJECT_STATUS_STORE_ERROR,
+            },
+            OBJECT_OP_WRITE => {
+                if len > OBJECT_MAX_PAYLOAD_BYTES {
+                    OBJECT_STATUS_TOO_LARGE
+                } else {
+                    match store.write_object(request.object_id, "object", &request.payload[..len]) {
+                        Ok(()) => match store.commit() {
+                            Ok(()) => OBJECT_STATUS_OK,
+                            Err(_) => OBJECT_STATUS_STORE_ERROR,
+                        },
+                        Err(StoreError::NotFound) => OBJECT_STATUS_NOT_FOUND,
+                        Err(_) => OBJECT_STATUS_STORE_ERROR,
+                    }
+                }
+            }
+            _ => OBJECT_STATUS_STORE_ERROR,
+        };
+        object_service_complete(role_handle, request.request_id, status, &[])?;
+    }
+}
+
+fn object_service_next(role_handle: u64, buffer: &mut [u8]) -> Result<u64, u64> {
+    if buffer.len() < OBJECT_SERVICE_REQUEST_BYTES {
+        return Err(0);
+    }
+    let result = raw_syscall(
+        SYSCALL_NR_CAP_OBJECT,
+        [
+            OBJECT_SUBOP_SERVICE_NEXT,
+            role_handle,
+            buffer.as_ptr() as u64,
+            0,
+            0,
+            0,
+        ],
+    );
+    if result >= u64::MAX - 4095 {
+        return Err(result);
+    }
+    Ok(result)
+}
+
+fn object_service_complete(
+    role_handle: u64,
+    request_id: u64,
+    status: u64,
+    payload: &[u8],
+) -> Result<(), u64> {
+    let len = payload.len();
+    let result = raw_syscall(
+        SYSCALL_NR_CAP_OBJECT,
+        [
+            OBJECT_SUBOP_SERVICE_COMPLETE,
+            role_handle,
+            request_id,
+            status,
+            payload.as_ptr() as u64,
+            len as u64,
+        ],
+    );
+    if result >= u64::MAX - 4095 {
+        return Err(result);
+    }
+    Ok(())
+}
+
+fn raw_syscall(nr: u64, args: [u64; 6]) -> u64 {
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") nr,
+            in("rdi") args[0],
+            in("rsi") args[1],
+            in("rdx") args[2],
+            in("r10") args[3],
+            in("r8") args[4],
+            in("r9") args[5],
+            lateout("rax") result,
+            options(nostack),
+        );
+    }
+    result
 }
 
 fn run_unauthorized_probe() -> Result<u64, u64> {

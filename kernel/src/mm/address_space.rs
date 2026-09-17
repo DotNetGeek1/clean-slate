@@ -35,7 +35,14 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 ))]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
 #[cfg(not(any(
@@ -45,7 +52,14 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 )))]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
 #[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
@@ -57,7 +71,14 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 ))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 80;
 #[cfg(not(any(
@@ -67,7 +88,14 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 80;
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 )))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 

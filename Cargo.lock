@@ -68,6 +68,7 @@ name = "clean-slate-supervisor"
 version = "0.0.1"
 dependencies = [
  "clean-slate-capability",
+ "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
 ]
 

@@ -97,6 +97,10 @@ pub(crate) fn register_bootstrap_grant(
     unsafe { &mut *BOOTSTRAP_GRANTS.get() }.register(holder, handle)
 }
 
+pub(crate) fn claim_bootstrap_grant(holder: HolderId) -> Option<CapabilityHandle> {
+    unsafe { &mut *BOOTSTRAP_GRANTS.get() }.claim(holder)
+}
+
 /// Drops unclaimed grants for an exiting holder so a later PID cannot inherit them.
 /// (PIDs are never reused, so this is defensive tidiness rather than a security boundary.)
 pub(crate) fn discard_bootstrap_grants_for_holder(holder: HolderId) -> usize {

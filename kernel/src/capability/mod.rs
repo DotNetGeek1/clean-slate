@@ -11,13 +11,42 @@ pub(crate) mod object;
 pub(crate) mod process_control;
 pub(crate) mod revocation;
 
+use core::fmt::{self, Write};
+
 use clean_slate_capability::{
-    CapabilityError, CapabilityHandle, CapabilityRecord, CapabilityTable, HolderId, Provenance,
-    ResourceClass, ResourceRef, Rights, MAX_SLOTS,
+    release_revoked, revoke_holder_tree, revoke_resource_tree, CapabilityError, CapabilityHandle,
+    CapabilityRecord, CapabilityTable, HolderId, Provenance, ResourceClass, ResourceRef, Rights,
+    MAX_SLOTS,
 };
 
 use crate::process::current_process_id;
 use crate::sync::global_cell::GlobalCell;
+
+/// Scratch buffer for formatting `Rights` name lists into serial logs.
+pub(super) struct RightsNameBuf {
+    bytes: [u8; 64],
+    len: usize,
+}
+
+impl RightsNameBuf {
+    pub(super) fn format_rights(&mut self, rights: Rights) {
+        self.bytes = [0; 64];
+        self.len = 0;
+        let _ = rights.write_names(self);
+    }
+}
+
+impl Write for RightsNameBuf {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let bytes = s.as_bytes();
+        if self.len + bytes.len() > self.bytes.len() {
+            return Err(fmt::Error);
+        }
+        self.bytes[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+        Ok(())
+    }
+}
 
 static CAPABILITY_SPACE: GlobalCell<CapabilityTable<MAX_SLOTS>> =
     GlobalCell::new(CapabilityTable::new());
@@ -68,8 +97,28 @@ pub(crate) fn authorize_current(
     resource: ResourceRef,
     required: Rights,
 ) -> Result<CapabilityRecord, CapabilityError> {
-    let holder = current_holder().map_err(|_| CapabilityError::UnauthorizedHolder)?;
-    with_capability_space(|table| authorize_decoded(table, holder, raw_handle, resource, required))
+    let holder = match current_holder() {
+        Ok(holder) => holder,
+        // No trusted actor — skip audit (nothing to attribute).
+        Err(_) => return Err(CapabilityError::UnauthorizedHolder),
+    };
+    let handle = CapabilityHandle::decode(raw_handle).unwrap_or(CapabilityHandle::INVALID);
+    let result = with_capability_space(|table| {
+        authorize_decoded(table, holder, raw_handle, resource, required)
+    });
+    let (audit_resource, depth) = match &result {
+        Ok(record) => (record.resource, record.provenance.depth),
+        Err(_) => (resource, 0),
+    };
+    audit::record_decision(
+        holder,
+        audit_resource,
+        required,
+        handle,
+        depth,
+        result.map(|_| ()),
+    );
+    result
 }
 
 /// Authorizes a handle against its record resource class and the current holder.
@@ -79,10 +128,34 @@ pub(crate) fn authorize_current_class(
     class: ResourceClass,
     required: Rights,
 ) -> Result<CapabilityRecord, CapabilityError> {
-    let holder = current_holder().map_err(|_| CapabilityError::UnauthorizedHolder)?;
-    with_capability_space(|table| {
+    let holder = match current_holder() {
+        Ok(holder) => holder,
+        Err(_) => return Err(CapabilityError::UnauthorizedHolder),
+    };
+    let handle = CapabilityHandle::decode(raw_handle).unwrap_or(CapabilityHandle::INVALID);
+    let result = with_capability_space(|table| {
         authorize_decoded_class(table, holder, raw_handle, class, required)
-    })
+    });
+    let (audit_resource, depth) = match &result {
+        Ok(record) => (record.resource, record.provenance.depth),
+        Err(_) => (
+            ResourceRef {
+                class,
+                id: 0,
+                instance_generation: 0,
+            },
+            0,
+        ),
+    };
+    audit::record_decision(
+        holder,
+        audit_resource,
+        required,
+        handle,
+        depth,
+        result.map(|_| ()),
+    );
+    result
 }
 
 /// Installs a kernel root grant into the global capability table.
@@ -92,20 +165,37 @@ pub(crate) fn grant_root(
     resource: ResourceRef,
     rights: Rights,
 ) -> Result<CapabilityHandle, CapabilityError> {
-    unsafe { capability_space_mut() }.grant(holder, resource, rights, Provenance::root(holder))
+    let table = unsafe { capability_space_mut() };
+    let provenance = Provenance::root(holder);
+    match table.grant(holder, resource, rights, provenance) {
+        Ok(handle) => Ok(handle),
+        Err(CapabilityError::CapacityExhausted) => {
+            let _ = release_revoked(table);
+            table.grant(holder, resource, rights, provenance)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn revoke_for_holder(holder: HolderId) -> usize {
-    unsafe { capability_space_mut() }.revoke_holder(holder)
+    revoke_holder_tree(unsafe { capability_space_mut() }, holder)
 }
 
 #[allow(dead_code)] // M6 adapters revoke exact ResourceRef (M6.3+).
 pub(crate) fn revoke_for_resource(resource: ResourceRef) -> usize {
-    unsafe { capability_space_mut() }.revoke_resource(resource)
+    revoke_resource_tree(
+        unsafe { capability_space_mut() },
+        resource.class,
+        resource.id,
+    )
 }
 
 pub(crate) fn revoke_for_process_resource(process_id: u64) -> usize {
-    unsafe { capability_space_mut() }.revoke_resource_id(ResourceClass::ProcessControl, process_id)
+    revoke_resource_tree(
+        unsafe { capability_space_mut() },
+        ResourceClass::ProcessControl,
+        process_id,
+    )
 }
 
 #[cfg(test)]

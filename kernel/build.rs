@@ -8,6 +8,13 @@ const R_X86_64_RELATIVE: u32 = 8;
 const USERSPACE_IMAGE_LOAD_BASE: u64 = 0x0000_4000_0000_0000;
 
 fn main() {
+    let m6_self_test = env::var("CARGO_FEATURE_M6_OBJECT_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M6_PROCESS_CONTROL_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M6_DELEGATION_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M6_REVOCATION_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M6_AUDIT_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M6_CAPABILITIES_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M6_FIXTURE_SMOKE_SELF_TEST").is_ok();
     if env::var("CARGO_FEATURE_M4_SUPERVISOR_SELF_TEST").is_ok() {
         embed_userspace_image(
             "supervisor_userspace.bin",
@@ -27,10 +34,18 @@ fn main() {
         || env::var("CARGO_FEATURE_M5_CRASH_EARLY_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M5_CRASH_LATE_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M5_CRASH_RECOVERY_SELF_TEST").is_ok()
+        || m6_self_test
     {
         embed_userspace_image(
             "storage_userspace.bin",
             "clean-slate-storage-userspace",
+            true,
+        );
+    }
+    if m6_self_test {
+        embed_userspace_image(
+            "m6_fixture_userspace.bin",
+            "clean-slate-m6-fixture-userspace",
             true,
         );
     }
@@ -80,6 +95,10 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
             "storage_userspace.bin" => (
                 "storage_userspace_entry.rs",
                 "STORAGE_USERSPACE_ENTRY_OFFSET",
+            ),
+            "m6_fixture_userspace.bin" => (
+                "m6_fixture_userspace_entry.rs",
+                "M6_FIXTURE_USERSPACE_ENTRY_OFFSET",
             ),
             _ => panic!("unexpected userspace image {raw_name}"),
         };

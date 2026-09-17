@@ -7,6 +7,7 @@ pub const STORAGE_SERVICE_MODE_PERSISTENCE: u64 = 4;
 pub const STORAGE_SERVICE_MODE_CRASH_ARM_EARLY: u64 = 5;
 pub const STORAGE_SERVICE_MODE_CRASH_ARM_LATE: u64 = 6;
 pub const STORAGE_SERVICE_MODE_CRASH_RECOVERY: u64 = 7;
+pub const STORAGE_SERVICE_MODE_OBJECT_SERVICE: u64 = 8;
 
 pub const STORAGE_SERVICE_RESULT_PENDING: u64 = 0;
 pub const STORAGE_SERVICE_RESULT_OK: u64 = 1;
@@ -28,6 +29,7 @@ pub struct StorageServiceBootstrap {
     pub alpha_checksum: u64,
     pub beta_len: u64,
     pub beta_checksum: u64,
+    pub object_role_handle: u64,
 }
 
 impl StorageServiceBootstrap {
@@ -45,6 +47,7 @@ impl StorageServiceBootstrap {
             alpha_checksum: 0,
             beta_len: 0,
             beta_checksum: 0,
+            object_role_handle: 0,
         }
     }
 }

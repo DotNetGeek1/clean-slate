@@ -112,6 +112,12 @@ $AllTests = [ordered]@{
     "test-m5-persistence"       = @{ Aliases = @("m5-persistence", "reboot-persistence"); Description = "M5 reboot-persistence acceptance on the persistent QEMU disk"; Role = "Constituent" }
     "test-m5-crash-recovery"    = @{ Aliases = @("m5-crash-recovery", "crash-recovery"); Description = "M5 abrupt-stop crash-recovery acceptance on the persistent QEMU disk"; Role = "Constituent" }
     "test-m5-disk-harness"      = @{ Aliases = @("m5-disk-harness", "m5-harness"); Description = "M5 harness-only two-boot disk fixture validation (host sentinel)"; Role = "Constituent" }
+    "test-m6-fixture-smoke"     = @{ Aliases = @("m6-fixture-smoke"); Description = "M6 scripted fixture harness smoke (constituent)"; Role = "Constituent" }
+    "test-m6-object"            = @{ Aliases = @("m6-object", "m6.3"); Description = "M6.3 object-capability constituent acceptance"; Role = "Constituent" }
+    "test-m6-process-control"   = @{ Aliases = @("m6-process-control", "m6.4"); Description = "M6.4 process-control capability constituent acceptance"; Role = "Constituent" }
+    "test-m6-delegation"        = @{ Aliases = @("m6-delegation", "m6.5"); Description = "M6.5 capability delegation and attenuation constituent acceptance"; Role = "Constituent" }
+    "test-m6-revocation"        = @{ Aliases = @("m6-revocation", "m6.6"); Description = "M6.6 capability revocation and teardown constituent acceptance"; Role = "Constituent" }
+    "test-m6-audit"             = @{ Aliases = @("m6-audit", "m6.7"); Description = "M6.7 capability audit events constituent acceptance"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {

@@ -55,6 +55,10 @@ pub(crate) fn program_local_apic_timer() {
     local_apic_write(APIC_REGISTER_INITIAL_COUNT, APIC_TIMER_INITIAL_COUNT);
 }
 
+pub(crate) fn reprogram_local_apic_timer(initial_count: u32) {
+    local_apic_write(APIC_REGISTER_INITIAL_COUNT, initial_count);
+}
+
 pub(crate) fn acknowledge_timer_interrupt() {
     local_apic_write(APIC_REGISTER_EOI, 0);
 }

@@ -89,6 +89,7 @@ struct UserspaceAddressSpaceTestPage {
 }
 
 #[cfg(feature = "m3-address-space-self-test")]
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UserspaceAddressSpaceStage {
     AwaitProcessOneEntry,

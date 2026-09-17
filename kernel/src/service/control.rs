@@ -271,7 +271,14 @@ impl ServiceLifecycleController {
         feature = "m5-persistence-self-test",
         feature = "m5-crash-early-self-test",
         feature = "m5-crash-late-self-test",
-        feature = "m5-crash-recovery-self-test"
+        feature = "m5-crash-recovery-self-test",
+        feature = "m6-object-self-test",
+        feature = "m6-process-control-self-test",
+        feature = "m6-delegation-self-test",
+        feature = "m6-revocation-self-test",
+        feature = "m6-audit-self-test",
+        feature = "m6-capabilities-self-test",
+        feature = "m6-fixture-smoke-self-test"
     ))]
     pub(crate) fn notify_exited_live_process(
         &mut self,

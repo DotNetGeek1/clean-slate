@@ -360,13 +360,27 @@ M6.1 defines the shared capability contract in workspace crate `clean-slate-capa
 - Revocation is **idempotent**; repeating revoke on an already-revoked slot is a no-op aside from audit.
 - A revoked slot keeps its generation, holder, resource, and provenance (rights are cleared) until it is **released**, so the original handle deterministically reports `Revoked` and revocation code can still walk descendants. Releasing the slot back to `Empty` **bumps the generation**, so previously issued handles report `StaleHandle` even if the slot is later reused for a different resource (`Retired` slots, whose generation is exhausted, are never reused).
 
+### M6.6 revocation and teardown
+
+Implementation lives in `capability/src/revocation.rs` (generic graph) and `kernel/src/capability/revocation.rs` (syscall). The kernel teardown hooks (`revoke_for_holder`, `revoke_for_process_resource`, `revoke_for_resource`) call `revoke_holder_tree` / `revoke_resource_tree`, which revoke matching capabilities **and their delegation subtrees**, then **release** slots held by the exiting holder or destroyed resource so capacity is reclaimed. Descendant capabilities delegated to *other* holders are revoked but **not** released until those holders observe `Revoked` or a later lazy reclaim.
+
+**Subtree algorithm:** bounded iterative closure over live slots (no recursion, no allocation): seed the target slot, repeatedly add live slots whose `provenance.parent` equals the handle of a slot already in the set (up to `MAX_DELEGATION_DEPTH` passes), then `revoke_slot` each member. Already-revoked members contribute count 0 (idempotent).
+
+**Revoke-then-lazy-release:** `revoke_subtree` only marks slots `Revoked`; `release_revoked` returns them to `Empty` and bumps generation. `grant_root` calls `release_revoked` once on `CapacityExhausted` and retries so stale holders still see `Revoked` until the kernel needs the slot.
+
+**Who may revoke:** the holder of the target capability, or any holder of an ancestor capability (walk `provenance.parent` via `authorize_revoke`). Userspace uses `SYSCALL_NR_CAP_REVOKE` op `REVOKE` (subtree revoke); unauthorized attempts log `[CAP ] revoke denied`.
+
+**PROBE:** `SYSCALL_NR_CAP_REVOKE` op `PROBE` runs the same `authorize_current_class` path as production operations (handle → record class → rights check). Used by fixtures and audit tests as a generic authority probe.
+
+**Deferred:** distributed/persistent revocation (revocation lists surviving reboot), and rollback of mistaken revokes.
+
 ### Module ownership (M6.2–M6.7)
 
 | Milestone | Owner |
 |-----------|--------|
 | M6.2 | Production capability table in `kernel/src/capability/` |
 | M6.3 | Persistent-object adapter (`service-fixtures` / `store` userspace) |
-| M6.4 | Process-control adapter in `kernel/src/process/` |
+| M6.4 | Process-control adapter in `kernel/src/capability/process_control.rs` |
 | M6.5 | Delegation protocol |
 | M6.6 | Revocation graph |
 | M6.7 | Audit sink |
@@ -379,6 +393,22 @@ M6.1 defines the shared capability contract in workspace crate `clean-slate-capa
 - **Legacy lifecycle-control and block-device capabilities:** `kernel/src/service/capability.rs` — service-spawn grants for supervisor fixtures; kept until M6.8.
 
 No new semantics were added to the legacy paths in M6.2; they remain bounded debt tracked for **M6.8** (unified table + adapter cutover).
+
+### M6.5 delegation and attenuation
+
+Delegation creates a new capability record for a target holder with a **subset** of the parent’s rights. The kernel path is: resolve the parent record, [`validate_delegation`](../../capability/src/authorize.rs) (parent must hold `DELEGATE`; no widening; class-valid bits only), [`Provenance::child_of`](../../capability/src/provenance.rs) (bounded depth, parent handle stored for M6.6 subtree revocation), then a single transactional [`CapabilityTable::install`](../../capability/src/table.rs). The delegator is always the trusted current holder; target PIDs are validated against the live process registry. **Transfer to the recipient** uses the same bounded bootstrap-grant table as root grants: after a successful `SYSCALL_NR_CAP_DELEGATE`, the kernel registers the new handle for `SYSCALL_NR_CAP_GRANT` claim by the target. Rights never widen; depth is capped at `MAX_DELEGATION_DEPTH` (4 hops below root). Deferred: user-facing sharing UI, cross-machine delegation, and persistent capability state across reboot.
+
+### M6.3 persistent object capability surface
+
+Persistent **object identity** (numeric object id) is separate from **authority** (a `PersistentObject` capability naming that id with a rights subset). Client processes never receive raw block-device authority; they submit bounded read/write requests through `SYSCALL_NR_CAP_OBJECT` while the kernel authorizes the caller’s capability against the requested object id, copies payloads into a fixed-depth request queue, and exposes a **service-role** capability (`ResourceRef::object(OBJECT_SERVICE_ROLE_ID)` with `INSPECT`) only to the userspace storage service. That service dequeues work, performs `ObjectStore` operations over the existing block-capability path, and completes requests back through the same syscall. Storage-service **restart** issues a new holder PID and a fresh role grant; stale role handles from a prior instance do not authorize. Explicitly deferred: paths/VFS, directories, POSIX permissions, mmap, and persistent process capabilities.
+
+### M6.7 capability audit events
+
+Authorization decisions emit fixed **64-byte** `AuditEvent` records (`sequence`, trusted `actor` holder id, resource class/id, requested rights, wire handle, `AuditOutcome`, delegation `depth`). **No payloads or secrets** are stored. The bounded kernel ring (`BoundedAuditLog<N>`) is the **sole authority for `sequence`** (starts at 1); on overflow the **oldest** event is dropped and a `dropped` counter increments — authorization outcomes are unaffected. Events are recorded from the shared `authorize_current` / `authorize_current_class` hooks so object/process/delegation lanes do not duplicate emission. **Reading** the log requires an `Audit` class capability (`Rights::AUDIT_READ`) via `SYSCALL_NR_CAP_AUDIT_READ` (12); unauthorized reads are denied and audited like any other authorization. Optional serial echo formats lines as `[AUD ] seq=… actor=… class=… resource=… op=… outcome=… depth=…` for self-tests. Deferred: durable persistence, repair-engine (M18) correlation, and operator viewer UI.
+
+### M6.4 process/domain control capabilities
+
+**Process-control** capabilities (`ResourceClass::ProcessControl`, `ResourceRef::process(pid, instance_generation)`) authorize bounded supervision of another live process: `OBSERVE` fills a fixed 32-byte `ProcessObservation` (pid, generation, coarse state, thread count — no memory or register access); `TERMINATE` drives the same **`teardown_process_by_id`** path M4 lifecycle **Terminate** uses (external force-exit, domain resource release, capability revocation for the target). Authorization always uses the **trusted current holder** from scheduler context, never a syscall-supplied PID; the target pid and optional **instance generation** come only from the capability record and must match a **live registry entry** (and generation when nonzero). Missing rights, wrong holder, and invalid handles map to the shared `CapabilityError` syscall statuses; stale targets return `SYSCALL_ESTALE`. Self-terminate is rejected. `ResourceRef.instance_generation` is currently **0** for all processes because PIDs are not reused within a boot (registry liveness lookup already makes stale targets deterministic via `ESTALE`); wiring service `InstanceGeneration` into the lookup is deferred to M6.8/M7. Trusted launch policy registers grants through `grant_process_control` plus the bootstrap-claim table (`SYSCALL_NR_CAP_GRANT`). PIDs are never reused, so caps for torn-down processes go stale without explicit revoke on every syscall. Deferred: signals, debugger attach, and scheduler policy overrides.
 
 ## Language strategy
 

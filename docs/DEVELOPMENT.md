@@ -194,6 +194,55 @@ cargo xtask test-m5-storage
 
 `test-m5-storage` now resets the M5 data disk to blank media for each run, then requires capability-gated userspace storage handshake plus store format/write/commit/remount/overwrite and malformed-media rejection markers before `[M5.7] PASS`. The storage path keeps the transport-neutral block contract while preserving explicit unauthorized denial for unrelated userspace callers.
 
+For M6.3 object-capability acceptance (constituent QEMU boot):
+
+```bash
+cargo test -p clean-slate-service-fixtures object_capability
+cargo test -p clean-slate-kernel capability::object
+cargo xtask test-m6-object
+```
+
+`test-m6-object` resets the M5 data disk, builds storage and M6 fixture userspace images, and requires ordered `[CAP ] object grant`, `[CAP ] object allowed`, `[CAP ] deny` (`missing-right` and `no-authority`), then `[M6.3] PASS` (90s timeout). Aliases: `m6-object`, `m6.3`.
+
+For M6.4 process-control acceptance (constituent QEMU boot):
+
+```bash
+cargo test -p clean-slate-kernel capability::process_control
+cargo xtask test-m6-process-control
+```
+
+`test-m6-process-control` builds the M6 fixture userspace image and requires ordered `[CAP ] process-control grant`, allowed/denied decisions (`missing-right`, `op=observe`, `op=terminate`), production `[PROC] teardown pid=`, post-teardown `stale-target`, then `[M6.4] PASS` (90s timeout). Aliases: `m6-process-control`, `m6.4`.
+
+For M6.5 delegation/attenuation acceptance (constituent QEMU boot):
+
+```bash
+cargo test -p clean-slate-capability delegation
+cargo test -p clean-slate-kernel capability::delegation
+cargo xtask test-m6-delegation
+```
+
+`test-m6-delegation` builds the M6 fixture userspace image and requires ordered `[CAP ] delegate denied` (`rights-widening`), successful `[CAP ] delegate` (`rights=read`, `depth=1`), reader re-delegate denied (`missing-right`), then `[M6.5] PASS` (90s timeout). Aliases: `m6-delegation`, `m6.5`.
+
+For M6.6 revocation and teardown acceptance (constituent QEMU boot):
+
+```bash
+cargo test -p clean-slate-capability revocation
+cargo test -p clean-slate-kernel capability
+cargo xtask test-m6-revocation
+```
+
+`test-m6-revocation` builds the M6 fixture userspace image and requires ordered `[CAP ] probe allowed holder=`, `[CAP ] revoke branch=`, `[CAP ] stale denied holder=`, `[CAP ] revoke denied actor=`, `[PROC] teardown pid=`, `[TEST] unrelated workload progress=`, then `[M6.6] PASS` (120s timeout). Aliases: `m6-revocation`, `m6.6`.
+
+For M6.7 capability audit acceptance (constituent QEMU boot):
+
+```bash
+cargo test -p clean-slate-capability audit_log
+cargo test -p clean-slate-kernel capability
+cargo xtask test-m6-audit
+```
+
+`test-m6-audit` builds the M6 fixture userspace image and requires ordered `[AUD ] seq=` … `outcome=allowed`, `[AUD ] seq=` … `outcome=` (a denial such as `invalid-handle` or `wrong-holder`), then `[M6.7] PASS` (90s timeout). Aliases: `m6-audit`, `m6.7`.
+
 M4.4 health/liveness tracking (host-tested, no QEMU) exercises `ServiceHealthTracker` deadline math with explicit tick values — no real-time sleeps:
 
 ```bash

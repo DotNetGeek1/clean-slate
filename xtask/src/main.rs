@@ -26,6 +26,12 @@ const M4_CRASH_SERVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M4_SUPERVISOR_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_RECOVERY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M5_STORAGE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M6_FIXTURE_SMOKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
+const M6_OBJECT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
+const M6_PROCESS_CONTROL_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
+const M6_DELEGATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
+const M6_REVOCATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
+const M6_AUDIT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M5_CRASH_MATRIX_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_PERSISTENCE_BOOT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -180,6 +186,63 @@ const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 16] = [
     "[STOR] malformed media rejected",
     "[M5.7] PASS",
 ];
+const M6_OBJECT_ACCEPTANCE_MARKERS: [&str; 7] = [
+    "[CAP ] object grant holder=",
+    "[CAP ] object allowed holder=",
+    "[CAP ] deny holder=",
+    "reason=missing-right",
+    "[CAP ] deny holder=",
+    "reason=no-authority",
+    "[M6.3] PASS",
+];
+const M6_DELEGATION_ACCEPTANCE_MARKERS: [&str; 8] = [
+    "[CAP ] delegate denied from=",
+    "reason=rights-widening",
+    "[CAP ] delegate from=",
+    "rights=read",
+    "depth=1",
+    "[CAP ] delegate denied from=",
+    "reason=missing-right",
+    "[M6.5] PASS",
+];
+const M6_AUDIT_ACCEPTANCE_MARKERS: [&str; 5] = [
+    "[AUD ] seq=",
+    "outcome=allowed",
+    "[AUD ] seq=",
+    "outcome=",
+    "[M6.7] PASS",
+];
+const M6_REVOCATION_ACCEPTANCE_MARKERS: [&str; 7] = [
+    "[CAP ] probe allowed holder=",
+    "[CAP ] revoke branch=",
+    "[CAP ] stale denied holder=",
+    "[CAP ] revoke denied actor=",
+    "[PROC] teardown pid=",
+    "[TEST] unrelated workload progress=",
+    "[M6.6] PASS",
+];
+const M6_PROCESS_CONTROL_ACCEPTANCE_MARKERS: [&str; 11] = [
+    "[CAP ] process-control grant holder=",
+    "[CAP ] process-control allowed holder=",
+    "op=observe",
+    "[CAP ] process-control denied holder=",
+    "reason=missing-right",
+    "[CAP ] process-control allowed holder=",
+    "op=terminate",
+    "[PROC] teardown pid=",
+    "[CAP ] process-control denied holder=",
+    "reason=stale",
+    "[M6.4] PASS",
+];
+const M6_FIXTURE_SMOKE_ACCEPTANCE_MARKERS: [&str; 7] = [
+    "[M6.F] fixture spawned pid=",
+    "[M6.F] fixture spawned pid=",
+    "[M6.F] fixture spawned pid=",
+    "[M6.F] report pid=",
+    "[M6.F] report pid=",
+    "[PROC] fault pid=",
+    "[M6.F] PASS",
+];
 const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[VIRT] block device found",
     "[BLK ] virtio-block ready blocks=",
@@ -315,6 +378,12 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM5Persistence => run_m5_persistence_acceptance(&trailing_args),
         ParsedCommand::TestM5CrashRecovery => run_m5_crash_recovery_acceptance(&trailing_args),
         ParsedCommand::TestM5DiskHarness => run_m5_disk_harness(&trailing_args),
+        ParsedCommand::TestM6FixtureSmoke => run_m6_fixture_smoke_acceptance(),
+        ParsedCommand::TestM6Object => run_m6_object_acceptance(),
+        ParsedCommand::TestM6ProcessControl => run_m6_process_control_acceptance(),
+        ParsedCommand::TestM6Delegation => run_m6_delegation_acceptance(),
+        ParsedCommand::TestM6Revocation => run_m6_revocation_acceptance(),
+        ParsedCommand::TestM6Audit => run_m6_audit_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -759,6 +828,90 @@ fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
         )),
         m5_storage_vm_config(),
     )
+}
+
+fn run_m6_fixture_smoke_acceptance() -> Result<(), XtaskError> {
+    run_m6_constituent(
+        "m6-fixture-smoke-self-test",
+        &M6_FIXTURE_SMOKE_ACCEPTANCE_MARKERS,
+        M6_FIXTURE_SMOKE_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+fn run_m6_object_acceptance() -> Result<(), XtaskError> {
+    reset_m5_data_disk_image()?;
+    build_m6_fixture_userspace(true)?;
+    build_storage_userspace(true)?;
+    run_vm_inner_with_config(
+        false,
+        false,
+        &["m6-object-self-test"],
+        Some((&M6_OBJECT_ACCEPTANCE_MARKERS, M6_OBJECT_ACCEPTANCE_TIMEOUT)),
+        m5_storage_vm_config(),
+    )
+}
+
+fn run_m6_process_control_acceptance() -> Result<(), XtaskError> {
+    run_m6_constituent(
+        "m6-process-control-self-test",
+        &M6_PROCESS_CONTROL_ACCEPTANCE_MARKERS,
+        M6_PROCESS_CONTROL_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+fn run_m6_delegation_acceptance() -> Result<(), XtaskError> {
+    run_m6_constituent(
+        "m6-delegation-self-test",
+        &M6_DELEGATION_ACCEPTANCE_MARKERS,
+        M6_DELEGATION_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+fn run_m6_revocation_acceptance() -> Result<(), XtaskError> {
+    run_m6_constituent(
+        "m6-revocation-self-test",
+        &M6_REVOCATION_ACCEPTANCE_MARKERS,
+        M6_REVOCATION_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+fn run_m6_audit_acceptance() -> Result<(), XtaskError> {
+    run_m6_constituent(
+        "m6-audit-self-test",
+        &M6_AUDIT_ACCEPTANCE_MARKERS,
+        M6_AUDIT_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+fn run_m6_constituent(
+    feature: &str,
+    markers: &[&str],
+    timeout: Duration,
+) -> Result<(), XtaskError> {
+    build_m6_fixture_userspace(true)?;
+    build_storage_userspace(true)?;
+    run_vm_inner(false, false, &[feature], Some((markers, timeout)))
+}
+
+fn build_m6_fixture_userspace(release: bool) -> Result<(), XtaskError> {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build")
+        .arg("-p")
+        .arg("clean-slate-supervisor")
+        .arg("--bin")
+        .arg("clean-slate-m6-fixture-userspace")
+        .arg("--features")
+        .arg("userspace")
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,compiler_builtins");
+    if release {
+        cmd.arg("--release");
+    }
+    cmd.env("RUSTC_BOOTSTRAP", "1");
+    run_command(&mut cmd)?;
+    Ok(())
 }
 
 fn run_m5_acceptance() -> Result<(), XtaskError> {
@@ -1543,6 +1696,16 @@ fn print_help() {
     println!(
         "                 Uses M1 markers only; does not assert milestone-level storage behavior"
     );
+    println!("  test-m6-fixture-smoke Build M6 fixture/storage images and validate harness smoke markers");
+    println!(
+        "  test-m6-object Build M6 object-capability constituent boot and validate ordered markers"
+    );
+    println!("  test-m6-process-control Build M6 process-control constituent boot and validate ordered markers");
+    println!("  test-m6-delegation Build M6 delegation/attenuation constituent boot and validate ordered markers");
+    println!("  test-m6-revocation Build M6 revocation/teardown constituent boot and validate ordered markers");
+    println!(
+        "  test-m6-audit Build M6 capability audit constituent boot and validate ordered markers"
+    );
     println!("  m5-disk-create Create deterministic M5 data disk if missing (preserve existing)");
     println!("  m5-disk-reset Recreate deterministic blank M5 data disk");
     println!("  m5-disk-inspect Print M5 data disk path and size");
@@ -1583,6 +1746,12 @@ enum ParsedCommand {
     TestM5Persistence,
     TestM5CrashRecovery,
     TestM5DiskHarness,
+    TestM6FixtureSmoke,
+    TestM6Object,
+    TestM6ProcessControl,
+    TestM6Delegation,
+    TestM6Revocation,
+    TestM6Audit,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -1619,6 +1788,14 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m5-persistence" => ParsedCommand::TestM5Persistence,
         Some(cmd) if cmd == "test-m5-crash-recovery" => ParsedCommand::TestM5CrashRecovery,
         Some(cmd) if cmd == "test-m5-disk-harness" => ParsedCommand::TestM5DiskHarness,
+        Some(cmd) if cmd == "test-m6-fixture-smoke" => ParsedCommand::TestM6FixtureSmoke,
+        Some(cmd) if cmd == "test-m6-object" => ParsedCommand::TestM6Object,
+        Some(cmd) if cmd == "test-m6-process-control" => ParsedCommand::TestM6ProcessControl,
+        Some(cmd) if cmd == "test-m6-delegation" => ParsedCommand::TestM6Delegation,
+        Some(cmd) if cmd == "test-m6-revocation" || cmd == "m6-revocation" || cmd == "m6.6" => {
+            ParsedCommand::TestM6Revocation
+        }
+        Some(cmd) if cmd == "test-m6-audit" => ParsedCommand::TestM6Audit,
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
         Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,

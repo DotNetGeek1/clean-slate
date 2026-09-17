@@ -14,7 +14,6 @@
 
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
-use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;

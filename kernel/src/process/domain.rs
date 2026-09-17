@@ -45,6 +45,21 @@ pub(crate) struct DomainTeardownResult {
 }
 
 #[allow(dead_code)]
+/// Counts scheduler/IPC ownership still attributed to `process_id` after teardown.
+pub(crate) fn remaining_owned_resource_count(process_id: u64) -> usize {
+    if unsafe { process_registry_mut().get(process_id) }.is_some() {
+        return usize::MAX;
+    }
+    let thread_resources =
+        without_interrupts(|| unsafe { scheduler_mut().resources_for_process(process_id) });
+    let ipc_resources = unsafe { endpoint_table_mut().resources_for_pid(process_id) };
+    thread_resources.threads
+        + thread_resources.kernel_stacks
+        + thread_resources.runnable_threads
+        + ipc_resources.owned_endpoints
+        + ipc_resources.held_capabilities
+}
+
 pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'static str> {
     let address_space = unsafe {
         process_registry_mut()

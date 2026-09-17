@@ -14,11 +14,30 @@ use crate::mm::frame_allocator::PageAllocator;
 )))]
 use crate::mm::PAGE_SIZE;
 #[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+use clean_slate_service_fixtures::m6_fixture::{
+    M6_FIXTURE_BOOTSTRAP_ADDRESS, M6_FIXTURE_BOOTSTRAP_BYTES,
+};
+#[cfg(any(
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 ))]
 use clean_slate_service_fixtures::{
     StorageServiceBootstrap, STORAGE_SERVICE_BOOTSTRAP_ADDRESS, STORAGE_SERVICE_ID,
@@ -48,7 +67,14 @@ const SERVICE_USER_STACK_ADDRESS: u64 = SERVICE_USER_CODE_ADDRESS + (PAGE_SIZE *
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 ))]
 include!(concat!(env!("OUT_DIR"), "/storage_userspace_entry.rs"));
 #[cfg(any(
@@ -56,7 +82,14 @@ include!(concat!(env!("OUT_DIR"), "/storage_userspace_entry.rs"));
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 ))]
 const STORAGE_USERSPACE_IMAGE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/storage_userspace.bin"));
@@ -65,7 +98,14 @@ const STORAGE_USERSPACE_IMAGE: &[u8] =
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 ))]
 const STORAGE_SERVICE_STACK_ADDRESS: u64 = STORAGE_SERVICE_BOOTSTRAP_ADDRESS + PAGE_SIZE;
 #[cfg(any(
@@ -73,7 +113,14 @@ const STORAGE_SERVICE_STACK_ADDRESS: u64 = STORAGE_SERVICE_BOOTSTRAP_ADDRESS + P
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 ))]
 const STORAGE_SERVICE_MAX_CODE_PAGES: usize = 64;
 #[cfg(any(
@@ -81,7 +128,14 @@ const STORAGE_SERVICE_MAX_CODE_PAGES: usize = 64;
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 ))]
 const STORAGE_SERVICE_STACK_PAGES: u64 = 8;
 // The storage image budget (code + stack + bootstrap page) must fit the
@@ -92,7 +146,14 @@ const STORAGE_SERVICE_STACK_PAGES: u64 = 8;
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 ))]
 const STORAGE_SERVICE_MAPPED_PAGES: usize =
     STORAGE_SERVICE_MAX_CODE_PAGES + STORAGE_SERVICE_STACK_PAGES as usize + 1;
@@ -101,11 +162,116 @@ const STORAGE_SERVICE_MAPPED_PAGES: usize =
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 ))]
 const _: () = assert!(
     STORAGE_SERVICE_MAPPED_PAGES <= crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
 );
+
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+include!(concat!(env!("OUT_DIR"), "/m6_fixture_userspace_entry.rs"));
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+const M6_FIXTURE_USERSPACE_IMAGE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/m6_fixture_userspace.bin"));
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+const M6_FIXTURE_BOOTSTRAP_PAGES: u64 = 2;
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+const M6_FIXTURE_STACK_PAGES: u64 = 4;
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+const M6_FIXTURE_STACK_ADDRESS: u64 =
+    M6_FIXTURE_BOOTSTRAP_ADDRESS + M6_FIXTURE_BOOTSTRAP_PAGES * PAGE_SIZE;
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+const M6_FIXTURE_MAX_CODE_PAGES: usize = 16;
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+const M6_FIXTURE_MAPPED_PAGES: usize = M6_FIXTURE_MAX_CODE_PAGES
+    + M6_FIXTURE_BOOTSTRAP_PAGES as usize
+    + M6_FIXTURE_STACK_PAGES as usize;
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+const _: () = assert!(
+    M6_FIXTURE_BOOTSTRAP_BYTES <= (M6_FIXTURE_BOOTSTRAP_PAGES as usize) * PAGE_SIZE as usize
+);
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+const _: () =
+    assert!(M6_FIXTURE_MAPPED_PAGES <= crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BuiltinServiceImage {
@@ -125,9 +291,26 @@ pub(crate) enum BuiltinServiceImage {
         feature = "m5-persistence-self-test",
         feature = "m5-crash-early-self-test",
         feature = "m5-crash-late-self-test",
-        feature = "m5-crash-recovery-self-test"
+        feature = "m5-crash-recovery-self-test",
+        feature = "m6-object-self-test",
+        feature = "m6-process-control-self-test",
+        feature = "m6-delegation-self-test",
+        feature = "m6-revocation-self-test",
+        feature = "m6-audit-self-test",
+        feature = "m6-capabilities-self-test",
+        feature = "m6-fixture-smoke-self-test"
     ))]
     StorageUserspacePayload,
+    #[cfg(any(
+        feature = "m6-object-self-test",
+        feature = "m6-process-control-self-test",
+        feature = "m6-delegation-self-test",
+        feature = "m6-revocation-self-test",
+        feature = "m6-audit-self-test",
+        feature = "m6-capabilities-self-test",
+        feature = "m6-fixture-smoke-self-test"
+    ))]
+    M6FixturePayload,
 }
 
 impl BuiltinServiceImage {
@@ -146,7 +329,14 @@ impl BuiltinServiceImage {
                 feature = "m5-persistence-self-test",
                 feature = "m5-crash-early-self-test",
                 feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
+                feature = "m5-crash-recovery-self-test",
+                feature = "m6-object-self-test",
+                feature = "m6-process-control-self-test",
+                feature = "m6-delegation-self-test",
+                feature = "m6-revocation-self-test",
+                feature = "m6-audit-self-test",
+                feature = "m6-capabilities-self-test",
+                feature = "m6-fixture-smoke-self-test"
             ))]
             id if id == STORAGE_SERVICE_ID.0 => Self::StorageUserspacePayload,
             #[cfg(any(
@@ -154,9 +344,26 @@ impl BuiltinServiceImage {
                 feature = "m5-persistence-self-test",
                 feature = "m5-crash-early-self-test",
                 feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
+                feature = "m5-crash-recovery-self-test",
+                feature = "m6-object-self-test",
+                feature = "m6-process-control-self-test",
+                feature = "m6-delegation-self-test",
+                feature = "m6-revocation-self-test",
+                feature = "m6-audit-self-test",
+                feature = "m6-capabilities-self-test",
+                feature = "m6-fixture-smoke-self-test"
             ))]
             id if id == STORAGE_UNAUTHORIZED_SERVICE_ID.0 => Self::StorageUserspacePayload,
+            #[cfg(any(
+                feature = "m6-object-self-test",
+                feature = "m6-process-control-self-test",
+                feature = "m6-delegation-self-test",
+                feature = "m6-revocation-self-test",
+                feature = "m6-audit-self-test",
+                feature = "m6-capabilities-self-test",
+                feature = "m6-fixture-smoke-self-test"
+            ))]
+            id if id >= 0x6000 && id <= 0x60ff => Self::M6FixturePayload,
             _ => Self::ImmediateExit,
         }
     }
@@ -202,10 +409,29 @@ pub(crate) fn launch_builtin_service(
             feature = "m5-persistence-self-test",
             feature = "m5-crash-early-self-test",
             feature = "m5-crash-late-self-test",
-            feature = "m5-crash-recovery-self-test"
+            feature = "m5-crash-recovery-self-test",
+            feature = "m6-object-self-test",
+            feature = "m6-process-control-self-test",
+            feature = "m6-delegation-self-test",
+            feature = "m6-revocation-self-test",
+            feature = "m6-audit-self-test",
+            feature = "m6-capabilities-self-test",
+            feature = "m6-fixture-smoke-self-test"
         ))]
         BuiltinServiceImage::StorageUserspacePayload => {
             launch_storage_userspace_service(allocator, kernel_stack_top, scheduler_slot, service)
+        }
+        #[cfg(any(
+            feature = "m6-object-self-test",
+            feature = "m6-process-control-self-test",
+            feature = "m6-delegation-self-test",
+            feature = "m6-revocation-self-test",
+            feature = "m6-audit-self-test",
+            feature = "m6-capabilities-self-test",
+            feature = "m6-fixture-smoke-self-test"
+        ))]
+        BuiltinServiceImage::M6FixturePayload => {
+            launch_m6_fixture_service(allocator, kernel_stack_top, scheduler_slot, service)
         }
         _ => launch_single_page_service(allocator, kernel_stack_top, scheduler_slot, image),
     }
@@ -367,10 +593,29 @@ fn launch_single_page_service(
             feature = "m5-persistence-self-test",
             feature = "m5-crash-early-self-test",
             feature = "m5-crash-late-self-test",
-            feature = "m5-crash-recovery-self-test"
+            feature = "m5-crash-recovery-self-test",
+            feature = "m6-object-self-test",
+            feature = "m6-process-control-self-test",
+            feature = "m6-delegation-self-test",
+            feature = "m6-revocation-self-test",
+            feature = "m6-audit-self-test",
+            feature = "m6-capabilities-self-test",
+            feature = "m6-fixture-smoke-self-test"
         ))]
         BuiltinServiceImage::StorageUserspacePayload => {
             return Err("storage userspace image must use the storage launch path");
+        }
+        #[cfg(any(
+            feature = "m6-object-self-test",
+            feature = "m6-process-control-self-test",
+            feature = "m6-delegation-self-test",
+            feature = "m6-revocation-self-test",
+            feature = "m6-audit-self-test",
+            feature = "m6-capabilities-self-test",
+            feature = "m6-fixture-smoke-self-test"
+        ))]
+        BuiltinServiceImage::M6FixturePayload => {
+            return Err("m6 fixture image must use the fixture launch path");
         }
         BuiltinServiceImage::ImmediateExit => unsafe {
             ptr::write(
@@ -452,7 +697,14 @@ fn launch_single_page_service(
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 ))]
 #[inline(never)]
 fn launch_storage_userspace_service(
@@ -529,7 +781,24 @@ fn launch_storage_userspace_service(
         .allocate_page()
         .ok_or("allocator could not provide a storage bootstrap page")?;
     zero_page(data_frame);
-    let bootstrap = crate::selftest::m5_storage::storage_service_bootstrap(service)?;
+    let bootstrap = {
+        #[cfg(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test"))]
+        {
+            let mut bootstrap = crate::selftest::m6_object::storage_service_bootstrap(service)?;
+            use clean_slate_capability::HolderId;
+            use clean_slate_service_fixtures::STORAGE_SERVICE_MODE_OBJECT_SERVICE;
+            if bootstrap.mode == STORAGE_SERVICE_MODE_OBJECT_SERVICE {
+                let role = crate::capability::object::grant_object_service_role(HolderId(pid))
+                    .map_err(|_| "object service role grant failed")?;
+                bootstrap.object_role_handle = role.encode();
+            }
+            bootstrap
+        }
+        #[cfg(not(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test")))]
+        {
+            crate::selftest::m5_storage::storage_service_bootstrap(service)?
+        }
+    };
     unsafe {
         ptr::write(
             (PHYSICAL_MEMORY_OFFSET + data_frame) as *mut StorageServiceBootstrap,
@@ -549,6 +818,134 @@ fn launch_storage_userspace_service(
     let user_stack_pointer =
         STORAGE_SERVICE_STACK_ADDRESS + STORAGE_SERVICE_STACK_PAGES * PAGE_SIZE;
     let entry_rip = SERVICE_USER_CODE_ADDRESS + STORAGE_USERSPACE_ENTRY_OFFSET;
+    let saved_stack_pointer =
+        build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
+    register_spawned_process(
+        address_space,
+        pid,
+        tid,
+        kernel_stack_top,
+        saved_stack_pointer,
+        entry_rip,
+        scheduler_slot,
+    )
+}
+
+/// Launches the M6 scripted fixture CPL3 image (`clean-slate-m6-fixture-userspace`).
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+#[inline(never)]
+fn launch_m6_fixture_service(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    scheduler_slot: usize,
+    service: ServiceId,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
+    use crate::mm::address_space::create_process_address_space;
+    use crate::mm::address_space::map_process_page;
+    use crate::mm::paging::zero_page;
+    use crate::mm::PHYSICAL_MEMORY_OFFSET;
+    use crate::process::id_allocator::id_allocator_mut;
+    use crate::selftest::m6_fixture::consume_fixture_program;
+    use core::ptr;
+    use x86_64::structures::paging::PageTableFlags;
+    use x86_64::VirtAddr;
+
+    let bootstrap = consume_fixture_program(service)?;
+    let image_pages = M6_FIXTURE_USERSPACE_IMAGE
+        .len()
+        .div_ceil(PAGE_SIZE as usize);
+    if image_pages > M6_FIXTURE_MAX_CODE_PAGES {
+        return Err("m6 fixture userspace image exceeded mapped code budget");
+    }
+    let mut address_space =
+        create_process_address_space(allocator, VirtAddr::new(SERVICE_USER_CODE_ADDRESS))?;
+    let (pid, tid) = {
+        let ids = unsafe { id_allocator_mut() };
+        (ids.allocate_pid()?, ids.allocate_tid()?)
+    };
+    for page_index in 0..image_pages {
+        let frame_address = allocator
+            .allocate_page()
+            .ok_or("allocator could not provide an m6 fixture code page")?;
+        zero_page(frame_address);
+        let offset = page_index * PAGE_SIZE as usize;
+        let chunk_end = (offset + PAGE_SIZE as usize).min(M6_FIXTURE_USERSPACE_IMAGE.len());
+        let chunk = &M6_FIXTURE_USERSPACE_IMAGE[offset..chunk_end];
+        unsafe {
+            ptr::copy_nonoverlapping(
+                chunk.as_ptr(),
+                (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
+                chunk.len(),
+            );
+        }
+        map_process_page(
+            &mut address_space,
+            SERVICE_USER_CODE_ADDRESS + page_index as u64 * PAGE_SIZE,
+            frame_address,
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+            allocator,
+        )?;
+    }
+    let bootstrap_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &bootstrap as *const _ as *const u8,
+            M6_FIXTURE_BOOTSTRAP_BYTES,
+        )
+    };
+    for page in 0..M6_FIXTURE_BOOTSTRAP_PAGES {
+        let frame = allocator
+            .allocate_page()
+            .ok_or("allocator could not provide an m6 fixture bootstrap page")?;
+        zero_page(frame);
+        let offset = page as usize * PAGE_SIZE as usize;
+        let end = (offset + PAGE_SIZE as usize).min(bootstrap_bytes.len());
+        if offset < bootstrap_bytes.len() {
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    bootstrap_bytes[offset..end].as_ptr(),
+                    (PHYSICAL_MEMORY_OFFSET + frame) as *mut u8,
+                    end - offset,
+                );
+            }
+        }
+        map_process_page(
+            &mut address_space,
+            M6_FIXTURE_BOOTSTRAP_ADDRESS + page * PAGE_SIZE,
+            frame,
+            PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::NO_EXECUTE
+                | PageTableFlags::USER_ACCESSIBLE,
+            allocator,
+        )?;
+    }
+    for stack_page in 0..M6_FIXTURE_STACK_PAGES {
+        let stack_frame = allocator
+            .allocate_page()
+            .ok_or("allocator could not provide an m6 fixture stack page")?;
+        zero_page(stack_frame);
+        map_process_page(
+            &mut address_space,
+            M6_FIXTURE_STACK_ADDRESS + stack_page * PAGE_SIZE,
+            stack_frame,
+            PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::NO_EXECUTE
+                | PageTableFlags::USER_ACCESSIBLE,
+            allocator,
+        )?;
+    }
+    let user_stack_pointer = M6_FIXTURE_STACK_ADDRESS + M6_FIXTURE_STACK_PAGES * PAGE_SIZE;
+    let entry_rip = SERVICE_USER_CODE_ADDRESS + M6_FIXTURE_USERSPACE_ENTRY_OFFSET;
     let saved_stack_pointer =
         build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
     register_spawned_process(
