@@ -124,11 +124,16 @@ impl ObjectRequestQueue {
         match slot.state {
             SlotState::Pending | SlotState::InService => Ok(OBJECT_STATUS_PENDING),
             SlotState::Done => {
-                if slot.status != 0 {
-                    return Err(SyscallQueueError::CompletionStatus(slot.status));
+                let status = slot.status;
+                if status != 0 {
+                    // Error completions still consume the client's poll; free so ENOSPC cannot stick.
+                    self.slots[index] = ObjectRequestSlot::free();
+                    return Err(SyscallQueueError::CompletionStatus(status));
                 }
                 let len = slot.len;
                 if out.len() < len {
+                    // Match success-path behavior: undersized buffer is EINVAL without freeing
+                    // (client can poll again with a large enough buffer).
                     return Err(SyscallQueueError::BufferTooSmall);
                 }
                 out[..len].copy_from_slice(&slot.payload[..len]);
@@ -577,6 +582,9 @@ fn handle_service_complete(frame: &mut SyscallContext) {
 mod tests {
     use super::*;
     use clean_slate_capability::{CapabilityHandle, CapabilityTable, Provenance};
+    use clean_slate_service_fixtures::{
+        OBJECT_STATUS_NOT_FOUND, OBJECT_STATUS_STORE_ERROR, OBJECT_STATUS_TOO_LARGE,
+    };
 
     fn grant_read(table: &mut CapabilityTable<8>, holder: HolderId, object_id: u64) -> u64 {
         table
@@ -769,6 +777,66 @@ mod tests {
         assert_eq!(
             table.authorize_class(holder, decoded, ResourceClass::BlockDevice, Rights::READ),
             Err(CapabilityError::WrongResource)
+        );
+    }
+
+    fn complete_next_with_status(queue: &mut ObjectRequestQueue, status: u64) -> u64 {
+        let request = queue.service_next().expect("pending request");
+        queue
+            .service_complete(request.request_id, status, &[])
+            .expect("complete");
+        request.request_id
+    }
+
+    #[test]
+    fn poll_frees_slot_on_error_completion_and_allows_resubmit() {
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(30);
+        let error_statuses = [
+            OBJECT_STATUS_NOT_FOUND,
+            OBJECT_STATUS_STORE_ERROR,
+            OBJECT_STATUS_TOO_LARGE,
+        ];
+        let mut request_ids = [0u64; OBJECT_REQUEST_SLOTS];
+        for index in 0..OBJECT_REQUEST_SLOTS {
+            request_ids[index] = queue.submit(client, OBJECT_OP_READ, 1, &[]).unwrap();
+            let status = error_statuses[index % error_statuses.len()];
+            assert_eq!(
+                complete_next_with_status(&mut queue, status),
+                request_ids[index]
+            );
+        }
+        assert_eq!(
+            queue.submit(client, OBJECT_OP_READ, 1, &[]),
+            Err(SyscallQueueError::QueueFull)
+        );
+        let mut out = [0u8; 8];
+        for (index, request_id) in request_ids.iter().enumerate() {
+            let status = error_statuses[index % error_statuses.len()];
+            assert_eq!(
+                queue.poll(client, *request_id, &mut out),
+                Err(SyscallQueueError::CompletionStatus(status))
+            );
+        }
+        for _ in 0..OBJECT_REQUEST_SLOTS {
+            queue.submit(client, OBJECT_OP_READ, 2, &[]).unwrap();
+        }
+    }
+
+    #[test]
+    fn poll_after_consumed_error_completion_returns_invalid_request() {
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(31);
+        let request_id = queue.submit(client, OBJECT_OP_READ, 1, &[]).unwrap();
+        complete_next_with_status(&mut queue, OBJECT_STATUS_NOT_FOUND);
+        let mut out = [0u8; 8];
+        assert_eq!(
+            queue.poll(client, request_id, &mut out),
+            Err(SyscallQueueError::CompletionStatus(OBJECT_STATUS_NOT_FOUND))
+        );
+        assert_eq!(
+            queue.poll(client, request_id, &mut out),
+            Err(SyscallQueueError::InvalidRequest)
         );
     }
 

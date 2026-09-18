@@ -29,9 +29,9 @@ use clean_slate_service_fixtures::m6_fixture::{
     M6FixtureBootstrap, M6FixtureStep, ARG_DATA_PTR, ARG_RESULT_OF, FIXTURE_STATUS_DONE,
 };
 use clean_slate_service_fixtures::{
-    StorageServiceBootstrap, OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_STATUS_PENDING,
-    OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT, STORAGE_SERVICE_ID,
-    STORAGE_SERVICE_MODE_OBJECT_SERVICE,
+    StorageServiceBootstrap, OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_STATUS_NOT_FOUND,
+    OBJECT_STATUS_PENDING, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, OBJECT_SUBOP_POLL,
+    OBJECT_SUBOP_SUBMIT, STORAGE_SERVICE_ID, STORAGE_SERVICE_MODE_OBJECT_SERVICE,
 };
 use clean_slate_service_lifecycle::{
     ControlRequest, ControlRequestKind, LifecycleMessage, ServiceId,
@@ -39,6 +39,8 @@ use clean_slate_service_lifecycle::{
 
 const SUPERVISOR_TEST_PID: u64 = 60;
 const TEST_OBJECT_ID: u64 = 7;
+/// Never written by M5/M6 fixtures; used to force NOT_FOUND without depending on disk state.
+const TEST_MISSING_OBJECT_ID: u64 = 9_001;
 const ALPHA_V1: &[u8] = b"alpha-v1";
 const PASS_MARKER: &str = "[M6.3] PASS";
 
@@ -141,6 +143,48 @@ fn build_owner_program() -> M6FixtureBootstrap {
         )
         .unwrap();
     let handle = arg_result(claim);
+    let claim_missing = program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_OBJECT,
+                [OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, 0, 0, 0, 0, 0],
+            )
+            .repeat_while_eq(0)
+            .expect_ne(0),
+        )
+        .unwrap();
+    let missing_handle = arg_result(claim_missing);
+    let submit_missing_read = program
+        .push(M6FixtureStep::syscall(
+            SYSCALL_NR_CAP_OBJECT,
+            [
+                OBJECT_SUBOP_SUBMIT,
+                missing_handle,
+                OBJECT_OP_READ,
+                TEST_MISSING_OBJECT_ID,
+                0,
+                0,
+            ],
+        ))
+        .unwrap();
+    program.push(M6FixtureStep::spin(8)).unwrap();
+    program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_OBJECT,
+                [
+                    OBJECT_SUBOP_POLL,
+                    arg_result(submit_missing_read),
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            )
+            .repeat_while_eq(OBJECT_STATUS_PENDING)
+            .expect_eq(OBJECT_STATUS_NOT_FOUND),
+        )
+        .unwrap();
     let submit_write = program
         .push(M6FixtureStep::syscall(
             SYSCALL_NR_CAP_OBJECT,
@@ -396,6 +440,10 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
                 Rights::READ.union(Rights::WRITE),
             )
             .unwrap_or_else(|_| fatal_kernel_error("owner bootstrap grant failed"));
+            register_pending_bootstrap_grant(holder, TEST_MISSING_OBJECT_ID, Rights::READ)
+                .unwrap_or_else(|_| {
+                    fatal_kernel_error("owner missing-object bootstrap grant failed")
+                });
         } else if index == FIXTURE_SPAWN_INDEX_READONLY {
             register_pending_bootstrap_grant(holder, TEST_OBJECT_ID, Rights::READ)
                 .unwrap_or_else(|_| fatal_kernel_error("readonly bootstrap grant failed"));
