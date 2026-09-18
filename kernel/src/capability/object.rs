@@ -6,7 +6,8 @@ use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSPC, SYSCALL_ENOSYS,
 };
 use clean_slate_capability::{
-    CapabilityError, CapabilityHandle, HolderId, ResourceClass, ResourceRef, Rights,
+    CapabilityError, CapabilityHandle, CapabilityState, HolderId, ResourceClass, ResourceRef,
+    Rights,
 };
 use clean_slate_service_fixtures::{
     ObjectServiceRequest, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_READ, OBJECT_OP_WRITE,
@@ -20,7 +21,10 @@ use crate::diagnostics::log::kernel_log_fmt;
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::sync::global_cell::GlobalCell;
 
-use super::{authorize_current, authorize_current_class, current_holder, grant_root};
+use super::{
+    authorize_current, authorize_current_class, capability_space_mut, current_holder, grant_root,
+    with_capability_space,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlotState {
@@ -148,6 +152,30 @@ impl ObjectRequestQueue {
         Some(request)
     }
 
+    /// Frees every queue slot owned by `holder` (any state).
+    pub fn reclaim_for_holder(&mut self, holder: HolderId) -> usize {
+        let mut reclaimed = 0usize;
+        for slot in &mut self.slots {
+            if slot.state != SlotState::Free && slot.client == holder {
+                *slot = ObjectRequestSlot::free();
+                reclaimed += 1;
+            }
+        }
+        reclaimed
+    }
+
+    /// Returns in-flight work to the pending queue after the object service holder exits.
+    pub fn requeue_in_service(&mut self) -> usize {
+        let mut requeued = 0usize;
+        for slot in &mut self.slots {
+            if slot.state == SlotState::InService {
+                slot.state = SlotState::Pending;
+                requeued += 1;
+            }
+        }
+        requeued
+    }
+
     pub fn service_complete(
         &mut self,
         request_id: u64,
@@ -198,6 +226,55 @@ static OBJECT_REQUEST_QUEUE: GlobalCell<ObjectRequestQueue> =
 
 fn queue_mut() -> &'static mut ObjectRequestQueue {
     unsafe { &mut *OBJECT_REQUEST_QUEUE.get() }
+}
+
+fn holder_holds_object_service_role(holder: HolderId) -> bool {
+    let role = ResourceRef::object(OBJECT_SERVICE_ROLE_ID);
+    with_capability_space(|table| {
+        for slot in 0..table.capacity() {
+            let record = table.record_at(slot);
+            if record.state == CapabilityState::Live
+                && record.holder == holder
+                && record.resource == role
+                && record.rights.contains(Rights::INSPECT)
+            {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+fn rollback_installed_capability(handle: CapabilityHandle) {
+    let table = unsafe { capability_space_mut() };
+    let slot = usize::from(handle.slot);
+    if table.revoke(handle).is_ok() {
+        table.release_slot(slot);
+    }
+}
+
+/// Requeues in-service object requests when the storage-service holder tears down.
+pub(crate) fn recover_object_queue_for_service_holder_exit(holder: HolderId) {
+    if !holder_holds_object_service_role(holder) {
+        return;
+    }
+    let requeued = queue_mut().requeue_in_service();
+    if requeued > 0 {
+        kernel_log_fmt(format_args!(
+            "[CAP ] object queue requeued in-service={requeued}\n",
+        ));
+    }
+}
+
+/// Drops all object request slots owned by a client holder that is tearing down.
+pub(crate) fn reclaim_object_requests_for_holder(holder: HolderId) {
+    let reclaimed = queue_mut().reclaim_for_holder(holder);
+    if reclaimed > 0 {
+        kernel_log_fmt(format_args!(
+            "[CAP ] object queue reclaimed holder={} requests={reclaimed}\n",
+            holder.0,
+        ));
+    }
 }
 
 fn op_name(op: u64) -> &'static str {
@@ -291,8 +368,11 @@ pub(crate) fn register_pending_bootstrap_grant(
     rights: Rights,
 ) -> Result<(), CapabilityError> {
     let handle = grant_object_capability(holder, object_id, rights)?;
-    super::bootstrap_grant::register_bootstrap_grant(holder, handle)
-        .map_err(|_| CapabilityError::CapacityExhausted)
+    if super::bootstrap_grant::register_bootstrap_grant(holder, handle).is_err() {
+        rollback_installed_capability(handle);
+        return Err(CapabilityError::CapacityExhausted);
+    }
+    Ok(())
 }
 
 fn authorize_object_op(raw_handle: u64, object_id: u64, op: u64) -> Result<(), CapabilityError> {
@@ -690,5 +770,105 @@ mod tests {
             table.authorize_class(holder, decoded, ResourceClass::BlockDevice, Rights::READ),
             Err(CapabilityError::WrongResource)
         );
+    }
+
+    #[test]
+    fn holder_exit_reclaims_pending_in_service_and_done_slots() {
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(20);
+        for _ in 0..OBJECT_REQUEST_SLOTS {
+            queue.submit(client, OBJECT_OP_READ, 1, &[]).unwrap();
+        }
+        queue.service_next().expect("pending request");
+        let second = queue.service_next().expect("second pending");
+        queue
+            .service_complete(second.request_id, 0, b"done")
+            .unwrap();
+        assert_eq!(queue.reclaim_for_holder(client), OBJECT_REQUEST_SLOTS);
+        for _ in 0..OBJECT_REQUEST_SLOTS {
+            queue.submit(client, OBJECT_OP_READ, 2, &[]).unwrap();
+        }
+    }
+
+    #[test]
+    fn service_complete_fails_after_holder_reclaim() {
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(21);
+        let request_id = queue.submit(client, OBJECT_OP_READ, 1, &[]).unwrap();
+        queue.service_next().expect("dequeue");
+        assert_eq!(queue.reclaim_for_holder(client), 1);
+        assert_eq!(
+            queue.service_complete(request_id, 0, &[]),
+            Err(SyscallQueueError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn service_holder_exit_requeues_in_service_requests() {
+        let mut queue = ObjectRequestQueue::new();
+        let client = HolderId(22);
+        queue
+            .submit(client, OBJECT_OP_WRITE, 7, b"payload")
+            .unwrap();
+        let first = queue.service_next().expect("first dequeue");
+        assert_eq!(queue.requeue_in_service(), 1);
+        let second = queue.service_next().expect("requeued dequeue");
+        assert_eq!(first.request_id, second.request_id);
+    }
+
+    #[test]
+    fn pending_bootstrap_grant_rolls_back_when_bootstrap_table_is_full() {
+        use clean_slate_capability::list_holder;
+
+        use super::register_pending_bootstrap_grant;
+        use crate::capability::bootstrap_grant::{
+            discard_bootstrap_grants_for_holder, register_bootstrap_grant,
+        };
+        use crate::capability::{grant_root, revoke_for_holder};
+
+        let holder = HolderId(88_881);
+        let target_object = 4242u64;
+        for object_id in 0..16u64 {
+            let handle = grant_root(
+                holder,
+                ResourceRef::object(object_id + 10_000),
+                Rights::READ,
+            )
+            .expect("fill bootstrap grants");
+            register_bootstrap_grant(holder, handle).expect("register filler grant");
+        }
+        let live_before = with_capability_space(|table| table.live_count());
+        let listed_before = with_capability_space(|table| {
+            let mut cursor = 0usize;
+            let mut found = false;
+            while let Some((next, _handle, record)) = list_holder(table, holder, cursor) {
+                if record.resource.id == target_object {
+                    found = true;
+                }
+                cursor = next;
+            }
+            found
+        });
+        assert_eq!(
+            register_pending_bootstrap_grant(holder, target_object, Rights::READ),
+            Err(CapabilityError::CapacityExhausted)
+        );
+        let live_after = with_capability_space(|table| table.live_count());
+        assert_eq!(live_before, live_after);
+        let listed_after = with_capability_space(|table| {
+            let mut cursor = 0usize;
+            let mut found = false;
+            while let Some((next, _handle, record)) = list_holder(table, holder, cursor) {
+                if record.resource.id == target_object {
+                    found = true;
+                }
+                cursor = next;
+            }
+            found
+        });
+        assert_eq!(listed_before, listed_after);
+        assert!(!listed_after);
+        discard_bootstrap_grants_for_holder(holder);
+        revoke_for_holder(holder);
     }
 }

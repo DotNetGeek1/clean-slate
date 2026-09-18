@@ -187,9 +187,10 @@ const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 16] = [
     "[STOR] malformed media rejected",
     "[M5.7] PASS",
 ];
-const M6_OBJECT_ACCEPTANCE_MARKERS: [&str; 7] = [
+const M6_OBJECT_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[CAP ] object grant holder=",
     "[CAP ] object allowed holder=",
+    "[CAP ] object queue reclaimed holder=",
     "[CAP ] deny holder=",
     "reason=missing-right",
     "[CAP ] deny holder=",

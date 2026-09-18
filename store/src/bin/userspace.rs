@@ -9,6 +9,7 @@ use clean_slate_block::{
     BlockDevice, BlockDeviceId, BlockGeometry, BlockIoError, BlockRequestError,
     BlockTransportError, BlockUnsupportedError,
 };
+use clean_slate_capability::syscall_abi::SYSCALL_EINVAL;
 use clean_slate_service_fixtures::{
     BlockTransportOp, BlockTransportRequest, BlockTransportResponse, BlockTransportStatus,
     ObjectServiceRequest, StorageServiceBootstrap, BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES,
@@ -170,7 +171,7 @@ fn run_object_service(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u6
         let request = ObjectServiceRequest::decode(&request_buf).map_err(|_| 0u64)?;
         let len = usize::try_from(request.len).map_err(|_| 0u64)?;
         if len > OBJECT_MAX_PAYLOAD_BYTES {
-            object_service_complete(
+            object_service_complete_or_abandon(
                 role_handle,
                 request.request_id,
                 OBJECT_STATUS_TOO_LARGE,
@@ -185,7 +186,7 @@ fn run_object_service(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u6
                     if payload.len() > OBJECT_MAX_PAYLOAD_BYTES {
                         OBJECT_STATUS_TOO_LARGE
                     } else {
-                        object_service_complete(
+                        object_service_complete_or_abandon(
                             role_handle,
                             request.request_id,
                             OBJECT_STATUS_OK,
@@ -213,7 +214,7 @@ fn run_object_service(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u6
             }
             _ => OBJECT_STATUS_STORE_ERROR,
         };
-        object_service_complete(role_handle, request.request_id, status, &[])?;
+        object_service_complete_or_abandon(role_handle, request.request_id, status, &[])?;
     }
 }
 
@@ -260,6 +261,20 @@ fn object_service_complete(
         return Err(result);
     }
     Ok(())
+}
+
+/// Completes a request, or drops the result when the kernel no longer tracks it.
+fn object_service_complete_or_abandon(
+    role_handle: u64,
+    request_id: u64,
+    status: u64,
+    payload: &[u8],
+) -> Result<(), u64> {
+    match object_service_complete(role_handle, request_id, status, payload) {
+        Ok(()) => Ok(()),
+        Err(SYSCALL_EINVAL) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn raw_syscall(nr: u64, args: [u64; 6]) -> u64 {

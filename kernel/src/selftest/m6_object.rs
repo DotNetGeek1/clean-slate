@@ -42,15 +42,18 @@ const TEST_OBJECT_ID: u64 = 7;
 const ALPHA_V1: &[u8] = b"alpha-v1";
 const PASS_MARKER: &str = "[M6.3] PASS";
 
-const FIXTURE_OWNER: u64 = 0;
-const FIXTURE_UNRELATED: u64 = 1;
-const FIXTURE_READONLY: u64 = 2;
+const FIXTURE_LEAKER: u64 = 0;
+const FIXTURE_OWNER: u64 = 1;
+const FIXTURE_UNRELATED: u64 = 2;
+const FIXTURE_READONLY: u64 = 3;
 
-const FIXTURE_SPAWN_INDEX_OWNER: usize = 0;
-const FIXTURE_SPAWN_INDEX_READONLY: usize = 1;
-const FIXTURE_SPAWN_INDEX_UNRELATED: usize = 2;
+const FIXTURE_SPAWN_INDEX_LEAKER: usize = 0;
+const FIXTURE_SPAWN_INDEX_OWNER: usize = 1;
+const FIXTURE_SPAWN_INDEX_READONLY: usize = 2;
+const FIXTURE_SPAWN_INDEX_UNRELATED: usize = 3;
 
 struct ObjectSelfTestState {
+    leaker_pid: u64,
     owner_pid: u64,
     unrelated_pid: u64,
     readonly_pid: u64,
@@ -88,6 +91,37 @@ fn arg_data(offset: usize) -> u64 {
 
 fn arg_result(step_index: usize) -> u64 {
     ARG_RESULT_OF | (step_index as u64 & 0xff)
+}
+
+fn build_leaker_program() -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    program.push(M6FixtureStep::spin(2)).unwrap();
+    let claim = program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_OBJECT,
+                [OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, 0, 0, 0, 0, 0],
+            )
+            .repeat_while_eq(0)
+            .expect_ne(0),
+        )
+        .unwrap();
+    let handle = arg_result(claim);
+    program
+        .push(M6FixtureStep::syscall(
+            SYSCALL_NR_CAP_OBJECT,
+            [
+                OBJECT_SUBOP_SUBMIT,
+                handle,
+                OBJECT_OP_READ,
+                TEST_OBJECT_ID,
+                0,
+                0,
+            ],
+        ))
+        .unwrap();
+    program.push(M6FixtureStep::fault()).unwrap();
+    program
 }
 
 fn build_owner_program() -> M6FixtureBootstrap {
@@ -229,6 +263,10 @@ fn validate_owner_report(report: &M6FixtureBootstrap) -> Result<(), &'static str
     Ok(())
 }
 
+fn leaker_teardown_complete(leaker_pid: u64) -> bool {
+    unsafe { process_registry_mut().get(leaker_pid).is_none() }
+}
+
 fn validate_readonly_report(report: &M6FixtureBootstrap) -> Result<(), &'static str> {
     if report.status != FIXTURE_STATUS_DONE {
         return Err("readonly fixture did not complete");
@@ -262,7 +300,11 @@ fn object_report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReport
     } else {
         return FixtureReportAction::Fail("unexpected fixture report pid");
     }
-    if state.owner_reported && state.unrelated_reported && state.readonly_reported {
+    if leaker_teardown_complete(state.leaker_pid)
+        && state.owner_reported
+        && state.unrelated_reported
+        && state.readonly_reported
+    {
         return FixtureReportAction::PassAndExit(PASS_MARKER);
     }
     FixtureReportAction::Continue
@@ -323,17 +365,19 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
     launch_storage_service(controller, allocator, lifecycle_capability);
 
     let services = [
+        fixture_service(FIXTURE_LEAKER),
         fixture_service(FIXTURE_OWNER),
         fixture_service(FIXTURE_READONLY),
         fixture_service(FIXTURE_UNRELATED),
     ];
     let programs = [
+        build_leaker_program(),
         build_owner_program(),
         build_readonly_program(),
         build_unrelated_program(),
     ];
-    let mut pids = [0u64; 3];
-    for index in 0..3 {
+    let mut pids = [0u64; 4];
+    for index in 0..4 {
         let stack_top = unsafe { task_stack_top(&(*task_stacks_mut())[index + 1]) };
         let spawned = spawn_fixture(
             allocator,
@@ -355,10 +399,14 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
         } else if index == FIXTURE_SPAWN_INDEX_READONLY {
             register_pending_bootstrap_grant(holder, TEST_OBJECT_ID, Rights::READ)
                 .unwrap_or_else(|_| fatal_kernel_error("readonly bootstrap grant failed"));
+        } else if index == FIXTURE_SPAWN_INDEX_LEAKER {
+            register_pending_bootstrap_grant(holder, TEST_OBJECT_ID, Rights::READ)
+                .unwrap_or_else(|_| fatal_kernel_error("leaker bootstrap grant failed"));
         }
     }
     unsafe {
         OBJECT_SELF_TEST_STATE = Some(ObjectSelfTestState {
+            leaker_pid: pids[FIXTURE_SPAWN_INDEX_LEAKER],
             owner_pid: pids[FIXTURE_SPAWN_INDEX_OWNER],
             readonly_pid: pids[FIXTURE_SPAWN_INDEX_READONLY],
             unrelated_pid: pids[FIXTURE_SPAWN_INDEX_UNRELATED],
@@ -369,6 +417,17 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
     }
     initialize_timer();
     reprogram_local_apic_timer(50_000);
+    let frame_pointer =
+        start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
+    unsafe { restore_task_context(frame_pointer) }
+}
+
+/// Resumes scheduling when the leaker fixture faults with no other runnable thread.
+pub(crate) fn maybe_continue_after_fixture_fault(pid: u64) -> ! {
+    let state = state_mut();
+    if pid != state.leaker_pid {
+        fatal_kernel_error("m6 object unexpected fixture fault pid");
+    }
     let frame_pointer =
         start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
     unsafe { restore_task_context(frame_pointer) }
