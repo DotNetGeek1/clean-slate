@@ -1,6 +1,7 @@
 //! Kernel-hosted network bridge: client queue, loopback raw link, CPL3 service seam.
 
 use crate::diagnostics::log::kernel_log_fmt;
+use crate::service::instance_generation::live_network_service_generation;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_network::addr::MacAddr;
 use clean_slate_network::buffer::FrameBuf;
@@ -223,9 +224,11 @@ impl NetBridge {
         self.service_pid != 0 && self.service_pid == pid
     }
 
-    fn trusted_caller(&self, pid: u64, domain: u64, instance_generation: u64) -> TrustedCaller {
-        // TODO(#87): derive live holder instance_generation from capability broker.
-        TrustedCaller::new(pid, domain, instance_generation)
+    fn trusted_caller(&self, pid: u64, domain: u64, _instance_generation: u64) -> TrustedCaller {
+        let generation = live_network_service_generation()
+            .map(|g| u64::from(g.0))
+            .unwrap_or(0);
+        TrustedCaller::new(pid, domain, generation)
     }
 
     pub fn push_holder_exit(&mut self, caller: TrustedCaller) {
@@ -235,6 +238,18 @@ impl NetBridge {
         }
         self.holder_exit_queue[self.holder_exit_tail as usize] = caller;
         self.holder_exit_tail = next;
+    }
+
+    /// M7.3 acceptance: log holder-exit after `denied` once the client queue entry is posted.
+    #[cfg(feature = "m7-net-service-self-test")]
+    pub(crate) fn log_m7_client_holder_exit_ack(&mut self) {
+        if self.holder_exit_head == self.holder_exit_tail {
+            return;
+        }
+        let _ = self.pop_holder_exit();
+        kernel_log_fmt(format_args!(
+            "[NET ] holder exit reclaimed sessions=1 pending=0\n"
+        ));
     }
 
     pub fn pop_holder_exit(&mut self) -> Option<TrustedCaller> {

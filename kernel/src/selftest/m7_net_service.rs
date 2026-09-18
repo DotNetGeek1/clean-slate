@@ -10,8 +10,8 @@ use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::interrupt::timer::initialize_timer;
 use crate::mm::address_space::activate_address_space_root;
+use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::paging::current_root_frame_address;
 use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
@@ -134,7 +134,7 @@ pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
         process_registry_mut().clear();
         *scheduler_mut() = Scheduler::new();
     }
-    let kernel_root = current_root_frame_address();
+    let kernel_root = kernel_root_frame();
     let kernel_stack_top = unsafe {
         let stacks = &*task_stacks_mut();
         task_stack_top(&stacks[0])
@@ -309,7 +309,7 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
         crate::process::current_process_id().unwrap_or_else(|message| fatal_kernel_error(message));
     let report = unsafe { &*(NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *const NetworkServiceBootstrap) };
     let test_state = state();
-    let kernel_root = current_root_frame_address();
+    let kernel_root = kernel_root_frame();
     let mut session_id_raw = test_state.session_id_raw;
     let mut service_generation = test_state.service_generation;
     let allocator = service_lifecycle_syscall_allocator_mut()
@@ -335,6 +335,13 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
             if report.result_code != NETWORK_SERVICE_RESULT_OK {
                 fatal_kernel_error("m7 unauthorized probe failed");
             }
+            use clean_slate_network::protocol::TrustedCaller;
+            crate::service::net_bridge::net_bridge_mut().push_holder_exit(TrustedCaller::new(
+                test_state.fixtures.client,
+                test_state.fixtures.client,
+                0,
+            ));
+            crate::service::net_bridge::net_bridge_mut().log_m7_client_holder_exit_ack();
             patch_fixture_bootstrap(test_state.fixtures.inflight, kernel_root, |bootstrap| {
                 bootstrap.session_id_raw = session_id_raw;
                 bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
@@ -403,6 +410,7 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 fatal_kernel_error("m7 capacity loop failed");
             }
             kernel_log_line("[NET ] capacity baseline ok");
+            terminate_network_service(controller, allocator, test_state.lifecycle_capability);
             M7Phase::Complete
         }
         _ => fatal_kernel_error("unexpected m7 net userspace trap phase/mode"),

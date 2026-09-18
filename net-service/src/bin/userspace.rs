@@ -270,14 +270,35 @@ impl NetworkLink for SyscallRawLink {
     }
 }
 
-static mut SERVICE_STATE: Option<
-    NetworkService<SyscallRawLink, AllowAllAuthorizer, PassthroughPacketPath>,
-> = None;
+type ServiceState = NetworkService<SyscallRawLink, AllowAllAuthorizer, PassthroughPacketPath>;
+
+static mut SERVICE_STATE: Option<ServiceState> = None;
 static mut SERVICE_REQUEST_BUF: [u8; NETWORK_REQUEST_BYTES] = [0; NETWORK_REQUEST_BYTES];
 static mut SERVICE_PAYLOAD_BUF: [u8; NETWORK_MAX_PAYLOAD_BYTES] = [0; NETWORK_MAX_PAYLOAD_BYTES];
 static mut SERVICE_RESPONSE_BUF: [u8; NETWORK_RESPONSE_BYTES] = [0; NETWORK_RESPONSE_BYTES];
 static mut SERVICE_RESPONSE_PAYLOAD: [u8; NETWORK_MAX_PAYLOAD_BYTES] =
     [0; NETWORK_MAX_PAYLOAD_BYTES];
+
+/// Single-threaded service loop; use raw pointers to satisfy `static_mut_refs` under `-D warnings`.
+unsafe fn service_state_slot() -> *mut Option<ServiceState> {
+    core::ptr::addr_of_mut!(SERVICE_STATE)
+}
+
+unsafe fn service_request_buf_ptr() -> *mut [u8; NETWORK_REQUEST_BYTES] {
+    core::ptr::addr_of_mut!(SERVICE_REQUEST_BUF)
+}
+
+unsafe fn service_payload_buf_ptr() -> *mut [u8; NETWORK_MAX_PAYLOAD_BYTES] {
+    core::ptr::addr_of_mut!(SERVICE_PAYLOAD_BUF)
+}
+
+unsafe fn service_response_buf_ptr() -> *mut [u8; NETWORK_RESPONSE_BYTES] {
+    core::ptr::addr_of_mut!(SERVICE_RESPONSE_BUF)
+}
+
+unsafe fn service_response_payload_ptr() -> *mut [u8; NETWORK_MAX_PAYLOAD_BYTES] {
+    core::ptr::addr_of_mut!(SERVICE_RESPONSE_PAYLOAD)
+}
 
 fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     let raw_handle = match network_capability(NETWORK_DEVICE_ID) {
@@ -287,27 +308,27 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     bootstrap.net_role_handle = raw_handle;
     let generation = SessionGeneration::new(bootstrap.service_generation);
     unsafe {
-        SERVICE_STATE = Some(NetworkService::new(
+        *service_state_slot() = Some(NetworkService::new(
             generation,
             AllowAllAuthorizer,
             PassthroughPacketPath,
         ));
-        if let Some(service) = SERVICE_STATE.as_mut() {
+        if let Some(service) = (*service_state_slot()).as_mut() {
             service.attach_backend(SyscallRawLink::attach(raw_handle));
         }
     }
     loop {
         let service = unsafe {
-            match SERVICE_STATE.as_mut() {
+            match (*service_state_slot()).as_mut() {
                 Some(service) => service,
                 None => continue,
             }
         };
-        let request_buf = unsafe { &mut SERVICE_REQUEST_BUF };
-        let payload_buf = unsafe { &mut SERVICE_PAYLOAD_BUF };
-        let response_buf = unsafe { &mut SERVICE_RESPONSE_BUF };
-        let response_payload = unsafe { &mut SERVICE_RESPONSE_PAYLOAD };
-        let _ = drain_holder_exits(service);
+        let request_buf = unsafe { &mut *service_request_buf_ptr() };
+        let payload_buf = unsafe { &mut *service_payload_buf_ptr() };
+        let response_buf = unsafe { &mut *service_response_buf_ptr() };
+        let response_payload = unsafe { &mut *service_response_payload_ptr() };
+        drain_holder_exits(service);
         let found = match service_next(raw_handle, request_buf, payload_buf) {
             Ok(id) => id,
             Err(_) => {
