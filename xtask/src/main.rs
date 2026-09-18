@@ -33,6 +33,7 @@ const M6_DELEGATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M6_REVOCATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 const M6_AUDIT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M6_CAPABILITIES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(180);
+const M7_NET_CAPS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M5_CRASH_MATRIX_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_PERSISTENCE_BOOT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -222,6 +223,19 @@ const M6_REVOCATION_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[PROC] teardown pid=",
     "[TEST] unrelated workload progress=",
     "[M6.6] PASS",
+];
+const M7_NET_CAPS_ACCEPTANCE_MARKERS: [&str; 11] = [
+    "[CAP ] net grant holder=1 rights=delegate|net_resolve|net_connect|net_send|net_receive generation=0",
+    "[CAP ] net allow op=connect holder=1",
+    "[NET ] denied pid=2 reason=no-authority",
+    "[NET ] denied pid=2 reason=missing-right",
+    "[NET ] denied pid=1 reason=revoked",
+    "[NET ] stale-session denied generation=0",
+    "[CAP ] net grant holder=1 rights=delegate|net_resolve|net_connect|net_send|net_receive generation=1",
+    "[AUD ] net op=resolve actor=1 outcome=allow resource=20992 generation=1",
+    "[CAP ] net allow op=resolve holder=1",
+    "[CAP ] net released holder=1 count=2",
+    "[M7.7] PASS",
 ];
 const M6_CAPABILITIES_ACCEPTANCE_MARKERS: [&str; 31] = [
     "[STOR] object-service started pid=",
@@ -438,6 +452,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM6Revocation => run_m6_revocation_acceptance(),
         ParsedCommand::TestM6Audit => run_m6_audit_acceptance(),
         ParsedCommand::TestM6Capabilities => run_m6_capabilities_acceptance(),
+        ParsedCommand::TestM7NetCaps => run_m7_net_caps_acceptance(),
         ParsedCommand::TestM6 => run_m6_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
@@ -959,6 +974,15 @@ fn run_m6_audit_acceptance() -> Result<(), XtaskError> {
         "m6-audit-self-test",
         &M6_AUDIT_ACCEPTANCE_MARKERS,
         M6_AUDIT_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+fn run_m7_net_caps_acceptance() -> Result<(), XtaskError> {
+    build_m6_fixture_userspace(true)?;
+    run_m6_constituent(
+        "m7-net-caps-self-test",
+        &M7_NET_CAPS_ACCEPTANCE_MARKERS,
+        M7_NET_CAPS_ACCEPTANCE_TIMEOUT,
     )
 }
 
@@ -1821,6 +1845,9 @@ fn print_help() {
     println!(
         "  test-m6-capabilities Build M6.8 capability convergence boot and validate ordered markers"
     );
+    println!(
+        "  test-m7-net-caps Build M7.7 network capability broker boot and validate ordered markers"
+    );
     println!("  m5-disk-create Create deterministic M5 data disk if missing (preserve existing)");
     println!("  m5-disk-reset Recreate deterministic blank M5 data disk");
     println!("  m5-disk-inspect Print M5 data disk path and size");
@@ -1868,6 +1895,7 @@ enum ParsedCommand {
     TestM6Revocation,
     TestM6Audit,
     TestM6Capabilities,
+    TestM7NetCaps,
     TestM6,
     M5DiskCreate,
     M5DiskReset,
@@ -1915,6 +1943,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m6-audit" => ParsedCommand::TestM6Audit,
         Some(cmd) if cmd == "test-m6-capabilities" || cmd == "m6-capabilities" || cmd == "m6.8" => {
             ParsedCommand::TestM6Capabilities
+        }
+        Some(cmd) if cmd == "test-m7-net-caps" || cmd == "m7-net-caps" || cmd == "m7.7" => {
+            ParsedCommand::TestM7NetCaps
         }
         Some(cmd) if cmd == "test-m6" || cmd == "m6" || cmd == "m6.9" => ParsedCommand::TestM6,
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
@@ -2105,6 +2136,14 @@ mod tests {
             ParsedCommand::TestM6
         );
         assert_eq!(parse_command(Some("m6.9".as_ref())), ParsedCommand::TestM6);
+        assert_eq!(
+            parse_command(Some("test-m7-net-caps".as_ref())),
+            ParsedCommand::TestM7NetCaps
+        );
+        assert_eq!(
+            parse_command(Some("m7.7".as_ref())),
+            ParsedCommand::TestM7NetCaps
+        );
         assert_eq!(
             parse_command(Some("test-m5-storage".as_ref())),
             ParsedCommand::TestM5Storage

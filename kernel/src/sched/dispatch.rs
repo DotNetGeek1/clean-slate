@@ -161,7 +161,8 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
     feature = "m6-delegation-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test"
+    feature = "m6-capabilities-self-test",
+    feature = "m7-net-caps-self-test"
 ))]
 pub(crate) fn start_current_scheduler_thread() -> Result<u64, &'static str> {
     let stack_pointer = without_interrupts(|| with_scheduler(|scheduler| scheduler.start()))?;

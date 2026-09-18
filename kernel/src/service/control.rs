@@ -275,6 +275,7 @@ impl ServiceLifecycleController {
         feature = "m6-object-self-test",
         feature = "m6-process-control-self-test",
         feature = "m6-delegation-self-test",
+        feature = "m7-net-caps-self-test",
         feature = "m6-revocation-self-test",
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
@@ -395,6 +396,45 @@ impl ServiceLifecycleController {
     pub(crate) fn live_pid(&self, service: ServiceId) -> Option<u64> {
         self.find_service(service)
             .and_then(|record| record.live.map(|live| live.pid))
+    }
+
+    pub(crate) fn authoritative_generation_for_live_pid(
+        &self,
+        pid: u64,
+    ) -> Option<InstanceGeneration> {
+        for entry in &self.services {
+            if entry.service.0 == 0 {
+                continue;
+            }
+            if entry.live.is_some_and(|live| live.pid == pid) {
+                return Some(entry.authoritative_generation);
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "m7-net-caps-self-test")]
+    pub(crate) fn test_advance_authoritative_generation(
+        &mut self,
+        service: ServiceId,
+    ) -> Result<InstanceGeneration, &'static str> {
+        let index = self
+            .service_index(service)
+            .ok_or("unknown service for generation bump")?;
+        let next = InstanceGeneration(self.services[index].authoritative_generation.0 + 1);
+        self.services[index].authoritative_generation = next;
+        Ok(next)
+    }
+
+    pub(crate) fn live_service_instance_id(&self, service: ServiceId) -> Option<ServiceInstanceId> {
+        let record = self.find_service(service)?;
+        let live = record.live?;
+        Some(ServiceInstanceId::new(
+            service,
+            record.authoritative_generation,
+            ProcessId(live.pid),
+            DomainId(live.domain_id),
+        ))
     }
 
     fn find_service(&self, service: ServiceId) -> Option<&ServiceRecord> {

@@ -70,6 +70,74 @@ Every `NetworkRequest` / `NetworkResponse` is one fixed 64-byte frame so it fits
 
 Constants live in `network/src/fixture.rs`. Acceptance assumes a private `10.77.0.0/24` lab network, fixed DNS answers, echo/TLS ports, and repository-owned certificates under `xtask/fixtures/m7/`. No public Internet, public DNS, external PKI, or host LAN dependencies.
 
+## M7.7 network capabilities & attribution
+
+Kernel broker: `kernel/src/capability/network.rs`. Live generation lookup:
+`kernel/src/service/instance_generation.rs` (`live_instance_generation`,
+`live_network_service_generation`).
+
+### Operation → right
+
+| `NetworkOp` | `Rights` |
+|-------------|----------|
+| `Resolve` | `NET_RESOLVE` |
+| `Connect` | `NET_CONNECT` |
+| `Send` | `NET_SEND` |
+| `Receive` | `NET_RECEIVE` |
+| `RawDevice` | `NET_RAW_DEVICE` |
+
+### Denial mapping (`NetworkError::Denied`)
+
+| `DenialReason` | M6 / broker source |
+|----------------|-------------------|
+| `NoCapability` | Missing/invalid handle, wrong holder |
+| `MissingRight` | `CapabilityError::MissingRight` |
+| `StaleGeneration` | `ResourceRef.instance_generation` ≠ live service generation, or `session_generation` mismatch |
+| `Revoked` | `CapabilityError::Revoked` |
+
+### `ResourceRef` for network
+
+- **Service instance:** `ResourceRef::network(logical_service_id, live_generation)` where
+  `live_generation` comes from `live_network_service_generation()` /
+  `ServiceLifecycleController::authoritative_generation(NETWORK_SERVICE_ID)`.
+- **Per-session (optional):** `ResourceRef::network_session(session_generation, session_index)`.
+  Destination/port scoping is not encoded in `ResourceRef` for M7.7.
+
+Classes still using `instance_generation = 0` in production grants: see
+[`docs/M7_INSTANCE_GENERATION.md`](M7_INSTANCE_GENERATION.md).
+
+### Revocation & holder exit
+
+`on_revoked(handle)` returns impacted `SessionId` values and revokes the capability subtree;
+the network service must close those sessions. After holder teardown,
+`on_holder_exit(holder)` clears session tracking and logs `[CAP ] net released …`.
+Further ops on revoked handles return `Revoked`.
+
+### Audit
+
+Allowed and denied ops emit standard M6 audit records plus serial
+`[AUD ] net op=… actor=… outcome=allow|deny resource=… generation=…` when
+`set_network_audit_serial_echo(true)`. Records never include payload bytes or hostnames.
+
+### Network service (#83) authorization API
+
+```rust
+authorize_network_op(
+    trusted_holder: HolderId,
+    raw_handle: u64,
+    op: NetworkOp,
+    session_generation: Option<SessionGeneration>,
+) -> Result<AuthorizedNetworkOp, DenialReason>
+```
+
+Bootstrap grants use `grant_network_authority(holder, rights, NetworkGrantPolicy::Application)`
+(service policy for `NET_RAW_DEVICE` only).
+
+### QEMU constituent
+
+`cargo xtask test-m7-net-caps` (aliases `m7-net-caps`, `m7.7`). Ordered markers end with
+`[M7.7] PASS`.
+
 ## Deferred
 
 - IPv6 and dual-stack policy
