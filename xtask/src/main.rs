@@ -1031,6 +1031,7 @@ fn run_m6_object_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m7_net_service_acceptance() -> Result<(), XtaskError> {
+    build_network_userspace(true)?;
     run_vm_inner(
         false,
         false,
@@ -1040,6 +1041,27 @@ fn run_m7_net_service_acceptance() -> Result<(), XtaskError> {
             M7_NET_SERVICE_ACCEPTANCE_TIMEOUT,
         )),
     )
+}
+
+fn build_network_userspace(release: bool) -> Result<(), XtaskError> {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build")
+        .arg("-p")
+        .arg("clean-slate-net-service")
+        .arg("--bin")
+        .arg("clean-slate-network-userspace")
+        .arg("--features")
+        .arg("userspace")
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,alloc,compiler_builtins");
+    if release {
+        cmd.arg("--release");
+    }
+    cmd.env("RUSTC_BOOTSTRAP", "1");
+    run_command(&mut cmd)?;
+    Ok(())
 }
 
 fn run_m6_process_control_acceptance() -> Result<(), XtaskError> {

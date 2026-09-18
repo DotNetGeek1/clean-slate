@@ -691,13 +691,19 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
         cap_abi::SYSCALL_NR_CAP_REVOKE => crate::capability::revocation::handle_syscall(frame),
         cap_abi::SYSCALL_NR_CAP_AUDIT_READ => crate::capability::audit::handle_syscall(frame),
         cap_abi::SYSCALL_NR_CAP_GRANT => crate::capability::bootstrap_grant::handle_syscall(frame),
+        cap_abi::SYSCALL_NR_NETWORK_CAPABILITY => {
+            crate::service::net_syscall::handle_syscall_network_capability(frame)
+        }
+        cap_abi::SYSCALL_NR_NETWORK_REQUEST => {
+            crate::service::net_syscall::handle_syscall_network_request(frame)
+        }
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 
     frame as *mut SyscallContext as u64
 }
 
-fn current_syscall_caller_pid() -> Result<u64, &'static str> {
+pub(crate) fn current_syscall_caller_pid() -> Result<u64, &'static str> {
     let thread =
         without_interrupts(|| with_scheduler(|scheduler| scheduler.current_thread_descriptor()))?;
     if thread.kind != ThreadKind::User {

@@ -43,7 +43,8 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m7-net-service-self-test"
 ))]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
 #[cfg(not(any(
@@ -61,7 +62,8 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m7-net-service-self-test"
 )))]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
 #[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
@@ -81,7 +83,8 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m7-net-service-self-test"
 ))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 80;
 #[cfg(not(any(
@@ -99,7 +102,8 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 80;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m7-net-service-self-test"
 )))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 

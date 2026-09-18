@@ -1,50 +1,30 @@
-//! Kernel-hosted network bridge: client queue, service instance, loopback link.
+//! Kernel-hosted network bridge: client queue, loopback raw link, CPL3 service seam.
 
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_network::addr::MacAddr;
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
-use clean_slate_network::error::DenialReason;
-use clean_slate_network::limits::{
-    MAX_APPLICATION_PAYLOAD_BYTES, MAX_DEVICE_RX_QUEUE_DEPTH, MAX_ETHERNET_FRAME_BYTES,
-};
 use clean_slate_network::protocol::{NetworkRequest, NetworkResponse, TrustedCaller};
 use clean_slate_network::session::SessionGeneration;
 use clean_slate_service_fixtures::{
-    NetworkAuthorizer, NetworkOp, NetworkService, PassthroughPacketPath, NETWORK_DEVICE_ID,
-    NETWORK_MAX_PAYLOAD_BYTES, NETWORK_REQUEST_SLOTS,
+    NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES, NETWORK_REQUEST_SLOTS,
 };
 
 const LOOPBACK_MAC: MacAddr = MacAddr([0x02, 0x10, 0x77, 0, 0, 1]);
-
-const UNAUTHORIZED_TEST_PID: u64 = 72;
-
-struct FixtureNetAuthorizer;
-
-impl NetworkAuthorizer for FixtureNetAuthorizer {
-    fn authorize(&self, caller: &TrustedCaller, op: NetworkOp) -> Result<(), DenialReason> {
-        if caller.pid == UNAUTHORIZED_TEST_PID {
-            return Err(DenialReason::NoCapability);
-        }
-        if op == NetworkOp::RawDevice {
-            return Err(DenialReason::NoCapability);
-        }
-        Ok(())
-    }
-}
+const MAX_HOLDER_EXIT_QUEUE: usize = 8;
 
 #[derive(Clone, Copy)]
 struct RingSlot {
     len: u16,
-    bytes: [u8; MAX_ETHERNET_FRAME_BYTES],
+    bytes: [u8; clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES],
 }
 
 impl RingSlot {
     const fn empty() -> Self {
         Self {
             len: 0,
-            bytes: [0; MAX_ETHERNET_FRAME_BYTES],
+            bytes: [0; clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES],
         }
     }
 }
@@ -53,7 +33,7 @@ impl RingSlot {
 pub struct KernelLoopbackLink {
     link: LinkProperties,
     state: DeviceState,
-    rx: [RingSlot; MAX_DEVICE_RX_QUEUE_DEPTH as usize],
+    rx: [RingSlot; clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as usize],
     rx_head: u8,
     rx_tail: u8,
     rx_count: u8,
@@ -64,7 +44,7 @@ impl KernelLoopbackLink {
         Self {
             link: LinkProperties::new(LOOPBACK_MAC, true),
             state: DeviceState::Ready,
-            rx: [RingSlot::empty(); MAX_DEVICE_RX_QUEUE_DEPTH as usize],
+            rx: [RingSlot::empty(); clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as usize],
             rx_head: 0,
             rx_tail: 0,
             rx_count: 0,
@@ -72,17 +52,19 @@ impl KernelLoopbackLink {
     }
 
     fn push_rx(&mut self, frame: FrameBuf) -> Result<(), NetworkDeviceError> {
-        if self.rx_count as usize >= MAX_DEVICE_RX_QUEUE_DEPTH as usize {
+        if self.rx_count as usize
+            >= clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as usize
+        {
             return Err(NetworkDeviceError::QueueFull);
         }
         let bytes = frame.as_slice();
-        if bytes.len() > MAX_ETHERNET_FRAME_BYTES {
+        if bytes.len() > clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES {
             return Err(NetworkDeviceError::Oversized);
         }
         let slot = &mut self.rx[self.rx_tail as usize];
         slot.len = bytes.len() as u16;
         slot.bytes[..bytes.len()].copy_from_slice(bytes);
-        self.rx_tail = (self.rx_tail + 1) % MAX_DEVICE_RX_QUEUE_DEPTH as u8;
+        self.rx_tail = (self.rx_tail + 1) % clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as u8;
         self.rx_count += 1;
         Ok(())
     }
@@ -115,7 +97,8 @@ impl NetworkLink for KernelLoopbackLink {
         let len = slot.len as usize;
         let frame =
             FrameBuf::from_slice(&slot.bytes[..len]).map_err(|_| NetworkDeviceError::Malformed)?;
-        self.rx_head = (self.rx_head + 1) % MAX_DEVICE_RX_QUEUE_DEPTH as u8;
+        self.rx_head =
+            (self.rx_head + 1) % clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as u8;
         self.rx_count -= 1;
         Ok(Some(frame))
     }
@@ -172,11 +155,15 @@ pub(crate) struct NetBridge {
     service_pid: u64,
     service_domain: u64,
     session_generation: SessionGeneration,
-    service:
-        Option<NetworkService<KernelLoopbackLink, FixtureNetAuthorizer, PassthroughPacketPath>>,
+    loopback: KernelLoopbackLink,
     slots: [ClientSlot; NETWORK_REQUEST_SLOTS],
     next_request_id: u64,
     inflight_failed: u32,
+    holder_exit_queue: [TrustedCaller; MAX_HOLDER_EXIT_QUEUE],
+    holder_exit_head: u8,
+    holder_exit_tail: u8,
+    /// Holder exit popped by the live service, awaiting `NET_SUBOP_ACK_HOLDER_EXIT`.
+    pending_holder_exit_ack: Option<TrustedCaller>,
 }
 
 impl NetBridge {
@@ -185,34 +172,27 @@ impl NetBridge {
             service_pid: 0,
             service_domain: 0,
             session_generation: SessionGeneration::new(0),
-            service: None,
+            loopback: KernelLoopbackLink::new(),
             slots: [ClientSlot::free(); NETWORK_REQUEST_SLOTS],
             next_request_id: 1,
             inflight_failed: 0,
+            holder_exit_queue: [TrustedCaller::new(0, 0, 0); MAX_HOLDER_EXIT_QUEUE],
+            holder_exit_head: 0,
+            holder_exit_tail: 0,
+            pending_holder_exit_ack: None,
         }
     }
 
-    pub fn attach_service_instance(
+    pub fn register_service_instance(
         &mut self,
         pid: u64,
         domain: u64,
         generation: u64,
     ) -> SessionGeneration {
-        if let Some(old) = self.service.take() {
-            let failed = old.pending_requests();
-            self.inflight_failed = self.inflight_failed.saturating_add(failed);
-            let _ = old.shutdown();
-        }
+        let _ = self.loopback.reset();
         self.service_pid = pid;
         self.service_domain = domain;
         self.session_generation = SessionGeneration::new(generation);
-        let mut service = NetworkService::new(
-            self.session_generation,
-            FixtureNetAuthorizer,
-            PassthroughPacketPath,
-        );
-        service.attach_backend(KernelLoopbackLink::new());
-        self.service = Some(service);
         self.session_generation
     }
 
@@ -232,21 +212,53 @@ impl NetBridge {
         self.inflight_failed = 0;
     }
 
-    fn service_mut(
-        &mut self,
-    ) -> Option<&mut NetworkService<KernelLoopbackLink, FixtureNetAuthorizer, PassthroughPacketPath>>
-    {
-        self.service.as_mut()
+    pub fn is_live_service(&self, pid: u64) -> bool {
+        self.service_pid != 0 && self.service_pid == pid
     }
 
-    fn trusted_caller(&self, pid: u64, instance_generation: u64) -> TrustedCaller {
+    fn trusted_caller(&self, pid: u64, domain: u64, instance_generation: u64) -> TrustedCaller {
         // TODO(#87): derive live holder instance_generation from capability broker.
-        TrustedCaller::new(pid, self.service_domain, instance_generation)
+        TrustedCaller::new(pid, domain, instance_generation)
+    }
+
+    pub fn push_holder_exit(&mut self, caller: TrustedCaller) {
+        let next = (self.holder_exit_tail + 1) % MAX_HOLDER_EXIT_QUEUE as u8;
+        if next == self.holder_exit_head {
+            return;
+        }
+        self.holder_exit_queue[self.holder_exit_tail as usize] = caller;
+        self.holder_exit_tail = next;
+    }
+
+    pub fn pop_holder_exit(&mut self) -> Option<TrustedCaller> {
+        if self.holder_exit_head == self.holder_exit_tail {
+            return None;
+        }
+        let caller = self.holder_exit_queue[self.holder_exit_head as usize];
+        self.holder_exit_head = (self.holder_exit_head + 1) % MAX_HOLDER_EXIT_QUEUE as u8;
+        self.pending_holder_exit_ack = Some(caller);
+        Some(caller)
+    }
+
+    pub fn ack_holder_exit(&mut self, service_pid: u64, sessions: u64, pending: u64) -> Result<(), NetBridgeError> {
+        if !self.is_live_service(service_pid) {
+            return Err(NetBridgeError::NotService);
+        }
+        let caller = self
+            .pending_holder_exit_ack
+            .take()
+            .ok_or(NetBridgeError::InvalidRequest)?;
+        let _ = crate::capability::network::on_holder_exit(clean_slate_capability::HolderId(caller.pid));
+        kernel_log_fmt(format_args!(
+            "[NET ] holder exit reclaimed sessions={sessions} pending={pending}\n"
+        ));
+        Ok(())
     }
 
     pub fn submit(
         &mut self,
         pid: u64,
+        domain: u64,
         instance_generation: u64,
         request_wire: &[u8; 64],
         payload: &[u8],
@@ -262,7 +274,7 @@ impl NetBridge {
         self.next_request_id = self.next_request_id.saturating_add(1);
         let mut slot = ClientSlot::free();
         slot.state = ClientSlotState::Pending;
-        slot.client = self.trusted_caller(pid, instance_generation);
+        slot.client = self.trusted_caller(pid, domain, instance_generation);
         slot.request_id = request_id;
         slot.request = request;
         let copy_len = payload.len().min(NETWORK_MAX_PAYLOAD_BYTES);
@@ -275,11 +287,12 @@ impl NetBridge {
     pub fn poll(
         &mut self,
         pid: u64,
+        domain: u64,
         instance_generation: u64,
         request_id: u64,
         out_payload: &mut [u8],
     ) -> Result<NetworkResponse, NetBridgeError> {
-        let caller = self.trusted_caller(pid, instance_generation);
+        let caller = self.trusted_caller(pid, domain, instance_generation);
         let index = self
             .slots
             .iter()
@@ -306,14 +319,19 @@ impl NetBridge {
         }
     }
 
-    pub fn service_next(&mut self) -> Option<(u64, NetworkRequest, u32)> {
+    pub fn service_next(&mut self) -> Option<(u64, NetworkRequest, u32, TrustedCaller)> {
         let index = self
             .slots
             .iter()
             .position(|slot| slot.state == ClientSlotState::Pending)?;
         self.slots[index].state = ClientSlotState::InService;
         let slot = &self.slots[index];
-        Some((slot.request_id, slot.request, slot.payload_len))
+        Some((
+            slot.request_id,
+            slot.request,
+            slot.payload_len,
+            slot.client,
+        ))
     }
 
     pub fn service_complete(
@@ -338,80 +356,47 @@ impl NetBridge {
         Ok(())
     }
 
-    pub fn process_one_pending(&mut self) -> bool {
-        let index = match self
-            .slots
-            .iter()
-            .position(|slot| slot.state == ClientSlotState::Pending)
-        {
-            Some(index) => index,
-            None => return false,
-        };
-        self.slots[index].state = ClientSlotState::InService;
-        let slot = &self.slots[index];
-        let mut payload_copy = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-        let payload_len = slot.payload_len as usize;
-        payload_copy[..payload_len].copy_from_slice(&slot.payload[..payload_len]);
-        let request_id = slot.request_id;
-        let request = slot.request;
-        let caller = slot.client;
-        let Some(service) = self.service_mut() else {
-            let _ = self.service_complete(
-                request_id,
-                NetworkResponse::Error {
-                    code: clean_slate_network::error::NetworkError::Reset.code(),
-                },
-                &[],
-            );
-            return true;
-        };
-        let mut response_payload = [0u8; MAX_APPLICATION_PAYLOAD_BYTES];
-        let (response, _) = service.handle_request(
-            caller,
-            request,
-            &payload_copy[..payload_len],
-            &mut response_payload,
-        );
-        let out_len = match response {
-            NetworkResponse::Receive { payload_len } => payload_len as usize,
-            _ => 0,
-        };
-        let _ = self.service_complete(request_id, response, &response_payload[..out_len]);
-        true
+    pub fn service_take_payload(&self, request_id: u64) -> Option<[u8; NETWORK_MAX_PAYLOAD_BYTES]> {
+        let slot = self.slots.iter().find(|s| s.request_id == request_id)?;
+        let mut buf = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+        let len = slot.payload_len as usize;
+        buf[..len].copy_from_slice(&slot.payload[..len]);
+        Some(buf)
     }
 
-    pub fn on_holder_exit(&mut self, pid: u64, instance_generation: u64) -> (u32, u32) {
-        let caller = self.trusted_caller(pid, instance_generation);
-        let mut reclaimed_slots = 0u32;
+    pub fn reclaim_for_holder(&mut self, pid: u64) -> usize {
+        let mut reclaimed = 0usize;
+        let mut caller = None;
         for slot in &mut self.slots {
-            if slot.state != ClientSlotState::Free && slot.client.pid == caller.pid {
+            if slot.state != ClientSlotState::Free && slot.client.pid == pid {
+                if caller.is_none() {
+                    caller = Some(slot.client);
+                }
                 *slot = ClientSlot::free();
-                reclaimed_slots += 1;
+                reclaimed += 1;
             }
         }
-        let (sessions, pending) = self
-            .service_mut()
-            .map(|service| service.on_holder_exit(caller))
-            .unwrap_or((0, 0));
-        let _ = pending;
-        (sessions, reclaimed_slots)
+        if let Some(caller) = caller {
+            self.push_holder_exit(caller);
+        }
+        reclaimed
     }
 
     pub fn shutdown_service(&mut self) -> u32 {
-        let Some(service) = self.service.take() else {
-            return 0;
-        };
-        let failed = service.pending_requests();
+        let mut failed = 0u32;
         for slot in &mut self.slots {
-            if slot.state == ClientSlotState::Pending || slot.state == ClientSlotState::InService {
+            if slot.state == ClientSlotState::Pending || slot.state == ClientSlotState::InService
+            {
                 slot.response = NetworkResponse::Error {
                     code: clean_slate_network::error::NetworkError::Reset.code(),
                 };
                 slot.response_payload_len = 0;
                 slot.state = ClientSlotState::Done;
+                failed += 1;
             }
         }
-        let _ = service.shutdown();
+        self.inflight_failed = self.inflight_failed.saturating_add(failed);
+        let _ = self.loopback.reset();
         self.service_pid = 0;
         failed
     }
@@ -427,22 +412,31 @@ impl NetBridge {
         requeued
     }
 
-    pub fn reclaim_for_holder(&mut self, pid: u64) -> usize {
-        let mut reclaimed = 0usize;
-        for slot in &mut self.slots {
-            if slot.state != ClientSlotState::Free && slot.client.pid == pid {
-                *slot = ClientSlot::free();
-                reclaimed += 1;
-            }
+    pub fn raw_transmit(&mut self, service_pid: u64, frame: FrameBuf) -> Result<(), NetworkDeviceError> {
+        if !self.is_live_service(service_pid) {
+            return Err(NetworkDeviceError::NotReady);
         }
-        reclaimed
+        self.loopback
+            .transmit(frame)
+            .map_err(|(err, _)| err)
     }
 
-    pub fn raw_geometry(&self) -> LinkProperties {
-        self.service
-            .as_ref()
-            .and_then(|service| service.link_properties())
-            .unwrap_or_else(|| LinkProperties::new(LOOPBACK_MAC, false))
+    pub fn raw_receive(
+        &mut self,
+        service_pid: u64,
+    ) -> Result<Option<FrameBuf>, NetworkDeviceError> {
+        if !self.is_live_service(service_pid) {
+            return Err(NetworkDeviceError::NotReady);
+        }
+        self.loopback.receive()
+    }
+
+    pub fn raw_geometry(&self, service_pid: u64) -> LinkProperties {
+        if self.is_live_service(service_pid) {
+            self.loopback.link()
+        } else {
+            LinkProperties::new(LOOPBACK_MAC, false)
+        }
     }
 }
 
@@ -462,10 +456,6 @@ pub(crate) fn net_bridge_mut() -> &'static mut NetBridge {
     unsafe { &mut *NET_BRIDGE.get() }
 }
 
-pub(crate) fn authorize_raw_device_access(caller_pid: u64, service_pid: u64) -> bool {
-    caller_pid == service_pid
-}
-
 pub(crate) fn recover_net_queue_for_service_holder_exit(service_pid: u64) {
     if net_bridge_mut().service_pid() != service_pid {
         return;
@@ -478,13 +468,14 @@ pub(crate) fn recover_net_queue_for_service_holder_exit(service_pid: u64) {
     }
 }
 
-pub(crate) fn reclaim_net_requests_for_holder(pid: u64) {
+pub(crate) fn reclaim_net_requests_for_holder(pid: u64) -> usize {
     let reclaimed = net_bridge_mut().reclaim_for_holder(pid);
     if reclaimed > 0 {
         kernel_log_fmt(format_args!(
             "[NET ] queue reclaimed holder={pid} requests={reclaimed}\n"
         ));
     }
+    reclaimed
 }
 
 pub(crate) fn shutdown_net_service_instance() -> u32 {
@@ -493,6 +484,12 @@ pub(crate) fn shutdown_net_service_instance() -> u32 {
 
 pub(crate) fn network_device_id() -> u64 {
     NETWORK_DEVICE_ID
+}
+
+pub(crate) fn log_network_denied(pid: u64) {
+    kernel_log_fmt(format_args!(
+        "[NET ] denied pid={pid} reason=no-authority\n"
+    ));
 }
 
 #[cfg(test)]
@@ -510,25 +507,18 @@ mod tests {
     }
 
     #[test]
-    fn bridge_submit_poll_open_close() {
+    fn bridge_submit_poll_without_service_leaves_pending() {
         let mut bridge = NetBridge::new();
-        bridge.attach_service_instance(10, 1, 3);
+        bridge.register_service_instance(10, 1, 3);
         let open = NetworkRequest::Open {
             kind: SocketKind::Udp,
         }
         .encode();
-        let id = bridge.submit(20, 1, &open, &[]).unwrap();
-        assert!(bridge.process_one_pending());
+        let id = bridge.submit(20, 1, 1, &open, &[]).unwrap();
         let mut payload = [0u8; 64];
-        let response = bridge.poll(20, 1, id, &mut payload).unwrap();
-        let session = match response {
-            NetworkResponse::Open { session } => session,
-            _ => panic!("expected open"),
-        };
-        let close = NetworkRequest::Close { session }.encode();
-        let id2 = bridge.submit(20, 1, &close, &[]).unwrap();
-        assert!(bridge.process_one_pending());
-        let response2 = bridge.poll(20, 1, id2, &mut payload).unwrap();
-        assert!(matches!(response2, NetworkResponse::Close));
+        assert!(matches!(
+            bridge.poll(20, 1, 1, id, &mut payload),
+            Err(NetBridgeError::Pending)
+        ));
     }
 }

@@ -53,6 +53,13 @@ fn main() {
             true,
         );
     }
+    if env::var("CARGO_FEATURE_M7_NET_SERVICE_SELF_TEST").is_ok() {
+        embed_userspace_image(
+            "network_userspace.bin",
+            "clean-slate-network-userspace",
+            true,
+        );
+    }
 }
 
 fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bool) {
@@ -103,6 +110,10 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
             "m6_fixture_userspace.bin" => (
                 "m6_fixture_userspace_entry.rs",
                 "M6_FIXTURE_USERSPACE_ENTRY_OFFSET",
+            ),
+            "network_userspace.bin" => (
+                "network_userspace_entry.rs",
+                "NETWORK_USERSPACE_ENTRY_OFFSET",
             ),
             _ => panic!("unexpected userspace image {raw_name}"),
         };

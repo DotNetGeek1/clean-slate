@@ -8,7 +8,9 @@ use crate::service::capability::LifecycleControlCapabilityError;
 use crate::service::capability::{BlockDeviceCapabilityError, BlockDeviceCapabilityTable};
 use crate::service::spawn::launch_builtin_service;
 use crate::sync::global_cell::GlobalCell;
-use clean_slate_service_fixtures::{STORAGE_BLOCK_DEVICE_ID, STORAGE_SERVICE_ID};
+use clean_slate_service_fixtures::{
+    NETWORK_DEVICE_ID, NETWORK_SERVICE_ID, STORAGE_BLOCK_DEVICE_ID, STORAGE_SERVICE_ID,
+};
 use clean_slate_service_lifecycle::apply_transition;
 use clean_slate_service_lifecycle::ControlRequest;
 use clean_slate_service_lifecycle::ControlRequestKind;
@@ -279,7 +281,8 @@ impl ServiceLifecycleController {
         feature = "m6-revocation-self-test",
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
-        feature = "m6-fixture-smoke-self-test"
+        feature = "m6-fixture-smoke-self-test",
+        feature = "m7-net-service-self-test"
     ))]
     pub(crate) fn notify_exited_live_process(
         &mut self,
@@ -580,29 +583,75 @@ impl ServiceLifecycleController {
     where
         F: FnMut(u64) -> Result<(), &'static str>,
     {
-        if service_id != STORAGE_SERVICE_ID {
-            return Ok(());
-        }
-        if let Err(message) = self
-            .block_capabilities
-            .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
-        {
+        if service_id == STORAGE_SERVICE_ID {
+            if let Err(message) = self
+                .block_capabilities
+                .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
+            {
+                kernel_log_fmt(format_args!(
+                    "[FAIL] block capability grant failed pid={} service={} err={message}\n",
+                    pid, service_id.0
+                ));
+                rollback_spawn(pid).map_err(|_| {
+                    LifecycleControlError::SpawnFailed(
+                        "storage service block-capability rollback teardown failed",
+                    )
+                })?;
+                return Err(LifecycleControlError::SpawnFailed(message));
+            }
             kernel_log_fmt(format_args!(
-                "[FAIL] block capability grant failed pid={} service={} err={message}\n",
-                pid, service_id.0
+                "[BLK ] authority granted pid={} device={}\n",
+                pid, STORAGE_BLOCK_DEVICE_ID
             ));
-            rollback_spawn(pid).map_err(|_| {
-                LifecycleControlError::SpawnFailed(
-                    "storage service block-capability rollback teardown failed",
-                )
-            })?;
-            return Err(LifecycleControlError::SpawnFailed(message));
+        } else if service_id == NETWORK_SERVICE_ID {
+            use clean_slate_capability::{HolderId, ResourceClass, Rights};
+            use crate::capability::network::{grant_network_authority, NetworkGrantPolicy};
+            let rights = Rights::valid_for(ResourceClass::Network);
+            if grant_network_authority(HolderId(pid), rights, NetworkGrantPolicy::NetworkService).is_err() {
+                kernel_log_fmt(format_args!(
+                    "[FAIL] network capability grant failed pid={} service={}\n",
+                    pid, service_id.0
+                ));
+                rollback_spawn(pid).map_err(|_| {
+                    LifecycleControlError::SpawnFailed(
+                        "network service capability rollback teardown failed",
+                    )
+                })?;
+                return Err(LifecycleControlError::SpawnFailed(
+                    "network service capability grant failed",
+                ));
+            }
+            let generation = self
+                .authoritative_generation(service_id)
+                .map(|g| u64::from(g.0))
+                .unwrap_or(0);
+            crate::service::net_bridge::net_bridge_mut().register_service_instance(
+                pid,
+                pid,
+                generation,
+            );
+            kernel_log_fmt(format_args!(
+                "[NET ] authority granted pid={} device={}\n",
+                pid, NETWORK_DEVICE_ID
+            ));
         }
-        kernel_log_fmt(format_args!(
-            "[BLK ] authority granted pid={} device={}\n",
-            pid, STORAGE_BLOCK_DEVICE_ID
-        ));
         Ok(())
+    }
+
+    pub(crate) fn grant_network_client_capability(
+        &mut self,
+        pid: u64,
+    ) -> Result<u64, &'static str> {
+        use clean_slate_capability::{HolderId, Rights};
+        use crate::capability::network::{grant_network_authority, NetworkGrantPolicy};
+        let rights = Rights::NET_RESOLVE
+            .union(Rights::NET_CONNECT)
+            .union(Rights::NET_SEND)
+            .union(Rights::NET_RECEIVE);
+        let handle =
+            grant_network_authority(HolderId(pid), rights, NetworkGrantPolicy::Application)
+                .map_err(|_| "network client capability grant failed")?;
+        Ok(handle.encode())
     }
 
     fn terminate_service(
@@ -617,6 +666,11 @@ impl ServiceLifecycleController {
             .live
             .ok_or(LifecycleControlError::ServiceNotLive)?;
         self.log_terminate(service_id, live.pid);
+        #[cfg(feature = "m7-net-service-self-test")]
+        if service_id == NETWORK_SERVICE_ID {
+            let failed = crate::service::net_bridge::shutdown_net_service_instance();
+            kernel_log_fmt(format_args!("[NET ] inflight failed count={failed}\n"));
+        }
         teardown_process_by_id(
             allocator,
             self.kernel_root_frame,
@@ -725,9 +779,9 @@ impl ServiceLifecycleController {
 
         match kind {
             ControlRequestKind::Start => {
+                self.services[service_index].authoritative_generation = next_generation;
                 let result = self.start_service(allocator, service_id, next_generation)?;
                 self.services[service_index].state = next_state;
-                self.services[service_index].authoritative_generation = next_generation;
                 Ok(result)
             }
             ControlRequestKind::Terminate | ControlRequestKind::Stop => {

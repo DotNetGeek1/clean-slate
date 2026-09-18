@@ -142,8 +142,10 @@ pub(crate) fn teardown_current_process(
     recover_object_queue_for_service_holder_exit(holder);
     reclaim_object_requests_for_holder(holder);
     recover_net_queue_for_service_holder_exit(holder.0);
-    reclaim_net_requests_for_holder(holder.0);
-    let _ = crate::capability::network::on_holder_exit(holder);
+    let net_reclaimed = reclaim_net_requests_for_holder(holder.0);
+    if net_reclaimed == 0 {
+        let _ = crate::capability::network::on_holder_exit(holder);
+    }
     revoke_for_holder(holder);
     revoke_for_process_resource(process_id);
     discard_bootstrap_grants_for_holder(holder);
@@ -256,7 +258,10 @@ pub(crate) fn teardown_process_by_id(
         recover_object_queue_for_service_holder_exit(holder);
         reclaim_object_requests_for_holder(holder);
         recover_net_queue_for_service_holder_exit(holder.0);
-        reclaim_net_requests_for_holder(holder.0);
+        let net_reclaimed = reclaim_net_requests_for_holder(holder.0);
+        if net_reclaimed == 0 {
+            let _ = crate::capability::network::on_holder_exit(holder);
+        }
         revoke_for_holder(holder);
         revoke_for_process_resource(process_id);
         discard_bootstrap_grants_for_holder(holder);

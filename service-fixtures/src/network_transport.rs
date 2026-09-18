@@ -6,12 +6,21 @@ use clean_slate_network::protocol::{
 
 pub const NETWORK_UNAUTHORIZED_PROBE_SERVICE_ID_VALUE: u32 = 0x0000_5201;
 pub const NETWORK_DEVICE_ID: u64 = 1;
+/// Application network access (submit/poll); distinct from raw NIC authority.
+pub const NETWORK_CLIENT_DEVICE_ID: u64 = 2;
+
+pub const NETWORK_STATUS_PENDING: u64 = 0xFFFF_FFFF_FFFF_FFF0;
 
 pub const NETWORK_SERVICE_BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0020_0000;
+
+pub const NETWORK_CAPABILITY_VERSION: u16 = 1;
 
 pub const NETWORK_SERVICE_MODE_ACCEPTANCE: u64 = 1;
 pub const NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE: u64 = 2;
 pub const NETWORK_SERVICE_MODE_CLIENT: u64 = 3;
+pub const NETWORK_SERVICE_MODE_INFLIGHT_ARM: u64 = 4;
+pub const NETWORK_SERVICE_MODE_STALE_CLOSE: u64 = 5;
+pub const NETWORK_SERVICE_MODE_CAPACITY_LOOP: u64 = 6;
 
 pub const NETWORK_SERVICE_RESULT_PENDING: u64 = 0;
 pub const NETWORK_SERVICE_RESULT_OK: u64 = 1;
@@ -22,6 +31,10 @@ pub const NET_SUBOP_POLL: u64 = 2;
 pub const NET_SUBOP_SERVICE_NEXT: u64 = 3;
 pub const NET_SUBOP_SERVICE_COMPLETE: u64 = 4;
 pub const NET_SUBOP_RAW_GEOMETRY: u64 = 5;
+pub const NET_SUBOP_RAW_TRANSMIT: u64 = 6;
+pub const NET_SUBOP_RAW_RECEIVE: u64 = 7;
+pub const NET_SUBOP_POP_HOLDER_EXIT: u64 = 8;
+pub const NET_SUBOP_ACK_HOLDER_EXIT: u64 = 9;
 
 pub const NET_SERVICE_ROLE_ID: u64 = 1;
 

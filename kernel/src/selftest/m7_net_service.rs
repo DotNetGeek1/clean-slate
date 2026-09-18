@@ -1,31 +1,110 @@
-//! M7.3 network service constituent self-test.
+//! M7.3 network service constituent self-test (CPL3 service + syscall path).
 
+use crate::arch::x86_64::apic::reprogram_local_apic_timer;
+use crate::arch::x86_64::context_switch::restore_task_context;
+use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
+use crate::interrupt::timer::initialize_timer;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
+use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
+use crate::arch::x86_64::cpu::without_interrupts;
+use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
+use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::scheduler_mut;
+use crate::sched::ThreadState;
+use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
-use crate::service::net_bridge::{net_bridge_mut, shutdown_net_service_instance};
+use crate::service::control::ServiceLifecycleController;
 use crate::service::service_lifecycle_controller_mut;
+use crate::service::spawn::launch_network_aux_process;
+use crate::sync::global_cell::GlobalCell;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
-use clean_slate_network::error::NetworkError;
-use clean_slate_network::limits::MAX_SESSIONS;
-use clean_slate_network::protocol::{NetworkRequest, NetworkResponse};
-use clean_slate_network::session::SocketKind;
-use clean_slate_service_fixtures::NETWORK_SERVICE_ID;
+use crate::syscall::service_lifecycle_syscall_allocator_mut;
+use clean_slate_service_fixtures::{
+    NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
+    NETWORK_SERVICE_MODE_ACCEPTANCE, NETWORK_SERVICE_MODE_CAPACITY_LOOP,
+    NETWORK_SERVICE_MODE_CLIENT, NETWORK_SERVICE_MODE_INFLIGHT_ARM,
+    NETWORK_SERVICE_MODE_STALE_CLOSE, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
+    NETWORK_SERVICE_RESULT_OK, NETWORK_UNAUTHORIZED_SERVICE_ID,
+};
+use clean_slate_service_lifecycle::{
+    ControlRequest, ControlRequestKind, LifecycleMessage, ServiceId,
+};
 
 const PASS_MARKER: &str = "[M7.3] PASS";
-const SERVICE_PID: u64 = 70;
-const CLIENT_PID: u64 = 71;
-const UNAUTHORIZED_PID: u64 = 72;
-const CLIENT_GENERATION: u64 = 1;
+const SUPERVISOR_TEST_PID: u64 = 70;
+
+const CLIENT_ECHO_SLOT: usize = 1;
+const UNAUTHORIZED_PROBE_SLOT: usize = 2;
+const INFLIGHT_ARM_SLOT: usize = 3;
+const STALE_CLOSE_SLOT: usize = 4;
+const CAPACITY_LOOP_SLOT: usize = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum M7Phase {
+    AwaitClientEcho,
+    AwaitUnauthorized,
+    AwaitInflightArm,
+    AwaitStaleClose,
+    AwaitCapacityLoop,
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostTeardownLaunch {
+    None,
+    UnauthorizedProbe,
+    InflightArm,
+    StaleClose,
+    CapacityLoop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct M7NetSelfTestState {
+    lifecycle_capability: u64,
+    phase: M7Phase,
+    session_id_raw: u64,
+    service_generation: u64,
+}
+
+static M7_NET_SELF_TEST_STATE: GlobalCell<Option<M7NetSelfTestState>> = GlobalCell::new(None);
+
+fn set_state(state: Option<M7NetSelfTestState>) {
+    unsafe {
+        *M7_NET_SELF_TEST_STATE.get() = state;
+    }
+}
+
+fn state() -> M7NetSelfTestState {
+    unsafe {
+        (*M7_NET_SELF_TEST_STATE.get()).expect("m7 net self-test state was not initialized")
+    }
+}
+
+pub(crate) fn network_service_bootstrap(
+    service: ServiceId,
+) -> Result<NetworkServiceBootstrap, &'static str> {
+    let test_state = state();
+    match service {
+        NETWORK_SERVICE_ID => Ok(NetworkServiceBootstrap::new(
+            NETWORK_SERVICE_MODE_ACCEPTANCE,
+            test_state.service_generation,
+        )),
+        NETWORK_UNAUTHORIZED_SERVICE_ID => Ok(NetworkServiceBootstrap::new(
+            NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
+            0,
+        )),
+        _ => Err("unexpected network bootstrap service"),
+    }
+}
 
 pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
     unsafe {
@@ -34,205 +113,318 @@ pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
         *scheduler_mut() = Scheduler::new();
     }
     let kernel_root = current_root_frame_address();
-    let kernel_stack_top = 0;
+    let kernel_stack_top = unsafe {
+        let stacks = &*task_stacks_mut();
+        task_stack_top(&stacks[0])
+    };
     install_service_lifecycle_syscall_allocator(allocator);
+    let lifecycle_capability = {
+        let controller = unsafe { service_lifecycle_controller_mut() };
+        controller.clear();
+        controller.configure_launch_context(kernel_root, kernel_stack_top);
+        controller
+            .declare_service(NETWORK_SERVICE_ID)
+            .unwrap_or_else(|message| fatal_kernel_error(message));
+        controller
+            .declare_service(NETWORK_UNAUTHORIZED_SERVICE_ID)
+            .unwrap_or_else(|message| fatal_kernel_error(message));
+        controller
+            .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID)
+            .unwrap_or_else(|message| fatal_kernel_error(message))
+    };
+    set_state(Some(M7NetSelfTestState {
+        lifecycle_capability,
+        phase: M7Phase::AwaitClientEcho,
+        session_id_raw: 0,
+        service_generation: 1,
+    }));
+    let allocator = service_lifecycle_syscall_allocator_mut()
+        .as_mut()
+        .unwrap_or_else(|| fatal_kernel_error("m7 net allocator missing"));
     let controller = unsafe { service_lifecycle_controller_mut() };
-    controller.clear();
-    controller.configure_launch_context(kernel_root, kernel_stack_top);
-    controller
-        .declare_service(NETWORK_SERVICE_ID)
-        .unwrap_or_else(|message| fatal_kernel_error(message));
-
-    run_scenario();
-
-    kernel_log_line(PASS_MARKER);
-    qemu_exit(QEMU_EXIT_SUCCESS)
+    launch_network_service(controller, allocator, lifecycle_capability, NETWORK_SERVICE_ID);
+    log_service_started(controller, 1);
+    launch_client_echo(controller, allocator, CLIENT_ECHO_SLOT);
+    initialize_timer();
+    reprogram_local_apic_timer(50_000);
+    let frame_pointer =
+        start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
+    unsafe { restore_task_context(frame_pointer) }
 }
 
-fn run_scenario() {
-    let gen1 = net_bridge_mut().attach_service_instance(SERVICE_PID, 1, 1);
+fn log_service_started(controller: &ServiceLifecycleController, generation: u64) {
+    let pid = controller.live_pid(NETWORK_SERVICE_ID).unwrap_or(0);
     kernel_log_fmt(format_args!(
-        "[NET ] service started pid={SERVICE_PID} generation={}\n",
-        gen1.get()
+        "[NET ] service started pid={pid} generation={generation}\n"
     ));
+}
 
-    let session = client_open_session(CLIENT_PID, gen1);
-    kernel_log_fmt(format_args!("[NET ] session open id={}\n", session.raw()));
+fn launch_network_service(
+    controller: &mut ServiceLifecycleController,
+    allocator: &mut PageAllocator,
+    lifecycle_capability: u64,
+    service: ServiceId,
+) {
+    let _ = controller
+        .handle_control_message(
+            allocator,
+            SUPERVISOR_TEST_PID,
+            lifecycle_capability,
+            &LifecycleMessage::ControlRequest(ControlRequest::new(
+                service,
+                ControlRequestKind::Start,
+            ))
+            .encode(),
+        )
+        .unwrap_or_else(|_| fatal_kernel_error("m7 network service launch failed"));
+}
 
-    let echo_payload = b"m7-echo-payload";
-    client_send(CLIENT_PID, session, echo_payload);
-    let mut recv_buf = [0u8; 512];
-    let received_len = client_receive(CLIENT_PID, session, &mut recv_buf);
-    if &recv_buf[..received_len] != echo_payload {
-        fatal_kernel_error("echo payload mismatch");
+fn launch_client_echo(
+    controller: &mut ServiceLifecycleController,
+    allocator: &mut PageAllocator,
+    slot: usize,
+) {
+    let test_state = state();
+    let stack_top = unsafe { task_stack_top(&(*task_stacks_mut())[slot]) };
+    let bootstrap =
+        NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_CLIENT, test_state.service_generation);
+    let spawned = launch_network_aux_process(allocator, stack_top, slot, bootstrap)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
+    controller
+        .grant_network_client_capability(spawned.pid)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
+}
+
+fn launch_aux(
+    controller: &mut ServiceLifecycleController,
+    allocator: &mut PageAllocator,
+    slot: usize,
+    mode: u64,
+    generation: u64,
+    grant_client: bool,
+) {
+    let stack_top = unsafe { task_stack_top(&(*task_stacks_mut())[slot]) };
+    let bootstrap = NetworkServiceBootstrap::new(mode, generation);
+    let spawned = launch_network_aux_process(allocator, stack_top, slot, bootstrap)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
+    if grant_client {
+        controller
+            .grant_network_client_capability(spawned.pid)
+            .unwrap_or_else(|message| fatal_kernel_error(message));
     }
-    kernel_log_fmt(format_args!("[NET ] echo ok len={received_len}\n"));
+}
 
-    probe_unauthorized_raw(UNAUTHORIZED_PID);
-    probe_unauthorized_session(UNAUTHORIZED_PID, session);
-    kernel_log_fmt(format_args!(
-        "[NET ] denied pid={UNAUTHORIZED_PID} reason=no-authority\n"
-    ));
+fn launch_aux_with_bootstrap(
+    controller: &mut ServiceLifecycleController,
+    allocator: &mut PageAllocator,
+    slot: usize,
+    bootstrap: NetworkServiceBootstrap,
+    grant_client: bool,
+) {
+    let stack_top = unsafe { task_stack_top(&(*task_stacks_mut())[slot]) };
+    let spawned = launch_network_aux_process(allocator, stack_top, slot, bootstrap)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
+    if grant_client {
+        controller
+            .grant_network_client_capability(spawned.pid)
+            .unwrap_or_else(|message| fatal_kernel_error(message));
+    }
+}
 
-    let (reclaimed_sessions, reclaimed_pending) =
-        net_bridge_mut().on_holder_exit(CLIENT_PID, CLIENT_GENERATION);
-    kernel_log_fmt(format_args!(
-        "[NET ] holder exit reclaimed sessions={reclaimed_sessions} pending={reclaimed_pending}\n"
-    ));
+fn terminate_network_service(
+    controller: &mut ServiceLifecycleController,
+    allocator: &mut PageAllocator,
+    lifecycle_capability: u64,
+) {
+    let _ = controller
+        .handle_control_message(
+            allocator,
+            SUPERVISOR_TEST_PID,
+            lifecycle_capability,
+            &LifecycleMessage::ControlRequest(ControlRequest::new(
+                NETWORK_SERVICE_ID,
+                ControlRequestKind::Terminate,
+            ))
+            .encode(),
+        )
+        .unwrap_or_else(|_| fatal_kernel_error("m7 network service terminate failed"));
+}
 
-    let inflight = shutdown_net_service_instance();
-    kernel_log_fmt(format_args!("[NET ] inflight failed count={inflight}\n"));
+fn scheduler_slot_for_launch(post_launch: PostTeardownLaunch) -> usize {
+    match post_launch {
+        PostTeardownLaunch::UnauthorizedProbe => UNAUTHORIZED_PROBE_SLOT,
+        PostTeardownLaunch::InflightArm => INFLIGHT_ARM_SLOT,
+        PostTeardownLaunch::StaleClose => STALE_CLOSE_SLOT,
+        PostTeardownLaunch::CapacityLoop => CAPACITY_LOOP_SLOT,
+        PostTeardownLaunch::None => fatal_kernel_error("missing scheduler slot for post-teardown launch"),
+    }
+}
 
-    let gen2 = net_bridge_mut().attach_service_instance(SERVICE_PID + 10, 1, 2);
-    kernel_log_fmt(format_args!(
-        "[NET ] service restarted pid={} generation={}\n",
-        SERVICE_PID + 10,
-        gen2.get()
-    ));
+fn resume_scheduler_slot(slot: usize) -> u64 {
+    let stack_pointer = without_interrupts(|| {
+        let scheduler = unsafe { scheduler_mut() };
+        if slot >= scheduler.threads.len() {
+            return Err("m7 net self-test scheduler slot out of range");
+        }
+        scheduler.current_thread = Some(slot);
+        scheduler.threads[slot].started = true;
+        scheduler.threads[slot].state = ThreadState::Running;
+        Ok(scheduler.threads[slot].saved_stack_pointer)
+    })
+    .unwrap_or_else(|message| fatal_kernel_error(message));
+    prepare_current_scheduler_thread_dispatch()
+        .unwrap_or_else(|message| fatal_kernel_error(message));
+    stack_pointer
+}
 
-    let close = NetworkRequest::Close { session }.encode();
-    let id = net_bridge_mut()
-        .submit(CLIENT_PID, CLIENT_GENERATION, &close, &[])
-        .expect("submit stale close");
-    drain_service();
-    let mut out = [0u8; 64];
-    let response = net_bridge_mut()
-        .poll(CLIENT_PID, CLIENT_GENERATION, id, &mut out)
-        .expect("poll stale close");
-    match response {
-        NetworkResponse::Error { code }
-            if code
-                == NetworkError::Denied(
-                    clean_slate_network::error::DenialReason::StaleGeneration,
-                )
-                .code() =>
-        {
+fn launch_post_teardown(
+    post_launch: PostTeardownLaunch,
+    controller: &mut ServiceLifecycleController,
+    allocator: &mut PageAllocator,
+) {
+    let test_state = state();
+    match post_launch {
+        PostTeardownLaunch::None => {}
+        PostTeardownLaunch::UnauthorizedProbe => {
+            launch_aux(
+                controller,
+                allocator,
+                UNAUTHORIZED_PROBE_SLOT,
+                NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
+                0,
+                false,
+            );
+            kernel_log_line("[NET ] unauthorized probe launched");
+        }
+        PostTeardownLaunch::InflightArm => {
+            let mut bootstrap = NetworkServiceBootstrap::new(
+                NETWORK_SERVICE_MODE_INFLIGHT_ARM,
+                test_state.service_generation,
+            );
+            bootstrap.session_id_raw = test_state.session_id_raw;
+            launch_aux_with_bootstrap(
+                controller,
+                allocator,
+                INFLIGHT_ARM_SLOT,
+                bootstrap,
+                true,
+            );
+        }
+        PostTeardownLaunch::StaleClose => {
+            let mut bootstrap =
+                NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_STALE_CLOSE, 2);
+            bootstrap.session_id_raw = test_state.session_id_raw;
+            launch_aux_with_bootstrap(controller, allocator, STALE_CLOSE_SLOT, bootstrap, true);
+        }
+        PostTeardownLaunch::CapacityLoop => launch_aux(
+            controller,
+            allocator,
+            CAPACITY_LOOP_SLOT,
+            NETWORK_SERVICE_MODE_CAPACITY_LOOP,
+            test_state.service_generation,
+            true,
+        ),
+    }
+}
+
+pub(crate) fn handle_userspace_network_entry() -> u64 {
+    let _pid = crate::process::current_process_id().unwrap_or_else(|message| fatal_kernel_error(message));
+    let report = unsafe { &*(NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *const NetworkServiceBootstrap) };
+    let test_state = state();
+    let mut session_id_raw = test_state.session_id_raw;
+    let allocator = service_lifecycle_syscall_allocator_mut()
+        .as_mut()
+        .unwrap_or_else(|| fatal_kernel_error("m7 net allocator missing"));
+    let controller = unsafe { service_lifecycle_controller_mut() };
+
+    let (next_phase, post_launch) = match (test_state.phase, report.mode) {
+        (M7Phase::AwaitClientEcho, NETWORK_SERVICE_MODE_CLIENT) => {
+            if report.result_code != NETWORK_SERVICE_RESULT_OK {
+                fatal_kernel_error("m7 client echo failed");
+            }
+            session_id_raw = report.session_id_raw;
+            kernel_log_fmt(format_args!(
+                "[NET ] session open id={}\n",
+                report.session_id_raw
+            ));
+            kernel_log_fmt(format_args!("[NET ] echo ok len={}\n", report.echo_len));
+            (
+                M7Phase::AwaitUnauthorized,
+                PostTeardownLaunch::UnauthorizedProbe,
+            )
+        }
+        (M7Phase::AwaitUnauthorized, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE) => {
+            if report.result_code != NETWORK_SERVICE_RESULT_OK {
+                fatal_kernel_error("m7 unauthorized probe failed");
+            }
+            (M7Phase::AwaitInflightArm, PostTeardownLaunch::InflightArm)
+        }
+        (M7Phase::AwaitInflightArm, NETWORK_SERVICE_MODE_INFLIGHT_ARM) => {
+            if report.result_code != NETWORK_SERVICE_RESULT_OK {
+                fatal_kernel_error("m7 inflight arm failed");
+            }
+            terminate_network_service(controller, allocator, test_state.lifecycle_capability);
+            let mut test_state = test_state;
+            test_state.service_generation = 2;
+            set_state(Some(test_state));
+            launch_network_service(
+                controller,
+                allocator,
+                test_state.lifecycle_capability,
+                NETWORK_SERVICE_ID,
+            );
+            kernel_log_fmt(format_args!(
+                "[NET ] service restarted pid={} generation={}\n",
+                controller.live_pid(NETWORK_SERVICE_ID).unwrap_or(0),
+                test_state.service_generation
+            ));
+            (M7Phase::AwaitStaleClose, PostTeardownLaunch::StaleClose)
+        }
+        (M7Phase::AwaitStaleClose, NETWORK_SERVICE_MODE_STALE_CLOSE) => {
+            if report.result_code != NETWORK_SERVICE_RESULT_OK {
+                fatal_kernel_error("m7 stale close failed");
+            }
             kernel_log_fmt(format_args!(
                 "[NET ] stale-session denied generation={}\n",
-                gen1.get()
+                report.aux_status
             ));
+            (M7Phase::AwaitCapacityLoop, PostTeardownLaunch::CapacityLoop)
         }
-        _ => fatal_kernel_error("expected stale-session denial"),
-    }
-
-    capacity_baseline_loop(gen2);
-    kernel_log_line("[NET ] capacity baseline ok");
-}
-
-fn drain_service() {
-    while net_bridge_mut().process_one_pending() {}
-}
-
-fn client_open_session(
-    pid: u64,
-    service_generation: clean_slate_network::session::SessionGeneration,
-) -> clean_slate_network::session::SessionId {
-    let open = NetworkRequest::Open {
-        kind: SocketKind::Udp,
-    }
-    .encode();
-    let id = net_bridge_mut()
-        .submit(pid, CLIENT_GENERATION, &open, &[])
-        .expect("submit open");
-    drain_service();
-    let mut out = [0u8; 512];
-    let response = net_bridge_mut()
-        .poll(pid, CLIENT_GENERATION, id, &mut out)
-        .expect("poll open");
-    match response {
-        NetworkResponse::Open { session } => {
-            if !session.matches_generation(service_generation) {
-                fatal_kernel_error("session generation mismatch");
+        (M7Phase::AwaitCapacityLoop, NETWORK_SERVICE_MODE_CAPACITY_LOOP) => {
+            if report.result_code != NETWORK_SERVICE_RESULT_OK {
+                fatal_kernel_error("m7 capacity loop failed");
             }
-            session
+            kernel_log_line("[NET ] capacity baseline ok");
+            (M7Phase::Complete, PostTeardownLaunch::None)
         }
-        _ => fatal_kernel_error("client open failed"),
-    }
-}
+        _ => fatal_kernel_error("unexpected m7 net userspace trap phase/mode"),
+    };
 
-fn client_send(pid: u64, session: clean_slate_network::session::SessionId, payload: &[u8]) {
-    let send = NetworkRequest::Send {
-        session,
-        payload_len: payload.len() as u32,
-    }
-    .encode();
-    let id = net_bridge_mut()
-        .submit(pid, CLIENT_GENERATION, &send, payload)
-        .expect("submit send");
-    drain_service();
-    let mut out = [0u8; 512];
-    let response = net_bridge_mut()
-        .poll(pid, CLIENT_GENERATION, id, &mut out)
-        .expect("poll send");
-    if !matches!(response, NetworkResponse::Send { .. }) {
-        fatal_kernel_error("client send failed");
-    }
-}
+    set_state(Some(M7NetSelfTestState {
+        lifecycle_capability: test_state.lifecycle_capability,
+        phase: next_phase,
+        session_id_raw,
+        service_generation: state().service_generation,
+    }));
 
-fn client_receive(
-    pid: u64,
-    session: clean_slate_network::session::SessionId,
-    out: &mut [u8],
-) -> usize {
-    let recv = NetworkRequest::Receive {
-        session,
-        max_len: out.len() as u32,
-    }
-    .encode();
-    let id = net_bridge_mut()
-        .submit(pid, CLIENT_GENERATION, &recv, &[])
-        .expect("submit receive");
-    drain_service();
-    let response = net_bridge_mut()
-        .poll(pid, CLIENT_GENERATION, id, out)
-        .expect("poll receive");
-    match response {
-        NetworkResponse::Receive { payload_len } => payload_len as usize,
-        _ => fatal_kernel_error("client receive failed"),
-    }
-}
+    let teardown = teardown_current_process(allocator, current_root_frame_address(), 0, false)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
 
-fn probe_unauthorized_raw(pid: u64) {
-    if crate::service::net_bridge::authorize_raw_device_access(pid, SERVICE_PID) {
-        fatal_kernel_error("unauthorized raw access should fail");
+    if post_launch != PostTeardownLaunch::None {
+        launch_post_teardown(post_launch, controller, allocator);
+        if next_phase == M7Phase::Complete {
+            kernel_log_line(PASS_MARKER);
+            qemu_exit(QEMU_EXIT_SUCCESS);
+        }
+        return resume_scheduler_slot(scheduler_slot_for_launch(post_launch));
     }
-}
 
-fn probe_unauthorized_session(pid: u64, session: clean_slate_network::session::SessionId) {
-    let close = NetworkRequest::Close { session }.encode();
-    let id = net_bridge_mut()
-        .submit(pid, CLIENT_GENERATION, &close, &[])
-        .expect("submit unauthorized");
-    drain_service();
-    let mut out = [0u8; 64];
-    let response = net_bridge_mut()
-        .poll(pid, CLIENT_GENERATION, id, &mut out)
-        .expect("poll unauthorized");
-    if !matches!(
-        response,
-        NetworkResponse::Error {
-            code: c
-        } if c == NetworkError::Denied(clean_slate_network::error::DenialReason::NoCapability).code()
-    ) {
-        fatal_kernel_error("expected unauthorized session denial");
+    if next_phase == M7Phase::Complete {
+        kernel_log_line(PASS_MARKER);
+        qemu_exit(QEMU_EXIT_SUCCESS);
     }
-}
 
-fn capacity_baseline_loop(generation: clean_slate_network::session::SessionGeneration) {
-    for _ in 0..=(MAX_SESSIONS * 4) {
-        let session = client_open_session(CLIENT_PID, generation);
-        client_send(CLIENT_PID, session, b"x");
-        let mut buf = [0u8; 64];
-        let _ = client_receive(CLIENT_PID, session, &mut buf);
-        let close = NetworkRequest::Close { session }.encode();
-        let id = net_bridge_mut()
-            .submit(CLIENT_PID, CLIENT_GENERATION, &close, &[])
-            .expect("close");
-        drain_service();
-        let mut out = [0u8; 64];
-        let _ = net_bridge_mut()
-            .poll(CLIENT_PID, CLIENT_GENERATION, id, &mut out)
-            .expect("poll close");
-        net_bridge_mut().on_holder_exit(CLIENT_PID, CLIENT_GENERATION);
-    }
+    teardown
+        .next_stack_pointer
+        .unwrap_or_else(|| fatal_kernel_error("m7 net self-test teardown found no runnable thread"))
 }

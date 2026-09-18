@@ -2,6 +2,7 @@
 members = [ "block",
     "capability",
     "kernel",
+    "net-service",
     "network",
     "service-fixtures",
     "service-lifecycle",

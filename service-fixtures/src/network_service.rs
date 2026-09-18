@@ -229,7 +229,7 @@ where
         }
         if entry.owner != *caller {
             return Err(Self::error_response(NetworkError::Denied(
-                DenialReason::MissingRight,
+                DenialReason::NoCapability,
             )));
         }
         Ok(index)
@@ -598,7 +598,7 @@ mod tests {
             resp,
             NetworkResponse::Error {
                 code: c
-            } if c == NetworkError::Denied(DenialReason::MissingRight).code()
+            } if c == NetworkError::Denied(DenialReason::NoCapability).code()
         ));
     }
 
