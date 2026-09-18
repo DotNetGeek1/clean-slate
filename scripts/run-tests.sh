@@ -50,11 +50,13 @@ TEST_NAMES=(
   test-m6-capabilities
   test-m7-net-device
   test-m7-tls
+  test-m7-net-caps
+  test-m7-dns
 )
 
 test_role() {
   case "$1" in
-    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-device | test-m7-tls)
+    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-device | test-m7-tls | test-m7-net-caps | test-m7-dns)
       echo Constituent
       ;;
     test-m3 | test-m4 | test-m5 | test-m6)
@@ -99,6 +101,8 @@ test_description() {
     test-m6-capabilities) echo "M6.8 capability convergence acceptance" ;;
     test-m7-net-device) echo "M7.2 VirtIO-net device-lane QEMU acceptance" ;;
     test-m7-tls) echo "M7.6 TLS client QEMU acceptance (pass + fail-closed)" ;;
+    test-m7-net-caps) echo "M7.7 network capability broker and attribution acceptance" ;;
+    test-m7-dns) echo "M7.5 DNS resolver QEMU acceptance" ;;
     test-m6) echo "M6 milestone gate (capability host tests, fixture smoke, constituents, convergence)" ;;
     *) echo "" ;;
   esac
@@ -137,6 +141,8 @@ test_aliases() {
     test-m6-capabilities) echo "m6-capabilities m6.8" ;;
     test-m7-net-device) echo "m7-net-device m7.2" ;;
     test-m7-tls) echo "m7-tls m7.6" ;;
+    test-m7-net-caps) echo "m7-net-caps m7.7" ;;
+    test-m7-dns) echo "m7-dns m7.5" ;;
     test-m6) echo "m6 m6.9" ;;
     *) echo "" ;;
   esac

@@ -37,7 +37,8 @@ use crate::sched::ThreadKind;
         feature = "m5-block-self-test",
         feature = "m7-net-device-self-test",
         feature = "m7-tls-self-test",
-        feature = "m7-tls-fail-closed-self-test"
+        feature = "m7-tls-fail-closed-self-test",
+        feature = "m7-dns-self-test"
     ),
     allow(dead_code)
 )]
@@ -84,7 +85,8 @@ pub(crate) fn initialize_scheduler() -> Result<(), &'static str> {
         feature = "m5-block-self-test",
         feature = "m7-net-device-self-test",
         feature = "m7-tls-self-test",
-        feature = "m7-tls-fail-closed-self-test"
+        feature = "m7-tls-fail-closed-self-test",
+        feature = "m7-dns-self-test"
     ),
     allow(dead_code)
 )]
@@ -167,7 +169,8 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
     feature = "m6-delegation-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test"
+    feature = "m6-capabilities-self-test",
+    feature = "m7-net-caps-self-test"
 ))]
 pub(crate) fn start_current_scheduler_thread() -> Result<u64, &'static str> {
     let stack_pointer = without_interrupts(|| with_scheduler(|scheduler| scheduler.start()))?;

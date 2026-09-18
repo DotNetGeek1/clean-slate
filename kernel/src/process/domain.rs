@@ -138,6 +138,7 @@ pub(crate) fn teardown_current_process(
     let holder = HolderId(process_id);
     recover_object_queue_for_service_holder_exit(holder);
     reclaim_object_requests_for_holder(holder);
+    let _ = crate::capability::network::on_holder_exit(holder);
     revoke_for_holder(holder);
     revoke_for_process_resource(process_id);
     discard_bootstrap_grants_for_holder(holder);

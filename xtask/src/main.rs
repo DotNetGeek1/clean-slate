@@ -39,9 +39,11 @@ const M6_DELEGATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M6_REVOCATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 const M6_AUDIT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M6_CAPABILITIES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(180);
+const M7_NET_CAPS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M7_NET_DEVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M7_TLS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
+const M7_DNS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M5_CRASH_MATRIX_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_PERSISTENCE_BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_CRASH_RECOVERY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -232,6 +234,19 @@ const M6_REVOCATION_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[TEST] unrelated workload progress=",
     "[M6.6] PASS",
 ];
+const M7_NET_CAPS_ACCEPTANCE_MARKERS: [&str; 11] = [
+    "[CAP ] net grant holder=1 rights=delegate|net_resolve|net_connect|net_send|net_receive generation=0",
+    "[CAP ] net allow op=connect holder=1",
+    "[NET ] denied pid=2 reason=no-authority",
+    "[NET ] denied pid=2 reason=missing-right",
+    "[NET ] denied pid=1 reason=revoked",
+    "[NET ] stale-session denied generation=0",
+    "[CAP ] net grant holder=1 rights=delegate|net_resolve|net_connect|net_send|net_receive generation=1",
+    "[AUD ] net op=resolve actor=1 outcome=allow resource=20992 generation=1",
+    "[CAP ] net allow op=resolve holder=1",
+    "[CAP ] net released holder=1 count=2",
+    "[M7.7] PASS",
+];
 const M6_CAPABILITIES_ACCEPTANCE_MARKERS: [&str; 31] = [
     "[STOR] object-service started pid=",
     "[CAP ] object grant holder=3 object=7",
@@ -306,6 +321,13 @@ const M7_TLS_ACCEPTANCE_MARKERS: [&str; 6] = [
 const M7_TLS_FAIL_CLOSED_MARKERS: [&str; 2] = [
     "[TLS ] peer identity rejected name=m7.fixture.test",
     "[M7.6] FAIL-CLOSED OK",
+];
+const M7_DNS_ACCEPTANCE_MARKERS: [&str; 5] = [
+    "[DNS ] virtio ready mac=",
+    "[DNS ] resolved name=m7.fixture.test addr=10.77.0.50 ttl=300",
+    "[DNS ] cache hit name=m7.fixture.test",
+    "[DNS ] nxdomain name=nope.fixture.test",
+    "[M7.5] PASS",
 ];
 const M7_NET_DEVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[NET ] virtio ready mac=",
@@ -466,6 +488,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
             m7_certs::generate_m7_fixture_certs().map_err(XtaskError::InvalidCommand)?;
             Ok(())
         }
+        ParsedCommand::TestM7Dns => run_m7_dns_acceptance(),
         ParsedCommand::TestM5Storage => run_m5_storage_acceptance(),
         ParsedCommand::TestM5CrashMatrix => run_m5_crash_matrix(),
         ParsedCommand::TestM5Persistence => run_m5_persistence_acceptance(&trailing_args),
@@ -478,6 +501,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM6Revocation => run_m6_revocation_acceptance(),
         ParsedCommand::TestM6Audit => run_m6_audit_acceptance(),
         ParsedCommand::TestM6Capabilities => run_m6_capabilities_acceptance(),
+        ParsedCommand::TestM7NetCaps => run_m7_net_caps_acceptance(),
         ParsedCommand::TestM6 => run_m6_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
@@ -579,6 +603,24 @@ fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
             kernel_release: false,
+        },
+    );
+    peer.shutdown();
+    run_result
+}
+
+fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
+    let peer = M7FixturePeer::start().map_err(XtaskError::Io)?;
+    let port = peer.port();
+    let run_result = run_vm_inner_with_config(
+        false,
+        false,
+        &["m7-dns-self-test"],
+        Some((&M7_DNS_ACCEPTANCE_MARKERS, M7_DNS_ACCEPTANCE_TIMEOUT)),
+        VmLaunchConfig {
+            m5_data_disk: None,
+            reset_ovmf_vars: false,
+            m7_fixture_port: Some(port),
         },
     );
     peer.shutdown();
@@ -1067,6 +1109,15 @@ fn run_m6_audit_acceptance() -> Result<(), XtaskError> {
         "m6-audit-self-test",
         &M6_AUDIT_ACCEPTANCE_MARKERS,
         M6_AUDIT_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+fn run_m7_net_caps_acceptance() -> Result<(), XtaskError> {
+    build_m6_fixture_userspace(true)?;
+    run_m6_constituent(
+        "m7-net-caps-self-test",
+        &M7_NET_CAPS_ACCEPTANCE_MARKERS,
+        M7_NET_CAPS_ACCEPTANCE_TIMEOUT,
     )
 }
 
@@ -1922,6 +1973,7 @@ fn print_help() {
     println!("  test-m7-net-device Build the M7.2 virtio-net kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m7-tls       M7.6 TLS client acceptance (pass + fail-closed QEMU boots)");
     println!("  gen-m7-fixture-certs  Regenerate repository-owned M7 TLS fixture certificates");
+    println!("  test-m7-dns         Build the M7.5 DNS resolver kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
     println!("  test-m5-persistence Two-boot persistent-disk M5 acceptance using the production storage path");
@@ -1946,6 +1998,9 @@ fn print_help() {
     );
     println!(
         "  test-m6-capabilities Build M6.8 capability convergence boot and validate ordered markers"
+    );
+    println!(
+        "  test-m7-net-caps Build M7.7 network capability broker boot and validate ordered markers"
     );
     println!("  m5-disk-create Create deterministic M5 data disk if missing (preserve existing)");
     println!("  m5-disk-reset Recreate deterministic blank M5 data disk");
@@ -1985,6 +2040,7 @@ enum ParsedCommand {
     TestM7NetDevice,
     TestM7Tls,
     GenM7FixtureCerts,
+    TestM7Dns,
     TestM5Storage,
     TestM5CrashMatrix,
     TestM5Persistence,
@@ -1997,6 +2053,7 @@ enum ParsedCommand {
     TestM6Revocation,
     TestM6Audit,
     TestM6Capabilities,
+    TestM7NetCaps,
     TestM6,
     M5DiskCreate,
     M5DiskReset,
@@ -2036,6 +2093,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
             ParsedCommand::TestM7Tls
         }
         Some(cmd) if cmd == "gen-m7-fixture-certs" => ParsedCommand::GenM7FixtureCerts,
+        Some(cmd) if cmd == "test-m7-dns" || cmd == "m7-dns" || cmd == "m7.5" => {
+            ParsedCommand::TestM7Dns
+        }
         Some(cmd) if cmd == "test-m5-storage" => ParsedCommand::TestM5Storage,
         Some(cmd) if cmd == "test-m5-crash-matrix" => ParsedCommand::TestM5CrashMatrix,
         Some(cmd) if cmd == "test-m5-persistence" => ParsedCommand::TestM5Persistence,
@@ -2051,6 +2111,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m6-audit" => ParsedCommand::TestM6Audit,
         Some(cmd) if cmd == "test-m6-capabilities" || cmd == "m6-capabilities" || cmd == "m6.8" => {
             ParsedCommand::TestM6Capabilities
+        }
+        Some(cmd) if cmd == "test-m7-net-caps" || cmd == "m7-net-caps" || cmd == "m7.7" => {
+            ParsedCommand::TestM7NetCaps
         }
         Some(cmd) if cmd == "test-m6" || cmd == "m6" || cmd == "m6.9" => ParsedCommand::TestM6,
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
@@ -2242,6 +2305,14 @@ mod tests {
         );
         assert_eq!(parse_command(Some("m6.9".as_ref())), ParsedCommand::TestM6);
         assert_eq!(
+            parse_command(Some("test-m7-net-caps".as_ref())),
+            ParsedCommand::TestM7NetCaps
+        );
+        assert_eq!(
+            parse_command(Some("m7.7".as_ref())),
+            ParsedCommand::TestM7NetCaps
+        );
+        assert_eq!(
             parse_command(Some("test-m5-storage".as_ref())),
             ParsedCommand::TestM5Storage
         );
@@ -2276,6 +2347,14 @@ mod tests {
         assert_eq!(
             parse_command(Some("m7.6".as_ref())),
             ParsedCommand::TestM7Tls
+        );
+        assert_eq!(
+            parse_command(Some("test-m7-dns".as_ref())),
+            ParsedCommand::TestM7Dns
+        );
+        assert_eq!(
+            parse_command(Some("m7.5".as_ref())),
+            ParsedCommand::TestM7Dns
         );
         assert_eq!(
             parse_command(Some("test-m5-disk-harness".as_ref())),

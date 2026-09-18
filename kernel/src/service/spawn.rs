@@ -17,6 +17,7 @@ use crate::mm::PAGE_SIZE;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -179,6 +180,7 @@ const _: () = assert!(
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -189,6 +191,7 @@ include!(concat!(env!("OUT_DIR"), "/m6_fixture_userspace_entry.rs"));
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -200,6 +203,7 @@ const M6_FIXTURE_USERSPACE_IMAGE: &[u8] =
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -210,6 +214,7 @@ const M6_FIXTURE_BOOTSTRAP_PAGES: u64 = 2;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -220,6 +225,7 @@ const M6_FIXTURE_STACK_PAGES: u64 = 4;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -231,6 +237,7 @@ const M6_FIXTURE_STACK_ADDRESS: u64 =
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -241,6 +248,7 @@ const M6_FIXTURE_MAX_CODE_PAGES: usize = 16;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -253,6 +261,7 @@ const M6_FIXTURE_MAPPED_PAGES: usize = M6_FIXTURE_MAX_CODE_PAGES
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -265,6 +274,7 @@ const _: () = assert!(
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -308,7 +318,8 @@ pub(crate) enum BuiltinServiceImage {
         feature = "m6-revocation-self-test",
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
-        feature = "m6-fixture-smoke-self-test"
+        feature = "m6-fixture-smoke-self-test",
+        feature = "m7-net-caps-self-test"
     ))]
     M6FixturePayload,
 }
@@ -361,7 +372,8 @@ impl BuiltinServiceImage {
                 feature = "m6-revocation-self-test",
                 feature = "m6-audit-self-test",
                 feature = "m6-capabilities-self-test",
-                feature = "m6-fixture-smoke-self-test"
+                feature = "m6-fixture-smoke-self-test",
+                feature = "m7-net-caps-self-test"
             ))]
             id if id >= 0x6000 && id <= 0x60ff => Self::M6FixturePayload,
             _ => Self::ImmediateExit,
@@ -428,7 +440,8 @@ pub(crate) fn launch_builtin_service(
             feature = "m6-revocation-self-test",
             feature = "m6-audit-self-test",
             feature = "m6-capabilities-self-test",
-            feature = "m6-fixture-smoke-self-test"
+            feature = "m6-fixture-smoke-self-test",
+            feature = "m7-net-caps-self-test"
         ))]
         BuiltinServiceImage::M6FixturePayload => {
             launch_m6_fixture_service(allocator, kernel_stack_top, scheduler_slot, service)
@@ -612,7 +625,8 @@ fn launch_single_page_service(
             feature = "m6-revocation-self-test",
             feature = "m6-audit-self-test",
             feature = "m6-capabilities-self-test",
-            feature = "m6-fixture-smoke-self-test"
+            feature = "m6-fixture-smoke-self-test",
+            feature = "m7-net-caps-self-test"
         ))]
         BuiltinServiceImage::M6FixturePayload => {
             return Err("m6 fixture image must use the fixture launch path");
@@ -848,6 +862,7 @@ fn launch_storage_userspace_service(
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",

@@ -8,7 +8,10 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration as StdDuration;
 
-use clean_slate_network::fixture::{PEER_IPV4, PEER_MAC, UDP_ECHO_PORT};
+use clean_slate_network::fixture::{
+    DNS_SERVER_PORT, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS, FIXTURE_HOSTNAME, PEER_IPV4, PEER_MAC,
+    UDP_ECHO_PORT,
+};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
@@ -129,6 +132,11 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
     );
     let udp_handle = sockets.add(udp_echo);
+    let udp_dns = udp::Socket::new(
+        udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
+        udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
+    );
+    let dns_handle = sockets.add(udp_dns);
 
     let tcp_echo = tcp::Socket::new(
         tcp::SocketBuffer::new(vec![0u8; 4096]),
@@ -165,6 +173,18 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
             }
         }
 
+        let dns_socket = sockets.get_mut::<udp::Socket>(dns_handle);
+        if !dns_socket.is_open() {
+            dns_socket.bind(DNS_SERVER_PORT).expect("bind udp dns");
+        }
+        if let Ok((payload, endpoint)) = dns_socket.recv() {
+            if let Some((name, response)) = build_dns_response(payload) {
+                let rcode = (response[3] & 0x0F) as u32;
+                if dns_socket.send_slice(&response, endpoint).is_ok() {
+                    println!("[FIX ] dns query name={name} rcode={rcode}");
+                }
+            }
+        }
         tcp_echo_service.poll(&mut sockets);
         tls_service.poll(&mut sockets);
 
@@ -292,6 +312,81 @@ impl phy::RxToken for QemuRxToken {
 
 struct QemuTxToken<'a> {
     device: &'a mut QemuSocketDevice,
+}
+
+fn build_dns_response(query: &[u8]) -> Option<(String, Vec<u8>)> {
+    if query.len() < 12 {
+        return None;
+    }
+    let id = [query[0], query[1]];
+    let qdcount = u16::from_be_bytes([query[4], query[5]]);
+    if qdcount != 1 {
+        return None;
+    }
+    let (name, qend) = parse_dns_qname(query, 12)?;
+    if qend + 4 > query.len() {
+        return None;
+    }
+    let qtype = u16::from_be_bytes([query[qend], query[qend + 1]]);
+    if qtype != 1 {
+        return None;
+    }
+    let question = query.get(12..qend + 4)?.to_vec();
+    let mut response = Vec::with_capacity(question.len() + 32);
+    response.extend_from_slice(&id);
+    let flags_ok = 0x8480u16;
+    let answer: [u8; 4] = FIXTURE_A_RECORD.octets();
+    if name.eq_ignore_ascii_case(FIXTURE_HOSTNAME) {
+        response.extend_from_slice(&flags_ok.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&question);
+        response.push(0xC0);
+        response.push(0x0C);
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&FIXTURE_A_TTL_SECS.to_be_bytes());
+        response.extend_from_slice(&4u16.to_be_bytes());
+        response.extend_from_slice(&answer);
+    } else {
+        let flags_nx = flags_ok | 3u16;
+        response.extend_from_slice(&flags_nx.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&question);
+    }
+    Some((name, response))
+}
+
+fn parse_dns_qname(msg: &[u8], mut offset: usize) -> Option<(String, usize)> {
+    let mut name = String::new();
+    let mut first = true;
+    while offset < msg.len() {
+        let len = msg[offset] as usize;
+        if len == 0 {
+            offset += 1;
+            break;
+        }
+        if len & 0xC0 == 0xC0 {
+            return None;
+        }
+        offset += 1;
+        if offset + len > msg.len() {
+            return None;
+        }
+        if !first {
+            name.push('.');
+        }
+        first = false;
+        let label = msg.get(offset..offset + len)?;
+        name.push_str(core::str::from_utf8(label).ok()?);
+        offset += len;
+    }
+    Some((name, offset))
 }
 
 impl phy::TxToken for QemuTxToken<'_> {

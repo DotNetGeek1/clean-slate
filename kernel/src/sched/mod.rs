@@ -22,6 +22,7 @@ const TASK_COUNT: usize = 9;
         feature = "m6-fixture-smoke-self-test",
         feature = "m6-process-control-self-test",
         feature = "m6-delegation-self-test",
+        feature = "m7-net-caps-self-test",
         feature = "m6-object-self-test",
         feature = "m6-audit-self-test"
     )
@@ -35,7 +36,8 @@ const TASK_COUNT: usize = 6;
     feature = "m6-delegation-self-test",
     feature = "m6-object-self-test",
     feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test"
+    feature = "m6-capabilities-self-test",
+    feature = "m7-net-caps-self-test"
 )))]
 const TASK_COUNT: usize = 2;
 pub(super) const TASK_REQUIRED_PREEMPTIONS: u64 = 2;

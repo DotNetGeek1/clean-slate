@@ -185,9 +185,11 @@ impl<L: NetworkLink> TcpTransport<L> {
         stack: L3Stack<L>,
         generation: SessionGeneration,
     ) {
-        (*slot).stack = stack;
-        (*slot).table.init_in_place(generation);
-        (*slot).stats = TcpStats::default();
+        unsafe {
+            (*slot).stack = stack;
+            (*slot).table.init_in_place(generation);
+            (*slot).stats = TcpStats::default();
+        }
     }
 
     pub fn new(stack: L3Stack<L>, generation: SessionGeneration) -> Self {

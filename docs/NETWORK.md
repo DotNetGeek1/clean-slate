@@ -70,6 +70,74 @@ Every `NetworkRequest` / `NetworkResponse` is one fixed 64-byte frame so it fits
 
 Constants live in `network/src/fixture.rs`. Acceptance assumes a private `10.77.0.0/24` lab network, fixed DNS answers, echo/TLS ports, and repository-owned certificates under `xtask/fixtures/m7/`. No public Internet, public DNS, external PKI, or host LAN dependencies.
 
+## M7.7 network capabilities & attribution
+
+Kernel broker: `kernel/src/capability/network.rs`. Live generation lookup:
+`kernel/src/service/instance_generation.rs` (`live_instance_generation`,
+`live_network_service_generation`).
+
+### Operation → right
+
+| `NetworkOp` | `Rights` |
+|-------------|----------|
+| `Resolve` | `NET_RESOLVE` |
+| `Connect` | `NET_CONNECT` |
+| `Send` | `NET_SEND` |
+| `Receive` | `NET_RECEIVE` |
+| `RawDevice` | `NET_RAW_DEVICE` |
+
+### Denial mapping (`NetworkError::Denied`)
+
+| `DenialReason` | M6 / broker source |
+|----------------|-------------------|
+| `NoCapability` | Missing/invalid handle, wrong holder |
+| `MissingRight` | `CapabilityError::MissingRight` |
+| `StaleGeneration` | `ResourceRef.instance_generation` ≠ live service generation, or `session_generation` mismatch |
+| `Revoked` | `CapabilityError::Revoked` |
+
+### `ResourceRef` for network
+
+- **Service instance:** `ResourceRef::network(logical_service_id, live_generation)` where
+  `live_generation` comes from `live_network_service_generation()` /
+  `ServiceLifecycleController::authoritative_generation(NETWORK_SERVICE_ID)`.
+- **Per-session (optional):** `ResourceRef::network_session(session_generation, session_index)`.
+  Destination/port scoping is not encoded in `ResourceRef` for M7.7.
+
+Classes still using `instance_generation = 0` in production grants: see
+[`docs/M7_INSTANCE_GENERATION.md`](M7_INSTANCE_GENERATION.md).
+
+### Revocation & holder exit
+
+`on_revoked(handle)` returns impacted `SessionId` values and revokes the capability subtree;
+the network service must close those sessions. After holder teardown,
+`on_holder_exit(holder)` clears session tracking and logs `[CAP ] net released …`.
+Further ops on revoked handles return `Revoked`.
+
+### Audit
+
+Allowed and denied ops emit standard M6 audit records plus serial
+`[AUD ] net op=… actor=… outcome=allow|deny resource=… generation=…` when
+`set_network_audit_serial_echo(true)`. Records never include payload bytes or hostnames.
+
+### Network service (#83) authorization API
+
+```rust
+authorize_network_op(
+    trusted_holder: HolderId,
+    raw_handle: u64,
+    op: NetworkOp,
+    session_generation: Option<SessionGeneration>,
+) -> Result<AuthorizedNetworkOp, DenialReason>
+```
+
+Bootstrap grants use `grant_network_authority(holder, rights, NetworkGrantPolicy::Application)`
+(service policy for `NET_RAW_DEVICE` only).
+
+### QEMU constituent
+
+`cargo xtask test-m7-net-caps` (aliases `m7-net-caps`, `m7.7`). Ordered markers end with
+`[M7.7] PASS`.
+
 ## Deferred
 
 - IPv6 and dual-stack policy
@@ -369,7 +437,7 @@ Pass boot markers (order): `[TCP ] connected peer=10.77.0.1:4001`, `[TCP ] echo 
 
 Fail-closed boot: `[TLS ] peer identity rejected name=m7.fixture.test`, `[M7.6] FAIL-CLOSED OK`.
 
-Kernel image is built **release** for this test on Windows (debug UEFI codegen issue with AES-GCM backends).
+UEFI builds enable `--cfg aes_force_soft` in [`.cargo/config.toml`](../.cargo/config.toml) so `test-m7-tls` uses the same **debug** kernel profile as other M7 lanes (avoids Windows LLVM failures in AES codegen without forcing release).
 
 ### Error mapping (`TlsError` → `NetworkError`)
 
@@ -382,3 +450,69 @@ Kernel image is built **release** for this test on Windows (debug UEFI codegen i
 | `BufferTooSmall`, `Rng` | `Protocol` |
 
 `Debug` on `TlsError` never prints keys, plaintext, or RNG output.
+
+### TCP transport storage
+
+[`TcpTransport`](../network/src/tcp/transport.rs) is ~310 KiB in `no_std` (32 × ~9.7 KiB connection slots). Do not construct it on boot stacks; use zeroed static storage and [`TcpTransport::init_in_place`](../network/src/tcp/transport.rs).
+
+## M7.5 DNS
+
+Issue #85 adds [`dns`](../network/src/dns.rs): a bounded RFC 1035 subset codec, fixed-capacity cache, and [`DnsResolver`](../network/src/dns.rs) over [`UdpTransport`](../network/src/udp.rs).
+
+### Supported subset
+
+- UDP only; `RD=1` queries; QTYPE A / QCLASS IN; single question; first A answer returned.
+- No CNAME chasing, no DNS-over-TCP, no DNSSEC, no EDNS0.
+- Wire names validated per label (1..=63), total <= [`MAX_DNS_NAME_LEN`](../network/src/limits.rs) (253).
+- Compression pointers: follow with hop limit [`DNS_COMPRESSION_HOP_LIMIT`](../network/src/dns.rs) (16); pointers must target strictly earlier offsets (loop/forward rejection).
+
+### Constants
+
+| Constant | Value | Role |
+|----------|------:|------|
+| [`MAX_DNS_ANSWERS`](../network/src/dns.rs) | 8 | Max answer RRs parsed |
+| [`DNS_CACHE_CAPACITY`](../network/src/dns.rs) | 16 | Cache entries |
+| [`DNS_MIN_TTL_SECS`](../network/src/dns.rs) / [`DNS_MAX_TTL_SECS`](../network/src/dns.rs) | 1 / 86400 | TTL clamp on cache insert |
+| [`DNS_QUERY_TIMEOUT_TICKS`](../network/src/dns.rs) | 500 | Pending query deadline |
+| [`MAX_IN_FLIGHT_RESOLVER_QUERIES`](../network/src/limits.rs) | 8 | Pending table rows |
+
+### Error mapping (`DnsError` → `NetworkError`)
+
+| `DnsError` | `NetworkError` |
+|------------|----------------|
+| `NameNotFound` | `NotFound` |
+| `Timeout` | `Timeout` |
+| `QueueFull` | `QueueFull` |
+| `Transport(e)` | `e` |
+| All other variants | `Protocol` |
+
+### Resolver behaviour
+
+- **Capability:** `NET_RESOLVE` is enforced by the network service (#87) before calling `resolve`; the resolver assumes the caller is already authorized.
+- **IDs:** DNS wire IDs are `dns_id_counter XOR session_generation` (deterministic, not cryptographically unpredictable — acceptable only on the hermetic lab network).
+- **Foreign source:** Replies not sourced from the configured `server` socket are dropped (`dropped_foreign_source`).
+- **Pending:** `resolve` → `ResolveOutcome::Cached` or `Pending { query_id }`; `poll` drives UDP/ARP, retries query send after `Unreachable`, applies timeouts, fills the cache; `take_result(query_id, owner)` is owner-checked.
+- **Teardown:** `on_holder_exit(owner)` drops that holder's pending queries and UDP endpoints; `reset()` clears cache, pending, and UDP/L3 state.
+
+### Network service API (after #87 authorization)
+
+1. `DnsResolver::new(udp, DNS_SERVER_ADDR)` (or `with_ticks` when tick rate ≠ `DEFAULT_TICKS_PER_SEC`).
+2. `resolve(now, owner, name)` → cache hit or pending id.
+3. `poll(now)` on every service tick (retry ARP/`Unreachable` on send).
+4. `take_result(query_id, owner)` → `(Ipv4Addr, ttl)` for IPC `NetworkResponse::Resolve`.
+
+Unauthorized DNS denial is proven in #87/#88, not in this lane.
+
+### Hermetic fixture
+
+`xtask/src/m7_fixture.rs` binds UDP/53 beside the echo port. `m7.fixture.test` → [`FIXTURE_A_RECORD`](../network/src/fixture.rs) / TTL [`FIXTURE_A_TTL_SECS`](../network/src/fixture.rs) with answer name compression pointer `0xC00C`; other names → NXDOMAIN (rcode 3). Log: `[FIX ] dns query name=<name> rcode=<n>`.
+
+### QEMU acceptance
+
+```bash
+cargo xtask test-m7-dns
+```
+
+**Serial markers (ordered):** `[DNS ] virtio ready mac=…`, `[DNS ] resolved name=m7.fixture.test addr=10.77.0.50 ttl=300`, `[DNS ] cache hit name=m7.fixture.test`, `[DNS ] nxdomain name=nope.fixture.test`, `[M7.5] PASS` (host peer also emits `[FIX ] dns query name=m7.fixture.test rcode=0`).
+
+Regression: `cargo xtask test-m7-net-device` (echo lane unchanged).
