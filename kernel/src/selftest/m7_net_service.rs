@@ -53,6 +53,7 @@ const FIXTURE_PHASE_RELEASED: u64 = 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum M7Phase {
     AwaitClientEcho,
+    AwaitHolderExitAck,
     AwaitUnauthorized,
     AwaitInflightArm,
     AwaitStaleClose,
@@ -109,6 +110,33 @@ fn release_fixture_phase(pid: u64, kernel_root: u64) {
     patch_fixture_bootstrap(pid, kernel_root, |bootstrap| {
         bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
     });
+}
+
+pub(crate) fn on_holder_exit_acked(holder_pid: u64, sessions: u64, pending: u64) {
+    let test_state = state();
+    if test_state.phase != M7Phase::AwaitHolderExitAck {
+        return;
+    }
+    if holder_pid != test_state.fixtures.client {
+        fatal_kernel_error("m7 holder exit ack for unexpected pid");
+    }
+    if sessions != 1 || pending != 0 {
+        fatal_kernel_error("m7 holder exit ack counts mismatch");
+    }
+    let service_root = unsafe {
+        service_lifecycle_controller_mut()
+            .live_pid(NETWORK_SERVICE_ID)
+            .and_then(|pid| userspace_process_root_frame(pid).ok())
+            .unwrap_or_else(kernel_root_frame)
+    };
+    release_fixture_phase(test_state.fixtures.unauthorized, service_root);
+    set_state(Some(M7NetSelfTestState {
+        lifecycle_capability: test_state.lifecycle_capability,
+        phase: M7Phase::AwaitUnauthorized,
+        session_id_raw: test_state.session_id_raw,
+        service_generation: test_state.service_generation,
+        fixtures: test_state.fixtures,
+    }));
 }
 
 pub(crate) fn network_service_bootstrap(
@@ -328,20 +356,17 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 report.session_id_raw
             ));
             kernel_log_fmt(format_args!("[NET ] echo ok len={}\n", report.echo_len));
-            release_fixture_phase(test_state.fixtures.unauthorized, kernel_root);
-            M7Phase::AwaitUnauthorized
+            M7Phase::AwaitHolderExitAck
         }
         (M7Phase::AwaitUnauthorized, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE) => {
             if report.result_code != NETWORK_SERVICE_RESULT_OK {
                 fatal_kernel_error("m7 unauthorized probe failed");
             }
-            use clean_slate_network::protocol::TrustedCaller;
-            crate::service::net_bridge::net_bridge_mut().push_holder_exit(TrustedCaller::new(
-                test_state.fixtures.client,
-                test_state.fixtures.client,
-                0,
-            ));
-            crate::service::net_bridge::net_bridge_mut().log_m7_client_holder_exit_ack();
+            if !crate::service::net_bridge::net_bridge_mut()
+                .holder_exit_acked_for(test_state.fixtures.client)
+            {
+                fatal_kernel_error("m7 unauthorized probe before holder exit ack");
+            }
             patch_fixture_bootstrap(test_state.fixtures.inflight, kernel_root, |bootstrap| {
                 bootstrap.session_id_raw = session_id_raw;
                 bootstrap.aux_status = FIXTURE_PHASE_RELEASED;

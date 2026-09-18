@@ -166,6 +166,8 @@ pub(crate) struct NetBridge {
     holder_exit_tail: u8,
     /// Holder exit popped by the live service, awaiting `NET_SUBOP_ACK_HOLDER_EXIT`.
     pending_holder_exit_ack: Option<TrustedCaller>,
+    #[cfg(feature = "m7-net-service-self-test")]
+    holder_exit_acked_pid: Option<u64>,
 }
 
 impl NetBridge {
@@ -182,6 +184,8 @@ impl NetBridge {
             holder_exit_head: 0,
             holder_exit_tail: 0,
             pending_holder_exit_ack: None,
+            #[cfg(feature = "m7-net-service-self-test")]
+            holder_exit_acked_pid: None,
         }
     }
 
@@ -198,6 +202,10 @@ impl NetBridge {
         self.holder_exit_head = 0;
         self.holder_exit_tail = 0;
         self.pending_holder_exit_ack = None;
+        #[cfg(feature = "m7-net-service-self-test")]
+        {
+            self.holder_exit_acked_pid = None;
+        }
         self.service_pid = pid;
         self.service_domain = domain;
         self.session_generation = SessionGeneration::new(generation);
@@ -240,16 +248,16 @@ impl NetBridge {
         self.holder_exit_tail = next;
     }
 
-    /// M7.3 acceptance: log holder-exit after `denied` once the client queue entry is posted.
+    fn holder_exit_caller(&self, pid: u64, domain: u64) -> TrustedCaller {
+        let generation = live_network_service_generation()
+            .map(|g| u64::from(g.0))
+            .unwrap_or(0);
+        TrustedCaller::new(pid, domain, generation)
+    }
+
     #[cfg(feature = "m7-net-service-self-test")]
-    pub(crate) fn log_m7_client_holder_exit_ack(&mut self) {
-        if self.holder_exit_head == self.holder_exit_tail {
-            return;
-        }
-        let _ = self.pop_holder_exit();
-        kernel_log_fmt(format_args!(
-            "[NET ] holder exit reclaimed sessions=1 pending=0\n"
-        ));
+    pub fn holder_exit_acked_for(&self, pid: u64) -> bool {
+        self.holder_exit_acked_pid == Some(pid)
     }
 
     pub fn pop_holder_exit(&mut self) -> Option<TrustedCaller> {
@@ -271,13 +279,20 @@ impl NetBridge {
         if !self.is_live_service(service_pid) {
             return Err(NetBridgeError::NotService);
         }
-        let _caller = self
+        let caller = self
             .pending_holder_exit_ack
             .take()
             .ok_or(NetBridgeError::InvalidRequest)?;
         kernel_log_fmt(format_args!(
             "[NET ] holder exit reclaimed sessions={sessions} pending={pending}\n"
         ));
+        #[cfg(feature = "m7-net-service-self-test")]
+        {
+            self.holder_exit_acked_pid = Some(caller.pid);
+            crate::selftest::m7_net_service::on_holder_exit_acked(caller.pid, sessions, pending);
+        }
+        #[cfg(not(feature = "m7-net-service-self-test"))]
+        let _ = caller;
         Ok(())
     }
 
@@ -398,7 +413,7 @@ impl NetBridge {
             }
         }
         if let Some(caller) = caller {
-            self.push_holder_exit(caller);
+            self.push_holder_exit(self.holder_exit_caller(caller.pid, caller.domain));
         }
         reclaimed
     }
@@ -498,6 +513,15 @@ pub(crate) fn reclaim_net_requests_for_holder(pid: u64) -> usize {
         ));
     }
     reclaimed
+}
+
+pub(crate) fn notify_holder_exit_for_process(process_id: u64) {
+    let bridge = net_bridge_mut();
+    if bridge.service_pid() == 0 || bridge.service_pid() == process_id {
+        return;
+    }
+    let caller = bridge.holder_exit_caller(process_id, process_id);
+    bridge.push_holder_exit(caller);
 }
 
 pub(crate) fn shutdown_net_service_instance() -> u32 {

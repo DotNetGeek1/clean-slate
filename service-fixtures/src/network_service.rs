@@ -697,8 +697,8 @@ mod tests {
             _ => panic!("expected open"),
         };
         assert_eq!(service.sessions_in_use(), 1);
-        let (reclaimed, _) = service.on_holder_exit(caller(1));
-        assert_eq!(reclaimed, 1);
+        let (reclaimed, pending) = service.on_holder_exit(caller(1));
+        assert_eq!((reclaimed, pending), (1, 0));
         assert_eq!(service.sessions_in_use(), 0);
     }
 

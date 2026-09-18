@@ -24,7 +24,8 @@ use crate::sched::with_scheduler;
 use crate::sched::ThreadKind;
 use crate::sched::ThreadProcessResources;
 use crate::service::net_bridge::{
-    reclaim_net_requests_for_holder, recover_net_queue_for_service_holder_exit,
+    notify_holder_exit_for_process, reclaim_net_requests_for_holder,
+    recover_net_queue_for_service_holder_exit,
 };
 
 // Process teardown and resource accounting are only exercised end-to-end by
@@ -145,6 +146,7 @@ pub(crate) fn teardown_current_process(
     let net_reclaimed = reclaim_net_requests_for_holder(holder.0);
     if net_reclaimed == 0 {
         let _ = crate::capability::network::on_holder_exit(holder);
+        notify_holder_exit_for_process(holder.0);
     }
     revoke_for_holder(holder);
     revoke_for_process_resource(process_id);
@@ -261,6 +263,7 @@ pub(crate) fn teardown_process_by_id(
         let net_reclaimed = reclaim_net_requests_for_holder(holder.0);
         if net_reclaimed == 0 {
             let _ = crate::capability::network::on_holder_exit(holder);
+            notify_holder_exit_for_process(holder.0);
         }
         revoke_for_holder(holder);
         revoke_for_process_resource(process_id);

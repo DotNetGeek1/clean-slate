@@ -184,8 +184,8 @@ Ordered QEMU markers for `cargo xtask test-m7-net-service`:
 1. `[NET ] service started pid=… generation=…`
 2. `[NET ] session open id=…`
 3. `[NET ] echo ok len=…`
-4. `[NET ] denied pid=… reason=no-authority`
-5. `[NET ] holder exit reclaimed sessions=… pending=…`
+4. `[NET ] holder exit reclaimed sessions=… pending=…`
+5. `[NET ] denied pid=… reason=no-authority`
 6. `[NET ] service restarted pid=… generation=…`
 7. `[NET ] inflight failed count=…`
 8. `[NET ] stale-session denied generation=…`
