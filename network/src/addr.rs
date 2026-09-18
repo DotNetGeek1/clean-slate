@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use crate::limits::MAX_DNS_NAME_LEN;
+use crate::limits::MAX_REQUEST_HOSTNAME_LEN;
 
 /// Ethernet MAC address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -150,18 +150,22 @@ impl IpProtocol {
     }
 }
 
-/// Bounded host name bytes for resolver requests.
+/// Bounded host name bytes for resolver *requests* crossing the client/service IPC.
+///
+/// Capacity is [`MAX_REQUEST_HOSTNAME_LEN`] so a `Resolve` request always fits one
+/// fixed-size IPC frame. DNS wire-format names (up to `MAX_DNS_NAME_LEN`) are the
+/// resolver lane's concern and are never carried in this type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BoundedHostname {
     len: u8,
-    bytes: [u8; MAX_DNS_NAME_LEN],
+    bytes: [u8; MAX_REQUEST_HOSTNAME_LEN],
 }
 
 impl BoundedHostname {
     pub const fn empty() -> Self {
         Self {
             len: 0,
-            bytes: [0; MAX_DNS_NAME_LEN],
+            bytes: [0; MAX_REQUEST_HOSTNAME_LEN],
         }
     }
 
@@ -169,13 +173,13 @@ impl BoundedHostname {
         if name.is_empty() {
             return Err(HostnameError::Empty);
         }
-        if name.len() > MAX_DNS_NAME_LEN {
+        if name.len() > MAX_REQUEST_HOSTNAME_LEN {
             return Err(HostnameError::TooLong);
         }
         if !name.is_ascii() {
             return Err(HostnameError::NotAscii);
         }
-        let mut bytes = [0u8; MAX_DNS_NAME_LEN];
+        let mut bytes = [0u8; MAX_REQUEST_HOSTNAME_LEN];
         bytes[..name.len()].copy_from_slice(name.as_bytes());
         Ok(Self {
             len: u8::try_from(name.len()).map_err(|_| HostnameError::TooLong)?,
@@ -201,12 +205,17 @@ impl BoundedHostname {
 
     pub fn from_encoded(len: u8, src: &[u8]) -> Result<Self, HostnameError> {
         let len_usize = len as usize;
-        if len_usize == 0 || len_usize > MAX_DNS_NAME_LEN || src.len() < len_usize {
+        if len_usize == 0 {
+            return Err(HostnameError::Empty);
+        }
+        if len_usize > MAX_REQUEST_HOSTNAME_LEN || src.len() < len_usize {
             return Err(HostnameError::TooLong);
         }
-        let mut bytes = [0u8; MAX_DNS_NAME_LEN];
+        let mut bytes = [0u8; MAX_REQUEST_HOSTNAME_LEN];
         bytes[..len_usize].copy_from_slice(&src[..len_usize]);
-        core::str::from_utf8(&bytes[..len_usize]).map_err(|_| HostnameError::NotAscii)?;
+        if !bytes[..len_usize].is_ascii() {
+            return Err(HostnameError::NotAscii);
+        }
         Ok(Self { len, bytes })
     }
 }

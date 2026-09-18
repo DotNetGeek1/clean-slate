@@ -33,6 +33,14 @@ pub const MAX_DNS_NAME_LEN: usize = 253;
 /// Maximum length of a single DNS label (63 octets).
 pub const MAX_DNS_LABEL_LEN: usize = 63;
 
+/// Maximum host name length a client may place in one `Resolve` request.
+///
+/// The client<->service request frame is a single kernel IPC message
+/// (64 bytes, see `kernel::ipc::IPC_MAX_MESSAGE_BYTES`); after the header and
+/// length byte, 55 bytes remain for the name. This is deliberately smaller than
+/// [`MAX_DNS_NAME_LEN`], which bounds names parsed from DNS wire messages.
+pub const MAX_REQUEST_HOSTNAME_LEN: usize = 55;
+
 /// Maximum in-flight resolver queries per client holder.
 pub const MAX_IN_FLIGHT_RESOLVER_QUERIES: u32 = 8;
 

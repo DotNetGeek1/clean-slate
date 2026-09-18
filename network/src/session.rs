@@ -25,8 +25,11 @@ impl SessionGeneration {
 pub struct SessionId(u64);
 
 impl SessionId {
+    /// Pack a generation and per-generation index. Only the low 32 bits of the
+    /// generation are representable; callers must not exceed `u32::MAX` generations.
     pub const fn new(generation: SessionGeneration, index: u32) -> Self {
-        let packed = (generation.get() << 32) | (index as u64);
+        debug_assert!(generation.get() <= u32::MAX as u64);
+        let packed = ((generation.get() & 0xFFFF_FFFF) << 32) | (index as u64);
         Self(packed)
     }
 

@@ -140,17 +140,17 @@ impl NetworkLink for FakeLink {
         if self.observed_tx.borrow().len() >= MAX_DEVICE_TX_QUEUE_DEPTH as usize {
             return Err((NetworkDeviceError::QueueFull, frame));
         }
-        self.observed_tx.borrow_mut().push_back(frame.clone());
-
         if let Some(peer) = &self.peer_inbound {
-            let mut peer_in = peer.borrow_mut();
-            if peer_in.len() >= MAX_DEVICE_RX_QUEUE_DEPTH as usize {
+            // Check peer capacity before recording the TX so a failed transmit
+            // leaves no partial state behind.
+            if peer.borrow().len() >= MAX_DEVICE_RX_QUEUE_DEPTH as usize {
                 return Err((NetworkDeviceError::QueueFull, frame));
             }
-            peer_in.push_back(frame);
+            self.observed_tx.borrow_mut().push_back(frame.clone());
+            peer.borrow_mut().push_back(frame);
             return Ok(());
         }
-
+        self.observed_tx.borrow_mut().push_back(frame);
         Ok(())
     }
 

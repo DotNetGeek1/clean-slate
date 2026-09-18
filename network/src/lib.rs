@@ -41,8 +41,11 @@ mod tests {
         APP_REQUEST_BYTES, APP_RESPONSE_BYTES, FIXTURE_A_RECORD, FIXTURE_HOSTNAME, GUEST_IPV4,
         PEER_IPV4, TLS_SERVER_NAME,
     };
-    use super::limits::MAX_APPLICATION_PAYLOAD_BYTES;
-    use super::protocol::{NetworkRequest, NetworkResponse};
+    use super::limits::{MAX_APPLICATION_PAYLOAD_BYTES, MAX_REQUEST_HOSTNAME_LEN};
+    use super::protocol::{
+        NetworkRequest, NetworkRequestDecodeError, NetworkResponse, NetworkResponseDecodeError,
+        NETWORK_PROTOCOL_VERSION, NETWORK_REQUEST_BYTES, NETWORK_RESPONSE_BYTES,
+    };
     use super::session::{SessionGeneration, SessionId, SocketKind};
 
     #[test]
@@ -53,9 +56,109 @@ mod tests {
         let encoded = addr.encode();
         assert_eq!(SocketAddrV4::decode(&encoded).unwrap(), addr);
         assert!(BoundedHostname::try_from_str("").is_err());
-        assert!(BoundedHostname::try_from_str(&"a".repeat(254)).is_err());
+        assert!(BoundedHostname::try_from_str(&"a".repeat(MAX_REQUEST_HOSTNAME_LEN + 1)).is_err());
+        assert!(BoundedHostname::try_from_str(&"a".repeat(MAX_REQUEST_HOSTNAME_LEN)).is_ok());
+        assert!(BoundedHostname::try_from_str("héllo").is_err());
         let name = BoundedHostname::try_from_str(FIXTURE_HOSTNAME).unwrap();
         assert_eq!(name.as_str().unwrap(), FIXTURE_HOSTNAME);
+    }
+
+    #[test]
+    fn resolve_request_max_length_hostname_fits_frame() {
+        let longest = "a".repeat(MAX_REQUEST_HOSTNAME_LEN);
+        let name = BoundedHostname::try_from_str(&longest).unwrap();
+        let encoded = NetworkRequest::Resolve { name }.encode();
+        assert_eq!(encoded.len(), NETWORK_REQUEST_BYTES);
+        let decoded = NetworkRequest::decode(&encoded).unwrap();
+        assert_eq!(decoded, NetworkRequest::Resolve { name });
+    }
+
+    #[test]
+    fn resolve_request_rejects_oversized_or_empty_name_length() {
+        let name = BoundedHostname::try_from_str(FIXTURE_HOSTNAME).unwrap();
+        let encoded = NetworkRequest::Resolve { name }.encode();
+
+        let mut oversized = encoded;
+        oversized[8] = (MAX_REQUEST_HOSTNAME_LEN + 1) as u8;
+        assert_eq!(
+            NetworkRequest::decode(&oversized),
+            Err(NetworkRequestDecodeError::InvalidHostname)
+        );
+
+        let mut empty = encoded;
+        empty[8] = 0;
+        assert_eq!(
+            NetworkRequest::decode(&empty),
+            Err(NetworkRequestDecodeError::InvalidHostname)
+        );
+
+        let mut non_ascii = encoded;
+        non_ascii[9] = 0xFF;
+        assert_eq!(
+            NetworkRequest::decode(&non_ascii),
+            Err(NetworkRequestDecodeError::InvalidHostname)
+        );
+    }
+
+    #[test]
+    fn wire_rejects_bad_header_fields() {
+        let encoded = NetworkRequest::Close {
+            session: SessionId::new(SessionGeneration::new(1), 0),
+        }
+        .encode();
+
+        let mut bad_magic = encoded;
+        bad_magic[0] ^= 0xFF;
+        assert_eq!(
+            NetworkRequest::decode(&bad_magic),
+            Err(NetworkRequestDecodeError::BadMagic)
+        );
+
+        let mut bad_version = encoded;
+        bad_version[4..6].copy_from_slice(&(NETWORK_PROTOCOL_VERSION + 1).to_le_bytes());
+        assert_eq!(
+            NetworkRequest::decode(&bad_version),
+            Err(NetworkRequestDecodeError::UnsupportedVersion(
+                NETWORK_PROTOCOL_VERSION + 1
+            ))
+        );
+
+        let mut bad_kind = encoded;
+        bad_kind[6] = 0xEE;
+        assert_eq!(
+            NetworkRequest::decode(&bad_kind),
+            Err(NetworkRequestDecodeError::InvalidKind(0xEE))
+        );
+
+        let mut bad_socket_kind = NetworkRequest::Open {
+            kind: SocketKind::Udp,
+        }
+        .encode();
+        bad_socket_kind[8] = 0x7F;
+        assert_eq!(
+            NetworkRequest::decode(&bad_socket_kind),
+            Err(NetworkRequestDecodeError::InvalidSocketKind(0x7F))
+        );
+
+        let response = NetworkResponse::Close.encode();
+        let mut bad_status = response;
+        bad_status[7] = 9;
+        assert_eq!(
+            NetworkResponse::decode(&bad_status),
+            Err(NetworkResponseDecodeError::InvalidStatus(9))
+        );
+        assert_eq!(
+            NetworkResponse::decode(&response[..NETWORK_RESPONSE_BYTES - 1]),
+            Err(NetworkResponseDecodeError::Truncated)
+        );
+    }
+
+    #[test]
+    fn session_id_packs_generation_and_index() {
+        let session = SessionId::new(SessionGeneration::new(0xABCD), 0xFFFF_FFFF);
+        assert_eq!(session.generation(), SessionGeneration::new(0xABCD));
+        assert_eq!(session.index(), 0xFFFF_FFFF);
+        assert_eq!(SessionId::from_raw(session.raw()), session);
     }
 
     #[test]

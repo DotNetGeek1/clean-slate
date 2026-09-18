@@ -1,13 +1,39 @@
 //! Bounded client ↔ network-service request/response wire shapes.
+//!
+//! Every request and response is exactly one fixed-size frame that fits a
+//! single kernel IPC message. Application payload bytes for `Send` / `Receive`
+//! are **not** carried in the frame: the frame carries only the byte count, and
+//! the bytes travel through the bounded payload region owned by the network
+//! service transport (lane #83), sized by
+//! [`crate::limits::MAX_APPLICATION_PAYLOAD_BYTES`].
+//!
+//! Frame layout (little-endian):
+//!
+//! ```text
+//! [0..4]  NETWORK_PROTOCOL_MAGIC
+//! [4..6]  NETWORK_PROTOCOL_VERSION
+//! [6]     NetworkRequestKind
+//! [7]     NetworkResponseStatus (responses only; 0 in requests)
+//! [8..]   kind-specific body
+//! ```
 
 use crate::addr::{BoundedHostname, SocketAddrV4};
-use crate::limits::MAX_APPLICATION_PAYLOAD_BYTES;
+use crate::limits::{MAX_APPLICATION_PAYLOAD_BYTES, MAX_REQUEST_HOSTNAME_LEN};
 use crate::session::{SessionId, SocketKind};
 
 pub const NETWORK_PROTOCOL_MAGIC: u32 = 0x4E45_5431; // "NET1"
 pub const NETWORK_PROTOCOL_VERSION: u16 = 1;
 pub const NETWORK_REQUEST_BYTES: usize = 64;
 pub const NETWORK_RESPONSE_BYTES: usize = 64;
+
+/// Byte offset of the hostname bytes inside a `Resolve` request frame
+/// (after the header and the one-byte name length at offset 8).
+const RESOLVE_NAME_OFFSET: usize = 9;
+
+const _: () = assert!(
+    RESOLVE_NAME_OFFSET + MAX_REQUEST_HOSTNAME_LEN <= NETWORK_REQUEST_BYTES,
+    "Resolve hostname must fit inside one request frame"
+);
 
 /// Caller identity attached by the trusted network service, never by the client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -54,7 +80,6 @@ impl NetworkRequestKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(clippy::large_enum_variant)]
 pub enum NetworkRequest {
     Resolve {
         name: BoundedHostname,
@@ -66,10 +91,12 @@ pub enum NetworkRequest {
         session: SessionId,
         dest: SocketAddrV4,
     },
+    /// Transmit `payload_len` bytes supplied out-of-band via the service payload region.
     Send {
         session: SessionId,
         payload_len: u32,
     },
+    /// Receive up to `max_len` bytes into the service payload region.
     Receive {
         session: SessionId,
         max_len: u32,
@@ -98,9 +125,10 @@ impl NetworkRequest {
         match self {
             Self::Resolve { name } => {
                 out[6] = NetworkRequestKind::Resolve as u8;
-                out[8] = name.len() as u8;
                 let len = name.len();
-                out[9..9 + len].copy_from_slice(name.as_bytes());
+                out[8] = len as u8;
+                out[RESOLVE_NAME_OFFSET..RESOLVE_NAME_OFFSET + len]
+                    .copy_from_slice(name.as_bytes());
             }
             Self::Open { kind } => {
                 out[6] = NetworkRequestKind::Open as u8;
@@ -149,7 +177,7 @@ impl NetworkRequest {
         match kind {
             NetworkRequestKind::Resolve => {
                 let len = bytes[8];
-                let name = BoundedHostname::from_encoded(len, &bytes[9..])
+                let name = BoundedHostname::from_encoded(len, &bytes[RESOLVE_NAME_OFFSET..])
                     .map_err(|_| NetworkRequestDecodeError::InvalidHostname)?;
                 Ok(Self::Resolve { name })
             }
