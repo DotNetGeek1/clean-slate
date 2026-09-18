@@ -167,3 +167,65 @@ cargo xtask test-m7-net-device
 Host peer logs: `[FIX ] arp reply`, `[FIX ] icmp echo`, `[FIX ] udp echo len=…`.
 
 On Windows, set `OVMF_CODE` / `OVMF_VARS` (see `scripts/run-tests.ps1`) or run tests through that script; xtask only auto-discovers Linux OVMF paths.
+
+## M7.4b UDP
+
+Issue #124 adds [`udp`](../network/src/udp.rs): UDP header codec, a bounded endpoint table, and [`UdpTransport`](../network/src/udp.rs) over [`L3Stack`](../network/src/stack.rs). TCP (#125) and future #88 acceptance multiplex inbound IPv4 on separate transports that each call `poll` on a shared or paired stack.
+
+### Header and checksum
+
+- [`UDP_HEADER_LEN`](../network/src/udp.rs) = 8; [`MAX_UDP_PAYLOAD`](../network/src/udp.rs) = [`MAX_L3_PAYLOAD_BYTES`](../network/src/limits.rs) − 20 − 8 (1472 bytes for IPv4-on-Ethernet).
+- **Checksum required on the wire:** [`UdpHeader::parse`](../network/src/udp.rs) rejects `checksum == 0` (IPv4 “no checksum” is not supported in M7). A computed checksum of zero is written as `0xFFFF` on transmit.
+- Parse failures use [`ParseError`](../network/src/ethernet.rs) (`Truncated`, `BadTotalLength`, `BadChecksum`, `PayloadTooLarge`, `BufferTooSmall`).
+
+### Endpoint table bounds and memory
+
+| Constant | Value |
+|----------|------:|
+| [`MAX_UDP_ENDPOINTS`](../network/src/limits.rs) | 32 |
+| RX queue per endpoint | [`MAX_PENDING_REQUESTS_PER_SESSION`](../network/src/limits.rs) = 8 |
+| Stored payload per datagram | ≤ [`MAX_UDP_PAYLOAD`](../network/src/udp.rs) = 1472 |
+
+Each queued datagram stores `SocketAddrV4` + length + 1472-byte fixed buffer (1480 B); a UDP datagram over unfragmented IPv4-on-Ethernet cannot exceed this, so the larger IPC bound `MAX_APPLICATION_PAYLOAD_BYTES` is not used here. Worst-case RX memory for the table is [`UDP_TABLE_MAX_RX_BYTES`](../network/src/udp.rs) (32 × 8 × 1480 ≈ 370 KiB). Slot metadata is O(32) and bounded.
+
+### Port allocation
+
+- Explicit bind: `UdpTable::open(owner, Some(port))` — collision → `NetworkError::InvalidRequest`.
+- Ephemeral: `open(owner, None)` chooses the lowest free port in `49152 ..= 49152 + MAX_UDP_ENDPOINTS - 1` ([`EPHEMERAL_PORT_BASE`](../network/src/udp.rs)).
+- Table full → `NetworkError::SessionExhausted`.
+
+### Drop and error policy
+
+| Condition | Behaviour |
+|-----------|-----------|
+| No endpoint on `dst_port` | Drop; `UdpStats::dropped_unbound` (no ICMP port-unreachable in M7) |
+| Connected endpoint, `from != connected_peer` | Drop; `dropped_foreign` |
+| RX queue full | Drop newest datagram; `dropped_queue_full` (never blocks) |
+| Malformed UDP / bad checksum | Drop; `dropped_malformed` |
+| ARP miss on send | `NetworkError::Unreachable` after bounded ARP request; caller `poll`s and retries |
+| Wrong `SessionId` generation | `Denied(StaleGeneration)` |
+| Wrong `TrustedCaller` | `Denied(NoCapability)` (defensive; capability broker #87 enforces above this layer) |
+| Oversized application send | `InvalidRequest` |
+
+### Teardown and holder exit
+
+- `UdpTransport::reset()` clears the endpoint table, stats, and `L3Stack` (ARP + link). A **new** `UdpTable::new(next_generation)` invalidates all prior `SessionId` values.
+- `UdpTable::on_holder_exit(owner)` closes every endpoint for that holder and drops queued datagrams.
+
+### Receive semantics
+
+- `receive` is non-blocking; returns `Ok(None)` if the queue is empty.
+- On success, returns `(from, full_payload_len)` and copies `min(full_payload_len, out.len())` bytes (truncation is visible when `full_payload_len > out.len()`).
+- `receive_with_deadline(now, deadline_tick, …)` polls until the deadline (inclusive) or returns `NetworkError::Timeout`.
+
+### DNS lane (#85) API
+
+Use the same [`SessionId`](../network/src/session.rs) / [`SessionGeneration`](../network/src/session.rs) as the network service:
+
+1. `UdpTable::open(owner, Some(53))` or ephemeral for client ports.
+2. `UdpTable::connect(id, owner, dns_server)` when a default peer is desired.
+3. `UdpTransport::send(now, id, owner, dest, payload)` — `dest` optional if connected.
+4. `UdpTransport::poll(now)` on every service tick (and after `Unreachable` on send).
+5. `UdpTransport::receive(id, owner, buf)` or `receive_with_deadline` for replies.
+
+Non-UDP `Inbound` from `L3Stack::poll` is ignored by UDP `poll` today; #88 will route one RX frame to UDP and TCP dispatchers.
