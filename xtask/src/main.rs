@@ -28,6 +28,7 @@ const M4_RECOVERY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M5_STORAGE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M6_FIXTURE_SMOKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M6_OBJECT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
+const M7_NET_SERVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M6_PROCESS_CONTROL_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M6_DELEGATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M6_REVOCATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -196,6 +197,19 @@ const M6_OBJECT_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[CAP ] deny holder=",
     "reason=no-authority",
     "[M6.3] PASS",
+];
+const M7_NET_SERVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
+    "[NET ] service started pid=",
+    "[NET ] session open id=",
+    "[NET ] echo ok len=",
+    "[NET ] denied pid=",
+    "reason=no-authority",
+    "[NET ] holder exit reclaimed sessions=",
+    "[NET ] service restarted pid=",
+    "[NET ] inflight failed count=",
+    "[NET ] stale-session denied generation=",
+    "[NET ] capacity baseline ok",
+    "[M7.3] PASS",
 ];
 const M6_DELEGATION_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[CAP ] delegate denied from=",
@@ -433,6 +447,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM5DiskHarness => run_m5_disk_harness(&trailing_args),
         ParsedCommand::TestM6FixtureSmoke => run_m6_fixture_smoke_acceptance(),
         ParsedCommand::TestM6Object => run_m6_object_acceptance(),
+        ParsedCommand::TestM7NetService => run_m7_net_service_acceptance(),
         ParsedCommand::TestM6ProcessControl => run_m6_process_control_acceptance(),
         ParsedCommand::TestM6Delegation => run_m6_delegation_acceptance(),
         ParsedCommand::TestM6Revocation => run_m6_revocation_acceptance(),
@@ -927,6 +942,18 @@ fn run_m6_object_acceptance() -> Result<(), XtaskError> {
         &["m6-object-self-test"],
         Some((&M6_OBJECT_ACCEPTANCE_MARKERS, M6_OBJECT_ACCEPTANCE_TIMEOUT)),
         m5_storage_vm_config(),
+    )
+}
+
+fn run_m7_net_service_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m7-net-service-self-test"],
+        Some((
+            &M7_NET_SERVICE_ACCEPTANCE_MARKERS,
+            M7_NET_SERVICE_ACCEPTANCE_TIMEOUT,
+        )),
     )
 }
 
@@ -1812,6 +1839,9 @@ fn print_help() {
     println!(
         "  test-m6-object Build M6 object-capability constituent boot and validate ordered markers"
     );
+    println!(
+        "  test-m7-net-service Build M7.3 network-service constituent boot and validate ordered markers (aliases: m7-net-service, m7.3)"
+    );
     println!("  test-m6-process-control Build M6 process-control constituent boot and validate ordered markers");
     println!("  test-m6-delegation Build M6 delegation/attenuation constituent boot and validate ordered markers");
     println!("  test-m6-revocation Build M6 revocation/teardown constituent boot and validate ordered markers");
@@ -1863,6 +1893,7 @@ enum ParsedCommand {
     TestM5DiskHarness,
     TestM6FixtureSmoke,
     TestM6Object,
+    TestM7NetService,
     TestM6ProcessControl,
     TestM6Delegation,
     TestM6Revocation,
@@ -1907,6 +1938,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m5-disk-harness" => ParsedCommand::TestM5DiskHarness,
         Some(cmd) if cmd == "test-m6-fixture-smoke" => ParsedCommand::TestM6FixtureSmoke,
         Some(cmd) if cmd == "test-m6-object" => ParsedCommand::TestM6Object,
+        Some(cmd) if cmd == "test-m7-net-service" || cmd == "m7-net-service" || cmd == "m7.3" => {
+            ParsedCommand::TestM7NetService
+        }
         Some(cmd) if cmd == "test-m6-process-control" => ParsedCommand::TestM6ProcessControl,
         Some(cmd) if cmd == "test-m6-delegation" => ParsedCommand::TestM6Delegation,
         Some(cmd) if cmd == "test-m6-revocation" || cmd == "m6-revocation" || cmd == "m6.6" => {

@@ -79,3 +79,49 @@ Constants live in `network/src/fixture.rs`. Acceptance assumes a private `10.77.
 - Linux socket ABI (M9)
 - DNS-over-TCP and DNSSEC
 - Arbitrary certificate stores / Web PKI
+
+## M7.3 network service
+
+Lane #83 adds the userspace-facing network service state machine (`service-fixtures/src/network_service.rs`) and the kernel bridge (`kernel/src/service/net_bridge.rs`).
+
+### State machine and generation rule
+
+Each supervised network-service instance owns a fixed `SessionGeneration` assigned at construction. Every `SessionId` embeds that generation; the service rejects IDs whose generation differs with `NetworkError::Denied(StaleGeneration)`. On supervisor restart the replacement instance receives a **new** generation and a fresh backend attachment; stale client handles become unusable.
+
+### Teardown / restart invariants
+
+| Invariant | Enforcement |
+|-----------|-------------|
+| Holder exit reclaims sessions, queued work, and staged payload for that holder | `NetworkService::on_holder_exit` + kernel client queue `reclaim_for_holder` (process teardown in `kernel/src/process/domain.rs`) |
+| Service shutdown fails in-flight work with `NetworkError::Reset`, clears tables, resets backend | `NetworkService::shutdown` / `NetBridge::shutdown_service` |
+| Service holder exit requeues in-service client work | `NetBridge::requeue_in_service` via `recover_net_queue_for_service_holder_exit` |
+| Raw NIC authority revoked before instance is gone | Backend `NetworkLink::reset` on shutdown; only the live network-service PID may perform raw-device bridge ops (`authorize_raw_device_access`) |
+
+### Authorization hook (#87)
+
+`NetworkAuthorizer` / `NetworkOp` in `network_service.rs` gate each operation. Production builds will replace the M7 fixture authorizer with capability-broker checks in `kernel/src/capability/network.rs` (TODO #87). Denials surface as `NetworkResponse::Error` with stable `NetworkError::Denied` codes.
+
+### Backend attach seam (#82 / #88)
+
+`NetworkService::attach_backend` / `detach_backend` hold the sole `NetworkLink` reference. The kernel bridge currently uses an in-kernel loopback link; VirtIO (#82) plugs in by attaching a real `NetworkLink` at service launch without changing the client IPC contract.
+
+### Payload region
+
+`Send` / `Receive` IPC frames carry counts only; bytes move through the bounded payload region (`MAX_APPLICATION_PAYLOAD_BYTES`) associated with the client queue slot / service handler.
+
+### Acceptance markers
+
+Ordered QEMU markers for `cargo xtask test-m7-net-service`:
+
+1. `[NET ] service started pid=… generation=…`
+2. `[NET ] session open id=…`
+3. `[NET ] echo ok len=…`
+4. `[NET ] denied pid=… reason=no-authority`
+5. `[NET ] holder exit reclaimed sessions=… pending=…`
+6. `[NET ] service restarted pid=… generation=…`
+7. `[NET ] inflight failed count=…`
+8. `[NET ] stale-session denied generation=…`
+9. `[NET ] capacity baseline ok`
+10. `[M7.3] PASS`
+
+Run locally: `cargo xtask test-m7-net-service` (aliases `m7-net-service`, `m7.3`) or `./scripts/run-tests.ps1 test-m7-net-service`.

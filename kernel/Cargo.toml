@@ -33,6 +33,7 @@ m6-revocation-self-test = ["m3-entry-self-test"]
 m6-audit-self-test = ["m3-entry-self-test"]
 m6-capabilities-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
 m6-fixture-smoke-self-test = ["m3-entry-self-test"]
+m7-net-service-self-test = ["m3-entry-self-test"]
 
 [lib]
 path = "src/lib.rs"
@@ -45,6 +46,7 @@ test = false
 [dependencies]
 clean-slate-block = { path = "../block" }
 clean-slate-capability = { path = "../capability" }
+clean-slate-network = { path = "../network" }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 clean-slate-store = { path = "../store", optional = true }

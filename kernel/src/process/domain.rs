@@ -23,6 +23,9 @@ use crate::sched::scheduler_mut;
 use crate::sched::with_scheduler;
 use crate::sched::ThreadKind;
 use crate::sched::ThreadProcessResources;
+use crate::service::net_bridge::{
+    reclaim_net_requests_for_holder, recover_net_queue_for_service_holder_exit,
+};
 
 // Process teardown and resource accounting are only exercised end-to-end by
 // the M3 self-test features today; the normal boot path picks them up later.
@@ -138,6 +141,8 @@ pub(crate) fn teardown_current_process(
     let holder = HolderId(process_id);
     recover_object_queue_for_service_holder_exit(holder);
     reclaim_object_requests_for_holder(holder);
+    recover_net_queue_for_service_holder_exit(holder.0);
+    reclaim_net_requests_for_holder(holder.0);
     revoke_for_holder(holder);
     revoke_for_process_resource(process_id);
     discard_bootstrap_grants_for_holder(holder);
@@ -249,6 +254,8 @@ pub(crate) fn teardown_process_by_id(
         let holder = HolderId(process_id);
         recover_object_queue_for_service_holder_exit(holder);
         reclaim_object_requests_for_holder(holder);
+        recover_net_queue_for_service_holder_exit(holder.0);
+        reclaim_net_requests_for_holder(holder.0);
         revoke_for_holder(holder);
         revoke_for_process_resource(process_id);
         discard_bootstrap_grants_for_holder(holder);

@@ -100,7 +100,8 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m6-delegation-self-test"),
     not(feature = "m6-revocation-self-test"),
     not(feature = "m6-audit-self-test"),
-    not(feature = "m6-capabilities-self-test")
+    not(feature = "m6-capabilities-self-test"),
+    not(feature = "m7-net-service-self-test")
 ))]
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
 #[cfg(feature = "m3-ipc-self-test")]
@@ -141,6 +142,8 @@ use crate::selftest::m6_object::start_m6_object_self_test;
 use crate::selftest::m6_process_control::start_m6_process_control_self_test;
 #[cfg(feature = "m6-revocation-self-test")]
 use crate::selftest::m6_revocation::start_m6_revocation_self_test;
+#[cfg(feature = "m7-net-service-self-test")]
+use crate::selftest::m7_net_service::start_m7_net_service_self_test;
 use crate::syscall::initialize_syscall_abi;
 use ::uefi::mem::memory_map::{MemoryMap, MemoryMapMut};
 use ::uefi::Status;
@@ -240,11 +243,19 @@ fn run_inner() -> Result<(), &'static str> {
 
     #[cfg(feature = "m3-entry-self-test")]
     {
-        #[cfg(feature = "m4-service-lifecycle-self-test")]
+        #[cfg(feature = "m7-net-service-self-test")]
+        {
+            start_m7_net_service_self_test(allocator)
+        }
+        #[cfg(all(
+            not(feature = "m7-net-service-self-test"),
+            feature = "m4-service-lifecycle-self-test"
+        ))]
         {
             start_service_lifecycle_self_test(allocator)
         }
         #[cfg(all(
+            not(feature = "m7-net-service-self-test"),
             not(feature = "m4-service-lifecycle-self-test"),
             feature = "m4-supervisor-self-test"
         ))]
@@ -253,6 +264,7 @@ fn run_inner() -> Result<(), &'static str> {
             start_userspace_supervisor_self_test(&mut allocator)
         }
         #[cfg(all(
+            not(feature = "m7-net-service-self-test"),
             not(feature = "m4-service-lifecycle-self-test"),
             not(feature = "m4-supervisor-self-test"),
             any(
@@ -388,6 +400,7 @@ fn run_inner() -> Result<(), &'static str> {
             start_m6_fixture_smoke_self_test(allocator)
         }
         #[cfg(all(
+            not(feature = "m7-net-service-self-test"),
             not(feature = "m4-service-lifecycle-self-test"),
             not(feature = "m4-supervisor-self-test"),
             not(any(

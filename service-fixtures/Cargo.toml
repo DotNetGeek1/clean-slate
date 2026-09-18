@@ -12,10 +12,12 @@ path = "src/lib.rs"
 [dependencies]
 clean-slate-block = { path = "../block" }
 clean-slate-capability = { path = "../capability" }
+clean-slate-network = { path = "../network" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 
 [dev-dependencies]
 clean-slate-block = { path = "../block", features = ["alloc"] }
+clean-slate-network = { path = "../network", features = ["alloc"] }
 
 [lints]
 workspace = true
