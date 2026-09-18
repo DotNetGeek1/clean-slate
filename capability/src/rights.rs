@@ -19,6 +19,17 @@ impl Rights {
     pub const TERMINATE: Self = Self(1 << 7);
     pub const AUDIT_READ: Self = Self(1 << 8);
 
+    /// Resolve DNS names through the network service.
+    pub const NET_RESOLVE: Self = Self(1 << 9);
+    /// Open/connect socket sessions (TCP/UDP).
+    pub const NET_CONNECT: Self = Self(1 << 10);
+    /// Send datagrams or stream bytes on an open session.
+    pub const NET_SEND: Self = Self(1 << 11);
+    /// Receive datagrams or stream bytes on an open session.
+    pub const NET_RECEIVE: Self = Self(1 << 12);
+    /// Raw NIC/device authority (driver or network service only).
+    pub const NET_RAW_DEVICE: Self = Self(1 << 13);
+
     const ALL_KNOWN: u32 = (1 << 0)
         | (1 << 1)
         | (1 << 2)
@@ -27,7 +38,12 @@ impl Rights {
         | (1 << 5)
         | (1 << 6)
         | (1 << 7)
-        | (1 << 8);
+        | (1 << 8)
+        | (1 << 9)
+        | (1 << 10)
+        | (1 << 11)
+        | (1 << 12)
+        | (1 << 13);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -90,13 +106,21 @@ impl Rights {
                     | Self::REVOKE.0,
             ),
             ResourceClass::Audit => Self(Self::AUDIT_READ.0 | Self::DELEGATE.0),
-            ResourceClass::Network => Self::empty(),
+            ResourceClass::Network => Self(
+                Self::NET_RESOLVE.0
+                    | Self::NET_CONNECT.0
+                    | Self::NET_SEND.0
+                    | Self::NET_RECEIVE.0
+                    | Self::NET_RAW_DEVICE.0
+                    | Self::DELEGATE.0
+                    | Self::REVOKE.0,
+            ),
         }
     }
 
     /// Lowercase, pipe-separated names in deterministic bit order.
     pub fn write_names(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        const NAMES: [(&str, u32); 9] = [
+        const NAMES: [(&str, u32); 14] = [
             ("read", 1 << 0),
             ("write", 1 << 1),
             ("inspect", 1 << 2),
@@ -106,6 +130,11 @@ impl Rights {
             ("signal", 1 << 6),
             ("terminate", 1 << 7),
             ("audit_read", 1 << 8),
+            ("net_resolve", 1 << 9),
+            ("net_connect", 1 << 10),
+            ("net_send", 1 << 11),
+            ("net_receive", 1 << 12),
+            ("net_raw_device", 1 << 13),
         ];
         let mut first = true;
         for (name, bit) in NAMES {

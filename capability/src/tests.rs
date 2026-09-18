@@ -63,7 +63,7 @@ fn rights_subset_and_names() {
     assert!(Rights::READ.is_subset_of(full));
     assert_eq!(full.attenuate(Rights::READ), Rights::READ);
     assert!(!Rights::WRITE.is_subset_of(Rights::READ));
-    assert_eq!(Rights::from_bits(1 << 9), None);
+    assert_eq!(Rights::from_bits(1 << 14), None);
     let mut buf = alloc::string::String::new();
     full.write_names(&mut buf).unwrap();
     assert_eq!(buf, "read|write|delegate");
@@ -82,6 +82,16 @@ fn valid_for_masks() {
     assert_eq!(
         Rights::valid_for(ResourceClass::Audit),
         Rights::AUDIT_READ.union(Rights::DELEGATE)
+    );
+    assert_eq!(
+        Rights::valid_for(ResourceClass::Network),
+        Rights::NET_RESOLVE
+            .union(Rights::NET_CONNECT)
+            .union(Rights::NET_SEND)
+            .union(Rights::NET_RECEIVE)
+            .union(Rights::NET_RAW_DEVICE)
+            .union(Rights::DELEGATE)
+            .union(Rights::REVOKE)
     );
 }
 
@@ -293,5 +303,70 @@ fn authorize_audited_matches_authorize() {
     assert_eq!(
         CapabilityError::from_u8(sink.events[1].outcome.error_code),
         Some(CapabilityError::MissingRight)
+    );
+}
+
+#[test]
+fn network_rights_mask_and_authorization() {
+    let holder = HolderId(77);
+    let resource = ResourceRef {
+        class: ResourceClass::Network,
+        id: 1,
+        instance_generation: 0,
+    };
+    let handle = CapabilityHandle::new(0, 1);
+    let valid = Rights::valid_for(ResourceClass::Network);
+    assert!(valid.contains(Rights::NET_SEND));
+    assert_eq!(Rights::from_bits(valid.bits() | (1 << 14)), None);
+    assert!(!Rights::NET_SEND.is_subset_of(Rights::valid_for(ResourceClass::BlockDevice)));
+
+    let parent = live_record(holder, resource, valid, 1);
+    let child_rights = Rights::NET_SEND.union(Rights::NET_RECEIVE);
+    assert_eq!(
+        validate_delegation(&parent, handle, holder, child_rights),
+        Ok(child_rights)
+    );
+    let invalid_parent = live_record(holder, resource, valid.union(Rights::READ), 1);
+    assert_eq!(
+        validate_delegation(&invalid_parent, handle, holder, Rights::READ),
+        Err(CapabilityError::InvalidRights)
+    );
+
+    let bad_object = live_record(
+        holder,
+        ResourceRef::object(1),
+        Rights::READ
+            .union(Rights::DELEGATE)
+            .union(Rights::NET_RESOLVE),
+        1,
+    );
+    assert_eq!(
+        validate_delegation(&bad_object, handle, holder, Rights::NET_RESOLVE),
+        Err(CapabilityError::InvalidRights)
+    );
+
+    let send_only = live_record(
+        holder,
+        resource,
+        Rights::NET_SEND.union(Rights::DELEGATE),
+        1,
+    );
+    assert_eq!(
+        authorize(&send_only, handle, holder, resource, Rights::NET_SEND),
+        Ok(())
+    );
+    assert_eq!(
+        authorize(&send_only, handle, holder, resource, Rights::NET_RECEIVE),
+        Err(CapabilityError::MissingRight)
+    );
+
+    assert_eq!(
+        validate_delegation(
+            &send_only,
+            handle,
+            holder,
+            Rights::NET_SEND.union(Rights::NET_RECEIVE)
+        ),
+        Err(CapabilityError::RightsWidening)
     );
 }

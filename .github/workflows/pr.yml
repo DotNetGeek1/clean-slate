@@ -4,7 +4,9 @@ on:
   pull_request:
     paths:
       - "block/**"
+      - "capability/**"
       - "kernel/**"
+      - "network/**"
       - "store/**"
       - "xtask/**"
       - "scripts/**"
@@ -18,7 +20,9 @@ on:
       - main
     paths:
       - "block/**"
+      - "capability/**"
       - "kernel/**"
+      - "network/**"
       - "store/**"
       - "xtask/**"
       - "scripts/**"
@@ -63,6 +67,14 @@ jobs:
       - name: Clippy (block contract)
         run: cargo clippy -p clean-slate-block --all-targets --features alloc -- -D warnings
 
+      - name: Clippy (network contract)
+        run: |
+          cargo clippy -p clean-slate-network --all-targets -- -D warnings
+          cargo clippy -p clean-slate-network --all-targets --features alloc -- -D warnings
+
+      - name: Clippy (capability)
+        run: cargo clippy -p clean-slate-capability --all-targets -- -D warnings
+
       - name: Clippy (store)
         run: cargo clippy -p clean-slate-store --all-targets -- -D warnings
 
@@ -76,6 +88,8 @@ jobs:
         run: |
           cargo build -p xtask
           cargo build -p clean-slate-block --features alloc
+          cargo build -p clean-slate-network
+          cargo build -p clean-slate-network --features alloc
           cargo build -p clean-slate-store
           cargo build -p clean-slate-kernel --target x86_64-unknown-uefi
           cargo xtask build
@@ -85,6 +99,8 @@ jobs:
           cargo test -p xtask
           cargo test -p clean-slate-block
           cargo test -p clean-slate-block --features alloc
+          cargo test -p clean-slate-network
+          cargo test -p clean-slate-network --features alloc
           cargo test -p clean-slate-store
           cargo test -p clean-slate-capability
           cargo test -p clean-slate-kernel
