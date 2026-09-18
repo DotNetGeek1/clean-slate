@@ -21,6 +21,7 @@ pub struct TcpEchoService {
     listen: SocketHandle,
     active: Option<SocketHandle>,
     recv_len: usize,
+    echoed: bool,
 }
 
 impl TcpEchoService {
@@ -31,6 +32,7 @@ impl TcpEchoService {
             listen,
             active: None,
             recv_len: 0,
+            echoed: false,
         }
     }
 
@@ -41,6 +43,7 @@ impl TcpEchoService {
                 println!("[FIX ] tcp echo connect");
                 self.active = Some(self.listen);
                 self.recv_len = 0;
+                self.echoed = false;
             } else if socket.is_listening() {
                 return;
             }
@@ -56,8 +59,11 @@ impl TcpEchoService {
             if let Ok(n) = socket.recv_slice(&mut buf) {
                 let take = n.min(buf.len());
                 self.recv_len = (self.recv_len + take).min(APP_REQUEST_BYTES.len());
-                if self.recv_len >= APP_REQUEST_BYTES.len() {
-                    let _ = socket.send_slice(APP_RESPONSE_BYTES);
+                if !self.echoed
+                    && self.recv_len >= APP_REQUEST_BYTES.len()
+                    && socket.send_slice(APP_RESPONSE_BYTES).is_ok()
+                {
+                    self.echoed = true;
                     println!("[FIX ] tcp echo");
                 }
             }
@@ -71,6 +77,7 @@ impl TcpEchoService {
     fn relisten(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
         self.active = None;
         self.recv_len = 0;
+        self.echoed = false;
         let socket = sockets.get_mut::<tcp::Socket>(self.listen);
         if !socket.is_listening() {
             let _ = socket.listen(TCP_ECHO_PORT);
@@ -141,7 +148,7 @@ impl TlsService {
                 Err(_) => break,
             }
         }
-        if !self.sni_logged && conn.is_handshaking() == false {
+        if !self.sni_logged && !conn.is_handshaking() {
             println!("[FIX ] tls handshake sni=m7.fixture.test");
             self.sni_logged = true;
         }

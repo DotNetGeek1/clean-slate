@@ -1,9 +1,7 @@
 //! Connection table and [`TcpTransport`] over [`L3Stack`].
 
-#[cfg(any(test, feature = "alloc"))]
+#[cfg(feature = "alloc")]
 extern crate alloc;
-#[cfg(any(test, feature = "alloc"))]
-use alloc::boxed::Box;
 
 use crate::addr::{IpProtocol, Ipv4Addr, SocketAddrV4};
 use crate::device::NetworkLink;
@@ -21,26 +19,10 @@ use crate::tcp::stats::TcpStats;
 
 const EPHEMERAL_PORT_BASE: u16 = 50_000;
 
-fn new_slot_storage() -> SlotStorage {
-    #[cfg(any(test, feature = "alloc"))]
-    {
-        Box::new([const { None }; MAX_TCP_CONNECTIONS as usize])
-    }
-    #[cfg(not(any(test, feature = "alloc")))]
-    {
-        [const { None }; MAX_TCP_CONNECTIONS as usize]
-    }
-}
-
-#[cfg(any(test, feature = "alloc"))]
-type SlotStorage = Box<[Option<TcpConnection>; MAX_TCP_CONNECTIONS as usize]>;
-#[cfg(not(any(test, feature = "alloc")))]
-type SlotStorage = [Option<TcpConnection>; MAX_TCP_CONNECTIONS as usize];
-
 /// Fixed-size connection table keyed by [`SessionId`] index.
 pub struct TcpTable {
     generation: SessionGeneration,
-    pub(crate) slots: SlotStorage,
+    pub(crate) slots: [Option<TcpConnection>; MAX_TCP_CONNECTIONS as usize],
     iss_counter: u64,
 }
 
@@ -49,22 +31,15 @@ impl TcpTable {
     pub fn init_in_place(&mut self, generation: SessionGeneration) {
         self.generation = generation;
         self.iss_counter = 0;
-        #[cfg(any(test, feature = "alloc"))]
-        {
-            self.slots = new_slot_storage();
-        }
-        #[cfg(not(any(test, feature = "alloc")))]
-        {
-            for slot in self.slots.iter_mut() {
-                *slot = None;
-            }
+        for slot in self.slots.iter_mut() {
+            *slot = None;
         }
     }
 
     pub fn new(generation: SessionGeneration) -> Self {
         Self {
             generation,
-            slots: new_slot_storage(),
+            slots: [const { None }; MAX_TCP_CONNECTIONS as usize],
             iss_counter: 0,
         }
     }
@@ -193,6 +168,25 @@ impl<L: NetworkLink> TcpTransport<L> {
             stack,
             table: TcpTable::new(generation),
             stats: TcpStats::default(),
+        }
+    }
+
+    /// Heap-backed transport for host tests (avoids multi-hundred-KiB stack frames).
+    #[cfg(feature = "alloc")]
+    pub fn alloc_boxed(
+        stack: L3Stack<L>,
+        generation: SessionGeneration,
+    ) -> alloc::boxed::Box<Self> {
+        let layout = core::alloc::Layout::new::<Self>();
+        let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) as *mut Self };
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        unsafe {
+            core::ptr::write(&mut (*ptr).stack, stack);
+            (*ptr).table.init_in_place(generation);
+            (*ptr).stats = TcpStats::default();
+            alloc::boxed::Box::from_raw(ptr)
         }
     }
 
@@ -348,59 +342,63 @@ impl<L: NetworkLink> TcpTransport<L> {
     }
 
     /// Drives RX, timers, SYN retry, and retransmits.
-    ///
-    /// Processes at most one link frame per call (same cadence as [`crate::udp::UdpTransport::poll`])
-    /// so virtio TX completion and RX stay interleaved under heavy poll loops.
     pub fn poll(&mut self, now: u64) -> Result<(), NetworkError> {
-        if let Some(inbound) = self.stack.poll(now)? {
-            if let stack::Inbound::Ipv4(ip) = inbound {
-                if ip.header.protocol == IpProtocol::TCP {
-                    let payload = ip.payload();
-                    let src = ip.header.src;
-                    let dst = ip.header.dst;
-                    match parse_tcp(src, dst, payload) {
-                        Ok((seg, data)) => {
-                            self.stats.segments_received += 1;
-                            let local_port = seg.dst_port;
-                            let remote = SocketAddrV4::new(src, seg.src_port);
-                            if let Some(index) = self.table.find_by_quad(local_port, remote) {
-                                let action = self.table.slots[index].as_mut().unwrap().on_segment(
-                                    &seg,
-                                    data,
-                                    &mut self.stats,
-                                );
-                                match action {
-                                    SegmentAction::SendAck => {
-                                        self.send_ack_at(now, index)?;
-                                        if self.table.slots[index].as_ref().unwrap().state
-                                            == TcpState::TimeWait
-                                        {
-                                            self.table.slots[index]
-                                                .as_mut()
-                                                .unwrap()
-                                                .enter_time_wait(now);
-                                        }
-                                    }
-                                    SegmentAction::MaybeSendData => {
-                                        let _ = self.try_send_data_at(now, index);
-                                    }
-                                    SegmentAction::Closed => {
-                                        self.table.free_slot(index);
-                                    }
-                                    SegmentAction::Failed(_) => {
-                                        self.table.slots[index].as_mut().unwrap().abort();
-                                        self.table.free_slot(index);
-                                    }
-                                    SegmentAction::None => {}
+        while let Some(inbound) = self.stack.poll(now)? {
+            let stack::Inbound::Ipv4(ip) = inbound else {
+                continue;
+            };
+            if ip.header.protocol != IpProtocol::TCP {
+                continue;
+            }
+            let payload = ip.payload();
+            let src = ip.header.src;
+            let dst = ip.header.dst;
+            match parse_tcp(src, dst, payload) {
+                Ok((seg, data)) => {
+                    self.stats.segments_received += 1;
+                    let local_port = seg.dst_port;
+                    let remote = SocketAddrV4::new(src, seg.src_port);
+                    if let Some(index) = self.table.find_by_quad(local_port, remote) {
+                        let action = self.table.slots[index].as_mut().unwrap().on_segment(
+                            &seg,
+                            data,
+                            &mut self.stats,
+                        );
+                        match action {
+                            SegmentAction::SendAck => {
+                                self.send_ack_at(now, index)?;
+                                if self.table.slots[index].as_ref().unwrap().state
+                                    == TcpState::TimeWait
+                                {
+                                    self.table.slots[index]
+                                        .as_mut()
+                                        .unwrap()
+                                        .enter_time_wait(now);
                                 }
-                            } else {
-                                self.stats.dropped_no_conn += 1;
                             }
+                            SegmentAction::MaybeSendData => {
+                                let _ = self.try_send_data_at(now, index);
+                            }
+                            SegmentAction::Closed => {
+                                self.table.free_slot(index);
+                            }
+                            SegmentAction::Failed(_) => {
+                                let conn = self.table.slots[index].as_mut().unwrap();
+                                if conn.has_buffered_recv() {
+                                    // Let `receive` drain in-order data before freeing the slot.
+                                } else {
+                                    conn.abort();
+                                    self.table.free_slot(index);
+                                }
+                            }
+                            SegmentAction::None => {}
                         }
-                        Err(_) => {
-                            self.stats.dropped_bad_checksum += 1;
-                        }
+                    } else {
+                        self.stats.dropped_no_conn += 1;
                     }
+                }
+                Err(_) => {
+                    self.stats.dropped_bad_checksum += 1;
                 }
             }
         }
@@ -415,8 +413,12 @@ impl<L: NetworkLink> TcpTransport<L> {
                         self.table.free_slot(i);
                     }
                     TimerAction::Failed(_) => {
-                        conn.abort();
-                        self.table.free_slot(i);
+                        if conn.has_buffered_recv() {
+                            // Defer until the application drains the recv ring.
+                        } else {
+                            conn.abort();
+                            self.table.free_slot(i);
+                        }
                     }
                     TimerAction::None => {}
                 }

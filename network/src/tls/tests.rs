@@ -33,6 +33,7 @@ mod integration {
         load_fixture_server_config, server_config_from_der, TcpState, TcpTransport, TlsPeerCert,
         TlsPeerFault, TlsTestPeer,
     };
+    use crate::tls::io::TLS_HANDSHAKE_TIMEOUT_TICKS;
     use crate::tls::verify::VALIDATION_TIME_UNIX;
     use crate::tls::{TlsConfig, TlsError, TlsSession, TLS_RECORD_BUFFER_BYTES};
 
@@ -67,12 +68,15 @@ mod integration {
     fn setup_tls_pair(
         cert: TlsPeerCert,
         fault: TlsPeerFault,
-    ) -> (TcpTransport<FakeLink>, TlsTestPeer<FakeLink>) {
+    ) -> (
+        alloc::boxed::Box<TcpTransport<FakeLink>>,
+        TlsTestPeer<FakeLink>,
+    ) {
         let (guest_link, peer_link) = FakeLink::pair();
         let guest_stack = L3Stack::new(guest_link, GUEST_MAC, GUEST_IPV4, ARP_TTL);
         let mut peer_stack = L3Stack::new(peer_link, PEER_MAC, PEER_IPV4, ARP_TTL);
         peer_stack.arp_cache_mut().insert(GUEST_IPV4, GUEST_MAC, 0);
-        let guest = TcpTransport::new(guest_stack, SessionGeneration::new(1));
+        let guest = TcpTransport::alloc_boxed(guest_stack, SessionGeneration::new(1));
         let mut peer = TlsTestPeer::with_fixture_cert(peer_stack, cert);
         peer.set_fault(fault);
         (guest, peer)
@@ -80,12 +84,15 @@ mod integration {
 
     fn setup_tls_pair_custom(
         config: Arc<rustls::ServerConfig>,
-    ) -> (TcpTransport<FakeLink>, TlsTestPeer<FakeLink>) {
+    ) -> (
+        alloc::boxed::Box<TcpTransport<FakeLink>>,
+        TlsTestPeer<FakeLink>,
+    ) {
         let (guest_link, peer_link) = FakeLink::pair();
         let guest_stack = L3Stack::new(guest_link, GUEST_MAC, GUEST_IPV4, ARP_TTL);
         let mut peer_stack = L3Stack::new(peer_link, PEER_MAC, PEER_IPV4, ARP_TTL);
         peer_stack.arp_cache_mut().insert(GUEST_IPV4, GUEST_MAC, 0);
-        let guest = TcpTransport::new(guest_stack, SessionGeneration::new(1));
+        let guest = TcpTransport::alloc_boxed(guest_stack, SessionGeneration::new(1));
         let peer = TlsTestPeer::with_custom_config(peer_stack, config);
         (guest, peer)
     }
@@ -111,6 +118,7 @@ mod integration {
         };
         let mut tls = TlsSession::connect_with_peer_tick(
             0,
+            TLS_HANDSHAKE_TIMEOUT_TICKS,
             &mut guest,
             OWNER,
             remote,
@@ -140,6 +148,7 @@ mod integration {
         };
         let result = TlsSession::connect_with_peer_tick(
             0,
+            TLS_HANDSHAKE_TIMEOUT_TICKS,
             &mut guest,
             OWNER,
             SocketAddrV4::new(PEER_IPV4, TLS_PORT),
@@ -175,6 +184,7 @@ mod integration {
         };
         let result = TlsSession::connect_with_peer_tick(
             0,
+            TLS_HANDSHAKE_TIMEOUT_TICKS,
             &mut guest,
             OWNER,
             SocketAddrV4::new(PEER_IPV4, TLS_PORT),
@@ -199,6 +209,7 @@ mod integration {
         };
         let result = TlsSession::connect_with_peer_tick(
             0,
+            TLS_HANDSHAKE_TIMEOUT_TICKS,
             &mut guest,
             OWNER,
             SocketAddrV4::new(PEER_IPV4, TLS_PORT),
@@ -231,6 +242,7 @@ mod integration {
         };
         let result = TlsSession::connect_with_peer_tick(
             0,
+            TLS_HANDSHAKE_TIMEOUT_TICKS,
             &mut guest,
             OWNER,
             remote,
@@ -260,6 +272,7 @@ mod integration {
         };
         let reconnect = TlsSession::connect_with_peer_tick(
             100,
+            100 + TLS_HANDSHAKE_TIMEOUT_TICKS,
             &mut guest,
             OWNER,
             SocketAddrV4::new(PEER_IPV4, TLS_PORT),

@@ -7,12 +7,16 @@ mod io;
 #[cfg(feature = "tls")]
 mod session;
 #[cfg(feature = "tls")]
+mod trace;
+#[cfg(feature = "tls")]
 mod verify;
 
 #[cfg(feature = "tls")]
 pub use error::TlsError;
 #[cfg(feature = "tls")]
 pub use session::{TlsConfig, TlsSession};
+#[cfg(feature = "m7-handshake-trace")]
+pub use trace::HANDSHAKE_MARKER;
 #[cfg(feature = "tls")]
 pub use verify::{TlsRng, VALIDATION_TIME_UNIX};
 

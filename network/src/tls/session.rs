@@ -76,14 +76,54 @@ impl<'a, 'buf, L: NetworkLink> TlsSession<'a, 'buf, L> {
         read_buf: &'buf mut [u8; TLS_RECORD_BUFFER_BYTES],
         write_buf: &'buf mut [u8; TLS_RECORD_BUFFER_BYTES],
     ) -> Result<Self, TlsError> {
+        let handshake_deadline = now.saturating_add(TLS_HANDSHAKE_TIMEOUT_TICKS);
+        Self::connect_with_handshake_deadline(
+            now,
+            handshake_deadline,
+            transport,
+            owner,
+            remote,
+            config,
+            rng,
+            read_buf,
+            write_buf,
+            None,
+        )
+    }
+
+    /// Like [`connect`], but the caller supplies an absolute monotonic handshake deadline
+    /// (QEMU self-tests use a larger budget than [`TLS_HANDSHAKE_TIMEOUT_TICKS`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_with_handshake_deadline<R: TlsRng>(
+        now: u64,
+        handshake_deadline: u64,
+        transport: &'a mut TcpTransport<L>,
+        owner: TrustedCaller,
+        remote: SocketAddrV4,
+        config: TlsConfig<'a>,
+        rng: R,
+        read_buf: &'buf mut [u8; TLS_RECORD_BUFFER_BYTES],
+        write_buf: &'buf mut [u8; TLS_RECORD_BUFFER_BYTES],
+        peer_tick: Option<&'a mut dyn FnMut(u64)>,
+    ) -> Result<Self, TlsError> {
         Self::connect_with_peer_tick(
-            now, transport, owner, remote, config, rng, read_buf, write_buf, None,
+            now,
+            handshake_deadline,
+            transport,
+            owner,
+            remote,
+            config,
+            rng,
+            read_buf,
+            write_buf,
+            peer_tick,
         )
     }
 
     /// Same as [`connect`], with an optional per-tick hook to drive a hermetic TCP peer (host tests).
     pub fn connect_with_peer_tick<R: TlsRng>(
         now: u64,
+        handshake_deadline: u64,
         transport: &'a mut TcpTransport<L>,
         owner: TrustedCaller,
         remote: SocketAddrV4,
@@ -98,7 +138,7 @@ impl<'a, 'buf, L: NetworkLink> TlsSession<'a, 'buf, L> {
         }
 
         let tcp_id = transport.connect(now, owner, remote)?;
-        let handshake_deadline = now + TLS_HANDSHAKE_TIMEOUT_TICKS;
+        crate::tls::trace::handshake_step("tcp syn sent");
         wait_tcp_established(
             transport,
             tcp_id,
@@ -107,6 +147,7 @@ impl<'a, 'buf, L: NetworkLink> TlsSession<'a, 'buf, L> {
             handshake_deadline,
             &mut peer_tick,
         )?;
+        crate::tls::trace::handshake_step("tcp established");
 
         let io_deadline = u64::MAX;
         let et_config = EtTlsConfig::new().with_server_name(config.server_name);
@@ -121,6 +162,7 @@ impl<'a, 'buf, L: NetworkLink> TlsSession<'a, 'buf, L> {
             owner,
             abort_on_drop: true,
         };
+        crate::tls::trace::handshake_step("client hello begin");
         let tls = run_tls_handshake(
             transport,
             tcp_id,
@@ -135,6 +177,7 @@ impl<'a, 'buf, L: NetworkLink> TlsSession<'a, 'buf, L> {
         );
         if tls.is_ok() {
             guard.abort_on_drop = false;
+            crate::tls::trace::handshake_step("handshake finished");
         }
         drop(guard);
         let tls = tls?;

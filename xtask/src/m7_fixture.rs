@@ -1,16 +1,12 @@
 //! Hermetic M7 QEMU raw-Ethernet peer (host-side smoltcp stack).
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration as StdDuration;
-
-use clean_slate_network::buffer::FrameBuf;
 
 use clean_slate_network::fixture::{
     DNS_SERVER_PORT, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS, FIXTURE_HOSTNAME, PEER_IPV4, PEER_MAC,
@@ -18,10 +14,9 @@ use clean_slate_network::fixture::{
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
-use smoltcp::socket::udp;
+use smoltcp::socket::{tcp, udp};
 
-use crate::m7_fixture_echo::{is_tcp_echo_frame, EchoFrameQueues, TcpEchoPeer};
-use crate::m7_fixture_tls::{is_tls_tcp_frame, TlsFixturePeer};
+use crate::m7_fixture_tcp::{FixtureTlsCert, TcpEchoService, TlsService};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 
@@ -110,11 +105,7 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         return;
     }
 
-    let echo_frames = Rc::new(RefCell::new(EchoFrameQueues::default()));
-    let tls_frames = Rc::new(RefCell::new(EchoFrameQueues::default()));
-    let mut device = QemuSocketDevice::new(stream, Rc::clone(&echo_frames), Rc::clone(&tls_frames));
-    let mut tcp_echo = TcpEchoPeer::new(Rc::clone(&echo_frames));
-    let mut tls_peer = TlsFixturePeer::new(Rc::clone(&tls_frames), options.tls_cert);
+    let mut device = QemuSocketDevice::new(stream);
     let peer_octets = PEER_IPV4.octets();
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(
         PEER_MAC.octets(),
@@ -147,6 +138,24 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
     );
     let dns_handle = sockets.add(udp_dns);
 
+    let tcp_echo = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0u8; 4096]),
+        tcp::SocketBuffer::new(vec![0u8; 4096]),
+    );
+    let tcp_echo_handle = sockets.add(tcp_echo);
+    let mut tcp_echo_service = TcpEchoService::new(&mut sockets, tcp_echo_handle);
+
+    let tls_listen = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0u8; 8192]),
+        tcp::SocketBuffer::new(vec![0u8; 8192]),
+    );
+    let tls_handle = sockets.add(tls_listen);
+    let tls_cert = match options.tls_cert {
+        WhichCert::Correct => FixtureTlsCert::Correct,
+        WhichCert::WrongName => FixtureTlsCert::WrongName,
+    };
+    let mut tls_service = TlsService::new(&mut sockets, tls_handle, tls_cert);
+
     let mut timestamp = Instant::from_millis(0);
     while !stop.load(Ordering::SeqCst) {
         timestamp += Duration::from_millis(1);
@@ -176,17 +185,8 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
                 }
             }
         }
-        let now_ms = timestamp.total_millis().max(0) as u64;
-        for _ in 0..64 {
-            tcp_echo.poll(now_ms);
-            while let Some(frame) = echo_frames.borrow_mut().tx.pop_front() {
-                let _ = device.write_frame_to_socket(frame.as_slice());
-            }
-            tls_peer.poll(now_ms);
-            while let Some(frame) = tls_frames.borrow_mut().tx.pop_front() {
-                let _ = device.write_frame_to_socket(frame.as_slice());
-            }
-        }
+        tcp_echo_service.poll(&mut sockets);
+        tls_service.poll(&mut sockets);
 
         for event in device.drain_events() {
             println!("{event}");
@@ -203,23 +203,15 @@ struct QemuSocketDevice {
     pending: Vec<u8>,
     rx_queue: VecDeque<Vec<u8>>,
     events: Vec<String>,
-    echo_frames: Rc<RefCell<EchoFrameQueues>>,
-    tls_frames: Rc<RefCell<EchoFrameQueues>>,
 }
 
 impl QemuSocketDevice {
-    fn new(
-        stream: TcpStream,
-        echo_frames: Rc<RefCell<EchoFrameQueues>>,
-        tls_frames: Rc<RefCell<EchoFrameQueues>>,
-    ) -> Self {
+    fn new(stream: TcpStream) -> Self {
         Self {
             stream,
             pending: Vec::with_capacity(4 * (4 + MAX_FRAME_BYTES)),
             rx_queue: VecDeque::new(),
             events: Vec::new(),
-            echo_frames,
-            tls_frames,
         }
     }
 
@@ -265,17 +257,7 @@ impl QemuSocketDevice {
                 if frame.len() >= 14 && u16::from_be_bytes([frame[12], frame[13]]) == 0x0806 {
                     self.events.push("[FIX ] arp request".to_owned());
                 }
-                if is_tcp_echo_frame(&frame) {
-                    if let Ok(buf) = FrameBuf::from_slice(&frame) {
-                        self.echo_frames.borrow_mut().rx.push_back(buf);
-                    }
-                } else if is_tls_tcp_frame(&frame) {
-                    if let Ok(buf) = FrameBuf::from_slice(&frame) {
-                        self.tls_frames.borrow_mut().rx.push_back(buf);
-                    }
-                } else {
-                    self.rx_queue.push_back(frame);
-                }
+                self.rx_queue.push_back(frame);
             } else {
                 self.events
                     .push(format!("[FIX ] dropped frame len={frame_len}"));

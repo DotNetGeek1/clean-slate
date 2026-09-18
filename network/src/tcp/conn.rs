@@ -26,7 +26,7 @@ pub const TCP_RTO_TICKS: u64 = 50;
 pub const TCP_TIME_WAIT_TICKS: u64 = 200;
 
 /// Active-open timeout while waiting for SYN-ACK.
-pub const TCP_CONNECT_TIMEOUT_TICKS: u64 = 500_000;
+pub const TCP_CONNECT_TIMEOUT_TICKS: u64 = 500;
 
 /// Fixed-capacity byte ring.
 #[derive(Clone, Debug)]
@@ -506,11 +506,18 @@ impl TcpConnection {
         Ok(n)
     }
 
+    pub fn has_buffered_recv(&self) -> bool {
+        !self.recv_buf.is_empty()
+    }
+
     pub fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetworkError> {
+        let n = self.recv_buf.pop(out);
+        if n > 0 {
+            return Ok(n);
+        }
         if self.state == TcpState::Reset {
             return Err(NetworkError::Reset);
         }
-        let n = self.recv_buf.pop(out);
         if n == 0 && self.peer_fin_seen && self.recv_buf.is_empty() {
             return Err(NetworkError::Closed);
         }

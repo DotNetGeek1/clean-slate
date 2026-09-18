@@ -14,6 +14,7 @@ use clean_slate_network::session::SessionGeneration;
 use clean_slate_network::session::SessionId;
 use clean_slate_network::stack::L3Stack;
 use clean_slate_network::tcp::{TcpState, TcpTransport};
+use clean_slate_network::tls::HANDSHAKE_MARKER;
 use clean_slate_network::tls::{
     TlsConfig, TlsError, TlsSession, TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
 };
@@ -25,6 +26,10 @@ use crate::{serial_write_fmt, serial_write_line};
 const OWNER: TrustedCaller = TrustedCaller::new(1, 0, 1);
 const ARP_TTL: u64 = 50_000;
 const POLL_LIMIT: usize = 50_000_000;
+/// Monotonic tick budget for TLS TCP+handshake after the echo phase (QEMU wall time via spin).
+const M7_TLS_HANDSHAKE_TICK_BUDGET: u64 = 5_000_000;
+/// Guest polls spin faster than the fixture's 1 ms smoltcp clock; advance logical time slowly.
+const TICKS_PER_POLL_BURST: u64 = 256;
 
 static mut TCP_TRANSPORT: MaybeUninit<TcpTransport<VirtioNetDevice>> = MaybeUninit::uninit();
 static mut TCP_TRANSPORT_READY: bool = false;
@@ -70,7 +75,29 @@ impl RngCore for RdrandRng {
     }
 }
 
+fn tls_handshake_marker(step: &'static str) {
+    let line = match step {
+        "tcp syn sent" => "[TLS ] step tcp syn sent",
+        "tcp established" => "[TLS ] step tcp connected",
+        "client hello begin" => "[TLS ] step client hello",
+        "client hello written" => "[TLS ] step client hello written",
+        "handshake finished" => "[TLS ] step finished",
+        other => {
+            serial_write_fmt(format_args!("[TLS ] step {other}\n"));
+            return;
+        }
+    };
+    serial_write_line(line);
+}
+
+fn install_tls_handshake_trace() {
+    unsafe {
+        HANDSHAKE_MARKER = Some(tls_handshake_marker);
+    }
+}
+
 pub(crate) fn run_m7_tls_self_test() -> Result<(), &'static str> {
+    install_tls_handshake_trace();
     let tcp = tcp_transport()?;
     let mut tick = 0u64;
     tick = run_tcp_echo_phase(tcp, tick)?;
@@ -78,6 +105,7 @@ pub(crate) fn run_m7_tls_self_test() -> Result<(), &'static str> {
 }
 
 pub(crate) fn run_m7_tls_fail_closed_self_test() -> Result<(), &'static str> {
+    install_tls_handshake_trace();
     let tcp = tcp_transport()?;
     run_tls_phase(tcp, true, 0)
 }
@@ -119,10 +147,9 @@ fn run_tcp_echo_phase(
         PEER_IPV4.octets()[3],
         TCP_ECHO_PORT
     ));
-    tick = tick.saturating_add(1);
     tcp.send(tick, echo_id, OWNER, APP_REQUEST_BYTES)
         .map_err(|_| "tcp echo send failed")?;
-    tick = tick.saturating_add(1);
+    tick = poll_for_ticks(tcp, tick.saturating_add(1), 256)?;
     let mut buf = [0u8; 64];
     let (n, tick) = receive_all(tcp, echo_id, tick, &mut buf)?;
     if &buf[..n] != APP_RESPONSE_BYTES {
@@ -146,8 +173,18 @@ fn run_tls_phase(
     let read_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_READ_BUF) };
     let write_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_WRITE_BUF) };
     tick = tick.saturating_add(1);
-    let tls_result = TlsSession::connect(
-        tick, tcp, OWNER, remote_tls, config, RdrandRng, read_buf, write_buf,
+    let handshake_deadline = tick.saturating_add(M7_TLS_HANDSHAKE_TICK_BUDGET);
+    let tls_result = TlsSession::connect_with_handshake_deadline(
+        tick,
+        handshake_deadline,
+        tcp,
+        OWNER,
+        remote_tls,
+        config,
+        RdrandRng,
+        read_buf,
+        write_buf,
+        None,
     );
     if expect_identity_failure {
         return match tls_result {
@@ -193,7 +230,7 @@ fn drive_tcp_until(
     mut tick: u64,
     target: TcpState,
 ) -> Result<u64, &'static str> {
-    for _ in 0..POLL_LIMIT {
+    for polls in 0..POLL_LIMIT {
         tcp.poll(tick).map_err(|_| "tcp poll failed")?;
         match tcp.state(id, OWNER) {
             Ok(s) if s == target => return Ok(tick),
@@ -201,7 +238,9 @@ fn drive_tcp_until(
             Err(_) => return Err("tcp drive stale session"),
             Ok(_) => {}
         }
-        tick = tick.saturating_add(1);
+        if polls as u64 % TICKS_PER_POLL_BURST == TICKS_PER_POLL_BURST - 1 {
+            tick = tick.saturating_add(1);
+        }
         spin_loop();
     }
     Err("tcp drive timeout")
@@ -212,9 +251,11 @@ fn poll_for_ticks(
     mut tick: u64,
     count: usize,
 ) -> Result<u64, &'static str> {
-    for _ in 0..count {
+    for polls in 0..count {
         tcp.poll(tick).map_err(|_| "tcp poll failed")?;
-        tick = tick.saturating_add(1);
+        if polls as u64 % TICKS_PER_POLL_BURST == TICKS_PER_POLL_BURST - 1 {
+            tick = tick.saturating_add(1);
+        }
         spin_loop();
     }
     Ok(tick)
@@ -227,12 +268,16 @@ fn receive_all(
     out: &mut [u8],
 ) -> Result<(usize, u64), &'static str> {
     let mut total = 0usize;
-    for _ in 0..POLL_LIMIT {
+    for polls in 0..POLL_LIMIT {
         tcp.poll(tick).map_err(|_| "tcp poll failed")?;
         let n = match tcp.receive(id, OWNER, &mut out[total..]) {
             Ok(n) => n,
-            Err(NetworkError::Closed) | Err(NetworkError::Reset) if total == 0 => {
-                tick = tick.saturating_add(1);
+            Err(NetworkError::Reset) if total == 0 => return Err("tcp recv reset"),
+            Err(NetworkError::Closed) if total == 0 => {
+                spin_loop();
+                continue;
+            }
+            Err(NetworkError::NotFound) if total == 0 => {
                 spin_loop();
                 continue;
             }
@@ -243,7 +288,9 @@ fn receive_all(
         if total >= APP_RESPONSE_BYTES.len() {
             return Ok((total, tick));
         }
-        tick = tick.saturating_add(1);
+        if polls as u64 % TICKS_PER_POLL_BURST == TICKS_PER_POLL_BURST - 1 {
+            tick = tick.saturating_add(1);
+        }
         spin_loop();
     }
     Err("tcp receive timeout")

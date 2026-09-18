@@ -13,7 +13,7 @@ use crate::tcp::TcpTransport;
 pub const TLS_IO_TIMEOUT_TICKS: u64 = 2_000;
 
 /// Handshake spin budget in monotonic ticks.
-pub const TLS_HANDSHAKE_TIMEOUT_TICKS: u64 = 500_000;
+pub const TLS_HANDSHAKE_TIMEOUT_TICKS: u64 = 3_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TlsIoError;
@@ -40,6 +40,9 @@ pub struct TcpRecordIo<'a, L: NetworkLink> {
     deadline: u64,
     /// Host tests: poll the fake TCP peer so frames cross [`FakeLink`].
     peer_tick: Option<&'a mut dyn FnMut(u64)>,
+    /// Spin-heavy polls (QEMU) must not burn the tick budget faster than the fixture clock.
+    idle_polls: u64,
+    marked_first_write: bool,
 }
 
 impl<'a, L: NetworkLink> TcpRecordIo<'a, L> {
@@ -58,6 +61,15 @@ impl<'a, L: NetworkLink> TcpRecordIo<'a, L> {
             now: start_now,
             deadline,
             peer_tick,
+            idle_polls: 0,
+            marked_first_write: false,
+        }
+    }
+
+    fn pace_time(&mut self) {
+        self.idle_polls = self.idle_polls.saturating_add(1);
+        if self.idle_polls % 256 == 0 {
+            self.now = self.now.saturating_add(1);
         }
     }
 
@@ -91,7 +103,7 @@ impl<L: NetworkLink> Read for TcpRecordIo<'_, L> {
                         return Err(TlsIoError);
                     }
                     self.tick_peer();
-                    self.now += 1;
+                    self.pace_time();
                 }
                 Ok(n) => return Ok(n),
                 Err(NetworkError::Closed) | Err(NetworkError::Reset) => return Err(TlsIoError),
@@ -120,15 +132,21 @@ impl<L: NetworkLink> Write for TcpRecordIo<'_, L> {
                         return Err(TlsIoError);
                     }
                     self.tick_peer();
-                    self.now += 1;
+                    self.pace_time();
                 }
-                Ok(n) => offset += n,
+                Ok(n) => {
+                    if n > 0 && !self.marked_first_write {
+                        self.marked_first_write = true;
+                        crate::tls::trace::handshake_step("client hello written");
+                    }
+                    offset += n;
+                }
                 Err(NetworkError::Unreachable) => {
                     if self.transport.poll(self.now).is_err() {
                         return Err(TlsIoError);
                     }
                     self.tick_peer();
-                    self.now += 1;
+                    self.pace_time();
                 }
                 Err(_) => return Err(TlsIoError),
             }
@@ -148,7 +166,7 @@ impl<L: NetworkLink> Write for TcpRecordIo<'_, L> {
             return Err(TlsIoError);
         }
         self.tick_peer();
-        self.now += 1;
+        self.pace_time();
         Ok(())
     }
 }
@@ -162,6 +180,7 @@ pub(crate) fn wait_tcp_established<L: NetworkLink>(
     peer_tick: &mut Option<&mut dyn FnMut(u64)>,
 ) -> Result<(), crate::tls::error::TlsError> {
     let mut now = start_now;
+    let mut idle_polls = 0u64;
     while now <= deadline {
         transport
             .poll(now)
@@ -175,7 +194,12 @@ pub(crate) fn wait_tcp_established<L: NetworkLink>(
                 return Err(crate::tls::error::TlsError::Tcp(NetworkError::Reset));
             }
             Ok(TcpState::Closed) => return Err(crate::tls::error::TlsError::Closed),
-            Ok(_) => now += 1,
+            Ok(_) => {
+                idle_polls = idle_polls.saturating_add(1);
+                if idle_polls % 256 == 0 {
+                    now = now.saturating_add(1);
+                }
+            }
             Err(e) => return Err(crate::tls::error::TlsError::Tcp(e)),
         }
     }

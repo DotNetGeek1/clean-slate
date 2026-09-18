@@ -17,6 +17,7 @@ tls = [
     "dep:aes",
 ]
 host-tls-peer = ["tls", "std", "dep:rustls"]
+m7-handshake-trace = ["tls"]
 
 [dependencies]
 embedded-tls = { version = "=0.19.0", default-features = false, features = ["rustpki"], optional = true }

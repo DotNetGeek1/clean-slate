@@ -11,9 +11,7 @@ use std::time::Duration;
 
 mod m7_certs;
 mod m7_fixture;
-mod m7_fixture_echo;
 mod m7_fixture_tcp;
-mod m7_fixture_tls;
 
 use m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
 

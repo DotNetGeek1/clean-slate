@@ -22,7 +22,11 @@ m4-supervisor-self-test = ["m3-entry-self-test"]
 m4-recovery-self-test = []
 m5-block-self-test = []
 m7-net-device-self-test = []
-m7-tls-self-test = ["clean-slate-network/tls", "dep:rand_core"]
+m7-tls-self-test = [
+    "clean-slate-network/tls",
+    "clean-slate-network/m7-handshake-trace",
+    "dep:rand_core",
+]
 m7-tls-fail-closed-self-test = ["m7-tls-self-test"]
 m7-dns-self-test = []
 m5-storage-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
