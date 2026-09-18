@@ -78,7 +78,9 @@ pub(crate) fn record_decision(
     let log = unsafe { audit_log_mut() };
     log.record(event);
     let echo = unsafe { *AUDIT_SERIAL_ECHO.get() };
-    if echo {
+    // Serial `[AUD ]` lines are for attribution proof (M6.7/M6.8 gates), not every
+    // capability check — object-service polls would otherwise flood the log.
+    if echo && resource.class == ResourceClass::Audit {
         let sequence = log
             .newest_sequence()
             .expect("audit record should exist after insert");

@@ -92,6 +92,7 @@ struct CapabilitiesSelfTestState {
     controller_reported: bool,
     auditor_reported: bool,
     intruder_reported: bool,
+    intruder_spawned: bool,
     target_torn_down: bool,
     workload_progress: u32,
 }
@@ -505,16 +506,6 @@ fn build_auditor_program() -> M6FixtureBootstrap {
             .expect_ne(0),
         )
         .unwrap();
-    program.push(M6FixtureStep::spin(2)).unwrap();
-    program
-        .push(
-            M6FixtureStep::syscall(
-                SYSCALL_NR_CAP_AUDIT_READ,
-                [handle, 1, arg_data(out_offset), 8, 0, 0],
-            )
-            .expect_ne(0),
-        )
-        .unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
 }
@@ -525,7 +516,6 @@ const INTRUDER_FOREIGN_CAP_WIRE: u64 = 1 << 16;
 fn build_intruder_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     let out_offset = 0usize;
-    program.push(M6FixtureStep::spin(720)).unwrap();
     program
         .push(
             M6FixtureStep::syscall(
@@ -583,6 +573,21 @@ fn ready_to_pass(state: &CapabilitiesSelfTestState) -> bool {
         && state.workload_progress >= 3
 }
 
+fn spawn_intruder_fixture() -> Result<u64, &'static str> {
+    let allocator = service_lifecycle_syscall_allocator_mut()
+        .as_mut()
+        .ok_or("m6.8 allocator missing for intruder spawn")?;
+    let stacks = unsafe { task_stacks_mut() };
+    let spawned = spawn_fixture(
+        allocator,
+        task_stack_top(&stacks[8]),
+        8,
+        fixture_service(FIXTURE_INTRUDER),
+        &build_intruder_program(),
+    )?;
+    Ok(spawned.pid)
+}
+
 fn capabilities_report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReportAction {
     let state = state_mut();
     if pid == state.owner_pid {
@@ -630,6 +635,18 @@ fn capabilities_report_handler(pid: u64, report: &M6FixtureBootstrap) -> Fixture
             return FixtureReportAction::Fail(message);
         }
         state.auditor_reported = true;
+        if !state.intruder_spawned {
+            match spawn_intruder_fixture() {
+                Ok(intruder_pid) => {
+                    if intruder_pid != PREDICTED_INTRUDER_PID {
+                        return FixtureReportAction::Fail("m6.8 intruder pid mismatch");
+                    }
+                    state.intruder_pid = intruder_pid;
+                    state.intruder_spawned = true;
+                }
+                Err(message) => return FixtureReportAction::Fail(message),
+            }
+        }
     } else if pid == state.intruder_pid {
         if report.status != FIXTURE_STATUS_DONE {
             return FixtureReportAction::Fail("intruder fixture did not complete");
@@ -736,7 +753,6 @@ pub(crate) fn start_m6_capabilities_self_test(allocator: PageAllocator) -> ! {
         fixture_service(FIXTURE_UNRELATED_PC),
         fixture_service(FIXTURE_CONTROLLER),
         fixture_service(FIXTURE_AUDITOR),
-        fixture_service(FIXTURE_INTRUDER),
     ];
     let programs = [
         build_target_program(),
@@ -749,7 +765,7 @@ pub(crate) fn start_m6_capabilities_self_test(allocator: PageAllocator) -> ! {
     ];
 
     let stacks = unsafe { task_stacks_mut() };
-    let mut pids = [0u64; 8];
+    let mut pids = [0u64; 7];
     for index in 0..7 {
         let scheduler_slot = index + 1;
         let spawned = spawn_fixture(
@@ -777,15 +793,6 @@ pub(crate) fn start_m6_capabilities_self_test(allocator: PageAllocator) -> ! {
                 .unwrap_or_else(|message| fatal_kernel_error(message));
         }
     }
-    let intruder_spawned = spawn_fixture(
-        allocator,
-        task_stack_top(&stacks[8]),
-        8,
-        services[7],
-        &build_intruder_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
-    pids[7] = intruder_spawned.pid;
 
     let expected = [
         PREDICTED_TARGET_PID,
@@ -795,7 +802,6 @@ pub(crate) fn start_m6_capabilities_self_test(allocator: PageAllocator) -> ! {
         PREDICTED_UNRELATED_PC_PID,
         PREDICTED_CONTROLLER_PID,
         PREDICTED_AUDITOR_PID,
-        PREDICTED_INTRUDER_PID,
     ];
     if pids != expected {
         fatal_kernel_error("m6.8 fixture pid ordering mismatch");
@@ -810,13 +816,14 @@ pub(crate) fn start_m6_capabilities_self_test(allocator: PageAllocator) -> ! {
             controller_pid: pids[5],
             target_pid: pids[0],
             auditor_pid: pids[6],
-            intruder_pid: pids[7],
+            intruder_pid: 0,
             owner_reported: false,
             reader_reported: false,
             unrelated_obj_reported: false,
             controller_reported: false,
             auditor_reported: false,
             intruder_reported: false,
+            intruder_spawned: false,
             target_torn_down: false,
             workload_progress: 0,
         });
