@@ -23,7 +23,9 @@ use crate::diagnostics::serial::serial_write_line;
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m3-entry-self-test",
-    feature = "m5-block-self-test"
+    feature = "m5-block-self-test",
+    feature = "m7-net-device-self-test",
+    feature = "m7-dns-self-test"
 )))]
 use crate::interrupt::timer::initialize_timer;
 #[cfg(not(any(
@@ -33,7 +35,9 @@ use crate::interrupt::timer::initialize_timer;
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m3-entry-self-test",
-    feature = "m5-block-self-test"
+    feature = "m5-block-self-test",
+    feature = "m7-net-device-self-test",
+    feature = "m7-dns-self-test"
 )))]
 use crate::interrupt::timer::report_timer_contract;
 use crate::mm::address_space::set_kernel_root_frame;
@@ -53,7 +57,9 @@ use crate::process::process_registry_mut;
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test",
-    feature = "m5-block-self-test"
+    feature = "m5-block-self-test",
+    feature = "m7-net-device-self-test",
+    feature = "m7-dns-self-test"
 )))]
 use crate::sched::dispatch::initialize_scheduler;
 #[cfg(not(any(
@@ -65,7 +71,9 @@ use crate::sched::dispatch::initialize_scheduler;
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test",
-    feature = "m5-block-self-test"
+    feature = "m5-block-self-test",
+    feature = "m7-net-device-self-test",
+    feature = "m7-dns-self-test"
 )))]
 use crate::sched::dispatch::start_scheduler;
 use crate::sched::task_stacks_mut;
@@ -101,7 +109,10 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m6-revocation-self-test"),
     not(feature = "m6-audit-self-test"),
     not(feature = "m6-capabilities-self-test"),
-    not(feature = "m7-net-service-self-test")
+    not(feature = "m7-net-service-self-test"),
+    not(feature = "m7-net-caps-self-test"),
+    not(feature = "m7-dns-self-test"),
+    not(feature = "m7-net-device-self-test")
 ))]
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
 #[cfg(feature = "m3-ipc-self-test")]
@@ -144,6 +155,12 @@ use crate::selftest::m6_process_control::start_m6_process_control_self_test;
 use crate::selftest::m6_revocation::start_m6_revocation_self_test;
 #[cfg(feature = "m7-net-service-self-test")]
 use crate::selftest::m7_net_service::start_m7_net_service_self_test;
+#[cfg(feature = "m7-dns-self-test")]
+use crate::selftest::m7_dns::run_m7_dns_self_test;
+#[cfg(feature = "m7-net-caps-self-test")]
+use crate::selftest::m7_net_caps::start_m7_net_caps_self_test;
+#[cfg(feature = "m7-net-device-self-test")]
+use crate::selftest::m7_net_device::run_m7_net_device_self_test;
 use crate::syscall::initialize_syscall_abi;
 use ::uefi::mem::memory_map::{MemoryMap, MemoryMapMut};
 use ::uefi::Status;
@@ -288,6 +305,22 @@ fn run_inner() -> Result<(), &'static str> {
                 feature = "m5-crash-late-self-test",
                 feature = "m5-crash-recovery-self-test"
             )),
+            feature = "m7-net-caps-self-test"
+        ))]
+        {
+            start_m7_net_caps_self_test(allocator)
+        }
+        #[cfg(all(
+            not(feature = "m4-service-lifecycle-self-test"),
+            not(feature = "m4-supervisor-self-test"),
+            not(any(
+                feature = "m5-storage-self-test",
+                feature = "m5-persistence-self-test",
+                feature = "m5-crash-early-self-test",
+                feature = "m5-crash-late-self-test",
+                feature = "m5-crash-recovery-self-test"
+            )),
+            not(feature = "m7-net-caps-self-test"),
             feature = "m6-revocation-self-test"
         ))]
         {
@@ -416,7 +449,8 @@ fn run_inner() -> Result<(), &'static str> {
             not(feature = "m6-delegation-self-test"),
             not(feature = "m6-audit-self-test"),
             not(feature = "m6-revocation-self-test"),
-            not(feature = "m6-capabilities-self-test")
+            not(feature = "m6-capabilities-self-test"),
+            not(feature = "m7-net-caps-self-test")
         ))]
         {
             let mut allocator = allocator;
@@ -466,6 +500,16 @@ fn run_inner() -> Result<(), &'static str> {
         run_m5_block_self_test()
     }
 
+    #[cfg(feature = "m7-net-device-self-test")]
+    {
+        run_m7_net_device_self_test()
+    }
+
+    #[cfg(feature = "m7-dns-self-test")]
+    {
+        run_m7_dns_self_test()
+    }
+
     #[cfg(all(
         not(feature = "m1-self-test"),
         not(feature = "m2-double-fault-self-test"),
@@ -475,7 +519,9 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m4-crash-service-self-test"),
         not(feature = "m4-recovery-self-test"),
         not(feature = "m3-entry-self-test"),
-        not(feature = "m5-block-self-test")
+        not(feature = "m5-block-self-test"),
+        not(feature = "m7-net-device-self-test"),
+        not(feature = "m7-dns-self-test")
     ))]
     {
         let kernel_root_frame = current_root_frame_address();

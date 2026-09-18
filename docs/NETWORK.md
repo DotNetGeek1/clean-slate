@@ -70,6 +70,74 @@ Every `NetworkRequest` / `NetworkResponse` is one fixed 64-byte frame so it fits
 
 Constants live in `network/src/fixture.rs`. Acceptance assumes a private `10.77.0.0/24` lab network, fixed DNS answers, echo/TLS ports, and repository-owned certificates under `xtask/fixtures/m7/`. No public Internet, public DNS, external PKI, or host LAN dependencies.
 
+## M7.7 network capabilities & attribution
+
+Kernel broker: `kernel/src/capability/network.rs`. Live generation lookup:
+`kernel/src/service/instance_generation.rs` (`live_instance_generation`,
+`live_network_service_generation`).
+
+### Operation → right
+
+| `NetworkOp` | `Rights` |
+|-------------|----------|
+| `Resolve` | `NET_RESOLVE` |
+| `Connect` | `NET_CONNECT` |
+| `Send` | `NET_SEND` |
+| `Receive` | `NET_RECEIVE` |
+| `RawDevice` | `NET_RAW_DEVICE` |
+
+### Denial mapping (`NetworkError::Denied`)
+
+| `DenialReason` | M6 / broker source |
+|----------------|-------------------|
+| `NoCapability` | Missing/invalid handle, wrong holder |
+| `MissingRight` | `CapabilityError::MissingRight` |
+| `StaleGeneration` | `ResourceRef.instance_generation` ≠ live service generation, or `session_generation` mismatch |
+| `Revoked` | `CapabilityError::Revoked` |
+
+### `ResourceRef` for network
+
+- **Service instance:** `ResourceRef::network(logical_service_id, live_generation)` where
+  `live_generation` comes from `live_network_service_generation()` /
+  `ServiceLifecycleController::authoritative_generation(NETWORK_SERVICE_ID)`.
+- **Per-session (optional):** `ResourceRef::network_session(session_generation, session_index)`.
+  Destination/port scoping is not encoded in `ResourceRef` for M7.7.
+
+Classes still using `instance_generation = 0` in production grants: see
+[`docs/M7_INSTANCE_GENERATION.md`](M7_INSTANCE_GENERATION.md).
+
+### Revocation & holder exit
+
+`on_revoked(handle)` returns impacted `SessionId` values and revokes the capability subtree;
+the network service must close those sessions. After holder teardown,
+`on_holder_exit(holder)` clears session tracking and logs `[CAP ] net released …`.
+Further ops on revoked handles return `Revoked`.
+
+### Audit
+
+Allowed and denied ops emit standard M6 audit records plus serial
+`[AUD ] net op=… actor=… outcome=allow|deny resource=… generation=…` when
+`set_network_audit_serial_echo(true)`. Records never include payload bytes or hostnames.
+
+### Network service (#83) authorization API
+
+```rust
+authorize_network_op(
+    trusted_holder: HolderId,
+    raw_handle: u64,
+    op: NetworkOp,
+    session_generation: Option<SessionGeneration>,
+) -> Result<AuthorizedNetworkOp, DenialReason>
+```
+
+Bootstrap grants use `grant_network_authority(holder, rights, NetworkGrantPolicy::Application)`
+(service policy for `NET_RAW_DEVICE` only).
+
+### QEMU constituent
+
+`cargo xtask test-m7-net-caps` (aliases `m7-net-caps`, `m7.7`). Ordered markers end with
+`[M7.7] PASS`.
+
 ## Deferred
 
 - IPv6 and dual-stack policy
@@ -125,3 +193,288 @@ Ordered QEMU markers for `cargo xtask test-m7-net-service`:
 10. `[M7.3] PASS`
 
 Run locally: `cargo xtask test-m7-net-service` (aliases `m7-net-service`, `m7.3`) or `./scripts/run-tests.ps1 test-m7-net-service`.
+
+## M7.4a L2/L3 foundation
+
+Issue #84 adds bounded parsers and a host-testable [`L3Stack`](../network/src/stack.rs) in `clean-slate-network` (no VirtIO types leak upward).
+
+### Supported on-wire subset
+
+- Ethernet II, 14-byte header, no VLAN; EtherTypes IPv4 (`0x0800`) and ARP (`0x0806`) only.
+- ARP: hardware type 1 (Ethernet), protocol `0x0800`, 6/4 address lengths, opcodes request/reply only.
+- IPv4: version 4, IHL 5–15 (options skipped, never parsed), header checksum verified (RFC 1071).
+- ICMP: echo request/reply with checksum; other types parsed as `IcmpMessage::Other` or error shells without panicking.
+
+### Fragmentation policy
+
+Any IPv4 datagram with the MF flag set or a non-zero fragment offset is rejected with `ParseError::Fragmented`. The stack increments `StackStats::dropped_fragmented` and continues; reassembly is deferred (see **Deferred** above).
+
+### ARP cache bounds
+
+- [`ARP_CACHE_CAPACITY`](../network/src/arp.rs) = 16 entries; TTL in monotonic ticks via `ArpCache::new(ttl_ticks)`.
+- On insert when full, the **oldest-inserted** entry (minimum `inserted_at`) is evicted.
+- At most [`MAX_PENDING_ARP_REQUESTS`](../network/src/arp.rs) = 4 distinct unresolved IPs may have outstanding ARP requests; further lookups fail until cache space frees.
+- `ArpCache::clear()` and `L3Stack::reset()` drop cache and pending state.
+
+### `L3Stack` API
+
+- `poll(now) -> Result<Option<Inbound>, NetworkError>` — one RX frame; handles ARP for our IP, ICMP echo to our IP, delivers IPv4 UDP/TCP to upper layers.
+- `send_ipv4(now, dst, protocol, payload_len, writer)` — same /24 only (`SUBNET_PREFIX_LEN` = 24); returns `NetworkError::Unreachable` after emitting a bounded ARP request when MAC is unknown (caller polls and retries).
+- `send_icmp_echo`, `reset()`, `stats()`.
+
+Malformed frames increment `StackStats::dropped_malformed` and are not fatal.
+
+### `Inbound` and offset helpers (#124 / #125)
+
+Upper lanes consume:
+
+- `Inbound::Ipv4(Ipv4Inbound { header, frame, payload_offset, payload_len })` — call `Ipv4Inbound::payload()` for bounded L4 bytes; `header.protocol` is `IpProtocol::UDP` or `TCP`.
+- `Inbound::IcmpEchoReply { id, seq, payload }` for local ping clients (not the socket IPC path).
+
+Layout helpers for writing into a [`FrameBuf`](../network/src/buffer.rs) before transmit:
+
+- `stack::ETHERNET_HEADER_LEN` (14)
+- `stack::STANDARD_IPV4_HEADER_LEN` (20)
+- `stack::l3_payload_offset()` → 34 (Ethernet + fixed IPv4 header)
+
+UDP/TCP modules should write L4 starting at `l3_payload_offset()` after the stack fills L2/L3 headers, or build on received `Ipv4Inbound::payload()`.
+
+### Pseudo-header checksum (#124 / #125)
+
+```rust
+pub fn pseudo_header_checksum(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    protocol: IpProtocol,
+    payload_len: u16,
+) -> u16
+```
+
+Defined in [`ipv4`](../network/src/ipv4.rs); combine with the L4 checksum per RFC 793/768.
+
+### Teardown
+
+`L3Stack::reset()` clears ARP cache, pending ARP tracking, stack statistics, and invokes `NetworkLink::reset()`.
+
+## M7.2 VirtIO-net
+
+Kernel driver: `kernel/src/device/virtio/net.rs` (legacy VirtIO PCI `0x1000`, I/O transport matching M5 block).
+
+**Features negotiated:** `VIRTIO_NET_F_MAC` only. No mergeable RX buffers, offloads, control queue, or multiqueue.
+
+**Queue geometry:** RX queue 0 and TX queue 1; each queue size must be a non-zero power of two (≤ 256 legacy max). The driver posts a bounded RX pool of 16 buffers (≤ `MAX_DEVICE_RX_QUEUE_DEPTH` 64). M7 acceptance uses legacy `virtio-net-pci` without host LAN attachment.
+
+**RX pool:** 16 static slots × (12-byte buffer prefix + 1514-byte frame). Legacy RX completions report a 10-byte on-wire header prefix; Ethernet begins at offset 10. Descriptor ownership is `DriverOwned` or `DeviceOwned`; slots are never reposted while `DeviceOwned`.
+
+**Poison / reset:** Malformed used-ring completions (unknown descriptor, descriptor not device-owned, length &gt; posted buffer, or length &lt; virtio-net header) are device-side protocol violations → `DeviceState::Poisoned`. Runt (&lt; 14 B) or oversized (&gt; 1514 B) Ethernet frames are peer-controlled and are dropped with the slot recycled, never poisoning the NIC. TX completion timeout → `ResetRequired`. `NetworkLink::reset()` resets the device, re-validates DMA, reposts RX buffers; failure → `Poisoned`. `VirtioNetDevice::release()` resets the PCI device, poisons local state and releases the single-instance DMA claim; `discover()` fails while another instance is live, so a replacement service can never alias device-owned descriptors.
+
+**Hermetic fixture:** `cargo xtask test-m7-net-device` starts an xtask-hosted smoltcp peer (`xtask/src/m7_fixture.rs`) on `127.0.0.1:<port>`. QEMU uses `-netdev socket,id=n0,connect=127.0.0.1:<port>` (4-byte big-endian length-prefixed raw Ethernet). Guest device: `-device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on`. The peer answers ARP/ICMP for `10.77.0.1` and UDP echo on port 4000.
+
+**Serial markers (ordered):** `[NET ] virtio ready mac=…`, `[NET ] tx ok len=…`, `[NET ] rx ok len=… from=52:54:00:ab:cd:ef`, `[NET ] reject oversized`, `[NET ] poisoned reason=…`, `[NET ] reset ok`, second TX/RX round trip, `[M7.2] PASS`.
+
+**Run / debug:**
+
+```bash
+cargo xtask test-m7-net-device
+```
+
+Host peer logs: `[FIX ] arp reply`, `[FIX ] icmp echo`, `[FIX ] udp echo len=…`.
+
+On Windows, set `OVMF_CODE` / `OVMF_VARS` (see `scripts/run-tests.ps1`) or run tests through that script; xtask only auto-discovers Linux OVMF paths.
+
+## M7.4b UDP
+
+Issue #124 adds [`udp`](../network/src/udp.rs): UDP header codec, a bounded endpoint table, and [`UdpTransport`](../network/src/udp.rs) over [`L3Stack`](../network/src/stack.rs). TCP (#125) and future #88 acceptance multiplex inbound IPv4 on separate transports that each call `poll` on a shared or paired stack.
+
+### Header and checksum
+
+- [`UDP_HEADER_LEN`](../network/src/udp.rs) = 8; [`MAX_UDP_PAYLOAD`](../network/src/udp.rs) = [`MAX_L3_PAYLOAD_BYTES`](../network/src/limits.rs) − 20 − 8 (1472 bytes for IPv4-on-Ethernet).
+- **Checksum required on the wire:** [`UdpHeader::parse`](../network/src/udp.rs) rejects `checksum == 0` (IPv4 “no checksum” is not supported in M7). A computed checksum of zero is written as `0xFFFF` on transmit.
+- Parse failures use [`ParseError`](../network/src/ethernet.rs) (`Truncated`, `BadTotalLength`, `BadChecksum`, `PayloadTooLarge`, `BufferTooSmall`).
+
+### Endpoint table bounds and memory
+
+| Constant | Value |
+|----------|------:|
+| [`MAX_UDP_ENDPOINTS`](../network/src/limits.rs) | 32 |
+| RX queue per endpoint | [`MAX_PENDING_REQUESTS_PER_SESSION`](../network/src/limits.rs) = 8 |
+| Stored payload per datagram | ≤ [`MAX_UDP_PAYLOAD`](../network/src/udp.rs) = 1472 |
+
+Each queued datagram stores `SocketAddrV4` + length + 1472-byte fixed buffer (1480 B); a UDP datagram over unfragmented IPv4-on-Ethernet cannot exceed this, so the larger IPC bound `MAX_APPLICATION_PAYLOAD_BYTES` is not used here. Worst-case RX memory for the table is [`UDP_TABLE_MAX_RX_BYTES`](../network/src/udp.rs) (32 × 8 × 1480 ≈ 370 KiB). Slot metadata is O(32) and bounded.
+
+### Port allocation
+
+- Explicit bind: `UdpTable::open(owner, Some(port))` — collision → `NetworkError::InvalidRequest`.
+- Ephemeral: `open(owner, None)` chooses the lowest free port in `49152 ..= 49152 + MAX_UDP_ENDPOINTS - 1` ([`EPHEMERAL_PORT_BASE`](../network/src/udp.rs)).
+- Table full → `NetworkError::SessionExhausted`.
+
+### Drop and error policy
+
+| Condition | Behaviour |
+|-----------|-----------|
+| No endpoint on `dst_port` | Drop; `UdpStats::dropped_unbound` (no ICMP port-unreachable in M7) |
+| Connected endpoint, `from != connected_peer` | Drop; `dropped_foreign` |
+| RX queue full | Drop newest datagram; `dropped_queue_full` (never blocks) |
+| Malformed UDP / bad checksum | Drop; `dropped_malformed` |
+| ARP miss on send | `NetworkError::Unreachable` after bounded ARP request; caller `poll`s and retries |
+| Wrong `SessionId` generation | `Denied(StaleGeneration)` |
+| Wrong `TrustedCaller` | `Denied(NoCapability)` (defensive; capability broker #87 enforces above this layer) |
+| Oversized application send | `InvalidRequest` |
+
+### Teardown and holder exit
+
+- `UdpTransport::reset()` clears the endpoint table, stats, and `L3Stack` (ARP + link). A **new** `UdpTable::new(next_generation)` invalidates all prior `SessionId` values.
+- `UdpTable::on_holder_exit(owner)` closes every endpoint for that holder and drops queued datagrams.
+
+### Receive semantics
+
+- `receive` is non-blocking; returns `Ok(None)` if the queue is empty.
+- On success, returns `(from, full_payload_len)` and copies `min(full_payload_len, out.len())` bytes (truncation is visible when `full_payload_len > out.len()`).
+- `receive_with_deadline(now, deadline_tick, …)` polls until the deadline (inclusive) or returns `NetworkError::Timeout`.
+
+### DNS lane (#85) API
+
+Use the same [`SessionId`](../network/src/session.rs) / [`SessionGeneration`](../network/src/session.rs) as the network service:
+
+1. `UdpTable::open(owner, Some(53))` or ephemeral for client ports.
+2. `UdpTable::connect(id, owner, dns_server)` when a default peer is desired.
+3. `UdpTransport::send(now, id, owner, dest, payload)` — `dest` optional if connected.
+4. `UdpTransport::poll(now)` on every service tick (and after `Unreachable` on send).
+5. `UdpTransport::receive(id, owner, buf)` or `receive_with_deadline` for replies.
+
+Non-UDP `Inbound` from `L3Stack::poll` is ignored by UDP `poll` today; #88 will route one RX frame to UDP and TCP dispatchers.
+
+## M7.4c TCP
+
+Issue #125 adds a **client-only** TCP transport in `network/src/tcp/` over [`L3Stack`](network/src/stack.rs). UDP inbound on the same stack is ignored here; lane #88 will fan out `Inbound` to UDP and TCP dispatchers.
+
+### Supported subset
+
+- Active open only (`SynSent` → `Established`); no `LISTEN` / `SYN-RCVD`.
+- In-order delivery: segments must arrive with `seq == rcv_nxt`; out-of-order segments are dropped and counted.
+- Stop-and-go: at most **one** unacknowledged data segment in flight.
+- Fixed RTO ([`TCP_RTO_TICKS`](../network/src/tcp/conn.rs)); separate connect timeout ([`TCP_CONNECT_TIMEOUT_TICKS`](../network/src/tcp/conn.rs)). Data-phase RTO exhaustion uses [`TCP_MAX_RETRIES`](../network/src/tcp/conn.rs); `SynSent` retries until connect timeout.
+- TCP options on the wire: EOL, NOP, MSS (kind 2, len 4) only; MSS is sent on SYN only.
+- Advertised MSS = [`MAX_TCP_PAYLOAD`](../network/src/tcp/segment.rs) = `MAX_L3_PAYLOAD_BYTES - 40` (1460 on Ethernet MTU).
+
+### Constants (authoritative: `network/src/tcp/`)
+
+| Constant | Value | Role |
+|----------|------:|------|
+| `MAX_TCP_CONNECTIONS` | 32 | Table slots (= `SessionId` index) |
+| `TCP_SEND_BUFFER_BYTES` / `TCP_RECV_BUFFER_BYTES` | 4096 each | Per-connection rings |
+| `TCP_MAX_RETRIES` | 5 | Data-phase RTO cap |
+| `TCP_RTO_TICKS` | 50 | Retransmission interval (ticks) |
+| `TCP_TIME_WAIT_TICKS` | 200 | TIME-WAIT before slot free |
+| `TCP_CONNECT_TIMEOUT_TICKS` | 500 | Active-open timeout |
+| Ephemeral ports | 50000–50031 | `50000 + slot_index` |
+
+**ISS:** `deterministic_iss(generation, index, counter)` — no randomness.
+
+### Client state diagram (text)
+
+```text
+Closed → SynSent → Established → FinWait1 → FinWait2 → TimeWait → Closed
+                              ↘ CloseWait (peer FIN) → LastAck → Closed
+Any phase → Reset (RST / timeout / abort)
+```
+
+Terminal states release send/recv buffers and the table slot (after TIME-WAIT expiry where applicable).
+
+### Error mapping
+
+| API result | When |
+|------------|------|
+| `SessionExhausted` | Table full |
+| `Denied(StaleGeneration)` | `SessionId` generation ≠ live `TcpTable` |
+| `Denied(NoCapability)` | `TrustedCaller` ≠ connection owner (defensive; broker #87 is authoritative) |
+| `NotFound` | Free / unknown slot |
+| `Unreachable` | `connect`/`send` ARP miss (caller should `poll` and retry) |
+| `QueueFull` | Send ring full (non-blocking) |
+| `Timeout` | Connect or data RTO exhausted |
+| `Reset` | Peer RST |
+| `Closed` | Peer FIN received and recv buffer drained |
+
+### Memory footprint (per connection, order-of-magnitude)
+
+~8 KiB rings + ~1.5 KiB unacked snapshot + connection metadata; **32 slots** heap-allocated when `feature = "alloc"` (host tests / service).
+
+### Restart and holder exit
+
+- `TcpTransport::reset()` / service restart: RST every live connection, clear table, `L3Stack::reset()`; new `TcpTable::new(next_generation)` rejects all prior `SessionId`s.
+- `on_holder_exit(owner)`: RST and free all connections owned by that holder.
+- Sessions are **never** transferred across restart; replacement generation invalidates old ids.
+
+### TLS lane (#86) API
+
+Use [`TcpTransport`](../network/src/tcp/transport.rs) on the network service side (after capability checks):
+
+1. `TcpTransport::new(stack, generation)`
+2. `connect(now, owner, SocketAddrV4)` → `SessionId`
+3. Loop: `poll(now)` (drives ARP, timers, RX)
+4. `send(now, id, owner, tls_record_bytes)` / `receive(id, owner, buf)`
+5. `close(now, id, owner)` or `abort(id, owner)`
+
+Host tests: [`TestPeer`](../network/src/tcp/test_peer.rs) on `FakeLink::pair()` answers on [`TCP_ECHO_PORT`](../network/src/fixture.rs) with fixture bytes and fault injection (`drop_next_n_outbound`, `reply_rst_on_next`, `stop_acking`, etc.).
+
+## M7.5 DNS
+
+Issue #85 adds [`dns`](../network/src/dns.rs): a bounded RFC 1035 subset codec, fixed-capacity cache, and [`DnsResolver`](../network/src/dns.rs) over [`UdpTransport`](../network/src/udp.rs).
+
+### Supported subset
+
+- UDP only; `RD=1` queries; QTYPE A / QCLASS IN; single question; first A answer returned.
+- No CNAME chasing, no DNS-over-TCP, no DNSSEC, no EDNS0.
+- Wire names validated per label (1..=63), total <= [`MAX_DNS_NAME_LEN`](../network/src/limits.rs) (253).
+- Compression pointers: follow with hop limit [`DNS_COMPRESSION_HOP_LIMIT`](../network/src/dns.rs) (16); pointers must target strictly earlier offsets (loop/forward rejection).
+
+### Constants
+
+| Constant | Value | Role |
+|----------|------:|------|
+| [`MAX_DNS_ANSWERS`](../network/src/dns.rs) | 8 | Max answer RRs parsed |
+| [`DNS_CACHE_CAPACITY`](../network/src/dns.rs) | 16 | Cache entries |
+| [`DNS_MIN_TTL_SECS`](../network/src/dns.rs) / [`DNS_MAX_TTL_SECS`](../network/src/dns.rs) | 1 / 86400 | TTL clamp on cache insert |
+| [`DNS_QUERY_TIMEOUT_TICKS`](../network/src/dns.rs) | 500 | Pending query deadline |
+| [`MAX_IN_FLIGHT_RESOLVER_QUERIES`](../network/src/limits.rs) | 8 | Pending table rows |
+
+### Error mapping (`DnsError` → `NetworkError`)
+
+| `DnsError` | `NetworkError` |
+|------------|----------------|
+| `NameNotFound` | `NotFound` |
+| `Timeout` | `Timeout` |
+| `QueueFull` | `QueueFull` |
+| `Transport(e)` | `e` |
+| All other variants | `Protocol` |
+
+### Resolver behaviour
+
+- **Capability:** `NET_RESOLVE` is enforced by the network service (#87) before calling `resolve`; the resolver assumes the caller is already authorized.
+- **IDs:** DNS wire IDs are `dns_id_counter XOR session_generation` (deterministic, not cryptographically unpredictable — acceptable only on the hermetic lab network).
+- **Foreign source:** Replies not sourced from the configured `server` socket are dropped (`dropped_foreign_source`).
+- **Pending:** `resolve` → `ResolveOutcome::Cached` or `Pending { query_id }`; `poll` drives UDP/ARP, retries query send after `Unreachable`, applies timeouts, fills the cache; `take_result(query_id, owner)` is owner-checked.
+- **Teardown:** `on_holder_exit(owner)` drops that holder's pending queries and UDP endpoints; `reset()` clears cache, pending, and UDP/L3 state.
+
+### Network service API (after #87 authorization)
+
+1. `DnsResolver::new(udp, DNS_SERVER_ADDR)` (or `with_ticks` when tick rate ≠ `DEFAULT_TICKS_PER_SEC`).
+2. `resolve(now, owner, name)` → cache hit or pending id.
+3. `poll(now)` on every service tick (retry ARP/`Unreachable` on send).
+4. `take_result(query_id, owner)` → `(Ipv4Addr, ttl)` for IPC `NetworkResponse::Resolve`.
+
+Unauthorized DNS denial is proven in #87/#88, not in this lane.
+
+### Hermetic fixture
+
+`xtask/src/m7_fixture.rs` binds UDP/53 beside the echo port. `m7.fixture.test` → [`FIXTURE_A_RECORD`](../network/src/fixture.rs) / TTL [`FIXTURE_A_TTL_SECS`](../network/src/fixture.rs) with answer name compression pointer `0xC00C`; other names → NXDOMAIN (rcode 3). Log: `[FIX ] dns query name=<name> rcode=<n>`.
+
+### QEMU acceptance
+
+```bash
+cargo xtask test-m7-dns
+```
+
+**Serial markers (ordered):** `[DNS ] virtio ready mac=…`, `[DNS ] resolved name=m7.fixture.test addr=10.77.0.50 ttl=300`, `[DNS ] cache hit name=m7.fixture.test`, `[DNS ] nxdomain name=nope.fixture.test`, `[M7.5] PASS` (host peer also emits `[FIX ] dns query name=m7.fixture.test rcode=0`).
+
+Regression: `cargo xtask test-m7-net-device` (echo lane unchanged).

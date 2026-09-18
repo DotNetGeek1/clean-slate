@@ -57,4 +57,21 @@ impl ResourceRef {
             instance_generation,
         }
     }
+
+    pub const fn network(service_id: u64, instance_generation: u64) -> Self {
+        Self {
+            class: ResourceClass::Network,
+            id: service_id,
+            instance_generation,
+        }
+    }
+
+    /// Per-session network resource: `id` is the session index within `session_generation`.
+    pub const fn network_session(session_generation: u64, session_index: u32) -> Self {
+        Self {
+            class: ResourceClass::Network,
+            id: session_index as u64,
+            instance_generation: session_generation,
+        }
+    }
 }
