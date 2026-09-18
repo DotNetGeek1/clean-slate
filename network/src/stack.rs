@@ -14,6 +14,9 @@ use crate::limits::{MAX_ETHERNET_FRAME_BYTES, MAX_L3_PAYLOAD_BYTES};
 /// On-wire Ethernet header length (no VLAN).
 pub const ETHERNET_HEADER_LEN: usize = EthernetHeader::LEN;
 
+/// Minimum Ethernet frame size on the wire (excluding FCS).
+pub const MIN_ETHERNET_FRAME_BYTES: usize = 60;
+
 /// IPv4 header length for datagrams this stack generates (20 bytes, no options).
 pub const STANDARD_IPV4_HEADER_LEN: usize = IPV4_MIN_HEADER_LEN;
 
@@ -223,6 +226,7 @@ impl<L: NetworkLink> L3Stack<L> {
         if ipv4.dst != self.our_ip {
             return Ok(None);
         }
+        self.arp.insert(ipv4.src, eth.src, now);
         if ipv4.protocol == IpProtocol::ICMP {
             match IcmpMessage::parse(payload) {
                 Ok(IcmpMessage::EchoRequest {
@@ -388,6 +392,10 @@ impl<L: NetworkLink> L3Stack<L> {
     }
 
     fn transmit_frame(&mut self, frame: FrameBuf) -> Result<(), NetworkError> {
+        let mut frame = frame;
+        while frame.len() < MIN_ETHERNET_FRAME_BYTES {
+            frame.push_bytes(&[0]).map_err(|_| NetworkError::Protocol)?;
+        }
         match self.link.transmit(frame) {
             Ok(()) => Ok(()),
             Err((err, _frame)) => Err(NetworkError::Transport(err)),

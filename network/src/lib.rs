@@ -15,7 +15,7 @@
 //! Linux socket ABI compatibility is explicitly out of scope until M9. This
 //! crate must not embed Linux-specific socket option semantics.
 
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
 
 #[cfg(any(test, feature = "alloc"))]
 extern crate alloc;
@@ -38,6 +38,9 @@ pub mod ipv4;
 pub mod stack;
 pub mod tcp;
 pub mod udp;
+
+#[cfg(feature = "tls")]
+pub mod tls;
 
 #[cfg(any(test, feature = "alloc"))]
 pub mod fake;

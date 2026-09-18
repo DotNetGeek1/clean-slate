@@ -14,11 +14,32 @@ use clean_slate_network::fixture::{
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
-use smoltcp::socket::udp;
+use smoltcp::socket::{tcp, udp};
+
+use crate::m7_fixture_tcp::{FixtureTlsCert, TcpEchoService, TlsService};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 
 const MAX_FRAME_BYTES: usize = 1514;
+
+#[derive(Clone, Copy, Debug)]
+pub enum WhichCert {
+    Correct,
+    WrongName,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FixtureOptions {
+    pub tls_cert: WhichCert,
+}
+
+impl Default for FixtureOptions {
+    fn default() -> Self {
+        Self {
+            tls_cert: WhichCert::Correct,
+        }
+    }
+}
 
 pub struct M7FixturePeer {
     port: u16,
@@ -28,11 +49,15 @@ pub struct M7FixturePeer {
 
 impl M7FixturePeer {
     pub fn start() -> std::io::Result<Self> {
+        Self::start_with(FixtureOptions::default())
+    }
+
+    pub fn start_with(options: FixtureOptions) -> std::io::Result<Self> {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
         let port = listener.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
-        let handle = thread::spawn(move || run_peer(listener, stop_flag));
+        let handle = thread::spawn(move || run_peer(listener, stop_flag, options));
         Ok(Self {
             port,
             stop,
@@ -52,7 +77,7 @@ impl M7FixturePeer {
     }
 }
 
-fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>) {
+fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOptions) {
     listener
         .set_nonblocking(true)
         .expect("fixture listener nonblocking");
@@ -113,6 +138,24 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>) {
     );
     let dns_handle = sockets.add(udp_dns);
 
+    let tcp_echo = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0u8; 4096]),
+        tcp::SocketBuffer::new(vec![0u8; 4096]),
+    );
+    let tcp_echo_handle = sockets.add(tcp_echo);
+    let mut tcp_echo_service = TcpEchoService::new(&mut sockets, tcp_echo_handle);
+
+    let tls_listen = tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0u8; 8192]),
+        tcp::SocketBuffer::new(vec![0u8; 8192]),
+    );
+    let tls_handle = sockets.add(tls_listen);
+    let tls_cert = match options.tls_cert {
+        WhichCert::Correct => FixtureTlsCert::Correct,
+        WhichCert::WrongName => FixtureTlsCert::WrongName,
+    };
+    let mut tls_service = TlsService::new(&mut sockets, tls_handle, tls_cert);
+
     let mut timestamp = Instant::from_millis(0);
     while !stop.load(Ordering::SeqCst) {
         timestamp += Duration::from_millis(1);
@@ -142,6 +185,8 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>) {
                 }
             }
         }
+        tcp_echo_service.poll(&mut sockets);
+        tls_service.poll(&mut sockets);
 
         for event in device.drain_events() {
             println!("{event}");

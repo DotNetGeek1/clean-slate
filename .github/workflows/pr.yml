@@ -71,6 +71,7 @@ jobs:
         run: |
           cargo clippy -p clean-slate-network --all-targets -- -D warnings
           cargo clippy -p clean-slate-network --all-targets --features alloc -- -D warnings
+          cargo clippy -p clean-slate-network --all-targets --features alloc,tls -- -D warnings
 
       - name: Clippy (capability)
         run: cargo clippy -p clean-slate-capability --all-targets -- -D warnings
@@ -79,7 +80,9 @@ jobs:
         run: cargo clippy -p clean-slate-store --all-targets -- -D warnings
 
       - name: Clippy (kernel UEFI)
-        run: cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi -- -D warnings
+        run: |
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m7-tls-self-test -- -D warnings
 
       - name: Clippy (kernel host tests)
         run: cargo clippy -p clean-slate-kernel --lib --tests -- -D warnings
@@ -101,6 +104,7 @@ jobs:
           cargo test -p clean-slate-block --features alloc
           cargo test -p clean-slate-network
           cargo test -p clean-slate-network --features alloc
+          cargo test -p clean-slate-network --features alloc,tls
           cargo test -p clean-slate-store
           cargo test -p clean-slate-capability
           cargo test -p clean-slate-kernel

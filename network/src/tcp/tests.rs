@@ -17,13 +17,40 @@ mod integration {
     const OWNER: TrustedCaller = TrustedCaller::new(1, 1, 1);
     const OTHER: TrustedCaller = TrustedCaller::new(2, 1, 1);
 
-    fn setup_pair() -> (TcpTransport<FakeLink>, TestPeer<FakeLink>) {
+    /// Boot stacks must not host [`TcpTransport`]; static `init_in_place` only.
+    const MAX_TCP_TRANSPORT_BSS_BYTES: usize = 512 * 1024;
+
+    #[test]
+    fn tcp_transport_size_documented() {
+        use crate::tcp::{TcpTable, TcpTransport};
+        use core::mem::size_of;
+        let transport = size_of::<TcpTransport<FakeLink>>();
+        let table = size_of::<TcpTable>();
+        eprintln!("size_of::<TcpTransport<FakeLink>>() = {transport}");
+        eprintln!("size_of::<TcpTable>() = {table}");
+        const MIN_INLINE_TCP_TRANSPORT_BYTES: usize = 256 * 1024;
+        assert!(
+            transport >= MIN_INLINE_TCP_TRANSPORT_BYTES,
+            "TcpTransport should use inline table ({transport} < {})",
+            MIN_INLINE_TCP_TRANSPORT_BYTES
+        );
+        assert!(
+            transport <= MAX_TCP_TRANSPORT_BSS_BYTES,
+            "TcpTransport grew past documented BSS budget ({transport} > {})",
+            MAX_TCP_TRANSPORT_BSS_BYTES
+        );
+    }
+
+    fn setup_pair() -> (
+        alloc::boxed::Box<TcpTransport<FakeLink>>,
+        TestPeer<FakeLink>,
+    ) {
         let (guest_link, peer_link) = FakeLink::pair();
         let guest_stack = L3Stack::new(guest_link, GUEST_MAC, GUEST_IPV4, ARP_TTL);
         let mut peer_stack = L3Stack::new(peer_link, PEER_MAC, PEER_IPV4, ARP_TTL);
         // Peer must be able to answer toward the guest without an extra ARP round-trip.
         peer_stack.arp_cache_mut().insert(GUEST_IPV4, GUEST_MAC, 0);
-        let guest = TcpTransport::new(guest_stack, SessionGeneration::new(1));
+        let guest = TcpTransport::alloc_boxed(guest_stack, SessionGeneration::new(1));
         let peer = TestPeer::new(peer_stack);
         (guest, peer)
     }
@@ -74,6 +101,33 @@ mod integration {
         assert_eq!(guest.state(id, OWNER).unwrap(), TcpState::SynSent);
         drive(1, &mut guest, &mut peer);
         assert_eq!(guest.state(id, OWNER).unwrap(), TcpState::Established);
+    }
+
+    #[test]
+    fn fixture_guest_syn_capture_parses() {
+        use crate::tcp::segment::{parse as parse_tcp, syn_segment, write as write_tcp};
+        // Guest SYN toward fixture TCP echo (same shape as QEMU, checksum from writer).
+        let seg = syn_segment(50_000, TCP_ECHO_PORT, 1);
+        let mut tcp_buf = [0u8; 64];
+        let n = write_tcp(GUEST_IPV4, PEER_IPV4, &seg, &[], &mut tcp_buf).unwrap();
+        let (parsed, data) =
+            parse_tcp(PEER_IPV4, GUEST_IPV4, &tcp_buf[..n]).expect("tcp segment on wire");
+        assert!(parsed.flags.contains(crate::tcp::segment::TcpFlags::SYN));
+        assert!(data.is_empty());
+        assert_eq!(parsed.dst_port, TCP_ECHO_PORT);
+    }
+
+    #[test]
+    fn poll_ok_during_arp_miss_retransmit_window() {
+        let (mut guest, _peer) = setup_pair();
+        let remote = SocketAddrV4::new(PEER_IPV4, TCP_ECHO_PORT);
+        let id = guest.connect(0, OWNER, remote).unwrap();
+        for tick in 0..200 {
+            guest
+                .poll(tick)
+                .expect("poll must not fail while ARP is unresolved");
+        }
+        assert_eq!(guest.state(id, OWNER).unwrap(), TcpState::SynSent);
     }
 
     #[test]
@@ -170,7 +224,7 @@ mod integration {
         let (_stack, _table, _stats) = guest.into_parts();
         let guest_link = FakeLink::new(GUEST_MAC, true);
         let stack = L3Stack::new(guest_link, GUEST_MAC, GUEST_IPV4, ARP_TTL);
-        let guest = TcpTransport::new(stack, SessionGeneration::new(2));
+        let guest = TcpTransport::alloc_boxed(stack, SessionGeneration::new(2));
         assert_eq!(
             guest.state(id, OWNER).unwrap_err(),
             NetworkError::Denied(DenialReason::StaleGeneration)
@@ -195,7 +249,7 @@ mod integration {
         assert_eq!(guest.state(id, OWNER).unwrap_err(), NetworkError::NotFound);
         let stack = guest.stack_mut();
         let _ = stack;
-        let replacement = TcpTransport::new(
+        let replacement = TcpTransport::alloc_boxed(
             L3Stack::new(
                 FakeLink::new(GUEST_MAC, true),
                 GUEST_MAC,
