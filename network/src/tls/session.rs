@@ -89,6 +89,7 @@ impl<'a, 'buf, L: NetworkLink> TlsSession<'a, 'buf, L> {
             write_buf,
             None,
         )
+        .map(|(session, _)| session)
     }
 
     /// Like [`connect`], but the caller supplies an absolute monotonic handshake deadline
@@ -105,7 +106,7 @@ impl<'a, 'buf, L: NetworkLink> TlsSession<'a, 'buf, L> {
         read_buf: &'buf mut [u8; TLS_RECORD_BUFFER_BYTES],
         write_buf: &'buf mut [u8; TLS_RECORD_BUFFER_BYTES],
         peer_tick: Option<&'a mut dyn FnMut(u64)>,
-    ) -> Result<Self, TlsError> {
+    ) -> Result<(Self, u64), TlsError> {
         Self::connect_with_peer_tick(
             now,
             handshake_deadline,
@@ -121,6 +122,7 @@ impl<'a, 'buf, L: NetworkLink> TlsSession<'a, 'buf, L> {
     }
 
     /// Same as [`connect`], with an optional per-tick hook to drive a hermetic TCP peer (host tests).
+    #[allow(clippy::too_many_arguments)]
     pub fn connect_with_peer_tick<R: TlsRng>(
         now: u64,
         handshake_deadline: u64,
@@ -132,14 +134,15 @@ impl<'a, 'buf, L: NetworkLink> TlsSession<'a, 'buf, L> {
         read_buf: &'buf mut [u8; TLS_RECORD_BUFFER_BYTES],
         write_buf: &'buf mut [u8; TLS_RECORD_BUFFER_BYTES],
         mut peer_tick: Option<&'a mut dyn FnMut(u64)>,
-    ) -> Result<Self, TlsError> {
+    ) -> Result<(Self, u64), TlsError> {
         if config.validation_time_unix != VALIDATION_TIME_UNIX {
             return Err(TlsError::Protocol);
         }
 
+        let handshake_start = now;
         let tcp_id = transport.connect(now, owner, remote)?;
         crate::tls::trace::handshake_step("tcp syn sent");
-        wait_tcp_established(
+        let tick = wait_tcp_established(
             transport,
             tcp_id,
             owner,
@@ -163,17 +166,19 @@ impl<'a, 'buf, L: NetworkLink> TlsSession<'a, 'buf, L> {
             abort_on_drop: true,
         };
         crate::tls::trace::handshake_step("client hello begin");
+        let mut end_now = tick;
         let tls = run_tls_handshake(
             transport,
             tcp_id,
             owner,
-            now,
+            tick,
             io_deadline,
             read_buf,
             write_buf,
             &et_config,
             provider,
             peer_tick,
+            Some(&mut end_now as *mut u64),
         );
         if tls.is_ok() {
             guard.abort_on_drop = false;
@@ -182,12 +187,15 @@ impl<'a, 'buf, L: NetworkLink> TlsSession<'a, 'buf, L> {
         drop(guard);
         let tls = tls?;
 
-        Ok(Self {
-            tcp_id,
-            owner,
-            server_name: config.server_name,
-            connection: Some(tls),
-        })
+        Ok((
+            Self {
+                tcp_id,
+                owner,
+                server_name: config.server_name,
+                connection: Some(tls),
+            },
+            end_now.saturating_sub(handshake_start),
+        ))
     }
 
     pub fn peer_name(&self) -> &str {
@@ -201,6 +209,11 @@ impl<'a, 'buf, L: NetworkLink> TlsSession<'a, 'buf, L> {
     pub fn write(&mut self, _now: u64, data: &[u8]) -> Result<usize, TlsError> {
         let connection = self.connection.as_mut().ok_or(TlsError::Closed)?;
         connection.write(data).map_err(map_embedded_tls_error)
+    }
+
+    pub fn flush(&mut self) -> Result<(), TlsError> {
+        let connection = self.connection.as_mut().ok_or(TlsError::Closed)?;
+        connection.flush().map_err(map_embedded_tls_error)
     }
 
     pub fn read(&mut self, _now: u64, out: &mut [u8]) -> Result<usize, TlsError> {
@@ -262,12 +275,21 @@ fn run_tls_handshake<'a, 'buf, L, R>(
     et_config: &EtTlsConfig,
     provider: M7CryptoProvider<'a, R>,
     peer_tick: Option<&'a mut dyn FnMut(u64)>,
+    end_now: Option<*mut u64>,
 ) -> Result<TlsConnection<'buf, TcpRecordIo<'a, L>, Aes128GcmSha256>, TlsError>
 where
     L: NetworkLink,
     R: rand_core::CryptoRngCore,
 {
-    let io = TcpRecordIo::new(transport, tcp_id, owner, now, io_deadline, peer_tick);
+    let io = TcpRecordIo::new(
+        transport,
+        tcp_id,
+        owner,
+        now,
+        io_deadline,
+        peer_tick,
+        end_now,
+    );
     let mut tls = TlsConnection::new(io, read_buf, write_buf);
     tls.open(TlsContext::new(et_config, provider))
         .map_err(map_embedded_tls_error)?;

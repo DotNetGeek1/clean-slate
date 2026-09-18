@@ -15,6 +15,9 @@ pub const TLS_IO_TIMEOUT_TICKS: u64 = 2_000;
 /// Handshake spin budget in monotonic ticks.
 pub const TLS_HANDSHAKE_TIMEOUT_TICKS: u64 = 3_000;
 
+/// QEMU guest polls outrun the host smoltcp fixture clock unless ticks are paced.
+const QEMU_IDLE_POLL_BURST: u32 = 4096;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TlsIoError;
 
@@ -40,9 +43,9 @@ pub struct TcpRecordIo<'a, L: NetworkLink> {
     deadline: u64,
     /// Host tests: poll the fake TCP peer so frames cross [`FakeLink`].
     peer_tick: Option<&'a mut dyn FnMut(u64)>,
-    /// Spin-heavy polls (QEMU) must not burn the tick budget faster than the fixture clock.
-    idle_polls: u64,
     marked_first_write: bool,
+    end_now: Option<*mut u64>,
+    idle_polls: u32,
 }
 
 impl<'a, L: NetworkLink> TcpRecordIo<'a, L> {
@@ -53,23 +56,47 @@ impl<'a, L: NetworkLink> TcpRecordIo<'a, L> {
         start_now: u64,
         deadline: u64,
         peer_tick: Option<&'a mut dyn FnMut(u64)>,
+        end_now: Option<*mut u64>,
     ) -> Self {
-        Self {
+        let mut io = Self {
             transport,
             session_id,
             owner,
             now: start_now,
             deadline,
             peer_tick,
-            idle_polls: 0,
             marked_first_write: false,
+            end_now,
+            idle_polls: 0,
+        };
+        io.sync_end_now();
+        io
+    }
+
+    fn idle_tick_burst(&self) -> u32 {
+        if self.peer_tick.is_some() {
+            1
+        } else {
+            QEMU_IDLE_POLL_BURST
         }
     }
 
-    fn pace_time(&mut self) {
-        self.idle_polls = self.idle_polls.saturating_add(1);
-        if self.idle_polls % 256 == 0 {
-            self.now = self.now.saturating_add(1);
+    fn advance_idle(&mut self) {
+        self.idle_polls = self.idle_polls.wrapping_add(1);
+        let burst = self.idle_tick_burst();
+        if self.idle_polls % burst != burst - 1 {
+            return;
+        }
+        self.now = self.now.saturating_add(1);
+        self.sync_end_now();
+        self.tick_peer();
+    }
+
+    fn sync_end_now(&mut self) {
+        if let Some(end) = self.end_now {
+            unsafe {
+                *end = self.now;
+            }
         }
     }
 
@@ -102,10 +129,12 @@ impl<L: NetworkLink> Read for TcpRecordIo<'_, L> {
                     if self.transport.poll(self.now).is_err() {
                         return Err(TlsIoError);
                     }
-                    self.tick_peer();
-                    self.pace_time();
+                    self.advance_idle();
                 }
-                Ok(n) => return Ok(n),
+                Ok(n) => {
+                    self.sync_end_now();
+                    return Ok(n);
+                }
                 Err(NetworkError::Closed) | Err(NetworkError::Reset) => return Err(TlsIoError),
                 Err(NetworkError::Timeout) => return Err(TlsIoError),
                 Err(_) => return Err(TlsIoError),
@@ -131,8 +160,7 @@ impl<L: NetworkLink> Write for TcpRecordIo<'_, L> {
                     if self.transport.poll(self.now).is_err() {
                         return Err(TlsIoError);
                     }
-                    self.tick_peer();
-                    self.pace_time();
+                    self.advance_idle();
                 }
                 Ok(n) => {
                     if n > 0 && !self.marked_first_write {
@@ -140,13 +168,13 @@ impl<L: NetworkLink> Write for TcpRecordIo<'_, L> {
                         crate::tls::trace::handshake_step("client hello written");
                     }
                     offset += n;
+                    self.sync_end_now();
                 }
                 Err(NetworkError::Unreachable) => {
                     if self.transport.poll(self.now).is_err() {
                         return Err(TlsIoError);
                     }
-                    self.tick_peer();
-                    self.pace_time();
+                    self.advance_idle();
                 }
                 Err(_) => return Err(TlsIoError),
             }
@@ -165,8 +193,7 @@ impl<L: NetworkLink> Write for TcpRecordIo<'_, L> {
         if self.transport.poll(self.now).is_err() {
             return Err(TlsIoError);
         }
-        self.tick_peer();
-        self.pace_time();
+        self.advance_idle();
         Ok(())
     }
 }
@@ -178,7 +205,12 @@ pub(crate) fn wait_tcp_established<L: NetworkLink>(
     start_now: u64,
     deadline: u64,
     peer_tick: &mut Option<&mut dyn FnMut(u64)>,
-) -> Result<(), crate::tls::error::TlsError> {
+) -> Result<u64, crate::tls::error::TlsError> {
+    let burst = if peer_tick.is_some() {
+        1u64
+    } else {
+        u64::from(QEMU_IDLE_POLL_BURST)
+    };
     let mut now = start_now;
     let mut idle_polls = 0u64;
     while now <= deadline {
@@ -189,14 +221,14 @@ pub(crate) fn wait_tcp_established<L: NetworkLink>(
             peer(now);
         }
         match transport.state(session_id, owner) {
-            Ok(TcpState::Established) => return Ok(()),
+            Ok(TcpState::Established) => return Ok(now),
             Ok(TcpState::Reset) => {
                 return Err(crate::tls::error::TlsError::Tcp(NetworkError::Reset));
             }
             Ok(TcpState::Closed) => return Err(crate::tls::error::TlsError::Closed),
             Ok(_) => {
                 idle_polls = idle_polls.saturating_add(1);
-                if idle_polls % 256 == 0 {
+                if idle_polls % burst == burst - 1 {
                     now = now.saturating_add(1);
                 }
             }

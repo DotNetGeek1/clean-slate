@@ -439,6 +439,8 @@ Fail-closed boot: `[TLS ] peer identity rejected name=m7.fixture.test`, `[M7.6] 
 
 UEFI builds set `--cfg aes_force_soft` in [`.cargo/config.toml`](../.cargo/config.toml) for portable AES. On Windows hosts, **debug** UEFI codegen for GCM (`polyval`/`aes`) can still trigger an LLVM split error; `cargo xtask test-m7-tls` therefore builds the kernel **release** profile (`kernel_release: true`) while other M7 lanes stay debug.
 
+**QEMU vCPU:** The TLS self-test RNG is hardware-only (`RDRAND` via CPUID.1:ECX[30] and `_rdrand64_step`). Default QEMU TCG `qemu64` does not expose RDRAND, so executing `RDRAND` raises `#UD` (often visible as `[EXC ] vector=6 name=Invalid Opcode` on serial). Only `cargo xtask test-m7-tls` passes `-cpu qemu64,+rdrand`; all other xtask QEMU lanes keep the previous command line (no `-cpu` flag). The kernel prints `[TLS ] rng=rdrand` after validation, or `[TLS ] FAIL reason=rdrand-unavailable` and exits without a weak RNG fallback.
+
 ### Error mapping (`TlsError` → `NetworkError`)
 
 | `TlsError` | `NetworkError` |

@@ -367,7 +367,9 @@ pub(crate) struct VirtioNetDevice {
     link: LinkProperties,
     #[allow(dead_code)]
     device_id: NetworkDeviceId,
+    #[allow(dead_code)]
     rx_queue_size: u16,
+    #[allow(dead_code)]
     tx_queue_size: u16,
     device_state: DeviceState,
     released: bool,
@@ -424,15 +426,12 @@ impl VirtioNetDevice {
         self.device_id
     }
 
+    #[cfg(feature = "m7-net-device-self-test")]
     pub(crate) fn queue_sizes(&self) -> (u16, u16) {
         (self.rx_queue_size, self.tx_queue_size)
     }
 
-    #[cfg(any(
-        feature = "m7-net-device-self-test",
-        feature = "m7-tls-self-test",
-        feature = "m7-tls-fail-closed-self-test"
-    ))]
+    #[cfg(feature = "m7-net-device-self-test")]
     #[allow(clippy::result_large_err)]
     pub(crate) fn self_test_transmit_declared_len(
         &mut self,
@@ -445,11 +444,7 @@ impl VirtioNetDevice {
         self.transmit(frame)
     }
 
-    #[cfg(any(
-        feature = "m7-net-device-self-test",
-        feature = "m7-tls-self-test",
-        feature = "m7-tls-fail-closed-self-test"
-    ))]
+    #[cfg(feature = "m7-net-device-self-test")]
     pub(crate) fn self_test_inject_malformed_rx_completion(&mut self) -> &'static str {
         let used = VirtqUsedElem {
             id: u32::MAX,

@@ -23,8 +23,7 @@ mod integration {
     use crate::addr::SocketAddrV4;
     use crate::fake::FakeLink;
     use crate::fixture::{
-        APP_REQUEST_BYTES, APP_RESPONSE_BYTES, GUEST_IPV4, GUEST_MAC, PEER_IPV4, PEER_MAC,
-        TLS_PORT, TLS_SERVER_NAME,
+        APP_REQUEST_BYTES, GUEST_IPV4, GUEST_MAC, PEER_IPV4, PEER_MAC, TLS_PORT, TLS_SERVER_NAME,
     };
     use crate::protocol::TrustedCaller;
     use crate::session::SessionGeneration;
@@ -116,7 +115,7 @@ mod integration {
         let mut peer_tick = |tick: u64| {
             let _ = peer.poll(tick);
         };
-        let mut tls = TlsSession::connect_with_peer_tick(
+        let (mut tls, _) = TlsSession::connect_with_peer_tick(
             0,
             TLS_HANDSHAKE_TIMEOUT_TICKS,
             &mut guest,

@@ -1,4 +1,4 @@
-use core::arch::x86_64::_rdrand64_step;
+use core::arch::x86_64::{__cpuid, _rdrand64_step};
 use core::hint::spin_loop;
 use core::mem::MaybeUninit;
 
@@ -26,10 +26,12 @@ use crate::{serial_write_fmt, serial_write_line};
 const OWNER: TrustedCaller = TrustedCaller::new(1, 0, 1);
 const ARP_TTL: u64 = 50_000;
 const POLL_LIMIT: usize = 50_000_000;
-/// Monotonic tick budget for TLS TCP+handshake after the echo phase (QEMU wall time via spin).
-const M7_TLS_HANDSHAKE_TICK_BUDGET: u64 = 5_000_000;
-/// Guest polls spin faster than the fixture's 1 ms smoltcp clock; advance logical time slowly.
-const TICKS_PER_POLL_BURST: u64 = 256;
+/// Monotonic tick budget for TLS TCP connect + handshake after the echo phase.
+/// With 4096-idle poll burst, the observed handshake is 0–2 logical ticks; allow TCP
+/// connect slack (`TCP_CONNECT_TIMEOUT_TICKS`) and per-op TLS I/O windows.
+const M7_TLS_HANDSHAKE_TICK_BUDGET: u64 = 8_192;
+/// Echo phase polls outrun the fixture's 1 ms clock unless time is paced.
+const TCP_POLL_TICK_BURST: u64 = 4096;
 
 static mut TCP_TRANSPORT: MaybeUninit<TcpTransport<VirtioNetDevice>> = MaybeUninit::uninit();
 static mut TCP_TRANSPORT_READY: bool = false;
@@ -38,6 +40,21 @@ static mut TLS_READ_BUF: [u8; TLS_RECORD_BUFFER_BYTES] = [0; TLS_RECORD_BUFFER_B
 static mut TLS_WRITE_BUF: [u8; TLS_RECORD_BUFFER_BYTES] = [0; TLS_RECORD_BUFFER_BYTES];
 
 pub struct RdrandRng;
+
+impl RdrandRng {
+    /// Requires CPUID.1:ECX[30] (RDRAND) and a working `RDRAND` instruction.
+    pub fn new() -> Result<Self, &'static str> {
+        let leaf1 = unsafe { __cpuid(1) };
+        if leaf1.ecx & (1 << 30) == 0 {
+            return Err("rdrand-unavailable");
+        }
+        let mut word = 0u64;
+        if unsafe { _rdrand64_step(&mut word) } == 0 {
+            return Err("rdrand-unavailable");
+        }
+        Ok(Self)
+    }
+}
 
 impl CryptoRng for RdrandRng {}
 
@@ -110,6 +127,7 @@ pub(crate) fn run_m7_tls_fail_closed_self_test() -> Result<(), &'static str> {
     run_tls_phase(tcp, true, 0)
 }
 
+#[allow(static_mut_refs)]
 fn tcp_transport() -> Result<&'static mut TcpTransport<VirtioNetDevice>, &'static str> {
     unsafe {
         if !TCP_TRANSPORT_READY {
@@ -172,6 +190,12 @@ fn run_tls_phase(
     let remote_tls = SocketAddrV4::new(PEER_IPV4, TLS_PORT);
     let read_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_READ_BUF) };
     let write_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_WRITE_BUF) };
+    let rng = RdrandRng::new().inspect_err(|&reason| {
+        if reason == "rdrand-unavailable" {
+            serial_write_line("[TLS ] FAIL reason=rdrand-unavailable");
+        }
+    })?;
+    serial_write_line("[TLS ] rng=rdrand");
     tick = tick.saturating_add(1);
     let handshake_deadline = tick.saturating_add(M7_TLS_HANDSHAKE_TICK_BUDGET);
     let tls_result = TlsSession::connect_with_handshake_deadline(
@@ -181,7 +205,7 @@ fn run_tls_phase(
         OWNER,
         remote_tls,
         config,
-        RdrandRng,
+        rng,
         read_buf,
         write_buf,
         None,
@@ -196,23 +220,23 @@ fn run_tls_phase(
                 serial_write_line("[M7.6] FAIL-CLOSED OK");
                 Ok(())
             }
-            Ok(_) => Err("expected peer identity failure"),
+            Ok((_, _)) => Err("expected peer identity failure"),
             Err(_) => Err("unexpected tls error for fail-closed boot"),
         };
     }
-    let mut tls = tls_result.map_err(|_| "tls connect failed")?;
+    let (mut tls, handshake_ticks) = tls_result.map_err(|_| "tls connect failed")?;
+    if handshake_ticks > M7_TLS_HANDSHAKE_TICK_BUDGET {
+        return Err("tls handshake budget exceeded");
+    }
+    serial_write_fmt(format_args!("[TLS ] handshake ticks={handshake_ticks}\n"));
     serial_write_fmt(format_args!(
         "[TLS ] authenticated peer={}\n",
         tls.peer_name()
     ));
-    tick = tick.saturating_add(100);
-    tls.write(tick, APP_REQUEST_BYTES)
-        .map_err(|_| "tls write failed")?;
+    tick = tick.saturating_add(1);
+    drive_tls_app_write(&mut tls, tick, APP_REQUEST_BYTES)?;
     let mut app_buf = [0u8; 64];
-    tick = tick.saturating_add(100);
-    let n = tls
-        .read(tick, &mut app_buf)
-        .map_err(|_| "tls read failed")?;
+    let n = drive_tls_app_read(&mut tls, tick, &mut app_buf)?;
     if &app_buf[..n] != APP_RESPONSE_BYTES {
         return Err("tls app response mismatch");
     }
@@ -222,6 +246,46 @@ fn run_tls_phase(
     serial_write_line("[TLS ] closed");
     serial_write_line("[M7.6] PASS");
     Ok(())
+}
+
+fn drive_tls_app_write(
+    tls: &mut TlsSession<'_, '_, VirtioNetDevice>,
+    mut tick: u64,
+    data: &[u8],
+) -> Result<(), &'static str> {
+    let mut offset = 0usize;
+    for _ in 0..POLL_LIMIT {
+        match tls.write(tick, &data[offset..]) {
+            Ok(0) => {}
+            Ok(n) => offset = offset.saturating_add(n),
+            Err(_) => return Err("tls write failed"),
+        }
+        if offset >= data.len() {
+            tls.flush().map_err(|_| "tls write flush failed")?;
+            return Ok(());
+        }
+        tick = tick.saturating_add(1);
+        spin_loop();
+    }
+    Err("tls write timeout")
+}
+
+fn drive_tls_app_read(
+    tls: &mut TlsSession<'_, '_, VirtioNetDevice>,
+    mut tick: u64,
+    out: &mut [u8],
+) -> Result<usize, &'static str> {
+    for _ in 0..POLL_LIMIT {
+        match tls.read(tick, out) {
+            Ok(0) => {}
+            Ok(n) => return Ok(n),
+            Err(TlsError::Timeout) => {}
+            Err(_) => return Err("tls read failed"),
+        }
+        tick = tick.saturating_add(1);
+        spin_loop();
+    }
+    Err("tls read timeout")
 }
 
 fn drive_tcp_until(
@@ -238,7 +302,7 @@ fn drive_tcp_until(
             Err(_) => return Err("tcp drive stale session"),
             Ok(_) => {}
         }
-        if polls as u64 % TICKS_PER_POLL_BURST == TICKS_PER_POLL_BURST - 1 {
+        if polls as u64 % TCP_POLL_TICK_BURST == TCP_POLL_TICK_BURST - 1 {
             tick = tick.saturating_add(1);
         }
         spin_loop();
@@ -253,7 +317,7 @@ fn poll_for_ticks(
 ) -> Result<u64, &'static str> {
     for polls in 0..count {
         tcp.poll(tick).map_err(|_| "tcp poll failed")?;
-        if polls as u64 % TICKS_PER_POLL_BURST == TICKS_PER_POLL_BURST - 1 {
+        if polls as u64 % TCP_POLL_TICK_BURST == TCP_POLL_TICK_BURST - 1 {
             tick = tick.saturating_add(1);
         }
         spin_loop();
@@ -288,7 +352,7 @@ fn receive_all(
         if total >= APP_RESPONSE_BYTES.len() {
             return Ok((total, tick));
         }
-        if polls as u64 % TICKS_PER_POLL_BURST == TICKS_PER_POLL_BURST - 1 {
+        if polls as u64 % TCP_POLL_TICK_BURST == TCP_POLL_TICK_BURST - 1 {
             tick = tick.saturating_add(1);
         }
         spin_loop();

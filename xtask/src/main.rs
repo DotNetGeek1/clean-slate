@@ -541,6 +541,7 @@ fn run_m5_block_acceptance() -> Result<(), XtaskError> {
             reset_ovmf_vars: false,
             m7_fixture_port: None,
             kernel_release: false,
+            cpu_model: None,
         },
     )
 }
@@ -561,6 +562,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
             kernel_release: true,
+            cpu_model: Some("qemu64,+rdrand"),
         },
     );
     peer.shutdown();
@@ -581,6 +583,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
             kernel_release: true,
+            cpu_model: Some("qemu64,+rdrand"),
         },
     );
     peer.shutdown();
@@ -603,6 +606,7 @@ fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
             kernel_release: false,
+            cpu_model: None,
         },
     );
     peer.shutdown();
@@ -622,6 +626,7 @@ fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
             kernel_release: false,
+            cpu_model: None,
         },
     );
     peer.shutdown();
@@ -770,6 +775,7 @@ fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
             reset_ovmf_vars: true,
             m7_fixture_port: None,
             kernel_release: false,
+            cpu_model: None,
         };
 
         println!("[M5.H] phase 1/2 boot");
@@ -1199,6 +1205,7 @@ fn m5_storage_vm_config() -> VmLaunchConfig {
         reset_ovmf_vars: true,
         m7_fixture_port: None,
         kernel_release: false,
+        cpu_model: None,
     }
 }
 
@@ -1285,6 +1292,8 @@ struct VmLaunchConfig {
     m7_fixture_port: Option<u16>,
     /// Work around Windows debug UEFI codegen for AES-GCM (TLS); release builds succeed.
     kernel_release: bool,
+    /// Optional QEMU `-cpu` model (TLS lane needs RDRAND).
+    cpu_model: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1366,6 +1375,9 @@ fn run_vm_inner_with_config(
         .arg(format!("if=pflash,format=raw,file={}", vars_copy.display()))
         .arg("-drive")
         .arg(format!("format=raw,file=fat:rw:{}", esp_dir.display()));
+    if let Some(cpu) = config.cpu_model {
+        qemu.arg("-cpu").arg(cpu);
+    }
     if let Some(m5_data_disk) = config.m5_data_disk {
         append_m5_disk_args(&mut qemu, &m5_data_disk);
     }
