@@ -370,3 +370,17 @@ fn network_rights_mask_and_authorization() {
         Err(CapabilityError::RightsWidening)
     );
 }
+
+#[test]
+fn network_resource_ref_constructors() {
+    let service = ResourceRef::network(0x5200, 3);
+    assert_eq!(service.class, ResourceClass::Network);
+    assert_eq!(service.id, 0x5200);
+    assert_eq!(service.instance_generation, 3);
+    let session = ResourceRef::network_session(2, 7);
+    assert_eq!(session.instance_generation, 2);
+    assert_eq!(session.id, 7);
+    let stale = ResourceRef::network(0x5200, 1);
+    let live = ResourceRef::network(0x5200, 2);
+    assert_ne!(stale, live);
+}

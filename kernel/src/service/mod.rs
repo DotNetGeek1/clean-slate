@@ -9,6 +9,7 @@
 pub(crate) mod block_bridge;
 pub(crate) mod capability;
 pub(crate) mod control;
+pub(crate) mod instance_generation;
 pub(crate) mod spawn;
 
 #[cfg(feature = "m4-recovery-self-test")]

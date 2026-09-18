@@ -24,7 +24,8 @@ pub(crate) mod m3_address_space;
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m7-net-caps-self-test"
 ))]
 pub(crate) mod m3_entry;
 #[cfg(feature = "m3-ipc-self-test")]
@@ -55,7 +56,8 @@ pub(crate) mod m5_block;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m7-net-caps-self-test"
 ))]
 pub(crate) mod m5_storage;
 #[cfg(feature = "m6-audit-self-test")]
@@ -71,7 +73,8 @@ pub(crate) mod m6_delegation;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m7-net-caps-self-test"
 ))]
 pub(crate) mod m6_fixture;
 #[cfg(feature = "m6-fixture-smoke-self-test")]
@@ -82,6 +85,8 @@ pub(crate) mod m6_object;
 pub(crate) mod m6_process_control;
 #[cfg(feature = "m6-revocation-self-test")]
 pub(crate) mod m6_revocation;
+#[cfg(feature = "m7-net-caps-self-test")]
+pub(crate) mod m7_net_caps;
 #[cfg(feature = "m7-net-device-self-test")]
 pub(crate) mod m7_net_device;
 #[cfg(any(
