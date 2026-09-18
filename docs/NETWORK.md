@@ -79,3 +79,27 @@ Constants live in `network/src/fixture.rs`. Acceptance assumes a private `10.77.
 - Linux socket ABI (M9)
 - DNS-over-TCP and DNSSEC
 - Arbitrary certificate stores / Web PKI
+
+## M7.2 VirtIO-net
+
+Kernel driver: `kernel/src/device/virtio/net.rs` (legacy VirtIO PCI `0x1000`, I/O transport matching M5 block).
+
+**Features negotiated:** `VIRTIO_NET_F_MAC` only. No mergeable RX buffers, offloads, control queue, or multiqueue.
+
+**Queue geometry:** RX queue 0 and TX queue 1; each queue size must be a non-zero power of two (≤ 256 legacy max). The driver posts a bounded RX pool of 16 buffers (≤ `MAX_DEVICE_RX_QUEUE_DEPTH` 64). M7 acceptance uses legacy `virtio-net-pci` without host LAN attachment.
+
+**RX pool:** 16 static slots × (12-byte buffer prefix + 1514-byte frame). Legacy RX completions report a 10-byte on-wire header prefix; Ethernet begins at offset 10. Descriptor ownership is `DriverOwned` or `DeviceOwned`; slots are never reposted while `DeviceOwned`.
+
+**Poison / reset:** Malformed used-ring completions (unknown descriptor, length &gt; posted buffer, or length &lt; header) → `DeviceState::Poisoned`. TX completion timeout → `ResetRequired`. `NetworkLink::reset()` resets the device, re-validates DMA, reposts RX buffers; failure → `Poisoned`. `VirtioNetDevice::release()` resets the PCI device and poisons local state before handoff.
+
+**Hermetic fixture:** `cargo xtask test-m7-net-device` starts an xtask-hosted smoltcp peer (`xtask/src/m7_fixture.rs`) on `127.0.0.1:<port>`. QEMU uses `-netdev socket,id=n0,connect=127.0.0.1:<port>` (4-byte big-endian length-prefixed raw Ethernet). Guest device: `-device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on`. The peer answers ARP/ICMP for `10.77.0.1` and UDP echo on port 4000.
+
+**Serial markers (ordered):** `[NET ] virtio ready mac=…`, `[NET ] tx ok len=…`, `[NET ] rx ok len=… from=52:54:00:ab:cd:ef`, `[NET ] reject oversized`, `[NET ] poisoned reason=…`, `[NET ] reset ok`, second TX/RX round trip, `[M7.2] PASS`.
+
+**Run / debug:**
+
+```bash
+cargo xtask test-m7-net-device
+```
+
+Host peer logs: `[FIX ] arp reply`, `[FIX ] icmp echo`, `[FIX ] udp echo len=…`.

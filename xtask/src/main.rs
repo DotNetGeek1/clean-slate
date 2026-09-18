@@ -9,6 +9,10 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+mod m7_fixture;
+
+use m7_fixture::M7FixturePeer;
+
 const KERNEL_PACKAGE: &str = "clean-slate-kernel";
 const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
 const QEMU_DEBUG_EXIT_SUCCESS: i32 = 33;
@@ -34,6 +38,7 @@ const M6_REVOCATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 const M6_AUDIT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M6_CAPABILITIES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(180);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
+const M7_NET_DEVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M5_CRASH_MATRIX_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_PERSISTENCE_BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_CRASH_RECOVERY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -46,6 +51,7 @@ const M5_HOST_SENTINEL: &[u8] = b"CLEAN-SLATE-M5-PERSISTENCE-SENTINEL-v1";
 const M5_QEMU_DISK_ID: &str = "m5disk";
 const M5_QEMU_DEVICE: &str =
     "virtio-blk-pci,drive=m5disk,serial=clean-slate-m5-data,disable-modern=on";
+const M7_QEMU_NET_DEVICE: &str = "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on";
 const M4_RECOVERY_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[CAP ] supervisor console capability granted pid=1",
     "[SUP ] started pid=1",
@@ -286,6 +292,19 @@ const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[BLK ] read lba=",
     "[M5.2] PASS",
 ];
+const M7_NET_DEVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
+    "[NET ] virtio ready mac=",
+    "[NET ] tx ok len=",
+    "[NET ] rx ok len=",
+    "from=52:54:00:ab:cd:ef",
+    "[NET ] reject oversized",
+    "[NET ] poisoned reason=",
+    "[NET ] reset ok",
+    "[NET ] tx ok len=",
+    "[NET ] rx ok len=",
+    "from=52:54:00:ab:cd:ef",
+    "[M7.2] PASS",
+];
 const M5_PERSISTENCE_WRITE_MARKERS: [&str; 7] = [
     "[BLK ] virtio-block ready blocks=",
     "[BLK ] flush complete",
@@ -426,6 +445,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM4Recovery => run_m4_recovery_acceptance(),
         ParsedCommand::TestM5 => run_m5_acceptance(),
         ParsedCommand::TestM5Block => run_m5_block_acceptance(),
+        ParsedCommand::TestM7NetDevice => run_m7_net_device_acceptance(),
         ParsedCommand::TestM5Storage => run_m5_storage_acceptance(),
         ParsedCommand::TestM5CrashMatrix => run_m5_crash_matrix(),
         ParsedCommand::TestM5Persistence => run_m5_persistence_acceptance(&trailing_args),
@@ -475,8 +495,30 @@ fn run_m5_block_acceptance() -> Result<(), XtaskError> {
         VmLaunchConfig {
             m5_data_disk: Some(disk),
             reset_ovmf_vars: false,
+            m7_fixture_port: None,
         },
     )
+}
+
+fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
+    let peer = M7FixturePeer::start().map_err(XtaskError::Io)?;
+    let port = peer.port();
+    let run_result = run_vm_inner_with_config(
+        false,
+        false,
+        &["m7-net-device-self-test"],
+        Some((
+            &M7_NET_DEVICE_ACCEPTANCE_MARKERS,
+            M7_NET_DEVICE_ACCEPTANCE_TIMEOUT,
+        )),
+        VmLaunchConfig {
+            m5_data_disk: None,
+            reset_ovmf_vars: false,
+            m7_fixture_port: Some(port),
+        },
+    );
+    peer.shutdown();
+    run_result
 }
 
 fn run_m5_persistence_acceptance_default() -> Result<(), XtaskError> {
@@ -619,6 +661,7 @@ fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
         let config = VmLaunchConfig {
             m5_data_disk: Some(disk.clone()),
             reset_ovmf_vars: true,
+            m7_fixture_port: None,
         };
 
         println!("[M5.H] phase 1/2 boot");
@@ -1037,6 +1080,7 @@ fn m5_storage_vm_config() -> VmLaunchConfig {
     VmLaunchConfig {
         m5_data_disk: Some(m5_data_disk_path()),
         reset_ovmf_vars: true,
+        m7_fixture_port: None,
     }
 }
 
@@ -1120,6 +1164,7 @@ fn run_m3_acceptance() -> Result<(), XtaskError> {
 struct VmLaunchConfig {
     m5_data_disk: Option<PathBuf>,
     reset_ovmf_vars: bool,
+    m7_fixture_port: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1204,6 +1249,9 @@ fn run_vm_inner_with_config(
     if let Some(m5_data_disk) = config.m5_data_disk {
         append_m5_disk_args(&mut qemu, &m5_data_disk);
     }
+    if let Some(port) = config.m7_fixture_port {
+        append_m7_net_args(&mut qemu, port);
+    }
 
     if wait_for_gdb {
         qemu.arg("-S").arg("-s");
@@ -1251,6 +1299,13 @@ fn append_m5_disk_args(qemu: &mut Command, m5_data_disk: &Path) {
         ))
         .arg("-device")
         .arg(M5_QEMU_DEVICE);
+}
+
+fn append_m7_net_args(qemu: &mut Command, port: u16) {
+    qemu.arg("-netdev")
+        .arg(format!("socket,id=n0,connect=127.0.0.1:{port}"))
+        .arg("-device")
+        .arg(M7_QEMU_NET_DEVICE);
 }
 
 fn m5_fixture_dir() -> PathBuf {
@@ -1796,6 +1851,7 @@ fn print_help() {
     println!("  test-m4       M4 milestone gate: recovery QEMU boot plus M4.6 host policy tests");
     println!("  test-m5       M5 milestone gate: block, storage, persistence, and crash-recovery acceptance");
     println!("  test-m5-block Build the M5.2 virtio-block kernel, run QEMU, and validate ordered markers");
+    println!("  test-m7-net-device Build the M7.2 virtio-net kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
     println!("  test-m5-persistence Two-boot persistent-disk M5 acceptance using the production storage path");
@@ -1856,6 +1912,7 @@ enum ParsedCommand {
     TestM4Recovery,
     TestM5,
     TestM5Block,
+    TestM7NetDevice,
     TestM5Storage,
     TestM5CrashMatrix,
     TestM5Persistence,
@@ -1900,6 +1957,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m4-recovery" => ParsedCommand::TestM4Recovery,
         Some(cmd) if cmd == "test-m5" => ParsedCommand::TestM5,
         Some(cmd) if cmd == "test-m5-block" => ParsedCommand::TestM5Block,
+        Some(cmd) if cmd == "test-m7-net-device" || cmd == "m7-net-device" || cmd == "m7.2" => {
+            ParsedCommand::TestM7NetDevice
+        }
         Some(cmd) if cmd == "test-m5-storage" => ParsedCommand::TestM5Storage,
         Some(cmd) if cmd == "test-m5-crash-matrix" => ParsedCommand::TestM5CrashMatrix,
         Some(cmd) if cmd == "test-m5-persistence" => ParsedCommand::TestM5Persistence,
@@ -2128,6 +2188,10 @@ mod tests {
         assert_eq!(
             parse_command(Some("test-m5-block".as_ref())),
             ParsedCommand::TestM5Block
+        );
+        assert_eq!(
+            parse_command(Some("test-m7-net-device".as_ref())),
+            ParsedCommand::TestM7NetDevice
         );
         assert_eq!(
             parse_command(Some("test-m5-disk-harness".as_ref())),

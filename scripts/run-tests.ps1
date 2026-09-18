@@ -124,6 +124,7 @@ $AllTests = [ordered]@{
     "test-m6-revocation"        = @{ Aliases = @("m6-revocation", "m6.6"); Description = "M6.6 capability revocation and teardown constituent acceptance"; Role = "Constituent" }
     "test-m6-audit"             = @{ Aliases = @("m6-audit", "m6.7"); Description = "M6.7 capability audit events constituent acceptance"; Role = "Constituent" }
     "test-m6-capabilities"      = @{ Aliases = @("m6-capabilities", "m6.8"); Description = "M6.8 capability convergence acceptance (object, delegation, revocation, process control, audit)"; Role = "Constituent" }
+    "test-m7-net-device"        = @{ Aliases = @("m7-net-device", "m7.2"); Description = "M7.2 VirtIO-net device-lane QEMU acceptance"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {
