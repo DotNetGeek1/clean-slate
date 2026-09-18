@@ -141,3 +141,76 @@ Defined in [`ipv4`](../network/src/ipv4.rs); combine with the L4 checksum per RF
 ### Teardown
 
 `L3Stack::reset()` clears ARP cache, pending ARP tracking, stack statistics, and invokes `NetworkLink::reset()`.
+
+## M7.4c TCP
+
+Issue #125 adds a **client-only** TCP transport in `network/src/tcp/` over [`L3Stack`](network/src/stack.rs). UDP inbound on the same stack is ignored here; lane #88 will fan out `Inbound` to UDP and TCP dispatchers.
+
+### Supported subset
+
+- Active open only (`SynSent` → `Established`); no `LISTEN` / `SYN-RCVD`.
+- In-order delivery: segments must arrive with `seq == rcv_nxt`; out-of-order segments are dropped and counted.
+- Stop-and-go: at most **one** unacknowledged data segment in flight.
+- Fixed RTO ([`TCP_RTO_TICKS`](../network/src/tcp/conn.rs)); separate connect timeout ([`TCP_CONNECT_TIMEOUT_TICKS`](../network/src/tcp/conn.rs)). Data-phase RTO exhaustion uses [`TCP_MAX_RETRIES`](../network/src/tcp/conn.rs); `SynSent` retries until connect timeout.
+- TCP options on the wire: EOL, NOP, MSS (kind 2, len 4) only; MSS is sent on SYN only.
+- Advertised MSS = [`MAX_TCP_PAYLOAD`](../network/src/tcp/segment.rs) = `MAX_L3_PAYLOAD_BYTES - 40` (1460 on Ethernet MTU).
+
+### Constants (authoritative: `network/src/tcp/`)
+
+| Constant | Value | Role |
+|----------|------:|------|
+| `MAX_TCP_CONNECTIONS` | 32 | Table slots (= `SessionId` index) |
+| `TCP_SEND_BUFFER_BYTES` / `TCP_RECV_BUFFER_BYTES` | 4096 each | Per-connection rings |
+| `TCP_MAX_RETRIES` | 5 | Data-phase RTO cap |
+| `TCP_RTO_TICKS` | 50 | Retransmission interval (ticks) |
+| `TCP_TIME_WAIT_TICKS` | 200 | TIME-WAIT before slot free |
+| `TCP_CONNECT_TIMEOUT_TICKS` | 500 | Active-open timeout |
+| Ephemeral ports | 50000–50031 | `50000 + slot_index` |
+
+**ISS:** `deterministic_iss(generation, index, counter)` — no randomness.
+
+### Client state diagram (text)
+
+```text
+Closed → SynSent → Established → FinWait1 → FinWait2 → TimeWait → Closed
+                              ↘ CloseWait (peer FIN) → LastAck → Closed
+Any phase → Reset (RST / timeout / abort)
+```
+
+Terminal states release send/recv buffers and the table slot (after TIME-WAIT expiry where applicable).
+
+### Error mapping
+
+| API result | When |
+|------------|------|
+| `SessionExhausted` | Table full |
+| `Denied(StaleGeneration)` | `SessionId` generation ≠ live `TcpTable` |
+| `Denied(NoCapability)` | `TrustedCaller` ≠ connection owner (defensive; broker #87 is authoritative) |
+| `NotFound` | Free / unknown slot |
+| `Unreachable` | `connect`/`send` ARP miss (caller should `poll` and retry) |
+| `QueueFull` | Send ring full (non-blocking) |
+| `Timeout` | Connect or data RTO exhausted |
+| `Reset` | Peer RST |
+| `Closed` | Peer FIN received and recv buffer drained |
+
+### Memory footprint (per connection, order-of-magnitude)
+
+~8 KiB rings + ~1.5 KiB unacked snapshot + connection metadata; **32 slots** heap-allocated when `feature = "alloc"` (host tests / service).
+
+### Restart and holder exit
+
+- `TcpTransport::reset()` / service restart: RST every live connection, clear table, `L3Stack::reset()`; new `TcpTable::new(next_generation)` rejects all prior `SessionId`s.
+- `on_holder_exit(owner)`: RST and free all connections owned by that holder.
+- Sessions are **never** transferred across restart; replacement generation invalidates old ids.
+
+### TLS lane (#86) API
+
+Use [`TcpTransport`](../network/src/tcp/transport.rs) on the network service side (after capability checks):
+
+1. `TcpTransport::new(stack, generation)`
+2. `connect(now, owner, SocketAddrV4)` → `SessionId`
+3. Loop: `poll(now)` (drives ARP, timers, RX)
+4. `send(now, id, owner, tls_record_bytes)` / `receive(id, owner, buf)`
+5. `close(now, id, owner)` or `abort(id, owner)`
+
+Host tests: [`TestPeer`](../network/src/tcp/test_peer.rs) on `FakeLink::pair()` answers on [`TCP_ECHO_PORT`](../network/src/fixture.rs) with fixture bytes and fault injection (`drop_next_n_outbound`, `reply_rst_on_next`, `stop_acking`, etc.).
