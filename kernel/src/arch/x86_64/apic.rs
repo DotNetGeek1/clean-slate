@@ -1,8 +1,3 @@
-#![cfg_attr(
-    not(any(feature = "m2-timer-self-test", feature = "m4-recovery-self-test")),
-    allow(dead_code)
-)]
-
 //! Local APIC timer/EOI programming and legacy PIC masking.
 //!
 //! Why unsafe: MMIO writes to the APIC register page and MSR writes to
@@ -55,6 +50,10 @@ pub(crate) fn program_local_apic_timer() {
     local_apic_write(APIC_REGISTER_INITIAL_COUNT, APIC_TIMER_INITIAL_COUNT);
 }
 
+#[cfg_attr(
+    not(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test",)),
+    allow(dead_code)
+)]
 pub(crate) fn reprogram_local_apic_timer(initial_count: u32) {
     local_apic_write(APIC_REGISTER_INITIAL_COUNT, initial_count);
 }
