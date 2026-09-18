@@ -79,3 +79,65 @@ Constants live in `network/src/fixture.rs`. Acceptance assumes a private `10.77.
 - Linux socket ABI (M9)
 - DNS-over-TCP and DNSSEC
 - Arbitrary certificate stores / Web PKI
+
+## M7.4a L2/L3 foundation
+
+Issue #84 adds bounded parsers and a host-testable [`L3Stack`](../network/src/stack.rs) in `clean-slate-network` (no VirtIO types leak upward).
+
+### Supported on-wire subset
+
+- Ethernet II, 14-byte header, no VLAN; EtherTypes IPv4 (`0x0800`) and ARP (`0x0806`) only.
+- ARP: hardware type 1 (Ethernet), protocol `0x0800`, 6/4 address lengths, opcodes request/reply only.
+- IPv4: version 4, IHL 5–15 (options skipped, never parsed), header checksum verified (RFC 1071).
+- ICMP: echo request/reply with checksum; other types parsed as `IcmpMessage::Other` or error shells without panicking.
+
+### Fragmentation policy
+
+Any IPv4 datagram with the MF flag set or a non-zero fragment offset is rejected with `ParseError::Fragmented`. The stack increments `StackStats::dropped_fragmented` and continues; reassembly is deferred (see **Deferred** above).
+
+### ARP cache bounds
+
+- [`ARP_CACHE_CAPACITY`](../network/src/arp.rs) = 16 entries; TTL in monotonic ticks via `ArpCache::new(ttl_ticks)`.
+- On insert when full, the **oldest-inserted** entry (minimum `inserted_at`) is evicted.
+- At most [`MAX_PENDING_ARP_REQUESTS`](../network/src/arp.rs) = 4 distinct unresolved IPs may have outstanding ARP requests; further lookups fail until cache space frees.
+- `ArpCache::clear()` and `L3Stack::reset()` drop cache and pending state.
+
+### `L3Stack` API
+
+- `poll(now) -> Result<Option<Inbound>, NetworkError>` — one RX frame; handles ARP for our IP, ICMP echo to our IP, delivers IPv4 UDP/TCP to upper layers.
+- `send_ipv4(now, dst, protocol, payload_len, writer)` — same /24 only (`SUBNET_PREFIX_LEN` = 24); returns `NetworkError::Unreachable` after emitting a bounded ARP request when MAC is unknown (caller polls and retries).
+- `send_icmp_echo`, `reset()`, `stats()`.
+
+Malformed frames increment `StackStats::dropped_malformed` and are not fatal.
+
+### `Inbound` and offset helpers (#124 / #125)
+
+Upper lanes consume:
+
+- `Inbound::Ipv4(Ipv4Inbound { header, frame, payload_offset, payload_len })` — call `Ipv4Inbound::payload()` for bounded L4 bytes; `header.protocol` is `IpProtocol::UDP` or `TCP`.
+- `Inbound::IcmpEchoReply { id, seq, payload }` for local ping clients (not the socket IPC path).
+
+Layout helpers for writing into a [`FrameBuf`](../network/src/buffer.rs) before transmit:
+
+- `stack::ETHERNET_HEADER_LEN` (14)
+- `stack::STANDARD_IPV4_HEADER_LEN` (20)
+- `stack::l3_payload_offset()` → 34 (Ethernet + fixed IPv4 header)
+
+UDP/TCP modules should write L4 starting at `l3_payload_offset()` after the stack fills L2/L3 headers, or build on received `Ipv4Inbound::payload()`.
+
+### Pseudo-header checksum (#124 / #125)
+
+```rust
+pub fn pseudo_header_checksum(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    protocol: IpProtocol,
+    payload_len: u16,
+) -> u16
+```
+
+Defined in [`ipv4`](../network/src/ipv4.rs); combine with the L4 checksum per RFC 793/768.
+
+### Teardown
+
+`L3Stack::reset()` clears ARP cache, pending ARP tracking, stack statistics, and invokes `NetworkLink::reset()`.

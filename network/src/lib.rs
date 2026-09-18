@@ -29,6 +29,13 @@ pub mod limits;
 pub mod protocol;
 pub mod session;
 
+pub mod arp;
+pub mod checksum;
+pub mod ethernet;
+pub mod icmp;
+pub mod ipv4;
+pub mod stack;
+
 #[cfg(any(test, feature = "alloc"))]
 pub mod fake;
 
@@ -285,5 +292,31 @@ mod tests {
     fn fixture_constants_self_consistent() {
         assert_eq!(TLS_SERVER_NAME, FIXTURE_HOSTNAME);
         assert_eq!(GUEST_IPV4, super::fixture::GUEST_SOCKET.addr);
+    }
+
+    /// Deterministic LCG parser fuzz: no panic on random lengths 0..=1514.
+    #[test]
+    fn parsers_never_panic_on_random_slices() {
+        use super::arp::ArpPacket;
+        use super::ethernet::EthernetHeader;
+        use super::icmp::IcmpMessage;
+        use super::ipv4::Ipv4Header;
+        use crate::limits::MAX_ETHERNET_FRAME_BYTES;
+
+        let mut state = 0xDEAD_BEEF_u32;
+        for _ in 0..512 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let len = (state as usize) % (MAX_ETHERNET_FRAME_BYTES + 1);
+            let mut buf = [0u8; MAX_ETHERNET_FRAME_BYTES];
+            for byte in buf.iter_mut().take(len) {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 16) as u8;
+            }
+            let slice = &buf[..len];
+            let _ = EthernetHeader::parse(slice);
+            let _ = ArpPacket::parse(slice);
+            let _ = Ipv4Header::parse(slice);
+            let _ = IcmpMessage::parse(slice);
+        }
     }
 }
