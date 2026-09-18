@@ -126,6 +126,7 @@ $AllTests = [ordered]@{
     "test-m6-capabilities"      = @{ Aliases = @("m6-capabilities", "m6.8"); Description = "M6.8 capability convergence acceptance (object, delegation, revocation, process control, audit)"; Role = "Constituent" }
     "test-m7-net-device"        = @{ Aliases = @("m7-net-device", "m7.2"); Description = "M7.2 VirtIO-net device-lane QEMU acceptance"; Role = "Constituent" }
     "test-m7-net-caps"          = @{ Aliases = @("m7-net-caps", "m7.7"); Description = "M7.7 network capability broker and attribution acceptance"; Role = "Constituent" }
+    "test-m7-dns"               = @{ Aliases = @("m7-dns", "m7.5"); Description = "M7.5 DNS resolver QEMU acceptance"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {

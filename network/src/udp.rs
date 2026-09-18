@@ -499,6 +499,38 @@ pub struct UdpTransport<L: NetworkLink> {
 }
 
 impl<L: NetworkLink> UdpTransport<L> {
+    /// Initializes transport fields at `slot` without a stack-sized [`Self`].
+    ///
+    /// # Safety
+    ///
+    /// `slot` must point to valid storage for [`UdpTransport`].
+    pub unsafe fn init_in_place(slot: *mut Self, stack: L3Stack<L>, generation: SessionGeneration) {
+        unsafe {
+            core::ptr::write(&mut (*slot).stack, stack);
+            (*slot).table.init_in_place(generation);
+            core::ptr::write(&mut (*slot).stats, UdpStats::default());
+        }
+    }
+
+    /// Heap-backed transport for host tests (avoids multi-megabyte stack frames).
+    #[cfg(feature = "alloc")]
+    pub fn alloc_boxed(
+        stack: L3Stack<L>,
+        generation: SessionGeneration,
+    ) -> alloc::boxed::Box<Self> {
+        let layout = core::alloc::Layout::new::<Self>();
+        let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) as *mut Self };
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        unsafe {
+            core::ptr::write(&mut (*ptr).stack, stack);
+            (*ptr).table.init_in_place(generation);
+            (*ptr).stats = UdpStats::default();
+            alloc::boxed::Box::from_raw(ptr)
+        }
+    }
+
     /// Creates transport with a fresh endpoint table for `generation`.
     pub fn new(stack: L3Stack<L>, generation: SessionGeneration) -> Self {
         Self {

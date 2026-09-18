@@ -40,6 +40,7 @@ const M6_CAPABILITIES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(180);
 const M7_NET_CAPS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M7_NET_DEVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+const M7_DNS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M5_CRASH_MATRIX_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_PERSISTENCE_BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_CRASH_RECOVERY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -306,6 +307,13 @@ const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[BLK ] read lba=",
     "[M5.2] PASS",
 ];
+const M7_DNS_ACCEPTANCE_MARKERS: [&str; 5] = [
+    "[DNS ] virtio ready mac=",
+    "[DNS ] resolved name=m7.fixture.test addr=10.77.0.50 ttl=300",
+    "[DNS ] cache hit name=m7.fixture.test",
+    "[DNS ] nxdomain name=nope.fixture.test",
+    "[M7.5] PASS",
+];
 const M7_NET_DEVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[NET ] virtio ready mac=",
     "[NET ] tx ok len=",
@@ -460,6 +468,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM5 => run_m5_acceptance(),
         ParsedCommand::TestM5Block => run_m5_block_acceptance(),
         ParsedCommand::TestM7NetDevice => run_m7_net_device_acceptance(),
+        ParsedCommand::TestM7Dns => run_m7_dns_acceptance(),
         ParsedCommand::TestM5Storage => run_m5_storage_acceptance(),
         ParsedCommand::TestM5CrashMatrix => run_m5_crash_matrix(),
         ParsedCommand::TestM5Persistence => run_m5_persistence_acceptance(&trailing_args),
@@ -526,6 +535,24 @@ fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
             &M7_NET_DEVICE_ACCEPTANCE_MARKERS,
             M7_NET_DEVICE_ACCEPTANCE_TIMEOUT,
         )),
+        VmLaunchConfig {
+            m5_data_disk: None,
+            reset_ovmf_vars: false,
+            m7_fixture_port: Some(port),
+        },
+    );
+    peer.shutdown();
+    run_result
+}
+
+fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
+    let peer = M7FixturePeer::start().map_err(XtaskError::Io)?;
+    let port = peer.port();
+    let run_result = run_vm_inner_with_config(
+        false,
+        false,
+        &["m7-dns-self-test"],
+        Some((&M7_DNS_ACCEPTANCE_MARKERS, M7_DNS_ACCEPTANCE_TIMEOUT)),
         VmLaunchConfig {
             m5_data_disk: None,
             reset_ovmf_vars: false,
@@ -1876,6 +1903,7 @@ fn print_help() {
     println!("  test-m5       M5 milestone gate: block, storage, persistence, and crash-recovery acceptance");
     println!("  test-m5-block Build the M5.2 virtio-block kernel, run QEMU, and validate ordered markers");
     println!("  test-m7-net-device Build the M7.2 virtio-net kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
+    println!("  test-m7-dns         Build the M7.5 DNS resolver kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
     println!("  test-m5-persistence Two-boot persistent-disk M5 acceptance using the production storage path");
@@ -1940,6 +1968,7 @@ enum ParsedCommand {
     TestM5,
     TestM5Block,
     TestM7NetDevice,
+    TestM7Dns,
     TestM5Storage,
     TestM5CrashMatrix,
     TestM5Persistence,
@@ -1987,6 +2016,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m5-block" => ParsedCommand::TestM5Block,
         Some(cmd) if cmd == "test-m7-net-device" || cmd == "m7-net-device" || cmd == "m7.2" => {
             ParsedCommand::TestM7NetDevice
+        }
+        Some(cmd) if cmd == "test-m7-dns" || cmd == "m7-dns" || cmd == "m7.5" => {
+            ParsedCommand::TestM7Dns
         }
         Some(cmd) if cmd == "test-m5-storage" => ParsedCommand::TestM5Storage,
         Some(cmd) if cmd == "test-m5-crash-matrix" => ParsedCommand::TestM5CrashMatrix,
@@ -2231,6 +2263,14 @@ mod tests {
         assert_eq!(
             parse_command(Some("test-m7-net-device".as_ref())),
             ParsedCommand::TestM7NetDevice
+        );
+        assert_eq!(
+            parse_command(Some("test-m7-dns".as_ref())),
+            ParsedCommand::TestM7Dns
+        );
+        assert_eq!(
+            parse_command(Some("m7.5".as_ref())),
+            ParsedCommand::TestM7Dns
         );
         assert_eq!(
             parse_command(Some("test-m5-disk-harness".as_ref())),
