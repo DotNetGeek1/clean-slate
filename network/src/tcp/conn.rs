@@ -189,12 +189,17 @@ impl TcpConnection {
             return TimerAction::Failed(err);
         }
         if self.state == TcpState::TimeWait {
-            if let Some(dl) = self.time_wait_deadline {
-                if now >= dl {
-                    self.state = TcpState::Closed;
-                    self.release_buffers();
-                    return TimerAction::Closed;
-                }
+            // Every path into TIME-WAIT must eventually free the slot. Some
+            // transitions (e.g. CLOSING -> TIME-WAIT, or the ACK of our FIN in
+            // FIN-WAIT-1) happen inside `on_segment` without a timestamp, so arm
+            // the deadline here on first observation if it is still unset.
+            let deadline = *self
+                .time_wait_deadline
+                .get_or_insert(now + TCP_TIME_WAIT_TICKS);
+            if now >= deadline {
+                self.state = TcpState::Closed;
+                self.release_buffers();
+                return TimerAction::Closed;
             }
         }
         if self.state == TcpState::SynSent {
@@ -259,15 +264,16 @@ impl TcpConnection {
         }
 
         if seg.flags.contains(TcpFlags::RST) {
-            if seq_acceptable(seg.seq, self.rcv_nxt)
-                || matches!(
-                    self.state,
-                    TcpState::Established
-                        | TcpState::SynSent
-                        | TcpState::FinWait1
-                        | TcpState::FinWait2
-                )
-            {
+            // RFC 793 §3.4: in SYN-SENT a RST is acceptable only if it ACKs our
+            // SYN; in every other synchronized state it must carry the exact
+            // next expected sequence number. Anything else is a blind RST and
+            // is dropped, so an off-path peer cannot tear down sessions.
+            let acceptable = if self.state == TcpState::SynSent {
+                seg.flags.contains(TcpFlags::ACK) && seg.ack == self.iss.wrapping_add(1)
+            } else {
+                seq_acceptable(seg.seq, self.rcv_nxt)
+            };
+            if acceptable {
                 stats.resets_received += 1;
                 self.state = TcpState::Reset;
                 self.release_buffers();
