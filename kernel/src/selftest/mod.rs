@@ -48,9 +48,40 @@ pub(crate) mod m5_block;
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
 ))]
 pub(crate) mod m5_storage;
+#[cfg(feature = "m6-audit-self-test")]
+pub(crate) mod m6_audit;
+#[cfg(feature = "m6-capabilities-self-test")]
+pub(crate) mod m6_capabilities;
+#[cfg(feature = "m6-delegation-self-test")]
+pub(crate) mod m6_delegation;
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+pub(crate) mod m6_fixture;
+#[cfg(feature = "m6-fixture-smoke-self-test")]
+pub(crate) mod m6_fixture_smoke;
+#[cfg(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test"))]
+pub(crate) mod m6_object;
+#[cfg(feature = "m6-process-control-self-test")]
+pub(crate) mod m6_process_control;
+#[cfg(feature = "m6-revocation-self-test")]
+pub(crate) mod m6_revocation;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",

@@ -26,6 +26,13 @@ const M4_CRASH_SERVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M4_SUPERVISOR_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_RECOVERY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M5_STORAGE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M6_FIXTURE_SMOKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
+const M6_OBJECT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
+const M6_PROCESS_CONTROL_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
+const M6_DELEGATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
+const M6_REVOCATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
+const M6_AUDIT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
+const M6_CAPABILITIES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(180);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M5_CRASH_MATRIX_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_PERSISTENCE_BOOT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -180,6 +187,97 @@ const M5_STORAGE_ACCEPTANCE_MARKERS: [&str; 16] = [
     "[STOR] malformed media rejected",
     "[M5.7] PASS",
 ];
+const M6_OBJECT_ACCEPTANCE_MARKERS: [&str; 8] = [
+    "[CAP ] object grant holder=",
+    "[CAP ] object allowed holder=",
+    "[CAP ] object queue reclaimed holder=",
+    "[CAP ] deny holder=",
+    "reason=missing-right",
+    "[CAP ] deny holder=",
+    "reason=no-authority",
+    "[M6.3] PASS",
+];
+const M6_DELEGATION_ACCEPTANCE_MARKERS: [&str; 8] = [
+    "[CAP ] delegate denied from=",
+    "reason=rights-widening",
+    "[CAP ] delegate from=",
+    "rights=read",
+    "depth=1",
+    "[CAP ] delegate denied from=",
+    "reason=missing-right",
+    "[M6.5] PASS",
+];
+const M6_AUDIT_ACCEPTANCE_MARKERS: [&str; 5] = [
+    "[AUD ] seq=",
+    "outcome=allowed",
+    "[AUD ] seq=",
+    "outcome=",
+    "[M6.7] PASS",
+];
+const M6_REVOCATION_ACCEPTANCE_MARKERS: [&str; 7] = [
+    "[CAP ] probe allowed holder=",
+    "[CAP ] revoke branch=",
+    "[CAP ] stale denied holder=",
+    "[CAP ] revoke denied actor=",
+    "[PROC] teardown pid=",
+    "[TEST] unrelated workload progress=",
+    "[M6.6] PASS",
+];
+const M6_CAPABILITIES_ACCEPTANCE_MARKERS: [&str; 31] = [
+    "[STOR] object-service started pid=",
+    "[CAP ] object grant holder=3 object=7",
+    "[TEST] unrelated workload progress=1",
+    "[CAP ] process-control denied holder=6 target=? op=terminate reason=invalid-handle",
+    "[CAP ] object allowed holder=3 object=7 op=write",
+    "[CAP ] deny holder=5 object=7 op=read reason=no-authority",
+    "[CAP ] object allowed holder=3 object=7 op=read",
+    "[CAP ] delegate from=3 to=4",
+    "rights=read",
+    "depth=1",
+    "[CAP ] object allowed holder=4 object=7 op=read",
+    "[CAP ] deny holder=4 object=7 op=write reason=missing-right",
+    "[CAP ] process-control allowed holder=7 target=2 op=observe",
+    "[CAP ] process-control denied holder=7 target=2 op=terminate reason=missing-right",
+    "[CAP ] process-control allowed holder=7 target=2 op=terminate",
+    "[PROC] teardown pid=",
+    "[CAP ] process-control denied holder=7 target=? op=observe reason=stale",
+    "[TEST] unrelated workload progress=3",
+    "[CAP ] revoke branch=",
+    "[CAP ] stale denied holder=4 reason=revoked",
+    "[CAP ] object allowed holder=3 object=7 op=read",
+    "[AUD ] seq=",
+    "actor=8 class=audit",
+    "outcome=allowed",
+    "[AUD ] seq=",
+    "actor=9 class=audit",
+    "outcome=invalid-handle",
+    "[AUD ] seq=",
+    "actor=9 class=audit",
+    "outcome=wrong-holder",
+    "[M6.8] PASS",
+];
+const M6_PROCESS_CONTROL_ACCEPTANCE_MARKERS: [&str; 11] = [
+    "[CAP ] process-control grant holder=",
+    "[CAP ] process-control allowed holder=",
+    "op=observe",
+    "[CAP ] process-control denied holder=",
+    "reason=missing-right",
+    "[CAP ] process-control allowed holder=",
+    "op=terminate",
+    "[PROC] teardown pid=",
+    "[CAP ] process-control denied holder=",
+    "reason=stale",
+    "[M6.4] PASS",
+];
+const M6_FIXTURE_SMOKE_ACCEPTANCE_MARKERS: [&str; 7] = [
+    "[M6.F] fixture spawned pid=",
+    "[M6.F] fixture spawned pid=",
+    "[M6.F] fixture spawned pid=",
+    "[M6.F] report pid=",
+    "[M6.F] report pid=",
+    "[PROC] fault pid=",
+    "[M6.F] PASS",
+];
 const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[VIRT] block device found",
     "[BLK ] virtio-block ready blocks=",
@@ -274,6 +372,24 @@ const M5_MILESTONE_STEPS: [M5MilestoneStep; 5] = [
         run_m5_crash_recovery_acceptance_default,
     ),
 ];
+type M6MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
+const M6_MILESTONE_STEPS: [M6MilestoneStep; 9] = [
+    (
+        "clean-slate-capability (host)",
+        run_m6_capability_crate_host_tests,
+    ),
+    (
+        "clean-slate-kernel capability (host)",
+        run_m6_kernel_capability_host_tests,
+    ),
+    ("test-m6-fixture-smoke", run_m6_fixture_smoke_acceptance),
+    ("test-m6-object", run_m6_object_acceptance),
+    ("test-m6-process-control", run_m6_process_control_acceptance),
+    ("test-m6-delegation", run_m6_delegation_acceptance),
+    ("test-m6-revocation", run_m6_revocation_acceptance),
+    ("test-m6-audit", run_m6_audit_acceptance),
+    ("test-m6-capabilities", run_m6_capabilities_acceptance),
+];
 
 fn main() -> ExitCode {
     match run(env::args_os()) {
@@ -315,6 +431,14 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM5Persistence => run_m5_persistence_acceptance(&trailing_args),
         ParsedCommand::TestM5CrashRecovery => run_m5_crash_recovery_acceptance(&trailing_args),
         ParsedCommand::TestM5DiskHarness => run_m5_disk_harness(&trailing_args),
+        ParsedCommand::TestM6FixtureSmoke => run_m6_fixture_smoke_acceptance(),
+        ParsedCommand::TestM6Object => run_m6_object_acceptance(),
+        ParsedCommand::TestM6ProcessControl => run_m6_process_control_acceptance(),
+        ParsedCommand::TestM6Delegation => run_m6_delegation_acceptance(),
+        ParsedCommand::TestM6Revocation => run_m6_revocation_acceptance(),
+        ParsedCommand::TestM6Audit => run_m6_audit_acceptance(),
+        ParsedCommand::TestM6Capabilities => run_m6_capabilities_acceptance(),
+        ParsedCommand::TestM6 => run_m6_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -733,6 +857,18 @@ fn run_m4_acceptance() -> Result<(), XtaskError> {
     Ok(())
 }
 
+fn run_cargo_package_tests(package: &str, filter: &[&str]) -> Result<(), XtaskError> {
+    let mut test = Command::new("cargo");
+    test.current_dir(workspace_root())
+        .arg("test")
+        .arg("-p")
+        .arg(package);
+    for arg in filter {
+        test.arg(arg);
+    }
+    run_command(&mut test)
+}
+
 fn run_m5_crash_matrix() -> Result<(), XtaskError> {
     let mut test = Command::new("cargo");
     test.current_dir(workspace_root())
@@ -743,6 +879,18 @@ fn run_m5_crash_matrix() -> Result<(), XtaskError> {
         .arg("crash_consistency");
     run_timed_command(&mut test, M5_CRASH_MATRIX_TIMEOUT)?;
     println!("[M5.6] PASS (host crash-consistency matrix)");
+    Ok(())
+}
+
+fn run_m6_capability_crate_host_tests() -> Result<(), XtaskError> {
+    run_cargo_package_tests("clean-slate-capability", &[])?;
+    println!("[M6.1] PASS (host capability contract tests)");
+    Ok(())
+}
+
+fn run_m6_kernel_capability_host_tests() -> Result<(), XtaskError> {
+    run_cargo_package_tests("clean-slate-kernel", &["capability"])?;
+    println!("[M6.2] PASS (host kernel capability module tests)");
     Ok(())
 }
 
@@ -761,6 +909,106 @@ fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
     )
 }
 
+fn run_m6_fixture_smoke_acceptance() -> Result<(), XtaskError> {
+    run_m6_constituent(
+        "m6-fixture-smoke-self-test",
+        &M6_FIXTURE_SMOKE_ACCEPTANCE_MARKERS,
+        M6_FIXTURE_SMOKE_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+fn run_m6_object_acceptance() -> Result<(), XtaskError> {
+    reset_m5_data_disk_image()?;
+    build_m6_fixture_userspace(true)?;
+    build_storage_userspace(true)?;
+    run_vm_inner_with_config(
+        false,
+        false,
+        &["m6-object-self-test"],
+        Some((&M6_OBJECT_ACCEPTANCE_MARKERS, M6_OBJECT_ACCEPTANCE_TIMEOUT)),
+        m5_storage_vm_config(),
+    )
+}
+
+fn run_m6_process_control_acceptance() -> Result<(), XtaskError> {
+    run_m6_constituent(
+        "m6-process-control-self-test",
+        &M6_PROCESS_CONTROL_ACCEPTANCE_MARKERS,
+        M6_PROCESS_CONTROL_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+fn run_m6_delegation_acceptance() -> Result<(), XtaskError> {
+    run_m6_constituent(
+        "m6-delegation-self-test",
+        &M6_DELEGATION_ACCEPTANCE_MARKERS,
+        M6_DELEGATION_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+fn run_m6_revocation_acceptance() -> Result<(), XtaskError> {
+    run_m6_constituent(
+        "m6-revocation-self-test",
+        &M6_REVOCATION_ACCEPTANCE_MARKERS,
+        M6_REVOCATION_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+fn run_m6_audit_acceptance() -> Result<(), XtaskError> {
+    run_m6_constituent(
+        "m6-audit-self-test",
+        &M6_AUDIT_ACCEPTANCE_MARKERS,
+        M6_AUDIT_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+fn run_m6_capabilities_acceptance() -> Result<(), XtaskError> {
+    reset_m5_data_disk_image()?;
+    build_m6_fixture_userspace(true)?;
+    build_storage_userspace(true)?;
+    run_vm_inner_with_config(
+        false,
+        false,
+        &["m6-capabilities-self-test"],
+        Some((
+            &M6_CAPABILITIES_ACCEPTANCE_MARKERS,
+            M6_CAPABILITIES_ACCEPTANCE_TIMEOUT,
+        )),
+        m5_storage_vm_config(),
+    )
+}
+
+fn run_m6_constituent(
+    feature: &str,
+    markers: &[&str],
+    timeout: Duration,
+) -> Result<(), XtaskError> {
+    build_m6_fixture_userspace(true)?;
+    build_storage_userspace(true)?;
+    run_vm_inner(false, false, &[feature], Some((markers, timeout)))
+}
+
+fn build_m6_fixture_userspace(release: bool) -> Result<(), XtaskError> {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build")
+        .arg("-p")
+        .arg("clean-slate-supervisor")
+        .arg("--bin")
+        .arg("clean-slate-m6-fixture-userspace")
+        .arg("--features")
+        .arg("userspace")
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,compiler_builtins");
+    if release {
+        cmd.arg("--release");
+    }
+    cmd.env("RUSTC_BOOTSTRAP", "1");
+    run_command(&mut cmd)?;
+    Ok(())
+}
+
 fn run_m5_acceptance() -> Result<(), XtaskError> {
     let total = M5_MILESTONE_STEPS.len();
     for (index, (name, step)) in M5_MILESTONE_STEPS.iter().enumerate() {
@@ -768,6 +1016,20 @@ fn run_m5_acceptance() -> Result<(), XtaskError> {
         step()?;
     }
     println!("[M5  ] PASS");
+    Ok(())
+}
+
+/// M6 milestone gate: host capability prerequisites, then every M6 QEMU
+/// constituent in [`M6_MILESTONE_STEPS`] order. The first failure propagates
+/// and no PASS is printed; `[M6  ] PASS` is emitted host-side only after all
+/// steps succeed.
+fn run_m6_acceptance() -> Result<(), XtaskError> {
+    let total = M6_MILESTONE_STEPS.len();
+    for (index, (name, step)) in M6_MILESTONE_STEPS.iter().enumerate() {
+        println!("[M6  ] step {}/{} {}", index + 1, total, name);
+        step()?;
+    }
+    println!("[M6  ] PASS");
     Ok(())
 }
 
@@ -1543,6 +1805,22 @@ fn print_help() {
     println!(
         "                 Uses M1 markers only; does not assert milestone-level storage behavior"
     );
+    println!(
+        "  test-m6       M6 milestone gate: capability host tests plus fixture smoke and QEMU constituents"
+    );
+    println!("  test-m6-fixture-smoke Build M6 fixture/storage images and validate harness smoke markers");
+    println!(
+        "  test-m6-object Build M6 object-capability constituent boot and validate ordered markers"
+    );
+    println!("  test-m6-process-control Build M6 process-control constituent boot and validate ordered markers");
+    println!("  test-m6-delegation Build M6 delegation/attenuation constituent boot and validate ordered markers");
+    println!("  test-m6-revocation Build M6 revocation/teardown constituent boot and validate ordered markers");
+    println!(
+        "  test-m6-audit Build M6 capability audit constituent boot and validate ordered markers"
+    );
+    println!(
+        "  test-m6-capabilities Build M6.8 capability convergence boot and validate ordered markers"
+    );
     println!("  m5-disk-create Create deterministic M5 data disk if missing (preserve existing)");
     println!("  m5-disk-reset Recreate deterministic blank M5 data disk");
     println!("  m5-disk-inspect Print M5 data disk path and size");
@@ -1583,6 +1861,14 @@ enum ParsedCommand {
     TestM5Persistence,
     TestM5CrashRecovery,
     TestM5DiskHarness,
+    TestM6FixtureSmoke,
+    TestM6Object,
+    TestM6ProcessControl,
+    TestM6Delegation,
+    TestM6Revocation,
+    TestM6Audit,
+    TestM6Capabilities,
+    TestM6,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -1619,6 +1905,18 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m5-persistence" => ParsedCommand::TestM5Persistence,
         Some(cmd) if cmd == "test-m5-crash-recovery" => ParsedCommand::TestM5CrashRecovery,
         Some(cmd) if cmd == "test-m5-disk-harness" => ParsedCommand::TestM5DiskHarness,
+        Some(cmd) if cmd == "test-m6-fixture-smoke" => ParsedCommand::TestM6FixtureSmoke,
+        Some(cmd) if cmd == "test-m6-object" => ParsedCommand::TestM6Object,
+        Some(cmd) if cmd == "test-m6-process-control" => ParsedCommand::TestM6ProcessControl,
+        Some(cmd) if cmd == "test-m6-delegation" => ParsedCommand::TestM6Delegation,
+        Some(cmd) if cmd == "test-m6-revocation" || cmd == "m6-revocation" || cmd == "m6.6" => {
+            ParsedCommand::TestM6Revocation
+        }
+        Some(cmd) if cmd == "test-m6-audit" => ParsedCommand::TestM6Audit,
+        Some(cmd) if cmd == "test-m6-capabilities" || cmd == "m6-capabilities" || cmd == "m6.8" => {
+            ParsedCommand::TestM6Capabilities
+        }
+        Some(cmd) if cmd == "test-m6" || cmd == "m6" || cmd == "m6.9" => ParsedCommand::TestM6,
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
         Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,
@@ -1803,6 +2101,11 @@ mod tests {
             ParsedCommand::TestM5
         );
         assert_eq!(
+            parse_command(Some("test-m6".as_ref())),
+            ParsedCommand::TestM6
+        );
+        assert_eq!(parse_command(Some("m6.9".as_ref())), ParsedCommand::TestM6);
+        assert_eq!(
             parse_command(Some("test-m5-storage".as_ref())),
             ParsedCommand::TestM5Storage
         );
@@ -1911,6 +2214,15 @@ mod tests {
     }
 
     #[test]
+    fn marker_tracker_requires_later_occurrence_for_repeated_markers() {
+        let markers = &["alpha", "beta", "alpha", "gamma"];
+        let output = "alpha\nbeta\nmiddle\nalpha tail\ngamma\n";
+        assert!(validate_output_markers(output, markers).is_ok());
+        let too_early = "alpha\nalpha\nbeta\ngamma\n";
+        assert!(validate_output_markers(too_early, markers).is_err());
+    }
+
+    #[test]
     fn marker_tracker_detects_ordered_markers_incrementally() {
         let mut tracker = MarkerTracker::new(&M2_ACCEPTANCE_MARKERS);
         assert!(!tracker.consume("[BOOT] UEFI memory map acquired\n[TIME] timer initialized\n"));
@@ -2013,6 +2325,25 @@ mod tests {
                 "test-m5-crash-matrix",
                 "test-m5-persistence",
                 "test-m5-crash-recovery",
+            ]
+        );
+    }
+
+    #[test]
+    fn m6_milestone_steps_have_deterministic_order() {
+        let names: Vec<&str> = M6_MILESTONE_STEPS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "clean-slate-capability (host)",
+                "clean-slate-kernel capability (host)",
+                "test-m6-fixture-smoke",
+                "test-m6-object",
+                "test-m6-process-control",
+                "test-m6-delegation",
+                "test-m6-revocation",
+                "test-m6-audit",
+                "test-m6-capabilities",
             ]
         );
     }

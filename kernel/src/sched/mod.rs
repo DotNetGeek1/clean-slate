@@ -10,9 +10,33 @@ use crate::arch::x86_64::context_switch::TASK_STACK_SIZE;
 use crate::process::KERNEL_PROCESS_ID;
 use crate::sync::global_cell::GlobalCell;
 
-#[cfg(feature = "m4-recovery-self-test")]
+#[cfg(feature = "m6-revocation-self-test")]
+const TASK_COUNT: usize = 8;
+#[cfg(feature = "m6-capabilities-self-test")]
+const TASK_COUNT: usize = 9;
+#[cfg(all(
+    not(feature = "m6-revocation-self-test"),
+    not(feature = "m6-capabilities-self-test"),
+    any(
+        feature = "m4-recovery-self-test",
+        feature = "m6-fixture-smoke-self-test",
+        feature = "m6-process-control-self-test",
+        feature = "m6-delegation-self-test",
+        feature = "m6-object-self-test",
+        feature = "m6-audit-self-test"
+    )
+))]
 const TASK_COUNT: usize = 6;
-#[cfg(not(feature = "m4-recovery-self-test"))]
+#[cfg(not(any(
+    feature = "m4-recovery-self-test",
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test"
+)))]
 const TASK_COUNT: usize = 2;
 pub(super) const TASK_REQUIRED_PREEMPTIONS: u64 = 2;
 const TASK_PROGRESS_CHUNK: u64 = 4_096;

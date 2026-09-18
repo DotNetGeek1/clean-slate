@@ -25,11 +25,18 @@ name = "clean-slate-supervisor-recovery-userspace"
 path = "src/bin/recovery_userspace.rs"
 required-features = ["userspace"]
 
+[[bin]]
+name = "clean-slate-m6-fixture-userspace"
+path = "src/bin/m6_fixture_userspace.rs"
+required-features = ["userspace"]
+
 [features]
 default = []
 userspace = []
 
 [dependencies]
+clean-slate-capability = { path = "../capability" }
+clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 
 [lints]

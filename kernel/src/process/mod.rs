@@ -4,14 +4,24 @@
 
 pub(crate) mod domain;
 pub(crate) mod id_allocator;
+use crate::arch::x86_64::cpu::without_interrupts;
 use crate::mm::address_space::AddressSpaceResourceCounts;
 use crate::mm::address_space::ProcessAddressSpace;
+use crate::sched::scheduler_mut;
 use crate::sched::Thread;
 use crate::sched::ThreadState;
 use crate::sync::global_cell::GlobalCell;
 
 pub(super) const KERNEL_PROCESS_ID: u64 = 0;
+#[cfg(feature = "m6-capabilities-self-test")]
+const PROCESS_REGISTRY_CAPACITY: usize = 12;
+#[cfg(not(feature = "m6-capabilities-self-test"))]
 const PROCESS_REGISTRY_CAPACITY: usize = 8;
+
+/// Trusted userspace process id from the current scheduler thread (never from syscall args).
+pub(crate) fn current_process_id() -> Result<u64, &'static str> {
+    without_interrupts(|| unsafe { scheduler_mut().current_userspace_process_id() })
+}
 
 // Process/thread lifecycle, IPC, and scheduler infrastructure below is only
 // exercised end-to-end by the M3 self-test features today; the normal boot path

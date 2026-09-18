@@ -158,6 +158,12 @@ cargo test -p clean-slate-service-lifecycle
 
 This crate is `no_std` outside unit tests and is the shared contract for supervisor, kernel control, and service fixtures in later M4 issues.
 
+For the M6.1 capability contract (host-tested):
+
+```bash
+cargo test -p clean-slate-capability
+```
+
 For M4.2 kernel lifecycle control (host tests + optional QEMU acceptance):
 
 ```bash
@@ -187,6 +193,81 @@ cargo xtask test-m5-storage
 ```
 
 `test-m5-storage` now resets the M5 data disk to blank media for each run, then requires capability-gated userspace storage handshake plus store format/write/commit/remount/overwrite and malformed-media rejection markers before `[M5.7] PASS`. The storage path keeps the transport-neutral block contract while preserving explicit unauthorized denial for unrelated userspace callers.
+
+For M6.3 object-capability acceptance (constituent QEMU boot):
+
+```bash
+cargo test -p clean-slate-service-fixtures object_capability
+cargo test -p clean-slate-kernel capability::object
+cargo xtask test-m6-object
+```
+
+`test-m6-object` resets the M5 data disk, builds storage and M6 fixture userspace images, and requires ordered `[CAP ] object grant`, `[CAP ] object allowed`, `[CAP ] deny` (`missing-right` and `no-authority`), then `[M6.3] PASS` (90s timeout). Aliases: `m6-object`, `m6.3`.
+
+For M6.4 process-control acceptance (constituent QEMU boot):
+
+```bash
+cargo test -p clean-slate-kernel capability::process_control
+cargo xtask test-m6-process-control
+```
+
+`test-m6-process-control` builds the M6 fixture userspace image and requires ordered `[CAP ] process-control grant`, allowed/denied decisions (`missing-right`, `op=observe`, `op=terminate`), production `[PROC] teardown pid=`, post-teardown `stale-target`, then `[M6.4] PASS` (90s timeout). Aliases: `m6-process-control`, `m6.4`.
+
+For M6.5 delegation/attenuation acceptance (constituent QEMU boot):
+
+```bash
+cargo test -p clean-slate-capability delegation
+cargo test -p clean-slate-kernel capability::delegation
+cargo xtask test-m6-delegation
+```
+
+`test-m6-delegation` builds the M6 fixture userspace image and requires ordered `[CAP ] delegate denied` (`rights-widening`), successful `[CAP ] delegate` (`rights=read`, `depth=1`), reader re-delegate denied (`missing-right`), then `[M6.5] PASS` (90s timeout). Aliases: `m6-delegation`, `m6.5`.
+
+For M6.6 revocation and teardown acceptance (constituent QEMU boot):
+
+```bash
+cargo test -p clean-slate-capability revocation
+cargo test -p clean-slate-kernel capability
+cargo xtask test-m6-revocation
+```
+
+`test-m6-revocation` builds the M6 fixture userspace image and requires ordered `[CAP ] probe allowed holder=`, `[CAP ] revoke branch=`, `[CAP ] stale denied holder=`, `[CAP ] revoke denied actor=`, `[PROC] teardown pid=`, `[TEST] unrelated workload progress=`, then `[M6.6] PASS` (120s timeout). Aliases: `m6-revocation`, `m6.6`.
+
+For M6.7 capability audit acceptance (constituent QEMU boot):
+
+```bash
+cargo test -p clean-slate-capability audit_log
+cargo test -p clean-slate-kernel capability
+cargo xtask test-m6-audit
+```
+
+`test-m6-audit` builds the M6 fixture userspace image and requires ordered `[AUD ] seq=` … `outcome=allowed`, `[AUD ] seq=` … `outcome=` (a denial such as `invalid-handle` or `wrong-holder`), then `[M6.7] PASS` (90s timeout). Aliases: `m6-audit`, `m6.7`.
+
+For M6.8 capability convergence acceptance (constituent QEMU boot):
+
+```bash
+cargo xtask test-m6-capabilities
+```
+
+`test-m6-capabilities` resets the M5 data disk, builds storage and M6 fixture userspace images, and requires ordered markers through object, delegation, revocation, process-control, and audit attribution phases (including serial `[AUD ]` lines for auditor pid 8 `outcome=allowed` and intruder pid 9 denials before `[M6.8] PASS`; the intruder fixture is spawned only after the auditor reports). Timeout: 180s. Aliases: `m6-capabilities`, `m6.8`.
+
+For the aggregate M6 milestone gate (M6.9):
+
+```bash
+cargo xtask test-m6
+```
+
+The aggregate runs host prerequisites first (`cargo test -p clean-slate-capability`, then `cargo test -p clean-slate-kernel capability`), then orchestrates QEMU constituents in order: `test-m6-fixture-smoke` (`[M6.F] PASS`), `test-m6-object` (`[M6.3] PASS`), `test-m6-process-control` (`[M6.4] PASS`), `test-m6-delegation` (`[M6.5] PASS`), `test-m6-revocation` (`[M6.6] PASS`), `test-m6-audit` (`[M6.7] PASS`), and finally `test-m6-capabilities` (`[M6.8] PASS`). Only after every step succeeds does xtask print `[M6  ] PASS`. Aliases: `m6`, `m6.9`.
+
+When a constituent fails inside the aggregate, xtask stops at the first failing step (the `[M6  ] step N/9 …` line names the phase). Re-run that constituent alone, for example `cargo xtask test-m6-revocation` or `cargo xtask test-m6-capabilities`. Serial output from the last QEMU boot is captured under `target/` as for other xtask acceptance commands (see the failure banner from `scripts/run-tests.ps1`, which points at `target/xtask-test-report.txt` when using the wrapper).
+
+Milestone regression gate (local or before a large M6 change):
+
+```bash
+.\scripts\run-tests.ps1 -Test @("m3","m4","m5","m6")
+```
+
+On Linux/WSL: `./scripts/run-tests.sh m3 m4 m5 m6`. Each name runs the corresponding aggregate only; constituents are not duplicated unless you pass `-Exhaustive` / `--exhaustive`.
 
 M4.4 health/liveness tracking (host-tested, no QEMU) exercises `ServiceHealthTracker` deadline math with explicit tick values — no real-time sleeps:
 
@@ -283,9 +364,9 @@ cargo xtask m5-disk-create
 cargo xtask m5-disk-reset
 ```
 
-On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, `test-m5`, which covers the milestone gates already wired into the aggregate flows without redundantly rerunning constituents. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, `test-m5-crash-recovery`, and `test-m5-disk-harness` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `m5`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, `m5-disk-harness`/`m5-harness`), for example `.\scripts\run-tests.ps1 -Test m5`; `-List` prints the available names.
+On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, `test-m5`, and `test-m6`, which covers the milestone gates already wired into the aggregate flows without redundantly rerunning constituents. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, `test-m5-crash-recovery`, `test-m5-disk-harness`, and each `test-m6-*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `m5`, `m6`/`m6.9`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, `m5-disk-harness`/`m5-harness`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, `m6-capabilities`/`m6.8`), for example `.\scripts\run-tests.ps1 -Test m6`; `-List` prints the available names.
 
-On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m5`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, and `m5-disk-harness`/`m5-harness`). OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive therefore exercises the new M5 crash/persistence constituents with the existing `qemu-system-x86` and `ovmf` package setup from `.github/workflows/pr.yml`.
+On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m6`/`m6.9`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, and `m6-capabilities`/`m6.8`). OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests including `clean-slate-capability`) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive therefore exercises every M3–M6 constituent plus all milestone aggregates with the existing `qemu-system-x86` and `ovmf` package setup from `.github/workflows/pr.yml`.
 
 To launch paused for debugger attach:
 

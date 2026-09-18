@@ -5,6 +5,13 @@ use super::reap_process_record;
 use super::ProcessState;
 use super::KERNEL_PROCESS_ID;
 use crate::arch::x86_64::cpu::without_interrupts;
+use clean_slate_capability::HolderId;
+
+use crate::capability::bootstrap_grant::discard_bootstrap_grants_for_holder;
+use crate::capability::object::{
+    reclaim_object_requests_for_holder, recover_object_queue_for_service_holder_exit,
+};
+use crate::capability::{revoke_for_holder, revoke_for_process_resource};
 use crate::ipc::endpoint_table_mut;
 use crate::ipc::IpcProcessResources;
 use crate::mm::address_space::activate_address_space_root;
@@ -41,6 +48,21 @@ pub(crate) struct DomainTeardownResult {
 }
 
 #[allow(dead_code)]
+/// Counts scheduler/IPC ownership still attributed to `process_id` after teardown.
+pub(crate) fn remaining_owned_resource_count(process_id: u64) -> usize {
+    if unsafe { process_registry_mut().get(process_id) }.is_some() {
+        return usize::MAX;
+    }
+    let thread_resources =
+        without_interrupts(|| unsafe { scheduler_mut().resources_for_process(process_id) });
+    let ipc_resources = unsafe { endpoint_table_mut().resources_for_pid(process_id) };
+    thread_resources.threads
+        + thread_resources.kernel_stacks
+        + thread_resources.runnable_threads
+        + ipc_resources.owned_endpoints
+        + ipc_resources.held_capabilities
+}
+
 pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'static str> {
     let address_space = unsafe {
         process_registry_mut()
@@ -113,6 +135,12 @@ pub(crate) fn teardown_current_process(
     activate_address_space_root(kernel_root_frame);
     let released_ipc: IpcProcessResources =
         unsafe { endpoint_table_mut().teardown_resources_for_pid(process_id)? };
+    let holder = HolderId(process_id);
+    recover_object_queue_for_service_holder_exit(holder);
+    reclaim_object_requests_for_holder(holder);
+    revoke_for_holder(holder);
+    revoke_for_process_resource(process_id);
+    discard_bootstrap_grants_for_holder(holder);
     let reaped_threads: ThreadProcessResources = without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
         let resources = scheduler.resources_for_process(process_id);
@@ -218,6 +246,12 @@ pub(crate) fn teardown_process_by_id(
     let teardown_result = (|| {
         let released_ipc: IpcProcessResources =
             unsafe { endpoint_table_mut().teardown_resources_for_pid(process_id)? };
+        let holder = HolderId(process_id);
+        recover_object_queue_for_service_holder_exit(holder);
+        reclaim_object_requests_for_holder(holder);
+        revoke_for_holder(holder);
+        revoke_for_process_resource(process_id);
+        discard_bootstrap_grants_for_holder(holder);
         let reaped_threads: ThreadProcessResources = without_interrupts(|| unsafe {
             let scheduler = scheduler_mut();
             let resources = scheduler.resources_for_process(process_id);

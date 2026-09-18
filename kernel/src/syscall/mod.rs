@@ -98,6 +98,7 @@ use crate::syscall::validation::maybe_validate_syscall_entry_flags;
 use crate::syscall::validation::syscall_return_rflags_match;
 use crate::syscall::validation::validate_canonical_user_return_state;
 use crate::syscall::validation::validate_sysret_selector_triplet;
+use clean_slate_capability::syscall_abi as cap_abi;
 use clean_slate_service_fixtures::{
     BlockTransportOp, BlockTransportRequest, BlockTransportResponse, BlockTransportStatus,
     BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES, BLOCK_TRANSPORT_REQUEST_BYTES,
@@ -681,6 +682,15 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
         SYSCALL_NR_LIFECYCLE_POLL => handle_syscall_lifecycle_poll(frame),
         SYSCALL_NR_BLOCK_CAPABILITY => handle_syscall_block_capability(frame),
         SYSCALL_NR_BLOCK_REQUEST => handle_syscall_block_request(frame),
+        // M6 capability-controlled services: numbers reserved in clean_slate_capability.
+        cap_abi::SYSCALL_NR_CAP_OBJECT => crate::capability::object::handle_syscall(frame),
+        cap_abi::SYSCALL_NR_CAP_PROCESS_CONTROL => {
+            crate::capability::process_control::handle_syscall(frame)
+        }
+        cap_abi::SYSCALL_NR_CAP_DELEGATE => crate::capability::delegation::handle_syscall(frame),
+        cap_abi::SYSCALL_NR_CAP_REVOKE => crate::capability::revocation::handle_syscall(frame),
+        cap_abi::SYSCALL_NR_CAP_AUDIT_READ => crate::capability::audit::handle_syscall(frame),
+        cap_abi::SYSCALL_NR_CAP_GRANT => crate::capability::bootstrap_grant::handle_syscall(frame),
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 

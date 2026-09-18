@@ -5,7 +5,9 @@
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-capabilities-self-test"
 ))]
 use core::alloc::{GlobalAlloc, Layout};
 #[cfg(any(
@@ -13,7 +15,9 @@ use core::alloc::{GlobalAlloc, Layout};
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-capabilities-self-test"
 ))]
 use core::ptr::null_mut;
 #[cfg(any(
@@ -21,12 +25,15 @@ use core::ptr::null_mut;
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-capabilities-self-test"
 ))]
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 mod arch;
 mod boot;
+mod capability;
 mod device;
 mod diagnostics;
 mod interrupt;
@@ -57,7 +64,9 @@ mod service;
         feature = "m5-persistence-self-test",
         feature = "m5-crash-early-self-test",
         feature = "m5-crash-late-self-test",
-        feature = "m5-crash-recovery-self-test"
+        feature = "m5-crash-recovery-self-test",
+        feature = "m6-object-self-test",
+        feature = "m6-fixture-smoke-self-test"
     ),
     allow(dead_code)
 )]
@@ -73,7 +82,9 @@ pub use diagnostics::serial::{serial_write_fmt, serial_write_line};
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-capabilities-self-test"
 ))]
 struct M5BumpAllocator;
 
@@ -82,7 +93,9 @@ struct M5BumpAllocator;
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-capabilities-self-test"
 ))]
 const M5_HEAP_BYTES: usize = 1024 * 1024;
 #[cfg(any(
@@ -90,7 +103,9 @@ const M5_HEAP_BYTES: usize = 1024 * 1024;
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-capabilities-self-test"
 ))]
 static M5_HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
 #[cfg(any(
@@ -98,7 +113,9 @@ static M5_HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-capabilities-self-test"
 ))]
 #[repr(align(16))]
 struct M5Heap([u8; M5_HEAP_BYTES]);
@@ -107,7 +124,9 @@ struct M5Heap([u8; M5_HEAP_BYTES]);
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-capabilities-self-test"
 ))]
 static mut M5_HEAP: M5Heap = M5Heap([0; M5_HEAP_BYTES]);
 
@@ -116,7 +135,9 @@ static mut M5_HEAP: M5Heap = M5Heap([0; M5_HEAP_BYTES]);
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-capabilities-self-test"
 ))]
 #[global_allocator]
 static M5_ALLOCATOR: M5BumpAllocator = M5BumpAllocator;
@@ -126,7 +147,9 @@ static M5_ALLOCATOR: M5BumpAllocator = M5BumpAllocator;
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-capabilities-self-test"
 ))]
 unsafe impl GlobalAlloc for M5BumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {

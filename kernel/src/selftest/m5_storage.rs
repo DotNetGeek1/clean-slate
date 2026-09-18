@@ -14,7 +14,6 @@
 
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
-use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
@@ -281,7 +280,7 @@ fn current_service(state: &M5StorageSelfTestState) -> ServiceId {
 }
 
 fn current_userspace_pid() -> Result<u64, &'static str> {
-    without_interrupts(|| unsafe { scheduler_mut().current_userspace_process_id() })
+    crate::process::current_process_id()
 }
 
 /// `USER_TEST_VECTOR` handler: a storage-service instance has finished its

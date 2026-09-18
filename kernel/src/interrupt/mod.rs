@@ -31,6 +31,16 @@ use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::interrupt::timer::increment_kernel_ticks;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::paging::current_root_frame_address;
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+use crate::process::current_process_id;
 use crate::process::domain::teardown_current_process;
 use crate::process::process_registry_mut;
 #[cfg(not(any(feature = "m2-timer-self-test", feature = "m3-syscall-self-test")))]
@@ -90,6 +100,26 @@ use crate::selftest::m4_supervisor::handle_userspace_supervisor_entry;
     feature = "m5-crash-recovery-self-test"
 ))]
 use crate::selftest::m5_storage::handle_userspace_storage_entry;
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+use crate::selftest::m6_fixture::handle_fixture_report;
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+use crate::selftest::m6_fixture::is_fixture_pid;
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 #[cfg(feature = "m2-double-fault-self-test")]
@@ -159,6 +189,26 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         };
     }
 
+    #[cfg(any(
+        feature = "m6-object-self-test",
+        feature = "m6-process-control-self-test",
+        feature = "m6-delegation-self-test",
+        feature = "m6-revocation-self-test",
+        feature = "m6-audit-self-test",
+        feature = "m6-capabilities-self-test",
+        feature = "m6-fixture-smoke-self-test"
+    ))]
+    if context.vector as usize == USER_TEST_VECTOR {
+        if let Ok(pid) = current_process_id() {
+            if is_fixture_pid(pid) {
+                let allocator = service_lifecycle_syscall_allocator_mut()
+                    .as_mut()
+                    .unwrap_or_else(|| fatal_kernel_error("fixture report allocator missing"));
+                return handle_fixture_report(allocator);
+            }
+        }
+    }
+
     #[cfg(all(
         any(
             feature = "m5-storage-self-test",
@@ -176,6 +226,11 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
     ))]
     if context.vector as usize == USER_TEST_VECTOR {
         return handle_userspace_storage_entry();
+    }
+
+    #[cfg(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test"))]
+    if context.vector as usize == USER_TEST_VECTOR {
+        fatal_kernel_error("object storage service issued an unexpected phase trap");
     }
 
     #[cfg(feature = "m3-ipc-self-test")]
@@ -383,9 +438,37 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
     #[cfg(feature = "m4-recovery-self-test")]
     observe_recovery_fault_after_containment(pid, maybe_fault_event)
         .unwrap_or_else(|message| fatal_kernel_error(message));
-    teardown
-        .next_stack_pointer
-        .unwrap_or_else(|| fatal_kernel_error("no runnable thread remained after userspace fault"))
+    teardown.next_stack_pointer.unwrap_or_else(|| {
+        #[cfg(feature = "m6-fixture-smoke-self-test")]
+        {
+            crate::selftest::m6_fixture_smoke::maybe_pass_after_fixture_fault(pid);
+        }
+        #[cfg(all(
+            feature = "m6-revocation-self-test",
+            not(feature = "m6-fixture-smoke-self-test")
+        ))]
+        {
+            crate::selftest::m6_revocation::maybe_continue_after_fixture_fault(pid);
+        }
+        #[cfg(all(
+            feature = "m6-object-self-test",
+            not(any(
+                feature = "m6-fixture-smoke-self-test",
+                feature = "m6-revocation-self-test"
+            ))
+        ))]
+        {
+            crate::selftest::m6_object::maybe_continue_after_fixture_fault(pid);
+        }
+        #[cfg(not(any(
+            feature = "m6-fixture-smoke-self-test",
+            feature = "m6-revocation-self-test",
+            feature = "m6-object-self-test"
+        )))]
+        {
+            fatal_kernel_error("no runnable thread remained after userspace fault");
+        }
+    })
 }
 
 fn current_userspace_fault_pid() -> Result<u64, &'static str> {
