@@ -32,5 +32,5 @@ pub use tls_test_peer::{
     load_fixture_server_config, server_config_from_der, TlsPeerCert, TlsPeerFault, TlsTestPeer,
 };
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests;

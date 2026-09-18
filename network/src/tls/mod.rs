@@ -23,6 +23,5 @@ pub use verify::{TlsRng, VALIDATION_TIME_UNIX};
 /// Maximum TLS ciphertext record size (RFC 8446); safe read buffer size for `embedded-tls`.
 pub const TLS_RECORD_BUFFER_BYTES: usize = 16_640;
 
-#[cfg(feature = "tls")]
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc", feature = "tls"))]
 mod tests;
