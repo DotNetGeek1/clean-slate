@@ -1,7 +1,6 @@
 //! TCP segment parse/serialize (MSS-only options on SYN).
 
 use crate::addr::{IpProtocol, Ipv4Addr};
-use crate::checksum::Checksum;
 use crate::ethernet::ParseError;
 use crate::ipv4::pseudo_header_checksum;
 use crate::limits::MAX_L3_PAYLOAD_BYTES;
@@ -97,8 +96,7 @@ pub fn parse(
     zeroed[..header_len].copy_from_slice(hdr);
     zeroed[16] = 0;
     zeroed[17] = 0;
-    let pseudo = pseudo_header_checksum(src_ip, dst_ip, IpProtocol::TCP, bytes.len() as u16);
-    let mut sum = Checksum::new().add_bytes(&pseudo.to_be_bytes());
+    let mut sum = pseudo_header_checksum(src_ip, dst_ip, IpProtocol::TCP, bytes.len() as u16);
     sum = sum.add_bytes(&zeroed[..header_len]);
     let payload = bytes.get(header_len..).ok_or(ParseError::Truncated)?;
     sum = sum.add_bytes(payload);
@@ -211,10 +209,9 @@ pub fn write(
         .ok_or(ParseError::BufferTooSmall)?
         .copy_from_slice(payload);
 
-    let pseudo = pseudo_header_checksum(src_ip, dst_ip, IpProtocol::TCP, total as u16);
-    let mut sum = Checksum::new().add_bytes(&pseudo.to_be_bytes());
-    sum = sum.add_bytes(out.get(0..total).ok_or(ParseError::BufferTooSmall)?);
-    let csum = sum.finish();
+    let csum = pseudo_header_checksum(src_ip, dst_ip, IpProtocol::TCP, total as u16)
+        .add_bytes(out.get(0..total).ok_or(ParseError::BufferTooSmall)?)
+        .finish();
     out[16..18].copy_from_slice(&csum.to_be_bytes());
 
     Ok(total)
@@ -383,11 +380,74 @@ mod tests {
     fn fix_checksum(buf: &mut [u8], total: usize, src: Ipv4Addr, dst: Ipv4Addr) {
         buf[16] = 0;
         buf[17] = 0;
-        let pseudo = pseudo_header_checksum(src, dst, IpProtocol::TCP, total as u16);
-        let mut sum = Checksum::new().add_bytes(&pseudo.to_be_bytes());
-        sum = sum.add_bytes(&buf[..total]);
-        let csum = sum.finish();
+        let csum = pseudo_header_checksum(src, dst, IpProtocol::TCP, total as u16)
+            .add_bytes(&buf[..total])
+            .finish();
         buf[16..18].copy_from_slice(&csum.to_be_bytes());
+    }
+
+    /// Known-answer test against an independently computed RFC 793 checksum.
+    ///
+    /// Guards against the pseudo-header being folded in as an already-inverted
+    /// value, which our own writer/parser pair would not notice but every
+    /// other TCP stack rejects.
+    #[test]
+    fn checksum_matches_rfc793_known_answer() {
+        // 10.77.0.2:50000 -> 10.77.0.1:4001, SYN, seq=0x1000, win=4096, MSS 1460.
+        let src = Ipv4Addr::new([10, 77, 0, 2]);
+        let dst = Ipv4Addr::new([10, 77, 0, 1]);
+        let seg = syn_segment(50000, 4001, 0x1000);
+        let mut buf = [0u8; 64];
+        let n = write(src, dst, &seg, &[], &mut buf).unwrap();
+        assert_eq!(n, 24);
+
+        // Reference: sum 16-bit words of pseudo-header + segment (checksum
+        // field zero), fold carries, invert. Computed here from first
+        // principles rather than via `Checksum`.
+        let mut words: alloc_free_vec::Words = alloc_free_vec::Words::new();
+        words.push_bytes(&[10, 77, 0, 2]);
+        words.push_bytes(&[10, 77, 0, 1]);
+        words.push_bytes(&[0, 6]);
+        words.push_bytes(&24u16.to_be_bytes());
+        let mut seg_bytes = buf;
+        seg_bytes[16] = 0;
+        seg_bytes[17] = 0;
+        words.push_bytes(&seg_bytes[..24]);
+        let mut sum: u32 = words.iter().map(u32::from).sum();
+        while sum > 0xFFFF {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        let expected = !(sum as u16);
+        assert_eq!(u16::from_be_bytes([buf[16], buf[17]]), expected);
+        // And the reference-valid segment must round-trip through our parser.
+        assert!(parse(src, dst, &buf[..n]).is_ok());
+    }
+
+    /// Tiny fixed-capacity word accumulator so the reference stays `no_std`.
+    mod alloc_free_vec {
+        pub struct Words {
+            buf: [u16; 64],
+            len: usize,
+        }
+        impl Words {
+            pub fn new() -> Self {
+                Self {
+                    buf: [0; 64],
+                    len: 0,
+                }
+            }
+            pub fn push_bytes(&mut self, bytes: &[u8]) {
+                for pair in bytes.chunks(2) {
+                    let hi = pair[0];
+                    let lo = pair.get(1).copied().unwrap_or(0);
+                    self.buf[self.len] = u16::from_be_bytes([hi, lo]);
+                    self.len += 1;
+                }
+            }
+            pub fn iter(&self) -> impl Iterator<Item = u16> + '_ {
+                self.buf[..self.len].iter().copied()
+            }
+        }
     }
 
     #[test]

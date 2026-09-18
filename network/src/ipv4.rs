@@ -144,19 +144,24 @@ impl Ipv4Header {
     }
 }
 
-/// IPv4 pseudo-header checksum used by TCP and UDP (RFC 793 / 768).
+/// Starts a transport checksum with the IPv4 pseudo-header (RFC 793 / 768).
+///
+/// Returns the *running* sum so the caller keeps accumulating the transport
+/// header and payload before calling [`Checksum::finish`]. It deliberately
+/// does not return a finished (inverted) value: folding an inverted partial
+/// back into a sum yields a checksum that is self-consistent between our own
+/// writer and parser yet rejected by every other stack.
 pub fn pseudo_header_checksum(
     src: Ipv4Addr,
     dst: Ipv4Addr,
     protocol: IpProtocol,
     payload_len: u16,
-) -> u16 {
-    let mut sum = Checksum::new();
-    sum = sum.add_bytes(&src.octets());
-    sum = sum.add_bytes(&dst.octets());
-    sum = sum.add_bytes(&[0, protocol.get()]);
-    sum = sum.add_bytes(&payload_len.to_be_bytes());
-    sum.finish()
+) -> Checksum {
+    Checksum::new()
+        .add_bytes(&src.octets())
+        .add_bytes(&dst.octets())
+        .add_bytes(&[0, protocol.get()])
+        .add_bytes(&payload_len.to_be_bytes())
 }
 
 #[cfg(test)]
@@ -238,7 +243,8 @@ mod tests {
             Ipv4Addr::new([192, 0, 2, 2]),
             IpProtocol::UDP,
             8,
-        );
+        )
+        .finish();
         let manual = Checksum::new()
             .add_bytes(&[192, 0, 2, 1])
             .add_bytes(&[192, 0, 2, 2])
