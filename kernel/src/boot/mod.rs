@@ -153,14 +153,14 @@ use crate::selftest::m6_object::start_m6_object_self_test;
 use crate::selftest::m6_process_control::start_m6_process_control_self_test;
 #[cfg(feature = "m6-revocation-self-test")]
 use crate::selftest::m6_revocation::start_m6_revocation_self_test;
-#[cfg(feature = "m7-net-service-self-test")]
-use crate::selftest::m7_net_service::start_m7_net_service_self_test;
 #[cfg(feature = "m7-dns-self-test")]
 use crate::selftest::m7_dns::run_m7_dns_self_test;
 #[cfg(feature = "m7-net-caps-self-test")]
 use crate::selftest::m7_net_caps::start_m7_net_caps_self_test;
 #[cfg(feature = "m7-net-device-self-test")]
 use crate::selftest::m7_net_device::run_m7_net_device_self_test;
+#[cfg(feature = "m7-net-service-self-test")]
+use crate::selftest::m7_net_service::start_m7_net_service_self_test;
 use crate::syscall::initialize_syscall_abi;
 use ::uefi::mem::memory_map::{MemoryMap, MemoryMapMut};
 use ::uefi::Status;

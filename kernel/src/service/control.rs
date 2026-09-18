@@ -604,10 +604,12 @@ impl ServiceLifecycleController {
                 pid, STORAGE_BLOCK_DEVICE_ID
             ));
         } else if service_id == NETWORK_SERVICE_ID {
-            use clean_slate_capability::{HolderId, ResourceClass, Rights};
             use crate::capability::network::{grant_network_authority, NetworkGrantPolicy};
+            use clean_slate_capability::{HolderId, ResourceClass, Rights};
             let rights = Rights::valid_for(ResourceClass::Network);
-            if grant_network_authority(HolderId(pid), rights, NetworkGrantPolicy::NetworkService).is_err() {
+            if grant_network_authority(HolderId(pid), rights, NetworkGrantPolicy::NetworkService)
+                .is_err()
+            {
                 kernel_log_fmt(format_args!(
                     "[FAIL] network capability grant failed pid={} service={}\n",
                     pid, service_id.0
@@ -625,11 +627,8 @@ impl ServiceLifecycleController {
                 .authoritative_generation(service_id)
                 .map(|g| u64::from(g.0))
                 .unwrap_or(0);
-            crate::service::net_bridge::net_bridge_mut().register_service_instance(
-                pid,
-                pid,
-                generation,
-            );
+            crate::service::net_bridge::net_bridge_mut()
+                .register_service_instance(pid, pid, generation);
             kernel_log_fmt(format_args!(
                 "[NET ] authority granted pid={} device={}\n",
                 pid, NETWORK_DEVICE_ID
@@ -642,8 +641,8 @@ impl ServiceLifecycleController {
         &mut self,
         pid: u64,
     ) -> Result<u64, &'static str> {
-        use clean_slate_capability::{HolderId, Rights};
         use crate::capability::network::{grant_network_authority, NetworkGrantPolicy};
+        use clean_slate_capability::{HolderId, Rights};
         let rights = Rights::NET_RESOLVE
             .union(Rights::NET_CONNECT)
             .union(Rights::NET_SEND)

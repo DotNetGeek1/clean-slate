@@ -26,6 +26,11 @@ use crate::mm::PAGE_SIZE;
 use clean_slate_service_fixtures::m6_fixture::{
     M6_FIXTURE_BOOTSTRAP_ADDRESS, M6_FIXTURE_BOOTSTRAP_BYTES,
 };
+#[cfg(feature = "m7-net-service-self-test")]
+use clean_slate_service_fixtures::{
+    NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
+    NETWORK_UNAUTHORIZED_SERVICE_ID,
+};
 #[cfg(any(
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
@@ -45,11 +50,6 @@ use clean_slate_service_fixtures::{
     STORAGE_UNAUTHORIZED_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::ServiceId;
-#[cfg(feature = "m7-net-service-self-test")]
-use clean_slate_service_fixtures::{
-    NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
-    NETWORK_UNAUTHORIZED_SERVICE_ID,
-};
 
 const SERVICE_USER_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
 #[cfg(any(

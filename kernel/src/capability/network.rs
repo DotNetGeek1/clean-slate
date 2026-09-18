@@ -210,11 +210,13 @@ fn log_grant(holder: HolderId, rights: Rights, generation: u64) {
 }
 
 fn log_allow(holder: HolderId, op: NetworkOp) {
+    #[cfg(feature = "m7-net-caps-self-test")]
     kernel_log_fmt(format_args!(
         "[CAP ] net allow op={} holder={}\n",
         op.op_name(),
         holder.0
     ));
+    let _ = (holder, op);
 }
 
 fn log_denied(holder: HolderId, reason: DenialReason) {

@@ -5,17 +5,17 @@ use core::ptr;
 use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSPC, SYSCALL_ESTALE,
 };
-use clean_slate_capability::{
-    CapabilityState, HolderId, ResourceClass, Rights,
-};
+use clean_slate_capability::{CapabilityState, HolderId, ResourceClass, Rights};
 use clean_slate_network::error::DenialReason;
-use clean_slate_network::protocol::{NetworkRequest, NetworkResponse, NETWORK_REQUEST_BYTES, NETWORK_RESPONSE_BYTES};
+use clean_slate_network::protocol::{
+    NetworkRequest, NetworkResponse, NETWORK_REQUEST_BYTES, NETWORK_RESPONSE_BYTES,
+};
 use clean_slate_network::session::SessionGeneration;
 use clean_slate_service_fixtures::{
-    NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES,
-    NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT,
-    NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
-    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
+    NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID,
+    NETWORK_MAX_PAYLOAD_BYTES, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_POLL,
+    NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
+    NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
 };
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
@@ -98,10 +98,7 @@ fn session_generation_for_request(request: &NetworkRequest) -> Option<SessionGen
 }
 
 fn live_network_service_pid() -> Option<u64> {
-    unsafe {
-        service_lifecycle_controller_mut()
-            .live_pid(NETWORK_SERVICE_ID)
-    }
+    unsafe { service_lifecycle_controller_mut().live_pid(NETWORK_SERVICE_ID) }
 }
 
 pub(crate) fn handle_syscall_network_capability(frame: &mut SyscallContext) {
@@ -186,7 +183,11 @@ fn handle_submit(frame: &mut SyscallContext) {
     };
     let mut request_wire = [0u8; NETWORK_REQUEST_BYTES];
     unsafe {
-        ptr::copy_nonoverlapping(frame.rdx as *const u8, request_wire.as_mut_ptr(), request_wire.len());
+        ptr::copy_nonoverlapping(
+            frame.rdx as *const u8,
+            request_wire.as_mut_ptr(),
+            request_wire.len(),
+        );
     }
     let request = match NetworkRequest::decode(&request_wire) {
         Ok(request) => request,
@@ -214,7 +215,13 @@ fn handle_submit(frame: &mut SyscallContext) {
     let generation = live_instance_generation_for_pid(holder.0)
         .map(|g| u64::from(g.0))
         .unwrap_or(0);
-    match net_bridge_mut().submit(holder.0, holder.0, generation, &request_wire, &payload[..payload_len]) {
+    match net_bridge_mut().submit(
+        holder.0,
+        holder.0,
+        generation,
+        &request_wire,
+        &payload[..payload_len],
+    ) {
         Ok(request_id) => frame.rax = request_id,
         Err(error) => frame.rax = bridge_error_status(error),
     }
@@ -255,7 +262,13 @@ fn handle_poll(frame: &mut SyscallContext) {
         .map(|g| u64::from(g.0))
         .unwrap_or(0);
     let mut out_payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-    match net_bridge_mut().poll(holder.0, holder.0, generation, frame.rdx, &mut out_payload[..out_len]) {
+    match net_bridge_mut().poll(
+        holder.0,
+        holder.0,
+        generation,
+        frame.rdx,
+        &mut out_payload[..out_len],
+    ) {
         Ok(response) => {
             let wire = response.encode();
             unsafe {
@@ -275,7 +288,8 @@ fn handle_poll(frame: &mut SyscallContext) {
 
 fn handle_service_next(frame: &mut SyscallContext) {
     if validate_user_writable_pointer_range(frame.rdx, NETWORK_REQUEST_BYTES as u64).is_err()
-        || validate_user_writable_pointer_range(frame.r10, NETWORK_MAX_PAYLOAD_BYTES as u64).is_err()
+        || validate_user_writable_pointer_range(frame.r10, NETWORK_MAX_PAYLOAD_BYTES as u64)
+            .is_err()
     {
         frame.rax = SYSCALL_EINVAL;
         return;
@@ -363,7 +377,11 @@ fn handle_service_complete(frame: &mut SyscallContext) {
     }
     let mut response_wire = [0u8; NETWORK_RESPONSE_BYTES];
     unsafe {
-        ptr::copy_nonoverlapping(frame.r10 as *const u8, response_wire.as_mut_ptr(), response_wire.len());
+        ptr::copy_nonoverlapping(
+            frame.r10 as *const u8,
+            response_wire.as_mut_ptr(),
+            response_wire.len(),
+        );
     }
     let response = match NetworkResponse::decode(&response_wire) {
         Ok(response) => response,
@@ -402,7 +420,11 @@ fn handle_raw_geometry(frame: &mut SyscallContext) {
     }
     let props = net_bridge_mut().raw_geometry(holder.0);
     unsafe {
-        ptr::copy_nonoverlapping(props.mac.0.as_ptr(), frame.rdx as *mut u8, props.mac.0.len());
+        ptr::copy_nonoverlapping(
+            props.mac.0.as_ptr(),
+            frame.rdx as *mut u8,
+            props.mac.0.len(),
+        );
     }
     frame.rax = if props.link_up { 1 } else { 0 };
 }

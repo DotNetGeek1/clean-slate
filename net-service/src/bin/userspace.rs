@@ -16,14 +16,14 @@ use clean_slate_network::protocol::{
 };
 use clean_slate_network::session::{SessionGeneration, SessionId, SocketKind};
 use clean_slate_service_fixtures::{
-    AllowAllAuthorizer, NetworkService, PassthroughPacketPath, NetworkServiceBootstrap,
+    AllowAllAuthorizer, NetworkService, NetworkServiceBootstrap, PassthroughPacketPath,
     NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID,
     NETWORK_MAX_PAYLOAD_BYTES, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_MODE_ACCEPTANCE,
     NETWORK_SERVICE_MODE_CAPACITY_LOOP, NETWORK_SERVICE_MODE_CLIENT,
     NETWORK_SERVICE_MODE_INFLIGHT_ARM, NETWORK_SERVICE_MODE_STALE_CLOSE,
     NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE, NETWORK_SERVICE_RESULT_ERROR,
-    NETWORK_SERVICE_RESULT_OK, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT,
-    NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
+    NETWORK_SERVICE_RESULT_OK, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_POLL,
+    NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
 };
 use core::alloc::{GlobalAlloc, Layout};
@@ -116,16 +116,34 @@ fn finish() -> ! {
     }
 }
 
+fn wait_fixture_phase_gate() {
+    while bootstrap_mut().aux_status == 0 {
+        let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
+    }
+}
+
 fn run(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
     match bootstrap.mode {
         NETWORK_SERVICE_MODE_ACCEPTANCE => {
             run_service_loop(bootstrap);
         }
-        NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE => run_unauthorized_probe(),
+        NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE => {
+            wait_fixture_phase_gate();
+            run_unauthorized_probe()
+        }
         NETWORK_SERVICE_MODE_CLIENT => run_client_echo(bootstrap),
-        NETWORK_SERVICE_MODE_INFLIGHT_ARM => run_inflight_arm(bootstrap),
-        NETWORK_SERVICE_MODE_STALE_CLOSE => run_stale_close(bootstrap),
-        NETWORK_SERVICE_MODE_CAPACITY_LOOP => run_capacity_loop(bootstrap),
+        NETWORK_SERVICE_MODE_INFLIGHT_ARM => {
+            wait_fixture_phase_gate();
+            run_inflight_arm(bootstrap)
+        }
+        NETWORK_SERVICE_MODE_STALE_CLOSE => {
+            wait_fixture_phase_gate();
+            run_stale_close(bootstrap)
+        }
+        NETWORK_SERVICE_MODE_CAPACITY_LOOP => {
+            wait_fixture_phase_gate();
+            run_capacity_loop(bootstrap)
+        }
         _ => Err(0),
     }
 }
@@ -154,14 +172,7 @@ fn raw_syscall(nr: u64, args: [u64; 6]) -> u64 {
 fn network_capability(device_id: u64) -> Result<u64, u64> {
     let raw = raw_syscall(
         SYSCALL_NR_NETWORK_CAPABILITY,
-        [
-            device_id,
-            u64::from(NETWORK_CAPABILITY_VERSION),
-            0,
-            0,
-            0,
-            0,
-        ],
+        [device_id, u64::from(NETWORK_CAPABILITY_VERSION), 0, 0, 0, 0],
     );
     if raw >= u64::MAX - 4095 {
         return Err(raw);
@@ -174,7 +185,7 @@ fn net_request(args: [u64; 6]) -> u64 {
 }
 
 fn run_unauthorized_probe() -> Result<u64, u64> {
-    match network_capability(NETWORK_DEVICE_ID) {
+    match network_capability(NETWORK_CLIENT_DEVICE_ID) {
         Err(SYSCALL_EACCES) => Ok(NETWORK_SERVICE_RESULT_OK),
         Ok(_) => Err(1),
         Err(other) => Err(other),
@@ -550,8 +561,7 @@ fn run_stale_close(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> 
     let response = poll_until_done(handle, close_id, &mut payload)?;
     match response {
         NetworkResponse::Error { code }
-            if code
-                == NetworkError::Denied(DenialReason::StaleGeneration).code() =>
+            if code == NetworkError::Denied(DenialReason::StaleGeneration).code() =>
         {
             bootstrap.aux_status = session.generation().get();
             Ok(NETWORK_SERVICE_RESULT_OK)

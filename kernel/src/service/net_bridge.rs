@@ -44,7 +44,8 @@ impl KernelLoopbackLink {
         Self {
             link: LinkProperties::new(LOOPBACK_MAC, true),
             state: DeviceState::Ready,
-            rx: [RingSlot::empty(); clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as usize],
+            rx: [RingSlot::empty();
+                clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as usize],
             rx_head: 0,
             rx_tail: 0,
             rx_count: 0,
@@ -52,8 +53,7 @@ impl KernelLoopbackLink {
     }
 
     fn push_rx(&mut self, frame: FrameBuf) -> Result<(), NetworkDeviceError> {
-        if self.rx_count as usize
-            >= clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as usize
+        if self.rx_count as usize >= clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as usize
         {
             return Err(NetworkDeviceError::QueueFull);
         }
@@ -64,7 +64,8 @@ impl KernelLoopbackLink {
         let slot = &mut self.rx[self.rx_tail as usize];
         slot.len = bytes.len() as u16;
         slot.bytes[..bytes.len()].copy_from_slice(bytes);
-        self.rx_tail = (self.rx_tail + 1) % clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as u8;
+        self.rx_tail =
+            (self.rx_tail + 1) % clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as u8;
         self.rx_count += 1;
         Ok(())
     }
@@ -240,7 +241,12 @@ impl NetBridge {
         Some(caller)
     }
 
-    pub fn ack_holder_exit(&mut self, service_pid: u64, sessions: u64, pending: u64) -> Result<(), NetBridgeError> {
+    pub fn ack_holder_exit(
+        &mut self,
+        service_pid: u64,
+        sessions: u64,
+        pending: u64,
+    ) -> Result<(), NetBridgeError> {
         if !self.is_live_service(service_pid) {
             return Err(NetBridgeError::NotService);
         }
@@ -248,7 +254,6 @@ impl NetBridge {
             .pending_holder_exit_ack
             .take()
             .ok_or(NetBridgeError::InvalidRequest)?;
-        let _ = crate::capability::network::on_holder_exit(clean_slate_capability::HolderId(caller.pid));
         kernel_log_fmt(format_args!(
             "[NET ] holder exit reclaimed sessions={sessions} pending={pending}\n"
         ));
@@ -326,12 +331,7 @@ impl NetBridge {
             .position(|slot| slot.state == ClientSlotState::Pending)?;
         self.slots[index].state = ClientSlotState::InService;
         let slot = &self.slots[index];
-        Some((
-            slot.request_id,
-            slot.request,
-            slot.payload_len,
-            slot.client,
-        ))
+        Some((slot.request_id, slot.request, slot.payload_len, slot.client))
     }
 
     pub fn service_complete(
@@ -385,8 +385,7 @@ impl NetBridge {
     pub fn shutdown_service(&mut self) -> u32 {
         let mut failed = 0u32;
         for slot in &mut self.slots {
-            if slot.state == ClientSlotState::Pending || slot.state == ClientSlotState::InService
-            {
+            if slot.state == ClientSlotState::Pending || slot.state == ClientSlotState::InService {
                 slot.response = NetworkResponse::Error {
                     code: clean_slate_network::error::NetworkError::Reset.code(),
                 };
@@ -412,13 +411,15 @@ impl NetBridge {
         requeued
     }
 
-    pub fn raw_transmit(&mut self, service_pid: u64, frame: FrameBuf) -> Result<(), NetworkDeviceError> {
+    pub fn raw_transmit(
+        &mut self,
+        service_pid: u64,
+        frame: FrameBuf,
+    ) -> Result<(), NetworkDeviceError> {
         if !self.is_live_service(service_pid) {
             return Err(NetworkDeviceError::NotReady);
         }
-        self.loopback
-            .transmit(frame)
-            .map_err(|(err, _)| err)
+        self.loopback.transmit(frame).map_err(|(err, _)| err)
     }
 
     pub fn raw_receive(
