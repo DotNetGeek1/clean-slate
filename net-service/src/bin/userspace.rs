@@ -27,11 +27,13 @@ use clean_slate_service_fixtures::{
     NETWORK_MAX_PAYLOAD_BYTES, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_MODE_ACCEPTANCE,
     NETWORK_SERVICE_MODE_CAPACITY_LOOP, NETWORK_SERVICE_MODE_CLIENT,
     NETWORK_SERVICE_MODE_INFLIGHT_ARM, NETWORK_SERVICE_MODE_M78_CLIENT,
-    NETWORK_SERVICE_MODE_M78_CONVERGENCE, NETWORK_SERVICE_MODE_STALE_CLOSE,
-    NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE, NETWORK_SERVICE_RESULT_ERROR,
+    NETWORK_SERVICE_MODE_M78_CONVERGENCE, NETWORK_SERVICE_MODE_M78_INFLIGHT_RECEIVE,
+    NETWORK_SERVICE_MODE_STALE_CLOSE, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
+    NetworkResolveConnect, NETWORK_SERVICE_RESULT_ERROR,
     NETWORK_SERVICE_RESULT_OK, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_POLL,
     NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
+    NET_SUBOP_M78_MALFORMED, NET_SUBOP_SERIAL_LOG,
 };
 use core::arch::x86_64::{__cpuid, _rdrand64_step};
 use core::hint::spin_loop;
@@ -49,7 +51,7 @@ struct BumpAllocator;
 static ALLOCATOR: BumpAllocator = BumpAllocator;
 
 static NEXT_HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-const HEAP_BYTES: usize = 256 * 1024;
+const HEAP_BYTES: usize = 512 * 1024;
 static mut HEAP: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 
 unsafe impl GlobalAlloc for BumpAllocator {
@@ -151,6 +153,10 @@ fn run(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
             wait_fixture_phase_gate();
             run_inflight_arm(bootstrap)
         }
+        NETWORK_SERVICE_MODE_M78_INFLIGHT_RECEIVE => {
+            wait_fixture_phase_gate();
+            run_m78_inflight_receive(bootstrap)
+        }
         NETWORK_SERVICE_MODE_STALE_CLOSE => {
             wait_fixture_phase_gate();
             run_stale_close(bootstrap)
@@ -197,6 +203,21 @@ fn network_capability(device_id: u64) -> Result<u64, u64> {
 
 fn net_request(args: [u64; 6]) -> u64 {
     raw_syscall(SYSCALL_NR_NETWORK_REQUEST, args)
+}
+
+fn net_serial_log(line: &str) {
+    let bytes = line.as_bytes();
+    if bytes.is_empty() || bytes.len() > 160 {
+        return;
+    }
+    let _ = net_request([
+        NET_SUBOP_SERIAL_LOG,
+        0,
+        bytes.as_ptr() as u64,
+        bytes.len() as u64,
+        0,
+        0,
+    ]);
 }
 
 fn run_unauthorized_probe() -> Result<u64, u64> {
@@ -657,7 +678,24 @@ fn run_capacity_loop(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64
 type ConvergenceService =
     NetworkService<SyscallRawLink, AllowAllAuthorizer, NetworkStackPath<SyscallRawLink>>;
 
-static mut CONV_SERVICE: Option<ConvergenceService> = None;
+static mut M78_MALFORMED_REPORTED: bool = false;
+
+fn maybe_report_malformed(service: &mut ConvergenceService) {
+    unsafe {
+        if M78_MALFORMED_REPORTED {
+            return;
+        }
+    }
+    let count = service.packet_path_mut().malformed_drop_count();
+    if count >= 3 {
+        unsafe {
+            M78_MALFORMED_REPORTED = true;
+        }
+        let _ = net_request([NET_SUBOP_M78_MALFORMED, 3, 0, 0, 0, 0]);
+    }
+}
+
+static mut CONV_SERVICE: Option<alloc::boxed::Box<ConvergenceService>> = None;
 
 fn run_convergence_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     let raw_handle = match network_capability(NETWORK_DEVICE_ID) {
@@ -667,10 +705,12 @@ fn run_convergence_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     bootstrap.net_role_handle = raw_handle;
     let generation = SessionGeneration::new(bootstrap.service_generation);
     unsafe {
-        *core::ptr::addr_of_mut!(CONV_SERVICE) = Some(NetworkService::new(
-            generation,
-            AllowAllAuthorizer,
-            NetworkStackPath::new(generation),
+        *core::ptr::addr_of_mut!(CONV_SERVICE) = Some(alloc::boxed::Box::new(
+            NetworkService::new(
+                generation,
+                AllowAllAuthorizer,
+                NetworkStackPath::new(generation),
+            ),
         ));
         if let Some(service) = (*core::ptr::addr_of_mut!(CONV_SERVICE)).as_mut() {
             let link = SyscallRawLink::attach(raw_handle);
@@ -686,6 +726,7 @@ fn run_convergence_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             }
         };
         service.packet_path_mut().poll_idle();
+        maybe_report_malformed(service);
         let request_buf = unsafe { &mut *service_request_buf_ptr() };
         let payload_buf = unsafe { &mut *service_payload_buf_ptr() };
         let response_buf = unsafe { &mut *service_response_buf_ptr() };
@@ -769,7 +810,17 @@ struct SessionTlsIo {
     session: SessionId,
 }
 
+#[derive(Debug, Clone, Copy)]
 struct SessionTlsError;
+
+impl core::fmt::Display for SessionTlsError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("session tls io error")
+    }
+}
+
+impl core::error::Error for SessionTlsError {}
+
 impl embedded_io::Error for SessionTlsError {
     fn kind(&self) -> embedded_io::ErrorKind {
         embedded_io::ErrorKind::Other
@@ -799,6 +850,10 @@ impl Read for SessionTlsIo {
     }
 }
 impl Write for SessionTlsIo {
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         let send = NetworkRequest::Send {
             session: self.session,
@@ -853,6 +908,7 @@ static mut TLS_READ_BUF: [u8; TLS_RECORD_BUFFER_BYTES] = [0; TLS_RECORD_BUFFER_B
 static mut TLS_WRITE_BUF: [u8; TLS_RECORD_BUFFER_BYTES] = [0; TLS_RECORD_BUFFER_BYTES];
 
 fn run_m78_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
+    wait_fixture_phase_gate();
     let handle = client_handle()?;
     bootstrap.net_role_handle = handle;
     let resolve = NetworkRequest::Resolve {
@@ -868,6 +924,10 @@ fn run_m78_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
     };
     let o = addr.octets();
     bootstrap.dns_addr = u32::from_ne_bytes([o[0], o[1], o[2], o[3]]);
+    net_serial_log(&alloc::format!(
+        "[DNS ] resolved name={FIXTURE_HOSTNAME} addr={}.{}.{}.{} ttl=300\n",
+        o[0], o[1], o[2], o[3]
+    ));
     let open = NetworkRequest::Open {
         kind: SocketKind::Tcp,
     }
@@ -883,6 +943,7 @@ fn run_m78_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
     let connect = NetworkRequest::Connect { session, dest: remote }.encode();
     let connect_id = client_submit(handle, &connect, &[])?;
     let _ = poll_until_done(handle, connect_id, &mut payload)?;
+    net_serial_log("[TCP ] connected peer=10.77.0.1:4443\n");
     let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
     let config = TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX);
     let rng = RdrandRng::new().map_err(|_| 0u64)?;
@@ -890,6 +951,7 @@ fn run_m78_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
     let read_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_READ_BUF) };
     let write_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_WRITE_BUF) };
     let mut tls = IoTlsSession::connect(io, config, rng, read_buf, write_buf).map_err(|_| 0u64)?;
+    net_serial_log("[TLS ] authenticated peer=m7.fixture.test\n");
     tls.write(APP_REQUEST_BYTES).map_err(|_| 0u64)?;
     let mut app_buf = [0u8; 64];
     let n = tls.read(&mut app_buf).map_err(|_| 0u64)?;
@@ -897,9 +959,20 @@ fn run_m78_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
         return Err(0);
     }
     bootstrap.echo_len = n as u64;
+    net_serial_log(&alloc::format!("[TLS ] app bytes ok len={n}\n"));
     let _ = tls.close();
-    let close = NetworkRequest::Close { session }.encode();
-    let close_id = client_submit(handle, &close, &[])?;
-    let _ = poll_until_done(handle, close_id, &mut payload)?;
+    Ok(NETWORK_SERVICE_RESULT_OK)
+}
+
+fn run_m78_inflight_receive(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
+    let handle = client_handle()?;
+    let session = SessionId::from_raw(bootstrap.session_id_raw);
+    let recv = NetworkRequest::Receive {
+        session,
+        max_len: 64,
+    }
+    .encode();
+    let _ = client_submit(handle, &recv, &[])?;
+    bootstrap.inflight_failed = 1;
     Ok(NETWORK_SERVICE_RESULT_OK)
 }

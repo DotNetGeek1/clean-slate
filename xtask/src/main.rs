@@ -45,6 +45,7 @@ const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M7_NET_DEVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M7_TLS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 const M7_DNS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
+const M7_NETWORK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(180);
 const M5_CRASH_MATRIX_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_PERSISTENCE_BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_CRASH_RECOVERY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -343,6 +344,30 @@ const M7_DNS_ACCEPTANCE_MARKERS: [&str; 5] = [
     "[DNS ] nxdomain name=nope.fixture.test",
     "[M7.5] PASS",
 ];
+const M7_NETWORK_ACCEPTANCE_MARKERS: [&str; 22] = [
+    "[NET ] virtio ready mac=",
+    "[NET ] service started pid=",
+    "generation=1",
+    "[NET ] authority granted pid=",
+    "[NET ] malformed dropped count=3",
+    "[NET ] denied pid=",
+    "reason=no-authority",
+    "[DNS ] resolved name=m7.fixture.test addr=",
+    "[TCP ] connected peer=10.77.0.1:4443",
+    "[TLS ] authenticated peer=m7.fixture.test",
+    "[TLS ] app bytes ok len=",
+    "[AUD ] net op=connect actor=",
+    "outcome=allow",
+    "[NET ] holder exit reclaimed sessions=",
+    "[NET ] inflight failed count=1",
+    "[NET ] service restarted pid=",
+    "generation=2",
+    "[NET ] authority granted pid=",
+    "[NET ] stale-session denied generation=1",
+    "[DNS ] resolved name=m7.fixture.test addr=",
+    "[NET ] capacity baseline ok",
+    "[M7.8] PASS",
+];
 const M7_NET_DEVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[NET ] virtio ready mac=",
     "[NET ] tx ok len=",
@@ -511,6 +536,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM6FixtureSmoke => run_m6_fixture_smoke_acceptance(),
         ParsedCommand::TestM6Object => run_m6_object_acceptance(),
         ParsedCommand::TestM7NetService => run_m7_net_service_acceptance(),
+        ParsedCommand::TestM7Network => run_m7_network_acceptance(),
         ParsedCommand::TestM6ProcessControl => run_m6_process_control_acceptance(),
         ParsedCommand::TestM6Delegation => run_m6_delegation_acceptance(),
         ParsedCommand::TestM6Revocation => run_m6_revocation_acceptance(),
@@ -564,6 +590,7 @@ fn run_m5_block_acceptance() -> Result<(), XtaskError> {
 fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
+        inject_m78_faults: false,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -585,6 +612,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
 
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::WrongName,
+        inject_m78_faults: false,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -1100,6 +1128,34 @@ fn run_m6_object_acceptance() -> Result<(), XtaskError> {
         Some((&M6_OBJECT_ACCEPTANCE_MARKERS, M6_OBJECT_ACCEPTANCE_TIMEOUT)),
         m5_storage_vm_config(),
     )
+}
+
+fn run_m7_network_acceptance() -> Result<(), XtaskError> {
+    build_network_userspace(true)?;
+    let peer = M7FixturePeer::start_with(FixtureOptions {
+        tls_cert: WhichCert::Correct,
+        inject_m78_faults: true,
+    })
+    .map_err(XtaskError::Io)?;
+    let port = peer.port();
+    let run_result = run_vm_inner_with_config(
+        false,
+        false,
+        &["m7-network-self-test"],
+        Some((
+            &M7_NETWORK_ACCEPTANCE_MARKERS,
+            M7_NETWORK_ACCEPTANCE_TIMEOUT,
+        )),
+        VmLaunchConfig {
+            m5_data_disk: None,
+            reset_ovmf_vars: false,
+            m7_fixture_port: Some(port),
+            kernel_release: true,
+            cpu_model: Some("qemu64,+rdrand"),
+        },
+    );
+    peer.shutdown();
+    run_result
 }
 
 fn run_m7_net_service_acceptance() -> Result<(), XtaskError> {
@@ -2055,6 +2111,9 @@ fn print_help() {
     println!(
         "  test-m7-net-service Build M7.3 network-service constituent boot and validate ordered markers (aliases: m7-net-service, m7.3)"
     );
+    println!(
+        "  test-m7-network Build M7.8 converged VirtIO-to-TLS path acceptance (aliases: m7-network, m7.8)"
+    );
     println!("  test-m6-process-control Build M6 process-control constituent boot and validate ordered markers");
     println!("  test-m6-delegation Build M6 delegation/attenuation constituent boot and validate ordered markers");
     println!("  test-m6-revocation Build M6 revocation/teardown constituent boot and validate ordered markers");
@@ -2114,6 +2173,7 @@ enum ParsedCommand {
     TestM6FixtureSmoke,
     TestM6Object,
     TestM7NetService,
+    TestM7Network,
     TestM6ProcessControl,
     TestM6Delegation,
     TestM6Revocation,
@@ -2171,6 +2231,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m6-object" => ParsedCommand::TestM6Object,
         Some(cmd) if cmd == "test-m7-net-service" || cmd == "m7-net-service" || cmd == "m7.3" => {
             ParsedCommand::TestM7NetService
+        }
+        Some(cmd) if cmd == "test-m7-network" || cmd == "m7-network" || cmd == "m7.8" => {
+            ParsedCommand::TestM7Network
         }
         Some(cmd) if cmd == "test-m6-process-control" => ParsedCommand::TestM6ProcessControl,
         Some(cmd) if cmd == "test-m6-delegation" => ParsedCommand::TestM6Delegation,
@@ -2426,6 +2489,14 @@ mod tests {
             ParsedCommand::TestM7Dns
         );
         assert_eq!(
+            parse_command(Some("test-m7-network".as_ref())),
+            ParsedCommand::TestM7Network
+        );
+        assert_eq!(
+            parse_command(Some("m7.8".as_ref())),
+            ParsedCommand::TestM7Network
+        );
+        assert_eq!(
             parse_command(Some("test-m5-disk-harness".as_ref())),
             ParsedCommand::TestM5DiskHarness
         );
@@ -2441,6 +2512,32 @@ mod tests {
             parse_command(Some("m5-disk-inspect".as_ref())),
             ParsedCommand::M5DiskInspect
         );
+    }
+
+    #[test]
+    fn scan_no_virtio(dir: &Path) {
+        for entry in fs::read_dir(dir).expect("read_dir") {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            if path.is_dir() {
+                scan_no_virtio(&path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = fs::read_to_string(&path).expect("read source");
+                assert!(
+                    !text.to_ascii_lowercase().contains("virtio"),
+                    "virtio identifier leaked into {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_virtio_identifiers_in_network_crates() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        for rel in ["network", "service-fixtures", "net-service"] {
+            scan_no_virtio(&root.join(rel));
+        }
     }
 
     #[test]

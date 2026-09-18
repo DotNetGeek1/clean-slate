@@ -90,7 +90,7 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
 ))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 80;
 #[cfg(feature = "m7-network-self-test")]
-pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 220;
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 520;
 #[cfg(not(any(
     feature = "m4-recovery-self-test",
     feature = "m4-supervisor-self-test",

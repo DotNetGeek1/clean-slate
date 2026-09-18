@@ -118,6 +118,7 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m6-audit-self-test"),
     not(feature = "m6-capabilities-self-test"),
     not(feature = "m7-net-service-self-test"),
+    not(feature = "m7-network-self-test"),
     not(feature = "m7-net-caps-self-test"),
     not(feature = "m7-dns-self-test"),
     not(feature = "m7-net-device-self-test")
@@ -457,6 +458,7 @@ fn run_inner() -> Result<(), &'static str> {
             start_m6_fixture_smoke_self_test(allocator)
         }
         #[cfg(all(
+            not(feature = "m7-network-self-test"),
             not(feature = "m7-net-service-self-test"),
             not(feature = "m7-dns-self-test"),
             not(feature = "m7-net-device-self-test"),

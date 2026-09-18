@@ -63,12 +63,18 @@ impl<L: NetworkLink> NetworkStackPath<L> {
         }
     }
 
-    pub fn malformed_drop_count(&self) -> u64 {
-        match &self.backend {
-            Backend::Resolver(resolver) => resolver.stats().dropped_malformed,
+    pub fn malformed_drop_count(&mut self) -> u64 {
+        match &mut self.backend {
+            Backend::Resolver(resolver) => {
+                let dns = resolver.stats().dropped_malformed;
+                let udp = resolver.udp_mut().stats().dropped_malformed;
+                let l3 = resolver.udp_mut().stack_mut().stats().dropped_malformed;
+                dns + udp + l3
+            }
             Backend::Tcp(tcp) => {
-                let stats = tcp.stats();
-                stats.dropped_bad_checksum
+                let l3 = tcp.stack_mut().stats().dropped_malformed;
+                let tcp_stats = tcp.stats();
+                l3 + tcp_stats.dropped_bad_checksum
             }
             Backend::None => 0,
         }

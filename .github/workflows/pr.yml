@@ -83,6 +83,7 @@ jobs:
         run: |
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m7-tls-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m7-network-self-test -- -D warnings
 
       - name: Clippy (kernel host tests)
         run: cargo clippy -p clean-slate-kernel --lib --tests -- -D warnings

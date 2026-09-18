@@ -1012,12 +1012,14 @@ const NETWORK_USERSPACE_IMAGE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/network_userspace.bin"));
 #[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
 const NETWORK_SERVICE_STACK_ADDRESS: u64 = NETWORK_SERVICE_BOOTSTRAP_ADDRESS + PAGE_SIZE;
-#[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
+#[cfg(feature = "m7-net-service-self-test")]
 const NETWORK_SERVICE_STACK_PAGES: u64 = 4;
+#[cfg(feature = "m7-network-self-test")]
+const NETWORK_SERVICE_STACK_PAGES: u64 = 128;
 #[cfg(feature = "m7-net-service-self-test")]
 const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 64;
 #[cfg(feature = "m7-network-self-test")]
-const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 192;
+const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 384;
 #[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
 const NETWORK_SERVICE_MAPPED_PAGES: usize =
     NETWORK_SERVICE_MAX_CODE_PAGES + NETWORK_SERVICE_STACK_PAGES as usize + 1;

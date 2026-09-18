@@ -16,6 +16,7 @@ use clean_slate_service_fixtures::{
     NETWORK_MAX_PAYLOAD_BYTES, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_POLL,
     NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
+    NET_SUBOP_M78_MALFORMED, NET_SUBOP_SERIAL_LOG,
 };
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
@@ -150,8 +151,69 @@ pub(crate) fn handle_syscall_network_request(frame: &mut SyscallContext) {
         NET_SUBOP_RAW_RECEIVE => handle_raw_receive(frame),
         NET_SUBOP_POP_HOLDER_EXIT => handle_pop_holder_exit(frame),
         NET_SUBOP_ACK_HOLDER_EXIT => handle_ack_holder_exit(frame),
+        NET_SUBOP_SERIAL_LOG => handle_serial_log(frame),
+        NET_SUBOP_M78_MALFORMED => handle_m78_malformed(frame),
         _ => frame.rax = SYSCALL_EINVAL,
     }
+}
+
+#[cfg(feature = "m7-network-self-test")]
+fn handle_serial_log(frame: &mut SyscallContext) {
+    const MAX_LINE: usize = 160;
+    let len = match usize::try_from(frame.rdx) {
+        Ok(len) if len > 0 && len <= MAX_LINE => len,
+        _ => {
+            frame.rax = SYSCALL_EINVAL;
+            return;
+        }
+    };
+    if validate_user_pointer_range(frame.rsi, len as u64).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    let mut buf = [0u8; MAX_LINE];
+    unsafe {
+        ptr::copy_nonoverlapping(frame.rsi as *const u8, buf.as_mut_ptr(), len);
+    }
+    if buf[..len].iter().any(|b| *b < 0x20 && *b != b'\n') {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    let line = core::str::from_utf8(&buf[..len]).unwrap_or("");
+    if !line.starts_with('[') {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    crate::diagnostics::log::kernel_log_fmt(format_args!("{line}"));
+    frame.rax = 0;
+}
+
+#[cfg(not(feature = "m7-network-self-test"))]
+fn handle_serial_log(frame: &mut SyscallContext) {
+    frame.rax = SYSCALL_EINVAL;
+}
+
+#[cfg(feature = "m7-network-self-test")]
+fn handle_m78_malformed(frame: &mut SyscallContext) {
+    let holder = match current_holder() {
+        Ok(holder) => holder,
+        Err(status) => {
+            frame.rax = status;
+            return;
+        }
+    };
+    if live_network_service_pid() != Some(holder.0) {
+        frame.rax = SYSCALL_EACCES;
+        return;
+    }
+    let count = frame.rsi;
+    crate::selftest::m7_network::on_malformed_drops(count);
+    frame.rax = 0;
+}
+
+#[cfg(not(feature = "m7-network-self-test"))]
+fn handle_m78_malformed(frame: &mut SyscallContext) {
+    frame.rax = SYSCALL_EINVAL;
 }
 
 fn handle_submit(frame: &mut SyscallContext) {
@@ -205,6 +267,12 @@ fn handle_submit(frame: &mut SyscallContext) {
     ) {
         frame.rax = denial_status(reason);
         return;
+    }
+    if let NetworkRequest::Connect { session, .. } = request {
+        if let Ok(handle) = clean_slate_capability::CapabilityHandle::decode(frame.rsi) {
+            let _ =
+                crate::capability::network::register_network_session(holder, session, handle);
+        }
     }
     let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
     if payload_len > 0 {

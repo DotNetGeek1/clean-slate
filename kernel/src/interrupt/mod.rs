@@ -238,7 +238,7 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
     }
 
     #[cfg(feature = "m7-network-self-test")]
-    {
+    if context.vector as usize == USER_TEST_VECTOR {
         return crate::selftest::m7_network::handle_userspace_network_entry();
     }
     #[cfg(all(

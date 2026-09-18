@@ -71,6 +71,9 @@ where
     }
 
     pub fn close(self) -> Result<(), TlsError> {
-        Ok(())
+        match self.connection.close() {
+            Ok(_) => Ok(()),
+            Err((_, err)) => Err(map_embedded_tls_error(err)),
+        }
     }
 }

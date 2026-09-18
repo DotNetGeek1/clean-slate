@@ -129,6 +129,7 @@ $AllTests = [ordered]@{
     "test-m7-tls"               = @{ Aliases = @("m7-tls", "m7.6"); Description = "M7.6 TLS client QEMU acceptance (pass + fail-closed)"; Role = "Constituent" }
     "test-m7-net-caps"          = @{ Aliases = @("m7-net-caps", "m7.7"); Description = "M7.7 network capability broker and attribution acceptance"; Role = "Constituent" }
     "test-m7-dns"               = @{ Aliases = @("m7-dns", "m7.5"); Description = "M7.5 DNS resolver QEMU acceptance"; Role = "Constituent" }
+    "test-m7-network"           = @{ Aliases = @("m7-network", "m7.8"); Description = "M7.8 converged network path QEMU acceptance"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {

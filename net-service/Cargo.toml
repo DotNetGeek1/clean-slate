@@ -17,6 +17,7 @@ required-features = ["userspace"]
 [dependencies]
 clean-slate-capability = { path = "../capability" }
 clean-slate-network = { path = "../network", features = ["alloc", "tls"] }
+embedded-io = { version = "=0.7.1", default-features = false }
 rand_core = { version = "=0.6.4", default-features = false }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 

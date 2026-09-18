@@ -1,11 +1,11 @@
 //! VirtIO raw NIC seam for M7.8 (kernel-only; no leakage into protocol crates).
 
+#![allow(static_mut_refs)]
+
 use core::mem::MaybeUninit;
 
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{LinkProperties, NetworkDeviceError, NetworkLink};
-use clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES;
-
 use crate::device::virtio::net::VirtioNetDevice;
 use crate::diagnostics::log::kernel_log_fmt;
 

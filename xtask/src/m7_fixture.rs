@@ -9,8 +9,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration as StdDuration;
 
 use clean_slate_network::fixture::{
-    DNS_SERVER_PORT, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS, FIXTURE_HOSTNAME, PEER_IPV4, PEER_MAC,
-    UDP_ECHO_PORT,
+    DNS_SERVER_PORT, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS, FIXTURE_HOSTNAME, GUEST_IPV4,
+    GUEST_MAC, PEER_IPV4, PEER_MAC, UDP_ECHO_PORT,
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
@@ -31,12 +31,14 @@ pub enum WhichCert {
 #[derive(Clone, Copy, Debug)]
 pub struct FixtureOptions {
     pub tls_cert: WhichCert,
+    pub inject_m78_faults: bool,
 }
 
 impl Default for FixtureOptions {
     fn default() -> Self {
         Self {
             tls_cert: WhichCert::Correct,
+            inject_m78_faults: false,
         }
     }
 }
@@ -77,6 +79,48 @@ impl M7FixturePeer {
     }
 }
 
+fn inject_m78_convergence_faults(device: &mut QemuSocketDevice) {
+    let _ = device.inject_toward_guest(vec![0x01, 0x02, 0x03, 0x04]);
+    let guest = GUEST_MAC.octets();
+    let peer = PEER_MAC.octets();
+    let gip = GUEST_IPV4.octets();
+    let pip = PEER_IPV4.octets();
+    let mut tcp = vec![0u8; 54];
+    tcp[0..6].copy_from_slice(&guest);
+    tcp[6..12].copy_from_slice(&peer);
+    tcp[12..14].copy_from_slice(&[0x08, 0x00]);
+    tcp[14..16].copy_from_slice(&[0x45, 0x00]);
+    tcp[16..18].copy_from_slice(&[0x00, 0x28]);
+    tcp[20..21].copy_from_slice(&[0x06]);
+    tcp[22..24].copy_from_slice(&[0x00, 0x00]);
+    tcp[26..30].copy_from_slice(&pip);
+    tcp[30..34].copy_from_slice(&gip);
+    tcp[34..36].copy_from_slice(&[0x11, 0x5c]);
+    tcp[36..38].copy_from_slice(&[0x00, 0x01]);
+    tcp[38..40].copy_from_slice(&[0x00, 0x00]);
+    let _ = device.inject_toward_guest(tcp);
+    let mut dns = vec![0u8; 42 + 64];
+    dns[0..6].copy_from_slice(&guest);
+    dns[6..12].copy_from_slice(&peer);
+    dns[12..14].copy_from_slice(&[0x08, 0x00]);
+    dns[14..16].copy_from_slice(&[0x45, 0x00]);
+    dns[16..18].copy_from_slice(&[0x00, 0x4a]);
+    dns[20..21].copy_from_slice(&[0x11]);
+    dns[26..30].copy_from_slice(&pip);
+    dns[30..34].copy_from_slice(&gip);
+    dns[34..36].copy_from_slice(&[0x00, 0x35]);
+    dns[36..38].copy_from_slice(&[0xc3, 0x50]);
+    dns[38..40].copy_from_slice(&[0x00, 0x30]);
+    dns[40..42].copy_from_slice(&[0x00, 0x01]);
+    dns[42..44].copy_from_slice(&[0xab, 0xcd]);
+    dns[44..46].copy_from_slice(&[0x81, 0x80]);
+    dns[46..48].copy_from_slice(&[0x00, 0x01]);
+    dns[48..50].copy_from_slice(&[0x00, 0x01]);
+    dns[54] = 0xC0;
+    dns[55] = 0x0C;
+    let _ = device.inject_toward_guest(dns);
+}
+
 fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOptions) {
     listener
         .set_nonblocking(true)
@@ -106,6 +150,8 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
     }
 
     let mut device = QemuSocketDevice::new(stream);
+    let mut m78_faults_injected = !options.inject_m78_faults;
+    let m78_inject_after = std::time::Instant::now() + StdDuration::from_secs(8);
     let peer_octets = PEER_IPV4.octets();
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(
         PEER_MAC.octets(),
@@ -158,6 +204,11 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
 
     let mut timestamp = Instant::from_millis(0);
     while !stop.load(Ordering::SeqCst) {
+        if !m78_faults_injected && std::time::Instant::now() >= m78_inject_after {
+            inject_m78_convergence_faults(&mut device);
+            m78_faults_injected = true;
+            println!("[FIX ] m78 convergence faults injected toward guest");
+        }
         timestamp += Duration::from_millis(1);
         iface.poll(timestamp, &mut device, &mut sockets);
 
@@ -272,6 +323,11 @@ impl QemuSocketDevice {
         self.stream.write_all(&len.to_be_bytes())?;
         self.stream.write_all(frame)?;
         self.stream.flush()
+    }
+
+    /// Delivers an Ethernet frame to the guest NIC (QEMU length-prefixed socket protocol).
+    fn inject_toward_guest(&mut self, frame: Vec<u8>) -> std::io::Result<()> {
+        self.write_frame_to_socket(&frame)
     }
 }
 

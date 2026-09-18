@@ -29,9 +29,8 @@ use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 use clean_slate_service_fixtures::{
     NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
-    NETWORK_SERVICE_MODE_ACCEPTANCE, NETWORK_SERVICE_MODE_CAPACITY_LOOP,
-    NETWORK_SERVICE_MODE_CLIENT, NETWORK_SERVICE_MODE_INFLIGHT_ARM,
-    NETWORK_SERVICE_MODE_STALE_CLOSE, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
+    NETWORK_SERVICE_MODE_M78_CLIENT, NETWORK_SERVICE_MODE_STALE_CLOSE,
+    NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
     NETWORK_SERVICE_RESULT_OK, NETWORK_UNAUTHORIZED_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::{
@@ -52,14 +51,17 @@ const FIXTURE_PHASE_RELEASED: u64 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum M7Phase {
+    AwaitMalformedGate,
+    AwaitUnauthorized,
     AwaitClientEcho,
     AwaitHolderExitAck,
-    AwaitUnauthorized,
     AwaitInflightArm,
     AwaitStaleClose,
     AwaitCapacityLoop,
     Complete,
 }
+
+static M7_MALFORMED_LOGGED: GlobalCell<bool> = GlobalCell::new(false);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct M7FixturePids {
@@ -112,6 +114,32 @@ fn release_fixture_phase(pid: u64, kernel_root: u64) {
     });
 }
 
+pub(crate) fn on_malformed_drops(count: u64) {
+    if count != 3 {
+        fatal_kernel_error("m7.8 malformed drop count mismatch");
+    }
+    unsafe {
+        if *M7_MALFORMED_LOGGED.get() {
+            return;
+        }
+        *M7_MALFORMED_LOGGED.get() = true;
+    }
+    kernel_log_fmt(format_args!("[NET ] malformed dropped count={count}\n"));
+    let test_state = state();
+    if test_state.phase != M7Phase::AwaitMalformedGate {
+        return;
+    }
+    let kernel_root = kernel_root_frame();
+    release_fixture_phase(test_state.fixtures.unauthorized, kernel_root);
+    set_state(Some(M7NetSelfTestState {
+        lifecycle_capability: test_state.lifecycle_capability,
+        phase: M7Phase::AwaitUnauthorized,
+        session_id_raw: test_state.session_id_raw,
+        service_generation: test_state.service_generation,
+        fixtures: test_state.fixtures,
+    }));
+}
+
 pub(crate) fn on_holder_exit_acked(holder_pid: u64, sessions: u64, pending: u64) {
     let test_state = state();
     if test_state.phase != M7Phase::AwaitHolderExitAck {
@@ -129,10 +157,13 @@ pub(crate) fn on_holder_exit_acked(holder_pid: u64, sessions: u64, pending: u64)
             .and_then(|pid| userspace_process_root_frame(pid).ok())
             .unwrap_or_else(kernel_root_frame)
     };
-    release_fixture_phase(test_state.fixtures.unauthorized, service_root);
+    patch_fixture_bootstrap(test_state.fixtures.inflight, service_root, |bootstrap| {
+        bootstrap.session_id_raw = test_state.session_id_raw;
+        bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
+    });
     set_state(Some(M7NetSelfTestState {
         lifecycle_capability: test_state.lifecycle_capability,
-        phase: M7Phase::AwaitUnauthorized,
+        phase: M7Phase::AwaitInflightArm,
         session_id_raw: test_state.session_id_raw,
         service_generation: test_state.service_generation,
         fixtures: test_state.fixtures,
@@ -187,7 +218,7 @@ pub(crate) fn start_m7_network_self_test(allocator: PageAllocator) -> ! {
     };
     set_state(Some(M7NetSelfTestState {
         lifecycle_capability,
-        phase: M7Phase::AwaitClientEcho,
+        phase: M7Phase::AwaitMalformedGate,
         session_id_raw: 0,
         service_generation: 1,
         fixtures: M7FixturePids {
@@ -212,7 +243,7 @@ pub(crate) fn start_m7_network_self_test(allocator: PageAllocator) -> ! {
     let fixtures = spawn_all_fixtures(controller, allocator);
     set_state(Some(M7NetSelfTestState {
         lifecycle_capability,
-        phase: M7Phase::AwaitClientEcho,
+        phase: M7Phase::AwaitMalformedGate,
         session_id_raw: 0,
         service_generation: 1,
         fixtures,
@@ -256,11 +287,10 @@ fn spawn_all_fixtures(
     allocator: &mut PageAllocator,
 ) -> M7FixturePids {
     let generation = 1;
-    let mut client_bootstrap = NetworkServiceBootstrap::new(
-        clean_slate_service_fixtures::NETWORK_SERVICE_MODE_M78_CLIENT,
+    let client_bootstrap = NetworkServiceBootstrap::new(
+        NETWORK_SERVICE_MODE_M78_CLIENT,
         generation,
     );
-    client_bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
     let client =
         launch_aux_with_bootstrap(controller, allocator, CLIENT_SLOT, client_bootstrap, true);
     let unauthorized = launch_aux_with_bootstrap(
@@ -274,7 +304,10 @@ fn spawn_all_fixtures(
         controller,
         allocator,
         INFLIGHT_SLOT,
-        NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_INFLIGHT_ARM, generation),
+        NetworkServiceBootstrap::new(
+            clean_slate_service_fixtures::NETWORK_SERVICE_MODE_M78_INFLIGHT_RECEIVE,
+            generation,
+        ),
         true,
     );
     let stale = launch_aux_with_bootstrap(
@@ -288,7 +321,10 @@ fn spawn_all_fixtures(
         controller,
         allocator,
         CAPACITY_SLOT,
-        NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_CAPACITY_LOOP, generation),
+        NetworkServiceBootstrap::new(
+            clean_slate_service_fixtures::NETWORK_SERVICE_MODE_M78_CLIENT,
+            generation,
+        ),
         true,
     );
     M7FixturePids {
@@ -359,42 +395,21 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 fatal_kernel_error("m7.8 client path failed");
             }
             session_id_raw = report.session_id_raw;
-            let addr = report.dns_addr;
-            kernel_log_fmt(format_args!(
-                "[DNS ] resolved name=m7.fixture.test addr={}.{}.{}.{} ttl=300\n",
-                (addr >> 24) & 0xFF,
-                (addr >> 16) & 0xFF,
-                (addr >> 8) & 0xFF,
-                addr & 0xFF
-            ));
-            kernel_log_fmt(format_args!(
-                "[TCP ] connected peer=10.77.0.1:4443\n"
-            ));
-            kernel_log_fmt(format_args!(
-                "[TLS ] authenticated peer=m7.fixture.test\n"
-            ));
-            kernel_log_fmt(format_args!(
-                "[TLS ] app bytes ok len={}\n",
-                report.echo_len
-            ));
             M7Phase::AwaitHolderExitAck
         }
         (M7Phase::AwaitUnauthorized, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE) => {
             if report.result_code != NETWORK_SERVICE_RESULT_OK {
                 fatal_kernel_error("m7 unauthorized probe failed");
             }
-            if !crate::service::net_bridge::net_bridge_mut()
-                .holder_exit_acked_for(test_state.fixtures.client)
-            {
-                fatal_kernel_error("m7 unauthorized probe before holder exit ack");
-            }
-            patch_fixture_bootstrap(test_state.fixtures.inflight, kernel_root, |bootstrap| {
-                bootstrap.session_id_raw = session_id_raw;
+            patch_fixture_bootstrap(test_state.fixtures.client, kernel_root, |bootstrap| {
                 bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
             });
-            M7Phase::AwaitInflightArm
+            M7Phase::AwaitClientEcho
         }
-        (M7Phase::AwaitInflightArm, NETWORK_SERVICE_MODE_INFLIGHT_ARM) => {
+        (
+            M7Phase::AwaitInflightArm,
+            clean_slate_service_fixtures::NETWORK_SERVICE_MODE_M78_INFLIGHT_RECEIVE,
+        ) => {
             if report.result_code != NETWORK_SERVICE_RESULT_OK {
                 fatal_kernel_error("m7 inflight arm failed");
             }
@@ -451,15 +466,24 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
             });
             M7Phase::AwaitCapacityLoop
         }
-        (M7Phase::AwaitCapacityLoop, NETWORK_SERVICE_MODE_CAPACITY_LOOP) => {
+        (
+            M7Phase::AwaitCapacityLoop,
+            clean_slate_service_fixtures::NETWORK_SERVICE_MODE_M78_CLIENT,
+        ) => {
             if report.result_code != NETWORK_SERVICE_RESULT_OK {
-                fatal_kernel_error("m7 capacity loop failed");
+                fatal_kernel_error("m7.8 generation-2 client failed");
             }
             kernel_log_line("[NET ] capacity baseline ok");
             terminate_network_service(controller, allocator, test_state.lifecycle_capability);
             M7Phase::Complete
         }
-        _ => fatal_kernel_error("unexpected m7 net userspace trap phase/mode"),
+        _ => {
+            kernel_log_fmt(format_args!(
+                "[FAIL] m7 trap phase={:?} mode={} result={} aux={}\n",
+                test_state.phase, report.mode, report.result_code, report.aux_status
+            ));
+            fatal_kernel_error("unexpected m7 net userspace trap phase/mode");
+        }
     };
 
     set_state(Some(M7NetSelfTestState {
