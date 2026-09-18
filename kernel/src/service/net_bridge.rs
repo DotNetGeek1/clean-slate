@@ -287,9 +287,6 @@ impl NetBridge {
             .pending_holder_exit_ack
             .take()
             .ok_or(NetBridgeError::InvalidRequest)?;
-        kernel_log_fmt(format_args!(
-            "[NET ] holder exit reclaimed sessions={sessions} pending={pending}\n"
-        ));
         #[cfg(feature = "m7-net-service-self-test")]
         {
             self.holder_exit_acked_pid = Some(caller.pid);
@@ -304,7 +301,9 @@ impl NetBridge {
             feature = "m7-net-service-self-test",
             feature = "m7-network-self-test"
         )))]
-        let _ = caller;
+        {
+            let _ = (caller, sessions, pending);
+        }
         Ok(())
     }
 

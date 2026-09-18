@@ -12,4 +12,6 @@ pub struct TcpStats {
     pub timeouts: u64,
     pub segments_sent: u64,
     pub segments_received: u64,
+    pub recv_payload_bytes: u64,
+    pub syn_sent_stray_payload: u64,
 }

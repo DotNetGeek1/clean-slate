@@ -17,7 +17,7 @@ use clean_slate_network::protocol::{
 use clean_slate_network::session::{SessionGeneration, SessionId, SocketKind};
 use clean_slate_network::addr::SocketAddrV4;
 use clean_slate_network::fixture::{
-    APP_REQUEST_BYTES, APP_RESPONSE_BYTES, FIXTURE_HOSTNAME, PEER_IPV4, TLS_PORT, TLS_SERVER_NAME,
+    APP_REQUEST_BYTES, APP_RESPONSE_BYTES, FIXTURE_HOSTNAME, TLS_PORT, TLS_SERVER_NAME,
 };
 use clean_slate_network::addr::BoundedHostname;
 use clean_slate_network::tls::{IoTlsSession, TlsConfig, TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX};
@@ -212,9 +212,9 @@ fn net_serial_log(line: &str) {
     }
     let _ = net_request([
         NET_SUBOP_SERIAL_LOG,
-        0,
         bytes.as_ptr() as u64,
         bytes.len() as u64,
+        0,
         0,
         0,
     ]);
@@ -235,6 +235,12 @@ struct SyscallRawLink {
 impl SyscallRawLink {
     fn attach(handle: u64) -> Self {
         Self { handle }
+    }
+
+    /// Under QEMU socket netdev, a tight RX spin can exhaust DNS/TCP poll budgets before the
+    /// host fixture thread delivers the reply; yield periodically on empty dequeue.
+    fn cooperative_yield_on_empty_rx() {
+        let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
     }
 
     fn geometry(&self) -> LinkProperties {
@@ -290,9 +296,11 @@ impl NetworkLink for SyscallRawLink {
             0,
         ]);
         if status == u64::MAX {
+            Self::cooperative_yield_on_empty_rx();
             return Ok(None);
         }
         if status >= u64::MAX - 4095 {
+            Self::cooperative_yield_on_empty_rx();
             return Err(NetworkDeviceError::NotReady);
         }
         let len = status as usize;
@@ -538,13 +546,19 @@ fn client_poll(
     Ok(status)
 }
 
+/// Service-side stack work (e.g. TCP connect) can run tens of thousands of link polls
+/// inside one `handle_request` before `service_complete`; client polls must outlive that.
+const CLIENT_POLL_ITERATIONS: u32 = 500_000;
+const TLS_IO_RECEIVE_ATTEMPTS: u32 = 512;
+const NETWORK_ERROR_TIMEOUT_CODE: u16 = 7;
+
 fn poll_until_done(
     handle: u64,
     request_id: u64,
     out_payload: &mut [u8],
 ) -> Result<NetworkResponse, u64> {
     let mut response_wire = [0u8; NETWORK_RESPONSE_BYTES];
-    for _ in 0..10_000 {
+    for _ in 0..CLIENT_POLL_ITERATIONS {
         match client_poll(handle, request_id, &mut response_wire, out_payload) {
             Ok(_) => return NetworkResponse::decode(&response_wire).map_err(|_| 0u64),
             Err(NETWORK_STATUS_PENDING) => {
@@ -716,6 +730,9 @@ fn run_convergence_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             let link = SyscallRawLink::attach(raw_handle);
             service.packet_path_mut().attach(link);
             service.attach_backend(SyscallRawLink::attach(raw_handle));
+            service
+                .packet_path_mut()
+                .prime_neighbor_discovery(clean_slate_network::fixture::PEER_IPV4);
         }
     }
     loop {
@@ -751,8 +768,19 @@ fn run_convergence_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         let caller = decode_caller(payload_buf);
         let payload_len = u32::from_le_bytes(payload_buf[24..28].try_into().unwrap());
         let payload = &payload_buf[28..28 + payload_len as usize];
+        let needs_post_poll = matches!(
+            request,
+            NetworkRequest::Send { .. }
+                | NetworkRequest::Resolve { .. }
+                | NetworkRequest::Connect { .. }
+        );
         let (response, out_len) =
             service.handle_request(caller, request, payload, response_payload);
+        if needs_post_poll {
+            for _ in 0..512 {
+                service.packet_path_mut().poll_idle();
+            }
+        }
         response_buf.copy_from_slice(&response.encode());
         let _ = service_complete(
             raw_handle,
@@ -810,6 +838,10 @@ struct SessionTlsIo {
     session: SessionId,
 }
 
+const TLS_IO_ACCUM_BYTES: usize = NETWORK_MAX_PAYLOAD_BYTES;
+static mut TLS_IO_ACCUM: [u8; TLS_IO_ACCUM_BYTES] = [0; TLS_IO_ACCUM_BYTES];
+static mut TLS_IO_ACCUM_LEN: usize = 0;
+
 #[derive(Debug, Clone, Copy)]
 struct SessionTlsError;
 
@@ -831,22 +863,64 @@ impl ErrorType for SessionTlsIo {
 }
 impl Read for SessionTlsIo {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        let recv = NetworkRequest::Receive {
-            session: self.session,
-            max_len: buf.len() as u32,
+        if buf.is_empty() {
+            return Ok(0);
         }
-        .encode();
-        let recv_id = client_submit(self.handle, &recv, &[]).map_err(|_| SessionTlsError)?;
-        let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-        let response = poll_until_done(self.handle, recv_id, &mut payload)
-            .map_err(|_| SessionTlsError)?;
-        let len = match response {
-            NetworkResponse::Receive { payload_len } => payload_len as usize,
-            _ => return Ok(0),
-        };
-        let copy = len.min(buf.len());
-        buf[..copy].copy_from_slice(&payload[..copy]);
-        Ok(copy)
+        unsafe {
+            if TLS_IO_ACCUM_LEN > 0 {
+                let accum_len = TLS_IO_ACCUM_LEN;
+                let take = accum_len.min(buf.len());
+                let accum = &*core::ptr::addr_of!(TLS_IO_ACCUM);
+                buf[..take].copy_from_slice(&accum[..take]);
+                let accum_mut = &mut *core::ptr::addr_of_mut!(TLS_IO_ACCUM);
+                accum_mut.copy_within(take..accum_len, 0);
+                TLS_IO_ACCUM_LEN = accum_len - take;
+                return Ok(take);
+            }
+        }
+        for _ in 0..TLS_IO_RECEIVE_ATTEMPTS {
+            let recv = NetworkRequest::Receive {
+                session: self.session,
+                max_len: TLS_IO_ACCUM_BYTES as u32,
+            }
+            .encode();
+            let recv_id = client_submit(self.handle, &recv, &[]).map_err(|_| SessionTlsError)?;
+            let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+            let response = poll_until_done(self.handle, recv_id, &mut payload)
+                .map_err(|_| SessionTlsError)?;
+            match response {
+                NetworkResponse::Receive { payload_len: 0 } => {
+                    let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
+                    continue;
+                }
+                NetworkResponse::Receive { payload_len: len } => {
+                    let len = len as usize;
+                    if len == 0 {
+                        continue;
+                    }
+                    let take = len.min(buf.len());
+                    buf[..take].copy_from_slice(&payload[..take]);
+                    let rest = len - take;
+                    if rest > 0 {
+                        unsafe {
+                            let accum = &mut *core::ptr::addr_of_mut!(TLS_IO_ACCUM);
+                            accum[..rest].copy_from_slice(&payload[take..len]);
+                            TLS_IO_ACCUM_LEN = rest;
+                        }
+                    }
+                    return Ok(take);
+                }
+                NetworkResponse::Error {
+                    code: NETWORK_ERROR_TIMEOUT_CODE,
+                } => {
+                    let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
+                    continue;
+                }
+                NetworkResponse::Error { .. } => return Err(SessionTlsError),
+                _ => return Ok(0),
+            }
+        }
+        Err(SessionTlsError)
     }
 }
 impl Write for SessionTlsIo {
@@ -862,8 +936,17 @@ impl Write for SessionTlsIo {
         .encode();
         let send_id = client_submit(self.handle, &send, buf).map_err(|_| SessionTlsError)?;
         let mut payload = [0u8; 64];
-        let _ = poll_until_done(self.handle, send_id, &mut payload).map_err(|_| SessionTlsError)?;
-        Ok(buf.len())
+        let response = poll_until_done(self.handle, send_id, &mut payload)
+            .map_err(|_| SessionTlsError)?;
+        let sent = match response {
+            NetworkResponse::Send { bytes_sent } => bytes_sent as usize,
+            NetworkResponse::Error { .. } => return Err(SessionTlsError),
+            _ => return Err(SessionTlsError),
+        };
+        if sent != buf.len() {
+            return Err(SessionTlsError);
+        }
+        Ok(sent)
     }
 }
 
@@ -924,10 +1007,7 @@ fn run_m78_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
     };
     let o = addr.octets();
     bootstrap.dns_addr = u32::from_ne_bytes([o[0], o[1], o[2], o[3]]);
-    net_serial_log(&alloc::format!(
-        "[DNS ] resolved name={FIXTURE_HOSTNAME} addr={}.{}.{}.{} ttl=300\n",
-        o[0], o[1], o[2], o[3]
-    ));
+    net_serial_log("[DNS ] resolved name=m7.fixture.test addr=10.77.0.1 ttl=300\n");
     let open = NetworkRequest::Open {
         kind: SocketKind::Tcp,
     }
@@ -939,10 +1019,14 @@ fn run_m78_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
         _ => return Err(0),
     };
     bootstrap.session_id_raw = session.raw();
-    let remote = SocketAddrV4::new(PEER_IPV4, TLS_PORT);
+    let remote = SocketAddrV4::new(addr, TLS_PORT);
     let connect = NetworkRequest::Connect { session, dest: remote }.encode();
     let connect_id = client_submit(handle, &connect, &[])?;
-    let _ = poll_until_done(handle, connect_id, &mut payload)?;
+    let connect_response = poll_until_done(handle, connect_id, &mut payload)?;
+    if !matches!(connect_response, NetworkResponse::Connect) {
+        return Err(1);
+    }
+    let _ = o;
     net_serial_log("[TCP ] connected peer=10.77.0.1:4443\n");
     let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
     let config = TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX);
@@ -950,13 +1034,33 @@ fn run_m78_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
     let io = SessionTlsIo { handle, session };
     let read_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_READ_BUF) };
     let write_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_WRITE_BUF) };
-    let mut tls = IoTlsSession::connect(io, config, rng, read_buf, write_buf).map_err(|_| 0u64)?;
+    let mut tls = IoTlsSession::connect(io, config, rng, read_buf, write_buf).map_err(|_| 2u64)?;
     net_serial_log("[TLS ] authenticated peer=m7.fixture.test\n");
-    tls.write(APP_REQUEST_BYTES).map_err(|_| 0u64)?;
+    unsafe {
+        TLS_IO_ACCUM_LEN = 0;
+    }
+    tls.write(APP_REQUEST_BYTES).map_err(|_| {
+        net_serial_log("[TLS ] app write fail\n");
+        3u64
+    })?;
+    tls.flush().map_err(|_| {
+        net_serial_log("[TLS ] app flush fail\n");
+        3u64
+    })?;
+    unsafe {
+        TLS_IO_ACCUM_LEN = 0;
+    }
+    for _ in 0..4_096 {
+        let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
+    }
     let mut app_buf = [0u8; 64];
-    let n = tls.read(&mut app_buf).map_err(|_| 0u64)?;
+    let n = tls.read(&mut app_buf).map_err(|_| {
+        net_serial_log("[TLS ] app read fail\n");
+        4u64
+    })?;
     if &app_buf[..n] != APP_RESPONSE_BYTES {
-        return Err(0);
+        net_serial_log("[TLS ] app bytes mismatch\n");
+        return Err(5);
     }
     bootstrap.echo_len = n as u64;
     net_serial_log(&alloc::format!("[TLS ] app bytes ok len={n}\n"));

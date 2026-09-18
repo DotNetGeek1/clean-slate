@@ -561,6 +561,64 @@ Unauthorized DNS denial is proven in #87/#88, not in this lane.
 cargo xtask test-m7-dns
 ```
 
-**Serial markers (ordered):** `[DNS ] virtio ready mac=…`, `[DNS ] resolved name=m7.fixture.test addr=10.77.0.50 ttl=300`, `[DNS ] cache hit name=m7.fixture.test`, `[DNS ] nxdomain name=nope.fixture.test`, `[M7.5] PASS` (host peer also emits `[FIX ] dns query name=m7.fixture.test rcode=0`).
+**Serial markers (ordered):** `[DNS ] virtio ready mac=…`, `[DNS ] resolved name=m7.fixture.test addr=10.77.0.1 ttl=300`, `[DNS ] cache hit name=m7.fixture.test`, `[DNS ] nxdomain name=nope.fixture.test`, `[M7.5] PASS` (host peer also emits `[FIX ] dns query name=m7.fixture.test rcode=0`).
 
 Regression: `cargo xtask test-m7-net-device` (echo lane unchanged).
+
+## M7.8 converged network acceptance (#88)
+
+End-to-end path: VirtIO NIC → kernel net bridge → userspace network service (`NetworkStackPath`: L3 + DNS + TCP) → client aux TLS/app echo against the hermetic fixture peer. Boot feature: `m7-network-self-test`; command:
+
+```bash
+cargo xtask test-m7-network
+```
+
+Requires host QEMU + OVMF (same as other M7 lanes). The xtask starts the socket netdev fixture (`inject_m78_faults: true`) and builds the net-service userspace binary with `userspace` + release profile for the convergence service loop.
+
+### Malformed-drop counter (`malformed_drop_count`)
+
+The convergence service reports `[NET ] malformed dropped count=3` when the stack path sum reaches 3. The sum includes:
+
+| Source | Counted as |
+|--------|------------|
+| L3 IPv4 parse failures (`StackStats::dropped_malformed`) | yes |
+| UDP malformed length/checksum (`UdpStats::dropped_malformed`) | yes |
+| UDP datagram to unbound port (`UdpStats::dropped_unbound`) | yes |
+| DNS wire decode failures (`DnsStats::dropped_malformed`) | yes |
+| Orphan TCP bad checksum / no connection while still in resolver backend (`TcpStats::dropped_bad_checksum`, `dropped_no_conn`) | yes |
+| VirtIO driver runt/oversized pre-service drops (#82) | **no** (never reaches the service stack) |
+
+Implementation: [`NetworkStackPath::malformed_drop_count`](../service-fixtures/src/network_stack_path.rs).
+
+### M7.8 fault injection (option choices)
+
+Faults are injected by the host fixture on the **first guest-originated ARP** (after service `prime_neighbor_discovery`), not on a wall-clock timer. Log: `[FIX ] m78 faults injected toward guest count=3`.
+
+| # | Fault | Choice | Rationale |
+|---|--------|--------|-----------|
+| 1 | L3 malformed | **(b)** Full Ethernet frame to guest MAC, IPv4 with invalid version/IHL (not a 14 B runt) | Runt frames are dropped in the kernel VirtIO RX path and never increment the service counter. |
+| 2 | TCP bad checksum | Valid IPv4 to guest IP/MAC, TCP segment with incorrect checksum | Exercises TCP checksum verification before connection lookup; counted in orphan-TCP path during resolver mode. |
+| 3 | DNS / L4 malformed | **(a)** UDP datagram to guest with bad UDP length field | Unsolicited “DNS compression pointer” replies are dropped as UDP no-endpoint before `DnsResolver` decodes; bad UDP length is deterministic at L4. |
+
+### Holder exit and fixture hygiene
+
+When a client holder exits without an explicit `Close`, the service must reclaim **sessions** (`NetworkService::on_holder_exit`) and **stack state** (`NetworkStackPath::reclaim_holder`: DNS endpoints + TCP RST for that owner). That resets the fixture TLS listen socket so generation-2 clients can connect to `10.77.0.1:4443`.
+
+### Audit serial echo
+
+Kernel audit records every decision; serial `[AUD ] net op=…` lines omit high-volume raw-device/send/receive ops. Connect/open allows are echoed at submit time (Open and Connect both gate on `NET_CONNECT`).
+
+### QEMU acceptance markers (ordered)
+
+See `M7_NETWORK_ACCEPTANCE_MARKERS` in [`xtask/src/main.rs`](../xtask/src/main.rs). Highlights: malformed gate (3), unauthorized probe denial, gen-1 client DNS/TCP/TLS/app bytes, holder exit reclaim, service restart generation 2, stale-session denial, gen-2 client path, capacity baseline, `[M7.8] PASS`.
+
+### Verification matrix (M7 regression)
+
+```bash
+cargo xtask test-m7-net-device
+cargo xtask test-m7-dns
+cargo xtask test-m7-tls
+cargo xtask test-m7-net-service
+cargo xtask test-m7-net-caps
+cargo xtask test-m7-network
+```

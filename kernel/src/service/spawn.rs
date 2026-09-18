@@ -1013,11 +1013,11 @@ const NETWORK_USERSPACE_IMAGE: &[u8] =
 #[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
 const NETWORK_SERVICE_STACK_ADDRESS: u64 = NETWORK_SERVICE_BOOTSTRAP_ADDRESS + PAGE_SIZE;
 #[cfg(feature = "m7-net-service-self-test")]
-const NETWORK_SERVICE_STACK_PAGES: u64 = 4;
+const NETWORK_SERVICE_STACK_PAGES: u64 = 64;
 #[cfg(feature = "m7-network-self-test")]
-const NETWORK_SERVICE_STACK_PAGES: u64 = 128;
+const NETWORK_SERVICE_STACK_PAGES: u64 = 256;
 #[cfg(feature = "m7-net-service-self-test")]
-const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 64;
+const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 384;
 #[cfg(feature = "m7-network-self-test")]
 const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 384;
 #[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]

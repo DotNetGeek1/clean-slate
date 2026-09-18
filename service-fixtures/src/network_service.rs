@@ -66,6 +66,9 @@ pub trait NetworkResolveConnect {
     }
 
     fn poll_idle(&mut self) {}
+
+    /// Release protocol-stack state owned by an exiting holder (TCP RST, DNS endpoints, etc.).
+    fn reclaim_holder(&mut self, _caller: TrustedCaller) {}
 }
 
 pub trait PacketPath {
@@ -472,6 +475,7 @@ where
     }
 
     pub fn on_holder_exit(&mut self, caller: TrustedCaller) -> (u32, u32) {
+        self.packet_path.reclaim_holder(caller);
         let mut reclaimed_sessions = 0u32;
         for (index, entry) in self.sessions.iter_mut().enumerate() {
             if entry.in_use && entry.owner == caller {

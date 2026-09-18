@@ -43,12 +43,9 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test",
-    feature = "m7-net-service-self-test"
+    feature = "m6-fixture-smoke-self-test"
 ))]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
-#[cfg(feature = "m7-network-self-test")]
-const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
 #[cfg(not(any(
     feature = "m4-recovery-self-test",
     feature = "m4-supervisor-self-test",
@@ -65,9 +62,12 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test",
-    feature = "m7-net-service-self-test", feature = "m7-network-self-test"
+    feature = "m7-net-service-self-test",
+    feature = "m7-network-self-test"
 )))]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
+#[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
+const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
 #[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
 /// The storage userspace image maps up to 64 code pages plus its stack and
@@ -85,12 +85,13 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test",
-    feature = "m7-net-service-self-test"
+    feature = "m6-fixture-smoke-self-test"
 ))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 80;
+#[cfg(feature = "m7-net-service-self-test")]
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 512;
 #[cfg(feature = "m7-network-self-test")]
-pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 520;
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 660;
 #[cfg(not(any(
     feature = "m4-recovery-self-test",
     feature = "m4-supervisor-self-test",

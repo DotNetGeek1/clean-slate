@@ -267,6 +267,9 @@ fn record_network_audit(
     if !unsafe { *NETWORK_AUDIT_SERIAL.get() } {
         return;
     }
+    if matches!(op, NetworkOp::RawDevice | NetworkOp::Receive | NetworkOp::Send) {
+        return;
+    }
     let outcome = match result {
         Ok(()) => "allow",
         Err(_) => "deny",

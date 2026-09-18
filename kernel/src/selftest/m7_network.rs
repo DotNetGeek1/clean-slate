@@ -11,6 +11,7 @@ use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::interrupt::timer::initialize_timer;
 use crate::mm::address_space::activate_address_space_root;
 use crate::mm::address_space::kernel_root_frame;
+use crate::mm::paging::current_root_frame_address;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
@@ -93,11 +94,8 @@ fn state() -> M7NetSelfTestState {
     unsafe { (*M7_NET_SELF_TEST_STATE.get()).expect("m7 net self-test state was not initialized") }
 }
 
-fn patch_fixture_bootstrap(
-    pid: u64,
-    kernel_root: u64,
-    patch: impl FnOnce(&mut NetworkServiceBootstrap),
-) {
+fn patch_fixture_bootstrap(pid: u64, patch: impl FnOnce(&mut NetworkServiceBootstrap)) {
+    let previous = current_root_frame_address();
     let root =
         userspace_process_root_frame(pid).unwrap_or_else(|message| fatal_kernel_error(message));
     activate_address_space_root(root);
@@ -105,11 +103,11 @@ fn patch_fixture_bootstrap(
         let bootstrap = &mut *(NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *mut NetworkServiceBootstrap);
         patch(bootstrap);
     }
-    activate_address_space_root(kernel_root);
+    activate_address_space_root(previous);
 }
 
-fn release_fixture_phase(pid: u64, kernel_root: u64) {
-    patch_fixture_bootstrap(pid, kernel_root, |bootstrap| {
+fn release_fixture_phase(pid: u64) {
+    patch_fixture_bootstrap(pid, |bootstrap| {
         bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
     });
 }
@@ -129,8 +127,7 @@ pub(crate) fn on_malformed_drops(count: u64) {
     if test_state.phase != M7Phase::AwaitMalformedGate {
         return;
     }
-    let kernel_root = kernel_root_frame();
-    release_fixture_phase(test_state.fixtures.unauthorized, kernel_root);
+    release_fixture_phase(test_state.fixtures.unauthorized);
     set_state(Some(M7NetSelfTestState {
         lifecycle_capability: test_state.lifecycle_capability,
         phase: M7Phase::AwaitUnauthorized,
@@ -151,13 +148,10 @@ pub(crate) fn on_holder_exit_acked(holder_pid: u64, sessions: u64, pending: u64)
     if sessions != 1 || pending != 0 {
         fatal_kernel_error("m7 holder exit ack counts mismatch");
     }
-    let service_root = unsafe {
-        service_lifecycle_controller_mut()
-            .live_pid(NETWORK_SERVICE_ID)
-            .and_then(|pid| userspace_process_root_frame(pid).ok())
-            .unwrap_or_else(kernel_root_frame)
-    };
-    patch_fixture_bootstrap(test_state.fixtures.inflight, service_root, |bootstrap| {
+    kernel_log_fmt(format_args!(
+        "[NET ] holder exit reclaimed sessions={sessions} pending={pending}\n"
+    ));
+    patch_fixture_bootstrap(test_state.fixtures.inflight, |bootstrap| {
         bootstrap.session_id_raw = test_state.session_id_raw;
         bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
     });
@@ -401,7 +395,7 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
             if report.result_code != NETWORK_SERVICE_RESULT_OK {
                 fatal_kernel_error("m7 unauthorized probe failed");
             }
-            patch_fixture_bootstrap(test_state.fixtures.client, kernel_root, |bootstrap| {
+            patch_fixture_bootstrap(test_state.fixtures.client, |bootstrap| {
                 bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
             });
             M7Phase::AwaitClientEcho
@@ -442,12 +436,12 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                     .grant_network_client_capability(pid)
                     .unwrap_or_else(|message| fatal_kernel_error(message));
             }
-            patch_fixture_bootstrap(test_state.fixtures.stale, kernel_root, |bootstrap| {
+            patch_fixture_bootstrap(test_state.fixtures.stale, |bootstrap| {
                 bootstrap.session_id_raw = session_id_raw;
                 bootstrap.service_generation = service_generation;
                 bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
             });
-            patch_fixture_bootstrap(test_state.fixtures.capacity, kernel_root, |bootstrap| {
+            patch_fixture_bootstrap(test_state.fixtures.capacity, |bootstrap| {
                 bootstrap.service_generation = service_generation;
             });
             M7Phase::AwaitStaleClose
@@ -460,7 +454,7 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 "[NET ] stale-session denied generation={}\n",
                 report.aux_status
             ));
-            patch_fixture_bootstrap(test_state.fixtures.capacity, kernel_root, |bootstrap| {
+            patch_fixture_bootstrap(test_state.fixtures.capacity, |bootstrap| {
                 bootstrap.service_generation = service_generation;
                 bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
             });

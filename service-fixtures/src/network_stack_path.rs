@@ -15,7 +15,8 @@ use crate::network_service::{NetworkResolveConnect, PacketPath};
 
 const ARP_TTL_TICKS: u64 = 50_000;
 const POLL_BURST: u64 = 256;
-const CONNECT_POLL_LIMIT: u64 = 50_000;
+const CONNECT_POLL_LIMIT: u64 = 500_000;
+const RECEIVE_POLL_LIMIT: u64 = 2_048;
 
 enum Backend<L: NetworkLink> {
     None,
@@ -63,20 +64,73 @@ impl<L: NetworkLink> NetworkStackPath<L> {
         }
     }
 
+    /// M7.8 acceptance counter: L3 parse failures + UDP length/checksum/unbound drops +
+    /// DNS decode failures + orphan TCP checksum failures (see `udp::poll` during resolver mode).
     pub fn malformed_drop_count(&mut self) -> u64 {
         match &mut self.backend {
             Backend::Resolver(resolver) => {
                 let dns = resolver.stats().dropped_malformed;
-                let udp = resolver.udp_mut().stats().dropped_malformed;
+                let udp = resolver.udp_mut().stats();
                 let l3 = resolver.udp_mut().stack_mut().stats().dropped_malformed;
-                dns + udp + l3
+                dns
+                    + udp.dropped_malformed
+                    + udp.dropped_unbound
+                    + l3
             }
             Backend::Tcp(tcp) => {
                 let l3 = tcp.stack_mut().stats().dropped_malformed;
                 let tcp_stats = tcp.stats();
-                l3 + tcp_stats.dropped_bad_checksum
+                l3 + tcp_stats.dropped_bad_checksum + tcp_stats.dropped_no_conn
             }
             Backend::None => 0,
+        }
+    }
+
+    /// Sends one ICMP echo toward `peer` so the fixture observes guest traffic and can inject faults.
+    pub fn prime_neighbor_discovery(&mut self, peer: clean_slate_network::addr::Ipv4Addr) {
+        if let Backend::Resolver(resolver) = &mut self.backend {
+            self.tick = self.tick.saturating_add(1);
+            let now = self.tick;
+            let _ = resolver
+                .udp_mut()
+                .stack_mut()
+                .send_icmp_echo(now, peer, 0x4d78, 1, b"");
+            for _ in 0..32 {
+                self.tick = self.tick.saturating_add(1);
+                let _ = resolver.poll(self.tick);
+            }
+        }
+    }
+
+    pub fn session_has_buffered_recv(
+        &self,
+        session: SessionId,
+        caller: TrustedCaller,
+    ) -> bool {
+        match &self.backend {
+            Backend::Tcp(tcp) => tcp
+                .table()
+                .get(session, caller)
+                .map(|c| c.has_buffered_recv())
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    pub fn tcp_stats_snapshot(&self) -> (u64, u64, u64, u64, u64, u64) {
+        match &self.backend {
+            Backend::Tcp(tcp) => {
+                let s = tcp.stats();
+                (
+                    s.segments_received,
+                    s.dropped_no_conn,
+                    s.dropped_bad_checksum,
+                    s.dropped_out_of_order,
+                    s.recv_payload_bytes,
+                    s.syn_sent_stray_payload,
+                )
+            }
+            _ => (0, 0, 0, 0, 0, 0),
         }
     }
 
@@ -173,6 +227,21 @@ impl<L: NetworkLink> NetworkStackPath<L> {
     pub fn reset_backend(&mut self, link: L) {
         self.attach(link);
     }
+
+    fn reclaim_stack_holder(&mut self, caller: TrustedCaller) {
+        let now = self.tick;
+        match &mut self.backend {
+            Backend::Resolver(resolver) => resolver.on_holder_exit(caller),
+            Backend::Tcp(tcp) => {
+                let _ = tcp.on_holder_exit(now, caller);
+                for _ in 0..4096 {
+                    self.tick = self.tick.saturating_add(1);
+                    let _ = tcp.poll(self.tick);
+                }
+            }
+            Backend::None => {}
+        }
+    }
 }
 
 impl<L: NetworkLink> NetworkResolveConnect for NetworkStackPath<L> {
@@ -196,6 +265,10 @@ impl<L: NetworkLink> NetworkResolveConnect for NetworkStackPath<L> {
     fn poll_idle(&mut self) {
         self.poll();
     }
+
+    fn reclaim_holder(&mut self, caller: TrustedCaller) {
+        self.reclaim_stack_holder(caller);
+    }
 }
 
 impl<L: NetworkLink> PacketPath for NetworkStackPath<L> {
@@ -214,6 +287,11 @@ impl<L: NetworkLink> PacketPath for NetworkStackPath<L> {
             let _ = self.tcp_mut()?.poll(tick);
         }
         let n = self.tcp_mut()?.send(now, session, caller, payload)?;
+        for _ in 0..POLL_BURST {
+            self.tick = self.tick.saturating_add(1);
+            let tick = self.tick;
+            let _ = self.tcp_mut()?.poll(tick);
+        }
         Ok(n as u32)
     }
 
@@ -226,16 +304,16 @@ impl<L: NetworkLink> PacketPath for NetworkStackPath<L> {
         out: &mut [u8],
     ) -> Result<u32, NetworkError> {
         self.transition_to_tcp()?;
-        for _ in 0..CONNECT_POLL_LIMIT {
+        for _ in 0..RECEIVE_POLL_LIMIT {
             self.tick = self.tick.saturating_add(1);
             let now = self.tick;
-            let _ = self.tcp_mut()?.poll(now);
             let n = self.tcp_mut()?.receive(session, caller, out)?;
             if n > 0 {
                 return Ok(n.min(max_len as usize) as u32);
             }
+            let _ = self.tcp_mut()?.poll(now);
         }
-        Ok(0)
+        Err(NetworkError::Timeout)
     }
 }
 

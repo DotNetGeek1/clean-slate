@@ -285,7 +285,7 @@ impl TcpConnection {
         }
 
         match self.state {
-            TcpState::SynSent => self.on_syn_sent(seg, stats),
+            TcpState::SynSent => self.on_syn_sent(seg, payload, stats),
             TcpState::Established => self.on_established(seg, payload, stats),
             TcpState::FinWait1 => self.on_fin_wait1(seg, payload, stats),
             TcpState::FinWait2 => self.on_fin_wait2(seg, payload, stats),
@@ -296,8 +296,11 @@ impl TcpConnection {
         }
     }
 
-    fn on_syn_sent(&mut self, seg: &TcpSegment, stats: &mut TcpStats) -> SegmentAction {
+    fn on_syn_sent(&mut self, seg: &TcpSegment, payload: &[u8], stats: &mut TcpStats) -> SegmentAction {
         if !seg.flags.contains(TcpFlags::ACK) || !seg.flags.contains(TcpFlags::SYN) {
+            if !payload.is_empty() {
+                stats.syn_sent_stray_payload += 1;
+            }
             return SegmentAction::None;
         }
         if seg.ack != self.iss.wrapping_add(1) {
@@ -354,7 +357,8 @@ impl TcpConnection {
                     // SYN bit consumes sequence space without payload bytes here.
                 }
                 let data_take = accept.min(payload.len());
-                self.recv_buf.push(payload.get(..data_take).unwrap_or(&[]));
+                let pushed = self.recv_buf.push(payload.get(..data_take).unwrap_or(&[]));
+                stats.recv_payload_bytes += pushed as u64;
                 self.rcv_nxt = self.rcv_nxt.wrapping_add(data_take as u32);
                 if seg.flags.contains(TcpFlags::SYN) {
                     self.rcv_nxt = self.rcv_nxt.wrapping_add(1);

@@ -123,6 +123,9 @@ pub(crate) fn on_holder_exit_acked(holder_pid: u64, sessions: u64, pending: u64)
     if sessions != 1 || pending != 0 {
         fatal_kernel_error("m7 holder exit ack counts mismatch");
     }
+    kernel_log_fmt(format_args!(
+        "[NET ] holder exit reclaimed sessions={sessions} pending={pending}\n"
+    ));
     let service_root = unsafe {
         service_lifecycle_controller_mut()
             .live_pid(NETWORK_SERVICE_ID)

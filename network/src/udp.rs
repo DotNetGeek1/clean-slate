@@ -11,6 +11,7 @@ use crate::limits::{MAX_L3_PAYLOAD_BYTES, MAX_PENDING_REQUESTS_PER_SESSION, MAX_
 use crate::protocol::TrustedCaller;
 use crate::session::{SessionGeneration, SessionId, SessionState};
 use crate::stack::{Inbound, L3Stack};
+use crate::tcp::parse_tcp_segment;
 
 /// UDP header length on the wire (RFC 768).
 pub const UDP_HEADER_LEN: usize = 8;
@@ -613,6 +614,13 @@ impl<L: NetworkLink> UdpTransport<L> {
     pub fn poll(&mut self, now: u64) -> Result<(), NetworkError> {
         let inbound = self.stack.poll(now)?;
         if let Some(Inbound::Ipv4(ipv4)) = inbound {
+            if ipv4.header.protocol == IpProtocol::TCP {
+                let payload = ipv4.payload();
+                if parse_tcp_segment(ipv4.header.src, ipv4.header.dst, payload).is_err() {
+                    self.stats.dropped_malformed += 1;
+                }
+                return Ok(());
+            }
             if ipv4.header.protocol != IpProtocol::UDP {
                 return Ok(());
             }

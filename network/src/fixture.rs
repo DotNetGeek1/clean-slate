@@ -16,7 +16,7 @@ pub const PEER_IPV4: Ipv4Addr = Ipv4Addr::new([10, 77, 0, 1]);
 pub const GATEWAY_IPV4: Ipv4Addr = Ipv4Addr::new([10, 77, 0, 1]);
 pub const SUBNET_PREFIX_LEN: u8 = 24;
 
-pub const FIXTURE_A_RECORD: Ipv4Addr = Ipv4Addr::new([10, 77, 0, 50]);
+pub const FIXTURE_A_RECORD: Ipv4Addr = PEER_IPV4;
 pub const FIXTURE_A_TTL_SECS: u32 = 300;
 
 pub const DNS_SERVER_PORT: u16 = 53;

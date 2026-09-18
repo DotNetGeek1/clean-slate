@@ -66,6 +66,10 @@ where
         self.connection.write(data).map_err(map_embedded_tls_error)
     }
 
+    pub fn flush(&mut self) -> Result<(), TlsError> {
+        self.connection.flush().map_err(map_embedded_tls_error)
+    }
+
     pub fn read(&mut self, out: &mut [u8]) -> Result<usize, TlsError> {
         self.connection.read(out).map_err(map_embedded_tls_error)
     }
