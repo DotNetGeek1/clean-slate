@@ -941,6 +941,15 @@ impl<L: NetworkLink> DnsResolver<L> {
         self.udp.reset().map_err(DnsError::Transport)?;
         Ok(())
     }
+
+    /// Releases the resolver and builds a TCP transport on the same L3 stack.
+    pub fn into_tcp_transport(
+        self,
+        generation: SessionGeneration,
+    ) -> crate::tcp::TcpTransport<L> {
+        let stack = self.udp.into_stack();
+        crate::tcp::TcpTransport::new(stack, generation)
+    }
 }
 
 #[cfg(test)]

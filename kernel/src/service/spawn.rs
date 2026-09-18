@@ -26,7 +26,7 @@ use crate::mm::PAGE_SIZE;
 use clean_slate_service_fixtures::m6_fixture::{
     M6_FIXTURE_BOOTSTRAP_ADDRESS, M6_FIXTURE_BOOTSTRAP_BYTES,
 };
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
 use clean_slate_service_fixtures::{
     NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
     NETWORK_UNAUTHORIZED_SERVICE_ID,
@@ -327,7 +327,7 @@ pub(crate) enum BuiltinServiceImage {
         feature = "m7-net-caps-self-test"
     ))]
     M6FixturePayload,
-    #[cfg(feature = "m7-net-service-self-test")]
+    #[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
     NetworkUserspacePayload,
 }
 
@@ -383,7 +383,7 @@ impl BuiltinServiceImage {
                 feature = "m7-net-caps-self-test"
             ))]
             id if id >= 0x6000 && id <= 0x60ff => Self::M6FixturePayload,
-            #[cfg(feature = "m7-net-service-self-test")]
+            #[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
             id if id == NETWORK_SERVICE_ID.0 || id == NETWORK_UNAUTHORIZED_SERVICE_ID.0 => {
                 Self::NetworkUserspacePayload
             }
@@ -457,7 +457,7 @@ pub(crate) fn launch_builtin_service(
         BuiltinServiceImage::M6FixturePayload => {
             launch_m6_fixture_service(allocator, kernel_stack_top, scheduler_slot, service)
         }
-        #[cfg(feature = "m7-net-service-self-test")]
+        #[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
         BuiltinServiceImage::NetworkUserspacePayload => {
             launch_network_userspace_service(allocator, kernel_stack_top, scheduler_slot, service)
         }
@@ -646,7 +646,7 @@ fn launch_single_page_service(
         BuiltinServiceImage::M6FixturePayload => {
             return Err("m6 fixture image must use the fixture launch path");
         }
-        #[cfg(feature = "m7-net-service-self-test")]
+        #[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
         BuiltinServiceImage::NetworkUserspacePayload => {
             return Err("network userspace image must use the network launch path");
         }
@@ -1005,26 +1005,28 @@ fn launch_m6_fixture_service(
     )
 }
 
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
 include!(concat!(env!("OUT_DIR"), "/network_userspace_entry.rs"));
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
 const NETWORK_USERSPACE_IMAGE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/network_userspace.bin"));
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
 const NETWORK_SERVICE_STACK_ADDRESS: u64 = NETWORK_SERVICE_BOOTSTRAP_ADDRESS + PAGE_SIZE;
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
 const NETWORK_SERVICE_STACK_PAGES: u64 = 4;
 #[cfg(feature = "m7-net-service-self-test")]
 const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 64;
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(feature = "m7-network-self-test")]
+const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 192;
+#[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
 const NETWORK_SERVICE_MAPPED_PAGES: usize =
     NETWORK_SERVICE_MAX_CODE_PAGES + NETWORK_SERVICE_STACK_PAGES as usize + 1;
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
 const _: () = assert!(
     NETWORK_SERVICE_MAPPED_PAGES <= crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
 );
 
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
 pub(crate) fn launch_network_aux_process(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
@@ -1034,18 +1036,24 @@ pub(crate) fn launch_network_aux_process(
     launch_network_userspace_with_bootstrap(allocator, kernel_stack_top, scheduler_slot, bootstrap)
 }
 
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
 fn launch_network_userspace_service(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
     scheduler_slot: usize,
     service: ServiceId,
 ) -> Result<SpawnedServiceInstance, &'static str> {
+    #[cfg(feature = "m7-network-self-test")]
+    let bootstrap = crate::selftest::m7_network::network_service_bootstrap(service)?;
+    #[cfg(all(
+        feature = "m7-net-service-self-test",
+        not(feature = "m7-network-self-test")
+    ))]
     let bootstrap = crate::selftest::m7_net_service::network_service_bootstrap(service)?;
     launch_network_userspace_with_bootstrap(allocator, kernel_stack_top, scheduler_slot, bootstrap)
 }
 
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
 fn launch_network_userspace_with_bootstrap(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,

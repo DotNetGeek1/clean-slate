@@ -11,6 +11,8 @@ pub(crate) mod capability;
 pub(crate) mod control;
 pub(crate) mod instance_generation;
 pub(crate) mod net_bridge;
+#[cfg(feature = "m7-network-self-test")]
+pub(crate) mod virtio_net_bridge;
 pub(crate) mod net_syscall;
 pub(crate) mod spawn;
 

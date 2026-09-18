@@ -678,7 +678,7 @@ impl ServiceLifecycleController {
             .live
             .ok_or(LifecycleControlError::ServiceNotLive)?;
         self.log_terminate(service_id, live.pid);
-        #[cfg(feature = "m7-net-service-self-test")]
+        #[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
         if service_id == NETWORK_SERVICE_ID {
             let _ = crate::service::net_bridge::shutdown_net_service_instance();
         }

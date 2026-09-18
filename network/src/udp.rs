@@ -548,6 +548,11 @@ impl<L: NetworkLink> UdpTransport<L> {
         &mut self.stack
     }
 
+    /// Consumes the transport and returns the owned L3 stack (for DNS→TCP handoff in the service).
+    pub fn into_stack(self) -> L3Stack<L> {
+        self.stack
+    }
+
     pub fn table(&self) -> &UdpTable {
         &self.table
     }

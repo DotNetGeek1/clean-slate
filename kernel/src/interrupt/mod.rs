@@ -237,7 +237,14 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         fatal_kernel_error("object storage service issued an unexpected phase trap");
     }
 
-    #[cfg(feature = "m7-net-service-self-test")]
+    #[cfg(feature = "m7-network-self-test")]
+    {
+        return crate::selftest::m7_network::handle_userspace_network_entry();
+    }
+    #[cfg(all(
+        feature = "m7-net-service-self-test",
+        not(feature = "m7-network-self-test")
+    ))]
     if context.vector as usize == USER_TEST_VECTOR {
         return crate::selftest::m7_net_service::handle_userspace_network_entry();
     }

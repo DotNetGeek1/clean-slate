@@ -1,5 +1,7 @@
 //! M7.3 userspace network service state machine (host-testable, `no_std`-friendly).
 
+use clean_slate_network::addr::Ipv4Addr;
+use clean_slate_network::addr::SocketAddrV4;
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{LinkProperties, NetworkDeviceError, NetworkLink};
 use clean_slate_network::error::{DenialReason, NetworkError};
@@ -44,9 +46,32 @@ impl NetworkAuthorizer for DenyAllAuthorizer {
 }
 
 /// Protocol-stack seam (#84 / #124 / #125 replace the passthrough impl).
+/// DNS/TCP stack seam for M7.8 (passthrough returns [`NetworkError::NotFound`]).
+pub trait NetworkResolveConnect {
+    fn resolve_name(
+        &mut self,
+        _caller: TrustedCaller,
+        _name: &str,
+    ) -> Result<(Ipv4Addr, u32), NetworkError> {
+        Err(NetworkError::NotFound)
+    }
+
+    fn connect_session(
+        &mut self,
+        _caller: TrustedCaller,
+        _session: SessionId,
+        _dest: SocketAddrV4,
+    ) -> Result<(), NetworkError> {
+        Ok(())
+    }
+
+    fn poll_idle(&mut self) {}
+}
+
 pub trait PacketPath {
     fn on_send(
         &mut self,
+        _caller: TrustedCaller,
         _session: SessionId,
         payload: &[u8],
         link: &mut dyn NetworkLink,
@@ -54,6 +79,7 @@ pub trait PacketPath {
 
     fn on_receive(
         &mut self,
+        _caller: TrustedCaller,
         _session: SessionId,
         max_len: u32,
         link: &mut dyn NetworkLink,
@@ -63,9 +89,12 @@ pub trait PacketPath {
 
 pub struct PassthroughPacketPath;
 
+impl NetworkResolveConnect for PassthroughPacketPath {}
+
 impl PacketPath for PassthroughPacketPath {
     fn on_send(
         &mut self,
+        _caller: TrustedCaller,
         _session: SessionId,
         payload: &[u8],
         link: &mut dyn NetworkLink,
@@ -78,6 +107,7 @@ impl PacketPath for PassthroughPacketPath {
 
     fn on_receive(
         &mut self,
+        _caller: TrustedCaller,
         _session: SessionId,
         max_len: u32,
         link: &mut dyn NetworkLink,
@@ -153,7 +183,7 @@ pub struct NetworkService<L, A, P> {
 impl<L, A, P> NetworkService<L, A, P>
 where
     A: NetworkAuthorizer,
-    P: PacketPath,
+    P: PacketPath + NetworkResolveConnect,
 {
     pub fn new(generation: SessionGeneration, authorizer: A, packet_path: P) -> Self {
         Self {
@@ -169,6 +199,10 @@ where
 
     pub const fn generation(&self) -> SessionGeneration {
         self.generation
+    }
+
+    pub fn packet_path_mut(&mut self) -> &mut P {
+        &mut self.packet_path
     }
 
     pub fn attach_backend(&mut self, link: L) {
@@ -321,7 +355,24 @@ where
         }
 
         match request {
-            NetworkRequest::Resolve { .. } => (Self::error_response(NetworkError::NotFound), 0),
+            NetworkRequest::Resolve { name } => {
+                let name_str = match name.as_str() {
+                    Ok(name) => name,
+                    Err(_) => {
+                        return (Self::error_response(NetworkError::InvalidRequest), 0);
+                    }
+                };
+                match self.packet_path.resolve_name(caller, name_str) {
+                    Ok((addr, ttl)) => (
+                        NetworkResponse::Resolve {
+                            addr,
+                            ttl,
+                        },
+                        0,
+                    ),
+                    Err(error) => (Self::error_response(error), 0),
+                }
+            }
             NetworkRequest::Open { kind } => match self.alloc_session(caller, kind) {
                 Ok(session) => (NetworkResponse::Open { session }, 0),
                 Err(response) => (response, 0),
@@ -334,13 +385,18 @@ where
                 self.clear_session(index);
                 (NetworkResponse::Close, 0)
             }
-            NetworkRequest::Connect { session, .. } => {
+            NetworkRequest::Connect { session, dest } => {
                 let index = match self.validate_session(&caller, session) {
                     Ok(index) => index,
                     Err(response) => return (response, 0),
                 };
-                self.sessions[index].state = SessionState::Open;
-                (NetworkResponse::Connect, 0)
+                match self.packet_path.connect_session(caller, session, dest) {
+                    Ok(()) => {
+                        self.sessions[index].state = SessionState::Open;
+                        (NetworkResponse::Connect, 0)
+                    }
+                    Err(error) => (Self::error_response(error), 0),
+                }
             }
             NetworkRequest::Send {
                 session,
@@ -373,7 +429,7 @@ where
                         );
                     }
                 };
-                let result = self.packet_path.on_send(session, payload, link);
+                let result = self.packet_path.on_send(caller, session, payload, link);
                 self.pop_pending(index, 0);
                 match result {
                     Ok(bytes_sent) => (NetworkResponse::Send { bytes_sent }, 0),
@@ -405,7 +461,7 @@ where
                 };
                 let result = self
                     .packet_path
-                    .on_receive(session, max_len, link, response_payload);
+                    .on_receive(caller, session, max_len, link, response_payload);
                 self.pop_pending(index, 0);
                 match result {
                     Ok(len) => (NetworkResponse::Receive { payload_len: len }, len),

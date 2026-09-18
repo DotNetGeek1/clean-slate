@@ -60,16 +60,33 @@ impl TcpTable {
     ) -> Result<usize, NetworkError> {
         for (index, slot) in self.slots.iter_mut().enumerate() {
             if slot.is_none() {
-                let port = EPHEMERAL_PORT_BASE + index as u16;
-                let local = SocketAddrV4::new(our_ip, port);
-                let iss = deterministic_iss(self.generation, index as u32, self.iss_counter);
-                self.iss_counter += 1;
-                let conn = TcpConnection::new(owner, local, remote, iss);
-                *slot = Some(conn);
-                return Ok(index);
+                return self.open_slot_at(index, owner, remote, our_ip);
             }
         }
         Err(NetworkError::SessionExhausted)
+    }
+
+    /// Opens `index` when vacant (network-service session index alignment).
+    pub fn open_slot_at(
+        &mut self,
+        index: usize,
+        owner: TrustedCaller,
+        remote: SocketAddrV4,
+        our_ip: Ipv4Addr,
+    ) -> Result<usize, NetworkError> {
+        if index >= self.slots.len() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        if self.slots[index].is_some() {
+            return Err(NetworkError::SessionExhausted);
+        }
+        let port = EPHEMERAL_PORT_BASE + index as u16;
+        let local = SocketAddrV4::new(our_ip, port);
+        let iss = deterministic_iss(self.generation, index as u32, self.iss_counter);
+        self.iss_counter += 1;
+        let conn = TcpConnection::new(owner, local, remote, iss);
+        self.slots[index] = Some(conn);
+        Ok(index)
     }
 
     fn check_id(&self, id: SessionId, owner: TrustedCaller) -> Result<usize, NetworkError> {
@@ -233,6 +250,34 @@ impl<L: NetworkLink> TcpTransport<L> {
         self.stats = TcpStats::default();
         self.stack.reset()?;
         Ok(())
+    }
+
+    /// Active open at the network-service session index.
+    pub fn connect_at_index(
+        &mut self,
+        now: u64,
+        owner: TrustedCaller,
+        remote: SocketAddrV4,
+        session_index: u32,
+    ) -> Result<SessionId, NetworkError> {
+        let our_ip = self.stack.our_ip();
+        let index = self
+            .table
+            .open_slot_at(session_index as usize, owner, remote, our_ip)?;
+        let id = SessionId::new(self.table.generation, index as u32);
+        self.table.slots[index]
+            .as_mut()
+            .unwrap()
+            .on_connect_start(now);
+        if let Err(NetworkError::Unreachable) = self.send_syn_at(now, index) {
+            self.table.slots[index].as_mut().unwrap().on_unreachable();
+        } else {
+            self.table.slots[index]
+                .as_mut()
+                .unwrap()
+                .clear_pending_syn();
+        }
+        Ok(id)
     }
 
     /// Active open: allocates a slot and sends SYN (or defers on ARP miss).

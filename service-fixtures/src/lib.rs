@@ -12,6 +12,7 @@ mod diagnostics;
 /// M6 scripted CPL3 fixture protocol (shared test harness).
 pub mod m6_fixture;
 mod network_service;
+mod network_stack_path;
 mod network_transport;
 /// M6.3 object-capability protocol (lane-owned).
 pub mod object_capability;
@@ -35,16 +36,18 @@ pub use diagnostics::{
     format_crash_service_started_line, format_unrelated_workload_progress_line,
 };
 pub use network_service::{
-    AllowAllAuthorizer, DenyAllAuthorizer, NetworkAuthorizer, NetworkOp, NetworkService,
-    PacketPath, PassthroughPacketPath,
+    AllowAllAuthorizer, DenyAllAuthorizer, NetworkAuthorizer, NetworkOp, NetworkResolveConnect,
+    NetworkService, PacketPath, PassthroughPacketPath,
 };
+pub use network_stack_path::NetworkStackPath;
 pub use network_transport::{
     encode_request, encode_response, NetworkServiceBootstrap, NetworkServiceWorkItem,
     NetworkServiceWorkItem as NetWorkItem, NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID,
     NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES, NETWORK_REQUEST_SLOTS,
     NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_MODE_ACCEPTANCE,
     NETWORK_SERVICE_MODE_CAPACITY_LOOP, NETWORK_SERVICE_MODE_CLIENT,
-    NETWORK_SERVICE_MODE_INFLIGHT_ARM, NETWORK_SERVICE_MODE_STALE_CLOSE,
+    NETWORK_SERVICE_MODE_INFLIGHT_ARM, NETWORK_SERVICE_MODE_M78_CLIENT,
+    NETWORK_SERVICE_MODE_M78_CONVERGENCE, NETWORK_SERVICE_MODE_STALE_CLOSE,
     NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE, NETWORK_SERVICE_RESULT_ERROR,
     NETWORK_SERVICE_RESULT_OK, NETWORK_SERVICE_RESULT_PENDING, NETWORK_STATUS_PENDING,
     NETWORK_UNAUTHORIZED_PROBE_SERVICE_ID_VALUE, NET_SERVICE_ROLE_ID, NET_SUBOP_ACK_HOLDER_EXIT,

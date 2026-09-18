@@ -166,7 +166,7 @@ pub(crate) struct NetBridge {
     holder_exit_tail: u8,
     /// Holder exit popped by the live service, awaiting `NET_SUBOP_ACK_HOLDER_EXIT`.
     pending_holder_exit_ack: Option<TrustedCaller>,
-    #[cfg(feature = "m7-net-service-self-test")]
+    #[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
     holder_exit_acked_pid: Option<u64>,
 }
 
@@ -184,7 +184,7 @@ impl NetBridge {
             holder_exit_head: 0,
             holder_exit_tail: 0,
             pending_holder_exit_ack: None,
-            #[cfg(feature = "m7-net-service-self-test")]
+            #[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
             holder_exit_acked_pid: None,
         }
     }
@@ -195,6 +195,10 @@ impl NetBridge {
         domain: u64,
         generation: u64,
     ) -> SessionGeneration {
+        #[cfg(feature = "m7-network-self-test")]
+        {
+            let _ = crate::service::virtio_net_bridge::reclaim_virtio_after_release();
+        }
         let _ = self.loopback.reset();
         self.slots = [ClientSlot::free(); NETWORK_REQUEST_SLOTS];
         self.next_request_id = 1;
@@ -202,7 +206,7 @@ impl NetBridge {
         self.holder_exit_head = 0;
         self.holder_exit_tail = 0;
         self.pending_holder_exit_ack = None;
-        #[cfg(feature = "m7-net-service-self-test")]
+        #[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
         {
             self.holder_exit_acked_pid = None;
         }
@@ -255,7 +259,7 @@ impl NetBridge {
         TrustedCaller::new(pid, domain, generation)
     }
 
-    #[cfg(feature = "m7-net-service-self-test")]
+    #[cfg(any(feature = "m7-net-service-self-test", feature = "m7-network-self-test"))]
     pub fn holder_exit_acked_for(&self, pid: u64) -> bool {
         self.holder_exit_acked_pid == Some(pid)
     }
@@ -291,7 +295,15 @@ impl NetBridge {
             self.holder_exit_acked_pid = Some(caller.pid);
             crate::selftest::m7_net_service::on_holder_exit_acked(caller.pid, sessions, pending);
         }
-        #[cfg(not(feature = "m7-net-service-self-test"))]
+        #[cfg(feature = "m7-network-self-test")]
+        {
+            self.holder_exit_acked_pid = Some(caller.pid);
+            crate::selftest::m7_network::on_holder_exit_acked(caller.pid, sessions, pending);
+        }
+        #[cfg(not(any(
+            feature = "m7-net-service-self-test",
+            feature = "m7-network-self-test"
+        )))]
         let _ = caller;
         Ok(())
     }
@@ -432,6 +444,8 @@ impl NetBridge {
         }
         self.inflight_failed = self.inflight_failed.saturating_add(failed);
         let _ = self.loopback.reset();
+        #[cfg(feature = "m7-network-self-test")]
+        crate::service::virtio_net_bridge::release_virtio_for_service_restart();
         self.service_pid = 0;
         failed
     }
@@ -455,6 +469,11 @@ impl NetBridge {
         if !self.is_live_service(service_pid) {
             return Err(NetworkDeviceError::NotReady);
         }
+        #[cfg(feature = "m7-network-self-test")]
+        {
+            return crate::service::virtio_net_bridge::virtio_raw_transmit(frame);
+        }
+        #[cfg(not(feature = "m7-network-self-test"))]
         self.loopback.transmit(frame).map_err(|(err, _)| err)
     }
 
@@ -465,12 +484,24 @@ impl NetBridge {
         if !self.is_live_service(service_pid) {
             return Err(NetworkDeviceError::NotReady);
         }
+        #[cfg(feature = "m7-network-self-test")]
+        {
+            return crate::service::virtio_net_bridge::virtio_raw_receive();
+        }
+        #[cfg(not(feature = "m7-network-self-test"))]
         self.loopback.receive()
     }
 
     pub fn raw_geometry(&self, service_pid: u64) -> LinkProperties {
         if self.is_live_service(service_pid) {
-            self.loopback.link()
+            #[cfg(feature = "m7-network-self-test")]
+            {
+                return crate::service::virtio_net_bridge::virtio_link_properties();
+            }
+            #[cfg(not(feature = "m7-network-self-test"))]
+            {
+                return self.loopback.link();
+            }
         } else {
             LinkProperties::new(LOOPBACK_MAC, false)
         }

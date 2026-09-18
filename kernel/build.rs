@@ -53,7 +53,9 @@ fn main() {
             true,
         );
     }
-    if env::var("CARGO_FEATURE_M7_NET_SERVICE_SELF_TEST").is_ok() {
+    if env::var("CARGO_FEATURE_M7_NET_SERVICE_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M7_NETWORK_SELF_TEST").is_ok()
+    {
         embed_userspace_image(
             "network_userspace.bin",
             "clean-slate-network-userspace",

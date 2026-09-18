@@ -169,6 +169,8 @@ use crate::selftest::m7_net_caps::start_m7_net_caps_self_test;
 use crate::selftest::m7_net_device::run_m7_net_device_self_test;
 #[cfg(feature = "m7-net-service-self-test")]
 use crate::selftest::m7_net_service::start_m7_net_service_self_test;
+#[cfg(feature = "m7-network-self-test")]
+use crate::selftest::m7_network::start_m7_network_self_test;
 #[cfg(feature = "m7-tls-fail-closed-self-test")]
 use crate::selftest::m7_tls::run_m7_tls_fail_closed_self_test;
 #[cfg(all(
@@ -275,7 +277,14 @@ fn run_inner() -> Result<(), &'static str> {
 
     #[cfg(feature = "m3-entry-self-test")]
     {
-        #[cfg(feature = "m7-net-service-self-test")]
+        #[cfg(feature = "m7-network-self-test")]
+        {
+            start_m7_network_self_test(allocator)
+        }
+        #[cfg(all(
+            feature = "m7-net-service-self-test",
+            not(feature = "m7-network-self-test")
+        ))]
         {
             start_m7_net_service_self_test(allocator)
         }

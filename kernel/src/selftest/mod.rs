@@ -93,6 +93,8 @@ pub(crate) mod m7_net_caps;
 pub(crate) mod m7_net_device;
 #[cfg(feature = "m7-net-service-self-test")]
 pub(crate) mod m7_net_service;
+#[cfg(feature = "m7-network-self-test")]
+pub(crate) mod m7_network;
 #[cfg(any(feature = "m7-tls-self-test", feature = "m7-tls-fail-closed-self-test"))]
 pub(crate) mod m7_tls;
 #[cfg(any(

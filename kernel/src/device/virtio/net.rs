@@ -2,7 +2,8 @@
     not(any(
         feature = "m7-net-device-self-test",
         feature = "m7-tls-self-test",
-        feature = "m7-tls-fail-closed-self-test"
+        feature = "m7-tls-fail-closed-self-test",
+        feature = "m7-network-self-test"
     )),
     allow(dead_code)
 )]

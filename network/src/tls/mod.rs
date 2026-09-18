@@ -5,6 +5,8 @@ mod error;
 #[cfg(feature = "tls")]
 mod io;
 #[cfg(feature = "tls")]
+mod io_session;
+#[cfg(feature = "tls")]
 mod session;
 #[cfg(feature = "tls")]
 mod trace;
@@ -13,6 +15,8 @@ mod verify;
 
 #[cfg(feature = "tls")]
 pub use error::TlsError;
+#[cfg(feature = "tls")]
+pub use io_session::IoTlsSession;
 #[cfg(feature = "tls")]
 pub use session::{TlsConfig, TlsSession};
 #[cfg(feature = "m7-handshake-trace")]

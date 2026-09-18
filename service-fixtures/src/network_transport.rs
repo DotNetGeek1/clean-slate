@@ -21,6 +21,8 @@ pub const NETWORK_SERVICE_MODE_CLIENT: u64 = 3;
 pub const NETWORK_SERVICE_MODE_INFLIGHT_ARM: u64 = 4;
 pub const NETWORK_SERVICE_MODE_STALE_CLOSE: u64 = 5;
 pub const NETWORK_SERVICE_MODE_CAPACITY_LOOP: u64 = 6;
+pub const NETWORK_SERVICE_MODE_M78_CLIENT: u64 = 7;
+pub const NETWORK_SERVICE_MODE_M78_CONVERGENCE: u64 = 8;
 
 pub const NETWORK_SERVICE_RESULT_PENDING: u64 = 0;
 pub const NETWORK_SERVICE_RESULT_OK: u64 = 1;
@@ -56,6 +58,7 @@ pub struct NetworkServiceBootstrap {
     pub reclaimed_sessions: u64,
     pub reclaimed_pending: u64,
     pub inflight_failed: u64,
+    pub dns_addr: u32,
 }
 
 impl NetworkServiceBootstrap {
@@ -71,6 +74,7 @@ impl NetworkServiceBootstrap {
             reclaimed_sessions: 0,
             reclaimed_pending: 0,
             inflight_failed: 0,
+            dns_addr: 0,
         }
     }
 }
