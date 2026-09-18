@@ -7,10 +7,7 @@ use crate::addr::{IpProtocol, Ipv4Addr, SocketAddrV4};
 use crate::device::NetworkLink;
 use crate::error::{DenialReason, NetworkError};
 use crate::ethernet::ParseError;
-use crate::limits::{
-    MAX_APPLICATION_PAYLOAD_BYTES, MAX_L3_PAYLOAD_BYTES, MAX_PENDING_REQUESTS_PER_SESSION,
-    MAX_UDP_ENDPOINTS,
-};
+use crate::limits::{MAX_L3_PAYLOAD_BYTES, MAX_PENDING_REQUESTS_PER_SESSION, MAX_UDP_ENDPOINTS};
 use crate::protocol::TrustedCaller;
 use crate::session::{SessionGeneration, SessionId, SessionState};
 use crate::stack::{Inbound, L3Stack};
@@ -165,19 +162,23 @@ fn verify_udp_datagram(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, datagram: &[u8]) -> b
 }
 
 /// One received datagram waiting in an endpoint RX queue.
+///
+/// Storage is sized to [`MAX_UDP_PAYLOAD`]: a UDP datagram over unfragmented
+/// IPv4-on-Ethernet can never carry more, so reserving the larger IPC payload
+/// bound here would only inflate the table.
 #[derive(Clone, Copy)]
 struct QueuedDatagram {
     from: SocketAddrV4,
     len: u16,
-    data: [u8; MAX_APPLICATION_PAYLOAD_BYTES],
+    data: [u8; MAX_UDP_PAYLOAD],
 }
 
 impl QueuedDatagram {
-    const STORAGE_BYTES: usize = 6 + 2 + MAX_APPLICATION_PAYLOAD_BYTES;
+    const STORAGE_BYTES: usize = 6 + 2 + MAX_UDP_PAYLOAD;
 
     fn store(from: SocketAddrV4, payload: &[u8]) -> Self {
-        let len = payload.len().min(MAX_APPLICATION_PAYLOAD_BYTES);
-        let mut data = [0u8; MAX_APPLICATION_PAYLOAD_BYTES];
+        let len = payload.len().min(MAX_UDP_PAYLOAD);
+        let mut data = [0u8; MAX_UDP_PAYLOAD];
         if let Some(slice) = data.get_mut(0..len) {
             slice.copy_from_slice(payload.get(0..len).unwrap_or(&[]));
         }
@@ -202,7 +203,7 @@ impl RxQueue {
             entries: [QueuedDatagram {
                 from: SocketAddrV4::new(Ipv4Addr::new([0, 0, 0, 0]), 0),
                 len: 0,
-                data: [0; MAX_APPLICATION_PAYLOAD_BYTES],
+                data: [0; MAX_UDP_PAYLOAD],
             }; RX_QUEUE_CAP],
             head: 0,
             len: 0,
@@ -539,7 +540,7 @@ impl<L: NetworkLink> UdpTransport<L> {
         dest: Option<SocketAddrV4>,
         data: &[u8],
     ) -> Result<usize, NetworkError> {
-        if data.len() > MAX_APPLICATION_PAYLOAD_BYTES {
+        if data.len() > MAX_UDP_PAYLOAD {
             return Err(NetworkError::InvalidRequest);
         }
         let index = self.table.resolve_index(id, owner)?;
@@ -890,7 +891,7 @@ mod tests {
         now: u64,
     ) {
         peer.poll(now).unwrap();
-        let mut buf = [0u8; MAX_APPLICATION_PAYLOAD_BYTES];
+        let mut buf = [0u8; MAX_UDP_PAYLOAD];
         if let Ok(Some((from, len))) = peer.receive(peer_id, peer_owner, &mut buf) {
             let payload = buf.get(0..len.min(buf.len())).unwrap_or(&[]);
             let _ = peer.send(now, peer_id, peer_owner, Some(from), payload);

@@ -158,9 +158,9 @@ Issue #124 adds [`udp`](../network/src/udp.rs): UDP header codec, a bounded endp
 |----------|------:|
 | [`MAX_UDP_ENDPOINTS`](../network/src/limits.rs) | 32 |
 | RX queue per endpoint | [`MAX_PENDING_REQUESTS_PER_SESSION`](../network/src/limits.rs) = 8 |
-| Stored payload per datagram | ≤ [`MAX_APPLICATION_PAYLOAD_BYTES`](../network/src/limits.rs) = 4096 |
+| Stored payload per datagram | ≤ [`MAX_UDP_PAYLOAD`](../network/src/udp.rs) = 1472 |
 
-Each queued datagram stores `SocketAddrV4` + length + 4096-byte fixed buffer (~4104 B). Worst-case RX memory for the table is [`UDP_TABLE_MAX_RX_BYTES`](../network/src/udp.rs) (32 × 8 × ~4104 ≈ 1.05 MiB). Slot metadata is O(32) and bounded.
+Each queued datagram stores `SocketAddrV4` + length + 1472-byte fixed buffer (1480 B); a UDP datagram over unfragmented IPv4-on-Ethernet cannot exceed this, so the larger IPC bound `MAX_APPLICATION_PAYLOAD_BYTES` is not used here. Worst-case RX memory for the table is [`UDP_TABLE_MAX_RX_BYTES`](../network/src/udp.rs) (32 × 8 × 1480 ≈ 370 KiB). Slot metadata is O(32) and bounded.
 
 ### Port allocation
 
