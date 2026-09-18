@@ -34,7 +34,8 @@ use crate::sched::ThreadKind;
         feature = "m3-entry-self-test",
         feature = "m3-syscall-self-test",
         feature = "m3-ipc-self-test",
-        feature = "m5-block-self-test"
+        feature = "m5-block-self-test",
+        feature = "m7-net-device-self-test"
     ),
     allow(dead_code)
 )]
@@ -78,7 +79,8 @@ pub(crate) fn initialize_scheduler() -> Result<(), &'static str> {
         feature = "m3-entry-self-test",
         feature = "m3-syscall-self-test",
         feature = "m3-ipc-self-test",
-        feature = "m5-block-self-test"
+        feature = "m5-block-self-test",
+        feature = "m7-net-device-self-test"
     ),
     allow(dead_code)
 )]
