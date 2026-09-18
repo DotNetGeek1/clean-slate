@@ -131,6 +131,10 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>) {
 
 struct QemuSocketDevice {
     stream: TcpStream,
+    /// Bytes received from QEMU that do not yet form a complete
+    /// length-prefixed frame. The socket is non-blocking, so a read may stop
+    /// mid-prefix or mid-frame; buffering keeps the stream in sync.
+    pending: Vec<u8>,
     rx_queue: VecDeque<Vec<u8>>,
     events: Vec<String>,
 }
@@ -139,6 +143,7 @@ impl QemuSocketDevice {
     fn new(stream: TcpStream) -> Self {
         Self {
             stream,
+            pending: Vec::with_capacity(4 * (4 + MAX_FRAME_BYTES)),
             rx_queue: VecDeque::new(),
             events: Vec::new(),
         }
@@ -149,10 +154,11 @@ impl QemuSocketDevice {
     }
 
     fn read_frames_from_socket(&mut self) {
+        let mut chunk = [0u8; 4096];
         loop {
-            let mut len_buf = [0u8; 4];
-            match self.stream.read_exact(&mut len_buf) {
-                Ok(()) => {}
+            match self.stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => self.pending.extend_from_slice(&chunk[..n]),
                 Err(error)
                     if error.kind() == std::io::ErrorKind::WouldBlock
                         || error.kind() == std::io::ErrorKind::TimedOut =>
@@ -161,19 +167,38 @@ impl QemuSocketDevice {
                 }
                 Err(_) => break,
             }
-            let frame_len = u32::from_be_bytes(len_buf) as usize;
-            if frame_len == 0 || frame_len > MAX_FRAME_BYTES {
-                continue;
-            }
-            let mut frame = vec![0u8; frame_len];
-            if self.stream.read_exact(&mut frame).is_err() {
+        }
+        self.parse_pending_frames();
+    }
+
+    /// Splits complete `[u32 BE len][frame]` records out of `pending`.
+    /// Oversized or zero-length records are skipped in full so the stream
+    /// never desynchronises.
+    fn parse_pending_frames(&mut self) {
+        let mut offset = 0usize;
+        while self.pending.len() - offset >= 4 {
+            let len_bytes: [u8; 4] = self.pending[offset..offset + 4]
+                .try_into()
+                .expect("4-byte slice");
+            let frame_len = u32::from_be_bytes(len_bytes) as usize;
+            if self.pending.len() - offset - 4 < frame_len {
                 break;
             }
-            if frame.len() >= 14 && u16::from_be_bytes([frame[12], frame[13]]) == 0x0806 {
-                self.events.push("[FIX ] arp request".to_owned());
+            let start = offset + 4;
+            let end = start + frame_len;
+            if frame_len != 0 && frame_len <= MAX_FRAME_BYTES {
+                let frame = self.pending[start..end].to_vec();
+                if frame.len() >= 14 && u16::from_be_bytes([frame[12], frame[13]]) == 0x0806 {
+                    self.events.push("[FIX ] arp request".to_owned());
+                }
+                self.rx_queue.push_back(frame);
+            } else {
+                self.events
+                    .push(format!("[FIX ] dropped frame len={frame_len}"));
             }
-            self.rx_queue.push_back(frame);
+            offset = end;
         }
+        self.pending.drain(..offset);
     }
 
     fn write_frame_to_socket(&mut self, frame: &[u8]) -> std::io::Result<()> {

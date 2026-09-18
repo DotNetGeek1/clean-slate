@@ -4,7 +4,7 @@ use core::convert::TryFrom;
 use core::hint::spin_loop;
 use core::mem::{align_of, size_of};
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{compiler_fence, Ordering};
+use core::sync::atomic::{compiler_fence, AtomicBool, Ordering};
 
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{
@@ -89,6 +89,12 @@ const _: () = assert!(RX_POOL_SIZE as u32 <= MAX_DEVICE_RX_QUEUE_DEPTH);
 static mut RX_BUFFER_POOL: RxBufferPool = RxBufferPool {
     slots: [[0; RX_SLOT_BYTES]; RX_POOL_SIZE],
 };
+
+/// Guards the single static DMA region: at most one live [`VirtioNetDevice`]
+/// may exist. A replacement instance can only be discovered after the previous
+/// one has been [`VirtioNetDevice::release`]d, which resets the device first so
+/// no device-owned descriptor can be inherited.
+static DEVICE_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy)]
 struct PciFunction {
@@ -361,7 +367,27 @@ pub(crate) struct VirtioNetDevice {
 }
 
 impl VirtioNetDevice {
+    /// Discovers and brings up the single QEMU VirtIO-net device.
+    ///
+    /// Fails with `"virtio net device already claimed"` if a live instance
+    /// exists; call [`Self::release`] on the old instance first.
     pub(crate) fn discover() -> Result<Self, &'static str> {
+        if DEVICE_CLAIMED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err("virtio net device already claimed");
+        }
+        match Self::discover_unguarded() {
+            Ok(device) => Ok(device),
+            Err(error) => {
+                DEVICE_CLAIMED.store(false, Ordering::Release);
+                Err(error)
+            }
+        }
+    }
+
+    fn discover_unguarded() -> Result<Self, &'static str> {
         let pci_function = discover_single_legacy_net_pci_function()?;
         let registers = LegacyRegisters::from_pci(pci_function)?;
         let mut device = Self::bring_up(registers, pci_function)?;
@@ -372,7 +398,8 @@ impl VirtioNetDevice {
     }
 
     /// Reset the device and poison local state so a replacement service cannot
-    /// reuse device-owned descriptors.
+    /// reuse device-owned descriptors, then release the static DMA claim so a
+    /// replacement instance may call [`Self::discover`].
     #[allow(dead_code)]
     pub(crate) fn release(mut self) {
         self.registers.write_u8(VIRTIO_PCI_STATUS, 0);
@@ -382,6 +409,7 @@ impl VirtioNetDevice {
             *slot = DescriptorOwnership::DriverOwned;
         }
         self.tx_in_flight = false;
+        DEVICE_CLAIMED.store(false, Ordering::Release);
     }
 
     #[allow(dead_code)]
@@ -585,15 +613,25 @@ impl VirtioNetDevice {
             self.poison_with_reason("bad-len");
             NetworkDeviceError::Malformed
         })?;
-        let frame_start = LEGACY_RX_FRAME_OFFSET;
-        let frame_len = used_len.saturating_sub(LEGACY_RX_FRAME_OFFSET);
-        if frame_len < 14 || frame_start + frame_len > RX_SLOT_BYTES {
+        // A completion shorter than the virtio-net header is a device-side
+        // protocol violation: poison.
+        if used_len < LEGACY_RX_FRAME_OFFSET {
             self.poison_with_reason("bad-len");
             return Err(NetworkDeviceError::Malformed);
         }
-        if frame_len > MAX_ETHERNET_FRAME_BYTES {
-            self.poison_with_reason("bad-len");
+        let frame_start = LEGACY_RX_FRAME_OFFSET;
+        let frame_len = used_len - LEGACY_RX_FRAME_OFFSET;
+
+        // Runt or oversized *Ethernet* frames are controlled by the remote peer,
+        // not the device. Drop them and recycle the slot without poisoning so a
+        // hostile peer cannot take the NIC down.
+        if frame_len < 14 {
+            self.recycle_rx_slot(desc_id)?;
             return Err(NetworkDeviceError::Malformed);
+        }
+        if frame_len > MAX_ETHERNET_FRAME_BYTES {
+            self.recycle_rx_slot(desc_id)?;
+            return Err(NetworkDeviceError::Oversized);
         }
 
         let buffer = unsafe { &RX_BUFFER_POOL.slots[desc_id] };
@@ -603,14 +641,21 @@ impl VirtioNetDevice {
             NetworkDeviceError::Malformed
         })?;
 
+        self.recycle_rx_slot(desc_id)?;
+        Ok(Some(frame))
+    }
+
+    /// Returns a completed RX slot to the device. Failure to repost means the
+    /// pool can no longer be trusted, so the device is poisoned.
+    fn recycle_rx_slot(&mut self, desc_id: usize) -> Result<(), NetworkDeviceError> {
         self.rx_ownership[desc_id] = DescriptorOwnership::DriverOwned;
         self.post_rx_slot(desc_id).map_err(|_| {
-            self.device_state = DeviceState::Poisoned;
+            self.poison_with_reason("repost-failed");
             NetworkDeviceError::DeviceError
         })?;
         self.registers
             .write_u16(VIRTIO_PCI_QUEUE_NOTIFY, RX_QUEUE_INDEX);
-        Ok(Some(frame))
+        Ok(())
     }
 
     fn complete_tx(&mut self, used: VirtqUsedElem) -> Result<(), NetworkDeviceError> {
