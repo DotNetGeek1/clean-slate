@@ -82,6 +82,8 @@ pub(crate) mod m6_object;
 pub(crate) mod m6_process_control;
 #[cfg(feature = "m6-revocation-self-test")]
 pub(crate) mod m6_revocation;
+#[cfg(feature = "m7-dns-self-test")]
+pub(crate) mod m7_dns;
 #[cfg(feature = "m7-net-device-self-test")]
 pub(crate) mod m7_net_device;
 #[cfg(any(
