@@ -38,6 +38,7 @@ impl TcpEchoService {
         if self.active.is_none() {
             let socket = sockets.get_mut::<tcp::Socket>(self.listen);
             if socket.is_active() {
+                println!("[FIX ] tcp echo connect");
                 self.active = Some(self.listen);
                 self.recv_len = 0;
             } else if socket.is_listening() {

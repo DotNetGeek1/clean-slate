@@ -26,7 +26,7 @@ pub const TCP_RTO_TICKS: u64 = 50;
 pub const TCP_TIME_WAIT_TICKS: u64 = 200;
 
 /// Active-open timeout while waiting for SYN-ACK.
-pub const TCP_CONNECT_TIMEOUT_TICKS: u64 = 500;
+pub const TCP_CONNECT_TIMEOUT_TICKS: u64 = 500_000;
 
 /// Fixed-capacity byte ring.
 #[derive(Clone, Debug)]

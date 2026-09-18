@@ -11,7 +11,9 @@ use std::time::Duration;
 
 mod m7_certs;
 mod m7_fixture;
+mod m7_fixture_echo;
 mod m7_fixture_tcp;
+mod m7_fixture_tls;
 
 use m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
 
@@ -560,7 +562,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             m5_data_disk: None,
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
-            kernel_release: false,
+            kernel_release: true,
         },
     );
     peer.shutdown();
@@ -580,7 +582,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             m5_data_disk: None,
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
-            kernel_release: false,
+            kernel_release: true,
         },
     );
     peer.shutdown();
@@ -621,6 +623,7 @@ fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
             m5_data_disk: None,
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
+            kernel_release: false,
         },
     );
     peer.shutdown();

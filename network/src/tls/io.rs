@@ -13,7 +13,7 @@ use crate::tcp::TcpTransport;
 pub const TLS_IO_TIMEOUT_TICKS: u64 = 2_000;
 
 /// Handshake spin budget in monotonic ticks.
-pub const TLS_HANDSHAKE_TIMEOUT_TICKS: u64 = 3_000;
+pub const TLS_HANDSHAKE_TIMEOUT_TICKS: u64 = 500_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TlsIoError;

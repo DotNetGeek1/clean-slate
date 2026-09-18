@@ -95,6 +95,40 @@ mod integration {
     }
 
     #[test]
+    fn fixture_guest_syn_capture_parses() {
+        use crate::addr::IpProtocol;
+        use crate::ipv4::Ipv4Header;
+        use crate::tcp::segment::parse as parse_tcp;
+        // First guest SYN observed in QEMU (IPv4 + TCP only, from xtask fixture log).
+        let ip = [
+            0x45, 0x00, 0x00, 0x2c, 0x00, 0x01, 0x40, 0x00, 0x40, 0x06, 0x26, 0x2f, 0x0a, 0x4d,
+            0x00, 0x02, 0x0a, 0x4d, 0x00, 0x01, 0xc3, 0x50, 0x0f, 0xa1, 0x00, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x60, 0x02, 0x10, 0x00, 0xca, 0x0d, 0x00, 0x00, 0x02, 0x04,
+            0x05, 0xb4,
+        ];
+        let (hdr, payload) = Ipv4Header::parse(&ip).expect("ipv4");
+        assert_eq!(hdr.protocol, IpProtocol::TCP);
+        let (seg, data) =
+            parse_tcp(hdr.src, hdr.dst, payload).expect("tcp segment must validate on wire");
+        assert!(seg.flags.contains(crate::tcp::segment::TcpFlags::SYN));
+        assert!(data.is_empty());
+        assert_eq!(seg.dst_port, TCP_ECHO_PORT);
+    }
+
+    #[test]
+    fn poll_ok_during_arp_miss_retransmit_window() {
+        let (mut guest, _peer) = setup_pair();
+        let remote = SocketAddrV4::new(PEER_IPV4, TCP_ECHO_PORT);
+        let id = guest.connect(0, OWNER, remote).unwrap();
+        for tick in 0..200 {
+            guest
+                .poll(tick)
+                .expect("poll must not fail while ARP is unresolved");
+        }
+        assert_eq!(guest.state(id, OWNER).unwrap(), TcpState::SynSent);
+    }
+
+    #[test]
     fn peer_rst_resets_session() {
         let (mut guest, mut peer) = setup_pair();
         let id = connect_echo(0, &mut guest, &mut peer);

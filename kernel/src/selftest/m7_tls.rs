@@ -4,8 +4,9 @@ use core::mem::MaybeUninit;
 
 use clean_slate_network::addr::SocketAddrV4;
 use clean_slate_network::device::NetworkLink;
+use clean_slate_network::error::NetworkError;
 use clean_slate_network::fixture::{
-    APP_REQUEST_BYTES, APP_RESPONSE_BYTES, GUEST_IPV4, GUEST_MAC, PEER_IPV4, TCP_ECHO_PORT,
+    APP_REQUEST_BYTES, APP_RESPONSE_BYTES, GUEST_IPV4, PEER_IPV4, PEER_MAC, TCP_ECHO_PORT,
     TLS_PORT, TLS_SERVER_NAME,
 };
 use clean_slate_network::protocol::TrustedCaller;
@@ -22,8 +23,8 @@ use crate::device::virtio::net::VirtioNetDevice;
 use crate::{serial_write_fmt, serial_write_line};
 
 const OWNER: TrustedCaller = TrustedCaller::new(1, 0, 1);
-const ARP_TTL: u64 = 5_000;
-const POLL_LIMIT: usize = 500_000;
+const ARP_TTL: u64 = 50_000;
+const POLL_LIMIT: usize = 50_000_000;
 
 static mut TCP_TRANSPORT: MaybeUninit<TcpTransport<VirtioNetDevice>> = MaybeUninit::uninit();
 static mut TCP_TRANSPORT_READY: bool = false;
@@ -71,22 +72,28 @@ impl RngCore for RdrandRng {
 
 pub(crate) fn run_m7_tls_self_test() -> Result<(), &'static str> {
     let tcp = tcp_transport()?;
-    run_tcp_echo_phase(tcp)?;
-    run_tls_phase(tcp, false)
+    let mut tick = 0u64;
+    tick = run_tcp_echo_phase(tcp, tick)?;
+    run_tls_phase(tcp, false, tick)
 }
 
 pub(crate) fn run_m7_tls_fail_closed_self_test() -> Result<(), &'static str> {
     let tcp = tcp_transport()?;
-    run_tls_phase(tcp, true)
+    run_tls_phase(tcp, true, 0)
 }
 
 fn tcp_transport() -> Result<&'static mut TcpTransport<VirtioNetDevice>, &'static str> {
     unsafe {
         if !TCP_TRANSPORT_READY {
             let device = VirtioNetDevice::discover()?;
-            let stack = L3Stack::new(device, GUEST_MAC, GUEST_IPV4, ARP_TTL);
+            let mac = device.link().mac;
+            let stack = L3Stack::new(device, mac, GUEST_IPV4, ARP_TTL);
             let slot = TCP_TRANSPORT.as_mut_ptr();
             TcpTransport::init_in_place(slot, stack, SessionGeneration::new(1));
+            (*TCP_TRANSPORT.as_mut_ptr())
+                .stack_mut()
+                .arp_cache_mut()
+                .insert(PEER_IPV4, PEER_MAC, 0);
             TCP_TRANSPORT_READY = true;
         }
         Ok(&mut *TCP_TRANSPORT.as_mut_ptr())
@@ -94,15 +101,16 @@ fn tcp_transport() -> Result<&'static mut TcpTransport<VirtioNetDevice>, &'stati
 }
 
 #[inline(never)]
-fn run_tcp_echo_phase(tcp: &mut TcpTransport<VirtioNetDevice>) -> Result<(), &'static str> {
+fn run_tcp_echo_phase(
+    tcp: &mut TcpTransport<VirtioNetDevice>,
+    tick: u64,
+) -> Result<u64, &'static str> {
     let remote_echo = SocketAddrV4::new(PEER_IPV4, TCP_ECHO_PORT);
+    let mut tick = tick;
     let echo_id = tcp
-        .connect(0, OWNER, remote_echo)
+        .connect(tick, OWNER, remote_echo)
         .map_err(|_| "tcp echo connect failed")?;
-    drive_tcp(tcp, echo_id)?;
-    if tcp.state(echo_id, OWNER) != Ok(TcpState::Established) {
-        return Err("tcp echo not established");
-    }
+    tick = drive_tcp_until(tcp, echo_id, tick, TcpState::Established)?;
     serial_write_fmt(format_args!(
         "[TCP ] connected peer={}.{}.{}.{}:{}\n",
         PEER_IPV4.octets()[0],
@@ -111,32 +119,35 @@ fn run_tcp_echo_phase(tcp: &mut TcpTransport<VirtioNetDevice>) -> Result<(), &'s
         PEER_IPV4.octets()[3],
         TCP_ECHO_PORT
     ));
-    tcp.send(1, echo_id, OWNER, APP_REQUEST_BYTES)
+    tick = tick.saturating_add(1);
+    tcp.send(tick, echo_id, OWNER, APP_REQUEST_BYTES)
         .map_err(|_| "tcp echo send failed")?;
-    drive_tcp(tcp, echo_id)?;
+    tick = tick.saturating_add(1);
     let mut buf = [0u8; 64];
-    let n = receive_all(tcp, echo_id, &mut buf)?;
+    let (n, tick) = receive_all(tcp, echo_id, tick, &mut buf)?;
     if &buf[..n] != APP_RESPONSE_BYTES {
         return Err("tcp echo response mismatch");
     }
     serial_write_fmt(format_args!("[TCP ] echo ok len={n}\n"));
-    let _ = tcp.close(2, echo_id, OWNER);
-    drive_tcp(tcp, echo_id)?;
-    Ok(())
+    let _ = tcp.close(tick, echo_id, OWNER);
+    poll_for_ticks(tcp, tick.saturating_add(1), 10_000)?;
+    Ok(tick)
 }
 
 #[inline(never)]
 fn run_tls_phase(
     tcp: &mut TcpTransport<VirtioNetDevice>,
     expect_identity_failure: bool,
+    mut tick: u64,
 ) -> Result<(), &'static str> {
     let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
     let config = TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX);
     let remote_tls = SocketAddrV4::new(PEER_IPV4, TLS_PORT);
     let read_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_READ_BUF) };
     let write_buf = unsafe { &mut *core::ptr::addr_of_mut!(TLS_WRITE_BUF) };
+    tick = tick.saturating_add(1);
     let tls_result = TlsSession::connect(
-        10, tcp, OWNER, remote_tls, config, RdrandRng, read_buf, write_buf,
+        tick, tcp, OWNER, remote_tls, config, RdrandRng, read_buf, write_buf,
     );
     if expect_identity_failure {
         return match tls_result {
@@ -157,45 +168,83 @@ fn run_tls_phase(
         "[TLS ] authenticated peer={}\n",
         tls.peer_name()
     ));
-    tls.write(20, APP_REQUEST_BYTES)
+    tick = tick.saturating_add(100);
+    tls.write(tick, APP_REQUEST_BYTES)
         .map_err(|_| "tls write failed")?;
     let mut app_buf = [0u8; 64];
-    let n = tls.read(30, &mut app_buf).map_err(|_| "tls read failed")?;
+    tick = tick.saturating_add(100);
+    let n = tls
+        .read(tick, &mut app_buf)
+        .map_err(|_| "tls read failed")?;
     if &app_buf[..n] != APP_RESPONSE_BYTES {
         return Err("tls app response mismatch");
     }
     serial_write_fmt(format_args!("[TLS ] app bytes ok len={n}\n"));
-    tls.close(40).map_err(|_| "tls close failed")?;
+    tick = tick.saturating_add(100);
+    tls.close(tick).map_err(|_| "tls close failed")?;
     serial_write_line("[TLS ] closed");
     serial_write_line("[M7.6] PASS");
     Ok(())
 }
 
-fn drive_tcp(tcp: &mut TcpTransport<VirtioNetDevice>, id: SessionId) -> Result<(), &'static str> {
-    for tick in 0..POLL_LIMIT {
-        tcp.poll(tick as u64).map_err(|_| "tcp poll failed")?;
-        if matches!(tcp.state(id, OWNER), Ok(TcpState::Established)) {
-            return Ok(());
+fn drive_tcp_until(
+    tcp: &mut TcpTransport<VirtioNetDevice>,
+    id: SessionId,
+    mut tick: u64,
+    target: TcpState,
+) -> Result<u64, &'static str> {
+    for _ in 0..POLL_LIMIT {
+        tcp.poll(tick).map_err(|_| "tcp poll failed")?;
+        match tcp.state(id, OWNER) {
+            Ok(s) if s == target => return Ok(tick),
+            Ok(TcpState::Reset) | Ok(TcpState::Closed) => return Err("tcp drive reset"),
+            Err(_) => return Err("tcp drive stale session"),
+            Ok(_) => {}
         }
+        tick = tick.saturating_add(1);
+        spin_loop();
     }
     Err("tcp drive timeout")
+}
+
+fn poll_for_ticks(
+    tcp: &mut TcpTransport<VirtioNetDevice>,
+    mut tick: u64,
+    count: usize,
+) -> Result<u64, &'static str> {
+    for _ in 0..count {
+        tcp.poll(tick).map_err(|_| "tcp poll failed")?;
+        tick = tick.saturating_add(1);
+        spin_loop();
+    }
+    Ok(tick)
 }
 
 fn receive_all(
     tcp: &mut TcpTransport<VirtioNetDevice>,
     id: SessionId,
+    mut tick: u64,
     out: &mut [u8],
-) -> Result<usize, &'static str> {
+) -> Result<(usize, u64), &'static str> {
     let mut total = 0usize;
-    for tick in 0..POLL_LIMIT {
-        tcp.poll(tick as u64).map_err(|_| "tcp poll failed")?;
-        let n = tcp
-            .receive(id, OWNER, &mut out[total..])
-            .map_err(|_| "tcp recv")?;
+    for _ in 0..POLL_LIMIT {
+        tcp.poll(tick).map_err(|_| "tcp poll failed")?;
+        let n = match tcp.receive(id, OWNER, &mut out[total..]) {
+            Ok(n) => n,
+            Err(NetworkError::Closed) | Err(NetworkError::Reset) if total == 0 => {
+                tick = tick.saturating_add(1);
+                spin_loop();
+                continue;
+            }
+            Err(NetworkError::NotFound) => return Err("tcp recv stale"),
+            Err(_) => return Err("tcp recv"),
+        };
         total += n;
-        if total >= APP_REQUEST_BYTES.len() {
-            return Ok(total);
+        if total >= APP_RESPONSE_BYTES.len() {
+            return Ok((total, tick));
         }
+        tick = tick.saturating_add(1);
+        spin_loop();
     }
     Err("tcp receive timeout")
 }

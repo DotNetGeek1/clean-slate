@@ -12,7 +12,7 @@ mod transport;
 #[cfg(any(test, feature = "alloc"))]
 mod test_peer;
 
-#[cfg(all(test, feature = "tls"))]
+#[cfg(any(test, feature = "host-tls-peer"))]
 mod tls_test_peer;
 
 pub use conn::{
@@ -27,7 +27,7 @@ pub use transport::{TcpTable, TcpTransport};
 #[cfg(any(test, feature = "alloc"))]
 pub use test_peer::TestPeer;
 
-#[cfg(all(test, feature = "tls"))]
+#[cfg(any(test, feature = "host-tls-peer"))]
 pub use tls_test_peer::{
     load_fixture_server_config, server_config_from_der, TlsPeerCert, TlsPeerFault, TlsTestPeer,
 };

@@ -437,7 +437,7 @@ Pass boot markers (order): `[TCP ] connected peer=10.77.0.1:4001`, `[TCP ] echo 
 
 Fail-closed boot: `[TLS ] peer identity rejected name=m7.fixture.test`, `[M7.6] FAIL-CLOSED OK`.
 
-UEFI builds enable `--cfg aes_force_soft` in [`.cargo/config.toml`](../.cargo/config.toml) so `test-m7-tls` uses the same **debug** kernel profile as other M7 lanes (avoids Windows LLVM failures in AES codegen without forcing release).
+UEFI builds set `--cfg aes_force_soft` in [`.cargo/config.toml`](../.cargo/config.toml) for portable AES. On Windows hosts, **debug** UEFI codegen for GCM (`polyval`/`aes`) can still trigger an LLVM split error; `cargo xtask test-m7-tls` therefore builds the kernel **release** profile (`kernel_release: true`) while other M7 lanes stay debug.
 
 ### Error mapping (`TlsError` → `NetworkError`)
 

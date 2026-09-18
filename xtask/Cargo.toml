@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-clean-slate-network = { path = "../network" }
+clean-slate-network = { path = "../network", features = ["alloc", "std", "host-tls-peer"] }
 rcgen = { version = "=0.13.2", default-features = false, features = ["pem", "crypto", "ring"] }
 rustls = { version = "=0.23.26", default-features = false, features = ["ring", "std", "tls12"] }
 time = { version = "=0.3.39", default-features = false, features = ["formatting", "parsing", "macros"] }
