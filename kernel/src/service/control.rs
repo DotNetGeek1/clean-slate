@@ -548,16 +548,21 @@ impl ServiceLifecycleController {
             DomainId(spawned.domain_id),
         );
         let kernel_root_frame = self.kernel_root_frame;
-        self.grant_storage_block_capability_with_rollback(spawned.pid, service_id, |pid| {
-            teardown_process_by_id(
-                allocator,
-                kernel_root_frame,
-                pid,
-                SERVICE_TERMINATE_STATUS,
-                false,
-            )
-            .map(|_| ())
-        })?;
+        self.grant_storage_block_capability_with_rollback(
+            spawned.pid,
+            service_id,
+            generation,
+            |pid| {
+                teardown_process_by_id(
+                    allocator,
+                    kernel_root_frame,
+                    pid,
+                    SERVICE_TERMINATE_STATUS,
+                    false,
+                )
+                .map(|_| ())
+            },
+        )?;
         self.services[service_index].live = Some(LiveServiceInstance {
             pid: spawned.pid,
             tid: spawned.tid,
@@ -578,6 +583,7 @@ impl ServiceLifecycleController {
         &mut self,
         pid: u64,
         service_id: ServiceId,
+        instance_generation: InstanceGeneration,
         mut rollback_spawn: F,
     ) -> Result<(), LifecycleControlError>
     where
@@ -607,8 +613,13 @@ impl ServiceLifecycleController {
             use crate::capability::network::{grant_network_authority, NetworkGrantPolicy};
             use clean_slate_capability::{HolderId, ResourceClass, Rights};
             let rights = Rights::valid_for(ResourceClass::Network);
-            if grant_network_authority(HolderId(pid), rights, NetworkGrantPolicy::NetworkService)
-                .is_err()
+            if grant_network_authority(
+                HolderId(pid),
+                rights,
+                NetworkGrantPolicy::NetworkService,
+                Some(u64::from(instance_generation.0)),
+            )
+            .is_err()
             {
                 kernel_log_fmt(format_args!(
                     "[FAIL] network capability grant failed pid={} service={}\n",
@@ -623,12 +634,11 @@ impl ServiceLifecycleController {
                     "network service capability grant failed",
                 ));
             }
-            let generation = self
-                .authoritative_generation(service_id)
-                .map(|g| u64::from(g.0))
-                .unwrap_or(0);
-            crate::service::net_bridge::net_bridge_mut()
-                .register_service_instance(pid, pid, generation);
+            crate::service::net_bridge::net_bridge_mut().register_service_instance(
+                pid,
+                pid,
+                u64::from(instance_generation.0),
+            );
             kernel_log_fmt(format_args!(
                 "[NET ] authority granted pid={} device={}\n",
                 pid, NETWORK_DEVICE_ID
@@ -641,14 +651,17 @@ impl ServiceLifecycleController {
         &mut self,
         pid: u64,
     ) -> Result<u64, &'static str> {
-        use crate::capability::network::{grant_network_authority, NetworkGrantPolicy};
+        use crate::capability::network::{
+            grant_network_authority, revoke_network_capabilities_for_holder, NetworkGrantPolicy,
+        };
         use clean_slate_capability::{HolderId, Rights};
+        revoke_network_capabilities_for_holder(HolderId(pid));
         let rights = Rights::NET_RESOLVE
             .union(Rights::NET_CONNECT)
             .union(Rights::NET_SEND)
             .union(Rights::NET_RECEIVE);
         let handle =
-            grant_network_authority(HolderId(pid), rights, NetworkGrantPolicy::Application)
+            grant_network_authority(HolderId(pid), rights, NetworkGrantPolicy::Application, None)
                 .map_err(|_| "network client capability grant failed")?;
         Ok(handle.encode())
     }
@@ -667,8 +680,7 @@ impl ServiceLifecycleController {
         self.log_terminate(service_id, live.pid);
         #[cfg(feature = "m7-net-service-self-test")]
         if service_id == NETWORK_SERVICE_ID {
-            let failed = crate::service::net_bridge::shutdown_net_service_instance();
-            kernel_log_fmt(format_args!("[NET ] inflight failed count={failed}\n"));
+            let _ = crate::service::net_bridge::shutdown_net_service_instance();
         }
         teardown_process_by_id(
             allocator,
@@ -778,8 +790,8 @@ impl ServiceLifecycleController {
 
         match kind {
             ControlRequestKind::Start => {
-                self.services[service_index].authoritative_generation = next_generation;
                 let result = self.start_service(allocator, service_id, next_generation)?;
+                self.services[service_index].authoritative_generation = next_generation;
                 self.services[service_index].state = next_state;
                 Ok(result)
             }
@@ -1049,10 +1061,15 @@ mod tests {
 
         let mut rollback_pid = 0_u64;
         let err = controller
-            .grant_storage_block_capability_with_rollback(77, STORAGE_SERVICE_ID, |pid| {
-                rollback_pid = pid;
-                Ok(())
-            })
+            .grant_storage_block_capability_with_rollback(
+                77,
+                STORAGE_SERVICE_ID,
+                InstanceGeneration(1),
+                |pid| {
+                    rollback_pid = pid;
+                    Ok(())
+                },
+            )
             .unwrap_err();
         assert!(matches!(err, LifecycleControlError::SpawnFailed(_)));
         assert_eq!(rollback_pid, 77);
@@ -1075,9 +1092,12 @@ mod tests {
         }
 
         let err = controller
-            .grant_storage_block_capability_with_rollback(77, STORAGE_SERVICE_ID, |_| {
-                Err("teardown failed")
-            })
+            .grant_storage_block_capability_with_rollback(
+                77,
+                STORAGE_SERVICE_ID,
+                InstanceGeneration(1),
+                |_| Err("teardown failed"),
+            )
             .unwrap_err();
         assert_eq!(
             err,

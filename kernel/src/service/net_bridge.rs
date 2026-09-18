@@ -191,6 +191,12 @@ impl NetBridge {
         generation: u64,
     ) -> SessionGeneration {
         let _ = self.loopback.reset();
+        self.slots = [ClientSlot::free(); NETWORK_REQUEST_SLOTS];
+        self.next_request_id = 1;
+        self.inflight_failed = 0;
+        self.holder_exit_head = 0;
+        self.holder_exit_tail = 0;
+        self.pending_holder_exit_ack = None;
         self.service_pid = pid;
         self.service_domain = domain;
         self.session_generation = SessionGeneration::new(generation);
@@ -250,7 +256,7 @@ impl NetBridge {
         if !self.is_live_service(service_pid) {
             return Err(NetBridgeError::NotService);
         }
-        let caller = self
+        let _caller = self
             .pending_holder_exit_ack
             .take()
             .ok_or(NetBridgeError::InvalidRequest)?;

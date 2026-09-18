@@ -374,10 +374,16 @@ pub(crate) fn destroy_process_address_space(
             free_frame(allocator, mapping.frame_address)?;
         }
     }
+    // Dropping `OffsetPageTable` walks the root; page-table frames are freed below.
+    #[allow(clippy::forget_non_drop)]
+    core::mem::forget(mapper);
     for frame_address in address_space.page_table_frames[..address_space.page_table_frame_count]
         .iter()
         .rev()
     {
+        if *frame_address == address_space.root_frame {
+            continue;
+        }
         unsafe {
             free_frame(allocator, *frame_address)?;
         }

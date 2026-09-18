@@ -5,7 +5,7 @@
 extern crate alloc;
 
 use clean_slate_capability::syscall_abi::{
-    SYSCALL_EACCES, SYSCALL_NR_NETWORK_CAPABILITY, SYSCALL_NR_NETWORK_REQUEST,
+    SYSCALL_EACCES, SYSCALL_ESTALE, SYSCALL_NR_NETWORK_CAPABILITY, SYSCALL_NR_NETWORK_REQUEST,
 };
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
@@ -556,7 +556,13 @@ fn run_stale_close(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> 
     let handle = client_handle()?;
     let session = SessionId::from_raw(bootstrap.session_id_raw);
     let close = NetworkRequest::Close { session }.encode();
-    let close_id = client_submit(handle, &close, &[])?;
+    let close_id = match client_submit(handle, &close, &[]) {
+        Err(SYSCALL_ESTALE) => {
+            bootstrap.aux_status = session.generation().get();
+            return Ok(NETWORK_SERVICE_RESULT_OK);
+        }
+        other => other?,
+    };
     let mut payload = [0u8; 64];
     let response = poll_until_done(handle, close_id, &mut payload)?;
     match response {

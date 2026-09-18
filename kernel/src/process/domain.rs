@@ -145,6 +145,13 @@ pub(crate) fn teardown_current_process(
     let net_reclaimed = reclaim_net_requests_for_holder(holder.0);
     if net_reclaimed == 0 {
         let _ = crate::capability::network::on_holder_exit(holder);
+        if crate::service::net_bridge::net_bridge_mut().service_pid() != holder.0
+            && crate::service::net_bridge::net_bridge_mut().service_pid() != 0
+        {
+            use clean_slate_network::protocol::TrustedCaller;
+            crate::service::net_bridge::net_bridge_mut()
+                .push_holder_exit(TrustedCaller::new(holder.0, holder.0, 0));
+        }
     }
     revoke_for_holder(holder);
     revoke_for_process_resource(process_id);

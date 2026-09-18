@@ -101,12 +101,13 @@ pub(crate) fn start_m7_net_caps_self_test(allocator: PageAllocator) -> ! {
         .union(Rights::NET_SEND)
         .union(Rights::NET_RECEIVE)
         .union(Rights::DELEGATE);
-    let handle = grant_network_authority(holder, app_rights, NetworkGrantPolicy::Application)
+    let handle = grant_network_authority(holder, app_rights, NetworkGrantPolicy::Application, None)
         .unwrap_or_else(|_| fatal_kernel_error("network grant failed"));
     if grant_network_authority(
         unrelated,
         Rights::NET_RAW_DEVICE,
         NetworkGrantPolicy::Application,
+        None,
     )
     .is_ok()
     {
@@ -116,6 +117,7 @@ pub(crate) fn start_m7_net_caps_self_test(allocator: PageAllocator) -> ! {
         holder,
         Rights::NET_RAW_DEVICE,
         NetworkGrantPolicy::NetworkService,
+        None,
     )
     .unwrap_or_else(|_| fatal_kernel_error("service raw-device grant failed"));
     authorize_network_op(holder, raw_handle.encode(), NetworkOp::RawDevice, None)
@@ -160,8 +162,9 @@ pub(crate) fn start_m7_net_caps_self_test(allocator: PageAllocator) -> ! {
     {
         fatal_kernel_error("stale session generation must deny");
     }
-    let replacement = grant_network_authority(holder, app_rights, NetworkGrantPolicy::Application)
-        .unwrap_or_else(|_| fatal_kernel_error("replacement grant failed"));
+    let replacement =
+        grant_network_authority(holder, app_rights, NetworkGrantPolicy::Application, None)
+            .unwrap_or_else(|_| fatal_kernel_error("replacement grant failed"));
     authorize_network_op(holder, replacement.encode(), NetworkOp::Resolve, None)
         .unwrap_or_else(|_| fatal_kernel_error("resolve on fresh generation failed"));
 

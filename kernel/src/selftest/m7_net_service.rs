@@ -3,7 +3,6 @@
 use crate::arch::x86_64::apic::reprogram_local_apic_timer;
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
-use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
@@ -18,12 +17,10 @@ use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
 use crate::process::userspace_process_root_frame;
-use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
-use crate::sched::ThreadState;
 use crate::service::control::ServiceLifecycleController;
 use crate::service::service_lifecycle_controller_mut;
 use crate::service::spawn::launch_network_aux_process;
@@ -240,12 +237,33 @@ fn spawn_all_fixtures(
         NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE, 0),
         false,
     );
+    let inflight = launch_aux_with_bootstrap(
+        controller,
+        allocator,
+        INFLIGHT_SLOT,
+        NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_INFLIGHT_ARM, generation),
+        true,
+    );
+    let stale = launch_aux_with_bootstrap(
+        controller,
+        allocator,
+        STALE_SLOT,
+        NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_STALE_CLOSE, 2),
+        true,
+    );
+    let capacity = launch_aux_with_bootstrap(
+        controller,
+        allocator,
+        CAPACITY_SLOT,
+        NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_CAPACITY_LOOP, generation),
+        true,
+    );
     M7FixturePids {
         client: client.pid,
         unauthorized: unauthorized.pid,
-        inflight: 0,
-        stale: 0,
-        capacity: 0,
+        inflight: inflight.pid,
+        stale: stale.pid,
+        capacity: capacity.pid,
     }
 }
 
@@ -265,31 +283,6 @@ fn launch_aux_with_bootstrap(
             .unwrap_or_else(|message| fatal_kernel_error(message));
     }
     spawned
-}
-
-fn resume_scheduler_slot(slot: usize) -> u64 {
-    let stack_pointer = without_interrupts(|| {
-        let scheduler = unsafe { scheduler_mut() };
-        if slot >= scheduler.threads.len() {
-            return Err("m7 net self-test scheduler slot out of range");
-        }
-        if !matches!(
-            scheduler.threads[slot].state,
-            ThreadState::Ready | ThreadState::Running
-        ) {
-            return Err("m7 net self-test resume target was not runnable");
-        }
-        scheduler.current_thread = Some(slot);
-        if !scheduler.threads[slot].started {
-            scheduler.threads[slot].started = true;
-        }
-        scheduler.threads[slot].state = ThreadState::Running;
-        Ok(scheduler.threads[slot].saved_stack_pointer)
-    })
-    .unwrap_or_else(|message| fatal_kernel_error(message));
-    prepare_current_scheduler_thread_dispatch()
-        .unwrap_or_else(|message| fatal_kernel_error(message));
-    stack_pointer
 }
 
 fn terminate_network_service(
@@ -353,7 +346,15 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 fatal_kernel_error("m7 inflight arm failed");
             }
             terminate_network_service(controller, allocator, test_state.lifecycle_capability);
+            let inflight_failed = crate::service::net_bridge::net_bridge_mut().inflight_failed();
             service_generation = 2;
+            set_state(Some(M7NetSelfTestState {
+                lifecycle_capability: test_state.lifecycle_capability,
+                phase: test_state.phase,
+                session_id_raw,
+                service_generation,
+                fixtures: test_state.fixtures,
+            }));
             launch_network_service(
                 controller,
                 allocator,
@@ -364,6 +365,9 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 "[NET ] service restarted pid={} generation={}\n",
                 controller.live_pid(NETWORK_SERVICE_ID).unwrap_or(0),
                 service_generation
+            ));
+            kernel_log_fmt(format_args!(
+                "[NET ] inflight failed count={inflight_failed}\n"
             ));
             for pid in [test_state.fixtures.stale, test_state.fixtures.capacity] {
                 controller
@@ -388,7 +392,10 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 "[NET ] stale-session denied generation={}\n",
                 report.aux_status
             ));
-            release_fixture_phase(test_state.fixtures.capacity, kernel_root);
+            patch_fixture_bootstrap(test_state.fixtures.capacity, kernel_root, |bootstrap| {
+                bootstrap.service_generation = service_generation;
+                bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
+            });
             M7Phase::AwaitCapacityLoop
         }
         (M7Phase::AwaitCapacityLoop, NETWORK_SERVICE_MODE_CAPACITY_LOOP) => {
@@ -411,25 +418,14 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
 
     let teardown = teardown_current_process(allocator, kernel_root, 0, false)
         .unwrap_or_else(|message| fatal_kernel_error(message));
-    kernel_log_line("[NET ] teardown complete");
 
     if next_phase == M7Phase::Complete {
         kernel_log_line(PASS_MARKER);
         qemu_exit(QEMU_EXIT_SUCCESS);
     }
 
-    let force_slot = match (test_state.phase, next_phase) {
-        (M7Phase::AwaitClientEcho, M7Phase::AwaitUnauthorized) => Some(UNAUTHORIZED_SLOT),
-        (M7Phase::AwaitUnauthorized, M7Phase::AwaitInflightArm) => Some(INFLIGHT_SLOT),
-        (M7Phase::AwaitInflightArm, M7Phase::AwaitStaleClose) => Some(STALE_SLOT),
-        (M7Phase::AwaitStaleClose, M7Phase::AwaitCapacityLoop) => Some(CAPACITY_SLOT),
-        _ => None,
-    };
-    if let Some(slot) = force_slot {
-        return resume_scheduler_slot(slot);
+    match teardown.next_stack_pointer {
+        Some(next_stack_pointer) => next_stack_pointer,
+        None => fatal_kernel_error("m7 net self-test teardown found no runnable thread"),
     }
-
-    teardown
-        .next_stack_pointer
-        .unwrap_or_else(|| fatal_kernel_error("m7 net self-test teardown found no runnable thread"))
 }

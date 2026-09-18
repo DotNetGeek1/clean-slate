@@ -434,6 +434,8 @@ fn run_inner() -> Result<(), &'static str> {
         }
         #[cfg(all(
             not(feature = "m7-net-service-self-test"),
+            not(feature = "m7-dns-self-test"),
+            not(feature = "m7-net-device-self-test"),
             not(feature = "m4-service-lifecycle-self-test"),
             not(feature = "m4-supervisor-self-test"),
             not(any(
