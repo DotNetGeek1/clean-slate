@@ -180,6 +180,7 @@ pub(crate) fn grant_network_authority(
     target_holder: HolderId,
     rights: Rights,
     policy: NetworkGrantPolicy,
+    instance_generation: Option<u64>,
 ) -> Result<CapabilityHandle, CapabilityError> {
     let effective = match policy {
         NetworkGrantPolicy::Application => sanitize_application_rights(rights)?,
@@ -190,7 +191,10 @@ pub(crate) fn grant_network_authority(
             rights
         }
     };
-    let resource = network_service_resource()?;
+    let resource = match instance_generation {
+        Some(generation) => ResourceRef::network(u64::from(NETWORK_SERVICE_ID.0), generation),
+        None => network_service_resource()?,
+    };
     let handle = grant_root(target_holder, resource, effective)?;
     log_grant(target_holder, effective, resource.instance_generation);
     Ok(handle)
@@ -210,11 +214,13 @@ fn log_grant(holder: HolderId, rights: Rights, generation: u64) {
 }
 
 fn log_allow(holder: HolderId, op: NetworkOp) {
+    #[cfg(feature = "m7-net-caps-self-test")]
     kernel_log_fmt(format_args!(
         "[CAP ] net allow op={} holder={}\n",
         op.op_name(),
         holder.0
     ));
+    let _ = (holder, op);
 }
 
 fn log_denied(holder: HolderId, reason: DenialReason) {
@@ -371,6 +377,33 @@ pub(crate) fn on_revoked(handle: CapabilityHandle) -> [SessionId; MAX_TRACKED_SE
     let table = unsafe { capability_space_mut() };
     let _ = revoke_subtree(table, handle);
     impacted
+}
+
+/// Revokes live network capabilities for a holder (used before re-granting after service restart).
+pub(crate) fn revoke_network_capabilities_for_holder(holder: HolderId) {
+    let handles: [Option<CapabilityHandle>; MAX_TRACKED_SESSIONS] =
+        with_capability_space(|table| {
+            let mut out = [None; MAX_TRACKED_SESSIONS];
+            let mut index = 0usize;
+            for slot in 0..table.capacity() {
+                if index >= MAX_TRACKED_SESSIONS {
+                    break;
+                }
+                if table.state_at(slot) != CapabilityState::Live {
+                    continue;
+                }
+                let record = table.record_at(slot);
+                if record.holder != holder || record.resource.class != ResourceClass::Network {
+                    continue;
+                }
+                out[index] = table.handle_at(slot);
+                index += 1;
+            }
+            out
+        });
+    for handle in handles.into_iter().flatten() {
+        let _ = on_revoked(handle);
+    }
 }
 
 /// Clears tracked network sessions after M6 holder revocation (call from process teardown).

@@ -93,6 +93,8 @@ pub mod syscall_abi {
     pub const SYSCALL_NR_CAP_REVOKE: u64 = 11;
     pub const SYSCALL_NR_CAP_AUDIT_READ: u64 = 12;
     pub const SYSCALL_NR_CAP_GRANT: u64 = 13;
+    pub const SYSCALL_NR_NETWORK_CAPABILITY: u64 = 14;
+    pub const SYSCALL_NR_NETWORK_REQUEST: u64 = 15;
 
     /// Best-effort inverse of `CapabilityError::syscall_status` (lossy: many errors share a status).
     pub fn error_from_status(status: u64) -> Option<CapabilityError> {
