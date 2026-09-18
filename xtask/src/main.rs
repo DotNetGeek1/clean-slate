@@ -9,9 +9,11 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+mod m7_certs;
 mod m7_fixture;
+mod m7_fixture_tcp;
 
-use m7_fixture::M7FixturePeer;
+use m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
 
 const KERNEL_PACKAGE: &str = "clean-slate-kernel";
 const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
@@ -39,6 +41,7 @@ const M6_AUDIT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M6_CAPABILITIES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(180);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M7_NET_DEVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+const M7_TLS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 const M5_CRASH_MATRIX_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_PERSISTENCE_BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_CRASH_RECOVERY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -292,6 +295,18 @@ const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[BLK ] read lba=",
     "[M5.2] PASS",
 ];
+const M7_TLS_ACCEPTANCE_MARKERS: [&str; 6] = [
+    "[TCP ] connected peer=10.77.0.1:4001",
+    "[TCP ] echo ok len=",
+    "[TLS ] authenticated peer=m7.fixture.test",
+    "[TLS ] app bytes ok len=",
+    "[TLS ] closed",
+    "[M7.6] PASS",
+];
+const M7_TLS_FAIL_CLOSED_MARKERS: [&str; 2] = [
+    "[TLS ] peer identity rejected name=m7.fixture.test",
+    "[M7.6] FAIL-CLOSED OK",
+];
 const M7_NET_DEVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[NET ] virtio ready mac=",
     "[NET ] tx ok len=",
@@ -446,6 +461,11 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM5 => run_m5_acceptance(),
         ParsedCommand::TestM5Block => run_m5_block_acceptance(),
         ParsedCommand::TestM7NetDevice => run_m7_net_device_acceptance(),
+        ParsedCommand::TestM7Tls => run_m7_tls_acceptance(),
+        ParsedCommand::GenM7FixtureCerts => {
+            m7_certs::generate_m7_fixture_certs().map_err(XtaskError::InvalidCommand)?;
+            Ok(())
+        }
         ParsedCommand::TestM5Storage => run_m5_storage_acceptance(),
         ParsedCommand::TestM5CrashMatrix => run_m5_crash_matrix(),
         ParsedCommand::TestM5Persistence => run_m5_persistence_acceptance(&trailing_args),
@@ -496,8 +516,51 @@ fn run_m5_block_acceptance() -> Result<(), XtaskError> {
             m5_data_disk: Some(disk),
             reset_ovmf_vars: false,
             m7_fixture_port: None,
+            kernel_release: false,
         },
     )
+}
+
+fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
+    let peer = M7FixturePeer::start_with(FixtureOptions {
+        tls_cert: WhichCert::Correct,
+    })
+    .map_err(XtaskError::Io)?;
+    let port = peer.port();
+    let pass = run_vm_inner_with_config(
+        false,
+        false,
+        &["m7-tls-self-test"],
+        Some((&M7_TLS_ACCEPTANCE_MARKERS, M7_TLS_ACCEPTANCE_TIMEOUT)),
+        VmLaunchConfig {
+            m5_data_disk: None,
+            reset_ovmf_vars: false,
+            m7_fixture_port: Some(port),
+            kernel_release: false,
+        },
+    );
+    peer.shutdown();
+    pass?;
+
+    let peer = M7FixturePeer::start_with(FixtureOptions {
+        tls_cert: WhichCert::WrongName,
+    })
+    .map_err(XtaskError::Io)?;
+    let port = peer.port();
+    let fail_closed = run_vm_inner_with_config(
+        false,
+        false,
+        &["m7-tls-fail-closed-self-test"],
+        Some((&M7_TLS_FAIL_CLOSED_MARKERS, M7_TLS_ACCEPTANCE_TIMEOUT)),
+        VmLaunchConfig {
+            m5_data_disk: None,
+            reset_ovmf_vars: false,
+            m7_fixture_port: Some(port),
+            kernel_release: false,
+        },
+    );
+    peer.shutdown();
+    fail_closed
 }
 
 fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
@@ -515,6 +578,7 @@ fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
             m5_data_disk: None,
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
+            kernel_release: false,
         },
     );
     peer.shutdown();
@@ -662,6 +726,7 @@ fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
             m5_data_disk: Some(disk.clone()),
             reset_ovmf_vars: true,
             m7_fixture_port: None,
+            kernel_release: false,
         };
 
         println!("[M5.H] phase 1/2 boot");
@@ -1081,6 +1146,7 @@ fn m5_storage_vm_config() -> VmLaunchConfig {
         m5_data_disk: Some(m5_data_disk_path()),
         reset_ovmf_vars: true,
         m7_fixture_port: None,
+        kernel_release: false,
     }
 }
 
@@ -1165,6 +1231,8 @@ struct VmLaunchConfig {
     m5_data_disk: Option<PathBuf>,
     reset_ovmf_vars: bool,
     m7_fixture_port: Option<u16>,
+    /// Work around Windows debug UEFI codegen for AES-GCM (TLS); release builds succeed.
+    kernel_release: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1195,7 +1263,7 @@ fn run_vm_inner_with_config(
     acceptance: Option<(&[&str], Duration)>,
     config: VmLaunchConfig,
 ) -> Result<(), XtaskError> {
-    let release = false;
+    let release = config.kernel_release;
     build_kernel(release, debug_entry, features)?;
 
     let kernel = kernel_artifact(release);
@@ -1852,6 +1920,8 @@ fn print_help() {
     println!("  test-m5       M5 milestone gate: block, storage, persistence, and crash-recovery acceptance");
     println!("  test-m5-block Build the M5.2 virtio-block kernel, run QEMU, and validate ordered markers");
     println!("  test-m7-net-device Build the M7.2 virtio-net kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
+    println!("  test-m7-tls       M7.6 TLS client acceptance (pass + fail-closed QEMU boots)");
+    println!("  gen-m7-fixture-certs  Regenerate repository-owned M7 TLS fixture certificates");
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
     println!("  test-m5-persistence Two-boot persistent-disk M5 acceptance using the production storage path");
@@ -1913,6 +1983,8 @@ enum ParsedCommand {
     TestM5,
     TestM5Block,
     TestM7NetDevice,
+    TestM7Tls,
+    GenM7FixtureCerts,
     TestM5Storage,
     TestM5CrashMatrix,
     TestM5Persistence,
@@ -1960,6 +2032,10 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m7-net-device" || cmd == "m7-net-device" || cmd == "m7.2" => {
             ParsedCommand::TestM7NetDevice
         }
+        Some(cmd) if cmd == "test-m7-tls" || cmd == "m7-tls" || cmd == "m7.6" => {
+            ParsedCommand::TestM7Tls
+        }
+        Some(cmd) if cmd == "gen-m7-fixture-certs" => ParsedCommand::GenM7FixtureCerts,
         Some(cmd) if cmd == "test-m5-storage" => ParsedCommand::TestM5Storage,
         Some(cmd) if cmd == "test-m5-crash-matrix" => ParsedCommand::TestM5CrashMatrix,
         Some(cmd) if cmd == "test-m5-persistence" => ParsedCommand::TestM5Persistence,
@@ -2192,6 +2268,14 @@ mod tests {
         assert_eq!(
             parse_command(Some("test-m7-net-device".as_ref())),
             ParsedCommand::TestM7NetDevice
+        );
+        assert_eq!(
+            parse_command(Some("test-m7-tls".as_ref())),
+            ParsedCommand::TestM7Tls
+        );
+        assert_eq!(
+            parse_command(Some("m7.6".as_ref())),
+            ParsedCommand::TestM7Tls
         );
         assert_eq!(
             parse_command(Some("test-m5-disk-harness".as_ref())),

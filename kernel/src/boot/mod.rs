@@ -24,7 +24,9 @@ use crate::diagnostics::serial::serial_write_line;
     feature = "m4-crash-service-self-test",
     feature = "m3-entry-self-test",
     feature = "m5-block-self-test",
-    feature = "m7-net-device-self-test"
+    feature = "m7-net-device-self-test",
+    feature = "m7-tls-self-test",
+    feature = "m7-tls-fail-closed-self-test"
 )))]
 use crate::interrupt::timer::initialize_timer;
 #[cfg(not(any(
@@ -35,7 +37,9 @@ use crate::interrupt::timer::initialize_timer;
     feature = "m4-crash-service-self-test",
     feature = "m3-entry-self-test",
     feature = "m5-block-self-test",
-    feature = "m7-net-device-self-test"
+    feature = "m7-net-device-self-test",
+    feature = "m7-tls-self-test",
+    feature = "m7-tls-fail-closed-self-test"
 )))]
 use crate::interrupt::timer::report_timer_contract;
 use crate::mm::address_space::set_kernel_root_frame;
@@ -56,7 +60,9 @@ use crate::process::process_registry_mut;
     feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test",
     feature = "m5-block-self-test",
-    feature = "m7-net-device-self-test"
+    feature = "m7-net-device-self-test",
+    feature = "m7-tls-self-test",
+    feature = "m7-tls-fail-closed-self-test"
 )))]
 use crate::sched::dispatch::initialize_scheduler;
 #[cfg(not(any(
@@ -69,7 +75,9 @@ use crate::sched::dispatch::initialize_scheduler;
     feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test",
     feature = "m5-block-self-test",
-    feature = "m7-net-device-self-test"
+    feature = "m7-net-device-self-test",
+    feature = "m7-tls-self-test",
+    feature = "m7-tls-fail-closed-self-test"
 )))]
 use crate::sched::dispatch::start_scheduler;
 use crate::sched::task_stacks_mut;
@@ -147,6 +155,10 @@ use crate::selftest::m6_process_control::start_m6_process_control_self_test;
 use crate::selftest::m6_revocation::start_m6_revocation_self_test;
 #[cfg(feature = "m7-net-device-self-test")]
 use crate::selftest::m7_net_device::run_m7_net_device_self_test;
+#[cfg(feature = "m7-tls-fail-closed-self-test")]
+use crate::selftest::m7_tls::run_m7_tls_fail_closed_self_test;
+#[cfg(feature = "m7-tls-self-test")]
+use crate::selftest::m7_tls::run_m7_tls_self_test;
 use crate::syscall::initialize_syscall_abi;
 use ::uefi::mem::memory_map::{MemoryMap, MemoryMapMut};
 use ::uefi::Status;
@@ -465,6 +477,19 @@ fn run_inner() -> Result<(), &'static str> {
     }
 
     #[cfg(all(
+        feature = "m7-tls-self-test",
+        not(feature = "m7-tls-fail-closed-self-test")
+    ))]
+    {
+        run_m7_tls_self_test()
+    }
+
+    #[cfg(feature = "m7-tls-fail-closed-self-test")]
+    {
+        run_m7_tls_fail_closed_self_test()
+    }
+
+    #[cfg(all(
         not(feature = "m1-self-test"),
         not(feature = "m2-double-fault-self-test"),
         not(feature = "m2-timer-self-test"),
@@ -474,7 +499,9 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m4-recovery-self-test"),
         not(feature = "m3-entry-self-test"),
         not(feature = "m5-block-self-test"),
-        not(feature = "m7-net-device-self-test")
+        not(feature = "m7-net-device-self-test"),
+        not(feature = "m7-tls-self-test"),
+        not(feature = "m7-tls-fail-closed-self-test")
     ))]
     {
         let kernel_root_frame = current_root_frame_address();

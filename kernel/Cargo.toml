@@ -22,6 +22,8 @@ m4-supervisor-self-test = ["m3-entry-self-test"]
 m4-recovery-self-test = []
 m5-block-self-test = []
 m7-net-device-self-test = []
+m7-tls-self-test = ["clean-slate-network/tls", "dep:rand_core"]
+m7-tls-fail-closed-self-test = ["m7-tls-self-test"]
 m5-storage-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
 m5-persistence-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
 m5-crash-early-self-test = ["m3-entry-self-test", "dep:clean-slate-store"]
@@ -46,6 +48,7 @@ test = false
 [dependencies]
 clean-slate-block = { path = "../block" }
 clean-slate-network = { path = "../network" }
+rand_core = { version = "=0.6.4", default-features = false, optional = true }
 clean-slate-capability = { path = "../capability" }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }

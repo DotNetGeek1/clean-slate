@@ -17,6 +17,24 @@ mod integration {
     const OWNER: TrustedCaller = TrustedCaller::new(1, 1, 1);
     const OTHER: TrustedCaller = TrustedCaller::new(2, 1, 1);
 
+    /// Boot stacks must not host [`TcpTransport`]; static `init_in_place` only.
+    const MAX_TCP_TRANSPORT_BSS_BYTES: usize = 512 * 1024;
+
+    #[test]
+    fn tcp_transport_size_documented() {
+        use crate::tcp::{TcpTable, TcpTransport};
+        use core::mem::size_of;
+        let transport = size_of::<TcpTransport<FakeLink>>();
+        let table = size_of::<TcpTable>();
+        eprintln!("size_of::<TcpTransport<FakeLink>>() = {transport}");
+        eprintln!("size_of::<TcpTable>() = {table}");
+        assert!(
+            transport <= MAX_TCP_TRANSPORT_BSS_BYTES,
+            "TcpTransport grew past documented BSS budget ({transport} > {})",
+            MAX_TCP_TRANSPORT_BSS_BYTES
+        );
+    }
+
     fn setup_pair() -> (TcpTransport<FakeLink>, TestPeer<FakeLink>) {
         let (guest_link, peer_link) = FakeLink::pair();
         let guest_stack = L3Stack::new(guest_link, GUEST_MAC, GUEST_IPV4, ARP_TTL);

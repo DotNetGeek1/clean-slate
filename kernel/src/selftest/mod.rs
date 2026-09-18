@@ -84,6 +84,8 @@ pub(crate) mod m6_process_control;
 pub(crate) mod m6_revocation;
 #[cfg(feature = "m7-net-device-self-test")]
 pub(crate) mod m7_net_device;
+#[cfg(any(feature = "m7-tls-self-test", feature = "m7-tls-fail-closed-self-test"))]
+pub(crate) mod m7_tls;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",

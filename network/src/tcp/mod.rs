@@ -12,6 +12,9 @@ mod transport;
 #[cfg(any(test, feature = "alloc"))]
 mod test_peer;
 
+#[cfg(all(test, feature = "tls"))]
+mod tls_test_peer;
+
 pub use conn::{
     TCP_CONNECT_TIMEOUT_TICKS, TCP_MAX_RETRIES, TCP_RECV_BUFFER_BYTES, TCP_RTO_TICKS,
     TCP_SEND_BUFFER_BYTES, TCP_TIME_WAIT_TICKS,
@@ -23,6 +26,11 @@ pub use transport::{TcpTable, TcpTransport};
 
 #[cfg(any(test, feature = "alloc"))]
 pub use test_peer::TestPeer;
+
+#[cfg(all(test, feature = "tls"))]
+pub use tls_test_peer::{
+    load_fixture_server_config, server_config_from_der, TlsPeerCert, TlsPeerFault, TlsTestPeer,
+};
 
 #[cfg(test)]
 mod tests;

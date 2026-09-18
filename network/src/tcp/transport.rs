@@ -45,6 +45,22 @@ pub struct TcpTable {
 }
 
 impl TcpTable {
+    /// Initializes a zeroed [`TcpTable`] (static or heap-backed storage).
+    pub fn init_in_place(&mut self, generation: SessionGeneration) {
+        self.generation = generation;
+        self.iss_counter = 0;
+        #[cfg(any(test, feature = "alloc"))]
+        {
+            self.slots = new_slot_storage();
+        }
+        #[cfg(not(any(test, feature = "alloc")))]
+        {
+            for slot in self.slots.iter_mut() {
+                *slot = None;
+            }
+        }
+    }
+
     pub fn new(generation: SessionGeneration) -> Self {
         Self {
             generation,
@@ -149,6 +165,10 @@ impl TcpTable {
 }
 
 /// Client TCP transport: bounded table + L3 transmit/receive.
+///
+/// The table holds up to [`MAX_TCP_CONNECTIONS`] connections (~9.7 KiB each in `no_std`).
+/// Do not construct this type on small boot stacks; use zeroed static storage and
+/// [`TcpTransport::init_in_place`].
 pub struct TcpTransport<L: NetworkLink> {
     stack: L3Stack<L>,
     table: TcpTable,
@@ -156,6 +176,20 @@ pub struct TcpTransport<L: NetworkLink> {
 }
 
 impl<L: NetworkLink> TcpTransport<L> {
+    /// # Safety
+    ///
+    /// `slot` must point to valid, aligned storage (typically `MaybeUninit::zeroed()` static).
+    /// No other references to `*slot` may exist until initialization completes.
+    pub unsafe fn init_in_place(
+        slot: *mut Self,
+        stack: L3Stack<L>,
+        generation: SessionGeneration,
+    ) {
+        (*slot).stack = stack;
+        (*slot).table.init_in_place(generation);
+        (*slot).stats = TcpStats::default();
+    }
+
     pub fn new(stack: L3Stack<L>, generation: SessionGeneration) -> Self {
         Self {
             stack,

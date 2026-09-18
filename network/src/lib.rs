@@ -38,6 +38,9 @@ pub mod stack;
 pub mod tcp;
 pub mod udp;
 
+#[cfg(feature = "tls")]
+pub mod tls;
+
 #[cfg(any(test, feature = "alloc"))]
 pub mod fake;
 

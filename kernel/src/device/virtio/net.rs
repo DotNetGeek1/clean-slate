@@ -1,4 +1,11 @@
-#![cfg_attr(not(feature = "m7-net-device-self-test"), allow(dead_code))]
+#![cfg_attr(
+    not(any(
+        feature = "m7-net-device-self-test",
+        feature = "m7-tls-self-test",
+        feature = "m7-tls-fail-closed-self-test"
+    )),
+    allow(dead_code)
+)]
 
 use core::convert::TryFrom;
 use core::hint::spin_loop;
@@ -421,7 +428,11 @@ impl VirtioNetDevice {
         (self.rx_queue_size, self.tx_queue_size)
     }
 
-    #[cfg(feature = "m7-net-device-self-test")]
+    #[cfg(any(
+        feature = "m7-net-device-self-test",
+        feature = "m7-tls-self-test",
+        feature = "m7-tls-fail-closed-self-test"
+    ))]
     #[allow(clippy::result_large_err)]
     pub(crate) fn self_test_transmit_declared_len(
         &mut self,
@@ -434,7 +445,11 @@ impl VirtioNetDevice {
         self.transmit(frame)
     }
 
-    #[cfg(feature = "m7-net-device-self-test")]
+    #[cfg(any(
+        feature = "m7-net-device-self-test",
+        feature = "m7-tls-self-test",
+        feature = "m7-tls-fail-closed-self-test"
+    ))]
     pub(crate) fn self_test_inject_malformed_rx_completion(&mut self) -> &'static str {
         let used = VirtqUsedElem {
             id: u32::MAX,

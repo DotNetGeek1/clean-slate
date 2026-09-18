@@ -302,3 +302,83 @@ Use [`TcpTransport`](../network/src/tcp/transport.rs) on the network service sid
 5. `close(now, id, owner)` or `abort(id, owner)`
 
 Host tests: [`TestPeer`](../network/src/tcp/test_peer.rs) on `FakeLink::pair()` answers on [`TCP_ECHO_PORT`](../network/src/fixture.rs) with fixture bytes and fault injection (`drop_next_n_outbound`, `reply_rst_on_next`, `stop_acking`, etc.).
+
+## M7.6 TLS
+
+Issue #86 adds a **bounded TLS 1.3 client** in `network/src/tls/` over an established [`TcpTransport`](../network/src/tcp/transport.rs) session. UDP/TCP fan-out on one stack remains #88; TLS uses its own TCP connection slot.
+
+### Dependency decision
+
+| Crate | Version | Role |
+|-------|---------|------|
+| `embedded-tls` | 0.19.0 | TLS 1.3 client (`no_std`, caller-supplied record buffers) |
+| Feature `rustpki` | (not `webpki`) | X.509 verification without `ring`/`getrandom` — builds on `x86_64-unknown-uefi` |
+| `embedded-io` | 0.7.1 | Blocking read/write traits over `TcpTransport` |
+| `rand_core` | 0.6.4 | RNG injection (`TlsRng`) |
+| `sha2` / `aes` | pinned | Portable crypto (`force-soft` SHA2) for UEFI |
+
+`webpki` was rejected for UEFI (pulls `ring`). `rustls` in the guest was not required once `embedded-tls` + `rustpki` compiled for UEFI. The **xtask hermetic peer** terminates TLS with **rustls 0.23** (host `std` only).
+
+Enable in consumers: `clean-slate-network` feature `tls` (kernel: `m7-tls-self-test`).
+
+### Supported subset
+
+- TLS **1.3** client only; cipher suite via `embedded-tls` default (`AES-128-GCM-SHA256`).
+- Server authentication: single **pinned DER trust anchor** (`TlsConfig::trust_anchor_der`), hostname/SAN vs `TlsConfig::server_name`.
+- **Fixed validation time** [`VALIDATION_TIME_UNIX`](../network/src/tls/verify.rs) = 2030-01-01 UTC (guest has no wall clock).
+- Record buffers: [`TLS_RECORD_BUFFER_BYTES`](../network/src/tls/mod.rs) = 16_640 bytes each (read + write), caller-provided.
+- I/O timeouts: [`TLS_HANDSHAKE_TIMEOUT_TICKS`](../network/src/tls/io.rs) / [`TLS_IO_TIMEOUT_TICKS`](../network/src/tls/io.rs) monotonic ticks in `TcpRecordIo`.
+
+### Hermetic trust model
+
+- Repository-owned material under `xtask/fixtures/m7/` (CA + server leaf + wrong-name leaf). **Test-only — never trust elsewhere.**
+- Regenerate: `cargo xtask gen-m7-fixture-certs` (deterministic layout; EC P-256, SAN `m7.fixture.test`, validity 2020–2120).
+- QEMU peer presents the leaf at `10.77.0.1:4443`; DNS A record `10.77.0.50` is fixture vocabulary only.
+- Pin `ca.crt` (DER) in the guest; `validation_time_unix` must match `VALIDATION_TIME_UNIX` or connect returns `Protocol`.
+
+### Fail-closed
+
+- Hostname/SAN mismatch or untrusted chain → `TlsError::PeerIdentity` → `NetworkError::Protocol`; failed handshake **aborts TCP** (no application data sent).
+- Second acceptance boot uses wrong-name cert; kernel feature `m7-tls-fail-closed-self-test` expects `PeerIdentity` and prints `[M7.6] FAIL-CLOSED OK`.
+
+### RNG policy
+
+- Production/acceptance: **RDRAND** only (`RdrandRng` in kernel self-test), no constant fallback.
+- Host unit tests: `SeededRng` (`#[cfg(test)]` only, documented insecure).
+
+### Public API (network service)
+
+- `TlsConfig { server_name, trust_anchor_der, validation_time_unix }`
+- `TlsSession::connect(now, transport, owner, remote, config, rng, read_buf, write_buf)`
+- `write` / `read` / `close` / `abort`, `peer_name()`
+- Host tests: `TlsSession::connect_with_peer_tick(..., Some(&mut peer_driver))` to poll a fake TCP peer.
+
+### Fixture peer (xtask)
+
+- TCP echo [`TCP_ECHO_PORT`](../network/src/fixture.rs): `APP_REQUEST_BYTES` → `APP_RESPONSE_BYTES`.
+- TLS [`TLS_PORT`](../network/src/fixture.rs): rustls server, same app contract after handshake.
+- Markers: `[FIX ] tcp echo`, `[FIX ] tls handshake sni=…`, `[FIX ] tls app bytes`.
+
+### QEMU acceptance
+
+```text
+cargo xtask test-m7-tls
+```
+
+Pass boot markers (order): `[TCP ] connected peer=10.77.0.1:4001`, `[TCP ] echo ok len=`, `[TLS ] authenticated peer=m7.fixture.test`, `[TLS ] app bytes ok len=`, `[TLS ] closed`, `[M7.6] PASS`.
+
+Fail-closed boot: `[TLS ] peer identity rejected name=m7.fixture.test`, `[M7.6] FAIL-CLOSED OK`.
+
+Kernel image is built **release** for this test on Windows (debug UEFI codegen issue with AES-GCM backends).
+
+### Error mapping (`TlsError` → `NetworkError`)
+
+| `TlsError` | `NetworkError` |
+|------------|----------------|
+| `Tcp(inner)` | `inner` |
+| `PeerIdentity`, `Handshake`, `Protocol`, `TruncatedRecord` | `Protocol` |
+| `Timeout` | `Timeout` |
+| `Closed` | `Closed` |
+| `BufferTooSmall`, `Rng` | `Protocol` |
+
+`Debug` on `TlsError` never prints keys, plaintext, or RNG output.
