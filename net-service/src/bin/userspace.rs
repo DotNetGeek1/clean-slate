@@ -10,7 +10,7 @@ use clean_slate_capability::syscall_abi::{
 use clean_slate_network::addr::SocketAddrV4;
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
-use clean_slate_network::dns::{DnsError, DnsResolver, ResolveOutcome};
+use clean_slate_network::dns::{DnsError, DnsResolver, ResolveOutcome, DNS_QUERY_TIMEOUT_TICKS};
 use clean_slate_network::error::{DenialReason, NetworkError};
 use clean_slate_network::fixture::{
     APP_REQUEST_BYTES, APP_RESPONSE_BYTES, DNS_SERVER_ADDR, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS,
@@ -22,7 +22,7 @@ use clean_slate_network::protocol::{
 };
 use clean_slate_network::session::{SessionGeneration, SessionId, SocketKind};
 use clean_slate_network::stack::L3Stack;
-use clean_slate_network::tcp::{TcpState, TcpTransport};
+use clean_slate_network::tcp::{TcpState, TcpTransport, TCP_CONNECT_TIMEOUT_TICKS};
 use clean_slate_network::tls::{
     TlsConfig, TlsError, TlsSession, TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
 };
@@ -36,9 +36,9 @@ use clean_slate_service_fixtures::{
     NETWORK_SERVICE_MODE_STALE_CLOSE, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
     NETWORK_SERVICE_NEXT_METADATA_BYTES, NETWORK_SERVICE_NEXT_WIRE_BYTES,
     NETWORK_SERVICE_RESULT_ERROR, NETWORK_SERVICE_RESULT_OK, NETWORK_STATUS_PENDING,
-    NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY,
-    NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
-    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
+    NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
+    NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
+    NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
 };
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::x86_64::{__cpuid, _rdrand64_step};
@@ -52,6 +52,8 @@ const ARP_TTL_TICKS: u64 = 50_000;
 const DNS_POLL_LIMIT: usize = 5_000_000;
 const TCP_POLL_LIMIT: usize = 10_000_000;
 const TLS_POLL_LIMIT: usize = 10_000_000;
+const TLS_IO_TIMEOUT_TICKS: u64 = 2_000;
+const TLS_CLOSE_TIMEOUT_TICKS: u64 = 100;
 const OWNER: clean_slate_network::protocol::TrustedCaller =
     clean_slate_network::protocol::TrustedCaller::new(0x5200, 0, 1);
 
@@ -195,6 +197,14 @@ fn raw_syscall(nr: u64, args: [u64; 6]) -> u64 {
 
 fn yield_cpu() {
     let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
+}
+
+fn monotonic_ticks() -> Result<u64, u64> {
+    let ticks = net_request([NET_SUBOP_MONOTONIC_TICKS, 0, 0, 0, 0, 0]);
+    if ticks >= u64::MAX - 4095 {
+        return Err(ticks);
+    }
+    Ok(ticks)
 }
 
 fn network_capability(device_id: u64) -> Result<u64, u64> {
@@ -726,9 +736,10 @@ fn run_dns_phase(generation: u64) -> Result<(), u64> {
     let stack = L3Stack::new(link, mac, GUEST_IPV4, ARP_TTL_TICKS);
     let udp = UdpTransport::new(stack, SessionGeneration::new(generation));
     let mut resolver = DnsResolver::new(udp, DNS_SERVER_ADDR);
-    let mut tick = 0u64;
+    let start = monotonic_ticks()?;
+    let deadline = start.saturating_add(DNS_QUERY_TIMEOUT_TICKS);
     let query_id = match resolver
-        .resolve(tick, OWNER, FIXTURE_HOSTNAME)
+        .resolve(start, OWNER, FIXTURE_HOSTNAME)
         .map_err(map_dns_error_code)?
     {
         ResolveOutcome::Cached { addr, ttl } => {
@@ -741,7 +752,8 @@ fn run_dns_phase(generation: u64) -> Result<(), u64> {
     };
 
     for _ in 0..DNS_POLL_LIMIT {
-        resolver.poll(tick).map_err(map_dns_error_code)?;
+        let now = monotonic_ticks()?;
+        resolver.poll(now).map_err(map_dns_error_code)?;
         if let Some(result) = resolver.take_result(query_id, OWNER) {
             let (addr, ttl) = result.map_err(map_dns_error_code)?;
             if addr != FIXTURE_A_RECORD || ttl != FIXTURE_A_TTL_SECS {
@@ -749,7 +761,9 @@ fn run_dns_phase(generation: u64) -> Result<(), u64> {
             }
             return Ok(());
         }
-        tick = tick.saturating_add(1);
+        if now >= deadline {
+            break;
+        }
         yield_cpu();
     }
     Err(0)
@@ -766,7 +780,7 @@ fn run_tls_phase(generation: u64) -> Result<usize, u64> {
         .arp_cache_mut()
         .insert(PEER_IPV4, PEER_MAC, 0);
     let remote_tls = SocketAddrV4::new(PEER_IPV4, TLS_PORT);
-    let mut tick = 0u64;
+    let mut tick = monotonic_ticks()?;
     let tcp_session = tcp
         .connect(tick, OWNER, remote_tls)
         .map_err(map_network_error_code)?;
@@ -798,17 +812,19 @@ fn run_tls_phase(generation: u64) -> Result<usize, u64> {
     if &app_buf[..n] != APP_RESPONSE_BYTES {
         return Err(0);
     }
-    tls.close(tick.saturating_add(100))
-        .map_err(map_tls_error_code)?;
+    let close_now = monotonic_ticks()?.saturating_add(TLS_CLOSE_TIMEOUT_TICKS);
+    tls.close(close_now).map_err(map_tls_error_code)?;
     Ok(n)
 }
 
 fn drive_tcp_until_established(
     tcp: &mut TcpTransport<ServiceClientLink>,
     id: SessionId,
-    mut tick: u64,
+    start_tick: u64,
 ) -> Result<u64, u64> {
+    let deadline = start_tick.saturating_add(TCP_CONNECT_TIMEOUT_TICKS);
     for _ in 0..TCP_POLL_LIMIT {
+        let tick = monotonic_ticks()?;
         tcp.poll(tick).map_err(map_network_error_code)?;
         match tcp.state(id, OWNER) {
             Ok(TcpState::Established) => return Ok(tick),
@@ -816,7 +832,9 @@ fn drive_tcp_until_established(
             Ok(_) => {}
             Err(_) => return Err(0),
         }
-        tick = tick.saturating_add(1);
+        if tick >= deadline {
+            break;
+        }
         yield_cpu();
     }
     Err(0)
@@ -824,11 +842,13 @@ fn drive_tcp_until_established(
 
 fn write_all_tls(
     tls: &mut TlsSession<'_, '_, ServiceClientLink>,
-    mut tick: u64,
+    start_tick: u64,
     data: &[u8],
 ) -> Result<(), u64> {
+    let deadline = start_tick.saturating_add(TLS_IO_TIMEOUT_TICKS);
     let mut offset = 0usize;
     for _ in 0..TLS_POLL_LIMIT {
+        let tick = monotonic_ticks()?;
         match tls.write(tick, &data[offset..]) {
             Ok(0) => {}
             Ok(written) => offset = offset.saturating_add(written),
@@ -838,7 +858,9 @@ fn write_all_tls(
             tls.flush().map_err(map_tls_error_code)?;
             return Ok(());
         }
-        tick = tick.saturating_add(1);
+        if tick >= deadline {
+            break;
+        }
         yield_cpu();
     }
     Err(0)
@@ -846,17 +868,21 @@ fn write_all_tls(
 
 fn read_tls(
     tls: &mut TlsSession<'_, '_, ServiceClientLink>,
-    mut tick: u64,
+    start_tick: u64,
     out: &mut [u8],
 ) -> Result<usize, u64> {
+    let deadline = start_tick.saturating_add(TLS_IO_TIMEOUT_TICKS);
     for _ in 0..TLS_POLL_LIMIT {
+        let tick = monotonic_ticks()?;
         match tls.read(tick, out) {
             Ok(0) => {}
             Ok(n) => return Ok(n),
             Err(TlsError::Timeout) => {}
             Err(err) => return Err(map_tls_error_code(err)),
         }
-        tick = tick.saturating_add(1);
+        if tick >= deadline {
+            break;
+        }
         yield_cpu();
     }
     Err(0)

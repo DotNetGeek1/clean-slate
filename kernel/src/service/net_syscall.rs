@@ -15,13 +15,15 @@ use clean_slate_service_fixtures::{
     NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID,
     NETWORK_MAX_PAYLOAD_BYTES, NETWORK_SERVICE_NEXT_METADATA_BYTES,
     NETWORK_SERVICE_NEXT_WIRE_BYTES, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT,
-    NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
-    NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
+    NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY,
+    NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
+    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
 };
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::network::{authorize_network_op, NetworkOp};
 use crate::capability::with_capability_space;
+use crate::interrupt::timer::kernel_ticks;
 use crate::mm::user_mapping::validate_user_pointer_range;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::service::instance_generation::live_instance_generation_for_pid;
@@ -151,6 +153,7 @@ pub(crate) fn handle_syscall_network_request(frame: &mut SyscallContext) {
         NET_SUBOP_RAW_RECEIVE => handle_raw_receive(frame),
         NET_SUBOP_POP_HOLDER_EXIT => handle_pop_holder_exit(frame),
         NET_SUBOP_ACK_HOLDER_EXIT => handle_ack_holder_exit(frame),
+        NET_SUBOP_MONOTONIC_TICKS => handle_monotonic_ticks(frame),
         _ => frame.rax = SYSCALL_EINVAL,
     }
 }
@@ -554,4 +557,8 @@ fn handle_ack_holder_exit(frame: &mut SyscallContext) {
         Ok(()) => frame.rax = 0,
         Err(error) => frame.rax = bridge_error_status(error),
     }
+}
+
+fn handle_monotonic_ticks(frame: &mut SyscallContext) {
+    frame.rax = kernel_ticks();
 }

@@ -1,5 +1,7 @@
 //! Kernel-hosted network bridge: client queue, loopback raw link, CPL3 service seam.
 
+#[cfg(feature = "m7-network-self-test")]
+use crate::device::virtio::net::VirtioNetDevice;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::service::instance_generation::live_network_service_generation;
 use crate::sync::global_cell::GlobalCell;
@@ -38,6 +40,50 @@ pub struct KernelLoopbackLink {
     rx_head: u8,
     rx_tail: u8,
     rx_count: u8,
+}
+
+enum RawBackend {
+    Loopback(KernelLoopbackLink),
+    #[cfg(feature = "m7-network-self-test")]
+    Virtio(VirtioNetDevice),
+}
+
+impl RawBackend {
+    const fn loopback() -> Self {
+        Self::Loopback(KernelLoopbackLink::new())
+    }
+
+    fn reset(&mut self) -> Result<(), NetworkDeviceError> {
+        match self {
+            Self::Loopback(link) => link.reset(),
+            #[cfg(feature = "m7-network-self-test")]
+            Self::Virtio(device) => device.reset(),
+        }
+    }
+
+    fn transmit(&mut self, frame: FrameBuf) -> Result<(), (NetworkDeviceError, FrameBuf)> {
+        match self {
+            Self::Loopback(link) => link.transmit(frame),
+            #[cfg(feature = "m7-network-self-test")]
+            Self::Virtio(device) => device.transmit(frame),
+        }
+    }
+
+    fn receive(&mut self) -> Result<Option<FrameBuf>, NetworkDeviceError> {
+        match self {
+            Self::Loopback(link) => link.receive(),
+            #[cfg(feature = "m7-network-self-test")]
+            Self::Virtio(device) => device.receive(),
+        }
+    }
+
+    fn geometry(&self) -> LinkProperties {
+        match self {
+            Self::Loopback(link) => link.link(),
+            #[cfg(feature = "m7-network-self-test")]
+            Self::Virtio(device) => device.link(),
+        }
+    }
 }
 
 impl KernelLoopbackLink {
@@ -157,7 +203,7 @@ pub(crate) struct NetBridge {
     service_pid: u64,
     service_domain: u64,
     session_generation: SessionGeneration,
-    loopback: KernelLoopbackLink,
+    raw_backend: RawBackend,
     slots: [ClientSlot; NETWORK_REQUEST_SLOTS],
     next_request_id: u64,
     inflight_failed: u32,
@@ -176,7 +222,7 @@ impl NetBridge {
             service_pid: 0,
             service_domain: 0,
             session_generation: SessionGeneration::new(0),
-            loopback: KernelLoopbackLink::new(),
+            raw_backend: RawBackend::loopback(),
             slots: [ClientSlot::free(); NETWORK_REQUEST_SLOTS],
             next_request_id: 1,
             inflight_failed: 0,
@@ -195,7 +241,7 @@ impl NetBridge {
         domain: u64,
         generation: u64,
     ) -> SessionGeneration {
-        let _ = self.loopback.reset();
+        let _ = self.raw_backend.reset();
         self.holder_exit_head = 0;
         self.holder_exit_tail = 0;
         self.pending_holder_exit_ack = None;
@@ -207,6 +253,16 @@ impl NetBridge {
         self.service_domain = domain;
         self.session_generation = SessionGeneration::new(generation);
         self.session_generation
+    }
+
+    #[cfg(feature = "m7-network-self-test")]
+    pub fn install_virtio_backend(&mut self, device: VirtioNetDevice) {
+        let mac = device.link().mac;
+        self.raw_backend = RawBackend::Virtio(device);
+        kernel_log_fmt(format_args!(
+            "[NET ] raw backend=virtio mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
+            mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5],
+        ));
     }
 
     #[allow(dead_code)]
@@ -431,7 +487,7 @@ impl NetBridge {
             }
         }
         self.inflight_failed = self.inflight_failed.saturating_add(failed);
-        let _ = self.loopback.reset();
+        let _ = self.raw_backend.reset();
         self.service_pid = 0;
         failed
     }
@@ -455,7 +511,7 @@ impl NetBridge {
         if !self.is_live_service(service_pid) {
             return Err(NetworkDeviceError::NotReady);
         }
-        self.loopback.transmit(frame).map_err(|(err, _)| err)
+        self.raw_backend.transmit(frame).map_err(|(err, _)| err)
     }
 
     pub fn raw_receive(
@@ -465,12 +521,12 @@ impl NetBridge {
         if !self.is_live_service(service_pid) {
             return Err(NetworkDeviceError::NotReady);
         }
-        self.loopback.receive()
+        self.raw_backend.receive()
     }
 
     pub fn raw_geometry(&self, service_pid: u64) -> LinkProperties {
         if self.is_live_service(service_pid) {
-            self.loopback.link()
+            self.raw_backend.geometry()
         } else {
             LinkProperties::new(LOOPBACK_MAC, false)
         }
