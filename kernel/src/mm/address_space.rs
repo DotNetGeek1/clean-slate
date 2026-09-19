@@ -87,7 +87,7 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
     feature = "m6-fixture-smoke-self-test",
     feature = "m7-net-service-self-test"
 ))]
-pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 104;
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 112;
 #[cfg(not(any(
     feature = "m4-recovery-self-test",
     feature = "m4-supervisor-self-test",
