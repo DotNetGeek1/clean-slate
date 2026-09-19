@@ -17,6 +17,7 @@ use crate::mm::PAGE_SIZE;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -24,6 +25,11 @@ use crate::mm::PAGE_SIZE;
 ))]
 use clean_slate_service_fixtures::m6_fixture::{
     M6_FIXTURE_BOOTSTRAP_ADDRESS, M6_FIXTURE_BOOTSTRAP_BYTES,
+};
+#[cfg(feature = "m7-net-service-self-test")]
+use clean_slate_service_fixtures::{
+    NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
+    NETWORK_UNAUTHORIZED_SERVICE_ID,
 };
 #[cfg(any(
     feature = "m5-storage-self-test",
@@ -179,6 +185,7 @@ const _: () = assert!(
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -189,6 +196,7 @@ include!(concat!(env!("OUT_DIR"), "/m6_fixture_userspace_entry.rs"));
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -200,6 +208,7 @@ const M6_FIXTURE_USERSPACE_IMAGE: &[u8] =
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -210,6 +219,7 @@ const M6_FIXTURE_BOOTSTRAP_PAGES: u64 = 2;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -220,6 +230,7 @@ const M6_FIXTURE_STACK_PAGES: u64 = 4;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -231,6 +242,7 @@ const M6_FIXTURE_STACK_ADDRESS: u64 =
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -241,6 +253,7 @@ const M6_FIXTURE_MAX_CODE_PAGES: usize = 16;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -253,6 +266,7 @@ const M6_FIXTURE_MAPPED_PAGES: usize = M6_FIXTURE_MAX_CODE_PAGES
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -265,6 +279,7 @@ const _: () = assert!(
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -308,9 +323,12 @@ pub(crate) enum BuiltinServiceImage {
         feature = "m6-revocation-self-test",
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
-        feature = "m6-fixture-smoke-self-test"
+        feature = "m6-fixture-smoke-self-test",
+        feature = "m7-net-caps-self-test"
     ))]
     M6FixturePayload,
+    #[cfg(feature = "m7-net-service-self-test")]
+    NetworkUserspacePayload,
 }
 
 impl BuiltinServiceImage {
@@ -361,9 +379,14 @@ impl BuiltinServiceImage {
                 feature = "m6-revocation-self-test",
                 feature = "m6-audit-self-test",
                 feature = "m6-capabilities-self-test",
-                feature = "m6-fixture-smoke-self-test"
+                feature = "m6-fixture-smoke-self-test",
+                feature = "m7-net-caps-self-test"
             ))]
             id if id >= 0x6000 && id <= 0x60ff => Self::M6FixturePayload,
+            #[cfg(feature = "m7-net-service-self-test")]
+            id if id == NETWORK_SERVICE_ID.0 || id == NETWORK_UNAUTHORIZED_SERVICE_ID.0 => {
+                Self::NetworkUserspacePayload
+            }
             _ => Self::ImmediateExit,
         }
     }
@@ -428,10 +451,15 @@ pub(crate) fn launch_builtin_service(
             feature = "m6-revocation-self-test",
             feature = "m6-audit-self-test",
             feature = "m6-capabilities-self-test",
-            feature = "m6-fixture-smoke-self-test"
+            feature = "m6-fixture-smoke-self-test",
+            feature = "m7-net-caps-self-test"
         ))]
         BuiltinServiceImage::M6FixturePayload => {
             launch_m6_fixture_service(allocator, kernel_stack_top, scheduler_slot, service)
+        }
+        #[cfg(feature = "m7-net-service-self-test")]
+        BuiltinServiceImage::NetworkUserspacePayload => {
+            launch_network_userspace_service(allocator, kernel_stack_top, scheduler_slot, service)
         }
         _ => launch_single_page_service(allocator, kernel_stack_top, scheduler_slot, image),
     }
@@ -612,10 +640,15 @@ fn launch_single_page_service(
             feature = "m6-revocation-self-test",
             feature = "m6-audit-self-test",
             feature = "m6-capabilities-self-test",
-            feature = "m6-fixture-smoke-self-test"
+            feature = "m6-fixture-smoke-self-test",
+            feature = "m7-net-caps-self-test"
         ))]
         BuiltinServiceImage::M6FixturePayload => {
             return Err("m6 fixture image must use the fixture launch path");
+        }
+        #[cfg(feature = "m7-net-service-self-test")]
+        BuiltinServiceImage::NetworkUserspacePayload => {
+            return Err("network userspace image must use the network launch path");
         }
         BuiltinServiceImage::ImmediateExit => unsafe {
             ptr::write(
@@ -848,6 +881,7 @@ fn launch_storage_userspace_service(
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -958,6 +992,151 @@ fn launch_m6_fixture_service(
     }
     let user_stack_pointer = M6_FIXTURE_STACK_ADDRESS + M6_FIXTURE_STACK_PAGES * PAGE_SIZE;
     let entry_rip = SERVICE_USER_CODE_ADDRESS + M6_FIXTURE_USERSPACE_ENTRY_OFFSET;
+    let saved_stack_pointer =
+        build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
+    register_spawned_process(
+        address_space,
+        pid,
+        tid,
+        kernel_stack_top,
+        saved_stack_pointer,
+        entry_rip,
+        scheduler_slot,
+    )
+}
+
+#[cfg(feature = "m7-net-service-self-test")]
+include!(concat!(env!("OUT_DIR"), "/network_userspace_entry.rs"));
+#[cfg(feature = "m7-net-service-self-test")]
+const NETWORK_USERSPACE_IMAGE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/network_userspace.bin"));
+#[cfg(feature = "m7-net-service-self-test")]
+const NETWORK_SERVICE_STACK_GUARD_PAGES: u64 = 1;
+#[cfg(feature = "m7-net-service-self-test")]
+const NETWORK_SERVICE_STACK_ADDRESS: u64 =
+    NETWORK_SERVICE_BOOTSTRAP_ADDRESS + (NETWORK_SERVICE_STACK_GUARD_PAGES + 1) * PAGE_SIZE;
+#[cfg(feature = "m7-net-service-self-test")]
+const NETWORK_SERVICE_STACK_PAGES: u64 = 12;
+#[cfg(feature = "m7-net-service-self-test")]
+const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 179;
+#[cfg(feature = "m7-net-service-self-test")]
+const NETWORK_SERVICE_MAPPED_PAGES: usize =
+    NETWORK_SERVICE_MAX_CODE_PAGES + NETWORK_SERVICE_STACK_PAGES as usize + 1;
+#[cfg(feature = "m7-net-service-self-test")]
+const _: () = assert!(
+    NETWORK_SERVICE_MAPPED_PAGES <= crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
+);
+
+#[cfg(feature = "m7-net-service-self-test")]
+pub(crate) fn launch_network_aux_process(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    scheduler_slot: usize,
+    bootstrap: NetworkServiceBootstrap,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    launch_network_userspace_with_bootstrap(allocator, kernel_stack_top, scheduler_slot, bootstrap)
+}
+
+#[cfg(feature = "m7-net-service-self-test")]
+fn launch_network_userspace_service(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    scheduler_slot: usize,
+    service: ServiceId,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    let bootstrap = crate::selftest::m7_net_service::network_service_bootstrap(service)?;
+    launch_network_userspace_with_bootstrap(allocator, kernel_stack_top, scheduler_slot, bootstrap)
+}
+
+#[cfg(feature = "m7-net-service-self-test")]
+fn launch_network_userspace_with_bootstrap(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    scheduler_slot: usize,
+    bootstrap: NetworkServiceBootstrap,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
+    use crate::mm::address_space::create_process_address_space;
+    use crate::mm::address_space::map_process_page;
+    use crate::mm::paging::zero_page;
+    use crate::mm::PHYSICAL_MEMORY_OFFSET;
+    use crate::process::id_allocator::id_allocator_mut;
+    use core::ptr;
+    use x86_64::structures::paging::PageTableFlags;
+    use x86_64::VirtAddr;
+
+    let image_pages = NETWORK_USERSPACE_IMAGE.len().div_ceil(PAGE_SIZE as usize);
+    if image_pages > NETWORK_SERVICE_MAX_CODE_PAGES {
+        return Err("network userspace image exceeded mapped code budget");
+    }
+    let mut address_space =
+        create_process_address_space(allocator, VirtAddr::new(SERVICE_USER_CODE_ADDRESS))?;
+    let (pid, tid) = {
+        let ids = unsafe { id_allocator_mut() };
+        (ids.allocate_pid()?, ids.allocate_tid()?)
+    };
+    for page_index in 0..image_pages {
+        let frame_address = allocator
+            .allocate_page()
+            .ok_or("allocator could not provide a network code page")?;
+        zero_page(frame_address);
+        let offset = page_index * PAGE_SIZE as usize;
+        let chunk_end = (offset + PAGE_SIZE as usize).min(NETWORK_USERSPACE_IMAGE.len());
+        let chunk = &NETWORK_USERSPACE_IMAGE[offset..chunk_end];
+        unsafe {
+            ptr::copy_nonoverlapping(
+                chunk.as_ptr(),
+                (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
+                chunk.len(),
+            );
+        }
+        map_process_page(
+            &mut address_space,
+            SERVICE_USER_CODE_ADDRESS + page_index as u64 * PAGE_SIZE,
+            frame_address,
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+            allocator,
+        )?;
+    }
+    for stack_page in 0..NETWORK_SERVICE_STACK_PAGES {
+        let stack_frame = allocator
+            .allocate_page()
+            .ok_or("allocator could not provide a network stack page")?;
+        zero_page(stack_frame);
+        map_process_page(
+            &mut address_space,
+            NETWORK_SERVICE_STACK_ADDRESS + stack_page * PAGE_SIZE,
+            stack_frame,
+            PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::NO_EXECUTE
+                | PageTableFlags::USER_ACCESSIBLE,
+            allocator,
+        )?;
+    }
+    let data_frame = allocator
+        .allocate_page()
+        .ok_or("allocator could not provide a network bootstrap page")?;
+    zero_page(data_frame);
+    unsafe {
+        ptr::write(
+            (PHYSICAL_MEMORY_OFFSET + data_frame) as *mut NetworkServiceBootstrap,
+            bootstrap,
+        );
+    }
+    map_process_page(
+        &mut address_space,
+        NETWORK_SERVICE_BOOTSTRAP_ADDRESS,
+        data_frame,
+        PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::NO_EXECUTE
+            | PageTableFlags::USER_ACCESSIBLE,
+        allocator,
+    )?;
+    let user_stack_pointer =
+        NETWORK_SERVICE_STACK_ADDRESS + NETWORK_SERVICE_STACK_PAGES * PAGE_SIZE;
+    let entry_rip = SERVICE_USER_CODE_ADDRESS + NETWORK_USERSPACE_ENTRY_OFFSET;
     let saved_stack_pointer =
         build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
     register_spawned_process(

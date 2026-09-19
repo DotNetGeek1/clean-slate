@@ -39,10 +39,12 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m7-net-service-self-test"
 ))]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
 #[cfg(not(any(
@@ -56,16 +58,21 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m7-net-service-self-test"
 )))]
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
 #[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
-/// The storage userspace image maps up to 64 code pages plus its stack and
-/// bootstrap pages; `service::spawn` asserts its budget against this value.
+#[cfg(feature = "m7-net-service-self-test")]
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 192;
+/// Storage and network userspace images map up to their configured code-page
+/// budgets plus stack/bootstrap pages; `service::spawn` asserts each budget
+/// against this value.
 #[cfg(any(
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
@@ -75,15 +82,17 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test"
 ))]
-pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 80;
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 104;
 #[cfg(not(any(
     feature = "m4-recovery-self-test",
     feature = "m4-supervisor-self-test",
+    feature = "m7-net-service-self-test",
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
@@ -92,10 +101,12 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 80;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m7-net-service-self-test"
 )))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 

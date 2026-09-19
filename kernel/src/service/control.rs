@@ -8,7 +8,9 @@ use crate::service::capability::LifecycleControlCapabilityError;
 use crate::service::capability::{BlockDeviceCapabilityError, BlockDeviceCapabilityTable};
 use crate::service::spawn::launch_builtin_service;
 use crate::sync::global_cell::GlobalCell;
-use clean_slate_service_fixtures::{STORAGE_BLOCK_DEVICE_ID, STORAGE_SERVICE_ID};
+use clean_slate_service_fixtures::{
+    NETWORK_DEVICE_ID, NETWORK_SERVICE_ID, STORAGE_BLOCK_DEVICE_ID, STORAGE_SERVICE_ID,
+};
 use clean_slate_service_lifecycle::apply_transition;
 use clean_slate_service_lifecycle::ControlRequest;
 use clean_slate_service_lifecycle::ControlRequestKind;
@@ -275,10 +277,12 @@ impl ServiceLifecycleController {
         feature = "m6-object-self-test",
         feature = "m6-process-control-self-test",
         feature = "m6-delegation-self-test",
+        feature = "m7-net-caps-self-test",
         feature = "m6-revocation-self-test",
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
-        feature = "m6-fixture-smoke-self-test"
+        feature = "m6-fixture-smoke-self-test",
+        feature = "m7-net-service-self-test"
     ))]
     pub(crate) fn notify_exited_live_process(
         &mut self,
@@ -397,6 +401,46 @@ impl ServiceLifecycleController {
             .and_then(|record| record.live.map(|live| live.pid))
     }
 
+    pub(crate) fn authoritative_generation_for_live_pid(
+        &self,
+        pid: u64,
+    ) -> Option<InstanceGeneration> {
+        for entry in &self.services {
+            if entry.service.0 == 0 {
+                continue;
+            }
+            if entry.live.is_some_and(|live| live.pid == pid) {
+                return Some(entry.authoritative_generation);
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "m7-net-caps-self-test")]
+    pub(crate) fn test_advance_authoritative_generation(
+        &mut self,
+        service: ServiceId,
+    ) -> Result<InstanceGeneration, &'static str> {
+        let index = self
+            .service_index(service)
+            .ok_or("unknown service for generation bump")?;
+        let next = InstanceGeneration(self.services[index].authoritative_generation.0 + 1);
+        self.services[index].authoritative_generation = next;
+        Ok(next)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn live_service_instance_id(&self, service: ServiceId) -> Option<ServiceInstanceId> {
+        let record = self.find_service(service)?;
+        let live = record.live?;
+        Some(ServiceInstanceId::new(
+            service,
+            record.authoritative_generation,
+            ProcessId(live.pid),
+            DomainId(live.domain_id),
+        ))
+    }
+
     fn find_service(&self, service: ServiceId) -> Option<&ServiceRecord> {
         self.services
             .iter()
@@ -505,16 +549,21 @@ impl ServiceLifecycleController {
             DomainId(spawned.domain_id),
         );
         let kernel_root_frame = self.kernel_root_frame;
-        self.grant_storage_block_capability_with_rollback(spawned.pid, service_id, |pid| {
-            teardown_process_by_id(
-                allocator,
-                kernel_root_frame,
-                pid,
-                SERVICE_TERMINATE_STATUS,
-                false,
-            )
-            .map(|_| ())
-        })?;
+        self.grant_storage_block_capability_with_rollback(
+            spawned.pid,
+            service_id,
+            generation,
+            |pid| {
+                teardown_process_by_id(
+                    allocator,
+                    kernel_root_frame,
+                    pid,
+                    SERVICE_TERMINATE_STATUS,
+                    false,
+                )
+                .map(|_| ())
+            },
+        )?;
         self.services[service_index].live = Some(LiveServiceInstance {
             pid: spawned.pid,
             tid: spawned.tid,
@@ -535,34 +584,88 @@ impl ServiceLifecycleController {
         &mut self,
         pid: u64,
         service_id: ServiceId,
+        instance_generation: InstanceGeneration,
         mut rollback_spawn: F,
     ) -> Result<(), LifecycleControlError>
     where
         F: FnMut(u64) -> Result<(), &'static str>,
     {
-        if service_id != STORAGE_SERVICE_ID {
-            return Ok(());
-        }
-        if let Err(message) = self
-            .block_capabilities
-            .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
-        {
+        if service_id == STORAGE_SERVICE_ID {
+            if let Err(message) = self
+                .block_capabilities
+                .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
+            {
+                kernel_log_fmt(format_args!(
+                    "[FAIL] block capability grant failed pid={} service={} err={message}\n",
+                    pid, service_id.0
+                ));
+                rollback_spawn(pid).map_err(|_| {
+                    LifecycleControlError::SpawnFailed(
+                        "storage service block-capability rollback teardown failed",
+                    )
+                })?;
+                return Err(LifecycleControlError::SpawnFailed(message));
+            }
             kernel_log_fmt(format_args!(
-                "[FAIL] block capability grant failed pid={} service={} err={message}\n",
-                pid, service_id.0
+                "[BLK ] authority granted pid={} device={}\n",
+                pid, STORAGE_BLOCK_DEVICE_ID
             ));
-            rollback_spawn(pid).map_err(|_| {
-                LifecycleControlError::SpawnFailed(
-                    "storage service block-capability rollback teardown failed",
-                )
-            })?;
-            return Err(LifecycleControlError::SpawnFailed(message));
+        } else if service_id == NETWORK_SERVICE_ID {
+            use crate::capability::network::{grant_network_authority, NetworkGrantPolicy};
+            use clean_slate_capability::{HolderId, ResourceClass, Rights};
+            let rights = Rights::valid_for(ResourceClass::Network);
+            if grant_network_authority(
+                HolderId(pid),
+                rights,
+                NetworkGrantPolicy::NetworkService,
+                Some(u64::from(instance_generation.0)),
+            )
+            .is_err()
+            {
+                kernel_log_fmt(format_args!(
+                    "[FAIL] network capability grant failed pid={} service={}\n",
+                    pid, service_id.0
+                ));
+                rollback_spawn(pid).map_err(|_| {
+                    LifecycleControlError::SpawnFailed(
+                        "network service capability rollback teardown failed",
+                    )
+                })?;
+                return Err(LifecycleControlError::SpawnFailed(
+                    "network service capability grant failed",
+                ));
+            }
+            crate::service::net_bridge::net_bridge_mut().register_service_instance(
+                pid,
+                pid,
+                u64::from(instance_generation.0),
+            );
+            kernel_log_fmt(format_args!(
+                "[NET ] authority granted pid={} device={}\n",
+                pid, NETWORK_DEVICE_ID
+            ));
         }
-        kernel_log_fmt(format_args!(
-            "[BLK ] authority granted pid={} device={}\n",
-            pid, STORAGE_BLOCK_DEVICE_ID
-        ));
         Ok(())
+    }
+
+    #[cfg(feature = "m7-net-service-self-test")]
+    pub(crate) fn grant_network_client_capability(
+        &mut self,
+        pid: u64,
+    ) -> Result<u64, &'static str> {
+        use crate::capability::network::{
+            grant_network_authority, revoke_network_capabilities_for_holder, NetworkGrantPolicy,
+        };
+        use clean_slate_capability::{HolderId, Rights};
+        revoke_network_capabilities_for_holder(HolderId(pid));
+        let rights = Rights::NET_RESOLVE
+            .union(Rights::NET_CONNECT)
+            .union(Rights::NET_SEND)
+            .union(Rights::NET_RECEIVE);
+        let handle =
+            grant_network_authority(HolderId(pid), rights, NetworkGrantPolicy::Application, None)
+                .map_err(|_| "network client capability grant failed")?;
+        Ok(handle.encode())
     }
 
     fn terminate_service(
@@ -577,6 +680,9 @@ impl ServiceLifecycleController {
             .live
             .ok_or(LifecycleControlError::ServiceNotLive)?;
         self.log_terminate(service_id, live.pid);
+        if service_id == NETWORK_SERVICE_ID {
+            let _ = crate::service::net_bridge::shutdown_net_service_instance();
+        }
         teardown_process_by_id(
             allocator,
             self.kernel_root_frame,
@@ -686,8 +792,8 @@ impl ServiceLifecycleController {
         match kind {
             ControlRequestKind::Start => {
                 let result = self.start_service(allocator, service_id, next_generation)?;
-                self.services[service_index].state = next_state;
                 self.services[service_index].authoritative_generation = next_generation;
+                self.services[service_index].state = next_state;
                 Ok(result)
             }
             ControlRequestKind::Terminate | ControlRequestKind::Stop => {
@@ -956,10 +1062,15 @@ mod tests {
 
         let mut rollback_pid = 0_u64;
         let err = controller
-            .grant_storage_block_capability_with_rollback(77, STORAGE_SERVICE_ID, |pid| {
-                rollback_pid = pid;
-                Ok(())
-            })
+            .grant_storage_block_capability_with_rollback(
+                77,
+                STORAGE_SERVICE_ID,
+                InstanceGeneration(1),
+                |pid| {
+                    rollback_pid = pid;
+                    Ok(())
+                },
+            )
             .unwrap_err();
         assert!(matches!(err, LifecycleControlError::SpawnFailed(_)));
         assert_eq!(rollback_pid, 77);
@@ -982,9 +1093,12 @@ mod tests {
         }
 
         let err = controller
-            .grant_storage_block_capability_with_rollback(77, STORAGE_SERVICE_ID, |_| {
-                Err("teardown failed")
-            })
+            .grant_storage_block_capability_with_rollback(
+                77,
+                STORAGE_SERVICE_ID,
+                InstanceGeneration(1),
+                |_| Err("teardown failed"),
+            )
             .unwrap_err();
         assert_eq!(
             err,

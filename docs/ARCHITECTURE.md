@@ -127,6 +127,10 @@ M5 introduces a Clean-Slate-native block contract between hardware-specific bloc
 - Host crash tests inject deterministic power loss or I/O failure only at counted block write/flush boundaries via `clean_slate_block::fault::FaultInjectingBlockDevice`, covering every boundary between the first object-data write and the commit flush. Recovery must validate superblock magic/version/checksum, geometry, generation, and object extents/lengths before selecting a committed state, and a corrupted newer superblock must fall back to the older valid one.
 - Buffer ownership remains synchronous and call-scoped: backends may inspect caller slices only for the duration of `read_blocks`/`write_blocks` and must not retain raw userspace pointers after the call returns.
 
+## M7 network layering
+
+M7 introduces `clean-slate-network`, a transport-independent contract between raw NIC backends, the userspace network service, and the protocol stack. VirtIO details stay in the kernel driver lane; applications receive attenuated `ResourceClass::Network` capabilities rather than ambient connectivity. See [NETWORK.md](NETWORK.md) for the ownership map, rights vocabulary, and hermetic fixture contract.
+
 Wave-1 storage boundaries should remain split so parallel lanes avoid shared-file conflicts:
 
 ```text

@@ -26,6 +26,7 @@ use clean_slate_service_fixtures::m6_fixture::{
 };
 
 const PASS_MARKER: &str = "[M6.F] PASS";
+const RESERVED_UNKNOWN_SYSCALL_NR: u64 = 0xFFFF_FFFF_FFFF_FFFE;
 
 use crate::sync::global_cell::GlobalCell;
 
@@ -82,7 +83,7 @@ fn build_p1_program() -> M6FixtureBootstrap {
         .push(M6FixtureStep::syscall(0, [0; 6]).expect_eq(1))
         .unwrap();
     program
-        .push(M6FixtureStep::syscall(14, [0; 6]).expect_eq(SYSCALL_ENOSYS))
+        .push(M6FixtureStep::syscall(RESERVED_UNKNOWN_SYSCALL_NR, [0; 6]).expect_eq(SYSCALL_ENOSYS))
         .unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program

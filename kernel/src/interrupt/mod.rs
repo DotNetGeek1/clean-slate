@@ -35,6 +35,7 @@ use crate::mm::paging::current_root_frame_address;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -104,6 +105,7 @@ use crate::selftest::m5_storage::handle_userspace_storage_entry;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -114,6 +116,7 @@ use crate::selftest::m6_fixture::handle_fixture_report;
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -193,6 +196,7 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         feature = "m6-object-self-test",
         feature = "m6-process-control-self-test",
         feature = "m6-delegation-self-test",
+        feature = "m7-net-caps-self-test",
         feature = "m6-revocation-self-test",
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
@@ -231,6 +235,11 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
     #[cfg(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test"))]
     if context.vector as usize == USER_TEST_VECTOR {
         fatal_kernel_error("object storage service issued an unexpected phase trap");
+    }
+
+    #[cfg(feature = "m7-net-service-self-test")]
+    if context.vector as usize == USER_TEST_VECTOR {
+        return crate::selftest::m7_net_service::handle_userspace_network_entry();
     }
 
     #[cfg(feature = "m3-ipc-self-test")]

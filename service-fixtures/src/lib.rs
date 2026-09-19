@@ -11,6 +11,8 @@ mod crash_service;
 mod diagnostics;
 /// M6 scripted CPL3 fixture protocol (shared test harness).
 pub mod m6_fixture;
+mod network_service;
+mod network_transport;
 /// M6.3 object-capability protocol (lane-owned).
 pub mod object_capability;
 mod storage_service;
@@ -31,6 +33,25 @@ pub use crash_service::{CrashServiceFixtureHarness, CrashServiceFixtureRole};
 pub use diagnostics::{
     format_crash_service_injecting_line, format_crash_service_replacement_healthy_line,
     format_crash_service_started_line, format_unrelated_workload_progress_line,
+};
+pub use network_service::{
+    AllowAllAuthorizer, DenyAllAuthorizer, NetworkAuthorizer, NetworkOp, NetworkService,
+    PacketPath, PassthroughPacketPath,
+};
+pub use network_transport::{
+    encode_request, encode_response, NetworkServiceBootstrap, NetworkServiceWorkItem,
+    NetworkServiceWorkItem as NetWorkItem, NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID,
+    NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES, NETWORK_REQUEST_SLOTS,
+    NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_MODE_ACCEPTANCE,
+    NETWORK_SERVICE_MODE_CAPACITY_LOOP, NETWORK_SERVICE_MODE_CLIENT,
+    NETWORK_SERVICE_MODE_CONVERGED_CLIENT, NETWORK_SERVICE_MODE_INFLIGHT_ARM,
+    NETWORK_SERVICE_MODE_STALE_CLOSE, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
+    NETWORK_SERVICE_NEXT_METADATA_BYTES, NETWORK_SERVICE_NEXT_WIRE_BYTES,
+    NETWORK_SERVICE_RESULT_ERROR, NETWORK_SERVICE_RESULT_OK, NETWORK_SERVICE_RESULT_PENDING,
+    NETWORK_STATUS_PENDING, NETWORK_UNAUTHORIZED_PROBE_SERVICE_ID_VALUE, NET_SERVICE_ROLE_ID,
+    NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
+    NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
+    NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
 };
 pub use object_capability::{
     ObjectServiceDecodeError, ObjectServiceRequest, OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_READ,
@@ -58,3 +79,7 @@ pub const CRASH_SERVICE_ID: ServiceId = ServiceId(0x0000_4100);
 pub const STORAGE_SERVICE_ID: ServiceId = ServiceId(0x0000_5100);
 /// Stable logical identity for an unrelated userspace process used by M5 denial tests.
 pub const STORAGE_UNAUTHORIZED_SERVICE_ID: ServiceId = ServiceId(0x0000_5101);
+/// Stable logical identity for the M7 userspace network service.
+pub const NETWORK_SERVICE_ID: ServiceId = ServiceId(0x0000_5200);
+/// Unrelated process used by M7 denial tests.
+pub const NETWORK_UNAUTHORIZED_SERVICE_ID: ServiceId = ServiceId(0x0000_5201);

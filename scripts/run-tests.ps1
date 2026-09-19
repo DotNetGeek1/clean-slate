@@ -22,9 +22,11 @@
       m5-crash-recovery / crash-recovery,
       m5-disk-harness / m5-harness
       m6 / test-m6,
+      m7 / test-m7,
       m6-fixture-smoke, m6-object / m6.3, m6-process-control / m6.4,
       m6-delegation / m6.5, m6-revocation / m6.6, m6-audit / m6.7,
       m6-capabilities / m6.8
+      m7-network / m7.8
 
 .PARAMETER Exhaustive
     Run every known test (milestone gates plus each individual M3/M4
@@ -117,13 +119,20 @@ $AllTests = [ordered]@{
     "test-m5-crash-recovery"    = @{ Aliases = @("m5-crash-recovery", "crash-recovery"); Description = "M5 abrupt-stop crash-recovery acceptance on the persistent QEMU disk"; Role = "Constituent" }
     "test-m5-disk-harness"      = @{ Aliases = @("m5-disk-harness", "m5-harness"); Description = "M5 harness-only two-boot disk fixture validation (host sentinel)"; Role = "Constituent" }
     "test-m6"                   = @{ Aliases = @("m6", "m6.9"); Description = "M6 milestone gate (capability host tests, fixture smoke, constituents, convergence)"; Role = "Aggregate" }
+    "test-m7"                   = @{ Aliases = @("m7", "m7.9"); Description = "M7 milestone gate (converged network-service path + DNS/TLS + capability broker)"; Role = "Aggregate" }
     "test-m6-fixture-smoke"     = @{ Aliases = @("m6-fixture-smoke"); Description = "M6 scripted fixture harness smoke (constituent)"; Role = "Constituent" }
     "test-m6-object"            = @{ Aliases = @("m6-object", "m6.3"); Description = "M6.3 object-capability constituent acceptance"; Role = "Constituent" }
+    "test-m7-net-service"       = @{ Aliases = @("m7-net-service", "m7.3"); Description = "M7.3 network service and driver-domain seam acceptance"; Role = "Constituent" }
+    "test-m7-network"           = @{ Aliases = @("m7-network", "m7.8"); Description = "M7.8 converged production path acceptance (service + capability + DNS/TCP/TLS)"; Role = "Constituent" }
     "test-m6-process-control"   = @{ Aliases = @("m6-process-control", "m6.4"); Description = "M6.4 process-control capability constituent acceptance"; Role = "Constituent" }
     "test-m6-delegation"        = @{ Aliases = @("m6-delegation", "m6.5"); Description = "M6.5 capability delegation and attenuation constituent acceptance"; Role = "Constituent" }
     "test-m6-revocation"        = @{ Aliases = @("m6-revocation", "m6.6"); Description = "M6.6 capability revocation and teardown constituent acceptance"; Role = "Constituent" }
     "test-m6-audit"             = @{ Aliases = @("m6-audit", "m6.7"); Description = "M6.7 capability audit events constituent acceptance"; Role = "Constituent" }
     "test-m6-capabilities"      = @{ Aliases = @("m6-capabilities", "m6.8"); Description = "M6.8 capability convergence acceptance (object, delegation, revocation, process control, audit)"; Role = "Constituent" }
+    "test-m7-net-device"        = @{ Aliases = @("m7-net-device", "m7.2"); Description = "M7.2 VirtIO-net device-lane QEMU acceptance"; Role = "Constituent" }
+    "test-m7-tls"               = @{ Aliases = @("m7-tls", "m7.6"); Description = "M7.6 TLS client QEMU acceptance (pass + fail-closed)"; Role = "Constituent" }
+    "test-m7-net-caps"          = @{ Aliases = @("m7-net-caps", "m7.7"); Description = "M7.7 network capability broker and attribution acceptance"; Role = "Constituent" }
+    "test-m7-dns"               = @{ Aliases = @("m7-dns", "m7.5"); Description = "M7.5 DNS resolver QEMU acceptance"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {
