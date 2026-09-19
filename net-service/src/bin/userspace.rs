@@ -940,8 +940,18 @@ fn map_network_error_code(_err: NetworkError) -> u64 {
     6
 }
 
-fn map_tls_error_code(_err: TlsError) -> u64 {
-    7
+fn map_tls_error_code(err: TlsError) -> u64 {
+    match err {
+        TlsError::Tcp(_) => 7,
+        TlsError::Handshake => 7,
+        TlsError::PeerIdentity => 7,
+        TlsError::Protocol => 7,
+        TlsError::TruncatedRecord => 7,
+        TlsError::Timeout => 7,
+        TlsError::Closed => 7,
+        TlsError::BufferTooSmall => 7,
+        TlsError::Rng => 7,
+    }
 }
 
 fn run_client_echo(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
