@@ -271,6 +271,9 @@ fn record_network_audit(
         Ok(()) => "allow",
         Err(_) => "deny",
     };
+    if outcome == "allow" && matches!(op, NetworkOp::RawDevice) {
+        return;
+    }
     kernel_log_fmt(format_args!(
         "[AUD ] net op={} actor={} outcome={} resource={} generation={}\n",
         op.op_name(),
