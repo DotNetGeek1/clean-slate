@@ -2,6 +2,8 @@
 
 use clean_slate_service_lifecycle::{InstanceGeneration, ServiceId, ServiceInstanceId};
 
+use crate::process::live_instance_generation as live_process_instance_generation;
+
 use super::control::service_lifecycle_controller_mut;
 use crate::capability::network::NETWORK_SERVICE_ID;
 
@@ -23,7 +25,7 @@ pub(crate) fn live_instance_generation_for_service(
 
 /// Generation bound to a live supervised service instance for `pid`, when registered.
 pub(crate) fn live_instance_generation_for_pid(pid: u64) -> Option<InstanceGeneration> {
-    unsafe { service_lifecycle_controller_mut().authoritative_generation_for_live_pid(pid) }
+    live_process_instance_generation(pid)
 }
 
 /// Convenience for network broker paths: live generation of the network service resource.

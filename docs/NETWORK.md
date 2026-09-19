@@ -100,6 +100,10 @@ Kernel broker: `kernel/src/capability/network.rs`. Live generation lookup:
 - **Service instance:** `ResourceRef::network(logical_service_id, live_generation)` where
   `live_generation` comes from `live_network_service_generation()` /
   `ServiceLifecycleController::authoritative_generation(NETWORK_SERVICE_ID)`.
+- **Trusted caller identity:** queued work and holder-exit notifications carry the
+  caller’s `(pid, domain, live process instance_generation)` separately from the
+  network-service/session generation, so PID/domain reuse cannot claim stale
+  authority.
 - **Per-session (optional):** `ResourceRef::network_session(session_generation, session_index)`.
   Destination/port scoping is not encoded in `ResourceRef` for M7.7.
 
