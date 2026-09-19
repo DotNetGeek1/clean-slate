@@ -222,6 +222,19 @@ const M7_NET_SERVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[NET ] capacity baseline ok",
     "[M7.3] PASS",
 ];
+const M7_NETWORK_ACCEPTANCE_MARKERS: [&str; 11] = [
+    "[NET ] service started pid=",
+    "[NET ] session open id=",
+    "[NET ] converged dns+tls ok len=",
+    "[NET ] holder exit reclaimed sessions=",
+    "[NET ] denied pid=",
+    "reason=no-authority",
+    "[NET ] service restarted pid=",
+    "[NET ] inflight failed count=",
+    "[NET ] stale-session denied generation=",
+    "[NET ] capacity baseline ok",
+    "[M7.8] PASS",
+];
 const M6_DELEGATION_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[CAP ] delegate denied from=",
     "reason=rights-widening",
@@ -462,7 +475,7 @@ const M6_MILESTONE_STEPS: [M6MilestoneStep; 9] = [
 ];
 type M7MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
 const M7_MILESTONE_STEPS: [M7MilestoneStep; 4] = [
-    ("test-m7-net-service", run_m7_net_service_acceptance),
+    ("test-m7-network", run_m7_network_acceptance),
     ("test-m7-net-caps", run_m7_net_caps_acceptance),
     ("test-m7-dns", run_m7_dns_acceptance),
     ("test-m7-tls", run_m7_tls_acceptance),
@@ -518,6 +531,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM6FixtureSmoke => run_m6_fixture_smoke_acceptance(),
         ParsedCommand::TestM6Object => run_m6_object_acceptance(),
         ParsedCommand::TestM7NetService => run_m7_net_service_acceptance(),
+        ParsedCommand::TestM7Network => run_m7_network_acceptance(),
         ParsedCommand::TestM6ProcessControl => run_m6_process_control_acceptance(),
         ParsedCommand::TestM6Delegation => run_m6_delegation_acceptance(),
         ParsedCommand::TestM6Revocation => run_m6_revocation_acceptance(),
@@ -1127,6 +1141,34 @@ fn run_m7_net_service_acceptance() -> Result<(), XtaskError> {
             M7_NET_SERVICE_ACCEPTANCE_TIMEOUT,
         )),
     )
+}
+
+fn run_m7_network_acceptance() -> Result<(), XtaskError> {
+    build_network_userspace(true)?;
+    let peer = M7FixturePeer::start_with(FixtureOptions {
+        tls_cert: WhichCert::Correct,
+        dns_reply_delay: std::time::Duration::from_millis(5),
+    })
+    .map_err(XtaskError::Io)?;
+    let port = peer.port();
+    let run_result = run_vm_inner_with_config(
+        false,
+        false,
+        &["m7-network-self-test"],
+        Some((
+            &M7_NETWORK_ACCEPTANCE_MARKERS,
+            M7_NET_SERVICE_ACCEPTANCE_TIMEOUT,
+        )),
+        VmLaunchConfig {
+            m5_data_disk: None,
+            reset_ovmf_vars: false,
+            m7_fixture_port: Some(port),
+            kernel_release: true,
+            cpu_model: Some("qemu64,+rdrand"),
+        },
+    );
+    peer.shutdown();
+    run_result
 }
 
 fn build_network_userspace(release: bool) -> Result<(), XtaskError> {
@@ -2079,6 +2121,9 @@ fn print_help() {
     println!(
         "  test-m7-net-service Build M7.3 network-service constituent boot and validate ordered markers (aliases: m7-net-service, m7.3)"
     );
+    println!(
+        "  test-m7-network Build M7.8 converged network path boot (VirtIO-net -> CPL3 service -> capability lane -> DNS/TCP/TLS) and validate ordered markers (aliases: m7-network, m7.8)"
+    );
     println!("  test-m6-process-control Build M6 process-control constituent boot and validate ordered markers");
     println!("  test-m6-delegation Build M6 delegation/attenuation constituent boot and validate ordered markers");
     println!("  test-m6-revocation Build M6 revocation/teardown constituent boot and validate ordered markers");
@@ -2139,6 +2184,7 @@ enum ParsedCommand {
     TestM6FixtureSmoke,
     TestM6Object,
     TestM7NetService,
+    TestM7Network,
     TestM6ProcessControl,
     TestM6Delegation,
     TestM6Revocation,
@@ -2197,6 +2243,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m6-object" => ParsedCommand::TestM6Object,
         Some(cmd) if cmd == "test-m7-net-service" || cmd == "m7-net-service" || cmd == "m7.3" => {
             ParsedCommand::TestM7NetService
+        }
+        Some(cmd) if cmd == "test-m7-network" || cmd == "m7-network" || cmd == "m7.8" => {
+            ParsedCommand::TestM7Network
         }
         Some(cmd) if cmd == "test-m6-process-control" => ParsedCommand::TestM6ProcessControl,
         Some(cmd) if cmd == "test-m6-delegation" => ParsedCommand::TestM6Delegation,
@@ -2403,6 +2452,14 @@ mod tests {
         assert_eq!(
             parse_command(Some("test-m7-net-caps".as_ref())),
             ParsedCommand::TestM7NetCaps
+        );
+        assert_eq!(
+            parse_command(Some("test-m7-network".as_ref())),
+            ParsedCommand::TestM7Network
+        );
+        assert_eq!(
+            parse_command(Some("m7.8".as_ref())),
+            ParsedCommand::TestM7Network
         );
         assert_eq!(
             parse_command(Some("m7.7".as_ref())),
@@ -2682,7 +2739,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "test-m7-net-service",
+                "test-m7-network",
                 "test-m7-net-caps",
                 "test-m7-dns",
                 "test-m7-tls",

@@ -16,8 +16,9 @@ required-features = ["userspace"]
 
 [dependencies]
 clean-slate-capability = { path = "../capability" }
-clean-slate-network = { path = "../network", features = ["alloc"] }
+clean-slate-network = { path = "../network", features = ["alloc", "tls"] }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
+rand_core = { version = "=0.6.4", default-features = false }
 
 [lints]
 workspace = true

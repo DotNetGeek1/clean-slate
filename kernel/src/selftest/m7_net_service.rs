@@ -30,15 +30,23 @@ use crate::syscall::service_lifecycle_syscall_allocator_mut;
 use clean_slate_service_fixtures::{
     NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
     NETWORK_SERVICE_MODE_ACCEPTANCE, NETWORK_SERVICE_MODE_CAPACITY_LOOP,
-    NETWORK_SERVICE_MODE_CLIENT, NETWORK_SERVICE_MODE_INFLIGHT_ARM,
-    NETWORK_SERVICE_MODE_STALE_CLOSE, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
-    NETWORK_SERVICE_RESULT_OK, NETWORK_UNAUTHORIZED_SERVICE_ID,
+    NETWORK_SERVICE_MODE_INFLIGHT_ARM, NETWORK_SERVICE_MODE_STALE_CLOSE,
+    NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE, NETWORK_SERVICE_RESULT_OK,
+    NETWORK_UNAUTHORIZED_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::{
     ControlRequest, ControlRequestKind, LifecycleMessage, ServiceId,
 };
 
+#[cfg(feature = "m7-network-self-test")]
+const PASS_MARKER: &str = "[M7.8] PASS";
+#[cfg(not(feature = "m7-network-self-test"))]
 const PASS_MARKER: &str = "[M7.3] PASS";
+#[cfg(feature = "m7-network-self-test")]
+const PRIMARY_CLIENT_MODE: u64 =
+    clean_slate_service_fixtures::NETWORK_SERVICE_MODE_CONVERGED_CLIENT;
+#[cfg(not(feature = "m7-network-self-test"))]
+const PRIMARY_CLIENT_MODE: u64 = clean_slate_service_fixtures::NETWORK_SERVICE_MODE_CLIENT;
 const SUPERVISOR_TEST_PID: u64 = 70;
 
 const CLIENT_SLOT: usize = 1;
@@ -253,8 +261,7 @@ fn spawn_all_fixtures(
     allocator: &mut PageAllocator,
 ) -> M7FixturePids {
     let generation = 1;
-    let mut client_bootstrap =
-        NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_CLIENT, generation);
+    let mut client_bootstrap = NetworkServiceBootstrap::new(PRIMARY_CLIENT_MODE, generation);
     client_bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
     let client =
         launch_aux_with_bootstrap(controller, allocator, CLIENT_SLOT, client_bootstrap, true);
@@ -346,7 +353,7 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
     let controller = unsafe { service_lifecycle_controller_mut() };
 
     let next_phase = match (test_state.phase, report.mode) {
-        (M7Phase::AwaitClientEcho, NETWORK_SERVICE_MODE_CLIENT) => {
+        (M7Phase::AwaitClientEcho, PRIMARY_CLIENT_MODE) => {
             if report.result_code != NETWORK_SERVICE_RESULT_OK {
                 fatal_kernel_error("m7 client echo failed");
             }
@@ -355,6 +362,12 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 "[NET ] session open id={}\n",
                 report.session_id_raw
             ));
+            #[cfg(feature = "m7-network-self-test")]
+            kernel_log_fmt(format_args!(
+                "[NET ] converged dns+tls ok len={}\n",
+                report.echo_len
+            ));
+            #[cfg(not(feature = "m7-network-self-test"))]
             kernel_log_fmt(format_args!("[NET ] echo ok len={}\n", report.echo_len));
             M7Phase::AwaitHolderExitAck
         }

@@ -26,6 +26,7 @@
       m6-fixture-smoke, m6-object / m6.3, m6-process-control / m6.4,
       m6-delegation / m6.5, m6-revocation / m6.6, m6-audit / m6.7,
       m6-capabilities / m6.8
+      m7-network / m7.8
 
 .PARAMETER Exhaustive
     Run every known test (milestone gates plus each individual M3/M4
@@ -122,6 +123,7 @@ $AllTests = [ordered]@{
     "test-m6-fixture-smoke"     = @{ Aliases = @("m6-fixture-smoke"); Description = "M6 scripted fixture harness smoke (constituent)"; Role = "Constituent" }
     "test-m6-object"            = @{ Aliases = @("m6-object", "m6.3"); Description = "M6.3 object-capability constituent acceptance"; Role = "Constituent" }
     "test-m7-net-service"       = @{ Aliases = @("m7-net-service", "m7.3"); Description = "M7.3 network service and driver-domain seam acceptance"; Role = "Constituent" }
+    "test-m7-network"           = @{ Aliases = @("m7-network", "m7.8"); Description = "M7.8 converged production path acceptance (service + capability + DNS/TCP/TLS)"; Role = "Constituent" }
     "test-m6-process-control"   = @{ Aliases = @("m6-process-control", "m6.4"); Description = "M6.4 process-control capability constituent acceptance"; Role = "Constituent" }
     "test-m6-delegation"        = @{ Aliases = @("m6-delegation", "m6.5"); Description = "M6.5 capability delegation and attenuation constituent acceptance"; Role = "Constituent" }
     "test-m6-revocation"        = @{ Aliases = @("m6-revocation", "m6.6"); Description = "M6.6 capability revocation and teardown constituent acceptance"; Role = "Constituent" }

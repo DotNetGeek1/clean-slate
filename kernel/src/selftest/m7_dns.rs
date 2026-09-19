@@ -13,17 +13,18 @@ use clean_slate_network::stack::L3Stack;
 
 use crate::device::virtio::net::VirtioNetDevice;
 use crate::diagnostics::qemu::{qemu_exit, QEMU_EXIT_SUCCESS};
+use crate::interrupt::timer::{initialize_timer, kernel_ticks};
 use crate::{serial_write_fmt, serial_write_line};
 
 const ARP_TTL_TICKS: u64 = 50_000;
 const POLL_SPIN_LIMIT: usize = 50_000_000;
-const DNS_POLL_TICK_BURST: u64 = 4096;
 const DNS_OWNER: TrustedCaller = TrustedCaller::new(0x4D37, 0, 1);
 
 static mut RESOLVER_STORAGE: MaybeUninit<DnsResolver<VirtioNetDevice>> = MaybeUninit::uninit();
 
 #[allow(static_mut_refs)]
 pub(crate) fn run_m7_dns_self_test() -> Result<(), &'static str> {
+    initialize_timer();
     let device = VirtioNetDevice::discover()?;
     let mac = device.link().mac;
     serial_write_fmt(format_args!("[DNS ] virtio ready mac="));
@@ -66,7 +67,7 @@ fn resolve_and_print(
     name: &str,
     expect_addr: bool,
 ) -> Result<(), &'static str> {
-    let mut now = 0u64;
+    let mut now = kernel_ticks();
     let outcome = resolver
         .resolve(now, DNS_OWNER, name)
         .map_err(map_dns_error)?;
@@ -78,7 +79,8 @@ fn resolve_and_print(
         ResolveOutcome::Pending { query_id } => query_id,
     };
 
-    for polls in 0..POLL_SPIN_LIMIT {
+    for _ in 0..POLL_SPIN_LIMIT {
+        now = kernel_ticks();
         resolver.poll(now).map_err(map_dns_error)?;
         if let Some(result) = resolver.take_result(query_id, DNS_OWNER) {
             match result {
@@ -93,9 +95,6 @@ fn resolve_and_print(
                 }
                 Err(err) => return Err(map_dns_error(err)),
             }
-        }
-        if polls as u64 % DNS_POLL_TICK_BURST == DNS_POLL_TICK_BURST - 1 {
-            now = now.saturating_add(1);
         }
         spin_loop();
     }
@@ -122,7 +121,7 @@ fn resolve_nxdomain(
     resolver: &mut DnsResolver<VirtioNetDevice>,
     name: &str,
 ) -> Result<(), &'static str> {
-    let mut now = 0u64;
+    let mut now = kernel_ticks();
     let query_id = match resolver
         .resolve(now, DNS_OWNER, name)
         .map_err(map_dns_error)?
@@ -130,7 +129,8 @@ fn resolve_nxdomain(
         ResolveOutcome::Pending { query_id } => query_id,
         _ => return Err("expected pending nxdomain query"),
     };
-    for polls in 0..POLL_SPIN_LIMIT {
+    for _ in 0..POLL_SPIN_LIMIT {
+        now = kernel_ticks();
         resolver.poll(now).map_err(map_dns_error)?;
         if let Some(result) = resolver.take_result(query_id, DNS_OWNER) {
             match result {
@@ -141,9 +141,6 @@ fn resolve_nxdomain(
                 Ok(_) => return Err("expected nxdomain"),
                 Err(other) => return Err(map_dns_error(other)),
             }
-        }
-        if polls as u64 % DNS_POLL_TICK_BURST == DNS_POLL_TICK_BURST - 1 {
-            now = now.saturating_add(1);
         }
         spin_loop();
     }
