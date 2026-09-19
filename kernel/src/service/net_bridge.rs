@@ -61,14 +61,6 @@ impl RawBackend {
         }
     }
 
-    fn transmit(&mut self, frame: FrameBuf) -> Result<(), (NetworkDeviceError, FrameBuf)> {
-        match self {
-            Self::Loopback(link) => link.transmit(frame),
-            #[cfg(feature = "m7-network-self-test")]
-            Self::Virtio(device) => device.transmit(frame),
-        }
-    }
-
     fn receive(&mut self) -> Result<Option<FrameBuf>, NetworkDeviceError> {
         match self {
             Self::Loopback(link) => link.receive(),
@@ -511,7 +503,12 @@ impl NetBridge {
         if !self.is_live_service(service_pid) {
             return Err(NetworkDeviceError::NotReady);
         }
-        self.raw_backend.transmit(frame).map_err(|(err, _)| err)
+        match &mut self.raw_backend {
+            RawBackend::Loopback(link) => link.transmit(frame),
+            #[cfg(feature = "m7-network-self-test")]
+            RawBackend::Virtio(device) => device.transmit(frame),
+        }
+        .map_err(|(err, _)| err)
     }
 
     pub fn raw_receive(
