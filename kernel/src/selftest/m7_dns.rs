@@ -1,4 +1,4 @@
-use core::arch::asm;
+use core::hint::spin_loop;
 use core::mem::MaybeUninit;
 
 use clean_slate_network::device::NetworkLink;
@@ -11,21 +11,19 @@ use clean_slate_network::protocol::TrustedCaller;
 use clean_slate_network::session::SessionGeneration;
 use clean_slate_network::stack::L3Stack;
 
-use crate::arch::x86_64::cpu::enable_interrupts;
 use crate::device::virtio::net::VirtioNetDevice;
 use crate::diagnostics::qemu::{qemu_exit, QEMU_EXIT_SUCCESS};
-use crate::interrupt::timer::kernel_ticks;
 use crate::{serial_write_fmt, serial_write_line};
 
 const ARP_TTL_TICKS: u64 = 50_000;
 const POLL_SPIN_LIMIT: usize = 50_000_000;
+const DNS_POLL_TICK_BURST: u64 = 4096;
 const DNS_OWNER: TrustedCaller = TrustedCaller::new(0x4D37, 0, 1);
 
 static mut RESOLVER_STORAGE: MaybeUninit<DnsResolver<VirtioNetDevice>> = MaybeUninit::uninit();
 
 #[allow(static_mut_refs)]
 pub(crate) fn run_m7_dns_self_test() -> Result<(), &'static str> {
-    enable_interrupts();
     let device = VirtioNetDevice::discover()?;
     let mac = device.link().mac;
     serial_write_fmt(format_args!("[DNS ] virtio ready mac="));
@@ -68,7 +66,7 @@ fn resolve_and_print(
     name: &str,
     expect_addr: bool,
 ) -> Result<(), &'static str> {
-    let mut now = kernel_ticks();
+    let mut now = 0u64;
     let outcome = resolver
         .resolve(now, DNS_OWNER, name)
         .map_err(map_dns_error)?;
@@ -80,7 +78,7 @@ fn resolve_and_print(
         ResolveOutcome::Pending { query_id } => query_id,
     };
 
-    for _ in 0..POLL_SPIN_LIMIT {
+    for polls in 0..POLL_SPIN_LIMIT {
         resolver.poll(now).map_err(map_dns_error)?;
         if let Some(result) = resolver.take_result(query_id, DNS_OWNER) {
             match result {
@@ -96,7 +94,10 @@ fn resolve_and_print(
                 Err(err) => return Err(map_dns_error(err)),
             }
         }
-        now = paced_monotonic_tick(now);
+        if polls as u64 % DNS_POLL_TICK_BURST == DNS_POLL_TICK_BURST - 1 {
+            now = now.saturating_add(1);
+        }
+        spin_loop();
     }
     fail("timeout waiting for DNS")
 }
@@ -121,7 +122,7 @@ fn resolve_nxdomain(
     resolver: &mut DnsResolver<VirtioNetDevice>,
     name: &str,
 ) -> Result<(), &'static str> {
-    let mut now = kernel_ticks();
+    let mut now = 0u64;
     let query_id = match resolver
         .resolve(now, DNS_OWNER, name)
         .map_err(map_dns_error)?
@@ -129,7 +130,7 @@ fn resolve_nxdomain(
         ResolveOutcome::Pending { query_id } => query_id,
         _ => return Err("expected pending nxdomain query"),
     };
-    for _ in 0..POLL_SPIN_LIMIT {
+    for polls in 0..POLL_SPIN_LIMIT {
         resolver.poll(now).map_err(map_dns_error)?;
         if let Some(result) = resolver.take_result(query_id, DNS_OWNER) {
             match result {
@@ -141,21 +142,12 @@ fn resolve_nxdomain(
                 Err(other) => return Err(map_dns_error(other)),
             }
         }
-        now = paced_monotonic_tick(now);
+        if polls as u64 % DNS_POLL_TICK_BURST == DNS_POLL_TICK_BURST - 1 {
+            now = now.saturating_add(1);
+        }
+        spin_loop();
     }
     fail("timeout waiting for nxdomain")
-}
-
-fn paced_monotonic_tick(now: u64) -> u64 {
-    loop {
-        let observed = kernel_ticks();
-        if observed > now {
-            return observed;
-        }
-        unsafe {
-            asm!("hlt", options(nomem, nostack, preserves_flags));
-        }
-    }
 }
 
 fn print_resolved(name: &str, addr: clean_slate_network::addr::Ipv4Addr, ttl: u32) {

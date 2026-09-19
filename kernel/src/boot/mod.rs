@@ -524,7 +524,6 @@ fn run_inner() -> Result<(), &'static str> {
 
     #[cfg(feature = "m7-dns-self-test")]
     {
-        crate::interrupt::timer::initialize_timer();
         run_m7_dns_self_test()
     }
 

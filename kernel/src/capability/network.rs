@@ -380,6 +380,7 @@ pub(crate) fn on_revoked(handle: CapabilityHandle) -> [SessionId; MAX_TRACKED_SE
 }
 
 /// Revokes live network capabilities for a holder (used before re-granting after service restart).
+#[allow(dead_code)]
 pub(crate) fn revoke_network_capabilities_for_holder(holder: HolderId) {
     let handles: [Option<CapabilityHandle>; MAX_TRACKED_SESSIONS] =
         with_capability_space(|table| {
