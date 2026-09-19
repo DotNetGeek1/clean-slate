@@ -1,4 +1,4 @@
-use core::hint::spin_loop;
+use core::arch::asm;
 use core::mem::MaybeUninit;
 
 use clean_slate_network::device::NetworkLink;
@@ -11,6 +11,7 @@ use clean_slate_network::protocol::TrustedCaller;
 use clean_slate_network::session::SessionGeneration;
 use clean_slate_network::stack::L3Stack;
 
+use crate::arch::x86_64::cpu::enable_interrupts;
 use crate::device::virtio::net::VirtioNetDevice;
 use crate::diagnostics::qemu::{qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::interrupt::timer::kernel_ticks;
@@ -24,6 +25,7 @@ static mut RESOLVER_STORAGE: MaybeUninit<DnsResolver<VirtioNetDevice>> = MaybeUn
 
 #[allow(static_mut_refs)]
 pub(crate) fn run_m7_dns_self_test() -> Result<(), &'static str> {
+    enable_interrupts();
     let device = VirtioNetDevice::discover()?;
     let mac = device.link().mac;
     serial_write_fmt(format_args!("[DNS ] virtio ready mac="));
@@ -150,7 +152,9 @@ fn paced_monotonic_tick(now: u64) -> u64 {
         if observed > now {
             return observed;
         }
-        spin_loop();
+        unsafe {
+            asm!("hlt", options(nomem, nostack, preserves_flags));
+        }
     }
 }
 
