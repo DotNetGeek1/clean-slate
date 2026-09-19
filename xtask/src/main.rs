@@ -460,6 +460,13 @@ const M6_MILESTONE_STEPS: [M6MilestoneStep; 9] = [
     ("test-m6-audit", run_m6_audit_acceptance),
     ("test-m6-capabilities", run_m6_capabilities_acceptance),
 ];
+type M7MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
+const M7_MILESTONE_STEPS: [M7MilestoneStep; 4] = [
+    ("test-m7-net-service", run_m7_net_service_acceptance),
+    ("test-m7-net-caps", run_m7_net_caps_acceptance),
+    ("test-m7-dns", run_m7_dns_acceptance),
+    ("test-m7-tls", run_m7_tls_acceptance),
+];
 
 fn main() -> ExitCode {
     match run(env::args_os()) {
@@ -517,6 +524,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM6Audit => run_m6_audit_acceptance(),
         ParsedCommand::TestM6Capabilities => run_m6_capabilities_acceptance(),
         ParsedCommand::TestM7NetCaps => run_m7_net_caps_acceptance(),
+        ParsedCommand::TestM7 => run_m7_acceptance(),
         ParsedCommand::TestM6 => run_m6_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
@@ -564,6 +572,7 @@ fn run_m5_block_acceptance() -> Result<(), XtaskError> {
 fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
+        dns_reply_delay: std::time::Duration::ZERO,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -585,6 +594,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
 
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::WrongName,
+        dns_reply_delay: std::time::Duration::ZERO,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -629,7 +639,11 @@ fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
-    let peer = M7FixturePeer::start().map_err(XtaskError::Io)?;
+    let peer = M7FixturePeer::start_with(FixtureOptions {
+        tls_cert: WhichCert::Correct,
+        dns_reply_delay: std::time::Duration::from_millis(5),
+    })
+    .map_err(XtaskError::Io)?;
     let port = peer.port();
     let run_result = run_vm_inner_with_config(
         false,
@@ -1245,6 +1259,16 @@ fn run_m6_acceptance() -> Result<(), XtaskError> {
         step()?;
     }
     println!("[M6  ] PASS");
+    Ok(())
+}
+
+fn run_m7_acceptance() -> Result<(), XtaskError> {
+    let total = M7_MILESTONE_STEPS.len();
+    for (index, (name, step)) in M7_MILESTONE_STEPS.iter().enumerate() {
+        println!("[M7  ] step {}/{} {}", index + 1, total, name);
+        step()?;
+    }
+    println!("[M7  ] PASS");
     Ok(())
 }
 
@@ -2067,6 +2091,7 @@ fn print_help() {
     println!(
         "  test-m7-net-caps Build M7.7 network capability broker boot and validate ordered markers"
     );
+    println!("  test-m7          M7 milestone gate over the converged network-service path");
     println!("  m5-disk-create Create deterministic M5 data disk if missing (preserve existing)");
     println!("  m5-disk-reset Recreate deterministic blank M5 data disk");
     println!("  m5-disk-inspect Print M5 data disk path and size");
@@ -2120,6 +2145,7 @@ enum ParsedCommand {
     TestM6Audit,
     TestM6Capabilities,
     TestM7NetCaps,
+    TestM7,
     TestM6,
     M5DiskCreate,
     M5DiskReset,
@@ -2184,6 +2210,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m7-net-caps" || cmd == "m7-net-caps" || cmd == "m7.7" => {
             ParsedCommand::TestM7NetCaps
         }
+        Some(cmd) if cmd == "test-m7" || cmd == "m7" || cmd == "m7.9" => ParsedCommand::TestM7,
         Some(cmd) if cmd == "test-m6" || cmd == "m6" || cmd == "m6.9" => ParsedCommand::TestM6,
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
@@ -2381,6 +2408,11 @@ mod tests {
             parse_command(Some("m7.7".as_ref())),
             ParsedCommand::TestM7NetCaps
         );
+        assert_eq!(
+            parse_command(Some("test-m7".as_ref())),
+            ParsedCommand::TestM7
+        );
+        assert_eq!(parse_command(Some("m7.9".as_ref())), ParsedCommand::TestM7);
         assert_eq!(
             parse_command(Some("test-m5-storage".as_ref())),
             ParsedCommand::TestM5Storage
@@ -2640,6 +2672,20 @@ mod tests {
                 "test-m6-revocation",
                 "test-m6-audit",
                 "test-m6-capabilities",
+            ]
+        );
+    }
+
+    #[test]
+    fn m7_milestone_steps_have_deterministic_order() {
+        let names: Vec<&str> = M7_MILESTONE_STEPS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "test-m7-net-service",
+                "test-m7-net-caps",
+                "test-m7-dns",
+                "test-m7-tls",
             ]
         );
     }

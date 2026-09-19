@@ -9,6 +9,7 @@ use crate::capability::network::NETWORK_SERVICE_ID;
 pub(crate) const NETWORK_LOGICAL_SERVICE: ServiceId = NETWORK_SERVICE_ID;
 
 /// Authoritative generation for a declared logical service (replacement counter).
+#[allow(dead_code)]
 pub(crate) fn live_instance_generation(service: ServiceId) -> Option<InstanceGeneration> {
     live_instance_generation_for_service(service)
 }
@@ -31,6 +32,7 @@ pub(crate) fn live_network_service_generation() -> Option<InstanceGeneration> {
 }
 
 /// Builds a [`ServiceInstanceId`] view when the pid is the live instance of `service`.
+#[allow(dead_code)]
 pub(crate) fn live_service_instance_id(service: ServiceId) -> Option<ServiceInstanceId> {
     unsafe { service_lifecycle_controller_mut().live_service_instance_id(service) }
 }

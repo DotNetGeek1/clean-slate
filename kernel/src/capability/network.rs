@@ -555,4 +555,37 @@ mod tests {
         );
         assert!(child_record.rights.contains(Rights::NET_RECEIVE));
     }
+
+    #[test]
+    fn session_registry_capacity_reused_after_holder_clear() {
+        let mut registry = NetworkSessionRegistry::new();
+        let holder = HolderId(7);
+        let handle = CapabilityHandle::new(3, 1);
+        for index in 0..MAX_TRACKED_SESSIONS {
+            registry
+                .register(
+                    holder,
+                    SessionId::new(SessionGeneration::new(1), index as u32),
+                    handle,
+                )
+                .expect("session insert");
+        }
+        assert!(registry
+            .register(
+                holder,
+                SessionId::new(SessionGeneration::new(1), 42),
+                handle
+            )
+            .is_err());
+        assert_eq!(registry.clear_holder(holder), MAX_TRACKED_SESSIONS);
+        for index in 0..MAX_TRACKED_SESSIONS {
+            registry
+                .register(
+                    holder,
+                    SessionId::new(SessionGeneration::new(2), index as u32),
+                    handle,
+                )
+                .expect("session reinsert");
+        }
+    }
 }

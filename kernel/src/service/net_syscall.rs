@@ -13,8 +13,9 @@ use clean_slate_network::protocol::{
 use clean_slate_network::session::SessionGeneration;
 use clean_slate_service_fixtures::{
     NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID,
-    NETWORK_MAX_PAYLOAD_BYTES, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_POLL,
-    NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
+    NETWORK_MAX_PAYLOAD_BYTES, NETWORK_SERVICE_NEXT_METADATA_BYTES,
+    NETWORK_SERVICE_NEXT_WIRE_BYTES, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT,
+    NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
 };
 
@@ -288,7 +289,7 @@ fn handle_poll(frame: &mut SyscallContext) {
 
 fn handle_service_next(frame: &mut SyscallContext) {
     if validate_user_writable_pointer_range(frame.rdx, NETWORK_REQUEST_BYTES as u64).is_err()
-        || validate_user_writable_pointer_range(frame.r10, NETWORK_MAX_PAYLOAD_BYTES as u64)
+        || validate_user_writable_pointer_range(frame.r10, NETWORK_SERVICE_NEXT_WIRE_BYTES as u64)
             .is_err()
     {
         frame.rax = SYSCALL_EINVAL;
@@ -319,19 +320,19 @@ fn handle_service_next(frame: &mut SyscallContext) {
             meta[0..8].copy_from_slice(&caller.pid.to_le_bytes());
             meta[8..16].copy_from_slice(&caller.domain.to_le_bytes());
             meta[16..24].copy_from_slice(&caller.instance_generation.to_le_bytes());
-            meta[24..28].copy_from_slice(&payload_len.to_le_bytes());
+            let payload_len_usize = payload_len as usize;
+            if payload_len_usize > NETWORK_MAX_PAYLOAD_BYTES {
+                frame.rax = SYSCALL_EINVAL;
+                return;
+            }
+            meta[24..28].copy_from_slice(&(payload_len_usize as u32).to_le_bytes());
             unsafe {
                 ptr::copy_nonoverlapping(meta.as_ptr(), frame.r10 as *mut u8, meta.len());
             }
             if let Some(payload) = net_bridge_mut().service_take_payload(request_id) {
-                let len = payload_len as usize;
                 unsafe {
-                    let dest = (frame.r10 as *mut u8).add(meta.len());
-                    ptr::copy_nonoverlapping(
-                        payload.as_ptr(),
-                        dest,
-                        len.min(NETWORK_MAX_PAYLOAD_BYTES - meta.len()),
-                    );
+                    let dest = (frame.r10 as *mut u8).add(NETWORK_SERVICE_NEXT_METADATA_BYTES);
+                    ptr::copy_nonoverlapping(payload.as_ptr(), dest, payload_len_usize);
                 }
             }
             frame.rax = request_id;

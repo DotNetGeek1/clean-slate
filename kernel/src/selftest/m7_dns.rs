@@ -13,6 +13,7 @@ use clean_slate_network::stack::L3Stack;
 
 use crate::device::virtio::net::VirtioNetDevice;
 use crate::diagnostics::qemu::{qemu_exit, QEMU_EXIT_SUCCESS};
+use crate::interrupt::timer::kernel_ticks;
 use crate::{serial_write_fmt, serial_write_line};
 
 const ARP_TTL_TICKS: u64 = 50_000;
@@ -65,7 +66,7 @@ fn resolve_and_print(
     name: &str,
     expect_addr: bool,
 ) -> Result<(), &'static str> {
-    let mut now = 0u64;
+    let mut now = kernel_ticks();
     let outcome = resolver
         .resolve(now, DNS_OWNER, name)
         .map_err(map_dns_error)?;
@@ -93,8 +94,7 @@ fn resolve_and_print(
                 Err(err) => return Err(map_dns_error(err)),
             }
         }
-        now = now.saturating_add(1);
-        spin_loop();
+        now = paced_monotonic_tick(now);
     }
     fail("timeout waiting for DNS")
 }
@@ -119,7 +119,7 @@ fn resolve_nxdomain(
     resolver: &mut DnsResolver<VirtioNetDevice>,
     name: &str,
 ) -> Result<(), &'static str> {
-    let mut now = 0u64;
+    let mut now = kernel_ticks();
     let query_id = match resolver
         .resolve(now, DNS_OWNER, name)
         .map_err(map_dns_error)?
@@ -139,10 +139,19 @@ fn resolve_nxdomain(
                 Err(other) => return Err(map_dns_error(other)),
             }
         }
-        now = now.saturating_add(1);
-        spin_loop();
+        now = paced_monotonic_tick(now);
     }
     fail("timeout waiting for nxdomain")
+}
+
+fn paced_monotonic_tick(now: u64) -> u64 {
+    loop {
+        let observed = kernel_ticks();
+        if observed > now {
+            return observed;
+        }
+        spin_loop();
+    }
 }
 
 fn print_resolved(name: &str, addr: clean_slate_network::addr::Ipv4Addr, ttl: u32) {

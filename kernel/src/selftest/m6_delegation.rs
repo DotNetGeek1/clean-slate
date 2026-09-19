@@ -46,6 +46,7 @@ const FIXTURE_OWNER: u64 = 0;
 const FIXTURE_READER: u64 = 1;
 
 const LISTING_BYTES: usize = 32;
+const INVALID_RIGHTS_BIT: u64 = 1 << 31;
 
 struct DelegationSelfTestState {
     owner_pid: u64,
@@ -144,7 +145,14 @@ fn build_owner_program(reader_pid: u64) -> M6FixtureBootstrap {
         .push(
             M6FixtureStep::syscall(
                 SYSCALL_NR_CAP_DELEGATE,
-                [DELEGATE_OP_DELEGATE, parent, reader_pid, 1 << 9, 0, 0],
+                [
+                    DELEGATE_OP_DELEGATE,
+                    parent,
+                    reader_pid,
+                    INVALID_RIGHTS_BIT,
+                    0,
+                    0,
+                ],
             )
             .expect_eq(SYSCALL_EINVAL),
         )

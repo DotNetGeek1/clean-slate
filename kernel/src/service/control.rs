@@ -429,6 +429,7 @@ impl ServiceLifecycleController {
         Ok(next)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn live_service_instance_id(&self, service: ServiceId) -> Option<ServiceInstanceId> {
         let record = self.find_service(service)?;
         let live = record.live?;
@@ -647,6 +648,7 @@ impl ServiceLifecycleController {
         Ok(())
     }
 
+    #[cfg(feature = "m7-net-service-self-test")]
     pub(crate) fn grant_network_client_capability(
         &mut self,
         pid: u64,
@@ -678,7 +680,6 @@ impl ServiceLifecycleController {
             .live
             .ok_or(LifecycleControlError::ServiceNotLive)?;
         self.log_terminate(service_id, live.pid);
-        #[cfg(feature = "m7-net-service-self-test")]
         if service_id == NETWORK_SERVICE_ID {
             let _ = crate::service::net_bridge::shutdown_net_service_instance();
         }

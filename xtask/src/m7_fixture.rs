@@ -31,12 +31,14 @@ pub enum WhichCert {
 #[derive(Clone, Copy, Debug)]
 pub struct FixtureOptions {
     pub tls_cert: WhichCert,
+    pub dns_reply_delay: StdDuration,
 }
 
 impl Default for FixtureOptions {
     fn default() -> Self {
         Self {
             tls_cert: WhichCert::Correct,
+            dns_reply_delay: StdDuration::ZERO,
         }
     }
 }
@@ -180,6 +182,9 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         if let Ok((payload, endpoint)) = dns_socket.recv() {
             if let Some((name, response)) = build_dns_response(payload) {
                 let rcode = (response[3] & 0x0F) as u32;
+                if !options.dns_reply_delay.is_zero() {
+                    thread::sleep(options.dns_reply_delay);
+                }
                 if dns_socket.send_slice(&response, endpoint).is_ok() {
                     println!("[FIX ] dns query name={name} rcode={rcode}");
                 }

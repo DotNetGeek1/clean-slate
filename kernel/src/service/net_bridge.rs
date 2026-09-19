@@ -196,9 +196,6 @@ impl NetBridge {
         generation: u64,
     ) -> SessionGeneration {
         let _ = self.loopback.reset();
-        self.slots = [ClientSlot::free(); NETWORK_REQUEST_SLOTS];
-        self.next_request_id = 1;
-        self.inflight_failed = 0;
         self.holder_exit_head = 0;
         self.holder_exit_tail = 0;
         self.pending_holder_exit_ack = None;
@@ -212,6 +209,7 @@ impl NetBridge {
         self.session_generation
     }
 
+    #[allow(dead_code)]
     pub fn session_generation(&self) -> SessionGeneration {
         self.session_generation
     }
@@ -220,10 +218,12 @@ impl NetBridge {
         self.service_pid
     }
 
+    #[cfg(feature = "m7-net-service-self-test")]
     pub fn inflight_failed(&self) -> u32 {
         self.inflight_failed
     }
 
+    #[allow(dead_code)]
     pub fn clear_inflight_failed(&mut self) {
         self.inflight_failed = 0;
     }
@@ -528,6 +528,7 @@ pub(crate) fn shutdown_net_service_instance() -> u32 {
     net_bridge_mut().shutdown_service()
 }
 
+#[allow(dead_code)]
 pub(crate) fn network_device_id() -> u64 {
     NETWORK_DEVICE_ID
 }

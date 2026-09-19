@@ -21,10 +21,11 @@ use clean_slate_service_fixtures::{
     NETWORK_MAX_PAYLOAD_BYTES, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_MODE_ACCEPTANCE,
     NETWORK_SERVICE_MODE_CAPACITY_LOOP, NETWORK_SERVICE_MODE_CLIENT,
     NETWORK_SERVICE_MODE_INFLIGHT_ARM, NETWORK_SERVICE_MODE_STALE_CLOSE,
-    NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE, NETWORK_SERVICE_RESULT_ERROR,
-    NETWORK_SERVICE_RESULT_OK, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_POLL,
-    NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
-    NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
+    NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE, NETWORK_SERVICE_NEXT_METADATA_BYTES,
+    NETWORK_SERVICE_NEXT_WIRE_BYTES, NETWORK_SERVICE_RESULT_ERROR, NETWORK_SERVICE_RESULT_OK,
+    NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT,
+    NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT,
+    NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
 };
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
@@ -274,7 +275,8 @@ type ServiceState = NetworkService<SyscallRawLink, AllowAllAuthorizer, Passthrou
 
 static mut SERVICE_STATE: Option<ServiceState> = None;
 static mut SERVICE_REQUEST_BUF: [u8; NETWORK_REQUEST_BYTES] = [0; NETWORK_REQUEST_BYTES];
-static mut SERVICE_PAYLOAD_BUF: [u8; NETWORK_MAX_PAYLOAD_BYTES] = [0; NETWORK_MAX_PAYLOAD_BYTES];
+static mut SERVICE_PAYLOAD_BUF: [u8; NETWORK_SERVICE_NEXT_WIRE_BYTES] =
+    [0; NETWORK_SERVICE_NEXT_WIRE_BYTES];
 static mut SERVICE_RESPONSE_BUF: [u8; NETWORK_RESPONSE_BYTES] = [0; NETWORK_RESPONSE_BYTES];
 static mut SERVICE_RESPONSE_PAYLOAD: [u8; NETWORK_MAX_PAYLOAD_BYTES] =
     [0; NETWORK_MAX_PAYLOAD_BYTES];
@@ -288,7 +290,7 @@ unsafe fn service_request_buf_ptr() -> *mut [u8; NETWORK_REQUEST_BYTES] {
     core::ptr::addr_of_mut!(SERVICE_REQUEST_BUF)
 }
 
-unsafe fn service_payload_buf_ptr() -> *mut [u8; NETWORK_MAX_PAYLOAD_BYTES] {
+unsafe fn service_payload_buf_ptr() -> *mut [u8; NETWORK_SERVICE_NEXT_WIRE_BYTES] {
     core::ptr::addr_of_mut!(SERVICE_PAYLOAD_BUF)
 }
 
@@ -362,8 +364,16 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             u64::from_le_bytes(domain_bytes),
             u64::from_le_bytes(gen_bytes),
         );
-        let payload_len = u32::from_le_bytes(len_bytes);
-        let payload = &payload_buf[28..28 + payload_len as usize];
+        let payload_len = u32::from_le_bytes(len_bytes) as usize;
+        if payload_len > NETWORK_MAX_PAYLOAD_BYTES {
+            continue;
+        }
+        let payload_start = NETWORK_SERVICE_NEXT_METADATA_BYTES;
+        let payload_end = payload_start.saturating_add(payload_len);
+        if payload_end > payload_buf.len() {
+            continue;
+        }
+        let payload = &payload_buf[payload_start..payload_end];
         let (response, out_len) =
             service.handle_request(caller, request, payload, response_payload);
         response_buf.copy_from_slice(&response.encode());
@@ -419,7 +429,7 @@ fn drain_holder_exits(
 fn service_next(
     role_handle: u64,
     request_buf: &mut [u8; NETWORK_REQUEST_BYTES],
-    payload_buf: &mut [u8; NETWORK_MAX_PAYLOAD_BYTES],
+    payload_buf: &mut [u8; NETWORK_SERVICE_NEXT_WIRE_BYTES],
 ) -> Result<u64, u64> {
     let status = net_request([
         NET_SUBOP_SERVICE_NEXT,
