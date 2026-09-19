@@ -221,13 +221,15 @@ impl ProcessRegistry {
         if process.instance_generation.0 == 0 {
             process.instance_generation = self.next_instance_generation;
         }
-        self.next_instance_generation = InstanceGeneration(
-            process
-                .instance_generation
-                .0
-                .saturating_add(1)
-                .max(self.next_instance_generation.0),
-        );
+        if process.instance_generation.0 >= self.next_instance_generation.0 {
+            self.next_instance_generation = InstanceGeneration(
+                process
+                    .instance_generation
+                    .0
+                    .checked_add(1)
+                    .ok_or("process instance generation exhausted")?,
+            );
+        }
         let slot = self
             .processes
             .iter_mut()
@@ -490,6 +492,21 @@ mod tests {
             .instance_generation(17)
             .expect("replacement generation");
         assert!(replacement_generation.0 > first_generation.0);
+    }
+
+    #[test]
+    fn process_registry_rejects_instance_generation_overflow() {
+        let mut registry = ProcessRegistry::new();
+        registry.next_instance_generation = InstanceGeneration(u32::MAX);
+        let result = registry.insert(Process {
+            id: 99,
+            instance_generation: InstanceGeneration(0),
+            state: ProcessState::Ready,
+            resource_domain: ResourceDomain::with_root_frame(99, 0xb000),
+            live_threads: 1,
+            exit_status: None,
+        });
+        assert_eq!(result, Err("process instance generation exhausted"));
     }
 
     #[test]
