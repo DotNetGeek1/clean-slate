@@ -316,6 +316,7 @@ fn create_userspace_process(
             process_registry_mut()
                 .insert(Process {
                     id: pid,
+                    instance_generation: clean_slate_service_lifecycle::InstanceGeneration(0),
                     state: ProcessState::Ready,
                     resource_domain: ResourceDomain::with_address_space(pid, address_space),
                     live_threads: 1,

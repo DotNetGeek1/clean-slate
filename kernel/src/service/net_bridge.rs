@@ -3,7 +3,6 @@
 #[cfg(feature = "m7-network-self-test")]
 use crate::device::virtio::net::VirtioNetDevice;
 use crate::diagnostics::log::kernel_log_fmt;
-use crate::service::instance_generation::live_network_service_generation;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_network::addr::MacAddr;
 use clean_slate_network::buffer::FrameBuf;
@@ -280,11 +279,8 @@ impl NetBridge {
         self.service_pid != 0 && self.service_pid == pid
     }
 
-    fn trusted_caller(&self, pid: u64, domain: u64, _instance_generation: u64) -> TrustedCaller {
-        let generation = live_network_service_generation()
-            .map(|g| u64::from(g.0))
-            .unwrap_or(0);
-        TrustedCaller::new(pid, domain, generation)
+    fn trusted_caller(&self, pid: u64, domain: u64, instance_generation: u64) -> TrustedCaller {
+        TrustedCaller::new(pid, domain, instance_generation)
     }
 
     pub fn push_holder_exit(&mut self, caller: TrustedCaller) {
@@ -296,11 +292,8 @@ impl NetBridge {
         self.holder_exit_tail = next;
     }
 
-    fn holder_exit_caller(&self, pid: u64, domain: u64) -> TrustedCaller {
-        let generation = live_network_service_generation()
-            .map(|g| u64::from(g.0))
-            .unwrap_or(0);
-        TrustedCaller::new(pid, domain, generation)
+    fn holder_exit_caller(&self, pid: u64, domain: u64, instance_generation: u64) -> TrustedCaller {
+        TrustedCaller::new(pid, domain, instance_generation)
     }
 
     #[cfg(feature = "m7-net-service-self-test")]
@@ -388,7 +381,7 @@ impl NetBridge {
             .position(|slot| slot.request_id == request_id)
             .ok_or(NetBridgeError::InvalidRequest)?;
         let slot = &self.slots[index];
-        if slot.client.pid != caller.pid {
+        if slot.client != caller {
             return Err(NetBridgeError::Unauthorized);
         }
         match slot.state {
@@ -461,7 +454,7 @@ impl NetBridge {
             }
         }
         if let Some(caller) = caller {
-            self.push_holder_exit(self.holder_exit_caller(caller.pid, caller.domain));
+            self.push_holder_exit(caller);
         }
         reclaimed
     }
@@ -568,12 +561,12 @@ pub(crate) fn reclaim_net_requests_for_holder(pid: u64) -> usize {
     reclaimed
 }
 
-pub(crate) fn notify_holder_exit_for_process(process_id: u64) {
+pub(crate) fn notify_holder_exit_for_process(process_id: u64, instance_generation: u64) {
     let bridge = net_bridge_mut();
     if bridge.service_pid() == 0 || bridge.service_pid() == process_id {
         return;
     }
-    let caller = bridge.holder_exit_caller(process_id, process_id);
+    let caller = bridge.holder_exit_caller(process_id, process_id, instance_generation);
     bridge.push_holder_exit(caller);
 }
 
@@ -620,5 +613,37 @@ mod tests {
             bridge.poll(20, 1, 1, id, &mut payload),
             Err(NetBridgeError::Pending)
         ));
+    }
+
+    #[test]
+    fn bridge_poll_rejects_replacement_process_generation() {
+        let mut bridge = NetBridge::new();
+        bridge.register_service_instance(10, 1, 3);
+        let open = NetworkRequest::Open {
+            kind: SocketKind::Udp,
+        }
+        .encode();
+        let id = bridge.submit(20, 20, 1, &open, &[]).unwrap();
+        let mut payload = [0u8; 64];
+        assert!(matches!(
+            bridge.poll(20, 20, 2, id, &mut payload),
+            Err(NetBridgeError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn reclaim_for_holder_preserves_original_trusted_caller_generation() {
+        let mut bridge = NetBridge::new();
+        bridge.register_service_instance(10, 1, 3);
+        let open = NetworkRequest::Open {
+            kind: SocketKind::Udp,
+        }
+        .encode();
+        bridge.submit(20, 20, 7, &open, &[]).unwrap();
+        assert_eq!(bridge.reclaim_for_holder(20), 1);
+        assert_eq!(
+            bridge.pop_holder_exit(),
+            Some(TrustedCaller::new(20, 20, 7))
+        );
     }
 }
