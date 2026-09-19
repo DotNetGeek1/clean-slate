@@ -68,8 +68,9 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
 const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
 #[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
-/// The storage userspace image maps up to 64 code pages plus its stack and
-/// bootstrap pages; `service::spawn` asserts its budget against this value.
+/// Storage and network userspace images map up to their configured code-page
+/// budgets plus stack/bootstrap pages; `service::spawn` asserts each budget
+/// against this value.
 #[cfg(any(
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
@@ -86,7 +87,7 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
     feature = "m6-fixture-smoke-self-test",
     feature = "m7-net-service-self-test"
 ))]
-pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 80;
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 96;
 #[cfg(not(any(
     feature = "m4-recovery-self-test",
     feature = "m4-supervisor-self-test",

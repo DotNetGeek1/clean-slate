@@ -1015,7 +1015,7 @@ const NETWORK_SERVICE_STACK_ADDRESS: u64 = NETWORK_SERVICE_BOOTSTRAP_ADDRESS + P
 #[cfg(feature = "m7-net-service-self-test")]
 const NETWORK_SERVICE_STACK_PAGES: u64 = 4;
 #[cfg(feature = "m7-net-service-self-test")]
-const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 64;
+const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 88;
 #[cfg(feature = "m7-net-service-self-test")]
 const NETWORK_SERVICE_MAPPED_PAGES: usize =
     NETWORK_SERVICE_MAX_CODE_PAGES + NETWORK_SERVICE_STACK_PAGES as usize + 1;
