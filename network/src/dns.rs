@@ -684,6 +684,25 @@ impl<L: NetworkLink> DnsResolver<L> {
         }
     }
 
+    /// Heap-backed resolver for environments that cannot place large protocol state on thread stacks.
+    #[cfg(feature = "alloc")]
+    pub fn alloc_boxed(
+        stack: crate::stack::L3Stack<L>,
+        generation: SessionGeneration,
+        server: SocketAddrV4,
+        ticks_per_sec: u64,
+    ) -> alloc::boxed::Box<Self> {
+        let layout = core::alloc::Layout::new::<Self>();
+        let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) as *mut Self };
+        if ptr.is_null() {
+            alloc::alloc::handle_alloc_error(layout);
+        }
+        unsafe {
+            Self::init_in_place(ptr, stack, generation, server, ticks_per_sec);
+            alloc::boxed::Box::from_raw(ptr)
+        }
+    }
+
     pub fn stats(&self) -> DnsResolverStats {
         self.stats
     }

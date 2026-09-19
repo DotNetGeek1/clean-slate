@@ -1011,9 +1011,12 @@ include!(concat!(env!("OUT_DIR"), "/network_userspace_entry.rs"));
 const NETWORK_USERSPACE_IMAGE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/network_userspace.bin"));
 #[cfg(feature = "m7-net-service-self-test")]
-const NETWORK_SERVICE_STACK_ADDRESS: u64 = NETWORK_SERVICE_BOOTSTRAP_ADDRESS + PAGE_SIZE;
+const NETWORK_SERVICE_STACK_GUARD_PAGES: u64 = 1;
 #[cfg(feature = "m7-net-service-self-test")]
-const NETWORK_SERVICE_STACK_PAGES: u64 = 16;
+const NETWORK_SERVICE_STACK_ADDRESS: u64 =
+    NETWORK_SERVICE_BOOTSTRAP_ADDRESS + (NETWORK_SERVICE_STACK_GUARD_PAGES + 1) * PAGE_SIZE;
+#[cfg(feature = "m7-net-service-self-test")]
+const NETWORK_SERVICE_STACK_PAGES: u64 = 8;
 #[cfg(feature = "m7-net-service-self-test")]
 const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 88;
 #[cfg(feature = "m7-net-service-self-test")]

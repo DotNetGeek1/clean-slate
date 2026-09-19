@@ -371,6 +371,10 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
             if report.result_code != NETWORK_SERVICE_RESULT_OK {
                 fatal_kernel_error("m7 client echo failed");
             }
+            kernel_log_fmt(format_args!(
+                "[NET ] converged phase progress={}\n",
+                report.aux_status
+            ));
             session_id_raw = report.session_id_raw;
             kernel_log_fmt(format_args!(
                 "[NET ] session open id={}\n",

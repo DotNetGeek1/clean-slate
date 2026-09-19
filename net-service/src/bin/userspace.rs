@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_ESTALE, SYSCALL_NR_NETWORK_CAPABILITY, SYSCALL_NR_NETWORK_REQUEST,
 };
@@ -26,7 +27,6 @@ use clean_slate_network::tcp::{TcpState, TcpTransport, TCP_CONNECT_TIMEOUT_TICKS
 use clean_slate_network::tls::{
     TlsConfig, TlsError, TlsSession, TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
 };
-use clean_slate_network::udp::UdpTransport;
 use clean_slate_service_fixtures::{
     AllowAllAuthorizer, NetworkService, NetworkServiceBootstrap, PassthroughPacketPath,
     NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID,
@@ -43,6 +43,7 @@ use clean_slate_service_fixtures::{
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::x86_64::{__cpuid, _rdrand64_step};
 use core::hint::spin_loop;
+use core::mem::size_of;
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use rand_core::{CryptoRng, RngCore};
@@ -63,7 +64,20 @@ struct BumpAllocator;
 static ALLOCATOR: BumpAllocator = BumpAllocator;
 
 static NEXT_HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-const HEAP_BYTES: usize = 96 * 1024;
+const fn max_usize(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+const PHASE_HEAP_MARGIN_BYTES: usize = 16 * 1024;
+const DNS_PHASE_HEAP_REQUIRED_BYTES: usize =
+    size_of::<DnsResolver<ServiceClientLink>>() + PHASE_HEAP_MARGIN_BYTES;
+const TLS_PHASE_HEAP_REQUIRED_BYTES: usize = size_of::<TcpTransport<ServiceClientLink>>()
+    + (2 * size_of::<[u8; TLS_RECORD_BUFFER_BYTES]>())
+    + PHASE_HEAP_MARGIN_BYTES;
+const HEAP_BYTES: usize = max_usize(DNS_PHASE_HEAP_REQUIRED_BYTES, TLS_PHASE_HEAP_REQUIRED_BYTES);
 static mut HEAP: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 
 unsafe impl GlobalAlloc for BumpAllocator {
@@ -724,18 +738,42 @@ fn poll_until_done(
 }
 
 fn run_converged_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
+    bootstrap.aux_status = 1;
+    phase_heap_reset();
+    phase_heap_ensure_capacity(DNS_PHASE_HEAP_REQUIRED_BYTES)?;
+    bootstrap.aux_status = 2;
     run_dns_phase(bootstrap.service_generation)?;
+    bootstrap.aux_status = 3;
+    phase_heap_reset();
+    phase_heap_ensure_capacity(TLS_PHASE_HEAP_REQUIRED_BYTES)?;
+    bootstrap.aux_status = 4;
     let app_len = run_tls_phase(bootstrap.service_generation)?;
+    bootstrap.aux_status = 5;
     bootstrap.echo_len = app_len as u64;
     Ok(NETWORK_SERVICE_RESULT_OK)
+}
+
+fn phase_heap_reset() {
+    NEXT_HEAP_OFFSET.store(0, Ordering::SeqCst);
+}
+
+fn phase_heap_ensure_capacity(required: usize) -> Result<(), u64> {
+    if required > HEAP_BYTES {
+        return Err(0);
+    }
+    Ok(())
 }
 
 fn run_dns_phase(generation: u64) -> Result<(), u64> {
     let link = ServiceClientLink::open()?;
     let mac = link.link().mac;
     let stack = L3Stack::new(link, mac, GUEST_IPV4, ARP_TTL_TICKS);
-    let udp = UdpTransport::new(stack, SessionGeneration::new(generation));
-    let mut resolver = DnsResolver::new(udp, DNS_SERVER_ADDR);
+    let mut resolver = DnsResolver::alloc_boxed(
+        stack,
+        SessionGeneration::new(generation),
+        DNS_SERVER_ADDR,
+        DnsResolver::<ServiceClientLink>::DEFAULT_TICKS_PER_SEC,
+    );
     let start = monotonic_ticks()?;
     let deadline = start.saturating_add(DNS_QUERY_TIMEOUT_TICKS);
     let query_id = match resolver
@@ -772,7 +810,7 @@ fn run_dns_phase(generation: u64) -> Result<(), u64> {
 fn run_tls_phase(generation: u64) -> Result<usize, u64> {
     let link = ServiceClientLink::open()?;
     let mac = link.link().mac;
-    let mut tcp = TcpTransport::new(
+    let mut tcp = TcpTransport::alloc_boxed(
         L3Stack::new(link, mac, GUEST_IPV4, ARP_TTL_TICKS),
         SessionGeneration::new(generation),
     );
@@ -786,8 +824,8 @@ fn run_tls_phase(generation: u64) -> Result<usize, u64> {
         .map_err(map_network_error_code)?;
     tick = drive_tcp_until_established(&mut tcp, tcp_session, tick)?;
 
-    let mut read_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
-    let mut write_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
+    let mut read_buf = Box::new([0u8; TLS_RECORD_BUFFER_BYTES]);
+    let mut write_buf = Box::new([0u8; TLS_RECORD_BUFFER_BYTES]);
     let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
     let config = TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX);
     let rng = RdrandRng::new()?;
@@ -800,8 +838,8 @@ fn run_tls_phase(generation: u64) -> Result<usize, u64> {
         remote_tls,
         config,
         rng,
-        &mut read_buf,
-        &mut write_buf,
+        read_buf.as_mut(),
+        write_buf.as_mut(),
         None,
     )
     .map_err(map_tls_error_code)?;
