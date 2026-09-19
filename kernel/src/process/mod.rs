@@ -497,7 +497,7 @@ mod tests {
     #[test]
     fn process_registry_rejects_instance_generation_overflow() {
         let mut registry = ProcessRegistry::new();
-        registry.next_instance_generation = InstanceGeneration(u32::MAX);
+        registry.next_instance_generation = InstanceGeneration::MAX;
         let result = registry.insert(Process {
             id: 99,
             instance_generation: InstanceGeneration(0),
