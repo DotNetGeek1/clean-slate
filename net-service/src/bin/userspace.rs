@@ -8,14 +8,14 @@ use alloc::boxed::Box;
 use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_ESTALE, SYSCALL_NR_NETWORK_CAPABILITY, SYSCALL_NR_NETWORK_REQUEST,
 };
-use clean_slate_network::addr::SocketAddrV4;
+use clean_slate_network::addr::{BoundedHostname, Ipv4Addr, SocketAddrV4};
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
-use clean_slate_network::dns::{DnsError, DnsResolver, ResolveOutcome, DNS_QUERY_TIMEOUT_TICKS};
+use clean_slate_network::dns::{DnsResolver, ResolveOutcome, DNS_QUERY_TIMEOUT_TICKS};
 use clean_slate_network::error::{DenialReason, NetworkError};
 use clean_slate_network::fixture::{
     APP_REQUEST_BYTES, APP_RESPONSE_BYTES, DNS_SERVER_ADDR, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS,
-    FIXTURE_HOSTNAME, GUEST_IPV4, GUEST_MAC, PEER_IPV4, PEER_MAC, TLS_PORT, TLS_SERVER_NAME,
+    FIXTURE_HOSTNAME, GUEST_IPV4, GUEST_MAC, PEER_MAC, TLS_PORT, TLS_SERVER_NAME,
 };
 use clean_slate_network::limits::{MAX_ETHERNET_FRAME_BYTES, MAX_SESSIONS};
 use clean_slate_network::protocol::{
@@ -335,6 +335,7 @@ impl NetworkLink for SyscallRawLink {
 type ServiceState = NetworkService<SyscallRawLink, AllowAllAuthorizer, PassthroughPacketPath>;
 
 static mut SERVICE_STATE: Option<ServiceState> = None;
+static mut SERVICE_DNS_RESOLVER: Option<Box<DnsResolver<SyscallRawLink>>> = None;
 static mut SERVICE_REQUEST_BUF: [u8; NETWORK_REQUEST_BYTES] = [0; NETWORK_REQUEST_BYTES];
 static mut SERVICE_PAYLOAD_BUF: [u8; NETWORK_SERVICE_NEXT_WIRE_BYTES] =
     [0; NETWORK_SERVICE_NEXT_WIRE_BYTES];
@@ -345,6 +346,10 @@ static mut SERVICE_RESPONSE_PAYLOAD: [u8; NETWORK_MAX_PAYLOAD_BYTES] =
 /// Single-threaded service loop; use raw pointers to satisfy `static_mut_refs` under `-D warnings`.
 unsafe fn service_state_slot() -> *mut Option<ServiceState> {
     core::ptr::addr_of_mut!(SERVICE_STATE)
+}
+
+unsafe fn service_dns_resolver_slot() -> *mut Option<Box<DnsResolver<SyscallRawLink>>> {
+    core::ptr::addr_of_mut!(SERVICE_DNS_RESOLVER)
 }
 
 unsafe fn service_request_buf_ptr() -> *mut [u8; NETWORK_REQUEST_BYTES] {
@@ -370,6 +375,7 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     };
     bootstrap.net_role_handle = raw_handle;
     let generation = SessionGeneration::new(bootstrap.service_generation);
+    let raw_mac = SyscallRawLink::attach(raw_handle).link().mac;
     unsafe {
         *service_state_slot() = Some(NetworkService::new(
             generation,
@@ -379,6 +385,17 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         if let Some(service) = (*service_state_slot()).as_mut() {
             service.attach_backend(SyscallRawLink::attach(raw_handle));
         }
+        *service_dns_resolver_slot() = Some(DnsResolver::alloc_boxed(
+            L3Stack::new(
+                SyscallRawLink::attach(raw_handle),
+                raw_mac,
+                GUEST_IPV4,
+                ARP_TTL_TICKS,
+            ),
+            generation,
+            DNS_SERVER_ADDR,
+            DnsResolver::<SyscallRawLink>::DEFAULT_TICKS_PER_SEC,
+        ));
     }
     loop {
         let service = unsafe {
@@ -435,8 +452,10 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             continue;
         }
         let payload = &payload_buf[payload_start..payload_end];
-        let (response, out_len) =
-            service.handle_request(caller, request, payload, response_payload);
+        let (response, out_len) = match request {
+            NetworkRequest::Resolve { name } => (handle_service_resolve(caller, name), 0),
+            _ => service.handle_request(caller, request, payload, response_payload),
+        };
         response_buf.copy_from_slice(&response.encode());
         let _ = service_complete(
             raw_handle,
@@ -445,6 +464,78 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             out_len,
             &response_payload[..out_len as usize],
         );
+    }
+}
+
+fn handle_service_resolve(
+    caller: clean_slate_network::protocol::TrustedCaller,
+    name: BoundedHostname,
+) -> NetworkResponse {
+    let name = match name.as_str() {
+        Ok(name) => name,
+        Err(_) => {
+            return NetworkResponse::Error {
+                code: NetworkError::InvalidRequest.code(),
+            };
+        }
+    };
+    let resolver = unsafe {
+        match (*service_dns_resolver_slot()).as_mut() {
+            Some(resolver) => resolver,
+            None => {
+                return NetworkResponse::Error {
+                    code: NetworkError::NotFound.code(),
+                };
+            }
+        }
+    };
+    let start = match monotonic_ticks() {
+        Ok(tick) => tick,
+        Err(_) => {
+            return NetworkResponse::Error {
+                code: NetworkError::Timeout.code(),
+            };
+        }
+    };
+    let deadline = start.saturating_add(DNS_QUERY_TIMEOUT_TICKS);
+    let query_id = match resolver.resolve(start, caller, name) {
+        Ok(ResolveOutcome::Cached { addr, ttl }) => return NetworkResponse::Resolve { addr, ttl },
+        Ok(ResolveOutcome::Pending { query_id }) => query_id,
+        Err(err) => {
+            return NetworkResponse::Error {
+                code: NetworkError::from(err).code(),
+            };
+        }
+    };
+    for _ in 0..DNS_POLL_LIMIT {
+        let now = match monotonic_ticks() {
+            Ok(tick) => tick,
+            Err(_) => {
+                return NetworkResponse::Error {
+                    code: NetworkError::Timeout.code(),
+                };
+            }
+        };
+        if let Err(err) = resolver.poll(now) {
+            return NetworkResponse::Error {
+                code: NetworkError::from(err).code(),
+            };
+        }
+        if let Some(result) = resolver.take_result(query_id, caller) {
+            return match result {
+                Ok((addr, ttl)) => NetworkResponse::Resolve { addr, ttl },
+                Err(err) => NetworkResponse::Error {
+                    code: NetworkError::from(err).code(),
+                },
+            };
+        }
+        if now >= deadline {
+            break;
+        }
+        yield_cpu();
+    }
+    NetworkResponse::Error {
+        code: NetworkError::Timeout.code(),
     }
 }
 
@@ -756,12 +847,12 @@ fn run_converged_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, 
     phase_heap_reset();
     phase_heap_ensure_capacity(DNS_PHASE_HEAP_REQUIRED_BYTES)?;
     bootstrap.aux_status = 2;
-    run_dns_phase(bootstrap.service_generation)?;
+    let resolved_addr = run_dns_phase(bootstrap.service_generation)?;
     bootstrap.aux_status = 3;
     phase_heap_reset();
     phase_heap_ensure_capacity(TLS_PHASE_HEAP_REQUIRED_BYTES)?;
     bootstrap.aux_status = 4;
-    let app_len = run_tls_phase(bootstrap.service_generation)?;
+    let app_len = run_tls_phase(bootstrap.service_generation, resolved_addr)?;
     bootstrap.aux_status = 5;
     bootstrap.echo_len = app_len as u64;
     // Like `run_client_echo`, leave exactly one session open at exit: the kernel test
@@ -786,50 +877,25 @@ fn phase_heap_ensure_capacity(required: usize) -> Result<(), u64> {
     Ok(())
 }
 
-fn run_dns_phase(generation: u64) -> Result<(), u64> {
-    let link = ServiceClientLink::open()?;
-    let mac = link.link().mac;
-    let stack = L3Stack::new(link, mac, GUEST_IPV4, ARP_TTL_TICKS);
-    let mut resolver = DnsResolver::alloc_boxed(
-        stack,
-        SessionGeneration::new(generation),
-        DNS_SERVER_ADDR,
-        DnsResolver::<ServiceClientLink>::DEFAULT_TICKS_PER_SEC,
-    );
-    let start = monotonic_ticks()?;
-    let deadline = start.saturating_add(DNS_QUERY_TIMEOUT_TICKS);
-    let query_id = match resolver
-        .resolve(start, OWNER, FIXTURE_HOSTNAME)
-        .map_err(map_dns_error_code)?
-    {
-        ResolveOutcome::Cached { addr, ttl } => {
-            if addr != FIXTURE_A_RECORD || ttl != FIXTURE_A_TTL_SECS {
-                return Err(0);
-            }
-            return Ok(());
+fn run_dns_phase(_generation: u64) -> Result<Ipv4Addr, u64> {
+    let handle = client_handle()?;
+    let name = BoundedHostname::try_from_str(FIXTURE_HOSTNAME).map_err(|_| 0u64)?;
+    let request = NetworkRequest::Resolve { name }.encode();
+    let request_id = client_submit(handle, &request, &[])?;
+    let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    let response = poll_until_done(handle, request_id, &mut payload)?;
+    match response {
+        NetworkResponse::Resolve { addr, ttl }
+            if addr == FIXTURE_A_RECORD && ttl == FIXTURE_A_TTL_SECS =>
+        {
+            Ok(addr)
         }
-        ResolveOutcome::Pending { query_id } => query_id,
-    };
-
-    for _ in 0..DNS_POLL_LIMIT {
-        let now = monotonic_ticks()?;
-        resolver.poll(now).map_err(map_dns_error_code)?;
-        if let Some(result) = resolver.take_result(query_id, OWNER) {
-            let (addr, ttl) = result.map_err(map_dns_error_code)?;
-            if addr != FIXTURE_A_RECORD || ttl != FIXTURE_A_TTL_SECS {
-                return Err(0);
-            }
-            return Ok(());
-        }
-        if now >= deadline {
-            break;
-        }
-        yield_cpu();
+        NetworkResponse::Error { code } => Err(code as u64),
+        _ => Err(0),
     }
-    Err(0)
 }
 
-fn run_tls_phase(generation: u64) -> Result<usize, u64> {
+fn run_tls_phase(generation: u64, resolved_addr: Ipv4Addr) -> Result<usize, u64> {
     let link = ServiceClientLink::open()?;
     let mac = link.link().mac;
     let mut tcp = TcpTransport::alloc_boxed(
@@ -838,8 +904,8 @@ fn run_tls_phase(generation: u64) -> Result<usize, u64> {
     );
     tcp.stack_mut()
         .arp_cache_mut()
-        .insert(PEER_IPV4, PEER_MAC, 0);
-    let remote_tls = SocketAddrV4::new(PEER_IPV4, TLS_PORT);
+        .insert(resolved_addr, PEER_MAC, 0);
+    let remote_tls = SocketAddrV4::new(resolved_addr, TLS_PORT);
     // `TlsSession::connect_*` opens and drives its own TCP session (as the kernel-direct
     // `m7_tls` path relies on). Pre-connecting here would occupy the fixture's single TLS
     // listener, so the TLS-internal SYN gets RST and the handshake never starts.
@@ -922,16 +988,6 @@ fn read_tls(
         yield_cpu();
     }
     Err(0)
-}
-
-fn map_dns_error_code(err: DnsError) -> u64 {
-    match err {
-        DnsError::NameNotFound => 1,
-        DnsError::Timeout => 2,
-        DnsError::QueueFull => 3,
-        DnsError::Transport(_) => 4,
-        _ => 5,
-    }
 }
 
 fn map_tls_error_code(err: TlsError) -> u64 {

@@ -3,10 +3,7 @@
 use crate::arch::x86_64::apic::reprogram_local_apic_timer;
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
-#[cfg(feature = "m7-network-self-test")]
 use crate::capability::network::set_network_audit_serial_echo;
-#[cfg(feature = "m7-network-self-test")]
-use crate::device::virtio::net::VirtioNetDevice;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
@@ -26,8 +23,6 @@ use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
 use crate::service::control::ServiceLifecycleController;
-#[cfg(feature = "m7-network-self-test")]
-use crate::service::net_bridge::net_bridge_mut;
 use crate::service::service_lifecycle_controller_mut;
 use crate::service::spawn::launch_network_aux_process;
 use crate::sync::global_cell::GlobalCell;
@@ -215,12 +210,6 @@ pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("m7 net allocator missing"));
     let controller = unsafe { service_lifecycle_controller_mut() };
-    #[cfg(feature = "m7-network-self-test")]
-    {
-        let device =
-            VirtioNetDevice::discover().unwrap_or_else(|message| fatal_kernel_error(message));
-        net_bridge_mut().install_virtio_backend(device);
-    }
     launch_network_service(
         controller,
         allocator,

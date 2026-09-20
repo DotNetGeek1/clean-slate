@@ -1,6 +1,5 @@
 //! Kernel-hosted network bridge: client queue, loopback raw link, CPL3 service seam.
 
-#[cfg(feature = "m7-network-self-test")]
 use crate::device::virtio::net::VirtioNetDevice;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::sync::global_cell::GlobalCell;
@@ -43,7 +42,6 @@ pub struct KernelLoopbackLink {
 
 enum RawBackend {
     Loopback(KernelLoopbackLink),
-    #[cfg(feature = "m7-network-self-test")]
     Virtio(VirtioNetDevice),
 }
 
@@ -55,7 +53,6 @@ impl RawBackend {
     fn reset(&mut self) -> Result<(), NetworkDeviceError> {
         match self {
             Self::Loopback(link) => link.reset(),
-            #[cfg(feature = "m7-network-self-test")]
             Self::Virtio(device) => device.reset(),
         }
     }
@@ -63,7 +60,6 @@ impl RawBackend {
     fn receive(&mut self) -> Result<Option<FrameBuf>, NetworkDeviceError> {
         match self {
             Self::Loopback(link) => link.receive(),
-            #[cfg(feature = "m7-network-self-test")]
             Self::Virtio(device) => device.receive(),
         }
     }
@@ -71,7 +67,6 @@ impl RawBackend {
     fn geometry(&self) -> LinkProperties {
         match self {
             Self::Loopback(link) => link.link(),
-            #[cfg(feature = "m7-network-self-test")]
             Self::Virtio(device) => device.link(),
         }
     }
@@ -232,6 +227,7 @@ impl NetBridge {
         domain: u64,
         generation: u64,
     ) -> SessionGeneration {
+        self.ensure_virtio_backend();
         let _ = self.raw_backend.reset();
         self.holder_exit_head = 0;
         self.holder_exit_tail = 0;
@@ -246,7 +242,6 @@ impl NetBridge {
         self.session_generation
     }
 
-    #[cfg(feature = "m7-network-self-test")]
     pub fn install_virtio_backend(&mut self, device: VirtioNetDevice) {
         let mac = device.link().mac;
         self.raw_backend = RawBackend::Virtio(device);
@@ -254,6 +249,18 @@ impl NetBridge {
             "[NET ] raw backend=virtio mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
             mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5],
         ));
+    }
+
+    fn ensure_virtio_backend(&mut self) {
+        #[cfg(not(test))]
+        {
+            if matches!(self.raw_backend, RawBackend::Virtio(_)) {
+                return;
+            }
+            if let Ok(device) = VirtioNetDevice::discover() {
+                self.install_virtio_backend(device);
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -498,7 +505,6 @@ impl NetBridge {
         }
         match &mut self.raw_backend {
             RawBackend::Loopback(link) => link.transmit(frame),
-            #[cfg(feature = "m7-network-self-test")]
             RawBackend::Virtio(device) => device.transmit(frame),
         }
         .map_err(|(err, _)| err)
