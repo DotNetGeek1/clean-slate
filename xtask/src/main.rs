@@ -358,7 +358,7 @@ const M7_TLS_FAIL_CLOSED_MARKERS: [&str; 2] = [
 ];
 const M7_DNS_ACCEPTANCE_MARKERS: [&str; 5] = [
     "[DNS ] virtio ready mac=",
-    "[DNS ] resolved name=m7.fixture.test addr=10.77.0.50 ttl=300",
+    "[DNS ] resolved name=m7.fixture.test addr=10.77.0.1 ttl=300",
     "[DNS ] cache hit name=m7.fixture.test",
     "[DNS ] nxdomain name=nope.fixture.test",
     "[M7.5] PASS",
