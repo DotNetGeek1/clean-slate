@@ -3,6 +3,7 @@
 use crate::arch::x86_64::apic::reprogram_local_apic_timer;
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
+#[cfg(feature = "m7-network-self-test")]
 use crate::capability::network::set_network_audit_serial_echo;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
