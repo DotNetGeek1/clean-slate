@@ -41,33 +41,51 @@ pub struct KernelLoopbackLink {
 }
 
 enum RawBackend {
-    Loopback(KernelLoopbackLink),
-    Virtio(VirtioNetDevice),
+    Loopback,
+    Virtio,
 }
 
 impl RawBackend {
     const fn loopback() -> Self {
-        Self::Loopback(KernelLoopbackLink::new())
+        Self::Loopback
     }
 
-    fn reset(&mut self) -> Result<(), NetworkDeviceError> {
+    fn reset(
+        &mut self,
+        loopback: &mut KernelLoopbackLink,
+        virtio: Option<&mut VirtioNetDevice>,
+    ) -> Result<(), NetworkDeviceError> {
         match self {
-            Self::Loopback(link) => link.reset(),
-            Self::Virtio(device) => device.reset(),
+            Self::Loopback => loopback.reset(),
+            Self::Virtio => virtio
+                .map(VirtioNetDevice::reset)
+                .unwrap_or(Err(NetworkDeviceError::NotReady)),
         }
     }
 
-    fn receive(&mut self) -> Result<Option<FrameBuf>, NetworkDeviceError> {
+    fn receive(
+        &mut self,
+        loopback: &mut KernelLoopbackLink,
+        virtio: Option<&mut VirtioNetDevice>,
+    ) -> Result<Option<FrameBuf>, NetworkDeviceError> {
         match self {
-            Self::Loopback(link) => link.receive(),
-            Self::Virtio(device) => device.receive(),
+            Self::Loopback => loopback.receive(),
+            Self::Virtio => virtio
+                .map(VirtioNetDevice::receive)
+                .unwrap_or(Err(NetworkDeviceError::NotReady)),
         }
     }
 
-    fn geometry(&self) -> LinkProperties {
+    fn geometry(
+        &self,
+        loopback: &KernelLoopbackLink,
+        virtio: Option<&VirtioNetDevice>,
+    ) -> LinkProperties {
         match self {
-            Self::Loopback(link) => link.link(),
-            Self::Virtio(device) => device.link(),
+            Self::Loopback => loopback.link(),
+            Self::Virtio => virtio
+                .map(VirtioNetDevice::link)
+                .unwrap_or(LinkProperties::new(LOOPBACK_MAC, false)),
         }
     }
 }
@@ -189,7 +207,9 @@ pub(crate) struct NetBridge {
     service_pid: u64,
     service_domain: u64,
     session_generation: SessionGeneration,
+    loopback: KernelLoopbackLink,
     raw_backend: RawBackend,
+    virtio: Option<VirtioNetDevice>,
     slots: [ClientSlot; NETWORK_REQUEST_SLOTS],
     next_request_id: u64,
     inflight_failed: u32,
@@ -208,7 +228,9 @@ impl NetBridge {
             service_pid: 0,
             service_domain: 0,
             session_generation: SessionGeneration::new(0),
+            loopback: KernelLoopbackLink::new(),
             raw_backend: RawBackend::loopback(),
+            virtio: None,
             slots: [ClientSlot::free(); NETWORK_REQUEST_SLOTS],
             next_request_id: 1,
             inflight_failed: 0,
@@ -228,7 +250,9 @@ impl NetBridge {
         generation: u64,
     ) -> SessionGeneration {
         self.ensure_virtio_backend();
-        let _ = self.raw_backend.reset();
+        let _ = self
+            .raw_backend
+            .reset(&mut self.loopback, self.virtio.as_mut());
         self.holder_exit_head = 0;
         self.holder_exit_tail = 0;
         self.pending_holder_exit_ack = None;
@@ -244,7 +268,8 @@ impl NetBridge {
 
     pub fn install_virtio_backend(&mut self, device: VirtioNetDevice) {
         let mac = device.link().mac;
-        self.raw_backend = RawBackend::Virtio(device);
+        self.virtio = Some(device);
+        self.raw_backend = RawBackend::Virtio;
         kernel_log_fmt(format_args!(
             "[NET ] raw backend=virtio mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
             mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5],
@@ -254,7 +279,7 @@ impl NetBridge {
     fn ensure_virtio_backend(&mut self) {
         #[cfg(not(test))]
         {
-            if matches!(self.raw_backend, RawBackend::Virtio(_)) {
+            if matches!(self.raw_backend, RawBackend::Virtio) {
                 return;
             }
             if let Ok(device) = VirtioNetDevice::discover() {
@@ -479,7 +504,9 @@ impl NetBridge {
             }
         }
         self.inflight_failed = self.inflight_failed.saturating_add(failed);
-        let _ = self.raw_backend.reset();
+        let _ = self
+            .raw_backend
+            .reset(&mut self.loopback, self.virtio.as_mut());
         self.service_pid = 0;
         failed
     }
@@ -504,8 +531,11 @@ impl NetBridge {
             return Err(NetworkDeviceError::NotReady);
         }
         match &mut self.raw_backend {
-            RawBackend::Loopback(link) => link.transmit(frame),
-            RawBackend::Virtio(device) => device.transmit(frame),
+            RawBackend::Loopback => self.loopback.transmit(frame),
+            RawBackend::Virtio => match self.virtio.as_mut() {
+                Some(device) => device.transmit(frame),
+                None => Err((NetworkDeviceError::NotReady, frame)),
+            },
         }
         .map_err(|(err, _)| err)
     }
@@ -517,12 +547,14 @@ impl NetBridge {
         if !self.is_live_service(service_pid) {
             return Err(NetworkDeviceError::NotReady);
         }
-        self.raw_backend.receive()
+        self.raw_backend
+            .receive(&mut self.loopback, self.virtio.as_mut())
     }
 
     pub fn raw_geometry(&self, service_pid: u64) -> LinkProperties {
         if self.is_live_service(service_pid) {
-            self.raw_backend.geometry()
+            self.raw_backend
+                .geometry(&self.loopback, self.virtio.as_ref())
         } else {
             LinkProperties::new(LOOPBACK_MAC, false)
         }
