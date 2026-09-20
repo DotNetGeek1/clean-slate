@@ -103,7 +103,10 @@ Kernel broker: `kernel/src/capability/network.rs`. Live generation lookup:
 - **Trusted caller identity:** queued work and holder-exit notifications carry the
   caller’s `(pid, domain, live process instance_generation)` separately from the
   network-service/session generation, so PID/domain reuse cannot claim stale
-  authority.
+  authority. The kernel process registry (`process::live_instance_generation`, via
+  `live_instance_generation_for_pid`) is the single source for that process generation;
+  it is never `0` for a registered process, and submit/poll deny (`EACCES`) rather than
+  attribute a caller whose generation cannot be resolved.
 - **Per-session (optional):** `ResourceRef::network_session(session_generation, session_index)`.
   Destination/port scoping is not encoded in `ResourceRef` for M7.7.
 

@@ -69,7 +69,7 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
 #[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
 #[cfg(feature = "m7-net-service-self-test")]
-pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 192;
+pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 208;
 /// Storage and network userspace images map up to their configured code-page
 /// budgets plus stack/bootstrap pages; `service::spawn` asserts each budget
 /// against this value.

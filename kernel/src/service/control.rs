@@ -401,21 +401,6 @@ impl ServiceLifecycleController {
             .and_then(|record| record.live.map(|live| live.pid))
     }
 
-    pub(crate) fn authoritative_generation_for_live_pid(
-        &self,
-        pid: u64,
-    ) -> Option<InstanceGeneration> {
-        for entry in &self.services {
-            if entry.service.0 == 0 {
-                continue;
-            }
-            if entry.live.is_some_and(|live| live.pid == pid) {
-                return Some(entry.authoritative_generation);
-            }
-        }
-        None
-    }
-
     #[cfg(feature = "m7-net-caps-self-test")]
     pub(crate) fn test_advance_authoritative_generation(
         &mut self,

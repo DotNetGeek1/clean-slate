@@ -369,6 +369,10 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
     let next_phase = match (test_state.phase, report.mode) {
         (M7Phase::AwaitClientEcho, PRIMARY_CLIENT_MODE) => {
             if report.result_code != NETWORK_SERVICE_RESULT_OK {
+                kernel_log_fmt(format_args!(
+                    "[NET ] converged client error code={} result={}\n",
+                    report.aux_status, report.result_code
+                ));
                 fatal_kernel_error("m7 client echo failed");
             }
             kernel_log_fmt(format_args!(

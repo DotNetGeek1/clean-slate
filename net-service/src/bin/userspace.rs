@@ -23,7 +23,7 @@ use clean_slate_network::protocol::{
 };
 use clean_slate_network::session::{SessionGeneration, SessionId, SocketKind};
 use clean_slate_network::stack::L3Stack;
-use clean_slate_network::tcp::{TcpState, TcpTransport, TCP_CONNECT_TIMEOUT_TICKS};
+use clean_slate_network::tcp::TcpTransport;
 use clean_slate_network::tls::{
     TlsConfig, TlsError, TlsSession, TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
 };
@@ -51,7 +51,6 @@ use rand_core::{CryptoRng, RngCore};
 const SYSCALL_NR_VERSION: u64 = 0;
 const ARP_TTL_TICKS: u64 = 50_000;
 const DNS_POLL_LIMIT: usize = 5_000_000;
-const TCP_POLL_LIMIT: usize = 10_000_000;
 const TLS_POLL_LIMIT: usize = 10_000_000;
 const TLS_IO_TIMEOUT_TICKS: u64 = 2_000;
 const TLS_CLOSE_TIMEOUT_TICKS: u64 = 100;
@@ -238,8 +237,19 @@ fn net_request(args: [u64; 6]) -> u64 {
 
 fn run_unauthorized_probe() -> Result<u64, u64> {
     match network_capability(NETWORK_CLIENT_DEVICE_ID) {
+        Err(SYSCALL_EACCES) => {}
+        Ok(_) => return Err(1),
+        Err(other) => return Err(other),
+    }
+    // Without a granted handle, a bridge submit must also be refused by the capability
+    // broker (audited as `op=connect outcome=deny`), not just the handle lookup above.
+    let open = NetworkRequest::Open {
+        kind: SocketKind::Udp,
+    }
+    .encode();
+    match client_submit(0, &open, &[]) {
         Err(SYSCALL_EACCES) => Ok(NETWORK_SERVICE_RESULT_OK),
-        Ok(_) => Err(1),
+        Ok(_) => Err(2),
         Err(other) => Err(other),
     }
 }
@@ -523,20 +533,24 @@ struct ServiceClientLink {
     recv_payload: [u8; NETWORK_MAX_PAYLOAD_BYTES],
 }
 
+/// Open a UDP session through the bridge and return its id without closing it.
+fn open_udp_session(handle: u64) -> Result<SessionId, u64> {
+    let open = NetworkRequest::Open {
+        kind: SocketKind::Udp,
+    }
+    .encode();
+    let open_id = client_submit(handle, &open, &[])?;
+    let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    match poll_until_done(handle, open_id, &mut payload)? {
+        NetworkResponse::Open { session } => Ok(session),
+        _ => Err(0),
+    }
+}
+
 impl ServiceClientLink {
     fn open() -> Result<Self, u64> {
         let handle = client_handle()?;
-        let open = NetworkRequest::Open {
-            kind: SocketKind::Udp,
-        }
-        .encode();
-        let open_id = client_submit(handle, &open, &[])?;
-        let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-        let open_response = poll_until_done(handle, open_id, &mut payload)?;
-        let session = match open_response {
-            NetworkResponse::Open { session } => session,
-            _ => return Err(0),
-        };
+        let session = open_udp_session(handle)?;
         Ok(Self {
             handle,
             session,
@@ -750,6 +764,14 @@ fn run_converged_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, 
     let app_len = run_tls_phase(bootstrap.service_generation)?;
     bootstrap.aux_status = 5;
     bootstrap.echo_len = app_len as u64;
+    // Like `run_client_echo`, leave exactly one session open at exit: the kernel test
+    // expects holder-exit reclamation of that session and reuses its id for the
+    // inflight-failure and stale-generation-denial phases.
+    let handle = client_handle()?;
+    bootstrap.net_role_handle = handle;
+    let lingering = open_udp_session(handle)?;
+    bootstrap.session_id_raw = lingering.raw();
+    bootstrap.aux_status = 6;
     Ok(NETWORK_SERVICE_RESULT_OK)
 }
 
@@ -818,11 +840,10 @@ fn run_tls_phase(generation: u64) -> Result<usize, u64> {
         .arp_cache_mut()
         .insert(PEER_IPV4, PEER_MAC, 0);
     let remote_tls = SocketAddrV4::new(PEER_IPV4, TLS_PORT);
-    let mut tick = monotonic_ticks()?;
-    let tcp_session = tcp
-        .connect(tick, OWNER, remote_tls)
-        .map_err(map_network_error_code)?;
-    tick = drive_tcp_until_established(&mut tcp, tcp_session, tick)?;
+    // `TlsSession::connect_*` opens and drives its own TCP session (as the kernel-direct
+    // `m7_tls` path relies on). Pre-connecting here would occupy the fixture's single TLS
+    // listener, so the TLS-internal SYN gets RST and the handshake never starts.
+    let tick = monotonic_ticks()?;
 
     let mut read_buf = Box::new([0u8; TLS_RECORD_BUFFER_BYTES]);
     let mut write_buf = Box::new([0u8; TLS_RECORD_BUFFER_BYTES]);
@@ -853,29 +874,6 @@ fn run_tls_phase(generation: u64) -> Result<usize, u64> {
     let close_now = monotonic_ticks()?.saturating_add(TLS_CLOSE_TIMEOUT_TICKS);
     tls.close(close_now).map_err(map_tls_error_code)?;
     Ok(n)
-}
-
-fn drive_tcp_until_established(
-    tcp: &mut TcpTransport<ServiceClientLink>,
-    id: SessionId,
-    start_tick: u64,
-) -> Result<u64, u64> {
-    let deadline = start_tick.saturating_add(TCP_CONNECT_TIMEOUT_TICKS);
-    for _ in 0..TCP_POLL_LIMIT {
-        let tick = monotonic_ticks()?;
-        tcp.poll(tick).map_err(map_network_error_code)?;
-        match tcp.state(id, OWNER) {
-            Ok(TcpState::Established) => return Ok(tick),
-            Ok(TcpState::Reset) | Ok(TcpState::Closed) => return Err(0),
-            Ok(_) => {}
-            Err(_) => return Err(0),
-        }
-        if tick >= deadline {
-            break;
-        }
-        yield_cpu();
-    }
-    Err(0)
 }
 
 fn write_all_tls(
@@ -934,10 +932,6 @@ fn map_dns_error_code(err: DnsError) -> u64 {
         DnsError::Transport(_) => 4,
         _ => 5,
     }
-}
-
-fn map_network_error_code(_err: NetworkError) -> u64 {
-    6
 }
 
 fn map_tls_error_code(err: TlsError) -> u64 {

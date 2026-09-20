@@ -1017,7 +1017,10 @@ const NETWORK_SERVICE_STACK_GUARD_PAGES: u64 = 1;
 const NETWORK_SERVICE_STACK_ADDRESS: u64 =
     NETWORK_SERVICE_BOOTSTRAP_ADDRESS + (NETWORK_SERVICE_STACK_GUARD_PAGES + 1) * PAGE_SIZE;
 #[cfg(feature = "m7-net-service-self-test")]
-const NETWORK_SERVICE_STACK_PAGES: u64 = 12;
+/// The converged client runs the full TLS 1.3 handshake (certificate verification and key
+/// schedule) in userspace; 12 pages overflowed into the guard page while processing the
+/// server flight, so give it headroom comparable to the 64 KiB kernel task stack.
+const NETWORK_SERVICE_STACK_PAGES: u64 = 28;
 #[cfg(feature = "m7-net-service-self-test")]
 const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 179;
 #[cfg(feature = "m7-net-service-self-test")]
