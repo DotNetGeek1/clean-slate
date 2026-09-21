@@ -1997,7 +1997,7 @@ fn validate_output_markers(output: &str, markers: &[&str]) -> Result<(), XtaskEr
 }
 
 fn validate_m6_capabilities_markers(output: &str) -> Result<(), XtaskError> {
-    const PREFIX: [&str; 19] = [
+    const PREFIX: [&str; 18] = [
         "[STOR] object-service started pid=",
         "[CAP ] object grant holder=3 object=7",
         "[TEST] unrelated workload progress=1",
@@ -2016,22 +2016,21 @@ fn validate_m6_capabilities_markers(output: &str) -> Result<(), XtaskError> {
         "[PROC] teardown pid=",
         "[CAP ] process-control denied holder=7 target=? op=observe reason=stale",
         "[TEST] unrelated workload progress=3",
+    ];
+    const TAIL_REQUIRED: [&str; 9] = [
         "[CAP ] revoke branch=",
-    ];
-    const UNORDERED: [&str; 2] = [
         "[CAP ] stale denied holder=4 reason=revoked",
+        "[M6.F] report pid=4 status=2 progress=580",
         "[CAP ] object allowed holder=3 object=7 op=read",
+        "actor=8 class=audit resource=0 op=audit_read outcome=allowed",
+        "[M6.F] report pid=8 status=2 progress=680",
+        "[M6.F] report pid=3 status=2 progress=606",
+        "actor=9 class=audit resource=0 op=audit_read outcome=invalid-handle",
+        "actor=9 class=audit resource=0 op=audit_read outcome=wrong-holder",
+        "[M6.F] report pid=9 status=2 progress=0",
     ];
-    const SUFFIX: [&str; 10] = [
-        "[AUD ] seq=",
-        "actor=8 class=audit",
-        "outcome=allowed",
-        "[AUD ] seq=",
-        "actor=9 class=audit",
-        "outcome=invalid-handle",
-        "[AUD ] seq=",
-        "actor=9 class=audit",
-        "outcome=wrong-holder",
+    const SUFFIX: [&str; 2] = [
+        "[TEST] unrelated workload progress=4",
         "[M6.8] PASS",
     ];
     let mut prefix = MarkerTracker::new(&PREFIX);
@@ -2040,19 +2039,14 @@ fn validate_m6_capabilities_markers(output: &str) -> Result<(), XtaskError> {
             PREFIX[prefix.next_marker].to_owned(),
         ));
     }
-    let revoke_offset = prefix.search_start;
-    let suffix_anchor = output[revoke_offset..]
-        .find(SUFFIX[0])
-        .map(|offset| revoke_offset + offset)
-        .ok_or_else(|| XtaskError::MissingMarker(SUFFIX[0].to_owned()))?;
-    let post_revoke = &output[revoke_offset..suffix_anchor];
-    for marker in UNORDERED {
-        if !post_revoke.contains(marker) {
+    let tail = &output[prefix.search_start..];
+    for marker in TAIL_REQUIRED {
+        if !tail.contains(marker) {
             return Err(XtaskError::MissingMarker(marker.to_owned()));
         }
     }
     let mut suffix = MarkerTracker::new(&SUFFIX);
-    suffix.search_start = suffix_anchor;
+    suffix.search_start = prefix.search_start;
     if suffix.consume(output) {
         Ok(())
     } else {
@@ -2781,11 +2775,50 @@ mod tests {
 [CAP ] process-control denied holder=7 target=? op=observe reason=stale\n\
 [TEST] unrelated workload progress=3\n\
 [CAP ] revoke branch=4\n\
-[CAP ] object allowed holder=3 object=7 op=read\n\
 [CAP ] stale denied holder=4 reason=revoked\n\
-[AUD ] seq=1 actor=8 class=audit outcome=allowed\n\
-[AUD ] seq=2 actor=9 class=audit outcome=invalid-handle\n\
-[AUD ] seq=3 actor=9 class=audit outcome=wrong-holder\n\
+[M6.F] report pid=4 status=2 progress=580\n\
+[CAP ] object allowed holder=3 object=7 op=read\n\
+[AUD ] seq=1 actor=8 class=audit resource=0 op=audit_read outcome=allowed depth=0\n\
+[M6.F] report pid=8 status=2 progress=680\n\
+[M6.F] report pid=3 status=2 progress=606\n\
+[AUD ] seq=2 actor=9 class=audit resource=0 op=audit_read outcome=invalid-handle depth=0\n\
+[AUD ] seq=3 actor=9 class=audit resource=0 op=audit_read outcome=wrong-holder depth=0\n\
+[M6.F] report pid=9 status=2 progress=0\n\
+[TEST] unrelated workload progress=4\n\
+[M6.8] PASS\n";
+        assert!(validate_output_markers(output, &M6_CAPABILITIES_ACCEPTANCE_MARKERS).is_ok());
+    }
+
+    #[test]
+    fn m6_capabilities_markers_accept_audit_before_revoke_tail() {
+        let output = "\
+[STOR] object-service started pid=1\n\
+[CAP ] object grant holder=3 object=7\n\
+[TEST] unrelated workload progress=1\n\
+[CAP ] process-control denied holder=6 target=? op=terminate reason=invalid-handle\n\
+[CAP ] object allowed holder=3 object=7 op=write\n\
+[CAP ] deny holder=5 object=7 op=read reason=no-authority\n\
+[CAP ] object allowed holder=3 object=7 op=read\n\
+[CAP ] delegate from=3 to=4 rights=read depth=1\n\
+[CAP ] object allowed holder=4 object=7 op=read\n\
+[CAP ] deny holder=4 object=7 op=write reason=missing-right\n\
+[CAP ] process-control allowed holder=7 target=2 op=observe\n\
+[CAP ] process-control denied holder=7 target=2 op=terminate reason=missing-right\n\
+[CAP ] process-control allowed holder=7 target=2 op=terminate\n\
+[PROC] teardown pid=2 resources=0\n\
+[CAP ] process-control denied holder=7 target=? op=observe reason=stale\n\
+[TEST] unrelated workload progress=3\n\
+[AUD ] seq=1 actor=8 class=audit resource=0 op=audit_read outcome=allowed depth=0\n\
+[M6.F] report pid=8 status=2 progress=680\n\
+[AUD ] seq=2 actor=9 class=audit resource=0 op=audit_read outcome=invalid-handle depth=0\n\
+[AUD ] seq=3 actor=9 class=audit resource=0 op=audit_read outcome=wrong-holder depth=0\n\
+[M6.F] report pid=9 status=2 progress=0\n\
+[CAP ] revoke branch=5:1 actor=3 count=1\n\
+[CAP ] stale denied holder=4 reason=revoked\n\
+[M6.F] report pid=4 status=2 progress=580\n\
+[CAP ] object allowed holder=3 object=7 op=read\n\
+[M6.F] report pid=3 status=2 progress=606\n\
+[TEST] unrelated workload progress=4\n\
 [M6.8] PASS\n";
         assert!(validate_output_markers(output, &M6_CAPABILITIES_ACCEPTANCE_MARKERS).is_ok());
     }
