@@ -672,7 +672,7 @@ fn handle_service_tls_send(
             code: map_tls_error_code(err) as u16,
         })?;
         drop(tls);
-        wait_for_tcp_close(tcp, service_owner, tcp_session, close_now)?;
+        drain_tcp_close(tcp, service_owner, tcp_session, close_now)?;
         response_len
     };
     let reset_now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
@@ -1048,7 +1048,7 @@ fn run_tls_phase(resolved_addr: Ipv4Addr) -> Result<usize, u64> {
     }
 }
 
-fn wait_for_tcp_close(
+fn drain_tcp_close(
     tcp: &mut TcpTransport<SyscallRawLink>,
     owner: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
@@ -1059,7 +1059,8 @@ fn wait_for_tcp_close(
         let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
             code: NetworkError::Timeout.code(),
         })?;
-        tcp.poll(now).map_err(|err| NetworkResponse::Error { code: err.code() })?;
+        tcp.poll(now)
+            .map_err(|err| NetworkResponse::Error { code: err.code() })?;
         match tcp.state(session, owner) {
             Ok(state) if state.is_terminal() => return Ok(()),
             Err(NetworkError::NotFound) => return Ok(()),
@@ -1071,9 +1072,7 @@ fn wait_for_tcp_close(
         }
         yield_cpu();
     }
-    Err(NetworkResponse::Error {
-        code: NetworkError::Timeout.code(),
-    })
+    Ok(())
 }
 
 fn write_all_tls(
