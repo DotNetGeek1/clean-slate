@@ -2017,7 +2017,7 @@ fn validate_m6_capabilities_markers(output: &str) -> Result<(), XtaskError> {
         "[CAP ] process-control denied holder=7 target=? op=observe reason=stale",
         "[TEST] unrelated workload progress=3",
     ];
-    const TAIL_REQUIRED: [&str; 9] = [
+    const TAIL_REQUIRED: [&str; 10] = [
         "[CAP ] revoke branch=",
         "[CAP ] stale denied holder=4 reason=revoked",
         "[M6.F] report pid=4 status=2 progress=580",
@@ -2029,10 +2029,7 @@ fn validate_m6_capabilities_markers(output: &str) -> Result<(), XtaskError> {
         "actor=9 class=audit resource=0 op=audit_read outcome=wrong-holder",
         "[M6.F] report pid=9 status=2 progress=0",
     ];
-    const SUFFIX: [&str; 2] = [
-        "[TEST] unrelated workload progress=4",
-        "[M6.8] PASS",
-    ];
+    const SUFFIX: [&str; 2] = ["[TEST] unrelated workload progress=4", "[M6.8] PASS"];
     let mut prefix = MarkerTracker::new(&PREFIX);
     if !prefix.consume(output) {
         return Err(XtaskError::MissingMarker(
