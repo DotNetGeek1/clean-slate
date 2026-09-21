@@ -453,7 +453,8 @@ mod tests {
         generation: u64,
         link: FakeLink,
     ) -> NetworkService<FakeLink, AllowAllAuthorizer> {
-        let mut service = NetworkService::new(SessionGeneration::new(generation), AllowAllAuthorizer);
+        let mut service =
+            NetworkService::new(SessionGeneration::new(generation), AllowAllAuthorizer);
         service.attach_backend(link);
         service
     }
@@ -601,10 +602,7 @@ mod tests {
 
     #[test]
     fn deny_all_authorizer() {
-        let mut service = NetworkService::new(
-            SessionGeneration::new(1),
-            DenyAllAuthorizer,
-        );
+        let mut service = NetworkService::new(SessionGeneration::new(1), DenyAllAuthorizer);
         service.attach_backend(FakeLink::new(test_mac(), true));
         let mut out = mut_buf();
         let (resp, _) = service.handle_request(

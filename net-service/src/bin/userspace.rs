@@ -439,8 +439,14 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             continue;
         }
         let payload = &payload_buf[payload_start..payload_end];
-        let (response, out_len) =
-            handle_service_request(service, bootstrap.service_generation, caller, request, payload, response_payload);
+        let (response, out_len) = handle_service_request(
+            service,
+            bootstrap.service_generation,
+            caller,
+            request,
+            payload,
+            response_payload,
+        );
         response_buf.copy_from_slice(&response.encode());
         let _ = service_complete(
             raw_handle,
@@ -581,17 +587,19 @@ fn handle_service_tls_send(
         }
         Err(response) => return Err(response),
     };
-    let raw_link = SyscallRawLink::attach(
-        network_capability(NETWORK_DEVICE_ID).map_err(|_| NetworkResponse::Error {
+    let raw_link = SyscallRawLink::attach(network_capability(NETWORK_DEVICE_ID).map_err(|_| {
+        NetworkResponse::Error {
             code: NetworkError::Transport(NetworkDeviceError::NotReady).code(),
-        })?,
-    );
+        }
+    })?);
     let raw_mac = raw_link.link().mac;
     let mut tcp = TcpTransport::alloc_boxed(
         L3Stack::new(raw_link, raw_mac, GUEST_IPV4, ARP_TTL_TICKS),
         SessionGeneration::new(service_generation),
     );
-    tcp.stack_mut().arp_cache_mut().insert(dest.addr, PEER_MAC, 0);
+    tcp.stack_mut()
+        .arp_cache_mut()
+        .insert(dest.addr, PEER_MAC, 0);
     let tick = monotonic_ticks().map_err(|_| NetworkResponse::Error {
         code: NetworkError::Timeout.code(),
     })?;
@@ -620,13 +628,11 @@ fn handle_service_tls_send(
     .map_err(|err| NetworkResponse::Error {
         code: map_tls_error_code(err) as u16,
     })?;
-    write_all_tls(&mut tls, tick.saturating_add(1), payload).map_err(|err| {
-        NetworkResponse::Error { code: err as u16 }
-    })?;
+    write_all_tls(&mut tls, tick.saturating_add(1), payload)
+        .map_err(|err| NetworkResponse::Error { code: err as u16 })?;
     let mut app_buf = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-    let response_len = read_tls(&mut tls, tick.saturating_add(2), &mut app_buf).map_err(|err| {
-        NetworkResponse::Error { code: err as u16 }
-    })?;
+    let response_len = read_tls(&mut tls, tick.saturating_add(2), &mut app_buf)
+        .map_err(|err| NetworkResponse::Error { code: err as u16 })?;
     let close_now = monotonic_ticks()
         .map_err(|_| NetworkResponse::Error {
             code: NetworkError::Timeout.code(),
@@ -639,9 +645,7 @@ fn handle_service_tls_send(
     Ok(payload.len() as u32)
 }
 
-fn drain_holder_exits(
-    service: &mut NetworkService<SyscallRawLink, AllowAllAuthorizer>,
-) {
+fn drain_holder_exits(service: &mut NetworkService<SyscallRawLink, AllowAllAuthorizer>) {
     loop {
         let mut caller_buf = [0u8; 24];
         let status = net_request([
