@@ -222,7 +222,7 @@ const M7_NET_SERVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[NET ] capacity baseline ok",
     "[M7.3] PASS",
 ];
-const M7_NETWORK_ACCEPTANCE_MARKERS: [&str; 18] = [
+const M7_NETWORK_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[NET ] raw backend=virtio mac=",
     "[NET ] service started pid=",
     "[AUD ] net op=resolve actor=",
@@ -230,6 +230,7 @@ const M7_NETWORK_ACCEPTANCE_MARKERS: [&str; 18] = [
     "[AUD ] net op=connect actor=",
     "outcome=allow resource=20992 generation=",
     "[NET ] session open id=",
+    "[NET ] tls reuse ok pid=",
     "[NET ] converged dns+tls ok len=",
     "[NET ] holder exit reclaimed sessions=",
     "[NET ] denied pid=",

@@ -61,6 +61,9 @@ pub struct NetworkServiceBootstrap {
     pub reclaimed_sessions: u64,
     pub reclaimed_pending: u64,
     pub inflight_failed: u64,
+    pub tls_transactions: u64,
+    pub tls_heap_checkpoint: u64,
+    pub tls_heap_after_last: u64,
 }
 
 impl NetworkServiceBootstrap {
@@ -76,6 +79,9 @@ impl NetworkServiceBootstrap {
             reclaimed_sessions: 0,
             reclaimed_pending: 0,
             inflight_failed: 0,
+            tls_transactions: 0,
+            tls_heap_checkpoint: 0,
+            tls_heap_after_last: 0,
         }
     }
 }
