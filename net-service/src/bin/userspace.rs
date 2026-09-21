@@ -662,6 +662,7 @@ fn handle_service_tls_send(
             .map_err(|err| NetworkResponse::Error { code: err as u16 })?;
         let response_len = read_tls(&mut tls, tick.saturating_add(2), &mut app_buf)
             .map_err(|err| NetworkResponse::Error { code: err as u16 })?;
+        let tcp_session = tls.tcp_session_id();
         let close_now = monotonic_ticks()
             .map_err(|_| NetworkResponse::Error {
                 code: NetworkError::Timeout.code(),
@@ -671,6 +672,7 @@ fn handle_service_tls_send(
             code: map_tls_error_code(err) as u16,
         })?;
         drop(tls);
+        wait_for_tcp_close(tcp, service_owner, tcp_session, close_now)?;
         response_len
     };
     let reset_now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
@@ -1044,6 +1046,34 @@ fn run_tls_phase(resolved_addr: Ipv4Addr) -> Result<usize, u64> {
         NetworkResponse::Error { code } => Err(code as u64),
         _ => Err(0),
     }
+}
+
+fn wait_for_tcp_close(
+    tcp: &mut TcpTransport<SyscallRawLink>,
+    owner: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+    start_tick: u64,
+) -> Result<(), NetworkResponse> {
+    let deadline = start_tick.saturating_add(TLS_CLOSE_TIMEOUT_TICKS);
+    for _ in 0..TLS_POLL_LIMIT {
+        let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+            code: NetworkError::Timeout.code(),
+        })?;
+        tcp.poll(now).map_err(|err| NetworkResponse::Error { code: err.code() })?;
+        match tcp.state(session, owner) {
+            Ok(state) if state.is_terminal() => return Ok(()),
+            Err(NetworkError::NotFound) => return Ok(()),
+            Ok(_) => {}
+            Err(err) => return Err(NetworkResponse::Error { code: err.code() }),
+        }
+        if now >= deadline {
+            break;
+        }
+        yield_cpu();
+    }
+    Err(NetworkResponse::Error {
+        code: NetworkError::Timeout.code(),
+    })
 }
 
 fn write_all_tls(
