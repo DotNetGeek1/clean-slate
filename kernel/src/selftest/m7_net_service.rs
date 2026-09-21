@@ -422,17 +422,23 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 "[NET ] converged phase progress={}\n",
                 report.aux_status
             ));
+            #[cfg(feature = "m7-network-self-test")]
             let live_service_pid = controller.live_pid(NETWORK_SERVICE_ID).unwrap_or(0);
+            #[cfg(feature = "m7-network-self-test")]
             if live_service_pid != test_state.service_pid {
                 fatal_kernel_error("m7 converged client changed live service pid");
             }
+            #[cfg(feature = "m7-network-self-test")]
             let service_bootstrap = read_fixture_bootstrap(live_service_pid, kernel_root);
+            #[cfg(feature = "m7-network-self-test")]
             if service_bootstrap.service_generation != test_state.service_generation {
                 fatal_kernel_error("m7 converged client changed live service generation");
             }
+            #[cfg(feature = "m7-network-self-test")]
             if service_bootstrap.tls_transactions != 2 {
                 fatal_kernel_error("m7 converged client did not complete two tls transactions");
             }
+            #[cfg(feature = "m7-network-self-test")]
             if service_bootstrap.tls_heap_checkpoint == 0
                 || service_bootstrap.tls_heap_after_last != service_bootstrap.tls_heap_checkpoint
             {
@@ -443,6 +449,7 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 "[NET ] session open id={}\n",
                 report.session_id_raw
             ));
+            #[cfg(feature = "m7-network-self-test")]
             kernel_log_fmt(format_args!(
                 "[NET ] tls reuse ok pid={} generation={} tx={} heap={}\n",
                 live_service_pid,
