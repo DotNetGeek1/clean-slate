@@ -36,7 +36,6 @@ pub use diagnostics::{
 };
 pub use network_service::{
     AllowAllAuthorizer, DenyAllAuthorizer, NetworkAuthorizer, NetworkOp, NetworkService,
-    PacketPath, PassthroughPacketPath,
 };
 pub use network_transport::{
     encode_request, encode_response, NetworkServiceBootstrap, NetworkServiceWorkItem,

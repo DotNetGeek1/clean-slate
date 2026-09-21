@@ -15,9 +15,9 @@ use clean_slate_network::dns::{DnsResolver, ResolveOutcome, DNS_QUERY_TIMEOUT_TI
 use clean_slate_network::error::{DenialReason, NetworkError};
 use clean_slate_network::fixture::{
     APP_REQUEST_BYTES, APP_RESPONSE_BYTES, DNS_SERVER_ADDR, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS,
-    FIXTURE_HOSTNAME, GUEST_IPV4, GUEST_MAC, PEER_MAC, TLS_PORT, TLS_SERVER_NAME,
+    FIXTURE_HOSTNAME, GUEST_IPV4, PEER_MAC, TLS_PORT, TLS_SERVER_NAME,
 };
-use clean_slate_network::limits::{MAX_ETHERNET_FRAME_BYTES, MAX_SESSIONS};
+use clean_slate_network::limits::MAX_SESSIONS;
 use clean_slate_network::protocol::{
     NetworkRequest, NetworkResponse, NETWORK_REQUEST_BYTES, NETWORK_RESPONSE_BYTES,
 };
@@ -28,9 +28,9 @@ use clean_slate_network::tls::{
     TlsConfig, TlsError, TlsSession, TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
 };
 use clean_slate_service_fixtures::{
-    AllowAllAuthorizer, NetworkService, NetworkServiceBootstrap, PassthroughPacketPath,
-    NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID,
-    NETWORK_MAX_PAYLOAD_BYTES, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_MODE_ACCEPTANCE,
+    AllowAllAuthorizer, NetworkService, NetworkServiceBootstrap, NETWORK_CAPABILITY_VERSION,
+    NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES,
+    NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_MODE_ACCEPTANCE,
     NETWORK_SERVICE_MODE_CAPACITY_LOOP, NETWORK_SERVICE_MODE_CLIENT,
     NETWORK_SERVICE_MODE_CONVERGED_CLIENT, NETWORK_SERVICE_MODE_INFLIGHT_ARM,
     NETWORK_SERVICE_MODE_STALE_CLOSE, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
@@ -54,8 +54,6 @@ const DNS_POLL_LIMIT: usize = 5_000_000;
 const TLS_POLL_LIMIT: usize = 10_000_000;
 const TLS_IO_TIMEOUT_TICKS: u64 = 2_000;
 const TLS_CLOSE_TIMEOUT_TICKS: u64 = 100;
-const OWNER: clean_slate_network::protocol::TrustedCaller =
-    clean_slate_network::protocol::TrustedCaller::new(0x5200, 0, 1);
 
 struct BumpAllocator;
 
@@ -63,20 +61,13 @@ struct BumpAllocator;
 static ALLOCATOR: BumpAllocator = BumpAllocator;
 
 static NEXT_HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-const fn max_usize(a: usize, b: usize) -> usize {
-    if a > b {
-        a
-    } else {
-        b
-    }
-}
 const PHASE_HEAP_MARGIN_BYTES: usize = 16 * 1024;
 const DNS_PHASE_HEAP_REQUIRED_BYTES: usize =
-    size_of::<DnsResolver<ServiceClientLink>>() + PHASE_HEAP_MARGIN_BYTES;
-const TLS_PHASE_HEAP_REQUIRED_BYTES: usize = size_of::<TcpTransport<ServiceClientLink>>()
+    size_of::<DnsResolver<SyscallRawLink>>() + PHASE_HEAP_MARGIN_BYTES;
+const TLS_PHASE_HEAP_REQUIRED_BYTES: usize = size_of::<TcpTransport<SyscallRawLink>>()
     + (2 * size_of::<[u8; TLS_RECORD_BUFFER_BYTES]>())
     + PHASE_HEAP_MARGIN_BYTES;
-const HEAP_BYTES: usize = max_usize(DNS_PHASE_HEAP_REQUIRED_BYTES, TLS_PHASE_HEAP_REQUIRED_BYTES);
+const HEAP_BYTES: usize = DNS_PHASE_HEAP_REQUIRED_BYTES + TLS_PHASE_HEAP_REQUIRED_BYTES;
 static mut HEAP: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 
 unsafe impl GlobalAlloc for BumpAllocator {
@@ -332,7 +323,7 @@ impl NetworkLink for SyscallRawLink {
     }
 }
 
-type ServiceState = NetworkService<SyscallRawLink, AllowAllAuthorizer, PassthroughPacketPath>;
+type ServiceState = NetworkService<SyscallRawLink, AllowAllAuthorizer>;
 
 static mut SERVICE_STATE: Option<ServiceState> = None;
 static mut SERVICE_DNS_RESOLVER: Option<Box<DnsResolver<SyscallRawLink>>> = None;
@@ -377,11 +368,7 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     let generation = SessionGeneration::new(bootstrap.service_generation);
     let raw_mac = SyscallRawLink::attach(raw_handle).link().mac;
     unsafe {
-        *service_state_slot() = Some(NetworkService::new(
-            generation,
-            AllowAllAuthorizer,
-            PassthroughPacketPath,
-        ));
+        *service_state_slot() = Some(NetworkService::new(generation, AllowAllAuthorizer));
         if let Some(service) = (*service_state_slot()).as_mut() {
             service.attach_backend(SyscallRawLink::attach(raw_handle));
         }
@@ -452,10 +439,8 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             continue;
         }
         let payload = &payload_buf[payload_start..payload_end];
-        let (response, out_len) = match request {
-            NetworkRequest::Resolve { name } => (handle_service_resolve(caller, name), 0),
-            _ => service.handle_request(caller, request, payload, response_payload),
-        };
+        let (response, out_len) =
+            handle_service_request(service, bootstrap.service_generation, caller, request, payload, response_payload);
         response_buf.copy_from_slice(&response.encode());
         let _ = service_complete(
             raw_handle,
@@ -464,6 +449,47 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             out_len,
             &response_payload[..out_len as usize],
         );
+    }
+}
+
+fn handle_service_request(
+    service: &mut ServiceState,
+    service_generation: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    request: NetworkRequest,
+    payload: &[u8],
+    response_payload: &mut [u8],
+) -> (NetworkResponse, u32) {
+    match request {
+        NetworkRequest::Resolve { name } => (handle_service_resolve(caller, name), 0),
+        NetworkRequest::Connect { session, dest }
+            if matches!(service.session_kind(caller, session), Ok(SocketKind::Tcp)) =>
+        {
+            service.handle_request(
+                caller,
+                NetworkRequest::Connect { session, dest },
+                payload,
+                response_payload,
+            )
+        }
+        NetworkRequest::Send {
+            session,
+            payload_len,
+        } if matches!(service.session_kind(caller, session), Ok(SocketKind::Tcp)) => {
+            if payload.len() != payload_len as usize {
+                return (
+                    NetworkResponse::Error {
+                        code: NetworkError::InvalidRequest.code(),
+                    },
+                    0,
+                );
+            }
+            match handle_service_tls_send(service, service_generation, caller, session, payload) {
+                Ok(bytes_sent) => (NetworkResponse::Send { bytes_sent }, 0),
+                Err(response) => (response, 0),
+            }
+        }
+        other => service.handle_request(caller, other, payload, response_payload),
     }
 }
 
@@ -539,8 +565,82 @@ fn handle_service_resolve(
     }
 }
 
+fn handle_service_tls_send(
+    service: &mut ServiceState,
+    service_generation: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+    payload: &[u8],
+) -> Result<u32, NetworkResponse> {
+    let dest = match service.connected_dest(caller, session) {
+        Ok(Some(dest)) => dest,
+        Ok(None) => {
+            return Err(NetworkResponse::Error {
+                code: NetworkError::InvalidRequest.code(),
+            });
+        }
+        Err(response) => return Err(response),
+    };
+    let raw_link = SyscallRawLink::attach(
+        network_capability(NETWORK_DEVICE_ID).map_err(|_| NetworkResponse::Error {
+            code: NetworkError::Transport(NetworkDeviceError::NotReady).code(),
+        })?,
+    );
+    let raw_mac = raw_link.link().mac;
+    let mut tcp = TcpTransport::alloc_boxed(
+        L3Stack::new(raw_link, raw_mac, GUEST_IPV4, ARP_TTL_TICKS),
+        SessionGeneration::new(service_generation),
+    );
+    tcp.stack_mut().arp_cache_mut().insert(dest.addr, PEER_MAC, 0);
+    let tick = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+        code: NetworkError::Timeout.code(),
+    })?;
+    let mut read_buf = Box::new([0u8; TLS_RECORD_BUFFER_BYTES]);
+    let mut write_buf = Box::new([0u8; TLS_RECORD_BUFFER_BYTES]);
+    let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
+    let config = TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX);
+    let rng = RdrandRng::new().map_err(|_| NetworkResponse::Error {
+        code: NetworkError::Protocol.code(),
+    })?;
+    let service_owner =
+        clean_slate_network::protocol::TrustedCaller::new(0x5200, 0, service_generation);
+    let handshake_deadline = tick.saturating_add(8_192);
+    let (mut tls, _) = TlsSession::connect_with_handshake_deadline(
+        tick,
+        handshake_deadline,
+        &mut tcp,
+        service_owner,
+        dest,
+        config,
+        rng,
+        read_buf.as_mut(),
+        write_buf.as_mut(),
+        None,
+    )
+    .map_err(|err| NetworkResponse::Error {
+        code: map_tls_error_code(err) as u16,
+    })?;
+    write_all_tls(&mut tls, tick.saturating_add(1), payload).map_err(|err| {
+        NetworkResponse::Error { code: err as u16 }
+    })?;
+    let mut app_buf = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    let response_len = read_tls(&mut tls, tick.saturating_add(2), &mut app_buf).map_err(|err| {
+        NetworkResponse::Error { code: err as u16 }
+    })?;
+    let close_now = monotonic_ticks()
+        .map_err(|_| NetworkResponse::Error {
+            code: NetworkError::Timeout.code(),
+        })?
+        .saturating_add(TLS_CLOSE_TIMEOUT_TICKS);
+    tls.close(close_now).map_err(|err| NetworkResponse::Error {
+        code: map_tls_error_code(err) as u16,
+    })?;
+    service.stage_response_payload(caller, session, &app_buf[..response_len])?;
+    Ok(payload.len() as u32)
+}
+
 fn drain_holder_exits(
-    service: &mut NetworkService<SyscallRawLink, AllowAllAuthorizer, PassthroughPacketPath>,
+    service: &mut NetworkService<SyscallRawLink, AllowAllAuthorizer>,
 ) {
     loop {
         let mut caller_buf = [0u8; 24];
@@ -618,18 +718,8 @@ fn service_complete(
     Ok(())
 }
 
-struct ServiceClientLink {
-    handle: u64,
-    session: SessionId,
-    recv_payload: [u8; NETWORK_MAX_PAYLOAD_BYTES],
-}
-
-/// Open a UDP session through the bridge and return its id without closing it.
-fn open_udp_session(handle: u64) -> Result<SessionId, u64> {
-    let open = NetworkRequest::Open {
-        kind: SocketKind::Udp,
-    }
-    .encode();
+fn open_session(handle: u64, kind: SocketKind) -> Result<SessionId, u64> {
+    let open = NetworkRequest::Open { kind }.encode();
     let open_id = client_submit(handle, &open, &[])?;
     let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
     match poll_until_done(handle, open_id, &mut payload)? {
@@ -638,91 +728,51 @@ fn open_udp_session(handle: u64) -> Result<SessionId, u64> {
     }
 }
 
-impl ServiceClientLink {
-    fn open() -> Result<Self, u64> {
-        let handle = client_handle()?;
-        let session = open_udp_session(handle)?;
-        Ok(Self {
-            handle,
-            session,
-            recv_payload: [0u8; NETWORK_MAX_PAYLOAD_BYTES],
-        })
-    }
+fn open_udp_session(handle: u64) -> Result<SessionId, u64> {
+    open_session(handle, SocketKind::Udp)
+}
 
-    fn close(&mut self) {
-        let close = NetworkRequest::Close {
-            session: self.session,
-        }
-        .encode();
-        if let Ok(close_id) = client_submit(self.handle, &close, &[]) {
-            let _ = poll_until_done(self.handle, close_id, &mut self.recv_payload);
-        }
+fn open_tcp_session(handle: u64) -> Result<SessionId, u64> {
+    open_session(handle, SocketKind::Tcp)
+}
+
+fn connect_session(handle: u64, session: SessionId, dest: SocketAddrV4) -> Result<(), u64> {
+    let request = NetworkRequest::Connect { session, dest }.encode();
+    let request_id = client_submit(handle, &request, &[])?;
+    let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    match poll_until_done(handle, request_id, &mut payload)? {
+        NetworkResponse::Connect => Ok(()),
+        NetworkResponse::Error { code } => Err(code as u64),
+        _ => Err(0),
     }
 }
 
-impl Drop for ServiceClientLink {
-    fn drop(&mut self) {
-        self.close();
+fn send_session(handle: u64, session: SessionId, payload: &[u8]) -> Result<u32, u64> {
+    let request = NetworkRequest::Send {
+        session,
+        payload_len: payload.len() as u32,
+    }
+    .encode();
+    let request_id = client_submit(handle, &request, payload)?;
+    let mut response_payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    match poll_until_done(handle, request_id, &mut response_payload)? {
+        NetworkResponse::Send { bytes_sent } => Ok(bytes_sent),
+        NetworkResponse::Error { code } => Err(code as u64),
+        _ => Err(0),
     }
 }
 
-impl NetworkLink for ServiceClientLink {
-    fn link(&self) -> LinkProperties {
-        LinkProperties::new(GUEST_MAC, true)
+fn receive_session(handle: u64, session: SessionId, out: &mut [u8]) -> Result<usize, u64> {
+    let request = NetworkRequest::Receive {
+        session,
+        max_len: out.len() as u32,
     }
-
-    fn state(&self) -> DeviceState {
-        DeviceState::Ready
-    }
-
-    fn transmit(&mut self, frame: FrameBuf) -> Result<(), (NetworkDeviceError, FrameBuf)> {
-        let bytes = frame.as_slice();
-        let request = NetworkRequest::Send {
-            session: self.session,
-            payload_len: bytes.len() as u32,
-        }
-        .encode();
-        let send_id = match client_submit(self.handle, &request, bytes) {
-            Ok(id) => id,
-            Err(_) => return Err((NetworkDeviceError::NotReady, frame)),
-        };
-        match poll_until_done(self.handle, send_id, &mut self.recv_payload) {
-            Ok(NetworkResponse::Send { bytes_sent }) if bytes_sent as usize == bytes.len() => {
-                Ok(())
-            }
-            _ => Err((NetworkDeviceError::NotReady, frame)),
-        }
-    }
-
-    fn receive(&mut self) -> Result<Option<FrameBuf>, NetworkDeviceError> {
-        let request = NetworkRequest::Receive {
-            session: self.session,
-            max_len: MAX_ETHERNET_FRAME_BYTES as u32,
-        }
-        .encode();
-        let recv_id =
-            client_submit(self.handle, &request, &[]).map_err(|_| NetworkDeviceError::NotReady)?;
-        let response = poll_until_done(self.handle, recv_id, &mut self.recv_payload)
-            .map_err(|_| NetworkDeviceError::NotReady)?;
-        let payload_len = match response {
-            NetworkResponse::Receive { payload_len } => payload_len as usize,
-            _ => return Err(NetworkDeviceError::Malformed),
-        };
-        if payload_len == 0 {
-            return Ok(None);
-        }
-        FrameBuf::from_slice(&self.recv_payload[..payload_len])
-            .map(Some)
-            .map_err(|_| NetworkDeviceError::Malformed)
-    }
-
-    fn reset(&mut self) -> Result<(), NetworkDeviceError> {
-        self.close();
-        let refreshed = ServiceClientLink::open().map_err(|_| NetworkDeviceError::NotReady)?;
-        self.handle = refreshed.handle;
-        self.session = refreshed.session;
-        self.recv_payload = refreshed.recv_payload;
-        Ok(())
+    .encode();
+    let request_id = client_submit(handle, &request, &[])?;
+    match poll_until_done(handle, request_id, out)? {
+        NetworkResponse::Receive { payload_len } => Ok(payload_len as usize),
+        NetworkResponse::Error { code } => Err(code as u64),
+        _ => Err(0),
     }
 }
 
@@ -844,15 +894,11 @@ fn poll_until_done(
 
 fn run_converged_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
     bootstrap.aux_status = 1;
-    phase_heap_reset();
-    phase_heap_ensure_capacity(DNS_PHASE_HEAP_REQUIRED_BYTES)?;
     bootstrap.aux_status = 2;
-    let resolved_addr = run_dns_phase(bootstrap.service_generation)?;
+    let resolved_addr = run_dns_phase()?;
     bootstrap.aux_status = 3;
-    phase_heap_reset();
-    phase_heap_ensure_capacity(TLS_PHASE_HEAP_REQUIRED_BYTES)?;
     bootstrap.aux_status = 4;
-    let app_len = run_tls_phase(bootstrap.service_generation, resolved_addr)?;
+    let app_len = run_tls_phase(resolved_addr)?;
     bootstrap.aux_status = 5;
     bootstrap.echo_len = app_len as u64;
     // Like `run_client_echo`, leave exactly one session open at exit: the kernel test
@@ -866,18 +912,7 @@ fn run_converged_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, 
     Ok(NETWORK_SERVICE_RESULT_OK)
 }
 
-fn phase_heap_reset() {
-    NEXT_HEAP_OFFSET.store(0, Ordering::SeqCst);
-}
-
-fn phase_heap_ensure_capacity(required: usize) -> Result<(), u64> {
-    if required > HEAP_BYTES {
-        return Err(0);
-    }
-    Ok(())
-}
-
-fn run_dns_phase(_generation: u64) -> Result<Ipv4Addr, u64> {
+fn run_dns_phase() -> Result<Ipv4Addr, u64> {
     let handle = client_handle()?;
     let name = BoundedHostname::try_from_str(FIXTURE_HOSTNAME).map_err(|_| 0u64)?;
     let request = NetworkRequest::Resolve { name }.encode();
@@ -895,55 +930,32 @@ fn run_dns_phase(_generation: u64) -> Result<Ipv4Addr, u64> {
     }
 }
 
-fn run_tls_phase(generation: u64, resolved_addr: Ipv4Addr) -> Result<usize, u64> {
-    let link = ServiceClientLink::open()?;
-    let mac = link.link().mac;
-    let mut tcp = TcpTransport::alloc_boxed(
-        L3Stack::new(link, mac, GUEST_IPV4, ARP_TTL_TICKS),
-        SessionGeneration::new(generation),
-    );
-    tcp.stack_mut()
-        .arp_cache_mut()
-        .insert(resolved_addr, PEER_MAC, 0);
+fn run_tls_phase(resolved_addr: Ipv4Addr) -> Result<usize, u64> {
+    let handle = client_handle()?;
+    let session = open_tcp_session(handle)?;
     let remote_tls = SocketAddrV4::new(resolved_addr, TLS_PORT);
-    // `TlsSession::connect_*` opens and drives its own TCP session (as the kernel-direct
-    // `m7_tls` path relies on). Pre-connecting here would occupy the fixture's single TLS
-    // listener, so the TLS-internal SYN gets RST and the handshake never starts.
-    let tick = monotonic_ticks()?;
-
-    let mut read_buf = Box::new([0u8; TLS_RECORD_BUFFER_BYTES]);
-    let mut write_buf = Box::new([0u8; TLS_RECORD_BUFFER_BYTES]);
-    let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
-    let config = TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX);
-    let rng = RdrandRng::new()?;
-    let handshake_deadline = tick.saturating_add(8_192);
-    let (mut tls, _) = TlsSession::connect_with_handshake_deadline(
-        tick,
-        handshake_deadline,
-        &mut tcp,
-        OWNER,
-        remote_tls,
-        config,
-        rng,
-        read_buf.as_mut(),
-        write_buf.as_mut(),
-        None,
-    )
-    .map_err(map_tls_error_code)?;
-
-    write_all_tls(&mut tls, tick.saturating_add(1), APP_REQUEST_BYTES)?;
+    connect_session(handle, session, remote_tls)?;
+    let bytes_sent = send_session(handle, session, APP_REQUEST_BYTES)?;
+    if bytes_sent as usize != APP_REQUEST_BYTES.len() {
+        return Err(0);
+    }
     let mut app_buf = [0u8; 64];
-    let n = read_tls(&mut tls, tick.saturating_add(2), &mut app_buf)?;
+    let n = receive_session(handle, session, &mut app_buf)?;
     if &app_buf[..n] != APP_RESPONSE_BYTES {
         return Err(0);
     }
-    let close_now = monotonic_ticks()?.saturating_add(TLS_CLOSE_TIMEOUT_TICKS);
-    tls.close(close_now).map_err(map_tls_error_code)?;
-    Ok(n)
+    let close = NetworkRequest::Close { session }.encode();
+    let close_id = client_submit(handle, &close, &[])?;
+    let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    match poll_until_done(handle, close_id, &mut payload)? {
+        NetworkResponse::Close => Ok(n),
+        NetworkResponse::Error { code } => Err(code as u64),
+        _ => Err(0),
+    }
 }
 
 fn write_all_tls(
-    tls: &mut TlsSession<'_, '_, ServiceClientLink>,
+    tls: &mut TlsSession<'_, '_, SyscallRawLink>,
     start_tick: u64,
     data: &[u8],
 ) -> Result<(), u64> {
@@ -969,7 +981,7 @@ fn write_all_tls(
 }
 
 fn read_tls(
-    tls: &mut TlsSession<'_, '_, ServiceClientLink>,
+    tls: &mut TlsSession<'_, '_, SyscallRawLink>,
     start_tick: u64,
     out: &mut [u8],
 ) -> Result<usize, u64> {

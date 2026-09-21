@@ -178,11 +178,11 @@ Each supervised network-service instance owns a fixed `SessionGeneration` assign
 
 ### Backend attach seam (#82 / #88)
 
-`NetworkService::attach_backend` / `detach_backend` hold the sole `NetworkLink` reference. The kernel bridge currently uses an in-kernel loopback link; VirtIO (#82) plugs in by attaching a real `NetworkLink` at service launch without changing the client IPC contract.
+`NetworkService::attach_backend` / `detach_backend` keep the raw `NetworkLink` on the service side only. Ordinary client `Open` / `Connect` / `Send` / `Receive` requests stage application payload in the bounded service buffers; the service-owned DNS/TCP/TLS bridge is what touches the raw link. The kernel bridge currently uses an in-kernel loopback link for M7.3 and attaches the real VirtIO `NetworkLink` for the converged M7.8 lane without changing the client IPC contract.
 
 ### Payload region
 
-`Send` / `Receive` IPC frames carry counts only; bytes move through the bounded payload region (`MAX_APPLICATION_PAYLOAD_BYTES`) associated with the client queue slot / service handler.
+`Send` / `Receive` IPC frames carry counts only; bytes move through the bounded payload region (`MAX_APPLICATION_PAYLOAD_BYTES`) associated with the client queue slot / service handler. Those bytes are always application payload, never caller-supplied Ethernet frames; raw frame injection remains gated by `NET_RAW_DEVICE`.
 
 ### Acceptance markers
 
