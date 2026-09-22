@@ -169,6 +169,14 @@ non-identity layout so processes can own low PML4 slots and host classic low
 Execution personality metadata and Linux syscall/errno/stack contracts are owned
 by #91 (`clean-slate-linux-abi`); syscall dispatch routing is #93.
 
+M8.2 (#92) reserves the top of the slot for the Linux user stack: two NX+W
+stack pages `[0x0000_407F_FFFF_D000, 0x0000_407F_FFFF_F000)`, an unmapped guard
+page below at `0x0000_407F_FFFF_C000`, and the slot's last page
+`0x0000_407F_FFFF_F000` left unmapped so the stack top is never the window end.
+Any PT_LOAD intersecting `[0x0000_407F_FFFF_C000, 0x0000_4080_0000_0000)` is
+rejected (`SegmentOverlapsStackReservation`). See
+[LINUX_PERSONALITY.md](LINUX_PERSONALITY.md), "M8.2 — ELF loader and process image".
+
 ## M7 network layering
 
 M7 introduces `clean-slate-network`, a transport-independent contract between raw NIC backends, the userspace network service, and the protocol stack. VirtIO details stay in the kernel driver lane; applications receive attenuated `ResourceClass::Network` capabilities rather than ambient connectivity. See [NETWORK.md](NETWORK.md) for the ownership map, rights vocabulary, and hermetic fixture contract.

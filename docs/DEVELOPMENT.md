@@ -376,6 +376,12 @@ cargo xtask verify-m8-fixture
 
 See [M8_FIXTURE.md](M8_FIXTURE.md) and `fixtures/linux-hello/`.
 
+For the M8.2 Linux ELF loader QEMU proof (fixture image constructed through `launch_linux_process`, entered at `e_entry` — first syscall observed from the Linux pid with RIP in the RX page and RSP equal to the launch RSP — then torn down through the production path with frame and registry accounting back to baseline while a native sibling makes progress; marker `[M8.2] PASS`, aliases `m8-linux-image`, `m8.2`; the fixture bytes are embedded by the `m8-linux-image` feature, so no userspace image build step is required):
+
+```bash
+cargo xtask test-m8-linux-image
+```
+
 To launch paused for debugger attach:
 
 ```bash
