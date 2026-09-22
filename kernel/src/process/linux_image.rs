@@ -136,6 +136,7 @@ pub(crate) const LINUX_M8_LOAD_POLICY: LoadPlanPolicy = LoadPlanPolicy {
 };
 
 /// Conventional Linux user window for low-VA `ET_EXEC` images (#142).
+#[cfg(any(feature = "m9-low-va-self-test", test))]
 pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
     LoadPlanPolicy::linux_conventional_x86_64();
 
@@ -144,6 +145,7 @@ pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
 pub(crate) const LINUX_LOW_VA_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-low-hello/hello-linux-low-x86_64");
 
+#[cfg(any(feature = "m9-low-va-self-test", test))]
 pub(crate) const LINUX_LOW_VA_ARGV0: &[u8] = b"hello-linux-low-x86_64";
 
 /// Stack and window constants selected by load policy (M8 slot 128 vs conventional low VA).
@@ -173,6 +175,7 @@ impl LinuxImageLayout {
         }
     }
 
+    #[cfg(any(feature = "m9-low-va-self-test", test))]
     pub(crate) const fn conventional(user_region_base: u64) -> Self {
         // Stack a few MiB above typical `0x400000` ET_EXEC mappings so image and
         // stack share page-table depth (same GiB / 2 MiB region as the M8 budget).
@@ -590,18 +593,9 @@ pub(crate) fn build_linux_initial_stack(
         (AT_ENTRY, entry),
     ];
     let mut bytes = [0u8; LINUX_INITIAL_STACK_IMAGE_BYTES];
-    let image = build_initial_stack(
-        &mut bytes,
-        layout.stack_top,
-        &[layout.argv0],
-        &[],
-        &auxv,
-    )
-    .map_err(LinuxImageError::InitialStack)?;
-    if image.rsp % 16 != 0
-        || image.rsp < layout.stack_base
-        || image.rsp >= layout.stack_top
-    {
+    let image = build_initial_stack(&mut bytes, layout.stack_top, &[layout.argv0], &[], &auxv)
+        .map_err(LinuxImageError::InitialStack)?;
+    if image.rsp % 16 != 0 || image.rsp < layout.stack_base || image.rsp >= layout.stack_top {
         return Err(LinuxImageError::InitialStack(
             StackLayoutError::InvalidStackTop,
         ));
@@ -699,8 +693,7 @@ pub(crate) fn validate_linux_image_with_policy(
         return Err(LinuxImageError::MappingBudgetExceeded);
     }
 
-    let initial_stack =
-        build_linux_initial_stack(plan.entry, phdr_vaddr, plan.phnum, &layout)?;
+    let initial_stack = build_linux_initial_stack(plan.entry, phdr_vaddr, plan.phnum, &layout)?;
     let entry = plan.entry;
     Ok(LinuxImagePlan {
         plan,
@@ -714,6 +707,7 @@ pub(crate) fn validate_linux_image_with_policy(
 }
 
 /// Validate the M9 low-VA fixture under [`LINUX_CONVENTIONAL_LOAD_POLICY`].
+#[cfg(any(feature = "m9-low-va-self-test", test))]
 pub(crate) fn validate_linux_low_va_image(bytes: &[u8]) -> Result<LinuxImagePlan, LinuxImageError> {
     let header = Elf64Header::parse(bytes)?;
     prescan_program_headers_minimal(bytes, &header)?;
@@ -800,11 +794,9 @@ pub(crate) fn build_linux_process_image(
     elf_bytes: &[u8],
     image_plan: &LinuxImagePlan,
 ) -> Result<LinuxProcessImage, LinuxImageError> {
-    let mut address_space = create_process_address_space(
-        allocator,
-        VirtAddr::new(image_plan.layout.user_region_base),
-    )
-    .map_err(LinuxImageError::AddressSpaceCreation)?;
+    let mut address_space =
+        create_process_address_space(allocator, VirtAddr::new(image_plan.layout.user_region_base))
+            .map_err(LinuxImageError::AddressSpaceCreation)?;
 
     let image_pages =
         match map_load_plan_segments(&mut address_space, allocator, elf_bytes, &image_plan.plan) {
@@ -838,9 +830,11 @@ pub(crate) fn build_linux_process_image(
         ));
     }
 
-    if let Err(message) =
-        write_initial_stack_image(&address_space, &image_plan.initial_stack, &image_plan.layout)
-    {
+    if let Err(message) = write_initial_stack_image(
+        &address_space,
+        &image_plan.initial_stack,
+        &image_plan.layout,
+    ) {
         return Err(discard_address_space(
             &address_space,
             allocator,
@@ -864,7 +858,8 @@ pub(crate) fn build_linux_process_image(
     let expected_pt = image_plan
         .page_table_frames
         .saturating_add(KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES);
-    if counts.page_table_frames != expected_pt || counts.user_pages as u64 != image_plan.mapped_pages()
+    if counts.page_table_frames != expected_pt
+        || counts.user_pages as u64 != image_plan.mapped_pages()
     {
         return Err(discard_address_space(
             &address_space,
@@ -1090,6 +1085,11 @@ pub(crate) fn launch_linux_process(
 
 /// Same as [`launch_linux_process`] but validates with a caller-supplied pure
 /// validator (M8 legacy vs conventional low VA).
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 pub(crate) fn launch_linux_process_with_policy(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
@@ -1873,7 +1873,8 @@ mod tests {
         let plan = validate_linux_image(&bytes).expect("three-region image");
         assert_eq!(plan.page_table_frames, 8);
         assert!(
-            plan.page_table_frames.saturating_add(KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES)
+            plan.page_table_frames
+                .saturating_add(KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES)
                 <= MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES
         );
         // Same 1 GiB region, different 2 MiB region: shares the PD, needs a PT.

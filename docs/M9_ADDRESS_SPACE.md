@@ -135,12 +135,51 @@ use `linux_conventional_x86_64()`.
 3. `destroy_process_address_space` unmaps user pages LIFO, frees page-table
    frames, returns counts via `AddressSpaceResourceCounts`.
 
+## Shared carve-out page tables (attach path)
+
+Process roots inherit kernel high-half mappings only; low canonical slots are
+wired by `attach_shared_carve_outs_to_process`, which installs **shared** leaf
+page tables for every registered kernel low carve-out (kernel image, MMIO, and
+similar). Per process, exactly `KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES = 3`
+private frames are allocated (PDPT + PD for GiB 0 + PD for LAPIC GiB 3).
+
+Directory entries on the attach path must **not** set `NO_EXECUTE`: on x86-64, NX
+on any non-leaf entry makes the whole subtree non-executable. PML4[0] and
+PDPT[0] use `PRESENT | WRITABLE | USER_ACCESSIBLE` so user mappings under GiB 0
+can set `USER` at the leaf; PD entries that point at shared PTs use
+`PRESENT | WRITABLE` only (supervisor); NX/W/U are decided at the shared leaf.
+
+Boot runs `verify_carve_out_attach_at_boot` (kernel-image probe VA): leaf
+`PRESENT`, leaf not `USER`, no NX on any directory level along the path, leaf
+physical address matches the kernel root.
+
+## Shared-PT leak contract (2 MiB user exclusion)
+
+User mappings must not populate a 2 MiB window that already uses a shared
+carve-out leaf PT. `va_overlaps_kernel_low_reserved` rounds each carve-out to
+2 MiB boundaries for validation and pointer checks; `map_process_page` also
+refuses when the target PD already references a frame marked
+`shared_carve_out_page_table_frame()`. Boot logs raw carve-outs and the rounded
+2 MiB exclusion windows. `assert_conventional_linux_window_clear` uses the
+rounded windows.
+
+## Reserved-unmapped probe slot
+
+`KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE = 0xffff_a000_0000_0000` (physmap-adjacent
+diagnostic slot in the kernel root) stays unmapped; M1/M2 probes use physmap
+scratch below that window.
+
 ## Capacity notes
 
-Default `MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES = 8` remains sufficient for low-slot
-ET_EXEC (same 4-level depth as slot 128). `m9-low-va-self-test` uses default
-mapping budget (4 user pages) unless stack+image exceeds it — same as M8 image
-self-test pattern.
+`MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES = BASE + KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES`
+with mutually exclusive `BASE` arms per feature set. Default host builds use
+`BASE = 8` (11 total including carve-out private frames). Low-slot
+`linux_conventional_x86_64()` images use a stack near `0x0080_0000` so image and
+stack share page-table depth with the carve-out attach path; validation subtracts
+the redundant root+PDPT demand already covered by attach.
+
+`m9-low-va-self-test` uses the default user mapping budget (4 pages) for the
+low hello fixture plus probe processes.
 
 ## Non-goals (this issue)
 

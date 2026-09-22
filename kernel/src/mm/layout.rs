@@ -2,7 +2,7 @@
 
 use crate::diagnostics::serial::serial_write_fmt;
 use crate::mm::region::ReservedRange;
-use crate::mm::{align_down, align_up, PAGE_SIZE};
+use crate::mm::{align_down, align_up};
 use crate::sync::global_cell::GlobalCell;
 
 /// Start of the supervisor-only direct physical map (512 GiB window at PML4 slot 511).
@@ -19,6 +19,7 @@ pub(crate) const KERNEL_USER_PML4_SLOT_END: usize = 256;
 pub(crate) const LINUX_CONVENTIONAL_USER_VA_LO: u64 = 0x10000;
 
 /// Reserved-unmapped PML4 slot used for deliberate kernel fault probes (M1/M2).
+#[allow(dead_code)]
 pub(crate) const KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE: u64 = 0xffff_a000_0000_0000;
 
 const TWO_MIB: u64 = 2 * 1024 * 1024;

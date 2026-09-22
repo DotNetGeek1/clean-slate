@@ -47,19 +47,38 @@ use crate::interrupt::timer::initialize_timer;
 )))]
 use crate::interrupt::timer::report_timer_contract;
 use crate::mm::address_space::set_kernel_root_frame;
-use crate::mm::frame_allocator::set_kernel_direct_map_ready;
-use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::address_space::KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES;
 use crate::mm::carve_out_shared::install_shared_carve_out_page_tables;
+use crate::mm::frame_allocator::set_kernel_direct_map_ready;
+use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::kernel_bootstrap::install_kernel_owned_root;
 use crate::mm::layout::{
     assert_conventional_linux_window_clear, init_kernel_low_carve_outs_from_reserved,
-    log_kernel_low_carve_outs, register_kernel_low_carve_out, KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE,
+    log_kernel_low_carve_outs, register_kernel_low_carve_out,
 };
-use crate::mm::paging::inspect_current_mapping;
+#[cfg(all(
+    not(feature = "m1-self-test"),
+    not(feature = "m2-double-fault-self-test"),
+    not(feature = "m2-timer-self-test"),
+    not(feature = "m3-address-space-self-test"),
+    not(feature = "m3-resources-self-test"),
+    not(feature = "m4-crash-service-self-test"),
+    not(feature = "m4-recovery-self-test"),
+    not(feature = "m3-entry-self-test"),
+    not(feature = "m8-linux-dispatch-self-test"),
+    not(feature = "m8-linux-hello-self-test"),
+    not(feature = "m5-block-self-test"),
+    not(feature = "m7-net-device-self-test"),
+    not(feature = "m7-tls-self-test"),
+    not(feature = "m7-tls-fail-closed-self-test"),
+    not(feature = "m7-dns-self-test"),
+    not(feature = "m8-linux-image-self-test"),
+    not(feature = "m9-low-va-self-test")
+))]
 use crate::mm::paging::current_root_frame_address;
-use crate::mm::PAGE_SIZE;
+use crate::mm::paging::inspect_current_mapping;
 use crate::mm::region::ReservedRange;
+use crate::mm::PAGE_SIZE;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
@@ -134,7 +153,8 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m7-dns-self-test"),
     not(feature = "m7-net-device-self-test"),
     not(feature = "m8-linux-image-self-test"),
-    not(feature = "m8-linux-hello-self-test")
+    not(feature = "m8-linux-hello-self-test"),
+    not(feature = "m9-low-va-self-test")
 ))]
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
 #[cfg(feature = "m3-ipc-self-test")]
@@ -311,7 +331,9 @@ fn run_inner() -> Result<(), &'static str> {
 
     #[cfg(feature = "m1-self-test")]
     {
-        trigger_expected_page_fault(KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE as *const u64);
+        trigger_expected_page_fault(
+            crate::mm::layout::KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE as *const u64,
+        );
     }
 
     #[cfg(feature = "m2-double-fault-self-test")]
@@ -352,7 +374,8 @@ fn run_inner() -> Result<(), &'static str> {
     #[cfg(all(
         feature = "m3-entry-self-test",
         not(feature = "m8-linux-dispatch-self-test"),
-        not(feature = "m8-linux-hello-self-test")
+        not(feature = "m8-linux-hello-self-test"),
+        not(feature = "m9-low-va-self-test")
     ))]
     {
         #[cfg(feature = "m7-net-service-self-test")]
@@ -572,7 +595,8 @@ fn run_inner() -> Result<(), &'static str> {
             not(feature = "m6-audit-self-test"),
             not(feature = "m6-revocation-self-test"),
             not(feature = "m6-capabilities-self-test"),
-            not(feature = "m7-net-caps-self-test")
+            not(feature = "m7-net-caps-self-test"),
+            not(feature = "m9-low-va-self-test")
         ))]
         {
             let mut allocator = allocator;
@@ -660,7 +684,9 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m7-net-device-self-test"),
         not(feature = "m7-tls-self-test"),
         not(feature = "m7-tls-fail-closed-self-test"),
-        not(feature = "m7-dns-self-test")
+        not(feature = "m7-dns-self-test"),
+        not(feature = "m8-linux-image-self-test"),
+        not(feature = "m9-low-va-self-test")
     ))]
     {
         let kernel_root_frame = current_root_frame_address();

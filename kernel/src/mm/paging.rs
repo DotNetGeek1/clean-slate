@@ -3,7 +3,6 @@
 //! flag inspection and the boot-time page-table reservation.
 
 use crate::boot::uefi::BootReservedRanges;
-use crate::mm::kernel_map_ptr;
 use crate::mm::region::ReservedRange;
 use crate::mm::PAGE_SIZE;
 use crate::mm::PHYSICAL_MEMORY_OFFSET;
@@ -23,7 +22,7 @@ const fn page_table_virt(frame: u64) -> u64 {
 
 #[cfg(not(test))]
 const fn page_table_virt(frame: u64) -> u64 {
-    kernel_map_ptr(frame)
+    crate::mm::phys_to_virt(frame)
 }
 
 pub(crate) struct PageWalkFlags {

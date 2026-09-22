@@ -35,6 +35,11 @@ Decoded request shape: `LinuxSyscallRequest { nr, args: [u64; 6] }`.
 
 M8 required numbers: `SYS_WRITE = 1`, `SYS_EXIT = 60`. Any other number returns `-ENOSYS`; the process continues.
 
+## Load policies and VA windows (M9 / #142)
+
+- **M8 frozen hello:** `LoadPlanPolicy::m8_legacy_slot_x86_64()` / `LINUX_M8_LOAD_POLICY` — single PML4 slot 128, stack at the top of that slot (`launch_linux_process`).
+- **Conventional low ET_EXEC:** `LoadPlanPolicy::linux_conventional_x86_64()` — e.g. static images linked at `0x400000`; `launch_linux_process_with_policy` + `validate_linux_low_va_image` (M9 acceptance). Console capability + stdio install match the M8.7 production sequence before the scheduler runs the image.
+
 ## Errno encoding (Linux vs native)
 
 **Linux:** success is a non-negative value in `RAX`. Failure is two's-complement `-errno` as `u64`. Decode rule: signed values in `[-4095, -1]` are errors (`clean_slate_linux_abi::encode_rax` / `decode_rax`).

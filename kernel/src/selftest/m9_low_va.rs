@@ -7,23 +7,24 @@ use crate::arch::x86_64::context_switch::{
     build_userspace_entry_frame, restore_task_context, task_stack_top,
 };
 use crate::arch::x86_64::gdt::selector_rpl;
-use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::arch::x86_64::interrupt_context::InterruptContext;
-use crate::ipc::endpoint_table_mut;
+use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::interrupt::timer::initialize_timer;
+use crate::ipc::endpoint_table_mut;
 use crate::mm::address_space::{
     create_process_address_space, destroy_process_address_space, kernel_root_frame,
     map_process_page, translate_address_in_root,
 };
-use crate::mm::layout::kernel_low_reserved_ranges;
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::layout::kernel_low_reserved_ranges;
 use crate::mm::layout::PHYSMAP_BASE;
 use crate::mm::paging::leaf_page_flags_for_address_in_root;
 use crate::mm::paging::zero_page;
 use crate::mm::{align_down, phys_to_virt, PAGE_SIZE};
 use crate::process::domain::teardown_current_process;
+use crate::process::domain::DomainTeardownResult;
 use crate::process::id_allocator::{id_allocator_mut, IdAllocator};
 use crate::process::linux_fd::{self, console_sink_render_style, ConsoleSinkRenderStyle};
 use crate::process::linux_image::{
@@ -31,7 +32,6 @@ use crate::process::linux_image::{
     LINUX_STACK_PAGES,
 };
 use crate::process::personality::execution_personality_for_pid;
-use crate::process::domain::DomainTeardownResult;
 use crate::process::process_registry_mut;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::{scheduler_mut, task_stacks_mut, Scheduler};
@@ -62,6 +62,7 @@ const LOW_HELLO_DELIVERED_BYTES: u64 = 15;
 const NATIVE_SIBLING_CODE: [u8; 6] = [0x31, 0xC0, 0x0F, 0x05, 0xEB, 0xFA];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 enum Stage {
     AwaitLinuxWrite,
     AwaitFaultVaZeroRead,
@@ -226,7 +227,11 @@ fn launch_fault_probe(
             .ok_or("m9 probe code page missing")?;
         zero_page(code_frame);
         unsafe {
-            ptr::copy_nonoverlapping(code.as_ptr(), phys_to_virt(code_frame) as *mut u8, code.len());
+            ptr::copy_nonoverlapping(
+                code.as_ptr(),
+                phys_to_virt(code_frame) as *mut u8,
+                code.len(),
+            );
         }
         map_process_page(
             &mut address_space,
@@ -520,10 +525,8 @@ fn prove_two_low_roots(allocator: &mut PageAllocator) {
     }
 
     let lapic = VirtAddr::new(LAPIC_MMIO_VA);
-    let lapic_flags =
-        leaf_page_flags_for_address_in_root(space_a.root_frame, lapic).unwrap_or_else(|_| {
-            fatal_kernel_error("m9 LAPIC leaf missing in process root")
-        });
+    let lapic_flags = leaf_page_flags_for_address_in_root(space_a.root_frame, lapic)
+        .unwrap_or_else(|_| fatal_kernel_error("m9 LAPIC leaf missing in process root"));
     if lapic_flags.contains(PageTableFlags::USER_ACCESSIBLE) {
         fatal_kernel_error("m9 LAPIC leaf is user accessible");
     }

@@ -58,10 +58,7 @@ fn push_shared(region_base: u64, frame: u64) -> Result<(), &'static str> {
         {
             return Ok(());
         }
-        registry.entries[registry.count] = SharedTwoMiBTable {
-            region_base,
-            frame,
-        };
+        registry.entries[registry.count] = SharedTwoMiBTable { region_base, frame };
         registry.count += 1;
     }
     Ok(())
@@ -89,10 +86,7 @@ fn populate_shared_table(
             continue;
         }
         let flags = leaf & !PageTableFlags::USER_ACCESSIBLE & !PageTableFlags::HUGE_PAGE;
-        table[index].set_addr(
-            x86_64::PhysAddr::new(frame_address),
-            flags,
-        );
+        table[index].set_addr(x86_64::PhysAddr::new(frame_address), flags);
     }
     Ok(())
 }

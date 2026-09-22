@@ -4,6 +4,7 @@
 use crate::arch::x86_64::cpu::without_write_protect;
 use crate::mm::align_down;
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::layout::va_overlaps_kernel_low_reserved;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
@@ -34,7 +35,6 @@ use crate::mm::paging::leaf_page_flags_for_address;
     feature = "m4-recovery-self-test"
 )))]
 use crate::mm::paging::page_flags_for_address;
-use crate::mm::layout::va_overlaps_kernel_low_reserved;
 use crate::mm::paging::walk_page_flags;
 use crate::mm::PAGE_SIZE;
 use crate::mm::USER_CANONICAL_TOP_EXCLUSIVE;
@@ -157,10 +157,7 @@ fn validate_user_pointer_range_with_permissions(
     if pointer >= USER_CANONICAL_TOP_EXCLUSIVE || end_inclusive >= USER_CANONICAL_TOP_EXCLUSIVE {
         return Err("userspace pointer range was outside canonical userspace");
     }
-    if va_overlaps_kernel_low_reserved(
-        pointer,
-        end_inclusive.saturating_add(1),
-    ) {
+    if va_overlaps_kernel_low_reserved(pointer, end_inclusive.saturating_add(1)) {
         return Err("userspace pointer range overlaps kernel low carve-out");
     }
 

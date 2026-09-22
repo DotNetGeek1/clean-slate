@@ -155,7 +155,10 @@ images at `0x0000_4000_0000_0000` without inheriting the kernel identity map.
 
 `LoadPlanPolicy::linux_conventional_x86_64()` accepts `[0x10000, 1<<47)`; the
 frozen M8 fixture remains valid via `LoadPlanPolicy::m8_legacy_slot_x86_64()`.
-See [M9_ADDRESS_SPACE.md](M9_ADDRESS_SPACE.md).
+Process roots attach kernel low carve-outs via shared leaf page tables (fixed
+`KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES = 3` per process) rather than inheriting
+kernel identity mappings; user availability inside carve-out 2 MiB windows is
+blocked at map and pointer-validation time. See [M9_ADDRESS_SPACE.md](M9_ADDRESS_SPACE.md).
 
 Execution personality metadata and Linux syscall/errno/stack contracts are owned
 by #91 (`clean-slate-linux-abi`); syscall dispatch routing is #93.

@@ -3,11 +3,13 @@
 //! address space down. Owns `KERNEL_ROOT_FRAME`.
 
 use crate::arch::x86_64::cpu::without_write_protect;
-use crate::mm::frame_allocator::free_frame;
-use crate::mm::frame_allocator::PageAllocator;
+use crate::diagnostics::serial::serial_write_line;
+use crate::mm::align_down;
 use crate::mm::carve_out_shared::{
     for_each_shared_two_mib_table, shared_carve_out_page_table_frame,
 };
+use crate::mm::frame_allocator::free_frame;
+use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::layout::{
     kernel_low_reserved_ranges, va_overlaps_kernel_low_reserved, KERNEL_USER_PML4_SLOT_END,
 };
@@ -15,9 +17,7 @@ use crate::mm::paging::assert_carve_out_directory_path_has_no_nx;
 use crate::mm::paging::leaf_page_flags_for_address_in_root;
 use crate::mm::paging::leaf_phys_addr_for_address_in_root;
 use crate::mm::paging::level2_table_frame_for_address_in_root;
-use crate::mm::align_down;
 use crate::mm::USER_CANONICAL_TOP_EXCLUSIVE;
-use crate::diagnostics::serial::serial_write_line;
 
 pub(crate) use crate::mm::carve_out_shared::KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES;
 use crate::mm::paging::offset_page_table_for_root;
@@ -406,8 +406,7 @@ pub(crate) fn verify_carve_out_attach_at_boot(
 
     assert_carve_out_directory_path_has_no_nx(space.root_frame, probe)?;
     let leaf = leaf_page_flags_for_address_in_root(space.root_frame, probe)?;
-    if !leaf.contains(PageTableFlags::PRESENT) || leaf.contains(PageTableFlags::USER_ACCESSIBLE)
-    {
+    if !leaf.contains(PageTableFlags::PRESENT) || leaf.contains(PageTableFlags::USER_ACCESSIBLE) {
         return Err("carve-out leaf mapping missing or user-accessible in process root");
     }
     let kernel_phys = leaf_phys_addr_for_address_in_root(kernel_root, probe)?;
@@ -453,9 +452,8 @@ fn attach_shared_carve_outs_to_process(
     address_space.record_page_table_frame(pd_gib0_frame)?;
     address_space.record_page_table_frame(pd_gib3_frame)?;
 
-    let slot0_directory_flags = PageTableFlags::PRESENT
-        | PageTableFlags::WRITABLE
-        | PageTableFlags::USER_ACCESSIBLE;
+    let slot0_directory_flags =
+        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
     let supervisor_directory_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
     let shared_pd_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
 
