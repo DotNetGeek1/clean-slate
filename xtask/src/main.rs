@@ -12,6 +12,7 @@ use std::time::Duration;
 mod m7_certs;
 mod m7_fixture;
 mod m7_fixture_tcp;
+mod m8_fixture;
 
 use m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
 
@@ -25,6 +26,7 @@ const M2_TIMER_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_ADDRESS_SPACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_ENTRY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_SYSCALL_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M8_LINUX_DISPATCH_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_LIFECYCLE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_IPC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_RESOURCES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -131,6 +133,17 @@ const M3_ADDRESS_SPACE_ACCEPTANCE_MARKERS: [&str; 7] = [
 const M3_SYSCALL_ACCEPTANCE_MARKERS: [&str; 2] = [
     "[TIME] timer initialized",
     "[SYSC] syscall entry/return PASS",
+];
+// The leading newline before "Hello from Linux." proves the Linux write reached
+// serial verbatim at the start of a line (no `[IPC ] console pid=N: ` framing);
+// no trailing newline is matched so LF and CRLF captures both pass.
+const M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS: [&str; 6] = [
+    "[TIME] timer initialized",
+    "[LNX ] personality=x86_64 pid=",
+    "[LNX ] unsupported syscall=999 errno=ENOSYS",
+    "\nHello from Linux.",
+    "[LNX ] exit pid=",
+    "[M8.3] PASS",
 ];
 const M3_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[PROC] created pid=1 tid=1",
@@ -513,6 +526,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM3AddressSpace => run_m3_address_space_acceptance(),
         ParsedCommand::TestM3Entry => run_m3_entry_acceptance(),
         ParsedCommand::TestM3Syscall => run_m3_syscall_acceptance(),
+        ParsedCommand::TestM8LinuxDispatch => run_m8_linux_dispatch_acceptance(),
         ParsedCommand::TestM3Lifecycle => run_m3_lifecycle_acceptance(),
         ParsedCommand::TestM3Ipc => run_m3_ipc_acceptance(),
         ParsedCommand::TestM3Resources => run_m3_resources_acceptance(),
@@ -528,6 +542,24 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM7Tls => run_m7_tls_acceptance(),
         ParsedCommand::GenM7FixtureCerts => {
             m7_certs::generate_m7_fixture_certs().map_err(XtaskError::InvalidCommand)?;
+            Ok(())
+        }
+        ParsedCommand::VerifyM8Fixture => {
+            let meta = m8_fixture::verify_m8_fixture().map_err(XtaskError::InvalidCommand)?;
+            println!("M8 fixture OK");
+            println!("  sha256={}", meta.sha256_hex);
+            println!("  e_entry={:#x}", meta.e_entry);
+            println!("  e_phentsize={}", meta.e_phentsize);
+            println!("  e_phnum={}", meta.e_phnum);
+            println!("  pt_load_count={}", meta.pt_load_count);
+            println!("  has_pt_interp={}", meta.has_pt_interp);
+            println!("  has_pt_dynamic={}", meta.has_pt_dynamic);
+            for (i, seg) in meta.pt_loads.iter().enumerate() {
+                println!(
+                    "  pt_load[{i}]: offset={:#x} vaddr={:#x} filesz={:#x} memsz={:#x} flags={:#x} align={:#x}",
+                    seg.p_offset, seg.p_vaddr, seg.p_filesz, seg.p_memsz, seg.p_flags, seg.p_align
+                );
+            }
             Ok(())
         }
         ParsedCommand::TestM7Dns => run_m7_dns_acceptance(),
@@ -929,6 +961,18 @@ fn run_m3_syscall_acceptance() -> Result<(), XtaskError> {
         Some((
             &M3_SYSCALL_ACCEPTANCE_MARKERS,
             M3_SYSCALL_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn run_m8_linux_dispatch_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m8-linux-dispatch-self-test"],
+        Some((
+            &M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS,
+            M8_LINUX_DISPATCH_ACCEPTANCE_TIMEOUT,
         )),
     )
 }
@@ -2155,6 +2199,7 @@ fn print_help() {
     println!("  test-m3-address-space Build the M3.2 address-space kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-entry Build the M3.1 userspace-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-syscall Build the M3.3 syscall-entry kernel, run QEMU, and validate PASS markers");
+    println!("  test-m8-linux-dispatch Build the M8.3 Linux personality dispatch kernel, run QEMU, and validate [M8.3] PASS");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
@@ -2169,6 +2214,7 @@ fn print_help() {
     println!("  test-m7-net-device Build the M7.2 virtio-net kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m7-tls       M7.6 TLS client acceptance (pass + fail-closed QEMU boots)");
     println!("  gen-m7-fixture-certs  Regenerate repository-owned M7 TLS fixture certificates");
+    println!("  verify-m8-fixture Verify committed Linux hello ELF hash and pinned metadata");
     println!("  test-m7-dns         Build the M7.5 DNS resolver kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
@@ -2229,6 +2275,7 @@ enum ParsedCommand {
     TestM3AddressSpace,
     TestM3Entry,
     TestM3Syscall,
+    TestM8LinuxDispatch,
     TestM3Lifecycle,
     TestM3Ipc,
     TestM3Resources,
@@ -2243,6 +2290,7 @@ enum ParsedCommand {
     TestM7NetDevice,
     TestM7Tls,
     GenM7FixtureCerts,
+    VerifyM8Fixture,
     TestM7Dns,
     TestM5Storage,
     TestM5CrashMatrix,
@@ -2281,6 +2329,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m3-address-space" => ParsedCommand::TestM3AddressSpace,
         Some(cmd) if cmd == "test-m3-entry" => ParsedCommand::TestM3Entry,
         Some(cmd) if cmd == "test-m3-syscall" => ParsedCommand::TestM3Syscall,
+        Some(cmd) if cmd == "test-m8-linux-dispatch" => ParsedCommand::TestM8LinuxDispatch,
         Some(cmd) if cmd == "test-m3-lifecycle" => ParsedCommand::TestM3Lifecycle,
         Some(cmd) if cmd == "test-m3-ipc" => ParsedCommand::TestM3Ipc,
         Some(cmd) if cmd == "test-m3-resources" => ParsedCommand::TestM3Resources,
@@ -2299,6 +2348,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
             ParsedCommand::TestM7Tls
         }
         Some(cmd) if cmd == "gen-m7-fixture-certs" => ParsedCommand::GenM7FixtureCerts,
+        Some(cmd) if cmd == "verify-m8-fixture" => ParsedCommand::VerifyM8Fixture,
         Some(cmd) if cmd == "test-m7-dns" || cmd == "m7-dns" || cmd == "m7.5" => {
             ParsedCommand::TestM7Dns
         }
@@ -2495,6 +2545,10 @@ mod tests {
         assert_eq!(
             parse_command(Some("test-m3-syscall".as_ref())),
             ParsedCommand::TestM3Syscall
+        );
+        assert_eq!(
+            parse_command(Some("test-m8-linux-dispatch".as_ref())),
+            ParsedCommand::TestM8LinuxDispatch
         );
         assert_eq!(
             parse_command(Some("test-m3-lifecycle".as_ref())),

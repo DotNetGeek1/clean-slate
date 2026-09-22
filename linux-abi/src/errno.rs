@@ -19,6 +19,8 @@ pub struct LinuxErrno(pub i32);
 pub const EPERM: LinuxErrno = LinuxErrno(1);
 /// No such file or directory.
 pub const ENOENT: LinuxErrno = LinuxErrno(2);
+/// No such process.
+pub const ESRCH: LinuxErrno = LinuxErrno(3);
 /// Bad file descriptor.
 pub const EBADF: LinuxErrno = LinuxErrno(9);
 /// Cannot allocate memory.
@@ -92,7 +94,9 @@ mod tests {
 
     #[test]
     fn encode_decode_round_trip_errors() {
-        for err in [EPERM, ENOENT, EBADF, ENOMEM, EACCES, EFAULT, EINVAL, ENOSYS] {
+        for err in [
+            EPERM, ENOENT, ESRCH, EBADF, ENOMEM, EACCES, EFAULT, EINVAL, ENOSYS,
+        ] {
             let encoded = encode_rax(Err(err));
             assert_eq!(decode_rax(encoded), Err(err));
             assert_eq!(encoded, (-(err.0 as i64)) as u64);

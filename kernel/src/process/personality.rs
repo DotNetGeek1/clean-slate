@@ -17,11 +17,12 @@ use super::process_registry_mut;
 /// Default is [`Native`]. Assigned at process creation; never taken from
 /// syscall arguments.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // LinuxX86_64 is assigned by the #92 loader path.
 pub(crate) enum ExecutionPersonality {
     /// Clean-Slate native syscall ABI (sentinel errno encoding).
     Native,
     /// Linux x86-64 syscall ABI (negative errno encoding).
+    /// Constructed by the #92 loader and the M8.3 dispatch self-test.
+    #[allow(dead_code)]
     LinuxX86_64,
 }
 
@@ -33,17 +34,16 @@ impl Default for ExecutionPersonality {
 
 /// Pure dispatch target derived from trusted personality (host-testable).
 ///
-/// Separated from [`ExecutionPersonality`] so #93 can route before decoding RAX
-/// without pulling process-table types into unit tests of the routing table.
+/// Separated from [`ExecutionPersonality`] so syscall dispatch can route before
+/// decoding RAX without pulling process-table types into unit tests of the
+/// routing table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Consumed by #93 dispatch rewiring.
 pub(crate) enum SyscallDispatchTarget {
     Native,
     LinuxX86_64,
 }
 
 /// Map trusted personality → dispatch target. Does not accept raw register values.
-#[allow(dead_code)] // Consumed by #93 dispatch rewiring.
 pub(crate) const fn dispatch_target_for(
     personality: ExecutionPersonality,
 ) -> SyscallDispatchTarget {
@@ -53,16 +53,42 @@ pub(crate) const fn dispatch_target_for(
     }
 }
 
+/// Trusted write of personality for a live registry entry (loader / self-test).
+///
+/// Userspace cannot invoke this; only trusted kernel code may assign personality.
+#[cfg_attr(not(feature = "m8-linux-dispatch-self-test"), allow(dead_code))]
+pub(crate) fn set_execution_personality(
+    pid: u64,
+    personality: ExecutionPersonality,
+) -> Result<(), &'static str> {
+    let process = unsafe { process_registry_mut().get_mut(pid) }
+        .ok_or("process was not present in registry")?;
+    process.execution_personality = personality;
+    Ok(())
+}
+
+/// Read trusted personality for a known process id from the registry.
+///
+/// Syscall dispatch should obtain `pid` via
+/// [`crate::syscall::current_syscall_caller_pid`] (scheduler + CR3 cross-check)
+/// before calling this — not via the weaker [`current_process_id`] path alone.
+pub(crate) fn execution_personality_for_pid(
+    pid: u64,
+) -> Result<ExecutionPersonality, &'static str> {
+    let process =
+        unsafe { process_registry_mut().get(pid) }.ok_or("process was not present in registry")?;
+    Ok(process.execution_personality)
+}
+
 /// Resolve the current process personality via the trusted scheduler/registry path.
 ///
 /// Uses [`current_process_id`] (scheduler thread → owner pid) then the process
-/// registry. Never reads personality from syscall arguments.
-#[allow(dead_code)] // Consumed by #93 dispatch rewiring.
+/// registry. Prefer [`execution_personality_for_pid`] after
+/// `current_syscall_caller_pid` at the syscall boundary (#93).
+#[allow(dead_code)] // Non-syscall call sites / diagnostics.
 pub(crate) fn current_execution_personality() -> Result<ExecutionPersonality, &'static str> {
     let pid = current_process_id()?;
-    let process = unsafe { process_registry_mut().get(pid) }
-        .ok_or("current process was not present in registry")?;
-    Ok(process.execution_personality)
+    execution_personality_for_pid(pid)
 }
 
 #[cfg(test)]

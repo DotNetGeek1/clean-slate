@@ -1,5 +1,7 @@
 use super::begin_thread_exit;
 use super::finalize_process_exit;
+use super::linux_fd;
+use super::live_instance_generation;
 use super::process_registry_mut;
 use super::reap_process_record;
 use super::ProcessState;
@@ -138,6 +140,11 @@ pub(crate) fn teardown_current_process(
         without_interrupts(|| with_scheduler(|scheduler| scheduler.finish_current_thread()))?;
     let released_resources = resource_snapshot(process_id)?;
     activate_address_space_root(kernel_root_frame);
+    // Drop Linux fd projections before IPC capability teardown so a replacement
+    // process (same pid, new generation) cannot observe a stale table (#95).
+    if let Some(generation) = live_instance_generation(process_id) {
+        linux_fd::release_for_process(process_id, generation);
+    }
     let released_ipc: IpcProcessResources =
         unsafe { endpoint_table_mut().teardown_resources_for_pid(process_id)? };
     let holder = HolderId(process_id);
@@ -258,6 +265,9 @@ pub(crate) fn teardown_process_by_id(
     let released_resources = resource_snapshot(process_id)?;
     activate_address_space_root(kernel_root_frame);
     let teardown_result = (|| {
+        if let Some(generation) = live_instance_generation(process_id) {
+            linux_fd::release_for_process(process_id, generation);
+        }
         let released_ipc: IpcProcessResources =
             unsafe { endpoint_table_mut().teardown_resources_for_pid(process_id)? };
         let holder = HolderId(process_id);

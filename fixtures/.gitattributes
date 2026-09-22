@@ -1,0 +1,4 @@
+# Keep fixture shell/asm sources LF so WSL rebuilds stay reproducible.
+fixtures/**/*.sh text eol=lf
+fixtures/**/*.S text eol=lf
+fixtures/**/*.ld text eol=lf
