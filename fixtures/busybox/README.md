@@ -19,8 +19,9 @@ Artifacts:
 
 | Path | Role |
 |------|------|
-| `candidates/*/` | Pinned `.config`, build recipe, `readelf.txt`, `sha256`, `applets.txt` |
-| `traces/*.strace` | Raw `strace -f -tt -s 200` for the #99 command matrix |
-| `syscall-matrix.toml` | Machine-readable nr → owner → commands (+ `syscall-matrix.json`) |
+| `candidates/*/` | Build evidence |
+| `traces/*.strace` | Fixture + supplement traces |
+| `run-traces.sh` / `run-supplement-traces.sh` | Regenerate traces |
+| `gen-syscall-matrix.py` | TOML/JSON with harness split |
 
 Phase A does **not** commit multi-MB `busybox` binaries (`candidates/.gitignore`); Phase B freezes the chosen artifact.
