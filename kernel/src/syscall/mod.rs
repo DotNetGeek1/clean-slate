@@ -638,6 +638,8 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
     crate::selftest::m8_linux_image::observe_syscall(frame);
     #[cfg(feature = "m8-linux-hello-self-test")]
     crate::selftest::m8_linux_hello::observe_syscall(frame);
+    #[cfg(feature = "m9-low-va-self-test")]
+    crate::selftest::m9_low_va::observe_syscall(frame);
 
     match resolve_syscall_caller() {
         Some(caller) => match dispatch_target_for(caller.personality) {

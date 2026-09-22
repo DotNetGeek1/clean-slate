@@ -125,7 +125,7 @@ const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 21;
     feature = "m8-linux-hello-self-test",
     feature = "m8-linux-dispatch-self-test"
 )))]
-const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 5;
+const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
 
 /// Total tracked page-table frames = user mapping demand + fixed carve-out wiring.
 pub(crate) const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize =

@@ -319,6 +319,14 @@ fn handle_exception(context: &InterruptContext) -> u64 {
             handle_crash_service_page_fault(context)
         }
 
+        #[cfg(feature = "m9-low-va-self-test")]
+        if selector_rpl(context.cs) == 3 {
+            if let Some(next_stack_pointer) = crate::selftest::m9_low_va::handle_page_fault(context)
+            {
+                return next_stack_pointer;
+            }
+        }
+
         if selector_rpl(context.cs) == 3 {
             return handle_faulted_userspace_exception(context);
         }
