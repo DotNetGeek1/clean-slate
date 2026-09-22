@@ -3,8 +3,8 @@
 //! flag inspection and the boot-time page-table reservation.
 
 use crate::boot::uefi::BootReservedRanges;
-use crate::mm::region::ReservedRange;
 use crate::mm::kernel_map_ptr;
+use crate::mm::region::ReservedRange;
 use crate::mm::PAGE_SIZE;
 use crate::mm::PHYSICAL_MEMORY_OFFSET;
 use crate::run;
@@ -67,9 +67,8 @@ fn walk_page_flags_in_root(
         .frame()
         .map_err(|_| "virtual address was not backed by a valid level-3 frame")?;
 
-    let level_3_table = unsafe {
-        &*(page_table_virt(level_3_frame.start_address().as_u64()) as *const PageTable)
-    };
+    let level_3_table =
+        unsafe { &*(page_table_virt(level_3_frame.start_address().as_u64()) as *const PageTable) };
     let level_3_entry = &level_3_table[address.p3_index()];
     if level_3_entry.is_unused() {
         return Err("virtual address was not backed by a valid level-3 entry");
@@ -94,9 +93,8 @@ fn walk_page_flags_in_root(
         .frame()
         .map_err(|_| "virtual address was not backed by a valid level-2 frame")?;
 
-    let level_2_table = unsafe {
-        &*(page_table_virt(level_2_frame.start_address().as_u64()) as *const PageTable)
-    };
+    let level_2_table =
+        unsafe { &*(page_table_virt(level_2_frame.start_address().as_u64()) as *const PageTable) };
     let level_2_entry = &level_2_table[address.p2_index()];
     if level_2_entry.is_unused() {
         return Err("virtual address was not backed by a valid level-2 entry");
@@ -119,9 +117,8 @@ fn walk_page_flags_in_root(
         .frame()
         .map_err(|_| "virtual address was not backed by a valid level-1 frame")?;
 
-    let level_1_table = unsafe {
-        &*(page_table_virt(level_1_frame.start_address().as_u64()) as *const PageTable)
-    };
+    let level_1_table =
+        unsafe { &*(page_table_virt(level_1_frame.start_address().as_u64()) as *const PageTable) };
     let level_1_entry = &level_1_table[address.p1_index()];
     if level_1_entry.is_unused() {
         return Err("virtual address was not mapped");
@@ -216,9 +213,7 @@ pub(crate) fn reserve_mapping_page_tables(
         PAGE_SIZE,
     ))?;
 
-    let level_4_table = unsafe {
-        &*(level_4_frame.start_address().as_u64() as *const PageTable)
-    };
+    let level_4_table = unsafe { &*(level_4_frame.start_address().as_u64() as *const PageTable) };
     let level_3_frame = level_4_table[address.p4_index()]
         .frame()
         .map_err(|_| "kernel address was not backed by a valid level-3 page-table frame")?;
@@ -227,9 +222,7 @@ pub(crate) fn reserve_mapping_page_tables(
         PAGE_SIZE,
     ))?;
 
-    let level_3_table = unsafe {
-        &*(level_3_frame.start_address().as_u64() as *const PageTable)
-    };
+    let level_3_table = unsafe { &*(level_3_frame.start_address().as_u64() as *const PageTable) };
     let level_3_entry = &level_3_table[address.p3_index()];
     if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
         return Ok(());
@@ -243,9 +236,7 @@ pub(crate) fn reserve_mapping_page_tables(
         PAGE_SIZE,
     ))?;
 
-    let level_2_table = unsafe {
-        &*(level_2_frame.start_address().as_u64() as *const PageTable)
-    };
+    let level_2_table = unsafe { &*(level_2_frame.start_address().as_u64() as *const PageTable) };
     let level_2_entry = &level_2_table[address.p2_index()];
     if level_2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
         return Ok(());
@@ -273,11 +264,7 @@ pub(crate) fn inspect_current_mapping() -> Result<(u64, u64), &'static str> {
 #[allow(dead_code)]
 pub(crate) fn zero_page(frame: u64) {
     unsafe {
-        ptr::write_bytes(
-            page_table_virt(frame) as *mut u8,
-            0,
-            PAGE_SIZE as usize,
-        );
+        ptr::write_bytes(page_table_virt(frame) as *mut u8, 0, PAGE_SIZE as usize);
     }
 }
 

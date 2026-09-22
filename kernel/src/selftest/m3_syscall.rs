@@ -20,12 +20,12 @@ use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_offset_page_table;
 use crate::mm::paging::zero_page;
+use crate::mm::phys_to_virt;
 use crate::mm::user_mapping::map_userspace_page;
 use crate::mm::user_mapping::unmap_userspace_page;
 #[cfg(feature = "m3-entry-self-test")]
 use crate::mm::user_mapping::validate_userspace_mappings;
 use crate::mm::PAGE_SIZE;
-use crate::mm::phys_to_virt;
 use crate::sched::task_stacks_mut;
 use crate::selftest::USER_TEST_CODE_ADDRESS;
 use crate::selftest::USER_TEST_STACK_ADDRESS;

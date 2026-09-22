@@ -89,12 +89,8 @@ fn map_physmap_while_on_firmware_cr3(
     root_frame: u64,
     allocator: &mut PageAllocator,
 ) -> Result<(), &'static str> {
-    let mut mapper = unsafe {
-        OffsetPageTable::new(
-            identity_page_table_mut(root_frame),
-            VirtAddr::new(0),
-        )
-    };
+    let mut mapper =
+        unsafe { OffsetPageTable::new(identity_page_table_mut(root_frame), VirtAddr::new(0)) };
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
     let mut bootstrap = BootstrapFrameAllocator { inner: allocator };
 

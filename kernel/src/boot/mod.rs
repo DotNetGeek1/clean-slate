@@ -45,8 +45,8 @@ use crate::interrupt::timer::initialize_timer;
 )))]
 use crate::interrupt::timer::report_timer_contract;
 use crate::mm::address_space::set_kernel_root_frame;
-use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::frame_allocator::set_kernel_direct_map_ready;
+use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::kernel_bootstrap::install_kernel_owned_root;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::inspect_current_mapping;
@@ -187,6 +187,8 @@ use crate::selftest::m8_linux_dispatch::start_m8_linux_dispatch_self_test;
 use crate::selftest::m8_linux_hello::start_m8_linux_hello_self_test;
 #[cfg(feature = "m8-linux-image-self-test")]
 use crate::selftest::m8_linux_image::start_m8_linux_image_self_test;
+#[cfg(feature = "m9-low-va-self-test")]
+use crate::selftest::m9_low_va::start_m9_low_va_self_test;
 use crate::syscall::initialize_syscall_abi;
 use ::uefi::mem::memory_map::{MemoryMap, MemoryMapMut};
 use ::uefi::Status;
@@ -290,12 +292,21 @@ fn run_inner() -> Result<(), &'static str> {
         start_timer_self_test_task()
     }
 
-    #[cfg(feature = "m8-linux-hello-self-test")]
+    #[cfg(feature = "m9-low-va-self-test")]
+    {
+        start_m9_low_va_self_test(allocator)
+    }
+
+    #[cfg(all(
+        not(feature = "m9-low-va-self-test"),
+        feature = "m8-linux-hello-self-test"
+    ))]
     {
         start_m8_linux_hello_self_test(allocator)
     }
 
     #[cfg(all(
+        not(feature = "m9-low-va-self-test"),
         feature = "m8-linux-dispatch-self-test",
         not(feature = "m8-linux-hello-self-test")
     ))]

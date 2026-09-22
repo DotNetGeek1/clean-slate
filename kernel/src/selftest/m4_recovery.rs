@@ -27,8 +27,8 @@ use crate::mm::address_space::map_process_page;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::zero_page;
-use crate::mm::PAGE_SIZE;
 use crate::mm::phys_to_virt;
+use crate::mm::PAGE_SIZE;
 use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
@@ -189,9 +189,7 @@ fn read_published_bootstrap() -> Option<RecoveryBootstrap> {
     if state.bootstrap_frame == 0 {
         return None;
     }
-    Some(unsafe {
-        ptr::read((phys_to_virt(state.bootstrap_frame)) as *const RecoveryBootstrap)
-    })
+    Some(unsafe { ptr::read((phys_to_virt(state.bootstrap_frame)) as *const RecoveryBootstrap) })
 }
 
 fn recovery_allocator() -> Result<&'static mut PageAllocator, &'static str> {
@@ -257,10 +255,7 @@ fn map_fixture_process(
         .allocate_page()
         .ok_or("allocator could not provide data page")?;
     unsafe {
-        ptr::write(
-            (phys_to_virt(data_frame)) as *mut FixtureUserPage,
-            page,
-        );
+        ptr::write((phys_to_virt(data_frame)) as *mut FixtureUserPage, page);
     }
     map_process_page(
         &mut address_space,

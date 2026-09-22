@@ -101,6 +101,8 @@ pub(crate) mod m8_linux_dispatch;
 pub(crate) mod m8_linux_hello;
 #[cfg(feature = "m8-linux-image-self-test")]
 pub(crate) mod m8_linux_image;
+#[cfg(feature = "m9-low-va-self-test")]
+pub(crate) mod m9_low_va;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",

@@ -5,8 +5,8 @@ use core::sync::atomic::Ordering;
 use x86_64::structures::paging::{FrameAllocator, PhysFrame, Size4KiB};
 use x86_64::PhysAddr;
 
-use crate::mm::region::{MemoryRegion, MemoryRegionKind, NormalizedMemoryMap, MAX_MEMORY_REGIONS};
 use crate::mm::kernel_map_ptr;
+use crate::mm::region::{MemoryRegion, MemoryRegionKind, NormalizedMemoryMap, MAX_MEMORY_REGIONS};
 use crate::mm::PAGE_SIZE;
 
 static KERNEL_DIRECT_MAP_READY: AtomicBool = AtomicBool::new(false);

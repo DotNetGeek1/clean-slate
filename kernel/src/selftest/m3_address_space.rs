@@ -24,6 +24,7 @@ use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::mm::address_space::create_process_address_space;
+use crate::mm::address_space::kernel_root_frame;
 use crate::mm::address_space::map_process_page;
 use crate::mm::address_space::translate_address_in_root;
 use crate::mm::address_space::validate_supervisor_only_kernel_root_entries;
@@ -35,9 +36,9 @@ use crate::mm::paging::leaf_page_flags_for_address_in_root;
 use crate::mm::paging::page_flags_for_address_in_root;
 use crate::mm::paging::page_table_ref;
 use crate::mm::paging::zero_page;
+use crate::mm::phys_to_virt;
 use crate::mm::user_mapping::relevant_userspace_leaf_flags;
 use crate::mm::PAGE_SIZE;
-use crate::mm::phys_to_virt;
 use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::process_registry_mut;
@@ -401,18 +402,25 @@ fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'st
         return Err("process stack mapping flags were incorrect");
     }
 
-    let kernel_flags = page_flags_for_address_in_root(
-        address_space.root_frame,
-        VirtAddr::from_ptr(run as *const ()),
-    )?;
-    let kernel_leaf_flags = leaf_page_flags_for_address_in_root(
-        address_space.root_frame,
-        VirtAddr::from_ptr(run as *const ()),
-    )?;
-    if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-        || kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-    {
-        return Err("kernel mapping unexpectedly became user accessible in a process root");
+    let kernel_va = VirtAddr::from_ptr(run as *const ());
+    if translate_address_in_root(address_space.root_frame, kernel_va).is_ok() {
+        let kernel_flags = page_flags_for_address_in_root(address_space.root_frame, kernel_va)?;
+        let kernel_leaf_flags =
+            leaf_page_flags_for_address_in_root(address_space.root_frame, kernel_va)?;
+        if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE)
+            || kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE)
+        {
+            return Err("kernel mapping unexpectedly became user accessible in a process root");
+        }
+    } else {
+        let kernel_flags = page_flags_for_address_in_root(kernel_root_frame(), kernel_va)?;
+        let kernel_leaf_flags =
+            leaf_page_flags_for_address_in_root(kernel_root_frame(), kernel_va)?;
+        if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE)
+            || kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE)
+        {
+            return Err("kernel mapping unexpectedly became user accessible in the kernel root");
+        }
     }
 
     Ok(())

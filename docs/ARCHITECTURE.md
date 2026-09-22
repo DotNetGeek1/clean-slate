@@ -144,27 +144,18 @@ in `clean-slate-elf`:
   `LoadPlanPolicy` (accepted `e_type`, auxv/phdr metadata already recorded on
   `LoadPlan`) rather than a second ELF parser.
 
-### Userspace VA window (critical for #92 / #96)
+### Userspace VA window (M9 / #142)
 
-With `PHYSICAL_MEMORY_OFFSET = 0`, the kernel identity-maps physical RAM into the
-low half of the canonical address space (low PML4 slots).
-`create_process_address_space(user_region_base)` gives each process exactly one
-private PML4 slot: `user_region_base >> 39`. Native services use
-`user_region_base = 0x0000_4000_0000_0000` (slot 128), so the private user window
-is `[0x0000_4000_0000_0000, 0x0000_4080_0000_0000)`.
+The kernel uses a supervisor direct map at `0xffff_8000_0000_0000` (512 GiB
+window) for physical-memory access. The kernel-owned CR3 retains a
+supervisor-only low identity carry-over for firmware-placed image/MMIO; **process
+roots clear all canonical user PML4 slots `[0, 256)`** so every process may map
+conventional low Linux VAs (e.g. `0x400000` in slot 0) and legacy M8 window
+images at `0x0000_4000_0000_0000` without inheriting the kernel identity map.
 
-**All** userspace mappings for a process — native embedded images and any Linux
-personality image in M8 — must fall inside that single-slot window.
-`LoadPlanPolicy::absolute_user_x86_64()` encodes the broader policy half starting
-at `0x0000_4000_0000_0000` (canonical user top exclusive at `1<<47`); in practice
-launch paths also stay inside the one owned PML4 slot.
-
-A conventional Linux `ET_EXEC` linked at `0x400000` **cannot** be mapped under
-this layout: page zero / low PML4 is kernel identity map, not a private process
-slot. M8 Linux fixtures must therefore be linked (or relocated) into the
-`0x0000_4000_0000_0000` window. M9+ debt: move the kernel to a higher-half /
-non-identity layout so processes can own low PML4 slots and host classic low
-`ET_EXEC` bases without a slide.
+`LoadPlanPolicy::linux_conventional_x86_64()` accepts `[0x10000, 1<<47)`; the
+frozen M8 fixture remains valid via `LoadPlanPolicy::m8_legacy_slot_x86_64()`.
+See [M9_ADDRESS_SPACE.md](M9_ADDRESS_SPACE.md).
 
 Execution personality metadata and Linux syscall/errno/stack contracts are owned
 by #91 (`clean-slate-linux-abi`); syscall dispatch routing is #93.
