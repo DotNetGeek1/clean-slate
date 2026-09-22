@@ -3,7 +3,7 @@
 use crate::{
     parse_load_plan, Elf64Header, LoadPlanError, LoadPlanPolicy, LoadSegment, SegmentPermissions,
     ELF64_EHDR_SIZE, ELF64_PHDR_SIZE, ELFMAG, EM_X86_64, ET_DYN, ET_REL, PF_R, PF_W, PF_X,
-    PT_INTERP, PT_LOAD,
+    PT_DYNAMIC, PT_INTERP, PT_LOAD,
 };
 
 const BASE: u64 = 0x0000_4000_0000_0000;
@@ -479,11 +479,37 @@ fn records_interp_and_phdr_vaddr() {
     let bytes = build_elf(ET_DYN, BASE, &phdrs, &[0; 64]);
     let plan = parse_load_plan(&bytes, &policy()).unwrap();
     assert!(plan.has_interp);
+    assert!(!plan.has_dynamic);
     assert_eq!(plan.e_type, ET_DYN);
     // Program headers start at offset 64 in the file; RX segment file region begins at
     // payload_off, so phoff is not inside the RX file range unless we place it there.
     // For this fixture phoff is in the EHDR/PHDR region before payload, so phdr_vaddr is None.
     assert!(plan.phdr_vaddr.is_none());
+}
+
+#[test]
+fn records_dynamic_segment_presence_without_mapping_it() {
+    let phdrs = [
+        Phdr {
+            p_type: PT_DYNAMIC,
+            flags: PF_R | PF_W,
+            offset: 0,
+            vaddr: BASE + PAGE,
+            filesz: 0,
+            memsz: 0,
+            align: 8,
+        },
+        rx_load(0, BASE, 64, 64),
+    ];
+    let bytes = build_elf(ET_DYN, BASE, &phdrs, &[0; 64]);
+    let plan = parse_load_plan(&bytes, &policy()).unwrap();
+    assert!(plan.has_dynamic);
+    assert!(!plan.has_interp);
+    // PT_DYNAMIC is metadata only: it never becomes a load segment.
+    assert_eq!(plan.segment_count, 1);
+
+    let plain = build_elf(ET_DYN, BASE, &[rx_load(0, BASE, 64, 64)], &[0; 64]);
+    assert!(!parse_load_plan(&plain, &policy()).unwrap().has_dynamic);
 }
 
 #[test]

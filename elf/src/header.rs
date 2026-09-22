@@ -18,6 +18,7 @@ pub const ELF64_EHDR_SIZE: usize = 64;
 pub const ELF64_PHDR_SIZE: u16 = 56;
 
 pub const PT_LOAD: u32 = 1;
+pub const PT_DYNAMIC: u32 = 2;
 pub const PT_INTERP: u32 = 3;
 
 pub const PF_X: u32 = 1;
