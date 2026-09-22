@@ -150,28 +150,45 @@ const M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[LNX ] exit pid=",
     "[M8.3] PASS",
 ];
-const M8_LINUX_HELLO_ACCEPTANCE_MARKERS: [&str; 11] = [
+// M8.7 / #98 self-test boot: production launch path observed twice (relaunch),
+// plus native-userspace progress and fail-closed malformed proof. Entry hex is
+// the frozen #96 fixture; `\nHello from Linux.` proves verbatim (no IPC frame).
+// Note: controller relaunch logs the second `[LNX ] ELF loaded` before the
+// observer emits `[M8.7] first exit observed` / `relaunch observed`.
+const M8_LINUX_HELLO_ACCEPTANCE_MARKERS: [&str; 20] = [
     "[LNX ] ELF loaded pid=",
+    "entry=0x0000400000400078",
     "[LNX ] personality=x86_64 pid=",
     "[LNX ] unsupported syscall=999 errno=ENOSYS",
     "\nHello from Linux.",
     "[LNX ] exit pid=",
     " status=0",
     "[LNX ] ELF loaded pid=",
+    "entry=0x0000400000400078",
+    "[M8.7] first exit observed",
+    "[M8.7] relaunch observed",
+    "[LNX ] personality=x86_64 pid=",
+    "[LNX ] unsupported syscall=999 errno=ENOSYS",
     "\nHello from Linux.",
     "[LNX ] exit pid=",
     " status=0",
+    "[M8.7] second exit observed",
+    "[M8.7] malformed ELF rejected fail-closed",
+    "[M8.7] native progress=",
     "[M8.7] PASS",
 ];
-/// Production `--features m8-linux-hello` (no self-test): hello once, then demo
-/// tasks finish cleanly with `[M2  ] PASS` (not a scheduler-empty `[FAIL]`).
-const M8_LINUX_HELLO_PRODUCTION_MARKERS: [&str; 7] = [
+/// Production `--features m8-linux-hello` (no self-test): hello once via the
+/// #97 path, both demo tasks progress, then `[M2  ] PASS` (not scheduler-empty).
+const M8_LINUX_HELLO_PRODUCTION_MARKERS: [&str; 10] = [
     "[LNX ] ELF loaded pid=",
+    "entry=0x0000400000400078",
     "[LNX ] personality=x86_64 pid=",
     "[LNX ] unsupported syscall=999 errno=ENOSYS",
     "\nHello from Linux.",
     "[LNX ] exit pid=",
     " status=0",
+    "[TASK] task 1 progress=",
+    "[TASK] task 2 progress=",
     "[M2  ] PASS",
 ];
 const M3_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 6] = [
@@ -540,6 +557,17 @@ const M7_MILESTONE_STEPS: [M7MilestoneStep; 4] = [
     ("test-m7-dns", run_m7_dns_acceptance),
     ("test-m7-tls", run_m7_tls_acceptance),
 ];
+type M8MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
+/// Authoritative M8 gate (#98): fixture verify + host crate/loader tests, then
+/// compose `test-m8-linux-hello` (self-test + production boots) rather than
+/// duplicating those QEMU runs.
+const M8_MILESTONE_STEPS: [M8MilestoneStep; 5] = [
+    ("verify-m8-fixture", run_m8_verify_fixture_step),
+    ("clean-slate-elf (host)", run_m8_elf_host_tests),
+    ("clean-slate-linux-abi (host)", run_m8_linux_abi_host_tests),
+    ("linux-image loader (host)", run_m8_linux_loader_host_tests),
+    ("test-m8-linux-hello", run_m8_linux_hello_acceptance),
+];
 
 fn main() -> ExitCode {
     match run(env::args_os()) {
@@ -567,6 +595,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM3Syscall => run_m3_syscall_acceptance(),
         ParsedCommand::TestM8LinuxDispatch => run_m8_linux_dispatch_acceptance(),
         ParsedCommand::TestM8LinuxHello => run_m8_linux_hello_acceptance(),
+        ParsedCommand::TestM8 => run_m8_acceptance(),
         ParsedCommand::TestM3Lifecycle => run_m3_lifecycle_acceptance(),
         ParsedCommand::TestM3Ipc => run_m3_ipc_acceptance(),
         ParsedCommand::TestM3Resources => run_m3_resources_acceptance(),
@@ -584,24 +613,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
             m7_certs::generate_m7_fixture_certs().map_err(XtaskError::InvalidCommand)?;
             Ok(())
         }
-        ParsedCommand::VerifyM8Fixture => {
-            let meta = m8_fixture::verify_m8_fixture().map_err(XtaskError::InvalidCommand)?;
-            println!("M8 fixture OK");
-            println!("  sha256={}", meta.sha256_hex);
-            println!("  e_entry={:#x}", meta.e_entry);
-            println!("  e_phentsize={}", meta.e_phentsize);
-            println!("  e_phnum={}", meta.e_phnum);
-            println!("  pt_load_count={}", meta.pt_load_count);
-            println!("  has_pt_interp={}", meta.has_pt_interp);
-            println!("  has_pt_dynamic={}", meta.has_pt_dynamic);
-            for (i, seg) in meta.pt_loads.iter().enumerate() {
-                println!(
-                    "  pt_load[{i}]: offset={:#x} vaddr={:#x} filesz={:#x} memsz={:#x} flags={:#x} align={:#x}",
-                    seg.p_offset, seg.p_vaddr, seg.p_filesz, seg.p_memsz, seg.p_flags, seg.p_align
-                );
-            }
-            Ok(())
-        }
+        ParsedCommand::VerifyM8Fixture => run_m8_verify_fixture_verbose(),
         ParsedCommand::TestM7Dns => run_m7_dns_acceptance(),
         ParsedCommand::TestM5Storage => run_m5_storage_acceptance(),
         ParsedCommand::TestM5CrashMatrix => run_m5_crash_matrix(),
@@ -1041,6 +1053,51 @@ fn run_m8_linux_hello_acceptance() -> Result<(), XtaskError> {
     )
 }
 
+fn run_m8_verify_fixture_verbose() -> Result<(), XtaskError> {
+    let meta = m8_fixture::verify_m8_fixture().map_err(XtaskError::InvalidCommand)?;
+    println!("M8 fixture OK");
+    println!("  sha256={}", meta.sha256_hex);
+    println!("  e_entry={:#x}", meta.e_entry);
+    println!("  e_phentsize={}", meta.e_phentsize);
+    println!("  e_phnum={}", meta.e_phnum);
+    println!("  pt_load_count={}", meta.pt_load_count);
+    println!("  has_pt_interp={}", meta.has_pt_interp);
+    println!("  has_pt_dynamic={}", meta.has_pt_dynamic);
+    for (i, seg) in meta.pt_loads.iter().enumerate() {
+        println!(
+            "  pt_load[{i}]: offset={:#x} vaddr={:#x} filesz={:#x} memsz={:#x} flags={:#x} align={:#x}",
+            seg.p_offset, seg.p_vaddr, seg.p_filesz, seg.p_memsz, seg.p_flags, seg.p_align
+        );
+    }
+    Ok(())
+}
+
+fn run_m8_verify_fixture_step() -> Result<(), XtaskError> {
+    m8_fixture::verify_m8_fixture().map_err(XtaskError::InvalidCommand)?;
+    Ok(())
+}
+
+fn run_m8_elf_host_tests() -> Result<(), XtaskError> {
+    run_cargo_package_tests("clean-slate-elf", &[])
+}
+
+fn run_m8_linux_abi_host_tests() -> Result<(), XtaskError> {
+    run_cargo_package_tests("clean-slate-linux-abi", &[])
+}
+
+/// #92 loader + malformed corpus host tests (fixture bytes gated by feature).
+fn run_m8_linux_loader_host_tests() -> Result<(), XtaskError> {
+    let mut test = Command::new("cargo");
+    test.current_dir(workspace_root())
+        .arg("test")
+        .arg("-p")
+        .arg("clean-slate-kernel")
+        .arg("--features")
+        .arg("m8-linux-image")
+        .arg("process::linux_image");
+    run_command(&mut test)
+}
+
 fn run_m3_lifecycle_acceptance() -> Result<(), XtaskError> {
     run_vm_inner(
         false,
@@ -1441,6 +1498,20 @@ fn run_m7_acceptance() -> Result<(), XtaskError> {
         step()?;
     }
     println!("[M7  ] PASS");
+    Ok(())
+}
+
+/// M8 milestone gate (#98): fixture hash/metadata, elf + linux-abi + #92 loader
+/// host tests, then the composed `test-m8-linux-hello` QEMU pair. Emits
+/// `[M8  ] PASS` only after every step succeeds; the first failure propagates
+/// with the failing `[M8  ] step N/…` name already printed.
+fn run_m8_acceptance() -> Result<(), XtaskError> {
+    let total = M8_MILESTONE_STEPS.len();
+    for (index, (name, step)) in M8_MILESTONE_STEPS.iter().enumerate() {
+        println!("[M8  ] step {}/{} {}", index + 1, total, name);
+        step()?;
+    }
+    println!("[M8  ] PASS");
     Ok(())
 }
 
@@ -2090,6 +2161,9 @@ fn run_acceptance_command(
     drain_output_events(&rx, &mut output);
 
     if authoritative_pass {
+        if markers_require_verbatim_linux_hello(markers) {
+            assert_no_ipc_framed_linux_hello(&output)?;
+        }
         return Ok(());
     }
 
@@ -2110,12 +2184,34 @@ fn validate_output_markers(output: &str, markers: &[&str]) -> Result<(), XtaskEr
     }
     let mut tracker = MarkerTracker::new(markers);
     if tracker.consume(output) {
+        if markers_require_verbatim_linux_hello(markers) {
+            assert_no_ipc_framed_linux_hello(output)?;
+        }
         Ok(())
     } else {
         Err(XtaskError::MissingMarker(
             markers[tracker.next_marker].to_owned(),
         ))
     }
+}
+
+fn markers_require_verbatim_linux_hello(markers: &[&str]) -> bool {
+    markers == M8_LINUX_HELLO_ACCEPTANCE_MARKERS
+        || markers == M8_LINUX_HELLO_PRODUCTION_MARKERS
+        || markers == M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS
+}
+
+/// Fail closed if the hello payload was rendered with native `[IPC ] console`
+/// framing instead of the Linux verbatim projection.
+fn assert_no_ipc_framed_linux_hello(output: &str) -> Result<(), XtaskError> {
+    for line in output.lines() {
+        if line.contains("[IPC ] console") && line.contains("Hello from Linux.") {
+            return Err(XtaskError::MissingMarker(
+                "Hello from Linux. must not appear on an [IPC ] console line".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_m6_capabilities_markers(output: &str) -> Result<(), XtaskError> {
@@ -2279,6 +2375,7 @@ fn print_help() {
     println!("  test-m3-syscall Build the M3.3 syscall-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m8-linux-dispatch Build the M8.3 Linux personality dispatch kernel, run QEMU, and validate [M8.3] PASS");
     println!("  test-m8-linux-hello Boot M8.7 self-test then production feature (hello + clean [M2] PASS); 40s for two launches (aliases: m8-linux-hello, m8.7)");
+    println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
@@ -2357,6 +2454,7 @@ enum ParsedCommand {
     TestM3Syscall,
     TestM8LinuxDispatch,
     TestM8LinuxHello,
+    TestM8,
     TestM3Lifecycle,
     TestM3Ipc,
     TestM3Resources,
@@ -2415,6 +2513,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m8-linux-hello" || cmd == "m8-linux-hello" || cmd == "m8.7" => {
             ParsedCommand::TestM8LinuxHello
         }
+        Some(cmd) if cmd == "test-m8" || cmd == "m8" || cmd == "m8.9" => ParsedCommand::TestM8,
         Some(cmd) if cmd == "test-m3-lifecycle" => ParsedCommand::TestM3Lifecycle,
         Some(cmd) if cmd == "test-m3-ipc" => ParsedCommand::TestM3Ipc,
         Some(cmd) if cmd == "test-m3-resources" => ParsedCommand::TestM3Resources,
@@ -2650,6 +2749,12 @@ mod tests {
             parse_command(Some("m8.7".as_ref())),
             ParsedCommand::TestM8LinuxHello
         );
+        assert_eq!(
+            parse_command(Some("test-m8".as_ref())),
+            ParsedCommand::TestM8
+        );
+        assert_eq!(parse_command(Some("m8".as_ref())), ParsedCommand::TestM8);
+        assert_eq!(parse_command(Some("m8.9".as_ref())), ParsedCommand::TestM8);
         assert_eq!(
             parse_command(Some("test-m3-lifecycle".as_ref())),
             ParsedCommand::TestM3Lifecycle
@@ -3041,6 +3146,21 @@ mod tests {
                 "test-m7-net-caps",
                 "test-m7-dns",
                 "test-m7-tls",
+            ]
+        );
+    }
+
+    #[test]
+    fn m8_milestone_steps_have_deterministic_order() {
+        let names: Vec<&str> = M8_MILESTONE_STEPS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "verify-m8-fixture",
+                "clean-slate-elf (host)",
+                "clean-slate-linux-abi (host)",
+                "linux-image loader (host)",
+                "test-m8-linux-hello",
             ]
         );
     }
