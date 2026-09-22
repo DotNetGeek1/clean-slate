@@ -137,10 +137,34 @@ in `clean-slate-elf`:
   metadata, emits only file-backed bytes, and generates segment tables / mapped-
   page demand;
 - kernel `mm::image_loader` maps those segments transactionally with W^X and BSS
-  zero-fill;
+  zero-fill (a merged page that would be both writable and executable is a hard
+  error; `userspace.ld` page-aligns `.data` away from RX sections so native images
+  do not share pages across the W^X boundary);
 - #92 should reuse `parse_load_plan` + `map_load_plan_segments` under a Linux
   `LoadPlanPolicy` (accepted `e_type`, auxv/phdr metadata already recorded on
   `LoadPlan`) rather than a second ELF parser.
+
+### Userspace VA window (critical for #92 / #96)
+
+With `PHYSICAL_MEMORY_OFFSET = 0`, the kernel identity-maps physical RAM into the
+low half of the canonical address space (low PML4 slots).
+`create_process_address_space(user_region_base)` gives each process exactly one
+private PML4 slot: `user_region_base >> 39`. Native services use
+`user_region_base = 0x0000_4000_0000_0000` (slot 128), so the private user window
+is `[0x0000_4000_0000_0000, 0x0000_4080_0000_0000)`.
+
+**All** userspace mappings for a process — native embedded images and any Linux
+personality image in M8 — must fall inside that single-slot window.
+`LoadPlanPolicy::absolute_user_x86_64()` encodes the broader policy half starting
+at `0x0000_4000_0000_0000` (canonical user top exclusive at `1<<47`); in practice
+launch paths also stay inside the one owned PML4 slot.
+
+A conventional Linux `ET_EXEC` linked at `0x400000` **cannot** be mapped under
+this layout: page zero / low PML4 is kernel identity map, not a private process
+slot. M8 Linux fixtures must therefore be linked (or relocated) into the
+`0x0000_4000_0000_0000` window. M9+ debt: move the kernel to a higher-half /
+non-identity layout so processes can own low PML4 slots and host classic low
+`ET_EXEC` bases without a slide.
 
 Execution personality metadata and Linux syscall/errno/stack contracts are owned
 by #91 (`clean-slate-linux-abi`); syscall dispatch routing is #93.

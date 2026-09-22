@@ -43,15 +43,13 @@ impl EmbeddedSegment {
     }
 }
 
-/// Page-table flags for userspace image pages.
-///
-/// Individual PT_LOAD segments with both write and execute are rejected by
-/// `clean-slate-elf`. Current `userspace.ld` packing may still place RX and RW
-/// contributions on one page; the merged page is then mapped W+X explicitly
-/// (matching the previous flat-image mapper) until separate-code linking lands.
+/// Page-table flags for userspace image pages. Never maps W+X.
 pub(crate) fn page_flags_for_segment_perms(
     perms: SegmentPermissions,
 ) -> Result<PageTableFlags, &'static str> {
+    if perms.is_write_execute() {
+        return Err("refusing to map a write+execute userspace page");
+    }
     let mut flags = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     if perms.write {
         flags |= PageTableFlags::WRITABLE;
@@ -130,6 +128,11 @@ fn collect_unique_pages(
                     count += 1;
                 }
             }
+        }
+    }
+    for page in pages[..count].iter() {
+        if page.perms.is_write_execute() {
+            return Err("image page would be writable and executable");
         }
     }
     Ok(count)
@@ -388,15 +391,12 @@ mod tests {
 
     #[test]
     fn page_flags_reject_write_execute() {
-        // Merged packed pages may be W+X; flags helper no longer rejects that case.
-        let flags = page_flags_for_segment_perms(SegmentPermissions {
+        let err = page_flags_for_segment_perms(SegmentPermissions {
             read: true,
             write: true,
             execute: true,
-        })
-        .unwrap();
-        assert!(flags.contains(PageTableFlags::WRITABLE));
-        assert!(!flags.contains(PageTableFlags::NO_EXECUTE));
+        });
+        assert_eq!(err, Err("refusing to map a write+execute userspace page"));
     }
 
     #[test]
@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_mapped_page_count_dedups_shared_page() {
+    fn embedded_mapped_page_count_dedups_shared_readonly_page() {
         let segments = [
             EmbeddedSegment {
                 offset_from_base: 0,
@@ -452,14 +452,14 @@ mod tests {
                 filesz: 0x100,
                 memsz: 0x100,
                 file_offset: 0x200,
-                flags: PF_R as u8 | PF_W as u8,
+                flags: PF_R as u8,
             },
         ];
         assert_eq!(embedded_mapped_page_count(&segments).unwrap(), 1);
     }
 
     #[test]
-    fn shared_page_rx_and_rw_merges_to_one_page() {
+    fn shared_page_rx_and_rw_is_rejected() {
         let segments = [
             EmbeddedSegment {
                 offset_from_base: 0,
@@ -476,7 +476,10 @@ mod tests {
                 flags: PF_R as u8 | PF_W as u8,
             },
         ];
-        assert_eq!(embedded_mapped_page_count(&segments).unwrap(), 1);
+        assert_eq!(
+            embedded_mapped_page_count(&segments),
+            Err("image page would be writable and executable")
+        );
     }
 
     #[test]

@@ -22,10 +22,13 @@ pub struct LoadPlanPolicy {
 }
 
 impl LoadPlanPolicy {
-    /// Native Clean-Slate userspace images: accept PIE link addresses in the
-    /// canonical user half, enforce W^X, and leave loaded-address page-zero
-    /// checks to the mapper (images may link at VA 0 then slide to
-    /// `0x0000_4000_0000_0000` at embed/map time).
+    /// Native Clean-Slate userspace images linked by `userspace.ld` at fixed base
+    /// `0x0000_4000_0000_0000` with build-time `R_X86_64_RELATIVE` fixups.
+    ///
+    /// The parse window is the full canonical user half `[0, 1<<47)` so the
+    /// validator accepts the fixed-base VAs (and would also accept a hypothetical
+    /// link-at-0 image). Loaded page-zero checks remain the mapper's job when a
+    /// runtime load bias is applied. W^X is enforced per PT_LOAD.
     pub const fn native_x86_64() -> Self {
         Self {
             user_va_lo: 0,
@@ -38,8 +41,12 @@ impl LoadPlanPolicy {
         }
     }
 
-    /// Policy for absolute userspace VAs already at their final load addresses
-    /// (for example a Linux ET_DYN/ET_EXEC image that #92 loads without a slide).
+    /// Policy for absolute userspace VAs already at their final load addresses.
+    ///
+    /// Window is the single private PML4 user slot used today:
+    /// `[0x0000_4000_0000_0000, 1<<47)`. This is **not** the conventional Linux
+    /// low ET_EXEC base (`0x400000`); such images cannot be mapped under the
+    /// current identity-mapped kernel layout (see docs/ARCHITECTURE.md).
     pub const fn absolute_user_x86_64() -> Self {
         Self {
             user_va_lo: 0x0000_4000_0000_0000,
