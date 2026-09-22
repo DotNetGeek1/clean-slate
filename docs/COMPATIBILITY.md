@@ -19,7 +19,7 @@ The user should not need to understand the implementation details in normal use.
 
 ## Linux compatibility
 
-The first practical compatibility target is Linux userspace.
+The first practical compatibility target is Linux userspace. The M8.1 execution contract (personality boundary, syscall/errno encoding, initial stack/auxv layout) is documented in [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md).
 
 The project should begin by supporting unmodified ELF64 applications that expect the Linux syscall ABI. Compatibility can then grow toward a useful Linux environment with libc, shells, CLI tools, graphical applications, and package import.
 

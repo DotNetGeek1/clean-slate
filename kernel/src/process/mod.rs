@@ -4,6 +4,8 @@
 
 pub(crate) mod domain;
 pub(crate) mod id_allocator;
+pub(crate) mod personality;
+
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::mm::address_space::AddressSpaceResourceCounts;
 use crate::mm::address_space::ProcessAddressSpace;
@@ -12,6 +14,7 @@ use crate::sched::Thread;
 use crate::sched::ThreadState;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_service_lifecycle::InstanceGeneration;
+use personality::ExecutionPersonality;
 
 pub(super) const KERNEL_PROCESS_ID: u64 = 0;
 #[cfg(feature = "m6-capabilities-self-test")]
@@ -108,6 +111,8 @@ pub(crate) struct Process {
     pub(crate) resource_domain: ResourceDomain,
     pub(crate) live_threads: u16,
     pub(crate) exit_status: Option<u64>,
+    /// Trusted ABI personality; never taken from syscall arguments (see `personality`).
+    pub(crate) execution_personality: ExecutionPersonality,
 }
 
 impl Process {
@@ -118,6 +123,7 @@ impl Process {
         resource_domain: ResourceDomain::EMPTY,
         live_threads: 0,
         exit_status: None,
+        execution_personality: ExecutionPersonality::Native,
     };
 
     pub(crate) fn address_space_root(&self) -> u64 {
@@ -312,6 +318,7 @@ pub(super) fn userspace_process_root_frame(process_id: u64) -> Result<u64, &'sta
 
 #[cfg(test)]
 mod tests {
+    use super::personality::ExecutionPersonality;
     use super::*;
     use crate::sched::Scheduler;
     use crate::sched::ThreadKind;
@@ -325,6 +332,7 @@ mod tests {
             resource_domain: ResourceDomain::with_root_frame(9, 0x2000),
             live_threads: 1,
             exit_status: None,
+            execution_personality: ExecutionPersonality::Native,
         };
         let mut thread = Thread {
             id: 13,
@@ -361,6 +369,7 @@ mod tests {
             resource_domain: ResourceDomain::with_root_frame(5, 0x3000),
             live_threads: 2,
             exit_status: None,
+            execution_personality: ExecutionPersonality::Native,
         };
         let mut thread = Thread {
             id: 41,
@@ -413,6 +422,7 @@ mod tests {
             resource_domain: ResourceDomain::with_root_frame(process_id, 0x9000),
             live_threads: 1,
             exit_status: None,
+            execution_personality: ExecutionPersonality::Native,
         };
         registry.insert(process).expect("insert");
         assert_eq!(
@@ -444,6 +454,7 @@ mod tests {
             resource_domain: ResourceDomain::with_root_frame(17, 0x9000),
             live_threads: 0,
             exit_status: Some(0),
+            execution_personality: ExecutionPersonality::Native,
         };
         reap_process_record(&mut process).expect("reap");
         registry.insert(process).expect("insert");
@@ -458,6 +469,7 @@ mod tests {
                 resource_domain: ResourceDomain::with_root_frame(18, 0xa000),
                 live_threads: 1,
                 exit_status: None,
+                execution_personality: ExecutionPersonality::Native,
             })
             .expect("reuse slot");
     }
@@ -472,6 +484,7 @@ mod tests {
             resource_domain: ResourceDomain::with_root_frame(17, 0x9000),
             live_threads: 0,
             exit_status: Some(0),
+            execution_personality: ExecutionPersonality::Native,
         };
         reap_process_record(&mut first).expect("reap first");
         registry.insert(first).expect("insert first");
@@ -486,6 +499,7 @@ mod tests {
                 resource_domain: ResourceDomain::with_root_frame(17, 0xa000),
                 live_threads: 1,
                 exit_status: None,
+                execution_personality: ExecutionPersonality::Native,
             })
             .expect("insert replacement");
         let replacement_generation = registry
@@ -505,6 +519,7 @@ mod tests {
             resource_domain: ResourceDomain::with_root_frame(99, 0xb000),
             live_threads: 1,
             exit_status: None,
+            execution_personality: ExecutionPersonality::Native,
         });
         assert_eq!(result, Err("process instance generation exhausted"));
     }
@@ -529,6 +544,7 @@ mod tests {
             resource_domain: ResourceDomain::with_root_frame(33, 0x9000),
             live_threads: 2,
             exit_status: None,
+            execution_personality: ExecutionPersonality::Native,
         };
         let mut current = scheduler.threads[0];
         assert!(

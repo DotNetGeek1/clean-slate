@@ -311,6 +311,7 @@ fn map_fixture_process(
             resource_domain: ResourceDomain::with_address_space(pid, address_space),
             live_threads: 1,
             exit_status: None,
+            execution_personality: crate::process::personality::ExecutionPersonality::Native,
         })?;
     }
     let scheduler = unsafe { scheduler_mut() };
@@ -441,6 +442,7 @@ fn map_supervisor_process(
             resource_domain: ResourceDomain::with_address_space(pid, address_space),
             live_threads: 1,
             exit_status: None,
+            execution_personality: crate::process::personality::ExecutionPersonality::Native,
         })?;
     }
     let scheduler = unsafe { scheduler_mut() };

@@ -237,7 +237,7 @@ CR3 switching and page-table construction should stay behind narrow memory-manag
 
 ## M3.3 native syscall boundary direction
 
-M3.3 uses the x86-64 `syscall/sysretq` mechanism (not Linux ABI) as the first native userspace/kernel call boundary.
+M3.3 uses the x86-64 `syscall/sysretq` mechanism (not Linux ABI) as the first native userspace/kernel call boundary. Linux ABI dispatch is a separate process personality; see [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md).
 
 - `IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK`, and `IA32_EFER.SCE` are initialized before the first userspace syscall.
 - The GDT SYSRET selector triplet is ordered deliberately as `base`, `base+8` (user data/SS), `base+16` (user code/CS) so STAR-derived selectors are valid in normal builds.
