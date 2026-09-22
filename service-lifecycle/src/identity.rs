@@ -10,6 +10,10 @@ pub struct ServiceId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InstanceGeneration(pub u32);
 
+impl InstanceGeneration {
+    pub const MAX: Self = Self(u32::MAX);
+}
+
 /// Process identifier for a running instance (kernel-owned, not stable across restarts).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProcessId(pub u64);

@@ -491,6 +491,7 @@ fn register_spawned_process(
 
     let process = Process {
         id: pid,
+        instance_generation: clean_slate_service_lifecycle::InstanceGeneration(0),
         state: ProcessState::Ready,
         resource_domain: ResourceDomain::with_address_space(pid, address_space),
         live_threads: 1,
@@ -1016,9 +1017,12 @@ const NETWORK_SERVICE_STACK_GUARD_PAGES: u64 = 1;
 const NETWORK_SERVICE_STACK_ADDRESS: u64 =
     NETWORK_SERVICE_BOOTSTRAP_ADDRESS + (NETWORK_SERVICE_STACK_GUARD_PAGES + 1) * PAGE_SIZE;
 #[cfg(feature = "m7-net-service-self-test")]
-const NETWORK_SERVICE_STACK_PAGES: u64 = 12;
+/// The M7 userspace image now carries both the ordinary client path and the service-owned
+/// DNS/TCP/TLS bridge logic. The combined protocol state currently needs a deeper userspace
+/// stack than earlier M7 lanes, so reserve extra guard headroom here.
+const NETWORK_SERVICE_STACK_PAGES: u64 = 80;
 #[cfg(feature = "m7-net-service-self-test")]
-const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 179;
+const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 300;
 #[cfg(feature = "m7-net-service-self-test")]
 const NETWORK_SERVICE_MAPPED_PAGES: usize =
     NETWORK_SERVICE_MAX_CODE_PAGES + NETWORK_SERVICE_STACK_PAGES as usize + 1;

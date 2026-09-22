@@ -11,6 +11,7 @@ use crate::sched::scheduler_mut;
 use crate::sched::Thread;
 use crate::sched::ThreadState;
 use crate::sync::global_cell::GlobalCell;
+use clean_slate_service_lifecycle::InstanceGeneration;
 
 pub(super) const KERNEL_PROCESS_ID: u64 = 0;
 #[cfg(feature = "m6-capabilities-self-test")]
@@ -102,6 +103,7 @@ impl ResourceDomain {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Process {
     pub(crate) id: u64,
+    pub(crate) instance_generation: InstanceGeneration,
     pub(crate) state: ProcessState,
     pub(crate) resource_domain: ResourceDomain,
     pub(crate) live_threads: u16,
@@ -111,6 +113,7 @@ pub(crate) struct Process {
 impl Process {
     const EMPTY: Self = Self {
         id: 0,
+        instance_generation: InstanceGeneration(0),
         state: ProcessState::Empty,
         resource_domain: ResourceDomain::EMPTY,
         live_threads: 0,
@@ -190,6 +193,7 @@ pub(super) fn finalize_process_exit(
 
 pub(crate) struct ProcessRegistry {
     processes: [Process; PROCESS_REGISTRY_CAPACITY],
+    next_instance_generation: InstanceGeneration,
 }
 
 #[allow(dead_code)]
@@ -197,20 +201,34 @@ impl ProcessRegistry {
     const fn new() -> Self {
         Self {
             processes: [const { Process::EMPTY }; PROCESS_REGISTRY_CAPACITY],
+            next_instance_generation: InstanceGeneration(1),
         }
     }
 
     pub(super) fn clear(&mut self) {
         self.processes = [const { Process::EMPTY }; PROCESS_REGISTRY_CAPACITY];
+        self.next_instance_generation = InstanceGeneration(1);
     }
 
-    pub(super) fn insert(&mut self, process: Process) -> Result<(), &'static str> {
+    pub(super) fn insert(&mut self, mut process: Process) -> Result<(), &'static str> {
         if self
             .processes
             .iter()
             .any(|entry| entry.id == process.id && entry.state != ProcessState::Empty)
         {
             return Err("process id already existed in registry");
+        }
+        if process.instance_generation.0 == 0 {
+            process.instance_generation = self.next_instance_generation;
+        }
+        if process.instance_generation.0 >= self.next_instance_generation.0 {
+            self.next_instance_generation = InstanceGeneration(
+                process
+                    .instance_generation
+                    .0
+                    .checked_add(1)
+                    .ok_or("process instance generation exhausted")?,
+            );
         }
         let slot = self
             .processes
@@ -231,6 +249,11 @@ impl ProcessRegistry {
         self.processes
             .iter_mut()
             .find(|entry| entry.id == process_id && entry.state != ProcessState::Empty)
+    }
+
+    pub(super) fn instance_generation(&self, process_id: u64) -> Option<InstanceGeneration> {
+        self.get(process_id)
+            .map(|process| process.instance_generation)
     }
 
     pub(super) fn release_reaped(&mut self, process_id: u64) -> Result<(), &'static str> {
@@ -271,6 +294,10 @@ pub(crate) unsafe fn process_registry_mut() -> &'static mut ProcessRegistry {
     unsafe { &mut *PROCESS_REGISTRY.get() }
 }
 
+pub(crate) fn live_instance_generation(process_id: u64) -> Option<InstanceGeneration> {
+    unsafe { process_registry_mut().instance_generation(process_id) }
+}
+
 pub(super) fn userspace_process_root_frame(process_id: u64) -> Result<u64, &'static str> {
     let process = unsafe {
         process_registry_mut()
@@ -293,6 +320,7 @@ mod tests {
     fn process_and_thread_lifecycle_transitions_cover_fault_exit_and_reap() {
         let mut process = Process {
             id: 9,
+            instance_generation: InstanceGeneration(0),
             state: ProcessState::Running,
             resource_domain: ResourceDomain::with_root_frame(9, 0x2000),
             live_threads: 1,
@@ -328,6 +356,7 @@ mod tests {
     fn first_thread_exit_keeps_multi_thread_process_alive() {
         let mut process = Process {
             id: 5,
+            instance_generation: InstanceGeneration(0),
             state: ProcessState::Running,
             resource_domain: ResourceDomain::with_root_frame(5, 0x3000),
             live_threads: 2,
@@ -379,6 +408,7 @@ mod tests {
         let process_id = 17;
         let process = Process {
             id: process_id,
+            instance_generation: InstanceGeneration(0),
             state: ProcessState::Ready,
             resource_domain: ResourceDomain::with_root_frame(process_id, 0x9000),
             live_threads: 1,
@@ -409,6 +439,7 @@ mod tests {
         let mut registry = ProcessRegistry::new();
         let mut process = Process {
             id: 17,
+            instance_generation: InstanceGeneration(0),
             state: ProcessState::Exited,
             resource_domain: ResourceDomain::with_root_frame(17, 0x9000),
             live_threads: 0,
@@ -422,12 +453,60 @@ mod tests {
         registry
             .insert(Process {
                 id: 18,
+                instance_generation: InstanceGeneration(0),
                 state: ProcessState::Ready,
                 resource_domain: ResourceDomain::with_root_frame(18, 0xa000),
                 live_threads: 1,
                 exit_status: None,
             })
             .expect("reuse slot");
+    }
+
+    #[test]
+    fn process_registry_assigns_new_instance_generation_on_pid_reuse() {
+        let mut registry = ProcessRegistry::new();
+        let mut first = Process {
+            id: 17,
+            instance_generation: InstanceGeneration(0),
+            state: ProcessState::Exited,
+            resource_domain: ResourceDomain::with_root_frame(17, 0x9000),
+            live_threads: 0,
+            exit_status: Some(0),
+        };
+        reap_process_record(&mut first).expect("reap first");
+        registry.insert(first).expect("insert first");
+        let first_generation = registry.instance_generation(17).expect("first generation");
+        registry.release_reaped(17).expect("release first slot");
+
+        registry
+            .insert(Process {
+                id: 17,
+                instance_generation: InstanceGeneration(0),
+                state: ProcessState::Ready,
+                resource_domain: ResourceDomain::with_root_frame(17, 0xa000),
+                live_threads: 1,
+                exit_status: None,
+            })
+            .expect("insert replacement");
+        let replacement_generation = registry
+            .instance_generation(17)
+            .expect("replacement generation");
+        assert!(replacement_generation.0 > first_generation.0);
+    }
+
+    #[test]
+    fn process_registry_rejects_instance_generation_overflow() {
+        let mut registry = ProcessRegistry::new();
+        registry.next_instance_generation = InstanceGeneration::MAX;
+        let result = registry.insert(Process {
+            id: 99,
+            instance_generation: InstanceGeneration(0),
+            state: ProcessState::Ready,
+            resource_domain: ResourceDomain::with_root_frame(99, 0xb000),
+            live_threads: 1,
+            exit_status: None,
+        });
+        assert_eq!(result, Err("process instance generation exhausted"));
     }
 
     #[test]
@@ -445,6 +524,7 @@ mod tests {
 
         let mut process = Process {
             id: 33,
+            instance_generation: InstanceGeneration(0),
             state: ProcessState::Running,
             resource_domain: ResourceDomain::with_root_frame(33, 0x9000),
             live_threads: 2,

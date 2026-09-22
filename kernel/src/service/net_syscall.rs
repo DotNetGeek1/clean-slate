@@ -38,6 +38,15 @@ fn current_holder() -> Result<HolderId, u64> {
         .map_err(|_| SYSCALL_EACCES)
 }
 
+/// Live process `instance_generation` for the syscall caller. The process registry is the
+/// single authoritative source; a caller without a registered live generation is denied rather
+/// than attributed to generation `0`.
+fn caller_instance_generation(holder: HolderId) -> Result<u64, u64> {
+    live_instance_generation_for_pid(holder.0)
+        .map(|generation| u64::from(generation.0))
+        .ok_or(SYSCALL_EACCES)
+}
+
 fn find_network_handle(holder: HolderId, raw_device: bool) -> Option<u64> {
     with_capability_space(|table| {
         for slot in 0..table.capacity() {
@@ -216,9 +225,13 @@ fn handle_submit(frame: &mut SyscallContext) {
             ptr::copy_nonoverlapping(frame.r10 as *const u8, payload.as_mut_ptr(), payload_len);
         }
     }
-    let generation = live_instance_generation_for_pid(holder.0)
-        .map(|g| u64::from(g.0))
-        .unwrap_or(0);
+    let generation = match caller_instance_generation(holder) {
+        Ok(generation) => generation,
+        Err(status) => {
+            frame.rax = status;
+            return;
+        }
+    };
     match net_bridge_mut().submit(
         holder.0,
         holder.0,
@@ -262,9 +275,13 @@ fn handle_poll(frame: &mut SyscallContext) {
         frame.rax = denial_status(reason);
         return;
     }
-    let generation = live_instance_generation_for_pid(holder.0)
-        .map(|g| u64::from(g.0))
-        .unwrap_or(0);
+    let generation = match caller_instance_generation(holder) {
+        Ok(generation) => generation,
+        Err(status) => {
+            frame.rax = status;
+            return;
+        }
+    };
     let mut out_payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
     match net_bridge_mut().poll(
         holder.0,

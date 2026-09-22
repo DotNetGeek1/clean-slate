@@ -8,29 +8,29 @@ use alloc::boxed::Box;
 use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_ESTALE, SYSCALL_NR_NETWORK_CAPABILITY, SYSCALL_NR_NETWORK_REQUEST,
 };
-use clean_slate_network::addr::SocketAddrV4;
+use clean_slate_network::addr::{BoundedHostname, Ipv4Addr, SocketAddrV4};
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
-use clean_slate_network::dns::{DnsError, DnsResolver, ResolveOutcome, DNS_QUERY_TIMEOUT_TICKS};
+use clean_slate_network::dns::{DnsResolver, ResolveOutcome, DNS_QUERY_TIMEOUT_TICKS};
 use clean_slate_network::error::{DenialReason, NetworkError};
 use clean_slate_network::fixture::{
     APP_REQUEST_BYTES, APP_RESPONSE_BYTES, DNS_SERVER_ADDR, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS,
-    FIXTURE_HOSTNAME, GUEST_IPV4, GUEST_MAC, PEER_IPV4, PEER_MAC, TLS_PORT, TLS_SERVER_NAME,
+    FIXTURE_HOSTNAME, GUEST_IPV4, PEER_MAC, TLS_PORT, TLS_SERVER_NAME,
 };
-use clean_slate_network::limits::{MAX_ETHERNET_FRAME_BYTES, MAX_SESSIONS};
+use clean_slate_network::limits::MAX_SESSIONS;
 use clean_slate_network::protocol::{
     NetworkRequest, NetworkResponse, NETWORK_REQUEST_BYTES, NETWORK_RESPONSE_BYTES,
 };
 use clean_slate_network::session::{SessionGeneration, SessionId, SocketKind};
 use clean_slate_network::stack::L3Stack;
-use clean_slate_network::tcp::{TcpState, TcpTransport, TCP_CONNECT_TIMEOUT_TICKS};
+use clean_slate_network::tcp::TcpTransport;
 use clean_slate_network::tls::{
     TlsConfig, TlsError, TlsSession, TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
 };
 use clean_slate_service_fixtures::{
-    AllowAllAuthorizer, NetworkService, NetworkServiceBootstrap, PassthroughPacketPath,
-    NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID,
-    NETWORK_MAX_PAYLOAD_BYTES, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_MODE_ACCEPTANCE,
+    AllowAllAuthorizer, NetworkService, NetworkServiceBootstrap, NETWORK_CAPABILITY_VERSION,
+    NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES,
+    NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_MODE_ACCEPTANCE,
     NETWORK_SERVICE_MODE_CAPACITY_LOOP, NETWORK_SERVICE_MODE_CLIENT,
     NETWORK_SERVICE_MODE_CONVERGED_CLIENT, NETWORK_SERVICE_MODE_INFLIGHT_ARM,
     NETWORK_SERVICE_MODE_STALE_CLOSE, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
@@ -43,20 +43,17 @@ use clean_slate_service_fixtures::{
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::x86_64::{__cpuid, _rdrand64_step};
 use core::hint::spin_loop;
-use core::mem::size_of;
+use core::mem::{size_of, MaybeUninit};
 use core::ptr;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use rand_core::{CryptoRng, RngCore};
 
 const SYSCALL_NR_VERSION: u64 = 0;
 const ARP_TTL_TICKS: u64 = 50_000;
 const DNS_POLL_LIMIT: usize = 5_000_000;
-const TCP_POLL_LIMIT: usize = 10_000_000;
 const TLS_POLL_LIMIT: usize = 10_000_000;
 const TLS_IO_TIMEOUT_TICKS: u64 = 2_000;
 const TLS_CLOSE_TIMEOUT_TICKS: u64 = 100;
-const OWNER: clean_slate_network::protocol::TrustedCaller =
-    clean_slate_network::protocol::TrustedCaller::new(0x5200, 0, 1);
 
 struct BumpAllocator;
 
@@ -64,21 +61,13 @@ struct BumpAllocator;
 static ALLOCATOR: BumpAllocator = BumpAllocator;
 
 static NEXT_HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
-const fn max_usize(a: usize, b: usize) -> usize {
-    if a > b {
-        a
-    } else {
-        b
-    }
-}
 const PHASE_HEAP_MARGIN_BYTES: usize = 16 * 1024;
 const DNS_PHASE_HEAP_REQUIRED_BYTES: usize =
-    size_of::<DnsResolver<ServiceClientLink>>() + PHASE_HEAP_MARGIN_BYTES;
-const TLS_PHASE_HEAP_REQUIRED_BYTES: usize = size_of::<TcpTransport<ServiceClientLink>>()
-    + (2 * size_of::<[u8; TLS_RECORD_BUFFER_BYTES]>())
-    + PHASE_HEAP_MARGIN_BYTES;
-const HEAP_BYTES: usize = max_usize(DNS_PHASE_HEAP_REQUIRED_BYTES, TLS_PHASE_HEAP_REQUIRED_BYTES);
+    size_of::<DnsResolver<SyscallRawLink>>() + PHASE_HEAP_MARGIN_BYTES;
+const HEAP_BYTES: usize = DNS_PHASE_HEAP_REQUIRED_BYTES;
 static mut HEAP: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
+static TLS_SCRATCH_ACTIVE: AtomicBool = AtomicBool::new(false);
+static TLS_HEAP_CHECKPOINT: AtomicUsize = AtomicUsize::new(0);
 
 unsafe impl GlobalAlloc for BumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -134,6 +123,9 @@ pub extern "C" fn _start() -> ! {
     bootstrap.reclaimed_sessions = 0;
     bootstrap.reclaimed_pending = 0;
     bootstrap.inflight_failed = 0;
+    bootstrap.tls_transactions = 0;
+    bootstrap.tls_heap_checkpoint = 0;
+    bootstrap.tls_heap_after_last = 0;
 
     bootstrap.result_code = match run(bootstrap) {
         Ok(code) => code,
@@ -238,8 +230,19 @@ fn net_request(args: [u64; 6]) -> u64 {
 
 fn run_unauthorized_probe() -> Result<u64, u64> {
     match network_capability(NETWORK_CLIENT_DEVICE_ID) {
+        Err(SYSCALL_EACCES) => {}
+        Ok(_) => return Err(1),
+        Err(other) => return Err(other),
+    }
+    // Without a granted handle, a bridge submit must also be refused by the capability
+    // broker (audited as `op=connect outcome=deny`), not just the handle lookup above.
+    let open = NetworkRequest::Open {
+        kind: SocketKind::Udp,
+    }
+    .encode();
+    match client_submit(0, &open, &[]) {
         Err(SYSCALL_EACCES) => Ok(NETWORK_SERVICE_RESULT_OK),
-        Ok(_) => Err(1),
+        Ok(_) => Err(2),
         Err(other) => Err(other),
     }
 }
@@ -322,9 +325,13 @@ impl NetworkLink for SyscallRawLink {
     }
 }
 
-type ServiceState = NetworkService<SyscallRawLink, AllowAllAuthorizer, PassthroughPacketPath>;
+type ServiceState = NetworkService<SyscallRawLink, AllowAllAuthorizer>;
 
 static mut SERVICE_STATE: Option<ServiceState> = None;
+static mut SERVICE_DNS_RESOLVER: Option<Box<DnsResolver<SyscallRawLink>>> = None;
+static mut SERVICE_TLS_TRANSPORT: MaybeUninit<TcpTransport<SyscallRawLink>> = MaybeUninit::uninit();
+static mut SERVICE_TLS_READ_BUF: [u8; TLS_RECORD_BUFFER_BYTES] = [0; TLS_RECORD_BUFFER_BYTES];
+static mut SERVICE_TLS_WRITE_BUF: [u8; TLS_RECORD_BUFFER_BYTES] = [0; TLS_RECORD_BUFFER_BYTES];
 static mut SERVICE_REQUEST_BUF: [u8; NETWORK_REQUEST_BYTES] = [0; NETWORK_REQUEST_BYTES];
 static mut SERVICE_PAYLOAD_BUF: [u8; NETWORK_SERVICE_NEXT_WIRE_BYTES] =
     [0; NETWORK_SERVICE_NEXT_WIRE_BYTES];
@@ -337,8 +344,24 @@ unsafe fn service_state_slot() -> *mut Option<ServiceState> {
     core::ptr::addr_of_mut!(SERVICE_STATE)
 }
 
+unsafe fn service_dns_resolver_slot() -> *mut Option<Box<DnsResolver<SyscallRawLink>>> {
+    core::ptr::addr_of_mut!(SERVICE_DNS_RESOLVER)
+}
+
 unsafe fn service_request_buf_ptr() -> *mut [u8; NETWORK_REQUEST_BYTES] {
     core::ptr::addr_of_mut!(SERVICE_REQUEST_BUF)
+}
+
+unsafe fn service_tls_transport_ptr() -> *mut TcpTransport<SyscallRawLink> {
+    core::ptr::addr_of_mut!(SERVICE_TLS_TRANSPORT) as *mut TcpTransport<SyscallRawLink>
+}
+
+unsafe fn service_tls_read_buf_ptr() -> *mut [u8; TLS_RECORD_BUFFER_BYTES] {
+    core::ptr::addr_of_mut!(SERVICE_TLS_READ_BUF)
+}
+
+unsafe fn service_tls_write_buf_ptr() -> *mut [u8; TLS_RECORD_BUFFER_BYTES] {
+    core::ptr::addr_of_mut!(SERVICE_TLS_WRITE_BUF)
 }
 
 unsafe fn service_payload_buf_ptr() -> *mut [u8; NETWORK_SERVICE_NEXT_WIRE_BYTES] {
@@ -360,15 +383,37 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     };
     bootstrap.net_role_handle = raw_handle;
     let generation = SessionGeneration::new(bootstrap.service_generation);
+    let raw_mac = SyscallRawLink::attach(raw_handle).link().mac;
     unsafe {
-        *service_state_slot() = Some(NetworkService::new(
-            generation,
-            AllowAllAuthorizer,
-            PassthroughPacketPath,
-        ));
+        *service_state_slot() = Some(NetworkService::new(generation, AllowAllAuthorizer));
         if let Some(service) = (*service_state_slot()).as_mut() {
             service.attach_backend(SyscallRawLink::attach(raw_handle));
         }
+        *service_dns_resolver_slot() = Some(DnsResolver::alloc_boxed(
+            L3Stack::new(
+                SyscallRawLink::attach(raw_handle),
+                raw_mac,
+                GUEST_IPV4,
+                ARP_TTL_TICKS,
+            ),
+            generation,
+            DNS_SERVER_ADDR,
+            DnsResolver::<SyscallRawLink>::DEFAULT_TICKS_PER_SEC,
+        ));
+        TcpTransport::init_in_place(
+            service_tls_transport_ptr(),
+            L3Stack::new(
+                SyscallRawLink::attach(raw_handle),
+                raw_mac,
+                GUEST_IPV4,
+                ARP_TTL_TICKS,
+            ),
+            generation,
+        );
+        let heap_checkpoint = current_heap_offset();
+        TLS_HEAP_CHECKPOINT.store(heap_checkpoint, Ordering::SeqCst);
+        bootstrap.tls_heap_checkpoint = heap_checkpoint as u64;
+        bootstrap.tls_heap_after_last = heap_checkpoint as u64;
     }
     loop {
         let service = unsafe {
@@ -425,8 +470,14 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             continue;
         }
         let payload = &payload_buf[payload_start..payload_end];
-        let (response, out_len) =
-            service.handle_request(caller, request, payload, response_payload);
+        let (response, out_len) = handle_service_request(
+            service,
+            bootstrap.service_generation,
+            caller,
+            request,
+            payload,
+            response_payload,
+        );
         response_buf.copy_from_slice(&response.encode());
         let _ = service_complete(
             raw_handle,
@@ -438,9 +489,252 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     }
 }
 
-fn drain_holder_exits(
-    service: &mut NetworkService<SyscallRawLink, AllowAllAuthorizer, PassthroughPacketPath>,
-) {
+fn handle_service_request(
+    service: &mut ServiceState,
+    service_generation: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    request: NetworkRequest,
+    payload: &[u8],
+    response_payload: &mut [u8],
+) -> (NetworkResponse, u32) {
+    match request {
+        NetworkRequest::Resolve { name } => (handle_service_resolve(caller, name), 0),
+        NetworkRequest::Connect { session, dest }
+            if matches!(service.session_kind(caller, session), Ok(SocketKind::Tcp)) =>
+        {
+            service.handle_request(
+                caller,
+                NetworkRequest::Connect { session, dest },
+                payload,
+                response_payload,
+            )
+        }
+        NetworkRequest::Send {
+            session,
+            payload_len,
+        } if matches!(service.session_kind(caller, session), Ok(SocketKind::Tcp)) => {
+            if payload.len() != payload_len as usize {
+                return (
+                    NetworkResponse::Error {
+                        code: NetworkError::InvalidRequest.code(),
+                    },
+                    0,
+                );
+            }
+            match handle_service_tls_send(service, service_generation, caller, session, payload) {
+                Ok(bytes_sent) => (NetworkResponse::Send { bytes_sent }, 0),
+                Err(response) => (response, 0),
+            }
+        }
+        other => service.handle_request(caller, other, payload, response_payload),
+    }
+}
+
+fn handle_service_resolve(
+    caller: clean_slate_network::protocol::TrustedCaller,
+    name: BoundedHostname,
+) -> NetworkResponse {
+    let name = match name.as_str() {
+        Ok(name) => name,
+        Err(_) => {
+            return NetworkResponse::Error {
+                code: NetworkError::InvalidRequest.code(),
+            };
+        }
+    };
+    let resolver = unsafe {
+        match (*service_dns_resolver_slot()).as_mut() {
+            Some(resolver) => resolver,
+            None => {
+                return NetworkResponse::Error {
+                    code: NetworkError::NotFound.code(),
+                };
+            }
+        }
+    };
+    let start = match monotonic_ticks() {
+        Ok(tick) => tick,
+        Err(_) => {
+            return NetworkResponse::Error {
+                code: NetworkError::Timeout.code(),
+            };
+        }
+    };
+    let deadline = start.saturating_add(DNS_QUERY_TIMEOUT_TICKS);
+    let query_id = match resolver.resolve(start, caller, name) {
+        Ok(ResolveOutcome::Cached { addr, ttl }) => return NetworkResponse::Resolve { addr, ttl },
+        Ok(ResolveOutcome::Pending { query_id }) => query_id,
+        Err(err) => {
+            return NetworkResponse::Error {
+                code: NetworkError::from(err).code(),
+            };
+        }
+    };
+    for _ in 0..DNS_POLL_LIMIT {
+        let now = match monotonic_ticks() {
+            Ok(tick) => tick,
+            Err(_) => {
+                return NetworkResponse::Error {
+                    code: NetworkError::Timeout.code(),
+                };
+            }
+        };
+        if let Err(err) = resolver.poll(now) {
+            return NetworkResponse::Error {
+                code: NetworkError::from(err).code(),
+            };
+        }
+        if let Some(result) = resolver.take_result(query_id, caller) {
+            return match result {
+                Ok((addr, ttl)) => NetworkResponse::Resolve { addr, ttl },
+                Err(err) => NetworkResponse::Error {
+                    code: NetworkError::from(err).code(),
+                },
+            };
+        }
+        if now >= deadline {
+            break;
+        }
+        yield_cpu();
+    }
+    NetworkResponse::Error {
+        code: NetworkError::Timeout.code(),
+    }
+}
+
+fn handle_service_tls_send(
+    service: &mut ServiceState,
+    service_generation: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+    payload: &[u8],
+) -> Result<u32, NetworkResponse> {
+    let scratch = TlsScratchGuard::claim()?;
+    let dest = match service.connected_dest(caller, session) {
+        Ok(Some(dest)) => dest,
+        Ok(None) => {
+            return Err(NetworkResponse::Error {
+                code: NetworkError::InvalidRequest.code(),
+            });
+        }
+        Err(response) => return Err(response),
+    };
+    let tick = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+        code: NetworkError::Timeout.code(),
+    })?;
+    let tcp = unsafe { &mut *service_tls_transport_ptr() };
+    tcp.reset(tick).map_err(|err| NetworkResponse::Error {
+        code: NetworkError::from(err).code(),
+    })?;
+    tcp.stack_mut()
+        .arp_cache_mut()
+        .insert(dest.addr, PEER_MAC, tick);
+    let read_buf = unsafe { &mut *service_tls_read_buf_ptr() };
+    let write_buf = unsafe { &mut *service_tls_write_buf_ptr() };
+    read_buf.fill(0);
+    write_buf.fill(0);
+    let mut app_buf = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    let response_len = {
+        let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
+        let config = TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX);
+        let rng = RdrandRng::new().map_err(|_| NetworkResponse::Error {
+            code: NetworkError::Protocol.code(),
+        })?;
+        let service_owner =
+            clean_slate_network::protocol::TrustedCaller::new(0x5200, 0, service_generation);
+        let handshake_deadline = tick.saturating_add(8_192);
+        let (mut tls, _) = TlsSession::connect_with_handshake_deadline(
+            tick,
+            handshake_deadline,
+            tcp,
+            service_owner,
+            dest,
+            config,
+            rng,
+            read_buf,
+            write_buf,
+            None,
+        )
+        .map_err(|err| NetworkResponse::Error {
+            code: map_tls_error_code(err) as u16,
+        })?;
+        write_all_tls(&mut tls, tick.saturating_add(1), payload)
+            .map_err(|err| NetworkResponse::Error { code: err as u16 })?;
+        let response_len = read_tls(&mut tls, tick.saturating_add(2), &mut app_buf)
+            .map_err(|err| NetworkResponse::Error { code: err as u16 })?;
+        let tcp_session = tls.tcp_session_id();
+        let close_now = monotonic_ticks()
+            .map_err(|_| NetworkResponse::Error {
+                code: NetworkError::Timeout.code(),
+            })?
+            .saturating_add(TLS_CLOSE_TIMEOUT_TICKS);
+        tls.close(close_now).map_err(|err| NetworkResponse::Error {
+            code: map_tls_error_code(err) as u16,
+        })?;
+        drop(tls);
+        drain_tcp_close(tcp, service_owner, tcp_session, close_now)?;
+        response_len
+    };
+    let reset_now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+        code: NetworkError::Timeout.code(),
+    })?;
+    tcp.reset(reset_now).map_err(|err| NetworkResponse::Error {
+        code: NetworkError::from(err).code(),
+    })?;
+    scratch.verify_reused()?;
+    service.stage_response_payload(caller, session, &app_buf[..response_len])?;
+    Ok(payload.len() as u32)
+}
+
+fn current_heap_offset() -> usize {
+    NEXT_HEAP_OFFSET.load(Ordering::SeqCst)
+}
+
+struct TlsScratchGuard {
+    checkpoint: usize,
+}
+
+impl TlsScratchGuard {
+    fn claim() -> Result<Self, NetworkResponse> {
+        if TLS_SCRATCH_ACTIVE
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(NetworkResponse::Error {
+                code: NetworkError::Protocol.code(),
+            });
+        }
+        let checkpoint = TLS_HEAP_CHECKPOINT.load(Ordering::SeqCst);
+        if current_heap_offset() != checkpoint {
+            TLS_SCRATCH_ACTIVE.store(false, Ordering::SeqCst);
+            return Err(NetworkResponse::Error {
+                code: NetworkError::Protocol.code(),
+            });
+        }
+        Ok(Self { checkpoint })
+    }
+
+    fn verify_reused(&self) -> Result<(), NetworkResponse> {
+        let current = current_heap_offset();
+        let bootstrap = bootstrap_mut();
+        bootstrap.tls_heap_after_last = current as u64;
+        if current != self.checkpoint {
+            return Err(NetworkResponse::Error {
+                code: NetworkError::Protocol.code(),
+            });
+        }
+        bootstrap.tls_transactions = bootstrap.tls_transactions.saturating_add(1);
+        Ok(())
+    }
+}
+
+impl Drop for TlsScratchGuard {
+    fn drop(&mut self) {
+        TLS_SCRATCH_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+fn drain_holder_exits(service: &mut NetworkService<SyscallRawLink, AllowAllAuthorizer>) {
     loop {
         let mut caller_buf = [0u8; 24];
         let status = net_request([
@@ -517,107 +811,61 @@ fn service_complete(
     Ok(())
 }
 
-struct ServiceClientLink {
-    handle: u64,
-    session: SessionId,
-    recv_payload: [u8; NETWORK_MAX_PAYLOAD_BYTES],
-}
-
-impl ServiceClientLink {
-    fn open() -> Result<Self, u64> {
-        let handle = client_handle()?;
-        let open = NetworkRequest::Open {
-            kind: SocketKind::Udp,
-        }
-        .encode();
-        let open_id = client_submit(handle, &open, &[])?;
-        let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-        let open_response = poll_until_done(handle, open_id, &mut payload)?;
-        let session = match open_response {
-            NetworkResponse::Open { session } => session,
-            _ => return Err(0),
-        };
-        Ok(Self {
-            handle,
-            session,
-            recv_payload: [0u8; NETWORK_MAX_PAYLOAD_BYTES],
-        })
-    }
-
-    fn close(&mut self) {
-        let close = NetworkRequest::Close {
-            session: self.session,
-        }
-        .encode();
-        if let Ok(close_id) = client_submit(self.handle, &close, &[]) {
-            let _ = poll_until_done(self.handle, close_id, &mut self.recv_payload);
-        }
+fn open_session(handle: u64, kind: SocketKind) -> Result<SessionId, u64> {
+    let open = NetworkRequest::Open { kind }.encode();
+    let open_id = client_submit(handle, &open, &[])?;
+    let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    match poll_until_done(handle, open_id, &mut payload)? {
+        NetworkResponse::Open { session } => Ok(session),
+        _ => Err(0),
     }
 }
 
-impl Drop for ServiceClientLink {
-    fn drop(&mut self) {
-        self.close();
+fn open_udp_session(handle: u64) -> Result<SessionId, u64> {
+    open_session(handle, SocketKind::Udp)
+}
+
+fn open_tcp_session(handle: u64) -> Result<SessionId, u64> {
+    open_session(handle, SocketKind::Tcp)
+}
+
+fn connect_session(handle: u64, session: SessionId, dest: SocketAddrV4) -> Result<(), u64> {
+    let request = NetworkRequest::Connect { session, dest }.encode();
+    let request_id = client_submit(handle, &request, &[])?;
+    let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    match poll_until_done(handle, request_id, &mut payload)? {
+        NetworkResponse::Connect => Ok(()),
+        NetworkResponse::Error { code } => Err(code as u64),
+        _ => Err(0),
     }
 }
 
-impl NetworkLink for ServiceClientLink {
-    fn link(&self) -> LinkProperties {
-        LinkProperties::new(GUEST_MAC, true)
+fn send_session(handle: u64, session: SessionId, payload: &[u8]) -> Result<u32, u64> {
+    let request = NetworkRequest::Send {
+        session,
+        payload_len: payload.len() as u32,
     }
-
-    fn state(&self) -> DeviceState {
-        DeviceState::Ready
+    .encode();
+    let request_id = client_submit(handle, &request, payload)?;
+    let mut response_payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    match poll_until_done(handle, request_id, &mut response_payload)? {
+        NetworkResponse::Send { bytes_sent } => Ok(bytes_sent),
+        NetworkResponse::Error { code } => Err(code as u64),
+        _ => Err(0),
     }
+}
 
-    fn transmit(&mut self, frame: FrameBuf) -> Result<(), (NetworkDeviceError, FrameBuf)> {
-        let bytes = frame.as_slice();
-        let request = NetworkRequest::Send {
-            session: self.session,
-            payload_len: bytes.len() as u32,
-        }
-        .encode();
-        let send_id = match client_submit(self.handle, &request, bytes) {
-            Ok(id) => id,
-            Err(_) => return Err((NetworkDeviceError::NotReady, frame)),
-        };
-        match poll_until_done(self.handle, send_id, &mut self.recv_payload) {
-            Ok(NetworkResponse::Send { bytes_sent }) if bytes_sent as usize == bytes.len() => {
-                Ok(())
-            }
-            _ => Err((NetworkDeviceError::NotReady, frame)),
-        }
+fn receive_session(handle: u64, session: SessionId, out: &mut [u8]) -> Result<usize, u64> {
+    let request = NetworkRequest::Receive {
+        session,
+        max_len: out.len() as u32,
     }
-
-    fn receive(&mut self) -> Result<Option<FrameBuf>, NetworkDeviceError> {
-        let request = NetworkRequest::Receive {
-            session: self.session,
-            max_len: MAX_ETHERNET_FRAME_BYTES as u32,
-        }
-        .encode();
-        let recv_id =
-            client_submit(self.handle, &request, &[]).map_err(|_| NetworkDeviceError::NotReady)?;
-        let response = poll_until_done(self.handle, recv_id, &mut self.recv_payload)
-            .map_err(|_| NetworkDeviceError::NotReady)?;
-        let payload_len = match response {
-            NetworkResponse::Receive { payload_len } => payload_len as usize,
-            _ => return Err(NetworkDeviceError::Malformed),
-        };
-        if payload_len == 0 {
-            return Ok(None);
-        }
-        FrameBuf::from_slice(&self.recv_payload[..payload_len])
-            .map(Some)
-            .map_err(|_| NetworkDeviceError::Malformed)
-    }
-
-    fn reset(&mut self) -> Result<(), NetworkDeviceError> {
-        self.close();
-        let refreshed = ServiceClientLink::open().map_err(|_| NetworkDeviceError::NotReady)?;
-        self.handle = refreshed.handle;
-        self.session = refreshed.session;
-        self.recv_payload = refreshed.recv_payload;
-        Ok(())
+    .encode();
+    let request_id = client_submit(handle, &request, &[])?;
+    match poll_until_done(handle, request_id, out)? {
+        NetworkResponse::Receive { payload_len } => Ok(payload_len as usize),
+        NetworkResponse::Error { code } => Err(code as u64),
+        _ => Err(0),
     }
 }
 
@@ -739,147 +987,96 @@ fn poll_until_done(
 
 fn run_converged_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
     bootstrap.aux_status = 1;
-    phase_heap_reset();
-    phase_heap_ensure_capacity(DNS_PHASE_HEAP_REQUIRED_BYTES)?;
     bootstrap.aux_status = 2;
-    run_dns_phase(bootstrap.service_generation)?;
+    let resolved_addr = run_dns_phase()?;
     bootstrap.aux_status = 3;
-    phase_heap_reset();
-    phase_heap_ensure_capacity(TLS_PHASE_HEAP_REQUIRED_BYTES)?;
     bootstrap.aux_status = 4;
-    let app_len = run_tls_phase(bootstrap.service_generation)?;
+    let first_len = run_tls_phase(resolved_addr)?;
     bootstrap.aux_status = 5;
-    bootstrap.echo_len = app_len as u64;
+    let second_len = run_tls_phase(resolved_addr)?;
+    bootstrap.echo_len = (first_len + second_len) as u64;
+    // Like `run_client_echo`, leave exactly one session open at exit: the kernel test
+    // expects holder-exit reclamation of that session and reuses its id for the
+    // inflight-failure and stale-generation-denial phases.
+    let handle = client_handle()?;
+    bootstrap.net_role_handle = handle;
+    let lingering = open_udp_session(handle)?;
+    bootstrap.session_id_raw = lingering.raw();
+    bootstrap.aux_status = 6;
     Ok(NETWORK_SERVICE_RESULT_OK)
 }
 
-fn phase_heap_reset() {
-    NEXT_HEAP_OFFSET.store(0, Ordering::SeqCst);
+fn run_dns_phase() -> Result<Ipv4Addr, u64> {
+    let handle = client_handle()?;
+    let name = BoundedHostname::try_from_str(FIXTURE_HOSTNAME).map_err(|_| 0u64)?;
+    let request = NetworkRequest::Resolve { name }.encode();
+    let request_id = client_submit(handle, &request, &[])?;
+    let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    let response = poll_until_done(handle, request_id, &mut payload)?;
+    match response {
+        NetworkResponse::Resolve { addr, ttl }
+            if addr == FIXTURE_A_RECORD && ttl == FIXTURE_A_TTL_SECS =>
+        {
+            Ok(addr)
+        }
+        NetworkResponse::Error { code } => Err(code as u64),
+        _ => Err(0),
+    }
 }
 
-fn phase_heap_ensure_capacity(required: usize) -> Result<(), u64> {
-    if required > HEAP_BYTES {
+fn run_tls_phase(resolved_addr: Ipv4Addr) -> Result<usize, u64> {
+    let handle = client_handle()?;
+    let session = open_tcp_session(handle)?;
+    let remote_tls = SocketAddrV4::new(resolved_addr, TLS_PORT);
+    connect_session(handle, session, remote_tls)?;
+    let bytes_sent = send_session(handle, session, APP_REQUEST_BYTES)?;
+    if bytes_sent as usize != APP_REQUEST_BYTES.len() {
         return Err(0);
     }
-    Ok(())
+    let mut app_buf = [0u8; 64];
+    let n = receive_session(handle, session, &mut app_buf)?;
+    if &app_buf[..n] != APP_RESPONSE_BYTES {
+        return Err(0);
+    }
+    let close = NetworkRequest::Close { session }.encode();
+    let close_id = client_submit(handle, &close, &[])?;
+    let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    match poll_until_done(handle, close_id, &mut payload)? {
+        NetworkResponse::Close => Ok(n),
+        NetworkResponse::Error { code } => Err(code as u64),
+        _ => Err(0),
+    }
 }
 
-fn run_dns_phase(generation: u64) -> Result<(), u64> {
-    let link = ServiceClientLink::open()?;
-    let mac = link.link().mac;
-    let stack = L3Stack::new(link, mac, GUEST_IPV4, ARP_TTL_TICKS);
-    let mut resolver = DnsResolver::alloc_boxed(
-        stack,
-        SessionGeneration::new(generation),
-        DNS_SERVER_ADDR,
-        DnsResolver::<ServiceClientLink>::DEFAULT_TICKS_PER_SEC,
-    );
-    let start = monotonic_ticks()?;
-    let deadline = start.saturating_add(DNS_QUERY_TIMEOUT_TICKS);
-    let query_id = match resolver
-        .resolve(start, OWNER, FIXTURE_HOSTNAME)
-        .map_err(map_dns_error_code)?
-    {
-        ResolveOutcome::Cached { addr, ttl } => {
-            if addr != FIXTURE_A_RECORD || ttl != FIXTURE_A_TTL_SECS {
-                return Err(0);
-            }
-            return Ok(());
-        }
-        ResolveOutcome::Pending { query_id } => query_id,
-    };
-
-    for _ in 0..DNS_POLL_LIMIT {
-        let now = monotonic_ticks()?;
-        resolver.poll(now).map_err(map_dns_error_code)?;
-        if let Some(result) = resolver.take_result(query_id, OWNER) {
-            let (addr, ttl) = result.map_err(map_dns_error_code)?;
-            if addr != FIXTURE_A_RECORD || ttl != FIXTURE_A_TTL_SECS {
-                return Err(0);
-            }
-            return Ok(());
+fn drain_tcp_close(
+    tcp: &mut TcpTransport<SyscallRawLink>,
+    owner: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+    start_tick: u64,
+) -> Result<(), NetworkResponse> {
+    let deadline = start_tick.saturating_add(TLS_CLOSE_TIMEOUT_TICKS);
+    for _ in 0..TLS_POLL_LIMIT {
+        let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+            code: NetworkError::Timeout.code(),
+        })?;
+        tcp.poll(now)
+            .map_err(|err| NetworkResponse::Error { code: err.code() })?;
+        match tcp.state(session, owner) {
+            Ok(state) if state.is_terminal() => return Ok(()),
+            Err(NetworkError::NotFound) => return Ok(()),
+            Ok(_) => {}
+            Err(err) => return Err(NetworkResponse::Error { code: err.code() }),
         }
         if now >= deadline {
             break;
         }
         yield_cpu();
     }
-    Err(0)
-}
-
-fn run_tls_phase(generation: u64) -> Result<usize, u64> {
-    let link = ServiceClientLink::open()?;
-    let mac = link.link().mac;
-    let mut tcp = TcpTransport::alloc_boxed(
-        L3Stack::new(link, mac, GUEST_IPV4, ARP_TTL_TICKS),
-        SessionGeneration::new(generation),
-    );
-    tcp.stack_mut()
-        .arp_cache_mut()
-        .insert(PEER_IPV4, PEER_MAC, 0);
-    let remote_tls = SocketAddrV4::new(PEER_IPV4, TLS_PORT);
-    let mut tick = monotonic_ticks()?;
-    let tcp_session = tcp
-        .connect(tick, OWNER, remote_tls)
-        .map_err(map_network_error_code)?;
-    tick = drive_tcp_until_established(&mut tcp, tcp_session, tick)?;
-
-    let mut read_buf = Box::new([0u8; TLS_RECORD_BUFFER_BYTES]);
-    let mut write_buf = Box::new([0u8; TLS_RECORD_BUFFER_BYTES]);
-    let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
-    let config = TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX);
-    let rng = RdrandRng::new()?;
-    let handshake_deadline = tick.saturating_add(8_192);
-    let (mut tls, _) = TlsSession::connect_with_handshake_deadline(
-        tick,
-        handshake_deadline,
-        &mut tcp,
-        OWNER,
-        remote_tls,
-        config,
-        rng,
-        read_buf.as_mut(),
-        write_buf.as_mut(),
-        None,
-    )
-    .map_err(map_tls_error_code)?;
-
-    write_all_tls(&mut tls, tick.saturating_add(1), APP_REQUEST_BYTES)?;
-    let mut app_buf = [0u8; 64];
-    let n = read_tls(&mut tls, tick.saturating_add(2), &mut app_buf)?;
-    if &app_buf[..n] != APP_RESPONSE_BYTES {
-        return Err(0);
-    }
-    let close_now = monotonic_ticks()?.saturating_add(TLS_CLOSE_TIMEOUT_TICKS);
-    tls.close(close_now).map_err(map_tls_error_code)?;
-    Ok(n)
-}
-
-fn drive_tcp_until_established(
-    tcp: &mut TcpTransport<ServiceClientLink>,
-    id: SessionId,
-    start_tick: u64,
-) -> Result<u64, u64> {
-    let deadline = start_tick.saturating_add(TCP_CONNECT_TIMEOUT_TICKS);
-    for _ in 0..TCP_POLL_LIMIT {
-        let tick = monotonic_ticks()?;
-        tcp.poll(tick).map_err(map_network_error_code)?;
-        match tcp.state(id, OWNER) {
-            Ok(TcpState::Established) => return Ok(tick),
-            Ok(TcpState::Reset) | Ok(TcpState::Closed) => return Err(0),
-            Ok(_) => {}
-            Err(_) => return Err(0),
-        }
-        if tick >= deadline {
-            break;
-        }
-        yield_cpu();
-    }
-    Err(0)
+    Ok(())
 }
 
 fn write_all_tls(
-    tls: &mut TlsSession<'_, '_, ServiceClientLink>,
+    tls: &mut TlsSession<'_, '_, SyscallRawLink>,
     start_tick: u64,
     data: &[u8],
 ) -> Result<(), u64> {
@@ -905,7 +1102,7 @@ fn write_all_tls(
 }
 
 fn read_tls(
-    tls: &mut TlsSession<'_, '_, ServiceClientLink>,
+    tls: &mut TlsSession<'_, '_, SyscallRawLink>,
     start_tick: u64,
     out: &mut [u8],
 ) -> Result<usize, u64> {
@@ -924,20 +1121,6 @@ fn read_tls(
         yield_cpu();
     }
     Err(0)
-}
-
-fn map_dns_error_code(err: DnsError) -> u64 {
-    match err {
-        DnsError::NameNotFound => 1,
-        DnsError::Timeout => 2,
-        DnsError::QueueFull => 3,
-        DnsError::Transport(_) => 4,
-        _ => 5,
-    }
-}
-
-fn map_network_error_code(_err: NetworkError) -> u64 {
-    6
 }
 
 fn map_tls_error_code(err: TlsError) -> u64 {

@@ -1,7 +1,7 @@
 //! M7.3 userspace network service state machine (host-testable, `no_std`-friendly).
 
-use clean_slate_network::buffer::FrameBuf;
-use clean_slate_network::device::{LinkProperties, NetworkDeviceError, NetworkLink};
+use clean_slate_network::addr::SocketAddrV4;
+use clean_slate_network::device::{LinkProperties, NetworkLink};
 use clean_slate_network::error::{DenialReason, NetworkError};
 use clean_slate_network::limits::{
     MAX_APPLICATION_PAYLOAD_BYTES, MAX_PENDING_REQUESTS_PER_SESSION, MAX_SESSIONS,
@@ -43,62 +43,6 @@ impl NetworkAuthorizer for DenyAllAuthorizer {
     }
 }
 
-/// Protocol-stack seam (#84 / #124 / #125 replace the passthrough impl).
-pub trait PacketPath {
-    fn on_send(
-        &mut self,
-        _session: SessionId,
-        payload: &[u8],
-        link: &mut dyn NetworkLink,
-    ) -> Result<u32, NetworkError>;
-
-    fn on_receive(
-        &mut self,
-        _session: SessionId,
-        max_len: u32,
-        link: &mut dyn NetworkLink,
-        out: &mut [u8],
-    ) -> Result<u32, NetworkError>;
-}
-
-pub struct PassthroughPacketPath;
-
-impl PacketPath for PassthroughPacketPath {
-    fn on_send(
-        &mut self,
-        _session: SessionId,
-        payload: &[u8],
-        link: &mut dyn NetworkLink,
-    ) -> Result<u32, NetworkError> {
-        let frame = FrameBuf::from_slice(payload).map_err(|_| NetworkError::InvalidRequest)?;
-        link.transmit(frame)
-            .map_err(|(err, _)| NetworkError::Transport(err))?;
-        Ok(payload.len() as u32)
-    }
-
-    fn on_receive(
-        &mut self,
-        _session: SessionId,
-        max_len: u32,
-        link: &mut dyn NetworkLink,
-        out: &mut [u8],
-    ) -> Result<u32, NetworkError> {
-        let max_len = max_len as usize;
-        if max_len > MAX_APPLICATION_PAYLOAD_BYTES || max_len > out.len() {
-            return Err(NetworkError::InvalidRequest);
-        }
-        match link.receive().map_err(NetworkError::Transport)? {
-            Some(frame) => {
-                let bytes = frame.as_slice();
-                let len = bytes.len().min(max_len);
-                out[..len].copy_from_slice(&bytes[..len]);
-                Ok(len as u32)
-            }
-            None => Ok(0),
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 struct PendingSlot {
     active: bool,
@@ -120,9 +64,11 @@ impl PendingSlot {
 struct SessionEntry {
     in_use: bool,
     owner: TrustedCaller,
-    #[allow(dead_code)]
     kind: SocketKind,
     state: SessionState,
+    connected_dest: Option<SocketAddrV4>,
+    staged_len: u32,
+    staged_payload: [u8; MAX_APPLICATION_PAYLOAD_BYTES],
     pending: [PendingSlot; MAX_PENDING_REQUESTS_PER_SESSION as usize],
     pending_count: u32,
 }
@@ -134,35 +80,35 @@ impl SessionEntry {
             owner: TrustedCaller::new(0, 0, 0),
             kind: SocketKind::Udp,
             state: SessionState::Closed,
+            connected_dest: None,
+            staged_len: 0,
+            staged_payload: [0; MAX_APPLICATION_PAYLOAD_BYTES],
             pending: [PendingSlot::empty(); MAX_PENDING_REQUESTS_PER_SESSION as usize],
             pending_count: 0,
         }
     }
 }
 
-pub struct NetworkService<L, A, P> {
+pub struct NetworkService<L, A> {
     generation: SessionGeneration,
     sessions: [SessionEntry; MAX_SESSIONS as usize],
     next_session_index: u32,
     total_pending: u32,
     authorizer: A,
-    packet_path: P,
     link: Option<L>,
 }
 
-impl<L, A, P> NetworkService<L, A, P>
+impl<L, A> NetworkService<L, A>
 where
     A: NetworkAuthorizer,
-    P: PacketPath,
 {
-    pub fn new(generation: SessionGeneration, authorizer: A, packet_path: P) -> Self {
+    pub fn new(generation: SessionGeneration, authorizer: A) -> Self {
         Self {
             generation,
             sessions: [SessionEntry::empty(); MAX_SESSIONS as usize],
             next_session_index: 0,
             total_pending: 0,
             authorizer,
-            packet_path,
             link: None,
         }
     }
@@ -252,6 +198,9 @@ where
                     owner: caller,
                     kind,
                     state: SessionState::Open,
+                    connected_dest: None,
+                    staged_len: 0,
+                    staged_payload: [0; MAX_APPLICATION_PAYLOAD_BYTES],
                     pending: [PendingSlot::empty(); MAX_PENDING_REQUESTS_PER_SESSION as usize],
                     pending_count: 0,
                 };
@@ -305,6 +254,48 @@ where
         *entry = SessionEntry::empty();
     }
 
+    fn stage_session_payload(
+        &mut self,
+        session_index: usize,
+        payload: &[u8],
+    ) -> Result<(), NetworkResponse> {
+        if payload.len() > MAX_APPLICATION_PAYLOAD_BYTES {
+            return Err(Self::error_response(NetworkError::InvalidRequest));
+        }
+        let entry = &mut self.sessions[session_index];
+        entry.staged_payload[..payload.len()].copy_from_slice(payload);
+        entry.staged_len = payload.len() as u32;
+        Ok(())
+    }
+
+    pub fn session_kind(
+        &self,
+        caller: TrustedCaller,
+        session: SessionId,
+    ) -> Result<SocketKind, NetworkResponse> {
+        let index = self.validate_session(&caller, session)?;
+        Ok(self.sessions[index].kind)
+    }
+
+    pub fn connected_dest(
+        &self,
+        caller: TrustedCaller,
+        session: SessionId,
+    ) -> Result<Option<SocketAddrV4>, NetworkResponse> {
+        let index = self.validate_session(&caller, session)?;
+        Ok(self.sessions[index].connected_dest)
+    }
+
+    pub fn stage_response_payload(
+        &mut self,
+        caller: TrustedCaller,
+        session: SessionId,
+        payload: &[u8],
+    ) -> Result<(), NetworkResponse> {
+        let index = self.validate_session(&caller, session)?;
+        self.stage_session_payload(index, payload)
+    }
+
     pub fn handle_request(
         &mut self,
         caller: TrustedCaller,
@@ -334,11 +325,12 @@ where
                 self.clear_session(index);
                 (NetworkResponse::Close, 0)
             }
-            NetworkRequest::Connect { session, .. } => {
+            NetworkRequest::Connect { session, dest } => {
                 let index = match self.validate_session(&caller, session) {
                     Ok(index) => index,
                     Err(response) => return (response, 0),
                 };
+                self.sessions[index].connected_dest = Some(dest);
                 self.sessions[index].state = SessionState::Open;
                 (NetworkResponse::Connect, 0)
             }
@@ -361,23 +353,16 @@ where
                 {
                     return (Self::error_response(NetworkError::QueueFull), 0);
                 }
-                let link = match self.link.as_mut() {
-                    Some(link) => link,
-                    None => {
-                        self.pop_pending(index, 0);
-                        return (
-                            Self::error_response(NetworkError::Transport(
-                                NetworkDeviceError::NotReady,
-                            )),
-                            0,
-                        );
-                    }
-                };
-                let result = self.packet_path.on_send(session, payload, link);
+                let result = self.stage_session_payload(index, payload);
                 self.pop_pending(index, 0);
                 match result {
-                    Ok(bytes_sent) => (NetworkResponse::Send { bytes_sent }, 0),
-                    Err(error) => (Self::error_response(error), 0),
+                    Ok(()) => (
+                        NetworkResponse::Send {
+                            bytes_sent: payload_len,
+                        },
+                        0,
+                    ),
+                    Err(response) => (response, 0),
                 }
             }
             NetworkRequest::Receive { session, max_len } => {
@@ -391,21 +376,18 @@ where
                 {
                     return (Self::error_response(NetworkError::QueueFull), 0);
                 }
-                let link = match self.link.as_mut() {
-                    Some(link) => link,
-                    None => {
-                        self.pop_pending(index, 0);
-                        return (
-                            Self::error_response(NetworkError::Transport(
-                                NetworkDeviceError::NotReady,
-                            )),
-                            0,
-                        );
+                let result = {
+                    let entry = &mut self.sessions[index];
+                    let max_len = max_len as usize;
+                    if max_len > MAX_APPLICATION_PAYLOAD_BYTES || max_len > response_payload.len() {
+                        Err(NetworkError::InvalidRequest)
+                    } else {
+                        let len = (entry.staged_len as usize).min(max_len);
+                        response_payload[..len].copy_from_slice(&entry.staged_payload[..len]);
+                        entry.staged_len = 0;
+                        Ok(len as u32)
                     }
                 };
-                let result = self
-                    .packet_path
-                    .on_receive(session, max_len, link, response_payload);
                 self.pop_pending(index, 0);
                 match result {
                     Ok(len) => (NetworkResponse::Receive { payload_len: len }, len),
@@ -470,12 +452,9 @@ mod tests {
     fn service_with_link(
         generation: u64,
         link: FakeLink,
-    ) -> NetworkService<FakeLink, AllowAllAuthorizer, PassthroughPacketPath> {
-        let mut service = NetworkService::new(
-            SessionGeneration::new(generation),
-            AllowAllAuthorizer,
-            PassthroughPacketPath,
-        );
+    ) -> NetworkService<FakeLink, AllowAllAuthorizer> {
+        let mut service =
+            NetworkService::new(SessionGeneration::new(generation), AllowAllAuthorizer);
         service.attach_backend(link);
         service
     }
@@ -623,11 +602,7 @@ mod tests {
 
     #[test]
     fn deny_all_authorizer() {
-        let mut service = NetworkService::new(
-            SessionGeneration::new(1),
-            DenyAllAuthorizer,
-            PassthroughPacketPath,
-        );
+        let mut service = NetworkService::new(SessionGeneration::new(1), DenyAllAuthorizer);
         service.attach_backend(FakeLink::new(test_mac(), true));
         let mut out = mut_buf();
         let (resp, _) = service.handle_request(
@@ -760,12 +735,10 @@ mod tests {
     }
 
     #[test]
-    fn fake_link_echo_between_services() {
-        let (link_a, link_b) = FakeLink::pair();
-        let mut service_a = service_with_link(1, link_a);
-        let mut service_b = service_with_link(2, link_b);
+    fn application_send_receive_stays_out_of_raw_link() {
+        let mut service = service_with_link(1, FakeLink::new(test_mac(), true));
         let mut out = mut_buf();
-        let (open_a, _) = service_a.handle_request(
+        let (open, _) = service.handle_request(
             caller(1),
             NetworkRequest::Open {
                 kind: SocketKind::Udp,
@@ -773,37 +746,25 @@ mod tests {
             &[],
             &mut out,
         );
-        let session_a = match open_a {
-            NetworkResponse::Open { session } => session,
-            _ => panic!("expected open"),
-        };
-        let (open_b, _) = service_b.handle_request(
-            caller(2),
-            NetworkRequest::Open {
-                kind: SocketKind::Udp,
-            },
-            &[],
-            &mut out,
-        );
-        let session_b = match open_b {
+        let session = match open {
             NetworkResponse::Open { session } => session,
             _ => panic!("expected open"),
         };
         let msg = b"hello-net";
-        let (send, _) = service_a.handle_request(
+        let (send, _) = service.handle_request(
             caller(1),
             NetworkRequest::Send {
-                session: session_a,
+                session,
                 payload_len: msg.len() as u32,
             },
             msg,
             &mut out,
         );
         assert!(matches!(send, NetworkResponse::Send { bytes_sent: 9 }));
-        let (recv, len) = service_b.handle_request(
-            caller(2),
+        let (recv, len) = service.handle_request(
+            caller(1),
             NetworkRequest::Receive {
-                session: session_b,
+                session,
                 max_len: 64,
             },
             &[],
@@ -816,6 +777,7 @@ mod tests {
         assert_eq!(payload_len, len);
         assert_eq!(len as usize, msg.len());
         assert_eq!(&out[..len as usize], msg);
+        assert_eq!(service.link.as_ref().expect("backend").tx_depth(), 0);
     }
 
     #[test]

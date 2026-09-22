@@ -5,8 +5,6 @@ use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 #[cfg(feature = "m7-network-self-test")]
 use crate::capability::network::set_network_audit_serial_echo;
-#[cfg(feature = "m7-network-self-test")]
-use crate::device::virtio::net::VirtioNetDevice;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
@@ -26,8 +24,6 @@ use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
 use crate::service::control::ServiceLifecycleController;
-#[cfg(feature = "m7-network-self-test")]
-use crate::service::net_bridge::net_bridge_mut;
 use crate::service::service_lifecycle_controller_mut;
 use crate::service::spawn::launch_network_aux_process;
 use crate::sync::global_cell::GlobalCell;
@@ -90,6 +86,7 @@ struct M7NetSelfTestState {
     phase: M7Phase,
     session_id_raw: u64,
     service_generation: u64,
+    service_pid: u64,
     fixtures: M7FixturePids,
 }
 
@@ -118,6 +115,51 @@ fn patch_fixture_bootstrap(
         patch(bootstrap);
     }
     activate_address_space_root(kernel_root);
+}
+
+fn read_fixture_bootstrap(pid: u64, kernel_root: u64) -> NetworkServiceBootstrap {
+    let root =
+        userspace_process_root_frame(pid).unwrap_or_else(|message| fatal_kernel_error(message));
+    activate_address_space_root(root);
+    let bootstrap_ptr = NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *const NetworkServiceBootstrap;
+    let mode = unsafe { core::ptr::addr_of!((*bootstrap_ptr).mode).read_volatile() };
+    let service_generation =
+        unsafe { core::ptr::addr_of!((*bootstrap_ptr).service_generation).read_volatile() };
+    let result_code = unsafe { core::ptr::addr_of!((*bootstrap_ptr).result_code).read_volatile() };
+    let aux_status = unsafe { core::ptr::addr_of!((*bootstrap_ptr).aux_status).read_volatile() };
+    let net_role_handle =
+        unsafe { core::ptr::addr_of!((*bootstrap_ptr).net_role_handle).read_volatile() };
+    let session_id_raw =
+        unsafe { core::ptr::addr_of!((*bootstrap_ptr).session_id_raw).read_volatile() };
+    let echo_len = unsafe { core::ptr::addr_of!((*bootstrap_ptr).echo_len).read_volatile() };
+    let reclaimed_sessions =
+        unsafe { core::ptr::addr_of!((*bootstrap_ptr).reclaimed_sessions).read_volatile() };
+    let reclaimed_pending =
+        unsafe { core::ptr::addr_of!((*bootstrap_ptr).reclaimed_pending).read_volatile() };
+    let inflight_failed =
+        unsafe { core::ptr::addr_of!((*bootstrap_ptr).inflight_failed).read_volatile() };
+    let tls_transactions =
+        unsafe { core::ptr::addr_of!((*bootstrap_ptr).tls_transactions).read_volatile() };
+    let tls_heap_checkpoint =
+        unsafe { core::ptr::addr_of!((*bootstrap_ptr).tls_heap_checkpoint).read_volatile() };
+    let tls_heap_after_last =
+        unsafe { core::ptr::addr_of!((*bootstrap_ptr).tls_heap_after_last).read_volatile() };
+    activate_address_space_root(kernel_root);
+    NetworkServiceBootstrap {
+        mode,
+        service_generation,
+        result_code,
+        aux_status,
+        net_role_handle,
+        session_id_raw,
+        echo_len,
+        reclaimed_sessions,
+        reclaimed_pending,
+        inflight_failed,
+        tls_transactions,
+        tls_heap_checkpoint,
+        tls_heap_after_last,
+    }
 }
 
 fn release_fixture_phase(pid: u64, kernel_root: u64) {
@@ -149,6 +191,7 @@ pub(crate) fn on_holder_exit_acked(holder_pid: u64, sessions: u64, pending: u64)
         phase: M7Phase::AwaitUnauthorized,
         session_id_raw: test_state.session_id_raw,
         service_generation: test_state.service_generation,
+        service_pid: test_state.service_pid,
         fixtures: test_state.fixtures,
     }));
 }
@@ -203,6 +246,7 @@ pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
         phase: M7Phase::AwaitClientEcho,
         session_id_raw: 0,
         service_generation: 1,
+        service_pid: 0,
         fixtures: M7FixturePids {
             client: 0,
             unauthorized: 0,
@@ -215,12 +259,6 @@ pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("m7 net allocator missing"));
     let controller = unsafe { service_lifecycle_controller_mut() };
-    #[cfg(feature = "m7-network-self-test")]
-    {
-        let device =
-            VirtioNetDevice::discover().unwrap_or_else(|message| fatal_kernel_error(message));
-        net_bridge_mut().install_virtio_backend(device);
-    }
     launch_network_service(
         controller,
         allocator,
@@ -234,6 +272,7 @@ pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
         phase: M7Phase::AwaitClientEcho,
         session_id_raw: 0,
         service_generation: 1,
+        service_pid: controller.live_pid(NETWORK_SERVICE_ID).unwrap_or(0),
         fixtures,
     }));
     initialize_timer();
@@ -356,7 +395,11 @@ fn terminate_network_service(
 pub(crate) fn handle_userspace_network_entry() -> u64 {
     let _pid =
         crate::process::current_process_id().unwrap_or_else(|message| fatal_kernel_error(message));
-    let report = unsafe { &*(NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *const NetworkServiceBootstrap) };
+    let report = unsafe {
+        core::ptr::read_volatile(
+            NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *const NetworkServiceBootstrap,
+        )
+    };
     let test_state = state();
     let kernel_root = kernel_root_frame();
     let mut session_id_raw = test_state.session_id_raw;
@@ -369,16 +412,50 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
     let next_phase = match (test_state.phase, report.mode) {
         (M7Phase::AwaitClientEcho, PRIMARY_CLIENT_MODE) => {
             if report.result_code != NETWORK_SERVICE_RESULT_OK {
+                kernel_log_fmt(format_args!(
+                    "[NET ] converged client error code={} result={}\n",
+                    report.aux_status, report.result_code
+                ));
                 fatal_kernel_error("m7 client echo failed");
             }
             kernel_log_fmt(format_args!(
                 "[NET ] converged phase progress={}\n",
                 report.aux_status
             ));
+            #[cfg(feature = "m7-network-self-test")]
+            let live_service_pid = controller.live_pid(NETWORK_SERVICE_ID).unwrap_or(0);
+            #[cfg(feature = "m7-network-self-test")]
+            if live_service_pid != test_state.service_pid {
+                fatal_kernel_error("m7 converged client changed live service pid");
+            }
+            #[cfg(feature = "m7-network-self-test")]
+            let service_bootstrap = read_fixture_bootstrap(live_service_pid, kernel_root);
+            #[cfg(feature = "m7-network-self-test")]
+            if service_bootstrap.service_generation != test_state.service_generation {
+                fatal_kernel_error("m7 converged client changed live service generation");
+            }
+            #[cfg(feature = "m7-network-self-test")]
+            if service_bootstrap.tls_transactions != 2 {
+                fatal_kernel_error("m7 converged client did not complete two tls transactions");
+            }
+            #[cfg(feature = "m7-network-self-test")]
+            if service_bootstrap.tls_heap_checkpoint == 0
+                || service_bootstrap.tls_heap_after_last != service_bootstrap.tls_heap_checkpoint
+            {
+                fatal_kernel_error("m7 converged client leaked tls scratch heap");
+            }
             session_id_raw = report.session_id_raw;
             kernel_log_fmt(format_args!(
                 "[NET ] session open id={}\n",
                 report.session_id_raw
+            ));
+            #[cfg(feature = "m7-network-self-test")]
+            kernel_log_fmt(format_args!(
+                "[NET ] tls reuse ok pid={} generation={} tx={} heap={}\n",
+                live_service_pid,
+                service_bootstrap.service_generation,
+                service_bootstrap.tls_transactions,
+                service_bootstrap.tls_heap_checkpoint,
             ));
             #[cfg(feature = "m7-network-self-test")]
             kernel_log_fmt(format_args!(
@@ -416,6 +493,7 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 phase: test_state.phase,
                 session_id_raw,
                 service_generation,
+                service_pid: test_state.service_pid,
                 fixtures: test_state.fixtures,
             }));
             launch_network_service(
@@ -477,6 +555,11 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
         phase: next_phase,
         session_id_raw,
         service_generation,
+        service_pid: if next_phase == M7Phase::AwaitStaleClose {
+            controller.live_pid(NETWORK_SERVICE_ID).unwrap_or(0)
+        } else {
+            test_state.service_pid
+        },
         fixtures: test_state.fixtures,
     }));
 

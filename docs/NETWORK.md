@@ -100,6 +100,13 @@ Kernel broker: `kernel/src/capability/network.rs`. Live generation lookup:
 - **Service instance:** `ResourceRef::network(logical_service_id, live_generation)` where
   `live_generation` comes from `live_network_service_generation()` /
   `ServiceLifecycleController::authoritative_generation(NETWORK_SERVICE_ID)`.
+- **Trusted caller identity:** queued work and holder-exit notifications carry the
+  caller’s `(pid, domain, live process instance_generation)` separately from the
+  network-service/session generation, so PID/domain reuse cannot claim stale
+  authority. The kernel process registry (`process::live_instance_generation`, via
+  `live_instance_generation_for_pid`) is the single source for that process generation;
+  it is never `0` for a registered process, and submit/poll deny (`EACCES`) rather than
+  attribute a caller whose generation cannot be resolved.
 - **Per-session (optional):** `ResourceRef::network_session(session_generation, session_index)`.
   Destination/port scoping is not encoded in `ResourceRef` for M7.7.
 
@@ -171,11 +178,11 @@ Each supervised network-service instance owns a fixed `SessionGeneration` assign
 
 ### Backend attach seam (#82 / #88)
 
-`NetworkService::attach_backend` / `detach_backend` hold the sole `NetworkLink` reference. The kernel bridge currently uses an in-kernel loopback link; VirtIO (#82) plugs in by attaching a real `NetworkLink` at service launch without changing the client IPC contract.
+`NetworkService::attach_backend` / `detach_backend` keep the raw `NetworkLink` on the service side only. Ordinary client `Open` / `Connect` / `Send` / `Receive` requests stage application payload in the bounded service buffers; the service-owned DNS/TCP/TLS bridge is what touches the raw link. The kernel bridge currently uses an in-kernel loopback link for M7.3 and attaches the real VirtIO `NetworkLink` for the converged M7.8 lane without changing the client IPC contract.
 
 ### Payload region
 
-`Send` / `Receive` IPC frames carry counts only; bytes move through the bounded payload region (`MAX_APPLICATION_PAYLOAD_BYTES`) associated with the client queue slot / service handler.
+`Send` / `Receive` IPC frames carry counts only; bytes move through the bounded payload region (`MAX_APPLICATION_PAYLOAD_BYTES`) associated with the client queue slot / service handler. Those bytes are always application payload, never caller-supplied Ethernet frames; raw frame injection remains gated by `NET_RAW_DEVICE`.
 
 ### Acceptance markers
 

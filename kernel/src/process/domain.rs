@@ -23,6 +23,7 @@ use crate::sched::scheduler_mut;
 use crate::sched::with_scheduler;
 use crate::sched::ThreadKind;
 use crate::sched::ThreadProcessResources;
+use crate::service::instance_generation::live_instance_generation_for_pid;
 use crate::service::net_bridge::{
     notify_holder_exit_for_process, reclaim_net_requests_for_holder,
     recover_net_queue_for_service_holder_exit,
@@ -140,13 +141,16 @@ pub(crate) fn teardown_current_process(
     let released_ipc: IpcProcessResources =
         unsafe { endpoint_table_mut().teardown_resources_for_pid(process_id)? };
     let holder = HolderId(process_id);
+    let holder_generation = live_instance_generation_for_pid(holder.0).map(|g| u64::from(g.0));
     recover_object_queue_for_service_holder_exit(holder);
     reclaim_object_requests_for_holder(holder);
     recover_net_queue_for_service_holder_exit(holder.0);
     let net_reclaimed = reclaim_net_requests_for_holder(holder.0);
     let sessions_cleared = crate::capability::network::on_holder_exit(holder);
     if net_reclaimed == 0 && sessions_cleared > 0 {
-        notify_holder_exit_for_process(holder.0);
+        if let Some(generation) = holder_generation {
+            notify_holder_exit_for_process(holder.0, generation);
+        }
     }
     revoke_for_holder(holder);
     revoke_for_process_resource(process_id);
@@ -257,13 +261,16 @@ pub(crate) fn teardown_process_by_id(
         let released_ipc: IpcProcessResources =
             unsafe { endpoint_table_mut().teardown_resources_for_pid(process_id)? };
         let holder = HolderId(process_id);
+        let holder_generation = live_instance_generation_for_pid(holder.0).map(|g| u64::from(g.0));
         recover_object_queue_for_service_holder_exit(holder);
         reclaim_object_requests_for_holder(holder);
         recover_net_queue_for_service_holder_exit(holder.0);
         let net_reclaimed = reclaim_net_requests_for_holder(holder.0);
         let sessions_cleared = crate::capability::network::on_holder_exit(holder);
         if net_reclaimed == 0 && sessions_cleared > 0 {
-            notify_holder_exit_for_process(holder.0);
+            if let Some(generation) = holder_generation {
+                notify_holder_exit_for_process(holder.0, generation);
+            }
         }
         revoke_for_holder(holder);
         revoke_for_process_resource(process_id);

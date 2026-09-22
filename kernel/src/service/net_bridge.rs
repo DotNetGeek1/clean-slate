@@ -1,9 +1,7 @@
 //! Kernel-hosted network bridge: client queue, loopback raw link, CPL3 service seam.
 
-#[cfg(feature = "m7-network-self-test")]
 use crate::device::virtio::net::VirtioNetDevice;
 use crate::diagnostics::log::kernel_log_fmt;
-use crate::service::instance_generation::live_network_service_generation;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_network::addr::MacAddr;
 use clean_slate_network::buffer::FrameBuf;
@@ -43,37 +41,51 @@ pub struct KernelLoopbackLink {
 }
 
 enum RawBackend {
-    Loopback(KernelLoopbackLink),
-    #[cfg(feature = "m7-network-self-test")]
-    Virtio(VirtioNetDevice),
+    Loopback,
+    Virtio,
 }
 
 impl RawBackend {
     const fn loopback() -> Self {
-        Self::Loopback(KernelLoopbackLink::new())
+        Self::Loopback
     }
 
-    fn reset(&mut self) -> Result<(), NetworkDeviceError> {
+    fn reset(
+        &mut self,
+        loopback: &mut KernelLoopbackLink,
+        virtio: Option<&mut VirtioNetDevice>,
+    ) -> Result<(), NetworkDeviceError> {
         match self {
-            Self::Loopback(link) => link.reset(),
-            #[cfg(feature = "m7-network-self-test")]
-            Self::Virtio(device) => device.reset(),
+            Self::Loopback => loopback.reset(),
+            Self::Virtio => virtio
+                .map(VirtioNetDevice::reset)
+                .unwrap_or(Err(NetworkDeviceError::NotReady)),
         }
     }
 
-    fn receive(&mut self) -> Result<Option<FrameBuf>, NetworkDeviceError> {
+    fn receive(
+        &mut self,
+        loopback: &mut KernelLoopbackLink,
+        virtio: Option<&mut VirtioNetDevice>,
+    ) -> Result<Option<FrameBuf>, NetworkDeviceError> {
         match self {
-            Self::Loopback(link) => link.receive(),
-            #[cfg(feature = "m7-network-self-test")]
-            Self::Virtio(device) => device.receive(),
+            Self::Loopback => loopback.receive(),
+            Self::Virtio => virtio
+                .map(VirtioNetDevice::receive)
+                .unwrap_or(Err(NetworkDeviceError::NotReady)),
         }
     }
 
-    fn geometry(&self) -> LinkProperties {
+    fn geometry(
+        &self,
+        loopback: &KernelLoopbackLink,
+        virtio: Option<&VirtioNetDevice>,
+    ) -> LinkProperties {
         match self {
-            Self::Loopback(link) => link.link(),
-            #[cfg(feature = "m7-network-self-test")]
-            Self::Virtio(device) => device.link(),
+            Self::Loopback => loopback.link(),
+            Self::Virtio => virtio
+                .map(VirtioNetDevice::link)
+                .unwrap_or(LinkProperties::new(LOOPBACK_MAC, false)),
         }
     }
 }
@@ -195,7 +207,9 @@ pub(crate) struct NetBridge {
     service_pid: u64,
     service_domain: u64,
     session_generation: SessionGeneration,
+    loopback: KernelLoopbackLink,
     raw_backend: RawBackend,
+    virtio: Option<VirtioNetDevice>,
     slots: [ClientSlot; NETWORK_REQUEST_SLOTS],
     next_request_id: u64,
     inflight_failed: u32,
@@ -214,7 +228,9 @@ impl NetBridge {
             service_pid: 0,
             service_domain: 0,
             session_generation: SessionGeneration::new(0),
+            loopback: KernelLoopbackLink::new(),
             raw_backend: RawBackend::loopback(),
+            virtio: None,
             slots: [ClientSlot::free(); NETWORK_REQUEST_SLOTS],
             next_request_id: 1,
             inflight_failed: 0,
@@ -233,7 +249,10 @@ impl NetBridge {
         domain: u64,
         generation: u64,
     ) -> SessionGeneration {
-        let _ = self.raw_backend.reset();
+        self.ensure_virtio_backend();
+        let _ = self
+            .raw_backend
+            .reset(&mut self.loopback, self.virtio.as_mut());
         self.holder_exit_head = 0;
         self.holder_exit_tail = 0;
         self.pending_holder_exit_ack = None;
@@ -247,14 +266,26 @@ impl NetBridge {
         self.session_generation
     }
 
-    #[cfg(feature = "m7-network-self-test")]
     pub fn install_virtio_backend(&mut self, device: VirtioNetDevice) {
         let mac = device.link().mac;
-        self.raw_backend = RawBackend::Virtio(device);
+        self.virtio = Some(device);
+        self.raw_backend = RawBackend::Virtio;
         kernel_log_fmt(format_args!(
             "[NET ] raw backend=virtio mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
             mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5],
         ));
+    }
+
+    fn ensure_virtio_backend(&mut self) {
+        #[cfg(not(test))]
+        {
+            if matches!(self.raw_backend, RawBackend::Virtio) {
+                return;
+            }
+            if let Ok(device) = VirtioNetDevice::discover() {
+                self.install_virtio_backend(device);
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -280,11 +311,8 @@ impl NetBridge {
         self.service_pid != 0 && self.service_pid == pid
     }
 
-    fn trusted_caller(&self, pid: u64, domain: u64, _instance_generation: u64) -> TrustedCaller {
-        let generation = live_network_service_generation()
-            .map(|g| u64::from(g.0))
-            .unwrap_or(0);
-        TrustedCaller::new(pid, domain, generation)
+    fn trusted_caller(&self, pid: u64, domain: u64, instance_generation: u64) -> TrustedCaller {
+        TrustedCaller::new(pid, domain, instance_generation)
     }
 
     pub fn push_holder_exit(&mut self, caller: TrustedCaller) {
@@ -296,11 +324,8 @@ impl NetBridge {
         self.holder_exit_tail = next;
     }
 
-    fn holder_exit_caller(&self, pid: u64, domain: u64) -> TrustedCaller {
-        let generation = live_network_service_generation()
-            .map(|g| u64::from(g.0))
-            .unwrap_or(0);
-        TrustedCaller::new(pid, domain, generation)
+    fn holder_exit_caller(&self, pid: u64, domain: u64, instance_generation: u64) -> TrustedCaller {
+        TrustedCaller::new(pid, domain, instance_generation)
     }
 
     #[cfg(feature = "m7-net-service-self-test")]
@@ -388,7 +413,7 @@ impl NetBridge {
             .position(|slot| slot.request_id == request_id)
             .ok_or(NetBridgeError::InvalidRequest)?;
         let slot = &self.slots[index];
-        if slot.client.pid != caller.pid {
+        if slot.client != caller {
             return Err(NetBridgeError::Unauthorized);
         }
         match slot.state {
@@ -461,7 +486,7 @@ impl NetBridge {
             }
         }
         if let Some(caller) = caller {
-            self.push_holder_exit(self.holder_exit_caller(caller.pid, caller.domain));
+            self.push_holder_exit(caller);
         }
         reclaimed
     }
@@ -479,7 +504,9 @@ impl NetBridge {
             }
         }
         self.inflight_failed = self.inflight_failed.saturating_add(failed);
-        let _ = self.raw_backend.reset();
+        let _ = self
+            .raw_backend
+            .reset(&mut self.loopback, self.virtio.as_mut());
         self.service_pid = 0;
         failed
     }
@@ -504,9 +531,11 @@ impl NetBridge {
             return Err(NetworkDeviceError::NotReady);
         }
         match &mut self.raw_backend {
-            RawBackend::Loopback(link) => link.transmit(frame),
-            #[cfg(feature = "m7-network-self-test")]
-            RawBackend::Virtio(device) => device.transmit(frame),
+            RawBackend::Loopback => self.loopback.transmit(frame),
+            RawBackend::Virtio => match self.virtio.as_mut() {
+                Some(device) => device.transmit(frame),
+                None => Err((NetworkDeviceError::NotReady, frame)),
+            },
         }
         .map_err(|(err, _)| err)
     }
@@ -518,12 +547,14 @@ impl NetBridge {
         if !self.is_live_service(service_pid) {
             return Err(NetworkDeviceError::NotReady);
         }
-        self.raw_backend.receive()
+        self.raw_backend
+            .receive(&mut self.loopback, self.virtio.as_mut())
     }
 
     pub fn raw_geometry(&self, service_pid: u64) -> LinkProperties {
         if self.is_live_service(service_pid) {
-            self.raw_backend.geometry()
+            self.raw_backend
+                .geometry(&self.loopback, self.virtio.as_ref())
         } else {
             LinkProperties::new(LOOPBACK_MAC, false)
         }
@@ -568,12 +599,12 @@ pub(crate) fn reclaim_net_requests_for_holder(pid: u64) -> usize {
     reclaimed
 }
 
-pub(crate) fn notify_holder_exit_for_process(process_id: u64) {
+pub(crate) fn notify_holder_exit_for_process(process_id: u64, instance_generation: u64) {
     let bridge = net_bridge_mut();
     if bridge.service_pid() == 0 || bridge.service_pid() == process_id {
         return;
     }
-    let caller = bridge.holder_exit_caller(process_id, process_id);
+    let caller = bridge.holder_exit_caller(process_id, process_id, instance_generation);
     bridge.push_holder_exit(caller);
 }
 
@@ -620,5 +651,37 @@ mod tests {
             bridge.poll(20, 1, 1, id, &mut payload),
             Err(NetBridgeError::Pending)
         ));
+    }
+
+    #[test]
+    fn bridge_poll_rejects_replacement_process_generation() {
+        let mut bridge = NetBridge::new();
+        bridge.register_service_instance(10, 1, 3);
+        let open = NetworkRequest::Open {
+            kind: SocketKind::Udp,
+        }
+        .encode();
+        let id = bridge.submit(20, 20, 1, &open, &[]).unwrap();
+        let mut payload = [0u8; 64];
+        assert!(matches!(
+            bridge.poll(20, 20, 2, id, &mut payload),
+            Err(NetBridgeError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn reclaim_for_holder_preserves_original_trusted_caller_generation() {
+        let mut bridge = NetBridge::new();
+        bridge.register_service_instance(10, 1, 3);
+        let open = NetworkRequest::Open {
+            kind: SocketKind::Udp,
+        }
+        .encode();
+        bridge.submit(20, 20, 7, &open, &[]).unwrap();
+        assert_eq!(bridge.reclaim_for_holder(20), 1);
+        assert_eq!(
+            bridge.pop_holder_exit(),
+            Some(TrustedCaller::new(20, 20, 7))
+        );
     }
 }
