@@ -453,6 +453,15 @@ impl ServiceLifecycleController {
         Ok(slot)
     }
 
+    #[cfg(any(
+        feature = "m8-linux-hello",
+        feature = "m4-recovery-self-test",
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-early-self-test",
+        feature = "m5-crash-late-self-test",
+        feature = "m5-crash-recovery-self-test"
+    ))]
     fn per_slot_kernel_stack_top(scheduler_slot: usize) -> Result<u64, LifecycleControlError> {
         use crate::arch::x86_64::context_switch::task_stack_top;
         use crate::sched::task_stacks_mut;
