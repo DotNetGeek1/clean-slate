@@ -81,6 +81,9 @@ jobs:
       - name: Clippy (linux-abi)
         run: cargo clippy -p clean-slate-linux-abi --all-targets -- -D warnings
 
+      - name: Clippy (elf)
+        run: cargo clippy -p clean-slate-elf --all-targets -- -D warnings
+
       - name: Clippy (store)
         run: cargo clippy -p clean-slate-store --all-targets -- -D warnings
 
@@ -116,6 +119,7 @@ jobs:
           cargo test -p clean-slate-store
           cargo test -p clean-slate-capability
           cargo test -p clean-slate-linux-abi
+          cargo test -p clean-slate-elf
           cargo test -p clean-slate-kernel
           cargo test -p clean-slate-kernel --features m3-entry-self-test
           cargo test -p clean-slate-kernel --features m3-address-space-self-test

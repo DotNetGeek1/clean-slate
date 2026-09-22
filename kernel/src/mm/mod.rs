@@ -1,5 +1,6 @@
 pub(crate) mod address_space;
 pub(crate) mod frame_allocator;
+pub(crate) mod image_loader;
 pub(crate) mod paging;
 pub(crate) mod region;
 pub(crate) mod user_mapping;

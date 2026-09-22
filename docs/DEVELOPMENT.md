@@ -455,6 +455,23 @@ Expected workflows include breakpoints in kernel entry, page-fault handlers, sch
 
 4. GDB will stop on a trap once `efi_main` is executing (`SIGTRAP`). From there, single-step or set additional breakpoints.
 
+## M8.0 ELF load-plan foundation
+
+M8.0 introduces `clean-slate-elf` (`elf/`), a `no_std` validated ELF64 load-plan
+representation shared by native userspace embedding and the future Linux runtime
+loader (#92).
+
+- `parse_load_plan` validates headers/PT_LOAD metadata with checked arithmetic,
+  W^X policy, user-VA window bounds, overlap detection, and exact mapped-page
+  derivation. Zero-fill (`p_memsz - p_filesz`) is never serialized as file bytes.
+- `kernel/build.rs` emits file-backed bytes plus a generated segment table; native
+  `.rela.dyn` `R_X86_64_RELATIVE` relocation handling remains build-time only.
+- `kernel/src/mm/image_loader.rs` transactionally maps segments (file copy, BSS
+  zero-fill including partial final file pages, segment-derived R/W/X, rollback on
+  failure). Native spawn paths consume generated metadata; #92 should call
+  `map_load_plan_segments` with a Linux `LoadPlanPolicy` rather than inventing a
+  second parser.
+
 ## Kernel source layout
 
 `kernel/src/lib.rs` is a thin crate-composition file: crate attributes, the module list, the three `pub` re-exports `main.rs` needs (`serial_write_line`, `serial_write_fmt`, `qemu_exit_failure`) and `pub fn run()`, which forwards to `boot::run`. Kernel-internal mechanism and policy still live in subsystem modules inside the same `clean-slate-kernel` crate, while transport-independent shared contracts that need host tests can live in separate workspace crates such as `clean-slate-block`.
@@ -480,6 +497,7 @@ kernel/src
 │   ├── frame_allocator.rs PageAllocator (physical frames)
 │   ├── paging.rs          page-table walking, current root frame, zero_page
 │   ├── address_space.rs   per-process roots, kernel-root sanitization/validation
+│   ├── image_loader.rs    segment-aware transactional userspace image mapping
 │   └── user_mapping.rs    map/unmap of userspace pages and mapping validation
 ├── process/               Process, ResourceDomain, ProcessRegistry, teardown coordinator; id_allocator.rs, domain.rs
 ├── sched/                 Thread, Scheduler, TASK_STACKS; dispatch.rs (start/schedule), demo_tasks.rs

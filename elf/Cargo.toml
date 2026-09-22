@@ -1,0 +1,13 @@
+[package]
+name = "clean-slate-elf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "M8.0 validated ELF64 load-plan representation for native embedding and Linux runtime loading"
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

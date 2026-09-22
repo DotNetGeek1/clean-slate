@@ -128,6 +128,25 @@ const STORAGE_SERVICE_STACK_ADDRESS: u64 = STORAGE_SERVICE_BOOTSTRAP_ADDRESS + P
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test"
 ))]
+const STORAGE_SERVICE_STACK_PAGES: u64 = 8;
+// Deliberate fixed upper bound on storage image PT_LOAD pages. The exact demand is
+// `STORAGE_USERSPACE_MAPPED_CODE_PAGES` from build-time load-plan metadata; keep this
+// ceiling so a grown image fails at compile/launch time instead of mid-map. Do not raise
+// `MAX_ADDRESS_SPACE_USER_MAPPINGS` just to absorb an oversized image.
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
 const STORAGE_SERVICE_MAX_CODE_PAGES: usize = 64;
 #[cfg(any(
     feature = "m5-storage-self-test",
@@ -143,10 +162,7 @@ const STORAGE_SERVICE_MAX_CODE_PAGES: usize = 64;
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test"
 ))]
-const STORAGE_SERVICE_STACK_PAGES: u64 = 8;
-// The storage image budget (code + stack + bootstrap page) must fit the
-// per-process mapping table, otherwise a large image fails midway through
-// mapping instead of being rejected up front.
+const _: () = assert!(STORAGE_USERSPACE_MAPPED_CODE_PAGES <= STORAGE_SERVICE_MAX_CODE_PAGES);
 #[cfg(any(
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
@@ -162,7 +178,7 @@ const STORAGE_SERVICE_STACK_PAGES: u64 = 8;
     feature = "m6-fixture-smoke-self-test"
 ))]
 const STORAGE_SERVICE_MAPPED_PAGES: usize =
-    STORAGE_SERVICE_MAX_CODE_PAGES + STORAGE_SERVICE_STACK_PAGES as usize + 1;
+    STORAGE_USERSPACE_MAPPED_CODE_PAGES + STORAGE_SERVICE_STACK_PAGES as usize + 1;
 #[cfg(any(
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
@@ -238,6 +254,8 @@ const M6_FIXTURE_STACK_PAGES: u64 = 4;
 ))]
 const M6_FIXTURE_STACK_ADDRESS: u64 =
     M6_FIXTURE_BOOTSTRAP_ADDRESS + M6_FIXTURE_BOOTSTRAP_PAGES * PAGE_SIZE;
+// Deliberate fixed upper bound on M6 fixture PT_LOAD pages; exact demand comes from
+// `M6_FIXTURE_USERSPACE_MAPPED_CODE_PAGES` generated metadata.
 #[cfg(any(
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
@@ -259,7 +277,18 @@ const M6_FIXTURE_MAX_CODE_PAGES: usize = 16;
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test"
 ))]
-const M6_FIXTURE_MAPPED_PAGES: usize = M6_FIXTURE_MAX_CODE_PAGES
+const _: () = assert!(M6_FIXTURE_USERSPACE_MAPPED_CODE_PAGES <= M6_FIXTURE_MAX_CODE_PAGES);
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+const M6_FIXTURE_MAPPED_PAGES: usize = M6_FIXTURE_USERSPACE_MAPPED_CODE_PAGES
     + M6_FIXTURE_BOOTSTRAP_PAGES as usize
     + M6_FIXTURE_STACK_PAGES as usize;
 #[cfg(any(
@@ -465,14 +494,74 @@ pub(crate) fn launch_builtin_service(
     }
 }
 
-/// Registers a freshly built process/thread pair with the process registry and
-/// scheduler. Shared tail of every launch path.
+/// Pure registration preconditions shared by the checked launch path and host tests.
 #[cfg(not(any(
     feature = "m1-self-test",
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
-fn register_spawned_process(
+fn registration_preconditions_ok(
+    scheduler_slot: usize,
+    thread_capacity: usize,
+    slot_is_empty: bool,
+    occupied_slots: usize,
+    registry_capacity: usize,
+) -> Result<(), &'static str> {
+    if scheduler_slot >= thread_capacity {
+        return Err("supervised launch: scheduler slot exceeded fixed capacity");
+    }
+    if !slot_is_empty {
+        return Err("supervised launch: scheduler slot was occupied");
+    }
+    if occupied_slots >= registry_capacity {
+        return Err("supervised launch: process registry capacity exceeded");
+    }
+    Ok(())
+}
+
+/// Remove a process that was inserted but whose scheduler configuration failed:
+/// destroy its address space, reap the record and release the registry slot.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+fn rollback_registered_spawned_process(
+    pid: u64,
+    allocator: &mut PageAllocator,
+) -> Result<(), &'static str> {
+    use crate::mm::address_space::destroy_process_address_space;
+    use crate::process::process_registry_mut;
+    use crate::process::reap_process_record;
+
+    let registry = unsafe { process_registry_mut() };
+    let record = registry
+        .get_mut(pid)
+        .ok_or("supervised launch rollback: process missing from registry")?;
+    let address_space = record
+        .resource_domain
+        .take_address_space()
+        .ok_or("supervised launch rollback: process had no address space")?;
+    destroy_process_address_space(&address_space, allocator)?;
+    record.live_threads = 0;
+    reap_process_record(record)?;
+    registry.release_reaped(pid)
+}
+
+/// Registers a freshly built process/thread pair with the process registry and
+/// scheduler without launch preconditions.
+///
+/// Callers must pre-check scheduler/registry capacity (or accept a silent
+/// address-space leak / Ready-without-thread zombie on failure). Prefer
+/// [`register_spawned_process_checked`].
+// TODO(#97): migrate remaining callers to `register_spawned_process_checked`.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+#[allow(dead_code)] // No in-tree callers until #139/#97; kept for downstream self-test sibling.
+pub(crate) fn register_spawned_process(
     address_space: crate::mm::address_space::ProcessAddressSpace,
     pid: u64,
     tid: u64,
@@ -519,6 +608,187 @@ fn register_spawned_process(
     })
 }
 
+/// Transactional registration: pre-check scheduler/registry under
+/// `without_interrupts`, destroy the address space on precondition failure, and
+/// roll back a post-insert `configure_thread` failure fail-closed.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+#[allow(clippy::too_many_arguments)]
+fn register_spawned_process_checked(
+    allocator: &mut PageAllocator,
+    address_space: crate::mm::address_space::ProcessAddressSpace,
+    pid: u64,
+    tid: u64,
+    kernel_stack_top: u64,
+    saved_stack_pointer: u64,
+    launch_entry: u64,
+    scheduler_slot: usize,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    use crate::arch::x86_64::cpu::without_interrupts;
+    use crate::ipc::endpoint_table_mut;
+    use crate::process::personality::ExecutionPersonality;
+    use crate::process::process_registry_mut;
+    use crate::process::Process;
+    use crate::process::ProcessState;
+    use crate::process::ResourceDomain;
+    use crate::process::PROCESS_REGISTRY_CAPACITY;
+    use crate::sched::scheduler_mut;
+    use crate::sched::ThreadKind;
+    use crate::sched::ThreadState;
+
+    enum RegisterOutcome {
+        Ready(SpawnedServiceInstance),
+        Precondition(&'static str),
+        ConfigureFailed { pid: u64, message: &'static str },
+        InsertFailed(&'static str),
+    }
+
+    let mut address_space_slot = Some(address_space);
+    let outcome = without_interrupts(|| {
+        let precondition = unsafe {
+            let scheduler = scheduler_mut();
+            let slot_is_empty = scheduler_slot < scheduler.thread_capacity()
+                && scheduler.threads[scheduler_slot].state == ThreadState::Empty;
+            registration_preconditions_ok(
+                scheduler_slot,
+                scheduler.thread_capacity(),
+                slot_is_empty,
+                process_registry_mut().occupied_slots(),
+                PROCESS_REGISTRY_CAPACITY,
+            )
+        };
+        if let Err(message) = precondition {
+            return RegisterOutcome::Precondition(message);
+        }
+
+        let address_space = match address_space_slot.take() {
+            Some(space) => space,
+            None => {
+                return RegisterOutcome::InsertFailed(
+                    "supervised launch: address space missing during registration",
+                );
+            }
+        };
+        let process = Process {
+            id: pid,
+            instance_generation: clean_slate_service_lifecycle::InstanceGeneration(0),
+            state: ProcessState::Ready,
+            resource_domain: ResourceDomain::with_address_space(pid, address_space),
+            live_threads: 1,
+            exit_status: None,
+            execution_personality: ExecutionPersonality::Native,
+        };
+        if let Err(message) = unsafe { process_registry_mut().insert(process) } {
+            return RegisterOutcome::InsertFailed(message);
+        }
+        if let Err(message) = unsafe {
+            scheduler_mut().configure_thread(
+                scheduler_slot,
+                tid,
+                pid,
+                ThreadKind::User,
+                kernel_stack_top,
+                saved_stack_pointer,
+                launch_entry,
+            )
+        } {
+            return RegisterOutcome::ConfigureFailed { pid, message };
+        }
+        let _ = unsafe { endpoint_table_mut() };
+        RegisterOutcome::Ready(SpawnedServiceInstance {
+            pid,
+            tid,
+            domain_id: pid,
+            scheduler_slot,
+        })
+    });
+
+    match outcome {
+        RegisterOutcome::Ready(instance) => Ok(instance),
+        RegisterOutcome::Precondition(message) => {
+            let address_space = address_space_slot
+                .as_ref()
+                .expect("precondition failure retains address space");
+            discard_address_space(address_space, allocator, message)
+        }
+        RegisterOutcome::ConfigureFailed { pid, message } => {
+            match rollback_registered_spawned_process(pid, allocator) {
+                Ok(()) => Err(message),
+                Err(rollback) => Err(rollback),
+            }
+        }
+        RegisterOutcome::InsertFailed(message) => Err(message),
+    }
+}
+
+/// User mapping flags for a single-page built-in code image.
+///
+/// Payload bytes are written through the kernel identity map
+/// (`PHYSICAL_MEMORY_OFFSET + frame`) before this mapping is installed, so the
+/// CPL3 view must never be writable (architectural W^X).
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+fn single_page_code_page_flags() -> x86_64::structures::paging::PageTableFlags {
+    use x86_64::structures::paging::PageTableFlags;
+    PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE
+}
+
+/// Tear down a freshly created process address space after a failed launch.
+///
+/// Prefer the destroy error when teardown itself fails (fail closed).
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+fn discard_address_space(
+    address_space: &crate::mm::address_space::ProcessAddressSpace,
+    allocator: &mut PageAllocator,
+    original_error: &'static str,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    match crate::mm::address_space::destroy_process_address_space(address_space, allocator) {
+        Ok(()) => Err(original_error),
+        Err(destroy_error) => Err(destroy_error),
+    }
+}
+
+/// Create a process address space, run `body`, and destroy it if `body` fails
+/// before taking ownership (for `register_spawned_process`).
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+fn with_process_address_space<F>(
+    allocator: &mut PageAllocator,
+    user_region_base: x86_64::VirtAddr,
+    body: F,
+) -> Result<SpawnedServiceInstance, &'static str>
+where
+    F: FnOnce(
+        &mut PageAllocator,
+        &mut Option<crate::mm::address_space::ProcessAddressSpace>,
+    ) -> Result<SpawnedServiceInstance, &'static str>,
+{
+    let mut address_space_slot = Some(crate::mm::address_space::create_process_address_space(
+        allocator,
+        user_region_base,
+    )?);
+    match body(allocator, &mut address_space_slot) {
+        Ok(instance) => Ok(instance),
+        Err(error) => match address_space_slot.as_ref() {
+            Some(address_space) => discard_address_space(address_space, allocator, error),
+            None => Err(error),
+        },
+    }
+}
+
 /// Launches the single-page built-in images (`ImmediateExit`, M3 user-test payload).
 #[cfg(not(any(
     feature = "m1-self-test",
@@ -550,7 +820,6 @@ fn launch_single_page_service(
     use crate::arch::x86_64::asm::clean_slate_user_address_space_test_start;
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
     use crate::diagnostics::log::kernel_log_fmt;
-    use crate::mm::address_space::create_process_address_space;
     use crate::mm::address_space::map_process_page;
     use crate::mm::paging::zero_page;
     use crate::mm::PHYSICAL_MEMORY_OFFSET;
@@ -600,17 +869,99 @@ fn launch_single_page_service(
         _ => SERVICE_USER_CODE_ADDRESS + PAGE_SIZE,
     };
 
-    let mut address_space = create_process_address_space(allocator, VirtAddr::new(code_address))?;
-    let (pid, tid) = {
-        let ids = unsafe { id_allocator_mut() };
-        (ids.allocate_pid()?, ids.allocate_tid()?)
-    };
+    with_process_address_space(allocator, VirtAddr::new(code_address), |allocator, slot| {
+        let address_space = slot
+            .as_mut()
+            .ok_or("supervised service address space missing")?;
+        let (pid, tid) = {
+            let ids = unsafe { id_allocator_mut() };
+            (ids.allocate_pid()?, ids.allocate_tid()?)
+        };
 
-    let code_frame = allocator
-        .allocate_page()
-        .ok_or("allocator could not provide a code page for supervised service")?;
-    zero_page(code_frame);
-    match image {
+        let code_frame = allocator
+            .allocate_page()
+            .ok_or("allocator could not provide a code page for supervised service")?;
+        zero_page(code_frame);
+        match image {
+            #[cfg(any(
+                feature = "m3-address-space-self-test",
+                feature = "m3-resources-self-test",
+                feature = "m4-crash-service-self-test",
+                feature = "m4-recovery-self-test",
+                feature = "m4-service-lifecycle-self-test"
+            ))]
+            BuiltinServiceImage::M3UserTestPayload => copy_m3_user_test_payload(code_frame)?,
+            #[cfg(any(
+                feature = "m5-storage-self-test",
+                feature = "m5-persistence-self-test",
+                feature = "m5-crash-early-self-test",
+                feature = "m5-crash-late-self-test",
+                feature = "m5-crash-recovery-self-test",
+                feature = "m6-object-self-test",
+                feature = "m6-process-control-self-test",
+                feature = "m6-delegation-self-test",
+                feature = "m6-revocation-self-test",
+                feature = "m6-audit-self-test",
+                feature = "m6-capabilities-self-test",
+                feature = "m6-fixture-smoke-self-test"
+            ))]
+            BuiltinServiceImage::StorageUserspacePayload => {
+                return Err("storage userspace image must use the storage launch path");
+            }
+            #[cfg(any(
+                feature = "m6-object-self-test",
+                feature = "m6-process-control-self-test",
+                feature = "m6-delegation-self-test",
+                feature = "m6-revocation-self-test",
+                feature = "m6-audit-self-test",
+                feature = "m6-capabilities-self-test",
+                feature = "m6-fixture-smoke-self-test",
+                feature = "m7-net-caps-self-test"
+            ))]
+            BuiltinServiceImage::M6FixturePayload => {
+                return Err("m6 fixture image must use the fixture launch path");
+            }
+            #[cfg(feature = "m7-net-service-self-test")]
+            BuiltinServiceImage::NetworkUserspacePayload => {
+                return Err("network userspace image must use the network launch path");
+            }
+            BuiltinServiceImage::ImmediateExit => unsafe {
+                ptr::write(
+                    (PHYSICAL_MEMORY_OFFSET + code_frame) as *mut ImmediateExitPage,
+                    ImmediateExitPage {
+                        halt_instruction: 0xF4F4,
+                    },
+                );
+            },
+        }
+        map_process_page(
+            address_space,
+            code_address,
+            code_frame,
+            single_page_code_page_flags(),
+            allocator,
+        )
+        .inspect_err(|&message| {
+            kernel_log_fmt(format_args!(
+                "[FAIL] map code image={image:?} va={code_address:#x} err={message}\n"
+            ));
+        })?;
+
+        let stack_frame = allocator
+            .allocate_page()
+            .ok_or("allocator could not provide a stack page for supervised service")?;
+        zero_page(stack_frame);
+        map_process_page(
+            address_space,
+            stack_address,
+            stack_frame,
+            PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::NO_EXECUTE
+                | PageTableFlags::USER_ACCESSIBLE,
+            allocator,
+        )?;
+
         #[cfg(any(
             feature = "m3-address-space-self-test",
             feature = "m3-resources-self-test",
@@ -618,113 +969,39 @@ fn launch_single_page_service(
             feature = "m4-recovery-self-test",
             feature = "m4-service-lifecycle-self-test"
         ))]
-        BuiltinServiceImage::M3UserTestPayload => copy_m3_user_test_payload(code_frame)?,
-        #[cfg(any(
-            feature = "m5-storage-self-test",
-            feature = "m5-persistence-self-test",
-            feature = "m5-crash-early-self-test",
-            feature = "m5-crash-late-self-test",
-            feature = "m5-crash-recovery-self-test",
-            feature = "m6-object-self-test",
-            feature = "m6-process-control-self-test",
-            feature = "m6-delegation-self-test",
-            feature = "m6-revocation-self-test",
-            feature = "m6-audit-self-test",
-            feature = "m6-capabilities-self-test",
-            feature = "m6-fixture-smoke-self-test"
-        ))]
-        BuiltinServiceImage::StorageUserspacePayload => {
-            return Err("storage userspace image must use the storage launch path");
+        if matches!(image, BuiltinServiceImage::M3UserTestPayload) {
+            let data_frame = allocator
+                .allocate_page()
+                .ok_or("allocator could not provide a data page for supervised service")?;
+            zero_page(data_frame);
+            map_process_page(
+                address_space,
+                SERVICE_USER_DATA_ADDRESS,
+                data_frame,
+                PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::NO_EXECUTE
+                    | PageTableFlags::USER_ACCESSIBLE,
+                allocator,
+            )?;
         }
-        #[cfg(any(
-            feature = "m6-object-self-test",
-            feature = "m6-process-control-self-test",
-            feature = "m6-delegation-self-test",
-            feature = "m6-revocation-self-test",
-            feature = "m6-audit-self-test",
-            feature = "m6-capabilities-self-test",
-            feature = "m6-fixture-smoke-self-test",
-            feature = "m7-net-caps-self-test"
-        ))]
-        BuiltinServiceImage::M6FixturePayload => {
-            return Err("m6 fixture image must use the fixture launch path");
-        }
-        #[cfg(feature = "m7-net-service-self-test")]
-        BuiltinServiceImage::NetworkUserspacePayload => {
-            return Err("network userspace image must use the network launch path");
-        }
-        BuiltinServiceImage::ImmediateExit => unsafe {
-            ptr::write(
-                (PHYSICAL_MEMORY_OFFSET + code_frame) as *mut ImmediateExitPage,
-                ImmediateExitPage {
-                    halt_instruction: 0xF4F4,
-                },
-            );
-        },
-    }
-    map_process_page(
-        &mut address_space,
-        code_address,
-        code_frame,
-        PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-        allocator,
-    )
-    .inspect_err(|&message| {
-        kernel_log_fmt(format_args!(
-            "[FAIL] map code image={image:?} va={code_address:#x} err={message}\n"
-        ));
-    })?;
-
-    let stack_frame = allocator
-        .allocate_page()
-        .ok_or("allocator could not provide a stack page for supervised service")?;
-    zero_page(stack_frame);
-    map_process_page(
-        &mut address_space,
-        stack_address,
-        stack_frame,
-        PageTableFlags::PRESENT
-            | PageTableFlags::WRITABLE
-            | PageTableFlags::NO_EXECUTE
-            | PageTableFlags::USER_ACCESSIBLE,
-        allocator,
-    )?;
-
-    #[cfg(any(
-        feature = "m3-address-space-self-test",
-        feature = "m3-resources-self-test",
-        feature = "m4-crash-service-self-test",
-        feature = "m4-recovery-self-test",
-        feature = "m4-service-lifecycle-self-test"
-    ))]
-    if matches!(image, BuiltinServiceImage::M3UserTestPayload) {
-        let data_frame = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide a data page for supervised service")?;
-        zero_page(data_frame);
-        map_process_page(
-            &mut address_space,
-            SERVICE_USER_DATA_ADDRESS,
-            data_frame,
-            PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::NO_EXECUTE
-                | PageTableFlags::USER_ACCESSIBLE,
+        let user_stack_pointer = stack_address + PAGE_SIZE;
+        let saved_stack_pointer =
+            build_userspace_entry_frame(kernel_stack_top, code_address, user_stack_pointer)?;
+        let address_space = slot
+            .take()
+            .ok_or("supervised service address space missing")?;
+        register_spawned_process_checked(
             allocator,
-        )?;
-    }
-    let user_stack_pointer = stack_address + PAGE_SIZE;
-    let saved_stack_pointer =
-        build_userspace_entry_frame(kernel_stack_top, code_address, user_stack_pointer)?;
-    register_spawned_process(
-        address_space,
-        pid,
-        tid,
-        kernel_stack_top,
-        saved_stack_pointer,
-        code_address,
-        scheduler_slot,
-    )
+            address_space,
+            pid,
+            tid,
+            kernel_stack_top,
+            saved_stack_pointer,
+            code_address,
+            scheduler_slot,
+        )
+    })
 }
 
 /// Launches the real CPL3 storage-service image (`clean-slate-storage-userspace`).
@@ -750,8 +1027,9 @@ fn launch_storage_userspace_service(
     service: ServiceId,
 ) -> Result<SpawnedServiceInstance, &'static str> {
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
-    use crate::mm::address_space::create_process_address_space;
     use crate::mm::address_space::map_process_page;
+    use crate::mm::image_loader::map_embedded_segments;
+    use crate::mm::image_loader::map_user_stack_pages;
     use crate::mm::paging::zero_page;
     use crate::mm::PHYSICAL_MEMORY_OFFSET;
     use crate::process::id_allocator::id_allocator_mut;
@@ -759,123 +1037,106 @@ fn launch_storage_userspace_service(
     use x86_64::structures::paging::PageTableFlags;
     use x86_64::VirtAddr;
 
-    let image_pages = STORAGE_USERSPACE_IMAGE.len().div_ceil(PAGE_SIZE as usize);
-    if image_pages > STORAGE_SERVICE_MAX_CODE_PAGES {
+    if STORAGE_USERSPACE_MAPPED_CODE_PAGES > STORAGE_SERVICE_MAX_CODE_PAGES {
         return Err("storage userspace image exceeded mapped code budget");
     }
-    let mut address_space =
-        create_process_address_space(allocator, VirtAddr::new(SERVICE_USER_CODE_ADDRESS))?;
-    let (pid, tid) = {
-        let ids = unsafe { id_allocator_mut() };
-        (ids.allocate_pid()?, ids.allocate_tid()?)
-    };
-    for page_index in 0..image_pages {
-        let frame_address = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide a storage code page")?;
-        zero_page(frame_address);
-        let offset = page_index * PAGE_SIZE as usize;
-        let chunk_end = (offset + PAGE_SIZE as usize).min(STORAGE_USERSPACE_IMAGE.len());
-        let chunk = &STORAGE_USERSPACE_IMAGE[offset..chunk_end];
-        unsafe {
-            ptr::copy_nonoverlapping(
-                chunk.as_ptr(),
-                (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
-                chunk.len(),
-            );
-        }
-        if let Err(message) = map_process_page(
-            &mut address_space,
-            SERVICE_USER_CODE_ADDRESS + page_index as u64 * PAGE_SIZE,
-            frame_address,
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        ) {
-            unsafe {
-                crate::mm::frame_allocator::free_frame(allocator, frame_address)?;
-            }
-            return Err(message);
-        }
-    }
-    for stack_page in 0..STORAGE_SERVICE_STACK_PAGES {
-        let stack_frame = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide a storage stack page")?;
-        zero_page(stack_frame);
-        map_process_page(
-            &mut address_space,
-            STORAGE_SERVICE_STACK_ADDRESS + stack_page * PAGE_SIZE,
-            stack_frame,
-            PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::NO_EXECUTE
-                | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )?;
-    }
-    let data_frame = allocator
-        .allocate_page()
-        .ok_or("allocator could not provide a storage bootstrap page")?;
-    zero_page(data_frame);
-    let bootstrap = {
-        #[cfg(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test"))]
-        {
-            let mut bootstrap = {
-                #[cfg(feature = "m6-capabilities-self-test")]
+    with_process_address_space(
+        allocator,
+        VirtAddr::new(SERVICE_USER_CODE_ADDRESS),
+        |allocator, slot| {
+            let address_space = slot
+                .as_mut()
+                .ok_or("supervised service address space missing")?;
+            let (pid, tid) = {
+                let ids = unsafe { id_allocator_mut() };
+                (ids.allocate_pid()?, ids.allocate_tid()?)
+            };
+            map_embedded_segments(
+                address_space,
+                allocator,
+                SERVICE_USER_CODE_ADDRESS,
+                STORAGE_USERSPACE_IMAGE,
+                &STORAGE_USERSPACE_SEGMENTS,
+            )?;
+            map_user_stack_pages(
+                address_space,
+                allocator,
+                STORAGE_SERVICE_STACK_ADDRESS,
+                STORAGE_SERVICE_STACK_PAGES,
+            )?;
+            let data_frame = allocator
+                .allocate_page()
+                .ok_or("allocator could not provide a storage bootstrap page")?;
+            zero_page(data_frame);
+            let bootstrap = {
+                #[cfg(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test"))]
                 {
-                    crate::selftest::m6_capabilities::storage_service_bootstrap(service)?
+                    let mut bootstrap = {
+                        #[cfg(feature = "m6-capabilities-self-test")]
+                        {
+                            crate::selftest::m6_capabilities::storage_service_bootstrap(service)?
+                        }
+                        #[cfg(all(
+                            feature = "m6-object-self-test",
+                            not(feature = "m6-capabilities-self-test")
+                        ))]
+                        {
+                            crate::selftest::m6_object::storage_service_bootstrap(service)?
+                        }
+                    };
+                    use clean_slate_capability::HolderId;
+                    use clean_slate_service_fixtures::STORAGE_SERVICE_MODE_OBJECT_SERVICE;
+                    if bootstrap.mode == STORAGE_SERVICE_MODE_OBJECT_SERVICE {
+                        let role =
+                            crate::capability::object::grant_object_service_role(HolderId(pid))
+                                .map_err(|_| "object service role grant failed")?;
+                        bootstrap.object_role_handle = role.encode();
+                    }
+                    bootstrap
                 }
-                #[cfg(all(
+                #[cfg(not(any(
                     feature = "m6-object-self-test",
-                    not(feature = "m6-capabilities-self-test")
-                ))]
+                    feature = "m6-capabilities-self-test"
+                )))]
                 {
-                    crate::selftest::m6_object::storage_service_bootstrap(service)?
+                    crate::selftest::m5_storage::storage_service_bootstrap(service)?
                 }
             };
-            use clean_slate_capability::HolderId;
-            use clean_slate_service_fixtures::STORAGE_SERVICE_MODE_OBJECT_SERVICE;
-            if bootstrap.mode == STORAGE_SERVICE_MODE_OBJECT_SERVICE {
-                let role = crate::capability::object::grant_object_service_role(HolderId(pid))
-                    .map_err(|_| "object service role grant failed")?;
-                bootstrap.object_role_handle = role.encode();
+            unsafe {
+                ptr::write(
+                    (PHYSICAL_MEMORY_OFFSET + data_frame) as *mut StorageServiceBootstrap,
+                    bootstrap,
+                );
             }
-            bootstrap
-        }
-        #[cfg(not(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test")))]
-        {
-            crate::selftest::m5_storage::storage_service_bootstrap(service)?
-        }
-    };
-    unsafe {
-        ptr::write(
-            (PHYSICAL_MEMORY_OFFSET + data_frame) as *mut StorageServiceBootstrap,
-            bootstrap,
-        );
-    }
-    map_process_page(
-        &mut address_space,
-        STORAGE_SERVICE_BOOTSTRAP_ADDRESS,
-        data_frame,
-        PageTableFlags::PRESENT
-            | PageTableFlags::WRITABLE
-            | PageTableFlags::NO_EXECUTE
-            | PageTableFlags::USER_ACCESSIBLE,
-        allocator,
-    )?;
-    let user_stack_pointer =
-        STORAGE_SERVICE_STACK_ADDRESS + STORAGE_SERVICE_STACK_PAGES * PAGE_SIZE;
-    let entry_rip = SERVICE_USER_CODE_ADDRESS + STORAGE_USERSPACE_ENTRY_OFFSET;
-    let saved_stack_pointer =
-        build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
-    register_spawned_process(
-        address_space,
-        pid,
-        tid,
-        kernel_stack_top,
-        saved_stack_pointer,
-        entry_rip,
-        scheduler_slot,
+            map_process_page(
+                address_space,
+                STORAGE_SERVICE_BOOTSTRAP_ADDRESS,
+                data_frame,
+                PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::NO_EXECUTE
+                    | PageTableFlags::USER_ACCESSIBLE,
+                allocator,
+            )?;
+            let user_stack_pointer =
+                STORAGE_SERVICE_STACK_ADDRESS + STORAGE_SERVICE_STACK_PAGES * PAGE_SIZE;
+            let entry_rip = SERVICE_USER_CODE_ADDRESS + STORAGE_USERSPACE_ENTRY_OFFSET;
+            let saved_stack_pointer =
+                build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
+            let address_space = slot
+                .take()
+                .ok_or("supervised service address space missing")?;
+            register_spawned_process_checked(
+                allocator,
+                address_space,
+                pid,
+                tid,
+                kernel_stack_top,
+                saved_stack_pointer,
+                entry_rip,
+                scheduler_slot,
+            )
+        },
     )
 }
 
@@ -898,8 +1159,9 @@ fn launch_m6_fixture_service(
     service: ServiceId,
 ) -> Result<SpawnedServiceInstance, &'static str> {
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
-    use crate::mm::address_space::create_process_address_space;
     use crate::mm::address_space::map_process_page;
+    use crate::mm::image_loader::map_embedded_segments;
+    use crate::mm::image_loader::map_user_stack_pages;
     use crate::mm::paging::zero_page;
     use crate::mm::PHYSICAL_MEMORY_OFFSET;
     use crate::process::id_allocator::id_allocator_mut;
@@ -909,102 +1171,84 @@ fn launch_m6_fixture_service(
     use x86_64::VirtAddr;
 
     let bootstrap = consume_fixture_program(service)?;
-    let image_pages = M6_FIXTURE_USERSPACE_IMAGE
-        .len()
-        .div_ceil(PAGE_SIZE as usize);
-    if image_pages > M6_FIXTURE_MAX_CODE_PAGES {
+    if M6_FIXTURE_USERSPACE_MAPPED_CODE_PAGES > M6_FIXTURE_MAX_CODE_PAGES {
         return Err("m6 fixture userspace image exceeded mapped code budget");
     }
-    let mut address_space =
-        create_process_address_space(allocator, VirtAddr::new(SERVICE_USER_CODE_ADDRESS))?;
-    let (pid, tid) = {
-        let ids = unsafe { id_allocator_mut() };
-        (ids.allocate_pid()?, ids.allocate_tid()?)
-    };
-    for page_index in 0..image_pages {
-        let frame_address = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide an m6 fixture code page")?;
-        zero_page(frame_address);
-        let offset = page_index * PAGE_SIZE as usize;
-        let chunk_end = (offset + PAGE_SIZE as usize).min(M6_FIXTURE_USERSPACE_IMAGE.len());
-        let chunk = &M6_FIXTURE_USERSPACE_IMAGE[offset..chunk_end];
-        unsafe {
-            ptr::copy_nonoverlapping(
-                chunk.as_ptr(),
-                (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
-                chunk.len(),
-            );
-        }
-        map_process_page(
-            &mut address_space,
-            SERVICE_USER_CODE_ADDRESS + page_index as u64 * PAGE_SIZE,
-            frame_address,
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )?;
-    }
-    let bootstrap_bytes = unsafe {
-        core::slice::from_raw_parts(
-            &bootstrap as *const _ as *const u8,
-            M6_FIXTURE_BOOTSTRAP_BYTES,
-        )
-    };
-    for page in 0..M6_FIXTURE_BOOTSTRAP_PAGES {
-        let frame = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide an m6 fixture bootstrap page")?;
-        zero_page(frame);
-        let offset = page as usize * PAGE_SIZE as usize;
-        let end = (offset + PAGE_SIZE as usize).min(bootstrap_bytes.len());
-        if offset < bootstrap_bytes.len() {
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    bootstrap_bytes[offset..end].as_ptr(),
-                    (PHYSICAL_MEMORY_OFFSET + frame) as *mut u8,
-                    end - offset,
-                );
+    with_process_address_space(
+        allocator,
+        VirtAddr::new(SERVICE_USER_CODE_ADDRESS),
+        |allocator, slot| {
+            let address_space = slot
+                .as_mut()
+                .ok_or("supervised service address space missing")?;
+            let (pid, tid) = {
+                let ids = unsafe { id_allocator_mut() };
+                (ids.allocate_pid()?, ids.allocate_tid()?)
+            };
+            map_embedded_segments(
+                address_space,
+                allocator,
+                SERVICE_USER_CODE_ADDRESS,
+                M6_FIXTURE_USERSPACE_IMAGE,
+                &M6_FIXTURE_USERSPACE_SEGMENTS,
+            )?;
+            let bootstrap_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &bootstrap as *const _ as *const u8,
+                    M6_FIXTURE_BOOTSTRAP_BYTES,
+                )
+            };
+            for page in 0..M6_FIXTURE_BOOTSTRAP_PAGES {
+                let frame = allocator
+                    .allocate_page()
+                    .ok_or("allocator could not provide an m6 fixture bootstrap page")?;
+                zero_page(frame);
+                let offset = page as usize * PAGE_SIZE as usize;
+                let end = (offset + PAGE_SIZE as usize).min(bootstrap_bytes.len());
+                if offset < bootstrap_bytes.len() {
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            bootstrap_bytes[offset..end].as_ptr(),
+                            (PHYSICAL_MEMORY_OFFSET + frame) as *mut u8,
+                            end - offset,
+                        );
+                    }
+                }
+                map_process_page(
+                    address_space,
+                    M6_FIXTURE_BOOTSTRAP_ADDRESS + page * PAGE_SIZE,
+                    frame,
+                    PageTableFlags::PRESENT
+                        | PageTableFlags::WRITABLE
+                        | PageTableFlags::NO_EXECUTE
+                        | PageTableFlags::USER_ACCESSIBLE,
+                    allocator,
+                )?;
             }
-        }
-        map_process_page(
-            &mut address_space,
-            M6_FIXTURE_BOOTSTRAP_ADDRESS + page * PAGE_SIZE,
-            frame,
-            PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::NO_EXECUTE
-                | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )?;
-    }
-    for stack_page in 0..M6_FIXTURE_STACK_PAGES {
-        let stack_frame = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide an m6 fixture stack page")?;
-        zero_page(stack_frame);
-        map_process_page(
-            &mut address_space,
-            M6_FIXTURE_STACK_ADDRESS + stack_page * PAGE_SIZE,
-            stack_frame,
-            PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::NO_EXECUTE
-                | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )?;
-    }
-    let user_stack_pointer = M6_FIXTURE_STACK_ADDRESS + M6_FIXTURE_STACK_PAGES * PAGE_SIZE;
-    let entry_rip = SERVICE_USER_CODE_ADDRESS + M6_FIXTURE_USERSPACE_ENTRY_OFFSET;
-    let saved_stack_pointer =
-        build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
-    register_spawned_process(
-        address_space,
-        pid,
-        tid,
-        kernel_stack_top,
-        saved_stack_pointer,
-        entry_rip,
-        scheduler_slot,
+            map_user_stack_pages(
+                address_space,
+                allocator,
+                M6_FIXTURE_STACK_ADDRESS,
+                M6_FIXTURE_STACK_PAGES,
+            )?;
+            let user_stack_pointer = M6_FIXTURE_STACK_ADDRESS + M6_FIXTURE_STACK_PAGES * PAGE_SIZE;
+            let entry_rip = SERVICE_USER_CODE_ADDRESS + M6_FIXTURE_USERSPACE_ENTRY_OFFSET;
+            let saved_stack_pointer =
+                build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
+            let address_space = slot
+                .take()
+                .ok_or("supervised service address space missing")?;
+            register_spawned_process_checked(
+                allocator,
+                address_space,
+                pid,
+                tid,
+                kernel_stack_top,
+                saved_stack_pointer,
+                entry_rip,
+                scheduler_slot,
+            )
+        },
     )
 }
 
@@ -1019,15 +1263,18 @@ const NETWORK_SERVICE_STACK_GUARD_PAGES: u64 = 1;
 const NETWORK_SERVICE_STACK_ADDRESS: u64 =
     NETWORK_SERVICE_BOOTSTRAP_ADDRESS + (NETWORK_SERVICE_STACK_GUARD_PAGES + 1) * PAGE_SIZE;
 #[cfg(feature = "m7-net-service-self-test")]
-/// The M7 userspace image now carries both the ordinary client path and the service-owned
-/// DNS/TCP/TLS bridge logic. The combined protocol state currently needs a deeper userspace
-/// stack than earlier M7 lanes, so reserve extra guard headroom here.
+/// The M7 userspace image carries both the ordinary client path and the service-owned
+/// DNS/TCP/TLS bridge logic. Exact PT_LOAD demand is `NETWORK_USERSPACE_MAPPED_CODE_PAGES`
+/// from load-plan metadata; this ceiling remains a deliberate fail-closed bound. Do not
+/// raise `MAX_ADDRESS_SPACE_USER_MAPPINGS` solely to absorb image growth.
 const NETWORK_SERVICE_STACK_PAGES: u64 = 80;
 #[cfg(feature = "m7-net-service-self-test")]
 const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 300;
 #[cfg(feature = "m7-net-service-self-test")]
+const _: () = assert!(NETWORK_USERSPACE_MAPPED_CODE_PAGES <= NETWORK_SERVICE_MAX_CODE_PAGES);
+#[cfg(feature = "m7-net-service-self-test")]
 const NETWORK_SERVICE_MAPPED_PAGES: usize =
-    NETWORK_SERVICE_MAX_CODE_PAGES + NETWORK_SERVICE_STACK_PAGES as usize + 1;
+    NETWORK_USERSPACE_MAPPED_CODE_PAGES + NETWORK_SERVICE_STACK_PAGES as usize + 1;
 #[cfg(feature = "m7-net-service-self-test")]
 const _: () = assert!(
     NETWORK_SERVICE_MAPPED_PAGES <= crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
@@ -1062,8 +1309,9 @@ fn launch_network_userspace_with_bootstrap(
     bootstrap: NetworkServiceBootstrap,
 ) -> Result<SpawnedServiceInstance, &'static str> {
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
-    use crate::mm::address_space::create_process_address_space;
     use crate::mm::address_space::map_process_page;
+    use crate::mm::image_loader::map_embedded_segments;
+    use crate::mm::image_loader::map_user_stack_pages;
     use crate::mm::paging::zero_page;
     use crate::mm::PHYSICAL_MEMORY_OFFSET;
     use crate::process::id_allocator::id_allocator_mut;
@@ -1071,87 +1319,123 @@ fn launch_network_userspace_with_bootstrap(
     use x86_64::structures::paging::PageTableFlags;
     use x86_64::VirtAddr;
 
-    let image_pages = NETWORK_USERSPACE_IMAGE.len().div_ceil(PAGE_SIZE as usize);
-    if image_pages > NETWORK_SERVICE_MAX_CODE_PAGES {
+    if NETWORK_USERSPACE_MAPPED_CODE_PAGES > NETWORK_SERVICE_MAX_CODE_PAGES {
         return Err("network userspace image exceeded mapped code budget");
     }
-    let mut address_space =
-        create_process_address_space(allocator, VirtAddr::new(SERVICE_USER_CODE_ADDRESS))?;
-    let (pid, tid) = {
-        let ids = unsafe { id_allocator_mut() };
-        (ids.allocate_pid()?, ids.allocate_tid()?)
-    };
-    for page_index in 0..image_pages {
-        let frame_address = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide a network code page")?;
-        zero_page(frame_address);
-        let offset = page_index * PAGE_SIZE as usize;
-        let chunk_end = (offset + PAGE_SIZE as usize).min(NETWORK_USERSPACE_IMAGE.len());
-        let chunk = &NETWORK_USERSPACE_IMAGE[offset..chunk_end];
-        unsafe {
-            ptr::copy_nonoverlapping(
-                chunk.as_ptr(),
-                (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
-                chunk.len(),
-            );
-        }
-        map_process_page(
-            &mut address_space,
-            SERVICE_USER_CODE_ADDRESS + page_index as u64 * PAGE_SIZE,
-            frame_address,
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )?;
+    with_process_address_space(
+        allocator,
+        VirtAddr::new(SERVICE_USER_CODE_ADDRESS),
+        |allocator, slot| {
+            let address_space = slot
+                .as_mut()
+                .ok_or("supervised service address space missing")?;
+            let (pid, tid) = {
+                let ids = unsafe { id_allocator_mut() };
+                (ids.allocate_pid()?, ids.allocate_tid()?)
+            };
+            map_embedded_segments(
+                address_space,
+                allocator,
+                SERVICE_USER_CODE_ADDRESS,
+                NETWORK_USERSPACE_IMAGE,
+                &NETWORK_USERSPACE_SEGMENTS,
+            )?;
+            map_user_stack_pages(
+                address_space,
+                allocator,
+                NETWORK_SERVICE_STACK_ADDRESS,
+                NETWORK_SERVICE_STACK_PAGES,
+            )?;
+            let data_frame = allocator
+                .allocate_page()
+                .ok_or("allocator could not provide a network bootstrap page")?;
+            zero_page(data_frame);
+            unsafe {
+                ptr::write(
+                    (PHYSICAL_MEMORY_OFFSET + data_frame) as *mut NetworkServiceBootstrap,
+                    bootstrap,
+                );
+            }
+            map_process_page(
+                address_space,
+                NETWORK_SERVICE_BOOTSTRAP_ADDRESS,
+                data_frame,
+                PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::NO_EXECUTE
+                    | PageTableFlags::USER_ACCESSIBLE,
+                allocator,
+            )?;
+            let user_stack_pointer =
+                NETWORK_SERVICE_STACK_ADDRESS + NETWORK_SERVICE_STACK_PAGES * PAGE_SIZE;
+            let entry_rip = SERVICE_USER_CODE_ADDRESS + NETWORK_USERSPACE_ENTRY_OFFSET;
+            let saved_stack_pointer =
+                build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
+            let address_space = slot
+                .take()
+                .ok_or("supervised service address space missing")?;
+            register_spawned_process_checked(
+                allocator,
+                address_space,
+                pid,
+                tid,
+                kernel_stack_top,
+                saved_stack_pointer,
+                entry_rip,
+                scheduler_slot,
+            )
+        },
+    )
+}
+
+#[cfg(all(
+    test,
+    not(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test"
+    ))
+))]
+mod tests {
+    use super::registration_preconditions_ok;
+    use super::single_page_code_page_flags;
+    use x86_64::structures::paging::PageTableFlags;
+
+    #[test]
+    fn single_page_code_page_flags_are_not_writable() {
+        let flags = single_page_code_page_flags();
+        assert!(flags.contains(PageTableFlags::PRESENT));
+        assert!(flags.contains(PageTableFlags::USER_ACCESSIBLE));
+        assert!(!flags.contains(PageTableFlags::WRITABLE));
+        assert!(!flags.contains(PageTableFlags::NO_EXECUTE));
     }
-    for stack_page in 0..NETWORK_SERVICE_STACK_PAGES {
-        let stack_frame = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide a network stack page")?;
-        zero_page(stack_frame);
-        map_process_page(
-            &mut address_space,
-            NETWORK_SERVICE_STACK_ADDRESS + stack_page * PAGE_SIZE,
-            stack_frame,
-            PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::NO_EXECUTE
-                | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )?;
+
+    #[test]
+    fn registration_preconditions_accept_happy_path() {
+        assert!(registration_preconditions_ok(1, 4, true, 0, 8).is_ok());
     }
-    let data_frame = allocator
-        .allocate_page()
-        .ok_or("allocator could not provide a network bootstrap page")?;
-    zero_page(data_frame);
-    unsafe {
-        ptr::write(
-            (PHYSICAL_MEMORY_OFFSET + data_frame) as *mut NetworkServiceBootstrap,
-            bootstrap,
+
+    #[test]
+    fn registration_preconditions_reject_slot_out_of_range() {
+        assert_eq!(
+            registration_preconditions_ok(4, 4, true, 0, 8),
+            Err("supervised launch: scheduler slot exceeded fixed capacity")
         );
     }
-    map_process_page(
-        &mut address_space,
-        NETWORK_SERVICE_BOOTSTRAP_ADDRESS,
-        data_frame,
-        PageTableFlags::PRESENT
-            | PageTableFlags::WRITABLE
-            | PageTableFlags::NO_EXECUTE
-            | PageTableFlags::USER_ACCESSIBLE,
-        allocator,
-    )?;
-    let user_stack_pointer =
-        NETWORK_SERVICE_STACK_ADDRESS + NETWORK_SERVICE_STACK_PAGES * PAGE_SIZE;
-    let entry_rip = SERVICE_USER_CODE_ADDRESS + NETWORK_USERSPACE_ENTRY_OFFSET;
-    let saved_stack_pointer =
-        build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
-    register_spawned_process(
-        address_space,
-        pid,
-        tid,
-        kernel_stack_top,
-        saved_stack_pointer,
-        entry_rip,
-        scheduler_slot,
-    )
+
+    #[test]
+    fn registration_preconditions_reject_occupied_slot() {
+        assert_eq!(
+            registration_preconditions_ok(1, 4, false, 0, 8),
+            Err("supervised launch: scheduler slot was occupied")
+        );
+    }
+
+    #[test]
+    fn registration_preconditions_reject_registry_full() {
+        assert_eq!(
+            registration_preconditions_ok(1, 4, true, 8, 8),
+            Err("supervised launch: process registry capacity exceeded")
+        );
+    }
 }

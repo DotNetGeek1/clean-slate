@@ -20,6 +20,7 @@ use crate::mm::address_space::create_process_address_space;
 use crate::mm::address_space::map_process_page;
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::image_loader::map_embedded_segments;
 use crate::mm::paging::zero_page;
 use crate::mm::PAGE_SIZE;
 use crate::mm::PHYSICAL_MEMORY_OFFSET;
@@ -82,9 +83,7 @@ pub(crate) static USERSPACE_SUPERVISOR_TEST_STATE: GlobalCell<
 > = GlobalCell::new(None);
 
 fn supervisor_image_page_count() -> usize {
-    SUPERVISOR_USERSPACE_IMAGE
-        .len()
-        .div_ceil(PAGE_SIZE as usize)
+    SUPERVISOR_USERSPACE_MAPPED_CODE_PAGES
 }
 
 fn supervisor_rendezvous_offset() -> u64 {
@@ -116,36 +115,13 @@ fn create_userspace_supervisor_process(
         (allocated_pid, ids.allocate_tid()?)
     };
 
-    // Map the supervisor image across consecutive code pages.
-    for page_index in 0..image_pages {
-        let frame_address = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide a supervisor code page")?;
-        zero_page(frame_address);
-        let offset = page_index * PAGE_SIZE as usize;
-        let chunk_end = (offset + PAGE_SIZE as usize).min(SUPERVISOR_USERSPACE_IMAGE.len());
-        let chunk = &SUPERVISOR_USERSPACE_IMAGE[offset..chunk_end];
-        unsafe {
-            ptr::copy_nonoverlapping(
-                chunk.as_ptr(),
-                (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
-                chunk.len(),
-            );
-        }
-        let virtual_address = USER_TEST_CODE_ADDRESS + page_index as u64 * PAGE_SIZE;
-        if let Err(message) = map_process_page(
-            &mut address_space,
-            virtual_address,
-            frame_address,
-            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        ) {
-            unsafe {
-                free_frame(allocator, frame_address)?;
-            }
-            return Err(message);
-        }
-    }
+    map_embedded_segments(
+        &mut address_space,
+        allocator,
+        USER_TEST_CODE_ADDRESS,
+        SUPERVISOR_USERSPACE_IMAGE,
+        &SUPERVISOR_USERSPACE_SEGMENTS,
+    )?;
 
     let stack_frame_address = allocator
         .allocate_page()
