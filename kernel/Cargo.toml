@@ -44,6 +44,11 @@ m7-network-self-test = ["m7-net-service-self-test"]
 m7-net-caps-self-test = ["m3-entry-self-test"]
 m7-dns-self-test = ["m3-entry-self-test"]
 m7-net-device-self-test = ["m3-entry-self-test"]
+# M8.2 (#92): embeds the frozen Linux fixture bytes (`LINUX_M8_FIXTURE`).
+# Production builds without it carry no fixture bytes; the loader logic itself
+# is always compiled.
+m8-linux-image = []
+m8-linux-image-self-test = ["m8-linux-image", "m3-entry-self-test"]
 
 [lib]
 path = "src/lib.rs"
