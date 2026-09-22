@@ -25,7 +25,7 @@ use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
-use crate::diagnostics::serial::serial_write_line;
+use crate::diagnostics::serial::{serial_write_bytes, serial_write_line};
 use crate::interrupt::timer::initialize_timer;
 use crate::ipc::endpoint_table_mut;
 use crate::ipc::IPC_MAX_MESSAGE_BYTES;
@@ -630,6 +630,7 @@ pub(crate) fn observe_linux_write_result(
             }
             M9_BYTES_OK.store(true, Ordering::Relaxed);
             M9_SERIAL_ACCUMULATE.store(false, Ordering::Relaxed);
+            serial_write_bytes(b"\n");
             kernel_log_fmt(format_args!(
                 "[M9.D] bytes={} fnv={:#010x}\n",
                 M9_STDIO_BLOCK_LEN, M9_STDIO_BLOCK_FNV

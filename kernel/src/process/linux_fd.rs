@@ -403,20 +403,22 @@ fn emit_console_sink_render(style: ConsoleSinkRenderStyle, sender_pid: u64, payl
 
 #[cfg(test)]
 mod linux_console_byte_test_sink {
-    use std::sync::Mutex;
+    use std::cell::RefCell;
 
-    static CAPTURE: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+    thread_local! {
+        static CAPTURE: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    }
 
     pub(super) fn reset() {
-        CAPTURE.lock().unwrap().clear();
+        CAPTURE.with(|capture| capture.borrow_mut().clear());
     }
 
     pub(super) fn capture(bytes: &[u8]) {
-        CAPTURE.lock().unwrap().extend_from_slice(bytes);
+        CAPTURE.with(|capture| capture.borrow_mut().extend_from_slice(bytes));
     }
 
     pub(super) fn take() -> Vec<u8> {
-        CAPTURE.lock().unwrap().clone()
+        CAPTURE.with(|capture| capture.borrow().clone())
     }
 }
 
