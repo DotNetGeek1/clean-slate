@@ -5,8 +5,10 @@
 //! [`decode`].
 
 pub(crate) mod decode;
+pub(crate) mod exit;
 pub(crate) mod table;
 pub(crate) mod user_copy;
+pub(crate) mod write;
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
@@ -18,15 +20,8 @@ use clean_slate_service_lifecycle::InstanceGeneration;
 use decode::decode_request_from_context;
 use table::{lookup_handler, LinuxSyscallContext};
 
-/// Distinctive unsupported number used by the M8.3 QEMU probe for completion.
-#[cfg(feature = "m8-linux-dispatch-self-test")]
-pub(crate) const M8_LINUX_COMPLETION_NR: u64 = 1000;
-
 #[cfg(feature = "m8-linux-dispatch-self-test")]
 pub(crate) static M8_LINUX_PROBE_OBSERVED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-#[cfg(feature = "m8-linux-dispatch-self-test")]
-pub(crate) static M8_LINUX_COMPLETION_OBSERVED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "m8-linux-dispatch-self-test")]
 pub(crate) static M8_NATIVE_PROGRESS: core::sync::atomic::AtomicU64 =
@@ -127,6 +122,7 @@ pub(crate) fn dispatch_with(
         frame,
     };
     let result = match lookup_handler(request.nr) {
+        // `exit` diverges inside the handler; only `write` returns here.
         Some(handler) => handler(&request, &mut ctx),
         None => {
             #[cfg(feature = "m8-linux-dispatch-self-test")]
@@ -135,14 +131,13 @@ pub(crate) fn dispatch_with(
                 if request.nr == 999 {
                     M8_LINUX_PROBE_OBSERVED.store(true, Ordering::Relaxed);
                 }
-                if request.nr == M8_LINUX_COMPLETION_NR {
-                    M8_LINUX_COMPLETION_OBSERVED.store(true, Ordering::Relaxed);
-                }
             }
             record_unsupported(&mut state.budget, request.nr);
             unsupported_syscall_result()
         }
     };
+    #[cfg(feature = "m8-linux-dispatch-self-test")]
+    crate::selftest::m8_linux_dispatch::observe_linux_write_result(pid, &request, result);
     ctx.frame.rax = encode_rax(result);
 }
 
@@ -183,7 +178,7 @@ mod tests {
     use crate::process::personality::{
         dispatch_target_for, ExecutionPersonality, SyscallDispatchTarget,
     };
-    use clean_slate_linux_abi::{decode_rax, ENOSYS, SYS_WRITE};
+    use clean_slate_linux_abi::{decode_rax, EBADF, EFAULT, ENOSYS, SYS_WRITE};
 
     fn empty_frame() -> SyscallContext {
         SyscallContext {
@@ -216,13 +211,47 @@ mod tests {
         assert_eq!(frame.rax as i64, -38);
     }
 
+    /// Host tests cannot install a global fd table without mutating a
+    /// `GlobalCell`, so through the real dispatcher every fd resolves to
+    /// "no table for (pid, generation)" → `EBADF`. This still proves the
+    /// complete `write` → `encode_rax` → `RAX` path and the errno bit pattern.
     #[test]
-    fn write_placeholder_returns_enosys_encoded() {
+    fn write_without_fd_table_encodes_negative_ebadf() {
         let mut state = LinuxDispatchState::new();
         let mut frame = empty_frame();
         frame.rax = SYS_WRITE;
+        frame.rdi = 1; // fd
+        frame.rsi = 0x1000; // buf (never read: fd fails first)
+        frame.rdx = 18; // count
         dispatch_with(&mut frame, 3, InstanceGeneration(2), &mut state);
-        assert_eq!(decode_rax(frame.rax), Err(ENOSYS));
+        assert_eq!(decode_rax(frame.rax), Err(EBADF));
+        assert_eq!(frame.rax as i64, -9);
+        // An unsupported nr afterwards is unaffected (no budget consumed by write).
+        assert_eq!(state.budget.observed, 0);
+    }
+
+    /// EBADF must win over EFAULT: a non-canonical pointer with a bad fd
+    /// yields `-9`, not `-14`, through the real dispatcher.
+    #[test]
+    fn write_bad_fd_and_bad_pointer_encodes_ebadf_not_efault() {
+        let mut state = LinuxDispatchState::new();
+        let mut frame = empty_frame();
+        frame.rax = SYS_WRITE;
+        frame.rdi = 7;
+        frame.rsi = 1 << 47; // first non-canonical user VA
+        frame.rdx = 8;
+        dispatch_with(&mut frame, 3, InstanceGeneration(2), &mut state);
+        assert_eq!(decode_rax(frame.rax), Err(EBADF));
+        assert_eq!(frame.rax as i64, -9);
+        assert_ne!(frame.rax as i64, -(EFAULT.as_i32() as i64));
+    }
+
+    #[test]
+    fn efault_and_ebadf_rax_patterns_match_linux() {
+        assert_eq!(encode_rax(Err(EBADF)) as i64, -9);
+        assert_eq!(encode_rax(Err(EFAULT)) as i64, -14);
+        assert_eq!(decode_rax(encode_rax(Err(EFAULT))), Err(EFAULT));
+        assert_eq!(encode_rax(Ok(18)), 18);
     }
 
     #[test]
@@ -255,7 +284,11 @@ mod tests {
         let mut linux_frame = empty_frame();
         linux_frame.rax = 1;
         dispatch_with(&mut linux_frame, 1, InstanceGeneration(1), &mut state);
-        assert_eq!(decode_rax(linux_frame.rax), Err(ENOSYS));
+        // nr 1 under the Linux personality is `write`: it reaches the fd
+        // projection (no table for this pid → EBADF), not native READ_U64 and
+        // not the unsupported path (which would be ENOSYS).
+        assert_eq!(decode_rax(linux_frame.rax), Err(EBADF));
+        assert_eq!(state.budget.observed, 0);
     }
 
     #[test]
