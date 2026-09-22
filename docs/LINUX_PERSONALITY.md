@@ -346,3 +346,16 @@ Hello from Linux.
 ```
 
 No `[IPC ] console` line may contain the hello text.
+
+### Generation spaces (M8.7)
+
+Two generation counters appear in serial and must not be confused:
+
+- **Controller / service generation** — `[SVC ] launch service=32768 pid=… gen=N`
+  is `ServiceLifecycleController`'s authoritative generation for
+  `LINUX_HELLO_SERVICE_ID` (bumped on each Start).
+- **Process / registry generation** — observer lines such as
+  `[M8.7] first exit observed pid=… gen=N` and fd-table keys use the process
+  registry `instance_generation` assigned at insert. Stale fd lookups and
+  `#98` greps for fd/identity proofs must use this process generation, not the
+  `[SVC ] … gen=` field.

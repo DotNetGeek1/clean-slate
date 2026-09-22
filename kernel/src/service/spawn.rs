@@ -359,7 +359,7 @@ pub(crate) enum BuiltinServiceImage {
     #[cfg(feature = "m7-net-service-self-test")]
     NetworkUserspacePayload,
     /// Frozen M8 Linux hello fixture launched through `service::linux_launch` (#97).
-    #[cfg(feature = "m8-linux-image")]
+    #[cfg(feature = "m8-linux-hello")]
     LinuxHello,
 }
 
@@ -419,7 +419,7 @@ impl BuiltinServiceImage {
             id if id == NETWORK_SERVICE_ID.0 || id == NETWORK_UNAUTHORIZED_SERVICE_ID.0 => {
                 Self::NetworkUserspacePayload
             }
-            #[cfg(feature = "m8-linux-image")]
+            #[cfg(feature = "m8-linux-hello")]
             id if id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID.0 => Self::LinuxHello,
             _ => Self::ImmediateExit,
         }
@@ -495,14 +495,22 @@ pub(crate) fn launch_builtin_service(
         BuiltinServiceImage::NetworkUserspacePayload => {
             launch_network_userspace_service(allocator, kernel_stack_top, scheduler_slot, service)
         }
-        #[cfg(feature = "m8-linux-image")]
+        #[cfg(feature = "m8-linux-hello")]
         BuiltinServiceImage::LinuxHello => {
             let launched = super::linux_launch::launch_linux_hello_fixture(
                 allocator,
                 kernel_stack_top,
                 scheduler_slot,
             )?;
-            super::linux_launch::note_linux_hello_launch(launched)?;
+            if let Err(message) = super::linux_launch::note_linux_hello_launch(launched) {
+                // Process is already Ready; fail closed through production teardown
+                // so the controller never observes a SpawnFailed with a live orphan.
+                return Err(super::linux_launch::rollback_ready_linux_hello(
+                    allocator,
+                    launched.pid,
+                    message,
+                ));
+            }
             Ok(SpawnedServiceInstance {
                 pid: launched.pid,
                 tid: launched.tid,
@@ -885,7 +893,7 @@ fn launch_single_page_service(
             BuiltinServiceImage::NetworkUserspacePayload => {
                 return Err("network userspace image must use the network launch path");
             }
-            #[cfg(feature = "m8-linux-image")]
+            #[cfg(feature = "m8-linux-hello")]
             BuiltinServiceImage::LinuxHello => {
                 return Err("linux hello image must use the linux_launch path");
             }

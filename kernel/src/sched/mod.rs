@@ -580,6 +580,30 @@ mod tests {
     }
 
     #[test]
+    fn all_finished_treats_empty_and_reaped_slots_as_done() {
+        // Demo-task boot tails call all_finished only after finish_current_thread
+        // finds no Ready/Running peer. Empty (never configured / reaped) slots
+        // must count as finished so a Linux process that already exited does not
+        // turn `[M2  ] PASS` into `[FAIL] scheduler had no runnable thread…`.
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .configure_kernel_thread(0, 1, 0x1000, 0x1000)
+            .expect("task 1");
+        scheduler.threads[0].state = ThreadState::Exited;
+        assert!(scheduler.all_finished());
+        scheduler.threads[0].state = ThreadState::Reaped;
+        assert!(scheduler.all_finished());
+        // Leave every slot Empty and confirm Empty-only tables also finish.
+        let empty = Scheduler::new();
+        assert!(empty.all_finished());
+        let mut ready = Scheduler::new();
+        ready
+            .configure_kernel_thread(0, 1, 0x1000, 0x1000)
+            .expect("ready again");
+        assert!(!ready.all_finished());
+    }
+
+    #[test]
     fn scheduler_can_track_user_and_kernel_thread_ownership_independently() {
         let mut scheduler = Scheduler::new();
         scheduler

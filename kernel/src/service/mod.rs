@@ -21,3 +21,21 @@ pub(crate) mod recovery_launch;
 
 pub(crate) use control::service_lifecycle_controller_mut;
 pub(crate) use control::LifecycleControlError;
+
+/// Notify the service layer that a supervised process exited through production
+/// teardown. Dispatches restart policy by service id; the Linux `exit` syscall
+/// must not name a concrete service.
+#[cfg(feature = "m8-linux-hello")]
+pub(crate) fn on_supervised_process_exited(
+    allocator: &mut crate::mm::frame_allocator::PageAllocator,
+    pid: u64,
+    status: u64,
+) {
+    let controller = unsafe { service_lifecycle_controller_mut() };
+    let Some(service_id) = controller.live_service_id_for_pid(pid) else {
+        return;
+    };
+    if service_id == linux_launch::LINUX_HELLO_SERVICE_ID {
+        linux_launch::on_linux_hello_process_exited(allocator, pid, status);
+    }
+}

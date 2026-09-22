@@ -617,18 +617,12 @@ fn run_inner() -> Result<(), &'static str> {
         initialize_scheduler()?;
         #[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
         {
-            // Both demo tasks occupy slots 0/1; controller Start places Linux in
-            // the first empty slot (2). Load failure must never be kernel-fatal.
+            // Load failure must never be kernel-fatal. The launch path already
+            // emits the specific `[LNX ] load failed: …` line; do not re-log.
             let allocator = crate::syscall::service_lifecycle_syscall_allocator_mut()
                 .as_mut()
                 .ok_or("linux hello: service lifecycle allocator missing")?;
-            if let Err(message) =
-                crate::service::linux_launch::start_linux_hello_service(allocator, 0)
-            {
-                crate::diagnostics::log::kernel_log_fmt(format_args!(
-                    "[LNX ] load failed: {message}\n"
-                ));
-            }
+            let _ = crate::service::linux_launch::start_linux_hello_service(allocator, 0);
         }
         initialize_timer();
         serial_write_line("[TIME] timer initialized");

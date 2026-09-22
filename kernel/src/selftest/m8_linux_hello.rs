@@ -173,9 +173,9 @@ fn prove_malformed_load(allocator: &mut PageAllocator, state: &mut ObserverState
         return;
     }
     let stacks = unsafe { &*task_stacks_mut() };
-    // Use an empty slot so we do not clobber the native sibling or a live Linux
-    // thread; slot 0 is where the controller places Linux and is Empty after the
-    // second exit.
+    // Use an empty slot so we do not clobber the native sibling. After the
+    // second Linux exit the controller-allocated Linux slot(s) are Empty again
+    // (first launch typically slot 0; relaunch may use another empty slot).
     const MALFORMED_SLOT: usize = 0;
     let free_before = allocator.stats().free_pages;
     let occupied_before = unsafe { process_registry_mut().occupied_slots() };

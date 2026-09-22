@@ -187,6 +187,10 @@ kernel tasks keep running alongside Linux (scheduler slot 2). Controller-owned
 re-Start yields a new generation and a fresh fd table. See
 [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md) "M8.7".
 
+Demo-task boot completion (`[M2  ] PASS`) treats scheduler slots in
+`Empty`/`Reaped`/`Exited` as finished so a reaped Linux slot does not fatal the
+tail after the demos exit.
+
 ## M7 network layering
 
 M7 introduces `clean-slate-network`, a transport-independent contract between raw NIC backends, the userspace network service, and the protocol stack. VirtIO details stay in the kernel driver lane; applications receive attenuated `ResourceClass::Network` capabilities rather than ambient connectivity. See [NETWORK.md](NETWORK.md) for the ownership map, rights vocabulary, and hermetic fixture contract.

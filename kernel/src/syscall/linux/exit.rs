@@ -77,8 +77,11 @@ pub(crate) fn handle_sys_exit(
     #[cfg(feature = "m8-linux-dispatch-self-test")]
     crate::selftest::m8_linux_dispatch::observe_linux_exit(pid, ctx.instance_generation, &teardown);
 
+    // Still executing on the exiting thread's kernel stack. Any re-Start of a
+    // supervised service from this hook must refuse a scheduler slot whose
+    // task stack contains the current rsp (see `linux_launch::ensure_slot_stack_is_idle`).
     #[cfg(feature = "m8-linux-hello")]
-    crate::service::linux_launch::on_linux_hello_process_exited(allocator, pid, status);
+    crate::service::on_supervised_process_exited(allocator, pid, status);
 
     switch_after_exit(teardown.next_stack_pointer)
 }
