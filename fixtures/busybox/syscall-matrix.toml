@@ -1,0 +1,294 @@
+# M9 BusyBox syscall matrix (Phase A draft — BusyBox rootfs slice only)
+# Evidence: fixtures/busybox/traces/*.strace (post execve /bin/* in chroot)
+
+[meta]
+candidate = "musl-minimal"
+busybox_version = "1.37.0"
+syscall_count = 41
+
+[[syscall]]
+nr = 0
+name = "read"
+owner = "#147"
+commands = ["nslookup-fixture", "pipe-grep", "script-sh", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "nslookup-fixture.strace:129"
+
+[[syscall]]
+nr = 1
+name = "write"
+owner = "#147"
+commands = ["busybox-list", "exit-3", "nslookup-fixture", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:103"
+
+[[syscall]]
+nr = 2
+name = "open"
+owner = "#147"
+commands = ["cat-hostname", "ls-root", "nslookup-fixture", "script-sh", "tmp-file-io", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "cat-hostname.strace:124"
+
+[[syscall]]
+nr = 3
+name = "close"
+owner = "#147"
+commands = ["cat-hostname", "ls-root", "nslookup-fixture", "pipe-grep", "script-sh", "tmp-file-io", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "cat-hostname.strace:127"
+
+[[syscall]]
+nr = 4
+name = "stat"
+owner = "#147"
+commands = ["busybox-list", "cat-hostname", "exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "sh-c-minimal", "sleep-1", "tmp-file-io", "true", "uname", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:92"
+
+[[syscall]]
+nr = 6
+name = "lstat"
+owner = "#101"
+commands = ["ls-root", "script-sh"]
+evidence = "ls-root.strace:136"
+
+[[syscall]]
+nr = 7
+name = "poll"
+owner = "#103"
+commands = ["nslookup-fixture", "wget-fixture-fail"]
+evidence = "nslookup-fixture.strace:143"
+
+[[syscall]]
+nr = 8
+name = "lseek"
+owner = "#147"
+commands = ["wget-local-httpd"]
+evidence = "wget-local-httpd.strace:296"
+
+[[syscall]]
+nr = 9
+name = "mmap"
+owner = "#147"
+commands = ["busybox-list", "cat-hostname", "exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "sh-c-minimal", "sleep-1", "tmp-file-io", "true", "uname", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:84"
+
+[[syscall]]
+nr = 11
+name = "munmap"
+owner = "#103"
+commands = ["exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "script-sh", "wget-local-httpd"]
+evidence = "exit-3.strace:149"
+
+[[syscall]]
+nr = 12
+name = "brk"
+owner = "#103"
+commands = ["busybox-list", "cat-hostname", "exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "sh-c-minimal", "sleep-1", "tmp-file-io", "true", "uname", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:82"
+
+[[syscall]]
+nr = 13
+name = "rt_sigaction"
+owner = "#103"
+commands = ["busybox-list", "cat-hostname", "exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "sh-c-minimal", "sleep-1", "tmp-file-io", "true", "uname", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:90"
+
+[[syscall]]
+nr = 14
+name = "rt_sigprocmask"
+owner = "#103"
+commands = ["busybox-list", "cat-hostname", "exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "sh-c-minimal", "sleep-1", "tmp-file-io", "true", "uname", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:89"
+
+[[syscall]]
+nr = 16
+name = "ioctl"
+owner = "#103"
+commands = ["ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "tmp-file-io", "uname", "wget-local-httpd"]
+evidence = "ls-root.strace:124"
+
+[[syscall]]
+nr = 20
+name = "writev"
+owner = "#147"
+commands = ["ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "tmp-file-io", "uname", "wget-local-httpd"]
+evidence = "ls-root.strace:147"
+
+[[syscall]]
+nr = 22
+name = "pipe"
+owner = "#102"
+commands = ["pipe-grep", "script-sh"]
+evidence = "pipe-grep.strace:119"
+
+[[syscall]]
+nr = 33
+name = "dup2"
+owner = "#147"
+commands = ["busybox-list", "script-sh", "tmp-file-io", "wget-local-httpd"]
+evidence = "busybox-list.strace:102"
+
+[[syscall]]
+nr = 35
+name = "nanosleep"
+owner = "#103"
+commands = ["script-sh", "sleep-1"]
+evidence = "script-sh.strace:419"
+
+[[syscall]]
+nr = 39
+name = "getpid"
+owner = "#103"
+commands = ["busybox-list", "cat-hostname", "exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "sh-c-minimal", "sleep-1", "tmp-file-io", "true", "uname", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:87"
+
+[[syscall]]
+nr = 40
+name = "sendfile"
+owner = "#147"
+commands = ["cat-hostname", "script-sh", "tmp-file-io"]
+evidence = "cat-hostname.strace:125"
+
+[[syscall]]
+nr = 41
+name = "socket"
+owner = "#105"
+commands = ["nslookup-fixture", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "nslookup-fixture.strace:136"
+
+[[syscall]]
+nr = 42
+name = "connect"
+owner = "#105"
+commands = ["nslookup-fixture", "wget-local-httpd"]
+evidence = "nslookup-fixture.strace:138"
+
+[[syscall]]
+nr = 44
+name = "sendto"
+owner = "#105"
+commands = ["wget-fixture-fail"]
+evidence = "wget-fixture-fail.strace:139"
+
+[[syscall]]
+nr = 49
+name = "bind"
+owner = "#105"
+commands = ["nslookup-fixture", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "nslookup-fixture.strace:137"
+
+[[syscall]]
+nr = 50
+name = "listen"
+owner = "#105"
+commands = ["wget-local-httpd"]
+evidence = "wget-local-httpd.strace:169"
+
+[[syscall]]
+nr = 57
+name = "fork"
+owner = "#102"
+commands = ["exit-3", "pipe-grep", "script-sh", "tmp-file-io", "wget-local-httpd"]
+evidence = "exit-3.strace:101"
+
+[[syscall]]
+nr = 59
+name = "execve"
+owner = "#146"
+commands = ["busybox-list", "cat-hostname", "exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "sh-c-minimal", "sleep-1", "tmp-file-io", "true", "uname", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:78"
+
+[[syscall]]
+nr = 61
+name = "wait4"
+owner = "#102"
+commands = ["exit-3", "pipe-grep", "script-sh", "tmp-file-io", "wget-local-httpd"]
+evidence = "exit-3.strace:139"
+
+[[syscall]]
+nr = 62
+name = "kill"
+owner = "#103"
+commands = ["wget-local-httpd"]
+evidence = "wget-local-httpd.strace:314"
+
+[[syscall]]
+nr = 63
+name = "uname"
+owner = "#103"
+commands = ["nslookup-fixture", "script-sh", "uname"]
+evidence = "nslookup-fixture.strace:134"
+
+[[syscall]]
+nr = 72
+name = "fcntl"
+owner = "#147"
+commands = ["ls-root", "nslookup-fixture", "script-sh", "tmp-file-io", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "ls-root.strace:133"
+
+[[syscall]]
+nr = 79
+name = "getcwd"
+owner = "#103"
+commands = ["busybox-list", "cat-hostname", "exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "sh-c-minimal", "sleep-1", "tmp-file-io", "true", "uname", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:93"
+
+[[syscall]]
+nr = 80
+name = "chdir"
+owner = "#103"
+commands = ["wget-local-httpd"]
+evidence = "wget-local-httpd.strace:164"
+
+[[syscall]]
+nr = 83
+name = "mkdir"
+owner = "#101"
+commands = ["script-sh", "tmp-file-io"]
+evidence = "script-sh.strace:233"
+
+[[syscall]]
+nr = 102
+name = "getuid"
+owner = "#103"
+commands = ["busybox-list", "cat-hostname", "exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "sh-c-minimal", "sleep-1", "tmp-file-io", "true", "uname", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:81"
+
+[[syscall]]
+nr = 110
+name = "getppid"
+owner = "#102"
+commands = ["busybox-list", "cat-hostname", "exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "sh-c-minimal", "sleep-1", "tmp-file-io", "true", "uname", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:91"
+
+[[syscall]]
+nr = 158
+name = "arch_prctl"
+owner = "#103"
+commands = ["busybox-list", "cat-hostname", "exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "sh-c-minimal", "sleep-1", "tmp-file-io", "true", "uname", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:79"
+
+[[syscall]]
+nr = 217
+name = "getdents64"
+owner = "#101"
+commands = ["ls-root", "script-sh"]
+evidence = "ls-root.strace:135"
+
+[[syscall]]
+nr = 218
+name = "set_tid_address"
+owner = "#103"
+commands = ["busybox-list", "cat-hostname", "exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "sh-c-minimal", "sleep-1", "tmp-file-io", "true", "uname", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:80"
+
+[[syscall]]
+nr = 231
+name = "exit_group"
+owner = "#103"
+commands = ["busybox-list", "cat-hostname", "exit-3", "ls-root", "nslookup-fixture", "pipe-grep", "pwd", "script-sh", "sh-c-minimal", "sleep-1", "tmp-file-io", "true", "uname", "wget-fixture-fail", "wget-local-httpd"]
+evidence = "busybox-list.strace:909"
+
+[[syscall]]
+nr = 43
+name = "accept"
+owner = "#105"
+commands = ["wget-local-httpd"]
+evidence = "wget-local-httpd.strace:174"

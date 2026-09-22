@@ -1,0 +1,1973 @@
+{
+  "syscalls": [
+    {
+      "nr": 0,
+      "name": "read",
+      "owner": "#147",
+      "commands": [
+        "nslookup-fixture",
+        "pipe-grep",
+        "script-sh",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 129,
+          "name": "read",
+          "args_sample": "3, \"nameserver 10.77.0.1\\n\", 1024",
+          "owner": "#147"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 131,
+          "name": "read",
+          "args_sample": "3, \"\", 1024",
+          "owner": "#147"
+        },
+        {
+          "trace": "pipe-grep.strace",
+          "line": 187,
+          "name": "read",
+          "args_sample": "0, \"hello\\n\", 1024",
+          "owner": "#147"
+        },
+        {
+          "trace": "pipe-grep.strace",
+          "line": 194,
+          "name": "read",
+          "args_sample": "0, \"\", 1024",
+          "owner": "#147"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 124,
+          "name": "read",
+          "args_sample": "10, \"pwd\\nls /\\ncat /etc/hostname\\nmkdir -p /tmp/demo2\\nprintf script > /tmp/demo2/file\\ncat /tmp/demo2/file\\necho hi | grep hi\\nuname\\nsleep 0\\nexit 0\\n\", 1023",
+          "owner": "#147"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 354,
+          "name": "read",
+          "args_sample": "0, \"hi\\n\", 1024",
+          "owner": "#147"
+        }
+      ]
+    },
+    {
+      "nr": 1,
+      "name": "write",
+      "owner": "#147",
+      "commands": [
+        "busybox-list",
+        "exit-3",
+        "nslookup-fixture",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 103,
+          "name": "write",
+          "args_sample": "2, \"[\", 1",
+          "owner": "#147"
+        },
+        {
+          "trace": "busybox-list.strace",
+          "line": 104,
+          "name": "write",
+          "args_sample": "2, \"\\n\", 1",
+          "owner": "#147"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 148,
+          "name": "write",
+          "args_sample": "1, \"exit_code=3\\n\", 12",
+          "owner": "#147"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 141,
+          "name": "write",
+          "args_sample": "3, \"\\200\\361\\1 \\0\\1\\0\\0\\0\\0\\0\\0\\2m7\\7fixture\\4test\\0\\0\\1\\0\\1\", 33",
+          "owner": "#147"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 142,
+          "name": "write",
+          "args_sample": "3, \"\\200\\362\\1 \\0\\1\\0\\0\\0\\0\\0\\0\\2m7\\7fixture\\4test\\0\\0\\34\\0\\1\", 33",
+          "owner": "#147"
+        },
+        {
+          "trace": "wget-fixture-fail.strace",
+          "line": 146,
+          "name": "write",
+          "args_sample": "2, \"wget: bad address 'm7.fixture.test:4001'\\n\", 41",
+          "owner": "#147"
+        }
+      ]
+    },
+    {
+      "nr": 2,
+      "name": "open",
+      "owner": "#147",
+      "commands": [
+        "cat-hostname",
+        "ls-root",
+        "nslookup-fixture",
+        "script-sh",
+        "tmp-file-io",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "cat-hostname.strace",
+          "line": 124,
+          "name": "open",
+          "args_sample": "\"/etc/hostname\", O_RDONLY|O_LARGEFILE",
+          "owner": "#147"
+        },
+        {
+          "trace": "ls-root.strace",
+          "line": 132,
+          "name": "open",
+          "args_sample": "\"/\", O_RDONLY|O_LARGEFILE|O_CLOEXEC|O_DIRECTORY",
+          "owner": "#147"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 124,
+          "name": "open",
+          "args_sample": "\"/etc/resolv.conf\", O_RDONLY|O_LARGEFILE",
+          "owner": "#147"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 115,
+          "name": "open",
+          "args_sample": "\"/tmp/script.sh\", O_RDONLY|O_LARGEFILE|O_CLOEXEC",
+          "owner": "#147"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 156,
+          "name": "open",
+          "args_sample": "\"/\", O_RDONLY|O_LARGEFILE|O_CLOEXEC|O_DIRECTORY",
+          "owner": "#147"
+        },
+        {
+          "trace": "tmp-file-io.strace",
+          "line": 152,
+          "name": "open",
+          "args_sample": "\"/tmp/demo/file\", O_WRONLY|O_CREAT|O_TRUNC|O_LARGEFILE, 0666",
+          "owner": "#147"
+        }
+      ]
+    },
+    {
+      "nr": 3,
+      "name": "close",
+      "owner": "#147",
+      "commands": [
+        "cat-hostname",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "script-sh",
+        "tmp-file-io",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "cat-hostname.strace",
+          "line": 127,
+          "name": "close",
+          "args_sample": "3",
+          "owner": "#147"
+        },
+        {
+          "trace": "ls-root.strace",
+          "line": 144,
+          "name": "close",
+          "args_sample": "3",
+          "owner": "#147"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 132,
+          "name": "close",
+          "args_sample": "3",
+          "owner": "#147"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 147,
+          "name": "close",
+          "args_sample": "3",
+          "owner": "#147"
+        },
+        {
+          "trace": "pipe-grep.strace",
+          "line": 178,
+          "name": "close",
+          "args_sample": "3",
+          "owner": "#147"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 119,
+          "name": "close",
+          "args_sample": "3",
+          "owner": "#147"
+        }
+      ]
+    },
+    {
+      "nr": 4,
+      "name": "stat",
+      "owner": "#147",
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 92,
+          "name": "stat",
+          "args_sample": "\"/work\", 0x7ffed788fdd0",
+          "owner": "#147"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 92,
+          "name": "stat",
+          "args_sample": "\"/work\", 0x7ffddcefa990",
+          "owner": "#147"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 98,
+          "name": "stat",
+          "args_sample": "\"/bin/sh\", {st_mode=S_IFREG|0755, st_size=1185688, ...}",
+          "owner": "#147"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 92,
+          "name": "stat",
+          "args_sample": "\"/work\", 0x7ffdda35c4c0",
+          "owner": "#147"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 98,
+          "name": "stat",
+          "args_sample": "\"/bin/sh\", {st_mode=S_IFREG|0755, st_size=1185688, ...}",
+          "owner": "#147"
+        },
+        {
+          "trace": "ls-root.strace",
+          "line": 92,
+          "name": "stat",
+          "args_sample": "\"/work\", 0x7ffe62615de0",
+          "owner": "#147"
+        }
+      ]
+    },
+    {
+      "nr": 6,
+      "name": "lstat",
+      "owner": "#101",
+      "commands": [
+        "ls-root",
+        "script-sh"
+      ],
+      "examples": [
+        {
+          "trace": "ls-root.strace",
+          "line": 136,
+          "name": "lstat",
+          "args_sample": "\"/var\", {st_mode=S_IFDIR|0755, st_size=4096, ...}",
+          "owner": "#101"
+        },
+        {
+          "trace": "ls-root.strace",
+          "line": 137,
+          "name": "lstat",
+          "args_sample": "\"/etc\", {st_mode=S_IFDIR|0755, st_size=4096, ...}",
+          "owner": "#101"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 160,
+          "name": "lstat",
+          "args_sample": "\"/var\", {st_mode=S_IFDIR|0755, st_size=4096, ...}",
+          "owner": "#101"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 161,
+          "name": "lstat",
+          "args_sample": "\"/etc\", {st_mode=S_IFDIR|0755, st_size=4096, ...}",
+          "owner": "#101"
+        }
+      ]
+    },
+    {
+      "nr": 7,
+      "name": "poll",
+      "owner": "#103",
+      "commands": [
+        "nslookup-fixture",
+        "wget-fixture-fail"
+      ],
+      "examples": [
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 143,
+          "name": "poll",
+          "args_sample": "[{fd=3, events=POLLIN}], 1, 2500",
+          "owner": "#103"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 146,
+          "name": "poll",
+          "args_sample": "[{fd=3, events=POLLIN}], 1, 2500",
+          "owner": "#103"
+        },
+        {
+          "trace": "wget-fixture-fail.strace",
+          "line": 141,
+          "name": "poll",
+          "args_sample": "[{fd=-1}, {fd=-1}, {fd=3, events=POLLIN}], 3, 2500",
+          "owner": "#103"
+        },
+        {
+          "trace": "wget-fixture-fail.strace",
+          "line": 144,
+          "name": "poll",
+          "args_sample": "[{fd=-1}, {fd=-1}, {fd=3, events=POLLIN}], 3, 2500",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 8,
+      "name": "lseek",
+      "owner": "#147",
+      "commands": [
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "wget-local-httpd.strace",
+          "line": 296,
+          "name": "lseek",
+          "args_sample": "1, 0, SEEK_CUR",
+          "owner": "#147"
+        }
+      ]
+    },
+    {
+      "nr": 9,
+      "name": "mmap",
+      "owner": "#147",
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 84,
+          "name": "mmap",
+          "args_sample": "0x3e3cf000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0",
+          "owner": "#147"
+        },
+        {
+          "trace": "busybox-list.strace",
+          "line": 85,
+          "name": "mmap",
+          "args_sample": "NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0",
+          "owner": "#147"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 84,
+          "name": "mmap",
+          "args_sample": "0x18007000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0",
+          "owner": "#147"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 85,
+          "name": "mmap",
+          "args_sample": "NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0",
+          "owner": "#147"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 84,
+          "name": "mmap",
+          "args_sample": "0x2273c000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0",
+          "owner": "#147"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 85,
+          "name": "mmap",
+          "args_sample": "NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0",
+          "owner": "#147"
+        }
+      ]
+    },
+    {
+      "nr": 11,
+      "name": "munmap",
+      "owner": "#103",
+      "commands": [
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "script-sh",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "exit-3.strace",
+          "line": 149,
+          "name": "munmap",
+          "args_sample": "0x7f8def481000, 4096",
+          "owner": "#103"
+        },
+        {
+          "trace": "ls-root.strace",
+          "line": 145,
+          "name": "munmap",
+          "args_sample": "0x7fcfa03a0000, 8192",
+          "owner": "#103"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 133,
+          "name": "munmap",
+          "args_sample": "0x7f97d589d000, 4096",
+          "owner": "#103"
+        },
+        {
+          "trace": "pipe-grep.strace",
+          "line": 190,
+          "name": "munmap",
+          "args_sample": "0x7f2dfc266000, 4096",
+          "owner": "#103"
+        },
+        {
+          "trace": "pipe-grep.strace",
+          "line": 191,
+          "name": "munmap",
+          "args_sample": "0x7f2dfc267000, 16384",
+          "owner": "#103"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 169,
+          "name": "munmap",
+          "args_sample": "0x7fe33aee6000, 8192",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 12,
+      "name": "brk",
+      "owner": "#103",
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 82,
+          "name": "brk",
+          "args_sample": "NULL",
+          "owner": "#103"
+        },
+        {
+          "trace": "busybox-list.strace",
+          "line": 83,
+          "name": "brk",
+          "args_sample": "0x3e3d1000",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 82,
+          "name": "brk",
+          "args_sample": "NULL",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 83,
+          "name": "brk",
+          "args_sample": "0x18009000",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 82,
+          "name": "brk",
+          "args_sample": "NULL",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 83,
+          "name": "brk",
+          "args_sample": "0x2273e000",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 13,
+      "name": "rt_sigaction",
+      "owner": "#103",
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 90,
+          "name": "rt_sigaction",
+          "args_sample": "SIGCHLD, {sa_handler=0x46e54e, sa_mask=~[RTMIN RT_1 RT_2], sa_flags=SA_RESTORER, sa_restorer=0x4dfe02}, NULL, 8",
+          "owner": "#103"
+        },
+        {
+          "trace": "busybox-list.strace",
+          "line": 94,
+          "name": "rt_sigaction",
+          "args_sample": "SIGINT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 90,
+          "name": "rt_sigaction",
+          "args_sample": "SIGCHLD, {sa_handler=0x46e54e, sa_mask=~[RTMIN RT_1 RT_2], sa_flags=SA_RESTORER, sa_restorer=0x4dfe02}, NULL, 8",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 94,
+          "name": "rt_sigaction",
+          "args_sample": "SIGINT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 90,
+          "name": "rt_sigaction",
+          "args_sample": "SIGCHLD, {sa_handler=0x46e54e, sa_mask=~[RTMIN RT_1 RT_2], sa_flags=SA_RESTORER, sa_restorer=0x4dfe02}, NULL, 8",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 94,
+          "name": "rt_sigaction",
+          "args_sample": "SIGINT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 14,
+      "name": "rt_sigprocmask",
+      "owner": "#103",
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 89,
+          "name": "rt_sigprocmask",
+          "args_sample": "SIG_UNBLOCK, [RT_1 RT_2], NULL, 8",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 89,
+          "name": "rt_sigprocmask",
+          "args_sample": "SIG_UNBLOCK, [RT_1 RT_2], NULL, 8",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 110,
+          "name": "rt_sigprocmask",
+          "args_sample": "SIG_UNBLOCK, [RT_1 RT_2], NULL, 8",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 89,
+          "name": "rt_sigprocmask",
+          "args_sample": "SIG_UNBLOCK, [RT_1 RT_2], NULL, 8",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 99,
+          "name": "rt_sigprocmask",
+          "args_sample": "SIG_BLOCK, ~[RTMIN RT_1 RT_2], [], 8",
+          "owner": "#103"
+        },
+        {
+          "trace": "ls-root.strace",
+          "line": 89,
+          "name": "rt_sigprocmask",
+          "args_sample": "SIG_UNBLOCK, [RT_1 RT_2], NULL, 8",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 16,
+      "name": "ioctl",
+      "owner": "#103",
+      "commands": [
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "tmp-file-io",
+        "uname",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "ls-root.strace",
+          "line": 124,
+          "name": "ioctl",
+          "args_sample": "0, TIOCGWINSZ, 0x7ffddffede00",
+          "owner": "#103"
+        },
+        {
+          "trace": "ls-root.strace",
+          "line": 125,
+          "name": "ioctl",
+          "args_sample": "1, TIOCGWINSZ, 0x7ffddffede48",
+          "owner": "#103"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 148,
+          "name": "ioctl",
+          "args_sample": "1, TIOCGWINSZ, 0x7ffd950a9488",
+          "owner": "#103"
+        },
+        {
+          "trace": "pipe-grep.strace",
+          "line": 192,
+          "name": "ioctl",
+          "args_sample": "1, TIOCGWINSZ, 0x7fffe82d45c8",
+          "owner": "#103"
+        },
+        {
+          "trace": "pwd.strace",
+          "line": 119,
+          "name": "ioctl",
+          "args_sample": "1, TIOCGWINSZ, 0x7ffc9b3440d8",
+          "owner": "#103"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 125,
+          "name": "ioctl",
+          "args_sample": "1, TIOCGWINSZ, 0x7ffceae3ce28",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 20,
+      "name": "writev",
+      "owner": "#147",
+      "commands": [
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "tmp-file-io",
+        "uname",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "ls-root.strace",
+          "line": 147,
+          "name": "writev",
+          "args_sample": "1, [{iov_base=\"bin\", iov_len=3}, {iov_base=\"\\n\", iov_len=1}], 2",
+          "owner": "#147"
+        },
+        {
+          "trace": "ls-root.strace",
+          "line": 148,
+          "name": "writev",
+          "args_sample": "1, [{iov_base=\"dev\\netc\\nproc\\nsys\\ntmp\\nvar\\n\", iov_len=25}, {iov_base=NULL, iov_len=0}], 2",
+          "owner": "#147"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 149,
+          "name": "writev",
+          "args_sample": "1, [{iov_base=\"\", iov_len=0}, {iov_base=\";; connection timed out; no servers could be reached\\n\\n\", iov_len=54}], 2",
+          "owner": "#147"
+        },
+        {
+          "trace": "pipe-grep.strace",
+          "line": 193,
+          "name": "writev",
+          "args_sample": "1, [{iov_base=\"hello\", iov_len=5}, {iov_base=\"\\n\", iov_len=1}], 2",
+          "owner": "#147"
+        },
+        {
+          "trace": "pwd.strace",
+          "line": 120,
+          "name": "writev",
+          "args_sample": "1, [{iov_base=\"/\", iov_len=1}, {iov_base=\"\\n\", iov_len=1}], 2",
+          "owner": "#147"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 126,
+          "name": "writev",
+          "args_sample": "1, [{iov_base=\"/\", iov_len=1}, {iov_base=\"\\n\", iov_len=1}], 2",
+          "owner": "#147"
+        }
+      ]
+    },
+    {
+      "nr": 22,
+      "name": "pipe",
+      "owner": "#102",
+      "commands": [
+        "pipe-grep",
+        "script-sh"
+      ],
+      "examples": [
+        {
+          "trace": "pipe-grep.strace",
+          "line": 119,
+          "name": "pipe",
+          "args_sample": "[3, 4]",
+          "owner": "#102"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 283,
+          "name": "pipe",
+          "args_sample": "[3, 4]",
+          "owner": "#102"
+        }
+      ]
+    },
+    {
+      "nr": 33,
+      "name": "dup2",
+      "owner": "#147",
+      "commands": [
+        "busybox-list",
+        "script-sh",
+        "tmp-file-io",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 102,
+          "name": "dup2",
+          "args_sample": "1, 2",
+          "owner": "#147"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 247,
+          "name": "dup2",
+          "args_sample": "3, 1",
+          "owner": "#147"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 251,
+          "name": "dup2",
+          "args_sample": "11, 1",
+          "owner": "#147"
+        },
+        {
+          "trace": "tmp-file-io.strace",
+          "line": 155,
+          "name": "dup2",
+          "args_sample": "3, 1",
+          "owner": "#147"
+        },
+        {
+          "trace": "tmp-file-io.strace",
+          "line": 160,
+          "name": "dup2",
+          "args_sample": "10, 1",
+          "owner": "#147"
+        },
+        {
+          "trace": "wget-local-httpd.strace",
+          "line": 247,
+          "name": "dup2",
+          "args_sample": "4, 0",
+          "owner": "#147"
+        }
+      ]
+    },
+    {
+      "nr": 35,
+      "name": "nanosleep",
+      "owner": "#103",
+      "commands": [
+        "script-sh",
+        "sleep-1"
+      ],
+      "examples": [
+        {
+          "trace": "script-sh.strace",
+          "line": 419,
+          "name": "nanosleep",
+          "args_sample": "{tv_sec=0, tv_nsec=0}, 0x7ffd92d04388",
+          "owner": "#103"
+        },
+        {
+          "trace": "sleep-1.strace",
+          "line": 124,
+          "name": "nanosleep",
+          "args_sample": "{tv_sec=1, tv_nsec=0}, 0x7ffe3c0331c8",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 39,
+      "name": "getpid",
+      "owner": "#103",
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 87,
+          "name": "getpid",
+          "args_sample": "",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 87,
+          "name": "getpid",
+          "args_sample": "",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 108,
+          "name": "getpid",
+          "args_sample": "",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 87,
+          "name": "getpid",
+          "args_sample": "",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 123,
+          "name": "getpid",
+          "args_sample": "",
+          "owner": "#103"
+        },
+        {
+          "trace": "ls-root.strace",
+          "line": 87,
+          "name": "getpid",
+          "args_sample": "",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 40,
+      "name": "sendfile",
+      "owner": "#147",
+      "commands": [
+        "cat-hostname",
+        "script-sh",
+        "tmp-file-io"
+      ],
+      "examples": [
+        {
+          "trace": "cat-hostname.strace",
+          "line": 125,
+          "name": "sendfile",
+          "args_sample": "1, 3, NULL, 16777216",
+          "owner": "#147"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 126,
+          "name": "sendfile",
+          "args_sample": "1, 3, NULL, 16777216",
+          "owner": "#147"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 201,
+          "name": "sendfile",
+          "args_sample": "1, 3, NULL, 16777216",
+          "owner": "#147"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 202,
+          "name": "sendfile",
+          "args_sample": "1, 3, NULL, 16777216",
+          "owner": "#147"
+        },
+        {
+          "trace": "tmp-file-io.strace",
+          "line": 168,
+          "name": "sendfile",
+          "args_sample": "1, 3, NULL, 16777216",
+          "owner": "#147"
+        },
+        {
+          "trace": "tmp-file-io.strace",
+          "line": 169,
+          "name": "sendfile",
+          "args_sample": "1, 3, NULL, 16777216",
+          "owner": "#147"
+        }
+      ]
+    },
+    {
+      "nr": 41,
+      "name": "socket",
+      "owner": "#105",
+      "commands": [
+        "nslookup-fixture",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 136,
+          "name": "socket",
+          "args_sample": "AF_INET, SOCK_DGRAM, IPPROTO_IP",
+          "owner": "#105"
+        },
+        {
+          "trace": "wget-fixture-fail.strace",
+          "line": 137,
+          "name": "socket",
+          "args_sample": "AF_INET, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_IP",
+          "owner": "#105"
+        },
+        {
+          "trace": "wget-local-httpd.strace",
+          "line": 166,
+          "name": "socket",
+          "args_sample": "AF_INET6, SOCK_STREAM, IPPROTO_IP",
+          "owner": "#105"
+        },
+        {
+          "trace": "wget-local-httpd.strace",
+          "line": 211,
+          "name": "socket",
+          "args_sample": "AF_INET, SOCK_STREAM, IPPROTO_IP",
+          "owner": "#105"
+        }
+      ]
+    },
+    {
+      "nr": 42,
+      "name": "connect",
+      "owner": "#105",
+      "commands": [
+        "nslookup-fixture",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 138,
+          "name": "connect",
+          "args_sample": "3, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(\"10.77.0.1\")}, 16",
+          "owner": "#105"
+        },
+        {
+          "trace": "wget-local-httpd.strace",
+          "line": 212,
+          "name": "connect",
+          "args_sample": "3, {sa_family=AF_INET, sin_port=htons(18080), sin_addr=inet_addr(\"127.0.0.1\")}, 16",
+          "owner": "#105"
+        }
+      ]
+    },
+    {
+      "nr": 44,
+      "name": "sendto",
+      "owner": "#105",
+      "commands": [
+        "wget-fixture-fail"
+      ],
+      "examples": [
+        {
+          "trace": "wget-fixture-fail.strace",
+          "line": 139,
+          "name": "sendto",
+          "args_sample": "3, \"\\25\\r\\1\\0\\0\\1\\0\\0\\0\\0\\0\\0\\2m7\\7fixture\\4test\\0\\0\\1\\0\\1\", 33, MSG_NOSIGNAL, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(\"10.77.0.1\")}, 16",
+          "owner": "#105"
+        },
+        {
+          "trace": "wget-fixture-fail.strace",
+          "line": 140,
+          "name": "sendto",
+          "args_sample": "3, \"\\26\\371\\1\\0\\0\\1\\0\\0\\0\\0\\0\\0\\2m7\\7fixture\\4test\\0\\0\\34\\0\\1\", 33, MSG_NOSIGNAL, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(\"10.77.0.1\")}, 16",
+          "owner": "#105"
+        }
+      ]
+    },
+    {
+      "nr": 49,
+      "name": "bind",
+      "owner": "#105",
+      "commands": [
+        "nslookup-fixture",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 137,
+          "name": "bind",
+          "args_sample": "3, {sa_family=AF_INET, sin_port=htons(0), sin_addr=inet_addr(\"0.0.0.0\")}, 16",
+          "owner": "#105"
+        },
+        {
+          "trace": "wget-fixture-fail.strace",
+          "line": 138,
+          "name": "bind",
+          "args_sample": "3, {sa_family=AF_INET, sin_port=htons(0), sin_addr=inet_addr(\"0.0.0.0\")}, 16",
+          "owner": "#105"
+        },
+        {
+          "trace": "wget-local-httpd.strace",
+          "line": 168,
+          "name": "bind",
+          "args_sample": "3, {sa_family=AF_INET6, sin6_port=htons(18080), sin6_flowinfo=htonl(0), inet_pton(AF_INET6, \"::\", &sin6_addr), sin6_scope_id=0}, 28",
+          "owner": "#105"
+        }
+      ]
+    },
+    {
+      "nr": 50,
+      "name": "listen",
+      "owner": "#105",
+      "commands": [
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "wget-local-httpd.strace",
+          "line": 169,
+          "name": "listen",
+          "args_sample": "3, 9",
+          "owner": "#105"
+        }
+      ]
+    },
+    {
+      "nr": 57,
+      "name": "fork",
+      "owner": "#102",
+      "commands": [
+        "exit-3",
+        "pipe-grep",
+        "script-sh",
+        "tmp-file-io",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "exit-3.strace",
+          "line": 101,
+          "name": "fork",
+          "args_sample": "",
+          "owner": "#102"
+        },
+        {
+          "trace": "pipe-grep.strace",
+          "line": 122,
+          "name": "fork",
+          "args_sample": "",
+          "owner": "#102"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 130,
+          "name": "fork",
+          "args_sample": "",
+          "owner": "#102"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 182,
+          "name": "fork",
+          "args_sample": "",
+          "owner": "#102"
+        },
+        {
+          "trace": "tmp-file-io.strace",
+          "line": 122,
+          "name": "fork",
+          "args_sample": "",
+          "owner": "#102"
+        },
+        {
+          "trace": "wget-local-httpd.strace",
+          "line": 100,
+          "name": "fork",
+          "args_sample": "",
+          "owner": "#102"
+        }
+      ]
+    },
+    {
+      "nr": 59,
+      "name": "execve",
+      "owner": "#146",
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 78,
+          "name": "execve",
+          "args_sample": "\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; /bin/busybox --list\"], 0x7fff895ee0a8 /* 6 vars */",
+          "owner": "#146"
+        },
+        {
+          "trace": "busybox-list.strace",
+          "line": 98,
+          "name": "execve",
+          "args_sample": "\"/bin/busybox\", [\"/bin/busybox\", \"--list\"], 0x7f0de75d39d0 /* 6 vars */",
+          "owner": "#146"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 78,
+          "name": "execve",
+          "args_sample": "\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh -c 'cat /etc/hostname'\"], 0x7ffe107d16b8 /* 6 vars */",
+          "owner": "#146"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 99,
+          "name": "execve",
+          "args_sample": "\"/bin/sh\", [\"sh\", \"-c\", \"cat /etc/hostname\"], 0x7f444524eae8 /* 6 vars */",
+          "owner": "#146"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 78,
+          "name": "execve",
+          "args_sample": "\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh -c 'exit 3'; /bin/busybox echo exit_code=$?\"], 0x7ffd8f120338 /* 6 vars */",
+          "owner": "#146"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 114,
+          "name": "execve",
+          "args_sample": "\"/bin/sh\", [\"sh\", \"-c\", \"exit 3\"], 0x7f4d0df7fbb8 /* 6 vars */",
+          "owner": "#146"
+        }
+      ]
+    },
+    {
+      "nr": 61,
+      "name": "wait4",
+      "owner": "#102",
+      "commands": [
+        "exit-3",
+        "pipe-grep",
+        "script-sh",
+        "tmp-file-io",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "exit-3.strace",
+          "line": 139,
+          "name": "wait4",
+          "args_sample": "-1, 0x7ffdda35c0fc, WNOHANG, NULL",
+          "owner": "#102"
+        },
+        {
+          "trace": "pipe-grep.strace",
+          "line": 200,
+          "name": "wait4",
+          "args_sample": "-1, 0x7fffcc863f8c, WNOHANG, NULL",
+          "owner": "#102"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 178,
+          "name": "wait4",
+          "args_sample": "-1, 0x7ffceae3d1ec, WNOHANG, NULL",
+          "owner": "#102"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 209,
+          "name": "wait4",
+          "args_sample": "-1, 0x7ffceae3d1ec, WNOHANG, NULL",
+          "owner": "#102"
+        },
+        {
+          "trace": "tmp-file-io.strace",
+          "line": 151,
+          "name": "wait4",
+          "args_sample": "-1, 0x7ffcafe76cbc, WNOHANG, NULL",
+          "owner": "#102"
+        },
+        {
+          "trace": "wget-local-httpd.strace",
+          "line": 181,
+          "name": "wait4",
+          "args_sample": "-1, 0x7ffc21edc33c, WNOHANG, NULL",
+          "owner": "#102"
+        }
+      ]
+    },
+    {
+      "nr": 62,
+      "name": "kill",
+      "owner": "#103",
+      "commands": [
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "wget-local-httpd.strace",
+          "line": 314,
+          "name": "kill",
+          "args_sample": "94, SIGTERM",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 63,
+      "name": "uname",
+      "owner": "#103",
+      "commands": [
+        "nslookup-fixture",
+        "script-sh",
+        "uname"
+      ],
+      "examples": [
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 134,
+          "name": "uname",
+          "args_sample": "{sysname=\"Linux\", nodename=\"ed74d79dcd81\", ...}",
+          "owner": "#103"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 389,
+          "name": "uname",
+          "args_sample": "{sysname=\"Linux\", nodename=\"ed74d79dcd81\", ...}",
+          "owner": "#103"
+        },
+        {
+          "trace": "uname.strace",
+          "line": 124,
+          "name": "uname",
+          "args_sample": "{sysname=\"Linux\", nodename=\"ed74d79dcd81\", ...}",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 72,
+      "name": "fcntl",
+      "owner": "#147",
+      "commands": [
+        "ls-root",
+        "nslookup-fixture",
+        "script-sh",
+        "tmp-file-io",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "ls-root.strace",
+          "line": 133,
+          "name": "fcntl",
+          "args_sample": "3, F_SETFD, FD_CLOEXEC",
+          "owner": "#147"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 139,
+          "name": "fcntl",
+          "args_sample": "3, F_GETFL",
+          "owner": "#147"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 140,
+          "name": "fcntl",
+          "args_sample": "3, F_SETFL, O_RDWR|O_NONBLOCK|O_LARGEFILE",
+          "owner": "#147"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 116,
+          "name": "fcntl",
+          "args_sample": "3, F_SETFD, FD_CLOEXEC",
+          "owner": "#147"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 117,
+          "name": "fcntl",
+          "args_sample": "3, F_DUPFD_CLOEXEC, 10",
+          "owner": "#147"
+        },
+        {
+          "trace": "tmp-file-io.strace",
+          "line": 153,
+          "name": "fcntl",
+          "args_sample": "1, F_DUPFD_CLOEXEC, 10",
+          "owner": "#147"
+        }
+      ]
+    },
+    {
+      "nr": 79,
+      "name": "getcwd",
+      "owner": "#103",
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 93,
+          "name": "getcwd",
+          "args_sample": "\"/\", 4096",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 93,
+          "name": "getcwd",
+          "args_sample": "\"/\", 4096",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 93,
+          "name": "getcwd",
+          "args_sample": "\"/\", 4096",
+          "owner": "#103"
+        },
+        {
+          "trace": "ls-root.strace",
+          "line": 93,
+          "name": "getcwd",
+          "args_sample": "\"/\", 4096",
+          "owner": "#103"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 93,
+          "name": "getcwd",
+          "args_sample": "\"/\", 4096",
+          "owner": "#103"
+        },
+        {
+          "trace": "pipe-grep.strace",
+          "line": 93,
+          "name": "getcwd",
+          "args_sample": "\"/\", 4096",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 80,
+      "name": "chdir",
+      "owner": "#103",
+      "commands": [
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "wget-local-httpd.strace",
+          "line": 164,
+          "name": "chdir",
+          "args_sample": "\"/var/www\"",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 83,
+      "name": "mkdir",
+      "owner": "#101",
+      "commands": [
+        "script-sh",
+        "tmp-file-io"
+      ],
+      "examples": [
+        {
+          "trace": "script-sh.strace",
+          "line": 233,
+          "name": "mkdir",
+          "args_sample": "\"/\", 0777",
+          "owner": "#101"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 235,
+          "name": "mkdir",
+          "args_sample": "\"/tmp/\", 0777",
+          "owner": "#101"
+        },
+        {
+          "trace": "tmp-file-io.strace",
+          "line": 141,
+          "name": "mkdir",
+          "args_sample": "\"/\", 0777",
+          "owner": "#101"
+        },
+        {
+          "trace": "tmp-file-io.strace",
+          "line": 143,
+          "name": "mkdir",
+          "args_sample": "\"/tmp/\", 0777",
+          "owner": "#101"
+        }
+      ]
+    },
+    {
+      "nr": 102,
+      "name": "getuid",
+      "owner": "#103",
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 81,
+          "name": "getuid",
+          "args_sample": "",
+          "owner": "#103"
+        },
+        {
+          "trace": "busybox-list.strace",
+          "line": 101,
+          "name": "getuid",
+          "args_sample": "",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 81,
+          "name": "getuid",
+          "args_sample": "",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 102,
+          "name": "getuid",
+          "args_sample": "",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 81,
+          "name": "getuid",
+          "args_sample": "",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 117,
+          "name": "getuid",
+          "args_sample": "",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 110,
+      "name": "getppid",
+      "owner": "#102",
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 91,
+          "name": "getppid",
+          "args_sample": "",
+          "owner": "#102"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 91,
+          "name": "getppid",
+          "args_sample": "",
+          "owner": "#102"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 112,
+          "name": "getppid",
+          "args_sample": "",
+          "owner": "#102"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 91,
+          "name": "getppid",
+          "args_sample": "",
+          "owner": "#102"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 127,
+          "name": "getppid",
+          "args_sample": "",
+          "owner": "#102"
+        },
+        {
+          "trace": "ls-root.strace",
+          "line": 91,
+          "name": "getppid",
+          "args_sample": "",
+          "owner": "#102"
+        }
+      ]
+    },
+    {
+      "nr": 158,
+      "name": "arch_prctl",
+      "owner": "#103",
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 79,
+          "name": "arch_prctl",
+          "args_sample": "ARCH_SET_FS, 0x523278",
+          "owner": "#103"
+        },
+        {
+          "trace": "busybox-list.strace",
+          "line": 99,
+          "name": "arch_prctl",
+          "args_sample": "ARCH_SET_FS, 0x523278",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 79,
+          "name": "arch_prctl",
+          "args_sample": "ARCH_SET_FS, 0x523278",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 100,
+          "name": "arch_prctl",
+          "args_sample": "ARCH_SET_FS, 0x523278",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 79,
+          "name": "arch_prctl",
+          "args_sample": "ARCH_SET_FS, 0x523278",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 115,
+          "name": "arch_prctl",
+          "args_sample": "ARCH_SET_FS, 0x523278",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 217,
+      "name": "getdents64",
+      "owner": "#101",
+      "commands": [
+        "ls-root",
+        "script-sh"
+      ],
+      "examples": [
+        {
+          "trace": "ls-root.strace",
+          "line": 135,
+          "name": "getdents64",
+          "args_sample": "3, 0x7fcfa03a0048 /* 9 entries */, 2048",
+          "owner": "#101"
+        },
+        {
+          "trace": "ls-root.strace",
+          "line": 143,
+          "name": "getdents64",
+          "args_sample": "3, 0x7fcfa03a0048 /* 0 entries */, 2048",
+          "owner": "#101"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 159,
+          "name": "getdents64",
+          "args_sample": "3, 0x7fe33aee6048 /* 9 entries */, 2048",
+          "owner": "#101"
+        },
+        {
+          "trace": "script-sh.strace",
+          "line": 167,
+          "name": "getdents64",
+          "args_sample": "3, 0x7fe33aee6048 /* 0 entries */, 2048",
+          "owner": "#101"
+        }
+      ]
+    },
+    {
+      "nr": 218,
+      "name": "set_tid_address",
+      "owner": "#103",
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 80,
+          "name": "set_tid_address",
+          "args_sample": "0x523bf8",
+          "owner": "#103"
+        },
+        {
+          "trace": "busybox-list.strace",
+          "line": 100,
+          "name": "set_tid_address",
+          "args_sample": "0x523bf8",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 80,
+          "name": "set_tid_address",
+          "args_sample": "0x523bf8",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 101,
+          "name": "set_tid_address",
+          "args_sample": "0x523bf8",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 80,
+          "name": "set_tid_address",
+          "args_sample": "0x523bf8",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 116,
+          "name": "set_tid_address",
+          "args_sample": "0x523bf8",
+          "owner": "#103"
+        }
+      ]
+    },
+    {
+      "nr": 231,
+      "name": "exit_group",
+      "owner": "#103",
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "examples": [
+        {
+          "trace": "busybox-list.strace",
+          "line": 909,
+          "name": "exit_group",
+          "args_sample": "0",
+          "owner": "#103"
+        },
+        {
+          "trace": "cat-hostname.strace",
+          "line": 128,
+          "name": "exit_group",
+          "args_sample": "0",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 134,
+          "name": "exit_group",
+          "args_sample": "3",
+          "owner": "#103"
+        },
+        {
+          "trace": "exit-3.strace",
+          "line": 150,
+          "name": "exit_group",
+          "args_sample": "0",
+          "owner": "#103"
+        },
+        {
+          "trace": "ls-root.strace",
+          "line": 149,
+          "name": "exit_group",
+          "args_sample": "0",
+          "owner": "#103"
+        },
+        {
+          "trace": "nslookup-fixture.strace",
+          "line": 150,
+          "name": "exit_group",
+          "args_sample": "1",
+          "owner": "#103"
+        }
+      ]
+    }
+  ]
+}
