@@ -135,6 +135,15 @@ aliases `m8-linux-hello`, `m8.7`; 40s timeout covers two launches):
 cargo xtask test-m8-linux-hello
 ```
 
+Authoritative M8 milestone gate (aliases `m8`, `m8.9`): fixture verify, `clean-slate-elf` /
+`clean-slate-linux-abi` / `#92` loader host tests, then the composed
+`test-m8-linux-hello` pair. Prints `[M8  ] PASS` only after every phase succeeds.
+See [LINUX_PERSONALITY.md — M8 acceptance (#98)](LINUX_PERSONALITY.md#m8-acceptance-98).
+
+```bash
+cargo xtask test-m8
+```
+
 For the bounded M3.4 process/thread lifecycle acceptance path:
 
 ```bash
@@ -380,9 +389,9 @@ cargo xtask m5-disk-create
 cargo xtask m5-disk-reset
 ```
 
-On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, `test-m5`, and `test-m6`, which covers the milestone gates already wired into the aggregate flows without redundantly rerunning constituents. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, `test-m5-crash-recovery`, `test-m5-disk-harness`, and each `test-m6-*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `m5`, `m6`/`m6.9`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, `m5-disk-harness`/`m5-harness`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, `m6-capabilities`/`m6.8`), for example `.\scripts\run-tests.ps1 -Test m6`; `-List` prints the available names.
+On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, `test-m5`, `test-m6`, `test-m7`, and `test-m8`, which covers the milestone gates already wired into the aggregate flows without redundantly rerunning constituents. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, `test-m5-crash-recovery`, `test-m5-disk-harness`, and each `test-m6-*` / `test-m7-*` / `test-m8-*` constituent. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `m5`, `m6`/`m6.9`, `m7`/`m7.9`, `m8`/`m8.9`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, `m5-disk-harness`/`m5-harness`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, `m6-capabilities`/`m6.8`), for example `.\scripts\run-tests.ps1 -Test m6`; `-List` prints the available names.
 
-On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m6`/`m6.9`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, and `m6-capabilities`/`m6.8`). OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests including `clean-slate-capability`) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive therefore exercises every M3–M6 constituent plus all milestone aggregates with the existing `qemu-system-x86` and `ovmf` package setup from `.github/workflows/pr.yml`.
+On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m6`/`m6.9`, `m7`/`m7.9`, `m8`/`m8.9`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, `m6-capabilities`/`m6.8`, `m8-linux-hello`/`m8.7`, `m8-linux-image`/`m8.2`, `m8-linux-dispatch`/`m8.3`, and `verify-m8-fixture`). OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests including `clean-slate-capability`) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive therefore exercises every M3–M8 constituent plus all milestone aggregates with the existing `qemu-system-x86` and `ovmf` package setup from `.github/workflows/pr.yml`.
 
 For the M8.6 committed Linux hello ELF provenance check (hash + pinned metadata; no QEMU):
 

@@ -21,6 +21,15 @@ The user should not need to understand the implementation details in normal use.
 
 The first practical compatibility target is Linux userspace. The M8.1 execution contract (personality boundary, syscall/errno encoding, initial stack/auxv layout) is documented in [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md).
 
+### Supported M8 Linux ABI
+
+M8 runs an unmodified Linux x86-64 `ET_EXEC` ELF through the production Linux personality (#97). Supported syscalls:
+
+- `write(1, …)` and `write(2, …)` — stdout/stderr via the capability-controlled fd projection (#95); payloads reach serial **verbatim** (no `[IPC ] console` framing).
+- `exit(status)` — production teardown (`teardown_current_process`); status is `status & 0xff`.
+
+Any other Linux syscall number returns `-ENOSYS` (`encode_rax(Err(ENOSYS))`) with bounded serial logging (`[LNX ] unsupported syscall=<nr> errno=ENOSYS`); never panic/fatal. Fixture provenance, rebuild, and verify: [M8_FIXTURE.md](M8_FIXTURE.md). Authoritative gate: `cargo xtask test-m8` ([M8 acceptance (#98)](LINUX_PERSONALITY.md#m8-acceptance-98)).
+
 The project should begin by supporting unmodified ELF64 applications that expect the Linux syscall ABI. Compatibility can then grow toward a useful Linux environment with libc, shells, CLI tools, graphical applications, and package import.
 
 Early target sequence:

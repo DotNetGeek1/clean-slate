@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Run Clean-Slate QEMU xtask acceptance tests and report failures.
 #
-# By default runs test-m1, test-m2, test-m3, test-m4, test-m5, test-m6 (milestone gates and
-# aggregates). Use --exhaustive for every registered xtask acceptance command.
+# By default runs test-m1, test-m2, test-m3, test-m4, test-m5, test-m6, test-m7, test-m8
+# (milestone gates and aggregates). Use --exhaustive for every registered xtask acceptance command.
 # OVMF is discovered by xtask on Linux when
 # OVMF_CODE/OVMF_VARS are unset; override with env vars or --ovmf-code/--ovmf-vars.
 set -euo pipefail
@@ -42,6 +42,7 @@ TEST_NAMES=(
   test-m5-disk-harness
   test-m6
   test-m7
+  test-m8
   test-m6-fixture-smoke
   test-m6-object
   test-m7-net-service
@@ -55,14 +56,18 @@ TEST_NAMES=(
   test-m7-tls
   test-m7-net-caps
   test-m7-dns
+  test-m8-linux-hello
+  test-m8-linux-image
+  test-m8-linux-dispatch
+  verify-m8-fixture
 )
 
 test_role() {
   case "$1" in
-    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls)
+    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls | test-m8-linux-hello | test-m8-linux-image | test-m8-linux-dispatch | verify-m8-fixture)
       echo Constituent
       ;;
-    test-m3 | test-m4 | test-m5 | test-m6 | test-m7)
+    test-m3 | test-m4 | test-m5 | test-m6 | test-m7 | test-m8)
       echo Aggregate
       ;;
     *)
@@ -110,6 +115,11 @@ test_description() {
     test-m7-dns) echo "M7.5 DNS resolver QEMU acceptance" ;;
     test-m6) echo "M6 milestone gate (capability host tests, fixture smoke, constituents, convergence)" ;;
     test-m7) echo "M7 milestone gate (converged network-service path + DNS/TLS + capability broker)" ;;
+    test-m8) echo "M8 milestone gate (fixture verify, elf/linux-abi/#92 host tests, Linux hello production path)" ;;
+    test-m8-linux-hello) echo "M8.7 integrated Linux hello (self-test observer + production boot)" ;;
+    test-m8-linux-image) echo "M8.2 Linux ELF loader QEMU constituent acceptance" ;;
+    test-m8-linux-dispatch) echo "M8.3 Linux personality dispatch QEMU constituent acceptance" ;;
+    verify-m8-fixture) echo "M8.6 fixture SHA-256 and ELF metadata verify (host)" ;;
     *) echo "" ;;
   esac
 }
@@ -153,6 +163,11 @@ test_aliases() {
     test-m7-dns) echo "m7-dns m7.5" ;;
     test-m6) echo "m6 m6.9" ;;
     test-m7) echo "m7 m7.9" ;;
+    test-m8) echo "m8 m8.9" ;;
+    test-m8-linux-hello) echo "m8-linux-hello m8.7" ;;
+    test-m8-linux-image) echo "m8-linux-image m8.2" ;;
+    test-m8-linux-dispatch) echo "m8-linux-dispatch m8.3" ;;
+    verify-m8-fixture) echo "verify-m8-fixture" ;;
     *) echo "" ;;
   esac
 }
