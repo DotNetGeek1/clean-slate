@@ -346,6 +346,31 @@ pub(crate) fn map_process_page(
     address_space.record_user_mapping(virtual_address, frame_address)
 }
 
+/// Unmap and free the most recently recorded user mapping (LIFO rollback helper).
+#[allow(dead_code)]
+pub(crate) fn unmap_last_user_mapping(
+    address_space: &mut ProcessAddressSpace,
+    allocator: &mut PageAllocator,
+) -> Result<(), &'static str> {
+    if address_space.user_mapping_count == 0 {
+        return Err("no user mapping available to roll back");
+    }
+    let index = address_space.user_mapping_count - 1;
+    let mapping = address_space.user_mappings[index];
+    let mut mapper = unsafe { offset_page_table_for_root(address_space.root_frame) };
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(mapping.virtual_address));
+    let frame = unmap_userspace_page(&mut mapper, page)?;
+    if frame.start_address().as_u64() != mapping.frame_address {
+        return Err("rollback unmapped an unexpected frame");
+    }
+    unsafe {
+        free_frame(allocator, mapping.frame_address)?;
+    }
+    address_space.user_mappings[index] = OwnedUserMapping::EMPTY;
+    address_space.user_mapping_count = index;
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub(crate) fn translate_address_in_root(
     root_frame: u64,

@@ -342,7 +342,7 @@ fn map_supervisor_process(
     kernel_stack_top: u64,
     bootstrap: RecoveryBootstrap,
 ) -> Result<(TrackedProcess, u64), &'static str> {
-    let image_pages = RECOVERY_SUPERVISOR_IMAGE.len().div_ceil(PAGE_SIZE as usize);
+    let image_pages = RECOVERY_SUPERVISOR_MAPPED_CODE_PAGES;
     if image_pages > RECOVERY_SUPERVISOR_MAX_CODE_PAGES as usize {
         return Err("recovery supervisor image exceeded mapped code budget");
     }
@@ -356,29 +356,13 @@ fn map_supervisor_process(
         }
         (pid, ids.allocate_tid()?)
     };
-    for page_index in 0..image_pages {
-        let frame_address = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide supervisor code page")?;
-        zero_page(frame_address);
-        let offset = page_index * PAGE_SIZE as usize;
-        let chunk_end = (offset + PAGE_SIZE as usize).min(RECOVERY_SUPERVISOR_IMAGE.len());
-        let chunk = &RECOVERY_SUPERVISOR_IMAGE[offset..chunk_end];
-        unsafe {
-            ptr::copy_nonoverlapping(
-                chunk.as_ptr(),
-                (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
-                chunk.len(),
-            );
-        }
-        map_process_page(
-            &mut address_space,
-            USER_TEST_CODE_ADDRESS + page_index as u64 * PAGE_SIZE,
-            frame_address,
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )?;
-    }
+    crate::mm::image_loader::map_embedded_segments(
+        &mut address_space,
+        allocator,
+        USER_TEST_CODE_ADDRESS,
+        RECOVERY_SUPERVISOR_IMAGE,
+        &RECOVERY_SUPERVISOR_SEGMENTS,
+    )?;
     for stack_page in 0..RECOVERY_SUPERVISOR_STACK_PAGES {
         let stack_frame = allocator
             .allocate_page()

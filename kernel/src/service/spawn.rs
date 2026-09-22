@@ -128,6 +128,25 @@ const STORAGE_SERVICE_STACK_ADDRESS: u64 = STORAGE_SERVICE_BOOTSTRAP_ADDRESS + P
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test"
 ))]
+const STORAGE_SERVICE_STACK_PAGES: u64 = 8;
+// Deliberate fixed upper bound on storage image PT_LOAD pages. The exact demand is
+// `STORAGE_USERSPACE_MAPPED_CODE_PAGES` from build-time load-plan metadata; keep this
+// ceiling so a grown image fails at compile/launch time instead of mid-map. Do not raise
+// `MAX_ADDRESS_SPACE_USER_MAPPINGS` just to absorb an oversized image.
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
 const STORAGE_SERVICE_MAX_CODE_PAGES: usize = 64;
 #[cfg(any(
     feature = "m5-storage-self-test",
@@ -143,10 +162,7 @@ const STORAGE_SERVICE_MAX_CODE_PAGES: usize = 64;
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test"
 ))]
-const STORAGE_SERVICE_STACK_PAGES: u64 = 8;
-// The storage image budget (code + stack + bootstrap page) must fit the
-// per-process mapping table, otherwise a large image fails midway through
-// mapping instead of being rejected up front.
+const _: () = assert!(STORAGE_USERSPACE_MAPPED_CODE_PAGES <= STORAGE_SERVICE_MAX_CODE_PAGES);
 #[cfg(any(
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
@@ -162,7 +178,7 @@ const STORAGE_SERVICE_STACK_PAGES: u64 = 8;
     feature = "m6-fixture-smoke-self-test"
 ))]
 const STORAGE_SERVICE_MAPPED_PAGES: usize =
-    STORAGE_SERVICE_MAX_CODE_PAGES + STORAGE_SERVICE_STACK_PAGES as usize + 1;
+    STORAGE_USERSPACE_MAPPED_CODE_PAGES + STORAGE_SERVICE_STACK_PAGES as usize + 1;
 #[cfg(any(
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
@@ -238,6 +254,8 @@ const M6_FIXTURE_STACK_PAGES: u64 = 4;
 ))]
 const M6_FIXTURE_STACK_ADDRESS: u64 =
     M6_FIXTURE_BOOTSTRAP_ADDRESS + M6_FIXTURE_BOOTSTRAP_PAGES * PAGE_SIZE;
+// Deliberate fixed upper bound on M6 fixture PT_LOAD pages; exact demand comes from
+// `M6_FIXTURE_USERSPACE_MAPPED_CODE_PAGES` generated metadata.
 #[cfg(any(
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
@@ -259,7 +277,18 @@ const M6_FIXTURE_MAX_CODE_PAGES: usize = 16;
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test"
 ))]
-const M6_FIXTURE_MAPPED_PAGES: usize = M6_FIXTURE_MAX_CODE_PAGES
+const _: () = assert!(M6_FIXTURE_USERSPACE_MAPPED_CODE_PAGES <= M6_FIXTURE_MAX_CODE_PAGES);
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+const M6_FIXTURE_MAPPED_PAGES: usize = M6_FIXTURE_USERSPACE_MAPPED_CODE_PAGES
     + M6_FIXTURE_BOOTSTRAP_PAGES as usize
     + M6_FIXTURE_STACK_PAGES as usize;
 #[cfg(any(
@@ -752,6 +781,8 @@ fn launch_storage_userspace_service(
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
     use crate::mm::address_space::create_process_address_space;
     use crate::mm::address_space::map_process_page;
+    use crate::mm::image_loader::map_embedded_segments;
+    use crate::mm::image_loader::map_user_stack_pages;
     use crate::mm::paging::zero_page;
     use crate::mm::PHYSICAL_MEMORY_OFFSET;
     use crate::process::id_allocator::id_allocator_mut;
@@ -759,8 +790,7 @@ fn launch_storage_userspace_service(
     use x86_64::structures::paging::PageTableFlags;
     use x86_64::VirtAddr;
 
-    let image_pages = STORAGE_USERSPACE_IMAGE.len().div_ceil(PAGE_SIZE as usize);
-    if image_pages > STORAGE_SERVICE_MAX_CODE_PAGES {
+    if STORAGE_USERSPACE_MAPPED_CODE_PAGES > STORAGE_SERVICE_MAX_CODE_PAGES {
         return Err("storage userspace image exceeded mapped code budget");
     }
     let mut address_space =
@@ -769,50 +799,19 @@ fn launch_storage_userspace_service(
         let ids = unsafe { id_allocator_mut() };
         (ids.allocate_pid()?, ids.allocate_tid()?)
     };
-    for page_index in 0..image_pages {
-        let frame_address = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide a storage code page")?;
-        zero_page(frame_address);
-        let offset = page_index * PAGE_SIZE as usize;
-        let chunk_end = (offset + PAGE_SIZE as usize).min(STORAGE_USERSPACE_IMAGE.len());
-        let chunk = &STORAGE_USERSPACE_IMAGE[offset..chunk_end];
-        unsafe {
-            ptr::copy_nonoverlapping(
-                chunk.as_ptr(),
-                (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
-                chunk.len(),
-            );
-        }
-        if let Err(message) = map_process_page(
-            &mut address_space,
-            SERVICE_USER_CODE_ADDRESS + page_index as u64 * PAGE_SIZE,
-            frame_address,
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        ) {
-            unsafe {
-                crate::mm::frame_allocator::free_frame(allocator, frame_address)?;
-            }
-            return Err(message);
-        }
-    }
-    for stack_page in 0..STORAGE_SERVICE_STACK_PAGES {
-        let stack_frame = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide a storage stack page")?;
-        zero_page(stack_frame);
-        map_process_page(
-            &mut address_space,
-            STORAGE_SERVICE_STACK_ADDRESS + stack_page * PAGE_SIZE,
-            stack_frame,
-            PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::NO_EXECUTE
-                | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )?;
-    }
+    map_embedded_segments(
+        &mut address_space,
+        allocator,
+        SERVICE_USER_CODE_ADDRESS,
+        STORAGE_USERSPACE_IMAGE,
+        &STORAGE_USERSPACE_SEGMENTS,
+    )?;
+    map_user_stack_pages(
+        &mut address_space,
+        allocator,
+        STORAGE_SERVICE_STACK_ADDRESS,
+        STORAGE_SERVICE_STACK_PAGES,
+    )?;
     let data_frame = allocator
         .allocate_page()
         .ok_or("allocator could not provide a storage bootstrap page")?;
@@ -900,6 +899,8 @@ fn launch_m6_fixture_service(
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
     use crate::mm::address_space::create_process_address_space;
     use crate::mm::address_space::map_process_page;
+    use crate::mm::image_loader::map_embedded_segments;
+    use crate::mm::image_loader::map_user_stack_pages;
     use crate::mm::paging::zero_page;
     use crate::mm::PHYSICAL_MEMORY_OFFSET;
     use crate::process::id_allocator::id_allocator_mut;
@@ -909,10 +910,7 @@ fn launch_m6_fixture_service(
     use x86_64::VirtAddr;
 
     let bootstrap = consume_fixture_program(service)?;
-    let image_pages = M6_FIXTURE_USERSPACE_IMAGE
-        .len()
-        .div_ceil(PAGE_SIZE as usize);
-    if image_pages > M6_FIXTURE_MAX_CODE_PAGES {
+    if M6_FIXTURE_USERSPACE_MAPPED_CODE_PAGES > M6_FIXTURE_MAX_CODE_PAGES {
         return Err("m6 fixture userspace image exceeded mapped code budget");
     }
     let mut address_space =
@@ -921,29 +919,13 @@ fn launch_m6_fixture_service(
         let ids = unsafe { id_allocator_mut() };
         (ids.allocate_pid()?, ids.allocate_tid()?)
     };
-    for page_index in 0..image_pages {
-        let frame_address = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide an m6 fixture code page")?;
-        zero_page(frame_address);
-        let offset = page_index * PAGE_SIZE as usize;
-        let chunk_end = (offset + PAGE_SIZE as usize).min(M6_FIXTURE_USERSPACE_IMAGE.len());
-        let chunk = &M6_FIXTURE_USERSPACE_IMAGE[offset..chunk_end];
-        unsafe {
-            ptr::copy_nonoverlapping(
-                chunk.as_ptr(),
-                (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
-                chunk.len(),
-            );
-        }
-        map_process_page(
-            &mut address_space,
-            SERVICE_USER_CODE_ADDRESS + page_index as u64 * PAGE_SIZE,
-            frame_address,
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )?;
-    }
+    map_embedded_segments(
+        &mut address_space,
+        allocator,
+        SERVICE_USER_CODE_ADDRESS,
+        M6_FIXTURE_USERSPACE_IMAGE,
+        &M6_FIXTURE_USERSPACE_SEGMENTS,
+    )?;
     let bootstrap_bytes = unsafe {
         core::slice::from_raw_parts(
             &bootstrap as *const _ as *const u8,
@@ -977,22 +959,12 @@ fn launch_m6_fixture_service(
             allocator,
         )?;
     }
-    for stack_page in 0..M6_FIXTURE_STACK_PAGES {
-        let stack_frame = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide an m6 fixture stack page")?;
-        zero_page(stack_frame);
-        map_process_page(
-            &mut address_space,
-            M6_FIXTURE_STACK_ADDRESS + stack_page * PAGE_SIZE,
-            stack_frame,
-            PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::NO_EXECUTE
-                | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )?;
-    }
+    map_user_stack_pages(
+        &mut address_space,
+        allocator,
+        M6_FIXTURE_STACK_ADDRESS,
+        M6_FIXTURE_STACK_PAGES,
+    )?;
     let user_stack_pointer = M6_FIXTURE_STACK_ADDRESS + M6_FIXTURE_STACK_PAGES * PAGE_SIZE;
     let entry_rip = SERVICE_USER_CODE_ADDRESS + M6_FIXTURE_USERSPACE_ENTRY_OFFSET;
     let saved_stack_pointer =
@@ -1019,15 +991,18 @@ const NETWORK_SERVICE_STACK_GUARD_PAGES: u64 = 1;
 const NETWORK_SERVICE_STACK_ADDRESS: u64 =
     NETWORK_SERVICE_BOOTSTRAP_ADDRESS + (NETWORK_SERVICE_STACK_GUARD_PAGES + 1) * PAGE_SIZE;
 #[cfg(feature = "m7-net-service-self-test")]
-/// The M7 userspace image now carries both the ordinary client path and the service-owned
-/// DNS/TCP/TLS bridge logic. The combined protocol state currently needs a deeper userspace
-/// stack than earlier M7 lanes, so reserve extra guard headroom here.
+/// The M7 userspace image carries both the ordinary client path and the service-owned
+/// DNS/TCP/TLS bridge logic. Exact PT_LOAD demand is `NETWORK_USERSPACE_MAPPED_CODE_PAGES`
+/// from load-plan metadata; this ceiling remains a deliberate fail-closed bound. Do not
+/// raise `MAX_ADDRESS_SPACE_USER_MAPPINGS` solely to absorb image growth.
 const NETWORK_SERVICE_STACK_PAGES: u64 = 80;
 #[cfg(feature = "m7-net-service-self-test")]
 const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 300;
 #[cfg(feature = "m7-net-service-self-test")]
+const _: () = assert!(NETWORK_USERSPACE_MAPPED_CODE_PAGES <= NETWORK_SERVICE_MAX_CODE_PAGES);
+#[cfg(feature = "m7-net-service-self-test")]
 const NETWORK_SERVICE_MAPPED_PAGES: usize =
-    NETWORK_SERVICE_MAX_CODE_PAGES + NETWORK_SERVICE_STACK_PAGES as usize + 1;
+    NETWORK_USERSPACE_MAPPED_CODE_PAGES + NETWORK_SERVICE_STACK_PAGES as usize + 1;
 #[cfg(feature = "m7-net-service-self-test")]
 const _: () = assert!(
     NETWORK_SERVICE_MAPPED_PAGES <= crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
@@ -1064,6 +1039,8 @@ fn launch_network_userspace_with_bootstrap(
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
     use crate::mm::address_space::create_process_address_space;
     use crate::mm::address_space::map_process_page;
+    use crate::mm::image_loader::map_embedded_segments;
+    use crate::mm::image_loader::map_user_stack_pages;
     use crate::mm::paging::zero_page;
     use crate::mm::PHYSICAL_MEMORY_OFFSET;
     use crate::process::id_allocator::id_allocator_mut;
@@ -1071,8 +1048,7 @@ fn launch_network_userspace_with_bootstrap(
     use x86_64::structures::paging::PageTableFlags;
     use x86_64::VirtAddr;
 
-    let image_pages = NETWORK_USERSPACE_IMAGE.len().div_ceil(PAGE_SIZE as usize);
-    if image_pages > NETWORK_SERVICE_MAX_CODE_PAGES {
+    if NETWORK_USERSPACE_MAPPED_CODE_PAGES > NETWORK_SERVICE_MAX_CODE_PAGES {
         return Err("network userspace image exceeded mapped code budget");
     }
     let mut address_space =
@@ -1081,45 +1057,19 @@ fn launch_network_userspace_with_bootstrap(
         let ids = unsafe { id_allocator_mut() };
         (ids.allocate_pid()?, ids.allocate_tid()?)
     };
-    for page_index in 0..image_pages {
-        let frame_address = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide a network code page")?;
-        zero_page(frame_address);
-        let offset = page_index * PAGE_SIZE as usize;
-        let chunk_end = (offset + PAGE_SIZE as usize).min(NETWORK_USERSPACE_IMAGE.len());
-        let chunk = &NETWORK_USERSPACE_IMAGE[offset..chunk_end];
-        unsafe {
-            ptr::copy_nonoverlapping(
-                chunk.as_ptr(),
-                (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
-                chunk.len(),
-            );
-        }
-        map_process_page(
-            &mut address_space,
-            SERVICE_USER_CODE_ADDRESS + page_index as u64 * PAGE_SIZE,
-            frame_address,
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )?;
-    }
-    for stack_page in 0..NETWORK_SERVICE_STACK_PAGES {
-        let stack_frame = allocator
-            .allocate_page()
-            .ok_or("allocator could not provide a network stack page")?;
-        zero_page(stack_frame);
-        map_process_page(
-            &mut address_space,
-            NETWORK_SERVICE_STACK_ADDRESS + stack_page * PAGE_SIZE,
-            stack_frame,
-            PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::NO_EXECUTE
-                | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )?;
-    }
+    map_embedded_segments(
+        &mut address_space,
+        allocator,
+        SERVICE_USER_CODE_ADDRESS,
+        NETWORK_USERSPACE_IMAGE,
+        &NETWORK_USERSPACE_SEGMENTS,
+    )?;
+    map_user_stack_pages(
+        &mut address_space,
+        allocator,
+        NETWORK_SERVICE_STACK_ADDRESS,
+        NETWORK_SERVICE_STACK_PAGES,
+    )?;
     let data_frame = allocator
         .allocate_page()
         .ok_or("allocator could not provide a network bootstrap page")?;
