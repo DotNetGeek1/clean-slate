@@ -29,7 +29,7 @@ use x86_64::VirtAddr;
 // these tables must stay small: every extra mapping slot costs 16 bytes in
 // each of the several copies that live on the stack during a launch.
 #[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
-const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
+pub(crate) const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
 #[cfg(any(
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
@@ -46,7 +46,7 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 32;
     feature = "m6-fixture-smoke-self-test",
     feature = "m7-net-service-self-test"
 ))]
-const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
+pub(crate) const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
 #[cfg(not(any(
     feature = "m4-recovery-self-test",
     feature = "m4-supervisor-self-test",
@@ -65,7 +65,7 @@ const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
     feature = "m6-fixture-smoke-self-test",
     feature = "m7-net-service-self-test"
 )))]
-const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
+pub(crate) const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
 #[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
 #[cfg(feature = "m7-net-service-self-test")]

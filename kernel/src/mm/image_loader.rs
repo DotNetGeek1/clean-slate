@@ -246,6 +246,59 @@ fn map_unique_pages(
     Ok(())
 }
 
+/// File-backed byte span of one mapped page for one segment.
+///
+/// Everything in the page outside `[page_offset, page_offset + len)` that the
+/// segment covers is BSS and stays at the zero-fill value written by
+/// `zero_page`. This is the pure decision behind `fill_page_from_segment`
+/// (host-tested; the copy itself needs a live frame).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PageFileSpan {
+    /// Byte offset inside the page where file bytes start.
+    pub(crate) page_offset: usize,
+    /// Byte offset relative to the segment's first file byte (`p_offset`).
+    pub(crate) file_rel: usize,
+    /// Number of file-backed bytes to copy into this page.
+    pub(crate) len: usize,
+}
+
+/// Decide which bytes of the page at `page_vaddr` are file-backed for a segment
+/// whose first byte lives at `segment_vaddr` with `filesz` file bytes.
+///
+/// Returns `Ok(None)` when the page holds no file bytes for this segment (pure
+/// BSS page, or `filesz == 0`). Never reads memory; checked arithmetic only.
+pub(crate) fn page_file_span(
+    page_vaddr: u64,
+    segment_vaddr: u64,
+    filesz: u64,
+) -> Result<Option<PageFileSpan>, &'static str> {
+    if filesz == 0 {
+        return Ok(None);
+    }
+    let file_vaddr_end = segment_vaddr
+        .checked_add(filesz)
+        .ok_or("segment filesz overflow")?;
+    let page_end = page_vaddr
+        .checked_add(PAGE_SIZE)
+        .ok_or("page end overflow")?;
+
+    let copy_start = page_vaddr.max(segment_vaddr);
+    let copy_end = page_end.min(file_vaddr_end);
+    if copy_start >= copy_end {
+        return Ok(None);
+    }
+    let page_offset =
+        usize::try_from(copy_start - page_vaddr).map_err(|_| "page offset overflow")?;
+    let file_rel =
+        usize::try_from(copy_start - segment_vaddr).map_err(|_| "file offset overflow")?;
+    let len = usize::try_from(copy_end - copy_start).map_err(|_| "copy length overflow")?;
+    Ok(Some(PageFileSpan {
+        page_offset,
+        file_rel,
+        len,
+    }))
+}
+
 fn fill_page_from_segment(
     frame: u64,
     page_vaddr: u64,
@@ -253,32 +306,15 @@ fn fill_page_from_segment(
     segment: &EmbeddedSegment,
     file_bytes: &[u8],
 ) -> Result<(), &'static str> {
-    if segment.filesz == 0 {
+    let Some(span) = page_file_span(page_vaddr, segment_vaddr, segment.filesz)? else {
         return Ok(());
-    }
-    let file_vaddr_start = segment_vaddr;
-    let file_vaddr_end = segment_vaddr
-        .checked_add(segment.filesz)
-        .ok_or("segment filesz overflow")?;
-    let page_end = page_vaddr
-        .checked_add(PAGE_SIZE)
-        .ok_or("page end overflow")?;
-
-    let copy_start = page_vaddr.max(file_vaddr_start);
-    let copy_end = page_end.min(file_vaddr_end);
-    if copy_start >= copy_end {
-        return Ok(());
-    }
-
-    let page_offset = (copy_start - page_vaddr) as usize;
-    let file_rel = (copy_start - file_vaddr_start) as usize;
+    };
     let blob_off = usize::try_from(segment.file_offset)
         .ok()
-        .and_then(|base| base.checked_add(file_rel))
+        .and_then(|base| base.checked_add(span.file_rel))
         .ok_or("file blob offset overflow")?;
-    let len = copy_end - copy_start;
     let blob_end = blob_off
-        .checked_add(len as usize)
+        .checked_add(span.len)
         .ok_or("file blob end overflow")?;
     if blob_end > file_bytes.len() {
         return Err("embedded segment file range exceeded image blob");
@@ -286,8 +322,8 @@ fn fill_page_from_segment(
     unsafe {
         ptr::copy_nonoverlapping(
             file_bytes[blob_off..blob_end].as_ptr(),
-            ((PHYSICAL_MEMORY_OFFSET + frame) as *mut u8).wrapping_add(page_offset),
-            len as usize,
+            ((PHYSICAL_MEMORY_OFFSET + frame) as *mut u8).wrapping_add(span.page_offset),
+            span.len,
         );
     }
     Ok(())
@@ -486,5 +522,69 @@ mod tests {
     fn segment_page_span_partial_first_page() {
         assert_eq!(segment_mapped_pages(0x100, 0x100).unwrap(), 1);
         assert_eq!(segment_mapped_pages(0x100, PAGE_SIZE).unwrap(), 2);
+    }
+
+    /// Segment with `memsz > filesz`: 0x10 file bytes then BSS running into a
+    /// second page. Page 0 gets a partial file copy (rest zero); page 1 is all zero.
+    #[test]
+    fn page_file_span_partial_tail_page_then_pure_bss_page() {
+        let base = 0x0000_4000_0040_0000u64;
+        let filesz = 0x10u64;
+        assert_eq!(
+            page_file_span(base, base, filesz).unwrap(),
+            Some(PageFileSpan {
+                page_offset: 0,
+                file_rel: 0,
+                len: 0x10,
+            })
+        );
+        // Second page of a memsz = PAGE_SIZE + 0x20 segment: zero-fill only.
+        assert_eq!(
+            page_file_span(base + PAGE_SIZE, base, filesz).unwrap(),
+            None
+        );
+    }
+
+    /// File bytes span a page boundary: page 0 copies from the segment start to
+    /// its end, page 1 copies the remaining tail at page offset 0.
+    #[test]
+    fn page_file_span_crosses_page_boundary() {
+        let base = 0x0000_4000_0040_0100u64;
+        let filesz = PAGE_SIZE; // ends 0x100 into the next page
+        let page0 = base & !(PAGE_SIZE - 1);
+        assert_eq!(
+            page_file_span(page0, base, filesz).unwrap(),
+            Some(PageFileSpan {
+                page_offset: 0x100,
+                file_rel: 0,
+                len: (PAGE_SIZE - 0x100) as usize,
+            })
+        );
+        assert_eq!(
+            page_file_span(page0 + PAGE_SIZE, base, filesz).unwrap(),
+            Some(PageFileSpan {
+                page_offset: 0,
+                file_rel: (PAGE_SIZE - 0x100) as usize,
+                len: 0x100,
+            })
+        );
+        // Third page is beyond the file bytes.
+        assert_eq!(
+            page_file_span(page0 + 2 * PAGE_SIZE, base, filesz).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn page_file_span_zero_filesz_is_never_file_backed() {
+        assert_eq!(page_file_span(0x1000, 0x1000, 0).unwrap(), None);
+    }
+
+    #[test]
+    fn page_file_span_rejects_overflow() {
+        assert_eq!(
+            page_file_span(0x1000, u64::MAX - 8, 0x10),
+            Err("segment filesz overflow")
+        );
     }
 }
