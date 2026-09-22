@@ -618,6 +618,9 @@ fn block_status_name(raw: u8) -> &'static str {
 }
 
 // Consumed by arch/x86_64/asm.rs (clean_slate_syscall_entry calls this with the saved frame).
+// #93 will resolve `crate::process::personality::current_execution_personality` and
+// `dispatch_target_for` before interpreting `frame.rax` so native vs Linux number
+// spaces cannot collide. This function remains native-only until that lane lands.
 #[unsafe(no_mangle)]
 extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 {
     let frame = unsafe { &mut *context };

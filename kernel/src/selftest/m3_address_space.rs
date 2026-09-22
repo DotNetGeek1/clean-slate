@@ -321,6 +321,8 @@ fn create_userspace_process(
                     resource_domain: ResourceDomain::with_address_space(pid, address_space),
                     live_threads: 1,
                     exit_status: None,
+                    execution_personality:
+                        crate::process::personality::ExecutionPersonality::Native,
                 })
                 .expect("fresh address-space self-test process should fit in the registry")
         };

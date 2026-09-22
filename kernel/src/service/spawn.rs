@@ -482,6 +482,7 @@ fn register_spawned_process(
     scheduler_slot: usize,
 ) -> Result<SpawnedServiceInstance, &'static str> {
     use crate::ipc::endpoint_table_mut;
+    use crate::process::personality::ExecutionPersonality;
     use crate::process::process_registry_mut;
     use crate::process::Process;
     use crate::process::ProcessState;
@@ -496,6 +497,7 @@ fn register_spawned_process(
         resource_domain: ResourceDomain::with_address_space(pid, address_space),
         live_threads: 1,
         exit_status: None,
+        execution_personality: ExecutionPersonality::Native,
     };
     unsafe { process_registry_mut().insert(process)? };
     let scheduler = unsafe { scheduler_mut() };
