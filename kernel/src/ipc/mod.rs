@@ -157,6 +157,18 @@ impl IpcEndpointTable {
         self.create_endpoint_with_kind(owner_pid, IpcEndpointKind::ConsoleSink)
     }
 
+    /// Trusted bootstrap helper: create a kernel-owned `ConsoleSink` and grant a
+    /// send capability to `holder_pid`. Used by Linux stdio install (#95 / #97)
+    /// and native supervisor fixtures; does not change existing grant semantics.
+    #[allow(dead_code)] // Consumed by linux_fd host tests and #97 bootstrap.
+    pub(crate) fn grant_console_capability_for_pid(
+        &mut self,
+        holder_pid: u64,
+    ) -> Result<u64, &'static str> {
+        let endpoint_slot = self.create_console_sink(crate::process::KERNEL_PROCESS_ID)?;
+        self.grant_send_capability(holder_pid, endpoint_slot)
+    }
+
     pub(super) fn create_lifecycle_control_endpoint(
         &mut self,
         owner_pid: u64,
@@ -405,7 +417,7 @@ impl IpcEndpointTable {
     }
 
     #[cfg(test)]
-    fn endpoint_message(&self, endpoint_slot: usize) -> Option<&[u8]> {
+    pub(crate) fn endpoint_message(&self, endpoint_slot: usize) -> Option<&[u8]> {
         let endpoint = self.endpoints.get(endpoint_slot)?;
         if endpoint.state != IpcEndpointState::Active {
             return None;

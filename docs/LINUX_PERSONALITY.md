@@ -136,3 +136,45 @@ Linux fd numbers must never be confused with capability handles.
 - Dynamic linking, PIE, signals, `brk`/`mmap` breadth
 
 See also: [COMPATIBILITY.md](COMPATIBILITY.md), [ROADMAP.md](ROADMAP.md) (M8/M9), [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## #95 fd projection
+
+Linux stdio is a **projection** onto existing Clean-Slate IPC console authority, not a new resource class.
+
+### Model
+
+- Each Linux-personality process may own a bounded fd table (`LINUX_FD_TABLE_CAPACITY = 4`, fds `0..3`) stored in a kernel registry keyed by `(pid, InstanceGeneration)`.
+- Registry capacity equals `PROCESS_REGISTRY_CAPACITY` (not a separate soft limit).
+- The table is **not** a field on `Process` (avoids spawn / literal churn).
+- fd integers are compatibility-local only. Authority is always an `IpcEndpointTable` send-capability handle granted to that pid by trusted bootstrap (`grant_console_capability_for_pid` / `grant_send_capability`).
+- M8 install: fd 1 = stdout, fd 2 = stderr (both `ConsoleEndpoint` projections); fd 0 and fd 3 stay `Closed`.
+
+### API (for #94 / #97)
+
+- `install_stdio_for_process(pid, generation, stdout_handle, stderr_handle)`
+- `projection_for(pid, generation, fd) -> Result<LinuxFdProjection, LinuxErrno>`
+- `write_fd(pid, generation, fd, bytes) -> Result<usize, LinuxErrno>`
+- `release_for_process(pid, generation)` (also hooked from production teardown in `process/domain.rs`)
+
+`write_fd` always calls `IpcEndpointTable::send_message(pid, handle, bytes)`. Naming fd 1 without a real grant yields `EACCES` / no output.
+
+### `IpcSendError` → `LinuxErrno`
+
+| IPC error | Linux errno |
+|-----------|-------------|
+| `InvalidCapability`, `StaleCapability` | `EBADF` |
+| `Unauthorized` | `EACCES` |
+| `InvalidMessageLength` | `EINVAL` |
+
+Closed / out-of-range / missing / stale `(pid, generation)` also return `EBADF`. Empty writes return `Ok(0)` without IPC. Writes longer than `IPC_MAX_MESSAGE_BYTES` (64) return a **short write** of 64 bytes; #94 decides whether to loop.
+
+### ConsoleSink rendering
+
+Reuse `IpcEndpointKind::ConsoleSink` only — no raw console syscall and no new endpoint kind.
+
+- **Linux-personality** senders on the fd path: payload is written to serial **verbatim** so acceptance can extract exactly `Hello from Linux.\n`.
+- **Native** `SYSCALL_NR_IPC_SEND` framing (`[IPC ] console pid=N: …`) is unchanged in the native syscall handler.
+
+### Teardown / replacement
+
+Production `teardown_current_process` / `teardown_process_by_id` call `release_for_process` before IPC capability teardown. A replacement process with the same pid and a new generation gets a fresh table; lookups with a stale generation fail closed (`EBADF`).
