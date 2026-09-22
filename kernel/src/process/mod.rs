@@ -4,6 +4,7 @@
 
 pub(crate) mod domain;
 pub(crate) mod id_allocator;
+pub(crate) mod linux_fd;
 pub(crate) mod linux_image;
 pub(crate) mod personality;
 
@@ -18,10 +19,11 @@ use clean_slate_service_lifecycle::InstanceGeneration;
 use personality::ExecutionPersonality;
 
 pub(super) const KERNEL_PROCESS_ID: u64 = 0;
+/// Fixed process-registry bound; Linux fd registry capacity (#95) is derived from this.
 #[cfg(feature = "m6-capabilities-self-test")]
-const PROCESS_REGISTRY_CAPACITY: usize = 12;
+pub(crate) const PROCESS_REGISTRY_CAPACITY: usize = 12;
 #[cfg(not(feature = "m6-capabilities-self-test"))]
-const PROCESS_REGISTRY_CAPACITY: usize = 8;
+pub(crate) const PROCESS_REGISTRY_CAPACITY: usize = 8;
 
 /// Trusted userspace process id from the current scheduler thread (never from syscall args).
 pub(crate) fn current_process_id() -> Result<u64, &'static str> {
@@ -177,7 +179,7 @@ pub(super) fn reap_process(process: &mut Process, thread: &mut Thread) -> Result
     reap_process_record(process)
 }
 
-pub(super) fn reap_process_record(process: &mut Process) -> Result<(), &'static str> {
+pub(crate) fn reap_process_record(process: &mut Process) -> Result<(), &'static str> {
     if process.live_threads != 0 {
         return Err("process could not be reaped while threads remained");
     }
@@ -252,7 +254,7 @@ impl ProcessRegistry {
             .find(|entry| entry.id == process_id && entry.state != ProcessState::Empty)
     }
 
-    pub(super) fn get_mut(&mut self, process_id: u64) -> Option<&mut Process> {
+    pub(crate) fn get_mut(&mut self, process_id: u64) -> Option<&mut Process> {
         self.processes
             .iter_mut()
             .find(|entry| entry.id == process_id && entry.state != ProcessState::Empty)
@@ -263,7 +265,7 @@ impl ProcessRegistry {
             .map(|process| process.instance_generation)
     }
 
-    pub(super) fn release_reaped(&mut self, process_id: u64) -> Result<(), &'static str> {
+    pub(crate) fn release_reaped(&mut self, process_id: u64) -> Result<(), &'static str> {
         let process = self
             .get_mut(process_id)
             .ok_or("process missing from registry during release")?;

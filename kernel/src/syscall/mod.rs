@@ -1,6 +1,7 @@
 //! SYSCALL ABI: numbers, error codes, MSR setup and the Rust-side dispatcher
 //! entered from `clean_slate_syscall_entry` in `arch/x86_64/asm.rs`.
 
+pub(crate) mod linux;
 pub(crate) mod validation;
 use crate::arch::x86_64::asm::clean_slate_syscall_entry;
 use crate::arch::x86_64::asm::SYSCALL_SCRATCH_USER_RSP;
@@ -52,6 +53,11 @@ use crate::mm::user_mapping::validate_user_pointer_range;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::mm::PAGE_SIZE;
+use crate::process::live_instance_generation;
+use crate::process::personality::dispatch_target_for;
+use crate::process::personality::execution_personality_for_pid;
+use crate::process::personality::ExecutionPersonality;
+use crate::process::personality::SyscallDispatchTarget;
 use crate::process::process_registry_mut;
 use crate::process::KERNEL_PROCESS_ID;
 use crate::sched::with_scheduler;
@@ -618,9 +624,8 @@ fn block_status_name(raw: u8) -> &'static str {
 }
 
 // Consumed by arch/x86_64/asm.rs (clean_slate_syscall_entry calls this with the saved frame).
-// #93 will resolve `crate::process::personality::current_execution_personality` and
-// `dispatch_target_for` before interpreting `frame.rax` so native vs Linux number
-// spaces cannot collide. This function remains native-only until that lane lands.
+// Personality is resolved from trusted process metadata before interpreting RAX
+// so native vs Linux number spaces cannot collide.
 #[unsafe(no_mangle)]
 extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 {
     let frame = unsafe { &mut *context };
@@ -632,10 +637,52 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
     #[cfg(feature = "m8-linux-image-self-test")]
     crate::selftest::m8_linux_image::observe_syscall(frame);
 
+    match resolve_syscall_caller() {
+        Some(caller) => match dispatch_target_for(caller.personality) {
+            SyscallDispatchTarget::LinuxX86_64 => match live_instance_generation(caller.pid) {
+                Some(generation) if generation.0 != 0 => {
+                    linux::dispatch(frame, caller.pid, generation);
+                    #[cfg(feature = "m8-linux-dispatch-self-test")]
+                    crate::selftest::m8_linux_dispatch::maybe_complete_m8_linux_dispatch();
+                }
+                _ => linux::reject_missing_generation(frame, caller.pid),
+            },
+            SyscallDispatchTarget::Native => dispatch_native(frame),
+        },
+        // Unresolved caller keeps today's native behaviour.
+        None => dispatch_native(frame),
+    }
+
+    frame as *mut SyscallContext as u64
+}
+
+/// Trusted caller identity resolved once per SYSCALL entry.
+struct ResolvedSyscallCaller {
+    pid: u64,
+    personality: ExecutionPersonality,
+}
+
+/// Resolve caller pid + personality from the trusted scheduler/CR3 path.
+///
+/// Returns `None` when the caller cannot be identified; the gate then keeps
+/// native dispatch semantics (pre-#93 behaviour).
+fn resolve_syscall_caller() -> Option<ResolvedSyscallCaller> {
+    let pid = current_syscall_caller_pid().ok()?;
+    let personality = execution_personality_for_pid(pid).ok()?;
+    Some(ResolvedSyscallCaller { pid, personality })
+}
+
+fn dispatch_native(frame: &mut SyscallContext) {
     match frame.rax {
         SYSCALL_NR_VERSION => {
             #[cfg(feature = "m3-syscall-self-test")]
             maybe_validate_syscall_entry_flags(frame);
+            #[cfg(feature = "m8-linux-dispatch-self-test")]
+            {
+                use core::sync::atomic::Ordering;
+                crate::syscall::linux::M8_NATIVE_PROGRESS.fetch_add(1, Ordering::Relaxed);
+                crate::selftest::m8_linux_dispatch::maybe_complete_m8_linux_dispatch();
+            }
             frame.rax = SYSCALL_ABI_VERSION;
         }
         #[cfg(feature = "m3-syscall-self-test")]
@@ -706,8 +753,6 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
         }
         _ => frame.rax = SYSCALL_ENOSYS,
     }
-
-    frame as *mut SyscallContext as u64
 }
 
 pub(crate) fn current_syscall_caller_pid() -> Result<u64, &'static str> {
@@ -751,5 +796,55 @@ mod tests {
     #[test]
     fn lifecycle_reply_capacity_accepts_wire_max_buffer() {
         assert!(lifecycle_reply_capacity_is_valid(LIFECYCLE_WIRE_MAX_BYTES));
+    }
+
+    #[test]
+    fn dispatch_native_unknown_nr_returns_native_enosys_sentinel() {
+        let mut frame = SyscallContext {
+            rax: 999,
+            rdx: 0,
+            rbx: 0,
+            rbp: 0,
+            rsi: 0,
+            rdi: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            user_rip: 0,
+            user_rflags: 0,
+            user_rsp: 0,
+        };
+        dispatch_native(&mut frame);
+        assert_eq!(frame.rax, SYSCALL_ENOSYS);
+        // Native sentinel is not produced via Linux encode_rax in this path.
+        assert_eq!(SYSCALL_ENOSYS, u64::MAX - 37);
+    }
+
+    #[test]
+    fn dispatch_native_version_returns_abi_version() {
+        let mut frame = SyscallContext {
+            rax: SYSCALL_NR_VERSION,
+            rdx: 0,
+            rbx: 0,
+            rbp: 0,
+            rsi: 0,
+            rdi: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            user_rip: 0,
+            user_rflags: 0,
+            user_rsp: 0,
+        };
+        dispatch_native(&mut frame);
+        assert_eq!(frame.rax, SYSCALL_ABI_VERSION);
     }
 }
