@@ -127,6 +127,24 @@ M5 introduces a Clean-Slate-native block contract between hardware-specific bloc
 - Host crash tests inject deterministic power loss or I/O failure only at counted block write/flush boundaries via `clean_slate_block::fault::FaultInjectingBlockDevice`, covering every boundary between the first object-data write and the commit flush. Recovery must validate superblock magic/version/checksum, geometry, generation, and object extents/lengths before selecting a committed state, and a corrupted newer superblock must fall back to the older valid one.
 - Buffer ownership remains synchronous and call-scoped: backends may inspect caller slices only for the duration of `read_blocks`/`write_blocks` and must not retain raw userspace pointers after the call returns.
 
+## M8 ELF load-plan and Linux personality layering
+
+M8 keeps Linux as a compatibility personality above the native kernel. Before the
+Linux runtime loader lands (#92), M8.0 establishes one shared load-plan substrate
+in `clean-slate-elf`:
+
+- build-time native userspace embedding (`kernel/build.rs`) validates PT_LOAD
+  metadata, emits only file-backed bytes, and generates segment tables / mapped-
+  page demand;
+- kernel `mm::image_loader` maps those segments transactionally with W^X and BSS
+  zero-fill;
+- #92 should reuse `parse_load_plan` + `map_load_plan_segments` under a Linux
+  `LoadPlanPolicy` (accepted `e_type`, auxv/phdr metadata already recorded on
+  `LoadPlan`) rather than a second ELF parser.
+
+Execution personality metadata and Linux syscall/errno/stack contracts are owned
+by #91 (`clean-slate-linux-abi`); syscall dispatch routing is #93.
+
 ## M7 network layering
 
 M7 introduces `clean-slate-network`, a transport-independent contract between raw NIC backends, the userspace network service, and the protocol stack. VirtIO details stay in the kernel driver lane; applications receive attenuated `ResourceClass::Network` capabilities rather than ambient connectivity. See [NETWORK.md](NETWORK.md) for the ownership map, rights vocabulary, and hermetic fixture contract.
