@@ -95,6 +95,8 @@ pub(crate) mod m7_net_device;
 pub(crate) mod m7_net_service;
 #[cfg(any(feature = "m7-tls-self-test", feature = "m7-tls-fail-closed-self-test"))]
 pub(crate) mod m7_tls;
+#[cfg(feature = "m8-linux-image-self-test")]
+pub(crate) mod m8_linux_image;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",

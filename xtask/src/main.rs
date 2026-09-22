@@ -34,6 +34,7 @@ const M4_SUPERVISOR_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M4_RECOVERY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M5_STORAGE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M6_FIXTURE_SMOKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
+const M8_LINUX_IMAGE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M6_OBJECT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M7_NET_SERVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M6_PROCESS_CONTROL_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -338,6 +339,16 @@ const M6_FIXTURE_SMOKE_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[PROC] fault pid=",
     "[M6.F] PASS",
 ];
+// M8.2 (#92): fixture image constructed, entered (first syscall observed from
+// the Linux pid), torn down with frames/registry reclaimed, native progress.
+const M8_LINUX_IMAGE_ACCEPTANCE_MARKERS: [&str; 6] = [
+    "[M8.2] native sibling pid=",
+    "[M8.2] linux launched pid=",
+    "[TIME] timer initialized",
+    "[M8.2] linux entry observed pid=",
+    "[M8.2] linux torn down pid=",
+    "[M8.2] PASS",
+];
 const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[VIRT] block device found",
     "[BLK ] virtio-block ready blocks=",
@@ -556,6 +567,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM5CrashRecovery => run_m5_crash_recovery_acceptance(&trailing_args),
         ParsedCommand::TestM5DiskHarness => run_m5_disk_harness(&trailing_args),
         ParsedCommand::TestM6FixtureSmoke => run_m6_fixture_smoke_acceptance(),
+        ParsedCommand::TestM8LinuxImage => run_m8_linux_image_acceptance(),
         ParsedCommand::TestM6Object => run_m6_object_acceptance(),
         ParsedCommand::TestM7NetService => run_m7_net_service_acceptance(),
         ParsedCommand::TestM7Network => run_m7_network_acceptance(),
@@ -1141,6 +1153,20 @@ fn run_m6_fixture_smoke_acceptance() -> Result<(), XtaskError> {
         "m6-fixture-smoke-self-test",
         &M6_FIXTURE_SMOKE_ACCEPTANCE_MARKERS,
         M6_FIXTURE_SMOKE_ACCEPTANCE_TIMEOUT,
+    )
+}
+
+/// M8.2 (#92): the fixture bytes are embedded by the kernel feature itself
+/// (`include_bytes!`), so no userspace image build step is required.
+fn run_m8_linux_image_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m8-linux-image-self-test"],
+        Some((
+            &M8_LINUX_IMAGE_ACCEPTANCE_MARKERS,
+            M8_LINUX_IMAGE_ACCEPTANCE_TIMEOUT,
+        )),
     )
 }
 
@@ -2203,6 +2229,7 @@ fn print_help() {
         "  test-m6       M6 milestone gate: capability host tests plus fixture smoke and QEMU constituents"
     );
     println!("  test-m6-fixture-smoke Build M6 fixture/storage images and validate harness smoke markers");
+    println!("  test-m8-linux-image Boot the M8.2 Linux ELF loader self-test (fixture constructed, entered, torn down) and validate ordered markers (aliases: m8-linux-image, m8.2)");
     println!(
         "  test-m6-object Build M6 object-capability constituent boot and validate ordered markers"
     );
@@ -2271,6 +2298,7 @@ enum ParsedCommand {
     TestM5CrashRecovery,
     TestM5DiskHarness,
     TestM6FixtureSmoke,
+    TestM8LinuxImage,
     TestM6Object,
     TestM7NetService,
     TestM7Network,
@@ -2330,6 +2358,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m5-crash-recovery" => ParsedCommand::TestM5CrashRecovery,
         Some(cmd) if cmd == "test-m5-disk-harness" => ParsedCommand::TestM5DiskHarness,
         Some(cmd) if cmd == "test-m6-fixture-smoke" => ParsedCommand::TestM6FixtureSmoke,
+        Some(cmd) if cmd == "test-m8-linux-image" || cmd == "m8-linux-image" || cmd == "m8.2" => {
+            ParsedCommand::TestM8LinuxImage
+        }
         Some(cmd) if cmd == "test-m6-object" => ParsedCommand::TestM6Object,
         Some(cmd) if cmd == "test-m7-net-service" || cmd == "m7-net-service" || cmd == "m7.3" => {
             ParsedCommand::TestM7NetService
@@ -2603,6 +2634,14 @@ mod tests {
         assert_eq!(
             parse_command(Some("m7.5".as_ref())),
             ParsedCommand::TestM7Dns
+        );
+        assert_eq!(
+            parse_command(Some("test-m8-linux-image".as_ref())),
+            ParsedCommand::TestM8LinuxImage
+        );
+        assert_eq!(
+            parse_command(Some("m8.2".as_ref())),
+            ParsedCommand::TestM8LinuxImage
         );
         assert_eq!(
             parse_command(Some("test-m5-disk-harness".as_ref())),

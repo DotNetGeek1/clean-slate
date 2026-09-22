@@ -501,7 +501,7 @@ pub(crate) fn launch_builtin_service(
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
-fn register_spawned_process(
+pub(crate) fn register_spawned_process(
     address_space: crate::mm::address_space::ProcessAddressSpace,
     pid: u64,
     tid: u64,
