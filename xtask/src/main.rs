@@ -12,6 +12,7 @@ use std::time::Duration;
 mod m7_certs;
 mod m7_fixture;
 mod m7_fixture_tcp;
+mod m8_fixture;
 
 use m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
 
@@ -528,6 +529,24 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM7Tls => run_m7_tls_acceptance(),
         ParsedCommand::GenM7FixtureCerts => {
             m7_certs::generate_m7_fixture_certs().map_err(XtaskError::InvalidCommand)?;
+            Ok(())
+        }
+        ParsedCommand::VerifyM8Fixture => {
+            let meta = m8_fixture::verify_m8_fixture().map_err(XtaskError::InvalidCommand)?;
+            println!("M8 fixture OK");
+            println!("  sha256={}", meta.sha256_hex);
+            println!("  e_entry={:#x}", meta.e_entry);
+            println!("  e_phentsize={}", meta.e_phentsize);
+            println!("  e_phnum={}", meta.e_phnum);
+            println!("  pt_load_count={}", meta.pt_load_count);
+            println!("  has_pt_interp={}", meta.has_pt_interp);
+            println!("  has_pt_dynamic={}", meta.has_pt_dynamic);
+            for (i, seg) in meta.pt_loads.iter().enumerate() {
+                println!(
+                    "  pt_load[{i}]: offset={:#x} vaddr={:#x} filesz={:#x} memsz={:#x} flags={:#x} align={:#x}",
+                    seg.p_offset, seg.p_vaddr, seg.p_filesz, seg.p_memsz, seg.p_flags, seg.p_align
+                );
+            }
             Ok(())
         }
         ParsedCommand::TestM7Dns => run_m7_dns_acceptance(),
@@ -2169,6 +2188,7 @@ fn print_help() {
     println!("  test-m7-net-device Build the M7.2 virtio-net kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m7-tls       M7.6 TLS client acceptance (pass + fail-closed QEMU boots)");
     println!("  gen-m7-fixture-certs  Regenerate repository-owned M7 TLS fixture certificates");
+    println!("  verify-m8-fixture Verify committed Linux hello ELF hash and pinned metadata");
     println!("  test-m7-dns         Build the M7.5 DNS resolver kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
@@ -2243,6 +2263,7 @@ enum ParsedCommand {
     TestM7NetDevice,
     TestM7Tls,
     GenM7FixtureCerts,
+    VerifyM8Fixture,
     TestM7Dns,
     TestM5Storage,
     TestM5CrashMatrix,
@@ -2299,6 +2320,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
             ParsedCommand::TestM7Tls
         }
         Some(cmd) if cmd == "gen-m7-fixture-certs" => ParsedCommand::GenM7FixtureCerts,
+        Some(cmd) if cmd == "verify-m8-fixture" => ParsedCommand::VerifyM8Fixture,
         Some(cmd) if cmd == "test-m7-dns" || cmd == "m7-dns" || cmd == "m7.5" => {
             ParsedCommand::TestM7Dns
         }
