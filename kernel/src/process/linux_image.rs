@@ -56,7 +56,15 @@ use x86_64::VirtAddr;
 /// enabled (or for host tests). Provenance is checked by `cargo xtask
 /// verify-m8-fixture`; the host test below pins length and `e_entry` so a drift
 /// in the bytes fails a test. No other copy of the fixture exists in the kernel.
+///
+/// Bare `--features m8-linux-image` (no hello / image self-test) embeds the
+/// bytes for the feature graph but has no in-crate consumer — allow dead_code
+/// there; hello and the image self-test consume it.
 #[cfg(any(feature = "m8-linux-image", test))]
+#[cfg_attr(
+    not(any(feature = "m8-linux-hello", feature = "m8-linux-image-self-test")),
+    allow(dead_code)
+)]
 pub(crate) const LINUX_M8_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-hello/hello-linux-x86_64");
 

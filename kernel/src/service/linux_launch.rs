@@ -6,7 +6,7 @@
 //! not drive launches or reimplement grant / stdio install themselves.
 
 #[cfg(feature = "m8-linux-hello")]
-use crate::arch::x86_64::context_switch::{task_stack_top, TaskStack, TASK_STACK_SIZE};
+use crate::arch::x86_64::context_switch::{TaskStack, TASK_STACK_SIZE};
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::ipc::endpoint_table_mut;
@@ -104,7 +104,6 @@ pub(crate) fn ensure_slot_stack_is_idle(scheduler_slot: usize) -> Result<(), &'s
         kernel_log_fmt(format_args!("[LNX ] load failed: {MESSAGE}\n"));
         return Err(MESSAGE);
     }
-    let _ = task_stack_top(&stacks[scheduler_slot]);
     Ok(())
 }
 
@@ -287,6 +286,7 @@ pub(crate) fn start_linux_hello_service(
         kernel_log_fmt(format_args!("[LNX ] load failed: {message}\n"));
         unsafe {
             *LINUX_HELLO_RUNTIME.get() = None;
+            *LINUX_HELLO_RESTART_BUDGET.get() = 0;
         }
         return Err(message);
     }
