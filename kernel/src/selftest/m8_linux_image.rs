@@ -41,7 +41,7 @@ use crate::process::process_registry_mut;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::{scheduler_mut, task_stacks_mut, Scheduler};
 use crate::selftest::{USER_TEST_CODE_ADDRESS, USER_TEST_STACK_ADDRESS};
-use crate::service::spawn::register_spawned_process;
+use crate::service::spawn::register_spawned_process_checked;
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::{
     current_syscall_caller_pid, install_service_lifecycle_syscall_allocator,
@@ -178,7 +178,8 @@ fn launch_native_sibling(
         USER_TEST_CODE_ADDRESS,
         USER_TEST_STACK_ADDRESS + PAGE_SIZE,
     )?;
-    let spawned = register_spawned_process(
+    let spawned = register_spawned_process_checked(
+        allocator,
         address_space,
         pid,
         tid,
