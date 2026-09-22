@@ -316,19 +316,24 @@ kernel_stack_top, scheduler_slot, elf_bytes)`. Order (under
 
 Any failure after a process was inserted tears it down through
 `teardown_process_by_id`, logs `[LNX ] load failed: <description>`, and returns
-`Err` — never kernel-fatal. Feature `m8-linux-hello` enables `m8-linux-image`
-and arms a one-shot session from the normal boot path (demo kernel tasks plus
-Linux hello in scheduler slot 2). `arm_linux_hello_session` /
-`poll_linux_hello_relaunch` reuse the same production API so a re-run gets a
-fresh `(pid, generation)` and a fresh fd table; stale lookups fail closed
-(`EBADF`).
+`Err` — never kernel-fatal. Feature `m8-linux-hello` bumps `TASK_COUNT` to 3
+(both demo kernel tasks plus Linux hello in scheduler slot 2) and starts the
+fixture through `ServiceLifecycleController` as
+`BuiltinServiceImage::LinuxHello` / `LINUX_HELLO_SERVICE_ID`. The controller
+owns generation and restart; boot arms a one-shot Start (`remaining_restarts =
+0`). Load failure at boot logs `[LNX ] load failed: …` and continues into
+`start_scheduler()` — it must never become `[FAIL]`.
 
 Observer proof (`cargo xtask test-m8-linux-hello`, marker `[M8.7] PASS`): the
-self-test never grants console/stdio itself. It arms a two-launch session,
-watches the first exit + production relaunch (stale fd fail-closed, fresh
-stdout projection), then the second exit, then feeds a malformed corpus image
-to `launch_linux_hello` and asserts `Err` + no process + no frame leak while a
-native sibling keeps making progress. Serial signature (CRLF-safe, in order):
+self-test never grants console/stdio and never drives relaunch. It Starts a
+two-launch session (`remaining_restarts = 1`), watches the first exit +
+controller Start (stale fd fail-closed, fresh stdout projection, exit
+`status=0`, delivered hello bytes / Verbatim render), then the second exit,
+then feeds a malformed corpus image to `launch_linux_hello` and asserts `Err`
++ no process + no frame leak while a native sibling keeps making progress
+(+N after the malformed proof). The same xtask also boots the production
+feature build and requires the hello signature plus `[M2  ] PASS`. Serial
+signature (CRLF-safe, in order):
 
 ```text
 [LNX ] ELF loaded pid=<pid> entry=0x0000400000400078
@@ -336,6 +341,7 @@ native sibling keeps making progress. Serial signature (CRLF-safe, in order):
 [LNX ] unsupported syscall=999 errno=ENOSYS
 Hello from Linux.
 [LNX ] exit pid=<pid> status=0
+… (second launch under the self-test) …
 [M8.7] PASS
 ```
 

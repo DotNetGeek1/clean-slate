@@ -127,7 +127,9 @@ cargo xtask test-m8-linux-dispatch
 
 This command builds the kernel with `m8-linux-dispatch-self-test`, boots QEMU headlessly, and validates the ordered markers `[LNX ] personality=x86_64 pid=`, `[LNX ] unsupported syscall=999 errno=ENOSYS`, a line consisting of exactly `Hello from Linux.` (verbatim Linux `write(1, …)` output, no `[IPC ] console` framing), `[LNX ] exit pid=… status=0`, and `[M8.3] PASS`. The Linux-tagged userspace process (M8.3 dispatch + M8.4 `write`/`exit`, #93/#94) observes `-ENOSYS` for syscall 999, writes 18 bytes through the fd projection, observes `-EBADF` for fd 7, and exits through production teardown while a Native sibling keeps making progress.
 
-For the M8.7 integrated Linux hello production path (loader + personality + fd projection + relaunch + malformed fail-closed; marker `[M8.7] PASS`, aliases `m8-linux-hello`, `m8.7`):
+For the M8.7 integrated Linux hello path (controller-owned Start/relaunch +
+observer self-test + production boot; markers `[M8.7] PASS` then `[M2  ] PASS`,
+aliases `m8-linux-hello`, `m8.7`; 40s timeout covers two launches):
 
 ```bash
 cargo xtask test-m8-linux-hello

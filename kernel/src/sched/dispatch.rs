@@ -39,8 +39,7 @@ use crate::sched::ThreadKind;
         feature = "m7-tls-self-test",
         feature = "m7-tls-fail-closed-self-test",
         feature = "m7-dns-self-test",
-        feature = "m8-linux-hello-self-test",
-        feature = "m8-linux-hello"
+        feature = "m8-linux-hello-self-test"
     ),
     allow(dead_code)
 )]
@@ -67,24 +66,6 @@ pub(crate) fn initialize_scheduler() -> Result<(), &'static str> {
         thread_two,
         task_stack_pointers[1],
         clean_slate_task_two_bootstrap_entry as usize as u64,
-    )?;
-    Ok(())
-}
-
-/// Production `m8-linux-hello` bring-up: one demo kernel task (native progress)
-/// leaving scheduler slot 1 empty for the Linux hello process. Keeps the default
-/// `TASK_COUNT = 2` so host tests that enable the feature stay capacity-stable.
-#[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
-pub(crate) fn initialize_scheduler_with_linux_hello_slot() -> Result<(), &'static str> {
-    let task_stacks = unsafe { task_stacks_mut() };
-    let scheduler = unsafe { scheduler_mut() };
-    *scheduler = Scheduler::new();
-    let thread_one = unsafe { id_allocator_mut().allocate_tid()? };
-    scheduler.configure_kernel_thread(
-        0,
-        thread_one,
-        task_stack_top(&task_stacks[0]),
-        clean_slate_task_one_bootstrap_entry as usize as u64,
     )?;
     Ok(())
 }

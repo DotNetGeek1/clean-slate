@@ -52,24 +52,21 @@ use crate::mm::region::ReservedRange;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
-#[cfg(all(
-    not(any(
-        feature = "m1-self-test",
-        feature = "m2-double-fault-self-test",
-        feature = "m2-timer-self-test",
-        feature = "m3-address-space-self-test",
-        feature = "m3-resources-self-test",
-        feature = "m4-crash-service-self-test",
-        feature = "m4-recovery-self-test",
-        feature = "m3-entry-self-test",
-        feature = "m5-block-self-test",
-        feature = "m7-net-device-self-test",
-        feature = "m7-tls-self-test",
-        feature = "m7-tls-fail-closed-self-test",
-        feature = "m7-dns-self-test"
-    )),
-    not(feature = "m8-linux-hello")
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test",
+    feature = "m3-address-space-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
+    feature = "m3-entry-self-test",
+    feature = "m5-block-self-test",
+    feature = "m7-net-device-self-test",
+    feature = "m7-tls-self-test",
+    feature = "m7-tls-fail-closed-self-test",
+    feature = "m7-dns-self-test"
+)))]
 use crate::sched::dispatch::initialize_scheduler;
 #[cfg(not(any(
     feature = "m1-self-test",
@@ -617,26 +614,21 @@ fn run_inner() -> Result<(), &'static str> {
         let controller = unsafe { crate::service::service_lifecycle_controller_mut() };
         controller.clear();
         controller.configure_launch_context(kernel_root_frame, syscall_kernel_stack_top);
+        initialize_scheduler()?;
         #[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
         {
-            // Default TASK_COUNT is 2: one demo kernel task for native progress,
-            // Linux hello in slot 1 (no capacity bump).
-            const LINUX_HELLO_SLOT: usize = 1;
-            crate::sched::dispatch::initialize_scheduler_with_linux_hello_slot()?;
+            // Both demo tasks occupy slots 0/1; controller Start places Linux in
+            // the first empty slot (2). Load failure must never be kernel-fatal.
             let allocator = crate::syscall::service_lifecycle_syscall_allocator_mut()
                 .as_mut()
                 .ok_or("linux hello: service lifecycle allocator missing")?;
-            let stacks = unsafe { &*task_stacks_mut() };
-            let _ = crate::service::linux_launch::arm_linux_hello_session(
-                allocator,
-                task_stack_top(&stacks[LINUX_HELLO_SLOT]),
-                LINUX_HELLO_SLOT,
-                1,
-            )?;
-        }
-        #[cfg(not(feature = "m8-linux-hello"))]
-        {
-            initialize_scheduler()?;
+            if let Err(message) =
+                crate::service::linux_launch::start_linux_hello_service(allocator, 0)
+            {
+                crate::diagnostics::log::kernel_log_fmt(format_args!(
+                    "[LNX ] load failed: {message}\n"
+                ));
+            }
         }
         initialize_timer();
         serial_write_line("[TIME] timer initialized");

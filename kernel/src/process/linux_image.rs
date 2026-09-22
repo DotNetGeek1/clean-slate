@@ -28,7 +28,12 @@
 //! (`m8-linux-image-self-test`). Consumed by `#97` (`service::linux_launch`)
 //! and the `m8-linux-image` self-test.
 
-#![cfg_attr(not(feature = "m8-linux-image"), allow(dead_code))]
+#![cfg_attr(
+    not(feature = "m8-linux-image"),
+    // Default builds have no `service::linux_launch` consumer (`m8-linux-image`
+    // gates that module); keep the loader compiling without dead_code noise.
+    allow(dead_code)
+)]
 
 use crate::mm::address_space::{
     create_process_address_space, destroy_process_address_space, translate_address_in_root,

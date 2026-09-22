@@ -214,6 +214,8 @@ pub(crate) fn handle_sys_write(
                 fd,
                 &chunk[..sent.min(chunk.len())],
             );
+            #[cfg(feature = "m8-linux-hello-self-test")]
+            crate::service::linux_launch::note_linux_hello_delivered_bytes(sent.min(chunk.len()));
             Ok(sent)
         },
     )

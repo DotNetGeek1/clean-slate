@@ -77,6 +77,9 @@ pub(crate) fn handle_sys_exit(
     #[cfg(feature = "m8-linux-dispatch-self-test")]
     crate::selftest::m8_linux_dispatch::observe_linux_exit(pid, ctx.instance_generation, &teardown);
 
+    #[cfg(feature = "m8-linux-hello")]
+    crate::service::linux_launch::on_linux_hello_process_exited(allocator, pid, status);
+
     switch_after_exit(teardown.next_stack_pointer)
 }
 

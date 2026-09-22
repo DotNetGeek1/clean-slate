@@ -179,11 +179,13 @@ rejected (`SegmentOverlapsStackReservation`). See
 
 ### Linux personality end-to-end path (#97)
 
-With `m8-linux-hello`, boot arms `service::linux_launch` against the frozen
-fixture: runtime load (#92) → `LinuxX86_64` process → console grant + stdio
-projection (#95) → Linux syscall dispatch (#93) → `write`/`exit` (#94) →
-production teardown. Re-launch through the same API yields a new generation and
-a fresh fd table. See [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md) "M8.7".
+With `m8-linux-hello`, boot Starts `LINUX_HELLO_SERVICE_ID` through
+`ServiceLifecycleController` (`BuiltinServiceImage::LinuxHello`): runtime load
+(#92) → `LinuxX86_64` process → console grant + stdio projection (#95) → Linux
+syscall dispatch (#93) → `write`/`exit` (#94) → production teardown. Both demo
+kernel tasks keep running alongside Linux (scheduler slot 2). Controller-owned
+re-Start yields a new generation and a fresh fd table. See
+[LINUX_PERSONALITY.md](LINUX_PERSONALITY.md) "M8.7".
 
 ## M7 network layering
 

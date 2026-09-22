@@ -1,10 +1,10 @@
 //! M8.7 (#97) observer self-test for the production Linux hello launch path.
 //!
-//! This module does **not** tag personality, grant console capabilities, or
-//! install stdio itself. Boot/session bring-up calls
-//! [`crate::service::linux_launch::arm_linux_hello_session`]; relaunch goes
-//! through [`crate::service::linux_launch::poll_linux_hello_relaunch`]. The
-//! observer watches registry / fd / serial effects and emits `[M8.7] PASS`.
+//! This module does **not** tag personality, grant console capabilities, install
+//! stdio, or drive relaunch. Boot calls
+//! [`crate::service::linux_launch::start_linux_hello_service`]; the lifecycle
+//! controller owns generation and restart. The observer watches registry / fd /
+//! serial / delivered-byte effects and emits `[M8.7] PASS`.
 
 use crate::arch::x86_64::context_switch::{
     build_userspace_entry_frame, restore_task_context, task_stack_top,
@@ -14,21 +14,26 @@ use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::interrupt::timer::initialize_timer;
 use crate::mm::address_space::{
-    create_process_address_space, destroy_process_address_space, map_process_page,
+    create_process_address_space, destroy_process_address_space, kernel_root_frame,
+    map_process_page,
 };
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::zero_page;
 use crate::mm::{PAGE_SIZE, PHYSICAL_MEMORY_OFFSET};
 use crate::process::id_allocator::{id_allocator_mut, IdAllocator};
-use crate::process::linux_fd::{self, LINUX_STDOUT_FD};
+use crate::process::linux_fd::{
+    self, console_sink_render_style, ConsoleSinkRenderStyle, LINUX_STDOUT_FD,
+};
 use crate::process::linux_image::LinuxImageError;
+use crate::process::personality::ExecutionPersonality;
 use crate::process::process_registry_mut;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::{scheduler_mut, task_stacks_mut, Scheduler};
 use crate::selftest::{USER_TEST_CODE_ADDRESS, USER_TEST_STACK_ADDRESS};
+use crate::service::control::service_lifecycle_controller_mut;
 use crate::service::linux_launch::{
-    arm_linux_hello_session, launch_linux_hello, linux_hello_completed_exits,
-    linux_hello_last_exited, linux_hello_live, poll_linux_hello_relaunch,
+    launch_linux_hello, linux_hello_completed_exits, linux_hello_delivered_bytes,
+    linux_hello_last_exited, linux_hello_live, start_linux_hello_service,
 };
 use crate::service::spawn::register_spawned_process_checked;
 use crate::sync::global_cell::GlobalCell;
@@ -52,12 +57,15 @@ const NATIVE_SIBLING_CODE: [u8; 6] = [
 
 const NATIVE_VERSION_SYSCALL_NR: u64 = 0;
 const NATIVE_REQUIRED_PROGRESS: u64 = 3;
+/// Native progress required *after* the malformed-load proof before PASS.
+const NATIVE_PROGRESS_AFTER_MALFORMED: u64 = 2;
 const NATIVE_PROGRESS_BOUND_WITHOUT_FIRST_EXIT: u64 = 1_000_000;
 
-const LINUX_SCHEDULER_SLOT: usize = 0;
 const NATIVE_SCHEDULER_SLOT: usize = 1;
-/// Initial + one relaunch through the production session.
-const LINUX_TARGET_LAUNCHES: u8 = 2;
+/// Fixture hello line is exactly 18 bytes including the trailing newline.
+const HELLO_DELIVERED_BYTES: u64 = 18;
+/// Initial + one controller-owned relaunch.
+const LINUX_REMAINING_RESTARTS: u8 = 1;
 
 /// Malformed corpus image used only by this self-test to prove fail-closed load.
 const MALFORMED_BAD_MAGIC: &[u8] =
@@ -72,8 +80,8 @@ struct ObserverState {
     second_exit_seen: bool,
     malformed_proven: bool,
     native_progress: u64,
-    /// Allocator free pages captured immediately before the malformed proof.
-    pre_malformed_free_pages: Option<u64>,
+    /// Native progress snapshot taken when malformed load was proven.
+    native_progress_at_malformed: Option<u64>,
 }
 
 static OBSERVER: GlobalCell<Option<ObserverState>> = GlobalCell::new(None);
@@ -165,14 +173,17 @@ fn prove_malformed_load(allocator: &mut PageAllocator, state: &mut ObserverState
         return;
     }
     let stacks = unsafe { &*task_stacks_mut() };
+    // Use an empty slot so we do not clobber the native sibling or a live Linux
+    // thread; slot 0 is where the controller places Linux and is Empty after the
+    // second exit.
+    const MALFORMED_SLOT: usize = 0;
     let free_before = allocator.stats().free_pages;
-    state.pre_malformed_free_pages = Some(free_before);
     let occupied_before = unsafe { process_registry_mut().occupied_slots() };
 
     let err = match launch_linux_hello(
         allocator,
-        task_stack_top(&stacks[LINUX_SCHEDULER_SLOT]),
-        LINUX_SCHEDULER_SLOT,
+        task_stack_top(&stacks[MALFORMED_SLOT]),
+        MALFORMED_SLOT,
         MALFORMED_BAD_MAGIC,
     ) {
         Ok(_) => {
@@ -191,32 +202,38 @@ fn prove_malformed_load(allocator: &mut PageAllocator, state: &mut ObserverState
         fatal_kernel_error("m8.7 malformed ELF launch created a process");
     }
     state.malformed_proven = true;
+    state.native_progress_at_malformed = Some(state.native_progress);
     kernel_log_line("[M8.7] malformed ELF rejected fail-closed");
 }
 
 fn maybe_pass(state: &ObserverState) {
+    let Some(at_malformed) = state.native_progress_at_malformed else {
+        return;
+    };
+    let after_malformed = state.native_progress.saturating_sub(at_malformed);
     if state.first_exit_seen
         && state.relaunch_seen
         && state.second_exit_seen
         && state.malformed_proven
         && state.native_progress >= NATIVE_REQUIRED_PROGRESS
+        && after_malformed >= NATIVE_PROGRESS_AFTER_MALFORMED
     {
         kernel_log_fmt(format_args!(
-            "[M8.7] native progress={} after linux hello session\n",
-            state.native_progress
+            "[M8.7] native progress={} (+{} after malformed) delivered_bytes={}\n",
+            state.native_progress,
+            after_malformed,
+            linux_hello_delivered_bytes()
         ));
         kernel_log_line(PASS_MARKER);
         qemu_exit(QEMU_EXIT_SUCCESS)
     }
 }
 
-/// Syscall-entry observer: native sibling drives relaunch poll + completion.
+/// Syscall-entry observer: native sibling watches production lifecycle effects.
 pub(crate) fn observe_syscall(frame: &SyscallContext) {
     let pid = current_syscall_caller_pid().unwrap_or_else(|message| fatal_kernel_error(message));
     let state = observer();
     if pid != state.native_pid {
-        // Linux personality syscalls are handled by the production path; the
-        // observer only watches their effects via the session snapshot below.
         return;
     }
     if frame.rax != NATIVE_VERSION_SYSCALL_NR {
@@ -227,66 +244,74 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
         .checked_add(1)
         .unwrap_or_else(|| fatal_kernel_error("m8.7 native progress overflow"));
 
-    // Production relaunch poll (stdio/personality wiring stays inside linux_launch).
-    // `poll_linux_hello_relaunch` records an exit and may start the next instance
-    // in the same call, so update exit observation from the session snapshot first.
-    let relaunch = match poll_linux_hello_relaunch(allocator()) {
-        Ok(launched) => launched,
-        Err(message) => {
-            kernel_log_fmt(format_args!("[M8.7] relaunch failed: {message}\n"));
-            fatal_kernel_error("m8.7 production relaunch failed");
-        }
-    };
-
     if !state.first_exit_seen {
         if linux_hello_completed_exits() >= 1 {
-            let Some((exited_pid, gen)) = linux_hello_last_exited() else {
+            let Some((exited_pid, gen, status)) = linux_hello_last_exited() else {
                 fatal_kernel_error("m8.7 first exit missing last_exited");
             };
             if exited_pid != state.first_pid || gen.0 != state.first_generation {
                 fatal_kernel_error("m8.7 first exit identity mismatched the armed session");
             }
+            if status != 0 {
+                fatal_kernel_error("m8.7 first exit status was not 0");
+            }
             if linux_fd::projection_for(exited_pid, gen, LINUX_STDOUT_FD) != Err(EBADF) {
                 fatal_kernel_error("m8.7 first-exit fd table did not fail closed");
             }
+            if linux_hello_delivered_bytes() < HELLO_DELIVERED_BYTES {
+                fatal_kernel_error("m8.7 first launch did not deliver the hello byte count");
+            }
+            if console_sink_render_style(ExecutionPersonality::LinuxX86_64)
+                != ConsoleSinkRenderStyle::Verbatim
+            {
+                fatal_kernel_error("m8.7 Linux console sink was not Verbatim");
+            }
             state.first_exit_seen = true;
             kernel_log_fmt(format_args!(
-                "[M8.7] first exit observed pid={} gen={}\n",
-                exited_pid, gen.0
+                "[M8.7] first exit observed pid={} gen={} status={}\n",
+                exited_pid, gen.0, status
             ));
         } else if state.native_progress >= NATIVE_PROGRESS_BOUND_WITHOUT_FIRST_EXIT {
             fatal_kernel_error("m8.7 Linux hello never exited");
         }
     }
 
-    if let Some(launched) = relaunch {
-        if !state.first_exit_seen {
-            fatal_kernel_error("m8.7 relaunch before the first Linux exit");
+    if state.first_exit_seen && !state.relaunch_seen {
+        if let Some(launched) = linux_hello_live() {
+            let Some((old_pid, old_gen, _)) = linux_hello_last_exited() else {
+                fatal_kernel_error("m8.7 relaunch missing last_exited snapshot");
+            };
+            if launched.pid == old_pid && launched.instance_generation.0 <= old_gen.0 {
+                fatal_kernel_error("m8.7 relaunch did not advance pid/generation");
+            }
+            if linux_fd::projection_for(old_pid, old_gen, LINUX_STDOUT_FD) != Err(EBADF) {
+                fatal_kernel_error("m8.7 stale (pid, generation) fd lookup did not fail closed");
+            }
+            if linux_fd::projection_for(launched.pid, launched.instance_generation, LINUX_STDOUT_FD)
+                .is_err()
+            {
+                fatal_kernel_error("m8.7 relaunched process had no fresh stdout projection");
+            }
+            state.relaunch_seen = true;
+            kernel_log_fmt(format_args!(
+                "[M8.7] relaunch observed pid={} gen={}\n",
+                launched.pid, launched.instance_generation.0
+            ));
         }
-        let Some((old_pid, old_gen)) = linux_hello_last_exited() else {
-            fatal_kernel_error("m8.7 relaunch missing last_exited snapshot");
-        };
-        if launched.pid == old_pid && launched.instance_generation.0 <= old_gen.0 {
-            fatal_kernel_error("m8.7 relaunch did not advance pid/generation");
-        }
-        if linux_fd::projection_for(old_pid, old_gen, LINUX_STDOUT_FD) != Err(EBADF) {
-            fatal_kernel_error("m8.7 stale (pid, generation) fd lookup did not fail closed");
-        }
-        if linux_fd::projection_for(launched.pid, launched.instance_generation, LINUX_STDOUT_FD)
-            .is_err()
-        {
-            fatal_kernel_error("m8.7 relaunched process had no fresh stdout projection");
-        }
-        state.relaunch_seen = true;
-        kernel_log_fmt(format_args!(
-            "[M8.7] relaunch observed pid={} gen={}\n",
-            launched.pid, launched.instance_generation.0
-        ));
     }
 
     if state.relaunch_seen && !state.second_exit_seen && linux_hello_completed_exits() >= 2 {
+        let Some((_, _, status)) = linux_hello_last_exited() else {
+            fatal_kernel_error("m8.7 second exit missing last_exited");
+        };
+        if status != 0 {
+            fatal_kernel_error("m8.7 second exit status was not 0");
+        }
         if linux_hello_live().is_some() {
             fatal_kernel_error("m8.7 second exit still showed a live session process");
+        }
+        if linux_hello_delivered_bytes() < HELLO_DELIVERED_BYTES.saturating_mul(2) {
+            fatal_kernel_error("m8.7 two launches did not deliver 2× hello bytes");
         }
         state.second_exit_seen = true;
         kernel_log_line("[M8.7] second exit observed");
@@ -306,6 +331,10 @@ pub(crate) fn start_m8_linux_hello_self_test(allocator: PageAllocator) -> ! {
     let allocator = self::allocator();
     let stacks = unsafe { &*task_stacks_mut() };
 
+    let controller = unsafe { service_lifecycle_controller_mut() };
+    controller.clear();
+    controller.configure_launch_context(kernel_root_frame(), 0);
+
     let native_pid = launch_native_sibling(
         allocator,
         task_stack_top(&stacks[NATIVE_SCHEDULER_SLOT]),
@@ -317,16 +346,13 @@ pub(crate) fn start_m8_linux_hello_self_test(allocator: PageAllocator) -> ! {
         native_pid, NATIVE_SCHEDULER_SLOT
     ));
 
-    let first = arm_linux_hello_session(
-        allocator,
-        task_stack_top(&stacks[LINUX_SCHEDULER_SLOT]),
-        LINUX_SCHEDULER_SLOT,
-        LINUX_TARGET_LAUNCHES,
-    )
-    .unwrap_or_else(|message| {
-        kernel_log_fmt(format_args!("[M8.7] arm failed: {message}\n"));
-        fatal_kernel_error("m8.7 production linux hello arm failed")
-    });
+    // Controller Start allocates the first empty slot (0) for Linux hello and
+    // owns generation + the single automatic relaunch (budget=1).
+    let first =
+        start_linux_hello_service(allocator, LINUX_REMAINING_RESTARTS).unwrap_or_else(|message| {
+            kernel_log_fmt(format_args!("[M8.7] arm failed: {message}\n"));
+            fatal_kernel_error("m8.7 production linux hello Start failed")
+        });
 
     unsafe {
         *OBSERVER.get() = Some(ObserverState {
@@ -338,7 +364,7 @@ pub(crate) fn start_m8_linux_hello_self_test(allocator: PageAllocator) -> ! {
             second_exit_seen: false,
             malformed_proven: false,
             native_progress: 0,
-            pre_malformed_free_pages: None,
+            native_progress_at_malformed: None,
         });
     }
 

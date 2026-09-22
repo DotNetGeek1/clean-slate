@@ -358,6 +358,9 @@ pub(crate) enum BuiltinServiceImage {
     M6FixturePayload,
     #[cfg(feature = "m7-net-service-self-test")]
     NetworkUserspacePayload,
+    /// Frozen M8 Linux hello fixture launched through `service::linux_launch` (#97).
+    #[cfg(feature = "m8-linux-image")]
+    LinuxHello,
 }
 
 impl BuiltinServiceImage {
@@ -416,6 +419,8 @@ impl BuiltinServiceImage {
             id if id == NETWORK_SERVICE_ID.0 || id == NETWORK_UNAUTHORIZED_SERVICE_ID.0 => {
                 Self::NetworkUserspacePayload
             }
+            #[cfg(feature = "m8-linux-image")]
+            id if id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID.0 => Self::LinuxHello,
             _ => Self::ImmediateExit,
         }
     }
@@ -489,6 +494,21 @@ pub(crate) fn launch_builtin_service(
         #[cfg(feature = "m7-net-service-self-test")]
         BuiltinServiceImage::NetworkUserspacePayload => {
             launch_network_userspace_service(allocator, kernel_stack_top, scheduler_slot, service)
+        }
+        #[cfg(feature = "m8-linux-image")]
+        BuiltinServiceImage::LinuxHello => {
+            let launched = super::linux_launch::launch_linux_hello_fixture(
+                allocator,
+                kernel_stack_top,
+                scheduler_slot,
+            )?;
+            super::linux_launch::note_linux_hello_launch(launched)?;
+            Ok(SpawnedServiceInstance {
+                pid: launched.pid,
+                tid: launched.tid,
+                domain_id: launched.pid,
+                scheduler_slot: launched.scheduler_slot,
+            })
         }
         _ => launch_single_page_service(allocator, kernel_stack_top, scheduler_slot, image),
     }
@@ -864,6 +884,10 @@ fn launch_single_page_service(
             #[cfg(feature = "m7-net-service-self-test")]
             BuiltinServiceImage::NetworkUserspacePayload => {
                 return Err("network userspace image must use the network launch path");
+            }
+            #[cfg(feature = "m8-linux-image")]
+            BuiltinServiceImage::LinuxHello => {
+                return Err("linux hello image must use the linux_launch path");
             }
             BuiltinServiceImage::ImmediateExit => unsafe {
                 ptr::write(

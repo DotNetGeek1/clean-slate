@@ -282,7 +282,8 @@ impl ServiceLifecycleController {
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
         feature = "m6-fixture-smoke-self-test",
-        feature = "m7-net-service-self-test"
+        feature = "m7-net-service-self-test",
+        feature = "m8-linux-hello"
     ))]
     pub(crate) fn notify_exited_live_process(
         &mut self,
@@ -463,15 +464,10 @@ impl ServiceLifecycleController {
             .allocate_scheduler_slot()
             .map_err(LifecycleControlError::SpawnFailed)?;
         let kernel_stack_top = {
-            #[cfg(any(
-                feature = "m4-recovery-self-test",
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            ))]
-            {
+            // Linux hello always uses the per-slot task stack so it can run
+            // alongside the two demo kernel tasks without sharing their stacks.
+            #[cfg(feature = "m8-linux-hello")]
+            if service_id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID {
                 use crate::arch::x86_64::context_switch::task_stack_top;
                 use crate::sched::task_stacks_mut;
                 let stacks = unsafe { task_stacks_mut() };
@@ -481,22 +477,80 @@ impl ServiceLifecycleController {
                     ));
                 }
                 task_stack_top(&stacks[scheduler_slot])
-            }
-            #[cfg(not(any(
-                feature = "m4-recovery-self-test",
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            )))]
-            {
-                if self.kernel_stack_top == 0 {
-                    return Err(LifecycleControlError::SpawnFailed(
-                        "service launch context was not configured",
-                    ));
+            } else {
+                #[cfg(any(
+                    feature = "m4-recovery-self-test",
+                    feature = "m5-storage-self-test",
+                    feature = "m5-persistence-self-test",
+                    feature = "m5-crash-early-self-test",
+                    feature = "m5-crash-late-self-test",
+                    feature = "m5-crash-recovery-self-test"
+                ))]
+                {
+                    use crate::arch::x86_64::context_switch::task_stack_top;
+                    use crate::sched::task_stacks_mut;
+                    let stacks = unsafe { task_stacks_mut() };
+                    if scheduler_slot >= stacks.len() {
+                        return Err(LifecycleControlError::SpawnFailed(
+                            "service scheduler slot exceeds task stack table",
+                        ));
+                    }
+                    task_stack_top(&stacks[scheduler_slot])
                 }
-                self.kernel_stack_top
+                #[cfg(not(any(
+                    feature = "m4-recovery-self-test",
+                    feature = "m5-storage-self-test",
+                    feature = "m5-persistence-self-test",
+                    feature = "m5-crash-early-self-test",
+                    feature = "m5-crash-late-self-test",
+                    feature = "m5-crash-recovery-self-test"
+                )))]
+                {
+                    if self.kernel_stack_top == 0 {
+                        return Err(LifecycleControlError::SpawnFailed(
+                            "service launch context was not configured",
+                        ));
+                    }
+                    self.kernel_stack_top
+                }
+            }
+            #[cfg(not(feature = "m8-linux-hello"))]
+            {
+                #[cfg(any(
+                    feature = "m4-recovery-self-test",
+                    feature = "m5-storage-self-test",
+                    feature = "m5-persistence-self-test",
+                    feature = "m5-crash-early-self-test",
+                    feature = "m5-crash-late-self-test",
+                    feature = "m5-crash-recovery-self-test"
+                ))]
+                {
+                    use crate::arch::x86_64::context_switch::task_stack_top;
+                    use crate::sched::task_stacks_mut;
+                    let stacks = unsafe { task_stacks_mut() };
+                    if scheduler_slot >= stacks.len() {
+                        return Err(LifecycleControlError::SpawnFailed(
+                            "service scheduler slot exceeds task stack table",
+                        ));
+                    }
+                    task_stack_top(&stacks[scheduler_slot])
+                }
+                #[cfg(not(any(
+                    feature = "m4-recovery-self-test",
+                    feature = "m5-storage-self-test",
+                    feature = "m5-persistence-self-test",
+                    feature = "m5-crash-early-self-test",
+                    feature = "m5-crash-late-self-test",
+                    feature = "m5-crash-recovery-self-test"
+                )))]
+                {
+                    if self.kernel_stack_top == 0 {
+                        return Err(LifecycleControlError::SpawnFailed(
+                            "service launch context was not configured",
+                        ));
+                    }
+                    self.kernel_stack_top
+                }
             }
         };
         let spawned = if service_id.0 == 0x0000_4100 {
@@ -520,6 +574,11 @@ impl ServiceLifecycleController {
         } else {
             launch_builtin_service(allocator, kernel_stack_top, scheduler_slot, service_id)
                 .map_err(|message| {
+                    #[cfg(feature = "m8-linux-image")]
+                    if service_id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID {
+                        // `launch_linux_hello` already logged `[LNX ] load failed: …`.
+                        return LifecycleControlError::SpawnFailed(message);
+                    }
                     kernel_log_fmt(format_args!(
                         "[FAIL] builtin service spawn service={} slot={} err={message}\n",
                         service_id.0, scheduler_slot
@@ -1001,6 +1060,14 @@ mod tests {
             crate::sched::scheduler_mut()
                 .configure_thread(0, 1, 1, ThreadKind::User, 0x1000, 0x1000, 0x1000)
                 .expect("occupy slot zero");
+            #[cfg(feature = "m8-linux-hello")]
+            {
+                // TASK_COUNT is 3 under this feature; occupy slot 2 so the
+                // wrap from next_scheduler_slot=2 still lands on empty slot 1.
+                crate::sched::scheduler_mut()
+                    .configure_thread(2, 3, 3, ThreadKind::User, 0x3000, 0x3000, 0x3000)
+                    .expect("occupy slot two");
+            }
         }
 
         let mut controller = ServiceLifecycleController::new();

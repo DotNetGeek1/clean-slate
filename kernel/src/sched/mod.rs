@@ -29,6 +29,23 @@ const TASK_COUNT: usize = 9;
     )
 ))]
 const TASK_COUNT: usize = 6;
+/// Production `m8-linux-hello`: both demo kernel tasks plus Linux hello in slot 2.
+#[cfg(all(
+    not(feature = "m6-revocation-self-test"),
+    not(feature = "m6-capabilities-self-test"),
+    not(any(
+        feature = "m4-recovery-self-test",
+        feature = "m6-fixture-smoke-self-test",
+        feature = "m6-process-control-self-test",
+        feature = "m6-delegation-self-test",
+        feature = "m7-net-caps-self-test",
+        feature = "m7-net-service-self-test",
+        feature = "m6-object-self-test",
+        feature = "m6-audit-self-test"
+    )),
+    feature = "m8-linux-hello"
+))]
+const TASK_COUNT: usize = 3;
 #[cfg(not(any(
     feature = "m4-recovery-self-test",
     feature = "m6-fixture-smoke-self-test",
@@ -39,7 +56,8 @@ const TASK_COUNT: usize = 6;
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
     feature = "m7-net-caps-self-test",
-    feature = "m7-net-service-self-test"
+    feature = "m7-net-service-self-test",
+    feature = "m8-linux-hello"
 )))]
 const TASK_COUNT: usize = 2;
 pub(super) const TASK_REQUIRED_PREEMPTIONS: u64 = 2;
@@ -438,9 +456,15 @@ impl Scheduler {
     }
 
     fn all_finished(&self) -> bool {
-        self.threads
-            .iter()
-            .all(|thread| matches!(thread.state, ThreadState::Exited))
+        // Unused slots stay Empty; reaped userspace slots are cleared to Empty
+        // (or briefly Reaped). Treat those as finished so demo-task boot tails
+        // still emit `[M2  ] PASS` when a Linux process has already exited.
+        self.threads.iter().all(|thread| {
+            matches!(
+                thread.state,
+                ThreadState::Exited | ThreadState::Empty | ThreadState::Reaped
+            )
+        })
     }
 
     fn next_runnable_from(&self, current: Option<usize>) -> Option<usize> {

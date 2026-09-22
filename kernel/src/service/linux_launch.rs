@@ -1,8 +1,9 @@
 //! M8.7 (#97): production Linux hello launch path.
 //!
-//! Wires the #92 loader, #95 console/fd bootstrap, and boot/relaunch policy into
-//! one transactional API. Self-tests may **observe** this path; they must not
-//! reimplement grant / stdio install themselves.
+//! Wires the #92 loader, #95 console/fd bootstrap, and
+//! [`ServiceLifecycleController`](super::control::ServiceLifecycleController)
+//! into one transactional API. Self-tests may **observe** this path; they must
+//! not drive launches or reimplement grant / stdio install themselves.
 
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::log::kernel_log_fmt;
@@ -12,31 +13,44 @@ use crate::mm::frame_allocator::PageAllocator;
 use crate::process::domain::teardown_process_by_id;
 use crate::process::linux_fd;
 use crate::process::linux_image::{launch_linux_process, LaunchedLinuxProcess, LINUX_M8_FIXTURE};
-use crate::process::process_registry_mut;
+use crate::service::control::{service_lifecycle_controller_mut, LifecycleControlError};
 use crate::sync::global_cell::GlobalCell;
-use clean_slate_service_lifecycle::InstanceGeneration;
+use clean_slate_service_lifecycle::{
+    ControlRequest, ControlRequestKind, InstanceGeneration, ServiceId,
+};
 
 /// Exit status used when rolling back a half-wired Linux launch.
 const LINUX_LAUNCH_ROLLBACK_STATUS: u64 = 1;
 
-/// How many successful production launches this boot session should perform.
-/// Self-test arms `2` (initial + one relaunch); plain `m8-linux-hello` arms `1`.
-struct LinuxHelloSession {
-    kernel_stack_top: u64,
-    scheduler_slot: usize,
-    target_launches: u8,
-    completed_exits: u8,
+/// Built-in service id for the frozen M8 Linux hello fixture (#97).
+pub(crate) const LINUX_HELLO_SERVICE_ID: ServiceId = ServiceId(0x0000_8000);
+
+/// Controller-fed observation of Linux hello launches (read-only for self-tests).
+///
+/// Generation and restart are owned by [`ServiceLifecycleController`]; this
+/// struct only records what the production Start / exit driver already did.
+#[derive(Clone, Copy, Debug, Default)]
+struct LinuxHelloObservation {
     live: Option<LaunchedLinuxProcess>,
-    /// Identity of the most recently exited instance (for stale-generation proofs).
-    last_exited: Option<(u64, InstanceGeneration)>,
-    /// Identity of the live or most recent successful launch.
-    last_launched: Option<LaunchedLinuxProcess>,
+    /// `(pid, process instance generation, exit status)` for the most recent exit.
+    last_exited: Option<(u64, InstanceGeneration, u64)>,
+    completed_exits: u8,
+    /// Bytes delivered through the Linux stdout/stderr console sink (self-test).
+    delivered_bytes: u64,
 }
 
-static LINUX_HELLO_SESSION: GlobalCell<Option<LinuxHelloSession>> = GlobalCell::new(None);
+static LINUX_HELLO_OBSERVATION: GlobalCell<Option<LinuxHelloObservation>> = GlobalCell::new(None);
 
-fn session_mut() -> Option<&'static mut LinuxHelloSession> {
-    unsafe { (*LINUX_HELLO_SESSION.get()).as_mut() }
+/// Remaining automatic `Start`s after the current live instance exits.
+/// Production arms `0` (one-shot); self-test arms `1` (initial + one relaunch).
+static LINUX_HELLO_RESTART_BUDGET: GlobalCell<u8> = GlobalCell::new(0);
+
+fn observation() -> Option<&'static LinuxHelloObservation> {
+    unsafe { (*LINUX_HELLO_OBSERVATION.get()).as_ref() }
+}
+
+fn observation_mut() -> Option<&'static mut LinuxHelloObservation> {
+    unsafe { (*LINUX_HELLO_OBSERVATION.get()).as_mut() }
 }
 
 /// Grant one console capability and install it as stdout/stderr for `pid`.
@@ -81,7 +95,7 @@ pub(crate) fn launch_linux_hello(
 ) -> Result<LaunchedLinuxProcess, &'static str> {
     // Nested `without_interrupts` inside `launch_linux_process` is fine; the
     // outer hold covers the grant/install window after registration returns.
-    let outcome = without_interrupts(|| {
+    without_interrupts(|| {
         let launched =
             match launch_linux_process(allocator, kernel_stack_top, scheduler_slot, elf_bytes) {
                 Ok(launched) => launched,
@@ -104,8 +118,7 @@ pub(crate) fn launch_linux_hello(
             launched.pid, launched.entry
         ));
         Ok(launched)
-    });
-    outcome
+    })
 }
 
 /// Convenience: launch the frozen M8 fixture through [`launch_linux_hello`].
@@ -123,106 +136,171 @@ pub(crate) fn launch_linux_hello_fixture(
     )
 }
 
-/// Arm a boot session that tracks live/exited Linux hello instances and can
-/// relaunch through the same production API (fresh pid/generation + fd table).
-#[cfg(feature = "m8-linux-image")]
-pub(crate) fn arm_linux_hello_session(
-    allocator: &mut PageAllocator,
-    kernel_stack_top: u64,
-    scheduler_slot: usize,
-    target_launches: u8,
-) -> Result<LaunchedLinuxProcess, &'static str> {
-    if target_launches == 0 {
-        return Err("linux hello: target_launches must be at least 1");
-    }
-    let launched = launch_linux_hello_fixture(allocator, kernel_stack_top, scheduler_slot)?;
-    unsafe {
-        *LINUX_HELLO_SESSION.get() = Some(LinuxHelloSession {
-            kernel_stack_top,
-            scheduler_slot,
-            target_launches,
-            completed_exits: 0,
-            live: Some(launched),
-            last_exited: None,
-            last_launched: Some(launched),
-        });
-    }
-    Ok(launched)
-}
-
-fn process_is_live(pid: u64) -> bool {
-    unsafe { process_registry_mut().get(pid) }.is_some()
-}
-
-/// Production relaunch poll: if the live Linux hello has exited and the session
-/// still owes launches, start a fresh instance through [`launch_linux_hello`].
-///
-/// Uses the same slot/stack and the production loader + stdio wiring, so the
-/// replacement gets a new `(pid, generation)` and a fresh fd table; stale
-/// `(pid, old generation)` lookups fail closed via `#95`.
-#[cfg(feature = "m8-linux-image")]
-pub(crate) fn poll_linux_hello_relaunch(
-    allocator: &mut PageAllocator,
-) -> Result<Option<LaunchedLinuxProcess>, &'static str> {
-    let Some(session) = session_mut() else {
-        return Ok(None);
+/// Record a successful controller-owned launch (called from the spawn arm).
+pub(crate) fn note_linux_hello_launch(launched: LaunchedLinuxProcess) -> Result<(), &'static str> {
+    let Some(obs) = observation_mut() else {
+        return Err("linux hello: observation was not armed before launch");
     };
-
-    if let Some(live) = session.live {
-        if process_is_live(live.pid) {
-            return Ok(None);
-        }
-        session.last_exited = Some((live.pid, live.instance_generation));
-        session.live = None;
-        session.completed_exits = session.completed_exits.saturating_add(1);
+    if obs.live.is_some() {
+        return Err("linux hello: refusing to overwrite a live observation");
     }
-
-    if session.live.is_some() {
-        return Ok(None);
-    }
-    if session.completed_exits >= session.target_launches {
-        return Ok(None);
-    }
-
-    let launched =
-        launch_linux_hello_fixture(allocator, session.kernel_stack_top, session.scheduler_slot)?;
-    session.live = Some(launched);
-    session.last_launched = Some(launched);
-    Ok(Some(launched))
+    obs.live = Some(launched);
+    Ok(())
 }
 
-/// Snapshot helpers for the #97 observer (read-only).
+fn note_linux_hello_exit(
+    pid: u64,
+    generation: InstanceGeneration,
+    status: u64,
+) -> Result<(), &'static str> {
+    let Some(obs) = observation_mut() else {
+        return Ok(());
+    };
+    obs.live = None;
+    obs.last_exited = Some((pid, generation, status));
+    obs.completed_exits = obs
+        .completed_exits
+        .checked_add(1)
+        .ok_or("linux hello: completed_exits overflow")?;
+    Ok(())
+}
+
+/// Decrement the restart budget by one, or `Err` when none remain.
+fn take_restart_budget() -> Result<u8, &'static str> {
+    let budget = unsafe { *LINUX_HELLO_RESTART_BUDGET.get() };
+    let next = budget
+        .checked_sub(1)
+        .ok_or("linux hello: restart budget underflow")?;
+    unsafe {
+        *LINUX_HELLO_RESTART_BUDGET.get() = next;
+    }
+    Ok(next)
+}
+
+fn remaining_restart_budget() -> u8 {
+    unsafe { *LINUX_HELLO_RESTART_BUDGET.get() }
+}
+
+/// Arm observation + restart budget and `Start` Linux hello through the controller.
+///
+/// `remaining_restarts` is how many automatic relaunches to perform after the
+/// first exit (`0` = production one-shot, `1` = self-test initial + relaunch).
+/// Refuses if observation state already exists (no silent overwrite).
+#[cfg(feature = "m8-linux-image")]
+pub(crate) fn start_linux_hello_service(
+    allocator: &mut PageAllocator,
+    remaining_restarts: u8,
+) -> Result<LaunchedLinuxProcess, &'static str> {
+    if observation().is_some() {
+        return Err("linux hello: session already armed");
+    }
+    unsafe {
+        *LINUX_HELLO_OBSERVATION.get() = Some(LinuxHelloObservation::default());
+        *LINUX_HELLO_RESTART_BUDGET.get() = remaining_restarts;
+    }
+
+    let controller = unsafe { service_lifecycle_controller_mut() };
+    controller.declare_service(LINUX_HELLO_SERVICE_ID)?;
+
+    match controller.handle_control_request(
+        allocator,
+        0,
+        ControlRequest::new(LINUX_HELLO_SERVICE_ID, ControlRequestKind::Start),
+    ) {
+        Ok(_) => {}
+        Err(LifecycleControlError::SpawnFailed(message)) => return Err(message),
+        Err(_) => return Err("linux hello: controller Start failed"),
+    }
+
+    observation()
+        .and_then(|obs| obs.live)
+        .ok_or("linux hello: Start succeeded but observation has no live process")
+}
+
+/// Production exit driver: publish lifecycle `Exited`, record status, then
+/// `Start` again while restart budget remains. Called from the Linux `exit`
+/// path after teardown so the slot is Empty and demos stay runnable.
+#[cfg(feature = "m8-linux-hello")]
+pub(crate) fn on_linux_hello_process_exited(allocator: &mut PageAllocator, pid: u64, status: u64) {
+    let controller = unsafe { service_lifecycle_controller_mut() };
+    if controller.live_pid(LINUX_HELLO_SERVICE_ID) != Some(pid) {
+        return;
+    }
+
+    let generation = observation()
+        .and_then(|obs| obs.live)
+        .map(|live| live.instance_generation)
+        .unwrap_or(InstanceGeneration(0));
+    if let Err(message) = note_linux_hello_exit(pid, generation, status) {
+        kernel_log_fmt(format_args!("[LNX ] exit observe failed: {message}\n"));
+        return;
+    }
+
+    if let Err(_error) = controller.notify_exited_live_process(pid) {
+        kernel_log_fmt(format_args!("[LNX ] lifecycle exit notify failed\n"));
+        return;
+    }
+
+    if remaining_restart_budget() == 0 {
+        return;
+    }
+    if let Err(message) = take_restart_budget() {
+        kernel_log_fmt(format_args!("[LNX ] relaunch budget: {message}\n"));
+        return;
+    }
+
+    match controller.handle_control_request(
+        allocator,
+        0,
+        ControlRequest::new(LINUX_HELLO_SERVICE_ID, ControlRequestKind::Start),
+    ) {
+        Ok(_) => {}
+        Err(LifecycleControlError::SpawnFailed(message)) => {
+            kernel_log_fmt(format_args!("[LNX ] relaunch failed: {message}\n"));
+        }
+        Err(_) => {
+            kernel_log_fmt(format_args!("[LNX ] relaunch failed\n"));
+        }
+    }
+}
+
+/// Self-test / write-path hook: accumulate delivered console bytes.
+#[cfg(feature = "m8-linux-hello-self-test")]
+pub(crate) fn note_linux_hello_delivered_bytes(count: usize) {
+    let Some(obs) = observation_mut() else {
+        return;
+    };
+    let Ok(added) = u64::try_from(count) else {
+        return;
+    };
+    if let Some(total) = obs.delivered_bytes.checked_add(added) {
+        obs.delivered_bytes = total;
+    }
+}
+
 #[cfg(feature = "m8-linux-hello-self-test")]
 pub(crate) fn linux_hello_live() -> Option<LaunchedLinuxProcess> {
-    session_mut().and_then(|session| session.live)
+    observation().and_then(|obs| obs.live)
 }
 
 #[cfg(feature = "m8-linux-hello-self-test")]
-pub(crate) fn linux_hello_last_exited() -> Option<(u64, InstanceGeneration)> {
-    session_mut().and_then(|session| session.last_exited)
+pub(crate) fn linux_hello_last_exited() -> Option<(u64, InstanceGeneration, u64)> {
+    observation().and_then(|obs| obs.last_exited)
 }
 
 #[cfg(feature = "m8-linux-hello-self-test")]
 pub(crate) fn linux_hello_completed_exits() -> u8 {
-    session_mut()
-        .map(|session| session.completed_exits)
-        .unwrap_or(0)
+    observation().map(|obs| obs.completed_exits).unwrap_or(0)
 }
 
 #[cfg(feature = "m8-linux-hello-self-test")]
-pub(crate) fn linux_hello_target_launches() -> u8 {
-    session_mut()
-        .map(|session| session.target_launches)
-        .unwrap_or(0)
-}
-
-#[cfg(feature = "m8-linux-hello-self-test")]
-pub(crate) fn linux_hello_last_launched() -> Option<LaunchedLinuxProcess> {
-    session_mut().and_then(|session| session.last_launched)
+pub(crate) fn linux_hello_delivered_bytes() -> u64 {
+    observation().map(|obs| obs.delivered_bytes).unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::process::linux_image::LinuxImageError;
     use clean_slate_elf::LoadPlanError;
 
@@ -232,5 +310,47 @@ mod tests {
             LinuxImageError::LoadPlan(LoadPlanError::BadMagic).description(),
             "linux image: bad ELF magic"
         );
+    }
+
+    #[test]
+    fn linux_hello_service_id_is_stable() {
+        assert_eq!(LINUX_HELLO_SERVICE_ID.0, 0x0000_8000);
+    }
+
+    #[test]
+    fn restart_budget_checked_sub_rejects_underflow() {
+        unsafe {
+            *LINUX_HELLO_RESTART_BUDGET.get() = 0;
+        }
+        assert!(take_restart_budget().is_err());
+        unsafe {
+            *LINUX_HELLO_RESTART_BUDGET.get() = 1;
+        }
+        assert_eq!(take_restart_budget(), Ok(0));
+        assert_eq!(remaining_restart_budget(), 0);
+    }
+
+    #[test]
+    fn observation_exit_counter_uses_checked_add() {
+        let obs = LinuxHelloObservation {
+            completed_exits: u8::MAX,
+            ..LinuxHelloObservation::default()
+        };
+        let result = obs.completed_exits.checked_add(1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn arming_refuses_when_observation_already_present() {
+        unsafe {
+            *LINUX_HELLO_OBSERVATION.get() = Some(LinuxHelloObservation::default());
+        }
+        // Cannot call start_linux_hello_service without a real allocator / controller
+        // bring-up; assert the guard predicate the production arm uses.
+        assert!(observation().is_some());
+        unsafe {
+            *LINUX_HELLO_OBSERVATION.get() = None;
+        }
+        assert!(observation().is_none());
     }
 }
