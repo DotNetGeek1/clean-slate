@@ -125,7 +125,7 @@ For the M8.3 Linux personality syscall dispatch proof:
 cargo xtask test-m8-linux-dispatch
 ```
 
-This command builds the kernel with `m8-linux-dispatch-self-test`, boots QEMU headlessly, and validates `[M8.3] PASS` after a Linux-tagged userspace process observes `-ENOSYS` for unsupported syscall 999 through the production dispatcher while a Native sibling keeps making progress.
+This command builds the kernel with `m8-linux-dispatch-self-test`, boots QEMU headlessly, and validates the ordered markers `[LNX ] personality=x86_64 pid=`, `[LNX ] unsupported syscall=999 errno=ENOSYS`, a line consisting of exactly `Hello from Linux.` (verbatim Linux `write(1, …)` output, no `[IPC ] console` framing), `[LNX ] exit pid=… status=0`, and `[M8.3] PASS`. The Linux-tagged userspace process (M8.3 dispatch + M8.4 `write`/`exit`, #93/#94) observes `-ENOSYS` for syscall 999, writes 18 bytes through the fd projection, observes `-EBADF` for fd 7, and exits through production teardown while a Native sibling keeps making progress.
 
 For the bounded M3.4 process/thread lifecycle acceptance path:
 

@@ -216,3 +216,33 @@ Reuse `IpcEndpointKind::ConsoleSink` only — no raw console syscall and no new 
 ### Teardown / replacement
 
 Production `teardown_current_process` / `teardown_process_by_id` call `release_for_process` before IPC capability teardown. A replacement process with the same pid and a new generation gets a fresh table; lookups with a stale generation fail closed (`EBADF`). Holder capability slots are reclaimed so sequential relaunches do not grow endpoint/capability occupancy.
+
+## M8.4 — write and exit (#94)
+
+`kernel/src/syscall/linux/write.rs` and `exit.rs` replace the #93 placeholders in `table.rs`. Only `SYS_WRITE = 1` and `SYS_EXIT = 60` are wired; every other number (including `brk`, `arch_prctl`, `set_tid_address`, `exit_group`, `futex`, `mmap`) still takes the #93 unsupported path (`-ENOSYS`, bounded diagnostic, process continues). The handler type `LinuxSyscallHandler` and `LinuxSyscallContext { pid, instance_generation, frame }` are unchanged.
+
+### `write(fd, buf, count)` — `rdi`, `rsi`, `rdx`
+
+Order of checks (matches Linux `fdget_pos` → copy):
+
+1. **fd first.** `linux_fd::projection_for(pid, generation, fd)` for the trusted caller. Out-of-range fd, `Closed` slot (fd 0 / fd 3 in M8), missing table or stale `(pid, generation)` → `EBADF`. Only fd 1 and fd 2 can be open in M8. `EBADF` therefore takes precedence over `EFAULT` **and** over the zero-length shortcut (`write(0, bad_ptr, 0)` is `EBADF`).
+2. **`count == 0` → `Ok(0)`** without touching user memory or the endpoint, even for a non-canonical pointer.
+3. **Bounded chunk loop.** The request is delivered in chunks of `LINUX_WRITE_CHUNK_BYTES = 64` (= `LINUX_USER_COPY_MAX_BYTES` = `IPC_MAX_MESSAGE_BYTES`, asserted at compile time). Each chunk is copied in with `copy_user_bytes` (live page-table walk, user bit required; failure → `EFAULT`) and then sent with `linux_fd::write_fd` → `IpcEndpointTable::send_message(pid, handle, chunk)`, so holder / generation / endpoint checks apply to every chunk and there is no kernel serial shortcut. Linux-personality senders render **verbatim** (#95).
+4. **Single-call bound.** `LINUX_WRITE_MAX_BYTES = PAGE_SIZE (4096)` → at most `LINUX_WRITE_MAX_CHUNKS = 64` iterations, implemented as a fixed-range `for` so the loop is bounded even if a primitive misbehaves. A request longer than 4096 bytes is a **short write of exactly 4096** (never `EINVAL`, never an unbounded spin). Justification: a page is the granularity of user-range validation, Linux permits any short write, and a conforming caller (libc `write` loops) still completes arbitrarily long output while per-syscall IPC/serial work stays bounded.
+5. **Partial-write rule.** `EFAULT`/`EBADF`/`EACCES`/`EINVAL` on the **first** chunk is returned as the errno; a failure (or short delivery) on a **later** chunk returns the bytes already delivered. The returned count always equals bytes accepted by the sink and never exceeds `count`. A primitive that copies fewer bytes than asked or a sink that claims more than it was handed is a kernel invariant violation and fails closed (`EINVAL` / partial count) rather than over-reporting.
+6. The result is encoded once by `dispatch_with` (`encode_rax`); handlers never encode.
+
+The loop is the pure function `write_chunked(count, fetch, deliver)`; host tests inject slice-backed `fetch` and a local `LinuxFdRegistry` + `IpcEndpointTable` `deliver`, and the non-canonical-pointer `EFAULT` case runs the real `copy_user_bytes`. The 18-byte fixture write is a single chunk.
+
+`IpcSendError → LinuxErrno` mapping is #95's (`InvalidCapability`/`StaleCapability → EBADF`, `Unauthorized → EACCES`, `InvalidMessageLength → EINVAL`).
+
+### `exit(status)` — `rdi`
+
+- Recorded exit status is `status & 0xff` (`LINUX_EXIT_STATUS_MASK`; what a parent would see via `WEXITSTATUS`). Higher bits are discarded by contract; `exit(-1)` records 255.
+- Logs one bounded line `[LNX ] exit pid=<pid> status=<n>`.
+- Terminates through the **production** path: `process::domain::teardown_current_process(allocator, kernel_root_frame(), status, false)` with the allocator from `service_lifecycle_syscall_allocator_mut()` — the same call and arguments the userspace fault handler uses. That path retires the thread, reclaims the address space, IPC endpoints/capabilities, capability-space and network holdings, and calls `linux_fd::release_for_process` (#95 hook). Nothing is reimplemented; if the torn-down pid differs from the caller the kernel fails closed.
+- **Never returns to userspace.** The SYSCALL stub restores the `SyscallContext` frame the dispatcher returns and executes `sysretq`, so an interrupt-style frame cannot be handed back through it. The handler therefore switches itself, exactly like the fault path and kernel task exit: `teardown_current_process` already selected the next runnable thread and activated its CR3 / TSS / syscall stacks (`prepare_current_scheduler_thread_dispatch`); the handler then does `restore_task_context(next_frame)` (`iretq`), or `start_first_task` when the scheduler returned `FRESH_TASK_SENTINEL` for a never-started kernel thread, or `fatal_kernel_error` when no runnable thread remains (mirrors the fault path's fail-closed behaviour). Every branch diverges, so the `LinuxSyscallResult` return type is satisfied by `!` coercion and `encode_rax` is never reached for `exit`. IF is masked for the whole path (IA32_FMASK) and the code runs on the exiting thread's static per-slot kernel stack, the same situation as a fault on that thread.
+
+### QEMU proof (`cargo xtask test-m8-linux-dispatch`)
+
+The M8.3 self-test is extended rather than duplicated. Trusted self-test code tags the process `LinuxX86_64`, calls `IpcEndpointTable::grant_console_capability_for_pid(pid)` once and `linux_fd::install_stdio_for_process(pid, generation, handle, handle)` **before** the process runs (this is the exact launch sequence #97 must perform), then hand-assembled code does: `syscall 999` → `rax == -38` else `exit(1)`; `write(1, "Hello from Linux.\n", 18)` → `rax == 18` else `exit(2)`; `write(7, …)` → `rax == -9` else `exit(3)`; `exit(0)`. Kernel-side checks: the fd projection accepted exactly the 18 expected bytes in one delivery and nothing for fd 7; render style is `Verbatim`; the exit status is 0; the process left the registry; no scheduler/IPC resource remains attributed to it; `projection_for` fails closed after exit; held capabilities return to baseline (the shared kernel-owned ConsoleSink persists by design); a Native sibling made progress. Serial must show `Hello from Linux.` at the start of a line (no `[IPC ] console` framing), `[LNX ] exit pid=… status=0`, then `[M8.3] PASS`. Any deviation is a `[FAIL]` fatal error; xtask times out fail-closed.
