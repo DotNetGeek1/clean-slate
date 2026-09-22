@@ -95,12 +95,15 @@ pub(crate) mod m7_net_device;
 pub(crate) mod m7_net_service;
 #[cfg(any(feature = "m7-tls-self-test", feature = "m7-tls-fail-closed-self-test"))]
 pub(crate) mod m7_tls;
+#[cfg(feature = "m8-linux-dispatch-self-test")]
+pub(crate) mod m8_linux_dispatch;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m8-linux-dispatch-self-test"
 ))]
 use crate::mm::PAGE_SIZE;
 
@@ -114,7 +117,8 @@ use crate::mm::PAGE_SIZE;
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m8-linux-dispatch-self-test"
 ))]
 pub(super) const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
 #[cfg(any(
@@ -150,7 +154,8 @@ pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SI
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m5-crash-recovery-self-test",
+    feature = "m8-linux-dispatch-self-test"
 ))]
 pub(super) const USER_TEST_PROCESS_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + (PAGE_SIZE * 2);
 #[cfg(feature = "m4-recovery-self-test")]

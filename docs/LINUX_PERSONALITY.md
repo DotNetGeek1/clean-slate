@@ -136,3 +136,39 @@ Linux fd numbers must never be confused with capability handles.
 - Dynamic linking, PIE, signals, `brk`/`mmap` breadth
 
 See also: [COMPATIBILITY.md](COMPATIBILITY.md), [ROADMAP.md](ROADMAP.md) (M8/M9), [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## #93 dispatch
+
+Syscall entry (`clean_slate_syscall_dispatch`) resolves the caller with
+`current_syscall_caller_pid()` (scheduler thread + CR3 cross-check), reads
+`execution_personality` from the process registry, then calls
+`dispatch_target_for` **before** interpreting `RAX`:
+
+| Target | Path |
+|--------|------|
+| `Native` | Existing native match, factored as `dispatch_native` (unchanged semantics) |
+| `LinuxX86_64` | `syscall::linux::dispatch` |
+
+If the caller cannot be resolved, behaviour stays native (same as pre-#93).
+
+Linux module layout (`kernel/src/syscall/linux/`):
+
+- `decode` — `SyscallContext` → `LinuxSyscallRegisters` → `LinuxSyscallRequest`
+- `table` — `LinuxSyscallHandler` / `LinuxSyscallContext { pid, instance_generation, frame }`;
+  `SYS_WRITE` / `SYS_EXIT` placeholders return `Err(ENOSYS)` until #94
+- `user_copy` — bounded copy-in on `validate_user_pointer_range` → `Err(EFAULT)`
+- unsupported numbers use `UnsupportedSyscallBudget` and log
+  `[LNX ] unsupported syscall=<nr> errno=ENOSYS` while under budget
+
+First Linux dispatch for a process instance logs
+`[LNX ] personality=x86_64 pid=<pid>` (once per `(pid, instance_generation)`).
+
+If a Linux-tagged process has no live instance generation, dispatch fails closed
+with `-ESRCH` and a bounded `[LNX ] missing generation …` diagnostic (no silent
+generation-0 sentinel).
+
+`copy_user_bytes` returns `Ok(0)` for zero length, clamps long copies to 64 bytes
+(caller decides short-write semantics), and `Err(EFAULT)` on validation failure.
+
+QEMU proof: `cargo xtask test-m8-linux-dispatch` (`m8-linux-dispatch-self-test`),
+marker `[M8.3] PASS`.
