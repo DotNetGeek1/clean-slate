@@ -160,6 +160,7 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
     feature = "m4-recovery-self-test",
     feature = "m3-ipc-self-test",
     feature = "m8-linux-dispatch-self-test",
+    feature = "m9-syscall-fail-closed-self-test",
     feature = "m4-supervisor-self-test",
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",

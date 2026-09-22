@@ -7,6 +7,9 @@ use crate::arch::x86_64::asm::clean_slate_syscall_entry;
 use crate::arch::x86_64::asm::SYSCALL_SCRATCH_USER_RSP;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::arch::x86_64::context_switch::USER_TEST_RFLAGS;
+use crate::arch::x86_64::context_switch::{
+    next_task, restore_task_context, start_first_task, FRESH_TASK_SENTINEL,
+};
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::gdt::set_syscall_kernel_stack;
 use crate::arch::x86_64::gdt::userspace_gdt_state;
@@ -47,12 +50,14 @@ use crate::ipc::USERSPACE_IPC_TEST_PID;
 use crate::ipc::USERSPACE_IPC_UNAUTHORIZED_TEST_PID;
 #[cfg(any(feature = "m4-supervisor-self-test", feature = "m4-recovery-self-test"))]
 use crate::ipc::USERSPACE_SUPERVISOR_TEST_PID;
+use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::user_mapping::validate_user_pointer_range;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::mm::PAGE_SIZE;
+use crate::process::domain::teardown_current_process;
 use crate::process::live_instance_generation;
 use crate::process::personality::dispatch_target_for;
 use crate::process::personality::execution_personality_for_pid;
@@ -110,13 +115,13 @@ use clean_slate_service_fixtures::{
     BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES, BLOCK_TRANSPORT_REQUEST_BYTES,
     BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION,
 };
+use clean_slate_service_lifecycle::InstanceGeneration;
 use clean_slate_service_lifecycle::LifecycleMessage;
 use clean_slate_service_lifecycle::ServiceId;
 use clean_slate_service_lifecycle::LIFECYCLE_WIRE_MAX_BYTES;
 use core::ptr;
-#[cfg(feature = "m3-syscall-self-test")]
+use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
-
 const SYSCALL_ENTRY_RFLAGS_MASK: u64 = (1u64 << RFLAGS_TRAP_FLAG_BIT)
     | (1u64 << RFLAGS_INTERRUPT_ENABLE_BIT)
     | (1u64 << RFLAGS_DIRECTION_FLAG_BIT)
@@ -639,39 +644,120 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
     #[cfg(feature = "m8-linux-hello-self-test")]
     crate::selftest::m8_linux_hello::observe_syscall(frame);
 
-    match resolve_syscall_caller() {
-        Some(caller) => match dispatch_target_for(caller.personality) {
-            SyscallDispatchTarget::LinuxX86_64 => match live_instance_generation(caller.pid) {
-                Some(generation) if generation.0 != 0 => {
-                    linux::dispatch(frame, caller.pid, generation);
-                    #[cfg(feature = "m8-linux-dispatch-self-test")]
-                    crate::selftest::m8_linux_dispatch::maybe_complete_m8_linux_dispatch();
-                }
-                _ => linux::reject_missing_generation(frame, caller.pid),
-            },
-            SyscallDispatchTarget::Native => dispatch_native(frame),
-        },
-        // Unresolved caller keeps today's native behaviour.
-        None => dispatch_native(frame),
+    #[cfg(feature = "m9-syscall-fail-closed-self-test")]
+    crate::selftest::m9_syscall_fail_closed::arm_caller_resolution_mismatch_if_pending();
+
+    match route_syscall(resolve_syscall_caller()) {
+        SyscallRoute::Native { pid } => {
+            let _ = pid;
+            dispatch_native(frame);
+        }
+        SyscallRoute::Linux { pid, generation } => {
+            linux::dispatch(frame, pid, generation);
+            #[cfg(feature = "m8-linux-dispatch-self-test")]
+            crate::selftest::m8_linux_dispatch::maybe_complete_m8_linux_dispatch();
+        }
+        SyscallRoute::LinuxRejectMissingGeneration { pid } => {
+            linux::reject_missing_generation(frame, pid);
+        }
+        SyscallRoute::FailClosed { reason } => fail_closed_unresolved_syscall_caller(reason),
     }
 
     frame as *mut SyscallContext as u64
 }
 
 /// Trusted caller identity resolved once per SYSCALL entry.
-struct ResolvedSyscallCaller {
-    pid: u64,
-    personality: ExecutionPersonality,
+pub(crate) struct ResolvedSyscallCaller {
+    pub(crate) pid: u64,
+    pub(crate) personality: ExecutionPersonality,
+}
+
+/// Pure routing decision for host tests and production dispatch (#143).
+pub(crate) enum SyscallRoute {
+    Native {
+        pid: u64,
+    },
+    Linux {
+        pid: u64,
+        generation: InstanceGeneration,
+    },
+    LinuxRejectMissingGeneration {
+        pid: u64,
+    },
+    FailClosed {
+        reason: &'static str,
+    },
+}
+
+/// Map trusted caller resolution to a dispatch target without touching user registers.
+pub(crate) fn route_syscall(
+    resolution: Result<ResolvedSyscallCaller, &'static str>,
+) -> SyscallRoute {
+    match resolution {
+        Ok(caller) => match dispatch_target_for(caller.personality) {
+            SyscallDispatchTarget::Native => SyscallRoute::Native { pid: caller.pid },
+            SyscallDispatchTarget::LinuxX86_64 => match live_instance_generation(caller.pid) {
+                Some(generation) if generation.0 != 0 => SyscallRoute::Linux {
+                    pid: caller.pid,
+                    generation,
+                },
+                _ => SyscallRoute::LinuxRejectMissingGeneration { pid: caller.pid },
+            },
+        },
+        Err(reason) => SyscallRoute::FailClosed { reason },
+    }
 }
 
 /// Resolve caller pid + personality from the trusted scheduler/CR3 path.
-///
-/// Returns `None` when the caller cannot be identified; the gate then keeps
-/// native dispatch semantics (pre-#93 behaviour).
-fn resolve_syscall_caller() -> Option<ResolvedSyscallCaller> {
-    let pid = current_syscall_caller_pid().ok()?;
-    let personality = execution_personality_for_pid(pid).ok()?;
-    Some(ResolvedSyscallCaller { pid, personality })
+fn resolve_syscall_caller() -> Result<ResolvedSyscallCaller, &'static str> {
+    let pid = current_syscall_caller_pid()?;
+    let personality = execution_personality_for_pid(pid)?;
+    Ok(ResolvedSyscallCaller { pid, personality })
+}
+
+const UNRESOLVED_CALLER_DIAG_LIMIT: u64 = 8;
+static UNRESOLVED_CALLER_DIAG_COUNT: AtomicU64 = AtomicU64::new(0);
+
+fn log_unresolved_syscall_caller(reason: &'static str) {
+    let observed = UNRESOLVED_CALLER_DIAG_COUNT.fetch_add(1, Ordering::Relaxed);
+    if observed < UNRESOLVED_CALLER_DIAG_LIMIT {
+        kernel_log_fmt(format_args!(
+            "[SYSC] unresolved caller reason={reason} fail-closed\n"
+        ));
+    }
+}
+
+/// Contain the current userspace execution context when caller resolution failed.
+fn fail_closed_unresolved_syscall_caller(reason: &'static str) -> ! {
+    log_unresolved_syscall_caller(reason);
+    if matches!(
+        reason,
+        "scheduler had no current thread to dispatch" | "syscall caller thread was not userspace"
+    ) {
+        fatal_kernel_error(reason);
+    }
+    let allocator = service_lifecycle_syscall_allocator_mut()
+        .as_mut()
+        .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));
+    let teardown = teardown_current_process(allocator, kernel_root_frame(), 1, true)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
+    #[cfg(feature = "m9-syscall-fail-closed-self-test")]
+    crate::selftest::m9_syscall_fail_closed::observe_syscall_fail_closed(
+        reason,
+        teardown.process_id,
+    );
+    resume_after_syscall_containment(teardown.next_stack_pointer)
+}
+
+fn resume_after_syscall_containment(next_stack_pointer: Option<u64>) -> ! {
+    match next_stack_pointer {
+        Some(FRESH_TASK_SENTINEL) => {
+            let (stack_pointer, entry_point) = unsafe { next_task() };
+            unsafe { start_first_task(stack_pointer, entry_point) }
+        }
+        Some(stack_pointer) => unsafe { restore_task_context(stack_pointer) },
+        None => fatal_kernel_error("no runnable thread remained after syscall fail-closed"),
+    }
 }
 
 fn dispatch_native(frame: &mut SyscallContext) {
@@ -681,10 +767,11 @@ fn dispatch_native(frame: &mut SyscallContext) {
             maybe_validate_syscall_entry_flags(frame);
             #[cfg(feature = "m8-linux-dispatch-self-test")]
             {
-                use core::sync::atomic::Ordering;
                 crate::syscall::linux::M8_NATIVE_PROGRESS.fetch_add(1, Ordering::Relaxed);
                 crate::selftest::m8_linux_dispatch::maybe_complete_m8_linux_dispatch();
             }
+            #[cfg(feature = "m9-syscall-fail-closed-self-test")]
+            crate::selftest::m9_syscall_fail_closed::observe_native_sibling_progress();
             frame.rax = SYSCALL_ABI_VERSION;
         }
         #[cfg(feature = "m3-syscall-self-test")]
@@ -824,6 +911,73 @@ mod tests {
         assert_eq!(frame.rax, SYSCALL_ENOSYS);
         // Native sentinel is not produced via Linux encode_rax in this path.
         assert_eq!(SYSCALL_ENOSYS, u64::MAX - 37);
+    }
+
+    #[test]
+    fn route_syscall_trusted_native_selects_native() {
+        let route = route_syscall(Ok(ResolvedSyscallCaller {
+            pid: 4,
+            personality: ExecutionPersonality::Native,
+        }));
+        assert!(matches!(route, SyscallRoute::Native { pid: 4 }));
+    }
+
+    #[test]
+    fn route_syscall_trusted_linux_selects_linux() {
+        let route = route_syscall(Ok(ResolvedSyscallCaller {
+            pid: 5,
+            personality: ExecutionPersonality::LinuxX86_64,
+        }));
+        assert!(matches!(
+            route,
+            SyscallRoute::LinuxRejectMissingGeneration { pid: 5 }
+        ));
+    }
+
+    #[test]
+    fn route_syscall_unresolved_fails_closed() {
+        let route = route_syscall(Err(
+            "syscall caller process did not match active address space",
+        ));
+        assert!(matches!(
+            route,
+            SyscallRoute::FailClosed {
+                reason: "syscall caller process did not match active address space"
+            }
+        ));
+    }
+
+    #[test]
+    fn overlapping_nr_one_unresolved_does_not_invoke_native_dispatch() {
+        let mut frame = SyscallContext {
+            rax: SYSCALL_NR_READ_U64,
+            rdx: 0,
+            rbx: 0,
+            rbp: 0,
+            rsi: 0,
+            rdi: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            user_rip: 0,
+            user_rflags: 0,
+            user_rsp: 0,
+        };
+        let route = route_syscall(Err(
+            "active address space did not map to a registered process",
+        ));
+        assert!(matches!(route, SyscallRoute::FailClosed { .. }));
+        let rax_before = frame.rax;
+        if matches!(route, SyscallRoute::FailClosed { .. }) {
+            // Production path diverges; host test proves routing never selects native.
+        } else {
+            dispatch_native(&mut frame);
+        }
+        assert_eq!(frame.rax, rax_before);
     }
 
     #[test]
