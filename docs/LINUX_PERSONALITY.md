@@ -137,6 +137,61 @@ Linux fd numbers must never be confused with capability handles.
 
 See also: [COMPATIBILITY.md](COMPATIBILITY.md), [ROADMAP.md](ROADMAP.md) (M8/M9), [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## M8.2 — ELF loader and process image (#92)
+
+`kernel/src/process/linux_image.rs` turns the frozen fixture bytes into a
+registered, isolated Clean-Slate process at runtime (nothing is flattened by
+`kernel/build.rs`). Production code, always compiled; only the embedded bytes
+(`LINUX_M8_FIXTURE`, feature `m8-linux-image`) and the QEMU self-test
+(`m8-linux-image-self-test`, `cargo xtask test-m8-linux-image`) are feature-gated.
+
+Pipeline (transactional, mirrors `service::spawn`):
+
+1. `validate_linux_image(bytes) -> Result<LinuxImagePlan, LinuxImageError>` (pure,
+   host-tested). `LINUX_M8_LOAD_POLICY` is `ET_EXEC`-only, W^X, page-zero reject,
+   window `[0x0000_4000_0000_0000, 0x0000_4080_0000_0000)`. On top of
+   `clean-slate-elf` it rejects `PT_INTERP` / `PT_DYNAMIC`, distinguishes page-zero,
+   identity-map (`< window base`), kernel/non-canonical (`>= 1<<47`) and
+   out-of-window addresses, requires `p_align` to be 0/1 or a power of two
+   `>= 4096`, requires the program headers to be covered by a PT_LOAD (for
+   `AT_PHDR`), rejects segments intersecting the stack reservation, and checks the
+   mapping budget (`MAX_ADDRESS_SPACE_USER_MAPPINGS`) and the exact page-table
+   frame demand (`MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES`) before anything is mapped.
+   Every failure is a distinct `LinuxImageError` variant with a `description()`.
+2. `build_linux_process_image` creates the address space, maps PT_LOAD pages via
+   `image_loader::map_load_plan_segments` (segment-derived R/W/X, BSS zero-filled
+   per page by `page_file_span`), maps the stack, writes the initial stack bytes
+   through the process root (never via a user pointer), verifies the guard page
+   is unmapped and the resource counts match the plan. Any failure destroys the
+   address space (every frame and page-table frame reclaimed).
+3. `launch_linux_process(allocator, kernel_stack_top, scheduler_slot, bytes)`
+   registers the `Process` with `execution_personality: ExecutionPersonality::LinuxX86_64`
+   (trusted kernel metadata, fixed at construction — the one launch-time
+   assignment) and configures the scheduler thread, returning
+   `LaunchedLinuxProcess { pid, tid, instance_generation, entry, launch_rsp, … }`.
+
+Stack placement (fixed, documented): two NX+W+U pages
+`[0x0000_407F_FFFF_D000, 0x0000_407F_FFFF_F000)` at the top of the slot, guard
+page `0x0000_407F_FFFF_C000` unmapped, slot's last page unmapped. Two pages
+because the fixture uses no stack and the default mapping budget is four pages
+(one PT_LOAD page + two stack pages leaves one page of headroom); M9 may grow it.
+
+Initial stack (per the contract above): `argc = 1`, `argv[0] = "hello-linux-x86_64"`,
+`envp = []`, auxv `AT_PHDR` (derived: `phdr_vaddr` = first PT_LOAD covering
+`e_phoff`, `0x0000_4000_0040_0040` for the fixture), `AT_PHENT = 56`,
+`AT_PHNUM = e_phnum`, `AT_PAGESZ = 4096`, `AT_ENTRY = e_entry`, `AT_NULL`.
+`AT_RANDOM` is not emitted (M9). Launch RSP is 16-byte aligned and points at
+`argc`; for the fixture it is `0x0000_407F_FFFF_EF60`.
+
+Proof (`[M8.2] PASS`): the first syscall of the Linux pid (nr 999) is observed
+at the syscall entry with `user_rip` inside the RX PT_LOAD page and
+`user_rsp == launch RSP`; the process is then torn down through
+`teardown_current_process` and allocator free frames / registry occupancy return
+to the pre-launch baseline while a native sibling keeps making progress. The
+Linux syscall surface (#93/#94), fd projection (#95) and the acceptance run (#98)
+are not exercised here; #97 wires `launch_linux_process` into the boot path and
+grants console / stdio after it returns.
+
 ## #93 dispatch
 
 Syscall entry (`clean_slate_syscall_dispatch`) resolves the caller with

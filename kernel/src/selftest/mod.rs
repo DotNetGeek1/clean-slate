@@ -97,6 +97,8 @@ pub(crate) mod m7_net_service;
 pub(crate) mod m7_tls;
 #[cfg(feature = "m8-linux-dispatch-self-test")]
 pub(crate) mod m8_linux_dispatch;
+#[cfg(feature = "m8-linux-image-self-test")]
+pub(crate) mod m8_linux_image;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",

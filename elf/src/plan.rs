@@ -1,7 +1,7 @@
 //! Validated load plan construction from ELF64 bytes.
 
 use crate::error::LoadPlanError;
-use crate::header::{read_u32, read_u64, Elf64Header, PT_INTERP, PT_LOAD};
+use crate::header::{read_u32, read_u64, Elf64Header, PT_DYNAMIC, PT_INTERP, PT_LOAD};
 use crate::policy::{LoadPlanPolicy, MAX_LOAD_SEGMENTS};
 use crate::segment::{LoadSegment, SegmentPermissions};
 
@@ -17,6 +17,10 @@ pub struct LoadPlan {
     pub segments: [LoadSegment; MAX_LOAD_SEGMENTS],
     pub segment_count: usize,
     pub has_interp: bool,
+    /// True when a `PT_DYNAMIC` program header is present (dynamic-linking metadata).
+    /// Recorded so policy layers (e.g. the M8 Linux loader) can reject it; the
+    /// generic plan itself does not interpret the dynamic section.
+    pub has_dynamic: bool,
     pub e_type: u16,
 }
 
@@ -117,6 +121,7 @@ pub fn parse_load_plan(bytes: &[u8], policy: &LoadPlanPolicy) -> Result<LoadPlan
     let mut segments = [LoadSegment::default(); MAX_LOAD_SEGMENTS];
     let mut segment_count = 0usize;
     let mut has_interp = false;
+    let mut has_dynamic = false;
 
     for index in 0..header.e_phnum {
         let start = header
@@ -137,6 +142,10 @@ pub fn parse_load_plan(bytes: &[u8], policy: &LoadPlanPolicy) -> Result<LoadPlan
         let p_type = read_u32(phdr, 0).map_err(|_| LoadPlanError::TruncatedProgramHeaders)?;
         if p_type == PT_INTERP {
             has_interp = true;
+            continue;
+        }
+        if p_type == PT_DYNAMIC {
+            has_dynamic = true;
             continue;
         }
         if p_type != PT_LOAD {
@@ -182,6 +191,7 @@ pub fn parse_load_plan(bytes: &[u8], policy: &LoadPlanPolicy) -> Result<LoadPlan
         segments,
         segment_count,
         has_interp,
+        has_dynamic,
         e_type: header.e_type,
     };
     validate_entry_in_executable(&plan)?;

@@ -632,6 +632,10 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
     if let Err(message) = validate_canonical_user_return_state(frame) {
         fatal_kernel_error(message);
     }
+    // M8.2 (#92) self-test: observe the first syscall of the launched Linux
+    // image (entry proof) and the native sibling's progress. Test-only hook.
+    #[cfg(feature = "m8-linux-image-self-test")]
+    crate::selftest::m8_linux_image::observe_syscall(frame);
 
     match resolve_syscall_caller() {
         Some(caller) => match dispatch_target_for(caller.personality) {
