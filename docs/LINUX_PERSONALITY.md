@@ -301,3 +301,61 @@ The loop is the pure function `write_chunked(count, fetch, deliver)`; host tests
 ### QEMU proof (`cargo xtask test-m8-linux-dispatch`)
 
 The M8.3 self-test is extended rather than duplicated. Trusted self-test code tags the process `LinuxX86_64`, calls `IpcEndpointTable::grant_console_capability_for_pid(pid)` once and `linux_fd::install_stdio_for_process(pid, generation, handle, handle)` **before** the process runs (this is the exact launch sequence #97 must perform), then hand-assembled code does: `syscall 999` → `rax == -38` else `exit(1)`; `write(1, "Hello from Linux.\n", 18)` → `rax == 18` else `exit(2)`; `write(7, …)` → `rax == -9` else `exit(3)`; `exit(0)`. Kernel-side checks: the fd projection accepted exactly the 18 expected bytes in one delivery and nothing for fd 7; render style is `Verbatim`; the exit status is 0; the process left the registry; no scheduler/IPC resource remains attributed to it; `projection_for` fails closed after exit; held capabilities return to baseline (the shared kernel-owned ConsoleSink persists by design); a Native sibling made progress. Serial must show `Hello from Linux.` at the start of a line (no `[IPC ] console` framing), `[LNX ] exit pid=… status=0`, then `[M8.3] PASS`. Any deviation is a `[FAIL]` fatal error; xtask times out fail-closed.
+
+## M8.7 — integrated launch path (#97)
+
+Production entry point: `service::linux_launch::launch_linux_hello(allocator,
+kernel_stack_top, scheduler_slot, elf_bytes)`. Order (under
+`without_interrupts` so the new Ready thread cannot run half-wired):
+
+1. `process::linux_image::launch_linux_process` — validate/map/register with
+   `ExecutionPersonality::LinuxX86_64` fixed at construction (#92).
+2. `IpcEndpointTable::grant_console_capability_for_pid(pid)` once (#95).
+3. `linux_fd::install_stdio_for_process(pid, generation, handle, handle)`.
+4. Log `[LNX ] ELF loaded pid=<pid> entry=<hex>`.
+
+Any failure after a process was inserted tears it down through
+`teardown_process_by_id`, logs `[LNX ] load failed: <description>`, and returns
+`Err` — never kernel-fatal. Feature `m8-linux-hello` bumps `TASK_COUNT` to 3
+(both demo kernel tasks plus Linux hello in scheduler slot 2) and starts the
+fixture through `ServiceLifecycleController` as
+`BuiltinServiceImage::LinuxHello` / `LINUX_HELLO_SERVICE_ID`. The controller
+owns generation and restart; boot arms a one-shot Start (`remaining_restarts =
+0`). Load failure at boot logs `[LNX ] load failed: …` and continues into
+`start_scheduler()` — it must never become `[FAIL]`.
+
+Observer proof (`cargo xtask test-m8-linux-hello`, marker `[M8.7] PASS`): the
+self-test never grants console/stdio and never drives relaunch. It Starts a
+two-launch session (`remaining_restarts = 1`), watches the first exit +
+controller Start (stale fd fail-closed, fresh stdout projection, exit
+`status=0`, delivered hello bytes / Verbatim render), then the second exit,
+then feeds a malformed corpus image to `launch_linux_hello` and asserts `Err`
++ no process + no frame leak while a native sibling keeps making progress
+(+N after the malformed proof). The same xtask also boots the production
+feature build and requires the hello signature plus `[M2  ] PASS`. Serial
+signature (CRLF-safe, in order):
+
+```text
+[LNX ] ELF loaded pid=<pid> entry=0x0000400000400078
+[LNX ] personality=x86_64 pid=<pid>
+[LNX ] unsupported syscall=999 errno=ENOSYS
+Hello from Linux.
+[LNX ] exit pid=<pid> status=0
+… (second launch under the self-test) …
+[M8.7] PASS
+```
+
+No `[IPC ] console` line may contain the hello text.
+
+### Generation spaces (M8.7)
+
+Two generation counters appear in serial and must not be confused:
+
+- **Controller / service generation** — `[SVC ] launch service=32768 pid=… gen=N`
+  is `ServiceLifecycleController`'s authoritative generation for
+  `LINUX_HELLO_SERVICE_ID` (bumped on each Start).
+- **Process / registry generation** — observer lines such as
+  `[M8.7] first exit observed pid=… gen=N` and fd-table keys use the process
+  registry `instance_generation` assigned at insert. Stale fd lookups and
+  `#98` greps for fd/identity proofs must use this process generation, not the
+  `[SVC ] … gen=` field.

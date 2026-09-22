@@ -25,11 +25,15 @@
 //!
 //! The loader logic is production code in every build. Cargo features gate only
 //! the embedded fixture bytes (`m8-linux-image`) and the QEMU self-test
-//! (`m8-linux-image-self-test`).
+//! (`m8-linux-image-self-test`). Consumed by `#97` (`service::linux_launch`)
+//! and the `m8-linux-image` self-test.
 
-// Consumed by the #97 supervisor launch path and the `m8-linux-image` self-test;
-// production boot does not launch a Linux process yet.
-#![allow(dead_code)]
+#![cfg_attr(
+    not(feature = "m8-linux-image"),
+    // Default builds have no `service::linux_launch` consumer (`m8-linux-image`
+    // gates that module); keep the loader compiling without dead_code noise.
+    allow(dead_code)
+)]
 
 use crate::mm::address_space::{
     create_process_address_space, destroy_process_address_space, translate_address_in_root,
@@ -52,7 +56,15 @@ use x86_64::VirtAddr;
 /// enabled (or for host tests). Provenance is checked by `cargo xtask
 /// verify-m8-fixture`; the host test below pins length and `e_entry` so a drift
 /// in the bytes fails a test. No other copy of the fixture exists in the kernel.
+///
+/// Bare `--features m8-linux-image` (no hello / image self-test) embeds the
+/// bytes for the feature graph but has no in-crate consumer — allow dead_code
+/// there; hello and the image self-test consume it.
 #[cfg(any(feature = "m8-linux-image", test))]
+#[cfg_attr(
+    not(any(feature = "m8-linux-hello", feature = "m8-linux-image-self-test")),
+    allow(dead_code)
+)]
 pub(crate) const LINUX_M8_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-hello/hello-linux-x86_64");
 

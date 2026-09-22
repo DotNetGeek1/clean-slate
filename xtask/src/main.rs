@@ -27,6 +27,10 @@ const M3_ADDRESS_SPACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_ENTRY_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_SYSCALL_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M8_LINUX_DISPATCH_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+// M8.7 needs 40s: two full Linux hello launches (initial + controller relaunch)
+// plus native-sibling progress and the malformed-load proof before `[M8.7] PASS`.
+const M8_LINUX_HELLO_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(40);
+const M8_LINUX_HELLO_PRODUCTION_TIMEOUT: Duration = Duration::from_secs(40);
 const M3_LIFECYCLE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_IPC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M3_RESOURCES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -145,6 +149,30 @@ const M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS: [&str; 6] = [
     "\nHello from Linux.",
     "[LNX ] exit pid=",
     "[M8.3] PASS",
+];
+const M8_LINUX_HELLO_ACCEPTANCE_MARKERS: [&str; 11] = [
+    "[LNX ] ELF loaded pid=",
+    "[LNX ] personality=x86_64 pid=",
+    "[LNX ] unsupported syscall=999 errno=ENOSYS",
+    "\nHello from Linux.",
+    "[LNX ] exit pid=",
+    " status=0",
+    "[LNX ] ELF loaded pid=",
+    "\nHello from Linux.",
+    "[LNX ] exit pid=",
+    " status=0",
+    "[M8.7] PASS",
+];
+/// Production `--features m8-linux-hello` (no self-test): hello once, then demo
+/// tasks finish cleanly with `[M2  ] PASS` (not a scheduler-empty `[FAIL]`).
+const M8_LINUX_HELLO_PRODUCTION_MARKERS: [&str; 7] = [
+    "[LNX ] ELF loaded pid=",
+    "[LNX ] personality=x86_64 pid=",
+    "[LNX ] unsupported syscall=999 errno=ENOSYS",
+    "\nHello from Linux.",
+    "[LNX ] exit pid=",
+    " status=0",
+    "[M2  ] PASS",
 ];
 const M3_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[PROC] created pid=1 tid=1",
@@ -538,6 +566,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM3Entry => run_m3_entry_acceptance(),
         ParsedCommand::TestM3Syscall => run_m3_syscall_acceptance(),
         ParsedCommand::TestM8LinuxDispatch => run_m8_linux_dispatch_acceptance(),
+        ParsedCommand::TestM8LinuxHello => run_m8_linux_hello_acceptance(),
         ParsedCommand::TestM3Lifecycle => run_m3_lifecycle_acceptance(),
         ParsedCommand::TestM3Ipc => run_m3_ipc_acceptance(),
         ParsedCommand::TestM3Resources => run_m3_resources_acceptance(),
@@ -985,6 +1014,29 @@ fn run_m8_linux_dispatch_acceptance() -> Result<(), XtaskError> {
         Some((
             &M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS,
             M8_LINUX_DISPATCH_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn run_m8_linux_hello_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m8-linux-hello-self-test"],
+        Some((
+            &M8_LINUX_HELLO_ACCEPTANCE_MARKERS,
+            M8_LINUX_HELLO_ACCEPTANCE_TIMEOUT,
+        )),
+    )?;
+    // Production feature boot (no self-test): catch boot-tail failures the
+    // observer build never reaches (e.g. empty-scheduler `[FAIL]` after Linux exits).
+    run_vm_inner(
+        false,
+        false,
+        &["m8-linux-hello"],
+        Some((
+            &M8_LINUX_HELLO_PRODUCTION_MARKERS,
+            M8_LINUX_HELLO_PRODUCTION_TIMEOUT,
         )),
     )
 }
@@ -2226,6 +2278,7 @@ fn print_help() {
     println!("  test-m3-entry Build the M3.1 userspace-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-syscall Build the M3.3 syscall-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m8-linux-dispatch Build the M8.3 Linux personality dispatch kernel, run QEMU, and validate [M8.3] PASS");
+    println!("  test-m8-linux-hello Boot M8.7 self-test then production feature (hello + clean [M2] PASS); 40s for two launches (aliases: m8-linux-hello, m8.7)");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
@@ -2303,6 +2356,7 @@ enum ParsedCommand {
     TestM3Entry,
     TestM3Syscall,
     TestM8LinuxDispatch,
+    TestM8LinuxHello,
     TestM3Lifecycle,
     TestM3Ipc,
     TestM3Resources,
@@ -2358,6 +2412,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m3-entry" => ParsedCommand::TestM3Entry,
         Some(cmd) if cmd == "test-m3-syscall" => ParsedCommand::TestM3Syscall,
         Some(cmd) if cmd == "test-m8-linux-dispatch" => ParsedCommand::TestM8LinuxDispatch,
+        Some(cmd) if cmd == "test-m8-linux-hello" || cmd == "m8-linux-hello" || cmd == "m8.7" => {
+            ParsedCommand::TestM8LinuxHello
+        }
         Some(cmd) if cmd == "test-m3-lifecycle" => ParsedCommand::TestM3Lifecycle,
         Some(cmd) if cmd == "test-m3-ipc" => ParsedCommand::TestM3Ipc,
         Some(cmd) if cmd == "test-m3-resources" => ParsedCommand::TestM3Resources,
@@ -2580,6 +2637,18 @@ mod tests {
         assert_eq!(
             parse_command(Some("test-m8-linux-dispatch".as_ref())),
             ParsedCommand::TestM8LinuxDispatch
+        );
+        assert_eq!(
+            parse_command(Some("test-m8-linux-hello".as_ref())),
+            ParsedCommand::TestM8LinuxHello
+        );
+        assert_eq!(
+            parse_command(Some("m8-linux-hello".as_ref())),
+            ParsedCommand::TestM8LinuxHello
+        );
+        assert_eq!(
+            parse_command(Some("m8.7".as_ref())),
+            ParsedCommand::TestM8LinuxHello
         );
         assert_eq!(
             parse_command(Some("test-m3-lifecycle".as_ref())),

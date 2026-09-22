@@ -636,6 +636,8 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
     // image (entry proof) and the native sibling's progress. Test-only hook.
     #[cfg(feature = "m8-linux-image-self-test")]
     crate::selftest::m8_linux_image::observe_syscall(frame);
+    #[cfg(feature = "m8-linux-hello-self-test")]
+    crate::selftest::m8_linux_hello::observe_syscall(frame);
 
     match resolve_syscall_caller() {
         Some(caller) => match dispatch_target_for(caller.personality) {

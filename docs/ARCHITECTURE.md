@@ -177,6 +177,20 @@ Any PT_LOAD intersecting `[0x0000_407F_FFFF_C000, 0x0000_4080_0000_0000)` is
 rejected (`SegmentOverlapsStackReservation`). See
 [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md), "M8.2 — ELF loader and process image".
 
+### Linux personality end-to-end path (#97)
+
+With `m8-linux-hello`, boot Starts `LINUX_HELLO_SERVICE_ID` through
+`ServiceLifecycleController` (`BuiltinServiceImage::LinuxHello`): runtime load
+(#92) → `LinuxX86_64` process → console grant + stdio projection (#95) → Linux
+syscall dispatch (#93) → `write`/`exit` (#94) → production teardown. Both demo
+kernel tasks keep running alongside Linux (scheduler slot 2). Controller-owned
+re-Start yields a new generation and a fresh fd table. See
+[LINUX_PERSONALITY.md](LINUX_PERSONALITY.md) "M8.7".
+
+Demo-task boot completion (`[M2  ] PASS`) treats scheduler slots in
+`Empty`/`Reaped`/`Exited` as finished so a reaped Linux slot does not fatal the
+tail after the demos exit.
+
 ## M7 network layering
 
 M7 introduces `clean-slate-network`, a transport-independent contract between raw NIC backends, the userspace network service, and the protocol stack. VirtIO details stay in the kernel driver lane; applications receive attenuated `ResourceClass::Network` capabilities rather than ambient connectivity. See [NETWORK.md](NETWORK.md) for the ownership map, rights vocabulary, and hermetic fixture contract.

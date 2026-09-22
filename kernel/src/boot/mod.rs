@@ -122,7 +122,8 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m7-net-caps-self-test"),
     not(feature = "m7-dns-self-test"),
     not(feature = "m7-net-device-self-test"),
-    not(feature = "m8-linux-image-self-test")
+    not(feature = "m8-linux-image-self-test"),
+    not(feature = "m8-linux-hello-self-test")
 ))]
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
 #[cfg(feature = "m3-ipc-self-test")]
@@ -180,6 +181,8 @@ use crate::selftest::m7_tls::run_m7_tls_fail_closed_self_test;
 use crate::selftest::m7_tls::run_m7_tls_self_test;
 #[cfg(feature = "m8-linux-dispatch-self-test")]
 use crate::selftest::m8_linux_dispatch::start_m8_linux_dispatch_self_test;
+#[cfg(feature = "m8-linux-hello-self-test")]
+use crate::selftest::m8_linux_hello::start_m8_linux_hello_self_test;
 #[cfg(feature = "m8-linux-image-self-test")]
 use crate::selftest::m8_linux_image::start_m8_linux_image_self_test;
 use crate::syscall::initialize_syscall_abi;
@@ -279,14 +282,23 @@ fn run_inner() -> Result<(), &'static str> {
         start_timer_self_test_task()
     }
 
-    #[cfg(feature = "m8-linux-dispatch-self-test")]
+    #[cfg(feature = "m8-linux-hello-self-test")]
+    {
+        start_m8_linux_hello_self_test(allocator)
+    }
+
+    #[cfg(all(
+        feature = "m8-linux-dispatch-self-test",
+        not(feature = "m8-linux-hello-self-test")
+    ))]
     {
         start_m8_linux_dispatch_self_test(allocator)
     }
 
     #[cfg(all(
         feature = "m3-entry-self-test",
-        not(feature = "m8-linux-dispatch-self-test")
+        not(feature = "m8-linux-dispatch-self-test"),
+        not(feature = "m8-linux-hello-self-test")
     ))]
     {
         #[cfg(feature = "m7-net-service-self-test")]
@@ -589,6 +601,7 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m4-recovery-self-test"),
         not(feature = "m3-entry-self-test"),
         not(feature = "m8-linux-dispatch-self-test"),
+        not(feature = "m8-linux-hello-self-test"),
         not(feature = "m5-block-self-test"),
         not(feature = "m7-net-device-self-test"),
         not(feature = "m7-tls-self-test"),
@@ -602,6 +615,15 @@ fn run_inner() -> Result<(), &'static str> {
         controller.clear();
         controller.configure_launch_context(kernel_root_frame, syscall_kernel_stack_top);
         initialize_scheduler()?;
+        #[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
+        {
+            // Load failure must never be kernel-fatal. The launch path already
+            // emits the specific `[LNX ] load failed: …` line; do not re-log.
+            let allocator = crate::syscall::service_lifecycle_syscall_allocator_mut()
+                .as_mut()
+                .ok_or("linux hello: service lifecycle allocator missing")?;
+            let _ = crate::service::linux_launch::start_linux_hello_service(allocator, 0);
+        }
         initialize_timer();
         serial_write_line("[TIME] timer initialized");
         report_timer_contract();

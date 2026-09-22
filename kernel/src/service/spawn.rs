@@ -358,6 +358,9 @@ pub(crate) enum BuiltinServiceImage {
     M6FixturePayload,
     #[cfg(feature = "m7-net-service-self-test")]
     NetworkUserspacePayload,
+    /// Frozen M8 Linux hello fixture launched through `service::linux_launch` (#97).
+    #[cfg(feature = "m8-linux-hello")]
+    LinuxHello,
 }
 
 impl BuiltinServiceImage {
@@ -416,6 +419,8 @@ impl BuiltinServiceImage {
             id if id == NETWORK_SERVICE_ID.0 || id == NETWORK_UNAUTHORIZED_SERVICE_ID.0 => {
                 Self::NetworkUserspacePayload
             }
+            #[cfg(feature = "m8-linux-hello")]
+            id if id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID.0 => Self::LinuxHello,
             _ => Self::ImmediateExit,
         }
     }
@@ -490,6 +495,29 @@ pub(crate) fn launch_builtin_service(
         BuiltinServiceImage::NetworkUserspacePayload => {
             launch_network_userspace_service(allocator, kernel_stack_top, scheduler_slot, service)
         }
+        #[cfg(feature = "m8-linux-hello")]
+        BuiltinServiceImage::LinuxHello => {
+            let launched = super::linux_launch::launch_linux_hello_fixture(
+                allocator,
+                kernel_stack_top,
+                scheduler_slot,
+            )?;
+            if let Err(message) = super::linux_launch::note_linux_hello_launch(launched) {
+                // Process is already Ready; fail closed through production teardown
+                // so the controller never observes a SpawnFailed with a live orphan.
+                return Err(super::linux_launch::rollback_ready_linux_hello(
+                    allocator,
+                    launched.pid,
+                    message,
+                ));
+            }
+            Ok(SpawnedServiceInstance {
+                pid: launched.pid,
+                tid: launched.tid,
+                domain_id: launched.pid,
+                scheduler_slot: launched.scheduler_slot,
+            })
+        }
         _ => launch_single_page_service(allocator, kernel_stack_top, scheduler_slot, image),
     }
 }
@@ -548,66 +576,6 @@ fn rollback_registered_spawned_process(
     registry.release_reaped(pid)
 }
 
-/// Registers a freshly built process/thread pair with the process registry and
-/// scheduler without launch preconditions.
-///
-/// Callers must pre-check scheduler/registry capacity (or accept a silent
-/// address-space leak / Ready-without-thread zombie on failure). Prefer
-/// [`register_spawned_process_checked`].
-// TODO(#97): migrate remaining callers to `register_spawned_process_checked`.
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test"
-)))]
-#[allow(dead_code)] // No in-tree callers until #139/#97; kept for downstream self-test sibling.
-pub(crate) fn register_spawned_process(
-    address_space: crate::mm::address_space::ProcessAddressSpace,
-    pid: u64,
-    tid: u64,
-    kernel_stack_top: u64,
-    saved_stack_pointer: u64,
-    launch_entry: u64,
-    scheduler_slot: usize,
-) -> Result<SpawnedServiceInstance, &'static str> {
-    use crate::ipc::endpoint_table_mut;
-    use crate::process::personality::ExecutionPersonality;
-    use crate::process::process_registry_mut;
-    use crate::process::Process;
-    use crate::process::ProcessState;
-    use crate::process::ResourceDomain;
-    use crate::sched::scheduler_mut;
-    use crate::sched::ThreadKind;
-
-    let process = Process {
-        id: pid,
-        instance_generation: clean_slate_service_lifecycle::InstanceGeneration(0),
-        state: ProcessState::Ready,
-        resource_domain: ResourceDomain::with_address_space(pid, address_space),
-        live_threads: 1,
-        exit_status: None,
-        execution_personality: ExecutionPersonality::Native,
-    };
-    unsafe { process_registry_mut().insert(process)? };
-    let scheduler = unsafe { scheduler_mut() };
-    scheduler.configure_thread(
-        scheduler_slot,
-        tid,
-        pid,
-        ThreadKind::User,
-        kernel_stack_top,
-        saved_stack_pointer,
-        launch_entry,
-    )?;
-    let _ = unsafe { endpoint_table_mut() };
-    Ok(SpawnedServiceInstance {
-        pid,
-        tid,
-        domain_id: pid,
-        scheduler_slot,
-    })
-}
-
 /// Transactional registration: pre-check scheduler/registry under
 /// `without_interrupts`, destroy the address space on precondition failure, and
 /// roll back a post-insert `configure_thread` failure fail-closed.
@@ -617,7 +585,7 @@ pub(crate) fn register_spawned_process(
     feature = "m2-timer-self-test"
 )))]
 #[allow(clippy::too_many_arguments)]
-fn register_spawned_process_checked(
+pub(crate) fn register_spawned_process_checked(
     allocator: &mut PageAllocator,
     address_space: crate::mm::address_space::ProcessAddressSpace,
     pid: u64,
@@ -759,7 +727,7 @@ fn discard_address_space(
 }
 
 /// Create a process address space, run `body`, and destroy it if `body` fails
-/// before taking ownership (for `register_spawned_process`).
+/// before taking ownership (for `register_spawned_process_checked`).
 #[cfg(not(any(
     feature = "m1-self-test",
     feature = "m2-double-fault-self-test",
@@ -924,6 +892,10 @@ fn launch_single_page_service(
             #[cfg(feature = "m7-net-service-self-test")]
             BuiltinServiceImage::NetworkUserspacePayload => {
                 return Err("network userspace image must use the network launch path");
+            }
+            #[cfg(feature = "m8-linux-hello")]
+            BuiltinServiceImage::LinuxHello => {
+                return Err("linux hello image must use the linux_launch path");
             }
             BuiltinServiceImage::ImmediateExit => unsafe {
                 ptr::write(

@@ -29,6 +29,23 @@ const TASK_COUNT: usize = 9;
     )
 ))]
 const TASK_COUNT: usize = 6;
+/// Production `m8-linux-hello`: both demo kernel tasks plus Linux hello in slot 2.
+#[cfg(all(
+    not(feature = "m6-revocation-self-test"),
+    not(feature = "m6-capabilities-self-test"),
+    not(any(
+        feature = "m4-recovery-self-test",
+        feature = "m6-fixture-smoke-self-test",
+        feature = "m6-process-control-self-test",
+        feature = "m6-delegation-self-test",
+        feature = "m7-net-caps-self-test",
+        feature = "m7-net-service-self-test",
+        feature = "m6-object-self-test",
+        feature = "m6-audit-self-test"
+    )),
+    feature = "m8-linux-hello"
+))]
+const TASK_COUNT: usize = 3;
 #[cfg(not(any(
     feature = "m4-recovery-self-test",
     feature = "m6-fixture-smoke-self-test",
@@ -39,7 +56,8 @@ const TASK_COUNT: usize = 6;
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
     feature = "m7-net-caps-self-test",
-    feature = "m7-net-service-self-test"
+    feature = "m7-net-service-self-test",
+    feature = "m8-linux-hello"
 )))]
 const TASK_COUNT: usize = 2;
 pub(super) const TASK_REQUIRED_PREEMPTIONS: u64 = 2;
@@ -438,9 +456,15 @@ impl Scheduler {
     }
 
     fn all_finished(&self) -> bool {
-        self.threads
-            .iter()
-            .all(|thread| matches!(thread.state, ThreadState::Exited))
+        // Unused slots stay Empty; reaped userspace slots are cleared to Empty
+        // (or briefly Reaped). Treat those as finished so demo-task boot tails
+        // still emit `[M2  ] PASS` when a Linux process has already exited.
+        self.threads.iter().all(|thread| {
+            matches!(
+                thread.state,
+                ThreadState::Exited | ThreadState::Empty | ThreadState::Reaped
+            )
+        })
     }
 
     fn next_runnable_from(&self, current: Option<usize>) -> Option<usize> {
@@ -553,6 +577,30 @@ mod tests {
         scheduler.threads[1].observed_progress = 9;
         assert_eq!(scheduler.finish_current_thread().expect("finish"), None);
         assert!(scheduler.all_finished());
+    }
+
+    #[test]
+    fn all_finished_treats_empty_and_reaped_slots_as_done() {
+        // Demo-task boot tails call all_finished only after finish_current_thread
+        // finds no Ready/Running peer. Empty (never configured / reaped) slots
+        // must count as finished so a Linux process that already exited does not
+        // turn `[M2  ] PASS` into `[FAIL] scheduler had no runnable thread…`.
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .configure_kernel_thread(0, 1, 0x1000, 0x1000)
+            .expect("task 1");
+        scheduler.threads[0].state = ThreadState::Exited;
+        assert!(scheduler.all_finished());
+        scheduler.threads[0].state = ThreadState::Reaped;
+        assert!(scheduler.all_finished());
+        // Leave every slot Empty and confirm Empty-only tables also finish.
+        let empty = Scheduler::new();
+        assert!(empty.all_finished());
+        let mut ready = Scheduler::new();
+        ready
+            .configure_kernel_thread(0, 1, 0x1000, 0x1000)
+            .expect("ready again");
+        assert!(!ready.all_finished());
     }
 
     #[test]
