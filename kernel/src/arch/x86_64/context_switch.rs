@@ -116,6 +116,22 @@ pub(crate) unsafe fn start_first_task(stack_pointer: u64, entry_point: u64) -> !
     }
 }
 
+/// Resume the thread selected by process teardown or syscall fail-closed containment.
+pub(crate) fn resume_after_scheduler_handoff(
+    next_stack_pointer: Option<u64>,
+    no_runnable_message: &'static str,
+) -> ! {
+    use crate::diagnostics::qemu::fatal_kernel_error;
+    match next_stack_pointer {
+        Some(FRESH_TASK_SENTINEL) => {
+            let (stack_pointer, entry_point) = unsafe { next_task() };
+            unsafe { start_first_task(stack_pointer, entry_point) }
+        }
+        Some(stack_pointer) => unsafe { restore_task_context(stack_pointer) },
+        None => fatal_kernel_error(no_runnable_message),
+    }
+}
+
 #[cfg(not(any(
     feature = "m1-self-test",
     feature = "m2-double-fault-self-test",

@@ -5,11 +5,9 @@ pub(crate) mod linux;
 pub(crate) mod validation;
 use crate::arch::x86_64::asm::clean_slate_syscall_entry;
 use crate::arch::x86_64::asm::SYSCALL_SCRATCH_USER_RSP;
+use crate::arch::x86_64::context_switch::resume_after_scheduler_handoff;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::arch::x86_64::context_switch::USER_TEST_RFLAGS;
-use crate::arch::x86_64::context_switch::{
-    next_task, restore_task_context, start_first_task, FRESH_TASK_SENTINEL,
-};
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::gdt::set_syscall_kernel_stack;
 use crate::arch::x86_64::gdt::userspace_gdt_state;
@@ -750,14 +748,10 @@ fn fail_closed_unresolved_syscall_caller(reason: &'static str) -> ! {
 }
 
 fn resume_after_syscall_containment(next_stack_pointer: Option<u64>) -> ! {
-    match next_stack_pointer {
-        Some(FRESH_TASK_SENTINEL) => {
-            let (stack_pointer, entry_point) = unsafe { next_task() };
-            unsafe { start_first_task(stack_pointer, entry_point) }
-        }
-        Some(stack_pointer) => unsafe { restore_task_context(stack_pointer) },
-        None => fatal_kernel_error("no runnable thread remained after syscall fail-closed"),
-    }
+    resume_after_scheduler_handoff(
+        next_stack_pointer,
+        "no runnable thread remained after syscall fail-closed",
+    )
 }
 
 fn dispatch_native(frame: &mut SyscallContext) {
@@ -948,36 +942,12 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_nr_one_unresolved_does_not_invoke_native_dispatch() {
-        let mut frame = SyscallContext {
-            rax: SYSCALL_NR_READ_U64,
-            rdx: 0,
-            rbx: 0,
-            rbp: 0,
-            rsi: 0,
-            rdi: 0,
-            r8: 0,
-            r9: 0,
-            r10: 0,
-            r12: 0,
-            r13: 0,
-            r14: 0,
-            r15: 0,
-            user_rip: 0,
-            user_rflags: 0,
-            user_rsp: 0,
-        };
+    fn overlapping_nr_one_unresolved_never_selects_native_route() {
         let route = route_syscall(Err(
             "active address space did not map to a registered process",
         ));
         assert!(matches!(route, SyscallRoute::FailClosed { .. }));
-        let rax_before = frame.rax;
-        if matches!(route, SyscallRoute::FailClosed { .. }) {
-            // Production path diverges; host test proves routing never selects native.
-        } else {
-            dispatch_native(&mut frame);
-        }
-        assert_eq!(frame.rax, rax_before);
+        assert!(!matches!(route, SyscallRoute::Native { .. }));
     }
 
     #[test]
