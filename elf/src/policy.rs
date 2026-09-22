@@ -22,11 +22,26 @@ pub struct LoadPlanPolicy {
 }
 
 impl LoadPlanPolicy {
-    /// Native Clean-Slate userspace images: fixed high half-canonical window,
-    /// W^X enforced, page-zero rejected, `ET_DYN`/`ET_EXEC` only.
+    /// Native Clean-Slate userspace images: accept PIE link addresses in the
+    /// canonical user half, enforce W^X, and leave loaded-address page-zero
+    /// checks to the mapper (images may link at VA 0 then slide to
+    /// `0x0000_4000_0000_0000` at embed/map time).
     pub const fn native_x86_64() -> Self {
         Self {
-            // Matches supervisor/userspace.ld fixed base and user canonical top.
+            user_va_lo: 0,
+            user_va_hi: 1 << 47,
+            max_segments: MAX_LOAD_SEGMENTS,
+            page_size: 4096,
+            reject_write_execute: true,
+            reject_page_zero: false,
+            allowed_e_types: &NATIVE_ALLOWED_E_TYPES,
+        }
+    }
+
+    /// Policy for absolute userspace VAs already at their final load addresses
+    /// (for example a Linux ET_DYN/ET_EXEC image that #92 loads without a slide).
+    pub const fn absolute_user_x86_64() -> Self {
+        Self {
             user_va_lo: 0x0000_4000_0000_0000,
             user_va_hi: 1 << 47,
             max_segments: MAX_LOAD_SEGMENTS,
@@ -39,7 +54,7 @@ impl LoadPlanPolicy {
 
     /// Whether `e_type` is accepted by this policy.
     pub fn allows_e_type(&self, e_type: u16) -> bool {
-        self.allowed_e_types.is_empty() || self.allowed_e_types.iter().any(|t| *t == e_type)
+        self.allowed_e_types.is_empty() || self.allowed_e_types.contains(&e_type)
     }
 }
 

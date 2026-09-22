@@ -2,8 +2,8 @@
 
 use crate::{
     parse_load_plan, Elf64Header, LoadPlanError, LoadPlanPolicy, LoadSegment, SegmentPermissions,
-    ELF64_EHDR_SIZE, ELF64_PHDR_SIZE, ELFMAG, EM_X86_64, ET_DYN, ET_REL, PF_R, PF_W, PF_X, PT_INTERP,
-    PT_LOAD,
+    ELF64_EHDR_SIZE, ELF64_PHDR_SIZE, ELFMAG, EM_X86_64, ET_DYN, ET_REL, PF_R, PF_W, PF_X,
+    PT_INTERP, PT_LOAD,
 };
 
 const BASE: u64 = 0x0000_4000_0000_0000;
@@ -253,13 +253,14 @@ fn rejects_vaddr_memsz_overflow() {
 
 #[test]
 fn rejects_out_of_window_and_page_zero() {
+    let absolute = LoadPlanPolicy::absolute_user_x86_64();
     let low = build_elf(ET_DYN, 0x1000, &[rx_load(0, 0x1000, 16, 16)], &[0; 16]);
     assert_eq!(
-        parse_load_plan(&low, &policy()),
+        parse_load_plan(&low, &absolute),
         Err(LoadPlanError::OutOfWindowVaddr)
     );
 
-    let mut page_zero_policy = policy();
+    let mut page_zero_policy = absolute;
     page_zero_policy.user_va_lo = 0;
     let zero = build_elf(ET_DYN, 0, &[rx_load(0, 0, 16, 16)], &[0; 16]);
     assert_eq!(
@@ -283,6 +284,19 @@ fn rejects_kernel_range_va() {
 }
 
 #[test]
+fn native_policy_accepts_pie_link_at_zero() {
+    let bytes = build_elf(
+        ET_DYN,
+        0x100,
+        &[rx_load(0, 0, PAGE, PAGE)],
+        &vec![0; PAGE as usize],
+    );
+    let plan = parse_load_plan(&bytes, &policy()).unwrap();
+    assert_eq!(plan.image_base(), Some(0));
+    assert_eq!(plan.entry, 0x100);
+}
+
+#[test]
 fn rejects_alignment_and_congruence() {
     let bad_align = build_elf(
         ET_DYN,
@@ -294,7 +308,7 @@ fn rejects_alignment_and_congruence() {
             vaddr: BASE + 1,
             filesz: 16,
             memsz: 16,
-            align: PAGE,
+            align: 3, // not a power of two
         }],
         &[0; 16],
     );
@@ -347,10 +361,7 @@ fn rejects_segment_budget_exceeded() {
     let bytes = build_elf(
         ET_DYN,
         BASE,
-        &[
-            rx_load(0, BASE, 16, 16),
-            rw_load(PAGE, BASE + PAGE, 16, 16),
-        ],
+        &[rx_load(0, BASE, 16, 16), rw_load(PAGE, BASE + PAGE, 16, 16)],
         &vec![0; (PAGE + 16) as usize],
     );
     assert_eq!(
@@ -415,8 +426,23 @@ fn derives_exact_mapped_page_count() {
         &vec![0; (PAGE + 0x20) as usize],
     );
     let plan = parse_load_plan(&bytes, &policy()).unwrap();
-    // RX: 1 page; RW: pages covering [BASE+PAGE, BASE+2*PAGE+0x20) => 2 pages.
+    // RX: 1 page; RW: 2 pages; no shared pages => 3.
     assert_eq!(plan.total_mapped_pages(PAGE).unwrap(), 3);
+}
+
+#[test]
+fn unique_page_count_when_segments_share_a_page() {
+    let bytes = build_elf(
+        ET_DYN,
+        BASE,
+        &[
+            rx_load(0, BASE, 0x100, 0x100),
+            rw_load(0x200, BASE + 0x200, 0x100, 0x100),
+        ],
+        &vec![0; 0x300],
+    );
+    let plan = parse_load_plan(&bytes, &policy()).unwrap();
+    assert_eq!(plan.total_mapped_pages(PAGE).unwrap(), 1);
 }
 
 #[test]
@@ -427,10 +453,7 @@ fn entry_inside_and_outside_executable_segment() {
     let bad = build_elf(
         ET_DYN,
         BASE + PAGE + 4,
-        &[
-            rx_load(0, BASE, 16, 16),
-            rw_load(PAGE, BASE + PAGE, 16, 16),
-        ],
+        &[rx_load(0, BASE, 16, 16), rw_load(PAGE, BASE + PAGE, 16, 16)],
         &vec![0; (PAGE + 16) as usize],
     );
     assert_eq!(

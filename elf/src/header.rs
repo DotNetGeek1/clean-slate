@@ -83,7 +83,9 @@ impl Elf64Header {
 }
 
 pub(crate) fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, LoadPlanError> {
-    let end = offset.checked_add(2).ok_or(LoadPlanError::ArithmeticOverflow)?;
+    let end = offset
+        .checked_add(2)
+        .ok_or(LoadPlanError::ArithmeticOverflow)?;
     if end > bytes.len() {
         return Err(LoadPlanError::TruncatedHeader);
     }
@@ -95,7 +97,9 @@ pub(crate) fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, LoadPlanError
 }
 
 pub(crate) fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, LoadPlanError> {
-    let end = offset.checked_add(4).ok_or(LoadPlanError::ArithmeticOverflow)?;
+    let end = offset
+        .checked_add(4)
+        .ok_or(LoadPlanError::ArithmeticOverflow)?;
     if end > bytes.len() {
         return Err(LoadPlanError::TruncatedHeader);
     }
@@ -107,7 +111,9 @@ pub(crate) fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, LoadPlanError
 }
 
 pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, LoadPlanError> {
-    let end = offset.checked_add(8).ok_or(LoadPlanError::ArithmeticOverflow)?;
+    let end = offset
+        .checked_add(8)
+        .ok_or(LoadPlanError::ArithmeticOverflow)?;
     if end > bytes.len() {
         return Err(LoadPlanError::TruncatedHeader);
     }

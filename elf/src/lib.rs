@@ -17,7 +17,7 @@ mod segment;
 
 pub use error::LoadPlanError;
 pub use header::{
-    Elf64Header, ELFCLASS64, ELFDATA2LSB, ELF64_EHDR_SIZE, ELF64_PHDR_SIZE, ELFMAG, EM_X86_64,
+    Elf64Header, ELF64_EHDR_SIZE, ELF64_PHDR_SIZE, ELFCLASS64, ELFDATA2LSB, ELFMAG, EM_X86_64,
     ET_CORE, ET_DYN, ET_EXEC, ET_NONE, ET_REL, EV_CURRENT, PF_R, PF_W, PF_X, PT_INTERP, PT_LOAD,
 };
 pub use plan::{parse_load_plan, LoadPlan};

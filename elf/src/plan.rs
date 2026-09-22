@@ -26,13 +26,51 @@ impl LoadPlan {
         self.segments[..self.segment_count].iter()
     }
 
-    /// Exact total mapped-page demand across all PT_LOAD segments.
+    /// Exact total mapped-page demand across all PT_LOAD segments (unique pages).
     pub fn total_mapped_pages(&self, page_size: u64) -> Result<u64, LoadPlanError> {
-        let mut total = 0u64;
+        if page_size == 0 || !page_size.is_power_of_two() {
+            return Err(LoadPlanError::AlignmentViolation);
+        }
+        // Merge page spans so adjacent/shared PT_LOAD pages are counted once.
+        let mut spans = [(0u64, 0u64); MAX_LOAD_SEGMENTS];
+        let mut span_count = 0usize;
         for segment in self.iter_segments() {
-            let count = segment.mapped_page_count(page_size)?;
+            let (first, count) = segment.page_span(page_size)?;
+            if count == 0 {
+                continue;
+            }
+            let end = first
+                .checked_add(
+                    count
+                        .checked_mul(page_size)
+                        .ok_or(LoadPlanError::ArithmeticOverflow)?,
+                )
+                .ok_or(LoadPlanError::ArithmeticOverflow)?;
+            spans[span_count] = (first, end);
+            span_count += 1;
+        }
+        for i in 1..span_count {
+            let mut j = i;
+            while j > 0 && spans[j - 1].0 > spans[j].0 {
+                spans.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+        let mut total = 0u64;
+        let mut index = 0usize;
+        while index < span_count {
+            let mut end = spans[index].1;
+            let start = spans[index].0;
+            index += 1;
+            while index < span_count && spans[index].0 < end {
+                end = end.max(spans[index].1);
+                index += 1;
+            }
+            let bytes = end
+                .checked_sub(start)
+                .ok_or(LoadPlanError::ArithmeticOverflow)?;
             total = total
-                .checked_add(count)
+                .checked_add(bytes / page_size)
                 .ok_or(LoadPlanError::ArithmeticOverflow)?;
         }
         Ok(total)
@@ -184,10 +222,8 @@ fn validate_segment(
         if !segment.align.is_power_of_two() {
             return Err(LoadPlanError::AlignmentViolation);
         }
-        if segment.vaddr % segment.align != 0 {
-            return Err(LoadPlanError::AlignmentViolation);
-        }
         // ELF requires p_offset ≡ p_vaddr (mod p_align) when p_align > 1.
+        // p_vaddr itself need not be a multiple of p_align (partial-page starts).
         if segment.file_offset % segment.align != segment.vaddr % segment.align {
             return Err(LoadPlanError::OffsetVaddrCongruenceViolation);
         }
@@ -198,7 +234,7 @@ fn validate_segment(
     Ok(())
 }
 
-fn detect_overlaps(segments: &[LoadSegment], page_size: u64) -> Result<(), LoadPlanError> {
+fn detect_overlaps(segments: &[LoadSegment], _page_size: u64) -> Result<(), LoadPlanError> {
     for i in 0..segments.len() {
         let left = &segments[i];
         if left.memsz == 0 {
@@ -208,14 +244,6 @@ fn detect_overlaps(segments: &[LoadSegment], page_size: u64) -> Result<(), LoadP
             .vaddr
             .checked_add(left.memsz)
             .ok_or(LoadPlanError::VaddrRangeOverflow)?;
-        let (left_page, left_pages) = left.page_span(page_size)?;
-        let left_page_end = left_page
-            .checked_add(
-                left_pages
-                    .checked_mul(page_size)
-                    .ok_or(LoadPlanError::ArithmeticOverflow)?,
-            )
-            .ok_or(LoadPlanError::ArithmeticOverflow)?;
         for right in segments.iter().skip(i + 1) {
             if right.memsz == 0 {
                 continue;
@@ -224,18 +252,9 @@ fn detect_overlaps(segments: &[LoadSegment], page_size: u64) -> Result<(), LoadP
                 .vaddr
                 .checked_add(right.memsz)
                 .ok_or(LoadPlanError::VaddrRangeOverflow)?;
+            // Byte-range overlap is invalid. Page sharing without byte overlap is
+            // normal for packed ELF images and is merged by the runtime mapper.
             if left.vaddr < right_end && right.vaddr < left_end {
-                return Err(LoadPlanError::SegmentOverlap);
-            }
-            let (right_page, right_pages) = right.page_span(page_size)?;
-            let right_page_end = right_page
-                .checked_add(
-                    right_pages
-                        .checked_mul(page_size)
-                        .ok_or(LoadPlanError::ArithmeticOverflow)?,
-                )
-                .ok_or(LoadPlanError::ArithmeticOverflow)?;
-            if left_page < right_page_end && right_page < left_page_end {
                 return Err(LoadPlanError::SegmentOverlap);
             }
         }

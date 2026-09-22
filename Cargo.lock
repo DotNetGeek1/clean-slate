@@ -117,12 +117,20 @@ name = "clean-slate-capability"
 version = "0.0.1"
 
 [[package]]
+name = "clean-slate-elf"
+version = "0.0.1"
+
+[[package]]
 name = "clean-slate-kernel"
 version = "0.0.1"
 dependencies = [
  "clean-slate-block",
  "clean-slate-capability",
+<<<<<<< HEAD
  "clean-slate-linux-abi",
+=======
+ "clean-slate-elf",
+>>>>>>> 48e5fb5 (M8.0: harden load-plan policy for native PIE images)
  "clean-slate-network",
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
