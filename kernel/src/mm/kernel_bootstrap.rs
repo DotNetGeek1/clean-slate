@@ -3,9 +3,9 @@
 use crate::arch::x86_64::cpu::without_write_protect;
 use crate::mm::address_space::activate_address_space_root;
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::layout::phys_to_virt;
-use crate::mm::region::NormalizedMemoryMap;
+use crate::mm::layout::{physmap_mapping_allowed, PHYSMAP_BASE};
 use crate::mm::PAGE_SIZE;
+use crate::mm::region::NormalizedMemoryMap;
 use core::ptr;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::FrameAllocator;
@@ -23,9 +23,7 @@ use x86_64::VirtAddr;
 
 const LOCAL_APIC_MMIO_BASE: u64 = 0xFEE0_0000;
 const TWO_MIB: u64 = 2 * 1024 * 1024;
-const BRINGUP_PHYSMAP_BYTES: u64 = 512 * 1024 * 1024;
 
-/// While still on the firmware CR3, page-table pages are reachable via identity.
 unsafe fn identity_page_table_mut(frame: u64) -> &'static mut PageTable {
     unsafe { &mut *(frame as *mut PageTable) }
 }
@@ -52,11 +50,9 @@ fn zero_page_identity(frame: u64) {
     }
 }
 
-/// Build a fresh kernel root, populate the physmap, switch CR3, and return the
-/// new root frame address.
 pub(crate) fn install_kernel_owned_root(
     allocator: &mut PageAllocator,
-    _memory_map: &NormalizedMemoryMap,
+    memory_map: &NormalizedMemoryMap,
 ) -> Result<u64, &'static str> {
     let (firmware_root_frame, _) = Cr3::read();
     let firmware_root = firmware_root_frame.start_address().as_u64();
@@ -79,14 +75,15 @@ pub(crate) fn install_kernel_owned_root(
         }
     }
 
-    map_physmap_while_on_firmware_cr3(new_root, allocator)?;
+    map_physmap_from_memory_map(new_root, memory_map, allocator)?;
 
     activate_address_space_root(new_root);
     Ok(new_root)
 }
 
-fn map_physmap_while_on_firmware_cr3(
+fn map_physmap_from_memory_map(
     root_frame: u64,
+    memory_map: &NormalizedMemoryMap,
     allocator: &mut PageAllocator,
 ) -> Result<(), &'static str> {
     let mut mapper =
@@ -94,26 +91,26 @@ fn map_physmap_while_on_firmware_cr3(
     let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
     let mut bootstrap = BootstrapFrameAllocator { inner: allocator };
 
-    for _pass in 0..2 {
-        let mut phys = TWO_MIB;
-        while phys < BRINGUP_PHYSMAP_BYTES {
-            map_physmap_page_2m(&mut mapper, &mut bootstrap, phys, flags)?;
-            phys = phys.saturating_add(TWO_MIB);
-        }
-    }
-
-    // Map low physical frames (except page zero — M1 scratch at physmap+0 stays unmapped).
-    for _pass in 0..2 {
-        let mut phys = PAGE_SIZE;
-        while phys < TWO_MIB {
-            map_physmap_page_4k(&mut mapper, &mut bootstrap, phys, flags)?;
+    for region in memory_map.regions() {
+        let mut phys = region.start;
+        while phys < region.end {
+            if phys >= PAGE_SIZE {
+                let virt = PHYSMAP_BASE.wrapping_add(phys);
+                if physmap_mapping_allowed(phys, virt) {
+                    if phys % TWO_MIB == 0 && phys.saturating_add(TWO_MIB) <= region.end {
+                        map_physmap_page_2m(&mut mapper, &mut bootstrap, phys, flags)?;
+                        phys = phys.saturating_add(TWO_MIB);
+                        continue;
+                    }
+                    map_physmap_page_4k(&mut mapper, &mut bootstrap, phys, flags)?;
+                }
+            }
             phys = phys.saturating_add(PAGE_SIZE);
         }
     }
-    let _ = root_frame;
 
     map_fixed_mmio_page(&mut mapper, &mut bootstrap, LOCAL_APIC_MMIO_BASE, flags)?;
-
+    let _ = root_frame;
     Ok(())
 }
 
@@ -123,14 +120,14 @@ fn map_physmap_page_2m(
     phys: u64,
     flags: PageTableFlags,
 ) -> Result<(), &'static str> {
-    let virt = Page::<Size2MiB>::containing_address(VirtAddr::new(phys_to_virt(phys)));
+    let virt = Page::<Size2MiB>::containing_address(VirtAddr::new(PHYSMAP_BASE.wrapping_add(phys)));
     if mapper.translate_addr(virt.start_address()).is_some() {
         return Ok(());
     }
     let frame = PhysFrame::<Size2MiB>::containing_address(PhysAddr::new(phys));
     let huge_flags = flags | PageTableFlags::HUGE_PAGE;
     without_write_protect(|| unsafe { mapper.map_to(virt, frame, huge_flags, bootstrap) })
-        .map_err(|_| "physmap 2MiB map failed for usable RAM")?
+        .map_err(|_| "physmap 2MiB map failed")?
         .flush();
     Ok(())
 }
@@ -141,13 +138,13 @@ fn map_physmap_page_4k(
     phys: u64,
     flags: PageTableFlags,
 ) -> Result<(), &'static str> {
-    let virt = Page::<Size4KiB>::containing_address(VirtAddr::new(phys_to_virt(phys)));
+    let virt = Page::<Size4KiB>::containing_address(VirtAddr::new(PHYSMAP_BASE.wrapping_add(phys)));
     if mapper.translate_addr(virt.start_address()).is_some() {
         return Ok(());
     }
     let frame = PhysFrame::containing_address(PhysAddr::new(phys));
     without_write_protect(|| unsafe { mapper.map_to(virt, frame, flags, bootstrap) })
-        .map_err(|_| "physmap map failed for usable RAM")?
+        .map_err(|_| "physmap 4KiB map failed")?
         .flush();
     Ok(())
 }
@@ -164,7 +161,7 @@ fn map_fixed_mmio_page(
     }
     let frame = PhysFrame::containing_address(PhysAddr::new(mmio_base));
     without_write_protect(|| unsafe { mapper.map_to(virt, frame, flags, bootstrap) })
-        .map_err(|_| "MMIO physmap map failed")?
+        .map_err(|_| "MMIO map failed")?
         .flush();
     Ok(())
 }

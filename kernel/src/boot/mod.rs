@@ -6,8 +6,10 @@
 pub(crate) mod uefi;
 
 use crate::arch::x86_64::context_switch::task_stack_top;
+use crate::arch::x86_64::gdt::register_gdt_tss_carve_outs;
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::arch::x86_64::idt::install_interrupt_handlers;
+use crate::arch::x86_64::idt::register_idt_carve_out;
 use crate::boot::uefi::collect_reserved_ranges_from_firmware;
 use crate::boot::uefi::normalize_memory_map;
 use crate::diagnostics::gdb::gdb_entry_handoff;
@@ -48,8 +50,13 @@ use crate::mm::address_space::set_kernel_root_frame;
 use crate::mm::frame_allocator::set_kernel_direct_map_ready;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::kernel_bootstrap::install_kernel_owned_root;
-use crate::mm::paging::current_root_frame_address;
+use crate::mm::layout::{
+    assert_conventional_linux_window_clear, init_kernel_low_carve_outs_from_reserved,
+    log_kernel_low_carve_outs, register_kernel_low_carve_out,
+};
 use crate::mm::paging::inspect_current_mapping;
+use crate::mm::paging::current_root_frame_address;
+use crate::mm::PAGE_SIZE;
 use crate::mm::region::ReservedRange;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
@@ -205,6 +212,23 @@ pub(crate) fn run() -> Status {
     halt_loop()
 }
 
+fn register_boot_kernel_low_carve_outs(
+    reserved: &crate::boot::uefi::BootReservedRanges,
+) -> Result<(), &'static str> {
+    init_kernel_low_carve_outs_from_reserved(reserved.as_slice())?;
+    register_kernel_low_carve_out(0xFEE0_0000, 0xFEE0_0000 + PAGE_SIZE)?;
+    register_idt_carve_out()?;
+    register_gdt_tss_carve_outs()?;
+    unsafe {
+        let stacks = &*task_stacks_mut();
+        let base = stacks as *const _ as u64;
+        let end = base + core::mem::size_of_val(stacks) as u64;
+        register_kernel_low_carve_out(base, end)?;
+    }
+    log_kernel_low_carve_outs();
+    assert_conventional_linux_window_clear()
+}
+
 fn run_inner() -> Result<(), &'static str> {
     let mut reserved_ranges = collect_reserved_ranges_from_firmware()?;
 
@@ -240,6 +264,7 @@ fn run_inner() -> Result<(), &'static str> {
     install_interrupt_handlers();
     serial_write_line("[INT ] IDT initialized");
     serial_write_line("[INT ] double-fault IST initialized");
+    register_boot_kernel_low_carve_outs(&reserved_ranges)?;
     serial_write_line("[MM  ] page-fault diagnostics installed");
     let syscall_kernel_stack_top = unsafe {
         let stacks = &*task_stacks_mut();

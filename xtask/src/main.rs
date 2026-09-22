@@ -628,7 +628,6 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM5DiskHarness => run_m5_disk_harness(&trailing_args),
         ParsedCommand::TestM6FixtureSmoke => run_m6_fixture_smoke_acceptance(),
         ParsedCommand::TestM8LinuxImage => run_m8_linux_image_acceptance(),
-        ParsedCommand::TestM9LowVa => run_m9_low_va_acceptance(),
         ParsedCommand::TestM6Object => run_m6_object_acceptance(),
         ParsedCommand::TestM7NetService => run_m7_net_service_acceptance(),
         ParsedCommand::TestM7Network => run_m7_network_acceptance(),

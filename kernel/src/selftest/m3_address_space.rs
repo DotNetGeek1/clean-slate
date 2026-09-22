@@ -23,6 +23,7 @@ use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
+use crate::mm::address_space::activate_address_space_root;
 use crate::mm::address_space::create_process_address_space;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::address_space::map_process_page;
@@ -343,6 +344,7 @@ fn create_userspace_process(
 
 #[cfg(feature = "m3-address-space-self-test")]
 fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'static str> {
+    activate_address_space_root(kernel_root_frame());
     let address_space = unsafe {
         process_registry_mut()
             .get(process.process_id)

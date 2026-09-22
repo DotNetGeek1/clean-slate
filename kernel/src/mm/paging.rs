@@ -177,20 +177,6 @@ pub(crate) fn page_flags_for_address_in_root(
     Ok(walk_page_flags_in_root(root_frame, address)?.path)
 }
 
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m4-recovery-self-test"
-))]
-#[cfg_attr(
-    any(
-        feature = "m3-resources-self-test",
-        feature = "m4-crash-service-self-test",
-        feature = "m4-recovery-self-test"
-    ),
-    allow(dead_code)
-)]
 pub(crate) fn leaf_page_flags_for_address_in_root(
     root_frame: u64,
     address: VirtAddr,

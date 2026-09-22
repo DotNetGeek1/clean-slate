@@ -323,10 +323,6 @@ fn handle_exception(context: &InterruptContext) -> u64 {
             return handle_faulted_userspace_exception(context);
         }
 
-        #[cfg(feature = "m2-double-fault-self-test")]
-        if DOUBLE_FAULT_TEST_ACTIVE.load(Ordering::Relaxed) {
-            trigger_nested_double_fault();
-        }
         let fault_address = Cr2::read()
             .expect("CR2 must contain a canonical fault address")
             .as_u64();
@@ -352,6 +348,11 @@ fn handle_exception(context: &InterruptContext) -> u64 {
         if expected == fault_address {
             kernel_log_line("[M1  ] PASS");
             qemu_exit(QEMU_EXIT_SUCCESS)
+        }
+
+        #[cfg(feature = "m2-double-fault-self-test")]
+        if DOUBLE_FAULT_TEST_ACTIVE.load(Ordering::Relaxed) {
+            trigger_nested_double_fault();
         }
 
         kernel_log_line("[PF  ] unexpected page fault");

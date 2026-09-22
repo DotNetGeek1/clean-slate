@@ -5,12 +5,14 @@
 use crate::arch::x86_64::cpu::without_write_protect;
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::layout::KERNEL_USER_PML4_SLOT_END;
+use crate::mm::layout::{kernel_low_reserved_ranges, va_overlaps_kernel_low_reserved, KERNEL_USER_PML4_SLOT_END};
+use crate::mm::paging::leaf_page_flags_for_address_in_root;
 use crate::mm::paging::offset_page_table_for_root;
 use crate::mm::paging::page_table_mut;
 use crate::mm::paging::page_table_ref;
 use crate::mm::paging::zero_page;
 use crate::mm::user_mapping::unmap_userspace_page;
+use crate::mm::{align_down, PAGE_SIZE};
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 use x86_64::registers::control::Cr3;
@@ -64,9 +66,30 @@ pub(crate) const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 16;
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test",
-    feature = "m7-net-service-self-test"
+    feature = "m7-net-service-self-test",
+    feature = "m9-low-va-self-test",
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
+    feature = "m8-linux-image-self-test",
+    feature = "m8-linux-hello-self-test",
+    feature = "m8-linux-dispatch-self-test"
 )))]
 pub(crate) const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
+#[cfg(any(
+    feature = "m9-low-va-self-test",
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test",
+    feature = "m3-resources-self-test",
+    feature = "m4-crash-service-self-test",
+    feature = "m4-recovery-self-test",
+    feature = "m8-linux-image-self-test",
+    feature = "m8-linux-hello-self-test",
+    feature = "m8-linux-dispatch-self-test"
+))]
+pub(crate) const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 24;
 #[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
 #[cfg(feature = "m7-net-service-self-test")]
@@ -282,20 +305,183 @@ pub(crate) fn validate_supervisor_only_kernel_root_entries(
 
 #[allow(dead_code)]
 fn clone_kernel_mappings_into_address_space(
-    root_frame: u64,
+    address_space: &mut ProcessAddressSpace,
     user_region_base: VirtAddr,
+    allocator: &mut PageAllocator,
 ) -> Result<(), &'static str> {
-    // Always clone from the kernel's own root rather than whatever CR3 holds:
-    // a launch may be triggered while another process's root is active.
     let source_root = unsafe { page_table_ref(kernel_root_frame()) };
-    let destination_root = unsafe { page_table_mut(root_frame) };
-    // Copy entry-by-entry instead of `clone_from`, which materialises a
-    // 4 KiB `PageTable` temporary on the (kernel-thread) stack.
-    for (destination, source) in destination_root.iter_mut().zip(source_root.iter()) {
-        destination.set_addr(source.addr(), source.flags());
+    let destination_root = unsafe { page_table_mut(address_space.root_frame) };
+    for (index, (destination, source)) in destination_root
+        .iter_mut()
+        .zip(source_root.iter())
+        .enumerate()
+    {
+        if index < KERNEL_USER_PML4_SLOT_END {
+            destination.set_unused();
+            continue;
+        }
+        if source.is_unused() {
+            destination.set_unused();
+            continue;
+        }
+        destination.set_addr(
+            source.addr(),
+            source.flags() & !PageTableFlags::USER_ACCESSIBLE,
+        );
     }
-    sanitize_kernel_root_entries(destination_root, user_region_base);
+    map_kernel_low_carve_outs(address_space, allocator)?;
+    map_low_page_table_frames_at_identity(address_space, allocator)?;
     validate_supervisor_only_kernel_root_entries(destination_root, user_region_base)
+}
+
+const LOW_IDENTITY_PT_CUTOFF: u64 = 2 * 1024 * 1024;
+
+fn map_low_page_table_frames_at_identity(
+    address_space: &mut ProcessAddressSpace,
+    allocator: &mut PageAllocator,
+) -> Result<(), &'static str> {
+    let mut frames = [0u64; 512];
+    let mut frame_count = 0usize;
+    collect_kernel_low_page_table_frames(&mut frames, &mut frame_count)?;
+    for frame in address_space.page_table_frames[..address_space.page_table_frame_count].iter() {
+        push_unique_frame(*frame, &mut frames, &mut frame_count)?;
+    }
+    for frame_address in frames[..frame_count].iter() {
+        if *frame_address >= LOW_IDENTITY_PT_CUTOFF {
+            continue;
+        }
+        let virt = VirtAddr::new(*frame_address);
+        let mapper = unsafe { offset_page_table_for_root(address_space.root_frame) };
+        if mapper.translate_addr(virt).is_some() {
+            continue;
+        }
+        let flags =
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
+        map_supervisor_page(
+            address_space,
+            *frame_address,
+            *frame_address,
+            flags,
+            allocator,
+        )?;
+    }
+    Ok(())
+}
+
+fn push_unique_frame(
+    frame: u64,
+    frames: &mut [u64; 512],
+    count: &mut usize,
+) -> Result<(), &'static str> {
+    if frames[..*count].contains(&frame) {
+        return Ok(());
+    }
+    if *count == frames.len() {
+        return Ok(());
+    }
+    frames[*count] = frame;
+    *count += 1;
+    Ok(())
+}
+
+fn collect_kernel_low_page_table_frames(
+    frames: &mut [u64; 512],
+    count: &mut usize,
+) -> Result<(), &'static str> {
+    let root = kernel_root_frame();
+    walk_low_page_table_frames(root, 0, frames, count)
+}
+
+fn walk_low_page_table_frames(
+    table_frame: u64,
+    level: u8,
+    frames: &mut [u64; 512],
+    count: &mut usize,
+) -> Result<(), &'static str> {
+    push_unique_frame(table_frame, frames, count)?;
+    if level >= 3 {
+        return Ok(());
+    }
+    let table = unsafe { page_table_ref(table_frame) };
+    let index_limit = if level == 0 {
+        KERNEL_USER_PML4_SLOT_END
+    } else {
+        512
+    };
+    for entry in table.iter().take(index_limit) {
+        if entry.is_unused() || entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+            continue;
+        }
+        let child = entry
+            .frame()
+            .map_err(|_| "invalid kernel page-table child")?
+            .start_address()
+            .as_u64();
+        walk_low_page_table_frames(child, level + 1, frames, count)?;
+    }
+    Ok(())
+}
+
+fn map_supervisor_page(
+    address_space: &mut ProcessAddressSpace,
+    virtual_address: u64,
+    frame_address: u64,
+    flags: PageTableFlags,
+    allocator: &mut PageAllocator,
+) -> Result<(), &'static str> {
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virtual_address));
+    let frame = PhysFrame::containing_address(PhysAddr::new(frame_address));
+    let mut mapper = unsafe { offset_page_table_for_root(address_space.root_frame) };
+    {
+        let mut tracking_allocator = AddressSpaceFrameAllocator::new(allocator, address_space);
+        without_write_protect(|| unsafe {
+            mapper.map_to(page, frame, flags, &mut tracking_allocator)
+        })
+        .map(|flush| flush.flush())
+        .map_err(|_| "failed to map kernel carve-out page")?;
+    }
+    Ok(())
+}
+
+fn map_kernel_low_carve_outs(
+    address_space: &mut ProcessAddressSpace,
+    allocator: &mut PageAllocator,
+) -> Result<(), &'static str> {
+    let kernel_root = kernel_root_frame();
+    for range in kernel_low_reserved_ranges() {
+        let mut virtual_address = align_down(range.start, PAGE_SIZE);
+        while virtual_address < range.end {
+            let virt = VirtAddr::new(virtual_address);
+            let frame_address = match translate_address_in_root(kernel_root, virt) {
+                Ok(frame) => frame,
+                Err(_) => {
+                    virtual_address = virtual_address.saturating_add(PAGE_SIZE);
+                    continue;
+                }
+            };
+            let leaf = (leaf_page_flags_for_address_in_root(kernel_root, virt)?)
+                & !PageTableFlags::USER_ACCESSIBLE
+                & !PageTableFlags::HUGE_PAGE;
+            {
+                let mapper =
+                    unsafe { offset_page_table_for_root(address_space.root_frame) };
+                if mapper.translate_addr(virt).map(|addr| addr.as_u64()) == Some(frame_address)
+                {
+                    virtual_address = virtual_address.saturating_add(PAGE_SIZE);
+                    continue;
+                }
+            }
+            map_supervisor_page(
+                address_space,
+                virtual_address,
+                frame_address,
+                leaf,
+                allocator,
+            )?;
+            virtual_address = virtual_address.saturating_add(PAGE_SIZE);
+        }
+    }
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -313,13 +499,16 @@ pub(crate) fn create_process_address_space(
             let _ = allocator.free_page(root_frame);
         }
     }
-    let address_space = address_space?;
-    if let Err(message) = clone_kernel_mappings_into_address_space(root_frame, user_region_base) {
+    let mut address_space = address_space?;
+    if let Err(message) =
+        clone_kernel_mappings_into_address_space(&mut address_space, user_region_base, allocator)
+    {
         unsafe {
             let _ = allocator.free_page(root_frame);
         }
         return Err(message);
     }
+    activate_address_space_root(kernel_root_frame());
     Ok(address_space)
 }
 
@@ -331,6 +520,12 @@ pub(crate) fn map_process_page(
     flags: PageTableFlags,
     allocator: &mut PageAllocator,
 ) -> Result<(), &'static str> {
+    let page_end = virtual_address
+        .checked_add(PAGE_SIZE)
+        .ok_or("user mapping virtual address overflow")?;
+    if va_overlaps_kernel_low_reserved(virtual_address, page_end) {
+        return Err("user mapping overlaps kernel low carve-out");
+    }
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virtual_address));
     let frame = PhysFrame::containing_address(PhysAddr::new(frame_address));
     let mut mapper = unsafe { offset_page_table_for_root(address_space.root_frame) };

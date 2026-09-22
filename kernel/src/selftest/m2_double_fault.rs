@@ -20,9 +20,10 @@ use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering;
 
 #[cfg(feature = "m2-double-fault-self-test")]
-const DOUBLE_FAULT_TEST_PRIMARY_ADDRESS: u64 = 0xffff_8000_0000_1000;
+const DOUBLE_FAULT_TEST_PRIMARY_ADDRESS: u64 = 0xffff_8000_0000_0000;
 #[cfg(feature = "m2-double-fault-self-test")]
-pub(crate) const DOUBLE_FAULT_TEST_SECONDARY_ADDRESS: u64 = 0xffff_8000_0000_2000;
+/// Deliberately unmapped physmap VA (phys `0x1000` is excluded from the linear map).
+pub(crate) const DOUBLE_FAULT_TEST_SECONDARY_ADDRESS: u64 = 0xffff_8000_0000_1000;
 
 #[cfg(any(
     feature = "m2-double-fault-self-test",
