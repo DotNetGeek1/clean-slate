@@ -5,7 +5,7 @@
 .DESCRIPTION
     Sets OVMF_CODE / OVMF_VARS when they are not already in the environment,
     then runs one or more `cargo xtask` acceptance tests. By default the
-    milestone gates run (test-m1, test-m2, test-m3, test-m4, test-m5, test-m6); the individual
+    milestone gates run (test-m1, test-m2, test-m3, test-m4, test-m5, test-m6, test-m7, test-m8); the individual
     test-m3-* and test-m4-* boots are constituents of those aggregates and are skipped unless
     named explicitly or -Exhaustive is given. Pass test names (or short
     aliases) to target a subset.
@@ -23,10 +23,13 @@
       m5-disk-harness / m5-harness
       m6 / test-m6,
       m7 / test-m7,
+      m8 / test-m8,
       m6-fixture-smoke, m6-object / m6.3, m6-process-control / m6.4,
       m6-delegation / m6.5, m6-revocation / m6.6, m6-audit / m6.7,
       m6-capabilities / m6.8
       m7-network / m7.8
+      m8-linux-hello / m8.7, m8-linux-image / m8.2, m8-linux-dispatch / m8.3,
+      verify-m8-fixture
 
 .PARAMETER Exhaustive
     Run every known test (milestone gates plus each individual M3/M4
@@ -120,6 +123,7 @@ $AllTests = [ordered]@{
     "test-m5-disk-harness"      = @{ Aliases = @("m5-disk-harness", "m5-harness"); Description = "M5 harness-only two-boot disk fixture validation (host sentinel)"; Role = "Constituent" }
     "test-m6"                   = @{ Aliases = @("m6", "m6.9"); Description = "M6 milestone gate (capability host tests, fixture smoke, constituents, convergence)"; Role = "Aggregate" }
     "test-m7"                   = @{ Aliases = @("m7", "m7.9"); Description = "M7 milestone gate (converged network-service path + DNS/TLS + capability broker)"; Role = "Aggregate" }
+    "test-m8"                   = @{ Aliases = @("m8", "m8.9"); Description = "M8 milestone gate (fixture verify, elf/linux-abi/#92 host tests, Linux hello production path)"; Role = "Aggregate" }
     "test-m6-fixture-smoke"     = @{ Aliases = @("m6-fixture-smoke"); Description = "M6 scripted fixture harness smoke (constituent)"; Role = "Constituent" }
     "test-m6-object"            = @{ Aliases = @("m6-object", "m6.3"); Description = "M6.3 object-capability constituent acceptance"; Role = "Constituent" }
     "test-m7-net-service"       = @{ Aliases = @("m7-net-service", "m7.3"); Description = "M7.3 network service and driver-domain seam acceptance"; Role = "Constituent" }
@@ -133,6 +137,10 @@ $AllTests = [ordered]@{
     "test-m7-tls"               = @{ Aliases = @("m7-tls", "m7.6"); Description = "M7.6 TLS client QEMU acceptance (pass + fail-closed)"; Role = "Constituent" }
     "test-m7-net-caps"          = @{ Aliases = @("m7-net-caps", "m7.7"); Description = "M7.7 network capability broker and attribution acceptance"; Role = "Constituent" }
     "test-m7-dns"               = @{ Aliases = @("m7-dns", "m7.5"); Description = "M7.5 DNS resolver QEMU acceptance"; Role = "Constituent" }
+    "test-m8-linux-hello"       = @{ Aliases = @("m8-linux-hello", "m8.7"); Description = "M8.7 integrated Linux hello (self-test observer + production boot)"; Role = "Constituent" }
+    "test-m8-linux-image"       = @{ Aliases = @("m8-linux-image", "m8.2"); Description = "M8.2 Linux ELF loader QEMU constituent acceptance"; Role = "Constituent" }
+    "test-m8-linux-dispatch"    = @{ Aliases = @("m8-linux-dispatch", "m8.3"); Description = "M8.3 Linux personality dispatch QEMU constituent acceptance"; Role = "Constituent" }
+    "verify-m8-fixture"         = @{ Aliases = @("verify-m8-fixture"); Description = "M8.6 fixture SHA-256 and ELF metadata verify (host)"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {
