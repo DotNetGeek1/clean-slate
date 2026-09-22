@@ -359,3 +359,74 @@ Two generation counters appear in serial and must not be confused:
   registry `instance_generation` assigned at insert. Stale fd lookups and
   `#98` greps for fd/identity proofs must use this process generation, not the
   `[SVC ] … gen=` field.
+
+## M8 acceptance (#98)
+
+Authoritative gate: `cargo xtask test-m8` (aliases `m8`, `m8.9`). Emits host-side
+`[M8  ] PASS` only after every phase succeeds. Does not restate #96/#97 contracts;
+see [M8_FIXTURE.md](M8_FIXTURE.md) and [M8.7 — integrated launch path (#97)](#m87--integrated-launch-path-97).
+
+### What it proves
+
+Ordered phases (`[M8  ] step N/5 <name>`):
+
+1. `verify-m8-fixture` — SHA-256 + pinned ELF metadata for the committed hello binary.
+2. `clean-slate-elf` host tests — segment-aware load-plan foundation (#129).
+3. `clean-slate-linux-abi` host tests — errno/syscall/stack contract (#91).
+4. `linux-image loader (host)` — `#92` `process::linux_image` + malformed corpus
+   (`cargo test -p clean-slate-kernel --features m8-linux-image process::linux_image`).
+5. `test-m8-linux-hello` — composed once (self-test then production QEMU); not
+   re-booted inside the aggregate.
+
+### Marker order (production build first for launch/output/exit)
+
+**Production** (`--features m8-linux-hello`) — launch/personality/ENOSYS/hello/exit
+must come from this boot (production `#97` path, not self-test shortcuts):
+
+```text
+[LNX ] ELF loaded pid=<n> entry=0x0000400000400078
+[LNX ] personality=x86_64 pid=<n>
+[LNX ] unsupported syscall=999 errno=ENOSYS
+Hello from Linux.
+[LNX ] exit pid=<n> status=0
+[TASK] task 1 progress=
+[TASK] task 2 progress=
+[M2  ] PASS
+```
+
+No `[IPC ] console` line may contain `Hello from Linux.`.
+
+**Self-test** (`--features m8-linux-hello-self-test`) — supplies evidence the
+production boot cannot (known #97 limitation: no native userspace sibling):
+
+```text
+… first hello/exit …
+[LNX ] ELF loaded pid=<n2> entry=0x0000400000400078
+[M8.7] first exit observed pid=<n> gen=<process-gen> status=0
+[M8.7] relaunch observed pid=<n2> gen=<process-gen2>
+… second hello/exit …
+[M8.7] second exit observed
+[M8.7] malformed ELF rejected fail-closed
+[M8.7] native progress=<n> …
+[M8.7] PASS
+```
+
+Use **process** generation (`[M8.7] … gen=`) for identity/fd proofs, not
+`[SVC ] … gen=`. The second `[LNX ] ELF loaded` appears **before** the
+`[M8.7] first exit observed` / `relaunch observed` pair (controller Start
+runs inside the exit path).
+
+### Debugging failures phase by phase
+
+| Failing step | Likely cause | Next action |
+| --- | --- | --- |
+| `verify-m8-fixture` | Bytes or metadata drift | Rebuild per [M8_FIXTURE.md](M8_FIXTURE.md); do not hand-edit the ELF |
+| `clean-slate-elf (host)` | Load-plan / W^X / window regression | `cargo test -p clean-slate-elf` |
+| `clean-slate-linux-abi (host)` | errno/stack/syscall contract | `cargo test -p clean-slate-linux-abi` |
+| `linux-image loader (host)` | Policy or malformed corpus | `cargo test -p clean-slate-kernel --features m8-linux-image process::linux_image` |
+| `test-m8-linux-hello` | Production or observer serial | Re-run `cargo xtask test-m8-linux-hello`; compare to the marker tables above |
+
+Scripts treat `test-m8` as Aggregate and `test-m8-linux-hello` /
+`test-m8-linux-image` / `test-m8-linux-dispatch` / `verify-m8-fixture` as
+Constituents so `--exhaustive` recognizes `m8` without inventing a second
+aggregate boot path inside `test-m8` itself.
