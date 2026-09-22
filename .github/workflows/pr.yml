@@ -92,6 +92,9 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m7-tls-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m8-linux-image-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m8-linux-hello -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m8-linux-hello-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m8-linux-dispatch-self-test -- -D warnings
 
       - name: Clippy (kernel host tests)
         run: cargo clippy -p clean-slate-kernel --lib --tests -- -D warnings
@@ -126,6 +129,7 @@ jobs:
           cargo test -p clean-slate-kernel --features m3-address-space-self-test
           cargo test -p clean-slate-kernel --features m3-syscall-self-test
           cargo test -p clean-slate-kernel --features m8-linux-image
+          cargo test -p clean-slate-kernel --features m8-linux-hello
 
   acceptance:
     name: acceptance
