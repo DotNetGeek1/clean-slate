@@ -55,6 +55,7 @@ test = false
 
 [dependencies]
 clean-slate-block = { path = "../block" }
+clean-slate-elf = { path = "../elf" }
 clean-slate-network = { path = "../network" }
 rand_core = { version = "=0.6.4", default-features = false, optional = true }
 clean-slate-capability = { path = "../capability" }
@@ -64,6 +65,9 @@ clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 clean-slate-store = { path = "../store", optional = true }
 uefi = "0.37.0"
 x86_64 = { version = "0.15.5", default-features = false, features = ["instructions"] }
+
+[build-dependencies]
+clean-slate-elf = { path = "../elf" }
 
 [lints]
 workspace = true

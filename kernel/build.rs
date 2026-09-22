@@ -1,8 +1,10 @@
+use clean_slate_elf::{
+    parse_load_plan, LoadPlan, LoadPlanPolicy, SegmentPermissions, PF_R, PF_W, PF_X,
+};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const PT_LOAD: u32 = 1;
 const SHT_RELA: u32 = 4;
 const R_X86_64_RELATIVE: u32 = 8;
 const USERSPACE_IMAGE_LOAD_BASE: u64 = 0x0000_4000_0000_0000;
@@ -81,7 +83,7 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
     }
 
     let elf_bytes = fs::read(&elf).expect("failed to read userspace ELF");
-    let (image, image_base, entry) = materialize_elf_image(&elf_bytes).unwrap_or_else(|message| {
+    let (image, plan, image_base) = materialize_elf_image(&elf_bytes).unwrap_or_else(|message| {
         panic!(
             "failed to materialize userspace ELF {}: {message}",
             elf.display()
@@ -91,36 +93,25 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
     fs::write(&raw_image, &image).expect("failed to write materialized userspace image");
 
     if record_entry_offset {
-        let entry_offset = entry
+        let entry_offset = plan
+            .entry
             .checked_sub(image_base)
             .expect("ELF entry point was below the image base");
-        let (generated_file, generated_const) = match raw_name {
-            "supervisor_userspace.bin" => (
-                "supervisor_userspace_entry.rs",
-                "SUPERVISOR_USERSPACE_ENTRY_OFFSET",
-            ),
-            "recovery_userspace.bin" => (
-                "recovery_userspace_entry.rs",
-                "RECOVERY_SUPERVISOR_ENTRY_OFFSET",
-            ),
-            "storage_userspace.bin" => (
-                "storage_userspace_entry.rs",
-                "STORAGE_USERSPACE_ENTRY_OFFSET",
-            ),
-            "m6_fixture_userspace.bin" => (
-                "m6_fixture_userspace_entry.rs",
-                "M6_FIXTURE_USERSPACE_ENTRY_OFFSET",
-            ),
-            "network_userspace.bin" => (
-                "network_userspace_entry.rs",
-                "NETWORK_USERSPACE_ENTRY_OFFSET",
-            ),
+        let mapped_pages = plan
+            .total_mapped_pages(4096)
+            .expect("mapped page derivation failed") as usize;
+        let (generated_file, prefix) = match raw_name {
+            "supervisor_userspace.bin" => ("supervisor_userspace_entry.rs", "SUPERVISOR_USERSPACE"),
+            "recovery_userspace.bin" => ("recovery_userspace_entry.rs", "RECOVERY_SUPERVISOR"),
+            "storage_userspace.bin" => ("storage_userspace_entry.rs", "STORAGE_USERSPACE"),
+            "m6_fixture_userspace.bin" => ("m6_fixture_userspace_entry.rs", "M6_FIXTURE_USERSPACE"),
+            "network_userspace.bin" => ("network_userspace_entry.rs", "NETWORK_USERSPACE"),
             _ => panic!("unexpected userspace image {raw_name}"),
         };
         let generated = out_dir.join(generated_file);
         fs::write(
             &generated,
-            format!("pub(super) const {generated_const}: u64 = {entry_offset};\n"),
+            format_segment_metadata(prefix, entry_offset, mapped_pages, image_base, &plan),
         )
         .expect("failed to write userspace_entry metadata");
     }
@@ -132,73 +123,110 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
     );
 }
 
-fn materialize_elf_image(elf: &[u8]) -> Result<(Vec<u8>, u64, u64), String> {
-    if elf.len() < 0x40 || &elf[0..4] != b"\x7fELF" || elf[4] != 2 || elf[5] != 1 {
-        return Err("expected a little-endian ELF64 file".into());
+fn format_segment_metadata(
+    prefix: &str,
+    entry_offset: u64,
+    mapped_pages: usize,
+    image_base: u64,
+    plan: &LoadPlan,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "pub(super) const {prefix}_ENTRY_OFFSET: u64 = {entry_offset};\n"
+    ));
+    out.push_str(&format!(
+        "pub(super) const {prefix}_MAPPED_CODE_PAGES: usize = {mapped_pages};\n"
+    ));
+    out.push_str(&format!(
+        "pub(super) const {prefix}_IMAGE_BASE: u64 = {image_base:#x};\n"
+    ));
+    out.push_str(&format!(
+        "pub(super) const {prefix}_SEGMENT_COUNT: usize = {};\n",
+        plan.segment_count
+    ));
+    out.push_str(&format!(
+        "pub(super) static {prefix}_SEGMENTS: [crate::mm::image_loader::EmbeddedSegment; {}] = [\n",
+        plan.segment_count
+    ));
+    for segment in plan.iter_segments() {
+        let offset_from_base = segment
+            .vaddr
+            .checked_sub(image_base)
+            .expect("segment vaddr below image base");
+        let file_offset = offset_from_base; // sparse file-backed blob layout
+        let flags = perm_bits(segment.perms);
+        out.push_str(&format!(
+            "    crate::mm::image_loader::EmbeddedSegment {{ offset_from_base: {offset_from_base}, filesz: {}, memsz: {}, file_offset: {file_offset}, flags: {flags} }},\n",
+            segment.filesz, segment.memsz
+        ));
     }
+    out.push_str("];\n");
+    out
+}
 
-    let entry = u64::from_le_bytes(elf[0x18..0x20].try_into().map_err(|_| "e_entry")?);
-    let phoff = u64::from_le_bytes(elf[0x20..0x28].try_into().map_err(|_| "e_phoff")?);
-    let phentsize =
-        u16::from_le_bytes(elf[0x36..0x38].try_into().map_err(|_| "e_phentsize")?) as u64;
-    let phnum = u16::from_le_bytes(elf[0x38..0x3a].try_into().map_err(|_| "e_phnum")?) as u64;
-
-    struct LoadSegment {
-        vaddr: u64,
-        offset: u64,
-        filesz: u64,
-        _memsz: u64,
+fn perm_bits(perms: SegmentPermissions) -> u8 {
+    let mut flags = 0u8;
+    if perms.read {
+        flags |= PF_R as u8;
     }
+    if perms.write {
+        flags |= PF_W as u8;
+    }
+    if perms.execute {
+        flags |= PF_X as u8;
+    }
+    flags
+}
 
-    let mut segments = Vec::new();
-    let mut image_base = u64::MAX;
-    let mut image_end = 0u64;
+/// Emit only file-backed PT_LOAD bytes (never `p_memsz` zero-fill) plus a validated plan.
+fn materialize_elf_image(elf: &[u8]) -> Result<(Vec<u8>, LoadPlan, u64), String> {
+    let policy = LoadPlanPolicy::native_x86_64();
+    let plan =
+        parse_load_plan(elf, &policy).map_err(|err| format!("load-plan validation: {err:?}"))?;
+    let image_base = plan
+        .image_base()
+        .ok_or_else(|| "ELF had no PT_LOAD segments".to_string())?;
 
-    for index in 0..phnum {
-        let start = phoff + index * phentsize;
-        let end = start + phentsize;
-        if end > elf.len() as u64 {
-            break;
-        }
-        let header = &elf[start as usize..end as usize];
-        let p_type = u32::from_le_bytes(header[0..4].try_into().map_err(|_| "p_type")?);
-        if p_type != PT_LOAD {
+    let mut image_end = image_base;
+    for segment in plan.iter_segments() {
+        if segment.filesz == 0 {
             continue;
         }
-        let p_offset = u64::from_le_bytes(header[0x08..0x10].try_into().map_err(|_| "p_offset")?);
-        let p_vaddr = u64::from_le_bytes(header[0x10..0x18].try_into().map_err(|_| "p_vaddr")?);
-        let p_filesz = u64::from_le_bytes(header[0x20..0x28].try_into().map_err(|_| "p_filesz")?);
-        let p_memsz = u64::from_le_bytes(header[0x28..0x30].try_into().map_err(|_| "p_memsz")?);
-        image_base = image_base.min(p_vaddr);
-        image_end = image_end.max(p_vaddr.saturating_add(p_memsz));
-        segments.push(LoadSegment {
-            vaddr: p_vaddr,
-            offset: p_offset,
-            filesz: p_filesz,
-            _memsz: p_memsz,
-        });
+        let end = segment
+            .vaddr
+            .checked_add(segment.filesz)
+            .ok_or("segment file-backed end overflow")?;
+        image_end = image_end.max(end);
     }
-
-    if segments.is_empty() {
-        return Err("ELF had no PT_LOAD segments".into());
-    }
-
-    let image_size = usize::try_from(image_end.saturating_sub(image_base))
-        .map_err(|_| "userspace image span exceeded addressable size")?;
+    let image_size = usize::try_from(
+        image_end
+            .checked_sub(image_base)
+            .ok_or("image span underflow")?,
+    )
+    .map_err(|_| "userspace image span exceeded addressable size")?;
     let mut image = vec![0u8; image_size];
 
-    for segment in &segments {
-        let dest_start = usize::try_from(segment.vaddr.saturating_sub(image_base))
-            .map_err(|_| "segment virtual address underflow")?;
+    for segment in plan.iter_segments() {
+        if segment.filesz == 0 {
+            continue;
+        }
+        let dest_start = usize::try_from(
+            segment
+                .vaddr
+                .checked_sub(image_base)
+                .ok_or("segment virtual address underflow")?,
+        )
+        .map_err(|_| "segment virtual address underflow")?;
         let dest_end = dest_start
-            .checked_add(segment.filesz as usize)
+            .checked_add(usize::try_from(segment.filesz).map_err(|_| "filesz too large")?)
             .ok_or("segment file copy overflow")?;
         if dest_end > image.len() {
             return Err("segment file range exceeded materialized image".into());
         }
-        let src_start = segment.offset as usize;
+        let src_start =
+            usize::try_from(segment.file_offset).map_err(|_| "file offset too large")?;
         let src_end = src_start
-            .checked_add(segment.filesz as usize)
+            .checked_add(usize::try_from(segment.filesz).map_err(|_| "filesz too large")?)
             .ok_or("segment file read overflow")?;
         if src_end > elf.len() {
             return Err("segment file range exceeded ELF file".into());
@@ -207,8 +235,7 @@ fn materialize_elf_image(elf: &[u8]) -> Result<(Vec<u8>, u64, u64), String> {
     }
 
     apply_rela_dyn(elf, &mut image, image_base, USERSPACE_IMAGE_LOAD_BASE)?;
-
-    Ok((image, image_base, entry))
+    Ok((image, plan, image_base))
 }
 
 fn apply_rela_dyn(
@@ -279,11 +306,15 @@ fn apply_rela_dyn(
 }
 
 fn write_u64(image: &mut [u8], load_base: u64, vaddr: u64, value: u64) -> Result<(), String> {
-    let offset = usize::try_from(vaddr.saturating_sub(load_base))
-        .map_err(|_| "relocation virtual address underflow")?;
+    let offset = usize::try_from(
+        vaddr
+            .checked_sub(load_base)
+            .ok_or("relocation below image base")?,
+    )
+    .map_err(|_| "relocation virtual address underflow")?;
     let end = offset.checked_add(8).ok_or("relocation write overflow")?;
     if end > image.len() {
-        return Err("relocation write exceeded materialized image".into());
+        return Err("relocation write exceeded file-backed image (BSS targets are unsupported at embed time)".into());
     }
     image[offset..end].copy_from_slice(&value.to_le_bytes());
     Ok(())
