@@ -1,6 +1,7 @@
 [workspace]
 members = [ "block",
     "capability",
+    "elf",
     "kernel",
     "linux-abi",
     "net-service",
