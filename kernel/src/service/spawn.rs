@@ -560,6 +560,7 @@ fn rollback_registered_spawned_process(
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
+#[allow(dead_code)] // No in-tree callers until #139/#97; kept for downstream self-test sibling.
 pub(crate) fn register_spawned_process(
     address_space: crate::mm::address_space::ProcessAddressSpace,
     pid: u64,
