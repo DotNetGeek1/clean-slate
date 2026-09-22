@@ -368,6 +368,14 @@ On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no
 
 On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m6`/`m6.9`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, and `m6-capabilities`/`m6.8`). OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests including `clean-slate-capability`) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive therefore exercises every M3–M6 constituent plus all milestone aggregates with the existing `qemu-system-x86` and `ovmf` package setup from `.github/workflows/pr.yml`.
 
+For the M8.6 committed Linux hello ELF provenance check (hash + pinned metadata; no QEMU):
+
+```bash
+cargo xtask verify-m8-fixture
+```
+
+See [M8_FIXTURE.md](M8_FIXTURE.md) and `fixtures/linux-hello/`.
+
 To launch paused for debugger attach:
 
 ```bash

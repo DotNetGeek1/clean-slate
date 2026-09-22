@@ -1,0 +1,25 @@
+# Pinned ELF metadata for fixtures/linux-hello/hello-linux-x86_64
+# Verified by `cargo xtask verify-m8-fixture` (issue #96 / M8.6).
+# Values are derived from the committed binary; do not edit by hand unless
+# rebuilding the fixture and updating the SHA-256 in lockstep.
+
+e_type = "ET_EXEC"
+e_machine = "EM_X86_64"
+ei_class = "ELFCLASS64"
+ei_data = "ELFDATA2LSB"
+
+e_entry = 0x400078
+e_phentsize = 56
+e_phnum = 1
+
+pt_load_count = 1
+has_pt_interp = false
+has_pt_dynamic = false
+
+[[pt_load]]
+p_offset = 0x78
+p_vaddr = 0x400078
+p_filesz = 0x6d
+p_memsz = 0x6d
+p_flags = 5   # PF_R | PF_X
+p_align = 0x1000
