@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Reproducible malformed ELF byte fixtures for #92 host tests (M8.6 / #96).
+# Derived conceptually from the good fixture linked at IMAGE_BASE.
 # Usage: ./generate.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
+
+# Match the committed good fixture link address (window base + 4 MiB).
+IMAGE_BASE=0x400000400000
+ENTRY=$((IMAGE_BASE + 0x78))
 
 le16() { printf '%02x%02x' $(($1 & 255)) $((($1 >> 8) & 255)); }
 le32() {
@@ -19,7 +24,6 @@ le64() {
 hx() { echo -n "$1" | xxd -r -p; }
 
 # ELF64 LE header fields + N program headers encoded as hex pairs.
-# Args after fixed header knobs are raw 56-byte phdr hex blobs.
 write_elf() {
   local out=$1
   local ei_class=$2
@@ -37,11 +41,11 @@ write_elf() {
   hdr+="$(le16 "$e_type")"
   hdr+="$(le16 "$e_machine")"
   hdr+="$(le32 1)"
-  hdr+="$(le64 0x400078)"   # e_entry
-  hdr+="$(le64 64)"         # e_phoff
-  hdr+="$(le64 0)"          # e_shoff
-  hdr+="$(le32 0)"          # e_flags
-  hdr+="$(le16 64)"         # e_ehsize
+  hdr+="$(le64 "$ENTRY")"  # e_entry
+  hdr+="$(le64 64)"        # e_phoff
+  hdr+="$(le64 0)"         # e_shoff
+  hdr+="$(le32 0)"         # e_flags
+  hdr+="$(le16 64)"        # e_ehsize
   hdr+="$(le16 "$e_phentsize")"
   hdr+="$(le16 "$e_phnum")"
   hdr+="$(le16 0)$(le16 0)$(le16 0)"
@@ -75,7 +79,8 @@ pad_to() {
   fi
 }
 
-LOAD_OK="$(phdr_load 5 0 0x400000 120 120 4096)"
+# Good-shaped LOAD covering headers at the M8 window base (like the real fixture).
+LOAD_OK="$(phdr_load 5 0 "$IMAGE_BASE" 0xe5 0xe5 4096)"
 
 # bad-magic
 write_elf bad-magic.elf 2 1 2 62 56 1 "$LOAD_OK"
@@ -103,25 +108,25 @@ write_elf truncated-phdr-table.elf 2 1 2 62 56 2 "$LOAD_OK" "$LOAD_OK"
 truncate -s 120 truncated-phdr-table.elf
 
 # filesz-gt-memsz
-LOAD_BAD_FSZ="$(phdr_load 5 0 0x400000 200 100 4096)"
+LOAD_BAD_FSZ="$(phdr_load 5 0 "$IMAGE_BASE" 200 100 4096)"
 write_elf filesz-gt-memsz.elf 2 1 2 62 56 1 "$LOAD_BAD_FSZ"
 pad_to filesz-gt-memsz.elf 200
 
-# overlapping-pt-load
-LOAD_A="$(phdr_load 5 0 0x400000 0x1000 0x1000 4096)"
-LOAD_B="$(phdr_load 5 0 0x400800 0x1000 0x1000 4096)"
+# overlapping-pt-load (both inside the window, overlapping VAs)
+LOAD_A="$(phdr_load 5 0 "$IMAGE_BASE" 0x1000 0x1000 4096)"
+LOAD_B="$(phdr_load 5 0 $((IMAGE_BASE + 0x800)) 0x1000 0x1000 4096)"
 write_elf overlapping-pt-load.elf 2 1 2 62 56 2 "$LOAD_A" "$LOAD_B"
 pad_to overlapping-pt-load.elf 200
 
 # has-pt-interp
 INTERP="$(phdr_interp 176 7)"
-LOAD_C="$(phdr_load 5 0 0x400000 200 200 4096)"
+LOAD_C="$(phdr_load 5 0 "$IMAGE_BASE" 200 200 4096)"
 write_elf has-pt-interp.elf 2 1 2 62 56 2 "$INTERP" "$LOAD_C"
 pad_to has-pt-interp.elf 176
 printf '/lib64\0' >> has-pt-interp.elf
 pad_to has-pt-interp.elf 200
 
-# vaddr-kernel-range
+# vaddr-kernel-range (still conceptually outside the user window / high half)
 LOAD_K="$(phdr_load 5 0 0xffff800000000000 0x1000 0x1000 4096)"
 write_elf vaddr-kernel-range.elf 2 1 2 62 56 1 "$LOAD_K"
 pad_to vaddr-kernel-range.elf 200
@@ -136,9 +141,9 @@ write_elf phentsize-wrong.elf 2 1 2 62 48 1 "$LOAD_OK"
 pad_to phentsize-wrong.elf 200
 
 # offset-beyond-eof: p_offset=0x1000, filesz=0x100, file only 200 bytes
-LOAD_EOF="$(phdr_load 5 0x1000 0x400000 0x100 0x100 4096)"
+LOAD_EOF="$(phdr_load 5 0x1000 "$IMAGE_BASE" 0x100 0x100 4096)"
 write_elf offset-beyond-eof.elf 2 1 2 62 56 1 "$LOAD_EOF"
 pad_to offset-beyond-eof.elf 200
 
-echo "Generated:"
+echo "Generated (IMAGE_BASE=$IMAGE_BASE ENTRY=$(printf '0x%x' "$ENTRY")):"
 ls -1 *.elf

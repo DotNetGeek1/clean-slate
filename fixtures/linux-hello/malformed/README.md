@@ -2,7 +2,9 @@
 
 Hand-built negative cases used by Linux ELF loader host tests. They are **not**
 meant to execute. Regenerate with `./generate.sh` (bash + `xxd` + `dd`) for
-byte-identical output.
+byte-identical output. Good-shaped loads use the same image base as the
+committed fixture (`0x0000400000400000`); `vaddr-page-zero` and
+`vaddr-kernel-range` remain deliberately outside that window.
 
 | File | What is wrong |
 |------|----------------|

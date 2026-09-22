@@ -18,10 +18,15 @@ const PT_DYNAMIC: u32 = 2;
 const ELF64_EHDR_SIZE: usize = 64;
 const ELF64_PHDR_SIZE: usize = 56;
 
+/// Clean-Slate M8 private user VA window (PML4 slot 128).
+const M8_USER_VA_LO: u64 = 0x0000_4000_0000_0000;
+const M8_USER_VA_HI: u64 = 0x0000_4080_0000_0000;
+
 /// Pinned fields from `fixtures/linux-hello/metadata.toml`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct M8FixtureMetadata {
     pub e_entry: u64,
+    pub e_phoff: u64,
     pub e_phentsize: u16,
     pub e_phnum: u16,
     pub pt_load_count: usize,
@@ -48,11 +53,19 @@ struct ParsedElf {
     ei_class: u8,
     ei_data: u8,
     e_entry: u64,
+    e_phoff: u64,
     e_phentsize: u16,
     e_phnum: u16,
     has_pt_interp: bool,
     has_pt_dynamic: bool,
     pt_loads: Vec<PtLoadMeta>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PinnedMetadata {
+    meta: M8FixtureMetadata,
+    user_va_lo: u64,
+    user_va_hi: u64,
 }
 
 /// Verify the committed M8 Linux hello fixture against hash + metadata pins.
@@ -101,26 +114,46 @@ fn verify_m8_fixture_at(dir: &Path) -> Result<M8FixtureMetadata, String> {
     assert_eq_field("ei_data", parsed.ei_data, ELFDATA2LSB)?;
     assert_eq_field("e_type", parsed.e_type, ET_EXEC)?;
     assert_eq_field("e_machine", parsed.e_machine, EM_X86_64)?;
-    assert_eq_field("e_entry", parsed.e_entry, pinned.e_entry)?;
-    assert_eq_field("e_phentsize", parsed.e_phentsize, pinned.e_phentsize)?;
-    assert_eq_field("e_phnum", parsed.e_phnum, pinned.e_phnum)?;
-    assert_eq_field("pt_load_count", parsed.pt_loads.len(), pinned.pt_load_count)?;
-    assert_eq_field("has_pt_interp", parsed.has_pt_interp, pinned.has_pt_interp)?;
+    assert_eq_field("e_entry", parsed.e_entry, pinned.meta.e_entry)?;
+    assert_eq_field("e_phoff", parsed.e_phoff, pinned.meta.e_phoff)?;
+    assert_eq_field("e_phentsize", parsed.e_phentsize, pinned.meta.e_phentsize)?;
+    assert_eq_field("e_phnum", parsed.e_phnum, pinned.meta.e_phnum)?;
+    assert_eq_field(
+        "pt_load_count",
+        parsed.pt_loads.len(),
+        pinned.meta.pt_load_count,
+    )?;
+    assert_eq_field(
+        "has_pt_interp",
+        parsed.has_pt_interp,
+        pinned.meta.has_pt_interp,
+    )?;
     assert_eq_field(
         "has_pt_dynamic",
         parsed.has_pt_dynamic,
-        pinned.has_pt_dynamic,
+        pinned.meta.has_pt_dynamic,
     )?;
+    assert_eq_field("user_va_lo", pinned.user_va_lo, M8_USER_VA_LO)?;
+    assert_eq_field("user_va_hi", pinned.user_va_hi, M8_USER_VA_HI)?;
 
-    if parsed.pt_loads != pinned.pt_loads {
+    if parsed.pt_loads != pinned.meta.pt_loads {
         return Err(format!(
             "PT_LOAD table mismatch: parsed={:?} pinned={:?}",
-            parsed.pt_loads, pinned.pt_loads
+            parsed.pt_loads, pinned.meta.pt_loads
         ));
     }
 
+    assert_loads_in_user_window(&parsed.pt_loads, pinned.user_va_lo, pinned.user_va_hi)?;
+    assert_phdr_table_in_pt_load(
+        parsed.e_phoff,
+        parsed.e_phentsize,
+        parsed.e_phnum,
+        &parsed.pt_loads,
+    )?;
+
     Ok(M8FixtureMetadata {
         e_entry: parsed.e_entry,
+        e_phoff: parsed.e_phoff,
         e_phentsize: parsed.e_phentsize,
         e_phnum: parsed.e_phnum,
         pt_load_count: parsed.pt_loads.len(),
@@ -129,6 +162,49 @@ fn verify_m8_fixture_at(dir: &Path) -> Result<M8FixtureMetadata, String> {
         pt_loads: parsed.pt_loads,
         sha256_hex: actual_hash,
     })
+}
+
+fn assert_loads_in_user_window(loads: &[PtLoadMeta], lo: u64, hi: u64) -> Result<(), String> {
+    for (i, seg) in loads.iter().enumerate() {
+        let end = seg
+            .p_vaddr
+            .checked_add(seg.p_memsz)
+            .ok_or_else(|| format!("pt_load[{i}] vaddr+memsz overflow"))?;
+        if seg.p_vaddr < lo || end > hi {
+            return Err(format!(
+                "pt_load[{i}] VA [{:#x}, {:#x}) outside user window [{:#x}, {:#x})",
+                seg.p_vaddr, end, lo, hi
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn assert_phdr_table_in_pt_load(
+    e_phoff: u64,
+    e_phentsize: u16,
+    e_phnum: u16,
+    loads: &[PtLoadMeta],
+) -> Result<(), String> {
+    let table_len = (e_phnum as u64)
+        .checked_mul(u64::from(e_phentsize))
+        .ok_or("phdr table length overflow")?;
+    let table_end = e_phoff
+        .checked_add(table_len)
+        .ok_or("phdr table end overflow")?;
+    let covered = loads.iter().any(|seg| {
+        let file_end = seg.p_offset.checked_add(seg.p_filesz);
+        match file_end {
+            Some(end) => seg.p_offset <= e_phoff && table_end <= end,
+            None => false,
+        }
+    });
+    if !covered {
+        return Err(format!(
+            "program header table file range [{e_phoff:#x}, {table_end:#x}) is not covered by any PT_LOAD"
+        ));
+    }
+    Ok(())
 }
 
 fn assert_eq_field<T: PartialEq + std::fmt::Debug>(
@@ -220,6 +296,7 @@ fn parse_elf64(bytes: &[u8]) -> Result<ParsedElf, String> {
         ei_class,
         ei_data,
         e_entry,
+        e_phoff,
         e_phentsize,
         e_phnum,
         has_pt_interp,
@@ -228,13 +305,16 @@ fn parse_elf64(bytes: &[u8]) -> Result<ParsedElf, String> {
     })
 }
 
-fn parse_metadata_toml(text: &str) -> Result<M8FixtureMetadata, String> {
+fn parse_metadata_toml(text: &str) -> Result<PinnedMetadata, String> {
     let mut e_entry = None;
+    let mut e_phoff = None;
     let mut e_phentsize = None;
     let mut e_phnum = None;
     let mut pt_load_count = None;
     let mut has_pt_interp = None;
     let mut has_pt_dynamic = None;
+    let mut user_va_lo = None;
+    let mut user_va_hi = None;
     let mut pt_loads = Vec::new();
     let mut current: Option<PtLoadMeta> = None;
 
@@ -268,11 +348,14 @@ fn parse_metadata_toml(text: &str) -> Result<M8FixtureMetadata, String> {
         let value = value.trim();
         match key {
             "e_entry" => e_entry = Some(parse_int(value)?),
+            "e_phoff" => e_phoff = Some(parse_int(value)?),
             "e_phentsize" => e_phentsize = Some(parse_int(value)? as u16),
             "e_phnum" => e_phnum = Some(parse_int(value)? as u16),
             "pt_load_count" => pt_load_count = Some(parse_int(value)? as usize),
             "has_pt_interp" => has_pt_interp = Some(parse_bool(value)?),
             "has_pt_dynamic" => has_pt_dynamic = Some(parse_bool(value)?),
+            "user_va_lo" => user_va_lo = Some(parse_int(value)?),
+            "user_va_hi" => user_va_hi = Some(parse_int(value)?),
             "p_offset" => {
                 current
                     .as_mut()
@@ -314,15 +397,20 @@ fn parse_metadata_toml(text: &str) -> Result<M8FixtureMetadata, String> {
     }
     flush(&mut current, &mut pt_loads);
 
-    Ok(M8FixtureMetadata {
-        e_entry: e_entry.ok_or("metadata missing e_entry")?,
-        e_phentsize: e_phentsize.ok_or("metadata missing e_phentsize")?,
-        e_phnum: e_phnum.ok_or("metadata missing e_phnum")?,
-        pt_load_count: pt_load_count.ok_or("metadata missing pt_load_count")?,
-        has_pt_interp: has_pt_interp.ok_or("metadata missing has_pt_interp")?,
-        has_pt_dynamic: has_pt_dynamic.ok_or("metadata missing has_pt_dynamic")?,
-        pt_loads,
-        sha256_hex: String::new(),
+    Ok(PinnedMetadata {
+        meta: M8FixtureMetadata {
+            e_entry: e_entry.ok_or("metadata missing e_entry")?,
+            e_phoff: e_phoff.ok_or("metadata missing e_phoff")?,
+            e_phentsize: e_phentsize.ok_or("metadata missing e_phentsize")?,
+            e_phnum: e_phnum.ok_or("metadata missing e_phnum")?,
+            pt_load_count: pt_load_count.ok_or("metadata missing pt_load_count")?,
+            has_pt_interp: has_pt_interp.ok_or("metadata missing has_pt_interp")?,
+            has_pt_dynamic: has_pt_dynamic.ok_or("metadata missing has_pt_dynamic")?,
+            pt_loads,
+            sha256_hex: String::new(),
+        },
+        user_va_lo: user_va_lo.ok_or("metadata missing user_va_lo")?,
+        user_va_hi: user_va_hi.ok_or("metadata missing user_va_hi")?,
     })
 }
 
@@ -492,12 +580,18 @@ mod tests {
     #[test]
     fn committed_fixture_verifies() {
         let meta = verify_m8_fixture().expect("committed fixture must verify");
-        assert_eq!(meta.e_entry, 0x400078);
+        assert_eq!(meta.e_entry, 0x0000_4000_0040_0078);
+        assert_eq!(meta.e_phoff, 64);
         assert_eq!(meta.pt_load_count, 1);
         assert!(!meta.has_pt_interp);
         assert!(!meta.has_pt_dynamic);
         assert_eq!(meta.e_phentsize, 56);
         assert_eq!(meta.e_phnum, 1);
+        assert_eq!(meta.pt_loads[0].p_offset, 0);
+        assert_eq!(meta.pt_loads[0].p_vaddr, 0x0000_4000_0040_0000);
+        assert_loads_in_user_window(&meta.pt_loads, M8_USER_VA_LO, M8_USER_VA_HI).unwrap();
+        assert_phdr_table_in_pt_load(meta.e_phoff, meta.e_phentsize, meta.e_phnum, &meta.pt_loads)
+            .unwrap();
     }
 
     #[test]
@@ -516,10 +610,47 @@ mod tests {
         let dir = tempfile_fixture_copy();
         let meta_path = dir.join("metadata.toml");
         let mut text = fs::read_to_string(&meta_path).unwrap();
-        text = text.replace("e_entry = 0x400078", "e_entry = 0x401000");
+        text = text.replace("e_entry = 0x400000400078", "e_entry = 0x400000401000");
         fs::write(&meta_path, text).unwrap();
         let err = verify_m8_fixture_at(&dir).expect_err("metadata mismatch must fail");
         assert!(err.contains("e_entry mismatch"), "{err}");
+    }
+
+    #[test]
+    fn out_of_window_load_rejected() {
+        let err = assert_loads_in_user_window(
+            &[PtLoadMeta {
+                p_offset: 0,
+                p_vaddr: 0x400000,
+                p_filesz: 0x100,
+                p_memsz: 0x100,
+                p_flags: 5,
+                p_align: 0x1000,
+            }],
+            M8_USER_VA_LO,
+            M8_USER_VA_HI,
+        )
+        .expect_err("classic 0x400000 must be rejected");
+        assert!(err.contains("outside user window"), "{err}");
+    }
+
+    #[test]
+    fn phdr_table_outside_load_rejected() {
+        let err = assert_phdr_table_in_pt_load(
+            64,
+            56,
+            1,
+            &[PtLoadMeta {
+                p_offset: 0x78,
+                p_vaddr: 0x0000_4000_0040_0078,
+                p_filesz: 0x6d,
+                p_memsz: 0x6d,
+                p_flags: 5,
+                p_align: 0x1000,
+            }],
+        )
+        .expect_err("phdrs below first mapped byte must fail");
+        assert!(err.contains("not covered by any PT_LOAD"), "{err}");
     }
 
     fn tempfile_fixture_copy() -> PathBuf {
@@ -540,7 +671,6 @@ mod tests {
         ] {
             fs::copy(src.join(name), dest.join(name)).unwrap();
         }
-        // Touch a marker so the directory is clearly ours.
         let mut f = fs::File::create(dest.join(".copied")).unwrap();
         writeln!(f, "ok").unwrap();
         dest

@@ -1,9 +1,34 @@
 # Linux hello fixture (M8.6 / #96)
 
 Deterministic unmodified Linux x86-64 `ET_EXEC` ELF used for M8 acceptance.
-**After this branch is pushed, the committed binary bytes are frozen** — do not
-relink or patch them to paper over loader bugs (#92/#97 inject the artifact
-unchanged).
+**Fixture bytes are frozen after the follow-up push that relocates the image
+into the Clean-Slate user VA window** — do not relink or patch them to paper
+over loader bugs (#92/#97 inject the artifact unchanged).
+
+## Why this link address
+
+Clean-Slate identity-maps physical memory at virtual 0 and gives each process
+exactly one private PML4 slot:
+
+```text
+0x0000_4000_0000_0000 .. 0x0000_4080_0000_0000
+```
+
+A classic Linux `ET_EXEC` at `0x400000` would alias the shared identity map and
+cannot be mapped in M8. This fixture is therefore linked at
+
+```text
+0x0000_4000_0040_0000   (= window base + classic 4 MiB offset)
+```
+
+That is still a normal Linux user address (far below `TASK_SIZE`), so the same
+source + ordinary linker script runs **unchanged** on real Linux. This is a
+link-address choice, not a Clean-Slate-specific binary patch. Supporting
+low/`0x400000` user mappings is M9+ kernel work (higher-half kernel).
+
+The first `PT_LOAD` starts at file offset 0 / `p_vaddr = 0x0000400000400000`
+and covers the ELF header + program headers (`FILEHDR`/`PHDRS` in `hello.ld`)
+so `#92` can set `AT_PHDR` to a real mapped user address.
 
 ## Behaviour (exact order)
 
@@ -13,18 +38,19 @@ unchanged).
 3. `exit(0)` via syscall **60**.
 
 Nothing else: no `brk`, `arch_prctl`, TLS setup, `rt_sigaction`, `exit_group`,
-or `set_tid_address`. The program does not read the initial stack.
+or `set_tid_address`. The program does not read the initial stack. String
+addressing is RIP-relative (`lea rsi, [rip + msg]`).
 
 ## Files
 
 | Path | Role |
 |------|------|
 | `hello.S` | Freestanding `_start` (GNU as) |
-| `hello.ld` | Single RX `PT_LOAD` at conventional `0x400000` base |
+| `hello.ld` | Single RX `PT_LOAD` at `0x0000400000400000` (headers included) |
 | `build.sh` | Deterministic rebuild |
 | `hello-linux-x86_64` | Committed acceptance binary (**frozen**) |
 | `hello-linux-x86_64.sha256` | SHA-256 of the binary (hex, one line) |
-| `metadata.toml` | Pinned ELF / `PT_LOAD` fields |
+| `metadata.toml` | Pinned ELF / `PT_LOAD` / user-window fields |
 | `readelf.txt` | `readelf -h -l -S` transcript |
 | `malformed/` | Negative ELF fixtures for #92 (+ `generate.sh`) |
 
@@ -61,9 +87,9 @@ Flags used: `as --64`; `ld -static -nostdlib -no-pie --build-id=none
 
 ```text
 $ ./build.sh
-SHA-256: 21e044df3b25c26d07c7d6cc536564c7c9e539ca9b98f105022aac7607d6a7ba
+SHA-256: 619a000cfa6990b3d73f97e365cf333aa140b09cfba096fac082647731004e4a
 $ rm -f hello-linux-x86_64 hello-linux-x86_64.sha256 readelf.txt && ./build.sh
-SHA-256: 21e044df3b25c26d07c7d6cc536564c7c9e539ca9b98f105022aac7607d6a7ba
+SHA-256: 619a000cfa6990b3d73f97e365cf333aa140b09cfba096fac082647731004e4a
 # identical both times
 ```
 
@@ -93,9 +119,11 @@ cargo xtask verify-m8-fixture
 cargo test -p xtask m8_fixture
 ```
 
-`verify-m8-fixture` checks SHA-256 against `hello-linux-x86_64.sha256` and
-asserts every field in `metadata.toml` against a local ELF64 parser (no kernel
-crate dependency).
+`verify-m8-fixture` checks SHA-256 against `hello-linux-x86_64.sha256`, asserts
+every field in `metadata.toml` against a local ELF64 parser, and additionally
+requires every `PT_LOAD` VA range to lie in
+`[0x0000400000000000, 0x0000408000000000)` and the program-header table to lie
+inside a `PT_LOAD` file range.
 
 ## Why only write / exit + the 999 probe
 
