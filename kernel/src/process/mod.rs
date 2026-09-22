@@ -4,6 +4,7 @@
 
 pub(crate) mod domain;
 pub(crate) mod id_allocator;
+pub(crate) mod linux_fd;
 pub(crate) mod personality;
 
 use crate::arch::x86_64::cpu::without_interrupts;
@@ -17,10 +18,11 @@ use clean_slate_service_lifecycle::InstanceGeneration;
 use personality::ExecutionPersonality;
 
 pub(super) const KERNEL_PROCESS_ID: u64 = 0;
+/// Fixed process-registry bound; Linux fd registry capacity (#95) is derived from this.
 #[cfg(feature = "m6-capabilities-self-test")]
-const PROCESS_REGISTRY_CAPACITY: usize = 12;
+pub(super) const PROCESS_REGISTRY_CAPACITY: usize = 12;
 #[cfg(not(feature = "m6-capabilities-self-test"))]
-const PROCESS_REGISTRY_CAPACITY: usize = 8;
+pub(super) const PROCESS_REGISTRY_CAPACITY: usize = 8;
 
 /// Trusted userspace process id from the current scheduler thread (never from syscall args).
 pub(crate) fn current_process_id() -> Result<u64, &'static str> {

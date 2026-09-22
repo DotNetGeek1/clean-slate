@@ -134,10 +134,15 @@ const M3_SYSCALL_ACCEPTANCE_MARKERS: [&str; 2] = [
     "[TIME] timer initialized",
     "[SYSC] syscall entry/return PASS",
 ];
-const M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS: [&str; 4] = [
+// The leading newline before "Hello from Linux." proves the Linux write reached
+// serial verbatim at the start of a line (no `[IPC ] console pid=N: ` framing);
+// no trailing newline is matched so LF and CRLF captures both pass.
+const M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[TIME] timer initialized",
     "[LNX ] personality=x86_64 pid=",
     "[LNX ] unsupported syscall=999 errno=ENOSYS",
+    "\nHello from Linux.",
+    "[LNX ] exit pid=",
     "[M8.3] PASS",
 ];
 const M3_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 6] = [

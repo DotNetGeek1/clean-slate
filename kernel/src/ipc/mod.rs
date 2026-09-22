@@ -4,8 +4,10 @@
 use crate::sync::global_cell::GlobalCell;
 
 pub(super) const IPC_MAX_MESSAGE_BYTES: usize = 64;
-const IPC_ENDPOINT_CAPACITY: usize = 4;
-const IPC_CAPABILITY_CAPACITY: usize = 8;
+/// Fixed endpoint-slot bound (host-testable; Linux console grants reuse one slot).
+pub(crate) const IPC_ENDPOINT_CAPACITY: usize = 4;
+/// Fixed send-capability-slot bound (one grant per holder; released on holder teardown).
+pub(crate) const IPC_CAPABILITY_CAPACITY: usize = 8;
 #[cfg(any(feature = "m3-ipc-self-test", test))]
 pub(super) const USERSPACE_IPC_TEST_PID: u64 = 1;
 #[cfg(any(feature = "m3-ipc-self-test", test))]
@@ -155,6 +157,43 @@ impl IpcEndpointTable {
 
     pub(super) fn create_console_sink(&mut self, owner_pid: u64) -> Result<usize, &'static str> {
         self.create_endpoint_with_kind(owner_pid, IpcEndpointKind::ConsoleSink)
+    }
+
+    /// Trusted bootstrap helper: grant a send capability on the **shared**
+    /// kernel-owned `ConsoleSink` to `holder_pid`.
+    ///
+    /// Lazily creates a single `ConsoleSink` owned by [`crate::process::KERNEL_PROCESS_ID`]
+    /// on first use, then reuses that endpoint for every subsequent grant.
+    /// Holder teardown via [`Self::teardown_resources_for_pid`] retires the
+    /// capability only — the shared endpoint stays so replacement processes do
+    /// not permanently consume `IPC_ENDPOINT_CAPACITY` slots (#95).
+    #[allow(dead_code)] // Consumed by linux_fd host tests and #97 bootstrap.
+    pub(crate) fn grant_console_capability_for_pid(
+        &mut self,
+        holder_pid: u64,
+    ) -> Result<u64, &'static str> {
+        let endpoint_slot = match self.shared_kernel_console_sink_slot() {
+            Some(slot) => slot,
+            None => self.create_console_sink(crate::process::KERNEL_PROCESS_ID)?,
+        };
+        self.grant_send_capability(holder_pid, endpoint_slot)
+    }
+
+    /// Active `ConsoleSink` owned by the kernel process, if one already exists.
+    fn shared_kernel_console_sink_slot(&self) -> Option<usize> {
+        self.endpoints
+            .iter()
+            .enumerate()
+            .find_map(|(slot, endpoint)| {
+                if endpoint.state == IpcEndpointState::Active
+                    && endpoint.kind == IpcEndpointKind::ConsoleSink
+                    && endpoint.owner_pid == crate::process::KERNEL_PROCESS_ID
+                {
+                    Some(slot)
+                } else {
+                    None
+                }
+            })
     }
 
     pub(super) fn create_lifecycle_control_endpoint(
@@ -405,7 +444,7 @@ impl IpcEndpointTable {
     }
 
     #[cfg(test)]
-    fn endpoint_message(&self, endpoint_slot: usize) -> Option<&[u8]> {
+    pub(crate) fn endpoint_message(&self, endpoint_slot: usize) -> Option<&[u8]> {
         let endpoint = self.endpoints.get(endpoint_slot)?;
         if endpoint.state != IpcEndpointState::Active {
             return None;
