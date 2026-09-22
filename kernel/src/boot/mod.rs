@@ -49,10 +49,12 @@ use crate::interrupt::timer::report_timer_contract;
 use crate::mm::address_space::set_kernel_root_frame;
 use crate::mm::frame_allocator::set_kernel_direct_map_ready;
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::address_space::KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES;
+use crate::mm::carve_out_shared::install_shared_carve_out_page_tables;
 use crate::mm::kernel_bootstrap::install_kernel_owned_root;
 use crate::mm::layout::{
     assert_conventional_linux_window_clear, init_kernel_low_carve_outs_from_reserved,
-    log_kernel_low_carve_outs, register_kernel_low_carve_out,
+    log_kernel_low_carve_outs, register_kernel_low_carve_out, KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE,
 };
 use crate::mm::paging::inspect_current_mapping;
 use crate::mm::paging::current_root_frame_address;
@@ -225,7 +227,9 @@ fn register_boot_kernel_low_carve_outs(
         let end = base + core::mem::size_of_val(stacks) as u64;
         register_kernel_low_carve_out(base, end)?;
     }
+    crate::mm::layout::rebuild_kernel_low_user_exclusion_2m()?;
     log_kernel_low_carve_outs();
+    crate::mm::layout::log_kernel_low_user_exclusion_2m();
     assert_conventional_linux_window_clear()
 }
 
@@ -284,6 +288,12 @@ fn run_inner() -> Result<(), &'static str> {
     ));
     set_kernel_root_frame(kernel_root);
     set_kernel_direct_map_ready();
+    install_shared_carve_out_page_tables(kernel_root, &mut allocator)?;
+    serial_write_fmt(format_args!(
+        "[MM  ] carve-out private tables per process: {}\n",
+        KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES
+    ));
+    crate::mm::address_space::verify_carve_out_attach_at_boot(&mut allocator)?;
 
     let inspected = inspect_current_mapping()?;
     serial_write_fmt(format_args!(
@@ -301,7 +311,7 @@ fn run_inner() -> Result<(), &'static str> {
 
     #[cfg(feature = "m1-self-test")]
     {
-        trigger_expected_page_fault(SCRATCH_PAGE_ADDRESS as *const u64);
+        trigger_expected_page_fault(KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE as *const u64);
     }
 
     #[cfg(feature = "m2-double-fault-self-test")]

@@ -1,4 +1,5 @@
 pub(crate) mod address_space;
+pub(crate) mod carve_out_shared;
 pub(crate) mod frame_allocator;
 pub(crate) mod image_loader;
 pub(crate) mod kernel_bootstrap;

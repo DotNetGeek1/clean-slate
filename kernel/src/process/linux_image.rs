@@ -37,7 +37,8 @@
 
 use crate::mm::address_space::{
     create_process_address_space, destroy_process_address_space, translate_address_in_root,
-    ProcessAddressSpace, MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES, MAX_ADDRESS_SPACE_USER_MAPPINGS,
+    ProcessAddressSpace, KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES,
+    MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES, MAX_ADDRESS_SPACE_USER_MAPPINGS,
 };
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::image_loader::{map_load_plan_segments, map_user_stack_pages};
@@ -545,7 +546,10 @@ pub(crate) fn validate_linux_image(bytes: &[u8]) -> Result<LinuxImagePlan, Linux
 
     // Page-table demand first: it is the tighter bound for sparse images.
     let page_table_frames = page_table_frame_demand(&ranges[..range_count])?;
-    if page_table_frames > MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES {
+    let page_table_frames_with_carve = page_table_frames
+        .checked_add(KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES)
+        .ok_or(LinuxImageError::PageTableBudgetExceeded)?;
+    if page_table_frames_with_carve > MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES {
         return Err(LinuxImageError::PageTableBudgetExceeded);
     }
     let image_pages = plan.total_mapped_pages(PAGE_SIZE)?;
@@ -696,7 +700,10 @@ pub(crate) fn build_linux_process_image(
         ));
     }
     let counts = address_space.resource_counts();
-    if counts.page_table_frames != image_plan.page_table_frames
+    if counts.page_table_frames
+        != image_plan
+            .page_table_frames
+            .saturating_add(KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES)
         || counts.user_pages as u64 != image_plan.mapped_pages()
     {
         return Err(discard_address_space(

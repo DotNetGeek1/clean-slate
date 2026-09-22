@@ -16,7 +16,8 @@ pub(crate) fn set_kernel_direct_map_ready() {
     KERNEL_DIRECT_MAP_READY.store(true, Ordering::Release);
 }
 
-fn frame_access_ptr(frame: u64) -> *mut u8 {
+/// Pointer to a physical frame for page-table edits and allocator metadata.
+pub(crate) fn physical_frame_ptr(frame: u64) -> *mut u8 {
     if KERNEL_DIRECT_MAP_READY.load(Ordering::Acquire) {
         kernel_map_ptr(frame) as *mut u8
     } else {
@@ -120,7 +121,7 @@ impl PageAllocator {
             return Err("attempted to free an already-free frame");
         }
 
-        let node_ptr = frame_access_ptr(frame) as *mut FreePageNode;
+        let node_ptr = physical_frame_ptr(frame) as *mut FreePageNode;
         unsafe {
             ptr::write(
                 node_ptr,
@@ -144,7 +145,7 @@ impl PageAllocator {
 
     fn pop_free_page(&mut self) -> Option<u64> {
         let frame = self.free_list_head?;
-        let node_ptr = frame_access_ptr(frame) as *const FreePageNode;
+        let node_ptr = physical_frame_ptr(frame) as *const FreePageNode;
         let node = unsafe { ptr::read(node_ptr) };
         self.free_list_head = node.next;
         Some(frame)
@@ -180,7 +181,7 @@ impl PageAllocator {
             if candidate == frame {
                 return true;
             }
-            let node_ptr = frame_access_ptr(candidate) as *const FreePageNode;
+            let node_ptr = physical_frame_ptr(candidate) as *const FreePageNode;
             let node = unsafe { ptr::read(node_ptr) };
             current = node.next;
         }

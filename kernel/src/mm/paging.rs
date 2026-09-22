@@ -184,6 +184,125 @@ pub(crate) fn leaf_page_flags_for_address_in_root(
     Ok(walk_page_flags_in_root(root_frame, address)?.leaf)
 }
 
+/// Physical address of the mapped leaf frame (handles 2 MiB / 1 GiB huge leaves).
+pub(crate) fn leaf_phys_addr_for_address_in_root(
+    root_frame: u64,
+    address: VirtAddr,
+) -> Result<u64, &'static str> {
+    let level_4_table = unsafe { page_table_ref(root_frame) };
+    let level_4_entry = &level_4_table[address.p4_index()];
+    if level_4_entry.is_unused() {
+        return Err("virtual address was not backed by a valid level-4 entry");
+    }
+    let level_3_frame = level_4_entry
+        .frame()
+        .map_err(|_| "virtual address was not backed by a valid level-3 frame")?;
+    let level_3_table =
+        unsafe { &*(page_table_virt(level_3_frame.start_address().as_u64()) as *const PageTable) };
+    let level_3_entry = &level_3_table[address.p3_index()];
+    if level_3_entry.is_unused() {
+        return Err("virtual address was not backed by a valid level-3 entry");
+    }
+    if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        const ONE_GIB: u64 = 1024 * 1024 * 1024;
+        return Ok(level_3_entry.addr().as_u64() + (address.as_u64() & (ONE_GIB - 1)));
+    }
+    let level_2_frame = level_3_entry
+        .frame()
+        .map_err(|_| "virtual address was not backed by a valid level-2 frame")?;
+    let level_2_table =
+        unsafe { &*(page_table_virt(level_2_frame.start_address().as_u64()) as *const PageTable) };
+    let level_2_entry = &level_2_table[address.p2_index()];
+    if level_2_entry.is_unused() {
+        return Err("virtual address was not backed by a valid level-2 entry");
+    }
+    if level_2_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        const TWO_MIB: u64 = 2 * 1024 * 1024;
+        return Ok(level_2_entry.addr().as_u64() + (address.as_u64() & (TWO_MIB - 1)));
+    }
+    let level_1_frame = level_2_entry
+        .frame()
+        .map_err(|_| "virtual address was not backed by a valid level-1 frame")?;
+    let level_1_table =
+        unsafe { &*(page_table_virt(level_1_frame.start_address().as_u64()) as *const PageTable) };
+    let level_1_entry = &level_1_table[address.p1_index()];
+    if level_1_entry.is_unused() {
+        return Err("virtual address was not mapped");
+    }
+    Ok(level_1_entry.addr().as_u64())
+}
+
+/// Physical frame of the level-2 (PD) table used for a 4 KiB mapping (not a huge leaf).
+pub(crate) fn level2_table_frame_for_address_in_root(
+    root_frame: u64,
+    address: VirtAddr,
+) -> Result<u64, &'static str> {
+    let level_4_table = unsafe { page_table_ref(root_frame) };
+    let level_4_entry = &level_4_table[address.p4_index()];
+    if level_4_entry.is_unused() {
+        return Err("virtual address was not backed by a valid level-4 entry");
+    }
+    let level_3_frame = level_4_entry
+        .frame()
+        .map_err(|_| "virtual address was not backed by a valid level-3 frame")?;
+    let level_3_table =
+        unsafe { &*(page_table_virt(level_3_frame.start_address().as_u64()) as *const PageTable) };
+    let level_3_entry = &level_3_table[address.p3_index()];
+    if level_3_entry.is_unused() {
+        return Err("virtual address was not backed by a valid level-3 entry");
+    }
+    if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return Err("virtual address was not backed by a page directory");
+    }
+    let level_2_frame = level_3_entry
+        .frame()
+        .map_err(|_| "virtual address was not backed by a valid level-2 frame")?;
+    Ok(level_2_frame.start_address().as_u64())
+}
+
+/// Ensures directory levels on the walk to `address` do not carry NX (carve-out attach contract).
+pub(crate) fn assert_carve_out_directory_path_has_no_nx(
+    root_frame: u64,
+    address: VirtAddr,
+) -> Result<(), &'static str> {
+    let level_4_table = unsafe { page_table_ref(root_frame) };
+    let level_4_entry = &level_4_table[address.p4_index()];
+    if level_4_entry.is_unused() {
+        return Err("carve-out walk missing level-4 entry");
+    }
+    if level_4_entry.flags().contains(PageTableFlags::NO_EXECUTE) {
+        return Err("carve-out walk found NX on level-4 entry");
+    }
+    let level_3_frame = level_4_entry
+        .frame()
+        .map_err(|_| "carve-out walk missing level-3 frame")?;
+    let level_3_table =
+        unsafe { &*(page_table_virt(level_3_frame.start_address().as_u64()) as *const PageTable) };
+    let level_3_entry = &level_3_table[address.p3_index()];
+    if level_3_entry.is_unused() {
+        return Err("carve-out walk missing level-3 entry");
+    }
+    if level_3_entry.flags().contains(PageTableFlags::NO_EXECUTE) {
+        return Err("carve-out walk found NX on level-3 entry");
+    }
+    if level_3_entry.flags().contains(PageTableFlags::HUGE_PAGE) {
+        return Ok(());
+    }
+    let level_2_frame = level_3_entry
+        .frame()
+        .map_err(|_| "carve-out walk missing level-2 frame")?;
+    let level_2_table =
+        unsafe { &*(page_table_virt(level_2_frame.start_address().as_u64()) as *const PageTable) };
+    let level_2_entry = &level_2_table[address.p2_index()];
+    if level_2_entry.is_unused() {
+        return Err("carve-out walk missing level-2 entry");
+    }
+    if level_2_entry.flags().contains(PageTableFlags::NO_EXECUTE) {
+        return Err("carve-out walk found NX on level-2 entry");
+    }
+    Ok(())
+}
+
 pub(crate) unsafe fn current_offset_page_table() -> OffsetPageTable<'static> {
     unsafe { offset_page_table_for_root(current_root_frame_address()) }
 }

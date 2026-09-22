@@ -406,21 +406,15 @@ fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'st
 
     let kernel_va = VirtAddr::from_ptr(run as *const ());
     if translate_address_in_root(address_space.root_frame, kernel_va).is_ok() {
-        let kernel_flags = page_flags_for_address_in_root(address_space.root_frame, kernel_va)?;
         let kernel_leaf_flags =
             leaf_page_flags_for_address_in_root(address_space.root_frame, kernel_va)?;
-        if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-            || kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-        {
+        if kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE) {
             return Err("kernel mapping unexpectedly became user accessible in a process root");
         }
     } else {
-        let kernel_flags = page_flags_for_address_in_root(kernel_root_frame(), kernel_va)?;
         let kernel_leaf_flags =
             leaf_page_flags_for_address_in_root(kernel_root_frame(), kernel_va)?;
-        if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-            || kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-        {
+        if kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE) {
             return Err("kernel mapping unexpectedly became user accessible in the kernel root");
         }
     }
@@ -550,7 +544,6 @@ pub(crate) fn start_userspace_address_space_self_test(mut allocator: PageAllocat
     if let Err(message) = validate_process_address_space(&process_two) {
         fatal_kernel_error(message);
     }
-
     let initial_state = UserspaceAddressSpaceTestState {
         kernel_root_frame,
         stage: UserspaceAddressSpaceStage::AwaitProcessOneEntry,

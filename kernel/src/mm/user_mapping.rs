@@ -124,11 +124,8 @@ pub(crate) fn validate_userspace_mappings() -> Result<(), &'static str> {
         return Err("userspace stack mapping flags were incorrect");
     }
 
-    let kernel_flags = page_flags_for_address(VirtAddr::from_ptr(run as *const ()))?;
     let kernel_leaf_flags = leaf_page_flags_for_address(VirtAddr::from_ptr(run as *const ()))?;
-    if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-        || kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-    {
+    if kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE) {
         return Err("kernel mapping unexpectedly became user accessible");
     }
 

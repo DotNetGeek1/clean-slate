@@ -2,6 +2,7 @@
 
 use crate::diagnostics::serial::serial_write_fmt;
 use crate::mm::region::ReservedRange;
+use crate::mm::{align_down, align_up, PAGE_SIZE};
 use crate::sync::global_cell::GlobalCell;
 
 /// Start of the supervisor-only direct physical map (512 GiB window at PML4 slot 511).
@@ -17,11 +18,10 @@ pub(crate) const KERNEL_USER_PML4_SLOT_END: usize = 256;
 
 pub(crate) const LINUX_CONVENTIONAL_USER_VA_LO: u64 = 0x10000;
 
-/// Only the kernel page-table root stays on the firmware identity window (#142).
-const KERNEL_IDENTITY_PHYS_CUTOFF: u64 = 0x1000;
+/// Reserved-unmapped PML4 slot used for deliberate kernel fault probes (M1/M2).
+pub(crate) const KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE: u64 = 0xffff_a000_0000_0000;
 
-/// Physical pages left unmapped in the linear physmap window for M2 fault probes.
-const PHYSMAP_FAULT_TEST_PHYS: &[u64] = &[0x1000];
+const TWO_MIB: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct VaRange {
@@ -51,6 +51,11 @@ static KERNEL_LOW_CARVE_OUTS: GlobalCell<CarveOutTable> = GlobalCell::new(CarveO
     ranges: [VaRange::new(0, 0); MAX_KERNEL_LOW_CARVE_OUTS],
 });
 
+static KERNEL_LOW_USER_EXCLUSION_2M: GlobalCell<CarveOutTable> = GlobalCell::new(CarveOutTable {
+    count: 0,
+    ranges: [VaRange::new(0, 0); MAX_KERNEL_LOW_CARVE_OUTS],
+});
+
 fn push_carve_out(range: VaRange) -> Result<(), &'static str> {
     if range.start >= range.end {
         return Ok(());
@@ -66,6 +71,46 @@ fn push_carve_out(range: VaRange) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn push_user_exclusion_2m(range: VaRange) -> Result<(), &'static str> {
+    if range.start >= range.end {
+        return Ok(());
+    }
+    unsafe {
+        let table = &mut *KERNEL_LOW_USER_EXCLUSION_2M.get();
+        if table.count == MAX_KERNEL_LOW_CARVE_OUTS {
+            return Err("kernel low user-exclusion table capacity exceeded");
+        }
+        if table.ranges[..table.count]
+            .iter()
+            .any(|existing| existing.start == range.start && existing.end == range.end)
+        {
+            return Ok(());
+        }
+        table.ranges[table.count] = range;
+        table.count += 1;
+    }
+    Ok(())
+}
+
+pub(crate) fn rebuild_kernel_low_user_exclusion_2m() -> Result<(), &'static str> {
+    unsafe {
+        (*KERNEL_LOW_USER_EXCLUSION_2M.get()).count = 0;
+    }
+    for range in kernel_low_reserved_ranges() {
+        let start = align_down(range.start, TWO_MIB);
+        let end = align_up(range.end, TWO_MIB);
+        push_user_exclusion_2m(VaRange::new(start, end))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn kernel_low_user_exclusion_2m_ranges() -> &'static [VaRange] {
+    unsafe {
+        let table = &*KERNEL_LOW_USER_EXCLUSION_2M.get();
+        &table.ranges[..table.count]
+    }
+}
+
 pub(crate) fn kernel_low_reserved_ranges() -> &'static [VaRange] {
     unsafe {
         let table = &*KERNEL_LOW_CARVE_OUTS.get();
@@ -74,7 +119,7 @@ pub(crate) fn kernel_low_reserved_ranges() -> &'static [VaRange] {
 }
 
 pub(crate) fn va_overlaps_kernel_low_reserved(start: u64, end: u64) -> bool {
-    kernel_low_reserved_ranges()
+    kernel_low_user_exclusion_2m_ranges()
         .iter()
         .any(|range| range.overlaps(start, end))
 }
@@ -87,7 +132,7 @@ pub(crate) fn physmap_mapping_allowed(phys: u64, virt: u64) -> bool {
     if virt != PHYSMAP_BASE.wrapping_add(phys) {
         return false;
     }
-    !PHYSMAP_FAULT_TEST_PHYS.contains(&phys)
+    true
 }
 
 /// Virtual address used to inspect or mutate a physical frame from kernel mode.
@@ -98,11 +143,7 @@ pub(crate) const fn kernel_map_ptr(phys: u64) -> u64 {
 
 #[cfg(not(test))]
 pub(crate) const fn kernel_map_ptr(phys: u64) -> u64 {
-    if phys <= KERNEL_IDENTITY_PHYS_CUTOFF {
-        phys
-    } else {
-        PHYSMAP_BASE.wrapping_add(phys)
-    }
+    PHYSMAP_BASE.wrapping_add(phys)
 }
 
 #[must_use]
@@ -159,14 +200,23 @@ pub(crate) fn log_kernel_low_carve_outs() {
     }
 }
 
+pub(crate) fn log_kernel_low_user_exclusion_2m() {
+    for range in kernel_low_user_exclusion_2m_ranges() {
+        serial_write_fmt(format_args!(
+            "[MM  ] user-low 2MiB exclusion: [{:#018x}, {:#018x})\n",
+            range.start, range.end
+        ));
+    }
+}
+
 /// Fail boot if the conventional Linux low window intersects a carve-out on this platform.
 pub(crate) fn assert_conventional_linux_window_clear() -> Result<(), &'static str> {
     const CHECK_LO: u64 = LINUX_CONVENTIONAL_USER_VA_LO;
     const CHECK_HI: u64 = 0x1000_0000;
-    for range in kernel_low_reserved_ranges() {
+    for range in kernel_low_user_exclusion_2m_ranges() {
         if range.overlaps(CHECK_LO, CHECK_HI) {
             serial_write_fmt(format_args!(
-                "[FAIL] conventional Linux window [{:#x},{:#x}) overlaps kernel carve-out [{:#x},{:#x})\n",
+                "[FAIL] conventional Linux window [{:#x},{:#x}) overlaps kernel 2MiB exclusion [{:#x},{:#x})\n",
                 CHECK_LO, CHECK_HI, range.start, range.end
             ));
             return Err("conventional Linux user window overlaps kernel low carve-out");
