@@ -1,0 +1,33 @@
+# Pinned ELF metadata for fixtures/linux-hello/hello-linux-x86_64
+# Verified by `cargo xtask verify-m8-fixture` (issue #96 / M8.6).
+# Values are derived from the committed binary; do not edit by hand unless
+# rebuilding the fixture and updating the SHA-256 in lockstep.
+#
+# Link base 0x0000400000400000 is inside the Clean-Slate M8 user VA window
+# [0x0000400000000000, 0x0000408000000000). See docs/M8_FIXTURE.md.
+
+e_type = "ET_EXEC"
+e_machine = "EM_X86_64"
+ei_class = "ELFCLASS64"
+ei_data = "ELFDATA2LSB"
+
+e_entry = 0x400000400078
+e_phentsize = 56
+e_phnum = 1
+e_phoff = 64
+
+pt_load_count = 1
+has_pt_interp = false
+has_pt_dynamic = false
+
+# Clean-Slate M8 user VA window (PML4 slot 128).
+user_va_lo = 0x0000400000000000
+user_va_hi = 0x0000408000000000
+
+[[pt_load]]
+p_offset = 0x0
+p_vaddr = 0x400000400000
+p_filesz = 0xe5
+p_memsz = 0xe5
+p_flags = 5   # PF_R | PF_X
+p_align = 0x1000

@@ -8,6 +8,7 @@ on:
       - "kernel/**"
       - "network/**"
       - "store/**"
+      - "fixtures/**"
       - "xtask/**"
       - "scripts/**"
       - "Cargo.toml"
@@ -24,6 +25,7 @@ on:
       - "kernel/**"
       - "network/**"
       - "store/**"
+      - "fixtures/**"
       - "xtask/**"
       - "scripts/**"
       - "Cargo.toml"
@@ -102,6 +104,9 @@ jobs:
           cargo build -p clean-slate-store
           cargo build -p clean-slate-kernel --target x86_64-unknown-uefi
           cargo xtask build
+
+      - name: Verify M8 Linux fixture
+        run: cargo xtask verify-m8-fixture
 
       - name: Host unit tests
         run: |

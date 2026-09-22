@@ -115,8 +115,8 @@ Authoritative fixture binary:
 
 - Linux x86-64, static `ET_EXEC`, no PIE, no `PT_INTERP`, no libc/dynamic loader
 - Freestanding `_start`
-- Success path: `write(1, …)` then `exit(0)`
-- Separate probe: unsupported syscall → `-ENOSYS`
+- Success path: unsupported-syscall probe (nr 999 → `-ENOSYS`), then `write(1, …)` then `exit(0)`
+- Provenance, rebuild, and `cargo xtask verify-m8-fixture`: see [M8_FIXTURE.md](M8_FIXTURE.md)
 
 ## Ownership split
 
