@@ -52,21 +52,24 @@ use crate::mm::region::ReservedRange;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test",
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m5-block-self-test",
-    feature = "m7-net-device-self-test",
-    feature = "m7-tls-self-test",
-    feature = "m7-tls-fail-closed-self-test",
-    feature = "m7-dns-self-test"
-)))]
+#[cfg(all(
+    not(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m5-block-self-test",
+        feature = "m7-net-device-self-test",
+        feature = "m7-tls-self-test",
+        feature = "m7-tls-fail-closed-self-test",
+        feature = "m7-dns-self-test"
+    )),
+    not(feature = "m8-linux-hello")
+))]
 use crate::sched::dispatch::initialize_scheduler;
 #[cfg(not(any(
     feature = "m1-self-test",
@@ -122,7 +125,8 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m7-net-caps-self-test"),
     not(feature = "m7-dns-self-test"),
     not(feature = "m7-net-device-self-test"),
-    not(feature = "m8-linux-image-self-test")
+    not(feature = "m8-linux-image-self-test"),
+    not(feature = "m8-linux-hello-self-test")
 ))]
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
 #[cfg(feature = "m3-ipc-self-test")]
@@ -180,6 +184,8 @@ use crate::selftest::m7_tls::run_m7_tls_fail_closed_self_test;
 use crate::selftest::m7_tls::run_m7_tls_self_test;
 #[cfg(feature = "m8-linux-dispatch-self-test")]
 use crate::selftest::m8_linux_dispatch::start_m8_linux_dispatch_self_test;
+#[cfg(feature = "m8-linux-hello-self-test")]
+use crate::selftest::m8_linux_hello::start_m8_linux_hello_self_test;
 #[cfg(feature = "m8-linux-image-self-test")]
 use crate::selftest::m8_linux_image::start_m8_linux_image_self_test;
 use crate::syscall::initialize_syscall_abi;
@@ -279,14 +285,23 @@ fn run_inner() -> Result<(), &'static str> {
         start_timer_self_test_task()
     }
 
-    #[cfg(feature = "m8-linux-dispatch-self-test")]
+    #[cfg(feature = "m8-linux-hello-self-test")]
+    {
+        start_m8_linux_hello_self_test(allocator)
+    }
+
+    #[cfg(all(
+        feature = "m8-linux-dispatch-self-test",
+        not(feature = "m8-linux-hello-self-test")
+    ))]
     {
         start_m8_linux_dispatch_self_test(allocator)
     }
 
     #[cfg(all(
         feature = "m3-entry-self-test",
-        not(feature = "m8-linux-dispatch-self-test")
+        not(feature = "m8-linux-dispatch-self-test"),
+        not(feature = "m8-linux-hello-self-test")
     ))]
     {
         #[cfg(feature = "m7-net-service-self-test")]
@@ -589,6 +604,7 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m4-recovery-self-test"),
         not(feature = "m3-entry-self-test"),
         not(feature = "m8-linux-dispatch-self-test"),
+        not(feature = "m8-linux-hello-self-test"),
         not(feature = "m5-block-self-test"),
         not(feature = "m7-net-device-self-test"),
         not(feature = "m7-tls-self-test"),
@@ -601,7 +617,27 @@ fn run_inner() -> Result<(), &'static str> {
         let controller = unsafe { crate::service::service_lifecycle_controller_mut() };
         controller.clear();
         controller.configure_launch_context(kernel_root_frame, syscall_kernel_stack_top);
-        initialize_scheduler()?;
+        #[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
+        {
+            // Default TASK_COUNT is 2: one demo kernel task for native progress,
+            // Linux hello in slot 1 (no capacity bump).
+            const LINUX_HELLO_SLOT: usize = 1;
+            crate::sched::dispatch::initialize_scheduler_with_linux_hello_slot()?;
+            let allocator = crate::syscall::service_lifecycle_syscall_allocator_mut()
+                .as_mut()
+                .ok_or("linux hello: service lifecycle allocator missing")?;
+            let stacks = unsafe { &*task_stacks_mut() };
+            let _ = crate::service::linux_launch::arm_linux_hello_session(
+                allocator,
+                task_stack_top(&stacks[LINUX_HELLO_SLOT]),
+                LINUX_HELLO_SLOT,
+                1,
+            )?;
+        }
+        #[cfg(not(feature = "m8-linux-hello"))]
+        {
+            initialize_scheduler()?;
+        }
         initialize_timer();
         serial_write_line("[TIME] timer initialized");
         report_timer_contract();

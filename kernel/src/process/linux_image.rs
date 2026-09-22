@@ -25,11 +25,10 @@
 //!
 //! The loader logic is production code in every build. Cargo features gate only
 //! the embedded fixture bytes (`m8-linux-image`) and the QEMU self-test
-//! (`m8-linux-image-self-test`).
+//! (`m8-linux-image-self-test`). Consumed by `#97` (`service::linux_launch`)
+//! and the `m8-linux-image` self-test.
 
-// Consumed by the #97 supervisor launch path and the `m8-linux-image` self-test;
-// production boot does not launch a Linux process yet.
-#![allow(dead_code)]
+#![cfg_attr(not(feature = "m8-linux-image"), allow(dead_code))]
 
 use crate::mm::address_space::{
     create_process_address_space, destroy_process_address_space, translate_address_in_root,
