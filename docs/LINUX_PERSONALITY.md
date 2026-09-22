@@ -147,14 +147,16 @@ Linux stdio is a **projection** onto existing Clean-Slate IPC console authority,
 - Registry capacity equals `PROCESS_REGISTRY_CAPACITY` (not a separate soft limit).
 - The table is **not** a field on `Process` (avoids spawn / literal churn).
 - fd integers are compatibility-local only. Authority is always an `IpcEndpointTable` send-capability handle granted to that pid by trusted bootstrap (`grant_console_capability_for_pid` / `grant_send_capability`).
-- M8 install: fd 1 = stdout, fd 2 = stderr (both `ConsoleEndpoint` projections); fd 0 and fd 3 stay `Closed`.
+- M8 install: fd 1 = stdout, fd 2 = stderr (both `ConsoleEndpoint` projections onto the **same** console capability); fd 0 and fd 3 stay `Closed`. Stderr is not distinguishable from stdout on serial in M8 (acceptable for the fixture).
+- Console sink lifecycle: `grant_console_capability_for_pid` lazily creates **one** kernel-owned `ConsoleSink` and reuses it for every grant. Holder teardown retires that holder's send capability only; the shared endpoint is not destroyed, so replacement launches do not exhaust `IPC_ENDPOINT_CAPACITY`.
 
 ### API (for #94 / #97)
 
-- `install_stdio_for_process(pid, generation, stdout_handle, stderr_handle)`
+- `install_stdio_for_process(pid, generation, stdout_handle, stderr_handle)` — does **not** pre-validate that the handles are held by `pid` (`send_message` does); rejects `KERNEL_PROCESS_ID`. M8 should pass the same handle twice.
 - `projection_for(pid, generation, fd) -> Result<LinuxFdProjection, LinuxErrno>`
-- `write_fd(pid, generation, fd, bytes) -> Result<usize, LinuxErrno>`
+- `write_fd(pid, generation, fd, bytes) -> Result<usize, LinuxErrno>` (core: `LinuxFdRegistry::write_fd(&mut self, &mut IpcEndpointTable, …, personality)`)
 - `release_for_process(pid, generation)` (also hooked from production teardown in `process/domain.rs`)
+- `console_sink_render_style(personality) -> ConsoleSinkRenderStyle` (`Verbatim` for Linux, `NativeFramed` for native)
 
 `write_fd` always calls `IpcEndpointTable::send_message(pid, handle, bytes)`. Naming fd 1 without a real grant yields `EACCES` / no output.
 
@@ -177,4 +179,4 @@ Reuse `IpcEndpointKind::ConsoleSink` only — no raw console syscall and no new 
 
 ### Teardown / replacement
 
-Production `teardown_current_process` / `teardown_process_by_id` call `release_for_process` before IPC capability teardown. A replacement process with the same pid and a new generation gets a fresh table; lookups with a stale generation fail closed (`EBADF`).
+Production `teardown_current_process` / `teardown_process_by_id` call `release_for_process` before IPC capability teardown. A replacement process with the same pid and a new generation gets a fresh table; lookups with a stale generation fail closed (`EBADF`). Holder capability slots are reclaimed so sequential relaunches do not grow endpoint/capability occupancy.

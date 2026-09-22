@@ -11,6 +11,10 @@
 //! not as a field on [`super::Process`], so spawn / Process-literal sites stay
 //! untouched and a replacement process (same pid, new generation) cannot inherit
 //! a prior instance's projections.
+//!
+//! Core logic is implemented on [`LinuxFdRegistry`] taking an explicit
+//! `&mut IpcEndpointTable` so host tests can use local instances without
+//! mutating process-global IPC / fd tables.
 
 // #94 (`write`/`exit`) and #97 (Linux launch bootstrap) consume install/write/
 // projection; production teardown already calls `release_for_process`.
@@ -21,10 +25,12 @@ use clean_slate_service_lifecycle::InstanceGeneration;
 
 use super::personality::ExecutionPersonality;
 use super::process_registry_mut;
+use super::KERNEL_PROCESS_ID;
 use super::PROCESS_REGISTRY_CAPACITY;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::ipc::endpoint_table_mut;
 use crate::ipc::IpcEndpointKind;
+use crate::ipc::IpcEndpointTable;
 use crate::ipc::IpcSendError;
 use crate::ipc::IPC_MAX_MESSAGE_BYTES;
 use crate::sync::global_cell::GlobalCell;
@@ -58,6 +64,25 @@ pub(crate) enum LinuxFdProjection {
 impl LinuxFdProjection {
     const fn closed() -> Self {
         Self::Closed
+    }
+}
+
+/// How a ConsoleSink message from the Linux fd path is rendered on serial.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConsoleSinkRenderStyle {
+    /// Payload bytes as UTF-8 with no `[IPC ]` framing (Linux personality).
+    Verbatim,
+    /// Historical `[IPC ] console pid=N: <msg>\n` framing (native personality).
+    NativeFramed,
+}
+
+/// Pure render-style decision from trusted personality (host-testable).
+pub(crate) const fn console_sink_render_style(
+    personality: ExecutionPersonality,
+) -> ConsoleSinkRenderStyle {
+    match personality {
+        ExecutionPersonality::LinuxX86_64 => ConsoleSinkRenderStyle::Verbatim,
+        ExecutionPersonality::Native => ConsoleSinkRenderStyle::NativeFramed,
     }
 }
 
@@ -105,8 +130,8 @@ impl LinuxFdRegistry {
         }
     }
 
-    fn clear(&mut self) {
-        *self = Self::new();
+    pub(crate) fn occupied(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.is_some()).count()
     }
 
     fn find_slot_mut(
@@ -127,13 +152,26 @@ impl LinuxFdRegistry {
         })
     }
 
-    fn install(
+    /// Install stdout (fd 1) / stderr (fd 2) projections.
+    ///
+    /// Does **not** validate that `stdout_handle` / `stderr_handle` are currently
+    /// held by `pid` — that check happens later in
+    /// [`IpcEndpointTable::send_message`] when [`Self::write_fd`] runs. Callers
+    /// may pass the same handle for both fds (M8: one shared console grant;
+    /// stderr is not distinguishable on serial).
+    ///
+    /// Rejects [`KERNEL_PROCESS_ID`]: the kernel is not a Linux-personality
+    /// process and must not own a compatibility fd table.
+    pub(crate) fn install(
         &mut self,
         pid: u64,
         generation: InstanceGeneration,
         stdout_handle: u64,
         stderr_handle: u64,
     ) -> Result<(), &'static str> {
+        if pid == KERNEL_PROCESS_ID {
+            return Err("linux fd table cannot be installed for the kernel process");
+        }
         if let Some(existing) = self.find_slot_mut(pid, generation) {
             existing.table = LinuxFdTable::empty();
             existing.table.set(
@@ -176,7 +214,19 @@ impl LinuxFdRegistry {
         Ok(())
     }
 
-    fn release(&mut self, pid: u64, generation: InstanceGeneration) -> bool {
+    /// Look up the projection for `fd` under `(pid, generation)`.
+    pub(crate) fn projection_for(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Result<LinuxFdProjection, LinuxErrno> {
+        let slot = self.find_slot(pid, generation).ok_or(EBADF)?;
+        slot.table.get(fd).ok_or(EBADF)
+    }
+
+    /// Release the fd table for `(pid, generation)` if present (idempotent).
+    pub(crate) fn release(&mut self, pid: u64, generation: InstanceGeneration) -> bool {
         for slot in &mut self.slots {
             if let Some(entry) = slot {
                 if entry.pid == pid && entry.generation == generation {
@@ -188,8 +238,40 @@ impl LinuxFdRegistry {
         false
     }
 
-    fn occupied(&self) -> usize {
-        self.slots.iter().filter(|slot| slot.is_some()).count()
+    /// Write `bytes` through the capability projected by Linux `fd`.
+    ///
+    /// Routes through `ipc.send_message(pid, handle, …)` so ownership and
+    /// generation checks apply. `personality` selects ConsoleSink serial
+    /// framing ([`console_sink_render_style`]); the global wrapper resolves it
+    /// from the process registry.
+    pub(crate) fn write_fd(
+        &mut self,
+        ipc: &mut IpcEndpointTable,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+        bytes: &[u8],
+        personality: ExecutionPersonality,
+    ) -> Result<usize, LinuxErrno> {
+        let projection = self.projection_for(pid, generation, fd)?;
+        let handle = match projection {
+            LinuxFdProjection::Closed => return Err(EBADF),
+            LinuxFdProjection::ConsoleEndpoint { capability_handle } => capability_handle,
+        };
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let send_len = core::cmp::min(bytes.len(), IPC_MAX_MESSAGE_BYTES);
+        let payload = &bytes[..send_len];
+        match ipc.send_message(pid, handle, payload) {
+            Ok(result) => {
+                if result.endpoint_kind == IpcEndpointKind::ConsoleSink {
+                    emit_console_sink_render(console_sink_render_style(personality), pid, payload);
+                }
+                Ok(result.bytes_sent)
+            }
+            Err(error) => Err(map_ipc_send_error(error)),
+        }
     }
 }
 
@@ -217,13 +299,12 @@ pub(crate) const fn map_ipc_send_error(error: IpcSendError) -> LinuxErrno {
 
 /// Install stdout (fd 1) and stderr (fd 2) projections for a process instance.
 ///
-/// Trusted bootstrap only: callers must have already granted `stdout_handle` /
-/// `stderr_handle` to `pid` via [`crate::ipc::IpcEndpointTable::grant_send_capability`]
-/// (or [`crate::ipc::IpcEndpointTable::grant_console_capability_for_pid`]). Naming
-/// fd 1 without that grant yields no output — [`write_fd`] still goes through
-/// IPC checks.
+/// Trusted bootstrap only. Does **not** validate that the handles are currently
+/// held by `pid` — [`write_fd`] / `send_message` enforce that. M8 callers should
+/// pass the **same** console capability for both fds (shared kernel ConsoleSink
+/// grant); stderr is not distinguishable from stdout on serial in M8.
 ///
-/// fd 0 and fd 3 remain [`LinuxFdProjection::Closed`] for M8.
+/// Rejects [`KERNEL_PROCESS_ID`]. fd 0 and fd 3 remain [`LinuxFdProjection::Closed`].
 pub(crate) fn install_stdio_for_process(
     pid: u64,
     generation: InstanceGeneration,
@@ -242,8 +323,7 @@ pub(crate) fn projection_for(
     generation: InstanceGeneration,
     fd: u64,
 ) -> Result<LinuxFdProjection, LinuxErrno> {
-    let slot = registry_mut().find_slot(pid, generation).ok_or(EBADF)?;
-    slot.table.get(fd).ok_or(EBADF)
+    registry_mut().projection_for(pid, generation, fd)
 }
 
 /// Write `bytes` through the capability projected by Linux `fd`.
@@ -253,34 +333,25 @@ pub(crate) fn projection_for(
 /// - Writes longer than [`IPC_MAX_MESSAGE_BYTES`] (64) return a **short write**:
 ///   only the first 64 bytes are sent and the returned length is `64`. #94
 ///   decides whether the Linux `write` handler loops for the remainder.
-/// - On success for a `ConsoleSink`, serial output is rendered per
-///   [`render_console_sink_for_linux_fd`] (verbatim for Linux-personality senders).
+/// - On success for a `ConsoleSink`, serial output uses
+///   [`console_sink_render_style`] for the sender's trusted personality.
 pub(crate) fn write_fd(
     pid: u64,
     generation: InstanceGeneration,
     fd: u64,
     bytes: &[u8],
 ) -> Result<usize, LinuxErrno> {
-    let projection = projection_for(pid, generation, fd)?;
-    let handle = match projection {
-        LinuxFdProjection::Closed => return Err(EBADF),
-        LinuxFdProjection::ConsoleEndpoint { capability_handle } => capability_handle,
-    };
-    if bytes.is_empty() {
-        return Ok(0);
-    }
-    let send_len = core::cmp::min(bytes.len(), IPC_MAX_MESSAGE_BYTES);
-    let payload = &bytes[..send_len];
-    let table = unsafe { endpoint_table_mut() };
-    match table.send_message(pid, handle, payload) {
-        Ok(result) => {
-            if result.endpoint_kind == IpcEndpointKind::ConsoleSink {
-                render_console_sink_for_linux_fd(pid, payload);
-            }
-            Ok(result.bytes_sent)
-        }
-        Err(error) => Err(map_ipc_send_error(error)),
-    }
+    let personality = unsafe { process_registry_mut().get(pid) }
+        .map(|process| process.execution_personality)
+        .unwrap_or(ExecutionPersonality::Native);
+    registry_mut().write_fd(
+        unsafe { endpoint_table_mut() },
+        pid,
+        generation,
+        fd,
+        bytes,
+        personality,
+    )
 }
 
 /// Release the fd table for `(pid, generation)` if present.
@@ -292,31 +363,23 @@ pub(crate) fn release_for_process(pid: u64, generation: InstanceGeneration) {
     let _ = registry_mut().release(pid, generation);
 }
 
-/// ConsoleSink serial rendering for messages delivered via the Linux fd path.
+/// Apply ConsoleSink serial rendering for the Linux fd path.
 ///
 /// **Decision (M8.5):** reuse `IpcEndpointKind::ConsoleSink` — no new endpoint
-/// kind, no raw console syscall, no new resource class. When the sender process
-/// has [`ExecutionPersonality::LinuxX86_64`], the payload is written to serial
-/// **verbatim** (no `[IPC ] console pid=N:` prefix) so acceptance can extract
-/// the exact bytes `Hello from Linux.\n`. Native personality senders using this
-/// path (unexpected in M8) keep the historical framed line for consistency with
-/// `SYSCALL_NR_IPC_SEND`. The native IPC syscall handler is unchanged and still
-/// owns framing for native `ipc_send`.
-fn render_console_sink_for_linux_fd(sender_pid: u64, payload: &[u8]) {
-    let personality = unsafe { process_registry_mut().get(sender_pid) }
-        .map(|process| process.execution_personality)
-        .unwrap_or(ExecutionPersonality::Native);
-    match personality {
-        ExecutionPersonality::LinuxX86_64 => {
+/// kind, no raw console syscall, no new resource class. Linux personality →
+/// verbatim payload so acceptance can extract `Hello from Linux.\n`. Native
+/// personality on this path keeps framed lines; the native `ipc_send` syscall
+/// handler is unchanged.
+fn emit_console_sink_render(style: ConsoleSinkRenderStyle, sender_pid: u64, payload: &[u8]) {
+    match style {
+        ConsoleSinkRenderStyle::Verbatim => {
             if let Ok(text) = core::str::from_utf8(payload) {
                 kernel_log_fmt(format_args!("{text}"));
             } else {
-                // M8 fixture is ASCII; non-UTF8 still avoids native framing so
-                // extracts stay free of `[IPC ]` prefixes.
                 kernel_log_fmt(format_args!("<non-utf8>\n"));
             }
         }
-        ExecutionPersonality::Native => {
+        ConsoleSinkRenderStyle::NativeFramed => {
             let message = core::str::from_utf8(payload).unwrap_or("<non-utf8>");
             kernel_log_fmt(format_args!("[IPC ] console pid={sender_pid}: {message}\n"));
         }
@@ -326,198 +389,361 @@ fn render_console_sink_for_linux_fd(sender_pid: u64, payload: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::IpcEndpointTable;
+    use crate::ipc::{IPC_CAPABILITY_CAPACITY, IPC_ENDPOINT_CAPACITY};
 
-    fn reset_globals() {
-        registry_mut().clear();
-        unsafe {
-            *endpoint_table_mut() = IpcEndpointTable::new();
-        }
-    }
-
-    fn grant_console_to(pid: u64) -> u64 {
-        let table = unsafe { endpoint_table_mut() };
-        table
-            .grant_console_capability_for_pid(pid)
-            .expect("grant console capability")
+    fn local_pair() -> (LinuxFdRegistry, IpcEndpointTable) {
+        (LinuxFdRegistry::new(), IpcEndpointTable::new())
     }
 
     #[test]
     fn install_and_lookup_stdio_projections() {
-        reset_globals();
+        let (mut fds, mut ipc) = local_pair();
         let generation = InstanceGeneration(3);
-        let stdout = grant_console_to(10);
-        let stderr = grant_console_to(10);
-        install_stdio_for_process(10, generation, stdout, stderr).expect("install");
+        let handle = ipc
+            .grant_console_capability_for_pid(10)
+            .expect("shared console grant");
+        // M8: stdout and stderr project the same console capability.
+        fds.install(10, generation, handle, handle)
+            .expect("install");
 
         assert_eq!(
-            projection_for(10, generation, LINUX_STDOUT_FD).expect("stdout"),
+            fds.projection_for(10, generation, LINUX_STDOUT_FD)
+                .expect("stdout"),
             LinuxFdProjection::ConsoleEndpoint {
-                capability_handle: stdout
+                capability_handle: handle
             }
         );
         assert_eq!(
-            projection_for(10, generation, LINUX_STDERR_FD).expect("stderr"),
+            fds.projection_for(10, generation, LINUX_STDERR_FD)
+                .expect("stderr"),
             LinuxFdProjection::ConsoleEndpoint {
-                capability_handle: stderr
+                capability_handle: handle
             }
         );
         assert_eq!(
-            projection_for(10, generation, 0).expect("stdin closed"),
+            fds.projection_for(10, generation, 0).expect("stdin closed"),
             LinuxFdProjection::Closed
         );
-        assert_eq!(projection_for(10, generation, 99), Err(EBADF));
-        reset_globals();
+        assert_eq!(fds.projection_for(10, generation, 99), Err(EBADF));
+    }
+
+    #[test]
+    fn install_rejects_kernel_process_id() {
+        let (mut fds, _) = local_pair();
+        assert!(fds
+            .install(KERNEL_PROCESS_ID, InstanceGeneration(1), 1, 1)
+            .is_err());
     }
 
     #[test]
     fn write_fd_ebadf_for_closed_and_invalid() {
-        reset_globals();
+        let (mut fds, mut ipc) = local_pair();
         let generation = InstanceGeneration(1);
-        let handle = grant_console_to(11);
-        install_stdio_for_process(11, generation, handle, handle).expect("install");
+        let handle = ipc.grant_console_capability_for_pid(11).expect("grant");
+        fds.install(11, generation, handle, handle)
+            .expect("install");
 
         assert_eq!(
-            write_fd(11, generation, 0, b"x"),
+            fds.write_fd(
+                &mut ipc,
+                11,
+                generation,
+                0,
+                b"x",
+                ExecutionPersonality::LinuxX86_64
+            ),
             Err(EBADF),
             "closed stdin"
         );
         assert_eq!(
-            write_fd(11, generation, 99, b"x"),
+            fds.write_fd(
+                &mut ipc,
+                11,
+                generation,
+                99,
+                b"x",
+                ExecutionPersonality::LinuxX86_64
+            ),
             Err(EBADF),
             "out of range"
         );
         assert_eq!(
-            write_fd(11, InstanceGeneration(99), LINUX_STDOUT_FD, b"x"),
+            fds.write_fd(
+                &mut ipc,
+                11,
+                InstanceGeneration(99),
+                LINUX_STDOUT_FD,
+                b"x",
+                ExecutionPersonality::LinuxX86_64
+            ),
             Err(EBADF),
             "stale generation"
         );
-        reset_globals();
     }
 
     #[test]
     fn registry_exhaustion_is_deterministic() {
-        reset_globals();
-        // Install does not validate handles; use placeholders so this test is
-        // independent of IPC endpoint/capability capacity.
+        let (mut fds, _) = local_pair();
         for i in 0..LINUX_FD_REGISTRY_CAPACITY {
             let pid = 100 + i as u64;
-            install_stdio_for_process(pid, InstanceGeneration(1), 1, 2).expect("fill registry");
+            fds.install(pid, InstanceGeneration(1), 1, 2)
+                .expect("fill registry");
         }
-        assert_eq!(registry_mut().occupied(), LINUX_FD_REGISTRY_CAPACITY);
-        assert!(install_stdio_for_process(999, InstanceGeneration(1), 1, 2).is_err());
-        reset_globals();
+        assert_eq!(fds.occupied(), LINUX_FD_REGISTRY_CAPACITY);
+        assert!(fds.install(999, InstanceGeneration(1), 1, 2).is_err());
     }
 
     #[test]
     fn release_clears_table_and_stale_generation_fails_closed() {
-        reset_globals();
+        let (mut fds, mut ipc) = local_pair();
         let generation = InstanceGeneration(4);
-        let handle = grant_console_to(12);
-        install_stdio_for_process(12, generation, handle, handle).expect("install");
-        release_for_process(12, generation);
-        assert_eq!(projection_for(12, generation, LINUX_STDOUT_FD), Err(EBADF));
+        let handle = ipc.grant_console_capability_for_pid(12).expect("grant");
+        fds.install(12, generation, handle, handle)
+            .expect("install");
+        fds.release(12, generation);
         assert_eq!(
-            write_fd(12, generation, LINUX_STDOUT_FD, b"hello"),
+            fds.projection_for(12, generation, LINUX_STDOUT_FD),
             Err(EBADF)
         );
-        release_for_process(12, InstanceGeneration(1));
-        reset_globals();
+        assert_eq!(
+            fds.write_fd(
+                &mut ipc,
+                12,
+                generation,
+                LINUX_STDOUT_FD,
+                b"hello",
+                ExecutionPersonality::LinuxX86_64
+            ),
+            Err(EBADF)
+        );
     }
 
     #[test]
     fn replacement_process_does_not_inherit_prior_table() {
-        reset_globals();
+        let (mut fds, mut ipc) = local_pair();
         let gen1 = InstanceGeneration(1);
         let gen2 = InstanceGeneration(2);
-        let handle1 = grant_console_to(13);
-        install_stdio_for_process(13, gen1, handle1, handle1).expect("install gen1");
-        release_for_process(13, gen1);
+        let handle1 = ipc
+            .grant_console_capability_for_pid(13)
+            .expect("grant gen1");
+        fds.install(13, gen1, handle1, handle1)
+            .expect("install gen1");
+        fds.release(13, gen1);
+        ipc.teardown_resources_for_pid(13)
+            .expect("teardown gen1 caps");
 
-        let handle2 = grant_console_to(13);
-        install_stdio_for_process(13, gen2, handle2, handle2).expect("install gen2");
+        let handle2 = ipc
+            .grant_console_capability_for_pid(13)
+            .expect("grant gen2");
+        fds.install(13, gen2, handle2, handle2)
+            .expect("install gen2");
 
         assert_eq!(
-            projection_for(13, gen1, LINUX_STDOUT_FD),
+            fds.projection_for(13, gen1, LINUX_STDOUT_FD),
             Err(EBADF),
             "old generation must not see a table"
         );
         assert_eq!(
-            projection_for(13, gen2, LINUX_STDOUT_FD).expect("new table"),
+            fds.projection_for(13, gen2, LINUX_STDOUT_FD)
+                .expect("new table"),
             LinuxFdProjection::ConsoleEndpoint {
                 capability_handle: handle2
             }
         );
         assert_ne!(handle1, handle2);
-        reset_globals();
     }
 
     #[test]
     fn naming_fd_one_without_grant_yields_no_output() {
-        reset_globals();
+        let (mut fds, mut ipc) = local_pair();
         let generation = InstanceGeneration(1);
-        // Install a handle granted to another pid — fd 1 is not authority.
-        let foreign = grant_console_to(50);
-        install_stdio_for_process(51, generation, foreign, foreign).expect("install ungranted");
+        let foreign = ipc
+            .grant_console_capability_for_pid(50)
+            .expect("grant to other pid");
+        fds.install(51, generation, foreign, foreign)
+            .expect("install ungranted");
 
-        let table = unsafe { endpoint_table_mut() };
         assert_eq!(
-            write_fd(51, generation, LINUX_STDOUT_FD, b"secret"),
+            fds.write_fd(
+                &mut ipc,
+                51,
+                generation,
+                LINUX_STDOUT_FD,
+                b"secret",
+                ExecutionPersonality::LinuxX86_64
+            ),
             Err(EACCES),
             "ungranted handle must be rejected by IpcEndpointTable"
         );
         assert_eq!(
-            table.endpoint_message(0),
+            ipc.endpoint_message(0),
             Some(&b""[..]),
             "no payload delivered without a real grant to the writer pid"
         );
-        reset_globals();
     }
 
     #[test]
     fn authorized_write_delivers_through_real_endpoint_table() {
-        reset_globals();
+        let (mut fds, mut ipc) = local_pair();
         let generation = InstanceGeneration(7);
-        let handle = grant_console_to(20);
-        install_stdio_for_process(20, generation, handle, handle).expect("install");
+        let handle = ipc.grant_console_capability_for_pid(20).expect("grant");
+        fds.install(20, generation, handle, handle)
+            .expect("install");
 
         assert_eq!(
-            write_fd(20, generation, LINUX_STDOUT_FD, b"Hello from Linux.\n"),
+            fds.write_fd(
+                &mut ipc,
+                20,
+                generation,
+                LINUX_STDOUT_FD,
+                b"Hello from Linux.\n",
+                ExecutionPersonality::LinuxX86_64
+            ),
             Ok(18)
         );
-        let table = unsafe { endpoint_table_mut() };
-        assert_eq!(table.endpoint_message(0), Some(&b"Hello from Linux.\n"[..]));
-        reset_globals();
+        assert_eq!(ipc.endpoint_message(0), Some(&b"Hello from Linux.\n"[..]));
     }
 
     #[test]
     fn short_write_caps_at_ipc_max_message_bytes() {
-        reset_globals();
+        let (mut fds, mut ipc) = local_pair();
         let generation = InstanceGeneration(1);
-        let handle = grant_console_to(21);
-        install_stdio_for_process(21, generation, handle, handle).expect("install");
+        let handle = ipc.grant_console_capability_for_pid(21).expect("grant");
+        fds.install(21, generation, handle, handle)
+            .expect("install");
 
         let mut oversized = [b'a'; IPC_MAX_MESSAGE_BYTES + 8];
         oversized[0] = b'H';
         assert_eq!(
-            write_fd(21, generation, LINUX_STDOUT_FD, &oversized),
+            fds.write_fd(
+                &mut ipc,
+                21,
+                generation,
+                LINUX_STDOUT_FD,
+                &oversized,
+                ExecutionPersonality::LinuxX86_64
+            ),
             Ok(IPC_MAX_MESSAGE_BYTES)
         );
-        let table = unsafe { endpoint_table_mut() };
-        let delivered = table.endpoint_message(0).expect("message");
+        let delivered = ipc.endpoint_message(0).expect("message");
         assert_eq!(delivered.len(), IPC_MAX_MESSAGE_BYTES);
         assert_eq!(delivered[0], b'H');
-        reset_globals();
     }
 
     #[test]
     fn empty_write_returns_zero_without_ipc() {
-        reset_globals();
+        let (mut fds, mut ipc) = local_pair();
         let generation = InstanceGeneration(1);
-        let handle = grant_console_to(22);
-        install_stdio_for_process(22, generation, handle, handle).expect("install");
-        assert_eq!(write_fd(22, generation, LINUX_STDOUT_FD, b""), Ok(0));
-        reset_globals();
+        let handle = ipc.grant_console_capability_for_pid(22).expect("grant");
+        fds.install(22, generation, handle, handle)
+            .expect("install");
+        assert_eq!(
+            fds.write_fd(
+                &mut ipc,
+                22,
+                generation,
+                LINUX_STDOUT_FD,
+                b"",
+                ExecutionPersonality::LinuxX86_64
+            ),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn shared_console_sink_survives_sequential_grant_teardown_cycles() {
+        let (mut fds, mut ipc) = local_pair();
+        // Exceed both endpoint and capability capacities: if each grant created
+        // a new ConsoleSink, this would fail. Shared sink + cap retirement must
+        // keep occupied resources flat across cycles.
+        let cycles = IPC_ENDPOINT_CAPACITY.max(IPC_CAPABILITY_CAPACITY) + 4;
+        let pid = 40u64;
+        let mut generation = InstanceGeneration(1);
+
+        for _ in 0..cycles {
+            let handle = ipc
+                .grant_console_capability_for_pid(pid)
+                .expect("grant on shared sink");
+            fds.install(pid, generation, handle, handle)
+                .expect("install");
+            assert_eq!(
+                fds.write_fd(
+                    &mut ipc,
+                    pid,
+                    generation,
+                    LINUX_STDOUT_FD,
+                    b"hi",
+                    ExecutionPersonality::LinuxX86_64
+                ),
+                Ok(2)
+            );
+            fds.release(pid, generation);
+            ipc.teardown_resources_for_pid(pid)
+                .expect("release holder capabilities");
+
+            let resources = ipc.active_resources();
+            assert_eq!(
+                resources.owned_endpoints, 1,
+                "shared kernel ConsoleSink must remain the sole endpoint"
+            );
+            assert_eq!(
+                resources.held_capabilities, 0,
+                "holder capabilities must be reclaimed each cycle"
+            );
+            generation = InstanceGeneration(generation.0 + 1);
+        }
+    }
+
+    #[test]
+    fn teardown_stales_old_handle_and_fresh_grant_works() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen1 = InstanceGeneration(1);
+        let gen2 = InstanceGeneration(2);
+        let pid = 41u64;
+        let old_handle = ipc
+            .grant_console_capability_for_pid(pid)
+            .expect("first grant");
+        fds.install(pid, gen1, old_handle, old_handle)
+            .expect("install");
+
+        fds.release(pid, gen1);
+        ipc.teardown_resources_for_pid(pid).expect("teardown caps");
+
+        assert_eq!(
+            ipc.send_message(pid, old_handle, b"x"),
+            Err(IpcSendError::StaleCapability)
+        );
+        assert_eq!(
+            fds.write_fd(
+                &mut ipc,
+                pid,
+                gen1,
+                LINUX_STDOUT_FD,
+                b"x",
+                ExecutionPersonality::LinuxX86_64
+            ),
+            Err(EBADF),
+            "old (pid, generation) must fail closed"
+        );
+
+        let new_handle = ipc
+            .grant_console_capability_for_pid(pid)
+            .expect("fresh grant");
+        fds.install(pid, gen2, new_handle, new_handle)
+            .expect("reinstall");
+        assert_eq!(
+            fds.write_fd(
+                &mut ipc,
+                pid,
+                gen2,
+                LINUX_STDOUT_FD,
+                b"ok",
+                ExecutionPersonality::LinuxX86_64
+            ),
+            Ok(2)
+        );
+        assert_ne!(old_handle, new_handle);
+        assert_eq!(ipc.active_resources().owned_endpoints, 1);
     }
 
     #[test]
@@ -535,5 +761,30 @@ mod tests {
     fn linux_fd_registry_capacity_tracks_process_registry() {
         assert_eq!(LINUX_FD_REGISTRY_CAPACITY, PROCESS_REGISTRY_CAPACITY);
         assert_eq!(LINUX_FD_TABLE_CAPACITY, 4);
+    }
+
+    #[test]
+    fn linux_personality_renders_verbatim_native_framed() {
+        assert_eq!(
+            console_sink_render_style(ExecutionPersonality::LinuxX86_64),
+            ConsoleSinkRenderStyle::Verbatim
+        );
+        assert_eq!(
+            console_sink_render_style(ExecutionPersonality::Native),
+            ConsoleSinkRenderStyle::NativeFramed
+        );
+    }
+
+    #[test]
+    fn grant_console_reuses_single_kernel_owned_sink() {
+        let mut ipc = IpcEndpointTable::new();
+        let _h1 = ipc
+            .grant_console_capability_for_pid(1)
+            .expect("first grant creates sink");
+        let _h2 = ipc
+            .grant_console_capability_for_pid(2)
+            .expect("second grant reuses sink");
+        assert_eq!(ipc.active_resources().owned_endpoints, 1);
+        assert_eq!(ipc.active_resources().held_capabilities, 2);
     }
 }
