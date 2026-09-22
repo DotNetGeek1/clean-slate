@@ -46,6 +46,8 @@ use crate::interrupt::timer::initialize_timer;
 use crate::interrupt::timer::report_timer_contract;
 use crate::mm::address_space::set_kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::frame_allocator::set_kernel_direct_map_ready;
+use crate::mm::kernel_bootstrap::install_kernel_owned_root;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::inspect_current_mapping;
 use crate::mm::region::ReservedRange;
@@ -225,7 +227,7 @@ fn run_inner() -> Result<(), &'static str> {
         normalized.reserved_bytes() / (1024 * 1024)
     ));
 
-    let allocator = PageAllocator::new(&normalized)?;
+    let mut allocator = PageAllocator::new(&normalized)?;
     let stats = allocator.stats();
     serial_write_fmt(format_args!(
         "[MEM ] pages: total={} allocated={} free={}\n",
@@ -248,6 +250,14 @@ fn run_inner() -> Result<(), &'static str> {
     set_privilege_stack(syscall_kernel_stack_top)?;
     initialize_syscall_abi(syscall_kernel_stack_top)?;
 
+    let kernel_root = install_kernel_owned_root(&mut allocator, &normalized)?;
+    serial_write_fmt(format_args!(
+        "[MM  ] kernel-owned root installed: {:#018x}\n",
+        kernel_root
+    ));
+    set_kernel_root_frame(kernel_root);
+    set_kernel_direct_map_ready();
+
     let inspected = inspect_current_mapping()?;
     serial_write_fmt(format_args!(
         "[MM  ] current mapping: {:#018x} -> {:#018x}\n",
@@ -256,13 +266,11 @@ fn run_inner() -> Result<(), &'static str> {
 
     #[cfg(feature = "m1-self-test")]
     {
-        let mut allocator = allocator;
         exercise_mapping(&mut allocator)?;
         serial_write_line("[MM  ] scratch page map/unmap OK");
     }
 
     serial_write_line("[MM  ] paging initialized");
-    set_kernel_root_frame(current_root_frame_address());
 
     #[cfg(feature = "m1-self-test")]
     {

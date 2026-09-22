@@ -1,12 +1,15 @@
 pub(crate) mod address_space;
 pub(crate) mod frame_allocator;
 pub(crate) mod image_loader;
+pub(crate) mod kernel_bootstrap;
+pub(crate) mod layout;
 pub(crate) mod paging;
 pub(crate) mod region;
 pub(crate) mod user_mapping;
 
+pub(crate) use layout::{kernel_map_ptr, phys_to_virt, PHYSICAL_MEMORY_OFFSET};
+
 pub(super) const PAGE_SIZE: u64 = 4096;
-pub(super) const PHYSICAL_MEMORY_OFFSET: u64 = 0;
 
 pub(super) const USER_CANONICAL_TOP_EXCLUSIVE: u64 = 1 << 47;
 

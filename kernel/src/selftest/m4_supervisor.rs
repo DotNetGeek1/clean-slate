@@ -23,7 +23,7 @@ use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::image_loader::map_embedded_segments;
 use crate::mm::paging::zero_page;
 use crate::mm::PAGE_SIZE;
-use crate::mm::PHYSICAL_MEMORY_OFFSET;
+use crate::mm::phys_to_virt;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
@@ -153,7 +153,7 @@ fn create_userspace_supervisor_process(
     };
     unsafe {
         ptr::write(
-            (PHYSICAL_MEMORY_OFFSET + data_frame_address) as *mut SupervisorBootstrap,
+            (phys_to_virt(data_frame_address)) as *mut SupervisorBootstrap,
             bootstrap,
         );
     }

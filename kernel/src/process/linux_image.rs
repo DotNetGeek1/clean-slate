@@ -41,7 +41,7 @@ use crate::mm::address_space::{
 };
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::image_loader::{map_load_plan_segments, map_user_stack_pages};
-use crate::mm::{align_down, PAGE_SIZE, PHYSICAL_MEMORY_OFFSET, USER_CANONICAL_TOP_EXCLUSIVE};
+use crate::mm::{align_down, phys_to_virt, PAGE_SIZE, USER_CANONICAL_TOP_EXCLUSIVE};
 use clean_slate_elf::{
     parse_load_plan, Elf64Header, LoadPlan, LoadPlanError, LoadPlanPolicy, ELF64_PHDR_SIZE,
     ET_EXEC, MAX_LOAD_SEGMENTS, PT_DYNAMIC, PT_INTERP, PT_LOAD,
@@ -603,7 +603,7 @@ fn write_initial_stack_image(
         unsafe {
             ptr::copy_nonoverlapping(
                 stack.bytes[offset..offset + chunk].as_ptr(),
-                (PHYSICAL_MEMORY_OFFSET + frame + in_page as u64) as *mut u8,
+                (phys_to_virt(frame + in_page as u64)) as *mut u8,
                 chunk,
             );
         }

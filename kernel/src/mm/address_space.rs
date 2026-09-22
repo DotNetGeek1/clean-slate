@@ -5,6 +5,7 @@
 use crate::arch::x86_64::cpu::without_write_protect;
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::layout::KERNEL_USER_PML4_SLOT_END;
 use crate::mm::paging::offset_page_table_for_root;
 use crate::mm::paging::page_table_mut;
 use crate::mm::paging::page_table_ref;
@@ -247,10 +248,9 @@ pub(crate) fn activate_address_space_root(root_frame: u64) {
 }
 
 #[allow(dead_code)]
-fn sanitize_kernel_root_entries(root: &mut PageTable, user_region_base: VirtAddr) {
-    let user_slot_index = ((user_region_base.as_u64() >> 39) & 0x1ff) as usize;
+fn sanitize_kernel_root_entries(root: &mut PageTable, _user_region_base: VirtAddr) {
     for (index, entry) in root.iter_mut().enumerate() {
-        if index == user_slot_index {
+        if index < KERNEL_USER_PML4_SLOT_END {
             entry.set_unused();
             continue;
         }
@@ -267,11 +267,10 @@ fn sanitize_kernel_root_entries(root: &mut PageTable, user_region_base: VirtAddr
 #[allow(dead_code)]
 pub(crate) fn validate_supervisor_only_kernel_root_entries(
     root: &PageTable,
-    user_region_base: VirtAddr,
+    _user_region_base: VirtAddr,
 ) -> Result<(), &'static str> {
-    let user_slot_index = ((user_region_base.as_u64() >> 39) & 0x1ff) as usize;
     for (index, entry) in root.iter().enumerate() {
-        if index == user_slot_index || entry.is_unused() {
+        if index < KERNEL_USER_PML4_SLOT_END || entry.is_unused() {
             continue;
         }
         if entry.flags().contains(PageTableFlags::USER_ACCESSIBLE) {
@@ -418,7 +417,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kernel_root_sanitization_clears_user_flags_and_user_slot() {
+    fn kernel_root_sanitization_clears_user_flags_and_user_slots() {
         let user_region_base = VirtAddr::new(0x0000_4000_0000_0000);
         let user_slot_index = ((user_region_base.as_u64() >> 39) & 0x1ff) as usize;
         let mut root = PageTable::new();
@@ -434,7 +433,7 @@ mod tests {
         sanitize_kernel_root_entries(&mut root, user_region_base);
 
         assert!(!root[0].flags().contains(PageTableFlags::USER_ACCESSIBLE));
-        assert!(root[0].flags().contains(PageTableFlags::WRITABLE));
+        assert!(root[0].is_unused());
         assert!(root[user_slot_index].is_unused());
         assert_eq!(
             validate_supervisor_only_kernel_root_entries(&root, user_region_base),
@@ -445,9 +444,7 @@ mod tests {
     #[test]
     fn kernel_root_validation_rejects_inherited_user_accessible_entry() {
         let user_region_base = VirtAddr::new(0x0000_4000_0000_0000);
-        let user_slot_index = ((user_region_base.as_u64() >> 39) & 0x1ff) as usize;
         let mut root = PageTable::new();
-        root[user_slot_index].set_unused();
         root[511].set_addr(
             PhysAddr::new(0x3000),
             PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,

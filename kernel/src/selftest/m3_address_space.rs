@@ -37,7 +37,7 @@ use crate::mm::paging::page_table_ref;
 use crate::mm::paging::zero_page;
 use crate::mm::user_mapping::relevant_userspace_leaf_flags;
 use crate::mm::PAGE_SIZE;
-use crate::mm::PHYSICAL_MEMORY_OFFSET;
+use crate::mm::phys_to_virt;
 use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::process_registry_mut;
@@ -166,7 +166,7 @@ fn initialize_userspace_address_space_page(
     zero_page(frame_address);
     unsafe {
         ptr::write(
-            (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut UserspaceAddressSpaceTestPage,
+            (phys_to_virt(frame_address)) as *mut UserspaceAddressSpaceTestPage,
             UserspaceAddressSpaceTestPage {
                 observed_value,
                 probe_address,
@@ -181,7 +181,7 @@ fn copy_userspace_address_space_payload(frame_address: u64) {
     unsafe {
         ptr::copy_nonoverlapping(
             &raw const clean_slate_user_address_space_test_start,
-            (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
+            (phys_to_virt(frame_address)) as *mut u8,
             payload_size,
         );
     }
@@ -272,7 +272,7 @@ fn create_userspace_process(
         zero_page(private_frame_address);
         unsafe {
             ptr::write_volatile(
-                (PHYSICAL_MEMORY_OFFSET + private_frame_address) as *mut u64,
+                (phys_to_virt(private_frame_address)) as *mut u64,
                 expected_value,
             );
         }

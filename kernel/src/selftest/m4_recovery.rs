@@ -28,7 +28,7 @@ use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::zero_page;
 use crate::mm::PAGE_SIZE;
-use crate::mm::PHYSICAL_MEMORY_OFFSET;
+use crate::mm::phys_to_virt;
 use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
@@ -176,7 +176,7 @@ pub(crate) fn publish_recovery_bootstrap(update: impl FnOnce(&mut RecoveryBootst
         if state.bootstrap_frame != 0 {
             unsafe {
                 ptr::write(
-                    (PHYSICAL_MEMORY_OFFSET + state.bootstrap_frame) as *mut RecoveryBootstrap,
+                    (phys_to_virt(state.bootstrap_frame)) as *mut RecoveryBootstrap,
                     published,
                 );
             }
@@ -190,7 +190,7 @@ fn read_published_bootstrap() -> Option<RecoveryBootstrap> {
         return None;
     }
     Some(unsafe {
-        ptr::read((PHYSICAL_MEMORY_OFFSET + state.bootstrap_frame) as *const RecoveryBootstrap)
+        ptr::read((phys_to_virt(state.bootstrap_frame)) as *const RecoveryBootstrap)
     })
 }
 
@@ -214,7 +214,7 @@ fn copy_userspace_payload(frame_address: u64) {
     unsafe {
         ptr::copy_nonoverlapping(
             &raw const clean_slate_user_address_space_test_start,
-            (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
+            (phys_to_virt(frame_address)) as *mut u8,
             userspace_payload_size(),
         );
     }
@@ -258,7 +258,7 @@ fn map_fixture_process(
         .ok_or("allocator could not provide data page")?;
     unsafe {
         ptr::write(
-            (PHYSICAL_MEMORY_OFFSET + data_frame) as *mut FixtureUserPage,
+            (phys_to_virt(data_frame)) as *mut FixtureUserPage,
             page,
         );
     }
@@ -385,7 +385,7 @@ fn map_supervisor_process(
     zero_page(data_frame);
     unsafe {
         ptr::write(
-            (PHYSICAL_MEMORY_OFFSET + data_frame) as *mut RecoveryBootstrap,
+            (phys_to_virt(data_frame)) as *mut RecoveryBootstrap,
             bootstrap,
         );
     }
