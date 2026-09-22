@@ -152,10 +152,12 @@ const M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS: [&str; 6] = [
 ];
 // M8.7 / #98 self-test boot: production launch path observed twice (relaunch),
 // plus native-userspace progress and fail-closed malformed proof. Entry hex is
-// the frozen #96 fixture; `\nHello from Linux.` proves verbatim (no IPC frame).
+// the frozen #96 fixture; `\nHello from Linux.` proves line-start, and
+// `assert_linux_hello_exact_line` requires the exact user-visible line.
 // Note: controller relaunch logs the second `[LNX ] ELF loaded` before the
 // observer emits `[M8.7] first exit observed` / `relaunch observed`.
-const M8_LINUX_HELLO_ACCEPTANCE_MARKERS: [&str; 20] = [
+const M8_LINUX_HELLO_ACCEPTANCE_MARKERS: [&str; 22] = [
+    "[M8.7] native sibling pid=",
     "[LNX ] ELF loaded pid=",
     "entry=0x0000400000400078",
     "[LNX ] personality=x86_64 pid=",
@@ -173,6 +175,7 @@ const M8_LINUX_HELLO_ACCEPTANCE_MARKERS: [&str; 20] = [
     "[LNX ] exit pid=",
     " status=0",
     "[M8.7] second exit observed",
+    "[LNX ] load failed: linux image: bad ELF magic",
     "[M8.7] malformed ELF rejected fail-closed",
     "[M8.7] native progress=",
     "[M8.7] PASS",
@@ -2201,15 +2204,30 @@ fn markers_require_verbatim_linux_hello(markers: &[&str]) -> bool {
         || markers == M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS
 }
 
-/// Fail closed if the hello payload was rendered with native `[IPC ] console`
-/// framing instead of the Linux verbatim projection.
+/// Fail closed unless serial contains the exact user-visible line
+/// `Hello from Linux.` (CRLF-safe) and never an `[IPC ] console`-framed or
+/// prefix-extended variant (`Hello from Linux.XYZ`).
 fn assert_no_ipc_framed_linux_hello(output: &str) -> Result<(), XtaskError> {
+    let mut saw_exact = false;
     for line in output.lines() {
-        if line.contains("[IPC ] console") && line.contains("Hello from Linux.") {
+        let trimmed = line.trim_end_matches('\r');
+        if trimmed.contains("[IPC ] console") && trimmed.contains("Hello from Linux.") {
             return Err(XtaskError::MissingMarker(
                 "Hello from Linux. must not appear on an [IPC ] console line".to_owned(),
             ));
         }
+        if trimmed == "Hello from Linux." {
+            saw_exact = true;
+        } else if trimmed.starts_with("Hello from Linux.") {
+            return Err(XtaskError::MissingMarker(
+                "Hello from Linux. line must be exact (no longer prefix match)".to_owned(),
+            ));
+        }
+    }
+    if !saw_exact {
+        return Err(XtaskError::MissingMarker(
+            "exact line Hello from Linux. required".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -2931,6 +2949,26 @@ mod tests {
 [MEM ] physical allocator initialized\n\
 [BOOT] ExitBootServices OK\n";
         assert!(validate_output_markers(invalid, &M1_ACCEPTANCE_MARKERS).is_err());
+    }
+
+    #[test]
+    fn linux_hello_exact_line_rejects_longer_prefix() {
+        let exact = "[LNX ] personality=x86_64 pid=1\nHello from Linux.\n[LNX ] exit pid=1\n";
+        assert!(assert_no_ipc_framed_linux_hello(exact).is_ok());
+
+        let crlf = "[LNX ] personality=x86_64 pid=1\r\nHello from Linux.\r\n[LNX ] exit pid=1\r\n";
+        assert!(assert_no_ipc_framed_linux_hello(crlf).is_ok());
+
+        let longer = "[LNX ] personality=x86_64 pid=1\nHello from Linux.XYZ\n[LNX ] exit pid=1\n";
+        let err = assert_no_ipc_framed_linux_hello(longer).expect_err("prefix extension");
+        assert!(err.to_string().contains("exact"), "unexpected error: {err}");
+
+        let framed =
+            "[IPC ] console pid=1: Hello from Linux.\nHello from Linux.\n[LNX ] exit pid=1\n";
+        assert!(assert_no_ipc_framed_linux_hello(framed).is_err());
+
+        let missing = "[LNX ] personality=x86_64 pid=1\n[LNX ] exit pid=1\n";
+        assert!(assert_no_ipc_framed_linux_hello(missing).is_err());
     }
 
     #[test]
