@@ -1,21 +1,34 @@
-//! M8.3 Linux personality dispatch self-test.
+//! M8.3/M8.4 Linux personality dispatch + `write`/`exit` self-test.
 //!
 //! Spawns a userspace process with hand-assembled `syscall` probes, sets its
 //! registry `execution_personality` to [`LinuxX86_64`] from trusted kernel code,
-//! and runs a concurrent Native sibling. Proof goes through the production
-//! dispatcher (unsupported `rax=999` → `-ENOSYS`, completion via `rax=1000`).
+//! grants it a console capability and installs the Linux stdio projection
+//! (trusted bootstrap, the same calls #97 will make at launch), and runs a
+//! concurrent Native sibling. Proof goes through the production dispatcher:
+//!
+//! 1. `syscall 999` → userspace checks `rax == -38` (`-ENOSYS`), else `exit(1)`;
+//! 2. `write(1, "Hello from Linux.\n", 18)` → userspace checks `rax == 18`,
+//!    else `exit(2)`; the kernel checks the sink holds exactly those bytes;
+//! 3. `write(7, …)` → userspace checks `rax == -9` (`-EBADF`), else `exit(3)`;
+//! 4. `exit(0)` → the kernel checks production teardown released the process,
+//!    its fd table and its console capability, then the Native sibling's next
+//!    syscall emits `[M8.3] PASS`. Any deviation is a fatal kernel error
+//!    (`[FAIL] …`) so timeouts and wrong statuses fail closed.
 
 use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::arch::x86_64::gdt::userspace_gdt_state;
+use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::diagnostics::serial::serial_write_line;
 use crate::interrupt::timer::initialize_timer;
+use crate::ipc::endpoint_table_mut;
+use crate::ipc::IPC_MAX_MESSAGE_BYTES;
 use crate::mm::address_space::create_process_address_space;
 use crate::mm::address_space::map_process_page;
 use crate::mm::frame_allocator::free_frame;
@@ -23,8 +36,17 @@ use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::zero_page;
 use crate::mm::PAGE_SIZE;
 use crate::mm::PHYSICAL_MEMORY_OFFSET;
+use crate::process::domain::remaining_owned_resource_count;
+use crate::process::domain::resource_snapshot;
+use crate::process::domain::DomainTeardownResult;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
+use crate::process::linux_fd;
+use crate::process::linux_fd::console_sink_render_style;
+use crate::process::linux_fd::ConsoleSinkRenderStyle;
+use crate::process::linux_fd::LINUX_STDOUT_FD;
+use crate::process::live_instance_generation;
+use crate::process::personality::execution_personality_for_pid;
 use crate::process::personality::set_execution_personality;
 use crate::process::personality::ExecutionPersonality;
 use crate::process::process_registry_mut;
@@ -40,31 +62,111 @@ use crate::sched::ThreadKind;
 use crate::sched::ThreadState;
 use crate::selftest::USER_TEST_CODE_ADDRESS;
 use crate::selftest::USER_TEST_PROCESS_STACK_ADDRESS;
+use crate::sync::global_cell::GlobalCell;
 use crate::syscall::initialize_syscall_abi;
-use crate::syscall::linux::M8_LINUX_COMPLETION_OBSERVED;
+use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::linux::M8_LINUX_PROBE_OBSERVED;
 use crate::syscall::linux::M8_NATIVE_PROGRESS;
+use crate::syscall::service_lifecycle_syscall_allocator_mut;
+use clean_slate_linux_abi::{LinuxSyscallRequest, LinuxSyscallResult, EBADF, SYS_WRITE};
+use clean_slate_service_lifecycle::InstanceGeneration;
 use core::ptr;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
 pub(crate) const M8_LINUX_DISPATCH_PASS_MARKER: &str = "[M8.3] PASS";
 
-/// Hand-assembled Linux probe:
-/// `mov rax,999; syscall; mov rbx,-38; cmp rax,rbx; jne fail;
-///  loop: mov rax,1000; syscall; jmp loop; fail: ud2`
-const LINUX_PROBE_CODE: [u8; 43] = [
-    0x48, 0xB8, 0xE7, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, 999
+/// Exact bytes the Linux probe writes to fd 1; shared by the code page, the
+/// kernel-side sink check and host tests. Matches the frozen #96 fixture.
+pub(crate) const M8_LINUX_HELLO_BYTES: [u8; 18] = *b"Hello from Linux.\n";
+
+/// fd the probe uses to provoke `EBADF` (outside the 4-entry Linux fd table).
+const M8_LINUX_BAD_FD: u64 = 7;
+
+/// Byte offset of the message inside the code page (immediately after text).
+const PROBE_MSG_OFFSET: usize = 131;
+/// Byte offsets of the three `exit(n)` failure stubs.
+const PROBE_FAIL1_OFFSET: usize = 89;
+const PROBE_FAIL2_OFFSET: usize = 103;
+const PROBE_FAIL3_OFFSET: usize = 117;
+
+/// Hand-assembled Linux probe text (x86-64, position-independent via RIP-relative
+/// `lea`). Offsets are listed so the relative branch/`lea` displacements below
+/// can be checked by hand and by the host tests.
+///
+/// Encodings used: `mov eax, imm32` = `B8 id` (zero-extends into RAX);
+/// `mov edi, imm32` = `BF id`; `mov edx, imm32` = `BA id`;
+/// `cmp rax, imm8` = `48 83 F8 ib` (sign-extended); `jne rel8` = `75 cb`;
+/// `lea rsi, [rip+rel32]` = `48 8D 35 cd`; `syscall` = `0F 05`;
+/// `xor edi, edi` = `31 FF`; `ud2` = `0F 0B`.
+const LINUX_PROBE_TEXT: [u8; PROBE_MSG_OFFSET] = [
+    // 0x00: mov rax, 999             (unsupported nr probe)
+    0x48, 0xB8, 0xE7, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x0A: syscall
+    0x0F, 0x05, // 0x0C: cmp rax, -38             (-ENOSYS)
+    0x48, 0x83, 0xF8, 0xDA, // 0x10: jne fail1                (0x59 - 0x12 = 0x47)
+    0x75, 0x47,
+    // ---- write(1, msg, 18) ----
+    // 0x12: mov eax, 1               (SYS_WRITE)
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x17: mov edi, 1               (fd = stdout)
+    0xBF, 0x01, 0x00, 0x00, 0x00, // 0x1C: lea rsi, [rip + msg]     (0x83 - 0x23 = 0x60)
+    0x48, 0x8D, 0x35, 0x60, 0x00, 0x00, 0x00, // 0x23: mov edx, 18              (count)
+    0xBA, 0x12, 0x00, 0x00, 0x00, // 0x28: syscall
+    0x0F, 0x05, // 0x2A: cmp rax, 18
+    0x48, 0x83, 0xF8, 0x12, // 0x2E: jne fail2                (0x67 - 0x30 = 0x37)
+    0x75, 0x37,
+    // ---- write(7, msg, 18) → expect -EBADF ----
+    // 0x30: mov eax, 1               (SYS_WRITE)
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x35: mov edi, 7               (fd = 7, not open)
+    0xBF, 0x07, 0x00, 0x00, 0x00, // 0x3A: lea rsi, [rip + msg]     (0x83 - 0x41 = 0x42)
+    0x48, 0x8D, 0x35, 0x42, 0x00, 0x00, 0x00, // 0x41: mov edx, 18              (count)
+    0xBA, 0x12, 0x00, 0x00, 0x00, // 0x46: syscall
+    0x0F, 0x05, // 0x48: cmp rax, -9              (-EBADF)
+    0x48, 0x83, 0xF8, 0xF7, // 0x4C: jne fail3                (0x75 - 0x4E = 0x27)
+    0x75, 0x27, // ---- exit(0) ----
+    // 0x4E: mov eax, 60              (SYS_EXIT)
+    0xB8, 0x3C, 0x00, 0x00, 0x00, // 0x53: xor edi, edi             (status = 0)
+    0x31, 0xFF, // 0x55: syscall
+    0x0F, 0x05, // 0x57: ud2                      (exit must never return)
+    0x0F, 0x0B, // fail1 @ 0x59: exit(1) — -ENOSYS check failed
+    0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60
+    0xBF, 0x01, 0x00, 0x00, 0x00, // mov edi, 1
     0x0F, 0x05, // syscall
-    0x48, 0xBB, 0xDA, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // mov rbx, -38
-    0x48, 0x39, 0xD8, // cmp rax, rbx
-    0x75, 0x0E, // jne fail (+14 → ud2)
-    0x48, 0xB8, 0xE8, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, 1000
-    0x0F, 0x05, // syscall
-    0xEB, 0xF2, // jmp loop (back to mov rax,1000)
     0x0F, 0x0B, // ud2
+    // fail2 @ 0x67: exit(2) — write(1) did not return 18
+    0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60
+    0xBF, 0x02, 0x00, 0x00, 0x00, // mov edi, 2
+    0x0F, 0x05, // syscall
+    0x0F, 0x0B, // ud2
+    // fail3 @ 0x75: exit(3) — write(7) did not return -EBADF
+    0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60
+    0xBF, 0x03, 0x00, 0x00, 0x00, // mov edi, 3
+    0x0F, 0x05, // syscall
+    0x0F,
+    0x0B, // ud2
+          // msg @ 0x83: "Hello from Linux.\n" (appended by `linux_probe_code`)
 ];
+
+const LINUX_PROBE_CODE_LEN: usize = PROBE_MSG_OFFSET + M8_LINUX_HELLO_BYTES.len();
+
+/// Text followed by the message bytes, built at compile time so the message
+/// constant is shared verbatim with the kernel-side check.
+const fn linux_probe_code() -> [u8; LINUX_PROBE_CODE_LEN] {
+    let mut code = [0u8; LINUX_PROBE_CODE_LEN];
+    let mut index = 0;
+    while index < PROBE_MSG_OFFSET {
+        code[index] = LINUX_PROBE_TEXT[index];
+        index += 1;
+    }
+    let mut message_index = 0;
+    while message_index < M8_LINUX_HELLO_BYTES.len() {
+        code[PROBE_MSG_OFFSET + message_index] = M8_LINUX_HELLO_BYTES[message_index];
+        message_index += 1;
+    }
+    code
+}
+
+const LINUX_PROBE_CODE: [u8; LINUX_PROBE_CODE_LEN] = linux_probe_code();
 
 /// Native sibling: `xor rax,rax; syscall; jmp $-7` (version syscall loop).
 const NATIVE_PROGRESS_CODE: [u8; 7] = [
@@ -72,6 +174,37 @@ const NATIVE_PROGRESS_CODE: [u8; 7] = [
     0x0F, 0x05, // syscall
     0xEB, 0xF9, // jmp loop
 ];
+
+/// Bytes the production `write` handler delivered to the fd projection for
+/// the probe's stdout, captured at the delivery point (after
+/// `IpcEndpointTable::send_message` accepted them). One chunk suffices: the
+/// probe writes 18 bytes, well under `IPC_MAX_MESSAGE_BYTES`.
+struct DeliveredRecord {
+    bytes: [u8; IPC_MAX_MESSAGE_BYTES],
+    len: usize,
+    deliveries: usize,
+}
+
+impl DeliveredRecord {
+    const EMPTY: Self = Self {
+        bytes: [0; IPC_MAX_MESSAGE_BYTES],
+        len: 0,
+        deliveries: 0,
+    };
+}
+
+static M8_DELIVERED: GlobalCell<DeliveredRecord> = GlobalCell::new(DeliveredRecord::EMPTY);
+
+/// Trusted identity of the Linux-tagged probe (0 = not yet created).
+static M8_LINUX_PID: AtomicU64 = AtomicU64::new(0);
+static M8_LINUX_GENERATION: AtomicU32 = AtomicU32::new(0);
+/// IPC occupancy before the console grant, for the post-exit reclaim check.
+static M8_IPC_BASELINE_ENDPOINTS: AtomicUsize = AtomicUsize::new(0);
+static M8_IPC_BASELINE_CAPABILITIES: AtomicUsize = AtomicUsize::new(0);
+/// Kernel-side observations, each set exactly once by the production path.
+static M8_LINUX_WRITE_OK: AtomicBool = AtomicBool::new(false);
+static M8_LINUX_EBADF_OBSERVED: AtomicBool = AtomicBool::new(false);
+static M8_LINUX_EXIT_OBSERVED: AtomicBool = AtomicBool::new(false);
 
 struct DispatchProcess {
     process_id: u64,
@@ -162,7 +295,7 @@ fn create_userspace_process(
             process_registry_mut()
                 .insert(Process {
                     id: pid,
-                    instance_generation: clean_slate_service_lifecycle::InstanceGeneration(0),
+                    instance_generation: InstanceGeneration(0),
                     state: ProcessState::Ready,
                     resource_domain: ResourceDomain::with_address_space(pid, address_space),
                     live_threads: 1,
@@ -180,6 +313,45 @@ fn create_userspace_process(
     })()
 }
 
+/// Trusted Linux stdio bootstrap for `pid` — the exact sequence #97 performs
+/// at launch: (1) personality tag (already applied), (2) console grant,
+/// (3) `install_stdio_for_process` with the same handle for fd 1 and fd 2.
+fn install_linux_stdio(pid: u64) -> Result<(), &'static str> {
+    let generation = live_instance_generation(pid)
+        .ok_or("m8 linux probe had no live instance generation after registration")?;
+    if generation.0 == 0 {
+        return Err("m8 linux probe generation must be non-zero");
+    }
+    let personality = execution_personality_for_pid(pid)?;
+    if console_sink_render_style(personality) != ConsoleSinkRenderStyle::Verbatim {
+        return Err("m8 linux probe personality must render console output verbatim");
+    }
+
+    let ipc = unsafe { endpoint_table_mut() };
+    let baseline = ipc.active_resources();
+    if baseline.owned_endpoints != 0 || baseline.held_capabilities != 0 {
+        return Err("m8 linux dispatch self-test requires an empty IPC table at start");
+    }
+    M8_IPC_BASELINE_ENDPOINTS.store(baseline.owned_endpoints, Ordering::Relaxed);
+    M8_IPC_BASELINE_CAPABILITIES.store(baseline.held_capabilities, Ordering::Relaxed);
+
+    let handle = ipc.grant_console_capability_for_pid(pid)?;
+    linux_fd::install_stdio_for_process(pid, generation, handle, handle)?;
+    let granted = ipc.active_resources();
+    if granted.owned_endpoints != baseline.owned_endpoints + 1
+        || granted.held_capabilities != baseline.held_capabilities + 1
+    {
+        return Err("console grant did not create one shared sink and one capability");
+    }
+    if ipc.resources_for_pid(pid).held_capabilities != 1 {
+        return Err("linux probe must hold exactly one console capability");
+    }
+
+    M8_LINUX_PID.store(pid, Ordering::Relaxed);
+    M8_LINUX_GENERATION.store(generation.0, Ordering::Relaxed);
+    Ok(())
+}
+
 fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
     unsafe {
         process_registry_mut().clear();
@@ -187,8 +359,14 @@ fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
         *scheduler_mut() = Scheduler::new();
     }
     M8_LINUX_PROBE_OBSERVED.store(false, Ordering::Relaxed);
-    M8_LINUX_COMPLETION_OBSERVED.store(false, Ordering::Relaxed);
     M8_NATIVE_PROGRESS.store(0, Ordering::Relaxed);
+    M8_LINUX_WRITE_OK.store(false, Ordering::Relaxed);
+    M8_LINUX_EBADF_OBSERVED.store(false, Ordering::Relaxed);
+    M8_LINUX_EXIT_OBSERVED.store(false, Ordering::Relaxed);
+    M8_LINUX_PID.store(0, Ordering::Relaxed);
+    unsafe {
+        *M8_DELIVERED.get() = DeliveredRecord::EMPTY;
+    }
 
     let stacks = unsafe { &*task_stacks_mut() };
     let linux = create_userspace_process(
@@ -197,6 +375,7 @@ fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
         &LINUX_PROBE_CODE,
         ExecutionPersonality::LinuxX86_64,
     )?;
+    install_linux_stdio(linux.process_id)?;
     let native = create_userspace_process(
         allocator,
         task_stack_top(&stacks[1]),
@@ -223,11 +402,17 @@ fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
         native.thread.saved_stack_pointer,
         native.thread.launch_entry,
     )?;
-    let _ = (linux.process_id, native.process_id);
+    let _ = native.process_id;
     Ok(())
 }
 
-pub(crate) fn start_m8_linux_dispatch_self_test(allocator: &mut PageAllocator) -> ! {
+pub(crate) fn start_m8_linux_dispatch_self_test(allocator: PageAllocator) -> ! {
+    // `exit` tears down through the production path, which takes the page
+    // allocator from the same slot the normal boot path installs it into.
+    install_service_lifecycle_syscall_allocator(allocator);
+    let allocator = service_lifecycle_syscall_allocator_mut()
+        .as_mut()
+        .unwrap_or_else(|| fatal_kernel_error("m8 linux dispatch allocator missing"));
     if let Err(message) = install_payload(allocator) {
         fatal_kernel_error(message);
     }
@@ -252,12 +437,141 @@ pub(crate) fn start_m8_linux_dispatch_self_test(allocator: &mut PageAllocator) -
     unsafe { restore_task_context(frame_pointer) }
 }
 
-/// Called from the production Linux dispatcher after each Linux SYSCALL return.
+fn is_linux_probe(pid: u64) -> bool {
+    pid != 0 && pid == M8_LINUX_PID.load(Ordering::Relaxed)
+}
+
+/// Called by the production `write` handler each time the fd projection
+/// accepted a chunk (i.e. after `IpcEndpointTable::send_message` succeeded).
+pub(crate) fn observe_linux_delivered_chunk(pid: u64, fd: u64, delivered: &[u8]) {
+    if !is_linux_probe(pid) {
+        return;
+    }
+    if fd != LINUX_STDOUT_FD {
+        fatal_kernel_error("m8 linux probe delivered bytes through an unexpected fd");
+    }
+    let record = unsafe { &mut *M8_DELIVERED.get() };
+    if record.deliveries != 0 || delivered.len() > IPC_MAX_MESSAGE_BYTES {
+        fatal_kernel_error("m8 linux probe delivered more than the single expected chunk");
+    }
+    record.bytes[..delivered.len()].copy_from_slice(delivered);
+    record.len = delivered.len();
+    record.deliveries = 1;
+}
+
+/// Exactly one delivery happened and it carried exactly [`M8_LINUX_HELLO_BYTES`].
+fn delivered_exactly_hello() -> bool {
+    let record = unsafe { &*M8_DELIVERED.get() };
+    record.deliveries == 1 && record.bytes[..record.len] == M8_LINUX_HELLO_BYTES[..]
+}
+
+/// Called by the production Linux dispatcher after every returning handler.
+///
+/// Verifies the two `write` probes from the kernel side: the fd 1 write must
+/// report exactly 18 bytes **and** the fd projection must have accepted exactly
+/// [`M8_LINUX_HELLO_BYTES`] in one delivery; the fd 7 write must report `EBADF`
+/// without any delivery. Anything else is a fatal self-test failure.
+pub(crate) fn observe_linux_write_result(
+    pid: u64,
+    request: &LinuxSyscallRequest,
+    result: LinuxSyscallResult,
+) {
+    if !is_linux_probe(pid) || request.nr != SYS_WRITE {
+        return;
+    }
+    let fd = request.args[0];
+    match (fd, result) {
+        (LINUX_STDOUT_FD, Ok(count)) if count == M8_LINUX_HELLO_BYTES.len() as u64 => {
+            if !delivered_exactly_hello() {
+                fatal_kernel_error(
+                    "m8 write(1) returned 18 but the sink did not receive the bytes",
+                );
+            }
+            M8_LINUX_WRITE_OK.store(true, Ordering::Relaxed);
+        }
+        (LINUX_STDOUT_FD, _) => {
+            fatal_kernel_error("m8 write(1) did not return the full 18-byte count");
+        }
+        (M8_LINUX_BAD_FD, Err(EBADF)) => {
+            if !delivered_exactly_hello() {
+                fatal_kernel_error("m8 write(7) must not deliver anything to the sink");
+            }
+            M8_LINUX_EBADF_OBSERVED.store(true, Ordering::Relaxed);
+        }
+        (M8_LINUX_BAD_FD, _) => {
+            fatal_kernel_error("m8 write(7) did not return EBADF");
+        }
+        _ => fatal_kernel_error("m8 linux probe issued an unexpected write fd"),
+    }
+}
+
+/// Called by the production `exit` handler after `teardown_current_process`
+/// returned and before it switches to the next thread.
+///
+/// Confirms the exit status, that the process left the registry, that no
+/// scheduler/IPC resource is still attributed to it, that the Linux fd table
+/// fails closed, and that IPC capability occupancy is back to baseline (the
+/// shared kernel-owned ConsoleSink persists by design).
+pub(crate) fn observe_linux_exit(
+    pid: u64,
+    generation: InstanceGeneration,
+    teardown: &DomainTeardownResult,
+) {
+    if !is_linux_probe(pid) {
+        fatal_kernel_error("m8 exit observed for a process other than the linux probe");
+    }
+    if generation.0 != M8_LINUX_GENERATION.load(Ordering::Relaxed) {
+        fatal_kernel_error("m8 exit observed with an unexpected instance generation");
+    }
+    if teardown.exit_status != 0 {
+        kernel_log_fmt(format_args!(
+            "[M8.3] linux probe exit status={} (1=ENOSYS probe, 2=write count, 3=EBADF)\n",
+            teardown.exit_status
+        ));
+        fatal_kernel_error("m8 linux probe exited with a non-zero status");
+    }
+    if !M8_LINUX_PROBE_OBSERVED.load(Ordering::Relaxed)
+        || !M8_LINUX_WRITE_OK.load(Ordering::Relaxed)
+        || !M8_LINUX_EBADF_OBSERVED.load(Ordering::Relaxed)
+    {
+        fatal_kernel_error("m8 linux probe exited before all probes were observed");
+    }
+    if resource_snapshot(pid).is_ok() {
+        fatal_kernel_error("m8 linux probe remained in the process registry after exit");
+    }
+    if remaining_owned_resource_count(pid) != 0 {
+        fatal_kernel_error("m8 linux probe still owned scheduler/IPC resources after exit");
+    }
+    if linux_fd::projection_for(pid, generation, LINUX_STDOUT_FD) != Err(EBADF) {
+        fatal_kernel_error("m8 linux fd table survived production teardown");
+    }
+    if teardown.released_resources.ipc_handles != 1 {
+        fatal_kernel_error("m8 exit did not release exactly the console capability");
+    }
+    let resources = unsafe { endpoint_table_mut() }.active_resources();
+    if resources.held_capabilities != M8_IPC_BASELINE_CAPABILITIES.load(Ordering::Relaxed) {
+        fatal_kernel_error("m8 console capability was not reclaimed by exit");
+    }
+    if resources.owned_endpoints != M8_IPC_BASELINE_ENDPOINTS.load(Ordering::Relaxed) + 1 {
+        fatal_kernel_error("m8 shared console sink accounting changed across exit");
+    }
+    M8_LINUX_EXIT_OBSERVED.store(true, Ordering::Relaxed);
+}
+
+/// Called from the production dispatcher after each Linux SYSCALL return and
+/// after each Native version syscall. Passes only when every probe and the
+/// production exit have been observed while the Native sibling progressed.
 pub(crate) fn maybe_complete_m8_linux_dispatch() {
     if !M8_LINUX_PROBE_OBSERVED.load(Ordering::Relaxed) {
         return;
     }
-    if !M8_LINUX_COMPLETION_OBSERVED.load(Ordering::Relaxed) {
+    if !M8_LINUX_WRITE_OK.load(Ordering::Relaxed) {
+        return;
+    }
+    if !M8_LINUX_EBADF_OBSERVED.load(Ordering::Relaxed) {
+        return;
+    }
+    if !M8_LINUX_EXIT_OBSERVED.load(Ordering::Relaxed) {
         return;
     }
     if M8_NATIVE_PROGRESS.load(Ordering::Relaxed) == 0 {
@@ -265,4 +579,112 @@ pub(crate) fn maybe_complete_m8_linux_dispatch() {
     }
     kernel_log_line(M8_LINUX_DISPATCH_PASS_MARKER);
     qemu_exit(QEMU_EXIT_SUCCESS);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SYSCALL: [u8; 2] = [0x0F, 0x05];
+    const MOV_EAX_60: [u8; 5] = [0xB8, 0x3C, 0x00, 0x00, 0x00];
+
+    fn rel8_target(jne_offset: usize) -> usize {
+        assert_eq!(
+            LINUX_PROBE_CODE[jne_offset], 0x75,
+            "jne opcode at {jne_offset:#x}"
+        );
+        let rel = LINUX_PROBE_CODE[jne_offset + 1] as i8 as isize;
+        (jne_offset as isize + 2 + rel) as usize
+    }
+
+    fn lea_rsi_target(lea_offset: usize) -> usize {
+        assert_eq!(
+            &LINUX_PROBE_CODE[lea_offset..lea_offset + 3],
+            &[0x48, 0x8D, 0x35],
+            "lea rsi,[rip+rel32] at {lea_offset:#x}"
+        );
+        let rel = i32::from_le_bytes(
+            LINUX_PROBE_CODE[lea_offset + 3..lea_offset + 7]
+                .try_into()
+                .unwrap(),
+        ) as isize;
+        (lea_offset as isize + 7 + rel) as usize
+    }
+
+    #[test]
+    fn probe_code_layout_matches_documented_offsets() {
+        assert_eq!(LINUX_PROBE_CODE.len(), 149);
+        assert!(LINUX_PROBE_CODE.len() <= PAGE_SIZE as usize);
+        assert_eq!(&LINUX_PROBE_CODE[PROBE_MSG_OFFSET..], &M8_LINUX_HELLO_BYTES);
+        assert_eq!(&M8_LINUX_HELLO_BYTES, b"Hello from Linux.\n");
+        assert_eq!(M8_LINUX_HELLO_BYTES.len(), 18);
+    }
+
+    #[test]
+    fn probe_branches_land_on_exit_stubs() {
+        assert_eq!(rel8_target(0x10), PROBE_FAIL1_OFFSET);
+        assert_eq!(rel8_target(0x2E), PROBE_FAIL2_OFFSET);
+        assert_eq!(rel8_target(0x4C), PROBE_FAIL3_OFFSET);
+        for (stub, status) in [
+            (PROBE_FAIL1_OFFSET, 1u8),
+            (PROBE_FAIL2_OFFSET, 2),
+            (PROBE_FAIL3_OFFSET, 3),
+        ] {
+            assert_eq!(&LINUX_PROBE_CODE[stub..stub + 5], &MOV_EAX_60);
+            assert_eq!(
+                &LINUX_PROBE_CODE[stub + 5..stub + 10],
+                &[0xBF, status, 0x00, 0x00, 0x00],
+                "mov edi, {status}"
+            );
+            assert_eq!(&LINUX_PROBE_CODE[stub + 10..stub + 12], &SYSCALL);
+            assert_eq!(&LINUX_PROBE_CODE[stub + 12..stub + 14], &[0x0F, 0x0B]);
+        }
+        // The stubs tile the text end-to-end up to the message.
+        assert_eq!(PROBE_FAIL3_OFFSET + 14, PROBE_MSG_OFFSET);
+    }
+
+    #[test]
+    fn probe_lea_operands_point_at_message() {
+        assert_eq!(lea_rsi_target(0x1C), PROBE_MSG_OFFSET);
+        assert_eq!(lea_rsi_target(0x3A), PROBE_MSG_OFFSET);
+    }
+
+    #[test]
+    fn probe_syscall_arguments_match_contract() {
+        // rax=999 probe, then cmp rax,-38.
+        assert_eq!(&LINUX_PROBE_CODE[0..2], &[0x48, 0xB8]);
+        assert_eq!(
+            u64::from_le_bytes(LINUX_PROBE_CODE[2..10].try_into().unwrap()),
+            999
+        );
+        assert_eq!(&LINUX_PROBE_CODE[0x0A..0x0C], &SYSCALL);
+        assert_eq!(
+            &LINUX_PROBE_CODE[0x0C..0x10],
+            &[0x48, 0x83, 0xF8, (-38i8) as u8]
+        );
+        // write(1, msg, 18)
+        assert_eq!(&LINUX_PROBE_CODE[0x12..0x17], &[0xB8, 1, 0, 0, 0]);
+        assert_eq!(&LINUX_PROBE_CODE[0x17..0x1C], &[0xBF, 1, 0, 0, 0]);
+        assert_eq!(&LINUX_PROBE_CODE[0x23..0x28], &[0xBA, 18, 0, 0, 0]);
+        assert_eq!(&LINUX_PROBE_CODE[0x28..0x2A], &SYSCALL);
+        assert_eq!(&LINUX_PROBE_CODE[0x2A..0x2E], &[0x48, 0x83, 0xF8, 18]);
+        // write(7, msg, 18) → cmp rax,-9
+        assert_eq!(&LINUX_PROBE_CODE[0x30..0x35], &[0xB8, 1, 0, 0, 0]);
+        assert_eq!(
+            &LINUX_PROBE_CODE[0x35..0x3A],
+            &[0xBF, M8_LINUX_BAD_FD as u8, 0, 0, 0]
+        );
+        assert_eq!(&LINUX_PROBE_CODE[0x41..0x46], &[0xBA, 18, 0, 0, 0]);
+        assert_eq!(&LINUX_PROBE_CODE[0x46..0x48], &SYSCALL);
+        assert_eq!(
+            &LINUX_PROBE_CODE[0x48..0x4C],
+            &[0x48, 0x83, 0xF8, (-9i8) as u8]
+        );
+        // exit(0) then ud2
+        assert_eq!(&LINUX_PROBE_CODE[0x4E..0x53], &MOV_EAX_60);
+        assert_eq!(&LINUX_PROBE_CODE[0x53..0x55], &[0x31, 0xFF]);
+        assert_eq!(&LINUX_PROBE_CODE[0x55..0x57], &SYSCALL);
+        assert_eq!(&LINUX_PROBE_CODE[0x57..0x59], &[0x0F, 0x0B]);
+        assert_eq!(M8_LINUX_BAD_FD, 7);
+    }
 }

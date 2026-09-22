@@ -278,8 +278,7 @@ fn run_inner() -> Result<(), &'static str> {
 
     #[cfg(feature = "m8-linux-dispatch-self-test")]
     {
-        let mut allocator = allocator;
-        start_m8_linux_dispatch_self_test(&mut allocator)
+        start_m8_linux_dispatch_self_test(allocator)
     }
 
     #[cfg(all(
