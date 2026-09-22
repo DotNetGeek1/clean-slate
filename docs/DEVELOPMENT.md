@@ -119,6 +119,14 @@ cargo xtask test-m3-syscall
 
 This command builds the kernel with the M3.3 syscall self-test enabled, boots QEMU headlessly, and validates the ordered markers proving timer-enabled repeated ring-3 `syscall/sysretq` round-trips and `[SYSC] syscall entry/return PASS`.
 
+For the M8.3 Linux personality syscall dispatch proof:
+
+```bash
+cargo xtask test-m8-linux-dispatch
+```
+
+This command builds the kernel with `m8-linux-dispatch-self-test`, boots QEMU headlessly, and validates `[M8.3] PASS` after a Linux-tagged userspace process observes `-ENOSYS` for unsupported syscall 999 through the production dispatcher while a Native sibling keeps making progress.
+
 For the bounded M3.4 process/thread lifecycle acceptance path:
 
 ```bash

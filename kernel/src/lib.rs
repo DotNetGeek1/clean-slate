@@ -58,6 +58,7 @@ mod service;
         feature = "m4-recovery-self-test",
         feature = "m3-syscall-self-test",
         feature = "m3-ipc-self-test",
+        feature = "m8-linux-dispatch-self-test",
         feature = "m4-service-lifecycle-self-test",
         feature = "m5-block-self-test",
         feature = "m7-net-device-self-test",
