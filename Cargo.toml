@@ -2,6 +2,7 @@
 members = [ "block",
     "capability",
     "kernel",
+    "linux-abi",
     "net-service",
     "network",
     "service-fixtures",

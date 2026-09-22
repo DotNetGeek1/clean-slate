@@ -58,6 +58,7 @@ clean-slate-block = { path = "../block" }
 clean-slate-network = { path = "../network" }
 rand_core = { version = "=0.6.4", default-features = false, optional = true }
 clean-slate-capability = { path = "../capability" }
+clean-slate-linux-abi = { path = "../linux-abi" }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 clean-slate-store = { path = "../store", optional = true }

@@ -122,6 +122,7 @@ version = "0.0.1"
 dependencies = [
  "clean-slate-block",
  "clean-slate-capability",
+ "clean-slate-linux-abi",
  "clean-slate-network",
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
@@ -130,6 +131,10 @@ dependencies = [
  "uefi",
  "x86_64",
 ]
+
+[[package]]
+name = "clean-slate-linux-abi"
+version = "0.0.1"
 
 [[package]]
 name = "clean-slate-net-service"
