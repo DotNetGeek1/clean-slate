@@ -494,14 +494,73 @@ pub(crate) fn launch_builtin_service(
     }
 }
 
-/// Registers a freshly built process/thread pair with the process registry and
-/// scheduler. Shared tail of every launch path.
+/// Pure registration preconditions shared by the checked launch path and host tests.
 #[cfg(not(any(
     feature = "m1-self-test",
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
-fn register_spawned_process(
+fn registration_preconditions_ok(
+    scheduler_slot: usize,
+    thread_capacity: usize,
+    slot_is_empty: bool,
+    occupied_slots: usize,
+    registry_capacity: usize,
+) -> Result<(), &'static str> {
+    if scheduler_slot >= thread_capacity {
+        return Err("supervised launch: scheduler slot exceeded fixed capacity");
+    }
+    if !slot_is_empty {
+        return Err("supervised launch: scheduler slot was occupied");
+    }
+    if occupied_slots >= registry_capacity {
+        return Err("supervised launch: process registry capacity exceeded");
+    }
+    Ok(())
+}
+
+/// Remove a process that was inserted but whose scheduler configuration failed:
+/// destroy its address space, reap the record and release the registry slot.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+fn rollback_registered_spawned_process(
+    pid: u64,
+    allocator: &mut PageAllocator,
+) -> Result<(), &'static str> {
+    use crate::mm::address_space::destroy_process_address_space;
+    use crate::process::process_registry_mut;
+    use crate::process::reap_process_record;
+
+    let registry = unsafe { process_registry_mut() };
+    let record = registry
+        .get_mut(pid)
+        .ok_or("supervised launch rollback: process missing from registry")?;
+    let address_space = record
+        .resource_domain
+        .take_address_space()
+        .ok_or("supervised launch rollback: process had no address space")?;
+    destroy_process_address_space(&address_space, allocator)?;
+    record.live_threads = 0;
+    reap_process_record(record)?;
+    registry.release_reaped(pid)
+}
+
+/// Registers a freshly built process/thread pair with the process registry and
+/// scheduler without launch preconditions.
+///
+/// Callers must pre-check scheduler/registry capacity (or accept a silent
+/// address-space leak / Ready-without-thread zombie on failure). Prefer
+/// [`register_spawned_process_checked`].
+// TODO(#97): migrate remaining callers to `register_spawned_process_checked`.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+pub(crate) fn register_spawned_process(
     address_space: crate::mm::address_space::ProcessAddressSpace,
     pid: u64,
     tid: u64,
@@ -546,6 +605,122 @@ fn register_spawned_process(
         domain_id: pid,
         scheduler_slot,
     })
+}
+
+/// Transactional registration: pre-check scheduler/registry under
+/// `without_interrupts`, destroy the address space on precondition failure, and
+/// roll back a post-insert `configure_thread` failure fail-closed.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+#[allow(clippy::too_many_arguments)]
+fn register_spawned_process_checked(
+    allocator: &mut PageAllocator,
+    address_space: crate::mm::address_space::ProcessAddressSpace,
+    pid: u64,
+    tid: u64,
+    kernel_stack_top: u64,
+    saved_stack_pointer: u64,
+    launch_entry: u64,
+    scheduler_slot: usize,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    use crate::arch::x86_64::cpu::without_interrupts;
+    use crate::ipc::endpoint_table_mut;
+    use crate::process::personality::ExecutionPersonality;
+    use crate::process::process_registry_mut;
+    use crate::process::Process;
+    use crate::process::ProcessState;
+    use crate::process::ResourceDomain;
+    use crate::process::PROCESS_REGISTRY_CAPACITY;
+    use crate::sched::scheduler_mut;
+    use crate::sched::ThreadKind;
+    use crate::sched::ThreadState;
+
+    enum RegisterOutcome {
+        Ready(SpawnedServiceInstance),
+        Precondition(&'static str),
+        ConfigureFailed { pid: u64, message: &'static str },
+        InsertFailed(&'static str),
+    }
+
+    let mut address_space_slot = Some(address_space);
+    let outcome = without_interrupts(|| {
+        let precondition = unsafe {
+            let scheduler = scheduler_mut();
+            let slot_is_empty = scheduler_slot < scheduler.thread_capacity()
+                && scheduler.threads[scheduler_slot].state == ThreadState::Empty;
+            registration_preconditions_ok(
+                scheduler_slot,
+                scheduler.thread_capacity(),
+                slot_is_empty,
+                process_registry_mut().occupied_slots(),
+                PROCESS_REGISTRY_CAPACITY,
+            )
+        };
+        if let Err(message) = precondition {
+            return RegisterOutcome::Precondition(message);
+        }
+
+        let address_space = match address_space_slot.take() {
+            Some(space) => space,
+            None => {
+                return RegisterOutcome::InsertFailed(
+                    "supervised launch: address space missing during registration",
+                );
+            }
+        };
+        let process = Process {
+            id: pid,
+            instance_generation: clean_slate_service_lifecycle::InstanceGeneration(0),
+            state: ProcessState::Ready,
+            resource_domain: ResourceDomain::with_address_space(pid, address_space),
+            live_threads: 1,
+            exit_status: None,
+            execution_personality: ExecutionPersonality::Native,
+        };
+        if let Err(message) = unsafe { process_registry_mut().insert(process) } {
+            return RegisterOutcome::InsertFailed(message);
+        }
+        if let Err(message) = unsafe {
+            scheduler_mut().configure_thread(
+                scheduler_slot,
+                tid,
+                pid,
+                ThreadKind::User,
+                kernel_stack_top,
+                saved_stack_pointer,
+                launch_entry,
+            )
+        } {
+            return RegisterOutcome::ConfigureFailed { pid, message };
+        }
+        let _ = unsafe { endpoint_table_mut() };
+        RegisterOutcome::Ready(SpawnedServiceInstance {
+            pid,
+            tid,
+            domain_id: pid,
+            scheduler_slot,
+        })
+    });
+
+    match outcome {
+        RegisterOutcome::Ready(instance) => Ok(instance),
+        RegisterOutcome::Precondition(message) => {
+            let address_space = address_space_slot
+                .as_ref()
+                .expect("precondition failure retains address space");
+            discard_address_space(address_space, allocator, message)
+        }
+        RegisterOutcome::ConfigureFailed { pid, message } => {
+            match rollback_registered_spawned_process(pid, allocator) {
+                Ok(()) => Err(message),
+                Err(rollback) => Err(rollback),
+            }
+        }
+        RegisterOutcome::InsertFailed(message) => Err(message),
+    }
 }
 
 /// User mapping flags for a single-page built-in code image.
@@ -815,7 +990,8 @@ fn launch_single_page_service(
         let address_space = slot
             .take()
             .ok_or("supervised service address space missing")?;
-        register_spawned_process(
+        register_spawned_process_checked(
+            allocator,
             address_space,
             pid,
             tid,
@@ -949,7 +1125,8 @@ fn launch_storage_userspace_service(
             let address_space = slot
                 .take()
                 .ok_or("supervised service address space missing")?;
-            register_spawned_process(
+            register_spawned_process_checked(
+                allocator,
                 address_space,
                 pid,
                 tid,
@@ -1060,7 +1237,8 @@ fn launch_m6_fixture_service(
             let address_space = slot
                 .take()
                 .ok_or("supervised service address space missing")?;
-            register_spawned_process(
+            register_spawned_process_checked(
+                allocator,
                 address_space,
                 pid,
                 tid,
@@ -1195,7 +1373,8 @@ fn launch_network_userspace_with_bootstrap(
             let address_space = slot
                 .take()
                 .ok_or("supervised service address space missing")?;
-            register_spawned_process(
+            register_spawned_process_checked(
+                allocator,
                 address_space,
                 pid,
                 tid,
@@ -1217,6 +1396,7 @@ fn launch_network_userspace_with_bootstrap(
     ))
 ))]
 mod tests {
+    use super::registration_preconditions_ok;
     use super::single_page_code_page_flags;
     use x86_64::structures::paging::PageTableFlags;
 
@@ -1227,5 +1407,34 @@ mod tests {
         assert!(flags.contains(PageTableFlags::USER_ACCESSIBLE));
         assert!(!flags.contains(PageTableFlags::WRITABLE));
         assert!(!flags.contains(PageTableFlags::NO_EXECUTE));
+    }
+
+    #[test]
+    fn registration_preconditions_accept_happy_path() {
+        assert!(registration_preconditions_ok(1, 4, true, 0, 8).is_ok());
+    }
+
+    #[test]
+    fn registration_preconditions_reject_slot_out_of_range() {
+        assert_eq!(
+            registration_preconditions_ok(4, 4, true, 0, 8),
+            Err("supervised launch: scheduler slot exceeded fixed capacity")
+        );
+    }
+
+    #[test]
+    fn registration_preconditions_reject_occupied_slot() {
+        assert_eq!(
+            registration_preconditions_ok(1, 4, false, 0, 8),
+            Err("supervised launch: scheduler slot was occupied")
+        );
+    }
+
+    #[test]
+    fn registration_preconditions_reject_registry_full() {
+        assert_eq!(
+            registration_preconditions_ok(1, 4, true, 8, 8),
+            Err("supervised launch: process registry capacity exceeded")
+        );
     }
 }
