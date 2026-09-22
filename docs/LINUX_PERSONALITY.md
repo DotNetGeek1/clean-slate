@@ -172,3 +172,47 @@ generation-0 sentinel).
 
 QEMU proof: `cargo xtask test-m8-linux-dispatch` (`m8-linux-dispatch-self-test`),
 marker `[M8.3] PASS`.
+
+## #95 fd projection
+
+Linux stdio is a **projection** onto existing Clean-Slate IPC console authority, not a new resource class.
+
+### Model
+
+- Each Linux-personality process may own a bounded fd table (`LINUX_FD_TABLE_CAPACITY = 4`, fds `0..3`) stored in a kernel registry keyed by `(pid, InstanceGeneration)`.
+- Registry capacity equals `PROCESS_REGISTRY_CAPACITY` (not a separate soft limit).
+- The table is **not** a field on `Process` (avoids spawn / literal churn).
+- fd integers are compatibility-local only. Authority is always an `IpcEndpointTable` send-capability handle granted to that pid by trusted bootstrap (`grant_console_capability_for_pid` / `grant_send_capability`).
+- M8 install: fd 1 = stdout, fd 2 = stderr (both `ConsoleEndpoint` projections onto the **same** console capability); fd 0 and fd 3 stay `Closed`. Stderr is not distinguishable from stdout on serial in M8 (acceptable for the fixture).
+- Console sink lifecycle: `grant_console_capability_for_pid` lazily creates **one** kernel-owned `ConsoleSink` and reuses it for every grant. Holder teardown retires that holder's send capability only; the shared endpoint is not destroyed, so replacement launches do not exhaust `IPC_ENDPOINT_CAPACITY`.
+
+### API (for #94 / #97)
+
+- `install_stdio_for_process(pid, generation, stdout_handle, stderr_handle)` — does **not** pre-validate that the handles are held by `pid` (`send_message` does); rejects `KERNEL_PROCESS_ID`. M8 should pass the same handle twice.
+- `projection_for(pid, generation, fd) -> Result<LinuxFdProjection, LinuxErrno>`
+- `write_fd(pid, generation, fd, bytes) -> Result<usize, LinuxErrno>` (core: `LinuxFdRegistry::write_fd(&mut self, &mut IpcEndpointTable, …, personality)`)
+- `release_for_process(pid, generation)` (also hooked from production teardown in `process/domain.rs`)
+- `console_sink_render_style(personality) -> ConsoleSinkRenderStyle` (`Verbatim` for Linux, `NativeFramed` for native)
+
+`write_fd` always calls `IpcEndpointTable::send_message(pid, handle, bytes)`. Naming fd 1 without a real grant yields `EACCES` / no output.
+
+### `IpcSendError` → `LinuxErrno`
+
+| IPC error | Linux errno |
+|-----------|-------------|
+| `InvalidCapability`, `StaleCapability` | `EBADF` |
+| `Unauthorized` | `EACCES` |
+| `InvalidMessageLength` | `EINVAL` |
+
+Closed / out-of-range / missing / stale `(pid, generation)` also return `EBADF`. Empty writes return `Ok(0)` without IPC. Writes longer than `IPC_MAX_MESSAGE_BYTES` (64) return a **short write** of 64 bytes; #94 decides whether to loop.
+
+### ConsoleSink rendering
+
+Reuse `IpcEndpointKind::ConsoleSink` only — no raw console syscall and no new endpoint kind.
+
+- **Linux-personality** senders on the fd path: payload is written to serial **verbatim** so acceptance can extract exactly `Hello from Linux.\n`.
+- **Native** `SYSCALL_NR_IPC_SEND` framing (`[IPC ] console pid=N: …`) is unchanged in the native syscall handler.
+
+### Teardown / replacement
+
+Production `teardown_current_process` / `teardown_process_by_id` call `release_for_process` before IPC capability teardown. A replacement process with the same pid and a new generation gets a fresh table; lookups with a stale generation fail closed (`EBADF`). Holder capability slots are reclaimed so sequential relaunches do not grow endpoint/capability occupancy.
