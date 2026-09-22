@@ -28,6 +28,8 @@ use super::process_registry_mut;
 use super::KERNEL_PROCESS_ID;
 use super::PROCESS_REGISTRY_CAPACITY;
 use crate::diagnostics::log::kernel_log_fmt;
+#[cfg(not(test))]
+use crate::diagnostics::serial::serial_write_bytes;
 use crate::ipc::endpoint_table_mut;
 use crate::ipc::IpcEndpointKind;
 use crate::ipc::IpcEndpointTable;
@@ -363,26 +365,58 @@ pub(crate) fn release_for_process(pid: u64, generation: InstanceGeneration) {
     let _ = registry_mut().release(pid, generation);
 }
 
+/// Deliver Linux ConsoleSink payload bytes to the host serial device.
+///
+/// This is the **only** path by which Linux-personality stdio payload bytes
+/// reach serial (#144 / #147 contract). Callers must pass the exact IPC chunk
+/// bytes; chunking at 64 bytes is invisible to this function — each invocation
+/// is rendered independently and must not reinterpret bytes as UTF-8.
+pub(crate) fn console_write_bytes(bytes: &[u8]) {
+    #[cfg(feature = "m8-linux-dispatch-self-test")]
+    crate::selftest::m8_linux_dispatch::observe_linux_console_write_bytes(bytes);
+
+    #[cfg(test)]
+    {
+        linux_console_byte_test_sink::capture(bytes);
+    }
+
+    #[cfg(not(test))]
+    serial_write_bytes(bytes);
+}
+
 /// Apply ConsoleSink serial rendering for the Linux fd path.
 ///
 /// **Decision (M8.5):** reuse `IpcEndpointKind::ConsoleSink` — no new endpoint
 /// kind, no raw console syscall, no new resource class. Linux personality →
-/// verbatim payload so acceptance can extract `Hello from Linux.\n`. Native
-/// personality on this path keeps framed lines; the native `ipc_send` syscall
-/// handler is unchanged.
+/// byte-transparent payload via [`console_write_bytes`]. Native personality on
+/// this path keeps framed lines; the native `ipc_send` syscall handler is
+/// unchanged.
 fn emit_console_sink_render(style: ConsoleSinkRenderStyle, sender_pid: u64, payload: &[u8]) {
     match style {
-        ConsoleSinkRenderStyle::Verbatim => {
-            if let Ok(text) = core::str::from_utf8(payload) {
-                kernel_log_fmt(format_args!("{text}"));
-            } else {
-                kernel_log_fmt(format_args!("<non-utf8>\n"));
-            }
-        }
+        ConsoleSinkRenderStyle::Verbatim => console_write_bytes(payload),
         ConsoleSinkRenderStyle::NativeFramed => {
             let message = core::str::from_utf8(payload).unwrap_or("<non-utf8>");
             kernel_log_fmt(format_args!("[IPC ] console pid={sender_pid}: {message}\n"));
         }
+    }
+}
+
+#[cfg(test)]
+mod linux_console_byte_test_sink {
+    use std::sync::Mutex;
+
+    static CAPTURE: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+    pub(super) fn reset() {
+        CAPTURE.lock().unwrap().clear();
+    }
+
+    pub(super) fn capture(bytes: &[u8]) {
+        CAPTURE.lock().unwrap().extend_from_slice(bytes);
+    }
+
+    pub(super) fn take() -> Vec<u8> {
+        CAPTURE.lock().unwrap().clone()
     }
 }
 
@@ -786,5 +820,162 @@ mod tests {
             .expect("second grant reuses sink");
         assert_eq!(ipc.active_resources().owned_endpoints, 1);
         assert_eq!(ipc.active_resources().held_capabilities, 2);
+    }
+
+    fn capture_verbatim_write(
+        fds: &mut LinuxFdRegistry,
+        ipc: &mut IpcEndpointTable,
+        pid: u64,
+        generation: InstanceGeneration,
+        bytes: &[u8],
+    ) -> usize {
+        linux_console_byte_test_sink::reset();
+        let written = fds
+            .write_fd(
+                ipc,
+                pid,
+                generation,
+                LINUX_STDOUT_FD,
+                bytes,
+                ExecutionPersonality::LinuxX86_64,
+            )
+            .expect("write");
+        assert_eq!(linux_console_byte_test_sink::take(), bytes[..written]);
+        written
+    }
+
+    #[test]
+    fn verbatim_render_preserves_ascii_nul_and_invalid_utf8() {
+        let generation = InstanceGeneration(1);
+        let (mut fds, mut ipc) = local_pair();
+        let handle = ipc.grant_console_capability_for_pid(30).expect("grant");
+        fds.install(30, generation, handle, handle)
+            .expect("install");
+        let payload = b"ok\0\xff\xfe\x80";
+        assert_eq!(
+            capture_verbatim_write(&mut fds, &mut ipc, 30, generation, payload),
+            payload.len()
+        );
+    }
+
+    #[test]
+    fn verbatim_render_preserves_64_byte_chunk_boundary() {
+        let generation = InstanceGeneration(1);
+        let (mut fds, mut ipc) = local_pair();
+        let handle = ipc.grant_console_capability_for_pid(31).expect("grant");
+        fds.install(31, generation, handle, handle)
+            .expect("install");
+        let mut payload = [0u8; IPC_MAX_MESSAGE_BYTES + 4];
+        payload.fill(b'x');
+        payload[IPC_MAX_MESSAGE_BYTES] = b'y';
+        let written = capture_verbatim_write(&mut fds, &mut ipc, 31, generation, &payload);
+        assert_eq!(written, IPC_MAX_MESSAGE_BYTES);
+        assert_eq!(
+            linux_console_byte_test_sink::take(),
+            &payload[..IPC_MAX_MESSAGE_BYTES]
+        );
+    }
+
+    #[test]
+    fn verbatim_render_preserves_utf8_split_across_chunks() {
+        let generation = InstanceGeneration(1);
+        let (mut fds, mut ipc) = local_pair();
+        let handle = ipc.grant_console_capability_for_pid(32).expect("grant");
+        fds.install(32, generation, handle, handle)
+            .expect("install");
+        let mut payload = [0u8; IPC_MAX_MESSAGE_BYTES + 8];
+        payload[..61].fill(b'a');
+        payload[61..65].copy_from_slice(&[0xF0, 0x9F, 0x98, 0x80]);
+        payload[65..].fill(b'b');
+        linux_console_byte_test_sink::reset();
+        let first = fds
+            .write_fd(
+                &mut ipc,
+                32,
+                generation,
+                LINUX_STDOUT_FD,
+                &payload,
+                ExecutionPersonality::LinuxX86_64,
+            )
+            .expect("first chunk");
+        assert_eq!(first, IPC_MAX_MESSAGE_BYTES);
+        let first_capture = linux_console_byte_test_sink::take();
+        linux_console_byte_test_sink::reset();
+        let second = fds
+            .write_fd(
+                &mut ipc,
+                32,
+                generation,
+                LINUX_STDOUT_FD,
+                &payload[first..],
+                ExecutionPersonality::LinuxX86_64,
+            )
+            .expect("second chunk");
+        let second_capture = linux_console_byte_test_sink::take();
+        let mut combined = first_capture;
+        combined.extend_from_slice(&second_capture);
+        assert_eq!(combined.as_slice(), &payload[..first + second]);
+    }
+
+    #[test]
+    fn write_4096_plus_short_writes_exact_max_to_capture() {
+        let generation = InstanceGeneration(1);
+        let (mut fds, mut ipc) = local_pair();
+        let handle = ipc.grant_console_capability_for_pid(34).expect("grant");
+        fds.install(34, generation, handle, handle)
+            .expect("install");
+        let payload = [0xABu8; crate::syscall::linux::write::LINUX_WRITE_MAX_BYTES + 16];
+        linux_console_byte_test_sink::reset();
+        let written = crate::syscall::linux::write::write_with(
+            &mut fds,
+            &mut ipc,
+            34,
+            generation,
+            LINUX_STDOUT_FD,
+            &payload,
+            ExecutionPersonality::LinuxX86_64,
+        )
+        .expect("write");
+        assert_eq!(
+            written,
+            crate::syscall::linux::write::LINUX_WRITE_MAX_BYTES as u64
+        );
+        assert_eq!(
+            linux_console_byte_test_sink::take(),
+            &payload[..crate::syscall::linux::write::LINUX_WRITE_MAX_BYTES]
+        );
+    }
+
+    #[test]
+    fn repeated_verbatim_writes_concatenate_on_serial_capture() {
+        let generation = InstanceGeneration(1);
+        let (mut fds, mut ipc) = local_pair();
+        let handle = ipc.grant_console_capability_for_pid(33).expect("grant");
+        fds.install(33, generation, handle, handle)
+            .expect("install");
+        linux_console_byte_test_sink::reset();
+        assert_eq!(
+            fds.write_fd(
+                &mut ipc,
+                33,
+                generation,
+                LINUX_STDOUT_FD,
+                b"ab",
+                ExecutionPersonality::LinuxX86_64
+            ),
+            Ok(2)
+        );
+        assert_eq!(
+            fds.write_fd(
+                &mut ipc,
+                33,
+                generation,
+                LINUX_STDOUT_FD,
+                b"cd",
+                ExecutionPersonality::LinuxX86_64
+            ),
+            Ok(2)
+        );
+        assert_eq!(linux_console_byte_test_sink::take(), b"abcd");
     }
 }

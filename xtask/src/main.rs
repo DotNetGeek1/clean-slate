@@ -142,14 +142,21 @@ const M3_SYSCALL_ACCEPTANCE_MARKERS: [&str; 2] = [
 // The leading newline before "Hello from Linux." proves the Linux write reached
 // serial verbatim at the start of a line (no `[IPC ] console pid=N: ` framing);
 // no trailing newline is matched so LF and CRLF captures both pass.
-const M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS: [&str; 6] = [
+const M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[TIME] timer initialized",
     "[LNX ] personality=x86_64 pid=",
     "[LNX ] unsupported syscall=999 errno=ENOSYS",
     "\nHello from Linux.",
+    "[M9.D] bytes=",
+    "[M9.D] PASS",
     "[LNX ] exit pid=",
     "[M8.3] PASS",
 ];
+
+/// `<<M9BYTES>>` + 140-byte inner + `<<END>>` (see `linux_stdio_m9_payload.rs`).
+const M9_STDIO_BLOCK_LEN_EXPECTED: usize = 158;
+/// FNV-1a 32-bit of `M9_STDIO_BLOCK` (host test `m9_block_fnv_matches_payload_module` locks this).
+const M9_STDIO_BLOCK_FNV_EXPECTED: u32 = 0x736c_e50e;
 // M8.7 / #98 self-test boot: production launch path observed twice (relaunch),
 // plus native-userspace progress and fail-closed malformed proof. Entry hex is
 // the frozen #96 fixture; `\nHello from Linux.` proves line-start, and
@@ -2129,6 +2136,15 @@ fn run_acceptance_command(
                 }
                 output.push_str(&chunk.text);
                 if tracker.consume(&output) && !authoritative_pass {
+                    if markers == M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS {
+                        if let Err(error) = validate_m9_stdio_bytes_line(&output) {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(error);
+                        }
+                    }
                     authoritative_pass = true;
                     terminate_child(&mut child)?;
                     child_status = Some(child.wait()?);
@@ -2187,6 +2203,9 @@ fn validate_output_markers(output: &str, markers: &[&str]) -> Result<(), XtaskEr
     }
     let mut tracker = MarkerTracker::new(markers);
     if tracker.consume(output) {
+        if markers == M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS {
+            validate_m9_stdio_bytes_line(output)?;
+        }
         if markers_require_verbatim_linux_hello(markers) {
             assert_no_ipc_framed_linux_hello(output)?;
         }
@@ -2207,6 +2226,38 @@ fn markers_require_verbatim_linux_hello(markers: &[&str]) -> bool {
 /// Fail closed unless serial contains the exact user-visible line
 /// `Hello from Linux.` (CRLF-safe) and never an `[IPC ] console`-framed or
 /// prefix-extended variant (`Hello from Linux.XYZ`).
+fn validate_m9_stdio_bytes_line(output: &str) -> Result<(), XtaskError> {
+    const PREFIX: &str = "[M9.D] bytes=";
+    let rest = output
+        .split(PREFIX)
+        .nth(1)
+        .ok_or_else(|| XtaskError::MissingMarker("[M9.D] bytes= line".to_owned()))?;
+    let header = rest.lines().next().unwrap_or(rest).trim_end_matches('\r');
+    let (count, fnv_part) = header
+        .split_once(" fnv=")
+        .ok_or_else(|| XtaskError::MissingMarker("m9 fnv field".to_owned()))?;
+    let count = count
+        .parse::<usize>()
+        .map_err(|_| XtaskError::MissingMarker("m9 byte count".to_owned()))?;
+    if count != M9_STDIO_BLOCK_LEN_EXPECTED {
+        return Err(XtaskError::MissingMarker(
+            "m9 byte count mismatch".to_owned(),
+        ));
+    }
+    let fnv = u32::from_str_radix(
+        fnv_part
+            .trim()
+            .trim_start_matches("0x")
+            .trim_start_matches("0X"),
+        16,
+    )
+    .map_err(|_| XtaskError::MissingMarker("m9 fnv parse".to_owned()))?;
+    if fnv != M9_STDIO_BLOCK_FNV_EXPECTED {
+        return Err(XtaskError::MissingMarker("m9 fnv mismatch".to_owned()));
+    }
+    Ok(())
+}
+
 fn assert_no_ipc_framed_linux_hello(output: &str) -> Result<(), XtaskError> {
     let mut saw_exact = false;
     for line in output.lines() {
