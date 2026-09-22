@@ -56,6 +56,7 @@ use crate::mm::PAGE_SIZE;
 use crate::process::live_instance_generation;
 use crate::process::personality::dispatch_target_for;
 use crate::process::personality::execution_personality_for_pid;
+use crate::process::personality::ExecutionPersonality;
 use crate::process::personality::SyscallDispatchTarget;
 use crate::process::process_registry_mut;
 use crate::process::KERNEL_PROCESS_ID;
@@ -632,37 +633,39 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
         fatal_kernel_error(message);
     }
 
-    match resolve_syscall_dispatch_target() {
-        SyscallDispatchTarget::LinuxX86_64 => {
-            // Caller identity was already proven in resolve; re-read for generation.
-            match current_syscall_caller_pid() {
-                Ok(pid) => {
-                    let generation = live_instance_generation(pid)
-                        .unwrap_or(clean_slate_service_lifecycle::InstanceGeneration(0));
-                    linux::dispatch(frame, pid, generation);
+    match resolve_syscall_caller() {
+        Some(caller) => match dispatch_target_for(caller.personality) {
+            SyscallDispatchTarget::LinuxX86_64 => match live_instance_generation(caller.pid) {
+                Some(generation) if generation.0 != 0 => {
+                    linux::dispatch(frame, caller.pid, generation);
                     #[cfg(feature = "m8-linux-dispatch-self-test")]
                     crate::selftest::m8_linux_dispatch::maybe_complete_m8_linux_dispatch();
                 }
-                Err(_) => dispatch_native(frame),
-            }
-        }
-        SyscallDispatchTarget::Native => dispatch_native(frame),
+                _ => linux::reject_missing_generation(frame, caller.pid),
+            },
+            SyscallDispatchTarget::Native => dispatch_native(frame),
+        },
+        // Unresolved caller keeps today's native behaviour.
+        None => dispatch_native(frame),
     }
 
     frame as *mut SyscallContext as u64
 }
 
-/// Resolve Native vs Linux from trusted caller identity + registry personality.
+/// Trusted caller identity resolved once per SYSCALL entry.
+struct ResolvedSyscallCaller {
+    pid: u64,
+    personality: ExecutionPersonality,
+}
+
+/// Resolve caller pid + personality from the trusted scheduler/CR3 path.
 ///
-/// If the caller cannot be resolved, keep today's native behaviour.
-fn resolve_syscall_dispatch_target() -> SyscallDispatchTarget {
-    match current_syscall_caller_pid() {
-        Ok(pid) => match execution_personality_for_pid(pid) {
-            Ok(personality) => dispatch_target_for(personality),
-            Err(_) => SyscallDispatchTarget::Native,
-        },
-        Err(_) => SyscallDispatchTarget::Native,
-    }
+/// Returns `None` when the caller cannot be identified; the gate then keeps
+/// native dispatch semantics (pre-#93 behaviour).
+fn resolve_syscall_caller() -> Option<ResolvedSyscallCaller> {
+    let pid = current_syscall_caller_pid().ok()?;
+    let personality = execution_personality_for_pid(pid).ok()?;
+    Some(ResolvedSyscallCaller { pid, personality })
 }
 
 fn dispatch_native(frame: &mut SyscallContext) {

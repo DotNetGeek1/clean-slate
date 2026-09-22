@@ -163,5 +163,12 @@ Linux module layout (`kernel/src/syscall/linux/`):
 First Linux dispatch for a process instance logs
 `[LNX ] personality=x86_64 pid=<pid>` (once per `(pid, instance_generation)`).
 
+If a Linux-tagged process has no live instance generation, dispatch fails closed
+with `-ESRCH` and a bounded `[LNX ] missing generation …` diagnostic (no silent
+generation-0 sentinel).
+
+`copy_user_bytes` returns `Ok(0)` for zero length, clamps long copies to 64 bytes
+(caller decides short-write semantics), and `Err(EFAULT)` on validation failure.
+
 QEMU proof: `cargo xtask test-m8-linux-dispatch` (`m8-linux-dispatch-self-test`),
 marker `[M8.3] PASS`.
