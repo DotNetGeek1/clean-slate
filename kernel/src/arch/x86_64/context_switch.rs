@@ -229,6 +229,7 @@ pub(crate) fn build_userspace_entry_frame(
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
+#[cfg_attr(not(feature = "m9-linux-proc-self-test"), allow(dead_code))]
 pub(crate) fn build_fork_child_userspace_frame(
     kernel_stack_top: u64,
     parent_syscall_frame: &SyscallContext,

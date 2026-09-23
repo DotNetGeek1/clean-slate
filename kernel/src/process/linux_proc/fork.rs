@@ -1,5 +1,7 @@
 //! Linux `fork` — bounded eager address-space copy (#102).
 
+#![cfg_attr(not(feature = "m9-linux-proc-self-test"), allow(dead_code))]
+
 use super::table::{table, table_mut, ProcId, LINUX_MAX_PROC_ENTRIES};
 use crate::arch::x86_64::context_switch::build_fork_child_userspace_frame;
 use crate::arch::x86_64::cpu::without_interrupts;

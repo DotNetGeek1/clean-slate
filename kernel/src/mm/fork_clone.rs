@@ -1,5 +1,7 @@
 //! Bounded eager user mapping clone for Linux `fork` (#102).
 
+#![cfg_attr(not(feature = "m9-linux-proc-self-test"), allow(dead_code))]
+
 use super::address_space::{
     create_process_address_space, destroy_process_address_space, map_process_page,
     unmap_last_user_mapping, ProcessAddressSpace,
