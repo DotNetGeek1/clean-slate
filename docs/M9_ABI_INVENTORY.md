@@ -295,6 +295,19 @@ Ash calls **`getcwd("/", 4096)`** (`true.strace:93`) and **`stat("/work")` → E
 **Applets:** `ash`, `cat`, `echo`, `env`, `grep`, `ls`, `mkdir`, `nslookup`, `printf`, `pwd`, `sh`, `sleep`, `true`, `uname`, `wget` (`frozen/applets.txt`).  
 **Matrix:** `syscall-matrix.toml` — `meta.candidate = "frozen"`, **`syscall_count = 35`**, **`harness_only_count = 0`**, **`highest_fd_observed = 11`**.
 
+### Lane ownership (frozen required syscalls)
+
+Counts and names match `syscall-matrix.toml` only (Phase A table above is historical).
+
+| Owner | Required syscalls |
+|-------|-------------------|
+| **#146** | execve |
+| **#147** | close, dup2, fcntl, **lseek**, read, write, writev; **open** has `secondary_owner = "#147"` |
+| **#101** | getcwd, getdents64, lstat, mkdir, open, stat |
+| **#102** | exit_group, fork, getppid, pipe, wait4 |
+| **#103** | arch_prctl, brk, getpid, ioctl, mmap, munmap, nanosleep, poll, rt_sigaction, rt_sigprocmask, set_tid_address, uname |
+| **#105** | bind, connect, sendto, socket |
+
 ### Rootfs manifest (#104)
 
 | Path | Policy | Content |
@@ -344,6 +357,8 @@ Unchanged from Phase A musl **1.2.5** table: **AT_PAGESZ**, **AT_HWCAP**, **AT_P
 | `httpd` harness | **Removed** — not in frozen binary or matrix (`harness_only_count` 0). |
 | `sleep` blocking demo | **`sleep 0`** / `nanosleep(0)` replaces **`sleep 1`** in frozen commands. |
 | DNS replies | **`read`** on UDP/TCP after **`poll`** now evidenced (no `recvfrom` in traces). |
+| **`getuid`** | **Dropped from required set** — not observed in any `fixtures/busybox/frozen/traces/*.strace` (grep over full corpus). Phase A startup saw it on the desktop defconfig binary; frozen **`allnoconfig` + trimmed applets** static build does not emit nr **102** for the frozen command matrix. |
+| **`lseek`** | **Promoted to required** (#147) — `wget-fixture-http.strace:150` `lseek(1, 0, SEEK_CUR) = -1 ESPIPE` (wget probes stdout before HTTP body `read`). |
 
 ### Explicit non-goals
 
