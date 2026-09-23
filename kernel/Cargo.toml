@@ -54,6 +54,7 @@ m8-linux-image-self-test = ["m8-linux-image", "m3-entry-self-test"]
 # M8.7 (#97): production Linux hello boot path (embeds fixture via m8-linux-image).
 m8-linux-hello = ["m8-linux-image"]
 m8-linux-hello-self-test = ["m8-linux-hello", "m3-entry-self-test"]
+m9-low-va-self-test = ["m8-linux-image", "m3-entry-self-test"]
 
 [lib]
 path = "src/lib.rs"

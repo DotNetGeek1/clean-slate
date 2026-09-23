@@ -23,6 +23,14 @@ pub fn serial_write_fmt(arguments: fmt::Arguments<'_>) {
     let _ = port.write_fmt(arguments);
 }
 
+/// Write raw bytes to COM1 without UTF-8 interpretation or formatting.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn serial_write_bytes(bytes: &[u8]) {
+    for byte in bytes {
+        serial_write_byte(*byte);
+    }
+}
+
 struct SerialPort;
 
 impl Write for SerialPort {

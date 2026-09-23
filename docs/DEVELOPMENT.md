@@ -415,6 +415,14 @@ For the M8.2 Linux ELF loader QEMU proof (fixture image constructed through `lau
 cargo xtask test-m8-linux-image
 ```
 
+For M9 #142 low canonical user VA acceptance (`fixtures/linux-low-hello/hello-linux-low-x86_64`, production `launch_linux_process_with_policy` + `linux_conventional_x86_64()`, CPL3 fault probes for page zero / kernel carve-outs / physmap, LAPIC leaf supervisor-only, teardown baselines; markers `[M9.0] creating`, `[M9.0] PASS`; aliases `m9-low-va`, `m9.142`, `test-m9-low-va`):
+
+```bash
+cargo xtask test-m9-low-va
+```
+
+Build the low hello fixture with `fixtures/linux-low-hello/build.sh` when changing `hello.S` / `hello.ld`.
+
 To launch paused for debugger attach:
 
 ```bash

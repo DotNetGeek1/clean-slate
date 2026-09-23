@@ -28,8 +28,8 @@ use crate::mm::address_space::map_process_page;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::zero_page;
+use crate::mm::phys_to_virt;
 use crate::mm::PAGE_SIZE;
-use crate::mm::PHYSICAL_MEMORY_OFFSET;
 use crate::process::domain::resource_snapshot;
 use crate::process::domain::teardown_current_process;
 use crate::process::domain::ResourceSnapshot;
@@ -162,7 +162,7 @@ fn initialize_userspace_resource_page(frame_address: u64, observed_value: u64, p
     zero_page(frame_address);
     unsafe {
         ptr::write(
-            (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut UserspaceResourceTestPage,
+            (phys_to_virt(frame_address)) as *mut UserspaceResourceTestPage,
             UserspaceResourceTestPage {
                 observed_value,
                 probe_address,
@@ -175,7 +175,7 @@ fn copy_userspace_resource_payload(frame_address: u64) {
     unsafe {
         ptr::copy_nonoverlapping(
             &raw const clean_slate_user_address_space_test_start,
-            (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
+            (phys_to_virt(frame_address)) as *mut u8,
             userspace_resources_test_size(),
         );
     }

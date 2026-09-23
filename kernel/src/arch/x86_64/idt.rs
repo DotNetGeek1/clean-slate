@@ -178,6 +178,12 @@ pub(crate) fn install_interrupt_handlers() {
     }
 }
 
+pub(crate) fn register_idt_carve_out() -> Result<(), &'static str> {
+    let start = core::ptr::addr_of!(IDT) as u64;
+    let end = start + core::mem::size_of::<InterruptDescriptorTable>() as u64;
+    crate::mm::layout::register_kernel_low_carve_out(start, end)
+}
+
 pub(crate) fn exception_name(vector: usize) -> &'static str {
     match vector {
         0 => "divide error",

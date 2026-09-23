@@ -92,6 +92,8 @@ const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[PF  ] rip=0x",
     "[M1  ] PASS",
 ];
+const M9_LOW_VA_ACCEPTANCE_MARKERS: [&str; 2] = ["[M9.0] creating", "[M9.0] PASS"];
+const M9_LOW_VA_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[INT ] double-fault IST initialized",
     "[DF  ] double fault",
@@ -142,14 +144,21 @@ const M3_SYSCALL_ACCEPTANCE_MARKERS: [&str; 2] = [
 // The leading newline before "Hello from Linux." proves the Linux write reached
 // serial verbatim at the start of a line (no `[IPC ] console pid=N: ` framing);
 // no trailing newline is matched so LF and CRLF captures both pass.
-const M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS: [&str; 6] = [
+const M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[TIME] timer initialized",
     "[LNX ] personality=x86_64 pid=",
     "[LNX ] unsupported syscall=999 errno=ENOSYS",
     "\nHello from Linux.",
+    "[M9.D] bytes=",
+    "[M9.D] PASS",
     "[LNX ] exit pid=",
     "[M8.3] PASS",
 ];
+
+/// `<<M9BYTES>>` + 140-byte inner + `<<END>>` (see `linux_stdio_m9_payload.rs`).
+const M9_STDIO_BLOCK_LEN_EXPECTED: usize = 158;
+/// FNV-1a 32-bit of `M9_STDIO_BLOCK` (host test `m9_block_fnv_matches_payload_module` locks this).
+const M9_STDIO_BLOCK_FNV_EXPECTED: u32 = 0x736c_e50e;
 const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS: [&str; 3] = [
     "[TIME] timer initialized",
@@ -597,6 +606,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
     match command {
         ParsedCommand::Run => run_vm(),
         ParsedCommand::TestM1 => run_m1_acceptance(),
+        ParsedCommand::TestM9LowVa => run_m9_low_va_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
         ParsedCommand::TestM3 => run_m3_acceptance(),
         ParsedCommand::TestM3AddressSpace => run_m3_address_space_acceptance(),
@@ -968,6 +978,15 @@ fn run_m1_acceptance() -> Result<(), XtaskError> {
         false,
         &["m1-self-test"],
         Some((&M1_ACCEPTANCE_MARKERS, M1_ACCEPTANCE_TIMEOUT)),
+    )
+}
+
+fn run_m9_low_va_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m9-low-va-self-test"],
+        Some((&M9_LOW_VA_ACCEPTANCE_MARKERS, M9_LOW_VA_ACCEPTANCE_TIMEOUT)),
     )
 }
 
@@ -2148,6 +2167,15 @@ fn run_acceptance_command(
                 }
                 output.push_str(&chunk.text);
                 if tracker.consume(&output) && !authoritative_pass {
+                    if markers == M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS {
+                        if let Err(error) = validate_m9_stdio_bytes_line(&output) {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(error);
+                        }
+                    }
                     authoritative_pass = true;
                     terminate_child(&mut child)?;
                     child_status = Some(child.wait()?);
@@ -2206,6 +2234,9 @@ fn validate_output_markers(output: &str, markers: &[&str]) -> Result<(), XtaskEr
     }
     let mut tracker = MarkerTracker::new(markers);
     if tracker.consume(output) {
+        if markers == M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS {
+            validate_m9_stdio_bytes_line(output)?;
+        }
         if markers_require_verbatim_linux_hello(markers) {
             assert_no_ipc_framed_linux_hello(output)?;
         }
@@ -2226,6 +2257,38 @@ fn markers_require_verbatim_linux_hello(markers: &[&str]) -> bool {
 /// Fail closed unless serial contains the exact user-visible line
 /// `Hello from Linux.` (CRLF-safe) and never an `[IPC ] console`-framed or
 /// prefix-extended variant (`Hello from Linux.XYZ`).
+fn validate_m9_stdio_bytes_line(output: &str) -> Result<(), XtaskError> {
+    const PREFIX: &str = "[M9.D] bytes=";
+    let rest = output
+        .split(PREFIX)
+        .nth(1)
+        .ok_or_else(|| XtaskError::MissingMarker("[M9.D] bytes= line".to_owned()))?;
+    let header = rest.lines().next().unwrap_or(rest).trim_end_matches('\r');
+    let (count, fnv_part) = header
+        .split_once(" fnv=")
+        .ok_or_else(|| XtaskError::MissingMarker("m9 fnv field".to_owned()))?;
+    let count = count
+        .parse::<usize>()
+        .map_err(|_| XtaskError::MissingMarker("m9 byte count".to_owned()))?;
+    if count != M9_STDIO_BLOCK_LEN_EXPECTED {
+        return Err(XtaskError::MissingMarker(
+            "m9 byte count mismatch".to_owned(),
+        ));
+    }
+    let fnv = u32::from_str_radix(
+        fnv_part
+            .trim()
+            .trim_start_matches("0x")
+            .trim_start_matches("0X"),
+        16,
+    )
+    .map_err(|_| XtaskError::MissingMarker("m9 fnv parse".to_owned()))?;
+    if fnv != M9_STDIO_BLOCK_FNV_EXPECTED {
+        return Err(XtaskError::MissingMarker("m9 fnv mismatch".to_owned()));
+    }
+    Ok(())
+}
+
 fn assert_no_ipc_framed_linux_hello(output: &str) -> Result<(), XtaskError> {
     let mut saw_exact = false;
     for line in output.lines() {
@@ -2517,6 +2580,7 @@ enum ParsedCommand {
     TestM5DiskHarness,
     TestM6FixtureSmoke,
     TestM8LinuxImage,
+    TestM9LowVa,
     TestM6Object,
     TestM7NetService,
     TestM7Network,
@@ -2543,6 +2607,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
     match command {
         Some(cmd) if cmd == "run" => ParsedCommand::Run,
         Some(cmd) if cmd == "test-m1" => ParsedCommand::TestM1,
+        Some(cmd) if cmd == "test-m9-low-va" || cmd == "m9-low-va" => ParsedCommand::TestM9LowVa,
         Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,
         Some(cmd) if cmd == "test-m3" => ParsedCommand::TestM3,
         Some(cmd) if cmd == "test-m3-address-space" => ParsedCommand::TestM3AddressSpace,

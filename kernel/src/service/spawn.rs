@@ -790,7 +790,7 @@ fn launch_single_page_service(
     use crate::diagnostics::log::kernel_log_fmt;
     use crate::mm::address_space::map_process_page;
     use crate::mm::paging::zero_page;
-    use crate::mm::PHYSICAL_MEMORY_OFFSET;
+    use crate::mm::phys_to_virt;
     use crate::process::id_allocator::id_allocator_mut;
     use core::ptr;
     use x86_64::structures::paging::PageTableFlags;
@@ -817,7 +817,7 @@ fn launch_single_page_service(
         unsafe {
             ptr::copy_nonoverlapping(
                 &raw const clean_slate_user_address_space_test_start,
-                (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
+                (phys_to_virt(frame_address)) as *mut u8,
                 payload_size,
             );
         }
@@ -899,7 +899,7 @@ fn launch_single_page_service(
             }
             BuiltinServiceImage::ImmediateExit => unsafe {
                 ptr::write(
-                    (PHYSICAL_MEMORY_OFFSET + code_frame) as *mut ImmediateExitPage,
+                    (phys_to_virt(code_frame)) as *mut ImmediateExitPage,
                     ImmediateExitPage {
                         halt_instruction: 0xF4F4,
                     },
@@ -1003,7 +1003,7 @@ fn launch_storage_userspace_service(
     use crate::mm::image_loader::map_embedded_segments;
     use crate::mm::image_loader::map_user_stack_pages;
     use crate::mm::paging::zero_page;
-    use crate::mm::PHYSICAL_MEMORY_OFFSET;
+    use crate::mm::phys_to_virt;
     use crate::process::id_allocator::id_allocator_mut;
     use core::ptr;
     use x86_64::structures::paging::PageTableFlags;
@@ -1076,7 +1076,7 @@ fn launch_storage_userspace_service(
             };
             unsafe {
                 ptr::write(
-                    (PHYSICAL_MEMORY_OFFSET + data_frame) as *mut StorageServiceBootstrap,
+                    (phys_to_virt(data_frame)) as *mut StorageServiceBootstrap,
                     bootstrap,
                 );
             }
@@ -1135,7 +1135,7 @@ fn launch_m6_fixture_service(
     use crate::mm::image_loader::map_embedded_segments;
     use crate::mm::image_loader::map_user_stack_pages;
     use crate::mm::paging::zero_page;
-    use crate::mm::PHYSICAL_MEMORY_OFFSET;
+    use crate::mm::phys_to_virt;
     use crate::process::id_allocator::id_allocator_mut;
     use crate::selftest::m6_fixture::consume_fixture_program;
     use core::ptr;
@@ -1181,7 +1181,7 @@ fn launch_m6_fixture_service(
                     unsafe {
                         ptr::copy_nonoverlapping(
                             bootstrap_bytes[offset..end].as_ptr(),
-                            (PHYSICAL_MEMORY_OFFSET + frame) as *mut u8,
+                            (phys_to_virt(frame)) as *mut u8,
                             end - offset,
                         );
                     }
@@ -1285,7 +1285,7 @@ fn launch_network_userspace_with_bootstrap(
     use crate::mm::image_loader::map_embedded_segments;
     use crate::mm::image_loader::map_user_stack_pages;
     use crate::mm::paging::zero_page;
-    use crate::mm::PHYSICAL_MEMORY_OFFSET;
+    use crate::mm::phys_to_virt;
     use crate::process::id_allocator::id_allocator_mut;
     use core::ptr;
     use x86_64::structures::paging::PageTableFlags;
@@ -1324,7 +1324,7 @@ fn launch_network_userspace_with_bootstrap(
             zero_page(data_frame);
             unsafe {
                 ptr::write(
-                    (PHYSICAL_MEMORY_OFFSET + data_frame) as *mut NetworkServiceBootstrap,
+                    (phys_to_virt(data_frame)) as *mut NetworkServiceBootstrap,
                     bootstrap,
                 );
             }

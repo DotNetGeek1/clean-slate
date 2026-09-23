@@ -9,8 +9,8 @@ use crate::mm::address_space::map_process_page;
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::zero_page;
+use crate::mm::phys_to_virt;
 use crate::mm::PAGE_SIZE;
-use crate::mm::PHYSICAL_MEMORY_OFFSET;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
 use crate::process::personality::ExecutionPersonality;
@@ -70,7 +70,7 @@ pub(crate) fn spawn_native_userspace_process_with_code(
     unsafe {
         ptr::copy_nonoverlapping(
             code.as_ptr(),
-            (PHYSICAL_MEMORY_OFFSET + code_frame_address) as *mut u8,
+            phys_to_virt(code_frame_address) as *mut u8,
             code.len(),
         );
     }

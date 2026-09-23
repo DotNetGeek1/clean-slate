@@ -494,7 +494,7 @@ impl ServiceLifecycleController {
         ))]
         {
             let _ = service_id;
-            return Self::per_slot_kernel_stack_top(scheduler_slot);
+            Self::per_slot_kernel_stack_top(scheduler_slot)
         }
         #[cfg(not(any(
             feature = "m4-recovery-self-test",

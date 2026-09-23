@@ -35,6 +35,11 @@ Decoded request shape: `LinuxSyscallRequest { nr, args: [u64; 6] }`.
 
 M8 required numbers: `SYS_WRITE = 1`, `SYS_EXIT = 60`. Any other number returns `-ENOSYS`; the process continues.
 
+## Load policies and VA windows (M9 / #142)
+
+- **M8 frozen hello:** `LoadPlanPolicy::m8_legacy_slot_x86_64()` / `LINUX_M8_LOAD_POLICY` — single PML4 slot 128, stack at the top of that slot (`launch_linux_process`).
+- **Conventional low ET_EXEC:** `LoadPlanPolicy::linux_conventional_x86_64()` — e.g. static images linked at `0x400000`; `launch_linux_process_with_policy` + `validate_linux_low_va_image` (M9 acceptance). Console capability + stdio install match the M8.7 production sequence before the scheduler runs the image.
+
 ## Errno encoding (Linux vs native)
 
 **Linux:** success is a non-negative value in `RAX`. Failure is two's-complement `-errno` as `u64`. Decode rule: signed values in `[-4095, -1]` are errors (`clean_slate_linux_abi::encode_rax` / `decode_rax`).
@@ -272,8 +277,30 @@ Closed / out-of-range / missing / stale `(pid, generation)` also return `EBADF`.
 
 Reuse `IpcEndpointKind::ConsoleSink` only — no raw console syscall and no new endpoint kind.
 
-- **Linux-personality** senders on the fd path: payload is written to serial **verbatim** so acceptance can extract exactly `Hello from Linux.\n`.
+- **Linux-personality** senders on the fd path: payload bytes reach COM1 through
+  [`console_write_bytes`](../../kernel/src/process/linux_fd.rs) (raw serial write).
+  UTF-8 interpretation and `<non-utf8>` substitution are **not** used (#144).
 - **Native** `SYSCALL_NR_IPC_SEND` framing (`[IPC ] console pid=N: …`) is unchanged in the native syscall handler.
+
+## #144 byte-transparent stdio
+
+Linux `write` still delivers IPC in 64-byte chunks, but **serial projection is
+byte-transparent**: each accepted chunk is written with
+`diagnostics::serial::serial_write_bytes` via
+`linux_fd::console_write_bytes` — the only supported path from Linux stdio
+payload bytes to the host serial device (#147 shared fd core must call this).
+
+```rust
+// kernel/src/process/linux_fd.rs — stdio backend contract for #147
+pub(crate) fn console_write_bytes(bytes: &[u8]);
+```
+
+Properties locked by host tests and `cargo xtask test-m8-linux-dispatch` (M9
+phase): arbitrary bytes (NUL, invalid UTF-8, control), multibyte UTF-8 split
+across chunk boundaries, and 4096-byte single-call short writes are preserved
+without CRLF translation. Kernel self-test emits `[M9.D] bytes=<n> fnv=<hex>`
+over the sentinel-framed block (`<<M9BYTES>>` … `<<END>>`); xtask checks the
+line against `linux_stdio_m9_payload::M9_STDIO_BLOCK_FNV`.
 
 ### Teardown / replacement
 
