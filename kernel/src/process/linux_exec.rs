@@ -405,14 +405,23 @@ pub(crate) fn commit_exec(
             return Err(LinuxImageError::ExecMultiThread);
         }
         let live_gen = process.instance_generation;
+        if process.resource_domain.address_space().is_none() {
+            return Err(LinuxImageError::Registry("exec commit: no address space"));
+        }
+        // Point of no return: from here the process owns the new image. Any
+        // failure below is a kernel invariant violation, not an errno -- returning
+        // an error would resume the old RIP inside the new address space.
         let old = process
             .resource_domain
             .replace_address_space(prepared.address_space)
-            .ok_or(LinuxImageError::Registry("exec commit: no address space"))?;
+            .unwrap_or_else(|| fatal_kernel_error("exec commit: address space vanished"));
         activate_address_space_root(new_root);
-        linux_fd::close_on_exec(pid, live_gen)
-            .map_err(|_| LinuxImageError::Registry("exec commit: close_on_exec failed"))?;
-        destroy_old_exec_address_space(old, allocator)?;
+        if linux_fd::close_on_exec(pid, live_gen).is_err() {
+            fatal_kernel_error("exec commit: close_on_exec failed after address-space swap");
+        }
+        if destroy_old_exec_address_space(old, allocator).is_err() {
+            fatal_kernel_error("exec commit: destroying the old address space failed");
+        }
         Ok::<(), LinuxImageError>(())
     })?;
 
