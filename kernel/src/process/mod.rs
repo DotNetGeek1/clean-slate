@@ -92,10 +92,9 @@ impl ResourceDomain {
         }
     }
 
+    /// Authoritative CR3 root for registry lookup and fail-closed syscall checks.
     pub(crate) fn address_space_root(&self) -> u64 {
-        self.address_space
-            .as_ref()
-            .map_or(self.root_frame, |space| space.root_frame)
+        self.root_frame
     }
 
     pub(crate) fn address_space(&self) -> Option<&ProcessAddressSpace> {

@@ -45,7 +45,9 @@ use clean_slate_elf::{
 use clean_slate_linux_abi::{
     build_initial_stack, StackLayoutError, AT_ENTRY, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM,
 };
+use crate::sync::global_cell::GlobalCell;
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::VirtAddr;
 
 /// Frozen M8 fixture bytes, embedded only when the `m8-linux-image` feature is
@@ -399,6 +401,35 @@ impl From<LoadPlanError> for LinuxImageError {
     }
 }
 
+/// Launch metadata for the initial Linux stack (no image bytes; those live in
+/// scratch or mapped user pages).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxStackLaunchInfo {
+    pub(crate) stack_top: u64,
+    pub(crate) bytes_len: usize,
+    pub(crate) rsp: u64,
+    pub(crate) auxv: [(u64, u64); LINUX_MAX_AUXV_ENTRIES],
+    pub(crate) auxv_len: usize,
+}
+
+impl LinuxStackLaunchInfo {
+    pub(crate) fn image_base(&self) -> u64 {
+        self.stack_top - self.bytes_len as u64
+    }
+}
+
+impl From<&LinuxInitialStack> for LinuxStackLaunchInfo {
+    fn from(stack: &LinuxInitialStack) -> Self {
+        Self {
+            stack_top: stack.stack_top,
+            bytes_len: stack.bytes_len,
+            rsp: stack.rsp,
+            auxv: stack.auxv,
+            auxv_len: stack.auxv_len,
+        }
+    }
+}
+
 /// Initial Linux stack bytes for the top of the stack, built on the host or in
 /// the kernel from the validated plan (pure).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -417,17 +448,65 @@ pub(crate) struct LinuxInitialStack {
 }
 
 impl LinuxInitialStack {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            stack_top: 0,
+            bytes: [0; LINUX_MAX_STACK_IMAGE_BYTES],
+            bytes_len: 0,
+            rsp: 0,
+            auxv: [(0, 0); LINUX_MAX_AUXV_ENTRIES],
+            auxv_len: 0,
+        }
+    }
+
     /// Lowest virtual address covered by the active stack image bytes.
     pub(crate) fn image_base(&self) -> u64 {
         self.stack_top - self.bytes_len as u64
     }
 }
 
-/// Validated, mapping-ready description of a Linux image.
+static KERNEL_INITIAL_STACK_SCRATCH: GlobalCell<LinuxInitialStack> =
+    GlobalCell::new(LinuxInitialStack::empty());
+static KERNEL_LAUNCH_LOAD_PLAN: GlobalCell<Option<LoadPlan>> = GlobalCell::new(None);
+static KERNEL_INITIAL_STACK_SCRATCH_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// Single-CPU scratch for building stack images without placing 8 KiB buffers on
+/// the task stack. Exec and launch never nest.
+pub(crate) fn with_kernel_initial_stack_scratch<R>(
+    operation: impl FnOnce(&mut LinuxInitialStack) -> Result<R, LinuxImageError>,
+) -> Result<R, LinuxImageError> {
+    if KERNEL_INITIAL_STACK_SCRATCH_BUSY.swap(true, Ordering::Acquire) {
+        return Err(LinuxImageError::Registry(
+            "linux initial stack scratch already in use",
+        ));
+    }
+    let result = operation(unsafe { &mut *KERNEL_INITIAL_STACK_SCRATCH.get() });
+    KERNEL_INITIAL_STACK_SCRATCH_BUSY.store(false, Ordering::Release);
+    result
+}
+
+#[cfg(test)]
+fn with_local_initial_stack_scratch<R>(
+    operation: impl FnOnce(&mut LinuxInitialStack) -> Result<R, LinuxImageError>,
+) -> Result<R, LinuxImageError> {
+    let mut stack = LinuxInitialStack::empty();
+    operation(&mut stack)
+}
+
+fn with_initial_stack_scratch<R>(
+    operation: impl FnOnce(&mut LinuxInitialStack) -> Result<R, LinuxImageError>,
+) -> Result<R, LinuxImageError> {
+    if cfg!(test) {
+        with_local_initial_stack_scratch(operation)
+    } else {
+        with_kernel_initial_stack_scratch(operation)
+    }
+}
+
+/// Validated, mapping-ready description of a Linux image (metadata only; the
+/// [`LoadPlan`] lives in scratch or caller storage during kernel builds).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxImagePlan {
-    /// The `clean-slate-elf` plan (segments, entry, phdr metadata).
-    pub(crate) plan: LoadPlan,
     /// `e_entry`; the launch RIP.
     pub(crate) entry: u64,
     /// `AT_PHDR`: user VA of the program-header table.
@@ -437,8 +516,8 @@ pub(crate) struct LinuxImagePlan {
     /// Exact page-table frames the address space will own after mapping
     /// (root + PDPT + distinct PDs + distinct PTs for image and stack).
     pub(crate) page_table_frames: usize,
-    /// Initial stack image and launch RSP.
-    pub(crate) initial_stack: LinuxInitialStack,
+    /// Initial stack launch metadata (bytes are copied from scratch at map time).
+    pub(crate) launch_stack: LinuxStackLaunchInfo,
     /// Window, stack, and argv layout used for this image.
     pub(crate) layout: LinuxImageLayout,
 }
@@ -446,7 +525,7 @@ pub(crate) struct LinuxImagePlan {
 impl LinuxImagePlan {
     /// Launch RSP (16-byte aligned, inside the mapped stack).
     pub(crate) const fn launch_rsp(&self) -> u64 {
-        self.initial_stack.rsp
+        self.launch_stack.rsp
     }
 
     /// Total user pages the address space will map (image + stack; the guard
@@ -649,7 +728,8 @@ pub(crate) fn build_linux_initial_stack(
     phdr_vaddr: u64,
     phnum: u16,
     layout: &LinuxImageLayout,
-) -> Result<LinuxInitialStack, LinuxImageError> {
+    out: &mut LinuxInitialStack,
+) -> Result<(), LinuxImageError> {
     let auxv = [
         (AT_PHDR, phdr_vaddr),
         (AT_PHENT, u64::from(ELF64_PHDR_SIZE)),
@@ -657,8 +737,8 @@ pub(crate) fn build_linux_initial_stack(
         (AT_PAGESZ, PAGE_SIZE),
         (AT_ENTRY, entry),
     ];
-    let mut bytes = [0u8; LINUX_MAX_STACK_IMAGE_BYTES];
-    let buf = &mut bytes[..LINUX_INITIAL_STACK_IMAGE_BYTES];
+    out.bytes.fill(0);
+    let buf = &mut out.bytes[..LINUX_INITIAL_STACK_IMAGE_BYTES];
     let image = build_initial_stack(buf, layout.stack_top, &[layout.argv0], &[], &auxv)
         .map_err(LinuxImageError::InitialStack)?;
     if image.rsp % 16 != 0 || image.rsp < layout.stack_base || image.rsp >= layout.stack_top {
@@ -666,18 +746,15 @@ pub(crate) fn build_linux_initial_stack(
             StackLayoutError::InvalidStackTop,
         ));
     }
-    let mut auxv_storage = [(0u64, 0u64); LINUX_MAX_AUXV_ENTRIES];
+    out.stack_top = layout.stack_top;
+    out.bytes_len = LINUX_INITIAL_STACK_IMAGE_BYTES;
+    out.rsp = image.rsp;
+    out.auxv = [(0u64, 0u64); LINUX_MAX_AUXV_ENTRIES];
     for (index, pair) in auxv.iter().enumerate() {
-        auxv_storage[index] = *pair;
+        out.auxv[index] = *pair;
     }
-    Ok(LinuxInitialStack {
-        stack_top: layout.stack_top,
-        bytes,
-        bytes_len: LINUX_INITIAL_STACK_IMAGE_BYTES,
-        rsp: image.rsp,
-        auxv: auxv_storage,
-        auxv_len: LINUX_AUXV_ENTRIES,
-    })
+    out.auxv_len = LINUX_AUXV_ENTRIES;
+    Ok(())
 }
 
 /// Pure, host-testable validation of a Linux ELF64 image under the M8 policy.
@@ -688,7 +765,14 @@ pub(crate) fn build_linux_initial_stack(
 /// reservation overlap, `AT_PHDR` derivability, mapping and page-table budgets,
 /// and the initial stack layout. Nothing is allocated or mapped.
 pub(crate) fn validate_linux_image(bytes: &[u8]) -> Result<LinuxImagePlan, LinuxImageError> {
-    validate_linux_image_with_policy(bytes, &LINUX_M8_LOAD_POLICY, LinuxImageLayout::m8_legacy())
+    with_initial_stack_scratch(|stack| {
+        validate_linux_image_with_policy(
+            bytes,
+            &LINUX_M8_LOAD_POLICY,
+            LinuxImageLayout::m8_legacy(),
+            stack,
+        )
+    })
 }
 
 /// Validate a Linux image under an arbitrary policy and layout (#142 low VA).
@@ -696,6 +780,7 @@ pub(crate) fn validate_linux_image_with_policy(
     bytes: &[u8],
     policy: &LoadPlanPolicy,
     layout: LinuxImageLayout,
+    stack: &mut LinuxInitialStack,
 ) -> Result<LinuxImagePlan, LinuxImageError> {
     let header = Elf64Header::parse(bytes)?;
     if policy.user_va_lo == LINUX_USER_WINDOW_BASE && policy.user_va_hi == LINUX_USER_WINDOW_END {
@@ -715,18 +800,9 @@ pub(crate) fn validate_linux_image_with_policy(
     let phdr_vaddr = plan
         .phdr_vaddr
         .ok_or(LinuxImageError::ProgramHeadersNotMapped)?;
-    let (image_pages, page_table_frames) =
-        validate_segment_layout_and_budgets(&plan, &layout, bytes)?;
-
-    let initial_stack = build_linux_initial_stack(plan.entry, phdr_vaddr, plan.phnum, &layout)?;
-    finish_linux_image_plan(
-        plan,
-        phdr_vaddr,
-        image_pages,
-        page_table_frames,
-        initial_stack,
-        layout,
-    )
+    build_linux_initial_stack(plan.entry, phdr_vaddr, plan.phnum, &layout, stack)?;
+    let mut load_plan = Some(plan);
+    validate_linux_image_with_stack(bytes, policy, layout, &mut load_plan, stack)
 }
 
 /// Validate segment layout and budgets, then attach a caller-built initial stack (#146).
@@ -734,6 +810,7 @@ pub(crate) fn validate_linux_image_with_stack(
     bytes: &[u8],
     policy: &LoadPlanPolicy,
     layout: LinuxImageLayout,
+    load_plan_out: &mut Option<LoadPlan>,
     initial_stack: &LinuxInitialStack,
 ) -> Result<LinuxImagePlan, LinuxImageError> {
     let header = Elf64Header::parse(bytes)?;
@@ -762,32 +839,31 @@ pub(crate) fn validate_linux_image_with_stack(
             StackLayoutError::InvalidStackTop,
         ));
     }
+    *load_plan_out = Some(plan);
     finish_linux_image_plan(
-        plan,
+        load_plan_out.as_ref().expect("load plan stored"),
         phdr_vaddr,
         image_pages,
         page_table_frames,
-        *initial_stack,
+        initial_stack,
         layout,
     )
 }
 
 fn finish_linux_image_plan(
-    plan: LoadPlan,
+    load_plan: &LoadPlan,
     phdr_vaddr: u64,
     image_pages: u64,
     page_table_frames: usize,
-    initial_stack: LinuxInitialStack,
+    initial_stack: &LinuxInitialStack,
     layout: LinuxImageLayout,
 ) -> Result<LinuxImagePlan, LinuxImageError> {
-    let entry = plan.entry;
     Ok(LinuxImagePlan {
-        plan,
-        entry,
+        entry: load_plan.entry,
         phdr_vaddr,
         image_pages,
         page_table_frames,
-        initial_stack,
+        launch_stack: LinuxStackLaunchInfo::from(initial_stack),
         layout,
     })
 }
@@ -849,18 +925,32 @@ fn validate_segment_layout_and_budgets(
 
 /// Validate the M9 low-VA fixture under [`LINUX_CONVENTIONAL_LOAD_POLICY`].
 #[cfg(any(feature = "m9-low-va-self-test", test))]
-pub(crate) fn validate_linux_low_va_image(bytes: &[u8]) -> Result<LinuxImagePlan, LinuxImageError> {
+pub(crate) fn validate_linux_low_va_image(
+    bytes: &[u8],
+    stack: &mut LinuxInitialStack,
+) -> Result<LinuxImagePlan, LinuxImageError> {
     let header = Elf64Header::parse(bytes)?;
     prescan_program_headers_minimal(bytes, &header)?;
     let plan = parse_load_plan(bytes, &LINUX_CONVENTIONAL_LOAD_POLICY)?;
     let image_base = plan
         .image_base()
         .ok_or(LinuxImageError::LoadPlan(LoadPlanError::NoLoadSegments))?;
-    validate_linux_image_with_policy(
+    let image_plan = validate_linux_image_with_policy(
         bytes,
         &LINUX_CONVENTIONAL_LOAD_POLICY,
         LinuxImageLayout::conventional(align_down(image_base, PAGE_SIZE)),
-    )
+        stack,
+    )?;
+    let load_plan = parse_load_plan(bytes, &LINUX_CONVENTIONAL_LOAD_POLICY)?;
+    unsafe {
+        *KERNEL_LAUNCH_LOAD_PLAN.get() = Some(load_plan);
+    }
+    Ok(image_plan)
+}
+
+#[cfg(test)]
+fn validate_linux_low_va_image_host(bytes: &[u8]) -> Result<LinuxImagePlan, LinuxImageError> {
+    with_initial_stack_scratch(|stack| validate_linux_low_va_image(bytes, stack))
 }
 
 /// A constructed (not yet registered) Linux process image.
@@ -879,9 +969,13 @@ pub(crate) struct LinuxProcessImage {
 /// process root's translation (kernel context; never via a user pointer).
 fn write_initial_stack_image(
     address_space: &ProcessAddressSpace,
-    stack: &LinuxInitialStack,
+    stack: &LinuxStackLaunchInfo,
+    stack_bytes: &[u8],
     layout: &LinuxImageLayout,
 ) -> Result<(), &'static str> {
+    if stack_bytes.len() != stack.bytes_len {
+        return Err("initial stack image length mismatch");
+    }
     let image_base = stack.image_base();
     let mut offset = 0usize;
     while offset < stack.bytes_len {
@@ -898,7 +992,7 @@ fn write_initial_stack_image(
         let frame = translate_address_in_root(address_space.root_frame, VirtAddr::new(page_vaddr))?;
         unsafe {
             ptr::copy_nonoverlapping(
-                stack.bytes[offset..offset + chunk].as_ptr(),
+                stack_bytes[offset..offset + chunk].as_ptr(),
                 (phys_to_virt(frame + in_page as u64)) as *mut u8,
                 chunk,
             );
@@ -933,14 +1027,16 @@ fn discard_address_space(
 pub(crate) fn build_linux_process_image(
     allocator: &mut PageAllocator,
     elf_bytes: &[u8],
+    load_plan: &LoadPlan,
     image_plan: &LinuxImagePlan,
+    stack_image_bytes: &[u8],
 ) -> Result<LinuxProcessImage, LinuxImageError> {
     let mut address_space =
         create_process_address_space(allocator, VirtAddr::new(image_plan.layout.user_region_base))
             .map_err(LinuxImageError::AddressSpaceCreation)?;
 
     let image_pages =
-        match map_load_plan_segments(&mut address_space, allocator, elf_bytes, &image_plan.plan) {
+        match map_load_plan_segments(&mut address_space, allocator, elf_bytes, load_plan) {
             Ok(pages) => pages,
             Err(message) => {
                 return Err(discard_address_space(
@@ -973,7 +1069,8 @@ pub(crate) fn build_linux_process_image(
 
     if let Err(message) = write_initial_stack_image(
         &address_space,
-        &image_plan.initial_stack,
+        &image_plan.launch_stack,
+        stack_image_bytes,
         &image_plan.layout,
     ) {
         return Err(discard_address_space(
@@ -1248,21 +1345,32 @@ pub(crate) fn launch_linux_process_with_policy(
     kernel_stack_top: u64,
     scheduler_slot: usize,
     elf_bytes: &[u8],
-    validate: fn(&[u8]) -> Result<LinuxImagePlan, LinuxImageError>,
+    validate: fn(&[u8], &mut LinuxInitialStack) -> Result<LinuxImagePlan, LinuxImageError>,
 ) -> Result<LaunchedLinuxProcess, LinuxImageError> {
-    let image_plan = validate(elf_bytes)?;
-    let image = build_linux_process_image(allocator, elf_bytes, &image_plan)?;
-    // Report what the address space actually owns (mapping-walk frames plus the
-    // per-process carve-out private tables), not the pure-plan mapping demand;
-    // `build_linux_process_image` has already verified the two agree.
-    let page_table_frames = image.address_space.resource_counts().page_table_frames;
-    register_linux_process(
-        allocator,
-        kernel_stack_top,
-        scheduler_slot,
-        image,
-        page_table_frames,
-    )
+    with_kernel_initial_stack_scratch(|stack| {
+        let load_plan_slot = unsafe { &mut *KERNEL_LAUNCH_LOAD_PLAN.get() };
+        *load_plan_slot = None;
+        let image_plan = validate(elf_bytes, stack)?;
+        let load_plan = load_plan_slot
+            .as_ref()
+            .ok_or(LinuxImageError::Registry("launch load plan missing"))?;
+        let bytes_len = image_plan.launch_stack.bytes_len;
+        let image = build_linux_process_image(
+            allocator,
+            elf_bytes,
+            load_plan,
+            &image_plan,
+            &stack.bytes[..bytes_len],
+        )?;
+        let page_table_frames = image.address_space.resource_counts().page_table_frames;
+        register_linux_process(
+            allocator,
+            kernel_stack_top,
+            scheduler_slot,
+            image,
+            page_table_frames,
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1270,6 +1378,25 @@ mod tests {
     use super::*;
     use clean_slate_elf::{ELF64_EHDR_SIZE, PF_R, PF_W, PF_X};
     use clean_slate_linux_abi::AT_NULL;
+
+    fn validated_m8_fixture_stack() -> (LoadPlan, LinuxImagePlan, LinuxInitialStack) {
+        with_local_initial_stack_scratch(|stack| {
+            let image_plan = validate_linux_image_with_policy(
+                LINUX_M8_FIXTURE,
+                &LINUX_M8_LOAD_POLICY,
+                LinuxImageLayout::m8_legacy(),
+                stack,
+            )?;
+            let load_plan =
+                parse_load_plan(LINUX_M8_FIXTURE, &LINUX_M8_LOAD_POLICY).expect("load plan");
+            Ok((load_plan, image_plan, *stack))
+        })
+        .expect("fixture validates")
+    }
+
+    fn m8_fixture_load_plan() -> LoadPlan {
+        parse_load_plan(LINUX_M8_FIXTURE, &LINUX_M8_LOAD_POLICY).expect("load plan")
+    }
 
     // Frozen malformed corpus (fixtures/linux-hello/malformed/README.md).
     const BAD_MAGIC: &[u8] =
@@ -1423,8 +1550,9 @@ mod tests {
     fn frozen_fixture_validates_with_expected_plan() {
         let plan = validate_linux_image(LINUX_M8_FIXTURE).expect("fixture validates");
         assert_eq!(plan.entry, FIXTURE_ENTRY);
-        assert_eq!(plan.plan.segment_count, 1);
-        let segment = plan.plan.iter_segments().next().expect("one PT_LOAD");
+        let load_plan = m8_fixture_load_plan();
+        assert_eq!(load_plan.segment_count, 1);
+        let segment = load_plan.iter_segments().next().expect("one PT_LOAD");
         assert_eq!(segment.vaddr, FIXTURE_IMAGE_BASE);
         assert_eq!(segment.file_offset, 0);
         assert_eq!(segment.filesz, FIXTURE_LOAD_FILESZ);
@@ -1436,17 +1564,18 @@ mod tests {
         assert_eq!(plan.page_table_frames, 6);
         assert!(plan.page_table_frames <= MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES);
         assert!(plan.mapped_pages() <= MAX_ADDRESS_SPACE_USER_MAPPINGS as u64);
-        assert!(!plan.plan.has_interp);
-        assert!(!plan.plan.has_dynamic);
+        assert!(!load_plan.has_interp);
+        assert!(!load_plan.has_dynamic);
     }
 
     #[test]
     fn at_phdr_is_derived_from_first_load_plus_phoff() {
         let plan = validate_linux_image(LINUX_M8_FIXTURE).expect("fixture validates");
-        let first = plan.plan.iter_segments().next().expect("one PT_LOAD");
-        assert_eq!(plan.phdr_vaddr, first.vaddr + plan.plan.phoff);
+        let load_plan = m8_fixture_load_plan();
+        let first = load_plan.iter_segments().next().expect("one PT_LOAD");
+        assert_eq!(plan.phdr_vaddr, first.vaddr + load_plan.phoff);
         assert_eq!(plan.phdr_vaddr, 0x0000_4000_0040_0040);
-        assert_eq!(plan.initial_stack.auxv[0], (AT_PHDR, 0x0000_4000_0040_0040));
+        assert_eq!(plan.launch_stack.auxv[0], (AT_PHDR, 0x0000_4000_0040_0040));
     }
 
     // ---- #142: conventional low-VA policy ---------------------------------
@@ -1456,7 +1585,7 @@ mod tests {
 
     #[test]
     fn low_va_fixture_validates_under_conventional_policy() {
-        let plan = validate_linux_low_va_image(LINUX_LOW_VA_FIXTURE)
+        let plan = validate_linux_low_va_image_host(LINUX_LOW_VA_FIXTURE)
             .expect("low-VA fixture validates under the conventional policy");
         assert_eq!(plan.entry, LOW_VA_FIXTURE_ENTRY);
         assert_eq!(plan.layout.user_region_base, LOW_VA_FIXTURE_IMAGE_BASE);
@@ -1469,7 +1598,9 @@ mod tests {
             LINUX_CONVENTIONAL_LOAD_POLICY.user_va_hi
         );
         assert_eq!(plan.layout.argv0, LINUX_LOW_VA_ARGV0);
-        let first = plan.plan.iter_segments().next().expect("one PT_LOAD");
+        let load_plan = parse_load_plan(LINUX_LOW_VA_FIXTURE, &LINUX_CONVENTIONAL_LOAD_POLICY)
+            .expect("load plan");
+        let first = load_plan.iter_segments().next().expect("one PT_LOAD");
         assert_eq!(first.vaddr, LOW_VA_FIXTURE_IMAGE_BASE);
         assert!(first.vaddr >= LINUX_CONVENTIONAL_LOAD_POLICY.user_va_lo);
         // Stack sits above the image in the same GiB and never touches page zero.
@@ -1918,9 +2049,9 @@ mod tests {
             memsz: 0x40,
             flags: PF_R | PF_W,
         }]);
-        let plan = validate_linux_image(&bytes).expect("bss segment validates");
-        let data = plan
-            .plan
+        let _image_plan = validate_linux_image(&bytes).expect("bss segment validates");
+        let load_plan = parse_load_plan(&bytes, &LINUX_M8_LOAD_POLICY).expect("load plan");
+        let data = load_plan
             .iter_segments()
             .find(|segment| segment.perms.write)
             .expect("data segment");
@@ -1931,8 +2062,8 @@ mod tests {
             Some((data.vaddr + 0x10, data.vaddr + 0x40))
         );
         assert_eq!(data.mapped_page_count(PAGE_SIZE).unwrap(), 1);
-        assert_eq!(plan.image_pages, 2);
-        assert_eq!(plan.mapped_pages(), 4);
+        assert_eq!(_image_plan.image_pages, 2);
+        assert_eq!(_image_plan.mapped_pages(), 4);
         // Per-page decision (image_loader::page_file_span): only the first 0x10
         // bytes of the page are file-backed; the rest of the page is zero-filled
         // by the frame zeroing in map_load_plan_segments.
@@ -2133,8 +2264,8 @@ mod tests {
 
     #[test]
     fn initial_stack_bytes_match_linux_contract() {
-        let plan = validate_linux_image(LINUX_M8_FIXTURE).expect("fixture validates");
-        let stack = &plan.initial_stack;
+        let (_load_plan, _plan, stack) = validated_m8_fixture_stack();
+        let stack = &stack;
         let rsp = stack.rsp;
         assert_eq!(rsp % 16, 0);
         assert!((LINUX_STACK_BASE..LINUX_STACK_TOP).contains(&rsp));
@@ -2182,8 +2313,8 @@ mod tests {
 
     #[test]
     fn initial_stack_every_pointer_is_inside_the_stack_range() {
-        let plan = validate_linux_image(LINUX_M8_FIXTURE).expect("fixture validates");
-        let stack = &plan.initial_stack;
+        let (_load_plan, plan, stack) = validated_m8_fixture_stack();
+        let stack = &stack;
         let argv0_ptr = read_u64_at(stack, stack.rsp + 8);
         for pointer in [stack.rsp, argv0_ptr] {
             assert!((LINUX_STACK_BASE..LINUX_STACK_TOP).contains(&pointer));
@@ -2242,5 +2373,12 @@ mod tests {
             LinuxImageError::SegmentMapping("mapper said no").description(),
             "mapper said no"
         );
+    }
+
+    #[test]
+    fn linux_image_plan_stays_small_without_stack_bytes() {
+        assert!(core::mem::size_of::<LinuxImagePlan>() <= 1024);
+        assert!(core::mem::size_of::<LinuxStackLaunchInfo>() <= 512);
+        assert!(core::mem::size_of::<LoadPlan>() > 512);
     }
 }

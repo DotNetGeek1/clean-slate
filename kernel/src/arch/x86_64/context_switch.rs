@@ -100,13 +100,24 @@ pub(crate) fn task_stack_top(stack: &TaskStack) -> u64 {
 )))]
 #[cfg_attr(not(feature = "m9-linux-exec-self-test"), allow(dead_code))]
 pub(crate) fn rsp_on_static_task_stack(rsp: u64) -> bool {
+    task_stack_margin_bytes(rsp).is_some()
+}
+
+/// Bytes between `rsp` and the base of the containing static task stack, if any.
+pub(crate) fn task_stack_margin_bytes(rsp: u64) -> Option<u64> {
     let stacks = unsafe { crate::sched::task_stacks_mut() };
-    stacks.iter().any(|stack| {
+    stacks.iter().find_map(|stack| {
         let base = stack.0.as_ptr() as u64;
         let top = task_stack_top(stack);
-        rsp > base && rsp <= top
+        if rsp > base && rsp <= top {
+            Some(rsp - base)
+        } else {
+            None
+        }
     })
 }
+
+pub(crate) const TASK_STACK_MIN_MARGIN_BYTES: u64 = 16 * 1024;
 
 pub(crate) unsafe fn restore_task_context(stack_pointer: u64) -> ! {
     unsafe {

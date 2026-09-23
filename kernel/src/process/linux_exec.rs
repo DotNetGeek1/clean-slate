@@ -10,7 +10,11 @@
     allow(dead_code)
 )]
 
-use crate::arch::x86_64::context_switch::{rsp_on_static_task_stack, USER_TEST_RFLAGS};
+use crate::arch::x86_64::context_switch::{
+    rsp_on_static_task_stack, task_stack_margin_bytes, TASK_STACK_MIN_MARGIN_BYTES,
+    USER_TEST_RFLAGS,
+};
+use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::mm::address_space::{activate_address_space_root, destroy_process_address_space};
@@ -36,7 +40,9 @@ use crate::process::linux_fd;
 )))]
 use crate::process::process_registry_mut;
 use crate::process::ProcessAddressSpace;
-use crate::process::linux_image::{LinuxImagePlan, LINUX_MAX_AUXV_ENTRIES};
+use crate::process::linux_image::{
+    with_kernel_initial_stack_scratch, LinuxImagePlan, LINUX_MAX_AUXV_ENTRIES,
+};
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_elf::{LoadPlanPolicy, ELF64_PHDR_SIZE};
 use clean_slate_linux_abi::{
@@ -132,15 +138,19 @@ fn fill_at_random(out: &mut [u8; 16]) {
 }
 
 static PREPARE_IMAGE_PLAN: GlobalCell<Option<LinuxImagePlan>> = GlobalCell::new(None);
+static PREPARE_LOAD_PLAN: GlobalCell<Option<clean_slate_elf::LoadPlan>> = GlobalCell::new(None);
 
-static PREPARE_INITIAL_STACK: GlobalCell<LinuxInitialStack> = GlobalCell::new(LinuxInitialStack {
-    stack_top: 0,
-    bytes: [0; LINUX_MAX_STACK_IMAGE_BYTES],
-    bytes_len: 0,
-    rsp: 0,
-    auxv: [(0, 0); LINUX_MAX_AUXV_ENTRIES],
-    auxv_len: 0,
-});
+fn assert_kernel_task_stack_margin(context: &'static str) {
+    let current_rsp: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) current_rsp, options(nomem, nostack));
+    }
+    let margin = task_stack_margin_bytes(current_rsp)
+        .unwrap_or_else(|| fatal_kernel_error("exec path left the static task stack"));
+    if margin < TASK_STACK_MIN_MARGIN_BYTES {
+        fatal_kernel_error(context);
+    }
+}
 
 fn build_exec_initial_stack(
     out: &mut LinuxInitialStack,
@@ -251,49 +261,62 @@ pub(crate) fn prepare_linux_image(
     allocator: &mut PageAllocator,
     spec: &LinuxExecSpec<'_>,
 ) -> Result<PreparedLinuxImage, LinuxImageError> {
+    assert_kernel_task_stack_margin("prepare_linux_image exhausted task stack headroom");
     validate_spec_strings(spec)?;
-    let plan = clean_slate_elf::parse_load_plan(spec.image, spec.policy)?;
-    let image_base = plan.image_base().ok_or(LinuxImageError::LoadPlan(
-        clean_slate_elf::LoadPlanError::NoLoadSegments,
-    ))?;
-    let layout = layout_for_spec(spec, image_base)?;
-    let phdr_vaddr = plan
-        .phdr_vaddr
-        .ok_or(LinuxImageError::ProgramHeadersNotMapped)?;
-    let initial_stack = unsafe { &mut *PREPARE_INITIAL_STACK.get() };
-    if spec.policy.user_va_lo == LINUX_USER_WINDOW_BASE
-        && spec.policy.user_va_hi == LINUX_USER_WINDOW_END
-    {
-        *initial_stack = build_linux_initial_stack(plan.entry, phdr_vaddr, plan.phnum, &layout)?;
-    } else {
-        build_exec_initial_stack(
-            initial_stack,
-            &layout,
-            spec,
-            plan.entry,
-            phdr_vaddr,
-            plan.phnum,
-        )?;
-    }
-    {
+    with_kernel_initial_stack_scratch(|initial_stack| {
+        let plan = clean_slate_elf::parse_load_plan(spec.image, spec.policy)?;
+        let image_base = plan.image_base().ok_or(LinuxImageError::LoadPlan(
+            clean_slate_elf::LoadPlanError::NoLoadSegments,
+        ))?;
+        let layout = layout_for_spec(spec, image_base)?;
+        let phdr_vaddr = plan
+            .phdr_vaddr
+            .ok_or(LinuxImageError::ProgramHeadersNotMapped)?;
+        if spec.policy.user_va_lo == LINUX_USER_WINDOW_BASE
+            && spec.policy.user_va_hi == LINUX_USER_WINDOW_END
+        {
+            build_linux_initial_stack(plan.entry, phdr_vaddr, plan.phnum, &layout, initial_stack)?;
+        } else {
+            build_exec_initial_stack(
+                initial_stack,
+                &layout,
+                spec,
+                plan.entry,
+                phdr_vaddr,
+                plan.phnum,
+            )?;
+        }
         let plan_slot = unsafe { &mut *PREPARE_IMAGE_PLAN.get() };
+        let load_plan_slot = unsafe { &mut *PREPARE_LOAD_PLAN.get() };
+        *load_plan_slot = None;
         *plan_slot = Some(validate_linux_image_with_stack(
             spec.image,
             spec.policy,
             layout,
+            load_plan_slot,
             initial_stack,
         )?);
-        let built = build_linux_process_image(allocator, spec.image, plan_slot.as_ref().unwrap())?;
+        let load_plan = load_plan_slot
+            .as_ref()
+            .ok_or(LinuxImageError::Registry("prepare load plan missing"))?;
+        let bytes_len = plan_slot.as_ref().unwrap().launch_stack.bytes_len;
+        let built = build_linux_process_image(
+            allocator,
+            spec.image,
+            load_plan,
+            plan_slot.as_ref().unwrap(),
+            &initial_stack.bytes[..bytes_len],
+        )?;
         plan_slot.take();
         let page_table_frames = built.address_space.resource_counts().page_table_frames;
-        return Ok(PreparedLinuxImage {
+        Ok(PreparedLinuxImage {
             address_space: built.address_space,
             entry: built.entry,
             launch_rsp: built.launch_rsp,
             image_pages: built.image_pages,
             page_table_frames,
-        });
-    }
+        })
+    })
 }
 
 #[cfg(not(any(
@@ -366,6 +389,7 @@ pub(crate) fn commit_exec(
         rsp_on_static_task_stack(current_rsp),
         "exec commit must run on a static task / syscall kernel stack"
     );
+    assert_kernel_task_stack_margin("commit_exec exhausted task stack headroom");
 
     without_interrupts(|| {
         let registry = unsafe { process_registry_mut() };
@@ -486,16 +510,20 @@ mod tests {
         let spec = m8_hello_exec_spec(LINUX_M8_FIXTURE);
         let plan = clean_slate_elf::parse_load_plan(spec.image, spec.policy).expect("plan");
         let layout = layout_for_spec(&spec, plan.image_base().unwrap()).expect("layout");
-        let stack =
-            build_linux_initial_stack(plan.entry, plan.phdr_vaddr.unwrap(), plan.phnum, &layout)
-                .expect("stack");
+        let mut stack = LinuxInitialStack::empty();
+        build_linux_initial_stack(
+            plan.entry,
+            plan.phdr_vaddr.unwrap(),
+            plan.phnum,
+            &layout,
+            &mut stack,
+        )
+        .expect("stack");
         let legacy = validate_linux_image(LINUX_M8_FIXTURE).expect("legacy");
-        assert_eq!(stack.rsp, legacy.initial_stack.rsp);
-        assert_eq!(stack.bytes_len, legacy.initial_stack.bytes_len);
-        assert_eq!(
-            stack.bytes[..stack.bytes_len],
-            legacy.initial_stack.bytes[..legacy.initial_stack.bytes_len]
-        );
+        assert_eq!(stack.rsp, legacy.launch_stack.rsp);
+        assert_eq!(stack.bytes_len, legacy.launch_stack.bytes_len);
+        let mut load_plan = None;
+        assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, &mut load_plan, &stack).is_ok());
     }
 
     #[test]
@@ -530,7 +558,8 @@ mod tests {
             plan.phnum,
         )
         .expect("stack");
-        assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, &stack).is_ok());
+        let mut load_plan = None;
+        assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, &mut load_plan, &stack).is_ok());
     }
 
     #[cfg(feature = "m9-linux-exec-self-test")]
@@ -572,7 +601,8 @@ mod tests {
         assert_eq!(argc, 3);
         let argv0 = u64::from_le_bytes(stack.bytes[rsp_off + 8..rsp_off + 16].try_into().unwrap());
         assert_ne!(argv0, 0);
-        assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, &stack).is_ok());
+        let mut load_plan = None;
+        assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, &mut load_plan, &stack).is_ok());
     }
 
     #[test]
@@ -591,5 +621,10 @@ mod tests {
             validate_spec_strings(&spec),
             Err(LinuxImageError::ExecArgvBounds)
         );
+    }
+
+    #[test]
+    fn prepared_linux_image_has_no_large_inline_buffers() {
+        assert!(core::mem::size_of::<PreparedLinuxImage>() <= 1024);
     }
 }

@@ -326,6 +326,7 @@ impl LinuxFdRegistry {
         inherit_table(&parent_table, &mut self.pool, child_table)
     }
 
+    /// When the process has no fd table slot (never opened a fd), exec is a no-op.
     pub(crate) fn close_on_exec_for_process(
         &mut self,
         pid: u64,
@@ -412,10 +413,6 @@ impl LinuxFdRegistry {
     }
 }
 
-// Guard against adjacent large stack/static writes during exec commit (registry
-// replace) corrupting the fd table.
-#[used]
-static FD_REGISTRY_GUARD: [u8; 64 * 1024] = [0; 64 * 1024];
 static LINUX_FD_REGISTRY: GlobalCell<LinuxFdRegistry> = GlobalCell::new(LinuxFdRegistry::new());
 
 fn registry_mut() -> &'static mut LinuxFdRegistry {
@@ -505,6 +502,8 @@ pub(crate) fn inherit_for_child(
     registry_mut().inherit_for_child(parent_pid, parent_gen, child_pid, child_gen)
 }
 
+/// Clears `FD_CLOEXEC` descriptors for `pid`/`generation`. Missing fd table is OK
+/// (process never used the fd layer).
 pub(crate) fn close_on_exec(pid: u64, generation: InstanceGeneration) -> Result<(), LinuxErrno> {
     registry_mut().close_on_exec_for_process(pid, generation)
 }
