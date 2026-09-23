@@ -43,7 +43,8 @@ use crate::arch::x86_64::interrupt_context::{
 
 pub(crate) const FRESH_TASK_SENTINEL: u64 = u64::MAX;
 /// Returned by the timer/block path when the next thread resumes a blocked syscall.
-pub(crate) const SYSCALL_BLOCKED_RESUME_SENTINEL: u64 = u64::MAX - 2;
+/// Must match `cmp rax, -2` in the interrupt/yield return asm (x86_64 sign-extended -2).
+pub(crate) const SYSCALL_BLOCKED_RESUME_SENTINEL: u64 = u64::MAX - 1;
 /// Stack frames handed to the CPU must be 16-byte aligned; this is the only
 /// alignment the architecture layer needs, so it stays local rather than
 /// depending upward on `mm`.
