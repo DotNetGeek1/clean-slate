@@ -105,13 +105,21 @@ mod tests {
         assert!(lookup_handler(SYS_EXIT).is_some());
         assert!(lookup_handler(999).is_none());
         assert!(lookup_handler(1000).is_none());
-        #[cfg(feature = "m9-linux-runtime-self-test")]
+        #[cfg(not(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        )))]
         {
             for nr in [12u64, 158, 218, 9] {
                 assert!(lookup_handler(nr).is_some(), "nr {nr} must be supported");
             }
         }
-        #[cfg(not(feature = "m9-linux-runtime-self-test"))]
+        #[cfg(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        ))]
         {
             for nr in [12u64, 158, 218, 202, 9] {
                 assert!(lookup_handler(nr).is_none(), "nr {nr} must be unsupported");
@@ -120,7 +128,10 @@ mod tests {
         #[cfg(feature = "m8-linux-image")]
         assert!(lookup_handler(231).is_some(), "exit_group owned by #102");
         #[cfg(not(feature = "m8-linux-image"))]
-        assert!(lookup_handler(231).is_none(), "exit_group must be unsupported");
+        assert!(
+            lookup_handler(231).is_none(),
+            "exit_group must be unsupported"
+        );
         assert_eq!(encode_rax(Err(ENOSYS)) as i64, -38);
     }
 

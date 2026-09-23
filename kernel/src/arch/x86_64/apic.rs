@@ -22,11 +22,11 @@ const APIC_REGISTER_SVR: usize = 0xf0;
 const APIC_REGISTER_LVT_TIMER: usize = 0x320;
 const APIC_REGISTER_INITIAL_COUNT: usize = 0x380;
 #[cfg_attr(
-    any(
-        feature = "m1-self-test",
-        feature = "m2-double-fault-self-test",
-        feature = "m2-timer-self-test"
-    ),
+    not(any(
+        feature = "m2-timer-self-test",
+        feature = "m3-syscall-self-test",
+        feature = "m9-linux-runtime-self-test"
+    )),
     allow(dead_code)
 )]
 const APIC_REGISTER_CURRENT_COUNT: usize = 0x390;
@@ -73,11 +73,11 @@ pub(crate) fn acknowledge_timer_interrupt() {
 
 /// Current APIC timer count (down-counter); for calibration with interrupts masked.
 #[cfg_attr(
-    any(
-        feature = "m1-self-test",
-        feature = "m2-double-fault-self-test",
-        feature = "m2-timer-self-test"
-    ),
+    not(any(
+        feature = "m2-timer-self-test",
+        feature = "m3-syscall-self-test",
+        feature = "m9-linux-runtime-self-test"
+    )),
     allow(dead_code)
 )]
 pub(crate) fn local_apic_timer_current_count() -> u32 {
@@ -85,11 +85,11 @@ pub(crate) fn local_apic_timer_current_count() -> u32 {
 }
 
 #[cfg_attr(
-    any(
-        feature = "m1-self-test",
-        feature = "m2-double-fault-self-test",
-        feature = "m2-timer-self-test"
-    ),
+    not(any(
+        feature = "m2-timer-self-test",
+        feature = "m3-syscall-self-test",
+        feature = "m9-linux-runtime-self-test"
+    )),
     allow(dead_code)
 )]
 fn local_apic_read(offset: usize) -> u32 {

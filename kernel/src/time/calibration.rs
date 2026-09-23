@@ -5,7 +5,6 @@
         test,
         feature = "m2-timer-self-test",
         feature = "m3-syscall-self-test",
-        feature = "m9-block-wake-self-test",
         feature = "m9-linux-runtime-self-test"
     )),
     allow(dead_code)

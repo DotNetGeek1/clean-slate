@@ -448,9 +448,8 @@ pub(crate) fn commit_exec(
         if linux_fd::close_on_exec(pid, live_gen).is_err() {
             fatal_kernel_error("exec commit: close_on_exec failed after address-space swap");
         }
-        crate::process::linux_mem::init_for_image(pid, live_gen, &layout, brk_initial).map_err(
-            |_| LinuxImageError::Registry("exec commit: linux_mem init failed"),
-        )?;
+        crate::process::linux_mem::init_for_image(pid, live_gen, &layout, brk_initial)
+            .map_err(|_| LinuxImageError::Registry("exec commit: linux_mem init failed"))?;
         if destroy_old_exec_address_space(old, allocator).is_err() {
             fatal_kernel_error("exec commit: destroying the old address space failed");
         }
