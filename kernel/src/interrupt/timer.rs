@@ -18,6 +18,11 @@ use crate::arch::x86_64::apic::mask_legacy_pic;
 use crate::arch::x86_64::apic::program_local_apic_timer;
 use crate::diagnostics::serial::serial_write_fmt;
 use crate::time::apic_timer_initial_count;
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 use crate::time::irq_period_ns;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
