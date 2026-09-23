@@ -310,18 +310,18 @@ pub(crate) fn prepare_linux_image(
             initial_stack,
         )?);
         let bytes_len = plan_slot.as_ref().unwrap().launch_stack.bytes_len;
-        let load_plan = clean_slate_elf::parse_load_plan(spec.image, spec.policy)
-            .map_err(LinuxImageError::LoadPlan)?;
+        let load_plan = load_plan_slot
+            .as_ref()
+            .ok_or(LinuxImageError::Registry("prepare load plan missing"))?;
         let built = build_linux_process_image(
             allocator,
             spec.image,
-            &load_plan,
+            load_plan,
             plan_slot.as_ref().unwrap(),
             &initial_stack.bytes[..bytes_len],
         )?;
-        let image_plan = plan_slot.as_ref().expect("plan");
-        let brk_initial = crate::process::linux_mem::brk_initial_from_load_plan(&load_plan);
-        let layout = image_plan.layout;
+        let brk_initial = crate::process::linux_mem::brk_initial_from_load_plan(load_plan);
+        let layout = plan_slot.as_ref().expect("plan").layout;
         plan_slot.take();
         let page_table_frames = built.address_space.resource_counts().page_table_frames;
         Ok(PreparedLinuxImage {
@@ -408,7 +408,8 @@ pub(crate) fn commit_exec(
     let entry = prepared.entry;
     let launch_rsp = prepared.launch_rsp;
     let new_root = prepared.address_space.root_frame;
-
+    let brk_initial = prepared.brk_initial;
+    let layout = prepared.layout;
     let current_rsp: u64;
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) current_rsp, options(nomem, nostack));
@@ -434,6 +435,8 @@ pub(crate) fn commit_exec(
         if process.resource_domain.address_space().is_none() {
             return Err(LinuxImageError::Registry("exec commit: no address space"));
         }
+        crate::process::linux_mem::reset_for_exec(pid, live_gen);
+        crate::process::linux_signal::reset_for_exec(pid, live_gen);
         // Point of no return: from here the process owns the new image. Any
         // failure below is a kernel invariant violation, not an errno -- returning
         // an error would resume the old RIP inside the new address space.
@@ -445,9 +448,9 @@ pub(crate) fn commit_exec(
         if linux_fd::close_on_exec(pid, live_gen).is_err() {
             fatal_kernel_error("exec commit: close_on_exec failed after address-space swap");
         }
-        // #103
-        crate::process::linux_mem::reset_for_exec(pid, live_gen);
-        crate::process::linux_signal::reset_for_exec(pid, live_gen);
+        crate::process::linux_mem::init_for_image(pid, live_gen, &layout, brk_initial).map_err(
+            |_| LinuxImageError::Registry("exec commit: linux_mem init failed"),
+        )?;
         if destroy_old_exec_address_space(old, allocator).is_err() {
             fatal_kernel_error("exec commit: destroying the old address space failed");
         }
