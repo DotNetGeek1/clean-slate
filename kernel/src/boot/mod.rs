@@ -361,7 +361,10 @@ fn run_inner() -> Result<(), &'static str> {
         start_m9_linux_exec_self_test(allocator)
     }
 
-    #[cfg(all(not(feature = "m9-linux-exec-self-test"), feature = "m9-low-va-self-test"))]
+    #[cfg(all(
+        not(feature = "m9-linux-exec-self-test"),
+        feature = "m9-low-va-self-test"
+    ))]
     {
         start_m9_low_va_self_test(allocator)
     }

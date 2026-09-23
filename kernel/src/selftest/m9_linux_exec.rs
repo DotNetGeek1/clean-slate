@@ -59,8 +59,7 @@ const PHASE2_ARGV: [&[u8]; 3] = [b"replaced", b"one", b"two"];
 const PHASE2_ENVP: [&[u8]; 2] = [b"NEW=1", b"OLD=0"];
 const PHASE2_EXECFN: &[u8] = b"/after/exec";
 
-const BAD_IMAGE: &[u8] =
-    include_bytes!("../../../fixtures/linux-hello/malformed/bad-magic.elf");
+const BAD_IMAGE: &[u8] = include_bytes!("../../../fixtures/linux-hello/malformed/bad-magic.elf");
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -140,8 +139,7 @@ fn append_output(bytes: &[u8]) {
     let state = state();
     let room = OUTPUT_CAP.saturating_sub(state.output_len);
     let take = bytes.len().min(room);
-    state.output[state.output_len..state.output_len + take]
-        .copy_from_slice(&bytes[..take]);
+    state.output[state.output_len..state.output_len + take].copy_from_slice(&bytes[..take]);
     state.output_len += take;
 }
 
@@ -198,7 +196,10 @@ fn reset_output() {
     state.output_len = 0;
 }
 
-fn launch_native_sibling(allocator: &mut PageAllocator, kernel_stack_top: u64) -> Result<u64, &'static str> {
+fn launch_native_sibling(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+) -> Result<u64, &'static str> {
     let mut address_space =
         create_process_address_space(allocator, VirtAddr::new(USER_TEST_CODE_ADDRESS))?;
     let setup = (|| -> Result<(), &'static str> {
@@ -382,10 +383,7 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
                 test.exec_committed = true;
                 kernel_log_fmt(format_args!(
                     "[M9.F] exec committed pid={} entry={:#018x} rsp={:#018x} pt_frames={}\n",
-                    commit.pid,
-                    commit.entry,
-                    commit.launch_rsp,
-                    pt_frames
+                    commit.pid, commit.entry, commit.launch_rsp, pt_frames
                 ));
                 test.stage = Stage::AwaitPhase2;
             }
@@ -417,7 +415,9 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
             {
                 let bad_spec = exec_spec(BAD_IMAGE, &PHASE1_ARGV, &PHASE1_ENVP, PHASE1_EXECFN);
                 match prepare_linux_image(allocator(), &bad_spec) {
-                    Err(_) => kernel_log_line("[M9.F] malformed prepare rejected (live process OK)"),
+                    Err(_) => {
+                        kernel_log_line("[M9.F] malformed prepare rejected (live process OK)")
+                    }
                     Ok(_) => fatal_kernel_error("m9 malformed image must not prepare"),
                 }
                 test.prepare_fail_attempted = true;

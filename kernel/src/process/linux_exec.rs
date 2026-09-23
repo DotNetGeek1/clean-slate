@@ -204,7 +204,9 @@ fn build_exec_initial_stack(
     )
     .map_err(LinuxImageError::InitialStack)?;
     if image.rsp % 16 != 0 || image.rsp < layout.stack_base || image.rsp >= layout.stack_top {
-        return Err(LinuxImageError::InitialStack(StackLayoutError::InvalidStackTop));
+        return Err(LinuxImageError::InitialStack(
+            StackLayoutError::InvalidStackTop,
+        ));
     }
     let mut auxv_storage = [(0u64, 0u64); crate::process::linux_image::LINUX_MAX_AUXV_ENTRIES];
     for (index, pair) in auxv[..auxv_len].iter().enumerate() {
@@ -226,9 +228,9 @@ pub(crate) fn prepare_linux_image(
 ) -> Result<PreparedLinuxImage, LinuxImageError> {
     validate_spec_strings(spec)?;
     let plan = clean_slate_elf::parse_load_plan(spec.image, spec.policy)?;
-    let image_base = plan
-        .image_base()
-        .ok_or(LinuxImageError::LoadPlan(clean_slate_elf::LoadPlanError::NoLoadSegments))?;
+    let image_base = plan.image_base().ok_or(LinuxImageError::LoadPlan(
+        clean_slate_elf::LoadPlanError::NoLoadSegments,
+    ))?;
     let layout = layout_for_spec(spec, image_base)?;
     let phdr_vaddr = plan
         .phdr_vaddr
@@ -310,12 +312,9 @@ pub(crate) fn commit_exec(
             .resource_domain
             .replace_address_space(prepared.address_space)
             .ok_or(LinuxImageError::Registry("exec commit: no address space"))?;
-        let saved_stack = build_userspace_entry_frame(
-            kernel_stack_top,
-            prepared.entry,
-            prepared.launch_rsp,
-        )
-        .map_err(LinuxImageError::EntryFrame)?;
+        let saved_stack =
+            build_userspace_entry_frame(kernel_stack_top, prepared.entry, prepared.launch_rsp)
+                .map_err(LinuxImageError::EntryFrame)?;
         let scheduler = unsafe { scheduler_mut() };
         let thread = scheduler
             .threads
@@ -373,7 +372,8 @@ pub(crate) fn m8_hello_exec_spec(image: &[u8]) -> LinuxExecSpec<'_> {
 mod tests {
     use super::*;
     use crate::process::linux_image::{
-        validate_linux_image, validate_linux_image_with_stack, LINUX_LOW_VA_FIXTURE, LINUX_M8_FIXTURE,
+        validate_linux_image, validate_linux_image_with_stack, LINUX_LOW_VA_FIXTURE,
+        LINUX_M8_FIXTURE,
     };
     use clean_slate_elf::LoadPlanPolicy;
 
@@ -382,13 +382,9 @@ mod tests {
         let spec = m8_hello_exec_spec(LINUX_M8_FIXTURE);
         let plan = clean_slate_elf::parse_load_plan(spec.image, spec.policy).expect("plan");
         let layout = layout_for_spec(&spec, plan.image_base().unwrap()).expect("layout");
-        let stack = build_linux_initial_stack(
-            plan.entry,
-            plan.phdr_vaddr.unwrap(),
-            plan.phnum,
-            &layout,
-        )
-        .expect("stack");
+        let stack =
+            build_linux_initial_stack(plan.entry, plan.phdr_vaddr.unwrap(), plan.phnum, &layout)
+                .expect("stack");
         let legacy = validate_linux_image(LINUX_M8_FIXTURE).expect("legacy");
         assert_eq!(stack.rsp, legacy.initial_stack.rsp);
         assert_eq!(stack.bytes_len, legacy.initial_stack.bytes_len);
@@ -412,8 +408,7 @@ mod tests {
             policy: &policy,
         };
         let plan = clean_slate_elf::parse_load_plan(spec.image, spec.policy).expect("plan");
-        let layout =
-            layout_for_spec(&spec, plan.image_base().unwrap()).expect("layout");
+        let layout = layout_for_spec(&spec, plan.image_base().unwrap()).expect("layout");
         let stack = build_exec_initial_stack(
             &layout,
             &spec,
@@ -437,6 +432,9 @@ mod tests {
             stack_pages: 2,
             policy: &policy,
         };
-        assert_eq!(validate_spec_strings(&spec), Err(LinuxImageError::ExecArgvBounds));
+        assert_eq!(
+            validate_spec_strings(&spec),
+            Err(LinuxImageError::ExecArgvBounds)
+        );
     }
 }

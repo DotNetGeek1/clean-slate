@@ -2625,9 +2625,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "run" => ParsedCommand::Run,
         Some(cmd) if cmd == "test-m1" => ParsedCommand::TestM1,
         Some(cmd) if cmd == "test-m9-low-va" || cmd == "m9-low-va" => ParsedCommand::TestM9LowVa,
-        Some(cmd)
-            if cmd == "test-m9-linux-exec" || cmd == "m9-linux-exec" || cmd == "m9.146" =>
-        {
+        Some(cmd) if cmd == "test-m9-linux-exec" || cmd == "m9-linux-exec" || cmd == "m9.146" => {
             ParsedCommand::TestM9LinuxExec
         }
         Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,

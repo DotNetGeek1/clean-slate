@@ -220,7 +220,9 @@ impl LinuxImageLayout {
         window_base: u64,
     ) -> Result<Self, LinuxImageError> {
         if stack_pages == 0 {
-            return Err(LinuxImageError::InitialStack(StackLayoutError::BufferTooSmall));
+            return Err(LinuxImageError::InitialStack(
+                StackLayoutError::BufferTooSmall,
+            ));
         }
         const CONVENTIONAL_STACK_TOP: u64 = 0x0000_0000_0080_0000;
         let stack_span = stack_pages
@@ -762,7 +764,9 @@ pub(crate) fn validate_linux_image_with_stack(
         || initial_stack.rsp < layout.stack_base
         || initial_stack.rsp >= layout.stack_top
     {
-        return Err(LinuxImageError::InitialStack(StackLayoutError::InvalidStackTop));
+        return Err(LinuxImageError::InitialStack(
+            StackLayoutError::InvalidStackTop,
+        ));
     }
     finish_linux_image_plan(
         plan,
