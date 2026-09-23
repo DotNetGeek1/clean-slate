@@ -1071,6 +1071,7 @@ fn run_m9_rootfs_acceptance() -> Result<(), XtaskError> {
 
 fn run_m9_linux_fs_acceptance() -> Result<(), XtaskError> {
     reset_m5_data_disk_image()?;
+    build_m6_fixture_userspace(true)?;
     build_storage_userspace(true)?;
     run_vm_inner_with_config(
         false,
@@ -2414,12 +2415,12 @@ fn markers_require_verbatim_linux_hello(markers: &[&str]) -> bool {
 /// prefix-extended variant (`Hello from Linux.XYZ`).
 fn validate_m9_linux_fs_probe_stdout(output: &str) -> Result<(), XtaskError> {
     if !output.contains("m9-fixture\n") {
-        return Err(XtaskError::Invalid(
+        return Err(XtaskError::InvalidCommand(
             "m9 linux fs acceptance missing probe stdout `m9-fixture\\n`".to_owned(),
         ));
     }
     if !output.contains("test") {
-        return Err(XtaskError::Invalid(
+        return Err(XtaskError::InvalidCommand(
             "m9 linux fs acceptance missing probe stdout `test`".to_owned(),
         ));
     }

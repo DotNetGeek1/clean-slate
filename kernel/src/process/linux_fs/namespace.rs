@@ -1,14 +1,14 @@
 //! Bounded Linux namespace node table (#101).
 
+use super::object_backend::{
+    tmp_file_by_object_id, tmp_file_create, tmp_file_lookup_by_path, LINUX_TMP_MAX_ENTRIES,
+};
+use super::path::{normalize_path, LINUX_PATH_MAX};
 use clean_slate_linux_abi::{
     LinuxErrno, LinuxStatFields, EACCES, EEXIST, EISDIR, ELOOP, ENOENT, ENOSPC, ENOTDIR, EROFS,
     S_IFDIR, S_IFLNK, S_IFREG,
 };
 use clean_slate_rootfs::{EntryKind, Image};
-use super::object_backend::{
-    LINUX_TMP_MAX_ENTRIES, tmp_file_by_object_id, tmp_file_create, tmp_file_lookup_by_path,
-};
-use super::path::{LINUX_PATH_MAX, normalize_path};
 
 pub const LINUX_FS_MAX_NODES: usize = 64;
 pub const LINUX_FS_MAX_LINK_DEPTH: usize = 2;
@@ -147,9 +147,7 @@ impl NodeTable {
             if !node.live || node.parent != parent.index {
                 continue;
             }
-            if node.name_len as usize == name.len()
-                && &node.name[..name.len()] == name
-            {
+            if node.name_len as usize == name.len() && &node.name[..name.len()] == name {
                 return Ok(NodeId {
                     index: index as u16,
                     generation: node.generation,
@@ -249,11 +247,7 @@ impl NodeTable {
         self.walk(target, image, true, depth + 1)
     }
 
-    pub fn mkdir(
-        &mut self,
-        path: &[u8],
-        image: &Image<'_>,
-    ) -> Result<(), LinuxErrno> {
+    pub fn mkdir(&mut self, path: &[u8], image: &Image<'_>) -> Result<(), LinuxErrno> {
         let mut norm = [0u8; LINUX_PATH_MAX];
         let len = normalize_path(path, &mut norm)?;
         let norm = &norm[..len];
@@ -276,7 +270,13 @@ impl NodeTable {
             return Err(ENOSPC);
         }
         let index = self.alloc_node()?;
-        self.fill_node(index, parent.index, name, NodeKind::Dir, NodeBackend::TmpDir);
+        self.fill_node(
+            index,
+            parent.index,
+            name,
+            NodeKind::Dir,
+            NodeBackend::TmpDir,
+        );
         Ok(())
     }
 
@@ -440,7 +440,10 @@ impl NodeTable {
         }
         let mut count = 0usize;
         let dir_path = self.path_of(dir.index, image)?;
-        let dir_len = dir_path.iter().position(|&b| b == 0).unwrap_or(LINUX_PATH_MAX);
+        let dir_len = dir_path
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(LINUX_PATH_MAX);
         let dir_path = &dir_path[..dir_len];
         for child in image.children(dir_path) {
             if count >= out.len() {
@@ -645,11 +648,12 @@ pub(crate) fn check_write_allowed(path: &[u8], flags: u32) -> Result<(), LinuxEr
     let mut norm = [0u8; LINUX_PATH_MAX];
     let len = normalize_path(path, &mut norm)?;
     let norm = &norm[..len];
-    let write_intent = (flags & (clean_slate_linux_abi::O_WRONLY
-        | clean_slate_linux_abi::O_RDWR
-        | clean_slate_linux_abi::O_CREAT
-        | clean_slate_linux_abi::O_TRUNC
-        | clean_slate_linux_abi::O_APPEND))
+    let write_intent = (flags
+        & (clean_slate_linux_abi::O_WRONLY
+            | clean_slate_linux_abi::O_RDWR
+            | clean_slate_linux_abi::O_CREAT
+            | clean_slate_linux_abi::O_TRUNC
+            | clean_slate_linux_abi::O_APPEND))
         != 0;
     if write_intent && !norm.starts_with(b"/tmp") {
         return Err(EROFS);

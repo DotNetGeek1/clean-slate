@@ -107,19 +107,20 @@ pub(crate) mod m9_block_wake;
 pub(crate) mod m9_fd_core;
 #[cfg(feature = "m9-linux-exec-self-test")]
 pub(crate) mod m9_linux_exec;
+#[cfg(feature = "m9-linux-fs-self-test")]
+pub(crate) mod m9_linux_fs;
 #[cfg(feature = "m9-low-va-self-test")]
 pub(crate) mod m9_low_va;
 #[cfg(feature = "m9-rootfs-self-test")]
 pub(crate) mod m9_rootfs;
-#[cfg(feature = "m9-linux-fs-self-test")]
-pub(crate) mod m9_linux_fs;
 #[cfg(feature = "m9-syscall-fail-closed-self-test")]
 pub(crate) mod m9_syscall_fail_closed;
 #[cfg(any(
     feature = "m3-syscall-self-test",
     feature = "m9-syscall-fail-closed-self-test",
     feature = "m9-block-wake-self-test",
-    feature = "m9-fd-core-self-test"
+    feature = "m9-fd-core-self-test",
+    feature = "m9-linux-fs-self-test"
 ))]
 pub(crate) mod userspace_process;
 #[cfg(any(
@@ -150,7 +151,8 @@ use crate::mm::PAGE_SIZE;
     feature = "m8-linux-hello-self-test",
     feature = "m9-syscall-fail-closed-self-test",
     feature = "m9-linux-exec-self-test",
-    feature = "m9-fd-core-self-test"
+    feature = "m9-fd-core-self-test",
+    feature = "m9-linux-fs-self-test"
 ))]
 pub(super) const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
 #[cfg(any(
@@ -192,7 +194,8 @@ pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SI
     feature = "m8-linux-dispatch-self-test",
     feature = "m9-syscall-fail-closed-self-test",
     feature = "m9-block-wake-self-test",
-    feature = "m9-fd-core-self-test"
+    feature = "m9-fd-core-self-test",
+    feature = "m9-linux-fs-self-test"
 ))]
 pub(super) const USER_TEST_PROCESS_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + (PAGE_SIZE * 2);
 #[cfg(feature = "m4-recovery-self-test")]

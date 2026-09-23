@@ -28,9 +28,11 @@ use crate::service::control::ServiceLifecycleController;
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
-use clean_slate_service_fixtures::STORAGE_SERVICE_ID;
+use clean_slate_service_fixtures::{
+    StorageServiceBootstrap, STORAGE_SERVICE_ID, STORAGE_SERVICE_MODE_OBJECT_SERVICE,
+};
 use clean_slate_service_lifecycle::{
-    ControlRequest, ControlRequestKind, InstanceGeneration, LifecycleMessage,
+    ControlRequest, ControlRequestKind, InstanceGeneration, LifecycleMessage, ServiceId,
 };
 use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering};
 
@@ -57,6 +59,18 @@ enum Phase {
 }
 
 static mut M9_PHASE: Phase = Phase::MainProbe;
+
+pub(crate) fn storage_service_bootstrap(
+    service: ServiceId,
+) -> Result<StorageServiceBootstrap, &'static str> {
+    if service != STORAGE_SERVICE_ID {
+        return Err("unexpected storage bootstrap service for m9 linux fs test");
+    }
+    Ok(StorageServiceBootstrap::new(
+        STORAGE_SERVICE_MODE_OBJECT_SERVICE,
+        0,
+    ))
+}
 
 pub(crate) fn start_m9_linux_fs_self_test(page_allocator: PageAllocator) -> ! {
     kernel_log_line("[M9.H] creating");
@@ -190,7 +204,7 @@ fn build_cycle_code(out: &mut [u8; PAGE_SIZE as usize]) -> Result<usize, &'stati
     // mov rsi, 0 (O_RDONLY)
     emit(&[0x48, 0xC7, 0xC6, 0x00, 0x00, 0x00, 0x00])?;
     emit(&[0x0F, 0x05])?; // syscall
-    // mov rbx, rax
+                          // mov rbx, rax
     emit(&[0x48, 0x89, 0xC3])?;
     // read(rbx, buf, 8) — buf at PATH_OFF+32
     let buf_abs = USER_TEST_CODE_ADDRESS + (PATH_OFF + 32) as u64;
@@ -236,6 +250,10 @@ fn launch_fs_cycle(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'st
     crate::process::linux_fs::grant_linux_tmp_object_capabilities(spawned.process_id)
         .map_err(|_| "tmp grant failed")?;
     configure_scheduler_thread_slot(CYCLE_SLOT, &spawned.thread)?;
+    let scheduler = unsafe { scheduler_mut() };
+    scheduler.current_thread = Some(CYCLE_SLOT);
+    scheduler.threads[CYCLE_SLOT].started = false;
+    scheduler.threads[CYCLE_SLOT].state = ThreadState::Ready;
     M9_CYCLE_PID.store(spawned.process_id, Ordering::Relaxed);
     let _ = generation;
     Ok(())

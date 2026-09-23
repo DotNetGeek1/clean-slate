@@ -37,7 +37,9 @@ const LINUX_FD_REGISTRY_CAPACITY: usize = PROCESS_REGISTRY_CAPACITY;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxFdProjection {
     Closed,
-    ConsoleEndpoint { capability_handle: u64 },
+    ConsoleEndpoint {
+        capability_handle: u64,
+    },
     /// #101: file-backed description (read/write/lseek via fs_io).
     FileBackend,
     /// #101: directory-backed description (getdents64 cursor in offset).
@@ -478,7 +480,8 @@ fn registry_mut() -> &'static mut LinuxFdRegistry {
 #[cfg(any(
     test,
     feature = "m9-linux-exec-self-test",
-    feature = "m9-fd-core-self-test"
+    feature = "m9-fd-core-self-test",
+    feature = "m9-linux-fs-self-test"
 ))]
 pub(crate) fn reset_registry_for_selftest() {
     unsafe { *LINUX_FD_REGISTRY.get() = LinuxFdRegistry::new() };

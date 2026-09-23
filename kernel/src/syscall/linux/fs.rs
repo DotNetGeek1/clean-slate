@@ -4,15 +4,18 @@
 use super::table::{LinuxSyscallContext, LinuxSyscallHandler};
 use super::user_copy::copy_user_bytes;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
-use crate::process::linux_fd::{self, open_description::{DescriptorKind, DirHandleRef, FileHandleRef, OpenAccess, OpenStatus}};
-use crate::process::linux_fs::namespace::{NodeId, check_write_allowed};
+use crate::process::linux_fd::{
+    self,
+    open_description::{DescriptorKind, DirHandleRef, FileHandleRef, OpenAccess, OpenStatus},
+};
+use crate::process::linux_fs::namespace::{check_write_allowed, NodeId};
 use crate::process::linux_fs::path::{copy_bounded_path, LINUX_PATH_MAX};
 use crate::process::linux_fs::table_mut;
 use crate::process::linux_rootfs;
 use clean_slate_linux_abi::{
     encode_dirent64, encode_stat144, LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EFAULT,
-    EINVAL, EISDIR, ENOTDIR, O_CREAT, O_DIRECTORY, O_RDONLY, O_TRUNC, O_WRONLY,
-    SYS_GETCWD, SYS_GETDENTS64, SYS_LSTAT, SYS_MKDIR, SYS_OPEN, SYS_STAT,
+    EINVAL, EISDIR, ENOTDIR, O_CREAT, O_DIRECTORY, O_RDONLY, O_TRUNC, O_WRONLY, SYS_GETCWD,
+    SYS_GETDENTS64, SYS_LSTAT, SYS_MKDIR, SYS_OPEN, SYS_STAT,
 };
 
 pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
@@ -163,15 +166,23 @@ pub(crate) fn handle_sys_getdents64(
     if validate_user_writable_pointer_range(buf_ptr, count).is_err() {
         return Err(EFAULT);
     }
-    let desc = linux_fd::open_description_snapshot(
-        linux_fd::open_description_id_for_fd(ctx.pid, ctx.instance_generation, fd)?,
-    )?;
+    let desc = linux_fd::open_description_snapshot(linux_fd::open_description_id_for_fd(
+        ctx.pid,
+        ctx.instance_generation,
+        fd,
+    )?)?;
     let dir_node = match desc.kind {
         DescriptorKind::Dir(r) => node_from_dir_ref(r),
         _ => return Err(ENOTDIR),
     };
     let image = image();
-    let mut children = [(NodeId { index: 0, generation: 0 }, 0u8); 32];
+    let mut children = [(
+        NodeId {
+            index: 0,
+            generation: 0,
+        },
+        0u8,
+    ); 32];
     let child_count = table_mut().list_children(dir_node, &image, &mut children)?;
     let cursor = desc.offset as usize;
     if cursor >= child_count {
@@ -204,7 +215,12 @@ pub(crate) fn handle_sys_getdents64(
         wrote += n as u64;
         offset += 1;
     }
-    linux_fd::set_open_description_offset(ctx.pid, ctx.instance_generation, fd, cursor as u64 + offset as u64)?;
+    linux_fd::set_open_description_offset(
+        ctx.pid,
+        ctx.instance_generation,
+        fd,
+        cursor as u64 + offset as u64,
+    )?;
     Ok(wrote)
 }
 

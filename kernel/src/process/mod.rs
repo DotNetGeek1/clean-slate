@@ -13,9 +13,9 @@ pub(crate) mod linux_exec;
 pub(crate) mod linux_fd;
 #[cfg(feature = "m9-rootfs")]
 pub(crate) mod linux_fs;
+pub(crate) mod linux_image;
 #[cfg(feature = "m9-rootfs")]
 pub(crate) mod linux_rootfs;
-pub(crate) mod linux_image;
 pub(crate) mod linux_stdio_m9_payload;
 pub(crate) mod personality;
 

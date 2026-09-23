@@ -217,7 +217,11 @@ pub(crate) fn handle_sys_read(
                     return Ok(0);
                 }
                 unsafe {
-                    core::ptr::copy_nonoverlapping(scratch.as_ptr(), buf_ptr as *mut u8, read as usize);
+                    core::ptr::copy_nonoverlapping(
+                        scratch.as_ptr(),
+                        buf_ptr as *mut u8,
+                        read as usize,
+                    );
                 }
                 Ok(read)
             });

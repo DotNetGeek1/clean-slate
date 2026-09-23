@@ -1,7 +1,7 @@
 //! File-backed fd read/write/lseek helpers (#101).
 
-use crate::process::linux_fd::open_description::DescriptorKind;
 use crate::process::linux_fd;
+use crate::process::linux_fd::open_description::DescriptorKind;
 use crate::process::linux_fs::object_backend::{
     object_read_sync, object_write_sync, tmp_scratch_for,
 };

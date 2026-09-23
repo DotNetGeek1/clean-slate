@@ -1041,7 +1041,11 @@ fn launch_storage_userspace_service(
                 .ok_or("allocator could not provide a storage bootstrap page")?;
             zero_page(data_frame);
             let bootstrap = {
-                #[cfg(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test"))]
+                #[cfg(any(
+                    feature = "m6-object-self-test",
+                    feature = "m6-capabilities-self-test",
+                    feature = "m9-linux-fs-self-test"
+                ))]
                 {
                     let mut bootstrap = {
                         #[cfg(feature = "m6-capabilities-self-test")]
@@ -1049,8 +1053,16 @@ fn launch_storage_userspace_service(
                             crate::selftest::m6_capabilities::storage_service_bootstrap(service)?
                         }
                         #[cfg(all(
-                            feature = "m6-object-self-test",
+                            feature = "m9-linux-fs-self-test",
                             not(feature = "m6-capabilities-self-test")
+                        ))]
+                        {
+                            crate::selftest::m9_linux_fs::storage_service_bootstrap(service)?
+                        }
+                        #[cfg(all(
+                            feature = "m6-object-self-test",
+                            not(feature = "m6-capabilities-self-test"),
+                            not(feature = "m9-linux-fs-self-test")
                         ))]
                         {
                             crate::selftest::m6_object::storage_service_bootstrap(service)?
@@ -1068,7 +1080,8 @@ fn launch_storage_userspace_service(
                 }
                 #[cfg(not(any(
                     feature = "m6-object-self-test",
-                    feature = "m6-capabilities-self-test"
+                    feature = "m6-capabilities-self-test",
+                    feature = "m9-linux-fs-self-test"
                 )))]
                 {
                     crate::selftest::m5_storage::storage_service_bootstrap(service)?

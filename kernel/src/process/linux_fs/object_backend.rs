@@ -9,9 +9,9 @@ use clean_slate_service_fixtures::{
 use crate::capability::object::{
     grant_object_capability, object_queue_poll, object_queue_submit, SyscallQueueError,
 };
+use crate::sync::global_cell::GlobalCell;
 use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
 use crate::syscall::linux::table::LinuxSyscallContext;
-use crate::sync::global_cell::GlobalCell;
 use clean_slate_linux_abi::LinuxSyscallRequest;
 
 pub const LINUX_TMP_OBJECT_ID_BASE: u64 = 0x004C_0000;
@@ -169,13 +169,9 @@ pub(crate) fn object_read_sync(
     let key = object_wait_key(request_id);
     let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
     match object_queue_poll(holder, request_id, &mut payload) {
-        Ok(status) if status == OBJECT_STATUS_PENDING => block_linux_syscall(
-            request,
-            ctx,
-            key,
-            None,
-            LinuxTimeoutResult::Zero,
-        ),
+        Ok(status) if status == OBJECT_STATUS_PENDING => {
+            block_linux_syscall(request, ctx, key, None, LinuxTimeoutResult::Zero)
+        }
         Ok(len) => {
             state.pending_request_id = 0;
             let len = len as usize;
@@ -211,26 +207,26 @@ pub(crate) fn object_write_sync(
     let holder = HolderId(pid);
     let state = slot_for_object_mut(object_id).ok_or(clean_slate_linux_abi::ENOENT)?;
     if state.pending_request_id == 0 {
-        state.pending_request_id = object_queue_submit(holder, OBJECT_OP_WRITE, object_id, payload)
-            .map_err(queue_err)?;
+        state.pending_request_id =
+            object_queue_submit(holder, OBJECT_OP_WRITE, object_id, payload).map_err(queue_err)?;
     }
     let request_id = state.pending_request_id;
     let key = object_wait_key(request_id);
     let mut scratch = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
     match object_queue_poll(holder, request_id, &mut scratch) {
-        Ok(status) if status == OBJECT_STATUS_PENDING => block_linux_syscall(
-            request,
-            ctx,
-            key,
-            None,
-            LinuxTimeoutResult::Zero,
-        ),
+        Ok(status) if status == OBJECT_STATUS_PENDING => {
+            block_linux_syscall(request, ctx, key, None, LinuxTimeoutResult::Zero)
+        }
         Ok(_) => {
             state.pending_request_id = 0;
             state.len = payload.len();
             if let Some(index) = slot_index_for_object(object_id) {
                 store_mut().scratch[index][..payload.len()].copy_from_slice(payload);
             }
+            crate::diagnostics::log::kernel_log_fmt(format_args!(
+                "[STOR] write object={object_id} bytes={}\n",
+                payload.len()
+            ));
             Ok(payload.len() as u64)
         }
         Err(SyscallQueueError::CompletionStatus(_)) => {
