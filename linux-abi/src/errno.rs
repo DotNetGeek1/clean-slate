@@ -31,6 +31,10 @@ pub const EACCES: LinuxErrno = LinuxErrno(13);
 pub const EFAULT: LinuxErrno = LinuxErrno(14);
 /// Invalid argument.
 pub const EINVAL: LinuxErrno = LinuxErrno(22);
+/// Too many open files in system.
+pub const ENFILE: LinuxErrno = LinuxErrno(23);
+/// Too many open files.
+pub const EMFILE: LinuxErrno = LinuxErrno(24);
 /// Function not implemented.
 pub const ENOSYS: LinuxErrno = LinuxErrno(38);
 
