@@ -421,8 +421,11 @@ fn handle_service_complete(frame: &mut SyscallContext) {
     match net_bridge_mut().service_complete(request_id, response, &payload[..payload_len]) {
         Ok(()) => {
             // #105: wake blocked Linux socket syscalls waiting on this request.
-            crate::process::linux_socket::notify_request_complete(request_id);
+            let woken = crate::process::linux_socket::notify_request_complete(request_id);
             frame.rax = 0;
+            if woken > 0 {
+                crate::sched::wait::yield_after_waking_blocked_peer(frame as *mut _);
+            }
         }
         Err(error) => frame.rax = bridge_error_status(error),
     }

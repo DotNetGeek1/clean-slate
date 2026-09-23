@@ -131,16 +131,18 @@ pub(crate) fn pool_live_count() -> usize {
     unsafe { (*SOCKET_POOL.get()).live_count() }
 }
 
-pub(crate) fn notify_request_complete(request_id: u64) {
+pub(crate) fn notify_request_complete(request_id: u64) -> usize {
+    let mut woken = 0usize;
     let wakes = unsafe { &mut *REQUEST_WAKE_SLOT.get() };
     for entry in wakes.iter_mut() {
         if entry.map(|(id, _)| id) == Some(request_id) {
             if let Some((_, key)) = *entry {
-                wake_all(key);
+                woken = wake_all(key);
             }
             *entry = None;
         }
     }
+    woken
 }
 
 pub(crate) fn register_request_wake(request_id: u64, key: WaitKey) {
@@ -176,6 +178,31 @@ pub(crate) fn alloc_socket_for_selftest(
     kind: SocketKindLinux,
 ) -> Result<LinuxSocketId, LinuxErrno> {
     alloc_socket(pid, instance_generation, kind)
+}
+
+/// After a restart-on-wake syscall, reuse the in-flight socket instead of allocating again.
+fn inflight_socket_for_restart(
+    pid: u64,
+    instance_generation: InstanceGeneration,
+    kind: SocketKindLinux,
+    state: SocketState,
+) -> Option<LinuxSocketId> {
+    let pool = unsafe { &*SOCKET_POOL.get() };
+    for (index, slot) in pool.slots.iter().enumerate() {
+        if slot.owner_pid != pid
+            || slot.owner_generation != instance_generation.0
+            || slot.kind != kind
+            || slot.state != state
+            || slot.inflight_request_id.is_none()
+        {
+            continue;
+        }
+        return Some(LinuxSocketId {
+            index: index as u16,
+            generation: slot.generation,
+        });
+    }
+    None
 }
 
 fn alloc_socket(
@@ -310,7 +337,15 @@ pub(crate) mod syscalls {
             3 => return Err(clean_slate_linux_abi::EPROTONOSUPPORT),
             _ => return Err(EINVAL),
         };
-        let id = alloc_socket(ctx.pid, ctx.instance_generation, kind)?;
+        let id = match inflight_socket_for_restart(
+            ctx.pid,
+            ctx.instance_generation,
+            kind,
+            SocketState::Unbound,
+        ) {
+            Some(id) => id,
+            None => alloc_socket(ctx.pid, ctx.instance_generation, kind)?,
+        };
         let m7_kind = match kind {
             SocketKindLinux::Udp => SocketKind::Udp,
             SocketKindLinux::Tcp => SocketKind::Tcp,
