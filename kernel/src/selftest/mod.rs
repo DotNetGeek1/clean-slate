@@ -111,6 +111,8 @@ pub(crate) mod m9_linux_exec;
 pub(crate) mod m9_linux_proc;
 #[cfg(feature = "m9-low-va-self-test")]
 pub(crate) mod m9_low_va;
+#[cfg(feature = "m9-rootfs-self-test")]
+pub(crate) mod m9_rootfs;
 #[cfg(feature = "m9-syscall-fail-closed-self-test")]
 pub(crate) mod m9_syscall_fail_closed;
 #[cfg(any(
