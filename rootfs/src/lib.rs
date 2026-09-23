@@ -31,7 +31,6 @@ impl EntryKind {
             _ => None,
         }
     }
-
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,7 +227,10 @@ impl<'a> Image<'a> {
 
     fn raw_entry_fields(&self, index: usize) -> Result<(u8, u8, u8, u32, u32), RootfsError> {
         let off = self.entry_offset(index);
-        let slice = self.bytes.get(off..off + ENTRY_SIZE).ok_or(RootfsError::TooSmall)?;
+        let slice = self
+            .bytes
+            .get(off..off + ENTRY_SIZE)
+            .ok_or(RootfsError::TooSmall)?;
         Ok((
             slice[0],
             slice[1],
@@ -264,7 +266,9 @@ impl<'a> Image<'a> {
         } else {
             let start = self.data_offset + data_off as usize;
             let end = start + data_len as usize;
-            self.bytes.get(start..end).ok_or(RootfsError::DataOutOfBounds)?
+            self.bytes
+                .get(start..end)
+                .ok_or(RootfsError::DataOutOfBounds)?
         };
         Ok(Entry {
             path,
@@ -393,10 +397,9 @@ inline = "m9-fixture\n"
                 .parent()
                 .unwrap()
                 .join("fixtures/busybox/frozen");
-            let packed = pack(
-                &manifest,
-                |_| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "unused")),
-            )
+            let packed = pack(&manifest, |_| {
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "unused"))
+            })
             .expect("pack");
             let image = Image::parse(&packed).expect("parse packed");
             assert!(image.lookup(b"/tmp").unwrap().writable_root);
@@ -452,10 +455,9 @@ inline = "m9-fixture\n"
                 .parent()
                 .unwrap()
                 .join("fixtures/busybox/frozen");
-            let packed = pack(
-                &manifest,
-                |p| std::fs::read(base.join(p.file_name().unwrap())),
-            )
+            let packed = pack(&manifest, |p| {
+                std::fs::read(base.join(p.file_name().unwrap()))
+            })
             .expect("pack");
             let image = Image::parse(&packed).expect("parse");
             assert!(image.lookup(b"/bin/").is_none());

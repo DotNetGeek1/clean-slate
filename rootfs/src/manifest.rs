@@ -96,9 +96,7 @@ fn parse_key_value(line: &str) -> Option<(&str, &str)> {
 }
 
 fn parse_u16(s: &str) -> Result<u16, RootfsError> {
-    s.trim()
-        .parse()
-        .map_err(|_| RootfsError::BadVersion)
+    s.trim().parse().map_err(|_| RootfsError::BadVersion)
 }
 
 fn parse_bool(s: &str) -> bool {

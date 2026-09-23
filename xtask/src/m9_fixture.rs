@@ -25,8 +25,8 @@ pub struct M9FixtureReport {
 pub fn verify_m9_fixture() -> Result<M9FixtureReport, String> {
     let dir = fixture_dir();
     let busybox_path = dir.join("busybox");
-    let bytes = fs::read(&busybox_path)
-        .map_err(|e| format!("read {}: {e}", busybox_path.display()))?;
+    let bytes =
+        fs::read(&busybox_path).map_err(|e| format!("read {}: {e}", busybox_path.display()))?;
 
     let actual_hash = hex_encode(&sha256(&bytes));
     if actual_hash != BUSYBOX_SHA256 {
@@ -40,8 +40,8 @@ pub fn verify_m9_fixture() -> Result<M9FixtureReport, String> {
 
     let manifest_text = fs::read_to_string(dir.join("rootfs.toml"))
         .map_err(|e| format!("read rootfs.toml: {e}"))?;
-    let manifest = Manifest::parse_toml(&manifest_text)
-        .map_err(|e| format!("parse rootfs.toml: {e:?}"))?;
+    let manifest =
+        Manifest::parse_toml(&manifest_text).map_err(|e| format!("parse rootfs.toml: {e:?}"))?;
 
     verify_manifest_links(&manifest, &dir)?;
 
@@ -90,15 +90,9 @@ fn print_entry_table(image: &Image) {
         };
         let path = escape_path(entry.path);
         if entry.kind == EntryKind::Link {
-            println!(
-                "  [{i}] {kind} {path} -> {}",
-                escape_path(entry.data)
-            );
+            println!("  [{i}] {kind} {path} -> {}", escape_path(entry.data));
         } else if entry.kind == EntryKind::File {
-            println!(
-                "  [{i}] {kind} {path} bytes={}",
-                entry.data.len()
-            );
+            println!("  [{i}] {kind} {path} bytes={}", entry.data.len());
         } else {
             let wr = if entry.writable_root { " writable" } else { "" };
             println!("  [{i}] {kind} {path}{wr}");

@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 
 use super::manifest::{Manifest, ManifestKind};
 use super::{
-    crc32, DATA_ALIGN, ENTRY_SIZE, FLAG_WRITABLE_ROOT, HEADER_SIZE, KIND_DIR, KIND_FILE, KIND_LINK,
-    MAX_ENTRIES, MAX_IMAGE_BYTES, MAX_PATH_BYTES, MAGIC, VERSION, RootfsError,
+    crc32, RootfsError, DATA_ALIGN, ENTRY_SIZE, FLAG_WRITABLE_ROOT, HEADER_SIZE, KIND_DIR,
+    KIND_FILE, KIND_LINK, MAGIC, MAX_ENTRIES, MAX_IMAGE_BYTES, MAX_PATH_BYTES, VERSION,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -59,7 +59,8 @@ pub fn pack(
                     inline.clone()
                 } else if let Some(source) = &entry.source {
                     let path = Path::new(source);
-                    let file_bytes = resolve_file(path).map_err(|_| RootfsError::DataOutOfBounds)?;
+                    let file_bytes =
+                        resolve_file(path).map_err(|_| RootfsError::DataOutOfBounds)?;
                     if let Some(expected) = &entry.sha256 {
                         let actual = hex_sha256(&file_bytes);
                         if actual != *expected {
@@ -73,10 +74,7 @@ pub fn pack(
                 (KIND_FILE, bytes)
             }
             ManifestKind::Link => {
-                let target = entry
-                    .target
-                    .clone()
-                    .ok_or(RootfsError::BadPath)?;
+                let target = entry.target.clone().ok_or(RootfsError::BadPath)?;
                 (KIND_LINK, target)
             }
         };

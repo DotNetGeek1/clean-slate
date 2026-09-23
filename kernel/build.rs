@@ -70,8 +70,7 @@ fn main() {
 fn embed_m9_rootfs_image() {
     use clean_slate_rootfs::{pack, Manifest};
 
-    const BUSYBOX_SHA256: &str =
-        "7ba56acec9fb89deace4ebfab6f4baaa8d1b778754b8f7ae3dbd7cf7990fe380";
+    const BUSYBOX_SHA256: &str = "7ba56acec9fb89deace4ebfab6f4baaa8d1b778754b8f7ae3dbd7cf7990fe380";
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let fixture_dir = manifest_dir
@@ -81,8 +80,7 @@ fn embed_m9_rootfs_image() {
         .join("frozen");
     let busybox_path = fixture_dir.join("busybox");
     let manifest_path = fixture_dir.join("rootfs.toml");
-    let busybox_bytes =
-        fs::read(&busybox_path).expect("read frozen busybox for m9-rootfs embed");
+    let busybox_bytes = fs::read(&busybox_path).expect("read frozen busybox for m9-rootfs embed");
     let actual_hash = hex_sha256(&busybox_bytes);
     if actual_hash != BUSYBOX_SHA256 {
         panic!(
@@ -109,7 +107,10 @@ fn embed_m9_rootfs_image() {
 
     println!("cargo:rerun-if-changed={}", busybox_path.display());
     println!("cargo:rerun-if-changed={}", manifest_path.display());
-    println!("cargo:rerun-if-changed={}", manifest_dir.join("build.rs").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("build.rs").display()
+    );
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {

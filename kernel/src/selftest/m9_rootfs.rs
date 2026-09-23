@@ -10,8 +10,7 @@ const PASS_MARKER: &str = "[M9.K] PASS";
 const BUSYBOX_SIZE: usize = 206_712;
 
 pub(crate) fn start_m9_rootfs_self_test(_allocator: PageAllocator) -> ! {
-    linux_rootfs::ensure_rootfs_integrity_logged()
-        .expect("m9 rootfs: embedded image must parse");
+    linux_rootfs::ensure_rootfs_integrity_logged().expect("m9 rootfs: embedded image must parse");
 
     let img = linux_rootfs::image().expect("m9 rootfs: image");
     let busybox = img.lookup(b"/bin/busybox").expect("busybox entry");

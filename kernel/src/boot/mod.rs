@@ -401,7 +401,7 @@ fn run_inner() -> Result<(), &'static str> {
     #[cfg(all(
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
-    not(feature = "m9-rootfs-self-test"),
+        not(feature = "m9-rootfs-self-test"),
         feature = "m8-linux-hello-self-test"
     ))]
     {
@@ -424,7 +424,7 @@ fn run_inner() -> Result<(), &'static str> {
         feature = "m9-fd-core-self-test",
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
-    not(feature = "m9-rootfs-self-test"),
+        not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-block-wake-self-test"),
         not(feature = "m8-linux-hello-self-test"),
         not(feature = "m9-syscall-fail-closed-self-test")
@@ -437,7 +437,7 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-fd-core-self-test"),
         not(feature = "m9-linux-exec-self-test"),
-    not(feature = "m9-rootfs-self-test"),
+        not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-block-wake-self-test"),
         feature = "m9-syscall-fail-closed-self-test",
         not(feature = "m8-linux-hello-self-test"),
@@ -450,7 +450,7 @@ fn run_inner() -> Result<(), &'static str> {
     #[cfg(all(
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
-    not(feature = "m9-rootfs-self-test"),
+        not(feature = "m9-rootfs-self-test"),
         feature = "m8-linux-dispatch-self-test",
         not(feature = "m8-linux-hello-self-test"),
         not(feature = "m9-syscall-fail-closed-self-test"),
@@ -469,7 +469,7 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-block-wake-self-test"),
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
-    not(feature = "m9-rootfs-self-test"),
+        not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-fd-core-self-test")
     ))]
     {
@@ -693,7 +693,7 @@ fn run_inner() -> Result<(), &'static str> {
             not(feature = "m7-net-caps-self-test"),
             not(feature = "m9-low-va-self-test"),
             not(feature = "m9-linux-exec-self-test"),
-    not(feature = "m9-rootfs-self-test")
+            not(feature = "m9-rootfs-self-test")
         ))]
         {
             let mut allocator = allocator;
@@ -787,7 +787,7 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m8-linux-image-self-test"),
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
-    not(feature = "m9-rootfs-self-test")
+        not(feature = "m9-rootfs-self-test")
     ))]
     {
         let kernel_root_frame = current_root_frame_address();

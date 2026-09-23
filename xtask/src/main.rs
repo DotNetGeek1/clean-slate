@@ -2597,7 +2597,9 @@ fn print_help() {
     println!("  test-m7-tls       M7.6 TLS client acceptance (pass + fail-closed QEMU boots)");
     println!("  gen-m7-fixture-certs  Regenerate repository-owned M7 TLS fixture certificates");
     println!("  verify-m8-fixture Verify committed Linux hello ELF hash and pinned metadata");
-    println!("  verify-m9-fixture Verify BusyBox hash, ELF metadata, and deterministic rootfs image");
+    println!(
+        "  verify-m9-fixture Verify BusyBox hash, ELF metadata, and deterministic rootfs image"
+    );
     println!("  test-m7-dns         Build the M7.5 DNS resolver kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");

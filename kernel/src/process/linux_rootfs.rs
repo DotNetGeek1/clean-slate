@@ -6,8 +6,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// Pinned BusyBox SHA-256 prefix for boot-time provenance logging (full hash in manifest).
 const BUSYBOX_SHA256_PREFIX: &str = "7ba56ace";
 
-const M9_ROOTFS_IMAGE_BYTES: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/m9-rootfs.img"));
+const M9_ROOTFS_IMAGE_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/m9-rootfs.img"));
 
 static ROOTFS_LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -22,9 +21,7 @@ pub(crate) fn ensure_rootfs_integrity_logged() -> Result<(), RootfsError> {
         return Ok(());
     }
     let img = image()?;
-    let busybox = img
-        .lookup(b"/bin/busybox")
-        .ok_or(RootfsError::BadPath)?;
+    let busybox = img.lookup(b"/bin/busybox").ok_or(RootfsError::BadPath)?;
     if busybox.kind != EntryKind::File {
         return Err(RootfsError::BadEntryKind);
     }
