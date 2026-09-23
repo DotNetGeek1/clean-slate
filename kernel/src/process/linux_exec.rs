@@ -142,7 +142,13 @@ fn fill_at_random(out: &mut [u8; 16]) {
 static PREPARE_IMAGE_PLAN: GlobalCell<Option<LinuxImagePlan>> = GlobalCell::new(None);
 static PREPARE_LOAD_PLAN: GlobalCell<Option<clean_slate_elf::LoadPlan>> = GlobalCell::new(None);
 
-#[cfg(feature = "m9-linux-runtime-self-test")]
+#[cfg_attr(
+    not(any(
+        feature = "m9-linux-runtime-self-test",
+        feature = "m9-linux-proc-self-test"
+    )),
+    allow(dead_code)
+)]
 pub(crate) fn reset_prepare_linux_image_scratch() {
     unsafe {
         *PREPARE_IMAGE_PLAN.get() = None;
@@ -310,19 +316,50 @@ pub(crate) fn prepare_linux_image(
             initial_stack,
         )?);
         let bytes_len = plan_slot.as_ref().unwrap().launch_stack.bytes_len;
+        #[cfg(any(
+            feature = "m9-linux-runtime-self-test",
+            feature = "m9-linux-proc-self-test"
+        ))]
+        let load_plan = clean_slate_elf::parse_load_plan(spec.image, spec.policy)
+            .map_err(LinuxImageError::LoadPlan)?;
+        #[cfg(not(any(
+            feature = "m9-linux-runtime-self-test",
+            feature = "m9-linux-proc-self-test"
+        )))]
         let load_plan = load_plan_slot
             .as_ref()
             .ok_or(LinuxImageError::Registry("prepare load plan missing"))?;
         let built = build_linux_process_image(
             allocator,
             spec.image,
+            #[cfg(any(
+                feature = "m9-linux-runtime-self-test",
+                feature = "m9-linux-proc-self-test"
+            ))]
+            &load_plan,
+            #[cfg(not(any(
+                feature = "m9-linux-runtime-self-test",
+                feature = "m9-linux-proc-self-test"
+            )))]
             load_plan,
             plan_slot.as_ref().unwrap(),
             &initial_stack.bytes[..bytes_len],
         )?;
-        let brk_initial = crate::process::linux_mem::brk_initial_from_load_plan(load_plan);
+        let brk_initial = crate::process::linux_mem::brk_initial_from_load_plan(
+            #[cfg(any(
+                feature = "m9-linux-runtime-self-test",
+                feature = "m9-linux-proc-self-test"
+            ))]
+            &load_plan,
+            #[cfg(not(any(
+                feature = "m9-linux-runtime-self-test",
+                feature = "m9-linux-proc-self-test"
+            )))]
+            load_plan,
+        );
         let layout = plan_slot.as_ref().expect("plan").layout;
         plan_slot.take();
+        load_plan_slot.take();
         let page_table_frames = built.address_space.resource_counts().page_table_frames;
         Ok(PreparedLinuxImage {
             address_space: built.address_space,

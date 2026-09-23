@@ -116,6 +116,7 @@ fn install_linux_stdio(pid: u64) -> Result<(), &'static str> {
 
 fn launch_cycle(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'static str> {
     log_cycle_metrics(cycle, "start");
+    crate::process::linux_exec::reset_prepare_linux_image_scratch();
     M9_OUTPUT_LEN.store(0, Ordering::Relaxed);
 
     let argv: [&[u8]; 1] = [b"linux-proc-probe"];

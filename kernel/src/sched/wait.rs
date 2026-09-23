@@ -9,7 +9,6 @@ use crate::arch::x86_64::context_switch::SYSCALL_BLOCKED_RESUME_SENTINEL;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
-use crate::interrupt::timer::kernel_ticks;
 use crate::process::live_instance_generation;
 use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 use crate::sched::scheduler_mut;
@@ -233,7 +232,6 @@ pub(crate) fn block_current_thread_with_resume(
     deadline: Option<Deadline>,
     resume: BlockedResume,
 ) -> Result<WaitOutcome, &'static str> {
-    let mut immediate_outcome = WaitOutcome::Woken;
     let must_yield = without_interrupts(|| {
         let scheduler = unsafe { scheduler_mut() };
         let thread_index = scheduler
@@ -252,18 +250,9 @@ pub(crate) fn block_current_thread_with_resume(
 
         let table = wait_table_mut();
         if table.consume_pending_wake(key) {
-            let deadline_due = waiter_deadline_due(deadline, kernel_ticks());
-            if deadline.is_none() || deadline_due {
-                thread.blocked_syscall_frame = 0;
-                set_blocked_resume(thread_index, BlockedResume::NativeOutcome);
-                immediate_outcome = if deadline_due {
-                    WaitOutcome::TimedOut
-                } else {
-                    WaitOutcome::Woken
-                };
-                return Ok(false);
-            }
-            // Stale pending wake before an absolute deadline: keep blocking.
+            thread.blocked_syscall_frame = 0;
+            set_blocked_resume(thread_index, BlockedResume::NativeOutcome);
+            return Ok(false);
         }
 
         let slot_index = table.allocate_slot()?;
@@ -278,13 +267,12 @@ pub(crate) fn block_current_thread_with_resume(
         };
 
         scheduler.threads[thread_index].state = ThreadState::Blocked;
-        #[cfg(feature = "m9-block-wake-self-test")]
         kernel_log_fmt(format_args!("[M9.E] blocked tid={} key={}\n", tid, key.0));
         Ok(true)
     })?;
 
     if !must_yield {
-        return Ok(immediate_outcome);
+        return Ok(WaitOutcome::Woken);
     }
 
     scheduler_block_and_switch();
