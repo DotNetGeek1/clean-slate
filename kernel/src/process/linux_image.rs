@@ -1292,6 +1292,59 @@ mod tests {
         assert_eq!(plan.initial_stack.auxv[0], (AT_PHDR, 0x0000_4000_0040_0040));
     }
 
+    // ---- #142: conventional low-VA policy ---------------------------------
+
+    const LOW_VA_FIXTURE_IMAGE_BASE: u64 = 0x0000_0000_0040_0000;
+    const LOW_VA_FIXTURE_ENTRY: u64 = 0x0000_0000_0040_0078;
+
+    #[test]
+    fn low_va_fixture_validates_under_conventional_policy() {
+        let plan = validate_linux_low_va_image(LINUX_LOW_VA_FIXTURE)
+            .expect("low-VA fixture validates under the conventional policy");
+        assert_eq!(plan.entry, LOW_VA_FIXTURE_ENTRY);
+        assert_eq!(plan.layout.user_region_base, LOW_VA_FIXTURE_IMAGE_BASE);
+        assert_eq!(
+            plan.layout.window_base,
+            LINUX_CONVENTIONAL_LOAD_POLICY.user_va_lo
+        );
+        assert_eq!(
+            plan.layout.window_end,
+            LINUX_CONVENTIONAL_LOAD_POLICY.user_va_hi
+        );
+        assert_eq!(plan.layout.argv0, LINUX_LOW_VA_ARGV0);
+        let first = plan.plan.iter_segments().next().expect("one PT_LOAD");
+        assert_eq!(first.vaddr, LOW_VA_FIXTURE_IMAGE_BASE);
+        assert!(first.vaddr >= LINUX_CONVENTIONAL_LOAD_POLICY.user_va_lo);
+        // Stack sits above the image in the same GiB and never touches page zero.
+        assert!(plan.layout.stack_guard_page > LOW_VA_FIXTURE_IMAGE_BASE);
+        assert!(plan.layout.stack_top <= 1 << 30);
+        assert!(
+            plan.page_table_frames + KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES
+                <= MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES
+        );
+        assert!(plan.mapped_pages() <= MAX_ADDRESS_SPACE_USER_MAPPINGS as u64);
+    }
+
+    #[test]
+    fn low_va_fixture_is_rejected_by_m8_legacy_policy() {
+        assert!(
+            validate_linux_image(LINUX_LOW_VA_FIXTURE).is_err(),
+            "M8 legacy slot policy must not accept a conventional 0x400000 image"
+        );
+    }
+
+    #[test]
+    fn conventional_layout_reserves_guard_below_stack() {
+        let layout = LinuxImageLayout::conventional(LOW_VA_FIXTURE_IMAGE_BASE);
+        assert_eq!(layout.user_region_base, LOW_VA_FIXTURE_IMAGE_BASE);
+        assert_eq!(layout.stack_guard_page + PAGE_SIZE, layout.stack_base);
+        assert_eq!(
+            layout.stack_top - layout.stack_base,
+            LINUX_STACK_PAGES * PAGE_SIZE
+        );
+        assert_eq!(layout.stack_reservation_start, layout.stack_guard_page);
+    }
+
     // ---- malformed corpus → exact variants -------------------------------
 
     #[test]
