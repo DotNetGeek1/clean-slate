@@ -200,6 +200,8 @@ fn build_reader_program(reader_pid: u64) -> M6FixtureBootstrap {
             .expect_eq(SYSCALL_EACCES),
         )
         .unwrap();
+    // Let the owner finish attenuated delegation before validating the child handle.
+    program.push(M6FixtureStep::spin(64)).unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
 }
