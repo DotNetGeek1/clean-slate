@@ -381,7 +381,7 @@ fn verify_console_bytes() {
     expected[elen..elen + WRITEV_EXPECTED.len()].copy_from_slice(WRITEV_EXPECTED);
     elen += WRITEV_EXPECTED.len();
     unsafe {
-        if len < elen || &M9_CONSOLE_BUF[..elen] != &expected[..elen] {
+        if len < elen || M9_CONSOLE_BUF[..elen] != expected[..elen] {
             fatal_kernel_error("m9 fd core console bytes mismatch");
         }
     }
