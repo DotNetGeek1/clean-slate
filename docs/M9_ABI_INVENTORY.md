@@ -283,3 +283,70 @@ Ash calls **`getcwd("/", 4096)`** (`true.strace:93`) and **`stat("/work")` → E
 ## Phase B follow-up
 
 - Pin **`CONFIG_FEATURE_USE_SENDFILE=n`**; re-run traces with **10.77.0.1** DNS + TCP **4001**; capture **`recvfrom`/`read`** after DNS success; freeze binary SHA.
+
+---
+
+## Phase B — frozen
+
+**Artifact:** `fixtures/busybox/frozen/busybox` (committed, ~207 KiB).  
+**SHA-256:** `7ba56acec9fb89deace4ebfab6f4baaa8d1b778754b8f7ae3dbd7cf7990fe380`  
+**Build:** `fixtures/busybox/frozen/Dockerfile` — Alpine `3.21@sha256:ce64758a…`, BusyBox `1.37.0` tarball `3311dff3…`, musl **1.2.5-r11** via Alpine `build-base`.  
+**ELF:** **ET_EXEC**, entry `0x412c82`, **PT_LOAD** in **`0x400000`** region, **no** `PT_INTERP` / **no** `PT_DYNAMIC` / **no** `PT_TLS` (see `frozen/readelf.txt`).  
+**Applets:** `ash`, `cat`, `echo`, `env`, `grep`, `ls`, `mkdir`, `nslookup`, `printf`, `pwd`, `sh`, `sleep`, `true`, `uname`, `wget` (`frozen/applets.txt`).  
+**Matrix:** `syscall-matrix.toml` — `meta.candidate = "frozen"`, **`syscall_count = 35`**, **`harness_only_count = 0`**, **`highest_fd_observed = 11`**.
+
+### Rootfs manifest (#104)
+
+| Path | Policy | Content |
+|------|--------|---------|
+| `/bin/busybox` | read-only | frozen binary bytes |
+| `/bin/<applet>` | read-only | symlink → `busybox` (Linux reference); #104 may use hardlink/alias manifest |
+| `/etc/hostname` | read-only | `m9-fixture\n` |
+| `/etc/resolv.conf` | read-only | `nameserver 10.77.0.1\n` |
+| `/tmp` | writable | script + demo files |
+| `/dev/null` | optional char dev | stdio sink (trace harness) |
+
+No host `/etc`, no public DNS/Internet. Hermetic reference runs **`--network none`** with **`fixture-responder.py`**:
+
+- UDP **`10.77.0.1:53`**: A `m7.fixture.test` → **`10.77.0.50`**; **AAAA → NOERROR, 0 answers** (wget/nslookup must proceed on A only).
+- TCP **`10.77.0.50:4001`**: `GET /` → body **`M9-FIXTURE-HTTP\n`** (`wget-fixture-http.strace` `read` on connected socket).
+
+### Blocking / readiness (#145)
+
+| Call | Wait event | Evidence |
+|------|------------|----------|
+| `poll` | timeout or `POLLIN` | `nslookup-fixture.strace` / `wget-fixture-http.strace` (2500 ms DNS) |
+| `nanosleep` | zero timeout | `sleep-0.strace` `{tv_sec=0,tv_nsec=0}` |
+| `wait4` | child exit | `pipe-grep.strace` |
+| `connect` | TCP connect complete | `wget-fixture-http.strace` → `10.77.0.50:4001` |
+
+### Descriptor kinds (#147)
+
+Regular file, directory fd, pipe, connected **TCP client**, connected **UDP** socket, stdio. No listening TCP.
+
+### auxv / TLS / AT_RANDOM (#146)
+
+Unchanged from Phase A musl **1.2.5** table: **AT_PAGESZ**, **AT_HWCAP**, **AT_PHDR/PHNUM/PHENT**, **AT_RANDOM** required for normal static startup; **AT_SYSINFO** optional (0 ok).
+
+### errno / unsupported policy
+
+- `ioctl(TIOCGWINSZ)` → **`ENOTTY`** (batch `sh -c`).
+- `wait4(..., WNOHANG)` after reap → **`ECHILD`**.
+- `sendfile` **not used** (`CONFIG_FEATURE_USE_SENDFILE=n`).
+- Paths: not UTF-8 assumed; no `openat`/`statx` in matrix.
+
+### Phase B deltas vs Phase A inventory
+
+| Item | Change |
+|------|--------|
+| `sendfile` | **Not observed**; config pinned **off** (was optional/y in Phase A traces). |
+| `wget` HTTP | **Success path** via fixture TCP (`wget-fixture-http`); Phase A failure trace dropped from matrix. |
+| `httpd` harness | **Removed** — not in frozen binary or matrix (`harness_only_count` 0). |
+| `sleep` blocking demo | **`sleep 0`** / `nanosleep(0)` replaces **`sleep 1`** in frozen commands. |
+| DNS replies | **`read`** on UDP/TCP after **`poll`** now evidenced (no `recvfrom` in traces). |
+
+### Explicit non-goals
+
+Syscall implementation, kernel changes, high-VA BusyBox link patches, in-fixture `httpd`, public network, interactive tty job control.
+
+**Lane matrix for #99:** `fixtures/busybox/frozen/M9_DEPENDENCY_MATRIX.md`.
