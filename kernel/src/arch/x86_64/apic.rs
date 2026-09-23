@@ -83,10 +83,7 @@ pub(crate) fn program_local_apic_timer() {
     local_apic_write(APIC_REGISTER_INITIAL_COUNT, apic_timer_initial_count());
 }
 
-#[cfg_attr(
-    not(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test",)),
-    allow(dead_code)
-)]
+#[allow(dead_code)] // retained for diagnostics; self-tests no longer reprogram manually (#163).
 pub(crate) fn reprogram_local_apic_timer(initial_count: u32) {
     local_apic_write(APIC_REGISTER_INITIAL_COUNT, initial_count);
 }
