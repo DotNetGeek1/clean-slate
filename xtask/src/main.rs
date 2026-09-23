@@ -13,6 +13,7 @@ mod m7_certs;
 mod m7_fixture;
 mod m7_fixture_tcp;
 mod m8_fixture;
+mod m9_fixture;
 
 use m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
 
@@ -118,6 +119,8 @@ const M9_LINUX_RUNTIME_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[M9.J] PASS",
 ];
 const M9_LINUX_RUNTIME_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M9_ROOTFS_ACCEPTANCE_MARKERS: [&str; 2] = ["[RFS ] rootfs entries=", "[M9.K] PASS"];
+const M9_ROOTFS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[INT ] double-fault IST initialized",
     "[DF  ] double fault",
@@ -658,6 +661,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM9LowVa => run_m9_low_va_acceptance(),
         ParsedCommand::TestM9LinuxExec => run_m9_linux_exec_acceptance(),
         ParsedCommand::TestM9LinuxRuntime => run_m9_linux_runtime_acceptance(),
+        ParsedCommand::TestM9Rootfs => run_m9_rootfs_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
         ParsedCommand::TestM3 => run_m3_acceptance(),
         ParsedCommand::TestM3AddressSpace => run_m3_address_space_acceptance(),
@@ -687,6 +691,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
             Ok(())
         }
         ParsedCommand::VerifyM8Fixture => run_m8_verify_fixture_verbose(),
+        ParsedCommand::VerifyM9Fixture => run_m9_verify_fixture_verbose(),
         ParsedCommand::TestM7Dns => run_m7_dns_acceptance(),
         ParsedCommand::TestM5Storage => run_m5_storage_acceptance(),
         ParsedCommand::TestM5CrashMatrix => run_m5_crash_matrix(),
@@ -1067,6 +1072,15 @@ fn run_m9_linux_runtime_acceptance() -> Result<(), XtaskError> {
     )
 }
 
+fn run_m9_rootfs_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m9-rootfs-self-test"],
+        Some((&M9_ROOTFS_ACCEPTANCE_MARKERS, M9_ROOTFS_ACCEPTANCE_TIMEOUT)),
+    )
+}
+
 fn run_m2_acceptance() -> Result<(), XtaskError> {
     run_vm_inner(
         false,
@@ -1216,6 +1230,21 @@ fn run_m8_verify_fixture_verbose() -> Result<(), XtaskError> {
 
 fn run_m8_verify_fixture_step() -> Result<(), XtaskError> {
     m8_fixture::verify_m8_fixture().map_err(XtaskError::InvalidCommand)?;
+    Ok(())
+}
+
+fn run_m9_verify_fixture_verbose() -> Result<(), XtaskError> {
+    let report = m9_fixture::verify_m9_fixture().map_err(XtaskError::InvalidCommand)?;
+    println!("M9 fixture OK");
+    println!("  busybox_sha256={}", report.busybox_sha256);
+    println!("  image_sha256={}", report.image_sha256);
+    println!("  entry_count={}", report.entry_count);
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn run_m9_verify_fixture_step() -> Result<(), XtaskError> {
+    m9_fixture::verify_m9_fixture().map_err(XtaskError::InvalidCommand)?;
     Ok(())
 }
 
@@ -1804,11 +1833,22 @@ fn run_vm_inner_with_config(
     } else {
         workspace_root().join("target").join("OVMF_VARS.fd")
     };
-    if config.reset_ovmf_vars || !vars_copy.is_file() {
-        if let Some(parent) = vars_copy.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    // Every boot starts from the pristine variable store. OVMF rewrites NV
+    // variables on each boot and the harness SIGKILLs QEMU as soon as the
+    // markers match, so a store shared across ~50 boots accumulates partial
+    // writes / reclaim state; on CI that eventually left the firmware stuck
+    // before BDS (console escapes only, no `BdsDxe:` line) for whichever test
+    // happened to boot next. A fresh copy makes each boot independent.
+    if let Some(parent) = vars_copy.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if !same_file(&ovmf.vars_template, &vars_copy) {
         fs::copy(&ovmf.vars_template, &vars_copy)?;
+    } else {
+        eprintln!(
+            "warning: OVMF_VARS template is the working copy ({}); firmware variable state is shared across boots",
+            vars_copy.display()
+        );
     }
 
     let mut qemu = Command::new("qemu-system-x86_64");
@@ -2066,6 +2106,14 @@ fn kernel_artifact(release: bool) -> PathBuf {
         .join(KERNEL_TARGET)
         .join(profile)
         .join(format!("{KERNEL_PACKAGE}.efi"))
+}
+
+/// True when both paths name the same existing file (after canonicalisation).
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 fn find_ovmf() -> Result<OvmfPaths, XtaskError> {
@@ -2595,6 +2643,9 @@ fn print_help() {
     println!("  test-m7-tls       M7.6 TLS client acceptance (pass + fail-closed QEMU boots)");
     println!("  gen-m7-fixture-certs  Regenerate repository-owned M7 TLS fixture certificates");
     println!("  verify-m8-fixture Verify committed Linux hello ELF hash and pinned metadata");
+    println!(
+        "  verify-m9-fixture Verify BusyBox hash, ELF metadata, and deterministic rootfs image"
+    );
     println!("  test-m7-dns         Build the M7.5 DNS resolver kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
@@ -2677,6 +2728,7 @@ enum ParsedCommand {
     TestM7Tls,
     GenM7FixtureCerts,
     VerifyM8Fixture,
+    VerifyM9Fixture,
     TestM7Dns,
     TestM5Storage,
     TestM5CrashMatrix,
@@ -2688,6 +2740,7 @@ enum ParsedCommand {
     TestM9LowVa,
     TestM9LinuxExec,
     TestM9LinuxRuntime,
+    TestM9Rootfs,
     TestM6Object,
     TestM7NetService,
     TestM7Network,
@@ -2722,6 +2775,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
             if cmd == "test-m9-linux-runtime" || cmd == "m9-linux-runtime" || cmd == "m9.103" =>
         {
             ParsedCommand::TestM9LinuxRuntime
+        }
+        Some(cmd) if cmd == "test-m9-rootfs" || cmd == "m9-rootfs" || cmd == "m9.104" => {
+            ParsedCommand::TestM9Rootfs
         }
         Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,
         Some(cmd) if cmd == "test-m3" => ParsedCommand::TestM3,
@@ -2765,6 +2821,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "gen-m7-fixture-certs" => ParsedCommand::GenM7FixtureCerts,
         Some(cmd) if cmd == "verify-m8-fixture" => ParsedCommand::VerifyM8Fixture,
+        Some(cmd) if cmd == "verify-m9-fixture" => ParsedCommand::VerifyM9Fixture,
         Some(cmd) if cmd == "test-m7-dns" || cmd == "m7-dns" || cmd == "m7.5" => {
             ParsedCommand::TestM7Dns
         }
