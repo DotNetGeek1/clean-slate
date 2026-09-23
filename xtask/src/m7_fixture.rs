@@ -16,7 +16,7 @@ use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
 
-use crate::m7_fixture_tcp::{FixtureTlsCert, TcpEchoService, TlsService};
+use crate::m7_fixture_tcp::{FixtureTlsCert, M9HttpService, TcpEchoService, TlsService};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 
@@ -32,6 +32,8 @@ pub enum WhichCert {
 pub struct FixtureOptions {
     pub tls_cert: WhichCert,
     pub dns_reply_delay: StdDuration,
+    /// M9 #105: DNS A → 10.77.0.50, HTTP on 10.77.0.50:4001 (M7 tests keep default false).
+    pub m9_profile: bool,
 }
 
 impl Default for FixtureOptions {
@@ -39,6 +41,7 @@ impl Default for FixtureOptions {
         Self {
             tls_cert: WhichCert::Correct,
             dns_reply_delay: StdDuration::ZERO,
+            m9_profile: false,
         }
     }
 }
@@ -126,6 +129,11 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
                 24,
             ))
             .expect("fixture IPv4");
+        if options.m9_profile {
+            addrs
+                .push(IpCidr::new(IpAddress::v4(10, 77, 0, 50), 24))
+                .expect("fixture M9 IPv4");
+        }
     });
 
     let mut sockets = SocketSet::new(vec![]);
@@ -158,6 +166,16 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
     };
     let mut tls_service = TlsService::new(&mut sockets, tls_handle, tls_cert);
 
+    let mut m9_http_service = None;
+    if options.m9_profile {
+        let m9_tcp = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0u8; 8192]),
+            tcp::SocketBuffer::new(vec![0u8; 8192]),
+        );
+        let m9_handle = sockets.add(m9_tcp);
+        m9_http_service = Some(M9HttpService::new(&mut sockets, m9_handle));
+    }
+
     let mut timestamp = Instant::from_millis(0);
     while !stop.load(Ordering::SeqCst) {
         timestamp += Duration::from_millis(1);
@@ -180,7 +198,7 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
             dns_socket.bind(DNS_SERVER_PORT).expect("bind udp dns");
         }
         if let Ok((payload, endpoint)) = dns_socket.recv() {
-            if let Some((name, response)) = build_dns_response(payload) {
+            if let Some((name, response)) = build_dns_response(payload, options.m9_profile) {
                 let rcode = (response[3] & 0x0F) as u32;
                 if !options.dns_reply_delay.is_zero() {
                     thread::sleep(options.dns_reply_delay);
@@ -192,6 +210,9 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         }
         tcp_echo_service.poll(&mut sockets);
         tls_service.poll(&mut sockets);
+        if let Some(http) = m9_http_service.as_mut() {
+            http.poll(&mut sockets);
+        }
 
         for event in device.drain_events() {
             println!("{event}");
@@ -319,7 +340,9 @@ struct QemuTxToken<'a> {
     device: &'a mut QemuSocketDevice,
 }
 
-fn build_dns_response(query: &[u8]) -> Option<(String, Vec<u8>)> {
+const M9_HTTP_ADDR: [u8; 4] = [10, 77, 0, 50];
+
+fn build_dns_response(query: &[u8], m9_profile: bool) -> Option<(String, Vec<u8>)> {
     if query.len() < 12 {
         return None;
     }
@@ -333,6 +356,18 @@ fn build_dns_response(query: &[u8]) -> Option<(String, Vec<u8>)> {
         return None;
     }
     let qtype = u16::from_be_bytes([query[qend], query[qend + 1]]);
+    if qtype == 28 && m9_profile {
+        let question = query.get(12..qend + 4)?.to_vec();
+        let mut response = Vec::with_capacity(question.len() + 16);
+        response.extend_from_slice(&id);
+        response.extend_from_slice(&0x8180u16.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&question);
+        return Some((name, response));
+    }
     if qtype != 1 {
         return None;
     }
@@ -340,7 +375,11 @@ fn build_dns_response(query: &[u8]) -> Option<(String, Vec<u8>)> {
     let mut response = Vec::with_capacity(question.len() + 32);
     response.extend_from_slice(&id);
     let flags_ok = 0x8480u16;
-    let answer: [u8; 4] = FIXTURE_A_RECORD.octets();
+    let answer: [u8; 4] = if m9_profile {
+        M9_HTTP_ADDR
+    } else {
+        FIXTURE_A_RECORD.octets()
+    };
     if name.eq_ignore_ascii_case(FIXTURE_HOSTNAME) {
         response.extend_from_slice(&flags_ok.to_be_bytes());
         response.extend_from_slice(&1u16.to_be_bytes());

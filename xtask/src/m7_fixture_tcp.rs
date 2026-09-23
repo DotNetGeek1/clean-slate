@@ -11,6 +11,7 @@ use rustls::server::ServerConnection;
 use rustls::ServerConfig;
 use smoltcp::iface::SocketHandle;
 use smoltcp::socket::tcp;
+use smoltcp::wire::{IpAddress, IpListenEndpoint};
 
 pub enum FixtureTlsCert {
     Correct,
@@ -192,6 +193,81 @@ impl TlsService {
         let socket = sockets.get_mut::<tcp::Socket>(self.listen);
         if !socket.is_listening() {
             let _ = socket.listen(TLS_PORT);
+        }
+    }
+}
+
+const M9_HTTP_PORT: u16 = 4001;
+
+pub struct M9HttpService {
+    listen: SocketHandle,
+    active: Option<SocketHandle>,
+    sent: bool,
+}
+
+impl M9HttpService {
+    pub fn new(sockets: &mut smoltcp::iface::SocketSet, listen: SocketHandle) -> Self {
+        let socket = sockets.get_mut::<tcp::Socket>(listen);
+        let endpoint = IpListenEndpoint {
+            addr: Some(IpAddress::v4(10, 77, 0, 50)),
+            port: M9_HTTP_PORT,
+        };
+        socket.listen(endpoint).expect("m9 http listen");
+        Self {
+            listen,
+            active: None,
+            sent: false,
+        }
+    }
+
+    pub fn poll(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+        if self.active.is_none() {
+            let socket = sockets.get_mut::<tcp::Socket>(self.listen);
+            if socket.is_active() {
+                self.active = Some(self.listen);
+                self.sent = false;
+                println!("[FIX ] m9 http connect");
+            }
+            return;
+        }
+        let active = self.active.expect("m9 http active");
+        let socket = sockets.get_mut::<tcp::Socket>(active);
+        if !socket.is_active() {
+            self.relisten(sockets);
+            return;
+        }
+        if socket.may_recv() {
+            let mut buf = [0u8; 256];
+            let _ = socket.recv_slice(&mut buf);
+        }
+        if !self.sent && socket.may_send() {
+            let resp = concat!(
+                "HTTP/1.0 200 OK\r\n",
+                "Content-Length: 16\r\n",
+                "Connection: close\r\n\r\n",
+                "M9-FIXTURE-HTTP\n"
+            );
+            if socket.send_slice(resp.as_bytes()).is_ok() {
+                self.sent = true;
+                println!("[FIX ] m9 http response");
+            }
+        }
+        if self.sent && socket.state() == tcp::State::CloseWait {
+            socket.close();
+            self.relisten(sockets);
+        }
+    }
+
+    fn relisten(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+        self.active = None;
+        self.sent = false;
+        let socket = sockets.get_mut::<tcp::Socket>(self.listen);
+        if !socket.is_listening() {
+            let endpoint = IpListenEndpoint {
+                addr: Some(IpAddress::v4(10, 77, 0, 50)),
+                port: M9_HTTP_PORT,
+            };
+            let _ = socket.listen(endpoint);
         }
     }
 }
