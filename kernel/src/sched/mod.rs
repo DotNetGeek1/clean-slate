@@ -24,7 +24,6 @@ const fn task_count_for_features() -> usize {
         feature = "m6-delegation-self-test",
         feature = "m7-net-caps-self-test",
         feature = "m7-net-service-self-test",
-        feature = "m9-linux-socket-self-test",
         feature = "m6-object-self-test",
         feature = "m6-audit-self-test"
     )) {
@@ -461,6 +460,11 @@ impl Scheduler {
         next_stack_pointer: u64,
         thread_index: usize,
     ) -> Result<u64, &'static str> {
+        // A woken blocked thread hands back `SYSCALL_BLOCKED_RESUME_SENTINEL`, which
+        // the interrupt/yield return asm routes to
+        // `clean_slate_blocked_syscall_resume_from_schedule`. Bouncing that case to
+        // idle instead (as this once did) starved the woken thread: the idle wake
+        // round-robin re-picked the lower slot every time it blocked again.
         Ok(wait::scheduler_handoff_stack_pointer(
             next_stack_pointer,
             thread_index,
