@@ -184,7 +184,9 @@ With `m8-linux-hello`, boot Starts `LINUX_HELLO_SERVICE_ID` through
 (#92) → `LinuxX86_64` process → console grant + stdio projection (#95) → Linux
 syscall dispatch (#93) → `write`/`exit` (#94) → production teardown. Both demo
 kernel tasks keep running alongside Linux (scheduler slot 2). Controller-owned
-re-Start yields a new generation and a fresh fd table. See
+re-Start yields a new generation and a fresh fd table. M9 #147 generalizes the
+fd table into open descriptions (see [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md)
+"#147 fd / open-description core"). See
 [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md) "M8.7".
 
 Demo-task boot completion (`[M2  ] PASS`) treats scheduler slots in

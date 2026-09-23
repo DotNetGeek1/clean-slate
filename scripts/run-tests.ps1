@@ -141,6 +141,7 @@ $AllTests = [ordered]@{
     "test-m8-linux-image"       = @{ Aliases = @("m8-linux-image", "m8.2"); Description = "M8.2 Linux ELF loader QEMU constituent acceptance"; Role = "Constituent" }
     "test-m8-linux-dispatch"    = @{ Aliases = @("m8-linux-dispatch", "m8.3"); Description = "M8.3 Linux personality dispatch QEMU constituent acceptance"; Role = "Constituent" }
     "test-m9-syscall-fail-closed" = @{ Aliases = @("m9-syscall-fail-closed", "m9.143"); Description = "M9 #143 unresolved syscall caller fail-closed QEMU acceptance"; Role = "Constituent" }
+    "test-m9-fd-core" = @{ Aliases = @("m9-fd-core", "m9.147"); Description = "M9 #147 Linux fd / open-description core QEMU acceptance"; Role = "Constituent" }
     "verify-m8-fixture"         = @{ Aliases = @("verify-m8-fixture"); Description = "M8.6 fixture SHA-256 and ELF metadata verify (host)"; Role = "Constituent" }
 }
 
