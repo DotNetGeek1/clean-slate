@@ -22,6 +22,17 @@ const APIC_REGISTER_EOI: usize = 0xb0;
 const APIC_REGISTER_SVR: usize = 0xf0;
 const APIC_REGISTER_LVT_TIMER: usize = 0x320;
 const APIC_REGISTER_INITIAL_COUNT: usize = 0x380;
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test"
+    ),
+    allow(dead_code)
+)]
 const APIC_REGISTER_CURRENT_COUNT: usize = 0x390;
 const APIC_REGISTER_DIVIDE_CONFIGURATION: usize = 0x3e0;
 const APIC_TIMER_PERIODIC: u32 = 1 << 17;
@@ -51,6 +62,17 @@ fn write_apic_timer_lvt_and_divide() {
 }
 
 /// Arm periodic mode with maximum count so calibration can observe the down-counter.
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn prepare_local_apic_timer_for_calibration() {
     write_apic_timer_lvt_and_divide();
     local_apic_write(APIC_REGISTER_INITIAL_COUNT, u32::MAX);
@@ -74,10 +96,32 @@ pub(crate) fn acknowledge_timer_interrupt() {
 }
 
 /// Current APIC timer count (down-counter); for calibration with interrupts masked.
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn local_apic_timer_current_count() -> u32 {
     local_apic_read(APIC_REGISTER_CURRENT_COUNT)
 }
 
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test"
+    ),
+    allow(dead_code)
+)]
 fn local_apic_read(offset: usize) -> u32 {
     let register = (local_apic_base() + offset as u64) as *const u32;
     unsafe { ptr::read_volatile(register) }

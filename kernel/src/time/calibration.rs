@@ -1,5 +1,17 @@
 //! APIC timer calibration against PIT channel 2 (#163), interrupts masked throughout.
 
+#![cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test"
+    ),
+    allow(dead_code)
+)]
+
 use crate::arch::x86_64::apic::{
     local_apic_timer_current_count, prepare_local_apic_timer_for_calibration,
     program_local_apic_timer,
