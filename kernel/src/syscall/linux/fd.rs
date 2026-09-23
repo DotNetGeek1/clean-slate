@@ -258,13 +258,7 @@ pub(crate) fn handle_sys_lseek(
         DescriptorKind::File(_) => {
             #[cfg(feature = "m9-rootfs")]
             {
-                super::fs_io::lseek_file_fd(
-                    ctx.pid,
-                    ctx.instance_generation,
-                    fd,
-                    offset,
-                    whence,
-                )
+                super::fs_io::lseek_file_fd(ctx.pid, ctx.instance_generation, fd, offset, whence)
             }
             #[cfg(not(feature = "m9-rootfs"))]
             {
