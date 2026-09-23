@@ -66,14 +66,16 @@ const M5_QEMU_DISK_ID: &str = "m5disk";
 const M5_QEMU_DEVICE: &str =
     "virtio-blk-pci,drive=m5disk,serial=clean-slate-m5-data,disable-modern=on";
 const M7_QEMU_NET_DEVICE: &str = "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on";
+// IPC console framing preserves these substrings; at ~1 ms tick the gen=1 health
+// line for the crash fixture often lands after fault injection in serial order.
 const M4_RECOVERY_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[CAP ] supervisor console capability granted pid=1",
     "[SUP ] started pid=1",
     "[DEP ] service=16640 ready",
     "[SVC ] launch service=16640 pid=",
-    "[HLTH] service=16640 healthy gen=1",
     "[TEST] crash-service injecting fault",
     "[PROC] fault pid=",
+    "[HLTH] service=16640 healthy gen=1",
     "[SUP ] failure service=16640 pid=",
     "[PROC] teardown pid=",
     "[SUP ] restart service=16640 attempt=1",
