@@ -262,7 +262,7 @@ pub(crate) fn handle_sys_write(
             copy_user_bytes(chunk_ptr, len as u64, dst)
         },
         |chunk| {
-            let sent = linux_fd::write_fd(pid, generation, fd, chunk, None, None)?;
+            let sent = linux_fd::write_fd(pid, generation, fd, chunk)?;
             #[cfg(feature = "m8-linux-dispatch-self-test")]
             crate::selftest::m8_linux_dispatch::observe_linux_delivered_chunk(
                 pid,

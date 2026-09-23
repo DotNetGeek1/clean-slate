@@ -239,7 +239,6 @@ impl LinuxFdRegistry {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn write_fd(
         &mut self,
         ipc: &mut IpcEndpointTable,
@@ -248,8 +247,6 @@ impl LinuxFdRegistry {
         fd: u64,
         bytes: &[u8],
         personality: ExecutionPersonality,
-        _request: Option<&clean_slate_linux_abi::LinuxSyscallRequest>,
-        _ctx: Option<&mut crate::syscall::linux::table::LinuxSyscallContext<'_>>,
     ) -> Result<usize, LinuxErrno> {
         let index = self.slot_index(pid, generation).ok_or(EBADF)?;
         let open = self.slots[index]
@@ -735,8 +732,6 @@ pub(crate) fn write_fd(
     generation: InstanceGeneration,
     fd: u64,
     bytes: &[u8],
-    request: Option<&clean_slate_linux_abi::LinuxSyscallRequest>,
-    ctx: Option<&mut crate::syscall::linux::table::LinuxSyscallContext<'_>>,
 ) -> Result<usize, LinuxErrno> {
     let personality = unsafe { process_registry_mut().get(pid) }
         .map(|process| process.execution_personality)
@@ -748,8 +743,6 @@ pub(crate) fn write_fd(
         fd,
         bytes,
         personality,
-        request,
-        ctx,
     )
 }
 

@@ -245,7 +245,7 @@ pub(crate) fn handle_sys_writev(
             Ok(copied)
         },
         |chunk| {
-            let sent = linux_fd::write_fd(pid, generation, fd, chunk, None, None)?;
+            let sent = linux_fd::write_fd(pid, generation, fd, chunk)?;
             Ok(sent)
         },
     )
