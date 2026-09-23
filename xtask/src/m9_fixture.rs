@@ -198,8 +198,8 @@ fn extract_shell_lines(text: &str) -> Vec<String> {
     let mut shells = Vec::new();
     for raw in text.lines() {
         let line = raw.split('#').next().unwrap_or("").trim();
-        if line.starts_with("shell = ") {
-            let value = line["shell = ".len()..].trim();
+        if let Some(rest) = line.strip_prefix("shell = ") {
+            let value = rest.trim();
             if let Some(unquoted) = strip_quotes(value) {
                 shells.push(unquoted);
             }
@@ -370,9 +370,8 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     msg.extend_from_slice(&bit_len.to_be_bytes());
     for chunk in msg.chunks(64) {
         let mut w = [0u32; 64];
-        for i in 0..16 {
-            let j = i * 4;
-            w[i] = u32::from_be_bytes([chunk[j], chunk[j + 1], chunk[j + 2], chunk[j + 3]]);
+        for (word, bytes) in w.iter_mut().zip(chunk.chunks_exact(4)) {
+            *word = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
