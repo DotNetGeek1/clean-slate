@@ -112,8 +112,11 @@ const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 12] = [
     "[M9.H] getcwd=/",
     "[M9.H] hostname=m9-fixture",
     "[M9.H] ls /bin ok",
-    "[BLK ] request op=write",
     "[M9.H] stat ok",
+    // Persistence audit: the probe's first /tmp write must reach the block
+    // device before the object service completes it, so the block write
+    // request is logged strictly between `stat ok` and `tmp write/read ok`.
+    "[BLK ] request op=write",
     "[M9.H] tmp write/read ok",
     "[M9.H] big write/read ok",
     "[M9.H] negative cases ok",
