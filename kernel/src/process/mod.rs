@@ -11,6 +11,18 @@ pub(crate) mod id_allocator;
 )))]
 pub(crate) mod linux_exec;
 pub(crate) mod linux_fd;
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+pub(crate) mod linux_mem;
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+pub(crate) mod linux_signal;
 pub(crate) mod linux_image;
 pub(crate) mod linux_stdio_m9_payload;
 pub(crate) mod personality;
