@@ -159,6 +159,7 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m8-linux-hello-self-test"),
     not(feature = "m9-low-va-self-test"),
     not(feature = "m9-linux-exec-self-test"),
+    not(feature = "m9-linux-proc-self-test"),
     not(feature = "m9-rootfs-self-test"),
     not(feature = "m9-linux-fs-self-test"),
     not(feature = "m9-fd-core-self-test")
@@ -277,6 +278,7 @@ fn register_boot_kernel_low_carve_outs(
     assert_conventional_linux_window_clear()
 }
 
+#[allow(unreachable_code)]
 fn run_inner() -> Result<(), &'static str> {
     let mut reserved_ranges = collect_reserved_ranges_from_firmware()?;
 
@@ -373,6 +375,12 @@ fn run_inner() -> Result<(), &'static str> {
         start_timer_self_test_task()
     }
 
+    #[cfg(feature = "m9-linux-proc-self-test")]
+    {
+        use crate::selftest::m9_linux_proc::start_m9_linux_proc_self_test;
+        start_m9_linux_proc_self_test(allocator)
+    }
+
     #[cfg(all(feature = "m9-rootfs", not(feature = "m9-rootfs-self-test")))]
     {
         crate::process::linux_rootfs::ensure_rootfs_integrity_logged()
@@ -399,9 +407,9 @@ fn run_inner() -> Result<(), &'static str> {
     }
 
     #[cfg(all(
+        not(feature = "m9-linux-proc-self-test"),
         not(feature = "m9-linux-fs-self-test"),
         not(feature = "m9-rootfs-self-test"),
-        not(feature = "m9-linux-fs-self-test"),
         feature = "m9-linux-exec-self-test"
     ))]
     {
@@ -410,6 +418,7 @@ fn run_inner() -> Result<(), &'static str> {
     }
 
     #[cfg(all(
+        not(feature = "m9-linux-proc-self-test"),
         not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-linux-fs-self-test"),
         not(feature = "m9-linux-exec-self-test"),
@@ -494,6 +503,7 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-block-wake-self-test"),
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-linux-proc-self-test"),
         not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-linux-fs-self-test"),
         not(feature = "m9-fd-core-self-test")

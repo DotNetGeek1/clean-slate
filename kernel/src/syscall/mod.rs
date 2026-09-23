@@ -653,6 +653,8 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
     crate::selftest::m9_low_va::observe_syscall(frame);
     #[cfg(feature = "m9-linux-exec-self-test")]
     crate::selftest::m9_linux_exec::observe_syscall(frame);
+    #[cfg(feature = "m9-linux-proc-self-test")]
+    crate::selftest::m9_linux_proc::observe_syscall(frame);
 
     #[cfg(feature = "m9-syscall-fail-closed-self-test")]
     crate::selftest::m9_syscall_fail_closed::arm_caller_resolution_mismatch_if_pending();

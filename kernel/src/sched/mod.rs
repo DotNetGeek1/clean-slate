@@ -30,6 +30,8 @@ const fn task_count_for_features() -> usize {
         6
     } else if cfg!(feature = "m8-linux-hello") {
         3
+    } else if cfg!(feature = "m9-linux-proc-self-test") {
+        6
     } else {
         2
     }
@@ -551,10 +553,16 @@ impl Scheduler {
                 }
                 Ok(Some(FRESH_TASK_SENTINEL))
             } else {
-                Ok(Some(self.threads[next].saved_stack_pointer))
+                Ok(Some(wait::scheduler_handoff_stack_pointer(
+                    self.threads[next].saved_stack_pointer,
+                    next,
+                )))
             }
         } else {
-            Ok(Some(self.threads[next].saved_stack_pointer))
+            Ok(Some(wait::scheduler_handoff_stack_pointer(
+                self.threads[next].saved_stack_pointer,
+                next,
+            )))
         }
     }
 

@@ -24,6 +24,8 @@
 
 use crate::errno::{LinuxErrno, ENOSYS};
 
+/// Linux `read` — `read(fd, buf, count)`.
+pub const SYS_READ: u64 = 0;
 /// Linux `write` — `write(fd, buf, count)`.
 pub const SYS_WRITE: u64 = 1;
 /// Linux `close` — `close(fd)`.
