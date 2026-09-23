@@ -18,7 +18,10 @@ DNS (#85)  TLS (#86)
 capability broker (#87)  acceptance (#88 / #89)
 ```
 
-Linux socket ABI compatibility is deferred to M9. Application code uses Clean-Slate capabilities and bounded IPC, not POSIX sockets.
+M9 #105 maps a subset of Linux socket syscalls onto this stack (see
+[LINUX_PERSONALITY.md](LINUX_PERSONALITY.md) “M9 #105”). Production apps still use
+Clean-Slate capabilities and bounded IPC; the Linux personality brokers `NetworkRequest`
+IPC to the userspace network service after capability checks.
 
 ## Ownership map
 
