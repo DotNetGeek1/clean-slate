@@ -2,10 +2,10 @@
 
 use super::table::{table, table_mut, ProcId, LINUX_MAX_PROC_ENTRIES};
 use crate::arch::x86_64::cpu::without_interrupts;
+use crate::arch::x86_64::context_switch::build_fork_child_userspace_frame;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::capability_space_mut;
 use crate::mm::address_space::destroy_process_address_space;
-use crate::mm::align_down;
 use crate::mm::fork_clone::{fork_child_address_space, LINUX_FORK_MAX_PAGES};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::id_allocator::id_allocator_mut;
@@ -20,39 +20,7 @@ use clean_slate_capability::CapabilityHandle;
 use clean_slate_capability::{delegate, list_holder, HolderId, MAX_SLOTS};
 use clean_slate_linux_abi::{EAGAIN, ENOMEM, ESRCH};
 use clean_slate_service_lifecycle::InstanceGeneration;
-use core::mem::size_of;
 use x86_64::VirtAddr;
-
-pub(crate) fn stash_syscall_frame_on_stack(
-    kernel_stack_top: u64,
-    frame: &SyscallContext,
-    rax: u64,
-) -> u64 {
-    let frame_address = align_down(kernel_stack_top - size_of::<SyscallContext>() as u64, 16);
-    let mut copy = SyscallContext {
-        rax: frame.rax,
-        rdx: frame.rdx,
-        rbx: frame.rbx,
-        rbp: frame.rbp,
-        rsi: frame.rsi,
-        rdi: frame.rdi,
-        r8: frame.r8,
-        r9: frame.r9,
-        r10: frame.r10,
-        r12: frame.r12,
-        r13: frame.r13,
-        r14: frame.r14,
-        r15: frame.r15,
-        user_rip: frame.user_rip,
-        user_rflags: frame.user_rflags,
-        user_rsp: frame.user_rsp,
-    };
-    copy.rax = rax;
-    unsafe {
-        core::ptr::write(frame_address as *mut SyscallContext, copy);
-    }
-    frame_address
-}
 
 pub(crate) fn linux_fork(
     parent_pid: u64,
@@ -86,7 +54,8 @@ pub(crate) fn linux_fork(
     })
     .map_err(|_| EAGAIN)?;
 
-    let child_frame_ptr = stash_syscall_frame_on_stack(kernel_stack_top, parent_frame, 0);
+    let child_frame_ptr =
+        build_fork_child_userspace_frame(kernel_stack_top, parent_frame).map_err(|_| EAGAIN)?;
 
     let child_gen = match without_interrupts(|| -> Result<InstanceGeneration, &'static str> {
         unsafe {
@@ -132,8 +101,6 @@ pub(crate) fn linux_fork(
                     crate::process::linux_image::rollback_registered_process(child_pid, allocator);
                 return Err("fork configure");
             }
-            let thread = &mut scheduler_mut().threads[scheduler_slot];
-            thread.started = true;
             Ok(generation)
         }
     }) {
