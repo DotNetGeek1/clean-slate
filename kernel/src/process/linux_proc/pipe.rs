@@ -2,9 +2,9 @@
 
 use crate::process::linux_fd;
 use crate::process::linux_fd::open_description::{PipeEnd, PipeId, PipeRef};
-use crate::sched::wait::WaitKey;
 #[cfg(not(test))]
 use crate::sched::wait::wake_all;
+use crate::sched::wait::WaitKey;
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
 use crate::syscall::linux::table::LinuxSyscallContext;
@@ -253,17 +253,11 @@ pub(crate) fn attach_pipe_end(pipe: PipeRef) {
 pub(crate) fn open_pipe_refs(pool: &mut PipePool) -> Result<(PipeRef, PipeRef), LinuxErrno> {
     let PipeHandle { index, generation } = pool.alloc_pipe()?;
     let read = PipeRef {
-        pipe: PipeId {
-            index,
-            generation,
-        },
+        pipe: PipeId { index, generation },
         end: PipeEnd::Read,
     };
     let write = PipeRef {
-        pipe: PipeId {
-            index,
-            generation,
-        },
+        pipe: PipeId { index, generation },
         end: PipeEnd::Write,
     };
     Ok((read, write))

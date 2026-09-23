@@ -294,8 +294,8 @@ mod tests {
     #[test]
     fn stale_generation_zombie_is_ignored_when_registry_generation_differs() {
         use crate::process::{
-            personality::ExecutionPersonality, Process, ProcessState, ResourceDomain,
-            process_registry_mut,
+            personality::ExecutionPersonality, process_registry_mut, Process, ProcessState,
+            ResourceDomain,
         };
         reset_for_selftest();
         unsafe {

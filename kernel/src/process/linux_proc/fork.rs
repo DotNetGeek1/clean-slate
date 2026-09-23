@@ -1,8 +1,8 @@
 //! Linux `fork` — bounded eager address-space copy (#102).
 
 use super::table::{table, table_mut, ProcId, LINUX_MAX_PROC_ENTRIES};
-use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::context_switch::build_fork_child_userspace_frame;
+use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::capability_space_mut;
 use crate::mm::address_space::destroy_process_address_space;
