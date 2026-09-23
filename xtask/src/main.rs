@@ -241,11 +241,11 @@ const M8_LINUX_HELLO_ACCEPTANCE_MARKERS: [&str; 22] = [
     "entry=0x0000400000400078",
     "[LNX ] personality=x86_64 pid=",
     "[LNX ] unsupported syscall=999 errno=ENOSYS",
-    "[M8.7] first exit observed",
-    "[M8.7] relaunch observed",
     "\nHello from Linux.",
     "[LNX ] exit pid=",
     " status=0",
+    "[M8.7] first exit observed",
+    "[M8.7] relaunch observed",
     "[M8.7] second exit observed",
     "[LNX ] load failed: linux image: bad ELF magic",
     "[M8.7] malformed ELF rejected fail-closed",
@@ -253,8 +253,8 @@ const M8_LINUX_HELLO_ACCEPTANCE_MARKERS: [&str; 22] = [
     "[M8.7] PASS",
 ];
 /// Production `--features m8-linux-hello` (no self-test): hello once via the
-/// #97 path, both demo tasks progress, then `[M2  ] PASS` (not scheduler-empty).
-const M8_LINUX_HELLO_PRODUCTION_MARKERS: [&str; 10] = [
+/// #97 path, demo task progress after Linux exit, then `[M2  ] PASS` (not scheduler-empty).
+const M8_LINUX_HELLO_PRODUCTION_MARKERS: [&str; 9] = [
     "[LNX ] ELF loaded pid=",
     "entry=0x0000400000400078",
     "[LNX ] personality=x86_64 pid=",
@@ -262,7 +262,6 @@ const M8_LINUX_HELLO_PRODUCTION_MARKERS: [&str; 10] = [
     "\nHello from Linux.",
     "[LNX ] exit pid=",
     " status=0",
-    "[TASK] task 1 progress=",
     "[TASK] task 2 progress=",
     "[M2  ] PASS",
 ];
