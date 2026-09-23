@@ -150,6 +150,12 @@ const M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[LNX ] exit pid=",
     "[M8.3] PASS",
 ];
+const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS: [&str; 3] = [
+    "[TIME] timer initialized",
+    "[SYSC] unresolved caller reason=syscall caller process did not match active address space fail-closed",
+    "[M9.C] PASS",
+];
 // M8.7 / #98 self-test boot: production launch path observed twice (relaunch),
 // plus native-userspace progress and fail-closed malformed proof. Entry hex is
 // the frozen #96 fixture; `\nHello from Linux.` proves line-start, and
@@ -597,6 +603,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM3Entry => run_m3_entry_acceptance(),
         ParsedCommand::TestM3Syscall => run_m3_syscall_acceptance(),
         ParsedCommand::TestM8LinuxDispatch => run_m8_linux_dispatch_acceptance(),
+        ParsedCommand::TestM9SyscallFailClosed => run_m9_syscall_fail_closed_acceptance(),
         ParsedCommand::TestM8LinuxHello => run_m8_linux_hello_acceptance(),
         ParsedCommand::TestM8 => run_m8_acceptance(),
         ParsedCommand::TestM3Lifecycle => run_m3_lifecycle_acceptance(),
@@ -1029,6 +1036,18 @@ fn run_m8_linux_dispatch_acceptance() -> Result<(), XtaskError> {
         Some((
             &M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS,
             M8_LINUX_DISPATCH_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn run_m9_syscall_fail_closed_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m9-syscall-fail-closed-self-test"],
+        Some((
+            &M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS,
+            M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_TIMEOUT,
         )),
     )
 }
@@ -2392,6 +2411,7 @@ fn print_help() {
     println!("  test-m3-entry Build the M3.1 userspace-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-syscall Build the M3.3 syscall-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m8-linux-dispatch Build the M8.3 Linux personality dispatch kernel, run QEMU, and validate [M8.3] PASS");
+    println!("  test-m9-syscall-fail-closed Build the M9 #143 fail-closed syscall kernel, run QEMU, and validate [M9.C] PASS");
     println!("  test-m8-linux-hello Boot M8.7 self-test then production feature (hello + clean [M2] PASS); 40s for two launches (aliases: m8-linux-hello, m8.7)");
     println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
@@ -2471,6 +2491,7 @@ enum ParsedCommand {
     TestM3Entry,
     TestM3Syscall,
     TestM8LinuxDispatch,
+    TestM9SyscallFailClosed,
     TestM8LinuxHello,
     TestM8,
     TestM3Lifecycle,
@@ -2528,6 +2549,13 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m3-entry" => ParsedCommand::TestM3Entry,
         Some(cmd) if cmd == "test-m3-syscall" => ParsedCommand::TestM3Syscall,
         Some(cmd) if cmd == "test-m8-linux-dispatch" => ParsedCommand::TestM8LinuxDispatch,
+        Some(cmd)
+            if cmd == "test-m9-syscall-fail-closed"
+                || cmd == "m9-syscall-fail-closed"
+                || cmd == "m9.143" =>
+        {
+            ParsedCommand::TestM9SyscallFailClosed
+        }
         Some(cmd) if cmd == "test-m8-linux-hello" || cmd == "m8-linux-hello" || cmd == "m8.7" => {
             ParsedCommand::TestM8LinuxHello
         }

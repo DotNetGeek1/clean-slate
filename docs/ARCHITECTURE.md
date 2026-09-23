@@ -317,6 +317,11 @@ The initial ABI is intentionally tiny and versioned for M3 testing:
 - `rax=2` → self-test completion probe (`0` until criteria are met)
 - unknown syscall numbers return deterministic `-ENOSYS`
 
+If syscall caller resolution fails at the gate (trusted scheduler/registry/CR3
+path), dispatch does not fall back to native: the kernel logs a bounded
+`[SYSC] unresolved caller … fail-closed` diagnostic and contains the current
+userspace process via production teardown (see [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md) #93).
+
 This keeps assembly/unsafe logic isolated in the x86-64 boundary while exposing only a narrowly auditable contract for early userspace validation.
 
 ## M3.4 process/thread lifecycle direction
