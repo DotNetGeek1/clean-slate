@@ -8,6 +8,7 @@ msg_hostname:   .ascii "[M9.H] hostname=m9-fixture\n"
 msg_ls:         .ascii "[M9.H] ls /bin ok\n"
 msg_stat:       .ascii "[M9.H] stat ok\n"
 msg_tmp:        .ascii "[M9.H] tmp write/read ok\n"
+msg_big:        .ascii "[M9.H] big write/read ok\n"
 msg_neg:        .ascii "[M9.H] negative cases ok\n"
 msg_pass:       .ascii "[M9.H] PASS\n"
 out_hostname:   .ascii "m9-fixture\n"
@@ -19,6 +20,8 @@ path_sh:        .ascii "/bin/sh\0"
 path_busybox:   .ascii "/bin/busybox\0"
 path_tmpdemo:   .ascii "/tmp/demo\0"
 path_tmpfile:   .ascii "/tmp/demo/file\0"
+path_tmpbig:    .ascii "/tmp/demo/big\0"
+big_payload:    .fill 300, 0x41
 path_bad:       .ascii "/nonexistent\0"
 path_tmp_etc:   .ascii "/tmp/../etc/hostname\0"
 path_etc_x:     .ascii "/etc/x\0"
@@ -140,6 +143,39 @@ _start:
     mov rdi, 1
     lea rsi, [rip + msg_tmp]
     mov rdx, 26
+    syscall
+    /* 300-byte /tmp write (restart-safe path) */
+    mov rax, 2
+    lea rdi, [rip + path_tmpbig]
+    mov rsi, 0x241
+    mov rdx, 0644
+    syscall
+    mov r15, rax
+    mov rax, 1
+    mov rdi, r15
+    lea rsi, [rip + big_payload]
+    mov rdx, 300
+    syscall
+    mov rax, 3
+    mov rdi, r15
+    syscall
+    mov rax, 2
+    lea rdi, [rip + path_tmpbig]
+    mov rsi, 0
+    syscall
+    mov r15, rax
+    mov rax, 0
+    mov rdi, r15
+    lea rsi, [rip + buf]
+    mov rdx, 300
+    syscall
+    mov rax, 3
+    mov rdi, r15
+    syscall
+    mov rax, 1
+    mov rdi, 1
+    lea rsi, [rip + msg_big]
+    mov rdx, 27
     syscall
     /* negative: EROFS on rootfs write */
     mov rax, 2

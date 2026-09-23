@@ -5,6 +5,9 @@ pub(crate) mod namespace;
 pub(crate) mod object_backend;
 pub(crate) mod path;
 
+#[cfg(all(test, feature = "m9-rootfs"))]
+mod host_tests;
+
 use clean_slate_linux_abi::LinuxErrno;
 use clean_slate_rootfs::Image;
 use clean_slate_service_lifecycle::InstanceGeneration;

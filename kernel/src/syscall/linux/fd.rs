@@ -179,7 +179,6 @@ fn locate_iov_index(iovecs: &[IoVec], offset: u64) -> Result<(usize, u64), Linux
     Err(EFAULT)
 }
 
-#[cfg(feature = "m9-rootfs")]
 pub(crate) fn handle_sys_read(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
@@ -200,40 +199,47 @@ pub(crate) fn handle_sys_read(
     let open = linux_fd::open_description_id_for_fd(ctx.pid, ctx.instance_generation, fd)?;
     let desc = linux_fd::open_description_snapshot(open)?;
     match desc.kind {
-        DescriptorKind::Console(_) => return Ok(0),
+        DescriptorKind::Console(_) => Ok(0),
         DescriptorKind::File(_) => {
-            let mut scratch = [0u8; super::fs_io::LINUX_READ_SCRATCH_BYTES];
-            let want = count.min(scratch.len() as u64) as usize;
-            return super::fs_io::read_file_fd(
-                request,
-                ctx,
-                ctx.pid,
-                ctx.instance_generation,
-                fd,
-                &mut scratch[..want],
-            )
-            .and_then(|read| {
-                if read == 0 {
-                    return Ok(0);
-                }
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        scratch.as_ptr(),
-                        buf_ptr as *mut u8,
-                        read as usize,
-                    );
-                }
-                Ok(read)
-            });
+            #[cfg(feature = "m9-rootfs")]
+            {
+                let mut scratch = [0u8; super::fs_io::LINUX_READ_SCRATCH_BYTES];
+                let want = count.min(scratch.len() as u64) as usize;
+                super::fs_io::read_file_fd(
+                    request,
+                    ctx,
+                    ctx.pid,
+                    ctx.instance_generation,
+                    fd,
+                    &mut scratch[..want],
+                )
+                .map(|read| {
+                    if read == 0 {
+                        return 0;
+                    }
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            scratch.as_ptr(),
+                            buf_ptr as *mut u8,
+                            read as usize,
+                        );
+                    }
+                    read
+                })
+            }
+            #[cfg(not(feature = "m9-rootfs"))]
+            {
+                let _ = (request, ctx, fd, buf_ptr, count);
+                Err(clean_slate_linux_abi::EBADF)
+            }
         }
         DescriptorKind::PipeRead(_) | DescriptorKind::PipeWrite(_) | DescriptorKind::Socket(_) => {
-            return Err(clean_slate_linux_abi::EBADF);
+            Err(clean_slate_linux_abi::EBADF)
         }
-        DescriptorKind::Dir(_) => return Err(clean_slate_linux_abi::EBADF),
+        DescriptorKind::Dir(_) => Err(clean_slate_linux_abi::EBADF),
     }
 }
 
-#[cfg(feature = "m9-rootfs")]
 pub(crate) fn handle_sys_lseek(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
@@ -250,7 +256,21 @@ pub(crate) fn handle_sys_lseek(
     let desc = linux_fd::open_description_snapshot(open)?;
     match desc.kind {
         DescriptorKind::File(_) => {
-            super::fs_io::lseek_file_fd(ctx.pid, ctx.instance_generation, fd, offset, whence)
+            #[cfg(feature = "m9-rootfs")]
+            {
+                super::fs_io::lseek_file_fd(
+                    ctx.pid,
+                    ctx.instance_generation,
+                    fd,
+                    offset,
+                    whence,
+                )
+            }
+            #[cfg(not(feature = "m9-rootfs"))]
+            {
+                let _ = (offset, whence);
+                Err(ESPIPE)
+            }
         }
         _ => Err(ESPIPE),
     }

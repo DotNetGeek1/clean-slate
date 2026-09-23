@@ -107,15 +107,16 @@ const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 7] = [
 const M9_LINUX_EXEC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M9_ROOTFS_ACCEPTANCE_MARKERS: [&str; 2] = ["[RFS ] rootfs entries=", "[M9.K] PASS"];
 const M9_ROOTFS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 11] = [
+const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 12] = [
     "[M9.H] creating",
     "[M9.H] getcwd=/",
     "[M9.H] hostname=m9-fixture",
     "[M9.H] ls /bin ok",
+    "[BLK ] request op=write",
     "[M9.H] stat ok",
     "[M9.H] tmp write/read ok",
+    "[M9.H] big write/read ok",
     "[M9.H] negative cases ok",
-    "[BLK ] request op=write",
     "[M9.H] pool_before",
     "[M9.H] pool_after",
     "[M9.H] PASS",

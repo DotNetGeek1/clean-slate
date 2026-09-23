@@ -45,9 +45,7 @@ pub fn normalize_path(input: &[u8], out: &mut [u8; LINUX_PATH_MAX]) -> Result<us
             continue;
         }
         if seg == b".." {
-            if comp_count > 0 {
-                comp_count -= 1;
-            }
+            comp_count = comp_count.saturating_sub(1);
             continue;
         }
         if seg.len() > 64 || comp_count >= 32 {

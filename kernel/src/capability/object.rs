@@ -209,7 +209,7 @@ impl ObjectRequestQueue {
     }
 }
 
-#[allow(dead_code)] // #101 object-backed /tmp writes (blocking path lands next).
+#[cfg(feature = "m9-rootfs")]
 pub(crate) fn object_queue_submit(
     client: HolderId,
     op: u64,
@@ -219,7 +219,7 @@ pub(crate) fn object_queue_submit(
     queue_mut().submit(client, op, object_id, payload)
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "m9-rootfs")]
 pub(crate) fn object_queue_poll(
     client: HolderId,
     request_id: u64,

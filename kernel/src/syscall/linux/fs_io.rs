@@ -2,14 +2,13 @@
 
 use crate::process::linux_fd;
 use crate::process::linux_fd::open_description::DescriptorKind;
-use crate::process::linux_fs::object_backend::{
-    object_read_sync, object_write_sync, tmp_scratch_for,
-};
+use crate::process::linux_fs::object_backend::{object_read_sync, object_write_sync, ObjectIo};
 use crate::process::linux_fs::table_mut;
 use crate::process::linux_rootfs;
 use crate::syscall::linux::table::LinuxSyscallContext;
+use crate::syscall::linux::user_copy::{copy_user_bytes, LINUX_USER_COPY_MAX_BYTES};
 use clean_slate_linux_abi::{
-    LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EBADF, EFBIG, EINVAL,
+    LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EBADF, EFAULT, EFBIG, EINVAL,
 };
 use clean_slate_service_fixtures::OBJECT_MAX_PAYLOAD_BYTES;
 use clean_slate_service_lifecycle::InstanceGeneration;
@@ -18,6 +17,12 @@ pub(crate) const LINUX_READ_SCRATCH_BYTES: usize = 1024;
 
 fn image() -> clean_slate_rootfs::Image<'static> {
     linux_rootfs::image().expect("m9 rootfs")
+}
+
+fn tmp_file_by_len(object_id: u64) -> usize {
+    crate::process::linux_fs::object_backend::tmp_file_by_object_id(object_id)
+        .map(|s| s.len)
+        .unwrap_or(0)
 }
 
 pub(crate) fn read_file_fd(
@@ -49,7 +54,10 @@ pub(crate) fn read_file_fd(
     }
     if let Ok(object_id) = table.object_id_for_node(file.node) {
         let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
-        object_read_sync(request, ctx, pid, object_id, &mut payload)?;
+        match object_read_sync(request, ctx, pid, object_id, &mut payload)? {
+            ObjectIo::Restart(rax) => return Ok(rax),
+            ObjectIo::Done(_) => {}
+        }
         let len = tmp_file_by_len(object_id);
         let start = desc.offset as usize;
         if start >= len {
@@ -61,12 +69,6 @@ pub(crate) fn read_file_fd(
         return Ok(take as u64);
     }
     Err(EBADF)
-}
-
-fn tmp_file_by_len(object_id: u64) -> usize {
-    crate::process::linux_fs::object_backend::tmp_file_by_object_id(object_id)
-        .map(|s| s.len)
-        .unwrap_or(0)
 }
 
 pub(crate) fn write_file_fd(
@@ -89,19 +91,61 @@ pub(crate) fn write_file_fd(
         return Err(EBADF);
     }
     let object_id = table.object_id_for_node(file.node)?;
-    let scratch = tmp_scratch_for(object_id)?;
+    let scratch = crate::process::linux_fs::object_backend::tmp_scratch_for(object_id)?;
     let start = desc.offset as usize;
     if start.saturating_add(bytes.len()) > OBJECT_MAX_PAYLOAD_BYTES {
-        return Err(clean_slate_linux_abi::EFBIG);
-    }
-    if start + bytes.len() > scratch.len() {
         return Err(EFBIG);
     }
     scratch[start..start + bytes.len()].copy_from_slice(bytes);
     let new_len = start + bytes.len();
-    object_write_sync(request, ctx, pid, object_id, &scratch[..new_len])?;
-    linux_fd::set_open_description_offset(pid, generation, fd, new_len as u64)?;
-    Ok(bytes.len() as u64)
+    match object_write_sync(request, ctx, pid, object_id, &scratch[..new_len])? {
+        ObjectIo::Restart(rax) => Ok(rax),
+        ObjectIo::Done(n) => {
+            linux_fd::set_open_description_offset(pid, generation, fd, new_len as u64)?;
+            Ok(n as u64)
+        }
+    }
+}
+
+/// Copy the full user buffer into the tmp object scratch, then one object write (restart-safe).
+pub(crate) fn write_file_fd_user(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+    pid: u64,
+    generation: InstanceGeneration,
+    fd: u64,
+    user_ptr: u64,
+    count: usize,
+) -> LinuxSyscallResult {
+    if count == 0 {
+        return Ok(0);
+    }
+    let open = linux_fd::open_description_id_for_fd(pid, generation, fd)?;
+    let desc = linux_fd::open_description_snapshot(open)?;
+    let file = match desc.kind {
+        DescriptorKind::File(f) => f,
+        _ => return Err(EBADF),
+    };
+    let table = table_mut();
+    table.check_node(file.node)?;
+    if table.rootfs_entry_data(file.node, &image()).is_ok() {
+        return Err(EBADF);
+    }
+    let start = desc.offset as usize;
+    if start.saturating_add(count) > OBJECT_MAX_PAYLOAD_BYTES {
+        return Err(EFBIG);
+    }
+    let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
+    let mut copied = 0usize;
+    let mut chunk = [0u8; LINUX_USER_COPY_MAX_BYTES];
+    while copied < count {
+        let want = (count - copied).min(LINUX_USER_COPY_MAX_BYTES);
+        let chunk_ptr = user_ptr.checked_add(copied as u64).ok_or(EFAULT)?;
+        copy_user_bytes(chunk_ptr, want as u64, &mut chunk)?;
+        payload[copied..copied + want].copy_from_slice(&chunk[..want]);
+        copied += want;
+    }
+    write_file_fd(request, ctx, pid, generation, fd, &payload[..count])
 }
 
 pub(crate) fn lseek_file_fd(

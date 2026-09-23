@@ -1,5 +1,4 @@
 //! Linux filesystem/path syscall family (#101).
-#![cfg(feature = "m9-rootfs")]
 
 use super::table::{LinuxSyscallContext, LinuxSyscallHandler};
 use super::user_copy::copy_user_bytes;
@@ -78,12 +77,17 @@ pub(crate) fn handle_sys_open(
                 status,
             )?
         }
-        _ => linux_fd::alloc_file_description(
-            ctx.pid,
-            ctx.instance_generation,
-            FileHandleRef { node },
-            status,
-        )?,
+        _ => {
+            if (flags & O_DIRECTORY) != 0 {
+                return Err(ENOTDIR);
+            }
+            linux_fd::alloc_file_description(
+                ctx.pid,
+                ctx.instance_generation,
+                FileHandleRef { node },
+                status,
+            )?
+        }
     };
     Ok(fd as u64)
 }

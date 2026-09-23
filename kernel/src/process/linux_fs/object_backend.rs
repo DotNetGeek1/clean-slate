@@ -1,7 +1,7 @@
 //! Writable `/tmp` files backed by M6.3 persistent objects (#101).
 
 use clean_slate_capability::{HolderId, Rights};
-use clean_slate_linux_abi::{LinuxErrno, LinuxSyscallResult};
+use clean_slate_linux_abi::LinuxErrno;
 use clean_slate_service_fixtures::{
     OBJECT_MAX_PAYLOAD_BYTES, OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_STATUS_PENDING,
 };
@@ -47,6 +47,11 @@ fn store_mut() -> &'static mut TmpStore {
     unsafe { &mut *TMP_STORE.get() }
 }
 
+#[cfg(all(test, feature = "m9-rootfs"))]
+pub(crate) fn reset_tmp_store_for_host_tests() {
+    *store_mut() = TmpStore::new();
+}
+
 pub(crate) fn grant_linux_tmp_object_capabilities(pid: u64) -> Result<(), &'static str> {
     let holder = HolderId(pid);
     for index in 0..LINUX_TMP_MAX_FILES {
@@ -83,11 +88,9 @@ pub(crate) fn tmp_file_create(path: &[u8]) -> Result<u64, LinuxErrno> {
 
 pub(crate) fn tmp_file_lookup_by_path(path: &[u8]) -> Option<u64> {
     let store = store_mut();
-    for slot in store.files.iter() {
-        if let Some(state) = slot {
-            if state.path_len as usize == path.len() && &state.path[..path.len()] == path {
-                return Some(state.object_id);
-            }
+    for state in store.files.iter().flatten() {
+        if state.path_len as usize == path.len() && &state.path[..path.len()] == path {
+            return Some(state.object_id);
         }
     }
     None
@@ -95,11 +98,9 @@ pub(crate) fn tmp_file_lookup_by_path(path: &[u8]) -> Option<u64> {
 
 pub(crate) fn tmp_file_by_object_id(object_id: u64) -> Option<TmpFileState> {
     let store = store_mut();
-    for slot in store.files.iter() {
-        if let Some(state) = slot {
-            if state.object_id == object_id {
-                return Some(*state);
-            }
+    for state in store.files.iter().flatten() {
+        if state.object_id == object_id {
+            return Some(*state);
         }
     }
     None
@@ -111,6 +112,7 @@ fn slot_index_for_object(object_id: u64) -> Option<usize> {
         .filter(|i| *i < LINUX_TMP_MAX_FILES)
 }
 
+#[allow(clippy::manual_flatten)]
 fn slot_for_object_mut(object_id: u64) -> Option<&'static mut TmpFileState> {
     let store = store_mut();
     for slot in store.files.iter_mut() {
@@ -144,6 +146,13 @@ pub(crate) fn object_wait_key(request_id: u64) -> crate::sched::wait::WaitKey {
     crate::sched::wait::WaitKey(0x46_u64 << 56 | (request_id & 0x00FF_FFFF_FFFF_FFFF))
 }
 
+/// Result of a synchronous object queue operation (may require syscall restart).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ObjectIo {
+    Done(usize),
+    Restart(u64),
+}
+
 fn queue_err(e: SyscallQueueError) -> LinuxErrno {
     match e {
         SyscallQueueError::QueueFull => clean_slate_linux_abi::ENOSPC,
@@ -158,7 +167,7 @@ pub(crate) fn object_read_sync(
     pid: u64,
     object_id: u64,
     out: &mut [u8],
-) -> LinuxSyscallResult {
+) -> Result<ObjectIo, LinuxErrno> {
     let holder = HolderId(pid);
     let state = slot_for_object_mut(object_id).ok_or(clean_slate_linux_abi::ENOENT)?;
     if state.pending_request_id == 0 {
@@ -171,6 +180,7 @@ pub(crate) fn object_read_sync(
     match object_queue_poll(holder, request_id, &mut payload) {
         Ok(status) if status == OBJECT_STATUS_PENDING => {
             block_linux_syscall(request, ctx, key, None, LinuxTimeoutResult::Zero)
+                .map(ObjectIo::Restart)
         }
         Ok(len) => {
             state.pending_request_id = 0;
@@ -181,7 +191,7 @@ pub(crate) fn object_read_sync(
             }
             let take = len.min(out.len());
             out[..take].copy_from_slice(&payload[..take]);
-            Ok(take as u64)
+            Ok(ObjectIo::Done(take))
         }
         Err(SyscallQueueError::CompletionStatus(_)) => {
             state.pending_request_id = 0;
@@ -200,7 +210,7 @@ pub(crate) fn object_write_sync(
     pid: u64,
     object_id: u64,
     payload: &[u8],
-) -> LinuxSyscallResult {
+) -> Result<ObjectIo, LinuxErrno> {
     if payload.len() > OBJECT_MAX_PAYLOAD_BYTES {
         return Err(clean_slate_linux_abi::EFBIG);
     }
@@ -216,6 +226,7 @@ pub(crate) fn object_write_sync(
     match object_queue_poll(holder, request_id, &mut scratch) {
         Ok(status) if status == OBJECT_STATUS_PENDING => {
             block_linux_syscall(request, ctx, key, None, LinuxTimeoutResult::Zero)
+                .map(ObjectIo::Restart)
         }
         Ok(_) => {
             state.pending_request_id = 0;
@@ -227,7 +238,7 @@ pub(crate) fn object_write_sync(
                 "[STOR] write object={object_id} bytes={}\n",
                 payload.len()
             ));
-            Ok(payload.len() as u64)
+            Ok(ObjectIo::Done(payload.len()))
         }
         Err(SyscallQueueError::CompletionStatus(_)) => {
             state.pending_request_id = 0;

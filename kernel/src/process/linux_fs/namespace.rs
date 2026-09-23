@@ -5,8 +5,8 @@ use super::object_backend::{
 };
 use super::path::{normalize_path, LINUX_PATH_MAX};
 use clean_slate_linux_abi::{
-    LinuxErrno, LinuxStatFields, EACCES, EEXIST, EISDIR, ELOOP, ENOENT, ENOSPC, ENOTDIR, EROFS,
-    S_IFDIR, S_IFLNK, S_IFREG,
+    LinuxErrno, LinuxStatFields, EACCES, EEXIST, EISDIR, ELOOP, ENFILE, ENOENT, ENOSPC, ENOTDIR,
+    EROFS, S_IFDIR, S_IFLNK, S_IFREG,
 };
 use clean_slate_rootfs::{EntryKind, Image};
 
@@ -155,9 +155,10 @@ impl NodeTable {
             }
         }
         let parent_path = self.path_of(parent.index, image)?;
+        let parent_len = path_buf_len(&parent_path);
         let mut child_path = [0u8; LINUX_PATH_MAX];
-        let mut pos = parent_path.len();
-        child_path[..pos].copy_from_slice(&parent_path);
+        let mut pos = parent_len;
+        child_path[..pos].copy_from_slice(&parent_path[..parent_len]);
         if child_path[pos - 1] != b'/' {
             child_path[pos] = b'/';
             pos += 1;
@@ -242,7 +243,8 @@ impl NodeTable {
             return Err(ELOOP);
         }
         let path = self.path_of(node.index, image)?;
-        let entry = image.lookup(&path).ok_or(ENOENT)?;
+        let path_len = path_buf_len(&path);
+        let entry = image.lookup(&path[..path_len]).ok_or(ENOENT)?;
         let target = entry.data;
         self.walk(target, image, true, depth + 1)
     }
@@ -361,7 +363,7 @@ impl NodeTable {
                 st_rdev: 0,
                 st_size: entry.data.len() as i64,
                 st_blksize: 4096,
-                st_blocks: ((entry.data.len() + 511) / 512) as i64,
+                st_blocks: entry.data.len().div_ceil(512) as i64,
             });
         }
         let mut effective = id;
@@ -395,7 +397,7 @@ impl NodeTable {
             st_rdev: 0,
             st_size: size,
             st_blksize: 4096,
-            st_blocks: ((size as usize + 511) / 512) as i64,
+            st_blocks: (size as usize).div_ceil(512) as i64,
         })
     }
 
@@ -486,7 +488,20 @@ impl NodeTable {
                 return Ok(index as u16);
             }
         }
-        Err(ENOSPC)
+        Err(ENFILE)
+    }
+
+    #[cfg(all(test, feature = "m9-rootfs"))]
+    pub(crate) fn host_test_evict_node(&mut self, id: NodeId) -> Result<(), LinuxErrno> {
+        self.check_node(id)?;
+        if id.index == self.root_index {
+            return Err(EACCES);
+        }
+        let slot = &mut self.nodes[id.index as usize];
+        slot.live = false;
+        slot.generation = slot.generation.wrapping_add(1);
+        self.live_count = self.live_count.saturating_sub(1);
+        Ok(())
     }
 
     fn fill_node(
@@ -598,6 +613,10 @@ fn find_entry_index(image: &Image<'_>, path: &[u8]) -> Option<u16> {
     None
 }
 
+fn path_buf_len(buf: &[u8; LINUX_PATH_MAX]) -> usize {
+    buf.iter().position(|&b| b == 0).unwrap_or(LINUX_PATH_MAX)
+}
+
 fn split_component(path: &[u8]) -> (&[u8], &[u8]) {
     match path.iter().position(|&b| b == b'/') {
         Some(pos) => (&path[..pos], &path[pos + 1..]),
@@ -624,10 +643,10 @@ fn parent_path_bytes(path: &[u8]) -> Result<&[u8], LinuxErrno> {
     if p.ends_with(b"/") {
         p = &p[..p.len() - 1];
     }
-    match p.rsplit(|&b| b == b'/').nth(1) {
-        Some(parent) if !parent.is_empty() => Ok(parent),
-        Some(_) => Ok(b"/"),
+    match p.iter().rposition(|&b| b == b'/') {
         None => Err(ENOENT),
+        Some(0) => Ok(b"/"),
+        Some(pos) => Ok(&p[..pos]),
     }
 }
 
