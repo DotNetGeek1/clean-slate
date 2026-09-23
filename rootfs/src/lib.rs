@@ -371,10 +371,6 @@ mod tests {
         use super::*;
         use std::path::Path;
 
-        fn fixture_resolve(base: &Path, rel: &str) -> std::io::Result<Vec<u8>> {
-            std::fs::read(base.join(rel))
-        }
-
         #[test]
         fn round_trip_minimal_manifest() {
             let toml = r#"
@@ -393,10 +389,6 @@ kind = "file"
 inline = "m9-fixture\n"
 "#;
             let manifest = Manifest::parse_toml(toml).expect("parse");
-            let base = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .join("fixtures/busybox/frozen");
             let packed = pack(&manifest, |_| {
                 Err(std::io::Error::new(std::io::ErrorKind::NotFound, "unused"))
             })
