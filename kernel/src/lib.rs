@@ -42,6 +42,12 @@ mod mm;
 mod process;
 mod sched;
 mod service;
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+mod time;
 // Milestone self-tests exit QEMU before the normal boot tail runs, so each
 // feature build leaves parts of its own scaffolding unreferenced. The
 // allowance is scoped to this module only; production modules must stay

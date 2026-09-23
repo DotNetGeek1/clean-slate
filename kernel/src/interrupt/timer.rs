@@ -49,6 +49,15 @@ pub(crate) fn initialize_timer() {
     mask_legacy_pic();
     enable_local_apic();
     program_local_apic_timer();
+    #[cfg(not(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test"
+    )))]
+    crate::time::calibration::calibrate_apic_tick();
 }
 
 // Boot-tail entry point: self-test builds exit QEMU before reaching it.
