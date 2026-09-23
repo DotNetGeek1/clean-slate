@@ -19,7 +19,12 @@ const SYSCALL_NR_IPC_SEND: u64 = 3;
 struct SupervisorBootstrap {
     self_pid: u64,
     console_capability: u64,
+    tick_period_ns: u64,
 }
+
+/// M4.6 image: 100 kernel ticks at the historical ~160 ms uncalibrated LAPIC period.
+const RESTART_POLICY_LIVENESS_MS: u64 = 16_000;
+const FALLBACK_TICK_PERIOD_NS: u64 = 1_000_000;
 
 struct IpcConsoleSink {
     capability: u64,
@@ -87,18 +92,24 @@ pub extern "C" fn _start() -> ! {
         LifecycleEventKind::Ready,
     ));
 
+    let tick_period_ns = if config.tick_period_ns == 0 {
+        FALLBACK_TICK_PERIOD_NS
+    } else {
+        config.tick_period_ns
+    };
+    let liveness = LivenessConfig::from_millis(RESTART_POLICY_LIVENESS_MS, tick_period_ns);
     let mut supervisor = ConvergedSupervisor::<_, _, 4>::new(
         ProcessId(config.self_pid),
         control,
         IpcConsoleSink {
             capability: config.console_capability,
         },
-        LivenessConfig::new(100),
+        liveness,
     );
 
     let policy = ServiceConvergenceConfig::new(
         RestartPolicy::OnFailure(BoundedRestart::new(3, 0)),
-        LivenessConfig::new(100),
+        liveness,
     );
 
     if supervisor.start().is_err() || supervisor.register_service(service, policy).is_err() {

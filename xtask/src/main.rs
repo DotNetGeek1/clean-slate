@@ -147,7 +147,7 @@ const M2_ACCEPTANCE_MARKERS: [&str; 12] = [
 const M2_TIMER_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[INT ] IDT initialized",
     "[TIME] timer initialized",
-    "[TIME] contract=lapic periodic divide=16 initial_count=10000000 tick-rate=uncalibrated",
+    "[TIME] contract=lapic periodic divide=16 initial_count=62500 tick-rate=uncalibrated",
     "[TIME] tick=1",
     "[TIME] ticks=",
     "[TIME] PASS",

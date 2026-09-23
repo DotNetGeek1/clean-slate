@@ -178,7 +178,7 @@ fn build_reader_program(reader_pid: u64) -> M6FixtureBootstrap {
         )
         .unwrap();
     let parent = arg_result(claim);
-    program
+    let list_root = program
         .push(M6FixtureStep::syscall(
             SYSCALL_NR_CAP_DELEGATE,
             [DELEGATE_OP_LIST, 0, arg_data(list_offset), 0, 0, 0],
@@ -200,8 +200,24 @@ fn build_reader_program(reader_pid: u64) -> M6FixtureBootstrap {
             .expect_eq(SYSCALL_EACCES),
         )
         .unwrap();
-    // Let the owner finish attenuated delegation before validating the child handle.
-    program.push(M6FixtureStep::spin(64)).unwrap();
+    // Block until the owner installs the attenuated delegated child (second live cap).
+    program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_DELEGATE,
+                [
+                    DELEGATE_OP_LIST,
+                    arg_result(list_root),
+                    arg_data(list_offset),
+                    0,
+                    0,
+                    0,
+                ],
+            )
+            .repeat_while_eq(0)
+            .expect_ne(0),
+        )
+        .unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
 }
