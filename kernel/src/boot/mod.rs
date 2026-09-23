@@ -119,8 +119,6 @@ use crate::sched::task_stacks_mut;
 use crate::selftest::m1_memory::exercise_mapping;
 #[cfg(feature = "m1-self-test")]
 use crate::selftest::m1_memory::trigger_expected_page_fault;
-#[cfg(feature = "m1-self-test")]
-use crate::selftest::m1_memory::SCRATCH_PAGE_ADDRESS;
 #[cfg(feature = "m2-double-fault-self-test")]
 use crate::selftest::m2_double_fault::trigger_double_fault_self_test;
 #[cfg(feature = "m2-timer-self-test")]
