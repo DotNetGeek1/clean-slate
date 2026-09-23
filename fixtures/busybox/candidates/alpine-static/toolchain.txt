@@ -1,0 +1,18 @@
+image=alpine:3.21
+package=busybox-static
+BusyBox v1.37.0 (2025-11-23 13:10:04 UTC) multi-call binary.
+libc=musl (Alpine bundled)
+busybox-static-1.37.0-r14 description:
+Statically linked Busybox
+
+busybox-static-1.37.0-r14 webpage:
+https://busybox.net/
+
+busybox-static-1.37.0-r14 installed size:
+1009 KiB
+
+musl-1.2.5-r11 description:
+the musl c library (libc) implementation
+
+musl-1.2.5-r11 webpage:
+https://musl.libc.org/

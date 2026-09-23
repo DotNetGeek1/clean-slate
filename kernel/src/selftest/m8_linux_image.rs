@@ -29,7 +29,7 @@ use crate::mm::address_space::{
 };
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::zero_page;
-use crate::mm::{PAGE_SIZE, PHYSICAL_MEMORY_OFFSET};
+use crate::mm::{phys_to_virt, PAGE_SIZE};
 use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::{id_allocator_mut, IdAllocator};
 use crate::process::linux_image::{
@@ -139,7 +139,7 @@ fn launch_native_sibling(
         unsafe {
             ptr::copy_nonoverlapping(
                 NATIVE_SIBLING_CODE.as_ptr(),
-                (PHYSICAL_MEMORY_OFFSET + code_frame) as *mut u8,
+                (phys_to_virt(code_frame)) as *mut u8,
                 NATIVE_SIBLING_CODE.len(),
             );
         }

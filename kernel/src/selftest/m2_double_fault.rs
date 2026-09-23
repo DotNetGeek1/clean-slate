@@ -20,9 +20,14 @@ use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering;
 
 #[cfg(feature = "m2-double-fault-self-test")]
-const DOUBLE_FAULT_TEST_PRIMARY_ADDRESS: u64 = 0xffff_8000_0000_1000;
 #[cfg(feature = "m2-double-fault-self-test")]
-pub(crate) const DOUBLE_FAULT_TEST_SECONDARY_ADDRESS: u64 = 0xffff_8000_0000_2000;
+use crate::mm::layout::KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE;
+
+#[cfg(feature = "m2-double-fault-self-test")]
+const DOUBLE_FAULT_TEST_PRIMARY_ADDRESS: u64 = KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE;
+#[cfg(feature = "m2-double-fault-self-test")]
+pub(crate) const DOUBLE_FAULT_TEST_SECONDARY_ADDRESS: u64 =
+    KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE + 0x1000;
 
 #[cfg(any(
     feature = "m2-double-fault-self-test",

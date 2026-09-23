@@ -1,0 +1,3454 @@
+{
+  "meta": {
+    "candidate": "musl-minimal",
+    "busybox_version": "1.37.0",
+    "syscall_count": 35,
+    "harness_only_count": 5,
+    "highest_fd_observed": 11
+  },
+  "syscalls": [
+    {
+      "nr": 0,
+      "name": "read",
+      "owner": "#147",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "grep",
+        "nslookup",
+        "sh",
+        "unknown",
+        "wget"
+      ],
+      "commands": [
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "script-sh",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "read(0, \"\", 1024)",
+        "read(0, \"GET / HTTP/1.1\\r\\nHost: 127.0.0.1:18080\\r\\nUser-Agent: Wget\\r\\nConnection: close\\r\\n\\r\\n\", 1024)",
+        "read(0, \"hello\\n\", 1024)",
+        "read(0, \"hi\\n\", 1024)",
+        "read(10, \"pwd\\nls /\\ncat /etc/hostname\\nmkdir -p /tmp/demo2\\nprintf script > /tmp/demo2/file\\ncat /tmp/demo2/file\\necho hi | grep hi\\nuname\\nsleep 0\\nexit 0\\n\", 1023)",
+        "read(3,  )",
+        "read(3, \"\", 1024)",
+        "read(3, \"\", 248)",
+        "read(3, \"nameserver 10.77.0.1\\n\", 1024)",
+        "read(3, \"nameserver 10.77.0.1\\n\", 248)"
+      ],
+      "blocking": [
+        "may-block",
+        "never"
+      ],
+      "descriptor_kinds": [
+        "fd"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "grep-via-busybox.strace:128",
+        "grep-via-busybox.strace:135",
+        "grep-via-symlink.strace:164",
+        "grep-via-symlink.strace:171",
+        "nslookup-fixture.strace:129",
+        "nslookup-fixture.strace:131",
+        "pipe-grep-env-i.strace:200",
+        "pipe-grep-env-i.strace:207",
+        "pipe-grep-path-only.strace:199",
+        "pipe-grep-path-only.strace:206",
+        "pipe-grep.strace:187",
+        "pipe-grep.strace:194",
+        "script-sh.strace:124",
+        "script-sh.strace:354",
+        "script-sh.strace:361",
+        "wget-fixture-fail.strace:134",
+        "wget-fixture-fail.strace:135",
+        "wget-local-httpd.strace:229",
+        "wget-local-httpd.strace:253"
+      ],
+      "required_evidence": [
+        "grep-via-busybox.strace:128",
+        "grep-via-busybox.strace:135",
+        "grep-via-symlink.strace:164",
+        "grep-via-symlink.strace:171",
+        "nslookup-fixture.strace:129",
+        "nslookup-fixture.strace:131",
+        "pipe-grep-env-i.strace:200",
+        "pipe-grep-env-i.strace:207",
+        "pipe-grep-path-only.strace:199",
+        "pipe-grep-path-only.strace:206",
+        "pipe-grep.strace:187",
+        "pipe-grep.strace:194",
+        "script-sh.strace:124",
+        "script-sh.strace:354",
+        "script-sh.strace:361",
+        "wget-fixture-fail.strace:134",
+        "wget-fixture-fail.strace:135",
+        "wget-local-httpd.strace:253"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:229"
+      ],
+      "note": null
+    },
+    {
+      "nr": 1,
+      "name": "write",
+      "owner": "#147",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "busybox",
+        "nslookup",
+        "sh",
+        "unknown",
+        "wget"
+      ],
+      "commands": [
+        "busybox-list",
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "script-sh",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "write(1, \"HTTP/1.1 200 OK\\r\\nDate: Tue, 22 Sep 2026 15:43:29 GMT\\r\\nConnection: close\\r\\nContent-type: text/html\\r\\nAccept-Ranges: bytes\\r\\nLast-Modified: Tue, 22 Sep 2026 15:43:16 GMT\\r\\nETag: \\\"6ab2a214-11\\\"\\r\\nContent-Lengt\"..., 209)",
+        "write(1, \"exit_code=3\\n\", 12)",
+        "write(1, \"hello-from-httpd\\n\", 17)",
+        "write(1, \"hello\\n\", 6 )",
+        "write(1, \"hi\\n\", 3 )",
+        "write(2, \"[\", 1)",
+        "write(2, \"[[\", 2)",
+        "write(2, \"\\n\", 1)",
+        "write(2, \"acpid\", 5)",
+        "write(2, \"add-shell\", 9)",
+        "write(2, \"addgroup\", 8)",
+        "write(2, \"adduser\", 7)",
+        "write(2, \"adjtimex\", 8)",
+        "write(2, \"arch\", 4)",
+        "write(2, \"arp\", 3)",
+        "write(2, \"arping\", 6)",
+        "write(2, \"ascii\", 5)",
+        "write(2, \"ash\", 3)",
+        "write(2, \"awk\", 3)",
+        "write(2, \"base32\", 6)",
+        "write(2, \"base64\", 6)",
+        "write(2, \"basename\", 8)",
+        "write(2, \"bc\", 2)",
+        "write(2, \"beep\", 4)",
+        "write(2, \"blkdiscard\", 10)",
+        "write(2, \"blkid\", 5)",
+        "write(2, \"blockdev\", 8)",
+        "write(2, \"bootchartd\", 10)",
+        "write(2, \"brctl\", 5)",
+        "write(2, \"bunzip2\", 7)",
+        "write(2, \"bzcat\", 5)",
+        "write(2, \"bzip2\", 5)",
+        "write(2, \"cal\", 3)",
+        "write(2, \"cat\", 3)",
+        "write(2, \"chat\", 4)",
+        "write(2, \"chattr\", 6)",
+        "write(2, \"chgrp\", 5)",
+        "write(2, \"chmod\", 5)",
+        "write(2, \"chown\", 5)",
+        "write(2, \"chpasswd\", 8)",
+        "write(2, \"chpst\", 5)",
+        "write(2, \"chroot\", 6)",
+        "write(2, \"chrt\", 4)",
+        "write(2, \"chvt\", 4)",
+        "write(2, \"cksum\", 5)",
+        "write(2, \"clear\", 5)",
+        "write(2, \"cmp\", 3)",
+        "write(2, \"comm\", 4)",
+        "write(2, \"conspy\", 6)",
+        "write(2, \"cp\", 2)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "fd"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:103",
+        "busybox-list.strace:104",
+        "busybox-list.strace:105",
+        "busybox-list.strace:106",
+        "busybox-list.strace:107",
+        "busybox-list.strace:108",
+        "busybox-list.strace:109",
+        "busybox-list.strace:110",
+        "busybox-list.strace:111",
+        "busybox-list.strace:112",
+        "busybox-list.strace:113",
+        "busybox-list.strace:114",
+        "busybox-list.strace:115",
+        "busybox-list.strace:116",
+        "busybox-list.strace:117",
+        "busybox-list.strace:118",
+        "busybox-list.strace:119",
+        "busybox-list.strace:120",
+        "busybox-list.strace:121",
+        "busybox-list.strace:122",
+        "busybox-list.strace:123",
+        "busybox-list.strace:124",
+        "busybox-list.strace:125",
+        "busybox-list.strace:126",
+        "busybox-list.strace:127",
+        "busybox-list.strace:128",
+        "busybox-list.strace:129",
+        "busybox-list.strace:130",
+        "busybox-list.strace:131",
+        "busybox-list.strace:132"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:103",
+        "busybox-list.strace:104",
+        "busybox-list.strace:105",
+        "busybox-list.strace:106",
+        "busybox-list.strace:107",
+        "busybox-list.strace:108",
+        "busybox-list.strace:109",
+        "busybox-list.strace:110",
+        "busybox-list.strace:111",
+        "busybox-list.strace:112",
+        "busybox-list.strace:113",
+        "busybox-list.strace:114",
+        "busybox-list.strace:115",
+        "busybox-list.strace:116",
+        "busybox-list.strace:117",
+        "busybox-list.strace:118",
+        "busybox-list.strace:119",
+        "busybox-list.strace:120",
+        "busybox-list.strace:121",
+        "busybox-list.strace:122"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:285"
+      ],
+      "note": null
+    },
+    {
+      "nr": 2,
+      "name": "open",
+      "owner": "#101",
+      "secondary_owner": "#147",
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "cat",
+        "httpd",
+        "ls",
+        "nslookup",
+        "sh",
+        "unknown",
+        "wget"
+      ],
+      "commands": [
+        "cat-hostname",
+        "ls-root",
+        "nslookup-fixture",
+        "script-sh",
+        "tmp-file-io",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "open(\"/\", O_RDONLY|O_LARGEFILE|O_CLOEXEC|O_DIRECTORY)",
+        "open(\"/dev/null\", O_RDONLY|O_LARGEFILE )",
+        "open(\"/dev/null\", O_WRONLY|O_CREAT|O_TRUNC|O_LARGEFILE, 0666)",
+        "open(\"/etc/hostname\", O_RDONLY|O_LARGEFILE)",
+        "open(\"/etc/hosts\", O_RDONLY|O_LARGEFILE|O_CLOEXEC)",
+        "open(\"/etc/httpd.conf\", O_RDONLY|O_LARGEFILE)",
+        "open(\"/etc/resolv.conf\", O_RDONLY|O_LARGEFILE)",
+        "open(\"/etc/resolv.conf\", O_RDONLY|O_LARGEFILE|O_CLOEXEC)",
+        "open(\"/tmp/demo/file\", O_RDONLY|O_LARGEFILE)",
+        "open(\"/tmp/demo/file\", O_WRONLY|O_CREAT|O_TRUNC|O_LARGEFILE, 0666)",
+        "open(\"/tmp/demo2/file\", O_RDONLY|O_LARGEFILE)",
+        "open(\"/tmp/demo2/file\", O_WRONLY|O_CREAT|O_TRUNC|O_LARGEFILE, 0666)",
+        "open(\"/tmp/script.sh\", O_RDONLY|O_LARGEFILE|O_CLOEXEC)",
+        "open(\"httpd.conf\", O_RDONLY|O_LARGEFILE)",
+        "open(\"index.html\", O_RDONLY|O_LARGEFILE)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "path"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "cat-hostname.strace:124",
+        "ls-root.strace:132",
+        "nslookup-fixture.strace:124",
+        "script-sh.strace:115",
+        "script-sh.strace:156",
+        "script-sh.strace:200",
+        "script-sh.strace:244",
+        "script-sh.strace:273",
+        "tmp-file-io.strace:152",
+        "tmp-file-io.strace:167",
+        "wget-fixture-fail.strace:131",
+        "wget-fixture-fail.strace:132",
+        "wget-local-httpd.strace:125",
+        "wget-local-httpd.strace:170",
+        "wget-local-httpd.strace:171",
+        "wget-local-httpd.strace:256",
+        "wget-local-httpd.strace:308"
+      ],
+      "required_evidence": [
+        "cat-hostname.strace:124",
+        "ls-root.strace:132",
+        "nslookup-fixture.strace:124",
+        "script-sh.strace:115",
+        "script-sh.strace:156",
+        "script-sh.strace:200",
+        "script-sh.strace:244",
+        "script-sh.strace:273",
+        "tmp-file-io.strace:152",
+        "tmp-file-io.strace:167",
+        "wget-fixture-fail.strace:131",
+        "wget-fixture-fail.strace:132",
+        "wget-local-httpd.strace:125",
+        "wget-local-httpd.strace:256",
+        "wget-local-httpd.strace:308"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:170",
+        "wget-local-httpd.strace:171"
+      ],
+      "note": null
+    },
+    {
+      "nr": 3,
+      "name": "close",
+      "owner": "#147",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "cat",
+        "httpd",
+        "ls",
+        "nslookup",
+        "sh",
+        "unknown",
+        "wget"
+      ],
+      "commands": [
+        "cat-hostname",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "script-sh",
+        "tmp-file-io",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "close(0 )",
+        "close(1)",
+        "close(10 )",
+        "close(10)",
+        "close(11)",
+        "close(3 )",
+        "close(3)",
+        "close(4 )",
+        "close(4)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "fd"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "cat-hostname.strace:127",
+        "grep-via-busybox.strace:100",
+        "grep-via-busybox.strace:104",
+        "grep-via-busybox.strace:143",
+        "grep-via-symlink.strace:111",
+        "grep-via-symlink.strace:118",
+        "grep-via-symlink.strace:125",
+        "grep-via-symlink.strace:136",
+        "grep-via-symlink.strace:155",
+        "ls-root.strace:144",
+        "nslookup-fixture.strace:132",
+        "nslookup-fixture.strace:147",
+        "pipe-grep-env-i.strace:141",
+        "pipe-grep-env-i.strace:148",
+        "pipe-grep-env-i.strace:156",
+        "pipe-grep-env-i.strace:183",
+        "pipe-grep-env-i.strace:188",
+        "pipe-grep-path-only.strace:145",
+        "pipe-grep-path-only.strace:152",
+        "pipe-grep-path-only.strace:160",
+        "pipe-grep-path-only.strace:173",
+        "pipe-grep-path-only.strace:190",
+        "pipe-grep.strace:132",
+        "pipe-grep.strace:139",
+        "pipe-grep.strace:147",
+        "pipe-grep.strace:160",
+        "pipe-grep.strace:178",
+        "script-sh.strace:119",
+        "script-sh.strace:142",
+        "script-sh.strace:168"
+      ],
+      "required_evidence": [
+        "cat-hostname.strace:127",
+        "grep-via-busybox.strace:100",
+        "grep-via-busybox.strace:104",
+        "grep-via-busybox.strace:143",
+        "grep-via-symlink.strace:111",
+        "grep-via-symlink.strace:118",
+        "grep-via-symlink.strace:125",
+        "grep-via-symlink.strace:136",
+        "grep-via-symlink.strace:155",
+        "ls-root.strace:144",
+        "nslookup-fixture.strace:132",
+        "nslookup-fixture.strace:147",
+        "pipe-grep-env-i.strace:141",
+        "pipe-grep-env-i.strace:148",
+        "pipe-grep-env-i.strace:156",
+        "pipe-grep-env-i.strace:183",
+        "pipe-grep-env-i.strace:188",
+        "pipe-grep-path-only.strace:145",
+        "pipe-grep-path-only.strace:152",
+        "pipe-grep-path-only.strace:160"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:241",
+        "wget-local-httpd.strace:298",
+        "wget-local-httpd.strace:301"
+      ],
+      "note": null
+    },
+    {
+      "nr": 4,
+      "name": "stat",
+      "owner": "#101",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "ls",
+        "mkdir",
+        "sh",
+        "unknown"
+      ],
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "stat(\".\", {st_mode=S_IFDIR|0755, st_size=4096, ...})",
+        "stat(\"/\", {st_mode=S_IFDIR|0755, st_size=4096, ...})",
+        "stat(\"/bin/cat\", {st_mode=S_IFREG|0755, st_size=1185688, ...})",
+        "stat(\"/bin/env\", {st_mode=S_IFREG|0755, st_size=1185688, ...})",
+        "stat(\"/bin/grep\",  )",
+        "stat(\"/bin/ls\", {st_mode=S_IFREG|0755, st_size=1185688, ...})",
+        "stat(\"/bin/mkdir\", {st_mode=S_IFREG|0755, st_size=1185688, ...})",
+        "stat(\"/bin/nslookup\", {st_mode=S_IFREG|0755, st_size=1185688, ...})",
+        "stat(\"/bin/sh\", {st_mode=S_IFREG|0755, st_size=1185688, ...})",
+        "stat(\"/bin/sleep\",  )",
+        "stat(\"/bin/sleep\", {st_mode=S_IFREG|0755, st_size=1185688, ...})",
+        "stat(\"/bin/uname\", {st_mode=S_IFREG|0755, st_size=1185688, ...})",
+        "stat(\"/bin/wget\", {st_mode=S_IFREG|0755, st_size=1185688, ...})",
+        "stat(\"/sbin/env\", 0x7ffd8d559fa0)",
+        "stat(\"/sbin/env\", 0x7fffb5e72490)",
+        "stat(\"/sbin/grep\",  )",
+        "stat(\"/tmp/\", {st_mode=S_IFDIR|0755, st_size=4096, ...})",
+        "stat(\"/usr/bin/env\", 0x7ffd8d559fa0)",
+        "stat(\"/usr/bin/env\", 0x7fffb5e72490)",
+        "stat(\"/usr/local/bin/env\", 0x7ffd8d559fa0)",
+        "stat(\"/usr/local/bin/env\", 0x7fffb5e72490)",
+        "stat(\"/usr/local/sbin/env\", 0x7ffd8d559fa0)",
+        "stat(\"/usr/local/sbin/env\", 0x7fffb5e72490)",
+        "stat(\"/usr/sbin/env\", 0x7ffd8d559fa0)",
+        "stat(\"/usr/sbin/env\", 0x7fffb5e72490)",
+        "stat(\"/usr/sbin/grep\",  )",
+        "stat(\"/work\", 0x7ffc21edc4a0)",
+        "stat(\"/work\", 0x7ffc26adb340)",
+        "stat(\"/work\", 0x7ffc4e3d6670)",
+        "stat(\"/work\", 0x7ffc4eb3d9d0)",
+        "stat(\"/work\", 0x7ffc564bab90)",
+        "stat(\"/work\", 0x7ffdda35c4c0)",
+        "stat(\"/work\", 0x7ffddcefa990)",
+        "stat(\"/work\", 0x7ffe62615de0)",
+        "stat(\"/work\", 0x7ffe7fedd850)",
+        "stat(\"/work\", 0x7ffeb7cdaf30)",
+        "stat(\"/work\", 0x7ffed788fdd0)",
+        "stat(\"/work\", 0x7fff07cf8ff0)",
+        "stat(\"/work\", 0x7fff52ac8d60)",
+        "stat(\"/work\", 0x7fffc6736180)",
+        "stat(\"/work\", 0x7fffdd550d20)",
+        "stat(\"index.html\", {st_mode=S_IFREG|0644, st_size=17, ...})"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "path"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:92",
+        "cat-hostname.strace:92",
+        "cat-hostname.strace:98",
+        "cat-hostname.strace:113",
+        "cat-hostname.strace:114",
+        "cat-hostname.strace:119",
+        "exit-3.strace:92",
+        "exit-3.strace:98",
+        "exit-3.strace:128",
+        "exit-3.strace:129",
+        "grep-via-busybox.strace:92",
+        "grep-via-busybox.strace:93",
+        "grep-via-symlink.strace:92",
+        "grep-via-symlink.strace:93",
+        "ls-root.strace:92",
+        "ls-root.strace:98",
+        "ls-root.strace:113",
+        "ls-root.strace:114",
+        "ls-root.strace:119",
+        "ls-root.strace:131",
+        "nslookup-fixture.strace:92",
+        "nslookup-fixture.strace:98",
+        "nslookup-fixture.strace:113",
+        "nslookup-fixture.strace:114",
+        "nslookup-fixture.strace:119",
+        "pipe-grep-env-i.strace:92",
+        "pipe-grep-env-i.strace:93",
+        "pipe-grep-env-i.strace:98",
+        "pipe-grep-env-i.strace:99",
+        "pipe-grep-env-i.strace:100"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:92",
+        "cat-hostname.strace:92",
+        "cat-hostname.strace:98",
+        "cat-hostname.strace:113",
+        "cat-hostname.strace:114",
+        "cat-hostname.strace:119",
+        "exit-3.strace:92",
+        "exit-3.strace:98",
+        "exit-3.strace:128",
+        "exit-3.strace:129",
+        "grep-via-busybox.strace:92",
+        "grep-via-busybox.strace:93",
+        "grep-via-symlink.strace:92",
+        "grep-via-symlink.strace:93",
+        "ls-root.strace:92",
+        "ls-root.strace:98",
+        "ls-root.strace:113",
+        "ls-root.strace:114",
+        "ls-root.strace:119",
+        "ls-root.strace:131"
+      ],
+      "harness_evidence": [],
+      "note": null
+    },
+    {
+      "nr": 6,
+      "name": "lstat",
+      "owner": "#101",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "ls"
+      ],
+      "commands": [
+        "ls-root",
+        "script-sh"
+      ],
+      "flags": [
+        "lstat(\"/bin\", {st_mode=S_IFDIR|0755, st_size=12288, ...})",
+        "lstat(\"/dev\", {st_mode=S_IFDIR|0755, st_size=4096, ...})",
+        "lstat(\"/etc\", {st_mode=S_IFDIR|0755, st_size=4096, ...})",
+        "lstat(\"/proc\", {st_mode=S_IFDIR|0755, st_size=4096, ...})",
+        "lstat(\"/sys\", {st_mode=S_IFDIR|0755, st_size=4096, ...})",
+        "lstat(\"/tmp\", {st_mode=S_IFDIR|0755, st_size=4096, ...})",
+        "lstat(\"/var\", {st_mode=S_IFDIR|0755, st_size=4096, ...})"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "path"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "ls-root.strace:136",
+        "ls-root.strace:137",
+        "ls-root.strace:138",
+        "ls-root.strace:139",
+        "ls-root.strace:140",
+        "ls-root.strace:141",
+        "ls-root.strace:142",
+        "script-sh.strace:160",
+        "script-sh.strace:161",
+        "script-sh.strace:162",
+        "script-sh.strace:163",
+        "script-sh.strace:164",
+        "script-sh.strace:165",
+        "script-sh.strace:166"
+      ],
+      "required_evidence": [
+        "ls-root.strace:136",
+        "ls-root.strace:137",
+        "ls-root.strace:138",
+        "ls-root.strace:139",
+        "ls-root.strace:140",
+        "ls-root.strace:141",
+        "ls-root.strace:142",
+        "script-sh.strace:160",
+        "script-sh.strace:161",
+        "script-sh.strace:162",
+        "script-sh.strace:163",
+        "script-sh.strace:164",
+        "script-sh.strace:165",
+        "script-sh.strace:166"
+      ],
+      "harness_evidence": [],
+      "note": null
+    },
+    {
+      "nr": 7,
+      "name": "poll",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "nslookup",
+        "wget"
+      ],
+      "commands": [
+        "nslookup-fixture",
+        "wget-fixture-fail"
+      ],
+      "flags": [
+        "poll([{fd=-1}, {fd=-1}, {fd=3, events=POLLIN}], 3, 2500)",
+        "poll([{fd=3, events=POLLIN}], 1, 2500)"
+      ],
+      "blocking": [
+        "timeout"
+      ],
+      "descriptor_kinds": [
+        "socket"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "nslookup-fixture.strace:143",
+        "nslookup-fixture.strace:146",
+        "wget-fixture-fail.strace:141",
+        "wget-fixture-fail.strace:144"
+      ],
+      "required_evidence": [
+        "nslookup-fixture.strace:143",
+        "nslookup-fixture.strace:146",
+        "wget-fixture-fail.strace:141",
+        "wget-fixture-fail.strace:144"
+      ],
+      "harness_evidence": [],
+      "note": null
+    },
+    {
+      "nr": 8,
+      "name": "lseek",
+      "owner": "#147",
+      "secondary_owner": null,
+      "required": false,
+      "harness_only": true,
+      "applets": [
+        "wget"
+      ],
+      "commands": [
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "lseek(1, 0, SEEK_CUR)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "fd"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "wget-local-httpd.strace:296"
+      ],
+      "required_evidence": [],
+      "harness_evidence": [
+        "wget-local-httpd.strace:296"
+      ],
+      "note": null
+    },
+    {
+      "nr": 9,
+      "name": "mmap",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "busybox",
+        "env",
+        "grep",
+        "httpd",
+        "ls",
+        "nslookup",
+        "sh",
+        "unknown",
+        "wget"
+      ],
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "mmap(0x112fa000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x1373c000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x15313000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x15a2f000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x16cca000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x16e2c000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x17424000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x18007000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x1820a000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x18463000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x18a34000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x19ac6000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x1b06e000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x1b6ab000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x1bce3000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x1c0bf000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x1c6bb000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x1cfc8000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x1e648000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x1f2f8000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x207bf000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x2273c000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x23a6c000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x27e10000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x2820e000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x282f9000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x29c31000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x2a181000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x2ca4b000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x2fe9000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x30368000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x3043000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x31853000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0 )",
+        "mmap(0x331ba000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x35044000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x35f86000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x39bf9000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x3a0a3000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x3c79e000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x3dc75000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0x3e3cf000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0xae41000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0xc7bb000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0xc8dd000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0xe024000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0xf68a000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(0xffe2000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)",
+        "mmap(NULL, 16384, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)",
+        "mmap(NULL, 28672, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)",
+        "mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 )"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:84",
+        "busybox-list.strace:85",
+        "busybox-list.strace:86",
+        "busybox-list.strace:88",
+        "cat-hostname.strace:84",
+        "cat-hostname.strace:85",
+        "cat-hostname.strace:86",
+        "cat-hostname.strace:88",
+        "cat-hostname.strace:105",
+        "cat-hostname.strace:106",
+        "cat-hostname.strace:107",
+        "cat-hostname.strace:109",
+        "exit-3.strace:84",
+        "exit-3.strace:85",
+        "exit-3.strace:86",
+        "exit-3.strace:88",
+        "exit-3.strace:120",
+        "exit-3.strace:121",
+        "exit-3.strace:122",
+        "exit-3.strace:124",
+        "exit-3.strace:146",
+        "exit-3.strace:147",
+        "grep-via-busybox.strace:84",
+        "grep-via-busybox.strace:85",
+        "grep-via-busybox.strace:86",
+        "grep-via-busybox.strace:88",
+        "grep-via-busybox.strace:126",
+        "grep-via-busybox.strace:127",
+        "grep-via-busybox.strace:129",
+        "grep-via-busybox.strace:130"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:84",
+        "busybox-list.strace:85",
+        "busybox-list.strace:86",
+        "busybox-list.strace:88",
+        "cat-hostname.strace:84",
+        "cat-hostname.strace:85",
+        "cat-hostname.strace:86",
+        "cat-hostname.strace:88",
+        "cat-hostname.strace:105",
+        "cat-hostname.strace:106",
+        "cat-hostname.strace:107",
+        "cat-hostname.strace:109",
+        "exit-3.strace:84",
+        "exit-3.strace:85",
+        "exit-3.strace:86",
+        "exit-3.strace:88",
+        "exit-3.strace:120",
+        "exit-3.strace:121",
+        "exit-3.strace:122",
+        "exit-3.strace:124"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:156",
+        "wget-local-httpd.strace:160",
+        "wget-local-httpd.strace:204",
+        "wget-local-httpd.strace:205",
+        "wget-local-httpd.strace:208",
+        "wget-local-httpd.strace:214"
+      ],
+      "note": null
+    },
+    {
+      "nr": 11,
+      "name": "munmap",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "busybox",
+        "grep",
+        "ls",
+        "nslookup",
+        "wget"
+      ],
+      "commands": [
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "script-sh",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "munmap(0x7f2dfc266000, 4096)",
+        "munmap(0x7f2dfc267000, 16384)",
+        "munmap(0x7f322c5f4000, 4096)",
+        "munmap(0x7f322c5f5000, 16384)",
+        "munmap(0x7f5830fab000, 4096)",
+        "munmap(0x7f5830fac000, 16384)",
+        "munmap(0x7f882f64b000, 4096)",
+        "munmap(0x7f882f64c000, 4096)",
+        "munmap(0x7f8def481000, 4096)",
+        "munmap(0x7f97d589d000, 4096)",
+        "munmap(0x7fb0b280d000, 4096)",
+        "munmap(0x7fb0b280e000, 16384)",
+        "munmap(0x7fcfa03a0000, 8192)",
+        "munmap(0x7fe33aee6000, 8192)",
+        "munmap(0x7ff15438c000, 4096)",
+        "munmap(0x7ff15438d000, 16384)",
+        "munmap(0x7ff718d85000, 4096)",
+        "munmap(0x7ff718d86000, 16384)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "exit-3.strace:149",
+        "grep-via-busybox.strace:131",
+        "grep-via-busybox.strace:132",
+        "grep-via-symlink.strace:167",
+        "grep-via-symlink.strace:168",
+        "ls-root.strace:145",
+        "nslookup-fixture.strace:133",
+        "pipe-grep-env-i.strace:203",
+        "pipe-grep-env-i.strace:204",
+        "pipe-grep-path-only.strace:202",
+        "pipe-grep-path-only.strace:203",
+        "pipe-grep.strace:190",
+        "pipe-grep.strace:191",
+        "script-sh.strace:169",
+        "script-sh.strace:357",
+        "script-sh.strace:358",
+        "wget-local-httpd.strace:299",
+        "wget-local-httpd.strace:300"
+      ],
+      "required_evidence": [
+        "exit-3.strace:149",
+        "grep-via-busybox.strace:131",
+        "grep-via-busybox.strace:132",
+        "grep-via-symlink.strace:167",
+        "grep-via-symlink.strace:168",
+        "ls-root.strace:145",
+        "nslookup-fixture.strace:133",
+        "pipe-grep-env-i.strace:203",
+        "pipe-grep-env-i.strace:204",
+        "pipe-grep-path-only.strace:202",
+        "pipe-grep-path-only.strace:203",
+        "pipe-grep.strace:190",
+        "pipe-grep.strace:191",
+        "script-sh.strace:169",
+        "script-sh.strace:357",
+        "script-sh.strace:358"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:299",
+        "wget-local-httpd.strace:300"
+      ],
+      "note": null
+    },
+    {
+      "nr": 12,
+      "name": "brk",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "busybox",
+        "env",
+        "grep",
+        "httpd",
+        "ls",
+        "nslookup",
+        "sh",
+        "wget"
+      ],
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "brk(0x112fc000)",
+        "brk(0x1373e000)",
+        "brk(0x15315000)",
+        "brk(0x15a31000)",
+        "brk(0x16ccc000)",
+        "brk(0x16e2e000)",
+        "brk(0x17426000)",
+        "brk(0x18009000)",
+        "brk(0x1820c000)",
+        "brk(0x18465000)",
+        "brk(0x18a36000)",
+        "brk(0x19ac8000)",
+        "brk(0x1b070000)",
+        "brk(0x1b6ad000)",
+        "brk(0x1bce5000)",
+        "brk(0x1c0c1000)",
+        "brk(0x1c6bd000)",
+        "brk(0x1cfca000)",
+        "brk(0x1e64a000)",
+        "brk(0x1f2fa000)",
+        "brk(0x207c1000)",
+        "brk(0x2273e000)",
+        "brk(0x23a6e000)",
+        "brk(0x27e12000)",
+        "brk(0x28210000)",
+        "brk(0x282fb000)",
+        "brk(0x29c33000)",
+        "brk(0x2a183000)",
+        "brk(0x2ca4d000)",
+        "brk(0x2feb000)",
+        "brk(0x3036a000)",
+        "brk(0x3045000)",
+        "brk(0x31855000 )",
+        "brk(0x331bc000)",
+        "brk(0x35046000)",
+        "brk(0x35f88000)",
+        "brk(0x39bfb000)",
+        "brk(0x3a0a5000)",
+        "brk(0x3c7a0000)",
+        "brk(0x3dc77000)",
+        "brk(0x3e3d1000)",
+        "brk(0xae43000)",
+        "brk(0xc7bd000)",
+        "brk(0xc8df000)",
+        "brk(0xe026000)",
+        "brk(0xf68c000)",
+        "brk(0xffe4000)",
+        "brk(NULL )",
+        "brk(NULL)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:82",
+        "busybox-list.strace:83",
+        "cat-hostname.strace:82",
+        "cat-hostname.strace:83",
+        "cat-hostname.strace:103",
+        "cat-hostname.strace:104",
+        "exit-3.strace:82",
+        "exit-3.strace:83",
+        "exit-3.strace:118",
+        "exit-3.strace:119",
+        "exit-3.strace:144",
+        "exit-3.strace:145",
+        "grep-via-busybox.strace:82",
+        "grep-via-busybox.strace:83",
+        "grep-via-busybox.strace:124",
+        "grep-via-busybox.strace:125",
+        "grep-via-symlink.strace:82",
+        "grep-via-symlink.strace:83",
+        "grep-via-symlink.strace:160",
+        "grep-via-symlink.strace:161",
+        "ls-root.strace:82",
+        "ls-root.strace:83",
+        "ls-root.strace:103",
+        "ls-root.strace:104",
+        "ls-root.strace:127",
+        "ls-root.strace:128",
+        "nslookup-fixture.strace:82",
+        "nslookup-fixture.strace:83",
+        "nslookup-fixture.strace:103",
+        "nslookup-fixture.strace:104"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:82",
+        "busybox-list.strace:83",
+        "cat-hostname.strace:82",
+        "cat-hostname.strace:83",
+        "cat-hostname.strace:103",
+        "cat-hostname.strace:104",
+        "exit-3.strace:82",
+        "exit-3.strace:83",
+        "exit-3.strace:118",
+        "exit-3.strace:119",
+        "exit-3.strace:144",
+        "exit-3.strace:145",
+        "grep-via-busybox.strace:82",
+        "grep-via-busybox.strace:83",
+        "grep-via-busybox.strace:124",
+        "grep-via-busybox.strace:125",
+        "grep-via-symlink.strace:82",
+        "grep-via-symlink.strace:83",
+        "grep-via-symlink.strace:160",
+        "grep-via-symlink.strace:161"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:148",
+        "wget-local-httpd.strace:152",
+        "wget-local-httpd.strace:202",
+        "wget-local-httpd.strace:203"
+      ],
+      "note": null
+    },
+    {
+      "nr": 13,
+      "name": "rt_sigaction",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "httpd",
+        "sh",
+        "unknown",
+        "wget"
+      ],
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "rt_sigaction(SIGALRM, {sa_handler=0x43a5cd, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8)",
+        "rt_sigaction(SIGALRM, {sa_handler=0x45150d, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8)",
+        "rt_sigaction(SIGCHLD, {sa_handler=0x46e54e, sa_mask=~[RTMIN RT_1 RT_2], sa_flags=SA_RESTORER, sa_restorer=0x4dfe02}, NULL, 8)",
+        "rt_sigaction(SIGCHLD, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8)",
+        "rt_sigaction(SIGHUP, {sa_handler=0x439a28, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8)",
+        "rt_sigaction(SIGHUP, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02},  )",
+        "rt_sigaction(SIGINT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8)",
+        "rt_sigaction(SIGINT, {sa_handler=0x46e54e, sa_mask=~[RTMIN RT_1 RT_2], sa_flags=SA_RESTORER, sa_restorer=0x4dfe02}, NULL, 8)",
+        "rt_sigaction(SIGINT, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02},  )",
+        "rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8)",
+        "rt_sigaction(SIGQUIT, NULL,  )",
+        "rt_sigaction(SIGQUIT, NULL, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=0}, 8)",
+        "rt_sigaction(SIGQUIT, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02},  )",
+        "rt_sigaction(SIGTERM, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:90",
+        "busybox-list.strace:94",
+        "busybox-list.strace:95",
+        "busybox-list.strace:96",
+        "busybox-list.strace:97",
+        "cat-hostname.strace:90",
+        "cat-hostname.strace:94",
+        "cat-hostname.strace:95",
+        "cat-hostname.strace:96",
+        "cat-hostname.strace:97",
+        "cat-hostname.strace:111",
+        "cat-hostname.strace:115",
+        "cat-hostname.strace:116",
+        "cat-hostname.strace:117",
+        "cat-hostname.strace:118",
+        "exit-3.strace:90",
+        "exit-3.strace:94",
+        "exit-3.strace:95",
+        "exit-3.strace:96",
+        "exit-3.strace:97",
+        "exit-3.strace:113",
+        "exit-3.strace:126",
+        "exit-3.strace:130",
+        "exit-3.strace:131",
+        "exit-3.strace:132",
+        "exit-3.strace:133",
+        "grep-via-busybox.strace:90",
+        "grep-via-busybox.strace:94",
+        "grep-via-busybox.strace:95",
+        "grep-via-busybox.strace:96"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:90",
+        "busybox-list.strace:94",
+        "busybox-list.strace:95",
+        "busybox-list.strace:96",
+        "busybox-list.strace:97",
+        "cat-hostname.strace:90",
+        "cat-hostname.strace:94",
+        "cat-hostname.strace:95",
+        "cat-hostname.strace:96",
+        "cat-hostname.strace:97",
+        "cat-hostname.strace:111",
+        "cat-hostname.strace:115",
+        "cat-hostname.strace:116",
+        "cat-hostname.strace:117",
+        "cat-hostname.strace:118",
+        "exit-3.strace:90",
+        "exit-3.strace:94",
+        "exit-3.strace:95",
+        "exit-3.strace:96",
+        "exit-3.strace:97"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:165",
+        "wget-local-httpd.strace:173",
+        "wget-local-httpd.strace:207"
+      ],
+      "note": null
+    },
+    {
+      "nr": 14,
+      "name": "rt_sigprocmask",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "httpd",
+        "sh",
+        "unknown",
+        "wget"
+      ],
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "rt_sigprocmask(SIG_BLOCK, ~[RTMIN RT_1 RT_2],  )",
+        "rt_sigprocmask(SIG_BLOCK, ~[RTMIN RT_1 RT_2], [], 8)",
+        "rt_sigprocmask(SIG_BLOCK, ~[],  )",
+        "rt_sigprocmask(SIG_BLOCK, ~[], ~[KILL STOP RTMIN RT_1 RT_2], 8)",
+        "rt_sigprocmask(SIG_SETMASK, [],  )",
+        "rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2],  )",
+        "rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2], NULL, 8)",
+        "rt_sigprocmask(SIG_UNBLOCK, [RT_1 RT_2], NULL, 8)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:89",
+        "cat-hostname.strace:89",
+        "cat-hostname.strace:110",
+        "exit-3.strace:89",
+        "exit-3.strace:99",
+        "exit-3.strace:100",
+        "exit-3.strace:103",
+        "exit-3.strace:106",
+        "exit-3.strace:107",
+        "exit-3.strace:110",
+        "exit-3.strace:125",
+        "grep-via-busybox.strace:89",
+        "grep-via-busybox.strace:105",
+        "grep-via-busybox.strace:106",
+        "grep-via-busybox.strace:109",
+        "grep-via-busybox.strace:112",
+        "grep-via-busybox.strace:113",
+        "grep-via-busybox.strace:116",
+        "grep-via-symlink.strace:89",
+        "grep-via-symlink.strace:99",
+        "grep-via-symlink.strace:100",
+        "grep-via-symlink.strace:103",
+        "grep-via-symlink.strace:106",
+        "grep-via-symlink.strace:107",
+        "grep-via-symlink.strace:110",
+        "grep-via-symlink.strace:115",
+        "grep-via-symlink.strace:119",
+        "grep-via-symlink.strace:128",
+        "grep-via-symlink.strace:132",
+        "grep-via-symlink.strace:135"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:89",
+        "cat-hostname.strace:89",
+        "cat-hostname.strace:110",
+        "exit-3.strace:89",
+        "exit-3.strace:99",
+        "exit-3.strace:100",
+        "exit-3.strace:103",
+        "exit-3.strace:106",
+        "exit-3.strace:107",
+        "exit-3.strace:110",
+        "exit-3.strace:125",
+        "grep-via-busybox.strace:89",
+        "grep-via-busybox.strace:105",
+        "grep-via-busybox.strace:106",
+        "grep-via-busybox.strace:109",
+        "grep-via-busybox.strace:112",
+        "grep-via-busybox.strace:113",
+        "grep-via-busybox.strace:116",
+        "grep-via-symlink.strace:89",
+        "grep-via-symlink.strace:99"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:172",
+        "wget-local-httpd.strace:206",
+        "wget-local-httpd.strace:219",
+        "wget-local-httpd.strace:223",
+        "wget-local-httpd.strace:233",
+        "wget-local-httpd.strace:237"
+      ],
+      "note": null
+    },
+    {
+      "nr": 16,
+      "name": "ioctl",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "grep",
+        "ls",
+        "nslookup",
+        "sh",
+        "uname",
+        "wget"
+      ],
+      "commands": [
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "tmp-file-io",
+        "uname",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "ioctl(0, TIOCGWINSZ, 0x7ffddffede00)",
+        "ioctl(0, TIOCGWINSZ, 0x7fff89a73d70)",
+        "ioctl(1, TIOCGWINSZ, 0x7ffc9b3440d8)",
+        "ioctl(1, TIOCGWINSZ, 0x7ffcafe76c48)",
+        "ioctl(1, TIOCGWINSZ, 0x7ffceae3ce28)",
+        "ioctl(1, TIOCGWINSZ, 0x7ffd3633e168)",
+        "ioctl(1, TIOCGWINSZ, 0x7ffd950a9488)",
+        "ioctl(1, TIOCGWINSZ, 0x7ffddffedd58)",
+        "ioctl(1, TIOCGWINSZ, 0x7ffddffede48)",
+        "ioctl(1, TIOCGWINSZ, 0x7ffde9fb7688)",
+        "ioctl(1, TIOCGWINSZ, 0x7ffe500c02c8)",
+        "ioctl(1, TIOCGWINSZ, 0x7ffef18eaa38)",
+        "ioctl(1, TIOCGWINSZ, 0x7fff89a73cc8)",
+        "ioctl(1, TIOCGWINSZ, 0x7fff89a73db8)",
+        "ioctl(1, TIOCGWINSZ, 0x7fffb020e2f8)",
+        "ioctl(1, TIOCGWINSZ, 0x7fffd54be308)",
+        "ioctl(1, TIOCGWINSZ, 0x7fffe82d45c8)",
+        "ioctl(1, TIOCGWINSZ, 0x7ffff0522328)",
+        "ioctl(2, TIOCGWINSZ, 0x7ffdce5461f0)",
+        "ioctl(2, TIOCGWINSZ, 0x7ffdce546238)",
+        "ioctl(3, TIOCGWINSZ )"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "grep-via-busybox.strace:133",
+        "grep-via-symlink.strace:169",
+        "ls-root.strace:124",
+        "ls-root.strace:125",
+        "ls-root.strace:126",
+        "ls-root.strace:146",
+        "nslookup-fixture.strace:148",
+        "pipe-grep-env-i.strace:205",
+        "pipe-grep-path-only.strace:204",
+        "pipe-grep.strace:192",
+        "pwd.strace:119",
+        "script-sh.strace:125",
+        "script-sh.strace:148",
+        "script-sh.strace:149",
+        "script-sh.strace:150",
+        "script-sh.strace:170",
+        "script-sh.strace:359",
+        "script-sh.strace:390",
+        "tmp-file-io.strace:158",
+        "uname.strace:125",
+        "wget-local-httpd.strace:218",
+        "wget-local-httpd.strace:288",
+        "wget-local-httpd.strace:291"
+      ],
+      "required_evidence": [
+        "grep-via-busybox.strace:133",
+        "grep-via-symlink.strace:169",
+        "ls-root.strace:124",
+        "ls-root.strace:125",
+        "ls-root.strace:126",
+        "ls-root.strace:146",
+        "nslookup-fixture.strace:148",
+        "pipe-grep-env-i.strace:205",
+        "pipe-grep-path-only.strace:204",
+        "pipe-grep.strace:192",
+        "pwd.strace:119",
+        "script-sh.strace:125",
+        "script-sh.strace:148",
+        "script-sh.strace:149",
+        "script-sh.strace:150",
+        "script-sh.strace:170",
+        "script-sh.strace:359",
+        "script-sh.strace:390",
+        "tmp-file-io.strace:158",
+        "uname.strace:125"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:218",
+        "wget-local-httpd.strace:288",
+        "wget-local-httpd.strace:291"
+      ],
+      "note": null
+    },
+    {
+      "nr": 20,
+      "name": "writev",
+      "owner": "#147",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "grep",
+        "ls",
+        "nslookup",
+        "sh",
+        "uname",
+        "wget"
+      ],
+      "commands": [
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "tmp-file-io",
+        "uname",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "writev(1, [{iov_base=\"\", iov_len=0}, {iov_base=\";; connection timed out; no servers could be reached\\n\\n\", iov_len=54}], 2)",
+        "writev(1, [{iov_base=\"/\", iov_len=1}, {iov_base=\"\\n\", iov_len=1}], 2)",
+        "writev(1, [{iov_base=\"Linux\", iov_len=5}, {iov_base=\"\\n\", iov_len=1}], 2)",
+        "writev(1, [{iov_base=\"bin\", iov_len=3}, {iov_base=\"\\n\", iov_len=1}], 2)",
+        "writev(1, [{iov_base=\"dev\\netc\\nproc\\nsys\\ntmp\\nvar\\n\", iov_len=25}, {iov_base=NULL, iov_len=0}], 2)",
+        "writev(1, [{iov_base=\"hello\", iov_len=5}, {iov_base=\"\\n\", iov_len=1}], 2)",
+        "writev(1, [{iov_base=\"hi\", iov_len=2}, {iov_base=\"\\n\", iov_len=1}], 2)",
+        "writev(1, [{iov_base=\"script\", iov_len=6}, {iov_base=NULL, iov_len=0}], 2)",
+        "writev(1, [{iov_base=\"test\", iov_len=4}, {iov_base=NULL, iov_len=0}], 2)",
+        "writev(2, [{iov_base=\"  0:00:00 ETA\", iov_len=13}, {iov_base=NULL, iov_len=0}], 2)",
+        "writev(2, [{iov_base=\"\", iov_len=0}, {iov_base=\"   17\", iov_len=5}], 2)",
+        "writev(2, [{iov_base=\"\", iov_len=0}, {iov_base=\"\\n\", iov_len=1}], 2)",
+        "writev(2, [{iov_base=\"\", iov_len=0}, {iov_base=\"writing to stdout\\n\", iov_len=18}], 2)",
+        "writev(2, [{iov_base=\"\", iov_len=0}, {iov_base=\"written to stdout\\n\", iov_len=18}], 2)",
+        "writev(2, [{iov_base=\"-                    \", iov_len=21}, {iov_base=NULL, iov_len=0}], 2)",
+        "writev(2, [{iov_base=\"100% \", iov_len=5}, {iov_base=NULL, iov_len=0}], 2)",
+        "writev(2, [{iov_base=\"Connecting to 127.0.0.1:18080 (127.0.0.1:18080)\\n\", iov_len=48}, {iov_base=NULL, iov_len=0}], 2)",
+        "writev(2, [{iov_base=\"|********************************| \", iov_len=35}, {iov_base=NULL, iov_len=0}], 2)",
+        "writev(3, [{iov_base=\"GET / HTTP/1.1\\r\\nHost: 127.0.0.1:18080\\r\\nUser-Agent: Wget\\r\\nConnection: close\\r\\n\\r\\n\", iov_len=78}, {iov_base=NULL, iov_len=0}], 2 )"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "fd"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "grep-via-busybox.strace:134",
+        "grep-via-symlink.strace:170",
+        "ls-root.strace:147",
+        "ls-root.strace:148",
+        "nslookup-fixture.strace:149",
+        "pipe-grep-env-i.strace:206",
+        "pipe-grep-path-only.strace:205",
+        "pipe-grep.strace:193",
+        "pwd.strace:120",
+        "script-sh.strace:126",
+        "script-sh.strace:171",
+        "script-sh.strace:172",
+        "script-sh.strace:250",
+        "script-sh.strace:360",
+        "script-sh.strace:391",
+        "tmp-file-io.strace:159",
+        "uname.strace:126",
+        "wget-local-httpd.strace:209",
+        "wget-local-httpd.strace:222",
+        "wget-local-httpd.strace:281",
+        "wget-local-httpd.strace:289",
+        "wget-local-httpd.strace:290",
+        "wget-local-httpd.strace:292",
+        "wget-local-httpd.strace:293",
+        "wget-local-httpd.strace:294",
+        "wget-local-httpd.strace:295",
+        "wget-local-httpd.strace:297"
+      ],
+      "required_evidence": [
+        "grep-via-busybox.strace:134",
+        "grep-via-symlink.strace:170",
+        "ls-root.strace:147",
+        "ls-root.strace:148",
+        "nslookup-fixture.strace:149",
+        "pipe-grep-env-i.strace:206",
+        "pipe-grep-path-only.strace:205",
+        "pipe-grep.strace:193",
+        "pwd.strace:120",
+        "script-sh.strace:126",
+        "script-sh.strace:171",
+        "script-sh.strace:172",
+        "script-sh.strace:250",
+        "script-sh.strace:360",
+        "script-sh.strace:391",
+        "tmp-file-io.strace:159",
+        "uname.strace:126"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:209",
+        "wget-local-httpd.strace:222",
+        "wget-local-httpd.strace:281",
+        "wget-local-httpd.strace:289",
+        "wget-local-httpd.strace:290",
+        "wget-local-httpd.strace:292",
+        "wget-local-httpd.strace:293",
+        "wget-local-httpd.strace:294",
+        "wget-local-httpd.strace:295",
+        "wget-local-httpd.strace:297"
+      ],
+      "note": null
+    },
+    {
+      "nr": 22,
+      "name": "pipe",
+      "owner": "#102",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "sh"
+      ],
+      "commands": [
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "script-sh"
+      ],
+      "flags": [
+        "pipe([3, 4])"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "pipe"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "grep-via-busybox.strace:98",
+        "grep-via-symlink.strace:98",
+        "pipe-grep-env-i.strace:128",
+        "pipe-grep-path-only.strace:132",
+        "pipe-grep.strace:119",
+        "script-sh.strace:283"
+      ],
+      "required_evidence": [
+        "grep-via-busybox.strace:98",
+        "grep-via-symlink.strace:98",
+        "pipe-grep-env-i.strace:128",
+        "pipe-grep-path-only.strace:132",
+        "pipe-grep.strace:119",
+        "script-sh.strace:283"
+      ],
+      "harness_evidence": [],
+      "note": null
+    },
+    {
+      "nr": 33,
+      "name": "dup2",
+      "owner": "#147",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "busybox",
+        "sh",
+        "unknown"
+      ],
+      "commands": [
+        "busybox-list",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "script-sh",
+        "tmp-file-io",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "dup2(0, 1)",
+        "dup2(1, 2)",
+        "dup2(10, 0)",
+        "dup2(10, 1)",
+        "dup2(10, 2 )",
+        "dup2(11, 1)",
+        "dup2(3, 0 )",
+        "dup2(3, 0)",
+        "dup2(3, 1)",
+        "dup2(3, 2)",
+        "dup2(4, 0)",
+        "dup2(4, 1 )"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "fd"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:102",
+        "grep-via-busybox.strace:103",
+        "grep-via-busybox.strace:142",
+        "grep-via-symlink.strace:122",
+        "grep-via-symlink.strace:151",
+        "pipe-grep-env-i.strace:152",
+        "pipe-grep-env-i.strace:184",
+        "pipe-grep-path-only.strace:156",
+        "pipe-grep-path-only.strace:189",
+        "pipe-grep.strace:143",
+        "pipe-grep.strace:175",
+        "script-sh.strace:247",
+        "script-sh.strace:251",
+        "script-sh.strace:311",
+        "script-sh.strace:344",
+        "tmp-file-io.strace:155",
+        "tmp-file-io.strace:160",
+        "wget-local-httpd.strace:247",
+        "wget-local-httpd.strace:249",
+        "wget-local-httpd.strace:311",
+        "wget-local-httpd.strace:316"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:102",
+        "grep-via-busybox.strace:103",
+        "grep-via-busybox.strace:142",
+        "grep-via-symlink.strace:122",
+        "grep-via-symlink.strace:151",
+        "pipe-grep-env-i.strace:152",
+        "pipe-grep-env-i.strace:184",
+        "pipe-grep-path-only.strace:156",
+        "pipe-grep-path-only.strace:189",
+        "pipe-grep.strace:143",
+        "pipe-grep.strace:175",
+        "script-sh.strace:247",
+        "script-sh.strace:251",
+        "script-sh.strace:311",
+        "script-sh.strace:344",
+        "tmp-file-io.strace:155",
+        "tmp-file-io.strace:160",
+        "wget-local-httpd.strace:247",
+        "wget-local-httpd.strace:249",
+        "wget-local-httpd.strace:311"
+      ],
+      "harness_evidence": [],
+      "note": null
+    },
+    {
+      "nr": 35,
+      "name": "nanosleep",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "sleep"
+      ],
+      "commands": [
+        "script-sh",
+        "sleep-1",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "nanosleep({tv_sec=0, tv_nsec=0}, 0x7ffd92d04388)",
+        "nanosleep({tv_sec=0, tv_nsec=200000000},  )",
+        "nanosleep({tv_sec=1, tv_nsec=0}, 0x7ffe3c0331c8)"
+      ],
+      "blocking": [
+        "timeout"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "script-sh.strace:419",
+        "sleep-1.strace:124",
+        "wget-local-httpd.strace:161"
+      ],
+      "required_evidence": [
+        "script-sh.strace:419",
+        "sleep-1.strace:124"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:161"
+      ],
+      "note": null
+    },
+    {
+      "nr": 39,
+      "name": "getpid",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "sh"
+      ],
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "getpid()"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:87",
+        "cat-hostname.strace:87",
+        "cat-hostname.strace:108",
+        "exit-3.strace:87",
+        "exit-3.strace:123",
+        "grep-via-busybox.strace:87",
+        "grep-via-symlink.strace:87",
+        "ls-root.strace:87",
+        "ls-root.strace:108",
+        "nslookup-fixture.strace:87",
+        "nslookup-fixture.strace:108",
+        "pipe-grep-env-i.strace:87",
+        "pipe-grep-env-i.strace:117",
+        "pipe-grep-path-only.strace:87",
+        "pipe-grep-path-only.strace:121",
+        "pipe-grep.strace:87",
+        "pipe-grep.strace:108",
+        "pwd.strace:87",
+        "pwd.strace:108",
+        "script-sh.strace:87",
+        "script-sh.strace:108",
+        "sh-c-minimal.strace:87",
+        "sh-c-minimal.strace:108",
+        "sleep-1.strace:87",
+        "sleep-1.strace:108",
+        "tmp-file-io.strace:87",
+        "tmp-file-io.strace:108",
+        "true.strace:87",
+        "uname.strace:87",
+        "uname.strace:108"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:87",
+        "cat-hostname.strace:87",
+        "cat-hostname.strace:108",
+        "exit-3.strace:87",
+        "exit-3.strace:123",
+        "grep-via-busybox.strace:87",
+        "grep-via-symlink.strace:87",
+        "ls-root.strace:87",
+        "ls-root.strace:108",
+        "nslookup-fixture.strace:87",
+        "nslookup-fixture.strace:108",
+        "pipe-grep-env-i.strace:87",
+        "pipe-grep-env-i.strace:117",
+        "pipe-grep-path-only.strace:87",
+        "pipe-grep-path-only.strace:121",
+        "pipe-grep.strace:87",
+        "pipe-grep.strace:108",
+        "pwd.strace:87",
+        "pwd.strace:108",
+        "script-sh.strace:87"
+      ],
+      "harness_evidence": [],
+      "note": null
+    },
+    {
+      "nr": 40,
+      "name": "sendfile",
+      "owner": "#147",
+      "secondary_owner": null,
+      "required": false,
+      "harness_only": false,
+      "applets": [
+        "cat",
+        "unknown"
+      ],
+      "commands": [
+        "cat-hostname",
+        "script-sh",
+        "tmp-file-io",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "sendfile(1, 3, NULL, 16777216)",
+        "sendfile(1, 3, [0] )",
+        "sendfile(1, 3, [17] )"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "fd"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "cat-hostname.strace:125",
+        "cat-hostname.strace:126",
+        "script-sh.strace:201",
+        "script-sh.strace:202",
+        "script-sh.strace:274",
+        "script-sh.strace:275",
+        "tmp-file-io.strace:168",
+        "tmp-file-io.strace:169",
+        "wget-local-httpd.strace:260",
+        "wget-local-httpd.strace:264"
+      ],
+      "required_evidence": [
+        "cat-hostname.strace:125",
+        "cat-hostname.strace:126",
+        "script-sh.strace:201",
+        "script-sh.strace:202",
+        "script-sh.strace:274",
+        "script-sh.strace:275",
+        "tmp-file-io.strace:168",
+        "tmp-file-io.strace:169"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:260",
+        "wget-local-httpd.strace:264"
+      ],
+      "note": "BusyBox copyfd.c falls back on sendfile failure; Phase B should set CONFIG_FEATURE_USE_SENDFILE=n"
+    },
+    {
+      "nr": 41,
+      "name": "socket",
+      "owner": "#105",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "httpd",
+        "nslookup",
+        "wget"
+      ],
+      "commands": [
+        "nslookup-fixture",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "socket(AF_INET, SOCK_DGRAM, IPPROTO_IP)",
+        "socket(AF_INET, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_IP)",
+        "socket(AF_INET, SOCK_STREAM, IPPROTO_IP)",
+        "socket(AF_INET6, SOCK_STREAM, IPPROTO_IP)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "socket"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "nslookup-fixture.strace:136",
+        "wget-fixture-fail.strace:137",
+        "wget-local-httpd.strace:166",
+        "wget-local-httpd.strace:211"
+      ],
+      "required_evidence": [
+        "nslookup-fixture.strace:136",
+        "wget-fixture-fail.strace:137"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:166",
+        "wget-local-httpd.strace:211"
+      ],
+      "note": null
+    },
+    {
+      "nr": 42,
+      "name": "connect",
+      "owner": "#105",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "nslookup",
+        "wget"
+      ],
+      "commands": [
+        "nslookup-fixture",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "connect(3, {sa_family=AF_INET, sin_port=htons(18080), sin_addr=inet_addr(\"127.0.0.1\")}, 16)",
+        "connect(3, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(\"10.77.0.1\")}, 16)"
+      ],
+      "blocking": [
+        "may-block"
+      ],
+      "descriptor_kinds": [
+        "socket"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "nslookup-fixture.strace:138",
+        "wget-local-httpd.strace:212"
+      ],
+      "required_evidence": [
+        "nslookup-fixture.strace:138"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:212"
+      ],
+      "note": null
+    },
+    {
+      "nr": 43,
+      "name": "accept",
+      "owner": "#105",
+      "secondary_owner": null,
+      "required": false,
+      "harness_only": true,
+      "applets": [
+        "httpd"
+      ],
+      "commands": [
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "accept(3,  )"
+      ],
+      "blocking": [
+        "may-block"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "wget-local-httpd.strace:174",
+        "wget-local-httpd.strace:245"
+      ],
+      "required_evidence": [],
+      "harness_evidence": [
+        "wget-local-httpd.strace:174",
+        "wget-local-httpd.strace:245"
+      ],
+      "note": null
+    },
+    {
+      "nr": 44,
+      "name": "sendto",
+      "owner": "#105",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "wget"
+      ],
+      "commands": [
+        "wget-fixture-fail"
+      ],
+      "flags": [
+        "sendto(3, \"\\25\\r\\1\\0\\0\\1\\0\\0\\0\\0\\0\\0\\2m7\\7fixture\\4test\\0\\0\\1\\0\\1\", 33, MSG_NOSIGNAL, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(\"10.77.0.1\")}, 16)",
+        "sendto(3, \"\\26\\371\\1\\0\\0\\1\\0\\0\\0\\0\\0\\0\\2m7\\7fixture\\4test\\0\\0\\34\\0\\1\", 33, MSG_NOSIGNAL, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr(\"10.77.0.1\")}, 16)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "socket"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "wget-fixture-fail.strace:139",
+        "wget-fixture-fail.strace:140",
+        "wget-fixture-fail.strace:142",
+        "wget-fixture-fail.strace:143"
+      ],
+      "required_evidence": [
+        "wget-fixture-fail.strace:139",
+        "wget-fixture-fail.strace:140",
+        "wget-fixture-fail.strace:142",
+        "wget-fixture-fail.strace:143"
+      ],
+      "harness_evidence": [],
+      "note": null
+    },
+    {
+      "nr": 49,
+      "name": "bind",
+      "owner": "#105",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "httpd",
+        "nslookup",
+        "wget"
+      ],
+      "commands": [
+        "nslookup-fixture",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "bind(3, {sa_family=AF_INET, sin_port=htons(0), sin_addr=inet_addr(\"0.0.0.0\")}, 16)",
+        "bind(3, {sa_family=AF_INET6, sin6_port=htons(18080), sin6_flowinfo=htonl(0), inet_pton(AF_INET6, \"::\", &sin6_addr), sin6_scope_id=0}, 28)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "socket"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "nslookup-fixture.strace:137",
+        "wget-fixture-fail.strace:138",
+        "wget-local-httpd.strace:168"
+      ],
+      "required_evidence": [
+        "nslookup-fixture.strace:137",
+        "wget-fixture-fail.strace:138"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:168"
+      ],
+      "note": null
+    },
+    {
+      "nr": 50,
+      "name": "listen",
+      "owner": "#105",
+      "secondary_owner": null,
+      "required": false,
+      "harness_only": true,
+      "applets": [
+        "httpd"
+      ],
+      "commands": [
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "listen(3, 9)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "wget-local-httpd.strace:169"
+      ],
+      "required_evidence": [],
+      "harness_evidence": [
+        "wget-local-httpd.strace:169"
+      ],
+      "note": null
+    },
+    {
+      "nr": 57,
+      "name": "fork",
+      "owner": "#102",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "httpd",
+        "sh"
+      ],
+      "commands": [
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "script-sh",
+        "tmp-file-io",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "fork( )",
+        "fork()"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "exit-3.strace:101",
+        "grep-via-busybox.strace:107",
+        "grep-via-symlink.strace:101",
+        "grep-via-symlink.strace:123",
+        "pipe-grep-env-i.strace:131",
+        "pipe-grep-env-i.strace:164",
+        "pipe-grep-path-only.strace:135",
+        "pipe-grep-path-only.strace:161",
+        "pipe-grep.strace:122",
+        "pipe-grep.strace:148",
+        "script-sh.strace:130",
+        "script-sh.strace:182",
+        "script-sh.strace:213",
+        "script-sh.strace:255",
+        "script-sh.strace:286",
+        "script-sh.strace:312",
+        "script-sh.strace:371",
+        "script-sh.strace:401",
+        "tmp-file-io.strace:122",
+        "wget-local-httpd.strace:100",
+        "wget-local-httpd.strace:122",
+        "wget-local-httpd.strace:185",
+        "wget-local-httpd.strace:227"
+      ],
+      "required_evidence": [
+        "exit-3.strace:101",
+        "grep-via-busybox.strace:107",
+        "grep-via-symlink.strace:101",
+        "grep-via-symlink.strace:123",
+        "pipe-grep-env-i.strace:131",
+        "pipe-grep-env-i.strace:164",
+        "pipe-grep-path-only.strace:135",
+        "pipe-grep-path-only.strace:161",
+        "pipe-grep.strace:122",
+        "pipe-grep.strace:148",
+        "script-sh.strace:130",
+        "script-sh.strace:182",
+        "script-sh.strace:213",
+        "script-sh.strace:255",
+        "script-sh.strace:286",
+        "script-sh.strace:312",
+        "script-sh.strace:371",
+        "script-sh.strace:401",
+        "tmp-file-io.strace:122",
+        "wget-local-httpd.strace:100"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:227"
+      ],
+      "note": null
+    },
+    {
+      "nr": 59,
+      "name": "execve",
+      "owner": "#146",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "busybox",
+        "cat",
+        "env",
+        "grep",
+        "httpd",
+        "ls",
+        "mkdir",
+        "nslookup",
+        "sh",
+        "sleep",
+        "uname",
+        "wget"
+      ],
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "(\"/bin/busybox\", [\"/bin/busybox\", \"--list\"], 0x7f0de75d39d0 /* 6 vars */) = 0",
+        "(\"/bin/busybox\", [\"/bin/busybox\", \"echo\", \"exit_code=3\"], 0x7f4d0df7fbc0 /* 6 vars */) = 0",
+        "(\"/bin/busybox\", [\"/bin/busybox\", \"grep\", \"hello\"], 0x7f16e753eae8 /* 5 vars */) = 0",
+        "(\"/bin/busybox\", [\"/bin/busybox\", \"httpd\", \"-f\", \"-p\", \"18080\", \"-h\", \"/var/www\"], 0x7f20b5377c20 /* 6 vars */ <unfinished ...>",
+        "(\"/bin/cat\", [\"cat\", \"/etc/hostname\"], 0x7f6358a59930 /* 6 vars */) = 0",
+        "(\"/bin/cat\", [\"cat\", \"/etc/hostname\"], 0x7fc157f69918 /* 6 vars */) = 0",
+        "(\"/bin/cat\", [\"cat\", \"/tmp/demo/file\"], 0x7f5eb8642ba8 /* 6 vars */) = 0",
+        "(\"/bin/cat\", [\"cat\", \"/tmp/demo2/file\"], 0x7fc157f69918 /* 6 vars */) = 0",
+        "(\"/bin/env\", [\"env\", \"-i\", \"/bin/sh\", \"-c\", \"echo hello | grep hello\"], 0x7faabecdcae8 /* 5 vars */) = 0",
+        "(\"/bin/env\", [\"env\", \"-i\", \"PATH=/bin\", \"/bin/sh\", \"-c\", \"echo hello | grep hello\"], 0x7f18ee8adb58 /* 5 vars */) = 0",
+        "(\"/bin/grep\", [\"/bin/grep\", \"hello\"], 0x7fd352b7c9d8 /* 5 vars */) = 0",
+        "(\"/bin/grep\", [\"grep\", \"hello\"], 0x7f008b6839c0 /* 3 vars */) = 0",
+        "(\"/bin/grep\", [\"grep\", \"hello\"], 0x7f56b23fa9c0 /* 6 vars */) = 0",
+        "(\"/bin/grep\", [\"grep\", \"hello\"], 0x7f70c8a1d9c0 /* 2 vars */) = 0",
+        "(\"/bin/grep\", [\"grep\", \"hi\"], 0x7fc157f699a8 /* 6 vars */) = 0",
+        "(\"/bin/ls\", [\"ls\", \"/\"], 0x7f9a05d0e910 /* 6 vars */) = 0",
+        "(\"/bin/ls\", [\"ls\", \"/\"], 0x7fc157f69908 /* 6 vars */) = 0",
+        "(\"/bin/mkdir\", [\"mkdir\", \"-p\", \"/tmp/demo\"], 0x7f5eb8642bc8 /* 6 vars */) = 0",
+        "(\"/bin/mkdir\", [\"mkdir\", \"-p\", \"/tmp/demo2\"], 0x7fc157f69960 /* 6 vars */) = 0",
+        "(\"/bin/nslookup\", [\"nslookup\", \"m7.fixture.test\"], 0x7fac74442948 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"/bin/busybox grep hello <<EOF\\nhello\\nEOF\"], 0x7ffcd3213568 /* 5 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"\\n      export PATH=/bin\\n      /bin/busybox httpd -f -p 18080 -h /var/www &\\n      HPID=$!\\n      sleep 0.2\\n      wget -O - http://127.0.0.1:18080/\\n      kill $HPID 2",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"echo hello | /bin/grep hello\"], 0x7ffc95062558 /* 5 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"echo hello | grep hello\"], 0x7f9ff8da2040 /* 1 var */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"echo hello | grep hello\"], NULL) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"env -i /bin/sh -c 'echo hello | grep hello'\"], 0x7ffd9743bc48 /* 5 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"env -i PATH=/bin /bin/sh -c 'echo hello | grep hello'\"], 0x7fffe9118d78 /* 5 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; /bin/busybox --list\"], 0x7fff895ee0a8 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh -c 'cat /etc/hostname'\"], 0x7ffe107d16b8 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh -c 'echo hello | grep hello'\"], 0x7ffd79e96158 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh -c 'exit 3'; /bin/busybox echo exit_code=$?\"], 0x7ffd8f120338 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh -c 'ls /'\"], 0x7ffd16ab4348 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh -c 'mkdir -p /tmp/demo; printf test > /tmp/demo/file; cat /tmp/demo/file'\"], 0x7ffd4705bf38 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh -c 'nslookup m7.fixture.test'\"], 0x7fff44a88e18 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh -c 'pwd'\"], 0x7ffe108e0cb8 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh -c 'sleep 1'\"], 0x7ffdc2a52538 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh -c 'true'\"], 0x7ffe5938f168 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh -c 'uname'\"], 0x7ffc337fe408 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh -c 'wget -O - http://m7.fixture.test:4001/'\"], 0x7ffc9504f8e8 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; sh /tmp/script.sh\"], 0x7ffef7f98e98 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"/bin/sh\", \"-c\", \"export PATH=/bin; true\"], 0x7fff2fb20a38 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"sh\", \"-c\", \"cat /etc/hostname\"], 0x7f444524eae8 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"sh\", \"-c\", \"echo hello | grep hello\"], 0x7f6ac4d7ab10 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"sh\", \"-c\", \"exit 3\"], 0x7f4d0df7fbb8 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"sh\", \"-c\", \"ls /\"], 0x7f9a0303ea00 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"sh\", \"-c\", \"mkdir -p /tmp/demo; printf test > /tmp/demo/file; cat /tmp/demo/file\"], 0x7f4bb936de08 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"sh\", \"-c\", \"nslookup m7.fixture.test\"], 0x7f0c50275b10 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"sh\", \"-c\", \"pwd\"], 0x7fd2d8be0a00 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"sh\", \"-c\", \"sleep 1\"], 0x7f8777996ae8 /* 6 vars */) = 0",
+        "(\"/bin/sh\", [\"sh\", \"-c\", \"true\"], 0x7fd2785cda00 /* 6 vars */) = 0"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "path"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:78",
+        "busybox-list.strace:98",
+        "cat-hostname.strace:78",
+        "cat-hostname.strace:99",
+        "cat-hostname.strace:120",
+        "exit-3.strace:78",
+        "exit-3.strace:114",
+        "exit-3.strace:140",
+        "grep-via-busybox.strace:78",
+        "grep-via-busybox.strace:120",
+        "grep-via-symlink.strace:78",
+        "grep-via-symlink.strace:156",
+        "ls-root.strace:78",
+        "ls-root.strace:99",
+        "ls-root.strace:120",
+        "nslookup-fixture.strace:78",
+        "nslookup-fixture.strace:99",
+        "nslookup-fixture.strace:120",
+        "pipe-grep-env-i.strace:78",
+        "pipe-grep-env-i.strace:104",
+        "pipe-grep-env-i.strace:108",
+        "pipe-grep-env-i.strace:192",
+        "pipe-grep-path-only.strace:78",
+        "pipe-grep-path-only.strace:104",
+        "pipe-grep-path-only.strace:112",
+        "pipe-grep-path-only.strace:191",
+        "pipe-grep.strace:78",
+        "pipe-grep.strace:99",
+        "pipe-grep.strace:179",
+        "pwd.strace:78"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:78",
+        "busybox-list.strace:98",
+        "cat-hostname.strace:78",
+        "cat-hostname.strace:99",
+        "cat-hostname.strace:120",
+        "exit-3.strace:78",
+        "exit-3.strace:114",
+        "exit-3.strace:140",
+        "grep-via-busybox.strace:78",
+        "grep-via-busybox.strace:120",
+        "grep-via-symlink.strace:78",
+        "grep-via-symlink.strace:156",
+        "ls-root.strace:78",
+        "ls-root.strace:99",
+        "ls-root.strace:120",
+        "nslookup-fixture.strace:78",
+        "nslookup-fixture.strace:99",
+        "nslookup-fixture.strace:120",
+        "pipe-grep-env-i.strace:78",
+        "pipe-grep-env-i.strace:104"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:133",
+        "wget-local-httpd.strace:145",
+        "wget-local-httpd.strace:198"
+      ],
+      "note": null
+    },
+    {
+      "nr": 61,
+      "name": "wait4",
+      "owner": "#102",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "sh"
+      ],
+      "commands": [
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "script-sh",
+        "tmp-file-io",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "wait4(-1,  )",
+        "wait4(-1, 0x7ffc17c4328c, WNOHANG, NULL)",
+        "wait4(-1, 0x7ffc21edc33c, WNOHANG, NULL)",
+        "wait4(-1, 0x7ffcafe76cbc, WNOHANG, NULL)",
+        "wait4(-1, 0x7ffceae3d1ec, WNOHANG, NULL)",
+        "wait4(-1, 0x7ffceae3d25c, WNOHANG, NULL)",
+        "wait4(-1, 0x7ffdda35c0fc, WNOHANG, NULL)",
+        "wait4(-1, 0x7ffe416bc01c, WNOHANG, NULL)",
+        "wait4(-1, 0x7fff6409195c, WNOHANG, NULL)",
+        "wait4(-1, 0x7fffcc863f8c, WNOHANG, NULL)",
+        "wait4(-1, 0x7ffff6a8eb0c, WNOHANG, NULL)"
+      ],
+      "blocking": [
+        "may-block",
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "exit-3.strace:111",
+        "exit-3.strace:139",
+        "grep-via-busybox.strace:117",
+        "grep-via-busybox.strace:141",
+        "grep-via-symlink.strace:140",
+        "grep-via-symlink.strace:154",
+        "grep-via-symlink.strace:177",
+        "pipe-grep-env-i.strace:187",
+        "pipe-grep-env-i.strace:191",
+        "pipe-grep-env-i.strace:213",
+        "pipe-grep-path-only.strace:177",
+        "pipe-grep-path-only.strace:188",
+        "pipe-grep-path-only.strace:212",
+        "pipe-grep.strace:164",
+        "pipe-grep.strace:176",
+        "pipe-grep.strace:200",
+        "script-sh.strace:140",
+        "script-sh.strace:178",
+        "script-sh.strace:192",
+        "script-sh.strace:209",
+        "script-sh.strace:223",
+        "script-sh.strace:243",
+        "script-sh.strace:265",
+        "script-sh.strace:282",
+        "script-sh.strace:329",
+        "script-sh.strace:343",
+        "script-sh.strace:367",
+        "script-sh.strace:381",
+        "script-sh.strace:397",
+        "script-sh.strace:411"
+      ],
+      "required_evidence": [
+        "exit-3.strace:111",
+        "exit-3.strace:139",
+        "grep-via-busybox.strace:117",
+        "grep-via-busybox.strace:141",
+        "grep-via-symlink.strace:140",
+        "grep-via-symlink.strace:154",
+        "grep-via-symlink.strace:177",
+        "pipe-grep-env-i.strace:187",
+        "pipe-grep-env-i.strace:191",
+        "pipe-grep-env-i.strace:213",
+        "pipe-grep-path-only.strace:177",
+        "pipe-grep-path-only.strace:188",
+        "pipe-grep-path-only.strace:212",
+        "pipe-grep.strace:164",
+        "pipe-grep.strace:176",
+        "pipe-grep.strace:200",
+        "script-sh.strace:140",
+        "script-sh.strace:178",
+        "script-sh.strace:192",
+        "script-sh.strace:209"
+      ],
+      "harness_evidence": [],
+      "note": null
+    },
+    {
+      "nr": 62,
+      "name": "kill",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": false,
+      "harness_only": true,
+      "applets": [
+        "sh"
+      ],
+      "commands": [
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "kill(94, SIGTERM)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "wget-local-httpd.strace:314"
+      ],
+      "required_evidence": [],
+      "harness_evidence": [
+        "wget-local-httpd.strace:314"
+      ],
+      "note": null
+    },
+    {
+      "nr": 63,
+      "name": "uname",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "nslookup",
+        "sh",
+        "uname"
+      ],
+      "commands": [
+        "nslookup-fixture",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "script-sh",
+        "uname"
+      ],
+      "flags": [
+        "uname({sysname=\"Linux\", nodename=\"1dc7f0cc9cd2\", ...})",
+        "uname({sysname=\"Linux\", nodename=\"ed74d79dcd81\", ...})"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "nslookup-fixture.strace:134",
+        "pipe-grep-env-i.strace:122",
+        "pipe-grep-path-only.strace:126",
+        "script-sh.strace:389",
+        "uname.strace:124"
+      ],
+      "required_evidence": [
+        "nslookup-fixture.strace:134",
+        "pipe-grep-env-i.strace:122",
+        "pipe-grep-path-only.strace:126",
+        "script-sh.strace:389",
+        "uname.strace:124"
+      ],
+      "harness_evidence": [],
+      "note": null
+    },
+    {
+      "nr": 72,
+      "name": "fcntl",
+      "owner": "#147",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "ls",
+        "nslookup",
+        "sh",
+        "wget"
+      ],
+      "commands": [
+        "grep-via-busybox",
+        "ls-root",
+        "nslookup-fixture",
+        "script-sh",
+        "tmp-file-io",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "fcntl(0, F_DUPFD_CLOEXEC, 10)",
+        "fcntl(1, F_DUPFD_CLOEXEC, 10)",
+        "fcntl(1, F_GETFL)",
+        "fcntl(10, F_SETFD, FD_CLOEXEC)",
+        "fcntl(11, F_SETFD, FD_CLOEXEC)",
+        "fcntl(2, F_DUPFD_CLOEXEC, 10)",
+        "fcntl(3, F_DUPFD_CLOEXEC, 10)",
+        "fcntl(3, F_GETFL)",
+        "fcntl(3, F_SETFD, FD_CLOEXEC)",
+        "fcntl(3, F_SETFL, O_RDWR|O_LARGEFILE)",
+        "fcntl(3, F_SETFL, O_RDWR|O_NONBLOCK|O_LARGEFILE)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "fd"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "grep-via-busybox.strace:101",
+        "grep-via-busybox.strace:102",
+        "ls-root.strace:133",
+        "nslookup-fixture.strace:139",
+        "nslookup-fixture.strace:140",
+        "script-sh.strace:116",
+        "script-sh.strace:117",
+        "script-sh.strace:118",
+        "script-sh.strace:157",
+        "script-sh.strace:245",
+        "script-sh.strace:246",
+        "script-sh.strace:249",
+        "tmp-file-io.strace:153",
+        "tmp-file-io.strace:154",
+        "tmp-file-io.strace:157",
+        "wget-fixture-fail.strace:133",
+        "wget-local-httpd.strace:282",
+        "wget-local-httpd.strace:283",
+        "wget-local-httpd.strace:286",
+        "wget-local-httpd.strace:287",
+        "wget-local-httpd.strace:309",
+        "wget-local-httpd.strace:310"
+      ],
+      "required_evidence": [
+        "grep-via-busybox.strace:101",
+        "grep-via-busybox.strace:102",
+        "ls-root.strace:133",
+        "nslookup-fixture.strace:139",
+        "nslookup-fixture.strace:140",
+        "script-sh.strace:116",
+        "script-sh.strace:117",
+        "script-sh.strace:118",
+        "script-sh.strace:157",
+        "script-sh.strace:245",
+        "script-sh.strace:246",
+        "script-sh.strace:249",
+        "tmp-file-io.strace:153",
+        "tmp-file-io.strace:154",
+        "tmp-file-io.strace:157",
+        "wget-fixture-fail.strace:133",
+        "wget-local-httpd.strace:309",
+        "wget-local-httpd.strace:310"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:282",
+        "wget-local-httpd.strace:283",
+        "wget-local-httpd.strace:286",
+        "wget-local-httpd.strace:287"
+      ],
+      "note": null
+    },
+    {
+      "nr": 79,
+      "name": "getcwd",
+      "owner": "#101",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "httpd",
+        "sh"
+      ],
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "getcwd(\"/\", 192)",
+        "getcwd(\"/\", 4096)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:93",
+        "cat-hostname.strace:93",
+        "exit-3.strace:93",
+        "ls-root.strace:93",
+        "nslookup-fixture.strace:93",
+        "pipe-grep-env-i.strace:123",
+        "pipe-grep-path-only.strace:127",
+        "pipe-grep.strace:93",
+        "pwd.strace:93",
+        "script-sh.strace:93",
+        "sh-c-minimal.strace:93",
+        "sleep-1.strace:93",
+        "tmp-file-io.strace:93",
+        "true.strace:93",
+        "uname.strace:93",
+        "wget-fixture-fail.strace:93",
+        "wget-local-httpd.strace:93",
+        "wget-local-httpd.strace:163"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:93",
+        "cat-hostname.strace:93",
+        "exit-3.strace:93",
+        "ls-root.strace:93",
+        "nslookup-fixture.strace:93",
+        "pipe-grep-env-i.strace:123",
+        "pipe-grep-path-only.strace:127",
+        "pipe-grep.strace:93",
+        "pwd.strace:93",
+        "script-sh.strace:93",
+        "sh-c-minimal.strace:93",
+        "sleep-1.strace:93",
+        "tmp-file-io.strace:93",
+        "true.strace:93",
+        "uname.strace:93",
+        "wget-fixture-fail.strace:93",
+        "wget-local-httpd.strace:93"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:163"
+      ],
+      "note": null
+    },
+    {
+      "nr": 80,
+      "name": "chdir",
+      "owner": "#101",
+      "secondary_owner": null,
+      "required": false,
+      "harness_only": true,
+      "applets": [
+        "httpd"
+      ],
+      "commands": [
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "chdir(\"/var/www\")"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "wget-local-httpd.strace:164"
+      ],
+      "required_evidence": [],
+      "harness_evidence": [
+        "wget-local-httpd.strace:164"
+      ],
+      "note": null
+    },
+    {
+      "nr": 83,
+      "name": "mkdir",
+      "owner": "#101",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "mkdir"
+      ],
+      "commands": [
+        "script-sh",
+        "tmp-file-io"
+      ],
+      "flags": [
+        "mkdir(\"/\", 0777)",
+        "mkdir(\"/tmp/\", 0777)",
+        "mkdir(\"/tmp/demo\", 0777)",
+        "mkdir(\"/tmp/demo2\", 0777)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "path"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "script-sh.strace:233",
+        "script-sh.strace:235",
+        "script-sh.strace:237",
+        "tmp-file-io.strace:141",
+        "tmp-file-io.strace:143",
+        "tmp-file-io.strace:145"
+      ],
+      "required_evidence": [
+        "script-sh.strace:233",
+        "script-sh.strace:235",
+        "script-sh.strace:237",
+        "tmp-file-io.strace:141",
+        "tmp-file-io.strace:143",
+        "tmp-file-io.strace:145"
+      ],
+      "harness_evidence": [],
+      "note": null
+    },
+    {
+      "nr": 102,
+      "name": "getuid",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "busybox",
+        "cat",
+        "env",
+        "grep",
+        "httpd",
+        "ls",
+        "mkdir",
+        "nslookup",
+        "sh",
+        "sleep",
+        "uname",
+        "wget"
+      ],
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "getuid( )",
+        "getuid()"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:81",
+        "busybox-list.strace:101",
+        "cat-hostname.strace:81",
+        "cat-hostname.strace:102",
+        "cat-hostname.strace:123",
+        "exit-3.strace:81",
+        "exit-3.strace:117",
+        "exit-3.strace:143",
+        "grep-via-busybox.strace:81",
+        "grep-via-busybox.strace:123",
+        "grep-via-symlink.strace:81",
+        "grep-via-symlink.strace:159",
+        "ls-root.strace:81",
+        "ls-root.strace:102",
+        "ls-root.strace:123",
+        "nslookup-fixture.strace:81",
+        "nslookup-fixture.strace:102",
+        "nslookup-fixture.strace:123",
+        "pipe-grep-env-i.strace:81",
+        "pipe-grep-env-i.strace:107",
+        "pipe-grep-env-i.strace:111",
+        "pipe-grep-env-i.strace:195",
+        "pipe-grep-path-only.strace:81",
+        "pipe-grep-path-only.strace:107",
+        "pipe-grep-path-only.strace:115",
+        "pipe-grep-path-only.strace:194",
+        "pipe-grep.strace:81",
+        "pipe-grep.strace:102",
+        "pipe-grep.strace:182",
+        "pwd.strace:81"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:81",
+        "busybox-list.strace:101",
+        "cat-hostname.strace:81",
+        "cat-hostname.strace:102",
+        "cat-hostname.strace:123",
+        "exit-3.strace:81",
+        "exit-3.strace:117",
+        "exit-3.strace:143",
+        "grep-via-busybox.strace:81",
+        "grep-via-busybox.strace:123",
+        "grep-via-symlink.strace:81",
+        "grep-via-symlink.strace:159",
+        "ls-root.strace:81",
+        "ls-root.strace:102",
+        "ls-root.strace:123",
+        "nslookup-fixture.strace:81",
+        "nslookup-fixture.strace:102",
+        "nslookup-fixture.strace:123",
+        "pipe-grep-env-i.strace:81",
+        "pipe-grep-env-i.strace:107"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:146",
+        "wget-local-httpd.strace:157",
+        "wget-local-httpd.strace:201"
+      ],
+      "note": null
+    },
+    {
+      "nr": 110,
+      "name": "getppid",
+      "owner": "#102",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "sh"
+      ],
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "getppid()"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:91",
+        "cat-hostname.strace:91",
+        "cat-hostname.strace:112",
+        "exit-3.strace:91",
+        "exit-3.strace:127",
+        "grep-via-busybox.strace:91",
+        "grep-via-symlink.strace:91",
+        "ls-root.strace:91",
+        "ls-root.strace:112",
+        "nslookup-fixture.strace:91",
+        "nslookup-fixture.strace:112",
+        "pipe-grep-env-i.strace:91",
+        "pipe-grep-env-i.strace:121",
+        "pipe-grep-path-only.strace:91",
+        "pipe-grep-path-only.strace:125",
+        "pipe-grep.strace:91",
+        "pipe-grep.strace:112",
+        "pwd.strace:91",
+        "pwd.strace:112",
+        "script-sh.strace:91",
+        "script-sh.strace:112",
+        "sh-c-minimal.strace:91",
+        "sh-c-minimal.strace:112",
+        "sleep-1.strace:91",
+        "sleep-1.strace:112",
+        "tmp-file-io.strace:91",
+        "tmp-file-io.strace:112",
+        "true.strace:91",
+        "uname.strace:91",
+        "uname.strace:112"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:91",
+        "cat-hostname.strace:91",
+        "cat-hostname.strace:112",
+        "exit-3.strace:91",
+        "exit-3.strace:127",
+        "grep-via-busybox.strace:91",
+        "grep-via-symlink.strace:91",
+        "ls-root.strace:91",
+        "ls-root.strace:112",
+        "nslookup-fixture.strace:91",
+        "nslookup-fixture.strace:112",
+        "pipe-grep-env-i.strace:91",
+        "pipe-grep-env-i.strace:121",
+        "pipe-grep-path-only.strace:91",
+        "pipe-grep-path-only.strace:125",
+        "pipe-grep.strace:91",
+        "pipe-grep.strace:112",
+        "pwd.strace:91",
+        "pwd.strace:112",
+        "script-sh.strace:91"
+      ],
+      "harness_evidence": [],
+      "note": null
+    },
+    {
+      "nr": 158,
+      "name": "arch_prctl",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "busybox",
+        "cat",
+        "env",
+        "grep",
+        "httpd",
+        "ls",
+        "mkdir",
+        "nslookup",
+        "sh",
+        "sleep",
+        "uname",
+        "wget"
+      ],
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "arch_prctl(ARCH_SET_FS, 0x523278 )",
+        "arch_prctl(ARCH_SET_FS, 0x523278)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:79",
+        "busybox-list.strace:99",
+        "cat-hostname.strace:79",
+        "cat-hostname.strace:100",
+        "cat-hostname.strace:121",
+        "exit-3.strace:79",
+        "exit-3.strace:115",
+        "exit-3.strace:141",
+        "grep-via-busybox.strace:79",
+        "grep-via-busybox.strace:121",
+        "grep-via-symlink.strace:79",
+        "grep-via-symlink.strace:157",
+        "ls-root.strace:79",
+        "ls-root.strace:100",
+        "ls-root.strace:121",
+        "nslookup-fixture.strace:79",
+        "nslookup-fixture.strace:100",
+        "nslookup-fixture.strace:121",
+        "pipe-grep-env-i.strace:79",
+        "pipe-grep-env-i.strace:105",
+        "pipe-grep-env-i.strace:109",
+        "pipe-grep-env-i.strace:193",
+        "pipe-grep-path-only.strace:79",
+        "pipe-grep-path-only.strace:105",
+        "pipe-grep-path-only.strace:113",
+        "pipe-grep-path-only.strace:192",
+        "pipe-grep.strace:79",
+        "pipe-grep.strace:100",
+        "pipe-grep.strace:180",
+        "pwd.strace:79"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:79",
+        "busybox-list.strace:99",
+        "cat-hostname.strace:79",
+        "cat-hostname.strace:100",
+        "cat-hostname.strace:121",
+        "exit-3.strace:79",
+        "exit-3.strace:115",
+        "exit-3.strace:141",
+        "grep-via-busybox.strace:79",
+        "grep-via-busybox.strace:121",
+        "grep-via-symlink.strace:79",
+        "grep-via-symlink.strace:157",
+        "ls-root.strace:79",
+        "ls-root.strace:100",
+        "ls-root.strace:121",
+        "nslookup-fixture.strace:79",
+        "nslookup-fixture.strace:100",
+        "nslookup-fixture.strace:121",
+        "pipe-grep-env-i.strace:79",
+        "pipe-grep-env-i.strace:105"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:138",
+        "wget-local-httpd.strace:149",
+        "wget-local-httpd.strace:199"
+      ],
+      "note": null
+    },
+    {
+      "nr": 217,
+      "name": "getdents64",
+      "owner": "#101",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "ls"
+      ],
+      "commands": [
+        "ls-root",
+        "script-sh"
+      ],
+      "flags": [
+        "getdents64(3, 0x7fcfa03a0048 /* 0 entries */, 2048)",
+        "getdents64(3, 0x7fcfa03a0048 /* 9 entries */, 2048)",
+        "getdents64(3, 0x7fe33aee6048 /* 0 entries */, 2048)",
+        "getdents64(3, 0x7fe33aee6048 /* 9 entries */, 2048)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "path"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "ls-root.strace:135",
+        "ls-root.strace:143",
+        "script-sh.strace:159",
+        "script-sh.strace:167"
+      ],
+      "required_evidence": [
+        "ls-root.strace:135",
+        "ls-root.strace:143",
+        "script-sh.strace:159",
+        "script-sh.strace:167"
+      ],
+      "harness_evidence": [],
+      "note": null
+    },
+    {
+      "nr": 218,
+      "name": "set_tid_address",
+      "owner": "#103",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "busybox",
+        "cat",
+        "env",
+        "grep",
+        "httpd",
+        "ls",
+        "mkdir",
+        "nslookup",
+        "sh",
+        "sleep",
+        "uname",
+        "unknown",
+        "wget"
+      ],
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "set_tid_address(0x523bf8 )",
+        "set_tid_address(0x523bf8)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:80",
+        "busybox-list.strace:100",
+        "cat-hostname.strace:80",
+        "cat-hostname.strace:101",
+        "cat-hostname.strace:122",
+        "exit-3.strace:80",
+        "exit-3.strace:102",
+        "exit-3.strace:116",
+        "exit-3.strace:142",
+        "grep-via-busybox.strace:80",
+        "grep-via-busybox.strace:108",
+        "grep-via-busybox.strace:122",
+        "grep-via-symlink.strace:80",
+        "grep-via-symlink.strace:102",
+        "grep-via-symlink.strace:127",
+        "grep-via-symlink.strace:158",
+        "ls-root.strace:80",
+        "ls-root.strace:101",
+        "ls-root.strace:122",
+        "nslookup-fixture.strace:80",
+        "nslookup-fixture.strace:101",
+        "nslookup-fixture.strace:122",
+        "pipe-grep-env-i.strace:80",
+        "pipe-grep-env-i.strace:106",
+        "pipe-grep-env-i.strace:110",
+        "pipe-grep-env-i.strace:132",
+        "pipe-grep-env-i.strace:167",
+        "pipe-grep-env-i.strace:194",
+        "pipe-grep-path-only.strace:80",
+        "pipe-grep-path-only.strace:106"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:80",
+        "busybox-list.strace:100",
+        "cat-hostname.strace:80",
+        "cat-hostname.strace:101",
+        "cat-hostname.strace:122",
+        "exit-3.strace:80",
+        "exit-3.strace:102",
+        "exit-3.strace:116",
+        "exit-3.strace:142",
+        "grep-via-busybox.strace:80",
+        "grep-via-busybox.strace:108",
+        "grep-via-busybox.strace:122",
+        "grep-via-symlink.strace:80",
+        "grep-via-symlink.strace:102",
+        "grep-via-symlink.strace:127",
+        "grep-via-symlink.strace:158",
+        "ls-root.strace:80",
+        "ls-root.strace:101",
+        "ls-root.strace:122",
+        "nslookup-fixture.strace:80"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:142",
+        "wget-local-httpd.strace:153",
+        "wget-local-httpd.strace:200"
+      ],
+      "note": null
+    },
+    {
+      "nr": 231,
+      "name": "exit_group",
+      "owner": "#102",
+      "secondary_owner": null,
+      "required": true,
+      "harness_only": false,
+      "applets": [
+        "busybox",
+        "cat",
+        "grep",
+        "ls",
+        "mkdir",
+        "nslookup",
+        "sh",
+        "sleep",
+        "uname",
+        "unknown",
+        "wget"
+      ],
+      "commands": [
+        "busybox-list",
+        "cat-hostname",
+        "exit-3",
+        "grep-via-busybox",
+        "grep-via-symlink",
+        "ls-root",
+        "nslookup-fixture",
+        "pipe-grep",
+        "pipe-grep-env-i",
+        "pipe-grep-path-only",
+        "pwd",
+        "script-sh",
+        "sh-c-minimal",
+        "sleep-1",
+        "tmp-file-io",
+        "true",
+        "uname",
+        "wget-fixture-fail",
+        "wget-local-httpd"
+      ],
+      "flags": [
+        "exit_group(0 )",
+        "exit_group(0)",
+        "exit_group(1)",
+        "exit_group(3)"
+      ],
+      "blocking": [
+        "never"
+      ],
+      "descriptor_kinds": [
+        "process"
+      ],
+      "errno_observed": [],
+      "evidence": [
+        "busybox-list.strace:909",
+        "cat-hostname.strace:128",
+        "exit-3.strace:134",
+        "exit-3.strace:150",
+        "grep-via-busybox.strace:136",
+        "grep-via-busybox.strace:144",
+        "grep-via-symlink.strace:141",
+        "grep-via-symlink.strace:172",
+        "grep-via-symlink.strace:178",
+        "ls-root.strace:149",
+        "nslookup-fixture.strace:150",
+        "pipe-grep-env-i.strace:165",
+        "pipe-grep-env-i.strace:208",
+        "pipe-grep-env-i.strace:214",
+        "pipe-grep-path-only.strace:172",
+        "pipe-grep-path-only.strace:207",
+        "pipe-grep-path-only.strace:213",
+        "pipe-grep.strace:159",
+        "pipe-grep.strace:195",
+        "pipe-grep.strace:201",
+        "pwd.strace:121",
+        "script-sh.strace:173",
+        "script-sh.strace:204",
+        "script-sh.strace:238",
+        "script-sh.strace:277",
+        "script-sh.strace:330",
+        "script-sh.strace:362",
+        "script-sh.strace:392",
+        "script-sh.strace:420",
+        "script-sh.strace:426"
+      ],
+      "required_evidence": [
+        "busybox-list.strace:909",
+        "cat-hostname.strace:128",
+        "exit-3.strace:134",
+        "exit-3.strace:150",
+        "grep-via-busybox.strace:136",
+        "grep-via-busybox.strace:144",
+        "grep-via-symlink.strace:141",
+        "grep-via-symlink.strace:172",
+        "grep-via-symlink.strace:178",
+        "ls-root.strace:149",
+        "nslookup-fixture.strace:150",
+        "pipe-grep-env-i.strace:165",
+        "pipe-grep-env-i.strace:208",
+        "pipe-grep-env-i.strace:214",
+        "pipe-grep-path-only.strace:172",
+        "pipe-grep-path-only.strace:207",
+        "pipe-grep-path-only.strace:213",
+        "pipe-grep.strace:159",
+        "pipe-grep.strace:195",
+        "pipe-grep.strace:201"
+      ],
+      "harness_evidence": [
+        "wget-local-httpd.strace:176",
+        "wget-local-httpd.strace:302"
+      ],
+      "note": null
+    }
+  ]
+}

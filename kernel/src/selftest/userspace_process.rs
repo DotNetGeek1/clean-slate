@@ -9,11 +9,11 @@ use crate::mm::address_space::map_process_page;
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::zero_page;
+use crate::mm::phys_to_virt;
 use crate::mm::PAGE_SIZE;
-use crate::mm::PHYSICAL_MEMORY_OFFSET;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
-use crate::process::personality::ExecutionPersonality;
+use crate::process::personality::{set_execution_personality, ExecutionPersonality};
 use crate::process::process_registry_mut;
 use crate::process::Process;
 use crate::process::ProcessState;
@@ -70,7 +70,7 @@ pub(crate) fn spawn_native_userspace_process_with_code(
     unsafe {
         ptr::copy_nonoverlapping(
             code.as_ptr(),
-            (PHYSICAL_MEMORY_OFFSET + code_frame_address) as *mut u8,
+            phys_to_virt(code_frame_address) as *mut u8,
             code.len(),
         );
     }
@@ -142,6 +142,26 @@ pub(crate) fn spawn_native_userspace_process_with_code(
         thread,
         user_stack_pointer,
     })
+}
+
+/// Same as [`spawn_native_userspace_process_with_code`] but tags Linux personality.
+pub(crate) fn spawn_linux_userspace_process_with_code(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    code: &[u8],
+    stack_virtual_address: u64,
+) -> Result<SpawnedUserspaceProcess, &'static str> {
+    let spawned = spawn_native_userspace_process_with_code(
+        allocator,
+        kernel_stack_top,
+        code,
+        stack_virtual_address,
+    )?;
+    set_execution_personality(spawned.process_id, ExecutionPersonality::LinuxX86_64)?;
+    if let Some(process) = unsafe { process_registry_mut().get_mut(spawned.process_id) } {
+        process.execution_personality = ExecutionPersonality::LinuxX86_64;
+    }
+    Ok(spawned)
 }
 
 pub(crate) fn configure_scheduler_thread_slot(

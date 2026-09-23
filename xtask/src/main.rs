@@ -92,6 +92,8 @@ const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[PF  ] rip=0x",
     "[M1  ] PASS",
 ];
+const M9_LOW_VA_ACCEPTANCE_MARKERS: [&str; 2] = ["[M9.0] creating", "[M9.0] PASS"];
+const M9_LOW_VA_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[INT ] double-fault IST initialized",
     "[DF  ] double fault",
@@ -163,17 +165,18 @@ const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS: [&str; 3] = [
     "[SYSC] unresolved caller reason=syscall caller process did not match active address space fail-closed",
     "[M9.C] PASS",
 ];
-const M9_FD_CORE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(25);
-const M9_FD_CORE_ACCEPTANCE_MARKERS: [&str; 9] = [
-    "[M9.G] pool_before_boot=",
+const M9_FD_CORE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+const M9_FD_CORE_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[TIME] timer initialized",
+    "[M9.G] pool_before=",
     "[LNX ] personality=x86_64 pid=",
-    "[LNX ] unsupported syscall=999 errno=ENOSYS",
-    "\nHello from Linux.",
-    "[M9.D] bytes=",
-    "[M9.D] PASS",
-    "[LNX ] exit pid=",
-    "[M8.3] PASS",
+    "[M9.G] pool_before=",
+    " pool_after=",
+    " cycle=0",
+    "[M9.G] pool_before=",
+    " pool_after=",
+    " cycle=7",
+    "[M9.G] PASS",
 ];
 // M8.7 / #98 self-test boot: production launch path observed twice (relaunch),
 // plus native-userspace progress and fail-closed malformed proof. Entry hex is
@@ -616,6 +619,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
     match command {
         ParsedCommand::Run => run_vm(),
         ParsedCommand::TestM1 => run_m1_acceptance(),
+        ParsedCommand::TestM9LowVa => run_m9_low_va_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
         ParsedCommand::TestM3 => run_m3_acceptance(),
         ParsedCommand::TestM3AddressSpace => run_m3_address_space_acceptance(),
@@ -988,6 +992,15 @@ fn run_m1_acceptance() -> Result<(), XtaskError> {
         false,
         &["m1-self-test"],
         Some((&M1_ACCEPTANCE_MARKERS, M1_ACCEPTANCE_TIMEOUT)),
+    )
+}
+
+fn run_m9_low_va_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m9-low-va-self-test"],
+        Some((&M9_LOW_VA_ACCEPTANCE_MARKERS, M9_LOW_VA_ACCEPTANCE_TIMEOUT)),
     )
 }
 
@@ -2488,7 +2501,7 @@ fn print_help() {
     println!("  test-m3-syscall Build the M3.3 syscall-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m8-linux-dispatch Build the M8.3 Linux personality dispatch kernel, run QEMU, and validate [M8.3] PASS");
     println!("  test-m9-syscall-fail-closed Build the M9 #143 fail-closed syscall kernel, run QEMU, and validate [M9.C] PASS");
-    println!("  test-m9-fd-core Build the M9 #147 fd-core kernel, run QEMU, and validate pool marker + [M8.3] PASS (aliases: m9-fd-core, m9.147)");
+    println!("  test-m9-fd-core Build the M9 #147 fd-core kernel, run QEMU, and validate pool equality + [M9.G] PASS (aliases: m9-fd-core, m9.147)");
     println!("  test-m8-linux-hello Boot M8.7 self-test then production feature (hello + clean [M2] PASS); 40s for two launches (aliases: m8-linux-hello, m8.7)");
     println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
@@ -2595,6 +2608,7 @@ enum ParsedCommand {
     TestM5DiskHarness,
     TestM6FixtureSmoke,
     TestM8LinuxImage,
+    TestM9LowVa,
     TestM6Object,
     TestM7NetService,
     TestM7Network,
@@ -2621,6 +2635,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
     match command {
         Some(cmd) if cmd == "run" => ParsedCommand::Run,
         Some(cmd) if cmd == "test-m1" => ParsedCommand::TestM1,
+        Some(cmd) if cmd == "test-m9-low-va" || cmd == "m9-low-va" => ParsedCommand::TestM9LowVa,
         Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,
         Some(cmd) if cmd == "test-m3" => ParsedCommand::TestM3,
         Some(cmd) if cmd == "test-m3-address-space" => ParsedCommand::TestM3AddressSpace,

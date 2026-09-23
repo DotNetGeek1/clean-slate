@@ -175,3 +175,142 @@ fn locate_iov_index(iovecs: &[IoVec], offset: u64) -> Result<(usize, u64), Linux
     }
     Err(EFAULT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arch::x86_64::interrupt_context::SyscallContext;
+    use crate::ipc::IpcEndpointTable;
+    use crate::process::linux_fd::{LinuxFdRegistry, LINUX_STDOUT_FD};
+    use clean_slate_linux_abi::{EBADF, SYS_DUP2, SYS_FCNTL, SYS_WRITEV};
+    use clean_slate_service_lifecycle::InstanceGeneration;
+
+    fn empty_frame() -> SyscallContext {
+        SyscallContext {
+            rax: 0,
+            rdx: 0,
+            rbx: 0,
+            rbp: 0,
+            rsi: 0,
+            rdi: 0,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            user_rip: 0,
+            user_rflags: 0,
+            user_rsp: 0,
+        }
+    }
+
+    fn syscall_ctx(frame: &mut SyscallContext) -> LinuxSyscallContext<'_> {
+        LinuxSyscallContext {
+            pid: 17,
+            instance_generation: InstanceGeneration(4),
+            frame,
+        }
+    }
+
+    #[test]
+    fn locate_iov_index_skips_zero_length_iov() {
+        let iovecs = [
+            IoVec {
+                base: 0x1000,
+                len: 2,
+            },
+            IoVec { base: 0x2000, len: 0 },
+            IoVec {
+                base: 0x3000,
+                len: 3,
+            },
+        ];
+        assert_eq!(locate_iov_index(&iovecs, 0), Ok((0, 0)));
+        assert_eq!(locate_iov_index(&iovecs, 2), Ok((2, 0)));
+    }
+
+    #[test]
+    fn writev_iovcnt_above_linux_iov_max_is_einval() {
+        let pid = 88u64;
+        let generation = InstanceGeneration(77);
+        let mut ipc = IpcEndpointTable::new();
+        let handle = ipc
+            .grant_console_capability_for_pid(pid)
+            .expect("console grant");
+        linux_fd::install_stdio_for_process(pid, generation, handle, handle)
+            .expect("install stdio");
+        let mut frame = empty_frame();
+        let mut ctx = LinuxSyscallContext {
+            pid,
+            instance_generation: generation,
+            frame: &mut frame,
+        };
+        let request = LinuxSyscallRequest {
+            nr: SYS_WRITEV,
+            args: [
+                LINUX_STDOUT_FD,
+                0x1000,
+                (LINUX_IOV_MAX as u64) + 1,
+                0,
+                0,
+                0,
+            ],
+        };
+        assert_eq!(handle_sys_writev(&request, &mut ctx), Err(EINVAL));
+    }
+
+    #[test]
+    fn fcntl_unknown_command_is_einval() {
+        let mut frame = empty_frame();
+        let mut ctx = syscall_ctx(&mut frame);
+        let request = LinuxSyscallRequest {
+            nr: SYS_FCNTL,
+            args: [1, 0xdead, 0, 0, 0, 0],
+        };
+        assert_eq!(handle_sys_fcntl(&request, &mut ctx), Err(EINVAL));
+    }
+
+    #[test]
+    fn fcntl_without_fd_table_is_ebadf() {
+        let mut frame = empty_frame();
+        let mut ctx = syscall_ctx(&mut frame);
+        let request = LinuxSyscallRequest {
+            nr: SYS_FCNTL,
+            args: [1, F_GETFD, 0, 0, 0, 0],
+        };
+        assert_eq!(handle_sys_fcntl(&request, &mut ctx), Err(EBADF));
+    }
+
+    #[test]
+    fn dup2_same_fd_is_noop_when_already_open() {
+        let (mut fds, mut ipc) = (LinuxFdRegistry::new(), IpcEndpointTable::new());
+        let gen = InstanceGeneration(1);
+        let handle = ipc.grant_console_capability_for_pid(2).expect("grant");
+        fds.install(2, gen, handle, handle).expect("install");
+        fds.dup2(2, gen, LINUX_STDOUT_FD, 5).expect("dup to 5");
+        assert!(fds.dup2(2, gen, 5, 5).is_ok());
+    }
+
+    #[test]
+    fn close_with_stale_generation_is_ebadf() {
+        let (mut fds, mut ipc) = (LinuxFdRegistry::new(), IpcEndpointTable::new());
+        let live = InstanceGeneration(1);
+        let stale = InstanceGeneration(2);
+        let handle = ipc.grant_console_capability_for_pid(3).expect("grant");
+        fds.install(3, live, handle, handle).expect("install");
+        assert_eq!(fds.close_fd(3, stale, LINUX_STDOUT_FD), Err(EBADF));
+    }
+
+    #[test]
+    fn dup2_handler_maps_ebadf_without_fd_table() {
+        let mut frame = empty_frame();
+        let mut ctx = syscall_ctx(&mut frame);
+        let request = LinuxSyscallRequest {
+            nr: SYS_DUP2,
+            args: [1, 5, 0, 0, 0, 0],
+        };
+        assert_eq!(handle_sys_dup2(&request, &mut ctx), Err(EBADF));
+    }
+}

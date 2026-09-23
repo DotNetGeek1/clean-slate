@@ -45,6 +45,8 @@ use crate::mm::paging::current_offset_page_table;
 #[cfg(feature = "m3-entry-self-test")]
 use crate::mm::paging::zero_page;
 #[cfg(feature = "m3-entry-self-test")]
+use crate::mm::phys_to_virt;
+#[cfg(feature = "m3-entry-self-test")]
 use crate::mm::user_mapping::map_userspace_page;
 #[cfg(feature = "m3-entry-self-test")]
 use crate::mm::user_mapping::unmap_userspace_page;
@@ -52,8 +54,6 @@ use crate::mm::user_mapping::unmap_userspace_page;
 use crate::mm::user_mapping::validate_userspace_mappings;
 #[cfg(feature = "m3-entry-self-test")]
 use crate::mm::PAGE_SIZE;
-#[cfg(feature = "m3-entry-self-test")]
-use crate::mm::PHYSICAL_MEMORY_OFFSET;
 #[cfg(feature = "m3-entry-self-test")]
 use crate::sched::task_stacks_mut;
 #[cfg(feature = "m3-entry-self-test")]
@@ -142,7 +142,7 @@ fn install_userspace_payload(allocator: &mut PageAllocator) -> Result<(), &'stat
     unsafe {
         ptr::copy_nonoverlapping(
             &raw const clean_slate_user_test_start,
-            (PHYSICAL_MEMORY_OFFSET + code_frame_address) as *mut u8,
+            (phys_to_virt(code_frame_address)) as *mut u8,
             payload_size,
         );
     }

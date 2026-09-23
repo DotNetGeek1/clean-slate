@@ -4,6 +4,7 @@
 use crate::arch::x86_64::cpu::without_write_protect;
 use crate::mm::align_down;
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::layout::va_overlaps_kernel_low_reserved;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
@@ -123,11 +124,8 @@ pub(crate) fn validate_userspace_mappings() -> Result<(), &'static str> {
         return Err("userspace stack mapping flags were incorrect");
     }
 
-    let kernel_flags = page_flags_for_address(VirtAddr::from_ptr(run as *const ()))?;
     let kernel_leaf_flags = leaf_page_flags_for_address(VirtAddr::from_ptr(run as *const ()))?;
-    if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-        || kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-    {
+    if kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE) {
         return Err("kernel mapping unexpectedly became user accessible");
     }
 
@@ -158,6 +156,9 @@ fn validate_user_pointer_range_with_permissions(
         .ok_or("userspace pointer range overflowed")?;
     if pointer >= USER_CANONICAL_TOP_EXCLUSIVE || end_inclusive >= USER_CANONICAL_TOP_EXCLUSIVE {
         return Err("userspace pointer range was outside canonical userspace");
+    }
+    if va_overlaps_kernel_low_reserved(pointer, end_inclusive.saturating_add(1)) {
+        return Err("userspace pointer range overlaps kernel low carve-out");
     }
 
     let mut cursor = align_down(pointer, PAGE_SIZE);

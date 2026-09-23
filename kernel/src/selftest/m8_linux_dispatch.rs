@@ -34,8 +34,8 @@ use crate::mm::address_space::map_process_page;
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::zero_page;
+use crate::mm::phys_to_virt;
 use crate::mm::PAGE_SIZE;
-use crate::mm::PHYSICAL_MEMORY_OFFSET;
 use crate::process::domain::remaining_owned_resource_count;
 use crate::process::domain::resource_snapshot;
 use crate::process::domain::DomainTeardownResult;
@@ -334,7 +334,7 @@ fn create_userspace_process(
         unsafe {
             ptr::copy_nonoverlapping(
                 code.as_ptr(),
-                (PHYSICAL_MEMORY_OFFSET + code_frame_address) as *mut u8,
+                (phys_to_virt(code_frame_address)) as *mut u8,
                 code.len(),
             );
         }
