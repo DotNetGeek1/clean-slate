@@ -30,6 +30,9 @@ pub(crate) use sockaddr::read_sockaddr_in;
 pub(crate) const LINUX_SOCKET_MAX: usize = 8;
 pub(crate) const LINUX_UDP_MAX_DATAGRAM: usize = 512;
 pub(crate) const LINUX_TCP_CONNECT_TIMEOUT_MS: u64 = 5000;
+/// `sched::wait::Deadline` uses APIC timer IRQ ticks (~750/s in QEMU), not milliseconds (#103).
+pub(crate) const LINUX_TCP_CONNECT_TIMEOUT_TICKS: u64 =
+    LINUX_TCP_CONNECT_TIMEOUT_MS * 750 / 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxSocketId {
@@ -66,6 +69,7 @@ pub(crate) struct LinuxSocket {
     session_generation: u64,
     local: clean_slate_linux_abi::SockaddrIn,
     remote: Option<clean_slate_linux_abi::SockaddrIn>,
+    m7_dest: Option<SocketAddrV4>,
     rx_queue: [Option<RxDatagram>; 2],
     rx_head: u8,
     rx_count: u8,
@@ -87,6 +91,7 @@ impl LinuxSocket {
             session_generation: 0,
             local: clean_slate_linux_abi::SockaddrIn::any_ephemeral(),
             remote: None,
+            m7_dest: None,
             rx_queue: [None, None],
             rx_head: 0,
             rx_count: 0,
@@ -148,9 +153,24 @@ pub(crate) fn notify_request_complete(request_id: u64) -> usize {
 pub(crate) fn register_request_wake(request_id: u64, key: WaitKey) {
     let wakes = unsafe { &mut *REQUEST_WAKE_SLOT.get() };
     for entry in wakes.iter_mut() {
+        if entry.map(|(id, _)| id) == Some(request_id) {
+            *entry = Some((request_id, key));
+            return;
+        }
+    }
+    for entry in wakes.iter_mut() {
         if entry.is_none() {
             *entry = Some((request_id, key));
             return;
+        }
+    }
+}
+
+pub(crate) fn clear_request_wake(request_id: u64) {
+    let wakes = unsafe { &mut *REQUEST_WAKE_SLOT.get() };
+    for entry in wakes.iter_mut() {
+        if entry.map(|(id, _)| id) == Some(request_id) {
+            *entry = None;
         }
     }
 }

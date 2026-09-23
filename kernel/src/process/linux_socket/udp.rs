@@ -61,6 +61,39 @@ fn udp_send_payload(
     id: LinuxSocketId,
     payload: &[u8],
 ) -> LinuxSyscallResult {
+    let dest = socket
+        .remote
+        .as_ref()
+        .ok_or(clean_slate_linux_abi::EDESTADDRREQ)
+        .map(|sa| socket_addr_v4(sa))?;
+    let session_gen = clean_slate_network::session::SessionGeneration::new(
+        socket.session_generation,
+    );
+    if socket.m7_dest != Some(dest) {
+        let connect_out = match broker_sync(
+            request,
+            ctx,
+            id,
+            &mut socket.inflight_request_id,
+            NetworkRequest::Connect {
+                session: socket.session,
+                dest,
+            },
+            &[],
+            Some(session_gen),
+            None,
+        ) {
+            Ok(outcome) => outcome,
+            Err(block_or_err) => return block_or_err,
+        };
+        match connect_out.response {
+            NetworkResponse::Connect => socket.m7_dest = Some(dest),
+            NetworkResponse::Error { code } => {
+                return super::tcp::map_network_error(code);
+            }
+            _ => return Err(clean_slate_linux_abi::EINVAL),
+        }
+    }
     let outcome = match broker_sync(
         request,
         ctx,
@@ -71,9 +104,7 @@ fn udp_send_payload(
             payload_len: payload.len() as u32,
         },
         payload,
-        Some(clean_slate_network::session::SessionGeneration::new(
-            socket.session_generation,
-        )),
+        Some(session_gen),
         None,
     ) {
         Ok(outcome) => outcome,

@@ -17,7 +17,9 @@ use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
 use crate::syscall::linux::table::LinuxSyscallContext;
 use clean_slate_linux_abi::{LinuxSyscallRequest, LinuxSyscallResult};
 
-use super::{linux_socket_wait_key, register_request_wake, LinuxSocketId};
+use super::{
+    clear_request_wake, linux_socket_wait_key, register_request_wake, LinuxSocketId,
+};
 
 pub(crate) fn network_client_handle(holder: HolderId) -> Option<u64> {
     with_capability_space(|table| {
@@ -107,6 +109,7 @@ pub(crate) fn broker_sync(
     match net_bridge_mut().poll(ctx.pid, ctx.pid, generation, request_id, &mut out) {
         Ok(response) => {
             *inflight_request_id = None;
+            clear_request_wake(request_id);
             let len = match response {
                 NetworkResponse::Receive { payload_len } => payload_len as usize,
                 _ => 0,
@@ -120,13 +123,16 @@ pub(crate) fn broker_sync(
         Err(NetBridgeError::Pending) => {
             let key = linux_socket_wait_key(socket_id);
             let deadline = on_timeout.map(|_| {
-                Deadline(kernel_ticks().saturating_add(super::LINUX_TCP_CONNECT_TIMEOUT_MS * 1000))
+                Deadline(
+                    kernel_ticks().saturating_add(super::LINUX_TCP_CONNECT_TIMEOUT_TICKS),
+                )
             });
             let timeout = on_timeout.unwrap_or(LinuxTimeoutResult::Zero);
             Err(block_linux_syscall(request, ctx, key, deadline, timeout))
         }
         Err(e) => {
             *inflight_request_id = None;
+            clear_request_wake(request_id);
             Err(Err(bridge_err(e)))
         }
     }

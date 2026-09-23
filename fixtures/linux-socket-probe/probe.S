@@ -98,17 +98,17 @@ sockaddr_in_any:
 sockaddr_dns:
     .word   2
     .word   0x3500
-    .long   0x014d010a
+    .long   0x01004d0a
     .space 8, 0
 sockaddr_http:
     .word   2
     .word   0xa10f
-    .long   0x324d010a
+    .long   0x32004d0a
     .space 8, 0
 sockaddr_refused:
     .word   2
     .word   0x3913
-    .long   0x324d010a
+    .long   0x32004d0a
     .space 8, 0
 
 _start:
