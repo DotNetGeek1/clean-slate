@@ -111,12 +111,16 @@ const _: () = assert!(LINUX_STACK_GUARD_PAGE > LINUX_USER_WINDOW_BASE);
 /// pairs, AT_NULL pair) = 120 B, 19 B of `argv[0]`, ≤ 15 B alignment padding →
 /// 154 B. 256 B leaves headroom without spanning more than the top page.
 pub(crate) const LINUX_INITIAL_STACK_IMAGE_BYTES: usize = 256;
+/// Upper bound for M9 exec stack images (multiple stack pages).
+pub(crate) const LINUX_MAX_STACK_IMAGE_BYTES: usize = 4096;
 const _: () = assert!(LINUX_INITIAL_STACK_IMAGE_BYTES as u64 <= PAGE_SIZE);
+const _: () = assert!(LINUX_MAX_STACK_IMAGE_BYTES as u64 <= 8 * PAGE_SIZE);
 /// `argv[0]` for the M8 fixture (WAVE2 / docs/LINUX_PERSONALITY.md).
 pub(crate) const LINUX_ARGV0: &[u8] = b"hello-linux-x86_64";
 /// Auxv entries emitted for M8 (excluding the `AT_NULL` terminator the builder
 /// appends): `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_ENTRY`.
 pub(crate) const LINUX_AUXV_ENTRIES: usize = 5;
+pub(crate) const LINUX_MAX_AUXV_ENTRIES: usize = 16;
 
 const LINUX_ALLOWED_E_TYPES: [u16; 1] = [ET_EXEC];
 
@@ -158,6 +162,7 @@ pub(crate) struct LinuxImageLayout {
     pub(crate) stack_base: u64,
     pub(crate) stack_guard_page: u64,
     pub(crate) stack_reservation_start: u64,
+    pub(crate) stack_pages: u64,
     pub(crate) argv0: &'static [u8],
 }
 
@@ -171,6 +176,7 @@ impl LinuxImageLayout {
             stack_base: LINUX_STACK_BASE,
             stack_guard_page: LINUX_STACK_GUARD_PAGE,
             stack_reservation_start: LINUX_STACK_RESERVATION_START,
+            stack_pages: LINUX_STACK_PAGES,
             argv0: LINUX_ARGV0,
         }
     }
@@ -190,8 +196,41 @@ impl LinuxImageLayout {
             stack_base,
             stack_guard_page,
             stack_reservation_start: stack_guard_page,
+            stack_pages: LINUX_STACK_PAGES,
             argv0: LINUX_LOW_VA_ARGV0,
         }
+    }
+
+    /// Conventional low-VA layout with an explicit mapped stack page count (#146).
+    pub(crate) fn conventional_with_stack(
+        user_region_base: u64,
+        stack_pages: u64,
+        window_base: u64,
+    ) -> Result<Self, LinuxImageError> {
+        if stack_pages == 0 {
+            return Err(LinuxImageError::InitialStack(StackLayoutError::BufferTooSmall));
+        }
+        const CONVENTIONAL_STACK_TOP: u64 = 0x0000_0000_0080_0000;
+        let stack_span = stack_pages
+            .checked_mul(PAGE_SIZE)
+            .ok_or(LinuxImageError::VaddrOverflow)?;
+        let stack_base = CONVENTIONAL_STACK_TOP
+            .checked_sub(stack_span)
+            .ok_or(LinuxImageError::VaddrOverflow)?;
+        let stack_guard_page = stack_base
+            .checked_sub(PAGE_SIZE)
+            .ok_or(LinuxImageError::VaddrOverflow)?;
+        Ok(Self {
+            user_region_base,
+            window_base,
+            window_end: USER_CANONICAL_TOP_EXCLUSIVE,
+            stack_top: CONVENTIONAL_STACK_TOP,
+            stack_base,
+            stack_guard_page,
+            stack_reservation_start: stack_guard_page,
+            stack_pages,
+            argv0: b"",
+        })
     }
 }
 
@@ -251,6 +290,16 @@ pub(crate) enum LinuxImageError {
     Scheduler(&'static str),
     /// Kernel side: a rollback step itself failed (resources may be leaked).
     Rollback(&'static str),
+    /// M9 exec: argv/env count or byte budget exceeded.
+    ExecArgvBounds,
+    /// M9 exec: environment count exceeded.
+    ExecEnvBounds,
+    /// M9 exec: stack page budget invalid or mapping budget exhausted.
+    ExecStackBounds,
+    /// M9 exec: live thread count is not exactly one.
+    ExecMultiThread,
+    /// M9 exec: stale instance generation.
+    ExecGenerationMismatch,
 }
 
 impl LinuxImageError {
@@ -294,6 +343,11 @@ impl LinuxImageError {
             | Self::Scheduler(message)
             | Self::Rollback(message) => message,
             Self::GuardPageMapped => "linux image: stack guard page was mapped",
+            Self::ExecArgvBounds => "linux image: exec argv/env byte or count bounds exceeded",
+            Self::ExecEnvBounds => "linux image: exec env count bounds exceeded",
+            Self::ExecStackBounds => "linux image: exec stack page budget invalid",
+            Self::ExecMultiThread => "linux image: exec with multiple live threads",
+            Self::ExecGenerationMismatch => "linux image: exec generation mismatch",
         }
     }
 }
@@ -343,18 +397,21 @@ impl From<LoadPlanError> for LinuxImageError {
 pub(crate) struct LinuxInitialStack {
     /// Exclusive top of the mapped stack pages for this layout.
     pub(crate) stack_top: u64,
-    /// Bytes occupying `[stack_top - LINUX_INITIAL_STACK_IMAGE_BYTES, stack_top)`.
-    pub(crate) bytes: [u8; LINUX_INITIAL_STACK_IMAGE_BYTES],
+    /// Bytes occupying `[image_base(), stack_top)`.
+    pub(crate) bytes: [u8; LINUX_MAX_STACK_IMAGE_BYTES],
+    /// Active prefix length of `bytes`.
+    pub(crate) bytes_len: usize,
     /// 16-byte-aligned user RSP pointing at `argc`.
     pub(crate) rsp: u64,
     /// Auxv pairs as emitted (without the trailing `AT_NULL`).
-    pub(crate) auxv: [(u64, u64); LINUX_AUXV_ENTRIES],
+    pub(crate) auxv: [(u64, u64); LINUX_MAX_AUXV_ENTRIES],
+    pub(crate) auxv_len: usize,
 }
 
 impl LinuxInitialStack {
-    /// Lowest virtual address covered by `bytes`.
-    pub(crate) const fn image_base(&self) -> u64 {
-        self.stack_top - LINUX_INITIAL_STACK_IMAGE_BYTES as u64
+    /// Lowest virtual address covered by the active stack image bytes.
+    pub(crate) fn image_base(&self) -> u64 {
+        self.stack_top - self.bytes_len as u64
     }
 }
 
@@ -387,7 +444,7 @@ impl LinuxImagePlan {
     /// Total user pages the address space will map (image + stack; the guard
     /// page is never mapped and so never counted).
     pub(crate) const fn mapped_pages(&self) -> u64 {
-        self.image_pages + LINUX_STACK_PAGES
+        self.image_pages + self.layout.stack_pages
     }
 }
 
@@ -592,19 +649,26 @@ pub(crate) fn build_linux_initial_stack(
         (AT_PAGESZ, PAGE_SIZE),
         (AT_ENTRY, entry),
     ];
-    let mut bytes = [0u8; LINUX_INITIAL_STACK_IMAGE_BYTES];
-    let image = build_initial_stack(&mut bytes, layout.stack_top, &[layout.argv0], &[], &auxv)
+    let mut bytes = [0u8; LINUX_MAX_STACK_IMAGE_BYTES];
+    let buf = &mut bytes[..LINUX_INITIAL_STACK_IMAGE_BYTES];
+    let image = build_initial_stack(buf, layout.stack_top, &[layout.argv0], &[], &auxv)
         .map_err(LinuxImageError::InitialStack)?;
     if image.rsp % 16 != 0 || image.rsp < layout.stack_base || image.rsp >= layout.stack_top {
         return Err(LinuxImageError::InitialStack(
             StackLayoutError::InvalidStackTop,
         ));
     }
+    let mut auxv_storage = [(0u64, 0u64); LINUX_MAX_AUXV_ENTRIES];
+    for (index, pair) in auxv.iter().enumerate() {
+        auxv_storage[index] = *pair;
+    }
     Ok(LinuxInitialStack {
         stack_top: layout.stack_top,
         bytes,
+        bytes_len: LINUX_INITIAL_STACK_IMAGE_BYTES,
         rsp: image.rsp,
-        auxv,
+        auxv: auxv_storage,
+        auxv_len: LINUX_AUXV_ENTRIES,
     })
 }
 
@@ -640,6 +704,90 @@ pub(crate) fn validate_linux_image_with_policy(
         return Err(LinuxImageError::DynamicNotAllowed);
     }
 
+    let phdr_vaddr = plan
+        .phdr_vaddr
+        .ok_or(LinuxImageError::ProgramHeadersNotMapped)?;
+    let (image_pages, page_table_frames) =
+        validate_segment_layout_and_budgets(&plan, &layout, bytes)?;
+
+    let initial_stack = build_linux_initial_stack(plan.entry, phdr_vaddr, plan.phnum, &layout)?;
+    finish_linux_image_plan(
+        plan,
+        phdr_vaddr,
+        image_pages,
+        page_table_frames,
+        initial_stack,
+        layout,
+    )
+}
+
+/// Validate segment layout and budgets, then attach a caller-built initial stack (#146).
+pub(crate) fn validate_linux_image_with_stack(
+    bytes: &[u8],
+    policy: &LoadPlanPolicy,
+    layout: LinuxImageLayout,
+    initial_stack: LinuxInitialStack,
+) -> Result<LinuxImagePlan, LinuxImageError> {
+    let header = Elf64Header::parse(bytes)?;
+    if policy.user_va_lo == LINUX_USER_WINDOW_BASE && policy.user_va_hi == LINUX_USER_WINDOW_END {
+        prescan_program_headers(bytes, &header)?;
+    } else {
+        prescan_program_headers_minimal(bytes, &header)?;
+    }
+    let plan = parse_load_plan(bytes, policy)?;
+    if plan.has_interp {
+        return Err(LinuxImageError::InterpreterNotAllowed);
+    }
+    if plan.has_dynamic {
+        return Err(LinuxImageError::DynamicNotAllowed);
+    }
+    let phdr_vaddr = plan
+        .phdr_vaddr
+        .ok_or(LinuxImageError::ProgramHeadersNotMapped)?;
+    let (image_pages, page_table_frames) =
+        validate_segment_layout_and_budgets(&plan, &layout, bytes)?;
+    if initial_stack.stack_top != layout.stack_top
+        || initial_stack.rsp < layout.stack_base
+        || initial_stack.rsp >= layout.stack_top
+    {
+        return Err(LinuxImageError::InitialStack(StackLayoutError::InvalidStackTop));
+    }
+    finish_linux_image_plan(
+        plan,
+        phdr_vaddr,
+        image_pages,
+        page_table_frames,
+        initial_stack,
+        layout,
+    )
+}
+
+fn finish_linux_image_plan(
+    plan: LoadPlan,
+    phdr_vaddr: u64,
+    image_pages: u64,
+    page_table_frames: usize,
+    initial_stack: LinuxInitialStack,
+    layout: LinuxImageLayout,
+) -> Result<LinuxImagePlan, LinuxImageError> {
+    let entry = plan.entry;
+    Ok(LinuxImagePlan {
+        plan,
+        entry,
+        phdr_vaddr,
+        image_pages,
+        page_table_frames,
+        initial_stack,
+        layout,
+    })
+}
+
+fn validate_segment_layout_and_budgets(
+    plan: &LoadPlan,
+    layout: &LinuxImageLayout,
+    bytes: &[u8],
+) -> Result<(u64, usize), LinuxImageError> {
+    let _ = bytes;
     let mut ranges = [(0u64, 0u64); MAX_LOAD_SEGMENTS + 1];
     let mut range_count = 0usize;
     for segment in plan.iter_segments() {
@@ -669,13 +817,7 @@ pub(crate) fn validate_linux_image_with_policy(
     ranges[range_count] = (layout.stack_base, layout.stack_top);
     range_count += 1;
 
-    let phdr_vaddr = plan
-        .phdr_vaddr
-        .ok_or(LinuxImageError::ProgramHeadersNotMapped)?;
-
     let mut page_table_frames = page_table_frame_demand(&ranges[..range_count])?;
-    // Low-slot process roots already own a PDPT and PML4[0] via shared carve-out
-    // attach; the pure demand helper still counts root+PDPT for the mapping walk.
     if layout.user_region_base < LINUX_USER_WINDOW_BASE {
         page_table_frames = page_table_frames.saturating_sub(2);
     }
@@ -687,23 +829,12 @@ pub(crate) fn validate_linux_image_with_policy(
     }
     let image_pages = plan.total_mapped_pages(PAGE_SIZE)?;
     let total_pages = image_pages
-        .checked_add(LINUX_STACK_PAGES)
+        .checked_add(layout.stack_pages)
         .ok_or(LinuxImageError::MappingBudgetExceeded)?;
     if total_pages > MAX_ADDRESS_SPACE_USER_MAPPINGS as u64 {
         return Err(LinuxImageError::MappingBudgetExceeded);
     }
-
-    let initial_stack = build_linux_initial_stack(plan.entry, phdr_vaddr, plan.phnum, &layout)?;
-    let entry = plan.entry;
-    Ok(LinuxImagePlan {
-        plan,
-        entry,
-        phdr_vaddr,
-        image_pages,
-        page_table_frames,
-        initial_stack,
-        layout,
-    })
+    Ok((image_pages, page_table_frames))
 }
 
 /// Validate the M9 low-VA fixture under [`LINUX_CONVENTIONAL_LOAD_POLICY`].
@@ -743,7 +874,7 @@ fn write_initial_stack_image(
 ) -> Result<(), &'static str> {
     let image_base = stack.image_base();
     let mut offset = 0usize;
-    while offset < stack.bytes.len() {
+    while offset < stack.bytes_len {
         let vaddr = image_base
             .checked_add(offset as u64)
             .ok_or("initial stack image address overflow")?;
@@ -753,7 +884,7 @@ fn write_initial_stack_image(
         }
         let in_page = usize::try_from(vaddr - page_vaddr)
             .map_err(|_| "initial stack image page offset overflow")?;
-        let chunk = (PAGE_SIZE as usize - in_page).min(stack.bytes.len() - offset);
+        let chunk = (PAGE_SIZE as usize - in_page).min(stack.bytes_len - offset);
         let frame = translate_address_in_root(address_space.root_frame, VirtAddr::new(page_vaddr))?;
         unsafe {
             ptr::copy_nonoverlapping(
@@ -821,7 +952,7 @@ pub(crate) fn build_linux_process_image(
         &mut address_space,
         allocator,
         image_plan.layout.stack_base,
-        LINUX_STACK_PAGES,
+        image_plan.layout.stack_pages,
     ) {
         return Err(discard_address_space(
             &address_space,
@@ -931,7 +1062,7 @@ fn rollback_registered_process(
     feature = "m2-timer-self-test"
 )))]
 #[inline(never)]
-fn register_linux_process(
+pub(crate) fn register_linux_process(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
     scheduler_slot: usize,
@@ -2000,7 +2131,7 @@ mod tests {
             (AT_PAGESZ, 4096),
             (AT_ENTRY, FIXTURE_ENTRY),
         ];
-        assert_eq!(stack.auxv, expected_auxv);
+        assert_eq!(stack.auxv[..LINUX_AUXV_ENTRIES], expected_auxv);
         for (a_type, a_val) in expected_auxv {
             assert_eq!(read_u64_at(stack, cursor), a_type);
             assert_eq!(read_u64_at(stack, cursor + 8), a_val);

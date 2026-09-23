@@ -23,8 +23,10 @@ pub use errno::{
     ENOMEM, ENOSYS, EPERM, ESRCH,
 };
 pub use stack::{
-    build_initial_stack, InitialStackBuilder, InitialStackImage, StackLayoutError, AT_ENTRY,
-    AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PLATFORM, AT_RANDOM, AT_SECURE,
+    build_initial_stack, build_initial_stack_with_tail, InitialStackBuilder, InitialStackImage,
+    StackLayoutError, StackTailBlob, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_EXECFN,
+    AT_FLAGS, AT_GID, AT_HWCAP, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PLATFORM,
+    AT_RANDOM, AT_SECURE, AT_UID,
 };
 pub use syscall::{
     decode_linux_syscall, is_m8_supported_syscall, unsupported_syscall_result,
