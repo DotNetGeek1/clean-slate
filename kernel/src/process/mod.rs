@@ -14,9 +14,9 @@ pub(crate) mod linux_fd;
 #[cfg(feature = "m9-rootfs")]
 pub(crate) mod linux_fs;
 pub(crate) mod linux_image;
-pub(crate) mod linux_socket;
 #[cfg(feature = "m9-rootfs")]
 pub(crate) mod linux_rootfs;
+pub(crate) mod linux_socket;
 pub(crate) mod linux_stdio_m9_payload;
 pub(crate) mod personality;
 
@@ -389,7 +389,6 @@ mod tests {
             kind: ThreadKind::User,
             kernel_stack_top: 0x3000,
             saved_stack_pointer: 0x3000,
-            userspace_initial_stack: 0,
             launch_entry: 0x4000,
             started: true,
             state: ThreadState::Running,
@@ -429,7 +428,6 @@ mod tests {
             kind: ThreadKind::User,
             kernel_stack_top: 0x5000,
             saved_stack_pointer: 0x5000,
-            userspace_initial_stack: 0,
             launch_entry: 0x6000,
             started: true,
             state: ThreadState::Running,
@@ -452,7 +450,6 @@ mod tests {
             kind: ThreadKind::User,
             kernel_stack_top: 0x7000,
             saved_stack_pointer: 0x7000,
-            userspace_initial_stack: 0,
             launch_entry: 0x8000,
             started: true,
             state: ThreadState::Running,

@@ -68,7 +68,6 @@ pub(crate) fn handle_sys_read(
     };
 
     match read_result {
-        Ok(n) if n == request.nr => Ok(n),
         Ok(0) => Ok(0),
         Ok(n) => {
             let n = n as usize;
@@ -300,67 +299,6 @@ fn locate_iov_index(iovecs: &[IoVec], offset: u64) -> Result<(usize, u64), Linux
         walked = end;
     }
     Err(EFAULT)
-}
-
-pub(crate) fn handle_sys_read(
-    request: &LinuxSyscallRequest,
-    ctx: &mut LinuxSyscallContext<'_>,
-) -> LinuxSyscallResult {
-    use crate::mm::user_mapping::validate_user_writable_pointer_range;
-    use crate::process::linux_fd::open_description::DescriptorKind;
-    use clean_slate_linux_abi::EFAULT;
-    let fd = request.args[0];
-    let buf_ptr = request.args[1];
-    let count = request.args[2];
-    if count == 0 {
-        return Ok(0);
-    }
-    ensure_open_fd(ctx.pid, ctx.instance_generation, fd)?;
-    if validate_user_writable_pointer_range(buf_ptr, count).is_err() {
-        return Err(EFAULT);
-    }
-    let open = linux_fd::open_description_id_for_fd(ctx.pid, ctx.instance_generation, fd)?;
-    let desc = linux_fd::open_description_snapshot(open)?;
-    match desc.kind {
-        DescriptorKind::Console(_) => Ok(0),
-        DescriptorKind::File(_) => {
-            #[cfg(feature = "m9-rootfs")]
-            {
-                let mut scratch = [0u8; super::fs_io::LINUX_READ_SCRATCH_BYTES];
-                let want = count.min(scratch.len() as u64) as usize;
-                super::fs_io::read_file_fd(
-                    request,
-                    ctx,
-                    ctx.pid,
-                    ctx.instance_generation,
-                    fd,
-                    &mut scratch[..want],
-                )
-                .map(|read| {
-                    if read == 0 {
-                        return 0;
-                    }
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            scratch.as_ptr(),
-                            buf_ptr as *mut u8,
-                            read as usize,
-                        );
-                    }
-                    read
-                })
-            }
-            #[cfg(not(feature = "m9-rootfs"))]
-            {
-                let _ = (request, ctx, fd, buf_ptr, count);
-                Err(clean_slate_linux_abi::EBADF)
-            }
-        }
-        DescriptorKind::PipeRead(_) | DescriptorKind::PipeWrite(_) | DescriptorKind::Socket(_) => {
-            Err(clean_slate_linux_abi::EBADF)
-        }
-        DescriptorKind::Dir(_) => Err(clean_slate_linux_abi::EBADF),
-    }
 }
 
 pub(crate) fn handle_sys_lseek(

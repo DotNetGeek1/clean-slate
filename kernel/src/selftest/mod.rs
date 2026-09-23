@@ -107,10 +107,10 @@ pub(crate) mod m9_block_wake;
 pub(crate) mod m9_fd_core;
 #[cfg(feature = "m9-linux-exec-self-test")]
 pub(crate) mod m9_linux_exec;
-#[cfg(feature = "m9-linux-socket-self-test")]
-pub(crate) mod m9_linux_socket;
 #[cfg(feature = "m9-linux-fs-self-test")]
 pub(crate) mod m9_linux_fs;
+#[cfg(feature = "m9-linux-socket-self-test")]
+pub(crate) mod m9_linux_socket;
 #[cfg(feature = "m9-low-va-self-test")]
 pub(crate) mod m9_low_va;
 #[cfg(feature = "m9-rootfs-self-test")]

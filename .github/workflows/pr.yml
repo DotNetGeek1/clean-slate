@@ -99,7 +99,8 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-syscall-fail-closed-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-block-wake-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-fd-core-self-test -- -D warnings
-          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-socket-self-test -- -D warnings
+          # m9-linux-socket-self-test embeds the linux-socket-probe userspace ELF at
+          # build time; built with RUSTFLAGS=-D warnings by the acceptance job via xtask.
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-low-va-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-exec-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-rootfs -- -D warnings

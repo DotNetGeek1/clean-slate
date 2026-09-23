@@ -40,103 +40,11 @@ use crate::arch::x86_64::context_switch::TaskStack;
 use crate::arch::x86_64::context_switch::FRESH_TASK_SENTINEL;
 use crate::arch::x86_64::context_switch::SYSCALL_BLOCKED_RESUME_SENTINEL;
 use crate::arch::x86_64::context_switch::TASK_STACK_SIZE;
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test"
-)))]
-use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test"
-)))]
-use crate::arch::x86_64::interrupt_context::UserspaceEntryFrame;
 use crate::process::KERNEL_PROCESS_ID;
 use crate::sync::global_cell::GlobalCell;
 
 pub(super) const TASK_REQUIRED_PREEMPTIONS: u64 = 2;
 const TASK_PROGRESS_CHUNK: u64 = 4_096;
-
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test"
-)))]
-fn userspace_initial_stack_from_entry_frame(
-    kind: ThreadKind,
-    saved_stack_pointer: u64,
-) -> u64 {
-    if kind != ThreadKind::User || saved_stack_pointer == 0 {
-        return 0;
-    }
-    unsafe {
-        (*(saved_stack_pointer as *const UserspaceEntryFrame)).user_stack_pointer
-    }
-}
-
-#[cfg(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test"
-))]
-fn userspace_initial_stack_from_entry_frame(
-    _kind: ThreadKind,
-    _saved_stack_pointer: u64,
-) -> u64 {
-    0
-}
-
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test"
-)))]
-fn saved_userspace_interrupt_frame(saved_stack_pointer: u64) -> bool {
-    if saved_stack_pointer == 0 {
-        return false;
-    }
-    let cs = unsafe {
-        let interrupt = &*(saved_stack_pointer as *const crate::arch::x86_64::interrupt_context::InterruptContext);
-        interrupt.cs
-    };
-    cs & 0x3 == 0x3
-}
-
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test"
-)))]
-fn refresh_userspace_entry_handoff(
-    thread: &Thread,
-    saved_stack_pointer: u64,
-) -> Result<u64, &'static str> {
-    if thread.kind != ThreadKind::User || thread.userspace_initial_stack == 0 {
-        return Ok(saved_stack_pointer);
-    }
-    if saved_userspace_interrupt_frame(saved_stack_pointer) {
-        return Ok(saved_stack_pointer);
-    }
-    build_userspace_entry_frame(
-        thread.kernel_stack_top,
-        thread.launch_entry,
-        thread.userspace_initial_stack,
-    )
-}
-
-#[cfg(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test"
-))]
-fn refresh_userspace_entry_handoff(
-    thread: &Thread,
-    saved_stack_pointer: u64,
-) -> Result<u64, &'static str> {
-    let _ = thread;
-    Ok(saved_stack_pointer)
-}
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,9 +71,6 @@ pub(super) struct Thread {
     pub(crate) kind: ThreadKind,
     pub(crate) kernel_stack_top: u64,
     pub(crate) saved_stack_pointer: u64,
-    /// Initial ring-3 stack for rebuilding the entry `iretq` frame after the first
-    /// restore consumed the configured frame but no timer preemption ran yet.
-    pub(crate) userspace_initial_stack: u64,
     pub(crate) launch_entry: u64,
     pub(crate) started: bool,
     pub(crate) state: ThreadState,
@@ -191,7 +96,6 @@ impl Thread {
         kind: ThreadKind::Kernel,
         kernel_stack_top: 0,
         saved_stack_pointer: 0,
-        userspace_initial_stack: 0,
         launch_entry: 0,
         started: false,
         state: ThreadState::Empty,
@@ -255,17 +159,12 @@ impl Scheduler {
         if slot >= self.threads.len() {
             return Err("thread slot exceeded fixed scheduler capacity");
         }
-        let userspace_initial_stack = userspace_initial_stack_from_entry_frame(
-            kind,
-            saved_stack_pointer,
-        );
         self.threads[slot] = Thread {
             id,
             owner_process_id,
             kind,
             kernel_stack_top,
             saved_stack_pointer,
-            userspace_initial_stack,
             launch_entry,
             started: false,
             state: ThreadState::Ready,
@@ -285,7 +184,7 @@ impl Scheduler {
         self.current_thread = Some(next);
         self.threads[next].started = true;
         self.threads[next].state = ThreadState::Running;
-        Ok(self.threads[next].saved_stack_pointer)
+        self.dispatch_handoff_stack_pointer(self.threads[next].saved_stack_pointer, next)
     }
 
     pub(super) fn current_thread_descriptor(&self) -> Result<Thread, &'static str> {
@@ -482,18 +381,11 @@ impl Scheduler {
         }
 
         {
-            let peer_blocked_ready = self.has_ready_blocked_syscall_thread();
             let thread = &mut self.threads[current];
             if thread.state != ThreadState::Blocked {
-                if saved_userspace_interrupt_frame(current_stack_pointer) {
-                    thread.saved_stack_pointer = current_stack_pointer;
-                    thread.preemptions += 1;
-                    if thread.state == ThreadState::Running {
-                        thread.state = ThreadState::Ready;
-                    }
-                } else if peer_blocked_ready && thread.state == ThreadState::Running {
-                    // Timer arrived in kernel on behalf of this user thread while a peer
-                    // blocked syscall is ready to resume; yield without clobbering stack.
+                thread.saved_stack_pointer = current_stack_pointer;
+                thread.preemptions += 1;
+                if thread.state == ThreadState::Running {
                     thread.state = ThreadState::Ready;
                 }
             }
@@ -533,12 +425,6 @@ impl Scheduler {
             .any(|thread| thread.state == ThreadState::Blocked)
     }
 
-    fn has_ready_blocked_syscall_thread(&self) -> bool {
-        self.threads.iter().any(|thread| {
-            thread.state == ThreadState::Ready && thread.blocked_syscall_frame != 0
-        })
-    }
-
     pub(super) fn yield_from_blocked_thread(&mut self) -> Result<u64, &'static str> {
         let current = self
             .current_thread
@@ -574,23 +460,11 @@ impl Scheduler {
         next_stack_pointer: u64,
         thread_index: usize,
     ) -> Result<u64, &'static str> {
-        let handoff = self.handoff_stack_for_thread(thread_index, next_stack_pointer)?;
+        let handoff = wait::scheduler_handoff_stack_pointer(next_stack_pointer, thread_index);
         if handoff == SYSCALL_BLOCKED_RESUME_SENTINEL {
             return idle::handoff_to_idle_thread();
         }
         Ok(handoff)
-    }
-
-    pub(super) fn handoff_stack_for_thread(
-        &self,
-        thread_index: usize,
-        saved_stack_pointer: u64,
-    ) -> Result<u64, &'static str> {
-        let thread = &self.threads[thread_index];
-        if thread.blocked_syscall_frame != 0 {
-            return Ok(SYSCALL_BLOCKED_RESUME_SENTINEL);
-        }
-        refresh_userspace_entry_handoff(thread, saved_stack_pointer)
     }
 
     pub(super) fn on_timer_interrupt_while_idle(
@@ -676,13 +550,11 @@ impl Scheduler {
                         self.threads[next].launch_entry,
                     );
                 }
-                Ok(Some(FRESH_TASK_SENTINEL))
-            } else {
-                Ok(Some(self.threads[next].saved_stack_pointer))
+                return Ok(Some(FRESH_TASK_SENTINEL));
             }
-        } else {
-            Ok(Some(self.threads[next].saved_stack_pointer))
         }
+        self.dispatch_handoff_stack_pointer(self.threads[next].saved_stack_pointer, next)
+            .map(Some)
     }
 
     fn all_finished(&self) -> bool {
