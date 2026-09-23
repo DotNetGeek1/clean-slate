@@ -6,6 +6,7 @@
 
 pub(crate) mod decode;
 pub(crate) mod exit;
+pub(crate) mod fd;
 pub(crate) mod table;
 pub(crate) mod user_copy;
 pub(crate) mod write;
