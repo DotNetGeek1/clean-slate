@@ -262,7 +262,7 @@ const M8_LINUX_HELLO_PRODUCTION_MARKERS: [&str; 9] = [
     "\nHello from Linux.",
     "[LNX ] exit pid=",
     " status=0",
-    "[TASK] task 2 progress=",
+    "[TASK] task 1 progress=",
     "[M2  ] PASS",
 ];
 const M3_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 6] = [
