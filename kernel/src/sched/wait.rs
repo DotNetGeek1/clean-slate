@@ -12,7 +12,7 @@ use crate::diagnostics::log::kernel_log_fmt;
 use crate::process::live_instance_generation;
 use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 use crate::sched::scheduler_mut;
-use crate::sched::ThreadState;
+use crate::sched::{ThreadKind, ThreadState};
 use clean_slate_service_lifecycle::InstanceGeneration;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -403,6 +403,15 @@ extern "C" fn clean_slate_complete_blocked_syscall_resume() -> u64 {
         let resume = take_blocked_resume(index);
         let frame = unsafe { &mut *(frame_ptr as *mut SyscallContext) };
         apply_blocked_resume(frame, resume, outcome);
+        let thread = &scheduler.threads[index];
+        if thread.kind == ThreadKind::User {
+            if let Some(generation) = live_instance_generation(thread.owner_process_id) {
+                crate::process::linux_mem::apply_fs_base_for_process(
+                    thread.owner_process_id,
+                    generation,
+                );
+            }
+        }
         #[cfg(feature = "m9-block-wake-self-test")]
         crate::selftest::m9_block_wake::on_blocked_syscall_resumed(outcome, frame.rax);
         frame_ptr

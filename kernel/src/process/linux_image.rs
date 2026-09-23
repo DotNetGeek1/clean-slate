@@ -142,12 +142,17 @@ pub(crate) const LINUX_M8_LOAD_POLICY: LoadPlanPolicy = LoadPlanPolicy {
 #[cfg(any(
     feature = "m9-low-va-self-test",
     feature = "m9-linux-exec-self-test",
+    feature = "m9-linux-runtime-self-test",
     test
 ))]
 pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
     LoadPlanPolicy::linux_conventional_x86_64();
 
 /// M9 #146 argv/envp/auxv exec fixture (`fixtures/linux-exec-args/linux-exec-args-x86_64`).
+#[cfg(feature = "m9-linux-runtime-self-test")]
+pub(crate) const LINUX_RUNTIME_PROBE_FIXTURE: &[u8] =
+    include_bytes!("../../../fixtures/linux-runtime-probe/linux-runtime-probe-x86_64");
+
 #[cfg(feature = "m9-linux-exec-self-test")]
 pub(crate) const LINUX_EXEC_ARGS_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-exec-args/linux-exec-args-x86_64");
@@ -1281,6 +1286,18 @@ pub(crate) fn register_linux_process(
         Ok(instance_generation)
     });
     let instance_generation = registered?;
+    if let Ok(layout) = LinuxImageLayout::conventional_with_stack(0x400000, LINUX_STACK_PAGES, 0) {
+        let brk_initial = crate::mm::align_up(
+            image.entry + (image.image_pages as u64) * PAGE_SIZE,
+            PAGE_SIZE,
+        );
+        let _ = crate::process::linux_mem::init_for_image(
+            pid,
+            instance_generation,
+            &layout,
+            brk_initial,
+        );
+    }
     Ok(LaunchedLinuxProcess {
         pid,
         tid,

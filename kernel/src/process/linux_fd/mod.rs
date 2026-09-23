@@ -422,6 +422,7 @@ fn registry_mut() -> &'static mut LinuxFdRegistry {
 #[cfg(any(
     test,
     feature = "m9-linux-exec-self-test",
+    feature = "m9-linux-runtime-self-test",
     feature = "m9-fd-core-self-test"
 ))]
 pub(crate) fn reset_registry_for_selftest() {

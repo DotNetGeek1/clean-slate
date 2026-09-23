@@ -150,7 +150,9 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 384;
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m9-linux-runtime-self-test",
+    feature = "m9-linux-exec-self-test"
 ))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 104;
 #[cfg(not(any(
@@ -170,7 +172,9 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 104;
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test",
-    feature = "m7-net-service-self-test"
+    feature = "m7-net-service-self-test",
+    feature = "m9-linux-runtime-self-test",
+    feature = "m9-linux-exec-self-test"
 )))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 
@@ -536,6 +540,37 @@ pub(crate) fn map_process_page(
         .map_err(|_| "failed to map an address-space page")?;
     }
     address_space.record_user_mapping(virtual_address, frame_address)
+}
+
+/// Unmap and free a tracked user mapping at `virtual_address` (#103 brk/munmap).
+#[allow(dead_code)]
+pub(crate) fn unmap_process_page_at(
+    address_space: &mut ProcessAddressSpace,
+    virtual_address: u64,
+    allocator: &mut PageAllocator,
+) -> Result<(), &'static str> {
+    let aligned = align_down(virtual_address, PAGE_SIZE);
+    let index = address_space
+        .user_mappings
+        .iter()
+        .position(|mapping| mapping.virtual_address == aligned);
+    let index = index.ok_or("unmap target was not tracked")?;
+    let mapping = address_space.user_mappings[index];
+    let mut mapper = unsafe { offset_page_table_for_root(address_space.root_frame) };
+    let page = Page::<Size4KiB>::containing_address(VirtAddr::new(mapping.virtual_address));
+    let frame = unmap_userspace_page(&mut mapper, page)?;
+    if frame.start_address().as_u64() != mapping.frame_address {
+        return Err("unmap removed an unexpected frame");
+    }
+    unsafe {
+        free_frame(allocator, mapping.frame_address)?;
+    }
+    for slot in index..address_space.user_mapping_count - 1 {
+        address_space.user_mappings[slot] = address_space.user_mappings[slot + 1];
+    }
+    address_space.user_mappings[address_space.user_mapping_count - 1] = OwnedUserMapping::EMPTY;
+    address_space.user_mapping_count -= 1;
+    Ok(())
 }
 
 /// Unmap and free the most recently recorded user mapping (LIFO rollback helper).

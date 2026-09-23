@@ -44,10 +44,16 @@ use crate::mm::paging::current_root_frame_address;
 use crate::process::current_process_id;
 use crate::process::domain::teardown_current_process;
 use crate::process::process_registry_mut;
-#[cfg(not(any(feature = "m2-timer-self-test", feature = "m3-syscall-self-test")))]
+#[cfg(not(any(
+    feature = "m2-timer-self-test",
+    feature = "m3-syscall-self-test"
+)))]
 use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 use crate::sched::scheduler_mut;
-#[cfg(not(any(feature = "m2-timer-self-test", feature = "m3-syscall-self-test")))]
+#[cfg(not(any(
+    feature = "m2-timer-self-test",
+    feature = "m3-syscall-self-test"
+)))]
 use crate::sched::with_scheduler;
 #[cfg(feature = "m2-double-fault-self-test")]
 use crate::selftest::m2_double_fault::double_fault_stack_contains;
@@ -170,6 +176,13 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
             crate::sched::wait::expire_deadlines(_previous_ticks + 1);
             #[cfg(feature = "m9-block-wake-self-test")]
             crate::selftest::m9_block_wake::observe_timer_while_consumer_blocked();
+            let has_current_thread = without_interrupts(|| unsafe {
+                scheduler_mut().current_thread.is_some()
+            });
+            if !has_current_thread {
+                acknowledge_timer_interrupt();
+                return stack_pointer;
+            }
             let next_stack_pointer =
                 match with_scheduler(|scheduler| scheduler.on_timer_interrupt(stack_pointer)) {
                     Ok(next_stack_pointer) => next_stack_pointer,

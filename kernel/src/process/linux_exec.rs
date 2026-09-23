@@ -419,6 +419,9 @@ pub(crate) fn commit_exec(
         if linux_fd::close_on_exec(pid, live_gen).is_err() {
             fatal_kernel_error("exec commit: close_on_exec failed after address-space swap");
         }
+        // #103
+        crate::process::linux_mem::reset_for_exec(pid, live_gen);
+        crate::process::linux_signal::reset_for_exec(pid, live_gen);
         if destroy_old_exec_address_space(old, allocator).is_err() {
             fatal_kernel_error("exec commit: destroying the old address space failed");
         }
