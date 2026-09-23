@@ -389,7 +389,7 @@ pub(crate) mod syscalls {
                 _ => return Err(EINVAL),
             };
             socket.session = session;
-            socket.session_generation = 1u64;
+            socket.session_generation = session.generation().get();
             socket.state = SocketState::Unbound;
             Ok(0)
         })
