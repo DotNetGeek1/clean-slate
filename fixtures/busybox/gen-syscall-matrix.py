@@ -8,11 +8,13 @@ from collections import defaultdict
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-TRACE_DIR = REPO / "fixtures" / "busybox" / "traces"
+FROZEN_DIR = REPO / "fixtures" / "busybox" / "frozen"
+TRACE_DIR = FROZEN_DIR / "traces"
 OUT_TOML = REPO / "fixtures" / "busybox" / "syscall-matrix.toml"
 OUT_JSON = REPO / "fixtures" / "busybox" / "syscall-matrix.json"
+SHA256_FILE = FROZEN_DIR / "busybox.sha256"
 
-# Frozen M9 command matrix traces (fixture); excludes harness-only wget-local-httpd for required counts
+# Phase B frozen command matrix (+ supplemental argv/exec evidence).
 FIXTURE_COMMAND_TRACES = {
     "true",
     "busybox-list",
@@ -23,8 +25,8 @@ FIXTURE_COMMAND_TRACES = {
     "pipe-grep",
     "uname",
     "nslookup-fixture",
-    "wget-fixture-fail",
-    "sleep-1",
+    "wget-fixture-http",
+    "sleep-0",
     "exit-3",
     "script-sh",
     "sh-c-minimal",
@@ -34,7 +36,7 @@ FIXTURE_COMMAND_TRACES = {
     "grep-via-symlink",
 }
 
-HARNESS_TRACE = "wget-local-httpd"
+HARNESS_TRACE = "wget-local-httpd"  # Phase A only; absent in frozen traces
 
 SYSCALL_BY_NAME: dict[str, int] = {
     "read": 0,
@@ -366,12 +368,9 @@ def merge_observations(all_obs: list[dict]) -> dict[int, dict]:
             if ev not in entry["required_evidence"]:
                 entry["required_evidence"].append(ev)
 
-    # sendfile: Phase A decision — not required until config pinned
     if 40 in merged:
         merged[40]["required"] = False
-        merged[40]["note"] = (
-            "BusyBox copyfd.c falls back on sendfile failure; Phase B should set CONFIG_FEATURE_USE_SENDFILE=n"
-        )
+        merged[40]["note"] = "CONFIG_FEATURE_USE_SENDFILE=n in frozen build; not observed in traces"
 
     return merged
 
@@ -418,6 +417,12 @@ def highest_fd(all_obs: list[dict]) -> int:
     return mx
 
 
+def load_binary_sha256() -> str:
+    if SHA256_FILE.is_file():
+        return SHA256_FILE.read_text(encoding="utf-8").strip()
+    return ""
+
+
 def main() -> None:
     all_obs: list[dict] = []
     for path in sorted(TRACE_DIR.glob("*.strace")):
@@ -430,6 +435,7 @@ def main() -> None:
     harness_rows = [r for r in rows if r["harness_only"] and not r["required"]]
 
     hi_fd = highest_fd(all_obs)
+    binary_sha256 = load_binary_sha256()
 
     json_rows = []
     for r in rows:
@@ -458,8 +464,9 @@ def main() -> None:
         json.dumps(
             {
                 "meta": {
-                    "candidate": "musl-minimal",
+                    "candidate": "frozen",
                     "busybox_version": "1.37.0",
+                    "binary_sha256": binary_sha256,
                     "syscall_count": len(required_rows),
                     "harness_only_count": len(harness_rows),
                     "highest_fd_observed": hi_fd,
@@ -473,11 +480,12 @@ def main() -> None:
     )
 
     lines_out = [
-        "# M9 BusyBox syscall matrix (Phase A — fixture vs harness split)",
+        "# M9 BusyBox syscall matrix (Phase B — frozen musl-static ET_EXEC)",
         "",
         "[meta]",
-        'candidate = "musl-minimal"',
+        'candidate = "frozen"',
         'busybox_version = "1.37.0"',
+        f'binary_sha256 = "{binary_sha256}"',
         f"syscall_count = {len(required_rows)}",
         f"harness_only_count = {len(harness_rows)}",
         f"highest_fd_observed = {hi_fd}",

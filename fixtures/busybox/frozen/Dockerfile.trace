@@ -1,0 +1,4 @@
+# Hermetic trace runner (tools baked at image build time; runtime uses --network none).
+FROM m9-busybox-frozen:local
+RUN apk add --no-cache strace iproute2 python3 coreutils
+WORKDIR /work
