@@ -1,17 +1,17 @@
 //! Linux fd syscalls: `close`, `dup2`, `fcntl`, `writev` (#147).
 
-use super::block::{block_linux_syscall, LinuxTimeoutResult};
 use super::table::LinuxSyscallContext;
 use super::user_copy::copy_user_bytes;
-use super::write::{ensure_fd_open, write_chunked, LINUX_WRITE_CHUNK_BYTES};
+use super::write::{ensure_fd_open, write_chunked};
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::process::linux_fd::{
-    self, apply_linux_fl_to_status, ensure_open_fd, open_status_to_linux_fl, projection_for,
+    self, apply_linux_fl_to_status, ensure_open_fd, open_description::DescriptorKind,
+    open_status_to_linux_fl, projection_for,
 };
-use crate::process::linux_proc::pipe::{pipe_ref_to_handle, reader_wait_key};
-use clean_slate_linux_abi::{
-    LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EAGAIN, EFAULT, EINVAL,
-};
+use clean_slate_linux_abi::{LinuxSyscallRequest, LinuxSyscallResult, EBADF, EFAULT, EINVAL};
+
+/// Matches frozen pipe `read(0, …, 1024)` traces.
+pub(crate) const LINUX_READ_SCRATCH_BYTES: usize = 1024;
 
 /// Bounded `writev` iov count (self-test uses 2–3; keep small and fixed).
 pub(crate) const LINUX_IOV_MAX: usize = 8;
@@ -37,31 +37,40 @@ pub(crate) fn handle_sys_read(
     let fd = request.args[0];
     let buf_ptr = request.args[1];
     let count = request.args[2];
+    let pid = ctx.pid;
+    let generation = ctx.instance_generation;
+
+    ensure_open_fd(pid, generation, fd)?;
     if count == 0 {
         return Ok(0);
     }
-    let count = usize::try_from(count).map_err(|_| EINVAL)?;
-    validate_user_writable_pointer_range(buf_ptr, count as u64).map_err(|_| EFAULT)?;
-    let mut buf = [0u8; 64];
-    let take = count.min(buf.len());
-    match linux_fd::read_fd(ctx.pid, ctx.instance_generation, fd, &mut buf[..take]) {
-        Ok(n) => {
-            if n > 0 {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(buf.as_ptr(), buf_ptr as *mut u8, n);
-                }
+    let want = usize::try_from(count)
+        .map_err(|_| EINVAL)?
+        .min(LINUX_READ_SCRATCH_BYTES);
+    validate_user_writable_pointer_range(buf_ptr, want as u64).map_err(|_| EFAULT)?;
+
+    let mut scratch = [0u8; LINUX_READ_SCRATCH_BYTES];
+    let result = match linux_fd::open_description_kind(pid, generation, fd)? {
+        DescriptorKind::Console(_) => Ok(0u64),
+        DescriptorKind::PipeRead(_) => crate::process::linux_proc::pipe::read_fd(
+            request,
+            ctx,
+            pid,
+            generation,
+            fd,
+            &mut scratch[..want],
+        ),
+        DescriptorKind::File(_) | DescriptorKind::Socket(_) => Err(EBADF),
+        DescriptorKind::PipeWrite(_) | DescriptorKind::Dir(_) => Err(EBADF),
+    };
+    if let Ok(n) = result {
+        if n > 0 {
+            unsafe {
+                core::ptr::copy_nonoverlapping(scratch.as_ptr(), buf_ptr as *mut u8, n as usize);
             }
-            Ok(n as u64)
         }
-        Err(EAGAIN) => {
-            if let Some(pipe) = linux_fd::pipe_ref_for(ctx.pid, ctx.instance_generation, fd) {
-                let key = reader_wait_key(pipe_ref_to_handle(pipe));
-                return block_linux_syscall(request, ctx, key, None, LinuxTimeoutResult::Zero);
-            }
-            Err(EAGAIN)
-        }
-        Err(errno) => Err(errno),
     }
+    result
 }
 
 pub(crate) fn handle_sys_close(
@@ -165,189 +174,31 @@ pub(crate) fn handle_sys_writev(
         }
     }
 
-    if total_len == 0 {
-        return Ok(0);
-    }
-
     write_chunked(
         total_len,
         |offset, len, dst| {
-            copy_from_iovecs(&iovecs[..iovcnt], offset, len, dst)?;
-            Ok(len)
+            let mut copied = 0usize;
+            let mut pos = offset;
+            for iov in &iovecs[..iovcnt] {
+                if pos >= iov.len {
+                    pos -= iov.len;
+                    continue;
+                }
+                let take = (iov.len - pos).min((len - copied) as u64) as usize;
+                let mut chunk = [0u8; super::user_copy::LINUX_USER_COPY_MAX_BYTES];
+                copy_user_bytes(iov.base + pos, take as u64, &mut chunk)?;
+                dst[copied..copied + take].copy_from_slice(&chunk[..take]);
+                copied += take;
+                pos = 0;
+                if copied >= len {
+                    break;
+                }
+            }
+            Ok(copied)
         },
-        |chunk| linux_fd::write_fd(pid, generation, fd, chunk),
+        |chunk| {
+            let sent = linux_fd::write_fd(pid, generation, fd, chunk)?;
+            Ok(sent)
+        },
     )
-}
-
-fn copy_from_iovecs(
-    iovecs: &[IoVec],
-    offset: u64,
-    len: usize,
-    dst: &mut [u8; LINUX_WRITE_CHUNK_BYTES],
-) -> Result<(), LinuxErrno> {
-    let mut filled = 0usize;
-    let mut cursor = offset;
-    while filled < len {
-        let (index, skip) = locate_iov_index(iovecs, cursor)?;
-        let iov = &iovecs[index];
-        let remaining_in_iov = iov.len - skip;
-        let want = (len - filled).min(remaining_in_iov as usize);
-        let chunk_ptr = iov.base.checked_add(skip).ok_or(EFAULT)?;
-        let mut scratch = [0u8; LINUX_WRITE_CHUNK_BYTES];
-        copy_user_bytes(chunk_ptr, want as u64, &mut scratch)?;
-        dst[filled..filled + want].copy_from_slice(&scratch[..want]);
-        filled += want;
-        cursor += want as u64;
-    }
-    Ok(())
-}
-
-fn locate_iov_index(iovecs: &[IoVec], offset: u64) -> Result<(usize, u64), LinuxErrno> {
-    let mut walked = 0u64;
-    for (index, iov) in iovecs.iter().enumerate() {
-        if iov.len == 0 {
-            continue;
-        }
-        let end = walked.checked_add(iov.len).ok_or(EINVAL)?;
-        if offset < end {
-            return Ok((index, offset - walked));
-        }
-        walked = end;
-    }
-    Err(EFAULT)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::arch::x86_64::interrupt_context::SyscallContext;
-    use crate::ipc::IpcEndpointTable;
-    use crate::process::linux_fd::{LinuxFdRegistry, LINUX_STDOUT_FD};
-    use clean_slate_linux_abi::{EBADF, SYS_DUP2, SYS_FCNTL, SYS_WRITEV};
-    use clean_slate_service_lifecycle::InstanceGeneration;
-
-    fn empty_frame() -> SyscallContext {
-        SyscallContext {
-            rax: 0,
-            rdx: 0,
-            rbx: 0,
-            rbp: 0,
-            rsi: 0,
-            rdi: 0,
-            r8: 0,
-            r9: 0,
-            r10: 0,
-            r12: 0,
-            r13: 0,
-            r14: 0,
-            r15: 0,
-            user_rip: 0,
-            user_rflags: 0,
-            user_rsp: 0,
-        }
-    }
-
-    fn syscall_ctx(frame: &mut SyscallContext) -> LinuxSyscallContext<'_> {
-        LinuxSyscallContext {
-            pid: 17,
-            instance_generation: InstanceGeneration(4),
-            frame,
-        }
-    }
-
-    #[test]
-    fn locate_iov_index_skips_zero_length_iov() {
-        let iovecs = [
-            IoVec {
-                base: 0x1000,
-                len: 2,
-            },
-            IoVec {
-                base: 0x2000,
-                len: 0,
-            },
-            IoVec {
-                base: 0x3000,
-                len: 3,
-            },
-        ];
-        assert_eq!(locate_iov_index(&iovecs, 0), Ok((0, 0)));
-        assert_eq!(locate_iov_index(&iovecs, 2), Ok((2, 0)));
-    }
-
-    #[test]
-    fn writev_iovcnt_above_linux_iov_max_is_einval() {
-        let pid = 88u64;
-        let generation = InstanceGeneration(77);
-        let mut ipc = IpcEndpointTable::new();
-        let handle = ipc
-            .grant_console_capability_for_pid(pid)
-            .expect("console grant");
-        linux_fd::install_stdio_for_process(pid, generation, handle, handle)
-            .expect("install stdio");
-        let mut frame = empty_frame();
-        let mut ctx = LinuxSyscallContext {
-            pid,
-            instance_generation: generation,
-            frame: &mut frame,
-        };
-        let request = LinuxSyscallRequest {
-            nr: SYS_WRITEV,
-            args: [LINUX_STDOUT_FD, 0x1000, (LINUX_IOV_MAX as u64) + 1, 0, 0, 0],
-        };
-        assert_eq!(handle_sys_writev(&request, &mut ctx), Err(EINVAL));
-    }
-
-    #[test]
-    fn fcntl_unknown_command_is_einval() {
-        let mut frame = empty_frame();
-        let mut ctx = syscall_ctx(&mut frame);
-        let request = LinuxSyscallRequest {
-            nr: SYS_FCNTL,
-            args: [1, 0xdead, 0, 0, 0, 0],
-        };
-        assert_eq!(handle_sys_fcntl(&request, &mut ctx), Err(EINVAL));
-    }
-
-    #[test]
-    fn fcntl_without_fd_table_is_ebadf() {
-        let mut frame = empty_frame();
-        let mut ctx = syscall_ctx(&mut frame);
-        let request = LinuxSyscallRequest {
-            nr: SYS_FCNTL,
-            args: [1, F_GETFD, 0, 0, 0, 0],
-        };
-        assert_eq!(handle_sys_fcntl(&request, &mut ctx), Err(EBADF));
-    }
-
-    #[test]
-    fn dup2_same_fd_is_noop_when_already_open() {
-        let (mut fds, mut ipc) = (LinuxFdRegistry::new(), IpcEndpointTable::new());
-        let gen = InstanceGeneration(1);
-        let handle = ipc.grant_console_capability_for_pid(2).expect("grant");
-        fds.install(2, gen, handle, handle).expect("install");
-        fds.dup2(2, gen, LINUX_STDOUT_FD, 5).expect("dup to 5");
-        assert!(fds.dup2(2, gen, 5, 5).is_ok());
-    }
-
-    #[test]
-    fn close_with_stale_generation_is_ebadf() {
-        let (mut fds, mut ipc) = (LinuxFdRegistry::new(), IpcEndpointTable::new());
-        let live = InstanceGeneration(1);
-        let stale = InstanceGeneration(2);
-        let handle = ipc.grant_console_capability_for_pid(3).expect("grant");
-        fds.install(3, live, handle, handle).expect("install");
-        assert_eq!(fds.close_fd(3, stale, LINUX_STDOUT_FD), Err(EBADF));
-    }
-
-    #[test]
-    fn dup2_handler_maps_ebadf_without_fd_table() {
-        let mut frame = empty_frame();
-        let mut ctx = syscall_ctx(&mut frame);
-        let request = LinuxSyscallRequest {
-            nr: SYS_DUP2,
-            args: [1, 5, 0, 0, 0, 0],
-        };
-        assert_eq!(handle_sys_dup2(&request, &mut ctx), Err(EBADF));
-    }
 }

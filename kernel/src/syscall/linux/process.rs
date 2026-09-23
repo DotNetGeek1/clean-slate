@@ -92,6 +92,10 @@ mod enabled {
         request: &LinuxSyscallRequest,
         ctx: &mut LinuxSyscallContext<'_>,
     ) -> LinuxSyscallResult {
+        table_mut().ensure_proc_slot(ProcId {
+            pid: ctx.pid,
+            generation: ctx.instance_generation,
+        })?;
         let user_ptr = request.args[0];
         if user_ptr == 0 {
             return Err(EFAULT);
@@ -111,6 +115,10 @@ mod enabled {
         _request: &LinuxSyscallRequest,
         ctx: &mut LinuxSyscallContext<'_>,
     ) -> LinuxSyscallResult {
+        table_mut().ensure_proc_slot(ProcId {
+            pid: ctx.pid,
+            generation: ctx.instance_generation,
+        })?;
         let allocator = service_lifecycle_syscall_allocator_mut()
             .as_mut()
             .ok_or(ENOMEM)?;
@@ -132,6 +140,10 @@ mod enabled {
         request: &LinuxSyscallRequest,
         ctx: &mut LinuxSyscallContext<'_>,
     ) -> LinuxSyscallResult {
+        table_mut().ensure_proc_slot(ProcId {
+            pid: ctx.pid,
+            generation: ctx.instance_generation,
+        })?;
         linux_wait4(request, ctx)
     }
 
@@ -156,8 +168,10 @@ mod enabled {
             pid,
             generation: ctx.instance_generation,
         };
+        let _ = table_mut().ensure_proc_slot(id);
         let parent_pid = table_mut().parent_of(id).map_or(pid, |p| p.pid);
         table_mut().publish_exit(id, exit_status_word(status as u32, None));
+        table_mut().retire_slot(id);
         wake_all(wait_key_for_parent(parent_pid));
         kernel_log_fmt(format_args!("[LNX ] exit pid={pid} status={status}\n"));
         let allocator = service_lifecycle_syscall_allocator_mut()
@@ -165,6 +179,16 @@ mod enabled {
             .unwrap_or_else(|| fatal_kernel_error("linux exit_group: allocator missing"));
         let teardown = teardown_current_process(allocator, kernel_root_frame(), status, false)
             .unwrap_or_else(|message| fatal_kernel_error(message));
+        #[cfg(feature = "m9-linux-proc-self-test")]
+        if let Some(next_frame) = crate::selftest::m9_linux_proc::after_probe_exit_group(
+            pid,
+            ctx.instance_generation,
+            status,
+            &teardown,
+            allocator,
+        ) {
+            switch_after_exit(Some(next_frame));
+        }
         switch_after_exit(teardown.next_stack_pointer)
     }
 

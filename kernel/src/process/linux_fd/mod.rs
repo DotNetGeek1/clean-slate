@@ -209,10 +209,8 @@ impl LinuxFdRegistry {
         let desc = self.pool.get(open)?;
         match desc.kind {
             DescriptorKind::Console(sink) => write_console(ipc, pid, sink, bytes, personality),
-            // #102
-            DescriptorKind::PipeWrite(pipe) => {
-                crate::process::linux_proc::pipe::write_pipe(pipe, bytes)
-            }
+            // #102 pipe writes use blocking path from syscall/write.rs
+            DescriptorKind::PipeWrite(_) => Err(clean_slate_linux_abi::EBADF),
             _ => Err(EBADF),
         }
     }
@@ -229,33 +227,12 @@ impl LinuxFdRegistry {
         &mut self.pool
     }
 
-    pub(crate) fn pipe_read_ref(
+    pub(crate) fn open_description_kind(
         &self,
         pid: u64,
         generation: InstanceGeneration,
         fd: u64,
-    ) -> Option<PipeRef> {
-        let index = self.slot_index(pid, generation)?;
-        let open = self.slots[index]
-            .as_ref()
-            .expect("slot")
-            .table
-            .get(fd)?
-            .open;
-        let desc = self.pool.get(open).ok()?;
-        match desc.kind {
-            DescriptorKind::PipeRead(pipe) => Some(pipe),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn read_fd(
-        &mut self,
-        pid: u64,
-        generation: InstanceGeneration,
-        fd: u64,
-        buf: &mut [u8],
-    ) -> Result<usize, LinuxErrno> {
+    ) -> Result<DescriptorKind, LinuxErrno> {
         let index = self.slot_index(pid, generation).ok_or(EBADF)?;
         let open = self.slots[index]
             .as_ref()
@@ -264,13 +241,30 @@ impl LinuxFdRegistry {
             .get(fd)
             .ok_or(EBADF)?
             .open;
-        let desc = self.pool.get(open)?;
-        match desc.kind {
-            // #102
-            DescriptorKind::PipeRead(pipe) => {
-                crate::process::linux_proc::pipe::read_pipe(pipe, buf)
-            }
-            _ => Err(EBADF),
+        Ok(self.pool.get(open)?.kind)
+    }
+
+    pub(crate) fn pipe_read_ref(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Option<PipeRef> {
+        match self.open_description_kind(pid, generation, fd).ok()? {
+            DescriptorKind::PipeRead(pipe) => Some(pipe),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn pipe_write_ref(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Option<PipeRef> {
+        match self.open_description_kind(pid, generation, fd).ok()? {
+            DescriptorKind::PipeWrite(pipe) => Some(pipe),
+            _ => None,
         }
     }
 
@@ -483,7 +477,8 @@ fn registry_mut() -> &'static mut LinuxFdRegistry {
 #[cfg(any(
     test,
     feature = "m9-linux-exec-self-test",
-    feature = "m9-fd-core-self-test"
+    feature = "m9-fd-core-self-test",
+    feature = "m9-linux-proc-self-test"
 ))]
 pub(crate) fn reset_registry_for_selftest() {
     unsafe { *LINUX_FD_REGISTRY.get() = LinuxFdRegistry::new() };
@@ -531,13 +526,20 @@ pub(crate) fn alloc_pipe_end(
         .alloc_lowest(&mut registry.pool, open, FdFlags::default())
 }
 
-pub(crate) fn read_fd(
+pub(crate) fn open_description_kind(
     pid: u64,
     generation: InstanceGeneration,
     fd: u64,
-    buf: &mut [u8],
-) -> Result<usize, LinuxErrno> {
-    registry_mut().read_fd(pid, generation, fd, buf)
+) -> Result<DescriptorKind, LinuxErrno> {
+    registry_mut().open_description_kind(pid, generation, fd)
+}
+
+pub(crate) fn pipe_read_ref(pid: u64, generation: InstanceGeneration, fd: u64) -> Option<PipeRef> {
+    registry_mut().pipe_read_ref(pid, generation, fd)
+}
+
+pub(crate) fn pipe_write_ref(pid: u64, generation: InstanceGeneration, fd: u64) -> Option<PipeRef> {
+    registry_mut().pipe_write_ref(pid, generation, fd)
 }
 
 pub(crate) fn pipe_ref_for(pid: u64, generation: InstanceGeneration, fd: u64) -> Option<PipeRef> {

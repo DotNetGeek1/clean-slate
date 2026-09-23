@@ -182,6 +182,7 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
     feature = "m8-linux-hello-self-test",
     feature = "m9-low-va-self-test",
     feature = "m9-linux-exec-self-test",
+    feature = "m9-linux-proc-self-test",
     feature = "m9-fd-core-self-test",
     feature = "m9-syscall-fail-closed-self-test",
     feature = "m9-block-wake-self-test"
