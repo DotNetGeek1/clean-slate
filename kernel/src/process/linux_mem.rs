@@ -13,8 +13,8 @@ use crate::sched::wait::Deadline;
 use crate::sched::TASK_COUNT;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_linux_abi::{
-    LinuxErrno, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_NONE, PROT_READ, PROT_WRITE,
-    EINVAL, ENOMEM, EPERM,
+    LinuxErrno, EINVAL, ENOMEM, EPERM, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_NONE,
+    PROT_READ, PROT_WRITE,
 };
 use clean_slate_service_lifecycle::InstanceGeneration;
 use core::ptr;
@@ -140,10 +140,7 @@ where
     if process.instance_generation != generation {
         return Err(EINVAL);
     }
-    let mut space = process
-        .resource_domain
-        .take_address_space()
-        .ok_or(EINVAL)?;
+    let mut space = process.resource_domain.take_address_space().ok_or(EINVAL)?;
     let result = f(&mut space, allocator);
     process.resource_domain.replace_address_space(space);
     process.resource_domain.sync_root_frame_from_address_space();
@@ -213,9 +210,7 @@ fn shrink_brk_to(
     let mut cursor = align_up(brk_end, PAGE_SIZE);
     let base = align_up(brk_base, PAGE_SIZE);
     while cursor > base {
-        cursor = cursor
-            .checked_sub(PAGE_SIZE)
-            .ok_or(EINVAL)?;
+        cursor = cursor.checked_sub(PAGE_SIZE).ok_or(EINVAL)?;
         unmap_one_page(cursor, domain, allocator)?;
     }
     Ok(())
@@ -277,19 +272,32 @@ fn map_zero_page(
 
 pub(crate) fn apply_fs_base_for_process(pid: u64, generation: InstanceGeneration) {
     if let Some(index) = registry_mut().find(pid, generation) {
-        let fs = registry_mut().slots[index].as_ref().expect("slot").state.fs_base;
+        let fs = registry_mut().slots[index]
+            .as_ref()
+            .expect("slot")
+            .state
+            .fs_base;
         if fs != 0 {
             write_msr(IA32_FS_BASE, fs);
         }
     }
 }
 
-pub(crate) fn sys_arch_prctl(code: u64, addr: u64, pid: u64, generation: InstanceGeneration) -> Result<u64, LinuxErrno> {
+pub(crate) fn sys_arch_prctl(
+    code: u64,
+    addr: u64,
+    pid: u64,
+    generation: InstanceGeneration,
+) -> Result<u64, LinuxErrno> {
     if code != clean_slate_linux_abi::ARCH_SET_FS {
         return Err(EINVAL);
     }
     let index = registry_mut().ensure(pid, generation)?;
-    registry_mut().slots[index].as_mut().expect("slot").state.fs_base = addr;
+    registry_mut().slots[index]
+        .as_mut()
+        .expect("slot")
+        .state
+        .fs_base = addr;
     write_msr(IA32_FS_BASE, addr);
     Ok(0)
 }
@@ -300,11 +308,19 @@ pub(crate) fn sys_set_tid_address(
     generation: InstanceGeneration,
 ) -> Result<u64, LinuxErrno> {
     let index = registry_mut().ensure(pid, generation)?;
-    registry_mut().slots[index].as_mut().expect("slot").state.tid_address = addr;
+    registry_mut().slots[index]
+        .as_mut()
+        .expect("slot")
+        .state
+        .tid_address = addr;
     Ok(pid)
 }
 
-pub(crate) fn sys_brk(addr: u64, pid: u64, generation: InstanceGeneration) -> Result<u64, LinuxErrno> {
+pub(crate) fn sys_brk(
+    addr: u64,
+    pid: u64,
+    generation: InstanceGeneration,
+) -> Result<u64, LinuxErrno> {
     let index = registry_mut().ensure(pid, generation)?;
     let (brk_base, old_end) = {
         let state = &registry_mut().slots[index].as_ref().expect("slot").state;
@@ -328,7 +344,11 @@ pub(crate) fn sys_brk(addr: u64, pid: u64, generation: InstanceGeneration) -> Re
             shrink_brk_to(brk_base, addr, domain, allocator)?;
             Ok(())
         })?;
-        registry_mut().slots[index].as_mut().expect("slot").state.brk_end = addr;
+        registry_mut().slots[index]
+            .as_mut()
+            .expect("slot")
+            .state
+            .brk_end = addr;
         return Ok(old_end);
     }
     with_address_space(pid, generation, |domain, allocator| {
@@ -340,17 +360,20 @@ pub(crate) fn sys_brk(addr: u64, pid: u64, generation: InstanceGeneration) -> Re
         }
         Ok(())
     })?;
-    registry_mut().slots[index].as_mut().expect("slot").state.brk_end = addr;
+    registry_mut().slots[index]
+        .as_mut()
+        .expect("slot")
+        .state
+        .brk_end = addr;
     Ok(addr)
 }
 
-pub(crate) fn pending_sleep_deadline(
-    pid: u64,
-    generation: InstanceGeneration,
-) -> Option<Deadline> {
-    registry_mut()
-        .find(pid, generation)
-        .and_then(|i| registry_mut().slots[i].as_ref().and_then(|s| s.state.pending_sleep_deadline))
+pub(crate) fn pending_sleep_deadline(pid: u64, generation: InstanceGeneration) -> Option<Deadline> {
+    registry_mut().find(pid, generation).and_then(|i| {
+        registry_mut().slots[i]
+            .as_ref()
+            .and_then(|s| s.state.pending_sleep_deadline)
+    })
 }
 
 pub(crate) fn set_pending_sleep_deadline(
@@ -359,14 +382,20 @@ pub(crate) fn set_pending_sleep_deadline(
     deadline: Option<Deadline>,
 ) {
     if let Some(index) = registry_mut().find(pid, generation) {
-        registry_mut().slots[index].as_mut().expect("slot").state.pending_sleep_deadline = deadline;
+        registry_mut().slots[index]
+            .as_mut()
+            .expect("slot")
+            .state
+            .pending_sleep_deadline = deadline;
     }
 }
 
 pub(crate) fn pending_poll_deadline(pid: u64, generation: InstanceGeneration) -> Option<Deadline> {
-    registry_mut()
-        .find(pid, generation)
-        .and_then(|i| registry_mut().slots[i].as_ref().and_then(|s| s.state.pending_poll_deadline))
+    registry_mut().find(pid, generation).and_then(|i| {
+        registry_mut().slots[i]
+            .as_ref()
+            .and_then(|s| s.state.pending_poll_deadline)
+    })
 }
 
 pub(crate) fn set_pending_poll_deadline(
@@ -375,7 +404,11 @@ pub(crate) fn set_pending_poll_deadline(
     deadline: Option<Deadline>,
 ) {
     if let Some(index) = registry_mut().find(pid, generation) {
-        registry_mut().slots[index].as_mut().expect("slot").state.pending_poll_deadline = deadline;
+        registry_mut().slots[index]
+            .as_mut()
+            .expect("slot")
+            .state
+            .pending_poll_deadline = deadline;
     }
 }
 
@@ -402,22 +435,14 @@ pub(crate) fn sys_mmap(
     if len == 0 {
         return Err(EINVAL);
     }
-    let page_count = len
-        .checked_add(PAGE_SIZE - 1)
-        .ok_or(EINVAL)?
-        / PAGE_SIZE;
+    let page_count = len.checked_add(PAGE_SIZE - 1).ok_or(EINVAL)? / PAGE_SIZE;
     if page_count > LINUX_MMAP_MAX_PAGES {
         return Err(ENOMEM);
     }
     let index = registry_mut().ensure(pid, generation)?;
     {
         let state = &registry_mut().slots[index].as_ref().expect("slot").state;
-        if state
-            .mmap_pages
-            .checked_add(page_count)
-            .ok_or(ENOMEM)?
-            > LINUX_MMAP_MAX_PAGES
-        {
+        if state.mmap_pages.checked_add(page_count).ok_or(ENOMEM)? > LINUX_MMAP_MAX_PAGES {
             return Err(ENOMEM);
         }
     }
@@ -512,10 +537,7 @@ fn record_region(
         page_count,
     };
     state.mmap_region_count += 1;
-    state.mmap_pages = state
-        .mmap_pages
-        .checked_add(page_count)
-        .ok_or(ENOMEM)?;
+    state.mmap_pages = state.mmap_pages.checked_add(page_count).ok_or(ENOMEM)?;
     Ok(())
 }
 
@@ -543,7 +565,11 @@ pub(crate) fn sys_munmap(
     })
 }
 
-pub(crate) fn copy_utsname_to_user(out: u64, _pid: u64, _generation: InstanceGeneration) -> Result<(), LinuxErrno> {
+pub(crate) fn copy_utsname_to_user(
+    out: u64,
+    _pid: u64,
+    _generation: InstanceGeneration,
+) -> Result<(), LinuxErrno> {
     validate_user_writable_pointer_range(out, clean_slate_linux_abi::UTSNAME_SIZE as u64)
         .map_err(|_| EINVAL)?;
     let image = clean_slate_linux_abi::encode_utsname_fields(
@@ -586,5 +612,10 @@ mod tests {
     #[test]
     fn mmap_window_below_stack_reservation() {
         assert!(LINUX_MMAP_WINDOW_TOP <= 0x0080_0000);
+    }
+
+    #[test]
+    fn occupied_slots_starts_empty() {
+        assert_eq!(occupied_slots(), 0);
     }
 }

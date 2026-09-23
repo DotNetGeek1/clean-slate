@@ -42,7 +42,11 @@ impl InterestTable {
         {
             return Ok(());
         }
-        let free = self.entries.iter().position(|entry| entry.is_none()).ok_or(())?;
+        let free = self
+            .entries
+            .iter()
+            .position(|entry| entry.is_none())
+            .ok_or(())?;
         self.entries[free] = Some(InterestEntry { desc, pid });
         Ok(())
     }
@@ -104,5 +108,6 @@ mod tests {
             register_poll_interest(desc, pid as u64).expect("register");
         }
         assert!(register_poll_interest(desc, 99).is_err());
+        assert_eq!(interest_occupied(), LINUX_POLL_INTEREST_MAX);
     }
 }

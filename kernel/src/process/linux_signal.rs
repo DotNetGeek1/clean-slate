@@ -60,7 +60,11 @@ impl Registry {
         if let Some(index) = self.find(pid, generation) {
             return index;
         }
-        let free = self.slots.iter().position(|slot| slot.is_none()).expect("capacity");
+        let free = self
+            .slots
+            .iter()
+            .position(|slot| slot.is_none())
+            .expect("capacity");
         self.slots[free] = Some(Slot {
             pid,
             generation,
@@ -183,5 +187,10 @@ mod tests {
         let mut mask_old = 0u64;
         rt_sigprocmask(SIG_BLOCK, Some(0x08), Some(&mut mask_old), 8, 5, gen).expect("mask");
         assert_eq!(mask_old, 0);
+    }
+
+    #[test]
+    fn occupied_slots_starts_empty() {
+        assert_eq!(occupied_slots(), 0);
     }
 }
