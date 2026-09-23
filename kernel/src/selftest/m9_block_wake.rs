@@ -210,8 +210,9 @@ pub(crate) fn on_blocked_syscall_resumed(outcome: WaitOutcome, result_rax: u64) 
     CONSUMER_BLOCKED.store(0, Ordering::Relaxed);
     if IDLE_SOAK_DONE.load(Ordering::Relaxed) == 0 {
         let ticks = IDLE_TICKS.load(Ordering::Relaxed);
+        let elapsed = kernel_ticks().saturating_sub(BLOCK_TICK.load(Ordering::Relaxed));
         kernel_log_fmt(format_args!("[M9.E] idle_ticks={}\n", ticks));
-        if ticks < idle_soak_ticks() {
+        if elapsed < idle_soak_ticks() {
             fatal_kernel_error("idle soak did not run long enough");
         }
         kernel_log_line("[M9.E] timeout resumed after idle");

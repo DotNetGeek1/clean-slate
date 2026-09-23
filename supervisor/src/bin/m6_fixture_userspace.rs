@@ -68,6 +68,11 @@ fn run_syscall_at(header: &mut M6FixtureBootstrap, index: usize) {
         while result == repeat_value && repeats < M6_FIXTURE_MAX_REPEATS {
             result = raw_syscall(nr, resolved_args);
             repeats = repeats.saturating_add(1);
+            if repeats & 0x3f == 0 {
+                unsafe {
+                    core::arch::asm!("int 0x80", options(nostack));
+                }
+            }
         }
     }
     header.steps[index].result = result;
