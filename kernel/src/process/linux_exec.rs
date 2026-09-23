@@ -1,5 +1,15 @@
 //! M9 #146: bounded Linux exec / process-image substrate (prepare + commit).
 
+#![cfg_attr(
+    not(any(
+        feature = "m8-linux-image",
+        feature = "m8-linux-hello",
+        feature = "m9-linux-exec-self-test",
+        feature = "m9-low-va-self-test"
+    )),
+    allow(dead_code)
+)]
+
 #[cfg(feature = "m9-linux-exec-self-test")]
 use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
 #[cfg(feature = "m9-linux-exec-self-test")]
@@ -226,7 +236,10 @@ fn build_exec_initial_stack(
     Ok(LinuxInitialStack {
         stack_top: layout.stack_top,
         bytes,
-        bytes_len: image.bytes_used.min(LINUX_MAX_STACK_IMAGE_BYTES),
+        // Map the full stack-image buffer from `stack_top - buf.len()` (same
+        // contract as M8 `LINUX_INITIAL_STACK_IMAGE_BYTES`) so vector bytes at
+        // `rsp_off` land at the launch RSP in the guest.
+        bytes_len: LINUX_MAX_STACK_IMAGE_BYTES,
         rsp: image.rsp,
         auxv: auxv_storage,
         auxv_len,
@@ -431,6 +444,40 @@ mod tests {
             plan.phnum,
         )
         .expect("stack");
+        assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, stack).is_ok());
+    }
+
+    #[cfg(feature = "m9-linux-exec-self-test")]
+    #[test]
+    fn exec_args_fixture_stack_has_argv_pointers() {
+        use crate::process::linux_image::LINUX_EXEC_ARGS_FIXTURE;
+        let argv: &[&[u8]] = &[b"linux-exec-args", b"beta", b"gamma\xff"];
+        let env: &[&[u8]] = &[b"FOO=bar", b"BAZ=qux"];
+        let spec = LinuxExecSpec {
+            image: LINUX_EXEC_ARGS_FIXTURE,
+            argv,
+            envp: env,
+            exec_filename: b"/fixture/linux-exec-args",
+            stack_pages: 2,
+            policy: &LoadPlanPolicy::linux_conventional_x86_64(),
+        };
+        let plan = clean_slate_elf::parse_load_plan(spec.image, spec.policy).expect("plan");
+        let layout = layout_for_spec(&spec, plan.image_base().unwrap()).expect("layout");
+        let stack = build_exec_initial_stack(
+            &layout,
+            &spec,
+            plan.entry,
+            plan.phdr_vaddr.unwrap(),
+            plan.phnum,
+        )
+        .expect("stack");
+        let stack_buf_base = stack.stack_top - LINUX_MAX_STACK_IMAGE_BYTES as u64;
+        let rsp_off = (stack.rsp - stack_buf_base) as usize;
+        let argc = u64::from_le_bytes(stack.bytes[rsp_off..rsp_off + 8].try_into().unwrap());
+        assert_eq!(argc, 3);
+        let argv0 =
+            u64::from_le_bytes(stack.bytes[rsp_off + 8..rsp_off + 16].try_into().unwrap());
+        assert_ne!(argv0, 0);
         assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, stack).is_ok());
     }
 

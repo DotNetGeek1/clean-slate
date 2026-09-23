@@ -30,7 +30,7 @@
 
 #![cfg_attr(
     not(any(
-        feature = "m8-linux-image-self-test",
+        feature = "m8-linux-image",
         feature = "m9-low-va-self-test",
         feature = "m8-linux-dispatch-self-test"
     )),
@@ -1239,6 +1239,7 @@ pub(crate) fn launch_linux_process(
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
+#[cfg_attr(not(feature = "m9-low-va-self-test"), allow(dead_code))]
 pub(crate) fn launch_linux_process_with_policy(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
