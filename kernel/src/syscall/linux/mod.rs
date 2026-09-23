@@ -10,7 +10,18 @@ pub(crate) mod decode;
 pub(crate) mod execve;
 pub(crate) mod exit;
 pub(crate) mod fd;
+#[cfg(feature = "m9-rootfs")]
 pub(crate) mod fs;
+#[cfg(not(feature = "m9-rootfs"))]
+pub(crate) mod fs {
+    use super::table::LinuxSyscallHandler;
+
+    pub(crate) fn lookup_handler(_nr: u64) -> Option<LinuxSyscallHandler> {
+        None
+    }
+}
+#[cfg(feature = "m9-rootfs")]
+pub(crate) mod fs_io;
 pub(crate) mod process;
 pub(crate) mod runtime;
 pub(crate) mod socket;

@@ -130,6 +130,9 @@ test_pipe_epipe:
     lea     rsi, [rip + msg_epipe_ok]
     mov     rdx, msg_epipe_ok_len
     call    write_lit
+    mov     rdi, r13
+    mov     rax, 3
+    syscall
     ret
 .Lepipe_child:
     mov     rdi, r12
@@ -182,6 +185,9 @@ test_pipe_fork_wait:
     lea     rsi, [rip + msg_pipe_ok]
     mov     rdx, msg_pipe_ok_len
     call    write_lit
+    mov     rdi, r12
+    mov     rax, 3
+    syscall
     ret
 .Lpipe_child:
     mov     rdi, r12
@@ -215,6 +221,12 @@ test_exec_fork:
     xor     rdx, rdx
     xor     r10, r10
     syscall
+    test    rax, rax
+    js      .Lbad_exit
+    mov     eax, [rsp - 48]
+    shr     eax, 8
+    cmp     eax, 0
+    jne     .Lbad_exit
     lea     rsi, [rip + msg_exec_ok]
     mov     rdx, msg_exec_ok_len
     call    write_lit

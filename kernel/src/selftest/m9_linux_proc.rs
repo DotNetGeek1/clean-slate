@@ -188,9 +188,6 @@ pub(crate) fn after_probe_exit_group(
     }
 
     let cycle = M9_CYCLE.load(Ordering::Relaxed);
-    crate::process::linux_proc::pipe::reset_for_selftest();
-    crate::process::linux_proc::table::reset_for_selftest();
-    linux_fd::reset_registry_for_selftest();
     log_cycle_metrics(cycle, "end");
     assert_baseline(cycle);
 
@@ -213,9 +210,6 @@ pub(crate) fn start_m9_linux_proc_self_test(page_allocator: PageAllocator) -> ! 
         .unwrap_or_else(|| fatal_kernel_error("m9 linux proc allocator missing"));
 
     reset_process_scheduler_world();
-    linux_fd::reset_registry_for_selftest();
-    crate::process::linux_proc::pipe::reset_for_selftest();
-    crate::process::linux_proc::table::reset_for_selftest();
     unsafe {
         *id_allocator_mut() = IdAllocator::new();
         process_registry_mut().clear();

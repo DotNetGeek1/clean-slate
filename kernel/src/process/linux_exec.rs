@@ -341,13 +341,18 @@ pub(crate) fn launch_linux_process_from_spec(
         launch_rsp: prepared.launch_rsp,
         image_pages: prepared.image_pages,
     };
-    register_linux_process(
+    let launched = register_linux_process(
         allocator,
         kernel_stack_top,
         scheduler_slot,
         image,
         page_table_frames,
-    )
+    )?;
+    #[cfg(feature = "m9-rootfs")]
+    crate::process::linux_fs::grant_linux_tmp_object_capabilities(launched.pid).map_err(|_| {
+        LinuxImageError::Registry("linux launch: tmp object capability grant failed")
+    })?;
+    Ok(launched)
 }
 
 #[cfg(not(any(

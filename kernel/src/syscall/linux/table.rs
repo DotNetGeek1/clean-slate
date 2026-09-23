@@ -2,13 +2,14 @@
 
 use super::exit::handle_sys_exit;
 use super::fd::{
-    handle_sys_close, handle_sys_dup2, handle_sys_fcntl, handle_sys_read, handle_sys_writev,
+    handle_sys_close, handle_sys_dup2, handle_sys_fcntl, handle_sys_lseek, handle_sys_read,
+    handle_sys_writev,
 };
 use super::write::handle_sys_write;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use clean_slate_linux_abi::{
-    LinuxSyscallRequest, LinuxSyscallResult, SYS_CLOSE, SYS_DUP2, SYS_EXIT, SYS_FCNTL, SYS_READ,
-    SYS_WRITE, SYS_WRITEV,
+    LinuxSyscallRequest, LinuxSyscallResult, SYS_CLOSE, SYS_DUP2, SYS_EXIT, SYS_FCNTL, SYS_LSEEK,
+    SYS_READ, SYS_WRITE, SYS_WRITEV,
 };
 use clean_slate_service_lifecycle::InstanceGeneration;
 
@@ -51,6 +52,7 @@ fn lookup_core_handler(nr: u64) -> Option<LinuxSyscallHandler> {
         SYS_DUP2 => Some(handle_sys_dup2),
         SYS_EXIT => Some(handle_sys_exit),
         SYS_FCNTL => Some(handle_sys_fcntl),
+        SYS_LSEEK => Some(handle_sys_lseek),
         _ => None,
     }
 }

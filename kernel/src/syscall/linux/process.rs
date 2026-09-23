@@ -171,6 +171,7 @@ mod enabled {
         let _ = table_mut().ensure_proc_slot(id);
         let parent_pid = table_mut().parent_of(id).map_or(pid, |p| p.pid);
         table_mut().publish_exit(id, exit_status_word(status as u32, None));
+        table_mut().finalize_children_on_parent_exit(id);
         table_mut().retire_slot(id);
         wake_all(wait_key_for_parent(parent_pid));
         kernel_log_fmt(format_args!("[LNX ] exit pid={pid} status={status}\n"));
@@ -225,13 +226,19 @@ mod enabled {
             &mut scratch.argv,
             &mut scratch.argv_len,
             LINUX_EXEC_MAX_ARGS,
+            true,
         )?;
-        scratch.envp_count = copy_user_string_array(
-            envp_ptr,
-            &mut scratch.envp,
-            &mut scratch.envp_len,
-            LINUX_EXEC_MAX_ENVS,
-        )?;
+        scratch.envp_count = if envp_ptr == 0 {
+            0
+        } else {
+            copy_user_string_array(
+                envp_ptr,
+                &mut scratch.envp,
+                &mut scratch.envp_len,
+                LINUX_EXEC_MAX_ENVS,
+                false,
+            )?
+        };
         let mut total = scratch.path_len;
         for i in 0..scratch.argv_count {
             total += scratch.argv_len[i] + 1;
@@ -318,9 +325,14 @@ mod enabled {
         storage: &mut [[u8; 128]],
         lengths: &mut [usize],
         max_entries: usize,
+        require_non_empty: bool,
     ) -> Result<usize, clean_slate_linux_abi::LinuxErrno> {
         if ptr == 0 {
-            return Err(EFAULT);
+            return if require_non_empty {
+                Err(EFAULT)
+            } else {
+                Ok(0)
+            };
         }
         let mut count = 0usize;
         while count < max_entries {
@@ -332,7 +344,7 @@ mod enabled {
             lengths[count] = copy_user_cstring(entry_ptr, &mut storage[count])?;
             count += 1;
         }
-        if count == 0 {
+        if count == 0 && require_non_empty {
             return Err(EINVAL);
         }
         Ok(count)

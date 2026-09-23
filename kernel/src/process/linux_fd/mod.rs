@@ -37,7 +37,15 @@ const LINUX_FD_REGISTRY_CAPACITY: usize = PROCESS_REGISTRY_CAPACITY;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxFdProjection {
     Closed,
-    ConsoleEndpoint { capability_handle: u64 },
+    ConsoleEndpoint {
+        capability_handle: u64,
+    },
+    /// #101: file-backed description (read/write/lseek via fs_io).
+    FileBackend,
+    /// #101: directory-backed description (getdents64 cursor in offset).
+    DirBackend,
+    /// #102: pipe read/write end (pipe syscalls; not `Closed`).
+    PipeBackend,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,10 +173,12 @@ impl LinuxFdRegistry {
             DescriptorKind::Console(sink) => Ok(LinuxFdProjection::ConsoleEndpoint {
                 capability_handle: sink.capability_handle,
             }),
-            DescriptorKind::File(_) | DescriptorKind::Dir(_) => Ok(LinuxFdProjection::Closed),
-            DescriptorKind::PipeRead(_)
-            | DescriptorKind::PipeWrite(_)
-            | DescriptorKind::Socket(_) => Ok(LinuxFdProjection::Closed),
+            DescriptorKind::File(_) => Ok(LinuxFdProjection::FileBackend),
+            DescriptorKind::Dir(_) => Ok(LinuxFdProjection::DirBackend),
+            DescriptorKind::PipeRead(_) | DescriptorKind::PipeWrite(_) => {
+                Ok(LinuxFdProjection::PipeBackend)
+            }
+            DescriptorKind::Socket(_) => Ok(LinuxFdProjection::Closed),
         }
     }
 
@@ -178,6 +188,11 @@ impl LinuxFdRegistry {
                 slot,
                 Some(entry) if entry.pid == pid && entry.generation == generation
             )
+        });
+        let index = index.or_else(|| {
+            self.slots
+                .iter()
+                .position(|slot| matches!(slot, Some(entry) if entry.pid == pid))
         });
         if let Some(index) = index {
             if let Some(entry) = &mut self.slots[index] {
@@ -210,7 +225,9 @@ impl LinuxFdRegistry {
         match desc.kind {
             DescriptorKind::Console(sink) => write_console(ipc, pid, sink, bytes, personality),
             // #102 pipe writes use blocking path from syscall/write.rs
-            DescriptorKind::PipeWrite(_) => Err(clean_slate_linux_abi::EBADF),
+            DescriptorKind::PipeWrite(_) => Err(EBADF),
+            // #101: file writes go through `write(2)` → `handle_sys_write` + `fs_io::write_file_fd`.
+            DescriptorKind::File(_) => Err(EBADF),
             _ => Err(EBADF),
         }
     }
@@ -443,12 +460,61 @@ impl LinuxFdRegistry {
         let open = self.pool.alloc_placeholder_file(
             pid,
             open_description::FileHandleRef {
-                id: 0x147,
-                generation: 1,
+                node: open_description::LinuxFsNodeId {
+                    index: 0x147,
+                    generation: 1,
+                },
             },
         )?;
         let table = &mut self.slots[index].as_mut().expect("slot").table;
         table.alloc_lowest(&mut self.pool, open, FdFlags::default())
+    }
+
+    pub(crate) fn alloc_description_and_fd(
+        &mut self,
+        pid: u64,
+        generation: InstanceGeneration,
+        kind: DescriptorKind,
+        status: OpenStatus,
+        flags: FdFlags,
+    ) -> Result<i32, LinuxErrno> {
+        let slot_index = self.slot_index(pid, generation).ok_or(EBADF)?;
+        let open = self.pool.alloc_file_or_dir(pid, kind, status)?;
+        let table = &mut self.slots[slot_index].as_mut().expect("slot").table;
+        table.alloc_lowest(&mut self.pool, open, flags)
+    }
+
+    pub(crate) fn open_description_for_fd(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Result<OpenDescriptionId, LinuxErrno> {
+        let slot_index = self.slot_index(pid, generation).ok_or(EBADF)?;
+        Ok(self.slots[slot_index]
+            .as_ref()
+            .expect("slot")
+            .table
+            .get(fd)
+            .ok_or(EBADF)?
+            .open)
+    }
+
+    pub(crate) fn open_description_view(
+        &self,
+        open: OpenDescriptionId,
+    ) -> Result<(DescriptorKind, u64), LinuxErrno> {
+        let desc = self.pool.get(open)?;
+        Ok((desc.kind, desc.offset))
+    }
+
+    pub(crate) fn set_description_offset(
+        &mut self,
+        open: OpenDescriptionId,
+        offset: u64,
+    ) -> Result<(), LinuxErrno> {
+        self.pool.get_mut(open)?.offset = offset;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -478,7 +544,8 @@ fn registry_mut() -> &'static mut LinuxFdRegistry {
     test,
     feature = "m9-linux-exec-self-test",
     feature = "m9-fd-core-self-test",
-    feature = "m9-linux-proc-self-test"
+    feature = "m9-linux-proc-self-test",
+    feature = "m9-linux-fs-self-test"
 ))]
 pub(crate) fn reset_registry_for_selftest() {
     unsafe { *LINUX_FD_REGISTRY.get() = LinuxFdRegistry::new() };
@@ -566,7 +633,46 @@ pub(crate) fn write_fd(
 }
 
 pub(crate) fn release_for_process(pid: u64, generation: InstanceGeneration) {
-    let _ = registry_mut().release(pid, generation);
+    let registry = registry_mut();
+    if registry.release(pid, generation) {
+        return;
+    }
+    registry.release_by_pid(pid);
+}
+
+pub(crate) fn release_for_process_by_pid(pid: u64) {
+    registry_mut().release_by_pid(pid);
+}
+
+pub(crate) fn release_stale_registry_slots<F>(mut registry_live: F)
+where
+    F: FnMut(u64) -> bool,
+{
+    let registry = registry_mut();
+    for index in 0..PROCESS_REGISTRY_CAPACITY {
+        if let Some(entry) = &registry.slots[index] {
+            if !registry_live(entry.pid) {
+                registry.release_by_pid(entry.pid);
+            }
+        }
+    }
+}
+
+impl LinuxFdRegistry {
+    fn release_by_pid(&mut self, pid: u64) {
+        let indices: [usize; PROCESS_REGISTRY_CAPACITY] = core::array::from_fn(|index| index);
+        for index in indices {
+            if matches!(
+                self.slots[index],
+                Some(entry) if entry.pid == pid
+            ) {
+                if let Some(entry) = &mut self.slots[index] {
+                    let _ = release_table(&mut entry.table, &mut self.pool);
+                }
+                self.slots[index] = None;
+            }
+        }
+    }
 }
 
 pub(crate) fn close_fd(
@@ -637,6 +743,76 @@ pub(crate) fn set_open_description_status(
     status: OpenStatus,
 ) -> Result<(), LinuxErrno> {
     registry_mut().set_open_description_status(pid, generation, fd, status)
+}
+
+pub(crate) fn alloc_lowest_fd(
+    pid: u64,
+    generation: InstanceGeneration,
+    open: OpenDescriptionId,
+    flags: FdFlags,
+) -> Result<i32, LinuxErrno> {
+    registry_mut().alloc_lowest_fd(pid, generation, open, flags)
+}
+
+pub(crate) fn alloc_file_description(
+    pid: u64,
+    generation: InstanceGeneration,
+    file: open_description::FileHandleRef,
+    status: OpenStatus,
+) -> Result<i32, LinuxErrno> {
+    registry_mut().alloc_description_and_fd(
+        pid,
+        generation,
+        DescriptorKind::File(file),
+        status,
+        FdFlags::default(),
+    )
+}
+
+pub(crate) fn alloc_dir_description(
+    pid: u64,
+    generation: InstanceGeneration,
+    dir: open_description::DirHandleRef,
+    status: OpenStatus,
+) -> Result<i32, LinuxErrno> {
+    registry_mut().alloc_description_and_fd(
+        pid,
+        generation,
+        DescriptorKind::Dir(dir),
+        status,
+        FdFlags::default(),
+    )
+}
+
+pub(crate) fn open_description_id_for_fd(
+    pid: u64,
+    generation: InstanceGeneration,
+    fd: u64,
+) -> Result<OpenDescriptionId, LinuxErrno> {
+    registry_mut().open_description_for_fd(pid, generation, fd)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct OpenDescriptionSnapshot {
+    pub kind: DescriptorKind,
+    pub offset: u64,
+}
+
+pub(crate) fn open_description_snapshot(
+    open: OpenDescriptionId,
+) -> Result<OpenDescriptionSnapshot, LinuxErrno> {
+    let (kind, offset) = registry_mut().open_description_view(open)?;
+    Ok(OpenDescriptionSnapshot { kind, offset })
+}
+
+pub(crate) fn set_open_description_offset(
+    pid: u64,
+    generation: InstanceGeneration,
+    fd: u64,
+    offset: u64,
+) -> Result<(), LinuxErrno> {
+    let open = open_description_id_for_fd(pid, generation, fd)?;
+    registry_mut().set_description_offset(open, offset)
 }
 
 pub(crate) fn dup_to_lowest_at_or_above(

@@ -82,6 +82,19 @@ impl LinuxProcessTable {
         Ok(())
     }
 
+    /// When a parent exits, reap any child still recorded (zombie or not yet reaped).
+    pub(crate) fn finalize_children_on_parent_exit(&mut self, parent: ProcId) {
+        let Some(parent_index) = self.slot_index(parent) else {
+            return;
+        };
+        let children = self.slots[parent_index].children;
+        for entry in children.iter().flatten() {
+            if !matches!(entry.state, ChildState::Reaped) {
+                self.reap_zombie(entry.child);
+            }
+        }
+    }
+
     pub(crate) fn publish_exit(&mut self, id: ProcId, status: i32) {
         let parent = self.parent_of(id);
         if let Some(parent_id) = parent {
@@ -179,6 +192,14 @@ impl LinuxProcessTable {
     pub(crate) fn retire_slot(&mut self, id: ProcId) {
         if let Some(index) = self.slot_index(id) {
             self.slots[index].live = false;
+            return;
+        }
+        if let Some(index) = self
+            .slots
+            .iter()
+            .position(|slot| slot.live && slot.id.pid == id.pid)
+        {
+            self.slots[index].live = false;
         }
     }
 
@@ -197,6 +218,18 @@ impl LinuxProcessTable {
 
     pub(crate) fn occupied(&self) -> usize {
         self.slots.iter().filter(|s| s.live).count()
+    }
+
+    /// Clears `live` on slots whose pid no longer exists in the process registry.
+    pub(crate) fn retire_stale_live_slots<F>(&mut self, mut registry_live: F)
+    where
+        F: FnMut(u64) -> bool,
+    {
+        for slot in &mut self.slots {
+            if slot.live && !registry_live(slot.id.pid) {
+                slot.live = false;
+            }
+        }
     }
 
     fn is_live(&self, id: ProcId) -> bool {
