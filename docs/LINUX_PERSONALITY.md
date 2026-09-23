@@ -141,6 +141,25 @@ Linux fd numbers must never be confused with capability handles.
 
 See also: [COMPATIBILITY.md](COMPATIBILITY.md), [ROADMAP.md](ROADMAP.md) (M8/M9), [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## M9 #104 — rootfs fixture
+
+Deterministic BusyBox rootfs bytes for M9 acceptance live in a bounded
+`CSROOTFS` v1 image (`clean-slate-rootfs`, manifest `fixtures/busybox/frozen/rootfs.toml`).
+Host verification: `cargo xtask verify-m9-fixture`. Provenance and layout:
+[fixtures/busybox/frozen/ROOTFS.md](../fixtures/busybox/frozen/ROOTFS.md).
+
+With `m9-rootfs`, `kernel/build.rs` embeds `$OUT_DIR/m9-rootfs.img` after verifying
+the frozen BusyBox SHA-256. `process::linux_rootfs::image()` parses the blob with
+the no_std reader (`lookup`, `children`, exact path bytes — no normalization).
+
+**Link semantics (#101):** `EntryKind::Link` stores the target path in `data`.
+Exec and path resolution for symlinks must preserve the **original** pathname
+(`argv[0]` / `AT_EXECFN`) so BusyBox selects the applet; do not rewrite to the
+link target before invoking the binary.
+
+Read-only image entries cover `/bin`, `/etc`, and applet links. Only `/tmp` carries
+the writable-root marker; durable writes traverse M5/M6 (#101), not the embed.
+
 ## M9 #146 — Linux exec / process image substrate
 
 `kernel/src/process/linux_exec.rs` generalizes the M8 loader into a bounded,

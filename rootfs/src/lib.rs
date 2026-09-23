@@ -32,13 +32,6 @@ impl EntryKind {
         }
     }
 
-    fn as_u8(self) -> u8 {
-        match self {
-            Self::Dir => KIND_DIR,
-            Self::File => KIND_FILE,
-            Self::Link => KIND_LINK,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,6 +122,10 @@ impl<'a> Image<'a> {
 
     pub fn len(&self) -> usize {
         self.entry_count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entry_count == 0
     }
 
     pub fn entry(&self, index: usize) -> Option<Entry<'a>> {

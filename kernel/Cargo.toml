@@ -58,6 +58,8 @@ m8-linux-hello = ["m8-linux-image"]
 m8-linux-hello-self-test = ["m8-linux-hello", "m3-entry-self-test"]
 m9-low-va-self-test = ["m8-linux-image", "m3-entry-self-test"]
 m9-linux-exec-self-test = ["m8-linux-image", "m3-entry-self-test"]
+m9-rootfs = ["dep:clean-slate-rootfs"]
+m9-rootfs-self-test = ["m9-rootfs", "m3-entry-self-test"]
 
 [lib]
 path = "src/lib.rs"
@@ -74,6 +76,7 @@ clean-slate-network = { path = "../network" }
 rand_core = { version = "=0.6.4", default-features = false, optional = true }
 clean-slate-capability = { path = "../capability" }
 clean-slate-linux-abi = { path = "../linux-abi" }
+clean-slate-rootfs = { path = "../rootfs", optional = true }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 clean-slate-store = { path = "../store", optional = true }
@@ -82,6 +85,7 @@ x86_64 = { version = "0.15.5", default-features = false, features = ["instructio
 
 [build-dependencies]
 clean-slate-elf = { path = "../elf" }
+clean-slate-rootfs = { path = "../rootfs", features = ["std"] }
 
 [lints]
 workspace = true

@@ -161,7 +161,7 @@ pub fn pack(
 }
 
 fn align_up(value: usize, align: usize) -> usize {
-    (value + align - 1) / align * align
+    value.div_ceil(align) * align
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -207,9 +207,9 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     msg.extend_from_slice(&bit_len.to_be_bytes());
     for chunk in msg.chunks(64) {
         let mut w = [0u32; 64];
-        for i in 0..16 {
+        for (i, word) in w.iter_mut().enumerate().take(16) {
             let j = i * 4;
-            w[i] = u32::from_be_bytes([chunk[j], chunk[j + 1], chunk[j + 2], chunk[j + 3]]);
+            *word = u32::from_be_bytes([chunk[j], chunk[j + 1], chunk[j + 2], chunk[j + 3]]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
