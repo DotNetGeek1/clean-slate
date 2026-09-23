@@ -65,7 +65,7 @@ fn udp_send_payload(
         .remote
         .as_ref()
         .ok_or(clean_slate_linux_abi::EDESTADDRREQ)
-        .map(|sa| socket_addr_v4(sa))?;
+        .map(socket_addr_v4)?;
     let session_gen = clean_slate_network::session::SessionGeneration::new(
         socket.session_generation,
     );
