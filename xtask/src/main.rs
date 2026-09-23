@@ -1777,11 +1777,22 @@ fn run_vm_inner_with_config(
     } else {
         workspace_root().join("target").join("OVMF_VARS.fd")
     };
-    if config.reset_ovmf_vars || !vars_copy.is_file() {
-        if let Some(parent) = vars_copy.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    // Every boot starts from the pristine variable store. OVMF rewrites NV
+    // variables on each boot and the harness SIGKILLs QEMU as soon as the
+    // markers match, so a store shared across ~50 boots accumulates partial
+    // writes / reclaim state; on CI that eventually left the firmware stuck
+    // before BDS (console escapes only, no `BdsDxe:` line) for whichever test
+    // happened to boot next. A fresh copy makes each boot independent.
+    if let Some(parent) = vars_copy.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if !same_file(&ovmf.vars_template, &vars_copy) {
         fs::copy(&ovmf.vars_template, &vars_copy)?;
+    } else {
+        eprintln!(
+            "warning: OVMF_VARS template is the working copy ({}); firmware variable state is shared across boots",
+            vars_copy.display()
+        );
     }
 
     let mut qemu = Command::new("qemu-system-x86_64");
@@ -2039,6 +2050,14 @@ fn kernel_artifact(release: bool) -> PathBuf {
         .join(KERNEL_TARGET)
         .join(profile)
         .join(format!("{KERNEL_PACKAGE}.efi"))
+}
+
+/// True when both paths name the same existing file (after canonicalisation).
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 fn find_ovmf() -> Result<OvmfPaths, XtaskError> {
