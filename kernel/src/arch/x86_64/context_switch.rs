@@ -24,6 +24,7 @@ use core::mem::size_of;
 )))]
 use core::ptr;
 
+use crate::arch::x86_64::asm::clean_slate_blocked_syscall_resume_from_schedule;
 use crate::arch::x86_64::asm::clean_slate_restore_context;
 #[cfg(not(any(
     feature = "m1-self-test",
@@ -39,7 +40,8 @@ use crate::arch::x86_64::gdt::userspace_gdt_state;
 use crate::arch::x86_64::interrupt_context::{InterruptContext, UserspaceEntryFrame};
 
 pub(crate) const FRESH_TASK_SENTINEL: u64 = u64::MAX;
-
+/// Returned by the timer/block path when the next thread resumes a blocked syscall.
+pub(crate) const SYSCALL_BLOCKED_RESUME_SENTINEL: u64 = u64::MAX - 2;
 /// Stack frames handed to the CPU must be 16-byte aligned; this is the only
 /// alignment the architecture layer needs, so it stays local rather than
 /// depending upward on `mm`.
@@ -154,6 +156,9 @@ pub(crate) fn resume_after_scheduler_handoff(
             let (stack_pointer, entry_point) = unsafe { next_task() };
             unsafe { start_first_task(stack_pointer, entry_point) }
         }
+        Some(SYSCALL_BLOCKED_RESUME_SENTINEL) => unsafe {
+            clean_slate_blocked_syscall_resume_from_schedule()
+        },
         Some(stack_pointer) => unsafe { restore_task_context(stack_pointer) },
         None => fatal_kernel_error(no_runnable_message),
     }

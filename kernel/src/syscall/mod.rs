@@ -137,6 +137,14 @@ const SYSCALL_NR_LIFECYCLE_CONTROL: u64 = 4;
 const SYSCALL_NR_LIFECYCLE_POLL: u64 = 5;
 const SYSCALL_NR_BLOCK_CAPABILITY: u64 = 6;
 const SYSCALL_NR_BLOCK_REQUEST: u64 = 7;
+#[cfg(feature = "m9-block-wake-self-test")]
+const SYSCALL_NR_WAIT_BLOCK: u64 = 100;
+#[cfg(feature = "m9-block-wake-self-test")]
+const SYSCALL_NR_WAIT_WAKE: u64 = 101;
+#[cfg(feature = "m9-block-wake-self-test")]
+const SYSCALL_NR_WAIT_PROGRESS: u64 = 102;
+#[cfg(feature = "m9-block-wake-self-test")]
+const SYSCALL_NR_WAIT_YIELD: u64 = 103;
 const SYSCALL_ENOSYS: u64 = u64::MAX - 37;
 pub(super) const SYSCALL_EACCES: u64 = u64::MAX - 12;
 const SYSCALL_EINVAL: u64 = u64::MAX - 21;
@@ -758,6 +766,21 @@ fn resume_after_syscall_containment(next_stack_pointer: Option<u64>) -> ! {
     )
 }
 
+/// Narrow hook for native blocking from syscall handlers (#145).
+#[cfg_attr(not(feature = "m9-block-wake-self-test"), allow(dead_code))]
+pub(crate) fn block_current_syscall(
+    frame: &mut SyscallContext,
+    key: crate::sched::wait::WaitKey,
+    deadline: Option<crate::sched::wait::Deadline>,
+) {
+    match crate::sched::wait::block_current_thread(frame, key, deadline) {
+        Ok(outcome) => {
+            frame.rax = crate::sched::wait::encode_wait_outcome(outcome);
+        }
+        Err(message) => fatal_kernel_error(message),
+    }
+}
+
 fn dispatch_native(frame: &mut SyscallContext) {
     match frame.rax {
         SYSCALL_NR_VERSION => {
@@ -823,6 +846,22 @@ fn dispatch_native(frame: &mut SyscallContext) {
         SYSCALL_NR_LIFECYCLE_POLL => handle_syscall_lifecycle_poll(frame),
         SYSCALL_NR_BLOCK_CAPABILITY => handle_syscall_block_capability(frame),
         SYSCALL_NR_BLOCK_REQUEST => handle_syscall_block_request(frame),
+        #[cfg(feature = "m9-block-wake-self-test")]
+        SYSCALL_NR_WAIT_BLOCK => {
+            crate::selftest::m9_block_wake::handle_wait_block_syscall(frame);
+        }
+        #[cfg(feature = "m9-block-wake-self-test")]
+        SYSCALL_NR_WAIT_WAKE => {
+            crate::selftest::m9_block_wake::handle_wait_wake_syscall(frame);
+        }
+        #[cfg(feature = "m9-block-wake-self-test")]
+        SYSCALL_NR_WAIT_PROGRESS => {
+            crate::selftest::m9_block_wake::handle_wait_progress_syscall(frame);
+        }
+        #[cfg(feature = "m9-block-wake-self-test")]
+        SYSCALL_NR_WAIT_YIELD => {
+            crate::selftest::m9_block_wake::handle_wait_yield_syscall(frame);
+        }
         // M6 capability-controlled services: numbers reserved in clean_slate_capability.
         cap_abi::SYSCALL_NR_CAP_OBJECT => crate::capability::object::handle_syscall(frame),
         cap_abi::SYSCALL_NR_CAP_PROCESS_CONTROL => {

@@ -62,6 +62,7 @@ mod service;
         feature = "m9-syscall-fail-closed-self-test",
         feature = "m9-linux-exec-self-test",
         feature = "m9-fd-core-self-test",
+        feature = "m9-block-wake-self-test",
         feature = "m3-syscall-self-test",
         feature = "m4-service-lifecycle-self-test",
         feature = "m5-block-self-test",

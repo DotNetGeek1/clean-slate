@@ -175,6 +175,18 @@ const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS: [&str; 3] = [
     "[SYSC] unresolved caller reason=syscall caller process did not match active address space fail-closed",
     "[M9.C] PASS",
 ];
+const M9_BLOCK_WAKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(45);
+const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 9] = [
+    "[TIME] timer initialized",
+    "[M9.E] idle_ticks=",
+    "[M9.E] timeout resumed after idle",
+    "[M9.E] blocked tid=",
+    "[M9.E] no progress while blocked",
+    "[M9.E] woken ",
+    "[M9.E] timeout resumed",
+    "[M9.E] cycles=8 waiters=0",
+    "[M9.E] PASS",
+];
 const M9_FD_CORE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M9_FD_CORE_ACCEPTANCE_MARKERS: [&str; 10] = [
     "[TIME] timer initialized",
@@ -638,6 +650,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM3Syscall => run_m3_syscall_acceptance(),
         ParsedCommand::TestM8LinuxDispatch => run_m8_linux_dispatch_acceptance(),
         ParsedCommand::TestM9SyscallFailClosed => run_m9_syscall_fail_closed_acceptance(),
+        ParsedCommand::TestM9BlockWake => run_m9_block_wake_acceptance(),
         ParsedCommand::TestM9FdCore => run_m9_fd_core_acceptance(),
         ParsedCommand::TestM8LinuxHello => run_m8_linux_hello_acceptance(),
         ParsedCommand::TestM8 => run_m8_acceptance(),
@@ -1104,6 +1117,18 @@ fn run_m9_syscall_fail_closed_acceptance() -> Result<(), XtaskError> {
         Some((
             &M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS,
             M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn run_m9_block_wake_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m9-block-wake-self-test"],
+        Some((
+            &M9_BLOCK_WAKE_ACCEPTANCE_MARKERS,
+            M9_BLOCK_WAKE_ACCEPTANCE_TIMEOUT,
         )),
     )
 }
@@ -2524,6 +2549,7 @@ fn print_help() {
     println!("  test-m3-syscall Build the M3.3 syscall-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m8-linux-dispatch Build the M8.3 Linux personality dispatch kernel, run QEMU, and validate [M8.3] PASS");
     println!("  test-m9-syscall-fail-closed Build the M9 #143 fail-closed syscall kernel, run QEMU, and validate [M9.C] PASS");
+    println!("  test-m9-block-wake Build the M9 #145 block/wake scheduler kernel, run QEMU, and validate [M9.E] PASS");
     println!("  test-m9-fd-core Build the M9 #147 fd-core kernel, run QEMU, and validate pool equality + [M9.G] PASS (aliases: m9-fd-core, m9.147)");
     println!("  test-m8-linux-hello Boot M8.7 self-test then production feature (hello + clean [M2] PASS); 40s for two launches (aliases: m8-linux-hello, m8.7)");
     println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
@@ -2605,6 +2631,7 @@ enum ParsedCommand {
     TestM3Syscall,
     TestM8LinuxDispatch,
     TestM9SyscallFailClosed,
+    TestM9BlockWake,
     TestM9FdCore,
     TestM8LinuxHello,
     TestM8,
@@ -2675,6 +2702,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
                 || cmd == "m9.143" =>
         {
             ParsedCommand::TestM9SyscallFailClosed
+        }
+        Some(cmd) if cmd == "test-m9-block-wake" || cmd == "m9-block-wake" || cmd == "m9.145" => {
+            ParsedCommand::TestM9BlockWake
         }
         Some(cmd) if cmd == "test-m9-fd-core" || cmd == "m9-fd-core" || cmd == "m9.147" => {
             ParsedCommand::TestM9FdCore

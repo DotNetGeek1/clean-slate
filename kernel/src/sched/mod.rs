@@ -3,63 +3,45 @@
 
 pub(crate) mod demo_tasks;
 pub(crate) mod dispatch;
+pub(crate) mod idle;
+pub(crate) mod wait;
+
+/// Application / userspace thread slots (`MAX_WAITERS` matches this count).
+pub(super) const TASK_COUNT: usize = task_count_for_features();
+/// Includes one dedicated idle thread slot at `IDLE_THREAD_INDEX`.
+pub(super) const SCHEDULER_THREAD_SLOTS: usize = TASK_COUNT + 1;
+pub(super) const IDLE_THREAD_INDEX: usize = TASK_COUNT;
+
+const fn task_count_for_features() -> usize {
+    if cfg!(feature = "m6-revocation-self-test") {
+        8
+    } else if cfg!(feature = "m6-capabilities-self-test") {
+        9
+    } else if cfg!(any(
+        feature = "m4-recovery-self-test",
+        feature = "m6-fixture-smoke-self-test",
+        feature = "m6-process-control-self-test",
+        feature = "m6-delegation-self-test",
+        feature = "m7-net-caps-self-test",
+        feature = "m7-net-service-self-test",
+        feature = "m6-object-self-test",
+        feature = "m6-audit-self-test"
+    )) {
+        6
+    } else if cfg!(feature = "m8-linux-hello") {
+        3
+    } else {
+        2
+    }
+}
 use crate::arch::x86_64::context_switch::set_next_task;
 use crate::arch::x86_64::context_switch::TaskStack;
 use crate::arch::x86_64::context_switch::FRESH_TASK_SENTINEL;
+use crate::arch::x86_64::context_switch::SYSCALL_BLOCKED_RESUME_SENTINEL;
 use crate::arch::x86_64::context_switch::TASK_STACK_SIZE;
 use crate::process::KERNEL_PROCESS_ID;
 use crate::sync::global_cell::GlobalCell;
 
-#[cfg(feature = "m6-revocation-self-test")]
-const TASK_COUNT: usize = 8;
-#[cfg(feature = "m6-capabilities-self-test")]
-const TASK_COUNT: usize = 9;
-#[cfg(all(
-    not(feature = "m6-revocation-self-test"),
-    not(feature = "m6-capabilities-self-test"),
-    any(
-        feature = "m4-recovery-self-test",
-        feature = "m6-fixture-smoke-self-test",
-        feature = "m6-process-control-self-test",
-        feature = "m6-delegation-self-test",
-        feature = "m7-net-caps-self-test",
-        feature = "m7-net-service-self-test",
-        feature = "m6-object-self-test",
-        feature = "m6-audit-self-test"
-    )
-))]
-const TASK_COUNT: usize = 6;
-/// Production `m8-linux-hello`: both demo kernel tasks plus Linux hello in slot 2.
-#[cfg(all(
-    not(feature = "m6-revocation-self-test"),
-    not(feature = "m6-capabilities-self-test"),
-    not(any(
-        feature = "m4-recovery-self-test",
-        feature = "m6-fixture-smoke-self-test",
-        feature = "m6-process-control-self-test",
-        feature = "m6-delegation-self-test",
-        feature = "m7-net-caps-self-test",
-        feature = "m7-net-service-self-test",
-        feature = "m6-object-self-test",
-        feature = "m6-audit-self-test"
-    )),
-    feature = "m8-linux-hello"
-))]
-const TASK_COUNT: usize = 3;
-#[cfg(not(any(
-    feature = "m4-recovery-self-test",
-    feature = "m6-fixture-smoke-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m7-net-caps-self-test",
-    feature = "m7-net-service-self-test",
-    feature = "m8-linux-hello"
-)))]
-const TASK_COUNT: usize = 2;
 pub(super) const TASK_REQUIRED_PREEMPTIONS: u64 = 2;
 const TASK_PROGRESS_CHUNK: u64 = 4_096;
 
@@ -69,6 +51,7 @@ pub(super) enum ThreadState {
     Empty,
     Ready,
     Running,
+    Blocked,
     Exiting,
     Exited,
     Reaped,
@@ -93,6 +76,9 @@ pub(super) struct Thread {
     pub(crate) progress_logged: bool,
     pub(crate) preemptions: u64,
     pub(crate) observed_progress: u64,
+    /// Syscall `SyscallContext` pointer while blocked inside a syscall handler.
+    pub(crate) blocked_syscall_frame: u64,
+    pub(crate) wait_resume_outcome: wait::WaitOutcome,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -115,11 +101,13 @@ impl Thread {
         progress_logged: false,
         preemptions: 0,
         observed_progress: 0,
+        blocked_syscall_frame: 0,
+        wait_resume_outcome: wait::WaitOutcome::Woken,
     };
 }
 
 pub(crate) struct Scheduler {
-    pub(super) threads: [Thread; TASK_COUNT],
+    pub(super) threads: [Thread; SCHEDULER_THREAD_SLOTS],
     pub(super) current_thread: Option<usize>,
     preemption_observed: bool,
     preemption_logged: bool,
@@ -130,7 +118,7 @@ pub(crate) struct Scheduler {
 impl Scheduler {
     pub(super) const fn new() -> Self {
         Self {
-            threads: [Thread::EMPTY; TASK_COUNT],
+            threads: [Thread::EMPTY; SCHEDULER_THREAD_SLOTS],
             current_thread: None,
             preemption_observed: false,
             preemption_logged: false,
@@ -182,6 +170,8 @@ impl Scheduler {
             progress_logged: false,
             preemptions: 0,
             observed_progress: 0,
+            blocked_syscall_frame: 0,
+            wait_resume_outcome: wait::WaitOutcome::Woken,
         };
         Ok(())
     }
@@ -250,7 +240,10 @@ impl Scheduler {
             if thread.owner_process_id != process_id || thread.id == keep_thread_id {
                 continue;
             }
-            if matches!(thread.state, ThreadState::Ready | ThreadState::Running) {
+            if matches!(
+                thread.state,
+                ThreadState::Ready | ThreadState::Running | ThreadState::Blocked
+            ) {
                 thread.state = ThreadState::Exited;
                 retired += 1;
             }
@@ -269,7 +262,10 @@ impl Scheduler {
             }
             if matches!(
                 thread.state,
-                ThreadState::Ready | ThreadState::Running | ThreadState::Exiting
+                ThreadState::Ready
+                    | ThreadState::Running
+                    | ThreadState::Blocked
+                    | ThreadState::Exiting
             ) {
                 thread.state = ThreadState::Exited;
                 exited += 1;
@@ -315,16 +311,16 @@ impl Scheduler {
     }
 
     pub(crate) fn thread_capacity(&self) -> usize {
-        self.threads.len()
+        TASK_COUNT
     }
 
     pub(crate) fn first_empty_slot_from(&self, start: usize) -> Option<usize> {
-        if self.threads.is_empty() {
+        if TASK_COUNT == 0 {
             return None;
         }
-        let start = start % self.threads.len();
-        for offset in 0..self.threads.len() {
-            let index = (start + offset) % self.threads.len();
+        let start = start % TASK_COUNT;
+        for offset in 0..TASK_COUNT {
+            let index = (start + offset) % TASK_COUNT;
             if self.threads[index].state == ThreadState::Empty {
                 return Some(index);
             }
@@ -336,13 +332,19 @@ impl Scheduler {
         &mut self,
         process_id: u64,
     ) -> Result<usize, &'static str> {
+        if let Some(generation) = crate::process::live_instance_generation(process_id) {
+            wait::cancel_waiters_for_process(process_id, generation);
+        }
         for thread in &self.threads {
             if thread.owner_process_id != process_id || thread.state == ThreadState::Empty {
                 continue;
             }
             if matches!(
                 thread.state,
-                ThreadState::Ready | ThreadState::Running | ThreadState::Exiting
+                ThreadState::Ready
+                    | ThreadState::Running
+                    | ThreadState::Blocked
+                    | ThreadState::Exiting
             ) {
                 return Err("thread remained runnable during process teardown");
             }
@@ -350,6 +352,9 @@ impl Scheduler {
 
         let mut reaped = 0usize;
         for (index, thread) in self.threads.iter_mut().enumerate() {
+            if index == IDLE_THREAD_INDEX {
+                continue;
+            }
             if thread.owner_process_id != process_id || thread.state == ThreadState::Empty {
                 continue;
             }
@@ -370,18 +375,27 @@ impl Scheduler {
             .current_thread
             .ok_or("timer interrupt arrived before a current thread existed")?;
 
+        if current == IDLE_THREAD_INDEX {
+            return self.on_timer_interrupt_while_idle(current_stack_pointer);
+        }
+
         {
             let thread = &mut self.threads[current];
-            thread.saved_stack_pointer = current_stack_pointer;
-            thread.preemptions += 1;
-            if thread.state == ThreadState::Running {
-                thread.state = ThreadState::Ready;
+            if thread.state != ThreadState::Blocked {
+                thread.saved_stack_pointer = current_stack_pointer;
+                thread.preemptions += 1;
+                if thread.state == ThreadState::Running {
+                    thread.state = ThreadState::Ready;
+                }
             }
         }
 
-        let next = self
-            .next_runnable_from(Some(current))
-            .ok_or("scheduler lost all runnable threads during timer interrupt")?;
+        let Some(next) = self.next_runnable_from(Some(current)) else {
+            if self.has_blocked_threads() {
+                return idle::handoff_to_idle_thread();
+            }
+            return Err("scheduler lost all runnable threads during timer interrupt");
+        };
         self.current_thread = Some(next);
         self.threads[next].state = ThreadState::Running;
         if next != current && !self.preemption_observed {
@@ -401,7 +415,96 @@ impl Scheduler {
             }
         }
 
-        Ok(self.threads[next].saved_stack_pointer)
+        self.dispatch_handoff_stack_pointer(self.threads[next].saved_stack_pointer, next)
+    }
+
+    pub(super) fn has_blocked_threads(&self) -> bool {
+        self.threads
+            .iter()
+            .any(|thread| thread.state == ThreadState::Blocked)
+    }
+
+    pub(super) fn yield_from_blocked_thread(&mut self) -> Result<u64, &'static str> {
+        let current = self
+            .current_thread
+            .ok_or("block yield required a current thread")?;
+        if self.threads[current].state != ThreadState::Blocked {
+            return Err("block yield required blocked thread state");
+        }
+        let Some(next) = self.next_runnable_from(Some(current)) else {
+            if self.has_blocked_threads() {
+                return idle::handoff_to_idle_thread();
+            }
+            return Err("scheduler lost all runnable threads during block yield");
+        };
+        self.current_thread = Some(next);
+        self.threads[next].state = ThreadState::Running;
+        if !self.threads[next].started {
+            self.threads[next].started = true;
+            if self.threads[next].kind == ThreadKind::Kernel {
+                unsafe {
+                    set_next_task(
+                        self.threads[next].saved_stack_pointer,
+                        self.threads[next].launch_entry,
+                    );
+                }
+                return Ok(FRESH_TASK_SENTINEL);
+            }
+        }
+        self.dispatch_handoff_stack_pointer(self.threads[next].saved_stack_pointer, next)
+    }
+
+    fn dispatch_handoff_stack_pointer(
+        &mut self,
+        next_stack_pointer: u64,
+        thread_index: usize,
+    ) -> Result<u64, &'static str> {
+        let handoff = wait::scheduler_handoff_stack_pointer(next_stack_pointer, thread_index);
+        if handoff == SYSCALL_BLOCKED_RESUME_SENTINEL {
+            return idle::handoff_to_idle_thread();
+        }
+        Ok(handoff)
+    }
+
+    pub(super) fn on_timer_interrupt_while_idle(
+        &mut self,
+        current_stack_pointer: u64,
+    ) -> Result<u64, &'static str> {
+        let idle = IDLE_THREAD_INDEX;
+        self.threads[idle].saved_stack_pointer = current_stack_pointer;
+        // Stay in the idle loop across the interrupt return; it runs deadline expiry
+        // and blocked-syscall resume with the correct dispatch preparation.
+        Ok(current_stack_pointer)
+    }
+
+    pub(super) fn wake_from_idle_loop(&mut self) -> Result<u64, &'static str> {
+        let idle = IDLE_THREAD_INDEX;
+        if let Some(next) = self.next_runnable_from(Some(idle)) {
+            self.threads[idle].state = ThreadState::Ready;
+            self.current_thread = Some(next);
+            self.threads[next].state = ThreadState::Running;
+            return Ok(wait::scheduler_handoff_stack_pointer(
+                self.threads[next].saved_stack_pointer,
+                next,
+            ));
+        }
+        Err("idle woke without a runnable thread")
+    }
+
+    pub(super) fn pick_next_runnable_stack_pointer(&mut self) -> Result<u64, &'static str> {
+        let current = self.current_thread;
+        let Some(next) = self.next_runnable_from(current) else {
+            if self.has_blocked_threads() {
+                return Err("idle woke without a runnable thread");
+            }
+            return Err("scheduler lost all runnable threads during idle wake");
+        };
+        self.current_thread = Some(next);
+        self.threads[next].state = ThreadState::Running;
+        Ok(wait::scheduler_handoff_stack_pointer(
+            self.threads[next].saved_stack_pointer,
+            next,
+        ))
     }
 
     fn note_progress(&mut self, thread_id: u64, progress: u64) {
@@ -459,7 +562,10 @@ impl Scheduler {
         // Unused slots stay Empty; reaped userspace slots are cleared to Empty
         // (or briefly Reaped). Treat those as finished so demo-task boot tails
         // still emit `[M2  ] PASS` when a Linux process has already exited.
-        self.threads.iter().all(|thread| {
+        self.threads.iter().enumerate().all(|(index, thread)| {
+            if index == IDLE_THREAD_INDEX {
+                return matches!(thread.state, ThreadState::Empty | ThreadState::Ready);
+            }
             matches!(
                 thread.state,
                 ThreadState::Exited | ThreadState::Empty | ThreadState::Reaped
@@ -471,6 +577,9 @@ impl Scheduler {
         let start = current.map_or(0, |index| (index + 1) % self.threads.len());
         for offset in 0..self.threads.len() {
             let index = (start + offset) % self.threads.len();
+            if index == IDLE_THREAD_INDEX {
+                continue;
+            }
             if matches!(
                 self.threads[index].state,
                 ThreadState::Ready | ThreadState::Running
@@ -502,21 +611,74 @@ pub(crate) unsafe fn scheduler_mut() -> &'static mut Scheduler {
     unsafe { &mut *SCHEDULER.get() }
 }
 
-static TASK_STACKS: GlobalCell<[TaskStack; TASK_COUNT]> =
-    GlobalCell::new([const { TaskStack([0; TASK_STACK_SIZE]) }; TASK_COUNT]);
+static TASK_STACKS: GlobalCell<[TaskStack; SCHEDULER_THREAD_SLOTS]> =
+    GlobalCell::new([const { TaskStack([0; TASK_STACK_SIZE]) }; SCHEDULER_THREAD_SLOTS]);
 
 /// Returns the kernel task stacks for call sites that hold the reference across other calls.
 ///
 /// # Safety
 /// The caller must ensure no other live reference to the kernel task stacks exists for the
 /// lifetime of the returned borrow.
-pub(crate) unsafe fn task_stacks_mut() -> &'static mut [TaskStack; TASK_COUNT] {
+pub(crate) unsafe fn task_stacks_mut() -> &'static mut [TaskStack; SCHEDULER_THREAD_SLOTS] {
     unsafe { &mut *TASK_STACKS.get() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_timer_ticks_stay_on_idle_stack_until_app_wake() {
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .configure_kernel_thread(0, 1, 0x1000, 0x1000)
+            .expect("task 1");
+        scheduler
+            .configure_kernel_thread(1, 2, 0x2000, 0x2000)
+            .expect("task 2");
+        scheduler
+            .configure_kernel_thread(IDLE_THREAD_INDEX, 9_999, 0x3000, 0x3000)
+            .expect("idle");
+        scheduler.threads[0].state = ThreadState::Blocked;
+        scheduler.threads[1].state = ThreadState::Blocked;
+        scheduler.threads[IDLE_THREAD_INDEX].started = true;
+        scheduler.threads[IDLE_THREAD_INDEX].state = ThreadState::Running;
+        scheduler.current_thread = Some(IDLE_THREAD_INDEX);
+        const IDLE_RSP: u64 = 0x3010;
+        for tick in 0..200 {
+            let result = scheduler
+                .on_timer_interrupt(IDLE_RSP)
+                .unwrap_or_else(|_| panic!("tick {tick}"));
+            assert_eq!(result, IDLE_RSP, "tick {tick}");
+            if tick == 150 {
+                scheduler.threads[0].state = ThreadState::Ready;
+                assert_eq!(
+                    scheduler.wake_from_idle_loop().expect("wake"),
+                    0x1000,
+                    "tick {tick}"
+                );
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn timer_tick_runs_unrelated_ready_thread_while_peer_blocked() {
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .configure_kernel_thread(0, 1, 0x1000, 0x1000)
+            .expect("task 1");
+        scheduler
+            .configure_kernel_thread(1, 2, 0x2000, 0x2000)
+            .expect("task 2");
+        scheduler.current_thread = Some(0);
+        scheduler.threads[0].state = ThreadState::Blocked;
+        scheduler.threads[1].state = ThreadState::Ready;
+        scheduler.threads[1].started = true;
+        assert_eq!(scheduler.on_timer_interrupt(0x1110).expect("tick"), 0x2000);
+        assert_eq!(scheduler.current_thread, Some(1));
+        assert_eq!(scheduler.threads[1].state, ThreadState::Running);
+    }
 
     #[test]
     fn scheduler_round_robins_and_tracks_preemption_progress() {
