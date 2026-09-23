@@ -260,6 +260,7 @@ fn create_resource_process(
         kind: ThreadKind::User,
         kernel_stack_top,
         saved_stack_pointer,
+        userspace_initial_stack: user_stack_pointer,
         launch_entry: USER_TEST_CODE_ADDRESS,
         started: false,
         state: ThreadState::Ready,

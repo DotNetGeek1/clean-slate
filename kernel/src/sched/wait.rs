@@ -5,7 +5,6 @@
 //! `Deadline` is an absolute `kernel_ticks()` value (APIC timer increments; uncalibrated).
 
 use crate::arch::x86_64::context_switch::resume_after_scheduler_handoff;
-use crate::arch::x86_64::context_switch::SYSCALL_BLOCKED_RESUME_SENTINEL;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
@@ -62,6 +61,8 @@ pub(crate) enum BlockedResume {
     /// `Woken`/`Cancelled`: `user_rip -= SYSCALL_INSTRUCTION_BYTES`, `RAX = nr`.
     /// `TimedOut`: `RAX = timeout_rax` (already errno-encoded by the caller).
     RestartSyscall { nr: u64, timeout_rax: u64 },
+    /// `sysretq` the saved frame unchanged (used when yielding mid-syscall after waking a peer).
+    CompleteInPlace,
 }
 
 /// Length of the `syscall` instruction (`0F 05`); SYSCALL saves the address of
@@ -110,6 +111,7 @@ pub(crate) fn apply_blocked_resume(
                 frame.rax = nr;
             }
         },
+        BlockedResume::CompleteInPlace => {}
     }
 }
 
@@ -287,6 +289,31 @@ pub(crate) fn wake_all(key: WaitKey) -> usize {
 }
 
 /// Voluntary yield from a syscall handler; may resume via blocked-syscall sentinel.
+/// Yield to a runnable peer after waking a blocked syscall waiter from the current
+/// syscall handler, then resume this thread's syscall via `CompleteInPlace`.
+pub(crate) fn yield_after_waking_blocked_peer(frame: *mut SyscallContext) -> ! {
+    let next = without_interrupts(|| {
+        let scheduler = unsafe { scheduler_mut() };
+        let current = scheduler
+            .current_thread
+            .ok_or("wake yield required current thread")?;
+        let thread = &mut scheduler.threads[current];
+        thread.blocked_syscall_frame = frame as u64;
+        thread.wait_resume_outcome = WaitOutcome::Woken;
+        set_blocked_resume(current, BlockedResume::CompleteInPlace);
+        thread.state = ThreadState::Ready;
+        scheduler.pick_next_runnable_stack_pointer()
+    })
+    .unwrap_or_else(|message| crate::diagnostics::qemu::fatal_kernel_error(message));
+    if let Err(message) = prepare_current_scheduler_thread_dispatch() {
+        crate::diagnostics::qemu::fatal_kernel_error(message);
+    }
+    resume_after_scheduler_handoff(
+        Some(next),
+        "no runnable thread remained after wake yield",
+    )
+}
+
 pub(crate) fn voluntary_yield_from_syscall(frame: *mut SyscallContext) -> ! {
     let next = without_interrupts(|| {
         arm_syscall_block_frame(frame);
@@ -418,12 +445,14 @@ fn scheduler_block_and_switch() -> ! {
     resume_after_scheduler_handoff(Some(next), "no runnable thread remained after block")
 }
 
-pub(crate) fn scheduler_handoff_stack_pointer(next_stack_pointer: u64, thread_index: usize) -> u64 {
+pub(crate) fn scheduler_handoff_stack_pointer(
+    next_stack_pointer: u64,
+    thread_index: usize,
+) -> u64 {
     let scheduler = unsafe { scheduler_mut() };
-    if scheduler.threads[thread_index].blocked_syscall_frame != 0 {
-        return SYSCALL_BLOCKED_RESUME_SENTINEL;
-    }
-    next_stack_pointer
+    scheduler
+        .handoff_stack_for_thread(thread_index, next_stack_pointer)
+        .unwrap_or_else(|message| crate::diagnostics::qemu::fatal_kernel_error(message))
 }
 
 pub(crate) fn clear_wait_table_for_tests() {

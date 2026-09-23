@@ -117,6 +117,7 @@ pub(crate) fn spawn_native_userspace_process_with_code(
         kind: ThreadKind::User,
         kernel_stack_top,
         saved_stack_pointer,
+        userspace_initial_stack: user_stack_pointer,
         launch_entry: USER_TEST_CODE_ADDRESS,
         started: false,
         state: ThreadState::Ready,
