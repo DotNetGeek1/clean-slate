@@ -39,7 +39,6 @@ const fn task_count_for_features() -> usize {
 use crate::arch::x86_64::context_switch::set_next_task;
 use crate::arch::x86_64::context_switch::TaskStack;
 use crate::arch::x86_64::context_switch::FRESH_TASK_SENTINEL;
-use crate::arch::x86_64::context_switch::SYSCALL_BLOCKED_RESUME_SENTINEL;
 use crate::arch::x86_64::context_switch::TASK_STACK_SIZE;
 use crate::process::KERNEL_PROCESS_ID;
 use crate::sync::global_cell::GlobalCell;
@@ -461,11 +460,15 @@ impl Scheduler {
         next_stack_pointer: u64,
         thread_index: usize,
     ) -> Result<u64, &'static str> {
-        let handoff = wait::scheduler_handoff_stack_pointer(next_stack_pointer, thread_index);
-        if handoff == SYSCALL_BLOCKED_RESUME_SENTINEL {
-            return idle::handoff_to_idle_thread();
-        }
-        Ok(handoff)
+        // A woken blocked thread hands back `SYSCALL_BLOCKED_RESUME_SENTINEL`, which
+        // the interrupt/yield return asm routes to
+        // `clean_slate_blocked_syscall_resume_from_schedule`. Bouncing that case to
+        // idle instead (as this once did) starved the woken thread: the idle wake
+        // round-robin re-picked the lower slot every time it blocked again.
+        Ok(wait::scheduler_handoff_stack_pointer(
+            next_stack_pointer,
+            thread_index,
+        ))
     }
 
     pub(super) fn on_timer_interrupt_while_idle(

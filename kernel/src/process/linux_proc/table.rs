@@ -284,25 +284,24 @@ pub(crate) fn exit_status_word(exit_code: u32, fault_signal: Option<u32>) -> i32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::process_registry_mut;
+
+    // Host tests run in parallel threads: each test owns its table rather than
+    // resetting the shared `LINUX_PROC_TABLE` static, and the two tests use
+    // disjoint pids so the shared process registry cannot cross-talk.
 
     #[test]
     fn zombie_reap_and_stale_generation() {
-        reset_for_selftest();
-        unsafe {
-            process_registry_mut().clear();
-        }
-        let table = table_mut();
+        let mut table = LinuxProcessTable::new();
         let init = ProcId {
-            pid: 1,
+            pid: 11,
             generation: InstanceGeneration(1),
         };
         let parent = ProcId {
-            pid: 2,
+            pid: 12,
             generation: InstanceGeneration(1),
         };
         let child = ProcId {
-            pid: 3,
+            pid: 13,
             generation: InstanceGeneration(1),
         };
         table
@@ -318,7 +317,7 @@ mod tests {
         table.register(child, parent).unwrap();
         table.publish_exit(child, w_exitcode(3));
         let found = table.find_zombie_child(parent, -1).expect("zombie");
-        assert_eq!(found.0.pid, 3);
+        assert_eq!(found.0.pid, 13);
         assert_eq!(found.1, 768);
         table.reap_zombie(child);
         assert!(!table.has_any_child(parent));
@@ -330,11 +329,7 @@ mod tests {
             personality::ExecutionPersonality, process_registry_mut, Process, ProcessState,
             ResourceDomain,
         };
-        reset_for_selftest();
-        unsafe {
-            process_registry_mut().clear();
-        }
-        let table = table_mut();
+        let mut table = LinuxProcessTable::new();
         let init = ProcId {
             pid: 1,
             generation: InstanceGeneration(1),

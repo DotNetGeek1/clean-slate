@@ -342,10 +342,12 @@ pub(crate) fn write_fd(
 mod tests {
     use super::*;
 
+    // Host tests run in parallel threads; each test owns its pool instead of
+    // resetting the shared `PIPE_POOL` static (that raced between tests).
+
     #[test]
     fn epipe_after_both_read_ends_released() {
-        reset_for_selftest();
-        let pool = pool_mut();
+        let mut pool = PipePool::new();
         let handle = pool.alloc_pipe().unwrap();
         pool.add_reader(handle);
         pool.add_reader(handle);
@@ -360,8 +362,7 @@ mod tests {
 
     #[test]
     fn ring_wrap_partial_write_eof_epipe() {
-        reset_for_selftest();
-        let pool = pool_mut();
+        let mut pool = PipePool::new();
         let handle = pool.alloc_pipe().unwrap();
         pool.add_reader(handle);
         pool.add_writer(handle);
