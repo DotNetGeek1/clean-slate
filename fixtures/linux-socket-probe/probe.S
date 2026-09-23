@@ -78,15 +78,15 @@ write_lit:
 
 exit_fail:
     mov     rax, 60
-    mov     rdi, 1
     syscall
 
 expect_errno:
-    /* rdi = expected positive errno */
+    /* ebx = step exit code, rdi = expected positive errno */
     neg     rdi
     cmp     rax, rdi
     je      .Lexp_ok
-    call    exit_fail
+    mov     rdi, rbx
+    jmp     exit_fail
 .Lexp_ok:
     ret
 
@@ -118,6 +118,7 @@ _start:
     mov     rsi, 2
     xor     rdx, rdx
     syscall
+    mov     ebx, 2
     mov     rdi, 97
     call    expect_errno
 
@@ -127,6 +128,7 @@ _start:
     mov     rsi, 3
     xor     rdx, rdx
     syscall
+    mov     ebx, 3
     mov     rdi, 93
     call    expect_errno
 
@@ -143,7 +145,12 @@ _start:
     mov     rax, 49
     syscall
     cmp     rax, 0
-    jne     exit_fail
+    jne     .Lfail_bind
+    jmp     .Lafter_bind
+.Lfail_bind:
+    mov     rdi, 10
+    jmp     exit_fail
+.Lafter_bind:
 
     mov     rdi, r12
     lea     rsi, [rip + dns_query_a]
@@ -154,7 +161,12 @@ _start:
     mov     rax, 44
     syscall
     cmp     rax, 0
-    jl      exit_fail
+    jl      .Lfail_dns_send
+    jmp     .Lafter_dns_send
+.Lfail_dns_send:
+    mov     rdi, 11
+    jmp     exit_fail
+.Lafter_dns_send:
 
     mov     rdi, r12
     lea     rsi, [rip + dns_reply]
@@ -162,19 +174,44 @@ _start:
     xor     rax, rax
     syscall
     cmp     rax, 0
-    jle     exit_fail
+    jle     .Lfail_dns_recv
+    jmp     .Lafter_dns_recv
+.Lfail_dns_recv:
+    mov     rdi, 12
+    jmp     exit_fail
+.Lafter_dns_recv:
     /* expect A 10.77.0.50 at end of answer */
     lea     rsi, [rip + dns_reply]
     add     rsi, rax
     sub     rsi, 4
     cmp     byte ptr [rsi], 10
-    jne     exit_fail
+    jne     .Lfail_dns_a0
+    jmp     .Ldns_a0_ok
+.Lfail_dns_a0:
+    mov     rdi, 13
+    jmp     exit_fail
+.Ldns_a0_ok:
     cmp     byte ptr [rsi + 1], 77
-    jne     exit_fail
+    jne     .Lfail_dns_a1
+    jmp     .Ldns_a1_ok
+.Lfail_dns_a1:
+    mov     rdi, 14
+    jmp     exit_fail
+.Ldns_a1_ok:
     cmp     byte ptr [rsi + 2], 0
-    jne     exit_fail
+    jne     .Lfail_dns_a2
+    jmp     .Ldns_a2_ok
+.Lfail_dns_a2:
+    mov     rdi, 15
+    jmp     exit_fail
+.Ldns_a2_ok:
     cmp     byte ptr [rsi + 3], 50
-    jne     exit_fail
+    jne     .Lfail_dns_a3
+    jmp     .Ldns_a3_ok
+.Lfail_dns_a3:
+    mov     rdi, 16
+    jmp     exit_fail
+.Ldns_a3_ok:
     lea     rsi, [rip + msg_dns_ok]
     mov     rdx, msg_dns_ok_len
     call    write_lit
@@ -194,10 +231,20 @@ _start:
     xor     rax, rax
     syscall
     cmp     rax, 12
-    jl      exit_fail
+    jl      .Lfail_aaaa_recv
+    jmp     .Lafter_aaaa_recv
+.Lfail_aaaa_recv:
+    mov     rdi, 20
+    jmp     exit_fail
+.Lafter_aaaa_recv:
     lea     rsi, [rip + dns_reply]
     cmp     word ptr [rsi + 6], 0
-    jne     exit_fail
+    jne     .Lfail_aaaa_ancount
+    jmp     .Lafter_aaaa_ancount
+.Lfail_aaaa_ancount:
+    mov     rdi, 21
+    jmp     exit_fail
+.Lafter_aaaa_ancount:
     lea     rsi, [rip + msg_aaaa_ok]
     mov     rdx, msg_aaaa_ok_len
     call    write_lit
@@ -218,14 +265,24 @@ _start:
     mov     rax, 42
     syscall
     cmp     rax, 0
-    jne     exit_fail
+    jne     .Lfail_tcp_connect
+    jmp     .Lafter_tcp_connect
+.Lfail_tcp_connect:
+    mov     rdi, 30
+    jmp     exit_fail
+.Lafter_tcp_connect:
     mov     rdi, r12
     lea     rsi, [rip + http_get]
     mov     rdx, http_get_len
     mov     rax, 1
     syscall
     cmp     rax, http_get_len
-    jne     exit_fail
+    jne     .Lfail_http_send
+    jmp     .Lafter_http_send
+.Lfail_http_send:
+    mov     rdi, 31
+    jmp     exit_fail
+.Lafter_http_send:
     xor     r13, r13
 .Lread_http:
     mov     rdi, r12
@@ -239,7 +296,12 @@ _start:
     jmp     .Lread_http
 .Lhttp_done:
     cmp     r13, http_tail_len
-    jl      exit_fail
+    jl      .Lfail_http_len
+    jmp     .Lafter_http_len
+.Lfail_http_len:
+    mov     rdi, 32
+    jmp     exit_fail
+.Lafter_http_len:
     lea     rsi, [rip + http_buf]
     add     rsi, r13
     sub     rsi, http_tail_len
@@ -250,11 +312,14 @@ _start:
     je      .Lhttp_ok
     mov     al, byte ptr [rsi]
     cmp     al, byte ptr [rdi]
-    jne     exit_fail
+    jne     .Lfail_http_tail
     inc     rsi
     inc     rdi
     dec     rcx
     jmp     .Lcmp_tail
+.Lfail_http_tail:
+    mov     rdi, 33
+    jmp     exit_fail
 .Lhttp_ok:
     lea     rsi, [rip + msg_http_ok]
     mov     rdx, msg_http_ok_len
@@ -278,6 +343,7 @@ _start:
     mov     r10, 16
     mov     rax, 44
     syscall
+    mov     ebx, 40
     mov     rdi, 89
     call    expect_errno
     mov     rdi, r12
@@ -296,6 +362,7 @@ _start:
     mov     rdx, 16
     mov     rax, 42
     syscall
+    mov     ebx, 41
     mov     rdi, 111
     call    expect_errno
     mov     rdi, r12
@@ -308,6 +375,7 @@ _start:
     mov     rdx, 8
     xor     rax, rax
     syscall
+    mov     ebx, 42
     mov     rdi, 9
     call    expect_errno
 
