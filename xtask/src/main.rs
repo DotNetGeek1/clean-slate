@@ -166,7 +166,7 @@ const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS: [&str; 3] = [
     "[M9.C] PASS",
 ];
 const M9_FD_CORE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
-const M9_FD_CORE_ACCEPTANCE_MARKERS: [&str; 11] = [
+const M9_FD_CORE_ACCEPTANCE_MARKERS: [&str; 10] = [
     "[TIME] timer initialized",
     "[M9.G] pool_before=",
     "[LNX ] personality=x86_64 pid=",
