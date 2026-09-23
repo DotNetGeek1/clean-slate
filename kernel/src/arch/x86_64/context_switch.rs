@@ -106,6 +106,11 @@ pub(crate) fn rsp_on_static_task_stack(rsp: u64) -> bool {
 }
 
 /// Bytes between `rsp` and the base of the containing static task stack, if any.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 pub(crate) fn task_stack_margin_bytes(rsp: u64) -> Option<u64> {
     let stacks = unsafe { crate::sched::task_stacks_mut() };
     stacks.iter().find_map(|stack| {
@@ -119,6 +124,11 @@ pub(crate) fn task_stack_margin_bytes(rsp: u64) -> Option<u64> {
     })
 }
 
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 pub(crate) const TASK_STACK_MIN_MARGIN_BYTES: u64 = 16 * 1024;
 
 pub(crate) unsafe fn restore_task_context(stack_pointer: u64) -> ! {
