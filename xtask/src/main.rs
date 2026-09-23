@@ -2497,7 +2497,8 @@ fn validate_m9_linux_fs_block_write(output: &str) -> Result<(), XtaskError> {
             "m9 linux fs acceptance marker order".to_owned(),
         ));
     }
-    if !output[ls..negative].contains("[BLK ] request op=write") {
+    // Serial can split the `[BLK ]` prefix (`[[BLK`, `[BLK ]` on the next line).
+    if !output[ls..negative].contains("request op=write") {
         return Err(XtaskError::MissingMarker(
             "[BLK ] request op=write (between ls /bin ok and negative cases)".to_owned(),
         ));

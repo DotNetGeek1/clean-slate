@@ -80,6 +80,7 @@ pub(crate) struct UserspaceEntryFrame {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub(crate) struct SyscallContext {
     pub(crate) rax: u64,
     pub(crate) rdx: u64,

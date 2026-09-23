@@ -49,6 +49,8 @@ pub(crate) fn initialize_timer() {
     mask_legacy_pic();
     enable_local_apic();
     program_local_apic_timer();
+    // M3 entry self-tests boot through a minimal timer path without the PIT ch2
+    // wiring `calibrate_apic_tick` needs; calibrating there hangs (not ~50ms).
     #[cfg(not(any(
         feature = "m1-self-test",
         feature = "m2-double-fault-self-test",

@@ -14,6 +14,7 @@ use crate::process::id_allocator::id_allocator_mut;
 use crate::process::linux_fd;
 use crate::process::linux_image::LINUX_USER_WINDOW_BASE;
 use crate::process::linux_mem;
+use crate::process::linux_signal;
 use crate::process::{
     personality::ExecutionPersonality, process_registry_mut, reap_process_record, Process,
     ProcessState, ResourceDomain,
@@ -158,8 +159,14 @@ fn linux_mem_clone_for_fork_stub(parent: ProcId, child: ProcId) {
     let _ = linux_mem::clone_for_fork(parent.pid, parent.generation, child.pid, child.generation);
 }
 
-/// ORCHESTRATOR: wire when `linux_signal::clone_for_fork` exists (#103).
-fn linux_signal_clone_for_fork_stub(_parent: ProcId, _child: ProcId) {}
+fn linux_signal_clone_for_fork_stub(parent: ProcId, child: ProcId) {
+    let _ = linux_signal::clone_for_fork(
+        parent.pid,
+        parent.generation,
+        child.pid,
+        child.generation,
+    );
+}
 
 fn abort_fork_child(child_pid: u64, allocator: &mut PageAllocator) {
     without_interrupts(|| {
