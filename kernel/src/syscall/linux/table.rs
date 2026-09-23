@@ -88,9 +88,11 @@ mod tests {
         assert!(lookup_handler(SYS_EXIT).is_some());
         assert!(lookup_handler(999).is_none());
         assert!(lookup_handler(1000).is_none());
-        // Deliberately not wired in M8 (M9 scope): brk, arch_prctl,
-        // set_tid_address, exit_group, futex, mmap.
-        for nr in [12u64, 158, 218, 231, 202, 9] {
+        // M9 #103 runtime family owns brk/mmap/arch_prctl/set_tid_address.
+        for nr in [12u64, 158, 218, 9] {
+            assert!(lookup_handler(nr).is_some(), "nr {nr} must be supported");
+        }
+        for nr in [231u64, 202] {
             assert!(lookup_handler(nr).is_none(), "nr {nr} must be unsupported");
         }
         assert_eq!(encode_rax(Err(ENOSYS)) as i64, -38);

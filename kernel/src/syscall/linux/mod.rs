@@ -12,6 +12,7 @@ pub(crate) mod exit;
 pub(crate) mod fd;
 pub(crate) mod fs;
 pub(crate) mod process;
+pub(crate) mod poll;
 pub(crate) mod runtime;
 pub(crate) mod socket;
 pub(crate) mod table;
