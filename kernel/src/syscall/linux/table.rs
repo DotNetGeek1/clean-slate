@@ -1,17 +1,17 @@
 //! Linux syscall handler table (M8: `write` and `exit` only, #94).
 
+#[cfg(feature = "m9-linux-exec-self-test")]
+use super::execve::handle_sys_execve;
 use super::exit::handle_sys_exit;
 use super::fd::{handle_sys_close, handle_sys_dup2, handle_sys_fcntl, handle_sys_writev};
 use super::write::handle_sys_write;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
+#[cfg(feature = "m9-linux-exec-self-test")]
+use clean_slate_linux_abi::SYS_EXECVE;
 use clean_slate_linux_abi::{
     LinuxSyscallRequest, LinuxSyscallResult, SYS_CLOSE, SYS_DUP2, SYS_EXIT, SYS_FCNTL, SYS_WRITE,
     SYS_WRITEV,
 };
-#[cfg(feature = "m9-linux-exec-self-test")]
-use clean_slate_linux_abi::SYS_EXECVE;
-#[cfg(feature = "m9-linux-exec-self-test")]
-use super::execve::handle_sys_execve;
 use clean_slate_service_lifecycle::InstanceGeneration;
 
 /// Trusted caller identity + mutable SYSCALL frame for Linux handlers.

@@ -14,12 +14,18 @@ use crate::arch::x86_64::context_switch::{
     rsp_on_static_task_stack, task_stack_margin_bytes, TASK_STACK_MIN_MARGIN_BYTES,
     USER_TEST_RFLAGS,
 };
-use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
+use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::mm::address_space::{activate_address_space_root, destroy_process_address_space};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::{align_down, PAGE_SIZE};
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+use crate::process::linux_fd;
 use crate::process::linux_image::{
     build_linux_initial_stack, build_linux_process_image, validate_linux_image_with_stack,
     LinuxImageError, LinuxImageLayout, LinuxInitialStack, LINUX_MAX_STACK_IMAGE_BYTES,
@@ -27,12 +33,9 @@ use crate::process::linux_image::{
 use crate::process::linux_image::{
     register_linux_process, LaunchedLinuxProcess, LINUX_USER_WINDOW_BASE, LINUX_USER_WINDOW_END,
 };
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test"
-)))]
-use crate::process::linux_fd;
+use crate::process::linux_image::{
+    with_kernel_initial_stack_scratch, LinuxImagePlan, LINUX_MAX_AUXV_ENTRIES,
+};
 #[cfg(not(any(
     feature = "m1-self-test",
     feature = "m2-double-fault-self-test",
@@ -40,9 +43,6 @@ use crate::process::linux_fd;
 )))]
 use crate::process::process_registry_mut;
 use crate::process::ProcessAddressSpace;
-use crate::process::linux_image::{
-    with_kernel_initial_stack_scratch, LinuxImagePlan, LINUX_MAX_AUXV_ENTRIES,
-};
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_elf::{LoadPlanPolicy, ELF64_PHDR_SIZE};
 use clean_slate_linux_abi::{
@@ -144,6 +144,9 @@ fn assert_kernel_task_stack_margin(context: &'static str) {
     let current_rsp: u64;
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) current_rsp, options(nomem, nostack));
+    }
+    if !rsp_on_static_task_stack(current_rsp) {
+        return;
     }
     let margin = task_stack_margin_bytes(current_rsp)
         .unwrap_or_else(|| fatal_kernel_error("exec path left the static task stack"));
@@ -358,9 +361,8 @@ fn destroy_old_exec_address_space(
     old: ProcessAddressSpace,
     allocator: &mut PageAllocator,
 ) -> Result<(), LinuxImageError> {
-    destroy_process_address_space(&old, allocator).map_err(|_| {
-        LinuxImageError::Registry("exec commit: destroy old address space failed")
-    })
+    destroy_process_address_space(&old, allocator)
+        .map_err(|_| LinuxImageError::Registry("exec commit: destroy old address space failed"))
 }
 
 #[cfg(not(any(
@@ -408,9 +410,8 @@ pub(crate) fn commit_exec(
             .replace_address_space(prepared.address_space)
             .ok_or(LinuxImageError::Registry("exec commit: no address space"))?;
         activate_address_space_root(new_root);
-        linux_fd::close_on_exec(pid, live_gen).map_err(|_| {
-            LinuxImageError::Registry("exec commit: close_on_exec failed")
-        })?;
+        linux_fd::close_on_exec(pid, live_gen)
+            .map_err(|_| LinuxImageError::Registry("exec commit: close_on_exec failed"))?;
         destroy_old_exec_address_space(old, allocator)?;
         Ok::<(), LinuxImageError>(())
     })?;
@@ -432,7 +433,9 @@ pub(crate) fn commit_exec(
     feature = "m2-timer-self-test"
 )))]
 #[cfg_attr(not(feature = "m9-linux-exec-self-test"), allow(dead_code))]
-pub(crate) fn linux_errno_for_exec_error(error: LinuxImageError) -> clean_slate_linux_abi::LinuxErrno {
+pub(crate) fn linux_errno_for_exec_error(
+    error: LinuxImageError,
+) -> clean_slate_linux_abi::LinuxErrno {
     use clean_slate_linux_abi::{EINVAL, ENOEXEC};
     match error {
         LinuxImageError::ExecGenerationMismatch | LinuxImageError::ExecMultiThread => EINVAL,
@@ -523,7 +526,14 @@ mod tests {
         assert_eq!(stack.rsp, legacy.launch_stack.rsp);
         assert_eq!(stack.bytes_len, legacy.launch_stack.bytes_len);
         let mut load_plan = None;
-        assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, &mut load_plan, &stack).is_ok());
+        assert!(validate_linux_image_with_stack(
+            spec.image,
+            spec.policy,
+            layout,
+            &mut load_plan,
+            &stack
+        )
+        .is_ok());
     }
 
     #[test]
@@ -559,7 +569,14 @@ mod tests {
         )
         .expect("stack");
         let mut load_plan = None;
-        assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, &mut load_plan, &stack).is_ok());
+        assert!(validate_linux_image_with_stack(
+            spec.image,
+            spec.policy,
+            layout,
+            &mut load_plan,
+            &stack
+        )
+        .is_ok());
     }
 
     #[cfg(feature = "m9-linux-exec-self-test")]
@@ -602,7 +619,14 @@ mod tests {
         let argv0 = u64::from_le_bytes(stack.bytes[rsp_off + 8..rsp_off + 16].try_into().unwrap());
         assert_ne!(argv0, 0);
         let mut load_plan = None;
-        assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, &mut load_plan, &stack).is_ok());
+        assert!(validate_linux_image_with_stack(
+            spec.image,
+            spec.policy,
+            layout,
+            &mut load_plan,
+            &stack
+        )
+        .is_ok());
     }
 
     #[test]

@@ -20,8 +20,7 @@ pub mod syscall;
 
 pub use errno::{
     decode_rax, encode_rax, LinuxErrno, LinuxSyscallResult, EACCES, EBADF, EFAULT, EINVAL, EMFILE,
-    ENOEXEC,
-    ENFILE, ENOENT, ENOMEM, ENOSYS, EPERM, ESRCH,
+    ENFILE, ENOENT, ENOEXEC, ENOMEM, ENOSYS, EPERM, ESRCH,
 };
 pub use stack::{
     build_initial_stack, build_initial_stack_with_tail, InitialStackBuilder, InitialStackImage,

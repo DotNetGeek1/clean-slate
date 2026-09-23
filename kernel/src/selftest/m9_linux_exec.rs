@@ -33,7 +33,7 @@ use crate::syscall::{
     current_syscall_caller_pid, install_service_lifecycle_syscall_allocator,
     service_lifecycle_syscall_allocator_mut,
 };
-use clean_slate_linux_abi::{LinuxSyscallResult, SYS_WRITE, ENOEXEC};
+use clean_slate_linux_abi::{LinuxSyscallResult, ENOEXEC, SYS_WRITE};
 use core::sync::atomic::{AtomicU8, Ordering};
 use x86_64::VirtAddr;
 
@@ -246,8 +246,7 @@ pub(crate) fn handle_execve_selftest(ctx: &mut LinuxSyscallContext<'_>) -> Linux
             }
             kernel_log_fmt(format_args!(
                 "[M9.F] exec committed pid={} gen={} (unchanged)\n",
-                test.linux_pid,
-                gen_before.0
+                test.linux_pid, gen_before.0
             ));
             test.stage = Stage::AwaitPhase2;
             reset_output();

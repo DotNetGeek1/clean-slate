@@ -101,12 +101,12 @@ pub(crate) mod m8_linux_dispatch;
 pub(crate) mod m8_linux_hello;
 #[cfg(feature = "m8-linux-image-self-test")]
 pub(crate) mod m8_linux_image;
-#[cfg(feature = "m9-linux-exec-self-test")]
-pub(crate) mod m9_linux_exec;
 #[cfg(feature = "m9-block-wake-self-test")]
 pub(crate) mod m9_block_wake;
 #[cfg(feature = "m9-fd-core-self-test")]
 pub(crate) mod m9_fd_core;
+#[cfg(feature = "m9-linux-exec-self-test")]
+pub(crate) mod m9_linux_exec;
 #[cfg(feature = "m9-low-va-self-test")]
 pub(crate) mod m9_low_va;
 #[cfg(feature = "m9-syscall-fail-closed-self-test")]

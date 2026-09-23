@@ -38,6 +38,7 @@ use crate::mm::address_space::{
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::image_loader::{map_load_plan_segments, map_user_stack_pages};
 use crate::mm::{align_down, phys_to_virt, PAGE_SIZE, USER_CANONICAL_TOP_EXCLUSIVE};
+use crate::sync::global_cell::GlobalCell;
 use clean_slate_elf::{
     parse_load_plan, Elf64Header, LoadPlan, LoadPlanError, LoadPlanPolicy, ELF64_PHDR_SIZE,
     ET_EXEC, MAX_LOAD_SEGMENTS, PT_DYNAMIC, PT_INTERP, PT_LOAD,
@@ -45,7 +46,6 @@ use clean_slate_elf::{
 use clean_slate_linux_abi::{
     build_initial_stack, StackLayoutError, AT_ENTRY, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM,
 };
-use crate::sync::global_cell::GlobalCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use x86_64::VirtAddr;
@@ -485,7 +485,6 @@ pub(crate) fn with_kernel_initial_stack_scratch<R>(
     result
 }
 
-#[cfg(test)]
 fn with_local_initial_stack_scratch<R>(
     operation: impl FnOnce(&mut LinuxInitialStack) -> Result<R, LinuxImageError>,
 ) -> Result<R, LinuxImageError> {
