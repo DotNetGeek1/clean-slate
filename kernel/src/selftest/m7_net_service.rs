@@ -1,6 +1,5 @@
 //! M7.3 network service constituent self-test (CPL3 service + syscall path).
 
-use crate::arch::x86_64::apic::reprogram_local_apic_timer;
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 #[cfg(feature = "m7-network-self-test")]
@@ -276,7 +275,6 @@ pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
         fixtures,
     }));
     initialize_timer();
-    reprogram_local_apic_timer(50_000);
     let frame_pointer =
         start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
     unsafe { restore_task_context(frame_pointer) }

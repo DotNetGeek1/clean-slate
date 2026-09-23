@@ -1,6 +1,5 @@
 //! M6.3 object-capability constituent self-test (storage service + scripted fixtures).
 
-use crate::arch::x86_64::apic::reprogram_local_apic_timer;
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::capability::object::register_pending_bootstrap_grant;
@@ -464,7 +463,6 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
         });
     }
     initialize_timer();
-    reprogram_local_apic_timer(50_000);
     let frame_pointer =
         start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
     unsafe { restore_task_context(frame_pointer) }

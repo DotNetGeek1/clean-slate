@@ -16,7 +16,8 @@ use crate::diagnostics::qemu::{qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::interrupt::timer::{initialize_timer, kernel_ticks};
 use crate::{serial_write_fmt, serial_write_line};
 
-const ARP_TTL_TICKS: u64 = 50_000;
+/// ~40 s ARP cache TTL at 1 ms LAPIC tick (was 50_000 ticks @ ~0.8 ms self-test reprogram).
+const ARP_TTL_TICKS: u64 = 40_000;
 const POLL_SPIN_LIMIT: usize = 50_000_000;
 const DNS_OWNER: TrustedCaller = TrustedCaller::new(0x4D37, 0, 1);
 
