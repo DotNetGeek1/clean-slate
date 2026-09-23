@@ -1,9 +1,11 @@
-﻿//! M9 #103 Linux runtime/memory/time/poll acceptance.
+//! M9 #103 Linux runtime/memory/time/poll acceptance.
 
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
+use crate::arch::x86_64::cpu::enable_interrupts;
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
+use crate::interrupt::timer::kernel_ticks;
 use crate::ipc::endpoint_table_mut;
 use crate::mm::address_space::{activate_address_space_root, kernel_root_frame};
 use crate::mm::frame_allocator::PageAllocator;
@@ -21,19 +23,27 @@ use crate::process::linux_signal;
 use crate::process::live_instance_generation;
 use crate::process::personality::execution_personality_for_pid;
 use crate::process::process_registry_mut;
+use crate::process::KERNEL_PROCESS_ID;
 use crate::sched::dispatch::start_current_scheduler_thread;
-use crate::sched::{scheduler_mut, Scheduler};
 use crate::sched::task_stacks_mut;
+use crate::sched::wait::WaitKey;
+use crate::sched::{scheduler_mut, ThreadKind, ThreadState, Scheduler};
 use crate::syscall::initialize_syscall_abi;
+use crate::syscall::linux::poll::{nanosleep_wait_key, poll_wait_key};
 use crate::syscall::linux::poll::interest_occupied;
 use crate::syscall::{
     install_service_lifecycle_syscall_allocator, service_lifecycle_syscall_allocator_mut,
 };
+use clean_slate_linux_abi::Timespec;
 use clean_slate_service_lifecycle::InstanceGeneration;
+use core::hint::spin_loop;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use crate::arch::x86_64::cpu::without_interrupts;
+use crate::time::ticks_from_millis;
 
 const RUNTIME_CYCLES: u32 = 8;
 const PASS: &str = "[M9.J] PASS";
+const LANE: u64 = 0x52;
 
 static RUNTIME_PID: AtomicU64 = AtomicU64::new(0);
 static RUNTIME_GENERATION: AtomicU32 = AtomicU32::new(0);
@@ -42,8 +52,91 @@ static BASELINE_MEM: AtomicU32 = AtomicU32::new(0);
 static BASELINE_SIG: AtomicU32 = AtomicU32::new(0);
 static BASELINE_POLL: AtomicU32 = AtomicU32::new(0);
 static BASELINE_FD: AtomicU32 = AtomicU32::new(0);
+static BLOCK_START_TICK: AtomicU64 = AtomicU64::new(0);
+static NANOSLEEP_LOGGED: AtomicU32 = AtomicU32::new(0);
+static POLL_ZERO_LOGGED: AtomicU32 = AtomicU32::new(0);
+
+#[unsafe(no_mangle)]
+extern "C" fn clean_slate_m9_runtime_spin() -> ! {
+    enable_interrupts();
+    loop {
+        spin_loop();
+    }
+}
+
+fn configure_preempt_kernel_thread() -> Result<(), &'static str> {
+    without_interrupts(|| {
+        let stacks = unsafe { task_stacks_mut() };
+        let stack_top = task_stack_top(&stacks[1]);
+        let tid = unsafe { id_allocator_mut().allocate_tid()? };
+        let scheduler = unsafe { scheduler_mut() };
+        scheduler.configure_thread(
+            1,
+            tid,
+            KERNEL_PROCESS_ID,
+            ThreadKind::Kernel,
+            stack_top,
+            stack_top,
+            clean_slate_m9_runtime_spin as usize as u64,
+        )?;
+        scheduler.threads[1].state = ThreadState::Ready;
+        Ok(())
+    })
+}
+
+pub(crate) fn on_runtime_blocked(pid: u64, key: WaitKey) {
+    if pid != RUNTIME_PID.load(Ordering::Relaxed) {
+        return;
+    }
+    let top = key.0 >> 56;
+    if top != LANE {
+        fatal_kernel_error("m9 runtime block key namespace");
+    }
+    BLOCK_START_TICK.store(kernel_ticks(), Ordering::Relaxed);
+    let _ = (pid, key);
+}
+
+pub(crate) fn on_nanosleep_complete(pid: u64, ts: Timespec) {
+    if pid != RUNTIME_PID.load(Ordering::Relaxed) {
+        return;
+    }
+    if ts.tv_sec != 0 || ts.tv_nsec != 20_000_000 {
+        return;
+    }
+    if NANOSLEEP_LOGGED.swap(1, Ordering::Relaxed) != 0 {
+        return;
+    }
+    let start = BLOCK_START_TICK.load(Ordering::Relaxed);
+    let elapsed = kernel_ticks().saturating_sub(start);
+    let min_ticks = ticks_from_millis(20).unwrap_or(1);
+    if elapsed < min_ticks {
+        kernel_log_fmt(format_args!(
+            "[M9.J] nanosleep 20ms ticks={} (too few min={})\n",
+            elapsed, min_ticks
+        ));
+        fatal_kernel_error("m9 runtime nanosleep too short");
+    }
+    kernel_log_fmt(format_args!("[M9.J] nanosleep 20ms ticks={}\n", elapsed));
+}
+
+pub(crate) fn on_poll_timeout_complete(pid: u64) {
+    if pid != RUNTIME_PID.load(Ordering::Relaxed) {
+        return;
+    }
+    if POLL_ZERO_LOGGED.swap(1, Ordering::Relaxed) != 0 {
+        return;
+    }
+    let start = BLOCK_START_TICK.load(Ordering::Relaxed);
+    let elapsed = kernel_ticks().saturating_sub(start);
+    let min_ticks = ticks_from_millis(30).unwrap_or(1);
+    if elapsed < min_ticks {
+        fatal_kernel_error("m9 runtime poll zero-fds timeout too short");
+    }
+}
 
 fn launch_probe(allocator: &mut PageAllocator, kernel_stack_top: u64) -> u64 {
+    NANOSLEEP_LOGGED.store(0, Ordering::Relaxed);
+    POLL_ZERO_LOGGED.store(0, Ordering::Relaxed);
     let argv: [&[u8]; 1] = [b"linux-runtime-probe"];
     let envp: [&[u8]; 1] = [b"HOME=/"];
     let spec = LinuxExecSpec {
@@ -77,6 +170,7 @@ fn launch_probe(allocator: &mut PageAllocator, kernel_stack_top: u64) -> u64 {
         .unwrap_or_else(|_| fatal_kernel_error("m9 linux runtime stdio"));
     RUNTIME_PID.store(launched.pid, Ordering::Relaxed);
     RUNTIME_GENERATION.store(generation.0, Ordering::Relaxed);
+    let _ = (nanosleep_wait_key(launched.pid), poll_wait_key(launched.pid));
     launched.pid
 }
 
@@ -129,6 +223,7 @@ pub(crate) fn after_linux_runtime_probe_exit(
         qemu_exit(QEMU_EXIT_SUCCESS);
     }
     RUNTIME_CYCLE.store(next, Ordering::Relaxed);
+    configure_preempt_kernel_thread().unwrap_or_else(|message| fatal_kernel_error(message));
     let kernel_stack_top = task_stack_top(unsafe { &task_stacks_mut()[0] });
     let _ = launch_probe(allocator, kernel_stack_top);
     Some(start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message)))
@@ -171,4 +266,3 @@ pub(crate) fn start_m9_linux_runtime_self_test(page_allocator: PageAllocator) ->
 }
 
 pub(crate) fn observe_linux_console_write_bytes(_bytes: &[u8]) {}
-

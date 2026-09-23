@@ -25,6 +25,9 @@ pub const MAP_ANONYMOUS: u64 = 0x20;
 pub const MAP_FIXED: u64 = 0x10;
 
 pub const ARCH_SET_FS: u64 = 0x1002;
+pub const ARCH_GET_FS: u64 = 0x1003;
+
+pub const TCGETS: u64 = 0x5401;
 
 pub const TIOCGWINSZ: u64 = 0x5413;
 
@@ -77,7 +80,7 @@ pub fn decode_timespec(bytes: &[u8]) -> Result<Timespec, LinuxErrno> {
     }
     let tv_sec = i64::from_le_bytes(bytes[0..8].try_into().expect("slice"));
     let tv_nsec = i64::from_le_bytes(bytes[8..16].try_into().expect("slice"));
-    if tv_nsec < 0 || tv_nsec >= 1_000_000_000 {
+    if !(0..1_000_000_000).contains(&tv_nsec) {
         return Err(EINVAL);
     }
     if tv_sec < 0 {

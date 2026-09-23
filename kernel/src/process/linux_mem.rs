@@ -13,7 +13,7 @@ use crate::sched::wait::Deadline;
 use crate::sched::TASK_COUNT;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_linux_abi::{
-    LinuxErrno, EINVAL, ENOMEM, EPERM, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_NONE,
+    LinuxErrno, EACCES, EINVAL, ENOMEM, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_NONE,
     PROT_READ, PROT_WRITE,
 };
 use clean_slate_service_lifecycle::InstanceGeneration;
@@ -289,17 +289,27 @@ pub(crate) fn sys_arch_prctl(
     pid: u64,
     generation: InstanceGeneration,
 ) -> Result<u64, LinuxErrno> {
-    if code != clean_slate_linux_abi::ARCH_SET_FS {
-        return Err(EINVAL);
-    }
     let index = registry_mut().ensure(pid, generation)?;
-    registry_mut().slots[index]
-        .as_mut()
-        .expect("slot")
-        .state
-        .fs_base = addr;
-    write_msr(IA32_FS_BASE, addr);
-    Ok(0)
+    match code {
+        clean_slate_linux_abi::ARCH_SET_FS => {
+            registry_mut().slots[index]
+                .as_mut()
+                .expect("slot")
+                .state
+                .fs_base = addr;
+            write_msr(IA32_FS_BASE, addr);
+            Ok(0)
+        }
+        clean_slate_linux_abi::ARCH_GET_FS => {
+            validate_user_writable_pointer_range(addr, 8).map_err(|_| EINVAL)?;
+            let fs = registry_mut().slots[index].as_ref().expect("slot").state.fs_base;
+            unsafe {
+                *(addr as *mut u64) = fs;
+            }
+            Ok(0)
+        }
+        _ => Err(EINVAL),
+    }
 }
 
 pub(crate) fn sys_set_tid_address(
@@ -334,7 +344,7 @@ pub(crate) fn sys_brk(
     }
     let new_bytes = addr.checked_sub(brk_base).ok_or(EINVAL)?;
     if new_bytes > LINUX_BRK_MAX_BYTES {
-        return Ok(old_end);
+        return Err(ENOMEM);
     }
     if addr == old_end {
         return Ok(old_end);
@@ -430,7 +440,7 @@ pub(crate) fn sys_mmap(
         return Err(EINVAL);
     }
     if (prot & PROT_EXEC) != 0 && (prot & PROT_WRITE) != 0 {
-        return Err(EPERM);
+        return Err(EACCES);
     }
     if len == 0 {
         return Err(EINVAL);

@@ -123,8 +123,12 @@ fn prepare_thread_dispatch(thread: Thread) -> Result<(), &'static str> {
     set_privilege_stack(thread.kernel_stack_top)?;
     set_syscall_kernel_stack(thread.kernel_stack_top)?;
     if thread.kind == ThreadKind::User {
-        if let Some(generation) = crate::process::live_instance_generation(thread.owner_process_id) {
-            crate::process::linux_mem::apply_fs_base_for_process(thread.owner_process_id, generation);
+        if let Some(generation) = crate::process::live_instance_generation(thread.owner_process_id)
+        {
+            crate::process::linux_mem::apply_fs_base_for_process(
+                thread.owner_process_id,
+                generation,
+            );
         }
     }
     Ok(())

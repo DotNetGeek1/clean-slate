@@ -105,20 +105,22 @@ const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[M9.F] PASS",
 ];
 const M9_LINUX_EXEC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_LINUX_RUNTIME_ACCEPTANCE_MARKERS: [&str; 11] = [
+const M9_LINUX_RUNTIME_ACCEPTANCE_MARKERS: [&str; 13] = [
     "[M9.J] creating",
     "[M9.J] baseline ok",
     "[TIME] apic tick calibrated",
     "[M9.J] fs base survives switch",
     "[M9.J] brk ok",
+    "[M9.J] mmap ok",
     "[M9.J] uname=Linux",
     "[M9.J] signals ok",
     "[M9.J] nanosleep 20ms ticks=",
     "[M9.J] poll timeout ok",
-    "[M9.J] mmap ok",
+    "[M9.J] probe done",
+    "[M9.J] cycle=7",
     "[M9.J] PASS",
 ];
-const M9_LINUX_RUNTIME_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M9_LINUX_RUNTIME_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 const M9_ROOTFS_ACCEPTANCE_MARKERS: [&str; 2] = ["[RFS ] rootfs entries=", "[M9.K] PASS"];
 const M9_ROOTFS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [

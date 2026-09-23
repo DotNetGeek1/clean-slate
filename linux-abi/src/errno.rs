@@ -51,6 +51,7 @@ impl LinuxErrno {
 
     /// Constructs an errno if `code` is in `1..=LINUX_ERRNO_MAX`.
     pub const fn from_positive(code: i32) -> Option<Self> {
+        #[allow(clippy::manual_range_contains)]
         if code >= 1 && code <= LINUX_ERRNO_MAX {
             Some(Self(code))
         } else {
@@ -75,6 +76,7 @@ pub const fn encode_rax(result: LinuxSyscallResult) -> u64 {
 /// Decode a RAX value using the Linux rule: values in `[-4095, -1]` are errors.
 pub const fn decode_rax(rax: u64) -> LinuxSyscallResult {
     let signed = rax as i64;
+    #[allow(clippy::manual_range_contains)]
     if signed >= -LINUX_ERRNO_MAX as i64 && signed <= -1 {
         Err(LinuxErrno((-signed) as i32))
     } else {

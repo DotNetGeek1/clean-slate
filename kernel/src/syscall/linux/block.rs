@@ -70,6 +70,7 @@ pub(crate) fn block_linux_syscall(
                 .unwrap_or_else(|| fatal_kernel_error("linux block: user rip underflow"));
             Ok(request.nr)
         }
+        Ok(WaitOutcome::TimedOut) => Ok(on_timeout.encode()),
         Ok(_) => fatal_kernel_error("linux block: unexpected immediate outcome"),
         Err(message) => fatal_kernel_error(message),
     }

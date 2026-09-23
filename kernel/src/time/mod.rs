@@ -29,9 +29,7 @@ pub(crate) fn ticks_from_timespec(ts: clean_slate_linux_abi::Timespec) -> Result
         .and_then(|n| n.checked_add(999_999_999))
         .ok_or(EINVAL)?
         / 1_000_000_000;
-    sec_ticks
-        .checked_add(ns_ticks)
-        .ok_or(EINVAL)
+    sec_ticks.checked_add(ns_ticks).ok_or(EINVAL)
 }
 
 pub(crate) fn ticks_from_millis(ms: u64) -> Result<u64, LinuxErrno> {
