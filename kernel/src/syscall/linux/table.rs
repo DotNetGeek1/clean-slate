@@ -3,14 +3,17 @@
 #[cfg(feature = "m9-linux-exec-self-test")]
 use super::execve::handle_sys_execve;
 use super::exit::handle_sys_exit;
-use super::fd::{handle_sys_close, handle_sys_dup2, handle_sys_fcntl, handle_sys_writev};
+use super::fd::{
+    handle_sys_close, handle_sys_dup2, handle_sys_fcntl, handle_sys_lseek, handle_sys_read,
+    handle_sys_writev,
+};
 use super::write::handle_sys_write;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 #[cfg(feature = "m9-linux-exec-self-test")]
 use clean_slate_linux_abi::SYS_EXECVE;
 use clean_slate_linux_abi::{
-    LinuxSyscallRequest, LinuxSyscallResult, SYS_CLOSE, SYS_DUP2, SYS_EXIT, SYS_FCNTL, SYS_WRITE,
-    SYS_WRITEV,
+    LinuxSyscallRequest, LinuxSyscallResult, SYS_CLOSE, SYS_DUP2, SYS_EXIT, SYS_FCNTL, SYS_LSEEK,
+    SYS_READ, SYS_WRITE, SYS_WRITEV,
 };
 use clean_slate_service_lifecycle::InstanceGeneration;
 
@@ -52,6 +55,10 @@ fn lookup_core_handler(nr: u64) -> Option<LinuxSyscallHandler> {
         SYS_DUP2 => Some(handle_sys_dup2),
         SYS_EXIT => Some(handle_sys_exit),
         SYS_FCNTL => Some(handle_sys_fcntl),
+        #[cfg(feature = "m9-rootfs")]
+        SYS_READ => Some(handle_sys_read),
+        #[cfg(feature = "m9-rootfs")]
+        SYS_LSEEK => Some(handle_sys_lseek),
         #[cfg(feature = "m9-linux-exec-self-test")]
         SYS_EXECVE => Some(handle_sys_execve),
         _ => None,

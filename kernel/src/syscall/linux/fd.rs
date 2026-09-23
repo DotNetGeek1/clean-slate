@@ -185,6 +185,7 @@ pub(crate) fn handle_sys_read(
     ctx: &mut LinuxSyscallContext<'_>,
 ) -> LinuxSyscallResult {
     use crate::mm::user_mapping::validate_user_writable_pointer_range;
+    use crate::process::linux_fd::open_description::DescriptorKind;
     use clean_slate_linux_abi::EFAULT;
     let fd = request.args[0];
     let buf_ptr = request.args[1];
@@ -196,16 +197,36 @@ pub(crate) fn handle_sys_read(
     if validate_user_writable_pointer_range(buf_ptr, count).is_err() {
         return Err(EFAULT);
     }
-    let mut scratch = [0u8; 64];
-    let want = count.min(scratch.len() as u64) as usize;
-    let read = super::fs_io::read_file_fd(ctx.pid, ctx.instance_generation, fd, &mut scratch[..want])?;
-    if read == 0 {
-        return Ok(0);
+    let open = linux_fd::open_description_id_for_fd(ctx.pid, ctx.instance_generation, fd)?;
+    let desc = linux_fd::open_description_snapshot(open)?;
+    match desc.kind {
+        DescriptorKind::Console(_) => return Ok(0),
+        DescriptorKind::File(_) => {
+            let mut scratch = [0u8; super::fs_io::LINUX_READ_SCRATCH_BYTES];
+            let want = count.min(scratch.len() as u64) as usize;
+            return super::fs_io::read_file_fd(
+                request,
+                ctx,
+                ctx.pid,
+                ctx.instance_generation,
+                fd,
+                &mut scratch[..want],
+            )
+            .and_then(|read| {
+                if read == 0 {
+                    return Ok(0);
+                }
+                unsafe {
+                    core::ptr::copy_nonoverlapping(scratch.as_ptr(), buf_ptr as *mut u8, read as usize);
+                }
+                Ok(read)
+            });
+        }
+        DescriptorKind::PipeRead(_) | DescriptorKind::PipeWrite(_) | DescriptorKind::Socket(_) => {
+            return Err(clean_slate_linux_abi::EBADF);
+        }
+        DescriptorKind::Dir(_) => return Err(clean_slate_linux_abi::EBADF),
     }
-    unsafe {
-        core::ptr::copy_nonoverlapping(scratch.as_ptr(), buf_ptr as *mut u8, read);
-    }
-    Ok(read as u64)
 }
 
 #[cfg(feature = "m9-rootfs")]
@@ -213,11 +234,22 @@ pub(crate) fn handle_sys_lseek(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
 ) -> LinuxSyscallResult {
+    use crate::process::linux_fd::open_description::DescriptorKind;
+    use clean_slate_linux_abi::ESPIPE;
     let fd = request.args[0];
     let offset = request.args[1] as i64;
     let whence = request.args[2] as u32;
+    let _ = request;
+    let _ = ctx;
     ensure_open_fd(ctx.pid, ctx.instance_generation, fd)?;
-    super::fs_io::lseek_file_fd(ctx.pid, ctx.instance_generation, fd, offset, whence)
+    let open = linux_fd::open_description_id_for_fd(ctx.pid, ctx.instance_generation, fd)?;
+    let desc = linux_fd::open_description_snapshot(open)?;
+    match desc.kind {
+        DescriptorKind::File(_) => {
+            super::fs_io::lseek_file_fd(ctx.pid, ctx.instance_generation, fd, offset, whence)
+        }
+        _ => Err(ESPIPE),
+    }
 }
 
 #[cfg(test)]

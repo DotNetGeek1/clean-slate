@@ -7,7 +7,6 @@ use clean_slate_linux_abi::{
 use clean_slate_rootfs::{EntryKind, Image};
 use super::object_backend::{
     LINUX_TMP_MAX_ENTRIES, tmp_file_by_object_id, tmp_file_create, tmp_file_lookup_by_path,
-    tmp_file_write_bytes,
 };
 use super::path::{LINUX_PATH_MAX, normalize_path};
 
@@ -302,7 +301,7 @@ impl NodeTable {
             }
             if truncate {
                 if let NodeBackend::Object { object_id } = node.backend {
-                    tmp_file_write_bytes(object_id, &[])?;
+                    super::object_backend::tmp_file_truncate_local(object_id)?;
                 }
             }
             return Ok(NodeId {
@@ -323,7 +322,7 @@ impl NodeTable {
             NodeBackend::Object { object_id },
         );
         if truncate {
-            tmp_file_write_bytes(object_id, &[])?;
+            super::object_backend::tmp_file_truncate_local(object_id)?;
         }
         Ok(NodeId {
             index,
@@ -586,7 +585,7 @@ fn mode_for_path(path: &[u8], kind: NodeKind) -> u32 {
 }
 
 fn find_entry_index(image: &Image<'_>, path: &[u8]) -> Option<u16> {
-    for index in 0..64 {
+    for index in 0..image.len() {
         if let Some(entry) = image.entry(index) {
             if entry.path == path {
                 return Some(index as u16);

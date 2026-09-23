@@ -214,22 +214,8 @@ impl LinuxFdRegistry {
         let desc = self.pool.get(open)?;
         match desc.kind {
             DescriptorKind::Console(sink) => write_console(ipc, pid, sink, bytes, personality),
-            // #101
-            DescriptorKind::File(_) => {
-                #[cfg(feature = "m9-rootfs")]
-                {
-                    return crate::syscall::linux::fs_io::write_file_bytes(
-                        pid,
-                        generation,
-                        fd,
-                        bytes,
-                    );
-                }
-                #[cfg(not(feature = "m9-rootfs"))]
-                {
-                    Err(EBADF)
-                }
-            }
+            // #101: file writes go through `write(2)` → `handle_sys_write` + `fs_io::write_file_fd`.
+            DescriptorKind::File(_) => Err(EBADF),
             _ => Err(EBADF),
         }
     }

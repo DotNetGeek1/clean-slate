@@ -74,7 +74,9 @@ use crate::mm::layout::{
     not(feature = "m7-dns-self-test"),
     not(feature = "m8-linux-image-self-test"),
     not(feature = "m9-low-va-self-test"),
-    not(feature = "m9-linux-exec-self-test")
+    not(feature = "m9-linux-exec-self-test"),
+    not(feature = "m9-rootfs-self-test"),
+    not(feature = "m9-linux-fs-self-test")
 ))]
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::inspect_current_mapping;
@@ -157,6 +159,8 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m8-linux-hello-self-test"),
     not(feature = "m9-low-va-self-test"),
     not(feature = "m9-linux-exec-self-test"),
+    not(feature = "m9-rootfs-self-test"),
+    not(feature = "m9-linux-fs-self-test"),
     not(feature = "m9-fd-core-self-test")
 ))]
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
@@ -366,13 +370,45 @@ fn run_inner() -> Result<(), &'static str> {
         start_timer_self_test_task()
     }
 
-    #[cfg(feature = "m9-linux-exec-self-test")]
+    #[cfg(all(feature = "m9-rootfs", not(feature = "m9-rootfs-self-test")))]
+    {
+        crate::process::linux_rootfs::ensure_rootfs_integrity_logged()
+            .map_err(|_| "m9 rootfs: embedded image failed integrity checks")?;
+        let img = crate::process::linux_rootfs::image()
+            .map_err(|_| "m9 rootfs: parse failed at boot")?;
+        crate::process::linux_fs::init_namespace(&img)
+            .map_err(|_| "m9 linux fs: namespace init failed")?;
+    }
+
+    #[cfg(feature = "m9-linux-fs-self-test")]
+    {
+        use crate::selftest::m9_linux_fs::start_m9_linux_fs_self_test;
+        start_m9_linux_fs_self_test(allocator)
+    }
+
+    #[cfg(all(
+        not(feature = "m9-linux-fs-self-test"),
+        feature = "m9-rootfs-self-test"
+    ))]
+    {
+        use crate::selftest::m9_rootfs::start_m9_rootfs_self_test;
+        start_m9_rootfs_self_test(allocator)
+    }
+
+    #[cfg(all(
+        not(feature = "m9-linux-fs-self-test"),
+        not(feature = "m9-rootfs-self-test"),
+    not(feature = "m9-linux-fs-self-test"),
+        feature = "m9-linux-exec-self-test"
+    ))]
     {
         use crate::selftest::m9_linux_exec::start_m9_linux_exec_self_test;
         start_m9_linux_exec_self_test(allocator)
     }
 
     #[cfg(all(
+        not(feature = "m9-rootfs-self-test"),
+    not(feature = "m9-linux-fs-self-test"),
         not(feature = "m9-linux-exec-self-test"),
         feature = "m9-low-va-self-test"
     ))]
@@ -383,6 +419,8 @@ fn run_inner() -> Result<(), &'static str> {
     #[cfg(all(
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-rootfs-self-test"),
+    not(feature = "m9-linux-fs-self-test"),
         feature = "m8-linux-hello-self-test"
     ))]
     {
@@ -405,6 +443,8 @@ fn run_inner() -> Result<(), &'static str> {
         feature = "m9-fd-core-self-test",
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-rootfs-self-test"),
+    not(feature = "m9-linux-fs-self-test"),
         not(feature = "m9-block-wake-self-test"),
         not(feature = "m8-linux-hello-self-test"),
         not(feature = "m9-syscall-fail-closed-self-test")
@@ -417,6 +457,8 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-fd-core-self-test"),
         not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-rootfs-self-test"),
+    not(feature = "m9-linux-fs-self-test"),
         not(feature = "m9-block-wake-self-test"),
         feature = "m9-syscall-fail-closed-self-test",
         not(feature = "m8-linux-hello-self-test"),
@@ -429,6 +471,8 @@ fn run_inner() -> Result<(), &'static str> {
     #[cfg(all(
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-rootfs-self-test"),
+    not(feature = "m9-linux-fs-self-test"),
         feature = "m8-linux-dispatch-self-test",
         not(feature = "m8-linux-hello-self-test"),
         not(feature = "m9-syscall-fail-closed-self-test"),
@@ -447,6 +491,8 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-block-wake-self-test"),
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-rootfs-self-test"),
+    not(feature = "m9-linux-fs-self-test"),
         not(feature = "m9-fd-core-self-test")
     ))]
     {
@@ -669,7 +715,9 @@ fn run_inner() -> Result<(), &'static str> {
             not(feature = "m6-capabilities-self-test"),
             not(feature = "m7-net-caps-self-test"),
             not(feature = "m9-low-va-self-test"),
-            not(feature = "m9-linux-exec-self-test")
+            not(feature = "m9-linux-exec-self-test"),
+            not(feature = "m9-rootfs-self-test"),
+    not(feature = "m9-linux-fs-self-test")
         ))]
         {
             let mut allocator = allocator;
@@ -762,7 +810,9 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m7-dns-self-test"),
         not(feature = "m8-linux-image-self-test"),
         not(feature = "m9-low-va-self-test"),
-        not(feature = "m9-linux-exec-self-test")
+        not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-rootfs-self-test"),
+    not(feature = "m9-linux-fs-self-test")
     ))]
     {
         let kernel_root_frame = current_root_frame_address();

@@ -59,6 +59,7 @@ m8-linux-hello-self-test = ["m8-linux-hello", "m3-entry-self-test"]
 m9-low-va-self-test = ["m8-linux-image", "m3-entry-self-test"]
 m9-linux-exec-self-test = ["m8-linux-image", "m3-entry-self-test"]
 m9-rootfs = ["dep:clean-slate-rootfs"]
+m9-rootfs-self-test = ["m9-rootfs", "m3-entry-self-test"]
 m9-linux-fs-self-test = [
     "m9-rootfs",
     "m3-entry-self-test",
@@ -81,10 +82,10 @@ clean-slate-network = { path = "../network" }
 rand_core = { version = "=0.6.4", default-features = false, optional = true }
 clean-slate-capability = { path = "../capability" }
 clean-slate-linux-abi = { path = "../linux-abi" }
+clean-slate-rootfs = { path = "../rootfs", optional = true }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 clean-slate-store = { path = "../store", optional = true }
-clean-slate-rootfs = { path = "../rootfs", optional = true }
 uefi = "0.37.0"
 x86_64 = { version = "0.15.5", default-features = false, features = ["instructions"] }
 

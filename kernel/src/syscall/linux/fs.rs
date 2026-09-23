@@ -1,7 +1,6 @@
 //! Linux filesystem/path syscall family (#101).
 #![cfg(feature = "m9-rootfs")]
 
-use super::fd::{handle_sys_lseek, handle_sys_read};
 use super::table::{LinuxSyscallContext, LinuxSyscallHandler};
 use super::user_copy::copy_user_bytes;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
@@ -13,7 +12,7 @@ use crate::process::linux_rootfs;
 use clean_slate_linux_abi::{
     encode_dirent64, encode_stat144, LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EFAULT,
     EINVAL, EISDIR, ENOTDIR, O_CREAT, O_DIRECTORY, O_RDONLY, O_TRUNC, O_WRONLY,
-    SYS_GETCWD, SYS_GETDENTS64, SYS_LSEEK, SYS_LSTAT, SYS_MKDIR, SYS_OPEN, SYS_READ, SYS_STAT,
+    SYS_GETCWD, SYS_GETDENTS64, SYS_LSTAT, SYS_MKDIR, SYS_OPEN, SYS_STAT,
 };
 
 pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
@@ -24,14 +23,12 @@ pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
         SYS_GETCWD => Some(handle_sys_getcwd),
         SYS_MKDIR => Some(handle_sys_mkdir),
         SYS_GETDENTS64 => Some(handle_sys_getdents64),
-        SYS_READ => Some(handle_sys_read),
-        SYS_LSEEK => Some(handle_sys_lseek),
         _ => None,
     }
 }
 
 fn image() -> clean_slate_rootfs::Image<'static> {
-    linux_rootfs::image()
+    linux_rootfs::image().expect("m9 rootfs embedded image")
 }
 
 fn node_from_dir_ref(r: DirHandleRef) -> NodeId {

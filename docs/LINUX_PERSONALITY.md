@@ -141,6 +141,58 @@ Linux fd numbers must never be confused with capability handles.
 
 See also: [COMPATIBILITY.md](COMPATIBILITY.md), [ROADMAP.md](ROADMAP.md) (M8/M9), [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## M9 #104 — rootfs fixture
+
+Deterministic BusyBox rootfs bytes for M9 acceptance live in a bounded
+`CSROOTFS` v1 image (`clean-slate-rootfs`, manifest `fixtures/busybox/frozen/rootfs.toml`).
+Host verification: `cargo xtask verify-m9-fixture`. Provenance and layout:
+[fixtures/busybox/frozen/ROOTFS.md](../fixtures/busybox/frozen/ROOTFS.md).
+
+With `m9-rootfs`, `kernel/build.rs` embeds `$OUT_DIR/m9-rootfs.img` after verifying
+the frozen BusyBox SHA-256. `process::linux_rootfs::image()` parses the blob with
+the no_std reader (`lookup`, `children`, exact path bytes — no normalization).
+
+**Link semantics (#101):** `EntryKind::Link` stores the target path in `data`.
+Exec and path resolution for symlinks must preserve the **original** pathname
+(`argv[0]` / `AT_EXECFN`) so BusyBox selects the applet; do not rewrite to the
+link target before invoking the binary.
+
+Read-only image entries cover `/bin`, `/etc`, and applet links. Only `/tmp` carries
+the writable-root marker; durable writes traverse M5/M6 (#101), not the embed.
+
+## M9 #101 — filesystem/path projection
+
+Kernel-side bounded namespace broker over two backends: the read-only #104
+`CSROOTFS` image and M6.3 persistent objects for writable `/tmp` files. Path
+normalization (`LINUX_PATH_MAX = 256`), single-level rootfs symlinks, and
+read-only enforcement (EROFS on rootfs writes and `mkdir` outside `/tmp`) live in
+`process::linux_fs`. Syscall surface: `open`, `stat`, `lstat`, `getcwd`,
+`mkdir`, `getdents64`; generic `read`/`lseek` front-ends dispatch on #147 open
+descriptions (File vs Console vs Pipe/Socket placeholders).
+
+| Limit | Value |
+|-------|-------|
+| Namespace nodes | 64 (`LINUX_FS_MAX_NODES`) |
+| `/tmp` entries | 8 (dirs + files) |
+| `/tmp` file bytes | 512 (`OBJECT_MAX_PAYLOAD_BYTES`) |
+| Tmp object ids | `0x4c_0000` .. +4 files |
+
+Boot (`m9-rootfs`): `init_namespace(linux_rootfs::image())` after integrity log.
+Linux launch grants tmp object capabilities (`grant_linux_tmp_object_capabilities`);
+failure is fail-closed. Tmp I/O uses `ObjectRequestQueue::submit` +
+`block_linux_syscall(0x46 << 56 | request_id)`; `service_complete` wakes the
+blocked syscall. Restart idempotency: poll completed slot before resubmit.
+
+**Lifecycle (12 events):** rootfs integrity log → namespace init → tmp capability
+grant → open path resolve → descriptor alloc → rootfs read or object RMW write →
+object queue submit → block → service_complete wake → restart poll → read copy →
+close (offset discard) → process teardown (namespace retained).
+
+**Debt:** compatibility policy is kernel-resident for M9; mandate prefers a
+userspace fs service — this lane is a broker, not a VFS.
+
+QEMU acceptance: `cargo xtask test-m9-linux-fs` (`fixtures/linux-fs-probe/`).
+
 ## M9 #146 — Linux exec / process image substrate
 
 `kernel/src/process/linux_exec.rs` generalizes the M8 loader into a bounded,

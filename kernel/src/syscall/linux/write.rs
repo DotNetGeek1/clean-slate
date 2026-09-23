@@ -198,7 +198,30 @@ pub(crate) fn handle_sys_write(
     let generation = ctx.instance_generation;
 
     // 1. fd first: EBADF beats EFAULT and beats the zero-length shortcut.
-    ensure_fd_open(linux_fd::projection_for(pid, generation, fd))?;
+    let projection = linux_fd::projection_for(pid, generation, fd)?;
+    ensure_fd_open(Ok(projection))?;
+
+    #[cfg(feature = "m9-rootfs")]
+    if matches!(projection, linux_fd::LinuxFdProjection::FileBackend) {
+        let n = clamp_write_count(count);
+        if n == 0 {
+            return Ok(0);
+        }
+        let mut chunk = [0u8; LINUX_WRITE_CHUNK_BYTES];
+        let mut copied = 0usize;
+        while copied < n {
+            let want = (n - copied).min(LINUX_WRITE_CHUNK_BYTES);
+            let chunk_ptr = user_ptr.checked_add(copied as u64).ok_or(EFAULT)?;
+            copy_user_bytes(chunk_ptr, want as u64, &mut chunk)?;
+            let wrote =
+                super::fs_io::write_file_fd(request, ctx, pid, generation, fd, &chunk[..want])?;
+            copied += wrote as usize;
+            if wrote == 0 {
+                break;
+            }
+        }
+        return Ok(copied as u64);
+    }
 
     // 2./3./4. bounded copy-in + capability-controlled delivery per chunk.
     write_chunked(

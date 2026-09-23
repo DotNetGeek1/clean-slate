@@ -43,6 +43,9 @@ pub const EROFS: LinuxErrno = LinuxErrno(30);
 pub const ERANGE: LinuxErrno = LinuxErrno(34);
 pub const ENAMETOOLONG: LinuxErrno = LinuxErrno(36);
 pub const ELOOP: LinuxErrno = LinuxErrno(40);
+pub const ESPIPE: LinuxErrno = LinuxErrno(29);
+pub const EFBIG: LinuxErrno = LinuxErrno(27);
+pub const EIO: LinuxErrno = LinuxErrno(5);
 
 /// x86-64 `struct stat` — 144 bytes, field-by-field little-endian.
 pub fn encode_stat144(out: &mut [u8], fields: &LinuxStatFields) -> bool {
