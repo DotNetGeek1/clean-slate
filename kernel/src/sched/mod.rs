@@ -553,10 +553,20 @@ impl Scheduler {
                 }
                 Ok(Some(FRESH_TASK_SENTINEL))
             } else {
-                Ok(Some(self.threads[next].saved_stack_pointer))
+                Ok(Some(
+                    self.dispatch_handoff_stack_pointer(
+                        self.threads[next].saved_stack_pointer,
+                        next,
+                    )?,
+                ))
             }
         } else {
-            Ok(Some(self.threads[next].saved_stack_pointer))
+            Ok(Some(
+                self.dispatch_handoff_stack_pointer(
+                    self.threads[next].saved_stack_pointer,
+                    next,
+                )?,
+            ))
         }
     }
 
