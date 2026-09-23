@@ -141,12 +141,24 @@ fn emit_m2_pass_and_stop() -> ! {
         }
     }
 
-    #[cfg(feature = "m2-self-test")]
+    #[cfg(any(
+        feature = "m2-self-test",
+        all(
+            feature = "m8-linux-hello",
+            not(feature = "m8-linux-hello-self-test")
+        )
+    ))]
     {
         qemu_exit(QEMU_EXIT_SUCCESS)
     }
 
-    #[cfg(not(feature = "m2-self-test"))]
+    #[cfg(not(any(
+        feature = "m2-self-test",
+        all(
+            feature = "m8-linux-hello",
+            not(feature = "m8-linux-hello-self-test")
+        )
+    )))]
     {
         halt_loop()
     }
