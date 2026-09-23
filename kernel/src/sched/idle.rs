@@ -1,10 +1,11 @@
-//! Dedicated kernel idle thread: `hlt` with interrupts enabled while all app threads are blocked.
+﻿//! Dedicated kernel idle thread: `hlt` with interrupts enabled while all app threads are blocked.
 
 use crate::arch::x86_64::asm::clean_slate_idle_thread_bootstrap_entry;
 use crate::arch::x86_64::context_switch::resume_after_scheduler_handoff;
 use crate::arch::x86_64::context_switch::set_next_task;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::context_switch::FRESH_TASK_SENTINEL;
+use crate::arch::x86_64::cpu::disable_interrupts;
 use crate::arch::x86_64::cpu::enable_interrupts;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::qemu::fatal_kernel_error;
@@ -38,10 +39,18 @@ fn idle_thread_one_wait() {
     unsafe {
         core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
     }
-    let next_stack = without_interrupts(|| {
+    // Interrupts stay masked from the scheduler decision through the stack
+    // switch. `wake_from_idle_loop` moves `current_thread` to the selected
+    // thread; if a timer IRQ landed between that and `restore_task_context`,
+    // `on_timer_interrupt` would record this idle-stack kernel frame as the
+    // selected thread's `saved_stack_pointer` and corrupt its context. The
+    // restored frame's RFLAGS (or `sysretq` r11) re-enables interrupts; the
+    // no-runnable path re-enables them at the top of the next wait.
+    disable_interrupts();
+    let next_stack = {
         let _ = wait::expire_deadlines(kernel_ticks());
         unsafe { scheduler_mut().wake_from_idle_loop() }
-    });
+    };
     match next_stack {
         Ok(stack_pointer) => {
             if let Err(message) = prepare_current_scheduler_thread_dispatch() {
