@@ -60,6 +60,12 @@ m9-low-va-self-test = ["m8-linux-image", "m3-entry-self-test"]
 m9-linux-exec-self-test = ["m8-linux-image", "m3-entry-self-test"]
 m9-rootfs = ["dep:clean-slate-rootfs"]
 m9-rootfs-self-test = ["m9-rootfs", "m3-entry-self-test"]
+m9-linux-fs-self-test = [
+    "m9-rootfs",
+    "m3-entry-self-test",
+    "m6-object-self-test",
+    "dep:clean-slate-store",
+]
 
 [lib]
 path = "src/lib.rs"

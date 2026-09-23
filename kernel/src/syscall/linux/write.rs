@@ -76,6 +76,7 @@ pub(crate) fn ensure_fd_open(
     match projection? {
         LinuxFdProjection::Closed => Err(EBADF),
         LinuxFdProjection::ConsoleEndpoint { .. } => Ok(()),
+        LinuxFdProjection::FileBackend | LinuxFdProjection::DirBackend => Ok(()),
     }
 }
 
@@ -197,7 +198,14 @@ pub(crate) fn handle_sys_write(
     let generation = ctx.instance_generation;
 
     // 1. fd first: EBADF beats EFAULT and beats the zero-length shortcut.
-    ensure_fd_open(linux_fd::projection_for(pid, generation, fd))?;
+    let projection = linux_fd::projection_for(pid, generation, fd)?;
+    ensure_fd_open(Ok(projection))?;
+
+    #[cfg(feature = "m9-rootfs")]
+    if matches!(projection, linux_fd::LinuxFdProjection::FileBackend) {
+        let n = clamp_write_count(count);
+        return super::fs_io::write_file_fd_user(request, ctx, pid, generation, fd, user_ptr, n);
+    }
 
     // 2./3./4. bounded copy-in + capability-controlled delivery per chunk.
     write_chunked(
