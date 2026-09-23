@@ -344,6 +344,11 @@ impl OpenDescriptionPool {
     }
 }
 
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 fn attach_pipe_open_description(kind: &DescriptorKind) {
     match kind {
         DescriptorKind::PipeRead(pipe) | DescriptorKind::PipeWrite(pipe) => {
@@ -353,6 +358,11 @@ fn attach_pipe_open_description(kind: &DescriptorKind) {
     }
 }
 
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 fn detach_pipe_open_description(kind: &DescriptorKind) {
     match kind {
         DescriptorKind::PipeRead(pipe) | DescriptorKind::PipeWrite(pipe) => {
@@ -361,6 +371,21 @@ fn detach_pipe_open_description(kind: &DescriptorKind) {
         _ => {}
     }
 }
+
+// M1/M2 boots exclude the Linux process substrate, so no pipe ends can exist.
+#[cfg(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+))]
+fn attach_pipe_open_description(_kind: &DescriptorKind) {}
+
+#[cfg(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+))]
+fn detach_pipe_open_description(_kind: &DescriptorKind) {}
 
 pub(crate) const fn open_status_to_linux_fl(status: &OpenStatus) -> u32 {
     let mut fl = match status.access {

@@ -52,14 +52,33 @@ pub(crate) fn handle_sys_read(
     let mut scratch = [0u8; LINUX_READ_SCRATCH_BYTES];
     let result = match linux_fd::open_description_kind(pid, generation, fd)? {
         DescriptorKind::Console(_) => Ok(0u64),
-        DescriptorKind::PipeRead(_) => crate::process::linux_proc::pipe::read_fd(
-            request,
-            ctx,
-            pid,
-            generation,
-            fd,
-            &mut scratch[..want],
-        ),
+        DescriptorKind::PipeRead(_) => {
+            #[cfg(not(any(
+                feature = "m1-self-test",
+                feature = "m2-double-fault-self-test",
+                feature = "m2-timer-self-test"
+            )))]
+            {
+                crate::process::linux_proc::pipe::read_fd(
+                    request,
+                    ctx,
+                    pid,
+                    generation,
+                    fd,
+                    &mut scratch[..want],
+                )
+            }
+            #[cfg(any(
+                feature = "m1-self-test",
+                feature = "m2-double-fault-self-test",
+                feature = "m2-timer-self-test"
+            ))]
+            {
+                // M1/M2 boots exclude the Linux process substrate (no pipes exist).
+                let _ = &mut scratch[..want];
+                Err(EBADF)
+            }
+        }
         DescriptorKind::File(_) => {
             #[cfg(feature = "m9-rootfs")]
             {

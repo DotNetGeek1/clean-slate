@@ -202,9 +202,21 @@ pub(crate) fn handle_sys_write(
     ensure_fd_open(Ok(projection))?;
 
     if matches!(projection, LinuxFdProjection::PipeBackend) {
+        #[cfg(not(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        )))]
         return crate::process::linux_proc::pipe::write_fd(
             request, ctx, pid, generation, fd, user_ptr, count,
         );
+        // M1/M2 boots exclude the Linux process substrate (no pipes exist).
+        #[cfg(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        ))]
+        return Err(EBADF);
     }
 
     #[cfg(feature = "m9-rootfs")]
