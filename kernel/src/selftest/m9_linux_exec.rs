@@ -310,7 +310,7 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
         return;
     }
 
-    if frame.rax != SYS_WRITE as u64 {
+    if frame.rax != SYS_WRITE {
         return;
     }
 

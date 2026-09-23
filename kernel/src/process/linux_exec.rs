@@ -1,7 +1,10 @@
 //! M9 #146: bounded Linux exec / process-image substrate (prepare + commit).
 
+#[cfg(feature = "m9-linux-exec-self-test")]
 use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
+#[cfg(feature = "m9-linux-exec-self-test")]
 use crate::arch::x86_64::cpu::without_interrupts;
+#[cfg(feature = "m9-linux-exec-self-test")]
 use crate::mm::address_space::destroy_process_address_space;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::{align_down, PAGE_SIZE};
@@ -12,7 +15,10 @@ use crate::process::linux_image::{
 use crate::process::linux_image::{
     register_linux_process, LaunchedLinuxProcess, LINUX_USER_WINDOW_BASE, LINUX_USER_WINDOW_END,
 };
-use crate::process::{process_registry_mut, ProcessAddressSpace};
+use crate::process::ProcessAddressSpace;
+#[cfg(feature = "m9-linux-exec-self-test")]
+use crate::process::process_registry_mut;
+#[cfg(feature = "m9-linux-exec-self-test")]
 use crate::sched::scheduler_mut;
 use clean_slate_elf::{LoadPlanPolicy, ELF64_PHDR_SIZE};
 use clean_slate_linux_abi::{
@@ -20,6 +26,7 @@ use clean_slate_linux_abi::{
     AT_EUID, AT_EXECFN, AT_FLAGS, AT_GID, AT_HWCAP, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM,
     AT_RANDOM, AT_SECURE, AT_UID,
 };
+#[cfg(feature = "m9-linux-exec-self-test")]
 use clean_slate_service_lifecycle::InstanceGeneration;
 #[cfg(not(any(test, feature = "m9-linux-exec-self-test")))]
 use core::arch::x86_64::{__cpuid, _rdrand64_step};
@@ -48,6 +55,7 @@ pub(crate) struct PreparedLinuxImage {
     pub(crate) page_table_frames: usize,
 }
 
+#[cfg(feature = "m9-linux-exec-self-test")]
 pub(crate) struct ExecCommit {
     pub(crate) pid: u64,
     pub(crate) instance_generation: InstanceGeneration,
@@ -55,12 +63,15 @@ pub(crate) struct ExecCommit {
     pub(crate) launch_rsp: u64,
 }
 
+#[cfg(feature = "m9-linux-exec-self-test")]
 pub(crate) trait ExecCommitHooks {
     fn close_on_exec(&self, pid: u64, generation: InstanceGeneration);
 }
 
+#[cfg(feature = "m9-linux-exec-self-test")]
 pub(crate) struct NoopExecCommitHooks;
 
+#[cfg(feature = "m9-linux-exec-self-test")]
 impl ExecCommitHooks for NoopExecCommitHooks {
     fn close_on_exec(&self, _pid: u64, _generation: InstanceGeneration) {}
 }
@@ -267,7 +278,7 @@ pub(crate) fn launch_linux_process_from_spec(
     spec: &LinuxExecSpec<'_>,
 ) -> Result<LaunchedLinuxProcess, LinuxImageError> {
     let prepared = prepare_linux_image(allocator, spec)?;
-    let page_table_frames = prepared.address_space.resource_counts().page_table_frames;
+    let page_table_frames = prepared.page_table_frames;
     let image = crate::process::linux_image::LinuxProcessImage {
         address_space: prepared.address_space,
         entry: prepared.entry,
@@ -283,11 +294,14 @@ pub(crate) fn launch_linux_process_from_spec(
     )
 }
 
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test"
-)))]
+#[cfg(all(
+    not(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test"
+    )),
+    feature = "m9-linux-exec-self-test"
+))]
 pub(crate) fn commit_exec(
     allocator: &mut PageAllocator,
     pid: u64,
