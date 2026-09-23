@@ -1,14 +1,6 @@
 //! Calibrated monotonic time for Linux personality (#103).
 
-#![cfg_attr(
-    not(any(
-        test,
-        feature = "m2-timer-self-test",
-        feature = "m3-syscall-self-test",
-        feature = "m9-linux-runtime-self-test"
-    )),
-    allow(dead_code)
-)]
+#![cfg_attr(not(feature = "m9-linux-runtime-self-test"), allow(dead_code))]
 //!
 //! `kernel_ticks()` advances once per local APIC timer **IRQ** (one full countdown
 //! from [`APIC_TIMER_INITIAL_COUNT`] to zero). [`APIC_COUNTER_HZ`] is the rate at

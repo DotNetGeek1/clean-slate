@@ -1,14 +1,6 @@
 //! APIC timer calibration against PIT channel 2 (#103), interrupts masked throughout.
 
-#![cfg_attr(
-    not(any(
-        test,
-        feature = "m2-timer-self-test",
-        feature = "m3-syscall-self-test",
-        feature = "m9-linux-runtime-self-test"
-    )),
-    allow(dead_code)
-)]
+#![cfg_attr(not(feature = "m9-linux-runtime-self-test"), allow(dead_code))]
 
 use crate::arch::x86_64::apic::local_apic_timer_current_count;
 use crate::arch::x86_64::apic::APIC_TIMER_INITIAL_COUNT;
