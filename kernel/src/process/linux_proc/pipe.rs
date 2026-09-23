@@ -1,10 +1,15 @@
 //! Bounded pipe ring storage (#102). Linux default 64 KiB; traces show ≤1024 bytes.
 
+use crate::process::linux_fd;
 use crate::process::linux_fd::open_description::{PipeEnd, PipeId, PipeRef};
-#[cfg_attr(test, allow(unused_imports))]
-use crate::sched::wait::{wake_all, WaitKey};
+use crate::sched::wait::WaitKey;
+#[cfg(not(test))]
+use crate::sched::wait::wake_all;
 use crate::sync::global_cell::GlobalCell;
-use clean_slate_linux_abi::{LinuxErrno, EAGAIN, EBADF, EPIPE};
+use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
+use crate::syscall::linux::table::LinuxSyscallContext;
+use crate::syscall::linux::user_copy::copy_user_bytes;
+use clean_slate_linux_abi::{LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EBADF, EPIPE};
 
 pub(crate) const LINUX_PIPE_MAX: usize = 8;
 pub(crate) const LINUX_PIPE_CAPACITY: usize = 1024;
@@ -51,7 +56,11 @@ impl PipePool {
     }
 
     pub(crate) fn alloc_pipe(&mut self) -> Result<PipeHandle, LinuxErrno> {
-        let index = self.slots.iter().position(|s| !s.live).ok_or(EAGAIN)?;
+        let index = self
+            .slots
+            .iter()
+            .position(|s| !s.live)
+            .ok_or(clean_slate_linux_abi::EAGAIN)?;
         let generation = self.next_generation;
         self.next_generation = self.next_generation.saturating_add(1).max(1);
         self.slots[index] = PipeSlot {
@@ -89,14 +98,12 @@ impl PipePool {
             PipeEnd::Read => {
                 slot.readers = slot.readers.saturating_sub(1);
                 if slot.readers == 0 {
-                    #[cfg(not(test))]
-                    wake_all(writer_wait_key(handle));
+                    wake_pipe_writers(handle);
                 }
             }
             PipeEnd::Write => {
                 slot.writers = slot.writers.saturating_sub(1);
-                #[cfg(not(test))]
-                wake_all(reader_wait_key(handle));
+                wake_pipe_readers(handle);
             }
         }
         if slot.readers == 0 && slot.writers == 0 {
@@ -117,8 +124,7 @@ impl PipePool {
             }
             slot.head = (slot.head + take) % LINUX_PIPE_CAPACITY;
             slot.len -= take;
-            #[cfg(not(test))]
-            wake_all(writer_wait_key(handle));
+            wake_pipe_writers(handle);
             return Ok(take);
         }
         if slot.writers > 0 {
@@ -138,10 +144,7 @@ impl PipePool {
         }
         let space = LINUX_PIPE_CAPACITY - slot.len;
         if space == 0 {
-            if slot.readers > 0 {
-                return Err(PipeWriteOutcome::Block);
-            }
-            return Err(PipeWriteOutcome::Epipe);
+            return Err(PipeWriteOutcome::Block);
         }
         let take = bytes.len().min(space);
         for (i, byte) in bytes.iter().take(take).enumerate() {
@@ -149,32 +152,12 @@ impl PipePool {
             slot.buffer[pos] = *byte;
         }
         slot.len += take;
-        #[cfg(not(test))]
-        wake_all(reader_wait_key(handle));
+        wake_pipe_readers(handle);
         Ok(take)
-    }
-
-    pub(crate) fn readable(&self, handle: PipeHandle) -> bool {
-        self.slot(handle)
-            .map(|s| s.len > 0 || s.writers == 0)
-            .unwrap_or(false)
-    }
-
-    pub(crate) fn writable(&self, handle: PipeHandle) -> bool {
-        self.slot(handle)
-            .map(|s| s.len < LINUX_PIPE_CAPACITY || s.readers == 0)
-            .unwrap_or(false)
     }
 
     pub(crate) fn live_count(&self) -> usize {
         self.slots.iter().filter(|s| s.live).count()
-    }
-
-    fn slot(&self, handle: PipeHandle) -> Option<&PipeSlot> {
-        let index = usize::from(handle.index);
-        self.slots
-            .get(index)
-            .filter(|s| s.live && s.generation == handle.generation)
     }
 
     fn slot_mut(&mut self, handle: PipeHandle) -> Option<&mut PipeSlot> {
@@ -220,6 +203,20 @@ pub(crate) fn wait_key_for_parent(pid: u64) -> WaitKey {
     WaitKey((0x50u64 << 56) | pid)
 }
 
+fn wake_pipe_readers(handle: PipeHandle) {
+    #[cfg(not(test))]
+    wake_all(reader_wait_key(handle));
+    #[cfg(test)]
+    let _ = handle;
+}
+
+fn wake_pipe_writers(handle: PipeHandle) {
+    #[cfg(not(test))]
+    wake_all(writer_wait_key(handle));
+    #[cfg(test)]
+    let _ = handle;
+}
+
 static PIPE_POOL: GlobalCell<PipePool> = GlobalCell::new(PipePool::new());
 
 pub(crate) fn pool_mut() -> &'static mut PipePool {
@@ -238,23 +235,6 @@ pub(crate) fn pipe_ref_to_handle(pipe: PipeRef) -> PipeHandle {
     PipeHandle {
         index: pipe.pipe.index,
         generation: pipe.pipe.generation,
-    }
-}
-
-pub(crate) fn read_pipe(pipe: PipeRef, buf: &mut [u8]) -> Result<usize, LinuxErrno> {
-    match pool_mut().read_into(pipe_ref_to_handle(pipe), buf) {
-        Ok(n) => Ok(n),
-        Err(PipeReadOutcome::Block) => Err(EAGAIN),
-        Err(PipeReadOutcome::Stale) => Err(EBADF),
-    }
-}
-
-pub(crate) fn write_pipe(pipe: PipeRef, bytes: &[u8]) -> Result<usize, LinuxErrno> {
-    match pool_mut().write_from(pipe_ref_to_handle(pipe), bytes) {
-        Ok(n) => Ok(n),
-        Err(PipeWriteOutcome::Block) => Err(EAGAIN),
-        Err(PipeWriteOutcome::Epipe) => Err(EPIPE),
-        Err(PipeWriteOutcome::Stale) => Err(EBADF),
     }
 }
 
@@ -283,6 +263,81 @@ pub(crate) fn open_pipe_refs(pool: &mut PipePool) -> Result<(PipeRef, PipeRef), 
     Ok((read, write))
 }
 
+/// Blocking `read` backend for the #147 front-end (`fd::handle_sys_read`).
+pub(crate) fn read_fd(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+    pid: u64,
+    generation: clean_slate_service_lifecycle::InstanceGeneration,
+    fd: u64,
+    scratch: &mut [u8],
+) -> LinuxSyscallResult {
+    let _pipe = linux_fd::pipe_read_ref(pid, generation, fd).ok_or(EBADF)?;
+    let handle = pipe_ref_to_handle(_pipe);
+    match pool_mut().read_into(handle, scratch) {
+        Ok(n) => Ok(n as u64),
+        Err(PipeReadOutcome::Block) => block_linux_syscall(
+            request,
+            ctx,
+            reader_wait_key(handle),
+            None,
+            LinuxTimeoutResult::Zero,
+        ),
+        Err(PipeReadOutcome::Stale) => Err(EBADF),
+    }
+}
+
+/// Blocking `write` backend for pipe fds (M9: no SIGPIPE delivery on `EPIPE`).
+pub(crate) fn write_fd(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+    pid: u64,
+    generation: clean_slate_service_lifecycle::InstanceGeneration,
+    fd: u64,
+    user_ptr: u64,
+    count: u64,
+) -> LinuxSyscallResult {
+    if count == 0 {
+        return Ok(0);
+    }
+    let pipe = linux_fd::pipe_write_ref(pid, generation, fd).ok_or(EBADF)?;
+    let handle = pipe_ref_to_handle(pipe);
+    let want = core::cmp::min(count as usize, LINUX_PIPE_CAPACITY);
+    let mut scratch = [0u8; LINUX_PIPE_CAPACITY];
+    let mut copied_total = 0usize;
+    while copied_total < want {
+        let mut chunk = [0u8; crate::syscall::linux::user_copy::LINUX_USER_COPY_MAX_BYTES];
+        let n = copy_user_bytes(
+            user_ptr + copied_total as u64,
+            (want - copied_total) as u64,
+            &mut chunk,
+        )?;
+        if n == 0 {
+            break;
+        }
+        scratch[copied_total..copied_total + n].copy_from_slice(&chunk[..n]);
+        copied_total += n;
+    }
+    let mut offset = 0usize;
+    while offset < copied_total {
+        match pool_mut().write_from(handle, &scratch[offset..copied_total]) {
+            Ok(n) => offset += n,
+            Err(PipeWriteOutcome::Block) => {
+                return block_linux_syscall(
+                    request,
+                    ctx,
+                    writer_wait_key(handle),
+                    None,
+                    LinuxTimeoutResult::Zero,
+                );
+            }
+            Err(PipeWriteOutcome::Epipe) => return Err(EPIPE),
+            Err(PipeWriteOutcome::Stale) => return Err(EBADF),
+        }
+    }
+    Ok(offset as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,7 +350,7 @@ mod tests {
         pool.add_reader(handle);
         pool.add_writer(handle);
         let mut buf = [0u8; 16];
-        assert_eq!(pool.write_from(handle, &[b'h', b'i']).unwrap(), 2);
+        assert_eq!(pool.write_from(handle, b"hi").unwrap(), 2);
         assert_eq!(pool.read_into(handle, &mut buf).unwrap(), 2);
         pool.release_end(handle, PipeEnd::Write);
         assert_eq!(pool.read_into(handle, &mut buf).unwrap(), 0);

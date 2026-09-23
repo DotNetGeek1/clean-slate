@@ -7,7 +7,7 @@ use super::address_space::{
 use super::frame_allocator::PageAllocator;
 use super::phys_to_virt;
 use super::PAGE_SIZE;
-use x86_64::structures::paging::PageTableFlags;
+use x86_64::structures::paging::{PageTableFlags, Translate};
 use x86_64::VirtAddr;
 
 /// BusyBox static image + stack + brk headroom (4 MiB); see `readelf.txt` + traces.
@@ -78,12 +78,15 @@ fn rollback_child_mappings(
     Ok(())
 }
 
-fn user_copy_flags(
-    _root_frame: u64,
-    _virtual_address: u64,
-) -> Result<PageTableFlags, &'static str> {
-    Ok(PageTableFlags::PRESENT
-        | PageTableFlags::USER_ACCESSIBLE
-        | PageTableFlags::WRITABLE
-        | PageTableFlags::NO_EXECUTE)
+fn user_copy_flags(root_frame: u64, virtual_address: u64) -> Result<PageTableFlags, &'static str> {
+    let mapper = unsafe { super::paging::offset_page_table_for_root(root_frame) };
+    let flags = match mapper.translate(VirtAddr::new(virtual_address)) {
+        x86_64::structures::paging::mapper::TranslateResult::Mapped { flags, .. } => flags,
+        _ => return Err("fork translate parent pte failed"),
+    };
+    Ok(flags
+        & (PageTableFlags::PRESENT
+            | PageTableFlags::USER_ACCESSIBLE
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::NO_EXECUTE))
 }

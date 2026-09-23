@@ -1,7 +1,8 @@
 //! Linux parent/child bookkeeping keyed by `(pid, generation)` (#102).
 
+use crate::process::live_instance_generation;
 use crate::sync::global_cell::GlobalCell;
-use clean_slate_linux_abi::w_exitcode;
+use clean_slate_linux_abi::{w_exitcode, LinuxErrno, EAGAIN};
 use clean_slate_service_lifecycle::InstanceGeneration;
 
 /// Self-test feature: sh + two pipe children + parent + headroom (#107 convergence).
@@ -119,12 +120,30 @@ impl LinuxProcessTable {
                 continue;
             }
             if let ChildState::Zombie { status } = entry.state {
+                if let Some(gen) = live_instance_generation(entry.child.pid) {
+                    if gen != entry.child.generation {
+                        entry.state = ChildState::Reaped;
+                        continue;
+                    }
+                }
                 let found = (entry.child, status);
                 entry.state = ChildState::Reaped;
                 return Some(found);
             }
         }
         None
+    }
+
+    /// Lazily inserts a Linux personality process the first time it uses #102 syscalls.
+    pub(crate) fn ensure_proc_slot(&mut self, id: ProcId) -> Result<(), LinuxErrno> {
+        if self.slot_index(id).is_some() {
+            return Ok(());
+        }
+        let parent = ProcId {
+            pid: 0,
+            generation: InstanceGeneration(0),
+        };
+        self.register(id, parent).map_err(|_| EAGAIN)
     }
 
     pub(crate) fn has_waitable_children(&self, parent: ProcId, wait_pid: i64) -> bool {
@@ -155,10 +174,16 @@ impl LinuxProcessTable {
         })
     }
 
-    pub(crate) fn reap_zombie(&mut self, id: ProcId) {
+    /// Marks a process slot inactive after `exit_group` without disturbing a
+    /// parent's zombie `ChildSlot` (the parent reaps via `wait4`).
+    pub(crate) fn retire_slot(&mut self, id: ProcId) {
         if let Some(index) = self.slot_index(id) {
             self.slots[index].live = false;
         }
+    }
+
+    pub(crate) fn reap_zombie(&mut self, id: ProcId) {
+        self.retire_slot(id);
         for slot in &mut self.slots {
             for child in &mut slot.children {
                 if let Some(entry) = child {
@@ -226,10 +251,14 @@ pub(crate) fn exit_status_word(exit_code: u32, fault_signal: Option<u32>) -> i32
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::process_registry_mut;
 
     #[test]
     fn zombie_reap_and_stale_generation() {
         reset_for_selftest();
+        unsafe {
+            process_registry_mut().clear();
+        }
         let table = table_mut();
         let init = ProcId {
             pid: 1,
@@ -260,5 +289,56 @@ mod tests {
         assert_eq!(found.1, 768);
         table.reap_zombie(child);
         assert!(!table.has_any_child(parent));
+    }
+
+    #[test]
+    fn stale_generation_zombie_is_ignored_when_registry_generation_differs() {
+        use crate::process::{
+            personality::ExecutionPersonality, Process, ProcessState, ResourceDomain,
+            process_registry_mut,
+        };
+        reset_for_selftest();
+        unsafe {
+            process_registry_mut().clear();
+        }
+        let table = table_mut();
+        let init = ProcId {
+            pid: 1,
+            generation: InstanceGeneration(1),
+        };
+        let parent = ProcId {
+            pid: 2,
+            generation: InstanceGeneration(1),
+        };
+        let child_stale = ProcId {
+            pid: 3,
+            generation: InstanceGeneration(1),
+        };
+        table
+            .register(
+                init,
+                ProcId {
+                    pid: 0,
+                    generation: InstanceGeneration(0),
+                },
+            )
+            .unwrap();
+        table.register(parent, init).unwrap();
+        table.register(child_stale, parent).unwrap();
+        table.publish_exit(child_stale, w_exitcode(9));
+        unsafe {
+            process_registry_mut()
+                .insert(Process {
+                    id: 3,
+                    instance_generation: InstanceGeneration(2),
+                    state: ProcessState::Ready,
+                    resource_domain: ResourceDomain::with_root_frame(3, 0x3000),
+                    live_threads: 1,
+                    exit_status: None,
+                    execution_personality: ExecutionPersonality::LinuxX86_64,
+                })
+                .unwrap();
+        }
+        assert!(table.find_zombie_child(parent, 3).is_none());
     }
 }

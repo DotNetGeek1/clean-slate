@@ -1,6 +1,6 @@
 //! Linux `fork` — bounded eager address-space copy (#102).
 
-use super::table::{table_mut, ProcId};
+use super::table::{table, table_mut, ProcId, LINUX_MAX_PROC_ENTRIES};
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::capability_space_mut;
@@ -17,13 +17,11 @@ use crate::process::{
 };
 use crate::sched::{scheduler_mut, ThreadKind, ThreadState};
 use clean_slate_capability::CapabilityHandle;
-use clean_slate_capability::{delegate, list_holder, HolderId};
+use clean_slate_capability::{delegate, list_holder, HolderId, MAX_SLOTS};
 use clean_slate_linux_abi::{EAGAIN, ENOMEM, ESRCH};
 use clean_slate_service_lifecycle::InstanceGeneration;
 use core::mem::size_of;
 use x86_64::VirtAddr;
-
-const DELEGATE_LIST_CAP: usize = 16;
 
 pub(crate) fn stash_syscall_frame_on_stack(
     kernel_stack_top: u64,
@@ -64,6 +62,9 @@ pub(crate) fn linux_fork(
     kernel_stack_top: u64,
     scheduler_slot: usize,
 ) -> Result<u64, clean_slate_linux_abi::LinuxErrno> {
+    if table().occupied() >= LINUX_MAX_PROC_ENTRIES {
+        return Err(EAGAIN);
+    }
     let child_space = without_interrupts(|| unsafe {
         let parent = process_registry_mut().get(parent_pid).ok_or(ESRCH)?;
         let parent_space = parent
@@ -159,10 +160,35 @@ pub(crate) fn linux_fork(
         return Err(EAGAIN);
     }
 
-    // #103: `linux_mem::clone_for_fork` / `linux_signal::clone_for_fork` here.
+    linux_mem_clone_for_fork_stub(
+        ProcId {
+            pid: parent_pid,
+            generation: parent_gen,
+        },
+        ProcId {
+            pid: child_pid,
+            generation: child_gen,
+        },
+    );
+    linux_signal_clone_for_fork_stub(
+        ProcId {
+            pid: parent_pid,
+            generation: parent_gen,
+        },
+        ProcId {
+            pid: child_pid,
+            generation: child_gen,
+        },
+    );
 
     Ok(child_pid)
 }
+
+/// ORCHESTRATOR: wire `linux_mem::clone_for_fork` (#103).
+fn linux_mem_clone_for_fork_stub(_parent: ProcId, _child: ProcId) {}
+
+/// ORCHESTRATOR: wire `linux_signal::clone_for_fork` (#103).
+fn linux_signal_clone_for_fork_stub(_parent: ProcId, _child: ProcId) {}
 
 fn abort_fork_child(child_pid: u64, allocator: &mut PageAllocator) {
     without_interrupts(|| {
@@ -188,16 +214,19 @@ fn delegate_all_caps(parent_pid: u64, child_pid: u64) -> Result<(), ()> {
     let parent = HolderId(parent_pid);
     let child = HolderId(child_pid);
     let mut cursor = 0usize;
-    let mut installed: [Option<CapabilityHandle>; DELEGATE_LIST_CAP] = [None; DELEGATE_LIST_CAP];
+    let mut installed = [None; MAX_SLOTS];
     let mut count = 0usize;
-    while count < DELEGATE_LIST_CAP {
+    loop {
         let table = unsafe { capability_space_mut() };
         let Some((next_cursor, handle, record)) = list_holder(table, parent, cursor) else {
             break;
         };
         cursor = next_cursor + 1;
-        let rights = record.rights;
-        match delegate(table, parent, handle, child, rights) {
+        if count >= MAX_SLOTS {
+            rollback_delegated(&installed[..count]);
+            return Err(());
+        }
+        match delegate(table, parent, handle, child, record.rights) {
             Ok(child_handle) => {
                 installed[count] = Some(child_handle);
                 count += 1;

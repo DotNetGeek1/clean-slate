@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+pub(crate) mod fault;
 pub(crate) mod pipe;
 pub(crate) mod table;
 
