@@ -44,6 +44,8 @@ struct LinuxHelloRuntimeState {
     live: Option<LaunchedLinuxProcess>,
     /// `(pid, process instance generation, exit status)` for the most recent exit.
     last_exited: Option<(u64, InstanceGeneration, u64)>,
+    /// First exit identity (stable when relaunch races the M8.7 native observer).
+    first_exited: Option<(u64, InstanceGeneration, u64)>,
     completed_exits: u8,
     /// Bytes delivered through the Linux stdout/stderr console sink (self-test).
     delivered_bytes: u64,
@@ -234,6 +236,9 @@ fn note_linux_hello_exit(
         return Ok(());
     };
     state.live = None;
+    if state.first_exited.is_none() {
+        state.first_exited = Some((pid, generation, status));
+    }
     state.last_exited = Some((pid, generation, status));
     state.completed_exits = state
         .completed_exits
@@ -386,6 +391,11 @@ pub(crate) fn linux_hello_live() -> Option<LaunchedLinuxProcess> {
 #[cfg(feature = "m8-linux-hello-self-test")]
 pub(crate) fn linux_hello_last_exited() -> Option<(u64, InstanceGeneration, u64)> {
     runtime().and_then(|state| state.last_exited)
+}
+
+#[cfg(feature = "m8-linux-hello-self-test")]
+pub(crate) fn linux_hello_first_exited() -> Option<(u64, InstanceGeneration, u64)> {
+    runtime().and_then(|state| state.first_exited)
 }
 
 #[cfg(feature = "m8-linux-hello-self-test")]

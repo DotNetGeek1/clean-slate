@@ -33,7 +33,8 @@ use crate::selftest::{USER_TEST_CODE_ADDRESS, USER_TEST_STACK_ADDRESS};
 use crate::service::control::service_lifecycle_controller_mut;
 use crate::service::linux_launch::{
     launch_linux_hello, linux_hello_completed_exits, linux_hello_delivered_bytes,
-    linux_hello_last_exited, linux_hello_live, start_linux_hello_service,
+    linux_hello_first_exited, linux_hello_last_exited, linux_hello_live,
+    start_linux_hello_service,
 };
 use crate::service::spawn::register_spawned_process_checked;
 use crate::sync::global_cell::GlobalCell;
@@ -246,8 +247,8 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
 
     if !state.first_exit_seen {
         if linux_hello_completed_exits() >= 1 {
-            let Some((exited_pid, gen, status)) = linux_hello_last_exited() else {
-                fatal_kernel_error("m8.7 first exit missing last_exited");
+            let Some((exited_pid, gen, status)) = linux_hello_first_exited() else {
+                fatal_kernel_error("m8.7 first exit missing first_exited");
             };
             if exited_pid != state.first_pid || gen.0 != state.first_generation {
                 fatal_kernel_error("m8.7 first exit identity mismatched the armed session");
