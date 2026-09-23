@@ -15,12 +15,19 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod errno;
+pub mod socket;
 pub mod stack;
 pub mod syscall;
 
 pub use errno::{
     decode_rax, encode_rax, LinuxErrno, LinuxSyscallResult, EACCES, EBADF, EFAULT, EINVAL, EMFILE,
-    ENFILE, ENOENT, ENOEXEC, ENOMEM, ENOSYS, EPERM, ESRCH,
+    ENFILE, ENOENT, ENOEXEC, ENOMEM, ENOSPC, ENOSYS, EPERM, ESRCH, ESTALE,
+};
+pub use socket::{
+    SockaddrIn, AF_INET, AF_INET6, EADDRINUSE, EAFNOSUPPORT, EAGAIN, ECONNREFUSED, ECONNRESET,
+    EDESTADDRREQ, EIO, EISCONN, EMSGSIZE, ENETUNREACH, ENOBUFS, ENOTCONN, EPROTONOSUPPORT,
+    ETIMEDOUT, IPPROTO_IP, IPPROTO_TCP, IPPROTO_UDP, MSG_NOSIGNAL, SOCKADDR_IN_LEN, SOCK_CLOEXEC,
+    SOCK_DGRAM, SOCK_NONBLOCK, SOCK_STREAM, SYS_BIND, SYS_CONNECT, SYS_SENDTO, SYS_SOCKET,
 };
 pub use stack::{
     build_initial_stack, build_initial_stack_with_tail, InitialStackBuilder, InitialStackImage,
@@ -31,6 +38,6 @@ pub use stack::{
 pub use syscall::{
     decode_linux_syscall, is_m8_supported_syscall, unsupported_syscall_result,
     LinuxSyscallRegisters, LinuxSyscallRequest, UnsupportedSyscallBudget,
-    UnsupportedSyscallObservation, SYS_CLOSE, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_WRITE,
-    SYS_WRITEV,
+    UnsupportedSyscallObservation, SYS_CLOSE, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_READ,
+    SYS_WRITE, SYS_WRITEV,
 };

@@ -39,6 +39,10 @@ pub const ENFILE: LinuxErrno = LinuxErrno(23);
 pub const EMFILE: LinuxErrno = LinuxErrno(24);
 /// Function not implemented.
 pub const ENOSYS: LinuxErrno = LinuxErrno(38);
+/// No space left on device / queue full (Linux 28).
+pub const ENOSPC: LinuxErrno = LinuxErrno(28);
+/// Stale file handle (Linux 116).
+pub const ESTALE: LinuxErrno = LinuxErrno(116);
 
 /// Maximum magnitude Linux treats as an errno when decoding RAX (`-1` … `-4095`).
 pub const LINUX_ERRNO_MAX: i32 = 4095;

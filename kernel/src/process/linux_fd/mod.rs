@@ -10,7 +10,7 @@ pub(crate) mod table;
 use clean_slate_linux_abi::{LinuxErrno, EBADF, EMFILE};
 use clean_slate_service_lifecycle::InstanceGeneration;
 use console::write_console;
-use open_description::{DescriptorKind, OpenDescriptionPool, OpenStatus};
+use open_description::{DescriptorKind, OpenAccess, OpenDescriptionPool, OpenStatus, SocketRef};
 use table::{
     close_fd_entry, close_on_exec as close_cloexec_in_table, dup2_fd, inherit_table,
     install_stdio_entries, release_table, LinuxFdTable,
@@ -209,6 +209,75 @@ impl LinuxFdRegistry {
         let desc = self.pool.get(open)?;
         match desc.kind {
             DescriptorKind::Console(sink) => write_console(ipc, pid, sink, bytes, personality),
+            // #105
+            DescriptorKind::Socket(socket) => {
+                let id = crate::process::linux_socket::socket_ref_to_id(socket);
+                let frame = crate::arch::x86_64::interrupt_context::SyscallContext {
+                    rax: 0,
+                    rdx: 0,
+                    rbx: 0,
+                    rbp: 0,
+                    rsi: 0,
+                    rdi: 0,
+                    r8: 0,
+                    r9: 0,
+                    r10: 0,
+                    r12: 0,
+                    r13: 0,
+                    r14: 0,
+                    r15: 0,
+                    user_rip: 0,
+                    user_rflags: 0,
+                    user_rsp: 0,
+                };
+                let mut frame = frame;
+                let mut ctx = crate::syscall::linux::table::LinuxSyscallContext {
+                    pid,
+                    instance_generation: generation,
+                    frame: &mut frame,
+                };
+                let request = clean_slate_linux_abi::LinuxSyscallRequest {
+                    nr: clean_slate_linux_abi::SYS_WRITE,
+                    args: [0, 0, 0, 0, 0, 0],
+                };
+                let nonblock = desc.status.nonblock;
+                crate::process::linux_socket::write_socket(&request, &mut ctx, id, bytes, nonblock)
+                    .map(|n| n as usize)
+            }
+            _ => Err(EBADF),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn read_fd(
+        &mut self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+        buf_ptr: u64,
+        count: u64,
+        request: &clean_slate_linux_abi::LinuxSyscallRequest,
+        ctx: &mut crate::syscall::linux::table::LinuxSyscallContext<'_>,
+    ) -> Result<usize, LinuxErrno> {
+        let index = self.slot_index(pid, generation).ok_or(EBADF)?;
+        let open = self.slots[index]
+            .as_ref()
+            .expect("slot")
+            .table
+            .get(fd)
+            .ok_or(EBADF)?
+            .open;
+        let desc = self.pool.get(open)?;
+        match desc.kind {
+            // #105
+            DescriptorKind::Socket(socket) => {
+                let id = crate::process::linux_socket::socket_ref_to_id(socket);
+                let nonblock = desc.status.nonblock;
+                crate::process::linux_socket::read_socket(
+                    request, ctx, id, buf_ptr, count, nonblock,
+                )
+                .map(|n| n as usize)
+            }
             _ => Err(EBADF),
         }
     }
@@ -340,6 +409,54 @@ impl LinuxFdRegistry {
         Ok(())
     }
 
+    pub(crate) fn open_description_id_for_fd(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Result<OpenDescriptionId, LinuxErrno> {
+        let entry = self.open_fd_entry(pid, generation, fd)?.ok_or(EBADF)?;
+        Ok(entry.open)
+    }
+
+    pub(crate) fn socket_ref_for_open(
+        &self,
+        open: OpenDescriptionId,
+    ) -> Result<SocketRef, LinuxErrno> {
+        let desc = self.pool.get(open)?;
+        match desc.kind {
+            DescriptorKind::Socket(socket) => Ok(socket),
+            _ => Err(EBADF),
+        }
+    }
+
+    pub(crate) fn ensure_fd_table(
+        &mut self,
+        pid: u64,
+        generation: InstanceGeneration,
+    ) -> Result<(), LinuxErrno> {
+        self.ensure_slot_index(pid, generation).map_err(|_| EBADF)?;
+        Ok(())
+    }
+
+    pub(crate) fn install_socket_description(
+        &mut self,
+        pid: u64,
+        generation: InstanceGeneration,
+        socket: SocketRef,
+        nonblock: bool,
+    ) -> Result<i32, LinuxErrno> {
+        self.ensure_fd_table(pid, generation)?;
+        let status = OpenStatus {
+            access: OpenAccess::ReadWrite,
+            nonblock,
+            append: false,
+        };
+        let open = self.pool.alloc_socket(pid, socket, status)?;
+        self.pool.attach_first_ref(open)?;
+        self.alloc_lowest_fd(pid, generation, open, FdFlags::default())
+    }
+
     pub(crate) fn alloc_lowest_fd(
         &mut self,
         pid: u64,
@@ -451,6 +568,39 @@ pub(crate) fn ensure_open_fd(
     fd: u64,
 ) -> Result<(), LinuxErrno> {
     registry_mut().ensure_open_fd(pid, generation, fd)
+}
+
+pub(crate) fn install_socket_fd(
+    pid: u64,
+    generation: InstanceGeneration,
+    socket: SocketRef,
+    nonblock: bool,
+) -> Result<i32, LinuxErrno> {
+    registry_mut().install_socket_description(pid, generation, socket, nonblock)
+}
+
+pub(crate) fn open_id_for_fd(
+    pid: u64,
+    generation: InstanceGeneration,
+    fd: u64,
+) -> Result<OpenDescriptionId, LinuxErrno> {
+    registry_mut().open_description_id_for_fd(pid, generation, fd)
+}
+
+pub(crate) fn socket_ref_for_open(open: OpenDescriptionId) -> Result<SocketRef, LinuxErrno> {
+    registry_mut().socket_ref_for_open(open)
+}
+
+pub(crate) fn read_fd(
+    pid: u64,
+    generation: InstanceGeneration,
+    fd: u64,
+    buf_ptr: u64,
+    count: u64,
+    request: &clean_slate_linux_abi::LinuxSyscallRequest,
+    ctx: &mut crate::syscall::linux::table::LinuxSyscallContext<'_>,
+) -> Result<usize, LinuxErrno> {
+    registry_mut().read_fd(pid, generation, fd, buf_ptr, count, request, ctx)
 }
 
 pub(crate) fn write_fd(

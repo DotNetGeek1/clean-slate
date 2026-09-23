@@ -36,7 +36,7 @@ pub(crate) struct PipeRef {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SocketRef {
-    pub(crate) id: u32,
+    pub(crate) index: u16,
     pub(crate) generation: u32,
 }
 
@@ -144,6 +144,31 @@ impl OpenDescriptionPool {
         slot.live = true;
         slot.description = OpenDescription {
             kind: DescriptorKind::Console(sink),
+            status,
+            offset: 0,
+            refcount: 0,
+            generation,
+            owner_pid_for_audit: owner_pid,
+        };
+        self.live_count = self.live_count.saturating_add(1);
+        Ok(OpenDescriptionId {
+            index: index as u16,
+            generation,
+        })
+    }
+
+    pub(crate) fn alloc_socket(
+        &mut self,
+        owner_pid: u64,
+        socket: SocketRef,
+        status: OpenStatus,
+    ) -> Result<OpenDescriptionId, LinuxErrno> {
+        let index = self.find_free_slot().ok_or(ENFILE)?;
+        let slot = &mut self.slots[index];
+        let generation = slot.generation;
+        slot.live = true;
+        slot.description = OpenDescription {
+            kind: DescriptorKind::Socket(socket),
             status,
             offset: 0,
             refcount: 0,
@@ -274,7 +299,11 @@ fn release_kind_hook(kind: &DescriptorKind) {
         DescriptorKind::Dir(_) => {}
         DescriptorKind::PipeRead(_) => {}
         DescriptorKind::PipeWrite(_) => {}
-        DescriptorKind::Socket(_) => {}
+        DescriptorKind::Socket(socket) => {
+            crate::process::linux_socket::release_socket(
+                crate::process::linux_socket::socket_ref_to_id(*socket),
+            );
+        }
     }
 }
 

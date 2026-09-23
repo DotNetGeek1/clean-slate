@@ -26,6 +26,22 @@ struct IoVec {
     len: u64,
 }
 
+pub(crate) fn handle_sys_read(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+) -> LinuxSyscallResult {
+    let fd = request.args[0];
+    let buf_ptr = request.args[1];
+    let count = request.args[2];
+    let pid = ctx.pid;
+    let generation = ctx.instance_generation;
+    if count == 0 {
+        return Ok(0);
+    }
+    linux_fd::ensure_open_fd(pid, generation, fd)?;
+    linux_fd::read_fd(pid, generation, fd, buf_ptr, count, request, ctx).map(|n| n as u64)
+}
+
 pub(crate) fn handle_sys_close(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
