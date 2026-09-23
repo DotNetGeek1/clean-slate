@@ -166,7 +166,17 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         #[cfg(not(feature = "m3-syscall-self-test"))]
         #[cfg(not(feature = "m2-timer-self-test"))]
         {
-            increment_kernel_ticks();
+            let _previous_ticks = increment_kernel_ticks();
+            crate::sched::wait::expire_deadlines(_previous_ticks + 1);
+            #[cfg(feature = "m9-block-wake-self-test")]
+            crate::selftest::m9_block_wake::observe_timer_while_consumer_blocked();
+            let on_syscall_stack = with_scheduler(|scheduler| {
+                scheduler.interrupt_stack_on_current_syscall_kernel_stack(stack_pointer)
+            });
+            if on_syscall_stack {
+                acknowledge_timer_interrupt();
+                return stack_pointer;
+            }
             let next_stack_pointer =
                 match with_scheduler(|scheduler| scheduler.on_timer_interrupt(stack_pointer)) {
                     Ok(next_stack_pointer) => next_stack_pointer,

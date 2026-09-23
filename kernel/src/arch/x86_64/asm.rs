@@ -112,6 +112,7 @@ unsafe extern "C" {
 
 unsafe extern "C" {
     pub(crate) fn clean_slate_syscall_entry();
+    pub(crate) fn clean_slate_blocked_syscall_resume_from_schedule() -> !;
 }
 
 #[cfg(feature = "m3-syscall-self-test")]
@@ -169,8 +170,35 @@ clean_slate_interrupt_common:
     call clean_slate_interrupt_dispatch
     cmp rax, -1
     je clean_slate_start_fresh_task
+    cmp rax, -2
+    je clean_slate_blocked_syscall_resume_from_schedule
     mov rsp, rax
     jmp clean_slate_restore_context
+
+    .global clean_slate_blocked_syscall_resume_from_schedule
+clean_slate_blocked_syscall_resume_from_schedule:
+    call clean_slate_complete_blocked_syscall_resume
+    mov rsp, rax
+    mov r12, [rsp + 120]
+    mov [rip + SYSCALL_SCRATCH_USER_RSP], r12
+    pop rax
+    pop rdx
+    pop rbx
+    pop rbp
+    pop rsi
+    pop rdi
+    pop r8
+    pop r9
+    pop r10
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+    pop rcx
+    pop r11
+    add rsp, 8
+    mov rsp, [rip + SYSCALL_SCRATCH_USER_RSP]
+    sysretq
 
     .global clean_slate_start_fresh_task
 clean_slate_start_fresh_task:
@@ -337,6 +365,8 @@ clean_slate_syscall_entry:
     sub rsp, 32
     sub rsp, r12
     call clean_slate_syscall_dispatch
+    cmp rax, -2
+    je clean_slate_blocked_syscall_resume_from_schedule
     mov rsp, rax
     mov r12, [rsp + 120]
     mov [rip + SYSCALL_SCRATCH_USER_RSP], r12
