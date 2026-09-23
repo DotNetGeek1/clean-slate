@@ -140,8 +140,10 @@ pub(crate) const LINUX_M8_LOAD_POLICY: LoadPlanPolicy = LoadPlanPolicy {
 
 /// Conventional Linux user window for low-VA `ET_EXEC` images (#142).
 #[cfg(any(
+    feature = "m8-linux-image",
     feature = "m9-low-va-self-test",
     feature = "m9-linux-exec-self-test",
+    feature = "m9-linux-proc-self-test",
     test
 ))]
 pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
@@ -1139,7 +1141,7 @@ pub(crate) struct LaunchedLinuxProcess {
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
-fn rollback_registered_process(
+pub(crate) fn rollback_registered_process(
     pid: u64,
     allocator: &mut PageAllocator,
 ) -> Result<(), &'static str> {

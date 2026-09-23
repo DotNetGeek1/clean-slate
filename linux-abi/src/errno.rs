@@ -39,6 +39,16 @@ pub const ENFILE: LinuxErrno = LinuxErrno(23);
 pub const EMFILE: LinuxErrno = LinuxErrno(24);
 /// Function not implemented.
 pub const ENOSYS: LinuxErrno = LinuxErrno(38);
+/// Interrupted system call (#102).
+pub const EINTR: LinuxErrno = LinuxErrno(4);
+/// Argument list too long (#102).
+pub const E2BIG: LinuxErrno = LinuxErrno(7);
+/// No child processes (#102).
+pub const ECHILD: LinuxErrno = LinuxErrno(10);
+/// Try again (#102).
+pub const EAGAIN: LinuxErrno = LinuxErrno(11);
+/// Broken pipe (#102).
+pub const EPIPE: LinuxErrno = LinuxErrno(32);
 
 /// Maximum magnitude Linux treats as an errno when decoding RAX (`-1` … `-4095`).
 pub const LINUX_ERRNO_MAX: i32 = 4095;

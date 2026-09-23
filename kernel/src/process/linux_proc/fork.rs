@@ -1,0 +1,219 @@
+//! Linux `fork` — bounded eager address-space copy (#102).
+
+use super::table::{table_mut, ProcId};
+use crate::arch::x86_64::cpu::without_interrupts;
+use crate::arch::x86_64::interrupt_context::SyscallContext;
+use crate::capability::capability_space_mut;
+use crate::mm::address_space::destroy_process_address_space;
+use crate::mm::align_down;
+use crate::mm::fork_clone::{fork_child_address_space, LINUX_FORK_MAX_PAGES};
+use crate::mm::frame_allocator::PageAllocator;
+use crate::process::id_allocator::id_allocator_mut;
+use crate::process::linux_fd;
+use crate::process::linux_image::LINUX_USER_WINDOW_BASE;
+use crate::process::{
+    personality::ExecutionPersonality, process_registry_mut, reap_process_record, Process,
+    ProcessState, ResourceDomain,
+};
+use crate::sched::{scheduler_mut, ThreadKind, ThreadState};
+use clean_slate_capability::CapabilityHandle;
+use clean_slate_capability::{delegate, list_holder, HolderId};
+use clean_slate_linux_abi::{EAGAIN, ENOMEM, ESRCH};
+use clean_slate_service_lifecycle::InstanceGeneration;
+use core::mem::size_of;
+use x86_64::VirtAddr;
+
+const DELEGATE_LIST_CAP: usize = 16;
+
+pub(crate) fn stash_syscall_frame_on_stack(
+    kernel_stack_top: u64,
+    frame: &SyscallContext,
+    rax: u64,
+) -> u64 {
+    let frame_address = align_down(kernel_stack_top - size_of::<SyscallContext>() as u64, 16);
+    let mut copy = SyscallContext {
+        rax: frame.rax,
+        rdx: frame.rdx,
+        rbx: frame.rbx,
+        rbp: frame.rbp,
+        rsi: frame.rsi,
+        rdi: frame.rdi,
+        r8: frame.r8,
+        r9: frame.r9,
+        r10: frame.r10,
+        r12: frame.r12,
+        r13: frame.r13,
+        r14: frame.r14,
+        r15: frame.r15,
+        user_rip: frame.user_rip,
+        user_rflags: frame.user_rflags,
+        user_rsp: frame.user_rsp,
+    };
+    copy.rax = rax;
+    unsafe {
+        core::ptr::write(frame_address as *mut SyscallContext, copy);
+    }
+    frame_address
+}
+
+pub(crate) fn linux_fork(
+    parent_pid: u64,
+    parent_gen: InstanceGeneration,
+    parent_frame: &SyscallContext,
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    scheduler_slot: usize,
+) -> Result<u64, clean_slate_linux_abi::LinuxErrno> {
+    let child_space = without_interrupts(|| unsafe {
+        let parent = process_registry_mut().get(parent_pid).ok_or(ESRCH)?;
+        let parent_space = parent
+            .resource_domain
+            .address_space()
+            .ok_or(clean_slate_linux_abi::EINVAL)?;
+        fork_child_address_space(
+            parent_space,
+            allocator,
+            VirtAddr::new(LINUX_USER_WINDOW_BASE),
+            LINUX_FORK_MAX_PAGES,
+        )
+        .map_err(|_| ENOMEM)
+    })?;
+
+    let (child_pid, child_tid) = without_interrupts(|| -> Result<(u64, u64), &'static str> {
+        let ids = unsafe { id_allocator_mut() };
+        Ok((ids.allocate_pid()?, ids.allocate_tid()?))
+    })
+    .map_err(|_| EAGAIN)?;
+
+    let child_frame_ptr = stash_syscall_frame_on_stack(kernel_stack_top, parent_frame, 0);
+
+    let child_gen = match without_interrupts(|| -> Result<InstanceGeneration, &'static str> {
+        unsafe {
+            if scheduler_slot >= scheduler_mut().thread_capacity() {
+                let _ = destroy_process_address_space(&child_space, allocator);
+                return Err("fork scheduler slot");
+            }
+            if scheduler_mut().threads[scheduler_slot].state != ThreadState::Empty {
+                let _ = destroy_process_address_space(&child_space, allocator);
+                return Err("fork scheduler slot occupied");
+            }
+            let process = Process {
+                id: child_pid,
+                instance_generation: InstanceGeneration(0),
+                state: ProcessState::Ready,
+                resource_domain: ResourceDomain::with_address_space(child_pid, child_space),
+                live_threads: 1,
+                exit_status: None,
+                execution_personality: ExecutionPersonality::LinuxX86_64,
+            };
+            if let Err(message) = process_registry_mut().insert(process) {
+                let _ = message;
+                let _ =
+                    crate::process::linux_image::rollback_registered_process(child_pid, allocator);
+                return Err("fork registry");
+            }
+            let generation = process_registry_mut()
+                .instance_generation(child_pid)
+                .ok_or("fork generation")?;
+            if scheduler_mut()
+                .configure_thread(
+                    scheduler_slot,
+                    child_tid,
+                    child_pid,
+                    ThreadKind::User,
+                    kernel_stack_top,
+                    child_frame_ptr,
+                    parent_frame.user_rip,
+                )
+                .is_err()
+            {
+                let _ =
+                    crate::process::linux_image::rollback_registered_process(child_pid, allocator);
+                return Err("fork configure");
+            }
+            let thread = &mut scheduler_mut().threads[scheduler_slot];
+            thread.started = true;
+            Ok(generation)
+        }
+    }) {
+        Ok(gen) => gen,
+        Err(_) => return Err(EAGAIN),
+    };
+
+    if linux_fd::inherit_for_child(parent_pid, parent_gen, child_pid, child_gen).is_err()
+        || delegate_all_caps(parent_pid, child_pid).is_err()
+        || table_mut()
+            .register(
+                ProcId {
+                    pid: child_pid,
+                    generation: child_gen,
+                },
+                ProcId {
+                    pid: parent_pid,
+                    generation: parent_gen,
+                },
+            )
+            .is_err()
+    {
+        abort_fork_child(child_pid, allocator);
+        return Err(EAGAIN);
+    }
+
+    // #103: `linux_mem::clone_for_fork` / `linux_signal::clone_for_fork` here.
+
+    Ok(child_pid)
+}
+
+fn abort_fork_child(child_pid: u64, allocator: &mut PageAllocator) {
+    without_interrupts(|| {
+        let registry = unsafe { process_registry_mut() };
+        if let Some(record) = registry.get_mut(child_pid) {
+            if let Some(space) = record.resource_domain.take_address_space() {
+                let _ = destroy_process_address_space(&space, allocator);
+            }
+            record.live_threads = 0;
+            let _ = reap_process_record(record);
+            let _ = registry.release_reaped(child_pid);
+        }
+        for thread in unsafe { scheduler_mut() }.threads.iter_mut() {
+            if thread.owner_process_id == child_pid {
+                thread.state = ThreadState::Empty;
+                thread.owner_process_id = 0;
+            }
+        }
+    });
+}
+
+fn delegate_all_caps(parent_pid: u64, child_pid: u64) -> Result<(), ()> {
+    let parent = HolderId(parent_pid);
+    let child = HolderId(child_pid);
+    let mut cursor = 0usize;
+    let mut installed: [Option<CapabilityHandle>; DELEGATE_LIST_CAP] = [None; DELEGATE_LIST_CAP];
+    let mut count = 0usize;
+    while count < DELEGATE_LIST_CAP {
+        let table = unsafe { capability_space_mut() };
+        let Some((next_cursor, handle, record)) = list_holder(table, parent, cursor) else {
+            break;
+        };
+        cursor = next_cursor + 1;
+        let rights = record.rights;
+        match delegate(table, parent, handle, child, rights) {
+            Ok(child_handle) => {
+                installed[count] = Some(child_handle);
+                count += 1;
+            }
+            Err(_) => {
+                rollback_delegated(&installed[..count]);
+                return Err(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rollback_delegated(handles: &[Option<CapabilityHandle>]) {
+    let table = unsafe { capability_space_mut() };
+    for handle in handles.iter().flatten() {
+        let _ = table.revoke(*handle);
+    }
+}

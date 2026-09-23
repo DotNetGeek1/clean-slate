@@ -58,6 +58,7 @@ m8-linux-hello = ["m8-linux-image"]
 m8-linux-hello-self-test = ["m8-linux-hello", "m3-entry-self-test"]
 m9-low-va-self-test = ["m8-linux-image", "m3-entry-self-test"]
 m9-linux-exec-self-test = ["m8-linux-image", "m3-entry-self-test"]
+m9-linux-proc-self-test = ["m8-linux-image", "m3-entry-self-test"]
 
 [lib]
 path = "src/lib.rs"

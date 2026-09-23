@@ -29,9 +29,21 @@ pub(crate) struct DirHandleRef {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PipeRef {
-    pub(crate) id: u32,
+pub(crate) struct PipeId {
+    pub(crate) index: u16,
     pub(crate) generation: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PipeEnd {
+    Read,
+    Write,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PipeRef {
+    pub(crate) pipe: PipeId,
+    pub(crate) end: PipeEnd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +157,38 @@ impl OpenDescriptionPool {
         slot.description = OpenDescription {
             kind: DescriptorKind::Console(sink),
             status,
+            offset: 0,
+            refcount: 0,
+            generation,
+            owner_pid_for_audit: owner_pid,
+        };
+        self.live_count = self.live_count.saturating_add(1);
+        Ok(OpenDescriptionId {
+            index: index as u16,
+            generation,
+        })
+    }
+
+    pub(crate) fn alloc_pipe(
+        &mut self,
+        owner_pid: u64,
+        pipe: PipeRef,
+    ) -> Result<OpenDescriptionId, LinuxErrno> {
+        let index = self.find_free_slot().ok_or(ENFILE)?;
+        let slot = &mut self.slots[index];
+        let generation = slot.generation;
+        slot.live = true;
+        let kind = match pipe.end {
+            PipeEnd::Read => DescriptorKind::PipeRead(pipe),
+            PipeEnd::Write => DescriptorKind::PipeWrite(pipe),
+        };
+        slot.description = OpenDescription {
+            kind,
+            status: OpenStatus {
+                access: OpenAccess::ReadWrite,
+                nonblock: false,
+                append: false,
+            },
             offset: 0,
             refcount: 0,
             generation,
@@ -272,8 +316,9 @@ fn release_kind_hook(kind: &DescriptorKind) {
         DescriptorKind::Console(_) => {}
         DescriptorKind::File(_) => {}
         DescriptorKind::Dir(_) => {}
-        DescriptorKind::PipeRead(_) => {}
-        DescriptorKind::PipeWrite(_) => {}
+        DescriptorKind::PipeRead(pipe) | DescriptorKind::PipeWrite(pipe) => {
+            crate::process::linux_proc::pipe::release_pipe_end(*pipe);
+        }
         DescriptorKind::Socket(_) => {}
     }
 }

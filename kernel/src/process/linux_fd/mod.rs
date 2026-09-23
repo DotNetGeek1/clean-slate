@@ -10,7 +10,7 @@ pub(crate) mod table;
 use clean_slate_linux_abi::{LinuxErrno, EBADF, EMFILE};
 use clean_slate_service_lifecycle::InstanceGeneration;
 use console::write_console;
-use open_description::{DescriptorKind, OpenDescriptionPool, OpenStatus};
+use open_description::{DescriptorKind, OpenDescriptionPool, OpenStatus, PipeRef};
 use table::{
     close_fd_entry, close_on_exec as close_cloexec_in_table, dup2_fd, inherit_table,
     install_stdio_entries, release_table, LinuxFdTable,
@@ -209,6 +209,67 @@ impl LinuxFdRegistry {
         let desc = self.pool.get(open)?;
         match desc.kind {
             DescriptorKind::Console(sink) => write_console(ipc, pid, sink, bytes, personality),
+            // #102
+            DescriptorKind::PipeWrite(pipe) => {
+                crate::process::linux_proc::pipe::write_pipe(pipe, bytes)
+            }
+            _ => Err(EBADF),
+        }
+    }
+
+    pub(crate) fn alloc_pipe_description(
+        &mut self,
+        owner_pid: u64,
+        pipe: PipeRef,
+    ) -> Result<OpenDescriptionId, LinuxErrno> {
+        self.pool.alloc_pipe(owner_pid, pipe)
+    }
+
+    fn pool_mut(&mut self) -> &mut OpenDescriptionPool {
+        &mut self.pool
+    }
+
+    pub(crate) fn pipe_read_ref(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Option<PipeRef> {
+        let index = self.slot_index(pid, generation)?;
+        let open = self.slots[index]
+            .as_ref()
+            .expect("slot")
+            .table
+            .get(fd)?
+            .open;
+        let desc = self.pool.get(open).ok()?;
+        match desc.kind {
+            DescriptorKind::PipeRead(pipe) => Some(pipe),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn read_fd(
+        &mut self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, LinuxErrno> {
+        let index = self.slot_index(pid, generation).ok_or(EBADF)?;
+        let open = self.slots[index]
+            .as_ref()
+            .expect("slot")
+            .table
+            .get(fd)
+            .ok_or(EBADF)?
+            .open;
+        let desc = self.pool.get(open)?;
+        match desc.kind {
+            // #102
+            DescriptorKind::PipeRead(pipe) => {
+                crate::process::linux_proc::pipe::read_pipe(pipe, buf)
+            }
             _ => Err(EBADF),
         }
     }
@@ -451,6 +512,36 @@ pub(crate) fn ensure_open_fd(
     fd: u64,
 ) -> Result<(), LinuxErrno> {
     registry_mut().ensure_open_fd(pid, generation, fd)
+}
+
+pub(crate) fn alloc_pipe_end(
+    pid: u64,
+    generation: InstanceGeneration,
+    pipe: PipeRef,
+) -> Result<i32, LinuxErrno> {
+    let registry = registry_mut();
+    let index = registry
+        .ensure_slot_index(pid, generation)
+        .map_err(|_| EBADF)?;
+    let open = registry.alloc_pipe_description(pid, pipe)?;
+    registry.slots[index]
+        .as_mut()
+        .expect("slot")
+        .table
+        .alloc_lowest(&mut registry.pool, open, FdFlags::default())
+}
+
+pub(crate) fn read_fd(
+    pid: u64,
+    generation: InstanceGeneration,
+    fd: u64,
+    buf: &mut [u8],
+) -> Result<usize, LinuxErrno> {
+    registry_mut().read_fd(pid, generation, fd, buf)
+}
+
+pub(crate) fn pipe_ref_for(pid: u64, generation: InstanceGeneration, fd: u64) -> Option<PipeRef> {
+    registry_mut().pipe_read_ref(pid, generation, fd)
 }
 
 pub(crate) fn write_fd(

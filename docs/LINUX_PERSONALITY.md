@@ -141,6 +141,19 @@ Linux fd numbers must never be confused with capability handles.
 
 See also: [COMPATIBILITY.md](COMPATIBILITY.md), [ROADMAP.md](ROADMAP.md) (M8/M9), [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## M9 #102 — process / exec / wait / pipe
+
+Lane #102 implements the frozen BusyBox process subset on trusted `(pid, generation)`:
+`fork`, `execve` (production pointer copy → `LinuxExecSpec` → `commit_exec`), `wait4`,
+`exit_group`, `getppid`, and `pipe`. Parent/child links live in
+`kernel/src/process/linux_proc/table.rs`; pipes are bounded (`LINUX_PIPE_MAX` ×
+`LINUX_PIPE_CAPACITY` = 1024 bytes each) with `#147` `PipeRef` backends and `#145`
+blocking (`WaitKey` namespace `0x50 << 56`). `fork` uses eager copy
+(`mm/fork_clone.rs`, `LINUX_FORK_MAX_PAGES` = 1024). Until #101 lands,
+`linux_proc/exec_resolve.rs` resolves `/bin/busybox` and `/bin/sh` to the M8 hello
+fixture (delete at integration). `#103` hooks: `linux_mem::clone_for_fork` /
+`linux_signal::clone_for_fork` at the marked call site in `fork.rs`.
+
 ## M9 #146 — Linux exec / process image substrate
 
 `kernel/src/process/linux_exec.rs` generalizes the M8 loader into a bounded,

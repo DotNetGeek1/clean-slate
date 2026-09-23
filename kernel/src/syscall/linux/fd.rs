@@ -1,13 +1,17 @@
 //! Linux fd syscalls: `close`, `dup2`, `fcntl`, `writev` (#147).
 
+use super::block::{block_linux_syscall, LinuxTimeoutResult};
 use super::table::LinuxSyscallContext;
 use super::user_copy::copy_user_bytes;
 use super::write::{ensure_fd_open, write_chunked, LINUX_WRITE_CHUNK_BYTES};
-use crate::mm::user_mapping::validate_user_pointer_range;
+use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::process::linux_fd::{
     self, apply_linux_fl_to_status, ensure_open_fd, open_status_to_linux_fl, projection_for,
 };
-use clean_slate_linux_abi::{LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EFAULT, EINVAL};
+use crate::process::linux_proc::pipe::{pipe_ref_to_handle, reader_wait_key};
+use clean_slate_linux_abi::{
+    LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EAGAIN, EFAULT, EINVAL,
+};
 
 /// Bounded `writev` iov count (self-test uses 2–3; keep small and fixed).
 pub(crate) const LINUX_IOV_MAX: usize = 8;
@@ -24,6 +28,40 @@ const FD_CLOEXEC: u64 = 1;
 struct IoVec {
     base: u64,
     len: u64,
+}
+
+pub(crate) fn handle_sys_read(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+) -> LinuxSyscallResult {
+    let fd = request.args[0];
+    let buf_ptr = request.args[1];
+    let count = request.args[2];
+    if count == 0 {
+        return Ok(0);
+    }
+    let count = usize::try_from(count).map_err(|_| EINVAL)?;
+    validate_user_writable_pointer_range(buf_ptr, count as u64).map_err(|_| EFAULT)?;
+    let mut buf = [0u8; 64];
+    let take = count.min(buf.len());
+    match linux_fd::read_fd(ctx.pid, ctx.instance_generation, fd, &mut buf[..take]) {
+        Ok(n) => {
+            if n > 0 {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(buf.as_ptr(), buf_ptr as *mut u8, n);
+                }
+            }
+            Ok(n as u64)
+        }
+        Err(EAGAIN) => {
+            if let Some(pipe) = linux_fd::pipe_ref_for(ctx.pid, ctx.instance_generation, fd) {
+                let key = reader_wait_key(pipe_ref_to_handle(pipe));
+                return block_linux_syscall(request, ctx, key, None, LinuxTimeoutResult::Zero);
+            }
+            Err(EAGAIN)
+        }
+        Err(errno) => Err(errno),
+    }
 }
 
 pub(crate) fn handle_sys_close(
