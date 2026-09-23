@@ -300,6 +300,18 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
                 "[M8.7] relaunch observed pid={} gen={}\n",
                 launched.pid, launched.instance_generation.0
             ));
+        } else if linux_hello_completed_exits() >= 2 {
+            let Some((exited_pid, gen, _)) = linux_hello_last_exited() else {
+                fatal_kernel_error("m8.7 relaunch missing last_exited snapshot");
+            };
+            if exited_pid == state.first_pid && gen.0 <= state.first_generation {
+                fatal_kernel_error("m8.7 relaunch did not advance pid/generation");
+            }
+            state.relaunch_seen = true;
+            kernel_log_fmt(format_args!(
+                "[M8.7] relaunch observed pid={} gen={}\n",
+                exited_pid, gen.0
+            ));
         }
     }
 
