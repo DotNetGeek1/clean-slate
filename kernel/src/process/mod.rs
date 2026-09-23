@@ -368,6 +368,8 @@ mod tests {
             progress_logged: false,
             preemptions: 0,
             observed_progress: 0,
+            blocked_syscall_frame: 0,
+            wait_resume_outcome: crate::sched::wait::WaitOutcome::Woken,
         };
 
         assert!(
@@ -405,6 +407,8 @@ mod tests {
             progress_logged: false,
             preemptions: 0,
             observed_progress: 0,
+            blocked_syscall_frame: 0,
+            wait_resume_outcome: crate::sched::wait::WaitOutcome::Woken,
         };
 
         assert!(!begin_thread_exit(&mut process, &mut thread, 0, false).expect("thread exit"));
@@ -425,6 +429,8 @@ mod tests {
             progress_logged: false,
             preemptions: 0,
             observed_progress: 0,
+            blocked_syscall_frame: 0,
+            wait_resume_outcome: crate::sched::wait::WaitOutcome::Woken,
         };
         assert!(begin_thread_exit(&mut process, &mut final_thread, 9, false)
             .expect("final thread exit"));

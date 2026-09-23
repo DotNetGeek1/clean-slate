@@ -162,6 +162,7 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
     feature = "m3-syscall-self-test",
     feature = "m8-linux-dispatch-self-test",
     feature = "m9-syscall-fail-closed-self-test",
+    feature = "m9-block-wake-self-test",
     feature = "m4-supervisor-self-test",
     feature = "m5-storage-self-test",
     feature = "m5-persistence-self-test",
@@ -181,7 +182,8 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
     feature = "m8-linux-hello-self-test",
     feature = "m9-low-va-self-test",
     feature = "m9-fd-core-self-test",
-    feature = "m9-syscall-fail-closed-self-test"
+    feature = "m9-syscall-fail-closed-self-test",
+    feature = "m9-block-wake-self-test"
 ))]
 pub(crate) fn start_current_scheduler_thread() -> Result<u64, &'static str> {
     let stack_pointer = without_interrupts(|| with_scheduler(|scheduler| scheduler.start()))?;
