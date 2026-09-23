@@ -26,8 +26,16 @@ use crate::errno::{LinuxErrno, ENOSYS};
 
 /// Linux `write` — `write(fd, buf, count)`.
 pub const SYS_WRITE: u64 = 1;
+/// Linux `close` — `close(fd)`.
+pub const SYS_CLOSE: u64 = 3;
+/// Linux `writev` — `writev(fd, iov, iovcnt)`.
+pub const SYS_WRITEV: u64 = 20;
+/// Linux `dup2` — `dup2(oldfd, newfd)`.
+pub const SYS_DUP2: u64 = 33;
 /// Linux `exit` — `exit(error_code)` (thread/group exit; M8 uses this for `_exit`).
 pub const SYS_EXIT: u64 = 60;
+/// Linux `fcntl` — `fcntl(fd, cmd, arg)`.
+pub const SYS_FCNTL: u64 = 72;
 
 /// Raw registers captured for Linux personality decode (subset of the full frame).
 ///

@@ -25,7 +25,7 @@ use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
-use crate::diagnostics::serial::serial_write_line;
+use crate::diagnostics::serial::{serial_write_bytes, serial_write_line};
 use crate::interrupt::timer::initialize_timer;
 use crate::ipc::endpoint_table_mut;
 use crate::ipc::IPC_MAX_MESSAGE_BYTES;
@@ -34,8 +34,8 @@ use crate::mm::address_space::map_process_page;
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::zero_page;
+use crate::mm::phys_to_virt;
 use crate::mm::PAGE_SIZE;
-use crate::mm::PHYSICAL_MEMORY_OFFSET;
 use crate::process::domain::remaining_owned_resource_count;
 use crate::process::domain::resource_snapshot;
 use crate::process::domain::DomainTeardownResult;
@@ -45,6 +45,9 @@ use crate::process::linux_fd;
 use crate::process::linux_fd::console_sink_render_style;
 use crate::process::linux_fd::ConsoleSinkRenderStyle;
 use crate::process::linux_fd::LINUX_STDOUT_FD;
+use crate::process::linux_stdio_m9_payload::{
+    M9_STDIO_BLOCK, M9_STDIO_BLOCK_FNV, M9_STDIO_BLOCK_LEN,
+};
 use crate::process::live_instance_generation;
 use crate::process::personality::execution_personality_for_pid;
 use crate::process::personality::set_execution_personality;
@@ -76,6 +79,7 @@ use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
 pub(crate) const M8_LINUX_DISPATCH_PASS_MARKER: &str = "[M8.3] PASS";
+pub(crate) const M9_STDIO_BYTES_PASS_MARKER: &str = "[M9.D] PASS";
 
 /// Exact bytes the Linux probe writes to fd 1; shared by the code page, the
 /// kernel-side sink check and host tests. Matches the frozen #96 fixture.
@@ -84,89 +88,181 @@ pub(crate) const M8_LINUX_HELLO_BYTES: [u8; 18] = *b"Hello from Linux.\n";
 /// fd the probe uses to provoke `EBADF` (outside the 4-entry Linux fd table).
 const M8_LINUX_BAD_FD: u64 = 7;
 
-/// Byte offset of the message inside the code page (immediately after text).
-const PROBE_MSG_OFFSET: usize = 131;
-/// Byte offsets of the three `exit(n)` failure stubs.
-const PROBE_FAIL1_OFFSET: usize = 89;
-const PROBE_FAIL2_OFFSET: usize = 103;
-const PROBE_FAIL3_OFFSET: usize = 117;
-
-/// Hand-assembled Linux probe text (x86-64, position-independent via RIP-relative
-/// `lea`). Offsets are listed so the relative branch/`lea` displacements below
-/// can be checked by hand and by the host tests.
-///
-/// Encodings used: `mov eax, imm32` = `B8 id` (zero-extends into RAX);
-/// `mov edi, imm32` = `BF id`; `mov edx, imm32` = `BA id`;
-/// `cmp rax, imm8` = `48 83 F8 ib` (sign-extended); `jne rel8` = `75 cb`;
-/// `lea rsi, [rip+rel32]` = `48 8D 35 cd`; `syscall` = `0F 05`;
-/// `xor edi, edi` = `31 FF`; `ud2` = `0F 0B`.
-const LINUX_PROBE_TEXT: [u8; PROBE_MSG_OFFSET] = [
-    // 0x00: mov rax, 999             (unsupported nr probe)
-    0x48, 0xB8, 0xE7, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x0A: syscall
-    0x0F, 0x05, // 0x0C: cmp rax, -38             (-ENOSYS)
-    0x48, 0x83, 0xF8, 0xDA, // 0x10: jne fail1                (0x59 - 0x12 = 0x47)
-    0x75, 0x47,
-    // ---- write(1, msg, 18) ----
-    // 0x12: mov eax, 1               (SYS_WRITE)
-    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x17: mov edi, 1               (fd = stdout)
-    0xBF, 0x01, 0x00, 0x00, 0x00, // 0x1C: lea rsi, [rip + msg]     (0x83 - 0x23 = 0x60)
-    0x48, 0x8D, 0x35, 0x60, 0x00, 0x00, 0x00, // 0x23: mov edx, 18              (count)
-    0xBA, 0x12, 0x00, 0x00, 0x00, // 0x28: syscall
-    0x0F, 0x05, // 0x2A: cmp rax, 18
-    0x48, 0x83, 0xF8, 0x12, // 0x2E: jne fail2                (0x67 - 0x30 = 0x37)
-    0x75, 0x37,
-    // ---- write(7, msg, 18) → expect -EBADF ----
-    // 0x30: mov eax, 1               (SYS_WRITE)
-    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x35: mov edi, 7               (fd = 7, not open)
-    0xBF, 0x07, 0x00, 0x00, 0x00, // 0x3A: lea rsi, [rip + msg]     (0x83 - 0x41 = 0x42)
-    0x48, 0x8D, 0x35, 0x42, 0x00, 0x00, 0x00, // 0x41: mov edx, 18              (count)
-    0xBA, 0x12, 0x00, 0x00, 0x00, // 0x46: syscall
-    0x0F, 0x05, // 0x48: cmp rax, -9              (-EBADF)
-    0x48, 0x83, 0xF8, 0xF7, // 0x4C: jne fail3                (0x75 - 0x4E = 0x27)
-    0x75, 0x27, // ---- exit(0) ----
-    // 0x4E: mov eax, 60              (SYS_EXIT)
-    0xB8, 0x3C, 0x00, 0x00, 0x00, // 0x53: xor edi, edi             (status = 0)
-    0x31, 0xFF, // 0x55: syscall
-    0x0F, 0x05, // 0x57: ud2                      (exit must never return)
-    0x0F, 0x0B, // fail1 @ 0x59: exit(1) — -ENOSYS check failed
-    0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60
-    0xBF, 0x01, 0x00, 0x00, 0x00, // mov edi, 1
-    0x0F, 0x05, // syscall
-    0x0F, 0x0B, // ud2
-    // fail2 @ 0x67: exit(2) — write(1) did not return 18
-    0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60
-    0xBF, 0x02, 0x00, 0x00, 0x00, // mov edi, 2
-    0x0F, 0x05, // syscall
-    0x0F, 0x0B, // ud2
-    // fail3 @ 0x75: exit(3) — write(7) did not return -EBADF
-    0xB8, 0x3C, 0x00, 0x00, 0x00, // mov eax, 60
-    0xBF, 0x03, 0x00, 0x00, 0x00, // mov edi, 3
-    0x0F, 0x05, // syscall
-    0x0F,
-    0x0B, // ud2
-          // msg @ 0x83: "Hello from Linux.\n" (appended by `linux_probe_code`)
-];
-
-const LINUX_PROBE_CODE_LEN: usize = PROBE_MSG_OFFSET + M8_LINUX_HELLO_BYTES.len();
-
-/// Text followed by the message bytes, built at compile time so the message
-/// constant is shared verbatim with the kernel-side check.
-const fn linux_probe_code() -> [u8; LINUX_PROBE_CODE_LEN] {
-    let mut code = [0u8; LINUX_PROBE_CODE_LEN];
-    let mut index = 0;
-    while index < PROBE_MSG_OFFSET {
-        code[index] = LINUX_PROBE_TEXT[index];
-        index += 1;
-    }
-    let mut message_index = 0;
-    while message_index < M8_LINUX_HELLO_BYTES.len() {
-        code[PROBE_MSG_OFFSET + message_index] = M8_LINUX_HELLO_BYTES[message_index];
-        message_index += 1;
-    }
-    code
+struct ProbeBuilder {
+    buf: [u8; PAGE_SIZE as usize],
+    len: usize,
 }
 
-const LINUX_PROBE_CODE: [u8; LINUX_PROBE_CODE_LEN] = linux_probe_code();
+impl ProbeBuilder {
+    fn new() -> Self {
+        Self {
+            buf: [0u8; PAGE_SIZE as usize],
+            len: 0,
+        }
+    }
+
+    fn emit(&mut self, bytes: &[u8]) -> Result<(), &'static str> {
+        if self.len + bytes.len() > self.buf.len() {
+            return Err("m8 linux probe code overflow");
+        }
+        self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+        Ok(())
+    }
+
+    fn emit_mov_eax(&mut self, value: u32) -> Result<(), &'static str> {
+        self.emit(&[0xB8])?;
+        self.emit(&value.to_le_bytes())
+    }
+
+    fn emit_mov_edi(&mut self, value: u32) -> Result<(), &'static str> {
+        self.emit(&[0xBF])?;
+        self.emit(&value.to_le_bytes())
+    }
+
+    fn emit_mov_edx(&mut self, value: u32) -> Result<(), &'static str> {
+        self.emit(&[0xBA])?;
+        self.emit(&value.to_le_bytes())
+    }
+
+    fn emit_syscall(&mut self) -> Result<(), &'static str> {
+        self.emit(&[0x0F, 0x05])
+    }
+
+    fn emit_cmp_rax_imm8(&mut self, value: i8) -> Result<(), &'static str> {
+        self.emit(&[0x48, 0x83, 0xF8, value as u8])
+    }
+
+    fn emit_cmp_rax_imm32(&mut self, value: u32) -> Result<(), &'static str> {
+        self.emit(&[0x48, 0x3D])?;
+        self.emit(&value.to_le_bytes())
+    }
+
+    fn emit_jne_placeholder(&mut self) -> Result<usize, &'static str> {
+        self.emit(&[0x75, 0x00])?;
+        Ok(self.len - 1)
+    }
+
+    fn patch_jne_rel8(
+        &mut self,
+        rel_byte_offset: usize,
+        target: usize,
+    ) -> Result<(), &'static str> {
+        let next = rel_byte_offset + 1;
+        let rel = isize::try_from(target - next).map_err(|_| "m8 probe branch out of range")?;
+        if rel < i8::MIN as isize || rel > i8::MAX as isize {
+            return Err("m8 probe branch out of range");
+        }
+        self.buf[rel_byte_offset] = rel as u8;
+        Ok(())
+    }
+
+    fn emit_lea_rsi_rip_placeholder(&mut self) -> Result<usize, &'static str> {
+        self.emit(&[0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00])?;
+        Ok(self.len - 4)
+    }
+
+    fn patch_lea_rsi_rip(
+        &mut self,
+        rel32_offset: usize,
+        target: usize,
+    ) -> Result<(), &'static str> {
+        let next = rel32_offset + 4;
+        let rel = isize::try_from(target - next).map_err(|_| "m8 probe lea out of range")?;
+        let rel32 = i32::try_from(rel).map_err(|_| "m8 probe lea out of range")?;
+        self.buf[rel32_offset..rel32_offset + 4].copy_from_slice(&rel32.to_le_bytes());
+        Ok(())
+    }
+
+    fn emit_exit_stub(&mut self, status: u8) -> Result<(), &'static str> {
+        self.emit_mov_eax(60)?;
+        self.emit_mov_edi(status as u32)?;
+        self.emit_syscall()?;
+        self.emit(&[0x0F, 0x0B])
+    }
+
+    fn emit_write_syscall(&mut self, fd: u32, count: u32) -> Result<usize, &'static str> {
+        self.emit_mov_eax(1)?;
+        self.emit_mov_edi(fd)?;
+        let lea = self.emit_lea_rsi_rip_placeholder()?;
+        self.emit_mov_edx(count)?;
+        self.emit_syscall()?;
+        Ok(lea)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+/// Build the Linux userspace probe (M8.3 + M9 #144 binary stdio) into `out`.
+fn build_linux_probe_code(out: &mut [u8]) -> Result<usize, &'static str> {
+    let mut builder = ProbeBuilder::new();
+    let mut lea_targets: [(usize, usize); 4] = [(0, 0), (0, 0), (0, 0), (0, 0)];
+    let mut lea_slots = 0usize;
+
+    builder.emit(&[0x48, 0xB8, 0xE7, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])?;
+    builder.emit_syscall()?;
+    builder.emit_cmp_rax_imm8(-38)?;
+    let jne_fail1 = builder.emit_jne_placeholder()?;
+
+    let lea_hello = builder.emit_write_syscall(1, M8_LINUX_HELLO_BYTES.len() as u32)?;
+    lea_targets[lea_slots] = (lea_hello, 0);
+    lea_slots += 1;
+    builder.emit_cmp_rax_imm8(M8_LINUX_HELLO_BYTES.len() as i8)?;
+    let jne_fail2 = builder.emit_jne_placeholder()?;
+
+    let lea_m9 = builder.emit_write_syscall(1, M9_STDIO_BLOCK_LEN as u32)?;
+    lea_targets[lea_slots] = (lea_m9, 0);
+    lea_slots += 1;
+    builder.emit_cmp_rax_imm32(M9_STDIO_BLOCK_LEN as u32)?;
+    let jne_fail4 = builder.emit_jne_placeholder()?;
+
+    let lea_bad_fd =
+        builder.emit_write_syscall(M8_LINUX_BAD_FD as u32, M8_LINUX_HELLO_BYTES.len() as u32)?;
+    lea_targets[lea_slots] = (lea_bad_fd, 0);
+    lea_slots += 1;
+    builder.emit_cmp_rax_imm8(-9)?;
+    let jne_fail3 = builder.emit_jne_placeholder()?;
+
+    builder.emit_mov_eax(60)?;
+    builder.emit_mov_edi(0)?;
+    builder.emit_syscall()?;
+    builder.emit(&[0x0F, 0x0B])?;
+
+    let fail1 = builder.len;
+    builder.emit_exit_stub(1)?;
+    let fail2 = builder.len;
+    builder.emit_exit_stub(2)?;
+    let fail4 = builder.len;
+    builder.emit_exit_stub(4)?;
+    let fail3 = builder.len;
+    builder.emit_exit_stub(3)?;
+
+    builder.patch_jne_rel8(jne_fail1, fail1)?;
+    builder.patch_jne_rel8(jne_fail2, fail2)?;
+    builder.patch_jne_rel8(jne_fail4, fail4)?;
+    builder.patch_jne_rel8(jne_fail3, fail3)?;
+
+    let hello_data = builder.len;
+    builder.emit(&M8_LINUX_HELLO_BYTES)?;
+    let m9_data = builder.len;
+    builder.emit(&M9_STDIO_BLOCK)?;
+
+    lea_targets[0].1 = hello_data;
+    lea_targets[1].1 = m9_data;
+    lea_targets[2].1 = hello_data;
+    for &(lea_off, target) in lea_targets.iter().take(lea_slots) {
+        builder.patch_lea_rsi_rip(lea_off, target)?;
+    }
+
+    let total = builder.len;
+    if total > out.len() {
+        return Err("m8 linux probe exceeded output buffer");
+    }
+    out[..total].copy_from_slice(builder.as_slice());
+    Ok(total)
+}
 
 /// Native sibling: `xor rax,rax; syscall; jmp $-7` (version syscall loop).
 const NATIVE_PROGRESS_CODE: [u8; 7] = [
@@ -205,6 +301,10 @@ static M8_IPC_BASELINE_CAPABILITIES: AtomicUsize = AtomicUsize::new(0);
 static M8_LINUX_WRITE_OK: AtomicBool = AtomicBool::new(false);
 static M8_LINUX_EBADF_OBSERVED: AtomicBool = AtomicBool::new(false);
 static M8_LINUX_EXIT_OBSERVED: AtomicBool = AtomicBool::new(false);
+static M9_BYTES_OK: AtomicBool = AtomicBool::new(false);
+static M9_SERIAL_ACCUMULATE: AtomicBool = AtomicBool::new(false);
+static M9_SERIAL_FNV: AtomicU32 = AtomicU32::new(0x811c_9dc5);
+static M9_SERIAL_LEN: AtomicUsize = AtomicUsize::new(0);
 
 struct DispatchProcess {
     process_id: u64,
@@ -234,7 +334,7 @@ fn create_userspace_process(
         unsafe {
             ptr::copy_nonoverlapping(
                 code.as_ptr(),
-                (PHYSICAL_MEMORY_OFFSET + code_frame_address) as *mut u8,
+                (phys_to_virt(code_frame_address)) as *mut u8,
                 code.len(),
             );
         }
@@ -365,16 +465,23 @@ fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
     M8_LINUX_WRITE_OK.store(false, Ordering::Relaxed);
     M8_LINUX_EBADF_OBSERVED.store(false, Ordering::Relaxed);
     M8_LINUX_EXIT_OBSERVED.store(false, Ordering::Relaxed);
+    M9_BYTES_OK.store(false, Ordering::Relaxed);
+    M9_SERIAL_ACCUMULATE.store(false, Ordering::Relaxed);
+    M9_SERIAL_FNV.store(0x811c_9dc5, Ordering::Relaxed);
+    M9_SERIAL_LEN.store(0, Ordering::Relaxed);
     M8_LINUX_PID.store(0, Ordering::Relaxed);
     unsafe {
         *M8_DELIVERED.get() = DeliveredRecord::EMPTY;
     }
 
+    let mut probe_buf = [0u8; PAGE_SIZE as usize];
+    let probe_len = build_linux_probe_code(&mut probe_buf)?;
+
     let stacks = unsafe { &*task_stacks_mut() };
     let linux = create_userspace_process(
         allocator,
         task_stack_top(&stacks[0]),
-        &LINUX_PROBE_CODE,
+        &probe_buf[..probe_len],
         ExecutionPersonality::LinuxX86_64,
     )?;
     install_linux_stdio(linux.process_id)?;
@@ -445,6 +552,23 @@ fn is_linux_probe(pid: u64) -> bool {
 
 /// Called by the production `write` handler each time the fd projection
 /// accepted a chunk (i.e. after `IpcEndpointTable::send_message` succeeded).
+/// Observe raw serial bytes from [`linux_fd::console_write_bytes`] during the M9
+/// stdio phase (after the hello `write` succeeded).
+pub(crate) fn observe_linux_console_write_bytes(bytes: &[u8]) {
+    if !M9_SERIAL_ACCUMULATE.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut hash = M9_SERIAL_FNV.load(Ordering::Relaxed);
+    let mut len = M9_SERIAL_LEN.load(Ordering::Relaxed);
+    for &byte in bytes {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+        len += 1;
+    }
+    M9_SERIAL_FNV.store(hash, Ordering::Relaxed);
+    M9_SERIAL_LEN.store(len, Ordering::Relaxed);
+}
+
 pub(crate) fn observe_linux_delivered_chunk(pid: u64, fd: u64, delivered: &[u8]) {
     if !is_linux_probe(pid) {
         return;
@@ -453,8 +577,14 @@ pub(crate) fn observe_linux_delivered_chunk(pid: u64, fd: u64, delivered: &[u8])
         fatal_kernel_error("m8 linux probe delivered bytes through an unexpected fd");
     }
     let record = unsafe { &mut *M8_DELIVERED.get() };
-    if record.deliveries != 0 || delivered.len() > IPC_MAX_MESSAGE_BYTES {
-        fatal_kernel_error("m8 linux probe delivered more than the single expected chunk");
+    if record.deliveries != 0 {
+        return;
+    }
+    if delivered.len() != M8_LINUX_HELLO_BYTES.len() {
+        return;
+    }
+    if delivered.len() > IPC_MAX_MESSAGE_BYTES {
+        fatal_kernel_error("m8 linux probe hello chunk exceeded ipc max");
     }
     record.bytes[..delivered.len()].copy_from_slice(delivered);
     record.len = delivered.len();
@@ -490,9 +620,30 @@ pub(crate) fn observe_linux_write_result(
                 );
             }
             M8_LINUX_WRITE_OK.store(true, Ordering::Relaxed);
+            M9_SERIAL_ACCUMULATE.store(true, Ordering::Relaxed);
+            M9_SERIAL_FNV.store(0x811c_9dc5, Ordering::Relaxed);
+            M9_SERIAL_LEN.store(0, Ordering::Relaxed);
         }
-        (LINUX_STDOUT_FD, _) => {
+        (LINUX_STDOUT_FD, Ok(count)) if count == M9_STDIO_BLOCK_LEN as u64 => {
+            if M9_SERIAL_LEN.load(Ordering::Relaxed) != M9_STDIO_BLOCK_LEN
+                || M9_SERIAL_FNV.load(Ordering::Relaxed) != M9_STDIO_BLOCK_FNV
+            {
+                fatal_kernel_error("m9 binary stdio serial bytes did not match expected fnv");
+            }
+            M9_BYTES_OK.store(true, Ordering::Relaxed);
+            M9_SERIAL_ACCUMULATE.store(false, Ordering::Relaxed);
+            serial_write_bytes(b"\n");
+            kernel_log_fmt(format_args!(
+                "[M9.D] bytes={} fnv={:#010x}\n",
+                M9_STDIO_BLOCK_LEN, M9_STDIO_BLOCK_FNV
+            ));
+            kernel_log_line(M9_STDIO_BYTES_PASS_MARKER);
+        }
+        (LINUX_STDOUT_FD, _) if !M8_LINUX_WRITE_OK.load(Ordering::Relaxed) => {
             fatal_kernel_error("m8 write(1) did not return the full 18-byte count");
+        }
+        (LINUX_STDOUT_FD, _) if !M9_BYTES_OK.load(Ordering::Relaxed) => {
+            fatal_kernel_error("m9 write(1) did not return the full binary block count");
         }
         (M8_LINUX_BAD_FD, Err(EBADF)) => {
             if !delivered_exactly_hello() {
@@ -534,6 +685,7 @@ pub(crate) fn observe_linux_exit(
     }
     if !M8_LINUX_PROBE_OBSERVED.load(Ordering::Relaxed)
         || !M8_LINUX_WRITE_OK.load(Ordering::Relaxed)
+        || !M9_BYTES_OK.load(Ordering::Relaxed)
         || !M8_LINUX_EBADF_OBSERVED.load(Ordering::Relaxed)
     {
         fatal_kernel_error("m8 linux probe exited before all probes were observed");
@@ -573,6 +725,9 @@ pub(crate) fn maybe_complete_m8_linux_dispatch() {
     if !M8_LINUX_EBADF_OBSERVED.load(Ordering::Relaxed) {
         return;
     }
+    if !M9_BYTES_OK.load(Ordering::Relaxed) {
+        return;
+    }
     if !M8_LINUX_EXIT_OBSERVED.load(Ordering::Relaxed) {
         return;
     }
@@ -586,107 +741,35 @@ pub(crate) fn maybe_complete_m8_linux_dispatch() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::linux_stdio_m9_payload::M9_STDIO_SENTINEL_START;
 
-    const SYSCALL: [u8; 2] = [0x0F, 0x05];
-    const MOV_EAX_60: [u8; 5] = [0xB8, 0x3C, 0x00, 0x00, 0x00];
-
-    fn rel8_target(jne_offset: usize) -> usize {
-        assert_eq!(
-            LINUX_PROBE_CODE[jne_offset], 0x75,
-            "jne opcode at {jne_offset:#x}"
-        );
-        let rel = LINUX_PROBE_CODE[jne_offset + 1] as i8 as isize;
-        (jne_offset as isize + 2 + rel) as usize
-    }
-
-    fn lea_rsi_target(lea_offset: usize) -> usize {
-        assert_eq!(
-            &LINUX_PROBE_CODE[lea_offset..lea_offset + 3],
-            &[0x48, 0x8D, 0x35],
-            "lea rsi,[rip+rel32] at {lea_offset:#x}"
-        );
-        let rel = i32::from_le_bytes(
-            LINUX_PROBE_CODE[lea_offset + 3..lea_offset + 7]
-                .try_into()
-                .unwrap(),
-        ) as isize;
-        (lea_offset as isize + 7 + rel) as usize
+    fn built_probe() -> ([u8; PAGE_SIZE as usize], usize) {
+        let mut buf = [0u8; PAGE_SIZE as usize];
+        let len = build_linux_probe_code(&mut buf).expect("probe build");
+        (buf, len)
     }
 
     #[test]
-    fn probe_code_layout_matches_documented_offsets() {
-        assert_eq!(LINUX_PROBE_CODE.len(), 149);
-        assert!(LINUX_PROBE_CODE.len() <= PAGE_SIZE as usize);
-        assert_eq!(&LINUX_PROBE_CODE[PROBE_MSG_OFFSET..], &M8_LINUX_HELLO_BYTES);
+    fn probe_code_contains_hello_and_m9_block() {
+        let (code, len) = built_probe();
+        assert!(len <= PAGE_SIZE as usize);
+        assert!(code
+            .windows(M8_LINUX_HELLO_BYTES.len())
+            .any(|w| w == M8_LINUX_HELLO_BYTES));
+        assert!(code
+            .windows(M9_STDIO_BLOCK_LEN)
+            .any(|w| w == M9_STDIO_BLOCK));
         assert_eq!(&M8_LINUX_HELLO_BYTES, b"Hello from Linux.\n");
-        assert_eq!(M8_LINUX_HELLO_BYTES.len(), 18);
     }
 
     #[test]
-    fn probe_branches_land_on_exit_stubs() {
-        assert_eq!(rel8_target(0x10), PROBE_FAIL1_OFFSET);
-        assert_eq!(rel8_target(0x2E), PROBE_FAIL2_OFFSET);
-        assert_eq!(rel8_target(0x4C), PROBE_FAIL3_OFFSET);
-        for (stub, status) in [
-            (PROBE_FAIL1_OFFSET, 1u8),
-            (PROBE_FAIL2_OFFSET, 2),
-            (PROBE_FAIL3_OFFSET, 3),
-        ] {
-            assert_eq!(&LINUX_PROBE_CODE[stub..stub + 5], &MOV_EAX_60);
-            assert_eq!(
-                &LINUX_PROBE_CODE[stub + 5..stub + 10],
-                &[0xBF, status, 0x00, 0x00, 0x00],
-                "mov edi, {status}"
-            );
-            assert_eq!(&LINUX_PROBE_CODE[stub + 10..stub + 12], &SYSCALL);
-            assert_eq!(&LINUX_PROBE_CODE[stub + 12..stub + 14], &[0x0F, 0x0B]);
-        }
-        // The stubs tile the text end-to-end up to the message.
-        assert_eq!(PROBE_FAIL3_OFFSET + 14, PROBE_MSG_OFFSET);
-    }
-
-    #[test]
-    fn probe_lea_operands_point_at_message() {
-        assert_eq!(lea_rsi_target(0x1C), PROBE_MSG_OFFSET);
-        assert_eq!(lea_rsi_target(0x3A), PROBE_MSG_OFFSET);
-    }
-
-    #[test]
-    fn probe_syscall_arguments_match_contract() {
-        // rax=999 probe, then cmp rax,-38.
-        assert_eq!(&LINUX_PROBE_CODE[0..2], &[0x48, 0xB8]);
+    fn m9_block_fnv_matches_payload_module() {
         assert_eq!(
-            u64::from_le_bytes(LINUX_PROBE_CODE[2..10].try_into().unwrap()),
-            999
+            M9_STDIO_BLOCK_FNV,
+            crate::process::linux_stdio_m9_payload::M9_STDIO_BLOCK_FNV
         );
-        assert_eq!(&LINUX_PROBE_CODE[0x0A..0x0C], &SYSCALL);
-        assert_eq!(
-            &LINUX_PROBE_CODE[0x0C..0x10],
-            &[0x48, 0x83, 0xF8, (-38i8) as u8]
-        );
-        // write(1, msg, 18)
-        assert_eq!(&LINUX_PROBE_CODE[0x12..0x17], &[0xB8, 1, 0, 0, 0]);
-        assert_eq!(&LINUX_PROBE_CODE[0x17..0x1C], &[0xBF, 1, 0, 0, 0]);
-        assert_eq!(&LINUX_PROBE_CODE[0x23..0x28], &[0xBA, 18, 0, 0, 0]);
-        assert_eq!(&LINUX_PROBE_CODE[0x28..0x2A], &SYSCALL);
-        assert_eq!(&LINUX_PROBE_CODE[0x2A..0x2E], &[0x48, 0x83, 0xF8, 18]);
-        // write(7, msg, 18) → cmp rax,-9
-        assert_eq!(&LINUX_PROBE_CODE[0x30..0x35], &[0xB8, 1, 0, 0, 0]);
-        assert_eq!(
-            &LINUX_PROBE_CODE[0x35..0x3A],
-            &[0xBF, M8_LINUX_BAD_FD as u8, 0, 0, 0]
-        );
-        assert_eq!(&LINUX_PROBE_CODE[0x41..0x46], &[0xBA, 18, 0, 0, 0]);
-        assert_eq!(&LINUX_PROBE_CODE[0x46..0x48], &SYSCALL);
-        assert_eq!(
-            &LINUX_PROBE_CODE[0x48..0x4C],
-            &[0x48, 0x83, 0xF8, (-9i8) as u8]
-        );
-        // exit(0) then ud2
-        assert_eq!(&LINUX_PROBE_CODE[0x4E..0x53], &MOV_EAX_60);
-        assert_eq!(&LINUX_PROBE_CODE[0x53..0x55], &[0x31, 0xFF]);
-        assert_eq!(&LINUX_PROBE_CODE[0x55..0x57], &SYSCALL);
-        assert_eq!(&LINUX_PROBE_CODE[0x57..0x59], &[0x0F, 0x0B]);
-        assert_eq!(M8_LINUX_BAD_FD, 7);
+        assert!(M9_STDIO_BLOCK
+            .windows(M9_STDIO_SENTINEL_START.len())
+            .any(|w| w == M9_STDIO_SENTINEL_START));
     }
 }

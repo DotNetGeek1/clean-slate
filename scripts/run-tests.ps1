@@ -29,6 +29,7 @@
       m6-capabilities / m6.8
       m7-network / m7.8
       m8-linux-hello / m8.7, m8-linux-image / m8.2, m8-linux-dispatch / m8.3,
+      m9-low-va / m9.142 / test-m9-low-va,
       verify-m8-fixture
 
 .PARAMETER Exhaustive
@@ -142,6 +143,8 @@ $AllTests = [ordered]@{
     "test-m8-linux-dispatch"    = @{ Aliases = @("m8-linux-dispatch", "m8.3"); Description = "M8.3 Linux personality dispatch QEMU constituent acceptance"; Role = "Constituent" }
     "test-m9-syscall-fail-closed" = @{ Aliases = @("m9-syscall-fail-closed", "m9.143"); Description = "M9 #143 unresolved syscall caller fail-closed QEMU acceptance"; Role = "Constituent" }
     "test-m9-block-wake" = @{ Aliases = @("m9-block-wake", "m9.145"); Description = "M9 #145 native block/wake scheduler substrate QEMU acceptance"; Role = "Constituent" }
+    "test-m9-fd-core"            = @{ Aliases = @("m9-fd-core", "m9.147"); Description = "M9 #147 Linux fd / open-description core QEMU acceptance"; Role = "Constituent" }
+    "test-m9-low-va"            = @{ Aliases = @("m9-low-va", "m9.142"); Description = "M9 #142 low canonical user VA acceptance (production Linux launch at 0x400000)"; Role = "Constituent" }
     "verify-m8-fixture"         = @{ Aliases = @("verify-m8-fixture"); Description = "M8.6 fixture SHA-256 and ELF metadata verify (host)"; Role = "Constituent" }
 }
 

@@ -23,7 +23,9 @@ use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
+use crate::mm::address_space::activate_address_space_root;
 use crate::mm::address_space::create_process_address_space;
+use crate::mm::address_space::kernel_root_frame;
 use crate::mm::address_space::map_process_page;
 use crate::mm::address_space::translate_address_in_root;
 use crate::mm::address_space::validate_supervisor_only_kernel_root_entries;
@@ -35,9 +37,9 @@ use crate::mm::paging::leaf_page_flags_for_address_in_root;
 use crate::mm::paging::page_flags_for_address_in_root;
 use crate::mm::paging::page_table_ref;
 use crate::mm::paging::zero_page;
+use crate::mm::phys_to_virt;
 use crate::mm::user_mapping::relevant_userspace_leaf_flags;
 use crate::mm::PAGE_SIZE;
-use crate::mm::PHYSICAL_MEMORY_OFFSET;
 use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::process_registry_mut;
@@ -166,7 +168,7 @@ fn initialize_userspace_address_space_page(
     zero_page(frame_address);
     unsafe {
         ptr::write(
-            (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut UserspaceAddressSpaceTestPage,
+            (phys_to_virt(frame_address)) as *mut UserspaceAddressSpaceTestPage,
             UserspaceAddressSpaceTestPage {
                 observed_value,
                 probe_address,
@@ -181,7 +183,7 @@ fn copy_userspace_address_space_payload(frame_address: u64) {
     unsafe {
         ptr::copy_nonoverlapping(
             &raw const clean_slate_user_address_space_test_start,
-            (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
+            (phys_to_virt(frame_address)) as *mut u8,
             payload_size,
         );
     }
@@ -272,7 +274,7 @@ fn create_userspace_process(
         zero_page(private_frame_address);
         unsafe {
             ptr::write_volatile(
-                (PHYSICAL_MEMORY_OFFSET + private_frame_address) as *mut u64,
+                (phys_to_virt(private_frame_address)) as *mut u64,
                 expected_value,
             );
         }
@@ -344,6 +346,7 @@ fn create_userspace_process(
 
 #[cfg(feature = "m3-address-space-self-test")]
 fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'static str> {
+    activate_address_space_root(kernel_root_frame());
     let address_space = unsafe {
         process_registry_mut()
             .get(process.process_id)
@@ -403,18 +406,19 @@ fn validate_process_address_space(process: &UserspaceProcess) -> Result<(), &'st
         return Err("process stack mapping flags were incorrect");
     }
 
-    let kernel_flags = page_flags_for_address_in_root(
-        address_space.root_frame,
-        VirtAddr::from_ptr(run as *const ()),
-    )?;
-    let kernel_leaf_flags = leaf_page_flags_for_address_in_root(
-        address_space.root_frame,
-        VirtAddr::from_ptr(run as *const ()),
-    )?;
-    if kernel_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-        || kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE)
-    {
-        return Err("kernel mapping unexpectedly became user accessible in a process root");
+    let kernel_va = VirtAddr::from_ptr(run as *const ());
+    if translate_address_in_root(address_space.root_frame, kernel_va).is_ok() {
+        let kernel_leaf_flags =
+            leaf_page_flags_for_address_in_root(address_space.root_frame, kernel_va)?;
+        if kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+            return Err("kernel mapping unexpectedly became user accessible in a process root");
+        }
+    } else {
+        let kernel_leaf_flags =
+            leaf_page_flags_for_address_in_root(kernel_root_frame(), kernel_va)?;
+        if kernel_leaf_flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+            return Err("kernel mapping unexpectedly became user accessible in the kernel root");
+        }
     }
 
     Ok(())
@@ -542,7 +546,6 @@ pub(crate) fn start_userspace_address_space_self_test(mut allocator: PageAllocat
     if let Err(message) = validate_process_address_space(&process_two) {
         fatal_kernel_error(message);
     }
-
     let initial_state = UserspaceAddressSpaceTestState {
         kernel_root_frame,
         stage: UserspaceAddressSpaceStage::AwaitProcessOneEntry,

@@ -6,6 +6,7 @@ pub(crate) mod domain;
 pub(crate) mod id_allocator;
 pub(crate) mod linux_fd;
 pub(crate) mod linux_image;
+pub(crate) mod linux_stdio_m9_payload;
 pub(crate) mod personality;
 
 use crate::arch::x86_64::cpu::without_interrupts;

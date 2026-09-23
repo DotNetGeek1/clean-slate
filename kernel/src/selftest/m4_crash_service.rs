@@ -24,8 +24,8 @@ use crate::mm::address_space::map_process_page;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::zero_page;
+use crate::mm::phys_to_virt;
 use crate::mm::PAGE_SIZE;
-use crate::mm::PHYSICAL_MEMORY_OFFSET;
 use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
@@ -164,7 +164,7 @@ fn copy_userspace_payload(frame_address: u64) {
     unsafe {
         ptr::copy_nonoverlapping(
             &raw const clean_slate_user_address_space_test_start,
-            (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut u8,
+            (phys_to_virt(frame_address)) as *mut u8,
             userspace_payload_size(),
         );
     }
@@ -180,7 +180,7 @@ fn initialize_crash_service_page(frame_address: u64, config: &CrashServiceLaunch
     };
     unsafe {
         ptr::write(
-            (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut CrashServiceUserPage,
+            (phys_to_virt(frame_address)) as *mut CrashServiceUserPage,
             page,
         );
     }
@@ -196,7 +196,7 @@ fn initialize_workload_page(frame_address: u64, token: u64, probe_address: u64) 
     };
     unsafe {
         ptr::write(
-            (PHYSICAL_MEMORY_OFFSET + frame_address) as *mut CrashServiceUserPage,
+            (phys_to_virt(frame_address)) as *mut CrashServiceUserPage,
             page,
         );
     }
@@ -235,7 +235,7 @@ fn create_userspace_process(
         .ok_or("allocator could not provide a data page")?;
     unsafe {
         ptr::write(
-            (PHYSICAL_MEMORY_OFFSET + data_frame) as *mut CrashServiceUserPage,
+            (phys_to_virt(data_frame)) as *mut CrashServiceUserPage,
             data_page,
         );
     }

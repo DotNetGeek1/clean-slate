@@ -11,7 +11,7 @@
 use crate::mm::address_space::{map_process_page, unmap_last_user_mapping, ProcessAddressSpace};
 use crate::mm::frame_allocator::{free_frame, PageAllocator};
 use crate::mm::paging::zero_page;
-use crate::mm::{PAGE_SIZE, PHYSICAL_MEMORY_OFFSET};
+use crate::mm::{phys_to_virt, PAGE_SIZE};
 use clean_slate_elf::{SegmentPermissions, MAX_LOAD_SEGMENTS, PF_R, PF_W, PF_X};
 use core::ptr;
 use x86_64::structures::paging::PageTableFlags;
@@ -322,7 +322,7 @@ fn fill_page_from_segment(
     unsafe {
         ptr::copy_nonoverlapping(
             file_bytes[blob_off..blob_end].as_ptr(),
-            ((PHYSICAL_MEMORY_OFFSET + frame) as *mut u8).wrapping_add(span.page_offset),
+            (phys_to_virt(frame) as *mut u8).wrapping_add(span.page_offset),
             span.len,
         );
     }

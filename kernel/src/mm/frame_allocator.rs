@@ -1,10 +1,29 @@
 use core::ptr;
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::Ordering;
 
 use x86_64::structures::paging::{FrameAllocator, PhysFrame, Size4KiB};
 use x86_64::PhysAddr;
 
+use crate::mm::kernel_map_ptr;
 use crate::mm::region::{MemoryRegion, MemoryRegionKind, NormalizedMemoryMap, MAX_MEMORY_REGIONS};
-use crate::mm::{PAGE_SIZE, PHYSICAL_MEMORY_OFFSET};
+use crate::mm::PAGE_SIZE;
+
+static KERNEL_DIRECT_MAP_READY: AtomicBool = AtomicBool::new(false);
+
+/// Called once the kernel-owned page table and physmap are active.
+pub(crate) fn set_kernel_direct_map_ready() {
+    KERNEL_DIRECT_MAP_READY.store(true, Ordering::Release);
+}
+
+/// Pointer to a physical frame for page-table edits and allocator metadata.
+pub(crate) fn physical_frame_ptr(frame: u64) -> *mut u8 {
+    if KERNEL_DIRECT_MAP_READY.load(Ordering::Acquire) {
+        kernel_map_ptr(frame) as *mut u8
+    } else {
+        frame as *mut u8
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct PageAllocator {
@@ -102,7 +121,7 @@ impl PageAllocator {
             return Err("attempted to free an already-free frame");
         }
 
-        let node_ptr = (PHYSICAL_MEMORY_OFFSET + frame) as *mut FreePageNode;
+        let node_ptr = physical_frame_ptr(frame) as *mut FreePageNode;
         unsafe {
             ptr::write(
                 node_ptr,
@@ -126,7 +145,7 @@ impl PageAllocator {
 
     fn pop_free_page(&mut self) -> Option<u64> {
         let frame = self.free_list_head?;
-        let node_ptr = (PHYSICAL_MEMORY_OFFSET + frame) as *const FreePageNode;
+        let node_ptr = physical_frame_ptr(frame) as *const FreePageNode;
         let node = unsafe { ptr::read(node_ptr) };
         self.free_list_head = node.next;
         Some(frame)
@@ -162,7 +181,7 @@ impl PageAllocator {
             if candidate == frame {
                 return true;
             }
-            let node_ptr = (PHYSICAL_MEMORY_OFFSET + candidate) as *const FreePageNode;
+            let node_ptr = physical_frame_ptr(candidate) as *const FreePageNode;
             let node = unsafe { ptr::read(node_ptr) };
             current = node.next;
         }

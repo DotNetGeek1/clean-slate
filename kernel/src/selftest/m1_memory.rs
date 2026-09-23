@@ -7,6 +7,7 @@ use crate::diagnostics::qemu::QEMU_EXIT_FAILURE;
 #[cfg(feature = "m1-self-test")]
 use crate::interrupt::set_expected_page_fault_address;
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::layout::KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE;
 use crate::mm::paging::current_offset_page_table;
 use core::ptr;
 use x86_64::structures::paging::Mapper;
@@ -20,7 +21,7 @@ use x86_64::PhysAddr;
 use x86_64::VirtAddr;
 
 #[cfg(feature = "m1-self-test")]
-pub(crate) const SCRATCH_PAGE_ADDRESS: u64 = 0xffff_8000_0000_0000;
+pub(crate) const SCRATCH_PAGE_ADDRESS: u64 = KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE + 0x2000;
 #[cfg(feature = "m1-self-test")]
 const TEST_PAGE_VALUE: u64 = 0x434c_4541_4e53_4c41;
 

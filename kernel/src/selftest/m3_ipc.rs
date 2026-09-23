@@ -31,8 +31,8 @@ use crate::mm::address_space::map_process_page;
 use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::zero_page;
+use crate::mm::phys_to_virt;
 use crate::mm::PAGE_SIZE;
-use crate::mm::PHYSICAL_MEMORY_OFFSET;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
@@ -163,7 +163,7 @@ fn create_userspace_ipc_process(
         unsafe {
             ptr::copy_nonoverlapping(
                 &raw const clean_slate_user_ipc_test_start,
-                (PHYSICAL_MEMORY_OFFSET + code_frame_address) as *mut u8,
+                (phys_to_virt(code_frame_address)) as *mut u8,
                 payload_size,
             );
         }
@@ -215,7 +215,7 @@ fn create_userspace_ipc_process(
         zero_page(data_frame_address);
         unsafe {
             ptr::write(
-                (PHYSICAL_MEMORY_OFFSET + data_frame_address) as *mut UserspaceIpcPayloadData,
+                (phys_to_virt(data_frame_address)) as *mut UserspaceIpcPayloadData,
                 payload_data,
             );
         }

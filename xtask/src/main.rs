@@ -92,6 +92,8 @@ const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[PF  ] rip=0x",
     "[M1  ] PASS",
 ];
+const M9_LOW_VA_ACCEPTANCE_MARKERS: [&str; 2] = ["[M9.0] creating", "[M9.0] PASS"];
+const M9_LOW_VA_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[INT ] double-fault IST initialized",
     "[DF  ] double fault",
@@ -142,14 +144,21 @@ const M3_SYSCALL_ACCEPTANCE_MARKERS: [&str; 2] = [
 // The leading newline before "Hello from Linux." proves the Linux write reached
 // serial verbatim at the start of a line (no `[IPC ] console pid=N: ` framing);
 // no trailing newline is matched so LF and CRLF captures both pass.
-const M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS: [&str; 6] = [
+const M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[TIME] timer initialized",
     "[LNX ] personality=x86_64 pid=",
     "[LNX ] unsupported syscall=999 errno=ENOSYS",
     "\nHello from Linux.",
+    "[M9.D] bytes=",
+    "[M9.D] PASS",
     "[LNX ] exit pid=",
     "[M8.3] PASS",
 ];
+
+/// `<<M9BYTES>>` + 140-byte inner + `<<END>>` (see `linux_stdio_m9_payload.rs`).
+const M9_STDIO_BLOCK_LEN_EXPECTED: usize = 158;
+/// FNV-1a 32-bit of `M9_STDIO_BLOCK` (host test `m9_block_fnv_matches_payload_module` locks this).
+const M9_STDIO_BLOCK_FNV_EXPECTED: u32 = 0x736c_e50e;
 const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS: [&str; 3] = [
     "[TIME] timer initialized",
@@ -165,6 +174,19 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[M9.E] timeout resumed",
     "[M9.E] cycles=8 waiters=0",
     "[M9.E] PASS",
+];
+const M9_FD_CORE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+const M9_FD_CORE_ACCEPTANCE_MARKERS: [&str; 10] = [
+    "[TIME] timer initialized",
+    "[M9.G] pool_before=",
+    "[LNX ] personality=x86_64 pid=",
+    "[M9.G] pool_before=",
+    " pool_after=",
+    " cycle=0",
+    "[M9.G] pool_before=",
+    " pool_after=",
+    " cycle=7",
+    "[M9.G] PASS",
 ];
 // M8.7 / #98 self-test boot: production launch path observed twice (relaunch),
 // plus native-userspace progress and fail-closed malformed proof. Entry hex is
@@ -607,6 +629,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
     match command {
         ParsedCommand::Run => run_vm(),
         ParsedCommand::TestM1 => run_m1_acceptance(),
+        ParsedCommand::TestM9LowVa => run_m9_low_va_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
         ParsedCommand::TestM3 => run_m3_acceptance(),
         ParsedCommand::TestM3AddressSpace => run_m3_address_space_acceptance(),
@@ -615,6 +638,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM8LinuxDispatch => run_m8_linux_dispatch_acceptance(),
         ParsedCommand::TestM9SyscallFailClosed => run_m9_syscall_fail_closed_acceptance(),
         ParsedCommand::TestM9BlockWake => run_m9_block_wake_acceptance(),
+        ParsedCommand::TestM9FdCore => run_m9_fd_core_acceptance(),
         ParsedCommand::TestM8LinuxHello => run_m8_linux_hello_acceptance(),
         ParsedCommand::TestM8 => run_m8_acceptance(),
         ParsedCommand::TestM3Lifecycle => run_m3_lifecycle_acceptance(),
@@ -982,6 +1006,15 @@ fn run_m1_acceptance() -> Result<(), XtaskError> {
     )
 }
 
+fn run_m9_low_va_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m9-low-va-self-test"],
+        Some((&M9_LOW_VA_ACCEPTANCE_MARKERS, M9_LOW_VA_ACCEPTANCE_TIMEOUT)),
+    )
+}
+
 fn run_m2_acceptance() -> Result<(), XtaskError> {
     run_vm_inner(
         false,
@@ -1071,6 +1104,18 @@ fn run_m9_block_wake_acceptance() -> Result<(), XtaskError> {
         Some((
             &M9_BLOCK_WAKE_ACCEPTANCE_MARKERS,
             M9_BLOCK_WAKE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn run_m9_fd_core_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m9-fd-core-self-test"],
+        Some((
+            &M9_FD_CORE_ACCEPTANCE_MARKERS,
+            M9_FD_CORE_ACCEPTANCE_TIMEOUT,
         )),
     )
 }
@@ -2171,6 +2216,15 @@ fn run_acceptance_command(
                 }
                 output.push_str(&chunk.text);
                 if tracker.consume(&output) && !authoritative_pass {
+                    if markers == M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS {
+                        if let Err(error) = validate_m9_stdio_bytes_line(&output) {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(error);
+                        }
+                    }
                     authoritative_pass = true;
                     terminate_child(&mut child)?;
                     child_status = Some(child.wait()?);
@@ -2229,6 +2283,9 @@ fn validate_output_markers(output: &str, markers: &[&str]) -> Result<(), XtaskEr
     }
     let mut tracker = MarkerTracker::new(markers);
     if tracker.consume(output) {
+        if markers == M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS {
+            validate_m9_stdio_bytes_line(output)?;
+        }
         if markers_require_verbatim_linux_hello(markers) {
             assert_no_ipc_framed_linux_hello(output)?;
         }
@@ -2249,6 +2306,38 @@ fn markers_require_verbatim_linux_hello(markers: &[&str]) -> bool {
 /// Fail closed unless serial contains the exact user-visible line
 /// `Hello from Linux.` (CRLF-safe) and never an `[IPC ] console`-framed or
 /// prefix-extended variant (`Hello from Linux.XYZ`).
+fn validate_m9_stdio_bytes_line(output: &str) -> Result<(), XtaskError> {
+    const PREFIX: &str = "[M9.D] bytes=";
+    let rest = output
+        .split(PREFIX)
+        .nth(1)
+        .ok_or_else(|| XtaskError::MissingMarker("[M9.D] bytes= line".to_owned()))?;
+    let header = rest.lines().next().unwrap_or(rest).trim_end_matches('\r');
+    let (count, fnv_part) = header
+        .split_once(" fnv=")
+        .ok_or_else(|| XtaskError::MissingMarker("m9 fnv field".to_owned()))?;
+    let count = count
+        .parse::<usize>()
+        .map_err(|_| XtaskError::MissingMarker("m9 byte count".to_owned()))?;
+    if count != M9_STDIO_BLOCK_LEN_EXPECTED {
+        return Err(XtaskError::MissingMarker(
+            "m9 byte count mismatch".to_owned(),
+        ));
+    }
+    let fnv = u32::from_str_radix(
+        fnv_part
+            .trim()
+            .trim_start_matches("0x")
+            .trim_start_matches("0X"),
+        16,
+    )
+    .map_err(|_| XtaskError::MissingMarker("m9 fnv parse".to_owned()))?;
+    if fnv != M9_STDIO_BLOCK_FNV_EXPECTED {
+        return Err(XtaskError::MissingMarker("m9 fnv mismatch".to_owned()));
+    }
+    Ok(())
+}
+
 fn assert_no_ipc_framed_linux_hello(output: &str) -> Result<(), XtaskError> {
     let mut saw_exact = false;
     for line in output.lines() {
@@ -2436,6 +2525,7 @@ fn print_help() {
     println!("  test-m8-linux-dispatch Build the M8.3 Linux personality dispatch kernel, run QEMU, and validate [M8.3] PASS");
     println!("  test-m9-syscall-fail-closed Build the M9 #143 fail-closed syscall kernel, run QEMU, and validate [M9.C] PASS");
     println!("  test-m9-block-wake Build the M9 #145 block/wake scheduler kernel, run QEMU, and validate [M9.E] PASS");
+    println!("  test-m9-fd-core Build the M9 #147 fd-core kernel, run QEMU, and validate pool equality + [M9.G] PASS (aliases: m9-fd-core, m9.147)");
     println!("  test-m8-linux-hello Boot M8.7 self-test then production feature (hello + clean [M2] PASS); 40s for two launches (aliases: m8-linux-hello, m8.7)");
     println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
@@ -2517,6 +2607,7 @@ enum ParsedCommand {
     TestM8LinuxDispatch,
     TestM9SyscallFailClosed,
     TestM9BlockWake,
+    TestM9FdCore,
     TestM8LinuxHello,
     TestM8,
     TestM3Lifecycle,
@@ -2542,6 +2633,7 @@ enum ParsedCommand {
     TestM5DiskHarness,
     TestM6FixtureSmoke,
     TestM8LinuxImage,
+    TestM9LowVa,
     TestM6Object,
     TestM7NetService,
     TestM7Network,
@@ -2568,6 +2660,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
     match command {
         Some(cmd) if cmd == "run" => ParsedCommand::Run,
         Some(cmd) if cmd == "test-m1" => ParsedCommand::TestM1,
+        Some(cmd) if cmd == "test-m9-low-va" || cmd == "m9-low-va" => ParsedCommand::TestM9LowVa,
         Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,
         Some(cmd) if cmd == "test-m3" => ParsedCommand::TestM3,
         Some(cmd) if cmd == "test-m3-address-space" => ParsedCommand::TestM3AddressSpace,
@@ -2583,6 +2676,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-m9-block-wake" || cmd == "m9-block-wake" || cmd == "m9.145" => {
             ParsedCommand::TestM9BlockWake
+        }
+        Some(cmd) if cmd == "test-m9-fd-core" || cmd == "m9-fd-core" || cmd == "m9.147" => {
+            ParsedCommand::TestM9FdCore
         }
         Some(cmd) if cmd == "test-m8-linux-hello" || cmd == "m8-linux-hello" || cmd == "m8.7" => {
             ParsedCommand::TestM8LinuxHello

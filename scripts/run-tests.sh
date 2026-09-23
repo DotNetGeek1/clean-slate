@@ -61,12 +61,14 @@ TEST_NAMES=(
   test-m8-linux-dispatch
   test-m9-syscall-fail-closed
   test-m9-block-wake
+  test-m9-fd-core
+  test-m9-low-va
   verify-m8-fixture
 )
 
 test_role() {
   case "$1" in
-    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls | test-m8-linux-hello | test-m8-linux-image | test-m8-linux-dispatch | test-m9-syscall-fail-closed | test-m9-block-wake | verify-m8-fixture)
+    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls | test-m8-linux-hello | test-m8-linux-image | test-m8-linux-dispatch | test-m9-syscall-fail-closed | test-m9-block-wake | test-m9-fd-core | test-m9-low-va | verify-m8-fixture)
       echo Constituent
       ;;
     test-m3 | test-m4 | test-m5 | test-m6 | test-m7 | test-m8)
@@ -123,6 +125,8 @@ test_description() {
     test-m8-linux-dispatch) echo "M8.3 Linux personality dispatch QEMU constituent acceptance" ;;
     test-m9-syscall-fail-closed) echo "M9 #143 unresolved syscall caller fail-closed QEMU acceptance" ;;
     test-m9-block-wake) echo "M9 #145 native block/wake scheduler substrate QEMU acceptance" ;;
+    test-m9-fd-core) echo "M9 #147 Linux fd / open-description core QEMU acceptance" ;;
+    test-m9-low-va) echo "M9 #142 low canonical user VA acceptance" ;;
     verify-m8-fixture) echo "M8.6 fixture SHA-256 and ELF metadata verify (host)" ;;
     *) echo "" ;;
   esac
@@ -173,6 +177,8 @@ test_aliases() {
     test-m8-linux-dispatch) echo "m8-linux-dispatch m8.3" ;;
     test-m9-syscall-fail-closed) echo "m9-syscall-fail-closed m9.143" ;;
     test-m9-block-wake) echo "m9-block-wake m9.145" ;;
+    test-m9-fd-core) echo "m9-fd-core m9.147" ;;
+    test-m9-low-va) echo "m9-low-va m9.142" ;;
     verify-m8-fixture) echo "verify-m8-fixture" ;;
     *) echo "" ;;
   esac

@@ -1,0 +1,15 @@
+ash
+cat
+echo
+env
+grep
+ls
+mkdir
+nslookup
+printf
+pwd
+sh
+sleep
+true
+uname
+wget
