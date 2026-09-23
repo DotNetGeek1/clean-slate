@@ -367,8 +367,8 @@ pub(crate) mod syscalls {
             None => alloc_socket(ctx.pid, ctx.instance_generation, kind)?,
         };
         let m7_kind = match kind {
-            SocketKindLinux::Udp => SocketKind::Udp,
-            SocketKindLinux::Tcp => SocketKind::Tcp,
+            SocketKindLinux::Udp => SocketKind::LinuxUdp,
+            SocketKindLinux::Tcp => SocketKind::LinuxTcp,
         };
         with_socket_mut(id, |socket| -> LinuxSyscallResult {
             let outcome = match broker_sync(
