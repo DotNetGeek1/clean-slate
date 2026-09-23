@@ -12,18 +12,48 @@ use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::interrupt::timer::kernel_ticks;
 use crate::time::set_apic_counter_hz;
 use core::arch::asm;
+
 const PIT_HZ: u64 = 1_193_182;
 const CALIBRATION_MS: u64 = 50;
 const PIT_POLL_MAX: u32 = 50_000_000;
+/// QEMU local APIC timer counter rate with divide-by-16 (1 GHz / 16).
+const QEMU_APIC_COUNTER_HZ_FALLBACK: u64 = 62_500_000;
+const APIC_COUNTER_HZ_MIN: u64 = 10_000_000;
+const APIC_COUNTER_HZ_MAX: u64 = 500_000_000;
 
-pub(crate) fn pit_read_count() -> u16 {
+fn pit_write_control(value: u8) {
     unsafe {
         asm!(
             "out dx, al",
             in("dx") 0x43u16,
-            in("al") 0u8,
+            in("al") value,
             options(nomem, nostack, preserves_flags)
         );
+    }
+}
+
+fn pit_write_reload(value: u16) {
+    let bytes = value.to_le_bytes();
+    unsafe {
+        asm!(
+            "out dx, al",
+            in("dx") 0x42u16,
+            in("al") bytes[0],
+            options(nomem, nostack, preserves_flags)
+        );
+        asm!(
+            "out dx, al",
+            in("dx") 0x42u16,
+            in("al") bytes[1],
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+}
+
+/// Latch channel 2 count (control byte `0x80`), then read data port 0x42.
+pub(crate) fn pit_read_count() -> u16 {
+    unsafe {
+        pit_write_control(0x80);
         let low: u8;
         let high: u8;
         asm!(
@@ -42,13 +72,21 @@ pub(crate) fn pit_read_count() -> u16 {
     }
 }
 
+/// Enable PIT channel 2 gate (port 0x61 bit 0), speaker off (bit 1 clear).
 fn pit_enable_gate() {
     unsafe {
         let mut gate: u8;
         asm!("in al, dx", in("dx") 0x61u16, out("al") gate, options(nomem, nostack));
-        gate |= 0x01;
+        gate = (gate | 0x01) & !0x02;
         asm!("out dx, al", in("dx") 0x61u16, in("al") gate, options(nomem, nostack));
     }
+}
+
+/// Program channel 2: mode 2 rate generator, reload `0xFFFF` (down-count only).
+fn pit_program_channel2() {
+    pit_write_control(0xB4);
+    pit_write_reload(0xFFFF);
+    pit_enable_gate();
 }
 
 fn pit_elapsed_ticks(start: u16, now: u16) -> u64 {
@@ -64,10 +102,24 @@ fn log_apic_time(counter_hz: u64) {
     ));
 }
 
+fn apply_apic_counter_hz(counter_hz: u64) {
+    if !(APIC_COUNTER_HZ_MIN..=APIC_COUNTER_HZ_MAX).contains(&counter_hz) {
+        kernel_log_fmt(format_args!(
+            "[TIME] apic calibration implausible measured={} fallback={}\n",
+            counter_hz, QEMU_APIC_COUNTER_HZ_FALLBACK
+        ));
+        set_apic_counter_hz(QEMU_APIC_COUNTER_HZ_FALLBACK);
+        log_apic_time(QEMU_APIC_COUNTER_HZ_FALLBACK);
+        return;
+    }
+    set_apic_counter_hz(counter_hz);
+    log_apic_time(counter_hz);
+}
+
 /// Measure APIC down-counter rate (Hz) using PIT channel 2 as reference.
 pub(crate) fn calibrate_apic_tick() {
     without_interrupts(|| {
-        pit_enable_gate();
+        pit_program_channel2();
         let target_pit_delta = (PIT_HZ * CALIBRATION_MS) / 1000;
         let start_pit = pit_read_count();
         let start_apic = local_apic_timer_current_count();
@@ -75,10 +127,8 @@ pub(crate) fn calibrate_apic_tick() {
         loop {
             polls = polls.saturating_add(1);
             if polls > PIT_POLL_MAX {
-                let fallback = 100u64 * u64::from(APIC_TIMER_INITIAL_COUNT);
-                set_apic_counter_hz(fallback);
-                log_apic_time(fallback);
-                kernel_log_fmt(format_args!("[TIME] apic calibration pit-fallback\n"));
+                kernel_log_fmt(format_args!("[TIME] apic calibration pit-timeout\n"));
+                apply_apic_counter_hz(QEMU_APIC_COUNTER_HZ_FALLBACK);
                 return;
             }
             let elapsed = pit_elapsed_ticks(start_pit, pit_read_count());
@@ -89,10 +139,8 @@ pub(crate) fn calibrate_apic_tick() {
         let end_apic = local_apic_timer_current_count();
         let apic_delta = u64::from(start_apic.wrapping_sub(end_apic));
         if apic_delta == 0 {
-            let fallback = 100u64 * u64::from(APIC_TIMER_INITIAL_COUNT);
-            set_apic_counter_hz(fallback);
-            log_apic_time(fallback);
-            kernel_log_fmt(format_args!("[TIME] apic calibration pit-fallback\n"));
+            kernel_log_fmt(format_args!("[TIME] apic calibration zero-delta\n"));
+            apply_apic_counter_hz(QEMU_APIC_COUNTER_HZ_FALLBACK);
             return;
         }
         let counter_hz = match apic_delta
@@ -101,15 +149,11 @@ pub(crate) fn calibrate_apic_tick() {
         {
             Some(value) if value > 0 => value,
             _ => {
-                let fallback = 100u64 * u64::from(APIC_TIMER_INITIAL_COUNT);
-                set_apic_counter_hz(fallback);
-                log_apic_time(fallback);
-                kernel_log_fmt(format_args!("[TIME] apic calibration pit-fallback\n"));
+                apply_apic_counter_hz(QEMU_APIC_COUNTER_HZ_FALLBACK);
                 return;
             }
         };
-        set_apic_counter_hz(counter_hz);
-        log_apic_time(counter_hz);
+        apply_apic_counter_hz(counter_hz);
     });
 }
 

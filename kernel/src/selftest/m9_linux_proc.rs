@@ -132,7 +132,10 @@ fn launch_cycle(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'stati
     let stacks = unsafe { task_stacks_mut() };
     let stack_top = task_stack_top(&stacks[LINUX_SLOT]);
     let launched = launch_linux_process_from_spec(allocator, stack_top, LINUX_SLOT, &spec)
-        .map_err(|_| "m9 linux proc launch failed")?;
+        .map_err(|error| {
+            kernel_log_fmt(format_args!("[M9.I] launch error={error:?}\n"));
+            "m9 linux proc launch failed"
+        })?;
     install_linux_stdio(launched.pid)?;
     M9_LINUX_PID.store(launched.pid, Ordering::Relaxed);
     M9_LINUX_GENERATION.store(launched.instance_generation.0, Ordering::Relaxed);

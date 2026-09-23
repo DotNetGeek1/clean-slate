@@ -316,47 +316,14 @@ pub(crate) fn prepare_linux_image(
             initial_stack,
         )?);
         let bytes_len = plan_slot.as_ref().unwrap().launch_stack.bytes_len;
-        #[cfg(any(
-            feature = "m9-linux-runtime-self-test",
-            feature = "m9-linux-proc-self-test"
-        ))]
-        let load_plan = clean_slate_elf::parse_load_plan(spec.image, spec.policy)
-            .map_err(LinuxImageError::LoadPlan)?;
-        #[cfg(not(any(
-            feature = "m9-linux-runtime-self-test",
-            feature = "m9-linux-proc-self-test"
-        )))]
-        let load_plan = load_plan_slot
-            .as_ref()
-            .ok_or(LinuxImageError::Registry("prepare load plan missing"))?;
         let built = build_linux_process_image(
             allocator,
             spec.image,
-            #[cfg(any(
-                feature = "m9-linux-runtime-self-test",
-                feature = "m9-linux-proc-self-test"
-            ))]
-            &load_plan,
-            #[cfg(not(any(
-                feature = "m9-linux-runtime-self-test",
-                feature = "m9-linux-proc-self-test"
-            )))]
-            load_plan,
+            &plan,
             plan_slot.as_ref().unwrap(),
             &initial_stack.bytes[..bytes_len],
         )?;
-        let brk_initial = crate::process::linux_mem::brk_initial_from_load_plan(
-            #[cfg(any(
-                feature = "m9-linux-runtime-self-test",
-                feature = "m9-linux-proc-self-test"
-            ))]
-            &load_plan,
-            #[cfg(not(any(
-                feature = "m9-linux-runtime-self-test",
-                feature = "m9-linux-proc-self-test"
-            )))]
-            load_plan,
-        );
+        let brk_initial = crate::process::linux_mem::brk_initial_from_load_plan(&plan);
         let layout = plan_slot.as_ref().expect("plan").layout;
         plan_slot.take();
         load_plan_slot.take();

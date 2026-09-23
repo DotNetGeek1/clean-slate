@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Display, Formatter};
@@ -105,7 +106,7 @@ const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[M9.F] PASS",
 ];
 const M9_LINUX_EXEC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_LINUX_RUNTIME_ACCEPTANCE_MARKERS: [&str; 13] = [
+const M9_LINUX_RUNTIME_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[M9.J] creating",
     "[M9.J] baseline ok",
     "[TIME] apic counter_hz=",
@@ -116,10 +117,18 @@ const M9_LINUX_RUNTIME_ACCEPTANCE_MARKERS: [&str; 13] = [
     "[M9.J] signals ok",
     "[M9.J] nanosleep 20ms ticks=",
     "[M9.J] poll timeout ok",
+    "[M9.J] nanosleep wall start",
+    "[M9.J] nanosleep wall end",
     "[M9.J] probe done",
     "[M9.J] cycle=7",
     "[M9.J] PASS",
 ];
+const M9_RUNTIME_WALL_START: &str = "[M9.J] nanosleep wall start";
+const M9_RUNTIME_WALL_END: &str = "[M9.J] nanosleep wall end";
+
+thread_local! {
+    static M9_RUNTIME_WALL_CLOCK: RefCell<Option<NanosleepWallClock>> = const { RefCell::new(None) };
+}
 const M9_LINUX_RUNTIME_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 const M9_LINUX_PROC_ACCEPTANCE_MARKERS: [&str; 3] =
     ["[M9.I] creating", "[M9.I] cycle=0 baseline", "[M9.I] PASS"];
@@ -1082,7 +1091,10 @@ fn run_m9_linux_exec_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m9_linux_runtime_acceptance() -> Result<(), XtaskError> {
-    run_vm_inner(
+    M9_RUNTIME_WALL_CLOCK.with(|slot| {
+        *slot.borrow_mut() = Some(NanosleepWallClock::default());
+    });
+    let result = run_vm_inner(
         false,
         false,
         &["m9-linux-runtime-self-test"],
@@ -1090,7 +1102,11 @@ fn run_m9_linux_runtime_acceptance() -> Result<(), XtaskError> {
             &M9_LINUX_RUNTIME_ACCEPTANCE_MARKERS,
             M9_LINUX_RUNTIME_ACCEPTANCE_TIMEOUT,
         )),
-    )
+    );
+    let wall = M9_RUNTIME_WALL_CLOCK.with(|slot| slot.borrow_mut().take());
+    result?;
+    wall.ok_or_else(|| XtaskError::InvalidCommand("m9 runtime wall clock missing".to_owned()))?
+        .validate()
 }
 
 fn run_m9_linux_proc_acceptance() -> Result<(), XtaskError> {
@@ -2307,6 +2323,42 @@ fn run_timed_command(command: &mut Command, timeout: Duration) -> Result<(), Xta
         })
     }
 }
+#[derive(Default)]
+struct NanosleepWallClock {
+    start: Option<std::time::Instant>,
+    end: Option<std::time::Instant>,
+}
+
+impl NanosleepWallClock {
+    fn observe(&mut self, output: &str) {
+        if self.start.is_none() && output.contains(M9_RUNTIME_WALL_START) {
+            self.start = Some(std::time::Instant::now());
+        }
+        if self.start.is_some() && self.end.is_none() && output.contains(M9_RUNTIME_WALL_END) {
+            self.end = Some(std::time::Instant::now());
+        }
+    }
+
+    fn validate(self) -> Result<(), XtaskError> {
+        let start = self
+            .start
+            .ok_or_else(|| XtaskError::MissingMarker(M9_RUNTIME_WALL_START.to_owned()))?;
+        let end = self
+            .end
+            .ok_or_else(|| XtaskError::MissingMarker(M9_RUNTIME_WALL_END.to_owned()))?;
+        let elapsed = end.duration_since(start);
+        let min = Duration::from_millis(800);
+        let max = Duration::from_millis(1500);
+        if elapsed < min || elapsed > max {
+            return Err(XtaskError::InvalidCommand(format!(
+                "m9 runtime nanosleep wall clock {elapsed:?} outside {min:?}..={max:?}"
+            )));
+        }
+        println!("m9 runtime nanosleep wall clock: {elapsed:?} (expected ~1.0s +0.5s/-0.2s)");
+        Ok(())
+    }
+}
+
 fn run_acceptance_command(
     command: &mut Command,
     markers: &[&str],
@@ -2364,6 +2416,11 @@ fn run_acceptance_command(
                     print!("{}", chunk.text);
                 }
                 output.push_str(&chunk.text);
+                M9_RUNTIME_WALL_CLOCK.with(|slot| {
+                    if let Some(wall) = slot.borrow_mut().as_mut() {
+                        wall.observe(&output);
+                    }
+                });
                 if tracker.consume(&output) && !authoritative_pass {
                     if markers == M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS {
                         if let Err(error) = validate_m9_stdio_bytes_line(&output) {

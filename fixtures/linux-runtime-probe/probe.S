@@ -83,6 +83,12 @@ m_poll:
 m_done:
     .ascii  "[M9.J] probe done\n"
     .equ    m_done_len, 20
+m_wall_start:
+    .ascii  "[M9.J] nanosleep wall start\n"
+    .equ    m_wall_start_len, 30
+m_wall_end:
+    .ascii  "[M9.J] nanosleep wall end\n"
+    .equ    m_wall_end_len, 28
 m_linux:
     .ascii  "Linux"
     .equ    m_linux_len, 5
@@ -157,6 +163,8 @@ ts_20ms:
     .quad   0, 20000000
 ts_1ms:
     .quad   0, 1000000
+ts_200ms:
+    .quad   0, 200000000
 ts_bad:
     .quad   -1, 0
 
@@ -470,6 +478,23 @@ _start:
     mov     rax, SYS_nanosleep
     syscall
     expect_errno EINVAL, fail_ts_bad
+
+    /* host wall-clock bracket: 5 × 200 ms nanosleep */
+    lea     rsi, [rip + m_wall_start]
+    mov     rdx, m_wall_start_len
+    call    write_str
+    mov     ecx, 5
+.Lnanosleep_wall:
+    lea     rdi, [rip + ts_200ms]
+    xor     rsi, rsi
+    mov     rax, SYS_nanosleep
+    syscall
+    syscall_error fail_nanosleep
+    dec     ecx
+    jnz     .Lnanosleep_wall
+    lea     rsi, [rip + m_wall_end]
+    mov     rdx, m_wall_end_len
+    call    write_str
 
     /* success banners */
     lea     rsi, [rip + m_fs_ok]

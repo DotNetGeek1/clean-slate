@@ -75,62 +75,6 @@ static BLOCKED_RESUME: crate::sync::global_cell::GlobalCell<
     [BlockedResume::NativeOutcome; super::SCHEDULER_THREAD_SLOTS],
 );
 
-/// Copy of the live syscall frame taken when a thread blocks with
-/// `RestartSyscall`. Another runnable thread may reuse the same per-slot kernel
-/// stack mapping before wake; restore this snapshot before completing resume.
-static BLOCKED_SYSCALL_SNAPSHOT: crate::sync::global_cell::GlobalCell<
-    [SyscallContext; super::SCHEDULER_THREAD_SLOTS],
-> = crate::sync::global_cell::GlobalCell::new(
-    [SyscallContext {
-        rax: 0,
-        rdx: 0,
-        rbx: 0,
-        rbp: 0,
-        rsi: 0,
-        rdi: 0,
-        r8: 0,
-        r9: 0,
-        r10: 0,
-        r12: 0,
-        r13: 0,
-        r14: 0,
-        r15: 0,
-        user_rip: 0,
-        user_rflags: 0,
-        user_rsp: 0,
-    }; super::SCHEDULER_THREAD_SLOTS],
-);
-
-static BLOCKED_SYSCALL_SNAPSHOT_VALID: crate::sync::global_cell::GlobalCell<
-    [bool; super::SCHEDULER_THREAD_SLOTS],
-> = crate::sync::global_cell::GlobalCell::new([false; super::SCHEDULER_THREAD_SLOTS]);
-
-fn snapshot_blocked_syscall_frame(thread_index: usize, frame: *mut SyscallContext) {
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            frame,
-            (*BLOCKED_SYSCALL_SNAPSHOT.get())
-                .as_mut_ptr()
-                .add(thread_index),
-            1,
-        );
-        (*BLOCKED_SYSCALL_SNAPSHOT_VALID.get())[thread_index] = true;
-    }
-}
-
-fn restore_blocked_syscall_snapshot(thread_index: usize, frame: &mut SyscallContext) {
-    unsafe {
-        if (*BLOCKED_SYSCALL_SNAPSHOT_VALID.get())[thread_index] {
-            core::ptr::copy_nonoverlapping(
-                (*BLOCKED_SYSCALL_SNAPSHOT.get()).as_ptr().add(thread_index),
-                frame as *mut SyscallContext,
-                1,
-            );
-            (*BLOCKED_SYSCALL_SNAPSHOT_VALID.get())[thread_index] = false;
-        }
-    }
-}
-
 fn set_blocked_resume(thread_index: usize, resume: BlockedResume) {
     // Caller holds interrupts disabled and owns `thread_index` as the current thread.
     unsafe {
@@ -300,9 +244,6 @@ pub(crate) fn block_current_thread_with_resume(
         }
         thread.blocked_syscall_frame = frame as u64;
         set_blocked_resume(thread_index, resume);
-        if matches!(resume, BlockedResume::RestartSyscall { .. }) {
-            snapshot_blocked_syscall_frame(thread_index, frame);
-        }
         let tid = thread.id;
         let pid = thread.owner_process_id;
         let generation =
@@ -312,9 +253,6 @@ pub(crate) fn block_current_thread_with_resume(
         if table.consume_pending_wake(key) {
             thread.blocked_syscall_frame = 0;
             set_blocked_resume(thread_index, BlockedResume::NativeOutcome);
-            unsafe {
-                (*BLOCKED_SYSCALL_SNAPSHOT_VALID.get())[thread_index] = false;
-            }
             return Ok(false);
         }
 
@@ -468,13 +406,17 @@ extern "C" fn clean_slate_complete_blocked_syscall_resume() -> u64 {
         scheduler.threads[index].blocked_syscall_frame = 0;
         let resume = take_blocked_resume(index);
         let frame = unsafe { &mut *(frame_ptr as *mut SyscallContext) };
-        restore_blocked_syscall_snapshot(index, frame);
         apply_blocked_resume(frame, resume, outcome);
         #[cfg(feature = "m9-linux-runtime-self-test")]
         if outcome == WaitOutcome::TimedOut {
             if let BlockedResume::RestartSyscall { nr, .. } = resume {
                 if nr == clean_slate_linux_abi::SYS_NANOSLEEP {
                     let pid = scheduler.threads[index].owner_process_id;
+                    if let Some(generation) = crate::process::live_instance_generation(pid) {
+                        crate::process::linux_mem::set_pending_sleep_deadline(
+                            pid, generation, None,
+                        );
+                    }
                     crate::selftest::m9_linux_runtime::on_scheduler_nanosleep_timeout(pid);
                 }
             }

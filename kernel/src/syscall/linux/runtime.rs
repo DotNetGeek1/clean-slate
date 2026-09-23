@@ -309,7 +309,9 @@ fn handle_sys_poll(
         linux_mem::set_pending_poll_deadline(ctx.pid, ctx.instance_generation, None);
         return Ok(ready as u64);
     }
-    poll_wait_with_timeout(ctx, request, pollfds_ptr, timeout_ms, &pollfds[..nfds])
+    let result = poll_wait_with_timeout(ctx, request, pollfds_ptr, timeout_ms, &pollfds[..nfds]);
+    clear_poll_interest_for_pid(ctx.pid);
+    result
 }
 
 fn poll_wait_with_timeout(
