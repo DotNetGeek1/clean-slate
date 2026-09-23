@@ -30,7 +30,6 @@
 
 #![cfg_attr(
     not(any(
-        feature = "m8-linux-hello",
         feature = "m8-linux-image-self-test",
         feature = "m9-low-va-self-test",
         feature = "m8-linux-dispatch-self-test"
@@ -152,7 +151,7 @@ pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
     LoadPlanPolicy::linux_conventional_x86_64();
 
 /// M9 #146 argv/envp/auxv exec fixture (`fixtures/linux-exec-args/linux-exec-args-x86_64`).
-#[cfg(any(feature = "m9-linux-exec-self-test", test))]
+#[cfg(feature = "m9-linux-exec-self-test")]
 pub(crate) const LINUX_EXEC_ARGS_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-exec-args/linux-exec-args-x86_64");
 
@@ -311,8 +310,10 @@ pub(crate) enum LinuxImageError {
     /// M9 exec: stack page budget invalid or mapping budget exhausted.
     ExecStackBounds,
     /// M9 exec: live thread count is not exactly one.
+    #[cfg_attr(not(feature = "m9-linux-exec-self-test"), allow(dead_code))]
     ExecMultiThread,
     /// M9 exec: stale instance generation.
+    #[cfg_attr(not(feature = "m9-linux-exec-self-test"), allow(dead_code))]
     ExecGenerationMismatch,
 }
 
