@@ -4,6 +4,12 @@
 
 pub(crate) mod domain;
 pub(crate) mod id_allocator;
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+pub(crate) mod linux_exec;
 pub(crate) mod linux_fd;
 pub(crate) mod linux_image;
 pub(crate) mod linux_stdio_m9_payload;
@@ -86,6 +92,7 @@ impl ResourceDomain {
         }
     }
 
+    /// Authoritative CR3 root for registry lookup and fail-closed syscall checks.
     pub(crate) fn address_space_root(&self) -> u64 {
         self.root_frame
     }
@@ -104,6 +111,21 @@ impl ResourceDomain {
     pub(crate) fn take_address_space(&mut self) -> Option<ProcessAddressSpace> {
         self.root_frame = 0;
         self.address_space.take()
+    }
+
+    pub(crate) fn replace_address_space(
+        &mut self,
+        new_space: ProcessAddressSpace,
+    ) -> Option<ProcessAddressSpace> {
+        let old = self.address_space.replace(new_space);
+        self.root_frame = self.address_space.as_ref().map_or(0, |s| s.root_frame);
+        old
+    }
+
+    pub(crate) fn sync_root_frame_from_address_space(&mut self) {
+        if let Some(space) = self.address_space.as_ref() {
+            self.root_frame = space.root_frame;
+        }
     }
 
     #[cfg(feature = "m9-syscall-fail-closed-self-test")]

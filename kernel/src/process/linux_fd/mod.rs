@@ -326,12 +326,15 @@ impl LinuxFdRegistry {
         inherit_table(&parent_table, &mut self.pool, child_table)
     }
 
+    /// When the process has no fd table slot (never opened a fd), exec is a no-op.
     pub(crate) fn close_on_exec_for_process(
         &mut self,
         pid: u64,
         generation: InstanceGeneration,
     ) -> Result<(), LinuxErrno> {
-        let index = self.slot_index(pid, generation).ok_or(EBADF)?;
+        let Some(index) = self.slot_index(pid, generation) else {
+            return Ok(());
+        };
         let table = &mut self.slots[index].as_mut().expect("slot").table;
         close_cloexec_in_table(table, &mut self.pool);
         Ok(())
@@ -416,6 +419,15 @@ fn registry_mut() -> &'static mut LinuxFdRegistry {
     unsafe { &mut *LINUX_FD_REGISTRY.get() }
 }
 
+#[cfg(any(
+    test,
+    feature = "m9-linux-exec-self-test",
+    feature = "m9-fd-core-self-test"
+))]
+pub(crate) fn reset_registry_for_selftest() {
+    unsafe { *LINUX_FD_REGISTRY.get() = LinuxFdRegistry::new() };
+}
+
 pub(crate) fn install_stdio_for_process(
     pid: u64,
     generation: InstanceGeneration,
@@ -490,6 +502,8 @@ pub(crate) fn inherit_for_child(
     registry_mut().inherit_for_child(parent_pid, parent_gen, child_pid, child_gen)
 }
 
+/// Clears `FD_CLOEXEC` descriptors for `pid`/`generation`. Missing fd table is OK
+/// (process never used the fd layer).
 pub(crate) fn close_on_exec(pid: u64, generation: InstanceGeneration) -> Result<(), LinuxErrno> {
     registry_mut().close_on_exec_for_process(pid, generation)
 }

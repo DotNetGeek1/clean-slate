@@ -34,6 +34,8 @@ pub const SYS_WRITEV: u64 = 20;
 pub const SYS_DUP2: u64 = 33;
 /// Linux `exit` — `exit(error_code)` (thread/group exit; M8 uses this for `_exit`).
 pub const SYS_EXIT: u64 = 60;
+/// Linux `execve` — `execve(path, argv, envp)` (M9 #102 will parse pointers; M9.F self-test stub).
+pub const SYS_EXECVE: u64 = 59;
 /// Linux `fcntl` — `fcntl(fd, cmd, arg)`.
 pub const SYS_FCNTL: u64 = 72;
 

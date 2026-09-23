@@ -23,6 +23,8 @@ pub const ENOENT: LinuxErrno = LinuxErrno(2);
 pub const ESRCH: LinuxErrno = LinuxErrno(3);
 /// Bad file descriptor.
 pub const EBADF: LinuxErrno = LinuxErrno(9);
+/// Exec format error.
+pub const ENOEXEC: LinuxErrno = LinuxErrno(8);
 /// Cannot allocate memory.
 pub const ENOMEM: LinuxErrno = LinuxErrno(12);
 /// Permission denied.

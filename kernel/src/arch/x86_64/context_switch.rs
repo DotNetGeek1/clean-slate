@@ -94,6 +94,43 @@ pub(crate) fn task_stack_top(stack: &TaskStack) -> u64 {
     align_down(((stack.0.as_ptr() as usize) + stack.0.len()) as u64, 16)
 }
 
+/// True when `rsp` points into one of the static per-slot task stacks (not user memory).
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+#[cfg_attr(not(feature = "m9-linux-exec-self-test"), allow(dead_code))]
+pub(crate) fn rsp_on_static_task_stack(rsp: u64) -> bool {
+    task_stack_margin_bytes(rsp).is_some()
+}
+
+/// Bytes between `rsp` and the base of the containing static task stack, if any.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+pub(crate) fn task_stack_margin_bytes(rsp: u64) -> Option<u64> {
+    let stacks = unsafe { crate::sched::task_stacks_mut() };
+    stacks.iter().find_map(|stack| {
+        let base = stack.0.as_ptr() as u64;
+        let top = task_stack_top(stack);
+        if rsp > base && rsp <= top {
+            Some(rsp - base)
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+pub(crate) const TASK_STACK_MIN_MARGIN_BYTES: u64 = 16 * 1024;
+
 pub(crate) unsafe fn restore_task_context(stack_pointer: u64) -> ! {
     unsafe {
         asm!(

@@ -48,6 +48,32 @@ pub const AT_RANDOM: u64 = 25;
 pub const AT_SECURE: u64 = 23;
 /// Platform string pointer — **unsupported in M8** (do not emit).
 pub const AT_PLATFORM: u64 = 15;
+/// Base address of the interpreter (0 for static ET_EXEC).
+pub const AT_BASE: u64 = 7;
+/// Flags (unused for static musl 1.2.5).
+pub const AT_FLAGS: u64 = 8;
+/// Real user id.
+pub const AT_UID: u64 = 11;
+/// Effective user id.
+pub const AT_EUID: u64 = 12;
+/// Real group id.
+pub const AT_GID: u64 = 13;
+/// Effective group id.
+pub const AT_EGID: u64 = 14;
+/// Hardware capabilities (may be 0).
+pub const AT_HWCAP: u64 = 16;
+/// Clock ticks per second (optional for musl 1.2.5 static).
+pub const AT_CLKTCK: u64 = 17;
+/// Filename used for exec (NUL-terminated string pointer).
+pub const AT_EXECFN: u64 = 31;
+
+/// Extra NUL-terminated or raw blobs laid out in the string region after `envp`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StackTailBlob<'a> {
+    pub bytes: &'a [u8],
+    /// When false, `bytes` are copied verbatim (e.g. 16-byte `AT_RANDOM`).
+    pub nul_terminate: bool,
+}
 
 /// Result of a successful [`build_initial_stack`] call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +84,9 @@ pub struct InitialStackImage {
     /// (including padding and strings). Equals `(stack_top_vaddr - rsp) as usize`
     /// when the image fills that span.
     pub bytes_used: usize,
+    /// Virtual addresses of each `tail` blob in order.
+    pub tail_blob_vaddrs: [u64; 8],
+    pub tail_blob_count: usize,
 }
 
 /// Errors from [`build_initial_stack`].
@@ -108,6 +137,19 @@ pub fn build_initial_stack(
     envp: &[&[u8]],
     auxv: &[(u64, u64)],
 ) -> Result<InitialStackImage, StackLayoutError> {
+    build_initial_stack_with_tail(buf, stack_top_vaddr, argv, envp, &[], auxv)
+}
+
+/// Like [`build_initial_stack`] but appends `tail` blobs after envp strings (high
+/// addresses). Used for `AT_EXECFN` / `AT_RANDOM` without exposing them in `envp`.
+pub fn build_initial_stack_with_tail(
+    buf: &mut [u8],
+    stack_top_vaddr: u64,
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    tail: &[StackTailBlob<'_>],
+    auxv: &[(u64, u64)],
+) -> Result<InitialStackImage, StackLayoutError> {
     let buf_len = buf.len();
     if buf_len == 0 {
         return Err(StackLayoutError::BufferTooSmall);
@@ -127,6 +169,18 @@ pub fn build_initial_stack(
         string_bytes = string_bytes
             .checked_add(s.len())
             .and_then(|n| n.checked_add(1))
+            .ok_or(StackLayoutError::StringOverflow)?;
+    }
+    for blob in tail {
+        string_bytes = string_bytes
+            .checked_add(blob.bytes.len())
+            .and_then(|n| {
+                if blob.nul_terminate {
+                    n.checked_add(1)
+                } else {
+                    Some(n)
+                }
+            })
             .ok_or(StackLayoutError::StringOverflow)?;
     }
 
@@ -197,6 +251,32 @@ pub fn build_initial_stack(
             .checked_add((s.len() + 1) as u64)
             .ok_or(StackLayoutError::StringOverflow)?;
     }
+    let mut tail_addrs = [0u64; 8];
+    if tail.len() > tail_addrs.len() {
+        return Err(StackLayoutError::BufferTooSmall);
+    }
+    for (i, blob) in tail.iter().enumerate() {
+        tail_addrs[i] = str_vaddr;
+        let end = str_off
+            .checked_add(blob.bytes.len())
+            .ok_or(StackLayoutError::StringOverflow)?;
+        buf[str_off..end].copy_from_slice(blob.bytes);
+        if blob.nul_terminate {
+            if end >= buf_len {
+                return Err(StackLayoutError::BufferTooSmall);
+            }
+            buf[end] = 0;
+            str_off = end + 1;
+            str_vaddr = str_vaddr
+                .checked_add((blob.bytes.len() + 1) as u64)
+                .ok_or(StackLayoutError::StringOverflow)?;
+        } else {
+            str_off = end;
+            str_vaddr = str_vaddr
+                .checked_add(blob.bytes.len() as u64)
+                .ok_or(StackLayoutError::StringOverflow)?;
+        }
+    }
     debug_assert_eq!(str_off, buf_len);
 
     // Align RSP down so argc sits at a 16-byte-aligned address.
@@ -237,7 +317,12 @@ pub fn build_initial_stack(
     debug_assert_eq!(cursor, vector_end_off);
 
     let bytes_used = (stack_top_vaddr - rsp) as usize;
-    Ok(InitialStackImage { rsp, bytes_used })
+    Ok(InitialStackImage {
+        rsp,
+        bytes_used,
+        tail_blob_vaddrs: tail_addrs,
+        tail_blob_count: tail.len(),
+    })
 }
 
 fn write_u64(buf: &mut [u8], cursor: &mut usize, value: u64) -> Result<(), StackLayoutError> {

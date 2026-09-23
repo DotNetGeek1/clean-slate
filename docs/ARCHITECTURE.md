@@ -171,6 +171,11 @@ Any PT_LOAD intersecting `[0x0000_407F_FFFF_C000, 0x0000_4080_0000_0000)` is
 rejected (`SegmentOverlapsStackReservation`). See
 [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md), "M8.2 — ELF loader and process image".
 
+M9 #146 adds the bounded exec substrate (`LinuxExecSpec`, `prepare_linux_image`,
+`commit_exec`) on top of the same loader; M8 hello and production Linux launch share
+`launch_linux_process_from_spec`. See [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md),
+"M9 #146 — Linux exec / process image substrate".
+
 ### Linux personality end-to-end path (#97)
 
 With `m8-linux-hello`, boot Starts `LINUX_HELLO_SERVICE_ID` through

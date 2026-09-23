@@ -78,6 +78,9 @@ pub(crate) fn handle_sys_exit(
     #[cfg(feature = "m9-low-va-self-test")]
     crate::selftest::m9_low_va::observe_linux_exit(pid, &teardown);
 
+    #[cfg(feature = "m9-linux-exec-self-test")]
+    crate::selftest::m9_linux_exec::observe_linux_exit(pid, &teardown);
+
     #[cfg(feature = "m9-fd-core-self-test")]
     if let Some(next_frame) = crate::selftest::m9_fd_core::after_linux_probe_exit(
         pid,

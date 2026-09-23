@@ -20,14 +20,17 @@ pub mod syscall;
 
 pub use errno::{
     decode_rax, encode_rax, LinuxErrno, LinuxSyscallResult, EACCES, EBADF, EFAULT, EINVAL, EMFILE,
-    ENFILE, ENOENT, ENOMEM, ENOSYS, EPERM, ESRCH,
+    ENFILE, ENOENT, ENOEXEC, ENOMEM, ENOSYS, EPERM, ESRCH,
 };
 pub use stack::{
-    build_initial_stack, InitialStackBuilder, InitialStackImage, StackLayoutError, AT_ENTRY,
-    AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PLATFORM, AT_RANDOM, AT_SECURE,
+    build_initial_stack, build_initial_stack_with_tail, InitialStackBuilder, InitialStackImage,
+    StackLayoutError, StackTailBlob, AT_BASE, AT_CLKTCK, AT_EGID, AT_ENTRY, AT_EUID, AT_EXECFN,
+    AT_FLAGS, AT_GID, AT_HWCAP, AT_NULL, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PLATFORM,
+    AT_RANDOM, AT_SECURE, AT_UID,
 };
 pub use syscall::{
     decode_linux_syscall, is_m8_supported_syscall, unsupported_syscall_result,
     LinuxSyscallRegisters, LinuxSyscallRequest, UnsupportedSyscallBudget,
-    UnsupportedSyscallObservation, SYS_CLOSE, SYS_DUP2, SYS_EXIT, SYS_FCNTL, SYS_WRITE, SYS_WRITEV,
+    UnsupportedSyscallObservation, SYS_CLOSE, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_WRITE,
+    SYS_WRITEV,
 };

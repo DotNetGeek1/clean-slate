@@ -94,6 +94,16 @@ const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
 ];
 const M9_LOW_VA_ACCEPTANCE_MARKERS: [&str; 2] = ["[M9.0] creating", "[M9.0] PASS"];
 const M9_LOW_VA_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 7] = [
+    "[M9.F] creating",
+    "[M9.F] phase-1 argv line",
+    "[M9.F] argv/envp/auxv OK",
+    "[M9.F] exec committed pid=",
+    "[M9.F] phase-2 argv line",
+    "[M9.F] exec rejected ENOEXEC",
+    "[M9.F] PASS",
+];
+const M9_LINUX_EXEC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[INT ] double-fault IST initialized",
     "[DF  ] double fault",
@@ -632,6 +642,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::Run => run_vm(),
         ParsedCommand::TestM1 => run_m1_acceptance(),
         ParsedCommand::TestM9LowVa => run_m9_low_va_acceptance(),
+        ParsedCommand::TestM9LinuxExec => run_m9_linux_exec_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
         ParsedCommand::TestM3 => run_m3_acceptance(),
         ParsedCommand::TestM3AddressSpace => run_m3_address_space_acceptance(),
@@ -1014,6 +1025,18 @@ fn run_m9_low_va_acceptance() -> Result<(), XtaskError> {
         false,
         &["m9-low-va-self-test"],
         Some((&M9_LOW_VA_ACCEPTANCE_MARKERS, M9_LOW_VA_ACCEPTANCE_TIMEOUT)),
+    )
+}
+
+fn run_m9_linux_exec_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m9-linux-exec-self-test"],
+        Some((
+            &M9_LINUX_EXEC_ACCEPTANCE_MARKERS,
+            M9_LINUX_EXEC_ACCEPTANCE_TIMEOUT,
+        )),
     )
 }
 
@@ -1754,11 +1777,22 @@ fn run_vm_inner_with_config(
     } else {
         workspace_root().join("target").join("OVMF_VARS.fd")
     };
-    if config.reset_ovmf_vars || !vars_copy.is_file() {
-        if let Some(parent) = vars_copy.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    // Every boot starts from the pristine variable store. OVMF rewrites NV
+    // variables on each boot and the harness SIGKILLs QEMU as soon as the
+    // markers match, so a store shared across ~50 boots accumulates partial
+    // writes / reclaim state; on CI that eventually left the firmware stuck
+    // before BDS (console escapes only, no `BdsDxe:` line) for whichever test
+    // happened to boot next. A fresh copy makes each boot independent.
+    if let Some(parent) = vars_copy.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if !same_file(&ovmf.vars_template, &vars_copy) {
         fs::copy(&ovmf.vars_template, &vars_copy)?;
+    } else {
+        eprintln!(
+            "warning: OVMF_VARS template is the working copy ({}); firmware variable state is shared across boots",
+            vars_copy.display()
+        );
     }
 
     let mut qemu = Command::new("qemu-system-x86_64");
@@ -2016,6 +2050,14 @@ fn kernel_artifact(release: bool) -> PathBuf {
         .join(KERNEL_TARGET)
         .join(profile)
         .join(format!("{KERNEL_PACKAGE}.efi"))
+}
+
+/// True when both paths name the same existing file (after canonicalisation).
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 fn find_ovmf() -> Result<OvmfPaths, XtaskError> {
@@ -2636,6 +2678,7 @@ enum ParsedCommand {
     TestM6FixtureSmoke,
     TestM8LinuxImage,
     TestM9LowVa,
+    TestM9LinuxExec,
     TestM6Object,
     TestM7NetService,
     TestM7Network,
@@ -2663,6 +2706,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "run" => ParsedCommand::Run,
         Some(cmd) if cmd == "test-m1" => ParsedCommand::TestM1,
         Some(cmd) if cmd == "test-m9-low-va" || cmd == "m9-low-va" => ParsedCommand::TestM9LowVa,
+        Some(cmd) if cmd == "test-m9-linux-exec" || cmd == "m9-linux-exec" || cmd == "m9.146" => {
+            ParsedCommand::TestM9LinuxExec
+        }
         Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,
         Some(cmd) if cmd == "test-m3" => ParsedCommand::TestM3,
         Some(cmd) if cmd == "test-m3-address-space" => ParsedCommand::TestM3AddressSpace,
