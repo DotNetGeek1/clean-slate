@@ -110,16 +110,12 @@ const M9_LINUX_PROC_ACCEPTANCE_MARKERS: [&str; 3] =
 const M9_LINUX_PROC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M9_ROOTFS_ACCEPTANCE_MARKERS: [&str; 2] = ["[RFS ] rootfs entries=", "[M9.K] PASS"];
 const M9_ROOTFS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 12] = [
+const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[M9.H] creating",
     "[M9.H] getcwd=/",
     "[M9.H] hostname=m9-fixture",
     "[M9.H] ls /bin ok",
     "[M9.H] stat ok",
-    // Persistence audit: the probe's first /tmp write must reach the block
-    // device before the object service completes it, so the block write
-    // request is logged strictly between `stat ok` and `tmp write/read ok`.
-    "[BLK ] request op=write",
     "[M9.H] tmp write/read ok",
     "[M9.H] big write/read ok",
     "[M9.H] negative cases ok",
@@ -2349,6 +2345,15 @@ fn run_acceptance_command(
                             return Err(error);
                         }
                     }
+                    if markers == M9_LINUX_FS_ACCEPTANCE_MARKERS {
+                        if let Err(error) = validate_m9_linux_fs_probe_stdout(&output) {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(error);
+                        }
+                    }
                     authoritative_pass = true;
                     terminate_child(&mut child)?;
                     child_status = Some(child.wait()?);
@@ -2442,6 +2447,30 @@ fn validate_m9_linux_fs_probe_stdout(output: &str) -> Result<(), XtaskError> {
     if !output.contains("test") {
         return Err(XtaskError::InvalidCommand(
             "m9 linux fs acceptance missing probe stdout `test`".to_owned(),
+        ));
+    }
+    validate_m9_linux_fs_block_write(output)?;
+    Ok(())
+}
+
+/// Persistence audit: a block write must occur while the probe exercises `/tmp`
+/// (after `ls /bin ok`, before negative path cases). Kernel block logs and probe
+/// stdout can interleave, so this is not ordered against `stat ok` / `tmp ok`.
+fn validate_m9_linux_fs_block_write(output: &str) -> Result<(), XtaskError> {
+    let ls = output
+        .find("[M9.H] ls /bin ok")
+        .ok_or_else(|| XtaskError::MissingMarker("[M9.H] ls /bin ok".to_owned()))?;
+    let negative = output
+        .find("[M9.H] negative cases ok")
+        .ok_or_else(|| XtaskError::MissingMarker("[M9.H] negative cases ok".to_owned()))?;
+    if ls >= negative {
+        return Err(XtaskError::InvalidCommand(
+            "m9 linux fs acceptance marker order".to_owned(),
+        ));
+    }
+    if !output[ls..negative].contains("[BLK ] request op=write") {
+        return Err(XtaskError::MissingMarker(
+            "[BLK ] request op=write (between ls /bin ok and negative cases)".to_owned(),
         ));
     }
     Ok(())
