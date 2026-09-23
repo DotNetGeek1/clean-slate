@@ -457,6 +457,9 @@ impl Scheduler {
             return false;
         };
         let thread = &self.threads[index];
+        if thread.kind != ThreadKind::User {
+            return false;
+        }
         if thread.kernel_stack_top == 0 {
             return false;
         }
@@ -470,7 +473,6 @@ impl Scheduler {
         self.threads
             .iter()
             .any(|thread| thread.state == ThreadState::Blocked)
-            || wait::waiter_occupancy() > 0
     }
 
     pub(super) fn yield_from_blocked_thread(&mut self) -> Result<u64, &'static str> {
