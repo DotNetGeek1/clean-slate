@@ -157,32 +157,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf
 
-      - name: DIAG isolated test-m9-linux-exec (temporary)
-        run: |
-          qemu-system-x86_64 --version
-          ls -la target/esp/EFI/BOOT || true
-          ls -la target/OVMF_VARS.fd || true
-          sha256sum target/OVMF_VARS.fd /usr/share/OVMF/OVMF_VARS_4M.fd || true
-          cargo xtask test-m9-linux-exec || echo "DIAG isolated exec run FAILED"
-          sha256sum target/esp/EFI/BOOT/BOOTX64.EFI target/OVMF_VARS.fd || true
-          mkdir -p target/diag && cp target/esp/EFI/BOOT/BOOTX64.EFI target/diag/exec-isolated.efi && cp target/OVMF_VARS.fd target/diag/vars-after-isolated.fd
-
       - name: Exhaustive QEMU acceptance (M1–M8 aggregates + constituents)
         run: bash ./scripts/run-tests.sh --exhaustive
 
-      - name: DIAG collect (temporary)
-        if: always()
-        run: |
-          sha256sum target/esp/EFI/BOOT/BOOTX64.EFI target/OVMF_VARS.fd || true
-          cp target/esp/EFI/BOOT/BOOTX64.EFI target/diag/exec-last.efi || true
-          cp target/OVMF_VARS.fd target/diag/vars-after-exhaustive.fd || true
-
       - name: Upload test report
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: xtask-test-report
-          path: |
-            target/xtask-test-report.txt
-            target/diag/
+          path: target/xtask-test-report.txt
           if-no-files-found: ignore
