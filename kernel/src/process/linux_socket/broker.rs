@@ -119,7 +119,9 @@ pub(crate) fn broker_sync(
         }
         Err(NetBridgeError::Pending) => {
             let key = linux_socket_wait_key(socket_id);
-            let deadline = on_timeout.map(|_| Deadline(kernel_ticks().saturating_add(5_000_000)));
+            let deadline = on_timeout.map(|_| {
+                Deadline(kernel_ticks().saturating_add(super::LINUX_TCP_CONNECT_TIMEOUT_MS * 1000))
+            });
             let timeout = on_timeout.unwrap_or(LinuxTimeoutResult::Zero);
             Err(block_linux_syscall(request, ctx, key, deadline, timeout))
         }

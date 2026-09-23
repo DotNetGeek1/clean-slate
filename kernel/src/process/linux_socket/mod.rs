@@ -15,7 +15,9 @@ use clean_slate_network::session::{SessionId, SocketKind};
 use clean_slate_service_fixtures::NETWORK_MAX_PAYLOAD_BYTES;
 use clean_slate_service_lifecycle::InstanceGeneration;
 
-use crate::capability::network::{grant_network_authority, NetworkGrantPolicy};
+use crate::capability::network::{
+    authorize_network_op, grant_network_authority, NetworkGrantPolicy,
+};
 use crate::process::linux_fd::open_description::{OpenDescriptionId, SocketRef};
 use crate::process::linux_fd::readiness::{Readiness, ReadinessSource};
 use crate::sched::wait::{wake_all, WaitKey};
@@ -36,7 +38,7 @@ pub(crate) struct LinuxSocketId {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SocketKindLinux {
+pub(crate) enum SocketKindLinux {
     Udp,
     Tcp,
 }
@@ -168,6 +170,14 @@ fn socket_addr_v4(sa: &clean_slate_linux_abi::SockaddrIn) -> SocketAddrV4 {
     SocketAddrV4::new(ipv4_from_sockaddr(sa), sa.port)
 }
 
+pub(crate) fn alloc_socket_for_selftest(
+    pid: u64,
+    instance_generation: InstanceGeneration,
+    kind: SocketKindLinux,
+) -> Result<LinuxSocketId, LinuxErrno> {
+    alloc_socket(pid, instance_generation, kind)
+}
+
 fn alloc_socket(
     pid: u64,
     instance_generation: InstanceGeneration,
@@ -210,9 +220,47 @@ pub(crate) fn release_socket(id: LinuxSocketId) {
     let pool = unsafe { &mut *SOCKET_POOL.get() };
     if let Some(slot) = pool.slots.get_mut(id.index as usize) {
         if slot.generation == id.generation && slot.state != SocketState::Closed {
+            close_m7_session(slot);
             slot.state = SocketState::Closed;
             slot.generation = slot.generation.saturating_add(1);
         }
+    }
+}
+
+fn close_m7_session(socket: &LinuxSocket) {
+    if socket.session.raw() == 0 {
+        return;
+    }
+    let holder = HolderId(socket.owner_pid);
+    let Some(handle) = broker::network_client_handle(holder) else {
+        return;
+    };
+    if authorize_network_op(
+        holder,
+        handle,
+        crate::capability::network::NetworkOp::Receive,
+        Some(clean_slate_network::session::SessionGeneration::new(
+            socket.session_generation,
+        )),
+    )
+    .is_err()
+    {
+        return;
+    }
+    let wire = NetworkRequest::Close {
+        session: socket.session,
+    }
+    .encode();
+    if let Some(gen) =
+        crate::service::instance_generation::live_instance_generation_for_pid(socket.owner_pid)
+    {
+        let _ = crate::service::net_bridge::net_bridge_mut().submit(
+            socket.owner_pid,
+            socket.owner_pid,
+            u64::from(gen.0),
+            &wire,
+            &[],
+        );
     }
 }
 
@@ -259,6 +307,7 @@ pub(crate) mod syscalls {
         let kind = match base_type {
             SOCK_DGRAM => SocketKindLinux::Udp,
             SOCK_STREAM => SocketKindLinux::Tcp,
+            3 => return Err(clean_slate_linux_abi::EPROTONOSUPPORT),
             _ => return Err(EINVAL),
         };
         let id = alloc_socket(ctx.pid, ctx.instance_generation, kind)?;
@@ -338,6 +387,7 @@ pub(crate) mod syscalls {
                 return Err(EISCONN);
             }
             socket.remote = Some(sa);
+            socket.state = SocketState::Connecting;
             let outcome = match broker_sync(
                 request,
                 ctx,
@@ -378,25 +428,21 @@ pub(crate) mod syscalls {
 pub(crate) fn read_socket(
     request: &clean_slate_linux_abi::LinuxSyscallRequest,
     ctx: &mut crate::syscall::linux::table::LinuxSyscallContext<'_>,
-    id: LinuxSocketId,
-    buf_ptr: u64,
-    count: u64,
-    nonblock: bool,
+    _pid: u64,
+    _generation: InstanceGeneration,
+    _fd: u64,
+    socket_ref: SocketRef,
+    scratch: &mut [u8],
 ) -> clean_slate_linux_abi::LinuxSyscallResult {
-    use crate::mm::user_mapping::validate_user_writable_pointer_range;
-    use clean_slate_linux_abi::EFAULT;
-
-    if count == 0 {
+    let id = socket_ref_to_id(socket_ref);
+    if scratch.is_empty() {
         return Ok(0);
-    }
-    if validate_user_writable_pointer_range(buf_ptr, count).is_err() {
-        return Err(EFAULT);
     }
     with_socket_mut(id, |socket| {
         if socket.kind == SocketKindLinux::Udp {
-            udp::read_datagram(socket, request, ctx, id, buf_ptr, count, nonblock)
+            udp::read_datagram(socket, request, ctx, id, scratch)
         } else {
-            tcp::read_stream(socket, request, ctx, id, buf_ptr, count, nonblock)
+            tcp::read_stream(socket, request, ctx, id, scratch)
         }
     })?
 }
@@ -404,17 +450,56 @@ pub(crate) fn read_socket(
 pub(crate) fn write_socket(
     request: &clean_slate_linux_abi::LinuxSyscallRequest,
     ctx: &mut crate::syscall::linux::table::LinuxSyscallContext<'_>,
-    id: LinuxSocketId,
+    _pid: u64,
+    _generation: InstanceGeneration,
+    _fd: u64,
+    socket_ref: SocketRef,
     bytes: &[u8],
-    nonblock: bool,
 ) -> clean_slate_linux_abi::LinuxSyscallResult {
+    let id = socket_ref_to_id(socket_ref);
     with_socket_mut(id, |socket| {
         if socket.kind == SocketKindLinux::Udp {
-            udp::write_datagram(socket, request, ctx, id, bytes, nonblock)
+            udp::write_datagram(socket, request, ctx, id, bytes)
         } else {
-            tcp::write_stream(socket, request, ctx, id, bytes, nonblock)
+            tcp::write_stream(socket, request, ctx, id, bytes)
         }
     })?
+}
+
+/// #103 consumes readiness via `notify_readiness_changed`; lane-local hook only.
+/// Self-test: stale M7 session generation must fail closed (`ESTALE`).
+#[cfg(feature = "m9-linux-socket-self-test")]
+pub(crate) fn selftest_read_stale_session(id: LinuxSocketId) -> LinuxErrno {
+    let pool = unsafe { &mut *SOCKET_POOL.get() };
+    let slot = match pool
+        .slots
+        .get_mut(id.index as usize)
+        .filter(|s| s.state != SocketState::Closed && s.generation == id.generation)
+    {
+        Some(s) => s,
+        None => return EBADF,
+    };
+    slot.session_generation = slot.session_generation.saturating_sub(1);
+    let handle = match broker::network_client_handle(HolderId(slot.owner_pid)) {
+        Some(h) => h,
+        None => return EBADF,
+    };
+    if let Err(clean_slate_network::error::DenialReason::StaleGeneration) = authorize_network_op(
+        HolderId(slot.owner_pid),
+        handle,
+        crate::capability::network::NetworkOp::Receive,
+        Some(clean_slate_network::session::SessionGeneration::new(
+            slot.session_generation,
+        )),
+    ) {
+        return clean_slate_linux_abi::ESTALE;
+    }
+    clean_slate_linux_abi::EINVAL
+}
+
+pub(crate) fn readiness_changed(open: OpenDescriptionId) {
+    let _ = open;
+    // ORCHESTRATOR: forward to syscall::linux::poll::notify_readiness_changed (#103)
 }
 
 pub(crate) fn readiness_for(id: LinuxSocketId) -> Readiness {

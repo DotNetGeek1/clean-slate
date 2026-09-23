@@ -11,6 +11,14 @@ use clean_slate_linux_abi::{LinuxErrno, EBADF, EMFILE};
 use clean_slate_service_lifecycle::InstanceGeneration;
 use console::write_console;
 use open_description::{DescriptorKind, OpenAccess, OpenDescriptionPool, OpenStatus, SocketRef};
+
+/// Kind dispatch for the #147 `read(2)` front-end (`fd.rs`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxReadKind {
+    Console,
+    Socket(SocketRef),
+    Unsupported,
+}
 use table::{
     close_fd_entry, close_on_exec as close_cloexec_in_table, dup2_fd, inherit_table,
     install_stdio_entries, release_table, LinuxFdTable,
@@ -189,6 +197,32 @@ impl LinuxFdRegistry {
         false
     }
 
+    pub(crate) fn read_kind_for_fd(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Result<LinuxReadKind, LinuxErrno> {
+        let index = self.slot_index(pid, generation).ok_or(EBADF)?;
+        let open = self.slots[index]
+            .as_ref()
+            .expect("slot")
+            .table
+            .get(fd)
+            .ok_or(EBADF)?
+            .open;
+        let desc = self.pool.get(open)?;
+        Ok(match desc.kind {
+            DescriptorKind::Console(_) => LinuxReadKind::Console,
+            DescriptorKind::Socket(socket) => LinuxReadKind::Socket(socket),
+            DescriptorKind::File(_)
+            | DescriptorKind::Dir(_)
+            | DescriptorKind::PipeRead(_)
+            | DescriptorKind::PipeWrite(_) => LinuxReadKind::Unsupported,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn write_fd(
         &mut self,
         ipc: &mut IpcEndpointTable,
@@ -197,6 +231,8 @@ impl LinuxFdRegistry {
         fd: u64,
         bytes: &[u8],
         personality: ExecutionPersonality,
+        _request: Option<&clean_slate_linux_abi::LinuxSyscallRequest>,
+        _ctx: Option<&mut crate::syscall::linux::table::LinuxSyscallContext<'_>>,
     ) -> Result<usize, LinuxErrno> {
         let index = self.slot_index(pid, generation).ok_or(EBADF)?;
         let open = self.slots[index]
@@ -209,75 +245,7 @@ impl LinuxFdRegistry {
         let desc = self.pool.get(open)?;
         match desc.kind {
             DescriptorKind::Console(sink) => write_console(ipc, pid, sink, bytes, personality),
-            // #105
-            DescriptorKind::Socket(socket) => {
-                let id = crate::process::linux_socket::socket_ref_to_id(socket);
-                let frame = crate::arch::x86_64::interrupt_context::SyscallContext {
-                    rax: 0,
-                    rdx: 0,
-                    rbx: 0,
-                    rbp: 0,
-                    rsi: 0,
-                    rdi: 0,
-                    r8: 0,
-                    r9: 0,
-                    r10: 0,
-                    r12: 0,
-                    r13: 0,
-                    r14: 0,
-                    r15: 0,
-                    user_rip: 0,
-                    user_rflags: 0,
-                    user_rsp: 0,
-                };
-                let mut frame = frame;
-                let mut ctx = crate::syscall::linux::table::LinuxSyscallContext {
-                    pid,
-                    instance_generation: generation,
-                    frame: &mut frame,
-                };
-                let request = clean_slate_linux_abi::LinuxSyscallRequest {
-                    nr: clean_slate_linux_abi::SYS_WRITE,
-                    args: [0, 0, 0, 0, 0, 0],
-                };
-                let nonblock = desc.status.nonblock;
-                crate::process::linux_socket::write_socket(&request, &mut ctx, id, bytes, nonblock)
-                    .map(|n| n as usize)
-            }
-            _ => Err(EBADF),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn read_fd(
-        &mut self,
-        pid: u64,
-        generation: InstanceGeneration,
-        fd: u64,
-        buf_ptr: u64,
-        count: u64,
-        request: &clean_slate_linux_abi::LinuxSyscallRequest,
-        ctx: &mut crate::syscall::linux::table::LinuxSyscallContext<'_>,
-    ) -> Result<usize, LinuxErrno> {
-        let index = self.slot_index(pid, generation).ok_or(EBADF)?;
-        let open = self.slots[index]
-            .as_ref()
-            .expect("slot")
-            .table
-            .get(fd)
-            .ok_or(EBADF)?
-            .open;
-        let desc = self.pool.get(open)?;
-        match desc.kind {
-            // #105
-            DescriptorKind::Socket(socket) => {
-                let id = crate::process::linux_socket::socket_ref_to_id(socket);
-                let nonblock = desc.status.nonblock;
-                crate::process::linux_socket::read_socket(
-                    request, ctx, id, buf_ptr, count, nonblock,
-                )
-                .map(|n| n as usize)
-            }
+            DescriptorKind::Socket(_) => Err(EBADF),
             _ => Err(EBADF),
         }
     }
@@ -539,7 +507,8 @@ fn registry_mut() -> &'static mut LinuxFdRegistry {
 #[cfg(any(
     test,
     feature = "m9-linux-exec-self-test",
-    feature = "m9-fd-core-self-test"
+    feature = "m9-fd-core-self-test",
+    feature = "m9-linux-socket-self-test"
 ))]
 pub(crate) fn reset_registry_for_selftest() {
     unsafe { *LINUX_FD_REGISTRY.get() = LinuxFdRegistry::new() };
@@ -591,23 +560,22 @@ pub(crate) fn socket_ref_for_open(open: OpenDescriptionId) -> Result<SocketRef, 
     registry_mut().socket_ref_for_open(open)
 }
 
-pub(crate) fn read_fd(
+pub(crate) fn read_kind_for_fd(
     pid: u64,
     generation: InstanceGeneration,
     fd: u64,
-    buf_ptr: u64,
-    count: u64,
-    request: &clean_slate_linux_abi::LinuxSyscallRequest,
-    ctx: &mut crate::syscall::linux::table::LinuxSyscallContext<'_>,
-) -> Result<usize, LinuxErrno> {
-    registry_mut().read_fd(pid, generation, fd, buf_ptr, count, request, ctx)
+) -> Result<LinuxReadKind, LinuxErrno> {
+    registry_mut().read_kind_for_fd(pid, generation, fd)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_fd(
     pid: u64,
     generation: InstanceGeneration,
     fd: u64,
     bytes: &[u8],
+    request: Option<&clean_slate_linux_abi::LinuxSyscallRequest>,
+    ctx: Option<&mut crate::syscall::linux::table::LinuxSyscallContext<'_>>,
 ) -> Result<usize, LinuxErrno> {
     let personality = unsafe { process_registry_mut().get(pid) }
         .map(|process| process.execution_personality)
@@ -619,6 +587,8 @@ pub(crate) fn write_fd(
         fd,
         bytes,
         personality,
+        request,
+        ctx,
     )
 }
 

@@ -34,7 +34,7 @@ use super::table::LinuxSyscallContext;
 use super::user_copy::{copy_user_bytes, LINUX_USER_COPY_MAX_BYTES};
 use crate::ipc::IPC_MAX_MESSAGE_BYTES;
 use crate::mm::PAGE_SIZE;
-use crate::process::linux_fd::{self, LinuxFdProjection};
+use crate::process::linux_fd::{self, ensure_open_fd, LinuxFdProjection};
 use clean_slate_linux_abi::{
     LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EBADF, EFAULT, EINVAL,
 };
@@ -178,7 +178,7 @@ pub(crate) fn write_with(
             dst[..len].copy_from_slice(&bytes[start..start + len]);
             Ok(len)
         },
-        |chunk| registry.write_fd(ipc, pid, generation, fd, chunk, personality),
+        |chunk| registry.write_fd(ipc, pid, generation, fd, chunk, personality, None, None),
     )
 }
 
@@ -196,10 +196,38 @@ pub(crate) fn handle_sys_write(
     let pid = ctx.pid;
     let generation = ctx.instance_generation;
 
-    // 1. fd first: EBADF beats EFAULT and beats the zero-length shortcut.
+    ensure_open_fd(pid, generation, fd)?;
+
+    if let linux_fd::LinuxReadKind::Socket(socket) =
+        linux_fd::read_kind_for_fd(pid, generation, fd)?
+    {
+        let total = clamp_write_count(count);
+        if total == 0 {
+            return Ok(0);
+        }
+        let mut buf = [0u8; LINUX_WRITE_MAX_BYTES];
+        let mut copied = 0usize;
+        while copied < total {
+            let chunk_ptr = user_ptr.checked_add(copied as u64).ok_or(EFAULT)?;
+            let want = (total - copied).min(LINUX_WRITE_CHUNK_BYTES);
+            let mut scratch = [0u8; LINUX_WRITE_CHUNK_BYTES];
+            let n = copy_user_bytes(chunk_ptr, want as u64, &mut scratch)?;
+            buf[copied..copied + n].copy_from_slice(&scratch[..n]);
+            copied += n;
+        }
+        return crate::process::linux_socket::write_socket(
+            request,
+            ctx,
+            pid,
+            generation,
+            fd,
+            socket,
+            &buf[..total],
+        );
+    }
+
     ensure_fd_open(linux_fd::projection_for(pid, generation, fd))?;
 
-    // 2./3./4. bounded copy-in + capability-controlled delivery per chunk.
     write_chunked(
         count,
         |offset, len, dst| {
@@ -207,7 +235,7 @@ pub(crate) fn handle_sys_write(
             copy_user_bytes(chunk_ptr, len as u64, dst)
         },
         |chunk| {
-            let sent = linux_fd::write_fd(pid, generation, fd, chunk)?;
+            let sent = linux_fd::write_fd(pid, generation, fd, chunk, None, None)?;
             #[cfg(feature = "m8-linux-dispatch-self-test")]
             crate::selftest::m8_linux_dispatch::observe_linux_delivered_chunk(
                 pid,
@@ -435,7 +463,7 @@ mod tests {
                     fetch_calls += 1;
                     Err(EFAULT)
                 },
-                |chunk| fds.write_fd(&mut ipc, 15, generation, 7, chunk, LINUX),
+                |chunk| fds.write_fd(&mut ipc, 15, generation, 7, chunk, LINUX, None, None),
             )
         });
         assert_eq!(result, Err(EBADF));
@@ -477,7 +505,18 @@ mod tests {
                     Ok(len)
                 }
             },
-            |chunk| fds.write_fd(&mut ipc, 17, generation, LINUX_STDOUT_FD, chunk, LINUX),
+            |chunk| {
+                fds.write_fd(
+                    &mut ipc,
+                    17,
+                    generation,
+                    LINUX_STDOUT_FD,
+                    chunk,
+                    LINUX,
+                    None,
+                    None,
+                )
+            },
         );
         assert_eq!(result, Ok((LINUX_WRITE_CHUNK_BYTES * 2) as u64));
     }
@@ -527,7 +566,16 @@ mod tests {
             },
             |chunk| {
                 deliveries += 1;
-                let sent = fds.write_fd(&mut ipc, 18, generation, LINUX_STDOUT_FD, chunk, LINUX)?;
+                let sent = fds.write_fd(
+                    &mut ipc,
+                    18,
+                    generation,
+                    LINUX_STDOUT_FD,
+                    chunk,
+                    LINUX,
+                    None,
+                    None,
+                )?;
                 delivered_total += sent;
                 Ok(sent)
             },

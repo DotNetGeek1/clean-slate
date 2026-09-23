@@ -142,6 +142,7 @@ pub(crate) const LINUX_M8_LOAD_POLICY: LoadPlanPolicy = LoadPlanPolicy {
 #[cfg(any(
     feature = "m9-low-va-self-test",
     feature = "m9-linux-exec-self-test",
+    feature = "m9-linux-socket-self-test",
     test
 ))]
 pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
@@ -151,6 +152,11 @@ pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
 #[cfg(feature = "m9-linux-exec-self-test")]
 pub(crate) const LINUX_EXEC_ARGS_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-exec-args/linux-exec-args-x86_64");
+
+/// M9 #105 socket probe (`fixtures/linux-socket-probe/linux-socket-probe-x86_64`).
+#[cfg(feature = "m9-linux-socket-self-test")]
+pub(crate) const LINUX_SOCKET_PROBE_FIXTURE: &[u8] =
+    include_bytes!("../../../fixtures/linux-socket-probe/linux-socket-probe-x86_64");
 
 /// M9 low-VA hello fixture (`fixtures/linux-low-hello/hello-linux-low-x86_64`).
 #[cfg(any(feature = "m9-low-va-self-test", test))]

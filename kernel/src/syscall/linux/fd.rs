@@ -1,13 +1,19 @@
-//! Linux fd syscalls: `close`, `dup2`, `fcntl`, `writev` (#147).
+//! Linux fd syscalls: `close`, `dup2`, `fcntl`, `writev`, `read` (#147).
 
 use super::table::LinuxSyscallContext;
 use super::user_copy::copy_user_bytes;
 use super::write::{ensure_fd_open, write_chunked, LINUX_WRITE_CHUNK_BYTES};
-use crate::mm::user_mapping::validate_user_pointer_range;
+use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::process::linux_fd::{
     self, apply_linux_fl_to_status, ensure_open_fd, open_status_to_linux_fl, projection_for,
+    LinuxReadKind,
 };
-use clean_slate_linux_abi::{LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EFAULT, EINVAL};
+use clean_slate_linux_abi::{
+    LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EBADF, EFAULT, EINVAL,
+};
+
+/// Stack scratch for one `read(2)` chunk (#147 front-end).
+pub(crate) const LINUX_READ_SCRATCH_BYTES: usize = 1024;
 
 /// Bounded `writev` iov count (self-test uses 2–3; keep small and fixed).
 pub(crate) const LINUX_IOV_MAX: usize = 8;
@@ -35,11 +41,45 @@ pub(crate) fn handle_sys_read(
     let count = request.args[2];
     let pid = ctx.pid;
     let generation = ctx.instance_generation;
+
+    ensure_open_fd(pid, generation, fd)?;
+    if validate_user_writable_pointer_range(buf_ptr, count).is_err() {
+        return Err(EFAULT);
+    }
     if count == 0 {
         return Ok(0);
     }
-    linux_fd::ensure_open_fd(pid, generation, fd)?;
-    linux_fd::read_fd(pid, generation, fd, buf_ptr, count, request, ctx).map(|n| n as u64)
+
+    let want = count.min(LINUX_READ_SCRATCH_BYTES as u64) as usize;
+    let mut scratch = [0u8; LINUX_READ_SCRATCH_BYTES];
+
+    let read_result = match linux_fd::read_kind_for_fd(pid, generation, fd)? {
+        LinuxReadKind::Console => Ok(0u64),
+        LinuxReadKind::Socket(socket) => crate::process::linux_socket::read_socket(
+            request,
+            ctx,
+            pid,
+            generation,
+            fd,
+            socket,
+            &mut scratch[..want],
+        ),
+        LinuxReadKind::Unsupported => Err(EBADF),
+    };
+
+    match read_result {
+        Ok(n) if n == request.nr => Ok(n),
+        Ok(0) => Ok(0),
+        Ok(n) => {
+            let n = n as usize;
+            let copy = n.min(want);
+            unsafe {
+                core::ptr::copy_nonoverlapping(scratch.as_ptr(), buf_ptr as *mut u8, copy);
+            }
+            Ok(copy as u64)
+        }
+        Err(errno) => Err(errno),
+    }
 }
 
 pub(crate) fn handle_sys_close(
@@ -111,6 +151,52 @@ pub(crate) fn handle_sys_writev(
     let pid = ctx.pid;
     let generation = ctx.instance_generation;
 
+    ensure_open_fd(pid, generation, fd)?;
+
+    if let LinuxReadKind::Socket(socket) = linux_fd::read_kind_for_fd(pid, generation, fd)? {
+        if iovcnt == 0 {
+            return Ok(0);
+        }
+        let iovcnt_usize = usize::try_from(iovcnt).map_err(|_| EINVAL)?;
+        if iovcnt_usize > LINUX_IOV_MAX {
+            return Err(EINVAL);
+        }
+        let mut total_len = 0u64;
+        let mut iovecs = [IoVec { base: 0, len: 0 }; LINUX_IOV_MAX];
+        let iovec_bytes = (core::mem::size_of::<IoVec>() as u64)
+            .checked_mul(iovcnt_usize as u64)
+            .ok_or(EINVAL)?;
+        if validate_user_pointer_range(iov_ptr, iovec_bytes).is_err() {
+            return Err(EFAULT);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                iov_ptr as *const u8,
+                iovecs.as_mut_ptr() as *mut u8,
+                iovec_bytes as usize,
+            );
+        }
+        for iov in &iovecs[..iovcnt_usize] {
+            total_len = total_len.checked_add(iov.len).ok_or(EINVAL)?;
+        }
+        if total_len == 0 {
+            return Ok(0);
+        }
+        let total = total_len.min(super::write::LINUX_WRITE_MAX_BYTES as u64) as usize;
+        let mut buf = [0u8; super::write::LINUX_WRITE_MAX_BYTES];
+        let mut scratch = [0u8; LINUX_WRITE_CHUNK_BYTES];
+        copy_from_iovecs(&iovecs[..iovcnt_usize], 0, total, &mut scratch, &mut buf)?;
+        return crate::process::linux_socket::write_socket(
+            request,
+            ctx,
+            pid,
+            generation,
+            fd,
+            socket,
+            &buf[..total],
+        );
+    }
+
     ensure_fd_open(projection_for(pid, generation, fd))?;
 
     if iovcnt == 0 {
@@ -150,14 +236,14 @@ pub(crate) fn handle_sys_writev(
     write_chunked(
         total_len,
         |offset, len, dst| {
-            copy_from_iovecs(&iovecs[..iovcnt], offset, len, dst)?;
+            copy_from_iovecs_into_chunk(&iovecs[..iovcnt], offset, len, dst)?;
             Ok(len)
         },
-        |chunk| linux_fd::write_fd(pid, generation, fd, chunk),
+        |chunk| linux_fd::write_fd(pid, generation, fd, chunk, None, None),
     )
 }
 
-fn copy_from_iovecs(
+fn copy_from_iovecs_into_chunk(
     iovecs: &[IoVec],
     offset: u64,
     len: usize,
@@ -171,11 +257,32 @@ fn copy_from_iovecs(
         let remaining_in_iov = iov.len - skip;
         let want = (len - filled).min(remaining_in_iov as usize);
         let chunk_ptr = iov.base.checked_add(skip).ok_or(EFAULT)?;
-        let mut scratch = [0u8; LINUX_WRITE_CHUNK_BYTES];
-        copy_user_bytes(chunk_ptr, want as u64, &mut scratch)?;
-        dst[filled..filled + want].copy_from_slice(&scratch[..want]);
-        filled += want;
-        cursor += want as u64;
+        let n = copy_user_bytes(chunk_ptr, want as u64, dst)?;
+        filled += n;
+        cursor += n as u64;
+    }
+    Ok(())
+}
+
+fn copy_from_iovecs(
+    iovecs: &[IoVec],
+    offset: u64,
+    len: usize,
+    chunk: &mut [u8; LINUX_WRITE_CHUNK_BYTES],
+    out: &mut [u8],
+) -> Result<(), LinuxErrno> {
+    let mut filled = 0usize;
+    let mut cursor = offset;
+    while filled < len {
+        let (index, skip) = locate_iov_index(iovecs, cursor)?;
+        let iov = &iovecs[index];
+        let remaining_in_iov = iov.len - skip;
+        let want = (len - filled).min(remaining_in_iov as usize);
+        let chunk_ptr = iov.base.checked_add(skip).ok_or(EFAULT)?;
+        let n = copy_user_bytes(chunk_ptr, want as u64, chunk)?;
+        out[filled..filled + n].copy_from_slice(&chunk[..n]);
+        filled += n;
+        cursor += n as u64;
     }
     Ok(())
 }

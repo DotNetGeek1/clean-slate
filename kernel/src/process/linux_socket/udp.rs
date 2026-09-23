@@ -50,29 +50,39 @@ pub(crate) fn sendto(
         }
         socket.remote = Some(dest);
         let _ = socket_addr_v4(&dest);
-        let outcome = match broker_sync(
-            request,
-            ctx,
-            id,
-            &mut socket.inflight_request_id,
-            NetworkRequest::Send {
-                session: socket.session,
-                payload_len: n as u32,
-            },
-            &payload[..n],
-            Some(clean_slate_network::session::SessionGeneration::new(
-                socket.session_generation,
-            )),
-            None,
-        ) {
-            Ok(outcome) => outcome,
-            Err(block_or_err) => return block_or_err,
-        };
-        match outcome.response {
-            NetworkResponse::Send { bytes_sent } => Ok(bytes_sent as u64),
-            _ => Err(clean_slate_linux_abi::EINVAL),
-        }
+        udp_send_payload(socket, request, ctx, id, &payload[..n])
     })?
+}
+
+fn udp_send_payload(
+    socket: &mut LinuxSocket,
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+    id: LinuxSocketId,
+    payload: &[u8],
+) -> LinuxSyscallResult {
+    let outcome = match broker_sync(
+        request,
+        ctx,
+        id,
+        &mut socket.inflight_request_id,
+        NetworkRequest::Send {
+            session: socket.session,
+            payload_len: payload.len() as u32,
+        },
+        payload,
+        Some(clean_slate_network::session::SessionGeneration::new(
+            socket.session_generation,
+        )),
+        None,
+    ) {
+        Ok(outcome) => outcome,
+        Err(block_or_err) => return block_or_err,
+    };
+    match outcome.response {
+        NetworkResponse::Send { bytes_sent } => Ok(bytes_sent as u64),
+        _ => Err(clean_slate_linux_abi::EINVAL),
+    }
 }
 
 pub(crate) fn read_datagram(
@@ -80,24 +90,17 @@ pub(crate) fn read_datagram(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
     id: LinuxSocketId,
-    buf_ptr: u64,
-    count: u64,
-    nonblock: bool,
+    scratch: &mut [u8],
 ) -> LinuxSyscallResult {
     if socket.rx_count > 0 {
         let idx = socket.rx_head as usize % 2;
         let dg = socket.rx_queue[idx].as_ref().expect("datagram");
-        let n = (dg.len as usize).min(count as usize);
-        unsafe {
-            core::ptr::copy_nonoverlapping(dg.bytes.as_ptr(), buf_ptr as *mut u8, n);
-        }
+        let n = (dg.len as usize).min(scratch.len());
+        scratch[..n].copy_from_slice(&dg.bytes[..n]);
         socket.rx_queue[idx] = None;
         socket.rx_head = (socket.rx_head + 1) % 2;
         socket.rx_count -= 1;
         return Ok(n as u64);
-    }
-    if nonblock {
-        return Err(clean_slate_linux_abi::EAGAIN);
     }
     let outcome = match broker_sync(
         request,
@@ -106,7 +109,7 @@ pub(crate) fn read_datagram(
         &mut socket.inflight_request_id,
         NetworkRequest::Receive {
             session: socket.session,
-            max_len: LINUX_UDP_MAX_DATAGRAM as u32,
+            max_len: scratch.len().min(LINUX_UDP_MAX_DATAGRAM) as u32,
         },
         &[],
         Some(clean_slate_network::session::SessionGeneration::new(
@@ -120,10 +123,8 @@ pub(crate) fn read_datagram(
     match outcome.response {
         NetworkResponse::Receive { payload_len } => {
             let n = payload_len as usize;
-            let copy = n.min(count as usize);
-            unsafe {
-                core::ptr::copy_nonoverlapping(outcome.payload.as_ptr(), buf_ptr as *mut u8, copy);
-            }
+            let copy = n.min(scratch.len());
+            scratch[..copy].copy_from_slice(&outcome.payload[..copy]);
             Ok(copy as u64)
         }
         _ => Err(clean_slate_linux_abi::EINVAL),
@@ -132,11 +133,10 @@ pub(crate) fn read_datagram(
 
 pub(crate) fn write_datagram(
     socket: &mut LinuxSocket,
-    _request: &LinuxSyscallRequest,
-    _ctx: &mut LinuxSyscallContext<'_>,
-    _id: LinuxSocketId,
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+    id: LinuxSocketId,
     bytes: &[u8],
-    _nonblock: bool,
 ) -> LinuxSyscallResult {
     if bytes.len() > LINUX_UDP_MAX_DATAGRAM {
         return Err(EMSGSIZE);
@@ -144,5 +144,5 @@ pub(crate) fn write_datagram(
     if socket.remote.is_none() {
         return Err(EDESTADDRREQ);
     }
-    Err(clean_slate_linux_abi::EINVAL)
+    udp_send_payload(socket, request, ctx, id, bytes)
 }

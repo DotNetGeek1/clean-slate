@@ -22,15 +22,11 @@ pub(crate) fn read_stream(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
     id: LinuxSocketId,
-    buf_ptr: u64,
-    count: u64,
-    nonblock: bool,
+    scratch: &mut [u8],
 ) -> LinuxSyscallResult {
     if socket.tcp_rx_len > 0 {
-        let n = socket.tcp_rx_len.min(count as u16) as usize;
-        unsafe {
-            core::ptr::copy_nonoverlapping(socket.tcp_rx.as_ptr(), buf_ptr as *mut u8, n);
-        }
+        let n = (socket.tcp_rx_len as usize).min(scratch.len());
+        scratch[..n].copy_from_slice(&socket.tcp_rx[..n]);
         if n < socket.tcp_rx_len as usize {
             let remain = socket.tcp_rx_len as usize - n;
             socket.tcp_rx.copy_within(n..socket.tcp_rx_len as usize, 0);
@@ -43,9 +39,6 @@ pub(crate) fn read_stream(
     if socket.tcp_eof {
         return Ok(0);
     }
-    if nonblock {
-        return Err(clean_slate_linux_abi::EAGAIN);
-    }
     let outcome = match broker_sync(
         request,
         ctx,
@@ -53,7 +46,7 @@ pub(crate) fn read_stream(
         &mut socket.inflight_request_id,
         NetworkRequest::Receive {
             session: socket.session,
-            max_len: count.min(4096) as u32,
+            max_len: scratch.len().min(4096) as u32,
         },
         &[],
         Some(clean_slate_network::session::SessionGeneration::new(
@@ -71,10 +64,8 @@ pub(crate) fn read_stream(
                 return Ok(0);
             }
             let n = payload_len as usize;
-            let copy = n.min(count as usize);
-            unsafe {
-                core::ptr::copy_nonoverlapping(outcome.payload.as_ptr(), buf_ptr as *mut u8, copy);
-            }
+            let copy = n.min(scratch.len());
+            scratch[..copy].copy_from_slice(&outcome.payload[..copy]);
             Ok(copy as u64)
         }
         _ => Err(clean_slate_linux_abi::EINVAL),
@@ -87,7 +78,6 @@ pub(crate) fn write_stream(
     ctx: &mut LinuxSyscallContext<'_>,
     id: LinuxSocketId,
     bytes: &[u8],
-    _nonblock: bool,
 ) -> LinuxSyscallResult {
     if socket.state != SocketState::Connected {
         return Err(clean_slate_linux_abi::ENOTCONN);

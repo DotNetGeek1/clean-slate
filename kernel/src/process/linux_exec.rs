@@ -341,13 +341,17 @@ pub(crate) fn launch_linux_process_from_spec(
         launch_rsp: prepared.launch_rsp,
         image_pages: prepared.image_pages,
     };
-    register_linux_process(
+    let launched = register_linux_process(
         allocator,
         kernel_stack_top,
         scheduler_slot,
         image,
         page_table_frames,
-    )
+    )?;
+    #[cfg(feature = "m9-linux-socket")]
+    crate::process::linux_socket::grant_linux_network_capabilities(launched.pid)
+        .map_err(|_| LinuxImageError::Registry("linux launch: network capability grant failed"))?;
+    Ok(launched)
 }
 
 #[cfg(not(any(
