@@ -35,9 +35,7 @@
 //! taken on that thread.
 
 use super::table::LinuxSyscallContext;
-use crate::arch::x86_64::context_switch::{
-    next_task, restore_task_context, start_first_task, FRESH_TASK_SENTINEL,
-};
+use crate::arch::x86_64::context_switch::resume_after_scheduler_handoff;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::mm::address_space::kernel_root_frame;
@@ -91,14 +89,10 @@ pub(crate) fn handle_sys_exit(
 
 /// Hand control to the thread selected by teardown; never returns.
 fn switch_after_exit(next_stack_pointer: Option<u64>) -> ! {
-    match next_stack_pointer {
-        Some(FRESH_TASK_SENTINEL) => {
-            let (stack_pointer, entry_point) = unsafe { next_task() };
-            unsafe { start_first_task(stack_pointer, entry_point) }
-        }
-        Some(stack_pointer) => unsafe { restore_task_context(stack_pointer) },
-        None => fatal_kernel_error("no runnable thread remained after linux exit"),
-    }
+    resume_after_scheduler_handoff(
+        next_stack_pointer,
+        "no runnable thread remained after linux exit",
+    )
 }
 
 #[cfg(test)]

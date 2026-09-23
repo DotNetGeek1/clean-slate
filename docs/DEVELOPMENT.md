@@ -119,6 +119,14 @@ cargo xtask test-m3-syscall
 
 This command builds the kernel with the M3.3 syscall self-test enabled, boots QEMU headlessly, and validates the ordered markers proving timer-enabled repeated ring-3 `syscall/sysretq` round-trips and `[SYSC] syscall entry/return PASS`.
 
+For the M9 #143 unresolved-caller fail-closed proof:
+
+```bash
+cargo xtask test-m9-syscall-fail-closed
+```
+
+This command builds the kernel with `m9-syscall-fail-closed-self-test`, boots QEMU headlessly, and validates `[SYSC] unresolved caller reason=syscall caller process did not match active address space fail-closed` (registry/CR3 mismatch constructed by the self-test), production teardown of the offender, and `[M9.C] PASS` while a Native sibling keeps making version syscalls without the offender ever reaching `dispatch_native`.
+
 For the M8.3 Linux personality syscall dispatch proof:
 
 ```bash

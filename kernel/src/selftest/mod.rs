@@ -103,6 +103,13 @@ pub(crate) mod m8_linux_hello;
 pub(crate) mod m8_linux_image;
 #[cfg(feature = "m9-low-va-self-test")]
 pub(crate) mod m9_low_va;
+#[cfg(feature = "m9-syscall-fail-closed-self-test")]
+pub(crate) mod m9_syscall_fail_closed;
+#[cfg(any(
+    feature = "m3-syscall-self-test",
+    feature = "m9-syscall-fail-closed-self-test"
+))]
+pub(crate) mod userspace_process;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
@@ -110,7 +117,8 @@ pub(crate) mod m9_low_va;
     feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test",
     feature = "m8-linux-dispatch-self-test",
-    feature = "m8-linux-hello-self-test"
+    feature = "m8-linux-hello-self-test",
+    feature = "m9-syscall-fail-closed-self-test"
 ))]
 use crate::mm::PAGE_SIZE;
 
@@ -126,7 +134,8 @@ use crate::mm::PAGE_SIZE;
     feature = "m5-crash-late-self-test",
     feature = "m5-crash-recovery-self-test",
     feature = "m8-linux-dispatch-self-test",
-    feature = "m8-linux-hello-self-test"
+    feature = "m8-linux-hello-self-test",
+    feature = "m9-syscall-fail-closed-self-test"
 ))]
 pub(super) const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
 #[cfg(any(
@@ -164,7 +173,8 @@ pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SI
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
     feature = "m5-crash-recovery-self-test",
-    feature = "m8-linux-dispatch-self-test"
+    feature = "m8-linux-dispatch-self-test",
+    feature = "m9-syscall-fail-closed-self-test"
 ))]
 pub(super) const USER_TEST_PROCESS_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + (PAGE_SIZE * 2);
 #[cfg(feature = "m4-recovery-self-test")]

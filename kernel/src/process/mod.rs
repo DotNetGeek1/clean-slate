@@ -104,6 +104,24 @@ impl ResourceDomain {
         self.root_frame = 0;
         self.address_space.take()
     }
+
+    #[cfg(feature = "m9-syscall-fail-closed-self-test")]
+    pub(crate) fn spoof_root_frame_for_self_test(&mut self, root_frame: u64) {
+        self.root_frame = root_frame;
+    }
+}
+
+#[cfg(feature = "m9-syscall-fail-closed-self-test")]
+pub(crate) fn spoof_registered_address_space_root_for_self_test(
+    pid: u64,
+    spoofed_root: u64,
+) -> Result<(), &'static str> {
+    let process = unsafe { process_registry_mut().get_mut(pid) }
+        .ok_or("spoof target process was not present in registry")?;
+    process
+        .resource_domain
+        .spoof_root_frame_for_self_test(spoofed_root);
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]

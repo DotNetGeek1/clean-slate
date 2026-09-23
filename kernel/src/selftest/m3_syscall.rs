@@ -5,8 +5,6 @@
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::arch::x86_64::asm::clean_slate_user_syscall_test_end;
 use crate::arch::x86_64::asm::clean_slate_user_syscall_test_start;
-#[cfg(any(feature = "m3-address-space-self-test", feature = "m3-entry-self-test"))]
-use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::gdt::set_privilege_stack;
@@ -16,18 +14,12 @@ use crate::diagnostics::serial::serial_write_line;
 use crate::interrupt::timer::initialize_timer;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::interrupt::timer::reset_kernel_ticks;
-use crate::mm::frame_allocator::free_frame;
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::paging::current_offset_page_table;
-use crate::mm::paging::zero_page;
-use crate::mm::phys_to_virt;
-use crate::mm::user_mapping::map_userspace_page;
-use crate::mm::user_mapping::unmap_userspace_page;
-#[cfg(feature = "m3-entry-self-test")]
-use crate::mm::user_mapping::validate_userspace_mappings;
-use crate::mm::PAGE_SIZE;
+use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::task_stacks_mut;
-use crate::selftest::USER_TEST_CODE_ADDRESS;
+use crate::selftest::userspace_process::configure_scheduler_thread_slot;
+use crate::selftest::userspace_process::reset_process_scheduler_world;
+use crate::selftest::userspace_process::spawn_native_userspace_process_with_code;
 use crate::selftest::USER_TEST_STACK_ADDRESS;
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::initialize_syscall_abi;
@@ -35,17 +27,9 @@ use core::ptr;
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
-use x86_64::structures::paging::Page;
-use x86_64::structures::paging::PageTableFlags;
-use x86_64::structures::paging::PhysFrame;
-use x86_64::structures::paging::Size4KiB;
-use x86_64::PhysAddr;
-use x86_64::VirtAddr;
 
 #[cfg(feature = "m3-syscall-self-test")]
 pub(crate) const SYSCALL_PASS_MARKER: &str = "[SYSC] syscall entry/return PASS";
-#[cfg(feature = "m3-syscall-self-test")]
-const SYSCALL_TEST_EXPECTED_VALUE: u64 = 0x5359_5343_4f4c_4c21;
 #[cfg(feature = "m3-syscall-self-test")]
 pub(crate) const SYSCALL_TEST_REQUIRED_CALLS: u64 = 256;
 #[cfg(feature = "m3-syscall-self-test")]
@@ -85,83 +69,35 @@ pub(crate) fn userspace_syscall_test_state(
 
 #[cfg(feature = "m3-syscall-self-test")]
 fn install_userspace_syscall_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
-    let mut mapper = unsafe { current_offset_page_table() };
     let payload_size = userspace_syscall_test_size();
-    if payload_size > PAGE_SIZE as usize {
+    if payload_size > crate::mm::PAGE_SIZE as usize {
         return Err("userspace syscall self-test payload exceeded one page");
     }
-
-    let code_frame_address = allocator
-        .allocate_page()
-        .ok_or("allocator could not provide a code page for userspace syscall test")?;
-    let stack_frame_address = match allocator.allocate_page() {
-        Some(frame) => frame,
-        None => {
-            unsafe {
-                free_frame(allocator, code_frame_address)?;
-            }
-            return Err("allocator could not provide a stack page for userspace syscall test");
-        }
-    };
-
-    let code_page = Page::<Size4KiB>::containing_address(VirtAddr::new(USER_TEST_CODE_ADDRESS));
-    let stack_page = Page::<Size4KiB>::containing_address(VirtAddr::new(USER_TEST_STACK_ADDRESS));
-    zero_page(code_frame_address);
-    zero_page(stack_frame_address);
+    let mut payload = [0u8; crate::mm::PAGE_SIZE as usize];
     unsafe {
         ptr::copy_nonoverlapping(
             &raw const clean_slate_user_syscall_test_start,
-            (phys_to_virt(code_frame_address)) as *mut u8,
+            payload.as_mut_ptr(),
             payload_size,
         );
     }
 
-    if let Err(message) = map_userspace_page(
-        &mut mapper,
-        code_page,
-        PhysFrame::containing_address(PhysAddr::new(code_frame_address)),
-        PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
-        allocator,
-    ) {
-        unsafe {
-            free_frame(allocator, stack_frame_address)?;
-            free_frame(allocator, code_frame_address)?;
-        }
-        return Err(message);
-    }
+    reset_process_scheduler_world();
 
-    if let Err(message) = map_userspace_page(
-        &mut mapper,
-        stack_page,
-        PhysFrame::containing_address(PhysAddr::new(stack_frame_address)),
-        PageTableFlags::PRESENT
-            | PageTableFlags::WRITABLE
-            | PageTableFlags::NO_EXECUTE
-            | PageTableFlags::USER_ACCESSIBLE,
+    let stacks = unsafe { &*task_stacks_mut() };
+    let kernel_stack_top = task_stack_top(&stacks[0]);
+    let spawned = spawn_native_userspace_process_with_code(
         allocator,
-    ) {
-        let _ = unmap_userspace_page(&mut mapper, code_page);
-        unsafe {
-            free_frame(allocator, stack_frame_address)?;
-            free_frame(allocator, code_frame_address)?;
-        }
-        return Err(message);
-    }
-
-    if let Err(message) = validate_userspace_mappings() {
-        let _ = unmap_userspace_page(&mut mapper, stack_page);
-        let _ = unmap_userspace_page(&mut mapper, code_page);
-        unsafe {
-            free_frame(allocator, stack_frame_address)?;
-            free_frame(allocator, code_frame_address)?;
-        }
-        return Err(message);
-    }
+        kernel_stack_top,
+        &payload[..payload_size],
+        USER_TEST_STACK_ADDRESS,
+    )?;
+    configure_scheduler_thread_slot(0, &spawned.thread)?;
 
     let gdt_state = userspace_gdt_state()?;
     unsafe {
         *USERSPACE_SYSCALL_TEST_STATE.get() = Some(UserspaceSyscallTestState {
-            user_stack_pointer: USER_TEST_STACK_ADDRESS + PAGE_SIZE,
+            user_stack_pointer: spawned.user_stack_pointer,
             user_stack_segment: gdt_state.user_data_selector.0 as u64,
         });
     }
@@ -190,15 +126,7 @@ pub(crate) fn start_userspace_syscall_self_test(allocator: &mut PageAllocator) -
     initialize_timer();
     serial_write_line("[TIME] timer initialized");
 
-    let state = match userspace_syscall_test_state() {
-        Ok(state) => state,
-        Err(message) => fatal_kernel_error(message),
-    };
-    let frame_pointer = match build_userspace_entry_frame(
-        kernel_stack_top,
-        USER_TEST_CODE_ADDRESS,
-        state.user_stack_pointer,
-    ) {
+    let frame_pointer = match start_current_scheduler_thread() {
         Ok(frame_pointer) => frame_pointer,
         Err(message) => fatal_kernel_error(message),
     };
@@ -210,6 +138,8 @@ mod tests {
     use super::*;
     use crate::arch::x86_64::context_switch::USER_TEST_RFLAGS;
     use crate::arch::x86_64::interrupt_context::SyscallContext;
+    use crate::mm::PAGE_SIZE;
+    use crate::selftest::USER_TEST_CODE_ADDRESS;
     use crate::syscall::validation::validate_canonical_user_return_state;
 
     #[cfg(feature = "m3-syscall-self-test")]

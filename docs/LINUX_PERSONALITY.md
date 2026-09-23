@@ -209,7 +209,14 @@ Syscall entry (`clean_slate_syscall_dispatch`) resolves the caller with
 | `Native` | Existing native match, factored as `dispatch_native` (unchanged semantics) |
 | `LinuxX86_64` | `syscall::linux::dispatch` |
 
-If the caller cannot be resolved, behaviour stays native (same as pre-#93).
+If the caller cannot be resolved (scheduler/registry/CR3 cross-check or
+personality lookup failure), dispatch **fails closed**: log a bounded
+`[SYSC] unresolved caller reason=… fail-closed` diagnostic, then contain the
+current userspace process through the production `teardown_current_process`
+path (same containment model as the userspace fault handler). No native or
+Linux handler runs; personality is never inferred from `RAX` or other user
+registers. Kernel-invariant failures (no current thread, non-userspace caller)
+use `fatal_kernel_error` instead.
 
 Linux module layout (`kernel/src/syscall/linux/`):
 
