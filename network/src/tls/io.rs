@@ -10,9 +10,11 @@ use crate::tcp::TcpState;
 use crate::tcp::TcpTransport;
 
 /// Per-operation I/O spin budget in monotonic ticks.
+/// Per I/O wait (~2 s at 1 ms LAPIC tick).
 pub const TLS_IO_TIMEOUT_TICKS: u64 = 2_000;
 
 /// Handshake spin budget in monotonic ticks.
+/// Handshake wait (~3 s at 1 ms LAPIC tick).
 pub const TLS_HANDSHAKE_TIMEOUT_TICKS: u64 = 3_000;
 
 /// QEMU guest polls outrun the host smoltcp fixture clock unless ticks are paced.

@@ -17,7 +17,7 @@ use clean_slate_service_fixtures::{
     NETWORK_SERVICE_NEXT_WIRE_BYTES, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT,
     NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY,
     NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
-    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
+    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS,
 };
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
@@ -30,6 +30,7 @@ use crate::service::instance_generation::live_instance_generation_for_pid;
 use crate::service::net_bridge::{net_bridge_mut, NetBridgeError};
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::current_syscall_caller_pid;
+use crate::time::irq_period_ns;
 use clean_slate_service_fixtures::NETWORK_SERVICE_ID;
 
 fn current_holder() -> Result<HolderId, u64> {
@@ -163,6 +164,7 @@ pub(crate) fn handle_syscall_network_request(frame: &mut SyscallContext) {
         NET_SUBOP_POP_HOLDER_EXIT => handle_pop_holder_exit(frame),
         NET_SUBOP_ACK_HOLDER_EXIT => handle_ack_holder_exit(frame),
         NET_SUBOP_MONOTONIC_TICKS => handle_monotonic_ticks(frame),
+        NET_SUBOP_TICK_PERIOD_NS => handle_tick_period_ns(frame),
         _ => frame.rax = SYSCALL_EINVAL,
     }
 }
@@ -578,4 +580,8 @@ fn handle_ack_holder_exit(frame: &mut SyscallContext) {
 
 fn handle_monotonic_ticks(frame: &mut SyscallContext) {
     frame.rax = kernel_ticks();
+}
+
+fn handle_tick_period_ns(frame: &mut SyscallContext) {
+    frame.rax = irq_period_ns().unwrap_or(0);
 }
