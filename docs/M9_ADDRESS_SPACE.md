@@ -187,3 +187,11 @@ low hello fixture plus probe processes.
 - Linux syscall semantic changes (#143/#144 lanes).
 - Removing kernel low identity entirely (physmap is mandatory; low identity may
   remain supervisor-only in the kernel root until a later cleanup).
+
+## M9 #103 — brk and anonymous mmap window
+
+- **brk:** grows from page-aligned end of the highest PT_LOAD (`linux_mem::init_for_image`);
+  capped at `LINUX_BRK_MAX_BYTES` (4 MiB) below stack/mmap reservations.
+- **mmap:** anonymous private mappings only, allocated top-down from
+  `[LINUX_MMAP_WINDOW_BASE, LINUX_MMAP_WINDOW_TOP)` =
+  `0x0020_0000` … `0x0060_0000` (below conventional stack reservation).

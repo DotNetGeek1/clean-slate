@@ -558,3 +558,27 @@ Scripts treat `test-m8` as Aggregate and `test-m8-linux-hello` /
 `test-m8-linux-image` / `test-m8-linux-dispatch` / `verify-m8-fixture` as
 Constituents so `--exhaustive` recognizes `m8` without inventing a second
 aggregate boot path inside `test-m8` itself.
+
+## M9 #103 — runtime / memory / time / poll / signals-state
+
+**Owner lane:** `syscall/linux/runtime.rs` (+ `poll.rs`), `process/linux_mem.rs`,
+`process/linux_signal.rs`, `time/`, `linux-abi/runtime.rs`.
+
+**Syscalls:** `arch_prctl`, `brk`, `getpid`, `ioctl`, `mmap`, `munmap`,
+`nanosleep`, `poll`, `rt_sigaction`, `rt_sigprocmask`, `set_tid_address`, `uname`.
+
+**Time:** APIC timer rate is calibrated once at boot against PIT channel 2 with
+interrupts masked (`[TIME] apic tick calibrated: ticks/s=N ref=pit`). Linux
+`nanosleep` / `poll` timeouts derive absolute `Deadline` values via
+`ticks_from_timespec` / `ticks_from_millis` (round up; no fabricated ns).
+
+**Memory:** per-process brk/mmap bookkeeping in `linux_mem` (bounded tables;
+anonymous `MAP_PRIVATE|MAP_ANONYMOUS` only; W^X rejects `PROT_EXEC|PROT_WRITE`).
+
+**Signals:** disposition + blocked mask storage only (no delivery in M9).
+
+**Blocking:** `nanosleep` / `poll` use `block_linux_syscall` with wait-key
+namespace `0x52` (see `M9_BLOCK_WAKE.md`).
+
+**QEMU:** `cargo xtask test-m9-linux-runtime` — eight probe launch/exit cycles,
+baseline occupancy logged, `[M9.J] PASS`.

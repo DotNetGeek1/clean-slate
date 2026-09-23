@@ -36,7 +36,7 @@
 
 use super::table::LinuxSyscallContext;
 use crate::arch::x86_64::context_switch::resume_after_scheduler_handoff;
-use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
+use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::mm::address_space::kernel_root_frame;
 use crate::process::domain::teardown_current_process;
@@ -82,9 +82,13 @@ pub(crate) fn handle_sys_exit(
     crate::selftest::m9_linux_exec::observe_linux_exit(pid, &teardown);
 
     #[cfg(feature = "m9-linux-runtime-self-test")]
-    if status == 0 {
-        kernel_log_line("[M9.J] PASS");
-        crate::diagnostics::qemu::qemu_exit(crate::diagnostics::qemu::QEMU_EXIT_SUCCESS);
+    if let Some(next_frame) = crate::selftest::m9_linux_runtime::after_linux_runtime_probe_exit(
+        pid,
+        ctx.instance_generation,
+        &teardown,
+        allocator,
+    ) {
+        switch_after_exit(Some(next_frame));
     }
 
     #[cfg(feature = "m9-fd-core-self-test")]

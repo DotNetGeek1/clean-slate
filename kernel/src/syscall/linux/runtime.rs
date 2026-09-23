@@ -11,7 +11,7 @@ use crate::interrupt::timer::kernel_ticks;
 use crate::mm::user_mapping::{
     validate_user_pointer_range, validate_user_writable_pointer_range,
 };
-use crate::process::linux_fd::{self, open_description::OpenDescriptionId, readiness::Readiness};
+use crate::process::linux_fd::{self, readiness::Readiness};
 use crate::process::linux_image::{LinuxImageLayout, LINUX_STACK_PAGES};
 use crate::process::linux_mem;
 use crate::process::linux_signal;
