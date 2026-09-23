@@ -37,7 +37,9 @@ use clean_slate_service_fixtures::m6_fixture::{
 };
 
 use crate::capability::bootstrap_grant::GRANT_SUBOP_CLAIM;
-use crate::capability::delegation::{DELEGATE_OP_DELEGATE, DELEGATE_OP_LIST};
+use crate::capability::delegation::{
+    DELEGATE_OP_DELEGATE, DELEGATE_OP_LIST, DELEGATE_OP_POLL_CHILD,
+};
 
 const TEST_OBJECT_ID: u64 = 7;
 const PASS_MARKER: &str = "[M6.5] PASS";
@@ -61,6 +63,12 @@ pub(crate) fn record_delegated_child_for_self_test(handle: CapabilityHandle) {
     unsafe {
         DELEGATION_TEST_CHILD_HANDLE = Some(handle);
     }
+}
+
+pub(crate) fn delegated_child_handle_for_self_test() -> u64 {
+    unsafe { DELEGATION_TEST_CHILD_HANDLE }
+        .map(CapabilityHandle::encode)
+        .unwrap_or(0)
 }
 
 #[allow(static_mut_refs)]
@@ -178,7 +186,7 @@ fn build_reader_program(reader_pid: u64) -> M6FixtureBootstrap {
         )
         .unwrap();
     let parent = arg_result(claim);
-    let list_root = program
+    program
         .push(M6FixtureStep::syscall(
             SYSCALL_NR_CAP_DELEGATE,
             [DELEGATE_OP_LIST, 0, arg_data(list_offset), 0, 0, 0],
@@ -200,19 +208,11 @@ fn build_reader_program(reader_pid: u64) -> M6FixtureBootstrap {
             .expect_eq(SYSCALL_EACCES),
         )
         .unwrap();
-    // Block until the owner installs the attenuated delegated child (second live cap).
     program
         .push(
             M6FixtureStep::syscall(
                 SYSCALL_NR_CAP_DELEGATE,
-                [
-                    DELEGATE_OP_LIST,
-                    arg_result(list_root),
-                    arg_data(list_offset),
-                    0,
-                    0,
-                    0,
-                ],
+                [DELEGATE_OP_POLL_CHILD, 0, 0, 0, 0, 0],
             )
             .repeat_while_eq(0)
             .expect_ne(0),

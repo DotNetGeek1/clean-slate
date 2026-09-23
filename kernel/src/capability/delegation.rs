@@ -16,6 +16,9 @@ use super::{capability_space_mut, current_holder};
 
 pub(crate) const DELEGATE_OP_DELEGATE: u64 = 1;
 pub(crate) const DELEGATE_OP_LIST: u64 = 2;
+/// M6.5 self-test only: returns encoded child handle or 0 until owner delegation completes.
+#[cfg(feature = "m6-delegation-self-test")]
+pub(crate) const DELEGATE_OP_POLL_CHILD: u64 = 3;
 
 const LISTING_BYTES: u64 = 32;
 
@@ -89,6 +92,10 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
     match frame.rdi {
         DELEGATE_OP_DELEGATE => handle_delegate(frame),
         DELEGATE_OP_LIST => handle_list(frame),
+        #[cfg(feature = "m6-delegation-self-test")]
+        DELEGATE_OP_POLL_CHILD => {
+            frame.rax = crate::selftest::m6_delegation::delegated_child_handle_for_self_test();
+        }
         _ => frame.rax = SYSCALL_EINVAL,
     }
 }

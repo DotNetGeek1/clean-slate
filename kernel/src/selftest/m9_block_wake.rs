@@ -70,7 +70,10 @@ static CONSUMER_TID: AtomicU64 = AtomicU64::new(0);
 static TEST_PASSED: AtomicUsize = AtomicUsize::new(0);
 static IDLE_SOAK_DONE: AtomicUsize = AtomicUsize::new(0);
 static IDLE_TICKS: AtomicU64 = AtomicU64::new(0);
-const IDLE_SOAK_DEADLINE_TICKS: u64 = 150;
+/// Historical acceptance: 150 ticks at ~160 ms uncalibrated LAPIC period (~24 s idle soak).
+fn idle_soak_ticks() -> u64 {
+    crate::time::ticks_from_millis(24_000).unwrap_or(150)
+}
 const PRODUCER_BLOCK_KEY: u64 = 0x146;
 
 fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
@@ -170,7 +173,7 @@ pub(crate) fn handle_wait_block_syscall(frame: &mut SyscallContext) {
     if IDLE_SOAK_DONE.load(Ordering::Relaxed) == 0 {
         let key = WaitKey(TEST_WAIT_KEY);
         let deadline = Some(Deadline(
-            kernel_ticks().saturating_add(IDLE_SOAK_DEADLINE_TICKS),
+            kernel_ticks().saturating_add(idle_soak_ticks()),
         ));
         CONSUMER_BLOCKED.store(1, Ordering::Relaxed);
         BLOCK_TICK.store(kernel_ticks(), Ordering::Relaxed);
@@ -208,7 +211,7 @@ pub(crate) fn on_blocked_syscall_resumed(outcome: WaitOutcome, result_rax: u64) 
     if IDLE_SOAK_DONE.load(Ordering::Relaxed) == 0 {
         let ticks = IDLE_TICKS.load(Ordering::Relaxed);
         kernel_log_fmt(format_args!("[M9.E] idle_ticks={}\n", ticks));
-        if ticks < IDLE_SOAK_DEADLINE_TICKS {
+        if ticks < idle_soak_ticks() {
             fatal_kernel_error("idle soak did not run long enough");
         }
         kernel_log_line("[M9.E] timeout resumed after idle");
