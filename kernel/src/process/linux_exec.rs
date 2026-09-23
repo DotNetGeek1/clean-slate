@@ -25,9 +25,9 @@ use crate::process::linux_image::{
 use crate::process::linux_image::{
     register_linux_process, LaunchedLinuxProcess, LINUX_USER_WINDOW_BASE, LINUX_USER_WINDOW_END,
 };
-use crate::process::ProcessAddressSpace;
 #[cfg(feature = "m9-linux-exec-self-test")]
 use crate::process::process_registry_mut;
+use crate::process::ProcessAddressSpace;
 #[cfg(feature = "m9-linux-exec-self-test")]
 use crate::sched::scheduler_mut;
 use clean_slate_elf::{LoadPlanPolicy, ELF64_PHDR_SIZE};
@@ -483,8 +483,7 @@ mod tests {
         let rsp_off = (stack.rsp - stack_buf_base) as usize;
         let argc = u64::from_le_bytes(stack.bytes[rsp_off..rsp_off + 8].try_into().unwrap());
         assert_eq!(argc, 3);
-        let argv0 =
-            u64::from_le_bytes(stack.bytes[rsp_off + 8..rsp_off + 16].try_into().unwrap());
+        let argv0 = u64::from_le_bytes(stack.bytes[rsp_off + 8..rsp_off + 16].try_into().unwrap());
         assert_ne!(argv0, 0);
         assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, stack).is_ok());
     }
