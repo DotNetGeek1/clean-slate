@@ -76,7 +76,6 @@ fn registry_mut() -> &'static mut Registry {
     unsafe { &mut *REGISTRY.get() }
 }
 
-#[allow(dead_code)]
 pub(crate) fn occupied_slots() -> usize {
     registry_mut()
         .slots

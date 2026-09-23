@@ -9,7 +9,6 @@ m_sig:      .ascii "[M9.J] signals ok\n"
 m_sleep:    .ascii "[M9.J] nanosleep 20ms ticks=0\n"
 m_poll:     .ascii "[M9.J] poll timeout ok\n"
 m_mmap:     .ascii "[M9.J] mmap ok\n"
-m_pass:     .ascii "[M9.J] PASS\n"
 
     .section .data
 tls_cell:
@@ -56,9 +55,6 @@ _start:
     call    write_lit
     lea     rsi, [rip + m_mmap]
     mov     rdx, 18
-    call    write_lit
-    lea     rsi, [rip + m_pass]
-    mov     rdx, 12
     call    write_lit
     mov     rax, 60
     xor     rdi, rdi

@@ -27,12 +27,7 @@ use crate::syscall::linux::poll::interest_occupied;
 use crate::syscall::{
     install_service_lifecycle_syscall_allocator, service_lifecycle_syscall_allocator_mut,
 };
-use core::sync::atomic::{AtomicUsize, Ordering};
-
 const PASS: &str = "[M9.J] PASS";
-const CONSOLE_TAIL_CAP: usize = 64;
-static mut CONSOLE_TAIL: [u8; CONSOLE_TAIL_CAP] = [0; CONSOLE_TAIL_CAP];
-static CONSOLE_TAIL_LEN: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn start_m9_linux_runtime_self_test(page_allocator: PageAllocator) -> ! {
     kernel_log_line("[M9.J] creating");
@@ -107,24 +102,4 @@ pub(crate) fn observe_linux_console_write_bytes(bytes: &[u8]) {
     if bytes.windows(PASS.len()).any(|window| window == PASS.as_bytes()) {
         qemu_exit(QEMU_EXIT_SUCCESS);
     }
-    let prior = CONSOLE_TAIL_LEN.load(Ordering::Relaxed);
-    let mut combined = [0u8; CONSOLE_TAIL_CAP + 32];
-    let prior_len = prior.min(CONSOLE_TAIL_CAP);
-    unsafe {
-        combined[..prior_len].copy_from_slice(&CONSOLE_TAIL[..prior_len]);
-    }
-    let append = bytes.len().min(combined.len() - prior_len);
-    combined[prior_len..prior_len + append].copy_from_slice(&bytes[..append]);
-    let total = prior_len + append;
-    if combined[..total]
-        .windows(PASS.len())
-        .any(|window| window == PASS.as_bytes())
-    {
-        qemu_exit(QEMU_EXIT_SUCCESS);
-    }
-    let keep = total.min(CONSOLE_TAIL_CAP);
-    unsafe {
-        CONSOLE_TAIL[..keep].copy_from_slice(&combined[total - keep..total]);
-    }
-    CONSOLE_TAIL_LEN.store(keep, Ordering::Relaxed);
 }

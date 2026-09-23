@@ -78,7 +78,6 @@ pub(crate) fn notify_readiness_changed(desc: OpenDescriptionId) {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn interest_occupied() -> usize {
     unsafe {
         (*INTEREST.get())

@@ -150,7 +150,6 @@ where
     result
 }
 
-#[allow(dead_code)]
 pub(crate) fn occupied_slots() -> usize {
     registry_mut()
         .slots

@@ -130,6 +130,20 @@ impl LinuxFdRegistry {
         }
     }
 
+    pub(crate) fn open_description_id_for_fd(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Result<OpenDescriptionId, LinuxErrno> {
+        let entry = match self.open_fd_entry(pid, generation, fd)? {
+            Some(entry) => entry,
+            None => return Err(EBADF),
+        };
+        self.pool.get(entry.open)?;
+        Ok(entry.open)
+    }
+
     fn open_fd_entry(
         &self,
         pid: u64,
@@ -452,6 +466,14 @@ pub(crate) fn ensure_open_fd(
     fd: u64,
 ) -> Result<(), LinuxErrno> {
     registry_mut().ensure_open_fd(pid, generation, fd)
+}
+
+pub(crate) fn open_description_id_for_fd(
+    pid: u64,
+    generation: InstanceGeneration,
+    fd: u64,
+) -> Result<OpenDescriptionId, LinuxErrno> {
+    registry_mut().open_description_id_for_fd(pid, generation, fd)
 }
 
 pub(crate) fn write_fd(

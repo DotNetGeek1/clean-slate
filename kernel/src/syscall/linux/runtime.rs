@@ -267,7 +267,14 @@ fn handle_sys_poll(
         pollfds[index] = decode_pollfd(&buf[index * USER_COPY_POLL..index * USER_COPY_POLL + USER_COPY_POLL])?;
     }
     for index in 0..nfds {
-        let _ = register_poll_interest(OpenDescriptionId { index: 0, generation: 0 }, ctx.pid);
+        let fd = pollfds[index].fd;
+        if fd >= 0 {
+            if let Ok(open_id) =
+                linux_fd::open_description_id_for_fd(ctx.pid, ctx.instance_generation, fd as u64)
+            {
+                let _ = register_poll_interest(open_id, ctx.pid);
+            }
+        }
         pollfds[index].revents = fd_readiness(ctx, pollfds[index].fd, pollfds[index].events)?;
     }
     let ready = pollfds[..nfds].iter().filter(|p| p.revents != 0).count();
