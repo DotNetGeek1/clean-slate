@@ -1,0 +1,122 @@
+# M9 Phase B frozen command contract (musl-static BusyBox 1.37.0).
+# Run inside minimal rootfs: /bin/busybox + /bin/<applet> symlinks, /etc/hostname,
+# /etc/resolv.conf → 10.77.0.1, writable /tmp. Hermetic reference: run-traces.sh
+# with --network none + fixture-responder.py (10.77.0.1:53, 10.77.0.50:4001).
+
+[meta]
+busybox_sha256 = "7ba56acec9fb89deace4ebfab6f4baaa8d1b778754b8f7ae3dbd7cf7990fe380"
+fixture_dns = "10.77.0.1:53"
+fixture_http = "10.77.0.50:4001"
+fixture_hostname = "m7.fixture.test"
+
+[[command]]
+name = "true"
+shell = "true"
+exit_status = 0
+stdout = ""
+
+[[command]]
+name = "busybox-list"
+shell = "/bin/busybox --list"
+exit_status = 0
+# Sorted applet names, one per line (see frozen/applets.txt).
+stdout_prefix = "ash\n"
+
+[[command]]
+name = "pwd"
+shell = "sh -c 'pwd'"
+exit_status = 0
+stdout = "/\n"
+
+[[command]]
+name = "ls-root"
+shell = "sh -c 'ls /'"
+exit_status = 0
+# Directory order is not stable; assert membership only in harness tests.
+stdout_contains = ["bin", "etc", "tmp"]
+
+[[command]]
+name = "cat-hostname"
+shell = "sh -c 'cat /etc/hostname'"
+exit_status = 0
+stdout = "m9-fixture\n"
+
+[[command]]
+name = "tmp-file-io"
+shell = "sh -c 'mkdir -p /tmp/demo; printf test > /tmp/demo/file; cat /tmp/demo/file'"
+exit_status = 0
+stdout = "test"
+
+[[command]]
+name = "pipe-grep"
+shell = "sh -c 'echo hello | grep hello'"
+exit_status = 0
+stdout = "hello\n"
+
+[[command]]
+name = "uname"
+shell = "sh -c 'uname'"
+exit_status = 0
+stdout_prefix = "Linux"
+
+[[command]]
+name = "nslookup-fixture"
+shell = "sh -c 'nslookup m7.fixture.test'"
+exit_status = 0
+stdout_contains = ["m7.fixture.test", "10.77.0.50"]
+# BusyBox prints a spurious \"can't resolve '(null)'\" before the answer line.
+
+[[command]]
+name = "wget-fixture-http"
+shell = "sh -c 'wget -O - http://m7.fixture.test:4001/'"
+exit_status = 0
+stdout = "M9-FIXTURE-HTTP\n"
+
+[[command]]
+name = "sleep-0"
+shell = "sh -c 'sleep 0'"
+exit_status = 0
+stdout = ""
+# Evidence: nanosleep({tv_sec=0,tv_nsec=0}) in sleep-0.strace (real timeout path).
+
+[[command]]
+name = "exit-3"
+shell = "sh -c 'exit 3'; /bin/busybox echo exit_code=$?"
+exit_status = 0
+stdout = "exit_code=3\n"
+
+[[command]]
+name = "script-sh"
+shell = "sh /tmp/script.sh"
+exit_status = 0
+stdout_contains = ["/", "m9-fixture", "script", "hi", "Linux"]
+
+[[command]]
+name = "sh-c-minimal"
+shell = "sh -c 'true'"
+exit_status = 0
+stdout = ""
+
+[[command]]
+name = "pipe-grep-env-i"
+shell = "env -i /bin/sh -c 'echo hello | grep hello'"
+exit_status = 0
+stdout = "hello\n"
+
+[[command]]
+name = "pipe-grep-path-only"
+shell = "env -i PATH=/bin /bin/sh -c 'echo hello | grep hello'"
+exit_status = 0
+stdout = "hello\n"
+
+[[command]]
+name = "grep-via-busybox"
+shell = "/bin/busybox grep hello (heredoc)"
+exit_status = 0
+stdout = "hello\n"
+
+[[command]]
+name = "grep-via-symlink"
+shell = "echo hello | /bin/grep hello"
+exit_status = 0
+stdout = "hello\n"
