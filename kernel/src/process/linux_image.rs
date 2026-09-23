@@ -305,10 +305,8 @@ pub(crate) enum LinuxImageError {
     /// M9 exec: stack page budget invalid or mapping budget exhausted.
     ExecStackBounds,
     /// M9 exec: live thread count is not exactly one.
-    #[cfg_attr(not(feature = "m9-linux-exec-self-test"), allow(dead_code))]
     ExecMultiThread,
     /// M9 exec: stale instance generation.
-    #[cfg_attr(not(feature = "m9-linux-exec-self-test"), allow(dead_code))]
     ExecGenerationMismatch,
 }
 
@@ -736,7 +734,7 @@ pub(crate) fn validate_linux_image_with_stack(
     bytes: &[u8],
     policy: &LoadPlanPolicy,
     layout: LinuxImageLayout,
-    initial_stack: LinuxInitialStack,
+    initial_stack: &LinuxInitialStack,
 ) -> Result<LinuxImagePlan, LinuxImageError> {
     let header = Elf64Header::parse(bytes)?;
     if policy.user_va_lo == LINUX_USER_WINDOW_BASE && policy.user_va_hi == LINUX_USER_WINDOW_END {
@@ -769,7 +767,7 @@ pub(crate) fn validate_linux_image_with_stack(
         phdr_vaddr,
         image_pages,
         page_table_frames,
-        initial_stack,
+        *initial_stack,
         layout,
     )
 }
@@ -1212,6 +1210,16 @@ pub(crate) fn register_linux_process(
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
+#[cfg_attr(
+    not(any(
+        feature = "m8-linux-image-self-test",
+        feature = "m8-linux-hello-self-test",
+        feature = "m8-linux-dispatch-self-test",
+        feature = "m9-low-va-self-test",
+        feature = "m9-linux-exec-self-test"
+    )),
+    allow(dead_code)
+)]
 pub(crate) fn launch_linux_process(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,

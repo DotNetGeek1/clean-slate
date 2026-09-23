@@ -1,0 +1,197 @@
+59    1790155248.245341 execve("/usr/sbin/chroot", ["chroot", "/tmp/m9-frozen-rootfs", "/bin/sh", "-c", "export PATH=/bin; sh -c 'mkdir -p /tmp/demo; printf test > /tmp/demo/file; cat /tmp/demo/file'"], 0x7fff4cab6db8 /* 6 vars */) = 0
+59    1790155248.246128 arch_prctl(ARCH_SET_FS, 0x7ff73db50b28) = 0
+59    1790155248.246653 set_tid_address(0x7ff73db50f90) = 59
+59    1790155248.247123 brk(NULL)       = 0x56515b611000
+59    1790155248.247636 brk(0x56515b613000) = 0x56515b613000
+59    1790155248.248349 mmap(0x56515b611000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x56515b611000
+59    1790155248.248909 open("/etc/ld-musl-x86_64.path", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+59    1790155248.249427 open("/lib/libcrypto.so.3", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+59    1790155248.250007 open("/usr/local/lib/libcrypto.so.3", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+59    1790155248.250573 open("/usr/lib/libcrypto.so.3", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 3</usr/lib/libcrypto.so.3>
+59    1790155248.251216 fcntl(3</usr/lib/libcrypto.so.3>, F_SETFD, FD_CLOEXEC) = 0
+59    1790155248.251805 fstat(3</usr/lib/libcrypto.so.3>, {st_mode=S_IFREG|0755, st_size=4498768, ...}) = 0
+59    1790155248.252397 read(3</usr/lib/libcrypto.so.3>, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0\20\237D\0\0\0\0\0\0\0\0\0@\08\0\v\0@\0\31\0\30\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\230\246\4\0\0\0\0\0\230\246\4\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0\260\4\0\0\0\0\0\0\260\4\0\0\0\0\0\0\260\4\0\0\0\0\0hl,\0\0\0\0\0hl,\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0 1\0\0\0\0\0\0 1\0\0\0\0\0\0 1\0\0\0\0\0\200\202\r\0\0\0\0\0\200\202\r\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\6\0\0\0p\244>\0\0\0\0\0p\264>\0\0\0\0\0"..., 960) = 960
+59    1790155248.252805 mmap(NULL, 4513792, PROT_READ, MAP_PRIVATE, 3</usr/lib/libcrypto.so.3>, 0) = 0x7ff73d65e000
+59    1790155248.253255 mmap(0x7ff73d6a9000, 2912256, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libcrypto.so.3>, 0x4b000) = 0x7ff73d6a9000
+59    1790155248.253799 mmap(0x7ff73d970000, 888832, PROT_READ, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libcrypto.so.3>, 0x312000) = 0x7ff73d970000
+59    1790155248.254380 mmap(0x7ff73da49000, 405504, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libcrypto.so.3>, 0x3ea000) = 0x7ff73da49000
+59    1790155248.254995 mmap(0x7ff73daa9000, 12288, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x7ff73daa9000
+59    1790155248.255549 close(3</usr/lib/libcrypto.so.3>) = 0
+59    1790155248.256012 open("/lib/libacl.so.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+59    1790155248.256539 open("/usr/local/lib/libacl.so.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+59    1790155248.257229 open("/usr/lib/libacl.so.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 3</usr/lib/libacl.so.1.1.2302>
+59    1790155248.257762 fcntl(3</usr/lib/libacl.so.1.1.2302>, F_SETFD, FD_CLOEXEC) = 0
+59    1790155248.258377 fstat(3</usr/lib/libacl.so.1.1.2302>, {st_mode=S_IFREG|0755, st_size=34576, ...}) = 0
+59    1790155248.258875 read(3</usr/lib/libacl.so.1.1.2302>, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0\20\201\0\0\0\0\0\0\0\0\0\0@\08\0\v\0@\0\30\0\27\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0H\30\0\0\0\0\0\0H\30\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0 \0\0\0\0\0\0\0 \0\0\0\0\0\0\0 \0\0\0\0\0\0\2764\0\0\0\0\0\0\2764\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0`\0\0\0\0\0\0\0`\0\0\0\0\0\0\0`\0\0\0\0\0\0\30\16\0\0\0\0\0\0\30\16\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\6\0\0\0 |\0\0\0\0\0\0 |\0\0\0\0\0\0"..., 960) = 960
+59    1790155248.259649 mmap(NULL, 36864, PROT_READ, MAP_PRIVATE, 3</usr/lib/libacl.so.1.1.2302>, 0) = 0x7ff73d655000
+59    1790155248.260299 mmap(0x7ff73d657000, 16384, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libacl.so.1.1.2302>, 0x2000) = 0x7ff73d657000
+59    1790155248.260955 mmap(0x7ff73d65b000, 4096, PROT_READ, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libacl.so.1.1.2302>, 0x6000) = 0x7ff73d65b000
+59    1790155248.261564 mmap(0x7ff73d65c000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libacl.so.1.1.2302>, 0x7000) = 0x7ff73d65c000
+59    1790155248.262300 close(3</usr/lib/libacl.so.1.1.2302>) = 0
+59    1790155248.263106 open("/lib/libattr.so.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+59    1790155248.263892 open("/usr/local/lib/libattr.so.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+59    1790155248.264425 open("/usr/lib/libattr.so.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 3</usr/lib/libattr.so.1.1.2502>
+59    1790155248.265165 fcntl(3</usr/lib/libattr.so.1.1.2502>, F_SETFD, FD_CLOEXEC) = 0
+59    1790155248.265578 fstat(3</usr/lib/libattr.so.1.1.2502>, {st_mode=S_IFREG|0755, st_size=22288, ...}) = 0
+59    1790155248.266185 read(3</usr/lib/libattr.so.1.1.2502>, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0\20Q\0\0\0\0\0\0\0\0\0\0@\08\0\v\0@\0\30\0\27\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\300\22\0\0\0\0\0\0\300\22\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0 \0\0\0\0\0\0\0 \0\0\0\0\0\0\0 \0\0\0\0\0\08\32\0\0\0\0\0\08\32\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0\374\6\0\0\0\0\0\0\374\6\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\6\0\0\0\220L\0\0\0\0\0\0\220\\\0\0\0\0\0\0"..., 960) = 960
+59    1790155248.266760 mmap(NULL, 28672, PROT_READ, MAP_PRIVATE, 3</usr/lib/libattr.so.1.1.2502>, 0) = 0x7ff73d64e000
+59    1790155248.268789 mmap(0x7ff73d650000, 8192, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libattr.so.1.1.2502>, 0x2000) = 0x7ff73d650000
+59    1790155248.269304 mmap(0x7ff73d652000, 4096, PROT_READ, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libattr.so.1.1.2502>, 0x4000) = 0x7ff73d652000
+59    1790155248.269743 mmap(0x7ff73d653000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libattr.so.1.1.2502>, 0x4000) = 0x7ff73d653000
+59    1790155248.270515 close(3</usr/lib/libattr.so.1.1.2502>) = 0
+59    1790155248.271009 open("/lib/libutmps.so.0.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+59    1790155248.271472 open("/usr/local/lib/libutmps.so.0.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+59    1790155248.272099 open("/usr/lib/libutmps.so.0.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 3</usr/lib/libutmps.so.0.1.2.3>
+59    1790155248.272659 fcntl(3</usr/lib/libutmps.so.0.1.2.3>, F_SETFD, FD_CLOEXEC) = 0
+59    1790155248.273342 fstat(3</usr/lib/libutmps.so.0.1.2.3>, {st_mode=S_IFREG|0755, st_size=13928, ...}) = 0
+59    1790155248.273950 read(3</usr/lib/libutmps.so.0.1.2.3>, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0\3500\0\0\0\0\0\0\0\0\0\0@\08\0\n\0@\0\26\0\25\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0000\17\0\0\0\0\0\0000\17\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0\20\0\0\0\0\0\0\0\20\0\0\0\0\0\0\0\20\0\0\0\0\0\0k\t\0\0\0\0\0\0k\t\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0 \0\0\0\0\0\0\0 \0\0\0\0\0\0\0 \0\0\0\0\0\0<\0\0\0\0\0\0\0<\0\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\6\0\0\0\20-\0\0\0\0\0\0\20=\0\0\0\0\0\0"..., 960) = 960
+59    1790155248.274359 mmap(NULL, 20480, PROT_READ, MAP_PRIVATE, 3</usr/lib/libutmps.so.0.1.2.3>, 0) = 0x7ff73d649000
+59    1790155248.274977 mmap(0x7ff73d64a000, 4096, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libutmps.so.0.1.2.3>, 0x1000) = 0x7ff73d64a000
+59    1790155248.275459 mmap(0x7ff73d64b000, 4096, PROT_READ, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libutmps.so.0.1.2.3>, 0x2000) = 0x7ff73d64b000
+59    1790155248.275795 mmap(0x7ff73d64c000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libutmps.so.0.1.2.3>, 0x2000) = 0x7ff73d64c000
+59    1790155248.276659 close(3</usr/lib/libutmps.so.0.1.2.3>) = 0
+59    1790155248.277408 open("/lib/libskarnet.so.2.14", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+59    1790155248.277987 open("/usr/local/lib/libskarnet.so.2.14", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+59    1790155248.278530 open("/usr/lib/libskarnet.so.2.14", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 3</usr/lib/libskarnet.so.2.14.3.0>
+59    1790155248.279059 fcntl(3</usr/lib/libskarnet.so.2.14.3.0>, F_SETFD, FD_CLOEXEC) = 0
+59    1790155248.279782 fstat(3</usr/lib/libskarnet.so.2.14.3.0>, {st_mode=S_IFREG|0755, st_size=195888, ...}) = 0
+59    1790155248.280325 read(3</usr/lib/libskarnet.so.2.14.3.0>, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0p\367\2\0\0\0\0\0\0\0\0\0@\08\0\n\0@\0\27\0\26\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\30\4\1\0\0\0\0\0\30\4\1\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0\20\1\0\0\0\0\0\0\20\1\0\0\0\0\0\0\20\1\0\0\0\0\0&y\1\0\0\0\0\0&y\1\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0\220\2\0\0\0\0\0\0\220\2\0\0\0\0\0\0\220\2\0\0\0\0\0\0243\0\0\0\0\0\0\0243\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\6\0\0\0\220\312\2\0\0\0\0\0\220\332\2\0\0\0\0\0"..., 960) = 960
+59    1790155248.280994 mmap(NULL, 237568, PROT_READ, MAP_PRIVATE, 3</usr/lib/libskarnet.so.2.14.3.0>, 0) = 0x7ff73d60f000
+59    1790155248.281625 mmap(0x7ff73d620000, 98304, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libskarnet.so.2.14.3.0>, 0x11000) = 0x7ff73d620000
+59    1790155248.282005 mmap(0x7ff73d638000, 16384, PROT_READ, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libskarnet.so.2.14.3.0>, 0x29000) = 0x7ff73d638000
+59    1790155248.282499 mmap(0x7ff73d63c000, 53248, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED, 3</usr/lib/libskarnet.so.2.14.3.0>, 0x2c000) = 0x7ff73d63c000
+59    1790155248.283034 mmap(0x7ff73d640000, 36864, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x7ff73d640000
+59    1790155248.283301 close(3</usr/lib/libskarnet.so.2.14.3.0>) = 0
+59    1790155248.284154 mprotect(0x7ff73da49000, 380928, PROT_READ) = 0
+59    1790155248.284580 mprotect(0x7ff73d65c000, 4096, PROT_READ) = 0
+59    1790155248.285005 mprotect(0x7ff73d653000, 4096, PROT_READ) = 0
+59    1790155248.285438 mprotect(0x7ff73d64c000, 4096, PROT_READ) = 0
+59    1790155248.286033 mprotect(0x7ff73db4d000, 4096, PROT_READ) = 0
+59    1790155248.286463 mprotect(0x7ff73d63c000, 12288, PROT_READ) = 0
+59    1790155248.287020 mprotect(0x565124a32000, 45056, PROT_READ) = 0
+59    1790155248.287506 prctl(PR_SET_NAME, "chroot") = 0
+59    1790155248.288043 prctl(PR_SET_MM, PR_SET_MM_ARG_START, 0x7ffd38680ed6, 0, 0) = -1 EPERM (Operation not permitted)
+59    1790155248.288656 readlink("/tmp", 0x7ffd3867e980, 1023) = -1 EINVAL (Invalid argument)
+59    1790155248.288979 readlink("/tmp/m9-frozen-rootfs", 0x7ffd3867e980, 1023) = -1 EINVAL (Invalid argument)
+59    1790155248.289258 chroot("/tmp/m9-frozen-rootfs") = 0
+59    1790155248.289962 chdir("/")      = 0
+59    1790155248.290543 execve("/bin/sh", ["/bin/sh", "-c", "export PATH=/bin; sh -c 'mkdir -p /tmp/demo; printf test > /tmp/demo/file; cat /tmp/demo/file'"], 0x7ffd3867efa8 /* 6 vars */) = 0
+59    1790155248.291242 arch_prctl(ARCH_SET_FS, 0x434378) = 0
+59    1790155248.291803 set_tid_address(0x434b24) = 59
+59    1790155248.292330 brk(NULL)       = 0x2a01c000
+59    1790155248.292796 brk(0x2a01e000) = 0x2a01e000
+59    1790155248.293296 mmap(0x2a01c000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x2a01c000
+59    1790155248.293853 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7faf02804000
+59    1790155248.294388 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7faf02803000
+59    1790155248.294788 getpid()        = 59
+59    1790155248.295357 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7faf02802000
+59    1790155248.295746 rt_sigprocmask(SIG_UNBLOCK, [RT_1 RT_2], NULL, 8) = 0
+59    1790155248.296242 rt_sigaction(SIGCHLD, {sa_handler=0x414501, sa_mask=~[RTMIN RT_1 RT_2], sa_flags=SA_RESTORER, sa_restorer=0x425cd5}, NULL, 8) = 0
+59    1790155248.296732 geteuid()       = 0
+59    1790155248.297200 getppid()       = 56
+59    1790155248.297720 stat("/work", 0x7ffc989446f0) = -1 ENOENT (No such file or directory)
+59    1790155248.298362 getcwd("/", 4096) = 2
+59    1790155248.298892 rt_sigaction(SIGINT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+59    1790155248.299253 rt_sigaction(SIGINT, {sa_handler=0x414501, sa_mask=~[RTMIN RT_1 RT_2], sa_flags=SA_RESTORER, sa_restorer=0x425cd5}, NULL, 8) = 0
+59    1790155248.299745 rt_sigaction(SIGQUIT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+59    1790155248.300205 rt_sigaction(SIGQUIT, {sa_handler=SIG_IGN, sa_mask=~[RTMIN RT_1 RT_2], sa_flags=SA_RESTORER, sa_restorer=0x425cd5}, NULL, 8) = 0
+59    1790155248.300779 rt_sigaction(SIGTERM, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+59    1790155248.301446 stat("/bin/sh", {st_mode=S_IFREG|0755, st_size=206712, ...}) = 0
+59    1790155248.302141 execve("/bin/sh", ["sh", "-c", "mkdir -p /tmp/demo; printf test > /tmp/demo/file; cat /tmp/demo/file"], 0x7faf02804e08 /* 6 vars */) = 0
+59    1790155248.302682 arch_prctl(ARCH_SET_FS, 0x434378) = 0
+59    1790155248.303141 set_tid_address(0x434b24) = 59
+59    1790155248.303845 brk(NULL)       = 0x1c3d000
+59    1790155248.304372 brk(0x1c3f000)  = 0x1c3f000
+59    1790155248.304977 mmap(0x1c3d000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x1c3d000
+59    1790155248.305563 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f951fe9b000
+59    1790155248.306079 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f951fe9a000
+59    1790155248.306503 getpid()        = 59
+59    1790155248.306912 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f951fe99000
+59    1790155248.307314 rt_sigprocmask(SIG_UNBLOCK, [RT_1 RT_2], NULL, 8) = 0
+59    1790155248.307860 rt_sigaction(SIGCHLD, {sa_handler=0x414501, sa_mask=~[RTMIN RT_1 RT_2], sa_flags=SA_RESTORER, sa_restorer=0x425cd5}, NULL, 8) = 0
+59    1790155248.308608 geteuid()       = 0
+59    1790155248.308968 getppid()       = 56
+59    1790155248.309353 stat("/", {st_mode=S_IFDIR|0755, st_size=4096, ...}) = 0
+59    1790155248.309751 stat(".", {st_mode=S_IFDIR|0755, st_size=4096, ...}) = 0
+59    1790155248.310087 rt_sigaction(SIGINT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+59    1790155248.310314 rt_sigaction(SIGINT, {sa_handler=0x414501, sa_mask=~[RTMIN RT_1 RT_2], sa_flags=SA_RESTORER, sa_restorer=0x425cd5}, NULL, 8) = 0
+59    1790155248.310730 rt_sigaction(SIGQUIT, NULL, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=0}, 8) = 0
+59    1790155248.311146 rt_sigaction(SIGTERM, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+59    1790155248.311706 stat("/bin/mkdir", {st_mode=S_IFREG|0755, st_size=206712, ...}) = 0
+59    1790155248.312191 rt_sigprocmask(SIG_BLOCK, ~[RTMIN RT_1 RT_2], [], 8) = 0
+59    1790155248.312586 rt_sigprocmask(SIG_BLOCK, ~[], ~[KILL STOP RTMIN RT_1 RT_2], 8) = 0
+59    1790155248.313174 fork()          = 60
+60    1790155248.313864 set_tid_address(0x434b24 <unfinished ...>
+59    1790155248.314098 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2],  <unfinished ...>
+60    1790155248.314236 <... set_tid_address resumed>) = 60
+59    1790155248.314448 <... rt_sigprocmask resumed>NULL, 8) = 0
+60    1790155248.314744 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2],  <unfinished ...>
+59    1790155248.315137 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+60    1790155248.315376 <... rt_sigprocmask resumed>NULL, 8) = 0
+59    1790155248.315529 <... rt_sigprocmask resumed>NULL, 8) = 0
+60    1790155248.315712 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+59    1790155248.315913 wait4(-1,  <unfinished ...>
+60    1790155248.316119 <... rt_sigprocmask resumed>NULL, 8) = 0
+60    1790155248.316458 rt_sigaction(SIGQUIT, NULL, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=0}, 8) = 0
+60    1790155248.316863 execve("/bin/mkdir", ["mkdir", "-p", "/tmp/demo"], 0x7f951fe9bbc8 /* 6 vars */) = 0
+60    1790155248.317300 arch_prctl(ARCH_SET_FS, 0x434378) = 0
+60    1790155248.317546 set_tid_address(0x434b24) = 60
+60    1790155248.317773 umask(000)      = 022
+60    1790155248.317993 umask(022)      = 000
+60    1790155248.318364 mkdir("/", 0777) = -1 EEXIST (File exists)
+60    1790155248.319098 stat("/", {st_mode=S_IFDIR|0755, st_size=4096, ...}) = 0
+60    1790155248.319516 mkdir("/tmp/", 0777) = -1 EEXIST (File exists)
+60    1790155248.319860 stat("/tmp/", {st_mode=S_IFDIR|0755, st_size=4096, ...}) = 0
+60    1790155248.320263 mkdir("/tmp/demo", 0777) = 0
+60    1790155248.320687 exit_group(0)   = ?
+60    1790155248.321345 +++ exited with 0 +++
+59    1790155248.321534 <... wait4 resumed>[{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 60
+59    1790155248.321803 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=60, si_uid=0, si_status=0, si_utime=0, si_stime=0} ---
+59    1790155248.322011 rt_sigreturn({mask=[]}) = 60
+59    1790155248.322523 wait4(-1, 0x7fff7f7bcc8c, WNOHANG, NULL) = -1 ECHILD (No child process)
+59    1790155248.323231 open("/tmp/demo/file", O_WRONLY|O_CREAT|O_TRUNC|O_LARGEFILE, 0666) = 3</tmp/m9-frozen-rootfs/tmp/demo/file>
+59    1790155248.323682 fcntl(1<pipe:[196244]>, F_DUPFD_CLOEXEC, 10) = 10<pipe:[196244]>
+59    1790155248.324006 fcntl(10<pipe:[196244]>, F_SETFD, FD_CLOEXEC) = 0
+59    1790155248.324296 dup2(3</tmp/m9-frozen-rootfs/tmp/demo/file>, 1<pipe:[196244]>) = 1</tmp/m9-frozen-rootfs/tmp/demo/file>
+59    1790155248.324728 close(3</tmp/m9-frozen-rootfs/tmp/demo/file>) = 0
+59    1790155248.325208 stat("/bin/printf", {st_mode=S_IFREG|0755, st_size=206712, ...}) = 0
+59    1790155248.325617 rt_sigprocmask(SIG_BLOCK, ~[RTMIN RT_1 RT_2], [], 8) = 0
+59    1790155248.326070 rt_sigprocmask(SIG_BLOCK, ~[], ~[KILL STOP RTMIN RT_1 RT_2], 8) = 0
+59    1790155248.326547 fork()          = 61
+61    1790155248.327087 set_tid_address(0x434b24 <unfinished ...>
+59    1790155248.327273 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2],  <unfinished ...>
+61    1790155248.327466 <... set_tid_address resumed>) = 61
+59    1790155248.327631 <... rt_sigprocmask resumed>NULL, 8) = 0
+61    1790155248.327879 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2],  <unfinished ...>
+59    1790155248.328050 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+61    1790155248.328189 <... rt_sigprocmask resumed>NULL, 8) = 0
+59    1790155248.328355 <... rt_sigprocmask resumed>NULL, 8) = 0
+61    1790155248.328592 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+59    1790155248.328739 wait4(-1,  <unfinished ...>
+61    1790155248.328862 <... rt_sigprocmask resumed>NULL, 8) = 0
+61    1790155248.329020 rt_sigaction(SIGQUIT, NULL, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=0}, 8) = 0
+61    1790155248.329478 execve("/bin/printf", ["printf", "test"], 0x7f951fe9bbc0 /* 6 vars */) = 0
+61    1790155248.330112 arch_prctl(ARCH_SET_FS, 0x434378) = 0
+61    1790155248.330500 set_tid_address(0x434b24) = 61
+61    1790155248.330724 fcntl(1</tmp/m9-frozen-rootfs/tmp/demo/file>, F_GETFL) = 0x8001 (flags O_WRONLY|O_LARGEFILE)
+61    1790155248.331212 ioctl(1</tmp/m9-frozen-rootfs/tmp/demo/file>, TIOCGWINSZ, 0x7ffd86f6e7a8) = -1 ENOTTY (Not a tty)
+61    1790155248.331640 writev(1</tmp/m9-frozen-rootfs/tmp/demo/file>, [{iov_base="test", iov_len=4}, {iov_base=NULL, iov_len=0}], 2) = 4
+61    1790155248.332462 exit_group(0)   = ?
+61    1790155248.332872 +++ exited with 0 +++
+59    1790155248.333132 <... wait4 resumed>[{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 61
+59    1790155248.333270 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=61, si_uid=0, si_status=0, si_utime=0, si_stime=0} ---
+59    1790155248.333559 rt_sigreturn({mask=[]}) = 61
+59    1790155248.334129 wait4(-1, 0x7fff7f7bcc8c, WNOHANG, NULL) = -1 ECHILD (No child process)
+59    1790155248.334699 dup2(10<pipe:[196244]>, 1</tmp/m9-frozen-rootfs/tmp/demo/file>) = 1<pipe:[196244]>
+59    1790155248.335279 close(10<pipe:[196244]>) = 0
+59    1790155248.335686 stat("/bin/cat", {st_mode=S_IFREG|0755, st_size=206712, ...}) = 0
+59    1790155248.336039 execve("/bin/cat", ["cat", "/tmp/demo/file"], 0x7f951fe9bba8 /* 6 vars */) = 0
+59    1790155248.336587 arch_prctl(ARCH_SET_FS, 0x434378) = 0
+59    1790155248.336901 set_tid_address(0x434b24) = 59
+59    1790155248.337574 open("/tmp/demo/file", O_RDONLY|O_LARGEFILE) = 3</tmp/m9-frozen-rootfs/tmp/demo/file>
+59    1790155248.338347 read(3</tmp/m9-frozen-rootfs/tmp/demo/file>, "test", 4096) = 4
+59    1790155248.338854 write(1<pipe:[196244]>, "test", 4) = 4
+59    1790155248.339405 read(3</tmp/m9-frozen-rootfs/tmp/demo/file>, "", 4096) = 0
+59    1790155248.339912 close(3</tmp/m9-frozen-rootfs/tmp/demo/file>) = 0
+59    1790155248.340459 exit_group(0)   = ?
+59    1790155248.340940 +++ exited with 0 +++

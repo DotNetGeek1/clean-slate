@@ -48,7 +48,7 @@ use crate::ipc::USERSPACE_IPC_TEST_PID;
 use crate::ipc::USERSPACE_IPC_UNAUTHORIZED_TEST_PID;
 #[cfg(any(feature = "m4-supervisor-self-test", feature = "m4-recovery-self-test"))]
 use crate::ipc::USERSPACE_SUPERVISOR_TEST_PID;
-use crate::mm::address_space::kernel_root_frame;
+use crate::mm::address_space::{activate_address_space_root, kernel_root_frame};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::user_mapping::validate_user_pointer_range;
@@ -635,6 +635,9 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
     if let Err(message) = validate_canonical_user_return_state(frame) {
         fatal_kernel_error(message);
     }
+    if let Err(message) = sync_syscall_caller_address_space() {
+        fatal_kernel_error(message);
+    }
     // M8.2 (#92) self-test: observe the first syscall of the launched Linux
     // image (entry proof) and the native sibling's progress. Test-only hook.
     #[cfg(feature = "m8-linux-image-self-test")]
@@ -710,8 +713,29 @@ pub(crate) fn route_syscall(
     }
 }
 
+/// Align CR3 with the current userspace thread before registry/CR3 caller checks.
+fn sync_syscall_caller_address_space() -> Result<(), &'static str> {
+    without_interrupts(|| {
+        let thread = with_scheduler(|scheduler| scheduler.current_thread_descriptor())?;
+        if thread.kind != ThreadKind::User {
+            return Ok(());
+        }
+        let registry = unsafe { process_registry_mut() };
+        let process = registry
+            .get(thread.owner_process_id)
+            .ok_or("syscall caller process was not present in registry")?;
+        let expected = process.address_space_root();
+        let active = current_root_frame_address();
+        if active != expected {
+            activate_address_space_root(expected);
+        }
+        Ok(())
+    })
+}
+
 /// Resolve caller pid + personality from the trusted scheduler/CR3 path.
 fn resolve_syscall_caller() -> Result<ResolvedSyscallCaller, &'static str> {
+    sync_syscall_caller_address_space()?;
     let pid = current_syscall_caller_pid()?;
     let personality = execution_personality_for_pid(pid)?;
     Ok(ResolvedSyscallCaller { pid, personality })

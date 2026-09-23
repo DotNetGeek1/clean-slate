@@ -60,6 +60,8 @@ mod service;
         feature = "m3-ipc-self-test",
         feature = "m8-linux-dispatch-self-test",
         feature = "m9-syscall-fail-closed-self-test",
+        feature = "m9-linux-exec-self-test",
+        feature = "m9-fd-core-self-test",
         feature = "m3-syscall-self-test",
         feature = "m4-service-lifecycle-self-test",
         feature = "m5-block-self-test",

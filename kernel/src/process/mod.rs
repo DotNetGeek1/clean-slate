@@ -93,7 +93,9 @@ impl ResourceDomain {
     }
 
     pub(crate) fn address_space_root(&self) -> u64 {
-        self.root_frame
+        self.address_space
+            .as_ref()
+            .map_or(self.root_frame, |space| space.root_frame)
     }
 
     pub(crate) fn address_space(&self) -> Option<&ProcessAddressSpace> {
@@ -119,6 +121,12 @@ impl ResourceDomain {
         let old = self.address_space.replace(new_space);
         self.root_frame = self.address_space.as_ref().map_or(0, |s| s.root_frame);
         old
+    }
+
+    pub(crate) fn sync_root_frame_from_address_space(&mut self) {
+        if let Some(space) = self.address_space.as_ref() {
+            self.root_frame = space.root_frame;
+        }
     }
 
     #[cfg(feature = "m9-syscall-fail-closed-self-test")]

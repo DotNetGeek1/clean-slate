@@ -5,13 +5,19 @@
 //! [`decode`].
 
 pub(crate) mod decode;
+#[cfg(feature = "m9-linux-exec-self-test")]
+pub(crate) mod execve;
 pub(crate) mod exit;
+pub(crate) mod fd;
 pub(crate) mod table;
 pub(crate) mod user_copy;
 pub(crate) mod write;
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
+use crate::mm::address_space::activate_address_space_root;
+use crate::mm::paging::current_root_frame_address;
+use crate::process::userspace_process_root_frame;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_linux_abi::{
     encode_rax, unsupported_syscall_result, UnsupportedSyscallBudget, ESRCH,
@@ -138,6 +144,10 @@ pub(crate) fn dispatch_with(
     };
     #[cfg(feature = "m8-linux-dispatch-self-test")]
     crate::selftest::m8_linux_dispatch::observe_linux_write_result(pid, &request, result);
+    #[cfg(feature = "m9-fd-core-self-test")]
+    if request.nr != clean_slate_linux_abi::SYS_EXIT {
+        crate::selftest::m9_fd_core::observe_linux_syscall_result(pid, &request, result);
+    }
     ctx.frame.rax = encode_rax(result);
 }
 
@@ -145,6 +155,12 @@ pub(crate) fn dispatch_with(
 ///
 /// Never panics; unsupported → `-ENOSYS`.
 pub(crate) fn dispatch(frame: &mut SyscallContext, pid: u64, generation: InstanceGeneration) {
+    if let Ok(root) = userspace_process_root_frame(pid) {
+        let active = current_root_frame_address();
+        if active != root {
+            activate_address_space_root(root);
+        }
+    }
     let state = unsafe { &mut *LINUX_DISPATCH_STATE.get() };
     dispatch_with(frame, pid, generation, state);
 }

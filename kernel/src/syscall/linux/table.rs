@@ -1,9 +1,17 @@
 //! Linux syscall handler table (M8: `write` and `exit` only, #94).
 
 use super::exit::handle_sys_exit;
+use super::fd::{handle_sys_close, handle_sys_dup2, handle_sys_fcntl, handle_sys_writev};
 use super::write::handle_sys_write;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
-use clean_slate_linux_abi::{LinuxSyscallRequest, LinuxSyscallResult, SYS_EXIT, SYS_WRITE};
+use clean_slate_linux_abi::{
+    LinuxSyscallRequest, LinuxSyscallResult, SYS_CLOSE, SYS_DUP2, SYS_EXIT, SYS_FCNTL, SYS_WRITE,
+    SYS_WRITEV,
+};
+#[cfg(feature = "m9-linux-exec-self-test")]
+use clean_slate_linux_abi::SYS_EXECVE;
+#[cfg(feature = "m9-linux-exec-self-test")]
+use super::execve::handle_sys_execve;
 use clean_slate_service_lifecycle::InstanceGeneration;
 
 /// Trusted caller identity + mutable SYSCALL frame for Linux handlers.
@@ -25,7 +33,13 @@ pub(crate) type LinuxSyscallHandler =
 pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
     match nr {
         SYS_WRITE => Some(handle_sys_write),
+        SYS_CLOSE => Some(handle_sys_close),
+        SYS_WRITEV => Some(handle_sys_writev),
+        SYS_DUP2 => Some(handle_sys_dup2),
         SYS_EXIT => Some(handle_sys_exit),
+        SYS_FCNTL => Some(handle_sys_fcntl),
+        #[cfg(feature = "m9-linux-exec-self-test")]
+        SYS_EXECVE => Some(handle_sys_execve),
         _ => None,
     }
 }
@@ -36,8 +50,12 @@ mod tests {
     use clean_slate_linux_abi::{encode_rax, ENOSYS};
 
     #[test]
-    fn table_maps_only_write_and_exit() {
+    fn table_maps_m8_write_exit_and_m9_fd_core() {
         assert!(lookup_handler(SYS_WRITE).is_some());
+        assert!(lookup_handler(SYS_CLOSE).is_some());
+        assert!(lookup_handler(SYS_WRITEV).is_some());
+        assert!(lookup_handler(SYS_DUP2).is_some());
+        assert!(lookup_handler(SYS_FCNTL).is_some());
         assert!(lookup_handler(SYS_EXIT).is_some());
         assert!(lookup_handler(999).is_none());
         assert!(lookup_handler(1000).is_none());

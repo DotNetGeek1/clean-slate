@@ -92,6 +92,22 @@ pub(crate) fn task_stack_top(stack: &TaskStack) -> u64 {
     align_down(((stack.0.as_ptr() as usize) + stack.0.len()) as u64, 16)
 }
 
+/// True when `rsp` points into one of the static per-slot task stacks (not user memory).
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+#[cfg_attr(not(feature = "m9-linux-exec-self-test"), allow(dead_code))]
+pub(crate) fn rsp_on_static_task_stack(rsp: u64) -> bool {
+    let stacks = unsafe { crate::sched::task_stacks_mut() };
+    stacks.iter().any(|stack| {
+        let base = stack.0.as_ptr() as u64;
+        let top = task_stack_top(stack);
+        rsp > base && rsp <= top
+    })
+}
+
 pub(crate) unsafe fn restore_task_context(stack_pointer: u64) -> ! {
     unsafe {
         asm!(

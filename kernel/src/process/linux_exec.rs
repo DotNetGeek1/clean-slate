@@ -10,12 +10,10 @@
     allow(dead_code)
 )]
 
-#[cfg(feature = "m9-linux-exec-self-test")]
-use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
-#[cfg(feature = "m9-linux-exec-self-test")]
+use crate::arch::x86_64::context_switch::{rsp_on_static_task_stack, USER_TEST_RFLAGS};
 use crate::arch::x86_64::cpu::without_interrupts;
-#[cfg(feature = "m9-linux-exec-self-test")]
-use crate::mm::address_space::destroy_process_address_space;
+use crate::arch::x86_64::interrupt_context::SyscallContext;
+use crate::mm::address_space::{activate_address_space_root, destroy_process_address_space};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::{align_down, PAGE_SIZE};
 use crate::process::linux_image::{
@@ -25,18 +23,27 @@ use crate::process::linux_image::{
 use crate::process::linux_image::{
     register_linux_process, LaunchedLinuxProcess, LINUX_USER_WINDOW_BASE, LINUX_USER_WINDOW_END,
 };
-#[cfg(feature = "m9-linux-exec-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+use crate::process::linux_fd;
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 use crate::process::process_registry_mut;
 use crate::process::ProcessAddressSpace;
-#[cfg(feature = "m9-linux-exec-self-test")]
-use crate::sched::scheduler_mut;
+use crate::process::linux_image::{LinuxImagePlan, LINUX_MAX_AUXV_ENTRIES};
+use crate::sync::global_cell::GlobalCell;
 use clean_slate_elf::{LoadPlanPolicy, ELF64_PHDR_SIZE};
 use clean_slate_linux_abi::{
     build_initial_stack_with_tail, StackLayoutError, StackTailBlob, AT_BASE, AT_EGID, AT_ENTRY,
     AT_EUID, AT_EXECFN, AT_FLAGS, AT_GID, AT_HWCAP, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM,
     AT_RANDOM, AT_SECURE, AT_UID,
 };
-#[cfg(feature = "m9-linux-exec-self-test")]
 use clean_slate_service_lifecycle::InstanceGeneration;
 #[cfg(not(any(test, feature = "m9-linux-exec-self-test")))]
 use core::arch::x86_64::{__cpuid, _rdrand64_step};
@@ -63,27 +70,6 @@ pub(crate) struct PreparedLinuxImage {
     pub(crate) launch_rsp: u64,
     pub(crate) image_pages: usize,
     pub(crate) page_table_frames: usize,
-}
-
-#[cfg(feature = "m9-linux-exec-self-test")]
-pub(crate) struct ExecCommit {
-    pub(crate) pid: u64,
-    pub(crate) instance_generation: InstanceGeneration,
-    pub(crate) entry: u64,
-    pub(crate) launch_rsp: u64,
-}
-
-#[cfg(feature = "m9-linux-exec-self-test")]
-pub(crate) trait ExecCommitHooks {
-    fn close_on_exec(&self, pid: u64, generation: InstanceGeneration);
-}
-
-#[cfg(feature = "m9-linux-exec-self-test")]
-pub(crate) struct NoopExecCommitHooks;
-
-#[cfg(feature = "m9-linux-exec-self-test")]
-impl ExecCommitHooks for NoopExecCommitHooks {
-    fn close_on_exec(&self, _pid: u64, _generation: InstanceGeneration) {}
 }
 
 fn validate_spec_strings(spec: &LinuxExecSpec<'_>) -> Result<(), LinuxImageError> {
@@ -145,13 +131,25 @@ fn fill_at_random(out: &mut [u8; 16]) {
     }
 }
 
+static PREPARE_IMAGE_PLAN: GlobalCell<Option<LinuxImagePlan>> = GlobalCell::new(None);
+
+static PREPARE_INITIAL_STACK: GlobalCell<LinuxInitialStack> = GlobalCell::new(LinuxInitialStack {
+    stack_top: 0,
+    bytes: [0; LINUX_MAX_STACK_IMAGE_BYTES],
+    bytes_len: 0,
+    rsp: 0,
+    auxv: [(0, 0); LINUX_MAX_AUXV_ENTRIES],
+    auxv_len: 0,
+});
+
 fn build_exec_initial_stack(
+    out: &mut LinuxInitialStack,
     layout: &LinuxImageLayout,
     spec: &LinuxExecSpec<'_>,
     entry: u64,
     phdr_vaddr: u64,
     phnum: u16,
-) -> Result<LinuxInitialStack, LinuxImageError> {
+) -> Result<(), LinuxImageError> {
     let mut random = [0u8; 16];
     fill_at_random(&mut random);
     let tail = [
@@ -189,8 +187,8 @@ fn build_exec_initial_stack(
     if stack_image_bytes == 0 || stack_image_bytes > LINUX_MAX_STACK_IMAGE_BYTES {
         return Err(LinuxImageError::ExecStackBounds);
     }
-    let mut bytes = [0u8; LINUX_MAX_STACK_IMAGE_BYTES];
-    let buf = &mut bytes[..stack_image_bytes];
+    out.bytes.fill(0);
+    let buf = &mut out.bytes[..stack_image_bytes];
     let probe = build_initial_stack_with_tail(
         buf,
         layout.stack_top,
@@ -238,20 +236,15 @@ fn build_exec_initial_stack(
             StackLayoutError::InvalidStackTop,
         ));
     }
-    let mut auxv_storage = [(0u64, 0u64); crate::process::linux_image::LINUX_MAX_AUXV_ENTRIES];
+    out.stack_top = layout.stack_top;
+    out.bytes_len = stack_image_bytes;
+    out.rsp = image.rsp;
+    out.auxv_len = auxv_len;
+    out.auxv = [(0u64, 0u64); LINUX_MAX_AUXV_ENTRIES];
     for (index, pair) in auxv[..auxv_len].iter().enumerate() {
-        auxv_storage[index] = *pair;
+        out.auxv[index] = *pair;
     }
-    Ok(LinuxInitialStack {
-        stack_top: layout.stack_top,
-        bytes,
-        // Map the stack-image buffer from `stack_top - stack_image_bytes` (same
-        // contract as M8 `LINUX_INITIAL_STACK_IMAGE_BYTES` within mapped pages).
-        bytes_len: stack_image_bytes,
-        rsp: image.rsp,
-        auxv: auxv_storage,
-        auxv_len,
-    })
+    Ok(())
 }
 
 pub(crate) fn prepare_linux_image(
@@ -267,24 +260,40 @@ pub(crate) fn prepare_linux_image(
     let phdr_vaddr = plan
         .phdr_vaddr
         .ok_or(LinuxImageError::ProgramHeadersNotMapped)?;
-    let initial_stack = if spec.policy.user_va_lo == LINUX_USER_WINDOW_BASE
+    let initial_stack = unsafe { &mut *PREPARE_INITIAL_STACK.get() };
+    if spec.policy.user_va_lo == LINUX_USER_WINDOW_BASE
         && spec.policy.user_va_hi == LINUX_USER_WINDOW_END
     {
-        build_linux_initial_stack(plan.entry, phdr_vaddr, plan.phnum, &layout)?
+        *initial_stack = build_linux_initial_stack(plan.entry, phdr_vaddr, plan.phnum, &layout)?;
     } else {
-        build_exec_initial_stack(&layout, spec, plan.entry, phdr_vaddr, plan.phnum)?
-    };
-    let image_plan =
-        validate_linux_image_with_stack(spec.image, spec.policy, layout, initial_stack)?;
-    let built = build_linux_process_image(allocator, spec.image, &image_plan)?;
-    let page_table_frames = built.address_space.resource_counts().page_table_frames;
-    Ok(PreparedLinuxImage {
-        address_space: built.address_space,
-        entry: built.entry,
-        launch_rsp: built.launch_rsp,
-        image_pages: built.image_pages,
-        page_table_frames,
-    })
+        build_exec_initial_stack(
+            initial_stack,
+            &layout,
+            spec,
+            plan.entry,
+            phdr_vaddr,
+            plan.phnum,
+        )?;
+    }
+    {
+        let plan_slot = unsafe { &mut *PREPARE_IMAGE_PLAN.get() };
+        *plan_slot = Some(validate_linux_image_with_stack(
+            spec.image,
+            spec.policy,
+            layout,
+            initial_stack,
+        )?);
+        let built = build_linux_process_image(allocator, spec.image, plan_slot.as_ref().unwrap())?;
+        plan_slot.take();
+        let page_table_frames = built.address_space.resource_counts().page_table_frames;
+        return Ok(PreparedLinuxImage {
+            address_space: built.address_space,
+            entry: built.entry,
+            launch_rsp: built.launch_rsp,
+            image_pages: built.image_pages,
+            page_table_frames,
+        });
+    }
 }
 
 #[cfg(not(any(
@@ -315,24 +324,50 @@ pub(crate) fn launch_linux_process_from_spec(
     )
 }
 
-#[cfg(all(
-    not(any(
-        feature = "m1-self-test",
-        feature = "m2-double-fault-self-test",
-        feature = "m2-timer-self-test"
-    )),
-    feature = "m9-linux-exec-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+#[cfg_attr(not(feature = "m9-linux-exec-self-test"), allow(dead_code))]
+#[inline(never)]
+fn destroy_old_exec_address_space(
+    old: ProcessAddressSpace,
+    allocator: &mut PageAllocator,
+) -> Result<(), LinuxImageError> {
+    destroy_process_address_space(&old, allocator).map_err(|_| {
+        LinuxImageError::Registry("exec commit: destroy old address space failed")
+    })
+}
+
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+#[cfg_attr(not(feature = "m9-linux-exec-self-test"), allow(dead_code))]
+#[inline(never)]
 pub(crate) fn commit_exec(
+    frame: &mut SyscallContext,
     allocator: &mut PageAllocator,
     pid: u64,
     generation: InstanceGeneration,
     prepared: PreparedLinuxImage,
-    kernel_stack_top: u64,
-    thread_id: u64,
-    hooks: &dyn ExecCommitHooks,
-) -> Result<ExecCommit, LinuxImageError> {
-    let old_space = without_interrupts(|| {
+) -> Result<(), LinuxImageError> {
+    let entry = prepared.entry;
+    let launch_rsp = prepared.launch_rsp;
+    let new_root = prepared.address_space.root_frame;
+
+    let current_rsp: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) current_rsp, options(nomem, nostack));
+    }
+    debug_assert!(
+        rsp_on_static_task_stack(current_rsp),
+        "exec commit must run on a static task / syscall kernel stack"
+    );
+
+    without_interrupts(|| {
         let registry = unsafe { process_registry_mut() };
         let process = registry
             .get_mut(pid)
@@ -343,33 +378,67 @@ pub(crate) fn commit_exec(
         if process.live_threads != 1 {
             return Err(LinuxImageError::ExecMultiThread);
         }
+        let live_gen = process.instance_generation;
         let old = process
             .resource_domain
             .replace_address_space(prepared.address_space)
             .ok_or(LinuxImageError::Registry("exec commit: no address space"))?;
-        let saved_stack =
-            build_userspace_entry_frame(kernel_stack_top, prepared.entry, prepared.launch_rsp)
-                .map_err(LinuxImageError::EntryFrame)?;
-        let scheduler = unsafe { scheduler_mut() };
-        let thread = scheduler
-            .threads
-            .iter_mut()
-            .find(|t| t.id == thread_id && t.owner_process_id == pid)
-            .ok_or(LinuxImageError::Scheduler(
-                "exec commit: thread missing for process",
-            ))?;
-        thread.saved_stack_pointer = saved_stack;
-        thread.launch_entry = prepared.entry;
-        Ok(old)
+        activate_address_space_root(new_root);
+        linux_fd::close_on_exec(pid, live_gen).map_err(|_| {
+            LinuxImageError::Registry("exec commit: close_on_exec failed")
+        })?;
+        destroy_old_exec_address_space(old, allocator)?;
+        Ok::<(), LinuxImageError>(())
     })?;
-    destroy_process_address_space(&old_space, allocator).map_err(LinuxImageError::Rollback)?;
-    hooks.close_on_exec(pid, generation);
-    Ok(ExecCommit {
-        pid,
-        instance_generation: generation,
-        entry: prepared.entry,
-        launch_rsp: prepared.launch_rsp,
-    })
+
+    rewrite_syscall_return_for_exec(frame, entry, launch_rsp);
+
+    Ok(())
+}
+
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+/// Map prepare/commit validation failures to Linux errno for syscall return.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+#[cfg_attr(not(feature = "m9-linux-exec-self-test"), allow(dead_code))]
+pub(crate) fn linux_errno_for_exec_error(error: LinuxImageError) -> clean_slate_linux_abi::LinuxErrno {
+    use clean_slate_linux_abi::{EINVAL, ENOEXEC};
+    match error {
+        LinuxImageError::ExecGenerationMismatch | LinuxImageError::ExecMultiThread => EINVAL,
+        _ => ENOEXEC,
+    }
+}
+
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+#[cfg_attr(not(feature = "m9-linux-exec-self-test"), allow(dead_code))]
+fn rewrite_syscall_return_for_exec(frame: &mut SyscallContext, entry: u64, launch_rsp: u64) {
+    frame.user_rip = entry;
+    frame.user_rsp = launch_rsp;
+    frame.user_rflags = USER_TEST_RFLAGS;
+    frame.rax = 0;
+    frame.rdx = 0;
+    frame.rbx = 0;
+    frame.rbp = 0;
+    frame.rsi = 0;
+    frame.rdi = 0;
+    frame.r8 = 0;
+    frame.r9 = 0;
+    frame.r10 = 0;
+    frame.r12 = 0;
+    frame.r13 = 0;
+    frame.r14 = 0;
+    frame.r15 = 0;
 }
 
 fn layout_for_spec(
@@ -407,8 +476,8 @@ pub(crate) fn m8_hello_exec_spec(image: &[u8]) -> LinuxExecSpec<'_> {
 mod tests {
     use super::*;
     use crate::process::linux_image::{
-        validate_linux_image, validate_linux_image_with_stack, LINUX_LOW_VA_FIXTURE,
-        LINUX_M8_FIXTURE,
+        validate_linux_image, validate_linux_image_with_stack, LinuxInitialStack,
+        LINUX_LOW_VA_FIXTURE, LINUX_M8_FIXTURE, LINUX_MAX_AUXV_ENTRIES,
     };
     use clean_slate_elf::LoadPlanPolicy;
 
@@ -444,7 +513,16 @@ mod tests {
         };
         let plan = clean_slate_elf::parse_load_plan(spec.image, spec.policy).expect("plan");
         let layout = layout_for_spec(&spec, plan.image_base().unwrap()).expect("layout");
-        let stack = build_exec_initial_stack(
+        let mut stack = LinuxInitialStack {
+            stack_top: 0,
+            bytes: [0; LINUX_MAX_STACK_IMAGE_BYTES],
+            bytes_len: 0,
+            rsp: 0,
+            auxv: [(0, 0); LINUX_MAX_AUXV_ENTRIES],
+            auxv_len: 0,
+        };
+        build_exec_initial_stack(
+            &mut stack,
             &layout,
             &spec,
             plan.entry,
@@ -452,7 +530,7 @@ mod tests {
             plan.phnum,
         )
         .expect("stack");
-        assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, stack).is_ok());
+        assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, &stack).is_ok());
     }
 
     #[cfg(feature = "m9-linux-exec-self-test")]
@@ -471,7 +549,16 @@ mod tests {
         };
         let plan = clean_slate_elf::parse_load_plan(spec.image, spec.policy).expect("plan");
         let layout = layout_for_spec(&spec, plan.image_base().unwrap()).expect("layout");
-        let stack = build_exec_initial_stack(
+        let mut stack = LinuxInitialStack {
+            stack_top: 0,
+            bytes: [0; LINUX_MAX_STACK_IMAGE_BYTES],
+            bytes_len: 0,
+            rsp: 0,
+            auxv: [(0, 0); LINUX_MAX_AUXV_ENTRIES],
+            auxv_len: 0,
+        };
+        build_exec_initial_stack(
+            &mut stack,
             &layout,
             &spec,
             plan.entry,
@@ -485,7 +572,7 @@ mod tests {
         assert_eq!(argc, 3);
         let argv0 = u64::from_le_bytes(stack.bytes[rsp_off + 8..rsp_off + 16].try_into().unwrap());
         assert_ne!(argv0, 0);
-        assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, stack).is_ok());
+        assert!(validate_linux_image_with_stack(spec.image, spec.policy, layout, &stack).is_ok());
     }
 
     #[test]

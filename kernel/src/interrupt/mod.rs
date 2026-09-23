@@ -167,8 +167,6 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         #[cfg(not(feature = "m2-timer-self-test"))]
         {
             increment_kernel_ticks();
-            #[cfg(feature = "m9-linux-exec-self-test")]
-            crate::selftest::m9_linux_exec::maybe_commit_on_timer();
             let next_stack_pointer =
                 match with_scheduler(|scheduler| scheduler.on_timer_interrupt(stack_pointer)) {
                     Ok(next_stack_pointer) => next_stack_pointer,

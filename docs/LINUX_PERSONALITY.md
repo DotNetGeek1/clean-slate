@@ -169,12 +169,21 @@ Deliberate limits (host-tested): `LINUX_EXEC_MAX_ARGS`, `LINUX_EXEC_MAX_ENVS`,
   failure destroys the partial address space; the caller's live image is untouched.
 - **`launch_linux_process_from_spec`**: fresh process registration (M8 hello, M9 low
   hello, self-tests).
-- **`commit_exec`**: replaces the **calling thread's** user image in place. **Pid
-  and process instance generation stay unchanged** (exec is not a new Clean-Slate
-  instance). The old address space is reclaimed only after the new CR3, entry, and
-  launch RSP are installed on the user return frame. Multi-threaded Linux processes
-  are rejected before mutation (`LinuxImageError::ExecMultiThreaded`). `ExecCommitHooks`
-  (no-op default; #147 may close-on-exec) run after install.
+- **`commit_exec(frame, …)`**: transactional exec on the **calling thread** from
+  Linux syscall context on that thread's syscall kernel stack. Under
+  `without_interrupts`: verify `instance_generation` and `live_threads == 1`,
+  `replace_address_space` in the registry (same pid, same generation, same slot),
+  then `activate_address_space_root` for the prepared image (kernel text, static
+  task stacks, and the physmap remain valid in the shared high half, so continuing
+  on the current kernel stack after CR3 switch is safe), then
+  `linux_fd::close_on_exec(pid, generation)` (#147 fd core) and
+  `destroy_process_address_space(old)`. Rewrite the in-place `SyscallContext` for
+  `sysretq`: `user_rip` = entry, `user_rsp` = launch stack, `user_rflags` with IF
+  and reserved bit 1 set, other GPRs zeroed, `rax = 0`. The scheduler's
+  `saved_stack_pointer` / `launch_entry` are **not** touched. Failures before the
+  registry commit leave
+  the live process untouched and return errno to the syscall; after commit there
+  is no half-image failure path.
 
 ### musl 1.2.5 auxv (static ET_EXEC)
 
@@ -190,9 +199,13 @@ Stack builder: `linux-abi/src/stack.rs` (`build_initial_stack_with_tail`).
 - Host: variable argv/envp layout, limit enforcement, auxv values, malformed-image
   rollback, M8 canonical stack byte-identical.
 - QEMU: `cargo xtask test-m9-linux-exec` (`m9-linux-exec-self-test`) — fixture
-  `fixtures/linux-exec-args/linux-exec-args-x86_64` at `0x400000` prints argv/envp/auxv
-  (`[M9.F] argv/envp/auxv OK`), then `commit_exec` with new argv; failed prepare leaves
-  the live process running; teardown restores allocator baseline; `[M9.F] PASS`.
+  `fixtures/linux-exec-args/linux-exec-args-x86_64` at `0x400000` prints phase-1
+  argv/envp/auxv, invokes `SYS_EXECVE` (self-test stub: fixed phase-2 spec, ignores
+  user pointers; `#102` replaces with real pointer parsing into the same
+  `LinuxExecSpec` / `commit_exec`), restarts at `_start` with phase-2 argv (same
+  pid/generation), then a second `execve` with a truncated ELF returns `ENOEXEC` while
+  the post-exec image keeps running; teardown restores allocator baseline;
+  `[M9.F] PASS`.
 
 ## M8.2 — ELF loader and process image (#92)
 
@@ -292,13 +305,23 @@ generation-0 sentinel).
 QEMU proof: `cargo xtask test-m8-linux-dispatch` (`m8-linux-dispatch-self-test`),
 marker `[M8.3] PASS`.
 
+## #147 fd / open-description core (M9)
+
+Linux fd integers remain compatibility-local. Authority lives in a **global bounded open-description pool** (`OPEN_DESCRIPTION_CAPACITY = 48`) referenced by per-process fd tables (`LINUX_FD_TABLE_CAPACITY = 16`, lowest-free allocation).
+
+Each fd entry stores `FdEntry { open: OpenDescriptionId, flags: FdFlags }` where `OpenDescriptionId { index, generation }` never aliases a replaced object. Open descriptions carry shared `OpenStatus` / `offset`, `DescriptorKind` (console, file/dir/pipe/socket placeholders), and a refcount; `close` drops one ref, final ref runs a kind-specific release hook.
+
+Syscalls wired for this lane: `close(3)`, `writev(20)`, `dup2(33)`, `fcntl(72)` (`F_GETFD`/`F_SETFD`/`F_GETFL`/`F_SETFL`/`F_DUPFD_CLOEXEC`). `write(1)` uses the same console backend via open descriptions. Errno mapping: `EBADF` stale/closed, `EMFILE` per-process table full, `ENFILE` pool full, `EINVAL` bad `fcntl`/`writev` iovcnt.
+
+QEMU: `cargo xtask test-m9-fd-core` (`m9-fd-core-self-test`), markers `[M9.G] pool_before_boot=` plus the M8.3 dispatch proof on the new substrate.
+
 ## #95 fd projection
 
 Linux stdio is a **projection** onto existing Clean-Slate IPC console authority, not a new resource class.
 
 ### Model
 
-- Each Linux-personality process may own a bounded fd table (`LINUX_FD_TABLE_CAPACITY = 4`, fds `0..3`) stored in a kernel registry keyed by `(pid, InstanceGeneration)`.
+- Each Linux-personality process owns a bounded fd table (`LINUX_FD_TABLE_CAPACITY = 16`) in the #147 registry keyed by `(pid, InstanceGeneration)`.
 - Registry capacity equals `PROCESS_REGISTRY_CAPACITY` (not a separate soft limit).
 - The table is **not** a field on `Process` (avoids spawn / literal churn).
 - fd integers are compatibility-local only. Authority is always an `IpcEndpointTable` send-capability handle granted to that pid by trusted bootstrap (`grant_console_capability_for_pid` / `grant_send_capability`).

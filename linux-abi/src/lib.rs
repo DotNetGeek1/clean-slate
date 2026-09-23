@@ -19,8 +19,9 @@ pub mod stack;
 pub mod syscall;
 
 pub use errno::{
-    decode_rax, encode_rax, LinuxErrno, LinuxSyscallResult, EACCES, EBADF, EFAULT, EINVAL, ENOENT,
-    ENOMEM, ENOSYS, EPERM, ESRCH,
+    decode_rax, encode_rax, LinuxErrno, LinuxSyscallResult, EACCES, EBADF, EFAULT, EINVAL, EMFILE,
+    ENOEXEC,
+    ENFILE, ENOENT, ENOMEM, ENOSYS, EPERM, ESRCH,
 };
 pub use stack::{
     build_initial_stack, build_initial_stack_with_tail, InitialStackBuilder, InitialStackImage,
@@ -31,5 +32,6 @@ pub use stack::{
 pub use syscall::{
     decode_linux_syscall, is_m8_supported_syscall, unsupported_syscall_result,
     LinuxSyscallRegisters, LinuxSyscallRequest, UnsupportedSyscallBudget,
-    UnsupportedSyscallObservation, SYS_EXIT, SYS_WRITE,
+    UnsupportedSyscallObservation, SYS_CLOSE, SYS_DUP2, SYS_EXECVE, SYS_EXIT, SYS_FCNTL, SYS_WRITE,
+    SYS_WRITEV,
 };

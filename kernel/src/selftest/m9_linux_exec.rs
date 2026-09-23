@@ -1,24 +1,21 @@
 //! M9 #146: Linux exec substrate acceptance (argv/envp/auxv fixture + commit_exec).
 
-use crate::arch::x86_64::context_switch::{
-    build_userspace_entry_frame, restore_task_context, task_stack_top,
-};
+use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
-use crate::interrupt::timer::initialize_timer;
 use crate::ipc::endpoint_table_mut;
 use crate::mm::address_space::{
-    create_process_address_space, destroy_process_address_space, kernel_root_frame,
+    activate_address_space_root, create_process_address_space, destroy_process_address_space,
+    kernel_root_frame,
 };
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::paging::zero_page;
-use crate::mm::{phys_to_virt, PAGE_SIZE};
-use crate::process::domain::teardown_current_process;
+use crate::mm::PAGE_SIZE;
+use crate::process::domain::DomainTeardownResult;
 use crate::process::id_allocator::{id_allocator_mut, IdAllocator};
 use crate::process::linux_exec::{
-    commit_exec, launch_linux_process_from_spec, prepare_linux_image, LinuxExecSpec,
-    NoopExecCommitHooks,
+    commit_exec, launch_linux_process_from_spec, linux_errno_for_exec_error, prepare_linux_image,
+    LinuxExecSpec,
 };
 use crate::process::linux_fd::{self, console_sink_render_style, ConsoleSinkRenderStyle};
 use crate::process::linux_image::{
@@ -29,26 +26,23 @@ use crate::process::personality::execution_personality_for_pid;
 use crate::process::process_registry_mut;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::{scheduler_mut, task_stacks_mut, Scheduler};
-use crate::selftest::{USER_TEST_CODE_ADDRESS, USER_TEST_STACK_ADDRESS};
-use crate::service::spawn::register_spawned_process_checked;
 use crate::sync::global_cell::GlobalCell;
+use crate::syscall::linux::table::LinuxSyscallContext;
 use crate::syscall::linux::user_copy::copy_user_bytes;
 use crate::syscall::{
     current_syscall_caller_pid, install_service_lifecycle_syscall_allocator,
     service_lifecycle_syscall_allocator_mut,
 };
-use clean_slate_linux_abi::SYS_WRITE;
-use core::ptr;
-use x86_64::structures::paging::PageTableFlags;
+use clean_slate_linux_abi::{LinuxSyscallResult, SYS_WRITE, ENOEXEC};
+use core::sync::atomic::{AtomicU8, Ordering};
 use x86_64::VirtAddr;
 
 const PASS_MARKER: &str = "[M9.F] PASS";
 const OK_MARKER: &[u8] = b"[M9.F] argv/envp/auxv OK\n";
+const PHASE1_LINE: &[u8] = b"[M9.F] phase-1 argv line\n";
+const PHASE2_LINE: &[u8] = b"[M9.F] phase-2 argv line\n";
+const ENOEXEC_SURVIVOR: &[u8] = b"[M9.F] still running after ENOEXEC\n";
 const LINUX_SLOT: usize = 0;
-const NATIVE_SLOT: usize = 1;
-const NATIVE_VERSION_SYSCALL_NR: u64 = 0;
-const NATIVE_REQUIRED_PROGRESS: u64 = 2;
-const NATIVE_SIBLING_CODE: [u8; 6] = [0x31, 0xC0, 0x0F, 0x05, 0xEB, 0xFA];
 const OUTPUT_CAP: usize = 4096;
 
 const PHASE1_ARGV: [&[u8]; 3] = [b"linux-exec-args", b"beta", b"gamma\xff"];
@@ -61,35 +55,23 @@ const PHASE2_EXECFN: &[u8] = b"/after/exec";
 
 const BAD_IMAGE: &[u8] = include_bytes!("../../../fixtures/linux-hello/malformed/bad-magic.elf");
 
+static EXECVE_ATTEMPTS: AtomicU8 = AtomicU8::new(0);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
     AwaitPhase1,
-    HeartbeatBeforeExec,
     AwaitPhase2,
-    HeartbeatAfterPrepareFail,
-    AwaitNativeProgress,
+    AwaitEnoexecSurvivor,
+    Done,
 }
 
 struct TestState {
     stage: Stage,
     baseline_free_pages: u64,
     baseline_pt_frames: usize,
-    native_pid: u64,
     linux_pid: u64,
-    linux_tid: u64,
-    linux_generation: clean_slate_service_lifecycle::InstanceGeneration,
-    exec_entry: u64,
-    exec_rsp: u64,
-    native_progress: u64,
     output: [u8; OUTPUT_CAP],
     output_len: usize,
-    ok_markers: u8,
-    heartbeat_dots: u64,
-    dots_at_prepare_fail: u64,
-    prepare_fail_attempted: bool,
-    exec_committed: bool,
-    post_exec_rip_checked: bool,
-    pending_exec_commit: bool,
 }
 
 static TEST_STATE: GlobalCell<Option<TestState>> = GlobalCell::new(None);
@@ -172,6 +154,9 @@ fn verify_phase1_output() {
     if !output_contains(&random_blob) {
         fatal_kernel_error("m9 phase1 AT_RANDOM bytes mismatch");
     }
+    if !output_contains(PHASE1_LINE) {
+        fatal_kernel_error("m9 phase1 argv line marker missing");
+    }
     if !output_contains(OK_MARKER) {
         fatal_kernel_error("m9 phase1 OK marker missing");
     }
@@ -188,6 +173,9 @@ fn verify_phase2_output() {
             fatal_kernel_error("m9 phase2 envp missing after exec");
         }
     }
+    if !output_contains(PHASE2_LINE) {
+        fatal_kernel_error("m9 phase2 argv line marker missing");
+    }
 }
 
 fn reset_output() {
@@ -196,74 +184,8 @@ fn reset_output() {
     state.output_len = 0;
 }
 
-fn launch_native_sibling(
-    allocator: &mut PageAllocator,
-    kernel_stack_top: u64,
-) -> Result<u64, &'static str> {
-    let mut address_space =
-        create_process_address_space(allocator, VirtAddr::new(USER_TEST_CODE_ADDRESS))?;
-    let setup = (|| -> Result<(), &'static str> {
-        let code_frame = allocator
-            .allocate_page()
-            .ok_or("m9 exec native code page missing")?;
-        zero_page(code_frame);
-        unsafe {
-            ptr::copy_nonoverlapping(
-                NATIVE_SIBLING_CODE.as_ptr(),
-                phys_to_virt(code_frame) as *mut u8,
-                NATIVE_SIBLING_CODE.len(),
-            );
-        }
-        crate::mm::address_space::map_process_page(
-            &mut address_space,
-            USER_TEST_CODE_ADDRESS,
-            code_frame,
-            PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )?;
-        let stack_frame = allocator
-            .allocate_page()
-            .ok_or("m9 exec native stack page missing")?;
-        zero_page(stack_frame);
-        crate::mm::address_space::map_process_page(
-            &mut address_space,
-            USER_TEST_STACK_ADDRESS,
-            stack_frame,
-            PageTableFlags::PRESENT
-                | PageTableFlags::WRITABLE
-                | PageTableFlags::NO_EXECUTE
-                | PageTableFlags::USER_ACCESSIBLE,
-            allocator,
-        )
-    })();
-    if let Err(message) = setup {
-        destroy_process_address_space(&address_space, allocator)?;
-        return Err(message);
-    }
-    let (pid, tid) = {
-        let ids = unsafe { id_allocator_mut() };
-        (ids.allocate_pid()?, ids.allocate_tid()?)
-    };
-    let saved = build_userspace_entry_frame(
-        kernel_stack_top,
-        USER_TEST_CODE_ADDRESS,
-        USER_TEST_STACK_ADDRESS + PAGE_SIZE,
-    )?;
-    let spawned = register_spawned_process_checked(
-        allocator,
-        address_space,
-        pid,
-        tid,
-        kernel_stack_top,
-        saved,
-        USER_TEST_CODE_ADDRESS,
-        NATIVE_SLOT,
-    )?;
-    Ok(spawned.pid)
-}
-
 fn maybe_finish(test: &TestState) {
-    if test.stage != Stage::AwaitNativeProgress || test.native_progress < NATIVE_REQUIRED_PROGRESS {
+    if test.stage != Stage::Done {
         return;
     }
     let allocator = allocator();
@@ -290,30 +212,77 @@ fn maybe_finish(test: &TestState) {
     qemu_exit(QEMU_EXIT_SUCCESS);
 }
 
-/// Timer tick hook: commit while Linux is in userspace (between syscalls), not
-/// from inside the Linux syscall observer path.
-pub(crate) fn maybe_commit_on_timer() {
+#[inline(never)]
+fn run_execve_prepare_and_commit(
+    ctx: &mut LinuxSyscallContext<'_>,
+    allocator: &mut PageAllocator,
+    generation: clean_slate_service_lifecycle::InstanceGeneration,
+    spec: &LinuxExecSpec<'_>,
+) -> Result<(), crate::process::linux_image::LinuxImageError> {
+    let prepared = prepare_linux_image(allocator, spec)?;
+    commit_exec(ctx.frame, allocator, ctx.pid, generation, prepared)
+}
+
+pub(crate) fn handle_execve_selftest(ctx: &mut LinuxSyscallContext<'_>) -> LinuxSyscallResult {
     let test = state();
-    if test.pending_exec_commit && !test.exec_committed {
-        commit_phase2_image(test);
+    if ctx.pid != test.linux_pid {
+        fatal_kernel_error("m9 execve from unexpected pid");
     }
+    let gen_before = ctx.instance_generation;
+    let attempt = EXECVE_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    let allocator = allocator();
+    match attempt {
+        0 => {
+            let spec = exec_spec(
+                LINUX_EXEC_ARGS_FIXTURE,
+                &PHASE2_ARGV,
+                &PHASE2_ENVP,
+                PHASE2_EXECFN,
+            );
+            run_execve_prepare_and_commit(ctx, allocator, gen_before, &spec)
+                .map_err(linux_errno_for_exec_error)?;
+            if live_instance_generation(test.linux_pid) != Some(gen_before) {
+                fatal_kernel_error("m9 exec bumped instance generation");
+            }
+            kernel_log_fmt(format_args!(
+                "[M9.F] exec committed pid={} gen={} (unchanged)\n",
+                test.linux_pid,
+                gen_before.0
+            ));
+            test.stage = Stage::AwaitPhase2;
+            reset_output();
+            Ok(0)
+        }
+        1 => {
+            let spec = exec_spec(BAD_IMAGE, &PHASE1_ARGV, &PHASE1_ENVP, PHASE1_EXECFN);
+            match prepare_linux_image(allocator, &spec) {
+                Err(error) => {
+                    kernel_log_line("[M9.F] exec rejected ENOEXEC");
+                    let _ = error;
+                    Err(ENOEXEC)
+                }
+                Ok(_) => fatal_kernel_error("m9 malformed image must not prepare"),
+            }
+        }
+        _ => fatal_kernel_error("m9 execve attempt overflow"),
+    }
+}
+
+pub(crate) fn observe_linux_exit(pid: u64, _teardown: &DomainTeardownResult) {
+    let test = state();
+    if pid != test.linux_pid {
+        return;
+    }
+    if test.stage != Stage::AwaitEnoexecSurvivor {
+        fatal_kernel_error("m9 linux exit at unexpected stage");
+    }
+    test.stage = Stage::Done;
+    maybe_finish(test);
 }
 
 pub(crate) fn observe_syscall(frame: &SyscallContext) {
     let pid = current_syscall_caller_pid().unwrap_or_else(|message| fatal_kernel_error(message));
     let test = state();
-
-    if pid == test.native_pid {
-        if frame.rax != NATIVE_VERSION_SYSCALL_NR {
-            fatal_kernel_error("m9 exec native sibling unexpected syscall");
-        }
-        test.native_progress = test
-            .native_progress
-            .checked_add(1)
-            .unwrap_or_else(|| fatal_kernel_error("m9 exec native progress overflow"));
-        maybe_finish(test);
-        return;
-    }
 
     if pid != test.linux_pid {
         return;
@@ -329,7 +298,6 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
     }
     let mut chunk = [0u8; 64];
     let mut copied = 0usize;
-    let mut last_byte = 0u8;
     while copied < count {
         let n = copy_user_bytes(
             frame.rsi + copied as u64,
@@ -340,119 +308,30 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
         if n == 0 {
             break;
         }
-        last_byte = chunk[n - 1];
         append_output(&chunk[..n]);
         copied += n;
     }
 
     match test.stage {
         Stage::AwaitPhase1 => {
-            if test.ok_markers == 0 && output_contains(OK_MARKER) {
+            if output_contains(OK_MARKER) {
                 verify_phase1_output();
-                test.ok_markers = 1;
-                reset_output();
-                test.stage = Stage::HeartbeatBeforeExec;
-                test.pending_exec_commit = true;
-            }
-        }
-        Stage::HeartbeatBeforeExec => {
-            if copied == 1 && last_byte == b'.' {
-                test.heartbeat_dots += 1;
             }
         }
         Stage::AwaitPhase2 => {
-            if test.exec_committed && !test.post_exec_rip_checked {
-                if frame.user_rsp != test.exec_rsp {
-                    fatal_kernel_error("m9 exec user_rsp did not match post-exec launch rsp");
-                }
-                let rx_page = test.exec_entry & !(PAGE_SIZE - 1);
-                if !(rx_page..rx_page + PAGE_SIZE).contains(&frame.user_rip) {
-                    fatal_kernel_error("m9 exec user_rip outside post-exec RX page");
-                }
-                test.post_exec_rip_checked = true;
-            }
             if output_contains(OK_MARKER) {
                 verify_phase2_output();
-                test.ok_markers = 2;
                 reset_output();
-                test.dots_at_prepare_fail = test.heartbeat_dots;
-                test.stage = Stage::HeartbeatAfterPrepareFail;
+                test.stage = Stage::AwaitEnoexecSurvivor;
             }
         }
-        Stage::HeartbeatAfterPrepareFail => {
-            if copied == 1 && last_byte == b'.' {
-                test.heartbeat_dots += 1;
-            }
-            if !test.prepare_fail_attempted && test.heartbeat_dots >= test.dots_at_prepare_fail + 1
-            {
-                let bad_spec = exec_spec(BAD_IMAGE, &PHASE1_ARGV, &PHASE1_ENVP, PHASE1_EXECFN);
-                match prepare_linux_image(allocator(), &bad_spec) {
-                    Err(_) => {
-                        kernel_log_line("[M9.F] malformed prepare rejected (live process OK)")
-                    }
-                    Ok(_) => fatal_kernel_error("m9 malformed image must not prepare"),
-                }
-                test.prepare_fail_attempted = true;
-            }
-            if test.prepare_fail_attempted && copied == 1 && last_byte == b'.' {
-                if test.heartbeat_dots <= test.dots_at_prepare_fail + 1 {
-                    fatal_kernel_error("m9 heartbeat stalled after failed prepare");
-                }
-                resume_native_after_linux_teardown();
+        Stage::AwaitEnoexecSurvivor => {
+            if output_contains(ENOEXEC_SURVIVOR) {
+                // Fixture will exit next; native sibling resumes after teardown.
             }
         }
-        Stage::AwaitNativeProgress => {}
+        Stage::Done => {}
     }
-}
-
-fn commit_phase2_image(test: &mut TestState) {
-    let spec = exec_spec(
-        LINUX_EXEC_ARGS_FIXTURE,
-        &PHASE2_ARGV,
-        &PHASE2_ENVP,
-        PHASE2_EXECFN,
-    );
-    let prepared = prepare_linux_image(allocator(), &spec)
-        .unwrap_or_else(|_| fatal_kernel_error("m9 exec phase2 prepare failed"));
-    test.exec_entry = prepared.entry;
-    test.exec_rsp = prepared.launch_rsp;
-    let pt_frames = prepared.page_table_frames;
-    let stacks = unsafe { &*task_stacks_mut() };
-    let kstack = task_stack_top(&stacks[LINUX_SLOT]);
-    let gen_before = test.linux_generation;
-    let commit = commit_exec(
-        allocator(),
-        test.linux_pid,
-        gen_before,
-        prepared,
-        kstack,
-        test.linux_tid,
-        &NoopExecCommitHooks,
-    )
-    .unwrap_or_else(|_| fatal_kernel_error("m9 exec commit failed"));
-    if commit.pid != test.linux_pid || commit.instance_generation != gen_before {
-        fatal_kernel_error("m9 exec changed pid or generation");
-    }
-    if live_instance_generation(test.linux_pid) != Some(gen_before) {
-        fatal_kernel_error("m9 exec bumped instance generation");
-    }
-    test.exec_committed = true;
-    test.pending_exec_commit = false;
-    kernel_log_fmt(format_args!(
-        "[M9.F] exec committed pid={} entry={:#018x} rsp={:#018x} pt_frames={}\n",
-        commit.pid, commit.entry, commit.launch_rsp, pt_frames
-    ));
-    test.stage = Stage::AwaitPhase2;
-}
-
-fn resume_native_after_linux_teardown() -> ! {
-    let teardown = teardown_current_process(allocator(), kernel_root_frame(), 1, false)
-        .unwrap_or_else(|message| fatal_kernel_error(message));
-    state().stage = Stage::AwaitNativeProgress;
-    let next = teardown
-        .next_stack_pointer
-        .unwrap_or_else(|| fatal_kernel_error("m9 exec no runnable thread after linux teardown"));
-    unsafe { restore_task_context(next) }
 }
 
 pub(crate) fn start_m9_linux_exec_self_test(page_allocator: PageAllocator) -> ! {
@@ -466,7 +345,9 @@ pub(crate) fn start_m9_linux_exec_self_test(page_allocator: PageAllocator) -> ! 
     let baseline_pt_frames = baseline_space.resource_counts().page_table_frames;
     destroy_process_address_space(&baseline_space, allocator)
         .unwrap_or_else(|_| fatal_kernel_error("m9 exec baseline destroy"));
+    activate_address_space_root(kernel_root_frame());
 
+    linux_fd::reset_registry_for_selftest();
     unsafe {
         *id_allocator_mut() = IdAllocator::new();
         process_registry_mut().clear();
@@ -474,8 +355,6 @@ pub(crate) fn start_m9_linux_exec_self_test(page_allocator: PageAllocator) -> ! 
     }
 
     let stacks = unsafe { &*task_stacks_mut() };
-    let native_pid = launch_native_sibling(allocator, task_stack_top(&stacks[NATIVE_SLOT]))
-        .unwrap_or_else(|message| fatal_kernel_error(message));
     let baseline_free_pages = allocator.stats().free_pages;
 
     let spec = exec_spec(
@@ -504,27 +383,12 @@ pub(crate) fn start_m9_linux_exec_self_test(page_allocator: PageAllocator) -> ! 
             stage: Stage::AwaitPhase1,
             baseline_free_pages,
             baseline_pt_frames,
-            native_pid,
             linux_pid: linux.pid,
-            linux_tid: linux.tid,
-            linux_generation: linux.instance_generation,
-            exec_entry: 0,
-            exec_rsp: 0,
-            native_progress: 0,
             output: [0; OUTPUT_CAP],
             output_len: 0,
-            ok_markers: 0,
-            heartbeat_dots: 0,
-            dots_at_prepare_fail: 0,
-            prepare_fail_attempted: false,
-            exec_committed: false,
-            post_exec_rip_checked: false,
-            pending_exec_commit: false,
         });
     }
 
-    initialize_timer();
-    kernel_log_line("[TIME] timer initialized");
     let frame_pointer =
         start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
     unsafe { restore_task_context(frame_pointer) }

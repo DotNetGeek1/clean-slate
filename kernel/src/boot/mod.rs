@@ -155,7 +155,8 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m8-linux-image-self-test"),
     not(feature = "m8-linux-hello-self-test"),
     not(feature = "m9-low-va-self-test"),
-    not(feature = "m9-linux-exec-self-test")
+    not(feature = "m9-linux-exec-self-test"),
+    not(feature = "m9-fd-core-self-test")
 ))]
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
 #[cfg(feature = "m3-ipc-self-test")]
@@ -211,17 +212,23 @@ use crate::selftest::m7_tls::run_m7_tls_fail_closed_self_test;
     not(feature = "m7-tls-fail-closed-self-test")
 ))]
 use crate::selftest::m7_tls::run_m7_tls_self_test;
-#[cfg(feature = "m8-linux-dispatch-self-test")]
+#[cfg(all(
+    feature = "m8-linux-dispatch-self-test",
+    not(feature = "m9-fd-core-self-test")
+))]
 use crate::selftest::m8_linux_dispatch::start_m8_linux_dispatch_self_test;
 #[cfg(feature = "m8-linux-hello-self-test")]
 use crate::selftest::m8_linux_hello::start_m8_linux_hello_self_test;
 #[cfg(feature = "m8-linux-image-self-test")]
 use crate::selftest::m8_linux_image::start_m8_linux_image_self_test;
+#[cfg(feature = "m9-fd-core-self-test")]
+use crate::selftest::m9_fd_core::start_m9_fd_core_self_test;
 #[cfg(feature = "m9-low-va-self-test")]
 use crate::selftest::m9_low_va::start_m9_low_va_self_test;
 #[cfg(all(
     feature = "m9-syscall-fail-closed-self-test",
-    not(feature = "m9-low-va-self-test")
+    not(feature = "m9-low-va-self-test"),
+    not(feature = "m9-fd-core-self-test")
 ))]
 use crate::selftest::m9_syscall_fail_closed::start_m9_syscall_fail_closed_self_test;
 use crate::syscall::initialize_syscall_abi;
@@ -379,7 +386,19 @@ fn run_inner() -> Result<(), &'static str> {
     }
 
     #[cfg(all(
+        feature = "m9-fd-core-self-test",
         not(feature = "m9-low-va-self-test"),
+        not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m8-linux-hello-self-test"),
+        not(feature = "m9-syscall-fail-closed-self-test")
+    ))]
+    {
+        start_m9_fd_core_self_test(allocator)
+    }
+
+    #[cfg(all(
+        not(feature = "m9-low-va-self-test"),
+        not(feature = "m9-fd-core-self-test"),
         not(feature = "m9-linux-exec-self-test"),
         feature = "m9-syscall-fail-closed-self-test",
         not(feature = "m8-linux-hello-self-test"),
@@ -394,7 +413,8 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-linux-exec-self-test"),
         feature = "m8-linux-dispatch-self-test",
         not(feature = "m8-linux-hello-self-test"),
-        not(feature = "m9-syscall-fail-closed-self-test")
+        not(feature = "m9-syscall-fail-closed-self-test"),
+        not(feature = "m9-fd-core-self-test")
     ))]
     {
         start_m8_linux_dispatch_self_test(allocator)
@@ -406,7 +426,8 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m8-linux-hello-self-test"),
         not(feature = "m9-syscall-fail-closed-self-test"),
         not(feature = "m9-low-va-self-test"),
-        not(feature = "m9-linux-exec-self-test")
+        not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-fd-core-self-test")
     ))]
     {
         #[cfg(feature = "m7-net-service-self-test")]

@@ -23,6 +23,8 @@ pub const ENOENT: LinuxErrno = LinuxErrno(2);
 pub const ESRCH: LinuxErrno = LinuxErrno(3);
 /// Bad file descriptor.
 pub const EBADF: LinuxErrno = LinuxErrno(9);
+/// Exec format error.
+pub const ENOEXEC: LinuxErrno = LinuxErrno(8);
 /// Cannot allocate memory.
 pub const ENOMEM: LinuxErrno = LinuxErrno(12);
 /// Permission denied.
@@ -31,6 +33,10 @@ pub const EACCES: LinuxErrno = LinuxErrno(13);
 pub const EFAULT: LinuxErrno = LinuxErrno(14);
 /// Invalid argument.
 pub const EINVAL: LinuxErrno = LinuxErrno(22);
+/// Too many open files in system.
+pub const ENFILE: LinuxErrno = LinuxErrno(23);
+/// Too many open files.
+pub const EMFILE: LinuxErrno = LinuxErrno(24);
 /// Function not implemented.
 pub const ENOSYS: LinuxErrno = LinuxErrno(38);
 
