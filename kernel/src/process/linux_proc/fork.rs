@@ -160,12 +160,8 @@ fn linux_mem_clone_for_fork_stub(parent: ProcId, child: ProcId) {
 }
 
 fn linux_signal_clone_for_fork_stub(parent: ProcId, child: ProcId) {
-    let _ = linux_signal::clone_for_fork(
-        parent.pid,
-        parent.generation,
-        child.pid,
-        child.generation,
-    );
+    let _ =
+        linux_signal::clone_for_fork(parent.pid, parent.generation, child.pid, child.generation);
 }
 
 fn abort_fork_child(child_pid: u64, allocator: &mut PageAllocator) {

@@ -1,4 +1,4 @@
-﻿//! Native blocking/wake substrate for scheduler threads (#145).
+//! Native blocking/wake substrate for scheduler threads (#145).
 
 #![allow(dead_code)]
 //!
@@ -109,7 +109,9 @@ fn snapshot_blocked_syscall_frame(thread_index: usize, frame: *mut SyscallContex
     unsafe {
         core::ptr::copy_nonoverlapping(
             frame,
-            (*BLOCKED_SYSCALL_SNAPSHOT.get()).as_mut_ptr().add(thread_index),
+            (*BLOCKED_SYSCALL_SNAPSHOT.get())
+                .as_mut_ptr()
+                .add(thread_index),
             1,
         );
         (*BLOCKED_SYSCALL_SNAPSHOT_VALID.get())[thread_index] = true;

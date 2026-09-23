@@ -96,6 +96,7 @@ pub(crate) fn reset_for_exec(pid: u64, generation: InstanceGeneration) {
     registry_mut().ensure(pid, generation);
 }
 
+#[cfg_attr(not(feature = "m9-linux-proc-self-test"), allow(dead_code))]
 pub(crate) fn clone_for_fork(
     parent_pid: u64,
     parent_gen: InstanceGeneration,
@@ -104,11 +105,7 @@ pub(crate) fn clone_for_fork(
 ) -> Result<(), clean_slate_linux_abi::LinuxErrno> {
     let parent_state = registry_mut()
         .find(parent_pid, parent_gen)
-        .and_then(|index| {
-            registry_mut().slots[index]
-                .as_ref()
-                .map(|slot| slot.state)
-        })
+        .and_then(|index| registry_mut().slots[index].as_ref().map(|slot| slot.state))
         .ok_or(EINVAL)?;
     let index = registry_mut().ensure(child_pid, child_gen);
     registry_mut().slots[index].as_mut().expect("slot").state = parent_state;
