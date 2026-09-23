@@ -153,7 +153,8 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m7-net-device-self-test"),
     not(feature = "m8-linux-image-self-test"),
     not(feature = "m8-linux-hello-self-test"),
-    not(feature = "m9-low-va-self-test")
+    not(feature = "m9-low-va-self-test"),
+    not(feature = "m9-fd-core-self-test")
 ))]
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
 #[cfg(feature = "m3-ipc-self-test")]

@@ -18,7 +18,6 @@ use crate::process::id_allocator::IdAllocator;
 use crate::process::linux_fd;
 use crate::process::linux_fd::LINUX_STDOUT_FD;
 use crate::process::live_instance_generation;
-use crate::process::personality::ExecutionPersonality;
 use crate::process::process_registry_mut;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::scheduler_mut;
@@ -28,7 +27,7 @@ use crate::selftest::userspace_process::{
     configure_scheduler_thread_slot, reset_process_scheduler_world,
     spawn_linux_userspace_process_with_code,
 };
-use crate::selftest::USER_TEST_PROCESS_STACK_ADDRESS;
+use crate::selftest::{USER_TEST_CODE_ADDRESS, USER_TEST_PROCESS_STACK_ADDRESS};
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 use clean_slate_linux_abi::{
@@ -62,7 +61,8 @@ static M9_CLOSE_OK: AtomicBool = AtomicBool::new(false);
 static M9_EBADF_OK: AtomicBool = AtomicBool::new(false);
 
 static M9_CONSOLE_CAPTURE: AtomicBool = AtomicBool::new(false);
-static mut M9_CONSOLE_BUF: [u8; 64] = [0; 64];
+const M9_CONSOLE_BUF_CAP: usize = 64;
+static mut M9_CONSOLE_BUF: [u8; M9_CONSOLE_BUF_CAP] = [0; M9_CONSOLE_BUF_CAP];
 static M9_CONSOLE_LEN: AtomicUsize = AtomicUsize::new(0);
 
 use core::sync::atomic::AtomicUsize;
@@ -123,17 +123,17 @@ impl ProbeBuilder {
     }
 
     fn emit_jne_placeholder(&mut self) -> Result<usize, &'static str> {
-        self.emit(&[0x75, 0x00])?;
-        Ok(self.len - 1)
+        self.emit(&[0x0F, 0x85, 0x00, 0x00, 0x00, 0x00])?;
+        Ok(self.len - 4)
     }
 
-    fn patch_jne_rel8(&mut self, off: usize, target: usize) -> Result<(), &'static str> {
-        let next = off + 1;
-        let rel = isize::try_from(target - next).map_err(|_| "branch oob")?;
-        if rel < i8::MIN as isize || rel > i8::MAX as isize {
-            return Err("branch oob");
-        }
-        self.buf[off] = rel as u8;
+    fn patch_jne_rel32(&mut self, off: usize, target: usize) -> Result<(), &'static str> {
+        let next = off + 4;
+        let rel = i32::try_from(
+            isize::try_from(target - next).map_err(|_| "branch oob")?,
+        )
+        .map_err(|_| "branch oob")?;
+        self.buf[off..off + 4].copy_from_slice(&rel.to_le_bytes());
         Ok(())
     }
 
@@ -245,12 +245,16 @@ fn build_m9_fd_probe(out: &mut [u8]) -> Result<usize, &'static str> {
     let f6 = b.len;
     b.emit_exit(15)?;
 
-    b.patch_jne_rel8(j1, f1)?;
-    b.patch_jne_rel8(j2, f2)?;
-    b.patch_jne_rel8(j3, f3)?;
-    b.patch_jne_rel8(j4, f4)?;
-    b.patch_jne_rel8(j5, f5)?;
-    b.patch_jne_rel8(j6, f6)?;
+    b.patch_jne_rel32(j1, f1)?;
+    b.patch_jne_rel32(j2, f2)?;
+    b.patch_jne_rel32(j3, f3)?;
+    b.patch_jne_rel32(j4, f4)?;
+    b.patch_jne_rel32(j5, f5)?;
+    b.patch_jne_rel32(j6, f6)?;
+
+    while b.len % 8 != 0 {
+        b.emit(&[0x90])?;
+    }
 
     let msg_off = b.len;
     b.emit(WRITE5_MSG)?;
@@ -259,12 +263,14 @@ fn build_m9_fd_probe(out: &mut [u8]) -> Result<usize, &'static str> {
     let cd_off = b.len;
     b.emit(b"CD\n")?;
     let iov_off = b.len;
+    let ab_va = USER_TEST_CODE_ADDRESS + ab_off as u64;
+    let cd_va = USER_TEST_CODE_ADDRESS + cd_off as u64;
     let mut iov = [0u8; 48];
-    iov[0..8].copy_from_slice(&(ab_off as u64).to_le_bytes());
+    iov[0..8].copy_from_slice(&ab_va.to_le_bytes());
     iov[8..16].copy_from_slice(&2u64.to_le_bytes());
-    iov[16..24].copy_from_slice(&(ab_off as u64).to_le_bytes());
+    iov[16..24].copy_from_slice(&ab_va.to_le_bytes());
     iov[24..32].copy_from_slice(&0u64.to_le_bytes());
-    iov[32..40].copy_from_slice(&(cd_off as u64).to_le_bytes());
+    iov[32..40].copy_from_slice(&cd_va.to_le_bytes());
     iov[40..48].copy_from_slice(&3u64.to_le_bytes());
     b.emit(&iov)?;
 
@@ -298,7 +304,8 @@ fn install_stdio_and_placeholder(pid: u64) -> Result<(), &'static str> {
     let ipc = unsafe { endpoint_table_mut() };
     let handle = ipc.grant_console_capability_for_pid(pid)?;
     linux_fd::install_stdio_for_process(pid, generation, handle, handle)?;
-    let placeholder = linux_fd::alloc_self_test_placeholder_file(pid, generation)?;
+    let placeholder = linux_fd::alloc_self_test_placeholder_file(pid, generation)
+        .map_err(|_| "m9 fd core placeholder allocation failed")?;
     if placeholder != 0 {
         return Err("m9 fd core placeholder expected on fd 0");
     }
@@ -360,7 +367,7 @@ pub(crate) fn observe_linux_console_write_bytes(bytes: &[u8]) {
     unsafe {
         let mut len = M9_CONSOLE_LEN.load(Ordering::Relaxed);
         for &byte in bytes {
-            if len < M9_CONSOLE_BUF.len() {
+            if len < M9_CONSOLE_BUF_CAP {
                 M9_CONSOLE_BUF[len] = byte;
                 len += 1;
             }

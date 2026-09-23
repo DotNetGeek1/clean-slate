@@ -112,8 +112,11 @@ pub(crate) fn handle_sys_writev(
     }
 
     let mut iovecs = [IoVec { base: 0, len: 0 }; LINUX_IOV_MAX];
+    let src = iov_ptr as *const u8;
+    let dst = iovecs.as_mut_ptr() as *mut u8;
+    let bytes = iovec_bytes as usize;
     unsafe {
-        core::ptr::copy_nonoverlapping(iov_ptr as *const IoVec, iovecs.as_mut_ptr(), iovcnt);
+        core::ptr::copy_nonoverlapping(src, dst, bytes);
     }
 
     let mut total_len = 0u64;
