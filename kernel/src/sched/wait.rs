@@ -1,4 +1,4 @@
-//! Native blocking/wake substrate for scheduler threads (#145).
+﻿//! Native blocking/wake substrate for scheduler threads (#145).
 
 #![allow(dead_code)]
 //!
@@ -6,6 +6,7 @@
 
 use crate::arch::x86_64::context_switch::resume_after_scheduler_handoff;
 use crate::arch::x86_64::context_switch::SYSCALL_BLOCKED_RESUME_SENTINEL;
+use crate::arch::x86_64::cpu::disable_interrupts;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
@@ -288,6 +289,9 @@ pub(crate) fn wake_all(key: WaitKey) -> usize {
 
 /// Voluntary yield from a syscall handler; may resume via blocked-syscall sentinel.
 pub(crate) fn voluntary_yield_from_syscall(frame: *mut SyscallContext) -> ! {
+    // See `scheduler_block_and_switch`: no interrupt window between selection
+    // and the stack switch.
+    disable_interrupts();
     let next = without_interrupts(|| {
         arm_syscall_block_frame(frame);
         let scheduler = unsafe { scheduler_mut() };
@@ -410,6 +414,13 @@ extern "C" fn clean_slate_complete_blocked_syscall_resume() -> u64 {
 }
 
 fn scheduler_block_and_switch() -> ! {
+    // The selection below moves `current_thread` to the next thread while we
+    // are still running on this thread's kernel stack. Interrupts must stay
+    // masked until the restored frame re-enables them, or a timer IRQ would
+    // save this kernel frame as the next thread's `saved_stack_pointer`.
+    // `syscall` entry already masks IF; this makes the invariant explicit for
+    // any caller that re-enabled interrupts.
+    disable_interrupts();
     let next = without_interrupts(|| unsafe { scheduler_mut().yield_from_blocked_thread() })
         .unwrap_or_else(|message| crate::diagnostics::qemu::fatal_kernel_error(message));
     if let Err(message) = prepare_current_scheduler_thread_dispatch() {
