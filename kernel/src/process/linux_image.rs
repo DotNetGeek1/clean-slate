@@ -890,7 +890,8 @@ pub(crate) struct LaunchedLinuxProcess {
     pub(crate) scheduler_slot: usize,
     /// PT_LOAD pages mapped (stack pages are `LINUX_STACK_PAGES` on top).
     pub(crate) image_pages: usize,
-    /// Page-table frames owned by the address space.
+    /// Page-table frames owned by the address space, including the
+    /// `KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES` private carve-out tables.
     pub(crate) page_table_frames: usize,
 }
 
@@ -1099,12 +1100,16 @@ pub(crate) fn launch_linux_process_with_policy(
 ) -> Result<LaunchedLinuxProcess, LinuxImageError> {
     let image_plan = validate(elf_bytes)?;
     let image = build_linux_process_image(allocator, elf_bytes, &image_plan)?;
+    // Report what the address space actually owns (mapping-walk frames plus the
+    // per-process carve-out private tables), not the pure-plan mapping demand;
+    // `build_linux_process_image` has already verified the two agree.
+    let page_table_frames = image.address_space.resource_counts().page_table_frames;
     register_linux_process(
         allocator,
         kernel_stack_top,
         scheduler_slot,
         image,
-        image_plan.page_table_frames,
+        page_table_frames,
     )
 }
 
