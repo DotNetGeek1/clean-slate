@@ -107,6 +107,24 @@ const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 7] = [
 const M9_LINUX_EXEC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M9_ROOTFS_ACCEPTANCE_MARKERS: [&str; 2] = ["[RFS ] rootfs entries=", "[M9.K] PASS"];
 const M9_ROOTFS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 12] = [
+    "[M9.H] creating",
+    "[M9.H] getcwd=/",
+    "[M9.H] hostname=m9-fixture",
+    "[M9.H] ls /bin ok",
+    "[M9.H] stat ok",
+    // Persistence audit: the probe's first /tmp write must reach the block
+    // device before the object service completes it, so the block write
+    // request is logged strictly between `stat ok` and `tmp write/read ok`.
+    "[BLK ] request op=write",
+    "[M9.H] tmp write/read ok",
+    "[M9.H] big write/read ok",
+    "[M9.H] negative cases ok",
+    "[M9.H] pool_before",
+    "[M9.H] pool_after",
+    "[M9.H] PASS",
+];
+const M9_LINUX_FS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[INT ] double-fault IST initialized",
     "[DF  ] double fault",
@@ -658,6 +676,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM9LowVa => run_m9_low_va_acceptance(),
         ParsedCommand::TestM9LinuxExec => run_m9_linux_exec_acceptance(),
         ParsedCommand::TestM9Rootfs => run_m9_rootfs_acceptance(),
+        ParsedCommand::TestM9LinuxFs => run_m9_linux_fs_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
         ParsedCommand::TestM3 => run_m3_acceptance(),
         ParsedCommand::TestM3AddressSpace => run_m3_address_space_acceptance(),
@@ -1066,6 +1085,22 @@ fn run_m9_rootfs_acceptance() -> Result<(), XtaskError> {
         false,
         &["m9-rootfs-self-test"],
         Some((&M9_ROOTFS_ACCEPTANCE_MARKERS, M9_ROOTFS_ACCEPTANCE_TIMEOUT)),
+    )
+}
+
+fn run_m9_linux_fs_acceptance() -> Result<(), XtaskError> {
+    reset_m5_data_disk_image()?;
+    build_m6_fixture_userspace(true)?;
+    build_storage_userspace(true)?;
+    run_vm_inner_with_config(
+        false,
+        false,
+        &["m9-linux-fs-self-test"],
+        Some((
+            &M9_LINUX_FS_ACCEPTANCE_MARKERS,
+            M9_LINUX_FS_ACCEPTANCE_TIMEOUT,
+        )),
+        m5_storage_vm_config(),
     )
 }
 
@@ -2404,6 +2439,9 @@ fn validate_output_markers(output: &str, markers: &[&str]) -> Result<(), XtaskEr
         if markers == M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS {
             validate_m9_stdio_bytes_line(output)?;
         }
+        if markers == M9_LINUX_FS_ACCEPTANCE_MARKERS {
+            validate_m9_linux_fs_probe_stdout(output)?;
+        }
         if markers_require_verbatim_linux_hello(markers) {
             assert_no_ipc_framed_linux_hello(output)?;
         }
@@ -2424,6 +2462,20 @@ fn markers_require_verbatim_linux_hello(markers: &[&str]) -> bool {
 /// Fail closed unless serial contains the exact user-visible line
 /// `Hello from Linux.` (CRLF-safe) and never an `[IPC ] console`-framed or
 /// prefix-extended variant (`Hello from Linux.XYZ`).
+fn validate_m9_linux_fs_probe_stdout(output: &str) -> Result<(), XtaskError> {
+    if !output.contains("m9-fixture\n") {
+        return Err(XtaskError::InvalidCommand(
+            "m9 linux fs acceptance missing probe stdout `m9-fixture\\n`".to_owned(),
+        ));
+    }
+    if !output.contains("test") {
+        return Err(XtaskError::InvalidCommand(
+            "m9 linux fs acceptance missing probe stdout `test`".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_m9_stdio_bytes_line(output: &str) -> Result<(), XtaskError> {
     const PREFIX: &str = "[M9.D] bytes=";
     let rest = output
@@ -2760,6 +2812,7 @@ enum ParsedCommand {
     TestM9LinuxExec,
     TestM9LinuxSocket,
     TestM9Rootfs,
+    TestM9LinuxFs,
     TestM6Object,
     TestM7NetService,
     TestM7Network,
@@ -2797,6 +2850,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-m9-rootfs" || cmd == "m9-rootfs" || cmd == "m9.104" => {
             ParsedCommand::TestM9Rootfs
+        }
+        Some(cmd) if cmd == "test-m9-linux-fs" || cmd == "m9-linux-fs" || cmd == "m9.101" => {
+            ParsedCommand::TestM9LinuxFs
         }
         Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,
         Some(cmd) if cmd == "test-m3" => ParsedCommand::TestM3,

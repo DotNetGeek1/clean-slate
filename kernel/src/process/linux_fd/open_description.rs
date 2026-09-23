@@ -15,17 +15,21 @@ pub(crate) struct ConsoleSinkRef {
     pub(crate) capability_handle: u64,
 }
 
-/// Placeholder refs until #101/#102/#105 land (id + generation only).
+/// #101: stable node identity for Linux fs projection backends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct FileHandleRef {
-    pub(crate) id: u32,
+pub(crate) struct LinuxFsNodeId {
+    pub(crate) index: u16,
     pub(crate) generation: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileHandleRef {
+    pub(crate) node: LinuxFsNodeId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DirHandleRef {
-    pub(crate) id: u32,
-    pub(crate) generation: u32,
+    pub(crate) node: LinuxFsNodeId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,8 +106,10 @@ pub(crate) struct OpenDescriptionPool {
 
 const EMPTY_POOL_DESCRIPTION: OpenDescription = OpenDescription {
     kind: DescriptorKind::File(FileHandleRef {
-        id: 0,
-        generation: 0,
+        node: LinuxFsNodeId {
+            index: 0,
+            generation: 0,
+        },
     }),
     status: OpenStatus {
         access: OpenAccess::ReadOnly,
@@ -169,6 +175,31 @@ impl OpenDescriptionPool {
         slot.live = true;
         slot.description = OpenDescription {
             kind: DescriptorKind::Socket(socket),
+            status,
+            offset: 0,
+            refcount: 0,
+            generation,
+            owner_pid_for_audit: owner_pid,
+        };
+        self.live_count = self.live_count.saturating_add(1);
+        Ok(OpenDescriptionId {
+            index: index as u16,
+            generation,
+        })
+    }
+
+    pub(crate) fn alloc_file_or_dir(
+        &mut self,
+        owner_pid: u64,
+        kind: DescriptorKind,
+        status: OpenStatus,
+    ) -> Result<OpenDescriptionId, LinuxErrno> {
+        let index = self.find_free_slot().ok_or(ENFILE)?;
+        let slot = &mut self.slots[index];
+        let generation = slot.generation;
+        slot.live = true;
+        slot.description = OpenDescription {
+            kind,
             status,
             offset: 0,
             refcount: 0,

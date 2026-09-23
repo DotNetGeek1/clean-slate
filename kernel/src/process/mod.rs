@@ -11,6 +11,8 @@ pub(crate) mod id_allocator;
 )))]
 pub(crate) mod linux_exec;
 pub(crate) mod linux_fd;
+#[cfg(feature = "m9-rootfs")]
+pub(crate) mod linux_fs;
 pub(crate) mod linux_image;
 pub(crate) mod linux_socket;
 #[cfg(feature = "m9-rootfs")]

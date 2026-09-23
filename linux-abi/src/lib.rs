@@ -15,6 +15,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod errno;
+pub mod fs;
 pub mod socket;
 pub mod stack;
 pub mod syscall;
@@ -28,6 +29,13 @@ pub use socket::{
     EDESTADDRREQ, EIO, EISCONN, EMSGSIZE, ENETUNREACH, ENOBUFS, ENOTCONN, EPROTONOSUPPORT,
     ETIMEDOUT, IPPROTO_IP, IPPROTO_TCP, IPPROTO_UDP, MSG_NOSIGNAL, SOCKADDR_IN_LEN, SOCK_CLOEXEC,
     SOCK_DGRAM, SOCK_NONBLOCK, SOCK_STREAM, SYS_BIND, SYS_CONNECT, SYS_SENDTO, SYS_SOCKET,
+};
+pub use fs::{
+    encode_dirent64, encode_stat144, LinuxStatFields, DT_DIR, DT_LNK, DT_REG, EEXIST, EFBIG, EIO,
+    EISDIR, ELOOP, ENAMETOOLONG, ENOSPC, ENOTDIR, ERANGE, EROFS, ESPIPE, O_APPEND, O_CLOEXEC,
+    O_CREAT, O_DIRECTORY, O_LARGEFILE, O_NONBLOCK, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR,
+    SEEK_END, SEEK_SET, SYS_GETCWD, SYS_GETDENTS64, SYS_LSEEK, SYS_LSTAT, SYS_MKDIR, SYS_OPEN,
+    SYS_READ, SYS_STAT, S_IFDIR, S_IFLNK, S_IFREG,
 };
 pub use stack::{
     build_initial_stack, build_initial_stack_with_tail, InitialStackBuilder, InitialStackImage,
