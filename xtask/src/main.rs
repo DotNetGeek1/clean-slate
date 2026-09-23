@@ -115,7 +115,7 @@ const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[M9.H] stat ok",
     "[M9.H] tmp write/read ok",
     "[M9.H] negative cases ok",
-    "[STOR] write object=",
+    "[BLK ] request op=write",
     "[M9.H] pool_before",
     "[M9.H] pool_after",
     "[M9.H] PASS",
