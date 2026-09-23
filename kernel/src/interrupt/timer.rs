@@ -75,6 +75,18 @@ pub(crate) fn initialize_timer() {
     allow(dead_code)
 )]
 pub(crate) fn report_timer_contract() {
+    #[cfg(not(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test"
+    )))]
+    if let Some(counter_hz) = crate::time::apic_counter_hz() {
+        serial_write_fmt(format_args!(
+            "[TIME] contract=lapic periodic divide=16 initial_count={} counter_hz={}\n",
+            APIC_TIMER_INITIAL_COUNT, counter_hz
+        ));
+        return;
+    }
     serial_write_fmt(format_args!(
         "[TIME] contract=lapic periodic divide=16 initial_count={} tick-rate=uncalibrated\n",
         APIC_TIMER_INITIAL_COUNT

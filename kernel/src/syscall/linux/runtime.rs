@@ -17,10 +17,10 @@ use crate::sched::wait::Deadline;
 use crate::time::{ticks_from_millis, ticks_from_timespec};
 use clean_slate_linux_abi::{
     decode_pollfd, decode_sigaction, decode_timespec, encode_pollfd, encode_sigaction, LinuxErrno,
-    LinuxSyscallRequest, LinuxSyscallResult, PollFd, Sigaction, EFAULT, EINVAL, ENOTTY, POLLERR,
-    POLLHUP, POLLIN, POLLNVAL, POLLOUT, SYS_ARCH_PRCTL, SYS_BRK, SYS_GETPID, SYS_IOCTL, SYS_MMAP,
-    SYS_MUNMAP, SYS_NANOSLEEP, SYS_POLL, SYS_RT_SIGACTION, SYS_RT_SIGPROCMASK, SYS_SET_TID_ADDRESS,
-    SYS_UNAME, TCGETS, TIOCGWINSZ,
+    LinuxSyscallRequest, LinuxSyscallResult, PollFd, Sigaction, Timespec, EFAULT, EINVAL, ENOTTY,
+    POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, SYS_ARCH_PRCTL, SYS_BRK, SYS_GETPID, SYS_IOCTL,
+    SYS_MMAP, SYS_MUNMAP, SYS_NANOSLEEP, SYS_POLL, SYS_RT_SIGACTION, SYS_RT_SIGPROCMASK,
+    SYS_SET_TID_ADDRESS, SYS_UNAME, TCGETS, TIOCGWINSZ,
 };
 
 const USER_COPY_POLL: usize = 8;
@@ -205,6 +205,7 @@ fn handle_sys_nanosleep(
         if rem_ptr != 0 {
             write_zero_timespec(rem_ptr)?;
         }
+        linux_mem::clear_pending_sleep_timing(ctx.pid, ctx.instance_generation);
         linux_mem::set_pending_sleep_deadline(ctx.pid, ctx.instance_generation, None);
         return Ok(0);
     }
@@ -213,8 +214,18 @@ fn handle_sys_nanosleep(
         Some(existing) => existing,
         None => {
             let ticks = ticks_from_timespec(ts)?;
-            let abs = kernel_ticks().checked_add(ticks).ok_or(EINVAL)?;
+            let start_tick = kernel_ticks();
+            let abs = start_tick.checked_add(ticks).ok_or(EINVAL)?;
             let d = Deadline(abs);
+            let request_ns = (ts.tv_sec as u64)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(ts.tv_nsec as u64);
+            linux_mem::set_pending_sleep_timing(
+                ctx.pid,
+                ctx.instance_generation,
+                request_ns,
+                start_tick,
+            );
             linux_mem::set_pending_sleep_deadline(ctx.pid, ctx.instance_generation, Some(d));
             #[cfg(feature = "m9-linux-runtime-self-test")]
             {
@@ -230,6 +241,8 @@ fn handle_sys_nanosleep(
         }
     };
     if kernel_ticks() >= deadline.0 {
+        linux_mem::finish_pending_nanosleep_wall_time(ctx.pid, ctx.instance_generation);
+        linux_mem::clear_pending_sleep_timing(ctx.pid, ctx.instance_generation);
         linux_mem::set_pending_sleep_deadline(ctx.pid, ctx.instance_generation, None);
         if rem_ptr != 0 {
             write_zero_timespec(rem_ptr)?;
@@ -249,6 +262,12 @@ fn handle_sys_nanosleep(
         Some(deadline),
         LinuxTimeoutResult::Zero,
     );
+    if result == Ok(request.nr) {
+        if rem_ptr != 0 {
+            write_remaining_timespec(rem_ptr, deadline)?;
+        }
+        return result;
+    }
     #[cfg(feature = "m9-linux-runtime-self-test")]
     if result == Ok(0) {
         let req_ticks = ticks_from_timespec(ts)?;
@@ -451,4 +470,33 @@ fn read_u64(ptr: u64) -> Result<u64, LinuxErrno> {
 
 fn write_zero_timespec(ptr: u64) -> Result<(), LinuxErrno> {
     write_user(ptr, &[0u8; 16])
+}
+
+fn write_remaining_timespec(ptr: u64, deadline: Deadline) -> Result<(), LinuxErrno> {
+    let rem_ticks = deadline.0.saturating_sub(kernel_ticks());
+    let ts = timespec_from_irq_ticks(rem_ticks)?;
+    let mut bytes = [0u8; 16];
+    bytes[0..8].copy_from_slice(&ts.tv_sec.to_le_bytes());
+    bytes[8..16].copy_from_slice(&ts.tv_nsec.to_le_bytes());
+    write_user(ptr, &bytes)
+}
+
+fn timespec_from_irq_ticks(ticks: u64) -> Result<Timespec, LinuxErrno> {
+    if ticks == 0 {
+        return Ok(Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        });
+    }
+    let hz = crate::time::apic_counter_hz().ok_or(EINVAL)? as u128;
+    let ic = u128::from(crate::arch::x86_64::apic::APIC_TIMER_INITIAL_COUNT);
+    let ns_total = (ticks as u128)
+        .checked_mul(ic)
+        .and_then(|n| n.checked_mul(1_000_000_000u128))
+        .and_then(|n| n.checked_div(hz))
+        .ok_or(EINVAL)?;
+    Ok(Timespec {
+        tv_sec: (ns_total / 1_000_000_000) as i64,
+        tv_nsec: (ns_total % 1_000_000_000) as i64,
+    })
 }

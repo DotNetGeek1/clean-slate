@@ -93,6 +93,23 @@ fn pit_elapsed_ticks(start: u16, now: u16) -> u64 {
     u64::from(start.wrapping_sub(now))
 }
 
+/// Busy-wait using PIT channel 2 for sub-IRQ-tick delays (interrupts may be off).
+pub(crate) fn busy_wait_pit_ns(target_ns: u64) {
+    if target_ns == 0 {
+        return;
+    }
+    let pit_ticks = target_ns
+        .saturating_mul(PIT_HZ)
+        .div_ceil(1_000_000_000)
+        .max(1);
+    let start = pit_read_count();
+    loop {
+        if pit_elapsed_ticks(start, pit_read_count()) >= pit_ticks {
+            break;
+        }
+    }
+}
+
 fn log_apic_time(counter_hz: u64) {
     let ic = u64::from(APIC_TIMER_INITIAL_COUNT);
     let irq_tick_ms = (1000u128 * ic as u128).div_ceil(counter_hz as u128);

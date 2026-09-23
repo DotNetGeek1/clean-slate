@@ -483,14 +483,14 @@ _start:
     lea     rsi, [rip + m_wall_start]
     mov     rdx, m_wall_start_len
     call    write_str
-    mov     ecx, 5
+    mov     r12d, 5
 .Lnanosleep_wall:
     lea     rdi, [rip + ts_200ms]
     xor     rsi, rsi
     mov     rax, SYS_nanosleep
     syscall
     syscall_error fail_nanosleep
-    dec     ecx
+    dec     r12d
     jnz     .Lnanosleep_wall
     lea     rsi, [rip + m_wall_end]
     mov     rdx, m_wall_end_len

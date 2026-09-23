@@ -18,6 +18,19 @@ pub(crate) fn set_apic_counter_hz(value: u64) {
     APIC_COUNTER_HZ.store(value, Ordering::Release);
 }
 
+pub(crate) fn irq_period_ns() -> Option<u64> {
+    let hz = apic_counter_hz()? as u128;
+    let ic = u128::from(APIC_TIMER_INITIAL_COUNT);
+    Some(u64::try_from(1_000_000_000u128 * ic / hz).unwrap_or(u64::MAX))
+}
+
+pub(crate) fn irq_elapsed_ns_since(start_tick: u64) -> u64 {
+    let ticks = crate::interrupt::timer::kernel_ticks().saturating_sub(start_tick);
+    irq_period_ns()
+        .map(|period| ticks.saturating_mul(period))
+        .unwrap_or(0)
+}
+
 pub(crate) fn apic_counter_hz() -> Option<u64> {
     let value = APIC_COUNTER_HZ.load(Ordering::Acquire);
     if value == 0 {
@@ -37,7 +50,7 @@ pub(crate) fn ticks_from_millis(ms: u64) -> Result<u64, LinuxErrno> {
     let num = ms as u128 * hz;
     let den = 1000u128 * ic;
     let ticks = num
-        .checked_add(den - 1)
+        .checked_add(den / 2)
         .ok_or(EINVAL)?
         .checked_div(den)
         .ok_or(EINVAL)?;
@@ -60,7 +73,7 @@ pub(crate) fn ticks_from_timespec(ts: clean_slate_linux_abi::Timespec) -> Result
     let den = 1_000_000_000u128 * ic;
     let num = ns.checked_mul(hz).ok_or(EINVAL)?;
     let ticks = num
-        .checked_add(den - 1)
+        .checked_add(den / 2)
         .ok_or(EINVAL)?
         .checked_div(den)
         .ok_or(EINVAL)?;
@@ -81,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn timespec_ticks_round_up() {
+    fn timespec_ticks_round_nearest() {
         set_ticks_per_second(1000);
         assert_eq!(
             ticks_from_timespec(Timespec {
@@ -101,11 +114,11 @@ mod tests {
     }
 
     #[test]
-    fn millis_ticks_round_up() {
+    fn millis_ticks_round_nearest() {
         set_ticks_per_second(100);
         assert_eq!(ticks_from_millis(1), Ok(1));
         assert_eq!(ticks_from_millis(10), Ok(1));
-        assert_eq!(ticks_from_millis(11), Ok(2));
+        assert_eq!(ticks_from_millis(15), Ok(2));
         set_apic_counter_hz(0);
     }
 }

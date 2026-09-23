@@ -61,6 +61,8 @@ pub(crate) struct LinuxMemState {
     fs_base: u64,
     tid_address: u64,
     pending_sleep_deadline: Option<Deadline>,
+    pending_sleep_request_ns: u64,
+    pending_sleep_start_tick: u64,
     pending_poll_deadline: Option<Deadline>,
 }
 
@@ -74,6 +76,8 @@ impl LinuxMemState {
         fs_base: 0,
         tid_address: 0,
         pending_sleep_deadline: None,
+        pending_sleep_request_ns: 0,
+        pending_sleep_start_tick: 0,
         pending_poll_deadline: None,
     };
 }
@@ -411,6 +415,43 @@ pub(crate) fn set_pending_sleep_deadline(
             .expect("slot")
             .state
             .pending_sleep_deadline = deadline;
+    }
+}
+
+pub(crate) fn set_pending_sleep_timing(
+    pid: u64,
+    generation: InstanceGeneration,
+    request_ns: u64,
+    start_tick: u64,
+) {
+    if let Some(index) = registry_mut().find(pid, generation) {
+        let state = &mut registry_mut().slots[index].as_mut().expect("slot").state;
+        state.pending_sleep_request_ns = request_ns;
+        state.pending_sleep_start_tick = start_tick;
+    }
+}
+
+pub(crate) fn clear_pending_sleep_timing(pid: u64, generation: InstanceGeneration) {
+    if let Some(index) = registry_mut().find(pid, generation) {
+        let state = &mut registry_mut().slots[index].as_mut().expect("slot").state;
+        state.pending_sleep_request_ns = 0;
+        state.pending_sleep_start_tick = 0;
+    }
+}
+
+pub(crate) fn finish_pending_nanosleep_wall_time(pid: u64, generation: InstanceGeneration) {
+    let Some(index) = registry_mut().find(pid, generation) else {
+        return;
+    };
+    let state = &registry_mut().slots[index].as_ref().expect("slot").state;
+    let request_ns = state.pending_sleep_request_ns;
+    if request_ns == 0 {
+        return;
+    }
+    let start_tick = state.pending_sleep_start_tick;
+    let elapsed_ns = crate::time::irq_elapsed_ns_since(start_tick);
+    if elapsed_ns < request_ns {
+        crate::time::calibration::busy_wait_pit_ns(request_ns - elapsed_ns);
     }
 }
 

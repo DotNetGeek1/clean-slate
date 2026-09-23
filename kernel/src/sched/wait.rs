@@ -1,4 +1,4 @@
-//! Native blocking/wake substrate for scheduler threads (#145).
+﻿//! Native blocking/wake substrate for scheduler threads (#145).
 
 #![allow(dead_code)]
 //!
@@ -203,11 +203,14 @@ fn log_stale_wake(pid: u64, generation: InstanceGeneration) {
 fn wake_thread_at_index(thread_index: usize, outcome: WaitOutcome) {
     let scheduler = unsafe { scheduler_mut() };
     let thread = &mut scheduler.threads[thread_index];
-    if thread.state != ThreadState::Blocked {
-        return;
-    }
+    // Always record the wake contract: `wait_resume_outcome` defaults to
+    // `Woken`, so skipping an update when the thread is no longer `Blocked`
+    // (e.g. timer preemption flipped it to `Ready` before `expire_deadlines`)
+    // would resume a blocked syscall as a spurious restart instead of `TimedOut`.
     thread.wait_resume_outcome = outcome;
-    thread.state = ThreadState::Ready;
+    if thread.state == ThreadState::Blocked {
+        thread.state = ThreadState::Ready;
+    }
 }
 
 /// Called ONLY from a syscall handler on the current thread.
@@ -413,6 +416,10 @@ extern "C" fn clean_slate_complete_blocked_syscall_resume() -> u64 {
                 if nr == clean_slate_linux_abi::SYS_NANOSLEEP {
                     let pid = scheduler.threads[index].owner_process_id;
                     if let Some(generation) = crate::process::live_instance_generation(pid) {
+                        crate::process::linux_mem::finish_pending_nanosleep_wall_time(
+                            pid, generation,
+                        );
+                        crate::process::linux_mem::clear_pending_sleep_timing(pid, generation);
                         crate::process::linux_mem::set_pending_sleep_deadline(
                             pid, generation, None,
                         );
