@@ -29,9 +29,12 @@
 //! and the `m8-linux-image` self-test.
 
 #![cfg_attr(
-    not(feature = "m8-linux-image"),
-    // Default builds have no `service::linux_launch` consumer (`m8-linux-image`
-    // gates that module); keep the loader compiling without dead_code noise.
+    not(any(
+        feature = "m8-linux-hello",
+        feature = "m8-linux-image-self-test",
+        feature = "m9-low-va-self-test",
+        feature = "m8-linux-dispatch-self-test"
+    )),
     allow(dead_code)
 )]
 
@@ -140,9 +143,18 @@ pub(crate) const LINUX_M8_LOAD_POLICY: LoadPlanPolicy = LoadPlanPolicy {
 };
 
 /// Conventional Linux user window for low-VA `ET_EXEC` images (#142).
-#[cfg(any(feature = "m9-low-va-self-test", test))]
+#[cfg(any(
+    feature = "m9-low-va-self-test",
+    feature = "m9-linux-exec-self-test",
+    test
+))]
 pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
     LoadPlanPolicy::linux_conventional_x86_64();
+
+/// M9 #146 argv/envp/auxv exec fixture (`fixtures/linux-exec-args/linux-exec-args-x86_64`).
+#[cfg(any(feature = "m9-linux-exec-self-test", test))]
+pub(crate) const LINUX_EXEC_ARGS_FIXTURE: &[u8] =
+    include_bytes!("../../../fixtures/linux-exec-args/linux-exec-args-x86_64");
 
 /// M9 low-VA hello fixture (`fixtures/linux-low-hello/hello-linux-low-x86_64`).
 #[cfg(any(feature = "m9-low-va-self-test", test))]
@@ -1206,12 +1218,12 @@ pub(crate) fn launch_linux_process(
     scheduler_slot: usize,
     elf_bytes: &[u8],
 ) -> Result<LaunchedLinuxProcess, LinuxImageError> {
-    launch_linux_process_with_policy(
+    let spec = crate::process::linux_exec::m8_hello_exec_spec(elf_bytes);
+    crate::process::linux_exec::launch_linux_process_from_spec(
         allocator,
         kernel_stack_top,
         scheduler_slot,
-        elf_bytes,
-        validate_linux_image,
+        &spec,
     )
 }
 

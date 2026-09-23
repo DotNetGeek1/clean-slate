@@ -1,8 +1,5 @@
 //! M9 #146: bounded Linux exec / process-image substrate (prepare + commit).
 
-// Wired by M8 hello / M9 linux-exec self-test / #102; keep compiling in default kernels.
-#![allow(dead_code)]
-
 use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::mm::address_space::destroy_process_address_space;
@@ -246,12 +243,13 @@ pub(crate) fn prepare_linux_image(
     let image_plan =
         validate_linux_image_with_stack(spec.image, spec.policy, layout, initial_stack)?;
     let built = build_linux_process_image(allocator, spec.image, &image_plan)?;
+    let page_table_frames = built.address_space.resource_counts().page_table_frames;
     Ok(PreparedLinuxImage {
         address_space: built.address_space,
         entry: built.entry,
         launch_rsp: built.launch_rsp,
         image_pages: built.image_pages,
-        page_table_frames: image_plan.page_table_frames,
+        page_table_frames,
     })
 }
 
@@ -267,6 +265,7 @@ pub(crate) fn launch_linux_process_from_spec(
     spec: &LinuxExecSpec<'_>,
 ) -> Result<LaunchedLinuxProcess, LinuxImageError> {
     let prepared = prepare_linux_image(allocator, spec)?;
+    let page_table_frames = prepared.address_space.resource_counts().page_table_frames;
     let image = crate::process::linux_image::LinuxProcessImage {
         address_space: prepared.address_space,
         entry: prepared.entry,
@@ -278,7 +277,7 @@ pub(crate) fn launch_linux_process_from_spec(
         kernel_stack_top,
         scheduler_slot,
         image,
-        prepared.page_table_frames,
+        page_table_frames,
     )
 }
 

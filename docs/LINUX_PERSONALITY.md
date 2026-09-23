@@ -136,11 +136,63 @@ Linux fd numbers must never be confused with capability handles.
 ## M9 extension points (explicit non-goals for M8)
 
 - Broader syscall coverage (BusyBox-class), filesystem/path projection, sockets
-- Auxv: `AT_RANDOM`, `AT_SECURE`, `AT_PLATFORM`
-- TLS / thread-local setup at entry
-- Dynamic linking, PIE, signals, `brk`/`mmap` breadth
+- `execve` syscall surface (#102), fork, dynamic linking, PIE, signals, `brk`/`mmap` breadth
+- TLS / thread-local setup at entry (beyond static musl auxv contract)
 
 See also: [COMPATIBILITY.md](COMPATIBILITY.md), [ROADMAP.md](ROADMAP.md) (M8/M9), [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## M9 #146 — Linux exec / process image substrate
+
+`kernel/src/process/linux_exec.rs` generalizes the M8 loader into a bounded,
+transactional exec substrate used by production launch (`launch_linux_process_from_spec`)
+and by M8 hello via `m8_hello_exec_spec`. The `execve` **syscall** (#102) is out of
+scope; this lane only prepares and commits static ET_EXEC images inside the kernel.
+
+### `LinuxExecSpec`
+
+| Field | Role |
+|-------|------|
+| `image` | Static ET_EXEC bytes (path-agnostic) |
+| `argv` / `envp` | Pointer arrays on the initial stack (bytes, not UTF-8) |
+| `exec_filename` | `AT_EXECFN` auxv string (bytes) |
+| `stack_pages` | User stack size in pages (one guard page below; W^X) |
+| `policy` | `LoadPlanPolicy` (same window / W^X rules as M8) |
+
+Deliberate limits (host-tested): `LINUX_EXEC_MAX_ARGS`, `LINUX_EXEC_MAX_ENVS`,
+`LINUX_EXEC_MAX_ARG_BYTES`, `LINUX_EXEC_MAX_STACK_PAGES`.
+
+### Prepare / commit semantics
+
+- **`prepare_linux_image`**: pure w.r.t. any live process — builds a fresh
+  `ProcessAddressSpace`, maps segments, constructs argv/envp/auxv on the stack,
+  returns `PreparedLinuxImage { entry, launch_rsp, page_table_frames, … }`. Any
+  failure destroys the partial address space; the caller's live image is untouched.
+- **`launch_linux_process_from_spec`**: fresh process registration (M8 hello, M9 low
+  hello, self-tests).
+- **`commit_exec`**: replaces the **calling thread's** user image in place. **Pid
+  and process instance generation stay unchanged** (exec is not a new Clean-Slate
+  instance). The old address space is reclaimed only after the new CR3, entry, and
+  launch RSP are installed on the user return frame. Multi-threaded Linux processes
+  are rejected before mutation (`LinuxImageError::ExecMultiThreaded`). `ExecCommitHooks`
+  (no-op default; #147 may close-on-exec) run after install.
+
+### musl 1.2.5 auxv (static ET_EXEC)
+
+Emitted set matches [M9_ABI_INVENTORY.md](M9_ABI_INVENTORY.md): `AT_PHDR`, `AT_PHENT`,
+`AT_PHNUM`, `AT_PAGESZ`, `AT_BASE = 0`, `AT_FLAGS`, `AT_ENTRY`, uid/gid pairs,
+`AT_SECURE = 0`, `AT_RANDOM` (16 bytes — **RDRAND** when available, documented
+fallback; fixed test bytes only under `m9-linux-exec-self-test`), `AT_EXECFN`, `AT_NULL`.
+
+Stack builder: `linux-abi/src/stack.rs` (`build_initial_stack_with_tail`).
+
+### Acceptance
+
+- Host: variable argv/envp layout, limit enforcement, auxv values, malformed-image
+  rollback, M8 canonical stack byte-identical.
+- QEMU: `cargo xtask test-m9-linux-exec` (`m9-linux-exec-self-test`) — fixture
+  `fixtures/linux-exec-args/linux-exec-args-x86_64` at `0x400000` prints argv/envp/auxv
+  (`[M9.F] argv/envp/auxv OK`), then `commit_exec` with new argv; failed prepare leaves
+  the live process running; teardown restores allocator baseline; `[M9.F] PASS`.
 
 ## M8.2 — ELF loader and process image (#92)
 

@@ -94,6 +94,9 @@ const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
 ];
 const M9_LOW_VA_ACCEPTANCE_MARKERS: [&str; 2] = ["[M9.0] creating", "[M9.0] PASS"];
 const M9_LOW_VA_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 3] =
+    ["[M9.F] creating", "[M9.F] argv/envp/auxv OK", "[M9.F] PASS"];
+const M9_LINUX_EXEC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[INT ] double-fault IST initialized",
     "[DF  ] double fault",
@@ -607,6 +610,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::Run => run_vm(),
         ParsedCommand::TestM1 => run_m1_acceptance(),
         ParsedCommand::TestM9LowVa => run_m9_low_va_acceptance(),
+        ParsedCommand::TestM9LinuxExec => run_m9_linux_exec_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
         ParsedCommand::TestM3 => run_m3_acceptance(),
         ParsedCommand::TestM3AddressSpace => run_m3_address_space_acceptance(),
@@ -987,6 +991,18 @@ fn run_m9_low_va_acceptance() -> Result<(), XtaskError> {
         false,
         &["m9-low-va-self-test"],
         Some((&M9_LOW_VA_ACCEPTANCE_MARKERS, M9_LOW_VA_ACCEPTANCE_TIMEOUT)),
+    )
+}
+
+fn run_m9_linux_exec_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m9-linux-exec-self-test"],
+        Some((
+            &M9_LINUX_EXEC_ACCEPTANCE_MARKERS,
+            M9_LINUX_EXEC_ACCEPTANCE_TIMEOUT,
+        )),
     )
 }
 
@@ -2581,6 +2597,7 @@ enum ParsedCommand {
     TestM6FixtureSmoke,
     TestM8LinuxImage,
     TestM9LowVa,
+    TestM9LinuxExec,
     TestM6Object,
     TestM7NetService,
     TestM7Network,
@@ -2608,6 +2625,11 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "run" => ParsedCommand::Run,
         Some(cmd) if cmd == "test-m1" => ParsedCommand::TestM1,
         Some(cmd) if cmd == "test-m9-low-va" || cmd == "m9-low-va" => ParsedCommand::TestM9LowVa,
+        Some(cmd)
+            if cmd == "test-m9-linux-exec" || cmd == "m9-linux-exec" || cmd == "m9.146" =>
+        {
+            ParsedCommand::TestM9LinuxExec
+        }
         Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,
         Some(cmd) if cmd == "test-m3" => ParsedCommand::TestM3,
         Some(cmd) if cmd == "test-m3-address-space" => ParsedCommand::TestM3AddressSpace,
