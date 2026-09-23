@@ -462,11 +462,10 @@ impl Scheduler {
         next_stack_pointer: u64,
         thread_index: usize,
     ) -> Result<u64, &'static str> {
-        let handoff = wait::scheduler_handoff_stack_pointer(next_stack_pointer, thread_index);
-        if handoff == SYSCALL_BLOCKED_RESUME_SENTINEL {
-            return idle::handoff_to_idle_thread();
-        }
-        Ok(handoff)
+        Ok(wait::scheduler_handoff_stack_pointer(
+            next_stack_pointer,
+            thread_index,
+        ))
     }
 
     pub(super) fn on_timer_interrupt_while_idle(
