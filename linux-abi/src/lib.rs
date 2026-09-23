@@ -15,12 +15,22 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod errno;
+pub mod runtime;
 pub mod stack;
 pub mod syscall;
 
 pub use errno::{
     decode_rax, encode_rax, LinuxErrno, LinuxSyscallResult, EACCES, EBADF, EFAULT, EINVAL, EMFILE,
     ENFILE, ENOENT, ENOEXEC, ENOMEM, ENOSYS, EPERM, ESRCH,
+};
+pub use runtime::{
+    decode_pollfd, decode_sigaction, decode_timespec, encode_pollfd, encode_sigaction,
+    encode_utsname_fields, PollFd, Sigaction, Timespec, ARCH_SET_FS, EAGAIN, EINTR, ENOTTY,
+    ETIMEDOUT, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT,
+    PROT_EXEC, PROT_NONE, PROT_READ, PROT_WRITE, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, SYS_ARCH_PRCTL,
+    SYS_BRK, SYS_GETPID, SYS_IOCTL, SYS_MMAP, SYS_MUNMAP, SYS_NANOSLEEP, SYS_POLL,
+    SYS_RT_SIGACTION, SYS_RT_SIGPROCMASK, SYS_SET_TID_ADDRESS, SYS_UNAME, TIOCGWINSZ, UTSNAME_SIZE,
+    _NSIG, SIGACTION_SIZE,
 };
 pub use stack::{
     build_initial_stack, build_initial_stack_with_tail, InitialStackBuilder, InitialStackImage,
