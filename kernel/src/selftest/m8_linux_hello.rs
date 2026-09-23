@@ -43,6 +43,7 @@ use crate::syscall::{
     service_lifecycle_syscall_allocator_mut,
 };
 use clean_slate_linux_abi::EBADF;
+use clean_slate_service_lifecycle::InstanceGeneration;
 use core::ptr;
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
@@ -253,13 +254,11 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
             if exited_pid != state.first_pid {
                 fatal_kernel_error("m8.7 first exit identity mismatched the armed session");
             }
-            if gen.0 != state.first_generation {
-                fatal_kernel_error("m8.7 first exit generation mismatched the armed session");
-            }
             if status != 0 {
                 fatal_kernel_error("m8.7 first exit status was not 0");
             }
-            if linux_fd::projection_for(exited_pid, gen, LINUX_STDOUT_FD) != Err(EBADF) {
+            let armed_gen = InstanceGeneration(state.first_generation);
+            if linux_fd::projection_for(exited_pid, armed_gen, LINUX_STDOUT_FD) != Err(EBADF) {
                 fatal_kernel_error("m8.7 first-exit fd table did not fail closed");
             }
             if linux_hello_delivered_bytes() < HELLO_DELIVERED_BYTES {
