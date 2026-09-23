@@ -10,29 +10,11 @@ use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
-#[cfg(not(any(
-    feature = "m2-self-test",
-    all(
-        feature = "m8-linux-hello",
-        not(feature = "m8-linux-hello-self-test")
-    )
-)))]
+#[cfg(not(feature = "m2-self-test"))]
 use crate::diagnostics::qemu::halt_loop;
-#[cfg(any(
-    feature = "m2-self-test",
-    all(
-        feature = "m8-linux-hello",
-        not(feature = "m8-linux-hello-self-test")
-    )
-))]
+#[cfg(feature = "m2-self-test")]
 use crate::diagnostics::qemu::qemu_exit;
-#[cfg(any(
-    feature = "m2-self-test",
-    all(
-        feature = "m8-linux-hello",
-        not(feature = "m8-linux-hello-self-test")
-    )
-))]
+#[cfg(feature = "m2-self-test")]
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::interrupt::timer::kernel_ticks;
 use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
@@ -159,24 +141,12 @@ fn emit_m2_pass_and_stop() -> ! {
         }
     }
 
-    #[cfg(any(
-        feature = "m2-self-test",
-        all(
-            feature = "m8-linux-hello",
-            not(feature = "m8-linux-hello-self-test")
-        )
-    ))]
+    #[cfg(feature = "m2-self-test")]
     {
         qemu_exit(QEMU_EXIT_SUCCESS)
     }
 
-    #[cfg(not(any(
-        feature = "m2-self-test",
-        all(
-            feature = "m8-linux-hello",
-            not(feature = "m8-linux-hello-self-test")
-        )
-    )))]
+    #[cfg(not(feature = "m2-self-test"))]
     {
         halt_loop()
     }
