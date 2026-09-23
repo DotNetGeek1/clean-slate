@@ -118,6 +118,21 @@ pub(crate) fn userspace_gdt_state() -> Result<&'static GdtState, &'static str> {
     }
 }
 
+pub(crate) fn register_gdt_tss_carve_outs() -> Result<(), &'static str> {
+    use crate::mm::layout::register_kernel_low_carve_out;
+    use core::mem::size_of;
+    let df = unsafe { &*DOUBLE_FAULT_STACK.get() };
+    let df_start = df.0.as_ptr() as u64;
+    register_kernel_low_carve_out(df_start, df_start + size_of::<DoubleFaultStack>() as u64)?;
+    let gdt_start = GDT_STATE.get() as *const _ as u64;
+    register_kernel_low_carve_out(gdt_start, gdt_start + size_of::<GdtState>() as u64)?;
+    let tss_start = TSS_STATE.get() as *const _ as u64;
+    register_kernel_low_carve_out(
+        tss_start,
+        tss_start + size_of::<Option<TaskStateSegment>>() as u64,
+    )
+}
+
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",

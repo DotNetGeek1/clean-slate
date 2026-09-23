@@ -319,14 +319,18 @@ fn handle_exception(context: &InterruptContext) -> u64 {
             handle_crash_service_page_fault(context)
         }
 
+        #[cfg(feature = "m9-low-va-self-test")]
+        if selector_rpl(context.cs) == 3 {
+            if let Some(next_stack_pointer) = crate::selftest::m9_low_va::handle_page_fault(context)
+            {
+                return next_stack_pointer;
+            }
+        }
+
         if selector_rpl(context.cs) == 3 {
             return handle_faulted_userspace_exception(context);
         }
 
-        #[cfg(feature = "m2-double-fault-self-test")]
-        if DOUBLE_FAULT_TEST_ACTIVE.load(Ordering::Relaxed) {
-            trigger_nested_double_fault();
-        }
         let fault_address = Cr2::read()
             .expect("CR2 must contain a canonical fault address")
             .as_u64();
@@ -352,6 +356,11 @@ fn handle_exception(context: &InterruptContext) -> u64 {
         if expected == fault_address {
             kernel_log_line("[M1  ] PASS");
             qemu_exit(QEMU_EXIT_SUCCESS)
+        }
+
+        #[cfg(feature = "m2-double-fault-self-test")]
+        if DOUBLE_FAULT_TEST_ACTIVE.load(Ordering::Relaxed) {
+            trigger_nested_double_fault();
         }
 
         kernel_log_line("[PF  ] unexpected page fault");

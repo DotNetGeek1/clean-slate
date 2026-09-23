@@ -41,15 +41,10 @@ impl LoadPlanPolicy {
         }
     }
 
-    /// Policy for absolute userspace VAs already at their final load addresses.
-    ///
-    /// Window is the single private PML4 user slot used today:
-    /// `[0x0000_4000_0000_0000, 1<<47)`. This is **not** the conventional Linux
-    /// low ET_EXEC base (`0x400000`); such images cannot be mapped under the
-    /// current identity-mapped kernel layout (see docs/ARCHITECTURE.md).
-    pub const fn absolute_user_x86_64() -> Self {
+    /// Conventional Linux user window: `[0x10000, 1<<47)` with page zero rejected.
+    pub const fn linux_conventional_x86_64() -> Self {
         Self {
-            user_va_lo: 0x0000_4000_0000_0000,
+            user_va_lo: 0x10000,
             user_va_hi: 1 << 47,
             max_segments: MAX_LOAD_SEGMENTS,
             page_size: 4096,
@@ -57,6 +52,43 @@ impl LoadPlanPolicy {
             reject_page_zero: true,
             allowed_e_types: &NATIVE_ALLOWED_E_TYPES,
         }
+    }
+
+    /// Legacy name for the M8 single-slot window policy.
+    pub const fn absolute_user_x86_64() -> Self {
+        Self::m8_legacy_slot_x86_64()
+    }
+
+    /// M8 frozen fixture window (single PML4 slot 128).
+    pub const fn m8_legacy_slot_x86_64() -> Self {
+        Self {
+            user_va_lo: 0x0000_4000_0000_0000,
+            user_va_hi: 0x0000_4080_0000_0000,
+            max_segments: MAX_LOAD_SEGMENTS,
+            page_size: 4096,
+            reject_write_execute: true,
+            reject_page_zero: true,
+            allowed_e_types: &NATIVE_ALLOWED_E_TYPES,
+        }
+    }
+
+    /// Returns true when `[vaddr, vaddr + len)` lies entirely inside this policy window.
+    pub const fn accepts_vaddr_range(self, vaddr: u64, len: u64) -> bool {
+        if len == 0 {
+            return vaddr >= self.user_va_lo && vaddr < self.user_va_hi;
+        }
+        let end = match vaddr.checked_add(len) {
+            Some(end) => end,
+            None => return false,
+        };
+        vaddr >= self.user_va_lo && end <= self.user_va_hi
+    }
+
+    /// Whether a segment at `vaddr` with `memsz` is accepted by conventional Linux
+    /// or the M8 legacy slot policy (#142 / #146 contract).
+    pub const fn accepts_linux_user_segment(vaddr: u64, memsz: u64) -> bool {
+        Self::linux_conventional_x86_64().accepts_vaddr_range(vaddr, memsz)
+            || Self::m8_legacy_slot_x86_64().accepts_vaddr_range(vaddr, memsz)
     }
 
     /// Whether `e_type` is accepted by this policy.
