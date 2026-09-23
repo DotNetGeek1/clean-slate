@@ -1,0 +1,5 @@
+dockerfile=fixtures/busybox/candidates/musl-minimal/Dockerfile
+build_image=alpine:3.21
+busybox_version=1.37.0
+CC=musl-gcc CONFIG_STATIC=y CONFIG_PIE=n
+LDFLAGS=-static -no-pie

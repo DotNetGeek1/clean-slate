@@ -1,0 +1,325 @@
+93    15:43:28.872591 execve("/usr/sbin/chroot", ["chroot", "/tmp/m9-rootfs", "/bin/sh", "-c", "\n      export PATH=/bin\n      /bin/busybox httpd -f -p 18080 -h /var/www &\n      HPID=$!\n      sleep 0.2\n      wget -O - http://127.0.0.1:18080/\n      kill $HPID 2>/dev/null || true\n    "], 0x7fff377cfc60 /* 6 vars */) = 0
+93    15:43:28.873278 arch_prctl(ARCH_SET_FS, 0x7f1a7ca6eb28) = 0
+93    15:43:28.873572 set_tid_address(0x7f1a7ca6ef90) = 93
+93    15:43:28.873796 brk(NULL)         = 0x56224d7e5000
+93    15:43:28.874103 brk(0x56224d7e7000) = 0x56224d7e7000
+93    15:43:28.874490 mmap(0x56224d7e5000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x56224d7e5000
+93    15:43:28.874964 open("/etc/ld-musl-x86_64.path", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+93    15:43:28.875386 open("/lib/libcrypto.so.3", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+93    15:43:28.876004 open("/usr/local/lib/libcrypto.so.3", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+93    15:43:28.876370 open("/usr/lib/libcrypto.so.3", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 3
+93    15:43:28.876711 fcntl(3, F_SETFD, FD_CLOEXEC) = 0
+93    15:43:28.877016 fstat(3, {st_mode=S_IFREG|0755, st_size=4498768, ...}) = 0
+93    15:43:28.877314 read(3, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0\20\237D\0\0\0\0\0\0\0\0\0@\08\0\v\0@\0\31\0\30\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\230\246\4\0\0\0\0\0\230\246\4\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0\260\4\0\0\0\0\0\0\260\4\0\0\0\0\0\0\260\4\0\0\0\0\0hl,\0\0\0\0\0hl,\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0 1\0\0\0\0\0\0 1\0\0\0\0\0"..., 960) = 960
+93    15:43:28.877611 mmap(NULL, 4513792, PROT_READ, MAP_PRIVATE, 3, 0) = 0x7f1a7c57c000
+93    15:43:28.878034 mmap(0x7f1a7c5c7000, 2912256, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED, 3, 0x4b000) = 0x7f1a7c5c7000
+93    15:43:28.878348 mmap(0x7f1a7c88e000, 888832, PROT_READ, MAP_PRIVATE|MAP_FIXED, 3, 0x312000) = 0x7f1a7c88e000
+93    15:43:28.878633 mmap(0x7f1a7c967000, 405504, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED, 3, 0x3ea000) = 0x7f1a7c967000
+93    15:43:28.878963 mmap(0x7f1a7c9c7000, 12288, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x7f1a7c9c7000
+93    15:43:28.879207 close(3)          = 0
+93    15:43:28.879459 open("/lib/libacl.so.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+93    15:43:28.879865 open("/usr/local/lib/libacl.so.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+93    15:43:28.880252 open("/usr/lib/libacl.so.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 3
+93    15:43:28.880621 fcntl(3, F_SETFD, FD_CLOEXEC) = 0
+93    15:43:28.881155 fstat(3, {st_mode=S_IFREG|0755, st_size=34576, ...}) = 0
+93    15:43:28.881629 read(3, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0\20\201\0\0\0\0\0\0\0\0\0\0@\08\0\v\0@\0\30\0\27\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0H\30\0\0\0\0\0\0H\30\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0 \0\0\0\0\0\0\0 \0\0\0\0\0\0\0 \0\0\0\0\0\0\2764\0\0\0\0\0\0\2764\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0`\0\0\0\0\0\0\0`\0\0\0\0\0\0"..., 960) = 960
+93    15:43:28.882237 mmap(NULL, 36864, PROT_READ, MAP_PRIVATE, 3, 0) = 0x7f1a7c573000
+93    15:43:28.882780 mmap(0x7f1a7c575000, 16384, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED, 3, 0x2000) = 0x7f1a7c575000
+93    15:43:28.883125 mmap(0x7f1a7c579000, 4096, PROT_READ, MAP_PRIVATE|MAP_FIXED, 3, 0x6000) = 0x7f1a7c579000
+93    15:43:28.883509 mmap(0x7f1a7c57a000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED, 3, 0x7000) = 0x7f1a7c57a000
+93    15:43:28.884013 close(3)          = 0
+93    15:43:28.884395 open("/lib/libattr.so.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+93    15:43:28.884781 open("/usr/local/lib/libattr.so.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+93    15:43:28.885106 open("/usr/lib/libattr.so.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 3
+93    15:43:28.885433 fcntl(3, F_SETFD, FD_CLOEXEC) = 0
+93    15:43:28.885701 fstat(3, {st_mode=S_IFREG|0755, st_size=22288, ...}) = 0
+93    15:43:28.886006 read(3, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0\20Q\0\0\0\0\0\0\0\0\0\0@\08\0\v\0@\0\30\0\27\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\300\22\0\0\0\0\0\0\300\22\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0 \0\0\0\0\0\0\0 \0\0\0\0\0\0\0 \0\0\0\0\0\08\32\0\0\0\0\0\08\32\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0@\0\0\0\0\0\0\0@\0\0\0\0\0\0"..., 960) = 960
+93    15:43:28.886311 mmap(NULL, 28672, PROT_READ, MAP_PRIVATE, 3, 0) = 0x7f1a7c56c000
+93    15:43:28.886528 mmap(0x7f1a7c56e000, 8192, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED, 3, 0x2000) = 0x7f1a7c56e000
+93    15:43:28.886775 mmap(0x7f1a7c570000, 4096, PROT_READ, MAP_PRIVATE|MAP_FIXED, 3, 0x4000) = 0x7f1a7c570000
+93    15:43:28.887036 mmap(0x7f1a7c571000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED, 3, 0x4000) = 0x7f1a7c571000
+93    15:43:28.887286 close(3)          = 0
+93    15:43:28.887754 open("/lib/libutmps.so.0.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+93    15:43:28.888140 open("/usr/local/lib/libutmps.so.0.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+93    15:43:28.888505 open("/usr/lib/libutmps.so.0.1", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 3
+93    15:43:28.888864 fcntl(3, F_SETFD, FD_CLOEXEC) = 0
+93    15:43:28.889218 fstat(3, {st_mode=S_IFREG|0755, st_size=13928, ...}) = 0
+93    15:43:28.889523 read(3, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0\3500\0\0\0\0\0\0\0\0\0\0@\08\0\n\0@\0\26\0\25\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0000\17\0\0\0\0\0\0000\17\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0\20\0\0\0\0\0\0\0\20\0\0\0\0\0\0\0\20\0\0\0\0\0\0k\t\0\0\0\0\0\0k\t\0\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0 \0\0\0\0\0\0\0 \0\0\0\0\0\0"..., 960) = 960
+93    15:43:28.889860 mmap(NULL, 20480, PROT_READ, MAP_PRIVATE, 3, 0) = 0x7f1a7c567000
+93    15:43:28.890150 mmap(0x7f1a7c568000, 4096, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED, 3, 0x1000) = 0x7f1a7c568000
+93    15:43:28.890434 mmap(0x7f1a7c569000, 4096, PROT_READ, MAP_PRIVATE|MAP_FIXED, 3, 0x2000) = 0x7f1a7c569000
+93    15:43:28.890751 mmap(0x7f1a7c56a000, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED, 3, 0x2000) = 0x7f1a7c56a000
+93    15:43:28.891112 close(3)          = 0
+93    15:43:28.891414 open("/lib/libskarnet.so.2.14", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+93    15:43:28.891960 open("/usr/local/lib/libskarnet.so.2.14", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+93    15:43:28.892394 open("/usr/lib/libskarnet.so.2.14", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 3
+93    15:43:28.892972 fcntl(3, F_SETFD, FD_CLOEXEC) = 0
+93    15:43:28.893528 fstat(3, {st_mode=S_IFREG|0755, st_size=195888, ...}) = 0
+93    15:43:28.893883 read(3, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0@\0\0\0\0\0\0\0p\367\2\0\0\0\0\0\0\0\0\0@\08\0\n\0@\0\27\0\26\0\1\0\0\0\4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\30\4\1\0\0\0\0\0\30\4\1\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\5\0\0\0\0\20\1\0\0\0\0\0\0\20\1\0\0\0\0\0\0\20\1\0\0\0\0\0&y\1\0\0\0\0\0&y\1\0\0\0\0\0\0\20\0\0\0\0\0\0\1\0\0\0\4\0\0\0\0\220\2\0\0\0\0\0\0\220\2\0\0\0\0\0"..., 960) = 960
+93    15:43:28.894248 mmap(NULL, 237568, PROT_READ, MAP_PRIVATE, 3, 0) = 0x7f1a7c52d000
+93    15:43:28.894683 mmap(0x7f1a7c53e000, 98304, PROT_READ|PROT_EXEC, MAP_PRIVATE|MAP_FIXED, 3, 0x11000) = 0x7f1a7c53e000
+93    15:43:28.894980 mmap(0x7f1a7c556000, 16384, PROT_READ, MAP_PRIVATE|MAP_FIXED, 3, 0x29000) = 0x7f1a7c556000
+93    15:43:28.895324 mmap(0x7f1a7c55a000, 53248, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED, 3, 0x2c000) = 0x7f1a7c55a000
+93    15:43:28.895683 mmap(0x7f1a7c55e000, 36864, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x7f1a7c55e000
+93    15:43:28.896006 close(3)          = 0
+93    15:43:28.896674 mprotect(0x7f1a7c967000, 380928, PROT_READ) = 0
+93    15:43:28.897030 mprotect(0x7f1a7c57a000, 4096, PROT_READ) = 0
+93    15:43:28.897353 mprotect(0x7f1a7c571000, 4096, PROT_READ) = 0
+93    15:43:28.897700 mprotect(0x7f1a7c56a000, 4096, PROT_READ) = 0
+93    15:43:28.897984 mprotect(0x7f1a7ca6b000, 4096, PROT_READ) = 0
+93    15:43:28.898394 mprotect(0x7f1a7c55a000, 12288, PROT_READ) = 0
+93    15:43:28.898771 mprotect(0x562222d41000, 45056, PROT_READ) = 0
+93    15:43:28.899077 prctl(PR_SET_NAME, "chroot") = 0
+93    15:43:28.899398 prctl(PR_SET_MM, PR_SET_MM_ARG_START, 0x7ffc99df9e81, 0, 0) = -1 EPERM (Operation not permitted)
+93    15:43:28.899682 readlink("/tmp", 0x7ffc99df7f00, 1023) = -1 EINVAL (Invalid argument)
+93    15:43:28.899945 readlink("/tmp/m9-rootfs", 0x7ffc99df7f00, 1023) = -1 EINVAL (Invalid argument)
+93    15:43:28.900240 chroot("/tmp/m9-rootfs") = 0
+93    15:43:28.900903 chdir("/")        = 0
+93    15:43:28.901344 execve("/bin/sh", ["/bin/sh", "-c", "\n      export PATH=/bin\n      /bin/busybox httpd -f -p 18080 -h /var/www &\n      HPID=$!\n      sleep 0.2\n      wget -O - http://127.0.0.1:18080/\n      kill $HPID 2>/dev/null || true\n    "], 0x7ffc99df8528 /* 6 vars */) = 0
+93    15:43:28.902442 arch_prctl(ARCH_SET_FS, 0x523278) = 0
+93    15:43:28.902903 set_tid_address(0x523bf8) = 93
+93    15:43:28.903228 getuid()          = 0
+93    15:43:28.903487 brk(NULL)         = 0x1b06e000
+93    15:43:28.903845 brk(0x1b070000)   = 0x1b070000
+93    15:43:28.904172 mmap(0x1b06e000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x1b06e000
+93    15:43:28.904614 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f20b5377000
+93    15:43:28.905033 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f20b5376000
+93    15:43:28.905358 getpid()          = 93
+93    15:43:28.905730 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f20b5375000
+93    15:43:28.906026 rt_sigprocmask(SIG_UNBLOCK, [RT_1 RT_2], NULL, 8) = 0
+93    15:43:28.906329 rt_sigaction(SIGCHLD, {sa_handler=0x46e54e, sa_mask=~[RTMIN RT_1 RT_2], sa_flags=SA_RESTORER, sa_restorer=0x4dfe02}, NULL, 8) = 0
+93    15:43:28.906640 getppid()         = 90
+93    15:43:28.906929 stat("/work", 0x7ffc21edc4a0) = -1 ENOENT (No such file or directory)
+93    15:43:28.907190 getcwd("/", 4096) = 2
+93    15:43:28.907414 rt_sigaction(SIGINT, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+93    15:43:28.907636 rt_sigaction(SIGINT, {sa_handler=0x46e54e, sa_mask=~[RTMIN RT_1 RT_2], sa_flags=SA_RESTORER, sa_restorer=0x4dfe02}, NULL, 8) = 0
+93    15:43:28.907853 rt_sigaction(SIGQUIT, NULL, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=0}, 8) = 0
+93    15:43:28.908113 rt_sigaction(SIGTERM, NULL, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+93    15:43:28.908506 rt_sigprocmask(SIG_BLOCK, ~[RTMIN RT_1 RT_2], [], 8) = 0
+93    15:43:28.908879 rt_sigprocmask(SIG_BLOCK, ~[], ~[KILL STOP RTMIN RT_1 RT_2], 8) = 0
+93    15:43:28.909199 fork()            = 94
+94    15:43:28.909823 set_tid_address(0x523bf8 <unfinished ...>
+93    15:43:28.909982 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2],  <unfinished ...>
+94    15:43:28.910110 <... set_tid_address resumed>) = 94
+93    15:43:28.910335 <... rt_sigprocmask resumed>NULL, 8) = 0
+94    15:43:28.910530 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2],  <unfinished ...>
+93    15:43:28.910759 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+94    15:43:28.911040 <... rt_sigprocmask resumed>NULL, 8) = 0
+93    15:43:28.911176 <... rt_sigprocmask resumed>NULL, 8) = 0
+94    15:43:28.911501 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+93    15:43:28.911665 stat("/bin/sleep",  <unfinished ...>
+94    15:43:28.911817 <... rt_sigprocmask resumed>NULL, 8) = 0
+93    15:43:28.911972 <... stat resumed>{st_mode=S_IFREG|0755, st_size=1185688, ...}) = 0
+94    15:43:28.912122 rt_sigaction(SIGINT, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02},  <unfinished ...>
+93    15:43:28.912259 rt_sigprocmask(SIG_BLOCK, ~[RTMIN RT_1 RT_2],  <unfinished ...>
+94    15:43:28.912380 <... rt_sigaction resumed>{sa_handler=0x46e54e, sa_mask=~[KILL STOP RTMIN RT_1 RT_2], sa_flags=SA_RESTORER, sa_restorer=0x4dfe02}, 8) = 0
+93    15:43:28.912485 <... rt_sigprocmask resumed>[], 8) = 0
+94    15:43:28.912634 rt_sigaction(SIGQUIT, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02},  <unfinished ...>
+93    15:43:28.912852 rt_sigprocmask(SIG_BLOCK, ~[],  <unfinished ...>
+94    15:43:28.912999 <... rt_sigaction resumed>{sa_handler=SIG_IGN, sa_mask=[], sa_flags=0}, 8) = 0
+93    15:43:28.913142 <... rt_sigprocmask resumed>~[KILL STOP RTMIN RT_1 RT_2], 8) = 0
+94    15:43:28.913338 close(0 <unfinished ...>
+93    15:43:28.913518 fork( <unfinished ...>
+94    15:43:28.913671 <... close resumed>) = 0
+93    15:43:28.913828 <... fork resumed>) = 95
+94    15:43:28.913966 open("/dev/null", O_RDONLY|O_LARGEFILE <unfinished ...>
+93    15:43:28.914112 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2],  <unfinished ...>
+95    15:43:28.914237 set_tid_address(0x523bf8 <unfinished ...>
+93    15:43:28.914361 <... rt_sigprocmask resumed>NULL, 8) = 0
+94    15:43:28.914472 <... open resumed>) = 0
+93    15:43:28.914588 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+95    15:43:28.914728 <... set_tid_address resumed>) = 95
+93    15:43:28.914842 <... rt_sigprocmask resumed>NULL, 8) = 0
+94    15:43:28.914962 execve("/bin/busybox", ["/bin/busybox", "httpd", "-f", "-p", "18080", "-h", "/var/www"], 0x7f20b5377c20 /* 6 vars */ <unfinished ...>
+93    15:43:28.915072 wait4(-1,  <unfinished ...>
+95    15:43:28.915204 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2], NULL, 8) = 0
+94    15:43:28.915462 <... execve resumed>) = 0
+95    15:43:28.915578 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+94    15:43:28.915716 arch_prctl(ARCH_SET_FS, 0x523278 <unfinished ...>
+95    15:43:28.915852 <... rt_sigprocmask resumed>NULL, 8) = 0
+94    15:43:28.915997 <... arch_prctl resumed>) = 0
+95    15:43:28.916118 rt_sigaction(SIGQUIT, NULL,  <unfinished ...>
+94    15:43:28.916230 set_tid_address(0x523bf8 <unfinished ...>
+95    15:43:28.916343 <... rt_sigaction resumed>{sa_handler=SIG_IGN, sa_mask=[], sa_flags=0}, 8) = 0
+94    15:43:28.916470 <... set_tid_address resumed>) = 94
+95    15:43:28.916589 execve("/bin/sleep", ["sleep", "0.2"], 0x7f20b53779c8 /* 6 vars */ <unfinished ...>
+94    15:43:28.916707 getuid()          = 0
+95    15:43:28.916938 <... execve resumed>) = 0
+94    15:43:28.917054 brk(NULL <unfinished ...>
+95    15:43:28.917219 arch_prctl(ARCH_SET_FS, 0x523278 <unfinished ...>
+94    15:43:28.917393 <... brk resumed>) = 0x31853000
+95    15:43:28.917533 <... arch_prctl resumed>) = 0
+94    15:43:28.917657 brk(0x31855000 <unfinished ...>
+95    15:43:28.917827 set_tid_address(0x523bf8 <unfinished ...>
+94    15:43:28.918141 <... brk resumed>) = 0x31855000
+95    15:43:28.918455 <... set_tid_address resumed>) = 95
+94    15:43:28.918631 mmap(0x31853000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+95    15:43:28.918787 getuid( <unfinished ...>
+94    15:43:28.919037 <... mmap resumed>) = 0x31853000
+95    15:43:28.919247 <... getuid resumed>) = 0
+94    15:43:28.919409 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+95    15:43:28.919652 nanosleep({tv_sec=0, tv_nsec=200000000},  <unfinished ...>
+94    15:43:28.919915 <... mmap resumed>) = 0x7f3d31dd9000
+94    15:43:28.920184 getcwd("/", 192)  = 2
+94    15:43:28.920725 chdir("/var/www") = 0
+94    15:43:28.921121 rt_sigaction(SIGCHLD, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+94    15:43:28.921509 socket(AF_INET6, SOCK_STREAM, IPPROTO_IP) = 3
+94    15:43:28.921872 setsockopt(3, SOL_SOCKET, SO_REUSEADDR, [1], 4) = 0
+94    15:43:28.922290 bind(3, {sa_family=AF_INET6, sin6_port=htons(18080), sin6_flowinfo=htonl(0), inet_pton(AF_INET6, "::", &sin6_addr), sin6_scope_id=0}, 28) = 0
+94    15:43:28.922594 listen(3, 9)      = 0
+94    15:43:28.922959 open("/etc/httpd.conf", O_RDONLY|O_LARGEFILE) = -1 ENOENT (No such file or directory)
+94    15:43:28.923274 open("httpd.conf", O_RDONLY|O_LARGEFILE) = -1 ENOENT (No such file or directory)
+94    15:43:28.923548 rt_sigprocmask(SIG_UNBLOCK, [RT_1 RT_2], NULL, 8) = 0
+94    15:43:28.923797 rt_sigaction(SIGHUP, {sa_handler=0x439a28, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+94    15:43:28.924058 accept(3,  <unfinished ...>
+95    15:43:29.120105 <... nanosleep resumed>0x7ffc51a0bbd8) = 0
+95    15:43:29.120444 exit_group(0)     = ?
+95    15:43:29.120974 +++ exited with 0 +++
+93    15:43:29.121254 <... wait4 resumed>[{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 95
+93    15:43:29.121433 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=95, si_uid=0, si_status=0, si_utime=0, si_stime=0} ---
+93    15:43:29.121627 rt_sigreturn({mask=[]}) = 95
+93    15:43:29.121930 wait4(-1, 0x7ffc21edc33c, WNOHANG, NULL) = 0
+93    15:43:29.122373 stat("/bin/wget", {st_mode=S_IFREG|0755, st_size=1185688, ...}) = 0
+93    15:43:29.122868 rt_sigprocmask(SIG_BLOCK, ~[RTMIN RT_1 RT_2], [], 8) = 0
+93    15:43:29.123245 rt_sigprocmask(SIG_BLOCK, ~[], ~[KILL STOP RTMIN RT_1 RT_2], 8) = 0
+93    15:43:29.123813 fork()            = 96
+96    15:43:29.124487 set_tid_address(0x523bf8 <unfinished ...>
+93    15:43:29.124626 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2],  <unfinished ...>
+96    15:43:29.124768 <... set_tid_address resumed>) = 96
+93    15:43:29.124885 <... rt_sigprocmask resumed>NULL, 8) = 0
+96    15:43:29.125029 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2],  <unfinished ...>
+93    15:43:29.125161 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+96    15:43:29.125290 <... rt_sigprocmask resumed>NULL, 8) = 0
+93    15:43:29.125404 <... rt_sigprocmask resumed>NULL, 8) = 0
+96    15:43:29.125518 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+93    15:43:29.125669 wait4(-1,  <unfinished ...>
+96    15:43:29.125796 <... rt_sigprocmask resumed>NULL, 8) = 0
+96    15:43:29.126001 rt_sigaction(SIGQUIT, NULL, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=0}, 8) = 0
+96    15:43:29.126344 execve("/bin/wget", ["wget", "-O", "-", "http://127.0.0.1:18080/"], 0x7f20b5377dc8 /* 6 vars */) = 0
+96    15:43:29.126803 arch_prctl(ARCH_SET_FS, 0x523278) = 0
+96    15:43:29.127135 set_tid_address(0x523bf8) = 96
+96    15:43:29.127366 getuid()          = 0
+96    15:43:29.127652 brk(NULL)         = 0x331ba000
+96    15:43:29.127936 brk(0x331bc000)   = 0x331bc000
+96    15:43:29.128192 mmap(0x331ba000, 4096, PROT_NONE, MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0) = 0x331ba000
+96    15:43:29.128499 mmap(NULL, 16384, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f882f64d000
+96    15:43:29.129031 rt_sigprocmask(SIG_UNBLOCK, [RT_1 RT_2], NULL, 8) = 0
+96    15:43:29.129447 rt_sigaction(SIGALRM, {sa_handler=0x45150d, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+96    15:43:29.129980 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f882f64c000
+96    15:43:29.130729 writev(2, [{iov_base="Connecting to 127.0.0.1:18080 (127.0.0.1:18080)\n", iov_len=48}, {iov_base=NULL, iov_len=0}], 2) = 48
+96    15:43:29.131104 setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=900, tv_usec=0}}, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=0, tv_usec=0}}) = 0
+96    15:43:29.131424 socket(AF_INET, SOCK_STREAM, IPPROTO_IP) = 3
+96    15:43:29.131736 connect(3, {sa_family=AF_INET, sin_port=htons(18080), sin_addr=inet_addr("127.0.0.1")}, 16) = 0
+94    15:43:29.132073 <... accept resumed>{sa_family=AF_INET6, sin6_port=htons(34932), sin6_flowinfo=htonl(0), inet_pton(AF_INET6, "::ffff:127.0.0.1", &sin6_addr), sin6_scope_id=0}, [28]) = 4
+96    15:43:29.132214 mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0 <unfinished ...>
+94    15:43:29.132348 setsockopt(4, SOL_SOCKET, SO_KEEPALIVE, [1], 4 <unfinished ...>
+96    15:43:29.132479 <... mmap resumed>) = 0x7f882f64b000
+94    15:43:29.132690 <... setsockopt resumed>) = 0
+96    15:43:29.132821 ioctl(3, TIOCGWINSZ <unfinished ...>
+94    15:43:29.132941 rt_sigprocmask(SIG_BLOCK, ~[RTMIN RT_1 RT_2],  <unfinished ...>
+96    15:43:29.133055 <... ioctl resumed>, 0x7ffdce5462e8) = -1 ENOTTY (Not a tty)
+94    15:43:29.133174 <... rt_sigprocmask resumed>[], 8) = 0
+96    15:43:29.133308 writev(3, [{iov_base="GET / HTTP/1.1\r\nHost: 127.0.0.1:18080\r\nUser-Agent: Wget\r\nConnection: close\r\n\r\n", iov_len=78}, {iov_base=NULL, iov_len=0}], 2 <unfinished ...>
+94    15:43:29.133441 rt_sigprocmask(SIG_BLOCK, ~[],  <unfinished ...>
+96    15:43:29.133566 <... writev resumed>) = 78
+94    15:43:29.133695 <... rt_sigprocmask resumed>~[KILL STOP RTMIN RT_1 RT_2], 8) = 0
+96    15:43:29.133823 setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=900, tv_usec=0}},  <unfinished ...>
+94    15:43:29.133955 fork( <unfinished ...>
+96    15:43:29.134099 <... setitimer resumed>{it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=899, tv_usec=997289}}) = 0
+96    15:43:29.134298 read(3,  <unfinished ...>
+97    15:43:29.134468 set_tid_address(0x523bf8 <unfinished ...>
+94    15:43:29.134833 <... fork resumed>) = 97
+97    15:43:29.134982 <... set_tid_address resumed>) = 97
+94    15:43:29.135763 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2],  <unfinished ...>
+97    15:43:29.136199 rt_sigprocmask(SIG_SETMASK, ~[KILL STOP RTMIN RT_1 RT_2],  <unfinished ...>
+94    15:43:29.136512 <... rt_sigprocmask resumed>NULL, 8) = 0
+97    15:43:29.136673 <... rt_sigprocmask resumed>NULL, 8) = 0
+94    15:43:29.136838 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+97    15:43:29.137100 rt_sigprocmask(SIG_SETMASK, [],  <unfinished ...>
+94    15:43:29.137263 <... rt_sigprocmask resumed>NULL, 8) = 0
+97    15:43:29.137475 <... rt_sigprocmask resumed>NULL, 8) = 0
+94    15:43:29.137693 close(4 <unfinished ...>
+97    15:43:29.137823 rt_sigaction(SIGHUP, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02},  <unfinished ...>
+94    15:43:29.137980 <... close resumed>) = 0
+97    15:43:29.138129 <... rt_sigaction resumed>{sa_handler=0x439a28, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02}, 8) = 0
+94    15:43:29.138347 accept(3,  <unfinished ...>
+97    15:43:29.138482 close(3)          = 0
+97    15:43:29.138791 dup2(4, 0)        = 0
+97    15:43:29.139135 close(4)          = 0
+97    15:43:29.139406 dup2(0, 1)        = 1
+97    15:43:29.139716 mmap(NULL, 28672, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f3d31dd2000
+97    15:43:29.140054 rt_sigaction(SIGALRM, {sa_handler=0x43a5cd, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+97    15:43:29.140345 setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=60, tv_usec=0}}, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=0, tv_usec=0}}) = 0
+97    15:43:29.140830 read(0, "GET / HTTP/1.1\r\nHost: 127.0.0.1:18080\r\nUser-Agent: Wget\r\nConnection: close\r\n\r\n", 1024) = 78
+97    15:43:29.141163 stat("index.html", {st_mode=S_IFREG|0644, st_size=17, ...}) = 0
+97    15:43:29.141671 setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=0, tv_usec=0}}, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=59, tv_usec=998515}}) = 0
+97    15:43:29.142311 open("index.html", O_RDONLY|O_LARGEFILE) = 3
+97    15:43:29.142717 rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x4dfe02}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+97    15:43:29.143116 write(1, "HTTP/1.1 200 OK\r\nDate: Tue, 22 Sep 2026 15:43:29 GMT\r\nConnection: close\r\nContent-type: text/html\r\nAccept-Ranges: bytes\r\nLast-Modified: Tue, 22 Sep 2026 15:43:16 GMT\r\nETag: \"6ab2a214-11\"\r\nContent-Lengt"..., 209) = 209
+96    15:43:29.143474 <... read resumed>"HTTP/1.1 200 OK\r\nDate: Tue, 22 Sep 2026 15:43:29 GMT\r\nConnection: close\r\nContent-type: text/html\r\nAccept-Ranges: bytes\r\nLast-Modified: Tue, 22 Sep 2026 15:43:16 GMT\r\nETag: \"6ab2a214-11\"\r\nContent-Lengt"..., 1024) = 209
+97    15:43:29.143604 sendfile(1, 3, [0] <unfinished ...>
+96    15:43:29.143772 setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=900, tv_usec=0}},  <unfinished ...>
+97    15:43:29.143907 <... sendfile resumed> => [17], 9223372036854710272) = 17
+96    15:43:29.144044 <... setitimer resumed>{it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=899, tv_usec=990049}}) = 0
+97    15:43:29.144168 sendfile(1, 3, [17] <unfinished ...>
+96    15:43:29.144275 setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=900, tv_usec=0}},  <unfinished ...>
+97    15:43:29.144380 <... sendfile resumed>, 9223372036854710272) = 0
+96    15:43:29.144487 <... setitimer resumed>{it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=899, tv_usec=999525}}) = 0
+97    15:43:29.144597 shutdown(1, SHUT_WR <unfinished ...>
+96    15:43:29.144713 setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=900, tv_usec=0}},  <unfinished ...>
+97    15:43:29.144828 <... shutdown resumed>) = 0
+96    15:43:29.144936 <... setitimer resumed>{it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=899, tv_usec=999552}}) = 0
+97    15:43:29.145047 exit_group(0 <unfinished ...>
+96    15:43:29.145178 setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=900, tv_usec=0}},  <unfinished ...>
+97    15:43:29.145371 <... exit_group resumed>) = ?
+96    15:43:29.145467 <... setitimer resumed>{it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=899, tv_usec=999544}}) = 0
+97    15:43:29.145603 +++ exited with 0 +++
+96    15:43:29.145734 setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=900, tv_usec=0}}, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=899, tv_usec=999427}}) = 0
+96    15:43:29.145998 setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=900, tv_usec=0}}, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=899, tv_usec=999747}}) = 0
+96    15:43:29.146274 setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=900, tv_usec=0}}, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=899, tv_usec=999627}}) = 0
+96    15:43:29.146849 setitimer(ITIMER_REAL, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=900, tv_usec=0}}, {it_interval={tv_sec=0, tv_usec=0}, it_value={tv_sec=899, tv_usec=999486}}) = 0
+96    15:43:29.147410 writev(2, [{iov_base="", iov_len=0}, {iov_base="writing to stdout\n", iov_len=18}], 2) = 18
+96    15:43:29.148187 fcntl(3, F_GETFL) = 0x2 (flags O_RDWR)
+96    15:43:29.148692 fcntl(3, F_SETFL, O_RDWR|O_NONBLOCK|O_LARGEFILE) = 0
+96    15:43:29.149040 readv(3, [{iov_base="hello-from-httpd", iov_len=16}, {iov_base="\n", iov_len=1024}], 2) = 17
+96    15:43:29.149427 write(1, "hello-from-httpd\n", 17) = 17
+96    15:43:29.149789 fcntl(3, F_GETFL) = 0x802 (flags O_RDWR|O_NONBLOCK)
+96    15:43:29.150157 fcntl(3, F_SETFL, O_RDWR|O_LARGEFILE) = 0
+96    15:43:29.150541 ioctl(2, TIOCGWINSZ, 0x7ffdce546238) = -1 ENOTTY (Not a tty)
+96    15:43:29.151697 writev(2, [{iov_base="-                    ", iov_len=21}, {iov_base=NULL, iov_len=0}], 2) = 21
+96    15:43:29.152057 writev(2, [{iov_base="100% ", iov_len=5}, {iov_base=NULL, iov_len=0}], 2) = 5
+96    15:43:29.152398 ioctl(2, TIOCGWINSZ, 0x7ffdce5461f0) = -1 ENOTTY (Not a tty)
+96    15:43:29.152747 writev(2, [{iov_base="|********************************| ", iov_len=35}, {iov_base=NULL, iov_len=0}], 2) = 35
+96    15:43:29.153056 writev(2, [{iov_base="", iov_len=0}, {iov_base="   17", iov_len=5}], 2) = 5
+96    15:43:29.153610 writev(2, [{iov_base="  0:00:00 ETA", iov_len=13}, {iov_base=NULL, iov_len=0}], 2) = 13
+96    15:43:29.154308 writev(2, [{iov_base="", iov_len=0}, {iov_base="\n", iov_len=1}], 2) = 1
+96    15:43:29.155226 lseek(1, 0, SEEK_CUR) = -1 ESPIPE (Invalid seek)
+96    15:43:29.155716 writev(2, [{iov_base="", iov_len=0}, {iov_base="written to stdout\n", iov_len=18}], 2) = 18
+96    15:43:29.156195 close(3)          = 0
+96    15:43:29.156543 munmap(0x7f882f64b000, 4096) = 0
+96    15:43:29.156909 munmap(0x7f882f64c000, 4096) = 0
+96    15:43:29.157204 close(1)          = 0
+96    15:43:29.157509 exit_group(0)     = ?
+96    15:43:29.157871 +++ exited with 0 +++
+93    15:43:29.157979 <... wait4 resumed>[{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 96
+93    15:43:29.158137 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=96, si_uid=0, si_status=0, si_utime=0, si_stime=0} ---
+93    15:43:29.158311 rt_sigreturn({mask=[]}) = 96
+93    15:43:29.158584 wait4(-1, 0x7ffc21edc33c, WNOHANG, NULL) = 0
+93    15:43:29.158834 open("/dev/null", O_WRONLY|O_CREAT|O_TRUNC|O_LARGEFILE, 0666) = 3
+93    15:43:29.159142 fcntl(2, F_DUPFD_CLOEXEC, 10) = 10
+93    15:43:29.159455 fcntl(10, F_SETFD, FD_CLOEXEC) = 0
+93    15:43:29.159816 dup2(3, 2)        = 2
+93    15:43:29.160090 close(3)          = 0
+93    15:43:29.160359 getpid()          = 93
+93    15:43:29.160597 kill(94, SIGTERM) = 0
+94    15:43:29.160883 <... accept resumed>0x7ffc59315cf0, [28]) = ? ERESTARTSYS (To be restarted if SA_RESTART is set)
+93    15:43:29.161011 dup2(10, 2 <unfinished ...>
+94    15:43:29.161141 --- SIGTERM {si_signo=SIGTERM, si_code=SI_USER, si_pid=93, si_uid=0} ---
+93    15:43:29.161264 <... dup2 resumed>) = 2
+93    15:43:29.161409 close(10 <unfinished ...>
+94    15:43:29.161525 +++ killed by SIGTERM +++
+93    15:43:29.161628 <... close resumed>) = 0
+93    15:43:29.161751 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_KILLED, si_pid=94, si_uid=0, si_status=SIGTERM, si_utime=0, si_stime=0} ---
+93    15:43:29.162182 rt_sigreturn({mask=[]}) = 0
+93    15:43:29.162745 exit_group(0)     = ?
+93    15:43:29.163533 +++ exited with 0 +++

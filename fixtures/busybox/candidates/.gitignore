@@ -1,0 +1,3 @@
+# Phase A does not commit multi-MB binaries; reproduce via build.sh / Dockerfile.
+busybox
+**/busybox
