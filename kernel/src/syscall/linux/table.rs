@@ -3,14 +3,17 @@
 #[cfg(feature = "m9-linux-exec-self-test")]
 use super::execve::handle_sys_execve;
 use super::exit::handle_sys_exit;
-use super::fd::{handle_sys_close, handle_sys_dup2, handle_sys_fcntl, handle_sys_writev};
+use super::fd::{
+    handle_sys_close, handle_sys_dup2, handle_sys_fcntl, handle_sys_lseek, handle_sys_read,
+    handle_sys_writev,
+};
 use super::write::handle_sys_write;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 #[cfg(feature = "m9-linux-exec-self-test")]
 use clean_slate_linux_abi::SYS_EXECVE;
 use clean_slate_linux_abi::{
-    LinuxSyscallRequest, LinuxSyscallResult, SYS_CLOSE, SYS_DUP2, SYS_EXIT, SYS_FCNTL, SYS_WRITE,
-    SYS_WRITEV,
+    LinuxSyscallRequest, LinuxSyscallResult, SYS_CLOSE, SYS_DUP2, SYS_EXIT, SYS_FCNTL, SYS_LSEEK,
+    SYS_READ, SYS_WRITE, SYS_WRITEV,
 };
 use clean_slate_service_lifecycle::InstanceGeneration;
 
@@ -40,8 +43,26 @@ pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
     lookup_core_handler(nr)
         .or_else(|| super::fs::lookup_handler(nr))
         .or_else(|| super::process::lookup_handler(nr))
-        .or_else(|| super::runtime::lookup_handler(nr))
+        .or_else(|| runtime_lookup(nr))
         .or_else(|| super::socket::lookup_handler(nr))
+}
+
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+fn runtime_lookup(nr: u64) -> Option<LinuxSyscallHandler> {
+    super::runtime::lookup_handler(nr)
+}
+
+#[cfg(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+))]
+fn runtime_lookup(_nr: u64) -> Option<LinuxSyscallHandler> {
+    None
 }
 
 fn lookup_core_handler(nr: u64) -> Option<LinuxSyscallHandler> {
@@ -52,6 +73,8 @@ fn lookup_core_handler(nr: u64) -> Option<LinuxSyscallHandler> {
         SYS_DUP2 => Some(handle_sys_dup2),
         SYS_EXIT => Some(handle_sys_exit),
         SYS_FCNTL => Some(handle_sys_fcntl),
+        SYS_READ => Some(handle_sys_read),
+        SYS_LSEEK => Some(handle_sys_lseek),
         #[cfg(feature = "m9-linux-exec-self-test")]
         SYS_EXECVE => Some(handle_sys_execve),
         _ => None,
@@ -65,7 +88,7 @@ fn family_claims(nr: u64) -> usize {
         lookup_core_handler(nr).is_some(),
         super::fs::lookup_handler(nr).is_some(),
         super::process::lookup_handler(nr).is_some(),
-        super::runtime::lookup_handler(nr).is_some(),
+        runtime_lookup(nr).is_some(),
         super::socket::lookup_handler(nr).is_some(),
     ]
     .iter()

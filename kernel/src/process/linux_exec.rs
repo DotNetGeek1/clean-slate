@@ -76,6 +76,8 @@ pub(crate) struct PreparedLinuxImage {
     pub(crate) launch_rsp: u64,
     pub(crate) image_pages: usize,
     pub(crate) page_table_frames: usize,
+    pub(crate) brk_initial: u64,
+    pub(crate) layout: LinuxImageLayout,
 }
 
 fn validate_spec_strings(spec: &LinuxExecSpec<'_>) -> Result<(), LinuxImageError> {
@@ -139,6 +141,14 @@ fn fill_at_random(out: &mut [u8; 16]) {
 
 static PREPARE_IMAGE_PLAN: GlobalCell<Option<LinuxImagePlan>> = GlobalCell::new(None);
 static PREPARE_LOAD_PLAN: GlobalCell<Option<clean_slate_elf::LoadPlan>> = GlobalCell::new(None);
+
+#[cfg(feature = "m9-linux-runtime-self-test")]
+pub(crate) fn reset_prepare_linux_image_scratch() {
+    unsafe {
+        *PREPARE_IMAGE_PLAN.get() = None;
+        *PREPARE_LOAD_PLAN.get() = None;
+    }
+}
 
 fn assert_kernel_task_stack_margin(context: &'static str) {
     let current_rsp: u64;
@@ -299,17 +309,19 @@ pub(crate) fn prepare_linux_image(
             load_plan_slot,
             initial_stack,
         )?);
-        let load_plan = load_plan_slot
-            .as_ref()
-            .ok_or(LinuxImageError::Registry("prepare load plan missing"))?;
         let bytes_len = plan_slot.as_ref().unwrap().launch_stack.bytes_len;
+        let load_plan = clean_slate_elf::parse_load_plan(spec.image, spec.policy)
+            .map_err(LinuxImageError::LoadPlan)?;
         let built = build_linux_process_image(
             allocator,
             spec.image,
-            load_plan,
+            &load_plan,
             plan_slot.as_ref().unwrap(),
             &initial_stack.bytes[..bytes_len],
         )?;
+        let image_plan = plan_slot.as_ref().expect("plan");
+        let brk_initial = crate::process::linux_mem::brk_initial_from_load_plan(&load_plan);
+        let layout = image_plan.layout;
         plan_slot.take();
         let page_table_frames = built.address_space.resource_counts().page_table_frames;
         Ok(PreparedLinuxImage {
@@ -318,6 +330,8 @@ pub(crate) fn prepare_linux_image(
             launch_rsp: built.launch_rsp,
             image_pages: built.image_pages,
             page_table_frames,
+            brk_initial,
+            layout,
         })
     })
 }
@@ -341,13 +355,25 @@ pub(crate) fn launch_linux_process_from_spec(
         launch_rsp: prepared.launch_rsp,
         image_pages: prepared.image_pages,
     };
-    register_linux_process(
+    let launched = register_linux_process(
         allocator,
         kernel_stack_top,
         scheduler_slot,
         image,
         page_table_frames,
+    )?;
+    crate::process::linux_mem::init_for_image(
+        launched.pid,
+        launched.instance_generation,
+        &prepared.layout,
+        prepared.brk_initial,
     )
+    .map_err(|_| LinuxImageError::Registry("linux launch: brk init failed"))?;
+    #[cfg(feature = "m9-rootfs")]
+    crate::process::linux_fs::grant_linux_tmp_object_capabilities(launched.pid).map_err(|_| {
+        LinuxImageError::Registry("linux launch: tmp object capability grant failed")
+    })?;
+    Ok(launched)
 }
 
 #[cfg(not(any(

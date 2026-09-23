@@ -5,11 +5,11 @@
 //! `Deadline` is an absolute `kernel_ticks()` value (APIC timer increments; uncalibrated).
 
 use crate::arch::x86_64::context_switch::resume_after_scheduler_handoff;
-use crate::interrupt::timer::kernel_ticks;
 use crate::arch::x86_64::context_switch::SYSCALL_BLOCKED_RESUME_SENTINEL;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
+use crate::interrupt::timer::kernel_ticks;
 use crate::process::live_instance_generation;
 use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 use crate::sched::scheduler_mut;
@@ -278,10 +278,8 @@ pub(crate) fn block_current_thread_with_resume(
         };
 
         scheduler.threads[thread_index].state = ThreadState::Blocked;
-        #[cfg(not(feature = "m9-linux-runtime-self-test"))]
+        #[cfg(feature = "m9-block-wake-self-test")]
         kernel_log_fmt(format_args!("[M9.E] blocked tid={} key={}\n", tid, key.0));
-        #[cfg(feature = "m9-linux-runtime-self-test")]
-        crate::selftest::m9_linux_runtime::on_runtime_blocked(pid, key);
         Ok(true)
     })?;
 
@@ -417,6 +415,15 @@ extern "C" fn clean_slate_complete_blocked_syscall_resume() -> u64 {
         let resume = take_blocked_resume(index);
         let frame = unsafe { &mut *(frame_ptr as *mut SyscallContext) };
         apply_blocked_resume(frame, resume, outcome);
+        #[cfg(feature = "m9-linux-runtime-self-test")]
+        if outcome == WaitOutcome::TimedOut {
+            if let BlockedResume::RestartSyscall { nr, .. } = resume {
+                if nr == clean_slate_linux_abi::SYS_NANOSLEEP {
+                    let pid = scheduler.threads[index].owner_process_id;
+                    crate::selftest::m9_linux_runtime::on_scheduler_nanosleep_timeout(pid);
+                }
+            }
+        }
         #[cfg(feature = "m9-block-wake-self-test")]
         crate::selftest::m9_block_wake::on_blocked_syscall_resumed(outcome, frame.rax);
         frame_ptr

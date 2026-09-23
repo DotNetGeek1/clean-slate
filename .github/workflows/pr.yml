@@ -104,6 +104,9 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-runtime-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-rootfs -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-rootfs-self-test -- -D warnings
+          # m9-linux-fs-self-test implies m6-object-self-test and embeds the storage
+          # userspace ELF at build time; like the M5/M6 self-test features it is
+          # built (with RUSTFLAGS=-D warnings) by the acceptance job via xtask.
 
       - name: Clippy (kernel host tests)
         run: cargo clippy -p clean-slate-kernel --lib --tests -- -D warnings

@@ -143,7 +143,7 @@ fn handle_sys_rt_sigaction(
             &mut scratch,
         )?;
         let bytes = &scratch[..copied];
-        Some(decode_sigaction(&bytes)?)
+        Some(decode_sigaction(bytes)?)
     } else {
         None
     };
@@ -200,7 +200,7 @@ fn handle_sys_nanosleep(
     let mut scratch = [0u8; LINUX_USER_COPY_MAX_BYTES];
     let copied = copy_user_bytes(req_ptr, 16, &mut scratch)?;
     let bytes = &scratch[..copied];
-    let ts = decode_timespec(&bytes)?;
+    let ts = decode_timespec(bytes)?;
     if ts.tv_sec == 0 && ts.tv_nsec == 0 {
         if rem_ptr != 0 {
             write_zero_timespec(rem_ptr)?;
@@ -216,6 +216,16 @@ fn handle_sys_nanosleep(
             let abs = kernel_ticks().checked_add(ticks).ok_or(EINVAL)?;
             let d = Deadline(abs);
             linux_mem::set_pending_sleep_deadline(ctx.pid, ctx.instance_generation, Some(d));
+            #[cfg(feature = "m9-linux-runtime-self-test")]
+            {
+                crate::selftest::m9_linux_runtime::mark_sleep_block_start();
+                let block_start = abs.saturating_sub(ticks);
+                crate::selftest::m9_linux_runtime::record_nanosleep_self_test(
+                    ctx.pid,
+                    ts,
+                    block_start,
+                );
+            }
             d
         }
     };
@@ -225,37 +235,31 @@ fn handle_sys_nanosleep(
             write_zero_timespec(rem_ptr)?;
         }
         #[cfg(feature = "m9-linux-runtime-self-test")]
-        crate::selftest::m9_linux_runtime::on_nanosleep_complete(ctx.pid, ts);
+        {
+            let req_ticks = ticks_from_timespec(ts)?;
+            let block_start = deadline.0.saturating_sub(req_ticks);
+            crate::selftest::m9_linux_runtime::on_nanosleep_complete(ctx.pid, ts, block_start);
+        }
         return Ok(0);
     }
-    #[cfg(feature = "m9-linux-runtime-self-test")]
-    {
-        use crate::sched::wait::{block_current_thread, WaitOutcome};
-        crate::selftest::m9_linux_runtime::on_runtime_blocked(
-            ctx.pid,
-            nanosleep_wait_key(ctx.pid),
-        );
-        if kernel_ticks() < deadline.0 {
-            match block_current_thread(ctx.frame, nanosleep_wait_key(ctx.pid), Some(deadline)) {
-                Ok(WaitOutcome::TimedOut) | Ok(WaitOutcome::Woken) => {}
-                Ok(WaitOutcome::Cancelled) => return Err(clean_slate_linux_abi::EINTR),
-                Err(message) => crate::diagnostics::qemu::fatal_kernel_error(message),
-            }
-        }
-        linux_mem::set_pending_sleep_deadline(ctx.pid, ctx.instance_generation, None);
-        if rem_ptr != 0 {
-            write_zero_timespec(rem_ptr)?;
-        }
-        crate::selftest::m9_linux_runtime::on_nanosleep_complete(ctx.pid, ts);
-        return Ok(0);
-    }
-    block_linux_syscall(
+    let result = block_linux_syscall(
         request,
         ctx,
         nanosleep_wait_key(ctx.pid),
         Some(deadline),
         LinuxTimeoutResult::Zero,
-    )
+    );
+    #[cfg(feature = "m9-linux-runtime-self-test")]
+    if result == Ok(0) {
+        let req_ticks = ticks_from_timespec(ts)?;
+        let block_start = deadline.0.saturating_sub(req_ticks);
+        crate::selftest::m9_linux_runtime::on_nanosleep_complete(ctx.pid, ts, block_start);
+        linux_mem::set_pending_sleep_deadline(ctx.pid, ctx.instance_generation, None);
+        if rem_ptr != 0 {
+            write_zero_timespec(rem_ptr)?;
+        }
+    }
+    result
 }
 
 fn handle_sys_poll(
@@ -286,16 +290,17 @@ fn handle_sys_poll(
         pollfds[index] =
             decode_pollfd(&buf[index * USER_COPY_POLL..index * USER_COPY_POLL + USER_COPY_POLL])?;
     }
-    for index in 0..nfds {
-        let fd = pollfds[index].fd;
-        if fd >= 0 {
-            if let Ok(open_id) =
-                linux_fd::open_description_id_for_fd(ctx.pid, ctx.instance_generation, fd as u64)
-            {
+    for pollfd in &mut pollfds[..nfds] {
+        if pollfd.fd >= 0 {
+            if let Ok(open_id) = linux_fd::open_description_id_for_fd(
+                ctx.pid,
+                ctx.instance_generation,
+                pollfd.fd as u64,
+            ) {
                 let _ = register_poll_interest(open_id, ctx.pid);
             }
         }
-        pollfds[index].revents = fd_readiness(ctx, pollfds[index].fd, pollfds[index].events)?;
+        pollfd.revents = fd_readiness(ctx, pollfd.fd, pollfd.events)?;
     }
     let ready = pollfds[..nfds].iter().filter(|p| p.revents != 0).count();
     if ready > 0 {
@@ -341,35 +346,39 @@ fn poll_wait_with_timeout(
             clear_poll_interest_for_pid(ctx.pid);
             linux_mem::set_pending_poll_deadline(ctx.pid, ctx.instance_generation, None);
             #[cfg(feature = "m9-linux-runtime-self-test")]
-            crate::selftest::m9_linux_runtime::on_poll_timeout_complete(ctx.pid);
-            return Ok(0);
-        }
-    }
-    #[cfg(feature = "m9-linux-runtime-self-test")]
-    if nfds == 0 {
-        if let Some(d) = deadline {
-            use crate::sched::wait::{block_current_thread, WaitOutcome};
-            crate::selftest::m9_linux_runtime::on_runtime_blocked(ctx.pid, poll_wait_key(ctx.pid));
-            if kernel_ticks() < d.0 {
-                match block_current_thread(ctx.frame, poll_wait_key(ctx.pid), Some(d)) {
-                    Ok(WaitOutcome::TimedOut) | Ok(WaitOutcome::Woken) => {}
-                    Ok(WaitOutcome::Cancelled) => return Err(clean_slate_linux_abi::EINTR),
-                    Err(message) => crate::diagnostics::qemu::fatal_kernel_error(message),
-                }
+            if nfds == 0 && timeout_ms > 0 {
+                let req_ticks = ticks_from_millis(timeout_ms as u64)?;
+                let block_start = d.0.saturating_sub(req_ticks);
+                crate::selftest::m9_linux_runtime::on_poll_timeout_complete(
+                    ctx.pid,
+                    timeout_ms as u64,
+                    block_start,
+                );
             }
-            clear_poll_interest_for_pid(ctx.pid);
-            linux_mem::set_pending_poll_deadline(ctx.pid, ctx.instance_generation, None);
-            crate::selftest::m9_linux_runtime::on_poll_timeout_complete(ctx.pid);
             return Ok(0);
         }
     }
-    block_linux_syscall(
+    let result = block_linux_syscall(
         request,
         ctx,
         poll_wait_key(ctx.pid),
         deadline,
         LinuxTimeoutResult::Zero,
-    )
+    );
+    #[cfg(feature = "m9-linux-runtime-self-test")]
+    if result == Ok(0) && nfds == 0 && timeout_ms > 0 {
+        if let Some(d) = deadline {
+            let req_ticks = ticks_from_millis(timeout_ms as u64)?;
+            let block_start = d.0.saturating_sub(req_ticks);
+            crate::selftest::m9_linux_runtime::on_poll_timeout_complete(
+                ctx.pid,
+                timeout_ms as u64,
+                block_start,
+            );
+        }
+        linux_mem::set_pending_poll_deadline(ctx.pid, ctx.instance_generation, None);
+    }
+    result
 }
 
 fn fd_readiness(

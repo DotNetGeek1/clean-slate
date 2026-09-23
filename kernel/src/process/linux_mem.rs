@@ -13,8 +13,8 @@ use crate::sched::wait::Deadline;
 use crate::sched::TASK_COUNT;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_linux_abi::{
-    LinuxErrno, EACCES, EINVAL, ENOMEM, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_NONE,
-    PROT_READ, PROT_WRITE,
+    LinuxErrno, EACCES, EFAULT, EINVAL, ENOMEM, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC,
+    PROT_NONE, PROT_READ, PROT_WRITE,
 };
 use clean_slate_service_lifecycle::InstanceGeneration;
 use core::ptr;
@@ -147,12 +147,22 @@ where
     result
 }
 
+#[cfg(any(test, feature = "m9-linux-runtime-self-test"))]
 pub(crate) fn occupied_slots() -> usize {
     registry_mut()
         .slots
         .iter()
         .filter(|slot| slot.is_some())
         .count()
+}
+
+pub(crate) fn brk_initial_from_load_plan(plan: &clean_slate_elf::LoadPlan) -> u64 {
+    let mut high = 0u64;
+    for segment in plan.iter_segments() {
+        let end = segment.vaddr.saturating_add(segment.memsz);
+        high = high.max(end);
+    }
+    align_up(high, PAGE_SIZE)
 }
 
 pub(crate) fn init_for_image(
@@ -302,7 +312,11 @@ pub(crate) fn sys_arch_prctl(
         }
         clean_slate_linux_abi::ARCH_GET_FS => {
             validate_user_writable_pointer_range(addr, 8).map_err(|_| EINVAL)?;
-            let fs = registry_mut().slots[index].as_ref().expect("slot").state.fs_base;
+            let fs = registry_mut().slots[index]
+                .as_ref()
+                .expect("slot")
+                .state
+                .fs_base;
             unsafe {
                 *(addr as *mut u64) = fs;
             }
@@ -422,6 +436,7 @@ pub(crate) fn set_pending_poll_deadline(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sys_mmap(
     addr: u64,
     len: u64,
@@ -581,7 +596,7 @@ pub(crate) fn copy_utsname_to_user(
     _generation: InstanceGeneration,
 ) -> Result<(), LinuxErrno> {
     validate_user_writable_pointer_range(out, clean_slate_linux_abi::UTSNAME_SIZE as u64)
-        .map_err(|_| EINVAL)?;
+        .map_err(|_| EFAULT)?;
     let image = clean_slate_linux_abi::encode_utsname_fields(
         b"Linux",
         b"m9-fixture",
@@ -621,7 +636,7 @@ mod tests {
 
     #[test]
     fn mmap_window_below_stack_reservation() {
-        assert!(LINUX_MMAP_WINDOW_TOP <= 0x0080_0000);
+        const _: () = assert!(LINUX_MMAP_WINDOW_TOP <= 0x0080_0000);
     }
 
     #[test]

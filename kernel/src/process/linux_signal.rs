@@ -80,6 +80,7 @@ fn registry_mut() -> &'static mut Registry {
     unsafe { &mut *REGISTRY.get() }
 }
 
+#[cfg(any(test, feature = "m9-linux-runtime-self-test"))]
 pub(crate) fn occupied_slots() -> usize {
     registry_mut()
         .slots

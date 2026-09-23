@@ -1,7 +1,6 @@
 //! M9 #103 Linux runtime/memory/time/poll acceptance.
 
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
-use crate::arch::x86_64::cpu::enable_interrupts;
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
@@ -23,27 +22,21 @@ use crate::process::linux_signal;
 use crate::process::live_instance_generation;
 use crate::process::personality::execution_personality_for_pid;
 use crate::process::process_registry_mut;
-use crate::process::KERNEL_PROCESS_ID;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::task_stacks_mut;
-use crate::sched::wait::WaitKey;
-use crate::sched::{scheduler_mut, ThreadKind, ThreadState, Scheduler};
+use crate::sched::{scheduler_mut, Scheduler};
 use crate::syscall::initialize_syscall_abi;
-use crate::syscall::linux::poll::{nanosleep_wait_key, poll_wait_key};
 use crate::syscall::linux::poll::interest_occupied;
 use crate::syscall::{
     install_service_lifecycle_syscall_allocator, service_lifecycle_syscall_allocator_mut,
 };
+use crate::time::ticks_from_millis;
 use clean_slate_linux_abi::Timespec;
 use clean_slate_service_lifecycle::InstanceGeneration;
-use core::hint::spin_loop;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use crate::arch::x86_64::cpu::without_interrupts;
-use crate::time::ticks_from_millis;
 
 const RUNTIME_CYCLES: u32 = 8;
 const PASS: &str = "[M9.J] PASS";
-const LANE: u64 = 0x52;
 
 static RUNTIME_PID: AtomicU64 = AtomicU64::new(0);
 static RUNTIME_GENERATION: AtomicU32 = AtomicU32::new(0);
@@ -52,51 +45,39 @@ static BASELINE_MEM: AtomicU32 = AtomicU32::new(0);
 static BASELINE_SIG: AtomicU32 = AtomicU32::new(0);
 static BASELINE_POLL: AtomicU32 = AtomicU32::new(0);
 static BASELINE_FD: AtomicU32 = AtomicU32::new(0);
-static BLOCK_START_TICK: AtomicU64 = AtomicU64::new(0);
 static NANOSLEEP_LOGGED: AtomicU32 = AtomicU32::new(0);
 static POLL_ZERO_LOGGED: AtomicU32 = AtomicU32::new(0);
+static IRQ_CROSSCHECK_DONE: AtomicU32 = AtomicU32::new(0);
+static SLEEP_BLOCK_PIT: AtomicU64 = AtomicU64::new(0);
+static OBS_PID: AtomicU64 = AtomicU64::new(0);
+static OBS_NSEC: AtomicU64 = AtomicU64::new(0);
+static OBS_BLOCK_START: AtomicU64 = AtomicU64::new(0);
 
-#[unsafe(no_mangle)]
-extern "C" fn clean_slate_m9_runtime_spin() -> ! {
-    enable_interrupts();
-    loop {
-        spin_loop();
-    }
+pub(crate) fn mark_sleep_block_start() {
+    SLEEP_BLOCK_PIT.store(
+        u64::from(crate::time::calibration::pit_read_count()),
+        Ordering::Relaxed,
+    );
 }
 
-fn configure_preempt_kernel_thread() -> Result<(), &'static str> {
-    without_interrupts(|| {
-        let stacks = unsafe { task_stacks_mut() };
-        let stack_top = task_stack_top(&stacks[1]);
-        let tid = unsafe { id_allocator_mut().allocate_tid()? };
-        let scheduler = unsafe { scheduler_mut() };
-        scheduler.configure_thread(
-            1,
-            tid,
-            KERNEL_PROCESS_ID,
-            ThreadKind::Kernel,
-            stack_top,
-            stack_top,
-            clean_slate_m9_runtime_spin as usize as u64,
-        )?;
-        scheduler.threads[1].state = ThreadState::Ready;
-        Ok(())
-    })
+pub(crate) fn record_nanosleep_self_test(pid: u64, ts: Timespec, block_start_tick: u64) {
+    OBS_PID.store(pid, Ordering::Relaxed);
+    OBS_NSEC.store(ts.tv_nsec as u64, Ordering::Relaxed);
+    OBS_BLOCK_START.store(block_start_tick, Ordering::Relaxed);
 }
 
-pub(crate) fn on_runtime_blocked(pid: u64, key: WaitKey) {
-    if pid != RUNTIME_PID.load(Ordering::Relaxed) {
+pub(crate) fn on_scheduler_nanosleep_timeout(pid: u64) {
+    if pid != OBS_PID.load(Ordering::Relaxed) {
         return;
     }
-    let top = key.0 >> 56;
-    if top != LANE {
-        fatal_kernel_error("m9 runtime block key namespace");
-    }
-    BLOCK_START_TICK.store(kernel_ticks(), Ordering::Relaxed);
-    let _ = (pid, key);
+    let ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: OBS_NSEC.load(Ordering::Relaxed) as i64,
+    };
+    on_nanosleep_complete(pid, ts, OBS_BLOCK_START.load(Ordering::Relaxed));
 }
 
-pub(crate) fn on_nanosleep_complete(pid: u64, ts: Timespec) {
+pub(crate) fn on_nanosleep_complete(pid: u64, ts: Timespec, block_start_tick: u64) {
     if pid != RUNTIME_PID.load(Ordering::Relaxed) {
         return;
     }
@@ -106,35 +87,47 @@ pub(crate) fn on_nanosleep_complete(pid: u64, ts: Timespec) {
     if NANOSLEEP_LOGGED.swap(1, Ordering::Relaxed) != 0 {
         return;
     }
-    let start = BLOCK_START_TICK.load(Ordering::Relaxed);
-    let elapsed = kernel_ticks().saturating_sub(start);
+    if IRQ_CROSSCHECK_DONE.swap(1, Ordering::Relaxed) == 0 {
+        crate::time::calibration::crosscheck_irq_ticks_for_elapsed(
+            block_start_tick,
+            SLEEP_BLOCK_PIT.load(Ordering::Relaxed) as u16,
+        );
+    }
     let min_ticks = ticks_from_millis(20).unwrap_or(1);
-    if elapsed < min_ticks {
+    let max_ticks = min_ticks.saturating_add(1);
+    let elapsed = kernel_ticks().saturating_sub(block_start_tick);
+    if elapsed < min_ticks || elapsed > max_ticks {
         kernel_log_fmt(format_args!(
-            "[M9.J] nanosleep 20ms ticks={} (too few min={})\n",
-            elapsed, min_ticks
+            "[M9.J] nanosleep 20ms ticks={} (expected {}..={})\n",
+            elapsed, min_ticks, max_ticks
         ));
-        fatal_kernel_error("m9 runtime nanosleep too short");
+        fatal_kernel_error("m9 runtime nanosleep tick window");
     }
     kernel_log_fmt(format_args!("[M9.J] nanosleep 20ms ticks={}\n", elapsed));
 }
 
-pub(crate) fn on_poll_timeout_complete(pid: u64) {
+pub(crate) fn on_poll_timeout_complete(pid: u64, timeout_ms: u64, block_start_tick: u64) {
     if pid != RUNTIME_PID.load(Ordering::Relaxed) {
         return;
     }
     if POLL_ZERO_LOGGED.swap(1, Ordering::Relaxed) != 0 {
         return;
     }
-    let start = BLOCK_START_TICK.load(Ordering::Relaxed);
-    let elapsed = kernel_ticks().saturating_sub(start);
-    let min_ticks = ticks_from_millis(30).unwrap_or(1);
-    if elapsed < min_ticks {
-        fatal_kernel_error("m9 runtime poll zero-fds timeout too short");
+    let min_ticks = ticks_from_millis(timeout_ms).unwrap_or(1);
+    let max_ticks = min_ticks.saturating_add(1);
+    let elapsed = kernel_ticks().saturating_sub(block_start_tick);
+    if elapsed < min_ticks || elapsed > max_ticks {
+        kernel_log_fmt(format_args!(
+            "[M9.J] poll timeout ticks={} (expected {}..={})\n",
+            elapsed, min_ticks, max_ticks
+        ));
+        fatal_kernel_error("m9 runtime poll zero-fds tick window");
     }
 }
 
 fn launch_probe(allocator: &mut PageAllocator, kernel_stack_top: u64) -> u64 {
+    set_privilege_stack(kernel_stack_top).unwrap_or_else(|message| fatal_kernel_error(message));
+    crate::process::linux_exec::reset_prepare_linux_image_scratch();
     NANOSLEEP_LOGGED.store(0, Ordering::Relaxed);
     POLL_ZERO_LOGGED.store(0, Ordering::Relaxed);
     let argv: [&[u8]; 1] = [b"linux-runtime-probe"];
@@ -170,7 +163,6 @@ fn launch_probe(allocator: &mut PageAllocator, kernel_stack_top: u64) -> u64 {
         .unwrap_or_else(|_| fatal_kernel_error("m9 linux runtime stdio"));
     RUNTIME_PID.store(launched.pid, Ordering::Relaxed);
     RUNTIME_GENERATION.store(generation.0, Ordering::Relaxed);
-    let _ = (nanosleep_wait_key(launched.pid), poll_wait_key(launched.pid));
     launched.pid
 }
 
@@ -223,7 +215,6 @@ pub(crate) fn after_linux_runtime_probe_exit(
         qemu_exit(QEMU_EXIT_SUCCESS);
     }
     RUNTIME_CYCLE.store(next, Ordering::Relaxed);
-    configure_preempt_kernel_thread().unwrap_or_else(|message| fatal_kernel_error(message));
     let kernel_stack_top = task_stack_top(unsafe { &task_stacks_mut()[0] });
     let _ = launch_probe(allocator, kernel_stack_top);
     Some(start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message)))
@@ -257,7 +248,9 @@ pub(crate) fn start_m9_linux_runtime_self_test(page_allocator: PageAllocator) ->
     set_privilege_stack(kernel_stack_top).unwrap_or_else(|message| fatal_kernel_error(message));
     initialize_syscall_abi(kernel_stack_top).unwrap_or_else(|message| fatal_kernel_error(message));
     crate::interrupt::timer::initialize_timer();
+    // `m3-entry-self-test` (pulled in by this feature) skips calibration inside `initialize_timer`.
     crate::time::calibration::calibrate_apic_tick();
+    IRQ_CROSSCHECK_DONE.store(0, Ordering::Relaxed);
     RUNTIME_CYCLE.store(0, Ordering::Relaxed);
     let _ = launch_probe(allocator, kernel_stack_top);
     let frame_pointer =

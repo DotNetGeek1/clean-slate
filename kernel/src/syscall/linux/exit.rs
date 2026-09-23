@@ -81,8 +81,8 @@ pub(crate) fn handle_sys_exit(
     #[cfg(feature = "m9-linux-exec-self-test")]
     crate::selftest::m9_linux_exec::observe_linux_exit(pid, &teardown);
 
-    #[cfg(feature = "m9-linux-runtime-self-test")]
-    if let Some(next_frame) = crate::selftest::m9_linux_runtime::after_linux_runtime_probe_exit(
+    #[cfg(feature = "m9-linux-fs-self-test")]
+    if let Some(next_frame) = crate::selftest::m9_linux_fs::after_linux_exit(
         pid,
         ctx.instance_generation,
         &teardown,
@@ -93,6 +93,16 @@ pub(crate) fn handle_sys_exit(
 
     #[cfg(feature = "m9-fd-core-self-test")]
     if let Some(next_frame) = crate::selftest::m9_fd_core::after_linux_probe_exit(
+        pid,
+        ctx.instance_generation,
+        &teardown,
+        allocator,
+    ) {
+        switch_after_exit(Some(next_frame));
+    }
+
+    #[cfg(feature = "m9-linux-runtime-self-test")]
+    if let Some(next_frame) = crate::selftest::m9_linux_runtime::after_linux_runtime_probe_exit(
         pid,
         ctx.instance_generation,
         &teardown,

@@ -144,8 +144,20 @@ pub(crate) fn teardown_current_process(
     // process (same pid, new generation) cannot observe a stale table (#95).
     if let Some(generation) = live_instance_generation(process_id) {
         linux_fd::release_for_process(process_id, generation);
-        crate::process::linux_mem::release_for_process(process_id, generation);
-        crate::process::linux_signal::release_for_process(process_id, generation);
+        #[cfg(not(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        )))]
+        {
+            crate::process::linux_mem::release_for_process(process_id, generation);
+            crate::process::linux_signal::release_for_process(process_id, generation);
+        }
+        #[cfg(not(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        )))]
         crate::syscall::linux::poll::clear_poll_interest_for_pid(process_id);
     }
     let released_ipc: IpcProcessResources =

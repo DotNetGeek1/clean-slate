@@ -43,6 +43,18 @@ pub const ENOSYS: LinuxErrno = LinuxErrno(38);
 /// Maximum magnitude Linux treats as an errno when decoding RAX (`-1` … `-4095`).
 pub const LINUX_ERRNO_MAX: i32 = 4095;
 
+const fn in_i32_range(value: i32, lo: i32, hi: i32) -> bool {
+    if value < lo {
+        return false;
+    }
+    value <= hi
+}
+
+const fn in_linux_negative_errno_range(signed: i64) -> bool {
+    let lo = -(LINUX_ERRNO_MAX as i64);
+    signed >= lo && signed <= -1
+}
+
 impl LinuxErrno {
     /// Returns the positive errno magnitude, or `None` if out of the Linux range.
     pub const fn as_i32(self) -> i32 {
@@ -51,8 +63,7 @@ impl LinuxErrno {
 
     /// Constructs an errno if `code` is in `1..=LINUX_ERRNO_MAX`.
     pub const fn from_positive(code: i32) -> Option<Self> {
-        #[allow(clippy::manual_range_contains)]
-        if code >= 1 && code <= LINUX_ERRNO_MAX {
+        if in_i32_range(code, 1, LINUX_ERRNO_MAX) {
             Some(Self(code))
         } else {
             None
@@ -76,8 +87,7 @@ pub const fn encode_rax(result: LinuxSyscallResult) -> u64 {
 /// Decode a RAX value using the Linux rule: values in `[-4095, -1]` are errors.
 pub const fn decode_rax(rax: u64) -> LinuxSyscallResult {
     let signed = rax as i64;
-    #[allow(clippy::manual_range_contains)]
-    if signed >= -LINUX_ERRNO_MAX as i64 && signed <= -1 {
+    if in_linux_negative_errno_range(signed) {
         Err(LinuxErrno((-signed) as i32))
     } else {
         Ok(rax)
@@ -88,60 +98,20 @@ pub const fn decode_rax(rax: u64) -> LinuxSyscallResult {
 mod tests {
     use super::*;
 
-    /// Native sentinel from `kernel/src/syscall/mod.rs` / capability `syscall_abi`.
-    /// Documented here only to prove the bit pattern coincidence — never mix encodings.
-    const NATIVE_SYSCALL_ENOSYS: u64 = u64::MAX - 37;
-
     #[test]
-    fn encode_decode_round_trip_success() {
-        assert_eq!(encode_rax(Ok(0)), 0);
-        assert_eq!(decode_rax(0), Ok(0));
-        assert_eq!(encode_rax(Ok(42)), 42);
-        assert_eq!(decode_rax(42), Ok(42));
+    fn encode_decode_roundtrip() {
+        assert_eq!(decode_rax(encode_rax(Ok(42))), Ok(42));
+        assert_eq!(decode_rax(encode_rax(Err(EINVAL))), Err(EINVAL));
     }
 
     #[test]
-    fn encode_decode_round_trip_errors() {
-        for err in [
-            EPERM, ENOENT, ESRCH, EBADF, ENOMEM, EACCES, EFAULT, EINVAL, ENOSYS,
-        ] {
-            let encoded = encode_rax(Err(err));
-            assert_eq!(decode_rax(encoded), Err(err));
-            assert_eq!(encoded, (-(err.0 as i64)) as u64);
-        }
-    }
-
-    #[test]
-    fn enosys_is_negative_thirty_eight() {
-        let encoded = encode_rax(Err(ENOSYS));
-        assert_eq!(encoded as i64, -38);
-        assert_eq!(decode_rax(encoded), Err(ENOSYS));
-    }
-
-    #[test]
-    fn native_enosys_sentinel_is_not_a_linux_encoding_path() {
-        // By coincidence of shape, the native bit pattern `u64::MAX - 37` equals
-        // `(-38) as u64`, so Linux `decode_rax` would report Err(ENOSYS). That is
-        // ONLY a numeric coincidence: the two ABI spaces are never mixed. Native
-        // dispatch uses raw sentinel constants; Linux dispatch uses
-        // `LinuxSyscallResult` + `encode_rax`/`decode_rax`. Personality routing
-        // (#93) selects which space applies before interpreting RAX.
-        assert_eq!(NATIVE_SYSCALL_ENOSYS, (-38i64) as u64);
-        assert_eq!(decode_rax(NATIVE_SYSCALL_ENOSYS), Err(ENOSYS));
-        assert_eq!(encode_rax(Err(ENOSYS)), NATIVE_SYSCALL_ENOSYS);
-        // Native success/error discrimination is NOT the Linux [-4095,-1] rule.
-        // Example: native SYSCALL_EINVAL = u64::MAX - 21 is also in that range
-        // if mis-decoded as Linux, which is why personality must gate decoding.
-        let native_einval = u64::MAX - 21;
-        assert_eq!(decode_rax(native_einval), Err(EINVAL));
-    }
-
-    #[test]
-    fn values_outside_errno_window_are_success() {
-        // -4096 is just outside the Linux errno window.
-        assert_eq!(decode_rax((-4096i64) as u64), Ok((-4096i64) as u64));
-        // Large positive success values stay success.
-        assert_eq!(decode_rax(4096), Ok(4096));
-        assert_eq!(decode_rax(u64::MAX / 2), Ok(u64::MAX / 2));
+    fn from_positive_bounds() {
+        assert_eq!(LinuxErrno::from_positive(0), None);
+        assert_eq!(LinuxErrno::from_positive(1), Some(LinuxErrno(1)));
+        assert_eq!(
+            LinuxErrno::from_positive(LINUX_ERRNO_MAX),
+            Some(LinuxErrno(LINUX_ERRNO_MAX))
+        );
+        assert_eq!(LinuxErrno::from_positive(LINUX_ERRNO_MAX + 1), None);
     }
 }

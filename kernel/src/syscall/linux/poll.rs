@@ -1,5 +1,14 @@
 //! Linux `poll` interest registration for producer wakeups (#103).
 
+#![cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test"
+    ),
+    allow(dead_code)
+)]
+
 use crate::process::linux_fd::open_description::OpenDescriptionId;
 use crate::sched::wait::{wake_all, WaitKey};
 use crate::sync::global_cell::GlobalCell;
@@ -82,6 +91,7 @@ pub(crate) fn notify_readiness_changed(desc: OpenDescriptionId) {
     }
 }
 
+#[cfg(any(test, feature = "m9-linux-runtime-self-test"))]
 pub(crate) fn interest_occupied() -> usize {
     unsafe {
         (*INTEREST.get())

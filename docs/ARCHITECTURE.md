@@ -181,6 +181,10 @@ M9 #104 pins the BusyBox rootfs as a hash-verified `CSROOTFS` image embedded whe
 See [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md) "M9 #104 — rootfs fixture" and
 [fixtures/busybox/frozen/ROOTFS.md](../fixtures/busybox/frozen/ROOTFS.md).
 
+M9 #101 projects paths onto that image plus M6.3 `/tmp` objects
+(`process::linux_fs`, `cargo xtask test-m9-linux-fs`). See
+[LINUX_PERSONALITY.md](LINUX_PERSONALITY.md) "M9 #101 — filesystem/path projection".
+
 ### Linux personality end-to-end path (#97)
 
 With `m8-linux-hello`, boot Starts `LINUX_HELLO_SERVICE_ID` through

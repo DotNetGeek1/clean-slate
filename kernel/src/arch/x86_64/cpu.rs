@@ -14,7 +14,10 @@ use x86_64::registers::control::{Cr0, Cr0Flags};
 use crate::arch::x86_64::{bit, RFLAGS_INTERRUPT_ENABLE_BIT};
 
 pub(crate) fn without_interrupts<T>(f: impl FnOnce() -> T) -> T {
-    let restore = interrupts_enabled();
+    // Host unit tests run in ring 3 where `cli`/`sti` fault
+    // (STATUS_PRIVILEGED_INSTRUCTION); interrupt masking is meaningless there,
+    // so the guard degenerates to a plain call. Production builds are unaffected.
+    let restore = !cfg!(test) && interrupts_enabled();
     if restore {
         disable_interrupts();
     }
