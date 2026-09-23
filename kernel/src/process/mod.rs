@@ -4,6 +4,11 @@
 
 pub(crate) mod domain;
 pub(crate) mod id_allocator;
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 pub(crate) mod linux_exec;
 pub(crate) mod linux_fd;
 pub(crate) mod linux_image;
