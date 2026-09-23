@@ -651,10 +651,7 @@ mod tests {
         scheduler.threads[0].state = ThreadState::Blocked;
         scheduler.threads[1].state = ThreadState::Ready;
         scheduler.threads[1].started = true;
-        assert_eq!(
-            scheduler.on_timer_interrupt(0x1110).expect("tick"),
-            0x2000
-        );
+        assert_eq!(scheduler.on_timer_interrupt(0x1110).expect("tick"), 0x2000);
         assert_eq!(scheduler.current_thread, Some(1));
         assert_eq!(scheduler.threads[1].state, ThreadState::Running);
     }
