@@ -333,7 +333,11 @@ pub(crate) fn on_linux_hello_process_exited(allocator: &mut PageAllocator, pid: 
 
     let generation = runtime()
         .and_then(|state| state.live)
+        .filter(|live| live.pid == pid)
         .map(|live| live.instance_generation)
+        .or_else(|| {
+            crate::service::instance_generation::live_instance_generation_for_pid(pid)
+        })
         .unwrap_or(InstanceGeneration(0));
     if let Err(message) = note_linux_hello_exit(pid, generation, status) {
         kernel_log_fmt(format_args!("[LNX ] exit observe failed: {message}\n"));
