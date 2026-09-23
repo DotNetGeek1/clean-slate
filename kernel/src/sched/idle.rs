@@ -57,8 +57,6 @@ fn idle_thread_one_wait() {
     }
 }
 
-#[cfg_attr(feature = "m9-block-wake-self-test", allow(dead_code))]
-#[cfg_attr(feature = "m9-block-wake-self-test", allow(dead_code))]
 fn assert_idle_stack_within_guard() {
     let stack_top = idle_kernel_stack_top();
     let rsp: u64;
