@@ -40,7 +40,6 @@ const fn task_count_for_features() -> usize {
 use crate::arch::x86_64::context_switch::set_next_task;
 use crate::arch::x86_64::context_switch::TaskStack;
 use crate::arch::x86_64::context_switch::FRESH_TASK_SENTINEL;
-use crate::arch::x86_64::context_switch::SYSCALL_BLOCKED_RESUME_SENTINEL;
 use crate::arch::x86_64::context_switch::TASK_STACK_SIZE;
 use crate::process::KERNEL_PROCESS_ID;
 use crate::sync::global_cell::GlobalCell;

@@ -539,13 +539,7 @@ fn plain_tcp_slot(session: SessionId) -> Option<&'static mut Option<SessionId>> 
     if index >= MAX_SESSIONS as usize {
         return None;
     }
-    unsafe {
-        Some(
-            &mut *PLAIN_TCP_BY_SESSION
-                .as_mut_ptr()
-                .add(index),
-        )
-    }
+    unsafe { Some(&mut *core::ptr::addr_of_mut!(PLAIN_TCP_BY_SESSION[index])) }
 }
 
 fn udp_endpoint_slot(session: SessionId) -> Option<&'static mut Option<SessionId>> {
@@ -553,13 +547,7 @@ fn udp_endpoint_slot(session: SessionId) -> Option<&'static mut Option<SessionId
     if index >= MAX_SESSIONS as usize {
         return None;
     }
-    unsafe {
-        Some(
-            &mut *UDP_ENDPOINT_BY_SESSION
-                .as_mut_ptr()
-                .add(index),
-        )
-    }
+    unsafe { Some(&mut *core::ptr::addr_of_mut!(UDP_ENDPOINT_BY_SESSION[index])) }
 }
 
 fn ensure_udp_endpoint(
