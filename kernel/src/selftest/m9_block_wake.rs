@@ -46,14 +46,18 @@ const CONSUMER_CODE: [u8; 30] = [
     0xEB, 0xE2, // jmp to offset 0
 ];
 
-/// Producer: wake syscall loop.
-const PRODUCER_CODE: [u8; 27] = [
+/// Producer: block forever on a private key, then wake syscall loop.
+const PRODUCER_CODE: [u8; 46] = [
+    0x48, 0xC7, 0xC0, 0x64, 0x00, 0x00, 0x00, // mov rax, 100 block
+    0x48, 0xC7, 0xC7, 0x46, 0x01, 0x00, 0x00, // mov rdi, 0x146
+    0x48, 0x31, 0xF6, // xor rsi, rsi
+    0x0F, 0x05, // syscall (never returns)
     0x48, 0xC7, 0xC0, 0x65, 0x00, 0x00, 0x00, // mov rax, 101 wake
     0x48, 0xC7, 0xC7, 0x01, 0x00, 0x00, 0x00, // mov rdi, 1
     0x0F, 0x05, // syscall
     0x48, 0xC7, 0xC0, 0x67, 0x00, 0x00, 0x00, // mov rax, 103 yield
     0x0F, 0x05, // syscall
-    0xEB, 0xE5, // jmp to 0
+    0xEB, 0xE5, // jmp to wake loop (offset 19)
 ];
 
 static CONSUMER_PROGRESS: AtomicU64 = AtomicU64::new(0);
@@ -64,6 +68,10 @@ static CYCLES_DONE: AtomicUsize = AtomicUsize::new(0);
 static BASELINE_FREE_FRAMES: AtomicU64 = AtomicU64::new(0);
 static CONSUMER_TID: AtomicU64 = AtomicU64::new(0);
 static TEST_PASSED: AtomicUsize = AtomicUsize::new(0);
+static IDLE_SOAK_DONE: AtomicUsize = AtomicUsize::new(0);
+static IDLE_TICKS: AtomicU64 = AtomicU64::new(0);
+const IDLE_SOAK_DEADLINE_TICKS: u64 = 150;
+const PRODUCER_BLOCK_KEY: u64 = 0x146;
 
 fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
     reset_process_scheduler_world();
@@ -73,6 +81,8 @@ fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
     BLOCK_PROGRESS_SNAPSHOT.store(0, Ordering::Relaxed);
     CYCLES_DONE.store(0, Ordering::Relaxed);
     TEST_PASSED.store(0, Ordering::Relaxed);
+    IDLE_SOAK_DONE.store(0, Ordering::Relaxed);
+    IDLE_TICKS.store(0, Ordering::Relaxed);
 
     let stacks = unsafe { &*task_stacks_mut() };
     let consumer = spawn_native_userspace_process_with_code(
@@ -125,6 +135,10 @@ pub(crate) fn start_m9_block_wake_self_test(allocator: PageAllocator) -> ! {
 
 static FLAT_PROGRESS_LOGGED: AtomicUsize = AtomicUsize::new(0);
 
+pub(crate) fn on_idle_loop_wake() {
+    IDLE_TICKS.fetch_add(1, Ordering::Relaxed);
+}
+
 pub(crate) fn observe_timer_while_consumer_blocked() {
     if CONSUMER_BLOCKED.load(Ordering::Relaxed) == 0 {
         return;
@@ -148,6 +162,23 @@ pub(crate) fn handle_wait_progress_syscall(frame: &mut SyscallContext) {
 }
 
 pub(crate) fn handle_wait_block_syscall(frame: &mut SyscallContext) {
+    let key = WaitKey(frame.rdi);
+    if key.0 == PRODUCER_BLOCK_KEY {
+        block_current_syscall(frame, key, None);
+        return;
+    }
+    if IDLE_SOAK_DONE.load(Ordering::Relaxed) == 0 {
+        let key = WaitKey(TEST_WAIT_KEY);
+        let deadline = Some(Deadline(
+            kernel_ticks().saturating_add(IDLE_SOAK_DEADLINE_TICKS),
+        ));
+        CONSUMER_BLOCKED.store(1, Ordering::Relaxed);
+        BLOCK_TICK.store(kernel_ticks(), Ordering::Relaxed);
+        BLOCK_PROGRESS_SNAPSHOT.store(CONSUMER_PROGRESS.load(Ordering::Relaxed), Ordering::Relaxed);
+        FLAT_PROGRESS_LOGGED.store(0, Ordering::Relaxed);
+        block_current_syscall(frame, key, deadline);
+        return;
+    }
     let key = WaitKey(TEST_WAIT_KEY);
     let cycle = CYCLES_DONE.load(Ordering::Relaxed);
     let deadline = if cycle % 2 == 1 {
@@ -174,6 +205,17 @@ pub(crate) fn on_blocked_syscall_resumed(outcome: WaitOutcome, result_rax: u64) 
         return;
     }
     CONSUMER_BLOCKED.store(0, Ordering::Relaxed);
+    if IDLE_SOAK_DONE.load(Ordering::Relaxed) == 0 {
+        let ticks = IDLE_TICKS.load(Ordering::Relaxed);
+        kernel_log_fmt(format_args!("[M9.E] idle_ticks={}\n", ticks));
+        if ticks < IDLE_SOAK_DEADLINE_TICKS {
+            fatal_kernel_error("idle soak did not run long enough");
+        }
+        kernel_log_line("[M9.E] timeout resumed after idle");
+        IDLE_SOAK_DONE.store(1, Ordering::Relaxed);
+        let _ = crate::sched::wait::wake_one(WaitKey(PRODUCER_BLOCK_KEY));
+        return;
+    }
     if outcome == WaitOutcome::TimedOut {
         kernel_log_line("[M9.E] timeout resumed");
     } else if outcome == WaitOutcome::Woken {

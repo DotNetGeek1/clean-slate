@@ -6,11 +6,9 @@
 
 use crate::arch::x86_64::context_switch::resume_after_scheduler_handoff;
 use crate::arch::x86_64::context_switch::SYSCALL_BLOCKED_RESUME_SENTINEL;
-use crate::arch::x86_64::cpu::enable_interrupts;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
-use crate::interrupt::timer::kernel_ticks;
 use crate::process::live_instance_generation;
 use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 use crate::sched::scheduler_mut;
@@ -338,36 +336,6 @@ pub(crate) fn scheduler_handoff_stack_pointer(next_stack_pointer: u64, thread_in
         return SYSCALL_BLOCKED_RESUME_SENTINEL;
     }
     next_stack_pointer
-}
-
-/// Idle until a blocked waiter becomes runnable. Runs outside interrupt frames
-/// (timer/block handoff returns `SCHEDULER_BLOCKED_IDLE_SENTINEL` first).
-pub(crate) fn blocked_idle_until_runnable_stack() -> u64 {
-    loop {
-        enable_interrupts();
-        unsafe {
-            core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
-        }
-        let next = without_interrupts(|| {
-            let _ = expire_deadlines(kernel_ticks());
-            unsafe { scheduler_mut().pick_next_runnable_stack_pointer() }
-        });
-        match next {
-            Ok(stack_pointer) => {
-                if let Err(message) = prepare_current_scheduler_thread_dispatch() {
-                    crate::diagnostics::qemu::fatal_kernel_error(message);
-                }
-                return stack_pointer;
-            }
-            Err("idle woke without a runnable thread") => {}
-            Err(message) => crate::diagnostics::qemu::fatal_kernel_error(message),
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn clean_slate_blocked_idle_until_runnable_impl() -> u64 {
-    blocked_idle_until_runnable_stack()
 }
 
 pub(crate) fn clear_wait_table_for_tests() {

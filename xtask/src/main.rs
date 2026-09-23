@@ -166,8 +166,10 @@ const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS: [&str; 3] = [
     "[M9.C] PASS",
 ];
 const M9_BLOCK_WAKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(45);
-const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 7] = [
+const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 9] = [
     "[TIME] timer initialized",
+    "[M9.E] idle_ticks=",
+    "[M9.E] timeout resumed after idle",
     "[M9.E] blocked tid=",
     "[M9.E] no progress while blocked",
     "[M9.E] woken ",

@@ -37,6 +37,7 @@ macro_rules! declare_interrupt_entries {
             pub(crate) fn clean_slate_task_one_bootstrap_entry();
             pub(crate) fn clean_slate_task_two_bootstrap_entry();
             pub(crate) fn clean_slate_timer_self_test_bootstrap_entry();
+            pub(crate) fn clean_slate_idle_thread_bootstrap_entry();
         }
     };
 }
@@ -172,14 +173,6 @@ clean_slate_interrupt_common:
     je clean_slate_start_fresh_task
     cmp rax, -2
     je clean_slate_blocked_syscall_resume_from_schedule
-    cmp rax, -3
-    je clean_slate_blocked_idle_until_runnable
-    mov rsp, rax
-    jmp clean_slate_restore_context
-
-    .global clean_slate_blocked_idle_until_runnable
-clean_slate_blocked_idle_until_runnable:
-    call clean_slate_blocked_idle_until_runnable_impl
     mov rsp, rax
     jmp clean_slate_restore_context
 
@@ -258,6 +251,15 @@ clean_slate_timer_self_test_bootstrap_entry:
     sub rsp, 32
     sub rsp, rax
     call clean_slate_timer_self_test_task
+    ud2
+
+    .global clean_slate_idle_thread_bootstrap_entry
+clean_slate_idle_thread_bootstrap_entry:
+    mov rax, rsp
+    and rax, 8
+    sub rsp, 32
+    sub rsp, rax
+    call clean_slate_idle_thread
     ud2
 
     .global clean_slate_user_address_space_test_start

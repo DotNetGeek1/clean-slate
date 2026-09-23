@@ -30,7 +30,7 @@ Each thread’s `kernel_stack_top` is published to `SYSCALL_KERNEL_STACK_TOP` on
 
 ## Idle
 
-When no thread is `Ready`/`Running` but blocked threads or deadlines remain, the timer/block paths return `SCHEDULER_BLOCKED_IDLE_SENTINEL` instead of running `hlt` inside the interrupt frame. Assembly dispatches to `blocked_idle_until_runnable_stack()`, which enables interrupts and `hlt`s in a normal kernel context until `expire_deadlines` or a wake makes a thread runnable, then restores that thread’s stack.
+When no application thread is `Ready`/`Running` but blocked threads or deadlines remain, the scheduler dispatches a dedicated **idle kernel thread** at `IDLE_THREAD_INDEX` (`TASK_COUNT`), using its own `TaskStack`. That thread’s loop is `hlt` with interrupts enabled, then `expire_deadlines` and a runnable pick. While the idle thread is current, timer interrupts update only the idle thread’s `saved_stack_pointer` (never a `Blocked` thread’s), scan deadlines, and either return into the idle loop or hand off to a newly runnable thread. A guard fatal fires if `rsp` leaves the top 1 KiB of the idle stack (detects IRQ nesting / stack growth bugs).
 
 ## Timer preemption
 
