@@ -20,6 +20,7 @@ pub(crate) mod linux_image;
     feature = "m2-timer-self-test"
 )))]
 pub(crate) mod linux_mem;
+pub(crate) mod linux_proc;
 #[cfg(feature = "m9-rootfs")]
 pub(crate) mod linux_rootfs;
 #[cfg(not(any(

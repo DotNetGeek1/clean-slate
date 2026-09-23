@@ -160,6 +160,11 @@ pub(crate) fn teardown_current_process(
         )))]
         crate::syscall::linux::poll::clear_poll_interest_for_pid(process_id);
     }
+    linux_fd::release_for_process_by_pid(process_id);
+    let registry_live = |check_pid: u64| unsafe { process_registry_mut().get(check_pid).is_some() };
+    linux_fd::release_stale_registry_slots(&registry_live);
+    #[cfg(feature = "m8-linux-image")]
+    crate::process::linux_proc::table::table_mut().retire_stale_live_slots(&registry_live);
     let released_ipc: IpcProcessResources =
         unsafe { endpoint_table_mut().teardown_resources_for_pid(process_id)? };
     let holder = HolderId(process_id);

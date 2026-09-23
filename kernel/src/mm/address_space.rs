@@ -152,7 +152,8 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 384;
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test",
     feature = "m9-linux-runtime-self-test",
-    feature = "m9-linux-exec-self-test"
+    feature = "m9-linux-exec-self-test",
+    feature = "m9-linux-proc-self-test"
 ))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 104;
 #[cfg(not(any(
@@ -174,7 +175,8 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 104;
     feature = "m6-fixture-smoke-self-test",
     feature = "m7-net-service-self-test",
     feature = "m9-linux-runtime-self-test",
-    feature = "m9-linux-exec-self-test"
+    feature = "m9-linux-exec-self-test",
+    feature = "m9-linux-proc-self-test"
 )))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 
@@ -191,9 +193,9 @@ pub(crate) fn set_kernel_root_frame(frame: u64) {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct OwnedUserMapping {
-    virtual_address: u64,
-    frame_address: u64,
+pub(crate) struct OwnedUserMapping {
+    pub(crate) virtual_address: u64,
+    pub(crate) frame_address: u64,
 }
 
 impl OwnedUserMapping {
@@ -263,6 +265,17 @@ impl ProcessAddressSpace {
             user_pages: self.user_mapping_count,
             page_table_frames: self.page_table_frame_count,
         }
+    }
+
+    pub(crate) fn user_mapping_count(&self) -> usize {
+        self.user_mapping_count
+    }
+
+    pub(crate) fn user_mapping_at(&self, index: usize) -> Option<OwnedUserMapping> {
+        if index >= self.user_mapping_count {
+            return None;
+        }
+        Some(self.user_mappings[index])
     }
 }
 

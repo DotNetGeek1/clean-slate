@@ -37,7 +37,9 @@ use crate::arch::x86_64::gdt::userspace_gdt_state;
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
-use crate::arch::x86_64::interrupt_context::{InterruptContext, UserspaceEntryFrame};
+use crate::arch::x86_64::interrupt_context::{
+    InterruptContext, SyscallContext, UserspaceEntryFrame,
+};
 
 pub(crate) const FRESH_TASK_SENTINEL: u64 = u64::MAX;
 /// Returned by the timer/block path when the next thread resumes a blocked syscall.
@@ -213,6 +215,54 @@ pub(crate) fn build_userspace_entry_frame(
             rflags: USER_TEST_RFLAGS,
         },
         user_stack_pointer,
+        user_stack_segment: gdt_state.user_data_selector.0 as u64,
+    };
+    unsafe {
+        ptr::write(frame_address as *mut UserspaceEntryFrame, frame);
+    }
+    Ok(frame_address)
+}
+
+/// Fork child resumes in user mode at the parent's syscall return site with `rax = 0`.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+#[cfg_attr(not(feature = "m9-linux-proc-self-test"), allow(dead_code))]
+pub(crate) fn build_fork_child_userspace_frame(
+    kernel_stack_top: u64,
+    parent_syscall_frame: &SyscallContext,
+) -> Result<u64, &'static str> {
+    let gdt_state = userspace_gdt_state()?;
+    let frame_address = align_down(
+        kernel_stack_top - size_of::<UserspaceEntryFrame>() as u64,
+        16,
+    );
+    let frame = UserspaceEntryFrame {
+        interrupt: InterruptContext {
+            r15: parent_syscall_frame.r15,
+            r14: parent_syscall_frame.r14,
+            r13: parent_syscall_frame.r13,
+            r12: parent_syscall_frame.r12,
+            r11: 0,
+            r10: parent_syscall_frame.r10,
+            r9: parent_syscall_frame.r9,
+            r8: parent_syscall_frame.r8,
+            rdi: parent_syscall_frame.rdi,
+            rsi: parent_syscall_frame.rsi,
+            rbp: parent_syscall_frame.rbp,
+            rbx: parent_syscall_frame.rbx,
+            rdx: parent_syscall_frame.rdx,
+            rcx: 0,
+            rax: 0,
+            vector: 0,
+            error_code: 0,
+            rip: parent_syscall_frame.user_rip,
+            cs: gdt_state.user_code_selector.0 as u64,
+            rflags: parent_syscall_frame.user_rflags,
+        },
+        user_stack_pointer: parent_syscall_frame.user_rsp,
         user_stack_segment: gdt_state.user_data_selector.0 as u64,
     };
     unsafe {

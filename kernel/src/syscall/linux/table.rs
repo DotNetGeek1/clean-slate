@@ -1,7 +1,5 @@
 //! Linux syscall handler table (M8: `write` and `exit` only, #94).
 
-#[cfg(feature = "m9-linux-exec-self-test")]
-use super::execve::handle_sys_execve;
 use super::exit::handle_sys_exit;
 use super::fd::{
     handle_sys_close, handle_sys_dup2, handle_sys_fcntl, handle_sys_lseek, handle_sys_read,
@@ -9,8 +7,6 @@ use super::fd::{
 };
 use super::write::handle_sys_write;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
-#[cfg(feature = "m9-linux-exec-self-test")]
-use clean_slate_linux_abi::SYS_EXECVE;
 use clean_slate_linux_abi::{
     LinuxSyscallRequest, LinuxSyscallResult, SYS_CLOSE, SYS_DUP2, SYS_EXIT, SYS_FCNTL, SYS_LSEEK,
     SYS_READ, SYS_WRITE, SYS_WRITEV,
@@ -67,16 +63,14 @@ fn runtime_lookup(_nr: u64) -> Option<LinuxSyscallHandler> {
 
 fn lookup_core_handler(nr: u64) -> Option<LinuxSyscallHandler> {
     match nr {
+        SYS_READ => Some(handle_sys_read),
         SYS_WRITE => Some(handle_sys_write),
         SYS_CLOSE => Some(handle_sys_close),
         SYS_WRITEV => Some(handle_sys_writev),
         SYS_DUP2 => Some(handle_sys_dup2),
         SYS_EXIT => Some(handle_sys_exit),
         SYS_FCNTL => Some(handle_sys_fcntl),
-        SYS_READ => Some(handle_sys_read),
         SYS_LSEEK => Some(handle_sys_lseek),
-        #[cfg(feature = "m9-linux-exec-self-test")]
-        SYS_EXECVE => Some(handle_sys_execve),
         _ => None,
     }
 }
@@ -111,13 +105,22 @@ mod tests {
         assert!(lookup_handler(SYS_EXIT).is_some());
         assert!(lookup_handler(999).is_none());
         assert!(lookup_handler(1000).is_none());
-        // M9 #103 runtime family owns brk/mmap/arch_prctl/set_tid_address.
-        for nr in [12u64, 158, 218, 9] {
-            assert!(lookup_handler(nr).is_some(), "nr {nr} must be supported");
+        #[cfg(feature = "m9-linux-runtime-self-test")]
+        {
+            for nr in [12u64, 158, 218, 9] {
+                assert!(lookup_handler(nr).is_some(), "nr {nr} must be supported");
+            }
         }
-        for nr in [231u64, 202] {
-            assert!(lookup_handler(nr).is_none(), "nr {nr} must be unsupported");
+        #[cfg(not(feature = "m9-linux-runtime-self-test"))]
+        {
+            for nr in [12u64, 158, 218, 202, 9] {
+                assert!(lookup_handler(nr).is_none(), "nr {nr} must be unsupported");
+            }
         }
+        #[cfg(feature = "m8-linux-image")]
+        assert!(lookup_handler(231).is_some(), "exit_group owned by #102");
+        #[cfg(not(feature = "m8-linux-image"))]
+        assert!(lookup_handler(231).is_none(), "exit_group must be unsupported");
         assert_eq!(encode_rax(Err(ENOSYS)) as i64, -38);
     }
 

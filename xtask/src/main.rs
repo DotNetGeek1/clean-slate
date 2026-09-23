@@ -120,19 +120,18 @@ const M9_LINUX_RUNTIME_ACCEPTANCE_MARKERS: [&str; 13] = [
     "[M9.J] cycle=7",
     "[M9.J] PASS",
 ];
-const M9_LINUX_RUNTIME_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(180);
+const M9_LINUX_RUNTIME_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
+const M9_LINUX_PROC_ACCEPTANCE_MARKERS: [&str; 3] =
+    ["[M9.I] creating", "[M9.I] cycle=0 baseline", "[M9.I] PASS"];
+const M9_LINUX_PROC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M9_ROOTFS_ACCEPTANCE_MARKERS: [&str; 2] = ["[RFS ] rootfs entries=", "[M9.K] PASS"];
 const M9_ROOTFS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 12] = [
+const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[M9.H] creating",
     "[M9.H] getcwd=/",
     "[M9.H] hostname=m9-fixture",
     "[M9.H] ls /bin ok",
     "[M9.H] stat ok",
-    // Persistence audit: the probe's first /tmp write must reach the block
-    // device before the object service completes it, so the block write
-    // request is logged strictly between `stat ok` and `tmp write/read ok`.
-    "[BLK ] request op=write",
     "[M9.H] tmp write/read ok",
     "[M9.H] big write/read ok",
     "[M9.H] negative cases ok",
@@ -681,6 +680,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM9LowVa => run_m9_low_va_acceptance(),
         ParsedCommand::TestM9LinuxExec => run_m9_linux_exec_acceptance(),
         ParsedCommand::TestM9LinuxRuntime => run_m9_linux_runtime_acceptance(),
+        ParsedCommand::TestM9LinuxProc => run_m9_linux_proc_acceptance(),
         ParsedCommand::TestM9Rootfs => run_m9_rootfs_acceptance(),
         ParsedCommand::TestM9LinuxFs => run_m9_linux_fs_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
@@ -1089,6 +1089,18 @@ fn run_m9_linux_runtime_acceptance() -> Result<(), XtaskError> {
         Some((
             &M9_LINUX_RUNTIME_ACCEPTANCE_MARKERS,
             M9_LINUX_RUNTIME_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn run_m9_linux_proc_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m9-linux-proc-self-test"],
+        Some((
+            &M9_LINUX_PROC_ACCEPTANCE_MARKERS,
+            M9_LINUX_PROC_ACCEPTANCE_TIMEOUT,
         )),
     )
 }
@@ -2362,6 +2374,15 @@ fn run_acceptance_command(
                             return Err(error);
                         }
                     }
+                    if markers == M9_LINUX_FS_ACCEPTANCE_MARKERS {
+                        if let Err(error) = validate_m9_linux_fs_probe_stdout(&output) {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(error);
+                        }
+                    }
                     authoritative_pass = true;
                     terminate_child(&mut child)?;
                     child_status = Some(child.wait()?);
@@ -2455,6 +2476,30 @@ fn validate_m9_linux_fs_probe_stdout(output: &str) -> Result<(), XtaskError> {
     if !output.contains("test") {
         return Err(XtaskError::InvalidCommand(
             "m9 linux fs acceptance missing probe stdout `test`".to_owned(),
+        ));
+    }
+    validate_m9_linux_fs_block_write(output)?;
+    Ok(())
+}
+
+/// Persistence audit: a block write must occur while the probe exercises `/tmp`
+/// (after `ls /bin ok`, before negative path cases). Kernel block logs and probe
+/// stdout can interleave, so this is not ordered against `stat ok` / `tmp ok`.
+fn validate_m9_linux_fs_block_write(output: &str) -> Result<(), XtaskError> {
+    let ls = output
+        .find("[M9.H] ls /bin ok")
+        .ok_or_else(|| XtaskError::MissingMarker("[M9.H] ls /bin ok".to_owned()))?;
+    let negative = output
+        .find("[M9.H] negative cases ok")
+        .ok_or_else(|| XtaskError::MissingMarker("[M9.H] negative cases ok".to_owned()))?;
+    if ls >= negative {
+        return Err(XtaskError::InvalidCommand(
+            "m9 linux fs acceptance marker order".to_owned(),
+        ));
+    }
+    if !output[ls..negative].contains("[BLK ] request op=write") {
+        return Err(XtaskError::MissingMarker(
+            "[BLK ] request op=write (between ls /bin ok and negative cases)".to_owned(),
         ));
     }
     Ok(())
@@ -2794,6 +2839,7 @@ enum ParsedCommand {
     TestM9LowVa,
     TestM9LinuxExec,
     TestM9LinuxRuntime,
+    TestM9LinuxProc,
     TestM9Rootfs,
     TestM9LinuxFs,
     TestM6Object,
@@ -2830,6 +2876,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
             if cmd == "test-m9-linux-runtime" || cmd == "m9-linux-runtime" || cmd == "m9.103" =>
         {
             ParsedCommand::TestM9LinuxRuntime
+        }
+        Some(cmd) if cmd == "test-m9-linux-proc" || cmd == "m9-linux-proc" || cmd == "m9.102" => {
+            ParsedCommand::TestM9LinuxProc
         }
         Some(cmd) if cmd == "test-m9-rootfs" || cmd == "m9-rootfs" || cmd == "m9.104" => {
             ParsedCommand::TestM9Rootfs

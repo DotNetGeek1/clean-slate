@@ -54,6 +54,7 @@ pub(crate) fn initialize_timer() {
         feature = "m2-double-fault-self-test",
         feature = "m2-timer-self-test",
         feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
         feature = "m3-ipc-self-test"
     )))]
     crate::time::calibration::calibrate_apic_tick();

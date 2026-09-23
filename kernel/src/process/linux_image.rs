@@ -140,8 +140,10 @@ pub(crate) const LINUX_M8_LOAD_POLICY: LoadPlanPolicy = LoadPlanPolicy {
 
 /// Conventional Linux user window for low-VA `ET_EXEC` images (#142).
 #[cfg(any(
+    feature = "m8-linux-image",
     feature = "m9-low-va-self-test",
     feature = "m9-linux-exec-self-test",
+    feature = "m9-linux-proc-self-test",
     feature = "m9-linux-fs-self-test",
     feature = "m9-linux-runtime-self-test",
     test
@@ -157,6 +159,11 @@ pub(crate) const LINUX_RUNTIME_PROBE_FIXTURE: &[u8] =
 #[cfg(feature = "m9-linux-exec-self-test")]
 pub(crate) const LINUX_EXEC_ARGS_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-exec-args/linux-exec-args-x86_64");
+
+/// M9 #102 fork/pipe/wait probe (`fixtures/linux-proc-probe/linux-proc-probe-x86_64`).
+#[cfg(feature = "m9-linux-proc-self-test")]
+pub(crate) const LINUX_PROC_PROBE_FIXTURE: &[u8] =
+    include_bytes!("../../../fixtures/linux-proc-probe/linux-proc-probe-x86_64");
 
 /// M9 low-VA hello fixture (`fixtures/linux-low-hello/hello-linux-low-x86_64`).
 #[cfg(any(feature = "m9-low-va-self-test", test))]
@@ -1145,7 +1152,7 @@ pub(crate) struct LaunchedLinuxProcess {
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
-fn rollback_registered_process(
+pub(crate) fn rollback_registered_process(
     pid: u64,
     allocator: &mut PageAllocator,
 ) -> Result<(), &'static str> {

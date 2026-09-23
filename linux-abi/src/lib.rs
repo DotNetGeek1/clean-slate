@@ -16,13 +16,14 @@
 
 pub mod errno;
 pub mod fs;
+pub mod process;
 pub mod runtime;
 pub mod stack;
 pub mod syscall;
 
 pub use errno::{
-    decode_rax, encode_rax, LinuxErrno, LinuxSyscallResult, EACCES, EBADF, EFAULT, EINVAL, EMFILE,
-    ENFILE, ENOENT, ENOEXEC, ENOMEM, ENOSYS, EPERM, ESRCH,
+    decode_rax, encode_rax, LinuxErrno, LinuxSyscallResult, E2BIG, EACCES, EAGAIN, EBADF, ECHILD,
+    EFAULT, EINVAL, EMFILE, ENFILE, ENOENT, ENOEXEC, ENOMEM, ENOSYS, EPERM, EPIPE, ESRCH,
 };
 pub use fs::{
     encode_dirent64, encode_stat144, LinuxStatFields, DT_DIR, DT_LNK, DT_REG, EEXIST, EFBIG, EIO,
@@ -31,11 +32,15 @@ pub use fs::{
     SEEK_END, SEEK_SET, SYS_GETCWD, SYS_GETDENTS64, SYS_LSEEK, SYS_LSTAT, SYS_MKDIR, SYS_OPEN,
     SYS_READ, SYS_STAT, S_IFDIR, S_IFLNK, S_IFREG,
 };
+pub use process::{
+    w_exitcode, w_exitstatus, w_ifsignalled, w_signalled_status, SIGKILL, SIGSEGV, SYS_EXIT_GROUP,
+    SYS_FORK, SYS_GETPPID, SYS_PIPE, SYS_WAIT4,
+};
 pub use runtime::{
     decode_pollfd, decode_sigaction, decode_timespec, encode_pollfd, encode_sigaction,
-    encode_utsname_fields, PollFd, Sigaction, Timespec, ARCH_GET_FS, ARCH_SET_FS, EAGAIN, EINTR,
-    ENOTTY, ETIMEDOUT, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, POLLERR, POLLHUP, POLLIN, POLLNVAL,
-    POLLOUT, PROT_EXEC, PROT_NONE, PROT_READ, PROT_WRITE, SIGACTION_SIZE, SIG_BLOCK, SIG_SETMASK,
+    encode_utsname_fields, PollFd, Sigaction, Timespec, ARCH_GET_FS, ARCH_SET_FS, EINTR, ENOTTY,
+    ETIMEDOUT, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT,
+    PROT_EXEC, PROT_NONE, PROT_READ, PROT_WRITE, SIGACTION_SIZE, SIG_BLOCK, SIG_SETMASK,
     SIG_UNBLOCK, SYS_ARCH_PRCTL, SYS_BRK, SYS_GETPID, SYS_IOCTL, SYS_MMAP, SYS_MUNMAP,
     SYS_NANOSLEEP, SYS_POLL, SYS_RT_SIGACTION, SYS_RT_SIGPROCMASK, SYS_SET_TID_ADDRESS, SYS_UNAME,
     TCGETS, TIOCGWINSZ, UTSNAME_SIZE, _NSIG,

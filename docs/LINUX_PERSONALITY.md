@@ -141,6 +141,37 @@ Linux fd numbers must never be confused with capability handles.
 
 See also: [COMPATIBILITY.md](COMPATIBILITY.md), [ROADMAP.md](ROADMAP.md) (M8/M9), [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## M9 #102 — process / exec / wait / pipe
+
+Lane #102 implements the frozen BusyBox process subset on trusted `(pid, generation)`:
+`fork`, `execve` (production pointer copy → `LinuxExecSpec` → `commit_exec`), `wait4`,
+`exit_group`, `getppid`, and `pipe`. Parent/child links live in
+`kernel/src/process/linux_proc/table.rs`; pipes are bounded (`LINUX_PIPE_MAX` ×
+`LINUX_PIPE_CAPACITY` = 1024 bytes each) with `#147` `PipeRef` backends and `#145`
+blocking (`WaitKey` namespace `0x50 << 56`: pipe reader
+`0x50<<56 | 0x01<<48 | index<<32 | gen`, writer `0x02<<48`, parent wait
+`0x50<<56 | pid`). Empty/full pipes and `wait4` block via `block_linux_syscall`
+(idempotent restart; no spin, no `EAGAIN`). Pipe `write` with no readers returns
+`EPIPE` (no `SIGPIPE` delivery in M9). `read(0)` front-end lives in
+`syscall/linux/fd.rs` (`ensure_open_fd`, 1024-byte scratch, kind dispatch); pipe
+bytes use `linux_proc/pipe::read_fd`. `fork` copies parent PTE flags faithfully
+(`mm/fork_clone.rs`, W^X preserved), delegates every parent capability via
+`list_holder` + `delegate`, and returns `EAGAIN` when `LINUX_MAX_PROC_ENTRIES`
+(6) is full. Fault exits publish `WIFSIGNALED` (`SIGSEGV` / `SIGILL`) through
+`linux_proc/fault.rs` + `teardown_process_by_id`. Until #101 lands,
+`linux_proc/exec_resolve.rs::resolve_executable(pid, gen, path, resolved_out)` stubs
+`/bin/busybox`, `/bin/sh`, and self-test fixture paths (orchestrator replaces with
+`linux_fs::resolve_executable`). `#103` stubs: `linux_mem_clone_for_fork_stub` /
+`linux_signal_clone_for_fork_stub` in `fork.rs`.
+
+### Acceptance
+
+- Fixture: `fixtures/linux-proc-probe/linux-proc-probe-x86_64` (raw syscalls: pipe +
+  fork/wait, exec marker, `ECHILD`/`EBADF`/`EPIPE`, fork-bomb `EAGAIN`).
+- QEMU: `cargo xtask test-m9-linux-proc` (`m9-linux-proc-self-test`) — eight probe
+  cycles with `[M9.I] PASS`, logging `pipe_pool_live`, `proc_table_live`, and open
+  description pool occupancy each cycle.
+
 ## M9 #104 — rootfs fixture
 
 Deterministic BusyBox rootfs bytes for M9 acceptance live in a bounded

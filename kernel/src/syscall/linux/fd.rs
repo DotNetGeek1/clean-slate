@@ -2,12 +2,16 @@
 
 use super::table::LinuxSyscallContext;
 use super::user_copy::copy_user_bytes;
-use super::write::{ensure_fd_open, write_chunked, LINUX_WRITE_CHUNK_BYTES};
-use crate::mm::user_mapping::validate_user_pointer_range;
+use super::write::{ensure_fd_open, write_chunked};
+use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::process::linux_fd::{
-    self, apply_linux_fl_to_status, ensure_open_fd, open_status_to_linux_fl, projection_for,
+    self, apply_linux_fl_to_status, ensure_open_fd, open_description::DescriptorKind,
+    open_status_to_linux_fl, projection_for,
 };
-use clean_slate_linux_abi::{LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EFAULT, EINVAL};
+use clean_slate_linux_abi::{LinuxSyscallRequest, LinuxSyscallResult, EBADF, EFAULT, EINVAL};
+
+/// Matches frozen pipe `read(0, …, 1024)` traces.
+pub(crate) const LINUX_READ_SCRATCH_BYTES: usize = 1024;
 
 /// Bounded `writev` iov count (self-test uses 2–3; keep small and fixed).
 pub(crate) const LINUX_IOV_MAX: usize = 8;
@@ -24,6 +28,80 @@ const FD_CLOEXEC: u64 = 1;
 struct IoVec {
     base: u64,
     len: u64,
+}
+
+pub(crate) fn handle_sys_read(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+) -> LinuxSyscallResult {
+    let fd = request.args[0];
+    let buf_ptr = request.args[1];
+    let count = request.args[2];
+    let pid = ctx.pid;
+    let generation = ctx.instance_generation;
+
+    ensure_open_fd(pid, generation, fd)?;
+    if count == 0 {
+        return Ok(0);
+    }
+    let want = usize::try_from(count)
+        .map_err(|_| EINVAL)?
+        .min(LINUX_READ_SCRATCH_BYTES);
+    validate_user_writable_pointer_range(buf_ptr, want as u64).map_err(|_| EFAULT)?;
+
+    let mut scratch = [0u8; LINUX_READ_SCRATCH_BYTES];
+    let result = match linux_fd::open_description_kind(pid, generation, fd)? {
+        DescriptorKind::Console(_) => Ok(0u64),
+        DescriptorKind::PipeRead(_) => {
+            #[cfg(not(any(
+                feature = "m1-self-test",
+                feature = "m2-double-fault-self-test",
+                feature = "m2-timer-self-test"
+            )))]
+            {
+                crate::process::linux_proc::pipe::read_fd(
+                    request,
+                    ctx,
+                    pid,
+                    generation,
+                    fd,
+                    &mut scratch[..want],
+                )
+            }
+            #[cfg(any(
+                feature = "m1-self-test",
+                feature = "m2-double-fault-self-test",
+                feature = "m2-timer-self-test"
+            ))]
+            {
+                // M1/M2 boots exclude the Linux process substrate (no pipes exist).
+                let _ = &mut scratch[..want];
+                Err(EBADF)
+            }
+        }
+        DescriptorKind::File(_) => {
+            #[cfg(feature = "m9-rootfs")]
+            {
+                super::fs_io::read_file_fd(request, ctx, pid, generation, fd, &mut scratch[..want])
+            }
+            #[cfg(not(feature = "m9-rootfs"))]
+            {
+                let _ = (request, ctx, pid, generation, fd);
+                Err(EBADF)
+            }
+        }
+        DescriptorKind::Dir(_) | DescriptorKind::Socket(_) | DescriptorKind::PipeWrite(_) => {
+            Err(EBADF)
+        }
+    };
+    if let Ok(n) = result {
+        if n > 0 {
+            unsafe {
+                core::ptr::copy_nonoverlapping(scratch.as_ptr(), buf_ptr as *mut u8, n as usize);
+            }
+        }
+    }
+    result
 }
 
 pub(crate) fn handle_sys_close(
@@ -127,44 +205,40 @@ pub(crate) fn handle_sys_writev(
         }
     }
 
-    if total_len == 0 {
-        return Ok(0);
-    }
-
     write_chunked(
         total_len,
         |offset, len, dst| {
-            copy_from_iovecs(&iovecs[..iovcnt], offset, len, dst)?;
-            Ok(len)
+            let mut copied = 0usize;
+            let mut pos = offset;
+            for iov in &iovecs[..iovcnt] {
+                if pos >= iov.len {
+                    pos -= iov.len;
+                    continue;
+                }
+                let take = (iov.len - pos).min((len - copied) as u64) as usize;
+                let mut chunk = [0u8; super::user_copy::LINUX_USER_COPY_MAX_BYTES];
+                copy_user_bytes(iov.base + pos, take as u64, &mut chunk)?;
+                dst[copied..copied + take].copy_from_slice(&chunk[..take]);
+                copied += take;
+                pos = 0;
+                if copied >= len {
+                    break;
+                }
+            }
+            Ok(copied)
         },
-        |chunk| linux_fd::write_fd(pid, generation, fd, chunk),
+        |chunk| {
+            let sent = linux_fd::write_fd(pid, generation, fd, chunk)?;
+            Ok(sent)
+        },
     )
 }
 
-fn copy_from_iovecs(
+#[cfg(test)]
+fn locate_iov_index(
     iovecs: &[IoVec],
     offset: u64,
-    len: usize,
-    dst: &mut [u8; LINUX_WRITE_CHUNK_BYTES],
-) -> Result<(), LinuxErrno> {
-    let mut filled = 0usize;
-    let mut cursor = offset;
-    while filled < len {
-        let (index, skip) = locate_iov_index(iovecs, cursor)?;
-        let iov = &iovecs[index];
-        let remaining_in_iov = iov.len - skip;
-        let want = (len - filled).min(remaining_in_iov as usize);
-        let chunk_ptr = iov.base.checked_add(skip).ok_or(EFAULT)?;
-        let mut scratch = [0u8; LINUX_WRITE_CHUNK_BYTES];
-        copy_user_bytes(chunk_ptr, want as u64, &mut scratch)?;
-        dst[filled..filled + want].copy_from_slice(&scratch[..want]);
-        filled += want;
-        cursor += want as u64;
-    }
-    Ok(())
-}
-
-fn locate_iov_index(iovecs: &[IoVec], offset: u64) -> Result<(usize, u64), LinuxErrno> {
+) -> Result<(usize, u64), clean_slate_linux_abi::LinuxErrno> {
     let mut walked = 0u64;
     for (index, iov) in iovecs.iter().enumerate() {
         if iov.len == 0 {
@@ -177,67 +251,6 @@ fn locate_iov_index(iovecs: &[IoVec], offset: u64) -> Result<(usize, u64), Linux
         walked = end;
     }
     Err(EFAULT)
-}
-
-pub(crate) fn handle_sys_read(
-    request: &LinuxSyscallRequest,
-    ctx: &mut LinuxSyscallContext<'_>,
-) -> LinuxSyscallResult {
-    use crate::mm::user_mapping::validate_user_writable_pointer_range;
-    use crate::process::linux_fd::open_description::DescriptorKind;
-    use clean_slate_linux_abi::EFAULT;
-    let fd = request.args[0];
-    let buf_ptr = request.args[1];
-    let count = request.args[2];
-    if count == 0 {
-        return Ok(0);
-    }
-    ensure_open_fd(ctx.pid, ctx.instance_generation, fd)?;
-    if validate_user_writable_pointer_range(buf_ptr, count).is_err() {
-        return Err(EFAULT);
-    }
-    let open = linux_fd::open_description_id_for_fd(ctx.pid, ctx.instance_generation, fd)?;
-    let desc = linux_fd::open_description_snapshot(open)?;
-    match desc.kind {
-        DescriptorKind::Console(_) => Ok(0),
-        DescriptorKind::File(_) => {
-            #[cfg(feature = "m9-rootfs")]
-            {
-                let mut scratch = [0u8; super::fs_io::LINUX_READ_SCRATCH_BYTES];
-                let want = count.min(scratch.len() as u64) as usize;
-                super::fs_io::read_file_fd(
-                    request,
-                    ctx,
-                    ctx.pid,
-                    ctx.instance_generation,
-                    fd,
-                    &mut scratch[..want],
-                )
-                .map(|read| {
-                    if read == 0 {
-                        return 0;
-                    }
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            scratch.as_ptr(),
-                            buf_ptr as *mut u8,
-                            read as usize,
-                        );
-                    }
-                    read
-                })
-            }
-            #[cfg(not(feature = "m9-rootfs"))]
-            {
-                let _ = (request, ctx, fd, buf_ptr, count);
-                Err(clean_slate_linux_abi::EBADF)
-            }
-        }
-        DescriptorKind::PipeRead(_) | DescriptorKind::PipeWrite(_) | DescriptorKind::Socket(_) => {
-            Err(clean_slate_linux_abi::EBADF)
-        }
-        DescriptorKind::Dir(_) => Err(clean_slate_linux_abi::EBADF),
-    }
 }
 
 pub(crate) fn handle_sys_lseek(

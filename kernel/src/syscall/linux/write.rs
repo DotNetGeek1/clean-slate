@@ -77,6 +77,7 @@ pub(crate) fn ensure_fd_open(
         LinuxFdProjection::Closed => Err(EBADF),
         LinuxFdProjection::ConsoleEndpoint { .. } => Ok(()),
         LinuxFdProjection::FileBackend | LinuxFdProjection::DirBackend => Ok(()),
+        LinuxFdProjection::PipeBackend => Ok(()),
     }
 }
 
@@ -197,12 +198,29 @@ pub(crate) fn handle_sys_write(
     let pid = ctx.pid;
     let generation = ctx.instance_generation;
 
-    // 1. fd first: EBADF beats EFAULT and beats the zero-length shortcut.
     let projection = linux_fd::projection_for(pid, generation, fd)?;
     ensure_fd_open(Ok(projection))?;
 
+    if matches!(projection, LinuxFdProjection::PipeBackend) {
+        #[cfg(not(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        )))]
+        return crate::process::linux_proc::pipe::write_fd(
+            request, ctx, pid, generation, fd, user_ptr, count,
+        );
+        // M1/M2 boots exclude the Linux process substrate (no pipes exist).
+        #[cfg(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        ))]
+        return Err(EBADF);
+    }
+
     #[cfg(feature = "m9-rootfs")]
-    if matches!(projection, linux_fd::LinuxFdProjection::FileBackend) {
+    if matches!(projection, LinuxFdProjection::FileBackend) {
         let n = clamp_write_count(count);
         return super::fs_io::write_file_fd_user(request, ctx, pid, generation, fd, user_ptr, n);
     }

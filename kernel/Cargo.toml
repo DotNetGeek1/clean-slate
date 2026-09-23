@@ -59,6 +59,7 @@ m8-linux-hello-self-test = ["m8-linux-hello", "m3-entry-self-test"]
 m9-low-va-self-test = ["m8-linux-image", "m3-entry-self-test"]
 m9-linux-exec-self-test = ["m8-linux-image", "m3-entry-self-test"]
 m9-linux-runtime-self-test = ["m8-linux-image", "m3-entry-self-test"]
+m9-linux-proc-self-test = ["m8-linux-image", "m3-entry-self-test"]
 m9-rootfs = ["dep:clean-slate-rootfs"]
 m9-rootfs-self-test = ["m9-rootfs", "m3-entry-self-test"]
 m9-linux-fs-self-test = [
