@@ -29,8 +29,22 @@ pub(crate) struct LinuxSyscallContext<'a> {
 pub(crate) type LinuxSyscallHandler =
     fn(&LinuxSyscallRequest, &mut LinuxSyscallContext<'_>) -> LinuxSyscallResult;
 
-/// Look up the M8 handler for `nr`, or `None` for unsupported numbers.
+/// Look up the handler for `nr`, or `None` for unsupported numbers.
+///
+/// Core arms (M8 `write`/`exit`, #147 fd core) live here; every other Linux
+/// syscall family registers through its own module so Wave 2 lanes never edit
+/// this table concurrently. Order is irrelevant: the frozen matrix gives each
+/// syscall number exactly one owner, and the host test below asserts that no
+/// number resolves in more than one family.
 pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
+    lookup_core_handler(nr)
+        .or_else(|| super::fs::lookup_handler(nr))
+        .or_else(|| super::process::lookup_handler(nr))
+        .or_else(|| super::runtime::lookup_handler(nr))
+        .or_else(|| super::socket::lookup_handler(nr))
+}
+
+fn lookup_core_handler(nr: u64) -> Option<LinuxSyscallHandler> {
     match nr {
         SYS_WRITE => Some(handle_sys_write),
         SYS_CLOSE => Some(handle_sys_close),
@@ -42,6 +56,21 @@ pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
         SYS_EXECVE => Some(handle_sys_execve),
         _ => None,
     }
+}
+
+/// Number of families (core + fs + process + runtime + socket) that claim `nr`.
+#[cfg(test)]
+fn family_claims(nr: u64) -> usize {
+    [
+        lookup_core_handler(nr).is_some(),
+        super::fs::lookup_handler(nr).is_some(),
+        super::process::lookup_handler(nr).is_some(),
+        super::runtime::lookup_handler(nr).is_some(),
+        super::socket::lookup_handler(nr).is_some(),
+    ]
+    .iter()
+    .filter(|claimed| **claimed)
+    .count()
 }
 
 #[cfg(test)]
@@ -73,5 +102,17 @@ mod tests {
         let exit = lookup_handler(SYS_EXIT).unwrap();
         assert_eq!(write as usize, handle_sys_write as usize);
         assert_eq!(exit as usize, handle_sys_exit as usize);
+    }
+
+    /// Every syscall number in the frozen matrix has exactly one owning
+    /// family; a lane that wires a number someone else owns fails here.
+    #[test]
+    fn no_syscall_number_is_claimed_by_two_families() {
+        for nr in 0..512u64 {
+            assert!(
+                family_claims(nr) <= 1,
+                "nr {nr} is claimed by more than one dispatch family"
+            );
+        }
     }
 }

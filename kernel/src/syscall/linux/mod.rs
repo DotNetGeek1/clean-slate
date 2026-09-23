@@ -4,11 +4,16 @@
 //! module runs. Handlers live in [`table`]; register decode is host-testable in
 //! [`decode`].
 
+pub(crate) mod block;
 pub(crate) mod decode;
 #[cfg(feature = "m9-linux-exec-self-test")]
 pub(crate) mod execve;
 pub(crate) mod exit;
 pub(crate) mod fd;
+pub(crate) mod fs;
+pub(crate) mod process;
+pub(crate) mod runtime;
+pub(crate) mod socket;
 pub(crate) mod table;
 pub(crate) mod user_copy;
 pub(crate) mod write;

@@ -46,6 +46,73 @@ pub(crate) fn encode_wait_outcome(outcome: WaitOutcome) -> u64 {
     }
 }
 
+/// How a blocked syscall is completed from the scheduler after its wake.
+///
+/// The blocked handler's kernel stack is abandoned at block time; the scheduler
+/// finishes the syscall by editing the saved [`SyscallContext`] and `sysretq`-ing
+/// straight back to user space. Native callers see the raw outcome in `RAX`.
+/// Linux handlers need to finish work after the wake (copy pipe bytes, fill a
+/// `wait4` status, fill `pollfd.revents`), so they use the Linux
+/// `-ERESTARTSYS` shape instead: re-execute the `syscall` instruction with the
+/// argument registers untouched and let the handler re-check its condition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlockedResume {
+    /// `RAX = encode_wait_outcome(outcome)` (#145 native contract).
+    NativeOutcome,
+    /// `Woken`/`Cancelled`: `user_rip -= SYSCALL_INSTRUCTION_BYTES`, `RAX = nr`.
+    /// `TimedOut`: `RAX = timeout_rax` (already errno-encoded by the caller).
+    RestartSyscall { nr: u64, timeout_rax: u64 },
+}
+
+/// Length of the `syscall` instruction (`0F 05`); SYSCALL saves the address of
+/// the following instruction in RCX, so restarting means backing up by this.
+pub(crate) const SYSCALL_INSTRUCTION_BYTES: u64 = 2;
+
+static BLOCKED_RESUME: crate::sync::global_cell::GlobalCell<
+    [BlockedResume; super::SCHEDULER_THREAD_SLOTS],
+> = crate::sync::global_cell::GlobalCell::new(
+    [BlockedResume::NativeOutcome; super::SCHEDULER_THREAD_SLOTS],
+);
+
+fn set_blocked_resume(thread_index: usize, resume: BlockedResume) {
+    // Caller holds interrupts disabled and owns `thread_index` as the current thread.
+    unsafe {
+        (*BLOCKED_RESUME.get())[thread_index] = resume;
+    }
+}
+
+fn take_blocked_resume(thread_index: usize) -> BlockedResume {
+    unsafe {
+        let slot = &mut (*BLOCKED_RESUME.get())[thread_index];
+        core::mem::replace(slot, BlockedResume::NativeOutcome)
+    }
+}
+
+/// Edit the saved frame so the woken thread completes its syscall per `resume`.
+pub(crate) fn apply_blocked_resume(
+    frame: &mut SyscallContext,
+    resume: BlockedResume,
+    outcome: WaitOutcome,
+) {
+    match resume {
+        BlockedResume::NativeOutcome => frame.rax = encode_wait_outcome(outcome),
+        BlockedResume::RestartSyscall { nr, timeout_rax } => match outcome {
+            WaitOutcome::TimedOut => frame.rax = timeout_rax,
+            WaitOutcome::Woken | WaitOutcome::Cancelled => {
+                frame.user_rip = frame
+                    .user_rip
+                    .checked_sub(SYSCALL_INSTRUCTION_BYTES)
+                    .unwrap_or_else(|| {
+                        crate::diagnostics::qemu::fatal_kernel_error(
+                            "blocked syscall restart: user rip underflow",
+                        )
+                    });
+                frame.rax = nr;
+            }
+        },
+    }
+}
+
 #[derive(Clone, Copy)]
 struct WaiterSlot {
     active: bool,
@@ -143,10 +210,27 @@ fn wake_thread_at_index(thread_index: usize, outcome: WaitOutcome) {
 }
 
 /// Called ONLY from a syscall handler on the current thread.
+///
+/// Native contract: on wake the scheduler completes the syscall with
+/// `RAX = encode_wait_outcome(outcome)`. Returns `Ok(Woken)` without yielding
+/// when a pending wake for `key` was already recorded.
 pub(crate) fn block_current_thread(
     frame: *mut SyscallContext,
     key: WaitKey,
     deadline: Option<Deadline>,
+) -> Result<WaitOutcome, &'static str> {
+    block_current_thread_with_resume(frame, key, deadline, BlockedResume::NativeOutcome)
+}
+
+/// [`block_current_thread`] with an explicit completion contract (Linux restart).
+///
+/// Only returns (with `Ok(Woken)`) when no yield was necessary; the caller then
+/// applies the same completion it would have received from the scheduler.
+pub(crate) fn block_current_thread_with_resume(
+    frame: *mut SyscallContext,
+    key: WaitKey,
+    deadline: Option<Deadline>,
+    resume: BlockedResume,
 ) -> Result<WaitOutcome, &'static str> {
     let must_yield = without_interrupts(|| {
         let scheduler = unsafe { scheduler_mut() };
@@ -158,6 +242,7 @@ pub(crate) fn block_current_thread(
             return Err("block required the running thread state");
         }
         thread.blocked_syscall_frame = frame as u64;
+        set_blocked_resume(thread_index, resume);
         let tid = thread.id;
         let pid = thread.owner_process_id;
         let generation =
@@ -166,6 +251,7 @@ pub(crate) fn block_current_thread(
         let table = wait_table_mut();
         if table.consume_pending_wake(key) {
             thread.blocked_syscall_frame = 0;
+            set_blocked_resume(thread_index, BlockedResume::NativeOutcome);
             return Ok(false);
         }
 
@@ -300,6 +386,7 @@ pub(crate) fn arm_syscall_block_frame(frame: *mut SyscallContext) {
             .current_thread
             .expect("syscall frame arm required current thread");
         scheduler.threads[index].blocked_syscall_frame = frame as u64;
+        set_blocked_resume(index, BlockedResume::NativeOutcome);
     });
 }
 
@@ -313,8 +400,9 @@ extern "C" fn clean_slate_complete_blocked_syscall_resume() -> u64 {
         let frame_ptr = scheduler.threads[index].blocked_syscall_frame;
         let outcome = scheduler.threads[index].wait_resume_outcome;
         scheduler.threads[index].blocked_syscall_frame = 0;
+        let resume = take_blocked_resume(index);
         let frame = unsafe { &mut *(frame_ptr as *mut SyscallContext) };
-        frame.rax = encode_wait_outcome(outcome);
+        apply_blocked_resume(frame, resume, outcome);
         #[cfg(feature = "m9-block-wake-self-test")]
         crate::selftest::m9_block_wake::on_blocked_syscall_resumed(outcome, frame.rax);
         frame_ptr
@@ -345,6 +433,73 @@ pub(crate) fn clear_wait_table_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn frame_at(user_rip: u64) -> SyscallContext {
+        SyscallContext {
+            rax: 0xdead,
+            rdx: 3,
+            rbx: 0,
+            rbp: 0,
+            rsi: 2,
+            rdi: 1,
+            r8: 5,
+            r9: 6,
+            r10: 4,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            user_rip,
+            user_rflags: 0x202,
+            user_rsp: 0x7fff_0000,
+        }
+    }
+
+    #[test]
+    fn native_resume_encodes_outcome_and_leaves_rip_alone() {
+        let mut frame = frame_at(0x40_1000);
+        apply_blocked_resume(
+            &mut frame,
+            BlockedResume::NativeOutcome,
+            WaitOutcome::TimedOut,
+        );
+        assert_eq!(frame.rax, encode_wait_outcome(WaitOutcome::TimedOut));
+        assert_eq!(frame.user_rip, 0x40_1000);
+    }
+
+    #[test]
+    fn restart_resume_reexecutes_syscall_with_arguments_intact() {
+        for outcome in [WaitOutcome::Woken, WaitOutcome::Cancelled] {
+            let mut frame = frame_at(0x40_1002);
+            apply_blocked_resume(
+                &mut frame,
+                BlockedResume::RestartSyscall {
+                    nr: 7,
+                    timeout_rax: u64::MAX,
+                },
+                outcome,
+            );
+            assert_eq!(frame.user_rip, 0x40_1000, "rip backs up over `syscall`");
+            assert_eq!(frame.rax, 7, "rax carries the syscall number again");
+            assert_eq!((frame.rdi, frame.rsi, frame.rdx), (1, 2, 3));
+            assert_eq!((frame.r10, frame.r8, frame.r9), (4, 5, 6));
+            assert_eq!(frame.user_rsp, 0x7fff_0000);
+            assert_eq!(frame.user_rflags, 0x202);
+        }
+    }
+
+    #[test]
+    fn restart_resume_completes_with_timeout_result_on_deadline() {
+        let mut frame = frame_at(0x40_1002);
+        let timeout_rax = (-110i64) as u64; // -ETIMEDOUT
+        apply_blocked_resume(
+            &mut frame,
+            BlockedResume::RestartSyscall { nr: 7, timeout_rax },
+            WaitOutcome::TimedOut,
+        );
+        assert_eq!(frame.user_rip, 0x40_1002, "no restart on timeout");
+        assert_eq!(frame.rax, timeout_rax);
+    }
 
     #[test]
     fn pending_wake_is_consumed_on_block_register() {
