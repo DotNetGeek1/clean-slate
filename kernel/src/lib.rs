@@ -83,6 +83,7 @@ mod service;
 mod selftest;
 mod sync;
 mod syscall;
+mod time;
 
 pub use diagnostics::qemu::qemu_exit_failure;
 pub use diagnostics::serial::{serial_write_fmt, serial_write_line};
