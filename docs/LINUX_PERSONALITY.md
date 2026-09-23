@@ -240,13 +240,23 @@ generation-0 sentinel).
 QEMU proof: `cargo xtask test-m8-linux-dispatch` (`m8-linux-dispatch-self-test`),
 marker `[M8.3] PASS`.
 
+## #147 fd / open-description core (M9)
+
+Linux fd integers remain compatibility-local. Authority lives in a **global bounded open-description pool** (`OPEN_DESCRIPTION_CAPACITY = 48`) referenced by per-process fd tables (`LINUX_FD_TABLE_CAPACITY = 16`, lowest-free allocation).
+
+Each fd entry stores `FdEntry { open: OpenDescriptionId, flags: FdFlags }` where `OpenDescriptionId { index, generation }` never aliases a replaced object. Open descriptions carry shared `OpenStatus` / `offset`, `DescriptorKind` (console, file/dir/pipe/socket placeholders), and a refcount; `close` drops one ref, final ref runs a kind-specific release hook.
+
+Syscalls wired for this lane: `close(3)`, `writev(20)`, `dup2(33)`, `fcntl(72)` (`F_GETFD`/`F_SETFD`/`F_GETFL`/`F_SETFL`/`F_DUPFD_CLOEXEC`). `write(1)` uses the same console backend via open descriptions. Errno mapping: `EBADF` stale/closed, `EMFILE` per-process table full, `ENFILE` pool full, `EINVAL` bad `fcntl`/`writev` iovcnt.
+
+QEMU: `cargo xtask test-m9-fd-core` (`m9-fd-core-self-test`), markers `[M9.G] pool_before_boot=` plus the M8.3 dispatch proof on the new substrate.
+
 ## #95 fd projection
 
 Linux stdio is a **projection** onto existing Clean-Slate IPC console authority, not a new resource class.
 
 ### Model
 
-- Each Linux-personality process may own a bounded fd table (`LINUX_FD_TABLE_CAPACITY = 4`, fds `0..3`) stored in a kernel registry keyed by `(pid, InstanceGeneration)`.
+- Each Linux-personality process owns a bounded fd table (`LINUX_FD_TABLE_CAPACITY = 16`) in the #147 registry keyed by `(pid, InstanceGeneration)`.
 - Registry capacity equals `PROCESS_REGISTRY_CAPACITY` (not a separate soft limit).
 - The table is **not** a field on `Process` (avoids spawn / literal churn).
 - fd integers are compatibility-local only. Authority is always an `IpcEndpointTable` send-capability handle granted to that pid by trusted bootstrap (`grant_console_capability_for_pid` / `grant_send_capability`).

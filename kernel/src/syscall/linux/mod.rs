@@ -6,6 +6,7 @@
 
 pub(crate) mod decode;
 pub(crate) mod exit;
+pub(crate) mod fd;
 pub(crate) mod table;
 pub(crate) mod user_copy;
 pub(crate) mod write;
@@ -138,6 +139,10 @@ pub(crate) fn dispatch_with(
     };
     #[cfg(feature = "m8-linux-dispatch-self-test")]
     crate::selftest::m8_linux_dispatch::observe_linux_write_result(pid, &request, result);
+    #[cfg(feature = "m9-fd-core-self-test")]
+    if request.nr != clean_slate_linux_abi::SYS_EXIT {
+        crate::selftest::m9_fd_core::observe_linux_syscall_result(pid, &request, result);
+    }
     ctx.frame.rax = encode_rax(result);
 }
 
