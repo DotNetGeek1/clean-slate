@@ -129,10 +129,8 @@ impl ProbeBuilder {
 
     fn patch_jne_rel32(&mut self, off: usize, target: usize) -> Result<(), &'static str> {
         let next = off + 4;
-        let rel = i32::try_from(
-            isize::try_from(target - next).map_err(|_| "branch oob")?,
-        )
-        .map_err(|_| "branch oob")?;
+        let rel = i32::try_from(isize::try_from(target - next).map_err(|_| "branch oob")?)
+            .map_err(|_| "branch oob")?;
         self.buf[off..off + 4].copy_from_slice(&rel.to_le_bytes());
         Ok(())
     }
@@ -144,10 +142,8 @@ impl ProbeBuilder {
 
     fn patch_lea_rsi_rip(&mut self, off: usize, target: usize) -> Result<(), &'static str> {
         let next = off + 4;
-        let rel = i32::try_from(
-            isize::try_from(target - next).map_err(|_| "lea oob")?,
-        )
-        .map_err(|_| "lea oob")?;
+        let rel = i32::try_from(isize::try_from(target - next).map_err(|_| "lea oob")?)
+            .map_err(|_| "lea oob")?;
         self.buf[off..off + 4].copy_from_slice(&rel.to_le_bytes());
         Ok(())
     }
@@ -299,8 +295,8 @@ fn reset_cycle_observations() {
 }
 
 fn install_stdio_and_placeholder(pid: u64) -> Result<(), &'static str> {
-    let generation = live_instance_generation(pid)
-        .ok_or("m9 fd core missing instance generation")?;
+    let generation =
+        live_instance_generation(pid).ok_or("m9 fd core missing instance generation")?;
     let ipc = unsafe { endpoint_table_mut() };
     let handle = ipc.grant_console_capability_for_pid(pid)?;
     linux_fd::install_stdio_for_process(pid, generation, handle, handle)?;
@@ -496,9 +492,7 @@ pub(crate) fn after_linux_probe_exit(
     }
     M9_CYCLE.store(next_cycle, Ordering::Relaxed);
     launch_cycle(allocator, next_cycle).unwrap_or_else(|message| fatal_kernel_error(message));
-    Some(
-        start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message)),
-    )
+    Some(start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message)))
 }
 
 pub(crate) fn start_m9_fd_core_self_test(allocator: PageAllocator) -> ! {
@@ -514,9 +508,7 @@ pub(crate) fn start_m9_fd_core_self_test(allocator: PageAllocator) -> ! {
     }
     M9_CYCLE.store(0, Ordering::Relaxed);
 
-    let kernel_stack_top = unsafe {
-        task_stack_top(&task_stacks_mut()[0])
-    };
+    let kernel_stack_top = unsafe { task_stack_top(&task_stacks_mut()[0]) };
     set_privilege_stack(kernel_stack_top).unwrap_or_else(|m| fatal_kernel_error(m));
     crate::syscall::initialize_syscall_abi(kernel_stack_top)
         .unwrap_or_else(|m| fatal_kernel_error(m));

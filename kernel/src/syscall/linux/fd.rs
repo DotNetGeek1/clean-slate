@@ -224,7 +224,10 @@ mod tests {
                 base: 0x1000,
                 len: 2,
             },
-            IoVec { base: 0x2000, len: 0 },
+            IoVec {
+                base: 0x2000,
+                len: 0,
+            },
             IoVec {
                 base: 0x3000,
                 len: 3,
@@ -252,14 +255,7 @@ mod tests {
         };
         let request = LinuxSyscallRequest {
             nr: SYS_WRITEV,
-            args: [
-                LINUX_STDOUT_FD,
-                0x1000,
-                (LINUX_IOV_MAX as u64) + 1,
-                0,
-                0,
-                0,
-            ],
+            args: [LINUX_STDOUT_FD, 0x1000, (LINUX_IOV_MAX as u64) + 1, 0, 0, 0],
         };
         assert_eq!(handle_sys_writev(&request, &mut ctx), Err(EINVAL));
     }
