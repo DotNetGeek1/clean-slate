@@ -196,14 +196,14 @@ pub(crate) fn handle_sys_write(
     let pid = ctx.pid;
     let generation = ctx.instance_generation;
 
-    // 1. fd first: EBADF beats EFAULT and beats the zero-length shortcut.
-    ensure_fd_open(linux_fd::projection_for(pid, generation, fd))?;
-
     if linux_fd::pipe_write_ref(pid, generation, fd).is_some() {
         return crate::process::linux_proc::pipe::write_fd(
             request, ctx, pid, generation, fd, user_ptr, count,
         );
     }
+
+    // fd first: EBADF beats EFAULT and beats the zero-length shortcut.
+    ensure_fd_open(linux_fd::projection_for(pid, generation, fd))?;
 
     // 2./3./4. bounded copy-in + capability-controlled delivery per chunk.
     write_chunked(

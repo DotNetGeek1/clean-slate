@@ -188,6 +188,9 @@ pub(crate) fn after_probe_exit_group(
     }
 
     let cycle = M9_CYCLE.load(Ordering::Relaxed);
+    crate::process::linux_proc::pipe::reset_for_selftest();
+    crate::process::linux_proc::table::reset_for_selftest();
+    linux_fd::reset_registry_for_selftest();
     log_cycle_metrics(cycle, "end");
     assert_baseline(cycle);
 

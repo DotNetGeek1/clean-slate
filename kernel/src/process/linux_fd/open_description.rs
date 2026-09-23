@@ -233,6 +233,7 @@ impl OpenDescriptionPool {
         let desc = self.get_mut(id)?;
         if desc.refcount == 0 {
             desc.refcount = 1;
+            attach_pipe_open_description(&desc.kind);
             Ok(())
         } else {
             self.add_ref(id)
@@ -272,6 +273,7 @@ impl OpenDescriptionPool {
             return Err(clean_slate_linux_abi::EMFILE);
         }
         desc.refcount += 1;
+        attach_pipe_open_description(&desc.kind);
         Ok(())
     }
 
@@ -288,7 +290,9 @@ impl OpenDescriptionPool {
         if desc.refcount == 0 {
             return Err(EBADF);
         }
+        let kind = desc.kind;
         desc.refcount -= 1;
+        detach_pipe_open_description(&kind);
         if desc.refcount == 0 {
             self.finalize_slot(id.index as usize);
         }
@@ -300,7 +304,6 @@ impl OpenDescriptionPool {
         if !slot.live {
             return;
         }
-        release_kind_hook(&slot.description.kind);
         slot.live = false;
         slot.generation = slot.generation.saturating_add(1);
         self.live_count = self.live_count.saturating_sub(1);
@@ -311,15 +314,21 @@ impl OpenDescriptionPool {
     }
 }
 
-fn release_kind_hook(kind: &DescriptorKind) {
+fn attach_pipe_open_description(kind: &DescriptorKind) {
     match kind {
-        DescriptorKind::Console(_) => {}
-        DescriptorKind::File(_) => {}
-        DescriptorKind::Dir(_) => {}
+        DescriptorKind::PipeRead(pipe) | DescriptorKind::PipeWrite(pipe) => {
+            crate::process::linux_proc::pipe::attach_pipe_end(*pipe);
+        }
+        _ => {}
+    }
+}
+
+fn detach_pipe_open_description(kind: &DescriptorKind) {
+    match kind {
         DescriptorKind::PipeRead(pipe) | DescriptorKind::PipeWrite(pipe) => {
             crate::process::linux_proc::pipe::release_pipe_end(*pipe);
         }
-        DescriptorKind::Socket(_) => {}
+        _ => {}
     }
 }
 

@@ -553,20 +553,16 @@ impl Scheduler {
                 }
                 Ok(Some(FRESH_TASK_SENTINEL))
             } else {
-                Ok(Some(
-                    self.dispatch_handoff_stack_pointer(
-                        self.threads[next].saved_stack_pointer,
-                        next,
-                    )?,
-                ))
-            }
-        } else {
-            Ok(Some(
-                self.dispatch_handoff_stack_pointer(
+                Ok(Some(wait::scheduler_handoff_stack_pointer(
                     self.threads[next].saved_stack_pointer,
                     next,
-                )?,
-            ))
+                )))
+            }
+        } else {
+            Ok(Some(wait::scheduler_handoff_stack_pointer(
+                self.threads[next].saved_stack_pointer,
+                next,
+            )))
         }
     }
 

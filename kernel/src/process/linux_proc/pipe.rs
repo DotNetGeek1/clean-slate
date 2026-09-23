@@ -242,21 +242,27 @@ pub(crate) fn release_pipe_end(pipe: PipeRef) {
     pool_mut().release_end(pipe_ref_to_handle(pipe), pipe.end);
 }
 
+pub(crate) fn attach_pipe_end(pipe: PipeRef) {
+    let handle = pipe_ref_to_handle(pipe);
+    match pipe.end {
+        PipeEnd::Read => pool_mut().add_reader(handle),
+        PipeEnd::Write => pool_mut().add_writer(handle),
+    }
+}
+
 pub(crate) fn open_pipe_refs(pool: &mut PipePool) -> Result<(PipeRef, PipeRef), LinuxErrno> {
-    let handle = pool.alloc_pipe()?;
-    pool.add_reader(handle);
-    pool.add_writer(handle);
+    let PipeHandle { index, generation } = pool.alloc_pipe()?;
     let read = PipeRef {
         pipe: PipeId {
-            index: handle.index,
-            generation: handle.generation,
+            index,
+            generation,
         },
         end: PipeEnd::Read,
     };
     let write = PipeRef {
         pipe: PipeId {
-            index: handle.index,
-            generation: handle.generation,
+            index,
+            generation,
         },
         end: PipeEnd::Write,
     };
@@ -341,6 +347,22 @@ pub(crate) fn write_fd(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn epipe_after_both_read_ends_released() {
+        reset_for_selftest();
+        let pool = pool_mut();
+        let handle = pool.alloc_pipe().unwrap();
+        pool.add_reader(handle);
+        pool.add_reader(handle);
+        pool.add_writer(handle);
+        pool.release_end(handle, PipeEnd::Read);
+        pool.release_end(handle, PipeEnd::Read);
+        assert!(matches!(
+            pool.write_from(handle, b"x"),
+            Err(PipeWriteOutcome::Epipe)
+        ));
+    }
 
     #[test]
     fn ring_wrap_partial_write_eof_epipe() {

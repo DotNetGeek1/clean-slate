@@ -119,6 +119,7 @@ test_pipe_epipe:
     xor     rdx, rdx
     xor     r10, r10
     syscall
+    mov     r13d, [rsp - 12]
     mov     rax, 1
     mov     rdi, r13
     lea     rsi, [rip + hello_line]
@@ -151,6 +152,9 @@ test_pipe_fork_wait:
     jz      .Lpipe_child
     /* parent */
     mov     r14, rax
+    mov     rdi, r13
+    mov     rax, 3
+    syscall
     xor     eax, eax
     mov     [rsp - 40], eax
 .Lparent_read:
