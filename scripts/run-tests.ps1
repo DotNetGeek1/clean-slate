@@ -146,6 +146,7 @@ $AllTests = [ordered]@{
     "test-m9-fd-core"            = @{ Aliases = @("m9-fd-core", "m9.147"); Description = "M9 #147 Linux fd / open-description core QEMU acceptance"; Role = "Constituent" }
     "test-m9-low-va"            = @{ Aliases = @("m9-low-va", "m9.142"); Description = "M9 #142 low canonical user VA acceptance (production Linux launch at 0x400000)"; Role = "Constituent" }
     "test-m9-linux-exec"        = @{ Aliases = @("m9-linux-exec", "m9.146"); Description = "M9 #146 Linux exec substrate (argv/envp/auxv fixture + commit_exec)"; Role = "Constituent" }
+    "test-m9-linux-runtime"     = @{ Aliases = @("m9-linux-runtime", "m9.103"); Description = "M9 #103 Linux runtime/memory/time/poll syscalls"; Role = "Constituent" }
     "verify-m8-fixture"         = @{ Aliases = @("verify-m8-fixture"); Description = "M8.6 fixture SHA-256 and ELF metadata verify (host)"; Role = "Constituent" }
 }
 
