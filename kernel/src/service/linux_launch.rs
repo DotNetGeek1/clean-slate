@@ -331,12 +331,12 @@ pub(crate) fn on_linux_hello_process_exited(allocator: &mut PageAllocator, pid: 
         return;
     }
 
-    let generation = runtime()
-        .and_then(|state| state.live)
-        .filter(|live| live.pid == pid)
-        .map(|live| live.instance_generation)
+    let generation = crate::process::live_instance_generation(pid)
         .or_else(|| {
-            crate::service::instance_generation::live_instance_generation_for_pid(pid)
+            runtime()
+                .and_then(|state| state.live)
+                .filter(|live| live.pid == pid)
+                .map(|live| live.instance_generation)
         })
         .unwrap_or(InstanceGeneration(0));
     if let Err(message) = note_linux_hello_exit(pid, generation, status) {

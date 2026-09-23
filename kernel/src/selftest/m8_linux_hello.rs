@@ -250,8 +250,11 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
             let Some((exited_pid, gen, status)) = linux_hello_first_exited() else {
                 fatal_kernel_error("m8.7 first exit missing first_exited");
             };
-            if exited_pid != state.first_pid || gen.0 != state.first_generation {
+            if exited_pid != state.first_pid {
                 fatal_kernel_error("m8.7 first exit identity mismatched the armed session");
+            }
+            if gen.0 != state.first_generation {
+                fatal_kernel_error("m8.7 first exit generation mismatched the armed session");
             }
             if status != 0 {
                 fatal_kernel_error("m8.7 first exit status was not 0");
