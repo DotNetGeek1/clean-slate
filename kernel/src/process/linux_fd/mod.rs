@@ -38,6 +38,10 @@ const LINUX_FD_REGISTRY_CAPACITY: usize = PROCESS_REGISTRY_CAPACITY;
 pub(crate) enum LinuxFdProjection {
     Closed,
     ConsoleEndpoint { capability_handle: u64 },
+    /// #101: file-backed description (read/write/lseek via fs_io).
+    FileBackend,
+    /// #101: directory-backed description (getdents64 cursor in offset).
+    DirBackend,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,7 +169,8 @@ impl LinuxFdRegistry {
             DescriptorKind::Console(sink) => Ok(LinuxFdProjection::ConsoleEndpoint {
                 capability_handle: sink.capability_handle,
             }),
-            DescriptorKind::File(_) | DescriptorKind::Dir(_) => Ok(LinuxFdProjection::Closed),
+            DescriptorKind::File(_) => Ok(LinuxFdProjection::FileBackend),
+            DescriptorKind::Dir(_) => Ok(LinuxFdProjection::DirBackend),
             DescriptorKind::PipeRead(_)
             | DescriptorKind::PipeWrite(_)
             | DescriptorKind::Socket(_) => Ok(LinuxFdProjection::Closed),
@@ -209,6 +214,22 @@ impl LinuxFdRegistry {
         let desc = self.pool.get(open)?;
         match desc.kind {
             DescriptorKind::Console(sink) => write_console(ipc, pid, sink, bytes, personality),
+            // #101
+            DescriptorKind::File(_) => {
+                #[cfg(feature = "m9-rootfs")]
+                {
+                    return crate::syscall::linux::fs_io::write_file_bytes(
+                        pid,
+                        generation,
+                        fd,
+                        bytes,
+                    );
+                }
+                #[cfg(not(feature = "m9-rootfs"))]
+                {
+                    Err(EBADF)
+                }
+            }
             _ => Err(EBADF),
         }
     }
@@ -388,12 +409,61 @@ impl LinuxFdRegistry {
         let open = self.pool.alloc_placeholder_file(
             pid,
             open_description::FileHandleRef {
-                id: 0x147,
-                generation: 1,
+                node: open_description::LinuxFsNodeId {
+                    index: 0x147,
+                    generation: 1,
+                },
             },
         )?;
         let table = &mut self.slots[index].as_mut().expect("slot").table;
         table.alloc_lowest(&mut self.pool, open, FdFlags::default())
+    }
+
+    pub(crate) fn alloc_description_and_fd(
+        &mut self,
+        pid: u64,
+        generation: InstanceGeneration,
+        kind: DescriptorKind,
+        status: OpenStatus,
+        flags: FdFlags,
+    ) -> Result<i32, LinuxErrno> {
+        let slot_index = self.slot_index(pid, generation).ok_or(EBADF)?;
+        let open = self.pool.alloc_file_or_dir(pid, kind, status)?;
+        let table = &mut self.slots[slot_index].as_mut().expect("slot").table;
+        table.alloc_lowest(&mut self.pool, open, flags)
+    }
+
+    pub(crate) fn open_description_for_fd(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Result<OpenDescriptionId, LinuxErrno> {
+        let slot_index = self.slot_index(pid, generation).ok_or(EBADF)?;
+        Ok(self.slots[slot_index]
+            .as_ref()
+            .expect("slot")
+            .table
+            .get(fd)
+            .ok_or(EBADF)?
+            .open)
+    }
+
+    pub(crate) fn open_description_view(
+        &self,
+        open: OpenDescriptionId,
+    ) -> Result<(DescriptorKind, u64), LinuxErrno> {
+        let desc = self.pool.get(open)?;
+        Ok((desc.kind, desc.offset))
+    }
+
+    pub(crate) fn set_description_offset(
+        &mut self,
+        open: OpenDescriptionId,
+        offset: u64,
+    ) -> Result<(), LinuxErrno> {
+        self.pool.get_mut(open)?.offset = offset;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -544,6 +614,76 @@ pub(crate) fn set_open_description_status(
     status: OpenStatus,
 ) -> Result<(), LinuxErrno> {
     registry_mut().set_open_description_status(pid, generation, fd, status)
+}
+
+pub(crate) fn alloc_lowest_fd(
+    pid: u64,
+    generation: InstanceGeneration,
+    open: OpenDescriptionId,
+    flags: FdFlags,
+) -> Result<i32, LinuxErrno> {
+    registry_mut().alloc_lowest_fd(pid, generation, open, flags)
+}
+
+pub(crate) fn alloc_file_description(
+    pid: u64,
+    generation: InstanceGeneration,
+    file: open_description::FileHandleRef,
+    status: OpenStatus,
+) -> Result<i32, LinuxErrno> {
+    registry_mut().alloc_description_and_fd(
+        pid,
+        generation,
+        DescriptorKind::File(file),
+        status,
+        FdFlags::default(),
+    )
+}
+
+pub(crate) fn alloc_dir_description(
+    pid: u64,
+    generation: InstanceGeneration,
+    dir: open_description::DirHandleRef,
+    status: OpenStatus,
+) -> Result<i32, LinuxErrno> {
+    registry_mut().alloc_description_and_fd(
+        pid,
+        generation,
+        DescriptorKind::Dir(dir),
+        status,
+        FdFlags::default(),
+    )
+}
+
+pub(crate) fn open_description_id_for_fd(
+    pid: u64,
+    generation: InstanceGeneration,
+    fd: u64,
+) -> Result<OpenDescriptionId, LinuxErrno> {
+    registry_mut().open_description_for_fd(pid, generation, fd)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct OpenDescriptionSnapshot {
+    pub kind: DescriptorKind,
+    pub offset: u64,
+}
+
+pub(crate) fn open_description_snapshot(
+    open: OpenDescriptionId,
+) -> Result<OpenDescriptionSnapshot, LinuxErrno> {
+    let (kind, offset) = registry_mut().open_description_view(open)?;
+    Ok(OpenDescriptionSnapshot { kind, offset })
+}
+
+pub(crate) fn set_open_description_offset(
+    pid: u64,
+    generation: InstanceGeneration,
+    fd: u64,
+    offset: u64,
+) -> Result<(), LinuxErrno> {
+    let open = open_description_id_for_fd(pid, generation, fd)?;
+    registry_mut().set_description_offset(open, offset)
 }
 
 pub(crate) fn dup_to_lowest_at_or_above(

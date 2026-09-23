@@ -201,8 +201,31 @@ impl ObjectRequestQueue {
         slot.status = status;
         slot.len = len;
         slot.payload[..len].copy_from_slice(payload);
+        // #101: wake blocked Linux fs syscalls waiting on this object request.
+        crate::sched::wait::wake_one(crate::sched::wait::WaitKey(
+            0x46_u64 << 56 | (request_id & 0x00FF_FFFF_FFFF_FFFF),
+        ));
         Ok(())
     }
+}
+
+#[allow(dead_code)] // #101 object-backed /tmp writes (blocking path lands next).
+pub(crate) fn object_queue_submit(
+    client: HolderId,
+    op: u64,
+    object_id: u64,
+    payload: &[u8],
+) -> Result<u64, SyscallQueueError> {
+    queue_mut().submit(client, op, object_id, payload)
+}
+
+#[allow(dead_code)]
+pub(crate) fn object_queue_poll(
+    client: HolderId,
+    request_id: u64,
+    out: &mut [u8],
+) -> Result<u64, SyscallQueueError> {
+    queue_mut().poll(client, request_id, out)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -334,7 +357,12 @@ fn log_grant(holder: HolderId, object_id: u64, rights: Rights) {
 }
 
 #[cfg_attr(
-    not(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test")),
+    not(any(
+        feature = "m6-object-self-test",
+        feature = "m6-capabilities-self-test",
+        feature = "m9-linux-fs-self-test",
+        feature = "m9-rootfs"
+    )),
     allow(dead_code)
 )] // Launch-policy API; exercised by M6 self-tests and the M6.8 integration path.
 pub(crate) fn grant_object_capability(

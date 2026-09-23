@@ -62,6 +62,74 @@ fn main() {
             true,
         );
     }
+    if env::var("CARGO_FEATURE_M9_ROOTFS").is_ok() {
+        pack_m9_rootfs_image();
+    }
+}
+
+fn pack_m9_rootfs_image() {
+    use clean_slate_rootfs::pack_std::{Manifest, ManifestEntry};
+    use clean_slate_rootfs::EntryKind;
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let busybox = manifest_dir.join("../fixtures/busybox/frozen/busybox");
+    let busybox_bytes = fs::read(&busybox).expect("read busybox for m9 rootfs");
+    let hostname = b"m9-fixture\n";
+    let resolv = b"nameserver 10.77.0.1\n";
+    let manifest = Manifest {
+        entries: vec![
+            ManifestEntry {
+                path: b"/".to_vec(),
+                kind: EntryKind::Dir,
+                writable_root: false,
+                data: vec![],
+            },
+            ManifestEntry {
+                path: b"/bin".to_vec(),
+                kind: EntryKind::Dir,
+                writable_root: false,
+                data: vec![],
+            },
+            ManifestEntry {
+                path: b"/bin/busybox".to_vec(),
+                kind: EntryKind::File,
+                writable_root: false,
+                data: busybox_bytes,
+            },
+            ManifestEntry {
+                path: b"/bin/sh".to_vec(),
+                kind: EntryKind::Link,
+                writable_root: false,
+                data: b"/bin/busybox".to_vec(),
+            },
+            ManifestEntry {
+                path: b"/etc".to_vec(),
+                kind: EntryKind::Dir,
+                writable_root: false,
+                data: vec![],
+            },
+            ManifestEntry {
+                path: b"/etc/hostname".to_vec(),
+                kind: EntryKind::File,
+                writable_root: false,
+                data: hostname.to_vec(),
+            },
+            ManifestEntry {
+                path: b"/etc/resolv.conf".to_vec(),
+                kind: EntryKind::File,
+                writable_root: false,
+                data: resolv.to_vec(),
+            },
+            ManifestEntry {
+                path: b"/tmp".to_vec(),
+                kind: EntryKind::Dir,
+                writable_root: true,
+                data: vec![],
+            },
+        ],
+    };
+    let packed = clean_slate_rootfs::pack_std::pack(&manifest).expect("pack m9 rootfs");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    fs::write(out_dir.join("m9-rootfs.img"), packed).expect("write m9-rootfs.img");
 }
 
 fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bool) {

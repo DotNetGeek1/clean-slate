@@ -179,6 +179,47 @@ fn locate_iov_index(iovecs: &[IoVec], offset: u64) -> Result<(usize, u64), Linux
     Err(EFAULT)
 }
 
+#[cfg(feature = "m9-rootfs")]
+pub(crate) fn handle_sys_read(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+) -> LinuxSyscallResult {
+    use crate::mm::user_mapping::validate_user_writable_pointer_range;
+    use clean_slate_linux_abi::EFAULT;
+    let fd = request.args[0];
+    let buf_ptr = request.args[1];
+    let count = request.args[2];
+    if count == 0 {
+        return Ok(0);
+    }
+    ensure_open_fd(ctx.pid, ctx.instance_generation, fd)?;
+    if validate_user_writable_pointer_range(buf_ptr, count).is_err() {
+        return Err(EFAULT);
+    }
+    let mut scratch = [0u8; 64];
+    let want = count.min(scratch.len() as u64) as usize;
+    let read = super::fs_io::read_file_fd(ctx.pid, ctx.instance_generation, fd, &mut scratch[..want])?;
+    if read == 0 {
+        return Ok(0);
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(scratch.as_ptr(), buf_ptr as *mut u8, read);
+    }
+    Ok(read as u64)
+}
+
+#[cfg(feature = "m9-rootfs")]
+pub(crate) fn handle_sys_lseek(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+) -> LinuxSyscallResult {
+    let fd = request.args[0];
+    let offset = request.args[1] as i64;
+    let whence = request.args[2] as u32;
+    ensure_open_fd(ctx.pid, ctx.instance_generation, fd)?;
+    super::fs_io::lseek_file_fd(ctx.pid, ctx.instance_generation, fd, offset, whence)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

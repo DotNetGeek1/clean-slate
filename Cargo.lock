@@ -129,6 +129,7 @@ dependencies = [
  "clean-slate-elf",
  "clean-slate-linux-abi",
  "clean-slate-network",
+ "clean-slate-rootfs",
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
  "clean-slate-store",
@@ -165,6 +166,10 @@ dependencies = [
  "sha2",
  "time",
 ]
+
+[[package]]
+name = "clean-slate-rootfs"
+version = "0.0.1"
 
 [[package]]
 name = "clean-slate-service-fixtures"

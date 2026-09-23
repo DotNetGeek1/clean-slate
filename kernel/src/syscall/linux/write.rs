@@ -76,6 +76,7 @@ pub(crate) fn ensure_fd_open(
     match projection? {
         LinuxFdProjection::Closed => Err(EBADF),
         LinuxFdProjection::ConsoleEndpoint { .. } => Ok(()),
+        LinuxFdProjection::FileBackend | LinuxFdProjection::DirBackend => Ok(()),
     }
 }
 
