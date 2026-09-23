@@ -311,6 +311,8 @@ fn create_userspace_process(
             progress_logged: false,
             preemptions: 0,
             observed_progress: 0,
+            blocked_syscall_frame: 0,
+            wait_resume_outcome: crate::sched::wait::WaitOutcome::Woken,
         };
         unsafe {
             process_registry_mut()
