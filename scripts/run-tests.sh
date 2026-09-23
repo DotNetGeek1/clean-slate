@@ -64,7 +64,7 @@ TEST_NAMES=(
   test-m9-fd-core
   test-m9-low-va
   test-m9-linux-exec
-  test-m9-linux-socket
+  test-m9-linux-proc
   test-m9-rootfs
   test-m9-linux-fs
   verify-m8-fixture
@@ -73,7 +73,7 @@ TEST_NAMES=(
 
 test_role() {
   case "$1" in
-    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls | test-m8-linux-hello | test-m8-linux-image | test-m8-linux-dispatch | test-m9-syscall-fail-closed | test-m9-block-wake | test-m9-fd-core | test-m9-low-va | test-m9-linux-exec | test-m9-linux-socket | test-m9-rootfs | test-m9-linux-fs | verify-m8-fixture | verify-m9-fixture)
+    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls | test-m8-linux-hello | test-m8-linux-image | test-m8-linux-dispatch | test-m9-syscall-fail-closed | test-m9-block-wake | test-m9-fd-core | test-m9-low-va | test-m9-linux-exec | test-m9-linux-proc | test-m9-rootfs | test-m9-linux-fs | verify-m8-fixture | verify-m9-fixture)
       echo Constituent
       ;;
     test-m3 | test-m4 | test-m5 | test-m6 | test-m7 | test-m8)
@@ -131,9 +131,9 @@ test_description() {
     test-m9-syscall-fail-closed) echo "M9 #143 unresolved syscall caller fail-closed QEMU acceptance" ;;
     test-m9-block-wake) echo "M9 #145 native block/wake scheduler substrate QEMU acceptance" ;;
     test-m9-fd-core) echo "M9 #147 Linux fd / open-description core QEMU acceptance" ;;
-    test-m9-linux-socket) echo "M9 #105 Linux socket ABI onto M7 network service" ;;
     test-m9-low-va) echo "M9 #142 low canonical user VA acceptance" ;;
     test-m9-linux-exec) echo "M9 #146 Linux exec substrate acceptance" ;;
+    test-m9-linux-proc) echo "M9 #102 Linux fork/pipe/wait acceptance" ;;
     test-m9-rootfs) echo "M9 #104 embedded rootfs fixture acceptance" ;;
     test-m9-linux-fs) echo "M9 #101 Linux filesystem/path projection acceptance" ;;
     verify-m8-fixture) echo "M8.6 fixture SHA-256 and ELF metadata verify (host)" ;;
@@ -188,9 +188,9 @@ test_aliases() {
     test-m9-syscall-fail-closed) echo "m9-syscall-fail-closed m9.143" ;;
     test-m9-block-wake) echo "m9-block-wake m9.145" ;;
     test-m9-fd-core) echo "m9-fd-core m9.147" ;;
-    test-m9-linux-socket) echo "m9-linux-socket m9.105" ;;
     test-m9-low-va) echo "m9-low-va m9.142" ;;
     test-m9-linux-exec) echo "m9-linux-exec m9.146" ;;
+    test-m9-linux-proc) echo "m9-linux-proc m9.102" ;;
     test-m9-rootfs) echo "m9-rootfs m9.104" ;;
     test-m9-linux-fs) echo "m9-linux-fs m9.101" ;;
     verify-m8-fixture) echo "verify-m8-fixture" ;;

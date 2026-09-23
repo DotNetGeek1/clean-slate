@@ -223,6 +223,14 @@ fn run_execve_prepare_and_commit(
     commit_exec(ctx.frame, allocator, ctx.pid, generation, prepared)
 }
 
+pub(crate) fn should_use_exec_selftest(pid: u64) -> bool {
+    unsafe {
+        (*TEST_STATE.get())
+            .as_ref()
+            .is_some_and(|test| test.linux_pid == pid)
+    }
+}
+
 pub(crate) fn handle_execve_selftest(ctx: &mut LinuxSyscallContext<'_>) -> LinuxSyscallResult {
     let test = state();
     if ctx.pid != test.linux_pid {

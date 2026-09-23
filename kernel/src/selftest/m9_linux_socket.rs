@@ -2,6 +2,7 @@
 
 use crate::arch::x86_64::apic::reprogram_local_apic_timer;
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
+use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::network::set_network_audit_serial_echo;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
@@ -22,12 +23,13 @@ use crate::process::personality::execution_personality_for_pid;
 use crate::process::process_registry_mut;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::{scheduler_mut, task_stacks_mut, Scheduler};
+use crate::selftest::userspace_process::reset_process_scheduler_world;
 use crate::service::control::ServiceLifecycleController;
 use crate::service::service_lifecycle_controller_mut;
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::linux::user_copy::copy_user_bytes;
 use crate::syscall::{
-    current_syscall_caller_pid, install_service_lifecycle_syscall_allocator,
+    current_syscall_caller_pid, initialize_syscall_abi, install_service_lifecycle_syscall_allocator,
     service_lifecycle_syscall_allocator_mut,
 };
 use clean_slate_linux_abi::{ESTALE, SYS_WRITE};
@@ -246,12 +248,15 @@ pub(crate) fn start_m9_linux_socket_self_test(page_allocator: PageAllocator) -> 
     kernel_log_line("[M9.L] creating linux socket acceptance");
     set_network_audit_serial_echo(true);
     install_service_lifecycle_syscall_allocator(page_allocator);
+    reset_process_scheduler_world();
     unsafe {
         *id_allocator_mut() = IdAllocator::new();
         process_registry_mut().clear();
         *scheduler_mut() = Scheduler::new();
     }
     let kernel_stack_top = unsafe { task_stack_top(&(*task_stacks_mut())[0]) };
+    set_privilege_stack(kernel_stack_top).unwrap_or_else(|m| fatal_kernel_error(m));
+    initialize_syscall_abi(kernel_stack_top).unwrap_or_else(|m| fatal_kernel_error(m));
     let controller = unsafe { service_lifecycle_controller_mut() };
     controller.clear();
     controller.configure_launch_context(

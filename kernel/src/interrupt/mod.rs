@@ -451,6 +451,9 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
             pid
         ));
     }
+    #[cfg(feature = "m8-linux-image")]
+    crate::process::linux_proc::fault::publish_linux_fault_exit(pid, context.vector);
+
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));

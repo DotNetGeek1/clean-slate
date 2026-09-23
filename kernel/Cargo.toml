@@ -65,6 +65,7 @@ m9-linux-socket-self-test = [
     "m3-entry-self-test",
     "m7-network-self-test",
 ]
+m9-linux-proc-self-test = ["m8-linux-image", "m3-entry-self-test"]
 m9-rootfs = ["dep:clean-slate-rootfs"]
 m9-rootfs-self-test = ["m9-rootfs", "m3-entry-self-test"]
 m9-linux-fs-self-test = [

@@ -13,8 +13,6 @@ use clean_slate_linux_abi::{
 use clean_slate_service_fixtures::OBJECT_MAX_PAYLOAD_BYTES;
 use clean_slate_service_lifecycle::InstanceGeneration;
 
-pub(crate) const LINUX_READ_SCRATCH_BYTES: usize = 1024;
-
 fn image() -> clean_slate_rootfs::Image<'static> {
     linux_rootfs::image().expect("m9 rootfs")
 }

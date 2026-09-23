@@ -10,9 +10,11 @@ pub(crate) mod table;
 use clean_slate_linux_abi::{LinuxErrno, EBADF, EMFILE};
 use clean_slate_service_lifecycle::InstanceGeneration;
 use console::write_console;
-use open_description::{DescriptorKind, OpenAccess, OpenDescriptionPool, OpenStatus, SocketRef};
+use open_description::{
+    DescriptorKind, OpenAccess, OpenDescriptionPool, OpenStatus, PipeRef, SocketRef,
+};
 
-/// Kind dispatch for the #147 `read(2)` front-end (`fd.rs`).
+/// Kind dispatch for the #147 `read(2)` front-end (`write.rs` socket path).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxReadKind {
     Console,
@@ -52,6 +54,8 @@ pub(crate) enum LinuxFdProjection {
     FileBackend,
     /// #101: directory-backed description (getdents64 cursor in offset).
     DirBackend,
+    /// #102: pipe read/write end (pipe syscalls; not `Closed`).
+    PipeBackend,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,9 +185,10 @@ impl LinuxFdRegistry {
             }),
             DescriptorKind::File(_) => Ok(LinuxFdProjection::FileBackend),
             DescriptorKind::Dir(_) => Ok(LinuxFdProjection::DirBackend),
-            DescriptorKind::PipeRead(_)
-            | DescriptorKind::PipeWrite(_)
-            | DescriptorKind::Socket(_) => Ok(LinuxFdProjection::Closed),
+            DescriptorKind::PipeRead(_) | DescriptorKind::PipeWrite(_) => {
+                Ok(LinuxFdProjection::PipeBackend)
+            }
+            DescriptorKind::Socket(_) => Ok(LinuxFdProjection::Closed),
         }
     }
 
@@ -193,6 +198,11 @@ impl LinuxFdRegistry {
                 slot,
                 Some(entry) if entry.pid == pid && entry.generation == generation
             )
+        });
+        let index = index.or_else(|| {
+            self.slots
+                .iter()
+                .position(|slot| matches!(slot, Some(entry) if entry.pid == pid))
         });
         if let Some(index) = index {
             if let Some(entry) = &mut self.slots[index] {
@@ -252,10 +262,65 @@ impl LinuxFdRegistry {
         let desc = self.pool.get(open)?;
         match desc.kind {
             DescriptorKind::Console(sink) => write_console(ipc, pid, sink, bytes, personality),
+            // #102 pipe writes use blocking path from syscall/write.rs
+            DescriptorKind::PipeWrite(_) => Err(EBADF),
             // #101: file writes go through `write(2)` → `handle_sys_write` + `fs_io::write_file_fd`.
             DescriptorKind::File(_) => Err(EBADF),
             DescriptorKind::Socket(_) => Err(EBADF),
             _ => Err(EBADF),
+        }
+    }
+
+    pub(crate) fn alloc_pipe_description(
+        &mut self,
+        owner_pid: u64,
+        pipe: PipeRef,
+    ) -> Result<OpenDescriptionId, LinuxErrno> {
+        self.pool.alloc_pipe(owner_pid, pipe)
+    }
+
+    fn pool_mut(&mut self) -> &mut OpenDescriptionPool {
+        &mut self.pool
+    }
+
+    pub(crate) fn open_description_kind(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Result<DescriptorKind, LinuxErrno> {
+        let index = self.slot_index(pid, generation).ok_or(EBADF)?;
+        let open = self.slots[index]
+            .as_ref()
+            .expect("slot")
+            .table
+            .get(fd)
+            .ok_or(EBADF)?
+            .open;
+        Ok(self.pool.get(open)?.kind)
+    }
+
+    pub(crate) fn pipe_read_ref(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Option<PipeRef> {
+        match self.open_description_kind(pid, generation, fd).ok()? {
+            DescriptorKind::PipeRead(pipe) => Some(pipe),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn pipe_write_ref(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Option<PipeRef> {
+        match self.open_description_kind(pid, generation, fd).ok()? {
+            DescriptorKind::PipeWrite(pipe) => Some(pipe),
+            _ => None,
         }
     }
 
@@ -567,6 +632,7 @@ fn registry_mut() -> &'static mut LinuxFdRegistry {
     feature = "m9-linux-exec-self-test",
     feature = "m9-fd-core-self-test",
     feature = "m9-linux-socket-self-test",
+    feature = "m9-linux-proc-self-test",
     feature = "m9-linux-fs-self-test"
 ))]
 pub(crate) fn reset_registry_for_selftest() {
@@ -627,7 +693,43 @@ pub(crate) fn read_kind_for_fd(
     registry_mut().read_kind_for_fd(pid, generation, fd)
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) fn alloc_pipe_end(
+    pid: u64,
+    generation: InstanceGeneration,
+    pipe: PipeRef,
+) -> Result<i32, LinuxErrno> {
+    let registry = registry_mut();
+    let index = registry
+        .ensure_slot_index(pid, generation)
+        .map_err(|_| EBADF)?;
+    let open = registry.alloc_pipe_description(pid, pipe)?;
+    registry.slots[index]
+        .as_mut()
+        .expect("slot")
+        .table
+        .alloc_lowest(&mut registry.pool, open, FdFlags::default())
+}
+
+pub(crate) fn open_description_kind(
+    pid: u64,
+    generation: InstanceGeneration,
+    fd: u64,
+) -> Result<DescriptorKind, LinuxErrno> {
+    registry_mut().open_description_kind(pid, generation, fd)
+}
+
+pub(crate) fn pipe_read_ref(pid: u64, generation: InstanceGeneration, fd: u64) -> Option<PipeRef> {
+    registry_mut().pipe_read_ref(pid, generation, fd)
+}
+
+pub(crate) fn pipe_write_ref(pid: u64, generation: InstanceGeneration, fd: u64) -> Option<PipeRef> {
+    registry_mut().pipe_write_ref(pid, generation, fd)
+}
+
+pub(crate) fn pipe_ref_for(pid: u64, generation: InstanceGeneration, fd: u64) -> Option<PipeRef> {
+    registry_mut().pipe_read_ref(pid, generation, fd)
+}
+
 pub(crate) fn write_fd(
     pid: u64,
     generation: InstanceGeneration,
@@ -652,7 +754,46 @@ pub(crate) fn write_fd(
 }
 
 pub(crate) fn release_for_process(pid: u64, generation: InstanceGeneration) {
-    let _ = registry_mut().release(pid, generation);
+    let registry = registry_mut();
+    if registry.release(pid, generation) {
+        return;
+    }
+    registry.release_by_pid(pid);
+}
+
+pub(crate) fn release_for_process_by_pid(pid: u64) {
+    registry_mut().release_by_pid(pid);
+}
+
+pub(crate) fn release_stale_registry_slots<F>(mut registry_live: F)
+where
+    F: FnMut(u64) -> bool,
+{
+    let registry = registry_mut();
+    for index in 0..PROCESS_REGISTRY_CAPACITY {
+        if let Some(entry) = &registry.slots[index] {
+            if !registry_live(entry.pid) {
+                registry.release_by_pid(entry.pid);
+            }
+        }
+    }
+}
+
+impl LinuxFdRegistry {
+    fn release_by_pid(&mut self, pid: u64) {
+        let indices: [usize; PROCESS_REGISTRY_CAPACITY] = core::array::from_fn(|index| index);
+        for index in indices {
+            if matches!(
+                self.slots[index],
+                Some(entry) if entry.pid == pid
+            ) {
+                if let Some(entry) = &mut self.slots[index] {
+                    let _ = release_table(&mut entry.table, &mut self.pool);
+                }
+                self.slots[index] = None;
+            }
+        }
+    }
 }
 
 pub(crate) fn close_fd(

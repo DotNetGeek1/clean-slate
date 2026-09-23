@@ -104,7 +104,7 @@ pub(crate) fn handle_sys_exit(
 }
 
 /// Hand control to the thread selected by teardown; never returns.
-fn switch_after_exit(next_stack_pointer: Option<u64>) -> ! {
+pub(crate) fn switch_after_exit(next_stack_pointer: Option<u64>) -> ! {
     resume_after_scheduler_handoff(
         next_stack_pointer,
         "no runnable thread remained after linux exit",

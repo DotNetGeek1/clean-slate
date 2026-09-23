@@ -31,6 +31,8 @@ const fn task_count_for_features() -> usize {
         6
     } else if cfg!(feature = "m8-linux-hello") {
         3
+    } else if cfg!(feature = "m9-linux-proc-self-test") {
+        6
     } else {
         2
     }
@@ -184,7 +186,7 @@ impl Scheduler {
         self.current_thread = Some(next);
         self.threads[next].started = true;
         self.threads[next].state = ThreadState::Running;
-        self.dispatch_handoff_stack_pointer(self.threads[next].saved_stack_pointer, next)
+        Ok(self.threads[next].saved_stack_pointer)
     }
 
     pub(super) fn current_thread_descriptor(&self) -> Result<Thread, &'static str> {
@@ -550,11 +552,19 @@ impl Scheduler {
                         self.threads[next].launch_entry,
                     );
                 }
-                return Ok(Some(FRESH_TASK_SENTINEL));
+                Ok(Some(FRESH_TASK_SENTINEL))
+            } else {
+                Ok(Some(wait::scheduler_handoff_stack_pointer(
+                    self.threads[next].saved_stack_pointer,
+                    next,
+                )))
             }
+        } else {
+            Ok(Some(wait::scheduler_handoff_stack_pointer(
+                self.threads[next].saved_stack_pointer,
+                next,
+            )))
         }
-        self.dispatch_handoff_stack_pointer(self.threads[next].saved_stack_pointer, next)
-            .map(Some)
     }
 
     fn all_finished(&self) -> bool {
