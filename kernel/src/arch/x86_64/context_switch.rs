@@ -42,6 +42,8 @@ use crate::arch::x86_64::interrupt_context::{InterruptContext, UserspaceEntryFra
 pub(crate) const FRESH_TASK_SENTINEL: u64 = u64::MAX;
 /// Returned by the timer/block path when the next thread resumes a blocked syscall.
 pub(crate) const SYSCALL_BLOCKED_RESUME_SENTINEL: u64 = u64::MAX - 2;
+/// Timer/block path: all runnable threads are blocked; enter the idle hlt loop outside IRQ frames.
+pub(crate) const SCHEDULER_BLOCKED_IDLE_SENTINEL: u64 = u64::MAX - 3;
 
 /// Stack frames handed to the CPU must be 16-byte aligned; this is the only
 /// alignment the architecture layer needs, so it stays local rather than
@@ -133,6 +135,10 @@ pub(crate) fn resume_after_scheduler_handoff(
         Some(SYSCALL_BLOCKED_RESUME_SENTINEL) => unsafe {
             clean_slate_blocked_syscall_resume_from_schedule()
         },
+        Some(SCHEDULER_BLOCKED_IDLE_SENTINEL) => {
+            let stack_pointer = crate::sched::wait::blocked_idle_until_runnable_stack();
+            unsafe { restore_task_context(stack_pointer) }
+        }
         Some(stack_pointer) => unsafe { restore_task_context(stack_pointer) },
         None => fatal_kernel_error(no_runnable_message),
     }

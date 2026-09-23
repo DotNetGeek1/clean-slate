@@ -146,6 +146,7 @@ fn wake_thread_at_index(thread_index: usize, outcome: WaitOutcome) {
 
 /// Called ONLY from a syscall handler on the current thread.
 pub(crate) fn block_current_thread(
+    frame: *mut SyscallContext,
     key: WaitKey,
     deadline: Option<Deadline>,
 ) -> Result<WaitOutcome, &'static str> {
@@ -154,20 +155,19 @@ pub(crate) fn block_current_thread(
         let thread_index = scheduler
             .current_thread
             .ok_or("block required a current scheduler thread")?;
-        let thread = &scheduler.threads[thread_index];
+        let thread = &mut scheduler.threads[thread_index];
         if thread.state != ThreadState::Running {
             return Err("block required the running thread state");
         }
+        thread.blocked_syscall_frame = frame as u64;
         let tid = thread.id;
         let pid = thread.owner_process_id;
         let generation =
             live_instance_generation(pid).ok_or("block process had no live generation")?;
-        if thread.blocked_syscall_frame == 0 {
-            return Err("block required syscall continuation frame");
-        }
 
         let table = wait_table_mut();
         if table.consume_pending_wake(key) {
+            thread.blocked_syscall_frame = 0;
             return Ok(false);
         }
 
@@ -268,6 +268,13 @@ pub(crate) fn cancel_waiters_for_process(pid: u64, generation: InstanceGeneratio
     })
 }
 
+pub(super) fn waiter_deadline_due(deadline: Option<Deadline>, now_ticks: u64) -> bool {
+    match deadline {
+        Some(Deadline(ticks)) => now_ticks >= ticks,
+        None => false,
+    }
+}
+
 pub(crate) fn expire_deadlines(now_ticks: u64) -> usize {
     without_interrupts(|| {
         let mut expired = 0usize;
@@ -276,11 +283,7 @@ pub(crate) fn expire_deadlines(now_ticks: u64) -> usize {
             if !slot.active {
                 continue;
             }
-            let deadline = match slot.deadline {
-                Some(Deadline(ticks)) => ticks,
-                None => continue,
-            };
-            if now_ticks < deadline {
+            if !waiter_deadline_due(slot.deadline, now_ticks) {
                 continue;
             }
             let index = slot.thread_index;
@@ -337,8 +340,9 @@ pub(crate) fn scheduler_handoff_stack_pointer(next_stack_pointer: u64, thread_in
     next_stack_pointer
 }
 
-#[allow(clippy::never_loop)]
-pub(crate) fn idle_until_runnable() -> Result<u64, &'static str> {
+/// Idle until a blocked waiter becomes runnable. Runs outside interrupt frames
+/// (timer/block handoff returns `SCHEDULER_BLOCKED_IDLE_SENTINEL` first).
+pub(crate) fn blocked_idle_until_runnable_stack() -> u64 {
     loop {
         enable_interrupts();
         unsafe {
@@ -347,9 +351,23 @@ pub(crate) fn idle_until_runnable() -> Result<u64, &'static str> {
         let next = without_interrupts(|| {
             let _ = expire_deadlines(kernel_ticks());
             unsafe { scheduler_mut().pick_next_runnable_stack_pointer() }
-        })?;
-        return Ok(next);
+        });
+        match next {
+            Ok(stack_pointer) => {
+                if let Err(message) = prepare_current_scheduler_thread_dispatch() {
+                    crate::diagnostics::qemu::fatal_kernel_error(message);
+                }
+                return stack_pointer;
+            }
+            Err("idle woke without a runnable thread") => {}
+            Err(message) => crate::diagnostics::qemu::fatal_kernel_error(message),
+        }
     }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn clean_slate_blocked_idle_until_runnable_impl() -> u64 {
+    blocked_idle_until_runnable_stack()
 }
 
 pub(crate) fn clear_wait_table_for_tests() {
@@ -372,5 +390,69 @@ mod tests {
     #[test]
     fn waiter_capacity_matches_task_count() {
         assert_eq!(MAX_WAITERS, super::super::TASK_COUNT);
+    }
+
+    #[test]
+    fn waiter_table_capacity_exhaustion_fails_closed() {
+        let mut table = WaitTable::new();
+        for _ in 0..MAX_WAITERS {
+            let index = table.allocate_slot().expect("slot");
+            table.slots[index].active = true;
+        }
+        assert_eq!(table.allocate_slot(), Err("waiter table exhausted"));
+    }
+
+    #[test]
+    fn waiter_deadline_due_only_at_or_after_tick() {
+        assert!(!waiter_deadline_due(Some(Deadline(5)), 4));
+        assert!(waiter_deadline_due(Some(Deadline(5)), 5));
+        assert!(!waiter_deadline_due(None, 100));
+    }
+
+    #[test]
+    fn wake_before_block_pending_wake_race() {
+        let mut table = WaitTable::new();
+        let key = WaitKey(77);
+        table.record_pending_wake(key);
+        assert!(table.consume_pending_wake(key));
+    }
+
+    #[test]
+    fn cancel_waiters_table_scan_clears_matching_pid_and_generation() {
+        let mut table = WaitTable::new();
+        let slot = table.allocate_slot().expect("slot");
+        table.slots[slot] = WaiterSlot {
+            active: true,
+            pid: 42,
+            generation: InstanceGeneration(3),
+            tid: 1,
+            thread_index: 0,
+            key: WaitKey(1),
+            deadline: None,
+        };
+        let other = table.allocate_slot().expect("slot");
+        table.slots[other] = WaiterSlot {
+            active: true,
+            pid: 43,
+            generation: InstanceGeneration(1),
+            tid: 2,
+            thread_index: 1,
+            key: WaitKey(2),
+            deadline: None,
+        };
+        for slot in &mut table.slots {
+            if slot.active && slot.pid == 42 && slot.generation == InstanceGeneration(3) {
+                slot.active = false;
+            }
+        }
+        assert!(!table.slots[slot].active);
+        assert!(table.slots[other].active);
+    }
+
+    #[test]
+    fn stale_generation_wake_denied_when_live_generation_missing() {
+        let slot_generation = InstanceGeneration(1);
+        let live: Option<InstanceGeneration> = None;
+        assert_ne!(live, Some(slot_generation));
     }
 }

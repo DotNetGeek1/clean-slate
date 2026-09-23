@@ -22,8 +22,16 @@ Each thread’s `kernel_stack_top` is published to `SYSCALL_KERNEL_STACK_TOP` on
 
 ## Tick contract
 
-`Deadline` is an absolute value from `kernel_ticks()` (APIC timer increments in `interrupt::timer`). Not nanoseconds.
+`Deadline` is an absolute value from `kernel_ticks()` (APIC timer increments in `interrupt::timer`). This is **not** wall-clock nanoseconds.
+
+- **Rate today:** one tick per local APIC timer interrupt (`interrupt::timer::increment_kernel_ticks` on the periodic LAPIC path). The divisor/initial count are fixed at timer init and logged as `tick-rate=uncalibrated` in self-tests.
+- **#103 (`nanosleep` / `poll`):** Linux lanes must convert between `kernel_ticks()` and requested durations once a calibrated tick period (or explicit “ticks per second”) is published; until then, native deadlines are expressed only in tick units and documented here.
+- **Future calibration:** a single authoritative ticks-per-second (or ns-per-tick) value will live alongside the timer driver (`interrupt::timer`), not in wait-table code.
 
 ## Idle
 
-When no thread is `Ready` but blocked threads or deadlines remain, the kernel executes `hlt` with interrupts enabled until the next timer interrupt or wake.
+When no thread is `Ready`/`Running` but blocked threads or deadlines remain, the timer/block paths return `SCHEDULER_BLOCKED_IDLE_SENTINEL` instead of running `hlt` inside the interrupt frame. Assembly dispatches to `blocked_idle_until_runnable_stack()`, which enables interrupts and `hlt`s in a normal kernel context until `expire_deadlines` or a wake makes a thread runnable, then restores that thread’s stack.
+
+## Timer preemption
+
+Timer preemption is **not** suppressed for arbitrary syscall handlers. Lost-wake protection uses interrupts-disabled registration in `block_current_thread` (including arming `blocked_syscall_frame` under the same critical section). Linux relaunch and other long syscall paths rely on ordinary timer preemption.

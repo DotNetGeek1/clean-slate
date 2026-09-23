@@ -172,6 +172,14 @@ clean_slate_interrupt_common:
     je clean_slate_start_fresh_task
     cmp rax, -2
     je clean_slate_blocked_syscall_resume_from_schedule
+    cmp rax, -3
+    je clean_slate_blocked_idle_until_runnable
+    mov rsp, rax
+    jmp clean_slate_restore_context
+
+    .global clean_slate_blocked_idle_until_runnable
+clean_slate_blocked_idle_until_runnable:
+    call clean_slate_blocked_idle_until_runnable_impl
     mov rsp, rax
     jmp clean_slate_restore_context
 

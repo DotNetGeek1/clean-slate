@@ -420,7 +420,7 @@ impl Scheduler {
 
         let Some(next) = self.next_runnable_from(Some(current)) else {
             if self.has_blocked_threads() {
-                return wait::idle_until_runnable();
+                return Ok(crate::arch::x86_64::context_switch::SCHEDULER_BLOCKED_IDLE_SENTINEL);
             }
             return Err("scheduler lost all runnable threads during timer interrupt");
         };
@@ -449,26 +449,6 @@ impl Scheduler {
         ))
     }
 
-    pub(super) fn interrupt_stack_on_current_syscall_kernel_stack(
-        &self,
-        interrupt_stack_pointer: u64,
-    ) -> bool {
-        let Some(index) = self.current_thread else {
-            return false;
-        };
-        let thread = &self.threads[index];
-        if thread.kind != ThreadKind::User {
-            return false;
-        }
-        if thread.kernel_stack_top == 0 {
-            return false;
-        }
-        let bottom = thread
-            .kernel_stack_top
-            .saturating_sub(TASK_STACK_SIZE as u64);
-        interrupt_stack_pointer >= bottom && interrupt_stack_pointer <= thread.kernel_stack_top
-    }
-
     pub(super) fn has_blocked_threads(&self) -> bool {
         self.threads
             .iter()
@@ -484,7 +464,7 @@ impl Scheduler {
         }
         let Some(next) = self.next_runnable_from(Some(current)) else {
             if self.has_blocked_threads() {
-                return wait::idle_until_runnable();
+                return Ok(crate::arch::x86_64::context_switch::SCHEDULER_BLOCKED_IDLE_SENTINEL);
             }
             return Err("scheduler lost all runnable threads during block yield");
         };
@@ -637,6 +617,47 @@ pub(crate) unsafe fn task_stacks_mut() -> &'static mut [TaskStack; TASK_COUNT] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timer_tick_returns_idle_sentinel_when_all_threads_blocked() {
+        use crate::arch::x86_64::context_switch::SCHEDULER_BLOCKED_IDLE_SENTINEL;
+
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .configure_kernel_thread(0, 1, 0x1000, 0x1000)
+            .expect("task 1");
+        scheduler
+            .configure_kernel_thread(1, 2, 0x2000, 0x2000)
+            .expect("task 2");
+        scheduler.current_thread = Some(0);
+        scheduler.threads[0].state = ThreadState::Blocked;
+        scheduler.threads[1].state = ThreadState::Blocked;
+        assert_eq!(
+            scheduler.on_timer_interrupt(0x1010).expect("tick"),
+            SCHEDULER_BLOCKED_IDLE_SENTINEL
+        );
+    }
+
+    #[test]
+    fn timer_tick_runs_unrelated_ready_thread_while_peer_blocked() {
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .configure_kernel_thread(0, 1, 0x1000, 0x1000)
+            .expect("task 1");
+        scheduler
+            .configure_kernel_thread(1, 2, 0x2000, 0x2000)
+            .expect("task 2");
+        scheduler.current_thread = Some(0);
+        scheduler.threads[0].state = ThreadState::Blocked;
+        scheduler.threads[1].state = ThreadState::Ready;
+        scheduler.threads[1].started = true;
+        assert_eq!(
+            scheduler.on_timer_interrupt(0x1110).expect("tick"),
+            0x2000
+        );
+        assert_eq!(scheduler.current_thread, Some(1));
+        assert_eq!(scheduler.threads[1].state, ThreadState::Running);
+    }
 
     #[test]
     fn scheduler_round_robins_and_tracks_preemption_progress() {

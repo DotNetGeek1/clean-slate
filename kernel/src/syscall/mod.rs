@@ -649,6 +649,8 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
     crate::selftest::m8_linux_image::observe_syscall(frame);
     #[cfg(feature = "m8-linux-hello-self-test")]
     crate::selftest::m8_linux_hello::observe_syscall(frame);
+    #[cfg(feature = "m9-low-va-self-test")]
+    crate::selftest::m9_low_va::observe_syscall(frame);
 
     #[cfg(feature = "m9-syscall-fail-closed-self-test")]
     crate::selftest::m9_syscall_fail_closed::arm_caller_resolution_mismatch_if_pending();
@@ -769,8 +771,7 @@ pub(crate) fn block_current_syscall(
     key: crate::sched::wait::WaitKey,
     deadline: Option<crate::sched::wait::Deadline>,
 ) {
-    crate::sched::wait::arm_syscall_block_frame(frame);
-    match crate::sched::wait::block_current_thread(key, deadline) {
+    match crate::sched::wait::block_current_thread(frame, key, deadline) {
         Ok(outcome) => {
             frame.rax = crate::sched::wait::encode_wait_outcome(outcome);
         }
