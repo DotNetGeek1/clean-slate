@@ -1,0 +1,97 @@
+# M9 #104 deterministic rootfs manifest (sources relative to this directory).
+[image]
+version = 1
+
+[[entry]]
+path = "/bin"
+kind = "dir"
+
+[[entry]]
+path = "/bin/busybox"
+kind = "file"
+source = "busybox"
+sha256 = "7ba56acec9fb89deace4ebfab6f4baaa8d1b778754b8f7ae3dbd7cf7990fe380"
+
+[[entry]]
+path = "/bin/sh"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
+path = "/bin/true"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
+path = "/bin/pwd"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
+path = "/bin/ls"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
+path = "/bin/cat"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
+path = "/bin/mkdir"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
+path = "/bin/printf"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
+path = "/bin/echo"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
+path = "/bin/grep"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
+path = "/bin/uname"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
+path = "/bin/nslookup"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
+path = "/bin/wget"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
+path = "/bin/sleep"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
+path = "/etc"
+kind = "dir"
+
+[[entry]]
+path = "/etc/hostname"
+kind = "file"
+inline = "m9-fixture\n"
+
+[[entry]]
+path = "/etc/resolv.conf"
+kind = "file"
+inline = "nameserver 10.77.0.1\n"
+
+[[entry]]
+path = "/tmp"
+kind = "dir"
+writable = true

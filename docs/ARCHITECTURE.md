@@ -176,6 +176,11 @@ M9 #146 adds the bounded exec substrate (`LinuxExecSpec`, `prepare_linux_image`,
 `launch_linux_process_from_spec`. See [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md),
 "M9 #146 — Linux exec / process image substrate".
 
+M9 #104 pins the BusyBox rootfs as a hash-verified `CSROOTFS` image embedded when
+`m9-rootfs` is enabled (`process::linux_rootfs`, `cargo xtask verify-m9-fixture`).
+See [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md) "M9 #104 — rootfs fixture" and
+[fixtures/busybox/frozen/ROOTFS.md](../fixtures/busybox/frozen/ROOTFS.md).
+
 ### Linux personality end-to-end path (#97)
 
 With `m8-linux-hello`, boot Starts `LINUX_HELLO_SERVICE_ID` through

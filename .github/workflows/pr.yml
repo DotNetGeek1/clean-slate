@@ -102,6 +102,8 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-socket-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-low-va-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-exec-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-rootfs -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-rootfs-self-test -- -D warnings
 
       - name: Clippy (kernel host tests)
         run: cargo clippy -p clean-slate-kernel --lib --tests -- -D warnings
@@ -119,6 +121,9 @@ jobs:
       - name: Verify M8 Linux fixture
         run: cargo xtask verify-m8-fixture
 
+      - name: Verify M9 BusyBox rootfs fixture
+        run: cargo xtask verify-m9-fixture
+
       - name: Host unit tests
         run: |
           cargo test -p xtask
@@ -131,6 +136,8 @@ jobs:
           cargo test -p clean-slate-capability
           cargo test -p clean-slate-linux-abi
           cargo test -p clean-slate-elf
+          cargo test -p clean-slate-rootfs
+          cargo test -p clean-slate-rootfs --features std
           cargo test -p clean-slate-kernel
           cargo test -p clean-slate-kernel --features m3-entry-self-test
           cargo test -p clean-slate-kernel --features m3-address-space-self-test
