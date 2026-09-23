@@ -31,6 +31,7 @@
       m8-linux-hello / m8.7, m8-linux-image / m8.2, m8-linux-dispatch / m8.3,
       m9-low-va / m9.142 / test-m9-low-va,
       verify-m8-fixture
+      verify-m9-fixture
 
 .PARAMETER Exhaustive
     Run every known test (milestone gates plus each individual M3/M4
@@ -147,6 +148,7 @@ $AllTests = [ordered]@{
     "test-m9-low-va"            = @{ Aliases = @("m9-low-va", "m9.142"); Description = "M9 #142 low canonical user VA acceptance (production Linux launch at 0x400000)"; Role = "Constituent" }
     "test-m9-linux-exec"        = @{ Aliases = @("m9-linux-exec", "m9.146"); Description = "M9 #146 Linux exec substrate (argv/envp/auxv fixture + commit_exec)"; Role = "Constituent" }
     "verify-m8-fixture"         = @{ Aliases = @("verify-m8-fixture"); Description = "M8.6 fixture SHA-256 and ELF metadata verify (host)"; Role = "Constituent" }
+    "verify-m9-fixture"         = @{ Aliases = @("verify-m9-fixture"); Description = "M9 #104 BusyBox + rootfs fixture verify (host)"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {

@@ -118,6 +118,9 @@ jobs:
       - name: Verify M8 Linux fixture
         run: cargo xtask verify-m8-fixture
 
+      - name: Verify M9 BusyBox rootfs fixture
+        run: cargo xtask verify-m9-fixture
+
       - name: Host unit tests
         run: |
           cargo test -p xtask

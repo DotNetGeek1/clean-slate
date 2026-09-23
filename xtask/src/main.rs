@@ -13,6 +13,7 @@ mod m7_certs;
 mod m7_fixture;
 mod m7_fixture_tcp;
 mod m8_fixture;
+mod m9_fixture;
 
 use m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
 
@@ -672,6 +673,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
             Ok(())
         }
         ParsedCommand::VerifyM8Fixture => run_m8_verify_fixture_verbose(),
+        ParsedCommand::VerifyM9Fixture => run_m9_verify_fixture_verbose(),
         ParsedCommand::TestM7Dns => run_m7_dns_acceptance(),
         ParsedCommand::TestM5Storage => run_m5_storage_acceptance(),
         ParsedCommand::TestM5CrashMatrix => run_m5_crash_matrix(),
@@ -1189,6 +1191,20 @@ fn run_m8_verify_fixture_verbose() -> Result<(), XtaskError> {
 
 fn run_m8_verify_fixture_step() -> Result<(), XtaskError> {
     m8_fixture::verify_m8_fixture().map_err(XtaskError::InvalidCommand)?;
+    Ok(())
+}
+
+fn run_m9_verify_fixture_verbose() -> Result<(), XtaskError> {
+    let report = m9_fixture::verify_m9_fixture().map_err(XtaskError::InvalidCommand)?;
+    println!("M9 fixture OK");
+    println!("  busybox_sha256={}", report.busybox_sha256);
+    println!("  image_sha256={}", report.image_sha256);
+    println!("  entry_count={}", report.entry_count);
+    Ok(())
+}
+
+fn run_m9_verify_fixture_step() -> Result<(), XtaskError> {
+    m9_fixture::verify_m9_fixture().map_err(XtaskError::InvalidCommand)?;
     Ok(())
 }
 
@@ -2568,6 +2584,7 @@ fn print_help() {
     println!("  test-m7-tls       M7.6 TLS client acceptance (pass + fail-closed QEMU boots)");
     println!("  gen-m7-fixture-certs  Regenerate repository-owned M7 TLS fixture certificates");
     println!("  verify-m8-fixture Verify committed Linux hello ELF hash and pinned metadata");
+    println!("  verify-m9-fixture Verify BusyBox hash, ELF metadata, and deterministic rootfs image");
     println!("  test-m7-dns         Build the M7.5 DNS resolver kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
@@ -2650,6 +2667,7 @@ enum ParsedCommand {
     TestM7Tls,
     GenM7FixtureCerts,
     VerifyM8Fixture,
+    VerifyM9Fixture,
     TestM7Dns,
     TestM5Storage,
     TestM5CrashMatrix,
@@ -2732,6 +2750,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "gen-m7-fixture-certs" => ParsedCommand::GenM7FixtureCerts,
         Some(cmd) if cmd == "verify-m8-fixture" => ParsedCommand::VerifyM8Fixture,
+        Some(cmd) if cmd == "verify-m9-fixture" => ParsedCommand::VerifyM9Fixture,
         Some(cmd) if cmd == "test-m7-dns" || cmd == "m7-dns" || cmd == "m7.5" => {
             ParsedCommand::TestM7Dns
         }
