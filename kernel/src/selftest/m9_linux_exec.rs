@@ -89,6 +89,7 @@ struct TestState {
     prepare_fail_attempted: bool,
     exec_committed: bool,
     post_exec_rip_checked: bool,
+    pending_exec_commit: bool,
 }
 
 static TEST_STATE: GlobalCell<Option<TestState>> = GlobalCell::new(None);
@@ -174,7 +175,6 @@ fn verify_phase1_output() {
     if !output_contains(OK_MARKER) {
         fatal_kernel_error("m9 phase1 OK marker missing");
     }
-    kernel_log_line("[M9.F] argv/envp/auxv OK");
 }
 
 fn verify_phase2_output() {
@@ -290,6 +290,15 @@ fn maybe_finish(test: &TestState) {
     qemu_exit(QEMU_EXIT_SUCCESS);
 }
 
+/// Timer tick hook: commit while Linux is in userspace (between syscalls), not
+/// from inside the Linux syscall observer path.
+pub(crate) fn maybe_commit_on_timer() {
+    let test = state();
+    if test.pending_exec_commit && !test.exec_committed {
+        commit_phase2_image(test);
+    }
+}
+
 pub(crate) fn observe_syscall(frame: &SyscallContext) {
     let pid = current_syscall_caller_pid().unwrap_or_else(|message| fatal_kernel_error(message));
     let test = state();
@@ -338,54 +347,17 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
 
     match test.stage {
         Stage::AwaitPhase1 => {
-            if output_contains(OK_MARKER) {
+            if test.ok_markers == 0 && output_contains(OK_MARKER) {
                 verify_phase1_output();
                 test.ok_markers = 1;
                 reset_output();
                 test.stage = Stage::HeartbeatBeforeExec;
+                test.pending_exec_commit = true;
             }
         }
         Stage::HeartbeatBeforeExec => {
             if copied == 1 && last_byte == b'.' {
                 test.heartbeat_dots += 1;
-            }
-            if test.heartbeat_dots >= 2 && !test.exec_committed {
-                let spec = exec_spec(
-                    LINUX_EXEC_ARGS_FIXTURE,
-                    &PHASE2_ARGV,
-                    &PHASE2_ENVP,
-                    PHASE2_EXECFN,
-                );
-                let prepared = prepare_linux_image(allocator(), &spec)
-                    .unwrap_or_else(|_| fatal_kernel_error("m9 exec phase2 prepare failed"));
-                test.exec_entry = prepared.entry;
-                test.exec_rsp = prepared.launch_rsp;
-                let pt_frames = prepared.page_table_frames;
-                let stacks = unsafe { &*task_stacks_mut() };
-                let kstack = task_stack_top(&stacks[LINUX_SLOT]);
-                let gen_before = test.linux_generation;
-                let commit = commit_exec(
-                    allocator(),
-                    test.linux_pid,
-                    gen_before,
-                    prepared,
-                    kstack,
-                    test.linux_tid,
-                    &NoopExecCommitHooks,
-                )
-                .unwrap_or_else(|_| fatal_kernel_error("m9 exec commit failed"));
-                if commit.pid != test.linux_pid || commit.instance_generation != gen_before {
-                    fatal_kernel_error("m9 exec changed pid or generation");
-                }
-                if live_instance_generation(test.linux_pid) != Some(gen_before) {
-                    fatal_kernel_error("m9 exec bumped instance generation");
-                }
-                test.exec_committed = true;
-                kernel_log_fmt(format_args!(
-                    "[M9.F] exec committed pid={} entry={:#018x} rsp={:#018x} pt_frames={}\n",
-                    commit.pid, commit.entry, commit.launch_rsp, pt_frames
-                ));
-                test.stage = Stage::AwaitPhase2;
             }
         }
         Stage::AwaitPhase2 => {
@@ -411,7 +383,7 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
             if copied == 1 && last_byte == b'.' {
                 test.heartbeat_dots += 1;
             }
-            if !test.prepare_fail_attempted && test.heartbeat_dots >= test.dots_at_prepare_fail + 2
+            if !test.prepare_fail_attempted && test.heartbeat_dots >= test.dots_at_prepare_fail + 1
             {
                 let bad_spec = exec_spec(BAD_IMAGE, &PHASE1_ARGV, &PHASE1_ENVP, PHASE1_EXECFN);
                 match prepare_linux_image(allocator(), &bad_spec) {
@@ -423,7 +395,7 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
                 test.prepare_fail_attempted = true;
             }
             if test.prepare_fail_attempted && copied == 1 && last_byte == b'.' {
-                if test.heartbeat_dots <= test.dots_at_prepare_fail + 2 {
+                if test.heartbeat_dots <= test.dots_at_prepare_fail + 1 {
                     fatal_kernel_error("m9 heartbeat stalled after failed prepare");
                 }
                 resume_native_after_linux_teardown();
@@ -431,6 +403,46 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
         }
         Stage::AwaitNativeProgress => {}
     }
+}
+
+fn commit_phase2_image(test: &mut TestState) {
+    let spec = exec_spec(
+        LINUX_EXEC_ARGS_FIXTURE,
+        &PHASE2_ARGV,
+        &PHASE2_ENVP,
+        PHASE2_EXECFN,
+    );
+    let prepared = prepare_linux_image(allocator(), &spec)
+        .unwrap_or_else(|_| fatal_kernel_error("m9 exec phase2 prepare failed"));
+    test.exec_entry = prepared.entry;
+    test.exec_rsp = prepared.launch_rsp;
+    let pt_frames = prepared.page_table_frames;
+    let stacks = unsafe { &*task_stacks_mut() };
+    let kstack = task_stack_top(&stacks[LINUX_SLOT]);
+    let gen_before = test.linux_generation;
+    let commit = commit_exec(
+        allocator(),
+        test.linux_pid,
+        gen_before,
+        prepared,
+        kstack,
+        test.linux_tid,
+        &NoopExecCommitHooks,
+    )
+    .unwrap_or_else(|_| fatal_kernel_error("m9 exec commit failed"));
+    if commit.pid != test.linux_pid || commit.instance_generation != gen_before {
+        fatal_kernel_error("m9 exec changed pid or generation");
+    }
+    if live_instance_generation(test.linux_pid) != Some(gen_before) {
+        fatal_kernel_error("m9 exec bumped instance generation");
+    }
+    test.exec_committed = true;
+    test.pending_exec_commit = false;
+    kernel_log_fmt(format_args!(
+        "[M9.F] exec committed pid={} entry={:#018x} rsp={:#018x} pt_frames={}\n",
+        commit.pid, commit.entry, commit.launch_rsp, pt_frames
+    ));
+    test.stage = Stage::AwaitPhase2;
 }
 
 fn resume_native_after_linux_teardown() -> ! {
@@ -507,6 +519,7 @@ pub(crate) fn start_m9_linux_exec_self_test(page_allocator: PageAllocator) -> ! 
             prepare_fail_attempted: false,
             exec_committed: false,
             post_exec_rip_checked: false,
+            pending_exec_commit: false,
         });
     }
 

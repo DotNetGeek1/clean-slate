@@ -110,7 +110,7 @@ dump_stack:
     lea     rsi, [rip + marker_ok]
     mov     rdx, marker_ok_len
     call    write_lit
-    ret
+    jmp     .heartbeat
 
 .heartbeat:
     lea     rsi, [rip + byte_dot]
@@ -119,5 +119,4 @@ dump_stack:
     jmp     .heartbeat
 
 _start:
-    call    dump_stack
-    jmp     .heartbeat
+    jmp     dump_stack

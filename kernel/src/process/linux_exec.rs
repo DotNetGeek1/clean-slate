@@ -181,9 +181,18 @@ fn build_exec_initial_stack(
         (AT_ENTRY, entry),
         (AT_EXECFN, 0),
     ];
+    let stack_image_bytes = layout
+        .stack_pages
+        .checked_mul(PAGE_SIZE)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or(LinuxImageError::ExecStackBounds)?;
+    if stack_image_bytes == 0 || stack_image_bytes > LINUX_MAX_STACK_IMAGE_BYTES {
+        return Err(LinuxImageError::ExecStackBounds);
+    }
     let mut bytes = [0u8; LINUX_MAX_STACK_IMAGE_BYTES];
+    let buf = &mut bytes[..stack_image_bytes];
     let probe = build_initial_stack_with_tail(
-        &mut bytes,
+        buf,
         layout.stack_top,
         spec.argv,
         spec.envp,
@@ -216,7 +225,7 @@ fn build_exec_initial_stack(
     let auxv_slice = &auxv[..auxv_len];
 
     let image = build_initial_stack_with_tail(
-        &mut bytes,
+        buf,
         layout.stack_top,
         spec.argv,
         spec.envp,
@@ -236,10 +245,9 @@ fn build_exec_initial_stack(
     Ok(LinuxInitialStack {
         stack_top: layout.stack_top,
         bytes,
-        // Map the full stack-image buffer from `stack_top - buf.len()` (same
-        // contract as M8 `LINUX_INITIAL_STACK_IMAGE_BYTES`) so vector bytes at
-        // `rsp_off` land at the launch RSP in the guest.
-        bytes_len: LINUX_MAX_STACK_IMAGE_BYTES,
+        // Map the stack-image buffer from `stack_top - stack_image_bytes` (same
+        // contract as M8 `LINUX_INITIAL_STACK_IMAGE_BYTES` within mapped pages).
+        bytes_len: stack_image_bytes,
         rsp: image.rsp,
         auxv: auxv_storage,
         auxv_len,
@@ -471,7 +479,7 @@ mod tests {
             plan.phnum,
         )
         .expect("stack");
-        let stack_buf_base = stack.stack_top - LINUX_MAX_STACK_IMAGE_BYTES as u64;
+        let stack_buf_base = stack.stack_top - stack.bytes_len as u64;
         let rsp_off = (stack.rsp - stack_buf_base) as usize;
         let argc = u64::from_le_bytes(stack.bytes[rsp_off..rsp_off + 8].try_into().unwrap());
         assert_eq!(argc, 3);

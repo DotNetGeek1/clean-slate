@@ -28,14 +28,7 @@
 //! (`m8-linux-image-self-test`). Consumed by `#97` (`service::linux_launch`)
 //! and the `m8-linux-image` self-test.
 
-#![cfg_attr(
-    not(any(
-        feature = "m8-linux-image",
-        feature = "m9-low-va-self-test",
-        feature = "m8-linux-dispatch-self-test"
-    )),
-    allow(dead_code)
-)]
+#![cfg_attr(not(test), allow(dead_code))]
 
 use crate::mm::address_space::{
     create_process_address_space, destroy_process_address_space, translate_address_in_root,
@@ -114,7 +107,9 @@ const _: () = assert!(LINUX_STACK_GUARD_PAGE > LINUX_USER_WINDOW_BASE);
 /// 154 B. 256 B leaves headroom without spanning more than the top page.
 pub(crate) const LINUX_INITIAL_STACK_IMAGE_BYTES: usize = 256;
 /// Upper bound for M9 exec stack images (multiple stack pages).
-pub(crate) const LINUX_MAX_STACK_IMAGE_BYTES: usize = 4096;
+/// Max bytes for the in-kernel stack image builder buffer (#146 exec needs
+/// `stack_pages * PAGE_SIZE`, typically 8192 for two stack pages).
+pub(crate) const LINUX_MAX_STACK_IMAGE_BYTES: usize = 8192;
 const _: () = assert!(LINUX_INITIAL_STACK_IMAGE_BYTES as u64 <= PAGE_SIZE);
 const _: () = assert!(LINUX_MAX_STACK_IMAGE_BYTES as u64 <= 8 * PAGE_SIZE);
 /// `argv[0]` for the M8 fixture (WAVE2 / docs/LINUX_PERSONALITY.md).
