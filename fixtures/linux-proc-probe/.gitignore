@@ -1,3 +1,2 @@
-linux-proc-probe-x86_64
-*.o
-*.tmp
+*.o
+*.tmp
