@@ -381,6 +381,7 @@ fn nic_ingress_enqueue(frame: FrameBuf) {
     }
 }
 
+#[allow(static_mut_refs)]
 fn nic_ingress_take_pending(consumer: StackConsumer) -> Option<FrameBuf> {
     unsafe {
         match consumer {
@@ -882,16 +883,15 @@ where
 }
 
 fn establish_plain_tcp_session(
-    raw_handle: u64,
+    _raw_handle: u64,
     service_generation: u64,
-    caller: clean_slate_network::protocol::TrustedCaller,
+    _caller: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
     dest: SocketAddrV4,
 ) -> Result<SessionId, NetworkResponse> {
     let tick = monotonic_ticks().map_err(|_| NetworkResponse::Error {
         code: NetworkError::Timeout.code(),
     })?;
-    let generation = SessionGeneration::new(service_generation);
     let tcp = shared_tcp_transport_mut();
     tcp.stack_mut()
         .arp_cache_mut()
@@ -961,7 +961,7 @@ fn handle_service_plain_tcp_send(
 
 fn handle_service_plain_tcp_receive(
     service: &mut ServiceState,
-    raw_handle: u64,
+    _raw_handle: u64,
     service_generation: u64,
     caller: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
@@ -1521,15 +1521,6 @@ fn service_next(
         return Err(status);
     }
     Ok(status)
-}
-
-fn abort_dequeued_request(raw_handle: u64, request_id: u64) {
-    let mut response_buf = [0u8; NETWORK_RESPONSE_BYTES];
-    let response = NetworkResponse::Error {
-        code: NetworkError::InvalidRequest.code(),
-    };
-    response_buf.copy_from_slice(&response.encode());
-    let _ = service_complete(raw_handle, request_id, &response_buf, 0, &[]);
 }
 
 fn service_complete(
