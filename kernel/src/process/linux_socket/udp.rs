@@ -9,7 +9,7 @@ use crate::syscall::linux::table::LinuxSyscallContext;
 
 use super::{
     broker_sync, read_sockaddr_in, socket_addr_v4, with_socket_mut, LinuxSocket, LinuxSocketId,
-    SocketKindLinux, SocketState, LINUX_UDP_MAX_DATAGRAM,
+    SocketState, LINUX_UDP_MAX_DATAGRAM,
 };
 
 pub(crate) fn sendto(

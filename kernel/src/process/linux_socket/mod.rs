@@ -8,7 +8,7 @@ mod tcp;
 mod udp;
 
 use clean_slate_capability::{HolderId, Rights};
-use clean_slate_linux_abi::{LinuxErrno, EBADF, ECONNREFUSED, EINVAL, SOCK_DGRAM, SOCK_STREAM};
+use clean_slate_linux_abi::{LinuxErrno, EBADF, EINVAL, SOCK_DGRAM, SOCK_STREAM};
 use clean_slate_network::addr::{Ipv4Addr, SocketAddrV4};
 use clean_slate_network::protocol::{NetworkRequest, NetworkResponse};
 use clean_slate_network::session::{SessionId, SocketKind};
