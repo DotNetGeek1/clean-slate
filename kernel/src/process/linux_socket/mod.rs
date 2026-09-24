@@ -482,7 +482,15 @@ pub(crate) mod syscalls {
         request: &LinuxSyscallRequest,
         ctx: &mut LinuxSyscallContext<'_>,
     ) -> LinuxSyscallResult {
-        udp::sendto(request, ctx)
+        let fd = request.args[0];
+        let open = crate::process::linux_fd::open_id_for_fd(ctx.pid, ctx.instance_generation, fd)?;
+        let socket_ref = crate::process::linux_fd::socket_ref_for_open(open)?;
+        let id = socket_ref_to_id(socket_ref);
+        let kind = with_socket_mut(id, |socket| socket.kind)?;
+        match kind {
+            SocketKindLinux::Tcp => tcp::sendto(request, ctx),
+            SocketKindLinux::Udp => udp::sendto(request, ctx),
+        }
     }
 }
 

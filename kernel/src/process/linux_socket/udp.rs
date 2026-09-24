@@ -36,9 +36,6 @@ pub(crate) fn sendto(
     let n = len as usize;
     copy_user_socket_bytes(buf_ptr, n, &mut payload[..n])?;
     with_socket_mut(id, |socket| -> LinuxSyscallResult {
-        if socket.kind != SocketKindLinux::Udp {
-            return Err(EDESTADDRREQ);
-        }
         let dest = if addr_ptr != 0 {
             Some(read_sockaddr_in(addr_ptr, socklen)?)
         } else {
