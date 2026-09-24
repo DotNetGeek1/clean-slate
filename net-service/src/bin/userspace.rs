@@ -929,6 +929,57 @@ fn establish_plain_tcp_session(
     Ok(tcp_session)
 }
 
+fn plain_tcp_prefetch_into_stage(
+    service: &mut ServiceState,
+    service_generation: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+    tcp_session: SessionId,
+    start: u64,
+) -> Result<(), NetworkResponse> {
+    let tcp = shared_tcp_transport_mut();
+    let owner = plain_tcp_owner(service_generation);
+    let mut buf = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    let mut total = 0usize;
+    let deadline = start.saturating_add(TLS_IO_TIMEOUT_TICKS);
+    for _ in 0..TLS_POLL_LIMIT {
+        let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+            code: NetworkError::Timeout.code(),
+        })?;
+        let _ = tcp.poll(now);
+        let room = buf.len().saturating_sub(total);
+        if room == 0 {
+            break;
+        }
+        let chunk = room.min(512);
+        match tcp.receive(tcp_session, owner, &mut buf[total..total + chunk]) {
+            Ok(0) => {
+                if matches!(
+                    tcp.state(tcp_session, owner),
+                    Ok(TcpState::CloseWait | TcpState::Closed | TcpState::TimeWait)
+                ) {
+                    break;
+                }
+            }
+            Ok(n) => total += n,
+            Err(NetworkError::Closed) => break,
+            Err(err) => {
+                return Err(NetworkResponse::Error {
+                    code: NetworkError::from(err).code(),
+                });
+            }
+        }
+        if now >= deadline {
+            break;
+        }
+        yield_cpu();
+    }
+    if total > 0 {
+        service.stage_response_payload(caller, session, &buf[..total])?;
+    }
+    Ok(())
+}
+
 fn handle_service_plain_tcp_send(
     service: &mut ServiceState,
     raw_handle: u64,
@@ -951,6 +1002,14 @@ fn handle_service_plain_tcp_send(
     })?;
     let tcp_session =
         establish_plain_tcp_session(raw_handle, service_generation, caller, session, dest)?;
+    plain_tcp_prefetch_into_stage(
+        service,
+        service_generation,
+        caller,
+        session,
+        tcp_session,
+        tick,
+    )?;
     let tcp = shared_tcp_transport_mut();
     let sent = tcp
         .send(
@@ -960,6 +1019,14 @@ fn handle_service_plain_tcp_send(
             payload,
         )
         .map_err(|err| NetworkResponse::Error { code: err.code() })? as u32;
+    plain_tcp_prefetch_into_stage(
+        service,
+        service_generation,
+        caller,
+        session,
+        tcp_session,
+        tick,
+    )?;
     Ok(sent)
 }
 
@@ -972,6 +1039,14 @@ fn handle_service_plain_tcp_receive(
     max_len: u32,
     response_payload: &mut [u8],
 ) -> (NetworkResponse, u32) {
+    if let Ok(Some(n)) = service.take_staged_payload(caller, session, response_payload) {
+        return (
+            NetworkResponse::Receive {
+                payload_len: n,
+            },
+            n,
+        );
+    }
     let tcp_session = match plain_tcp_slot(session).and_then(|s| *s) {
         Some(id) => id,
         None => {
