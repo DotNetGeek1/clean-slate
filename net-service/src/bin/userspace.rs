@@ -354,12 +354,14 @@ fn nic_ingress_read_raw() -> Result<Option<FrameBuf>, NetworkDeviceError> {
         .map_err(|_| NetworkDeviceError::Malformed)
 }
 
+#[allow(static_mut_refs)]
 fn nic_ingress_stash_udp(frame: FrameBuf) {
     unsafe {
         NIC_INGRESS.pending_udp.push(frame);
     }
 }
 
+#[allow(static_mut_refs)]
 fn nic_ingress_stash_tcp(frame: FrameBuf) {
     unsafe {
         NIC_INGRESS.pending_tcp.push(frame);
