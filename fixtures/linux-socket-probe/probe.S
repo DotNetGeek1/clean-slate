@@ -295,7 +295,7 @@ _start:
     syscall
     cmp     rax, 0
     je      .Lhttp_done
-    jl      .Lread_http
+    jl      .Lfail_read_neg
     add     r13, rax
     jmp     .Lread_http
 .Lhttp_done:
@@ -304,6 +304,9 @@ _start:
     jmp     .Lafter_http_len
 .Lfail_http_len:
     mov     rdi, 32
+    jmp     exit_fail
+.Lfail_read_neg:
+    mov     rdi, 34
     jmp     exit_fail
 .Lafter_http_len:
     lea     rsi, [rip + http_buf]
@@ -332,7 +335,7 @@ _start:
     mov     rax, 3
     syscall
 
-    /* sendto on unbound TCP => EDESTADDRREQ (89) */
+    /* sendto on unconnected TCP => EPIPE (32) */
     mov     rax, 41
     mov     rdi, 2
     mov     rsi, 1
@@ -348,7 +351,7 @@ _start:
     mov     rax, 44
     syscall
     mov     ebx, 40
-    mov     rdi, 89
+    mov     rdi, 32
     call    expect_errno
     mov     rdi, r12
     mov     rax, 3
