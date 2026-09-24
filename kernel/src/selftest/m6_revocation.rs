@@ -3,7 +3,7 @@
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::capability::bootstrap_grant::register_bootstrap_grant;
-use crate::capability::revocation::{REVOKE_OP_PROBE, REVOKE_OP_REVOKE};
+use crate::capability::revocation::{REVOKE_OP_PROBE, REVOKE_OP_REVOKE, REVOKE_OP_WAIT_READERS};
 use crate::capability::{grant_root, with_capability_space};
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
@@ -33,6 +33,42 @@ use clean_slate_capability::{
 use clean_slate_service_fixtures::m6_fixture::{
     M6FixtureBootstrap, M6FixtureStep, ARG_RESULT_OF, FIXTURE_STATUS_DONE, FIXTURE_STATUS_MISMATCH,
 };
+use core::sync::atomic::{AtomicU8, Ordering};
+
+static READER_PROBE_COUNT: AtomicU8 = AtomicU8::new(0);
+static READER1_INITIAL_PROBE: AtomicU8 = AtomicU8::new(0);
+static READER2_INITIAL_PROBE: AtomicU8 = AtomicU8::new(0);
+static mut READER_PROBE_PIDS: Option<(u64, u64)> = None;
+
+/// Called from `REVOKE_OP_PROBE` when a reader fixture successfully probes its handle.
+pub(crate) fn note_reader_probe(holder: HolderId) {
+    let Some((reader, reader2)) = (unsafe { READER_PROBE_PIDS }) else {
+        return;
+    };
+    let counted = if holder.0 == reader {
+        READER1_INITIAL_PROBE
+            .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    } else if holder.0 == reader2 {
+        READER2_INITIAL_PROBE
+            .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    } else {
+        false
+    };
+    if counted {
+        READER_PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// `REVOKE_OP_WAIT_READERS`: owner polls until both readers completed their initial probe.
+pub(crate) fn readers_ready_for_owner() -> u64 {
+    if READER_PROBE_COUNT.load(Ordering::Relaxed) >= 2 {
+        1
+    } else {
+        0
+    }
+}
 
 const PASS_MARKER: &str = "[M6.6] PASS";
 const TEST_OBJECT_ID: u64 = 7;
@@ -204,7 +240,16 @@ fn build_owner_program(child_handle: u64) -> M6FixtureBootstrap {
     program
         .push(probe_step(root, Rights::READ).expect_eq(0))
         .unwrap();
-    program.push(M6FixtureStep::spin(4)).unwrap();
+    program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_REVOKE,
+                [REVOKE_OP_WAIT_READERS, 0, 0, 0, 0, 0],
+            )
+            .repeat_while_eq(0)
+            .expect_ne(0),
+        )
+        .unwrap();
     program
         .push(revoke_step(child_handle).expect_eq(2))
         .unwrap();
@@ -450,6 +495,13 @@ pub(crate) fn start_m6_revocation_self_test(allocator: PageAllocator) -> ! {
 
     if pids != [1, 2, 3, 4, 5, 6, 7] {
         fatal_kernel_error("m6 revocation pid ordering mismatch");
+    }
+
+    READER_PROBE_COUNT.store(0, Ordering::Relaxed);
+    READER1_INITIAL_PROBE.store(0, Ordering::Relaxed);
+    READER2_INITIAL_PROBE.store(0, Ordering::Relaxed);
+    unsafe {
+        READER_PROBE_PIDS = Some((pids[1], pids[2]));
     }
 
     unsafe {

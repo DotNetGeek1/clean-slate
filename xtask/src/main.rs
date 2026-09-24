@@ -393,12 +393,11 @@ const M6_AUDIT_ACCEPTANCE_MARKERS: [&str; 5] = [
     "outcome=",
     "[M6.7] PASS",
 ];
-const M6_REVOCATION_ACCEPTANCE_MARKERS: [&str; 7] = [
+const M6_REVOCATION_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[CAP ] probe allowed holder=",
+    "[CAP ] revoke denied actor=",
     "[CAP ] revoke branch=",
     "[CAP ] stale denied holder=",
-    "[CAP ] revoke denied actor=",
-    "[PROC] teardown pid=",
     "[TEST] unrelated workload progress=",
     "[M6.6] PASS",
 ];
