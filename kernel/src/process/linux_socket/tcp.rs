@@ -72,13 +72,9 @@ pub(crate) fn read_stream(
     fd: u64,
     scratch: &mut [u8],
 ) -> LinuxSyscallResult {
-    let open = crate::process::linux_fd::open_id_for_fd(ctx.pid, ctx.instance_generation, fd)?;
-    let nonblock = crate::process::linux_fd::open_description_status(
-        ctx.pid,
-        ctx.instance_generation,
-        open,
-    )?
-    .nonblock;
+    let nonblock =
+        crate::process::linux_fd::open_description_status(ctx.pid, ctx.instance_generation, fd)?
+            .nonblock;
 
     loop {
         if socket.tcp_rx_len > 0 {
