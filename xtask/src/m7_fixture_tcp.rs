@@ -217,7 +217,7 @@ impl M9RefusedService {
 
     pub fn poll(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
         let socket = sockets.get_mut::<tcp::Socket>(self.listen);
-        if socket.is_active() && socket.state() != tcp::State::Established {
+        if socket.state() == tcp::State::SynReceived {
             socket.abort();
             println!("[FIX ] m9 connect refused reset");
         }
