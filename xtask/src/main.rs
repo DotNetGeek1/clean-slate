@@ -3346,6 +3346,7 @@ mod tests {
 [TASK] task 1 started\n\
 [TASK] task 2 started\n\
 [SCHED] preemption observed\n\
+[TASK] task 1 progress=1\n\
 [TASK] task 2 progress=1\n\
 [TIME] ticks=4\n\
 [M2  ] PASS\n"
