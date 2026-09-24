@@ -131,37 +131,17 @@ pub(crate) fn linux_fork(
         return Err(EAGAIN);
     }
 
-    linux_mem_clone_for_fork_stub(
-        ProcId {
-            pid: parent_pid,
-            generation: parent_gen,
-        },
-        ProcId {
-            pid: child_pid,
-            generation: child_gen,
-        },
-    );
-    linux_signal_clone_for_fork_stub(
-        ProcId {
-            pid: parent_pid,
-            generation: parent_gen,
-        },
-        ProcId {
-            pid: child_pid,
-            generation: child_gen,
-        },
-    );
+    let runtime_state = linux_mem::clone_for_fork(parent_pid, parent_gen, child_pid, child_gen)
+        .and_then(|()| linux_signal::clone_for_fork(parent_pid, parent_gen, child_pid, child_gen));
+    if let Err(errno) = runtime_state {
+        linux_mem::release_for_process(child_pid, child_gen);
+        linux_signal::release_for_process(child_pid, child_gen);
+        linux_fd::release_for_process(child_pid, child_gen);
+        abort_fork_child(child_pid, allocator);
+        return Err(errno);
+    }
 
     Ok(child_pid)
-}
-
-fn linux_mem_clone_for_fork_stub(parent: ProcId, child: ProcId) {
-    let _ = linux_mem::clone_for_fork(parent.pid, parent.generation, child.pid, child.generation);
-}
-
-fn linux_signal_clone_for_fork_stub(parent: ProcId, child: ProcId) {
-    let _ =
-        linux_signal::clone_for_fork(parent.pid, parent.generation, child.pid, child.generation);
 }
 
 fn abort_fork_child(child_pid: u64, allocator: &mut PageAllocator) {

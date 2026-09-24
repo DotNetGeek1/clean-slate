@@ -147,7 +147,7 @@ where
     result
 }
 
-#[cfg(any(test, feature = "m9-linux-runtime-self-test"))]
+#[cfg(feature = "m9-linux-runtime-self-test")]
 pub(crate) fn occupied_slots() -> usize {
     registry_mut()
         .slots
@@ -640,7 +640,8 @@ mod tests {
     }
 
     #[test]
-    fn occupied_slots_starts_empty() {
-        assert_eq!(occupied_slots(), 0);
+    fn new_registry_is_empty() {
+        let registry = Registry::new();
+        assert!(registry.slots.iter().all(|slot| slot.is_none()));
     }
 }

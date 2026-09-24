@@ -2502,7 +2502,7 @@ fn parse_first_wall_tsc_ns(serial: &str) -> Result<u64, XtaskError> {
 
 fn validate_nanosleep_wall_budget(host: Duration, serial: &str) -> Result<(), XtaskError> {
     let guest_tsc_ns = parse_first_wall_tsc_ns(serial)?;
-    if guest_tsc_ns < 1_000_000_000 || guest_tsc_ns > 1_050_000_000 {
+    if !(1_000_000_000..=1_050_000_000).contains(&guest_tsc_ns) {
         return Err(XtaskError::InvalidCommand(format!(
             "m9 runtime guest wall tsc_ns {guest_tsc_ns} outside 1000000000..=1050000000"
         )));
