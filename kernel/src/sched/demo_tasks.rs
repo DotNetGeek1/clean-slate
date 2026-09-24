@@ -10,7 +10,10 @@ use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
-#[cfg(not(feature = "m2-self-test"))]
+#[cfg(all(
+    not(feature = "m2-self-test"),
+    not(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))
+))]
 use crate::diagnostics::qemu::halt_loop;
 #[cfg(feature = "m2-self-test")]
 use crate::diagnostics::qemu::qemu_exit;

@@ -270,7 +270,7 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
 
     if !state.first_exit_seen {
         if linux_hello_completed_exits() >= 1 {
-            let Some((exited_pid, gen, status)) = linux_hello_first_exited() else {
+            let Some((exited_pid, _gen, status)) = linux_hello_first_exited() else {
                 fatal_kernel_error("m8.7 first exit missing first_exited");
             };
             if exited_pid != state.first_pid {
