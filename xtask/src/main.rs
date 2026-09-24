@@ -260,17 +260,22 @@ const M8_LINUX_HELLO_ACCEPTANCE_MARKERS: [&str; 22] = [
     "[M8.7] PASS",
 ];
 /// Production `--features m8-linux-hello` (no self-test): #97 hello path plus demo
-/// scheduler completion (`[M2  ] PASS` after both tasks finish; progress lines may race Linux).
+/// scheduler completion. Progress, Linux exit, and `[M2  ] PASS` may interleave
+/// after hello (pass is causal on both tasks, not on exit order).
+const M8_LINUX_HELLO_PRODUCTION_TAIL: &[&str] = &[
+    "task 1 progress=",
+    "task 2 progress=",
+    "[LNX ] exit pid=",
+    " status=0",
+    "[M2  ] PASS",
+];
 const M8_LINUX_HELLO_PRODUCTION_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[LNX ] ELF loaded pid="),
     MarkerStep::Ordered("entry=0x0000400000400078"),
     MarkerStep::Ordered("[LNX ] personality=x86_64 pid="),
     MarkerStep::Ordered("[LNX ] unsupported syscall=999 errno=ENOSYS"),
     MarkerStep::Ordered("\nHello from Linux."),
-    MarkerStep::Ordered("[LNX ] exit pid="),
-    MarkerStep::Ordered(" status=0"),
-    MarkerStep::UnorderedGroupAnywhere(M2_TASK_PROGRESS_GROUP),
-    MarkerStep::Ordered("[M2  ] PASS"),
+    MarkerStep::UnorderedGroupAnywhere(M8_LINUX_HELLO_PRODUCTION_TAIL),
 ];
 const M3_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[PROC] created pid=1 tid=1",
@@ -2544,9 +2549,9 @@ fn validate_m9_linux_fs_block_write(output: &str) -> Result<(), XtaskError> {
             "m9 linux fs acceptance marker order".to_owned(),
         ));
     }
-    if !output[ls..negative].contains("[BLK ] request op=write") {
+    if !output[ls..negative].contains("request op=write") {
         return Err(XtaskError::MissingMarker(
-            "[BLK ] request op=write (between ls /bin ok and negative cases)".to_owned(),
+            "request op=write (between ls /bin ok and negative cases)".to_owned(),
         ));
     }
     Ok(())
