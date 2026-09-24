@@ -2541,17 +2541,19 @@ fn validate_m9_linux_fs_block_write(output: &str) -> Result<(), XtaskError> {
     let ls = output
         .find("[M9.H] ls /bin ok")
         .ok_or_else(|| XtaskError::MissingMarker("[M9.H] ls /bin ok".to_owned()))?;
-    let negative = output
-        .find("[M9.H] negative cases ok")
-        .ok_or_else(|| XtaskError::MissingMarker("[M9.H] negative cases ok".to_owned()))?;
-    if ls >= negative {
+    let pass = output
+        .find("[M9.H] PASS")
+        .ok_or_else(|| XtaskError::MissingMarker("[M9.H] PASS".to_owned()))?;
+    if ls >= pass {
         return Err(XtaskError::InvalidCommand(
             "m9 linux fs acceptance marker order".to_owned(),
         ));
     }
-    if !output[ls..negative].contains("request op=write") {
+    // Block logs and probe stdout interleave; do not bound the upper end at
+    // `negative cases ok` because that marker can appear before the write log.
+    if !output[ls..pass].contains("request op=write") {
         return Err(XtaskError::MissingMarker(
-            "request op=write (between ls /bin ok and negative cases)".to_owned(),
+            "request op=write (after ls /bin ok before PASS)".to_owned(),
         ));
     }
     Ok(())
