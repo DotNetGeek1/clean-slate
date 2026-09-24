@@ -10,7 +10,10 @@ use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
-#[cfg(not(feature = "m2-self-test"))]
+#[cfg(all(
+    not(feature = "m2-self-test"),
+    not(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))
+))]
 use crate::diagnostics::qemu::halt_loop;
 #[cfg(feature = "m2-self-test")]
 use crate::diagnostics::qemu::qemu_exit;
@@ -27,6 +30,16 @@ use core::hint::spin_loop;
 /// Sample progress while spinning so a task can log `progress=1` before
 /// `thread_should_exit` at ~1 ms LAPIC preemption rates (see `TASK_PROGRESS_CHUNK`).
 const PROGRESS_SAMPLE_INTERVAL: u64 = 512;
+
+#[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
+fn demo_tasks_may_exit_on_preemption_threshold() -> bool {
+    false
+}
+
+#[cfg(not(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test"))))]
+fn demo_tasks_may_exit_on_preemption_threshold() -> bool {
+    true
+}
 
 #[unsafe(no_mangle)]
 extern "C" fn clean_slate_task_one() -> ! {
@@ -51,14 +64,14 @@ fn run_demo_task(task_id: u64) -> ! {
             if progress % PROGRESS_SAMPLE_INTERVAL == 0 {
                 note_task_progress(task_id, progress);
                 flush_scheduler_markers(task_id);
-                if task_should_exit(task_id) {
+                if demo_tasks_may_exit_on_preemption_threshold() && task_should_exit(task_id) {
                     task_exit();
                 }
             }
         }
         note_task_progress(task_id, progress);
         flush_scheduler_markers(task_id);
-        if task_should_exit(task_id) {
+        if demo_tasks_may_exit_on_preemption_threshold() && task_should_exit(task_id) {
             task_exit();
         }
     }
@@ -102,6 +115,40 @@ fn flush_scheduler_markers(task_id: u64) {
             2 => kernel_log_line("[TASK] task 2 progress=1"),
             _ => kernel_log_line("[TASK] task progress=1"),
         }
+        #[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
+        maybe_log_m2_pass_when_both_demo_tasks_ready();
+    }
+}
+
+/// Production M8: keep demo threads alive through Linux exit; emit `[M2  ] PASS`
+/// once both tasks meet the usual M2 acceptance thresholds (no serial ordering).
+#[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
+fn maybe_log_m2_pass_when_both_demo_tasks_ready() {
+    let ready = without_interrupts(|| unsafe {
+        if scheduler_mut().pass_emitted {
+            return false;
+        }
+        scheduler_mut().threads.iter().fold((false, false), |(t1, t2), thread| {
+            let ready = thread.preemptions >= TASK_REQUIRED_PREEMPTIONS && thread.progress_logged;
+            match thread.id {
+                1 => (ready, t2),
+                2 => (t1, ready),
+                _ => (t1, t2),
+            }
+        }) == (true, true)
+    });
+    if ready {
+        log_m2_pass_once();
+    }
+}
+
+fn log_m2_pass_once() {
+    unsafe {
+        if !scheduler_mut().pass_emitted {
+            scheduler_mut().pass_emitted = true;
+            kernel_log_fmt(format_args!("[TIME] ticks={}\n", kernel_ticks()));
+            kernel_log_line("[M2  ] PASS");
+        }
     }
 }
 
@@ -144,20 +191,28 @@ fn task_exit() -> ! {
 }
 
 fn emit_m2_pass_and_stop() -> ! {
-    unsafe {
-        if !scheduler_mut().pass_emitted {
-            scheduler_mut().pass_emitted = true;
-            kernel_log_fmt(format_args!("[TIME] ticks={}\n", kernel_ticks()));
-            kernel_log_line("[M2  ] PASS");
-        }
-    }
+    log_m2_pass_once();
 
     #[cfg(feature = "m2-self-test")]
     {
         qemu_exit(QEMU_EXIT_SUCCESS)
     }
 
-    #[cfg(not(feature = "m2-self-test"))]
+    #[cfg(all(
+        not(feature = "m2-self-test"),
+        feature = "m8-linux-hello",
+        not(feature = "m8-linux-hello-self-test")
+    ))]
+    {
+        loop {
+            spin_loop();
+        }
+    }
+
+    #[cfg(all(
+        not(feature = "m2-self-test"),
+        not(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))
+    ))]
     {
         halt_loop()
     }
