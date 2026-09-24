@@ -78,11 +78,15 @@ struct ObserverState {
     first_generation: u32,
     first_exit_seen: bool,
     relaunch_seen: bool,
+    relaunch_pid: u64,
+    relaunch_generation: u32,
     second_exit_seen: bool,
     malformed_proven: bool,
     native_progress: u64,
     /// Native progress snapshot taken when malformed load was proven.
     native_progress_at_malformed: Option<u64>,
+    /// Harness-visible `[M8.7] * observed` lines (after both Linux exits).
+    observer_markers_emitted: bool,
 }
 
 static OBSERVER: GlobalCell<Option<ObserverState>> = GlobalCell::new(None);
@@ -207,6 +211,25 @@ fn prove_malformed_load(allocator: &mut PageAllocator, state: &mut ObserverState
     kernel_log_line("[M8.7] malformed ELF rejected fail-closed");
 }
 
+fn emit_observer_markers_once(state: &mut ObserverState) {
+    if state.observer_markers_emitted {
+        return;
+    }
+    let Some((exited_pid, gen, status)) = linux_hello_first_exited() else {
+        fatal_kernel_error("m8.7 first exit missing first_exited");
+    };
+    kernel_log_fmt(format_args!(
+        "[M8.7] first exit observed pid={} gen={} status={}\n",
+        exited_pid, gen.0, status
+    ));
+    kernel_log_fmt(format_args!(
+        "[M8.7] relaunch observed pid={} gen={}\n",
+        state.relaunch_pid, state.relaunch_generation
+    ));
+    kernel_log_line("[M8.7] second exit observed");
+    state.observer_markers_emitted = true;
+}
+
 fn maybe_pass(state: &ObserverState) {
     let Some(at_malformed) = state.native_progress_at_malformed else {
         return;
@@ -269,10 +292,6 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
                 fatal_kernel_error("m8.7 Linux console sink was not Verbatim");
             }
             state.first_exit_seen = true;
-            kernel_log_fmt(format_args!(
-                "[M8.7] first exit observed pid={} gen={} status={}\n",
-                exited_pid, gen.0, status
-            ));
         } else if state.native_progress >= NATIVE_PROGRESS_BOUND_WITHOUT_FIRST_EXIT {
             fatal_kernel_error("m8.7 Linux hello never exited");
         }
@@ -295,10 +314,8 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
                 fatal_kernel_error("m8.7 relaunched process had no fresh stdout projection");
             }
             state.relaunch_seen = true;
-            kernel_log_fmt(format_args!(
-                "[M8.7] relaunch observed pid={} gen={}\n",
-                launched.pid, launched.instance_generation.0
-            ));
+            state.relaunch_pid = launched.pid;
+            state.relaunch_generation = launched.instance_generation.0;
         } else if linux_hello_completed_exits() >= 2 {
             let Some((exited_pid, gen, _)) = linux_hello_last_exited() else {
                 fatal_kernel_error("m8.7 relaunch missing last_exited snapshot");
@@ -307,10 +324,8 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
                 fatal_kernel_error("m8.7 relaunch did not advance pid/generation");
             }
             state.relaunch_seen = true;
-            kernel_log_fmt(format_args!(
-                "[M8.7] relaunch observed pid={} gen={}\n",
-                exited_pid, gen.0
-            ));
+            state.relaunch_pid = exited_pid;
+            state.relaunch_generation = gen.0;
         }
     }
 
@@ -328,7 +343,7 @@ pub(crate) fn observe_syscall(frame: &SyscallContext) {
             fatal_kernel_error("m8.7 two launches did not deliver 2× hello bytes");
         }
         state.second_exit_seen = true;
-        kernel_log_line("[M8.7] second exit observed");
+        emit_observer_markers_once(state);
         prove_malformed_load(allocator(), state);
     }
 
@@ -375,10 +390,13 @@ pub(crate) fn start_m8_linux_hello_self_test(allocator: PageAllocator) -> ! {
             first_generation: first.instance_generation.0,
             first_exit_seen: false,
             relaunch_seen: false,
+            relaunch_pid: 0,
+            relaunch_generation: 0,
             second_exit_seen: false,
             malformed_proven: false,
             native_progress: 0,
             native_progress_at_malformed: None,
+            observer_markers_emitted: false,
         });
     }
 

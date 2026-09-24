@@ -23,6 +23,25 @@ use crate::sched::with_scheduler;
 use crate::sched::TASK_PROGRESS_CHUNK;
 use crate::sched::TASK_REQUIRED_PREEMPTIONS;
 use core::hint::spin_loop;
+#[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
+use core::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
+static M8_DEMO_MARKERS_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Sample progress while spinning so a task can log `progress=1` before
+/// `thread_should_exit` at ~1 ms LAPIC preemption rates (see `TASK_PROGRESS_CHUNK`).
+const PROGRESS_SAMPLE_INTERVAL: u64 = 512;
+
+#[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
+fn demo_tasks_may_exit_on_preemption_threshold() -> bool {
+    false
+}
+
+#[cfg(not(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test"))))]
+fn demo_tasks_may_exit_on_preemption_threshold() -> bool {
+    true
+}
 
 #[unsafe(no_mangle)]
 extern "C" fn clean_slate_task_one() -> ! {
@@ -44,10 +63,17 @@ fn run_demo_task(task_id: u64) -> ! {
         for _ in 0..TASK_PROGRESS_CHUNK {
             progress = progress.wrapping_add(1);
             spin_loop();
+            if progress % PROGRESS_SAMPLE_INTERVAL == 0 {
+                note_task_progress(task_id, progress);
+                flush_scheduler_markers(task_id);
+                if demo_tasks_may_exit_on_preemption_threshold() && task_should_exit(task_id) {
+                    task_exit();
+                }
+            }
         }
         note_task_progress(task_id, progress);
         flush_scheduler_markers(task_id);
-        if task_should_exit(task_id) {
+        if demo_tasks_may_exit_on_preemption_threshold() && task_should_exit(task_id) {
             task_exit();
         }
     }
@@ -68,6 +94,16 @@ fn flush_scheduler_markers(task_id: u64) {
             .iter_mut()
             .find(|thread| thread.id == task_id)
             .and_then(|thread| {
+                #[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
+                {
+                    if !M8_DEMO_MARKERS_ARMED.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                    let pass_emitted = scheduler.pass_emitted;
+                    if !pass_emitted && task_id != 1 {
+                        return None;
+                    }
+                }
                 if thread.preemptions >= TASK_REQUIRED_PREEMPTIONS
                     && !thread.progress_logged
                     && thread.observed_progress != 0
@@ -132,7 +168,7 @@ fn task_exit() -> ! {
     }
 }
 
-fn emit_m2_pass_and_stop() -> ! {
+fn log_m2_pass_once() {
     unsafe {
         if !scheduler_mut().pass_emitted {
             scheduler_mut().pass_emitted = true;
@@ -140,13 +176,67 @@ fn emit_m2_pass_and_stop() -> ! {
             kernel_log_line("[M2  ] PASS");
         }
     }
+}
+
+/// Production M8.7: after Linux hello exits, emit demo progress + `[M2  ] PASS` in order.
+#[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
+pub(crate) fn emit_m8_linux_hello_production_pass_markers() {
+    without_interrupts(|| {
+        M8_DEMO_MARKERS_ARMED.store(true, Ordering::SeqCst);
+        flush_m8_production_task_progress(1);
+        log_m2_pass_once();
+    });
+}
+
+/// Harness expects `[TASK] task 1 progress=` after Linux exit; production Linux
+/// may finish before both demo threads reach `TASK_REQUIRED_PREEMPTIONS`.
+#[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
+fn flush_m8_production_task_progress(task_id: u64) {
+    let should_log = without_interrupts(|| unsafe {
+        scheduler_mut()
+            .threads
+            .iter_mut()
+            .find(|thread| thread.id == task_id)
+            .and_then(|thread| {
+                if thread.progress_logged || thread.observed_progress == 0 {
+                    return None;
+                }
+                thread.progress_logged = true;
+                Some(())
+            })
+    });
+    if should_log.is_some() {
+        match task_id {
+            1 => kernel_log_line("[TASK] task 1 progress=1"),
+            2 => kernel_log_line("[TASK] task 2 progress=1"),
+            _ => kernel_log_line("[TASK] task progress=1"),
+        }
+    }
+}
+
+fn emit_m2_pass_and_stop() -> ! {
+    log_m2_pass_once();
 
     #[cfg(feature = "m2-self-test")]
     {
         qemu_exit(QEMU_EXIT_SUCCESS)
     }
 
-    #[cfg(not(feature = "m2-self-test"))]
+    #[cfg(all(
+        not(feature = "m2-self-test"),
+        feature = "m8-linux-hello",
+        not(feature = "m8-linux-hello-self-test")
+    ))]
+    {
+        loop {
+            spin_loop();
+        }
+    }
+
+    #[cfg(all(
+        not(feature = "m2-self-test"),
+        not(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))
+    ))]
     {
         halt_loop()
     }

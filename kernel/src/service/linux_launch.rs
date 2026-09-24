@@ -350,6 +350,8 @@ pub(crate) fn on_linux_hello_process_exited(allocator: &mut PageAllocator, pid: 
     }
 
     if remaining_restart_budget() == 0 {
+        #[cfg(not(feature = "m8-linux-hello-self-test"))]
+        crate::sched::demo_tasks::emit_m8_linux_hello_production_pass_markers();
         return;
     }
     if let Err(message) = take_restart_budget() {

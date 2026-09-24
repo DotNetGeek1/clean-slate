@@ -132,7 +132,7 @@ const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[DF  ] emergency stack OK",
     "[DF  ] PASS",
 ];
-const M2_ACCEPTANCE_MARKERS: [&str; 11] = [
+const M2_ACCEPTANCE_MARKERS: [&str; 12] = [
     "[BOOT] UEFI memory map acquired",
     "[BOOT] ExitBootServices OK",
     "[MEM ] physical allocator initialized",
@@ -141,8 +141,8 @@ const M2_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[TASK] task 1 started",
     "[TASK] task 2 started",
     "[SCHED] preemption observed",
-    // At ~1 ms LAPIC ticks only one demo task may emit progress before `[M2  ] PASS`.
-    "progress=1",
+    "[TASK] task 1 progress=",
+    "[TASK] task 2 progress=",
     "[TIME] ticks=",
     "[M2  ] PASS",
 ];
