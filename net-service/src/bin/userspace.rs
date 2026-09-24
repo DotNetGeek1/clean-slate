@@ -56,6 +56,8 @@ const ARP_TTL_TICKS: u64 = 50_000;
 const DNS_POLL_LIMIT: usize = 5_000_000;
 const TLS_POLL_LIMIT: usize = 10_000_000;
 const TLS_IO_TIMEOUT_TICKS: u64 = 2_000;
+/// Monotonic-tick I/O bound (1 tick/ms after #163; ~160 ms/tick until then).
+const PLAIN_TCP_IO_TIMEOUT_TICKS: u64 = 2_000;
 const TLS_CLOSE_TIMEOUT_TICKS: u64 = 100;
 
 struct BumpAllocator;
@@ -1026,10 +1028,18 @@ fn handle_service_plain_tcp_receive(
             );
         }
     }
-    for _ in 0..TLS_POLL_LIMIT {
+    let deadline = tick.saturating_add(PLAIN_TCP_IO_TIMEOUT_TICKS);
+    loop {
         let now = match monotonic_ticks() {
             Ok(now) => now,
-            Err(_) => break,
+            Err(_) => {
+                return (
+                    NetworkResponse::Error {
+                        code: NetworkError::Timeout.code(),
+                    },
+                    0,
+                );
+            }
         };
         let _ = tcp.poll(now);
         match tcp.receive(tcp_session, owner, &mut response_payload[..want]) {
@@ -1065,14 +1075,16 @@ fn handle_service_plain_tcp_receive(
                 );
             }
         }
+        if now >= deadline {
+            return (
+                NetworkResponse::Error {
+                    code: NetworkError::Timeout.code(),
+                },
+                0,
+            );
+        }
         yield_cpu();
     }
-    (
-        NetworkResponse::Error {
-            code: NetworkError::Timeout.code(),
-        },
-        0,
-    )
 }
 
 mod linux_socket_data_plane {

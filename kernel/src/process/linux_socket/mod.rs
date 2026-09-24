@@ -511,7 +511,7 @@ pub(crate) fn read_socket(
         if socket.kind == SocketKindLinux::Udp {
             udp::read_datagram(socket, request, ctx, id, scratch)
         } else {
-            tcp::read_stream(socket, request, ctx, id, scratch)
+            tcp::read_stream(socket, request, ctx, id, _fd, scratch)
         }
     })?
 }

@@ -1,6 +1,6 @@
 //! TCP socket path (#105).
 
-use clean_slate_linux_abi::{LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EPIPE};
+use clean_slate_linux_abi::{LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EAGAIN, EPIPE};
 use clean_slate_network::error::NetworkError;
 use clean_slate_network::protocol::{NetworkRequest, NetworkResponse};
 use clean_slate_service_fixtures::NETWORK_MAX_PAYLOAD_BYTES;
@@ -69,54 +69,71 @@ pub(crate) fn read_stream(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
     id: LinuxSocketId,
+    fd: u64,
     scratch: &mut [u8],
 ) -> LinuxSyscallResult {
-    if socket.tcp_rx_len > 0 {
-        let n = (socket.tcp_rx_len as usize).min(scratch.len());
-        scratch[..n].copy_from_slice(&socket.tcp_rx[..n]);
-        if n < socket.tcp_rx_len as usize {
-            let remain = socket.tcp_rx_len as usize - n;
-            socket.tcp_rx.copy_within(n..socket.tcp_rx_len as usize, 0);
-            socket.tcp_rx_len = remain as u16;
-        } else {
-            socket.tcp_rx_len = 0;
-        }
-        return Ok(n as u64);
-    }
-    if socket.tcp_eof {
-        return Ok(0);
-    }
-    let outcome = match broker_sync(
-        request,
-        ctx,
-        id,
-        &mut socket.inflight_request_id,
-        NetworkRequest::Receive {
-            session: socket.session,
-            max_len: scratch.len().min(4096) as u32,
-        },
-        &[],
-        Some(clean_slate_network::session::SessionGeneration::new(
-            socket.session_generation,
-        )),
-        None,
-    ) {
-        Ok(outcome) => outcome,
-        Err(block_or_err) => return block_or_err,
-    };
-    match outcome.response {
-        NetworkResponse::Receive { payload_len } => {
-            if payload_len == 0 {
-                socket.tcp_eof = true;
-                return Ok(0);
+    let open = crate::process::linux_fd::open_id_for_fd(ctx.pid, ctx.instance_generation, fd)?;
+    let nonblock = crate::process::linux_fd::open_description_status(
+        ctx.pid,
+        ctx.instance_generation,
+        open,
+    )?
+    .nonblock;
+
+    loop {
+        if socket.tcp_rx_len > 0 {
+            let n = (socket.tcp_rx_len as usize).min(scratch.len());
+            scratch[..n].copy_from_slice(&socket.tcp_rx[..n]);
+            if n < socket.tcp_rx_len as usize {
+                let remain = socket.tcp_rx_len as usize - n;
+                socket.tcp_rx.copy_within(n..socket.tcp_rx_len as usize, 0);
+                socket.tcp_rx_len = remain as u16;
+            } else {
+                socket.tcp_rx_len = 0;
             }
-            let n = payload_len as usize;
-            let copy = n.min(scratch.len());
-            scratch[..copy].copy_from_slice(&outcome.payload[..copy]);
-            Ok(copy as u64)
+            return Ok(n as u64);
         }
-        NetworkResponse::Error { code } => map_network_error(code),
-        _ => Err(clean_slate_linux_abi::EINVAL),
+        if socket.tcp_eof {
+            return Ok(0);
+        }
+        let outcome = match broker_sync(
+            request,
+            ctx,
+            id,
+            &mut socket.inflight_request_id,
+            NetworkRequest::Receive {
+                session: socket.session,
+                max_len: scratch.len().min(4096) as u32,
+            },
+            &[],
+            Some(clean_slate_network::session::SessionGeneration::new(
+                socket.session_generation,
+            )),
+            None,
+        ) {
+            Ok(outcome) => outcome,
+            Err(block_or_err) => return block_or_err,
+        };
+        match outcome.response {
+            NetworkResponse::Receive { payload_len } => {
+                if payload_len == 0 {
+                    socket.tcp_eof = true;
+                    return Ok(0);
+                }
+                let n = payload_len as usize;
+                let copy = n.min(scratch.len());
+                scratch[..copy].copy_from_slice(&outcome.payload[..copy]);
+                return Ok(copy as u64);
+            }
+            NetworkResponse::Error { code } if code == NetworkError::Timeout.code() => {
+                if nonblock {
+                    return Err(EAGAIN);
+                }
+                continue;
+            }
+            NetworkResponse::Error { code } => return map_network_error(code),
+            _ => return Err(clean_slate_linux_abi::EINVAL),
+        }
     }
 }
 
