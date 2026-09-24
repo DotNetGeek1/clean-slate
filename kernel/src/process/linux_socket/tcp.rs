@@ -125,6 +125,7 @@ pub(crate) fn read_stream(
                 if nonblock {
                     return Err(EAGAIN);
                 }
+                // #106/#107: service has no NIC-RX wake; re-arm blocking Receive after each slice.
                 continue;
             }
             NetworkResponse::Error { code } => return map_network_error(code),

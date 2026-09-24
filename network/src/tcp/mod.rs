@@ -19,7 +19,10 @@ pub use conn::{
     TCP_CONNECT_TIMEOUT_TICKS, TCP_MAX_RETRIES, TCP_RECV_BUFFER_BYTES, TCP_RTO_TICKS,
     TCP_SEND_BUFFER_BYTES, TCP_TIME_WAIT_TICKS,
 };
-pub use segment::{TcpFlags, TcpSegment, MAX_TCP_PAYLOAD, TCP_MIN_HEADER_LEN};
+pub use segment::{
+    parse as parse_tcp_segment, write as write_tcp_segment, TcpFlags, TcpSegment, MAX_TCP_PAYLOAD,
+    TCP_MIN_HEADER_LEN,
+};
 pub use state::TcpState;
 pub use stats::TcpStats;
 pub use transport::{TcpTable, TcpTransport};

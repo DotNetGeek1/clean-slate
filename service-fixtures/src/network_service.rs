@@ -286,6 +286,18 @@ where
         Ok(self.sessions[index].connected_dest)
     }
 
+    pub fn attach_connected_dest(
+        &mut self,
+        caller: TrustedCaller,
+        session: SessionId,
+        dest: SocketAddrV4,
+    ) -> Result<(), NetworkResponse> {
+        let index = self.validate_session(&caller, session)?;
+        self.sessions[index].connected_dest = Some(dest);
+        self.sessions[index].state = SessionState::Open;
+        Ok(())
+    }
+
     pub fn stage_response_payload(
         &mut self,
         caller: TrustedCaller,

@@ -56,8 +56,7 @@ const ARP_TTL_TICKS: u64 = 50_000;
 const DNS_POLL_LIMIT: usize = 5_000_000;
 const TLS_POLL_LIMIT: usize = 10_000_000;
 const TLS_IO_TIMEOUT_TICKS: u64 = 2_000;
-/// Monotonic-tick I/O bound (1 tick/ms after #163; ~160 ms/tick until then).
-const PLAIN_TCP_IO_TIMEOUT_TICKS: u64 = 2_000;
+const PLAIN_TCP_IO_TIMEOUT_MS: u64 = 2_000;
 const TLS_CLOSE_TIMEOUT_TICKS: u64 = 100;
 
 struct BumpAllocator;
@@ -216,6 +215,20 @@ fn monotonic_ticks() -> Result<u64, u64> {
         return Err(ticks);
     }
     Ok(ticks)
+}
+
+/// Pre-#163 production LAPIC tick (~160 ms). #163 replaces this with `NET_SUBOP_TICK_PERIOD_NS`.
+fn tick_period_ns() -> u64 {
+    160_000_000
+}
+
+fn ms_to_irq_ticks(ms: u64) -> u64 {
+    if ms == 0 {
+        return 0;
+    }
+    let period = tick_period_ns();
+    let ns = ms.saturating_mul(1_000_000);
+    ns.div_ceil(period).max(1)
 }
 
 fn network_capability(device_id: u64) -> Result<u64, u64> {
@@ -906,16 +919,17 @@ fn establish_plain_tcp_session(
             .map_err(|err| NetworkResponse::Error { code: err.code() })?,
     };
     let owner = plain_tcp_owner(service_generation);
-    poll_plain_tcp_until(tcp, tick, TCP_CONNECT_TIMEOUT_TICKS, |tcp, now| {
+    poll_plain_tcp_until(tcp, tick, TCP_CONNECT_TIMEOUT_TICKS, |tcp, _now| {
         match tcp.state(tcp_session, owner) {
             Ok(TcpState::Established) => Ok(true),
             Ok(TcpState::Reset) | Ok(TcpState::Closed) => Err(NetworkResponse::Error {
                 code: NetworkError::Reset.code(),
             }),
-            Ok(_) => {
-                let _ = tcp.poll(now);
-                Ok(false)
-            }
+            Ok(_) => Ok(false),
+            // `poll` frees the slot after an acceptable RST; connect must still fail closed.
+            Err(NetworkError::NotFound) => Err(NetworkResponse::Error {
+                code: NetworkError::Reset.code(),
+            }),
             Err(err) => Err(NetworkResponse::Error { code: err.code() }),
         }
     })?;
@@ -1030,18 +1044,11 @@ fn handle_service_plain_tcp_receive(
             );
         }
     }
-    let deadline = tick.saturating_add(PLAIN_TCP_IO_TIMEOUT_TICKS);
-    loop {
+    let deadline = tick.saturating_add(ms_to_irq_ticks(PLAIN_TCP_IO_TIMEOUT_MS));
+    for _ in 0..TLS_POLL_LIMIT {
         let now = match monotonic_ticks() {
             Ok(now) => now,
-            Err(_) => {
-                return (
-                    NetworkResponse::Error {
-                        code: NetworkError::Timeout.code(),
-                    },
-                    0,
-                );
-            }
+            Err(_) => break,
         };
         let _ = tcp.poll(now);
         match tcp.receive(tcp_session, owner, &mut response_payload[..want]) {
@@ -1078,15 +1085,16 @@ fn handle_service_plain_tcp_receive(
             }
         }
         if now >= deadline {
-            return (
-                NetworkResponse::Error {
-                    code: NetworkError::Timeout.code(),
-                },
-                0,
-            );
+            break;
         }
         yield_cpu();
     }
+    (
+        NetworkResponse::Error {
+            code: NetworkError::Timeout.code(),
+        },
+        0,
+    )
 }
 
 mod linux_socket_data_plane {
@@ -1102,6 +1110,32 @@ mod linux_socket_data_plane {
         response_payload: &mut [u8],
     ) -> Option<(NetworkResponse, u32)> {
         match request {
+            NetworkRequest::Connect { session, dest }
+                if matches!(
+                    service.session_kind(caller, session),
+                    Ok(SocketKind::LinuxTcp)
+                ) =>
+            {
+                Some(
+                    match establish_plain_tcp_session(
+                        raw_handle,
+                        service_generation,
+                        caller,
+                        session,
+                        dest,
+                    ) {
+                        Ok(_) => {
+                            if let Err(response) =
+                                service.attach_connected_dest(caller, session, dest)
+                            {
+                                return Some((response, 0));
+                            }
+                            (NetworkResponse::Connect, 0)
+                        }
+                        Err(response) => (response, 0),
+                    },
+                )
+            }
             NetworkRequest::Send {
                 session,
                 payload_len,

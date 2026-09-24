@@ -8,10 +8,14 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration as StdDuration;
 
+use clean_slate_network::addr::{EtherType, IpProtocol};
+use clean_slate_network::ethernet::EthernetHeader;
 use clean_slate_network::fixture::{
     DNS_SERVER_PORT, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS, FIXTURE_HOSTNAME, PEER_IPV4, PEER_MAC,
     UDP_ECHO_PORT,
 };
+use clean_slate_network::ipv4::Ipv4Header;
+use clean_slate_network::tcp::{parse_tcp_segment, write_tcp_segment, TcpFlags, TcpSegment};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
@@ -254,71 +258,79 @@ impl QemuSocketDevice {
         self.events.drain(..)
     }
 
-    /// Answer SYN to `10.77.0.50:M9_REFUSED_PORT` with RST (Linux ECONNREFUSED path).
+    /// Answer SYN to `M9_REFUSED_PORT` with RST|ACK (Linux ECONNREFUSED path).
     fn try_answer_m9_refused_syn(&mut self, frame: &[u8]) -> bool {
-        if frame.len() < 54 {
+        let (eth, l3) = match EthernetHeader::parse(frame) {
+            Ok(parsed) => parsed,
+            Err(_) => return false,
+        };
+        if eth.ethertype != EtherType::IPV4 {
             return false;
         }
-        if u16::from_be_bytes([frame[12], frame[13]]) != 0x0800 {
+        let (ip, ip_payload) = match Ipv4Header::parse(l3) {
+            Ok(parsed) => parsed,
+            Err(_) => return false,
+        };
+        if ip.protocol != IpProtocol::TCP {
             return false;
         }
-        let ip_hlen = ((frame[14] & 0x0f) as usize).saturating_mul(4);
-        if ip_hlen < 20 || frame[14 + 9] != 6 {
+        let (seg, _) = match parse_tcp_segment(ip.src, ip.dst, ip_payload) {
+            Ok(parsed) => parsed,
+            Err(_) => return false,
+        };
+        if seg.dst_port != M9_REFUSED_PORT
+            || !seg.flags.contains(TcpFlags::SYN)
+            || seg.flags.contains(TcpFlags::ACK)
+        {
             return false;
         }
-        let tcp_start = 14 + ip_hlen;
-        if frame.len() < tcp_start + 20 {
+        let mut reply = vec![0u8; MAX_FRAME_BYTES];
+        let eth_len = match (EthernetHeader {
+            dst: eth.src,
+            src: eth.dst,
+            ethertype: EtherType::IPV4,
+        })
+        .write(&mut reply)
+        {
+            Ok(len) => len,
+            Err(_) => return false,
+        };
+        let ip_off = eth_len;
+        let ip_hdr = Ipv4Header {
+            src: ip.dst,
+            dst: ip.src,
+            protocol: IpProtocol::TCP,
+            ttl: 64,
+            identification: 0,
+            flags: 0,
+            fragment_offset: 0,
+            header_len: 20,
+            total_len: 0,
+            dscp: 0,
+            ecn: 0,
+        };
+        let tcp_off = ip_off + 20;
+        let rst = TcpSegment {
+            src_port: seg.dst_port,
+            dst_port: seg.src_port,
+            seq: 0,
+            ack: seg.seq.wrapping_add(1),
+            data_offset: 5,
+            flags: TcpFlags::RST.union(TcpFlags::ACK),
+            window: 0,
+            checksum: 0,
+            urgent: 0,
+            mss_option: None,
+        };
+        let tcp_len = match write_tcp_segment(ip.dst, ip.src, &rst, &[], &mut reply[tcp_off..]) {
+            Ok(len) => len,
+            Err(_) => return false,
+        };
+        if ip_hdr.write(&mut reply[ip_off..], tcp_len).is_err() {
             return false;
         }
-        let dst_port = u16::from_be_bytes([frame[tcp_start + 2], frame[tcp_start + 3]]);
-        if dst_port != M9_REFUSED_PORT {
-            return false;
-        }
-        let flags = frame[tcp_start + 13];
-        if flags & 0x02 == 0 || flags & 0x10 != 0 {
-            return false;
-        }
-        let seq = u32::from_be_bytes([
-            frame[tcp_start + 4],
-            frame[tcp_start + 5],
-            frame[tcp_start + 6],
-            frame[tcp_start + 7],
-        ]);
-        let mut reply = vec![0u8; 54];
-        reply[0..6].copy_from_slice(&frame[6..12]);
-        reply[6..12].copy_from_slice(&frame[0..6]);
-        reply[12..14].copy_from_slice(&[0x08, 0x00]);
-        reply[14] = 0x45;
-        reply[15] = 0x00;
-        reply[16..18].copy_from_slice(&40u16.to_be_bytes());
-        reply[18..20].copy_from_slice(&[0, 0]);
-        reply[20] = 64;
-        reply[21] = 6;
-        reply[22..24].copy_from_slice(&[0, 0]);
-        reply[24..28].copy_from_slice(&M9_HTTP_ADDR);
-        reply[28..32].copy_from_slice(&frame[24..28]);
-        let tcp_off = 34usize;
-        reply[tcp_off..tcp_off + 2]
-            .copy_from_slice(&frame[tcp_start + 2..tcp_start + 4]);
-        reply[tcp_off + 2..tcp_off + 4].copy_from_slice(&frame[tcp_start..tcp_start + 2]);
-        reply[tcp_off + 4..tcp_off + 8].copy_from_slice(&0u32.to_be_bytes());
-        reply[tcp_off + 8..tcp_off + 12].copy_from_slice(&(seq.wrapping_add(1)).to_be_bytes());
-        reply[tcp_off + 12] = 0x50;
-        reply[tcp_off + 13] = 0x14;
-        reply[tcp_off + 14..tcp_off + 16].copy_from_slice(&[0, 0]);
-        reply[tcp_off + 16..tcp_off + 18].copy_from_slice(&[0, 0]);
-        reply[tcp_off + 18..tcp_off + 20].copy_from_slice(&[0, 0]);
-        let ip_csum = internet_checksum(&reply[14..34]);
-        reply[22..24].copy_from_slice(&ip_csum.to_be_bytes());
-        let tcp_csum = tcp_ipv4_checksum(&reply[24..28], &reply[28..32], &reply[tcp_off..54]);
-        reply[tcp_off + 16..tcp_off + 18].copy_from_slice(&tcp_csum.to_be_bytes());
-        if self.write_frame_to_socket(&reply).is_ok() {
-            self.events
-                .push("[FIX ] m9 connect refused reset".to_owned());
-            true
-        } else {
-            false
-        }
+        reply.truncate(ip_off + 20 + tcp_len);
+        self.write_frame_to_socket(&reply).is_ok()
     }
 
     fn read_frames_from_socket(&mut self) {
@@ -420,33 +432,6 @@ struct QemuTxToken<'a> {
 }
 
 const M9_HTTP_ADDR: [u8; 4] = [10, 77, 0, 50];
-
-fn internet_checksum(data: &[u8]) -> u16 {
-    let mut sum = 0u32;
-    let mut i = 0usize;
-    while i + 1 < data.len() {
-        sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
-        i += 2;
-    }
-    if i < data.len() {
-        sum += (data[i] as u32) << 8;
-    }
-    while (sum >> 16) != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    !sum as u16
-}
-
-fn tcp_ipv4_checksum(src: &[u8], dst: &[u8], tcp: &[u8]) -> u16 {
-    let mut pseudo = Vec::with_capacity(12 + tcp.len());
-    pseudo.extend_from_slice(src);
-    pseudo.extend_from_slice(dst);
-    pseudo.push(0);
-    pseudo.push(6);
-    pseudo.extend_from_slice(&(tcp.len() as u16).to_be_bytes());
-    pseudo.extend_from_slice(tcp);
-    internet_checksum(&pseudo)
-}
 
 fn build_dns_response(query: &[u8], m9_profile: bool) -> Option<(String, Vec<u8>)> {
     if query.len() < 12 {
