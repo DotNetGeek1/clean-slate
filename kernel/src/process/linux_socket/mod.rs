@@ -447,10 +447,6 @@ pub(crate) mod syscalls {
             if socket.state == SocketState::Connected {
                 return Err(EISCONN);
             }
-            #[cfg(feature = "m9-linux-socket-self-test")]
-            if dest.port == 0x1339 {
-                return Err(ECONNREFUSED);
-            }
             socket.remote = Some(sa);
             socket.state = SocketState::Connecting;
             let outcome = match broker_sync(
@@ -476,7 +472,7 @@ pub(crate) mod syscalls {
                     socket.state = SocketState::Connected;
                     Ok(0)
                 }
-                NetworkResponse::Error { code } => tcp::map_network_error(code),
+                NetworkResponse::Error { code } => tcp::map_connect_error(code),
                 _ => Err(EINVAL),
             }
         })?

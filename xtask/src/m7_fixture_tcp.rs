@@ -198,6 +198,38 @@ impl TlsService {
 }
 
 const M9_HTTP_PORT: u16 = 4001;
+const M9_REFUSED_PORT: u16 = 0x1339;
+
+pub struct M9RefusedService {
+    listen: SocketHandle,
+}
+
+impl M9RefusedService {
+    pub fn new(sockets: &mut smoltcp::iface::SocketSet, listen: SocketHandle) -> Self {
+        let socket = sockets.get_mut::<tcp::Socket>(listen);
+        let endpoint = IpListenEndpoint {
+            addr: Some(IpAddress::v4(10, 77, 0, 50)),
+            port: M9_REFUSED_PORT,
+        };
+        socket.listen(endpoint).expect("m9 refused listen");
+        Self { listen }
+    }
+
+    pub fn poll(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+        let socket = sockets.get_mut::<tcp::Socket>(self.listen);
+        if socket.is_active() && socket.state() != tcp::State::Established {
+            socket.abort();
+            println!("[FIX ] m9 connect refused reset");
+        }
+        if !socket.is_listening() && !socket.is_active() {
+            let endpoint = IpListenEndpoint {
+                addr: Some(IpAddress::v4(10, 77, 0, 50)),
+                port: M9_REFUSED_PORT,
+            };
+            let _ = socket.listen(endpoint);
+        }
+    }
+}
 
 pub struct M9HttpService {
     listen: SocketHandle,

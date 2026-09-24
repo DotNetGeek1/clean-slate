@@ -1,6 +1,7 @@
 //! TCP socket path (#105).
 
 use clean_slate_linux_abi::{LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult};
+use clean_slate_network::error::NetworkError;
 use clean_slate_network::protocol::{NetworkRequest, NetworkResponse};
 
 use crate::syscall::linux::table::LinuxSyscallContext;
@@ -8,12 +9,19 @@ use crate::syscall::linux::table::LinuxSyscallContext;
 use super::{broker_sync, LinuxSocket, LinuxSocketId, SocketState};
 
 pub(crate) fn map_network_error(code: u16) -> Result<u64, LinuxErrno> {
-    use clean_slate_network::error::NetworkError;
     match code {
         c if c == NetworkError::Unreachable.code() => Err(clean_slate_linux_abi::ECONNREFUSED),
         c if c == NetworkError::Timeout.code() => Err(clean_slate_linux_abi::ETIMEDOUT),
         c if c == NetworkError::Reset.code() => Err(clean_slate_linux_abi::ECONNRESET),
         _ => Err(clean_slate_linux_abi::EIO),
+    }
+}
+
+pub(crate) fn map_connect_error(code: u16) -> Result<u64, LinuxErrno> {
+    if code == NetworkError::Reset.code() || code == NetworkError::Unreachable.code() {
+        Err(clean_slate_linux_abi::ECONNREFUSED)
+    } else {
+        map_network_error(code)
     }
 }
 
@@ -104,5 +112,30 @@ pub(crate) fn write_stream(
     match outcome.response {
         NetworkResponse::Send { bytes_sent } => Ok(bytes_sent as u64),
         _ => Err(clean_slate_linux_abi::EINVAL),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connect_reset_maps_to_econnrefused() {
+        assert_eq!(
+            map_connect_error(NetworkError::Reset.code()),
+            Err(clean_slate_linux_abi::ECONNREFUSED)
+        );
+        assert_eq!(
+            map_connect_error(NetworkError::Unreachable.code()),
+            Err(clean_slate_linux_abi::ECONNREFUSED)
+        );
+    }
+
+    #[test]
+    fn established_reset_maps_to_econnreset() {
+        assert_eq!(
+            map_network_error(NetworkError::Reset.code()),
+            Err(clean_slate_linux_abi::ECONNRESET)
+        );
     }
 }
