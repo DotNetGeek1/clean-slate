@@ -50,6 +50,7 @@ impl<'a> MarkerTracker<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn next_step_index(&self) -> usize {
         self.next_step
     }
