@@ -57,6 +57,13 @@ http_tail:
     .ascii "M9-FIXTURE-HTTP\n"
 http_tail_len = . - http_tail
 
+    .section .bss, "aw", @nobits
+    .align 16
+dns_reply:
+    .space 512
+http_buf:
+    .space 512
+
     .section .text, "ax", @progbits
 
 write_out:
@@ -144,8 +151,6 @@ _start:
     mov     rdi, 10
     jmp     exit_fail
 .Lafter_bind:
-    sub     rsp, 1024
-    lea     rbx, [rsp]
 
     mov     rdi, r12
     lea     rsi, [rip + dns_query_a]
@@ -164,7 +169,7 @@ _start:
 .Lafter_dns_send:
 
     mov     rdi, r12
-    lea     rsi, [rbx]
+    lea     rsi, [rip + dns_reply]
     mov     rdx, 512
     xor     rax, rax
     syscall
@@ -176,7 +181,7 @@ _start:
     jmp     exit_fail
 .Lafter_dns_recv:
     /* expect A 10.77.0.50 at end of answer */
-    lea     rsi, [rbx]
+    lea     rsi, [rip + dns_reply]
     add     rsi, rax
     sub     rsi, 4
     cmp     byte ptr [rsi], 10
@@ -221,7 +226,7 @@ _start:
     mov     rax, 44
     syscall
     mov     rdi, r12
-    lea     rsi, [rbx]
+    lea     rsi, [rip + dns_reply]
     mov     rdx, 512
     xor     rax, rax
     syscall
@@ -232,7 +237,7 @@ _start:
     mov     rdi, 20
     jmp     exit_fail
 .Lafter_aaaa_recv:
-    lea     rsi, [rbx]
+    lea     rsi, [rip + dns_reply]
     cmp     word ptr [rsi + 6], 0
     jne     .Lfail_aaaa_ancount
     jmp     .Lafter_aaaa_ancount
@@ -281,7 +286,7 @@ _start:
     xor     r13, r13
 .Lread_http:
     mov     rdi, r12
-    lea     rsi, [rbx]
+    lea     rsi, [rip + http_buf]
     mov     rdx, 512
     xor     rax, rax
     syscall
@@ -297,7 +302,7 @@ _start:
     mov     rdi, 32
     jmp     exit_fail
 .Lafter_http_len:
-    lea     rsi, [rbx]
+    lea     rsi, [rip + http_buf]
     add     rsi, r13
     sub     rsi, http_tail_len
     lea     rdi, [rip + http_tail]
@@ -366,7 +371,7 @@ _start:
 
     /* read EBADF on fd 99 */
     mov     rdi, 99
-    lea     rsi, [rbx]
+    lea     rsi, [rip + dns_reply]
     mov     rdx, 8
     xor     rax, rax
     syscall
@@ -380,7 +385,6 @@ _start:
     lea     rsi, [rip + msg_pass]
     mov     rdx, msg_pass_len
     call    write_lit
-    add     rsp, 1024
     mov     rax, 60
     xor     rdi, rdi
     syscall

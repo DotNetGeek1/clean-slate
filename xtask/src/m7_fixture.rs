@@ -148,12 +148,16 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
     );
     let dns_handle = sockets.add(udp_dns);
 
-    let tcp_echo = tcp::Socket::new(
-        tcp::SocketBuffer::new(vec![0u8; 4096]),
-        tcp::SocketBuffer::new(vec![0u8; 4096]),
-    );
-    let tcp_echo_handle = sockets.add(tcp_echo);
-    let mut tcp_echo_service = TcpEchoService::new(&mut sockets, tcp_echo_handle);
+    let mut tcp_echo_service = if options.m9_profile {
+        None
+    } else {
+        let tcp_echo = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0u8; 4096]),
+            tcp::SocketBuffer::new(vec![0u8; 4096]),
+        );
+        let tcp_echo_handle = sockets.add(tcp_echo);
+        Some(TcpEchoService::new(&mut sockets, tcp_echo_handle))
+    };
 
     let tls_listen = tcp::Socket::new(
         tcp::SocketBuffer::new(vec![0u8; 8192]),
@@ -208,7 +212,9 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
                 }
             }
         }
-        tcp_echo_service.poll(&mut sockets);
+        if let Some(echo) = tcp_echo_service.as_mut() {
+            echo.poll(&mut sockets);
+        }
         tls_service.poll(&mut sockets);
         if let Some(http) = m9_http_service.as_mut() {
             http.poll(&mut sockets);
