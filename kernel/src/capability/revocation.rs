@@ -21,7 +21,7 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
         REVOKE_OP_PROBE => handle_probe(frame),
         #[cfg(feature = "m6-revocation-self-test")]
         REVOKE_OP_WAIT_READERS => {
-            frame.rax = crate::selftest::m6_revocation::readers_ready_for_owner();
+            crate::selftest::m6_revocation::handle_wait_for_readers(frame);
         }
         _ => frame.rax = SYSCALL_EINVAL,
     }

@@ -57,16 +57,41 @@ pub(crate) fn note_reader_probe(holder: HolderId) {
         false
     };
     if counted {
-        READER_PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+        let previous = READER_PROBE_COUNT.fetch_add(1, Ordering::Relaxed);
+        if previous + 1 >= 2 {
+            crate::sched::wait::wake_one(REVOCATION_READERS_READY_KEY);
+        }
     }
 }
 
-/// `REVOKE_OP_WAIT_READERS`: owner polls until both readers completed their initial probe.
-pub(crate) fn readers_ready_for_owner() -> u64 {
+const REVOCATION_READERS_READY_KEY: crate::sched::wait::WaitKey =
+    crate::sched::wait::WaitKey(0x660);
+
+pub(crate) fn handle_wait_for_readers(
+    frame: &mut crate::arch::x86_64::interrupt_context::SyscallContext,
+) {
+    use crate::arch::x86_64::interrupt_context::SyscallContext;
+    use crate::diagnostics::qemu::fatal_kernel_error;
+    use crate::sched::wait::{block_current_thread_with_resume, BlockedResume, WaitOutcome};
+    use clean_slate_capability::syscall_abi::SYSCALL_NR_CAP_REVOKE;
+
     if READER_PROBE_COUNT.load(Ordering::Relaxed) >= 2 {
-        1
-    } else {
-        0
+        frame.rax = 1;
+        return;
+    }
+    match block_current_thread_with_resume(
+        frame as *mut SyscallContext,
+        REVOCATION_READERS_READY_KEY,
+        None,
+        BlockedResume::RestartSyscall {
+            nr: SYSCALL_NR_CAP_REVOKE,
+            timeout_rax: 0,
+        },
+    ) {
+        Ok(WaitOutcome::Woken) | Ok(WaitOutcome::TimedOut) | Ok(WaitOutcome::Cancelled) => {
+            handle_wait_for_readers(frame)
+        }
+        Err(message) => fatal_kernel_error(message),
     }
 }
 
@@ -246,7 +271,6 @@ fn build_owner_program(child_handle: u64) -> M6FixtureBootstrap {
                 SYSCALL_NR_CAP_REVOKE,
                 [REVOKE_OP_WAIT_READERS, 0, 0, 0, 0, 0],
             )
-            .repeat_while_eq(0)
             .expect_ne(0),
         )
         .unwrap();
