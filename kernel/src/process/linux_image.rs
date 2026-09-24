@@ -1634,6 +1634,15 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "m9-linux-socket-self-test")]
+    #[test]
+    fn socket_probe_fixture_validates_under_conventional_policy() {
+        with_initial_stack_scratch(|stack| {
+            validate_linux_low_va_image(LINUX_SOCKET_PROBE_FIXTURE, stack)
+        })
+        .expect("socket probe ELF must validate");
+    }
+
     #[test]
     fn conventional_layout_reserves_guard_below_stack() {
         let layout = LinuxImageLayout::conventional(LOW_VA_FIXTURE_IMAGE_BASE);

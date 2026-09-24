@@ -66,9 +66,8 @@ fn udp_send_payload(
         .as_ref()
         .ok_or(clean_slate_linux_abi::EDESTADDRREQ)
         .map(socket_addr_v4)?;
-    let session_gen = clean_slate_network::session::SessionGeneration::new(
-        socket.session_generation,
-    );
+    let session_gen =
+        clean_slate_network::session::SessionGeneration::new(socket.session_generation);
     if socket.m7_dest != Some(dest) {
         let connect_out = match broker_sync(
             request,

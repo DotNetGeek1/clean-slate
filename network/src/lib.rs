@@ -168,10 +168,7 @@ mod tests {
 
     #[test]
     fn socket_kind_linux_variants_roundtrip_open_wire() {
-        for kind in [
-            SocketKind::LinuxUdp,
-            SocketKind::LinuxTcp,
-        ] {
+        for kind in [SocketKind::LinuxUdp, SocketKind::LinuxTcp] {
             let wire = NetworkRequest::Open { kind }.encode();
             let decoded = NetworkRequest::decode(&wire).unwrap();
             assert!(matches!(decoded, NetworkRequest::Open { kind: k } if k == kind));

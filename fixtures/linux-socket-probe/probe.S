@@ -57,13 +57,6 @@ http_tail:
     .ascii "M9-FIXTURE-HTTP\n"
 http_tail_len = . - http_tail
 
-    .section .bss, "aw", @nobits
-    .align 16
-dns_reply:
-    .space 512
-http_buf:
-    .space 512
-
     .section .text, "ax", @progbits
 
 write_out:
@@ -151,13 +144,15 @@ _start:
     mov     rdi, 10
     jmp     exit_fail
 .Lafter_bind:
+    sub     rsp, 1024
+    lea     rbx, [rsp]
 
     mov     rdi, r12
     lea     rsi, [rip + dns_query_a]
     mov     rdx, dns_query_a_len
-    xor     r8, r8
-    lea     r9, [rip + sockaddr_dns]
-    mov     r10, 16
+    xor     r10, r10
+    lea     r8, [rip + sockaddr_dns]
+    mov     r9, 16
     mov     rax, 44
     syscall
     cmp     rax, 0
@@ -169,7 +164,7 @@ _start:
 .Lafter_dns_send:
 
     mov     rdi, r12
-    lea     rsi, [rip + dns_reply]
+    lea     rsi, [rbx]
     mov     rdx, 512
     xor     rax, rax
     syscall
@@ -181,7 +176,7 @@ _start:
     jmp     exit_fail
 .Lafter_dns_recv:
     /* expect A 10.77.0.50 at end of answer */
-    lea     rsi, [rip + dns_reply]
+    lea     rsi, [rbx]
     add     rsi, rax
     sub     rsi, 4
     cmp     byte ptr [rsi], 10
@@ -220,13 +215,13 @@ _start:
     mov     rdi, r12
     lea     rsi, [rip + dns_query_aaaa]
     mov     rdx, dns_query_aaaa_len
-    xor     r8, r8
-    lea     r9, [rip + sockaddr_dns]
-    mov     r10, 16
+    xor     r10, r10
+    lea     r8, [rip + sockaddr_dns]
+    mov     r9, 16
     mov     rax, 44
     syscall
     mov     rdi, r12
-    lea     rsi, [rip + dns_reply]
+    lea     rsi, [rbx]
     mov     rdx, 512
     xor     rax, rax
     syscall
@@ -237,7 +232,7 @@ _start:
     mov     rdi, 20
     jmp     exit_fail
 .Lafter_aaaa_recv:
-    lea     rsi, [rip + dns_reply]
+    lea     rsi, [rbx]
     cmp     word ptr [rsi + 6], 0
     jne     .Lfail_aaaa_ancount
     jmp     .Lafter_aaaa_ancount
@@ -286,7 +281,7 @@ _start:
     xor     r13, r13
 .Lread_http:
     mov     rdi, r12
-    lea     rsi, [rip + http_buf]
+    lea     rsi, [rbx]
     mov     rdx, 512
     xor     rax, rax
     syscall
@@ -302,7 +297,7 @@ _start:
     mov     rdi, 32
     jmp     exit_fail
 .Lafter_http_len:
-    lea     rsi, [rip + http_buf]
+    lea     rsi, [rbx]
     add     rsi, r13
     sub     rsi, http_tail_len
     lea     rdi, [rip + http_tail]
@@ -338,9 +333,9 @@ _start:
     mov     rdi, r12
     lea     rsi, [rip + http_get]
     mov     rdx, 4
-    xor     r8, r8
-    lea     r9, [rip + sockaddr_http]
-    mov     r10, 16
+    xor     r10, r10
+    lea     r8, [rip + sockaddr_http]
+    mov     r9, 16
     mov     rax, 44
     syscall
     mov     ebx, 40
@@ -371,7 +366,7 @@ _start:
 
     /* read EBADF on fd 99 */
     mov     rdi, 99
-    lea     rsi, [rip + http_buf]
+    lea     rsi, [rbx]
     mov     rdx, 8
     xor     rax, rax
     syscall
@@ -385,6 +380,7 @@ _start:
     lea     rsi, [rip + msg_pass]
     mov     rdx, msg_pass_len
     call    write_lit
+    add     rsp, 1024
     mov     rax, 60
     xor     rdi, rdi
     syscall

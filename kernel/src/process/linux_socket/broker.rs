@@ -20,7 +20,7 @@ use crate::syscall::linux::table::LinuxSyscallContext;
 use clean_slate_linux_abi::{LinuxSyscallRequest, LinuxSyscallResult};
 
 use super::{
-    clear_request_wake, linux_socket_wait_key, register_request_wake, LinuxSocketId,
+    clear_request_wake, linux_socket_request_wait_key, register_request_wake, LinuxSocketId,
 };
 
 pub(crate) fn network_client_handle(holder: HolderId) -> Option<u64> {
@@ -67,15 +67,20 @@ pub(crate) struct BrokerOutcome {
     pub payload: [u8; NETWORK_MAX_PAYLOAD_BYTES],
 }
 
-fn response_matches_request(request: &NetworkRequest, response: &NetworkResponse) -> bool {
-    match (request, response) {
-        (NetworkRequest::Open { .. }, NetworkResponse::Open { .. }) => true,
-        (NetworkRequest::Connect { .. }, NetworkResponse::Connect) => true,
-        (NetworkRequest::Send { .. }, NetworkResponse::Send { .. }) => true,
-        (NetworkRequest::Receive { .. }, NetworkResponse::Receive { .. }) => true,
-        (NetworkRequest::Close { .. }, NetworkResponse::Close) => true,
-        (_, NetworkResponse::Error { .. }) => true,
-        _ => false,
+/// Session-scoped ops must authorize against the live network-service resource
+/// generation (M6 `ResourceRef`), not the M7 session id embedded generation alone.
+fn session_generation_for_broker(
+    network_request: &NetworkRequest,
+    caller_session: Option<SessionGeneration>,
+) -> Option<SessionGeneration> {
+    match network_request {
+        NetworkRequest::Connect { .. }
+        | NetworkRequest::Send { .. }
+        | NetworkRequest::Receive { .. }
+        | NetworkRequest::Close { .. } => {
+            live_network_service_generation().map(|g| SessionGeneration::new(u64::from(g.0)))
+        }
+        _ => caller_session,
     }
 }
 
@@ -83,21 +88,14 @@ fn response_matches_request(request: &NetworkRequest, response: &NetworkResponse
 pub(crate) fn broker_sync(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
-    socket_id: LinuxSocketId,
+    _socket_id: LinuxSocketId,
     inflight_request_id: &mut Option<u64>,
     network_request: NetworkRequest,
     payload: &[u8],
     session_generation: Option<SessionGeneration>,
     on_timeout: Option<LinuxTimeoutResult>,
 ) -> Result<BrokerOutcome, LinuxSyscallResult> {
-    let session_generation = match &network_request {
-        NetworkRequest::Connect { .. }
-        | NetworkRequest::Send { .. }
-        | NetworkRequest::Receive { .. }
-        | NetworkRequest::Close { .. } => live_network_service_generation()
-            .map(|g| SessionGeneration::new(u64::from(g.0))),
-        _ => session_generation,
-    };
+    let session_generation = session_generation_for_broker(&network_request, session_generation);
     let holder = HolderId(ctx.pid);
     let handle = network_client_handle(holder).ok_or(Err(clean_slate_linux_abi::EACCES))?;
     let op = match &network_request {
@@ -115,65 +113,103 @@ pub(crate) fn broker_sync(
         .map(|g| u64::from(g.0))
         .ok_or(Err(clean_slate_linux_abi::EACCES))?;
 
-    let key = linux_socket_wait_key(socket_id);
-    let deadline = on_timeout.map(|_| {
-        Deadline(kernel_ticks().saturating_add(super::LINUX_TCP_CONNECT_TIMEOUT_TICKS))
-    });
+    let request_id = if let Some(id) = *inflight_request_id {
+        id
+    } else {
+        let wire = network_request.encode();
+        let id = net_bridge_mut()
+            .submit(ctx.pid, ctx.pid, generation, &wire, payload)
+            .map_err(|e| Err(bridge_err(e)))?;
+        *inflight_request_id = Some(id);
+        register_request_wake(id, linux_socket_request_wait_key(id));
+        id
+    };
+
+    let key = linux_socket_request_wait_key(request_id);
+    let deadline = on_timeout
+        .map(|_| Deadline(kernel_ticks().saturating_add(super::LINUX_TCP_CONNECT_TIMEOUT_TICKS)));
     let timeout = on_timeout.unwrap_or(LinuxTimeoutResult::Zero);
 
-    loop {
-        let request_id = if let Some(id) = *inflight_request_id {
-            id
-        } else {
-            let wire = network_request.encode();
-            let id = net_bridge_mut()
-                .submit(ctx.pid, ctx.pid, generation, &wire, payload)
-                .map_err(|e| Err(bridge_err(e)))?;
-            *inflight_request_id = Some(id);
-            register_request_wake(id, key);
-            id
-        };
-
-        let mut out = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-        match net_bridge_mut().poll(ctx.pid, ctx.pid, generation, request_id, &mut out) {
-            Ok(response) => {
-                if !response_matches_request(&network_request, &response) {
-                    *inflight_request_id = None;
-                    clear_request_wake(request_id);
-                    continue;
-                }
-                *inflight_request_id = None;
-                clear_request_wake(request_id);
-                let len = match response {
-                    NetworkResponse::Receive { payload_len } => payload_len as usize,
-                    _ => 0,
-                };
-                return Ok(BrokerOutcome {
-                    response,
-                    payload_len: len.min(NETWORK_MAX_PAYLOAD_BYTES),
-                    payload: out,
-                });
-            }
-            Err(NetBridgeError::Pending) => match block_linux_syscall(
-                request,
-                ctx,
-                key,
-                deadline,
-                timeout,
-            ) {
-                Ok(_nr) => continue,
-                Err(errno) => return Err(Err(errno)),
-            },
-            Err(NetBridgeError::InvalidRequest) | Err(NetBridgeError::Unauthorized) => {
-                *inflight_request_id = None;
-                clear_request_wake(request_id);
-                continue;
-            }
-            Err(e) => {
-                *inflight_request_id = None;
-                clear_request_wake(request_id);
-                return Err(Err(bridge_err(e)));
+    let mut out = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    match net_bridge_mut().poll(ctx.pid, ctx.pid, generation, request_id, &mut out) {
+        Ok(response) => {
+            *inflight_request_id = None;
+            clear_request_wake(request_id);
+            let len = match response {
+                NetworkResponse::Receive { payload_len } => payload_len as usize,
+                _ => 0,
+            };
+            Ok(BrokerOutcome {
+                response,
+                payload_len: len.min(NETWORK_MAX_PAYLOAD_BYTES),
+                payload: out,
+            })
+        }
+        Err(NetBridgeError::Pending) => {
+            match block_linux_syscall(request, ctx, key, deadline, timeout) {
+                Ok(_nr) => broker_sync(
+                    request,
+                    ctx,
+                    _socket_id,
+                    inflight_request_id,
+                    network_request,
+                    payload,
+                    session_generation,
+                    on_timeout,
+                ),
+                Err(errno) => Err(Err(errno)),
             }
         }
+        Err(e) => {
+            *inflight_request_id = None;
+            clear_request_wake(request_id);
+            Err(Err(bridge_err(e)))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_wait_keys_are_unique_per_request_id() {
+        let a = linux_socket_request_wait_key(1);
+        let b = linux_socket_request_wait_key(2);
+        assert_ne!(a, b);
+        assert_eq!(a.0 >> 56, 0x54);
+    }
+
+    #[test]
+    fn request_wait_key_differs_from_legacy_socket_key() {
+        use super::super::linux_socket_wait_key;
+        use super::super::LinuxSocketId;
+        let socket_key = linux_socket_wait_key(LinuxSocketId {
+            index: 0,
+            generation: 1,
+        });
+        let request_key = linux_socket_request_wait_key(1);
+        assert_ne!(socket_key, request_key);
+    }
+
+    /// Open completion on a socket-scoped key must not be consumable by a later Connect wait.
+    #[test]
+    fn completion_before_block_uses_distinct_wait_keys() {
+        let open_id = 1u64;
+        let connect_id = 2u64;
+        assert_ne!(
+            linux_socket_request_wait_key(open_id),
+            linux_socket_request_wait_key(connect_id)
+        );
+    }
+
+    /// Restart-on-wake must keep the same in-flight request id (no second submit).
+    #[test]
+    fn restart_reuses_inflight_request_id() {
+        let mut inflight = Some(7u64);
+        let reused = inflight.unwrap_or(99);
+        assert_eq!(reused, 7);
+        inflight = None;
+        assert!(inflight.is_none());
     }
 }

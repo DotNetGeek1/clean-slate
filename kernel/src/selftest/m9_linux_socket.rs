@@ -29,8 +29,8 @@ use crate::service::service_lifecycle_controller_mut;
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::linux::user_copy::copy_user_bytes;
 use crate::syscall::{
-    current_syscall_caller_pid, initialize_syscall_abi, install_service_lifecycle_syscall_allocator,
-    service_lifecycle_syscall_allocator_mut,
+    current_syscall_caller_pid, initialize_syscall_abi,
+    install_service_lifecycle_syscall_allocator, service_lifecycle_syscall_allocator_mut,
 };
 use clean_slate_linux_abi::{ESTALE, SYS_WRITE};
 use clean_slate_service_fixtures::NETWORK_SERVICE_ID;
