@@ -266,9 +266,6 @@ impl QemuSocketDevice {
         if ip_hlen < 20 || frame[14 + 9] != 6 {
             return false;
         }
-        if frame[16..20] != M9_HTTP_ADDR {
-            return false;
-        }
         let tcp_start = 14 + ip_hlen;
         if frame.len() < tcp_start + 20 {
             return false;
