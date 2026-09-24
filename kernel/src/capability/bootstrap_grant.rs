@@ -94,7 +94,12 @@ pub(crate) fn register_bootstrap_grant(
     holder: HolderId,
     handle: CapabilityHandle,
 ) -> Result<(), &'static str> {
-    unsafe { &mut *BOOTSTRAP_GRANTS.get() }.register(holder, handle)
+    let registered = unsafe { &mut *BOOTSTRAP_GRANTS.get() }.register(holder, handle);
+    #[cfg(feature = "m6-delegation-self-test")]
+    if registered.is_ok() {
+        crate::selftest::m6_delegation::on_reader_bootstrap_registered(holder);
+    }
+    registered
 }
 
 pub(crate) fn claim_bootstrap_grant(holder: HolderId) -> Option<CapabilityHandle> {
@@ -124,6 +129,8 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
         Some(handle) => handle.encode(),
         None => 0,
     };
+    #[cfg(feature = "m6-delegation-self-test")]
+    crate::selftest::m6_delegation::wait_for_reader_bootstrap_grant_if_needed(frame, holder);
 }
 
 /// Exposed so callers can map a full table into the documented syscall status.

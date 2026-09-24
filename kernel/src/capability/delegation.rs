@@ -94,7 +94,7 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
         DELEGATE_OP_LIST => handle_list(frame),
         #[cfg(feature = "m6-delegation-self-test")]
         DELEGATE_OP_POLL_CHILD => {
-            frame.rax = crate::selftest::m6_delegation::delegated_child_handle_for_self_test();
+            crate::selftest::m6_delegation::handle_poll_delegated_child(frame);
         }
         _ => frame.rax = SYSCALL_EINVAL,
     }

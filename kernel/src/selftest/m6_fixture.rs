@@ -214,8 +214,8 @@ pub(crate) fn handle_fixture_report(allocator: &mut PageAllocator) -> u64 {
     }
     store_report(pid, report).unwrap_or_else(|message| fatal_kernel_error(message));
     kernel_log_fmt(format_args!(
-        "[M6.F] report pid={pid} status={} progress={}\n",
-        report.status, report.progress
+        "[M6.F] report pid={pid} status={} progress={} failed_step={}\n",
+        report.status, report.progress, report.failed_step
     ));
     let handler = unsafe { *FIXTURE_REPORT_HANDLER.get() }
         .unwrap_or_else(|| fatal_kernel_error("fixture report handler was not installed"));
