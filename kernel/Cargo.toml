@@ -74,6 +74,12 @@ m9-linux-fs-self-test = [
     "m6-object-self-test",
     "dep:clean-slate-store",
 ]
+m9-linux-trace = []
+m9-linux-trace-self-test = [
+    "m9-linux-trace",
+    "m8-linux-image",
+    "m3-entry-self-test",
+]
 
 [lib]
 path = "src/lib.rs"

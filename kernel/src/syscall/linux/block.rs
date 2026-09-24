@@ -56,6 +56,13 @@ pub(crate) fn block_linux_syscall(
     deadline: Option<Deadline>,
     on_timeout: LinuxTimeoutResult,
 ) -> LinuxSyscallResult {
+    #[cfg(feature = "m9-linux-trace")]
+    super::trace::record_wait_event(
+        ctx.pid,
+        ctx.instance_generation,
+        request.nr,
+        super::trace::LinuxTraceReason::Blocked,
+    );
     let resume = BlockedResume::RestartSyscall {
         nr: request.nr,
         timeout_rax: on_timeout.encode(),

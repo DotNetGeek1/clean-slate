@@ -237,6 +237,8 @@ use crate::selftest::m8_linux_image::start_m8_linux_image_self_test;
 use crate::selftest::m9_block_wake::start_m9_block_wake_self_test;
 #[cfg(feature = "m9-fd-core-self-test")]
 use crate::selftest::m9_fd_core::start_m9_fd_core_self_test;
+#[cfg(feature = "m9-linux-trace-self-test")]
+use crate::selftest::m9_linux_trace::start_m9_linux_trace_self_test;
 #[cfg(feature = "m9-low-va-self-test")]
 use crate::selftest::m9_low_va::start_m9_low_va_self_test;
 #[cfg(all(
@@ -463,12 +465,28 @@ fn run_inner() -> Result<(), &'static str> {
     }
 
     #[cfg(all(
+        feature = "m9-linux-trace-self-test",
+        not(feature = "m9-low-va-self-test"),
+        not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-rootfs-self-test"),
+        not(feature = "m9-linux-fs-self-test"),
+        not(feature = "m9-block-wake-self-test"),
+        not(feature = "m9-fd-core-self-test"),
+        not(feature = "m8-linux-hello-self-test"),
+        not(feature = "m9-syscall-fail-closed-self-test")
+    ))]
+    {
+        start_m9_linux_trace_self_test(allocator)
+    }
+
+    #[cfg(all(
         feature = "m9-fd-core-self-test",
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
         not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-linux-fs-self-test"),
         not(feature = "m9-block-wake-self-test"),
+        not(feature = "m9-linux-trace-self-test"),
         not(feature = "m8-linux-hello-self-test"),
         not(feature = "m9-syscall-fail-closed-self-test")
     ))]

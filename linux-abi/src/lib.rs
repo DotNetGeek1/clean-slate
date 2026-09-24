@@ -16,6 +16,7 @@
 
 pub mod errno;
 pub mod fs;
+pub mod names;
 pub mod process;
 pub mod socket;
 pub mod stack;
@@ -33,6 +34,7 @@ pub use fs::{
     SEEK_SET, SYS_GETCWD, SYS_GETDENTS64, SYS_LSEEK, SYS_LSTAT, SYS_MKDIR, SYS_OPEN, SYS_READ,
     SYS_STAT, S_IFDIR, S_IFLNK, S_IFREG,
 };
+pub use names::{linux_syscall_name, SyscallName};
 pub use process::{
     w_exitcode, w_exitstatus, w_ifsignalled, w_signalled_status, SIGKILL, SIGSEGV, SYS_EXIT_GROUP,
     SYS_FORK, SYS_GETPPID, SYS_PIPE, SYS_WAIT4,

@@ -27,6 +27,8 @@ pub(crate) mod runtime;
 pub(crate) mod socket;
 pub(crate) mod socket_copy;
 pub(crate) mod table;
+#[cfg(feature = "m9-linux-trace")]
+pub(crate) mod trace;
 pub(crate) mod user_copy;
 pub(crate) mod write;
 
@@ -144,7 +146,8 @@ pub(crate) fn dispatch_with(
         instance_generation: generation,
         frame,
     };
-    let result = match lookup_handler(request.nr) {
+    let handler = lookup_handler(request.nr);
+    let result = match handler {
         // `exit` diverges inside the handler; only `write` returns here.
         Some(handler) => handler(&request, &mut ctx),
         None => {
@@ -159,6 +162,13 @@ pub(crate) fn dispatch_with(
             unsupported_syscall_result()
         }
     };
+    #[cfg(feature = "m9-linux-trace")]
+    trace::record_syscall(pid, generation, &request, handler.is_some(), result);
+    #[cfg(feature = "m9-linux-trace-self-test")]
+    {
+        crate::selftest::m9_linux_trace::observe_linux_syscall_result(pid, &request, result);
+        crate::selftest::m9_linux_trace::poll_pass_request();
+    }
     #[cfg(feature = "m8-linux-dispatch-self-test")]
     crate::selftest::m8_linux_dispatch::observe_linux_write_result(pid, &request, result);
     #[cfg(feature = "m9-fd-core-self-test")]

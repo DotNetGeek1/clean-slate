@@ -1,4 +1,4 @@
-﻿//! Native blocking/wake substrate for scheduler threads (#145).
+//! Native blocking/wake substrate for scheduler threads (#145).
 
 #![allow(dead_code)]
 //!
@@ -407,6 +407,36 @@ extern "C" fn clean_slate_complete_blocked_syscall_resume() -> u64 {
         let resume = take_blocked_resume(index);
         let frame = unsafe { &mut *(frame_ptr as *mut SyscallContext) };
         apply_blocked_resume(frame, resume, outcome);
+        #[cfg(feature = "m9-linux-trace")]
+        {
+            use crate::process::personality::{
+                execution_personality_for_pid, ExecutionPersonality,
+            };
+            if let BlockedResume::RestartSyscall { nr, .. } = resume {
+                let pid = scheduler.threads[index].owner_process_id;
+                if matches!(
+                    execution_personality_for_pid(pid),
+                    Ok(ExecutionPersonality::LinuxX86_64)
+                ) {
+                    if let Some(generation) = live_instance_generation(pid) {
+                        let reason = match outcome {
+                            WaitOutcome::Woken => {
+                                crate::syscall::linux::trace::LinuxTraceReason::Woke
+                            }
+                            WaitOutcome::TimedOut => {
+                                crate::syscall::linux::trace::LinuxTraceReason::Timeout
+                            }
+                            WaitOutcome::Cancelled => {
+                                crate::syscall::linux::trace::LinuxTraceReason::OtherErrno
+                            }
+                        };
+                        crate::syscall::linux::trace::record_wait_event(
+                            pid, generation, nr, reason,
+                        );
+                    }
+                }
+            }
+        }
         #[cfg(feature = "m9-block-wake-self-test")]
         crate::selftest::m9_block_wake::on_blocked_syscall_resumed(outcome, frame.rax);
         frame_ptr

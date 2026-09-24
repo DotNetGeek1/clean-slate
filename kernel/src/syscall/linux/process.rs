@@ -162,6 +162,10 @@ mod enabled {
         request: &LinuxSyscallRequest,
         ctx: &mut LinuxSyscallContext<'_>,
     ) -> LinuxSyscallResult {
+        #[cfg(feature = "m9-linux-trace-self-test")]
+        if crate::selftest::m9_linux_trace::pass_requested() {
+            crate::selftest::m9_linux_trace::finish_acceptance_from_exit_hook();
+        }
         let status = exit_status_from_linux(request.args[0]);
         let pid = ctx.pid;
         let id = ProcId {
@@ -182,6 +186,16 @@ mod enabled {
             .unwrap_or_else(|message| fatal_kernel_error(message));
         #[cfg(feature = "m9-linux-proc-self-test")]
         if let Some(next_frame) = crate::selftest::m9_linux_proc::after_probe_exit_group(
+            pid,
+            ctx.instance_generation,
+            status,
+            &teardown,
+            allocator,
+        ) {
+            switch_after_exit(Some(next_frame));
+        }
+        #[cfg(feature = "m9-linux-trace-self-test")]
+        if let Some(next_frame) = crate::selftest::m9_linux_trace::after_probe_exit_group(
             pid,
             ctx.instance_generation,
             status,

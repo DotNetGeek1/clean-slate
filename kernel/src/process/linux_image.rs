@@ -162,7 +162,10 @@ pub(crate) const LINUX_SOCKET_PROBE_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-socket-probe/linux-socket-probe-x86_64");
 
 /// M9 #102 fork/pipe/wait probe (`fixtures/linux-proc-probe/linux-proc-probe-x86_64`).
-#[cfg(feature = "m9-linux-proc-self-test")]
+#[cfg(any(
+    feature = "m9-linux-proc-self-test",
+    feature = "m9-linux-trace-self-test"
+))]
 pub(crate) const LINUX_PROC_PROBE_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-proc-probe/linux-proc-probe-x86_64");
 

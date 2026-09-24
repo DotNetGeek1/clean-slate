@@ -144,6 +144,8 @@ pub(crate) fn teardown_current_process(
     // process (same pid, new generation) cannot observe a stale table (#95).
     if let Some(generation) = live_instance_generation(process_id) {
         linux_fd::release_for_process(process_id, generation);
+        #[cfg(feature = "m9-linux-trace")]
+        crate::syscall::linux::trace::release_process(process_id, generation);
     }
     linux_fd::release_for_process_by_pid(process_id);
     let registry_live = |check_pid: u64| unsafe { process_registry_mut().get(check_pid).is_some() };

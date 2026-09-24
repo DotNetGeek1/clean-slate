@@ -227,6 +227,17 @@ const M9_LINUX_SOCKET_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[M9.L] stale ESTALE ok",
     "[M9.L] PASS",
 ];
+const M9_LINUX_TRACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
+const M9_LINUX_TRACE_ACCEPTANCE_MARKERS: [&str; 7] = [
+    "[M9.T] trace_slots_baseline=0 boot",
+    "[TIME] timer initialized",
+    "UNKNOWN(999)",
+    "unsupported",
+    "bad-pointer",
+    "[LTRC] dropped=",
+    "[M9.T] PASS",
+];
+
 const M9_FD_CORE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M9_FD_CORE_ACCEPTANCE_MARKERS: [&str; 10] = [
     "[TIME] timer initialized",
@@ -702,6 +713,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM9SyscallFailClosed => run_m9_syscall_fail_closed_acceptance(),
         ParsedCommand::TestM9BlockWake => run_m9_block_wake_acceptance(),
         ParsedCommand::TestM9FdCore => run_m9_fd_core_acceptance(),
+        ParsedCommand::TestM9LinuxTrace => run_m9_linux_trace_acceptance(),
         ParsedCommand::TestM9LinuxSocket => run_m9_linux_socket_acceptance(),
         ParsedCommand::TestM8LinuxHello => run_m8_linux_hello_acceptance(),
         ParsedCommand::TestM8 => run_m8_acceptance(),
@@ -1319,6 +1331,18 @@ fn run_m9_fd_core_acceptance() -> Result<(), XtaskError> {
         Some((
             MarkerSet::Ordered(&M9_FD_CORE_ACCEPTANCE_MARKERS),
             M9_FD_CORE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn run_m9_linux_trace_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m9-linux-trace-self-test"],
+        Some((
+            MarkerSet::Ordered(&M9_LINUX_TRACE_ACCEPTANCE_MARKERS),
+            M9_LINUX_TRACE_ACCEPTANCE_TIMEOUT,
         )),
     )
 }
@@ -2788,6 +2812,7 @@ fn print_help() {
     println!("  test-m9-syscall-fail-closed Build the M9 #143 fail-closed syscall kernel, run QEMU, and validate [M9.C] PASS");
     println!("  test-m9-block-wake Build the M9 #145 block/wake scheduler kernel, run QEMU, and validate [M9.E] PASS");
     println!("  test-m9-fd-core Build the M9 #147 fd-core kernel, run QEMU, and validate pool equality + [M9.G] PASS (aliases: m9-fd-core, m9.147)");
+    println!("  test-m9-linux-trace M9 #106 bounded Linux syscall trace QEMU acceptance (aliases: m9-linux-trace, m9.106)");
     println!("  test-m9-linux-socket M9 #105 socket syscalls + M7 data plane + probe ELF (aliases: m9-linux-socket, m9.105)");
     println!("  test-m8-linux-hello Boot M8.7 self-test then production feature (hello + clean [M2] PASS); 40s for two launches (aliases: m8-linux-hello, m8.7)");
     println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
@@ -2874,6 +2899,7 @@ enum ParsedCommand {
     TestM9SyscallFailClosed,
     TestM9BlockWake,
     TestM9FdCore,
+    TestM9LinuxTrace,
     TestM8LinuxHello,
     TestM8,
     TestM3Lifecycle,
@@ -2968,6 +2994,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-m9-fd-core" || cmd == "m9-fd-core" || cmd == "m9.147" => {
             ParsedCommand::TestM9FdCore
+        }
+        Some(cmd) if cmd == "test-m9-linux-trace" || cmd == "m9-linux-trace" || cmd == "m9.106" => {
+            ParsedCommand::TestM9LinuxTrace
         }
         Some(cmd) if cmd == "test-m8-linux-hello" || cmd == "m8-linux-hello" || cmd == "m8.7" => {
             ParsedCommand::TestM8LinuxHello
