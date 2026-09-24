@@ -1,0 +1,5 @@
+Fix M9 Linux HTTP read path and probe accumulation.
+
+Remove speculative plain-TCP prefetch staging. Deliver buffered TCP data promptly,
+signal EOF after the fixture closes, fix probe HTTP read offsets, wire the M9
+socket self-test write observer, and map TCP sendto to EDESTADDRREQ.

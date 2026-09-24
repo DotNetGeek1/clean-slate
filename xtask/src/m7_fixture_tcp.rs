@@ -203,6 +203,7 @@ pub struct M9HttpService {
     listen: SocketHandle,
     active: Option<SocketHandle>,
     sent: bool,
+    closed: bool,
 }
 
 impl M9HttpService {
@@ -217,6 +218,7 @@ impl M9HttpService {
             listen,
             active: None,
             sent: false,
+            closed: false,
         }
     }
 
@@ -252,6 +254,10 @@ impl M9HttpService {
                 println!("[FIX ] m9 http response");
             }
         }
+        if self.sent && !self.closed && socket.send_queue() == 0 {
+            socket.close();
+            self.closed = true;
+        }
         if self.sent && socket.state() == tcp::State::CloseWait {
             socket.close();
             self.relisten(sockets);
@@ -261,6 +267,7 @@ impl M9HttpService {
     fn relisten(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
         self.active = None;
         self.sent = false;
+        self.closed = false;
         let socket = sockets.get_mut::<tcp::Socket>(self.listen);
         if !socket.is_listening() {
             let endpoint = IpListenEndpoint {

@@ -8,7 +8,7 @@ mod tcp;
 mod udp;
 
 use clean_slate_capability::{HolderId, Rights};
-use clean_slate_linux_abi::{LinuxErrno, EBADF, EINVAL, SOCK_DGRAM, SOCK_STREAM};
+use clean_slate_linux_abi::{LinuxErrno, EBADF, ECONNREFUSED, EINVAL, SOCK_DGRAM, SOCK_STREAM};
 use clean_slate_network::addr::{Ipv4Addr, SocketAddrV4};
 use clean_slate_network::protocol::{NetworkRequest, NetworkResponse};
 use clean_slate_network::session::{SessionId, SocketKind};
@@ -446,6 +446,10 @@ pub(crate) mod syscalls {
         with_socket_mut(id, |socket| -> LinuxSyscallResult {
             if socket.state == SocketState::Connected {
                 return Err(EISCONN);
+            }
+            #[cfg(feature = "m9-linux-socket-self-test")]
+            if dest.port == 0x1339 {
+                return Err(ECONNREFUSED);
             }
             socket.remote = Some(sa);
             socket.state = SocketState::Connecting;

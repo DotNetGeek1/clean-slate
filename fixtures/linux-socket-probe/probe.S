@@ -287,11 +287,15 @@ _start:
 .Lread_http:
     mov     rdi, r12
     lea     rsi, [rip + http_buf]
+    add     rsi, r13
     mov     rdx, 512
+    sub     rdx, r13
+    jz      .Lfail_http_len
     xor     rax, rax
     syscall
     cmp     rax, 0
     je      .Lhttp_done
+    jl      .Lread_http
     add     r13, rax
     jmp     .Lread_http
 .Lhttp_done:

@@ -68,6 +68,7 @@ pub(crate) fn read_stream(
             scratch[..copy].copy_from_slice(&outcome.payload[..copy]);
             Ok(copy as u64)
         }
+        NetworkResponse::Error { code } => map_network_error(code),
         _ => Err(clean_slate_linux_abi::EINVAL),
     }
 }

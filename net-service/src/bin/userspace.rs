@@ -9,16 +9,16 @@ use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_ESTALE, SYSCALL_NR_NETWORK_CAPABILITY, SYSCALL_NR_NETWORK_REQUEST,
 };
 use clean_slate_network::addr::{BoundedHostname, EtherType, IpProtocol, Ipv4Addr, SocketAddrV4};
-use clean_slate_network::ethernet::EthernetFrame;
-use clean_slate_network::ipv4::Ipv4Header;
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
 use clean_slate_network::dns::{DnsResolver, ResolveOutcome, DNS_QUERY_TIMEOUT_TICKS};
 use clean_slate_network::error::{DenialReason, NetworkError};
+use clean_slate_network::ethernet::EthernetFrame;
 use clean_slate_network::fixture::{
     APP_REQUEST_BYTES, APP_RESPONSE_BYTES, DNS_SERVER_ADDR, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS,
     FIXTURE_HOSTNAME, GUEST_IPV4, PEER_MAC, TLS_PORT, TLS_SERVER_NAME,
 };
+use clean_slate_network::ipv4::Ipv4Header;
 use clean_slate_network::limits::MAX_SESSIONS;
 use clean_slate_network::protocol::{
     NetworkRequest, NetworkResponse, NETWORK_REQUEST_BYTES, NETWORK_RESPONSE_BYTES,
@@ -347,7 +347,9 @@ fn nic_ingress_read_raw() -> Result<Option<FrameBuf>, NetworkDeviceError> {
         return Err(NetworkDeviceError::NotReady);
     }
     let len = status as usize;
-    FrameBuf::from_slice(&buf[..len]).map(Some).map_err(|_| NetworkDeviceError::Malformed)
+    FrameBuf::from_slice(&buf[..len])
+        .map(Some)
+        .map_err(|_| NetworkDeviceError::Malformed)
 }
 
 fn nic_ingress_stash_udp(frame: FrameBuf) {
@@ -545,24 +547,14 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             service.attach_backend(DemuxLink::for_udp());
         }
         *service_dns_resolver_slot() = Some(DnsResolver::alloc_boxed(
-            L3Stack::new(
-                DemuxLink::for_udp(),
-                raw_mac,
-                GUEST_IPV4,
-                ARP_TTL_TICKS,
-            ),
+            L3Stack::new(DemuxLink::for_udp(), raw_mac, GUEST_IPV4, ARP_TTL_TICKS),
             generation,
             DNS_SERVER_ADDR,
             DnsResolver::<ServiceLink>::DEFAULT_TICKS_PER_SEC,
         ));
         TcpTransport::init_in_place(
             service_tls_transport_ptr(),
-            L3Stack::new(
-                DemuxLink::for_tcp(),
-                raw_mac,
-                GUEST_IPV4,
-                ARP_TTL_TICKS,
-            ),
+            L3Stack::new(DemuxLink::for_tcp(), raw_mac, GUEST_IPV4, ARP_TTL_TICKS),
             generation,
         );
         let heap_checkpoint = current_heap_offset();
@@ -929,57 +921,6 @@ fn establish_plain_tcp_session(
     Ok(tcp_session)
 }
 
-fn plain_tcp_prefetch_into_stage(
-    service: &mut ServiceState,
-    service_generation: u64,
-    caller: clean_slate_network::protocol::TrustedCaller,
-    session: SessionId,
-    tcp_session: SessionId,
-    start: u64,
-) -> Result<(), NetworkResponse> {
-    let tcp = shared_tcp_transport_mut();
-    let owner = plain_tcp_owner(service_generation);
-    let mut buf = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-    let mut total = 0usize;
-    let deadline = start.saturating_add(TLS_IO_TIMEOUT_TICKS);
-    for _ in 0..TLS_POLL_LIMIT {
-        let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
-            code: NetworkError::Timeout.code(),
-        })?;
-        let _ = tcp.poll(now);
-        let room = buf.len().saturating_sub(total);
-        if room == 0 {
-            break;
-        }
-        let chunk = room.min(512);
-        match tcp.receive(tcp_session, owner, &mut buf[total..total + chunk]) {
-            Ok(0) => {
-                if matches!(
-                    tcp.state(tcp_session, owner),
-                    Ok(TcpState::CloseWait | TcpState::Closed | TcpState::TimeWait)
-                ) {
-                    break;
-                }
-            }
-            Ok(n) => total += n,
-            Err(NetworkError::Closed) => break,
-            Err(err) => {
-                return Err(NetworkResponse::Error {
-                    code: NetworkError::from(err).code(),
-                });
-            }
-        }
-        if now >= deadline {
-            break;
-        }
-        yield_cpu();
-    }
-    if total > 0 {
-        service.stage_response_payload(caller, session, &buf[..total])?;
-    }
-    Ok(())
-}
-
 fn handle_service_plain_tcp_send(
     service: &mut ServiceState,
     raw_handle: u64,
@@ -1002,14 +943,6 @@ fn handle_service_plain_tcp_send(
     })?;
     let tcp_session =
         establish_plain_tcp_session(raw_handle, service_generation, caller, session, dest)?;
-    plain_tcp_prefetch_into_stage(
-        service,
-        service_generation,
-        caller,
-        session,
-        tcp_session,
-        tick,
-    )?;
     let tcp = shared_tcp_transport_mut();
     let sent = tcp
         .send(
@@ -1019,14 +952,6 @@ fn handle_service_plain_tcp_send(
             payload,
         )
         .map_err(|err| NetworkResponse::Error { code: err.code() })? as u32;
-    plain_tcp_prefetch_into_stage(
-        service,
-        service_generation,
-        caller,
-        session,
-        tcp_session,
-        tick,
-    )?;
     Ok(sent)
 }
 
@@ -1039,14 +964,6 @@ fn handle_service_plain_tcp_receive(
     max_len: u32,
     response_payload: &mut [u8],
 ) -> (NetworkResponse, u32) {
-    if let Ok(Some(n)) = service.take_staged_payload(caller, session, response_payload) {
-        return (
-            NetworkResponse::Receive {
-                payload_len: n,
-            },
-            n,
-        );
-    }
     let tcp_session = match plain_tcp_slot(session).and_then(|s| *s) {
         Some(id) => id,
         None => {
@@ -1075,7 +992,40 @@ fn handle_service_plain_tcp_receive(
     let want = max_len
         .min(response_payload.len())
         .min(NETWORK_MAX_PAYLOAD_BYTES);
-    let deadline = tick.saturating_add(TLS_IO_TIMEOUT_TICKS);
+    let _ = tcp.poll(tick);
+    match tcp.receive(tcp_session, owner, &mut response_payload[..want]) {
+        Ok(0) => {}
+        Ok(n) => {
+            if service
+                .stage_response_payload(caller, session, &response_payload[..n])
+                .is_err()
+            {
+                return (
+                    NetworkResponse::Error {
+                        code: NetworkError::InvalidRequest.code(),
+                    },
+                    0,
+                );
+            }
+            return (
+                NetworkResponse::Receive {
+                    payload_len: n as u32,
+                },
+                n as u32,
+            );
+        }
+        Err(NetworkError::Closed) => {
+            return (NetworkResponse::Receive { payload_len: 0 }, 0);
+        }
+        Err(err) => {
+            return (
+                NetworkResponse::Error {
+                    code: NetworkError::from(err).code(),
+                },
+                0,
+            );
+        }
+    }
     for _ in 0..TLS_POLL_LIMIT {
         let now = match monotonic_ticks() {
             Ok(now) => now,
@@ -1083,14 +1033,7 @@ fn handle_service_plain_tcp_receive(
         };
         let _ = tcp.poll(now);
         match tcp.receive(tcp_session, owner, &mut response_payload[..want]) {
-            Ok(0) => {
-                if matches!(
-                    tcp.state(tcp_session, owner),
-                    Ok(TcpState::CloseWait | TcpState::Closed | TcpState::TimeWait)
-                ) {
-                    return (NetworkResponse::Receive { payload_len: 0 }, 0);
-                }
-            }
+            Ok(0) => {}
             Ok(n) => {
                 if service
                     .stage_response_payload(caller, session, &response_payload[..n])
@@ -1121,9 +1064,6 @@ fn handle_service_plain_tcp_receive(
                     0,
                 );
             }
-        }
-        if now >= deadline {
-            break;
         }
         yield_cpu();
     }
