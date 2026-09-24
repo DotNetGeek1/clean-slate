@@ -198,6 +198,7 @@ impl TlsService {
 }
 
 const M9_HTTP_PORT: u16 = 4001;
+
 pub struct M9HttpService {
     listen: SocketHandle,
     active: Option<SocketHandle>,

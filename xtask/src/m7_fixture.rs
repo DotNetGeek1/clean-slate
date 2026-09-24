@@ -110,7 +110,7 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         return;
     }
 
-    let mut device = QemuSocketDevice::new(stream);
+    let mut device = QemuSocketDevice::new(stream, options.m9_profile);
     let peer_octets = PEER_IPV4.octets();
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(
         PEER_MAC.octets(),
@@ -219,7 +219,6 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         if let Some(http) = m9_http_service.as_mut() {
             http.poll(&mut sockets);
         }
-
         for event in device.drain_events() {
             println!("{event}");
         }
@@ -227,8 +226,11 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
     }
 }
 
+const M9_REFUSED_PORT: u16 = 0x1339;
+
 struct QemuSocketDevice {
     stream: TcpStream,
+    m9_profile: bool,
     /// Bytes received from QEMU that do not yet form a complete
     /// length-prefixed frame. The socket is non-blocking, so a read may stop
     /// mid-prefix or mid-frame; buffering keeps the stream in sync.
@@ -238,9 +240,10 @@ struct QemuSocketDevice {
 }
 
 impl QemuSocketDevice {
-    fn new(stream: TcpStream) -> Self {
+    fn new(stream: TcpStream, m9_profile: bool) -> Self {
         Self {
             stream,
+            m9_profile,
             pending: Vec::with_capacity(4 * (4 + MAX_FRAME_BYTES)),
             rx_queue: VecDeque::new(),
             events: Vec::new(),
@@ -249,6 +252,76 @@ impl QemuSocketDevice {
 
     fn drain_events(&mut self) -> impl Iterator<Item = String> + '_ {
         self.events.drain(..)
+    }
+
+    /// Answer SYN to `10.77.0.50:M9_REFUSED_PORT` with RST (Linux ECONNREFUSED path).
+    fn try_answer_m9_refused_syn(&mut self, frame: &[u8]) -> bool {
+        if frame.len() < 54 {
+            return false;
+        }
+        if u16::from_be_bytes([frame[12], frame[13]]) != 0x0800 {
+            return false;
+        }
+        let ip_hlen = ((frame[14] & 0x0f) as usize).saturating_mul(4);
+        if ip_hlen < 20 || frame[14 + 9] != 6 {
+            return false;
+        }
+        if frame[16..20] != M9_HTTP_ADDR {
+            return false;
+        }
+        let tcp_start = 14 + ip_hlen;
+        if frame.len() < tcp_start + 20 {
+            return false;
+        }
+        let dst_port = u16::from_be_bytes([frame[tcp_start + 2], frame[tcp_start + 3]]);
+        if dst_port != M9_REFUSED_PORT {
+            return false;
+        }
+        let flags = frame[tcp_start + 13];
+        if flags & 0x02 == 0 || flags & 0x10 != 0 {
+            return false;
+        }
+        let seq = u32::from_be_bytes([
+            frame[tcp_start + 4],
+            frame[tcp_start + 5],
+            frame[tcp_start + 6],
+            frame[tcp_start + 7],
+        ]);
+        let mut reply = vec![0u8; 54];
+        reply[0..6].copy_from_slice(&frame[6..12]);
+        reply[6..12].copy_from_slice(&frame[0..6]);
+        reply[12..14].copy_from_slice(&[0x08, 0x00]);
+        reply[14] = 0x45;
+        reply[15] = 0x00;
+        reply[16..18].copy_from_slice(&40u16.to_be_bytes());
+        reply[18..20].copy_from_slice(&[0, 0]);
+        reply[20] = 64;
+        reply[21] = 6;
+        reply[22..24].copy_from_slice(&[0, 0]);
+        reply[24..28].copy_from_slice(&M9_HTTP_ADDR);
+        reply[28..32].copy_from_slice(&frame[24..28]);
+        let tcp_off = 34usize;
+        reply[tcp_off..tcp_off + 2]
+            .copy_from_slice(&frame[tcp_start + 2..tcp_start + 4]);
+        reply[tcp_off + 2..tcp_off + 4].copy_from_slice(&frame[tcp_start..tcp_start + 2]);
+        reply[tcp_off + 4..tcp_off + 8].copy_from_slice(&0u32.to_be_bytes());
+        reply[tcp_off + 8..tcp_off + 12].copy_from_slice(&(seq.wrapping_add(1)).to_be_bytes());
+        reply[tcp_off + 12] = 0x50;
+        reply[tcp_off + 13] = 0x14;
+        reply[tcp_off + 14..tcp_off + 16].copy_from_slice(&[0, 0]);
+        reply[tcp_off + 16..tcp_off + 18].copy_from_slice(&[0, 0]);
+        reply[tcp_off + 18..tcp_off + 20].copy_from_slice(&[0, 0]);
+        let ip_csum = internet_checksum(&reply[14..34]);
+        reply[22..24].copy_from_slice(&ip_csum.to_be_bytes());
+        let tcp_csum = tcp_ipv4_checksum(&reply[24..28], &reply[28..32], &reply[tcp_off..54]);
+        reply[tcp_off + 16..tcp_off + 18].copy_from_slice(&tcp_csum.to_be_bytes());
+        if self.write_frame_to_socket(&reply).is_ok() {
+            self.events
+                .push("[FIX ] m9 connect refused reset".to_owned());
+            true
+        } else {
+            false
+        }
     }
 
     fn read_frames_from_socket(&mut self) {
@@ -288,6 +361,9 @@ impl QemuSocketDevice {
                 let frame = self.pending[start..end].to_vec();
                 if frame.len() >= 14 && u16::from_be_bytes([frame[12], frame[13]]) == 0x0806 {
                     self.events.push("[FIX ] arp request".to_owned());
+                }
+                if self.m9_profile && self.try_answer_m9_refused_syn(&frame) {
+                    continue;
                 }
                 self.rx_queue.push_back(frame);
             } else {
@@ -347,6 +423,33 @@ struct QemuTxToken<'a> {
 }
 
 const M9_HTTP_ADDR: [u8; 4] = [10, 77, 0, 50];
+
+fn internet_checksum(data: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    let mut i = 0usize;
+    while i + 1 < data.len() {
+        sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < data.len() {
+        sum += (data[i] as u32) << 8;
+    }
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !sum as u16
+}
+
+fn tcp_ipv4_checksum(src: &[u8], dst: &[u8], tcp: &[u8]) -> u16 {
+    let mut pseudo = Vec::with_capacity(12 + tcp.len());
+    pseudo.extend_from_slice(src);
+    pseudo.extend_from_slice(dst);
+    pseudo.push(0);
+    pseudo.push(6);
+    pseudo.extend_from_slice(&(tcp.len() as u16).to_be_bytes());
+    pseudo.extend_from_slice(tcp);
+    internet_checksum(&pseudo)
+}
 
 fn build_dns_response(query: &[u8], m9_profile: bool) -> Option<(String, Vec<u8>)> {
     if query.len() < 12 {
