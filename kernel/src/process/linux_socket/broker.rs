@@ -11,7 +11,9 @@ use crate::capability::network::{authorize_network_op, NetworkOp};
 use crate::capability::with_capability_space;
 use crate::interrupt::timer::kernel_ticks;
 use crate::sched::wait::Deadline;
-use crate::service::instance_generation::live_instance_generation_for_pid;
+use crate::service::instance_generation::{
+    live_instance_generation_for_pid, live_network_service_generation,
+};
 use crate::service::net_bridge::{net_bridge_mut, NetBridgeError};
 use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
 use crate::syscall::linux::table::LinuxSyscallContext;
@@ -65,6 +67,18 @@ pub(crate) struct BrokerOutcome {
     pub payload: [u8; NETWORK_MAX_PAYLOAD_BYTES],
 }
 
+fn response_matches_request(request: &NetworkRequest, response: &NetworkResponse) -> bool {
+    match (request, response) {
+        (NetworkRequest::Open { .. }, NetworkResponse::Open { .. }) => true,
+        (NetworkRequest::Connect { .. }, NetworkResponse::Connect) => true,
+        (NetworkRequest::Send { .. }, NetworkResponse::Send { .. }) => true,
+        (NetworkRequest::Receive { .. }, NetworkResponse::Receive { .. }) => true,
+        (NetworkRequest::Close { .. }, NetworkResponse::Close) => true,
+        (_, NetworkResponse::Error { .. }) => true,
+        _ => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn broker_sync(
     request: &LinuxSyscallRequest,
@@ -76,6 +90,14 @@ pub(crate) fn broker_sync(
     session_generation: Option<SessionGeneration>,
     on_timeout: Option<LinuxTimeoutResult>,
 ) -> Result<BrokerOutcome, LinuxSyscallResult> {
+    let session_generation = match &network_request {
+        NetworkRequest::Connect { .. }
+        | NetworkRequest::Send { .. }
+        | NetworkRequest::Receive { .. }
+        | NetworkRequest::Close { .. } => live_network_service_generation()
+            .map(|g| SessionGeneration::new(u64::from(g.0))),
+        _ => session_generation,
+    };
     let holder = HolderId(ctx.pid);
     let handle = network_client_handle(holder).ok_or(Err(clean_slate_linux_abi::EACCES))?;
     let op = match &network_request {
@@ -93,47 +115,65 @@ pub(crate) fn broker_sync(
         .map(|g| u64::from(g.0))
         .ok_or(Err(clean_slate_linux_abi::EACCES))?;
 
-    let request_id = if let Some(id) = *inflight_request_id {
-        id
-    } else {
-        let wire = network_request.encode();
-        let id = net_bridge_mut()
-            .submit(ctx.pid, ctx.pid, generation, &wire, payload)
-            .map_err(|e| Err(bridge_err(e)))?;
-        *inflight_request_id = Some(id);
-        register_request_wake(id, linux_socket_wait_key(socket_id));
-        id
-    };
+    let key = linux_socket_wait_key(socket_id);
+    let deadline = on_timeout.map(|_| {
+        Deadline(kernel_ticks().saturating_add(super::LINUX_TCP_CONNECT_TIMEOUT_TICKS))
+    });
+    let timeout = on_timeout.unwrap_or(LinuxTimeoutResult::Zero);
 
-    let mut out = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-    match net_bridge_mut().poll(ctx.pid, ctx.pid, generation, request_id, &mut out) {
-        Ok(response) => {
-            *inflight_request_id = None;
-            clear_request_wake(request_id);
-            let len = match response {
-                NetworkResponse::Receive { payload_len } => payload_len as usize,
-                _ => 0,
-            };
-            Ok(BrokerOutcome {
-                response,
-                payload_len: len.min(NETWORK_MAX_PAYLOAD_BYTES),
-                payload: out,
-            })
-        }
-        Err(NetBridgeError::Pending) => {
-            let key = linux_socket_wait_key(socket_id);
-            let deadline = on_timeout.map(|_| {
-                Deadline(
-                    kernel_ticks().saturating_add(super::LINUX_TCP_CONNECT_TIMEOUT_TICKS),
-                )
-            });
-            let timeout = on_timeout.unwrap_or(LinuxTimeoutResult::Zero);
-            Err(block_linux_syscall(request, ctx, key, deadline, timeout))
-        }
-        Err(e) => {
-            *inflight_request_id = None;
-            clear_request_wake(request_id);
-            Err(Err(bridge_err(e)))
+    loop {
+        let request_id = if let Some(id) = *inflight_request_id {
+            id
+        } else {
+            let wire = network_request.encode();
+            let id = net_bridge_mut()
+                .submit(ctx.pid, ctx.pid, generation, &wire, payload)
+                .map_err(|e| Err(bridge_err(e)))?;
+            *inflight_request_id = Some(id);
+            register_request_wake(id, key);
+            id
+        };
+
+        let mut out = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+        match net_bridge_mut().poll(ctx.pid, ctx.pid, generation, request_id, &mut out) {
+            Ok(response) => {
+                if !response_matches_request(&network_request, &response) {
+                    *inflight_request_id = None;
+                    clear_request_wake(request_id);
+                    continue;
+                }
+                *inflight_request_id = None;
+                clear_request_wake(request_id);
+                let len = match response {
+                    NetworkResponse::Receive { payload_len } => payload_len as usize,
+                    _ => 0,
+                };
+                return Ok(BrokerOutcome {
+                    response,
+                    payload_len: len.min(NETWORK_MAX_PAYLOAD_BYTES),
+                    payload: out,
+                });
+            }
+            Err(NetBridgeError::Pending) => match block_linux_syscall(
+                request,
+                ctx,
+                key,
+                deadline,
+                timeout,
+            ) {
+                Ok(_nr) => continue,
+                Err(errno) => return Err(Err(errno)),
+            },
+            Err(NetBridgeError::InvalidRequest) | Err(NetBridgeError::Unauthorized) => {
+                *inflight_request_id = None;
+                clear_request_wake(request_id);
+                continue;
+            }
+            Err(e) => {
+                *inflight_request_id = None;
+                clear_request_wake(request_id);
+                return Err(Err(bridge_err(e)));
+            }
         }
     }
 }

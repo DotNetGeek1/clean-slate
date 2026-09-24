@@ -112,6 +112,7 @@ fn udp_send_payload(
     };
     match outcome.response {
         NetworkResponse::Send { bytes_sent } => Ok(bytes_sent as u64),
+        NetworkResponse::Error { code } => super::tcp::map_network_error(code),
         _ => Err(clean_slate_linux_abi::EINVAL),
     }
 }
@@ -158,6 +159,7 @@ pub(crate) fn read_datagram(
             scratch[..copy].copy_from_slice(&outcome.payload[..copy]);
             Ok(copy as u64)
         }
+        NetworkResponse::Error { code } => super::tcp::map_network_error(code),
         _ => Err(clean_slate_linux_abi::EINVAL),
     }
 }
