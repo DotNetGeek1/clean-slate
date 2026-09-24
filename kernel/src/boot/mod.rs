@@ -212,7 +212,10 @@ use crate::selftest::m7_dns::run_m7_dns_self_test;
 use crate::selftest::m7_net_caps::start_m7_net_caps_self_test;
 #[cfg(feature = "m7-net-device-self-test")]
 use crate::selftest::m7_net_device::run_m7_net_device_self_test;
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(all(
+    feature = "m7-net-service-self-test",
+    not(feature = "m9-linux-socket-self-test")
+))]
 use crate::selftest::m7_net_service::start_m7_net_service_self_test;
 #[cfg(feature = "m7-tls-fail-closed-self-test")]
 use crate::selftest::m7_tls::run_m7_tls_fail_closed_self_test;
@@ -375,6 +378,12 @@ fn run_inner() -> Result<(), &'static str> {
         start_timer_self_test_task()
     }
 
+    #[cfg(feature = "m9-linux-socket-self-test")]
+    {
+        use crate::selftest::m9_linux_socket::start_m9_linux_socket_self_test;
+        start_m9_linux_socket_self_test(allocator)
+    }
+
     #[cfg(feature = "m9-linux-proc-self-test")]
     {
         use crate::selftest::m9_linux_proc::start_m9_linux_proc_self_test;
@@ -398,6 +407,7 @@ fn run_inner() -> Result<(), &'static str> {
     }
 
     #[cfg(all(
+        not(feature = "m9-linux-socket-self-test"),
         not(feature = "m9-linux-fs-self-test"),
         feature = "m9-rootfs-self-test"
     ))]
@@ -407,6 +417,7 @@ fn run_inner() -> Result<(), &'static str> {
     }
 
     #[cfg(all(
+        not(feature = "m9-linux-socket-self-test"),
         not(feature = "m9-linux-proc-self-test"),
         not(feature = "m9-linux-fs-self-test"),
         not(feature = "m9-rootfs-self-test"),
@@ -503,6 +514,7 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-block-wake-self-test"),
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-linux-socket-self-test"),
         not(feature = "m9-linux-proc-self-test"),
         not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-linux-fs-self-test"),

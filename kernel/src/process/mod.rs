@@ -22,6 +22,7 @@ pub(crate) mod linux_image;
 pub(crate) mod linux_proc;
 #[cfg(feature = "m9-rootfs")]
 pub(crate) mod linux_rootfs;
+pub(crate) mod linux_socket;
 pub(crate) mod linux_stdio_m9_payload;
 pub(crate) mod personality;
 

@@ -143,6 +143,7 @@ pub(crate) const LINUX_M8_LOAD_POLICY: LoadPlanPolicy = LoadPlanPolicy {
     feature = "m8-linux-image",
     feature = "m9-low-va-self-test",
     feature = "m9-linux-exec-self-test",
+    feature = "m9-linux-socket-self-test",
     feature = "m9-linux-proc-self-test",
     feature = "m9-linux-fs-self-test",
     test
@@ -154,6 +155,11 @@ pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
 #[cfg(feature = "m9-linux-exec-self-test")]
 pub(crate) const LINUX_EXEC_ARGS_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-exec-args/linux-exec-args-x86_64");
+
+/// M9 #105 socket probe (`fixtures/linux-socket-probe/linux-socket-probe-x86_64`).
+#[cfg(feature = "m9-linux-socket-self-test")]
+pub(crate) const LINUX_SOCKET_PROBE_FIXTURE: &[u8] =
+    include_bytes!("../../../fixtures/linux-socket-probe/linux-socket-probe-x86_64");
 
 /// M9 #102 fork/pipe/wait probe (`fixtures/linux-proc-probe/linux-proc-probe-x86_64`).
 #[cfg(feature = "m9-linux-proc-self-test")]
@@ -1626,6 +1632,15 @@ mod tests {
             validate_linux_image(LINUX_LOW_VA_FIXTURE).is_err(),
             "M8 legacy slot policy must not accept a conventional 0x400000 image"
         );
+    }
+
+    #[cfg(feature = "m9-linux-socket-self-test")]
+    #[test]
+    fn socket_probe_fixture_validates_under_conventional_policy() {
+        with_initial_stack_scratch(|stack| {
+            validate_linux_low_va_image(LINUX_SOCKET_PROBE_FIXTURE, stack)
+        })
+        .expect("socket probe ELF must validate");
     }
 
     #[test]

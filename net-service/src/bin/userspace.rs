@@ -8,15 +8,17 @@ use alloc::boxed::Box;
 use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_ESTALE, SYSCALL_NR_NETWORK_CAPABILITY, SYSCALL_NR_NETWORK_REQUEST,
 };
-use clean_slate_network::addr::{BoundedHostname, Ipv4Addr, SocketAddrV4};
+use clean_slate_network::addr::{BoundedHostname, EtherType, IpProtocol, Ipv4Addr, SocketAddrV4};
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
 use clean_slate_network::dns::{DnsResolver, ResolveOutcome, DNS_QUERY_TIMEOUT_TICKS};
 use clean_slate_network::error::{DenialReason, NetworkError};
+use clean_slate_network::ethernet::EthernetFrame;
 use clean_slate_network::fixture::{
     APP_REQUEST_BYTES, APP_RESPONSE_BYTES, DNS_SERVER_ADDR, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS,
     FIXTURE_HOSTNAME, GUEST_IPV4, PEER_MAC, TLS_PORT, TLS_SERVER_NAME,
 };
+use clean_slate_network::ipv4::Ipv4Header;
 use clean_slate_network::limits::MAX_SESSIONS;
 use clean_slate_network::protocol::{
     NetworkRequest, NetworkResponse, NETWORK_REQUEST_BYTES, NETWORK_RESPONSE_BYTES,
@@ -24,6 +26,7 @@ use clean_slate_network::protocol::{
 use clean_slate_network::session::{SessionGeneration, SessionId, SocketKind};
 use clean_slate_network::stack::L3Stack;
 use clean_slate_network::tcp::TcpTransport;
+use clean_slate_network::tcp::{TcpState, TCP_CONNECT_TIMEOUT_TICKS};
 use clean_slate_network::tls::{
     TlsConfig, TlsError, TlsSession, TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
 };
@@ -53,6 +56,7 @@ const ARP_TTL_TICKS: u64 = 50_000;
 const DNS_POLL_LIMIT: usize = 5_000_000;
 const TLS_POLL_LIMIT: usize = 10_000_000;
 const TLS_IO_TIMEOUT_TICKS: u64 = 2_000;
+const PLAIN_TCP_IO_TIMEOUT_MS: u64 = 2_000;
 const TLS_CLOSE_TIMEOUT_TICKS: u64 = 100;
 
 struct BumpAllocator;
@@ -63,7 +67,7 @@ static ALLOCATOR: BumpAllocator = BumpAllocator;
 static NEXT_HEAP_OFFSET: AtomicUsize = AtomicUsize::new(0);
 const PHASE_HEAP_MARGIN_BYTES: usize = 16 * 1024;
 const DNS_PHASE_HEAP_REQUIRED_BYTES: usize =
-    size_of::<DnsResolver<SyscallRawLink>>() + PHASE_HEAP_MARGIN_BYTES;
+    size_of::<DnsResolver<ServiceLink>>() + PHASE_HEAP_MARGIN_BYTES;
 const HEAP_BYTES: usize = DNS_PHASE_HEAP_REQUIRED_BYTES;
 static mut HEAP: [u8; HEAP_BYTES] = [0; HEAP_BYTES];
 static TLS_SCRATCH_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -213,6 +217,20 @@ fn monotonic_ticks() -> Result<u64, u64> {
     Ok(ticks)
 }
 
+/// Pre-#163 production LAPIC tick (~160 ms). #163 replaces this with `NET_SUBOP_TICK_PERIOD_NS`.
+fn tick_period_ns() -> u64 {
+    160_000_000
+}
+
+fn ms_to_irq_ticks(ms: u64) -> u64 {
+    if ms == 0 {
+        return 0;
+    }
+    let period = tick_period_ns();
+    let ns = ms.saturating_mul(1_000_000);
+    ns.div_ceil(period).max(1)
+}
+
 fn network_capability(device_id: u64) -> Result<u64, u64> {
     let raw = raw_syscall(
         SYSCALL_NR_NETWORK_CAPABILITY,
@@ -247,20 +265,180 @@ fn run_unauthorized_probe() -> Result<u64, u64> {
     }
 }
 
-struct SyscallRawLink {
-    handle: u64,
+/// One raw NIC reader demuxes frames into bounded per-stack queues (depth 4).
+const INGRESS_DEPTH: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StackConsumer {
+    Udp,
+    Tcp,
 }
 
-impl SyscallRawLink {
-    fn attach(handle: u64) -> Self {
-        Self { handle }
+struct PendingFrames {
+    slots: [Option<FrameBuf>; INGRESS_DEPTH],
+    len: usize,
+}
+
+impl PendingFrames {
+    const fn empty() -> Self {
+        Self {
+            slots: [const { None }; INGRESS_DEPTH],
+            len: 0,
+        }
     }
 
-    fn geometry(&self) -> LinkProperties {
+    fn push(&mut self, frame: FrameBuf) {
+        if self.len >= INGRESS_DEPTH {
+            for i in 1..INGRESS_DEPTH {
+                self.slots[i - 1] = self.slots[i].take();
+            }
+            self.len = INGRESS_DEPTH - 1;
+        }
+        self.slots[self.len] = Some(frame);
+        self.len += 1;
+    }
+
+    fn pop(&mut self) -> Option<FrameBuf> {
+        if self.len == 0 {
+            return None;
+        }
+        let frame = self.slots[0].take();
+        for i in 1..self.len {
+            self.slots[i - 1] = self.slots[i].take();
+        }
+        self.len -= 1;
+        frame
+    }
+}
+
+struct NicIngress {
+    raw_handle: u64,
+    pending_udp: PendingFrames,
+    pending_tcp: PendingFrames,
+}
+
+static mut NIC_INGRESS: NicIngress = NicIngress {
+    raw_handle: 0,
+    pending_udp: PendingFrames::empty(),
+    pending_tcp: PendingFrames::empty(),
+};
+
+fn frame_ipv4_protocol(frame: &FrameBuf) -> Option<IpProtocol> {
+    let data = frame.as_slice();
+    let (_, l3) = EthernetFrame::parse_frame(data).ok()?;
+    let (ipv4, _) = Ipv4Header::parse(l3).ok()?;
+    Some(ipv4.protocol)
+}
+
+fn frame_is_arp(frame: &FrameBuf) -> bool {
+    EthernetFrame::parse_frame(frame.as_slice())
+        .ok()
+        .is_some_and(|(eth, _)| eth.ethertype == EtherType::ARP)
+}
+
+fn nic_ingress_init(raw_handle: u64) {
+    unsafe {
+        NIC_INGRESS.raw_handle = raw_handle;
+        NIC_INGRESS.pending_udp = PendingFrames::empty();
+        NIC_INGRESS.pending_tcp = PendingFrames::empty();
+    }
+}
+
+fn nic_ingress_read_raw() -> Result<Option<FrameBuf>, NetworkDeviceError> {
+    let handle = unsafe { NIC_INGRESS.raw_handle };
+    let mut buf = [0u8; clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES];
+    let status = net_request([
+        NET_SUBOP_RAW_RECEIVE,
+        handle,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        0,
+        0,
+    ]);
+    if status == u64::MAX {
+        return Ok(None);
+    }
+    if status >= u64::MAX - 4095 {
+        return Err(NetworkDeviceError::NotReady);
+    }
+    let len = status as usize;
+    FrameBuf::from_slice(&buf[..len])
+        .map(Some)
+        .map_err(|_| NetworkDeviceError::Malformed)
+}
+
+#[allow(static_mut_refs)]
+fn nic_ingress_stash_udp(frame: FrameBuf) {
+    unsafe {
+        NIC_INGRESS.pending_udp.push(frame);
+    }
+}
+
+#[allow(static_mut_refs)]
+fn nic_ingress_stash_tcp(frame: FrameBuf) {
+    unsafe {
+        NIC_INGRESS.pending_tcp.push(frame);
+    }
+}
+
+fn nic_ingress_enqueue(frame: FrameBuf) {
+    if frame_is_arp(&frame) {
+        nic_ingress_stash_udp(frame.clone());
+        nic_ingress_stash_tcp(frame);
+        return;
+    }
+    match frame_ipv4_protocol(&frame) {
+        Some(IpProtocol::UDP) => nic_ingress_stash_udp(frame),
+        Some(IpProtocol::TCP) => nic_ingress_stash_tcp(frame),
+        _ => {}
+    }
+}
+
+#[allow(static_mut_refs)]
+fn nic_ingress_take_pending(consumer: StackConsumer) -> Option<FrameBuf> {
+    unsafe {
+        match consumer {
+            StackConsumer::Udp => NIC_INGRESS.pending_udp.pop(),
+            StackConsumer::Tcp => NIC_INGRESS.pending_tcp.pop(),
+        }
+    }
+}
+
+fn nic_ingress_dequeue(consumer: StackConsumer) -> Result<Option<FrameBuf>, NetworkDeviceError> {
+    if let Some(frame) = nic_ingress_take_pending(consumer) {
+        return Ok(Some(frame));
+    }
+    let frame = nic_ingress_read_raw()?;
+    let Some(frame) = frame else {
+        return Ok(None);
+    };
+    nic_ingress_enqueue(frame);
+    Ok(nic_ingress_take_pending(consumer))
+}
+
+struct DemuxLink {
+    consumer: StackConsumer,
+}
+
+impl DemuxLink {
+    fn for_udp() -> Self {
+        Self {
+            consumer: StackConsumer::Udp,
+        }
+    }
+
+    fn for_tcp() -> Self {
+        Self {
+            consumer: StackConsumer::Tcp,
+        }
+    }
+
+    fn raw_geometry() -> LinkProperties {
+        let handle = unsafe { NIC_INGRESS.raw_handle };
         let mut mac = [0u8; 6];
         let status = net_request([
             NET_SUBOP_RAW_GEOMETRY,
-            self.handle,
+            handle,
             mac.as_mut_ptr() as u64,
             0,
             0,
@@ -273,9 +451,9 @@ impl SyscallRawLink {
     }
 }
 
-impl NetworkLink for SyscallRawLink {
+impl NetworkLink for DemuxLink {
     fn link(&self) -> LinkProperties {
-        self.geometry()
+        Self::raw_geometry()
     }
 
     fn state(&self) -> DeviceState {
@@ -283,10 +461,11 @@ impl NetworkLink for SyscallRawLink {
     }
 
     fn transmit(&mut self, frame: FrameBuf) -> Result<(), (NetworkDeviceError, FrameBuf)> {
+        let handle = unsafe { NIC_INGRESS.raw_handle };
         let bytes = frame.as_slice();
         let status = net_request([
             NET_SUBOP_RAW_TRANSMIT,
-            self.handle,
+            handle,
             bytes.as_ptr() as u64,
             bytes.len() as u64,
             0,
@@ -299,25 +478,7 @@ impl NetworkLink for SyscallRawLink {
     }
 
     fn receive(&mut self) -> Result<Option<FrameBuf>, NetworkDeviceError> {
-        let mut buf = [0u8; clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES];
-        let status = net_request([
-            NET_SUBOP_RAW_RECEIVE,
-            self.handle,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-            0,
-            0,
-        ]);
-        if status == u64::MAX {
-            return Ok(None);
-        }
-        if status >= u64::MAX - 4095 {
-            return Err(NetworkDeviceError::NotReady);
-        }
-        let len = status as usize;
-        FrameBuf::from_slice(&buf[..len])
-            .map(Some)
-            .map_err(|_| NetworkDeviceError::Malformed)
+        nic_ingress_dequeue(self.consumer)
     }
 
     fn reset(&mut self) -> Result<(), NetworkDeviceError> {
@@ -325,11 +486,16 @@ impl NetworkLink for SyscallRawLink {
     }
 }
 
-type ServiceState = NetworkService<SyscallRawLink, AllowAllAuthorizer>;
+type ServiceLink = DemuxLink;
+type ServiceState = NetworkService<ServiceLink, AllowAllAuthorizer>;
 
 static mut SERVICE_STATE: Option<ServiceState> = None;
-static mut SERVICE_DNS_RESOLVER: Option<Box<DnsResolver<SyscallRawLink>>> = None;
-static mut SERVICE_TLS_TRANSPORT: MaybeUninit<TcpTransport<SyscallRawLink>> = MaybeUninit::uninit();
+static mut SERVICE_DNS_RESOLVER: Option<Box<DnsResolver<ServiceLink>>> = None;
+static mut SERVICE_TLS_TRANSPORT: MaybeUninit<TcpTransport<ServiceLink>> = MaybeUninit::uninit();
+static mut PLAIN_TCP_BY_SESSION: [Option<SessionId>; MAX_SESSIONS as usize] =
+    [None; MAX_SESSIONS as usize];
+static mut UDP_ENDPOINT_BY_SESSION: [Option<SessionId>; MAX_SESSIONS as usize] =
+    [None; MAX_SESSIONS as usize];
 static mut SERVICE_TLS_READ_BUF: [u8; TLS_RECORD_BUFFER_BYTES] = [0; TLS_RECORD_BUFFER_BYTES];
 static mut SERVICE_TLS_WRITE_BUF: [u8; TLS_RECORD_BUFFER_BYTES] = [0; TLS_RECORD_BUFFER_BYTES];
 static mut SERVICE_REQUEST_BUF: [u8; NETWORK_REQUEST_BYTES] = [0; NETWORK_REQUEST_BYTES];
@@ -344,7 +510,7 @@ unsafe fn service_state_slot() -> *mut Option<ServiceState> {
     core::ptr::addr_of_mut!(SERVICE_STATE)
 }
 
-unsafe fn service_dns_resolver_slot() -> *mut Option<Box<DnsResolver<SyscallRawLink>>> {
+unsafe fn service_dns_resolver_slot() -> *mut Option<Box<DnsResolver<ServiceLink>>> {
     core::ptr::addr_of_mut!(SERVICE_DNS_RESOLVER)
 }
 
@@ -352,8 +518,16 @@ unsafe fn service_request_buf_ptr() -> *mut [u8; NETWORK_REQUEST_BYTES] {
     core::ptr::addr_of_mut!(SERVICE_REQUEST_BUF)
 }
 
-unsafe fn service_tls_transport_ptr() -> *mut TcpTransport<SyscallRawLink> {
-    core::ptr::addr_of_mut!(SERVICE_TLS_TRANSPORT) as *mut TcpTransport<SyscallRawLink>
+unsafe fn service_tls_transport_ptr() -> *mut TcpTransport<ServiceLink> {
+    core::ptr::addr_of_mut!(SERVICE_TLS_TRANSPORT) as *mut TcpTransport<ServiceLink>
+}
+
+fn shared_tcp_transport_mut() -> &'static mut TcpTransport<ServiceLink> {
+    unsafe { &mut *service_tls_transport_ptr() }
+}
+
+fn plain_tcp_owner(service_generation: u64) -> clean_slate_network::protocol::TrustedCaller {
+    clean_slate_network::protocol::TrustedCaller::new(0x5200, 0, service_generation)
 }
 
 unsafe fn service_tls_read_buf_ptr() -> *mut [u8; TLS_RECORD_BUFFER_BYTES] {
@@ -383,31 +557,22 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     };
     bootstrap.net_role_handle = raw_handle;
     let generation = SessionGeneration::new(bootstrap.service_generation);
-    let raw_mac = SyscallRawLink::attach(raw_handle).link().mac;
+    nic_ingress_init(raw_handle);
+    let raw_mac = DemuxLink::raw_geometry().mac;
     unsafe {
         *service_state_slot() = Some(NetworkService::new(generation, AllowAllAuthorizer));
         if let Some(service) = (*service_state_slot()).as_mut() {
-            service.attach_backend(SyscallRawLink::attach(raw_handle));
+            service.attach_backend(DemuxLink::for_udp());
         }
         *service_dns_resolver_slot() = Some(DnsResolver::alloc_boxed(
-            L3Stack::new(
-                SyscallRawLink::attach(raw_handle),
-                raw_mac,
-                GUEST_IPV4,
-                ARP_TTL_TICKS,
-            ),
+            L3Stack::new(DemuxLink::for_udp(), raw_mac, GUEST_IPV4, ARP_TTL_TICKS),
             generation,
             DNS_SERVER_ADDR,
-            DnsResolver::<SyscallRawLink>::DEFAULT_TICKS_PER_SEC,
+            DnsResolver::<ServiceLink>::DEFAULT_TICKS_PER_SEC,
         ));
         TcpTransport::init_in_place(
             service_tls_transport_ptr(),
-            L3Stack::new(
-                SyscallRawLink::attach(raw_handle),
-                raw_mac,
-                GUEST_IPV4,
-                ARP_TTL_TICKS,
-            ),
+            L3Stack::new(DemuxLink::for_tcp(), raw_mac, GUEST_IPV4, ARP_TTL_TICKS),
             generation,
         );
         let heap_checkpoint = current_heap_offset();
@@ -489,6 +654,596 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     }
 }
 
+fn plain_tcp_slot(session: SessionId) -> Option<&'static mut Option<SessionId>> {
+    let index = session.index() as usize;
+    if index >= MAX_SESSIONS as usize {
+        return None;
+    }
+    unsafe { Some(&mut *core::ptr::addr_of_mut!(PLAIN_TCP_BY_SESSION[index])) }
+}
+
+fn udp_endpoint_slot(session: SessionId) -> Option<&'static mut Option<SessionId>> {
+    let index = session.index() as usize;
+    if index >= MAX_SESSIONS as usize {
+        return None;
+    }
+    unsafe {
+        Some(&mut *core::ptr::addr_of_mut!(
+            UDP_ENDPOINT_BY_SESSION[index]
+        ))
+    }
+}
+
+fn ensure_udp_endpoint(
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+    dest: SocketAddrV4,
+    tick: u64,
+) -> Result<SessionId, NetworkResponse> {
+    if let Some(slot) = udp_endpoint_slot(session) {
+        if let Some(id) = *slot {
+            return Ok(id);
+        }
+    }
+    let resolver = unsafe {
+        (*service_dns_resolver_slot())
+            .as_mut()
+            .ok_or(NetworkResponse::Error {
+                code: NetworkError::Protocol.code(),
+            })?
+    };
+    let udp = resolver.udp_mut();
+    udp.stack_mut()
+        .arp_cache_mut()
+        .insert(dest.addr, PEER_MAC, tick);
+    let id = udp
+        .table_mut()
+        .open(caller, None)
+        .map_err(|err| NetworkResponse::Error {
+            code: NetworkError::from(err).code(),
+        })?;
+    udp.table_mut()
+        .connect(id, caller, dest)
+        .map_err(|err| NetworkResponse::Error {
+            code: NetworkError::from(err).code(),
+        })?;
+    if let Some(slot) = udp_endpoint_slot(session) {
+        *slot = Some(id);
+    }
+    Ok(id)
+}
+
+fn handle_service_udp_send(
+    service: &mut ServiceState,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+    payload: &[u8],
+) -> Result<u32, NetworkResponse> {
+    let dest = match service.connected_dest(caller, session) {
+        Ok(Some(dest)) => dest,
+        Ok(None) => {
+            return Err(NetworkResponse::Error {
+                code: NetworkError::InvalidRequest.code(),
+            });
+        }
+        Err(response) => return Err(response),
+    };
+    let start = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+        code: NetworkError::Timeout.code(),
+    })?;
+    let deadline = start.saturating_add(DNS_QUERY_TIMEOUT_TICKS);
+    let resolver = unsafe {
+        (*service_dns_resolver_slot())
+            .as_mut()
+            .ok_or(NetworkResponse::Error {
+                code: NetworkError::Protocol.code(),
+            })?
+    };
+    let udp_sid = ensure_udp_endpoint(caller, session, dest, start)?;
+    for _ in 0..DNS_POLL_LIMIT {
+        let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+            code: NetworkError::Timeout.code(),
+        })?;
+        let udp = resolver.udp_mut();
+        match udp.send(now, udp_sid, caller, Some(dest), payload) {
+            Ok(sent) => return Ok(sent as u32),
+            Err(NetworkError::Unreachable) => {
+                let _ = udp.poll(now);
+            }
+            Err(err) => {
+                return Err(NetworkResponse::Error {
+                    code: NetworkError::from(err).code(),
+                });
+            }
+        }
+        if now >= deadline {
+            break;
+        }
+        yield_cpu();
+    }
+    Err(NetworkResponse::Error {
+        code: NetworkError::Timeout.code(),
+    })
+}
+
+fn handle_service_udp_receive(
+    service: &mut ServiceState,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+    max_len: u32,
+    response_payload: &mut [u8],
+) -> (NetworkResponse, u32) {
+    let dest = match service.connected_dest(caller, session) {
+        Ok(Some(dest)) => dest,
+        Ok(None) => {
+            return (
+                NetworkResponse::Error {
+                    code: NetworkError::InvalidRequest.code(),
+                },
+                0,
+            );
+        }
+        Err(response) => return (response, 0),
+    };
+    let start = match monotonic_ticks() {
+        Ok(tick) => tick,
+        Err(_) => {
+            return (
+                NetworkResponse::Error {
+                    code: NetworkError::Timeout.code(),
+                },
+                0,
+            );
+        }
+    };
+    let deadline = start.saturating_add(DNS_QUERY_TIMEOUT_TICKS);
+    let resolver = match unsafe { (*service_dns_resolver_slot()).as_mut() } {
+        Some(resolver) => resolver,
+        None => {
+            return (
+                NetworkResponse::Error {
+                    code: NetworkError::Protocol.code(),
+                },
+                0,
+            );
+        }
+    };
+    let udp_sid = match ensure_udp_endpoint(caller, session, dest, start) {
+        Ok(id) => id,
+        Err(response) => return (response, 0),
+    };
+    let want = max_len as usize;
+    let want = want.min(response_payload.len());
+    for _ in 0..DNS_POLL_LIMIT {
+        let now = match monotonic_ticks() {
+            Ok(tick) => tick,
+            Err(_) => {
+                return (
+                    NetworkResponse::Error {
+                        code: NetworkError::Timeout.code(),
+                    },
+                    0,
+                );
+            }
+        };
+        if let Err(err) = resolver.poll(now) {
+            return (
+                NetworkResponse::Error {
+                    code: NetworkError::from(err).code(),
+                },
+                0,
+            );
+        }
+        let udp = resolver.udp_mut();
+        match udp.receive(udp_sid, caller, &mut response_payload[..want]) {
+            Ok(Some((_from, n))) if n > 0 => {
+                return (
+                    NetworkResponse::Receive {
+                        payload_len: n as u32,
+                    },
+                    n as u32,
+                );
+            }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(err) => {
+                return (
+                    NetworkResponse::Error {
+                        code: NetworkError::from(err).code(),
+                    },
+                    0,
+                );
+            }
+        }
+        if now >= deadline {
+            break;
+        }
+        yield_cpu();
+    }
+    (
+        NetworkResponse::Error {
+            code: NetworkError::Timeout.code(),
+        },
+        0,
+    )
+}
+
+fn poll_plain_tcp_until<F>(
+    tcp: &mut TcpTransport<ServiceLink>,
+    start: u64,
+    deadline_ticks: u64,
+    mut ready: F,
+) -> Result<(), NetworkResponse>
+where
+    F: FnMut(&mut TcpTransport<ServiceLink>, u64) -> Result<bool, NetworkResponse>,
+{
+    for _ in 0..TLS_POLL_LIMIT {
+        let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+            code: NetworkError::Timeout.code(),
+        })?;
+        tcp.poll(now)
+            .map_err(|err| NetworkResponse::Error { code: err.code() })?;
+        if ready(tcp, now)? {
+            return Ok(());
+        }
+        if now.saturating_sub(start) >= deadline_ticks {
+            break;
+        }
+        yield_cpu();
+    }
+    Err(NetworkResponse::Error {
+        code: NetworkError::Timeout.code(),
+    })
+}
+
+fn establish_plain_tcp_session(
+    _raw_handle: u64,
+    service_generation: u64,
+    _caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+    dest: SocketAddrV4,
+) -> Result<SessionId, NetworkResponse> {
+    let tick = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+        code: NetworkError::Timeout.code(),
+    })?;
+    let tcp = shared_tcp_transport_mut();
+    tcp.stack_mut()
+        .arp_cache_mut()
+        .insert(dest.addr, PEER_MAC, tick);
+    let slot = plain_tcp_slot(session).ok_or(NetworkResponse::Error {
+        code: NetworkError::InvalidRequest.code(),
+    })?;
+    let tcp_session = match *slot {
+        Some(id) => id,
+        None => tcp
+            .connect(tick, plain_tcp_owner(service_generation), dest)
+            .map_err(|err| NetworkResponse::Error { code: err.code() })?,
+    };
+    let owner = plain_tcp_owner(service_generation);
+    poll_plain_tcp_until(tcp, tick, TCP_CONNECT_TIMEOUT_TICKS, |tcp, _now| {
+        match tcp.state(tcp_session, owner) {
+            Ok(TcpState::Established) => Ok(true),
+            Ok(TcpState::Reset) | Ok(TcpState::Closed) => Err(NetworkResponse::Error {
+                code: NetworkError::Reset.code(),
+            }),
+            Ok(_) => Ok(false),
+            // `poll` frees the slot after an acceptable RST; connect must still fail closed.
+            Err(NetworkError::NotFound) => Err(NetworkResponse::Error {
+                code: NetworkError::Reset.code(),
+            }),
+            Err(err) => Err(NetworkResponse::Error { code: err.code() }),
+        }
+    })?;
+    if let Some(slot) = plain_tcp_slot(session) {
+        *slot = Some(tcp_session);
+    }
+    Ok(tcp_session)
+}
+
+fn handle_service_plain_tcp_send(
+    service: &mut ServiceState,
+    raw_handle: u64,
+    service_generation: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+    payload: &[u8],
+) -> Result<u32, NetworkResponse> {
+    let dest = match service.connected_dest(caller, session) {
+        Ok(Some(dest)) => dest,
+        Ok(None) => {
+            return Err(NetworkResponse::Error {
+                code: NetworkError::InvalidRequest.code(),
+            });
+        }
+        Err(response) => return Err(response),
+    };
+    let tick = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+        code: NetworkError::Timeout.code(),
+    })?;
+    let tcp_session =
+        establish_plain_tcp_session(raw_handle, service_generation, caller, session, dest)?;
+    let tcp = shared_tcp_transport_mut();
+    let sent = tcp
+        .send(
+            tick,
+            tcp_session,
+            plain_tcp_owner(service_generation),
+            payload,
+        )
+        .map_err(|err| NetworkResponse::Error { code: err.code() })? as u32;
+    Ok(sent)
+}
+
+fn handle_service_plain_tcp_receive(
+    service: &mut ServiceState,
+    _raw_handle: u64,
+    service_generation: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+    max_len: u32,
+    response_payload: &mut [u8],
+) -> (NetworkResponse, u32) {
+    let tcp_session = match plain_tcp_slot(session).and_then(|s| *s) {
+        Some(id) => id,
+        None => {
+            return (
+                NetworkResponse::Error {
+                    code: NetworkError::InvalidRequest.code(),
+                },
+                0,
+            );
+        }
+    };
+    let tick = match monotonic_ticks() {
+        Ok(tick) => tick,
+        Err(_) => {
+            return (
+                NetworkResponse::Error {
+                    code: NetworkError::Timeout.code(),
+                },
+                0,
+            );
+        }
+    };
+    let tcp = shared_tcp_transport_mut();
+    let owner = plain_tcp_owner(service_generation);
+    let max_len = max_len as usize;
+    let want = max_len
+        .min(response_payload.len())
+        .min(NETWORK_MAX_PAYLOAD_BYTES);
+    let _ = tcp.poll(tick);
+    match tcp.receive(tcp_session, owner, &mut response_payload[..want]) {
+        Ok(0) => {}
+        Ok(n) => {
+            if service
+                .stage_response_payload(caller, session, &response_payload[..n])
+                .is_err()
+            {
+                return (
+                    NetworkResponse::Error {
+                        code: NetworkError::InvalidRequest.code(),
+                    },
+                    0,
+                );
+            }
+            return (
+                NetworkResponse::Receive {
+                    payload_len: n as u32,
+                },
+                n as u32,
+            );
+        }
+        Err(NetworkError::Closed) => {
+            return (NetworkResponse::Receive { payload_len: 0 }, 0);
+        }
+        Err(err) => {
+            return (
+                NetworkResponse::Error {
+                    code: NetworkError::from(err).code(),
+                },
+                0,
+            );
+        }
+    }
+    let deadline = tick.saturating_add(ms_to_irq_ticks(PLAIN_TCP_IO_TIMEOUT_MS));
+    for _ in 0..TLS_POLL_LIMIT {
+        let now = match monotonic_ticks() {
+            Ok(now) => now,
+            Err(_) => break,
+        };
+        let _ = tcp.poll(now);
+        match tcp.receive(tcp_session, owner, &mut response_payload[..want]) {
+            Ok(0) => {}
+            Ok(n) => {
+                if service
+                    .stage_response_payload(caller, session, &response_payload[..n])
+                    .is_err()
+                {
+                    return (
+                        NetworkResponse::Error {
+                            code: NetworkError::InvalidRequest.code(),
+                        },
+                        0,
+                    );
+                }
+                return (
+                    NetworkResponse::Receive {
+                        payload_len: n as u32,
+                    },
+                    n as u32,
+                );
+            }
+            Err(NetworkError::Closed) => {
+                return (NetworkResponse::Receive { payload_len: 0 }, 0);
+            }
+            Err(err) => {
+                return (
+                    NetworkResponse::Error {
+                        code: NetworkError::from(err).code(),
+                    },
+                    0,
+                );
+            }
+        }
+        if now >= deadline {
+            break;
+        }
+        yield_cpu();
+    }
+    (
+        NetworkResponse::Error {
+            code: NetworkError::Timeout.code(),
+        },
+        0,
+    )
+}
+
+mod linux_socket_data_plane {
+    use super::*;
+
+    pub(super) fn handle(
+        service: &mut ServiceState,
+        raw_handle: u64,
+        service_generation: u64,
+        caller: clean_slate_network::protocol::TrustedCaller,
+        request: NetworkRequest,
+        payload: &[u8],
+        response_payload: &mut [u8],
+    ) -> Option<(NetworkResponse, u32)> {
+        match request {
+            NetworkRequest::Connect { session, dest }
+                if matches!(
+                    service.session_kind(caller, session),
+                    Ok(SocketKind::LinuxTcp)
+                ) =>
+            {
+                Some(
+                    match establish_plain_tcp_session(
+                        raw_handle,
+                        service_generation,
+                        caller,
+                        session,
+                        dest,
+                    ) {
+                        Ok(_) => {
+                            if let Err(response) =
+                                service.attach_connected_dest(caller, session, dest)
+                            {
+                                return Some((response, 0));
+                            }
+                            (NetworkResponse::Connect, 0)
+                        }
+                        Err(response) => (response, 0),
+                    },
+                )
+            }
+            NetworkRequest::Send {
+                session,
+                payload_len,
+            } if matches!(
+                service.session_kind(caller, session),
+                Ok(SocketKind::LinuxTcp)
+            ) =>
+            {
+                if payload.len() != payload_len as usize {
+                    return Some((
+                        NetworkResponse::Error {
+                            code: NetworkError::InvalidRequest.code(),
+                        },
+                        0,
+                    ));
+                }
+                Some(
+                    match handle_service_plain_tcp_send(
+                        service,
+                        raw_handle,
+                        service_generation,
+                        caller,
+                        session,
+                        payload,
+                    ) {
+                        Ok(bytes_sent) => (NetworkResponse::Send { bytes_sent }, 0),
+                        Err(response) => (response, 0),
+                    },
+                )
+            }
+            NetworkRequest::Send {
+                session,
+                payload_len,
+            } if matches!(
+                service.session_kind(caller, session),
+                Ok(SocketKind::LinuxUdp)
+            ) =>
+            {
+                if payload.len() != payload_len as usize {
+                    return Some((
+                        NetworkResponse::Error {
+                            code: NetworkError::InvalidRequest.code(),
+                        },
+                        0,
+                    ));
+                }
+                Some(
+                    match handle_service_udp_send(service, caller, session, payload) {
+                        Ok(bytes_sent) => (NetworkResponse::Send { bytes_sent }, 0),
+                        Err(response) => (response, 0),
+                    },
+                )
+            }
+            NetworkRequest::Receive { session, max_len }
+                if matches!(
+                    service.session_kind(caller, session),
+                    Ok(SocketKind::LinuxUdp)
+                ) =>
+            {
+                Some(handle_service_udp_receive(
+                    service,
+                    caller,
+                    session,
+                    max_len,
+                    response_payload,
+                ))
+            }
+            NetworkRequest::Receive { session, max_len }
+                if matches!(
+                    service.session_kind(caller, session),
+                    Ok(SocketKind::LinuxTcp)
+                ) =>
+            {
+                Some(handle_service_plain_tcp_receive(
+                    service,
+                    raw_handle,
+                    service_generation,
+                    caller,
+                    session,
+                    max_len,
+                    response_payload,
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
+fn handle_linux_socket_data_plane(
+    service: &mut ServiceState,
+    raw_handle: u64,
+    service_generation: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    request: NetworkRequest,
+    payload: &[u8],
+    response_payload: &mut [u8],
+) -> Option<(NetworkResponse, u32)> {
+    linux_socket_data_plane::handle(
+        service,
+        raw_handle,
+        service_generation,
+        caller,
+        request,
+        payload,
+        response_payload,
+    )
+}
+
 fn handle_service_request(
     service: &mut ServiceState,
     service_generation: u64,
@@ -497,6 +1252,18 @@ fn handle_service_request(
     payload: &[u8],
     response_payload: &mut [u8],
 ) -> (NetworkResponse, u32) {
+    let raw_handle = bootstrap_mut().net_role_handle;
+    if let Some(result) = handle_linux_socket_data_plane(
+        service,
+        raw_handle,
+        service_generation,
+        caller,
+        request,
+        payload,
+        response_payload,
+    ) {
+        return result;
+    }
     match request {
         NetworkRequest::Resolve { name } => (handle_service_resolve(caller, name), 0),
         NetworkRequest::Connect { session, dest }
@@ -734,7 +1501,7 @@ impl Drop for TlsScratchGuard {
     }
 }
 
-fn drain_holder_exits(service: &mut NetworkService<SyscallRawLink, AllowAllAuthorizer>) {
+fn drain_holder_exits(service: &mut NetworkService<ServiceLink, AllowAllAuthorizer>) {
     loop {
         let mut caller_buf = [0u8; 24];
         let status = net_request([
@@ -1049,7 +1816,7 @@ fn run_tls_phase(resolved_addr: Ipv4Addr) -> Result<usize, u64> {
 }
 
 fn drain_tcp_close(
-    tcp: &mut TcpTransport<SyscallRawLink>,
+    tcp: &mut TcpTransport<ServiceLink>,
     owner: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
     start_tick: u64,
@@ -1076,7 +1843,7 @@ fn drain_tcp_close(
 }
 
 fn write_all_tls(
-    tls: &mut TlsSession<'_, '_, SyscallRawLink>,
+    tls: &mut TlsSession<'_, '_, ServiceLink>,
     start_tick: u64,
     data: &[u8],
 ) -> Result<(), u64> {
@@ -1102,7 +1869,7 @@ fn write_all_tls(
 }
 
 fn read_tls(
-    tls: &mut TlsSession<'_, '_, SyscallRawLink>,
+    tls: &mut TlsSession<'_, '_, ServiceLink>,
     start_tick: u64,
     out: &mut [u8],
 ) -> Result<usize, u64> {

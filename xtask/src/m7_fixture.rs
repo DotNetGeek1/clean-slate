@@ -8,15 +8,19 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration as StdDuration;
 
+use clean_slate_network::addr::{EtherType, IpProtocol};
+use clean_slate_network::ethernet::EthernetHeader;
 use clean_slate_network::fixture::{
     DNS_SERVER_PORT, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS, FIXTURE_HOSTNAME, PEER_IPV4, PEER_MAC,
     UDP_ECHO_PORT,
 };
+use clean_slate_network::ipv4::Ipv4Header;
+use clean_slate_network::tcp::{parse_tcp_segment, write_tcp_segment, TcpFlags, TcpSegment};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
 
-use crate::m7_fixture_tcp::{FixtureTlsCert, TcpEchoService, TlsService};
+use crate::m7_fixture_tcp::{FixtureTlsCert, M9HttpService, TcpEchoService, TlsService};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 
@@ -32,6 +36,8 @@ pub enum WhichCert {
 pub struct FixtureOptions {
     pub tls_cert: WhichCert,
     pub dns_reply_delay: StdDuration,
+    /// M9 #105: DNS A → 10.77.0.50, HTTP on 10.77.0.50:4001 (M7 tests keep default false).
+    pub m9_profile: bool,
 }
 
 impl Default for FixtureOptions {
@@ -39,6 +45,7 @@ impl Default for FixtureOptions {
         Self {
             tls_cert: WhichCert::Correct,
             dns_reply_delay: StdDuration::ZERO,
+            m9_profile: false,
         }
     }
 }
@@ -107,7 +114,7 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         return;
     }
 
-    let mut device = QemuSocketDevice::new(stream);
+    let mut device = QemuSocketDevice::new(stream, options.m9_profile);
     let peer_octets = PEER_IPV4.octets();
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(
         PEER_MAC.octets(),
@@ -126,6 +133,11 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
                 24,
             ))
             .expect("fixture IPv4");
+        if options.m9_profile {
+            addrs
+                .push(IpCidr::new(IpAddress::v4(10, 77, 0, 50), 24))
+                .expect("fixture M9 IPv4");
+        }
     });
 
     let mut sockets = SocketSet::new(vec![]);
@@ -140,12 +152,16 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
     );
     let dns_handle = sockets.add(udp_dns);
 
-    let tcp_echo = tcp::Socket::new(
-        tcp::SocketBuffer::new(vec![0u8; 4096]),
-        tcp::SocketBuffer::new(vec![0u8; 4096]),
-    );
-    let tcp_echo_handle = sockets.add(tcp_echo);
-    let mut tcp_echo_service = TcpEchoService::new(&mut sockets, tcp_echo_handle);
+    let mut tcp_echo_service = if options.m9_profile {
+        None
+    } else {
+        let tcp_echo = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0u8; 4096]),
+            tcp::SocketBuffer::new(vec![0u8; 4096]),
+        );
+        let tcp_echo_handle = sockets.add(tcp_echo);
+        Some(TcpEchoService::new(&mut sockets, tcp_echo_handle))
+    };
 
     let tls_listen = tcp::Socket::new(
         tcp::SocketBuffer::new(vec![0u8; 8192]),
@@ -157,6 +173,16 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         WhichCert::WrongName => FixtureTlsCert::WrongName,
     };
     let mut tls_service = TlsService::new(&mut sockets, tls_handle, tls_cert);
+
+    let mut m9_http_service = None;
+    if options.m9_profile {
+        let m9_tcp = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0u8; 8192]),
+            tcp::SocketBuffer::new(vec![0u8; 8192]),
+        );
+        let m9_handle = sockets.add(m9_tcp);
+        m9_http_service = Some(M9HttpService::new(&mut sockets, m9_handle));
+    }
 
     let mut timestamp = Instant::from_millis(0);
     while !stop.load(Ordering::SeqCst) {
@@ -180,7 +206,7 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
             dns_socket.bind(DNS_SERVER_PORT).expect("bind udp dns");
         }
         if let Ok((payload, endpoint)) = dns_socket.recv() {
-            if let Some((name, response)) = build_dns_response(payload) {
+            if let Some((name, response)) = build_dns_response(payload, options.m9_profile) {
                 let rcode = (response[3] & 0x0F) as u32;
                 if !options.dns_reply_delay.is_zero() {
                     thread::sleep(options.dns_reply_delay);
@@ -190,9 +216,13 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
                 }
             }
         }
-        tcp_echo_service.poll(&mut sockets);
+        if let Some(echo) = tcp_echo_service.as_mut() {
+            echo.poll(&mut sockets);
+        }
         tls_service.poll(&mut sockets);
-
+        if let Some(http) = m9_http_service.as_mut() {
+            http.poll(&mut sockets);
+        }
         for event in device.drain_events() {
             println!("{event}");
         }
@@ -200,8 +230,11 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
     }
 }
 
+const M9_REFUSED_PORT: u16 = 0x1339;
+
 struct QemuSocketDevice {
     stream: TcpStream,
+    m9_profile: bool,
     /// Bytes received from QEMU that do not yet form a complete
     /// length-prefixed frame. The socket is non-blocking, so a read may stop
     /// mid-prefix or mid-frame; buffering keeps the stream in sync.
@@ -211,9 +244,10 @@ struct QemuSocketDevice {
 }
 
 impl QemuSocketDevice {
-    fn new(stream: TcpStream) -> Self {
+    fn new(stream: TcpStream, m9_profile: bool) -> Self {
         Self {
             stream,
+            m9_profile,
             pending: Vec::with_capacity(4 * (4 + MAX_FRAME_BYTES)),
             rx_queue: VecDeque::new(),
             events: Vec::new(),
@@ -222,6 +256,81 @@ impl QemuSocketDevice {
 
     fn drain_events(&mut self) -> impl Iterator<Item = String> + '_ {
         self.events.drain(..)
+    }
+
+    /// Answer SYN to `M9_REFUSED_PORT` with RST|ACK (Linux ECONNREFUSED path).
+    fn try_answer_m9_refused_syn(&mut self, frame: &[u8]) -> bool {
+        let (eth, l3) = match EthernetHeader::parse(frame) {
+            Ok(parsed) => parsed,
+            Err(_) => return false,
+        };
+        if eth.ethertype != EtherType::IPV4 {
+            return false;
+        }
+        let (ip, ip_payload) = match Ipv4Header::parse(l3) {
+            Ok(parsed) => parsed,
+            Err(_) => return false,
+        };
+        if ip.protocol != IpProtocol::TCP {
+            return false;
+        }
+        let (seg, _) = match parse_tcp_segment(ip.src, ip.dst, ip_payload) {
+            Ok(parsed) => parsed,
+            Err(_) => return false,
+        };
+        if seg.dst_port != M9_REFUSED_PORT
+            || !seg.flags.contains(TcpFlags::SYN)
+            || seg.flags.contains(TcpFlags::ACK)
+        {
+            return false;
+        }
+        let mut reply = vec![0u8; MAX_FRAME_BYTES];
+        let eth_len = match (EthernetHeader {
+            dst: eth.src,
+            src: eth.dst,
+            ethertype: EtherType::IPV4,
+        })
+        .write(&mut reply)
+        {
+            Ok(len) => len,
+            Err(_) => return false,
+        };
+        let ip_off = eth_len;
+        let ip_hdr = Ipv4Header {
+            src: ip.dst,
+            dst: ip.src,
+            protocol: IpProtocol::TCP,
+            ttl: 64,
+            identification: 0,
+            flags: 0,
+            fragment_offset: 0,
+            header_len: 20,
+            total_len: 0,
+            dscp: 0,
+            ecn: 0,
+        };
+        let tcp_off = ip_off + 20;
+        let rst = TcpSegment {
+            src_port: seg.dst_port,
+            dst_port: seg.src_port,
+            seq: 0,
+            ack: seg.seq.wrapping_add(1),
+            data_offset: 5,
+            flags: TcpFlags::RST.union(TcpFlags::ACK),
+            window: 0,
+            checksum: 0,
+            urgent: 0,
+            mss_option: None,
+        };
+        let tcp_len = match write_tcp_segment(ip.dst, ip.src, &rst, &[], &mut reply[tcp_off..]) {
+            Ok(len) => len,
+            Err(_) => return false,
+        };
+        if ip_hdr.write(&mut reply[ip_off..], tcp_len).is_err() {
+            return false;
+        }
+        reply.truncate(ip_off + 20 + tcp_len);
+        self.write_frame_to_socket(&reply).is_ok()
     }
 
     fn read_frames_from_socket(&mut self) {
@@ -261,6 +370,9 @@ impl QemuSocketDevice {
                 let frame = self.pending[start..end].to_vec();
                 if frame.len() >= 14 && u16::from_be_bytes([frame[12], frame[13]]) == 0x0806 {
                     self.events.push("[FIX ] arp request".to_owned());
+                }
+                if self.m9_profile && self.try_answer_m9_refused_syn(&frame) {
+                    continue;
                 }
                 self.rx_queue.push_back(frame);
             } else {
@@ -319,7 +431,9 @@ struct QemuTxToken<'a> {
     device: &'a mut QemuSocketDevice,
 }
 
-fn build_dns_response(query: &[u8]) -> Option<(String, Vec<u8>)> {
+const M9_HTTP_ADDR: [u8; 4] = [10, 77, 0, 50];
+
+fn build_dns_response(query: &[u8], m9_profile: bool) -> Option<(String, Vec<u8>)> {
     if query.len() < 12 {
         return None;
     }
@@ -333,6 +447,18 @@ fn build_dns_response(query: &[u8]) -> Option<(String, Vec<u8>)> {
         return None;
     }
     let qtype = u16::from_be_bytes([query[qend], query[qend + 1]]);
+    if qtype == 28 && m9_profile {
+        let question = query.get(12..qend + 4)?.to_vec();
+        let mut response = Vec::with_capacity(question.len() + 16);
+        response.extend_from_slice(&id);
+        response.extend_from_slice(&0x8180u16.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&question);
+        return Some((name, response));
+    }
     if qtype != 1 {
         return None;
     }
@@ -340,7 +466,11 @@ fn build_dns_response(query: &[u8]) -> Option<(String, Vec<u8>)> {
     let mut response = Vec::with_capacity(question.len() + 32);
     response.extend_from_slice(&id);
     let flags_ok = 0x8480u16;
-    let answer: [u8; 4] = FIXTURE_A_RECORD.octets();
+    let answer: [u8; 4] = if m9_profile {
+        M9_HTTP_ADDR
+    } else {
+        FIXTURE_A_RECORD.octets()
+    };
     if name.eq_ignore_ascii_case(FIXTURE_HOSTNAME) {
         response.extend_from_slice(&flags_ok.to_be_bytes());
         response.extend_from_slice(&1u16.to_be_bytes());

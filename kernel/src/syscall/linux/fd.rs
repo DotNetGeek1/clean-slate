@@ -90,9 +90,26 @@ pub(crate) fn handle_sys_read(
                 Err(EBADF)
             }
         }
-        DescriptorKind::Dir(_) | DescriptorKind::Socket(_) | DescriptorKind::PipeWrite(_) => {
-            Err(EBADF)
+        DescriptorKind::Socket(socket) => {
+            #[cfg(feature = "m9-linux-socket")]
+            {
+                crate::process::linux_socket::read_socket(
+                    request,
+                    ctx,
+                    pid,
+                    generation,
+                    fd,
+                    socket,
+                    &mut scratch[..want],
+                )
+            }
+            #[cfg(not(feature = "m9-linux-socket"))]
+            {
+                let _ = (request, ctx, pid, generation, fd, socket);
+                Err(EBADF)
+            }
         }
+        DescriptorKind::Dir(_) | DescriptorKind::PipeWrite(_) => Err(EBADF),
     };
     if let Ok(n) = result {
         if n > 0 {

@@ -10,7 +10,17 @@ pub(crate) mod table;
 use clean_slate_linux_abi::{LinuxErrno, EBADF, EMFILE};
 use clean_slate_service_lifecycle::InstanceGeneration;
 use console::write_console;
-use open_description::{DescriptorKind, OpenDescriptionPool, OpenStatus, PipeRef};
+use open_description::{
+    DescriptorKind, OpenAccess, OpenDescriptionPool, OpenStatus, PipeRef, SocketRef,
+};
+
+/// Kind dispatch for the #147 `read(2)` front-end (`write.rs` socket path).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinuxReadKind {
+    Console,
+    Socket(SocketRef),
+    Unsupported,
+}
 use table::{
     close_fd_entry, close_on_exec as close_cloexec_in_table, dup2_fd, inherit_table,
     install_stdio_entries, release_table, LinuxFdTable,
@@ -204,6 +214,31 @@ impl LinuxFdRegistry {
         false
     }
 
+    pub(crate) fn read_kind_for_fd(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Result<LinuxReadKind, LinuxErrno> {
+        let index = self.slot_index(pid, generation).ok_or(EBADF)?;
+        let open = self.slots[index]
+            .as_ref()
+            .expect("slot")
+            .table
+            .get(fd)
+            .ok_or(EBADF)?
+            .open;
+        let desc = self.pool.get(open)?;
+        Ok(match desc.kind {
+            DescriptorKind::Console(_) => LinuxReadKind::Console,
+            DescriptorKind::Socket(socket) => LinuxReadKind::Socket(socket),
+            DescriptorKind::File(_)
+            | DescriptorKind::Dir(_)
+            | DescriptorKind::PipeRead(_)
+            | DescriptorKind::PipeWrite(_) => LinuxReadKind::Unsupported,
+        })
+    }
+
     pub(crate) fn write_fd(
         &mut self,
         ipc: &mut IpcEndpointTable,
@@ -228,6 +263,7 @@ impl LinuxFdRegistry {
             DescriptorKind::PipeWrite(_) => Err(EBADF),
             // #101: file writes go through `write(2)` → `handle_sys_write` + `fs_io::write_file_fd`.
             DescriptorKind::File(_) => Err(EBADF),
+            DescriptorKind::Socket(_) => Err(EBADF),
             _ => Err(EBADF),
         }
     }
@@ -412,6 +448,54 @@ impl LinuxFdRegistry {
         Ok(())
     }
 
+    pub(crate) fn open_description_id_for_fd(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+        fd: u64,
+    ) -> Result<OpenDescriptionId, LinuxErrno> {
+        let entry = self.open_fd_entry(pid, generation, fd)?.ok_or(EBADF)?;
+        Ok(entry.open)
+    }
+
+    pub(crate) fn socket_ref_for_open(
+        &self,
+        open: OpenDescriptionId,
+    ) -> Result<SocketRef, LinuxErrno> {
+        let desc = self.pool.get(open)?;
+        match desc.kind {
+            DescriptorKind::Socket(socket) => Ok(socket),
+            _ => Err(EBADF),
+        }
+    }
+
+    pub(crate) fn ensure_fd_table(
+        &mut self,
+        pid: u64,
+        generation: InstanceGeneration,
+    ) -> Result<(), LinuxErrno> {
+        self.ensure_slot_index(pid, generation).map_err(|_| EBADF)?;
+        Ok(())
+    }
+
+    pub(crate) fn install_socket_description(
+        &mut self,
+        pid: u64,
+        generation: InstanceGeneration,
+        socket: SocketRef,
+        nonblock: bool,
+    ) -> Result<i32, LinuxErrno> {
+        self.ensure_fd_table(pid, generation)?;
+        let status = OpenStatus {
+            access: OpenAccess::ReadWrite,
+            nonblock,
+            append: false,
+        };
+        let open = self.pool.alloc_socket(pid, socket, status)?;
+        self.pool.attach_first_ref(open)?;
+        self.alloc_lowest_fd(pid, generation, open, FdFlags::default())
+    }
+
     pub(crate) fn alloc_lowest_fd(
         &mut self,
         pid: u64,
@@ -544,6 +628,7 @@ fn registry_mut() -> &'static mut LinuxFdRegistry {
     test,
     feature = "m9-linux-exec-self-test",
     feature = "m9-fd-core-self-test",
+    feature = "m9-linux-socket-self-test",
     feature = "m9-linux-proc-self-test",
     feature = "m9-linux-fs-self-test"
 ))]
@@ -574,6 +659,35 @@ pub(crate) fn ensure_open_fd(
     fd: u64,
 ) -> Result<(), LinuxErrno> {
     registry_mut().ensure_open_fd(pid, generation, fd)
+}
+
+pub(crate) fn install_socket_fd(
+    pid: u64,
+    generation: InstanceGeneration,
+    socket: SocketRef,
+    nonblock: bool,
+) -> Result<i32, LinuxErrno> {
+    registry_mut().install_socket_description(pid, generation, socket, nonblock)
+}
+
+pub(crate) fn open_id_for_fd(
+    pid: u64,
+    generation: InstanceGeneration,
+    fd: u64,
+) -> Result<OpenDescriptionId, LinuxErrno> {
+    registry_mut().open_description_id_for_fd(pid, generation, fd)
+}
+
+pub(crate) fn socket_ref_for_open(open: OpenDescriptionId) -> Result<SocketRef, LinuxErrno> {
+    registry_mut().socket_ref_for_open(open)
+}
+
+pub(crate) fn read_kind_for_fd(
+    pid: u64,
+    generation: InstanceGeneration,
+    fd: u64,
+) -> Result<LinuxReadKind, LinuxErrno> {
+    registry_mut().read_kind_for_fd(pid, generation, fd)
 }
 
 pub(crate) fn alloc_pipe_end(
