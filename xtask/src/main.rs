@@ -137,7 +137,8 @@ const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[DF  ] emergency stack OK",
     "[DF  ] PASS",
 ];
-const M2_TASK_PROGRESS_GROUP: &[&str] = &["[TASK] task 1 progress=", "[TASK] task 2 progress="];
+/// Substrings tolerate concurrent `[TASK]` prefix interleaving on serial.
+const M2_TASK_PROGRESS_GROUP: &[&str] = &["task 1 progress=", "task 2 progress="];
 /// Demo tasks log progress concurrently; `[M2  ] PASS` follows both exits (with `[TIME] ticks=`).
 const M2_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[BOOT] UEFI memory map acquired"),
