@@ -33,8 +33,7 @@ use crate::selftest::{USER_TEST_CODE_ADDRESS, USER_TEST_STACK_ADDRESS};
 use crate::service::control::service_lifecycle_controller_mut;
 use crate::service::linux_launch::{
     launch_linux_hello, linux_hello_completed_exits, linux_hello_delivered_bytes,
-    linux_hello_first_exited, linux_hello_last_exited, linux_hello_live,
-    start_linux_hello_service,
+    linux_hello_first_exited, linux_hello_last_exited, linux_hello_live, start_linux_hello_service,
 };
 use crate::service::spawn::register_spawned_process_checked;
 use crate::sync::global_cell::GlobalCell;
