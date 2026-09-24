@@ -1,8 +1,8 @@
-﻿//! Native blocking/wake substrate for scheduler threads (#145).
+//! Native blocking/wake substrate for scheduler threads (#145).
 
 #![allow(dead_code)]
 //!
-//! `Deadline` is an absolute `kernel_ticks()` value (APIC timer increments; uncalibrated).
+//! `Deadline` is either absolute `kernel_ticks()` or calibrated `monotonic_ns()` (#103).
 
 use crate::arch::x86_64::context_switch::resume_after_scheduler_handoff;
 use crate::arch::x86_64::context_switch::SYSCALL_BLOCKED_RESUME_SENTINEL;
@@ -28,7 +28,10 @@ pub(crate) enum WaitOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Deadline(pub u64);
+pub(crate) enum Deadline {
+    IrqTicks(u64),
+    MonotonicNs(u64),
+}
 
 pub(crate) const MAX_WAITERS: usize = super::TASK_COUNT;
 
@@ -203,14 +206,11 @@ fn log_stale_wake(pid: u64, generation: InstanceGeneration) {
 fn wake_thread_at_index(thread_index: usize, outcome: WaitOutcome) {
     let scheduler = unsafe { scheduler_mut() };
     let thread = &mut scheduler.threads[thread_index];
-    // Record the wake contract even when timer preemption flipped the thread to
-    // `Ready` before `expire_deadlines`: `wait_resume_outcome` defaults to
-    // `Woken`, so skipping the update would restart `nanosleep` instead of
-    // completing with `TimedOut`.
-    thread.wait_resume_outcome = outcome;
-    if thread.state == ThreadState::Blocked {
-        thread.state = ThreadState::Ready;
+    if thread.state != ThreadState::Blocked {
+        return;
     }
+    thread.wait_resume_outcome = outcome;
+    thread.state = ThreadState::Ready;
 }
 
 /// Called ONLY from a syscall handler on the current thread.
@@ -359,14 +359,20 @@ pub(crate) fn cancel_waiters_for_process(pid: u64, generation: InstanceGeneratio
     })
 }
 
-pub(super) fn waiter_deadline_due(deadline: Option<Deadline>, now_ticks: u64) -> bool {
+pub(super) fn waiter_deadline_due(deadline: Option<Deadline>, now_ticks: u64, now_ns: u64) -> bool {
     match deadline {
-        Some(Deadline(ticks)) => now_ticks >= ticks,
+        Some(Deadline::IrqTicks(ticks)) => now_ticks >= ticks,
+        Some(Deadline::MonotonicNs(ns)) => now_ns >= ns,
         None => false,
     }
 }
 
 pub(crate) fn expire_deadlines(now_ticks: u64) -> usize {
+    let now_ns = if crate::time::tsc_hz().is_some() {
+        crate::time::monotonic_ns()
+    } else {
+        0
+    };
     without_interrupts(|| {
         let mut expired = 0usize;
         let table = wait_table_mut();
@@ -374,7 +380,7 @@ pub(crate) fn expire_deadlines(now_ticks: u64) -> usize {
             if !slot.active {
                 continue;
             }
-            if !waiter_deadline_due(slot.deadline, now_ticks) {
+            if !waiter_deadline_due(slot.deadline, now_ticks, now_ns) {
                 continue;
             }
             let index = slot.thread_index;
@@ -555,9 +561,14 @@ mod tests {
 
     #[test]
     fn waiter_deadline_due_only_at_or_after_tick() {
-        assert!(!waiter_deadline_due(Some(Deadline(5)), 4));
-        assert!(waiter_deadline_due(Some(Deadline(5)), 5));
-        assert!(!waiter_deadline_due(None, 100));
+        assert!(!waiter_deadline_due(Some(Deadline::IrqTicks(5)), 4, 0));
+        assert!(waiter_deadline_due(Some(Deadline::IrqTicks(5)), 5, 0));
+        assert!(waiter_deadline_due(
+            Some(Deadline::MonotonicNs(100)),
+            0,
+            100
+        ));
+        assert!(!waiter_deadline_due(None, 100, 100));
     }
 
     #[test]

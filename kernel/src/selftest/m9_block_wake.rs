@@ -172,7 +172,9 @@ pub(crate) fn handle_wait_block_syscall(frame: &mut SyscallContext) {
     }
     if IDLE_SOAK_DONE.load(Ordering::Relaxed) == 0 {
         let key = WaitKey(TEST_WAIT_KEY);
-        let deadline = Some(Deadline(kernel_ticks().saturating_add(idle_soak_ticks())));
+        let deadline = Some(Deadline::IrqTicks(
+            kernel_ticks().saturating_add(idle_soak_ticks()),
+        ));
         CONSUMER_BLOCKED.store(1, Ordering::Relaxed);
         BLOCK_TICK.store(kernel_ticks(), Ordering::Relaxed);
         BLOCK_PROGRESS_SNAPSHOT.store(CONSUMER_PROGRESS.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -183,7 +185,7 @@ pub(crate) fn handle_wait_block_syscall(frame: &mut SyscallContext) {
     let key = WaitKey(TEST_WAIT_KEY);
     let cycle = CYCLES_DONE.load(Ordering::Relaxed);
     let deadline = if cycle % 2 == 1 {
-        Some(Deadline(kernel_ticks() + 5))
+        Some(Deadline::IrqTicks(kernel_ticks() + 5))
     } else {
         None
     };

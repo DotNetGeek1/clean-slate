@@ -122,11 +122,11 @@ const M9_LINUX_RUNTIME_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[M9.J] mmap ok"),
     MarkerStep::Ordered("[M9.J] uname=Linux"),
     MarkerStep::Ordered("[M9.J] signals ok"),
-    MarkerStep::Ordered("[M9.J] nanosleep 20ms ticks="),
+    MarkerStep::Ordered("[M9.J] nanosleep 20ms tsc_ns="),
     MarkerStep::Ordered("[M9.J] poll timeout ok"),
     MarkerStep::Ordered("[M9.J] nanosleep wall start"),
     MarkerStep::Ordered("[M9.J] nanosleep wall end"),
-    MarkerStep::Ordered("[M9.J] nanosleep wall ticks="),
+    MarkerStep::Ordered("[M9.J] nanosleep wall irq_ticks="),
     MarkerStep::Ordered("[M9.J] probe done"),
     MarkerStep::Ordered("[M9.J] cycle=7"),
     MarkerStep::Ordered("[M9.J] PASS"),
@@ -2480,106 +2480,68 @@ impl NanosleepWallClock {
     }
 }
 
-fn parse_apic_tick_period_ns(serial: &str) -> Result<u64, XtaskError> {
-    const MARKER: &str = "tick_ns=";
-    let rest = serial
-        .split(MARKER)
-        .nth(1)
-        .ok_or_else(|| XtaskError::MissingMarker("tick_ns".to_owned()))?;
-    let token = rest
-        .lines()
-        .next()
-        .unwrap_or(rest)
-        .trim_end_matches('\r')
-        .split_whitespace()
-        .next()
-        .unwrap_or("");
-    token
-        .parse::<u64>()
-        .map_err(|_| XtaskError::MissingMarker("tick_ns parse".to_owned()))
-}
-
-fn parse_first_wall_irq_ticks(serial: &str) -> Result<u64, XtaskError> {
-    const PREFIX: &str = "[M9.J] nanosleep wall ticks=";
+fn parse_first_wall_tsc_ns(serial: &str) -> Result<u64, XtaskError> {
+    const PREFIX: &str = "[M9.J] nanosleep wall irq_ticks=";
     let rest = serial
         .split(PREFIX)
         .nth(1)
         .ok_or_else(|| XtaskError::MissingMarker(PREFIX.to_owned()))?;
-    let token = rest
-        .lines()
+    let line = rest.lines().next().unwrap_or(rest).trim_end_matches('\r');
+    let tsc_part = line
+        .split("tsc_ns=")
+        .nth(1)
+        .ok_or_else(|| XtaskError::MissingMarker("wall tsc_ns".to_owned()))?;
+    tsc_part
+        .split_whitespace()
         .next()
-        .unwrap_or(rest)
-        .trim_end_matches('\r')
-        .trim();
-    token
+        .unwrap_or(tsc_part)
+        .trim()
         .parse::<u64>()
-        .map_err(|_| XtaskError::MissingMarker("wall irq ticks parse".to_owned()))
+        .map_err(|_| XtaskError::MissingMarker("wall tsc_ns parse".to_owned()))
 }
 
 fn validate_nanosleep_wall_budget(host: Duration, serial: &str) -> Result<(), XtaskError> {
-    let irq_ticks = parse_first_wall_irq_ticks(serial)?;
-    if irq_ticks < 1000 || irq_ticks > 1050 {
+    let guest_tsc_ns = parse_first_wall_tsc_ns(serial)?;
+    if guest_tsc_ns < 1_000_000_000 || guest_tsc_ns > 1_050_000_000 {
         return Err(XtaskError::InvalidCommand(format!(
-            "m9 runtime guest wall irq ticks {irq_ticks} outside 1000..=1050"
+            "m9 runtime guest wall tsc_ns {guest_tsc_ns} outside 1000000000..=1050000000"
         )));
     }
-    let tick_ns = parse_apic_tick_period_ns(serial)?;
-    let guest = Duration::from_nanos(irq_ticks.saturating_mul(tick_ns));
-    let rt_min = Duration::from_millis(1000);
-    let rt_max = Duration::from_millis(1050);
-    if host >= rt_min && host <= rt_max {
-        println!(
-            "m9 runtime nanosleep wall clock: {host:?} guest_irq={guest:?} ticks={irq_ticks} (RT window)"
-        );
-        return Ok(());
-    }
-    if host < guest {
+    let min = Duration::from_millis(1000);
+    let max = Duration::from_millis(1050);
+    if host < min || host > max {
         return Err(XtaskError::InvalidCommand(format!(
-            "m9 runtime host wall {host:?} shorter than guest irq budget {guest:?}"
-        )));
-    }
-    let max_tcg = guest * 8 / 5;
-    if host > max_tcg {
-        return Err(XtaskError::InvalidCommand(format!(
-            "m9 runtime host wall {host:?} outside guest irq budget {guest:?}..={max_tcg:?}"
+            "m9 runtime nanosleep wall clock {host:?} outside {min:?}..={max:?}"
         )));
     }
     println!(
-        "m9 runtime nanosleep wall clock: {host:?} guest_irq={guest:?} ticks={irq_ticks} (TCG slack)"
+        "m9 runtime nanosleep wall clock: {host:?} guest_tsc_ns={guest_tsc_ns} (strict 1.00-1.05s)"
     );
     Ok(())
 }
 
 #[cfg(test)]
 mod nanosleep_wall_clock_tests {
-    use super::{
-        parse_apic_tick_period_ns, parse_first_wall_irq_ticks, validate_nanosleep_wall_budget,
-    };
+    use super::{parse_first_wall_tsc_ns, validate_nanosleep_wall_budget};
     use std::time::Duration;
 
-    const SAMPLE: &str = "[TIME] apic counter_hz=62500000 initial_count=62500 tick_ns=1000000\n\
-[M9.J] nanosleep wall ticks=1005\n";
+    const SAMPLE: &str = "[M9.J] nanosleep wall irq_ticks=1005 tsc_ns=1005000000\n";
 
     #[test]
-    fn parses_tick_period_and_wall_ticks() {
-        assert_eq!(parse_apic_tick_period_ns(SAMPLE).unwrap(), 1_000_000);
-        assert_eq!(parse_first_wall_irq_ticks(SAMPLE).unwrap(), 1005);
+    fn parses_wall_tsc_ns() {
+        assert_eq!(parse_first_wall_tsc_ns(SAMPLE).unwrap(), 1_005_000_000);
     }
 
     #[test]
-    fn accepts_rt_host_window() {
+    fn accepts_strict_host_window() {
         validate_nanosleep_wall_budget(Duration::from_millis(1025), SAMPLE).unwrap();
     }
 
     #[test]
-    fn accepts_tcg_host_when_guest_ticks_ok() {
-        validate_nanosleep_wall_budget(Duration::from_millis(1600), SAMPLE).unwrap();
-    }
-
-    #[test]
-    fn rejects_short_host_or_bad_guest_ticks() {
-        assert!(validate_nanosleep_wall_budget(Duration::from_millis(900), SAMPLE).is_err());
-        let bad = SAMPLE.replace("1005", "900");
+    fn rejects_late_host_or_bad_guest_tsc() {
+        assert!(validate_nanosleep_wall_budget(Duration::from_millis(1051), SAMPLE).is_err());
+        assert!(validate_nanosleep_wall_budget(Duration::from_millis(999), SAMPLE).is_err());
+        let bad = SAMPLE.replace("1005000000", "900000000");
         assert!(validate_nanosleep_wall_budget(Duration::from_millis(1025), &bad).is_err());
     }
 }

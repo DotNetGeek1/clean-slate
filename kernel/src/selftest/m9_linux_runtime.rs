@@ -30,7 +30,9 @@ use crate::syscall::linux::poll::interest_occupied;
 use crate::syscall::{
     install_service_lifecycle_syscall_allocator, service_lifecycle_syscall_allocator_mut,
 };
-use crate::time::ticks_from_millis;
+use crate::time::{
+    irq_period_ns, monotonic_ns, sleep_budget_ns_from_millis, sleep_budget_ns_from_timespec,
+};
 use clean_slate_linux_abi::Timespec;
 use clean_slate_service_lifecycle::InstanceGeneration;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -49,13 +51,14 @@ static NANOSLEEP_LOGGED: AtomicU32 = AtomicU32::new(0);
 static POLL_ZERO_LOGGED: AtomicU32 = AtomicU32::new(0);
 static OBS_PID: AtomicU64 = AtomicU64::new(0);
 static OBS_NSEC: AtomicU64 = AtomicU64::new(0);
-static OBS_BLOCK_START: AtomicU64 = AtomicU64::new(0);
+static OBS_BLOCK_START_NS: AtomicU64 = AtomicU64::new(0);
 static WALL_TICKS_START: AtomicU64 = AtomicU64::new(0);
+static WALL_TSC_START: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn record_nanosleep_self_test(pid: u64, ts: Timespec, block_start_tick: u64) {
+pub(crate) fn record_nanosleep_self_test(pid: u64, ts: Timespec, block_start_ns: u64) {
     OBS_PID.store(pid, Ordering::Relaxed);
     OBS_NSEC.store(ts.tv_nsec as u64, Ordering::Relaxed);
-    OBS_BLOCK_START.store(block_start_tick, Ordering::Relaxed);
+    OBS_BLOCK_START_NS.store(block_start_ns, Ordering::Relaxed);
 }
 
 pub(crate) fn on_scheduler_nanosleep_timeout(pid: u64) {
@@ -66,10 +69,10 @@ pub(crate) fn on_scheduler_nanosleep_timeout(pid: u64) {
         tv_sec: 0,
         tv_nsec: OBS_NSEC.load(Ordering::Relaxed) as i64,
     };
-    on_nanosleep_complete(pid, ts, OBS_BLOCK_START.load(Ordering::Relaxed));
+    on_nanosleep_complete_ns(pid, ts, OBS_BLOCK_START_NS.load(Ordering::Relaxed));
 }
 
-pub(crate) fn on_nanosleep_complete(pid: u64, ts: Timespec, block_start_tick: u64) {
+pub(crate) fn on_nanosleep_complete_ns(pid: u64, ts: Timespec, block_start_ns: u64) {
     if pid != RUNTIME_PID.load(Ordering::Relaxed) {
         return;
     }
@@ -79,35 +82,41 @@ pub(crate) fn on_nanosleep_complete(pid: u64, ts: Timespec, block_start_tick: u6
     if NANOSLEEP_LOGGED.swap(1, Ordering::Relaxed) != 0 {
         return;
     }
-    let min_ticks = ticks_from_millis(20).ok().unwrap_or(1);
-    let max_ticks = min_ticks.saturating_add(1);
-    let elapsed = kernel_ticks().saturating_sub(block_start_tick);
-    if elapsed < min_ticks || elapsed > max_ticks {
+    let budget = sleep_budget_ns_from_timespec(ts).unwrap_or(20_000_000);
+    let slack = irq_period_ns().unwrap_or(1_000_000);
+    let elapsed_ns = monotonic_ns().saturating_sub(block_start_ns);
+    // One LAPIC tick of IRQ coalescing plus syscall restart overhead on TCG.
+    let max_ns = budget.saturating_add(slack.saturating_mul(3));
+    if elapsed_ns < budget || elapsed_ns > max_ns {
         kernel_log_fmt(format_args!(
-            "[M9.J] nanosleep 20ms ticks={} (expected {}..={})\n",
-            elapsed, min_ticks, max_ticks
+            "[M9.J] nanosleep 20ms tsc_ns={} (expected {}..={})\n",
+            elapsed_ns, budget, max_ns
         ));
-        fatal_kernel_error("m9 runtime nanosleep tick window");
+        fatal_kernel_error("m9 runtime nanosleep monotonic window");
     }
-    kernel_log_fmt(format_args!("[M9.J] nanosleep 20ms ticks={}\n", elapsed));
+    kernel_log_fmt(format_args!(
+        "[M9.J] nanosleep 20ms tsc_ns={}\n",
+        elapsed_ns
+    ));
 }
 
-pub(crate) fn on_poll_timeout_complete(pid: u64, timeout_ms: u64, block_start_tick: u64) {
+pub(crate) fn on_poll_timeout_complete_ns(pid: u64, timeout_ms: u64, block_start_ns: u64) {
     if pid != RUNTIME_PID.load(Ordering::Relaxed) {
         return;
     }
     if POLL_ZERO_LOGGED.swap(1, Ordering::Relaxed) != 0 {
         return;
     }
-    let min_ticks = ticks_from_millis(timeout_ms).ok().unwrap_or(1);
-    let max_ticks = min_ticks.saturating_add(1);
-    let elapsed = kernel_ticks().saturating_sub(block_start_tick);
-    if elapsed < min_ticks || elapsed > max_ticks {
+    let budget = sleep_budget_ns_from_millis(timeout_ms).unwrap_or(timeout_ms * 1_000_000);
+    let slack = irq_period_ns().unwrap_or(1_000_000);
+    let elapsed_ns = monotonic_ns().saturating_sub(block_start_ns);
+    let max_ns = budget.saturating_add(slack.saturating_mul(3));
+    if elapsed_ns < budget || elapsed_ns > max_ns {
         kernel_log_fmt(format_args!(
-            "[M9.J] poll timeout ticks={} (expected {}..={})\n",
-            elapsed, min_ticks, max_ticks
+            "[M9.J] poll timeout tsc_ns={} (expected {}..={})\n",
+            elapsed_ns, budget, max_ns
         ));
-        fatal_kernel_error("m9 runtime poll zero-fds tick window");
+        fatal_kernel_error("m9 runtime poll zero-fds monotonic window");
     }
 }
 
@@ -254,15 +263,17 @@ pub(crate) fn observe_linux_console_write_bytes(bytes: &[u8]) {
     const WALL_END: &[u8] = b"[M9.J] nanosleep wall end";
     if bytes_contains(bytes, WALL_START) {
         WALL_TICKS_START.store(kernel_ticks(), Ordering::Relaxed);
+        WALL_TSC_START.store(monotonic_ns(), Ordering::Relaxed);
     }
     if bytes_contains(bytes, WALL_END) {
-        let start = WALL_TICKS_START.load(Ordering::Relaxed);
-        let elapsed = kernel_ticks().saturating_sub(start);
-        kernel_log_fmt(format_args!("[M9.J] nanosleep wall ticks={}\n", elapsed));
-        let min_ticks = ticks_from_millis(1000).ok().unwrap_or(1000);
-        let max_ticks = min_ticks + ticks_from_millis(50).ok().unwrap_or(50);
-        if elapsed < min_ticks || elapsed > max_ticks {
-            fatal_kernel_error("m9 runtime nanosleep wall tick window");
+        let irq_ticks = kernel_ticks().saturating_sub(WALL_TICKS_START.load(Ordering::Relaxed));
+        let tsc_ns = monotonic_ns().saturating_sub(WALL_TSC_START.load(Ordering::Relaxed));
+        kernel_log_fmt(format_args!(
+            "[M9.J] nanosleep wall irq_ticks={} tsc_ns={}\n",
+            irq_ticks, tsc_ns
+        ));
+        if !(1_000_000_000..=1_050_000_000).contains(&tsc_ns) {
+            fatal_kernel_error("m9 runtime nanosleep wall monotonic window");
         }
     }
 }
