@@ -16,9 +16,7 @@ use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
 
-use crate::m7_fixture_tcp::{
-    FixtureTlsCert, M9HttpService, M9RefusedService, TcpEchoService, TlsService,
-};
+use crate::m7_fixture_tcp::{FixtureTlsCert, M9HttpService, TcpEchoService, TlsService};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 
@@ -173,7 +171,6 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
     let mut tls_service = TlsService::new(&mut sockets, tls_handle, tls_cert);
 
     let mut m9_http_service = None;
-    let mut m9_refused_service = None;
     if options.m9_profile {
         let m9_tcp = tcp::Socket::new(
             tcp::SocketBuffer::new(vec![0u8; 8192]),
@@ -181,13 +178,6 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         );
         let m9_handle = sockets.add(m9_tcp);
         m9_http_service = Some(M9HttpService::new(&mut sockets, m9_handle));
-
-        let m9_refused_tcp = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0u8; 8192]),
-            tcp::SocketBuffer::new(vec![0u8; 8192]),
-        );
-        let m9_refused_handle = sockets.add(m9_refused_tcp);
-        m9_refused_service = Some(M9RefusedService::new(&mut sockets, m9_refused_handle));
     }
 
     let mut timestamp = Instant::from_millis(0);
@@ -228,9 +218,6 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         tls_service.poll(&mut sockets);
         if let Some(http) = m9_http_service.as_mut() {
             http.poll(&mut sockets);
-        }
-        if let Some(refused) = m9_refused_service.as_mut() {
-            refused.poll(&mut sockets);
         }
 
         for event in device.drain_events() {
