@@ -47,18 +47,10 @@ static BASELINE_POLL: AtomicU32 = AtomicU32::new(0);
 static BASELINE_FD: AtomicU32 = AtomicU32::new(0);
 static NANOSLEEP_LOGGED: AtomicU32 = AtomicU32::new(0);
 static POLL_ZERO_LOGGED: AtomicU32 = AtomicU32::new(0);
-static IRQ_CROSSCHECK_DONE: AtomicU32 = AtomicU32::new(0);
-static SLEEP_BLOCK_PIT: AtomicU64 = AtomicU64::new(0);
 static OBS_PID: AtomicU64 = AtomicU64::new(0);
 static OBS_NSEC: AtomicU64 = AtomicU64::new(0);
 static OBS_BLOCK_START: AtomicU64 = AtomicU64::new(0);
-
-pub(crate) fn mark_sleep_block_start() {
-    SLEEP_BLOCK_PIT.store(
-        u64::from(crate::time::calibration::pit_read_count()),
-        Ordering::Relaxed,
-    );
-}
+static WALL_TICKS_START: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn record_nanosleep_self_test(pid: u64, ts: Timespec, block_start_tick: u64) {
     OBS_PID.store(pid, Ordering::Relaxed);
@@ -87,13 +79,7 @@ pub(crate) fn on_nanosleep_complete(pid: u64, ts: Timespec, block_start_tick: u6
     if NANOSLEEP_LOGGED.swap(1, Ordering::Relaxed) != 0 {
         return;
     }
-    if IRQ_CROSSCHECK_DONE.swap(1, Ordering::Relaxed) == 0 {
-        crate::time::calibration::crosscheck_irq_ticks_for_elapsed(
-            block_start_tick,
-            SLEEP_BLOCK_PIT.load(Ordering::Relaxed) as u16,
-        );
-    }
-    let min_ticks = ticks_from_millis(20).unwrap_or(1);
+    let min_ticks = ticks_from_millis(20).ok().unwrap_or(1);
     let max_ticks = min_ticks.saturating_add(1);
     let elapsed = kernel_ticks().saturating_sub(block_start_tick);
     if elapsed < min_ticks || elapsed > max_ticks {
@@ -113,7 +99,7 @@ pub(crate) fn on_poll_timeout_complete(pid: u64, timeout_ms: u64, block_start_ti
     if POLL_ZERO_LOGGED.swap(1, Ordering::Relaxed) != 0 {
         return;
     }
-    let min_ticks = ticks_from_millis(timeout_ms).unwrap_or(1);
+    let min_ticks = ticks_from_millis(timeout_ms).ok().unwrap_or(1);
     let max_ticks = min_ticks.saturating_add(1);
     let elapsed = kernel_ticks().saturating_sub(block_start_tick);
     if elapsed < min_ticks || elapsed > max_ticks {
@@ -250,7 +236,6 @@ pub(crate) fn start_m9_linux_runtime_self_test(page_allocator: PageAllocator) ->
     crate::interrupt::timer::initialize_timer();
     // `m3-entry-self-test` (pulled in by this feature) skips calibration inside `initialize_timer`.
     crate::time::calibration::calibrate_apic_tick();
-    IRQ_CROSSCHECK_DONE.store(0, Ordering::Relaxed);
     RUNTIME_CYCLE.store(0, Ordering::Relaxed);
     let _ = launch_probe(allocator, kernel_stack_top);
     let frame_pointer =
@@ -258,4 +243,26 @@ pub(crate) fn start_m9_linux_runtime_self_test(page_allocator: PageAllocator) ->
     unsafe { restore_task_context(frame_pointer) }
 }
 
-pub(crate) fn observe_linux_console_write_bytes(_bytes: &[u8]) {}
+fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+pub(crate) fn observe_linux_console_write_bytes(bytes: &[u8]) {
+    const WALL_START: &[u8] = b"[M9.J] nanosleep wall start";
+    const WALL_END: &[u8] = b"[M9.J] nanosleep wall end";
+    if bytes_contains(bytes, WALL_START) {
+        WALL_TICKS_START.store(kernel_ticks(), Ordering::Relaxed);
+    }
+    if bytes_contains(bytes, WALL_END) {
+        let start = WALL_TICKS_START.load(Ordering::Relaxed);
+        let elapsed = kernel_ticks().saturating_sub(start);
+        kernel_log_fmt(format_args!("[M9.J] nanosleep wall ticks={}\n", elapsed));
+        let min_ticks = ticks_from_millis(1000).ok().unwrap_or(1000);
+        let max_ticks = min_ticks + ticks_from_millis(50).ok().unwrap_or(50);
+        if elapsed < min_ticks || elapsed > max_ticks {
+            fatal_kernel_error("m9 runtime nanosleep wall tick window");
+        }
+    }
+}

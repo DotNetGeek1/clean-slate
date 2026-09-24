@@ -198,6 +198,37 @@ pub(crate) fn handle_sys_write(
     let pid = ctx.pid;
     let generation = ctx.instance_generation;
 
+    linux_fd::ensure_open_fd(pid, generation, fd)?;
+
+    #[cfg(feature = "m9-linux-socket")]
+    if let Ok(linux_fd::LinuxReadKind::Socket(socket)) =
+        linux_fd::read_kind_for_fd(pid, generation, fd)
+    {
+        let total = clamp_write_count(count);
+        if total == 0 {
+            return Ok(0);
+        }
+        let mut buf = [0u8; LINUX_WRITE_MAX_BYTES];
+        let mut copied = 0usize;
+        let mut scratch = [0u8; LINUX_WRITE_CHUNK_BYTES];
+        while copied < total {
+            let chunk_ptr = user_ptr.checked_add(copied as u64).ok_or(EFAULT)?;
+            let want = (total - copied).min(LINUX_WRITE_CHUNK_BYTES);
+            let n = copy_user_bytes(chunk_ptr, want as u64, &mut scratch)?;
+            buf[copied..copied + n].copy_from_slice(&scratch[..n]);
+            copied += n;
+        }
+        return crate::process::linux_socket::write_socket(
+            request,
+            ctx,
+            pid,
+            generation,
+            fd,
+            socket,
+            &buf[..total],
+        );
+    }
+
     let projection = linux_fd::projection_for(pid, generation, fd)?;
     ensure_fd_open(Ok(projection))?;
 

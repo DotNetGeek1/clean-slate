@@ -7,9 +7,23 @@
 
 use crate::arch::x86_64::apic::enable_local_apic;
 use crate::arch::x86_64::apic::mask_legacy_pic;
+#[cfg(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test",
+    feature = "m3-address-space-self-test",
+    feature = "m3-entry-self-test",
+    feature = "m3-ipc-self-test"
+))]
 use crate::arch::x86_64::apic::program_local_apic_timer;
-use crate::arch::x86_64::apic::APIC_TIMER_INITIAL_COUNT;
 use crate::diagnostics::serial::serial_write_fmt;
+use crate::time::apic_timer_initial_count;
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+use crate::time::irq_period_ns;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 
@@ -48,7 +62,6 @@ pub(super) fn increment_kernel_ticks() -> u64 {
 pub(crate) fn initialize_timer() {
     mask_legacy_pic();
     enable_local_apic();
-    program_local_apic_timer();
     // M3 entry self-tests boot through a minimal timer path without the PIT ch2
     // wiring `calibrate_apic_tick` needs; calibrating there hangs (not ~50ms).
     #[cfg(not(any(
@@ -59,7 +72,32 @@ pub(crate) fn initialize_timer() {
         feature = "m3-entry-self-test",
         feature = "m3-ipc-self-test"
     )))]
-    crate::time::calibration::calibrate_apic_tick();
+    {
+        crate::time::calibration::calibrate_apic_tick();
+    }
+    #[cfg(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test"
+    ))]
+    {
+        crate::time::calibration::apply_fallback_apic_timer_config();
+        program_local_apic_timer();
+    }
+    #[cfg(not(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test"
+    )))]
+    {
+        // `calibrate_apic_tick` arms the production reload count.
+    }
 }
 
 // Boot-tail entry point: self-test builds exit QEMU before reaching it.
@@ -75,20 +113,22 @@ pub(crate) fn initialize_timer() {
     allow(dead_code)
 )]
 pub(crate) fn report_timer_contract() {
+    let initial_count = apic_timer_initial_count();
     #[cfg(not(any(
         feature = "m1-self-test",
         feature = "m2-double-fault-self-test",
         feature = "m2-timer-self-test"
     )))]
-    if let Some(counter_hz) = crate::time::apic_counter_hz() {
+    if let Some(tick_ns) = irq_period_ns() {
+        let counter_hz = crate::time::apic_counter_hz().unwrap_or(0);
         serial_write_fmt(format_args!(
-            "[TIME] contract=lapic periodic divide=16 initial_count={} counter_hz={}\n",
-            APIC_TIMER_INITIAL_COUNT, counter_hz
+            "[TIME] contract=lapic periodic divide=16 initial_count={} counter_hz={} tick_ns={}\n",
+            initial_count, counter_hz, tick_ns
         ));
         return;
     }
     serial_write_fmt(format_args!(
         "[TIME] contract=lapic periodic divide=16 initial_count={} tick-rate=uncalibrated\n",
-        APIC_TIMER_INITIAL_COUNT
+        initial_count
     ));
 }

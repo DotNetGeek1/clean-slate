@@ -29,6 +29,7 @@ pub(crate) mod linux_rootfs;
     feature = "m2-timer-self-test"
 )))]
 pub(crate) mod linux_signal;
+pub(crate) mod linux_socket;
 pub(crate) mod linux_stdio_m9_payload;
 pub(crate) mod personality;
 

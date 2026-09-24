@@ -195,7 +195,9 @@ syscall dispatch (#93) → `write`/`exit` (#94) → production teardown. Both de
 kernel tasks keep running alongside Linux (scheduler slot 2). Controller-owned
 re-Start yields a new generation and a fresh fd table. M9 #147 generalizes the
 fd table into open descriptions (see [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md)
-"#147 fd / open-description core"). See
+"#147 fd / open-description core"). M9 #105 adds Linux `socket`/`bind`/`connect`/`sendto`
+plus `#147` read/write data plane onto M7 (see [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md)
+"M9 #105" and [NETWORK.md](NETWORK.md)). See
 [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md) "M8.7".
 
 Demo-task boot completion (`[M2  ] PASS`) treats scheduler slots in

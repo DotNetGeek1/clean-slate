@@ -11,11 +11,18 @@ use super::{authorize_current_class, capability_space_mut, current_holder, with_
 
 pub(crate) const REVOKE_OP_REVOKE: u64 = 1;
 pub(crate) const REVOKE_OP_PROBE: u64 = 2;
+/// M6.6 self-test only: returns 1 once both reader fixtures probed, else 0.
+#[cfg(feature = "m6-revocation-self-test")]
+pub(crate) const REVOKE_OP_WAIT_READERS: u64 = 3;
 
 pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
     match frame.rdi {
         REVOKE_OP_REVOKE => handle_revoke(frame),
         REVOKE_OP_PROBE => handle_probe(frame),
+        #[cfg(feature = "m6-revocation-self-test")]
+        REVOKE_OP_WAIT_READERS => {
+            crate::selftest::m6_revocation::handle_wait_for_readers(frame);
+        }
         _ => frame.rax = SYSCALL_EINVAL,
     }
 }
@@ -87,6 +94,8 @@ fn handle_probe(frame: &mut SyscallContext) {
     match authorize_current_class(raw_handle, class, required) {
         Ok(_) => {
             kernel_log_fmt(format_args!("[CAP ] probe allowed holder={}\n", holder.0));
+            #[cfg(feature = "m6-revocation-self-test")]
+            crate::selftest::m6_revocation::note_reader_probe(holder);
             frame.rax = 0;
         }
         Err(error) => {

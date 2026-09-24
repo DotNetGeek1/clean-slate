@@ -1,23 +1,32 @@
-//! APIC timer calibration against PIT channel 2 (#103), interrupts masked throughout.
+//! APIC timer calibration against PIT channel 2 (#163), interrupts masked throughout.
 
-#![cfg_attr(not(feature = "m9-linux-runtime-self-test"), allow(dead_code))]
+#![cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test"
+    ),
+    allow(dead_code)
+)]
 
-use crate::arch::x86_64::apic::local_apic_timer_current_count;
-use crate::arch::x86_64::apic::APIC_TIMER_INITIAL_COUNT;
+use crate::arch::x86_64::apic::{
+    local_apic_timer_current_count, prepare_local_apic_timer_for_calibration,
+    program_local_apic_timer,
+};
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::log::kernel_log_fmt;
-#[cfg(feature = "m9-linux-runtime-self-test")]
-use crate::diagnostics::qemu::fatal_kernel_error;
-#[cfg(feature = "m9-linux-runtime-self-test")]
-use crate::interrupt::timer::kernel_ticks;
-use crate::time::set_apic_counter_hz;
+use crate::time::{
+    set_apic_counter_hz, set_apic_timer_initial_count, APIC_TIMER_FALLBACK_INITIAL_COUNT,
+    QEMU_APIC_COUNTER_HZ_FALLBACK,
+};
 use core::arch::asm;
 
 const PIT_HZ: u64 = 1_193_182;
 const CALIBRATION_MS: u64 = 50;
 const PIT_POLL_MAX: u32 = 50_000_000;
-/// QEMU local APIC timer counter rate with divide-by-16 (1 GHz / 16).
-const QEMU_APIC_COUNTER_HZ_FALLBACK: u64 = 62_500_000;
 const APIC_COUNTER_HZ_MIN: u64 = 10_000_000;
 const APIC_COUNTER_HZ_MAX: u64 = 500_000_000;
 
@@ -51,7 +60,7 @@ fn pit_write_reload(value: u16) {
 }
 
 /// Latch channel 2 count (control byte `0x80`), then read data port 0x42.
-pub(crate) fn pit_read_count() -> u16 {
+fn pit_read_count() -> u16 {
     unsafe {
         pit_write_control(0x80);
         let low: u8;
@@ -93,49 +102,57 @@ fn pit_elapsed_ticks(start: u16, now: u16) -> u64 {
     u64::from(start.wrapping_sub(now))
 }
 
-/// Busy-wait using PIT channel 2 for sub-IRQ-tick delays (interrupts may be off).
-pub(crate) fn busy_wait_pit_ns(target_ns: u64) {
-    if target_ns == 0 {
-        return;
-    }
-    let pit_ticks = target_ns
-        .saturating_mul(PIT_HZ)
-        .div_ceil(1_000_000_000)
-        .max(1);
-    let start = pit_read_count();
-    loop {
-        if pit_elapsed_ticks(start, pit_read_count()) >= pit_ticks {
-            break;
-        }
-    }
+fn derive_initial_count(counter_hz: u64) -> u32 {
+    let ic = counter_hz / 1000;
+    u32::try_from(ic.max(1)).unwrap_or(APIC_TIMER_FALLBACK_INITIAL_COUNT)
 }
 
-fn log_apic_time(counter_hz: u64) {
-    let ic = u64::from(APIC_TIMER_INITIAL_COUNT);
-    let irq_tick_ms = (1000u128 * ic as u128).div_ceil(counter_hz as u128);
+fn log_apic_time(counter_hz: u64, initial_count: u32) {
+    let tick_ns = crate::time::irq_period_ns_from(counter_hz, initial_count).unwrap_or(0);
     kernel_log_fmt(format_args!(
-        "[TIME] apic counter_hz={} initial_count={} irq_tick_ms={}\n",
-        counter_hz, ic, irq_tick_ms
+        "[TIME] apic counter_hz={} initial_count={} tick_ns={}\n",
+        counter_hz, initial_count, tick_ns
     ));
 }
 
-fn apply_apic_counter_hz(counter_hz: u64) {
-    if !(APIC_COUNTER_HZ_MIN..=APIC_COUNTER_HZ_MAX).contains(&counter_hz) {
+fn apply_apic_timer_config(counter_hz: u64) {
+    let (hz, initial_count) = if (APIC_COUNTER_HZ_MIN..=APIC_COUNTER_HZ_MAX).contains(&counter_hz) {
+        (counter_hz, derive_initial_count(counter_hz))
+    } else {
         kernel_log_fmt(format_args!(
             "[TIME] apic calibration implausible measured={} fallback={}\n",
             counter_hz, QEMU_APIC_COUNTER_HZ_FALLBACK
         ));
-        set_apic_counter_hz(QEMU_APIC_COUNTER_HZ_FALLBACK);
-        log_apic_time(QEMU_APIC_COUNTER_HZ_FALLBACK);
-        return;
-    }
-    set_apic_counter_hz(counter_hz);
-    log_apic_time(counter_hz);
+        (
+            QEMU_APIC_COUNTER_HZ_FALLBACK,
+            APIC_TIMER_FALLBACK_INITIAL_COUNT,
+        )
+    };
+    set_apic_counter_hz(hz);
+    set_apic_timer_initial_count(initial_count);
+    log_apic_time(hz, initial_count);
+}
+
+/// Apply the QEMU fallback rate and ~1 ms reload without PIT measurement.
+#[cfg_attr(
+    not(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn apply_fallback_apic_timer_config() {
+    apply_apic_timer_config(QEMU_APIC_COUNTER_HZ_FALLBACK);
 }
 
 /// Measure APIC down-counter rate (Hz) using PIT channel 2 as reference.
 pub(crate) fn calibrate_apic_tick() {
     without_interrupts(|| {
+        prepare_local_apic_timer_for_calibration();
         pit_program_channel2();
         let target_pit_delta = (PIT_HZ * CALIBRATION_MS) / 1000;
         let start_pit = pit_read_count();
@@ -145,7 +162,8 @@ pub(crate) fn calibrate_apic_tick() {
             polls = polls.saturating_add(1);
             if polls > PIT_POLL_MAX {
                 kernel_log_fmt(format_args!("[TIME] apic calibration pit-timeout\n"));
-                apply_apic_counter_hz(QEMU_APIC_COUNTER_HZ_FALLBACK);
+                apply_apic_timer_config(QEMU_APIC_COUNTER_HZ_FALLBACK);
+                program_local_apic_timer();
                 return;
             }
             let elapsed = pit_elapsed_ticks(start_pit, pit_read_count());
@@ -157,7 +175,8 @@ pub(crate) fn calibrate_apic_tick() {
         let apic_delta = u64::from(start_apic.wrapping_sub(end_apic));
         if apic_delta == 0 {
             kernel_log_fmt(format_args!("[TIME] apic calibration zero-delta\n"));
-            apply_apic_counter_hz(QEMU_APIC_COUNTER_HZ_FALLBACK);
+            apply_apic_timer_config(QEMU_APIC_COUNTER_HZ_FALLBACK);
+            program_local_apic_timer();
             return;
         }
         let counter_hz = match apic_delta
@@ -166,32 +185,12 @@ pub(crate) fn calibrate_apic_tick() {
         {
             Some(value) if value > 0 => value,
             _ => {
-                apply_apic_counter_hz(QEMU_APIC_COUNTER_HZ_FALLBACK);
+                apply_apic_timer_config(QEMU_APIC_COUNTER_HZ_FALLBACK);
+                program_local_apic_timer();
                 return;
             }
         };
-        apply_apic_counter_hz(counter_hz);
+        apply_apic_timer_config(counter_hz);
+        program_local_apic_timer();
     });
-}
-
-/// Compare IRQ ticks elapsed since `block_start_tick` to PIT (scheduler already running).
-#[cfg(feature = "m9-linux-runtime-self-test")]
-pub(crate) fn crosscheck_irq_ticks_for_elapsed(block_start_tick: u64, pit_at_block: u16) {
-    let irq_elapsed = kernel_ticks().saturating_sub(block_start_tick);
-    let pit_elapsed = pit_elapsed_ticks(pit_at_block, pit_read_count());
-    let counter_hz = crate::time::apic_counter_hz().unwrap_or(0);
-    let ic = u64::from(APIC_TIMER_INITIAL_COUNT);
-    let expected_irq = if counter_hz == 0 {
-        0
-    } else {
-        (pit_elapsed * counter_hz) / (PIT_HZ * ic)
-    };
-    kernel_log_fmt(format_args!(
-        "[TIME] irq crosscheck irq_ticks={} pit_expect={} pit_raw={}\n",
-        irq_elapsed, expected_irq, pit_elapsed
-    ));
-    let diff = irq_elapsed.abs_diff(expected_irq);
-    if irq_elapsed == 0 || diff > 1 {
-        fatal_kernel_error("irq tick crosscheck vs PIT failed");
-    }
 }

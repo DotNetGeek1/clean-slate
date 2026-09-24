@@ -113,6 +113,8 @@ pub(crate) mod m9_linux_fs;
 pub(crate) mod m9_linux_proc;
 #[cfg(feature = "m9-linux-runtime-self-test")]
 pub(crate) mod m9_linux_runtime;
+#[cfg(feature = "m9-linux-socket-self-test")]
+pub(crate) mod m9_linux_socket;
 #[cfg(feature = "m9-low-va-self-test")]
 pub(crate) mod m9_low_va;
 #[cfg(feature = "m9-rootfs-self-test")]
@@ -124,6 +126,7 @@ pub(crate) mod m9_syscall_fail_closed;
     feature = "m9-syscall-fail-closed-self-test",
     feature = "m9-block-wake-self-test",
     feature = "m9-fd-core-self-test",
+    feature = "m9-linux-socket-self-test",
     feature = "m9-linux-proc-self-test",
     feature = "m9-linux-fs-self-test"
 ))]

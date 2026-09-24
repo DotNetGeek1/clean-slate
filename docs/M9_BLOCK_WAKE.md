@@ -24,14 +24,9 @@ Each thread’s `kernel_stack_top` is published to `SYSCALL_KERNEL_STACK_TOP` on
 
 `Deadline` is an absolute value from `kernel_ticks()` (APIC timer increments in `interrupt::timer`). This is **not** wall-clock nanoseconds.
 
-- **Rate today:** one tick per local APIC timer interrupt (`interrupt::timer::increment_kernel_ticks` on the periodic LAPIC path). The divisor/initial count are fixed at timer init and logged as `tick-rate=uncalibrated` in self-tests.
-- **#103 (`nanosleep` / `poll`):** Linux handlers convert timespec/ms to absolute
-  `Deadline` values using `time::ticks_per_second()` (PIT-calibrated APIC rate at
-  boot). Stored per-process deadlines survive syscall restart (`block_linux_syscall`).
-- **Calibration (#103 addendum):** `time::calibration::calibrate_apic_tick()` runs
-  with interrupts disabled, polling PIT channel 2 against the APIC current-count
-  register; logs `[TIME] apic tick calibrated: ticks/s=N ref=pit` (deterministic
-  fallback when the sample window yields zero APIC delta).
+- **Rate today:** one tick per local APIC timer interrupt (`interrupt::timer::increment_kernel_ticks` on the periodic LAPIC path). Timer init calibrates the LAPIC counter (PIT sample) and derives the reload count for a ~1 ms IRQ; self-tests log `initial_count=62500 tick-rate=uncalibrated` when calibration is skipped.
+- **#103 (`nanosleep` / `poll`):** Linux lanes convert between `kernel_ticks()` and requested durations using the kernel tick period (`kernel/src/time`, ceil-rounded tick deadlines; `NET_SUBOP_TICK_PERIOD_NS` for net-service).
+- **Supervisors:** recovery bootstrap publishes `tick_period_ns` so CPL3 liveness windows stay wall-time stable across tick-rate changes.
 
 ## Idle
 

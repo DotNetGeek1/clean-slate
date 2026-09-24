@@ -167,6 +167,18 @@ mod tests {
     }
 
     #[test]
+    fn socket_kind_linux_variants_roundtrip_open_wire() {
+        for kind in [SocketKind::LinuxUdp, SocketKind::LinuxTcp] {
+            let wire = NetworkRequest::Open { kind }.encode();
+            let decoded = NetworkRequest::decode(&wire).unwrap();
+            assert!(matches!(decoded, NetworkRequest::Open { kind: k } if k == kind));
+        }
+        assert!(SocketKind::LinuxUdp.is_udp());
+        assert!(!SocketKind::LinuxTcp.is_udp());
+        assert!(SocketKind::Udp.is_udp());
+    }
+
+    #[test]
     fn session_id_packs_generation_and_index() {
         let session = SessionId::new(SessionGeneration::new(0xABCD), 0xFFFF_FFFF);
         assert_eq!(session.generation(), SessionGeneration::new(0xABCD));
@@ -195,6 +207,12 @@ mod tests {
         let name = BoundedHostname::try_from_str(FIXTURE_HOSTNAME).unwrap();
         let requests = [
             NetworkRequest::Resolve { name },
+            NetworkRequest::Open {
+                kind: SocketKind::LinuxUdp,
+            },
+            NetworkRequest::Open {
+                kind: SocketKind::LinuxTcp,
+            },
             NetworkRequest::Open {
                 kind: SocketKind::Tcp,
             },

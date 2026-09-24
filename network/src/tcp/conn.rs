@@ -19,13 +19,13 @@ pub const TCP_RECV_BUFFER_BYTES: usize = 4096;
 /// Retransmission attempts before `NetworkError::Timeout`.
 pub const TCP_MAX_RETRIES: u32 = 5;
 
-/// Fixed retransmission timeout in monotonic ticks.
+/// Retransmission timeout (~50 ms at 1 ms LAPIC tick).
 pub const TCP_RTO_TICKS: u64 = 50;
 
-/// TIME-WAIT duration before a closed connection slot is reusable.
+/// TIME-WAIT duration before a closed connection slot is reusable (~200 ms).
 pub const TCP_TIME_WAIT_TICKS: u64 = 200;
 
-/// Active-open timeout while waiting for SYN-ACK.
+/// Active-open timeout while waiting for SYN-ACK (~500 ms).
 pub const TCP_CONNECT_TIMEOUT_TICKS: u64 = 500;
 
 /// Fixed-capacity byte ring.
@@ -47,6 +47,10 @@ impl<const N: usize> RingBuf<N> {
 
     pub const fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    pub const fn filled(&self) -> usize {
+        self.len
     }
 
     pub fn free_space(&self) -> usize {
@@ -508,6 +512,10 @@ impl TcpConnection {
 
     pub fn has_buffered_recv(&self) -> bool {
         !self.recv_buf.is_empty()
+    }
+
+    pub fn recv_buffered_len(&self) -> usize {
+        self.recv_buf.filled()
     }
 
     pub fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetworkError> {

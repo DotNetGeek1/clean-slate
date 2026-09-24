@@ -205,7 +205,6 @@ fn handle_sys_nanosleep(
         if rem_ptr != 0 {
             write_zero_timespec(rem_ptr)?;
         }
-        linux_mem::clear_pending_sleep_timing(ctx.pid, ctx.instance_generation);
         linux_mem::set_pending_sleep_deadline(ctx.pid, ctx.instance_generation, None);
         return Ok(0);
     }
@@ -217,19 +216,9 @@ fn handle_sys_nanosleep(
             let start_tick = kernel_ticks();
             let abs = start_tick.checked_add(ticks).ok_or(EINVAL)?;
             let d = Deadline(abs);
-            let request_ns = (ts.tv_sec as u64)
-                .saturating_mul(1_000_000_000)
-                .saturating_add(ts.tv_nsec as u64);
-            linux_mem::set_pending_sleep_timing(
-                ctx.pid,
-                ctx.instance_generation,
-                request_ns,
-                start_tick,
-            );
             linux_mem::set_pending_sleep_deadline(ctx.pid, ctx.instance_generation, Some(d));
             #[cfg(feature = "m9-linux-runtime-self-test")]
             {
-                crate::selftest::m9_linux_runtime::mark_sleep_block_start();
                 let block_start = abs.saturating_sub(ticks);
                 crate::selftest::m9_linux_runtime::record_nanosleep_self_test(
                     ctx.pid,
@@ -241,8 +230,6 @@ fn handle_sys_nanosleep(
         }
     };
     if kernel_ticks() >= deadline.0 {
-        linux_mem::finish_pending_nanosleep_wall_time(ctx.pid, ctx.instance_generation);
-        linux_mem::clear_pending_sleep_timing(ctx.pid, ctx.instance_generation);
         linux_mem::set_pending_sleep_deadline(ctx.pid, ctx.instance_generation, None);
         if rem_ptr != 0 {
             write_zero_timespec(rem_ptr)?;
@@ -489,7 +476,7 @@ fn timespec_from_irq_ticks(ticks: u64) -> Result<Timespec, LinuxErrno> {
         });
     }
     let hz = crate::time::apic_counter_hz().ok_or(EINVAL)? as u128;
-    let ic = u128::from(crate::arch::x86_64::apic::APIC_TIMER_INITIAL_COUNT);
+    let ic = u128::from(crate::time::apic_timer_initial_count());
     let ns_total = (ticks as u128)
         .checked_mul(ic)
         .and_then(|n| n.checked_mul(1_000_000_000u128))
