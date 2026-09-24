@@ -348,6 +348,9 @@ pub(crate) fn launch_linux_process_from_spec(
         image,
         page_table_frames,
     )?;
+    #[cfg(feature = "m9-linux-socket")]
+    crate::process::linux_socket::grant_linux_network_capabilities(launched.pid)
+        .map_err(|_| LinuxImageError::Registry("linux launch: network capability grant failed"))?;
     #[cfg(feature = "m9-rootfs")]
     crate::process::linux_fs::grant_linux_tmp_object_capabilities(launched.pid).map_err(|_| {
         LinuxImageError::Registry("linux launch: tmp object capability grant failed")

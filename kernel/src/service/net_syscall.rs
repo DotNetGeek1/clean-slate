@@ -419,8 +419,13 @@ fn handle_service_complete(frame: &mut SyscallContext) {
             ptr::copy_nonoverlapping(frame.r8 as *const u8, payload.as_mut_ptr(), payload_len);
         }
     }
-    match net_bridge_mut().service_complete(frame.rdx, response, &payload[..payload_len]) {
-        Ok(()) => frame.rax = 0,
+    let request_id = frame.rdx;
+    match net_bridge_mut().service_complete(request_id, response, &payload[..payload_len]) {
+        Ok(()) => {
+            // #105: wake blocked Linux socket syscalls waiting on this request.
+            let _woken = crate::process::linux_socket::notify_request_complete(request_id);
+            frame.rax = 0;
+        }
         Err(error) => frame.rax = bridge_error_status(error),
     }
 }

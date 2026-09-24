@@ -49,6 +49,10 @@ pub const ECHILD: LinuxErrno = LinuxErrno(10);
 pub const EAGAIN: LinuxErrno = LinuxErrno(11);
 /// Broken pipe (#102).
 pub const EPIPE: LinuxErrno = LinuxErrno(32);
+/// No space left on device.
+pub const ENOSPC: LinuxErrno = LinuxErrno(28);
+/// Stale file handle (#105).
+pub const ESTALE: LinuxErrno = LinuxErrno(116);
 
 /// Maximum magnitude Linux treats as an errno when decoding RAX (`-1` … `-4095`).
 pub const LINUX_ERRNO_MAX: i32 = 4095;

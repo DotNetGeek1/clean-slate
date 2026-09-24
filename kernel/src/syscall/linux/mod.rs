@@ -25,6 +25,7 @@ pub(crate) mod fs_io;
 pub(crate) mod process;
 pub(crate) mod runtime;
 pub(crate) mod socket;
+pub(crate) mod socket_copy;
 pub(crate) mod table;
 pub(crate) mod user_copy;
 pub(crate) mod write;

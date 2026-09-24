@@ -49,6 +49,10 @@ impl<const N: usize> RingBuf<N> {
         self.len == 0
     }
 
+    pub const fn filled(&self) -> usize {
+        self.len
+    }
+
     pub fn free_space(&self) -> usize {
         N - self.len
     }
@@ -508,6 +512,10 @@ impl TcpConnection {
 
     pub fn has_buffered_recv(&self) -> bool {
         !self.recv_buf.is_empty()
+    }
+
+    pub fn recv_buffered_len(&self) -> usize {
+        self.recv_buf.filled()
     }
 
     pub fn receive(&mut self, out: &mut [u8]) -> Result<usize, NetworkError> {

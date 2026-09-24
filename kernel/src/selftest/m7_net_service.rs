@@ -195,6 +195,24 @@ pub(crate) fn on_holder_exit_acked(holder_pid: u64, sessions: u64, pending: u64)
     }));
 }
 
+#[cfg(feature = "m9-linux-socket-self-test")]
+pub(crate) fn init_minimal_state_for_m9_socket(lifecycle_capability: u64) {
+    set_state(Some(M7NetSelfTestState {
+        lifecycle_capability,
+        phase: M7Phase::AwaitClientEcho,
+        session_id_raw: 0,
+        service_generation: 1,
+        service_pid: 0,
+        fixtures: M7FixturePids {
+            client: 0,
+            unauthorized: 0,
+            inflight: 0,
+            stale: 0,
+            capacity: 0,
+        },
+    }));
+}
+
 pub(crate) fn network_service_bootstrap(
     service: ServiceId,
 ) -> Result<NetworkServiceBootstrap, &'static str> {
@@ -398,6 +416,15 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
             NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *const NetworkServiceBootstrap,
         )
     };
+    #[cfg(feature = "m9-linux-socket-self-test")]
+    if report.mode == NETWORK_SERVICE_MODE_ACCEPTANCE {
+        if report.result_code != NETWORK_SERVICE_RESULT_OK {
+            fatal_kernel_error("m9 network service acceptance failed");
+        }
+        kernel_log_line("[NET ] service ready");
+        return start_current_scheduler_thread()
+            .unwrap_or_else(|message| fatal_kernel_error(message));
+    }
     let test_state = state();
     let kernel_root = kernel_root_frame();
     let mut session_id_raw = test_state.session_id_raw;

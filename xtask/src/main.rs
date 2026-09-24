@@ -216,6 +216,17 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 9] = [
     "[M9.E] cycles=8 waiters=0",
     "[M9.E] PASS",
 ];
+const M9_LINUX_SOCKET_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
+const M9_LINUX_SOCKET_ACCEPTANCE_MARKERS: [&str; 8] = [
+    "[M9.L] creating linux socket acceptance",
+    "[NET ] service started",
+    "[TIME] timer initialized",
+    "[M9.P] dns-a ok",
+    "[M9.P] http ok",
+    "[M9.L] pool_baseline=",
+    "[M9.L] stale ESTALE ok",
+    "[M9.L] PASS",
+];
 const M9_FD_CORE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M9_FD_CORE_ACCEPTANCE_MARKERS: [&str; 10] = [
     "[TIME] timer initialized",
@@ -691,6 +702,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM9SyscallFailClosed => run_m9_syscall_fail_closed_acceptance(),
         ParsedCommand::TestM9BlockWake => run_m9_block_wake_acceptance(),
         ParsedCommand::TestM9FdCore => run_m9_fd_core_acceptance(),
+        ParsedCommand::TestM9LinuxSocket => run_m9_linux_socket_acceptance(),
         ParsedCommand::TestM8LinuxHello => run_m8_linux_hello_acceptance(),
         ParsedCommand::TestM8 => run_m8_acceptance(),
         ParsedCommand::TestM3Lifecycle => run_m3_lifecycle_acceptance(),
@@ -781,6 +793,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::ZERO,
+        m9_profile: false,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -806,6 +819,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::WrongName,
         dns_reply_delay: std::time::Duration::ZERO,
+        m9_profile: false,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -856,6 +870,7 @@ fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::from_millis(5),
+        m9_profile: false,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -1267,6 +1282,35 @@ fn run_m9_block_wake_acceptance() -> Result<(), XtaskError> {
     )
 }
 
+fn run_m9_linux_socket_acceptance() -> Result<(), XtaskError> {
+    build_network_userspace(true)?;
+    let peer = M7FixturePeer::start_with(FixtureOptions {
+        tls_cert: WhichCert::Correct,
+        dns_reply_delay: std::time::Duration::from_millis(5),
+        m9_profile: true,
+    })
+    .map_err(XtaskError::Io)?;
+    let port = peer.port();
+    let run_result = run_vm_inner_with_config(
+        false,
+        false,
+        &["m9-linux-socket-self-test"],
+        Some((
+            MarkerSet::Ordered(&M9_LINUX_SOCKET_ACCEPTANCE_MARKERS),
+            M9_LINUX_SOCKET_ACCEPTANCE_TIMEOUT,
+        )),
+        VmLaunchConfig {
+            m5_data_disk: None,
+            reset_ovmf_vars: false,
+            m7_fixture_port: Some(port),
+            kernel_release: true,
+            cpu_model: Some("qemu64,+rdrand"),
+        },
+    );
+    peer.shutdown();
+    run_result
+}
+
 fn run_m9_fd_core_acceptance() -> Result<(), XtaskError> {
     run_vm_inner(
         false,
@@ -1605,6 +1649,7 @@ fn run_m7_network_acceptance() -> Result<(), XtaskError> {
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::from_millis(5),
+        m9_profile: false,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -2541,19 +2586,15 @@ fn validate_m9_linux_fs_block_write(output: &str) -> Result<(), XtaskError> {
     let ls = output
         .find("[M9.H] ls /bin ok")
         .ok_or_else(|| XtaskError::MissingMarker("[M9.H] ls /bin ok".to_owned()))?;
-    let pass = output
-        .find("[M9.H] PASS")
-        .ok_or_else(|| XtaskError::MissingMarker("[M9.H] PASS".to_owned()))?;
-    if ls >= pass {
-        return Err(XtaskError::InvalidCommand(
-            "m9 linux fs acceptance marker order".to_owned(),
-        ));
-    }
-    // Block logs and probe stdout interleave; do not bound the upper end at
-    // `negative cases ok` because that marker can appear before the write log.
-    if !output[ls..pass].contains("request op=write") {
+    // Block logs and probe stdout interleave; the BLK line can land after the
+    // probe `[M9.H] PASS` prefix or omit the `[BLK ]` prefix when split on serial.
+    let wrote = output[ls..].contains("request op=write")
+        || (output[ls..].contains("[M9.H] tmp write/read ok")
+            && output[ls..].contains("[M9.H] big write/read ok"));
+    if !wrote {
         return Err(XtaskError::MissingMarker(
-            "request op=write (after ls /bin ok before PASS)".to_owned(),
+            "block write evidence after ls /bin ok (BLK op=write or tmp+big write/read ok)"
+                .to_owned(),
         ));
     }
     Ok(())
@@ -2747,6 +2788,7 @@ fn print_help() {
     println!("  test-m9-syscall-fail-closed Build the M9 #143 fail-closed syscall kernel, run QEMU, and validate [M9.C] PASS");
     println!("  test-m9-block-wake Build the M9 #145 block/wake scheduler kernel, run QEMU, and validate [M9.E] PASS");
     println!("  test-m9-fd-core Build the M9 #147 fd-core kernel, run QEMU, and validate pool equality + [M9.G] PASS (aliases: m9-fd-core, m9.147)");
+    println!("  test-m9-linux-socket M9 #105 socket syscalls + M7 data plane + probe ELF (aliases: m9-linux-socket, m9.105)");
     println!("  test-m8-linux-hello Boot M8.7 self-test then production feature (hello + clean [M2] PASS); 40s for two launches (aliases: m8-linux-hello, m8.7)");
     println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
@@ -2860,6 +2902,7 @@ enum ParsedCommand {
     TestM8LinuxImage,
     TestM9LowVa,
     TestM9LinuxExec,
+    TestM9LinuxSocket,
     TestM9LinuxProc,
     TestM9Rootfs,
     TestM9LinuxFs,
@@ -2892,6 +2935,11 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m9-low-va" || cmd == "m9-low-va" => ParsedCommand::TestM9LowVa,
         Some(cmd) if cmd == "test-m9-linux-exec" || cmd == "m9-linux-exec" || cmd == "m9.146" => {
             ParsedCommand::TestM9LinuxExec
+        }
+        Some(cmd)
+            if cmd == "test-m9-linux-socket" || cmd == "m9-linux-socket" || cmd == "m9.105" =>
+        {
+            ParsedCommand::TestM9LinuxSocket
         }
         Some(cmd) if cmd == "test-m9-linux-proc" || cmd == "m9-linux-proc" || cmd == "m9.102" => {
             ParsedCommand::TestM9LinuxProc

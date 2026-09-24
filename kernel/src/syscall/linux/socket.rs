@@ -1,18 +1,44 @@
 //! Linux socket syscall family (#105) translated onto M7 networking.
-//!
-//! Frozen ownership (`fixtures/busybox/frozen/M9_DEPENDENCY_MATRIX.md`):
-//! `socket`, `connect`, `sendto`, `bind` (AF_INET, SOCK_STREAM/SOCK_DGRAM).
-//! Socket `read`/`write` arrive through #147 open-description kinds; blocking
-//! `connect`/receive uses the #145 substrate; DNS is real UDP traffic to the
-//! fixture resolver, never an internal resolver call.
-//!
-//! This module is the only dispatch-table surface #105 edits: add arms to
-//! [`lookup_handler`] here, never to `table.rs`.
 
-use super::table::LinuxSyscallHandler;
+use super::table::{LinuxSyscallContext, LinuxSyscallHandler};
+use clean_slate_linux_abi::{
+    LinuxSyscallRequest, LinuxSyscallResult, SYS_BIND, SYS_CONNECT, SYS_SENDTO, SYS_SOCKET,
+};
 
-/// Handlers owned by the socket family, or `None` if `nr` is not ours.
 pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
-    let _ = nr;
-    None
+    match nr {
+        SYS_SOCKET => Some(handle_sys_socket),
+        SYS_CONNECT => Some(handle_sys_connect),
+        SYS_SENDTO => Some(handle_sys_sendto),
+        SYS_BIND => Some(handle_sys_bind),
+        _ => None,
+    }
+}
+
+fn handle_sys_socket(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+) -> LinuxSyscallResult {
+    crate::process::linux_socket::syscalls::sys_socket(request, ctx)
+}
+
+fn handle_sys_connect(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+) -> LinuxSyscallResult {
+    crate::process::linux_socket::syscalls::sys_connect(request, ctx)
+}
+
+fn handle_sys_sendto(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+) -> LinuxSyscallResult {
+    crate::process::linux_socket::syscalls::sys_sendto(request, ctx)
+}
+
+fn handle_sys_bind(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+) -> LinuxSyscallResult {
+    crate::process::linux_socket::syscalls::sys_bind(request, ctx)
 }

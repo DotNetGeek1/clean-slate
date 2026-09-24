@@ -74,6 +74,8 @@ impl fmt::Display for SessionId {
 pub enum SocketKind {
     Udp = 1,
     Tcp = 2,
+    LinuxUdp = 3,
+    LinuxTcp = 4,
 }
 
 impl SocketKind {
@@ -81,8 +83,14 @@ impl SocketKind {
         match raw {
             1 => Some(Self::Udp),
             2 => Some(Self::Tcp),
+            3 => Some(Self::LinuxUdp),
+            4 => Some(Self::LinuxTcp),
             _ => None,
         }
+    }
+
+    pub const fn is_udp(self) -> bool {
+        matches!(self, Self::Udp | Self::LinuxUdp)
     }
 }
 

@@ -286,6 +286,18 @@ where
         Ok(self.sessions[index].connected_dest)
     }
 
+    pub fn attach_connected_dest(
+        &mut self,
+        caller: TrustedCaller,
+        session: SessionId,
+        dest: SocketAddrV4,
+    ) -> Result<(), NetworkResponse> {
+        let index = self.validate_session(&caller, session)?;
+        self.sessions[index].connected_dest = Some(dest);
+        self.sessions[index].state = SessionState::Open;
+        Ok(())
+    }
+
     pub fn stage_response_payload(
         &mut self,
         caller: TrustedCaller,
@@ -294,6 +306,25 @@ where
     ) -> Result<(), NetworkResponse> {
         let index = self.validate_session(&caller, session)?;
         self.stage_session_payload(index, payload)
+    }
+
+    pub fn take_staged_payload(
+        &mut self,
+        caller: TrustedCaller,
+        session: SessionId,
+        out: &mut [u8],
+    ) -> Result<Option<u32>, NetworkResponse> {
+        let index = self.validate_session(&caller, session)?;
+        let entry = &mut self.sessions[index];
+        if entry.staged_len == 0 {
+            return Ok(None);
+        }
+        let len = (entry.staged_len as usize)
+            .min(out.len())
+            .min(MAX_APPLICATION_PAYLOAD_BYTES);
+        out[..len].copy_from_slice(&entry.staged_payload[..len]);
+        entry.staged_len = 0;
+        Ok(Some(len as u32))
     }
 
     pub fn handle_request(
