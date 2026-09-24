@@ -67,7 +67,7 @@ This command runs three bounded headless QEMU boots:
 
 The shared acceptance runner treats the ordered serial PASS markers as authoritative, terminates QEMU from the host as soon as those markers arrive, and only falls back to `isa-debug-exit` or the timeout path if the expected sequence never completes. This keeps the test reliable on hosts where the guest can print PASS but QEMU does not shut down cleanly on its own.
 
-M2 intentionally treats the LAPIC timer as an uncalibrated periodic tick source for now. The contract is in ticks, not Hertz: the kernel reports the divide configuration and initial count, exposes a monotonic `[TIME] ticks=<n>` counter, and the standalone timer acceptance requires at least the documented minimum number of ticks within the bounded test window.
+M2 timer acceptance boots with `m2-timer-self-test`, which logs an explicit LAPIC contract line (`initial_count=62500 tick-rate=uncalibrated` when PIT calibration is skipped in that image). Production kernels calibrate the LAPIC against the PIT, derive `initial_count` for a ~1 ms IRQ (~`counter_hz/1000`), and log `initial_count`, `counter_hz`, and `tick_ns` on the `[TIME] contract=lapic` line. All paths expose monotonic `[TIME] ticks=<n>`; the standalone timer test still requires the documented minimum tick count within its bounded host window.
 
 For the aggregate M3 milestone gate:
 

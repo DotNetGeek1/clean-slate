@@ -24,9 +24,9 @@ Each thread’s `kernel_stack_top` is published to `SYSCALL_KERNEL_STACK_TOP` on
 
 `Deadline` is an absolute value from `kernel_ticks()` (APIC timer increments in `interrupt::timer`). This is **not** wall-clock nanoseconds.
 
-- **Rate today:** one tick per local APIC timer interrupt (`interrupt::timer::increment_kernel_ticks` on the periodic LAPIC path). The divisor/initial count are fixed at timer init and logged as `tick-rate=uncalibrated` in self-tests.
-- **#103 (`nanosleep` / `poll`):** Linux lanes must convert between `kernel_ticks()` and requested durations once a calibrated tick period (or explicit “ticks per second”) is published; until then, native deadlines are expressed only in tick units and documented here.
-- **Future calibration:** a single authoritative ticks-per-second (or ns-per-tick) value will live alongside the timer driver (`interrupt::timer`), not in wait-table code.
+- **Rate today:** one tick per local APIC timer interrupt (`interrupt::timer::increment_kernel_ticks` on the periodic LAPIC path). Timer init calibrates the LAPIC counter (PIT sample) and derives the reload count for a ~1 ms IRQ; self-tests log `initial_count=62500 tick-rate=uncalibrated` when calibration is skipped.
+- **#103 (`nanosleep` / `poll`):** Linux lanes convert between `kernel_ticks()` and requested durations using the kernel tick period (`kernel/src/time`, `NET_SUBOP_TICK_PERIOD_NS` for net-service).
+- **Supervisors:** recovery bootstrap publishes `tick_period_ns` so CPL3 liveness windows stay wall-time stable across tick-rate changes.
 
 ## Idle
 

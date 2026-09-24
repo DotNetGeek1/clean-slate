@@ -1,6 +1,5 @@
 //! M9 #101 Linux filesystem/path projection acceptance (storage + probe + fd cycles).
 
-use crate::arch::x86_64::apic::reprogram_local_apic_timer;
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
@@ -119,7 +118,6 @@ pub(crate) fn start_m9_linux_fs_self_test(page_allocator: PageAllocator) -> ! {
     ));
 
     initialize_timer();
-    reprogram_local_apic_timer(50_000);
 
     let spec = LinuxExecSpec {
         image: PROBE_FIXTURE,

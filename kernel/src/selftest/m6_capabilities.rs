@@ -1,7 +1,6 @@
 //! M6.8 capability convergence self-test: object queue, delegation, revocation,
 //! process control, audit, and unrelated workload in one QEMU boot.
 
-use crate::arch::x86_64::apic::reprogram_local_apic_timer;
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::capability::audit::{grant_audit_reader, set_audit_serial_echo};
@@ -836,7 +835,6 @@ pub(crate) fn start_m6_capabilities_self_test(allocator: PageAllocator) -> ! {
     ));
 
     initialize_timer();
-    reprogram_local_apic_timer(50_000);
     let frame_pointer =
         start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
     unsafe { restore_task_context(frame_pointer) }

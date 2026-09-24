@@ -26,9 +26,13 @@ struct RecoveryBootstrap {
     console_capability: u64,
     lifecycle_capability: u64,
     kernel_ticks: u64,
+    tick_period_ns: u64,
     complete: u8,
     workload_progress: u32,
 }
+
+/// M4.8 recovery acceptance: 1000 kernel ticks at the historical ~160 ms uncalibrated LAPIC period.
+const RECOVERY_LIVENESS_PERIOD_MS: u64 = 160_000;
 
 struct IpcConsoleSink {
     capability: u64,
@@ -76,6 +80,7 @@ fn syscall_yield() -> Result<(), ()> {
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     let config = bootstrap();
+    let liveness = LivenessConfig::from_millis(RECOVERY_LIVENESS_PERIOD_MS, config.tick_period_ns);
     let control = SyscallLifecycleControl::<16>::new(config.lifecycle_capability);
     let mut supervisor = ConvergedSupervisor::<_, _, 4>::new(
         ProcessId(config.self_pid),
@@ -83,12 +88,12 @@ pub extern "C" fn _start() -> ! {
         IpcConsoleSink {
             capability: config.console_capability,
         },
-        LivenessConfig::new(1_000),
+        liveness,
     );
 
     let policy = ServiceConvergenceConfig::new(
         RestartPolicy::OnFailure(BoundedRestart::new(3, 0)),
-        LivenessConfig::new(1_000),
+        liveness,
     );
 
     if supervisor.start().is_err() {
@@ -103,7 +108,7 @@ pub extern "C" fn _start() -> ! {
                 CRASH_SERVICE_ID,
                 ServiceConvergenceConfig::new(
                     RestartPolicy::OnFailure(BoundedRestart::new(3, 0)),
-                    LivenessConfig::new(1_000),
+                    liveness,
                 ),
             )
             .is_err()

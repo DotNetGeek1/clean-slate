@@ -89,6 +89,7 @@ pub(crate) struct RecoveryBootstrap {
     console_capability: u64,
     lifecycle_capability: u64,
     pub(crate) kernel_ticks: u64,
+    pub(crate) tick_period_ns: u64,
     pub(crate) complete: u8,
     pub(crate) workload_progress: u32,
 }
@@ -170,6 +171,7 @@ pub(crate) fn publish_recovery_bootstrap(update: impl FnOnce(&mut RecoveryBootst
     let Some(bootstrap) = (unsafe { (&mut *RECOVERY_BOOTSTRAP.get()).as_mut() }) else {
         return;
     };
+    bootstrap.tick_period_ns = crate::time::irq_period_ns().unwrap_or(1_000_000);
     update(bootstrap);
     let published = *bootstrap;
     if let Ok(state) = recovery_state() {
@@ -619,11 +621,13 @@ pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
         .unwrap_or_else(|message| fatal_kernel_error(message));
     kernel_log_line("[CAP ] supervisor console capability granted pid=1");
     install_crash_spawn_hook(crash_spawn_hook);
+    let tick_period_ns = crate::time::irq_period_ns().unwrap_or(1_000_000);
     let bootstrap = RecoveryBootstrap {
         self_pid: USERSPACE_SUPERVISOR_TEST_PID,
         console_capability,
         lifecycle_capability,
         kernel_ticks: 0,
+        tick_period_ns,
         complete: 0,
         workload_progress: 0,
     };

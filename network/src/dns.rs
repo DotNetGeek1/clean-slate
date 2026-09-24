@@ -26,8 +26,10 @@ pub const DNS_MIN_TTL_SECS: u32 = 1;
 /// Maximum TTL stored in the cache (seconds).
 pub const DNS_MAX_TTL_SECS: u32 = 86_400;
 
-/// Resolver query timeout in monotonic ticks.
-pub const DNS_QUERY_TIMEOUT_TICKS: u64 = 500;
+/// Resolver query timeout wall time (ms); derive IRQ ticks via kernel tick period.
+pub const DNS_QUERY_TIMEOUT_MS: u64 = 500;
+/// Resolver query timeout at 1 ms/tick production (`DNS_QUERY_TIMEOUT_MS`).
+pub const DNS_QUERY_TIMEOUT_TICKS: u64 = DNS_QUERY_TIMEOUT_MS;
 
 /// Compression pointer follow hop limit.
 pub const DNS_COMPRESSION_HOP_LIMIT: usize = 16;

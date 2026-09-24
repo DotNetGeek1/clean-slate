@@ -11,7 +11,7 @@ use clean_slate_capability::syscall_abi::{
 use clean_slate_network::addr::{BoundedHostname, EtherType, IpProtocol, Ipv4Addr, SocketAddrV4};
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
-use clean_slate_network::dns::{DnsResolver, ResolveOutcome, DNS_QUERY_TIMEOUT_TICKS};
+use clean_slate_network::dns::{DnsResolver, ResolveOutcome, DNS_QUERY_TIMEOUT_MS};
 use clean_slate_network::error::{DenialReason, NetworkError};
 use clean_slate_network::ethernet::EthernetFrame;
 use clean_slate_network::fixture::{
@@ -25,8 +25,8 @@ use clean_slate_network::protocol::{
 };
 use clean_slate_network::session::{SessionGeneration, SessionId, SocketKind};
 use clean_slate_network::stack::L3Stack;
+use clean_slate_network::tcp::TcpState;
 use clean_slate_network::tcp::TcpTransport;
-use clean_slate_network::tcp::{TcpState, TCP_CONNECT_TIMEOUT_TICKS};
 use clean_slate_network::tls::{
     TlsConfig, TlsError, TlsSession, TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
 };
@@ -42,6 +42,7 @@ use clean_slate_service_fixtures::{
     NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
     NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
+    NET_SUBOP_TICK_PERIOD_NS,
 };
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::x86_64::{__cpuid, _rdrand64_step};
@@ -52,12 +53,15 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use rand_core::{CryptoRng, RngCore};
 
 const SYSCALL_NR_VERSION: u64 = 0;
-const ARP_TTL_TICKS: u64 = 50_000;
+/// ARP cache TTL (~40 s wall time at production 1 ms LAPIC tick).
+const ARP_TTL_MS: u64 = 40_000;
 const DNS_POLL_LIMIT: usize = 5_000_000;
 const TLS_POLL_LIMIT: usize = 10_000_000;
-const TLS_IO_TIMEOUT_TICKS: u64 = 2_000;
+const TLS_IO_TIMEOUT_MS: u64 = 2_000;
 const PLAIN_TCP_IO_TIMEOUT_MS: u64 = 2_000;
-const TLS_CLOSE_TIMEOUT_TICKS: u64 = 100;
+const TLS_CLOSE_TIMEOUT_MS: u64 = 100;
+/// Active-open timeout while waiting for SYN-ACK (matches `TCP_CONNECT_TIMEOUT_TICKS` at 1 ms/tick).
+const TCP_CONNECT_TIMEOUT_MS: u64 = 500;
 
 struct BumpAllocator;
 
@@ -217,9 +221,13 @@ fn monotonic_ticks() -> Result<u64, u64> {
     Ok(ticks)
 }
 
-/// Pre-#163 production LAPIC tick (~160 ms). #163 replaces this with `NET_SUBOP_TICK_PERIOD_NS`.
 fn tick_period_ns() -> u64 {
-    160_000_000
+    let period = net_request([NET_SUBOP_TICK_PERIOD_NS, 0, 0, 0, 0, 0]);
+    if period == 0 {
+        1_000_000
+    } else {
+        period
+    }
 }
 
 fn ms_to_irq_ticks(ms: u64) -> u64 {
@@ -565,14 +573,24 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             service.attach_backend(DemuxLink::for_udp());
         }
         *service_dns_resolver_slot() = Some(DnsResolver::alloc_boxed(
-            L3Stack::new(DemuxLink::for_udp(), raw_mac, GUEST_IPV4, ARP_TTL_TICKS),
+            L3Stack::new(
+                DemuxLink::for_udp(),
+                raw_mac,
+                GUEST_IPV4,
+                ms_to_irq_ticks(ARP_TTL_MS),
+            ),
             generation,
             DNS_SERVER_ADDR,
             DnsResolver::<ServiceLink>::DEFAULT_TICKS_PER_SEC,
         ));
         TcpTransport::init_in_place(
             service_tls_transport_ptr(),
-            L3Stack::new(DemuxLink::for_tcp(), raw_mac, GUEST_IPV4, ARP_TTL_TICKS),
+            L3Stack::new(
+                DemuxLink::for_tcp(),
+                raw_mac,
+                GUEST_IPV4,
+                ms_to_irq_ticks(ARP_TTL_MS),
+            ),
             generation,
         );
         let heap_checkpoint = current_heap_offset();
@@ -731,7 +749,7 @@ fn handle_service_udp_send(
     let start = monotonic_ticks().map_err(|_| NetworkResponse::Error {
         code: NetworkError::Timeout.code(),
     })?;
-    let deadline = start.saturating_add(DNS_QUERY_TIMEOUT_TICKS);
+    let deadline = start.saturating_add(ms_to_irq_ticks(DNS_QUERY_TIMEOUT_MS));
     let resolver = unsafe {
         (*service_dns_resolver_slot())
             .as_mut()
@@ -796,7 +814,7 @@ fn handle_service_udp_receive(
             );
         }
     };
-    let deadline = start.saturating_add(DNS_QUERY_TIMEOUT_TICKS);
+    let deadline = start.saturating_add(ms_to_irq_ticks(DNS_QUERY_TIMEOUT_MS));
     let resolver = match unsafe { (*service_dns_resolver_slot()).as_mut() } {
         Some(resolver) => resolver,
         None => {
@@ -919,20 +937,25 @@ fn establish_plain_tcp_session(
             .map_err(|err| NetworkResponse::Error { code: err.code() })?,
     };
     let owner = plain_tcp_owner(service_generation);
-    poll_plain_tcp_until(tcp, tick, TCP_CONNECT_TIMEOUT_TICKS, |tcp, _now| {
-        match tcp.state(tcp_session, owner) {
-            Ok(TcpState::Established) => Ok(true),
-            Ok(TcpState::Reset) | Ok(TcpState::Closed) => Err(NetworkResponse::Error {
-                code: NetworkError::Reset.code(),
-            }),
-            Ok(_) => Ok(false),
-            // `poll` frees the slot after an acceptable RST; connect must still fail closed.
-            Err(NetworkError::NotFound) => Err(NetworkResponse::Error {
-                code: NetworkError::Reset.code(),
-            }),
-            Err(err) => Err(NetworkResponse::Error { code: err.code() }),
-        }
-    })?;
+    poll_plain_tcp_until(
+        tcp,
+        tick,
+        ms_to_irq_ticks(TCP_CONNECT_TIMEOUT_MS),
+        |tcp, _now| {
+            match tcp.state(tcp_session, owner) {
+                Ok(TcpState::Established) => Ok(true),
+                Ok(TcpState::Reset) | Ok(TcpState::Closed) => Err(NetworkResponse::Error {
+                    code: NetworkError::Reset.code(),
+                }),
+                Ok(_) => Ok(false),
+                // `poll` frees the slot after an acceptable RST; connect must still fail closed.
+                Err(NetworkError::NotFound) => Err(NetworkResponse::Error {
+                    code: NetworkError::Reset.code(),
+                }),
+                Err(err) => Err(NetworkResponse::Error { code: err.code() }),
+            }
+        },
+    )?;
     if let Some(slot) = plain_tcp_slot(session) {
         *slot = Some(tcp_session);
     }
@@ -1327,7 +1350,7 @@ fn handle_service_resolve(
             };
         }
     };
-    let deadline = start.saturating_add(DNS_QUERY_TIMEOUT_TICKS);
+    let deadline = start.saturating_add(ms_to_irq_ticks(DNS_QUERY_TIMEOUT_MS));
     let query_id = match resolver.resolve(start, caller, name) {
         Ok(ResolveOutcome::Cached { addr, ttl }) => return NetworkResponse::Resolve { addr, ttl },
         Ok(ResolveOutcome::Pending { query_id }) => query_id,
@@ -1434,7 +1457,7 @@ fn handle_service_tls_send(
             .map_err(|_| NetworkResponse::Error {
                 code: NetworkError::Timeout.code(),
             })?
-            .saturating_add(TLS_CLOSE_TIMEOUT_TICKS);
+            .saturating_add(ms_to_irq_ticks(TLS_CLOSE_TIMEOUT_MS));
         tls.close(close_now).map_err(|err| NetworkResponse::Error {
             code: map_tls_error_code(err) as u16,
         })?;
@@ -1821,7 +1844,7 @@ fn drain_tcp_close(
     session: SessionId,
     start_tick: u64,
 ) -> Result<(), NetworkResponse> {
-    let deadline = start_tick.saturating_add(TLS_CLOSE_TIMEOUT_TICKS);
+    let deadline = start_tick.saturating_add(ms_to_irq_ticks(TLS_CLOSE_TIMEOUT_MS));
     for _ in 0..TLS_POLL_LIMIT {
         let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
             code: NetworkError::Timeout.code(),
@@ -1847,7 +1870,7 @@ fn write_all_tls(
     start_tick: u64,
     data: &[u8],
 ) -> Result<(), u64> {
-    let deadline = start_tick.saturating_add(TLS_IO_TIMEOUT_TICKS);
+    let deadline = start_tick.saturating_add(ms_to_irq_ticks(TLS_IO_TIMEOUT_MS));
     let mut offset = 0usize;
     for _ in 0..TLS_POLL_LIMIT {
         let tick = monotonic_ticks()?;
@@ -1873,7 +1896,7 @@ fn read_tls(
     start_tick: u64,
     out: &mut [u8],
 ) -> Result<usize, u64> {
-    let deadline = start_tick.saturating_add(TLS_IO_TIMEOUT_TICKS);
+    let deadline = start_tick.saturating_add(ms_to_irq_ticks(TLS_IO_TIMEOUT_MS));
     for _ in 0..TLS_POLL_LIMIT {
         let tick = monotonic_ticks()?;
         match tls.read(tick, out) {

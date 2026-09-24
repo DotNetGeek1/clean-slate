@@ -34,18 +34,26 @@ use clean_slate_capability::syscall_abi::{
 use clean_slate_capability::{CapabilityHandle, HolderId, ResourceClass, ResourceRef, Rights};
 use clean_slate_service_fixtures::m6_fixture::{
     M6FixtureBootstrap, M6FixtureStep, ARG_DATA_PTR, ARG_RESULT_OF, FIXTURE_STATUS_DONE,
+    FIXTURE_STATUS_RUNNING,
 };
 
 use crate::capability::bootstrap_grant::GRANT_SUBOP_CLAIM;
-use crate::capability::delegation::{DELEGATE_OP_DELEGATE, DELEGATE_OP_LIST};
+use crate::capability::delegation::{
+    DELEGATE_OP_DELEGATE, DELEGATE_OP_LIST, DELEGATE_OP_POLL_CHILD,
+};
 
 const TEST_OBJECT_ID: u64 = 7;
 const PASS_MARKER: &str = "[M6.5] PASS";
 
 const FIXTURE_OWNER: u64 = 0;
 const FIXTURE_READER: u64 = 1;
+const PREDICTED_READER_PID: u64 = 2;
 
 const LISTING_BYTES: usize = 32;
+
+const DELEGATION_READER_BOOTSTRAP_KEY: crate::sched::wait::WaitKey =
+    crate::sched::wait::WaitKey(0x652);
+const DELEGATION_CHILD_READY_KEY: crate::sched::wait::WaitKey = crate::sched::wait::WaitKey(0x651);
 const INVALID_RIGHTS_BIT: u64 = 1 << 31;
 
 struct DelegationSelfTestState {
@@ -61,6 +69,69 @@ pub(crate) fn record_delegated_child_for_self_test(handle: CapabilityHandle) {
     unsafe {
         DELEGATION_TEST_CHILD_HANDLE = Some(handle);
     }
+    crate::sched::wait::wake_one(DELEGATION_CHILD_READY_KEY);
+}
+
+pub(crate) fn delegated_child_handle_for_self_test() -> u64 {
+    unsafe { DELEGATION_TEST_CHILD_HANDLE }
+        .map(CapabilityHandle::encode)
+        .unwrap_or(0)
+}
+
+pub(crate) fn on_reader_bootstrap_registered(holder: HolderId) {
+    if holder.0 == PREDICTED_READER_PID {
+        crate::sched::wait::wake_one(DELEGATION_READER_BOOTSTRAP_KEY);
+    }
+}
+
+fn block_for_delegation_event(
+    frame: &mut crate::arch::x86_64::interrupt_context::SyscallContext,
+    key: crate::sched::wait::WaitKey,
+    syscall_nr: u64,
+) {
+    use crate::arch::x86_64::interrupt_context::SyscallContext;
+    use crate::diagnostics::qemu::fatal_kernel_error;
+    use crate::sched::wait::{block_current_thread_with_resume, BlockedResume, WaitOutcome};
+
+    match block_current_thread_with_resume(
+        frame as *mut SyscallContext,
+        key,
+        None,
+        BlockedResume::RestartSyscall {
+            nr: syscall_nr,
+            timeout_rax: 0,
+        },
+    ) {
+        Ok(WaitOutcome::Woken) | Ok(WaitOutcome::TimedOut) | Ok(WaitOutcome::Cancelled) => {}
+        Err(message) => fatal_kernel_error(message),
+    }
+}
+
+pub(crate) fn handle_poll_delegated_child(
+    frame: &mut crate::arch::x86_64::interrupt_context::SyscallContext,
+) {
+    use clean_slate_capability::syscall_abi::SYSCALL_NR_CAP_DELEGATE;
+
+    let handle = delegated_child_handle_for_self_test();
+    if handle != 0 {
+        frame.rax = handle;
+        return;
+    }
+    block_for_delegation_event(frame, DELEGATION_CHILD_READY_KEY, SYSCALL_NR_CAP_DELEGATE);
+    handle_poll_delegated_child(frame);
+}
+
+pub(crate) fn wait_for_reader_bootstrap_grant_if_needed(
+    frame: &mut crate::arch::x86_64::interrupt_context::SyscallContext,
+    holder: HolderId,
+) {
+    use clean_slate_capability::syscall_abi::SYSCALL_NR_CAP_GRANT;
+
+    if holder.0 != PREDICTED_READER_PID || frame.rax != 0 {
+        return;
+    }
+    block_for_delegation_event(frame, DELEGATION_READER_BOOTSTRAP_KEY, SYSCALL_NR_CAP_GRANT);
+    wait_for_reader_bootstrap_grant_if_needed(frame, holder);
 }
 
 #[allow(static_mut_refs)]
@@ -173,7 +244,6 @@ fn build_reader_program(reader_pid: u64) -> M6FixtureBootstrap {
     let claim = program
         .push(
             M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0])
-                .repeat_while_eq(0)
                 .expect_ne(0),
         )
         .unwrap();
@@ -200,11 +270,18 @@ fn build_reader_program(reader_pid: u64) -> M6FixtureBootstrap {
             .expect_eq(SYSCALL_EACCES),
         )
         .unwrap();
+    program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_DELEGATE,
+                [DELEGATE_OP_POLL_CHILD, 0, 0, 0, 0, 0],
+            )
+            .expect_ne(0),
+        )
+        .unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
 }
-
-const PREDICTED_READER_PID: u64 = 2;
 
 fn validate_reader_report(report: &M6FixtureBootstrap) -> Result<CapabilityHandle, &'static str> {
     if report.status != FIXTURE_STATUS_DONE {
@@ -237,6 +314,9 @@ fn validate_reader_report(report: &M6FixtureBootstrap) -> Result<CapabilityHandl
 }
 
 fn delegation_report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReportAction {
+    if report.status == FIXTURE_STATUS_RUNNING {
+        return FixtureReportAction::Continue;
+    }
     let state = state_mut();
     if pid != state.reader_pid {
         return FixtureReportAction::Fail("unexpected fixture report pid");

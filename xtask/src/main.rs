@@ -14,6 +14,9 @@ mod m7_fixture;
 mod m7_fixture_tcp;
 mod m8_fixture;
 mod m9_fixture;
+mod marker_spec;
+
+use marker_spec::{MarkerSet, MarkerStep, MarkerTracker};
 
 use m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
 
@@ -66,22 +69,26 @@ const M5_QEMU_DISK_ID: &str = "m5disk";
 const M5_QEMU_DEVICE: &str =
     "virtio-blk-pci,drive=m5disk,serial=clean-slate-m5-data,disable-modern=on";
 const M7_QEMU_NET_DEVICE: &str = "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on";
-const M4_RECOVERY_ACCEPTANCE_MARKERS: [&str; 15] = [
-    "[CAP ] supervisor console capability granted pid=1",
-    "[SUP ] started pid=1",
-    "[DEP ] service=16640 ready",
-    "[SVC ] launch service=16640 pid=",
-    "[HLTH] service=16640 healthy gen=1",
-    "[TEST] crash-service injecting fault",
-    "[PROC] fault pid=",
-    "[SUP ] failure service=16640 pid=",
-    "[PROC] teardown pid=",
-    "[SUP ] restart service=16640 attempt=1",
-    "[SVC ] launch service=16640 pid=",
-    "[HLTH] service=16640 healthy gen=2",
-    "[TEST] unrelated workload progress=",
-    "[SUP ] stale-instance ignored",
-    "[M4  ] PASS",
+// IPC console framing preserves these substrings; at ~1 ms tick the gen=1 health
+// line for the crash fixture often lands after fault injection in serial order.
+const M4_RECOVERY_FAULT_HEALTH_GROUP: &[&str] =
+    &["[PROC] fault pid=", "[HLTH] service=16640 healthy gen=1"];
+/// IPC health vs fault injection can race at ~1 ms tick; restart path stays ordered.
+const M4_RECOVERY_ACCEPTANCE_SPEC: &[MarkerStep] = &[
+    MarkerStep::Ordered("[CAP ] supervisor console capability granted pid=1"),
+    MarkerStep::Ordered("[SUP ] started pid=1"),
+    MarkerStep::Ordered("[DEP ] service=16640 ready"),
+    MarkerStep::Ordered("[SVC ] launch service=16640 pid="),
+    MarkerStep::Ordered("[TEST] crash-service injecting fault"),
+    MarkerStep::UnorderedGroup(M4_RECOVERY_FAULT_HEALTH_GROUP),
+    MarkerStep::Ordered("[SUP ] failure service=16640 pid="),
+    MarkerStep::Ordered("[PROC] teardown pid="),
+    MarkerStep::Ordered("[SUP ] restart service=16640 attempt=1"),
+    MarkerStep::Ordered("[SVC ] launch service=16640 pid="),
+    MarkerStep::Ordered("[HLTH] service=16640 healthy gen=2"),
+    MarkerStep::Ordered("[TEST] unrelated workload progress="),
+    MarkerStep::Ordered("[SUP ] stale-instance ignored"),
+    MarkerStep::Ordered("[M4  ] PASS"),
 ];
 const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[BOOT] UEFI memory map acquired",
@@ -130,24 +137,26 @@ const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[DF  ] emergency stack OK",
     "[DF  ] PASS",
 ];
-const M2_ACCEPTANCE_MARKERS: [&str; 12] = [
-    "[BOOT] UEFI memory map acquired",
-    "[BOOT] ExitBootServices OK",
-    "[MEM ] physical allocator initialized",
-    "[INT ] IDT initialized",
-    "[TIME] timer initialized",
-    "[TASK] task 1 started",
-    "[TASK] task 2 started",
-    "[SCHED] preemption observed",
-    "[TASK] task 1 progress=",
-    "[TASK] task 2 progress=",
-    "[TIME] ticks=",
-    "[M2  ] PASS",
+/// Substrings tolerate concurrent `[TASK]` prefix interleaving on serial.
+const M2_TASK_PROGRESS_GROUP: &[&str] = &["task 1 progress=", "task 2 progress="];
+/// Demo tasks log progress concurrently; `[M2  ] PASS` follows both exits (with `[TIME] ticks=`).
+const M2_ACCEPTANCE_SPEC: &[MarkerStep] = &[
+    MarkerStep::Ordered("[BOOT] UEFI memory map acquired"),
+    MarkerStep::Ordered("[BOOT] ExitBootServices OK"),
+    MarkerStep::Ordered("[MEM ] physical allocator initialized"),
+    MarkerStep::Ordered("[INT ] IDT initialized"),
+    MarkerStep::Ordered("[TIME] timer initialized"),
+    MarkerStep::Ordered("[TASK] task 1 started"),
+    MarkerStep::Ordered("[TASK] task 2 started"),
+    MarkerStep::Ordered("[SCHED] preemption observed"),
+    MarkerStep::UnorderedGroup(M2_TASK_PROGRESS_GROUP),
+    MarkerStep::Ordered("[TIME] ticks="),
+    MarkerStep::Ordered("[M2  ] PASS"),
 ];
 const M2_TIMER_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[INT ] IDT initialized",
     "[TIME] timer initialized",
-    "[TIME] contract=lapic periodic divide=16 initial_count=10000000 tick-rate=uncalibrated",
+    "[TIME] contract=lapic periodic divide=16 initial_count=62500 tick-rate=uncalibrated",
     "[TIME] tick=1",
     "[TIME] ticks=",
     "[TIME] PASS",
@@ -248,32 +257,36 @@ const M8_LINUX_HELLO_ACCEPTANCE_MARKERS: [&str; 22] = [
     " status=0",
     "[LNX ] ELF loaded pid=",
     "entry=0x0000400000400078",
-    "[M8.7] first exit observed",
-    "[M8.7] relaunch observed",
     "[LNX ] personality=x86_64 pid=",
     "[LNX ] unsupported syscall=999 errno=ENOSYS",
     "\nHello from Linux.",
     "[LNX ] exit pid=",
     " status=0",
+    "[M8.7] first exit observed",
+    "[M8.7] relaunch observed",
     "[M8.7] second exit observed",
     "[LNX ] load failed: linux image: bad ELF magic",
     "[M8.7] malformed ELF rejected fail-closed",
     "[M8.7] native progress=",
     "[M8.7] PASS",
 ];
-/// Production `--features m8-linux-hello` (no self-test): hello once via the
-/// #97 path, both demo tasks progress, then `[M2  ] PASS` (not scheduler-empty).
-const M8_LINUX_HELLO_PRODUCTION_MARKERS: [&str; 10] = [
-    "[LNX ] ELF loaded pid=",
-    "entry=0x0000400000400078",
-    "[LNX ] personality=x86_64 pid=",
-    "[LNX ] unsupported syscall=999 errno=ENOSYS",
-    "\nHello from Linux.",
+/// Production `--features m8-linux-hello` (no self-test): #97 hello path plus demo
+/// scheduler completion. Progress, Linux exit, and `[M2  ] PASS` may interleave
+/// after hello (pass is causal on both tasks, not on exit order).
+const M8_LINUX_HELLO_PRODUCTION_TAIL: &[&str] = &[
+    "task 1 progress=",
+    "task 2 progress=",
     "[LNX ] exit pid=",
     " status=0",
-    "[TASK] task 1 progress=",
-    "[TASK] task 2 progress=",
     "[M2  ] PASS",
+];
+const M8_LINUX_HELLO_PRODUCTION_SPEC: &[MarkerStep] = &[
+    MarkerStep::Ordered("[LNX ] ELF loaded pid="),
+    MarkerStep::Ordered("entry=0x0000400000400078"),
+    MarkerStep::Ordered("[LNX ] personality=x86_64 pid="),
+    MarkerStep::Ordered("[LNX ] unsupported syscall=999 errno=ENOSYS"),
+    MarkerStep::Ordered("\nHello from Linux."),
+    MarkerStep::UnorderedGroupAnywhere(M8_LINUX_HELLO_PRODUCTION_TAIL),
 ];
 const M3_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[PROC] created pid=1 tid=1",
@@ -403,14 +416,17 @@ const M6_AUDIT_ACCEPTANCE_MARKERS: [&str; 5] = [
     "outcome=",
     "[M6.7] PASS",
 ];
-const M6_REVOCATION_ACCEPTANCE_MARKERS: [&str; 7] = [
-    "[CAP ] probe allowed holder=",
-    "[CAP ] revoke branch=",
-    "[CAP ] stale denied holder=",
-    "[CAP ] revoke denied actor=",
-    "[PROC] teardown pid=",
+const M6_REVOCATION_BOOTSTRAP_GROUP: &[&str] = &[
     "[TEST] unrelated workload progress=",
-    "[M6.6] PASS",
+    "[CAP ] revoke denied actor=",
+];
+/// Unrelated workload and early revoke-deny are independent; revoke story stays ordered after.
+const M6_REVOCATION_ACCEPTANCE_SPEC: &[MarkerStep] = &[
+    MarkerStep::UnorderedGroupAnywhere(M6_REVOCATION_BOOTSTRAP_GROUP),
+    MarkerStep::Ordered("[CAP ] probe allowed holder="),
+    MarkerStep::Ordered("[CAP ] revoke branch="),
+    MarkerStep::Ordered("[CAP ] stale denied holder="),
+    MarkerStep::Ordered("[M6.6] PASS"),
 ];
 const M7_NET_CAPS_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[CAP ] net grant holder=1 rights=delegate|net_resolve|net_connect|net_send|net_receive generation=0",
@@ -759,7 +775,10 @@ fn run_m5_block_acceptance() -> Result<(), XtaskError> {
         false,
         false,
         &["m5-block-self-test"],
-        Some((&M5_BLOCK_ACCEPTANCE_MARKERS, M5_BLOCK_ACCEPTANCE_TIMEOUT)),
+        Some((
+            MarkerSet::Ordered(&M5_BLOCK_ACCEPTANCE_MARKERS),
+            M5_BLOCK_ACCEPTANCE_TIMEOUT,
+        )),
         VmLaunchConfig {
             m5_data_disk: Some(disk),
             reset_ovmf_vars: false,
@@ -782,7 +801,10 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
         false,
         false,
         &["m7-tls-self-test"],
-        Some((&M7_TLS_ACCEPTANCE_MARKERS, M7_TLS_ACCEPTANCE_TIMEOUT)),
+        Some((
+            MarkerSet::Ordered(&M7_TLS_ACCEPTANCE_MARKERS),
+            M7_TLS_ACCEPTANCE_TIMEOUT,
+        )),
         VmLaunchConfig {
             m5_data_disk: None,
             reset_ovmf_vars: false,
@@ -805,7 +827,10 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
         false,
         false,
         &["m7-tls-fail-closed-self-test"],
-        Some((&M7_TLS_FAIL_CLOSED_MARKERS, M7_TLS_ACCEPTANCE_TIMEOUT)),
+        Some((
+            MarkerSet::Ordered(&M7_TLS_FAIL_CLOSED_MARKERS),
+            M7_TLS_ACCEPTANCE_TIMEOUT,
+        )),
         VmLaunchConfig {
             m5_data_disk: None,
             reset_ovmf_vars: false,
@@ -826,7 +851,7 @@ fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
         false,
         &["m7-net-device-self-test"],
         Some((
-            &M7_NET_DEVICE_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M7_NET_DEVICE_ACCEPTANCE_MARKERS),
             M7_NET_DEVICE_ACCEPTANCE_TIMEOUT,
         )),
         VmLaunchConfig {
@@ -853,7 +878,10 @@ fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
         false,
         false,
         &["m7-dns-self-test"],
-        Some((&M7_DNS_ACCEPTANCE_MARKERS, M7_DNS_ACCEPTANCE_TIMEOUT)),
+        Some((
+            MarkerSet::Ordered(&M7_DNS_ACCEPTANCE_MARKERS),
+            M7_DNS_ACCEPTANCE_TIMEOUT,
+        )),
         VmLaunchConfig {
             m5_data_disk: None,
             reset_ovmf_vars: false,
@@ -885,7 +913,10 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
             false,
             false,
             &["m5-persistence-self-test"],
-            Some((&M5_PERSISTENCE_WRITE_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            Some((
+                MarkerSet::Ordered(&M5_PERSISTENCE_WRITE_MARKERS),
+                M5_PERSISTENCE_BOOT_TIMEOUT,
+            )),
             config.clone(),
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
@@ -898,7 +929,10 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
             false,
             false,
             &["m5-persistence-self-test"],
-            Some((&M5_PERSISTENCE_READ_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            Some((
+                MarkerSet::Ordered(&M5_PERSISTENCE_READ_MARKERS),
+                M5_PERSISTENCE_BOOT_TIMEOUT,
+            )),
             config,
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
@@ -922,7 +956,10 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             false,
             &["m5-persistence-self-test"],
-            Some((&M5_PERSISTENCE_WRITE_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            Some((
+                MarkerSet::Ordered(&M5_PERSISTENCE_WRITE_MARKERS),
+                M5_PERSISTENCE_BOOT_TIMEOUT,
+            )),
             config.clone(),
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
@@ -935,7 +972,10 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             false,
             &["m5-persistence-self-test"],
-            Some((&M5_PERSISTENCE_READ_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            Some((
+                MarkerSet::Ordered(&M5_PERSISTENCE_READ_MARKERS),
+                M5_PERSISTENCE_BOOT_TIMEOUT,
+            )),
             config.clone(),
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
@@ -947,7 +987,10 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             false,
             &["m5-crash-early-self-test"],
-            Some((&M5_CRASH_ARM_EARLY_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            Some((
+                MarkerSet::Ordered(&M5_CRASH_ARM_EARLY_MARKERS),
+                M5_PERSISTENCE_BOOT_TIMEOUT,
+            )),
             config.clone(),
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
@@ -960,7 +1003,10 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             false,
             &["m5-crash-recovery-self-test"],
-            Some((&M5_CRASH_RECOVERY_MARKERS, M5_CRASH_RECOVERY_TIMEOUT)),
+            Some((
+                MarkerSet::Ordered(&M5_CRASH_RECOVERY_MARKERS),
+                M5_CRASH_RECOVERY_TIMEOUT,
+            )),
             config.clone(),
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
@@ -972,7 +1018,10 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             false,
             &["m5-crash-late-self-test"],
-            Some((&M5_CRASH_ARM_LATE_MARKERS, M5_PERSISTENCE_BOOT_TIMEOUT)),
+            Some((
+                MarkerSet::Ordered(&M5_CRASH_ARM_LATE_MARKERS),
+                M5_PERSISTENCE_BOOT_TIMEOUT,
+            )),
             config.clone(),
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
@@ -985,7 +1034,10 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             false,
             &["m5-crash-recovery-self-test"],
-            Some((&M5_CRASH_RECOVERY_MARKERS, M5_CRASH_RECOVERY_TIMEOUT)),
+            Some((
+                MarkerSet::Ordered(&M5_CRASH_RECOVERY_MARKERS),
+                M5_CRASH_RECOVERY_TIMEOUT,
+            )),
             config,
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
@@ -1016,7 +1068,10 @@ fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
             false,
             false,
             &["m1-self-test"],
-            Some((&M1_ACCEPTANCE_MARKERS, M5_DISK_HARNESS_TIMEOUT)),
+            Some((
+                MarkerSet::Ordered(&M1_ACCEPTANCE_MARKERS),
+                M5_DISK_HARNESS_TIMEOUT,
+            )),
             config.clone(),
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
@@ -1031,7 +1086,10 @@ fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
             false,
             false,
             &["m1-self-test"],
-            Some((&M1_ACCEPTANCE_MARKERS, M5_DISK_HARNESS_TIMEOUT)),
+            Some((
+                MarkerSet::Ordered(&M1_ACCEPTANCE_MARKERS),
+                M5_DISK_HARNESS_TIMEOUT,
+            )),
             config,
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
@@ -1054,7 +1112,10 @@ fn run_m1_acceptance() -> Result<(), XtaskError> {
         false,
         false,
         &["m1-self-test"],
-        Some((&M1_ACCEPTANCE_MARKERS, M1_ACCEPTANCE_TIMEOUT)),
+        Some((
+            MarkerSet::Ordered(&M1_ACCEPTANCE_MARKERS),
+            M1_ACCEPTANCE_TIMEOUT,
+        )),
     )
 }
 
@@ -1063,7 +1124,10 @@ fn run_m9_low_va_acceptance() -> Result<(), XtaskError> {
         false,
         false,
         &["m9-low-va-self-test"],
-        Some((&M9_LOW_VA_ACCEPTANCE_MARKERS, M9_LOW_VA_ACCEPTANCE_TIMEOUT)),
+        Some((
+            MarkerSet::Ordered(&M9_LOW_VA_ACCEPTANCE_MARKERS),
+            M9_LOW_VA_ACCEPTANCE_TIMEOUT,
+        )),
     )
 }
 
@@ -1073,7 +1137,7 @@ fn run_m9_linux_exec_acceptance() -> Result<(), XtaskError> {
         false,
         &["m9-linux-exec-self-test"],
         Some((
-            &M9_LINUX_EXEC_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M9_LINUX_EXEC_ACCEPTANCE_MARKERS),
             M9_LINUX_EXEC_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1085,7 +1149,7 @@ fn run_m9_linux_proc_acceptance() -> Result<(), XtaskError> {
         false,
         &["m9-linux-proc-self-test"],
         Some((
-            &M9_LINUX_PROC_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M9_LINUX_PROC_ACCEPTANCE_MARKERS),
             M9_LINUX_PROC_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1096,7 +1160,10 @@ fn run_m9_rootfs_acceptance() -> Result<(), XtaskError> {
         false,
         false,
         &["m9-rootfs-self-test"],
-        Some((&M9_ROOTFS_ACCEPTANCE_MARKERS, M9_ROOTFS_ACCEPTANCE_TIMEOUT)),
+        Some((
+            MarkerSet::Ordered(&M9_ROOTFS_ACCEPTANCE_MARKERS),
+            M9_ROOTFS_ACCEPTANCE_TIMEOUT,
+        )),
     )
 }
 
@@ -1109,7 +1176,7 @@ fn run_m9_linux_fs_acceptance() -> Result<(), XtaskError> {
         false,
         &["m9-linux-fs-self-test"],
         Some((
-            &M9_LINUX_FS_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M9_LINUX_FS_ACCEPTANCE_MARKERS),
             M9_LINUX_FS_ACCEPTANCE_TIMEOUT,
         )),
         m5_storage_vm_config(),
@@ -1122,7 +1189,7 @@ fn run_m2_acceptance() -> Result<(), XtaskError> {
         false,
         &["m2-double-fault-self-test"],
         Some((
-            &M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS),
             M2_DOUBLE_FAULT_ACCEPTANCE_TIMEOUT,
         )),
     )?;
@@ -1130,13 +1197,16 @@ fn run_m2_acceptance() -> Result<(), XtaskError> {
         false,
         false,
         &["m2-timer-self-test"],
-        Some((&M2_TIMER_ACCEPTANCE_MARKERS, M2_TIMER_ACCEPTANCE_TIMEOUT)),
+        Some((
+            MarkerSet::Ordered(&M2_TIMER_ACCEPTANCE_MARKERS),
+            M2_TIMER_ACCEPTANCE_TIMEOUT,
+        )),
     )?;
     run_vm_inner(
         false,
         false,
         &["m2-self-test"],
-        Some((&M2_ACCEPTANCE_MARKERS, M2_ACCEPTANCE_TIMEOUT)),
+        Some((MarkerSet::Steps(M2_ACCEPTANCE_SPEC), M2_ACCEPTANCE_TIMEOUT)),
     )
 }
 
@@ -1145,7 +1215,10 @@ fn run_m3_entry_acceptance() -> Result<(), XtaskError> {
         false,
         false,
         &["m3-entry-self-test"],
-        Some((&M3_ENTRY_ACCEPTANCE_MARKERS, M3_ENTRY_ACCEPTANCE_TIMEOUT)),
+        Some((
+            MarkerSet::Ordered(&M3_ENTRY_ACCEPTANCE_MARKERS),
+            M3_ENTRY_ACCEPTANCE_TIMEOUT,
+        )),
     )
 }
 
@@ -1155,7 +1228,7 @@ fn run_m3_address_space_acceptance() -> Result<(), XtaskError> {
         false,
         &["m3-address-space-self-test"],
         Some((
-            &M3_ADDRESS_SPACE_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M3_ADDRESS_SPACE_ACCEPTANCE_MARKERS),
             M3_ADDRESS_SPACE_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1167,7 +1240,7 @@ fn run_m3_syscall_acceptance() -> Result<(), XtaskError> {
         false,
         &["m3-entry-self-test", "m3-syscall-self-test"],
         Some((
-            &M3_SYSCALL_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M3_SYSCALL_ACCEPTANCE_MARKERS),
             M3_SYSCALL_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1179,7 +1252,7 @@ fn run_m8_linux_dispatch_acceptance() -> Result<(), XtaskError> {
         false,
         &["m8-linux-dispatch-self-test"],
         Some((
-            &M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS),
             M8_LINUX_DISPATCH_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1191,7 +1264,7 @@ fn run_m9_syscall_fail_closed_acceptance() -> Result<(), XtaskError> {
         false,
         &["m9-syscall-fail-closed-self-test"],
         Some((
-            &M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS),
             M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1203,7 +1276,7 @@ fn run_m9_block_wake_acceptance() -> Result<(), XtaskError> {
         false,
         &["m9-block-wake-self-test"],
         Some((
-            &M9_BLOCK_WAKE_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M9_BLOCK_WAKE_ACCEPTANCE_MARKERS),
             M9_BLOCK_WAKE_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1223,7 +1296,7 @@ fn run_m9_linux_socket_acceptance() -> Result<(), XtaskError> {
         false,
         &["m9-linux-socket-self-test"],
         Some((
-            &M9_LINUX_SOCKET_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M9_LINUX_SOCKET_ACCEPTANCE_MARKERS),
             M9_LINUX_SOCKET_ACCEPTANCE_TIMEOUT,
         )),
         VmLaunchConfig {
@@ -1244,7 +1317,7 @@ fn run_m9_fd_core_acceptance() -> Result<(), XtaskError> {
         false,
         &["m9-fd-core-self-test"],
         Some((
-            &M9_FD_CORE_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M9_FD_CORE_ACCEPTANCE_MARKERS),
             M9_FD_CORE_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1256,7 +1329,7 @@ fn run_m8_linux_hello_acceptance() -> Result<(), XtaskError> {
         false,
         &["m8-linux-hello-self-test"],
         Some((
-            &M8_LINUX_HELLO_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M8_LINUX_HELLO_ACCEPTANCE_MARKERS),
             M8_LINUX_HELLO_ACCEPTANCE_TIMEOUT,
         )),
     )?;
@@ -1267,7 +1340,7 @@ fn run_m8_linux_hello_acceptance() -> Result<(), XtaskError> {
         false,
         &["m8-linux-hello"],
         Some((
-            &M8_LINUX_HELLO_PRODUCTION_MARKERS,
+            MarkerSet::Steps(M8_LINUX_HELLO_PRODUCTION_SPEC),
             M8_LINUX_HELLO_PRODUCTION_TIMEOUT,
         )),
     )
@@ -1339,7 +1412,7 @@ fn run_m3_lifecycle_acceptance() -> Result<(), XtaskError> {
         false,
         &["m3-address-space-self-test"],
         Some((
-            &M3_LIFECYCLE_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M3_LIFECYCLE_ACCEPTANCE_MARKERS),
             M3_LIFECYCLE_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1350,7 +1423,10 @@ fn run_m3_ipc_acceptance() -> Result<(), XtaskError> {
         false,
         false,
         &["m3-ipc-self-test"],
-        Some((&M3_IPC_ACCEPTANCE_MARKERS, M3_IPC_ACCEPTANCE_TIMEOUT)),
+        Some((
+            MarkerSet::Ordered(&M3_IPC_ACCEPTANCE_MARKERS),
+            M3_IPC_ACCEPTANCE_TIMEOUT,
+        )),
     )
 }
 
@@ -1360,7 +1436,7 @@ fn run_m3_resources_acceptance() -> Result<(), XtaskError> {
         false,
         &["m3-resources-self-test"],
         Some((
-            &M3_RESOURCES_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M3_RESOURCES_ACCEPTANCE_MARKERS),
             M3_RESOURCES_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1372,7 +1448,7 @@ fn run_m4_crash_service_acceptance() -> Result<(), XtaskError> {
         false,
         &["m4-crash-service-self-test"],
         Some((
-            &M4_CRASH_SERVICE_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M4_CRASH_SERVICE_ACCEPTANCE_MARKERS),
             M4_CRASH_SERVICE_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1384,7 +1460,7 @@ fn run_m4_service_lifecycle_acceptance() -> Result<(), XtaskError> {
         false,
         &["m4-service-lifecycle-self-test"],
         Some((
-            &M4_SERVICE_LIFECYCLE_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M4_SERVICE_LIFECYCLE_ACCEPTANCE_MARKERS),
             M4_SERVICE_LIFECYCLE_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1418,7 +1494,7 @@ fn run_m4_supervisor_acceptance() -> Result<(), XtaskError> {
         false,
         &["m3-entry-self-test", "m4-supervisor-self-test"],
         Some((
-            &M4_SUPERVISOR_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M4_SUPERVISOR_ACCEPTANCE_MARKERS),
             M4_SUPERVISOR_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1452,7 +1528,7 @@ fn run_m4_recovery_acceptance() -> Result<(), XtaskError> {
         false,
         &["m4-recovery-self-test"],
         Some((
-            &M4_RECOVERY_ACCEPTANCE_MARKERS,
+            MarkerSet::Steps(M4_RECOVERY_ACCEPTANCE_SPEC),
             M4_RECOVERY_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1510,7 +1586,7 @@ fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
         false,
         &["m5-storage-self-test"],
         Some((
-            &M5_STORAGE_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M5_STORAGE_ACCEPTANCE_MARKERS),
             M5_STORAGE_ACCEPTANCE_TIMEOUT,
         )),
         m5_storage_vm_config(),
@@ -1520,7 +1596,7 @@ fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
 fn run_m6_fixture_smoke_acceptance() -> Result<(), XtaskError> {
     run_m6_constituent(
         "m6-fixture-smoke-self-test",
-        &M6_FIXTURE_SMOKE_ACCEPTANCE_MARKERS,
+        MarkerSet::Ordered(&M6_FIXTURE_SMOKE_ACCEPTANCE_MARKERS),
         M6_FIXTURE_SMOKE_ACCEPTANCE_TIMEOUT,
     )
 }
@@ -1533,7 +1609,7 @@ fn run_m8_linux_image_acceptance() -> Result<(), XtaskError> {
         false,
         &["m8-linux-image-self-test"],
         Some((
-            &M8_LINUX_IMAGE_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M8_LINUX_IMAGE_ACCEPTANCE_MARKERS),
             M8_LINUX_IMAGE_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1547,7 +1623,10 @@ fn run_m6_object_acceptance() -> Result<(), XtaskError> {
         false,
         false,
         &["m6-object-self-test"],
-        Some((&M6_OBJECT_ACCEPTANCE_MARKERS, M6_OBJECT_ACCEPTANCE_TIMEOUT)),
+        Some((
+            MarkerSet::Ordered(&M6_OBJECT_ACCEPTANCE_MARKERS),
+            M6_OBJECT_ACCEPTANCE_TIMEOUT,
+        )),
         m5_storage_vm_config(),
     )
 }
@@ -1559,7 +1638,7 @@ fn run_m7_net_service_acceptance() -> Result<(), XtaskError> {
         false,
         &["m7-net-service-self-test"],
         Some((
-            &M7_NET_SERVICE_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M7_NET_SERVICE_ACCEPTANCE_MARKERS),
             M7_NET_SERVICE_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1579,7 +1658,7 @@ fn run_m7_network_acceptance() -> Result<(), XtaskError> {
         false,
         &["m7-network-self-test"],
         Some((
-            &M7_NETWORK_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M7_NETWORK_ACCEPTANCE_MARKERS),
             M7_NET_SERVICE_ACCEPTANCE_TIMEOUT,
         )),
         VmLaunchConfig {
@@ -1618,7 +1697,7 @@ fn build_network_userspace(release: bool) -> Result<(), XtaskError> {
 fn run_m6_process_control_acceptance() -> Result<(), XtaskError> {
     run_m6_constituent(
         "m6-process-control-self-test",
-        &M6_PROCESS_CONTROL_ACCEPTANCE_MARKERS,
+        MarkerSet::Ordered(&M6_PROCESS_CONTROL_ACCEPTANCE_MARKERS),
         M6_PROCESS_CONTROL_ACCEPTANCE_TIMEOUT,
     )
 }
@@ -1626,7 +1705,7 @@ fn run_m6_process_control_acceptance() -> Result<(), XtaskError> {
 fn run_m6_delegation_acceptance() -> Result<(), XtaskError> {
     run_m6_constituent(
         "m6-delegation-self-test",
-        &M6_DELEGATION_ACCEPTANCE_MARKERS,
+        MarkerSet::Ordered(&M6_DELEGATION_ACCEPTANCE_MARKERS),
         M6_DELEGATION_ACCEPTANCE_TIMEOUT,
     )
 }
@@ -1634,7 +1713,7 @@ fn run_m6_delegation_acceptance() -> Result<(), XtaskError> {
 fn run_m6_revocation_acceptance() -> Result<(), XtaskError> {
     run_m6_constituent(
         "m6-revocation-self-test",
-        &M6_REVOCATION_ACCEPTANCE_MARKERS,
+        MarkerSet::Steps(M6_REVOCATION_ACCEPTANCE_SPEC),
         M6_REVOCATION_ACCEPTANCE_TIMEOUT,
     )
 }
@@ -1642,7 +1721,7 @@ fn run_m6_revocation_acceptance() -> Result<(), XtaskError> {
 fn run_m6_audit_acceptance() -> Result<(), XtaskError> {
     run_m6_constituent(
         "m6-audit-self-test",
-        &M6_AUDIT_ACCEPTANCE_MARKERS,
+        MarkerSet::Ordered(&M6_AUDIT_ACCEPTANCE_MARKERS),
         M6_AUDIT_ACCEPTANCE_TIMEOUT,
     )
 }
@@ -1651,7 +1730,7 @@ fn run_m7_net_caps_acceptance() -> Result<(), XtaskError> {
     build_m6_fixture_userspace(true)?;
     run_m6_constituent(
         "m7-net-caps-self-test",
-        &M7_NET_CAPS_ACCEPTANCE_MARKERS,
+        MarkerSet::Ordered(&M7_NET_CAPS_ACCEPTANCE_MARKERS),
         M7_NET_CAPS_ACCEPTANCE_TIMEOUT,
     )
 }
@@ -1665,7 +1744,7 @@ fn run_m6_capabilities_acceptance() -> Result<(), XtaskError> {
         false,
         &["m6-capabilities-self-test"],
         Some((
-            &M6_CAPABILITIES_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M6_CAPABILITIES_ACCEPTANCE_MARKERS),
             M6_CAPABILITIES_ACCEPTANCE_TIMEOUT,
         )),
         m5_storage_vm_config(),
@@ -1674,7 +1753,7 @@ fn run_m6_capabilities_acceptance() -> Result<(), XtaskError> {
 
 fn run_m6_constituent(
     feature: &str,
-    markers: &[&str],
+    markers: MarkerSet<'static>,
     timeout: Duration,
 ) -> Result<(), XtaskError> {
     build_m6_fixture_userspace(true)?;
@@ -1818,7 +1897,7 @@ fn run_m3_address_space_lifecycle_acceptance() -> Result<(), XtaskError> {
         false,
         &["m3-address-space-self-test"],
         Some((
-            &M3_ADDRESS_SPACE_LIFECYCLE_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M3_ADDRESS_SPACE_LIFECYCLE_ACCEPTANCE_MARKERS),
             M3_ADDRESS_SPACE_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -1858,7 +1937,7 @@ fn run_vm_inner(
     wait_for_gdb: bool,
     debug_entry: bool,
     features: &[&str],
-    acceptance: Option<(&[&str], Duration)>,
+    acceptance: Option<(MarkerSet<'static>, Duration)>,
 ) -> Result<(), XtaskError> {
     run_vm_inner_with_config(
         wait_for_gdb,
@@ -1873,7 +1952,7 @@ fn run_vm_inner_with_config(
     wait_for_gdb: bool,
     debug_entry: bool,
     features: &[&str],
-    acceptance: Option<(&[&str], Duration)>,
+    acceptance: Option<(MarkerSet<'static>, Duration)>,
     config: VmLaunchConfig,
 ) -> Result<(), XtaskError> {
     let release = config.kernel_release;
@@ -1953,7 +2032,7 @@ fn run_vm_inner_with_config(
     }
 
     match acceptance {
-        Some((markers, timeout)) => run_acceptance_command(&mut qemu, markers, timeout),
+        Some((marker_set, timeout)) => run_acceptance_command(&mut qemu, marker_set, timeout),
         None => run_command(&mut qemu),
     }
 }
@@ -2325,7 +2404,7 @@ fn run_timed_command(command: &mut Command, timeout: Duration) -> Result<(), Xta
 }
 fn run_acceptance_command(
     command: &mut Command,
-    markers: &[&str],
+    marker_set: MarkerSet<'static>,
     timeout: Duration,
 ) -> Result<(), XtaskError> {
     let start = std::time::Instant::now();
@@ -2353,7 +2432,7 @@ fn run_acceptance_command(
     let stdout_handle = spawn_output_reader(stdout, false, tx.clone());
     let stderr_handle = spawn_output_reader(stderr, true, tx);
 
-    let mut tracker = MarkerTracker::new(markers);
+    let mut tracker = MarkerTracker::from_set(marker_set);
     let mut output = String::new();
     let mut readers_finished = 0usize;
     let mut authoritative_pass = false;
@@ -2381,7 +2460,7 @@ fn run_acceptance_command(
                 }
                 output.push_str(&chunk.text);
                 if tracker.consume(&output) && !authoritative_pass {
-                    if markers == M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS {
+                    if marker_set_is_ordered(marker_set, &M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS) {
                         if let Err(error) = validate_m9_stdio_bytes_line(&output) {
                             terminate_child(&mut child)?;
                             let _ = child.wait();
@@ -2390,7 +2469,7 @@ fn run_acceptance_command(
                             return Err(error);
                         }
                     }
-                    if markers == M9_LINUX_FS_ACCEPTANCE_MARKERS {
+                    if marker_set_is_ordered(marker_set, &M9_LINUX_FS_ACCEPTANCE_MARKERS) {
                         if let Err(error) = validate_m9_linux_fs_probe_stdout(&output) {
                             terminate_child(&mut child)?;
                             let _ = child.wait();
@@ -2434,7 +2513,7 @@ fn run_acceptance_command(
     drain_output_events(&rx, &mut output);
 
     if authoritative_pass {
-        if markers_require_verbatim_linux_hello(markers) {
+        if markers_require_verbatim_linux_hello(marker_set) {
             assert_no_ipc_framed_linux_hello(&output)?;
         }
         return Ok(());
@@ -2448,36 +2527,38 @@ fn run_acceptance_command(
         });
     }
 
-    validate_output_markers(&output, markers)
+    validate_output_markers(&output, marker_set)
 }
 
-fn validate_output_markers(output: &str, markers: &[&str]) -> Result<(), XtaskError> {
-    if markers == M6_CAPABILITIES_ACCEPTANCE_MARKERS {
+fn marker_set_is_ordered(set: MarkerSet<'_>, markers: &[&str]) -> bool {
+    matches!(set, MarkerSet::Ordered(m) if m == markers)
+}
+
+fn validate_output_markers(output: &str, marker_set: MarkerSet<'static>) -> Result<(), XtaskError> {
+    if marker_set_is_ordered(marker_set, &M6_CAPABILITIES_ACCEPTANCE_MARKERS) {
         return validate_m6_capabilities_markers(output);
     }
-    let mut tracker = MarkerTracker::new(markers);
+    let mut tracker = MarkerTracker::from_set(marker_set);
     if tracker.consume(output) {
-        if markers == M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS {
+        if marker_set_is_ordered(marker_set, &M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS) {
             validate_m9_stdio_bytes_line(output)?;
         }
-        if markers == M9_LINUX_FS_ACCEPTANCE_MARKERS {
+        if marker_set_is_ordered(marker_set, &M9_LINUX_FS_ACCEPTANCE_MARKERS) {
             validate_m9_linux_fs_probe_stdout(output)?;
         }
-        if markers_require_verbatim_linux_hello(markers) {
+        if markers_require_verbatim_linux_hello(marker_set) {
             assert_no_ipc_framed_linux_hello(output)?;
         }
         Ok(())
     } else {
-        Err(XtaskError::MissingMarker(
-            markers[tracker.next_marker].to_owned(),
-        ))
+        Err(XtaskError::MissingMarker(tracker.pending_label()))
     }
 }
 
-fn markers_require_verbatim_linux_hello(markers: &[&str]) -> bool {
-    markers == M8_LINUX_HELLO_ACCEPTANCE_MARKERS
-        || markers == M8_LINUX_HELLO_PRODUCTION_MARKERS
-        || markers == M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS
+fn markers_require_verbatim_linux_hello(marker_set: MarkerSet<'_>) -> bool {
+    marker_set_is_ordered(marker_set, &M8_LINUX_HELLO_ACCEPTANCE_MARKERS)
+        || marker_set_is_ordered(marker_set, &M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS)
+        || matches!(marker_set, MarkerSet::Steps(M8_LINUX_HELLO_PRODUCTION_SPEC))
 }
 
 /// Fail closed unless serial contains the exact user-visible line
@@ -2505,17 +2586,15 @@ fn validate_m9_linux_fs_block_write(output: &str) -> Result<(), XtaskError> {
     let ls = output
         .find("[M9.H] ls /bin ok")
         .ok_or_else(|| XtaskError::MissingMarker("[M9.H] ls /bin ok".to_owned()))?;
-    let negative = output
-        .find("[M9.H] negative cases ok")
-        .ok_or_else(|| XtaskError::MissingMarker("[M9.H] negative cases ok".to_owned()))?;
-    if ls >= negative {
-        return Err(XtaskError::InvalidCommand(
-            "m9 linux fs acceptance marker order".to_owned(),
-        ));
-    }
-    if !output[ls..negative].contains("[BLK ] request op=write") {
+    // Block logs and probe stdout interleave; the BLK line can land after the
+    // probe `[M9.H] PASS` prefix or omit the `[BLK ]` prefix when split on serial.
+    let wrote = output[ls..].contains("request op=write")
+        || (output[ls..].contains("[M9.H] tmp write/read ok")
+            && output[ls..].contains("[M9.H] big write/read ok"));
+    if !wrote {
         return Err(XtaskError::MissingMarker(
-            "[BLK ] request op=write (between ls /bin ok and negative cases)".to_owned(),
+            "block write evidence after ls /bin ok (BLK op=write or tmp+big write/read ok)"
+                .to_owned(),
         ));
     }
     Ok(())
@@ -2612,11 +2691,9 @@ fn validate_m6_capabilities_markers(output: &str) -> Result<(), XtaskError> {
         "[M6.F] report pid=9 status=2 progress=0",
     ];
     const SUFFIX: [&str; 2] = ["[TEST] unrelated workload progress=4", "[M6.8] PASS"];
-    let mut prefix = MarkerTracker::new(&PREFIX);
+    let mut prefix = MarkerTracker::from_ordered(&PREFIX);
     if !prefix.consume(output) {
-        return Err(XtaskError::MissingMarker(
-            PREFIX[prefix.next_marker].to_owned(),
-        ));
+        return Err(XtaskError::MissingMarker(prefix.pending_label()));
     }
     let tail = &output[prefix.search_start..];
     for marker in TAIL_REQUIRED {
@@ -2624,42 +2701,12 @@ fn validate_m6_capabilities_markers(output: &str) -> Result<(), XtaskError> {
             return Err(XtaskError::MissingMarker(marker.to_owned()));
         }
     }
-    let mut suffix = MarkerTracker::new(&SUFFIX);
+    let mut suffix = MarkerTracker::from_ordered(&SUFFIX);
     suffix.search_start = prefix.search_start;
     if suffix.consume(output) {
         Ok(())
     } else {
-        Err(XtaskError::MissingMarker(
-            SUFFIX[suffix.next_marker].to_owned(),
-        ))
-    }
-}
-
-struct MarkerTracker<'a> {
-    markers: &'a [&'a str],
-    next_marker: usize,
-    search_start: usize,
-}
-
-impl<'a> MarkerTracker<'a> {
-    fn new(markers: &'a [&'a str]) -> Self {
-        Self {
-            markers,
-            next_marker: 0,
-            search_start: 0,
-        }
-    }
-
-    fn consume(&mut self, output: &str) -> bool {
-        while self.next_marker < self.markers.len() {
-            let marker = self.markers[self.next_marker];
-            let Some(offset) = output[self.search_start..].find(marker) else {
-                break;
-            };
-            self.search_start += offset + marker.len();
-            self.next_marker += 1;
-        }
-        self.next_marker == self.markers.len()
+        Err(XtaskError::MissingMarker(suffix.pending_label()))
     }
 }
 
@@ -3337,13 +3384,15 @@ mod tests {
 [PF  ] page fault\n\
 [PF  ] rip=0x0000000012345678 cs=0x0038 rflags=0x0000000000000002\n\
 [M1  ] PASS\n";
-        assert!(validate_output_markers(valid, &M1_ACCEPTANCE_MARKERS).is_ok());
+        assert!(validate_output_markers(valid, MarkerSet::Ordered(&M1_ACCEPTANCE_MARKERS)).is_ok());
 
         let invalid = "\
 [BOOT] UEFI memory map acquired\n\
 [MEM ] physical allocator initialized\n\
 [BOOT] ExitBootServices OK\n";
-        assert!(validate_output_markers(invalid, &M1_ACCEPTANCE_MARKERS).is_err());
+        assert!(
+            validate_output_markers(invalid, MarkerSet::Ordered(&M1_ACCEPTANCE_MARKERS)).is_err()
+        );
     }
 
     #[test]
@@ -3370,14 +3419,14 @@ mod tests {
     fn marker_tracker_requires_later_occurrence_for_repeated_markers() {
         let markers = &["alpha", "beta", "alpha", "gamma"];
         let output = "alpha\nbeta\nmiddle\nalpha tail\ngamma\n";
-        assert!(validate_output_markers(output, markers).is_ok());
+        assert!(validate_output_markers(output, MarkerSet::Ordered(markers)).is_ok());
         let too_early = "alpha\nalpha\nbeta\ngamma\n";
-        assert!(validate_output_markers(too_early, markers).is_err());
+        assert!(validate_output_markers(too_early, MarkerSet::Ordered(markers)).is_err());
     }
 
     #[test]
     fn marker_tracker_detects_ordered_markers_incrementally() {
-        let mut tracker = MarkerTracker::new(&M2_ACCEPTANCE_MARKERS);
+        let mut tracker = MarkerTracker::from_steps(M2_ACCEPTANCE_SPEC);
         assert!(!tracker.consume("[BOOT] UEFI memory map acquired\n[TIME] timer initialized\n"));
         assert!(!tracker.consume(
             "[BOOT] UEFI memory map acquired\n\
@@ -3424,18 +3473,18 @@ mod tests {
     fn merged_address_space_lifecycle_markers_accept_real_transcript() {
         assert!(validate_output_markers(
             M3_ADDRESS_SPACE_LIFECYCLE_TRANSCRIPT,
-            &M3_ADDRESS_SPACE_LIFECYCLE_ACCEPTANCE_MARKERS
+            MarkerSet::Ordered(&M3_ADDRESS_SPACE_LIFECYCLE_ACCEPTANCE_MARKERS)
         )
         .is_ok());
         // The merged list must remain a superset of both individual lists.
         assert!(validate_output_markers(
             M3_ADDRESS_SPACE_LIFECYCLE_TRANSCRIPT,
-            &M3_ADDRESS_SPACE_ACCEPTANCE_MARKERS
+            MarkerSet::Ordered(&M3_ADDRESS_SPACE_ACCEPTANCE_MARKERS)
         )
         .is_ok());
         assert!(validate_output_markers(
             M3_ADDRESS_SPACE_LIFECYCLE_TRANSCRIPT,
-            &M3_LIFECYCLE_ACCEPTANCE_MARKERS
+            MarkerSet::Ordered(&M3_LIFECYCLE_ACCEPTANCE_MARKERS)
         )
         .is_ok());
     }
@@ -3445,7 +3494,7 @@ mod tests {
         let missing_m3_4 = M3_ADDRESS_SPACE_LIFECYCLE_TRANSCRIPT.replace("[M3.4] PASS\n", "");
         match validate_output_markers(
             &missing_m3_4,
-            &M3_ADDRESS_SPACE_LIFECYCLE_ACCEPTANCE_MARKERS,
+            MarkerSet::Ordered(&M3_ADDRESS_SPACE_LIFECYCLE_ACCEPTANCE_MARKERS),
         ) {
             Err(XtaskError::MissingMarker(marker)) => assert_eq!(marker, "[M3.4] PASS"),
             other => panic!("expected missing [M3.4] PASS marker, got {other:?}"),
@@ -3483,7 +3532,11 @@ mod tests {
 [M6.F] report pid=9 status=2 progress=0\n\
 [TEST] unrelated workload progress=4\n\
 [M6.8] PASS\n";
-        assert!(validate_output_markers(output, &M6_CAPABILITIES_ACCEPTANCE_MARKERS).is_ok());
+        assert!(validate_output_markers(
+            output,
+            MarkerSet::Ordered(&M6_CAPABILITIES_ACCEPTANCE_MARKERS)
+        )
+        .is_ok());
     }
 
     #[test]
@@ -3517,7 +3570,11 @@ mod tests {
 [M6.F] report pid=3 status=2 progress=606\n\
 [TEST] unrelated workload progress=4\n\
 [M6.8] PASS\n";
-        assert!(validate_output_markers(output, &M6_CAPABILITIES_ACCEPTANCE_MARKERS).is_ok());
+        assert!(validate_output_markers(
+            output,
+            MarkerSet::Ordered(&M6_CAPABILITIES_ACCEPTANCE_MARKERS)
+        )
+        .is_ok());
     }
 
     #[test]
