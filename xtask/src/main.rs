@@ -207,7 +207,7 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 9] = [
     "[M9.E] cycles=8 waiters=0",
     "[M9.E] PASS",
 ];
-const M9_LINUX_SOCKET_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(240);
+const M9_LINUX_SOCKET_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 const M9_LINUX_SOCKET_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[TIME] timer initialized",
     "[M9.L] creating linux socket acceptance",
