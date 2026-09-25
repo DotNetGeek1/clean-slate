@@ -98,7 +98,7 @@ impl LinuxProcessTable {
     pub(crate) fn publish_exit(&mut self, id: ProcId, status: i32) {
         let parent = self.parent_of(id);
         if let Some(parent_id) = parent {
-            if let Some(parent_index) = self.slot_index(parent_id) {
+            if let Some(parent_index) = self.slot_index_resolved(parent_id) {
                 for entry in self.slots[parent_index].children.iter_mut().flatten() {
                     if entry.child == id {
                         entry.state = ChildState::Zombie { status };
@@ -127,7 +127,7 @@ impl LinuxProcessTable {
         parent: ProcId,
         wait_pid: i64,
     ) -> Option<(ProcId, i32)> {
-        let index = self.slot_index(parent)?;
+        let index = self.slot_index_resolved(parent)?;
         for entry in self.slots[index].children.iter_mut().flatten() {
             if wait_pid > 0 && entry.child.pid != wait_pid as u64 {
                 continue;
@@ -160,7 +160,7 @@ impl LinuxProcessTable {
     }
 
     pub(crate) fn has_waitable_children(&self, parent: ProcId, wait_pid: i64) -> bool {
-        let Some(index) = self.slot_index(parent) else {
+        let Some(index) = self.slot_index_resolved(parent) else {
             return false;
         };
         self.slots[index].children.iter().any(|child| {
@@ -172,7 +172,7 @@ impl LinuxProcessTable {
     }
 
     pub(crate) fn has_any_child(&self, parent: ProcId) -> bool {
-        let Some(index) = self.slot_index(parent) else {
+        let Some(index) = self.slot_index_resolved(parent) else {
             return false;
         };
         self.slots[index].children.iter().any(|c| {
@@ -241,6 +241,23 @@ impl LinuxProcessTable {
         self.slots
             .iter()
             .position(|slot| slot.live && slot.id == id)
+    }
+
+    /// Maps syscall `ctx` identity to the live proc-table slot (generation drift).
+    pub(crate) fn resolve_proc_id(&self, id: ProcId) -> ProcId {
+        if self.slot_index(id).is_some() {
+            return id;
+        }
+        live_instance_generation(id.pid)
+            .map(|generation| ProcId {
+                pid: id.pid,
+                generation,
+            })
+            .unwrap_or(id)
+    }
+
+    pub(crate) fn slot_index_resolved(&self, id: ProcId) -> Option<usize> {
+        self.slot_index(self.resolve_proc_id(id))
     }
 }
 

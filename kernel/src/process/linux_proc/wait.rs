@@ -28,11 +28,11 @@ pub(crate) fn linux_wait4(
         pid if pid < -1 => -1,
         pid => pid,
     };
-    let parent = ProcId {
+    let table = table_mut();
+    let parent = table.resolve_proc_id(ProcId {
         pid: ctx.pid,
         generation: ctx.instance_generation,
-    };
-    let table = table_mut();
+    });
     if !table.has_any_child(parent) {
         return Err(ECHILD);
     }
