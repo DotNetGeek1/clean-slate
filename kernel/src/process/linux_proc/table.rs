@@ -6,9 +6,6 @@ use clean_slate_linux_abi::{w_exitcode, LinuxErrno, EAGAIN};
 use clean_slate_service_lifecycle::InstanceGeneration;
 
 /// Self-test feature: sh + two pipe children + parent + headroom (#107 convergence).
-#[cfg(feature = "m9-userspace-self-test")]
-pub(crate) const LINUX_MAX_PROC_ENTRIES: usize = 12;
-#[cfg(not(feature = "m9-userspace-self-test"))]
 pub(crate) const LINUX_MAX_PROC_ENTRIES: usize = 6;
 pub(crate) const LINUX_PROC_MAX_CHILDREN_PER_PARENT: usize = 4;
 

@@ -25,7 +25,9 @@ const fn task_count_for_features() -> usize {
         feature = "m7-net-caps-self-test",
         feature = "m7-net-service-self-test",
         feature = "m6-object-self-test",
-        feature = "m6-audit-self-test"
+        feature = "m6-audit-self-test",
+        // #107: storage(0)+net(1)+spinner(5)+shell+fork child (#100 pipe-grep peak).
+        feature = "m9-userspace-self-test"
     )) {
         6
     } else if cfg!(feature = "m8-linux-hello") {
