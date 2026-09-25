@@ -45,6 +45,8 @@ use crate::sync::global_cell::GlobalCell;
 use clean_slate_linux_abi::{
     encode_rax, unsupported_syscall_result, UnsupportedSyscallBudget, ESRCH,
 };
+#[cfg(feature = "m9-userspace-self-test")]
+use core::sync::atomic::{AtomicUsize, Ordering};
 use clean_slate_service_lifecycle::InstanceGeneration;
 use decode::decode_request_from_context;
 use table::{lookup_handler, LinuxSyscallContext};
@@ -125,6 +127,25 @@ impl PersonalityLogState {
 static LINUX_DISPATCH_STATE: GlobalCell<LinuxDispatchState> =
     GlobalCell::new(LinuxDispatchState::new());
 
+#[cfg(feature = "m9-userspace-self-test")]
+static SYSCALL_ERRNO_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "m9-userspace-self-test")]
+const SYSCALL_ERRNO_LOG_LIMIT: usize = 64;
+
+#[cfg(feature = "m9-userspace-self-test")]
+fn maybe_log_syscall_errno(pid: u64, nr: u64, result: clean_slate_linux_abi::LinuxSyscallResult) {
+    if SYSCALL_ERRNO_LOG_COUNT.load(Ordering::Relaxed) >= SYSCALL_ERRNO_LOG_LIMIT {
+        return;
+    }
+    if let Err(errno) = result {
+        SYSCALL_ERRNO_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+        kernel_log_fmt(format_args!(
+            "[M9  ] syscall err pid={pid} nr={nr} errno={}\n",
+            errno.0
+        ));
+    }
+}
+
 fn record_unsupported(budget: &mut UnsupportedSyscallBudget, nr: u64) {
     if let Some(observation) = budget.record(nr) {
         kernel_log_fmt(format_args!(
@@ -171,6 +192,8 @@ pub(crate) fn dispatch_with(
     if request.nr != clean_slate_linux_abi::SYS_EXIT {
         crate::selftest::m9_fd_core::observe_linux_syscall_result(pid, &request, result);
     }
+    #[cfg(feature = "m9-userspace-self-test")]
+    maybe_log_syscall_errno(pid, request.nr, result);
     ctx.frame.rax = encode_rax(result);
 }
 

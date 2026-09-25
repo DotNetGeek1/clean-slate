@@ -1,7 +1,7 @@
 //! Linux filesystem/path syscall family (#101).
 
 use super::table::{LinuxSyscallContext, LinuxSyscallHandler};
-use super::user_copy::copy_user_bytes;
+use super::user_copy::copy_user_path_cstring;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::process::linux_fd::{
     self,
@@ -246,23 +246,8 @@ fn write_stat(stat_ptr: u64, node: NodeId, lstat: bool) -> Result<(), LinuxErrno
 
 fn copy_path_from_user(ptr: u64) -> Result<[u8; LINUX_PATH_MAX], LinuxErrno> {
     let mut scratch = [0u8; LINUX_PATH_MAX];
-    let mut chunk = [0u8; 64];
-    let mut len = 0usize;
-    while len < LINUX_PATH_MAX {
-        let want = (LINUX_PATH_MAX - len).min(64);
-        copy_user_bytes(ptr + len as u64, want as u64, &mut chunk)?;
-        for byte in &chunk[..want] {
-            if *byte == 0 {
-                return copy_bounded_path(&scratch[..len]);
-            }
-            scratch[len] = *byte;
-            len += 1;
-            if len >= LINUX_PATH_MAX {
-                return Err(clean_slate_linux_abi::ENAMETOOLONG);
-            }
-        }
-    }
-    Err(clean_slate_linux_abi::ENAMETOOLONG)
+    let len = copy_user_path_cstring(ptr, &mut scratch)?;
+    copy_bounded_path(&scratch[..len])
 }
 
 fn final_name(path: &[u8]) -> Result<&[u8], LinuxErrno> {
