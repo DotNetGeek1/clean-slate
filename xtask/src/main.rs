@@ -2653,14 +2653,17 @@ fn run_acceptance_command(
                     print!("{}", chunk.text);
                 }
                 output.push_str(&chunk.text);
-                if output.contains("[FAIL]") && !authoritative_pass {
+                if marker_set_is_ordered(marker_set, &M9_USERSPACE_ACCEPTANCE_MARKERS)
+                    && output.contains("[FAIL] m9 userspace checklist command faulted")
+                    && !authoritative_pass
+                {
                     terminate_child(&mut child)?;
                     let _ = child.wait();
                     join_output_reader(stdout_handle);
                     join_output_reader(stderr_handle);
                     return Err(XtaskError::CommandFailed {
                         command: command_display,
-                        status: "guest reported [FAIL]".to_owned(),
+                        status: "guest reported m9 userspace checklist [FAIL]".to_owned(),
                     });
                 }
                 M9_RUNTIME_WALL_CLOCK.with(|slot| {

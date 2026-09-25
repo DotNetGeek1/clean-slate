@@ -424,8 +424,10 @@ fn fd_readiness(
     fd: i32,
     events: i16,
 ) -> Result<i16, LinuxErrno> {
+    // Linux ignores negative fds in poll(2); do not set revents (BusyBox nslookup
+    // uses placeholder nfds slots with fd=-1 alongside the real UDP socket).
     if fd < 0 {
-        return Ok(POLLNVAL);
+        return Ok(0);
     }
     if linux_fd::ensure_open_fd(ctx.pid, ctx.instance_generation, fd as u64).is_err() {
         return Ok(POLLNVAL);

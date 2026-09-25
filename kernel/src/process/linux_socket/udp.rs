@@ -1,8 +1,10 @@
 //! UDP socket path (#105).
 
 use clean_slate_linux_abi::{
-    LinuxSyscallRequest, LinuxSyscallResult, EDESTADDRREQ, EMSGSIZE, SOCKADDR_IN_LEN,
+    LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EDESTADDRREQ, EMSGSIZE, EAGAIN,
+    SOCKADDR_IN_LEN,
 };
+use clean_slate_network::error::NetworkError;
 use clean_slate_network::protocol::{NetworkRequest, NetworkResponse};
 use clean_slate_service_fixtures::NETWORK_MAX_PAYLOAD_BYTES;
 
@@ -36,6 +38,17 @@ fn push_rx_datagram(socket: &mut LinuxSocket, bytes: &[u8]) {
         },
     });
     socket.rx_count += 1;
+}
+
+fn map_udp_receive_error(code: u16, _nonblock: bool) -> LinuxErrno {
+    if code == NetworkError::Timeout.code() {
+        // Linux UDP recv/recvmsg without SO_RCVTIMEO never returns ETIMEDOUT.
+        return EAGAIN;
+    }
+    match super::tcp::map_network_error(code) {
+        Ok(_) => clean_slate_linux_abi::EINVAL,
+        Err(errno) => errno,
+    }
 }
 
 fn arm_udp_receive(
@@ -222,60 +235,90 @@ fn drain_rx_if_ready(
     })?
 }
 
+/// Shared inbound path for `read(2)`, `recvfrom`, and `recvmsg` on UDP sockets.
 pub(crate) fn read_datagram(
     id: LinuxSocketId,
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
     scratch: &mut [u8],
+    nonblock: bool,
 ) -> LinuxSyscallResult {
-    if let Some(n) = drain_rx_if_ready(id, ctx, scratch)? {
-        return Ok(n as u64);
-    }
-    while let Some(req_id) = with_socket_mut(id, |socket| socket.pending_rx_req)? {
+    loop {
         if let Some(n) = drain_rx_if_ready(id, ctx, scratch)? {
             return Ok(n as u64);
         }
-        match block_linux_syscall(
-            request,
-            ctx,
-            linux_socket_request_wait_key(req_id),
-            None,
-            LinuxTimeoutResult::Zero,
-        ) {
-            Ok(_) => continue,
-            Err(errno) => return Err(errno),
+
+        while let Some(req_id) = with_socket_mut(id, |socket| socket.pending_rx_req)? {
+            if let Some(n) = drain_rx_if_ready(id, ctx, scratch)? {
+                return Ok(n as u64);
+            }
+            if nonblock {
+                return Err(EAGAIN);
+            }
+            match block_linux_syscall(
+                request,
+                ctx,
+                linux_socket_request_wait_key(req_id),
+                None,
+                LinuxTimeoutResult::Zero,
+            ) {
+                Ok(_) => continue,
+                Err(errno) => return Err(errno),
+            }
         }
-    }
-    with_socket_mut(id, |socket| {
-        let outcome = match broker_sync(
-            request,
-            ctx,
-            id,
-            &mut socket.inflight_request_id,
-            NetworkRequest::Receive {
-                session: socket.session,
-                max_len: scratch.len().min(LINUX_UDP_MAX_DATAGRAM) as u32,
-            },
-            &[],
-            Some(clean_slate_network::session::SessionGeneration::new(
-                socket.session_generation,
-            )),
-            None,
-        ) {
+
+        let broker = with_socket_mut(id, |socket| {
+            broker_sync(
+                request,
+                ctx,
+                id,
+                &mut socket.inflight_request_id,
+                NetworkRequest::Receive {
+                    session: socket.session,
+                    max_len: scratch.len().min(LINUX_UDP_MAX_DATAGRAM) as u32,
+                },
+                &[],
+                Some(clean_slate_network::session::SessionGeneration::new(
+                    socket.session_generation,
+                )),
+                None,
+            )
+        })?;
+
+        let outcome = match broker {
             Ok(outcome) => outcome,
-            Err(block_or_err) => return block_or_err,
+            Err(block_or_err) => {
+                if nonblock {
+                    if let Some(n) = drain_rx_if_ready(id, ctx, scratch)? {
+                        return Ok(n as u64);
+                    }
+                    return Err(EAGAIN);
+                }
+                return block_or_err;
+            }
         };
+
         match outcome.response {
             NetworkResponse::Receive { payload_len } => {
                 let n = payload_len as usize;
-                let copy = n.min(scratch.len());
-                scratch[..copy].copy_from_slice(&outcome.payload[..copy]);
-                Ok(copy as u64)
+                let copy = n.min(scratch.len()).min(NETWORK_MAX_PAYLOAD_BYTES);
+                return with_socket_mut(id, |socket| {
+                    push_rx_datagram(socket, &outcome.payload[..copy]);
+                    Ok(take_rx_datagram(socket, scratch).unwrap_or(copy) as u64)
+                })?;
             }
-            NetworkResponse::Error { code } => super::tcp::map_network_error(code),
-            _ => Err(clean_slate_linux_abi::EINVAL),
+            NetworkResponse::Error { code } => {
+                if code == NetworkError::Timeout.code() {
+                    if nonblock {
+                        return Err(EAGAIN);
+                    }
+                    continue;
+                }
+                return Err(map_udp_receive_error(code, nonblock));
+            }
+            _ => return Err(clean_slate_linux_abi::EINVAL),
         }
-    })?
+    }
 }
 
 pub(crate) fn write_datagram(
@@ -299,6 +342,7 @@ const MSGHDR_SIZE: u64 = 56;
 pub(crate) fn recvmsg(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
+    nonblock: bool,
 ) -> LinuxSyscallResult {
     let fd = request.args[0];
     let msg_ptr = request.args[1];
@@ -330,7 +374,7 @@ pub(crate) fn recvmsg(
     let socket_ref = crate::process::linux_fd::socket_ref_for_open(open)?;
     let id = super::socket_ref_to_id(socket_ref);
     let mut scratch = [0u8; LINUX_UDP_MAX_DATAGRAM];
-    let n = read_datagram(id, request, ctx, &mut scratch)? as usize;
+    let n = read_datagram(id, request, ctx, &mut scratch, nonblock)? as usize;
     let copy = n.min(want).min(scratch.len());
     if copy > 0 {
         unsafe {

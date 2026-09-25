@@ -500,8 +500,25 @@ pub(crate) mod syscalls {
         request: &LinuxSyscallRequest,
         ctx: &mut LinuxSyscallContext<'_>,
     ) -> LinuxSyscallResult {
-        udp::recvmsg(request, ctx)
+        let fd = request.args[0];
+        let nonblock = super::socket_recv_nonblock(ctx, fd, request.args[2])?;
+        udp::recvmsg(request, ctx, nonblock)
     }
+}
+
+const MSG_DONTWAIT: u64 = 0x40;
+
+pub(super) fn socket_recv_nonblock(
+    ctx: &crate::syscall::linux::table::LinuxSyscallContext<'_>,
+    fd: u64,
+    msg_flags: u64,
+) -> Result<bool, clean_slate_linux_abi::LinuxErrno> {
+    let status = crate::process::linux_fd::open_description_status(
+        ctx.pid,
+        ctx.instance_generation,
+        fd,
+    )?;
+    Ok(status.nonblock || (msg_flags & MSG_DONTWAIT) != 0)
 }
 
 pub(crate) fn refresh_readiness_for_fd(
@@ -543,8 +560,9 @@ pub(crate) fn read_socket(
     if scratch.is_empty() {
         return Ok(0);
     }
+    let nonblock = socket_recv_nonblock(ctx, _fd, 0)?;
     match with_socket_mut(id, |socket| socket.kind)? {
-        SocketKindLinux::Udp => udp::read_datagram(id, request, ctx, scratch),
+        SocketKindLinux::Udp => udp::read_datagram(id, request, ctx, scratch, nonblock),
         SocketKindLinux::Tcp => with_socket_mut(id, |socket| {
             tcp::read_stream(socket, request, ctx, id, _fd, scratch)
         })?,
