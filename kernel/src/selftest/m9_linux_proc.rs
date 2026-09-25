@@ -108,9 +108,7 @@ fn install_linux_stdio(pid: u64) -> Result<(), &'static str> {
     if console_sink_render_style(personality) != ConsoleSinkRenderStyle::Verbatim {
         return Err("m9 linux proc: personality not verbatim");
     }
-    let ipc = unsafe { endpoint_table_mut() };
-    let handle = ipc.grant_console_capability_for_pid(pid)?;
-    linux_fd::install_stdio_for_process(pid, generation, handle, handle)
+    linux_fd::grant_console_stdio_for_process(pid, generation)
         .map_err(|_| "m9 linux proc: stdio install failed")
 }
 

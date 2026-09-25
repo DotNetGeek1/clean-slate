@@ -152,11 +152,7 @@ fn launch_probe(allocator: &mut PageAllocator) -> u64 {
     }
     let generation = live_instance_generation(launched.pid)
         .unwrap_or_else(|| fatal_kernel_error("m9 linux runtime generation"));
-    let ipc = unsafe { endpoint_table_mut() };
-    let handle = ipc
-        .grant_console_capability_for_pid(launched.pid)
-        .unwrap_or_else(|_| fatal_kernel_error("m9 linux runtime console grant"));
-    linux_fd::install_stdio_for_process(launched.pid, generation, handle, handle)
+    linux_fd::grant_console_stdio_for_process(launched.pid, generation)
         .unwrap_or_else(|_| fatal_kernel_error("m9 linux runtime stdio"));
     RUNTIME_PID.store(launched.pid, Ordering::Relaxed);
     RUNTIME_GENERATION.store(generation.0, Ordering::Relaxed);

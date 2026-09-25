@@ -297,9 +297,7 @@ fn reset_cycle_observations() {
 fn install_stdio_and_placeholder(pid: u64) -> Result<(), &'static str> {
     let generation =
         live_instance_generation(pid).ok_or("m9 fd core missing instance generation")?;
-    let ipc = unsafe { endpoint_table_mut() };
-    let handle = ipc.grant_console_capability_for_pid(pid)?;
-    linux_fd::install_stdio_for_process(pid, generation, handle, handle)?;
+    linux_fd::grant_console_stdio_for_process(pid, generation)?;
     let placeholder = linux_fd::alloc_self_test_placeholder_file(pid, generation)
         .map_err(|_| "m9 fd core placeholder allocation failed")?;
     if placeholder != 0 {

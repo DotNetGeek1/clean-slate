@@ -9,7 +9,6 @@
 use crate::arch::x86_64::context_switch::{TaskStack, TASK_STACK_SIZE};
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::log::kernel_log_fmt;
-use crate::ipc::endpoint_table_mut;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::domain::teardown_process_by_id;
@@ -114,8 +113,7 @@ pub(crate) fn ensure_slot_stack_is_idle(scheduler_slot: usize) -> Result<(), &'s
 /// On failure the caller must tear the process down through the production path
 /// so a half-wired Linux process never runs.
 fn wire_linux_stdio(pid: u64, generation: InstanceGeneration) -> Result<(), &'static str> {
-    let handle = unsafe { endpoint_table_mut() }.grant_console_capability_for_pid(pid)?;
-    linux_fd::install_stdio_for_process(pid, generation, handle, handle)
+    linux_fd::grant_console_stdio_for_process(pid, generation)
 }
 
 fn rollback_half_wired(

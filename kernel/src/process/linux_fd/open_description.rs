@@ -9,10 +9,11 @@ pub(crate) struct OpenDescriptionId {
     pub(crate) generation: u32,
 }
 
-/// Opaque console backend reference (IPC send-capability handle).
+/// Shared console backend identity (kernel IPC endpoint resource, not a holder handle).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ConsoleSinkRef {
-    pub(crate) capability_handle: u64,
+    pub(crate) endpoint_slot: u16,
+    pub(crate) endpoint_generation: u16,
 }
 
 /// #101: stable node identity for Linux fs projection backends.

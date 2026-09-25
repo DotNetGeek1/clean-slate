@@ -137,11 +137,7 @@ pub(crate) fn start_m9_linux_fs_self_test(page_allocator: PageAllocator) -> ! {
     .unwrap_or_else(|_| fatal_kernel_error("m9 linux fs probe launch failed"));
     M9_MAIN_PROBE_PID.store(linux.pid, Ordering::Relaxed);
 
-    let ipc = unsafe { endpoint_table_mut() };
-    let handle = ipc
-        .grant_console_capability_for_pid(linux.pid)
-        .unwrap_or_else(|_| fatal_kernel_error("console grant"));
-    linux_fd::install_stdio_for_process(linux.pid, linux.instance_generation, handle, handle)
+    linux_fd::grant_console_stdio_for_process(linux.pid, linux.instance_generation)
         .unwrap_or_else(|_| fatal_kernel_error("stdio install"));
 
     let frame_pointer =

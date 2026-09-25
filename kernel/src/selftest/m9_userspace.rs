@@ -204,12 +204,8 @@ fn install_linux_stdio(pid: u64, generation: InstanceGeneration) {
     if console_sink_render_style(personality) != ConsoleSinkRenderStyle::Verbatim {
         fatal_kernel_error("m9 userspace stdio not verbatim");
     }
-    let ipc = unsafe { endpoint_table_mut() };
-    let handle = ipc
-        .grant_console_capability_for_pid(pid)
-        .unwrap_or_else(|_| fatal_kernel_error("console grant"));
-    linux_fd::install_stdio_for_process(pid, generation, handle, handle)
-        .unwrap_or_else(|_| fatal_kernel_error("stdio install"));
+    linux_fd::grant_console_stdio_for_process(pid, generation)
+        .unwrap_or_else(|_| fatal_kernel_error("console stdio install"));
 }
 
 fn launch_busybox_inner(

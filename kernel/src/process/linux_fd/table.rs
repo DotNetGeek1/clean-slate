@@ -1,7 +1,7 @@
 //! Per-process Linux fd table (compatibility integers → open descriptions).
 
 use super::open_description::{
-    ConsoleSinkRef, DescriptorKind, OpenAccess, OpenDescriptionId, OpenDescriptionPool,
+    ConsoleSinkRef, OpenAccess, OpenDescriptionId, OpenDescriptionPool,
     OpenStatus,
 };
 use clean_slate_linux_abi::{LinuxErrno, EBADF, EMFILE};
@@ -169,8 +169,7 @@ pub(crate) fn install_stdio_entries(
     table: &mut LinuxFdTable,
     pool: &mut OpenDescriptionPool,
     pid: u64,
-    stdout_handle: u64,
-    stderr_handle: u64,
+    sink: ConsoleSinkRef,
 ) -> Result<(), LinuxErrno> {
     *table = LinuxFdTable::empty();
     let write_status = OpenStatus {
@@ -178,20 +177,8 @@ pub(crate) fn install_stdio_entries(
         nonblock: false,
         append: false,
     };
-    let stdout_open = pool.alloc_console(
-        pid,
-        ConsoleSinkRef {
-            capability_handle: stdout_handle,
-        },
-        write_status,
-    )?;
-    let stderr_open = pool.alloc_console(
-        pid,
-        ConsoleSinkRef {
-            capability_handle: stderr_handle,
-        },
-        write_status,
-    )?;
+    let stdout_open = pool.alloc_console(pid, sink, write_status)?;
+    let stderr_open = pool.alloc_console(pid, sink, write_status)?;
     pool.attach_first_ref(stdout_open)?;
     pool.attach_first_ref(stderr_open)?;
     table.entries[LINUX_STDOUT_FD as usize] = Some(FdEntry {
@@ -202,43 +189,5 @@ pub(crate) fn install_stdio_entries(
         open: stderr_open,
         flags: FdFlags::default(),
     });
-    Ok(())
-}
-
-/// After `fork(2)`, inherited stdio fds share open descriptions whose console handles
-/// still name the parent holder. Replace fd 1/2 with child-local console descriptions
-/// when they still point at a console backend (leave pipes/files shared as-is).
-pub(crate) fn rebind_console_stdio_if_console(
-    table: &mut LinuxFdTable,
-    pool: &mut OpenDescriptionPool,
-    owner_pid: u64,
-    fd: u64,
-    capability_handle: u64,
-) -> Result<(), LinuxErrno> {
-    let Some(entry) = table.get(fd).copied() else {
-        return Ok(());
-    };
-    if !matches!(
-        pool.get(entry.open)?.kind,
-        DescriptorKind::Console(_)
-    ) {
-        return Ok(());
-    }
-    let flags = entry.flags;
-    close_fd_entry(table, pool, fd)?;
-    let write_status = OpenStatus {
-        access: OpenAccess::WriteOnly,
-        nonblock: false,
-        append: false,
-    };
-    let open = pool.alloc_console(
-        owner_pid,
-        ConsoleSinkRef {
-            capability_handle,
-        },
-        write_status,
-    )?;
-    pool.attach_first_ref(open)?;
-    table.entries[usize::try_from(fd).map_err(|_| EBADF)?] = Some(FdEntry { open, flags });
     Ok(())
 }

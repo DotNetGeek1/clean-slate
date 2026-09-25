@@ -437,8 +437,9 @@ fn install_linux_stdio(pid: u64) -> Result<(), &'static str> {
     M8_IPC_BASELINE_ENDPOINTS.store(baseline.owned_endpoints, Ordering::Relaxed);
     M8_IPC_BASELINE_CAPABILITIES.store(baseline.held_capabilities, Ordering::Relaxed);
 
-    let handle = ipc.grant_console_capability_for_pid(pid)?;
-    linux_fd::install_stdio_for_process(pid, generation, handle, handle)?;
+    ipc.grant_console_capability_for_pid(pid)?;
+    let sink = linux_fd::console_sink_ref_from_table(ipc)?;
+    linux_fd::install_stdio_for_process(pid, generation, sink)?;
     let granted = ipc.active_resources();
     if granted.owned_endpoints != baseline.owned_endpoints + 1
         || granted.held_capabilities != baseline.held_capabilities + 1

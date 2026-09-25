@@ -186,6 +186,29 @@ pub(crate) fn revoke_for_holder(holder: HolderId) -> usize {
 ///
 /// Unlike userspace [`clean_slate_capability::delegate`], this kernel-only path does not
 /// require `Rights::DELEGATE` on the parent caps — fork is not a delegation syscall.
+/// Returns whether `holder` holds any live capability for `resource` with `required` rights.
+pub(crate) fn holder_has_resource_rights(
+    holder: HolderId,
+    resource: ResourceRef,
+    required: Rights,
+) -> bool {
+    with_capability_space(|table| {
+        let mut cursor = 0usize;
+        loop {
+            let Some((next_cursor, handle, _record)) = list_holder(table, holder, cursor) else {
+                return false;
+            };
+            cursor = next_cursor;
+            if table
+                .authorize(holder, handle, resource, required)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    })
+}
+
 pub(crate) fn inherit_capabilities_for_fork(
     parent: HolderId,
     child: HolderId,

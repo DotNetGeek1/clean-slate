@@ -1,12 +1,14 @@
 //! Console sink backend for Linux stdio (#144 byte-transparent serial).
 
 use super::open_description::ConsoleSinkRef;
+use crate::capability::holder_has_resource_rights;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::ipc::IpcEndpointKind;
 use crate::ipc::IpcEndpointTable;
 use crate::ipc::IpcSendError;
 use crate::ipc::IPC_MAX_MESSAGE_BYTES;
 use crate::process::personality::ExecutionPersonality;
+use clean_slate_capability::{HolderId, ResourceRef, Rights};
 use clean_slate_linux_abi::{LinuxErrno, EACCES, EBADF, EINVAL};
 
 /// How a ConsoleSink message from the Linux fd path is rendered on serial.
@@ -81,7 +83,15 @@ pub(crate) fn write_console(
     }
     let send_len = core::cmp::min(bytes.len(), IPC_MAX_MESSAGE_BYTES);
     let payload = &bytes[..send_len];
-    match ipc.send_message(pid, sink.capability_handle, payload) {
+    let resource = ResourceRef::ipc_endpoint(u64::from(sink.endpoint_slot));
+    if !holder_has_resource_rights(HolderId(pid), resource, Rights::WRITE) {
+        return Err(EACCES);
+    }
+    match ipc.send_message_to_endpoint(
+        usize::from(sink.endpoint_slot),
+        sink.endpoint_generation,
+        payload,
+    ) {
         Ok(result) => {
             if result.endpoint_kind == IpcEndpointKind::ConsoleSink {
                 emit_console_sink_render(console_sink_render_style(personality), pid, payload);

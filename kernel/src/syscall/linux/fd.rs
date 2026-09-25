@@ -388,10 +388,10 @@ mod tests {
         let pid = 88u64;
         let generation = InstanceGeneration(77);
         let mut ipc = IpcEndpointTable::new();
-        let handle = ipc
-            .grant_console_capability_for_pid(pid)
+        ipc.grant_console_capability_for_pid(pid)
             .expect("console grant");
-        linux_fd::install_stdio_for_process(pid, generation, handle, handle)
+        let sink = linux_fd::console_sink_ref_from_table(&ipc).expect("console sink");
+        linux_fd::install_stdio_for_process(pid, generation, sink)
             .expect("install stdio");
         let mut frame = empty_frame();
         let mut ctx = LinuxSyscallContext {
@@ -432,8 +432,9 @@ mod tests {
     fn dup2_same_fd_is_noop_when_already_open() {
         let (mut fds, mut ipc) = (LinuxFdRegistry::new(), IpcEndpointTable::new());
         let gen = InstanceGeneration(1);
-        let handle = ipc.grant_console_capability_for_pid(2).expect("grant");
-        fds.install(2, gen, handle, handle).expect("install");
+        ipc.grant_console_capability_for_pid(2).expect("grant");
+        let sink = linux_fd::console_sink_ref_from_table(&ipc).expect("sink");
+        fds.install(2, gen, sink).expect("install");
         fds.dup2(2, gen, LINUX_STDOUT_FD, 5).expect("dup to 5");
         assert!(fds.dup2(2, gen, 5, 5).is_ok());
     }
@@ -443,8 +444,9 @@ mod tests {
         let (mut fds, mut ipc) = (LinuxFdRegistry::new(), IpcEndpointTable::new());
         let live = InstanceGeneration(1);
         let stale = InstanceGeneration(2);
-        let handle = ipc.grant_console_capability_for_pid(3).expect("grant");
-        fds.install(3, live, handle, handle).expect("install");
+        ipc.grant_console_capability_for_pid(3).expect("grant");
+        let sink = linux_fd::console_sink_ref_from_table(&ipc).expect("sink");
+        fds.install(3, live, sink).expect("install");
         assert_eq!(fds.close_fd(3, stale, LINUX_STDOUT_FD), Err(EBADF));
     }
 
