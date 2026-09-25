@@ -12,6 +12,7 @@ use crate::mm::address_space::destroy_process_address_space;
 use crate::mm::fork_clone::{fork_child_address_space, LINUX_FORK_MAX_PAGES};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::id_allocator::id_allocator_mut;
+use crate::ipc::endpoint_table_mut;
 use crate::process::linux_fd;
 use crate::process::linux_image::LINUX_USER_WINDOW_BASE;
 use crate::process::linux_mem;
@@ -182,6 +183,20 @@ pub(crate) fn linux_fork(
         return Err(EAGAIN);
     }
     cleanup.caps_inherited = true;
+
+    if without_interrupts(|| -> Result<(), clean_slate_linux_abi::LinuxErrno> {
+        let handle = unsafe { endpoint_table_mut() }
+            .grant_console_capability_for_pid(child_pid)
+            .map_err(|_| EAGAIN)?;
+        linux_fd::rebind_forked_console_stdio(child_pid, child_gen, handle, handle)
+    })
+    .is_err()
+    {
+        abort_fork_child(child_pid, &cleanup, allocator);
+        #[cfg(feature = "m9-userspace-self-test")]
+        fork_diag("rebind-stdio", child_pid);
+        return Err(EAGAIN);
+    }
 
     if table_mut()
         .register(

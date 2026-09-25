@@ -23,7 +23,7 @@ pub(crate) enum LinuxReadKind {
 }
 use table::{
     close_fd_entry, close_on_exec as close_cloexec_in_table, dup2_fd, inherit_table,
-    install_stdio_entries, release_table, LinuxFdTable,
+    install_stdio_entries, rebind_console_stdio_if_console, release_table, LinuxFdTable,
 };
 
 use super::personality::ExecutionPersonality;
@@ -434,6 +434,32 @@ impl LinuxFdRegistry {
         inherit_table(&parent_table, &mut self.pool, child_table)
     }
 
+    pub(crate) fn rebind_forked_console_stdio(
+        &mut self,
+        pid: u64,
+        generation: InstanceGeneration,
+        stdout_handle: u64,
+        stderr_handle: u64,
+    ) -> Result<(), LinuxErrno> {
+        let index = self.slot_index(pid, generation).ok_or(EBADF)?;
+        let table = &mut self.slots[index].as_mut().expect("slot").table;
+        rebind_console_stdio_if_console(
+            table,
+            &mut self.pool,
+            pid,
+            LINUX_STDOUT_FD,
+            stdout_handle,
+        )?;
+        rebind_console_stdio_if_console(
+            table,
+            &mut self.pool,
+            pid,
+            LINUX_STDERR_FD,
+            stderr_handle,
+        )?;
+        Ok(())
+    }
+
     /// When the process has no fd table slot (never opened a fd), exec is a no-op.
     pub(crate) fn close_on_exec_for_process(
         &mut self,
@@ -815,6 +841,15 @@ pub(crate) fn inherit_for_child(
     child_gen: InstanceGeneration,
 ) -> Result<(), LinuxErrno> {
     registry_mut().inherit_for_child(parent_pid, parent_gen, child_pid, child_gen)
+}
+
+pub(crate) fn rebind_forked_console_stdio(
+    pid: u64,
+    generation: InstanceGeneration,
+    stdout_handle: u64,
+    stderr_handle: u64,
+) -> Result<(), LinuxErrno> {
+    registry_mut().rebind_forked_console_stdio(pid, generation, stdout_handle, stderr_handle)
 }
 
 /// Clears `FD_CLOEXEC` descriptors for `pid`/`generation`. Missing fd table is OK
