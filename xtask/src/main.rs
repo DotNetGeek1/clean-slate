@@ -70,18 +70,14 @@ const M5_QEMU_DISK_ID: &str = "m5disk";
 const M5_QEMU_DEVICE: &str =
     "virtio-blk-pci,drive=m5disk,serial=clean-slate-m5-data,disable-modern=on";
 const M7_QEMU_NET_DEVICE: &str = "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on";
-// IPC console framing preserves these substrings; at ~1 ms tick the gen=1 health
-// line for the crash fixture often lands after fault injection in serial order.
-const M4_RECOVERY_FAULT_HEALTH_GROUP: &[&str] =
-    &["[PROC] fault pid=", "[HLTH] service=16640 healthy gen=1"];
-/// IPC health vs fault injection can race at ~1 ms tick; restart path stays ordered.
 const M4_RECOVERY_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[CAP ] supervisor console capability granted pid=1"),
     MarkerStep::Ordered("[SUP ] started pid=1"),
     MarkerStep::Ordered("[DEP ] service=16640 ready"),
     MarkerStep::Ordered("[SVC ] launch service=16640 pid="),
+    MarkerStep::Ordered("[HLTH] service=16640 healthy gen=1"),
     MarkerStep::Ordered("[TEST] crash-service injecting fault"),
-    MarkerStep::UnorderedGroup(M4_RECOVERY_FAULT_HEALTH_GROUP),
+    MarkerStep::Ordered("[PROC] fault pid="),
     MarkerStep::Ordered("[SUP ] failure service=16640 pid="),
     MarkerStep::Ordered("[PROC] teardown pid="),
     MarkerStep::Ordered("[SUP ] restart service=16640 attempt=1"),
