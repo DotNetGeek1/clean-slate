@@ -45,9 +45,15 @@ use x86_64::VirtAddr;
 // these tables must stay small: every extra mapping slot costs 16 bytes in
 // each of the several copies that live on the stack during a launch.
 // User mapping page-table budget (excluding the fixed carve-out private tables).
-#[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
+#[cfg(feature = "m9-userspace-self-test")]
+const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 21;
+#[cfg(all(
+    not(feature = "m9-userspace-self-test"),
+    any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test")
+))]
 const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 29;
 #[cfg(all(
+    not(feature = "m9-userspace-self-test"),
     not(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test")),
     any(
         feature = "m5-storage-self-test",
@@ -68,6 +74,7 @@ const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 29;
 ))]
 const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 13;
 #[cfg(all(
+    not(feature = "m9-userspace-self-test"),
     not(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test")),
     not(any(
         feature = "m5-storage-self-test",
@@ -98,7 +105,9 @@ const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 13;
     )
 ))]
 const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 21;
-#[cfg(not(any(
+#[cfg(all(
+    not(feature = "m9-userspace-self-test"),
+    not(any(
     feature = "m4-recovery-self-test",
     feature = "m4-supervisor-self-test",
     feature = "m5-storage-self-test",
@@ -124,7 +133,7 @@ const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 21;
     feature = "m8-linux-image-self-test",
     feature = "m8-linux-hello-self-test",
     feature = "m8-linux-dispatch-self-test"
-)))]
+))))]
 const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
 
 /// Total tracked page-table frames = user mapping demand + fixed carve-out wiring.

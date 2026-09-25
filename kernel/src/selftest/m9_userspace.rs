@@ -23,7 +23,7 @@ use crate::process::linux_proc::{
     table::{proc_table_invariant_violations, table},
 };
 use crate::process::linux_fs::object_backend::bootstrap_tmp_file_bytes;
-use crate::process::linux_image::{LINUX_CONVENTIONAL_LOAD_POLICY, LINUX_STACK_PAGES};
+use crate::process::linux_image::LINUX_CONVENTIONAL_LOAD_POLICY;
 use crate::process::linux_rootfs;
 use crate::sync::global_cell::GlobalCell;
 use crate::process::personality::execution_personality_for_pid;
@@ -59,7 +59,7 @@ const SUPERVISOR_PID: u64 = 107;
 const NATIVE_SLOT: usize = 5;
 const USERSPACE_CYCLES: u32 = 9;
 /// BusyBox DNS/TCP paths need more than the 2-page M8 default (#107 / nslookup strace).
-const M9_BUSYBOX_STACK_PAGES: u64 = 64;
+const M9_BUSYBOX_STACK_PAGES: u64 = 8;
 
 const SCRIPT_SH_BODY: &[u8] = b"pwd\nls /\ncat /etc/hostname\nmkdir -p /tmp/demo2\nprintf script > /tmp/demo2/file\ncat /tmp/demo2/file\necho hi | grep hi\nuname\nsleep 0\nexit 0\n";
 
@@ -219,8 +219,15 @@ fn launch_busybox_inner(
 ) {
     let (slot, stack_top) =
         pick_scheduler_slot_for_relaunch().unwrap_or_else(|m| fatal_kernel_error(m));
-    let launched = launch_linux_process_from_spec(allocator, stack_top, slot, spec)
-        .unwrap_or_else(|_| fatal_kernel_error("m9 userspace busybox launch failed"));
+    let launched = launch_linux_process_from_spec(allocator, stack_top, slot, spec).unwrap_or_else(
+        |err| {
+            kernel_log_fmt(format_args!(
+                "[M9  ] busybox launch err={}\n",
+                err.description()
+            ));
+            fatal_kernel_error("m9 userspace busybox launch failed");
+        },
+    );
     install_linux_stdio(launched.pid, launched.instance_generation);
     M9_LINUX_PID.store(launched.pid, Ordering::Relaxed);
     kernel_log_fmt(format_args!(
@@ -474,8 +481,8 @@ pub(crate) fn on_checklist_command_fault(pid: u64, context: &InterruptContext) {
     M9_CHECKLIST_FAULT.store(true, Ordering::Relaxed);
 }
 
-pub(crate) fn take_checklist_fault_fatal() -> bool {
-    M9_CHECKLIST_FAULT.swap(false, Ordering::Relaxed)
+pub(crate) fn checklist_fault_pending() -> bool {
+    M9_CHECKLIST_FAULT.load(Ordering::SeqCst)
 }
 
 pub(crate) fn after_linux_exit_group(

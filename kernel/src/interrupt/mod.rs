@@ -516,7 +516,7 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 1, true)
         .unwrap_or_else(|message| fatal_kernel_error(message));
     #[cfg(feature = "m9-userspace-self-test")]
-    if crate::selftest::m9_userspace::take_checklist_fault_fatal() {
+    if crate::selftest::m9_userspace::checklist_fault_pending() {
         fatal_kernel_error("m9 userspace checklist command faulted");
     }
     #[cfg(feature = "m4-recovery-self-test")]
@@ -536,6 +536,7 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
         }
         #[cfg(all(
             feature = "m6-object-self-test",
+            not(feature = "m9-userspace-self-test"),
             not(any(
                 feature = "m6-fixture-smoke-self-test",
                 feature = "m6-revocation-self-test"
@@ -547,8 +548,13 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
         #[cfg(not(any(
             feature = "m6-fixture-smoke-self-test",
             feature = "m6-revocation-self-test",
-            feature = "m6-object-self-test"
+            feature = "m6-object-self-test",
+            feature = "m9-userspace-self-test"
         )))]
+        {
+            fatal_kernel_error("no runnable thread remained after userspace fault");
+        }
+        #[cfg(feature = "m9-userspace-self-test")]
         {
             fatal_kernel_error("no runnable thread remained after userspace fault");
         }

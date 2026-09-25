@@ -208,11 +208,9 @@ fn build_exec_initial_stack(
         (AT_ENTRY, entry),
         (AT_EXECFN, 0),
     ];
-    let stack_image_bytes = layout
-        .stack_pages
-        .checked_mul(PAGE_SIZE)
-        .and_then(|n| usize::try_from(n).ok())
-        .ok_or(LinuxImageError::ExecStackBounds)?;
+    // Initial argc/argv/envp/auxv are constructed in the top stack page only; extra
+    // mapped stack pages below are for runtime growth (#107 BusyBox).
+    let stack_image_bytes = usize::try_from(PAGE_SIZE).map_err(|_| LinuxImageError::ExecStackBounds)?;
     if stack_image_bytes == 0 || stack_image_bytes > LINUX_MAX_STACK_IMAGE_BYTES {
         return Err(LinuxImageError::ExecStackBounds);
     }
