@@ -52,7 +52,12 @@ const fn align_down(value: u64, align: u64) -> u64 {
     value & !(align - 1)
 }
 
-pub(crate) const TASK_STACK_SIZE: usize = 64 * 1024;
+/// Debug builds of the Linux exec/launch path peak near 63 KiB of kernel stack
+/// before interrupt nesting; keep `TASK_STACK_MIN_MARGIN_BYTES` above that.
+pub(crate) const TASK_STACK_SIZE: usize = 128 * 1024;
+/// Lowest bytes of each task stack hold a pattern checked on timer and syscall
+/// entry; there are no guard pages yet (#162), so this is the overflow tripwire.
+pub(crate) const TASK_STACK_GUARD_BYTES: usize = 1024;
 
 #[cfg(not(any(
     feature = "m1-self-test",

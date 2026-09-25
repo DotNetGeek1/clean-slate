@@ -72,7 +72,7 @@ static IDLE_SOAK_DONE: AtomicUsize = AtomicUsize::new(0);
 static IDLE_TICKS: AtomicU64 = AtomicU64::new(0);
 /// Historical acceptance: 150 ticks at ~160 ms uncalibrated LAPIC period (~24 s idle soak).
 fn idle_soak_ticks() -> u64 {
-    crate::time::ticks_from_millis(24_000).unwrap_or(150)
+    crate::time::ticks_from_millis(24_000).ok().unwrap_or(150)
 }
 const PRODUCER_BLOCK_KEY: u64 = 0x146;
 
@@ -172,7 +172,9 @@ pub(crate) fn handle_wait_block_syscall(frame: &mut SyscallContext) {
     }
     if IDLE_SOAK_DONE.load(Ordering::Relaxed) == 0 {
         let key = WaitKey(TEST_WAIT_KEY);
-        let deadline = Some(Deadline(kernel_ticks().saturating_add(idle_soak_ticks())));
+        let deadline = Some(Deadline::IrqTicks(
+            kernel_ticks().saturating_add(idle_soak_ticks()),
+        ));
         CONSUMER_BLOCKED.store(1, Ordering::Relaxed);
         BLOCK_TICK.store(kernel_ticks(), Ordering::Relaxed);
         BLOCK_PROGRESS_SNAPSHOT.store(CONSUMER_PROGRESS.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -183,7 +185,7 @@ pub(crate) fn handle_wait_block_syscall(frame: &mut SyscallContext) {
     let key = WaitKey(TEST_WAIT_KEY);
     let cycle = CYCLES_DONE.load(Ordering::Relaxed);
     let deadline = if cycle % 2 == 1 {
-        Some(Deadline(kernel_ticks() + 5))
+        Some(Deadline::IrqTicks(kernel_ticks() + 5))
     } else {
         None
     };

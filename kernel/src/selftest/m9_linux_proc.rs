@@ -11,6 +11,7 @@ use crate::ipc::endpoint_table_mut;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::domain::DomainTeardownResult;
 use crate::process::id_allocator::{id_allocator_mut, IdAllocator};
+use crate::process::linux_exec::pick_scheduler_slot_for_relaunch;
 use crate::process::linux_exec::{launch_linux_process_from_spec, LinuxExecSpec};
 use crate::process::linux_fd::{self, console_sink_render_style, ConsoleSinkRenderStyle};
 use crate::process::linux_image::{
@@ -33,7 +34,6 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub(crate) const M9_LINUX_PROC_PASS_MARKER: &str = "[M9.I] PASS";
 const M9_PROC_CYCLES: u32 = 8;
-const LINUX_SLOT: usize = 0;
 const OUTPUT_CAP: usize = 4096;
 
 const MARKER_PROBE_PASS: &[u8] = b"[M9.I] probe PASS\n";
@@ -116,6 +116,7 @@ fn install_linux_stdio(pid: u64) -> Result<(), &'static str> {
 
 fn launch_cycle(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'static str> {
     log_cycle_metrics(cycle, "start");
+    crate::process::linux_exec::reset_prepare_linux_image_scratch();
     M9_OUTPUT_LEN.store(0, Ordering::Relaxed);
 
     let argv: [&[u8]; 1] = [b"linux-proc-probe"];
@@ -128,10 +129,13 @@ fn launch_cycle(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'stati
         stack_pages: LINUX_STACK_PAGES,
         policy: &LINUX_CONVENTIONAL_LOAD_POLICY,
     };
-    let stacks = unsafe { task_stacks_mut() };
-    let stack_top = task_stack_top(&stacks[LINUX_SLOT]);
-    let launched = launch_linux_process_from_spec(allocator, stack_top, LINUX_SLOT, &spec)
-        .map_err(|_| "m9 linux proc launch failed")?;
+    let (scheduler_slot, stack_top) =
+        pick_scheduler_slot_for_relaunch().map_err(|_| "m9 linux proc: no launch slot")?;
+    let launched = launch_linux_process_from_spec(allocator, stack_top, scheduler_slot, &spec)
+        .map_err(|error| {
+            kernel_log_fmt(format_args!("[M9.I] launch error={error:?}\n"));
+            "m9 linux proc launch failed"
+        })?;
     install_linux_stdio(launched.pid)?;
     M9_LINUX_PID.store(launched.pid, Ordering::Relaxed);
     M9_LINUX_GENERATION.store(launched.instance_generation.0, Ordering::Relaxed);

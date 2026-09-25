@@ -1,4 +1,4 @@
-//! APIC timer calibration against PIT channel 2 (#163), interrupts masked throughout.
+//! APIC and TSC calibration against PIT channel 2 (#163 / #103), IF masked throughout.
 
 #![cfg_attr(
     any(
@@ -18,17 +18,45 @@ use crate::arch::x86_64::apic::{
 };
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::log::kernel_log_fmt;
+use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::time::{
-    set_apic_counter_hz, set_apic_timer_initial_count, APIC_TIMER_FALLBACK_INITIAL_COUNT,
-    QEMU_APIC_COUNTER_HZ_FALLBACK,
+    set_apic_counter_hz, set_apic_timer_initial_count, set_tsc_hz, set_tsc_origin,
+    APIC_TIMER_FALLBACK_INITIAL_COUNT, QEMU_APIC_COUNTER_HZ_FALLBACK,
 };
 use core::arch::asm;
+use core::arch::x86_64::__cpuid;
 
 const PIT_HZ: u64 = 1_193_182;
 const CALIBRATION_MS: u64 = 50;
 const PIT_POLL_MAX: u32 = 50_000_000;
 const APIC_COUNTER_HZ_MIN: u64 = 10_000_000;
 const APIC_COUNTER_HZ_MAX: u64 = 500_000_000;
+const TSC_HZ_MIN: u64 = 500_000_000;
+const TSC_HZ_MAX: u64 = 10_000_000_000;
+
+pub(crate) fn read_tsc() -> u64 {
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+
+fn log_tsc_cpuid() {
+    let leaf0 = unsafe { __cpuid(0) };
+    let max_leaf = leaf0.eax;
+    let leaf1 = unsafe { __cpuid(1) };
+    let tsc_present = (leaf1.edx & (1 << 4)) != 0;
+    let mut invariant = false;
+    if max_leaf >= 0x8000_0007 {
+        let leaf7 = unsafe { __cpuid(0x8000_0007) };
+        invariant = (leaf7.edx & (1 << 8)) != 0;
+    }
+    kernel_log_fmt(format_args!(
+        "[TIME] tsc cpuid present={} invariant={}\n",
+        tsc_present, invariant
+    ));
+    if !tsc_present {
+        kernel_log_fmt(format_args!("[FAIL] tsc not reported by cpuid\n"));
+        fatal_kernel_error("tsc calibration: CPUID reports no TSC");
+    }
+}
 
 fn pit_write_control(value: u8) {
     unsafe {
@@ -59,7 +87,6 @@ fn pit_write_reload(value: u16) {
     }
 }
 
-/// Latch channel 2 count (control byte `0x80`), then read data port 0x42.
 fn pit_read_count() -> u16 {
     unsafe {
         pit_write_control(0x80);
@@ -81,7 +108,6 @@ fn pit_read_count() -> u16 {
     }
 }
 
-/// Enable PIT channel 2 gate (port 0x61 bit 0), speaker off (bit 1 clear).
 fn pit_enable_gate() {
     unsafe {
         let mut gate: u8;
@@ -91,7 +117,6 @@ fn pit_enable_gate() {
     }
 }
 
-/// Program channel 2: mode 2 rate generator, reload `0xFFFF` (down-count only).
 fn pit_program_channel2() {
     pit_write_control(0xB4);
     pit_write_reload(0xFFFF);
@@ -133,6 +158,19 @@ fn apply_apic_timer_config(counter_hz: u64) {
     log_apic_time(hz, initial_count);
 }
 
+fn apply_tsc_config(tsc_hz: u64, origin: u64) {
+    if !(TSC_HZ_MIN..=TSC_HZ_MAX).contains(&tsc_hz) {
+        kernel_log_fmt(format_args!(
+            "[FAIL] tsc calibration implausible hz={}\n",
+            tsc_hz
+        ));
+        fatal_kernel_error("tsc calibration implausible frequency");
+    }
+    set_tsc_hz(tsc_hz);
+    set_tsc_origin(origin);
+    kernel_log_fmt(format_args!("[TIME] tsc hz={} origin={}\n", tsc_hz, origin));
+}
+
 /// Apply the QEMU fallback rate and ~1 ms reload without PIT measurement.
 #[cfg_attr(
     not(any(
@@ -149,35 +187,35 @@ pub(crate) fn apply_fallback_apic_timer_config() {
     apply_apic_timer_config(QEMU_APIC_COUNTER_HZ_FALLBACK);
 }
 
-/// Measure APIC down-counter rate (Hz) using PIT channel 2 as reference.
+/// Measure APIC down-counter and TSC rates (Hz) using PIT channel 2 as reference.
 pub(crate) fn calibrate_apic_tick() {
     without_interrupts(|| {
+        log_tsc_cpuid();
         prepare_local_apic_timer_for_calibration();
         pit_program_channel2();
         let target_pit_delta = (PIT_HZ * CALIBRATION_MS) / 1000;
         let start_pit = pit_read_count();
         let start_apic = local_apic_timer_current_count();
+        let start_tsc = read_tsc();
         let mut polls = 0u32;
         loop {
             polls = polls.saturating_add(1);
             if polls > PIT_POLL_MAX {
-                kernel_log_fmt(format_args!("[TIME] apic calibration pit-timeout\n"));
-                apply_apic_timer_config(QEMU_APIC_COUNTER_HZ_FALLBACK);
-                program_local_apic_timer();
-                return;
+                kernel_log_fmt(format_args!("[FAIL] apic calibration pit-timeout\n"));
+                fatal_kernel_error("apic/tsc calibration pit timeout");
             }
             let elapsed = pit_elapsed_ticks(start_pit, pit_read_count());
             if elapsed >= target_pit_delta {
                 break;
             }
         }
+        let pit_delta = pit_elapsed_ticks(start_pit, pit_read_count());
         let end_apic = local_apic_timer_current_count();
+        let end_tsc = read_tsc();
         let apic_delta = u64::from(start_apic.wrapping_sub(end_apic));
-        if apic_delta == 0 {
-            kernel_log_fmt(format_args!("[TIME] apic calibration zero-delta\n"));
-            apply_apic_timer_config(QEMU_APIC_COUNTER_HZ_FALLBACK);
-            program_local_apic_timer();
-            return;
+        if apic_delta == 0 || pit_delta == 0 {
+            kernel_log_fmt(format_args!("[FAIL] apic/tsc calibration zero-delta\n"));
+            fatal_kernel_error("apic/tsc calibration zero delta");
         }
         let counter_hz = match apic_delta
             .checked_mul(1000)
@@ -185,12 +223,25 @@ pub(crate) fn calibrate_apic_tick() {
         {
             Some(value) if value > 0 => value,
             _ => {
-                apply_apic_timer_config(QEMU_APIC_COUNTER_HZ_FALLBACK);
-                program_local_apic_timer();
-                return;
+                kernel_log_fmt(format_args!("[FAIL] apic calibration overflow\n"));
+                fatal_kernel_error("apic calibration overflow");
             }
         };
+        let tsc_delta = end_tsc.wrapping_sub(start_tsc);
+        if tsc_delta == 0 {
+            kernel_log_fmt(format_args!("[FAIL] tsc calibration zero-delta\n"));
+            fatal_kernel_error("tsc calibration zero delta");
+        }
+        let Some(tsc_hz) = tsc_delta
+            .checked_mul(PIT_HZ)
+            .and_then(|n| n.checked_div(pit_delta))
+            .filter(|&hz| hz > 0)
+        else {
+            kernel_log_fmt(format_args!("[FAIL] tsc calibration overflow\n"));
+            fatal_kernel_error("tsc calibration overflow");
+        };
         apply_apic_timer_config(counter_hz);
+        apply_tsc_config(tsc_hz, end_tsc);
         program_local_apic_timer();
     });
 }

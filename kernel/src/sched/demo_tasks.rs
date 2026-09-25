@@ -143,8 +143,8 @@ fn note_task_progress(task_id: u64, progress: u64) {
     });
 }
 
-/// Do not retire a demo thread until it has observable progress (matches the
-/// `[TASK] task N progress=1` gate in `flush_scheduler_markers`).
+/// Do not retire a demo thread until progress is logged (same gate as
+/// `both_demo_tasks_logged_acceptance_progress`).
 fn task_ready_to_exit(task_id: u64) -> bool {
     without_interrupts(|| unsafe {
         if !scheduler_mut().thread_should_exit(task_id) {
@@ -154,7 +154,7 @@ fn task_ready_to_exit(task_id: u64) -> bool {
             .threads
             .iter()
             .find(|thread| thread.id == task_id)
-            .is_some_and(|thread| thread.observed_progress != 0)
+            .is_some_and(|thread| thread.progress_logged)
     })
 }
 

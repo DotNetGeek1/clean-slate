@@ -103,6 +103,7 @@ jobs:
           # build time; built with RUSTFLAGS=-D warnings by the acceptance job via xtask.
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-low-va-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-exec-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-runtime-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-proc-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-rootfs -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-rootfs-self-test -- -D warnings

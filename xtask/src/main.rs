@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Display, Formatter};
@@ -112,6 +113,32 @@ const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[M9.F] PASS",
 ];
 const M9_LINUX_EXEC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M9_LINUX_RUNTIME_ACCEPTANCE_SPEC: &[MarkerStep] = &[
+    MarkerStep::Ordered("[M9.J] creating"),
+    MarkerStep::Ordered("[M9.J] baseline ok"),
+    MarkerStep::Ordered("[TIME] apic counter_hz="),
+    MarkerStep::Ordered("[M9.J] fs base survives switch"),
+    MarkerStep::Ordered("[M9.J] brk ok"),
+    MarkerStep::Ordered("[M9.J] mmap ok"),
+    MarkerStep::Ordered("[M9.J] uname=Linux"),
+    MarkerStep::Ordered("[M9.J] signals ok"),
+    MarkerStep::Ordered("[M9.J] nanosleep 20ms tsc_ns="),
+    MarkerStep::Ordered("[M9.J] poll timeout ok"),
+    MarkerStep::Ordered("[M9.J] nanosleep wall start"),
+    MarkerStep::Ordered("[M9.J] nanosleep wall end"),
+    MarkerStep::Ordered("[M9.J] nanosleep wall irq_ticks="),
+    MarkerStep::Ordered("[M9.J] probe done"),
+    MarkerStep::Ordered("[M9.J] cycle=7"),
+    MarkerStep::Ordered("[M9.J] PASS"),
+];
+const M9_RUNTIME_WALL_START: &str = "[M9.J] nanosleep wall start";
+const M9_RUNTIME_WALL_END: &str = "[M9.J] nanosleep wall end";
+
+thread_local! {
+    static M9_RUNTIME_WALL_CLOCK: RefCell<Option<NanosleepWallClock>> = const { RefCell::new(None) };
+    static M9_RUNTIME_SERIAL: RefCell<String> = const { RefCell::new(String::new()) };
+}
+const M9_LINUX_RUNTIME_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 const M9_LINUX_PROC_ACCEPTANCE_MARKERS: [&str; 3] =
     ["[M9.I] creating", "[M9.I] cycle=0 baseline", "[M9.I] PASS"];
 const M9_LINUX_PROC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -690,6 +717,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM1 => run_m1_acceptance(),
         ParsedCommand::TestM9LowVa => run_m9_low_va_acceptance(),
         ParsedCommand::TestM9LinuxExec => run_m9_linux_exec_acceptance(),
+        ParsedCommand::TestM9LinuxRuntime => run_m9_linux_runtime_acceptance(),
         ParsedCommand::TestM9LinuxProc => run_m9_linux_proc_acceptance(),
         ParsedCommand::TestM9Rootfs => run_m9_rootfs_acceptance(),
         ParsedCommand::TestM9LinuxFs => run_m9_linux_fs_acceptance(),
@@ -1141,6 +1169,27 @@ fn run_m9_linux_exec_acceptance() -> Result<(), XtaskError> {
             M9_LINUX_EXEC_ACCEPTANCE_TIMEOUT,
         )),
     )
+}
+
+fn run_m9_linux_runtime_acceptance() -> Result<(), XtaskError> {
+    M9_RUNTIME_WALL_CLOCK.with(|slot| {
+        *slot.borrow_mut() = Some(NanosleepWallClock::default());
+    });
+    M9_RUNTIME_SERIAL.with(|slot| slot.borrow_mut().clear());
+    let result = run_vm_inner(
+        false,
+        false,
+        &["m9-linux-runtime-self-test"],
+        Some((
+            MarkerSet::Steps(M9_LINUX_RUNTIME_ACCEPTANCE_SPEC),
+            M9_LINUX_RUNTIME_ACCEPTANCE_TIMEOUT,
+        )),
+    );
+    let wall = M9_RUNTIME_WALL_CLOCK.with(|slot| slot.borrow_mut().take());
+    let serial = M9_RUNTIME_SERIAL.with(|slot| slot.borrow().clone());
+    result?;
+    wall.ok_or_else(|| XtaskError::InvalidCommand("m9 runtime wall clock missing".to_owned()))?
+        .validate(&serial)
 }
 
 fn run_m9_linux_proc_acceptance() -> Result<(), XtaskError> {
@@ -2402,6 +2451,101 @@ fn run_timed_command(command: &mut Command, timeout: Duration) -> Result<(), Xta
         })
     }
 }
+#[derive(Default)]
+struct NanosleepWallClock {
+    start: Option<std::time::Instant>,
+    end: Option<std::time::Instant>,
+}
+
+impl NanosleepWallClock {
+    fn observe(&mut self, output: &str) {
+        if self.start.is_none() && output.contains(M9_RUNTIME_WALL_START) {
+            self.start = Some(std::time::Instant::now());
+        }
+        if self.start.is_some() && self.end.is_none() && output.contains(M9_RUNTIME_WALL_END) {
+            self.end = Some(std::time::Instant::now());
+        }
+    }
+
+    fn validate(self, serial: &str) -> Result<(), XtaskError> {
+        let start = self
+            .start
+            .ok_or_else(|| XtaskError::MissingMarker(M9_RUNTIME_WALL_START.to_owned()))?;
+        let end = self
+            .end
+            .ok_or_else(|| XtaskError::MissingMarker(M9_RUNTIME_WALL_END.to_owned()))?;
+        let elapsed = end.duration_since(start);
+        validate_nanosleep_wall_budget(elapsed, serial)?;
+        Ok(())
+    }
+}
+
+fn parse_first_wall_tsc_ns(serial: &str) -> Result<u64, XtaskError> {
+    const PREFIX: &str = "[M9.J] nanosleep wall irq_ticks=";
+    let rest = serial
+        .split(PREFIX)
+        .nth(1)
+        .ok_or_else(|| XtaskError::MissingMarker(PREFIX.to_owned()))?;
+    let line = rest.lines().next().unwrap_or(rest).trim_end_matches('\r');
+    let tsc_part = line
+        .split("tsc_ns=")
+        .nth(1)
+        .ok_or_else(|| XtaskError::MissingMarker("wall tsc_ns".to_owned()))?;
+    tsc_part
+        .split_whitespace()
+        .next()
+        .unwrap_or(tsc_part)
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| XtaskError::MissingMarker("wall tsc_ns parse".to_owned()))
+}
+
+fn validate_nanosleep_wall_budget(host: Duration, serial: &str) -> Result<(), XtaskError> {
+    let guest_tsc_ns = parse_first_wall_tsc_ns(serial)?;
+    if !(1_000_000_000..=1_050_000_000).contains(&guest_tsc_ns) {
+        return Err(XtaskError::InvalidCommand(format!(
+            "m9 runtime guest wall tsc_ns {guest_tsc_ns} outside 1000000000..=1050000000"
+        )));
+    }
+    let min = Duration::from_millis(1000);
+    let max = Duration::from_millis(1050);
+    if host < min || host > max {
+        return Err(XtaskError::InvalidCommand(format!(
+            "m9 runtime nanosleep wall clock {host:?} outside {min:?}..={max:?}"
+        )));
+    }
+    println!(
+        "m9 runtime nanosleep wall clock: {host:?} guest_tsc_ns={guest_tsc_ns} (strict 1.00-1.05s)"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod nanosleep_wall_clock_tests {
+    use super::{parse_first_wall_tsc_ns, validate_nanosleep_wall_budget};
+    use std::time::Duration;
+
+    const SAMPLE: &str = "[M9.J] nanosleep wall irq_ticks=1005 tsc_ns=1005000000\n";
+
+    #[test]
+    fn parses_wall_tsc_ns() {
+        assert_eq!(parse_first_wall_tsc_ns(SAMPLE).unwrap(), 1_005_000_000);
+    }
+
+    #[test]
+    fn accepts_strict_host_window() {
+        validate_nanosleep_wall_budget(Duration::from_millis(1025), SAMPLE).unwrap();
+    }
+
+    #[test]
+    fn rejects_late_host_or_bad_guest_tsc() {
+        assert!(validate_nanosleep_wall_budget(Duration::from_millis(1051), SAMPLE).is_err());
+        assert!(validate_nanosleep_wall_budget(Duration::from_millis(999), SAMPLE).is_err());
+        let bad = SAMPLE.replace("1005000000", "900000000");
+        assert!(validate_nanosleep_wall_budget(Duration::from_millis(1025), &bad).is_err());
+    }
+}
+
 fn run_acceptance_command(
     command: &mut Command,
     marker_set: MarkerSet<'static>,
@@ -2459,6 +2603,16 @@ fn run_acceptance_command(
                     print!("{}", chunk.text);
                 }
                 output.push_str(&chunk.text);
+                M9_RUNTIME_WALL_CLOCK.with(|slot| {
+                    if slot.borrow().is_some() {
+                        M9_RUNTIME_SERIAL.with(|serial| {
+                            *serial.borrow_mut() = output.clone();
+                        });
+                        if let Some(wall) = slot.borrow_mut().as_mut() {
+                            wall.observe(&output);
+                        }
+                    }
+                });
                 if tracker.consume(&output) && !authoritative_pass {
                     if marker_set_is_ordered(marker_set, &M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS) {
                         if let Err(error) = validate_m9_stdio_bytes_line(&output) {
@@ -2902,6 +3056,7 @@ enum ParsedCommand {
     TestM8LinuxImage,
     TestM9LowVa,
     TestM9LinuxExec,
+    TestM9LinuxRuntime,
     TestM9LinuxSocket,
     TestM9LinuxProc,
     TestM9Rootfs,
@@ -2935,6 +3090,11 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m9-low-va" || cmd == "m9-low-va" => ParsedCommand::TestM9LowVa,
         Some(cmd) if cmd == "test-m9-linux-exec" || cmd == "m9-linux-exec" || cmd == "m9.146" => {
             ParsedCommand::TestM9LinuxExec
+        }
+        Some(cmd)
+            if cmd == "test-m9-linux-runtime" || cmd == "m9-linux-runtime" || cmd == "m9.103" =>
+        {
+            ParsedCommand::TestM9LinuxRuntime
         }
         Some(cmd)
             if cmd == "test-m9-linux-socket" || cmd == "m9-linux-socket" || cmd == "m9.105" =>

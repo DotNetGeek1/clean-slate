@@ -146,10 +146,15 @@ pub(crate) const LINUX_M8_LOAD_POLICY: LoadPlanPolicy = LoadPlanPolicy {
     feature = "m9-linux-socket-self-test",
     feature = "m9-linux-proc-self-test",
     feature = "m9-linux-fs-self-test",
+    feature = "m9-linux-runtime-self-test",
     test
 ))]
 pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
     LoadPlanPolicy::linux_conventional_x86_64();
+
+#[cfg(feature = "m9-linux-runtime-self-test")]
+pub(crate) const LINUX_RUNTIME_PROBE_FIXTURE: &[u8] =
+    include_bytes!("../../../fixtures/linux-runtime-probe/linux-runtime-probe-x86_64");
 
 /// M9 #146 argv/envp/auxv exec fixture (`fixtures/linux-exec-args/linux-exec-args-x86_64`).
 #[cfg(feature = "m9-linux-exec-self-test")]
@@ -1196,7 +1201,9 @@ pub(crate) fn register_linux_process(
         process_registry_mut, Process, ProcessState, ResourceDomain, PROCESS_REGISTRY_CAPACITY,
     };
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
+    use crate::arch::x86_64::context_switch::task_stack_top;
     use crate::arch::x86_64::cpu::without_interrupts;
+    use crate::sched::task_stacks_mut;
     use crate::sched::{scheduler_mut, ThreadKind, ThreadState};
     use clean_slate_service_lifecycle::InstanceGeneration;
 
@@ -1243,8 +1250,19 @@ pub(crate) fn register_linux_process(
         }
     };
 
+    let stacks = unsafe { task_stacks_mut() };
+    let slot_stack_top = task_stack_top(&stacks[scheduler_slot]);
+    if kernel_stack_top != slot_stack_top {
+        return Err(discard_address_space(
+            &image.address_space,
+            allocator,
+            LinuxImageError::Scheduler(
+                "linux launch: kernel_stack_top did not match scheduler slot stack",
+            ),
+        ));
+    }
     let saved_stack_pointer =
-        match build_userspace_entry_frame(kernel_stack_top, image.entry, image.launch_rsp) {
+        match build_userspace_entry_frame(slot_stack_top, image.entry, image.launch_rsp) {
             Ok(frame) => frame,
             Err(message) => {
                 return Err(discard_address_space(
@@ -1283,7 +1301,7 @@ pub(crate) fn register_linux_process(
             tid,
             pid,
             ThreadKind::User,
-            kernel_stack_top,
+            slot_stack_top,
             saved_stack_pointer,
             image.entry,
         ) {

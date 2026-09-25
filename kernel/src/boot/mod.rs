@@ -75,6 +75,7 @@ use crate::mm::layout::{
     not(feature = "m8-linux-image-self-test"),
     not(feature = "m9-low-va-self-test"),
     not(feature = "m9-linux-exec-self-test"),
+    not(feature = "m9-linux-runtime-self-test"),
     not(feature = "m9-rootfs-self-test"),
     not(feature = "m9-linux-fs-self-test")
 ))]
@@ -159,6 +160,7 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m8-linux-hello-self-test"),
     not(feature = "m9-low-va-self-test"),
     not(feature = "m9-linux-exec-self-test"),
+    not(feature = "m9-linux-runtime-self-test"),
     not(feature = "m9-linux-proc-self-test"),
     not(feature = "m9-rootfs-self-test"),
     not(feature = "m9-linux-fs-self-test"),
@@ -289,6 +291,7 @@ fn run_inner() -> Result<(), &'static str> {
     memory_map.sort();
     serial_write_line("[BOOT] UEFI memory map acquired");
     serial_write_line("[BOOT] ExitBootServices OK");
+    crate::sched::arm_task_stack_guards();
 
     reserved_ranges.push(ReservedRange::from_base_and_size(
         memory_map.buffer().as_ptr() as u64,
@@ -400,6 +403,12 @@ fn run_inner() -> Result<(), &'static str> {
             .map_err(|_| "m9 linux fs: namespace init failed")?;
     }
 
+    #[cfg(feature = "m9-linux-runtime-self-test")]
+    {
+        use crate::selftest::m9_linux_runtime::start_m9_linux_runtime_self_test;
+        start_m9_linux_runtime_self_test(allocator)
+    }
+
     #[cfg(feature = "m9-linux-fs-self-test")]
     {
         use crate::selftest::m9_linux_fs::start_m9_linux_fs_self_test;
@@ -407,6 +416,7 @@ fn run_inner() -> Result<(), &'static str> {
     }
 
     #[cfg(all(
+        not(feature = "m9-linux-runtime-self-test"),
         not(feature = "m9-linux-socket-self-test"),
         not(feature = "m9-linux-fs-self-test"),
         feature = "m9-rootfs-self-test"
@@ -417,6 +427,7 @@ fn run_inner() -> Result<(), &'static str> {
     }
 
     #[cfg(all(
+        not(feature = "m9-linux-runtime-self-test"),
         not(feature = "m9-linux-socket-self-test"),
         not(feature = "m9-linux-proc-self-test"),
         not(feature = "m9-linux-fs-self-test"),
@@ -429,6 +440,7 @@ fn run_inner() -> Result<(), &'static str> {
     }
 
     #[cfg(all(
+        not(feature = "m9-linux-runtime-self-test"),
         not(feature = "m9-linux-proc-self-test"),
         not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-linux-fs-self-test"),
@@ -442,6 +454,7 @@ fn run_inner() -> Result<(), &'static str> {
     #[cfg(all(
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-linux-runtime-self-test"),
         not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-linux-fs-self-test"),
         feature = "m8-linux-hello-self-test"
@@ -466,6 +479,7 @@ fn run_inner() -> Result<(), &'static str> {
         feature = "m9-fd-core-self-test",
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-linux-runtime-self-test"),
         not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-linux-fs-self-test"),
         not(feature = "m9-block-wake-self-test"),
@@ -480,6 +494,7 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-fd-core-self-test"),
         not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-linux-runtime-self-test"),
         not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-linux-fs-self-test"),
         not(feature = "m9-block-wake-self-test"),
@@ -494,6 +509,7 @@ fn run_inner() -> Result<(), &'static str> {
     #[cfg(all(
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-linux-runtime-self-test"),
         not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-linux-fs-self-test"),
         feature = "m8-linux-dispatch-self-test",
@@ -514,6 +530,7 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-block-wake-self-test"),
         not(feature = "m9-low-va-self-test"),
         not(feature = "m9-linux-exec-self-test"),
+        not(feature = "m9-linux-runtime-self-test"),
         not(feature = "m9-linux-socket-self-test"),
         not(feature = "m9-linux-proc-self-test"),
         not(feature = "m9-rootfs-self-test"),

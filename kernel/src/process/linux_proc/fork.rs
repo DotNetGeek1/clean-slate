@@ -13,11 +13,13 @@ use crate::mm::frame_allocator::PageAllocator;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::linux_fd;
 use crate::process::linux_image::LINUX_USER_WINDOW_BASE;
+use crate::process::linux_mem;
+use crate::process::linux_signal;
 use crate::process::{
     personality::ExecutionPersonality, process_registry_mut, reap_process_record, Process,
     ProcessState, ResourceDomain,
 };
-use crate::sched::{scheduler_mut, ThreadKind, ThreadState};
+use crate::sched::{scheduler_mut, Thread, ThreadKind, ThreadState};
 use clean_slate_capability::CapabilityHandle;
 use clean_slate_capability::{delegate, list_holder, HolderId, MAX_SLOTS};
 use clean_slate_linux_abi::{EAGAIN, ENOMEM, ESRCH};
@@ -129,35 +131,18 @@ pub(crate) fn linux_fork(
         return Err(EAGAIN);
     }
 
-    linux_mem_clone_for_fork_stub(
-        ProcId {
-            pid: parent_pid,
-            generation: parent_gen,
-        },
-        ProcId {
-            pid: child_pid,
-            generation: child_gen,
-        },
-    );
-    linux_signal_clone_for_fork_stub(
-        ProcId {
-            pid: parent_pid,
-            generation: parent_gen,
-        },
-        ProcId {
-            pid: child_pid,
-            generation: child_gen,
-        },
-    );
+    let runtime_state = linux_mem::clone_for_fork(parent_pid, parent_gen, child_pid, child_gen)
+        .and_then(|()| linux_signal::clone_for_fork(parent_pid, parent_gen, child_pid, child_gen));
+    if let Err(errno) = runtime_state {
+        linux_mem::release_for_process(child_pid, child_gen, allocator);
+        linux_signal::release_for_process(child_pid, child_gen);
+        linux_fd::release_for_process(child_pid, child_gen);
+        abort_fork_child(child_pid, allocator);
+        return Err(errno);
+    }
 
     Ok(child_pid)
 }
-
-/// ORCHESTRATOR: wire `linux_mem::clone_for_fork` (#103).
-fn linux_mem_clone_for_fork_stub(_parent: ProcId, _child: ProcId) {}
-
-/// ORCHESTRATOR: wire `linux_signal::clone_for_fork` (#103).
-fn linux_signal_clone_for_fork_stub(_parent: ProcId, _child: ProcId) {}
 
 fn abort_fork_child(child_pid: u64, allocator: &mut PageAllocator) {
     without_interrupts(|| {
@@ -172,8 +157,7 @@ fn abort_fork_child(child_pid: u64, allocator: &mut PageAllocator) {
         }
         for thread in unsafe { scheduler_mut() }.threads.iter_mut() {
             if thread.owner_process_id == child_pid {
-                thread.state = ThreadState::Empty;
-                thread.owner_process_id = 0;
+                *thread = Thread::EMPTY;
             }
         }
     });

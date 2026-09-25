@@ -22,7 +22,13 @@ pub(crate) mod fs {
 }
 #[cfg(feature = "m9-rootfs")]
 pub(crate) mod fs_io;
+pub(crate) mod poll;
 pub(crate) mod process;
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 pub(crate) mod runtime;
 pub(crate) mod socket;
 pub(crate) mod socket_copy;

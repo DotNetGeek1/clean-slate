@@ -637,8 +637,21 @@ fn block_status_name(raw: u8) -> &'static str {
 // Consumed by arch/x86_64/asm.rs (clean_slate_syscall_entry calls this with the saved frame).
 // Personality is resolved from trusted process metadata before interpreting RAX
 // so native vs Linux number spaces cannot collide.
+fn sync_syscall_kernel_stack_from_current_thread() {
+    let _ = crate::arch::x86_64::cpu::without_interrupts(|| {
+        let scheduler = unsafe { crate::sched::scheduler_mut() };
+        let index = scheduler
+            .current_thread
+            .ok_or("syscall entry required a current thread")?;
+        let top = scheduler.threads[index].kernel_stack_top;
+        crate::arch::x86_64::gdt::set_syscall_kernel_stack(top)
+    });
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 {
+    sync_syscall_kernel_stack_from_current_thread();
+    crate::sched::check_task_stack_guard(context as u64);
     let frame = unsafe { &mut *context };
     if let Err(message) = validate_canonical_user_return_state(frame) {
         fatal_kernel_error(message);

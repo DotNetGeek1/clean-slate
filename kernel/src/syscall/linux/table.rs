@@ -39,8 +39,26 @@ pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
     lookup_core_handler(nr)
         .or_else(|| super::fs::lookup_handler(nr))
         .or_else(|| super::process::lookup_handler(nr))
-        .or_else(|| super::runtime::lookup_handler(nr))
+        .or_else(|| runtime_lookup(nr))
         .or_else(|| super::socket::lookup_handler(nr))
+}
+
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+fn runtime_lookup(nr: u64) -> Option<LinuxSyscallHandler> {
+    super::runtime::lookup_handler(nr)
+}
+
+#[cfg(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+))]
+fn runtime_lookup(_nr: u64) -> Option<LinuxSyscallHandler> {
+    None
 }
 
 fn lookup_core_handler(nr: u64) -> Option<LinuxSyscallHandler> {
@@ -64,7 +82,7 @@ fn family_claims(nr: u64) -> usize {
         lookup_core_handler(nr).is_some(),
         super::fs::lookup_handler(nr).is_some(),
         super::process::lookup_handler(nr).is_some(),
-        super::runtime::lookup_handler(nr).is_some(),
+        runtime_lookup(nr).is_some(),
         super::socket::lookup_handler(nr).is_some(),
     ]
     .iter()
@@ -87,13 +105,33 @@ mod tests {
         assert!(lookup_handler(SYS_EXIT).is_some());
         assert!(lookup_handler(999).is_none());
         assert!(lookup_handler(1000).is_none());
-        // Deliberately not wired in M8 (M9 scope): brk, arch_prctl,
-        // set_tid_address, exit_group, futex, mmap.
-        for nr in [12u64, 158, 218, 202, 9] {
-            assert!(lookup_handler(nr).is_none(), "nr {nr} must be unsupported");
+        #[cfg(not(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        )))]
+        {
+            for nr in [12u64, 158, 218, 9] {
+                assert!(lookup_handler(nr).is_some(), "nr {nr} must be supported");
+            }
+        }
+        #[cfg(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        ))]
+        {
+            for nr in [12u64, 158, 218, 202, 9] {
+                assert!(lookup_handler(nr).is_none(), "nr {nr} must be unsupported");
+            }
         }
         #[cfg(feature = "m8-linux-image")]
         assert!(lookup_handler(231).is_some(), "exit_group owned by #102");
+        #[cfg(not(feature = "m8-linux-image"))]
+        assert!(
+            lookup_handler(231).is_none(),
+            "exit_group must be unsupported"
+        );
         assert_eq!(encode_rax(Err(ENOSYS)) as i64, -38);
     }
 
