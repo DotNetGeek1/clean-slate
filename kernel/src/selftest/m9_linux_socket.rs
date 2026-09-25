@@ -184,6 +184,9 @@ fn verify_probe_output() {
     if !output_contains(b"[M9.P] http ok\n") {
         fatal_kernel_error("m9 socket probe missing http");
     }
+    if !output_contains(b"[M9.P] banner ok\n") {
+        fatal_kernel_error("m9 socket probe missing server-first banner");
+    }
     if !output_contains(PROBE_PASS) {
         fatal_kernel_error("m9 socket probe missing pass marker");
     }

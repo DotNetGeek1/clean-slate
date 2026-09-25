@@ -94,6 +94,34 @@ mod integration {
     }
 
     #[test]
+    fn syn_ack_piggyback_survives_until_recv() {
+        let (mut guest, mut peer) = setup_pair();
+        const BANNER: &[u8] = b"M9-BANNER-FIX\n";
+        peer.set_syn_ack_piggyback(BANNER);
+        let remote = SocketAddrV4::new(PEER_IPV4, TCP_ECHO_PORT);
+        let id = guest.connect(0, OWNER, remote).unwrap();
+        drive(2, &mut guest, &mut peer);
+        assert_eq!(guest.state(id, OWNER).unwrap(), TcpState::Established);
+        let mut buf = [0u8; 32];
+        let n = guest.receive(id, OWNER, &mut buf).unwrap();
+        assert_eq!(&buf[..n], BANNER);
+    }
+
+    #[test]
+    fn server_first_banner_survives_connect_poll() {
+        let (mut guest, mut peer) = setup_pair();
+        const BANNER: &[u8] = b"M9-BANNER-FIX\n";
+        peer.set_banner_on_establish(BANNER);
+        let remote = SocketAddrV4::new(PEER_IPV4, TCP_ECHO_PORT);
+        let id = guest.connect(0, OWNER, remote).unwrap();
+        drive(2, &mut guest, &mut peer);
+        assert_eq!(guest.state(id, OWNER).unwrap(), TcpState::Established);
+        let mut buf = [0u8; 32];
+        let n = guest.receive(id, OWNER, &mut buf).unwrap();
+        assert_eq!(&buf[..n], BANNER);
+    }
+
+    #[test]
     fn arp_miss_then_connect() {
         let (mut guest, mut peer) = setup_pair();
         let remote = SocketAddrV4::new(PEER_IPV4, TCP_ECHO_PORT);

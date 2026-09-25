@@ -204,7 +204,6 @@ pub struct M9HttpService {
     active: Option<SocketHandle>,
     sent: bool,
     closed: bool,
-    saw_request: bool,
 }
 
 impl M9HttpService {
@@ -220,7 +219,6 @@ impl M9HttpService {
             active: None,
             sent: false,
             closed: false,
-            saw_request: false,
         }
     }
 
@@ -230,7 +228,6 @@ impl M9HttpService {
             if socket.is_active() {
                 self.active = Some(self.listen);
                 self.sent = false;
-                self.saw_request = false;
                 println!("[FIX ] m9 http connect");
             }
             return;
@@ -243,13 +240,9 @@ impl M9HttpService {
         }
         if socket.may_recv() {
             let mut buf = [0u8; 256];
-            if let Ok(n) = socket.recv_slice(&mut buf) {
-                if n > 0 {
-                    self.saw_request = true;
-                }
-            }
+            let _ = socket.recv_slice(&mut buf);
         }
-        if !self.sent && self.saw_request && socket.may_send() {
+        if !self.sent && socket.may_send() {
             let resp = concat!(
                 "HTTP/1.0 200 OK\r\n",
                 "Content-Length: 16\r\n",
@@ -275,12 +268,75 @@ impl M9HttpService {
         self.active = None;
         self.sent = false;
         self.closed = false;
-        self.saw_request = false;
         let socket = sockets.get_mut::<tcp::Socket>(self.listen);
         if !socket.is_listening() {
             let endpoint = IpListenEndpoint {
                 addr: Some(IpAddress::v4(10, 77, 0, 50)),
                 port: M9_HTTP_PORT,
+            };
+            let _ = socket.listen(endpoint);
+        }
+    }
+}
+
+const M9_BANNER_PORT: u16 = 4002;
+const M9_BANNER_BYTES: &[u8] = b"M9-BANNER-FIX\n";
+
+pub struct M9BannerService {
+    listen: SocketHandle,
+    active: Option<SocketHandle>,
+    sent: bool,
+}
+
+impl M9BannerService {
+    pub fn new(sockets: &mut smoltcp::iface::SocketSet, listen: SocketHandle) -> Self {
+        let socket = sockets.get_mut::<tcp::Socket>(listen);
+        let endpoint = IpListenEndpoint {
+            addr: Some(IpAddress::v4(10, 77, 0, 50)),
+            port: M9_BANNER_PORT,
+        };
+        socket.listen(endpoint).expect("m9 banner listen");
+        Self {
+            listen,
+            active: None,
+            sent: false,
+        }
+    }
+
+    pub fn poll(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+        if self.active.is_none() {
+            let socket = sockets.get_mut::<tcp::Socket>(self.listen);
+            if socket.is_active() {
+                self.active = Some(self.listen);
+                self.sent = false;
+                println!("[FIX ] m9 banner connect");
+            }
+            return;
+        }
+        let active = self.active.expect("m9 banner active");
+        let socket = sockets.get_mut::<tcp::Socket>(active);
+        if !socket.is_active() {
+            self.relisten(sockets);
+            return;
+        }
+        if !self.sent && socket.may_send() && socket.send_slice(M9_BANNER_BYTES).is_ok() {
+            self.sent = true;
+            println!("[FIX ] m9 banner sent");
+        }
+        if self.sent && socket.state() == tcp::State::CloseWait {
+            socket.close();
+            self.relisten(sockets);
+        }
+    }
+
+    fn relisten(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+        self.active = None;
+        self.sent = false;
+        let socket = sockets.get_mut::<tcp::Socket>(self.listen);
+        if !socket.is_listening() {
+            let endpoint = IpListenEndpoint {
+                addr: Some(IpAddress::v4(10, 77, 0, 50)),
+                port: M9_BANNER_PORT,
             };
             let _ = socket.listen(endpoint);
         }

@@ -894,6 +894,21 @@ fn handle_service_udp_receive(
     )
 }
 
+#[allow(static_mut_refs)]
+fn tcp_ingress_pending_count() -> usize {
+    unsafe { NIC_INGRESS.pending_tcp.len }
+}
+
+/// After active-open completes, drain queued TCP ingress until idle (bounded).
+fn drain_post_connect_tcp_ingress(tcp: &mut TcpTransport<ServiceLink>, tick: u64) {
+    for _ in 0..INGRESS_READ_BUDGET {
+        if tcp_ingress_pending_count() == 0 {
+            break;
+        }
+        let _ = tcp.poll(tick);
+    }
+}
+
 fn poll_plain_tcp_until<F>(
     tcp: &mut TcpTransport<ServiceLink>,
     start: u64,
@@ -965,9 +980,7 @@ fn establish_plain_tcp_session(
             }
         },
     )?;
-    for _ in 0..INGRESS_READ_BUDGET {
-        let _ = tcp.poll(tick);
-    }
+    drain_post_connect_tcp_ingress(tcp, tick);
     if let Some(slot) = plain_tcp_slot(session) {
         *slot = Some(tcp_session);
     }
@@ -1005,9 +1018,6 @@ fn handle_service_plain_tcp_send(
             payload,
         )
         .map_err(|err| NetworkResponse::Error { code: err.code() })? as u32;
-    for _ in 0..INGRESS_READ_BUDGET {
-        let _ = tcp.poll(tick);
-    }
     Ok(sent)
 }
 

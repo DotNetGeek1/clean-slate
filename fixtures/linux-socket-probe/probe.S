@@ -16,6 +16,12 @@ msg_aaaa_ok_len = . - msg_aaaa_ok
 msg_http_ok:
     .ascii "[M9.P] http ok\n"
 msg_http_ok_len = . - msg_http_ok
+msg_banner_ok:
+    .ascii "[M9.P] banner ok\n"
+msg_banner_ok_len = . - msg_banner_ok
+banner_expect:
+    .ascii "M9-BANNER-FIX\n"
+banner_expect_len = . - banner_expect
 msg_neg_ok:
     .ascii "[M9.P] negatives ok\n"
 msg_neg_ok_len = . - msg_neg_ok
@@ -63,6 +69,8 @@ dns_reply:
     .space 512
 http_buf:
     .space 512
+banner_buf:
+    .space 64
 
     .section .text, "ax", @progbits
 
@@ -103,6 +111,11 @@ sockaddr_dns:
 sockaddr_http:
     .word   2
     .word   0xa10f
+    .long   0x32004d0a
+    .space 8, 0
+sockaddr_banner:
+    .word   2
+    .word   0xa20f
     .long   0x32004d0a
     .space 8, 0
 sockaddr_refused:
@@ -330,6 +343,61 @@ _start:
 .Lhttp_ok:
     lea     rsi, [rip + msg_http_ok]
     mov     rdx, msg_http_ok_len
+    call    write_lit
+    mov     rdi, r12
+    mov     rax, 3
+    syscall
+
+    /* Server-first banner: connect, delay, recv byte-exact */
+    mov     rax, 41
+    mov     rdi, 2
+    mov     rsi, 1
+    xor     rdx, rdx
+    syscall
+    mov     r12, rax
+    mov     rdi, r12
+    lea     rsi, [rip + sockaddr_banner]
+    mov     rdx, 16
+    mov     rax, 42
+    syscall
+    cmp     rax, 0
+    jne     .Lfail_banner_connect
+    mov     rcx, 50000000
+.Lbanner_delay:
+    dec     rcx
+    jnz     .Lbanner_delay
+    mov     rdi, r12
+    lea     rsi, [rip + banner_buf]
+    mov     rdx, banner_expect_len
+    xor     rax, rax
+    syscall
+    cmp     rax, banner_expect_len
+    jne     .Lfail_banner_len
+    lea     rsi, [rip + banner_buf]
+    lea     rdi, [rip + banner_expect]
+    mov     rcx, banner_expect_len
+.Lcmp_banner:
+    cmp     rcx, 0
+    je      .Lbanner_ok
+    mov     al, byte ptr [rsi]
+    cmp     al, byte ptr [rdi]
+    jne     .Lfail_banner_bytes
+    inc     rsi
+    inc     rdi
+    dec     rcx
+    jmp     .Lcmp_banner
+.Lfail_banner_connect:
+    mov     rdi, 35
+    jmp     exit_fail
+.Lfail_banner_len:
+    mov     rdi, 36
+    jmp     exit_fail
+.Lfail_banner_bytes:
+    mov     rdi, 37
+    jmp     exit_fail
+.Lbanner_ok:
+    lea     rsi, [rip + msg_banner_ok]
+    mov     rdx, msg_banner_ok_len
     call    write_lit
     mov     rdi, r12
     mov     rax, 3

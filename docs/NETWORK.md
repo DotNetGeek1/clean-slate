@@ -374,6 +374,7 @@ Issue #125 adds a **client-only** TCP transport in `network/src/tcp/` over [`L3S
 
 - Active open only (`SynSent` → `Established`); no `LISTEN` / `SYN-RCVD`.
 - In-order delivery: segments must arrive with `seq == rcv_nxt`; out-of-order segments are dropped and counted.
+- **Server-first data:** payload piggybacked on the SYN-ACK (or sent immediately after the handshake) is copied into the connection recv ring during active open; it is not dropped while still in `SynSent`. M9 acceptance adds fixture TCP **4002** (`M9BannerService`): banner on accept, guest `connect` → brief delay → `recv` byte-exact (`[M9.P] banner ok`). HTTP on **4001** may still send as soon as `may_send()` (no request gate); early response bytes must remain readable until the guest `recv`s.
 - Stop-and-go: at most **one** unacknowledged data segment in flight.
 - Fixed RTO ([`TCP_RTO_TICKS`](../network/src/tcp/conn.rs)); separate connect timeout ([`TCP_CONNECT_TIMEOUT_TICKS`](../network/src/tcp/conn.rs)). Data-phase RTO exhaustion uses [`TCP_MAX_RETRIES`](../network/src/tcp/conn.rs); `SynSent` retries until connect timeout.
 - TCP options on the wire: EOL, NOP, MSS (kind 2, len 4) only; MSS is sent on SYN only.

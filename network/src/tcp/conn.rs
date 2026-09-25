@@ -134,6 +134,8 @@ pub struct TcpConnection {
     peer_fin_seen: bool,
     our_fin_sent: bool,
     failed: Option<NetworkError>,
+    /// First sequence number of server-first DATA held in `recv_buf` before SYN-ACK.
+    syn_early_seq: u32,
 }
 
 impl TcpConnection {
@@ -161,6 +163,7 @@ impl TcpConnection {
             peer_fin_seen: false,
             our_fin_sent: false,
             failed: None,
+            syn_early_seq: 0,
         }
     }
 
@@ -173,6 +176,46 @@ impl TcpConnection {
         self.recv_buf.clear();
         self.retransmit = Unacked::empty();
         self.rto_deadline = None;
+        self.syn_early_seq = 0;
+    }
+
+    fn reconcile_syn_early_after_handshake(&mut self, stats: &mut TcpStats) {
+        if self.syn_early_seq == 0 {
+            return;
+        }
+        if self.syn_early_seq != self.rcv_nxt {
+            stats.dropped_out_of_order += 1;
+            self.recv_buf.clear();
+            self.syn_early_seq = 0;
+            return;
+        }
+        self.rcv_nxt = self.rcv_nxt.wrapping_add(self.recv_buf.filled() as u32);
+        self.syn_early_seq = 0;
+    }
+
+    fn stash_syn_early_data(
+        &mut self,
+        seg: &TcpSegment,
+        payload: &[u8],
+        stats: &mut TcpStats,
+    ) -> SegmentAction {
+        if !seg.flags.contains(TcpFlags::ACK)
+            || seg.flags.contains(TcpFlags::SYN)
+            || seg.ack != self.iss.wrapping_add(1)
+            || payload.is_empty()
+        {
+            return SegmentAction::None;
+        }
+        if self.syn_early_seq == 0 {
+            self.syn_early_seq = seg.seq;
+        } else if seg.seq != self.rcv_nxt {
+            stats.dropped_out_of_order += 1;
+            return SegmentAction::None;
+        }
+        let take = payload.len().min(self.recv_buf.free_space());
+        self.recv_buf.push(payload.get(..take).unwrap_or(&[]));
+        self.rcv_nxt = self.rcv_nxt.wrapping_add(take as u32);
+        SegmentAction::SendAck
     }
 
     pub fn take_failure(&mut self) -> Option<NetworkError> {
@@ -289,7 +332,7 @@ impl TcpConnection {
         }
 
         match self.state {
-            TcpState::SynSent => self.on_syn_sent(seg, stats),
+            TcpState::SynSent => self.on_syn_sent(seg, payload, stats),
             TcpState::Established => self.on_established(seg, payload, stats),
             TcpState::FinWait1 => self.on_fin_wait1(seg, payload, stats),
             TcpState::FinWait2 => self.on_fin_wait2(seg, payload, stats),
@@ -300,8 +343,16 @@ impl TcpConnection {
         }
     }
 
-    fn on_syn_sent(&mut self, seg: &TcpSegment, stats: &mut TcpStats) -> SegmentAction {
-        if !seg.flags.contains(TcpFlags::ACK) || !seg.flags.contains(TcpFlags::SYN) {
+    fn on_syn_sent(
+        &mut self,
+        seg: &TcpSegment,
+        payload: &[u8],
+        stats: &mut TcpStats,
+    ) -> SegmentAction {
+        if !seg.flags.contains(TcpFlags::SYN) {
+            return self.stash_syn_early_data(seg, payload, stats);
+        }
+        if !seg.flags.contains(TcpFlags::ACK) {
             return SegmentAction::None;
         }
         if seg.ack != self.iss.wrapping_add(1) {
@@ -322,6 +373,18 @@ impl TcpConnection {
         self.snd_nxt = self.iss.wrapping_add(1);
         self.state = TcpState::Established;
         self.connect_deadline = None;
+        self.reconcile_syn_early_after_handshake(stats);
+        if payload.is_empty() {
+            return SegmentAction::SendAck;
+        }
+        // Piggybacked data follows the SYN sequence number (RFC 793).
+        if seg.seq.wrapping_add(1) != self.rcv_nxt {
+            stats.dropped_out_of_order += 1;
+            return SegmentAction::SendAck;
+        }
+        let take = payload.len().min(self.recv_buf.free_space());
+        self.recv_buf.push(payload.get(..take).unwrap_or(&[]));
+        self.rcv_nxt = self.rcv_nxt.wrapping_add(take as u32);
         SegmentAction::SendAck
     }
 

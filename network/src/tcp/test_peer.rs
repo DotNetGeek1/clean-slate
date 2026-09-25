@@ -34,6 +34,8 @@ pub struct TestPeer<L: NetworkLink> {
     bad_ack_next: bool,
     out_of_order_next: bool,
     stop_acking: bool,
+    syn_ack_piggyback: Option<&'static [u8]>,
+    banner_on_establish: Option<&'static [u8]>,
 }
 
 impl<L: NetworkLink> TestPeer<L> {
@@ -54,7 +56,17 @@ impl<L: NetworkLink> TestPeer<L> {
             bad_ack_next: false,
             out_of_order_next: false,
             stop_acking: false,
+            syn_ack_piggyback: None,
+            banner_on_establish: None,
         }
+    }
+
+    pub fn set_syn_ack_piggyback(&mut self, payload: &'static [u8]) {
+        self.syn_ack_piggyback = Some(payload);
+    }
+
+    pub fn set_banner_on_establish(&mut self, payload: &'static [u8]) {
+        self.banner_on_establish = Some(payload);
     }
 
     pub fn stack_mut(&mut self) -> &mut L3Stack<L> {
@@ -134,6 +146,22 @@ impl<L: NetworkLink> TestPeer<L> {
             PeerState::SynReceived => {
                 if seg.flags.contains(TcpFlags::ACK) {
                     self.state = PeerState::Established;
+                    if let Some(banner) = self.banner_on_establish {
+                        let data = TcpSegment {
+                            src_port: self.local.port,
+                            dst_port: seg.src_port,
+                            seq: self.snd_nxt,
+                            ack: self.rcv_nxt,
+                            data_offset: 5,
+                            flags: TcpFlags::ACK.union(TcpFlags::PSH),
+                            window: 4096,
+                            checksum: 0,
+                            urgent: 0,
+                            mss_option: None,
+                        };
+                        self.transmit(now, remote, &data, banner)?;
+                        self.snd_nxt = self.snd_nxt.wrapping_add(banner.len() as u32);
+                    }
                 } else if seg.flags.contains(TcpFlags::SYN) {
                     self.send_syn_ack(now, remote, seg.src_port)?;
                 }
@@ -253,7 +281,8 @@ impl<L: NetworkLink> TestPeer<L> {
             mss_option: Some(OUR_TCP_MSS),
         };
         self.snd_nxt = self.iss.wrapping_add(1);
-        self.transmit(now, remote, &syn_ack, &[])
+        let piggy = self.syn_ack_piggyback.unwrap_or(&[]);
+        self.transmit(now, remote, &syn_ack, piggy)
     }
 
     fn send_ack(&mut self, now: u64, remote: SocketAddrV4) -> Result<(), NetworkError> {

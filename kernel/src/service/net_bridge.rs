@@ -764,7 +764,17 @@ impl NetBridge {
             return Ok(Some(frame));
         }
         if matches!(self.raw_backend, RawBackend::Virtio) {
-            let _ = self.harvest_virtio_rx(RAW_RECEIVE_HARVEST_BUDGET);
+            for _ in 0..4 {
+                if let Some(frame) = self.pop_virtio_rx_pending() {
+                    self.virtio_rx_stats.delivered =
+                        self.virtio_rx_stats.delivered.saturating_add(1);
+                    return Ok(Some(frame));
+                }
+                if self.virtio_rx_unconsumed_completions() == 0 {
+                    break;
+                }
+                let _ = self.harvest_virtio_rx(RAW_RECEIVE_HARVEST_BUDGET);
+            }
             if let Some(frame) = self.pop_virtio_rx_pending() {
                 self.virtio_rx_stats.delivered = self.virtio_rx_stats.delivered.saturating_add(1);
                 return Ok(Some(frame));
