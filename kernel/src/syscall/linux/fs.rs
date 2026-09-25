@@ -45,14 +45,14 @@ pub(crate) fn handle_sys_open(
     let flags = request.args[1] as u32;
     let _mode = request.args[2];
     let path = copy_path_from_user(path_ptr)?;
-    check_write_allowed(&path, flags)?;
+    check_write_allowed(path.as_bytes(), flags)?;
     let image = image();
     let table = table_mut();
     let node = if (flags & O_CREAT) != 0 && (flags & O_WRONLY) != 0 {
-        table.open_create_file(&path, (flags & O_TRUNC) != 0, &image)?
+        table.open_create_file(path.as_bytes(), (flags & O_TRUNC) != 0, &image)?
     } else {
         let follow = (flags & O_DIRECTORY) == 0;
-        table.lookup_path(&path, &image, follow)?
+        table.lookup_path(path.as_bytes(), &image, follow)?
     };
     let kind = table.node_kind(node)?;
     let access = match flags & 0b11 {
@@ -100,7 +100,7 @@ pub(crate) fn handle_sys_stat(
     let stat_ptr = request.args[1];
     let path = copy_path_from_user(path_ptr)?;
     let image = image();
-    let node = table_mut().lookup_path(&path, &image, true)?;
+    let node = table_mut().lookup_path(path.as_bytes(), &image, true)?;
     write_stat(stat_ptr, node, false)?;
     Ok(0)
 }
@@ -114,7 +114,7 @@ pub(crate) fn handle_sys_lstat(
     let stat_ptr = request.args[1];
     let path = copy_path_from_user(path_ptr)?;
     let image = image();
-    let node = table_mut().lookup_path(&path, &image, false)?;
+    let node = table_mut().lookup_path(path.as_bytes(), &image, false)?;
     write_stat(stat_ptr, node, true)?;
     Ok(0)
 }
@@ -153,7 +153,7 @@ pub(crate) fn handle_sys_mkdir(
     let _mode = request.args[1];
     let path = copy_path_from_user(path_ptr)?;
     let image = image();
-    table_mut().mkdir(&path, &image)?;
+    table_mut().mkdir(path.as_bytes(), &image)?;
     Ok(0)
 }
 
@@ -244,10 +244,24 @@ fn write_stat(stat_ptr: u64, node: NodeId, lstat: bool) -> Result<(), LinuxErrno
     Ok(())
 }
 
-fn copy_path_from_user(ptr: u64) -> Result<[u8; LINUX_PATH_MAX], LinuxErrno> {
+struct UserPathBuf {
+    storage: [u8; LINUX_PATH_MAX],
+    len: usize,
+}
+
+impl UserPathBuf {
+    fn as_bytes(&self) -> &[u8] {
+        &self.storage[..self.len]
+    }
+}
+
+fn copy_path_from_user(ptr: u64) -> Result<UserPathBuf, LinuxErrno> {
     let mut scratch = [0u8; LINUX_PATH_MAX];
     let len = copy_user_path_cstring(ptr, &mut scratch)?;
-    copy_bounded_path(&scratch[..len])
+    Ok(UserPathBuf {
+        storage: copy_bounded_path(&scratch[..len])?,
+        len,
+    })
 }
 
 fn final_name(path: &[u8]) -> Result<&[u8], LinuxErrno> {
