@@ -63,6 +63,8 @@ pub(crate) struct PageAllocator {
     current_region: usize,
     next_page: u64,
     free_list_head: Option<u64>,
+    #[cfg(debug_assertions)]
+    free_list_tail: Option<u64>,
     total_pages: u64,
     available_pages: u64,
 }
@@ -82,6 +84,8 @@ impl PageAllocator {
             current_region: 0,
             next_page: 0,
             free_list_head: None,
+            #[cfg(debug_assertions)]
+            free_list_tail: None,
             total_pages: 0,
             available_pages: 0,
         };
@@ -197,6 +201,10 @@ impl PageAllocator {
         let node_ptr = physical_frame_ptr(frame) as *const FreePageNode;
         let node = unsafe { ptr::read(node_ptr) };
         self.free_list_head = node.next;
+        #[cfg(debug_assertions)]
+        if self.free_list_head.is_none() {
+            self.free_list_tail = None;
+        }
         Some(frame)
     }
 
@@ -207,24 +215,16 @@ impl PageAllocator {
         unsafe {
             (*node_ptr).next = None;
         }
-        let Some(head) = self.free_list_head else {
-            self.free_list_head = Some(frame);
-            return;
-        };
-        let mut tail = head;
-        loop {
-            let tail_ptr = physical_frame_ptr(tail) as *const FreePageNode;
-            match unsafe { ptr::read(tail_ptr) }.next {
-                Some(next) => tail = next,
-                None => {
-                    let tail_mut = physical_frame_ptr(tail) as *mut FreePageNode;
-                    unsafe {
-                        (*tail_mut).next = Some(frame);
-                    }
-                    return;
+        match self.free_list_tail {
+            Some(tail) => {
+                let tail_ptr = physical_frame_ptr(tail) as *mut FreePageNode;
+                unsafe {
+                    (*tail_ptr).next = Some(frame);
                 }
             }
+            None => self.free_list_head = Some(frame),
         }
+        self.free_list_tail = Some(frame);
     }
 
     fn contains_usable_frame(&self, frame: u64) -> bool {
