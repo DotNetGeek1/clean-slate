@@ -923,7 +923,7 @@ fn ensure_udp_endpoint(
         .map_err(|err| NetworkResponse::Error {
             code: NetworkError::from(err).code(),
         })?;
-    let _ = udp.connect(id, caller, dest);
+    let _ = udp.table_mut().connect(id, caller, dest);
     log_linux_udp_endpoint(session, id, local_port);
     if let Some(slot) = udp_endpoint_slot(session) {
         *slot = Some(id);
