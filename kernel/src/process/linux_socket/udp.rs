@@ -1,7 +1,7 @@
 //! UDP socket path (#105).
 
 use clean_slate_linux_abi::{
-    LinuxSyscallRequest, LinuxSyscallResult, SockaddrIn, EDESTADDRREQ, EMSGSIZE, SOCKADDR_IN_LEN,
+    LinuxSyscallRequest, LinuxSyscallResult, EDESTADDRREQ, EMSGSIZE, SOCKADDR_IN_LEN,
 };
 use clean_slate_network::protocol::{NetworkRequest, NetworkResponse};
 use clean_slate_service_fixtures::NETWORK_MAX_PAYLOAD_BYTES;
