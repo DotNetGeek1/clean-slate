@@ -45,6 +45,14 @@ use clean_slate_service_lifecycle::InstanceGeneration;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub(crate) const M9_LINUX_TRACE_PASS_MARKER: &str = "[M9.T] PASS";
+
+/// `exit_group` hook result: resume scheduling or terminate QEMU acceptance.
+pub(crate) enum TraceExitHook {
+    NotApplicable,
+    Continue(u64),
+    Pass,
+}
+
 const M9_TRACE_CYCLES: u32 = 2;
 const LINUX_SLOT: usize = 0;
 /// Enough unsupported syscalls to exhaust the self-test token budget (see `GLOBAL_MAX_TOKENS`).
@@ -253,7 +261,8 @@ fn launch_cycle(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'stati
     }
 }
 
-fn finish_pass() -> ! {
+pub(crate) fn finish_pass() -> ! {
+    crate::syscall::linux::trace::flush_all_pending_drops();
     serial_write_line(M9_LINUX_TRACE_PASS_MARKER);
     qemu_exit(QEMU_EXIT_SUCCESS);
 }
@@ -296,9 +305,9 @@ pub(crate) fn after_probe_exit_group(
     status: u64,
     teardown: &DomainTeardownResult,
     _allocator: &mut PageAllocator,
-) -> Option<u64> {
+) -> TraceExitHook {
     if !is_probe(pid) {
-        return None;
+        return TraceExitHook::NotApplicable;
     }
     if generation.0 != M9_LINUX_GENERATION.load(Ordering::Relaxed) {
         fatal_kernel_error("m9 trace proc generation mismatch");
@@ -321,7 +330,7 @@ pub(crate) fn after_probe_exit_group(
         fatal_kernel_error("m9 trace proc exit with live trace slots");
     }
     log_trace_baseline("after_proc_wait");
-    finish_pass();
+    TraceExitHook::Pass
 }
 
 pub(crate) fn start_m9_linux_trace_self_test(allocator: PageAllocator) -> ! {

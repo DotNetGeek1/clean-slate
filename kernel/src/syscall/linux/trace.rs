@@ -264,9 +264,8 @@ impl LinuxTraceState {
             retained[retained_len] = Some(line);
             retained_len += 1;
         }
-        for index in 0..retained_len {
-            self.ring
-                .push(retained[index].take().expect("retained line"));
+        for line in retained.iter_mut().take(retained_len) {
+            self.ring.push(line.take().expect("retained line"));
         }
     }
 

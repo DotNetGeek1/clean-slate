@@ -2825,10 +2825,15 @@ fn validate_m9_linux_trace_ltrc(output: &str) -> Result<(), XtaskError> {
             let space = after_arrow
                 .find(' ')
                 .ok_or_else(|| XtaskError::MissingMarker("m9 trace result token".to_owned()))?;
-            let val = after_arrow[..space]
+            let result_token = &after_arrow[..space];
+            let reason = after_arrow[space + 1..].trim();
+            if result_token.starts_with("errno") {
+                pending_completion = None;
+                continue;
+            }
+            let val = result_token
                 .parse::<u64>()
                 .map_err(|_| XtaskError::MissingMarker("m9 trace result parse".to_owned()))?;
-            let reason = after_arrow[space + 1..].trim();
             if reason == "ok" && val == nr {
                 return Err(XtaskError::MissingMarker(format!(
                     "LTRC must not publish syscall nr as user result (nr={nr})"

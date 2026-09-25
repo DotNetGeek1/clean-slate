@@ -137,6 +137,12 @@ test_pipe_epipe:
     syscall
     ret
 .Lepipe_child:
+    /* Spin so the parent reaches wait4 while this child is still live (M9 #106 LTRC blocked/woke). */
+    mov     ecx, 0x00200000
+.Lepipe_child_delay:
+    pause
+    dec     ecx
+    jnz     .Lepipe_child_delay
     mov     rdi, r12
     mov     rax, 3
     syscall
