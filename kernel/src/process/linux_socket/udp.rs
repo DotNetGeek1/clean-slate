@@ -11,6 +11,7 @@ use crate::mm::user_mapping::{
 };
 use crate::service::instance_generation::live_instance_generation_for_pid;
 use crate::service::net_bridge::{net_bridge_mut, NetBridgeError};
+use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
 use crate::syscall::linux::socket_copy::copy_user_socket_bytes;
 use crate::syscall::linux::table::LinuxSyscallContext;
 
@@ -190,61 +191,91 @@ fn udp_send_payload(
         Err(block_or_err) => return block_or_err,
     };
     match outcome.response {
-        NetworkResponse::Send { bytes_sent } => {
-            let _ = arm_udp_receive(socket, ctx, id);
-            Ok(bytes_sent as u64)
-        }
+        NetworkResponse::Send { bytes_sent } => Ok(bytes_sent as u64),
         NetworkResponse::Error { code } => super::tcp::map_network_error(code),
         _ => Err(clean_slate_linux_abi::EINVAL),
     }
 }
 
+fn take_rx_datagram(socket: &mut LinuxSocket, scratch: &mut [u8]) -> Option<usize> {
+    if socket.rx_count == 0 {
+        return None;
+    }
+    let idx = socket.rx_head as usize % socket.rx_queue.len();
+    let dg = socket.rx_queue[idx].as_ref()?;
+    let n = (dg.len as usize).min(scratch.len());
+    scratch[..n].copy_from_slice(&dg.bytes[..n]);
+    socket.rx_queue[idx] = None;
+    socket.rx_head = (socket.rx_head + 1) % 2;
+    socket.rx_count -= 1;
+    Some(n)
+}
+
+fn drain_rx_if_ready(
+    id: LinuxSocketId,
+    ctx: &LinuxSyscallContext<'_>,
+    scratch: &mut [u8],
+) -> Result<Option<usize>, clean_slate_linux_abi::LinuxErrno> {
+    with_socket_mut(id, |socket| {
+        let _ = try_complete_pending_rx_on_socket(socket, ctx);
+        Ok(take_rx_datagram(socket, scratch))
+    })?
+}
+
 pub(crate) fn read_datagram(
-    socket: &mut LinuxSocket,
+    id: LinuxSocketId,
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
-    id: LinuxSocketId,
     scratch: &mut [u8],
 ) -> LinuxSyscallResult {
-    let _ = try_complete_pending_rx_on_socket(socket, ctx);
-    if socket.rx_count > 0 {
-        let idx = socket.rx_head as usize % 2;
-        let dg = socket.rx_queue[idx].as_ref().expect("datagram");
-        let n = (dg.len as usize).min(scratch.len());
-        scratch[..n].copy_from_slice(&dg.bytes[..n]);
-        socket.rx_queue[idx] = None;
-        socket.rx_head = (socket.rx_head + 1) % 2;
-        socket.rx_count -= 1;
+    if let Some(n) = drain_rx_if_ready(id, ctx, scratch)? {
         return Ok(n as u64);
     }
-    let outcome = match broker_sync(
-        request,
-        ctx,
-        id,
-        &mut socket.inflight_request_id,
-        NetworkRequest::Receive {
-            session: socket.session,
-            max_len: scratch.len().min(LINUX_UDP_MAX_DATAGRAM) as u32,
-        },
-        &[],
-        Some(clean_slate_network::session::SessionGeneration::new(
-            socket.session_generation,
-        )),
-        None,
-    ) {
-        Ok(outcome) => outcome,
-        Err(block_or_err) => return block_or_err,
-    };
-    match outcome.response {
-        NetworkResponse::Receive { payload_len } => {
-            let n = payload_len as usize;
-            let copy = n.min(scratch.len());
-            scratch[..copy].copy_from_slice(&outcome.payload[..copy]);
-            Ok(copy as u64)
+    while let Some(req_id) = with_socket_mut(id, |socket| socket.pending_rx_req)? {
+        if let Some(n) = drain_rx_if_ready(id, ctx, scratch)? {
+            return Ok(n as u64);
         }
-        NetworkResponse::Error { code } => super::tcp::map_network_error(code),
-        _ => Err(clean_slate_linux_abi::EINVAL),
+        match block_linux_syscall(
+            request,
+            ctx,
+            linux_socket_request_wait_key(req_id),
+            None,
+            LinuxTimeoutResult::Zero,
+        ) {
+            Ok(_) => continue,
+            Err(errno) => return Err(errno),
+        }
     }
+    with_socket_mut(id, |socket| {
+        let outcome = match broker_sync(
+            request,
+            ctx,
+            id,
+            &mut socket.inflight_request_id,
+            NetworkRequest::Receive {
+                session: socket.session,
+                max_len: scratch.len().min(LINUX_UDP_MAX_DATAGRAM) as u32,
+            },
+            &[],
+            Some(clean_slate_network::session::SessionGeneration::new(
+                socket.session_generation,
+            )),
+            None,
+        ) {
+            Ok(outcome) => outcome,
+            Err(block_or_err) => return block_or_err,
+        };
+        match outcome.response {
+            NetworkResponse::Receive { payload_len } => {
+                let n = payload_len as usize;
+                let copy = n.min(scratch.len());
+                scratch[..copy].copy_from_slice(&outcome.payload[..copy]);
+                Ok(copy as u64)
+            }
+            NetworkResponse::Error { code } => super::tcp::map_network_error(code),
+            _ => Err(clean_slate_linux_abi::EINVAL),
+        }
+    })?
 }
 
 pub(crate) fn write_datagram(
@@ -299,10 +330,7 @@ pub(crate) fn recvmsg(
     let socket_ref = crate::process::linux_fd::socket_ref_for_open(open)?;
     let id = super::socket_ref_to_id(socket_ref);
     let mut scratch = [0u8; LINUX_UDP_MAX_DATAGRAM];
-    let n = with_socket_mut(id, |socket| {
-        let _ = try_complete_pending_rx_on_socket(socket, ctx);
-        read_datagram(socket, request, ctx, id, &mut scratch)
-    })?? as usize;
+    let n = read_datagram(id, request, ctx, &mut scratch)? as usize;
     let copy = n.min(want).min(scratch.len());
     if copy > 0 {
         unsafe {

@@ -543,13 +543,12 @@ pub(crate) fn read_socket(
     if scratch.is_empty() {
         return Ok(0);
     }
-    with_socket_mut(id, |socket| {
-        if socket.kind == SocketKindLinux::Udp {
-            udp::read_datagram(socket, request, ctx, id, scratch)
-        } else {
+    match with_socket_mut(id, |socket| socket.kind)? {
+        SocketKindLinux::Udp => udp::read_datagram(id, request, ctx, scratch),
+        SocketKindLinux::Tcp => with_socket_mut(id, |socket| {
             tcp::read_stream(socket, request, ctx, id, _fd, scratch)
-        }
-    })?
+        })?,
+    }
 }
 
 pub(crate) fn write_socket(
@@ -603,8 +602,7 @@ pub(crate) fn selftest_read_stale_session(id: LinuxSocketId) -> LinuxErrno {
 }
 
 pub(crate) fn readiness_changed(open: OpenDescriptionId) {
-    let _ = open;
-    // ORCHESTRATOR: forward to syscall::linux::poll::notify_readiness_changed (#103)
+    crate::syscall::linux::poll::notify_readiness_changed(open);
 }
 
 pub(crate) fn readiness_for(id: LinuxSocketId) -> Readiness {
