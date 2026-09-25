@@ -57,10 +57,6 @@ pub(crate) fn handle_sys_exit(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
 ) -> LinuxSyscallResult {
-    #[cfg(feature = "m9-linux-trace-self-test")]
-    if crate::selftest::m9_linux_trace::pass_requested() {
-        crate::selftest::m9_linux_trace::finish_acceptance_from_exit_hook();
-    }
     let status = exit_status_from_linux(request.args[0]);
     let pid = ctx.pid;
     kernel_log_fmt(format_args!("[LNX ] exit pid={pid} status={status}\n"));

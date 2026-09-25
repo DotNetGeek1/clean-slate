@@ -228,13 +228,17 @@ const M9_LINUX_SOCKET_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[M9.L] PASS",
 ];
 const M9_LINUX_TRACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
-const M9_LINUX_TRACE_ACCEPTANCE_MARKERS: [&str; 7] = [
+const M9_LINUX_TRACE_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[M9.T] trace_slots_baseline=0 boot",
     "[TIME] timer initialized",
     "UNKNOWN(999)",
     "unsupported",
     "bad-pointer",
     "[LTRC] dropped=",
+    "[M9.T] cycle=1 proc_fixture",
+    "wait4 nr=61 blocked",
+    "wait4 nr=61 woke",
+    "[M9.T] trace_slots_baseline=0 after_proc_wait",
     "[M9.T] PASS",
 ];
 
@@ -1993,31 +1997,26 @@ fn run_vm_inner_with_config(
     fs::copy(&kernel, esp_boot_dir.join("BOOTX64.EFI"))?;
 
     let ovmf = find_ovmf()?;
-    let vars_copy = if config.reset_ovmf_vars {
+    let runtime_vars = if config.reset_ovmf_vars {
         workspace_root()
             .join("target")
             .join("m5")
             .join("OVMF_VARS.fd")
     } else {
-        workspace_root().join("target").join("OVMF_VARS.fd")
+        workspace_root()
+            .join("target")
+            .join(format!("OVMF_VARS.runtime.{}.fd", std::process::id()))
     };
-    // Every boot starts from the pristine variable store. OVMF rewrites NV
-    // variables on each boot and the harness SIGKILLs QEMU as soon as the
-    // markers match, so a store shared across ~50 boots accumulates partial
-    // writes / reclaim state; on CI that eventually left the firmware stuck
-    // before BDS (console escapes only, no `BdsDxe:` line) for whichever test
-    // happened to boot next. A fresh copy makes each boot independent.
-    if let Some(parent) = vars_copy.parent() {
+    // Every boot starts from the pristine variable store (`vars_template`).
+    // OVMF rewrites NV variables on each boot and acceptance tests SIGKILL
+    // QEMU as soon as markers match, so writing back into the template path
+    // (common when OVMF_VARS env points at a working copy) leaves the next
+    // boot stuck before BDS or timing out after PASS. Always launch from a
+    // fresh runtime copy.
+    if let Some(parent) = runtime_vars.parent() {
         fs::create_dir_all(parent)?;
     }
-    if !same_file(&ovmf.vars_template, &vars_copy) {
-        fs::copy(&ovmf.vars_template, &vars_copy)?;
-    } else {
-        eprintln!(
-            "warning: OVMF_VARS template is the working copy ({}); firmware variable state is shared across boots",
-            vars_copy.display()
-        );
-    }
+    fs::copy(&ovmf.vars_template, &runtime_vars)?;
 
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.arg("-machine")
@@ -2038,7 +2037,10 @@ fn run_vm_inner_with_config(
             ovmf.code.display()
         ))
         .arg("-drive")
-        .arg(format!("if=pflash,format=raw,file={}", vars_copy.display()))
+        .arg(format!(
+            "if=pflash,format=raw,file={}",
+            runtime_vars.display()
+        ))
         .arg("-drive")
         .arg(format!("format=raw,file=fat:rw:{}", esp_dir.display()));
     if let Some(cpu) = config.cpu_model {
@@ -2274,14 +2276,6 @@ fn kernel_artifact(release: bool) -> PathBuf {
         .join(KERNEL_TARGET)
         .join(profile)
         .join(format!("{KERNEL_PACKAGE}.efi"))
-}
-
-/// True when both paths name the same existing file (after canonicalisation).
-fn same_file(a: &Path, b: &Path) -> bool {
-    match (fs::canonicalize(a), fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
 }
 
 fn find_ovmf() -> Result<OvmfPaths, XtaskError> {

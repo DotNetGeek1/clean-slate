@@ -66,24 +66,9 @@ pub(crate) const fn classify_errno(errno: LinuxErrno) -> LinuxTraceReason {
     }
 }
 
-#[cfg(feature = "m9-linux-trace-self-test")]
-const RING_CAPACITY: usize = 8;
-#[cfg(not(feature = "m9-linux-trace-self-test"))]
 const RING_CAPACITY: usize = 32;
-
-#[cfg(feature = "m9-linux-trace-self-test")]
-const MAX_PROCESS_TRACE_SLOTS: usize = 4;
-#[cfg(not(feature = "m9-linux-trace-self-test"))]
 const MAX_PROCESS_TRACE_SLOTS: usize = 16;
-
-#[cfg(feature = "m9-linux-trace-self-test")]
-const GLOBAL_MAX_TOKENS: u32 = 6;
-#[cfg(not(feature = "m9-linux-trace-self-test"))]
 const GLOBAL_MAX_TOKENS: u32 = 64;
-
-#[cfg(feature = "m9-linux-trace-self-test")]
-const PER_PROCESS_MAX_TOKENS: u32 = 4;
-#[cfg(not(feature = "m9-linux-trace-self-test"))]
 const PER_PROCESS_MAX_TOKENS: u32 = 32;
 
 const TOKENS_PER_TICK: u32 = 2;
@@ -263,7 +248,12 @@ impl LinuxTraceState {
     pub(crate) fn release_process(&mut self, pid: u64, generation: InstanceGeneration) {
         for slot in &mut self.processes {
             if slot.active() && slot.identity.pid == pid && slot.identity.generation == generation {
+                if slot.pending_drops > 0 {
+                    emit_drop_summary(pid, slot.pending_drops);
+                    slot.pending_drops = 0;
+                }
                 *slot = PerProcessTrace::EMPTY;
+                return;
             }
         }
     }
@@ -512,6 +502,25 @@ pub(crate) fn release_process(pid: u64, generation: InstanceGeneration) {
     state_mut().release_process(pid, generation);
 }
 
+/// Clear bounded trace state between QEMU acceptance cycles (no leak across probes).
+#[cfg(feature = "m9-linux-trace-self-test")]
+pub(crate) fn flush_all_pending_drops() {
+    let state = state_mut();
+    for slot in &mut state.processes {
+        if slot.active() && slot.pending_drops > 0 {
+            emit_drop_summary(slot.identity.pid, slot.pending_drops);
+            slot.pending_drops = 0;
+        }
+    }
+}
+
+#[cfg(feature = "m9-linux-trace-self-test")]
+pub(crate) fn reset_trace_state() {
+    unsafe {
+        *LINUX_TRACE_STATE.get() = LinuxTraceState::new();
+    }
+}
+
 #[cfg(feature = "m9-linux-trace-self-test")]
 pub(crate) fn live_trace_process_slots() -> usize {
     state_mut().live_process_slots()
@@ -617,6 +626,18 @@ mod tests {
         state.locate_process(id);
         assert_eq!(state.live_process_slots(), 1);
         state.release_process(9, InstanceGeneration(3));
+        assert_eq!(state.live_process_slots(), 0);
+    }
+
+    #[test]
+    fn release_process_flushes_pending_drop_summary() {
+        let mut state = LinuxTraceState::new();
+        let index = state.locate_process(TraceIdentity {
+            pid: 4,
+            generation: InstanceGeneration(1),
+        });
+        state.processes[index].pending_drops = 5;
+        state.release_process(4, InstanceGeneration(1));
         assert_eq!(state.live_process_slots(), 0);
     }
 }

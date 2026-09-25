@@ -1,4 +1,10 @@
 //! M9 #106 Linux compatibility trace QEMU acceptance (`[M9.T] PASS`).
+//!
+//! Cycle 0: static asm probe (unsupported, ok write, bad pointer, flood/drop).
+//! Cycle 1: committed `linux-proc-probe` fixture (fork/wait4 block + wake on production path).
+//!
+//! **`timeout` reason class:** no fixture on this branch exercises a timed-out Linux wait
+//! (poll/nanosleep timeout paths land with #103). Host unit tests cover `classify_errno(ETIMEDOUT)`.
 
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::gdt::set_privilege_stack;
@@ -35,15 +41,16 @@ use clean_slate_service_lifecycle::InstanceGeneration;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 pub(crate) const M9_LINUX_TRACE_PASS_MARKER: &str = "[M9.T] PASS";
-const M9_TRACE_CYCLES: u32 = 1;
-const FLOOD_COUNT: u32 = 32;
+const M9_TRACE_CYCLES: u32 = 2;
+const LINUX_SLOT: usize = 0;
+/// Enough unsupported syscalls to exhaust the self-test token budget (see `GLOBAL_MAX_TOKENS`).
+const FLOOD_COUNT: u32 = 128;
 
 static M9_LINUX_PID: AtomicU64 = AtomicU64::new(0);
 static M9_LINUX_GENERATION: AtomicU32 = AtomicU32::new(0);
 static M9_CYCLE: AtomicU32 = AtomicU32::new(0);
 static M9_WAIT_BLOCKED: AtomicBool = AtomicBool::new(false);
 static M9_WAIT_WOKE: AtomicBool = AtomicBool::new(false);
-static M9_PASS_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 struct ProbeBuilder {
     buf: [u8; PAGE_SIZE as usize],
@@ -87,35 +94,8 @@ impl ProbeBuilder {
         self.emit(&v.to_le_bytes())
     }
 
-    fn emit_mov_rcx(&mut self, v: u32) -> Result<(), &'static str> {
-        self.emit(&[0x48, 0xC7, 0xC1])?;
-        self.emit(&v.to_le_bytes())
-    }
-
     fn emit_syscall(&mut self) -> Result<(), &'static str> {
         self.emit(&[0x0F, 0x05])
-    }
-
-    fn emit_mov_rdi_u64(&mut self, v: u64) -> Result<(), &'static str> {
-        self.emit(&[0x48, 0xBF])?;
-        self.emit(&v.to_le_bytes())
-    }
-
-    fn emit_test_rax_rax(&mut self) -> Result<(), &'static str> {
-        self.emit(&[0x48, 0x85, 0xC0])
-    }
-
-    fn emit_jz_placeholder(&mut self) -> Result<usize, &'static str> {
-        self.emit(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00])?;
-        Ok(self.len - 4)
-    }
-
-    fn patch_jz_rel32(&mut self, off: usize, target: usize) -> Result<(), &'static str> {
-        let next = off + 4;
-        let rel = i32::try_from(isize::try_from(target - next).map_err(|_| "jz oob")?)
-            .map_err(|_| "jz oob")?;
-        self.buf[off..off + 4].copy_from_slice(&rel.to_le_bytes());
-        Ok(())
     }
 
     fn emit_exit(&mut self, code: u8) -> Result<(), &'static str> {
@@ -129,17 +109,14 @@ impl ProbeBuilder {
 fn build_trace_probe(out: &mut [u8]) -> Result<usize, &'static str> {
     let mut b = ProbeBuilder::new();
 
-    // unsupported nr 999
     b.emit_mov_eax(999)?;
     b.emit_syscall()?;
 
-    // dup2(1, 5) so stdout-backed fd 5 exists for write probes
     b.emit_mov_edi(1)?;
     b.emit_mov_esi(5)?;
     b.emit_mov_eax(SYS_DUP2 as u32)?;
     b.emit_syscall()?;
 
-    // ok write to fd 5
     b.emit_mov_eax(SYS_WRITE as u32)?;
     b.emit_mov_edi(5)?;
     b.emit(&[0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00])?;
@@ -147,7 +124,6 @@ fn build_trace_probe(out: &mut [u8]) -> Result<usize, &'static str> {
     b.emit_mov_edx(5)?;
     b.emit_syscall()?;
 
-    // bad pointer write (open fd, invalid buffer)
     b.emit_mov_eax(SYS_WRITE as u32)?;
     b.emit_mov_edi(5)?;
     b.emit(&[0x48, 0xBE])?;
@@ -155,7 +131,6 @@ fn build_trace_probe(out: &mut [u8]) -> Result<usize, &'static str> {
     b.emit_mov_edx(8)?;
     b.emit_syscall()?;
 
-    // flood unsupported 998 (unrolled — no probe loop encoding hazard)
     for _ in 0..FLOOD_COUNT {
         b.emit_mov_eax(998)?;
         b.emit_syscall()?;
@@ -166,7 +141,6 @@ fn build_trace_probe(out: &mut [u8]) -> Result<usize, &'static str> {
     b.emit_syscall()?;
     b.emit(&[0x0F, 0x0B])?;
 
-    // fixup lea for ok message
     let msg_off = b.len;
     b.emit(b"trace")?;
     let rel = (msg_off as i32) - (lea_ok_fixup as i32 + 4);
@@ -181,51 +155,6 @@ fn is_probe(pid: u64) -> bool {
     pid == M9_LINUX_PID.load(Ordering::Relaxed)
 }
 
-pub(crate) fn observe_linux_syscall_result(
-    pid: u64,
-    request: &clean_slate_linux_abi::LinuxSyscallRequest,
-    result: clean_slate_linux_abi::LinuxSyscallResult,
-) {
-    if request.nr == SYS_WAIT4 && result.is_ok() && M9_WAIT_BLOCKED.load(Ordering::Relaxed) {
-        M9_WAIT_WOKE.store(true, Ordering::Relaxed);
-        if let Some(generation) = live_instance_generation(pid) {
-            crate::syscall::linux::trace::record_wait_event(
-                pid,
-                generation,
-                SYS_WAIT4,
-                LinuxTraceReason::Woke,
-            );
-        }
-        try_finish_acceptance();
-    }
-}
-
-fn try_finish_acceptance() {
-    if M9_CYCLE.load(Ordering::Relaxed) >= 1
-        && M9_WAIT_BLOCKED.load(Ordering::Relaxed)
-        && M9_WAIT_WOKE.load(Ordering::Relaxed)
-        && !M9_PASS_REQUESTED.load(Ordering::Relaxed)
-    {
-        M9_PASS_REQUESTED.store(true, Ordering::Relaxed);
-        log_trace_baseline("after_proc_wait");
-        serial_write_line(M9_LINUX_TRACE_PASS_MARKER);
-    }
-}
-
-pub(crate) fn pass_requested() -> bool {
-    M9_PASS_REQUESTED.load(Ordering::Relaxed)
-}
-
-pub(crate) fn finish_acceptance_from_exit_hook() -> ! {
-    qemu_exit(QEMU_EXIT_SUCCESS);
-}
-
-pub(crate) fn poll_pass_request() {
-    if pass_requested() {
-        finish_acceptance_from_exit_hook();
-    }
-}
-
 pub(crate) fn note_wait_trace(nr: u64, reason: LinuxTraceReason) {
     if nr != SYS_WAIT4 {
         return;
@@ -235,7 +164,6 @@ pub(crate) fn note_wait_trace(nr: u64, reason: LinuxTraceReason) {
         LinuxTraceReason::Woke => M9_WAIT_WOKE.store(true, Ordering::Relaxed),
         _ => {}
     }
-    try_finish_acceptance();
 }
 
 fn log_trace_baseline(label: &str) {
@@ -254,6 +182,9 @@ fn install_stdio(pid: u64) -> Result<(), &'static str> {
 }
 
 fn launch_proc_fixture(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'static str> {
+    M9_WAIT_BLOCKED.store(false, Ordering::Relaxed);
+    M9_WAIT_WOKE.store(false, Ordering::Relaxed);
+
     let argv: [&[u8]; 1] = [b"linux-proc-probe"];
     let envp: [&[u8]; 1] = [b"PATH=/fixture"];
     let spec = LinuxExecSpec {
@@ -265,8 +196,13 @@ fn launch_proc_fixture(allocator: &mut PageAllocator, cycle: u32) -> Result<(), 
         policy: &LINUX_CONVENTIONAL_LOAD_POLICY,
     };
     let stacks = unsafe { task_stacks_mut() };
-    let launched = launch_linux_process_from_spec(allocator, task_stack_top(&stacks[0]), 0, &spec)
-        .map_err(|_| "m9 trace proc fixture launch failed")?;
+    let launched = launch_linux_process_from_spec(
+        allocator,
+        task_stack_top(&stacks[LINUX_SLOT]),
+        LINUX_SLOT,
+        &spec,
+    )
+    .map_err(|_| "m9 trace proc fixture launch failed")?;
     install_stdio(launched.pid)?;
     M9_LINUX_PID.store(launched.pid, Ordering::Relaxed);
     M9_LINUX_GENERATION.store(launched.instance_generation.0, Ordering::Relaxed);
@@ -314,6 +250,12 @@ fn launch_cycle(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'stati
     }
 }
 
+fn finish_pass() -> ! {
+    serial_write_line(M9_LINUX_TRACE_PASS_MARKER);
+    qemu_exit(QEMU_EXIT_SUCCESS);
+}
+
+/// Asm probe `exit(2)` — hand off to the proc fixture (cycle 1).
 pub(crate) fn after_linux_probe_exit(
     pid: u64,
     generation: InstanceGeneration,
@@ -331,27 +273,51 @@ pub(crate) fn after_linux_probe_exit(
     }
     let cycle = M9_CYCLE.load(Ordering::Relaxed);
     if cycle != 0 {
-        fatal_kernel_error("m9 trace asm probe exit on unexpected cycle");
+        return None;
     }
     log_trace_baseline("after_asm_exit");
+    crate::syscall::linux::trace::flush_all_pending_drops();
+    crate::syscall::linux::trace::reset_trace_state();
+    // Proc fixture matches `m9_linux_proc` boot: first Linux process at pid 1.
+    reset_process_scheduler_world();
     let next = cycle + 1;
-    if next >= M9_TRACE_CYCLES {
-        serial_write_line(M9_LINUX_TRACE_PASS_MARKER);
-        qemu_exit(QEMU_EXIT_SUCCESS);
-    }
     M9_CYCLE.store(next, Ordering::Relaxed);
     launch_cycle(allocator, next).unwrap_or_else(|m| fatal_kernel_error(m));
     Some(start_current_scheduler_thread().unwrap_or_else(|m| fatal_kernel_error(m)))
 }
 
+/// Proc fixture parent `exit_group(2)` after child reaped — PASS once wait trace observed.
 pub(crate) fn after_probe_exit_group(
-    _pid: u64,
-    _generation: InstanceGeneration,
-    _status: u64,
-    _teardown: &DomainTeardownResult,
+    pid: u64,
+    generation: InstanceGeneration,
+    status: u64,
+    teardown: &DomainTeardownResult,
     _allocator: &mut PageAllocator,
 ) -> Option<u64> {
-    None
+    if !is_probe(pid) {
+        return None;
+    }
+    if generation.0 != M9_LINUX_GENERATION.load(Ordering::Relaxed) {
+        fatal_kernel_error("m9 trace proc generation mismatch");
+    }
+    if status != 0 {
+        fatal_kernel_error("m9 trace proc probe exited non-zero");
+    }
+    if teardown.exit_status != 0 {
+        fatal_kernel_error("m9 trace proc teardown status non-zero");
+    }
+    let cycle = M9_CYCLE.load(Ordering::Relaxed);
+    if cycle != 1 {
+        fatal_kernel_error("m9 trace proc exit on unexpected cycle");
+    }
+    if !M9_WAIT_BLOCKED.load(Ordering::Relaxed) || !M9_WAIT_WOKE.load(Ordering::Relaxed) {
+        fatal_kernel_error("m9 trace proc wait4 block/wake not observed");
+    }
+    if live_trace_process_slots() != 0 {
+        fatal_kernel_error("m9 trace proc exit with live trace slots");
+    }
+    log_trace_baseline("after_proc_wait");
+    finish_pass();
 }
 
 pub(crate) fn start_m9_linux_trace_self_test(allocator: PageAllocator) -> ! {

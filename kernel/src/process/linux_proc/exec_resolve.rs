@@ -38,30 +38,42 @@ pub(crate) fn resolve_executable(
     use crate::process::linux_image::LINUX_M8_FIXTURE;
 
     // M8 fixture paths only; #107 (BusyBox convergence) removes this stub.
-    #[cfg(feature = "m9-linux-proc-self-test")]
+    #[cfg(any(
+        feature = "m9-linux-proc-self-test",
+        feature = "m9-linux-trace-self-test"
+    ))]
     const PROC_PROBE: &[u8] =
         include_bytes!("../../../../fixtures/linux-proc-probe/linux-proc-probe-x86_64");
     #[cfg(any(
         feature = "m9-linux-proc-self-test",
-        feature = "m9-linux-exec-self-test"
+        feature = "m9-linux-exec-self-test",
+        feature = "m9-linux-trace-self-test"
     ))]
     const EXEC_ARGS: &[u8] =
         include_bytes!("../../../../fixtures/linux-exec-args/linux-exec-args-x86_64");
 
     let image: Option<&[u8]> = match path {
         b"/bin/busybox" | b"/bin/sh" => Some(LINUX_M8_FIXTURE),
-        #[cfg(feature = "m9-linux-proc-self-test")]
+        #[cfg(any(
+            feature = "m9-linux-proc-self-test",
+            feature = "m9-linux-trace-self-test"
+        ))]
         b"/fixture/linux-proc-probe" => Some(PROC_PROBE),
-        #[cfg(not(feature = "m9-linux-proc-self-test"))]
+        #[cfg(not(any(
+            feature = "m9-linux-proc-self-test",
+            feature = "m9-linux-trace-self-test"
+        )))]
         b"/fixture/linux-proc-probe" => None,
         #[cfg(any(
             feature = "m9-linux-proc-self-test",
-            feature = "m9-linux-exec-self-test"
+            feature = "m9-linux-exec-self-test",
+            feature = "m9-linux-trace-self-test"
         ))]
         b"/fixture/linux-exec-args" => Some(EXEC_ARGS),
         #[cfg(not(any(
             feature = "m9-linux-proc-self-test",
-            feature = "m9-linux-exec-self-test"
+            feature = "m9-linux-exec-self-test",
+            feature = "m9-linux-trace-self-test"
         )))]
         b"/fixture/linux-exec-args" => None,
         _ => None,

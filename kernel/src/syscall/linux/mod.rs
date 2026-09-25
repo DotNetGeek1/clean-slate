@@ -164,11 +164,6 @@ pub(crate) fn dispatch_with(
     };
     #[cfg(feature = "m9-linux-trace")]
     trace::record_syscall(pid, generation, &request, handler.is_some(), result);
-    #[cfg(feature = "m9-linux-trace-self-test")]
-    {
-        crate::selftest::m9_linux_trace::observe_linux_syscall_result(pid, &request, result);
-        crate::selftest::m9_linux_trace::poll_pass_request();
-    }
     #[cfg(feature = "m8-linux-dispatch-self-test")]
     crate::selftest::m8_linux_dispatch::observe_linux_write_result(pid, &request, result);
     #[cfg(feature = "m9-fd-core-self-test")]

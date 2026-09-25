@@ -1,0 +1,7 @@
+Restore Linux trace proc wait4 coverage and fix harness OVMF reuse (#106).
+
+Cycle 1 runs linux-proc-probe with production wait4 block/wake LTRC lines;
+PASS only after exit_group teardown and trace slot baseline. Flush pending
+drop summaries on process release and between cycles. Wire exec_resolve for
+m9-linux-trace-self-test. xtask copies OVMF vars to a per-run runtime file
+so SIGKILL acceptance runs do not corrupt the template store.
