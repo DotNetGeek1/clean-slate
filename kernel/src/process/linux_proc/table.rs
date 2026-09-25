@@ -2,7 +2,7 @@
 
 use crate::process::live_instance_generation;
 use crate::sync::global_cell::GlobalCell;
-use clean_slate_linux_abi::{w_exitcode, LinuxErrno, EAGAIN};
+use clean_slate_linux_abi::{w_exitcode, LinuxErrno};
 use clean_slate_service_lifecycle::InstanceGeneration;
 
 /// Self-test feature: sh + two pipe children + parent + headroom (#107 convergence).
@@ -33,6 +33,8 @@ struct ProcSlot {
     live: bool,
     id: ProcId,
     parent: ProcId,
+    /// Process group id (M9: one group per launched tree; children inherit at fork).
+    pgid: u64,
     children: [Option<ChildSlot>; LINUX_PROC_MAX_CHILDREN_PER_PARENT],
 }
 
@@ -58,10 +60,17 @@ impl LinuxProcessTable {
             .iter_mut()
             .position(|s| !s.live)
             .ok_or("linux proc table full")?;
+        let pgid = if parent.pid == 0 {
+            id.pid
+        } else {
+            let parent_index = self.slot_index(parent).ok_or("linux proc parent missing")?;
+            self.slots[parent_index].pgid
+        };
         self.slots[free] = ProcSlot {
             live: true,
             id,
             parent,
+            pgid,
             children: [None; LINUX_PROC_MAX_CHILDREN_PER_PARENT],
         };
         if parent.pid != 0 {
@@ -98,16 +107,35 @@ impl LinuxProcessTable {
     pub(crate) fn publish_exit(&mut self, id: ProcId, status: i32) {
         let parent = self.parent_of(id);
         if let Some(parent_id) = parent {
-            if let Some(parent_index) = self.slot_index_resolved(parent_id) {
+            if parent_id.pid == 0 {
+                self.reap_zombie(id);
+                return;
+            }
+            if let Some(parent_index) = self.slot_index(parent_id) {
                 for entry in self.slots[parent_index].children.iter_mut().flatten() {
                     if entry.child == id {
                         entry.state = ChildState::Zombie { status };
                         return;
                     }
                 }
+                #[cfg(feature = "m9-userspace-self-test")]
+                exit_publish_diag(id, parent_id, "child-missing-in-parent-list");
+            } else {
+                #[cfg(feature = "m9-userspace-self-test")]
+                exit_publish_diag(id, parent_id, "parent-slot-missing");
             }
+        } else {
+            #[cfg(feature = "m9-userspace-self-test")]
+            exit_publish_diag(
+                id,
+                ProcId {
+                    pid: 0,
+                    generation: InstanceGeneration(0),
+                },
+                "exitee-slot-missing",
+            );
         }
-        // Parent gone: reap immediately.
+        // Parent gone or linkage broken: reap immediately.
         self.reap_zombie(id);
     }
 
@@ -127,78 +155,120 @@ impl LinuxProcessTable {
         parent: ProcId,
         wait_pid: i64,
     ) -> Option<(ProcId, i32)> {
-        let index = self.slot_index_resolved(parent)?;
-        for entry in self.slots[index].children.iter_mut().flatten() {
-            if wait_pid > 0 && entry.child.pid != wait_pid as u64 {
+        let index = self.slot_index(parent)?;
+        let parent_pgid = self.slots[index].pgid;
+        for child_index in 0..LINUX_PROC_MAX_CHILDREN_PER_PARENT {
+            let Some(entry) = self.slots[index].children[child_index] else {
+                continue;
+            };
+            if !self.child_matches_wait(&entry, wait_pid, parent_pgid) {
                 continue;
             }
             if let ChildState::Zombie { status } = entry.state {
                 if let Some(gen) = live_instance_generation(entry.child.pid) {
                     if gen != entry.child.generation {
-                        entry.state = ChildState::Reaped;
+                        self.slots[index].children[child_index] = Some(ChildSlot {
+                            state: ChildState::Reaped,
+                            ..entry
+                        });
                         continue;
                     }
                 }
                 let found = (entry.child, status);
-                entry.state = ChildState::Reaped;
+                self.slots[index].children[child_index] = Some(ChildSlot {
+                    state: ChildState::Reaped,
+                    ..entry
+                });
                 return Some(found);
             }
         }
         None
     }
 
-    /// Lazily inserts a Linux personality process the first time it uses #102 syscalls.
-    pub(crate) fn ensure_proc_slot(&mut self, id: ProcId) -> Result<(), LinuxErrno> {
+    /// Fail closed unless `id` matches a live proc-table slot (exact generation).
+    pub(crate) fn require_proc_slot(&self, id: ProcId) -> Result<(), LinuxErrno> {
         if self.slot_index(id).is_some() {
-            return Ok(());
+            Ok(())
+        } else {
+            Err(clean_slate_linux_abi::EINVAL)
         }
-        let parent = ProcId {
-            pid: 0,
-            generation: InstanceGeneration(0),
-        };
-        self.register(id, parent).map_err(|_| EAGAIN)
+    }
+
+    pub(crate) fn pgid_of(&self, id: ProcId) -> Option<u64> {
+        self.slot_index(id).map(|index| self.slots[index].pgid)
     }
 
     pub(crate) fn has_waitable_children(&self, parent: ProcId, wait_pid: i64) -> bool {
-        let Some(index) = self.slot_index_resolved(parent) else {
+        let Some(index) = self.slot_index(parent) else {
             return false;
         };
+        let parent_pgid = self.slots[index].pgid;
         self.slots[index].children.iter().any(|child| {
             child.as_ref().is_some_and(|entry| {
-                (wait_pid <= 0 || entry.child.pid == wait_pid as u64)
+                self.child_matches_wait(entry, wait_pid, parent_pgid)
                     && matches!(entry.state, ChildState::Running | ChildState::Zombie { .. })
             })
         })
     }
 
-    pub(crate) fn has_any_child(&self, parent: ProcId) -> bool {
-        let Some(index) = self.slot_index_resolved(parent) else {
+    pub(crate) fn has_child_in_wait_set(&self, parent: ProcId, wait_pid: i64) -> bool {
+        let Some(index) = self.slot_index(parent) else {
             return false;
         };
-        self.slots[index].children.iter().any(|c| {
-            c.is_some()
-                && !matches!(
-                    c,
-                    Some(ChildSlot {
-                        state: ChildState::Reaped,
-                        ..
-                    })
-                )
+        let parent_pgid = self.slots[index].pgid;
+        self.slots[index].children.iter().any(|child| {
+            child.as_ref().is_some_and(|entry| {
+                self.child_matches_wait(entry, wait_pid, parent_pgid)
+                    && !matches!(entry.state, ChildState::Reaped)
+            })
         })
+    }
+
+    #[cfg(feature = "m9-userspace-self-test")]
+    pub(crate) fn format_wait_diag_children(&self, parent: ProcId, out: &mut [u8]) -> usize {
+        let Some(index) = self.slot_index(parent) else {
+            return 0;
+        };
+        let mut pos = 0usize;
+        for entry in self.slots[index].children.iter().flatten() {
+            if pos + 12 >= out.len() {
+                break;
+            }
+            let state = match entry.state {
+                ChildState::Running => b'R',
+                ChildState::Zombie { .. } => b'Z',
+                ChildState::Reaped => b'r',
+            };
+            out[pos] = state;
+            pos += 1;
+            out[pos] = b':';
+            pos += 1;
+            pos += write_decimal(&mut out[pos..], entry.child.pid);
+            if pos < out.len() {
+                out[pos] = b',';
+                pos += 1;
+            }
+        }
+        pos
+    }
+
+    fn child_matches_wait(&self, entry: &ChildSlot, wait_pid: i64, parent_pgid: u64) -> bool {
+        let child_pgid = self
+            .slot_index(entry.child)
+            .map(|index| self.slots[index].pgid)
+            .unwrap_or(parent_pgid);
+        match wait_pid {
+            -1 => true,
+            0 => child_pgid == parent_pgid,
+            pid if pid < -1 => child_pgid == (-pid) as u64,
+            pid => entry.child.pid == pid as u64,
+        }
     }
 
     /// Marks a process slot inactive after `exit_group` without disturbing a
     /// parent's zombie `ChildSlot` (the parent reaps via `wait4`).
     pub(crate) fn retire_slot(&mut self, id: ProcId) {
         if let Some(index) = self.slot_index(id) {
-            self.slots[index].live = false;
-            return;
-        }
-        if let Some(index) = self
-            .slots
-            .iter()
-            .position(|slot| slot.live && slot.id.pid == id.pid)
-        {
             self.slots[index].live = false;
         }
     }
@@ -243,22 +313,58 @@ impl LinuxProcessTable {
             .position(|slot| slot.live && slot.id == id)
     }
 
-    /// Maps syscall `ctx` identity to the live proc-table slot (generation drift).
-    pub(crate) fn resolve_proc_id(&self, id: ProcId) -> ProcId {
-        if self.slot_index(id).is_some() {
-            return id;
-        }
-        live_instance_generation(id.pid)
-            .map(|generation| ProcId {
-                pid: id.pid,
-                generation,
-            })
-            .unwrap_or(id)
-    }
+}
 
-    pub(crate) fn slot_index_resolved(&self, id: ProcId) -> Option<usize> {
-        self.slot_index(self.resolve_proc_id(id))
+#[cfg(feature = "m9-userspace-self-test")]
+fn exit_publish_diag(exitee: ProcId, parent: ProcId, reason: &str) {
+    use crate::diagnostics::log::kernel_log_fmt;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static EXIT_PUBLISH_DIAG: AtomicUsize = AtomicUsize::new(0);
+    if EXIT_PUBLISH_DIAG.fetch_add(1, Ordering::Relaxed) >= 8 {
+        return;
     }
+    kernel_log_fmt(format_args!(
+        "[M9  ] publish_exit {reason} exitee={} gen={} parent={} pgen={}\n",
+        exitee.pid,
+        exitee.generation.0,
+        parent.pid,
+        parent.generation.0,
+    ));
+}
+
+fn write_decimal(out: &mut [u8], mut value: u64) -> usize {
+    if value == 0 {
+        if !out.is_empty() {
+            out[0] = b'0';
+            return 1;
+        }
+        return 0;
+    }
+    let mut digits = [0u8; 20];
+    let mut len = 0usize;
+    while value > 0 {
+        digits[len] = b'0' + (value % 10) as u8;
+        len += 1;
+        value /= 10;
+    }
+    let take = len.min(out.len());
+    for index in 0..take {
+        out[index] = digits[len - 1 - index];
+    }
+    take
+}
+
+#[cfg(feature = "m8-linux-image")]
+pub(crate) fn register_launched_linux_process(
+    pid: u64,
+    generation: InstanceGeneration,
+) -> Result<(), &'static str> {
+    let id = ProcId { pid, generation };
+    let parent = ProcId {
+        pid: 0,
+        generation: InstanceGeneration(0),
+    };
+    table_mut().register(id, parent)
 }
 
 impl ProcSlot {
@@ -272,6 +378,7 @@ impl ProcSlot {
             pid: 0,
             generation: InstanceGeneration(0),
         },
+        pgid: 0,
         children: [None; LINUX_PROC_MAX_CHILDREN_PER_PARENT],
     };
 }
@@ -337,7 +444,7 @@ mod tests {
         assert_eq!(found.0.pid, 13);
         assert_eq!(found.1, 768);
         table.reap_zombie(child);
-        assert!(!table.has_any_child(parent));
+        assert!(!table.has_child_in_wait_set(parent, -1));
     }
 
     #[test]

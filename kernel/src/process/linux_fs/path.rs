@@ -149,6 +149,15 @@ mod tests {
     }
 
     #[test]
+    fn relative_dotdot_cannot_escape_above_root() {
+        let mut out = [0u8; LINUX_PATH_MAX];
+        let len = resolve_path(b"/", b"..", &mut out).expect("resolve");
+        assert_eq!(&out[..len], b"/");
+        let len = resolve_path(b"/", b"tmp/../../etc/passwd", &mut out).expect("resolve");
+        assert_eq!(&out[..len], b"/etc/passwd");
+    }
+
+    #[test]
     fn normalize_uses_path_len_not_padded_storage() {
         let mut padded = [0u8; LINUX_PATH_MAX];
         padded[..7].copy_from_slice(b"/bin/ls");

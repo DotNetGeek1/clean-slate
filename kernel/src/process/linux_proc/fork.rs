@@ -202,7 +202,6 @@ pub(crate) fn linux_fork(
         return Err(EAGAIN);
     }
     cleanup.proc_registered = true;
-
     let runtime_state = linux_mem::clone_for_fork(parent_pid, parent_gen, child_pid, child_gen)
         .and_then(|()| linux_signal::clone_for_fork(parent_pid, parent_gen, child_pid, child_gen));
     if let Err(errno) = runtime_state {
