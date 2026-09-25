@@ -204,6 +204,14 @@ Ordered QEMU markers for `cargo xtask test-m7-net-service`:
 
 Run locally: `cargo xtask test-m7-net-service` (aliases `m7-net-service`, `m7.3`) or `./scripts/run-tests.ps1 test-m7-net-service`.
 
+### Blocking waits and virtio RX harvest (#167)
+
+M7 clients block on per-request wait keys (`0x54 << 56 | request_id`) via the #145 substrate; poll retries use `BlockedResume::RestartSyscall`. The net service blocks on `NET_SUBOP_WAIT_WORK` (key `0x55 << 56`) when the bridge queue is empty. Active request handling pulls ingress via non-blocking `RAW_RECEIVE` (one harvest attempt per call). `NET_SUBOP_WAIT_RX` (key `0x55 << 56 | 1`) blocks until the kernel pending RX ring is non-empty; it returns immediately if bridge work is already queued (checks `net_service_has_work()` with interrupts masked). Readiness is checked with interrupts masked immediately before registering a waiter; early wakers record pending wakes per `docs/M9_BLOCK_WAKE.md`. Request completion always wakes `0x54 | request_id` even if the optional register slot table is full.
+
+**Interim virtio RX (no IOAPIC/MSI yet):** the LAPIC timer hook `timer_poll_net_virtio_rx` harvests RX completions into a bounded kernel pending ring. Each tick performs a single used-ring index compare (no frame copy) and returns immediately when idle; when the used index advanced, it drains at most four completions per tick. Syscall paths avoid large stack frames in the timer ISR; completed frames live in the bridge pending ring until `RAW_RECEIVE` copies one into userspace. **Follow-up:** replace timer harvest with virtio-net MSI/IOAPIC RX interrupts once the platform exposes device IRQ delivery (see issue text in #167 PR notes).
+
+Serial diagnostics on service idle block: `[NET ] idle block=work|rx …` plus existing `[M9.E] blocked tid=… key=…`.
+
 ## M7.4a L2/L3 foundation
 
 Issue #84 adds bounded parsers and a host-testable [`L3Stack`](../network/src/stack.rs) in `clean-slate-network` (no VirtIO types leak upward).
