@@ -8,7 +8,9 @@ use crate::process::linux_fd::{
     self, apply_linux_fl_to_status, ensure_open_fd, open_description::DescriptorKind,
     open_status_to_linux_fl, projection_for, LinuxFdProjection,
 };
-use clean_slate_linux_abi::{LinuxSyscallRequest, LinuxSyscallResult, EBADF, EFAULT, EINVAL};
+use clean_slate_linux_abi::{
+    LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EBADF, EFAULT, EINVAL,
+};
 
 /// Matches frozen pipe `read(0, …, 1024)` traces.
 pub(crate) const LINUX_READ_SCRATCH_BYTES: usize = 1024;
