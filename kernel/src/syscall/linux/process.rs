@@ -190,6 +190,14 @@ mod enabled {
         ) {
             switch_after_exit(Some(next_frame));
         }
+        #[cfg(feature = "m9-userspace-self-test")]
+        if let Some(next_frame) = crate::selftest::m9_userspace::after_linux_exit_group(
+            pid,
+            &teardown,
+            allocator,
+        ) {
+            switch_after_exit(Some(next_frame));
+        }
         switch_after_exit(teardown.next_stack_pointer)
     }
 

@@ -137,7 +137,9 @@ fn resolve_executable_link_and_errors() {
     let img = image();
     let busybox = resolve_executable_bytes(&mut table, &img, b"/bin/sh").expect("sh link");
     let direct = resolve_executable_bytes(&mut table, &img, b"/bin/busybox").expect("busybox");
+    let ls = resolve_executable_bytes(&mut table, &img, b"/bin/ls").expect("ls link");
     assert_eq!(busybox.as_ptr(), direct.as_ptr());
+    assert_eq!(ls.as_ptr(), direct.as_ptr());
     assert_eq!(
         resolve_executable_bytes(&mut table, &img, b"/no/such/file").unwrap_err(),
         clean_slate_linux_abi::ENOENT

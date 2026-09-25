@@ -381,7 +381,16 @@ fn run_inner() -> Result<(), &'static str> {
         start_timer_self_test_task()
     }
 
-    #[cfg(feature = "m9-linux-socket-self-test")]
+    #[cfg(feature = "m9-userspace-self-test")]
+    {
+        use crate::selftest::m9_userspace::start_m9_userspace_self_test;
+        start_m9_userspace_self_test(allocator)
+    }
+
+    #[cfg(all(
+        not(feature = "m9-userspace-self-test"),
+        feature = "m9-linux-socket-self-test"
+    ))]
     {
         use crate::selftest::m9_linux_socket::start_m9_linux_socket_self_test;
         start_m9_linux_socket_self_test(allocator)

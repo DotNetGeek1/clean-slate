@@ -195,7 +195,10 @@ pub(crate) fn on_holder_exit_acked(holder_pid: u64, sessions: u64, pending: u64)
     }));
 }
 
-#[cfg(feature = "m9-linux-socket-self-test")]
+#[cfg(any(
+    feature = "m9-linux-socket-self-test",
+    feature = "m9-userspace-self-test"
+))]
 pub(crate) fn init_minimal_state_for_m9_socket(lifecycle_capability: u64) {
     set_state(Some(M7NetSelfTestState {
         lifecycle_capability,

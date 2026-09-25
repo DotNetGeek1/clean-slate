@@ -63,6 +63,20 @@ pub(crate) fn grant_linux_tmp_object_capabilities(pid: u64) -> Result<(), &'stat
     Ok(())
 }
 
+/// Bootstrap a writable `/tmp` file before any Linux process runs (self-test / init).
+pub(crate) fn bootstrap_tmp_file_bytes(path: &[u8], data: &[u8]) -> Result<(), LinuxErrno> {
+    if data.len() > OBJECT_MAX_PAYLOAD_BYTES {
+        return Err(clean_slate_linux_abi::EFBIG);
+    }
+    let object_id = tmp_file_create(path)?;
+    let state = slot_for_object_mut(object_id).ok_or(clean_slate_linux_abi::ENOENT)?;
+    state.len = data.len();
+    if let Some(index) = slot_index_for_object(object_id) {
+        store_mut().scratch[index][..data.len()].copy_from_slice(data);
+    }
+    Ok(())
+}
+
 pub(crate) fn tmp_file_create(path: &[u8]) -> Result<u64, LinuxErrno> {
     let store = store_mut();
     for index in 0..LINUX_TMP_MAX_FILES {

@@ -1044,7 +1044,8 @@ fn launch_storage_userspace_service(
                 #[cfg(any(
                     feature = "m6-object-self-test",
                     feature = "m6-capabilities-self-test",
-                    feature = "m9-linux-fs-self-test"
+                    feature = "m9-linux-fs-self-test",
+                    feature = "m9-userspace-self-test"
                 ))]
                 {
                     let mut bootstrap = {
@@ -1054,15 +1055,24 @@ fn launch_storage_userspace_service(
                         }
                         #[cfg(all(
                             feature = "m9-linux-fs-self-test",
-                            not(feature = "m6-capabilities-self-test")
+                            not(feature = "m6-capabilities-self-test"),
+                            not(feature = "m9-userspace-self-test")
                         ))]
                         {
                             crate::selftest::m9_linux_fs::storage_service_bootstrap(service)?
                         }
                         #[cfg(all(
+                            feature = "m9-userspace-self-test",
+                            not(feature = "m6-capabilities-self-test")
+                        ))]
+                        {
+                            crate::selftest::m9_userspace::storage_service_bootstrap(service)?
+                        }
+                        #[cfg(all(
                             feature = "m6-object-self-test",
                             not(feature = "m6-capabilities-self-test"),
-                            not(feature = "m9-linux-fs-self-test")
+                            not(feature = "m9-linux-fs-self-test"),
+                            not(feature = "m9-userspace-self-test")
                         ))]
                         {
                             crate::selftest::m6_object::storage_service_bootstrap(service)?
@@ -1081,7 +1091,8 @@ fn launch_storage_userspace_service(
                 #[cfg(not(any(
                     feature = "m6-object-self-test",
                     feature = "m6-capabilities-self-test",
-                    feature = "m9-linux-fs-self-test"
+                    feature = "m9-linux-fs-self-test",
+                    feature = "m9-userspace-self-test"
                 )))]
                 {
                     crate::selftest::m5_storage::storage_service_bootstrap(service)?

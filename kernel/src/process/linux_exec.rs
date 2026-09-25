@@ -345,7 +345,8 @@ pub(crate) fn prepare_linux_image(
 /// still runs on the exiting thread's kernel stack.
 #[cfg(any(
     feature = "m9-linux-proc-self-test",
-    feature = "m9-linux-runtime-self-test"
+    feature = "m9-linux-runtime-self-test",
+    feature = "m9-userspace-self-test"
 ))]
 pub(crate) fn pick_scheduler_slot_for_relaunch() -> Result<(usize, u64), &'static str> {
     use crate::arch::x86_64::context_switch::task_stack_top;

@@ -147,6 +147,7 @@ pub(crate) const LINUX_M8_LOAD_POLICY: LoadPlanPolicy = LoadPlanPolicy {
     feature = "m9-linux-proc-self-test",
     feature = "m9-linux-fs-self-test",
     feature = "m9-linux-runtime-self-test",
+    feature = "m9-userspace-self-test",
     test
 ))]
 pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
