@@ -21,9 +21,11 @@ use clean_slate_service_fixtures::{
     NET_SUBOP_WAIT_WORK,
 };
 
+use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::network::{authorize_network_op, authorize_network_op_quiet, NetworkOp};
 use crate::capability::with_capability_space;
+use crate::diagnostics::log::kernel_log_fmt;
 use crate::interrupt::timer::kernel_ticks;
 use crate::mm::user_mapping::validate_user_pointer_range;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
@@ -84,6 +86,26 @@ fn denial_status(reason: DenialReason) -> u64 {
             SYSCALL_EACCES
         }
     }
+}
+
+/// Check `ready` with interrupts masked, then block on `key` if still not ready (#145).
+fn block_net_idle(
+    frame: &mut SyscallContext,
+    key: WaitKey,
+    ready: fn() -> bool,
+    retry: fn(&mut SyscallContext),
+    idle_label: &'static str,
+) {
+    if without_interrupts(ready) {
+        frame.rax = 0;
+        return;
+    }
+    let (pending, holder) = net_bridge_mut().net_service_work_counts();
+    let rx_pending = net_bridge_mut().has_virtio_rx_pending();
+    kernel_log_fmt(format_args!(
+        "[NET ] idle block={idle_label} pending={pending} holder={holder} rx_pending={rx_pending}\n"
+    ));
+    block_net_syscall_restart(frame, key, 0, retry);
 }
 
 fn block_net_syscall_restart(
@@ -622,6 +644,14 @@ fn handle_ack_holder_exit(frame: &mut SyscallContext) {
     }
 }
 
+fn net_rx_idle_ready() -> bool {
+    net_bridge_mut().has_virtio_rx_pending()
+}
+
+fn net_work_idle_ready() -> bool {
+    net_bridge_mut().net_service_has_work()
+}
+
 fn handle_wait_rx(frame: &mut SyscallContext) {
     let holder = match current_holder() {
         Ok(holder) => holder,
@@ -638,13 +668,18 @@ fn handle_wait_rx(frame: &mut SyscallContext) {
         frame.rax = denial_status(reason);
         return;
     }
-    let bridge = net_bridge_mut();
-    bridge.poll_virtio_rx_pending();
-    if bridge.has_virtio_rx_pending() {
+    if without_interrupts(net_work_idle_ready) {
         frame.rax = 0;
         return;
     }
-    block_net_syscall_restart(frame, net_service_rx_wait_key(), 0, handle_wait_rx);
+    let _ = net_bridge_mut().harvest_virtio_rx(1);
+    block_net_idle(
+        frame,
+        net_service_rx_wait_key(),
+        net_rx_idle_ready,
+        handle_wait_rx,
+        "rx",
+    );
 }
 
 fn handle_wait_work(frame: &mut SyscallContext) {
@@ -663,11 +698,13 @@ fn handle_wait_work(frame: &mut SyscallContext) {
         frame.rax = denial_status(reason);
         return;
     }
-    if net_bridge_mut().net_service_has_work() {
-        frame.rax = 0;
-        return;
-    }
-    block_net_syscall_restart(frame, net_service_work_wait_key(), 0, handle_wait_work);
+    block_net_idle(
+        frame,
+        net_service_work_wait_key(),
+        net_work_idle_ready,
+        handle_wait_work,
+        "work",
+    );
 }
 
 fn handle_monotonic_ticks(frame: &mut SyscallContext) {

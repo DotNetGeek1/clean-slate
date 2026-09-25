@@ -30,17 +30,9 @@ pub(crate) fn wake_net_service_rx() {
 static REQUEST_WAKE_SLOT: GlobalCell<[Option<(u64, WaitKey)>; 16]> = GlobalCell::new([None; 16]);
 
 pub(crate) fn notify_net_request_complete(request_id: u64) -> usize {
-    let mut woken = 0usize;
-    let wakes = unsafe { &mut *REQUEST_WAKE_SLOT.get() };
-    for entry in wakes.iter_mut() {
-        if entry.map(|(id, _)| id) == Some(request_id) {
-            if let Some((_, key)) = *entry {
-                woken = wake_all(key);
-            }
-            *entry = None;
-        }
-    }
-    woken
+    clear_net_request_wake(request_id);
+    // Key is deterministic from request_id; do not depend on a prior register slot (#167).
+    wake_all(net_bridge_request_wait_key(request_id))
 }
 
 pub(crate) fn register_net_request_wake(request_id: u64, key: WaitKey) {

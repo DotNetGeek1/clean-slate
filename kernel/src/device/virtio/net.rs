@@ -320,6 +320,11 @@ impl QueueState {
         }
     }
 
+    fn has_used_completion(&self) -> bool {
+        let used_idx = unsafe { read_volatile(self.used_idx_ptr()) };
+        used_idx != self.last_used_idx
+    }
+
     fn poll_completion(&mut self) -> Option<VirtqUsedElem> {
         let used_idx = unsafe { read_volatile(self.used_idx_ptr()) };
         if used_idx == self.last_used_idx {
@@ -689,6 +694,10 @@ impl VirtioNetDevice {
             }
             Err(error) => Err(error),
         }
+    }
+
+    pub(crate) fn rx_completion_available(&self) -> bool {
+        self.rx_queue.has_used_completion()
     }
 }
 
