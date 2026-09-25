@@ -515,6 +515,10 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
         .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 1, true)
         .unwrap_or_else(|message| fatal_kernel_error(message));
+    #[cfg(feature = "m9-userspace-self-test")]
+    if crate::selftest::m9_userspace::take_checklist_fault_fatal() {
+        fatal_kernel_error("m9 userspace checklist command faulted");
+    }
     #[cfg(feature = "m4-recovery-self-test")]
     observe_recovery_fault_after_containment(pid, maybe_fault_event)
         .unwrap_or_else(|message| fatal_kernel_error(message));

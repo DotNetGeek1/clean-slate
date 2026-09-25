@@ -50,7 +50,7 @@ use clean_slate_service_fixtures::{
 use clean_slate_service_lifecycle::{
     ControlRequest, ControlRequestKind, InstanceGeneration, LifecycleMessage, ServiceId,
 };
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 const PASS_MARKER: &str = "[M9.8] PASS";
 const BUSYBOX_SHA256_PREFIX: &str = "7ba56ace";
@@ -58,6 +58,8 @@ const SUPERVISOR_PID: u64 = 107;
 /// Dedicated RR slot for the native spinner (storage=0, network=1, Linux=2+).
 const NATIVE_SLOT: usize = 5;
 const USERSPACE_CYCLES: u32 = 9;
+/// BusyBox DNS/TCP paths need more than the 2-page M8 default (#107 / nslookup strace).
+const M9_BUSYBOX_STACK_PAGES: u64 = 64;
 
 const SCRIPT_SH_BODY: &[u8] = b"pwd\nls /\ncat /etc/hostname\nmkdir -p /tmp/demo2\nprintf script > /tmp/demo2/file\ncat /tmp/demo2/file\necho hi | grep hi\nuname\nsleep 0\nexit 0\n";
 
@@ -152,6 +154,7 @@ enum Phase {
 
 static mut M9_PHASE: Phase = Phase::Commands(0);
 static M9_LINUX_PID: AtomicU64 = AtomicU64::new(0);
+static M9_CHECKLIST_FAULT: AtomicBool = AtomicBool::new(false);
 static M9_CYCLE: AtomicU32 = AtomicU32::new(0);
 static M9_STDOUT_LEN: AtomicUsize = AtomicUsize::new(0);
 const M9_STDOUT_CAP: usize = 4096;
@@ -240,7 +243,7 @@ fn launch_busybox(allocator: &mut PageAllocator, cmd: &ShellCmd) {
             argv: &argv,
             envp: &envp,
             exec_filename: b"/bin/sh",
-            stack_pages: LINUX_STACK_PAGES,
+            stack_pages: M9_BUSYBOX_STACK_PAGES,
             policy: &LINUX_CONVENTIONAL_LOAD_POLICY,
         };
         launch_busybox_inner(allocator, cmd, &spec);
@@ -251,7 +254,7 @@ fn launch_busybox(allocator: &mut PageAllocator, cmd: &ShellCmd) {
             argv: &argv,
             envp: &envp,
             exec_filename: b"/bin/sh",
-            stack_pages: LINUX_STACK_PAGES,
+            stack_pages: M9_BUSYBOX_STACK_PAGES,
             policy: &LINUX_CONVENTIONAL_LOAD_POLICY,
         };
         launch_busybox_inner(allocator, cmd, &spec);
@@ -455,7 +458,7 @@ fn dispatch_phase(allocator: &mut PageAllocator) {
     }
 }
 
-/// Fail the acceptance immediately when the active checklist shell faults.
+/// Record a checklist-shell fault; [`take_checklist_fault_fatal`] runs after teardown.
 pub(crate) fn on_checklist_command_fault(pid: u64, context: &InterruptContext) {
     if pid != M9_LINUX_PID.load(Ordering::Relaxed) {
         return;
@@ -468,7 +471,11 @@ pub(crate) fn on_checklist_command_fault(pid: u64, context: &InterruptContext) {
         "[M9  ] checklist fault cmd={} vector={} rip={:#018x}\n",
         cmd.name, context.vector, context.rip
     ));
-    fatal_kernel_error("m9 userspace checklist command faulted");
+    M9_CHECKLIST_FAULT.store(true, Ordering::Relaxed);
+}
+
+pub(crate) fn take_checklist_fault_fatal() -> bool {
+    M9_CHECKLIST_FAULT.swap(false, Ordering::Relaxed)
 }
 
 pub(crate) fn after_linux_exit_group(
