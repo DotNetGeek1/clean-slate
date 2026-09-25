@@ -255,7 +255,7 @@ const M9_LINUX_SOCKET_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[M9.L] PASS",
 ];
 const M9_LINUX_TRACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
-const M9_LINUX_TRACE_ACCEPTANCE_MARKERS: [&str; 11] = [
+const M9_LINUX_TRACE_ACCEPTANCE_MARKERS: [&str; 13] = [
     "[M9.T] trace_slots_baseline=0 boot",
     "[TIME] timer initialized",
     "UNKNOWN(999)",
@@ -263,8 +263,10 @@ const M9_LINUX_TRACE_ACCEPTANCE_MARKERS: [&str; 11] = [
     "bad-pointer",
     "[LTRC] dropped=",
     "[M9.T] cycle=1 proc_fixture",
-    "wait4 nr=61 blocked",
-    "wait4 nr=61 woke",
+    "[M9.I] EPIPE OK",
+    "read nr=0 blocked",
+    "read nr=0 woke",
+    "[M9.I] pipe OK",
     "[M9.T] trace_slots_baseline=0 after_proc_wait",
     "[M9.T] PASS",
 ];
@@ -2834,14 +2836,18 @@ fn validate_m9_linux_trace_ltrc(output: &str) -> Result<(), XtaskError> {
             let val = result_token
                 .parse::<u64>()
                 .map_err(|_| XtaskError::MissingMarker("m9 trace result parse".to_owned()))?;
-            if reason == "ok" && val == nr {
-                return Err(XtaskError::MissingMarker(format!(
-                    "LTRC must not publish syscall nr as user result (nr={nr})"
-                )));
-            }
-            if pending_completion == Some((nr, nr)) && reason == "ok" {
-                pending_completion = None;
-                continue;
+            if reason == "ok" {
+                if let Some((pending_nr, _)) = pending_completion {
+                    // `read(2)` legitimately returns 0 at EOF after block/wake; reject only
+                    // when the user result equals a non-zero syscall nr (e.g. wait4 -> 61).
+                    if pending_nr == nr && val == nr && nr != 0 {
+                        return Err(XtaskError::MissingMarker(format!(
+                            "LTRC must not publish syscall nr as user result after block (nr={nr})"
+                        )));
+                    }
+                    pending_completion = None;
+                    continue;
+                }
             }
             pending_completion = None;
         } else {

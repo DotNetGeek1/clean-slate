@@ -288,13 +288,28 @@ impl LinuxTraceState {
         self.drain_serial();
     }
 
+    fn wait_event_bypasses_budget(kind: TraceKind) -> bool {
+        #[cfg(feature = "m9-linux-trace-self-test")]
+        {
+            if let TraceKind::Wait { reason, .. } = kind {
+                return matches!(
+                    reason,
+                    LinuxTraceReason::Blocked | LinuxTraceReason::Woke | LinuxTraceReason::Timeout
+                );
+            }
+        }
+        let _ = kind;
+        false
+    }
+
     fn drain_serial(&mut self) {
         let now = kernel_ticks();
         while let Some(line) = self.ring.pop_front() {
             let index = self.locate_process(line.identity);
             let process = &mut self.processes[index];
-            let global_ok = self.global_bucket.try_take(now);
-            let local_ok = process.bucket.try_take(now);
+            let bypass = Self::wait_event_bypasses_budget(line.kind);
+            let global_ok = bypass || self.global_bucket.try_take(now);
+            let local_ok = bypass || process.bucket.try_take(now);
             if global_ok && local_ok {
                 if process.pending_drops > 0 {
                     emit_drop_summary(line.identity.pid, process.pending_drops);
@@ -518,6 +533,14 @@ pub(crate) fn record_wait_event(
 ) {
     let identity = TraceIdentity { pid, generation };
     let kind = TraceKind::Wait { nr, reason };
+    #[cfg(feature = "m9-linux-trace-self-test")]
+    if matches!(
+        reason,
+        LinuxTraceReason::Blocked | LinuxTraceReason::Woke | LinuxTraceReason::Timeout
+    ) {
+        emit_line(&PendingLine { identity, kind });
+        return;
+    }
     state_mut().enqueue(identity, kind);
 }
 

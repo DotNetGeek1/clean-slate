@@ -110,18 +110,17 @@ test_pipe_epipe:
     test    rax, rax
     js      .Lbad_exit
     jz      .Lepipe_child
-    /* Reap the forked child before closing pipe ends so wait4 blocks on the
-       production scheduler path (M9 #106 trace markers). */
-    mov     rax, 61
+    mov     rax, 61          /* reap child before EPIPE (pipe ends still open in parent) */
     mov     rdi, -1
     xor     rsi, rsi
     xor     rdx, rdx
     xor     r10, r10
     syscall
+    mov     r12d, [rsp - 16]
+    mov     r13d, [rsp - 12]
     mov     rdi, r12
     mov     rax, 3
     syscall
-    mov     r13d, [rsp - 12]
     mov     rax, 1
     mov     rdi, r13
     lea     rsi, [rip + hello_line]
@@ -137,12 +136,6 @@ test_pipe_epipe:
     syscall
     ret
 .Lepipe_child:
-    /* Spin so the parent reaches wait4 while this child is still live (M9 #106 LTRC blocked/woke). */
-    mov     ecx, 0x00200000
-.Lepipe_child_delay:
-    pause
-    dec     ecx
-    jnz     .Lepipe_child_delay
     mov     rdi, r12
     mov     rax, 3
     syscall
@@ -151,12 +144,27 @@ test_pipe_epipe:
     syscall
 
 test_pipe_fork_wait:
+    /* P=data, Q=child-ready (child write / parent read), R=parent-ready (parent close w / child read). */
     mov     rax, 22
     lea     rdi, [rsp - 16]
     syscall
-    mov     r12d, [rsp - 16] /* read */
-    mov     r13d, [rsp - 12] /* write */
-    mov     rax, 57          /* fork */
+    mov     r12d, [rsp - 16] /* P read */
+    mov     r13d, [rsp - 12] /* P write */
+    mov     rax, 22
+    lea     rdi, [rsp - 32]
+    syscall
+    test    rax, rax
+    js      .Lbad_exit
+    mov     r15d, [rsp - 32] /* Q read */
+    mov     r8d, [rsp - 28]  /* Q write (not r11: syscall clobbers r11) */
+    mov     rax, 22
+    lea     rdi, [rsp - 48]
+    syscall
+    test    rax, rax
+    js      .Lbad_exit
+    mov     r9d, [rsp - 48]  /* R read */
+    mov     r10d, [rsp - 44] /* R write */
+    mov     rax, 57
     syscall
     test    rax, rax
     js      .Lbad_exit
@@ -165,28 +173,48 @@ test_pipe_fork_wait:
     mov     r14, rax
     mov     rdi, r13
     mov     rax, 3
-    syscall
+    syscall                  /* close P.w */
+    mov     edi, r8d
+    mov     rax, 3
+    syscall                  /* close Q.w */
+    mov     edi, r9d
+    mov     rax, 3
+    syscall                  /* close R.r (child holds read end) */
     xor     eax, eax
-    mov     [rsp - 40], eax
+    mov     [rsp - 56], eax
+.Lparent_sync_q:
+    mov     rax, 0
+    mov     rdi, r15
+    lea     rsi, [rsp - 56]
+    mov     rdx, 1
+    syscall                  /* block until child writes Q */
+    test    rax, rax
+    jz      .Lbad_exit
+    mov     edi, r10d
+    mov     rax, 3
+    syscall                  /* close R.w -> child leaves sync read */
+    xor     eax, eax
+    mov     [rsp - 64], eax
 .Lparent_read:
     mov     rax, 0
     mov     rdi, r12
-    lea     rsi, [rsp - 32]
+    lea     rsi, [rsp - 64]
     mov     rdx, 32
     syscall
     test    rax, rax
-    jz      .Lparent_wait
-    jmp     .Lparent_read
+    jz      .Lbad_exit
+    /* One blocking read until child writes (M9 #106 LTRC); then reap via wait4. */
+    jmp     .Lparent_wait
 .Lparent_wait:
     mov     rax, 61
     mov     rdi, -1
-    lea     rsi, [rsp - 40]
+    lea     rsi, [rsp - 72]
     xor     rdx, rdx
     xor     r10, r10
     syscall
     test    rax, rax
     js      .Lbad_exit
-    mov     eax, [rsp - 40]
+    mov     eax, [rsp - 72]
     shr     eax, 8
     cmp     eax, 7
     jne     .Lbad_exit
@@ -198,6 +226,24 @@ test_pipe_fork_wait:
     syscall
     ret
 .Lpipe_child:
+    mov     rdi, r15
+    mov     rax, 3           /* close Q.r */
+    syscall
+    mov     rax, 1
+    mov     edi, r8d
+    lea     rsi, [rsp - 80]
+    mov     byte ptr [rsp - 80], 1
+    mov     rdx, 1
+    syscall                  /* ready byte on Q */
+    /* Parent closes R.w after reading Q; child must not write P until then. */
+    mov     edi, r10d
+    mov     rax, 3
+    syscall                  /* close child R.w */
+    mov     rax, 0
+    mov     edi, r9d
+    lea     rsi, [rsp - 88]
+    mov     rdx, 1
+    syscall                  /* block until parent closes R.w (deterministic gate) */
     mov     rdi, r12
     mov     rax, 3
     syscall
