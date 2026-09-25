@@ -7,7 +7,6 @@ use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::interrupt::timer::{initialize_timer, kernel_ticks};
-use crate::ipc::endpoint_table_mut;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::process::domain::DomainTeardownResult;
@@ -23,8 +22,12 @@ use crate::process::linux_proc::{
     table::{proc_table_invariant_violations, table},
 };
 use crate::process::linux_fs::object_backend::bootstrap_tmp_file_bytes;
-use crate::process::linux_image::LINUX_CONVENTIONAL_LOAD_POLICY;
+use crate::process::linux_image::{
+    LINUX_CONVENTIONAL_EXEC_STACK_PAGES, LINUX_CONVENTIONAL_LOAD_POLICY,
+};
+use crate::process::linux_mem;
 use crate::process::linux_rootfs;
+use crate::process::live_instance_generation;
 use crate::sync::global_cell::GlobalCell;
 use crate::process::personality::execution_personality_for_pid;
 use crate::process::process_registry_mut;
@@ -58,8 +61,7 @@ const SUPERVISOR_PID: u64 = 107;
 /// Dedicated RR slot for the native spinner (storage=0, network=1, Linux=2+).
 const NATIVE_SLOT: usize = 5;
 const USERSPACE_CYCLES: u32 = 9;
-/// BusyBox DNS/TCP paths need more than the 2-page M8 default (#107 / nslookup strace).
-const M9_BUSYBOX_STACK_PAGES: u64 = 8;
+const M9_BUSYBOX_STACK_PAGES: u64 = LINUX_CONVENTIONAL_EXEC_STACK_PAGES;
 
 const SCRIPT_SH_BODY: &[u8] = b"pwd\nls /\ncat /etc/hostname\nmkdir -p /tmp/demo2\nprintf script > /tmp/demo2/file\ncat /tmp/demo2/file\necho hi | grep hi\nuname\nsleep 0\nexit 0\n";
 
@@ -231,12 +233,14 @@ fn launch_busybox_inner(
     install_linux_stdio(launched.pid, launched.instance_generation);
     M9_LINUX_PID.store(launched.pid, Ordering::Relaxed);
     kernel_log_fmt(format_args!(
-        "[M9  ] shell started pid={} slot={} kstack=0x{:x} cmd={}\n",
+        "[M9  ] shell started pid={} slot={} kstack=0x{:x} cmd={} stack_pages={}\n",
         launched.pid,
         slot,
         stack_top,
-        cmd.name
+        cmd.name,
+        M9_BUSYBOX_STACK_PAGES
     ));
+    linux_mem::log_m9_exec_layout(launched.pid, launched.instance_generation, 0);
 }
 
 fn launch_busybox(allocator: &mut PageAllocator, cmd: &ShellCmd) {
@@ -474,11 +478,21 @@ pub(crate) fn on_checklist_command_fault(pid: u64, context: &InterruptContext) {
         return;
     };
     let cmd = &SHELL_CMDS[index];
+    let cr2 = if context.vector as usize == 14 {
+        x86_64::registers::control::Cr2::read()
+            .map(|a| a.as_u64())
+            .unwrap_or(0)
+    } else {
+        0
+    };
     kernel_log_fmt(format_args!(
-        "[M9  ] checklist fault cmd={} vector={} rip={:#018x}\n",
+        "[M9  ] checklist fault cmd={} vector={} rip={:#018x} cr2={cr2:#018x} insn=mov %rdx,(%rsp) after sub $0x2838,%rsp\n",
         cmd.name, context.vector, context.rip
     ));
-    M9_CHECKLIST_FAULT.store(true, Ordering::Relaxed);
+    if let Some(gen) = live_instance_generation(pid) {
+        linux_mem::log_m9_exec_layout(pid, gen, cr2);
+    }
+    M9_CHECKLIST_FAULT.store(true, Ordering::SeqCst);
 }
 
 pub(crate) fn checklist_fault_pending() -> bool {

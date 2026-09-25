@@ -33,7 +33,9 @@ mod enabled {
         LINUX_EXEC_MAX_ARGS, LINUX_EXEC_MAX_ARG_BYTES, LINUX_EXEC_MAX_ENVS,
     };
     use crate::process::linux_fd;
-    use crate::process::linux_image::{LINUX_CONVENTIONAL_LOAD_POLICY, LINUX_STACK_PAGES};
+    use crate::process::linux_image::{
+        LINUX_CONVENTIONAL_EXEC_STACK_PAGES, LINUX_CONVENTIONAL_LOAD_POLICY,
+    };
     use crate::process::linux_proc::exec_resolve::resolve_executable;
     use crate::process::linux_proc::{
         fork::linux_fork,
@@ -276,7 +278,7 @@ mod enabled {
             argv: &argv_storage[..scratch.argv_count],
             envp: &envp_storage[..scratch.envp_count],
             exec_filename: path,
-            stack_pages: LINUX_STACK_PAGES,
+            stack_pages: LINUX_CONVENTIONAL_EXEC_STACK_PAGES,
             policy: &LINUX_CONVENTIONAL_LOAD_POLICY,
         };
         let allocator = service_lifecycle_syscall_allocator_mut()

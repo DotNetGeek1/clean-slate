@@ -86,6 +86,10 @@ const PAGE_DIRECTORY_SPAN: u64 = PAGE_TABLE_SPAN * 512;
 /// headroom for a data page. M9 may grow this once the mapping bound is raised
 /// for Linux images; do not bump the bound just to absorb a bigger stack.
 pub(crate) const LINUX_STACK_PAGES: u64 = 2;
+/// Mapped stack pages for conventional low-VA `execve` (BusyBox nslookup uses
+/// ~0x2838-byte frames — see `fixtures/busybox/frozen/traces/nslookup-fixture.strace`).
+pub(crate) const LINUX_CONVENTIONAL_EXEC_STACK_PAGES: u64 = 8;
+const _: () = assert!(LINUX_CONVENTIONAL_EXEC_STACK_PAGES <= 8);
 /// Exclusive top of the mapped stack. The last page of the slot is deliberately
 /// left unmapped so the stack never abuts the slot boundary.
 pub(crate) const LINUX_STACK_TOP: u64 = LINUX_USER_WINDOW_END - PAGE_SIZE;

@@ -59,6 +59,9 @@ pub(crate) struct LinuxMemState {
     mmap_window_lo: u64,
     /// Exclusive high bound (stack guard / reservation start from exec layout).
     mmap_window_hi: u64,
+    stack_top: u64,
+    stack_base: u64,
+    stack_pages: u64,
     mmap_regions: [MmapRegion; LINUX_MMAP_MAX_REGIONS],
     mmap_region_count: usize,
     mmap_pages: u64,
@@ -74,6 +77,9 @@ impl LinuxMemState {
         brk_end: 0,
         mmap_window_lo: LINUX_MMAP_WINDOW_BASE,
         mmap_window_hi: LINUX_MMAP_WINDOW_TOP,
+        stack_top: 0,
+        stack_base: 0,
+        stack_pages: 0,
         mmap_regions: [MmapRegion::EMPTY; LINUX_MMAP_MAX_REGIONS],
         mmap_region_count: 0,
         mmap_pages: 0,
@@ -190,7 +196,60 @@ pub(crate) fn init_for_image(
     slot.state.brk_end = brk_initial;
     slot.state.mmap_window_lo = layout.window_base;
     slot.state.mmap_window_hi = layout.stack_reservation_start;
+    slot.state.stack_top = layout.stack_top;
+    slot.state.stack_base = layout.stack_base;
+    slot.state.stack_pages = layout.stack_pages;
     Ok(())
+}
+
+#[cfg(feature = "m9-userspace-self-test")]
+pub(crate) fn log_m9_exec_layout(pid: u64, generation: InstanceGeneration, cr2: u64) {
+    use crate::diagnostics::log::kernel_log_fmt;
+    let Some(index) = registry_mut().find(pid, generation) else {
+        kernel_log_fmt(format_args!(
+            "[M9  ] exec layout pid={pid} gen={} missing linux_mem slot cr2={cr2:#x}\n",
+            generation.0
+        ));
+        return;
+    };
+    let s = &registry_mut().slots[index].as_ref().expect("slot").state;
+    kernel_log_fmt(format_args!(
+        "[M9  ] exec layout pid={pid} stack_pages={} stack_top={:#x} stack_base={:#x} stack_lo={:#x} mmap_window=[{:#x},{:#x}) brk=[{:#x},{:#x}) cr2={cr2:#x}\n",
+        s.stack_pages,
+        s.stack_top,
+        s.stack_base,
+        s.stack_base,
+        s.mmap_window_lo,
+        s.mmap_window_hi,
+        s.brk_base,
+        s.brk_end,
+    ));
+    if cr2 != 0 && (cr2 < s.stack_base || cr2 >= s.stack_top) {
+        kernel_log_fmt(format_args!(
+            "[M9  ] cr2 outside mapped stack cr2={cr2:#x} mapped=[{:#x},{:#x})\n",
+            s.stack_base,
+            s.stack_top
+        ));
+    } else if cr2 != 0 && cr2 >= s.stack_base && cr2 < s.stack_top {
+        kernel_log_fmt(format_args!(
+            "[M9  ] cr2 inside mapped stack span (check guard below stack_base)\n"
+        ));
+    }
+}
+
+#[cfg(feature = "m9-userspace-self-test")]
+fn log_m9_mmap_enomem(
+    pid: u64,
+    reason: &'static str,
+    addr: u64,
+    len: u64,
+    prot: u64,
+    flags: u64,
+) {
+    use crate::diagnostics::log::kernel_log_fmt;
+    kernel_log_fmt(format_args!(
+        "[M9  ] mmap ENOMEM pid={pid} reason={reason} addr={addr:#x} len={len:#x} prot={prot:#x} flags={flags:#x}\n"
+    ));
 }
 
 pub(crate) fn reset_for_exec(
@@ -485,12 +544,16 @@ pub(crate) fn sys_mmap(
     }
     let page_count = len.checked_add(PAGE_SIZE - 1).ok_or(EINVAL)? / PAGE_SIZE;
     if page_count > LINUX_MMAP_MAX_PAGES {
+        #[cfg(feature = "m9-userspace-self-test")]
+        log_m9_mmap_enomem(pid, "single-map-page-cap", addr, len, prot, flags);
         return Err(ENOMEM);
     }
     let index = registry_mut().ensure(pid, generation)?;
     {
         let state = &registry_mut().slots[index].as_ref().expect("slot").state;
         if state.mmap_pages.checked_add(page_count).ok_or(ENOMEM)? > LINUX_MMAP_MAX_PAGES {
+            #[cfg(feature = "m9-userspace-self-test")]
+            log_m9_mmap_enomem(pid, "process-mmap-page-budget", addr, len, prot, flags);
             return Err(ENOMEM);
         }
     }
@@ -504,7 +567,15 @@ pub(crate) fn sys_mmap(
             }
             addr
         } else {
-            alloc_mmap_addr(state, page_count)?
+            match alloc_mmap_addr(state, page_count) {
+                Ok(candidate) => candidate,
+                Err(ENOMEM) => {
+                    #[cfg(feature = "m9-userspace-self-test")]
+                    log_m9_mmap_enomem(pid, "no-anonymous-slot", addr, len, prot, flags);
+                    return Err(ENOMEM);
+                }
+                Err(other) => return Err(other),
+            }
         };
         (map_addr, lo, hi)
     };
@@ -512,6 +583,15 @@ pub(crate) fn sys_mmap(
         .checked_add(page_count.checked_mul(PAGE_SIZE).ok_or(EINVAL)?)
         .ok_or(EINVAL)?;
     if map_addr < mmap_window_lo || map_end > mmap_window_hi {
+        #[cfg(feature = "m9-userspace-self-test")]
+        log_m9_mmap_enomem(
+            pid,
+            "outside-exec-mmap-window",
+            addr,
+            len,
+            prot,
+            flags,
+        );
         return Err(ENOMEM);
     }
     let allocator = syscall_page_allocator()?;
@@ -535,7 +615,11 @@ pub(crate) fn sys_mmap(
         Ok(())
     })?;
     let state = &mut registry_mut().slots[index].as_mut().expect("slot").state;
-    record_region(state, map_addr, map_end, page_count)?;
+    if let Err(ENOMEM) = record_region(state, map_addr, map_end, page_count) {
+        #[cfg(feature = "m9-userspace-self-test")]
+        log_m9_mmap_enomem(pid, "region-table-full", addr, len, prot, flags);
+        return Err(ENOMEM);
+    }
     Ok(map_addr)
 }
 
