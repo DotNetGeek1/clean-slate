@@ -6,7 +6,7 @@ use super::table::{table, table_mut, ProcId, LINUX_MAX_PROC_ENTRIES};
 use crate::arch::x86_64::context_switch::build_fork_child_userspace_frame;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
-use crate::capability::capability_space_mut;
+use crate::capability::inherit_capabilities_for_fork;
 use crate::capability::revoke_for_holder;
 use crate::mm::address_space::destroy_process_address_space;
 use crate::mm::fork_clone::{fork_child_address_space, LINUX_FORK_MAX_PAGES};
@@ -21,8 +21,7 @@ use crate::process::{
     ProcessState, ResourceDomain,
 };
 use crate::sched::{scheduler_mut, Thread, ThreadKind, ThreadState, TASK_COUNT};
-use clean_slate_capability::CapabilityHandle;
-use clean_slate_capability::{delegate, list_holder, HolderId, MAX_SLOTS};
+use clean_slate_capability::HolderId;
 use clean_slate_linux_abi::{EAGAIN, ENOMEM, ESRCH};
 use clean_slate_service_lifecycle::InstanceGeneration;
 use x86_64::VirtAddr;
@@ -38,7 +37,7 @@ struct ForkChildCleanup {
     child_gen: InstanceGeneration,
     registry_committed: bool,
     proc_registered: bool,
-    caps_delegated: bool,
+    caps_inherited: bool,
     fd_inherited: bool,
 }
 
@@ -164,7 +163,7 @@ pub(crate) fn linux_fork(
         child_gen,
         registry_committed: true,
         proc_registered: false,
-        caps_delegated: false,
+        caps_inherited: false,
         fd_inherited: false,
     };
 
@@ -176,13 +175,13 @@ pub(crate) fn linux_fork(
     }
     cleanup.fd_inherited = true;
 
-    if delegate_all_caps(parent_pid, child_pid).is_err() {
+    if inherit_capabilities_for_fork(HolderId(parent_pid), HolderId(child_pid)).is_err() {
         abort_fork_child(child_pid, &cleanup, allocator);
         #[cfg(feature = "m9-userspace-self-test")]
-        fork_diag("delegate-caps", child_pid);
+        fork_diag("inherit-caps", child_pid);
         return Err(EAGAIN);
     }
-    cleanup.caps_delegated = true;
+    cleanup.caps_inherited = true;
 
     if table_mut()
         .register(
@@ -226,7 +225,7 @@ fn abort_fork_child(
     if cleanup.fd_inherited {
         linux_fd::release_for_process(child_pid, cleanup.child_gen);
     }
-    if cleanup.caps_delegated {
+    if cleanup.caps_inherited {
         revoke_for_holder(HolderId(child_pid));
     }
     if cleanup.proc_registered {
@@ -289,39 +288,3 @@ fn fork_diag(reason: &str, child_pid: u64) {
     });
 }
 
-fn delegate_all_caps(parent_pid: u64, child_pid: u64) -> Result<(), ()> {
-    let parent = HolderId(parent_pid);
-    let child = HolderId(child_pid);
-    let mut cursor = 0usize;
-    let mut installed = [None; MAX_SLOTS];
-    let mut count = 0usize;
-    loop {
-        let table = unsafe { capability_space_mut() };
-        let Some((next_cursor, handle, record)) = list_holder(table, parent, cursor) else {
-            break;
-        };
-        cursor = next_cursor + 1;
-        if count >= MAX_SLOTS {
-            rollback_delegated(&installed[..count]);
-            return Err(());
-        }
-        match delegate(table, parent, handle, child, record.rights) {
-            Ok(child_handle) => {
-                installed[count] = Some(child_handle);
-                count += 1;
-            }
-            Err(_) => {
-                rollback_delegated(&installed[..count]);
-                return Err(());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn rollback_delegated(handles: &[Option<CapabilityHandle>]) {
-    let table = unsafe { capability_space_mut() };
-    for handle in handles.iter().flatten() {
-        let _ = table.revoke(*handle);
-    }
-}
