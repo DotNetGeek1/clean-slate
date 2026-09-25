@@ -253,6 +253,9 @@ impl NodeTable {
         let mut norm = [0u8; LINUX_PATH_MAX];
         let len = normalize_path(path, &mut norm)?;
         let norm = &norm[..len];
+        if norm == b"/" {
+            return Err(EEXIST);
+        }
         if !norm.starts_with(b"/tmp/") && norm != b"/tmp" {
             return Err(EROFS);
         }

@@ -148,13 +148,25 @@ pub(crate) fn handle_sys_mkdir(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
 ) -> LinuxSyscallResult {
-    let _ = ctx;
     let path_ptr = request.args[0];
     let _mode = request.args[1];
     let path = copy_path_from_user(path_ptr)?;
     let image = image();
-    table_mut().mkdir(path.as_bytes(), &image)?;
-    Ok(0)
+    match table_mut().mkdir(path.as_bytes(), &image) {
+        Ok(()) => Ok(0),
+        Err(errno) => {
+            #[cfg(feature = "m9-userspace-self-test")]
+            if errno == clean_slate_linux_abi::EROFS {
+                use crate::diagnostics::log::kernel_log_fmt;
+                kernel_log_fmt(format_args!(
+                    "[M9  ] mkdir EROFS pid={} path={:?}\n",
+                    ctx.pid,
+                    path.as_bytes()
+                ));
+            }
+            Err(errno)
+        }
+    }
 }
 
 pub(crate) fn handle_sys_getdents64(
