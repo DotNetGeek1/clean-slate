@@ -2,7 +2,8 @@
 
 use super::table::{LinuxSyscallContext, LinuxSyscallHandler};
 use clean_slate_linux_abi::{
-    LinuxSyscallRequest, LinuxSyscallResult, SYS_BIND, SYS_CONNECT, SYS_SENDTO, SYS_SOCKET,
+    LinuxSyscallRequest, LinuxSyscallResult, SYS_BIND, SYS_CONNECT, SYS_RECVMSG, SYS_SENDTO,
+    SYS_SOCKET,
 };
 
 pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
@@ -10,6 +11,7 @@ pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
         SYS_SOCKET => Some(handle_sys_socket),
         SYS_CONNECT => Some(handle_sys_connect),
         SYS_SENDTO => Some(handle_sys_sendto),
+        SYS_RECVMSG => Some(handle_sys_recvmsg),
         SYS_BIND => Some(handle_sys_bind),
         _ => None,
     }
@@ -41,4 +43,11 @@ fn handle_sys_bind(
     ctx: &mut LinuxSyscallContext<'_>,
 ) -> LinuxSyscallResult {
     crate::process::linux_socket::syscalls::sys_bind(request, ctx)
+}
+
+fn handle_sys_recvmsg(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+) -> LinuxSyscallResult {
+    crate::process::linux_socket::syscalls::sys_recvmsg(request, ctx)
 }

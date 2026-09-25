@@ -434,7 +434,24 @@ fn fd_readiness(
     if linux_fd::ensure_open_fd(ctx.pid, ctx.instance_generation, fd as u64).is_err() {
         return Ok(POLLNVAL);
     }
-    let readiness = console_readiness();
+    if (events & POLLIN) != 0 {
+        let _ = crate::process::linux_socket::refresh_readiness_for_fd(ctx, fd as u64);
+    }
+    let readiness = match linux_fd::open_description_kind(
+        ctx.pid,
+        ctx.instance_generation,
+        fd as u64,
+    ) {
+        Ok(crate::process::linux_fd::open_description::DescriptorKind::Socket(socket_ref)) => {
+            crate::process::linux_socket::readiness_for(crate::process::linux_socket::socket_ref_to_id(
+                socket_ref,
+            ))
+        }
+        Ok(crate::process::linux_fd::open_description::DescriptorKind::Console(_)) => {
+            console_readiness()
+        }
+        _ => Readiness::default(),
+    };
     let mut revents = 0i16;
     if (events & POLLIN) != 0 && readiness.readable {
         revents |= POLLIN;

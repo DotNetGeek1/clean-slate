@@ -76,6 +76,8 @@ pub(crate) struct LinuxSocket {
     tcp_rx_len: u16,
     tcp_eof: bool,
     inflight_request_id: Option<u64>,
+    /// Post-`sendto` receive arm so `poll(2)` can observe datagrams before `recvmsg`.
+    pending_rx_req: Option<u64>,
     owner_pid: u64,
     owner_generation: u32,
     generation: u32,
@@ -98,6 +100,7 @@ impl LinuxSocket {
             tcp_rx_len: 0,
             tcp_eof: false,
             inflight_request_id: None,
+            pending_rx_req: None,
             owner_pid: 0,
             owner_generation: 0,
             generation: 1,
@@ -492,6 +495,39 @@ pub(crate) mod syscalls {
             SocketKindLinux::Udp => udp::sendto(request, ctx),
         }
     }
+
+    pub(crate) fn sys_recvmsg(
+        request: &LinuxSyscallRequest,
+        ctx: &mut LinuxSyscallContext<'_>,
+    ) -> LinuxSyscallResult {
+        udp::recvmsg(request, ctx)
+    }
+}
+
+pub(crate) fn refresh_readiness_for_fd(
+    ctx: &mut crate::syscall::linux::table::LinuxSyscallContext<'_>,
+    fd: u64,
+) -> Result<(), clean_slate_linux_abi::LinuxErrno> {
+    use crate::process::linux_fd::open_description::DescriptorKind;
+    let open = crate::process::linux_fd::open_description_id_for_fd(
+        ctx.pid,
+        ctx.instance_generation,
+        fd,
+    )?;
+    let kind = crate::process::linux_fd::open_description_kind(
+        ctx.pid,
+        ctx.instance_generation,
+        fd,
+    )?;
+    if !matches!(kind, DescriptorKind::Socket(_)) {
+        return Ok(());
+    }
+    let socket_ref = crate::process::linux_fd::socket_ref_for_open(open)?;
+    let id = socket_ref_to_id(socket_ref);
+    if udp::try_complete_pending_rx(ctx, id)? {
+        crate::syscall::linux::poll::notify_readiness_changed(open);
+    }
+    Ok(())
 }
 
 pub(crate) fn read_socket(

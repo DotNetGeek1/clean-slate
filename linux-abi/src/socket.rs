@@ -6,6 +6,8 @@ pub const SYS_SOCKET: u64 = 41;
 pub const SYS_CONNECT: u64 = 42;
 /// `sendto(2)`.
 pub const SYS_SENDTO: u64 = 44;
+/// `recvmsg(2)`.
+pub const SYS_RECVMSG: u64 = 47;
 /// `bind(2)`.
 pub const SYS_BIND: u64 = 49;
 
