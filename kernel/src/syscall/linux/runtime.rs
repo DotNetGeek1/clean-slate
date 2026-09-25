@@ -10,7 +10,6 @@ use super::user_copy::{copy_user_bytes, LINUX_USER_COPY_MAX_BYTES};
 use crate::interrupt::timer::kernel_ticks;
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::process::linux_fd::{self, readiness::Readiness};
-use crate::process::linux_image::{LinuxImageLayout, LINUX_STACK_PAGES};
 use crate::process::linux_mem;
 use crate::process::linux_signal;
 use crate::sched::wait::Deadline;
@@ -125,8 +124,6 @@ fn handle_sys_mmap(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
 ) -> LinuxSyscallResult {
-    let layout = LinuxImageLayout::conventional_with_stack(0x400000, LINUX_STACK_PAGES, 0)
-        .map_err(|_| EINVAL)?;
     linux_mem::sys_mmap(
         request.args[0],
         request.args[1],
@@ -136,7 +133,6 @@ fn handle_sys_mmap(
         request.args[5],
         ctx.pid,
         ctx.instance_generation,
-        &layout,
     )
 }
 

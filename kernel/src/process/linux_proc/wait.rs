@@ -90,6 +90,9 @@ pub(crate) fn linux_wait4(
     )
 }
 
+#[cfg(not(feature = "m9-userspace-self-test"))]
+fn maybe_diag_echild(_parent: ProcId, _wait_pid: i64, _reason: &str) {}
+
 #[cfg(feature = "m9-userspace-self-test")]
 fn maybe_diag_echild(parent: ProcId, wait_pid: i64, reason: &str) {
     if WAIT_ECHILD_DIAG_COUNT.fetch_add(1, Ordering::Relaxed) >= WAIT_ECHILD_DIAG_LIMIT {

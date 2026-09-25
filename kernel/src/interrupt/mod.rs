@@ -507,6 +507,8 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
     }
     #[cfg(feature = "m8-linux-image")]
     crate::process::linux_proc::fault::publish_linux_fault_exit(pid, context.vector);
+    #[cfg(feature = "m9-userspace-self-test")]
+    crate::selftest::m9_userspace::on_checklist_command_fault(pid, context);
 
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()

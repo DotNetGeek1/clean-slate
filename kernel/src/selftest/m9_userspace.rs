@@ -1,6 +1,7 @@
 //! M9 #107: frozen BusyBox/rootfs convergence on the production Linux path.
 
 use crate::arch::x86_64::apic::reprogram_local_apic_timer;
+use crate::arch::x86_64::interrupt_context::InterruptContext;
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
@@ -452,6 +453,22 @@ fn dispatch_phase(allocator: &mut PageAllocator) {
             launch_busybox(allocator, &SHELL_CMDS[0]);
         }
     }
+}
+
+/// Fail the acceptance immediately when the active checklist shell faults.
+pub(crate) fn on_checklist_command_fault(pid: u64, context: &InterruptContext) {
+    if pid != M9_LINUX_PID.load(Ordering::Relaxed) {
+        return;
+    }
+    let Phase::Commands(index) = (unsafe { M9_PHASE }) else {
+        return;
+    };
+    let cmd = &SHELL_CMDS[index];
+    kernel_log_fmt(format_args!(
+        "[M9  ] checklist fault cmd={} vector={} rip={:#018x}\n",
+        cmd.name, context.vector, context.rip
+    ));
+    fatal_kernel_error("m9 userspace checklist command faulted");
 }
 
 pub(crate) fn after_linux_exit_group(

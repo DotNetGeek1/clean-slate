@@ -455,6 +455,38 @@ mod tests {
     }
 
     #[test]
+    fn signalled_zombie_wait_status_is_sigsegv() {
+        let mut table = LinuxProcessTable::new();
+        let init = ProcId {
+            pid: 20,
+            generation: InstanceGeneration(1),
+        };
+        let parent = ProcId {
+            pid: 21,
+            generation: InstanceGeneration(1),
+        };
+        let child = ProcId {
+            pid: 22,
+            generation: InstanceGeneration(1),
+        };
+        table
+            .register(
+                init,
+                ProcId {
+                    pid: 0,
+                    generation: InstanceGeneration(0),
+                },
+            )
+            .unwrap();
+        table.register(parent, init).unwrap();
+        table.register(child, parent).unwrap();
+        table.publish_exit(child, exit_status_word(0, Some(11)));
+        let found = table.find_zombie_child(parent, child.pid as i64).expect("zombie");
+        assert_eq!(found.1, 11);
+        assert!(clean_slate_linux_abi::w_ifsignalled(found.1));
+    }
+
+    #[test]
     fn stale_generation_zombie_is_ignored_when_registry_generation_differs() {
         use crate::process::{
             personality::ExecutionPersonality, process_registry_mut, Process, ProcessState,

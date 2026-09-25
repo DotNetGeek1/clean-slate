@@ -24,3 +24,15 @@ pub(crate) fn publish_linux_exit(id: ProcId, status: u32, finalize_children: boo
     table.retire_slot(id);
     wake_all(wait_key_for_parent(parent_pid));
 }
+
+/// Publish a signalled zombie (e.g. page fault) and wake a blocked parent `wait4`.
+pub(crate) fn publish_linux_signalled_exit(id: ProcId, signal: u32) {
+    let table = table_mut();
+    if table.require_proc_slot(id).is_err() {
+        return;
+    }
+    let parent_pid = table.parent_of(id).map_or(id.pid, |p| p.pid);
+    table.publish_exit(id, exit_status_word(0, Some(signal)));
+    table.retire_slot(id);
+    wake_all(wait_key_for_parent(parent_pid));
+}

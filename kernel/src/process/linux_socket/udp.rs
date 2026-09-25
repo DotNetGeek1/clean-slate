@@ -323,5 +323,8 @@ pub(crate) fn recvmsg(
             }
         }
     }
+    unsafe {
+        core::ptr::write((msg_ptr + 48) as *mut i32, 0);
+    }
     Ok(copy as u64)
 }

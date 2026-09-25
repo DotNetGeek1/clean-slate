@@ -55,6 +55,10 @@ impl MmapRegion {
 pub(crate) struct LinuxMemState {
     brk_base: u64,
     brk_end: u64,
+    /// Inclusive low bound for anonymous `mmap` (from exec layout `window_base`).
+    mmap_window_lo: u64,
+    /// Exclusive high bound (stack guard / reservation start from exec layout).
+    mmap_window_hi: u64,
     mmap_regions: [MmapRegion; LINUX_MMAP_MAX_REGIONS],
     mmap_region_count: usize,
     mmap_pages: u64,
@@ -68,6 +72,8 @@ impl LinuxMemState {
     const EMPTY: Self = Self {
         brk_base: 0,
         brk_end: 0,
+        mmap_window_lo: LINUX_MMAP_WINDOW_BASE,
+        mmap_window_hi: LINUX_MMAP_WINDOW_TOP,
         mmap_regions: [MmapRegion::EMPTY; LINUX_MMAP_MAX_REGIONS],
         mmap_region_count: 0,
         mmap_pages: 0,
@@ -182,7 +188,8 @@ pub(crate) fn init_for_image(
     let slot = registry_mut().slots[index].as_mut().expect("slot");
     slot.state.brk_base = brk_initial;
     slot.state.brk_end = brk_initial;
-    let _ = layout;
+    slot.state.mmap_window_lo = layout.window_base;
+    slot.state.mmap_window_hi = layout.stack_reservation_start;
     Ok(())
 }
 
@@ -463,7 +470,6 @@ pub(crate) fn sys_mmap(
     offset: u64,
     pid: u64,
     generation: InstanceGeneration,
-    layout: &LinuxImageLayout,
 ) -> Result<u64, LinuxErrno> {
     if fd != -1 || offset != 0 {
         return Err(EINVAL);
@@ -488,24 +494,24 @@ pub(crate) fn sys_mmap(
             return Err(ENOMEM);
         }
     }
-    let map_addr = {
+    let (map_addr, mmap_window_lo, mmap_window_hi) = {
         let state = &registry_mut().slots[index].as_ref().expect("slot").state;
-        if (flags & MAP_FIXED) != 0 {
+        let lo = state.mmap_window_lo;
+        let hi = state.mmap_window_hi;
+        let map_addr = if (flags & MAP_FIXED) != 0 {
             if addr % PAGE_SIZE != 0 {
                 return Err(EINVAL);
             }
             addr
         } else {
-            alloc_mmap_addr(state, page_count, layout)?
-        }
+            alloc_mmap_addr(state, page_count)?
+        };
+        (map_addr, lo, hi)
     };
     let map_end = map_addr
         .checked_add(page_count.checked_mul(PAGE_SIZE).ok_or(EINVAL)?)
         .ok_or(EINVAL)?;
-    if map_addr < LINUX_MMAP_WINDOW_BASE || map_end > LINUX_MMAP_WINDOW_TOP {
-        return Err(ENOMEM);
-    }
-    if map_end > layout.stack_reservation_start {
+    if map_addr < mmap_window_lo || map_end > mmap_window_hi {
         return Err(ENOMEM);
     }
     let allocator = syscall_page_allocator()?;
@@ -533,24 +539,25 @@ pub(crate) fn sys_mmap(
     Ok(map_addr)
 }
 
-fn alloc_mmap_addr(
-    state: &LinuxMemState,
-    page_count: u64,
-    layout: &LinuxImageLayout,
-) -> Result<u64, LinuxErrno> {
+fn alloc_mmap_addr(state: &LinuxMemState, page_count: u64) -> Result<u64, LinuxErrno> {
     let bytes = page_count.checked_mul(PAGE_SIZE).ok_or(ENOMEM)?;
-    let mut candidate = LINUX_MMAP_WINDOW_TOP;
-    while candidate >= LINUX_MMAP_WINDOW_BASE + bytes {
+    let lo = state.mmap_window_lo;
+    let hi = state.mmap_window_hi;
+    if hi <= lo || bytes > hi.saturating_sub(lo) {
+        return Err(ENOMEM);
+    }
+    let mut candidate = hi;
+    while candidate >= lo.saturating_add(bytes) {
         candidate = candidate.checked_sub(bytes).ok_or(ENOMEM)?;
         candidate = align_down(candidate, PAGE_SIZE);
-        let end = candidate + bytes;
-        if end > layout.stack_reservation_start {
+        let end = candidate.saturating_add(bytes);
+        if end > hi {
             continue;
         }
         if !overlaps_any(state, candidate, end) && candidate >= state.brk_end {
             return Ok(candidate);
         }
-        if candidate == LINUX_MMAP_WINDOW_BASE {
+        if candidate <= lo {
             break;
         }
     }
@@ -654,7 +661,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mmap_window_below_stack_reservation() {
+    fn legacy_mmap_window_constants_below_conventional_stack() {
         const _: () = assert!(LINUX_MMAP_WINDOW_TOP <= 0x0080_0000);
     }
 
