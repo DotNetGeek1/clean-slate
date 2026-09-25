@@ -162,6 +162,7 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m9-linux-exec-self-test"),
     not(feature = "m9-linux-runtime-self-test"),
     not(feature = "m9-linux-proc-self-test"),
+    not(feature = "m9-linux-trace-self-test"),
     not(feature = "m9-rootfs-self-test"),
     not(feature = "m9-linux-fs-self-test"),
     not(feature = "m9-fd-core-self-test")

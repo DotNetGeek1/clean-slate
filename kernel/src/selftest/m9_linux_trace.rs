@@ -295,7 +295,7 @@ pub(crate) fn after_probe_exit_group(
     generation: InstanceGeneration,
     status: u64,
     teardown: &DomainTeardownResult,
-    allocator: &mut PageAllocator,
+    _allocator: &mut PageAllocator,
 ) -> Option<u64> {
     if !is_probe(pid) {
         return None;
