@@ -119,7 +119,7 @@ mod enabled {
             pid: ctx.pid,
             generation: ctx.instance_generation,
         })?;
-        table_mut().retire_stale_live_slots(|pid| {
+        table_mut().retire_stale_live_slots(|pid| unsafe {
             crate::process::process_registry_mut().get(pid).is_some()
         });
         let allocator = service_lifecycle_syscall_allocator_mut()
