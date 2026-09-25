@@ -128,13 +128,21 @@ fn registry_mut() -> &'static mut Registry {
     unsafe { &mut *REGISTRY.get() }
 }
 
-fn with_address_space<F, R>(pid: u64, generation: InstanceGeneration, f: F) -> Result<R, LinuxErrno>
+fn syscall_page_allocator() -> Result<&'static mut PageAllocator, LinuxErrno> {
+    crate::syscall::service_lifecycle_syscall_allocator_mut()
+        .as_mut()
+        .ok_or(ENOMEM)
+}
+
+fn with_address_space<F, R>(
+    pid: u64,
+    generation: InstanceGeneration,
+    allocator: &mut PageAllocator,
+    f: F,
+) -> Result<R, LinuxErrno>
 where
     F: FnOnce(&mut ProcessAddressSpace, &mut PageAllocator) -> Result<R, LinuxErrno>,
 {
-    let allocator = crate::syscall::service_lifecycle_syscall_allocator_mut()
-        .as_mut()
-        .ok_or(ENOMEM)?;
     let registry = unsafe { process_registry_mut() };
     let process = registry.get_mut(pid).ok_or(EINVAL)?;
     if process.instance_generation != generation {
@@ -179,21 +187,29 @@ pub(crate) fn init_for_image(
     Ok(())
 }
 
-pub(crate) fn reset_for_exec(pid: u64, generation: InstanceGeneration) {
+pub(crate) fn reset_for_exec(
+    pid: u64,
+    generation: InstanceGeneration,
+    allocator: &mut PageAllocator,
+) {
     if let Some(index) = registry_mut().find(pid, generation) {
-        let _ = release_slot(index);
+        let _ = release_slot(index, allocator);
     }
 }
 
-pub(crate) fn release_for_process(pid: u64, generation: InstanceGeneration) {
+pub(crate) fn release_for_process(
+    pid: u64,
+    generation: InstanceGeneration,
+    allocator: &mut PageAllocator,
+) {
     if let Some(index) = registry_mut().find(pid, generation) {
-        let _ = release_slot(index);
+        let _ = release_slot(index, allocator);
     }
 }
 
-fn release_slot(index: usize) -> Result<(), LinuxErrno> {
+fn release_slot(index: usize, allocator: &mut PageAllocator) -> Result<(), LinuxErrno> {
     let slot = registry_mut().slots[index].take().ok_or(EINVAL)?;
-    with_address_space(slot.pid, slot.generation, |domain, allocator| {
+    with_address_space(slot.pid, slot.generation, allocator, |domain, allocator| {
         unmap_all(&slot.state, domain, allocator)
     })?;
     Ok(())
@@ -364,7 +380,8 @@ pub(crate) fn sys_brk(
         return Ok(old_end);
     }
     if addr < old_end {
-        with_address_space(pid, generation, |domain, allocator| {
+        let allocator = syscall_page_allocator()?;
+        with_address_space(pid, generation, allocator, |domain, allocator| {
             shrink_brk_to(brk_base, addr, domain, allocator)?;
             Ok(())
         })?;
@@ -375,7 +392,8 @@ pub(crate) fn sys_brk(
             .brk_end = addr;
         return Ok(old_end);
     }
-    with_address_space(pid, generation, |domain, allocator| {
+    let allocator = syscall_page_allocator()?;
+    with_address_space(pid, generation, allocator, |domain, allocator| {
         let mut va = align_up(old_end, PAGE_SIZE);
         let target = align_up(addr, PAGE_SIZE);
         while va < target {
@@ -491,7 +509,8 @@ pub(crate) fn sys_mmap(
     if map_end > layout.stack_reservation_start {
         return Err(ENOMEM);
     }
-    with_address_space(pid, generation, |domain, allocator| {
+    let allocator = syscall_page_allocator()?;
+    with_address_space(pid, generation, allocator, |domain, allocator| {
         let mut va = map_addr;
         for _ in 0..page_count {
             let readable = (prot & PROT_READ) != 0;
@@ -578,7 +597,8 @@ pub(crate) fn sys_munmap(
     let end = addr.checked_add(len).ok_or(EINVAL)?;
     let index = registry_mut().ensure(pid, generation)?;
     let state = &mut registry_mut().slots[index].as_mut().expect("slot").state;
-    with_address_space(pid, generation, |domain, allocator| {
+    let allocator = syscall_page_allocator()?;
+    with_address_space(pid, generation, allocator, |domain, allocator| {
         unmap_range(addr, end, domain, allocator)?;
         for region in state.mmap_regions.iter_mut().filter(|r| r.is_live()) {
             if addr <= region.start && end >= region.end {

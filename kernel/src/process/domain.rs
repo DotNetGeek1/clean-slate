@@ -150,7 +150,7 @@ pub(crate) fn teardown_current_process(
             feature = "m2-timer-self-test"
         )))]
         {
-            crate::process::linux_mem::release_for_process(process_id, generation);
+            crate::process::linux_mem::release_for_process(process_id, generation, allocator);
             crate::process::linux_signal::release_for_process(process_id, generation);
         }
         #[cfg(not(any(

@@ -480,7 +480,7 @@ pub(crate) fn commit_exec(
         if process.resource_domain.address_space().is_none() {
             return Err(LinuxImageError::Registry("exec commit: no address space"));
         }
-        crate::process::linux_mem::reset_for_exec(pid, live_gen);
+        crate::process::linux_mem::reset_for_exec(pid, live_gen, allocator);
         crate::process::linux_signal::reset_for_exec(pid, live_gen);
         // Point of no return: from here the process owns the new image. Any
         // failure below is a kernel invariant violation, not an errno -- returning

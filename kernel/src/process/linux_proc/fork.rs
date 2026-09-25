@@ -134,7 +134,7 @@ pub(crate) fn linux_fork(
     let runtime_state = linux_mem::clone_for_fork(parent_pid, parent_gen, child_pid, child_gen)
         .and_then(|()| linux_signal::clone_for_fork(parent_pid, parent_gen, child_pid, child_gen));
     if let Err(errno) = runtime_state {
-        linux_mem::release_for_process(child_pid, child_gen);
+        linux_mem::release_for_process(child_pid, child_gen, allocator);
         linux_signal::release_for_process(child_pid, child_gen);
         linux_fd::release_for_process(child_pid, child_gen);
         abort_fork_child(child_pid, allocator);
