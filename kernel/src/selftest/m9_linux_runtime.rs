@@ -1,6 +1,6 @@
 //! M9 #103 Linux runtime/memory/time/poll acceptance.
 
-use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
+use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};

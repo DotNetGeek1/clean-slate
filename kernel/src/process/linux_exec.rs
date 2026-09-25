@@ -343,11 +343,10 @@ pub(crate) fn prepare_linux_image(
 /// Pick an empty scheduler slot whose static kernel stack is not the one we
 /// are executing on. Required when launching from the Linux `exit` path, which
 /// still runs on the exiting thread's kernel stack.
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test"
-)))]
+#[cfg(any(
+    feature = "m9-linux-proc-self-test",
+    feature = "m9-linux-runtime-self-test"
+))]
 pub(crate) fn pick_scheduler_slot_for_relaunch() -> Result<(usize, u64), &'static str> {
     use crate::arch::x86_64::context_switch::task_stack_top;
     use crate::arch::x86_64::cpu::without_interrupts;
@@ -364,12 +363,12 @@ pub(crate) fn pick_scheduler_slot_for_relaunch() -> Result<(usize, u64), &'stati
     let stacks = unsafe { task_stacks_mut() };
     without_interrupts(|| {
         let scheduler = unsafe { scheduler_mut() };
-        for slot in 0..TASK_COUNT {
+        for (slot, stack) in stacks.iter().enumerate().take(TASK_COUNT) {
             if scheduler.threads[slot].state != ThreadState::Empty {
                 continue;
             }
-            let base = stacks[slot].0.as_ptr() as u64;
-            let top = task_stack_top(&stacks[slot]);
+            let base = stack.0.as_ptr() as u64;
+            let top = task_stack_top(stack);
             if rsp > base && rsp <= top {
                 continue;
             }
