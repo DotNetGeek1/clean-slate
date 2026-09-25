@@ -18,14 +18,15 @@ use crate::syscall::linux::socket_copy::copy_user_socket_bytes;
 use crate::syscall::linux::table::LinuxSyscallContext;
 
 use super::{
-    broker_sync, linux_socket_request_wait_key, read_sockaddr_in, register_request_wake,
-    socket_addr_v4, with_socket_mut, LinuxSocket, LinuxSocketId, SocketState,
-    LINUX_UDP_MAX_DATAGRAM,
+    broker_sync, clear_request_wake, linux_socket_request_wait_key, read_sockaddr_in,
+    register_request_wake, socket_addr_v4, with_socket_mut, LinuxSocket, LinuxSocketId,
+    SocketState, LINUX_UDP_MAX_DATAGRAM,
 };
 
-fn push_rx_datagram(socket: &mut LinuxSocket, bytes: &[u8]) {
+fn push_rx_datagram(socket: &mut LinuxSocket, bytes: &[u8]) -> bool {
     if socket.rx_count as usize >= socket.rx_queue.len() {
-        return;
+        socket.rx_dropped = socket.rx_dropped.saturating_add(1);
+        return false;
     }
     let idx = (socket.rx_head as usize + socket.rx_count as usize) % socket.rx_queue.len();
     let n = bytes.len().min(LINUX_UDP_MAX_DATAGRAM);
@@ -38,6 +39,24 @@ fn push_rx_datagram(socket: &mut LinuxSocket, bytes: &[u8]) {
         },
     });
     socket.rx_count += 1;
+    true
+}
+
+fn maybe_arm_udp_receive(
+    socket: &mut LinuxSocket,
+    ctx: &LinuxSyscallContext<'_>,
+    id: LinuxSocketId,
+) -> Result<(), clean_slate_linux_abi::LinuxErrno> {
+    if socket.state == SocketState::Closed {
+        return Ok(());
+    }
+    if socket.rx_count as usize >= socket.rx_queue.len() {
+        return Ok(());
+    }
+    if socket.pending_rx_req.is_some() || socket.inflight_request_id.is_some() {
+        return Ok(());
+    }
+    arm_udp_receive(socket, ctx, id)
 }
 
 fn map_udp_receive_error(code: u16, _nonblock: bool) -> LinuxErrno {
@@ -78,6 +97,7 @@ fn arm_udp_receive(
 pub(crate) fn try_complete_pending_rx_on_socket(
     socket: &mut LinuxSocket,
     ctx: &LinuxSyscallContext<'_>,
+    id: LinuxSocketId,
 ) -> Result<bool, clean_slate_linux_abi::LinuxErrno> {
     let Some(request_id) = socket.pending_rx_req else {
         return Ok(false);
@@ -89,14 +109,23 @@ pub(crate) fn try_complete_pending_rx_on_socket(
     match net_bridge_mut().poll(ctx.pid, ctx.pid, generation, request_id, &mut payload) {
         Ok(NetworkResponse::Receive { payload_len }) => {
             let n = payload_len as usize;
-            push_rx_datagram(socket, &payload[..n.min(NETWORK_MAX_PAYLOAD_BYTES)]);
+            let _ = push_rx_datagram(socket, &payload[..n.min(NETWORK_MAX_PAYLOAD_BYTES)]);
             socket.pending_rx_req = None;
+            clear_request_wake(request_id);
+            maybe_arm_udp_receive(socket, ctx, id)?;
             Ok(true)
+        }
+        Ok(NetworkResponse::Error { .. }) => {
+            socket.pending_rx_req = None;
+            clear_request_wake(request_id);
+            maybe_arm_udp_receive(socket, ctx, id)?;
+            Ok(false)
         }
         Ok(_) => Ok(false),
         Err(NetBridgeError::Pending) => Ok(false),
         Err(_) => {
             socket.pending_rx_req = None;
+            clear_request_wake(request_id);
             Ok(false)
         }
     }
@@ -106,7 +135,14 @@ pub(crate) fn try_complete_pending_rx(
     ctx: &LinuxSyscallContext<'_>,
     id: LinuxSocketId,
 ) -> Result<bool, clean_slate_linux_abi::LinuxErrno> {
-    with_socket_mut(id, |socket| try_complete_pending_rx_on_socket(socket, ctx))?
+    with_socket_mut(id, |socket| try_complete_pending_rx_on_socket(socket, ctx, id))?
+}
+
+pub(crate) fn ensure_udp_receive_armed(
+    ctx: &LinuxSyscallContext<'_>,
+    id: LinuxSocketId,
+) -> Result<(), clean_slate_linux_abi::LinuxErrno> {
+    with_socket_mut(id, |socket| maybe_arm_udp_receive(socket, ctx, id))?
 }
 
 pub(crate) fn sendto(
@@ -204,7 +240,10 @@ fn udp_send_payload(
         Err(block_or_err) => return block_or_err,
     };
     match outcome.response {
-        NetworkResponse::Send { bytes_sent } => Ok(bytes_sent as u64),
+        NetworkResponse::Send { bytes_sent } => {
+            let _ = maybe_arm_udp_receive(socket, ctx, id);
+            Ok(bytes_sent as u64)
+        }
         NetworkResponse::Error { code } => super::tcp::map_network_error(code),
         _ => Err(clean_slate_linux_abi::EINVAL),
     }
@@ -230,8 +269,12 @@ fn drain_rx_if_ready(
     scratch: &mut [u8],
 ) -> Result<Option<usize>, clean_slate_linux_abi::LinuxErrno> {
     with_socket_mut(id, |socket| {
-        let _ = try_complete_pending_rx_on_socket(socket, ctx);
-        Ok(take_rx_datagram(socket, scratch))
+        let _ = try_complete_pending_rx_on_socket(socket, ctx, id);
+        let taken = take_rx_datagram(socket, scratch);
+        if taken.is_some() {
+            let _ = maybe_arm_udp_receive(socket, ctx, id);
+        }
+        Ok(taken)
     })?
 }
 

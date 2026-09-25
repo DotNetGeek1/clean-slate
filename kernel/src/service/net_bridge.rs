@@ -443,6 +443,18 @@ impl NetBridge {
         Some((slot.request_id, slot.request, slot.payload_len, slot.client))
     }
 
+    pub fn service_requeue(&mut self, request_id: u64) -> Result<(), NetBridgeError> {
+        let index = self
+            .slots
+            .iter()
+            .position(|slot| {
+                slot.request_id == request_id && slot.state == ClientSlotState::InService
+            })
+            .ok_or(NetBridgeError::InvalidRequest)?;
+        self.slots[index].state = ClientSlotState::Pending;
+        Ok(())
+    }
+
     pub fn service_complete(
         &mut self,
         request_id: u64,

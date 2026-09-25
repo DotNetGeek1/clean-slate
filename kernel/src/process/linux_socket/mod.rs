@@ -72,6 +72,7 @@ pub(crate) struct LinuxSocket {
     rx_queue: [Option<RxDatagram>; 2],
     rx_head: u8,
     rx_count: u8,
+    rx_dropped: u8,
     tcp_rx: [u8; NETWORK_MAX_PAYLOAD_BYTES],
     tcp_rx_len: u16,
     tcp_eof: bool,
@@ -96,6 +97,7 @@ impl LinuxSocket {
             rx_queue: [None, None],
             rx_head: 0,
             rx_count: 0,
+            rx_dropped: 0,
             tcp_rx: [0; NETWORK_MAX_PAYLOAD_BYTES],
             tcp_rx_len: 0,
             tcp_eof: false,
@@ -541,7 +543,9 @@ pub(crate) fn refresh_readiness_for_fd(
     }
     let socket_ref = crate::process::linux_fd::socket_ref_for_open(open)?;
     let id = socket_ref_to_id(socket_ref);
-    if udp::try_complete_pending_rx(ctx, id)? {
+    let progressed = udp::try_complete_pending_rx(ctx, id)?;
+    let _ = udp::ensure_udp_receive_armed(ctx, id);
+    if progressed {
         crate::syscall::linux::poll::notify_readiness_changed(open);
     }
     Ok(())

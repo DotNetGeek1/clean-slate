@@ -7,13 +7,19 @@
 
 use crate::arch::x86_64::apic::enable_local_apic;
 use crate::arch::x86_64::apic::mask_legacy_pic;
-#[cfg(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test",
-    feature = "m3-address-space-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m3-ipc-self-test"
+#[cfg(all(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-ipc-self-test"
+    ),
+    not(any(
+        feature = "m9-userspace-self-test",
+        feature = "m9-linux-runtime-self-test"
+    ))
 ))]
 use crate::arch::x86_64::apic::program_local_apic_timer;
 use crate::diagnostics::serial::serial_write_fmt;
@@ -64,37 +70,56 @@ pub(crate) fn initialize_timer() {
     enable_local_apic();
     // M3 entry self-tests boot through a minimal timer path without the PIT ch2
     // wiring `calibrate_apic_tick` needs; calibrating there hangs (not ~50ms).
-    #[cfg(not(any(
-        feature = "m1-self-test",
-        feature = "m2-double-fault-self-test",
-        feature = "m2-timer-self-test",
-        feature = "m3-address-space-self-test",
-        feature = "m3-entry-self-test",
-        feature = "m3-ipc-self-test"
-    )))]
+    // M9 userspace/runtime acceptance runs full Linux workloads and needs TSC.
+    #[cfg(any(
+        all(
+            not(any(
+                feature = "m1-self-test",
+                feature = "m2-double-fault-self-test",
+                feature = "m2-timer-self-test",
+                feature = "m3-address-space-self-test",
+                feature = "m3-entry-self-test",
+                feature = "m3-ipc-self-test"
+            )),
+        ),
+        feature = "m9-userspace-self-test",
+        feature = "m9-linux-runtime-self-test",
+    ))]
     {
         crate::time::calibration::calibrate_apic_tick();
     }
-    #[cfg(any(
-        feature = "m1-self-test",
-        feature = "m2-double-fault-self-test",
-        feature = "m2-timer-self-test",
-        feature = "m3-address-space-self-test",
-        feature = "m3-entry-self-test",
-        feature = "m3-ipc-self-test"
+    #[cfg(all(
+        any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test",
+            feature = "m3-address-space-self-test",
+            feature = "m3-entry-self-test",
+            feature = "m3-ipc-self-test"
+        ),
+        not(any(
+            feature = "m9-userspace-self-test",
+            feature = "m9-linux-runtime-self-test"
+        ))
     ))]
     {
         crate::time::calibration::apply_fallback_apic_timer_config();
         program_local_apic_timer();
     }
-    #[cfg(not(any(
-        feature = "m1-self-test",
-        feature = "m2-double-fault-self-test",
-        feature = "m2-timer-self-test",
-        feature = "m3-address-space-self-test",
-        feature = "m3-entry-self-test",
-        feature = "m3-ipc-self-test"
-    )))]
+    #[cfg(any(
+        all(
+            not(any(
+                feature = "m1-self-test",
+                feature = "m2-double-fault-self-test",
+                feature = "m2-timer-self-test",
+                feature = "m3-address-space-self-test",
+                feature = "m3-entry-self-test",
+                feature = "m3-ipc-self-test"
+            )),
+        ),
+        feature = "m9-userspace-self-test",
+        feature = "m9-linux-runtime-self-test",
+    ))]
     {
         // `calibrate_apic_tick` arms the production reload count.
     }
