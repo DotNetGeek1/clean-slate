@@ -366,8 +366,55 @@ fn handle_exception(context: &InterruptContext) -> u64 {
             trigger_nested_double_fault();
         }
 
+        log_unexpected_kernel_fault_context(context);
         kernel_log_line("[PF  ] unexpected page fault");
         qemu_exit(QEMU_EXIT_FAILURE)
+    }
+
+    /// Dumps enough state to symbolize a kernel-mode fault offline: an image
+    /// anchor (this function's runtime address) and a bounded scan of the
+    /// interrupted stack. Long-mode interrupt frames always carry RSP/SS after
+    /// RFLAGS, even without a privilege change.
+    fn log_unexpected_kernel_fault_context(context: &InterruptContext) {
+        const STACK_SCAN_QWORDS: usize = 128;
+        let anchor = log_unexpected_kernel_fault_context as usize as u64;
+        kernel_log_fmt(format_args!("[PF  ] image_anchor={:#018x}\n", anchor));
+        kernel_log_fmt(format_args!(
+            "[PF  ] rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x} rbp={:#x}\n",
+            context.rax,
+            context.rbx,
+            context.rcx,
+            context.rdx,
+            context.rsi,
+            context.rdi,
+            context.rbp
+        ));
+        kernel_log_fmt(format_args!(
+            "[PF  ] r8={:#x} r9={:#x} r10={:#x} r11={:#x} r12={:#x} r13={:#x} r14={:#x} r15={:#x}\n",
+            context.r8,
+            context.r9,
+            context.r10,
+            context.r11,
+            context.r12,
+            context.r13,
+            context.r14,
+            context.r15
+        ));
+        let frame_end = (context as *const InterruptContext).wrapping_add(1) as *const u64;
+        let interrupted_rsp = unsafe { core::ptr::read(frame_end) };
+        kernel_log_fmt(format_args!("[PF  ] rsp={:#018x}\n", interrupted_rsp));
+        let image_window = anchor.saturating_sub(0x40_0000)..anchor.saturating_add(0x40_0000);
+        for index in 0..STACK_SCAN_QWORDS {
+            let slot = interrupted_rsp.wrapping_add((index * 8) as u64);
+            let value = unsafe { core::ptr::read_volatile(slot as *const u64) };
+            if image_window.contains(&value) {
+                kernel_log_fmt(format_args!(
+                    "[PF  ] stack[{:#x}]={:#018x}\n",
+                    index * 8,
+                    value
+                ));
+            }
+        }
     }
 
     fn handle_double_fault(context: &InterruptContext) -> ! {
