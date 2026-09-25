@@ -110,14 +110,16 @@ test_pipe_epipe:
     test    rax, rax
     js      .Lbad_exit
     jz      .Lepipe_child
-    mov     rdi, r12
-    mov     rax, 3
-    syscall
+    /* Reap the forked child before closing pipe ends so wait4 blocks on the
+       production scheduler path (M9 #106 trace markers). */
     mov     rax, 61
     mov     rdi, -1
     xor     rsi, rsi
     xor     rdx, rdx
     xor     r10, r10
+    syscall
+    mov     rdi, r12
+    mov     rax, 3
     syscall
     mov     r13d, [rsp - 12]
     mov     rax, 1

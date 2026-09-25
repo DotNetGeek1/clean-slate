@@ -70,6 +70,16 @@ pub(crate) fn block_linux_syscall(
     let frame: *mut _ = ctx.frame;
     match block_current_thread_with_resume(frame, key, deadline, resume) {
         Ok(WaitOutcome::Woken) => {
+            // Wake can be pending before we sleep; the scheduler path emits
+            // `woke` from `clean_slate_complete_blocked_syscall_resume`, but
+            // this fast path must match so acceptance markers stay ordered.
+            #[cfg(feature = "m9-linux-trace")]
+            super::trace::record_wait_event(
+                ctx.pid,
+                ctx.instance_generation,
+                request.nr,
+                super::trace::LinuxTraceReason::Woke,
+            );
             ctx.frame.user_rip = ctx
                 .frame
                 .user_rip
