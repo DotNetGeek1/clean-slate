@@ -39,6 +39,10 @@ pub const NET_SUBOP_ACK_HOLDER_EXIT: u64 = 9;
 pub const NET_SUBOP_MONOTONIC_TICKS: u64 = 10;
 /// Returns LAPIC IRQ period in nanoseconds (0 if uncalibrated).
 pub const NET_SUBOP_TICK_PERIOD_NS: u64 = 11;
+/// Block the net service until virtio RX is ready (#167).
+pub const NET_SUBOP_WAIT_RX: u64 = 12;
+/// Block until a client request is queued for the net service (#167).
+pub const NET_SUBOP_WAIT_WORK: u64 = 13;
 
 pub const NET_SERVICE_ROLE_ID: u64 = 1;
 

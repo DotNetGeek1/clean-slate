@@ -42,7 +42,7 @@ use clean_slate_service_fixtures::{
     NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
     NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
-    NET_SUBOP_TICK_PERIOD_NS,
+    NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK,
 };
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::x86_64::{__cpuid, _rdrand64_step};
@@ -612,13 +612,10 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         drain_holder_exits(service);
         let found = match service_next(raw_handle, request_buf, payload_buf) {
             Ok(id) => id,
-            Err(_) => {
-                let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
-                continue;
-            }
+            Err(_) => continue,
         };
         if found == 0 {
-            let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
+            let _ = net_request([NET_SUBOP_WAIT_WORK, raw_handle, 0, 0, 0, 0]);
             continue;
         }
         let request_id = found;
@@ -1763,16 +1760,13 @@ fn poll_until_done(
     out_payload: &mut [u8],
 ) -> Result<NetworkResponse, u64> {
     let mut response_wire = [0u8; NETWORK_RESPONSE_BYTES];
-    for _ in 0..10_000 {
+    loop {
         match client_poll(handle, request_id, &mut response_wire, out_payload) {
             Ok(_) => return NetworkResponse::decode(&response_wire).map_err(|_| 0u64),
-            Err(NETWORK_STATUS_PENDING) => {
-                let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
-            }
+            Err(NETWORK_STATUS_PENDING) => {}
             Err(error) => return Err(error),
         }
     }
-    Err(0)
 }
 
 fn run_converged_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {

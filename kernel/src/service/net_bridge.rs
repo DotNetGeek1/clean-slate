@@ -118,6 +118,7 @@ impl KernelLoopbackLink {
         self.rx_tail =
             (self.rx_tail + 1) % clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as u8;
         self.rx_count += 1;
+        crate::service::net_request_wake::wake_net_service_rx();
         Ok(())
     }
 }
@@ -203,6 +204,9 @@ impl ClientSlot {
     }
 }
 
+const VIRTIO_RX_PENDING_DEPTH: usize =
+    clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as usize;
+
 pub(crate) struct NetBridge {
     service_pid: u64,
     service_domain: u64,
@@ -210,6 +214,10 @@ pub(crate) struct NetBridge {
     loopback: KernelLoopbackLink,
     raw_backend: RawBackend,
     virtio: Option<VirtioNetDevice>,
+    virtio_rx_pending: [RingSlot; VIRTIO_RX_PENDING_DEPTH],
+    virtio_rx_pending_head: u8,
+    virtio_rx_pending_tail: u8,
+    virtio_rx_pending_count: u8,
     slots: [ClientSlot; NETWORK_REQUEST_SLOTS],
     next_request_id: u64,
     inflight_failed: u32,
@@ -231,6 +239,10 @@ impl NetBridge {
             loopback: KernelLoopbackLink::new(),
             raw_backend: RawBackend::loopback(),
             virtio: None,
+            virtio_rx_pending: [RingSlot::empty(); VIRTIO_RX_PENDING_DEPTH],
+            virtio_rx_pending_head: 0,
+            virtio_rx_pending_tail: 0,
+            virtio_rx_pending_count: 0,
             slots: [ClientSlot::free(); NETWORK_REQUEST_SLOTS],
             next_request_id: 1,
             inflight_failed: 0,
@@ -256,6 +268,9 @@ impl NetBridge {
         self.holder_exit_head = 0;
         self.holder_exit_tail = 0;
         self.pending_holder_exit_ack = None;
+        self.virtio_rx_pending_head = 0;
+        self.virtio_rx_pending_tail = 0;
+        self.virtio_rx_pending_count = 0;
         #[cfg(feature = "m7-net-service-self-test")]
         {
             self.holder_exit_acked_pid = None;
@@ -322,6 +337,7 @@ impl NetBridge {
         }
         self.holder_exit_queue[self.holder_exit_tail as usize] = caller;
         self.holder_exit_tail = next;
+        crate::service::net_request_wake::wake_net_service_work();
     }
 
     fn holder_exit_caller(&self, pid: u64, domain: u64, instance_generation: u64) -> TrustedCaller {
@@ -395,6 +411,7 @@ impl NetBridge {
         slot.payload[..copy_len].copy_from_slice(&payload[..copy_len]);
         slot.payload_len = copy_len as u32;
         self.slots[slot_index] = slot;
+        crate::service::net_request_wake::wake_net_service_work();
         Ok(request_id)
     }
 
@@ -431,6 +448,13 @@ impl NetBridge {
             }
             ClientSlotState::Free => Err(NetBridgeError::InvalidRequest),
         }
+    }
+
+    pub(crate) fn net_service_has_work(&self) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| slot.state == ClientSlotState::Pending)
+            || self.holder_exit_head != self.holder_exit_tail
     }
 
     pub fn service_next(&mut self) -> Option<(u64, NetworkRequest, u32, TrustedCaller)> {
@@ -540,12 +564,82 @@ impl NetBridge {
         .map_err(|(err, _)| err)
     }
 
+    fn push_virtio_rx_pending(&mut self, frame: FrameBuf) -> Result<(), NetworkDeviceError> {
+        if self.virtio_rx_pending_count as usize >= VIRTIO_RX_PENDING_DEPTH {
+            return Err(NetworkDeviceError::QueueFull);
+        }
+        let bytes = frame.as_slice();
+        if bytes.len() > clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES {
+            return Err(NetworkDeviceError::Oversized);
+        }
+        let slot = &mut self.virtio_rx_pending[self.virtio_rx_pending_tail as usize];
+        slot.len = bytes.len() as u16;
+        slot.bytes[..bytes.len()].copy_from_slice(bytes);
+        self.virtio_rx_pending_tail =
+            (self.virtio_rx_pending_tail + 1) % VIRTIO_RX_PENDING_DEPTH as u8;
+        self.virtio_rx_pending_count += 1;
+        Ok(())
+    }
+
+    fn pop_virtio_rx_pending(&mut self) -> Option<FrameBuf> {
+        if self.virtio_rx_pending_count == 0 {
+            return None;
+        }
+        let slot = &self.virtio_rx_pending[self.virtio_rx_pending_head as usize];
+        let len = slot.len as usize;
+        let frame = FrameBuf::from_slice(&slot.bytes[..len]).ok();
+        self.virtio_rx_pending_head =
+            (self.virtio_rx_pending_head + 1) % VIRTIO_RX_PENDING_DEPTH as u8;
+        self.virtio_rx_pending_count -= 1;
+        frame
+    }
+
+    pub(crate) fn poll_virtio_rx_pending(&mut self) {
+        self.poll_virtio_into_pending();
+    }
+
+    pub(crate) fn has_virtio_rx_pending(&self) -> bool {
+        self.virtio_rx_pending_count > 0
+    }
+
+    fn poll_virtio_into_pending(&mut self) {
+        if !matches!(self.raw_backend, RawBackend::Virtio) || self.service_pid == 0 {
+            return;
+        }
+        crate::arch::x86_64::cpu::without_interrupts(|| {
+            while (self.virtio_rx_pending_count as usize) < VIRTIO_RX_PENDING_DEPTH {
+                let frame = match self.virtio.as_mut() {
+                    Some(device) => match device.receive() {
+                        Ok(Some(frame)) => frame,
+                        Ok(None) => break,
+                        Err(_) => break,
+                    },
+                    None => break,
+                };
+                if self.push_virtio_rx_pending(frame).is_err() {
+                    break;
+                }
+                crate::service::net_request_wake::wake_net_service_rx();
+            }
+        });
+    }
+
     pub fn raw_receive(
         &mut self,
         service_pid: u64,
     ) -> Result<Option<FrameBuf>, NetworkDeviceError> {
         if !self.is_live_service(service_pid) {
             return Err(NetworkDeviceError::NotReady);
+        }
+        if let Some(frame) = self.pop_virtio_rx_pending() {
+            return Ok(Some(frame));
+        }
+        if matches!(self.raw_backend, RawBackend::Virtio) {
+            self.poll_virtio_into_pending();
+            if let Some(frame) = self.pop_virtio_rx_pending() {
+                return Ok(Some(frame));
+            }
+            return Ok(None);
         }
         self.raw_backend
             .receive(&mut self.loopback, self.virtio.as_mut())
@@ -575,6 +669,11 @@ static NET_BRIDGE: GlobalCell<NetBridge> = GlobalCell::new(NetBridge::new());
 
 pub(crate) fn net_bridge_mut() -> &'static mut NetBridge {
     unsafe { &mut *NET_BRIDGE.get() }
+}
+
+/// LAPIC timer hook: drain virtio RX completions while the net service may be blocked (#167).
+pub(crate) fn timer_poll_net_virtio_rx() {
+    net_bridge_mut().poll_virtio_rx_pending();
 }
 
 pub(crate) fn recover_net_queue_for_service_holder_exit(service_pid: u64) {

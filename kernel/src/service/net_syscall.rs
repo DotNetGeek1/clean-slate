@@ -17,17 +17,23 @@ use clean_slate_service_fixtures::{
     NETWORK_SERVICE_NEXT_WIRE_BYTES, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT,
     NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY,
     NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
-    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS,
+    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_RX,
+    NET_SUBOP_WAIT_WORK,
 };
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
-use crate::capability::network::{authorize_network_op, NetworkOp};
+use crate::capability::network::{authorize_network_op, authorize_network_op_quiet, NetworkOp};
 use crate::capability::with_capability_space;
 use crate::interrupt::timer::kernel_ticks;
 use crate::mm::user_mapping::validate_user_pointer_range;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
+use crate::sched::wait::{block_current_thread_with_resume, BlockedResume, WaitKey, WaitOutcome};
 use crate::service::instance_generation::live_instance_generation_for_pid;
 use crate::service::net_bridge::{net_bridge_mut, NetBridgeError};
+use crate::service::net_request_wake::{
+    net_bridge_request_wait_key, net_service_rx_wait_key, net_service_work_wait_key,
+    register_net_request_wake, wake_net_service_work,
+};
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::current_syscall_caller_pid;
 use crate::time::irq_period_ns;
@@ -77,6 +83,25 @@ fn denial_status(reason: DenialReason) -> u64 {
         DenialReason::NoCapability | DenialReason::MissingRight | DenialReason::Revoked => {
             SYSCALL_EACCES
         }
+    }
+}
+
+fn block_net_syscall_restart(
+    frame: &mut SyscallContext,
+    key: WaitKey,
+    timeout_rax: u64,
+    retry: fn(&mut SyscallContext),
+) {
+    let nr = frame.rax;
+    match block_current_thread_with_resume(
+        frame,
+        key,
+        None,
+        BlockedResume::RestartSyscall { nr, timeout_rax },
+    ) {
+        Ok(WaitOutcome::Woken) => retry(frame),
+        Ok(WaitOutcome::TimedOut) | Ok(WaitOutcome::Cancelled) => frame.rax = timeout_rax,
+        Err(message) => crate::diagnostics::qemu::fatal_kernel_error(message),
     }
 }
 
@@ -165,6 +190,8 @@ pub(crate) fn handle_syscall_network_request(frame: &mut SyscallContext) {
         NET_SUBOP_ACK_HOLDER_EXIT => handle_ack_holder_exit(frame),
         NET_SUBOP_MONOTONIC_TICKS => handle_monotonic_ticks(frame),
         NET_SUBOP_TICK_PERIOD_NS => handle_tick_period_ns(frame),
+        NET_SUBOP_WAIT_RX => handle_wait_rx(frame),
+        NET_SUBOP_WAIT_WORK => handle_wait_work(frame),
         _ => frame.rax = SYSCALL_EINVAL,
     }
 }
@@ -241,7 +268,11 @@ fn handle_submit(frame: &mut SyscallContext) {
         &request_wire,
         &payload[..payload_len],
     ) {
-        Ok(request_id) => frame.rax = request_id,
+        Ok(request_id) => {
+            register_net_request_wake(request_id, net_bridge_request_wait_key(request_id));
+            wake_net_service_work();
+            frame.rax = request_id;
+        }
         Err(error) => frame.rax = bridge_error_status(error),
     }
 }
@@ -273,7 +304,7 @@ fn handle_poll(frame: &mut SyscallContext) {
             return;
         }
     };
-    if let Err(reason) = authorize_network_op(holder, frame.rsi, NetworkOp::Receive, None) {
+    if let Err(reason) = authorize_network_op_quiet(holder, frame.rsi, NetworkOp::Receive, None) {
         frame.rax = denial_status(reason);
         return;
     }
@@ -284,12 +315,14 @@ fn handle_poll(frame: &mut SyscallContext) {
             return;
         }
     };
+    let request_id = frame.rdx;
+    let wait_key = net_bridge_request_wait_key(request_id);
     let mut out_payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
     match net_bridge_mut().poll(
         holder.0,
         holder.0,
         generation,
-        frame.rdx,
+        request_id,
         &mut out_payload[..out_len],
     ) {
         Ok(response) => {
@@ -305,6 +338,12 @@ fn handle_poll(frame: &mut SyscallContext) {
             }
             frame.rax = 0;
         }
+        Err(NetBridgeError::Pending) => block_net_syscall_restart(
+            frame,
+            wait_key,
+            bridge_error_status(NetBridgeError::Pending),
+            handle_poll,
+        ),
         Err(error) => frame.rax = bridge_error_status(error),
     }
 }
@@ -333,6 +372,7 @@ fn handle_service_next(frame: &mut SyscallContext) {
         return;
     }
     match net_bridge_mut().service_next() {
+        None => frame.rax = 0,
         Some((request_id, request, payload_len, caller)) => {
             let wire = request.encode();
             unsafe {
@@ -359,7 +399,6 @@ fn handle_service_next(frame: &mut SyscallContext) {
             }
             frame.rax = request_id;
         }
-        None => frame.rax = 0,
     }
 }
 
@@ -423,7 +462,7 @@ fn handle_service_complete(frame: &mut SyscallContext) {
     match net_bridge_mut().service_complete(request_id, response, &payload[..payload_len]) {
         Ok(()) => {
             // #105: wake blocked Linux socket syscalls waiting on this request.
-            let _woken = crate::process::linux_socket::notify_request_complete(request_id);
+            let _woken = crate::service::net_request_wake::notify_net_request_complete(request_id);
             frame.rax = 0;
         }
         Err(error) => frame.rax = bridge_error_status(error),
@@ -581,6 +620,54 @@ fn handle_ack_holder_exit(frame: &mut SyscallContext) {
         Ok(()) => frame.rax = 0,
         Err(error) => frame.rax = bridge_error_status(error),
     }
+}
+
+fn handle_wait_rx(frame: &mut SyscallContext) {
+    let holder = match current_holder() {
+        Ok(holder) => holder,
+        Err(status) => {
+            frame.rax = status;
+            return;
+        }
+    };
+    if live_network_service_pid() != Some(holder.0) {
+        frame.rax = SYSCALL_EACCES;
+        return;
+    }
+    if let Err(reason) = authorize_network_op_quiet(holder, frame.rsi, NetworkOp::RawDevice, None) {
+        frame.rax = denial_status(reason);
+        return;
+    }
+    let bridge = net_bridge_mut();
+    bridge.poll_virtio_rx_pending();
+    if bridge.has_virtio_rx_pending() {
+        frame.rax = 0;
+        return;
+    }
+    block_net_syscall_restart(frame, net_service_rx_wait_key(), 0, handle_wait_rx);
+}
+
+fn handle_wait_work(frame: &mut SyscallContext) {
+    let holder = match current_holder() {
+        Ok(holder) => holder,
+        Err(status) => {
+            frame.rax = status;
+            return;
+        }
+    };
+    if live_network_service_pid() != Some(holder.0) {
+        frame.rax = SYSCALL_EACCES;
+        return;
+    }
+    if let Err(reason) = authorize_network_op_quiet(holder, frame.rsi, NetworkOp::RawDevice, None) {
+        frame.rax = denial_status(reason);
+        return;
+    }
+    if net_bridge_mut().net_service_has_work() {
+        frame.rax = 0;
+        return;
+    }
+    block_net_syscall_restart(frame, net_service_work_wait_key(), 0, handle_wait_work);
 }
 
 fn handle_monotonic_ticks(frame: &mut SyscallContext) {
