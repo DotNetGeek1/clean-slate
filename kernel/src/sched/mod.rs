@@ -39,9 +39,11 @@ const fn task_count_for_features() -> usize {
 use crate::arch::x86_64::context_switch::set_next_task;
 use crate::arch::x86_64::context_switch::TaskStack;
 use crate::arch::x86_64::context_switch::FRESH_TASK_SENTINEL;
+use crate::arch::x86_64::context_switch::TASK_STACK_GUARD_BYTES;
 use crate::arch::x86_64::context_switch::TASK_STACK_SIZE;
 use crate::process::KERNEL_PROCESS_ID;
 use crate::sync::global_cell::GlobalCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 pub(super) const TASK_REQUIRED_PREEMPTIONS: u64 = 2;
 const TASK_PROGRESS_CHUNK: u64 = 4_096;
@@ -90,7 +92,7 @@ pub(crate) struct ThreadProcessResources {
 }
 
 impl Thread {
-    const EMPTY: Self = Self {
+    pub(super) const EMPTY: Self = Self {
         id: 0,
         owner_process_id: 0,
         kind: ThreadKind::Kernel,
@@ -632,6 +634,72 @@ static TASK_STACKS: GlobalCell<[TaskStack; SCHEDULER_THREAD_SLOTS]> =
 /// lifetime of the returned borrow.
 pub(crate) unsafe fn task_stacks_mut() -> &'static mut [TaskStack; SCHEDULER_THREAD_SLOTS] {
     unsafe { &mut *TASK_STACKS.get() }
+}
+
+const TASK_STACK_GUARD_QWORD: u64 = 0x5354_4b47_5541_5244;
+static TASK_STACK_GUARDS_ARMED: AtomicBool = AtomicBool::new(false);
+
+fn task_stack_guard_words(slot: usize) -> *mut u64 {
+    let base = TASK_STACKS.get() as *mut u8;
+    unsafe { base.add(slot * TASK_STACK_SIZE) as *mut u64 }
+}
+
+/// Writes the overflow tripwire into every task stack. Must run before any
+/// task stack is in use.
+pub(crate) fn arm_task_stack_guards() {
+    for slot in 0..SCHEDULER_THREAD_SLOTS {
+        let words = task_stack_guard_words(slot);
+        for index in 0..TASK_STACK_GUARD_BYTES / 8 {
+            unsafe { core::ptr::write_volatile(words.add(index), TASK_STACK_GUARD_QWORD) };
+        }
+    }
+    TASK_STACK_GUARDS_ARMED.store(true, Ordering::Release);
+}
+
+/// Fails closed if the task stack containing `rsp` has overrun its guard.
+/// Kernel statics sit directly below the stacks, so an overrun corrupts them.
+pub(crate) fn check_task_stack_guard(rsp: u64) {
+    if !TASK_STACK_GUARDS_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+    let base = TASK_STACKS.get() as u64;
+    let Some(offset) = rsp.checked_sub(base) else {
+        return;
+    };
+    let slot = (offset / TASK_STACK_SIZE as u64) as usize;
+    if slot >= SCHEDULER_THREAD_SLOTS {
+        return;
+    }
+    let words = task_stack_guard_words(slot);
+    let intact = (0..TASK_STACK_GUARD_BYTES / 8).all(
+        |index| unsafe { core::ptr::read_volatile(words.add(index)) } == TASK_STACK_GUARD_QWORD,
+    );
+    if !intact || offset % (TASK_STACK_SIZE as u64) < TASK_STACK_GUARD_BYTES as u64 {
+        crate::diagnostics::log::kernel_log_fmt(format_args!(
+            "[SCHED] task stack overflow slot={slot} rsp={rsp:#x}\n"
+        ));
+        crate::diagnostics::qemu::fatal_kernel_error("kernel task stack overflowed its guard");
+    }
+}
+
+/// Fault diagnostics: logs each task stack's range and deepest touched byte.
+/// Stacks start zeroed (above the guard), so the lowest non-zero byte bounds
+/// the high-water mark.
+pub(crate) fn log_task_stack_high_water() {
+    let base = TASK_STACKS.get() as *const u8;
+    for slot in 0..SCHEDULER_THREAD_SLOTS {
+        let start = unsafe { base.add(slot * TASK_STACK_SIZE) };
+        let lowest_used = (TASK_STACK_GUARD_BYTES..TASK_STACK_SIZE)
+            .find(|offset| unsafe { core::ptr::read_volatile(start.add(*offset)) } != 0)
+            .unwrap_or(TASK_STACK_SIZE);
+        crate::diagnostics::log::kernel_log_fmt(format_args!(
+            "[PF  ] task_stack[{}] base={:#x} used={:#x}/{:#x}\n",
+            slot,
+            start as u64,
+            TASK_STACK_SIZE - lowest_used,
+            TASK_STACK_SIZE
+        ));
+    }
 }
 
 #[cfg(test)]

@@ -18,9 +18,15 @@ pub fn serial_write_line(message: &str) {
     serial_write_fmt(format_args!("{message}\n"));
 }
 
+/// One call emits one contiguous record: interrupts are masked (and the prior
+/// IF restored) so preemption cannot splice another task's line into it.
 pub fn serial_write_fmt(arguments: fmt::Arguments<'_>) {
-    let mut port = SerialPort;
-    let _ = port.write_fmt(arguments);
+    #[cfg(not(test))]
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let _ = SerialPort.write_fmt(arguments);
+    });
+    #[cfg(test)]
+    let _ = SerialPort.write_fmt(arguments);
 }
 
 /// Write raw bytes to COM1 without UTF-8 interpretation or formatting.

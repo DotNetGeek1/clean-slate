@@ -126,8 +126,9 @@ pub(crate) fn broker_sync(
     };
 
     let key = linux_socket_request_wait_key(request_id);
-    let deadline = on_timeout
-        .map(|_| Deadline(kernel_ticks().saturating_add(super::LINUX_TCP_CONNECT_TIMEOUT_TICKS)));
+    let deadline = on_timeout.map(|_| {
+        Deadline::IrqTicks(kernel_ticks().saturating_add(super::LINUX_TCP_CONNECT_TIMEOUT_TICKS))
+    });
     let timeout = on_timeout.unwrap_or(LinuxTimeoutResult::Zero);
 
     let mut out = [0u8; NETWORK_MAX_PAYLOAD_BYTES];

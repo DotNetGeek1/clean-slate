@@ -149,6 +149,7 @@ $AllTests = [ordered]@{
     "test-m9-linux-socket"       = @{ Aliases = @("m9-linux-socket", "m9.105"); Description = "M9 #105 Linux socket syscalls brokered onto M7"; Role = "Constituent" }
     "test-m9-low-va"            = @{ Aliases = @("m9-low-va", "m9.142"); Description = "M9 #142 low canonical user VA acceptance (production Linux launch at 0x400000)"; Role = "Constituent" }
     "test-m9-linux-exec"        = @{ Aliases = @("m9-linux-exec", "m9.146"); Description = "M9 #146 Linux exec substrate (argv/envp/auxv fixture + commit_exec)"; Role = "Constituent" }
+    "test-m9-linux-runtime"     = @{ Aliases = @("m9-linux-runtime", "m9.103"); Description = "M9 #103 Linux runtime/memory/time/poll syscalls"; Role = "Constituent" }
     "test-m9-linux-proc"        = @{ Aliases = @("m9-linux-proc", "m9.102"); Description = "M9 #102 Linux fork/pipe/wait (proc probe fixture + blocking wait keys)"; Role = "Constituent" }
     "test-m9-rootfs"            = @{ Aliases = @("m9-rootfs", "m9.104"); Description = "M9 #104 embedded rootfs fixture acceptance"; Role = "Constituent" }
     "test-m9-linux-fs"          = @{ Aliases = @("m9-linux-fs", "m9.101"); Description = "M9 #101 Linux filesystem/path projection acceptance"; Role = "Constituent" }

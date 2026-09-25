@@ -114,6 +114,16 @@ pub(crate) fn handle_sys_exit(
         switch_after_exit(Some(next_frame));
     }
 
+    #[cfg(feature = "m9-linux-runtime-self-test")]
+    if let Some(next_frame) = crate::selftest::m9_linux_runtime::after_linux_runtime_probe_exit(
+        pid,
+        ctx.instance_generation,
+        &teardown,
+        allocator,
+    ) {
+        switch_after_exit(Some(next_frame));
+    }
+
     // Still executing on the exiting thread's kernel stack. Any re-Start of a
     // supervised service from this hook must refuse a scheduler slot whose
     // task stack contains the current rsp (see `linux_launch::ensure_slot_stack_is_idle`).

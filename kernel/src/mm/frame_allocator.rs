@@ -9,6 +9,37 @@ use crate::mm::kernel_map_ptr;
 use crate::mm::region::{MemoryRegion, MemoryRegionKind, NormalizedMemoryMap, MAX_MEMORY_REGIONS};
 use crate::mm::PAGE_SIZE;
 
+#[cfg(debug_assertions)]
+const FRAME_POISON_QWORD: u64 = 0xDEAD_BEEF_DEAD_BEEF;
+#[cfg(debug_assertions)]
+const FREE_NODE_BYTES: usize = core::mem::size_of::<FreePageNode>();
+
+#[cfg(debug_assertions)]
+fn poison_freed_frame(frame: u64) {
+    let base = physical_frame_ptr(frame);
+    let mut offset = FREE_NODE_BYTES;
+    while offset < PAGE_SIZE as usize {
+        unsafe {
+            core::ptr::write_unaligned(base.add(offset) as *mut u64, FRAME_POISON_QWORD);
+        }
+        offset += core::mem::size_of::<u64>();
+    }
+}
+
+#[cfg(debug_assertions)]
+fn assert_frame_poison_intact(frame: u64) -> Result<(), &'static str> {
+    let base = physical_frame_ptr(frame);
+    let mut offset = FREE_NODE_BYTES;
+    while offset < PAGE_SIZE as usize {
+        let word = unsafe { core::ptr::read_unaligned(base.add(offset) as *const u64) };
+        if word != FRAME_POISON_QWORD {
+            return Err("physical page allocator detected frame reuse before poison check");
+        }
+        offset += core::mem::size_of::<u64>();
+    }
+    Ok(())
+}
+
 static KERNEL_DIRECT_MAP_READY: AtomicBool = AtomicBool::new(false);
 
 /// Called once the kernel-owned page table and physmap are active.
@@ -32,6 +63,8 @@ pub(crate) struct PageAllocator {
     current_region: usize,
     next_page: u64,
     free_list_head: Option<u64>,
+    #[cfg(debug_assertions)]
+    free_list_tail: Option<u64>,
     total_pages: u64,
     available_pages: u64,
 }
@@ -51,6 +84,8 @@ impl PageAllocator {
             current_region: 0,
             next_page: 0,
             free_list_head: None,
+            #[cfg(debug_assertions)]
+            free_list_tail: None,
             total_pages: 0,
             available_pages: 0,
         };
@@ -121,16 +156,24 @@ impl PageAllocator {
             return Err("attempted to free an already-free frame");
         }
 
-        let node_ptr = physical_frame_ptr(frame) as *mut FreePageNode;
-        unsafe {
-            ptr::write(
-                node_ptr,
-                FreePageNode {
-                    next: self.free_list_head,
-                },
-            );
+        #[cfg(not(debug_assertions))]
+        {
+            let node_ptr = physical_frame_ptr(frame) as *mut FreePageNode;
+            unsafe {
+                ptr::write(
+                    node_ptr,
+                    FreePageNode {
+                        next: self.free_list_head,
+                    },
+                );
+            }
+            self.free_list_head = Some(frame);
         }
-        self.free_list_head = Some(frame);
+        #[cfg(debug_assertions)]
+        {
+            poison_freed_frame(frame);
+            self.push_free_page_fifo(frame);
+        }
         self.available_pages += 1;
         Ok(())
     }
@@ -145,10 +188,43 @@ impl PageAllocator {
 
     fn pop_free_page(&mut self) -> Option<u64> {
         let frame = self.free_list_head?;
+        #[cfg(debug_assertions)]
+        if let Err(message) = assert_frame_poison_intact(frame) {
+            #[cfg(not(test))]
+            crate::diagnostics::qemu::fatal_kernel_error(message);
+            #[cfg(test)]
+            {
+                let _ = message;
+                return None;
+            }
+        }
         let node_ptr = physical_frame_ptr(frame) as *const FreePageNode;
         let node = unsafe { ptr::read(node_ptr) };
         self.free_list_head = node.next;
+        #[cfg(debug_assertions)]
+        if self.free_list_head.is_none() {
+            self.free_list_tail = None;
+        }
         Some(frame)
+    }
+
+    /// Debug-only FIFO enqueue so reuse order differs from LIFO production paths.
+    #[cfg(debug_assertions)]
+    fn push_free_page_fifo(&mut self, frame: u64) {
+        let node_ptr = physical_frame_ptr(frame) as *mut FreePageNode;
+        unsafe {
+            (*node_ptr).next = None;
+        }
+        match self.free_list_tail {
+            Some(tail) => {
+                let tail_ptr = physical_frame_ptr(tail) as *mut FreePageNode;
+                unsafe {
+                    (*tail_ptr).next = Some(frame);
+                }
+            }
+            None => self.free_list_head = Some(frame),
+        }
+        self.free_list_tail = Some(frame);
     }
 
     fn contains_usable_frame(&self, frame: u64) -> bool {
@@ -261,6 +337,25 @@ mod tests {
                 free_pages: 2,
             }
         );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn freed_frame_poison_detects_use_after_free() {
+        let mut pages = AlignedPages([0; (PAGE_SIZE as usize) * 4]);
+        let base = pages.0.as_mut_ptr() as u64;
+        let descriptors = [descriptor(MemoryType::CONVENTIONAL, base, 4)];
+        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
+        let mut allocator = PageAllocator::new(&map).expect("allocator");
+        let frame = allocator.allocate_page().expect("page");
+        unsafe {
+            allocator.free_page(frame).expect("free");
+        }
+        assert_frame_poison_intact(frame).expect("poison after free");
+        unsafe {
+            *(physical_frame_ptr(frame).add(FREE_NODE_BYTES) as *mut u64) = 0;
+        }
+        assert!(assert_frame_poison_intact(frame).is_err());
     }
 
     #[test]

@@ -19,9 +19,16 @@ pub(crate) mod linux_image;
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
+pub(crate) mod linux_mem;
 pub(crate) mod linux_proc;
 #[cfg(feature = "m9-rootfs")]
 pub(crate) mod linux_rootfs;
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+pub(crate) mod linux_signal;
 pub(crate) mod linux_socket;
 pub(crate) mod linux_stdio_m9_payload;
 pub(crate) mod personality;
@@ -110,6 +117,11 @@ impl ResourceDomain {
 
     pub(crate) fn address_space(&self) -> Option<&ProcessAddressSpace> {
         self.address_space.as_ref()
+    }
+
+    /// In-place access; callers must not replace the root frame through it.
+    pub(crate) fn address_space_mut(&mut self) -> Option<&mut ProcessAddressSpace> {
+        self.address_space.as_mut()
     }
 
     pub(crate) fn address_space_resource_counts(&self) -> AddressSpaceResourceCounts {

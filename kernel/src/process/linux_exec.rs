@@ -76,6 +76,8 @@ pub(crate) struct PreparedLinuxImage {
     pub(crate) launch_rsp: u64,
     pub(crate) image_pages: usize,
     pub(crate) page_table_frames: usize,
+    pub(crate) brk_initial: u64,
+    pub(crate) layout: LinuxImageLayout,
 }
 
 fn validate_spec_strings(spec: &LinuxExecSpec<'_>) -> Result<(), LinuxImageError> {
@@ -139,6 +141,20 @@ fn fill_at_random(out: &mut [u8; 16]) {
 
 static PREPARE_IMAGE_PLAN: GlobalCell<Option<LinuxImagePlan>> = GlobalCell::new(None);
 static PREPARE_LOAD_PLAN: GlobalCell<Option<clean_slate_elf::LoadPlan>> = GlobalCell::new(None);
+
+#[cfg_attr(
+    not(any(
+        feature = "m9-linux-runtime-self-test",
+        feature = "m9-linux-proc-self-test"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn reset_prepare_linux_image_scratch() {
+    unsafe {
+        *PREPARE_IMAGE_PLAN.get() = None;
+        *PREPARE_LOAD_PLAN.get() = None;
+    }
+}
 
 fn assert_kernel_task_stack_margin(context: &'static str) {
     let current_rsp: u64;
@@ -299,18 +315,18 @@ pub(crate) fn prepare_linux_image(
             load_plan_slot,
             initial_stack,
         )?);
-        let load_plan = load_plan_slot
-            .as_ref()
-            .ok_or(LinuxImageError::Registry("prepare load plan missing"))?;
         let bytes_len = plan_slot.as_ref().unwrap().launch_stack.bytes_len;
         let built = build_linux_process_image(
             allocator,
             spec.image,
-            load_plan,
+            &plan,
             plan_slot.as_ref().unwrap(),
             &initial_stack.bytes[..bytes_len],
         )?;
+        let brk_initial = crate::process::linux_mem::brk_initial_from_load_plan(&plan);
+        let layout = plan_slot.as_ref().expect("plan").layout;
         plan_slot.take();
+        load_plan_slot.take();
         let page_table_frames = built.address_space.resource_counts().page_table_frames;
         Ok(PreparedLinuxImage {
             address_space: built.address_space,
@@ -318,7 +334,47 @@ pub(crate) fn prepare_linux_image(
             launch_rsp: built.launch_rsp,
             image_pages: built.image_pages,
             page_table_frames,
+            brk_initial,
+            layout,
         })
+    })
+}
+
+/// Pick an empty scheduler slot whose static kernel stack is not the one we
+/// are executing on. Required when launching from the Linux `exit` path, which
+/// still runs on the exiting thread's kernel stack.
+#[cfg(any(
+    feature = "m9-linux-proc-self-test",
+    feature = "m9-linux-runtime-self-test"
+))]
+pub(crate) fn pick_scheduler_slot_for_relaunch() -> Result<(usize, u64), &'static str> {
+    use crate::arch::x86_64::context_switch::task_stack_top;
+    use crate::arch::x86_64::cpu::without_interrupts;
+    use crate::sched::{scheduler_mut, task_stacks_mut, ThreadState, TASK_COUNT};
+
+    let rsp: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, rsp",
+            out(reg) rsp,
+            options(nostack, nomem, preserves_flags)
+        );
+    }
+    let stacks = unsafe { task_stacks_mut() };
+    without_interrupts(|| {
+        let scheduler = unsafe { scheduler_mut() };
+        for (slot, stack) in stacks.iter().enumerate().take(TASK_COUNT) {
+            if scheduler.threads[slot].state != ThreadState::Empty {
+                continue;
+            }
+            let base = stack.0.as_ptr() as u64;
+            let top = task_stack_top(stack);
+            if rsp > base && rsp <= top {
+                continue;
+            }
+            return Ok((slot, top));
+        }
+        Err("linux relaunch: no scheduler slot with idle kernel stack")
     })
 }
 
@@ -348,6 +404,13 @@ pub(crate) fn launch_linux_process_from_spec(
         image,
         page_table_frames,
     )?;
+    crate::process::linux_mem::init_for_image(
+        launched.pid,
+        launched.instance_generation,
+        &prepared.layout,
+        prepared.brk_initial,
+    )
+    .map_err(|_| LinuxImageError::Registry("linux launch: brk init failed"))?;
     #[cfg(feature = "m9-linux-socket")]
     crate::process::linux_socket::grant_linux_network_capabilities(launched.pid)
         .map_err(|_| LinuxImageError::Registry("linux launch: network capability grant failed"))?;
@@ -390,7 +453,8 @@ pub(crate) fn commit_exec(
     let entry = prepared.entry;
     let launch_rsp = prepared.launch_rsp;
     let new_root = prepared.address_space.root_frame;
-
+    let brk_initial = prepared.brk_initial;
+    let layout = prepared.layout;
     let current_rsp: u64;
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) current_rsp, options(nomem, nostack));
@@ -416,6 +480,8 @@ pub(crate) fn commit_exec(
         if process.resource_domain.address_space().is_none() {
             return Err(LinuxImageError::Registry("exec commit: no address space"));
         }
+        crate::process::linux_mem::reset_for_exec(pid, live_gen, allocator);
+        crate::process::linux_signal::reset_for_exec(pid, live_gen);
         // Point of no return: from here the process owns the new image. Any
         // failure below is a kernel invariant violation, not an errno -- returning
         // an error would resume the old RIP inside the new address space.
@@ -427,6 +493,8 @@ pub(crate) fn commit_exec(
         if linux_fd::close_on_exec(pid, live_gen).is_err() {
             fatal_kernel_error("exec commit: close_on_exec failed after address-space swap");
         }
+        crate::process::linux_mem::init_for_image(pid, live_gen, &layout, brk_initial)
+            .map_err(|_| LinuxImageError::Registry("exec commit: linux_mem init failed"))?;
         if destroy_old_exec_address_space(old, allocator).is_err() {
             fatal_kernel_error("exec commit: destroying the old address space failed");
         }

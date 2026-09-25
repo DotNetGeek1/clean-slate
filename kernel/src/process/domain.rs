@@ -146,6 +146,21 @@ pub(crate) fn teardown_current_process(
         linux_fd::release_for_process(process_id, generation);
         #[cfg(feature = "m9-linux-trace")]
         crate::syscall::linux::trace::release_process(process_id, generation);
+        #[cfg(not(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        )))]
+        {
+            crate::process::linux_mem::release_for_process(process_id, generation, allocator);
+            crate::process::linux_signal::release_for_process(process_id, generation);
+        }
+        #[cfg(not(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        )))]
+        crate::syscall::linux::poll::clear_poll_interest_for_pid(process_id);
     }
     linux_fd::release_for_process_by_pid(process_id);
     let registry_live = |check_pid: u64| unsafe { process_registry_mut().get(check_pid).is_some() };

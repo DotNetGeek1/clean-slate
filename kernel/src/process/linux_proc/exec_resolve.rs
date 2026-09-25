@@ -51,6 +51,12 @@ pub(crate) fn resolve_executable(
     ))]
     const EXEC_ARGS: &[u8] =
         include_bytes!("../../../../fixtures/linux-exec-args/linux-exec-args-x86_64");
+    #[cfg(any(
+        feature = "m9-linux-runtime-self-test",
+        feature = "m9-linux-trace-self-test"
+    ))]
+    const RUNTIME_PROBE: &[u8] =
+        include_bytes!("../../../../fixtures/linux-runtime-probe/linux-runtime-probe-x86_64");
 
     let image: Option<&[u8]> = match path {
         b"/bin/busybox" | b"/bin/sh" => Some(LINUX_M8_FIXTURE),
@@ -76,6 +82,16 @@ pub(crate) fn resolve_executable(
             feature = "m9-linux-trace-self-test"
         )))]
         b"/fixture/linux-exec-args" => None,
+        #[cfg(any(
+            feature = "m9-linux-runtime-self-test",
+            feature = "m9-linux-trace-self-test"
+        ))]
+        b"/fixture/linux-runtime-probe" => Some(RUNTIME_PROBE),
+        #[cfg(not(any(
+            feature = "m9-linux-runtime-self-test",
+            feature = "m9-linux-trace-self-test"
+        )))]
+        b"/fixture/linux-runtime-probe" => None,
         _ => None,
     };
     let Some(image) = image else {
