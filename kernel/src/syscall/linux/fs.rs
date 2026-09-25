@@ -197,8 +197,7 @@ pub(crate) fn handle_sys_getdents64(
     let mut scratch = [0u8; 256];
     while (cursor as usize) + offset < child_count {
         let (node, dt) = children[(cursor as usize) + offset];
-        let path_buf = table_mut().path_of_node(node.index, &image)?;
-        let name = final_name(&path_buf)?;
+        let name = table_mut().dirent_name(node)?;
         let n = encode_dirent64(&mut scratch, (node.index as u64) + 1, 0, dt, name);
         if n == 0 {
             if wrote == 0 {
@@ -264,16 +263,3 @@ fn copy_path_from_user(ptr: u64) -> Result<UserPathBuf, LinuxErrno> {
     })
 }
 
-fn final_name(path: &[u8]) -> Result<&[u8], LinuxErrno> {
-    let mut p = path;
-    while p.ends_with(&[0]) {
-        p = &p[..p.len() - 1];
-    }
-    if p.is_empty() || p == b"/" {
-        return Err(EINVAL);
-    }
-    match p.rsplit(|&b| b == b'/').next() {
-        Some(name) if !name.is_empty() => Ok(name),
-        _ => Err(EINVAL),
-    }
-}

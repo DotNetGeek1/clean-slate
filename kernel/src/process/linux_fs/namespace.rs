@@ -551,6 +551,17 @@ impl NodeTable {
         self.path_of(index, image)
     }
 
+    /// Final path component for `getdents64` (not the full normalized path).
+    pub(crate) fn dirent_name(&self, id: NodeId) -> Result<&[u8], LinuxErrno> {
+        self.check_node(id)?;
+        let node = &self.nodes[id.index as usize];
+        let len = node.name_len as usize;
+        if len == 0 || (len == 1 && node.name[0] == b'/') {
+            return Err(clean_slate_linux_abi::EINVAL);
+        }
+        Ok(&node.name[..len])
+    }
+
     fn path_of(&self, index: u16, _image: &Image<'_>) -> Result<[u8; LINUX_PATH_MAX], LinuxErrno> {
         let mut buf = [0u8; LINUX_PATH_MAX];
         let mut stack = [0u16; 16];
