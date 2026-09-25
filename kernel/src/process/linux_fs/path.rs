@@ -82,6 +82,33 @@ pub fn normalize_path(input: &[u8], out: &mut [u8; LINUX_PATH_MAX]) -> Result<us
     Ok(pos)
 }
 
+/// Resolve `input` against an absolute normalized `cwd` (M9: `getcwd` is `/` until `chdir`).
+pub fn resolve_path(
+    cwd: &[u8],
+    input: &[u8],
+    out: &mut [u8; LINUX_PATH_MAX],
+) -> Result<usize, LinuxErrno> {
+    if input.is_empty() {
+        return normalize_path(cwd, out);
+    }
+    if input[0] == b'/' {
+        return normalize_path(input, out);
+    }
+    let mut scratch = [0u8; LINUX_PATH_MAX];
+    let cwd_len = normalize_path(cwd, &mut scratch)?;
+    let mut pos = cwd_len;
+    if pos + 1 + input.len() >= LINUX_PATH_MAX {
+        return Err(ENAMETOOLONG);
+    }
+    if scratch[pos - 1] != b'/' {
+        scratch[pos] = b'/';
+        pos += 1;
+    }
+    scratch[pos..pos + input.len()].copy_from_slice(input);
+    pos += input.len();
+    normalize_path(&scratch[..pos], out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +139,13 @@ mod tests {
     fn nul_rejected() {
         let mut buf = [0u8; LINUX_PATH_MAX];
         assert!(normalize_path(b"a\0b", &mut buf).is_err());
+    }
+
+    #[test]
+    fn relative_path_resolves_against_cwd() {
+        let mut out = [0u8; LINUX_PATH_MAX];
+        let len = resolve_path(b"/", b"tmp/demo", &mut out).expect("resolve");
+        assert_eq!(&out[..len], b"/tmp/demo");
     }
 
     #[test]

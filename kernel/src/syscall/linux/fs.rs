@@ -8,7 +8,7 @@ use crate::process::linux_fd::{
     open_description::{DescriptorKind, DirHandleRef, FileHandleRef, OpenAccess, OpenStatus},
 };
 use crate::process::linux_fs::namespace::{check_write_allowed, NodeId};
-use crate::process::linux_fs::path::{copy_bounded_path, LINUX_PATH_MAX};
+use crate::process::linux_fs::path::{resolve_path, LINUX_PATH_MAX};
 use crate::process::linux_fs::table_mut;
 use crate::process::linux_rootfs;
 use clean_slate_linux_abi::{
@@ -257,9 +257,11 @@ impl UserPathBuf {
 fn copy_path_from_user(ptr: u64) -> Result<UserPathBuf, LinuxErrno> {
     let mut scratch = [0u8; LINUX_PATH_MAX];
     let len = copy_user_path_cstring(ptr, &mut scratch)?;
+    let mut storage = [0u8; LINUX_PATH_MAX];
+    let norm_len = resolve_path(b"/", &scratch[..len], &mut storage)?;
     Ok(UserPathBuf {
-        storage: copy_bounded_path(&scratch[..len])?,
-        len,
+        storage,
+        len: norm_len,
     })
 }
 
