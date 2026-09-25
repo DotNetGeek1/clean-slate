@@ -21,9 +21,12 @@ pub(crate) fn linux_wait4(
     if rusage != 0 {
         // Documented: non-NULL rusage ignored in M9 traces (always NULL).
     }
-    if wait_pid != -1 && wait_pid <= 0 {
+    if wait_pid < -1 {
         return Err(EINVAL);
     }
+    // Linux: `0` waits for any child in the caller's process group; M9 has no
+    // separate pgid tracking yet, so treat `0` like `-1` (any child of parent).
+    let wait_filter = if wait_pid == 0 { -1 } else { wait_pid };
     let parent = ProcId {
         pid: ctx.pid,
         generation: ctx.instance_generation,
@@ -32,7 +35,7 @@ pub(crate) fn linux_wait4(
     if !table.has_any_child(parent) {
         return Err(ECHILD);
     }
-    if let Some((child, status)) = table.find_zombie_child(parent, wait_pid) {
+    if let Some((child, status)) = table.find_zombie_child(parent, wait_filter) {
         if wstatus_ptr != 0 {
             let bytes = (status as u32).to_le_bytes();
             validate_user_writable_pointer_range(wstatus_ptr, bytes.len() as u64)
@@ -44,7 +47,7 @@ pub(crate) fn linux_wait4(
         table.reap_zombie(child);
         return Ok(child.pid);
     }
-    if !table.has_waitable_children(parent, wait_pid) {
+    if !table.has_waitable_children(parent, wait_filter) {
         return Err(ECHILD);
     }
     block_linux_syscall(
