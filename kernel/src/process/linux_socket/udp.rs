@@ -291,75 +291,36 @@ pub(crate) fn read_datagram(
             return Ok(n as u64);
         }
 
-        while let Some(req_id) = with_socket_mut(id, |socket| socket.pending_rx_req)? {
-            if let Some(n) = drain_rx_if_ready(id, ctx, scratch)? {
-                return Ok(n as u64);
-            }
-            if nonblock {
-                return Err(EAGAIN);
-            }
-            match block_linux_syscall(
-                request,
-                ctx,
-                linux_socket_request_wait_key(req_id),
-                None,
-                LinuxTimeoutResult::Zero,
-            ) {
-                Ok(_) => continue,
-                Err(errno) => return Err(errno),
-            }
+        let has_pending = with_socket_mut(id, |socket| socket.pending_rx_req.is_some())?;
+        if !has_pending {
+            ensure_udp_receive_armed(ctx, id)?;
         }
 
-        let broker = with_socket_mut(id, |socket| {
-            broker_sync(
-                request,
-                ctx,
-                id,
-                &mut socket.inflight_request_id,
-                NetworkRequest::Receive {
-                    session: socket.session,
-                    max_len: scratch.len().min(LINUX_UDP_MAX_DATAGRAM) as u32,
-                },
-                &[],
-                Some(clean_slate_network::session::SessionGeneration::new(
-                    socket.session_generation,
-                )),
-                None,
-            )
-        })?;
-
-        let outcome = match broker {
-            Ok(outcome) => outcome,
-            Err(block_or_err) => {
+        let req_id = match with_socket_mut(id, |socket| socket.pending_rx_req)? {
+            Some(id) => id,
+            None => {
                 if nonblock {
-                    if let Some(n) = drain_rx_if_ready(id, ctx, scratch)? {
-                        return Ok(n as u64);
-                    }
                     return Err(EAGAIN);
                 }
-                return block_or_err;
+                continue;
             }
         };
 
-        match outcome.response {
-            NetworkResponse::Receive { payload_len } => {
-                let n = payload_len as usize;
-                let copy = n.min(scratch.len()).min(NETWORK_MAX_PAYLOAD_BYTES);
-                return with_socket_mut(id, |socket| {
-                    push_rx_datagram(socket, &outcome.payload[..copy]);
-                    Ok(take_rx_datagram(socket, scratch).unwrap_or(copy) as u64)
-                })?;
-            }
-            NetworkResponse::Error { code } => {
-                if code == NetworkError::Timeout.code() {
-                    if nonblock {
-                        return Err(EAGAIN);
-                    }
-                    continue;
-                }
-                return Err(map_udp_receive_error(code, nonblock));
-            }
-            _ => return Err(clean_slate_linux_abi::EINVAL),
+        if let Some(n) = drain_rx_if_ready(id, ctx, scratch)? {
+            return Ok(n as u64);
+        }
+        if nonblock {
+            return Err(EAGAIN);
+        }
+        match block_linux_syscall(
+            request,
+            ctx,
+            linux_socket_request_wait_key(req_id),
+            None,
+            LinuxTimeoutResult::Zero,
+        ) {
+            Ok(_) => continue,
+            Err(errno) => return Err(errno),
         }
     }
 }

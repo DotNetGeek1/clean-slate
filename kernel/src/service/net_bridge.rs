@@ -443,18 +443,6 @@ impl NetBridge {
         Some((slot.request_id, slot.request, slot.payload_len, slot.client))
     }
 
-    pub fn service_requeue(&mut self, request_id: u64) -> Result<(), NetBridgeError> {
-        let index = self
-            .slots
-            .iter()
-            .position(|slot| {
-                slot.request_id == request_id && slot.state == ClientSlotState::InService
-            })
-            .ok_or(NetBridgeError::InvalidRequest)?;
-        self.slots[index].state = ClientSlotState::Pending;
-        Ok(())
-    }
-
     pub fn service_complete(
         &mut self,
         request_id: u64,
@@ -532,6 +520,24 @@ impl NetBridge {
             }
         }
         requeued
+    }
+
+    #[cfg(feature = "m9-userspace-self-test")]
+    pub(crate) fn log_slot_diag(&self) {
+        let mut pending = 0u32;
+        let mut in_service = 0u32;
+        let mut done = 0u32;
+        for slot in &self.slots {
+            match slot.state {
+                ClientSlotState::Pending => pending += 1,
+                ClientSlotState::InService => in_service += 1,
+                ClientSlotState::Done => done += 1,
+                ClientSlotState::Free => {}
+            }
+        }
+        kernel_log_fmt(format_args!(
+            "[M9.D] bridge pending={pending} in_service={in_service} done={done}\n"
+        ));
     }
 
     pub fn raw_transmit(

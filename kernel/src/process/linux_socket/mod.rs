@@ -627,6 +627,27 @@ pub(crate) fn readiness_changed(open: OpenDescriptionId) {
     crate::syscall::linux::poll::notify_readiness_changed(open);
 }
 
+#[cfg(feature = "m9-userspace-self-test")]
+pub(crate) fn log_udp_poll_diag(pid: u64) {
+    use crate::diagnostics::log::kernel_log_fmt;
+    let pool = unsafe { &*SOCKET_POOL.get() };
+    for (index, slot) in pool.slots.iter().enumerate() {
+        if slot.owner_pid != pid || slot.kind != SocketKindLinux::Udp {
+            continue;
+        }
+        if slot.state == SocketState::Closed {
+            continue;
+        }
+        kernel_log_fmt(format_args!(
+            "[M9.D] udp idx={index} rx_q={} pending_rx={:?} inflight={:?} dropped={}\n",
+            slot.rx_count,
+            slot.pending_rx_req,
+            slot.inflight_request_id,
+            slot.rx_dropped,
+        ));
+    }
+}
+
 pub(crate) fn readiness_for(id: LinuxSocketId) -> Readiness {
     let pool = unsafe { &*SOCKET_POOL.get() };
     let socket = pool

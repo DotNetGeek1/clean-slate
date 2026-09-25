@@ -39,8 +39,6 @@ pub const NET_SUBOP_ACK_HOLDER_EXIT: u64 = 9;
 pub const NET_SUBOP_MONOTONIC_TICKS: u64 = 10;
 /// Returns LAPIC IRQ period in nanoseconds (0 if uncalibrated).
 pub const NET_SUBOP_TICK_PERIOD_NS: u64 = 11;
-/// Requeue one in-service bridge slot to pending (async service work).
-pub const NET_SUBOP_SERVICE_REQUEUE: u64 = 12;
 
 pub const NET_SERVICE_ROLE_ID: u64 = 1;
 

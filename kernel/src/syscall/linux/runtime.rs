@@ -396,6 +396,16 @@ fn poll_wait_with_timeout(
             return Ok(0);
         }
     }
+    #[cfg(feature = "m9-userspace-self-test")]
+    {
+        use core::sync::atomic::{AtomicU8, Ordering};
+        static POLL_BLOCK_DIAG: AtomicU8 = AtomicU8::new(0);
+        if nfds > 0 && POLL_BLOCK_DIAG.load(Ordering::Relaxed) < 4 {
+            POLL_BLOCK_DIAG.fetch_add(1, Ordering::Relaxed);
+            crate::process::linux_socket::log_udp_poll_diag(ctx.pid);
+            crate::service::net_bridge::net_bridge_mut().log_slot_diag();
+        }
+    }
     let result = block_linux_syscall(
         request,
         ctx,

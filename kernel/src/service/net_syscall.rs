@@ -17,7 +17,7 @@ use clean_slate_service_fixtures::{
     NETWORK_SERVICE_NEXT_WIRE_BYTES, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT,
     NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY,
     NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
-    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SERVICE_REQUEUE, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS,
+    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS,
 };
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
@@ -158,7 +158,6 @@ pub(crate) fn handle_syscall_network_request(frame: &mut SyscallContext) {
         NET_SUBOP_POLL => handle_poll(frame),
         NET_SUBOP_SERVICE_NEXT => handle_service_next(frame),
         NET_SUBOP_SERVICE_COMPLETE => handle_service_complete(frame),
-        NET_SUBOP_SERVICE_REQUEUE => handle_service_requeue(frame),
         NET_SUBOP_RAW_GEOMETRY => handle_raw_geometry(frame),
         NET_SUBOP_RAW_TRANSMIT => handle_raw_transmit(frame),
         NET_SUBOP_RAW_RECEIVE => handle_raw_receive(frame),
@@ -427,28 +426,6 @@ fn handle_service_complete(frame: &mut SyscallContext) {
             let _woken = crate::process::linux_socket::notify_request_complete(request_id);
             frame.rax = 0;
         }
-        Err(error) => frame.rax = bridge_error_status(error),
-    }
-}
-
-fn handle_service_requeue(frame: &mut SyscallContext) {
-    let holder = match current_holder() {
-        Ok(holder) => holder,
-        Err(status) => {
-            frame.rax = status;
-            return;
-        }
-    };
-    if live_network_service_pid() != Some(holder.0) {
-        frame.rax = SYSCALL_EACCES;
-        return;
-    }
-    if let Err(reason) = authorize_network_op(holder, frame.rsi, NetworkOp::RawDevice, None) {
-        frame.rax = denial_status(reason);
-        return;
-    }
-    match net_bridge_mut().service_requeue(frame.rdx) {
-        Ok(()) => frame.rax = 0,
         Err(error) => frame.rax = bridge_error_status(error),
     }
 }
