@@ -6,7 +6,7 @@ use super::write::{ensure_fd_open, write_chunked};
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::process::linux_fd::{
     self, apply_linux_fl_to_status, ensure_open_fd, open_description::DescriptorKind,
-    open_status_to_linux_fl, projection_for,
+    open_status_to_linux_fl, projection_for, LinuxFdProjection,
 };
 use clean_slate_linux_abi::{LinuxSyscallRequest, LinuxSyscallResult, EBADF, EFAULT, EINVAL};
 
@@ -190,7 +190,8 @@ pub(crate) fn handle_sys_writev(
     let pid = ctx.pid;
     let generation = ctx.instance_generation;
 
-    ensure_fd_open(projection_for(pid, generation, fd))?;
+    let projection = projection_for(pid, generation, fd)?;
+    ensure_fd_open(Ok(projection))?;
 
     if iovcnt == 0 {
         return Ok(0);
@@ -222,6 +223,18 @@ pub(crate) fn handle_sys_writev(
         }
     }
 
+    let write_chunk = |chunk: &[u8]| -> Result<usize, LinuxErrno> {
+        if chunk.is_empty() {
+            return Ok(0);
+        }
+        #[cfg(feature = "m9-rootfs")]
+        if matches!(projection, LinuxFdProjection::FileBackend) {
+            let n = super::fs_io::write_file_fd(request, ctx, pid, generation, fd, chunk)?;
+            return usize::try_from(n).map_err(|_| EINVAL);
+        }
+        linux_fd::write_fd(pid, generation, fd, chunk)
+    };
+
     write_chunked(
         total_len,
         |offset, len, dst| {
@@ -244,10 +257,7 @@ pub(crate) fn handle_sys_writev(
             }
             Ok(copied)
         },
-        |chunk| {
-            let sent = linux_fd::write_fd(pid, generation, fd, chunk)?;
-            Ok(sent)
-        },
+        write_chunk,
     )
 }
 

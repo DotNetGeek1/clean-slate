@@ -17,7 +17,10 @@ use crate::process::linux_exec::{
 use crate::process::linux_fd::{
     self, console_sink_render_style, open_description_pool_live_count, ConsoleSinkRenderStyle,
 };
-use crate::process::linux_proc::{pipe::pool, table::table};
+use crate::process::linux_proc::{
+    pipe::pool,
+    table::{proc_table_invariant_violations, table},
+};
 use crate::process::linux_fs::object_backend::bootstrap_tmp_file_bytes;
 use crate::process::linux_image::{LINUX_CONVENTIONAL_LOAD_POLICY, LINUX_STACK_PAGES};
 use crate::process::linux_rootfs;
@@ -469,7 +472,7 @@ pub(crate) fn after_linux_exit_group(
             if teardown.exit_status != u64::from(cmd.expect_status) {
                 fatal_kernel_error("m9 userspace command exit status");
             }
-            if table::proc_table_invariant_violations() > 0 {
+            if proc_table_invariant_violations() > 0 {
                 fatal_kernel_error("m9 userspace proc-table invariant");
             }
             validate_stdout_expectations(cmd);
