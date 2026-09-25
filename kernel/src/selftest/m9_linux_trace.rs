@@ -313,7 +313,11 @@ pub(crate) fn after_probe_exit_group(
     if cycle != 1 {
         fatal_kernel_error("m9 trace proc exit on unexpected cycle");
     }
+    crate::syscall::linux::trace::sweep_dead_process_trace_slots(|pid| unsafe {
+        crate::process::process_registry_mut().get(pid).is_some()
+    });
     if live_trace_process_slots() != 0 {
+        crate::syscall::linux::trace::log_live_trace_slots_for_selftest();
         fatal_kernel_error("m9 trace proc exit with live trace slots");
     }
     log_trace_baseline("after_proc_wait");

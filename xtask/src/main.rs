@@ -2659,6 +2659,15 @@ fn run_acceptance_command(
                             return Err(error);
                         }
                     }
+                    if marker_set_is_ordered(marker_set, &M9_LINUX_TRACE_ACCEPTANCE_MARKERS) {
+                        if let Err(error) = validate_m9_linux_trace_ltrc(&output) {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(error);
+                        }
+                    }
                     authoritative_pass = true;
                     terminate_child(&mut child)?;
                     child_status = Some(child.wait()?);
@@ -2727,6 +2736,9 @@ fn validate_output_markers(output: &str, marker_set: MarkerSet<'static>) -> Resu
         if marker_set_is_ordered(marker_set, &M9_LINUX_FS_ACCEPTANCE_MARKERS) {
             validate_m9_linux_fs_probe_stdout(output)?;
         }
+        if marker_set_is_ordered(marker_set, &M9_LINUX_TRACE_ACCEPTANCE_MARKERS) {
+            validate_m9_linux_trace_ltrc(output)?;
+        }
         if markers_require_verbatim_linux_hello(marker_set) {
             assert_no_ipc_framed_linux_hello(output)?;
         }
@@ -2777,6 +2789,59 @@ fn validate_m9_linux_fs_block_write(output: &str) -> Result<(), XtaskError> {
             "block write evidence after ls /bin ok (BLK op=write or tmp+big write/read ok)"
                 .to_owned(),
         ));
+    }
+    Ok(())
+}
+
+/// Reject restart-sentinel leaks and duplicate syscall completions on block/restart paths.
+fn validate_m9_linux_trace_ltrc(output: &str) -> Result<(), XtaskError> {
+    let mut pending_completion: Option<(u64, u64)> = None;
+    for line in output.lines() {
+        let line = line.trim_end_matches('\r');
+        if !line.contains("[LTRC]") {
+            pending_completion = None;
+            continue;
+        }
+        if line.contains(" dropped=") {
+            continue;
+        }
+        let Some(nr_pos) = line.find(" nr=") else {
+            pending_completion = None;
+            continue;
+        };
+        let after_nr = &line[nr_pos + 4..];
+        let nr_end = after_nr
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after_nr.len());
+        let nr = after_nr[..nr_end]
+            .parse::<u64>()
+            .map_err(|_| XtaskError::MissingMarker("m9 trace nr parse".to_owned()))?;
+        if line.ends_with(" blocked") || line.ends_with(" woke") || line.ends_with(" timeout") {
+            pending_completion = Some((nr, nr));
+            continue;
+        }
+        if let Some(arrow) = line.find(" -> ") {
+            let after_arrow = &line[arrow + 4..];
+            let space = after_arrow
+                .find(' ')
+                .ok_or_else(|| XtaskError::MissingMarker("m9 trace result token".to_owned()))?;
+            let val = after_arrow[..space]
+                .parse::<u64>()
+                .map_err(|_| XtaskError::MissingMarker("m9 trace result parse".to_owned()))?;
+            let reason = after_arrow[space + 1..].trim();
+            if reason == "ok" && val == nr {
+                return Err(XtaskError::MissingMarker(format!(
+                    "LTRC must not publish syscall nr as user result (nr={nr})"
+                )));
+            }
+            if pending_completion == Some((nr, nr)) && reason == "ok" {
+                pending_completion = None;
+                continue;
+            }
+            pending_completion = None;
+        } else {
+            pending_completion = None;
+        }
     }
     Ok(())
 }

@@ -68,9 +68,18 @@ pub(crate) const fn classify_errno(errno: LinuxErrno) -> LinuxTraceReason {
 
 const RING_CAPACITY: usize = 32;
 const MAX_PROCESS_TRACE_SLOTS: usize = 16;
+#[cfg(feature = "m9-linux-trace-self-test")]
+const GLOBAL_MAX_TOKENS: u32 = 32;
+#[cfg(not(feature = "m9-linux-trace-self-test"))]
 const GLOBAL_MAX_TOKENS: u32 = 64;
+#[cfg(feature = "m9-linux-trace-self-test")]
+const PER_PROCESS_MAX_TOKENS: u32 = 16;
+#[cfg(not(feature = "m9-linux-trace-self-test"))]
 const PER_PROCESS_MAX_TOKENS: u32 = 32;
 
+#[cfg(feature = "m9-linux-trace-self-test")]
+const TOKENS_PER_TICK: u32 = 0;
+#[cfg(not(feature = "m9-linux-trace-self-test"))]
 const TOKENS_PER_TICK: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +254,22 @@ impl LinuxTraceState {
         0
     }
 
+    fn drop_pending_ring_lines_for_pid(&mut self, pid: u64) {
+        let mut retained = [None; RING_CAPACITY];
+        let mut retained_len = 0usize;
+        while let Some(line) = self.ring.pop_front() {
+            if line.identity.pid == pid {
+                continue;
+            }
+            retained[retained_len] = Some(line);
+            retained_len += 1;
+        }
+        for index in 0..retained_len {
+            self.ring
+                .push(retained[index].take().expect("retained line"));
+        }
+    }
+
     pub(crate) fn release_process(&mut self, pid: u64, generation: InstanceGeneration) {
         for slot in &mut self.processes {
             if slot.active() && slot.identity.pid == pid && slot.identity.generation == generation {
@@ -253,6 +278,7 @@ impl LinuxTraceState {
                     slot.pending_drops = 0;
                 }
                 *slot = PerProcessTrace::EMPTY;
+                self.drop_pending_ring_lines_for_pid(pid);
                 return;
             }
         }
@@ -522,6 +548,32 @@ pub(crate) fn reset_trace_state() {
 #[cfg(feature = "m9-linux-trace-self-test")]
 pub(crate) fn live_trace_process_slots() -> usize {
     state_mut().live_process_slots()
+}
+
+/// Drop trace state for processes no longer in the registry (teardown already ran).
+#[cfg(feature = "m9-linux-trace-self-test")]
+pub(crate) fn sweep_dead_process_trace_slots(is_live: impl Fn(u64) -> bool) {
+    let state = state_mut();
+    for index in 0..state.processes.len() {
+        let pid = state.processes[index].identity.pid;
+        if state.processes[index].active() && !is_live(pid) {
+            let generation = state.processes[index].identity.generation;
+            state.release_process(pid, generation);
+        }
+    }
+}
+
+#[cfg(feature = "m9-linux-trace-self-test")]
+pub(crate) fn log_live_trace_slots_for_selftest() {
+    let state = state_mut();
+    for slot in &state.processes {
+        if slot.active() {
+            kernel_log_fmt(format_args!(
+                "[M9.T] live_trace_slot pid={} gen={}\n",
+                slot.identity.pid, slot.identity.generation.0
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

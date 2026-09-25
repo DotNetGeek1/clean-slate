@@ -254,9 +254,17 @@ pub(crate) fn block_current_thread_with_resume(
 
         let table = wait_table_mut();
         if table.consume_pending_wake(key) {
-            thread.blocked_syscall_frame = 0;
-            set_blocked_resume(thread_index, BlockedResume::NativeOutcome);
-            return Ok(false);
+            match resume {
+                BlockedResume::NativeOutcome => {
+                    thread.blocked_syscall_frame = 0;
+                    set_blocked_resume(thread_index, BlockedResume::NativeOutcome);
+                    return Ok(false);
+                }
+                BlockedResume::RestartSyscall { .. } => {
+                    // Pending wakes may be stale (recorded when no thread was blocked).
+                    // Linux handlers re-check after a real block; ignore the shortcut.
+                }
+            }
         }
 
         let slot_index = table.allocate_slot()?;

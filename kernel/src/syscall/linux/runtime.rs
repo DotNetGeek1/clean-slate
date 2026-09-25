@@ -248,7 +248,7 @@ fn handle_sys_nanosleep(
         Some(deadline),
         LinuxTimeoutResult::Zero,
     );
-    if result == Ok(request.nr) {
+    if super::block::is_block_restart_result(result) {
         if rem_ptr != 0 {
             write_remaining_timespec(rem_ptr, deadline)?;
         }
