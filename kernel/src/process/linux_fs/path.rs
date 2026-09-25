@@ -117,13 +117,13 @@ mod tests {
     #[test]
     fn normalize_uses_path_len_not_padded_storage() {
         let mut padded = [0u8; LINUX_PATH_MAX];
-        padded[..8].copy_from_slice(b"/bin/ls");
+        padded[..7].copy_from_slice(b"/bin/ls");
         let mut out = [0u8; LINUX_PATH_MAX];
         assert_eq!(
             normalize_path(&padded, &mut out).unwrap_err(),
             ENAMETOOLONG
         );
-        let len = normalize_path(&padded[..8], &mut out).expect("short slice");
+        let len = normalize_path(&padded[..7], &mut out).expect("short slice");
         assert_eq!(&out[..len], b"/bin/ls");
     }
 }
