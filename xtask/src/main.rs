@@ -2282,7 +2282,11 @@ fn find_ovmf() -> Result<OvmfPaths, XtaskError> {
     let env_ovmf = ovmf_from_env(env::var_os("OVMF_CODE"), env::var_os("OVMF_VARS"));
     if let Some(ovmf) = env_ovmf {
         if ovmf.code.is_file() && ovmf.vars_template.is_file() {
-            return Ok(ovmf);
+            let vars_template = resolve_ovmf_vars_template(&ovmf.code, &ovmf.vars_template);
+            return Ok(OvmfPaths {
+                code: ovmf.code,
+                vars_template,
+            });
         }
         return Err(XtaskError::MissingOvmf);
     }
@@ -3072,6 +3076,44 @@ fn ovmf_from_env(code: Option<OsString>, vars: Option<OsString>) -> Option<OvmfP
     }
 }
 
+/// OVMF_VARS in the environment often points at a workspace working copy that
+/// QEMU mutates; never use that file as the copy source for the next boot.
+fn resolve_ovmf_vars_template(code: &Path, env_vars: &Path) -> PathBuf {
+    if !ovmf_vars_env_is_mutable_working_copy(env_vars) {
+        return env_vars.to_path_buf();
+    }
+    stock_ovmf_vars_beside_code(code).unwrap_or_else(|| env_vars.to_path_buf())
+}
+
+fn ovmf_vars_env_is_mutable_working_copy(path: &Path) -> bool {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("OVMF_VARS.runtime."))
+    {
+        return true;
+    }
+    let root = workspace_root();
+    path == root.join("target").join("OVMF_VARS.fd")
+        || path == root.join("target").join("m5").join("OVMF_VARS.fd")
+}
+
+fn stock_ovmf_vars_beside_code(code: &Path) -> Option<PathBuf> {
+    let parent = code.parent()?;
+    for name in [
+        "edk2-x86_64-vars.fd",
+        "edk2-i386-vars.fd",
+        "OVMF_VARS.fd",
+        "OVMF_VARS_4M.fd",
+    ] {
+        let candidate = parent.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn select_ovmf_from_candidates(
     candidates: impl IntoIterator<Item = OvmfPaths>,
 ) -> Option<OvmfPaths> {
@@ -3365,6 +3407,31 @@ mod tests {
         let ovmf = ovmf.expect("must return env ovmf");
         assert_eq!(ovmf.code, PathBuf::from("code.fd"));
         assert_eq!(ovmf.vars_template, PathBuf::from("vars.fd"));
+    }
+
+    #[test]
+    fn resolve_ovmf_vars_template_prefers_stock_vars_for_runtime_copy() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("clean-slate-ovmf-resolve-{unique}"));
+        fs::create_dir_all(&base).expect("mkdir");
+        let code = base.join("edk2-x86_64-code.fd");
+        let stock = base.join("edk2-i386-vars.fd");
+        let working = base.join(format!("OVMF_VARS.runtime.{unique}.fd"));
+        fs::write(&code, b"code").expect("write code");
+        fs::write(&stock, b"stock").expect("write stock");
+        fs::write(&working, b"mutated").expect("write working");
+        let resolved = resolve_ovmf_vars_template(&code, &working);
+        assert_eq!(resolved, stock);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ovmf_vars_env_marks_workspace_target_copy_as_mutable() {
+        let working = workspace_root().join("target").join("OVMF_VARS.fd");
+        assert!(ovmf_vars_env_is_mutable_working_copy(&working));
     }
 
     #[test]
