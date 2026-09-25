@@ -13,7 +13,9 @@ use crate::mm::frame_allocator::PageAllocator;
 use crate::process::process_registry_mut;
 use crate::process::spoof_registered_address_space_root_for_self_test;
 use crate::sched::dispatch::start_current_scheduler_thread;
+use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
+use crate::sched::ThreadKind;
 use crate::selftest::userspace_process::configure_scheduler_thread_slot;
 use crate::selftest::userspace_process::reset_process_scheduler_world;
 use crate::selftest::userspace_process::spawn_native_userspace_process_with_code;
@@ -24,6 +26,10 @@ use crate::syscall::service_lifecycle_syscall_allocator_mut;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 pub(crate) const M9_SYSCALL_FAIL_CLOSED_PASS_MARKER: &str = "[M9.C] PASS";
+
+/// Registry poison value for the offender; must not be `0` (a transient CR3 of zero
+/// would match and let native dispatch loop instead of fail-closed).
+const M9_ROOT_SPOOF_SENTINEL: u64 = 0x0000_0000_DEAD_BEEF;
 
 /// Offender: `syscall` with `rax=0` (native VERSION); loops if it ever returned.
 const OFFENDER_SYSCALL_CODE: [u8; 7] = [
@@ -75,6 +81,31 @@ fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Poison registry metadata on the offender's first syscall only (not the sibling).
+pub(crate) fn arm_caller_resolution_mismatch_if_pending() {
+    if !M9_MISMATCH_ARMED.load(Ordering::Relaxed) || M9_MISMATCH_APPLIED.load(Ordering::Relaxed) {
+        return;
+    }
+    let offender = M9_OFFENDER_PID.load(Ordering::Relaxed);
+    if offender == 0 {
+        return;
+    }
+    let scheduler = unsafe { scheduler_mut() };
+    let index = match scheduler.current_thread {
+        Some(index) => index,
+        None => return,
+    };
+    let thread = scheduler.threads[index];
+    if thread.kind != ThreadKind::User || thread.owner_process_id != offender {
+        return;
+    }
+    if spoof_registered_address_space_root_for_self_test(offender, M9_ROOT_SPOOF_SENTINEL).is_err()
+    {
+        return;
+    }
+    M9_MISMATCH_APPLIED.store(true, Ordering::Relaxed);
+}
+
 pub(crate) fn start_m9_syscall_fail_closed_self_test(allocator: PageAllocator) -> ! {
     install_service_lifecycle_syscall_allocator(allocator);
     let allocator = service_lifecycle_syscall_allocator_mut()
@@ -102,21 +133,6 @@ pub(crate) fn start_m9_syscall_fail_closed_self_test(allocator: PageAllocator) -
         Err(message) => fatal_kernel_error(message),
     };
     unsafe { restore_task_context(frame_pointer) }
-}
-
-/// Trusted hook: poison registry CR3 metadata once for the offender's first syscall.
-pub(crate) fn arm_caller_resolution_mismatch_if_pending() {
-    if !M9_MISMATCH_ARMED.load(Ordering::Relaxed) || M9_MISMATCH_APPLIED.load(Ordering::Relaxed) {
-        return;
-    }
-    let offender = M9_OFFENDER_PID.load(Ordering::Relaxed);
-    if offender == 0 {
-        return;
-    }
-    if spoof_registered_address_space_root_for_self_test(offender, 0).is_err() {
-        return;
-    }
-    M9_MISMATCH_APPLIED.store(true, Ordering::Relaxed);
 }
 
 pub(crate) fn observe_syscall_fail_closed(reason: &'static str, torn_down_pid: u64) {

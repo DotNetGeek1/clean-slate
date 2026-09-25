@@ -912,6 +912,9 @@ pub(crate) fn current_syscall_caller_pid() -> Result<u64, &'static str> {
         .get(thread.owner_process_id)
         .ok_or("syscall caller process was not present in registry")?;
     let active_root = current_root_frame_address();
+    if active_root == 0 {
+        return Err("syscall caller active address space root was invalid");
+    }
     if process.address_space_root() != active_root {
         return Err("syscall caller process did not match active address space");
     }
