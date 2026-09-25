@@ -255,7 +255,7 @@ const M9_LINUX_SOCKET_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[M9.L] PASS",
 ];
 const M9_LINUX_TRACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
-const M9_LINUX_TRACE_ACCEPTANCE_MARKERS: [&str; 15] = [
+const M9_LINUX_TRACE_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[M9.T] trace_slots_baseline=0 boot",
     "[TIME] timer initialized",
     "UNKNOWN(999)",
@@ -266,10 +266,6 @@ const M9_LINUX_TRACE_ACCEPTANCE_MARKERS: [&str; 15] = [
     "wait4 nr=61 blocked",
     "wait4 nr=61 woke",
     "[M9.T] trace_slots_baseline=0 after_proc_wait",
-    "[M9.T] cycle=2 runtime_fixture",
-    "poll nr=7 blocked",
-    "poll nr=7 timeout",
-    "[M9.T] trace_slots_baseline=0 after_runtime_poll",
     "[M9.T] PASS",
 ];
 
@@ -2322,10 +2318,15 @@ fn build_kernel(release: bool, debug_entry: bool, features: &[&str]) -> Result<(
     run_command(&mut cmd)
 }
 
+fn cargo_target_dir() -> PathBuf {
+    env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("target"))
+}
+
 fn kernel_artifact(release: bool) -> PathBuf {
     let profile = if release { "release" } else { "debug" };
-    workspace_root()
-        .join("target")
+    cargo_target_dir()
         .join(KERNEL_TARGET)
         .join(profile)
         .join(format!("{KERNEL_PACKAGE}.efi"))

@@ -551,6 +551,7 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-linux-runtime-self-test"),
         not(feature = "m9-linux-socket-self-test"),
         not(feature = "m9-linux-proc-self-test"),
+        not(feature = "m9-linux-trace-self-test"),
         not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-linux-fs-self-test"),
         not(feature = "m9-fd-core-self-test")

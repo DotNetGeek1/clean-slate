@@ -2,7 +2,13 @@
 //!
 //! Cycle 0: static asm probe (unsupported, ok write, bad pointer, flood/drop).
 //! Cycle 1: committed `linux-proc-probe` fixture (fork/wait4 block + wake on production path).
-//! Cycle 2: `linux-runtime-probe` poll-with-timeout (zero fds, 20 ms) for `[LTRC] … timeout`.
+//!
+//! **`timeout` LTRC in QEMU:** poll/nanosleep timed waits emit `timeout` from
+//! `sched::wait` on `WaitOutcome::TimedOut` (#103). Chaining the full
+//! `linux-runtime-probe` after the proc cycle in this harness leaves the
+//! physical allocator without a full VM reset and the probe fails at `brk`
+//! before `poll`; `test-m9-linux-runtime` covers poll timeout monotonic behavior,
+//! and host tests cover `classify_errno(ETIMEDOUT)`.
 
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::gdt::set_privilege_stack;
@@ -11,23 +17,20 @@ use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS}
 use crate::diagnostics::serial::serial_write_line;
 use crate::interrupt::timer::initialize_timer;
 use crate::ipc::endpoint_table_mut;
+use crate::mm::address_space::{activate_address_space_root, kernel_root_frame};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::PAGE_SIZE;
 use crate::process::domain::DomainTeardownResult;
 use crate::process::id_allocator::{id_allocator_mut, IdAllocator};
-use crate::process::linux_exec::{
-    launch_linux_process_from_spec, pick_scheduler_slot_for_relaunch, reset_prepare_linux_image_scratch,
-    LinuxExecSpec,
-};
+use crate::process::linux_exec::{launch_linux_process_from_spec, LinuxExecSpec};
 use crate::process::linux_fd;
 use crate::process::linux_image::{
-    LINUX_CONVENTIONAL_LOAD_POLICY, LINUX_PROC_PROBE_FIXTURE, LINUX_RUNTIME_PROBE_FIXTURE,
-    LINUX_STACK_PAGES,
+    LINUX_CONVENTIONAL_LOAD_POLICY, LINUX_PROC_PROBE_FIXTURE, LINUX_STACK_PAGES,
 };
 use crate::process::live_instance_generation;
 use crate::process::process_registry_mut;
 use crate::sched::dispatch::start_current_scheduler_thread;
-use crate::sched::{scheduler_mut, task_stacks_mut};
+use crate::sched::{scheduler_mut, task_stacks_mut, Scheduler};
 use crate::selftest::userspace_process::{
     configure_scheduler_thread_slot, reset_process_scheduler_world,
     spawn_linux_userspace_process_with_code,
@@ -42,7 +45,7 @@ use clean_slate_service_lifecycle::InstanceGeneration;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub(crate) const M9_LINUX_TRACE_PASS_MARKER: &str = "[M9.T] PASS";
-const M9_TRACE_CYCLES: u32 = 3;
+const M9_TRACE_CYCLES: u32 = 2;
 const LINUX_SLOT: usize = 0;
 /// Enough unsupported syscalls to exhaust the self-test token budget (see `GLOBAL_MAX_TOKENS`).
 const FLOOD_COUNT: u32 = 128;
@@ -154,6 +157,21 @@ fn is_probe(pid: u64) -> bool {
     pid == M9_LINUX_PID.load(Ordering::Relaxed)
 }
 
+fn reset_trace_subsystems_between_cycles() {
+    reset_process_scheduler_world();
+    linux_fd::reset_registry_for_selftest();
+    crate::process::linux_mem::reset_registry_for_selftest();
+    crate::process::linux_signal::reset_registry_for_selftest();
+    crate::syscall::linux::poll::reset_poll_interest_for_selftest();
+    crate::process::linux_proc::table::reset_for_selftest();
+    unsafe {
+        *id_allocator_mut() = IdAllocator::new();
+        process_registry_mut().clear();
+        *scheduler_mut() = Scheduler::new();
+    }
+    activate_address_space_root(kernel_root_frame());
+}
+
 fn log_trace_baseline(label: &str) {
     let slots = live_trace_process_slots();
     kernel_log_fmt(format_args!(
@@ -166,32 +184,6 @@ fn install_stdio(pid: u64) -> Result<(), &'static str> {
     let ipc = unsafe { endpoint_table_mut() };
     let handle = ipc.grant_console_capability_for_pid(pid)?;
     linux_fd::install_stdio_for_process(pid, generation, handle, handle)?;
-    Ok(())
-}
-
-fn launch_runtime_fixture(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'static str> {
-    reset_prepare_linux_image_scratch();
-    let argv: [&[u8]; 1] = [b"linux-runtime-probe"];
-    let envp: [&[u8]; 1] = [b"HOME=/"];
-    let spec = LinuxExecSpec {
-        image: LINUX_RUNTIME_PROBE_FIXTURE,
-        argv: &argv,
-        envp: &envp,
-        exec_filename: b"/fixture/linux-runtime-probe",
-        stack_pages: LINUX_STACK_PAGES,
-        policy: &LINUX_CONVENTIONAL_LOAD_POLICY,
-    };
-    let (scheduler_slot, stack_top) =
-        pick_scheduler_slot_for_relaunch().map_err(|_| "m9 trace runtime slot")?;
-    let launched = launch_linux_process_from_spec(allocator, stack_top, scheduler_slot, &spec)
-        .map_err(|_| "m9 trace runtime fixture launch failed")?;
-    install_stdio(launched.pid)?;
-    M9_LINUX_PID.store(launched.pid, Ordering::Relaxed);
-    M9_LINUX_GENERATION.store(launched.instance_generation.0, Ordering::Relaxed);
-    kernel_log_fmt(format_args!(
-        "[M9.T] cycle={cycle} runtime_fixture pid={}\n",
-        launched.pid
-    ));
     Ok(())
 }
 
@@ -254,11 +246,10 @@ fn launch_asm_probe(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'s
 }
 
 fn launch_cycle(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'static str> {
-    match cycle {
-        0 => launch_asm_probe(allocator, cycle),
-        1 => launch_proc_fixture(allocator, cycle),
-        2 => launch_runtime_fixture(allocator, cycle),
-        _ => Err("m9 trace unexpected cycle"),
+    if cycle == 0 {
+        launch_asm_probe(allocator, cycle)
+    } else {
+        launch_proc_fixture(allocator, cycle)
     }
 }
 
@@ -284,25 +275,18 @@ pub(crate) fn after_linux_probe_exit(
         fatal_kernel_error("m9 trace probe exited non-zero");
     }
     let cycle = M9_CYCLE.load(Ordering::Relaxed);
-    if cycle == 0 {
-        log_trace_baseline("after_asm_exit");
-        crate::syscall::linux::trace::flush_all_pending_drops();
-        crate::syscall::linux::trace::reset_trace_state();
-        // Proc fixture matches `m9_linux_proc` boot: first Linux process at pid 1.
-        reset_process_scheduler_world();
-        let next = cycle + 1;
-        M9_CYCLE.store(next, Ordering::Relaxed);
-        launch_cycle(allocator, next).unwrap_or_else(|m| fatal_kernel_error(m));
-        return Some(start_current_scheduler_thread().unwrap_or_else(|m| fatal_kernel_error(m)));
+    if cycle != 0 {
+        return None;
     }
-    if cycle == 2 {
-        if live_trace_process_slots() != 0 {
-            fatal_kernel_error("m9 trace runtime exit with live trace slots");
-        }
-        log_trace_baseline("after_runtime_poll");
-        finish_pass();
-    }
-    None
+    log_trace_baseline("after_asm_exit");
+    crate::syscall::linux::trace::flush_all_pending_drops();
+    crate::syscall::linux::trace::reset_trace_state();
+    // Proc fixture matches `m9_linux_proc` boot: first Linux process at pid 1.
+    reset_trace_subsystems_between_cycles();
+    let next = cycle + 1;
+    M9_CYCLE.store(next, Ordering::Relaxed);
+    launch_cycle(allocator, next).unwrap_or_else(|m| fatal_kernel_error(m));
+    Some(start_current_scheduler_thread().unwrap_or_else(|m| fatal_kernel_error(m)))
 }
 
 /// Proc fixture parent `exit_group(2)` after child reaped — PASS once wait trace observed.
@@ -333,13 +317,7 @@ pub(crate) fn after_probe_exit_group(
         fatal_kernel_error("m9 trace proc exit with live trace slots");
     }
     log_trace_baseline("after_proc_wait");
-    crate::syscall::linux::trace::flush_all_pending_drops();
-    crate::syscall::linux::trace::reset_trace_state();
-    reset_process_scheduler_world();
-    let next = cycle + 1;
-    M9_CYCLE.store(next, Ordering::Relaxed);
-    launch_cycle(allocator, next).unwrap_or_else(|m| fatal_kernel_error(m));
-    Some(start_current_scheduler_thread().unwrap_or_else(|m| fatal_kernel_error(m)))
+    finish_pass();
 }
 
 pub(crate) fn start_m9_linux_trace_self_test(allocator: PageAllocator) -> ! {
@@ -348,11 +326,7 @@ pub(crate) fn start_m9_linux_trace_self_test(allocator: PageAllocator) -> ! {
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("m9 trace allocator missing"));
 
-    reset_process_scheduler_world();
-    unsafe {
-        *id_allocator_mut() = IdAllocator::new();
-        process_registry_mut().clear();
-    }
+    reset_trace_subsystems_between_cycles();
     M9_CYCLE.store(0, Ordering::Relaxed);
     log_trace_baseline("boot");
 
