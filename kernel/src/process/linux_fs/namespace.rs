@@ -461,6 +461,9 @@ impl NodeTable {
             if count >= out.len() {
                 break;
             }
+            if index as u16 == dir.index {
+                continue;
+            }
             let node = &self.nodes[index];
             if !node.live || node.parent != dir.index {
                 continue;
