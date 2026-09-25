@@ -343,10 +343,7 @@ pub(crate) fn prepare_linux_image(
 /// Pick an empty scheduler slot whose static kernel stack is not the one we
 /// are executing on. Required when launching from the Linux `exit` path, which
 /// still runs on the exiting thread's kernel stack.
-#[cfg_attr(
-    feature = "m9-linux-trace-self-test",
-    allow(dead_code)
-)]
+#[cfg_attr(feature = "m9-linux-trace-self-test", allow(dead_code))]
 #[cfg(any(
     feature = "m9-linux-proc-self-test",
     feature = "m9-linux-runtime-self-test",
