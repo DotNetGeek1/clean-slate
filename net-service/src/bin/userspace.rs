@@ -42,8 +42,9 @@ use clean_slate_service_fixtures::{
     NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
     NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
-    NET_SUBOP_TICK_PERIOD_NS,
+    NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_UDP_TRACE,
 };
+use clean_slate_network::udp::{set_udp_rx_demux_trace, EPHEMERAL_PORT_BASE, UdpRxDemuxTrace};
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::x86_64::{__cpuid, _rdrand64_step};
 use core::hint::spin_loop;
@@ -228,6 +229,124 @@ fn tick_period_ns() -> u64 {
     } else {
         period
     }
+}
+
+fn service_udp_trace_line(mut line: [u8; 96], len: usize) {
+    let len = len.min(96);
+    let _ = net_request([
+        NET_SUBOP_UDP_TRACE,
+        line.as_mut_ptr() as u64,
+        len as u64,
+        0,
+        0,
+        0,
+    ]);
+}
+
+fn write_ipv4_octets(out: &mut [u8], addr: Ipv4Addr) -> usize {
+    let o = addr.octets();
+    let mut n = 0usize;
+    for (i, byte) in o.iter().enumerate() {
+        if i > 0 && n < out.len() {
+            out[n] = b'.';
+            n += 1;
+        }
+        n += write_u16_decimal(out.get_mut(n..).unwrap_or(&mut []), u16::from(*byte));
+    }
+    n
+}
+
+fn write_u16_decimal(out: &mut [u8], mut value: u16) -> usize {
+    if out.is_empty() {
+        return 0;
+    }
+    if value == 0 {
+        out[0] = b'0';
+        return 1;
+    }
+    let mut tmp = [0u8; 5];
+    let mut len = 0usize;
+    while value > 0 {
+        tmp[len] = b'0' + (value % 10) as u8;
+        value /= 10;
+        len += 1;
+    }
+    let copy = len.min(out.len());
+    for i in 0..copy {
+        out[i] = tmp[len - 1 - i];
+    }
+    copy
+}
+
+fn udp_demux_trace_line(
+    dst_port: u16,
+    src: SocketAddrV4,
+    result: &'static str,
+    ep_index: Option<u32>,
+) {
+    let mut line = [0u8; 96];
+    let mut n = 0usize;
+    let push = |line: &mut [u8], n: &mut usize, bytes: &[u8]| {
+        let take = bytes.len().min(line.len().saturating_sub(*n));
+        line[*n..*n + take].copy_from_slice(&bytes[..take]);
+        *n += take;
+    };
+    push(&mut line, &mut n, b"rx dst=");
+    n += write_u16_decimal(&mut line[n..], dst_port);
+    push(&mut line, &mut n, b" src=");
+    n += write_ipv4_octets(&mut line[n..], src.addr);
+    if n < line.len() {
+        line[n] = b':';
+        n += 1;
+    }
+    n += write_u16_decimal(&mut line[n..], src.port);
+    push(&mut line, &mut n, b" ");
+    push(&mut line, &mut n, result.as_bytes());
+    if let Some(ep) = ep_index {
+        push(&mut line, &mut n, b"=");
+        n += write_u16_decimal(&mut line[n..], ep as u16);
+    }
+    service_udp_trace_line(line, n);
+}
+
+fn log_linux_udp_endpoint(session: SessionId, endpoint: SessionId, local_port: u16) {
+    let mut line = [0u8; 96];
+    let mut n = 0usize;
+    let push = |line: &mut [u8], n: &mut usize, bytes: &[u8]| {
+        let take = bytes.len().min(line.len().saturating_sub(*n));
+        line[*n..*n + take].copy_from_slice(&bytes[..take]);
+        *n += take;
+    };
+    push(&mut line, &mut n, b"linux-udp m7_session=");
+    n += write_u16_decimal(&mut line[n..], session.index() as u16);
+    push(&mut line, &mut n, b" ep=");
+    n += write_u16_decimal(&mut line[n..], endpoint.index() as u16);
+    push(&mut line, &mut n, b" bind=");
+    n += write_u16_decimal(&mut line[n..], local_port);
+    push(&mut line, &mut n, b" peer=none");
+    service_udp_trace_line(line, n);
+}
+
+fn log_linux_udp_send(local_port: u16, dest: SocketAddrV4, len: usize) {
+    let mut line = [0u8; 96];
+    let mut n = 0usize;
+    let push = |line: &mut [u8], n: &mut usize, bytes: &[u8]| {
+        let take = bytes.len().min(line.len().saturating_sub(*n));
+        line[*n..*n + take].copy_from_slice(&bytes[..take]);
+        *n += take;
+    };
+    push(&mut line, &mut n, b"tx local=");
+    n += write_u16_decimal(&mut line[n..], local_port);
+    push(&mut line, &mut n, b" dst=");
+    n += write_ipv4_octets(&mut line[n..], dest.addr);
+    if n < line.len() {
+        line[n] = b':';
+        n += 1;
+    }
+    n += write_u16_decimal(&mut line[n..], dest.port);
+    push(&mut line, &mut n, b" len=");
+    n += write_u16_decimal(&mut line[n..], len.min(u16::MAX as usize) as u16);
+    service_udp_trace_line(line, n);
 }
 
 fn ms_to_irq_ticks(ms: u64) -> u64 {
@@ -606,6 +725,7 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             ),
             generation,
         );
+        set_udp_rx_demux_trace(Some(udp_demux_trace_line as UdpRxDemuxTrace));
         let heap_checkpoint = current_heap_offset();
         TLS_HEAP_CHECKPOINT.store(heap_checkpoint, Ordering::SeqCst);
         bootstrap.tls_heap_checkpoint = heap_checkpoint as u64;
@@ -744,17 +864,20 @@ fn ensure_udp_endpoint(
     udp.stack_mut()
         .arp_cache_mut()
         .insert(dest.addr, PEER_MAC, tick);
+    let idx = session.index();
+    if idx >= clean_slate_network::limits::MAX_UDP_ENDPOINTS {
+        return Err(NetworkResponse::Error {
+            code: NetworkError::InvalidRequest.code(),
+        });
+    }
+    let local_port = EPHEMERAL_PORT_BASE.saturating_add(idx as u16);
     let id = udp
         .table_mut()
-        .open(caller, None)
+        .open(caller, Some(local_port))
         .map_err(|err| NetworkResponse::Error {
             code: NetworkError::from(err).code(),
         })?;
-    udp.table_mut()
-        .connect(id, caller, dest)
-        .map_err(|err| NetworkResponse::Error {
-            code: NetworkError::from(err).code(),
-        })?;
+    log_linux_udp_endpoint(session, id, local_port);
     if let Some(slot) = udp_endpoint_slot(session) {
         *slot = Some(id);
     }
@@ -793,8 +916,17 @@ fn handle_service_udp_send(
             code: NetworkError::Timeout.code(),
         })?;
         let udp = resolver.udp_mut();
+        let local_port = udp
+            .table()
+            .local_port(udp_sid, caller)
+            .map_err(|err| NetworkResponse::Error {
+                code: NetworkError::from(err).code(),
+            })?;
         match udp.send(now, udp_sid, caller, Some(dest), payload) {
-            Ok(sent) => return Ok(sent as u32),
+            Ok(sent) => {
+                log_linux_udp_send(local_port, dest, sent);
+                return Ok(sent as u32);
+            }
             Err(NetworkError::Unreachable) => {
                 let _ = udp.poll(now);
             }
@@ -812,6 +944,17 @@ fn handle_service_udp_send(
     Err(NetworkResponse::Error {
         code: NetworkError::Timeout.code(),
     })
+}
+
+fn cancel_pending_linux_udp_request(request_id: u64) {
+    unsafe {
+        for slot in PENDING_LINUX_UDP_RECV.iter_mut() {
+            if slot.map(|e| e.request_id) == Some(request_id) {
+                *slot = None;
+                return;
+            }
+        }
+    }
 }
 
 fn pending_linux_udp_contains(request_id: u64) -> bool {
@@ -946,13 +1089,8 @@ fn try_udp_receive_once(
     let want = max_len as usize;
     let want = want.min(response_payload.len());
     let udp = resolver.udp_mut();
-    for step in 0..32 {
-        let now = start.saturating_add(step);
-        if let Err(err) = udp.poll(now) {
-            return Err(NetworkResponse::Error {
-                code: NetworkError::from(err).code(),
-            });
-        }
+    for step in 0..128 {
+        let now = monotonic_ticks().unwrap_or(start.saturating_add(step));
         match udp.receive(udp_sid, caller, &mut response_payload[..want]) {
             Ok(Some((_from, n))) if n > 0 => return Ok(Some(n as u32)),
             Ok(Some(_)) | Ok(None) => {}
@@ -961,6 +1099,25 @@ fn try_udp_receive_once(
                     code: NetworkError::from(err).code(),
                 });
             }
+        }
+        if let Err(err) = udp.poll(now) {
+            return Err(NetworkResponse::Error {
+                code: NetworkError::from(err).code(),
+            });
+        }
+    }
+    if let Ok(depth) = udp.table().rx_queued(udp_sid, caller) {
+        if depth > 0 {
+            let mut line = [0u8; 96];
+            let mut n = 0usize;
+            let push = |line: &mut [u8], n: &mut usize, bytes: &[u8]| {
+                let take = bytes.len().min(line.len().saturating_sub(*n));
+                line[*n..*n + take].copy_from_slice(&bytes[..take]);
+                *n += take;
+            };
+            push(&mut line, &mut n, b"recv-stuck depth=");
+            n += write_u16_decimal(&mut line[n..], depth as u16);
+            service_udp_trace_line(line, n);
         }
     }
     Ok(None)
@@ -987,7 +1144,7 @@ fn pump_pending_linux_udp_receives(
 ) -> bool {
     if let Ok(now) = monotonic_ticks() {
         if let Some(resolver) = unsafe { (*service_dns_resolver_slot()).as_mut() } {
-            for step in 0..32 {
+            for step in 0..128 {
                 let tick = now.saturating_add(step);
                 let _ = resolver.poll(tick);
             }
@@ -1073,6 +1230,17 @@ fn handle_service_udp_receive(
                 session,
                 max_len,
             }) {
+                for _ in 0..64 {
+                    if let Ok(Some(n)) =
+                        try_udp_receive_once(caller, session, max_len, response_payload)
+                    {
+                        cancel_pending_linux_udp_request(request_id);
+                        return LinuxSocketDispatch::Done(
+                            NetworkResponse::Receive { payload_len: n },
+                            n,
+                        );
+                    }
+                }
                 LinuxSocketDispatch::Deferred
             } else {
                 LinuxSocketDispatch::Done(

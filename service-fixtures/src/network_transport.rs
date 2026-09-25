@@ -39,6 +39,8 @@ pub const NET_SUBOP_ACK_HOLDER_EXIT: u64 = 9;
 pub const NET_SUBOP_MONOTONIC_TICKS: u64 = 10;
 /// Returns LAPIC IRQ period in nanoseconds (0 if uncalibrated).
 pub const NET_SUBOP_TICK_PERIOD_NS: u64 = 11;
+/// Bounded serial trace line from the network service (`[M9.U]` prefix added in kernel).
+pub const NET_SUBOP_UDP_TRACE: u64 = 12;
 
 pub const NET_SERVICE_ROLE_ID: u64 = 1;
 

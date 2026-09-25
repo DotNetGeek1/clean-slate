@@ -187,6 +187,10 @@ Each supervised network-service instance owns a fixed `SessionGeneration` assign
 
 `Send` / `Receive` IPC frames carry counts only; bytes move through the bounded payload region (`MAX_APPLICATION_PAYLOAD_BYTES`) associated with the client queue slot / service handler. Those bytes are always application payload, never caller-supplied Ethernet frames; raw frame injection remains gated by `NET_RAW_DEVICE`.
 
+### Userspace service idle (M9 #105 / #107)
+
+When the network-service loop has no bridge progress (no deferred Linux UDP completions and no `service_next` work), it yields via the version syscall. That spin is an **interim** idle strategy only. Issue **#167** adds `NET_SUBOP_WAIT_WORK` plus a timer-driven RX harvest that wakes the service; once #167 is on `main`, replace the yield-only idle path with the `WAIT_WORK` block (no `TODO(#167)` markers in source — track here).
+
 ### Acceptance markers
 
 Ordered QEMU markers for `cargo xtask test-m7-net-service`:
