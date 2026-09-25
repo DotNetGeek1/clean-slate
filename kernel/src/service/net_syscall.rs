@@ -98,10 +98,19 @@ fn block_net_idle(
         frame.rax = 0;
         return;
     }
-    let (pending, holder) = net_bridge_mut().net_service_work_counts();
-    let rx_pending = net_bridge_mut().has_virtio_rx_pending();
+    let bridge = net_bridge_mut();
+    let (pending, holder) = bridge.net_service_work_counts();
+    let rx_pending = bridge.has_virtio_rx_pending();
+    let rx_unconsumed = bridge.virtio_rx_unconsumed_completions();
+    let rx_stats = bridge.virtio_rx_stats();
     kernel_log_fmt(format_args!(
-        "[NET ] idle block={idle_label} pending={pending} holder={holder} rx_pending={rx_pending}\n"
+        "[NET ] idle block={idle_label} pending={pending} holder={holder} rx_pending={rx_pending} \
+         rx_avail={rx_unconsumed} rx_stats=harv={} del={} drop={} err={} strand={}\n",
+        rx_stats.harvested,
+        rx_stats.delivered,
+        rx_stats.pending_drop_full,
+        rx_stats.harvest_device_err,
+        rx_stats.stranded_observed,
     ));
     block_net_syscall_restart(frame, key, 0, retry);
 }
@@ -641,7 +650,12 @@ fn handle_ack_holder_exit(frame: &mut SyscallContext) {
 }
 
 fn net_work_idle_ready() -> bool {
-    net_bridge_mut().net_service_has_work()
+    let bridge = net_bridge_mut();
+    if bridge.virtio_rx_unconsumed_completions() > 0 {
+        let _ =
+            bridge.harvest_virtio_rx(crate::service::net_bridge::TIMER_VIRTIO_RX_HARVEST_BUDGET);
+    }
+    bridge.net_service_has_work() || bridge.has_virtio_rx_pending()
 }
 
 fn handle_wait_work(frame: &mut SyscallContext) {

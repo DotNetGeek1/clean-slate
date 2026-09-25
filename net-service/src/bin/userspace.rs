@@ -275,6 +275,8 @@ fn run_unauthorized_probe() -> Result<u64, u64> {
 
 /// One raw NIC reader demuxes frames into bounded per-stack queues (depth 4).
 const INGRESS_DEPTH: usize = 4;
+/// Max kernel `RAW_RECEIVE` pulls per demux dequeue when the consumer queue is empty.
+const INGRESS_READ_BUDGET: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StackConsumer {
@@ -297,10 +299,12 @@ impl PendingFrames {
 
     fn push(&mut self, frame: FrameBuf) {
         if self.len >= INGRESS_DEPTH {
+            let _ = self.slots[0].take();
             for i in 1..INGRESS_DEPTH {
                 self.slots[i - 1] = self.slots[i].take();
             }
             self.len = INGRESS_DEPTH - 1;
+            INGRESS_DROP_FULL.fetch_add(1, Ordering::Relaxed);
         }
         self.slots[self.len] = Some(frame);
         self.len += 1;
@@ -324,6 +328,8 @@ struct NicIngress {
     pending_udp: PendingFrames,
     pending_tcp: PendingFrames,
 }
+
+static INGRESS_DROP_FULL: AtomicUsize = AtomicUsize::new(0);
 
 static mut NIC_INGRESS: NicIngress = NicIngress {
     raw_handle: 0,
@@ -391,6 +397,7 @@ fn nic_ingress_stash_tcp(frame: FrameBuf) {
 
 fn nic_ingress_enqueue(frame: FrameBuf) {
     if frame_is_arp(&frame) {
+        // ARP is L2: both stacks may consume it; one frame is enough per queue slot budget.
         nic_ingress_stash_udp(frame.clone());
         nic_ingress_stash_tcp(frame);
         return;
@@ -416,12 +423,17 @@ fn nic_ingress_dequeue(consumer: StackConsumer) -> Result<Option<FrameBuf>, Netw
     if let Some(frame) = nic_ingress_take_pending(consumer) {
         return Ok(Some(frame));
     }
-    let frame = nic_ingress_read_raw()?;
-    let Some(frame) = frame else {
-        return Ok(None);
-    };
-    nic_ingress_enqueue(frame);
-    Ok(nic_ingress_take_pending(consumer))
+    for _ in 0..INGRESS_READ_BUDGET {
+        let frame = match nic_ingress_read_raw()? {
+            Some(frame) => frame,
+            None => break,
+        };
+        nic_ingress_enqueue(frame);
+        if let Some(frame) = nic_ingress_take_pending(consumer) {
+            return Ok(Some(frame));
+        }
+    }
+    Ok(None)
 }
 
 struct DemuxLink {
@@ -953,6 +965,9 @@ fn establish_plain_tcp_session(
             }
         },
     )?;
+    for _ in 0..INGRESS_READ_BUDGET {
+        let _ = tcp.poll(tick);
+    }
     if let Some(slot) = plain_tcp_slot(session) {
         *slot = Some(tcp_session);
     }
@@ -990,6 +1005,9 @@ fn handle_service_plain_tcp_send(
             payload,
         )
         .map_err(|err| NetworkResponse::Error { code: err.code() })? as u32;
+    for _ in 0..INGRESS_READ_BUDGET {
+        let _ = tcp.poll(tick);
+    }
     Ok(sent)
 }
 

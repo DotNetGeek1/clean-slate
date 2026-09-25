@@ -204,6 +204,7 @@ pub struct M9HttpService {
     active: Option<SocketHandle>,
     sent: bool,
     closed: bool,
+    saw_request: bool,
 }
 
 impl M9HttpService {
@@ -219,6 +220,7 @@ impl M9HttpService {
             active: None,
             sent: false,
             closed: false,
+            saw_request: false,
         }
     }
 
@@ -228,6 +230,7 @@ impl M9HttpService {
             if socket.is_active() {
                 self.active = Some(self.listen);
                 self.sent = false;
+                self.saw_request = false;
                 println!("[FIX ] m9 http connect");
             }
             return;
@@ -240,9 +243,13 @@ impl M9HttpService {
         }
         if socket.may_recv() {
             let mut buf = [0u8; 256];
-            let _ = socket.recv_slice(&mut buf);
+            if let Ok(n) = socket.recv_slice(&mut buf) {
+                if n > 0 {
+                    self.saw_request = true;
+                }
+            }
         }
-        if !self.sent && socket.may_send() {
+        if !self.sent && self.saw_request && socket.may_send() {
             let resp = concat!(
                 "HTTP/1.0 200 OK\r\n",
                 "Content-Length: 16\r\n",
@@ -268,6 +275,7 @@ impl M9HttpService {
         self.active = None;
         self.sent = false;
         self.closed = false;
+        self.saw_request = false;
         let socket = sockets.get_mut::<tcp::Socket>(self.listen);
         if !socket.is_listening() {
             let endpoint = IpListenEndpoint {

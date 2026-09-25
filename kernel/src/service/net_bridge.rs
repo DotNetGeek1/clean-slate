@@ -11,6 +11,7 @@ use clean_slate_network::session::SessionGeneration;
 use clean_slate_service_fixtures::{
     NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES, NETWORK_REQUEST_SLOTS,
 };
+use core::sync::atomic::{AtomicBool, Ordering};
 
 const LOOPBACK_MAC: MacAddr = MacAddr([0x02, 0x10, 0x77, 0, 0, 1]);
 const MAX_HOLDER_EXIT_QUEUE: usize = 8;
@@ -207,7 +208,32 @@ impl ClientSlot {
 const VIRTIO_RX_PENDING_DEPTH: usize =
     clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as usize;
 /// Max virtio RX completions drained per LAPIC tick (#167; bounded ISR work).
-const TIMER_VIRTIO_RX_HARVEST_BUDGET: usize = 4;
+pub(crate) const TIMER_VIRTIO_RX_HARVEST_BUDGET: usize = 4;
+/// Max completions pulled from the NIC on one `RAW_RECEIVE` when the pending ring is empty.
+const RAW_RECEIVE_HARVEST_BUDGET: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VirtioRxStats {
+    pub harvested: u32,
+    pub delivered: u32,
+    pub pending_drop_full: u32,
+    pub harvest_device_err: u32,
+    pub stranded_observed: u32,
+}
+
+impl VirtioRxStats {
+    const fn zero() -> Self {
+        Self {
+            harvested: 0,
+            delivered: 0,
+            pending_drop_full: 0,
+            harvest_device_err: 0,
+            stranded_observed: 0,
+        }
+    }
+}
+
+static RX_DIAGNOSTIC_LOGGED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) struct NetBridge {
     service_pid: u64,
@@ -220,6 +246,7 @@ pub(crate) struct NetBridge {
     virtio_rx_pending_head: u8,
     virtio_rx_pending_tail: u8,
     virtio_rx_pending_count: u8,
+    virtio_rx_stats: VirtioRxStats,
     slots: [ClientSlot; NETWORK_REQUEST_SLOTS],
     next_request_id: u64,
     inflight_failed: u32,
@@ -245,6 +272,7 @@ impl NetBridge {
             virtio_rx_pending_head: 0,
             virtio_rx_pending_tail: 0,
             virtio_rx_pending_count: 0,
+            virtio_rx_stats: VirtioRxStats::zero(),
             slots: [ClientSlot::free(); NETWORK_REQUEST_SLOTS],
             next_request_id: 1,
             inflight_failed: 0,
@@ -617,26 +645,94 @@ impl NetBridge {
         self.virtio_rx_pending_count > 0
     }
 
+    pub(crate) fn virtio_rx_stats(&self) -> VirtioRxStats {
+        self.virtio_rx_stats
+    }
+
+    pub(crate) fn virtio_rx_unconsumed_completions(&self) -> u16 {
+        self.virtio
+            .as_ref()
+            .map(VirtioNetDevice::rx_ring_snapshot)
+            .map(|(used, last)| used.wrapping_sub(last))
+            .unwrap_or(0)
+    }
+
+    fn note_stranded_virtio_rx(&mut self, reason: &'static str) {
+        let unconsumed = self.virtio_rx_unconsumed_completions();
+        if unconsumed == 0 {
+            return;
+        }
+        self.virtio_rx_stats.stranded_observed =
+            self.virtio_rx_stats.stranded_observed.saturating_add(1);
+        self.log_virtio_rx_diagnostic(reason, unconsumed);
+    }
+
+    fn log_virtio_rx_diagnostic(&self, reason: &'static str, unconsumed: u16) {
+        let (used_idx, last_used) = self
+            .virtio
+            .as_ref()
+            .map(VirtioNetDevice::rx_ring_snapshot)
+            .unwrap_or((0, 0));
+        let stats = self.virtio_rx_stats;
+        kernel_log_fmt(format_args!(
+            "[NET ] rx-diag reason={reason} used={used_idx} last={last_used} avail={unconsumed} \
+             pending={}/{} stats=harv={} del={} drop={} err={} strand={}\n",
+            self.virtio_rx_pending_count,
+            VIRTIO_RX_PENDING_DEPTH,
+            stats.harvested,
+            stats.delivered,
+            stats.pending_drop_full,
+            stats.harvest_device_err,
+            stats.stranded_observed,
+        ));
+    }
+
+    fn maybe_log_virtio_rx_diagnostic_once(&self, reason: &'static str) {
+        if RX_DIAGNOSTIC_LOGGED
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            let unconsumed = self.virtio_rx_unconsumed_completions();
+            if unconsumed > 0 || self.virtio_rx_stats.pending_drop_full > 0 {
+                self.log_virtio_rx_diagnostic(reason, unconsumed);
+            }
+        }
+    }
+
     fn harvest_virtio_rx_locked(&mut self, budget: usize) -> usize {
         let mut harvested = 0usize;
         for _ in 0..budget {
             if self.virtio_rx_pending_count as usize >= VIRTIO_RX_PENDING_DEPTH {
+                self.virtio_rx_stats.pending_drop_full =
+                    self.virtio_rx_stats.pending_drop_full.saturating_add(1);
+                self.maybe_log_virtio_rx_diagnostic_once("pending-full");
                 break;
             }
             let frame = match self.virtio.as_mut() {
                 Some(device) => match device.receive() {
                     Ok(Some(frame)) => frame,
-                    Ok(None) | Err(_) => break,
+                    Ok(None) => break,
+                    Err(_) => {
+                        self.virtio_rx_stats.harvest_device_err =
+                            self.virtio_rx_stats.harvest_device_err.saturating_add(1);
+                        break;
+                    }
                 },
                 None => break,
             };
             if self.push_virtio_rx_pending(frame).is_err() {
+                self.virtio_rx_stats.pending_drop_full =
+                    self.virtio_rx_stats.pending_drop_full.saturating_add(1);
+                self.maybe_log_virtio_rx_diagnostic_once("push-fail");
                 break;
             }
+            self.virtio_rx_stats.harvested = self.virtio_rx_stats.harvested.saturating_add(1);
             harvested += 1;
         }
         if harvested > 0 {
             crate::service::net_request_wake::wake_net_service_work();
+        } else if self.virtio_rx_unconsumed_completions() > 0 {
+            self.note_stranded_virtio_rx("harvest-idle");
         }
         harvested
     }
@@ -653,13 +749,6 @@ impl NetBridge {
         if !matches!(self.raw_backend, RawBackend::Virtio) || self.service_pid == 0 {
             return;
         }
-        let ring_ready = self
-            .virtio
-            .as_ref()
-            .is_some_and(VirtioNetDevice::rx_completion_available);
-        if !ring_ready {
-            return;
-        }
         let _ = self.harvest_virtio_rx(TIMER_VIRTIO_RX_HARVEST_BUDGET);
     }
 
@@ -671,12 +760,17 @@ impl NetBridge {
             return Err(NetworkDeviceError::NotReady);
         }
         if let Some(frame) = self.pop_virtio_rx_pending() {
+            self.virtio_rx_stats.delivered = self.virtio_rx_stats.delivered.saturating_add(1);
             return Ok(Some(frame));
         }
         if matches!(self.raw_backend, RawBackend::Virtio) {
-            let _ = self.harvest_virtio_rx(1);
+            let _ = self.harvest_virtio_rx(RAW_RECEIVE_HARVEST_BUDGET);
             if let Some(frame) = self.pop_virtio_rx_pending() {
+                self.virtio_rx_stats.delivered = self.virtio_rx_stats.delivered.saturating_add(1);
                 return Ok(Some(frame));
+            }
+            if self.virtio_rx_unconsumed_completions() > 0 {
+                self.note_stranded_virtio_rx("raw-empty");
             }
             return Ok(None);
         }
