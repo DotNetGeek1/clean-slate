@@ -75,10 +75,7 @@ pub(crate) fn register_poll_interest(desc: OpenDescriptionId, pid: u64) -> Resul
     unsafe { (*INTEREST.get()).register(desc, pid) }
 }
 
-#[cfg(any(
-    feature = "m9-linux-runtime-self-test",
-    feature = "m9-linux-trace-self-test"
-))]
+#[cfg(feature = "m9-linux-trace-self-test")]
 pub(crate) fn reset_poll_interest_for_selftest() {
     unsafe { *INTEREST.get() = InterestTable::new() };
 }

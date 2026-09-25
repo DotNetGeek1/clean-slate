@@ -179,10 +179,7 @@ fn registry_mut() -> &'static mut Registry {
     unsafe { &mut *REGISTRY.get() }
 }
 
-#[cfg(any(
-    feature = "m9-linux-runtime-self-test",
-    feature = "m9-linux-trace-self-test"
-))]
+#[cfg(feature = "m9-linux-trace-self-test")]
 pub(crate) fn reset_registry_for_selftest() {
     unsafe { *REGISTRY.get() = Registry::new() };
 }
