@@ -53,6 +53,12 @@ fn maybe_arm_udp_receive(
     if socket.rx_count as usize >= socket.rx_queue.len() {
         return Ok(());
     }
+    // Do not prefetch another M7 receive while a datagram is still in the kernel queue;
+    // nslookup issues a bounded number of queries per socket and over-prefetching leaves
+    // a deferred bridge slot with no matching reply.
+    if socket.rx_count > 0 {
+        return Ok(());
+    }
     if socket.pending_rx_req.is_some() || socket.inflight_request_id.is_some() {
         return Ok(());
     }
@@ -178,6 +184,9 @@ fn maybe_arm_udp_receive_for_owner(
         return Ok(());
     }
     if socket.rx_count as usize >= socket.rx_queue.len() {
+        return Ok(());
+    }
+    if socket.rx_count > 0 {
         return Ok(());
     }
     if socket.pending_rx_req.is_some() || socket.inflight_request_id.is_some() {

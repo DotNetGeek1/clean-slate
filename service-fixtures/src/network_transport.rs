@@ -39,10 +39,12 @@ pub const NET_SUBOP_ACK_HOLDER_EXIT: u64 = 9;
 pub const NET_SUBOP_MONOTONIC_TICKS: u64 = 10;
 /// Returns LAPIC IRQ period in nanoseconds (0 if uncalibrated).
 pub const NET_SUBOP_TICK_PERIOD_NS: u64 = 11;
-/// Bounded serial trace line from the network service (`[M9.U]` prefix added in kernel).
-pub const NET_SUBOP_UDP_TRACE: u64 = 12;
 
 pub const NET_SERVICE_ROLE_ID: u64 = 1;
+
+/// Max `[M9.U]` lines drained from bootstrap per kernel syscall (fail-closed bound).
+pub const NETWORK_SERVICE_DIAG_LINE_BYTES: usize = 96;
+pub const NETWORK_SERVICE_DIAG_DRAIN_MAX: u32 = 8;
 
 pub const NETWORK_MAX_PAYLOAD_BYTES: usize =
     clean_slate_network::limits::MAX_APPLICATION_PAYLOAD_BYTES;
@@ -68,6 +70,9 @@ pub struct NetworkServiceBootstrap {
     pub tls_transactions: u64,
     pub tls_heap_checkpoint: u64,
     pub tls_heap_after_last: u64,
+    /// Length of pending user-visible diag line in `diag_line` (0 = none).
+    pub diag_line_len: u64,
+    pub diag_line: [u8; NETWORK_SERVICE_DIAG_LINE_BYTES],
 }
 
 impl NetworkServiceBootstrap {
@@ -86,6 +91,8 @@ impl NetworkServiceBootstrap {
             tls_transactions: 0,
             tls_heap_checkpoint: 0,
             tls_heap_after_last: 0,
+            diag_line_len: 0,
+            diag_line: [0; NETWORK_SERVICE_DIAG_LINE_BYTES],
         }
     }
 }
