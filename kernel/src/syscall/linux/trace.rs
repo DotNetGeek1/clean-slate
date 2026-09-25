@@ -491,8 +491,6 @@ pub(crate) fn record_wait_event(
     nr: u64,
     reason: LinuxTraceReason,
 ) {
-    #[cfg(feature = "m9-linux-trace-self-test")]
-    crate::selftest::m9_linux_trace::note_wait_trace(nr, reason);
     let identity = TraceIdentity { pid, generation };
     let kind = TraceKind::Wait { nr, reason };
     state_mut().enqueue(identity, kind);

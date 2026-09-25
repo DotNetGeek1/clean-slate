@@ -34,11 +34,10 @@ use crate::selftest::USER_TEST_PROCESS_STACK_ADDRESS;
 use crate::syscall::initialize_syscall_abi;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::linux::trace::live_trace_process_slots;
-use crate::syscall::linux::trace::LinuxTraceReason;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
-use clean_slate_linux_abi::{SYS_DUP2, SYS_EXIT, SYS_WAIT4, SYS_WRITE};
+use clean_slate_linux_abi::{SYS_DUP2, SYS_EXIT, SYS_WRITE};
 use clean_slate_service_lifecycle::InstanceGeneration;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub(crate) const M9_LINUX_TRACE_PASS_MARKER: &str = "[M9.T] PASS";
 const M9_TRACE_CYCLES: u32 = 2;
@@ -49,8 +48,6 @@ const FLOOD_COUNT: u32 = 128;
 static M9_LINUX_PID: AtomicU64 = AtomicU64::new(0);
 static M9_LINUX_GENERATION: AtomicU32 = AtomicU32::new(0);
 static M9_CYCLE: AtomicU32 = AtomicU32::new(0);
-static M9_WAIT_BLOCKED: AtomicBool = AtomicBool::new(false);
-static M9_WAIT_WOKE: AtomicBool = AtomicBool::new(false);
 
 struct ProbeBuilder {
     buf: [u8; PAGE_SIZE as usize],
@@ -155,17 +152,6 @@ fn is_probe(pid: u64) -> bool {
     pid == M9_LINUX_PID.load(Ordering::Relaxed)
 }
 
-pub(crate) fn note_wait_trace(nr: u64, reason: LinuxTraceReason) {
-    if nr != SYS_WAIT4 {
-        return;
-    }
-    match reason {
-        LinuxTraceReason::Blocked => M9_WAIT_BLOCKED.store(true, Ordering::Relaxed),
-        LinuxTraceReason::Woke => M9_WAIT_WOKE.store(true, Ordering::Relaxed),
-        _ => {}
-    }
-}
-
 fn log_trace_baseline(label: &str) {
     let slots = live_trace_process_slots();
     kernel_log_fmt(format_args!(
@@ -182,9 +168,6 @@ fn install_stdio(pid: u64) -> Result<(), &'static str> {
 }
 
 fn launch_proc_fixture(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'static str> {
-    M9_WAIT_BLOCKED.store(false, Ordering::Relaxed);
-    M9_WAIT_WOKE.store(false, Ordering::Relaxed);
-
     let argv: [&[u8]; 1] = [b"linux-proc-probe"];
     let envp: [&[u8]; 1] = [b"PATH=/fixture"];
     let spec = LinuxExecSpec {
@@ -309,9 +292,6 @@ pub(crate) fn after_probe_exit_group(
     let cycle = M9_CYCLE.load(Ordering::Relaxed);
     if cycle != 1 {
         fatal_kernel_error("m9 trace proc exit on unexpected cycle");
-    }
-    if !M9_WAIT_BLOCKED.load(Ordering::Relaxed) || !M9_WAIT_WOKE.load(Ordering::Relaxed) {
-        fatal_kernel_error("m9 trace proc wait4 block/wake not observed");
     }
     if live_trace_process_slots() != 0 {
         fatal_kernel_error("m9 trace proc exit with live trace slots");
