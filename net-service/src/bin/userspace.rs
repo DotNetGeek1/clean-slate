@@ -945,20 +945,25 @@ fn try_udp_receive_once(
     let udp_sid = ensure_udp_endpoint(caller, session, dest, start)?;
     let want = max_len as usize;
     let want = want.min(response_payload.len());
-    let now = start;
     let udp = resolver.udp_mut();
-    if let Err(err) = udp.poll(now) {
-        return Err(NetworkResponse::Error {
-            code: NetworkError::from(err).code(),
-        });
+    for step in 0..32 {
+        let now = start.saturating_add(step);
+        if let Err(err) = udp.poll(now) {
+            return Err(NetworkResponse::Error {
+                code: NetworkError::from(err).code(),
+            });
+        }
+        match udp.receive(udp_sid, caller, &mut response_payload[..want]) {
+            Ok(Some((_from, n))) if n > 0 => return Ok(Some(n as u32)),
+            Ok(Some(_)) | Ok(None) => {}
+            Err(err) => {
+                return Err(NetworkResponse::Error {
+                    code: NetworkError::from(err).code(),
+                });
+            }
+        }
     }
-    match udp.receive(udp_sid, caller, &mut response_payload[..want]) {
-        Ok(Some((_from, n))) if n > 0 => Ok(Some(n as u32)),
-        Ok(Some(_)) | Ok(None) => Ok(None),
-        Err(err) => Err(NetworkResponse::Error {
-            code: NetworkError::from(err).code(),
-        }),
-    }
+    Ok(None)
 }
 
 fn service_connected_dest_for_linux_udp(
@@ -982,7 +987,10 @@ fn pump_pending_linux_udp_receives(
 ) -> bool {
     if let Ok(now) = monotonic_ticks() {
         if let Some(resolver) = unsafe { (*service_dns_resolver_slot()).as_mut() } {
-            let _ = resolver.poll(now);
+            for step in 0..32 {
+                let tick = now.saturating_add(step);
+                let _ = resolver.poll(tick);
+            }
         }
     }
     let mut completions = [(0u64, NetworkResponse::Close, 0u32); MAX_PENDING_LINUX_UDP_RECV];

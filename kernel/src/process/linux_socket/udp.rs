@@ -78,16 +78,14 @@ fn arm_udp_receive(
     if socket.pending_rx_req.is_some() {
         return Ok(());
     }
-    let generation = live_instance_generation_for_pid(ctx.pid)
-        .map(|g| u64::from(g.0))
-        .ok_or(clean_slate_linux_abi::EACCES)?;
+    let generation = u64::from(socket.owner_generation);
     let wire = NetworkRequest::Receive {
         session: socket.session,
         max_len: LINUX_UDP_MAX_DATAGRAM as u32,
     }
     .encode();
     let request_id = net_bridge_mut()
-        .submit(ctx.pid, ctx.pid, generation, &wire, &[])
+        .submit(socket.owner_pid, socket.owner_pid, generation, &wire, &[])
         .map_err(|_| clean_slate_linux_abi::EACCES)?;
     socket.pending_rx_req = Some(request_id);
     register_request_wake(request_id, linux_socket_request_wait_key(request_id));
@@ -102,11 +100,15 @@ pub(crate) fn try_complete_pending_rx_on_socket(
     let Some(request_id) = socket.pending_rx_req else {
         return Ok(false);
     };
-    let generation = live_instance_generation_for_pid(ctx.pid)
-        .map(|g| u64::from(g.0))
-        .ok_or(clean_slate_linux_abi::EACCES)?;
+    let generation = u64::from(socket.owner_generation);
     let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-    match net_bridge_mut().poll(ctx.pid, ctx.pid, generation, request_id, &mut payload) {
+    match net_bridge_mut().poll(
+        socket.owner_pid,
+        socket.owner_pid,
+        generation,
+        request_id,
+        &mut payload,
+    ) {
         Ok(NetworkResponse::Receive { payload_len }) => {
             let n = payload_len as usize;
             let _ = push_rx_datagram(socket, &payload[..n.min(NETWORK_MAX_PAYLOAD_BYTES)]);
@@ -153,16 +155,14 @@ fn arm_udp_receive_for_owner(
     if socket.pending_rx_req.is_some() {
         return Ok(());
     }
-    let generation = live_instance_generation_for_pid(owner_pid)
-        .map(|g| u64::from(g.0))
-        .ok_or(clean_slate_linux_abi::EACCES)?;
+    let generation = u64::from(socket.owner_generation);
     let wire = NetworkRequest::Receive {
         session: socket.session,
         max_len: LINUX_UDP_MAX_DATAGRAM as u32,
     }
     .encode();
     let request_id = net_bridge_mut()
-        .submit(owner_pid, owner_pid, generation, &wire, &[])
+        .submit(socket.owner_pid, socket.owner_pid, generation, &wire, &[])
         .map_err(|_| clean_slate_linux_abi::EACCES)?;
     socket.pending_rx_req = Some(request_id);
     register_request_wake(request_id, linux_socket_request_wait_key(request_id));
@@ -195,9 +195,7 @@ pub(crate) fn deliver_completed_prefetch(request_id: u64) -> Option<u64> {
                 return Ok(None);
             }
             let owner_pid = socket.owner_pid;
-            let generation = live_instance_generation_for_pid(owner_pid)
-                .map(|g| u64::from(g.0))
-                .ok_or(clean_slate_linux_abi::EACCES)?;
+            let generation = u64::from(socket.owner_generation);
             let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
             match net_bridge_mut().poll(
                 owner_pid,
