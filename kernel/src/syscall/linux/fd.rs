@@ -234,6 +234,19 @@ pub(crate) fn handle_sys_writev(
             let n = super::fs_io::write_file_fd(request, ctx, pid, generation, fd, chunk)?;
             return usize::try_from(n).map_err(|_| EINVAL);
         }
+        if matches!(projection, LinuxFdProjection::PipeBackend) {
+            #[cfg(not(any(
+                feature = "m1-self-test",
+                feature = "m2-double-fault-self-test",
+                feature = "m2-timer-self-test"
+            )))]
+            {
+                let n = crate::process::linux_proc::pipe::write_fd_buffer(
+                    request, ctx, pid, generation, fd, chunk,
+                )?;
+                return usize::try_from(n).map_err(|_| EINVAL);
+            }
+        }
         linux_fd::write_fd(pid, generation, fd, chunk)
     };
 
