@@ -19,7 +19,7 @@ use crate::process::{
     personality::ExecutionPersonality, process_registry_mut, reap_process_record, Process,
     ProcessState, ResourceDomain,
 };
-use crate::sched::{scheduler_mut, ThreadKind, ThreadState};
+use crate::sched::{scheduler_mut, Thread, ThreadKind, ThreadState};
 use clean_slate_capability::CapabilityHandle;
 use clean_slate_capability::{delegate, list_holder, HolderId, MAX_SLOTS};
 use clean_slate_linux_abi::{EAGAIN, ENOMEM, ESRCH};
@@ -157,8 +157,7 @@ fn abort_fork_child(child_pid: u64, allocator: &mut PageAllocator) {
         }
         for thread in unsafe { scheduler_mut() }.threads.iter_mut() {
             if thread.owner_process_id == child_pid {
-                thread.state = ThreadState::Empty;
-                thread.owner_process_id = 0;
+                *thread = Thread::EMPTY;
             }
         }
     });

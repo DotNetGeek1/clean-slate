@@ -90,7 +90,7 @@ pub(crate) struct ThreadProcessResources {
 }
 
 impl Thread {
-    const EMPTY: Self = Self {
+    pub(super) const EMPTY: Self = Self {
         id: 0,
         owner_process_id: 0,
         kind: ThreadKind::Kernel,

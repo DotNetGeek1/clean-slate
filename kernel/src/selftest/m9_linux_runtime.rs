@@ -10,7 +10,9 @@ use crate::mm::address_space::{activate_address_space_root, kernel_root_frame};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::domain::DomainTeardownResult;
 use crate::process::id_allocator::{id_allocator_mut, IdAllocator};
-use crate::process::linux_exec::{launch_linux_process_from_spec, LinuxExecSpec};
+use crate::process::linux_exec::{
+    launch_linux_process_from_spec, pick_scheduler_slot_for_relaunch, LinuxExecSpec,
+};
 use crate::process::linux_fd::{
     self, console_sink_render_style, open_description_pool_live_count, ConsoleSinkRenderStyle,
 };
@@ -23,7 +25,6 @@ use crate::process::live_instance_generation;
 use crate::process::personality::execution_personality_for_pid;
 use crate::process::process_registry_mut;
 use crate::sched::dispatch::start_current_scheduler_thread;
-use crate::sched::task_stacks_mut;
 use crate::sched::{scheduler_mut, Scheduler};
 use crate::syscall::initialize_syscall_abi;
 use crate::syscall::linux::poll::interest_occupied;
@@ -120,8 +121,7 @@ pub(crate) fn on_poll_timeout_complete_ns(pid: u64, timeout_ms: u64, block_start
     }
 }
 
-fn launch_probe(allocator: &mut PageAllocator, kernel_stack_top: u64) -> u64 {
-    set_privilege_stack(kernel_stack_top).unwrap_or_else(|message| fatal_kernel_error(message));
+fn launch_probe(allocator: &mut PageAllocator) -> u64 {
     crate::process::linux_exec::reset_prepare_linux_image_scratch();
     NANOSLEEP_LOGGED.store(0, Ordering::Relaxed);
     POLL_ZERO_LOGGED.store(0, Ordering::Relaxed);
@@ -135,7 +135,9 @@ fn launch_probe(allocator: &mut PageAllocator, kernel_stack_top: u64) -> u64 {
         stack_pages: LINUX_STACK_PAGES,
         policy: &LINUX_CONVENTIONAL_LOAD_POLICY,
     };
-    let launched = launch_linux_process_from_spec(allocator, kernel_stack_top, 0, &spec)
+    let (scheduler_slot, stack_top) =
+        pick_scheduler_slot_for_relaunch().unwrap_or_else(|message| fatal_kernel_error(message));
+    let launched = launch_linux_process_from_spec(allocator, stack_top, scheduler_slot, &spec)
         .unwrap_or_else(|error| {
             kernel_log_fmt(format_args!(
                 "[M9.J] launch failed: {}\n",
@@ -210,8 +212,7 @@ pub(crate) fn after_linux_runtime_probe_exit(
         qemu_exit(QEMU_EXIT_SUCCESS);
     }
     RUNTIME_CYCLE.store(next, Ordering::Relaxed);
-    let kernel_stack_top = task_stack_top(unsafe { &task_stacks_mut()[0] });
-    let _ = launch_probe(allocator, kernel_stack_top);
+    let _ = launch_probe(allocator);
     Some(start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message)))
 }
 
@@ -239,14 +240,15 @@ pub(crate) fn start_m9_linux_runtime_self_test(page_allocator: PageAllocator) ->
         BASELINE_POLL.load(Ordering::Relaxed),
         BASELINE_FD.load(Ordering::Relaxed)
     ));
-    let kernel_stack_top = task_stack_top(unsafe { &task_stacks_mut()[0] });
-    set_privilege_stack(kernel_stack_top).unwrap_or_else(|message| fatal_kernel_error(message));
-    initialize_syscall_abi(kernel_stack_top).unwrap_or_else(|message| fatal_kernel_error(message));
+    let (_, syscall_stack_top) =
+        pick_scheduler_slot_for_relaunch().unwrap_or_else(|message| fatal_kernel_error(message));
+    set_privilege_stack(syscall_stack_top).unwrap_or_else(|message| fatal_kernel_error(message));
+    initialize_syscall_abi(syscall_stack_top).unwrap_or_else(|message| fatal_kernel_error(message));
     crate::interrupt::timer::initialize_timer();
     // `m3-entry-self-test` (pulled in by this feature) skips calibration inside `initialize_timer`.
     crate::time::calibration::calibrate_apic_tick();
     RUNTIME_CYCLE.store(0, Ordering::Relaxed);
-    let _ = launch_probe(allocator, kernel_stack_top);
+    let _ = launch_probe(allocator);
     let frame_pointer =
         start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
     unsafe { restore_task_context(frame_pointer) }
