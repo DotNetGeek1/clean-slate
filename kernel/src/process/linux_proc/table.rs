@@ -4,6 +4,7 @@ use crate::process::live_instance_generation;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_linux_abi::{w_exitcode, LinuxErrno};
 use clean_slate_service_lifecycle::InstanceGeneration;
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// Self-test feature: sh + two pipe children + parent + headroom (#107 convergence).
 pub(crate) const LINUX_MAX_PROC_ENTRIES: usize = 6;
@@ -25,6 +26,8 @@ pub(crate) enum ChildState {
 #[derive(Clone, Copy, Debug)]
 struct ChildSlot {
     child: ProcId,
+    /// Process group at fork/registration (stable after child slot is retired).
+    pgid: u64,
     state: ChildState,
 }
 
@@ -82,6 +85,7 @@ impl LinuxProcessTable {
                 .ok_or("linux proc child capacity exceeded")?;
             *child_slot = Some(ChildSlot {
                 child: id,
+                pgid,
                 state: ChildState::Running,
             });
         }
@@ -118,21 +122,18 @@ impl LinuxProcessTable {
                         return;
                     }
                 }
-                #[cfg(feature = "m9-userspace-self-test")]
-                exit_publish_diag(id, parent_id, "child-missing-in-parent-list");
+                log_proc_table_invariant("child-missing-in-parent-list", id, parent_id);
             } else {
-                #[cfg(feature = "m9-userspace-self-test")]
-                exit_publish_diag(id, parent_id, "parent-slot-missing");
+                log_proc_table_invariant("parent-slot-missing", id, parent_id);
             }
         } else {
-            #[cfg(feature = "m9-userspace-self-test")]
-            exit_publish_diag(
+            log_proc_table_invariant(
+                "exitee-slot-missing",
                 id,
                 ProcId {
                     pid: 0,
                     generation: InstanceGeneration(0),
                 },
-                "exitee-slot-missing",
             );
         }
         // Parent gone or linkage broken: reap immediately.
@@ -253,10 +254,7 @@ impl LinuxProcessTable {
     }
 
     fn child_matches_wait(&self, entry: &ChildSlot, wait_pid: i64, parent_pgid: u64) -> bool {
-        let child_pgid = self
-            .slot_index(entry.child)
-            .map(|index| self.slots[index].pgid)
-            .unwrap_or(parent_pgid);
+        let child_pgid = entry.pgid;
         match wait_pid {
             -1 => true,
             0 => child_pgid == parent_pgid,
@@ -315,21 +313,30 @@ impl LinuxProcessTable {
 
 }
 
-#[cfg(feature = "m9-userspace-self-test")]
-fn exit_publish_diag(exitee: ProcId, parent: ProcId, reason: &str) {
-    use crate::diagnostics::log::kernel_log_fmt;
-    use core::sync::atomic::{AtomicUsize, Ordering};
-    static EXIT_PUBLISH_DIAG: AtomicUsize = AtomicUsize::new(0);
-    if EXIT_PUBLISH_DIAG.fetch_add(1, Ordering::Relaxed) >= 8 {
+const PROC_TABLE_INVARIANT_LOG_LIMIT: usize = 8;
+
+static PROC_TABLE_INVARIANT_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PROC_TABLE_INVARIANT_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+
+fn log_proc_table_invariant(reason: &str, exitee: ProcId, parent: ProcId) {
+    PROC_TABLE_INVARIANT_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+    if PROC_TABLE_INVARIANT_LOG_COUNT.fetch_add(1, Ordering::Relaxed) >= PROC_TABLE_INVARIANT_LOG_LIMIT
+    {
         return;
     }
+    use crate::diagnostics::log::kernel_log_fmt;
     kernel_log_fmt(format_args!(
-        "[M9  ] publish_exit {reason} exitee={} gen={} parent={} pgen={}\n",
+        "[LNX ] proc-table invariant reason={reason} exitee={} gen={} parent={} pgen={}\n",
         exitee.pid,
         exitee.generation.0,
         parent.pid,
         parent.generation.0,
     ));
+}
+
+/// Count of proc-table invariant violations (for M9 acceptance).
+pub(crate) fn proc_table_invariant_violations() -> u32 {
+    PROC_TABLE_INVARIANT_VIOLATIONS.load(Ordering::Relaxed)
 }
 
 fn write_decimal(out: &mut [u8], mut value: u64) -> usize {

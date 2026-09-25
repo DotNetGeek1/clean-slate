@@ -51,6 +51,15 @@ pub(crate) fn read_file_fd(
         return Ok(take as u64);
     }
     if let Ok(object_id) = table.object_id_for_node(file.node) {
+        let start = desc.offset as usize;
+        if let Ok(take) =
+            crate::process::linux_fs::object_backend::tmp_file_read_local(object_id, start, buf)
+        {
+            if take > 0 || tmp_file_by_len(object_id) <= start {
+                linux_fd::set_open_description_offset(pid, generation, fd, desc.offset + take as u64)?;
+                return Ok(take as u64);
+            }
+        }
         let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
         match object_read_sync(request, ctx, pid, object_id, &mut payload)? {
             ObjectIo::Restart(rax) => return Ok(rax),

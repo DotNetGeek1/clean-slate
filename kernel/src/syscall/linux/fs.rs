@@ -13,7 +13,7 @@ use crate::process::linux_fs::table_mut;
 use crate::process::linux_rootfs;
 use clean_slate_linux_abi::{
     encode_dirent64, encode_stat144, LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EFAULT,
-    EINVAL, EISDIR, ENOTDIR, O_CREAT, O_DIRECTORY, O_RDONLY, O_TRUNC, O_WRONLY, SYS_GETCWD,
+    EINVAL, EISDIR, ENOTDIR, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SYS_GETCWD,
     SYS_GETDENTS64, SYS_LSTAT, SYS_MKDIR, SYS_OPEN, SYS_STAT,
 };
 
@@ -48,7 +48,10 @@ pub(crate) fn handle_sys_open(
     check_write_allowed(path.as_bytes(), flags)?;
     let image = image();
     let table = table_mut();
-    let node = if (flags & O_CREAT) != 0 && (flags & O_WRONLY) != 0 {
+    let access = flags & 0b11;
+    let may_create =
+        (flags & O_CREAT) != 0 && (access == O_WRONLY || access == O_RDWR);
+    let node = if may_create {
         table.open_create_file(path.as_bytes(), (flags & O_TRUNC) != 0, &image)?
     } else {
         let follow = (flags & O_DIRECTORY) == 0;

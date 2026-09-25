@@ -469,6 +469,9 @@ pub(crate) fn after_linux_exit_group(
             if teardown.exit_status != u64::from(cmd.expect_status) {
                 fatal_kernel_error("m9 userspace command exit status");
             }
+            if table::proc_table_invariant_violations() > 0 {
+                fatal_kernel_error("m9 userspace proc-table invariant");
+            }
             validate_stdout_expectations(cmd);
             if cmd.name == "nslookup-fixture" {
                 let delta = kernel_ticks().saturating_sub(TICKS_BEFORE_BLOCK.load(Ordering::Relaxed));

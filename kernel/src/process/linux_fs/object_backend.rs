@@ -110,6 +110,22 @@ pub(crate) fn tmp_file_lookup_by_path(path: &[u8]) -> Option<u64> {
     None
 }
 
+/// Read bytes from the in-kernel tmp scratch (authoritative after a completed write).
+pub(crate) fn tmp_file_read_local(
+    object_id: u64,
+    offset: usize,
+    out: &mut [u8],
+) -> Result<usize, LinuxErrno> {
+    let state = tmp_file_by_object_id(object_id).ok_or(clean_slate_linux_abi::ENOENT)?;
+    if offset >= state.len {
+        return Ok(0);
+    }
+    let index = slot_index_for_object(object_id).ok_or(clean_slate_linux_abi::EINVAL)?;
+    let take = (state.len - offset).min(out.len());
+    out[..take].copy_from_slice(&store_mut().scratch[index][offset..offset + take]);
+    Ok(take)
+}
+
 pub(crate) fn tmp_file_by_object_id(object_id: u64) -> Option<TmpFileState> {
     let store = store_mut();
     for state in store.files.iter().flatten() {
