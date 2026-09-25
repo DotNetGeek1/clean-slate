@@ -460,7 +460,12 @@ impl ServiceLifecycleController {
         feature = "m5-persistence-self-test",
         feature = "m5-crash-early-self-test",
         feature = "m5-crash-late-self-test",
-        feature = "m5-crash-recovery-self-test"
+        feature = "m5-crash-recovery-self-test",
+        feature = "m6-object-self-test",
+        feature = "m7-net-service-self-test",
+        feature = "m9-linux-fs-self-test",
+        feature = "m9-linux-socket-self-test",
+        feature = "m9-userspace-self-test"
     ))]
     fn per_slot_kernel_stack_top(scheduler_slot: usize) -> Result<u64, LifecycleControlError> {
         use crate::arch::x86_64::context_switch::task_stack_top;
@@ -490,7 +495,12 @@ impl ServiceLifecycleController {
             feature = "m5-persistence-self-test",
             feature = "m5-crash-early-self-test",
             feature = "m5-crash-late-self-test",
-            feature = "m5-crash-recovery-self-test"
+            feature = "m5-crash-recovery-self-test",
+            feature = "m6-object-self-test",
+            feature = "m7-net-service-self-test",
+            feature = "m9-linux-fs-self-test",
+            feature = "m9-linux-socket-self-test",
+            feature = "m9-userspace-self-test"
         ))]
         {
             let _ = service_id;
@@ -502,7 +512,12 @@ impl ServiceLifecycleController {
             feature = "m5-persistence-self-test",
             feature = "m5-crash-early-self-test",
             feature = "m5-crash-late-self-test",
-            feature = "m5-crash-recovery-self-test"
+            feature = "m5-crash-recovery-self-test",
+            feature = "m6-object-self-test",
+            feature = "m7-net-service-self-test",
+            feature = "m9-linux-fs-self-test",
+            feature = "m9-linux-socket-self-test",
+            feature = "m9-userspace-self-test"
         )))]
         {
             let _ = service_id;

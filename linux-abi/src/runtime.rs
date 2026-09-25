@@ -11,6 +11,14 @@ pub const SYS_IOCTL: u64 = 16;
 pub const SYS_POLL: u64 = 7;
 pub const SYS_ARCH_PRCTL: u64 = 158;
 pub const SYS_GETPID: u64 = 39;
+/// Linux `getuid` — `getuid()`.
+pub const SYS_GETUID: u64 = 102;
+/// Linux `getgid` — `getgid()`.
+pub const SYS_GETGID: u64 = 104;
+/// Linux `geteuid` — `geteuid()`.
+pub const SYS_GETEUID: u64 = 107;
+/// Linux `getegid` — `getegid()`.
+pub const SYS_GETEGID: u64 = 108;
 pub const SYS_NANOSLEEP: u64 = 35;
 pub const SYS_UNAME: u64 = 63;
 pub const SYS_SET_TID_ADDRESS: u64 = 218;
@@ -198,6 +206,14 @@ mod tests {
         let enc = encode_sigaction(sa);
         assert_eq!(enc.len(), 32);
         assert_eq!(decode_sigaction(&enc), Ok(sa));
+    }
+
+    #[test]
+    fn m9_fixture_id_syscall_numbers() {
+        assert_eq!(SYS_GETUID, 102);
+        assert_eq!(SYS_GETEUID, 107);
+        assert_eq!(SYS_GETGID, 104);
+        assert_eq!(SYS_GETEGID, 108);
     }
 
     #[test]

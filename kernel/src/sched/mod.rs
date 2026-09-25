@@ -161,6 +161,14 @@ impl Scheduler {
         if slot >= self.threads.len() {
             return Err("thread slot exceeded fixed scheduler capacity");
         }
+        if kind == ThreadKind::User {
+            let expected = crate::arch::x86_64::context_switch::task_stack_top(
+                &unsafe { crate::sched::task_stacks_mut() }[slot],
+            );
+            if kernel_stack_top != expected {
+                return Err("kernel stack top must match scheduler slot task stack");
+            }
+        }
         self.threads[slot] = Thread {
             id,
             owner_process_id,

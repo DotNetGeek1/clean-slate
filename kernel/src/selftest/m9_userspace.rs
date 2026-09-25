@@ -221,8 +221,10 @@ fn launch_busybox_inner(
     install_linux_stdio(launched.pid, launched.instance_generation);
     M9_LINUX_PID.store(launched.pid, Ordering::Relaxed);
     kernel_log_fmt(format_args!(
-        "[M9  ] shell started pid={} cmd={}\n",
+        "[M9  ] shell started pid={} slot={} kstack=0x{:x} cmd={}\n",
         launched.pid,
+        slot,
+        stack_top,
         cmd.name
     ));
 }
