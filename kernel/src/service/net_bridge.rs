@@ -118,7 +118,7 @@ impl KernelLoopbackLink {
         self.rx_tail =
             (self.rx_tail + 1) % clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as u8;
         self.rx_count += 1;
-        crate::service::net_request_wake::wake_net_service_rx();
+        crate::service::net_request_wake::wake_net_service_work();
         Ok(())
     }
 }
@@ -636,7 +636,7 @@ impl NetBridge {
             harvested += 1;
         }
         if harvested > 0 {
-            crate::service::net_request_wake::wake_net_service_rx();
+            crate::service::net_request_wake::wake_net_service_work();
         }
         harvested
     }

@@ -17,8 +17,7 @@ use clean_slate_service_fixtures::{
     NETWORK_SERVICE_NEXT_WIRE_BYTES, NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT,
     NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY,
     NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
-    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_RX,
-    NET_SUBOP_WAIT_WORK,
+    NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK,
 };
 
 use crate::arch::x86_64::cpu::without_interrupts;
@@ -33,8 +32,7 @@ use crate::sched::wait::{block_current_thread_with_resume, BlockedResume, WaitKe
 use crate::service::instance_generation::live_instance_generation_for_pid;
 use crate::service::net_bridge::{net_bridge_mut, NetBridgeError};
 use crate::service::net_request_wake::{
-    net_bridge_request_wait_key, net_service_rx_wait_key, net_service_work_wait_key,
-    register_net_request_wake, wake_net_service_work,
+    net_bridge_request_wait_key, net_service_work_wait_key, wake_net_service_work,
 };
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::current_syscall_caller_pid;
@@ -212,7 +210,6 @@ pub(crate) fn handle_syscall_network_request(frame: &mut SyscallContext) {
         NET_SUBOP_ACK_HOLDER_EXIT => handle_ack_holder_exit(frame),
         NET_SUBOP_MONOTONIC_TICKS => handle_monotonic_ticks(frame),
         NET_SUBOP_TICK_PERIOD_NS => handle_tick_period_ns(frame),
-        NET_SUBOP_WAIT_RX => handle_wait_rx(frame),
         NET_SUBOP_WAIT_WORK => handle_wait_work(frame),
         _ => frame.rax = SYSCALL_EINVAL,
     }
@@ -291,7 +288,6 @@ fn handle_submit(frame: &mut SyscallContext) {
         &payload[..payload_len],
     ) {
         Ok(request_id) => {
-            register_net_request_wake(request_id, net_bridge_request_wait_key(request_id));
             wake_net_service_work();
             frame.rax = request_id;
         }
@@ -644,42 +640,8 @@ fn handle_ack_holder_exit(frame: &mut SyscallContext) {
     }
 }
 
-fn net_rx_idle_ready() -> bool {
-    net_bridge_mut().has_virtio_rx_pending()
-}
-
 fn net_work_idle_ready() -> bool {
     net_bridge_mut().net_service_has_work()
-}
-
-fn handle_wait_rx(frame: &mut SyscallContext) {
-    let holder = match current_holder() {
-        Ok(holder) => holder,
-        Err(status) => {
-            frame.rax = status;
-            return;
-        }
-    };
-    if live_network_service_pid() != Some(holder.0) {
-        frame.rax = SYSCALL_EACCES;
-        return;
-    }
-    if let Err(reason) = authorize_network_op_quiet(holder, frame.rsi, NetworkOp::RawDevice, None) {
-        frame.rax = denial_status(reason);
-        return;
-    }
-    if without_interrupts(net_work_idle_ready) {
-        frame.rax = 0;
-        return;
-    }
-    let _ = net_bridge_mut().harvest_virtio_rx(1);
-    block_net_idle(
-        frame,
-        net_service_rx_wait_key(),
-        net_rx_idle_ready,
-        handle_wait_rx,
-        "rx",
-    );
 }
 
 fn handle_wait_work(frame: &mut SyscallContext) {
