@@ -187,6 +187,11 @@ pub(crate) fn kernel_root_frame() -> u64 {
     KERNEL_ROOT_FRAME.load(Ordering::Relaxed)
 }
 
+/// Fault diagnostics: where the kernel root frame is stored, to spot stray writes.
+pub(crate) fn kernel_root_frame_storage_address() -> u64 {
+    core::ptr::addr_of!(KERNEL_ROOT_FRAME) as u64
+}
+
 /// Records the kernel's root page-table frame at boot (relaxed store).
 pub(crate) fn set_kernel_root_frame(frame: u64) {
     KERNEL_ROOT_FRAME.store(frame, Ordering::Relaxed);

@@ -403,6 +403,12 @@ fn handle_exception(context: &InterruptContext) -> u64 {
         let frame_end = (context as *const InterruptContext).wrapping_add(1) as *const u64;
         let interrupted_rsp = unsafe { core::ptr::read(frame_end) };
         kernel_log_fmt(format_args!("[PF  ] rsp={:#018x}\n", interrupted_rsp));
+        kernel_log_fmt(format_args!(
+            "[PF  ] kernel_root_frame={:#x} storage={:#x}\n",
+            crate::mm::address_space::kernel_root_frame(),
+            crate::mm::address_space::kernel_root_frame_storage_address()
+        ));
+        crate::sched::log_task_stack_high_water();
         let image_window = anchor.saturating_sub(0x40_0000)..anchor.saturating_add(0x40_0000);
         for index in 0..STACK_SCAN_QWORDS {
             let slot = interrupted_rsp.wrapping_add((index * 8) as u64);

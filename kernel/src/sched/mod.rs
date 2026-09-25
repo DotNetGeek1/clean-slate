@@ -634,6 +634,25 @@ pub(crate) unsafe fn task_stacks_mut() -> &'static mut [TaskStack; SCHEDULER_THR
     unsafe { &mut *TASK_STACKS.get() }
 }
 
+/// Fault diagnostics: logs each task stack's range and deepest touched byte.
+/// Stacks start zeroed, so the lowest non-zero byte bounds the high-water mark.
+pub(crate) fn log_task_stack_high_water() {
+    let base = TASK_STACKS.get() as *const u8;
+    for slot in 0..SCHEDULER_THREAD_SLOTS {
+        let start = unsafe { base.add(slot * TASK_STACK_SIZE) };
+        let lowest_used = (0..TASK_STACK_SIZE)
+            .find(|offset| unsafe { core::ptr::read_volatile(start.add(*offset)) } != 0)
+            .unwrap_or(TASK_STACK_SIZE);
+        crate::diagnostics::log::kernel_log_fmt(format_args!(
+            "[PF  ] task_stack[{}] base={:#x} used={:#x}/{:#x}\n",
+            slot,
+            start as u64,
+            TASK_STACK_SIZE - lowest_used,
+            TASK_STACK_SIZE
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
