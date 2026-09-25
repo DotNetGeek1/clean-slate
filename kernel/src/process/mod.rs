@@ -110,9 +110,18 @@ impl ResourceDomain {
         }
     }
 
-    /// Authoritative CR3 root for registry lookup and fail-closed syscall checks.
+    /// Registry root used for fail-closed syscall cross-checks (may diverge from
+    /// the live mapping under deliberate test spoofing).
     pub(crate) fn address_space_root(&self) -> u64 {
         self.root_frame
+    }
+
+    /// Physical root frame to load into CR3 before running this process.
+    pub(crate) fn dispatch_root_frame(&self) -> u64 {
+        self.address_space
+            .as_ref()
+            .map(|space| space.root_frame)
+            .unwrap_or(self.root_frame)
     }
 
     pub(crate) fn address_space(&self) -> Option<&ProcessAddressSpace> {
@@ -380,7 +389,15 @@ pub(super) fn userspace_process_root_frame(process_id: u64) -> Result<u64, &'sta
     if !matches!(process.state, ProcessState::Ready | ProcessState::Running) {
         return Err("userspace process was not dispatchable");
     }
-    Ok(process.address_space_root())
+    let dispatch_root = process.resource_domain.dispatch_root_frame();
+    #[cfg(not(feature = "m9-syscall-fail-closed-self-test"))]
+    {
+        let registry_root = process.address_space_root();
+        if process.resource_domain.address_space().is_some() && dispatch_root != registry_root {
+            return Err("process registry root diverged from live address space");
+        }
+    }
+    Ok(dispatch_root)
 }
 
 #[cfg(test)]
