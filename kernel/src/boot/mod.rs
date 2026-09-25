@@ -291,6 +291,7 @@ fn run_inner() -> Result<(), &'static str> {
     memory_map.sort();
     serial_write_line("[BOOT] UEFI memory map acquired");
     serial_write_line("[BOOT] ExitBootServices OK");
+    crate::sched::arm_task_stack_guards();
 
     reserved_ranges.push(ReservedRange::from_base_and_size(
         memory_map.buffer().as_ptr() as u64,

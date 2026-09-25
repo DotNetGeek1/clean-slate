@@ -148,6 +148,7 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
     let stack_pointer = context as u64;
     let context = unsafe { &*context };
     if context.vector as usize == TIMER_VECTOR {
+        crate::sched::check_task_stack_guard(stack_pointer);
         #[cfg(feature = "m3-syscall-self-test")]
         {
             increment_kernel_ticks();

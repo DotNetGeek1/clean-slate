@@ -651,6 +651,7 @@ fn sync_syscall_kernel_stack_from_current_thread() {
 #[unsafe(no_mangle)]
 extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 {
     sync_syscall_kernel_stack_from_current_thread();
+    crate::sched::check_task_stack_guard(context as u64);
     let frame = unsafe { &mut *context };
     if let Err(message) = validate_canonical_user_return_state(frame) {
         fatal_kernel_error(message);

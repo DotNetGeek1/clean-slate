@@ -119,6 +119,11 @@ impl ResourceDomain {
         self.address_space.as_ref()
     }
 
+    /// In-place access; callers must not replace the root frame through it.
+    pub(crate) fn address_space_mut(&mut self) -> Option<&mut ProcessAddressSpace> {
+        self.address_space.as_mut()
+    }
+
     pub(crate) fn address_space_resource_counts(&self) -> AddressSpaceResourceCounts {
         self.address_space.as_ref().map_or(
             AddressSpaceResourceCounts::default(),

@@ -148,11 +148,10 @@ where
     if process.instance_generation != generation {
         return Err(EINVAL);
     }
-    let mut space = process.resource_domain.take_address_space().ok_or(EINVAL)?;
-    let result = f(&mut space, allocator);
-    process.resource_domain.replace_address_space(space);
-    process.resource_domain.sync_root_frame_from_address_space();
-    result
+    // Borrow in place: moving the address space by value costs several KiB of
+    // kernel stack per copy in debug builds, and this runs on the exec and exit paths.
+    let space = process.resource_domain.address_space_mut().ok_or(EINVAL)?;
+    f(space, allocator)
 }
 
 #[cfg(feature = "m9-linux-runtime-self-test")]
