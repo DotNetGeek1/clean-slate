@@ -147,6 +147,18 @@ pub(crate) fn pool_live_count() -> usize {
     unsafe { (*SOCKET_POOL.get()).live_count() }
 }
 
+pub(super) fn live_udp_socket_id(index: usize) -> Option<LinuxSocketId> {
+    let pool = unsafe { &*SOCKET_POOL.get() };
+    let slot = pool.slots.get(index)?;
+    if slot.state == SocketState::Closed || slot.kind != SocketKindLinux::Udp {
+        return None;
+    }
+    Some(LinuxSocketId {
+        index: index as u16,
+        generation: slot.generation,
+    })
+}
+
 pub(crate) fn notify_request_complete(request_id: u64) -> usize {
     let mut woken = 0usize;
     let wakes = unsafe { &mut *REQUEST_WAKE_SLOT.get() };
@@ -159,6 +171,17 @@ pub(crate) fn notify_request_complete(request_id: u64) -> usize {
         }
     }
     woken
+}
+
+/// Pull a completed bridge `Receive` into the socket `rx_queue` and wake poll/recv waiters.
+pub(crate) fn deliver_prefetch_receive(request_id: u64) -> usize {
+    let mut woken = 0usize;
+    if let Some(owner_pid) = udp::deliver_completed_prefetch(request_id) {
+        woken = woken.saturating_add(crate::syscall::linux::poll::wake_poll_waiters_for_pid(
+            owner_pid,
+        ));
+    }
+    woken.saturating_add(notify_request_complete(request_id))
 }
 
 pub(crate) fn register_request_wake(request_id: u64, key: WaitKey) {

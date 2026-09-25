@@ -145,6 +145,96 @@ pub(crate) fn ensure_udp_receive_armed(
     with_socket_mut(id, |socket| maybe_arm_udp_receive(socket, ctx, id))?
 }
 
+fn arm_udp_receive_for_owner(
+    socket: &mut LinuxSocket,
+    owner_pid: u64,
+    _id: LinuxSocketId,
+) -> Result<(), clean_slate_linux_abi::LinuxErrno> {
+    if socket.pending_rx_req.is_some() {
+        return Ok(());
+    }
+    let generation = live_instance_generation_for_pid(owner_pid)
+        .map(|g| u64::from(g.0))
+        .ok_or(clean_slate_linux_abi::EACCES)?;
+    let wire = NetworkRequest::Receive {
+        session: socket.session,
+        max_len: LINUX_UDP_MAX_DATAGRAM as u32,
+    }
+    .encode();
+    let request_id = net_bridge_mut()
+        .submit(owner_pid, owner_pid, generation, &wire, &[])
+        .map_err(|_| clean_slate_linux_abi::EACCES)?;
+    socket.pending_rx_req = Some(request_id);
+    register_request_wake(request_id, linux_socket_request_wait_key(request_id));
+    Ok(())
+}
+
+fn maybe_arm_udp_receive_for_owner(
+    socket: &mut LinuxSocket,
+    owner_pid: u64,
+    id: LinuxSocketId,
+) -> Result<(), clean_slate_linux_abi::LinuxErrno> {
+    if socket.state == SocketState::Closed {
+        return Ok(());
+    }
+    if socket.rx_count as usize >= socket.rx_queue.len() {
+        return Ok(());
+    }
+    if socket.pending_rx_req.is_some() || socket.inflight_request_id.is_some() {
+        return Ok(());
+    }
+    arm_udp_receive_for_owner(socket, owner_pid, id)
+}
+
+/// After `service_complete`, move payload into `rx_queue` for the matching prefetch slot.
+pub(crate) fn deliver_completed_prefetch(request_id: u64) -> Option<u64> {
+    for index in 0..super::LINUX_SOCKET_MAX {
+        let id = super::live_udp_socket_id(index)?;
+        let delivered = with_socket_mut(id, |socket| -> Result<Option<u64>, clean_slate_linux_abi::LinuxErrno> {
+            if socket.pending_rx_req != Some(request_id) {
+                return Ok(None);
+            }
+            let owner_pid = socket.owner_pid;
+            let generation = live_instance_generation_for_pid(owner_pid)
+                .map(|g| u64::from(g.0))
+                .ok_or(clean_slate_linux_abi::EACCES)?;
+            let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+            match net_bridge_mut().poll(
+                owner_pid,
+                owner_pid,
+                generation,
+                request_id,
+                &mut payload,
+            ) {
+                Ok(NetworkResponse::Receive { payload_len }) => {
+                    let n = payload_len as usize;
+                    let _ = push_rx_datagram(socket, &payload[..n.min(NETWORK_MAX_PAYLOAD_BYTES)]);
+                    socket.pending_rx_req = None;
+                    clear_request_wake(request_id);
+                    let _ = maybe_arm_udp_receive_for_owner(socket, owner_pid, id);
+                    Ok(Some(owner_pid))
+                }
+                Ok(NetworkResponse::Error { .. }) => {
+                    socket.pending_rx_req = None;
+                    clear_request_wake(request_id);
+                    Ok(None)
+                }
+                Err(NetBridgeError::Pending) => Ok(None),
+                Err(_) => {
+                    socket.pending_rx_req = None;
+                    clear_request_wake(request_id);
+                    Ok(None)
+                }
+                Ok(_) => Ok(None),
+            }
+        });
+        if let Ok(Ok(Some(owner_pid))) = delivered {
+            return Some(owner_pid);
+        }
+    }
+    None
+}
+
 pub(crate) fn sendto(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
