@@ -77,44 +77,44 @@ fn run_demo_task(task_id: u64) -> ! {
     }
 }
 
+/// Each flag is set in the same interrupt-masked section that prints its line,
+/// so a set flag means the line is already on serial. Progress is only logged
+/// once `preemption_logged` is set: serial order is preemption, then progress,
+/// then `[M2  ] PASS`.
 fn flush_scheduler_markers(task_id: u64) {
-    let (preemption_log, progress_log) = without_interrupts(|| unsafe {
+    let progress_logged_now = without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
-        let preemption_log = if scheduler.preemption_observed && !scheduler.preemption_logged {
+        if scheduler.preemption_observed && !scheduler.preemption_logged {
+            kernel_log_line("[SCHED] preemption observed");
             scheduler.preemption_logged = true;
-            true
-        } else {
-            false
-        };
+        }
+        if !scheduler.preemption_logged {
+            return false;
+        }
 
-        let progress_log = scheduler
+        let Some(thread) = scheduler
             .threads
             .iter_mut()
             .find(|thread| thread.id == task_id)
-            .and_then(|thread| {
-                if thread.preemptions >= TASK_REQUIRED_PREEMPTIONS
-                    && !thread.progress_logged
-                    && thread.observed_progress != 0
-                {
-                    thread.progress_logged = true;
-                    Some(thread.observed_progress)
-                } else {
-                    None
-                }
-            });
-
-        (preemption_log, progress_log)
-    });
-
-    if preemption_log {
-        kernel_log_line("[SCHED] preemption observed");
-    }
-    if progress_log.is_some() {
+        else {
+            return false;
+        };
+        if thread.preemptions < TASK_REQUIRED_PREEMPTIONS
+            || thread.progress_logged
+            || thread.observed_progress == 0
+        {
+            return false;
+        }
         match task_id {
             1 => kernel_log_line("[TASK] task 1 progress=1"),
             2 => kernel_log_line("[TASK] task 2 progress=1"),
             _ => kernel_log_line("[TASK] task progress=1"),
         }
+        thread.progress_logged = true;
+        true
+    });
+
+    if progress_logged_now {
         #[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
         maybe_log_m2_pass_when_both_demo_tasks_ready();
     }
@@ -128,13 +128,13 @@ fn maybe_log_m2_pass_when_both_demo_tasks_ready() {
 }
 
 fn log_m2_pass_once() {
-    unsafe {
+    without_interrupts(|| unsafe {
         if !scheduler_mut().pass_emitted {
             scheduler_mut().pass_emitted = true;
             kernel_log_fmt(format_args!("[TIME] ticks={}\n", kernel_ticks()));
             kernel_log_line("[M2  ] PASS");
         }
-    }
+    });
 }
 
 fn note_task_progress(task_id: u64, progress: u64) {
