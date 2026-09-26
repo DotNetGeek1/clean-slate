@@ -29,6 +29,8 @@ fn raw_syscall(nr: u64, args: [u64; 6]) -> u64 {
             in("r8") args[4],
             in("r9") args[5],
             lateout("rax") result,
+            lateout("rcx") _,
+            lateout("r11") _,
             options(nostack),
         );
     }
@@ -68,11 +70,6 @@ fn run_syscall_at(header: &mut M6FixtureBootstrap, index: usize) {
         while result == repeat_value && repeats < M6_FIXTURE_MAX_REPEATS {
             result = raw_syscall(nr, resolved_args);
             repeats = repeats.saturating_add(1);
-            if repeats & 0x3f == 0 {
-                unsafe {
-                    core::arch::asm!("int 0x80", options(nostack));
-                }
-            }
         }
     }
     header.steps[index].result = result;
