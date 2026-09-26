@@ -42,15 +42,14 @@ use clean_slate_service_fixtures::{
     NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
     NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
-    NET_SUBOP_TICK_PERIOD_NS, NETWORK_SERVICE_DIAG_LINE_BYTES,
+    NET_SUBOP_TICK_PERIOD_NS,
 };
-use clean_slate_network::udp::{set_udp_rx_demux_trace, UdpRxDemuxTrace};
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::x86_64::{__cpuid, _rdrand64_step};
 use core::hint::spin_loop;
 use core::mem::{size_of, MaybeUninit};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use rand_core::{CryptoRng, RngCore};
 
 const SYSCALL_NR_VERSION: u64 = 0;
@@ -63,9 +62,6 @@ const PLAIN_TCP_IO_TIMEOUT_MS: u64 = 2_000;
 const TLS_CLOSE_TIMEOUT_MS: u64 = 100;
 /// Active-open timeout while waiting for SYN-ACK (matches `TCP_CONNECT_TIMEOUT_TICKS` at 1 ms/tick).
 const TCP_CONNECT_TIMEOUT_MS: u64 = 500;
-/// Bounded `[M9.U]` lines per service boot (matches kernel drain cap order-of-magnitude).
-const USER_DIAG_LINE_MAX: u32 = 256;
-static USER_DIAG_LINES_EMITTED: AtomicU32 = AtomicU32::new(0);
 
 struct BumpAllocator;
 
@@ -217,6 +213,13 @@ fn yield_cpu() {
     let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
 }
 
+/// Idle point of the acceptance service loop: nothing was queued and no deferred receive
+/// completed. Client requests, holder exits and NIC ingress are the only wake sources.
+/// Interim: yields until the blocking `NET_SUBOP_WAIT_WORK` (#167) replaces this body.
+fn wait_for_service_work(_raw_handle: u64) {
+    yield_cpu();
+}
+
 fn monotonic_ticks() -> Result<u64, u64> {
     let ticks = net_request([NET_SUBOP_MONOTONIC_TICKS, 0, 0, 0, 0, 0]);
     if ticks >= u64::MAX - 4095 {
@@ -232,149 +235,6 @@ fn tick_period_ns() -> u64 {
     } else {
         period
     }
-}
-
-fn emit_bootstrap_user_diag(line: &[u8]) {
-    if USER_DIAG_LINES_EMITTED.fetch_add(1, Ordering::Relaxed) >= USER_DIAG_LINE_MAX {
-        return;
-    }
-    let len = line.len().min(NETWORK_SERVICE_DIAG_LINE_BYTES);
-    let bootstrap = bootstrap_mut();
-    bootstrap.diag_line[..len].copy_from_slice(&line[..len]);
-    bootstrap.diag_line_len = len as u64;
-}
-
-fn write_ipv4_octets(out: &mut [u8], addr: Ipv4Addr) -> usize {
-    let o = addr.octets();
-    let mut n = 0usize;
-    for (i, byte) in o.iter().enumerate() {
-        if i > 0 && n < out.len() {
-            out[n] = b'.';
-            n += 1;
-        }
-        n += write_u16_decimal(out.get_mut(n..).unwrap_or(&mut []), u16::from(*byte));
-    }
-    n
-}
-
-fn write_u16_decimal(out: &mut [u8], mut value: u16) -> usize {
-    if out.is_empty() {
-        return 0;
-    }
-    if value == 0 {
-        out[0] = b'0';
-        return 1;
-    }
-    let mut tmp = [0u8; 5];
-    let mut len = 0usize;
-    while value > 0 {
-        tmp[len] = b'0' + (value % 10) as u8;
-        value /= 10;
-        len += 1;
-    }
-    let copy = len.min(out.len());
-    for i in 0..copy {
-        out[i] = tmp[len - 1 - i];
-    }
-    copy
-}
-
-fn udp_demux_trace_line(
-    dst_port: u16,
-    src: SocketAddrV4,
-    result: &'static str,
-    ep_index: Option<u32>,
-) {
-    let mut line = [0u8; 96];
-    let mut n = 0usize;
-    let push = |line: &mut [u8], n: &mut usize, bytes: &[u8]| {
-        let take = bytes.len().min(line.len().saturating_sub(*n));
-        line[*n..*n + take].copy_from_slice(&bytes[..take]);
-        *n += take;
-    };
-    push(&mut line, &mut n, b"rx dst=");
-    n += write_u16_decimal(&mut line[n..], dst_port);
-    push(&mut line, &mut n, b" src=");
-    n += write_ipv4_octets(&mut line[n..], src.addr);
-    if n < line.len() {
-        line[n] = b':';
-        n += 1;
-    }
-    n += write_u16_decimal(&mut line[n..], src.port);
-    push(&mut line, &mut n, b" ");
-    push(&mut line, &mut n, result.as_bytes());
-    if let Some(ep) = ep_index {
-        push(&mut line, &mut n, b"=");
-        n += write_u16_decimal(&mut line[n..], ep as u16);
-    }
-    emit_bootstrap_user_diag(&line[..n]);
-}
-
-fn log_linux_udp_endpoint(session: SessionId, endpoint: SessionId, local_port: u16) {
-    let mut line = [0u8; 96];
-    let mut n = 0usize;
-    let push = |line: &mut [u8], n: &mut usize, bytes: &[u8]| {
-        let take = bytes.len().min(line.len().saturating_sub(*n));
-        line[*n..*n + take].copy_from_slice(&bytes[..take]);
-        *n += take;
-    };
-    push(&mut line, &mut n, b"linux-udp m7_session=");
-    n += write_u16_decimal(&mut line[n..], session.index() as u16);
-    push(&mut line, &mut n, b" ep=");
-    n += write_u16_decimal(&mut line[n..], endpoint.index() as u16);
-    push(&mut line, &mut n, b" bind=");
-    n += write_u16_decimal(&mut line[n..], local_port);
-    push(&mut line, &mut n, b" peer=none");
-    emit_bootstrap_user_diag(&line[..n]);
-}
-
-fn log_linux_udp_send(local_port: u16, dest: SocketAddrV4, len: usize) {
-    let mut line = [0u8; 96];
-    let mut n = 0usize;
-    let push = |line: &mut [u8], n: &mut usize, bytes: &[u8]| {
-        let take = bytes.len().min(line.len().saturating_sub(*n));
-        line[*n..*n + take].copy_from_slice(&bytes[..take]);
-        *n += take;
-    };
-    push(&mut line, &mut n, b"tx local=");
-    n += write_u16_decimal(&mut line[n..], local_port);
-    push(&mut line, &mut n, b" dst=");
-    n += write_ipv4_octets(&mut line[n..], dest.addr);
-    if n < line.len() {
-        line[n] = b':';
-        n += 1;
-    }
-    n += write_u16_decimal(&mut line[n..], dest.port);
-    push(&mut line, &mut n, b" len=");
-    n += write_u16_decimal(&mut line[n..], len.min(u16::MAX as usize) as u16);
-    emit_bootstrap_user_diag(&line[..n]);
-}
-
-fn log_pump_udp_receive(
-    request_id: u64,
-    m7_session: SessionId,
-    udp_endpoint: SessionId,
-    depth: usize,
-    outcome: &'static str,
-) {
-    let mut line = [0u8; 96];
-    let mut n = 0usize;
-    let push = |line: &mut [u8], n: &mut usize, bytes: &[u8]| {
-        let take = bytes.len().min(line.len().saturating_sub(*n));
-        line[*n..*n + take].copy_from_slice(&bytes[..take]);
-        *n += take;
-    };
-    push(&mut line, &mut n, b"pump req=");
-    n += write_u16_decimal(&mut line[n..], (request_id & 0xFFFF) as u16);
-    push(&mut line, &mut n, b" m7=");
-    n += write_u16_decimal(&mut line[n..], m7_session.index() as u16);
-    push(&mut line, &mut n, b" ep=");
-    n += write_u16_decimal(&mut line[n..], udp_endpoint.index() as u16);
-    push(&mut line, &mut n, b" depth=");
-    n += write_u16_decimal(&mut line[n..], depth.min(u16::MAX as usize) as u16);
-    push(&mut line, &mut n, b" ");
-    push(&mut line, &mut n, outcome.as_bytes());
-    emit_bootstrap_user_diag(&line[..n]);
 }
 
 fn ms_to_irq_ticks(ms: u64) -> u64 {
@@ -647,9 +507,23 @@ type ServiceState = NetworkService<ServiceLink, AllowAllAuthorizer>;
 static mut SERVICE_STATE: Option<ServiceState> = None;
 static mut SERVICE_DNS_RESOLVER: Option<Box<DnsResolver<ServiceLink>>> = None;
 static mut SERVICE_TLS_TRANSPORT: MaybeUninit<TcpTransport<ServiceLink>> = MaybeUninit::uninit();
-static mut PLAIN_TCP_BY_SESSION: [Option<SessionId>; MAX_SESSIONS as usize] =
+/// Linux TCP session -> shared-transport connection, owned by the caller that connected it.
+#[derive(Clone, Copy)]
+struct LinuxTcpConnection {
+    owner: clean_slate_network::protocol::TrustedCaller,
+    connection: SessionId,
+}
+
+static mut PLAIN_TCP_BY_SESSION: [Option<LinuxTcpConnection>; MAX_SESSIONS as usize] =
     [None; MAX_SESSIONS as usize];
-static mut UDP_ENDPOINT_BY_SESSION: [Option<SessionId>; MAX_SESSIONS as usize] =
+/// Linux UDP session -> datagram endpoint, owned by the caller that connected it.
+#[derive(Clone, Copy)]
+struct LinuxUdpEndpoint {
+    owner: clean_slate_network::protocol::TrustedCaller,
+    endpoint: SessionId,
+}
+
+static mut UDP_ENDPOINT_BY_SESSION: [Option<LinuxUdpEndpoint>; MAX_SESSIONS as usize] =
     [None; MAX_SESSIONS as usize];
 static mut SERVICE_TLS_READ_BUF: [u8; TLS_RECORD_BUFFER_BYTES] = [0; TLS_RECORD_BUFFER_BYTES];
 static mut SERVICE_TLS_WRITE_BUF: [u8; TLS_RECORD_BUFFER_BYTES] = [0; TLS_RECORD_BUFFER_BYTES];
@@ -753,7 +627,6 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             ),
             generation,
         );
-        set_udp_rx_demux_trace(Some(udp_demux_trace_line as UdpRxDemuxTrace));
         let heap_checkpoint = current_heap_offset();
         TLS_HEAP_CHECKPOINT.store(heap_checkpoint, Ordering::SeqCst);
         bootstrap.tls_heap_checkpoint = heap_checkpoint as u64;
@@ -770,60 +643,33 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         let payload_buf = unsafe { &mut *service_payload_buf_ptr() };
         let response_buf = unsafe { &mut *service_response_buf_ptr() };
         let response_payload = unsafe { &mut *service_response_payload_ptr() };
-        drain_holder_exits(service, raw_handle, response_buf, response_payload);
-        let mut progress = pump_pending_linux_udp_receives(
+        drain_holder_exits(
+            service,
+            bootstrap.service_generation,
             raw_handle,
             response_buf,
             response_payload,
         );
-        let found = match service_next(raw_handle, request_buf, payload_buf) {
-            Ok(id) => id,
-            Err(_) => {
-                if !progress {
-                    yield_cpu();
-                }
-                continue;
-            }
-        };
+        drain_ingress();
+        let completed_receives =
+            pump_pending_linux_udp_receives(raw_handle, response_buf, response_payload);
+        let found = service_next(raw_handle, request_buf, payload_buf).unwrap_or(0);
         if found == 0 {
-            if !progress {
-                yield_cpu();
+            if !completed_receives {
+                wait_for_service_work(raw_handle);
             }
             continue;
         }
-        progress = true;
         let request_id = found;
-        let request = match NetworkRequest::decode(request_buf) {
-            Ok(request) => request,
-            Err(_) => continue,
-        };
-        let Ok(pid_bytes) = payload_buf[0..8].try_into() else {
+        let Some((request, caller, payload)) = decode_service_request(request_buf, payload_buf)
+        else {
+            let response = NetworkResponse::Error {
+                code: NetworkError::InvalidRequest.code(),
+            };
+            response_buf.copy_from_slice(&response.encode());
+            let _ = service_complete(raw_handle, request_id, response_buf, 0, &[]);
             continue;
         };
-        let Ok(domain_bytes) = payload_buf[8..16].try_into() else {
-            continue;
-        };
-        let Ok(gen_bytes) = payload_buf[16..24].try_into() else {
-            continue;
-        };
-        let Ok(len_bytes) = payload_buf[24..28].try_into() else {
-            continue;
-        };
-        let caller = clean_slate_network::protocol::TrustedCaller::new(
-            u64::from_le_bytes(pid_bytes),
-            u64::from_le_bytes(domain_bytes),
-            u64::from_le_bytes(gen_bytes),
-        );
-        let payload_len = u32::from_le_bytes(len_bytes) as usize;
-        if payload_len > NETWORK_MAX_PAYLOAD_BYTES {
-            continue;
-        }
-        let payload_start = NETWORK_SERVICE_NEXT_METADATA_BYTES;
-        let payload_end = payload_start.saturating_add(payload_len);
-        if payload_end > payload_buf.len() {
-            continue;
-        }
-        let payload = &payload_buf[payload_start..payload_end];
         match handle_service_request(
             service,
             bootstrap.service_generation,
@@ -850,7 +696,34 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     }
 }
 
-fn plain_tcp_slot(session: SessionId) -> Option<&'static mut Option<SessionId>> {
+/// Splits a `SERVICE_NEXT` record into the request, its trusted caller, and its payload.
+#[inline(never)]
+fn decode_service_request<'a>(
+    request_buf: &[u8; NETWORK_REQUEST_BYTES],
+    payload_buf: &'a [u8; NETWORK_SERVICE_NEXT_WIRE_BYTES],
+) -> Option<(
+    NetworkRequest,
+    clean_slate_network::protocol::TrustedCaller,
+    &'a [u8],
+)> {
+    let request = NetworkRequest::decode(request_buf).ok()?;
+    let word = |at: usize| {
+        payload_buf[at..at + 8]
+            .try_into()
+            .ok()
+            .map(u64::from_le_bytes)
+    };
+    let caller = clean_slate_network::protocol::TrustedCaller::new(word(0)?, word(8)?, word(16)?);
+    let payload_len = u32::from_le_bytes(payload_buf[24..28].try_into().ok()?) as usize;
+    if payload_len > NETWORK_MAX_PAYLOAD_BYTES {
+        return None;
+    }
+    let payload_start = NETWORK_SERVICE_NEXT_METADATA_BYTES;
+    let payload = payload_buf.get(payload_start..payload_start.checked_add(payload_len)?)?;
+    Some((request, caller, payload))
+}
+
+fn plain_tcp_slot(session: SessionId) -> Option<&'static mut Option<LinuxTcpConnection>> {
     let index = session.index() as usize;
     if index >= MAX_SESSIONS as usize {
         return None;
@@ -858,7 +731,59 @@ fn plain_tcp_slot(session: SessionId) -> Option<&'static mut Option<SessionId>> 
     unsafe { Some(&mut *core::ptr::addr_of_mut!(PLAIN_TCP_BY_SESSION[index])) }
 }
 
-fn udp_endpoint_slot(session: SessionId) -> Option<&'static mut Option<SessionId>> {
+fn linux_tcp_connection(
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+) -> Option<SessionId> {
+    plain_tcp_slot(session)
+        .and_then(|slot| *slot)
+        .filter(|mapping| mapping.owner == caller)
+        .map(|mapping| mapping.connection)
+}
+
+/// Linux TCP `close` (also run when the holder exits): sends FIN; the shared transport
+/// finishes the teardown in `poll` and frees the connection.
+fn close_linux_tcp_connection(
+    service_generation: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+) {
+    if let Some(slot) = plain_tcp_slot(session) {
+        close_tcp_mapping_owned_by(service_generation, caller, slot);
+    }
+}
+
+fn close_linux_tcp_connections_for_caller(
+    service_generation: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+) {
+    for index in 0..MAX_SESSIONS as usize {
+        let slot = unsafe { &mut *core::ptr::addr_of_mut!(PLAIN_TCP_BY_SESSION[index]) };
+        close_tcp_mapping_owned_by(service_generation, caller, slot);
+    }
+}
+
+#[inline(never)]
+fn close_tcp_mapping_owned_by(
+    service_generation: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    slot: &mut Option<LinuxTcpConnection>,
+) {
+    let Some(mapping) = slot.filter(|mapping| mapping.owner == caller) else {
+        return;
+    };
+    *slot = None;
+    let tcp = shared_tcp_transport_mut();
+    let owner = plain_tcp_owner(service_generation);
+    let closed = monotonic_ticks()
+        .map_err(|_| NetworkError::Timeout)
+        .and_then(|now| tcp.close(now, mapping.connection, owner));
+    if closed.is_err() {
+        let _ = tcp.abort(mapping.connection, owner);
+    }
+}
+
+fn udp_endpoint_slot(session: SessionId) -> Option<&'static mut Option<LinuxUdpEndpoint>> {
     let index = session.index() as usize;
     if index >= MAX_SESSIONS as usize {
         return None;
@@ -870,6 +795,12 @@ fn udp_endpoint_slot(session: SessionId) -> Option<&'static mut Option<SessionId
     }
 }
 
+fn udp_resolver() -> Result<&'static mut DnsResolver<ServiceLink>, NetworkResponse> {
+    unsafe { (*service_dns_resolver_slot()).as_deref_mut() }.ok_or(NetworkResponse::Error {
+        code: NetworkError::Protocol.code(),
+    })
+}
+
 fn close_linux_udp_endpoint(
     caller: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
@@ -877,58 +808,77 @@ fn close_linux_udp_endpoint(
     let Some(slot) = udp_endpoint_slot(session) else {
         return;
     };
-    let Some(udp_id) = slot.take() else {
+    let Some(mapping) = slot.filter(|mapping| mapping.owner == caller) else {
         return;
     };
-    let Some(resolver) = (unsafe { (*service_dns_resolver_slot()).as_mut() }) else {
-        return;
-    };
-    let _ = resolver.udp_mut().table_mut().close(udp_id, caller);
+    *slot = None;
+    if let Ok(resolver) = udp_resolver() {
+        let _ = resolver
+            .udp_mut()
+            .table_mut()
+            .close(mapping.endpoint, caller);
+    }
 }
 
-fn ensure_udp_endpoint(
+/// Linux UDP `connect` (the kernel connects before the first send): opens the session's
+/// datagram endpoint, or re-points an existing one at the new peer.
+fn connect_linux_udp_endpoint(
     caller: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
     dest: SocketAddrV4,
-    tick: u64,
-) -> Result<SessionId, NetworkResponse> {
-    let resolver = unsafe {
-        (*service_dns_resolver_slot())
-            .as_mut()
-            .ok_or(NetworkResponse::Error {
-                code: NetworkError::Protocol.code(),
-            })?
+) -> Result<(), NetworkResponse> {
+    let slot = udp_endpoint_slot(session).ok_or(NetworkResponse::Error {
+        code: NetworkError::InvalidRequest.code(),
+    })?;
+    let tick = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+        code: NetworkError::Timeout.code(),
+    })?;
+    let udp = udp_resolver()?.udp_mut();
+    let to_response = |err| NetworkResponse::Error {
+        code: NetworkError::from(err).code(),
     };
-    let udp = resolver.udp_mut();
-    if let Some(slot) = udp_endpoint_slot(session) {
-        if let Some(id) = *slot {
-            if udp.table().local_port(id, caller).is_ok() {
-                return Ok(id);
-            }
-            *slot = None;
-        }
-    }
     udp.stack_mut()
         .arp_cache_mut()
         .insert(dest.addr, PEER_MAC, tick);
-    let id = udp
-        .table_mut()
-        .open(caller, None)
-        .map_err(|err| NetworkResponse::Error {
-            code: NetworkError::from(err).code(),
-        })?;
-    let local_port = udp
-        .table()
-        .local_port(id, caller)
-        .map_err(|err| NetworkResponse::Error {
-            code: NetworkError::from(err).code(),
-        })?;
-    let _ = udp.table_mut().connect(id, caller, dest);
-    log_linux_udp_endpoint(session, id, local_port);
-    if let Some(slot) = udp_endpoint_slot(session) {
-        *slot = Some(id);
+    if let Some(mapping) = slot.filter(|mapping| mapping.owner == caller) {
+        return udp
+            .table_mut()
+            .connect(mapping.endpoint, caller, dest)
+            .map_err(to_response);
     }
-    Ok(id)
+    let endpoint = udp.table_mut().open(caller, None).map_err(to_response)?;
+    if let Err(err) = udp.table_mut().connect(endpoint, caller, dest) {
+        let _ = udp.table_mut().close(endpoint, caller);
+        return Err(to_response(err));
+    }
+    *slot = Some(LinuxUdpEndpoint {
+        owner: caller,
+        endpoint,
+    });
+    Ok(())
+}
+
+/// Send and receive only use the endpoint `connect` created; a missing one is an error.
+fn linux_udp_endpoint(
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+) -> Result<SessionId, NetworkResponse> {
+    udp_endpoint_slot(session)
+        .and_then(|slot| *slot)
+        .filter(|mapping| mapping.owner == caller)
+        .map(|mapping| mapping.endpoint)
+        .ok_or(NetworkResponse::Error {
+            code: NetworkError::InvalidRequest.code(),
+        })
+}
+
+fn forget_linux_udp_endpoints_for_caller(caller: clean_slate_network::protocol::TrustedCaller) {
+    for index in 0..MAX_SESSIONS as usize {
+        let slot = unsafe { &mut *core::ptr::addr_of_mut!(UDP_ENDPOINT_BY_SESSION[index]) };
+        if slot.is_some_and(|mapping| mapping.owner == caller) {
+            *slot = None;
+        }
+    }
 }
 
 fn handle_service_udp_send(
@@ -950,28 +900,15 @@ fn handle_service_udp_send(
         code: NetworkError::Timeout.code(),
     })?;
     let deadline = start.saturating_add(ms_to_irq_ticks(DNS_QUERY_TIMEOUT_MS));
-    let resolver = unsafe {
-        (*service_dns_resolver_slot())
-            .as_mut()
-            .ok_or(NetworkResponse::Error {
-                code: NetworkError::Protocol.code(),
-            })?
-    };
-    let udp_sid = ensure_udp_endpoint(caller, session, dest, start)?;
+    let udp_sid = linux_udp_endpoint(caller, session)?;
+    let resolver = udp_resolver()?;
     for _ in 0..DNS_POLL_LIMIT {
         let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
             code: NetworkError::Timeout.code(),
         })?;
         let udp = resolver.udp_mut();
-        let local_port = udp
-            .table()
-            .local_port(udp_sid, caller)
-            .map_err(|err| NetworkResponse::Error {
-                code: NetworkError::from(err).code(),
-            })?;
         match udp.send(now, udp_sid, caller, Some(dest), payload) {
             Ok(sent) => {
-                log_linux_udp_send(local_port, dest, sent);
                 let _ = udp.poll(now);
                 return Ok(sent as u32);
             }
@@ -994,38 +931,28 @@ fn handle_service_udp_send(
     })
 }
 
-fn cancel_pending_linux_udp_request(request_id: u64) {
-    unsafe {
-        for slot in PENDING_LINUX_UDP_RECV.iter_mut() {
-            if slot.map(|e| e.request_id) == Some(request_id) {
-                *slot = None;
-                return;
-            }
-        }
-    }
+fn pending_linux_udp_receives(
+) -> &'static mut [Option<PendingLinuxUdpReceive>; MAX_PENDING_LINUX_UDP_RECV] {
+    unsafe { &mut *core::ptr::addr_of_mut!(PENDING_LINUX_UDP_RECV) }
 }
 
 fn pending_linux_udp_contains(request_id: u64) -> bool {
-    unsafe {
-        PENDING_LINUX_UDP_RECV
-            .iter()
-            .any(|slot| slot.map(|e| e.request_id) == Some(request_id))
-    }
+    pending_linux_udp_receives()
+        .iter()
+        .any(|slot| slot.is_some_and(|entry| entry.request_id == request_id))
 }
 
 fn enqueue_pending_linux_udp_receive(entry: PendingLinuxUdpReceive) -> bool {
-    if pending_linux_udp_contains(entry.request_id) {
-        return true;
-    }
-    unsafe {
-        for slot in PENDING_LINUX_UDP_RECV.iter_mut() {
-            if slot.is_none() {
-                *slot = Some(entry);
-                return true;
-            }
+    match pending_linux_udp_receives()
+        .iter_mut()
+        .find(|slot| slot.is_none())
+    {
+        Some(slot) => {
+            *slot = Some(entry);
+            true
         }
+        None => false,
     }
-    false
 }
 
 fn complete_pending_linux_udp_raw(
@@ -1046,223 +973,105 @@ fn complete_pending_linux_udp_raw(
     );
 }
 
-fn cancel_pending_linux_udp_for_caller(
+/// Completes (with `Reset`) every deferred receive matching `matches`.
+fn cancel_pending_linux_udp_where(
     raw_handle: u64,
-    caller: clean_slate_network::protocol::TrustedCaller,
     response_buf: &mut [u8; NETWORK_RESPONSE_BYTES],
     response_payload: &mut [u8; NETWORK_MAX_PAYLOAD_BYTES],
+    matches: impl Fn(&PendingLinuxUdpReceive) -> bool,
 ) {
     let reset = NetworkResponse::Error {
         code: NetworkError::Reset.code(),
     };
-    unsafe {
-        for slot in PENDING_LINUX_UDP_RECV.iter_mut() {
-            let Some(entry) = slot else {
-                continue;
-            };
-            if entry.caller != caller {
-                continue;
-            }
-            let request_id = entry.request_id;
-            *slot = None;
-            complete_pending_linux_udp_raw(
-                raw_handle,
-                request_id,
-                reset,
-                0,
-                response_payload,
-                response_buf,
-            );
-        }
+    for slot in pending_linux_udp_receives().iter_mut() {
+        let Some(entry) = slot.filter(|entry| matches(entry)) else {
+            continue;
+        };
+        *slot = None;
+        complete_pending_linux_udp_raw(
+            raw_handle,
+            entry.request_id,
+            reset,
+            0,
+            response_payload,
+            response_buf,
+        );
     }
 }
 
-fn cancel_pending_linux_udp_session(
-    raw_handle: u64,
-    caller: clean_slate_network::protocol::TrustedCaller,
-    session: SessionId,
-    response_buf: &mut [u8; NETWORK_RESPONSE_BYTES],
-    response_payload: &mut [u8; NETWORK_MAX_PAYLOAD_BYTES],
-) {
-    let reset = NetworkResponse::Error {
-        code: NetworkError::Reset.code(),
-    };
-    unsafe {
-        for slot in PENDING_LINUX_UDP_RECV.iter_mut() {
-            let Some(entry) = slot else {
-                continue;
-            };
-            if entry.caller != caller || entry.session != session {
-                continue;
-            }
-            let request_id = entry.request_id;
-            *slot = None;
-            complete_pending_linux_udp_raw(
-                raw_handle,
-                request_id,
-                reset,
-                0,
-                response_payload,
-                response_buf,
-            );
-        }
-    }
-}
-
+/// One non-blocking receive attempt on the session's endpoint. Ingress is drained by
+/// the service loop, not here.
 fn try_udp_receive_once(
     caller: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
     max_len: u32,
     response_payload: &mut [u8],
 ) -> Result<Option<u32>, NetworkResponse> {
-    let dest = match service_connected_dest_for_linux_udp(caller, session)? {
-        Some(dest) => dest,
-        None => {
-            return Err(NetworkResponse::Error {
-                code: NetworkError::InvalidRequest.code(),
-            });
-        }
-    };
-    let start = monotonic_ticks().map_err(|_| NetworkResponse::Error {
-        code: NetworkError::Timeout.code(),
-    })?;
-    let resolver = unsafe {
-        (*service_dns_resolver_slot())
-            .as_mut()
-            .ok_or(NetworkResponse::Error {
-                code: NetworkError::Protocol.code(),
-            })?
-    };
-    let udp_sid = ensure_udp_endpoint(caller, session, dest, start)?;
-    let want = max_len as usize;
-    let want = want.min(response_payload.len());
-    let udp = resolver.udp_mut();
-    match udp.receive(udp_sid, caller, &mut response_payload[..want]) {
-        Ok(Some((_from, n))) if n > 0 => return Ok(Some(n as u32)),
-        Ok(Some(_)) | Ok(None) => {}
-        Err(err) => {
-            return Err(NetworkResponse::Error {
-                code: NetworkError::from(err).code(),
-            });
-        }
-    }
-    if let Err(err) = udp.poll(start) {
-        return Err(NetworkResponse::Error {
-            code: NetworkError::from(err).code(),
-        });
-    }
-    match udp.receive(udp_sid, caller, &mut response_payload[..want]) {
-        Ok(Some((_from, n))) if n > 0 => Ok(Some(n as u32)),
-        Ok(Some(_)) | Ok(None) => Ok(None),
+    let udp_sid = linux_udp_endpoint(caller, session)?;
+    let want = (max_len as usize).min(response_payload.len());
+    match udp_resolver()?
+        .udp_mut()
+        .receive(udp_sid, caller, &mut response_payload[..want])
+    {
+        // `receive` reports the full datagram length; only `want` bytes were copied.
+        Ok(Some((_from, datagram_len))) => Ok(Some(datagram_len.min(want) as u32)),
+        Ok(None) => Ok(None),
         Err(err) => Err(NetworkResponse::Error {
             code: NetworkError::from(err).code(),
         }),
     }
 }
 
-fn service_connected_dest_for_linux_udp(
-    caller: clean_slate_network::protocol::TrustedCaller,
-    session: SessionId,
-) -> Result<Option<SocketAddrV4>, NetworkResponse> {
-    let service = unsafe {
-        (*service_state_slot())
-            .as_ref()
-            .ok_or(NetworkResponse::Error {
-                code: NetworkError::Protocol.code(),
-            })?
+/// Moves buffered NIC ingress into the UDP endpoint queues (bounded by the ingress
+/// queue depth; overflow is counted by the UDP stack) and drives the shared TCP
+/// transport (inbound segments, retransmit and close timers).
+#[inline(never)]
+fn drain_ingress() {
+    let Ok(now) = monotonic_ticks() else {
+        return;
     };
-    service.connected_dest(caller, session)
+    if let Ok(resolver) = udp_resolver() {
+        for _ in 0..INGRESS_DEPTH {
+            let _ = resolver.poll(now);
+        }
+    }
+    let _ = shared_tcp_transport_mut().poll(now);
 }
 
+/// Completes deferred Linux UDP receives whose endpoint now holds a datagram. Each
+/// completion is sent before the next receive reuses `response_payload`.
 fn pump_pending_linux_udp_receives(
     raw_handle: u64,
     response_buf: &mut [u8; NETWORK_RESPONSE_BYTES],
     response_payload: &mut [u8; NETWORK_MAX_PAYLOAD_BYTES],
 ) -> bool {
-    let pending_active = unsafe { PENDING_LINUX_UDP_RECV.iter().any(|slot| slot.is_some()) };
-    if pending_active {
-        if let (Ok(now), Some(resolver)) = (
-            monotonic_ticks(),
-            unsafe { (*service_dns_resolver_slot()).as_mut() },
+    let mut completed = false;
+    for slot in pending_linux_udp_receives().iter_mut() {
+        let Some(entry) = *slot else {
+            continue;
+        };
+        let (response, out_len) = match try_udp_receive_once(
+            entry.caller,
+            entry.session,
+            entry.max_len,
+            response_payload,
         ) {
-            for _ in 0..INGRESS_DEPTH {
-                let _ = resolver.poll(now);
-            }
-        }
-    }
-    let mut completions = [(0u64, NetworkResponse::Close, 0u32); MAX_PENDING_LINUX_UDP_RECV];
-    let mut completion_count = 0usize;
-    unsafe {
-        for slot in PENDING_LINUX_UDP_RECV.iter_mut() {
-            let Some(pending) = slot else {
-                continue;
-            };
-            let entry = *pending;
-            let log_pump_outcome = |outcome: &'static str| {
-                let Some(udp_sid) = udp_endpoint_slot(entry.session).and_then(|s| *s) else {
-                    log_pump_udp_receive(entry.request_id, entry.session, entry.session, 0, outcome);
-                    return;
-                };
-                let depth = (*service_dns_resolver_slot())
-                    .as_mut()
-                    .and_then(|resolver| {
-                        resolver
-                            .udp_mut()
-                            .table()
-                            .rx_queued(udp_sid, entry.caller)
-                            .ok()
-                    })
-                    .unwrap_or(0);
-                log_pump_udp_receive(
-                    entry.request_id,
-                    entry.session,
-                    udp_sid,
-                    depth,
-                    outcome,
-                );
-            };
-            match try_udp_receive_once(
-                entry.caller,
-                entry.session,
-                entry.max_len,
-                response_payload,
-            ) {
-                Ok(Some(n)) => {
-                    log_pump_outcome("ok");
-                    *slot = None;
-                    if completion_count < completions.len() {
-                        completions[completion_count] = (
-                            entry.request_id,
-                            NetworkResponse::Receive { payload_len: n },
-                            n,
-                        );
-                        completion_count += 1;
-                    }
-                }
-                Ok(None) => {}
-                Err(response) => {
-                    log_pump_outcome("err");
-                    *slot = None;
-                    if completion_count < completions.len() {
-                        completions[completion_count] = (entry.request_id, response, 0);
-                        completion_count += 1;
-                    }
-                }
-            }
-        }
-    }
-    for i in 0..completion_count {
-        let (request_id, response, out_len) = completions[i];
+            Ok(None) => continue,
+            Ok(Some(n)) => (NetworkResponse::Receive { payload_len: n }, n),
+            Err(response) => (response, 0),
+        };
+        *slot = None;
         complete_pending_linux_udp_raw(
             raw_handle,
-            request_id,
+            entry.request_id,
             response,
             out_len,
-            &response_payload[..out_len as usize],
+            response_payload,
             response_buf,
         );
+        completed = true;
     }
-    completion_count > 0
+    completed
 }
 
 enum LinuxSocketDispatch {
@@ -1282,12 +1091,7 @@ fn handle_service_udp_receive(
         return LinuxSocketDispatch::Deferred;
     }
     match try_udp_receive_once(caller, session, max_len, response_payload) {
-        Ok(Some(n)) => LinuxSocketDispatch::Done(
-            NetworkResponse::Receive {
-                payload_len: n,
-            },
-            n,
-        ),
+        Ok(Some(n)) => LinuxSocketDispatch::Done(NetworkResponse::Receive { payload_len: n }, n),
         Ok(None) => {
             if enqueue_pending_linux_udp_receive(PendingLinuxUdpReceive {
                 request_id,
@@ -1340,7 +1144,7 @@ where
 fn establish_plain_tcp_session(
     _raw_handle: u64,
     service_generation: u64,
-    _caller: clean_slate_network::protocol::TrustedCaller,
+    caller: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
     dest: SocketAddrV4,
 ) -> Result<SessionId, NetworkResponse> {
@@ -1354,20 +1158,28 @@ fn establish_plain_tcp_session(
     let slot = plain_tcp_slot(session).ok_or(NetworkResponse::Error {
         code: NetworkError::InvalidRequest.code(),
     })?;
-    let tcp_session = match *slot {
-        Some(id) => id,
-        None => tcp
-            .connect(tick, plain_tcp_owner(service_generation), dest)
-            .map_err(|err| NetworkResponse::Error { code: err.code() })?,
-    };
     let owner = plain_tcp_owner(service_generation);
-    poll_plain_tcp_until(
+    let (tcp_session, is_new) = match *slot {
+        Some(mapping) if mapping.owner == caller => (mapping.connection, false),
+        Some(_) => {
+            return Err(NetworkResponse::Error {
+                code: NetworkError::InvalidRequest.code(),
+            });
+        }
+        None => (
+            tcp.connect(tick, owner, dest)
+                .map_err(|err| NetworkResponse::Error { code: err.code() })?,
+            true,
+        ),
+    };
+    let established = poll_plain_tcp_until(
         tcp,
         tick,
         ms_to_irq_ticks(TCP_CONNECT_TIMEOUT_MS),
         |tcp, _now| {
             match tcp.state(tcp_session, owner) {
-                Ok(TcpState::Established) => Ok(true),
+                // The peer may send data and FIN before this predicate runs again.
+                Ok(TcpState::Established) | Ok(TcpState::CloseWait) => Ok(true),
                 Ok(TcpState::Reset) | Ok(TcpState::Closed) => Err(NetworkResponse::Error {
                     code: NetworkError::Reset.code(),
                 }),
@@ -1379,13 +1191,19 @@ fn establish_plain_tcp_session(
                 Err(err) => Err(NetworkResponse::Error { code: err.code() }),
             }
         },
-    )?;
-    if let Some(slot) = plain_tcp_slot(session) {
-        *slot = Some(tcp_session);
+    );
+    if let Err(response) = established {
+        if is_new {
+            let _ = tcp.abort(tcp_session, owner);
+        }
+        return Err(response);
     }
+    *slot = Some(LinuxTcpConnection {
+        owner: caller,
+        connection: tcp_session,
+    });
     Ok(tcp_session)
 }
-
 fn handle_service_plain_tcp_send(
     service: &mut ServiceState,
     raw_handle: u64,
@@ -1429,7 +1247,7 @@ fn handle_service_plain_tcp_receive(
     max_len: u32,
     response_payload: &mut [u8],
 ) -> (NetworkResponse, u32) {
-    let tcp_session = match plain_tcp_slot(session).and_then(|s| *s) {
+    let tcp_session = match linux_tcp_connection(caller, session) {
         Some(id) => id,
         None => {
             return (
@@ -1561,6 +1379,26 @@ mod linux_socket_data_plane {
             NetworkRequest::Connect { session, dest }
                 if matches!(
                     service.session_kind(caller, session),
+                    Ok(SocketKind::LinuxUdp)
+                ) =>
+            {
+                let (response, out_len) = service.handle_request(
+                    caller,
+                    NetworkRequest::Connect { session, dest },
+                    payload,
+                    response_payload,
+                );
+                if !matches!(response, NetworkResponse::Connect) {
+                    return LinuxSocketDispatch::Done(response, out_len);
+                }
+                match connect_linux_udp_endpoint(caller, session, dest) {
+                    Ok(()) => LinuxSocketDispatch::Done(response, out_len),
+                    Err(response) => LinuxSocketDispatch::Done(response, 0),
+                }
+            }
+            NetworkRequest::Connect { session, dest }
+                if matches!(
+                    service.session_kind(caller, session),
                     Ok(SocketKind::LinuxTcp)
                 ) =>
             {
@@ -1572,8 +1410,7 @@ mod linux_socket_data_plane {
                     dest,
                 ) {
                     Ok(_) => {
-                        if let Err(response) =
-                            service.attach_connected_dest(caller, session, dest)
+                        if let Err(response) = service.attach_connected_dest(caller, session, dest)
                         {
                             return LinuxSocketDispatch::Done(response, 0);
                         }
@@ -1643,12 +1480,11 @@ mod linux_socket_data_plane {
                     Ok(SocketKind::LinuxUdp)
                 ) =>
             {
-                cancel_pending_linux_udp_session(
+                cancel_pending_linux_udp_where(
                     raw_handle,
-                    caller,
-                    session,
                     unsafe { &mut *service_response_buf_ptr() },
                     unsafe { &mut *service_response_payload_ptr() },
+                    |entry| entry.caller == caller && entry.session == session,
                 );
                 close_linux_udp_endpoint(caller, session);
                 {
@@ -1661,19 +1497,28 @@ mod linux_socket_data_plane {
                     LinuxSocketDispatch::Done(response, out_len)
                 }
             }
+            NetworkRequest::Close { session }
+                if matches!(
+                    service.session_kind(caller, session),
+                    Ok(SocketKind::LinuxTcp)
+                ) =>
+            {
+                close_linux_tcp_connection(service_generation, caller, session);
+                let (response, out_len) = service.handle_request(
+                    caller,
+                    NetworkRequest::Close { session },
+                    payload,
+                    response_payload,
+                );
+                LinuxSocketDispatch::Done(response, out_len)
+            }
             NetworkRequest::Receive { session, max_len }
                 if matches!(
                     service.session_kind(caller, session),
                     Ok(SocketKind::LinuxUdp)
                 ) =>
             {
-                handle_service_udp_receive(
-                    request_id,
-                    caller,
-                    session,
-                    max_len,
-                    response_payload,
-                )
+                handle_service_udp_receive(request_id, caller, session, max_len, response_payload)
             }
             NetworkRequest::Receive { session, max_len }
                 if matches!(
@@ -1681,18 +1526,16 @@ mod linux_socket_data_plane {
                     Ok(SocketKind::LinuxTcp)
                 ) =>
             {
-                {
-                    let (response, out_len) = handle_service_plain_tcp_receive(
-                        service,
-                        raw_handle,
-                        service_generation,
-                        caller,
-                        session,
-                        max_len,
-                        response_payload,
-                    );
-                    LinuxSocketDispatch::Done(response, out_len)
-                }
+                let (response, out_len) = handle_service_plain_tcp_receive(
+                    service,
+                    raw_handle,
+                    service_generation,
+                    caller,
+                    session,
+                    max_len,
+                    response_payload,
+                );
+                LinuxSocketDispatch::Done(response, out_len)
             }
             _ => LinuxSocketDispatch::NotHandled,
         }
@@ -1987,6 +1830,7 @@ impl Drop for TlsScratchGuard {
 
 fn drain_holder_exits(
     service: &mut NetworkService<ServiceLink, AllowAllAuthorizer>,
+    service_generation: u64,
     raw_handle: u64,
     response_buf: &mut [u8; NETWORK_RESPONSE_BYTES],
     response_payload: &mut [u8; NETWORK_MAX_PAYLOAD_BYTES],
@@ -2012,15 +1856,14 @@ fn drain_holder_exits(
             u64::from_le_bytes(caller_buf[8..16].try_into().unwrap()),
             u64::from_le_bytes(caller_buf[16..24].try_into().unwrap()),
         );
-        cancel_pending_linux_udp_for_caller(raw_handle, caller, response_buf, response_payload);
+        cancel_pending_linux_udp_where(raw_handle, response_buf, response_payload, |entry| {
+            entry.caller == caller
+        });
         if let Some(resolver) = unsafe { (*service_dns_resolver_slot()).as_mut() } {
             resolver.on_holder_exit(caller);
         }
-        unsafe {
-            for slot in core::ptr::addr_of_mut!(UDP_ENDPOINT_BY_SESSION).as_mut().unwrap() {
-                *slot = None;
-            }
-        }
+        forget_linux_udp_endpoints_for_caller(caller);
+        close_linux_tcp_connections_for_caller(service_generation, caller);
         let (sessions, pending) = service.on_holder_exit(caller);
         let ack = net_request([
             NET_SUBOP_ACK_HOLDER_EXIT,
