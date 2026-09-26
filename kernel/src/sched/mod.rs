@@ -671,7 +671,11 @@ pub(crate) unsafe fn task_stacks_mut() -> &'static mut [TaskStack; SCHEDULER_THR
 }
 
 const TASK_STACK_GUARD_QWORD: u64 = 0x5354_4b47_5541_5244;
+#[cfg(not(test))]
 static TASK_STACK_GUARDS_ARMED: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static TASK_STACK_GUARDS_ARMED: crate::sync::per_test_thread::PerTestThread<AtomicBool> =
+    crate::sync::per_test_thread::PerTestThread::new(AtomicBool::new(false));
 
 fn task_stack_guard_words(slot: usize) -> *mut u64 {
     let base = TASK_STACKS.get() as *mut u8;

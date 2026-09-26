@@ -83,10 +83,20 @@ static mut NEXT_TASK_ENTRY_POINT: u64 = 0;
 /// Interrupts must be disabled (or the caller must otherwise guarantee no
 /// concurrent dispatch) until the trampoline has consumed the values.
 pub(crate) unsafe fn set_next_task(stack_pointer: u64, entry_point: u64) {
+    #[cfg(not(test))]
     unsafe {
         NEXT_TASK_STACK_POINTER = stack_pointer;
         NEXT_TASK_ENTRY_POINT = entry_point;
     }
+    #[cfg(test)]
+    TEST_NEXT_TASK.set((stack_pointer, entry_point));
+}
+
+// Host scheduler tests publish fresh tasks from parallel test threads; the
+// trampoline statics above are only read by asm, which tests never run.
+#[cfg(test)]
+std::thread_local! {
+    static TEST_NEXT_TASK: core::cell::Cell<(u64, u64)> = const { core::cell::Cell::new((0, 0)) };
 }
 
 /// Reads back the `(stack_pointer, entry_point)` pair published by
@@ -95,7 +105,12 @@ pub(crate) unsafe fn set_next_task(stack_pointer: u64, entry_point: u64) {
 /// # Safety
 /// Same as [`set_next_task`]: no concurrent writer may be active.
 pub(crate) unsafe fn next_task() -> (u64, u64) {
-    unsafe { (NEXT_TASK_STACK_POINTER, NEXT_TASK_ENTRY_POINT) }
+    #[cfg(not(test))]
+    unsafe {
+        (NEXT_TASK_STACK_POINTER, NEXT_TASK_ENTRY_POINT)
+    }
+    #[cfg(test)]
+    TEST_NEXT_TASK.get()
 }
 
 pub(crate) fn task_stack_top(stack: &TaskStack) -> u64 {

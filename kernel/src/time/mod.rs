@@ -12,10 +12,25 @@ pub(crate) const APIC_TIMER_FALLBACK_INITIAL_COUNT: u32 = 62_500;
 /// QEMU local APIC timer counter rate with divide-by-16 (1 GHz / 16).
 pub(crate) const QEMU_APIC_COUNTER_HZ_FALLBACK: u64 = 62_500_000;
 
+#[cfg(not(test))]
 static APIC_COUNTER_HZ: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
 static APIC_TIMER_INITIAL_COUNT: AtomicU32 = AtomicU32::new(0);
+#[cfg(not(test))]
 static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(test))]
 static TSC_ORIGIN: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+use crate::sync::per_test_thread::PerTestThread;
+#[cfg(test)]
+static APIC_COUNTER_HZ: PerTestThread<AtomicU64> = PerTestThread::new(AtomicU64::new(0));
+#[cfg(test)]
+static APIC_TIMER_INITIAL_COUNT: PerTestThread<AtomicU32> = PerTestThread::new(AtomicU32::new(0));
+#[cfg(test)]
+static TSC_HZ: PerTestThread<AtomicU64> = PerTestThread::new(AtomicU64::new(0));
+#[cfg(test)]
+static TSC_ORIGIN: PerTestThread<AtomicU64> = PerTestThread::new(AtomicU64::new(0));
 
 pub(crate) fn set_apic_counter_hz(value: u64) {
     APIC_COUNTER_HZ.store(value, Ordering::Release);
@@ -234,9 +249,6 @@ mod tests {
         assert!(mul_div_u128(1, u128::MAX, 0).is_none());
     }
 
-    /// The APIC counter globals are process-wide, and the test harness runs
-    /// tests in parallel, so every assertion that depends on them lives in
-    /// this one test.
     #[test]
     fn sleep_budget_and_deadline_use_ceil_apic_period() {
         set_apic_counter_hz(62_500_000);

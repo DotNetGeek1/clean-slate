@@ -20,7 +20,11 @@ use crate::sched::ThreadState;
 use crate::sched::IDLE_THREAD_INDEX;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(not(test))]
 static IDLE_THREAD_CONFIGURED: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static IDLE_THREAD_CONFIGURED: crate::sync::per_test_thread::PerTestThread<AtomicBool> =
+    crate::sync::per_test_thread::PerTestThread::new(AtomicBool::new(false));
 
 const IDLE_STACK_GUARD_BYTES: u64 = 1024;
 
