@@ -209,6 +209,29 @@ impl ObjectRequestQueue {
     }
 }
 
+/// Kernel-internal authority check for a holder acting on an object without a raw
+/// handle (Linux `/tmp` projection). Denials are logged like native submit denials.
+#[cfg(feature = "m9-rootfs")]
+pub(crate) fn authorize_holder_object_op(
+    holder: HolderId,
+    object_id: u64,
+    op: u64,
+) -> Result<(), SyscallQueueError> {
+    let required = match op {
+        OBJECT_OP_READ => Rights::READ,
+        OBJECT_OP_WRITE => Rights::WRITE,
+        _ => return Err(SyscallQueueError::InvalidRequest),
+    };
+    if super::holder_has_resource_rights(holder, ResourceRef::object(object_id), required) {
+        Ok(())
+    } else {
+        log_deny(holder, object_id, op, CapabilityError::UnauthorizedHolder);
+        #[cfg(feature = "m9-userspace-self-test")]
+        crate::selftest::m9_userspace::observe_object_denial(op == OBJECT_OP_WRITE);
+        Err(SyscallQueueError::UnauthorizedHolder)
+    }
+}
+
 #[cfg(feature = "m9-rootfs")]
 pub(crate) fn object_queue_submit(
     client: HolderId,
@@ -216,7 +239,18 @@ pub(crate) fn object_queue_submit(
     object_id: u64,
     payload: &[u8],
 ) -> Result<u64, SyscallQueueError> {
+    authorize_holder_object_op(client, object_id, op)?;
     queue_mut().submit(client, op, object_id, payload)
+}
+
+/// Object request slots not yet released by their client.
+#[cfg(feature = "m9-userspace-self-test")]
+pub(crate) fn object_queue_occupied_slots() -> usize {
+    queue_mut()
+        .slots
+        .iter()
+        .filter(|slot| slot.state != SlotState::Free)
+        .count()
 }
 
 #[cfg(feature = "m9-rootfs")]

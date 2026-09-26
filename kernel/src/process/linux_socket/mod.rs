@@ -371,6 +371,9 @@ pub(crate) mod syscalls {
         ctx: &mut LinuxSyscallContext<'_>,
     ) -> LinuxSyscallResult {
         if broker::network_client_handle(HolderId(ctx.pid)).is_none() {
+            crate::service::net_bridge::log_network_denied(ctx.pid);
+            #[cfg(feature = "m9-userspace-self-test")]
+            crate::selftest::m9_userspace::observe_network_denial();
             return Err(EACCES);
         }
         let domain = request.args[0] as u16;

@@ -288,6 +288,15 @@ impl NetBridge {
         }
     }
 
+    /// Client request slots not yet released (pending, in service, or awaiting pickup).
+    #[cfg(feature = "m9-userspace-self-test")]
+    pub(crate) fn occupied_request_slots(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| slot.state != ClientSlotState::Free)
+            .count()
+    }
+
     pub fn register_service_instance(
         &mut self,
         pid: u64,

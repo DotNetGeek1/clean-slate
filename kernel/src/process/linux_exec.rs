@@ -391,6 +391,54 @@ pub(crate) fn launch_linux_process_from_spec(
     scheduler_slot: usize,
     spec: &LinuxExecSpec<'_>,
 ) -> Result<LaunchedLinuxProcess, LinuxImageError> {
+    launch_linux_process_with_authority(
+        allocator,
+        kernel_stack_top,
+        scheduler_slot,
+        spec,
+        LinuxLaunchAuthority::FULL,
+    )
+}
+
+/// Launch-time authority for a Linux process. Nothing is ambient: a process without a
+/// grant is denied by the capability layer. `fork(2)` children inherit the parent's grants.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LinuxLaunchAuthority {
+    /// `NET_CONNECT | NET_SEND | NET_RECEIVE` client authority (Linux sockets).
+    pub network: bool,
+    /// `READ | WRITE` on every `/tmp` backing object (the writable `/tmp` projection).
+    pub tmp_objects: bool,
+}
+
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+impl LinuxLaunchAuthority {
+    pub(crate) const FULL: Self = Self {
+        network: true,
+        tmp_objects: true,
+    };
+}
+
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+pub(crate) fn launch_linux_process_with_authority(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    scheduler_slot: usize,
+    spec: &LinuxExecSpec<'_>,
+    authority: LinuxLaunchAuthority,
+) -> Result<LaunchedLinuxProcess, LinuxImageError> {
     let prepared = prepare_linux_image(allocator, spec)?;
     let page_table_frames = prepared.page_table_frames;
     let image = crate::process::linux_image::LinuxProcessImage {
@@ -413,13 +461,18 @@ pub(crate) fn launch_linux_process_from_spec(
         prepared.brk_initial,
     )
     .map_err(|_| LinuxImageError::Registry("linux launch: brk init failed"))?;
-    #[cfg(feature = "m9-linux-socket")]
-    crate::process::linux_socket::grant_linux_network_capabilities(launched.pid)
-        .map_err(|_| LinuxImageError::Registry("linux launch: network capability grant failed"))?;
-    #[cfg(feature = "m9-rootfs")]
-    crate::process::linux_fs::grant_linux_tmp_object_capabilities(launched.pid).map_err(|_| {
-        LinuxImageError::Registry("linux launch: tmp object capability grant failed")
-    })?;
+    if authority.network {
+        #[cfg(feature = "m9-linux-socket")]
+        crate::process::linux_socket::grant_linux_network_capabilities(launched.pid).map_err(
+            |_| LinuxImageError::Registry("linux launch: network capability grant failed"),
+        )?;
+    }
+    if authority.tmp_objects {
+        #[cfg(feature = "m9-rootfs")]
+        crate::process::linux_fs::grant_linux_tmp_object_capabilities(launched.pid).map_err(
+            |_| LinuxImageError::Registry("linux launch: tmp object capability grant failed"),
+        )?;
+    }
     Ok(launched)
 }
 
