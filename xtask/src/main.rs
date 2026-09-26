@@ -752,7 +752,10 @@ const M9_MILESTONE_STEPS: [M9MilestoneStep; 17] = [
     ("clean-slate-elf (host)", run_m8_elf_host_tests),
     ("clean-slate-rootfs (host)", run_m9_rootfs_host_tests),
     ("kernel linux personality (host)", run_m9_kernel_host_tests),
-    ("test-m9-syscall-fail-closed", run_m9_syscall_fail_closed_acceptance),
+    (
+        "test-m9-syscall-fail-closed",
+        run_m9_syscall_fail_closed_acceptance,
+    ),
     ("test-m9-low-va", run_m9_low_va_acceptance),
     ("test-m9-linux-exec", run_m9_linux_exec_acceptance),
     ("test-m9-fd-core", run_m9_fd_core_acceptance),
@@ -1569,7 +1572,11 @@ fn run_m9_rootfs_host_tests() -> Result<(), XtaskError> {
 fn run_m9_kernel_host_tests() -> Result<(), XtaskError> {
     run_cargo_package_tests(
         "clean-slate-kernel",
-        &["--lib", "--features", "m9-rootfs,m9-linux-socket,m9-linux-trace"],
+        &[
+            "--lib",
+            "--features",
+            "m9-rootfs,m9-linux-socket,m9-linux-trace",
+        ],
     )
 }
 

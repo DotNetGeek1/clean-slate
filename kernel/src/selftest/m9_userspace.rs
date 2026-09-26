@@ -345,14 +345,15 @@ fn launch_shell(
     };
     let (slot, stack_top) =
         pick_scheduler_slot_for_relaunch().unwrap_or_else(|m| fatal_kernel_error(m));
-    let launched = launch_linux_process_with_authority(allocator, stack_top, slot, &spec, authority)
-        .unwrap_or_else(|err| {
-            kernel_log_fmt(format_args!(
-                "[M9  ] busybox launch err={}\n",
-                err.description()
-            ));
-            fatal_kernel_error("m9 userspace busybox launch failed");
-        });
+    let launched =
+        launch_linux_process_with_authority(allocator, stack_top, slot, &spec, authority)
+            .unwrap_or_else(|err| {
+                kernel_log_fmt(format_args!(
+                    "[M9  ] busybox launch err={}\n",
+                    err.description()
+                ));
+                fatal_kernel_error("m9 userspace busybox launch failed");
+            });
     if !LOW_VA_ENTRY_RANGE.contains(&launched.entry) {
         fatal_kernel_error("m9 userspace busybox entry outside the conventional low VA window");
     }
@@ -414,7 +415,9 @@ pub(crate) fn on_thread_blocked(thread_index: usize, pid: u64) {
 /// A blocked thread became Ready (wake, deadline expiry, or cancel). Runs in IRQ or
 /// syscall context: counters only.
 pub(crate) fn on_thread_woken(thread_index: usize, outcome: WaitOutcome) {
-    if thread_index >= SCHEDULER_THREAD_SLOTS || !SLEEP_ARMED[thread_index].swap(false, Ordering::Relaxed) {
+    if thread_index >= SCHEDULER_THREAD_SLOTS
+        || !SLEEP_ARMED[thread_index].swap(false, Ordering::Relaxed)
+    {
         return;
     }
     let steps = NATIVE_PROGRESS
@@ -623,8 +626,13 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 
 fn stdout_matches(cmd: &MatrixCommand, out: &[u8]) -> bool {
     cmd.stdout.is_none_or(|exact| out == exact)
-        && cmd.stdout_prefix.is_none_or(|prefix| out.starts_with(prefix))
-        && cmd.stdout_contains.iter().all(|needle| contains(out, needle))
+        && cmd
+            .stdout_prefix
+            .is_none_or(|prefix| out.starts_with(prefix))
+        && cmd
+            .stdout_contains
+            .iter()
+            .all(|needle| contains(out, needle))
 }
 
 fn finish_matrix_command(index: usize, status: u64) {
@@ -705,7 +713,8 @@ fn finish_probe(index: usize, pid: u64, status: u64) {
         ProbeEvidence::NetworkDenied => net_denials > 0 && read_denials + write_denials == 0,
         ProbeEvidence::ConnectTimeout => {
             SLEEP.woken_with_native_progress.load(Ordering::Relaxed) > 0
-                && SLEEP.max_blocked_ticks.load(Ordering::Relaxed) >= CONNECT_TIMEOUT_MIN_BLOCKED_TICKS
+                && SLEEP.max_blocked_ticks.load(Ordering::Relaxed)
+                    >= CONNECT_TIMEOUT_MIN_BLOCKED_TICKS
         }
     };
     if !proven {
@@ -731,7 +740,12 @@ fn dispatch_phase(allocator: &mut PageAllocator) {
     match phase() {
         Phase::Command(index) => {
             let cmd = &M9_COMMAND_MATRIX[index];
-            launch_shell(allocator, cmd.name, cmd.invocation, LinuxLaunchAuthority::FULL);
+            launch_shell(
+                allocator,
+                cmd.name,
+                cmd.invocation,
+                LinuxLaunchAuthority::FULL,
+            );
         }
         Phase::Probe(index) => {
             let probe = &PROBES[index];
@@ -873,7 +887,10 @@ pub(crate) fn start_m9_userspace_self_test(page_allocator: PageAllocator) -> ! {
     crate::process::linux_fs::init_namespace(&img).expect("namespace");
     linux_rootfs::ensure_rootfs_integrity_logged().expect("integrity");
     verify_busybox_bytes("verified");
-    kernel_log_fmt(format_args!("[M9  ] matrix commands={MATRIX_LEN} probes={} cycles={USERSPACE_CYCLES}\n", PROBES.len()));
+    kernel_log_fmt(format_args!(
+        "[M9  ] matrix commands={MATRIX_LEN} probes={} cycles={USERSPACE_CYCLES}\n",
+        PROBES.len()
+    ));
     for cmd in M9_COMMAND_MATRIX {
         if let Some((path, body)) = cmd.stage {
             bootstrap_tmp_file_bytes(path, body)

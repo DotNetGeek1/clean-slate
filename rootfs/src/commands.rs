@@ -175,14 +175,22 @@ impl CommandMatrix {
                     return Err(format!("command #{}: missing {required}", index + 1));
                 }
             }
-            if spec.stdout.is_none() && spec.stdout_prefix.is_none() && spec.stdout_contains.is_empty()
+            if spec.stdout.is_none()
+                && spec.stdout_prefix.is_none()
+                && spec.stdout_contains.is_empty()
             {
                 return Err(format!("{}: no stdout expectation", spec.name));
             }
             if spec.stage_path.is_some() != spec.stage_body.is_some() {
-                return Err(format!("{}: stage_path and stage_body go together", spec.name));
+                return Err(format!(
+                    "{}: stage_path and stage_body go together",
+                    spec.name
+                ));
             }
-            if commands[..index].iter().any(|other| other.name == spec.name) {
+            if commands[..index]
+                .iter()
+                .any(|other| other.name == spec.name)
+            {
                 return Err(format!("duplicate command name {}", spec.name));
             }
         }
@@ -320,7 +328,11 @@ mod tests {
             .find(|c| c.name == "grep-via-busybox")
             .unwrap();
         assert_eq!(heredoc.shell, "/bin/busybox grep hello <<EOF\nhello\nEOF");
-        let script = matrix.commands.iter().find(|c| c.name == "script-sh").unwrap();
+        let script = matrix
+            .commands
+            .iter()
+            .find(|c| c.name == "script-sh")
+            .unwrap();
         assert_eq!(script.stage_path.as_deref(), Some("/tmp/script.sh"));
         assert!(script.stage_body.as_ref().unwrap().ends_with(b"exit 0\n"));
     }
@@ -328,7 +340,11 @@ mod tests {
     #[test]
     fn stdout_expectations() {
         let matrix = frozen_matrix();
-        let ls = matrix.commands.iter().find(|c| c.name == "ls-root").unwrap();
+        let ls = matrix
+            .commands
+            .iter()
+            .find(|c| c.name == "ls-root")
+            .unwrap();
         assert!(ls.check_stdout(b"tmp\netc\nbin\n").is_ok());
         assert!(ls.check_stdout(b"tmp\netc\n").is_err());
         let pwd = matrix.commands.iter().find(|c| c.name == "pwd").unwrap();
@@ -348,8 +364,12 @@ mod tests {
         let base = "[meta]\nbusybox_sha256 = \"x\"\n[[command]]\nname = \"a\"\nshell = \"true\"\nexit_status = 0\n";
         assert!(CommandMatrix::parse_toml(&format!("{base}stdout = \"\"\n")).is_ok());
         assert!(CommandMatrix::parse_toml(base).is_err());
-        assert!(CommandMatrix::parse_toml(&format!("{base}stdout = \"\"\nstderr = \"\"\n")).is_err());
-        assert!(CommandMatrix::parse_toml(&format!("{base}stdout = \"\"\nstdout = \"\"\n")).is_err());
+        assert!(
+            CommandMatrix::parse_toml(&format!("{base}stdout = \"\"\nstderr = \"\"\n")).is_err()
+        );
+        assert!(
+            CommandMatrix::parse_toml(&format!("{base}stdout = \"\"\nstdout = \"\"\n")).is_err()
+        );
         let dup = format!("{base}stdout = \"\"\n[[command]]\nname = \"a\"\nshell = \"true\"\nexit_status = 0\nstdout = \"\"\n");
         assert!(CommandMatrix::parse_toml(&dup).is_err());
     }

@@ -142,7 +142,9 @@ pub fn validate_m9_userspace_serial(serial: &str) -> Result<(), String> {
         return Err("guest probe count differs from the validator".into());
     }
     if cycles < 2 {
-        return Err(format!("reuse evidence needs at least 2 cycles, guest ran {cycles}"));
+        return Err(format!(
+            "reuse evidence needs at least 2 cycles, guest ran {cycles}"
+        ));
     }
 
     validate_integrity(&lines)?;
@@ -189,7 +191,9 @@ fn collect_launches(lines: &[&str]) -> Result<Vec<Launch>, String> {
         };
         let entry = field_u64(payload, "entry")?;
         if !(LOW_VA_ENTRY_MIN..LOW_VA_ENTRY_END).contains(&entry) {
-            return Err(format!("BusyBox entry {entry:#x} outside the low-VA window"));
+            return Err(format!(
+                "BusyBox entry {entry:#x} outside the low-VA window"
+            ));
         }
         let name = field(payload, "cmd").ok_or("shell started without cmd=")?;
         let (net, tmp) = (field_u64(payload, "net")?, field_u64(payload, "tmp")?);
@@ -199,7 +203,9 @@ fn collect_launches(lines: &[&str]) -> Result<Vec<Launch>, String> {
             .map(|p| (u64::from(p.net), u64::from(p.tmp)))
             .unwrap_or((1, 1));
         if (net, tmp) != expected {
-            return Err(format!("{name}: launched with net={net} tmp={tmp}, expected {expected:?}"));
+            return Err(format!(
+                "{name}: launched with net={net} tmp={tmp}, expected {expected:?}"
+            ));
         }
         launches.push(Launch {
             pid: field_u64(payload, "pid")?,
@@ -225,7 +231,10 @@ fn validate_launch_sequence(
             expected.push((probe.name, cycle));
         }
     }
-    let actual: Vec<(&str, u64)> = launches.iter().map(|l| (l.name.as_str(), l.cycle)).collect();
+    let actual: Vec<(&str, u64)> = launches
+        .iter()
+        .map(|l| (l.name.as_str(), l.cycle))
+        .collect();
     if actual != expected {
         return Err(format!(
             "launch sequence differs from matrix+probes x {cycles} cycles ({} launches, expected {})",
@@ -323,11 +332,15 @@ fn validate_probes(lines: &[&str], launches: &[Launch], cycles: u64) -> Result<(
             .filter(|p| p.name == name)
             .ok_or_else(|| format!("probe #{seen} is {name}, out of order"))?;
         if cycle != (seen / PROBES.len()) as u64 + 1 {
-            return Err(format!("probe {name} logged for cycle {cycle} out of order"));
+            return Err(format!(
+                "probe {name} logged for cycle {cycle} out of order"
+            ));
         }
         seen += 1;
         if field_u64(payload, "status")? != spec.status {
-            return Err(format!("{name}@{cycle}: unexpected exit status in `{payload}`"));
+            return Err(format!(
+                "{name}@{cycle}: unexpected exit status in `{payload}`"
+            ));
         }
         let launch = launches
             .iter()
@@ -342,38 +355,60 @@ fn validate_probes(lines: &[&str], launches: &[Launch], cycles: u64) -> Result<(
         let net_denials = field_u64(payload, "network_denials")?;
         match name {
             "deny-fs-readonly" => {
-                if !has("Read-only file system") || read_denials + write_denials + net_denials != 0 {
-                    return Err(format!("{name}@{cycle}: expected EROFS without a capability denial"));
+                if !has("Read-only file system") || read_denials + write_denials + net_denials != 0
+                {
+                    return Err(format!(
+                        "{name}@{cycle}: expected EROFS without a capability denial"
+                    ));
                 }
             }
             "deny-tmp-write" | "deny-tmp-read" => {
-                let op = if name == "deny-tmp-write" { "write" } else { "read" };
-                let denials = if op == "write" { write_denials } else { read_denials };
+                let op = if name == "deny-tmp-write" {
+                    "write"
+                } else {
+                    "read"
+                };
+                let denials = if op == "write" {
+                    write_denials
+                } else {
+                    read_denials
+                };
                 let cap_line = format!("[CAP ] deny holder={pid} ");
                 let denied = window.iter().any(|l| {
                     l.contains(&cap_line) && l.contains(&format!(" op={op} reason=no-authority"))
                 });
                 if denials == 0 || !denied {
-                    return Err(format!("{name}@{cycle}: missing `[CAP ] deny ... op={op}` for pid {pid}"));
+                    return Err(format!(
+                        "{name}@{cycle}: missing `[CAP ] deny ... op={op}` for pid {pid}"
+                    ));
                 }
                 if has(&format!("[CAP ] object grant holder={pid} ")) {
-                    return Err(format!("{name}@{cycle}: pid {pid} was granted /tmp authority"));
+                    return Err(format!(
+                        "{name}@{cycle}: pid {pid} was granted /tmp authority"
+                    ));
                 }
                 if !has("Permission denied") {
                     return Err(format!("{name}@{cycle}: BusyBox did not report EACCES"));
                 }
             }
             "deny-net" => {
-                if net_denials == 0 || !has(&format!("[NET ] denied pid={pid} reason=no-authority")) {
-                    return Err(format!("{name}@{cycle}: missing network denial for pid {pid}"));
+                if net_denials == 0 || !has(&format!("[NET ] denied pid={pid} reason=no-authority"))
+                {
+                    return Err(format!(
+                        "{name}@{cycle}: missing network denial for pid {pid}"
+                    ));
                 }
                 if has(&format!("[CAP ] net grant holder={pid} ")) {
-                    return Err(format!("{name}@{cycle}: pid {pid} was granted network authority"));
+                    return Err(format!(
+                        "{name}@{cycle}: pid {pid} was granted network authority"
+                    ));
                 }
             }
             "connect-timeout" => {
                 if !has("Operation timed out") {
-                    return Err(format!("{name}@{cycle}: connect did not fail with ETIMEDOUT"));
+                    return Err(format!(
+                        "{name}@{cycle}: connect did not fail with ETIMEDOUT"
+                    ));
                 }
             }
             _ => unreachable!("probe names come from PROBES"),
@@ -403,7 +438,9 @@ fn validate_sleep_evidence(lines: &[&str]) -> Result<(), String> {
             || field_u64(proof, "native_steps_while_blocked")? == 0
             || field_u64(proof, "max_blocked_ticks")? == 0
         {
-            return Err(format!("sleep proof lacks native progress while blocked: `{proof}`"));
+            return Err(format!(
+                "sleep proof lacks native progress while blocked: `{proof}`"
+            ));
         }
     }
     for sleep in payloads.iter().filter(|p| p.starts_with("sleep ")) {
@@ -460,7 +497,10 @@ fn validate_resources(lines: &[&str], cycles: u64) -> Result<(), String> {
         }
         for key in PERSISTENT_RESOURCES {
             if values.get(key) != first.get(key) || values.get(key).is_none() {
-                return Err(format!("cycle {}: persistent {key} changed after cycle 1", index + 1));
+                return Err(format!(
+                    "cycle {}: persistent {key} changed after cycle 1",
+                    index + 1
+                ));
             }
         }
         let progress = values.get("native_progress").copied().unwrap_or(0);
