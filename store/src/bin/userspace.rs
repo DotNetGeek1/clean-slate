@@ -290,6 +290,8 @@ fn raw_syscall(nr: u64, args: [u64; 6]) -> u64 {
             in("r8") args[4],
             in("r9") args[5],
             lateout("rax") result,
+            lateout("rcx") _,
+            lateout("r11") _,
             options(nostack),
         );
     }

@@ -14,6 +14,9 @@ pub(crate) const REVOKE_OP_PROBE: u64 = 2;
 /// M6.6 self-test only: returns 1 once both reader fixtures probed, else 0.
 #[cfg(feature = "m6-revocation-self-test")]
 pub(crate) const REVOKE_OP_WAIT_READERS: u64 = 3;
+/// M6.6 self-test only: blocks a reader fixture until the owner finished its revocations.
+#[cfg(feature = "m6-revocation-self-test")]
+pub(crate) const REVOKE_OP_WAIT_OWNER: u64 = 4;
 
 pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
     match frame.rdi {
@@ -22,6 +25,10 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
         #[cfg(feature = "m6-revocation-self-test")]
         REVOKE_OP_WAIT_READERS => {
             crate::selftest::m6_revocation::handle_wait_for_readers(frame);
+        }
+        #[cfg(feature = "m6-revocation-self-test")]
+        REVOKE_OP_WAIT_OWNER => {
+            crate::selftest::m6_revocation::handle_wait_for_owner_finished(frame);
         }
         _ => frame.rax = SYSCALL_EINVAL,
     }

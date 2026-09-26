@@ -1,11 +1,15 @@
 //! M9 #104 BusyBox + rootfs fixture verification (`cargo xtask verify-m9-fixture`).
 
+use clean_slate_rootfs::commands::CommandMatrix;
 use clean_slate_rootfs::{pack, EntryKind, Image, Manifest, ManifestKind};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const BUSYBOX_SHA256: &str = "7ba56acec9fb89deace4ebfab6f4baaa8d1b778754b8f7ae3dbd7cf7990fe380";
+pub const BUSYBOX_SHA256: &str = "7ba56acec9fb89deace4ebfab6f4baaa8d1b778754b8f7ae3dbd7cf7990fe380";
+/// Packed `rootfs.toml` image; `kernel/build.rs` embeds the same bytes and pins the same hash.
+pub const ROOTFS_IMAGE_SHA256: &str =
+    "03bd40c0f1f7ae56551f597d5f2b33672cc9d1617e13c22360866236aa367a5d";
 const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 const ET_EXEC: u16 = 2;
 const EM_X86_64: u16 = 62;
@@ -35,15 +39,25 @@ pub fn verify_m9_fixture() -> Result<M9FixtureReport, String> {
         ));
     }
 
+    verify_busybox_sha256_file(&dir)?;
     verify_busybox_elf(&bytes)?;
-    verify_applets_from_commands(&dir)?;
+    let matrix = load_command_matrix()?;
+    if matrix.busybox_sha256 != BUSYBOX_SHA256 {
+        return Err(format!(
+            "commands.toml busybox_sha256 {} != pinned {BUSYBOX_SHA256}",
+            matrix.busybox_sha256
+        ));
+    }
+    verify_matrix_against_reference_harness(&matrix, &dir)?;
+    let required_applets = verify_applets_from_commands(&matrix, &dir)?;
 
     let manifest_text = fs::read_to_string(dir.join("rootfs.toml"))
         .map_err(|e| format!("read rootfs.toml: {e}"))?;
     let manifest =
         Manifest::parse_toml(&manifest_text).map_err(|e| format!("parse rootfs.toml: {e:?}"))?;
 
-    verify_manifest_links(&manifest, &dir)?;
+    verify_manifest_busybox_pin(&manifest)?;
+    verify_manifest_links(&manifest, &dir, &required_applets)?;
 
     let pack_once = |bytes_out: &mut Vec<u8>| -> Result<(), String> {
         *bytes_out = pack(&manifest, |p| {
@@ -71,6 +85,15 @@ pub fn verify_m9_fixture() -> Result<M9FixtureReport, String> {
     print_entry_table(&image);
     let image_sha256 = hex_encode(&sha256(&image_a));
     println!("M9 rootfs image sha256={image_sha256}");
+    if image_sha256 != ROOTFS_IMAGE_SHA256 {
+        return Err(format!(
+            "rootfs image SHA-256 mismatch: expected {ROOTFS_IMAGE_SHA256}, got {image_sha256}"
+        ));
+    }
+    println!(
+        "M9 fixture verified busybox={BUSYBOX_SHA256} image={ROOTFS_IMAGE_SHA256} commands={}",
+        matrix.commands.len()
+    );
 
     Ok(M9FixtureReport {
         busybox_sha256: actual_hash,
@@ -167,7 +190,89 @@ fn verify_busybox_elf(bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_applets_from_commands(dir: &Path) -> Result<(), String> {
+/// Parses the frozen #100 command contract with the parser the kernel build uses.
+pub fn load_command_matrix() -> Result<CommandMatrix, String> {
+    let path = fixture_dir().join("commands.toml");
+    let text = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    CommandMatrix::parse_toml(&text).map_err(|e| format!("parse commands.toml: {e}"))
+}
+
+fn verify_busybox_sha256_file(dir: &Path) -> Result<(), String> {
+    let text = fs::read_to_string(dir.join("busybox.sha256"))
+        .map_err(|e| format!("read busybox.sha256: {e}"))?;
+    let recorded = text.split_whitespace().next().unwrap_or("");
+    if recorded != BUSYBOX_SHA256 {
+        return Err(format!(
+            "busybox.sha256 records {recorded}, pinned {BUSYBOX_SHA256}"
+        ));
+    }
+    Ok(())
+}
+
+fn verify_manifest_busybox_pin(manifest: &Manifest) -> Result<(), String> {
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|e| e.path == b"/bin/busybox")
+        .ok_or("rootfs.toml has no /bin/busybox entry")?;
+    match entry.sha256.as_deref() {
+        Some(BUSYBOX_SHA256) => Ok(()),
+        other => Err(format!(
+            "rootfs.toml /bin/busybox sha256 {other:?} != pinned {BUSYBOX_SHA256}"
+        )),
+    }
+}
+
+/// Every contract command must be one `run-traces.sh` recorded, in the same order, with a
+/// frozen strace; staged files must match the reference heredoc byte-for-byte.
+fn verify_matrix_against_reference_harness(
+    matrix: &CommandMatrix,
+    dir: &Path,
+) -> Result<(), String> {
+    let harness = fs::read_to_string(dir.join("run-traces.sh"))
+        .map_err(|e| format!("read run-traces.sh: {e}"))?
+        .replace("\r\n", "\n");
+    let traced: Vec<&str> = harness
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("strace_one \""))
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    let names: Vec<&str> = matrix.commands.iter().map(|c| c.name.as_str()).collect();
+    if traced != names {
+        return Err(format!(
+            "commands.toml order {names:?} != run-traces.sh order {traced:?}"
+        ));
+    }
+    for spec in &matrix.commands {
+        let trace = dir.join("traces").join(format!("{}.strace", spec.name));
+        if !trace.is_file() {
+            return Err(format!("missing frozen trace {}", trace.display()));
+        }
+        if let (Some(path), Some(body)) = (&spec.stage_path, &spec.stage_body) {
+            let opener = format!("cat > \"$ROOTFS{path}\" <<'SCRIPT'\n");
+            let start = harness
+                .find(&opener)
+                .map(|at| at + opener.len())
+                .ok_or_else(|| format!("run-traces.sh does not stage {path}"))?;
+            let end = harness[start..]
+                .find("\nSCRIPT\n")
+                .map(|at| start + at + 1)
+                .ok_or_else(|| format!("run-traces.sh heredoc for {path} is unterminated"))?;
+            if harness.as_bytes()[start..end] != body[..] {
+                return Err(format!(
+                    "{}: stage_body differs from the run-traces.sh heredoc",
+                    spec.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_applets_from_commands(
+    matrix: &CommandMatrix,
+    dir: &Path,
+) -> Result<BTreeSet<String>, String> {
     let applets_text = fs::read_to_string(dir.join("applets.txt"))
         .map_err(|e| format!("read applets.txt: {e}"))?;
     let applets: BTreeSet<String> = applets_text
@@ -177,43 +282,18 @@ fn verify_applets_from_commands(dir: &Path) -> Result<(), String> {
         .map(str::to_string)
         .collect();
 
-    let commands_text = fs::read_to_string(dir.join("commands.toml"))
-        .map_err(|e| format!("read commands.toml: {e}"))?;
-    let shells = extract_shell_lines(&commands_text);
     let mut required = BTreeSet::new();
-    for shell in shells {
-        collect_applets_from_shell(&shell, &mut required);
+    for spec in &matrix.commands {
+        collect_applets_from_shell(&spec.shell, &mut required);
     }
-    for name in required {
-        if !applets.contains(&name) {
+    for name in &required {
+        if !applets.contains(name) {
             return Err(format!(
                 "applets.txt missing applet '{name}' required by commands.toml shells"
             ));
         }
     }
-    Ok(())
-}
-
-fn extract_shell_lines(text: &str) -> Vec<String> {
-    let mut shells = Vec::new();
-    for raw in text.lines() {
-        let line = raw.split('#').next().unwrap_or("").trim();
-        if let Some(rest) = line.strip_prefix("shell = ") {
-            let value = rest.trim();
-            if let Some(unquoted) = strip_quotes(value) {
-                shells.push(unquoted);
-            }
-        }
-    }
-    shells
-}
-
-fn strip_quotes(s: &str) -> Option<String> {
-    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-        Some(s[1..s.len() - 1].to_string())
-    } else {
-        None
-    }
+    Ok(required)
 }
 
 fn collect_applets_from_shell(shell: &str, out: &mut BTreeSet<String>) {
@@ -254,7 +334,23 @@ fn is_applet_token(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-fn verify_manifest_links(manifest: &Manifest, dir: &Path) -> Result<(), String> {
+fn verify_manifest_links(
+    manifest: &Manifest,
+    dir: &Path,
+    required_applets: &BTreeSet<String>,
+) -> Result<(), String> {
+    for applet in required_applets {
+        let link = format!("/bin/{applet}");
+        let linked = manifest
+            .entries
+            .iter()
+            .any(|e| e.kind == ManifestKind::Link && e.path == link.as_bytes());
+        if !linked {
+            return Err(format!(
+                "rootfs.toml lacks {link}, which a commands.toml shell invokes"
+            ));
+        }
+    }
     let applets_text = fs::read_to_string(dir.join("applets.txt"))
         .map_err(|e| format!("read applets.txt: {e}"))?;
     let applets: BTreeSet<String> = applets_text

@@ -3,7 +3,9 @@
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::capability::bootstrap_grant::register_bootstrap_grant;
-use crate::capability::revocation::{REVOKE_OP_PROBE, REVOKE_OP_REVOKE, REVOKE_OP_WAIT_READERS};
+use crate::capability::revocation::{
+    REVOKE_OP_PROBE, REVOKE_OP_REVOKE, REVOKE_OP_WAIT_OWNER, REVOKE_OP_WAIT_READERS,
+};
 use crate::capability::{grant_root, with_capability_space};
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
@@ -90,6 +92,44 @@ pub(crate) fn handle_wait_for_readers(
     ) {
         Ok(WaitOutcome::Woken) | Ok(WaitOutcome::TimedOut) | Ok(WaitOutcome::Cancelled) => {
             handle_wait_for_readers(frame)
+        }
+        Err(message) => fatal_kernel_error(message),
+    }
+}
+
+/// Set once the owner reported; readers stay alive until then so both owner revokes act on a
+/// reader branch whose holders (and slots) are still live.
+static OWNER_FINISHED: AtomicU8 = AtomicU8::new(0);
+
+const REVOCATION_OWNER_FINISHED_KEY: crate::sched::wait::WaitKey =
+    crate::sched::wait::WaitKey(0x661);
+
+fn release_readers() {
+    OWNER_FINISHED.store(1, Ordering::Relaxed);
+    crate::sched::wait::wake_all(REVOCATION_OWNER_FINISHED_KEY);
+}
+
+pub(crate) fn handle_wait_for_owner_finished(
+    frame: &mut crate::arch::x86_64::interrupt_context::SyscallContext,
+) {
+    use crate::arch::x86_64::interrupt_context::SyscallContext;
+    use crate::sched::wait::{block_current_thread_with_resume, BlockedResume, WaitOutcome};
+
+    if OWNER_FINISHED.load(Ordering::Relaxed) != 0 {
+        frame.rax = 1;
+        return;
+    }
+    match block_current_thread_with_resume(
+        frame as *mut SyscallContext,
+        REVOCATION_OWNER_FINISHED_KEY,
+        None,
+        BlockedResume::RestartSyscall {
+            nr: SYSCALL_NR_CAP_REVOKE,
+            timeout_rax: 0,
+        },
+    ) {
+        Ok(WaitOutcome::Woken) | Ok(WaitOutcome::TimedOut) | Ok(WaitOutcome::Cancelled) => {
+            handle_wait_for_owner_finished(frame)
         }
         Err(message) => fatal_kernel_error(message),
     }
@@ -251,7 +291,12 @@ fn build_reader_program(handle: u64) -> M6FixtureBootstrap {
     program
         .push(probe_step(handle, Rights::READ).expect_eq(0))
         .unwrap();
-    program.push(M6FixtureStep::spin(3)).unwrap();
+    program
+        .push(
+            M6FixtureStep::syscall(SYSCALL_NR_CAP_REVOKE, [REVOKE_OP_WAIT_OWNER, 0, 0, 0, 0, 0])
+                .expect_ne(0),
+        )
+        .unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
 }
@@ -386,6 +431,7 @@ fn report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReportAction 
             .unwrap_or_else(|_| fatal_kernel_error("child handle decode failed"));
         log_revoked_probe(HolderId(state.reader_pid), child);
         log_revoked_probe(HolderId(state.reader2_pid), child);
+        release_readers();
     } else if pid == state.reader_pid {
         if report.status == FIXTURE_STATUS_DONE
             || (report.status == FIXTURE_STATUS_MISMATCH && state.owner_reported)
@@ -524,6 +570,7 @@ pub(crate) fn start_m6_revocation_self_test(allocator: PageAllocator) -> ! {
     READER_PROBE_COUNT.store(0, Ordering::Relaxed);
     READER1_INITIAL_PROBE.store(0, Ordering::Relaxed);
     READER2_INITIAL_PROBE.store(0, Ordering::Relaxed);
+    OWNER_FINISHED.store(0, Ordering::Relaxed);
     unsafe {
         READER_PROBE_PIDS = Some((pids[1], pids[2]));
     }

@@ -194,22 +194,24 @@ pub(crate) fn calibrate_apic_tick() {
         prepare_local_apic_timer_for_calibration();
         pit_program_channel2();
         let target_pit_delta = (PIT_HZ * CALIBRATION_MS) / 1000;
-        let start_pit = pit_read_count();
+        let mut last_pit = pit_read_count();
         let start_apic = local_apic_timer_current_count();
         let start_tsc = read_tsc();
+        // Accumulate per-poll deltas: the 16-bit counter wraps every ~55 ms, so a single
+        // start-to-now difference loses whole wraps whenever one poll gap straddles the
+        // target (the vCPU can stall for several ms under TCG), inflating the TSC rate.
+        let mut pit_delta = 0u64;
         let mut polls = 0u32;
-        loop {
+        while pit_delta < target_pit_delta {
             polls = polls.saturating_add(1);
             if polls > PIT_POLL_MAX {
                 kernel_log_fmt(format_args!("[FAIL] apic calibration pit-timeout\n"));
                 fatal_kernel_error("apic/tsc calibration pit timeout");
             }
-            let elapsed = pit_elapsed_ticks(start_pit, pit_read_count());
-            if elapsed >= target_pit_delta {
-                break;
-            }
+            let now_pit = pit_read_count();
+            pit_delta += pit_elapsed_ticks(last_pit, now_pit);
+            last_pit = now_pit;
         }
-        let pit_delta = pit_elapsed_ticks(start_pit, pit_read_count());
         let end_apic = local_apic_timer_current_count();
         let end_tsc = read_tsc();
         let apic_delta = u64::from(start_apic.wrapping_sub(end_apic));

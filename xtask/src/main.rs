@@ -15,6 +15,7 @@ mod m7_fixture;
 mod m7_fixture_tcp;
 mod m8_fixture;
 mod m9_fixture;
+mod m9_userspace_validate;
 mod marker_spec;
 
 use marker_spec::{MarkerSet, MarkerStep, MarkerTracker};
@@ -250,19 +251,23 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 9] = [
     "[M9.E] PASS",
 ];
 const M9_USERSPACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(300);
-const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 14] = [
+const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 18] = [
     "[M9  ] creating",
     "[M9  ] busybox verified",
+    "[M9  ] matrix commands=",
     "[STOR] object-service started",
+    "[M9  ] resources label=baseline",
     "[TIME] timer initialized",
     "[M9  ] fs PASS",
     "[M9  ] process-pipe PASS",
-    "[M9  ] blocking PASS",
     "[M9  ] dns PASS",
+    "[M9  ] blocking PASS",
     "[M9  ] tcp PASS",
     "[M9  ] deny fs ok",
     "[M9  ] deny net ok",
+    "[M9  ] timeout PASS",
     "[M9  ] cycle=9",
+    "[M9  ] busybox intact",
     "[M9  ] denial PASS",
     "[M9.8] PASS",
 ];
@@ -736,6 +741,33 @@ const M8_MILESTONE_STEPS: [M8MilestoneStep; 5] = [
     ("linux-image loader (host)", run_m8_linux_loader_host_tests),
     ("test-m8-linux-hello", run_m8_linux_hello_acceptance),
 ];
+type M9MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
+/// Authoritative M9 gate (#108): pinned fixture verification, host ABI/ELF/rootfs/kernel
+/// personality tests, every M9 production-path QEMU constituent, then the #107
+/// convergence boot (`test-m9-userspace`) with its host serial validator. Each step has
+/// a finite timeout; `[M9  ] PASS` is printed only after all of them succeed.
+const M9_MILESTONE_STEPS: [M9MilestoneStep; 17] = [
+    ("verify-m9-fixture", run_m9_verify_fixture_step),
+    ("clean-slate-linux-abi (host)", run_m8_linux_abi_host_tests),
+    ("clean-slate-elf (host)", run_m8_elf_host_tests),
+    ("clean-slate-rootfs (host)", run_m9_rootfs_host_tests),
+    ("kernel linux personality (host)", run_m9_kernel_host_tests),
+    (
+        "test-m9-syscall-fail-closed",
+        run_m9_syscall_fail_closed_acceptance,
+    ),
+    ("test-m9-low-va", run_m9_low_va_acceptance),
+    ("test-m9-linux-exec", run_m9_linux_exec_acceptance),
+    ("test-m9-fd-core", run_m9_fd_core_acceptance),
+    ("test-m9-block-wake", run_m9_block_wake_acceptance),
+    ("test-m9-linux-runtime", run_m9_linux_runtime_acceptance),
+    ("test-m9-linux-proc", run_m9_linux_proc_acceptance),
+    ("test-m9-rootfs", run_m9_rootfs_acceptance),
+    ("test-m9-linux-fs", run_m9_linux_fs_acceptance),
+    ("test-m9-linux-socket", run_m9_linux_socket_acceptance),
+    ("test-m9-linux-trace", run_m9_linux_trace_acceptance),
+    ("test-m9-userspace", run_m9_userspace_acceptance),
+];
 
 fn main() -> ExitCode {
     match run(env::args_os()) {
@@ -763,6 +795,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM9Rootfs => run_m9_rootfs_acceptance(),
         ParsedCommand::TestM9LinuxFs => run_m9_linux_fs_acceptance(),
         ParsedCommand::TestM9Userspace => run_m9_userspace_acceptance(),
+        ParsedCommand::TestM9 => run_m9_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
         ParsedCommand::TestM3 => run_m3_acceptance(),
         ParsedCommand::TestM3AddressSpace => run_m3_address_space_acceptance(),
@@ -1285,8 +1318,9 @@ fn run_m9_linux_fs_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m9_userspace_acceptance() -> Result<(), XtaskError> {
-    m9_fixture::verify_m9_fixture().map_err(XtaskError::InvalidCommand)?;
+    m9_fixture::verify_m9_fixture().map_err(XtaskError::Validation)?;
     reset_m5_data_disk_image()?;
+    build_m6_fixture_userspace(true)?;
     build_storage_userspace(true)?;
     build_network_userspace(true)?;
     let peer = M7FixturePeer::start_with(FixtureOptions {
@@ -1516,7 +1550,7 @@ fn run_m8_verify_fixture_step() -> Result<(), XtaskError> {
 }
 
 fn run_m9_verify_fixture_verbose() -> Result<(), XtaskError> {
-    let report = m9_fixture::verify_m9_fixture().map_err(XtaskError::InvalidCommand)?;
+    let report = m9_fixture::verify_m9_fixture().map_err(XtaskError::Validation)?;
     println!("M9 fixture OK");
     println!("  busybox_sha256={}", report.busybox_sha256);
     println!("  image_sha256={}", report.image_sha256);
@@ -1524,9 +1558,45 @@ fn run_m9_verify_fixture_verbose() -> Result<(), XtaskError> {
     Ok(())
 }
 
-#[allow(dead_code)]
 fn run_m9_verify_fixture_step() -> Result<(), XtaskError> {
-    m9_fixture::verify_m9_fixture().map_err(XtaskError::InvalidCommand)?;
+    m9_fixture::verify_m9_fixture().map_err(XtaskError::Validation)?;
+    Ok(())
+}
+
+fn run_m9_rootfs_host_tests() -> Result<(), XtaskError> {
+    run_cargo_package_tests("clean-slate-rootfs", &["--features", "std"])
+}
+
+/// Linux-personality kernel unit tests that sit behind M9 feature gates (fd/proc tables,
+/// `/tmp` namespace, socket and trace plumbing); plain `cargo test` never enables them.
+fn run_m9_kernel_host_tests() -> Result<(), XtaskError> {
+    run_cargo_package_tests(
+        "clean-slate-kernel",
+        &[
+            "--lib",
+            "--features",
+            "m9-rootfs,m9-linux-socket,m9-linux-trace",
+        ],
+    )
+}
+
+/// M9 milestone gate (#108). Emits `[M9  ] PASS` only after every step succeeds; the
+/// first failure propagates with the failing `[M9  ] step N/…` name already printed.
+fn run_m9_acceptance() -> Result<(), XtaskError> {
+    let total = M9_MILESTONE_STEPS.len();
+    for (index, (name, step)) in M9_MILESTONE_STEPS.iter().enumerate() {
+        println!("[M9  ] step {}/{} {}", index + 1, total, name);
+        let started = std::time::Instant::now();
+        step()?;
+        println!(
+            "[M9  ] step {}/{} {} ok secs={:.1}",
+            index + 1,
+            total,
+            name,
+            started.elapsed().as_secs_f64()
+        );
+    }
+    println!("[M9  ] PASS");
     Ok(())
 }
 
@@ -1548,7 +1618,7 @@ fn run_m8_linux_loader_host_tests() -> Result<(), XtaskError> {
         .arg("--features")
         .arg("m8-linux-image")
         .arg("process::linux_image");
-    run_command(&mut test)
+    run_host_test_command(&mut test)
 }
 
 fn run_m3_lifecycle_acceptance() -> Result<(), XtaskError> {
@@ -1628,7 +1698,7 @@ fn build_supervisor_userspace(release: bool) -> Result<(), XtaskError> {
         cmd.arg("--release");
     }
     cmd.env("RUSTC_BOOTSTRAP", "1");
-    run_command(&mut cmd)?;
+    run_build_command(&mut cmd)?;
     Ok(())
 }
 
@@ -1662,7 +1732,7 @@ fn build_recovery_userspace(release: bool) -> Result<(), XtaskError> {
         cmd.arg("--release");
     }
     cmd.env("RUSTC_BOOTSTRAP", "1");
-    run_command(&mut cmd)?;
+    run_build_command(&mut cmd)?;
     Ok(())
 }
 
@@ -1695,7 +1765,7 @@ fn run_cargo_package_tests(package: &str, filter: &[&str]) -> Result<(), XtaskEr
     for arg in filter {
         test.arg(arg);
     }
-    run_command(&mut test)
+    run_host_test_command(&mut test)
 }
 
 fn run_m5_crash_matrix() -> Result<(), XtaskError> {
@@ -1835,7 +1905,7 @@ fn build_network_userspace(release: bool) -> Result<(), XtaskError> {
         cmd.arg("--release");
     }
     cmd.env("RUSTC_BOOTSTRAP", "1");
-    run_command(&mut cmd)?;
+    run_build_command(&mut cmd)?;
     Ok(())
 }
 
@@ -1923,7 +1993,7 @@ fn build_m6_fixture_userspace(release: bool) -> Result<(), XtaskError> {
         cmd.arg("--release");
     }
     cmd.env("RUSTC_BOOTSTRAP", "1");
-    run_command(&mut cmd)?;
+    run_build_command(&mut cmd)?;
     Ok(())
 }
 
@@ -2011,7 +2081,7 @@ fn build_restart_policy_userspace(release: bool) -> Result<(), XtaskError> {
         cmd.arg("--release");
     }
     cmd.env("RUSTC_BOOTSTRAP", "1");
-    run_command(&mut cmd)?;
+    run_build_command(&mut cmd)?;
     Ok(())
 }
 
@@ -2032,7 +2102,7 @@ fn build_storage_userspace(release: bool) -> Result<(), XtaskError> {
         cmd.arg("--release");
     }
     cmd.env("RUSTC_BOOTSTRAP", "1");
-    run_command(&mut cmd)?;
+    run_build_command(&mut cmd)?;
     Ok(())
 }
 
@@ -2383,7 +2453,7 @@ fn build_kernel(release: bool, debug_entry: bool, features: &[&str]) -> Result<(
         cmd.arg("--features").arg(feature_list.join(","));
     }
 
-    run_command(&mut cmd)
+    run_build_command(&mut cmd)
 }
 
 fn cargo_target_dir() -> PathBuf {
@@ -2460,6 +2530,19 @@ fn run_command(command: &mut Command) -> Result<(), XtaskError> {
             status: status.to_string(),
         })
     }
+}
+
+/// Cold CI builds of the kernel or a userspace image finish well inside this bound; it
+/// exists so no acceptance phase can hang indefinitely.
+const BUILD_COMMAND_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const HOST_TEST_COMMAND_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+fn run_build_command(command: &mut Command) -> Result<(), XtaskError> {
+    run_timed_command(command, BUILD_COMMAND_TIMEOUT)
+}
+
+fn run_host_test_command(command: &mut Command) -> Result<(), XtaskError> {
+    run_timed_command(command, HOST_TEST_COMMAND_TIMEOUT)
 }
 
 fn run_timed_command(command: &mut Command, timeout: Duration) -> Result<(), XtaskError> {
@@ -2698,18 +2781,24 @@ fn run_acceptance_command(
                     print!("{}", chunk.text);
                 }
                 output.push_str(&chunk.text);
+                let guest_fail_line = output.find("[FAIL] ").and_then(|start| {
+                    output[start..]
+                        .find('\n')
+                        .map(|len| output[start..start + len].trim_end().to_owned())
+                });
                 if marker_set_is_ordered(marker_set, &M9_USERSPACE_ACCEPTANCE_MARKERS)
-                    && output.contains("[FAIL] m9 userspace checklist command faulted")
                     && !authoritative_pass
                 {
-                    terminate_child(&mut child)?;
-                    let _ = child.wait();
-                    join_output_reader(stdout_handle);
-                    join_output_reader(stderr_handle);
-                    return Err(XtaskError::CommandFailed {
-                        command: command_display,
-                        status: "guest reported m9 userspace checklist [FAIL]".to_owned(),
-                    });
+                    if let Some(fail_line) = guest_fail_line {
+                        terminate_child(&mut child)?;
+                        let _ = child.wait();
+                        join_output_reader(stdout_handle);
+                        join_output_reader(stderr_handle);
+                        return Err(XtaskError::CommandFailed {
+                            command: command_display,
+                            status: format!("guest reported an m9 userspace failure: {fail_line}"),
+                        });
+                    }
                 }
                 M9_RUNTIME_WALL_CLOCK.with(|slot| {
                     if slot.borrow().is_some() {
@@ -2748,6 +2837,23 @@ fn run_acceptance_command(
                             join_output_reader(stderr_handle);
                             return Err(error);
                         }
+                    }
+                    if marker_set_is_ordered(marker_set, &M9_USERSPACE_ACCEPTANCE_MARKERS) {
+                        if let Err(reason) =
+                            m9_userspace_validate::validate_m9_userspace_serial(&output)
+                        {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(XtaskError::Validation(format!(
+                                "m9 userspace serial: {reason}"
+                            )));
+                        }
+                        println!(
+                            "\n[M9  ] host validation ok qemu_secs={:.1}",
+                            start.elapsed().as_secs_f64()
+                        );
                     }
                     authoritative_pass = true;
                     terminate_child(&mut child)?;
@@ -3128,6 +3234,7 @@ fn print_help() {
     println!("  test-m9-linux-socket M9 #105 socket syscalls + M7 data plane + probe ELF (aliases: m9-linux-socket, m9.105)");
     println!("  test-m8-linux-hello Boot M8.7 self-test then production feature (hello + clean [M2] PASS); 40s for two launches (aliases: m8-linux-hello, m8.7)");
     println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
+    println!("  test-m9         M9 milestone gate: verify pinned BusyBox fixture, linux-abi/elf/rootfs/kernel host tests, every test-m9-* constituent, then test-m9-userspace; prints [M9  ] PASS (aliases: m9, m9.9)");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
@@ -3246,6 +3353,7 @@ enum ParsedCommand {
     TestM9Rootfs,
     TestM9LinuxFs,
     TestM9Userspace,
+    TestM9,
     TestM6Object,
     TestM7NetService,
     TestM7Network,
@@ -3324,6 +3432,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
             ParsedCommand::TestM8LinuxHello
         }
         Some(cmd) if cmd == "test-m8" || cmd == "m8" || cmd == "m8.9" => ParsedCommand::TestM8,
+        Some(cmd) if cmd == "test-m9" || cmd == "m9" || cmd == "m9.9" => ParsedCommand::TestM9,
         Some(cmd) if cmd == "test-m3-lifecycle" => ParsedCommand::TestM3Lifecycle,
         Some(cmd) if cmd == "test-m3-ipc" => ParsedCommand::TestM3Ipc,
         Some(cmd) if cmd == "test-m3-resources" => ParsedCommand::TestM3Resources,
@@ -3473,11 +3582,13 @@ enum XtaskError {
     MissingFile(PathBuf),
     MissingOvmf,
     UnsafePath(PathBuf),
+    Validation(String),
 }
 
 impl Display for XtaskError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            XtaskError::Validation(reason) => write!(f, "validation failed: {reason}"),
             XtaskError::CommandFailed { command, status } => {
                 write!(f, "command `{command}` failed with status {status}")
             }
@@ -3604,6 +3715,12 @@ mod tests {
         );
         assert_eq!(parse_command(Some("m8".as_ref())), ParsedCommand::TestM8);
         assert_eq!(parse_command(Some("m8.9".as_ref())), ParsedCommand::TestM8);
+        assert_eq!(
+            parse_command(Some("test-m9".as_ref())),
+            ParsedCommand::TestM9
+        );
+        assert_eq!(parse_command(Some("m9".as_ref())), ParsedCommand::TestM9);
+        assert_eq!(parse_command(Some("m9.9".as_ref())), ParsedCommand::TestM9);
         assert_eq!(
             parse_command(Some("test-m3-lifecycle".as_ref())),
             ParsedCommand::TestM3Lifecycle
@@ -4148,6 +4265,34 @@ mod tests {
                 "test-m8-linux-hello",
             ]
         );
+    }
+
+    #[test]
+    fn m9_milestone_steps_verify_fixture_first_and_converge_last() {
+        let names: Vec<&str> = M9_MILESTONE_STEPS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names.first(), Some(&"verify-m9-fixture"));
+        assert_eq!(names.last(), Some(&"test-m9-userspace"));
+        for constituent in [
+            "test-m9-syscall-fail-closed",
+            "test-m9-low-va",
+            "test-m9-linux-exec",
+            "test-m9-fd-core",
+            "test-m9-block-wake",
+            "test-m9-linux-runtime",
+            "test-m9-linux-proc",
+            "test-m9-rootfs",
+            "test-m9-linux-fs",
+            "test-m9-linux-socket",
+            "test-m9-linux-trace",
+        ] {
+            assert_eq!(
+                names.iter().filter(|name| **name == constituent).count(),
+                1,
+                "{constituent} must run exactly once in test-m9"
+            );
+        }
+        let host_steps = names.iter().filter(|name| name.ends_with("(host)")).count();
+        assert_eq!(host_steps, 4);
     }
 
     #[test]

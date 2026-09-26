@@ -857,6 +857,12 @@ pub(crate) fn open_description_pool_live_count() -> u16 {
     registry_mut().open_description_live_count()
 }
 
+/// Live per-process fd tables.
+#[cfg(feature = "m9-userspace-self-test")]
+pub(crate) fn fd_table_live_count() -> usize {
+    registry_mut().occupied()
+}
+
 pub(crate) fn get_fd_cloexec(
     pid: u64,
     generation: InstanceGeneration,

@@ -42,6 +42,8 @@ fn ipc_send(capability: u64, message: &[u8]) -> Result<(), ()> {
             in("rsi") message.as_ptr(),
             in("rdx") message.len(),
             lateout("rax") result,
+            lateout("rcx") _,
+            lateout("r11") _,
             options(nostack),
         );
     }

@@ -116,7 +116,9 @@ jobs:
           # M9 rootfs image; built (with RUSTFLAGS=-D warnings) via xtask test-m9-userspace.
 
       - name: Clippy (kernel host tests)
-        run: cargo clippy -p clean-slate-kernel --lib --tests -- -D warnings
+        run: |
+          cargo clippy -p clean-slate-kernel --lib --tests -- -D warnings
+          cargo clippy -p clean-slate-kernel --lib --tests --features m9-rootfs,m9-linux-socket,m9-linux-trace -- -D warnings
 
       - name: Build
         run: |
@@ -131,9 +133,6 @@ jobs:
       - name: Verify M8 Linux fixture
         run: cargo xtask verify-m8-fixture
 
-      - name: Verify M9 BusyBox rootfs fixture
-        run: cargo xtask verify-m9-fixture
-
       - name: Host unit tests
         run: |
           cargo test -p xtask
@@ -146,8 +145,9 @@ jobs:
           cargo test -p clean-slate-capability
           cargo test -p clean-slate-linux-abi
           cargo test -p clean-slate-elf
+          # verify-m9-fixture, clean-slate-rootfs --features std and the M9-gated kernel
+          # host tests run once, as steps of `cargo xtask test-m9` in the acceptance job.
           cargo test -p clean-slate-rootfs
-          cargo test -p clean-slate-rootfs --features std
           cargo test -p clean-slate-kernel
           cargo test -p clean-slate-kernel --features m3-entry-self-test
           cargo test -p clean-slate-kernel --features m3-address-space-self-test
@@ -175,7 +175,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf
 
-      - name: Exhaustive QEMU acceptance (M1–M8 aggregates + constituents)
+      # test-m9 runs every test-m9-* constituent once; --exhaustive does not repeat them.
+      - name: Exhaustive QEMU acceptance (M1–M9 aggregates + constituents)
         run: bash ./scripts/run-tests.sh --exhaustive
 
       - name: Upload test report
