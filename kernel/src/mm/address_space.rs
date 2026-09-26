@@ -167,7 +167,8 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 384;
         feature = "m6-fixture-smoke-self-test",
         feature = "m9-linux-runtime-self-test",
         feature = "m9-linux-exec-self-test",
-        feature = "m9-linux-proc-self-test"
+        feature = "m9-linux-proc-self-test",
+        feature = "m9-linux-trace-self-test"
     ),
     not(feature = "m9-userspace-self-test")
 ))]
@@ -192,7 +193,8 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 104;
     feature = "m7-net-service-self-test",
     feature = "m9-linux-runtime-self-test",
     feature = "m9-linux-exec-self-test",
-    feature = "m9-linux-proc-self-test"
+    feature = "m9-linux-proc-self-test",
+    feature = "m9-linux-trace-self-test"
 )))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 
