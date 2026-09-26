@@ -15,10 +15,12 @@
     call print
 .endm
 
-.macro PRINT_BUF len
-    lea rsi, [rip + buf]
-    mov edx, \len
-    call print
+.macro PRINT_LINE prefix, len, newline
+    lea rsi, [rip + \prefix]
+    mov edx, OFFSET \prefix\()_len
+    mov r10d, \len
+    mov r8d, \newline
+    call print_line
 .endm
 
 /* Fails with `step` unless the preceding cmp/test set ZF. */
@@ -76,7 +78,6 @@ MSG msg_tmp,       "[M9.H] tmp write/read ok\n"
 MSG msg_big,       "[M9.H] big write/read ok\n"
 MSG msg_neg,       "[M9.H] negative cases ok\n"
 MSG msg_pass,      "[M9.H] PASS\n"
-MSG msg_nl,        "\n"
 MSG msg_fail,      "[FAIL] m9 fs probe step="
 MSG msg_rax,       " rax=0x"
 hex_digits:     .ascii "0123456789abcdef"
@@ -97,7 +98,7 @@ path_etc_x:     .ascii "/etc/x\0"
 
 .section .bss
 buf:            .space 4096
-fail_buf:       .space 32
+line_buf:       .space 128
 
 .section .text
 _start:
@@ -108,9 +109,7 @@ _start:
     EXPECT_EQ 2, 2
     cmp word ptr [rip + buf], 0x002f
     FAIL_NE 3
-    PRINT msg_getcwd
-    PRINT_BUF 1
-    PRINT msg_nl
+    PRINT_LINE msg_getcwd, 1, 1
 
     /* open /etc/hostname O_RDONLY|O_LARGEFILE, read it exactly, echo the bytes read. */
     SYS 2, "lea rdi, [rip + path_hostname]", "mov esi, 0x8000"
@@ -121,8 +120,7 @@ _start:
     EXPECT_BYTES out_hostname, 11, 6
     SYS 3, "mov rdi, r12"
     EXPECT_EQ 0, 7
-    PRINT msg_hostname
-    PRINT_BUF 11
+    PRINT_LINE msg_hostname, 11, 0
 
     /* getdents64 on /bin (O_DIRECTORY) until the busybox entry is seen. */
     SYS 2, "lea rdi, [rip + path_bin]", "mov esi, 0x10000"
@@ -195,9 +193,7 @@ dents_found:
     EXPECT_BYTES out_test, 4, 24
     SYS 3, "mov rdi, r14"
     EXPECT_EQ 0, 25
-    PRINT msg_tmp_read
-    PRINT_BUF 4
-    PRINT msg_nl
+    PRINT_LINE msg_tmp_read, 4, 1
     PRINT msg_tmp
 
     /* /tmp 300-byte file (restart-safe path): write, reopen, read back exactly. */
@@ -247,12 +243,33 @@ print:
     mov edi, 1
     jmp fail
 
-/* edi = step, rax = offending result. Prints best-effort and exits with the step. */
+/* One write of prefix (rsi, rdx) + r10 bytes of buf [+ '\n' if r8d]; kernel log lines
+ * may land between separate writes, so every console line is a single write. */
+print_line:
+    lea rdi, [rip + line_buf]
+    mov rcx, rdx
+    rep movsb
+    lea rsi, [rip + buf]
+    mov rcx, r10
+    rep movsb
+    test r8d, r8d
+    jz 1f
+    mov byte ptr [rdi], 10
+    inc rdi
+1:
+    lea rsi, [rip + line_buf]
+    mov rdx, rdi
+    sub rdx, rsi
+    jmp print
+
+/* edi = step, rax = offending result. Writes the whole [FAIL] line once, exits with the step. */
 fail:
     mov ebx, edi
     mov r12, rax
-    SYS 1, "mov edi, 1", "lea rsi, [rip + msg_fail]", "mov edx, OFFSET msg_fail_len"
-    lea rdi, [rip + fail_buf]
+    lea rdi, [rip + line_buf]
+    lea rsi, [rip + msg_fail]
+    mov ecx, OFFSET msg_fail_len
+    rep movsb
     mov eax, ebx
     xor edx, edx
     mov ecx, 10
@@ -261,9 +278,10 @@ fail:
     add dl, '0'
     mov byte ptr [rdi], al
     mov byte ptr [rdi + 1], dl
-    SYS 1, "mov edi, 1", "lea rsi, [rip + fail_buf]", "mov edx, 2"
-    SYS 1, "mov edi, 1", "lea rsi, [rip + msg_rax]", "mov edx, OFFSET msg_rax_len"
-    lea rdi, [rip + fail_buf]
+    add rdi, 2
+    lea rsi, [rip + msg_rax]
+    mov ecx, OFFSET msg_rax_len
+    rep movsb
     lea rsi, [rip + hex_digits]
     mov rdx, r12
     mov ecx, 16
@@ -277,5 +295,13 @@ fail:
     dec ecx
     jnz 2b
     mov byte ptr [rdi], 10
-    SYS 1, "mov edi, 1", "lea rsi, [rip + fail_buf]", "mov edx, 17"
-    SYS 60, "mov edi, ebx"
+    inc rdi
+    lea rsi, [rip + line_buf]
+    mov rdx, rdi
+    sub rdx, rsi
+    mov edi, 1
+    mov eax, 1
+    syscall
+    mov edi, ebx
+    mov eax, 60
+    syscall
