@@ -185,6 +185,8 @@ struct ClientSlot {
     response: NetworkResponse,
     response_payload_len: u32,
     response_payload: [u8; NETWORK_MAX_PAYLOAD_BYTES],
+    /// The client released its interest: the slot is freed when the service completes it.
+    discard_result: bool,
 }
 
 impl ClientSlot {
@@ -201,6 +203,7 @@ impl ClientSlot {
             response: NetworkResponse::Close,
             response_payload_len: 0,
             response_payload: [0; NETWORK_MAX_PAYLOAD_BYTES],
+            discard_result: false,
         }
     }
 }
@@ -490,6 +493,32 @@ impl NetBridge {
             || self.holder_exit_head != self.holder_exit_tail
     }
 
+    /// The client no longer wants `request_id`'s response (e.g. its socket was released):
+    /// a completed slot is freed now; an outstanding one is still serviced (a fire-and-forget
+    /// `Close` must reach the service) and freed on completion instead of lingering `Done`.
+    pub fn discard_result(
+        &mut self,
+        pid: u64,
+        domain: u64,
+        instance_generation: u64,
+        request_id: u64,
+    ) -> Result<(), NetBridgeError> {
+        let caller = self.trusted_caller(pid, domain, instance_generation);
+        let slot = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.state != ClientSlotState::Free && slot.request_id == request_id)
+            .ok_or(NetBridgeError::InvalidRequest)?;
+        if slot.client != caller {
+            return Err(NetBridgeError::Unauthorized);
+        }
+        if slot.state == ClientSlotState::Done {
+            *slot = ClientSlot::free();
+        } else {
+            slot.discard_result = true;
+        }
+        Ok(())
+    }
     pub fn service_next(&mut self) -> Option<(u64, NetworkRequest, u32, TrustedCaller)> {
         let index = self
             .slots
@@ -514,6 +543,10 @@ impl NetBridge {
             })
             .ok_or(NetBridgeError::InvalidRequest)?;
         let len = payload.len().min(NETWORK_MAX_PAYLOAD_BYTES);
+        if self.slots[index].discard_result {
+            self.slots[index] = ClientSlot::free();
+            return Ok(());
+        }
         let slot = &mut self.slots[index];
         slot.response = response;
         slot.response_payload_len = len as u32;
@@ -552,6 +585,10 @@ impl NetBridge {
         let mut failed = 0u32;
         for slot in &mut self.slots {
             if slot.state == ClientSlotState::Pending || slot.state == ClientSlotState::InService {
+                if slot.discard_result {
+                    *slot = ClientSlot::free();
+                    continue;
+                }
                 slot.response = NetworkResponse::Error {
                     code: clean_slate_network::error::NetworkError::Reset.code(),
                 };

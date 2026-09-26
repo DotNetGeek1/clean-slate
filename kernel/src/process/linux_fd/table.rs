@@ -168,8 +168,7 @@ pub(crate) fn install_stdio_entries(
     table: &mut LinuxFdTable,
     pool: &mut OpenDescriptionPool,
     pid: u64,
-    stdout_handle: u64,
-    stderr_handle: u64,
+    sink: ConsoleSinkRef,
 ) -> Result<(), LinuxErrno> {
     *table = LinuxFdTable::empty();
     let write_status = OpenStatus {
@@ -177,20 +176,8 @@ pub(crate) fn install_stdio_entries(
         nonblock: false,
         append: false,
     };
-    let stdout_open = pool.alloc_console(
-        pid,
-        ConsoleSinkRef {
-            capability_handle: stdout_handle,
-        },
-        write_status,
-    )?;
-    let stderr_open = pool.alloc_console(
-        pid,
-        ConsoleSinkRef {
-            capability_handle: stderr_handle,
-        },
-        write_status,
-    )?;
+    let stdout_open = pool.alloc_console(pid, sink, write_status)?;
+    let stderr_open = pool.alloc_console(pid, sink, write_status)?;
     pool.attach_first_ref(stdout_open)?;
     pool.attach_first_ref(stderr_open)?;
     table.entries[LINUX_STDOUT_FD as usize] = Some(FdEntry {

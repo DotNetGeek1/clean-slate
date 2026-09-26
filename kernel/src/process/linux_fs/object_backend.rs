@@ -63,6 +63,20 @@ pub(crate) fn grant_linux_tmp_object_capabilities(pid: u64) -> Result<(), &'stat
     Ok(())
 }
 
+/// Bootstrap a writable `/tmp` file before any Linux process runs (self-test / init).
+pub(crate) fn bootstrap_tmp_file_bytes(path: &[u8], data: &[u8]) -> Result<(), LinuxErrno> {
+    if data.len() > OBJECT_MAX_PAYLOAD_BYTES {
+        return Err(clean_slate_linux_abi::EFBIG);
+    }
+    let object_id = tmp_file_create(path)?;
+    let state = slot_for_object_mut(object_id).ok_or(clean_slate_linux_abi::ENOENT)?;
+    state.len = data.len();
+    if let Some(index) = slot_index_for_object(object_id) {
+        store_mut().scratch[index][..data.len()].copy_from_slice(data);
+    }
+    Ok(())
+}
+
 pub(crate) fn tmp_file_create(path: &[u8]) -> Result<u64, LinuxErrno> {
     let store = store_mut();
     for index in 0..LINUX_TMP_MAX_FILES {
@@ -94,6 +108,22 @@ pub(crate) fn tmp_file_lookup_by_path(path: &[u8]) -> Option<u64> {
         }
     }
     None
+}
+
+/// Read bytes from the in-kernel tmp scratch (authoritative after a completed write).
+pub(crate) fn tmp_file_read_local(
+    object_id: u64,
+    offset: usize,
+    out: &mut [u8],
+) -> Result<usize, LinuxErrno> {
+    let state = tmp_file_by_object_id(object_id).ok_or(clean_slate_linux_abi::ENOENT)?;
+    if offset >= state.len {
+        return Ok(0);
+    }
+    let index = slot_index_for_object(object_id).ok_or(clean_slate_linux_abi::EINVAL)?;
+    let take = (state.len - offset).min(out.len());
+    out[..take].copy_from_slice(&store_mut().scratch[index][offset..offset + take]);
+    Ok(take)
 }
 
 pub(crate) fn tmp_file_by_object_id(object_id: u64) -> Option<TmpFileState> {
@@ -137,9 +167,9 @@ pub(crate) fn tmp_file_truncate_local(object_id: u64) -> Result<(), LinuxErrno> 
 
 pub(crate) fn tmp_scratch_for(
     object_id: u64,
-) -> Result<&'static mut [u8; OBJECT_MAX_PAYLOAD_BYTES], LinuxErrno> {
+) -> Result<&'static [u8; OBJECT_MAX_PAYLOAD_BYTES], LinuxErrno> {
     let index = slot_index_for_object(object_id).ok_or(clean_slate_linux_abi::EINVAL)?;
-    Ok(&mut store_mut().scratch[index])
+    Ok(&store_mut().scratch[index])
 }
 
 pub(crate) fn object_wait_key(request_id: u64) -> crate::sched::wait::WaitKey {

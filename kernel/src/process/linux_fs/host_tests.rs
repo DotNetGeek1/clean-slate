@@ -7,8 +7,8 @@ use super::object_backend::{tmp_file_create, LINUX_TMP_MAX_ENTRIES, LINUX_TMP_MA
 use super::path::{normalize_path, LINUX_PATH_MAX};
 use crate::process::linux_rootfs;
 use clean_slate_linux_abi::{
-    encode_dirent64, EACCES, EISDIR, ENAMETOOLONG, ENFILE, ENOSPC, EROFS, O_CREAT, O_RDONLY,
-    O_RDWR, O_TRUNC, O_WRONLY,
+    encode_dirent64, DT_DIR, EACCES, EISDIR, ENAMETOOLONG, ENFILE, ENOSPC, EROFS, O_CREAT,
+    O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
 };
 use clean_slate_service_fixtures::OBJECT_MAX_PAYLOAD_BYTES;
 use clean_slate_service_lifecycle::InstanceGeneration;
@@ -41,6 +41,34 @@ fn read_only_rootfs_write_flags_ero_fs() {
     );
     assert!(check_write_allowed(b"/tmp/demo/x", O_WRONLY | O_CREAT).is_ok());
     assert!(check_write_allowed(b"/etc/hostname", O_RDONLY).is_ok());
+}
+
+#[test]
+fn root_getdents_names_encode() {
+    let mut table = fresh_table();
+    let img = image();
+    let root = table.lookup_path(b"/", &img, true).expect("root");
+    let mut children = [(
+        NodeId {
+            index: 0,
+            generation: 0,
+        },
+        0u8,
+    ); 32];
+    let count = table
+        .list_children(root, &img, &mut children)
+        .expect("list");
+    assert!(count >= 3, "expected bin etc tmp at minimum");
+    for index in 0..count {
+        let (node, _dt) = children[index];
+        let name = table.dirent_name(node).expect("dirent name");
+        let mut scratch = [0u8; 256];
+        assert!(
+            encode_dirent64(&mut scratch, node.index as u64 + 1, 0, DT_DIR, name) > 0,
+            "encode failed for {:?}",
+            core::str::from_utf8(name).ok()
+        );
+    }
 }
 
 #[test]
@@ -137,7 +165,9 @@ fn resolve_executable_link_and_errors() {
     let img = image();
     let busybox = resolve_executable_bytes(&mut table, &img, b"/bin/sh").expect("sh link");
     let direct = resolve_executable_bytes(&mut table, &img, b"/bin/busybox").expect("busybox");
+    let ls = resolve_executable_bytes(&mut table, &img, b"/bin/ls").expect("ls link");
     assert_eq!(busybox.as_ptr(), direct.as_ptr());
+    assert_eq!(ls.as_ptr(), direct.as_ptr());
     assert_eq!(
         resolve_executable_bytes(&mut table, &img, b"/no/such/file").unwrap_err(),
         clean_slate_linux_abi::ENOENT

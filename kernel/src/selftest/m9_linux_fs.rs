@@ -4,7 +4,6 @@ use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::interrupt::timer::initialize_timer;
-use crate::ipc::endpoint_table_mut;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::PAGE_SIZE;
@@ -91,11 +90,10 @@ pub(crate) fn start_m9_linux_fs_self_test(page_allocator: PageAllocator) -> ! {
     linux_fd::reset_registry_for_selftest();
 
     let kernel_root = current_root_frame_address();
-    let kernel_stack_top = unsafe { task_stack_top(&(*task_stacks_mut())[0]) };
     let lifecycle_capability = {
         let controller = unsafe { service_lifecycle_controller_mut() };
         controller.clear();
-        controller.configure_launch_context(kernel_root, kernel_stack_top);
+        controller.configure_launch_context(kernel_root);
         controller
             .declare_service(STORAGE_SERVICE_ID)
             .unwrap_or_else(|message| fatal_kernel_error(message));
@@ -137,11 +135,7 @@ pub(crate) fn start_m9_linux_fs_self_test(page_allocator: PageAllocator) -> ! {
     .unwrap_or_else(|_| fatal_kernel_error("m9 linux fs probe launch failed"));
     M9_MAIN_PROBE_PID.store(linux.pid, Ordering::Relaxed);
 
-    let ipc = unsafe { endpoint_table_mut() };
-    let handle = ipc
-        .grant_console_capability_for_pid(linux.pid)
-        .unwrap_or_else(|_| fatal_kernel_error("console grant"));
-    linux_fd::install_stdio_for_process(linux.pid, linux.instance_generation, handle, handle)
+    linux_fd::grant_console_stdio_for_process(linux.pid, linux.instance_generation)
         .unwrap_or_else(|_| fatal_kernel_error("stdio install"));
 
     let frame_pointer =
@@ -295,8 +289,19 @@ pub(crate) fn after_linux_exit(
     match unsafe { M9_PHASE } {
         Phase::MainProbe if pid == M9_MAIN_PROBE_PID.load(Ordering::Relaxed) => {
             if teardown.exit_status != 0 {
+                kernel_log_fmt(format_args!(
+                    "[M9.H] probe exit status={}\n",
+                    teardown.exit_status
+                ));
                 fatal_kernel_error("m9 linux fs probe non-zero exit");
             }
+            // The namespace keeps `/tmp` entries and resolved rootfs nodes after the probe
+            // exits, so cycles are measured against the post-probe node table.
+            let probe_nodes = table().live_count();
+            M9_BASELINE_NODES.store(probe_nodes, Ordering::Relaxed);
+            kernel_log_fmt(format_args!(
+                "[M9.H] node baseline after probe={probe_nodes}\n"
+            ));
             unsafe {
                 M9_PHASE = Phase::Cycles;
             }

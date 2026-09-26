@@ -48,7 +48,7 @@ const LINUX_FD_REGISTRY_CAPACITY: usize = PROCESS_REGISTRY_CAPACITY;
 pub(crate) enum LinuxFdProjection {
     Closed,
     ConsoleEndpoint {
-        capability_handle: u64,
+        sink: ConsoleSinkRef,
     },
     /// #101: file-backed description (read/write/lseek via fs_io).
     FileBackend,
@@ -124,12 +124,11 @@ impl LinuxFdRegistry {
         &mut self,
         pid: u64,
         generation: InstanceGeneration,
-        stdout_handle: u64,
-        stderr_handle: u64,
+        sink: ConsoleSinkRef,
     ) -> Result<(), &'static str> {
         let index = self.ensure_slot_index(pid, generation)?;
         let table = &mut self.slots[index].as_mut().expect("slot").table;
-        install_stdio_entries(table, &mut self.pool, pid, stdout_handle, stderr_handle)
+        install_stdio_entries(table, &mut self.pool, pid, sink)
             .map_err(|_| "linux fd stdio install failed")
     }
 
@@ -180,9 +179,7 @@ impl LinuxFdRegistry {
         };
         let desc = self.pool.get(entry.open)?;
         match desc.kind {
-            DescriptorKind::Console(sink) => Ok(LinuxFdProjection::ConsoleEndpoint {
-                capability_handle: sink.capability_handle,
-            }),
+            DescriptorKind::Console(sink) => Ok(LinuxFdProjection::ConsoleEndpoint { sink }),
             DescriptorKind::File(_) => Ok(LinuxFdProjection::FileBackend),
             DescriptorKind::Dir(_) => Ok(LinuxFdProjection::DirBackend),
             DescriptorKind::PipeRead(_) | DescriptorKind::PipeWrite(_) => {
@@ -258,7 +255,15 @@ impl LinuxFdRegistry {
             .open;
         let desc = self.pool.get(open)?;
         match desc.kind {
-            DescriptorKind::Console(sink) => write_console(ipc, pid, sink, bytes, personality),
+            DescriptorKind::Console(sink) => {
+                let written = write_console(ipc, pid, sink, bytes, personality)?;
+                #[cfg(feature = "m9-userspace-self-test")]
+                crate::selftest::m9_userspace::observe_console_description_write(
+                    open,
+                    &bytes[..written],
+                );
+                Ok(written)
+            }
             // #102 pipe writes use blocking path from syscall/write.rs
             DescriptorKind::PipeWrite(_) => Err(EBADF),
             // #101: file writes go through `write(2)` → `handle_sys_write` + `fs_io::write_file_fd`.
@@ -484,6 +489,7 @@ impl LinuxFdRegistry {
         generation: InstanceGeneration,
         socket: SocketRef,
         nonblock: bool,
+        cloexec: bool,
     ) -> Result<i32, LinuxErrno> {
         self.ensure_fd_table(pid, generation)?;
         let status = OpenStatus {
@@ -492,8 +498,8 @@ impl LinuxFdRegistry {
             append: false,
         };
         let open = self.pool.alloc_socket(pid, socket, status)?;
-        self.pool.attach_first_ref(open)?;
-        self.alloc_lowest_fd(pid, generation, open, FdFlags::default())
+        self.alloc_lowest_fd(pid, generation, open, FdFlags { cloexec })
+            .inspect_err(|_| self.pool.free_unattached(open))
     }
 
     pub(crate) fn alloc_lowest_fd(
@@ -565,7 +571,9 @@ impl LinuxFdRegistry {
         let slot_index = self.slot_index(pid, generation).ok_or(EBADF)?;
         let open = self.pool.alloc_file_or_dir(pid, kind, status)?;
         let table = &mut self.slots[slot_index].as_mut().expect("slot").table;
-        table.alloc_lowest(&mut self.pool, open, flags)
+        table
+            .alloc_lowest(&mut self.pool, open, flags)
+            .inspect_err(|_| self.pool.free_unattached(open))
     }
 
     pub(crate) fn open_description_for_fd(
@@ -632,19 +640,40 @@ fn registry_mut() -> &'static mut LinuxFdRegistry {
     feature = "m9-linux-runtime-self-test",
     feature = "m9-linux-socket-self-test",
     feature = "m9-linux-proc-self-test",
+    feature = "m9-userspace-self-test",
     feature = "m9-linux-trace-self-test"
 ))]
 pub(crate) fn reset_registry_for_selftest() {
     unsafe { *LINUX_FD_REGISTRY.get() = LinuxFdRegistry::new() };
 }
 
+pub(crate) fn console_sink_ref_from_table(
+    ipc: &IpcEndpointTable,
+) -> Result<ConsoleSinkRef, &'static str> {
+    let (endpoint_slot, endpoint_generation) = ipc.kernel_console_sink_identity()?;
+    Ok(ConsoleSinkRef {
+        endpoint_slot,
+        endpoint_generation,
+    })
+}
+
+/// Grant the shared console IPC + M6 capabilities and install stdio for `pid`.
+pub(crate) fn grant_console_stdio_for_process(
+    pid: u64,
+    generation: InstanceGeneration,
+) -> Result<(), &'static str> {
+    let ipc = unsafe { endpoint_table_mut() };
+    ipc.grant_console_capability_for_pid(pid)?;
+    let sink = console_sink_ref_from_table(ipc)?;
+    install_stdio_for_process(pid, generation, sink)
+}
+
 pub(crate) fn install_stdio_for_process(
     pid: u64,
     generation: InstanceGeneration,
-    stdout_handle: u64,
-    stderr_handle: u64,
+    sink: ConsoleSinkRef,
 ) -> Result<(), &'static str> {
-    registry_mut().install(pid, generation, stdout_handle, stderr_handle)
+    registry_mut().install(pid, generation, sink)
 }
 
 pub(crate) fn projection_for(
@@ -668,8 +697,9 @@ pub(crate) fn install_socket_fd(
     generation: InstanceGeneration,
     socket: SocketRef,
     nonblock: bool,
+    cloexec: bool,
 ) -> Result<i32, LinuxErrno> {
-    registry_mut().install_socket_description(pid, generation, socket, nonblock)
+    registry_mut().install_socket_description(pid, generation, socket, nonblock, cloexec)
 }
 
 pub(crate) fn open_id_for_fd(
@@ -960,33 +990,40 @@ pub(crate) use table::{FdEntry, FdFlags, LINUX_FD_TABLE_CAPACITY};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::personality::ExecutionPersonality;
+
     fn local_pair() -> (LinuxFdRegistry, IpcEndpointTable) {
         (LinuxFdRegistry::new(), IpcEndpointTable::new())
+    }
+
+    fn install_test_stdio(
+        fds: &mut LinuxFdRegistry,
+        ipc: &mut IpcEndpointTable,
+        pid: u64,
+        generation: InstanceGeneration,
+    ) -> ConsoleSinkRef {
+        ipc.grant_console_capability_for_pid(pid)
+            .expect("shared console grant");
+        let sink = console_sink_ref_from_table(ipc).expect("console sink");
+        fds.install(pid, generation, sink).expect("install");
+        sink
     }
 
     #[test]
     fn install_and_lookup_stdio_projections() {
         let (mut fds, mut ipc) = local_pair();
         let generation = InstanceGeneration(3);
-        let handle = ipc
-            .grant_console_capability_for_pid(10)
-            .expect("shared console grant");
-        fds.install(10, generation, handle, handle)
-            .expect("install");
+        let sink = install_test_stdio(&mut fds, &mut ipc, 10, generation);
 
         assert_eq!(
             fds.projection_for(10, generation, LINUX_STDOUT_FD)
                 .expect("stdout"),
-            LinuxFdProjection::ConsoleEndpoint {
-                capability_handle: handle
-            }
+            LinuxFdProjection::ConsoleEndpoint { sink }
         );
         assert_eq!(
             fds.projection_for(10, generation, LINUX_STDERR_FD)
                 .expect("stderr"),
-            LinuxFdProjection::ConsoleEndpoint {
-                capability_handle: handle
-            }
+            LinuxFdProjection::ConsoleEndpoint { sink }
         );
         assert_eq!(
             fds.projection_for(10, generation, 0).expect("stdin closed"),
@@ -999,8 +1036,7 @@ mod tests {
     fn lowest_fd_allocation_and_reuse() {
         let (mut fds, mut ipc) = local_pair();
         let gen = InstanceGeneration(1);
-        let handle = ipc.grant_console_capability_for_pid(1).expect("grant");
-        fds.install(1, gen, handle, handle).expect("install");
+        install_test_stdio(&mut fds, &mut ipc, 1, gen);
         let placeholder = fds
             .alloc_self_test_placeholder_file(1, gen)
             .expect("placeholder");
@@ -1011,11 +1047,49 @@ mod tests {
     }
 
     #[test]
+    fn closing_socket_fd_frees_its_open_description() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 3, gen);
+        let baseline = fds.open_description_live_count();
+        let socket = SocketRef {
+            index: 0,
+            generation: 1,
+        };
+        let fd = fds
+            .install_socket_description(3, gen, socket, false, false)
+            .expect("socket fd");
+        assert_eq!(fds.open_description_live_count(), baseline + 1);
+        fds.close_fd(3, gen, fd as u64).expect("close");
+        assert_eq!(fds.open_description_live_count(), baseline);
+    }
+
+    #[test]
+    fn failed_socket_install_frees_its_open_description() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 4, gen);
+        let socket = SocketRef {
+            index: 0,
+            generation: 1,
+        };
+        while fds
+            .install_socket_description(4, gen, socket, false, false)
+            .is_ok()
+        {}
+        let saturated = fds.open_description_live_count();
+        assert_eq!(
+            fds.install_socket_description(4, gen, socket, false, false),
+            Err(clean_slate_linux_abi::EMFILE)
+        );
+        assert_eq!(fds.open_description_live_count(), saturated);
+    }
+
+    #[test]
     fn dup2_shares_open_description_independent_cloexec() {
         let (mut fds, mut ipc) = local_pair();
         let gen = InstanceGeneration(1);
-        let handle = ipc.grant_console_capability_for_pid(2).expect("grant");
-        fds.install(2, gen, handle, handle).expect("install");
+        install_test_stdio(&mut fds, &mut ipc, 2, gen);
         fds.dup2(2, gen, LINUX_STDOUT_FD, 5).expect("dup2");
         fds.set_fd_cloexec(2, gen, 5, true).expect("cloexec");
         assert!(!fds.get_fd_cloexec(2, gen, LINUX_STDOUT_FD).expect("get"));
@@ -1028,8 +1102,7 @@ mod tests {
     fn double_close_is_ebadf() {
         let (mut fds, mut ipc) = local_pair();
         let gen = InstanceGeneration(1);
-        let handle = ipc.grant_console_capability_for_pid(3).expect("grant");
-        fds.install(3, gen, handle, handle).expect("install");
+        install_test_stdio(&mut fds, &mut ipc, 3, gen);
         fds.close_fd(3, gen, LINUX_STDOUT_FD).expect("close");
         assert_eq!(fds.close_fd(3, gen, LINUX_STDOUT_FD), Err(EBADF));
     }
@@ -1038,8 +1111,7 @@ mod tests {
     fn close_on_exec_closes_only_flagged() {
         let (mut fds, mut ipc) = local_pair();
         let gen = InstanceGeneration(1);
-        let handle = ipc.grant_console_capability_for_pid(4).expect("grant");
-        fds.install(4, gen, handle, handle).expect("install");
+        install_test_stdio(&mut fds, &mut ipc, 4, gen);
         fds.set_fd_cloexec(4, gen, LINUX_STDERR_FD, true)
             .expect("set");
         fds.close_on_exec_for_process(4, gen).expect("exec");
@@ -1052,8 +1124,7 @@ mod tests {
         let (mut fds, mut ipc) = local_pair();
         let pg = InstanceGeneration(1);
         let cg = InstanceGeneration(2);
-        let handle = ipc.grant_console_capability_for_pid(5).expect("grant");
-        fds.install(5, pg, handle, handle).expect("install");
+        install_test_stdio(&mut fds, &mut ipc, 5, pg);
         let before = fds.open_description_live_count();
         fds.inherit_for_child(5, pg, 6, cg).expect("inherit");
         assert!(fds.table_get_for_test(6, cg, LINUX_STDOUT_FD).is_some());
@@ -1067,8 +1138,7 @@ mod tests {
     fn stale_open_description_generation_rejected() {
         let (mut fds, mut ipc) = local_pair();
         let gen = InstanceGeneration(1);
-        let handle = ipc.grant_console_capability_for_pid(7).expect("grant");
-        fds.install(7, gen, handle, handle).expect("install");
+        install_test_stdio(&mut fds, &mut ipc, 7, gen);
         fds.close_fd(7, gen, LINUX_STDOUT_FD).expect("close");
         assert_eq!(
             fds.projection_for(7, gen, LINUX_STDOUT_FD),
@@ -1080,8 +1150,7 @@ mod tests {
     fn table_exhaustion_returns_emfile() {
         let (mut fds, mut ipc) = local_pair();
         let gen = InstanceGeneration(1);
-        let handle = ipc.grant_console_capability_for_pid(8).expect("grant");
-        fds.install(8, gen, handle, handle).expect("install");
+        install_test_stdio(&mut fds, &mut ipc, 8, gen);
         while fds.alloc_self_test_placeholder_file(8, gen).is_ok() {}
         assert_eq!(fds.alloc_self_test_placeholder_file(8, gen), Err(EMFILE));
     }
@@ -1090,8 +1159,7 @@ mod tests {
     fn process_teardown_releases_pool() {
         let (mut fds, mut ipc) = local_pair();
         let gen = InstanceGeneration(1);
-        let handle = ipc.grant_console_capability_for_pid(9).expect("grant");
-        fds.install(9, gen, handle, handle).expect("install");
+        install_test_stdio(&mut fds, &mut ipc, 9, gen);
         fds.alloc_self_test_placeholder_file(9, gen).expect("ph");
         assert!(fds.open_description_live_count() > 0);
         fds.release(9, gen);
@@ -1103,5 +1171,29 @@ mod tests {
         assert_eq!(LINUX_FD_REGISTRY_CAPACITY, PROCESS_REGISTRY_CAPACITY);
         assert_eq!(LINUX_FD_TABLE_CAPACITY, 16);
         assert_eq!(OPEN_DESCRIPTION_CAPACITY, 48);
+    }
+
+    #[test]
+    fn shared_console_open_description_requires_holder_capability() {
+        use clean_slate_linux_abi::EACCES;
+        const LINUX: ExecutionPersonality = ExecutionPersonality::LinuxX86_64;
+        let (mut fds, mut ipc) = local_pair();
+        let parent_gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 100, parent_gen);
+        let child_gen = InstanceGeneration(2);
+        fds.inherit_for_child(100, parent_gen, 200, child_gen)
+            .expect("inherit");
+        fds.dup2(200, child_gen, LINUX_STDOUT_FD, 3)
+            .expect("dup console to fd 3");
+        assert_eq!(
+            fds.write_fd(&mut ipc, 200, child_gen, 3, b"denied\n", LINUX),
+            Err(EACCES)
+        );
+        ipc.grant_console_capability_for_pid(200)
+            .expect("grant inherited child");
+        assert_eq!(
+            fds.write_fd(&mut ipc, 200, child_gen, 3, b"ok\n", LINUX),
+            Ok(3)
+        );
     }
 }

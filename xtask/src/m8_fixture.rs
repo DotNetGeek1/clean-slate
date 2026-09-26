@@ -456,6 +456,26 @@ fn read_u64(bytes: &[u8], off: usize) -> Result<u64, String> {
     ]))
 }
 
+/// Checks a committed fixture binary against the first token of its tracked `.sha256` file.
+pub fn verify_pinned_sha256(binary_path: &Path, hash_path: &Path) -> Result<(), String> {
+    let bytes =
+        fs::read(binary_path).map_err(|e| format!("read {}: {e}", binary_path.display()))?;
+    let expected_hash = fs::read_to_string(hash_path)
+        .map_err(|e| format!("read {}: {e}", hash_path.display()))?
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| format!("empty hash file {}", hash_path.display()))?
+        .to_ascii_lowercase();
+    let actual_hash = hex_encode(&sha256(&bytes));
+    if actual_hash != expected_hash {
+        return Err(format!(
+            "SHA-256 mismatch for {}: expected {expected_hash}, got {actual_hash}",
+            binary_path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);

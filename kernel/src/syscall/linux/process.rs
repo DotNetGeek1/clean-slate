@@ -33,15 +33,16 @@ mod enabled {
         LINUX_EXEC_MAX_ARGS, LINUX_EXEC_MAX_ARG_BYTES, LINUX_EXEC_MAX_ENVS,
     };
     use crate::process::linux_fd;
-    use crate::process::linux_image::{LINUX_CONVENTIONAL_LOAD_POLICY, LINUX_STACK_PAGES};
+    use crate::process::linux_image::{
+        LINUX_CONVENTIONAL_EXEC_STACK_PAGES, LINUX_CONVENTIONAL_LOAD_POLICY,
+    };
     use crate::process::linux_proc::exec_resolve::resolve_executable;
     use crate::process::linux_proc::{
         fork::linux_fork,
-        pipe::{open_pipe_refs, pool_mut, wait_key_for_parent},
-        table::{exit_status_word, table_mut, ProcId},
+        pipe::{open_pipe_refs, pool_mut},
+        table::{table_mut, ProcId},
         wait::linux_wait4,
     };
-    use crate::sched::wait::wake_all;
     use crate::sched::{scheduler_mut, task_stacks_mut, ThreadState};
     #[cfg(feature = "m9-linux-exec-self-test")]
     use crate::selftest::m9_linux_exec::handle_execve_selftest;
@@ -92,7 +93,7 @@ mod enabled {
         request: &LinuxSyscallRequest,
         ctx: &mut LinuxSyscallContext<'_>,
     ) -> LinuxSyscallResult {
-        table_mut().ensure_proc_slot(ProcId {
+        table_mut().require_proc_slot(ProcId {
             pid: ctx.pid,
             generation: ctx.instance_generation,
         })?;
@@ -115,7 +116,7 @@ mod enabled {
         _request: &LinuxSyscallRequest,
         ctx: &mut LinuxSyscallContext<'_>,
     ) -> LinuxSyscallResult {
-        table_mut().ensure_proc_slot(ProcId {
+        table_mut().require_proc_slot(ProcId {
             pid: ctx.pid,
             generation: ctx.instance_generation,
         })?;
@@ -140,7 +141,7 @@ mod enabled {
         request: &LinuxSyscallRequest,
         ctx: &mut LinuxSyscallContext<'_>,
     ) -> LinuxSyscallResult {
-        table_mut().ensure_proc_slot(ProcId {
+        table_mut().require_proc_slot(ProcId {
             pid: ctx.pid,
             generation: ctx.instance_generation,
         })?;
@@ -168,13 +169,8 @@ mod enabled {
             pid,
             generation: ctx.instance_generation,
         };
-        let _ = table_mut().ensure_proc_slot(id);
-        let parent_pid = table_mut().parent_of(id).map_or(pid, |p| p.pid);
-        table_mut().publish_exit(id, exit_status_word(status as u32, None));
-        table_mut().finalize_children_on_parent_exit(id);
-        table_mut().retire_slot(id);
-        wake_all(wait_key_for_parent(parent_pid));
         kernel_log_fmt(format_args!("[LNX ] exit pid={pid} status={status}\n"));
+        crate::process::linux_proc::exit_publish::publish_linux_exit(id, status as u32, true);
         let allocator = service_lifecycle_syscall_allocator_mut()
             .as_mut()
             .unwrap_or_else(|| fatal_kernel_error("linux exit_group: allocator missing"));
@@ -188,6 +184,12 @@ mod enabled {
             &teardown,
             allocator,
         ) {
+            switch_after_exit(Some(next_frame));
+        }
+        #[cfg(feature = "m9-userspace-self-test")]
+        if let Some(next_frame) =
+            crate::selftest::m9_userspace::after_linux_exit_group(pid, &teardown, allocator)
+        {
             switch_after_exit(Some(next_frame));
         }
         #[cfg(feature = "m9-linux-trace-self-test")]
@@ -286,7 +288,7 @@ mod enabled {
             argv: &argv_storage[..scratch.argv_count],
             envp: &envp_storage[..scratch.envp_count],
             exec_filename: path,
-            stack_pages: LINUX_STACK_PAGES,
+            stack_pages: LINUX_CONVENTIONAL_EXEC_STACK_PAGES,
             policy: &LINUX_CONVENTIONAL_LOAD_POLICY,
         };
         let allocator = service_lifecycle_syscall_allocator_mut()

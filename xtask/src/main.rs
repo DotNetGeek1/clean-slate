@@ -144,13 +144,16 @@ const M9_LINUX_PROC_ACCEPTANCE_MARKERS: [&str; 3] =
 const M9_LINUX_PROC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M9_ROOTFS_ACCEPTANCE_MARKERS: [&str; 2] = ["[RFS ] rootfs entries=", "[M9.K] PASS"];
 const M9_ROOTFS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 11] = [
+const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 14] = [
     "[M9.H] creating",
-    "[M9.H] getcwd=/",
-    "[M9.H] hostname=m9-fixture",
+    "[M9.H] getcwd=/\n",
+    "[M9.H] hostname=m9-fixture\n",
     "[M9.H] ls /bin ok",
     "[M9.H] stat ok",
+    "[STOR] write object=",
+    "[M9.H] tmp read=test\n",
     "[M9.H] tmp write/read ok",
+    "[STOR] write object=",
     "[M9.H] big write/read ok",
     "[M9.H] negative cases ok",
     "[M9.H] pool_before",
@@ -245,6 +248,23 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 9] = [
     "[M9.E] timeout resumed",
     "[M9.E] cycles=8 waiters=0",
     "[M9.E] PASS",
+];
+const M9_USERSPACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(300);
+const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 14] = [
+    "[M9  ] creating",
+    "[M9  ] busybox verified",
+    "[STOR] object-service started",
+    "[TIME] timer initialized",
+    "[M9  ] fs PASS",
+    "[M9  ] process-pipe PASS",
+    "[M9  ] blocking PASS",
+    "[M9  ] dns PASS",
+    "[M9  ] tcp PASS",
+    "[M9  ] deny fs ok",
+    "[M9  ] deny net ok",
+    "[M9  ] cycle=9",
+    "[M9  ] denial PASS",
+    "[M9.8] PASS",
 ];
 const M9_LINUX_SOCKET_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 const M9_LINUX_SOCKET_ACCEPTANCE_MARKERS: [&str; 9] = [
@@ -742,6 +762,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM9LinuxProc => run_m9_linux_proc_acceptance(),
         ParsedCommand::TestM9Rootfs => run_m9_rootfs_acceptance(),
         ParsedCommand::TestM9LinuxFs => run_m9_linux_fs_acceptance(),
+        ParsedCommand::TestM9Userspace => run_m9_userspace_acceptance(),
         ParsedCommand::TestM2 => run_m2_acceptance(),
         ParsedCommand::TestM3 => run_m3_acceptance(),
         ParsedCommand::TestM3AddressSpace => run_m3_address_space_acceptance(),
@@ -1239,6 +1260,15 @@ fn run_m9_rootfs_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m9_linux_fs_acceptance() -> Result<(), XtaskError> {
+    let probe_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("fixtures")
+        .join("linux-fs-probe");
+    m8_fixture::verify_pinned_sha256(
+        &probe_dir.join("linux-fs-probe-x86_64"),
+        &probe_dir.join("linux-fs-probe-x86_64.sha256"),
+    )
+    .map_err(XtaskError::InvalidCommand)?;
     reset_m5_data_disk_image()?;
     build_m6_fixture_userspace(true)?;
     build_storage_userspace(true)?;
@@ -1252,6 +1282,38 @@ fn run_m9_linux_fs_acceptance() -> Result<(), XtaskError> {
         )),
         m5_storage_vm_config(),
     )
+}
+
+fn run_m9_userspace_acceptance() -> Result<(), XtaskError> {
+    m9_fixture::verify_m9_fixture().map_err(XtaskError::InvalidCommand)?;
+    reset_m5_data_disk_image()?;
+    build_storage_userspace(true)?;
+    build_network_userspace(true)?;
+    let peer = M7FixturePeer::start_with(FixtureOptions {
+        tls_cert: WhichCert::Correct,
+        dns_reply_delay: std::time::Duration::from_millis(5),
+        m9_profile: true,
+    })
+    .map_err(XtaskError::Io)?;
+    let port = peer.port();
+    let run_result = run_vm_inner_with_config(
+        false,
+        false,
+        &["m9-userspace-self-test"],
+        Some((
+            MarkerSet::Ordered(&M9_USERSPACE_ACCEPTANCE_MARKERS),
+            M9_USERSPACE_ACCEPTANCE_TIMEOUT,
+        )),
+        VmLaunchConfig {
+            m5_data_disk: Some(m5_data_disk_path()),
+            reset_ovmf_vars: false,
+            m7_fixture_port: Some(port),
+            kernel_release: true,
+            cpu_model: Some("qemu64,+rdrand"),
+        },
+    );
+    peer.shutdown();
+    run_result
 }
 
 fn run_m2_acceptance() -> Result<(), XtaskError> {
@@ -2636,6 +2698,19 @@ fn run_acceptance_command(
                     print!("{}", chunk.text);
                 }
                 output.push_str(&chunk.text);
+                if marker_set_is_ordered(marker_set, &M9_USERSPACE_ACCEPTANCE_MARKERS)
+                    && output.contains("[FAIL] m9 userspace checklist command faulted")
+                    && !authoritative_pass
+                {
+                    terminate_child(&mut child)?;
+                    let _ = child.wait();
+                    join_output_reader(stdout_handle);
+                    join_output_reader(stderr_handle);
+                    return Err(XtaskError::CommandFailed {
+                        command: command_display,
+                        status: "guest reported m9 userspace checklist [FAIL]".to_owned(),
+                    });
+                }
                 M9_RUNTIME_WALL_CLOCK.with(|slot| {
                     if slot.borrow().is_some() {
                         M9_RUNTIME_SERIAL.with(|serial| {
@@ -3170,6 +3245,7 @@ enum ParsedCommand {
     TestM9LinuxProc,
     TestM9Rootfs,
     TestM9LinuxFs,
+    TestM9Userspace,
     TestM6Object,
     TestM7NetService,
     TestM7Network,
@@ -3218,6 +3294,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-m9-linux-fs" || cmd == "m9-linux-fs" || cmd == "m9.101" => {
             ParsedCommand::TestM9LinuxFs
+        }
+        Some(cmd) if cmd == "test-m9-userspace" || cmd == "m9-userspace" || cmd == "m9.107" => {
+            ParsedCommand::TestM9Userspace
         }
         Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,
         Some(cmd) if cmd == "test-m3" => ParsedCommand::TestM3,

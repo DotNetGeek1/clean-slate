@@ -3,6 +3,7 @@
 
 pub(crate) mod demo_tasks;
 pub(crate) mod dispatch;
+pub(crate) mod fpu;
 pub(crate) mod idle;
 pub(crate) mod wait;
 
@@ -25,7 +26,9 @@ const fn task_count_for_features() -> usize {
         feature = "m7-net-caps-self-test",
         feature = "m7-net-service-self-test",
         feature = "m6-object-self-test",
-        feature = "m6-audit-self-test"
+        feature = "m6-audit-self-test",
+        // #107: storage(0)+net(1)+spinner(5)+shell+fork child (#100 pipe-grep peak).
+        feature = "m9-userspace-self-test"
     )) {
         6
     } else if cfg!(feature = "m8-linux-hello") {
@@ -150,6 +153,12 @@ impl Scheduler {
         )
     }
 
+    /// Kernel stack top a user thread in `slot` must be configured with.
+    #[cfg(test)]
+    pub(crate) fn user_kernel_stack_top(slot: usize) -> u64 {
+        crate::arch::x86_64::context_switch::task_stack_top(&unsafe { task_stacks_mut() }[slot])
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn configure_thread(
         &mut self,
@@ -164,6 +173,15 @@ impl Scheduler {
         if slot >= self.threads.len() {
             return Err("thread slot exceeded fixed scheduler capacity");
         }
+        if kind == ThreadKind::User {
+            let expected = crate::arch::x86_64::context_switch::task_stack_top(
+                &unsafe { crate::sched::task_stacks_mut() }[slot],
+            );
+            if kernel_stack_top != expected {
+                return Err("kernel stack top must match scheduler slot task stack");
+            }
+        }
+        fpu::reset_slot(slot);
         self.threads[slot] = Thread {
             id,
             owner_process_id,
@@ -186,10 +204,23 @@ impl Scheduler {
         let next = self
             .next_runnable_from(None)
             .ok_or("scheduler had no runnable threads")?;
-        self.current_thread = Some(next);
+        self.make_current(next);
         self.threads[next].started = true;
         self.threads[next].state = ThreadState::Running;
         Ok(self.threads[next].saved_stack_pointer)
+    }
+
+    /// Every switch of the running thread goes through here so a user thread never
+    /// resumes with another thread's FPU/SSE registers.
+    pub(super) fn make_current(&mut self, next: usize) {
+        self.current_thread = Some(next);
+        if self.threads[next].kind == ThreadKind::User {
+            fpu::activate_user_slot(next);
+        }
+    }
+
+    pub(crate) fn current_slot(&self) -> Option<usize> {
+        self.current_thread
     }
 
     pub(super) fn current_thread_descriptor(&self) -> Result<Thread, &'static str> {
@@ -402,7 +433,7 @@ impl Scheduler {
             }
             return Err("scheduler lost all runnable threads during timer interrupt");
         };
-        self.current_thread = Some(next);
+        self.make_current(next);
         self.threads[next].state = ThreadState::Running;
         if next != current && !self.preemption_observed {
             self.preemption_observed = true;
@@ -443,7 +474,7 @@ impl Scheduler {
             }
             return Err("scheduler lost all runnable threads during block yield");
         };
-        self.current_thread = Some(next);
+        self.make_current(next);
         self.threads[next].state = ThreadState::Running;
         if !self.threads[next].started {
             self.threads[next].started = true;
@@ -491,7 +522,7 @@ impl Scheduler {
         let idle = IDLE_THREAD_INDEX;
         if let Some(next) = self.next_runnable_from(Some(idle)) {
             self.threads[idle].state = ThreadState::Ready;
-            self.current_thread = Some(next);
+            self.make_current(next);
             self.threads[next].state = ThreadState::Running;
             return Ok(wait::scheduler_handoff_stack_pointer(
                 self.threads[next].saved_stack_pointer,
@@ -509,7 +540,7 @@ impl Scheduler {
             }
             return Err("scheduler lost all runnable threads during idle wake");
         };
-        self.current_thread = Some(next);
+        self.make_current(next);
         self.threads[next].state = ThreadState::Running;
         Ok(wait::scheduler_handoff_stack_pointer(
             self.threads[next].saved_stack_pointer,
@@ -548,7 +579,7 @@ impl Scheduler {
             return Ok(None);
         };
 
-        self.current_thread = Some(next);
+        self.make_current(next);
         self.threads[next].state = ThreadState::Running;
         if !self.threads[next].started {
             self.threads[next].started = true;
@@ -854,7 +885,15 @@ mod tests {
             .configure_thread(0, 11, 0, ThreadKind::Kernel, 0x1000, 0x1000, 0x1000)
             .expect("kernel thread");
         scheduler
-            .configure_thread(1, 22, 7, ThreadKind::User, 0x2000, 0x2000, 0x2000)
+            .configure_thread(
+                1,
+                22,
+                7,
+                ThreadKind::User,
+                Scheduler::user_kernel_stack_top(1),
+                0x2000,
+                0x2000,
+            )
             .expect("user thread");
 
         assert_eq!(scheduler.threads[0].kind, ThreadKind::Kernel);
@@ -869,10 +908,26 @@ mod tests {
     fn process_resource_helpers_count_and_reap_owned_threads() {
         let mut scheduler = Scheduler::new();
         scheduler
-            .configure_thread(0, 11, 7, ThreadKind::User, 0x1000, 0x1000, 0x1000)
+            .configure_thread(
+                0,
+                11,
+                7,
+                ThreadKind::User,
+                Scheduler::user_kernel_stack_top(0),
+                0x1000,
+                0x1000,
+            )
             .expect("thread one");
         scheduler
-            .configure_thread(1, 12, 7, ThreadKind::User, 0x2000, 0x2000, 0x2000)
+            .configure_thread(
+                1,
+                12,
+                7,
+                ThreadKind::User,
+                Scheduler::user_kernel_stack_top(1),
+                0x2000,
+                0x2000,
+            )
             .expect("thread two");
         scheduler.threads[0].state = ThreadState::Exited;
         scheduler.threads[1].state = ThreadState::Ready;

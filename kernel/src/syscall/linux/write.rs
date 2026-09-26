@@ -298,11 +298,11 @@ mod tests {
     ) -> (LinuxFdRegistry, IpcEndpointTable) {
         let mut fds = LinuxFdRegistry::new();
         let mut ipc = IpcEndpointTable::new();
-        let handle = ipc
-            .grant_console_capability_for_pid(pid)
+        ipc.grant_console_capability_for_pid(pid)
             .expect("console grant");
-        fds.install(pid, generation, handle, handle)
-            .expect("install stdio");
+        let sink =
+            crate::process::linux_fd::console_sink_ref_from_table(&ipc).expect("console sink");
+        fds.install(pid, generation, sink).expect("install stdio");
         (fds, ipc)
     }
 
@@ -407,15 +407,15 @@ mod tests {
     }
 
     #[test]
-    fn write_unowned_handle_is_rejected_by_endpoint_table() {
+    fn write_without_holder_console_capability_is_eacces() {
         let generation = InstanceGeneration(1);
         let mut fds = LinuxFdRegistry::new();
         let mut ipc = IpcEndpointTable::new();
-        let foreign = ipc
-            .grant_console_capability_for_pid(50)
+        ipc.grant_console_capability_for_pid(50)
             .expect("grant to other pid");
-        fds.install(51, generation, foreign, foreign)
-            .expect("install");
+        let sink =
+            crate::process::linux_fd::console_sink_ref_from_table(&ipc).expect("console sink");
+        fds.install(51, generation, sink).expect("install");
         assert_eq!(
             write_with(
                 &mut fds,

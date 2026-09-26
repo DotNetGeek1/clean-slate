@@ -2,8 +2,6 @@
 //! and restart with fresh instance identity markers.
 
 #[cfg(feature = "m4-service-lifecycle-self-test")]
-use crate::arch::x86_64::context_switch::task_stack_top;
-#[cfg(feature = "m4-service-lifecycle-self-test")]
 use crate::diagnostics::log::kernel_log_line;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
 use crate::diagnostics::qemu::fatal_kernel_error;
@@ -23,8 +21,6 @@ use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
 use crate::sched::scheduler_mut;
-#[cfg(feature = "m4-service-lifecycle-self-test")]
-use crate::sched::task_stacks_mut;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
 use crate::sched::Scheduler;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
@@ -59,14 +55,10 @@ pub(crate) fn start_service_lifecycle_self_test(allocator: PageAllocator) -> ! {
         *scheduler_mut() = Scheduler::new();
     }
     let kernel_root_frame = current_root_frame_address();
-    let kernel_stack_top = unsafe {
-        let stacks = &*task_stacks_mut();
-        task_stack_top(&stacks[0])
-    };
     install_service_lifecycle_syscall_allocator(allocator);
     let controller = unsafe { service_lifecycle_controller_mut() };
     controller.clear();
-    controller.configure_launch_context(kernel_root_frame, kernel_stack_top);
+    controller.configure_launch_context(kernel_root_frame);
     controller
         .declare_service(ServiceId(2))
         .unwrap_or_else(|message| fatal_kernel_error(message));

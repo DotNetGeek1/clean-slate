@@ -287,6 +287,40 @@ pub(crate) fn read_fd(
     }
 }
 
+/// Blocking pipe write from a kernel buffer (shared by `write(2)` and `writev(2)`).
+pub(crate) fn write_fd_buffer(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+    pid: u64,
+    generation: clean_slate_service_lifecycle::InstanceGeneration,
+    fd: u64,
+    bytes: &[u8],
+) -> LinuxSyscallResult {
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+    let pipe = linux_fd::pipe_write_ref(pid, generation, fd).ok_or(EBADF)?;
+    let handle = pipe_ref_to_handle(pipe);
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        match pool_mut().write_from(handle, &bytes[offset..]) {
+            Ok(n) => offset += n,
+            Err(PipeWriteOutcome::Block) => {
+                return block_linux_syscall(
+                    request,
+                    ctx,
+                    writer_wait_key(handle),
+                    None,
+                    LinuxTimeoutResult::Zero,
+                );
+            }
+            Err(PipeWriteOutcome::Epipe) => return Err(EPIPE),
+            Err(PipeWriteOutcome::Stale) => return Err(EBADF),
+        }
+    }
+    Ok(offset as u64)
+}
+
 /// Blocking `write` backend for pipe fds (M9: no SIGPIPE delivery on `EPIPE`).
 pub(crate) fn write_fd(
     request: &LinuxSyscallRequest,
@@ -300,8 +334,6 @@ pub(crate) fn write_fd(
     if count == 0 {
         return Ok(0);
     }
-    let pipe = linux_fd::pipe_write_ref(pid, generation, fd).ok_or(EBADF)?;
-    let handle = pipe_ref_to_handle(pipe);
     let want = core::cmp::min(count as usize, LINUX_PIPE_CAPACITY);
     let mut scratch = [0u8; LINUX_PIPE_CAPACITY];
     let mut copied_total = 0usize;
@@ -318,24 +350,7 @@ pub(crate) fn write_fd(
         scratch[copied_total..copied_total + n].copy_from_slice(&chunk[..n]);
         copied_total += n;
     }
-    let mut offset = 0usize;
-    while offset < copied_total {
-        match pool_mut().write_from(handle, &scratch[offset..copied_total]) {
-            Ok(n) => offset += n,
-            Err(PipeWriteOutcome::Block) => {
-                return block_linux_syscall(
-                    request,
-                    ctx,
-                    writer_wait_key(handle),
-                    None,
-                    LinuxTimeoutResult::Zero,
-                );
-            }
-            Err(PipeWriteOutcome::Epipe) => return Err(EPIPE),
-            Err(PipeWriteOutcome::Stale) => return Err(EBADF),
-        }
-    }
-    Ok(offset as u64)
+    write_fd_buffer(request, ctx, pid, generation, fd, &scratch[..copied_total])
 }
 
 #[cfg(test)]

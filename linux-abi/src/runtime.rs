@@ -11,6 +11,12 @@ pub const SYS_IOCTL: u64 = 16;
 pub const SYS_POLL: u64 = 7;
 pub const SYS_ARCH_PRCTL: u64 = 158;
 pub const SYS_GETPID: u64 = 39;
+/// Linux `geteuid` — `geteuid()`.
+pub const SYS_GETEUID: u64 = 107;
+/// `clock_gettime(2)`. Reference traces hide it behind the host vDSO; without a vDSO, musl
+/// `mtime()` / BusyBox `monotonic_ms()` issue the syscall for `CLOCK_MONOTONIC`.
+pub const SYS_CLOCK_GETTIME: u64 = 228;
+pub const CLOCK_MONOTONIC: u64 = 1;
 pub const SYS_NANOSLEEP: u64 = 35;
 pub const SYS_UNAME: u64 = 63;
 pub const SYS_SET_TID_ADDRESS: u64 = 218;
@@ -198,6 +204,13 @@ mod tests {
         let enc = encode_sigaction(sa);
         assert_eq!(enc.len(), 32);
         assert_eq!(decode_sigaction(&enc), Ok(sa));
+    }
+
+    #[test]
+    fn m9_fixture_runtime_syscall_numbers() {
+        assert_eq!(SYS_GETEUID, 107);
+        assert_eq!(SYS_CLOCK_GETTIME, 228);
+        assert_eq!(CLOCK_MONOTONIC, 1);
     }
 
     #[test]

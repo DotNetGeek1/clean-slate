@@ -195,7 +195,10 @@ pub(crate) fn on_holder_exit_acked(holder_pid: u64, sessions: u64, pending: u64)
     }));
 }
 
-#[cfg(feature = "m9-linux-socket-self-test")]
+#[cfg(any(
+    feature = "m9-linux-socket-self-test",
+    feature = "m9-userspace-self-test"
+))]
 pub(crate) fn init_minimal_state_for_m9_socket(lifecycle_capability: u64) {
     set_state(Some(M7NetSelfTestState {
         lifecycle_capability,
@@ -239,15 +242,11 @@ pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
         *scheduler_mut() = Scheduler::new();
     }
     let kernel_root = kernel_root_frame();
-    let kernel_stack_top = unsafe {
-        let stacks = &*task_stacks_mut();
-        task_stack_top(&stacks[0])
-    };
     install_service_lifecycle_syscall_allocator(allocator);
     let lifecycle_capability = {
         let controller = unsafe { service_lifecycle_controller_mut() };
         controller.clear();
-        controller.configure_launch_context(kernel_root, kernel_stack_top);
+        controller.configure_launch_context(kernel_root);
         controller
             .declare_service(NETWORK_SERVICE_ID)
             .unwrap_or_else(|message| fatal_kernel_error(message));

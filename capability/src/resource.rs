@@ -74,4 +74,12 @@ impl ResourceRef {
             instance_generation: session_generation,
         }
     }
+
+    pub const fn ipc_endpoint(endpoint_slot: u64) -> Self {
+        Self {
+            class: ResourceClass::IpcEndpoint,
+            id: endpoint_slot,
+            instance_generation: 0,
+        }
+    }
 }

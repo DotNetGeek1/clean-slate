@@ -20,6 +20,7 @@ pub fn qemu_exit_failure() -> ! {
 pub(crate) fn halt_loop() -> ! {
     loop {
         unsafe {
+            asm!("cli", options(nomem, nostack, preserves_flags));
             asm!("hlt", options(nomem, nostack, preserves_flags));
         }
     }

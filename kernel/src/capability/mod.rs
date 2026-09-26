@@ -15,9 +15,9 @@ pub(crate) mod revocation;
 use core::fmt::{self, Write};
 
 use clean_slate_capability::{
-    release_revoked, revoke_holder_tree, revoke_resource_tree, CapabilityError, CapabilityHandle,
-    CapabilityRecord, CapabilityTable, HolderId, Provenance, ResourceClass, ResourceRef, Rights,
-    MAX_SLOTS,
+    list_holder, release_revoked, revoke_holder_tree, revoke_resource_tree, CapabilityError,
+    CapabilityHandle, CapabilityRecord, CapabilityTable, HolderId, Provenance, ResourceClass,
+    ResourceRef, Rights, MAX_SLOTS,
 };
 
 use crate::process::current_process_id;
@@ -180,6 +180,79 @@ pub(crate) fn grant_root(
 
 pub(crate) fn revoke_for_holder(holder: HolderId) -> usize {
     revoke_holder_tree(unsafe { capability_space_mut() }, holder)
+}
+
+/// Duplicates every live capability held by `parent` onto `child` for Linux `fork(2)`.
+///
+/// Unlike userspace [`clean_slate_capability::delegate`], this kernel-only path does not
+/// require `Rights::DELEGATE` on the parent caps — fork is not a delegation syscall.
+/// Returns whether `holder` holds any live capability for `resource` with `required` rights.
+pub(crate) fn holder_has_resource_rights(
+    holder: HolderId,
+    resource: ResourceRef,
+    required: Rights,
+) -> bool {
+    with_capability_space(|table| {
+        let mut cursor = 0usize;
+        loop {
+            let Some((next_cursor, handle, _record)) = list_holder(table, holder, cursor) else {
+                return false;
+            };
+            cursor = next_cursor;
+            if table.authorize(holder, handle, resource, required).is_ok() {
+                return true;
+            }
+        }
+    })
+}
+
+#[cfg(feature = "m8-linux-image")]
+pub(crate) fn inherit_capabilities_for_fork(
+    parent: HolderId,
+    child: HolderId,
+) -> Result<(), CapabilityError> {
+    let mut cursor = 0usize;
+    let mut installed = [None; MAX_SLOTS];
+    let mut count = 0usize;
+    loop {
+        let table = unsafe { capability_space_mut() };
+        let Some((next_cursor, handle, record)) = list_holder(table, parent, cursor) else {
+            break;
+        };
+        cursor = next_cursor;
+        let provenance = Provenance::child_of(handle, &record.provenance)?;
+        let child_record = CapabilityRecord {
+            state: clean_slate_capability::CapabilityState::Live,
+            holder: child,
+            resource: record.resource,
+            rights: record.rights,
+            provenance,
+            generation: 0,
+        };
+        if count >= MAX_SLOTS {
+            rollback_fork_inherited(&installed[..count]);
+            return Err(CapabilityError::CapacityExhausted);
+        }
+        match table.install(child_record) {
+            Ok(child_handle) => {
+                installed[count] = Some(child_handle);
+                count += 1;
+            }
+            Err(error) => {
+                rollback_fork_inherited(&installed[..count]);
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "m8-linux-image")]
+fn rollback_fork_inherited(handles: &[Option<CapabilityHandle>]) {
+    let table = unsafe { capability_space_mut() };
+    for handle in handles.iter().flatten() {
+        let _ = table.revoke(*handle);
+    }
 }
 
 #[allow(dead_code)] // M6 adapters revoke exact ResourceRef (M6.3+).

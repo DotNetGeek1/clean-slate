@@ -508,12 +508,21 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
     }
     #[cfg(feature = "m8-linux-image")]
     crate::process::linux_proc::fault::publish_linux_fault_exit(pid, context.vector);
+    #[cfg(feature = "m9-userspace-self-test")]
+    crate::selftest::m9_userspace::on_checklist_command_fault(pid, context);
 
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 1, true)
         .unwrap_or_else(|message| fatal_kernel_error(message));
+    #[cfg(feature = "m9-userspace-self-test")]
+    if crate::selftest::m9_userspace::checklist_fault_pending() {
+        crate::diagnostics::serial::serial_write_line(
+            "[FAIL] m9 userspace checklist command faulted",
+        );
+        crate::diagnostics::qemu::qemu_exit(crate::diagnostics::qemu::QEMU_EXIT_FAILURE);
+    }
     #[cfg(feature = "m4-recovery-self-test")]
     observe_recovery_fault_after_containment(pid, maybe_fault_event)
         .unwrap_or_else(|message| fatal_kernel_error(message));
@@ -531,6 +540,7 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
         }
         #[cfg(all(
             feature = "m6-object-self-test",
+            not(feature = "m9-userspace-self-test"),
             not(any(
                 feature = "m6-fixture-smoke-self-test",
                 feature = "m6-revocation-self-test"
@@ -542,8 +552,13 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
         #[cfg(not(any(
             feature = "m6-fixture-smoke-self-test",
             feature = "m6-revocation-self-test",
-            feature = "m6-object-self-test"
+            feature = "m6-object-self-test",
+            feature = "m9-userspace-self-test"
         )))]
+        {
+            fatal_kernel_error("no runnable thread remained after userspace fault");
+        }
+        #[cfg(feature = "m9-userspace-self-test")]
         {
             fatal_kernel_error("no runnable thread remained after userspace fault");
         }

@@ -9,7 +9,6 @@ use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::diagnostics::serial::serial_write_line;
 use crate::interrupt::timer::initialize_timer;
-use crate::ipc::endpoint_table_mut;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::PAGE_SIZE;
 use crate::process::domain::DomainTeardownResult;
@@ -297,9 +296,7 @@ fn reset_cycle_observations() {
 fn install_stdio_and_placeholder(pid: u64) -> Result<(), &'static str> {
     let generation =
         live_instance_generation(pid).ok_or("m9 fd core missing instance generation")?;
-    let ipc = unsafe { endpoint_table_mut() };
-    let handle = ipc.grant_console_capability_for_pid(pid)?;
-    linux_fd::install_stdio_for_process(pid, generation, handle, handle)?;
+    linux_fd::grant_console_stdio_for_process(pid, generation)?;
     let placeholder = linux_fd::alloc_self_test_placeholder_file(pid, generation)
         .map_err(|_| "m9 fd core placeholder allocation failed")?;
     if placeholder != 0 {

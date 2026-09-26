@@ -16,7 +16,6 @@ use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::diagnostics::serial::serial_write_line;
 use crate::interrupt::timer::initialize_timer;
-use crate::ipc::endpoint_table_mut;
 use crate::mm::address_space::{activate_address_space_root, kernel_root_frame};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::PAGE_SIZE;
@@ -189,10 +188,7 @@ fn log_trace_baseline(label: &str) {
 
 fn install_stdio(pid: u64) -> Result<(), &'static str> {
     let generation = live_instance_generation(pid).ok_or("m9 trace missing instance generation")?;
-    let ipc = unsafe { endpoint_table_mut() };
-    let handle = ipc.grant_console_capability_for_pid(pid)?;
-    linux_fd::install_stdio_for_process(pid, generation, handle, handle)?;
-    Ok(())
+    linux_fd::grant_console_stdio_for_process(pid, generation)
 }
 
 fn launch_proc_fixture(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'static str> {

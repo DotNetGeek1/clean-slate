@@ -266,11 +266,18 @@ clean_slate_idle_thread_bootstrap_entry:
 clean_slate_user_address_space_test_start:
     movabs rax, 0x0000400000001000
     mov rdi, [rax]
+    movq xmm0, rdi
     int 0x80
     .global clean_slate_user_address_space_test_after_entry
 clean_slate_user_address_space_test_after_entry:
+    # The other process ran (with its own private value in xmm0) before this one
+    # resumes; SSE state must be per thread.
+    movq rcx, xmm0
+    cmp rcx, rdi
+    jne 2f
     mov rax, [rax + 8]
     mov rax, [rax]
+2:
     ud2
     .global clean_slate_user_address_space_test_end
 clean_slate_user_address_space_test_end:

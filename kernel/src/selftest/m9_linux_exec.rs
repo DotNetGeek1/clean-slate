@@ -4,7 +4,6 @@ use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
-use crate::ipc::endpoint_table_mut;
 use crate::mm::address_space::{
     activate_address_space_root, create_process_address_space, destroy_process_address_space,
     kernel_root_frame,
@@ -96,9 +95,7 @@ fn install_linux_stdio(pid: u64) -> Result<(), &'static str> {
     if console_sink_render_style(personality) != ConsoleSinkRenderStyle::Verbatim {
         return Err("m9 linux exec: personality not verbatim");
     }
-    let ipc = unsafe { endpoint_table_mut() };
-    let handle = ipc.grant_console_capability_for_pid(pid)?;
-    linux_fd::install_stdio_for_process(pid, generation, handle, handle)?;
+    linux_fd::grant_console_stdio_for_process(pid, generation)?;
     Ok(())
 }
 

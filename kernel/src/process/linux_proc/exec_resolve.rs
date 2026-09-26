@@ -18,10 +18,10 @@ pub(crate) fn resolve_executable(
     generation: clean_slate_service_lifecycle::InstanceGeneration,
     path: &[u8],
     resolved_out: &mut [u8; LINUX_PATH_MAX],
-) -> Result<ExecutableRef<'_>, LinuxErrno> {
-    let image = crate::process::linux_rootfs::image().map_err(|_| ENOENT)?;
+) -> Result<ExecutableRef<'static>, LinuxErrno> {
+    let image = crate::process::linux_rootfs::image_ref().map_err(|_| ENOENT)?;
     let exec =
-        crate::process::linux_fs::resolve_executable(pid, generation, path, resolved_out, &image)?;
+        crate::process::linux_fs::resolve_executable(pid, generation, path, resolved_out, image)?;
     Ok(ExecutableRef {
         image: exec.image,
         resolved_path_len: exec.resolved_path_len,

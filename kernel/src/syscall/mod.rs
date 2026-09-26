@@ -164,6 +164,7 @@ pub(super) fn initialize_syscall_abi(kernel_stack_top: u64) -> Result<(), &'stat
     let star = ((gdt_state.user_sysret_selector_base.0 as u64) << 48)
         | ((gdt_state.code_selector.0 as u64) << 32);
     set_syscall_kernel_stack(kernel_stack_top)?;
+    crate::sched::fpu::enable_user_fpu_state();
     unsafe {
         SYSCALL_SCRATCH_USER_RSP = 0;
     }

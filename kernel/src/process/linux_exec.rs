@@ -208,11 +208,10 @@ fn build_exec_initial_stack(
         (AT_ENTRY, entry),
         (AT_EXECFN, 0),
     ];
-    let stack_image_bytes = layout
-        .stack_pages
-        .checked_mul(PAGE_SIZE)
-        .and_then(|n| usize::try_from(n).ok())
-        .ok_or(LinuxImageError::ExecStackBounds)?;
+    // Initial argc/argv/envp/auxv are constructed in the top stack page only; extra
+    // mapped stack pages below are for runtime growth (#107 BusyBox).
+    let stack_image_bytes =
+        usize::try_from(PAGE_SIZE).map_err(|_| LinuxImageError::ExecStackBounds)?;
     if stack_image_bytes == 0 || stack_image_bytes > LINUX_MAX_STACK_IMAGE_BYTES {
         return Err(LinuxImageError::ExecStackBounds);
     }
@@ -347,6 +346,7 @@ pub(crate) fn prepare_linux_image(
 #[cfg(any(
     feature = "m9-linux-proc-self-test",
     feature = "m9-linux-runtime-self-test",
+    feature = "m9-userspace-self-test",
     feature = "m9-linux-trace-self-test"
 ))]
 pub(crate) fn pick_scheduler_slot_for_relaunch() -> Result<(usize, u64), &'static str> {
@@ -484,6 +484,10 @@ pub(crate) fn commit_exec(
         }
         crate::process::linux_mem::reset_for_exec(pid, live_gen, allocator);
         crate::process::linux_signal::reset_for_exec(pid, live_gen);
+        let exec_slot = unsafe { crate::sched::scheduler_mut() }
+            .current_slot()
+            .ok_or(LinuxImageError::Registry("exec commit: no current thread"))?;
+        crate::sched::fpu::reset_for_exec(exec_slot);
         // Point of no return: from here the process owns the new image. Any
         // failure below is a kernel invariant violation, not an errno -- returning
         // an error would resume the old RIP inside the new address space.

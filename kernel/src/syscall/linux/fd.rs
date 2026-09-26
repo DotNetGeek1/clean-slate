@@ -6,9 +6,11 @@ use super::write::{ensure_fd_open, write_chunked};
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::process::linux_fd::{
     self, apply_linux_fl_to_status, ensure_open_fd, open_description::DescriptorKind,
-    open_status_to_linux_fl, projection_for,
+    open_status_to_linux_fl, projection_for, LinuxFdProjection,
 };
-use clean_slate_linux_abi::{LinuxSyscallRequest, LinuxSyscallResult, EBADF, EFAULT, EINVAL};
+use clean_slate_linux_abi::{
+    LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EBADF, EFAULT, EINVAL,
+};
 
 /// Matches frozen pipe `read(0, …, 1024)` traces.
 pub(crate) const LINUX_READ_SCRATCH_BYTES: usize = 1024;
@@ -190,7 +192,8 @@ pub(crate) fn handle_sys_writev(
     let pid = ctx.pid;
     let generation = ctx.instance_generation;
 
-    ensure_fd_open(projection_for(pid, generation, fd))?;
+    let projection = projection_for(pid, generation, fd)?;
+    ensure_fd_open(Ok(projection))?;
 
     if iovcnt == 0 {
         return Ok(0);
@@ -222,6 +225,31 @@ pub(crate) fn handle_sys_writev(
         }
     }
 
+    let write_chunk = |chunk: &[u8]| -> Result<usize, LinuxErrno> {
+        if chunk.is_empty() {
+            return Ok(0);
+        }
+        #[cfg(feature = "m9-rootfs")]
+        if matches!(projection, LinuxFdProjection::FileBackend) {
+            let n = super::fs_io::write_file_fd(request, ctx, pid, generation, fd, chunk)?;
+            return usize::try_from(n).map_err(|_| EINVAL);
+        }
+        if matches!(projection, LinuxFdProjection::PipeBackend) {
+            #[cfg(not(any(
+                feature = "m1-self-test",
+                feature = "m2-double-fault-self-test",
+                feature = "m2-timer-self-test"
+            )))]
+            {
+                let n = crate::process::linux_proc::pipe::write_fd_buffer(
+                    request, ctx, pid, generation, fd, chunk,
+                )?;
+                return usize::try_from(n).map_err(|_| EINVAL);
+            }
+        }
+        linux_fd::write_fd(pid, generation, fd, chunk)
+    };
+
     write_chunked(
         total_len,
         |offset, len, dst| {
@@ -244,10 +272,7 @@ pub(crate) fn handle_sys_writev(
             }
             Ok(copied)
         },
-        |chunk| {
-            let sent = linux_fd::write_fd(pid, generation, fd, chunk)?;
-            Ok(sent)
-        },
+        write_chunk,
     )
 }
 
@@ -363,11 +388,10 @@ mod tests {
         let pid = 88u64;
         let generation = InstanceGeneration(77);
         let mut ipc = IpcEndpointTable::new();
-        let handle = ipc
-            .grant_console_capability_for_pid(pid)
+        ipc.grant_console_capability_for_pid(pid)
             .expect("console grant");
-        linux_fd::install_stdio_for_process(pid, generation, handle, handle)
-            .expect("install stdio");
+        let sink = linux_fd::console_sink_ref_from_table(&ipc).expect("console sink");
+        linux_fd::install_stdio_for_process(pid, generation, sink).expect("install stdio");
         let mut frame = empty_frame();
         let mut ctx = LinuxSyscallContext {
             pid,
@@ -407,8 +431,9 @@ mod tests {
     fn dup2_same_fd_is_noop_when_already_open() {
         let (mut fds, mut ipc) = (LinuxFdRegistry::new(), IpcEndpointTable::new());
         let gen = InstanceGeneration(1);
-        let handle = ipc.grant_console_capability_for_pid(2).expect("grant");
-        fds.install(2, gen, handle, handle).expect("install");
+        ipc.grant_console_capability_for_pid(2).expect("grant");
+        let sink = linux_fd::console_sink_ref_from_table(&ipc).expect("sink");
+        fds.install(2, gen, sink).expect("install");
         fds.dup2(2, gen, LINUX_STDOUT_FD, 5).expect("dup to 5");
         assert!(fds.dup2(2, gen, 5, 5).is_ok());
     }
@@ -418,8 +443,9 @@ mod tests {
         let (mut fds, mut ipc) = (LinuxFdRegistry::new(), IpcEndpointTable::new());
         let live = InstanceGeneration(1);
         let stale = InstanceGeneration(2);
-        let handle = ipc.grant_console_capability_for_pid(3).expect("grant");
-        fds.install(3, live, handle, handle).expect("install");
+        ipc.grant_console_capability_for_pid(3).expect("grant");
+        let sink = linux_fd::console_sink_ref_from_table(&ipc).expect("sink");
+        fds.install(3, live, sink).expect("install");
         assert_eq!(fds.close_fd(3, stale, LINUX_STDOUT_FD), Err(EBADF));
     }
 

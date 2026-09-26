@@ -12,6 +12,7 @@ use crate::arch::x86_64::gdt::set_syscall_kernel_stack;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::mm::address_space::activate_address_space_root;
 use crate::mm::address_space::kernel_root_frame;
+use crate::mm::paging::current_root_frame_address;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::userspace_process_root_frame;
 use crate::sched::scheduler_mut;
@@ -120,6 +121,9 @@ fn prepare_thread_dispatch(thread: Thread) -> Result<(), &'static str> {
     };
 
     activate_address_space_root(root_frame);
+    if current_root_frame_address() != root_frame {
+        return Err("CR3 root mismatch after address-space activate");
+    }
     set_privilege_stack(thread.kernel_stack_top)?;
     set_syscall_kernel_stack(thread.kernel_stack_top)?;
     if thread.kind == ThreadKind::User {

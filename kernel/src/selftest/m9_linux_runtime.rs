@@ -5,7 +5,6 @@ use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::interrupt::timer::kernel_ticks;
-use crate::ipc::endpoint_table_mut;
 use crate::mm::address_space::{activate_address_space_root, kernel_root_frame};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::domain::DomainTeardownResult;
@@ -152,11 +151,7 @@ fn launch_probe(allocator: &mut PageAllocator) -> u64 {
     }
     let generation = live_instance_generation(launched.pid)
         .unwrap_or_else(|| fatal_kernel_error("m9 linux runtime generation"));
-    let ipc = unsafe { endpoint_table_mut() };
-    let handle = ipc
-        .grant_console_capability_for_pid(launched.pid)
-        .unwrap_or_else(|_| fatal_kernel_error("m9 linux runtime console grant"));
-    linux_fd::install_stdio_for_process(launched.pid, generation, handle, handle)
+    linux_fd::grant_console_stdio_for_process(launched.pid, generation)
         .unwrap_or_else(|_| fatal_kernel_error("m9 linux runtime stdio"));
     RUNTIME_PID.store(launched.pid, Ordering::Relaxed);
     RUNTIME_GENERATION.store(generation.0, Ordering::Relaxed);

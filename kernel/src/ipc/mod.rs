@@ -1,7 +1,9 @@
 //! Endpoint-based IPC: endpoint slots, send capabilities with generation
 //! checks, and the endpoint table. Owns `IPC_ENDPOINT_TABLE`.
 
+use crate::capability::grant_root;
 use crate::sync::global_cell::GlobalCell;
+use clean_slate_capability::{HolderId, ResourceRef, Rights};
 
 pub(super) const IPC_MAX_MESSAGE_BYTES: usize = 64;
 /// Fixed endpoint-slot bound (host-testable; Linux console grants reuse one slot).
@@ -176,11 +178,27 @@ impl IpcEndpointTable {
             Some(slot) => slot,
             None => self.create_console_sink(crate::process::KERNEL_PROCESS_ID)?,
         };
-        self.grant_send_capability(holder_pid, endpoint_slot)
+        let ipc_handle = self.grant_send_capability(holder_pid, endpoint_slot)?;
+        let resource = ResourceRef::ipc_endpoint(endpoint_slot as u64);
+        grant_root(HolderId(holder_pid), resource, Rights::WRITE)
+            .map_err(|_| "m6 console capability grant failed")?;
+        Ok(ipc_handle)
+    }
+
+    /// Stable identity of the shared kernel console sink endpoint.
+    pub(crate) fn kernel_console_sink_identity(&self) -> Result<(u16, u16), &'static str> {
+        let slot = self
+            .shared_kernel_console_sink_slot()
+            .ok_or("kernel console sink was not created")?;
+        let generation = self.endpoint_generation(slot)?;
+        Ok((
+            u16::try_from(slot).map_err(|_| "ipc endpoint slot exceeded u16")?,
+            generation,
+        ))
     }
 
     /// Active `ConsoleSink` owned by the kernel process, if one already exists.
-    fn shared_kernel_console_sink_slot(&self) -> Option<usize> {
+    pub(crate) fn shared_kernel_console_sink_slot(&self) -> Option<usize> {
         self.endpoints
             .iter()
             .enumerate()
@@ -318,6 +336,33 @@ impl IpcEndpointTable {
             return Err(IpcSendError::StaleCapability);
         }
         Ok(capability.endpoint_slot as usize)
+    }
+
+    /// Delivers a message after the caller has authorized against the M6 `IpcEndpoint` resource.
+    pub(crate) fn send_message_to_endpoint(
+        &mut self,
+        endpoint_slot: usize,
+        endpoint_generation: u16,
+        message: &[u8],
+    ) -> Result<IpcSendResult, IpcSendError> {
+        if message.is_empty() || message.len() > IPC_MAX_MESSAGE_BYTES {
+            return Err(IpcSendError::InvalidMessageLength);
+        }
+        let endpoint = self
+            .endpoints
+            .get_mut(endpoint_slot)
+            .ok_or(IpcSendError::StaleCapability)?;
+        if endpoint.state != IpcEndpointState::Active || endpoint.generation != endpoint_generation
+        {
+            return Err(IpcSendError::StaleCapability);
+        }
+        endpoint.last_message = [0; IPC_MAX_MESSAGE_BYTES];
+        endpoint.last_message[..message.len()].copy_from_slice(message);
+        endpoint.last_message_len = message.len() as u16;
+        Ok(IpcSendResult {
+            bytes_sent: message.len(),
+            endpoint_kind: endpoint.kind,
+        })
     }
 
     pub(super) fn send_message(

@@ -86,6 +86,10 @@ pub(crate) fn clear_poll_interest_for_pid(pid: u64) {
     }
 }
 
+pub(crate) fn wake_poll_waiters_for_pid(pid: u64) -> usize {
+    wake_all(poll_wait_key(pid))
+}
+
 #[allow(dead_code)]
 pub(crate) fn notify_readiness_changed(desc: OpenDescriptionId) {
     let table = unsafe { &*INTEREST.get() };

@@ -318,8 +318,9 @@ impl TcpConnection {
             TcpState::Established => self.on_established(seg, payload, stats),
             TcpState::FinWait1 => self.on_fin_wait1(seg, payload, stats),
             TcpState::FinWait2 => self.on_fin_wait2(seg, payload, stats),
-            TcpState::Closing => self.on_closing(seg, stats),
-            TcpState::LastAck => self.on_last_ack(seg, stats),
+            TcpState::Closing => self.on_closing(seg, payload, stats),
+            TcpState::LastAck => self.on_last_ack(seg, payload, stats),
+            TcpState::TimeWait => self.on_time_wait(seg, payload, stats),
             TcpState::CloseWait => self.on_close_wait(seg, payload, stats),
             _ => SegmentAction::None,
         }
@@ -376,38 +377,30 @@ impl TcpConnection {
         }
         self.peer_window = seg.window;
 
-        if !payload.is_empty()
-            || seg.flags.contains(TcpFlags::SYN)
-            || seg.flags.contains(TcpFlags::FIN)
-        {
-            if seg.seq != self.rcv_nxt {
-                stats.dropped_out_of_order += 1;
-                // RFC 793 §3.9: an unacceptable segment is answered with an ACK so a
-                // peer whose earlier ACK was lost stops retransmitting.
-                action = SegmentAction::SendAck;
-            } else {
-                let mut consume = payload.len();
-                if seg.flags.contains(TcpFlags::SYN) {
-                    consume += 1;
-                }
-                let room = self.recv_buf.free_space();
-                let accept = consume.min(room);
-                if accept > payload.len() {
-                    // SYN bit consumes sequence space without payload bytes here.
-                }
-                let data_take = accept.min(payload.len());
-                self.recv_buf.push(payload.get(..data_take).unwrap_or(&[]));
-                self.rcv_nxt = self.rcv_nxt.wrapping_add(data_take as u32);
-                if seg.flags.contains(TcpFlags::SYN) {
-                    self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
-                }
-                if seg.flags.contains(TcpFlags::FIN) {
-                    self.peer_fin_seen = true;
-                    self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
-                    self.state = TcpState::CloseWait;
-                }
-                action = SegmentAction::SendAck;
+        if self.is_unacceptable(seg, payload, stats) {
+            action = SegmentAction::SendAck;
+        } else if occupies_sequence_space(seg, payload) {
+            let mut consume = payload.len();
+            if seg.flags.contains(TcpFlags::SYN) {
+                consume += 1;
             }
+            let room = self.recv_buf.free_space();
+            let accept = consume.min(room);
+            if accept > payload.len() {
+                // SYN bit consumes sequence space without payload bytes here.
+            }
+            let data_take = accept.min(payload.len());
+            self.recv_buf.push(payload.get(..data_take).unwrap_or(&[]));
+            self.rcv_nxt = self.rcv_nxt.wrapping_add(data_take as u32);
+            if seg.flags.contains(TcpFlags::SYN) {
+                self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
+            }
+            if seg.flags.contains(TcpFlags::FIN) {
+                self.peer_fin_seen = true;
+                self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
+                self.state = TcpState::CloseWait;
+            }
+            action = SegmentAction::SendAck;
         } else if seg.flags.contains(TcpFlags::ACK)
             && ack_valid(seg.ack, self.snd_una, self.snd_nxt)
         {
@@ -424,27 +417,17 @@ impl TcpConnection {
         payload: &[u8],
         stats: &mut TcpStats,
     ) -> SegmentAction {
-        let mut action = self.on_established(seg, payload, stats);
-        if seg.flags.contains(TcpFlags::ACK) && ack_valid(seg.ack, self.snd_una, self.snd_nxt) {
-            self.apply_ack(seg.ack);
-            if self.our_fin_sent && self.snd_una == self.snd_nxt {
-                if seg.flags.contains(TcpFlags::FIN) {
-                    self.state = TcpState::TimeWait;
-                } else {
-                    self.state = TcpState::FinWait2;
-                }
-            }
-        }
-        if seg.flags.contains(TcpFlags::FIN) && seg.seq == self.rcv_nxt {
-            self.peer_fin_seen = true;
-            self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
-            if self.snd_una == self.snd_nxt {
-                self.state = TcpState::TimeWait;
-            } else {
-                self.state = TcpState::Closing;
-            }
-            action = SegmentAction::SendAck;
-        }
+        // `on_established` applies the ACK, accepts data, and consumes an in-order FIN
+        // (leaving CLOSE-WAIT behind); the FIN-WAIT-1 successor state is decided here
+        // from what has now been exchanged (RFC 793 §3.9).
+        let action = self.on_established(seg, payload, stats);
+        let our_fin_acked = self.our_fin_sent && self.snd_una == self.snd_nxt;
+        self.state = match (self.peer_fin_seen, our_fin_acked) {
+            (true, true) => TcpState::TimeWait,
+            (true, false) => TcpState::Closing,
+            (false, true) => TcpState::FinWait2,
+            (false, false) => TcpState::FinWait1,
+        };
         action
     }
 
@@ -457,18 +440,16 @@ impl TcpConnection {
         if seg.flags.contains(TcpFlags::ACK) && ack_valid(seg.ack, self.snd_una, self.snd_nxt) {
             self.apply_ack(seg.ack);
         }
-        if !payload.is_empty() {
-            if seg.seq != self.rcv_nxt {
-                stats.dropped_out_of_order += 1;
-                return SegmentAction::SendAck;
-            } else {
-                let take = payload.len().min(self.recv_buf.free_space());
-                self.recv_buf.push(payload.get(..take).unwrap_or(&[]));
-                self.rcv_nxt = self.rcv_nxt.wrapping_add(take as u32);
-                return SegmentAction::SendAck;
-            }
+        if self.is_unacceptable(seg, payload, stats) {
+            return SegmentAction::SendAck;
         }
-        if seg.flags.contains(TcpFlags::FIN) && seg.seq == self.rcv_nxt {
+        if !payload.is_empty() {
+            let take = payload.len().min(self.recv_buf.free_space());
+            self.recv_buf.push(payload.get(..take).unwrap_or(&[]));
+            self.rcv_nxt = self.rcv_nxt.wrapping_add(take as u32);
+            return SegmentAction::SendAck;
+        }
+        if seg.flags.contains(TcpFlags::FIN) {
             self.peer_fin_seen = true;
             self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
             self.state = TcpState::TimeWait;
@@ -477,21 +458,63 @@ impl TcpConnection {
         SegmentAction::None
     }
 
-    fn on_closing(&mut self, seg: &TcpSegment, _stats: &mut TcpStats) -> SegmentAction {
+    fn on_closing(
+        &mut self,
+        seg: &TcpSegment,
+        payload: &[u8],
+        stats: &mut TcpStats,
+    ) -> SegmentAction {
         if seg.flags.contains(TcpFlags::ACK) && ack_valid(seg.ack, self.snd_una, self.snd_nxt) {
             self.apply_ack(seg.ack);
             if self.snd_una == self.snd_nxt {
                 self.state = TcpState::TimeWait;
             }
         }
+        if self.is_unacceptable(seg, payload, stats) {
+            return SegmentAction::SendAck;
+        }
         SegmentAction::None
     }
 
-    fn on_last_ack(&mut self, seg: &TcpSegment, stats: &mut TcpStats) -> SegmentAction {
+    fn on_time_wait(
+        &mut self,
+        seg: &TcpSegment,
+        payload: &[u8],
+        stats: &mut TcpStats,
+    ) -> SegmentAction {
+        // Everything the peer may send here was already consumed, so any segment that
+        // occupies sequence space is unacceptable. The transport restarts the 2MSL timer
+        // when TIME-WAIT answers with an ACK.
+        if self.is_unacceptable(seg, payload, stats) {
+            return SegmentAction::SendAck;
+        }
+        SegmentAction::None
+    }
+
+    /// RFC 793 §3.9: a segment occupying sequence space that does not start at `rcv_nxt`
+    /// is unacceptable. It is dropped (and counted) and must be answered with an ACK so a
+    /// peer whose earlier ACK was lost stops retransmitting, in every synchronized state.
+    fn is_unacceptable(&self, seg: &TcpSegment, payload: &[u8], stats: &mut TcpStats) -> bool {
+        if occupies_sequence_space(seg, payload) && seg.seq != self.rcv_nxt {
+            stats.dropped_out_of_order += 1;
+            return true;
+        }
+        false
+    }
+
+    fn on_last_ack(
+        &mut self,
+        seg: &TcpSegment,
+        payload: &[u8],
+        stats: &mut TcpStats,
+    ) -> SegmentAction {
         if seg.flags.contains(TcpFlags::ACK) && seg.ack == self.snd_nxt {
             self.state = TcpState::Closed;
             self.release_buffers();
             return SegmentAction::Closed;
+        }
+        if self.is_unacceptable(seg, payload, stats) {
+            return SegmentAction::SendAck;
         }
         if seg.flags.contains(TcpFlags::ACK) {
             stats.dropped_bad_ack += 1;
@@ -508,11 +531,10 @@ impl TcpConnection {
         if seg.flags.contains(TcpFlags::ACK) && ack_valid(seg.ack, self.snd_una, self.snd_nxt) {
             self.apply_ack(seg.ack);
         }
-        if (!payload.is_empty() || seg.flags.contains(TcpFlags::FIN)) && seg.seq != self.rcv_nxt {
-            stats.dropped_out_of_order += 1;
+        if self.is_unacceptable(seg, payload, stats) {
             return SegmentAction::SendAck;
         }
-        if !payload.is_empty() && seg.seq == self.rcv_nxt {
+        if !payload.is_empty() {
             let take = payload.len().min(self.recv_buf.free_space());
             self.recv_buf.push(payload.get(..take).unwrap_or(&[]));
             self.rcv_nxt = self.rcv_nxt.wrapping_add(take as u32);
@@ -703,6 +725,10 @@ fn ack_valid(ack: u32, snd_una: u32, snd_nxt: u32) -> bool {
     seq_le(snd_una, ack) && seq_le(ack, snd_nxt)
 }
 
+fn occupies_sequence_space(seg: &TcpSegment, payload: &[u8]) -> bool {
+    !payload.is_empty() || seg.flags.contains(TcpFlags::SYN) || seg.flags.contains(TcpFlags::FIN)
+}
+
 fn seq_acceptable(seq: u32, rcv_nxt: u32) -> bool {
     seq == rcv_nxt
 }
@@ -715,4 +741,165 @@ pub fn write_tcp_to_buf(
     out: &mut [u8],
 ) -> Result<usize, NetworkError> {
     write_segment(src_ip, dst_ip, seg, payload, out).map_err(|_| NetworkError::Protocol)
+}
+
+#[cfg(test)]
+mod close_state_tests {
+    use super::*;
+
+    const ISS: u32 = 1_000;
+    const IRS: u32 = 5_000;
+
+    fn established() -> TcpConnection {
+        let local = SocketAddrV4::new(Ipv4Addr::new([10, 0, 2, 15]), 50_000);
+        let remote = SocketAddrV4::new(Ipv4Addr::new([10, 0, 2, 2]), 4001);
+        let mut conn = TcpConnection::new(TrustedCaller::new(1, 1, 1), local, remote, ISS);
+        let mut stats = TcpStats::default();
+        let syn_ack = peer_segment(IRS, ISS + 1, TcpFlags::SYN.union(TcpFlags::ACK));
+        assert!(matches!(
+            conn.on_segment(&syn_ack, &[], &mut stats),
+            SegmentAction::SendAck
+        ));
+        assert_eq!(conn.state, TcpState::Established);
+        conn
+    }
+
+    /// Mirrors `TcpTransport::send_fin_at`: our FIN consumes one sequence number and
+    /// stays in flight (retransmit armed) until the peer acknowledges it.
+    fn send_our_fin(conn: &mut TcpConnection) {
+        assert!(conn.start_close());
+        let seq = conn.snd_nxt;
+        conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
+        conn.record_unacked(seq, &[], false, true, 0);
+    }
+
+    fn peer_segment(seq: u32, ack: u32, flags: TcpFlags) -> TcpSegment {
+        TcpSegment {
+            src_port: 4001,
+            dst_port: 50_000,
+            seq,
+            ack,
+            data_offset: 5,
+            flags,
+            window: 4096,
+            checksum: 0,
+            urgent: 0,
+            mss_option: None,
+        }
+    }
+
+    fn fin_ack(seq: u32, ack: u32) -> TcpSegment {
+        peer_segment(seq, ack, TcpFlags::FIN.union(TcpFlags::ACK))
+    }
+
+    #[test]
+    fn simultaneous_close_goes_through_closing_to_time_wait() {
+        let mut conn = established();
+        let mut stats = TcpStats::default();
+        send_our_fin(&mut conn);
+        assert_eq!(conn.state, TcpState::FinWait1);
+
+        // Peer FIN crosses ours: it does not yet acknowledge our FIN.
+        let action = conn.on_segment(&fin_ack(IRS + 1, ISS + 1), &[], &mut stats);
+        assert!(matches!(action, SegmentAction::SendAck));
+        assert_eq!(conn.state, TcpState::Closing);
+        assert_eq!(conn.rcv_nxt, IRS + 2);
+
+        let ack = peer_segment(IRS + 2, ISS + 2, TcpFlags::ACK);
+        conn.on_segment(&ack, &[], &mut stats);
+        assert_eq!(conn.state, TcpState::TimeWait);
+    }
+
+    #[test]
+    fn fin_acking_our_fin_in_fin_wait1_enters_time_wait() {
+        let mut conn = established();
+        let mut stats = TcpStats::default();
+        send_our_fin(&mut conn);
+
+        let action = conn.on_segment(&fin_ack(IRS + 1, ISS + 2), &[], &mut stats);
+        assert!(matches!(action, SegmentAction::SendAck));
+        assert_eq!(conn.state, TcpState::TimeWait);
+    }
+
+    #[test]
+    fn ack_of_our_fin_in_fin_wait1_enters_fin_wait2() {
+        let mut conn = established();
+        let mut stats = TcpStats::default();
+        send_our_fin(&mut conn);
+
+        let ack = peer_segment(IRS + 1, ISS + 2, TcpFlags::ACK);
+        conn.on_segment(&ack, &[], &mut stats);
+        assert_eq!(conn.state, TcpState::FinWait2);
+    }
+
+    #[test]
+    fn out_of_sequence_fin_in_fin_wait2_is_acknowledged_not_consumed() {
+        let mut conn = established();
+        let mut stats = TcpStats::default();
+        send_our_fin(&mut conn);
+        conn.on_segment(
+            &peer_segment(IRS + 1, ISS + 2, TcpFlags::ACK),
+            &[],
+            &mut stats,
+        );
+        assert_eq!(conn.state, TcpState::FinWait2);
+
+        let action = conn.on_segment(&fin_ack(IRS + 9, ISS + 2), &[], &mut stats);
+        assert!(matches!(action, SegmentAction::SendAck));
+        assert_eq!(conn.state, TcpState::FinWait2);
+        assert_eq!(conn.rcv_nxt, IRS + 1);
+        assert_eq!(stats.dropped_out_of_order, 1);
+
+        let action = conn.on_segment(&fin_ack(IRS + 1, ISS + 2), &[], &mut stats);
+        assert!(matches!(action, SegmentAction::SendAck));
+        assert_eq!(conn.state, TcpState::TimeWait);
+    }
+
+    #[test]
+    fn retransmitted_fin_is_reacknowledged_in_closing() {
+        let mut conn = established();
+        let mut stats = TcpStats::default();
+        send_our_fin(&mut conn);
+        conn.on_segment(&fin_ack(IRS + 1, ISS + 1), &[], &mut stats);
+        assert_eq!(conn.state, TcpState::Closing);
+
+        let action = conn.on_segment(&fin_ack(IRS + 1, ISS + 1), &[], &mut stats);
+        assert!(matches!(action, SegmentAction::SendAck));
+        assert_eq!(conn.state, TcpState::Closing);
+        assert_eq!(conn.rcv_nxt, IRS + 2);
+    }
+
+    #[test]
+    fn retransmitted_fin_is_reacknowledged_in_time_wait() {
+        let mut conn = established();
+        let mut stats = TcpStats::default();
+        send_our_fin(&mut conn);
+        conn.on_segment(&fin_ack(IRS + 1, ISS + 2), &[], &mut stats);
+        assert_eq!(conn.state, TcpState::TimeWait);
+
+        let action = conn.on_segment(&fin_ack(IRS + 1, ISS + 2), &[], &mut stats);
+        assert!(matches!(action, SegmentAction::SendAck));
+        assert_eq!(conn.state, TcpState::TimeWait);
+        assert_eq!(conn.rcv_nxt, IRS + 2);
+    }
+
+    #[test]
+    fn retransmitted_fin_is_reacknowledged_in_last_ack() {
+        let mut conn = established();
+        let mut stats = TcpStats::default();
+        conn.on_segment(&fin_ack(IRS + 1, ISS + 1), &[], &mut stats);
+        assert_eq!(conn.state, TcpState::CloseWait);
+        send_our_fin(&mut conn);
+        assert_eq!(conn.state, TcpState::LastAck);
+
+        let action = conn.on_segment(&fin_ack(IRS + 1, ISS + 1), &[], &mut stats);
+        assert!(matches!(action, SegmentAction::SendAck));
+        assert_eq!(conn.state, TcpState::LastAck);
+
+        let ack = peer_segment(IRS + 2, ISS + 2, TcpFlags::ACK);
+        assert!(matches!(
+            conn.on_segment(&ack, &[], &mut stats),
+            SegmentAction::Closed
+        ));
+    }
 }

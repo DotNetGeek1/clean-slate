@@ -253,6 +253,9 @@ impl NodeTable {
         let mut norm = [0u8; LINUX_PATH_MAX];
         let len = normalize_path(path, &mut norm)?;
         let norm = &norm[..len];
+        if norm == b"/" {
+            return Err(EEXIST);
+        }
         if !norm.starts_with(b"/tmp/") && norm != b"/tmp" {
             return Err(EROFS);
         }
@@ -461,6 +464,9 @@ impl NodeTable {
             if count >= out.len() {
                 break;
             }
+            if index as u16 == dir.index {
+                continue;
+            }
             let node = &self.nodes[index];
             if !node.live || node.parent != dir.index {
                 continue;
@@ -549,6 +555,17 @@ impl NodeTable {
         image: &Image<'_>,
     ) -> Result<[u8; LINUX_PATH_MAX], LinuxErrno> {
         self.path_of(index, image)
+    }
+
+    /// Final path component for `getdents64` (not the full normalized path).
+    pub(crate) fn dirent_name(&self, id: NodeId) -> Result<&[u8], LinuxErrno> {
+        self.check_node(id)?;
+        let node = &self.nodes[id.index as usize];
+        let len = node.name_len as usize;
+        if len == 0 || (len == 1 && node.name[0] == b'/') {
+            return Err(clean_slate_linux_abi::EINVAL);
+        }
+        Ok(&node.name[..len])
     }
 
     fn path_of(&self, index: u16, _image: &Image<'_>) -> Result<[u8; LINUX_PATH_MAX], LinuxErrno> {

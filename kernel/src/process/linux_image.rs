@@ -86,6 +86,10 @@ const PAGE_DIRECTORY_SPAN: u64 = PAGE_TABLE_SPAN * 512;
 /// headroom for a data page. M9 may grow this once the mapping bound is raised
 /// for Linux images; do not bump the bound just to absorb a bigger stack.
 pub(crate) const LINUX_STACK_PAGES: u64 = 2;
+/// Mapped stack pages for conventional low-VA `execve` (BusyBox nslookup uses
+/// ~0x2838-byte frames — see `fixtures/busybox/frozen/traces/nslookup-fixture.strace`).
+pub(crate) const LINUX_CONVENTIONAL_EXEC_STACK_PAGES: u64 = 8;
+const _: () = assert!(LINUX_CONVENTIONAL_EXEC_STACK_PAGES <= 8);
 /// Exclusive top of the mapped stack. The last page of the slot is deliberately
 /// left unmapped so the stack never abuts the slot boundary.
 pub(crate) const LINUX_STACK_TOP: u64 = LINUX_USER_WINDOW_END - PAGE_SIZE;
@@ -147,6 +151,7 @@ pub(crate) const LINUX_M8_LOAD_POLICY: LoadPlanPolicy = LoadPlanPolicy {
     feature = "m9-linux-proc-self-test",
     feature = "m9-linux-fs-self-test",
     feature = "m9-linux-runtime-self-test",
+    feature = "m9-userspace-self-test",
     test
 ))]
 pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
@@ -1302,6 +1307,17 @@ pub(crate) fn register_linux_process(
                 .ok_or(LinuxImageError::Registry(
                     "linux launch: inserted process had no instance generation",
                 ))?;
+        // Every launched Linux process owns a proc-table slot; exit publication
+        // treats a missing slot as a kernel invariant violation.
+        if let Err(message) = crate::process::linux_proc::table::register_launched_linux_process(
+            pid,
+            instance_generation,
+        ) {
+            return Err(match rollback_registered_process(pid, allocator) {
+                Ok(()) => LinuxImageError::Registry(message),
+                Err(rollback) => LinuxImageError::Rollback(rollback),
+            });
+        }
         if let Err(message) = scheduler_mut().configure_thread(
             scheduler_slot,
             tid,
@@ -1311,6 +1327,12 @@ pub(crate) fn register_linux_process(
             saved_stack_pointer,
             image.entry,
         ) {
+            crate::process::linux_proc::table::table_mut().retire_slot(
+                crate::process::linux_proc::table::ProcId {
+                    pid,
+                    generation: instance_generation,
+                },
+            );
             return Err(match rollback_registered_process(pid, allocator) {
                 Ok(()) => LinuxImageError::Scheduler(message),
                 Err(rollback) => LinuxImageError::Rollback(rollback),

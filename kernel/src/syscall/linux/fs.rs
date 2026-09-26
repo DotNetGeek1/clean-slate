@@ -1,19 +1,19 @@
 //! Linux filesystem/path syscall family (#101).
 
 use super::table::{LinuxSyscallContext, LinuxSyscallHandler};
-use super::user_copy::copy_user_bytes;
+use super::user_copy::copy_user_path_cstring;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::process::linux_fd::{
     self,
     open_description::{DescriptorKind, DirHandleRef, FileHandleRef, OpenAccess, OpenStatus},
 };
 use crate::process::linux_fs::namespace::{check_write_allowed, NodeId};
-use crate::process::linux_fs::path::{copy_bounded_path, LINUX_PATH_MAX};
+use crate::process::linux_fs::path::{resolve_path, LINUX_PATH_MAX};
 use crate::process::linux_fs::table_mut;
 use crate::process::linux_rootfs;
 use clean_slate_linux_abi::{
     encode_dirent64, encode_stat144, LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EFAULT,
-    EINVAL, EISDIR, ENOTDIR, O_CREAT, O_DIRECTORY, O_RDONLY, O_TRUNC, O_WRONLY, SYS_GETCWD,
+    EINVAL, EISDIR, ENOTDIR, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SYS_GETCWD,
     SYS_GETDENTS64, SYS_LSTAT, SYS_MKDIR, SYS_OPEN, SYS_STAT,
 };
 
@@ -45,14 +45,16 @@ pub(crate) fn handle_sys_open(
     let flags = request.args[1] as u32;
     let _mode = request.args[2];
     let path = copy_path_from_user(path_ptr)?;
-    check_write_allowed(&path, flags)?;
+    check_write_allowed(path.as_bytes(), flags)?;
     let image = image();
     let table = table_mut();
-    let node = if (flags & O_CREAT) != 0 && (flags & O_WRONLY) != 0 {
-        table.open_create_file(&path, (flags & O_TRUNC) != 0, &image)?
+    let access = flags & 0b11;
+    let may_create = (flags & O_CREAT) != 0 && (access == O_WRONLY || access == O_RDWR);
+    let node = if may_create {
+        table.open_create_file(path.as_bytes(), (flags & O_TRUNC) != 0, &image)?
     } else {
         let follow = (flags & O_DIRECTORY) == 0;
-        table.lookup_path(&path, &image, follow)?
+        table.lookup_path(path.as_bytes(), &image, follow)?
     };
     let kind = table.node_kind(node)?;
     let access = match flags & 0b11 {
@@ -100,7 +102,7 @@ pub(crate) fn handle_sys_stat(
     let stat_ptr = request.args[1];
     let path = copy_path_from_user(path_ptr)?;
     let image = image();
-    let node = table_mut().lookup_path(&path, &image, true)?;
+    let node = table_mut().lookup_path(path.as_bytes(), &image, true)?;
     write_stat(stat_ptr, node, false)?;
     Ok(0)
 }
@@ -114,7 +116,7 @@ pub(crate) fn handle_sys_lstat(
     let stat_ptr = request.args[1];
     let path = copy_path_from_user(path_ptr)?;
     let image = image();
-    let node = table_mut().lookup_path(&path, &image, false)?;
+    let node = table_mut().lookup_path(path.as_bytes(), &image, false)?;
     write_stat(stat_ptr, node, true)?;
     Ok(0)
 }
@@ -141,20 +143,18 @@ pub(crate) fn handle_sys_getcwd(
         core::ptr::copy_nonoverlapping(cwd.as_ptr(), dst, cwd.len());
         *dst.add(cwd.len()) = 0;
     }
-    Ok(buf)
+    Ok(cwd.len() as u64 + 1)
 }
 
 pub(crate) fn handle_sys_mkdir(
     request: &LinuxSyscallRequest,
-    ctx: &mut LinuxSyscallContext<'_>,
+    _ctx: &mut LinuxSyscallContext<'_>,
 ) -> LinuxSyscallResult {
-    let _ = ctx;
     let path_ptr = request.args[0];
     let _mode = request.args[1];
     let path = copy_path_from_user(path_ptr)?;
     let image = image();
-    table_mut().mkdir(&path, &image)?;
-    Ok(0)
+    table_mut().mkdir(path.as_bytes(), &image).map(|()| 0)
 }
 
 pub(crate) fn handle_sys_getdents64(
@@ -197,8 +197,7 @@ pub(crate) fn handle_sys_getdents64(
     let mut scratch = [0u8; 256];
     while (cursor as usize) + offset < child_count {
         let (node, dt) = children[(cursor as usize) + offset];
-        let path_buf = table_mut().path_of_node(node.index, &image)?;
-        let name = final_name(&path_buf)?;
+        let name = table_mut().dirent_name(node)?;
         let n = encode_dirent64(&mut scratch, (node.index as u64) + 1, 0, dt, name);
         if n == 0 {
             if wrote == 0 {
@@ -244,37 +243,24 @@ fn write_stat(stat_ptr: u64, node: NodeId, lstat: bool) -> Result<(), LinuxErrno
     Ok(())
 }
 
-fn copy_path_from_user(ptr: u64) -> Result<[u8; LINUX_PATH_MAX], LinuxErrno> {
-    let mut scratch = [0u8; LINUX_PATH_MAX];
-    let mut chunk = [0u8; 64];
-    let mut len = 0usize;
-    while len < LINUX_PATH_MAX {
-        let want = (LINUX_PATH_MAX - len).min(64);
-        copy_user_bytes(ptr + len as u64, want as u64, &mut chunk)?;
-        for byte in &chunk[..want] {
-            if *byte == 0 {
-                return copy_bounded_path(&scratch[..len]);
-            }
-            scratch[len] = *byte;
-            len += 1;
-            if len >= LINUX_PATH_MAX {
-                return Err(clean_slate_linux_abi::ENAMETOOLONG);
-            }
-        }
-    }
-    Err(clean_slate_linux_abi::ENAMETOOLONG)
+struct UserPathBuf {
+    storage: [u8; LINUX_PATH_MAX],
+    len: usize,
 }
 
-fn final_name(path: &[u8]) -> Result<&[u8], LinuxErrno> {
-    let mut p = path;
-    while p.ends_with(&[0]) {
-        p = &p[..p.len() - 1];
+impl UserPathBuf {
+    fn as_bytes(&self) -> &[u8] {
+        &self.storage[..self.len]
     }
-    if p.is_empty() || p == b"/" {
-        return Err(EINVAL);
-    }
-    match p.rsplit(|&b| b == b'/').next() {
-        Some(name) if !name.is_empty() => Ok(name),
-        _ => Err(EINVAL),
-    }
+}
+
+fn copy_path_from_user(ptr: u64) -> Result<UserPathBuf, LinuxErrno> {
+    let mut scratch = [0u8; LINUX_PATH_MAX];
+    let len = copy_user_path_cstring(ptr, &mut scratch)?;
+    let mut storage = [0u8; LINUX_PATH_MAX];
+    let norm_len = resolve_path(b"/", &scratch[..len], &mut storage)?;
+    Ok(UserPathBuf {
+        storage,
+        len: norm_len,
+    })
 }

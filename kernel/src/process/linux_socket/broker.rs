@@ -40,7 +40,7 @@ pub(crate) fn network_client_handle(holder: HolderId) -> Option<u64> {
     })
 }
 
-fn bridge_err(e: NetBridgeError) -> LinuxErrno {
+pub(super) fn bridge_err(e: NetBridgeError) -> LinuxErrno {
     use clean_slate_linux_abi::{EACCES, EINVAL, ENFILE};
     match e {
         NetBridgeError::QueueFull => ENFILE,

@@ -10,23 +10,26 @@ use super::user_copy::{copy_user_bytes, LINUX_USER_COPY_MAX_BYTES};
 use crate::interrupt::timer::kernel_ticks;
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::process::linux_fd::{self, readiness::Readiness};
-use crate::process::linux_image::{LinuxImageLayout, LINUX_STACK_PAGES};
 use crate::process::linux_mem;
 use crate::process::linux_signal;
 use crate::sched::wait::Deadline;
 use crate::time::{
     monotonic_deadline_from_millis, monotonic_deadline_from_timespec, monotonic_ns,
-    timespec_from_remaining_ns,
+    timespec_from_monotonic_ns, timespec_from_remaining_ns,
 };
 #[cfg(feature = "m9-linux-runtime-self-test")]
 use crate::time::{sleep_budget_ns_from_millis, sleep_budget_ns_from_timespec};
 use clean_slate_linux_abi::{
     decode_pollfd, decode_sigaction, decode_timespec, encode_pollfd, encode_sigaction, LinuxErrno,
-    LinuxSyscallRequest, LinuxSyscallResult, PollFd, Sigaction, EFAULT, EINVAL, ENOTTY, POLLERR,
-    POLLHUP, POLLIN, POLLNVAL, POLLOUT, SYS_ARCH_PRCTL, SYS_BRK, SYS_GETPID, SYS_IOCTL, SYS_MMAP,
-    SYS_MUNMAP, SYS_NANOSLEEP, SYS_POLL, SYS_RT_SIGACTION, SYS_RT_SIGPROCMASK, SYS_SET_TID_ADDRESS,
-    SYS_UNAME, TCGETS, TIOCGWINSZ,
+    LinuxSyscallRequest, LinuxSyscallResult, PollFd, Sigaction, CLOCK_MONOTONIC, EFAULT, EINVAL,
+    ENOTTY, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, SYS_ARCH_PRCTL, SYS_BRK,
+    SYS_CLOCK_GETTIME, SYS_GETEUID, SYS_GETPID, SYS_IOCTL, SYS_MMAP, SYS_MUNMAP, SYS_NANOSLEEP,
+    SYS_POLL, SYS_RT_SIGACTION, SYS_RT_SIGPROCMASK, SYS_SET_TID_ADDRESS, SYS_UNAME, TCGETS,
+    TIOCGWINSZ,
 };
+
+/// Single-user M9 fixture personality: effective uid is 0 (matches auxv `AT_EUID`).
+const LINUX_FIXTURE_UID: u64 = 0;
 
 const USER_COPY_POLL: usize = 8;
 
@@ -34,7 +37,9 @@ pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
     match nr {
         SYS_ARCH_PRCTL => Some(handle_sys_arch_prctl),
         SYS_BRK => Some(handle_sys_brk),
+        SYS_CLOCK_GETTIME => Some(handle_sys_clock_gettime),
         SYS_GETPID => Some(handle_sys_getpid),
+        SYS_GETEUID => Some(handle_sys_geteuid),
         SYS_IOCTL => Some(handle_sys_ioctl),
         SYS_MMAP => Some(handle_sys_mmap),
         SYS_MUNMAP => Some(handle_sys_munmap),
@@ -74,6 +79,30 @@ fn handle_sys_getpid(
     Ok(ctx.pid)
 }
 
+fn handle_sys_geteuid(
+    _request: &LinuxSyscallRequest,
+    _ctx: &mut LinuxSyscallContext<'_>,
+) -> LinuxSyscallResult {
+    Ok(LINUX_FIXTURE_UID)
+}
+
+/// Only `CLOCK_MONOTONIC` (calibrated TSC) is backed; there is no wall clock, so every other
+/// clock id fails closed with `EINVAL`.
+fn handle_sys_clock_gettime(
+    request: &LinuxSyscallRequest,
+    _ctx: &mut LinuxSyscallContext<'_>,
+) -> LinuxSyscallResult {
+    if request.args[0] != CLOCK_MONOTONIC {
+        return Err(EINVAL);
+    }
+    let ts = timespec_from_monotonic_ns(monotonic_ns());
+    let mut bytes = [0u8; 16];
+    bytes[0..8].copy_from_slice(&ts.tv_sec.to_le_bytes());
+    bytes[8..16].copy_from_slice(&ts.tv_nsec.to_le_bytes());
+    write_user(request.args[1], &bytes)?;
+    Ok(0)
+}
+
 fn handle_sys_ioctl(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
@@ -90,8 +119,6 @@ fn handle_sys_mmap(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
 ) -> LinuxSyscallResult {
-    let layout = LinuxImageLayout::conventional_with_stack(0x400000, LINUX_STACK_PAGES, 0)
-        .map_err(|_| EINVAL)?;
     linux_mem::sys_mmap(
         request.args[0],
         request.args[1],
@@ -101,7 +128,6 @@ fn handle_sys_mmap(
         request.args[5],
         ctx.pid,
         ctx.instance_generation,
-        &layout,
     )
 }
 
@@ -393,13 +419,29 @@ fn fd_readiness(
     fd: i32,
     events: i16,
 ) -> Result<i16, LinuxErrno> {
+    // Linux ignores negative fds in poll(2); do not set revents (BusyBox nslookup
+    // uses placeholder nfds slots with fd=-1 alongside the real UDP socket).
     if fd < 0 {
-        return Ok(POLLNVAL);
+        return Ok(0);
     }
     if linux_fd::ensure_open_fd(ctx.pid, ctx.instance_generation, fd as u64).is_err() {
         return Ok(POLLNVAL);
     }
-    let readiness = console_readiness();
+    if (events & POLLIN) != 0 {
+        let _ = crate::process::linux_socket::refresh_readiness_for_fd(ctx, fd as u64);
+    }
+    let readiness =
+        match linux_fd::open_description_kind(ctx.pid, ctx.instance_generation, fd as u64) {
+            Ok(crate::process::linux_fd::open_description::DescriptorKind::Socket(socket_ref)) => {
+                crate::process::linux_socket::readiness_for(
+                    crate::process::linux_socket::socket_ref_to_id(socket_ref),
+                )
+            }
+            Ok(crate::process::linux_fd::open_description::DescriptorKind::Console(_)) => {
+                console_readiness()
+            }
+            _ => Readiness::default(),
+        };
     let mut revents = 0i16;
     if (events & POLLIN) != 0 && readiness.readable {
         revents |= POLLIN;
