@@ -289,6 +289,10 @@ pub(crate) fn after_linux_exit(
     match unsafe { M9_PHASE } {
         Phase::MainProbe if pid == M9_MAIN_PROBE_PID.load(Ordering::Relaxed) => {
             if teardown.exit_status != 0 {
+                kernel_log_fmt(format_args!(
+                    "[M9.H] probe exit status={}\n",
+                    teardown.exit_status
+                ));
                 fatal_kernel_error("m9 linux fs probe non-zero exit");
             }
             // The namespace keeps `/tmp` entries and resolved rootfs nodes after the probe

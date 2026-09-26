@@ -143,7 +143,7 @@ pub(crate) fn handle_sys_getcwd(
         core::ptr::copy_nonoverlapping(cwd.as_ptr(), dst, cwd.len());
         *dst.add(cwd.len()) = 0;
     }
-    Ok(buf)
+    Ok(cwd.len() as u64 + 1)
 }
 
 pub(crate) fn handle_sys_mkdir(

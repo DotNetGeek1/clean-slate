@@ -144,13 +144,16 @@ const M9_LINUX_PROC_ACCEPTANCE_MARKERS: [&str; 3] =
 const M9_LINUX_PROC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M9_ROOTFS_ACCEPTANCE_MARKERS: [&str; 2] = ["[RFS ] rootfs entries=", "[M9.K] PASS"];
 const M9_ROOTFS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 11] = [
+const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 14] = [
     "[M9.H] creating",
-    "[M9.H] getcwd=/",
-    "[M9.H] hostname=m9-fixture",
+    "[M9.H] getcwd=/\n",
+    "[M9.H] hostname=m9-fixture\n",
     "[M9.H] ls /bin ok",
     "[M9.H] stat ok",
+    "[STOR] write object=",
+    "[M9.H] tmp read=test\n",
     "[M9.H] tmp write/read ok",
+    "[STOR] write object=",
     "[M9.H] big write/read ok",
     "[M9.H] negative cases ok",
     "[M9.H] pool_before",
@@ -1257,6 +1260,15 @@ fn run_m9_rootfs_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m9_linux_fs_acceptance() -> Result<(), XtaskError> {
+    let probe_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("fixtures")
+        .join("linux-fs-probe");
+    m8_fixture::verify_pinned_sha256(
+        &probe_dir.join("linux-fs-probe-x86_64"),
+        &probe_dir.join("linux-fs-probe-x86_64.sha256"),
+    )
+    .map_err(XtaskError::InvalidCommand)?;
     reset_m5_data_disk_image()?;
     build_m6_fixture_userspace(true)?;
     build_storage_userspace(true)?;
