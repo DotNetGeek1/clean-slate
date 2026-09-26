@@ -310,7 +310,6 @@ impl LinuxProcessTable {
             .iter()
             .position(|slot| slot.live && slot.id == id)
     }
-
 }
 
 const PROC_TABLE_INVARIANT_LOG_LIMIT: usize = 8;
@@ -320,17 +319,15 @@ static PROC_TABLE_INVARIANT_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
 
 fn log_proc_table_invariant(reason: &str, exitee: ProcId, parent: ProcId) {
     PROC_TABLE_INVARIANT_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
-    if PROC_TABLE_INVARIANT_LOG_COUNT.fetch_add(1, Ordering::Relaxed) >= PROC_TABLE_INVARIANT_LOG_LIMIT
+    if PROC_TABLE_INVARIANT_LOG_COUNT.fetch_add(1, Ordering::Relaxed)
+        >= PROC_TABLE_INVARIANT_LOG_LIMIT
     {
         return;
     }
     use crate::diagnostics::log::kernel_log_fmt;
     kernel_log_fmt(format_args!(
         "[LNX ] proc-table invariant reason={reason} exitee={} gen={} parent={} pgen={}\n",
-        exitee.pid,
-        exitee.generation.0,
-        parent.pid,
-        parent.generation.0,
+        exitee.pid, exitee.generation.0, parent.pid, parent.generation.0,
     ));
 }
 
@@ -480,7 +477,9 @@ mod tests {
         table.register(parent, init).unwrap();
         table.register(child, parent).unwrap();
         table.publish_exit(child, exit_status_word(0, Some(11)));
-        let found = table.find_zombie_child(parent, child.pid as i64).expect("zombie");
+        let found = table
+            .find_zombie_child(parent, child.pid as i64)
+            .expect("zombie");
         assert_eq!(found.1, 11);
         assert!(clean_slate_linux_abi::w_ifsignalled(found.1));
     }

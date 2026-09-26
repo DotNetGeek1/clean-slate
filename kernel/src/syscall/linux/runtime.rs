@@ -391,16 +391,6 @@ fn poll_wait_with_timeout(
             return Ok(0);
         }
     }
-    #[cfg(feature = "m9-userspace-self-test")]
-    {
-        use core::sync::atomic::{AtomicU8, Ordering};
-        static POLL_BLOCK_DIAG: AtomicU8 = AtomicU8::new(0);
-        if nfds > 0 && POLL_BLOCK_DIAG.load(Ordering::Relaxed) < 4 {
-            POLL_BLOCK_DIAG.fetch_add(1, Ordering::Relaxed);
-            crate::process::linux_socket::log_udp_poll_diag(ctx.pid);
-            crate::service::net_bridge::net_bridge_mut().log_slot_diag();
-        }
-    }
     let result = block_linux_syscall(
         request,
         ctx,
@@ -440,21 +430,18 @@ fn fd_readiness(
     if (events & POLLIN) != 0 {
         let _ = crate::process::linux_socket::refresh_readiness_for_fd(ctx, fd as u64);
     }
-    let readiness = match linux_fd::open_description_kind(
-        ctx.pid,
-        ctx.instance_generation,
-        fd as u64,
-    ) {
-        Ok(crate::process::linux_fd::open_description::DescriptorKind::Socket(socket_ref)) => {
-            crate::process::linux_socket::readiness_for(crate::process::linux_socket::socket_ref_to_id(
-                socket_ref,
-            ))
-        }
-        Ok(crate::process::linux_fd::open_description::DescriptorKind::Console(_)) => {
-            console_readiness()
-        }
-        _ => Readiness::default(),
-    };
+    let readiness =
+        match linux_fd::open_description_kind(ctx.pid, ctx.instance_generation, fd as u64) {
+            Ok(crate::process::linux_fd::open_description::DescriptorKind::Socket(socket_ref)) => {
+                crate::process::linux_socket::readiness_for(
+                    crate::process::linux_socket::socket_ref_to_id(socket_ref),
+                )
+            }
+            Ok(crate::process::linux_fd::open_description::DescriptorKind::Console(_)) => {
+                console_readiness()
+            }
+            _ => Readiness::default(),
+        };
     let mut revents = 0i16;
     if (events & POLLIN) != 0 && readiness.readable {
         revents |= POLLIN;

@@ -300,10 +300,9 @@ mod tests {
         let mut ipc = IpcEndpointTable::new();
         ipc.grant_console_capability_for_pid(pid)
             .expect("console grant");
-        let sink = crate::process::linux_fd::console_sink_ref_from_table(&ipc)
-            .expect("console sink");
-        fds.install(pid, generation, sink)
-            .expect("install stdio");
+        let sink =
+            crate::process::linux_fd::console_sink_ref_from_table(&ipc).expect("console sink");
+        fds.install(pid, generation, sink).expect("install stdio");
         (fds, ipc)
     }
 
@@ -414,10 +413,9 @@ mod tests {
         let mut ipc = IpcEndpointTable::new();
         ipc.grant_console_capability_for_pid(50)
             .expect("grant to other pid");
-        let sink = crate::process::linux_fd::console_sink_ref_from_table(&ipc)
-            .expect("console sink");
-        fds.install(51, generation, sink)
-            .expect("install");
+        let sink =
+            crate::process::linux_fd::console_sink_ref_from_table(&ipc).expect("console sink");
+        fds.install(51, generation, sink).expect("install");
         assert_eq!(
             write_with(
                 &mut fds,

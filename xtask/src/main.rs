@@ -3174,9 +3174,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m9-linux-fs" || cmd == "m9-linux-fs" || cmd == "m9.101" => {
             ParsedCommand::TestM9LinuxFs
         }
-        Some(cmd)
-            if cmd == "test-m9-userspace" || cmd == "m9-userspace" || cmd == "m9.107" =>
-        {
+        Some(cmd) if cmd == "test-m9-userspace" || cmd == "m9-userspace" || cmd == "m9.107" => {
             ParsedCommand::TestM9Userspace
         }
         Some(cmd) if cmd == "test-m2" => ParsedCommand::TestM2,

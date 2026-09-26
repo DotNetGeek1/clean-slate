@@ -56,7 +56,12 @@ pub(crate) fn read_file_fd(
             crate::process::linux_fs::object_backend::tmp_file_read_local(object_id, start, buf)
         {
             if take > 0 || tmp_file_by_len(object_id) <= start {
-                linux_fd::set_open_description_offset(pid, generation, fd, desc.offset + take as u64)?;
+                linux_fd::set_open_description_offset(
+                    pid,
+                    generation,
+                    fd,
+                    desc.offset + take as u64,
+                )?;
                 return Ok(take as u64);
             }
         }

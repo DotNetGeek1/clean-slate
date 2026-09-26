@@ -199,10 +199,7 @@ pub(crate) fn holder_has_resource_rights(
                 return false;
             };
             cursor = next_cursor;
-            if table
-                .authorize(holder, handle, resource, required)
-                .is_ok()
-            {
+            if table.authorize(holder, handle, resource, required).is_ok() {
                 return true;
             }
         }

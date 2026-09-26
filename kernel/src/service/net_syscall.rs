@@ -18,13 +18,9 @@ use clean_slate_service_fixtures::{
     NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY,
     NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
     NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS,
-    NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_DIAG_DRAIN_MAX,
-    NETWORK_SERVICE_DIAG_LINE_BYTES,
 };
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
-#[cfg(feature = "m9-userspace-self-test")]
-use crate::diagnostics::log::kernel_log_fmt;
 use crate::capability::network::{authorize_network_op, NetworkOp};
 use crate::capability::with_capability_space;
 use crate::interrupt::timer::kernel_ticks;
@@ -172,66 +168,6 @@ pub(crate) fn handle_syscall_network_request(frame: &mut SyscallContext) {
         _ => frame.rax = SYSCALL_EINVAL,
     }
 }
-
-#[cfg(feature = "m9-userspace-self-test")]
-fn drain_network_service_bootstrap_diag() {
-    use crate::mm::address_space::activate_address_space_root;
-    use crate::mm::paging::current_root_frame_address;
-    use crate::process::userspace_process_root_frame;
-    use clean_slate_service_fixtures::NetworkServiceBootstrap;
-
-    static BOOTSTRAP_DIAG_TOTAL: core::sync::atomic::AtomicU32 =
-        core::sync::atomic::AtomicU32::new(0);
-
-    const BOOTSTRAP_DIAG_BOOT_MAX: u32 = 256;
-
-    let Some(pid) = live_network_service_pid() else {
-        return;
-    };
-    let service_root = match userspace_process_root_frame(pid) {
-        Ok(root) => root,
-        Err(_) => return,
-    };
-    let kernel_root = current_root_frame_address();
-    activate_address_space_root(service_root);
-    let bootstrap_ptr = NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *mut NetworkServiceBootstrap;
-    for _ in 0..NETWORK_SERVICE_DIAG_DRAIN_MAX {
-        let len = unsafe {
-            core::ptr::addr_of_mut!((*bootstrap_ptr).diag_line_len).read_volatile() as usize
-        };
-        if len == 0 || len > NETWORK_SERVICE_DIAG_LINE_BYTES {
-            if len > NETWORK_SERVICE_DIAG_LINE_BYTES {
-                unsafe {
-                    core::ptr::addr_of_mut!((*bootstrap_ptr).diag_line_len).write_volatile(0);
-                }
-            }
-            break;
-        }
-        if BOOTSTRAP_DIAG_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-            >= BOOTSTRAP_DIAG_BOOT_MAX
-        {
-            unsafe {
-                core::ptr::addr_of_mut!((*bootstrap_ptr).diag_line_len).write_volatile(0);
-            }
-            break;
-        }
-        let mut buf = [0u8; NETWORK_SERVICE_DIAG_LINE_BYTES];
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                core::ptr::addr_of!((*bootstrap_ptr).diag_line) as *const u8,
-                buf.as_mut_ptr(),
-                len,
-            );
-            core::ptr::addr_of_mut!((*bootstrap_ptr).diag_line_len).write_volatile(0);
-        }
-        let line = core::str::from_utf8(&buf[..len]).unwrap_or("<non-utf8>");
-        kernel_log_fmt(format_args!("[M9.U] {line}\n"));
-    }
-    activate_address_space_root(kernel_root);
-}
-
-#[cfg(not(feature = "m9-userspace-self-test"))]
-fn drain_network_service_bootstrap_diag() {}
 
 fn handle_submit(frame: &mut SyscallContext) {
     if validate_user_pointer_range(frame.rdx, NETWORK_REQUEST_BYTES as u64).is_err() {
@@ -392,7 +328,6 @@ fn handle_service_next(frame: &mut SyscallContext) {
         frame.rax = SYSCALL_EACCES;
         return;
     }
-    drain_network_service_bootstrap_diag();
     if let Err(reason) = authorize_network_op(holder, frame.rsi, NetworkOp::RawDevice, None) {
         frame.rax = denial_status(reason);
         return;
@@ -485,12 +420,10 @@ fn handle_service_complete(frame: &mut SyscallContext) {
         }
     }
     let request_id = frame.rdx;
-    drain_network_service_bootstrap_diag();
     match net_bridge_mut().service_complete(request_id, response, &payload[..payload_len]) {
         Ok(()) => {
             // #105: wake blocked Linux socket syscalls waiting on this request.
-            let _woken = crate::process::linux_socket::deliver_prefetch_receive(request_id);
-            drain_network_service_bootstrap_diag();
+            let _woken = crate::process::linux_socket::notify_request_complete(request_id);
             frame.rax = 0;
         }
         Err(error) => frame.rax = bridge_error_status(error),

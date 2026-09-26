@@ -522,24 +522,6 @@ impl NetBridge {
         requeued
     }
 
-    #[cfg(feature = "m9-userspace-self-test")]
-    pub(crate) fn log_slot_diag(&self) {
-        let mut pending = 0u32;
-        let mut in_service = 0u32;
-        let mut done = 0u32;
-        for slot in &self.slots {
-            match slot.state {
-                ClientSlotState::Pending => pending += 1,
-                ClientSlotState::InService => in_service += 1,
-                ClientSlotState::Done => done += 1,
-                ClientSlotState::Free => {}
-            }
-        }
-        kernel_log_fmt(format_args!(
-            "[M9.D] bridge pending={pending} in_service={in_service} done={done}\n"
-        ));
-    }
-
     pub fn raw_transmit(
         &mut self,
         service_pid: u64,

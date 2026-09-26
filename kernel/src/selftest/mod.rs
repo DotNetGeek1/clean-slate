@@ -119,10 +119,10 @@ pub(crate) mod m9_linux_socket;
 pub(crate) mod m9_low_va;
 #[cfg(feature = "m9-rootfs-self-test")]
 pub(crate) mod m9_rootfs;
-#[cfg(feature = "m9-userspace-self-test")]
-pub(crate) mod m9_userspace;
 #[cfg(feature = "m9-syscall-fail-closed-self-test")]
 pub(crate) mod m9_syscall_fail_closed;
+#[cfg(feature = "m9-userspace-self-test")]
+pub(crate) mod m9_userspace;
 #[cfg(any(
     feature = "m3-syscall-self-test",
     feature = "m9-syscall-fail-closed-self-test",

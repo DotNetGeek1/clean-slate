@@ -350,14 +350,7 @@ pub(crate) fn write_fd(
         scratch[copied_total..copied_total + n].copy_from_slice(&chunk[..n]);
         copied_total += n;
     }
-    write_fd_buffer(
-        request,
-        ctx,
-        pid,
-        generation,
-        fd,
-        &scratch[..copied_total],
-    )
+    write_fd_buffer(request, ctx, pid, generation, fd, &scratch[..copied_total])
 }
 
 #[cfg(test)]

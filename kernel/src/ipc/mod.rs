@@ -352,8 +352,7 @@ impl IpcEndpointTable {
             .endpoints
             .get_mut(endpoint_slot)
             .ok_or(IpcSendError::StaleCapability)?;
-        if endpoint.state != IpcEndpointState::Active
-            || endpoint.generation != endpoint_generation
+        if endpoint.state != IpcEndpointState::Active || endpoint.generation != endpoint_generation
         {
             return Err(IpcSendError::StaleCapability);
         }

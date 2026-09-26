@@ -5,9 +5,7 @@ use super::table::{table_mut, ProcId};
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
 use crate::syscall::linux::table::LinuxSyscallContext;
-use clean_slate_linux_abi::{
-    LinuxSyscallRequest, LinuxSyscallResult, ECHILD, EFAULT, EINVAL,
-};
+use clean_slate_linux_abi::{LinuxSyscallRequest, LinuxSyscallResult, ECHILD, EFAULT, EINVAL};
 #[cfg(feature = "m9-userspace-self-test")]
 use core::sync::atomic::{AtomicUsize, Ordering};
 

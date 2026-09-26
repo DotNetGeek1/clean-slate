@@ -49,8 +49,7 @@ pub(crate) fn handle_sys_open(
     let image = image();
     let table = table_mut();
     let access = flags & 0b11;
-    let may_create =
-        (flags & O_CREAT) != 0 && (access == O_WRONLY || access == O_RDWR);
+    let may_create = (flags & O_CREAT) != 0 && (access == O_WRONLY || access == O_RDWR);
     let node = if may_create {
         table.open_create_file(path.as_bytes(), (flags & O_TRUNC) != 0, &image)?
     } else {
@@ -277,9 +276,7 @@ fn mkdir_erofs_diag(pid: u64, path: &[u8]) {
         return;
     }
     use crate::diagnostics::log::kernel_log_fmt;
-    kernel_log_fmt(format_args!(
-        "[M9  ] mkdir EROFS pid={pid} path={path:?}\n",
-    ));
+    kernel_log_fmt(format_args!("[M9  ] mkdir EROFS pid={pid} path={path:?}\n",));
 }
 
 fn copy_path_from_user(ptr: u64) -> Result<UserPathBuf, LinuxErrno> {
@@ -292,4 +289,3 @@ fn copy_path_from_user(ptr: u64) -> Result<UserPathBuf, LinuxErrno> {
         len: norm_len,
     })
 }
-

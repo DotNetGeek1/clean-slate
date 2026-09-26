@@ -23,41 +23,6 @@ pub const MAX_UDP_PAYLOAD: usize = MAX_L3_PAYLOAD_BYTES
 /// First ephemeral local port for deterministic auto-bind ([`UdpTable::open`] with `None`).
 pub const EPHEMERAL_PORT_BASE: u16 = 49_152;
 
-/// Max inbound demux trace lines when a trace hook is installed (M9 diagnostics).
-pub const UDP_RX_DEMUX_TRACE_MAX: u32 = 32;
-
-/// Inbound UDP demux trace hook (`dst_port`, source, result tag, endpoint table index if any).
-pub type UdpRxDemuxTrace =
-    fn(dst_port: u16, src: SocketAddrV4, result: &'static str, ep_index: Option<u32>);
-
-static mut UDP_RX_DEMUX_TRACE: Option<UdpRxDemuxTrace> = None;
-static mut UDP_RX_DEMUX_TRACE_COUNT: u32 = 0;
-
-/// Installs or clears the bounded RX demux trace hook (resets the line counter).
-pub fn set_udp_rx_demux_trace(trace: Option<UdpRxDemuxTrace>) {
-    unsafe {
-        UDP_RX_DEMUX_TRACE = trace;
-        UDP_RX_DEMUX_TRACE_COUNT = 0;
-    }
-}
-
-fn emit_udp_rx_demux_trace(
-    dst_port: u16,
-    from: SocketAddrV4,
-    result: &'static str,
-    ep_index: Option<u32>,
-) {
-    unsafe {
-        if UDP_RX_DEMUX_TRACE_COUNT >= UDP_RX_DEMUX_TRACE_MAX {
-            return;
-        }
-        if let Some(f) = UDP_RX_DEMUX_TRACE {
-            UDP_RX_DEMUX_TRACE_COUNT += 1;
-            f(dst_port, from, result, ep_index);
-        }
-    }
-}
-
 /// Session handle for a UDP endpoint (same packing as [`SessionId`]).
 pub type UdpEndpointId = SessionId;
 
@@ -358,12 +323,6 @@ impl UdpTable {
         Ok(self.meta[index].local_port)
     }
 
-    /// Queued datagram count for an endpoint (M9 diagnostics).
-    pub fn rx_queued(&self, id: SessionId, owner: TrustedCaller) -> Result<usize, NetworkError> {
-        let index = self.resolve_index(id, owner)?;
-        Ok(self.rx[index].queued_count())
-    }
-
     /// Opens a UDP endpoint; `local_port == None` picks the lowest free ephemeral port.
     pub fn open(
         &mut self,
@@ -483,25 +442,16 @@ impl UdpTable {
     }
 
     fn enqueue(&mut self, port: u16, from: SocketAddrV4, payload: &[u8]) -> Result<(), RxDrop> {
-        let index = match self.slot_index_for_port(port) {
-            Some(index) => index,
-            None => {
-                emit_udp_rx_demux_trace(port, from, "drop-unbound", None);
-                return Err(RxDrop::Unbound);
-            }
-        };
+        let index = self.slot_index_for_port(port).ok_or(RxDrop::Unbound)?;
         if let Some(peer) = self.meta[index].connected_peer {
             if from != peer {
-                emit_udp_rx_demux_trace(port, from, "drop-foreign", Some(index as u32));
                 return Err(RxDrop::Foreign);
             }
         }
         if !self.rx[index].push(from, payload) {
-            emit_udp_rx_demux_trace(port, from, "drop-qfull", Some(index as u32));
             return Err(RxDrop::QueueFull);
         }
         self.queued_total += 1;
-        emit_udp_rx_demux_trace(port, from, "queued-ep", Some(index as u32));
         Ok(())
     }
 

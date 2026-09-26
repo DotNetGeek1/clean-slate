@@ -45,9 +45,9 @@ use crate::sync::global_cell::GlobalCell;
 use clean_slate_linux_abi::{
     encode_rax, unsupported_syscall_result, UnsupportedSyscallBudget, ESRCH,
 };
+use clean_slate_service_lifecycle::InstanceGeneration;
 #[cfg(feature = "m9-userspace-self-test")]
 use core::sync::atomic::{AtomicUsize, Ordering};
-use clean_slate_service_lifecycle::InstanceGeneration;
 use decode::decode_request_from_context;
 use table::{lookup_handler, LinuxSyscallContext};
 

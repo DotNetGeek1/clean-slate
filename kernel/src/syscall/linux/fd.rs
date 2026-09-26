@@ -391,8 +391,7 @@ mod tests {
         ipc.grant_console_capability_for_pid(pid)
             .expect("console grant");
         let sink = linux_fd::console_sink_ref_from_table(&ipc).expect("console sink");
-        linux_fd::install_stdio_for_process(pid, generation, sink)
-            .expect("install stdio");
+        linux_fd::install_stdio_for_process(pid, generation, sink).expect("install stdio");
         let mut frame = empty_frame();
         let mut ctx = LinuxSyscallContext {
             pid,

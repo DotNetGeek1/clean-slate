@@ -20,18 +20,11 @@ use crate::process::{
     personality::ExecutionPersonality, process_registry_mut, reap_process_record, Process,
     ProcessState, ResourceDomain,
 };
-use crate::sched::{scheduler_mut, Thread, ThreadKind, ThreadState, TASK_COUNT};
+use crate::sched::{scheduler_mut, Thread, ThreadKind, ThreadState};
 use clean_slate_capability::HolderId;
 use clean_slate_linux_abi::{EAGAIN, ENOMEM, ESRCH};
 use clean_slate_service_lifecycle::InstanceGeneration;
 use x86_64::VirtAddr;
-#[cfg(feature = "m9-userspace-self-test")]
-use core::sync::atomic::{AtomicUsize, Ordering};
-
-#[cfg(feature = "m9-userspace-self-test")]
-const FORK_DIAG_LIMIT: usize = 8;
-#[cfg(feature = "m9-userspace-self-test")]
-static FORK_DIAG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 struct ForkChildCleanup {
     child_gen: InstanceGeneration,
@@ -50,8 +43,6 @@ pub(crate) fn linux_fork(
     scheduler_slot: usize,
 ) -> Result<u64, clean_slate_linux_abi::LinuxErrno> {
     if table().occupied() >= LINUX_MAX_PROC_ENTRIES {
-        #[cfg(feature = "m9-userspace-self-test")]
-        fork_diag("proc-table-full", 0);
         return Err(EAGAIN);
     }
     let child_space = match without_interrupts(|| unsafe {
@@ -71,13 +62,9 @@ pub(crate) fn linux_fork(
         Ok(space) => space,
         Err(ESRCH) => return Err(ESRCH),
         Err(ENOMEM) => {
-            #[cfg(feature = "m9-userspace-self-test")]
-            fork_diag("clone-as-ENOMEM", 0);
             return Err(ENOMEM);
         }
         Err(_) => {
-            #[cfg(feature = "m9-userspace-self-test")]
-            fork_diag("clone-as", 0);
             return Err(EAGAIN);
         }
     };
@@ -89,8 +76,6 @@ pub(crate) fn linux_fork(
         Ok(ids) => ids,
         Err(_) => {
             let _ = destroy_process_address_space(&child_space, allocator);
-            #[cfg(feature = "m9-userspace-self-test")]
-            fork_diag("id-alloc", 0);
             return Err(EAGAIN);
         }
     };
@@ -99,8 +84,6 @@ pub(crate) fn linux_fork(
         Ok(ptr) => ptr,
         Err(_) => {
             let _ = destroy_process_address_space(&child_space, allocator);
-            #[cfg(feature = "m9-userspace-self-test")]
-            fork_diag("child-frame", child_pid);
             return Err(EAGAIN);
         }
     };
@@ -157,11 +140,7 @@ pub(crate) fn linux_fork(
         }
     }) {
         Ok(gen) => gen,
-        Err(reason) => {
-            #[cfg(feature = "m9-userspace-self-test")]
-            fork_diag(reason, child_pid);
-            return Err(EAGAIN);
-        }
+        Err(_) => return Err(EAGAIN),
     };
 
     let mut cleanup = ForkChildCleanup {
@@ -174,16 +153,12 @@ pub(crate) fn linux_fork(
 
     if linux_fd::inherit_for_child(parent_pid, parent_gen, child_pid, child_gen).is_err() {
         abort_fork_child(child_pid, &cleanup, allocator);
-        #[cfg(feature = "m9-userspace-self-test")]
-        fork_diag("inherit-fd", child_pid);
         return Err(EAGAIN);
     }
     cleanup.fd_inherited = true;
 
     if inherit_capabilities_for_fork(HolderId(parent_pid), HolderId(child_pid)).is_err() {
         abort_fork_child(child_pid, &cleanup, allocator);
-        #[cfg(feature = "m9-userspace-self-test")]
-        fork_diag("inherit-caps", child_pid);
         return Err(EAGAIN);
     }
     cleanup.caps_inherited = true;
@@ -202,8 +177,6 @@ pub(crate) fn linux_fork(
         .is_err()
     {
         abort_fork_child(child_pid, &cleanup, allocator);
-        #[cfg(feature = "m9-userspace-self-test")]
-        fork_diag("proc-register", child_pid);
         return Err(EAGAIN);
     }
     cleanup.proc_registered = true;
@@ -213,19 +186,13 @@ pub(crate) fn linux_fork(
         linux_mem::release_for_process(child_pid, child_gen, allocator);
         linux_signal::release_for_process(child_pid, child_gen);
         abort_fork_child(child_pid, &cleanup, allocator);
-        #[cfg(feature = "m9-userspace-self-test")]
-        fork_diag("runtime-clone", child_pid);
         return Err(errno);
     }
 
     Ok(child_pid)
 }
 
-fn abort_fork_child(
-    child_pid: u64,
-    cleanup: &ForkChildCleanup,
-    allocator: &mut PageAllocator,
-) {
+fn abort_fork_child(child_pid: u64, cleanup: &ForkChildCleanup, allocator: &mut PageAllocator) {
     if cleanup.fd_inherited {
         linux_fd::release_for_process(child_pid, cleanup.child_gen);
     }
@@ -257,38 +224,3 @@ fn abort_fork_child(
         });
     }
 }
-
-#[cfg(feature = "m9-userspace-self-test")]
-fn fork_diag(reason: &str, child_pid: u64) {
-    if FORK_DIAG_COUNT.fetch_add(1, Ordering::Relaxed) >= FORK_DIAG_LIMIT {
-        return;
-    }
-    use crate::capability::with_capability_space;
-    use crate::diagnostics::log::kernel_log_fmt;
-    let (proc_live, sched_occ, reg_occ, cap_live, fd_pool) = without_interrupts(|| unsafe {
-        (
-            table().occupied(),
-            scheduler_mut().occupied_thread_slots(),
-            process_registry_mut().occupied_slots(),
-            with_capability_space(|t| t.live_count()),
-            linux_fd::open_description_pool_live_count(),
-        )
-    });
-    kernel_log_fmt(format_args!(
-        "[M9  ] fork fail reason={reason} child={child_pid} proc={proc_live}/{LINUX_MAX_PROC_ENTRIES} sched={sched_occ}/{TASK_COUNT} reg={reg_occ} caps={cap_live} fd_pool={fd_pool}\n"
-    ));
-    without_interrupts(|| unsafe {
-        let scheduler = scheduler_mut();
-        for slot in 0..TASK_COUNT {
-            let thread = &scheduler.threads[slot];
-            if thread.state == ThreadState::Empty {
-                continue;
-            }
-            kernel_log_fmt(format_args!(
-                "[M9  ] fork slot={slot} pid={} state={:?}\n",
-                thread.owner_process_id, thread.state
-            ));
-        }
-    });
-}
-

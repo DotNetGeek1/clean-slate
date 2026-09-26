@@ -1,14 +1,15 @@
 //! M9 #107: frozen BusyBox/rootfs convergence on the production Linux path.
 
 use crate::arch::x86_64::apic::reprogram_local_apic_timer;
-use crate::arch::x86_64::interrupt_context::InterruptContext;
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::gdt::set_privilege_stack;
+use crate::arch::x86_64::interrupt_context::InterruptContext;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::interrupt::timer::{initialize_timer, kernel_ticks};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
+use crate::mm::PAGE_SIZE;
 use crate::process::domain::DomainTeardownResult;
 use crate::process::id_allocator::{id_allocator_mut, IdAllocator};
 use crate::process::linux_exec::{
@@ -18,18 +19,17 @@ use crate::process::linux_fd::{
     self, console_sink_render_style, open_description_pool_live_count, ConsoleSinkRenderStyle,
     OpenDescriptionId,
 };
-use crate::process::linux_proc::{
-    pipe::pool,
-    table::{proc_table_invariant_violations, table},
-};
 use crate::process::linux_fs::object_backend::bootstrap_tmp_file_bytes;
 use crate::process::linux_image::{
     LINUX_CONVENTIONAL_EXEC_STACK_PAGES, LINUX_CONVENTIONAL_LOAD_POLICY,
 };
 use crate::process::linux_mem;
+use crate::process::linux_proc::{
+    pipe::pool,
+    table::{proc_table_invariant_violations, table},
+};
 use crate::process::linux_rootfs;
 use crate::process::live_instance_generation;
-use crate::sync::global_cell::GlobalCell;
 use crate::process::personality::execution_personality_for_pid;
 use crate::process::process_registry_mut;
 use crate::sched::dispatch::start_current_scheduler_thread;
@@ -39,17 +39,17 @@ use crate::selftest::userspace_process::{
     configure_scheduler_thread_slot, reset_process_scheduler_world,
     spawn_native_userspace_process_with_code,
 };
-use crate::mm::PAGE_SIZE;
 use crate::service::control::ServiceLifecycleController;
 use crate::service::service_lifecycle_controller_mut;
+use crate::sync::global_cell::GlobalCell;
 use crate::syscall::initialize_syscall_abi;
 use crate::syscall::{
     install_service_lifecycle_syscall_allocator, service_lifecycle_syscall_allocator_mut,
 };
 use clean_slate_rootfs::EntryKind;
 use clean_slate_service_fixtures::{
-    StorageServiceBootstrap, STORAGE_SERVICE_ID, STORAGE_SERVICE_MODE_OBJECT_SERVICE,
-    NETWORK_SERVICE_ID,
+    StorageServiceBootstrap, NETWORK_SERVICE_ID, STORAGE_SERVICE_ID,
+    STORAGE_SERVICE_MODE_OBJECT_SERVICE,
 };
 use clean_slate_service_lifecycle::{
     ControlRequest, ControlRequestKind, InstanceGeneration, LifecycleMessage, ServiceId,
@@ -221,33 +221,23 @@ fn install_linux_stdio(pid: u64, generation: InstanceGeneration) {
     }
 }
 
-fn launch_busybox_inner(
-    allocator: &mut PageAllocator,
-    cmd: &ShellCmd,
-    spec: &LinuxExecSpec<'_>,
-) {
+fn launch_busybox_inner(allocator: &mut PageAllocator, cmd: &ShellCmd, spec: &LinuxExecSpec<'_>) {
     let (slot, stack_top) =
         pick_scheduler_slot_for_relaunch().unwrap_or_else(|m| fatal_kernel_error(m));
-    let launched = launch_linux_process_from_spec(allocator, stack_top, slot, spec).unwrap_or_else(
-        |err| {
+    let launched =
+        launch_linux_process_from_spec(allocator, stack_top, slot, spec).unwrap_or_else(|err| {
             kernel_log_fmt(format_args!(
                 "[M9  ] busybox launch err={}\n",
                 err.description()
             ));
             fatal_kernel_error("m9 userspace busybox launch failed");
-        },
-    );
+        });
     install_linux_stdio(launched.pid, launched.instance_generation);
     M9_LINUX_PID.store(launched.pid, Ordering::Relaxed);
     kernel_log_fmt(format_args!(
         "[M9  ] shell started pid={} slot={} kstack=0x{:x} cmd={} stack_pages={}\n",
-        launched.pid,
-        slot,
-        stack_top,
-        cmd.name,
-        M9_BUSYBOX_STACK_PAGES
+        launched.pid, slot, stack_top, cmd.name, M9_BUSYBOX_STACK_PAGES
     ));
-    linux_mem::log_m9_exec_layout(launched.pid, launched.instance_generation, 0);
 }
 
 fn launch_busybox(allocator: &mut PageAllocator, cmd: &ShellCmd) {
@@ -355,7 +345,10 @@ pub(crate) fn observe_console_description_write(open: OpenDescriptionId, bytes: 
         return;
     }
     let len = M9_STDOUT_LEN.load(Ordering::Relaxed);
-    let Some(end) = len.checked_add(bytes.len()).filter(|end| *end <= M9_STDOUT_CAP) else {
+    let Some(end) = len
+        .checked_add(bytes.len())
+        .filter(|end| *end <= M9_STDOUT_CAP)
+    else {
         fatal_kernel_error("m9 checklist stdout capture exceeded its bound");
     };
     unsafe {
@@ -381,8 +374,7 @@ fn validate_stdout_expectations(cmd: &ShellCmd) {
             fatal_kernel_error("nslookup bytes");
         }
         "script-sh"
-            if !out.windows(6).any(|w| w == b"script")
-                || !out.windows(2).any(|w| w == b"hi") =>
+            if !out.windows(6).any(|w| w == b"script") || !out.windows(2).any(|w| w == b"hi") =>
         {
             fatal_kernel_error("script bytes");
         }
@@ -446,22 +438,28 @@ fn dispatch_phase(allocator: &mut PageAllocator) {
             launch_busybox(allocator, cmd);
         }
         Phase::DenyFs => {
-            launch_busybox(allocator, &ShellCmd {
-                name: "deny-fs",
-                shell: b"echo x > /etc/hostname",
-                expect_status: 1,
-                use_script_file: false,
-                phase_marker: None,
-            });
+            launch_busybox(
+                allocator,
+                &ShellCmd {
+                    name: "deny-fs",
+                    shell: b"echo x > /etc/hostname",
+                    expect_status: 1,
+                    use_script_file: false,
+                    phase_marker: None,
+                },
+            );
         }
         Phase::DenyNet => {
-            launch_busybox(allocator, &ShellCmd {
-                name: "deny-net",
-                shell: b"wget -O - http://203.0.113.1:9/",
-                expect_status: 1,
-                use_script_file: false,
-                phase_marker: None,
-            });
+            launch_busybox(
+                allocator,
+                &ShellCmd {
+                    name: "deny-net",
+                    shell: b"wget -O - http://203.0.113.1:9/",
+                    expect_status: 1,
+                    use_script_file: false,
+                    phase_marker: None,
+                },
+            );
         }
         Phase::Cycle => {
             let cycle = M9_CYCLE.load(Ordering::Relaxed);
@@ -527,13 +525,12 @@ pub(crate) fn after_linux_exit_group(
             }
             validate_stdout_expectations(cmd);
             if cmd.name == "nslookup-fixture" {
-                let delta = kernel_ticks().saturating_sub(TICKS_BEFORE_BLOCK.load(Ordering::Relaxed));
+                let delta =
+                    kernel_ticks().saturating_sub(TICKS_BEFORE_BLOCK.load(Ordering::Relaxed));
                 if delta < 2 {
                     fatal_kernel_error("m9 userspace blocking poll too short");
                 }
-                kernel_log_fmt(format_args!(
-                    "[M9  ] blocking PASS irq_ticks={delta}\n"
-                ));
+                kernel_log_fmt(format_args!("[M9  ] blocking PASS irq_ticks={delta}\n"));
             }
             let next = index + 1;
             unsafe {

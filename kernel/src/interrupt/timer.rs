@@ -72,16 +72,14 @@ pub(crate) fn initialize_timer() {
     // wiring `calibrate_apic_tick` needs; calibrating there hangs (not ~50ms).
     // M9 userspace/runtime acceptance runs full Linux workloads and needs TSC.
     #[cfg(any(
-        all(
-            not(any(
-                feature = "m1-self-test",
-                feature = "m2-double-fault-self-test",
-                feature = "m2-timer-self-test",
-                feature = "m3-address-space-self-test",
-                feature = "m3-entry-self-test",
-                feature = "m3-ipc-self-test"
-            )),
-        ),
+        not(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test",
+            feature = "m3-address-space-self-test",
+            feature = "m3-entry-self-test",
+            feature = "m3-ipc-self-test"
+        )),
         feature = "m9-userspace-self-test",
         feature = "m9-linux-runtime-self-test",
     ))]
@@ -107,16 +105,14 @@ pub(crate) fn initialize_timer() {
         program_local_apic_timer();
     }
     #[cfg(any(
-        all(
-            not(any(
-                feature = "m1-self-test",
-                feature = "m2-double-fault-self-test",
-                feature = "m2-timer-self-test",
-                feature = "m3-address-space-self-test",
-                feature = "m3-entry-self-test",
-                feature = "m3-ipc-self-test"
-            )),
-        ),
+        not(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test",
+            feature = "m3-address-space-self-test",
+            feature = "m3-entry-self-test",
+            feature = "m3-ipc-self-test"
+        )),
         feature = "m9-userspace-self-test",
         feature = "m9-linux-runtime-self-test",
     ))]

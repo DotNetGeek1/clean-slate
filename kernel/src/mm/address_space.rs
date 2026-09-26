@@ -108,32 +108,33 @@ const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 21;
 #[cfg(all(
     not(feature = "m9-userspace-self-test"),
     not(any(
-    feature = "m4-recovery-self-test",
-    feature = "m4-supervisor-self-test",
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m7-net-caps-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test",
-    feature = "m7-net-service-self-test",
-    feature = "m9-low-va-self-test",
-    feature = "m3-address-space-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m8-linux-image",
-    feature = "m8-linux-image-self-test",
-    feature = "m8-linux-hello-self-test",
-    feature = "m8-linux-dispatch-self-test"
-))))]
+        feature = "m4-recovery-self-test",
+        feature = "m4-supervisor-self-test",
+        feature = "m5-storage-self-test",
+        feature = "m5-persistence-self-test",
+        feature = "m5-crash-early-self-test",
+        feature = "m5-crash-late-self-test",
+        feature = "m5-crash-recovery-self-test",
+        feature = "m6-object-self-test",
+        feature = "m6-process-control-self-test",
+        feature = "m6-delegation-self-test",
+        feature = "m7-net-caps-self-test",
+        feature = "m6-revocation-self-test",
+        feature = "m6-audit-self-test",
+        feature = "m6-capabilities-self-test",
+        feature = "m6-fixture-smoke-self-test",
+        feature = "m7-net-service-self-test",
+        feature = "m9-low-va-self-test",
+        feature = "m3-address-space-self-test",
+        feature = "m3-entry-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m8-linux-image",
+        feature = "m8-linux-image-self-test",
+        feature = "m8-linux-hello-self-test",
+        feature = "m8-linux-dispatch-self-test"
+    ))
+))]
 const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 8;
 
 /// Total tracked page-table frames = user mapping demand + fixed carve-out wiring.
@@ -141,7 +142,10 @@ pub(crate) const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize =
     BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES + KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES;
 #[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
-#[cfg(any(feature = "m7-net-service-self-test", feature = "m9-userspace-self-test"))]
+#[cfg(any(
+    feature = "m7-net-service-self-test",
+    feature = "m9-userspace-self-test"
+))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 384;
 /// Storage and network userspace images map up to their configured code-page
 /// budgets plus stack/bootstrap pages; `service::spawn` asserts each budget

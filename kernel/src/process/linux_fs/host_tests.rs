@@ -7,8 +7,8 @@ use super::object_backend::{tmp_file_create, LINUX_TMP_MAX_ENTRIES, LINUX_TMP_MA
 use super::path::{normalize_path, LINUX_PATH_MAX};
 use crate::process::linux_rootfs;
 use clean_slate_linux_abi::{
-    encode_dirent64, EACCES, EISDIR, ENAMETOOLONG, ENFILE, ENOSPC, EROFS, O_CREAT, O_RDONLY,
-    O_RDWR, O_TRUNC, O_WRONLY, DT_DIR,
+    encode_dirent64, DT_DIR, EACCES, EISDIR, ENAMETOOLONG, ENFILE, ENOSPC, EROFS, O_CREAT,
+    O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
 };
 use clean_slate_service_fixtures::OBJECT_MAX_PAYLOAD_BYTES;
 use clean_slate_service_lifecycle::InstanceGeneration;
@@ -55,7 +55,9 @@ fn root_getdents_names_encode() {
         },
         0u8,
     ); 32];
-    let count = table.list_children(root, &img, &mut children).expect("list");
+    let count = table
+        .list_children(root, &img, &mut children)
+        .expect("list");
     assert!(count >= 3, "expected bin etc tmp at minimum");
     for index in 0..count {
         let (node, _dt) = children[index];

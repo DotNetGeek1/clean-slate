@@ -517,7 +517,9 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
         .unwrap_or_else(|message| fatal_kernel_error(message));
     #[cfg(feature = "m9-userspace-self-test")]
     if crate::selftest::m9_userspace::checklist_fault_pending() {
-        crate::diagnostics::serial::serial_write_line("[FAIL] m9 userspace checklist command faulted");
+        crate::diagnostics::serial::serial_write_line(
+            "[FAIL] m9 userspace checklist command faulted",
+        );
         crate::diagnostics::qemu::qemu_exit(crate::diagnostics::qemu::QEMU_EXIT_FAILURE);
     }
     #[cfg(feature = "m4-recovery-self-test")]

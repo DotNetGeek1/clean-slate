@@ -227,8 +227,7 @@ pub(crate) fn log_m9_exec_layout(pid: u64, generation: InstanceGeneration, cr2: 
     if cr2 != 0 && (cr2 < s.stack_base || cr2 >= s.stack_top) {
         kernel_log_fmt(format_args!(
             "[M9  ] cr2 outside mapped stack cr2={cr2:#x} mapped=[{:#x},{:#x})\n",
-            s.stack_base,
-            s.stack_top
+            s.stack_base, s.stack_top
         ));
     } else if cr2 != 0 && cr2 >= s.stack_base && cr2 < s.stack_top {
         kernel_log_fmt(format_args!(
@@ -238,14 +237,7 @@ pub(crate) fn log_m9_exec_layout(pid: u64, generation: InstanceGeneration, cr2: 
 }
 
 #[cfg(feature = "m9-userspace-self-test")]
-fn log_m9_mmap_enomem(
-    pid: u64,
-    reason: &'static str,
-    addr: u64,
-    len: u64,
-    prot: u64,
-    flags: u64,
-) {
+fn log_m9_mmap_enomem(pid: u64, reason: &'static str, addr: u64, len: u64, prot: u64, flags: u64) {
     use crate::diagnostics::log::kernel_log_fmt;
     kernel_log_fmt(format_args!(
         "[M9  ] mmap ENOMEM pid={pid} reason={reason} addr={addr:#x} len={len:#x} prot={prot:#x} flags={flags:#x}\n"
@@ -584,14 +576,7 @@ pub(crate) fn sys_mmap(
         .ok_or(EINVAL)?;
     if map_addr < mmap_window_lo || map_end > mmap_window_hi {
         #[cfg(feature = "m9-userspace-self-test")]
-        log_m9_mmap_enomem(
-            pid,
-            "outside-exec-mmap-window",
-            addr,
-            len,
-            prot,
-            flags,
-        );
+        log_m9_mmap_enomem(pid, "outside-exec-mmap-window", addr, len, prot, flags);
         return Err(ENOMEM);
     }
     let allocator = syscall_page_allocator()?;

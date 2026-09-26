@@ -170,11 +170,7 @@ mod enabled {
             generation: ctx.instance_generation,
         };
         kernel_log_fmt(format_args!("[LNX ] exit pid={pid} status={status}\n"));
-        crate::process::linux_proc::exit_publish::publish_linux_exit(
-            id,
-            status as u32,
-            true,
-        );
+        crate::process::linux_proc::exit_publish::publish_linux_exit(id, status as u32, true);
         let allocator = service_lifecycle_syscall_allocator_mut()
             .as_mut()
             .unwrap_or_else(|| fatal_kernel_error("linux exit_group: allocator missing"));
@@ -191,11 +187,9 @@ mod enabled {
             switch_after_exit(Some(next_frame));
         }
         #[cfg(feature = "m9-userspace-self-test")]
-        if let Some(next_frame) = crate::selftest::m9_userspace::after_linux_exit_group(
-            pid,
-            &teardown,
-            allocator,
-        ) {
+        if let Some(next_frame) =
+            crate::selftest::m9_userspace::after_linux_exit_group(pid, &teardown, allocator)
+        {
             switch_after_exit(Some(next_frame));
         }
         switch_after_exit(teardown.next_stack_pointer)

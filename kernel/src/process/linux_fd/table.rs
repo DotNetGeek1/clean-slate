@@ -1,8 +1,7 @@
 //! Per-process Linux fd table (compatibility integers → open descriptions).
 
 use super::open_description::{
-    ConsoleSinkRef, OpenAccess, OpenDescriptionId, OpenDescriptionPool,
-    OpenStatus,
+    ConsoleSinkRef, OpenAccess, OpenDescriptionId, OpenDescriptionPool, OpenStatus,
 };
 use clean_slate_linux_abi::{LinuxErrno, EBADF, EMFILE};
 
