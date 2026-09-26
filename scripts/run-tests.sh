@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Run Clean-Slate QEMU xtask acceptance tests and report failures.
 #
-# By default runs test-m1, test-m2, test-m3, test-m4, test-m5, test-m6, test-m7, test-m8
-# (milestone gates and aggregates). Use --exhaustive for every registered xtask acceptance command.
+# By default runs test-m1, test-m2, test-m3, test-m4, test-m5, test-m6, test-m7, test-m8, test-m9
+# (milestone gates and aggregates). Use --exhaustive for every registered xtask acceptance command
+# except constituents an aggregate already runs as a step (every test-m9-* boot and
+# verify-m9-fixture run once, inside test-m9).
 # OVMF is discovered by xtask on Linux when
 # OVMF_CODE/OVMF_VARS are unset; override with env vars or --ovmf-code/--ovmf-vars.
 set -euo pipefail
@@ -43,6 +45,7 @@ TEST_NAMES=(
   test-m6
   test-m7
   test-m8
+  test-m9
   test-m6-fixture-smoke
   test-m6-object
   test-m7-net-service
@@ -63,6 +66,7 @@ TEST_NAMES=(
   test-m9-block-wake
   test-m9-fd-core
   test-m9-linux-trace
+  test-m9-linux-socket
   test-m9-low-va
   test-m9-linux-exec
   test-m9-linux-proc
@@ -76,16 +80,37 @@ TEST_NAMES=(
 
 test_role() {
   case "$1" in
-    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls | test-m8-linux-hello | test-m8-linux-image | test-m8-linux-dispatch | test-m9-syscall-fail-closed | test-m9-block-wake | test-m9-fd-core | test-m9-linux-trace | test-m9-low-va | test-m9-linux-exec | test-m9-linux-proc | test-m9-linux-runtime | test-m9-rootfs | test-m9-linux-fs | test-m9-userspace | verify-m8-fixture | verify-m9-fixture)
+    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls | test-m8-linux-hello | test-m8-linux-image | test-m8-linux-dispatch | test-m9-syscall-fail-closed | test-m9-block-wake | test-m9-fd-core | test-m9-linux-trace | test-m9-linux-socket | test-m9-low-va | test-m9-linux-exec | test-m9-linux-proc | test-m9-linux-runtime | test-m9-rootfs | test-m9-linux-fs | test-m9-userspace | verify-m8-fixture | verify-m9-fixture)
       echo Constituent
       ;;
-    test-m3 | test-m4 | test-m5 | test-m6 | test-m7 | test-m8)
+    test-m3 | test-m4 | test-m5 | test-m6 | test-m7 | test-m8 | test-m9)
       echo Aggregate
       ;;
     *)
       echo Milestone
       ;;
   esac
+}
+
+# Aggregate that already runs this constituent as one of its steps (matches CoveredBy in
+# scripts/run-tests.ps1); empty when the constituent is only run on its own.
+test_covered_by() {
+  case "$1" in
+    test-m9-*) echo test-m9 ;;
+    verify-m9-fixture) echo test-m9 ;;
+    *) echo "" ;;
+  esac
+}
+
+exhaustive_suite() {
+  local name aggregate
+  for name in "${TEST_NAMES[@]}"; do
+    aggregate="$(test_covered_by "$name")"
+    if [[ -n "$aggregate" ]] && [[ " ${TEST_NAMES[*]} " == *" $aggregate "* ]]; then
+      continue
+    fi
+    echo "$name"
+  done
 }
 
 test_description() {
@@ -131,6 +156,8 @@ test_description() {
     test-m8-linux-hello) echo "M8.7 integrated Linux hello (self-test observer + production boot)" ;;
     test-m8-linux-image) echo "M8.2 Linux ELF loader QEMU constituent acceptance" ;;
     test-m8-linux-dispatch) echo "M8.3 Linux personality dispatch QEMU constituent acceptance" ;;
+    test-m9) echo "M9 milestone gate (pinned fixture verify, ABI/ELF/rootfs/kernel host tests, every M9 constituent, BusyBox userspace convergence)" ;;
+    test-m9-linux-socket) echo "M9 #105 Linux socket syscalls brokered onto M7" ;;
     test-m9-syscall-fail-closed) echo "M9 #143 unresolved syscall caller fail-closed QEMU acceptance" ;;
     test-m9-block-wake) echo "M9 #145 native block/wake scheduler substrate QEMU acceptance" ;;
     test-m9-fd-core) echo "M9 #147 Linux fd / open-description core QEMU acceptance" ;;
@@ -191,6 +218,8 @@ test_aliases() {
     test-m8-linux-hello) echo "m8-linux-hello m8.7" ;;
     test-m8-linux-image) echo "m8-linux-image m8.2" ;;
     test-m8-linux-dispatch) echo "m8-linux-dispatch m8.3" ;;
+    test-m9) echo "m9 m9.9" ;;
+    test-m9-linux-socket) echo "m9-linux-socket m9.105" ;;
     test-m9-syscall-fail-closed) echo "m9-syscall-fail-closed m9.143" ;;
     test-m9-block-wake) echo "m9-block-wake m9.145" ;;
     test-m9-fd-core) echo "m9-fd-core m9.147" ;;
@@ -212,7 +241,7 @@ usage() {
   sed -n '2,20p' "$0" | sed 's/^# \?//'
   echo ""
   echo "Options:"
-  echo "  --exhaustive       Run every known test"
+  echo "  --exhaustive       Run every known test not already run by a selected aggregate"
   echo "  --list             List tests and exit"
   echo "  --ovmf-code PATH   Set OVMF_CODE"
   echo "  --ovmf-vars PATH   Set OVMF_VARS"
@@ -278,6 +307,10 @@ show_test_list() {
     aliases="$(test_aliases "$name")"
     printf "  %-24s %s %s\n" "$name" "$tag" "$desc"
     printf "  %-24s %s aliases: %s\n" "" "" "$aliases"
+    covered_by="$(test_covered_by "$name")"
+    if [[ -n "$covered_by" ]]; then
+      printf "  %-24s %s run by: %s\n" "" "" "$covered_by"
+    fi
   done
   echo ""
   echo -n "Default suite:  "
@@ -290,7 +323,7 @@ show_test_list() {
     fi
   done
   echo ""
-  echo "--exhaustive:    ${TEST_NAMES[*]}"
+  echo "--exhaustive:    $(exhaustive_suite | paste -sd ' ' -)"
   echo "Constituents are per-boundary debugging workflows behind aggregate milestone commands and standalone acceptance lanes."
 }
 
@@ -389,7 +422,7 @@ if [[ ${#REQUESTED[@]} -gt 0 ]]; then
     fi
   done
 elif [[ $EXHAUSTIVE -eq 1 ]]; then
-  SELECTED=("${TEST_NAMES[@]}")
+  mapfile -t SELECTED < <(exhaustive_suite)
 else
   for name in "${TEST_NAMES[@]}"; do
     if [[ "$(test_role "$name")" != Constituent ]]; then

@@ -5,9 +5,11 @@
 .DESCRIPTION
     Sets OVMF_CODE / OVMF_VARS when they are not already in the environment,
     then runs one or more `cargo xtask` acceptance tests. By default the
-    milestone gates run (test-m1, test-m2, test-m3, test-m4, test-m5, test-m6, test-m7, test-m8); the individual
+    milestone gates run (test-m1, test-m2, test-m3, test-m4, test-m5, test-m6, test-m7, test-m8, test-m9); the individual
     test-m3-* and test-m4-* boots are constituents of those aggregates and are skipped unless
-    named explicitly or -Exhaustive is given. Pass test names (or short
+    named explicitly or -Exhaustive is given. Constituents marked CoveredBy (every test-m9-*
+    boot and verify-m9-fixture) are steps of their aggregate, so -Exhaustive runs them only
+    through that aggregate. Pass test names (or short
     aliases) to target a subset.
 
 .PARAMETER Test
@@ -24,6 +26,7 @@
       m6 / test-m6,
       m7 / test-m7,
       m8 / test-m8,
+      m9 / m9.9 / test-m9,
       m6-fixture-smoke, m6-object / m6.3, m6-process-control / m6.4,
       m6-delegation / m6.5, m6-revocation / m6.6, m6-audit / m6.7,
       m6-capabilities / m6.8
@@ -34,8 +37,8 @@
       verify-m9-fixture
 
 .PARAMETER Exhaustive
-    Run every known test (milestone gates plus each individual M3/M4
-    constituent) instead of the default suite. Ignored when explicit test
+    Run every known test (milestone gates plus each individual constituent
+    that no selected aggregate already runs) instead of the default suite. Ignored when explicit test
     names are given.
 
 .PARAMETER List
@@ -126,6 +129,7 @@ $AllTests = [ordered]@{
     "test-m6"                   = @{ Aliases = @("m6", "m6.9"); Description = "M6 milestone gate (capability host tests, fixture smoke, constituents, convergence)"; Role = "Aggregate" }
     "test-m7"                   = @{ Aliases = @("m7", "m7.9"); Description = "M7 milestone gate (converged network-service path + DNS/TLS + capability broker)"; Role = "Aggregate" }
     "test-m8"                   = @{ Aliases = @("m8", "m8.9"); Description = "M8 milestone gate (fixture verify, elf/linux-abi/#92 host tests, Linux hello production path)"; Role = "Aggregate" }
+    "test-m9"                   = @{ Aliases = @("m9", "m9.9"); Description = "M9 milestone gate (pinned fixture verify, ABI/ELF/rootfs/kernel host tests, every M9 constituent, BusyBox userspace convergence)"; Role = "Aggregate" }
     "test-m6-fixture-smoke"     = @{ Aliases = @("m6-fixture-smoke"); Description = "M6 scripted fixture harness smoke (constituent)"; Role = "Constituent" }
     "test-m6-object"            = @{ Aliases = @("m6-object", "m6.3"); Description = "M6.3 object-capability constituent acceptance"; Role = "Constituent" }
     "test-m7-net-service"       = @{ Aliases = @("m7-net-service", "m7.3"); Description = "M7.3 network service and driver-domain seam acceptance"; Role = "Constituent" }
@@ -142,24 +146,43 @@ $AllTests = [ordered]@{
     "test-m8-linux-hello"       = @{ Aliases = @("m8-linux-hello", "m8.7"); Description = "M8.7 integrated Linux hello (self-test observer + production boot)"; Role = "Constituent" }
     "test-m8-linux-image"       = @{ Aliases = @("m8-linux-image", "m8.2"); Description = "M8.2 Linux ELF loader QEMU constituent acceptance"; Role = "Constituent" }
     "test-m8-linux-dispatch"    = @{ Aliases = @("m8-linux-dispatch", "m8.3"); Description = "M8.3 Linux personality dispatch QEMU constituent acceptance"; Role = "Constituent" }
-    "test-m9-syscall-fail-closed" = @{ Aliases = @("m9-syscall-fail-closed", "m9.143"); Description = "M9 #143 unresolved syscall caller fail-closed QEMU acceptance"; Role = "Constituent" }
-    "test-m9-block-wake" = @{ Aliases = @("m9-block-wake", "m9.145"); Description = "M9 #145 native block/wake scheduler substrate QEMU acceptance"; Role = "Constituent" }
-    "test-m9-fd-core"            = @{ Aliases = @("m9-fd-core", "m9.147"); Description = "M9 #147 Linux fd / open-description core QEMU acceptance"; Role = "Constituent" }
-    "test-m9-linux-trace"        = @{ Aliases = @("m9-linux-trace", "m9.106"); Description = "M9 #106 bounded Linux compatibility trace QEMU acceptance"; Role = "Constituent" }
-    "test-m9-linux-socket"       = @{ Aliases = @("m9-linux-socket", "m9.105"); Description = "M9 #105 Linux socket syscalls brokered onto M7"; Role = "Constituent" }
-    "test-m9-low-va"            = @{ Aliases = @("m9-low-va", "m9.142"); Description = "M9 #142 low canonical user VA acceptance (production Linux launch at 0x400000)"; Role = "Constituent" }
-    "test-m9-linux-exec"        = @{ Aliases = @("m9-linux-exec", "m9.146"); Description = "M9 #146 Linux exec substrate (argv/envp/auxv fixture + commit_exec)"; Role = "Constituent" }
-    "test-m9-linux-runtime"     = @{ Aliases = @("m9-linux-runtime", "m9.103"); Description = "M9 #103 Linux runtime/memory/time/poll syscalls"; Role = "Constituent" }
-    "test-m9-linux-proc"        = @{ Aliases = @("m9-linux-proc", "m9.102"); Description = "M9 #102 Linux fork/pipe/wait (proc probe fixture + blocking wait keys)"; Role = "Constituent" }
-    "test-m9-rootfs"            = @{ Aliases = @("m9-rootfs", "m9.104"); Description = "M9 #104 embedded rootfs fixture acceptance"; Role = "Constituent" }
-    "test-m9-linux-fs"          = @{ Aliases = @("m9-linux-fs", "m9.101"); Description = "M9 #101 Linux filesystem/path projection acceptance"; Role = "Constituent" }
-    "test-m9-userspace"         = @{ Aliases = @("m9-userspace", "m9.107"); Description = "M9 #107 BusyBox userspace convergence acceptance"; Role = "Constituent" }
+    "test-m9-syscall-fail-closed" = @{ Aliases = @("m9-syscall-fail-closed", "m9.143"); Description = "M9 #143 unresolved syscall caller fail-closed QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
+    "test-m9-block-wake" = @{ Aliases = @("m9-block-wake", "m9.145"); Description = "M9 #145 native block/wake scheduler substrate QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
+    "test-m9-fd-core"            = @{ Aliases = @("m9-fd-core", "m9.147"); Description = "M9 #147 Linux fd / open-description core QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
+    "test-m9-linux-trace"        = @{ Aliases = @("m9-linux-trace", "m9.106"); Description = "M9 #106 bounded Linux compatibility trace QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
+    "test-m9-linux-socket"       = @{ Aliases = @("m9-linux-socket", "m9.105"); Description = "M9 #105 Linux socket syscalls brokered onto M7"; Role = "Constituent"; CoveredBy = "test-m9" }
+    "test-m9-low-va"            = @{ Aliases = @("m9-low-va", "m9.142"); Description = "M9 #142 low canonical user VA acceptance (production Linux launch at 0x400000)"; Role = "Constituent"; CoveredBy = "test-m9" }
+    "test-m9-linux-exec"        = @{ Aliases = @("m9-linux-exec", "m9.146"); Description = "M9 #146 Linux exec substrate (argv/envp/auxv fixture + commit_exec)"; Role = "Constituent"; CoveredBy = "test-m9" }
+    "test-m9-linux-runtime"     = @{ Aliases = @("m9-linux-runtime", "m9.103"); Description = "M9 #103 Linux runtime/memory/time/poll syscalls"; Role = "Constituent"; CoveredBy = "test-m9" }
+    "test-m9-linux-proc"        = @{ Aliases = @("m9-linux-proc", "m9.102"); Description = "M9 #102 Linux fork/pipe/wait (proc probe fixture + blocking wait keys)"; Role = "Constituent"; CoveredBy = "test-m9" }
+    "test-m9-rootfs"            = @{ Aliases = @("m9-rootfs", "m9.104"); Description = "M9 #104 embedded rootfs fixture acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
+    "test-m9-linux-fs"          = @{ Aliases = @("m9-linux-fs", "m9.101"); Description = "M9 #101 Linux filesystem/path projection acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
+    "test-m9-userspace"         = @{ Aliases = @("m9-userspace", "m9.107"); Description = "M9 #107 BusyBox userspace convergence acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
     "verify-m8-fixture"         = @{ Aliases = @("verify-m8-fixture"); Description = "M8.6 fixture SHA-256 and ELF metadata verify (host)"; Role = "Constituent" }
-    "verify-m9-fixture"         = @{ Aliases = @("verify-m9-fixture"); Description = "M9 #104 BusyBox + rootfs fixture verify (host)"; Role = "Constituent" }
+    "verify-m9-fixture"         = @{ Aliases = @("verify-m9-fixture"); Description = "M9 #104 BusyBox + rootfs fixture verify (host)"; Role = "Constituent"; CoveredBy = "test-m9" }
 }
 
 function Get-DefaultSuite {
     return @($AllTests.Keys | Where-Object { $AllTests[$_].Role -ne "Constituent" })
+}
+
+function Get-CoveringAggregate {
+    param([string]$Name)
+    $entry = $AllTests[$Name]
+    if ($entry.ContainsKey("CoveredBy")) {
+        return $entry.CoveredBy
+    }
+    return $null
+}
+
+# Every registered test, minus constituents that a selected aggregate already runs
+# as one of its steps (e.g. test-m9 runs each test-m9-* boot exactly once).
+function Get-ExhaustiveSuite {
+    $all = @($AllTests.Keys)
+    return @($all | Where-Object {
+            $aggregate = Get-CoveringAggregate $_
+            -not ($aggregate -and ($all -contains $aggregate))
+        })
 }
 
 function Show-TestList {
@@ -174,10 +197,14 @@ function Show-TestList {
         }
         Write-Host ("  {0,-24} {1} {2}" -f $name, $tag, $entry.Description)
         Write-Host ("  {0,-24} {1} aliases: {2}" -f "", "", $aliases)
+        $aggregate = Get-CoveringAggregate $name
+        if ($aggregate) {
+            Write-Host ("  {0,-24} {1} run by: {2}" -f "", "", $aggregate)
+        }
     }
     Write-Host ""
     Write-Host "Default suite:  $((Get-DefaultSuite) -join ', ')"
-    Write-Host "-Exhaustive:    $(@($AllTests.Keys) -join ', ')"
+    Write-Host "-Exhaustive:    $((Get-ExhaustiveSuite) -join ', ')"
     Write-Host "Constituents are per-boundary debugging workflows behind aggregate milestone commands and standalone acceptance lanes."
 }
 
@@ -335,7 +362,7 @@ if ($requested.Count -gt 0) {
     $selected = @($selected | Select-Object -Unique)
 }
 elseif ($Exhaustive) {
-    $selected = @($AllTests.Keys)
+    $selected = Get-ExhaustiveSuite
 }
 else {
     $selected = Get-DefaultSuite
