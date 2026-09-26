@@ -366,50 +366,6 @@ pub(crate) fn authorize_network_op(
     })
 }
 
-/// Same authority as [`authorize_network_op`] without serial `[AUD ] net` echo (#167).
-pub(crate) fn authorize_network_op_quiet(
-    trusted_holder: HolderId,
-    raw_handle: u64,
-    op: NetworkOp,
-    session_generation: Option<SessionGeneration>,
-) -> Result<AuthorizedNetworkOp, DenialReason> {
-    let live_resource = match network_service_resource() {
-        Ok(resource) => resource,
-        Err(_) => return Err(DenialReason::StaleGeneration),
-    };
-    if let Some(session_gen) = session_generation {
-        if session_gen.get() != live_resource.instance_generation {
-            log_stale_session(session_gen.get());
-            return Err(DenialReason::StaleGeneration);
-        }
-    }
-    let handle = match CapabilityHandle::decode(raw_handle) {
-        Ok(handle) => handle,
-        Err(_) => {
-            log_denied(trusted_holder, DenialReason::NoCapability);
-            return Err(DenialReason::NoCapability);
-        }
-    };
-    let required = op.required_right();
-    let auth = with_capability_space(|table| {
-        table.authorize(trusted_holder, handle, live_resource, required)
-    });
-    let record = match auth {
-        Ok(record) => record,
-        Err(error) => {
-            let denial = capability_error_to_denial(error);
-            log_denied(trusted_holder, denial);
-            return Err(denial);
-        }
-    };
-    Ok(AuthorizedNetworkOp {
-        holder: trusted_holder,
-        resource: record.resource,
-        op,
-        live_generation: live_resource.instance_generation,
-    })
-}
-
 pub(crate) fn register_network_session(
     holder: HolderId,
     session: SessionId,

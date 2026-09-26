@@ -5,7 +5,7 @@ use crate::device::NetworkLink;
 use crate::error::NetworkError;
 use crate::fixture::{APP_REQUEST_BYTES, APP_RESPONSE_BYTES, PEER_IPV4, TCP_ECHO_PORT};
 use crate::stack::{Inbound, L3Stack};
-use crate::tcp::conn::write_tcp_to_buf;
+use crate::tcp::conn::{seq_le, write_tcp_to_buf};
 use crate::tcp::segment::{parse as parse_tcp, TcpFlags, TcpSegment, OUR_TCP_MSS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +36,9 @@ pub struct TestPeer<L: NetworkLink> {
     stop_acking: bool,
     syn_ack_piggyback: Option<&'static [u8]>,
     banner_on_establish: Option<&'static [u8]>,
+    banner_seq: u32,
+    acks_received: u32,
+    highest_ack: u32,
 }
 
 impl<L: NetworkLink> TestPeer<L> {
@@ -58,7 +61,44 @@ impl<L: NetworkLink> TestPeer<L> {
             stop_acking: false,
             syn_ack_piggyback: None,
             banner_on_establish: None,
+            banner_seq: 0,
+            acks_received: 0,
+            highest_ack: 0,
         }
+    }
+
+    /// ACK-bearing segments received while established.
+    pub fn acks_received(&self) -> u32 {
+        self.acks_received
+    }
+
+    /// Highest acknowledgment number the guest has sent while established.
+    pub fn highest_ack(&self) -> u32 {
+        self.highest_ack
+    }
+
+    pub fn snd_nxt(&self) -> u32 {
+        self.snd_nxt
+    }
+
+    /// Retransmits the establish banner at its original sequence number (a duplicate).
+    pub fn resend_banner(&mut self, now: u64) -> Result<(), NetworkError> {
+        let (Some(banner), Some(remote)) = (self.banner_on_establish, self.remote) else {
+            return Err(NetworkError::InvalidRequest);
+        };
+        let data = TcpSegment {
+            src_port: self.local.port,
+            dst_port: remote.port,
+            seq: self.banner_seq,
+            ack: self.rcv_nxt,
+            data_offset: 5,
+            flags: TcpFlags::ACK.union(TcpFlags::PSH),
+            window: 4096,
+            checksum: 0,
+            urgent: 0,
+            mss_option: None,
+        };
+        self.transmit(now, remote, &data, banner)
     }
 
     pub fn set_syn_ack_piggyback(&mut self, payload: &'static [u8]) {
@@ -159,6 +199,7 @@ impl<L: NetworkLink> TestPeer<L> {
                             urgent: 0,
                             mss_option: None,
                         };
+                        self.banner_seq = self.snd_nxt;
                         self.transmit(now, remote, &data, banner)?;
                         self.snd_nxt = self.snd_nxt.wrapping_add(banner.len() as u32);
                     }
@@ -167,6 +208,12 @@ impl<L: NetworkLink> TestPeer<L> {
                 }
             }
             PeerState::Established => {
+                if seg.flags.contains(TcpFlags::ACK) {
+                    if self.acks_received == 0 || seq_le(self.highest_ack, seg.ack) {
+                        self.highest_ack = seg.ack;
+                    }
+                    self.acks_received += 1;
+                }
                 if self.bad_ack_next {
                     self.bad_ack_next = false;
                     let bad = TcpSegment {

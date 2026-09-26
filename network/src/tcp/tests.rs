@@ -121,6 +121,94 @@ mod integration {
         assert_eq!(&buf[..n], BANNER);
     }
 
+    /// Handshake with the peer's establish banner withheld until the guest has sent.
+    fn establish_with_request_in_flight(
+        guest: &mut TcpTransport<FakeLink>,
+        peer: &mut TestPeer<FakeLink>,
+        request: &[u8],
+    ) -> SessionId {
+        let remote = SocketAddrV4::new(PEER_IPV4, TCP_ECHO_PORT);
+        let id = guest.connect(0, OWNER, remote).unwrap();
+        // ARP request/reply, SYN, SYN-ACK: stop as soon as the guest has ACKed the SYN-ACK
+        // so its request goes out before the peer sees that ACK and sends the banner.
+        for _ in 0..8 {
+            if guest.state(id, OWNER).unwrap() == TcpState::Established {
+                break;
+            }
+            peer.poll(0).unwrap();
+            guest.poll(0).unwrap();
+        }
+        assert_eq!(guest.state(id, OWNER).unwrap(), TcpState::Established);
+        guest.send(0, id, OWNER, request).unwrap();
+        peer.poll(0).unwrap();
+        id
+    }
+
+    #[test]
+    fn server_first_data_acked_while_request_in_flight() {
+        let (mut guest, mut peer) = setup_pair();
+        const BANNER: &[u8] = b"M9-BANNER-FIX\n";
+        peer.set_banner_on_establish(BANNER);
+        peer.stop_acking();
+        let id = establish_with_request_in_flight(&mut guest, &mut peer, APP_REQUEST_BYTES);
+        // The banner carries ack == guest ISS+1, so the guest request stays unacked.
+        guest.poll(1).unwrap();
+        peer.poll(1).unwrap();
+        assert_eq!(
+            peer.highest_ack(),
+            peer.snd_nxt(),
+            "banner must be acknowledged"
+        );
+        let mut buf = [0u8; 32];
+        let n = guest.receive(id, OWNER, &mut buf).unwrap();
+        assert_eq!(&buf[..n], BANNER);
+    }
+
+    #[test]
+    fn duplicate_data_is_reacknowledged() {
+        let (mut guest, mut peer) = setup_pair();
+        const BANNER: &[u8] = b"M9-BANNER-FIX\n";
+        peer.set_banner_on_establish(BANNER);
+        let id = establish_with_request_in_flight(&mut guest, &mut peer, b"hello");
+        drive(1, &mut guest, &mut peer);
+        let acks_before = peer.acks_received();
+        let ooo_before = guest.stats().dropped_out_of_order;
+        peer.resend_banner(2).unwrap();
+        guest.poll(2).unwrap();
+        peer.poll(2).unwrap();
+        assert_eq!(guest.stats().dropped_out_of_order, ooo_before + 1);
+        assert_eq!(
+            peer.acks_received(),
+            acks_before + 1,
+            "duplicate must be re-ACKed"
+        );
+        assert_eq!(peer.highest_ack(), peer.snd_nxt());
+        let mut buf = [0u8; 32];
+        let n = guest.receive(id, OWNER, &mut buf).unwrap();
+        assert_eq!(&buf[..n], BANNER);
+    }
+
+    #[test]
+    fn next_timer_deadline_tracks_retransmit_and_clears_on_ack() {
+        let (mut guest, mut peer) = setup_pair();
+        assert_eq!(guest.next_timer_deadline(), None);
+        let id = connect_echo(0, &mut guest, &mut peer);
+        assert_eq!(
+            guest.next_timer_deadline(),
+            None,
+            "idle established has no timer"
+        );
+        peer.stop_acking();
+        guest.send(5, id, OWNER, APP_REQUEST_BYTES).unwrap();
+        let rto = guest.next_timer_deadline().expect("unacked data arms RTO");
+        assert!(rto > 5);
+        guest.poll(rto - 1).unwrap();
+        assert_eq!(guest.stats().retransmits, 0);
+        guest.poll(rto).unwrap();
+        assert_eq!(guest.stats().retransmits, 1);
+        assert!(guest.next_timer_deadline().unwrap() > rto);
+    }
+
     #[test]
     fn arp_miss_then_connect() {
         let (mut guest, mut peer) = setup_pair();

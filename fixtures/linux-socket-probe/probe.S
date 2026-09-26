@@ -22,6 +22,11 @@ msg_banner_ok_len = . - msg_banner_ok
 banner_expect:
     .ascii "M9-BANNER-FIX\n"
 banner_expect_len = . - banner_expect
+    .align 8
+banner_delay_ts:
+    /* struct timespec { tv_sec = 0, tv_nsec = 100 ms } */
+    .quad 0
+    .quad 100000000
 msg_neg_ok:
     .ascii "[M9.P] negatives ok\n"
 msg_neg_ok_len = . - msg_neg_ok
@@ -348,7 +353,8 @@ _start:
     mov     rax, 3
     syscall
 
-    /* Server-first banner: connect, delay, recv byte-exact */
+    /* Server-first banner: connect, sleep before the first recv (the banner arrives and
+       must be retained meanwhile), then recv byte-exact */
     mov     rax, 41
     mov     rdi, 2
     mov     rsi, 1
@@ -362,10 +368,12 @@ _start:
     syscall
     cmp     rax, 0
     jne     .Lfail_banner_connect
-    mov     rcx, 50000000
-.Lbanner_delay:
-    dec     rcx
-    jnz     .Lbanner_delay
+    mov     rax, 35
+    lea     rdi, [rip + banner_delay_ts]
+    xor     rsi, rsi
+    syscall
+    cmp     rax, 0
+    jne     .Lfail_banner_sleep
     mov     rdi, r12
     lea     rsi, [rip + banner_buf]
     mov     rdx, banner_expect_len
@@ -394,6 +402,9 @@ _start:
     jmp     exit_fail
 .Lfail_banner_bytes:
     mov     rdi, 37
+    jmp     exit_fail
+.Lfail_banner_sleep:
+    mov     rdi, 38
     jmp     exit_fail
 .Lbanner_ok:
     lea     rsi, [rip + msg_banner_ok]

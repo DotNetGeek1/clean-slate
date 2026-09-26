@@ -1,6 +1,5 @@
 //! M9 #105 Linux socket acceptance (`[M9.L] PASS`): M7 network service + probe ELF.
 
-use crate::arch::x86_64::apic::reprogram_local_apic_timer;
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
@@ -292,7 +291,9 @@ pub(crate) fn start_m9_linux_socket_self_test(page_allocator: PageAllocator) -> 
         });
     }
     initialize_timer();
-    reprogram_local_apic_timer(50_000);
+    // `m3-entry-self-test` skips calibration inside `initialize_timer`; the net service's
+    // idle/RX waits and Linux `nanosleep` use TSC `MonotonicNs` deadlines.
+    crate::time::calibration::calibrate_apic_tick();
     serial_write_line("[TIME] timer initialized");
     let frame = start_current_scheduler_thread().unwrap_or_else(|m| fatal_kernel_error(m));
     unsafe { restore_task_context(frame) }

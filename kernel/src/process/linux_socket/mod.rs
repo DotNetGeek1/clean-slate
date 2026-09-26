@@ -141,10 +141,6 @@ pub(crate) fn pool_live_count() -> usize {
     unsafe { (*SOCKET_POOL.get()).live_count() }
 }
 
-pub(crate) fn notify_request_complete(request_id: u64) -> usize {
-    crate::service::net_request_wake::notify_net_request_complete(request_id)
-}
-
 pub(crate) fn grant_linux_network_capabilities(pid: u64) -> Result<(), &'static str> {
     let rights = Rights::NET_CONNECT
         .union(Rights::NET_SEND)

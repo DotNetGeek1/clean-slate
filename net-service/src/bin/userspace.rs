@@ -42,14 +42,14 @@ use clean_slate_service_fixtures::{
     NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
     NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
-    NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK,
+    NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
 };
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::x86_64::{__cpuid, _rdrand64_step};
 use core::hint::spin_loop;
 use core::mem::{size_of, MaybeUninit};
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use rand_core::{CryptoRng, RngCore};
 
 const SYSCALL_NR_VERSION: u64 = 0;
@@ -222,12 +222,16 @@ fn monotonic_ticks() -> Result<u64, u64> {
 }
 
 fn tick_period_ns() -> u64 {
-    let period = net_request([NET_SUBOP_TICK_PERIOD_NS, 0, 0, 0, 0, 0]);
-    if period == 0 {
-        1_000_000
-    } else {
-        period
+    let cached = TICK_PERIOD_NS.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
     }
+    let period = net_request([NET_SUBOP_TICK_PERIOD_NS, 0, 0, 0, 0, 0]);
+    if period == 0 || period >= u64::MAX - 4095 {
+        return 1_000_000;
+    }
+    TICK_PERIOD_NS.store(period, Ordering::Relaxed);
+    period
 }
 
 fn ms_to_irq_ticks(ms: u64) -> u64 {
@@ -252,6 +256,57 @@ fn network_capability(device_id: u64) -> Result<u64, u64> {
 
 fn net_request(args: [u64; 6]) -> u64 {
     raw_syscall(SYSCALL_NR_NETWORK_REQUEST, args)
+}
+
+/// Blocks in `NET_SUBOP_WAIT_WORK` until a source in `mask` is ready or the IRQ-tick
+/// `deadline` passes (`None` = no timeout). Returns at once when `deadline <= now`.
+fn wait_net_work(mask: u64, now: u64, deadline: Option<u64>) -> Result<(), u64> {
+    let timeout_ns = match deadline {
+        None => 0,
+        Some(deadline) if deadline <= now => return Ok(()),
+        Some(deadline) => (deadline - now).saturating_mul(tick_period_ns()),
+    };
+    let handle = unsafe { NIC_INGRESS.raw_handle };
+    let status = net_request([NET_SUBOP_WAIT_WORK, handle, mask, timeout_ns, 0, 0]);
+    if status >= u64::MAX - 4095 {
+        return Err(status);
+    }
+    Ok(())
+}
+
+/// In-request wait for `consumer`'s next frame, a stack timer (`stack_deadline`), or the
+/// request `deadline`, all in IRQ ticks.
+fn wait_request_ingress(
+    consumer: StackConsumer,
+    now: u64,
+    deadline: u64,
+    stack_deadline: Option<u64>,
+) -> Result<(), NetworkResponse> {
+    if nic_ingress_stashed(consumer) > 0 {
+        return Ok(());
+    }
+    let until = stack_deadline.map_or(deadline, |timer| timer.min(deadline));
+    wait_net_work(NET_WAIT_WORK_RX, now, Some(until)).map_err(|_| NetworkResponse::Error {
+        code: NetworkError::Protocol.code(),
+    })
+}
+
+/// Idle between requests: ingest NIC frames into the TCP stack (ACKs, in-order data for
+/// connected Linux sockets, retransmit/TIME-WAIT timers), then block until a request, a
+/// frame, or the stack's next timer deadline.
+fn service_idle_wait() {
+    let Ok(now) = monotonic_ticks() else {
+        finish();
+    };
+    let tcp = shared_tcp_transport_mut();
+    let _ = tcp.poll(now);
+    if nic_ingress_stashed(StackConsumer::Tcp) > 0 {
+        return;
+    }
+    let mask = NET_WAIT_WORK_REQUESTS | NET_WAIT_WORK_RX;
+    if wait_net_work(mask, now, tcp.next_timer_deadline()).is_err() {
+        finish();
+    }
 }
 
 fn run_unauthorized_probe() -> Result<u64, u64> {
@@ -330,6 +385,9 @@ struct NicIngress {
 }
 
 static INGRESS_DROP_FULL: AtomicUsize = AtomicUsize::new(0);
+/// Frames that are neither ARP nor IPv4 UDP/TCP; no stack consumes them.
+static INGRESS_DROP_UNHANDLED: AtomicUsize = AtomicUsize::new(0);
+static TICK_PERIOD_NS: AtomicU64 = AtomicU64::new(0);
 
 static mut NIC_INGRESS: NicIngress = NicIngress {
     raw_handle: 0,
@@ -405,7 +463,19 @@ fn nic_ingress_enqueue(frame: FrameBuf) {
     match frame_ipv4_protocol(&frame) {
         Some(IpProtocol::UDP) => nic_ingress_stash_udp(frame),
         Some(IpProtocol::TCP) => nic_ingress_stash_tcp(frame),
-        _ => {}
+        _ => {
+            INGRESS_DROP_UNHANDLED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+#[allow(static_mut_refs)]
+fn nic_ingress_stashed(consumer: StackConsumer) -> usize {
+    unsafe {
+        match consumer {
+            StackConsumer::Udp => NIC_INGRESS.pending_udp.len,
+            StackConsumer::Tcp => NIC_INGRESS.pending_tcp.len,
+        }
     }
 }
 
@@ -610,66 +680,41 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         bootstrap.tls_heap_checkpoint = heap_checkpoint as u64;
         bootstrap.tls_heap_after_last = heap_checkpoint as u64;
     }
+    let Some(service) = (unsafe { (*service_state_slot()).as_mut() }) else {
+        finish();
+    };
     loop {
-        let service = unsafe {
-            match (*service_state_slot()).as_mut() {
-                Some(service) => service,
-                None => continue,
-            }
-        };
         let request_buf = unsafe { &mut *service_request_buf_ptr() };
         let payload_buf = unsafe { &mut *service_payload_buf_ptr() };
         let response_buf = unsafe { &mut *service_response_buf_ptr() };
         let response_payload = unsafe { &mut *service_response_payload_ptr() };
         drain_holder_exits(service);
-        let found = match service_next(raw_handle, request_buf, payload_buf) {
-            Ok(id) => id,
-            Err(_) => continue,
+        let Ok(found) = service_next(raw_handle, request_buf, payload_buf) else {
+            // Denied or stale authority is permanent for this instance.
+            finish();
         };
         if found == 0 {
-            let _ = net_request([NET_SUBOP_WAIT_WORK, raw_handle, 0, 0, 0, 0]);
+            service_idle_wait();
             continue;
         }
         let request_id = found;
-        let request = match NetworkRequest::decode(request_buf) {
-            Ok(request) => request,
-            Err(_) => continue,
+        let (response, out_len) = match decode_service_work(request_buf, payload_buf) {
+            Some((request, caller, payload)) => handle_service_request(
+                service,
+                bootstrap.service_generation,
+                caller,
+                request,
+                payload,
+                response_payload,
+            ),
+            // The kernel encoded this work item; complete it rather than strand the client.
+            None => (
+                NetworkResponse::Error {
+                    code: NetworkError::InvalidRequest.code(),
+                },
+                0,
+            ),
         };
-        let Ok(pid_bytes) = payload_buf[0..8].try_into() else {
-            continue;
-        };
-        let Ok(domain_bytes) = payload_buf[8..16].try_into() else {
-            continue;
-        };
-        let Ok(gen_bytes) = payload_buf[16..24].try_into() else {
-            continue;
-        };
-        let Ok(len_bytes) = payload_buf[24..28].try_into() else {
-            continue;
-        };
-        let caller = clean_slate_network::protocol::TrustedCaller::new(
-            u64::from_le_bytes(pid_bytes),
-            u64::from_le_bytes(domain_bytes),
-            u64::from_le_bytes(gen_bytes),
-        );
-        let payload_len = u32::from_le_bytes(len_bytes) as usize;
-        if payload_len > NETWORK_MAX_PAYLOAD_BYTES {
-            continue;
-        }
-        let payload_start = NETWORK_SERVICE_NEXT_METADATA_BYTES;
-        let payload_end = payload_start.saturating_add(payload_len);
-        if payload_end > payload_buf.len() {
-            continue;
-        }
-        let payload = &payload_buf[payload_start..payload_end];
-        let (response, out_len) = handle_service_request(
-            service,
-            bootstrap.service_generation,
-            caller,
-            request,
-            payload,
-            response_payload,
-        );
         response_buf.copy_from_slice(&response.encode());
         let _ = service_complete(
             raw_handle,
@@ -679,6 +724,29 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             &response_payload[..out_len as usize],
         );
     }
+}
+
+fn decode_service_work<'a>(
+    request_buf: &[u8; NETWORK_REQUEST_BYTES],
+    payload_buf: &'a [u8; NETWORK_SERVICE_NEXT_WIRE_BYTES],
+) -> Option<(
+    NetworkRequest,
+    clean_slate_network::protocol::TrustedCaller,
+    &'a [u8],
+)> {
+    let request = NetworkRequest::decode(request_buf).ok()?;
+    let word = |range: core::ops::Range<usize>| -> Option<u64> {
+        Some(u64::from_le_bytes(payload_buf.get(range)?.try_into().ok()?))
+    };
+    let caller =
+        clean_slate_network::protocol::TrustedCaller::new(word(0..8)?, word(8..16)?, word(16..24)?);
+    let payload_len = u32::from_le_bytes(payload_buf.get(24..28)?.try_into().ok()?) as usize;
+    if payload_len > NETWORK_MAX_PAYLOAD_BYTES {
+        return None;
+    }
+    let payload_start = NETWORK_SERVICE_NEXT_METADATA_BYTES;
+    let payload = payload_buf.get(payload_start..payload_start.checked_add(payload_len)?)?;
+    Some((request, caller, payload))
 }
 
 fn plain_tcp_slot(session: SessionId) -> Option<&'static mut Option<SessionId>> {
@@ -786,7 +854,7 @@ fn handle_service_udp_send(
         if now >= deadline {
             break;
         }
-        yield_cpu();
+        wait_request_ingress(StackConsumer::Udp, now, deadline, None)?;
     }
     Err(NetworkResponse::Error {
         code: NetworkError::Timeout.code(),
@@ -884,7 +952,9 @@ fn handle_service_udp_receive(
         if now >= deadline {
             break;
         }
-        yield_cpu();
+        if let Err(response) = wait_request_ingress(StackConsumer::Udp, now, deadline, None) {
+            return (response, 0);
+        }
     }
     (
         NetworkResponse::Error {
@@ -892,21 +962,6 @@ fn handle_service_udp_receive(
         },
         0,
     )
-}
-
-#[allow(static_mut_refs)]
-fn tcp_ingress_pending_count() -> usize {
-    unsafe { NIC_INGRESS.pending_tcp.len }
-}
-
-/// After active-open completes, drain queued TCP ingress until idle (bounded).
-fn drain_post_connect_tcp_ingress(tcp: &mut TcpTransport<ServiceLink>, tick: u64) {
-    for _ in 0..INGRESS_READ_BUDGET {
-        if tcp_ingress_pending_count() == 0 {
-            break;
-        }
-        let _ = tcp.poll(tick);
-    }
 }
 
 fn poll_plain_tcp_until<F>(
@@ -927,10 +982,11 @@ where
         if ready(tcp, now)? {
             return Ok(());
         }
-        if now.saturating_sub(start) >= deadline_ticks {
+        let deadline = start.saturating_add(deadline_ticks);
+        if now >= deadline {
             break;
         }
-        yield_cpu();
+        wait_request_ingress(StackConsumer::Tcp, now, deadline, tcp.next_timer_deadline())?;
     }
     Err(NetworkResponse::Error {
         code: NetworkError::Timeout.code(),
@@ -980,7 +1036,6 @@ fn establish_plain_tcp_session(
             }
         },
     )?;
-    drain_post_connect_tcp_ingress(tcp, tick);
     if let Some(slot) = plain_tcp_slot(session) {
         *slot = Some(tcp_session);
     }
@@ -1022,10 +1077,7 @@ fn handle_service_plain_tcp_send(
 }
 
 fn handle_service_plain_tcp_receive(
-    service: &mut ServiceState,
-    _raw_handle: u64,
     service_generation: u64,
-    caller: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
     max_len: u32,
     response_payload: &mut [u8],
@@ -1058,61 +1110,13 @@ fn handle_service_plain_tcp_receive(
     let want = max_len
         .min(response_payload.len())
         .min(NETWORK_MAX_PAYLOAD_BYTES);
-    let _ = tcp.poll(tick);
-    match tcp.receive(tcp_session, owner, &mut response_payload[..want]) {
-        Ok(0) => {}
-        Ok(n) => {
-            if service
-                .stage_response_payload(caller, session, &response_payload[..n])
-                .is_err()
-            {
-                return (
-                    NetworkResponse::Error {
-                        code: NetworkError::InvalidRequest.code(),
-                    },
-                    0,
-                );
-            }
-            return (
-                NetworkResponse::Receive {
-                    payload_len: n as u32,
-                },
-                n as u32,
-            );
-        }
-        Err(NetworkError::Closed) => {
-            return (NetworkResponse::Receive { payload_len: 0 }, 0);
-        }
-        Err(err) => {
-            return (
-                NetworkResponse::Error {
-                    code: NetworkError::from(err).code(),
-                },
-                0,
-            );
-        }
-    }
     let deadline = tick.saturating_add(ms_to_irq_ticks(PLAIN_TCP_IO_TIMEOUT_MS));
+    let mut now = tick;
     for _ in 0..TLS_POLL_LIMIT {
-        let now = match monotonic_ticks() {
-            Ok(now) => now,
-            Err(_) => break,
-        };
         let _ = tcp.poll(now);
         match tcp.receive(tcp_session, owner, &mut response_payload[..want]) {
             Ok(0) => {}
             Ok(n) => {
-                if service
-                    .stage_response_payload(caller, session, &response_payload[..n])
-                    .is_err()
-                {
-                    return (
-                        NetworkResponse::Error {
-                            code: NetworkError::InvalidRequest.code(),
-                        },
-                        0,
-                    );
-                }
                 return (
                     NetworkResponse::Receive {
                         payload_len: n as u32,
@@ -1135,7 +1139,15 @@ fn handle_service_plain_tcp_receive(
         if now >= deadline {
             break;
         }
-        yield_cpu();
+        if let Err(response) =
+            wait_request_ingress(StackConsumer::Tcp, now, deadline, tcp.next_timer_deadline())
+        {
+            return (response, 0);
+        }
+        now = match monotonic_ticks() {
+            Ok(now) => now,
+            Err(_) => break,
+        };
     }
     (
         NetworkResponse::Error {
@@ -1144,7 +1156,6 @@ fn handle_service_plain_tcp_receive(
         0,
     )
 }
-
 mod linux_socket_data_plane {
     use super::*;
 
@@ -1258,10 +1269,7 @@ mod linux_socket_data_plane {
                 ) =>
             {
                 Some(handle_service_plain_tcp_receive(
-                    service,
-                    raw_handle,
                     service_generation,
-                    caller,
                     session,
                     max_len,
                     response_payload,
@@ -1410,7 +1418,9 @@ fn handle_service_resolve(
         if now >= deadline {
             break;
         }
-        yield_cpu();
+        if let Err(response) = wait_request_ingress(StackConsumer::Udp, now, deadline, None) {
+            return response;
+        }
     }
     NetworkResponse::Error {
         code: NetworkError::Timeout.code(),
@@ -1882,7 +1892,7 @@ fn drain_tcp_close(
         if now >= deadline {
             break;
         }
-        yield_cpu();
+        wait_request_ingress(StackConsumer::Tcp, now, deadline, tcp.next_timer_deadline())?;
     }
     Ok(())
 }

@@ -244,12 +244,13 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 9] = [
     "[M9.E] PASS",
 ];
 const M9_LINUX_SOCKET_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
-const M9_LINUX_SOCKET_ACCEPTANCE_MARKERS: [&str; 8] = [
+const M9_LINUX_SOCKET_ACCEPTANCE_MARKERS: [&str; 9] = [
     "[M9.L] creating linux socket acceptance",
     "[NET ] service started",
     "[TIME] timer initialized",
     "[M9.P] dns-a ok",
     "[M9.P] http ok",
+    "[M9.P] banner ok",
     "[M9.L] pool_baseline=",
     "[M9.L] stale ESTALE ok",
     "[M9.L] PASS",

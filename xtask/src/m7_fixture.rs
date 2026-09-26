@@ -383,10 +383,9 @@ impl QemuSocketDevice {
                 if frame.len() >= 14 && u16::from_be_bytes([frame[12], frame[13]]) == 0x0806 {
                     self.events.push("[FIX ] arp request".to_owned());
                 }
-                if self.m9_profile && self.try_answer_m9_refused_syn(&frame) {
-                    continue;
+                if !(self.m9_profile && self.try_answer_m9_refused_syn(&frame)) {
+                    self.rx_queue.push_back(frame);
                 }
-                self.rx_queue.push_back(frame);
             } else {
                 self.events
                     .push(format!("[FIX ] dropped frame len={frame_len}"));

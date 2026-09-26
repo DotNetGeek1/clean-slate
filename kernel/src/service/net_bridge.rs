@@ -208,7 +208,7 @@ impl ClientSlot {
 const VIRTIO_RX_PENDING_DEPTH: usize =
     clean_slate_network::limits::MAX_DEVICE_RX_QUEUE_DEPTH as usize;
 /// Max virtio RX completions drained per LAPIC tick (#167; bounded ISR work).
-pub(crate) const TIMER_VIRTIO_RX_HARVEST_BUDGET: usize = 4;
+const TIMER_VIRTIO_RX_HARVEST_BUDGET: usize = 4;
 /// Max completions pulled from the NIC on one `RAW_RECEIVE` when the pending ring is empty.
 const RAW_RECEIVE_HARVEST_BUDGET: usize = 4;
 
@@ -292,15 +292,18 @@ impl NetBridge {
         generation: u64,
     ) -> SessionGeneration {
         self.ensure_virtio_backend();
-        let _ = self
-            .raw_backend
-            .reset(&mut self.loopback, self.virtio.as_mut());
         self.holder_exit_head = 0;
         self.holder_exit_tail = 0;
         self.pending_holder_exit_ack = None;
-        self.virtio_rx_pending_head = 0;
-        self.virtio_rx_pending_tail = 0;
-        self.virtio_rx_pending_count = 0;
+        // The timer ISR harvests into the pending ring; reset device and ring atomically.
+        crate::arch::x86_64::cpu::without_interrupts(|| {
+            let _ = self
+                .raw_backend
+                .reset(&mut self.loopback, self.virtio.as_mut());
+            self.virtio_rx_pending_head = 0;
+            self.virtio_rx_pending_tail = 0;
+            self.virtio_rx_pending_count = 0;
+        });
         #[cfg(feature = "m7-net-service-self-test")]
         {
             self.holder_exit_acked_pid = None;
@@ -487,20 +490,6 @@ impl NetBridge {
             || self.holder_exit_head != self.holder_exit_tail
     }
 
-    pub(crate) fn net_service_work_counts(&self) -> (usize, usize) {
-        let pending = self
-            .slots
-            .iter()
-            .filter(|slot| slot.state == ClientSlotState::Pending)
-            .count();
-        let holder_exits = if self.holder_exit_head != self.holder_exit_tail {
-            1
-        } else {
-            0
-        };
-        (pending, holder_exits)
-    }
-
     pub fn service_next(&mut self) -> Option<(u64, NetworkRequest, u32, TrustedCaller)> {
         let index = self
             .slots
@@ -568,14 +557,18 @@ impl NetBridge {
                 };
                 slot.response_payload_len = 0;
                 slot.state = ClientSlotState::Done;
+                // Clients block in `NET_SUBOP_POLL` on the completion key without a deadline.
+                crate::service::net_request_wake::notify_net_request_complete(slot.request_id);
                 failed += 1;
             }
         }
         self.inflight_failed = self.inflight_failed.saturating_add(failed);
-        let _ = self
-            .raw_backend
-            .reset(&mut self.loopback, self.virtio.as_mut());
-        self.service_pid = 0;
+        crate::arch::x86_64::cpu::without_interrupts(|| {
+            self.service_pid = 0;
+            let _ = self
+                .raw_backend
+                .reset(&mut self.loopback, self.virtio.as_mut());
+        });
         failed
     }
 
@@ -641,15 +634,7 @@ impl NetBridge {
         frame
     }
 
-    pub(crate) fn has_virtio_rx_pending(&self) -> bool {
-        self.virtio_rx_pending_count > 0
-    }
-
-    pub(crate) fn virtio_rx_stats(&self) -> VirtioRxStats {
-        self.virtio_rx_stats
-    }
-
-    pub(crate) fn virtio_rx_unconsumed_completions(&self) -> u16 {
+    fn virtio_rx_unconsumed_completions(&self) -> u16 {
         self.virtio
             .as_ref()
             .map(VirtioNetDevice::rx_ring_snapshot)
@@ -664,7 +649,7 @@ impl NetBridge {
         }
         self.virtio_rx_stats.stranded_observed =
             self.virtio_rx_stats.stranded_observed.saturating_add(1);
-        self.log_virtio_rx_diagnostic(reason, unconsumed);
+        self.maybe_log_virtio_rx_diagnostic_once(reason);
     }
 
     fn log_virtio_rx_diagnostic(&self, reason: &'static str, unconsumed: u16) {
@@ -701,11 +686,14 @@ impl NetBridge {
 
     fn harvest_virtio_rx_locked(&mut self, budget: usize) -> usize {
         let mut harvested = 0usize;
+        let mut pending_full = false;
         for _ in 0..budget {
             if self.virtio_rx_pending_count as usize >= VIRTIO_RX_PENDING_DEPTH {
+                // Completions stay in the device ring until the service drains the pending ring.
                 self.virtio_rx_stats.pending_drop_full =
                     self.virtio_rx_stats.pending_drop_full.saturating_add(1);
                 self.maybe_log_virtio_rx_diagnostic_once("pending-full");
+                pending_full = true;
                 break;
             }
             let frame = match self.virtio.as_mut() {
@@ -731,25 +719,20 @@ impl NetBridge {
         }
         if harvested > 0 {
             crate::service::net_request_wake::wake_net_service_work();
-        } else if self.virtio_rx_unconsumed_completions() > 0 {
+        } else if !pending_full && self.virtio_rx_unconsumed_completions() > 0 {
             self.note_stranded_virtio_rx("harvest-idle");
         }
         harvested
     }
 
-    /// Drain up to `budget` virtio RX completions into the kernel pending ring.
-    pub(crate) fn harvest_virtio_rx(&mut self, budget: usize) -> usize {
-        if !matches!(self.raw_backend, RawBackend::Virtio) || self.service_pid == 0 {
-            return 0;
-        }
-        crate::arch::x86_64::cpu::without_interrupts(|| self.harvest_virtio_rx_locked(budget))
-    }
-
+    /// Drain up to [`TIMER_VIRTIO_RX_HARVEST_BUDGET`] virtio RX completions into the pending ring.
     pub(crate) fn timer_harvest_virtio_rx(&mut self) {
         if !matches!(self.raw_backend, RawBackend::Virtio) || self.service_pid == 0 {
             return;
         }
-        let _ = self.harvest_virtio_rx(TIMER_VIRTIO_RX_HARVEST_BUDGET);
+        crate::arch::x86_64::cpu::without_interrupts(|| {
+            let _ = self.harvest_virtio_rx_locked(TIMER_VIRTIO_RX_HARVEST_BUDGET);
+        });
     }
 
     pub fn raw_receive(
@@ -759,33 +742,42 @@ impl NetBridge {
         if !self.is_live_service(service_pid) {
             return Err(NetworkDeviceError::NotReady);
         }
-        if let Some(frame) = self.pop_virtio_rx_pending() {
-            self.virtio_rx_stats.delivered = self.virtio_rx_stats.delivered.saturating_add(1);
-            return Ok(Some(frame));
+        if !matches!(self.raw_backend, RawBackend::Virtio) {
+            return self
+                .raw_backend
+                .receive(&mut self.loopback, self.virtio.as_mut());
         }
-        if matches!(self.raw_backend, RawBackend::Virtio) {
-            for _ in 0..4 {
-                if let Some(frame) = self.pop_virtio_rx_pending() {
-                    self.virtio_rx_stats.delivered =
-                        self.virtio_rx_stats.delivered.saturating_add(1);
-                    return Ok(Some(frame));
-                }
-                if self.virtio_rx_unconsumed_completions() == 0 {
-                    break;
-                }
-                let _ = self.harvest_virtio_rx(RAW_RECEIVE_HARVEST_BUDGET);
+        // The timer ISR pushes into the pending ring; pop with interrupts masked so its
+        // count update cannot interleave with ours.
+        crate::arch::x86_64::cpu::without_interrupts(|| {
+            if self.virtio_rx_pending_count == 0 {
+                let _ = self.harvest_virtio_rx_locked(RAW_RECEIVE_HARVEST_BUDGET);
             }
-            if let Some(frame) = self.pop_virtio_rx_pending() {
+            let frame = self.pop_virtio_rx_pending();
+            if frame.is_some() {
                 self.virtio_rx_stats.delivered = self.virtio_rx_stats.delivered.saturating_add(1);
-                return Ok(Some(frame));
             }
-            if self.virtio_rx_unconsumed_completions() > 0 {
-                self.note_stranded_virtio_rx("raw-empty");
-            }
-            return Ok(None);
+            Ok(frame)
+        })
+    }
+
+    /// Whether a `RAW_RECEIVE` would return a frame now. Harvests stranded virtio completions
+    /// (used index ahead of the consumed index) so a missed timer harvest cannot hide them.
+    /// Caller masks interrupts.
+    pub(crate) fn raw_rx_ready(&mut self) -> bool {
+        if self.service_pid == 0 {
+            return false;
         }
-        self.raw_backend
-            .receive(&mut self.loopback, self.virtio.as_mut())
+        match self.raw_backend {
+            RawBackend::Loopback => self.loopback.rx_count > 0,
+            RawBackend::Virtio => {
+                if self.virtio_rx_pending_count == 0 && self.virtio_rx_unconsumed_completions() > 0
+                {
+                    let _ = self.harvest_virtio_rx_locked(TIMER_VIRTIO_RX_HARVEST_BUDGET);
+                }
+                self.virtio_rx_pending_count > 0
+            }
+        }
     }
 
     pub fn raw_geometry(&self, service_pid: u64) -> LinkProperties {

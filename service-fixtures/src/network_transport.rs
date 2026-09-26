@@ -39,8 +39,17 @@ pub const NET_SUBOP_ACK_HOLDER_EXIT: u64 = 9;
 pub const NET_SUBOP_MONOTONIC_TICKS: u64 = 10;
 /// Returns LAPIC IRQ period in nanoseconds (0 if uncalibrated).
 pub const NET_SUBOP_TICK_PERIOD_NS: u64 = 11;
-/// Block until a client request is queued for the net service (#167).
+/// Net-service idle block (#167): `rsi` = raw-device handle, `rdx` = non-empty subset of
+/// [`NET_WAIT_WORK_MASK`], `r10` = relative timeout in ns (0 = no timeout, requires a
+/// calibrated TSC otherwise). Returns 0 when a selected source is already ready, else the
+/// #145 native wait outcome after blocking (woken / timed out / cancelled); callers re-check
+/// state either way. Errors: `EINVAL` (bad mask, TSC uncalibrated), `EACCES`, `ESTALE`.
 pub const NET_SUBOP_WAIT_WORK: u64 = 12;
+/// Wake for a queued client request or a pending holder-exit notification.
+pub const NET_WAIT_WORK_REQUESTS: u64 = 1 << 0;
+/// Wake when `NET_SUBOP_RAW_RECEIVE` would return a frame.
+pub const NET_WAIT_WORK_RX: u64 = 1 << 1;
+pub const NET_WAIT_WORK_MASK: u64 = NET_WAIT_WORK_REQUESTS | NET_WAIT_WORK_RX;
 
 pub const NET_SERVICE_ROLE_ID: u64 = 1;
 

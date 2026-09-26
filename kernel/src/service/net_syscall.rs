@@ -18,17 +18,20 @@ use clean_slate_service_fixtures::{
     NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL, NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY,
     NET_SUBOP_RAW_RECEIVE, NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE,
     NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT, NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK,
+    NET_WAIT_WORK_MASK, NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
 };
 
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
-use crate::capability::network::{authorize_network_op, authorize_network_op_quiet, NetworkOp};
+use crate::capability::network::{authorize_network_op, NetworkOp};
 use crate::capability::with_capability_space;
-use crate::diagnostics::log::kernel_log_fmt;
 use crate::interrupt::timer::kernel_ticks;
 use crate::mm::user_mapping::validate_user_pointer_range;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
-use crate::sched::wait::{block_current_thread_with_resume, BlockedResume, WaitKey, WaitOutcome};
+use crate::sched::wait::{
+    block_current_thread, block_current_thread_with_resume, encode_wait_outcome, BlockedResume,
+    Deadline, WaitKey, WaitOutcome,
+};
 use crate::service::instance_generation::live_instance_generation_for_pid;
 use crate::service::net_bridge::{net_bridge_mut, NetBridgeError};
 use crate::service::net_request_wake::{
@@ -36,7 +39,7 @@ use crate::service::net_request_wake::{
 };
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::current_syscall_caller_pid;
-use crate::time::irq_period_ns;
+use crate::time::{irq_period_ns, monotonic_ns, tsc_hz};
 use clean_slate_service_fixtures::NETWORK_SERVICE_ID;
 
 fn current_holder() -> Result<HolderId, u64> {
@@ -84,35 +87,6 @@ fn denial_status(reason: DenialReason) -> u64 {
             SYSCALL_EACCES
         }
     }
-}
-
-/// Check `ready` with interrupts masked, then block on `key` if still not ready (#145).
-fn block_net_idle(
-    frame: &mut SyscallContext,
-    key: WaitKey,
-    ready: fn() -> bool,
-    retry: fn(&mut SyscallContext),
-    idle_label: &'static str,
-) {
-    if without_interrupts(ready) {
-        frame.rax = 0;
-        return;
-    }
-    let bridge = net_bridge_mut();
-    let (pending, holder) = bridge.net_service_work_counts();
-    let rx_pending = bridge.has_virtio_rx_pending();
-    let rx_unconsumed = bridge.virtio_rx_unconsumed_completions();
-    let rx_stats = bridge.virtio_rx_stats();
-    kernel_log_fmt(format_args!(
-        "[NET ] idle block={idle_label} pending={pending} holder={holder} rx_pending={rx_pending} \
-         rx_avail={rx_unconsumed} rx_stats=harv={} del={} drop={} err={} strand={}\n",
-        rx_stats.harvested,
-        rx_stats.delivered,
-        rx_stats.pending_drop_full,
-        rx_stats.harvest_device_err,
-        rx_stats.stranded_observed,
-    ));
-    block_net_syscall_restart(frame, key, 0, retry);
 }
 
 fn block_net_syscall_restart(
@@ -331,7 +305,7 @@ fn handle_poll(frame: &mut SyscallContext) {
             return;
         }
     };
-    if let Err(reason) = authorize_network_op_quiet(holder, frame.rsi, NetworkOp::Receive, None) {
+    if let Err(reason) = authorize_network_op(holder, frame.rsi, NetworkOp::Receive, None) {
         frame.rax = denial_status(reason);
         return;
     }
@@ -649,16 +623,21 @@ fn handle_ack_holder_exit(frame: &mut SyscallContext) {
     }
 }
 
-fn net_work_idle_ready() -> bool {
+/// Whether any wake source selected by `mask` is ready. Caller masks interrupts so the check
+/// and the subsequent block see one consistent state (wakes in between become pending wakes).
+fn net_work_ready(mask: u64) -> bool {
     let bridge = net_bridge_mut();
-    if bridge.virtio_rx_unconsumed_completions() > 0 {
-        let _ =
-            bridge.harvest_virtio_rx(crate::service::net_bridge::TIMER_VIRTIO_RX_HARVEST_BUDGET);
-    }
-    bridge.net_service_has_work() || bridge.has_virtio_rx_pending()
+    (mask & NET_WAIT_WORK_REQUESTS != 0 && bridge.net_service_has_work())
+        || (mask & NET_WAIT_WORK_RX != 0 && bridge.raw_rx_ready())
 }
 
 fn handle_wait_work(frame: &mut SyscallContext) {
+    let mask = frame.rdx;
+    if mask == 0 || mask & !NET_WAIT_WORK_MASK != 0 {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
+    let timeout_ns = frame.r10;
     let holder = match current_holder() {
         Ok(holder) => holder,
         Err(status) => {
@@ -670,17 +649,29 @@ fn handle_wait_work(frame: &mut SyscallContext) {
         frame.rax = SYSCALL_EACCES;
         return;
     }
-    if let Err(reason) = authorize_network_op_quiet(holder, frame.rsi, NetworkOp::RawDevice, None) {
+    if let Err(reason) = authorize_network_op(holder, frame.rsi, NetworkOp::RawDevice, None) {
         frame.rax = denial_status(reason);
         return;
     }
-    block_net_idle(
-        frame,
-        net_service_work_wait_key(),
-        net_work_idle_ready,
-        handle_wait_work,
-        "work",
-    );
+    let deadline = if timeout_ns == 0 {
+        None
+    } else {
+        if tsc_hz().is_none() {
+            frame.rax = SYSCALL_EINVAL;
+            return;
+        }
+        Some(Deadline::MonotonicNs(
+            monotonic_ns().saturating_add(timeout_ns),
+        ))
+    };
+    if without_interrupts(|| net_work_ready(mask)) {
+        frame.rax = 0;
+        return;
+    }
+    match block_current_thread(frame, net_service_work_wait_key(), deadline) {
+        Ok(outcome) => frame.rax = encode_wait_outcome(outcome),
+        Err(message) => crate::diagnostics::qemu::fatal_kernel_error(message),
+    }
 }
 
 fn handle_monotonic_ticks(frame: &mut SyscallContext) {
