@@ -15,19 +15,20 @@ use crate::process::linux_signal;
 use crate::sched::wait::Deadline;
 use crate::time::{
     monotonic_deadline_from_millis, monotonic_deadline_from_timespec, monotonic_ns,
-    timespec_from_remaining_ns,
+    timespec_from_monotonic_ns, timespec_from_remaining_ns,
 };
 #[cfg(feature = "m9-linux-runtime-self-test")]
 use crate::time::{sleep_budget_ns_from_millis, sleep_budget_ns_from_timespec};
 use clean_slate_linux_abi::{
     decode_pollfd, decode_sigaction, decode_timespec, encode_pollfd, encode_sigaction, LinuxErrno,
-    LinuxSyscallRequest, LinuxSyscallResult, PollFd, Sigaction, EFAULT, EINVAL, ENOTTY, POLLERR,
-    POLLHUP, POLLIN, POLLNVAL, POLLOUT, SYS_ARCH_PRCTL, SYS_BRK, SYS_GETPID, SYS_IOCTL, SYS_MMAP,
-    SYS_MUNMAP,     SYS_GETEGID, SYS_GETEUID, SYS_GETGID, SYS_GETUID, SYS_NANOSLEEP, SYS_POLL, SYS_RT_SIGACTION,
-    SYS_RT_SIGPROCMASK, SYS_SET_TID_ADDRESS, SYS_UNAME, TCGETS, TIOCGWINSZ,
+    LinuxSyscallRequest, LinuxSyscallResult, PollFd, Sigaction, CLOCK_MONOTONIC, EFAULT, EINVAL,
+    ENOTTY, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT, SYS_ARCH_PRCTL, SYS_BRK,
+    SYS_CLOCK_GETTIME, SYS_GETEUID, SYS_GETPID, SYS_IOCTL, SYS_MMAP, SYS_MUNMAP, SYS_NANOSLEEP,
+    SYS_POLL, SYS_RT_SIGACTION, SYS_RT_SIGPROCMASK, SYS_SET_TID_ADDRESS, SYS_UNAME, TCGETS,
+    TIOCGWINSZ,
 };
 
-/// Single-user M9 fixture personality: real uid/gid/euid/egid are 0 (see auxv AT_*).
+/// Single-user M9 fixture personality: effective uid is 0 (matches auxv `AT_EUID`).
 const LINUX_FIXTURE_UID: u64 = 0;
 
 const USER_COPY_POLL: usize = 8;
@@ -36,11 +37,9 @@ pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
     match nr {
         SYS_ARCH_PRCTL => Some(handle_sys_arch_prctl),
         SYS_BRK => Some(handle_sys_brk),
+        SYS_CLOCK_GETTIME => Some(handle_sys_clock_gettime),
         SYS_GETPID => Some(handle_sys_getpid),
-        SYS_GETUID => Some(handle_sys_getuid),
         SYS_GETEUID => Some(handle_sys_geteuid),
-        SYS_GETGID => Some(handle_sys_getgid),
-        SYS_GETEGID => Some(handle_sys_getegid),
         SYS_IOCTL => Some(handle_sys_ioctl),
         SYS_MMAP => Some(handle_sys_mmap),
         SYS_MUNMAP => Some(handle_sys_munmap),
@@ -80,13 +79,6 @@ fn handle_sys_getpid(
     Ok(ctx.pid)
 }
 
-fn handle_sys_getuid(
-    _request: &LinuxSyscallRequest,
-    _ctx: &mut LinuxSyscallContext<'_>,
-) -> LinuxSyscallResult {
-    Ok(LINUX_FIXTURE_UID)
-}
-
 fn handle_sys_geteuid(
     _request: &LinuxSyscallRequest,
     _ctx: &mut LinuxSyscallContext<'_>,
@@ -94,18 +86,21 @@ fn handle_sys_geteuid(
     Ok(LINUX_FIXTURE_UID)
 }
 
-fn handle_sys_getgid(
-    _request: &LinuxSyscallRequest,
+/// Only `CLOCK_MONOTONIC` (calibrated TSC) is backed; there is no wall clock, so every other
+/// clock id fails closed with `EINVAL`.
+fn handle_sys_clock_gettime(
+    request: &LinuxSyscallRequest,
     _ctx: &mut LinuxSyscallContext<'_>,
 ) -> LinuxSyscallResult {
-    Ok(LINUX_FIXTURE_UID)
-}
-
-fn handle_sys_getegid(
-    _request: &LinuxSyscallRequest,
-    _ctx: &mut LinuxSyscallContext<'_>,
-) -> LinuxSyscallResult {
-    Ok(LINUX_FIXTURE_UID)
+    if request.args[0] != CLOCK_MONOTONIC {
+        return Err(EINVAL);
+    }
+    let ts = timespec_from_monotonic_ns(monotonic_ns());
+    let mut bytes = [0u8; 16];
+    bytes[0..8].copy_from_slice(&ts.tv_sec.to_le_bytes());
+    bytes[8..16].copy_from_slice(&ts.tv_nsec.to_le_bytes());
+    write_user(request.args[1], &bytes)?;
+    Ok(0)
 }
 
 fn handle_sys_ioctl(

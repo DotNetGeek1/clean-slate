@@ -459,6 +459,20 @@ fn build_dns_response(query: &[u8], m9_profile: bool) -> Option<(String, Vec<u8>
         response.extend_from_slice(&question);
         return Some((name, response));
     }
+    if qtype != 1 && m9_profile {
+        // Frozen `fixture-responder.py`: every other query type is NXDOMAIN (e.g. the
+        // reverse PTR lookup BusyBox nslookup issues after the A/AAAA exchange).
+        let question = query.get(12..qend + 4)?.to_vec();
+        let mut response = Vec::with_capacity(question.len() + 12);
+        response.extend_from_slice(&id);
+        response.extend_from_slice(&0x8183u16.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&question);
+        return Some((name, response));
+    }
     if qtype != 1 {
         return None;
     }
@@ -541,5 +555,28 @@ impl phy::TxToken for QemuTxToken<'_> {
         }
         let _ = self.device.write_frame_to_socket(&buffer);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_dns_response;
+
+    /// PTR query/reply bytes from `fixtures/busybox/frozen/traces/nslookup-fixture.strace`.
+    const FROZEN_PTR_QUERY: &[u8] =
+        b"L2\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x0250\x010\x0277\x0210\x07in-addr\x04arpa\x00\x00\x0c\x00\x01";
+    const FROZEN_PTR_REPLY: &[u8] =
+        b"L2\x81\x83\x00\x01\x00\x00\x00\x00\x00\x00\x0250\x010\x0277\x0210\x07in-addr\x04arpa\x00\x00\x0c\x00\x01";
+
+    #[test]
+    fn m9_profile_answers_ptr_with_frozen_nxdomain_bytes() {
+        let (name, reply) = build_dns_response(FROZEN_PTR_QUERY, true).expect("PTR reply");
+        assert_eq!(name, "50.0.77.10.in-addr.arpa");
+        assert_eq!(reply, FROZEN_PTR_REPLY);
+    }
+
+    #[test]
+    fn m7_profile_still_ignores_ptr() {
+        assert!(build_dns_response(FROZEN_PTR_QUERY, false).is_none());
     }
 }
