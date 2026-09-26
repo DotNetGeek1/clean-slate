@@ -19,8 +19,11 @@ const DEFAULT_FCW: u16 = 0x037f;
 /// Architectural reset MXCSR: all SIMD exceptions masked, round-to-nearest.
 const DEFAULT_MXCSR: u32 = 0x1f80;
 
+#[cfg(not(test))]
 const CR4_OSFXSR: u64 = 1 << 9;
+#[cfg(not(test))]
 const CR4_OSXMMEXCPT: u64 = 1 << 10;
+#[cfg(not(test))]
 const CR4_OSXSAVE: u64 = 1 << 18;
 
 #[derive(Clone, Copy)]
@@ -95,6 +98,7 @@ pub(super) fn activate_user_slot(slot: usize) {
 }
 
 /// `fork(2)`: the child resumes with the parent's register state at the syscall.
+#[cfg(feature = "m8-linux-image")]
 pub(crate) fn inherit_for_fork(parent_slot: usize, child_slot: usize) {
     let fpu = state();
     if fpu.owner == Some(parent_slot) {
@@ -105,6 +109,11 @@ pub(crate) fn inherit_for_fork(parent_slot: usize, child_slot: usize) {
 }
 
 /// `execve(2)`: the new image starts from the architectural reset state.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 pub(crate) fn reset_for_exec(slot: usize) {
     let fpu = state();
     fpu.areas[slot] = DEFAULT_AREA;

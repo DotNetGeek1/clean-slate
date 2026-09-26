@@ -4,7 +4,6 @@ use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::interrupt::timer::initialize_timer;
-use crate::ipc::endpoint_table_mut;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::PAGE_SIZE;

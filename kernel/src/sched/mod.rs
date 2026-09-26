@@ -150,6 +150,12 @@ impl Scheduler {
         )
     }
 
+    /// Kernel stack top a user thread in `slot` must be configured with.
+    #[cfg(test)]
+    pub(crate) fn user_kernel_stack_top(slot: usize) -> u64 {
+        crate::arch::x86_64::context_switch::task_stack_top(&unsafe { task_stacks_mut() }[slot])
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn configure_thread(
         &mut self,
@@ -172,7 +178,6 @@ impl Scheduler {
                 return Err("kernel stack top must match scheduler slot task stack");
             }
         }
-        #[cfg(not(test))]
         fpu::reset_slot(slot);
         self.threads[slot] = Thread {
             id,
@@ -206,7 +211,6 @@ impl Scheduler {
     /// resumes with another thread's FPU/SSE registers.
     pub(super) fn make_current(&mut self, next: usize) {
         self.current_thread = Some(next);
-        #[cfg(not(test))]
         if self.threads[next].kind == ThreadKind::User {
             fpu::activate_user_slot(next);
         }
@@ -878,7 +882,15 @@ mod tests {
             .configure_thread(0, 11, 0, ThreadKind::Kernel, 0x1000, 0x1000, 0x1000)
             .expect("kernel thread");
         scheduler
-            .configure_thread(1, 22, 7, ThreadKind::User, 0x2000, 0x2000, 0x2000)
+            .configure_thread(
+                1,
+                22,
+                7,
+                ThreadKind::User,
+                Scheduler::user_kernel_stack_top(1),
+                0x2000,
+                0x2000,
+            )
             .expect("user thread");
 
         assert_eq!(scheduler.threads[0].kind, ThreadKind::Kernel);
@@ -893,10 +905,26 @@ mod tests {
     fn process_resource_helpers_count_and_reap_owned_threads() {
         let mut scheduler = Scheduler::new();
         scheduler
-            .configure_thread(0, 11, 7, ThreadKind::User, 0x1000, 0x1000, 0x1000)
+            .configure_thread(
+                0,
+                11,
+                7,
+                ThreadKind::User,
+                Scheduler::user_kernel_stack_top(0),
+                0x1000,
+                0x1000,
+            )
             .expect("thread one");
         scheduler
-            .configure_thread(1, 12, 7, ThreadKind::User, 0x2000, 0x2000, 0x2000)
+            .configure_thread(
+                1,
+                12,
+                7,
+                ThreadKind::User,
+                Scheduler::user_kernel_stack_top(1),
+                0x2000,
+                0x2000,
+            )
             .expect("thread two");
         scheduler.threads[0].state = ThreadState::Exited;
         scheduler.threads[1].state = ThreadState::Ready;

@@ -148,22 +148,13 @@ pub(crate) fn handle_sys_getcwd(
 
 pub(crate) fn handle_sys_mkdir(
     request: &LinuxSyscallRequest,
-    ctx: &mut LinuxSyscallContext<'_>,
+    _ctx: &mut LinuxSyscallContext<'_>,
 ) -> LinuxSyscallResult {
     let path_ptr = request.args[0];
     let _mode = request.args[1];
     let path = copy_path_from_user(path_ptr)?;
     let image = image();
-    match table_mut().mkdir(path.as_bytes(), &image) {
-        Ok(()) => Ok(0),
-        Err(errno) => {
-            #[cfg(feature = "m9-userspace-self-test")]
-            if errno == clean_slate_linux_abi::EROFS {
-                mkdir_erofs_diag(ctx.pid, path.as_bytes());
-            }
-            Err(errno)
-        }
-    }
+    table_mut().mkdir(path.as_bytes(), &image).map(|()| 0)
 }
 
 pub(crate) fn handle_sys_getdents64(
@@ -261,22 +252,6 @@ impl UserPathBuf {
     fn as_bytes(&self) -> &[u8] {
         &self.storage[..self.len]
     }
-}
-
-#[cfg(feature = "m9-userspace-self-test")]
-const MKDIR_EROFS_DIAG_LIMIT: usize = 8;
-#[cfg(feature = "m9-userspace-self-test")]
-use core::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(feature = "m9-userspace-self-test")]
-static MKDIR_EROFS_DIAG_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-#[cfg(feature = "m9-userspace-self-test")]
-fn mkdir_erofs_diag(pid: u64, path: &[u8]) {
-    if MKDIR_EROFS_DIAG_COUNT.fetch_add(1, Ordering::Relaxed) >= MKDIR_EROFS_DIAG_LIMIT {
-        return;
-    }
-    use crate::diagnostics::log::kernel_log_fmt;
-    kernel_log_fmt(format_args!("[M9  ] mkdir EROFS pid={pid} path={path:?}\n",));
 }
 
 fn copy_path_from_user(ptr: u64) -> Result<UserPathBuf, LinuxErrno> {

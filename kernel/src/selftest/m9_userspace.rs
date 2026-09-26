@@ -195,7 +195,7 @@ fn allocator() -> &'static mut PageAllocator {
 fn busybox_image_bytes() -> &'static [u8] {
     unsafe {
         if let Some(bytes) = (*BUSYBOX_EXEC_BYTES.get()).as_ref() {
-            return *bytes;
+            return bytes;
         }
         let img = linux_rootfs::image().expect("m9 userspace rootfs");
         let busybox = img.lookup(b"/bin/busybox").expect("busybox");

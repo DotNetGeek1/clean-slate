@@ -9,7 +9,6 @@ use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::diagnostics::serial::serial_write_line;
 use crate::interrupt::timer::initialize_timer;
-use crate::ipc::endpoint_table_mut;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::PAGE_SIZE;
 use crate::process::domain::DomainTeardownResult;

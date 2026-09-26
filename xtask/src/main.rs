@@ -1251,7 +1251,7 @@ fn run_m9_linux_fs_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m9_userspace_acceptance() -> Result<(), XtaskError> {
-    m9_fixture::verify_m9_fixture().map_err(|e| XtaskError::InvalidCommand(e))?;
+    m9_fixture::verify_m9_fixture().map_err(XtaskError::InvalidCommand)?;
     reset_m5_data_disk_image()?;
     build_storage_userspace(true)?;
     build_network_userspace(true)?;

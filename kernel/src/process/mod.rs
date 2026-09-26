@@ -618,10 +618,26 @@ mod tests {
     fn fault_termination_requires_sibling_retirement_before_final_exit() {
         let mut scheduler = Scheduler::new();
         scheduler
-            .configure_thread(0, 90, 33, ThreadKind::User, 0x1000, 0x1000, 0x1000)
+            .configure_thread(
+                0,
+                90,
+                33,
+                ThreadKind::User,
+                crate::sched::Scheduler::user_kernel_stack_top(0),
+                0x1000,
+                0x1000,
+            )
             .expect("thread one");
         scheduler
-            .configure_thread(1, 91, 33, ThreadKind::User, 0x2000, 0x2000, 0x2000)
+            .configure_thread(
+                1,
+                91,
+                33,
+                ThreadKind::User,
+                crate::sched::Scheduler::user_kernel_stack_top(1),
+                0x2000,
+                0x2000,
+            )
             .expect("thread two");
         scheduler.current_thread = Some(0);
         scheduler.threads[0].state = ThreadState::Running;

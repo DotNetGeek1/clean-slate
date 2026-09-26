@@ -16,8 +16,8 @@ use core::fmt::{self, Write};
 
 use clean_slate_capability::{
     list_holder, release_revoked, revoke_holder_tree, revoke_resource_tree, CapabilityError,
-    CapabilityHandle, CapabilityRecord, CapabilityState, CapabilityTable, HolderId, Provenance,
-    ResourceClass, ResourceRef, Rights, MAX_SLOTS,
+    CapabilityHandle, CapabilityRecord, CapabilityTable, HolderId, Provenance, ResourceClass,
+    ResourceRef, Rights, MAX_SLOTS,
 };
 
 use crate::process::current_process_id;
@@ -206,6 +206,7 @@ pub(crate) fn holder_has_resource_rights(
     })
 }
 
+#[cfg(feature = "m8-linux-image")]
 pub(crate) fn inherit_capabilities_for_fork(
     parent: HolderId,
     child: HolderId,
@@ -221,7 +222,7 @@ pub(crate) fn inherit_capabilities_for_fork(
         cursor = next_cursor;
         let provenance = Provenance::child_of(handle, &record.provenance)?;
         let child_record = CapabilityRecord {
-            state: CapabilityState::Live,
+            state: clean_slate_capability::CapabilityState::Live,
             holder: child,
             resource: record.resource,
             rights: record.rights,
@@ -246,6 +247,7 @@ pub(crate) fn inherit_capabilities_for_fork(
     Ok(())
 }
 
+#[cfg(feature = "m8-linux-image")]
 fn rollback_fork_inherited(handles: &[Option<CapabilityHandle>]) {
     let table = unsafe { capability_space_mut() };
     for handle in handles.iter().flatten() {

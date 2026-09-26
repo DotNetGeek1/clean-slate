@@ -4,7 +4,6 @@ use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
-use crate::ipc::endpoint_table_mut;
 use crate::mm::address_space::{
     activate_address_space_root, create_process_address_space, destroy_process_address_space,
     kernel_root_frame,

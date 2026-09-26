@@ -5,7 +5,6 @@ use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::interrupt::timer::kernel_ticks;
-use crate::ipc::endpoint_table_mut;
 use crate::mm::address_space::{activate_address_space_root, kernel_root_frame};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::domain::DomainTeardownResult;

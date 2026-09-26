@@ -7,7 +7,6 @@ use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::diagnostics::serial::serial_write_line;
 use crate::interrupt::timer::initialize_timer;
-use crate::ipc::endpoint_table_mut;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::domain::DomainTeardownResult;
 use crate::process::id_allocator::{id_allocator_mut, IdAllocator};

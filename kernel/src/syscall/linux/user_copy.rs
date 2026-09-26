@@ -63,7 +63,7 @@ pub(crate) fn copy_user_path_cstring(
     if user_ptr == 0 {
         return Err(EFAULT);
     }
-    for index in 0..LINUX_PATH_MAX {
+    for (index, slot) in out.iter_mut().enumerate() {
         validate_user_pointer_range(user_ptr + index as u64, 1).map_err(|_| EFAULT)?;
         let byte = unsafe { *((user_ptr + index as u64) as *const u8) };
         if byte == 0 {
@@ -72,7 +72,7 @@ pub(crate) fn copy_user_path_cstring(
             }
             return Ok(index);
         }
-        out[index] = byte;
+        *slot = byte;
     }
     Err(ENAMETOOLONG)
 }

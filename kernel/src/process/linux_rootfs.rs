@@ -3,6 +3,7 @@
 use clean_slate_rootfs::{EntryKind, Image, RootfsError};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(feature = "m8-linux-image")]
 use crate::sync::global_cell::GlobalCell;
 
 /// Pinned BusyBox SHA-256 prefix for boot-time provenance logging (full hash in manifest).
@@ -11,6 +12,7 @@ const BUSYBOX_SHA256_PREFIX: &str = "7ba56ace";
 const M9_ROOTFS_IMAGE_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/m9-rootfs.img"));
 
 static ROOTFS_LOGGED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "m8-linux-image")]
 static PARSED_IMAGE: GlobalCell<Option<Image<'static>>> = GlobalCell::new(None);
 
 /// Borrowed view over the build-time packed rootfs image.
@@ -19,6 +21,7 @@ pub(crate) fn image() -> Result<Image<'static>, RootfsError> {
 }
 
 /// Stable `Image` handle for exec resolution (bytes are `include_bytes!` static).
+#[cfg(feature = "m8-linux-image")]
 pub(crate) fn image_ref() -> Result<&'static Image<'static>, RootfsError> {
     unsafe {
         let slot = &mut *PARSED_IMAGE.get();

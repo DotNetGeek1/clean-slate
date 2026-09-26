@@ -12,7 +12,6 @@ use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::interrupt::timer::initialize_timer;
-use crate::ipc::endpoint_table_mut;
 use crate::mm::address_space::{
     create_process_address_space, destroy_process_address_space, kernel_root_frame,
     map_process_page, translate_address_in_root,

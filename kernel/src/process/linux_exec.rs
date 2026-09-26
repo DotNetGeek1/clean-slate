@@ -408,7 +408,7 @@ pub(crate) fn launch_linux_process_from_spec(
         launched.pid,
         launched.instance_generation,
     )
-    .map_err(|message| LinuxImageError::Registry(message))?;
+    .map_err(LinuxImageError::Registry)?;
     crate::process::linux_mem::init_for_image(
         launched.pid,
         launched.instance_generation,

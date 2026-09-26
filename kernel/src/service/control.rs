@@ -1066,14 +1066,30 @@ mod tests {
         unsafe {
             *crate::sched::scheduler_mut() = crate::sched::Scheduler::new();
             crate::sched::scheduler_mut()
-                .configure_thread(0, 1, 1, ThreadKind::User, 0x1000, 0x1000, 0x1000)
+                .configure_thread(
+                    0,
+                    1,
+                    1,
+                    ThreadKind::User,
+                    crate::sched::Scheduler::user_kernel_stack_top(0),
+                    0x1000,
+                    0x1000,
+                )
                 .expect("occupy slot zero");
             #[cfg(feature = "m8-linux-hello")]
             {
                 // TASK_COUNT is 3 under this feature; occupy slot 2 so the
                 // wrap from next_scheduler_slot=2 still lands on empty slot 1.
                 crate::sched::scheduler_mut()
-                    .configure_thread(2, 3, 3, ThreadKind::User, 0x3000, 0x3000, 0x3000)
+                    .configure_thread(
+                        2,
+                        3,
+                        3,
+                        ThreadKind::User,
+                        crate::sched::Scheduler::user_kernel_stack_top(2),
+                        0x3000,
+                        0x3000,
+                    )
                     .expect("occupy slot two");
             }
         }
