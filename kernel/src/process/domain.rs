@@ -8,6 +8,7 @@ use super::ProcessState;
 use super::KERNEL_PROCESS_ID;
 use crate::arch::x86_64::cpu::without_interrupts;
 use clean_slate_capability::HolderId;
+use clean_slate_service_lifecycle::InstanceGeneration;
 
 use crate::capability::bootstrap_grant::discard_bootstrap_grants_for_holder;
 use crate::capability::object::{
@@ -99,7 +100,7 @@ pub(crate) fn teardown_current_process(
     status: u64,
     faulted: bool,
 ) -> Result<DomainTeardownResult, &'static str> {
-    let process_id = without_interrupts(|| unsafe {
+    let (process_id, instance_generation) = without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();
         let current_index = scheduler
             .current_thread
@@ -116,6 +117,7 @@ pub(crate) fn teardown_current_process(
         let process_record = process_registry_mut()
             .get_mut(current.owner_process_id)
             .ok_or("teardown process was missing from registry")?;
+        let instance_generation = process_record.instance_generation;
         let current_thread = scheduler
             .threads
             .get_mut(current_index)
@@ -133,7 +135,10 @@ pub(crate) fn teardown_current_process(
         if process_record.live_threads != 0 {
             return Err("process teardown left live threads after sibling retirement");
         }
-        Ok::<u64, &'static str>(current.owner_process_id)
+        Ok::<(u64, InstanceGeneration), &'static str>((
+            current.owner_process_id,
+            instance_generation,
+        ))
     })?;
 
     let next_stack_pointer =
@@ -142,24 +147,24 @@ pub(crate) fn teardown_current_process(
     activate_address_space_root(kernel_root_frame);
     // Drop Linux fd projections before IPC capability teardown so a replacement
     // process (same pid, new generation) cannot observe a stale table (#95).
-    if let Some(generation) = live_instance_generation(process_id) {
-        linux_fd::release_for_process(process_id, generation);
-        #[cfg(not(any(
-            feature = "m1-self-test",
-            feature = "m2-double-fault-self-test",
-            feature = "m2-timer-self-test"
-        )))]
-        {
-            crate::process::linux_mem::release_for_process(process_id, generation, allocator);
-            crate::process::linux_signal::release_for_process(process_id, generation);
-        }
-        #[cfg(not(any(
-            feature = "m1-self-test",
-            feature = "m2-double-fault-self-test",
-            feature = "m2-timer-self-test"
-        )))]
-        crate::syscall::linux::poll::clear_poll_interest_for_pid(process_id);
+    linux_fd::release_for_process(process_id, instance_generation);
+    #[cfg(feature = "m9-linux-trace")]
+    crate::syscall::linux::trace::release_process(process_id, instance_generation);
+    #[cfg(not(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test"
+    )))]
+    {
+        crate::process::linux_mem::release_for_process(process_id, instance_generation, allocator);
+        crate::process::linux_signal::release_for_process(process_id, instance_generation);
     }
+    #[cfg(not(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test"
+    )))]
+    crate::syscall::linux::poll::clear_poll_interest_for_pid(process_id);
     linux_fd::release_for_process_by_pid(process_id);
     let registry_live = |check_pid: u64| unsafe { process_registry_mut().get(check_pid).is_some() };
     linux_fd::release_stale_registry_slots(&registry_live);

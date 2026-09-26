@@ -154,6 +154,11 @@ where
     f(space, allocator)
 }
 
+#[cfg(feature = "m9-linux-trace-self-test")]
+pub(crate) fn reset_registry_for_selftest() {
+    unsafe { *REGISTRY.get() = Registry::new() };
+}
+
 #[cfg(feature = "m9-linux-runtime-self-test")]
 pub(crate) fn occupied_slots() -> usize {
     registry_mut()

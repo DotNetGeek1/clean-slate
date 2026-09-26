@@ -631,7 +631,8 @@ fn registry_mut() -> &'static mut LinuxFdRegistry {
     feature = "m9-linux-fs-self-test",
     feature = "m9-linux-runtime-self-test",
     feature = "m9-linux-socket-self-test",
-    feature = "m9-linux-proc-self-test"
+    feature = "m9-linux-proc-self-test",
+    feature = "m9-linux-trace-self-test"
 ))]
 pub(crate) fn reset_registry_for_selftest() {
     unsafe { *LINUX_FD_REGISTRY.get() = LinuxFdRegistry::new() };

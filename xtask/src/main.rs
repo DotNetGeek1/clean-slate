@@ -70,18 +70,14 @@ const M5_QEMU_DISK_ID: &str = "m5disk";
 const M5_QEMU_DEVICE: &str =
     "virtio-blk-pci,drive=m5disk,serial=clean-slate-m5-data,disable-modern=on";
 const M7_QEMU_NET_DEVICE: &str = "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on";
-// IPC console framing preserves these substrings; at ~1 ms tick the gen=1 health
-// line for the crash fixture often lands after fault injection in serial order.
-const M4_RECOVERY_FAULT_HEALTH_GROUP: &[&str] =
-    &["[PROC] fault pid=", "[HLTH] service=16640 healthy gen=1"];
-/// IPC health vs fault injection can race at ~1 ms tick; restart path stays ordered.
 const M4_RECOVERY_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[CAP ] supervisor console capability granted pid=1"),
     MarkerStep::Ordered("[SUP ] started pid=1"),
     MarkerStep::Ordered("[DEP ] service=16640 ready"),
     MarkerStep::Ordered("[SVC ] launch service=16640 pid="),
+    MarkerStep::Ordered("[HLTH] service=16640 healthy gen=1"),
     MarkerStep::Ordered("[TEST] crash-service injecting fault"),
-    MarkerStep::UnorderedGroup(M4_RECOVERY_FAULT_HEALTH_GROUP),
+    MarkerStep::Ordered("[PROC] fault pid="),
     MarkerStep::Ordered("[SUP ] failure service=16640 pid="),
     MarkerStep::Ordered("[PROC] teardown pid="),
     MarkerStep::Ordered("[SUP ] restart service=16640 attempt=1"),
@@ -113,20 +109,24 @@ const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[M9.F] PASS",
 ];
 const M9_LINUX_EXEC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+/// One probe cycle in serial order: the kernel logs the 20 ms nanosleep on wakeup,
+/// the probe writes the wall bracket, the kernel logs `irq_ticks` while observing the
+/// `wall end` write (before its bytes reach serial), then the probe writes its
+/// success banners.
 const M9_LINUX_RUNTIME_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[M9.J] creating"),
     MarkerStep::Ordered("[M9.J] baseline ok"),
     MarkerStep::Ordered("[TIME] apic counter_hz="),
+    MarkerStep::Ordered("[M9.J] nanosleep 20ms tsc_ns="),
+    MarkerStep::Ordered("[M9.J] nanosleep wall start"),
+    MarkerStep::Ordered("[M9.J] nanosleep wall irq_ticks="),
+    MarkerStep::Ordered("[M9.J] nanosleep wall end"),
     MarkerStep::Ordered("[M9.J] fs base survives switch"),
     MarkerStep::Ordered("[M9.J] brk ok"),
     MarkerStep::Ordered("[M9.J] mmap ok"),
     MarkerStep::Ordered("[M9.J] uname=Linux"),
     MarkerStep::Ordered("[M9.J] signals ok"),
-    MarkerStep::Ordered("[M9.J] nanosleep 20ms tsc_ns="),
     MarkerStep::Ordered("[M9.J] poll timeout ok"),
-    MarkerStep::Ordered("[M9.J] nanosleep wall start"),
-    MarkerStep::Ordered("[M9.J] nanosleep wall end"),
-    MarkerStep::Ordered("[M9.J] nanosleep wall irq_ticks="),
     MarkerStep::Ordered("[M9.J] probe done"),
     MarkerStep::Ordered("[M9.J] cycle=7"),
     MarkerStep::Ordered("[M9.J] PASS"),
@@ -164,9 +164,12 @@ const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[DF  ] emergency stack OK",
     "[DF  ] PASS",
 ];
-/// Substrings tolerate concurrent `[TASK]` prefix interleaving on serial.
-const M2_TASK_PROGRESS_GROUP: &[&str] = &["task 1 progress=", "task 2 progress="];
-/// Demo tasks log progress concurrently; `[M2  ] PASS` follows both exits (with `[TIME] ticks=`).
+/// Either task can reach its preemption threshold first, so progress order is free.
+const M2_TASK_PROGRESS_GROUP: &[&str] = &["[TASK] task 1 progress=", "[TASK] task 2 progress="];
+/// Task 2 only starts on the first preemption, and the kernel only logs progress
+/// after `[SCHED] preemption observed` is on serial. `[TIME] ticks=` and
+/// `[M2  ] PASS` follow the second task exit, and each task exits only after
+/// logging its progress.
 const M2_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[BOOT] UEFI memory map acquired"),
     MarkerStep::Ordered("[BOOT] ExitBootServices OK"),
@@ -255,6 +258,23 @@ const M9_LINUX_SOCKET_ACCEPTANCE_MARKERS: [&str; 9] = [
     "[M9.L] stale ESTALE ok",
     "[M9.L] PASS",
 ];
+const M9_LINUX_TRACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
+const M9_LINUX_TRACE_ACCEPTANCE_MARKERS: [&str; 13] = [
+    "[M9.T] trace_slots_baseline=0 boot",
+    "[TIME] timer initialized",
+    "UNKNOWN(999)",
+    "unsupported",
+    "bad-pointer",
+    "[LTRC] dropped=",
+    "[M9.T] cycle=1 proc_fixture",
+    "[M9.I] EPIPE OK",
+    "read nr=0 blocked",
+    "read nr=0 woke",
+    "[M9.I] pipe OK",
+    "[M9.T] trace_slots_baseline=0 after_proc_wait",
+    "[M9.T] PASS",
+];
+
 const M9_FD_CORE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M9_FD_CORE_ACCEPTANCE_MARKERS: [&str; 10] = [
     "[TIME] timer initialized",
@@ -444,16 +464,16 @@ const M6_AUDIT_ACCEPTANCE_MARKERS: [&str; 5] = [
     "outcome=",
     "[M6.7] PASS",
 ];
-const M6_REVOCATION_BOOTSTRAP_GROUP: &[&str] = &[
-    "[TEST] unrelated workload progress=",
-    "[CAP ] revoke denied actor=",
-];
-/// Unrelated workload and early revoke-deny are independent; revoke story stays ordered after.
+/// Workload progress=1 is logged before any fixture is spawned. The owner revokes
+/// only after its own probe and both reader probes, and its report logs the stale
+/// denial. The unrelated fixture's denied revoke races that whole chain, so it is
+/// only required before `[M6.6] PASS`, which waits for the unrelated report.
 const M6_REVOCATION_ACCEPTANCE_SPEC: &[MarkerStep] = &[
-    MarkerStep::UnorderedGroupAnywhere(M6_REVOCATION_BOOTSTRAP_GROUP),
+    MarkerStep::Ordered("[TEST] unrelated workload progress="),
     MarkerStep::Ordered("[CAP ] probe allowed holder="),
     MarkerStep::Ordered("[CAP ] revoke branch="),
     MarkerStep::Ordered("[CAP ] stale denied holder="),
+    MarkerStep::UnorderedGroupAnywhere(&["[CAP ] revoke denied actor="]),
     MarkerStep::Ordered("[M6.6] PASS"),
 ];
 const M7_NET_CAPS_ACCEPTANCE_MARKERS: [&str; 11] = [
@@ -731,6 +751,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM9SyscallFailClosed => run_m9_syscall_fail_closed_acceptance(),
         ParsedCommand::TestM9BlockWake => run_m9_block_wake_acceptance(),
         ParsedCommand::TestM9FdCore => run_m9_fd_core_acceptance(),
+        ParsedCommand::TestM9LinuxTrace => run_m9_linux_trace_acceptance(),
         ParsedCommand::TestM9LinuxSocket => run_m9_linux_socket_acceptance(),
         ParsedCommand::TestM8LinuxHello => run_m8_linux_hello_acceptance(),
         ParsedCommand::TestM8 => run_m8_acceptance(),
@@ -1369,6 +1390,18 @@ fn run_m9_fd_core_acceptance() -> Result<(), XtaskError> {
         Some((
             MarkerSet::Ordered(&M9_FD_CORE_ACCEPTANCE_MARKERS),
             M9_FD_CORE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn run_m9_linux_trace_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m9-linux-trace-self-test"],
+        Some((
+            MarkerSet::Ordered(&M9_LINUX_TRACE_ACCEPTANCE_MARKERS),
+            M9_LINUX_TRACE_ACCEPTANCE_TIMEOUT,
         )),
     )
 }
@@ -2019,31 +2052,26 @@ fn run_vm_inner_with_config(
     fs::copy(&kernel, esp_boot_dir.join("BOOTX64.EFI"))?;
 
     let ovmf = find_ovmf()?;
-    let vars_copy = if config.reset_ovmf_vars {
+    let runtime_vars = if config.reset_ovmf_vars {
         workspace_root()
             .join("target")
             .join("m5")
             .join("OVMF_VARS.fd")
     } else {
-        workspace_root().join("target").join("OVMF_VARS.fd")
+        workspace_root()
+            .join("target")
+            .join(format!("OVMF_VARS.runtime.{}.fd", std::process::id()))
     };
-    // Every boot starts from the pristine variable store. OVMF rewrites NV
-    // variables on each boot and the harness SIGKILLs QEMU as soon as the
-    // markers match, so a store shared across ~50 boots accumulates partial
-    // writes / reclaim state; on CI that eventually left the firmware stuck
-    // before BDS (console escapes only, no `BdsDxe:` line) for whichever test
-    // happened to boot next. A fresh copy makes each boot independent.
-    if let Some(parent) = vars_copy.parent() {
+    // Every boot starts from the pristine variable store (`vars_template`).
+    // OVMF rewrites NV variables on each boot and acceptance tests SIGKILL
+    // QEMU as soon as markers match, so writing back into the template path
+    // (common when OVMF_VARS env points at a working copy) leaves the next
+    // boot stuck before BDS or timing out after PASS. Always launch from a
+    // fresh runtime copy.
+    if let Some(parent) = runtime_vars.parent() {
         fs::create_dir_all(parent)?;
     }
-    if !same_file(&ovmf.vars_template, &vars_copy) {
-        fs::copy(&ovmf.vars_template, &vars_copy)?;
-    } else {
-        eprintln!(
-            "warning: OVMF_VARS template is the working copy ({}); firmware variable state is shared across boots",
-            vars_copy.display()
-        );
-    }
+    fs::copy(&ovmf.vars_template, &runtime_vars)?;
 
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.arg("-machine")
@@ -2064,7 +2092,10 @@ fn run_vm_inner_with_config(
             ovmf.code.display()
         ))
         .arg("-drive")
-        .arg(format!("if=pflash,format=raw,file={}", vars_copy.display()))
+        .arg(format!(
+            "if=pflash,format=raw,file={}",
+            runtime_vars.display()
+        ))
         .arg("-drive")
         .arg(format!("format=raw,file=fat:rw:{}", esp_dir.display()));
     if let Some(cpu) = config.cpu_model {
@@ -2293,28 +2324,29 @@ fn build_kernel(release: bool, debug_entry: bool, features: &[&str]) -> Result<(
     run_command(&mut cmd)
 }
 
+fn cargo_target_dir() -> PathBuf {
+    env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("target"))
+}
+
 fn kernel_artifact(release: bool) -> PathBuf {
     let profile = if release { "release" } else { "debug" };
-    workspace_root()
-        .join("target")
+    cargo_target_dir()
         .join(KERNEL_TARGET)
         .join(profile)
         .join(format!("{KERNEL_PACKAGE}.efi"))
-}
-
-/// True when both paths name the same existing file (after canonicalisation).
-fn same_file(a: &Path, b: &Path) -> bool {
-    match (fs::canonicalize(a), fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
 }
 
 fn find_ovmf() -> Result<OvmfPaths, XtaskError> {
     let env_ovmf = ovmf_from_env(env::var_os("OVMF_CODE"), env::var_os("OVMF_VARS"));
     if let Some(ovmf) = env_ovmf {
         if ovmf.code.is_file() && ovmf.vars_template.is_file() {
-            return Ok(ovmf);
+            let vars_template = resolve_ovmf_vars_template(&ovmf.code, &ovmf.vars_template);
+            return Ok(OvmfPaths {
+                code: ovmf.code,
+                vars_template,
+            });
         }
         return Err(XtaskError::MissingOvmf);
     }
@@ -2633,6 +2665,15 @@ fn run_acceptance_command(
                             return Err(error);
                         }
                     }
+                    if marker_set_is_ordered(marker_set, &M9_LINUX_TRACE_ACCEPTANCE_MARKERS) {
+                        if let Err(error) = validate_m9_linux_trace_ltrc(&output) {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(error);
+                        }
+                    }
                     authoritative_pass = true;
                     terminate_child(&mut child)?;
                     child_status = Some(child.wait()?);
@@ -2701,6 +2742,9 @@ fn validate_output_markers(output: &str, marker_set: MarkerSet<'static>) -> Resu
         if marker_set_is_ordered(marker_set, &M9_LINUX_FS_ACCEPTANCE_MARKERS) {
             validate_m9_linux_fs_probe_stdout(output)?;
         }
+        if marker_set_is_ordered(marker_set, &M9_LINUX_TRACE_ACCEPTANCE_MARKERS) {
+            validate_m9_linux_trace_ltrc(output)?;
+        }
         if markers_require_verbatim_linux_hello(marker_set) {
             assert_no_ipc_framed_linux_hello(output)?;
         }
@@ -2751,6 +2795,68 @@ fn validate_m9_linux_fs_block_write(output: &str) -> Result<(), XtaskError> {
             "block write evidence after ls /bin ok (BLK op=write or tmp+big write/read ok)"
                 .to_owned(),
         ));
+    }
+    Ok(())
+}
+
+/// Reject restart-sentinel leaks and duplicate syscall completions on block/restart paths.
+fn validate_m9_linux_trace_ltrc(output: &str) -> Result<(), XtaskError> {
+    let mut pending_completion: Option<(u64, u64)> = None;
+    for line in output.lines() {
+        let line = line.trim_end_matches('\r');
+        if !line.contains("[LTRC]") {
+            pending_completion = None;
+            continue;
+        }
+        if line.contains(" dropped=") {
+            continue;
+        }
+        let Some(nr_pos) = line.find(" nr=") else {
+            pending_completion = None;
+            continue;
+        };
+        let after_nr = &line[nr_pos + 4..];
+        let nr_end = after_nr
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after_nr.len());
+        let nr = after_nr[..nr_end]
+            .parse::<u64>()
+            .map_err(|_| XtaskError::MissingMarker("m9 trace nr parse".to_owned()))?;
+        if line.ends_with(" blocked") || line.ends_with(" woke") || line.ends_with(" timeout") {
+            pending_completion = Some((nr, nr));
+            continue;
+        }
+        if let Some(arrow) = line.find(" -> ") {
+            let after_arrow = &line[arrow + 4..];
+            let space = after_arrow
+                .find(' ')
+                .ok_or_else(|| XtaskError::MissingMarker("m9 trace result token".to_owned()))?;
+            let result_token = &after_arrow[..space];
+            let reason = after_arrow[space + 1..].trim();
+            if result_token.starts_with("errno") {
+                pending_completion = None;
+                continue;
+            }
+            let val = result_token
+                .parse::<u64>()
+                .map_err(|_| XtaskError::MissingMarker("m9 trace result parse".to_owned()))?;
+            if reason == "ok" {
+                if let Some((pending_nr, _)) = pending_completion {
+                    // `read(2)` legitimately returns 0 at EOF after block/wake; reject only
+                    // when the user result equals a non-zero syscall nr (e.g. wait4 -> 61).
+                    if pending_nr == nr && val == nr && nr != 0 {
+                        return Err(XtaskError::MissingMarker(format!(
+                            "LTRC must not publish syscall nr as user result after block (nr={nr})"
+                        )));
+                    }
+                    pending_completion = None;
+                    continue;
+                }
+            }
+            pending_completion = None;
+        } else {
+            pending_completion = None;
+        }
     }
     Ok(())
 }
@@ -2943,6 +3049,7 @@ fn print_help() {
     println!("  test-m9-syscall-fail-closed Build the M9 #143 fail-closed syscall kernel, run QEMU, and validate [M9.C] PASS");
     println!("  test-m9-block-wake Build the M9 #145 block/wake scheduler kernel, run QEMU, and validate [M9.E] PASS");
     println!("  test-m9-fd-core Build the M9 #147 fd-core kernel, run QEMU, and validate pool equality + [M9.G] PASS (aliases: m9-fd-core, m9.147)");
+    println!("  test-m9-linux-trace M9 #106 bounded Linux syscall trace QEMU acceptance (aliases: m9-linux-trace, m9.106)");
     println!("  test-m9-linux-socket M9 #105 socket syscalls + M7 data plane + probe ELF (aliases: m9-linux-socket, m9.105)");
     println!("  test-m8-linux-hello Boot M8.7 self-test then production feature (hello + clean [M2] PASS); 40s for two launches (aliases: m8-linux-hello, m8.7)");
     println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
@@ -3029,6 +3136,7 @@ enum ParsedCommand {
     TestM9SyscallFailClosed,
     TestM9BlockWake,
     TestM9FdCore,
+    TestM9LinuxTrace,
     TestM8LinuxHello,
     TestM8,
     TestM3Lifecycle,
@@ -3130,6 +3238,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m9-fd-core" || cmd == "m9-fd-core" || cmd == "m9.147" => {
             ParsedCommand::TestM9FdCore
         }
+        Some(cmd) if cmd == "test-m9-linux-trace" || cmd == "m9-linux-trace" || cmd == "m9.106" => {
+            ParsedCommand::TestM9LinuxTrace
+        }
         Some(cmd) if cmd == "test-m8-linux-hello" || cmd == "m8-linux-hello" || cmd == "m8.7" => {
             ParsedCommand::TestM8LinuxHello
         }
@@ -3208,6 +3319,44 @@ fn ovmf_from_env(code: Option<OsString>, vars: Option<OsString>) -> Option<OvmfP
         }),
         _ => None,
     }
+}
+
+/// OVMF_VARS in the environment often points at a workspace working copy that
+/// QEMU mutates; never use that file as the copy source for the next boot.
+fn resolve_ovmf_vars_template(code: &Path, env_vars: &Path) -> PathBuf {
+    if !ovmf_vars_env_is_mutable_working_copy(env_vars) {
+        return env_vars.to_path_buf();
+    }
+    stock_ovmf_vars_beside_code(code).unwrap_or_else(|| env_vars.to_path_buf())
+}
+
+fn ovmf_vars_env_is_mutable_working_copy(path: &Path) -> bool {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("OVMF_VARS.runtime."))
+    {
+        return true;
+    }
+    let root = workspace_root();
+    path == root.join("target").join("OVMF_VARS.fd")
+        || path == root.join("target").join("m5").join("OVMF_VARS.fd")
+}
+
+fn stock_ovmf_vars_beside_code(code: &Path) -> Option<PathBuf> {
+    let parent = code.parent()?;
+    for name in [
+        "edk2-x86_64-vars.fd",
+        "edk2-i386-vars.fd",
+        "OVMF_VARS.fd",
+        "OVMF_VARS_4M.fd",
+    ] {
+        let candidate = parent.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn select_ovmf_from_candidates(
@@ -3506,6 +3655,31 @@ mod tests {
     }
 
     #[test]
+    fn resolve_ovmf_vars_template_prefers_stock_vars_for_runtime_copy() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("clean-slate-ovmf-resolve-{unique}"));
+        fs::create_dir_all(&base).expect("mkdir");
+        let code = base.join("edk2-x86_64-code.fd");
+        let stock = base.join("edk2-i386-vars.fd");
+        let working = base.join(format!("OVMF_VARS.runtime.{unique}.fd"));
+        fs::write(&code, b"code").expect("write code");
+        fs::write(&stock, b"stock").expect("write stock");
+        fs::write(&working, b"mutated").expect("write working");
+        let resolved = resolve_ovmf_vars_template(&code, &working);
+        assert_eq!(resolved, stock);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ovmf_vars_env_marks_workspace_target_copy_as_mutable() {
+        let working = workspace_root().join("target").join("OVMF_VARS.fd");
+        assert!(ovmf_vars_env_is_mutable_working_copy(&working));
+    }
+
+    #[test]
     fn select_existing_ovmf_candidate() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3613,6 +3787,87 @@ mod tests {
 [TIME] ticks=4\n\
 [M2  ] PASS\n"
         ));
+    }
+
+    const M2_BOOT_PREFIX: &str = "[BOOT] UEFI memory map acquired\n\
+[BOOT] ExitBootServices OK\n\
+[MEM ] physical allocator initialized\n\
+[INT ] IDT initialized\n\
+[TIME] timer initialized\n\
+[TASK] task 1 started\n\
+[TASK] task 2 started\n";
+
+    #[test]
+    fn m2_spec_accepts_either_progress_order_after_preemption() {
+        for progress in [
+            "[TASK] task 1 progress=1\n[TASK] task 2 progress=1\n",
+            "[TASK] task 2 progress=1\n[TASK] task 1 progress=1\n",
+        ] {
+            let output = format!(
+                "{M2_BOOT_PREFIX}[SCHED] preemption observed\n{progress}[TIME] ticks=9\n[M2  ] PASS\n"
+            );
+            assert!(validate_output_markers(&output, MarkerSet::Steps(M2_ACCEPTANCE_SPEC)).is_ok());
+        }
+    }
+
+    #[test]
+    fn m2_spec_rejects_progress_before_preemption() {
+        let output = format!(
+            "{M2_BOOT_PREFIX}[TASK] task 1 progress=1\n[SCHED] preemption observed\n\
+[TASK] task 2 progress=1\n[TIME] ticks=9\n[M2  ] PASS\n"
+        );
+        assert!(validate_output_markers(&output, MarkerSet::Steps(M2_ACCEPTANCE_SPEC)).is_err());
+    }
+
+    #[test]
+    fn m6_revocation_spec_accepts_unrelated_denial_anywhere_before_pass() {
+        let chain_head = "[TEST] unrelated workload progress=1\n\
+[CAP ] probe allowed holder=1\n\
+[CAP ] probe allowed holder=2\n\
+[CAP ] probe allowed holder=3\n";
+        let chain_tail = "[CAP ] revoke branch=1:0 actor=1 count=2\n\
+[TEST] unrelated workload progress=2\n\
+[CAP ] stale denied holder=2 reason=revoked\n";
+        let denied = "[CAP ] revoke denied actor=4 reason=unauthorized\n";
+        let early = format!("{chain_head}{denied}{chain_tail}[M6.6] PASS\n");
+        let late = format!("{chain_head}{chain_tail}{denied}[M6.6] PASS\n");
+        for output in [&early, &late] {
+            assert!(validate_output_markers(
+                output,
+                MarkerSet::Steps(M6_REVOCATION_ACCEPTANCE_SPEC)
+            )
+            .is_ok());
+        }
+        let missing = format!("{chain_head}{chain_tail}[M6.6] PASS\n");
+        assert!(
+            validate_output_markers(&missing, MarkerSet::Steps(M6_REVOCATION_ACCEPTANCE_SPEC))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn m9_runtime_spec_matches_single_cycle_serial_order() {
+        let output = "[M9.J] creating\n\
+[M9.J] baseline ok mem=0 sig=0 poll=0 fd=0\n\
+[TIME] apic counter_hz=62491100 initial_count=62491 tick_ns=999998\n\
+[M9.J] nanosleep 20ms tsc_ns=21924929\n\
+[M9.J] nanosleep wall start\n\
+[M9.J] nanosleep wall irq_ticks=1011 tsc_ns=1011849971\n\
+[M9.J] nanosleep wall end\n\
+[M9.J] fs base survives switch\n\
+[M9.J] brk ok\n\
+[M9.J] mmap ok\n\
+[M9.J] uname=Linux\n\
+[M9.J] signals ok\n\
+[M9.J] poll timeout ok\n\
+[M9.J] probe done\n\
+[M9.J] cycle=7 mem=0 sig=0 poll=0 fd=0\n\
+[M9.J] PASS\n";
+        assert!(validate_output_markers(
+            output,
+            MarkerSet::Steps(M9_LINUX_RUNTIME_ACCEPTANCE_SPEC)
+        )
+        .is_ok());
     }
 
     const M3_ADDRESS_SPACE_LIFECYCLE_TRANSCRIPT: &str = "\

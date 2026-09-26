@@ -190,6 +190,22 @@ mod enabled {
         ) {
             switch_after_exit(Some(next_frame));
         }
+        #[cfg(feature = "m9-linux-trace-self-test")]
+        match crate::selftest::m9_linux_trace::after_probe_exit_group(
+            pid,
+            ctx.instance_generation,
+            status,
+            &teardown,
+            allocator,
+        ) {
+            crate::selftest::m9_linux_trace::TraceExitHook::NotApplicable => {}
+            crate::selftest::m9_linux_trace::TraceExitHook::Continue(next_frame) => {
+                switch_after_exit(Some(next_frame));
+            }
+            crate::selftest::m9_linux_trace::TraceExitHook::Pass => {
+                crate::selftest::m9_linux_trace::finish_pass();
+            }
+        }
         switch_after_exit(teardown.next_stack_pointer)
     }
 

@@ -22,6 +22,17 @@ use crate::sched::wait::{
 };
 use clean_slate_linux_abi::{encode_rax, LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult};
 
+/// Internal handler return only: not a valid user-visible syscall result (`read` may return 0).
+pub(crate) const BLOCK_RESTART_SENTINEL: u64 = 0xFFFF_FF00_0000_0001;
+
+pub(crate) fn block_restart_result() -> LinuxSyscallResult {
+    Ok(BLOCK_RESTART_SENTINEL)
+}
+
+pub(crate) fn is_block_restart_result(result: LinuxSyscallResult) -> bool {
+    result == Ok(BLOCK_RESTART_SENTINEL)
+}
+
 /// What the syscall returns to user space if the wait ends by deadline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinuxTimeoutResult {
@@ -56,6 +67,13 @@ pub(crate) fn block_linux_syscall(
     deadline: Option<Deadline>,
     on_timeout: LinuxTimeoutResult,
 ) -> LinuxSyscallResult {
+    #[cfg(feature = "m9-linux-trace")]
+    super::trace::record_wait_event(
+        ctx.pid,
+        ctx.instance_generation,
+        request.nr,
+        super::trace::LinuxTraceReason::Blocked,
+    );
     let resume = BlockedResume::RestartSyscall {
         nr: request.nr,
         timeout_rax: on_timeout.encode(),
@@ -68,7 +86,7 @@ pub(crate) fn block_linux_syscall(
                 .user_rip
                 .checked_sub(SYSCALL_INSTRUCTION_BYTES)
                 .unwrap_or_else(|| fatal_kernel_error("linux block: user rip underflow"));
-            Ok(request.nr)
+            block_restart_result()
         }
         #[cfg(feature = "m9-linux-runtime-self-test")]
         Ok(WaitOutcome::TimedOut) => Ok(on_timeout.encode()),

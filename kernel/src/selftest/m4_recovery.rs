@@ -147,6 +147,38 @@ pub(crate) struct RecoverySelfTestState {
     skip_workload_respawn_once: bool,
     gen2_ready_poll_pending: Option<ServiceInstanceId>,
     last_faulted_service_pid: u64,
+    gen1_health_observed: bool,
+    gen1_fault_inject_blocked: bool,
+    gen1_inject_logged: bool,
+}
+
+const GEN1_HEALTH_MARKER: &str = "[HLTH] service=16640 healthy gen=1";
+
+fn emit_crash_service_injecting_fault() {
+    kernel_log_line("[TEST] crash-service injecting fault");
+}
+
+fn recovery_note_gen1_health_emitted(state: &mut RecoverySelfTestState) {
+    if state.gen1_health_observed {
+        return;
+    }
+    state.gen1_health_observed = true;
+    if !state.gen1_fault_inject_blocked || state.gen1_inject_logged {
+        return;
+    }
+    emit_crash_service_injecting_fault();
+    state.gen1_inject_logged = true;
+    let gen1_pid = state.gen1_pid;
+    without_interrupts(|| {
+        let scheduler = unsafe { scheduler_mut() };
+        for thread in scheduler.threads.iter_mut() {
+            if thread.owner_process_id == gen1_pid && thread.state == ThreadState::Blocked {
+                thread.state = ThreadState::Ready;
+                break;
+            }
+        }
+    });
+    state.gen1_fault_inject_blocked = false;
 }
 
 static RECOVERY_STATE: GlobalCell<Option<RecoverySelfTestState>> = GlobalCell::new(None);
@@ -559,6 +591,9 @@ pub(crate) fn observe_recovery_supervisor_line(sender_pid: u64, message: &str) {
         return;
     }
     if let Ok(state) = recovery_state() {
+        if message.contains(GEN1_HEALTH_MARKER) {
+            recovery_note_gen1_health_emitted(state);
+        }
         if message.contains("failure service=16640 pid=") && state.last_faulted_service_pid != 0 {
             kernel_log_fmt(format_args!(
                 "[PROC] teardown pid={} resources=0\n",
@@ -678,6 +713,9 @@ pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
             skip_workload_respawn_once: false,
             gen2_ready_poll_pending: None,
             last_faulted_service_pid: 0,
+            gen1_health_observed: false,
+            gen1_fault_inject_blocked: false,
+            gen1_inject_logged: false,
         });
     }
     if let Err(message) = set_privilege_stack(kernel_stack_top) {
@@ -827,6 +865,8 @@ pub(crate) fn handle_recovery_userspace_entry(
             if state.stage == RecoveryStage::Running {
                 use crate::sched::dispatch::schedule_next_thread;
                 let saved_stack_pointer = context as *const InterruptContext as u64;
+                let mut block_for_health = false;
+                let mut resume_for_fault = false;
                 without_interrupts(|| {
                     let scheduler = unsafe { scheduler_mut() };
                     let current = scheduler
@@ -838,8 +878,27 @@ pub(crate) fn handle_recovery_userspace_entry(
                             scheduler.threads[current].id,
                             saved_stack_pointer,
                         )
-                        .map_err(|_| "failed to persist crash inject stack")
+                        .map_err(|_| "failed to persist crash inject stack")?;
+                    if process.pid == state.gen1_pid {
+                        if state.gen1_health_observed {
+                            resume_for_fault = true;
+                        } else {
+                            scheduler.threads[current].state = ThreadState::Blocked;
+                            block_for_health = true;
+                        }
+                    }
+                    Ok::<(), &'static str>(())
                 })?;
+                if block_for_health {
+                    state.gen1_fault_inject_blocked = true;
+                }
+                if resume_for_fault {
+                    if !state.gen1_inject_logged {
+                        emit_crash_service_injecting_fault();
+                        state.gen1_inject_logged = true;
+                    }
+                    return Ok(saved_stack_pointer);
+                }
                 let next_stack_pointer = schedule_next_thread(saved_stack_pointer)?;
                 return Ok(next_stack_pointer);
             }
@@ -896,7 +955,9 @@ pub(crate) fn observe_recovery_fault_before_containment(
     if fault_address != service.probe_address {
         return Err("recovery faulted at an unexpected virtual address");
     }
-    kernel_log_line("[TEST] crash-service injecting fault");
+    if !state.gen1_inject_logged {
+        return Err("recovery fault arrived before gen=1 inject marker");
+    }
     Ok(())
 }
 
