@@ -193,6 +193,18 @@ pub(crate) fn waiter_occupancy() -> usize {
     without_interrupts(|| wait_table_mut().occupied())
 }
 
+/// Active waiters whose owning pid satisfies `owned_by`.
+#[cfg(feature = "m9-userspace-self-test")]
+pub(crate) fn waiter_occupancy_where(mut owned_by: impl FnMut(u64) -> bool) -> usize {
+    without_interrupts(|| {
+        wait_table_mut()
+            .slots
+            .iter()
+            .filter(|slot| slot.active && owned_by(slot.pid))
+            .count()
+    })
+}
+
 fn log_stale_wake(pid: u64, generation: InstanceGeneration) {
     let observed = STALE_WAKE_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
     if observed < STALE_WAKE_LOG_LIMIT {
@@ -211,6 +223,8 @@ fn wake_thread_at_index(thread_index: usize, outcome: WaitOutcome) {
     }
     thread.wait_resume_outcome = outcome;
     thread.state = ThreadState::Ready;
+    #[cfg(feature = "m9-userspace-self-test")]
+    crate::selftest::m9_userspace::on_thread_woken(thread_index, outcome);
 }
 
 /// Called ONLY from a syscall handler on the current thread.
@@ -279,6 +293,8 @@ pub(crate) fn block_current_thread_with_resume(
         };
 
         scheduler.threads[thread_index].state = ThreadState::Blocked;
+        #[cfg(feature = "m9-userspace-self-test")]
+        crate::selftest::m9_userspace::on_thread_blocked(thread_index, pid);
         kernel_log_fmt(format_args!("[M9.E] blocked tid={} key={}\n", tid, key.0));
         Ok(true)
     })?;
