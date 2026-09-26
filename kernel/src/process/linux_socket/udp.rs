@@ -1,245 +1,143 @@
 //! UDP socket path (#105).
+//!
+//! Inbound datagrams are prefetched: once the service holds the socket's datagram
+//! endpoint (created by the first `connect`/`sendto`), one `Receive` request stays
+//! outstanding while the socket queue has room. Its completion is moved into the queue
+//! from `service_complete`, which wakes readers and `poll(2)` waiters.
 
 use clean_slate_linux_abi::{
-    LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EDESTADDRREQ, EMSGSIZE, EAGAIN,
-    SOCKADDR_IN_LEN,
+    LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EAGAIN, EDESTADDRREQ, EFAULT, EINVAL,
+    EMSGSIZE, MSG_DONTWAIT, MSG_NOSIGNAL, MSG_TRUNC, SOCKADDR_IN_LEN,
 };
 use clean_slate_network::error::NetworkError;
 use clean_slate_network::protocol::{NetworkRequest, NetworkResponse};
 use clean_slate_service_fixtures::NETWORK_MAX_PAYLOAD_BYTES;
 
-use crate::mm::user_mapping::{
-    validate_user_pointer_range, validate_user_writable_pointer_range,
-};
-use crate::service::instance_generation::live_instance_generation_for_pid;
+use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::service::net_bridge::{net_bridge_mut, NetBridgeError};
 use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
 use crate::syscall::linux::socket_copy::copy_user_socket_bytes;
 use crate::syscall::linux::table::LinuxSyscallContext;
 
+use super::broker::bridge_err;
 use super::{
-    broker_sync, clear_request_wake, linux_socket_request_wait_key, read_sockaddr_in,
-    register_request_wake, socket_addr_v4, with_socket_mut, LinuxSocket, LinuxSocketId,
-    SocketState, LINUX_UDP_MAX_DATAGRAM,
+    broker_sync, linux_socket_wait_key, read_sockaddr_in, socket_addr_v4, with_socket_mut,
+    LinuxSocket, LinuxSocketId, SocketState, LINUX_UDP_MAX_DATAGRAM,
 };
 
-fn push_rx_datagram(socket: &mut LinuxSocket, bytes: &[u8]) -> bool {
+/// `recvmsg(2)` accepts at most this many iovecs (fail closed with `EMSGSIZE` above it).
+const RECVMSG_MAX_IOV: usize = 8;
+const MSGHDR_SIZE: u64 = 56;
+const IOVEC_SIZE: u64 = 16;
+
+fn push_rx_datagram(socket: &mut LinuxSocket, bytes: &[u8]) {
     if socket.rx_count as usize >= socket.rx_queue.len() {
         socket.rx_dropped = socket.rx_dropped.saturating_add(1);
-        return false;
+        return;
     }
     let idx = (socket.rx_head as usize + socket.rx_count as usize) % socket.rx_queue.len();
     let n = bytes.len().min(LINUX_UDP_MAX_DATAGRAM);
-    socket.rx_queue[idx] = Some(super::RxDatagram {
+    let mut datagram = super::RxDatagram {
         len: n as u16,
-        bytes: {
-            let mut buf = [0u8; LINUX_UDP_MAX_DATAGRAM];
-            buf[..n].copy_from_slice(&bytes[..n]);
-            buf
-        },
-    });
+        bytes: [0u8; LINUX_UDP_MAX_DATAGRAM],
+    };
+    datagram.bytes[..n].copy_from_slice(&bytes[..n]);
+    socket.rx_queue[idx] = Some(datagram);
     socket.rx_count += 1;
-    true
 }
 
-fn maybe_arm_udp_receive(
-    socket: &mut LinuxSocket,
-    ctx: &LinuxSyscallContext<'_>,
-    id: LinuxSocketId,
-) -> Result<(), clean_slate_linux_abi::LinuxErrno> {
-    if socket.state == SocketState::Closed {
-        return Ok(());
-    }
-    if socket.rx_count as usize >= socket.rx_queue.len() {
-        return Ok(());
-    }
-    // Do not prefetch another M7 receive while a datagram is still in the kernel queue;
-    // nslookup issues a bounded number of queries per socket and over-prefetching leaves
-    // a deferred bridge slot with no matching reply.
-    if socket.rx_count > 0 {
-        return Ok(());
-    }
-    if socket.pending_rx_req.is_some() || socket.inflight_request_id.is_some() {
-        return Ok(());
-    }
-    arm_udp_receive(socket, ctx, id)
-}
-
-fn map_udp_receive_error(code: u16, _nonblock: bool) -> LinuxErrno {
+fn map_udp_receive_error(code: u16) -> LinuxErrno {
     if code == NetworkError::Timeout.code() {
         // Linux UDP recv/recvmsg without SO_RCVTIMEO never returns ETIMEDOUT.
         return EAGAIN;
     }
     match super::tcp::map_network_error(code) {
-        Ok(_) => clean_slate_linux_abi::EINVAL,
+        Ok(_) => EINVAL,
         Err(errno) => errno,
     }
 }
 
-fn arm_udp_receive(
-    socket: &mut LinuxSocket,
-    ctx: &LinuxSyscallContext<'_>,
-    _id: LinuxSocketId,
-) -> Result<(), clean_slate_linux_abi::LinuxErrno> {
-    if socket.pending_rx_req.is_some() {
+/// Keeps one `Receive` outstanding while the service endpoint exists, the queue has
+/// room for its result, and no receive error is waiting to be reported.
+fn arm_receive(socket: &mut LinuxSocket) -> Result<(), LinuxErrno> {
+    if socket.state == SocketState::Closed
+        || socket.m7_dest.is_none()
+        || socket.pending_rx_req.is_some()
+        || socket.rx_error.is_some()
+        || socket.rx_count as usize >= socket.rx_queue.len()
+    {
         return Ok(());
     }
-    let generation = u64::from(socket.owner_generation);
     let wire = NetworkRequest::Receive {
         session: socket.session,
         max_len: LINUX_UDP_MAX_DATAGRAM as u32,
     }
     .encode();
     let request_id = net_bridge_mut()
-        .submit(socket.owner_pid, socket.owner_pid, generation, &wire, &[])
-        .map_err(|_| clean_slate_linux_abi::EACCES)?;
+        .submit(
+            socket.owner_pid,
+            socket.owner_pid,
+            u64::from(socket.owner_generation),
+            &wire,
+            &[],
+        )
+        .map_err(bridge_err)?;
     socket.pending_rx_req = Some(request_id);
-    register_request_wake(request_id, linux_socket_request_wait_key(request_id));
     Ok(())
 }
 
-pub(crate) fn try_complete_pending_rx_on_socket(
-    socket: &mut LinuxSocket,
-    ctx: &LinuxSyscallContext<'_>,
-    id: LinuxSocketId,
-) -> Result<bool, clean_slate_linux_abi::LinuxErrno> {
+/// Moves a completed prefetch into the socket queue (or records its error) and re-arms.
+/// Returns whether the socket's read readiness changed.
+fn complete_prefetch(socket: &mut LinuxSocket) -> bool {
     let Some(request_id) = socket.pending_rx_req else {
-        return Ok(false);
+        return false;
     };
-    let generation = u64::from(socket.owner_generation);
     let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-    match net_bridge_mut().poll(
+    let response = match net_bridge_mut().poll(
         socket.owner_pid,
         socket.owner_pid,
-        generation,
+        u64::from(socket.owner_generation),
         request_id,
         &mut payload,
     ) {
+        Err(NetBridgeError::Pending) => return false,
+        other => other,
+    };
+    socket.pending_rx_req = None;
+    match response {
         Ok(NetworkResponse::Receive { payload_len }) => {
-            let n = payload_len as usize;
-            let _ = push_rx_datagram(socket, &payload[..n.min(NETWORK_MAX_PAYLOAD_BYTES)]);
-            socket.pending_rx_req = None;
-            clear_request_wake(request_id);
-            maybe_arm_udp_receive(socket, ctx, id)?;
-            Ok(true)
+            let n = (payload_len as usize).min(NETWORK_MAX_PAYLOAD_BYTES);
+            push_rx_datagram(socket, &payload[..n]);
         }
-        Ok(NetworkResponse::Error { .. }) => {
-            socket.pending_rx_req = None;
-            clear_request_wake(request_id);
-            maybe_arm_udp_receive(socket, ctx, id)?;
-            Ok(false)
-        }
-        Ok(_) => Ok(false),
-        Err(NetBridgeError::Pending) => Ok(false),
-        Err(_) => {
-            socket.pending_rx_req = None;
-            clear_request_wake(request_id);
-            Ok(false)
-        }
+        Ok(NetworkResponse::Error { code }) => socket.rx_error = Some(map_udp_receive_error(code)),
+        Ok(_) => socket.rx_error = Some(EINVAL),
+        Err(error) => socket.rx_error = Some(bridge_err(error)),
     }
+    if let Err(errno) = arm_receive(socket) {
+        socket.rx_error.get_or_insert(errno);
+    }
+    true
 }
 
-pub(crate) fn try_complete_pending_rx(
-    ctx: &LinuxSyscallContext<'_>,
-    id: LinuxSocketId,
-) -> Result<bool, clean_slate_linux_abi::LinuxErrno> {
-    with_socket_mut(id, |socket| try_complete_pending_rx_on_socket(socket, ctx, id))?
+/// `poll(2)` refresh: pick up a completed prefetch and make sure one is outstanding.
+pub(crate) fn refresh_receive(id: LinuxSocketId) -> Result<bool, LinuxErrno> {
+    with_socket_mut(id, |socket| {
+        let changed = complete_prefetch(socket);
+        arm_receive(socket)?;
+        Ok(changed)
+    })?
 }
 
-pub(crate) fn ensure_udp_receive_armed(
-    ctx: &LinuxSyscallContext<'_>,
-    id: LinuxSocketId,
-) -> Result<(), clean_slate_linux_abi::LinuxErrno> {
-    with_socket_mut(id, |socket| maybe_arm_udp_receive(socket, ctx, id))?
-}
-
-fn arm_udp_receive_for_owner(
-    socket: &mut LinuxSocket,
-    owner_pid: u64,
-    _id: LinuxSocketId,
-) -> Result<(), clean_slate_linux_abi::LinuxErrno> {
-    if socket.pending_rx_req.is_some() {
-        return Ok(());
-    }
-    let generation = u64::from(socket.owner_generation);
-    let wire = NetworkRequest::Receive {
-        session: socket.session,
-        max_len: LINUX_UDP_MAX_DATAGRAM as u32,
-    }
-    .encode();
-    let request_id = net_bridge_mut()
-        .submit(socket.owner_pid, socket.owner_pid, generation, &wire, &[])
-        .map_err(|_| clean_slate_linux_abi::EACCES)?;
-    socket.pending_rx_req = Some(request_id);
-    register_request_wake(request_id, linux_socket_request_wait_key(request_id));
-    Ok(())
-}
-
-fn maybe_arm_udp_receive_for_owner(
-    socket: &mut LinuxSocket,
-    owner_pid: u64,
-    id: LinuxSocketId,
-) -> Result<(), clean_slate_linux_abi::LinuxErrno> {
-    if socket.state == SocketState::Closed {
-        return Ok(());
-    }
-    if socket.rx_count as usize >= socket.rx_queue.len() {
-        return Ok(());
-    }
-    if socket.rx_count > 0 {
-        return Ok(());
-    }
-    if socket.pending_rx_req.is_some() || socket.inflight_request_id.is_some() {
-        return Ok(());
-    }
-    arm_udp_receive_for_owner(socket, owner_pid, id)
-}
-
-/// After `service_complete`, move payload into `rx_queue` for the matching prefetch slot.
-pub(crate) fn deliver_completed_prefetch(request_id: u64) -> Option<u64> {
-    for index in 0..super::LINUX_SOCKET_MAX {
-        let id = super::live_udp_socket_id(index)?;
-        let delivered = with_socket_mut(id, |socket| -> Result<Option<u64>, clean_slate_linux_abi::LinuxErrno> {
-            if socket.pending_rx_req != Some(request_id) {
-                return Ok(None);
-            }
-            let owner_pid = socket.owner_pid;
-            let generation = u64::from(socket.owner_generation);
-            let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-            match net_bridge_mut().poll(
-                owner_pid,
-                owner_pid,
-                generation,
-                request_id,
-                &mut payload,
-            ) {
-                Ok(NetworkResponse::Receive { payload_len }) => {
-                    let n = payload_len as usize;
-                    let _ = push_rx_datagram(socket, &payload[..n.min(NETWORK_MAX_PAYLOAD_BYTES)]);
-                    socket.pending_rx_req = None;
-                    clear_request_wake(request_id);
-                    let _ = maybe_arm_udp_receive_for_owner(socket, owner_pid, id);
-                    Ok(Some(owner_pid))
-                }
-                Ok(NetworkResponse::Error { .. }) => {
-                    socket.pending_rx_req = None;
-                    clear_request_wake(request_id);
-                    Ok(None)
-                }
-                Err(NetBridgeError::Pending) => Ok(None),
-                Err(_) => {
-                    socket.pending_rx_req = None;
-                    clear_request_wake(request_id);
-                    Ok(None)
-                }
-                Ok(_) => Ok(None),
-            }
-        });
-        if let Ok(Ok(Some(owner_pid))) = delivered {
-            return Some(owner_pid);
-        }
-    }
-    None
+/// `service_complete` hook: delivers the prefetch `request_id` belongs to, if any.
+/// Returns the owning socket so the caller can wake its readers.
+pub(crate) fn deliver_completed_prefetch(request_id: u64) -> Option<(LinuxSocketId, u64)> {
+    let id = super::udp_socket_with_pending_receive(request_id)?;
+    with_socket_mut(id, |socket| {
+        complete_prefetch(socket);
+        socket.owner_pid
+    })
+    .ok()
+    .map(|owner_pid| (id, owner_pid))
 }
 
 pub(crate) fn sendto(
@@ -249,15 +147,20 @@ pub(crate) fn sendto(
     let fd = request.args[0];
     let buf_ptr = request.args[1];
     let len = request.args[2];
-    let _flags = request.args[3];
+    let flags = request.args[3];
     let addr_ptr = request.args[4];
     let socklen = request.args[5] as u32;
 
+    // UDP never raises SIGPIPE and a datagram send never blocks here, so both accepted
+    // flags are no-ops; anything else is unsupported.
+    if flags & !u64::from(MSG_NOSIGNAL | MSG_DONTWAIT) != 0 {
+        return Err(EINVAL);
+    }
     if len > LINUX_UDP_MAX_DATAGRAM as u64 {
         return Err(EMSGSIZE);
     }
     if validate_user_pointer_range(buf_ptr, len).is_err() {
-        return Err(clean_slate_linux_abi::EFAULT);
+        return Err(EFAULT);
     }
     let open = crate::process::linux_fd::open_id_for_fd(ctx.pid, ctx.instance_generation, fd)?;
     let socket_ref = crate::process::linux_fd::socket_ref_for_open(open)?;
@@ -276,7 +179,6 @@ pub(crate) fn sendto(
             socket.state = SocketState::Bound;
         }
         socket.remote = Some(dest);
-        let _ = socket_addr_v4(&dest);
         udp_send_payload(socket, request, ctx, id, &payload[..n])
     })?
 }
@@ -291,7 +193,7 @@ fn udp_send_payload(
     let dest = socket
         .remote
         .as_ref()
-        .ok_or(clean_slate_linux_abi::EDESTADDRREQ)
+        .ok_or(EDESTADDRREQ)
         .map(socket_addr_v4)?;
     let session_gen =
         clean_slate_network::session::SessionGeneration::new(socket.session_generation);
@@ -317,7 +219,7 @@ fn udp_send_payload(
             NetworkResponse::Error { code } => {
                 return super::tcp::map_network_error(code);
             }
-            _ => return Err(clean_slate_linux_abi::EINVAL),
+            _ => return Err(EINVAL),
         }
     }
     let outcome = match broker_sync(
@@ -338,44 +240,64 @@ fn udp_send_payload(
     };
     match outcome.response {
         NetworkResponse::Send { bytes_sent } => {
-            let _ = maybe_arm_udp_receive(socket, ctx, id);
+            arm_receive(socket)?;
             Ok(bytes_sent as u64)
         }
         NetworkResponse::Error { code } => super::tcp::map_network_error(code),
-        _ => Err(clean_slate_linux_abi::EINVAL),
+        _ => Err(EINVAL),
     }
 }
 
-fn take_rx_datagram(socket: &mut LinuxSocket, scratch: &mut [u8]) -> Option<usize> {
+/// A queued datagram as `(copied, full_len)`, else a pending receive error.
+fn take_rx(
+    socket: &mut LinuxSocket,
+    scratch: &mut [u8],
+) -> Option<Result<(usize, usize), LinuxErrno>> {
     if socket.rx_count == 0 {
-        return None;
+        return socket.rx_error.take().map(Err);
     }
     let idx = socket.rx_head as usize % socket.rx_queue.len();
-    let dg = socket.rx_queue[idx].as_ref()?;
-    let n = (dg.len as usize).min(scratch.len());
-    scratch[..n].copy_from_slice(&dg.bytes[..n]);
-    socket.rx_queue[idx] = None;
-    socket.rx_head = (socket.rx_head + 1) % 2;
+    let datagram = socket.rx_queue[idx].take()?;
+    let full_len = datagram.len as usize;
+    let copied = full_len.min(scratch.len());
+    scratch[..copied].copy_from_slice(&datagram.bytes[..copied]);
+    socket.rx_head = ((idx + 1) % socket.rx_queue.len()) as u8;
     socket.rx_count -= 1;
-    Some(n)
+    Some(Ok((copied, full_len)))
 }
 
-fn drain_rx_if_ready(
+/// Shared inbound path for `read(2)` and `recvmsg`: returns `(copied, full_len)`.
+/// Blocking readers wait on the socket key, woken by prefetch delivery.
+fn receive_datagram(
     id: LinuxSocketId,
-    ctx: &LinuxSyscallContext<'_>,
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
     scratch: &mut [u8],
-) -> Result<Option<usize>, clean_slate_linux_abi::LinuxErrno> {
-    with_socket_mut(id, |socket| {
-        let _ = try_complete_pending_rx_on_socket(socket, ctx, id);
-        let taken = take_rx_datagram(socket, scratch);
-        if taken.is_some() {
-            let _ = maybe_arm_udp_receive(socket, ctx, id);
+    nonblock: bool,
+) -> Result<(usize, usize), LinuxErrno> {
+    loop {
+        let taken = with_socket_mut(id, |socket| {
+            complete_prefetch(socket);
+            let taken = take_rx(socket, scratch);
+            arm_receive(socket)?;
+            Ok::<_, LinuxErrno>(taken)
+        })??;
+        if let Some(result) = taken {
+            return result;
         }
-        Ok(taken)
-    })?
+        if nonblock {
+            return Err(EAGAIN);
+        }
+        block_linux_syscall(
+            request,
+            ctx,
+            linux_socket_wait_key(id),
+            None,
+            LinuxTimeoutResult::Zero,
+        )?;
+    }
 }
 
-/// Shared inbound path for `read(2)`, `recvfrom`, and `recvmsg` on UDP sockets.
 pub(crate) fn read_datagram(
     id: LinuxSocketId,
     request: &LinuxSyscallRequest,
@@ -383,43 +305,7 @@ pub(crate) fn read_datagram(
     scratch: &mut [u8],
     nonblock: bool,
 ) -> LinuxSyscallResult {
-    loop {
-        if let Some(n) = drain_rx_if_ready(id, ctx, scratch)? {
-            return Ok(n as u64);
-        }
-
-        let has_pending = with_socket_mut(id, |socket| socket.pending_rx_req.is_some())?;
-        if !has_pending {
-            ensure_udp_receive_armed(ctx, id)?;
-        }
-
-        let req_id = match with_socket_mut(id, |socket| socket.pending_rx_req)? {
-            Some(id) => id,
-            None => {
-                if nonblock {
-                    return Err(EAGAIN);
-                }
-                continue;
-            }
-        };
-
-        if let Some(n) = drain_rx_if_ready(id, ctx, scratch)? {
-            return Ok(n as u64);
-        }
-        if nonblock {
-            return Err(EAGAIN);
-        }
-        match block_linux_syscall(
-            request,
-            ctx,
-            linux_socket_request_wait_key(req_id),
-            None,
-            LinuxTimeoutResult::Zero,
-        ) {
-            Ok(_) => continue,
-            Err(errno) => return Err(errno),
-        }
-    }
+    receive_datagram(id, request, ctx, scratch, nonblock).map(|(copied, _)| copied as u64)
 }
 
 pub(crate) fn write_datagram(
@@ -438,8 +324,22 @@ pub(crate) fn write_datagram(
     udp_send_payload(socket, request, ctx, id, bytes)
 }
 
-const MSGHDR_SIZE: u64 = 56;
+fn read_user_u64(address: u64) -> Result<u64, LinuxErrno> {
+    validate_user_pointer_range(address, 8).map_err(|_| EFAULT)?;
+    Ok(unsafe { core::ptr::read_unaligned(address as *const u64) })
+}
 
+fn write_user_bytes(address: u64, bytes: &[u8]) -> Result<(), LinuxErrno> {
+    validate_user_writable_pointer_range(address, bytes.len() as u64).map_err(|_| EFAULT)?;
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len());
+    }
+    Ok(())
+}
+
+/// `recvmsg(2)` on a UDP socket: scatters one datagram across the iovecs, reports the
+/// (connected) peer as the source, no ancillary data, and `MSG_TRUNC` when the
+/// datagram did not fit.
 pub(crate) fn recvmsg(
     request: &LinuxSyscallRequest,
     ctx: &mut LinuxSyscallContext<'_>,
@@ -447,57 +347,50 @@ pub(crate) fn recvmsg(
 ) -> LinuxSyscallResult {
     let fd = request.args[0];
     let msg_ptr = request.args[1];
-    let _flags = request.args[2];
-    if msg_ptr == 0 {
-        return Err(clean_slate_linux_abi::EFAULT);
+    if request.args[2] & !u64::from(MSG_DONTWAIT) != 0 {
+        return Err(EINVAL);
     }
-    validate_user_pointer_range(msg_ptr, MSGHDR_SIZE).map_err(|_| clean_slate_linux_abi::EFAULT)?;
-    let msg_name = unsafe { *((msg_ptr) as *const u64) };
-    let msg_namelen = unsafe { *((msg_ptr + 8) as *const u32) };
-    let msg_iov = unsafe { *((msg_ptr + 16) as *const u64) };
-    let msg_iovlen = unsafe { *((msg_ptr + 24) as *const u64) };
-    if msg_iov == 0 || msg_iovlen == 0 {
-        return Err(clean_slate_linux_abi::EINVAL);
+    validate_user_writable_pointer_range(msg_ptr, MSGHDR_SIZE).map_err(|_| EFAULT)?;
+    let msg_name = read_user_u64(msg_ptr)?;
+    let msg_namelen = read_user_u64(msg_ptr + 8)? as u32;
+    let msg_iov = read_user_u64(msg_ptr + 16)?;
+    let msg_iovlen = usize::try_from(read_user_u64(msg_ptr + 24)?).map_err(|_| EMSGSIZE)?;
+    if msg_iovlen > RECVMSG_MAX_IOV {
+        return Err(EMSGSIZE);
     }
-    if msg_iovlen > 8 {
-        return Err(clean_slate_linux_abi::EMSGSIZE);
+    let mut iovecs = [(0u64, 0usize); RECVMSG_MAX_IOV];
+    for (index, iovec) in iovecs.iter_mut().take(msg_iovlen).enumerate() {
+        let entry = msg_iov + index as u64 * IOVEC_SIZE;
+        let base = read_user_u64(entry)?;
+        let len = usize::try_from(read_user_u64(entry + 8)?).map_err(|_| EINVAL)?;
+        validate_user_writable_pointer_range(base, len as u64).map_err(|_| EFAULT)?;
+        *iovec = (base, len);
     }
-    validate_user_pointer_range(msg_iov, 16).map_err(|_| clean_slate_linux_abi::EFAULT)?;
-    let iov_base = unsafe { *((msg_iov) as *const u64) };
-    let iov_len = unsafe { *((msg_iov + 8) as *const u64) };
-    if iov_base == 0 {
-        return Err(clean_slate_linux_abi::EFAULT);
-    }
-    let want = usize::try_from(iov_len).map_err(|_| clean_slate_linux_abi::EINVAL)?;
-    validate_user_writable_pointer_range(iov_base, iov_len).map_err(|_| clean_slate_linux_abi::EFAULT)?;
 
     let open = crate::process::linux_fd::open_id_for_fd(ctx.pid, ctx.instance_generation, fd)?;
     let socket_ref = crate::process::linux_fd::socket_ref_for_open(open)?;
     let id = super::socket_ref_to_id(socket_ref);
     let mut scratch = [0u8; LINUX_UDP_MAX_DATAGRAM];
-    let n = read_datagram(id, request, ctx, &mut scratch, nonblock)? as usize;
-    let copy = n.min(want).min(scratch.len());
-    if copy > 0 {
-        unsafe {
-            core::ptr::copy_nonoverlapping(scratch.as_ptr(), iov_base as *mut u8, copy);
+    let (copied, full_len) = receive_datagram(id, request, ctx, &mut scratch, nonblock)?;
+
+    let mut written = 0usize;
+    for &(base, len) in iovecs.iter().take(msg_iovlen) {
+        let chunk = len.min(copied - written);
+        write_user_bytes(base, &scratch[written..written + chunk])?;
+        written += chunk;
+        if written == copied {
+            break;
         }
     }
-    if msg_name != 0 && msg_namelen >= SOCKADDR_IN_LEN as u32 {
-        let remote = with_socket_mut(id, |socket| socket.remote)?;
-        if let Some(sa) = remote {
-            validate_user_writable_pointer_range(msg_name, msg_namelen as u64)
-                .map_err(|_| clean_slate_linux_abi::EFAULT)?;
-            let wire = sa.encode();
-            unsafe {
-                core::ptr::copy_nonoverlapping(wire.as_ptr(), msg_name as *mut u8, SOCKADDR_IN_LEN);
-            }
-            unsafe {
-                core::ptr::write((msg_ptr + 8) as *mut u32, SOCKADDR_IN_LEN as u32);
-            }
-        }
+    if msg_name != 0 {
+        let peer = with_socket_mut(id, |socket| socket.remote)?.ok_or(EINVAL)?;
+        let wire = peer.encode();
+        let name_len = (msg_namelen as usize).min(SOCKADDR_IN_LEN);
+        write_user_bytes(msg_name, &wire[..name_len])?;
+        write_user_bytes(msg_ptr + 8, &(SOCKADDR_IN_LEN as u32).to_le_bytes())?;
     }
-    unsafe {
-        core::ptr::write((msg_ptr + 48) as *mut i32, 0);
-    }
-    Ok(copy as u64)
+    let msg_flags = if full_len > written { MSG_TRUNC } else { 0 };
+    write_user_bytes(msg_ptr + 40, &0u64.to_le_bytes())?;
+    write_user_bytes(msg_ptr + 48, &msg_flags.to_le_bytes())?;
+    Ok(written as u64)
 }

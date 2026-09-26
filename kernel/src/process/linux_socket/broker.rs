@@ -42,7 +42,7 @@ pub(crate) fn network_client_handle(holder: HolderId) -> Option<u64> {
     })
 }
 
-fn bridge_err(e: NetBridgeError) -> LinuxErrno {
+pub(super) fn bridge_err(e: NetBridgeError) -> LinuxErrno {
     use clean_slate_linux_abi::{EACCES, EINVAL, ENFILE};
     match e {
         NetBridgeError::QueueFull => ENFILE,
@@ -120,8 +120,11 @@ pub(crate) fn broker_sync(
         let id = net_bridge_mut()
             .submit(ctx.pid, ctx.pid, generation, &wire, payload)
             .map_err(|e| Err(bridge_err(e)))?;
+        if let Err(errno) = register_request_wake(id, linux_socket_request_wait_key(id)) {
+            let _ = net_bridge_mut().discard_result(ctx.pid, ctx.pid, generation, id);
+            return Err(Err(errno));
+        }
         *inflight_request_id = Some(id);
-        register_request_wake(id, linux_socket_request_wait_key(id));
         id
     };
 

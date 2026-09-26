@@ -489,6 +489,7 @@ impl LinuxFdRegistry {
         generation: InstanceGeneration,
         socket: SocketRef,
         nonblock: bool,
+        cloexec: bool,
     ) -> Result<i32, LinuxErrno> {
         self.ensure_fd_table(pid, generation)?;
         let status = OpenStatus {
@@ -497,8 +498,8 @@ impl LinuxFdRegistry {
             append: false,
         };
         let open = self.pool.alloc_socket(pid, socket, status)?;
-        self.pool.attach_first_ref(open)?;
-        self.alloc_lowest_fd(pid, generation, open, FdFlags::default())
+        self.alloc_lowest_fd(pid, generation, open, FdFlags { cloexec })
+            .inspect_err(|_| self.pool.free_unattached(open))
     }
 
     pub(crate) fn alloc_lowest_fd(
@@ -570,7 +571,9 @@ impl LinuxFdRegistry {
         let slot_index = self.slot_index(pid, generation).ok_or(EBADF)?;
         let open = self.pool.alloc_file_or_dir(pid, kind, status)?;
         let table = &mut self.slots[slot_index].as_mut().expect("slot").table;
-        table.alloc_lowest(&mut self.pool, open, flags)
+        table
+            .alloc_lowest(&mut self.pool, open, flags)
+            .inspect_err(|_| self.pool.free_unattached(open))
     }
 
     pub(crate) fn open_description_for_fd(
@@ -693,8 +696,9 @@ pub(crate) fn install_socket_fd(
     generation: InstanceGeneration,
     socket: SocketRef,
     nonblock: bool,
+    cloexec: bool,
 ) -> Result<i32, LinuxErrno> {
-    registry_mut().install_socket_description(pid, generation, socket, nonblock)
+    registry_mut().install_socket_description(pid, generation, socket, nonblock, cloexec)
 }
 
 pub(crate) fn open_id_for_fd(
@@ -1000,8 +1004,7 @@ mod tests {
         ipc.grant_console_capability_for_pid(pid)
             .expect("shared console grant");
         let sink = console_sink_ref_from_table(ipc).expect("console sink");
-        fds.install(pid, generation, sink)
-            .expect("install");
+        fds.install(pid, generation, sink).expect("install");
         sink
     }
 
@@ -1040,6 +1043,45 @@ mod tests {
         fds.close_fd(1, gen, 0).expect("close");
         let again = fds.alloc_self_test_placeholder_file(1, gen).expect("reuse");
         assert_eq!(again, 0);
+    }
+
+    #[test]
+    fn closing_socket_fd_frees_its_open_description() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 3, gen);
+        let baseline = fds.open_description_live_count();
+        let socket = SocketRef {
+            index: 0,
+            generation: 1,
+        };
+        let fd = fds
+            .install_socket_description(3, gen, socket, false, false)
+            .expect("socket fd");
+        assert_eq!(fds.open_description_live_count(), baseline + 1);
+        fds.close_fd(3, gen, fd as u64).expect("close");
+        assert_eq!(fds.open_description_live_count(), baseline);
+    }
+
+    #[test]
+    fn failed_socket_install_frees_its_open_description() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 4, gen);
+        let socket = SocketRef {
+            index: 0,
+            generation: 1,
+        };
+        while fds
+            .install_socket_description(4, gen, socket, false, false)
+            .is_ok()
+        {}
+        let saturated = fds.open_description_live_count();
+        assert_eq!(
+            fds.install_socket_description(4, gen, socket, false, false),
+            Err(clean_slate_linux_abi::EMFILE)
+        );
+        assert_eq!(fds.open_description_live_count(), saturated);
     }
 
     #[test]
@@ -1143,14 +1185,7 @@ mod tests {
         fds.dup2(200, child_gen, LINUX_STDOUT_FD, 3)
             .expect("dup console to fd 3");
         assert_eq!(
-            fds.write_fd(
-                &mut ipc,
-                200,
-                child_gen,
-                3,
-                b"denied\n",
-                LINUX
-            ),
+            fds.write_fd(&mut ipc, 200, child_gen, 3, b"denied\n", LINUX),
             Err(EACCES)
         );
         ipc.grant_console_capability_for_pid(200)

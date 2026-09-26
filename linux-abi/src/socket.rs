@@ -23,6 +23,9 @@ pub const IPPROTO_IP: u32 = 0;
 pub const IPPROTO_TCP: u32 = 6;
 pub const IPPROTO_UDP: u32 = 17;
 
+/// `recvmsg` output flag: the datagram was longer than the supplied buffers.
+pub const MSG_TRUNC: u32 = 0x20;
+pub const MSG_DONTWAIT: u32 = 0x40;
 pub const MSG_NOSIGNAL: u32 = 0x4000;
 
 pub const SOCKADDR_IN_LEN: usize = 16;

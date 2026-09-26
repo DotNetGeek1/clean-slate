@@ -355,6 +355,13 @@ impl OpenDescriptionPool {
         Ok(())
     }
 
+    /// Frees a description whose install into an fd table failed before any fd referenced it.
+    pub(crate) fn free_unattached(&mut self, id: OpenDescriptionId) {
+        if self.get(id).is_ok_and(|desc| desc.refcount == 0) {
+            self.finalize_slot(id.index as usize);
+        }
+    }
+
     fn finalize_slot(&mut self, index: usize) {
         let slot = &mut self.slots[index];
         if !slot.live {

@@ -8,7 +8,7 @@ mod tcp;
 mod udp;
 
 use clean_slate_capability::{HolderId, Rights};
-use clean_slate_linux_abi::{LinuxErrno, EBADF, EINVAL, SOCK_DGRAM, SOCK_STREAM};
+use clean_slate_linux_abi::{LinuxErrno, EBADF, EINVAL, EIO, SOCK_DGRAM, SOCK_STREAM};
 use clean_slate_network::addr::{Ipv4Addr, SocketAddrV4};
 use clean_slate_network::protocol::{NetworkRequest, NetworkResponse};
 use clean_slate_network::session::{SessionId, SocketKind};
@@ -77,8 +77,10 @@ pub(crate) struct LinuxSocket {
     tcp_rx_len: u16,
     tcp_eof: bool,
     inflight_request_id: Option<u64>,
-    /// Post-`sendto` receive arm so `poll(2)` can observe datagrams before `recvmsg`.
+    /// Outstanding prefetch `Receive` (see `udp`): lets `poll(2)` observe datagrams.
     pending_rx_req: Option<u64>,
+    /// Receive failure reported by the service, returned once to the next reader.
+    rx_error: Option<LinuxErrno>,
     owner_pid: u64,
     owner_generation: u32,
     generation: u32,
@@ -103,6 +105,7 @@ impl LinuxSocket {
             tcp_eof: false,
             inflight_request_id: None,
             pending_rx_req: None,
+            rx_error: None,
             owner_pid: 0,
             owner_generation: 0,
             generation: 1,
@@ -130,7 +133,9 @@ impl SocketPool {
 }
 
 static SOCKET_POOL: GlobalCell<SocketPool> = GlobalCell::new(SocketPool::new());
-static REQUEST_WAKE_SLOT: GlobalCell<[Option<(u64, WaitKey)>; 16]> = GlobalCell::new([None; 16]);
+/// At most one blocking broker request is in flight per socket.
+static REQUEST_WAKE_SLOT: GlobalCell<[Option<(u64, WaitKey)>; LINUX_SOCKET_MAX]> =
+    GlobalCell::new([None; LINUX_SOCKET_MAX]);
 
 pub(crate) fn linux_socket_wait_key(id: LinuxSocketId) -> WaitKey {
     WaitKey((0x53u64 << 56) | ((id.index as u64) << 32) | (id.generation as u64))
@@ -147,16 +152,20 @@ pub(crate) fn pool_live_count() -> usize {
     unsafe { (*SOCKET_POOL.get()).live_count() }
 }
 
-pub(super) fn live_udp_socket_id(index: usize) -> Option<LinuxSocketId> {
+pub(super) fn udp_socket_with_pending_receive(request_id: u64) -> Option<LinuxSocketId> {
     let pool = unsafe { &*SOCKET_POOL.get() };
-    let slot = pool.slots.get(index)?;
-    if slot.state == SocketState::Closed || slot.kind != SocketKindLinux::Udp {
-        return None;
-    }
-    Some(LinuxSocketId {
-        index: index as u16,
-        generation: slot.generation,
-    })
+    pool.slots
+        .iter()
+        .enumerate()
+        .find(|(_, slot)| {
+            slot.state != SocketState::Closed
+                && slot.kind == SocketKindLinux::Udp
+                && slot.pending_rx_req == Some(request_id)
+        })
+        .map(|(index, slot)| LinuxSocketId {
+            index: index as u16,
+            generation: slot.generation,
+        })
 }
 
 pub(crate) fn notify_request_complete(request_id: u64) -> usize {
@@ -173,33 +182,38 @@ pub(crate) fn notify_request_complete(request_id: u64) -> usize {
     woken
 }
 
-/// Pull a completed bridge `Receive` into the socket `rx_queue` and wake poll/recv waiters.
+/// `service_complete` hook: wakes the broker waiter for `request_id`, or delivers a UDP
+/// prefetch into its socket queue and wakes that socket's readers and `poll(2)` waiters.
 pub(crate) fn deliver_prefetch_receive(request_id: u64) -> usize {
-    let mut woken = 0usize;
-    if let Some(owner_pid) = udp::deliver_completed_prefetch(request_id) {
-        woken = woken.saturating_add(crate::syscall::linux::poll::wake_poll_waiters_for_pid(
-            owner_pid,
-        ));
+    let mut woken = notify_request_complete(request_id);
+    if let Some((id, owner_pid)) = udp::deliver_completed_prefetch(request_id) {
+        woken = woken
+            .saturating_add(wake_all(linux_socket_wait_key(id)))
+            .saturating_add(crate::syscall::linux::poll::wake_poll_waiters_for_pid(
+                owner_pid,
+            ));
     }
-    woken.saturating_add(notify_request_complete(request_id))
+    woken
 }
 
-pub(crate) fn register_request_wake(request_id: u64, key: WaitKey) {
+/// Fails closed when the table is full: a dropped registration would leave the
+/// blocked caller without a wake.
+pub(crate) fn register_request_wake(request_id: u64, key: WaitKey) -> Result<(), LinuxErrno> {
     let wakes = unsafe { &mut *REQUEST_WAKE_SLOT.get() };
-    for entry in wakes.iter_mut() {
-        if entry.map(|(id, _)| id) == Some(request_id) {
-            *entry = Some((request_id, key));
-            return;
-        }
+    if let Some(entry) = wakes
+        .iter_mut()
+        .find(|entry| entry.is_some_and(|(id, _)| id == request_id))
+    {
+        *entry = Some((request_id, key));
+        return Ok(());
     }
-    for entry in wakes.iter_mut() {
-        if entry.is_none() {
-            *entry = Some((request_id, key));
-            return;
-        }
-    }
+    let entry = wakes
+        .iter_mut()
+        .find(|entry| entry.is_none())
+        .ok_or(clean_slate_linux_abi::ENOBUFS)?;
+    *entry = Some((request_id, key));
+    Ok(())
 }
-
 pub(crate) fn clear_request_wake(request_id: u64) {
     let wakes = unsafe { &mut *REQUEST_WAKE_SLOT.get() };
     for entry in wakes.iter_mut() {
@@ -301,10 +315,32 @@ pub(crate) fn release_socket(id: LinuxSocketId) {
     let pool = unsafe { &mut *SOCKET_POOL.get() };
     if let Some(slot) = pool.slots.get_mut(id.index as usize) {
         if slot.generation == id.generation && slot.state != SocketState::Closed {
+            abandon_outstanding_requests(slot);
             close_m7_session(slot);
             slot.state = SocketState::Closed;
+            wake_all(linux_socket_wait_key(id));
             slot.generation = slot.generation.saturating_add(1);
         }
+    }
+}
+
+/// The socket is going away: nobody will poll its outstanding bridge requests.
+fn abandon_outstanding_requests(socket: &mut LinuxSocket) {
+    let generation = u64::from(socket.owner_generation);
+    for request_id in [
+        socket.pending_rx_req.take(),
+        socket.inflight_request_id.take(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        clear_request_wake(request_id);
+        let _ = crate::service::net_bridge::net_bridge_mut().discard_result(
+            socket.owner_pid,
+            socket.owner_pid,
+            generation,
+            request_id,
+        );
     }
 }
 
@@ -335,13 +371,21 @@ fn close_m7_session(socket: &LinuxSocket) {
     if let Some(gen) =
         crate::service::instance_generation::live_instance_generation_for_pid(socket.owner_pid)
     {
-        let _ = crate::service::net_bridge::net_bridge_mut().submit(
+        let bridge = crate::service::net_bridge::net_bridge_mut();
+        if let Ok(request_id) = bridge.submit(
             socket.owner_pid,
             socket.owner_pid,
             u64::from(gen.0),
             &wire,
             &[],
-        );
+        ) {
+            let _ = bridge.discard_result(
+                socket.owner_pid,
+                socket.owner_pid,
+                u64::from(gen.0),
+                request_id,
+            );
+        }
     }
 }
 
@@ -404,7 +448,7 @@ pub(crate) mod syscalls {
             SocketKindLinux::Udp => SocketKind::LinuxUdp,
             SocketKindLinux::Tcp => SocketKind::LinuxTcp,
         };
-        with_socket_mut(id, |socket| -> LinuxSyscallResult {
+        let opened = with_socket_mut(id, |socket| -> LinuxSyscallResult {
             let outcome = match broker_sync(
                 request,
                 ctx,
@@ -420,21 +464,26 @@ pub(crate) mod syscalls {
             };
             let session = match outcome.response {
                 NetworkResponse::Open { session } => session,
-                _ => return Err(EINVAL),
+                _ => return Err(EIO),
             };
             socket.session = session;
             socket.session_generation = session.generation().get();
             socket.state = SocketState::Unbound;
             Ok(0)
         })
-        .map_err(|_| EBADF)??;
-        let nonblock = (sock_type & SOCK_NONBLOCK) != 0;
+        .map_err(|_| EBADF)?;
+        if let Err(errno) = opened {
+            release_socket(id);
+            return Err(errno);
+        }
         let fd = crate::process::linux_fd::install_socket_fd(
             ctx.pid,
             ctx.instance_generation,
             id_to_socket_ref(id),
-            nonblock,
-        )?;
+            (sock_type & SOCK_NONBLOCK) != 0,
+            (sock_type & SOCK_CLOEXEC) != 0,
+        )
+        .inspect_err(|_| release_socket(id))?;
         Ok(fd as u64)
     }
 
@@ -531,19 +580,14 @@ pub(crate) mod syscalls {
     }
 }
 
-const MSG_DONTWAIT: u64 = 0x40;
-
 pub(super) fn socket_recv_nonblock(
     ctx: &crate::syscall::linux::table::LinuxSyscallContext<'_>,
     fd: u64,
     msg_flags: u64,
 ) -> Result<bool, clean_slate_linux_abi::LinuxErrno> {
-    let status = crate::process::linux_fd::open_description_status(
-        ctx.pid,
-        ctx.instance_generation,
-        fd,
-    )?;
-    Ok(status.nonblock || (msg_flags & MSG_DONTWAIT) != 0)
+    let status =
+        crate::process::linux_fd::open_description_status(ctx.pid, ctx.instance_generation, fd)?;
+    Ok(status.nonblock || (msg_flags & u64::from(clean_slate_linux_abi::MSG_DONTWAIT)) != 0)
 }
 
 pub(crate) fn refresh_readiness_for_fd(
@@ -551,24 +595,19 @@ pub(crate) fn refresh_readiness_for_fd(
     fd: u64,
 ) -> Result<(), clean_slate_linux_abi::LinuxErrno> {
     use crate::process::linux_fd::open_description::DescriptorKind;
-    let open = crate::process::linux_fd::open_description_id_for_fd(
-        ctx.pid,
-        ctx.instance_generation,
-        fd,
-    )?;
-    let kind = crate::process::linux_fd::open_description_kind(
-        ctx.pid,
-        ctx.instance_generation,
-        fd,
-    )?;
+    let open =
+        crate::process::linux_fd::open_description_id_for_fd(ctx.pid, ctx.instance_generation, fd)?;
+    let kind =
+        crate::process::linux_fd::open_description_kind(ctx.pid, ctx.instance_generation, fd)?;
     if !matches!(kind, DescriptorKind::Socket(_)) {
         return Ok(());
     }
     let socket_ref = crate::process::linux_fd::socket_ref_for_open(open)?;
     let id = socket_ref_to_id(socket_ref);
-    let progressed = udp::try_complete_pending_rx(ctx, id)?;
-    let _ = udp::ensure_udp_receive_armed(ctx, id);
-    if progressed {
+    if with_socket_mut(id, |socket| socket.kind)? != SocketKindLinux::Udp {
+        return Ok(());
+    }
+    if udp::refresh_receive(id)? {
         crate::syscall::linux::poll::notify_readiness_changed(open);
     }
     Ok(())
@@ -648,27 +687,6 @@ pub(crate) fn selftest_read_stale_session(id: LinuxSocketId) -> LinuxErrno {
 
 pub(crate) fn readiness_changed(open: OpenDescriptionId) {
     crate::syscall::linux::poll::notify_readiness_changed(open);
-}
-
-#[cfg(feature = "m9-userspace-self-test")]
-pub(crate) fn log_udp_poll_diag(pid: u64) {
-    use crate::diagnostics::log::kernel_log_fmt;
-    let pool = unsafe { &*SOCKET_POOL.get() };
-    for (index, slot) in pool.slots.iter().enumerate() {
-        if slot.owner_pid != pid || slot.kind != SocketKindLinux::Udp {
-            continue;
-        }
-        if slot.state == SocketState::Closed {
-            continue;
-        }
-        kernel_log_fmt(format_args!(
-            "[M9.D] udp idx={index} rx_q={} pending_rx={:?} inflight={:?} dropped={}\n",
-            slot.rx_count,
-            slot.pending_rx_req,
-            slot.inflight_request_id,
-            slot.rx_dropped,
-        ));
-    }
 }
 
 pub(crate) fn readiness_for(id: LinuxSocketId) -> Readiness {
