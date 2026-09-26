@@ -871,7 +871,7 @@ fn run_inner() -> Result<(), &'static str> {
         crate::syscall::install_service_lifecycle_syscall_allocator(allocator);
         let controller = unsafe { crate::service::service_lifecycle_controller_mut() };
         controller.clear();
-        controller.configure_launch_context(kernel_root_frame, syscall_kernel_stack_top);
+        controller.configure_launch_context(kernel_root_frame);
         initialize_scheduler()?;
         #[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
         {

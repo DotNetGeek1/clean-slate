@@ -602,7 +602,7 @@ pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
     install_service_lifecycle_syscall_allocator(allocator);
     let controller = unsafe { service_lifecycle_controller_mut() };
     controller.clear();
-    controller.configure_launch_context(kernel_root_frame, kernel_stack_top);
+    controller.configure_launch_context(kernel_root_frame);
     controller
         .declare_service(DEPENDENCY_SERVICE_ID)
         .unwrap_or_else(|message| fatal_kernel_error(message));

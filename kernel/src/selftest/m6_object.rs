@@ -384,15 +384,11 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
         *scheduler_mut() = Scheduler::new();
     }
     let kernel_root = current_root_frame_address();
-    let kernel_stack_top = unsafe {
-        let stacks = &*task_stacks_mut();
-        task_stack_top(&stacks[0])
-    };
     install_service_lifecycle_syscall_allocator(allocator);
     let lifecycle_capability = {
         let controller = unsafe { service_lifecycle_controller_mut() };
         controller.clear();
-        controller.configure_launch_context(kernel_root, kernel_stack_top);
+        controller.configure_launch_context(kernel_root);
         controller
             .declare_service(STORAGE_SERVICE_ID)
             .unwrap_or_else(|message| fatal_kernel_error(message));

@@ -602,7 +602,7 @@ pub(crate) fn start_m9_userspace_self_test(page_allocator: PageAllocator) -> ! {
 
     let controller = unsafe { service_lifecycle_controller_mut() };
     controller.clear();
-    controller.configure_launch_context(kernel_root, kernel_stack_top);
+    controller.configure_launch_context(kernel_root);
     controller
         .declare_service(STORAGE_SERVICE_ID)
         .unwrap_or_else(|m| fatal_kernel_error(m));

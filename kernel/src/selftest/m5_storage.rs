@@ -13,7 +13,6 @@
 //! exactly as it does for any other exiting userspace thread.
 
 use crate::arch::x86_64::context_switch::restore_task_context;
-use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
@@ -29,7 +28,6 @@ use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::scheduler_mut;
-use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
 use crate::service::control::LifecycleControlError;
 use crate::service::control::ServiceLifecycleController;
@@ -109,16 +107,12 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
         *M5_CRASH_PLAN.get() = None;
     }
     let kernel_root = current_root_frame_address();
-    let kernel_stack_top = unsafe {
-        let stacks = &*task_stacks_mut();
-        task_stack_top(&stacks[0])
-    };
     install_service_lifecycle_syscall_allocator(allocator);
     let mode = active_self_test_mode();
     let capability = {
         let controller = unsafe { service_lifecycle_controller_mut() };
         controller.clear();
-        controller.configure_launch_context(kernel_root, kernel_stack_top);
+        controller.configure_launch_context(kernel_root);
         controller
             .declare_service(STORAGE_SERVICE_ID)
             .unwrap_or_else(|message| fatal_kernel_error(message));

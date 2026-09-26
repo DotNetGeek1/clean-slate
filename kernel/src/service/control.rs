@@ -91,7 +91,6 @@ pub(crate) struct ServiceLifecycleController {
     pending_count: usize,
     next_scheduler_slot: usize,
     kernel_root_frame: u64,
-    kernel_stack_top: u64,
 }
 
 impl ServiceLifecycleController {
@@ -104,7 +103,6 @@ impl ServiceLifecycleController {
             pending_count: 0,
             next_scheduler_slot: SERVICE_SCHEDULER_SLOT_START,
             kernel_root_frame: 0,
-            kernel_stack_top: 0,
         }
     }
 
@@ -320,13 +318,8 @@ impl ServiceLifecycleController {
         Ok(Some(event))
     }
 
-    pub(crate) fn configure_launch_context(
-        &mut self,
-        kernel_root_frame: u64,
-        kernel_stack_top: u64,
-    ) {
+    pub(crate) fn configure_launch_context(&mut self, kernel_root_frame: u64) {
         self.kernel_root_frame = kernel_root_frame;
-        self.kernel_stack_top = kernel_stack_top;
     }
 
     pub(crate) fn declare_service(&mut self, service: ServiceId) -> Result<(), &'static str> {
@@ -453,21 +446,10 @@ impl ServiceLifecycleController {
         Ok(slot)
     }
 
-    #[cfg(any(
-        feature = "m8-linux-hello",
-        feature = "m4-recovery-self-test",
-        feature = "m5-storage-self-test",
-        feature = "m5-persistence-self-test",
-        feature = "m5-crash-early-self-test",
-        feature = "m5-crash-late-self-test",
-        feature = "m5-crash-recovery-self-test",
-        feature = "m6-object-self-test",
-        feature = "m7-net-service-self-test",
-        feature = "m9-linux-fs-self-test",
-        feature = "m9-linux-socket-self-test",
-        feature = "m9-userspace-self-test"
-    ))]
-    fn per_slot_kernel_stack_top(scheduler_slot: usize) -> Result<u64, LifecycleControlError> {
+    /// Every service thread runs on its own scheduler slot's task stack: dispatch loads
+    /// `Thread::kernel_stack_top` into the TSS and SYSCALL stack on each switch, and
+    /// `Scheduler::configure_thread` rejects a user thread bound to any other stack.
+    fn resolve_kernel_stack_top(scheduler_slot: usize) -> Result<u64, LifecycleControlError> {
         use crate::arch::x86_64::context_switch::task_stack_top;
         use crate::sched::task_stacks_mut;
         let stacks = unsafe { task_stacks_mut() };
@@ -477,58 +459,6 @@ impl ServiceLifecycleController {
             ));
         }
         Ok(task_stack_top(&stacks[scheduler_slot]))
-    }
-
-    fn resolve_kernel_stack_top(
-        &self,
-        service_id: ServiceId,
-        scheduler_slot: usize,
-    ) -> Result<u64, LifecycleControlError> {
-        #[cfg(feature = "m8-linux-hello")]
-        if service_id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID {
-            // Per-slot stack so Linux can run alongside the two demo kernel tasks.
-            return Self::per_slot_kernel_stack_top(scheduler_slot);
-        }
-        #[cfg(any(
-            feature = "m4-recovery-self-test",
-            feature = "m5-storage-self-test",
-            feature = "m5-persistence-self-test",
-            feature = "m5-crash-early-self-test",
-            feature = "m5-crash-late-self-test",
-            feature = "m5-crash-recovery-self-test",
-            feature = "m6-object-self-test",
-            feature = "m7-net-service-self-test",
-            feature = "m9-linux-fs-self-test",
-            feature = "m9-linux-socket-self-test",
-            feature = "m9-userspace-self-test"
-        ))]
-        {
-            let _ = service_id;
-            Self::per_slot_kernel_stack_top(scheduler_slot)
-        }
-        #[cfg(not(any(
-            feature = "m4-recovery-self-test",
-            feature = "m5-storage-self-test",
-            feature = "m5-persistence-self-test",
-            feature = "m5-crash-early-self-test",
-            feature = "m5-crash-late-self-test",
-            feature = "m5-crash-recovery-self-test",
-            feature = "m6-object-self-test",
-            feature = "m7-net-service-self-test",
-            feature = "m9-linux-fs-self-test",
-            feature = "m9-linux-socket-self-test",
-            feature = "m9-userspace-self-test"
-        )))]
-        {
-            let _ = service_id;
-            let _ = scheduler_slot;
-            if self.kernel_stack_top == 0 {
-                return Err(LifecycleControlError::SpawnFailed(
-                    "service launch context was not configured",
-                ));
-            }
-            Ok(self.kernel_stack_top)
-        }
     }
 
     fn service_index(&self, service_id: ServiceId) -> Option<usize> {
@@ -549,10 +479,15 @@ impl ServiceLifecycleController {
         if self.services[service_index].live.is_some() {
             return Err(LifecycleControlError::ServiceAlreadyLive);
         }
+        if self.kernel_root_frame == 0 {
+            return Err(LifecycleControlError::SpawnFailed(
+                "service launch context was not configured",
+            ));
+        }
         let scheduler_slot = self
             .allocate_scheduler_slot()
             .map_err(LifecycleControlError::SpawnFailed)?;
-        let kernel_stack_top = self.resolve_kernel_stack_top(service_id, scheduler_slot)?;
+        let kernel_stack_top = Self::resolve_kernel_stack_top(scheduler_slot)?;
         let spawned = if service_id.0 == 0x0000_4100 {
             #[cfg(feature = "m4-recovery-self-test")]
             {
@@ -576,7 +511,7 @@ impl ServiceLifecycleController {
                 .map_err(|message| {
                     #[cfg(feature = "m8-linux-hello")]
                     if service_id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID {
-                        // `launch_linux_hello` already logged `[LNX ] load failed: …`.
+                        // `launch_linux_hello` already logged `[LNX ] load failed: â€¦`.
                         return LifecycleControlError::SpawnFailed(message);
                     }
                     kernel_log_fmt(format_args!(
@@ -994,7 +929,7 @@ mod tests {
             .grant_lifecycle_control_capability(100)
             .expect("grant capability");
         let mut allocator = test_allocator();
-        controller.configure_launch_context(0x1000, 0x2000);
+        controller.configure_launch_context(0x1000);
         let request = ControlRequest::new(ServiceId(7), ControlRequestKind::Start);
         let message = LifecycleMessage::ControlRequest(request).encode();
         let err = controller

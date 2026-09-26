@@ -362,7 +362,7 @@ pub(crate) fn start_m8_linux_hello_self_test(allocator: PageAllocator) -> ! {
 
     let controller = unsafe { service_lifecycle_controller_mut() };
     controller.clear();
-    controller.configure_launch_context(kernel_root_frame(), 0);
+    controller.configure_launch_context(kernel_root_frame());
 
     let native_pid = launch_native_sibling(
         allocator,

@@ -257,10 +257,7 @@ pub(crate) fn start_m9_linux_socket_self_test(page_allocator: PageAllocator) -> 
     initialize_syscall_abi(kernel_stack_top).unwrap_or_else(|m| fatal_kernel_error(m));
     let controller = unsafe { service_lifecycle_controller_mut() };
     controller.clear();
-    controller.configure_launch_context(
-        crate::mm::address_space::kernel_root_frame(),
-        kernel_stack_top,
-    );
+    controller.configure_launch_context(crate::mm::address_space::kernel_root_frame());
     controller
         .declare_service(NETWORK_SERVICE_ID)
         .unwrap_or_else(|m| fatal_kernel_error(m));

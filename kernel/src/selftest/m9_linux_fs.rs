@@ -90,11 +90,10 @@ pub(crate) fn start_m9_linux_fs_self_test(page_allocator: PageAllocator) -> ! {
     linux_fd::reset_registry_for_selftest();
 
     let kernel_root = current_root_frame_address();
-    let kernel_stack_top = unsafe { task_stack_top(&(*task_stacks_mut())[0]) };
     let lifecycle_capability = {
         let controller = unsafe { service_lifecycle_controller_mut() };
         controller.clear();
-        controller.configure_launch_context(kernel_root, kernel_stack_top);
+        controller.configure_launch_context(kernel_root);
         controller
             .declare_service(STORAGE_SERVICE_ID)
             .unwrap_or_else(|message| fatal_kernel_error(message));

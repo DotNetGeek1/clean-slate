@@ -64,7 +64,7 @@ pub(crate) fn start_m7_net_caps_self_test(allocator: PageAllocator) -> ! {
     {
         let controller = unsafe { service_lifecycle_controller_mut() };
         controller.clear();
-        controller.configure_launch_context(kernel_root, 0);
+        controller.configure_launch_context(kernel_root);
         controller
             .declare_service(NETWORK_SERVICE_ID)
             .unwrap_or_else(|message| fatal_kernel_error(message));
