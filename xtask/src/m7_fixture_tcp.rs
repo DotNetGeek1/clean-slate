@@ -279,6 +279,70 @@ impl M9HttpService {
     }
 }
 
+const M9_BANNER_PORT: u16 = 4002;
+const M9_BANNER_BYTES: &[u8] = b"M9-BANNER-FIX\n";
+
+pub struct M9BannerService {
+    listen: SocketHandle,
+    active: Option<SocketHandle>,
+    sent: bool,
+}
+
+impl M9BannerService {
+    pub fn new(sockets: &mut smoltcp::iface::SocketSet, listen: SocketHandle) -> Self {
+        let socket = sockets.get_mut::<tcp::Socket>(listen);
+        let endpoint = IpListenEndpoint {
+            addr: Some(IpAddress::v4(10, 77, 0, 50)),
+            port: M9_BANNER_PORT,
+        };
+        socket.listen(endpoint).expect("m9 banner listen");
+        Self {
+            listen,
+            active: None,
+            sent: false,
+        }
+    }
+
+    pub fn poll(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+        if self.active.is_none() {
+            let socket = sockets.get_mut::<tcp::Socket>(self.listen);
+            if socket.is_active() {
+                self.active = Some(self.listen);
+                self.sent = false;
+                println!("[FIX ] m9 banner connect");
+            }
+            return;
+        }
+        let active = self.active.expect("m9 banner active");
+        let socket = sockets.get_mut::<tcp::Socket>(active);
+        if !socket.is_active() {
+            self.relisten(sockets);
+            return;
+        }
+        if !self.sent && socket.may_send() && socket.send_slice(M9_BANNER_BYTES).is_ok() {
+            self.sent = true;
+            println!("[FIX ] m9 banner sent");
+        }
+        if self.sent && socket.state() == tcp::State::CloseWait {
+            socket.close();
+            self.relisten(sockets);
+        }
+    }
+
+    fn relisten(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+        self.active = None;
+        self.sent = false;
+        let socket = sockets.get_mut::<tcp::Socket>(self.listen);
+        if !socket.is_listening() {
+            let endpoint = IpListenEndpoint {
+                addr: Some(IpAddress::v4(10, 77, 0, 50)),
+                port: M9_BANNER_PORT,
+            };
+            let _ = socket.listen(endpoint);
+        }
+    }
+}
+
 fn load_server_config(cert: FixtureTlsCert) -> ServerConfig {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

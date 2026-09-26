@@ -133,9 +133,6 @@ impl SocketPool {
 }
 
 static SOCKET_POOL: GlobalCell<SocketPool> = GlobalCell::new(SocketPool::new());
-/// At most one blocking broker request is in flight per socket.
-static REQUEST_WAKE_SLOT: GlobalCell<[Option<(u64, WaitKey)>; LINUX_SOCKET_MAX]> =
-    GlobalCell::new([None; LINUX_SOCKET_MAX]);
 
 pub(crate) fn linux_socket_wait_key(id: LinuxSocketId) -> WaitKey {
     WaitKey((0x53u64 << 56) | ((id.index as u64) << 32) | (id.generation as u64))
@@ -145,7 +142,7 @@ pub(crate) fn linux_socket_wait_key(id: LinuxSocketId) -> WaitKey {
 /// earlier completion (e.g. Open) leave a pending wake that the next syscall
 /// (Connect) consumes before its reply exists.
 pub(crate) fn linux_socket_request_wait_key(request_id: u64) -> WaitKey {
-    WaitKey((0x54u64 << 56) | request_id)
+    crate::service::net_request_wake::net_bridge_request_wait_key(request_id)
 }
 
 pub(crate) fn pool_live_count() -> usize {
@@ -168,24 +165,10 @@ pub(super) fn udp_socket_with_pending_receive(request_id: u64) -> Option<LinuxSo
         })
 }
 
-pub(crate) fn notify_request_complete(request_id: u64) -> usize {
-    let mut woken = 0usize;
-    let wakes = unsafe { &mut *REQUEST_WAKE_SLOT.get() };
-    for entry in wakes.iter_mut() {
-        if entry.map(|(id, _)| id) == Some(request_id) {
-            if let Some((_, key)) = *entry {
-                woken = wake_all(key);
-            }
-            *entry = None;
-        }
-    }
-    woken
-}
-
 /// `service_complete` hook: wakes the broker waiter for `request_id`, or delivers a UDP
 /// prefetch into its socket queue and wakes that socket's readers and `poll(2)` waiters.
 pub(crate) fn deliver_prefetch_receive(request_id: u64) -> usize {
-    let mut woken = notify_request_complete(request_id);
+    let mut woken = crate::service::net_request_wake::notify_net_request_complete(request_id);
     if let Some((id, owner_pid)) = udp::deliver_completed_prefetch(request_id) {
         woken = woken
             .saturating_add(wake_all(linux_socket_wait_key(id)))
@@ -195,34 +178,6 @@ pub(crate) fn deliver_prefetch_receive(request_id: u64) -> usize {
     }
     woken
 }
-
-/// Fails closed when the table is full: a dropped registration would leave the
-/// blocked caller without a wake.
-pub(crate) fn register_request_wake(request_id: u64, key: WaitKey) -> Result<(), LinuxErrno> {
-    let wakes = unsafe { &mut *REQUEST_WAKE_SLOT.get() };
-    if let Some(entry) = wakes
-        .iter_mut()
-        .find(|entry| entry.is_some_and(|(id, _)| id == request_id))
-    {
-        *entry = Some((request_id, key));
-        return Ok(());
-    }
-    let entry = wakes
-        .iter_mut()
-        .find(|entry| entry.is_none())
-        .ok_or(clean_slate_linux_abi::ENOBUFS)?;
-    *entry = Some((request_id, key));
-    Ok(())
-}
-pub(crate) fn clear_request_wake(request_id: u64) {
-    let wakes = unsafe { &mut *REQUEST_WAKE_SLOT.get() };
-    for entry in wakes.iter_mut() {
-        if entry.map(|(id, _)| id) == Some(request_id) {
-            *entry = None;
-        }
-    }
-}
-
 pub(crate) fn grant_linux_network_capabilities(pid: u64) -> Result<(), &'static str> {
     let rights = Rights::NET_CONNECT
         .union(Rights::NET_SEND)
@@ -334,7 +289,6 @@ fn abandon_outstanding_requests(socket: &mut LinuxSocket) {
     .into_iter()
     .flatten()
     {
-        clear_request_wake(request_id);
         let _ = crate::service::net_bridge::net_bridge_mut().discard_result(
             socket.owner_pid,
             socket.owner_pid,

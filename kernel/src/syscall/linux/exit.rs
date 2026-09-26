@@ -105,6 +105,16 @@ pub(crate) fn handle_sys_exit(
     #[cfg(feature = "m9-linux-socket-self-test")]
     crate::selftest::m9_linux_socket::observe_linux_exit(pid, &teardown);
 
+    #[cfg(feature = "m9-linux-trace-self-test")]
+    if let Some(next_frame) = crate::selftest::m9_linux_trace::after_linux_probe_exit(
+        pid,
+        ctx.instance_generation,
+        &teardown,
+        allocator,
+    ) {
+        switch_after_exit(Some(next_frame));
+    }
+
     #[cfg(feature = "m9-fd-core-self-test")]
     if let Some(next_frame) = crate::selftest::m9_fd_core::after_linux_probe_exit(
         pid,

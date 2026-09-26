@@ -33,7 +33,10 @@ const fn task_count_for_features() -> usize {
         6
     } else if cfg!(feature = "m8-linux-hello") {
         3
-    } else if cfg!(feature = "m9-linux-proc-self-test") {
+    } else if cfg!(any(
+        feature = "m9-linux-proc-self-test",
+        feature = "m9-linux-trace-self-test"
+    )) {
         6
     } else {
         2

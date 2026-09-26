@@ -13,6 +13,7 @@ pub(crate) mod instance_generation;
 #[cfg(feature = "m8-linux-image")]
 pub(crate) mod linux_launch;
 pub(crate) mod net_bridge;
+pub(crate) mod net_request_wake;
 pub(crate) mod net_syscall;
 pub(crate) mod spawn;
 

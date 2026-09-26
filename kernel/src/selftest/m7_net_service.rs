@@ -292,6 +292,9 @@ pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
         fixtures,
     }));
     initialize_timer();
+    // `m3-entry-self-test` skips calibration inside `initialize_timer`; the net service's
+    // idle/RX waits use TSC `MonotonicNs` deadlines.
+    crate::time::calibration::calibrate_apic_tick();
     let frame_pointer =
         start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
     unsafe { restore_task_context(frame_pointer) }

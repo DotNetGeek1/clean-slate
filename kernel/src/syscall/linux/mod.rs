@@ -33,6 +33,8 @@ pub(crate) mod runtime;
 pub(crate) mod socket;
 pub(crate) mod socket_copy;
 pub(crate) mod table;
+#[cfg(feature = "m9-linux-trace")]
+pub(crate) mod trace;
 pub(crate) mod user_copy;
 pub(crate) mod write;
 
@@ -144,34 +146,45 @@ pub(crate) fn dispatch_with(
     state
         .personality_log
         .maybe_log_linux_personality(pid, generation);
-    let request = decode_request_from_context(frame);
-    let mut ctx = LinuxSyscallContext {
-        pid,
-        instance_generation: generation,
-        frame,
-    };
-    let result = match lookup_handler(request.nr) {
-        // `exit` diverges inside the handler; only `write` returns here.
-        Some(handler) => handler(&request, &mut ctx),
-        None => {
-            #[cfg(feature = "m8-linux-dispatch-self-test")]
-            {
-                use core::sync::atomic::Ordering;
-                if request.nr == 999 {
-                    M8_LINUX_PROBE_OBSERVED.store(true, Ordering::Relaxed);
+    const MAX_BLOCK_RESTARTS: u32 = 256;
+    for _restart in 0..MAX_BLOCK_RESTARTS {
+        let request = decode_request_from_context(frame);
+        let mut ctx = LinuxSyscallContext {
+            pid,
+            instance_generation: generation,
+            frame,
+        };
+        let handler = lookup_handler(request.nr);
+        let result = match handler {
+            // `exit` diverges inside the handler; only `write` returns here.
+            Some(handler) => handler(&request, &mut ctx),
+            None => {
+                #[cfg(feature = "m8-linux-dispatch-self-test")]
+                {
+                    use core::sync::atomic::Ordering;
+                    if request.nr == 999 {
+                        M8_LINUX_PROBE_OBSERVED.store(true, Ordering::Relaxed);
+                    }
                 }
+                record_unsupported(&mut state.budget, request.nr);
+                unsupported_syscall_result()
             }
-            record_unsupported(&mut state.budget, request.nr);
-            unsupported_syscall_result()
+        };
+        if block::is_block_restart_result(result) {
+            continue;
         }
-    };
-    #[cfg(feature = "m8-linux-dispatch-self-test")]
-    crate::selftest::m8_linux_dispatch::observe_linux_write_result(pid, &request, result);
-    #[cfg(feature = "m9-fd-core-self-test")]
-    if request.nr != clean_slate_linux_abi::SYS_EXIT {
-        crate::selftest::m9_fd_core::observe_linux_syscall_result(pid, &request, result);
+        #[cfg(feature = "m9-linux-trace")]
+        trace::record_syscall(pid, generation, &request, handler.is_some(), result);
+        #[cfg(feature = "m8-linux-dispatch-self-test")]
+        crate::selftest::m8_linux_dispatch::observe_linux_write_result(pid, &request, result);
+        #[cfg(feature = "m9-fd-core-self-test")]
+        if request.nr != clean_slate_linux_abi::SYS_EXIT {
+            crate::selftest::m9_fd_core::observe_linux_syscall_result(pid, &request, result);
+        }
+        ctx.frame.rax = encode_rax(result);
+        return;
     }
-    ctx.frame.rax = encode_rax(result);
+    crate::diagnostics::qemu::fatal_kernel_error("linux dispatch block restart budget exhausted");
 }
 
 /// Dispatch a Linux-personality SYSCALL using the process-global state cell.

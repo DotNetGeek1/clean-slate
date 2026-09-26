@@ -1,6 +1,5 @@
 //! M9 #107: frozen BusyBox/rootfs convergence on the production Linux path.
 
-use crate::arch::x86_64::apic::reprogram_local_apic_timer;
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::arch::x86_64::interrupt_context::InterruptContext;
@@ -623,7 +622,9 @@ pub(crate) fn start_m9_userspace_self_test(page_allocator: PageAllocator) -> ! {
     spawn_native_spinner(allocator);
 
     initialize_timer();
-    reprogram_local_apic_timer(50_000);
+    // `m3-entry-self-test` skips calibration inside `initialize_timer`; the net service's
+    // WAIT_WORK/RX deadlines and Linux `nanosleep` use TSC `MonotonicNs` deadlines.
+    crate::time::calibration::calibrate_apic_tick();
     kernel_log_line("[TIME] timer initialized");
 
     unsafe {

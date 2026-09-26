@@ -157,7 +157,10 @@ pub(crate) const LINUX_M8_LOAD_POLICY: LoadPlanPolicy = LoadPlanPolicy {
 pub(crate) const LINUX_CONVENTIONAL_LOAD_POLICY: LoadPlanPolicy =
     LoadPlanPolicy::linux_conventional_x86_64();
 
-#[cfg(feature = "m9-linux-runtime-self-test")]
+#[cfg(any(
+    feature = "m9-linux-runtime-self-test",
+    feature = "m9-linux-trace-self-test"
+))]
 pub(crate) const LINUX_RUNTIME_PROBE_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-runtime-probe/linux-runtime-probe-x86_64");
 
@@ -172,7 +175,10 @@ pub(crate) const LINUX_SOCKET_PROBE_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-socket-probe/linux-socket-probe-x86_64");
 
 /// M9 #102 fork/pipe/wait probe (`fixtures/linux-proc-probe/linux-proc-probe-x86_64`).
-#[cfg(feature = "m9-linux-proc-self-test")]
+#[cfg(any(
+    feature = "m9-linux-proc-self-test",
+    feature = "m9-linux-trace-self-test"
+))]
 pub(crate) const LINUX_PROC_PROBE_FIXTURE: &[u8] =
     include_bytes!("../../../fixtures/linux-proc-probe/linux-proc-probe-x86_64");
 

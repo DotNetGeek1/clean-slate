@@ -20,7 +20,9 @@ use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
 
-use crate::m7_fixture_tcp::{FixtureTlsCert, M9HttpService, TcpEchoService, TlsService};
+use crate::m7_fixture_tcp::{
+    FixtureTlsCert, M9BannerService, M9HttpService, TcpEchoService, TlsService,
+};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 
@@ -175,6 +177,7 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
     let mut tls_service = TlsService::new(&mut sockets, tls_handle, tls_cert);
 
     let mut m9_http_service = None;
+    let mut m9_banner_service = None;
     if options.m9_profile {
         let m9_tcp = tcp::Socket::new(
             tcp::SocketBuffer::new(vec![0u8; 8192]),
@@ -182,6 +185,12 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         );
         let m9_handle = sockets.add(m9_tcp);
         m9_http_service = Some(M9HttpService::new(&mut sockets, m9_handle));
+        let m9_banner_tcp = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0u8; 4096]),
+            tcp::SocketBuffer::new(vec![0u8; 4096]),
+        );
+        let m9_banner_handle = sockets.add(m9_banner_tcp);
+        m9_banner_service = Some(M9BannerService::new(&mut sockets, m9_banner_handle));
     }
 
     let mut timestamp = Instant::from_millis(0);
@@ -222,6 +231,9 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         tls_service.poll(&mut sockets);
         if let Some(http) = m9_http_service.as_mut() {
             http.poll(&mut sockets);
+        }
+        if let Some(banner) = m9_banner_service.as_mut() {
+            banner.poll(&mut sockets);
         }
         for event in device.drain_events() {
             println!("{event}");
@@ -371,10 +383,9 @@ impl QemuSocketDevice {
                 if frame.len() >= 14 && u16::from_be_bytes([frame[12], frame[13]]) == 0x0806 {
                     self.events.push("[FIX ] arp request".to_owned());
                 }
-                if self.m9_profile && self.try_answer_m9_refused_syn(&frame) {
-                    continue;
+                if !(self.m9_profile && self.try_answer_m9_refused_syn(&frame)) {
+                    self.rx_queue.push_back(frame);
                 }
-                self.rx_queue.push_back(frame);
             } else {
                 self.events
                     .push(format!("[FIX ] dropped frame len={frame_len}"));

@@ -295,7 +295,9 @@ pub(crate) fn after_linux_exit(
             // exits, so cycles are measured against the post-probe node table.
             let probe_nodes = table().live_count();
             M9_BASELINE_NODES.store(probe_nodes, Ordering::Relaxed);
-            kernel_log_fmt(format_args!("[M9.H] node baseline after probe={probe_nodes}\n"));
+            kernel_log_fmt(format_args!(
+                "[M9.H] node baseline after probe={probe_nodes}\n"
+            ));
             unsafe {
                 M9_PHASE = Phase::Cycles;
             }

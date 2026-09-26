@@ -208,6 +208,23 @@ Ordered QEMU markers for `cargo xtask test-m7-net-service`:
 
 Run locally: `cargo xtask test-m7-net-service` (aliases `m7-net-service`, `m7.3`) or `./scripts/run-tests.ps1 test-m7-net-service`.
 
+### Blocking waits and virtio RX harvest (#167)
+
+M7 clients block on per-request wait keys (`0x54 << 56 | request_id`) via the #145 substrate; `NET_SUBOP_POLL` retries use `BlockedResume::RestartSyscall`. Request completion always wakes `0x54 | request_id` from the deterministic key (no side table); `shutdown_service` wakes the same key for every slot it fails with `Reset`.
+
+**`NET_SUBOP_WAIT_WORK` (12)** is the net service's only blocking primitive (wait key `0x55 << 56`):
+
+- `rsi` = raw-device handle (`NET_RAW_DEVICE` right, live service pid only), `rdx` = wake mask, a non-empty subset of `NET_WAIT_WORK_REQUESTS` (1: a `Pending` bridge slot or a queued holder-exit event) and `NET_WAIT_WORK_RX` (2: `RAW_RECEIVE` would return a frame), `r10` = relative timeout in ns (0 = none). A non-zero timeout becomes `Deadline::MonotonicNs(monotonic_ns() + r10)` and requires a calibrated TSC.
+- Returns 0 when a selected source is already ready; otherwise blocks and returns the #145 native outcome (`WOKEN` / `TIMEOUT` / `CANCEL` magic). Callers re-check state either way (wakes are level hints; the key is shared by all sources). `EINVAL` for an unknown or empty mask or an uncalibrated TSC with a timeout; `EACCES` / `ESTALE` per the capability check (audited like the other raw-device subops).
+- Readiness is evaluated with interrupts masked immediately before the waiter registers; wakes in between become #145 pending wakes, so no wake is lost. RX readiness harvests stranded virtio completions (used index ahead of the consumed index) before answering.
+- Wakers: `NetBridge::submit`, `requeue_in_service`, holder-exit enqueue (requests); timer harvest and loopback transmit (RX); deadline expiry and process cancel.
+
+**Service idle:** between requests the service calls `TcpTransport::poll` once (ingests ACKs, in-order data for connected Linux sockets, and fires retransmit / TIME-WAIT timers), then `WAIT_WORK(REQUESTS | RX, timeout = next_timer_deadline() - now)` converted from IRQ ticks to ns. Server-first data that arrives between `connect` and the first `recv` is therefore acknowledged and buffered while the application does other work. **In-flight requests** (connect, plain TCP recv, UDP send/recv, DNS resolve, TLS close drain) never spin: each iteration polls the relevant stack, then `WAIT_WORK(RX)` bounded by the request deadline and the TCP timer deadline. Only one request is in service at a time; a request that must wait for the network holds the service until its own deadline. A future service that defers in-flight requests (parks them and returns to the loop) must include `RX` in its idle mask and use the earliest deadline across parked requests and stack timers as the timeout.
+
+**Interim virtio RX (no IOAPIC/MSI yet):** the LAPIC timer hook `timer_poll_net_virtio_rx` harvests up to four RX completions per tick into a bounded kernel pending ring (depth `MAX_DEVICE_RX_QUEUE_DEPTH`) and wakes the work key. The ring is only touched with interrupts masked (ISR push vs. syscall pop). `RAW_RECEIVE` pops one frame, harvesting up to four completions first when the ring is empty. Bounded counters (`harvested`, `delivered`, `pending_drop_full`, `harvest_device_err`, `stranded_observed`) and a one-shot `[NET ] rx-diag …` line record ring pressure and unconsumed used-ring slots. **Follow-up #170:** replace timer harvest with virtio-net MSI/IOAPIC RX interrupts once the platform exposes device IRQ delivery.
+
+Self-test kernels that launch the net service (`m7-net-service-self-test`, `m9-linux-socket-self-test`) calibrate the LAPIC period and TSC at boot; `m3-entry-self-test` alone skips calibration.
+
 ## M7.4a L2/L3 foundation
 
 Issue #84 adds bounded parsers and a host-testable [`L3Stack`](../network/src/stack.rs) in `clean-slate-network` (no VirtIO types leak upward).
@@ -366,6 +383,7 @@ Issue #125 adds a **client-only** TCP transport in `network/src/tcp/` over [`L3S
 
 - Active open only (`SynSent` → `Established`); no `LISTEN` / `SYN-RCVD`.
 - In-order delivery: segments must arrive with `seq == rcv_nxt`; out-of-order segments are dropped and counted.
+- **Server-first data:** payload piggybacked on the SYN-ACK is accepted at `IRS + 1`; non-SYN segments in `SynSent` are dropped (RFC 793). Every accepted segment is ACKed even while guest data is unacknowledged, and unacceptable (duplicate / out-of-window) data or FIN segments are answered with an ACK. M9 acceptance adds fixture TCP **4002** (`M9BannerService`): banner on accept, guest `connect` → `nanosleep(100 ms)` → `recv` byte-exact (`[M9.P] banner ok`). HTTP on **4001** sends as soon as `may_send()` (no request gate).
 - Stop-and-go: at most **one** unacknowledged data segment in flight.
 - Fixed RTO ([`TCP_RTO_TICKS`](../network/src/tcp/conn.rs)); separate connect timeout ([`TCP_CONNECT_TIMEOUT_TICKS`](../network/src/tcp/conn.rs)). Data-phase RTO exhaustion uses [`TCP_MAX_RETRIES`](../network/src/tcp/conn.rs); `SynSent` retries until connect timeout.
 - TCP options on the wire: EOL, NOP, MSS (kind 2, len 4) only; MSS is sent on SYN only.
