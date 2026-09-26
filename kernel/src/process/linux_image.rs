@@ -1301,6 +1301,17 @@ pub(crate) fn register_linux_process(
                 .ok_or(LinuxImageError::Registry(
                     "linux launch: inserted process had no instance generation",
                 ))?;
+        // Every launched Linux process owns a proc-table slot; exit publication
+        // treats a missing slot as a kernel invariant violation.
+        if let Err(message) = crate::process::linux_proc::table::register_launched_linux_process(
+            pid,
+            instance_generation,
+        ) {
+            return Err(match rollback_registered_process(pid, allocator) {
+                Ok(()) => LinuxImageError::Registry(message),
+                Err(rollback) => LinuxImageError::Rollback(rollback),
+            });
+        }
         if let Err(message) = scheduler_mut().configure_thread(
             scheduler_slot,
             tid,
@@ -1310,6 +1321,12 @@ pub(crate) fn register_linux_process(
             saved_stack_pointer,
             image.entry,
         ) {
+            crate::process::linux_proc::table::table_mut().retire_slot(
+                crate::process::linux_proc::table::ProcId {
+                    pid,
+                    generation: instance_generation,
+                },
+            );
             return Err(match rollback_registered_process(pid, allocator) {
                 Ok(()) => LinuxImageError::Scheduler(message),
                 Err(rollback) => LinuxImageError::Rollback(rollback),

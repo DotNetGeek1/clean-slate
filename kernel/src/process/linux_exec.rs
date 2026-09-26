@@ -404,11 +404,6 @@ pub(crate) fn launch_linux_process_from_spec(
         image,
         page_table_frames,
     )?;
-    crate::process::linux_proc::table::register_launched_linux_process(
-        launched.pid,
-        launched.instance_generation,
-    )
-    .map_err(LinuxImageError::Registry)?;
     crate::process::linux_mem::init_for_image(
         launched.pid,
         launched.instance_generation,
