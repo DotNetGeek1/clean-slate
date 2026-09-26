@@ -19,9 +19,7 @@ use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
 use crate::syscall::linux::table::LinuxSyscallContext;
 use clean_slate_linux_abi::{LinuxSyscallRequest, LinuxSyscallResult};
 
-use super::{
-    clear_request_wake, linux_socket_request_wait_key, register_request_wake, LinuxSocketId,
-};
+use super::{linux_socket_request_wait_key, LinuxSocketId};
 
 pub(crate) fn network_client_handle(holder: HolderId) -> Option<u64> {
     with_capability_space(|table| {
@@ -121,7 +119,6 @@ pub(crate) fn broker_sync(
             .submit(ctx.pid, ctx.pid, generation, &wire, payload)
             .map_err(|e| Err(bridge_err(e)))?;
         *inflight_request_id = Some(id);
-        register_request_wake(id, linux_socket_request_wait_key(id));
         id
     };
 
@@ -135,7 +132,6 @@ pub(crate) fn broker_sync(
     match net_bridge_mut().poll(ctx.pid, ctx.pid, generation, request_id, &mut out) {
         Ok(response) => {
             *inflight_request_id = None;
-            clear_request_wake(request_id);
             let len = match response {
                 NetworkResponse::Receive { payload_len } => payload_len as usize,
                 _ => 0,
@@ -163,7 +159,6 @@ pub(crate) fn broker_sync(
         }
         Err(e) => {
             *inflight_request_id = None;
-            clear_request_wake(request_id);
             Err(Err(bridge_err(e)))
         }
     }

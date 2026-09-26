@@ -20,7 +20,7 @@ use crate::capability::network::{
 };
 use crate::process::linux_fd::open_description::{OpenDescriptionId, SocketRef};
 use crate::process::linux_fd::readiness::{Readiness, ReadinessSource};
-use crate::sched::wait::{wake_all, WaitKey};
+use crate::sched::wait::WaitKey;
 use crate::sync::global_cell::GlobalCell;
 
 pub(crate) use broker::broker_sync;
@@ -125,7 +125,6 @@ impl SocketPool {
 }
 
 static SOCKET_POOL: GlobalCell<SocketPool> = GlobalCell::new(SocketPool::new());
-static REQUEST_WAKE_SLOT: GlobalCell<[Option<(u64, WaitKey)>; 16]> = GlobalCell::new([None; 16]);
 
 pub(crate) fn linux_socket_wait_key(id: LinuxSocketId) -> WaitKey {
     WaitKey((0x53u64 << 56) | ((id.index as u64) << 32) | (id.generation as u64))
@@ -135,50 +134,11 @@ pub(crate) fn linux_socket_wait_key(id: LinuxSocketId) -> WaitKey {
 /// earlier completion (e.g. Open) leave a pending wake that the next syscall
 /// (Connect) consumes before its reply exists.
 pub(crate) fn linux_socket_request_wait_key(request_id: u64) -> WaitKey {
-    WaitKey((0x54u64 << 56) | request_id)
+    crate::service::net_request_wake::net_bridge_request_wait_key(request_id)
 }
 
 pub(crate) fn pool_live_count() -> usize {
     unsafe { (*SOCKET_POOL.get()).live_count() }
-}
-
-pub(crate) fn notify_request_complete(request_id: u64) -> usize {
-    let mut woken = 0usize;
-    let wakes = unsafe { &mut *REQUEST_WAKE_SLOT.get() };
-    for entry in wakes.iter_mut() {
-        if entry.map(|(id, _)| id) == Some(request_id) {
-            if let Some((_, key)) = *entry {
-                woken = wake_all(key);
-            }
-            *entry = None;
-        }
-    }
-    woken
-}
-
-pub(crate) fn register_request_wake(request_id: u64, key: WaitKey) {
-    let wakes = unsafe { &mut *REQUEST_WAKE_SLOT.get() };
-    for entry in wakes.iter_mut() {
-        if entry.map(|(id, _)| id) == Some(request_id) {
-            *entry = Some((request_id, key));
-            return;
-        }
-    }
-    for entry in wakes.iter_mut() {
-        if entry.is_none() {
-            *entry = Some((request_id, key));
-            return;
-        }
-    }
-}
-
-pub(crate) fn clear_request_wake(request_id: u64) {
-    let wakes = unsafe { &mut *REQUEST_WAKE_SLOT.get() };
-    for entry in wakes.iter_mut() {
-        if entry.map(|(id, _)| id) == Some(request_id) {
-            *entry = None;
-        }
-    }
 }
 
 pub(crate) fn grant_linux_network_capabilities(pid: u64) -> Result<(), &'static str> {

@@ -320,6 +320,14 @@ impl QueueState {
         }
     }
 
+    fn used_index(&self) -> u16 {
+        unsafe { read_volatile(self.used_idx_ptr()) }
+    }
+
+    fn last_consumed_index(&self) -> u16 {
+        self.last_used_idx
+    }
+
     fn poll_completion(&mut self) -> Option<VirtqUsedElem> {
         let used_idx = unsafe { read_volatile(self.used_idx_ptr()) };
         if used_idx == self.last_used_idx {
@@ -689,6 +697,13 @@ impl VirtioNetDevice {
             }
             Err(error) => Err(error),
         }
+    }
+
+    pub(crate) fn rx_ring_snapshot(&self) -> (u16, u16) {
+        (
+            self.rx_queue.used_index(),
+            self.rx_queue.last_consumed_index(),
+        )
     }
 }
 

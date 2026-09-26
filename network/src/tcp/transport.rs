@@ -19,6 +19,9 @@ use crate::tcp::stats::TcpStats;
 
 const EPHEMERAL_PORT_BASE: u16 = 50_000;
 
+/// Max inbound frames one [`TcpTransport::poll`] processes (one device RX queue's worth).
+pub const TCP_POLL_RX_BUDGET: usize = crate::limits::MAX_DEVICE_RX_QUEUE_DEPTH as usize;
+
 /// Fixed-size connection table keyed by [`SessionId`] index.
 pub struct TcpTable {
     generation: SessionGeneration,
@@ -341,9 +344,26 @@ impl<L: NetworkLink> TcpTransport<L> {
         Ok(count)
     }
 
+    /// Earliest tick at which [`Self::poll`] has timer work (retransmit, connect timeout,
+    /// TIME-WAIT expiry) across all connections, or `None` when no timer is armed.
+    pub fn next_timer_deadline(&self) -> Option<u64> {
+        self.table
+            .slots
+            .iter()
+            .flatten()
+            .filter_map(|conn| conn.next_timer_deadline())
+            .min()
+    }
+
     /// Drives RX, timers, SYN retry, and retransmits.
+    ///
+    /// At most [`TCP_POLL_RX_BUDGET`] inbound frames are processed per call so a
+    /// peer flood cannot keep the caller from observing connection state.
     pub fn poll(&mut self, now: u64) -> Result<(), NetworkError> {
-        while let Some(inbound) = self.stack.poll(now)? {
+        for _ in 0..TCP_POLL_RX_BUDGET {
+            let Some(inbound) = self.stack.poll(now)? else {
+                break;
+            };
             let stack::Inbound::Ipv4(ip) = inbound else {
                 continue;
             };
