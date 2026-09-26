@@ -775,10 +775,10 @@ fn close_tcp_mapping_owned_by(
     *slot = None;
     let tcp = shared_tcp_transport_mut();
     let owner = plain_tcp_owner(service_generation);
-    let closed = monotonic_ticks()
-        .map_err(|_| NetworkError::Timeout)
-        .and_then(|now| tcp.close(now, mapping.connection, owner));
-    if closed.is_err() {
+    let is_closing = monotonic_ticks()
+        .ok()
+        .is_some_and(|now| tcp.close(now, mapping.connection, owner).is_ok());
+    if !is_closing {
         let _ = tcp.abort(mapping.connection, owner);
     }
 }

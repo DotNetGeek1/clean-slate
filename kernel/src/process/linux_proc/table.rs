@@ -225,34 +225,6 @@ impl LinuxProcessTable {
         })
     }
 
-    #[cfg(feature = "m9-userspace-self-test")]
-    pub(crate) fn format_wait_diag_children(&self, parent: ProcId, out: &mut [u8]) -> usize {
-        let Some(index) = self.slot_index(parent) else {
-            return 0;
-        };
-        let mut pos = 0usize;
-        for entry in self.slots[index].children.iter().flatten() {
-            if pos + 12 >= out.len() {
-                break;
-            }
-            let state = match entry.state {
-                ChildState::Running => b'R',
-                ChildState::Zombie { .. } => b'Z',
-                ChildState::Reaped => b'r',
-            };
-            out[pos] = state;
-            pos += 1;
-            out[pos] = b':';
-            pos += 1;
-            pos += write_decimal(&mut out[pos..], entry.child.pid);
-            if pos < out.len() {
-                out[pos] = b',';
-                pos += 1;
-            }
-        }
-        pos
-    }
-
     fn child_matches_wait(&self, entry: &ChildSlot, wait_pid: i64, parent_pgid: u64) -> bool {
         let child_pgid = entry.pgid;
         match wait_pid {
@@ -334,28 +306,6 @@ fn log_proc_table_invariant(reason: &str, exitee: ProcId, parent: ProcId) {
 /// Count of proc-table invariant violations (for M9 acceptance).
 pub(crate) fn proc_table_invariant_violations() -> u32 {
     PROC_TABLE_INVARIANT_VIOLATIONS.load(Ordering::Relaxed)
-}
-
-fn write_decimal(out: &mut [u8], mut value: u64) -> usize {
-    if value == 0 {
-        if !out.is_empty() {
-            out[0] = b'0';
-            return 1;
-        }
-        return 0;
-    }
-    let mut digits = [0u8; 20];
-    let mut len = 0usize;
-    while value > 0 {
-        digits[len] = b'0' + (value % 10) as u8;
-        len += 1;
-        value /= 10;
-    }
-    let take = len.min(out.len());
-    for index in 0..take {
-        out[index] = digits[len - 1 - index];
-    }
-    take
 }
 
 pub(crate) fn register_launched_linux_process(
