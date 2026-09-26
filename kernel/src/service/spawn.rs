@@ -1265,7 +1265,7 @@ const NETWORK_SERVICE_STACK_ADDRESS: u64 =
 /// raise `MAX_ADDRESS_SPACE_USER_MAPPINGS` solely to absorb image growth.
 const NETWORK_SERVICE_STACK_PAGES: u64 = 80;
 #[cfg(feature = "m7-net-service-self-test")]
-const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 304;
+const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 300;
 #[cfg(feature = "m7-net-service-self-test")]
 const _: () = assert!(NETWORK_USERSPACE_MAPPED_CODE_PAGES <= NETWORK_SERVICE_MAX_CODE_PAGES);
 #[cfg(feature = "m7-net-service-self-test")]

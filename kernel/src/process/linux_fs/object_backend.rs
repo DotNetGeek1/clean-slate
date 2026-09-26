@@ -167,9 +167,9 @@ pub(crate) fn tmp_file_truncate_local(object_id: u64) -> Result<(), LinuxErrno> 
 
 pub(crate) fn tmp_scratch_for(
     object_id: u64,
-) -> Result<&'static mut [u8; OBJECT_MAX_PAYLOAD_BYTES], LinuxErrno> {
+) -> Result<&'static [u8; OBJECT_MAX_PAYLOAD_BYTES], LinuxErrno> {
     let index = slot_index_for_object(object_id).ok_or(clean_slate_linux_abi::EINVAL)?;
-    Ok(&mut store_mut().scratch[index])
+    Ok(&store_mut().scratch[index])
 }
 
 pub(crate) fn object_wait_key(request_id: u64) -> crate::sched::wait::WaitKey {

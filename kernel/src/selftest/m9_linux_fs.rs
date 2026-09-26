@@ -291,6 +291,11 @@ pub(crate) fn after_linux_exit(
             if teardown.exit_status != 0 {
                 fatal_kernel_error("m9 linux fs probe non-zero exit");
             }
+            // The namespace keeps `/tmp` entries and resolved rootfs nodes after the probe
+            // exits, so cycles are measured against the post-probe node table.
+            let probe_nodes = table().live_count();
+            M9_BASELINE_NODES.store(probe_nodes, Ordering::Relaxed);
+            kernel_log_fmt(format_args!("[M9.H] node baseline after probe={probe_nodes}\n"));
             unsafe {
                 M9_PHASE = Phase::Cycles;
             }

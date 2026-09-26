@@ -103,14 +103,17 @@ pub(crate) fn write_file_fd(
         return Err(EBADF);
     }
     let object_id = table.object_id_for_node(file.node)?;
-    let scratch = crate::process::linux_fs::object_backend::tmp_scratch_for(object_id)?;
+    let committed = crate::process::linux_fs::object_backend::tmp_scratch_for(object_id)?;
     let start = desc.offset as usize;
     if start.saturating_add(bytes.len()) > OBJECT_MAX_PAYLOAD_BYTES {
         return Err(EFBIG);
     }
-    scratch[start..start + bytes.len()].copy_from_slice(bytes);
+    // The tmp scratch mirrors committed object bytes; it changes only when the write completes.
     let new_len = start + bytes.len();
-    match object_write_sync(request, ctx, pid, object_id, &scratch[..new_len])? {
+    let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
+    payload[..start].copy_from_slice(&committed[..start]);
+    payload[start..new_len].copy_from_slice(bytes);
+    match object_write_sync(request, ctx, pid, object_id, &payload[..new_len])? {
         ObjectIo::Restart(rax) => Ok(rax),
         ObjectIo::Done(n) => {
             linux_fd::set_open_description_offset(pid, generation, fd, new_len as u64)?;
