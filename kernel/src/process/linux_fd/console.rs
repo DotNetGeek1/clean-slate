@@ -48,9 +48,6 @@ pub(crate) fn console_write_bytes(bytes: &[u8]) {
     #[cfg(feature = "m9-linux-runtime-self-test")]
     crate::selftest::m9_linux_runtime::observe_linux_console_write_bytes(bytes);
 
-    #[cfg(feature = "m9-userspace-self-test")]
-    crate::selftest::m9_userspace::observe_linux_console_write_bytes(bytes);
-
     #[cfg(test)]
     {
         linux_console_byte_test_sink::capture(bytes);

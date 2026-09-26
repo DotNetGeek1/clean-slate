@@ -16,6 +16,7 @@ use crate::process::linux_exec::{
 };
 use crate::process::linux_fd::{
     self, console_sink_render_style, open_description_pool_live_count, ConsoleSinkRenderStyle,
+    OpenDescriptionId,
 };
 use crate::process::linux_proc::{
     pipe::pool,
@@ -161,6 +162,7 @@ static M9_CYCLE: AtomicU32 = AtomicU32::new(0);
 static M9_STDOUT_LEN: AtomicUsize = AtomicUsize::new(0);
 const M9_STDOUT_CAP: usize = 4096;
 static M9_STDOUT_BUF: GlobalCell<[u8; M9_STDOUT_CAP]> = GlobalCell::new([0; M9_STDOUT_CAP]);
+static M9_STDOUT_OPEN: GlobalCell<Option<OpenDescriptionId>> = GlobalCell::new(None);
 static TICKS_BEFORE_BLOCK: AtomicU64 = AtomicU64::new(0);
 static BUSYBOX_EXEC_BYTES: GlobalCell<Option<&'static [u8]>> = GlobalCell::new(None);
 
@@ -212,6 +214,11 @@ fn install_linux_stdio(pid: u64, generation: InstanceGeneration) {
     }
     linux_fd::grant_console_stdio_for_process(pid, generation)
         .unwrap_or_else(|_| fatal_kernel_error("console stdio install"));
+    let stdout = linux_fd::open_id_for_fd(pid, generation, 1)
+        .unwrap_or_else(|_| fatal_kernel_error("console stdout description"));
+    unsafe {
+        *M9_STDOUT_OPEN.get() = Some(stdout);
+    }
 }
 
 fn launch_busybox_inner(
@@ -340,19 +347,21 @@ fn stdout_slice() -> &'static [u8] {
     }
 }
 
-pub(crate) fn observe_linux_console_write_bytes(bytes: &[u8]) {
-    let mut len = M9_STDOUT_LEN.load(Ordering::Relaxed);
-    unsafe {
-        let buf = &mut *M9_STDOUT_BUF.get();
-        for b in bytes {
-            if len >= M9_STDOUT_CAP {
-                break;
-            }
-            buf[len] = *b;
-            len += 1;
-        }
+/// Captures bytes written through the open description installed as the checklist
+/// shell's stdout (inherited across fork/dup), matching the reference harness's stdout
+/// pipe; stderr diagnostics such as wget progress stay on the console only.
+pub(crate) fn observe_console_description_write(open: OpenDescriptionId, bytes: &[u8]) {
+    if unsafe { *M9_STDOUT_OPEN.get() } != Some(open) {
+        return;
     }
-    M9_STDOUT_LEN.store(len, Ordering::Relaxed);
+    let len = M9_STDOUT_LEN.load(Ordering::Relaxed);
+    let Some(end) = len.checked_add(bytes.len()).filter(|end| *end <= M9_STDOUT_CAP) else {
+        fatal_kernel_error("m9 checklist stdout capture exceeded its bound");
+    };
+    unsafe {
+        (&mut *M9_STDOUT_BUF.get())[len..end].copy_from_slice(bytes);
+    }
+    M9_STDOUT_LEN.store(end, Ordering::Relaxed);
 }
 
 fn validate_stdout_expectations(cmd: &ShellCmd) {

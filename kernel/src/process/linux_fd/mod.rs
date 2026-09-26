@@ -255,7 +255,15 @@ impl LinuxFdRegistry {
             .open;
         let desc = self.pool.get(open)?;
         match desc.kind {
-            DescriptorKind::Console(sink) => write_console(ipc, pid, sink, bytes, personality),
+            DescriptorKind::Console(sink) => {
+                let written = write_console(ipc, pid, sink, bytes, personality)?;
+                #[cfg(feature = "m9-userspace-self-test")]
+                crate::selftest::m9_userspace::observe_console_description_write(
+                    open,
+                    &bytes[..written],
+                );
+                Ok(written)
+            }
             // #102 pipe writes use blocking path from syscall/write.rs
             DescriptorKind::PipeWrite(_) => Err(EBADF),
             // #101: file writes go through `write(2)` → `handle_sys_write` + `fs_io::write_file_fd`.
