@@ -70,18 +70,14 @@ const M5_QEMU_DISK_ID: &str = "m5disk";
 const M5_QEMU_DEVICE: &str =
     "virtio-blk-pci,drive=m5disk,serial=clean-slate-m5-data,disable-modern=on";
 const M7_QEMU_NET_DEVICE: &str = "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on";
-// IPC console framing preserves these substrings; at ~1 ms tick the gen=1 health
-// line for the crash fixture often lands after fault injection in serial order.
-const M4_RECOVERY_FAULT_HEALTH_GROUP: &[&str] =
-    &["[PROC] fault pid=", "[HLTH] service=16640 healthy gen=1"];
-/// IPC health vs fault injection can race at ~1 ms tick; restart path stays ordered.
 const M4_RECOVERY_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[CAP ] supervisor console capability granted pid=1"),
     MarkerStep::Ordered("[SUP ] started pid=1"),
     MarkerStep::Ordered("[DEP ] service=16640 ready"),
     MarkerStep::Ordered("[SVC ] launch service=16640 pid="),
+    MarkerStep::Ordered("[HLTH] service=16640 healthy gen=1"),
     MarkerStep::Ordered("[TEST] crash-service injecting fault"),
-    MarkerStep::UnorderedGroup(M4_RECOVERY_FAULT_HEALTH_GROUP),
+    MarkerStep::Ordered("[PROC] fault pid="),
     MarkerStep::Ordered("[SUP ] failure service=16640 pid="),
     MarkerStep::Ordered("[PROC] teardown pid="),
     MarkerStep::Ordered("[SUP ] restart service=16640 attempt=1"),
@@ -113,20 +109,24 @@ const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[M9.F] PASS",
 ];
 const M9_LINUX_EXEC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+/// One probe cycle in serial order: the kernel logs the 20 ms nanosleep on wakeup,
+/// the probe writes the wall bracket, the kernel logs `irq_ticks` while observing the
+/// `wall end` write (before its bytes reach serial), then the probe writes its
+/// success banners.
 const M9_LINUX_RUNTIME_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[M9.J] creating"),
     MarkerStep::Ordered("[M9.J] baseline ok"),
     MarkerStep::Ordered("[TIME] apic counter_hz="),
+    MarkerStep::Ordered("[M9.J] nanosleep 20ms tsc_ns="),
+    MarkerStep::Ordered("[M9.J] nanosleep wall start"),
+    MarkerStep::Ordered("[M9.J] nanosleep wall irq_ticks="),
+    MarkerStep::Ordered("[M9.J] nanosleep wall end"),
     MarkerStep::Ordered("[M9.J] fs base survives switch"),
     MarkerStep::Ordered("[M9.J] brk ok"),
     MarkerStep::Ordered("[M9.J] mmap ok"),
     MarkerStep::Ordered("[M9.J] uname=Linux"),
     MarkerStep::Ordered("[M9.J] signals ok"),
-    MarkerStep::Ordered("[M9.J] nanosleep 20ms tsc_ns="),
     MarkerStep::Ordered("[M9.J] poll timeout ok"),
-    MarkerStep::Ordered("[M9.J] nanosleep wall start"),
-    MarkerStep::Ordered("[M9.J] nanosleep wall end"),
-    MarkerStep::Ordered("[M9.J] nanosleep wall irq_ticks="),
     MarkerStep::Ordered("[M9.J] probe done"),
     MarkerStep::Ordered("[M9.J] cycle=7"),
     MarkerStep::Ordered("[M9.J] PASS"),
@@ -164,9 +164,12 @@ const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[DF  ] emergency stack OK",
     "[DF  ] PASS",
 ];
-/// Substrings tolerate concurrent `[TASK]` prefix interleaving on serial.
-const M2_TASK_PROGRESS_GROUP: &[&str] = &["task 1 progress=", "task 2 progress="];
-/// Demo tasks log progress concurrently; `[M2  ] PASS` follows both exits (with `[TIME] ticks=`).
+/// Either task can reach its preemption threshold first, so progress order is free.
+const M2_TASK_PROGRESS_GROUP: &[&str] = &["[TASK] task 1 progress=", "[TASK] task 2 progress="];
+/// Task 2 only starts on the first preemption, and the kernel only logs progress
+/// after `[SCHED] preemption observed` is on serial. `[TIME] ticks=` and
+/// `[M2  ] PASS` follow the second task exit, and each task exits only after
+/// logging its progress.
 const M2_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[BOOT] UEFI memory map acquired"),
     MarkerStep::Ordered("[BOOT] ExitBootServices OK"),
@@ -443,16 +446,16 @@ const M6_AUDIT_ACCEPTANCE_MARKERS: [&str; 5] = [
     "outcome=",
     "[M6.7] PASS",
 ];
-const M6_REVOCATION_BOOTSTRAP_GROUP: &[&str] = &[
-    "[TEST] unrelated workload progress=",
-    "[CAP ] revoke denied actor=",
-];
-/// Unrelated workload and early revoke-deny are independent; revoke story stays ordered after.
+/// Workload progress=1 is logged before any fixture is spawned. The owner revokes
+/// only after its own probe and both reader probes, and its report logs the stale
+/// denial. The unrelated fixture's denied revoke races that whole chain, so it is
+/// only required before `[M6.6] PASS`, which waits for the unrelated report.
 const M6_REVOCATION_ACCEPTANCE_SPEC: &[MarkerStep] = &[
-    MarkerStep::UnorderedGroupAnywhere(M6_REVOCATION_BOOTSTRAP_GROUP),
+    MarkerStep::Ordered("[TEST] unrelated workload progress="),
     MarkerStep::Ordered("[CAP ] probe allowed holder="),
     MarkerStep::Ordered("[CAP ] revoke branch="),
     MarkerStep::Ordered("[CAP ] stale denied holder="),
+    MarkerStep::UnorderedGroupAnywhere(&["[CAP ] revoke denied actor="]),
     MarkerStep::Ordered("[M6.6] PASS"),
 ];
 const M7_NET_CAPS_ACCEPTANCE_MARKERS: [&str; 11] = [
@@ -3612,6 +3615,87 @@ mod tests {
 [TIME] ticks=4\n\
 [M2  ] PASS\n"
         ));
+    }
+
+    const M2_BOOT_PREFIX: &str = "[BOOT] UEFI memory map acquired\n\
+[BOOT] ExitBootServices OK\n\
+[MEM ] physical allocator initialized\n\
+[INT ] IDT initialized\n\
+[TIME] timer initialized\n\
+[TASK] task 1 started\n\
+[TASK] task 2 started\n";
+
+    #[test]
+    fn m2_spec_accepts_either_progress_order_after_preemption() {
+        for progress in [
+            "[TASK] task 1 progress=1\n[TASK] task 2 progress=1\n",
+            "[TASK] task 2 progress=1\n[TASK] task 1 progress=1\n",
+        ] {
+            let output = format!(
+                "{M2_BOOT_PREFIX}[SCHED] preemption observed\n{progress}[TIME] ticks=9\n[M2  ] PASS\n"
+            );
+            assert!(validate_output_markers(&output, MarkerSet::Steps(M2_ACCEPTANCE_SPEC)).is_ok());
+        }
+    }
+
+    #[test]
+    fn m2_spec_rejects_progress_before_preemption() {
+        let output = format!(
+            "{M2_BOOT_PREFIX}[TASK] task 1 progress=1\n[SCHED] preemption observed\n\
+[TASK] task 2 progress=1\n[TIME] ticks=9\n[M2  ] PASS\n"
+        );
+        assert!(validate_output_markers(&output, MarkerSet::Steps(M2_ACCEPTANCE_SPEC)).is_err());
+    }
+
+    #[test]
+    fn m6_revocation_spec_accepts_unrelated_denial_anywhere_before_pass() {
+        let chain_head = "[TEST] unrelated workload progress=1\n\
+[CAP ] probe allowed holder=1\n\
+[CAP ] probe allowed holder=2\n\
+[CAP ] probe allowed holder=3\n";
+        let chain_tail = "[CAP ] revoke branch=1:0 actor=1 count=2\n\
+[TEST] unrelated workload progress=2\n\
+[CAP ] stale denied holder=2 reason=revoked\n";
+        let denied = "[CAP ] revoke denied actor=4 reason=unauthorized\n";
+        let early = format!("{chain_head}{denied}{chain_tail}[M6.6] PASS\n");
+        let late = format!("{chain_head}{chain_tail}{denied}[M6.6] PASS\n");
+        for output in [&early, &late] {
+            assert!(validate_output_markers(
+                output,
+                MarkerSet::Steps(M6_REVOCATION_ACCEPTANCE_SPEC)
+            )
+            .is_ok());
+        }
+        let missing = format!("{chain_head}{chain_tail}[M6.6] PASS\n");
+        assert!(
+            validate_output_markers(&missing, MarkerSet::Steps(M6_REVOCATION_ACCEPTANCE_SPEC))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn m9_runtime_spec_matches_single_cycle_serial_order() {
+        let output = "[M9.J] creating\n\
+[M9.J] baseline ok mem=0 sig=0 poll=0 fd=0\n\
+[TIME] apic counter_hz=62491100 initial_count=62491 tick_ns=999998\n\
+[M9.J] nanosleep 20ms tsc_ns=21924929\n\
+[M9.J] nanosleep wall start\n\
+[M9.J] nanosleep wall irq_ticks=1011 tsc_ns=1011849971\n\
+[M9.J] nanosleep wall end\n\
+[M9.J] fs base survives switch\n\
+[M9.J] brk ok\n\
+[M9.J] mmap ok\n\
+[M9.J] uname=Linux\n\
+[M9.J] signals ok\n\
+[M9.J] poll timeout ok\n\
+[M9.J] probe done\n\
+[M9.J] cycle=7 mem=0 sig=0 poll=0 fd=0\n\
+[M9.J] PASS\n";
+        assert!(validate_output_markers(
+            output,
+            MarkerSet::Steps(M9_LINUX_RUNTIME_ACCEPTANCE_SPEC)
+        )
+        .is_ok());
     }
 
     const M3_ADDRESS_SPACE_LIFECYCLE_TRANSCRIPT: &str = "\
