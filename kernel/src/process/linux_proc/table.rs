@@ -361,7 +361,6 @@ fn write_decimal(out: &mut [u8], mut value: u64) -> usize {
     take
 }
 
-#[cfg(feature = "m8-linux-image")]
 pub(crate) fn register_launched_linux_process(
     pid: u64,
     generation: InstanceGeneration,

@@ -486,6 +486,10 @@ pub(crate) fn commit_exec(
         }
         crate::process::linux_mem::reset_for_exec(pid, live_gen, allocator);
         crate::process::linux_signal::reset_for_exec(pid, live_gen);
+        let exec_slot = unsafe { crate::sched::scheduler_mut() }
+            .current_slot()
+            .ok_or(LinuxImageError::Registry("exec commit: no current thread"))?;
+        crate::sched::fpu::reset_for_exec(exec_slot);
         // Point of no return: from here the process owns the new image. Any
         // failure below is a kernel invariant violation, not an errno -- returning
         // an error would resume the old RIP inside the new address space.

@@ -3,6 +3,7 @@
 
 pub(crate) mod demo_tasks;
 pub(crate) mod dispatch;
+pub(crate) mod fpu;
 pub(crate) mod idle;
 pub(crate) mod wait;
 
@@ -171,6 +172,8 @@ impl Scheduler {
                 return Err("kernel stack top must match scheduler slot task stack");
             }
         }
+        #[cfg(not(test))]
+        fpu::reset_slot(slot);
         self.threads[slot] = Thread {
             id,
             owner_process_id,
@@ -193,10 +196,24 @@ impl Scheduler {
         let next = self
             .next_runnable_from(None)
             .ok_or("scheduler had no runnable threads")?;
-        self.current_thread = Some(next);
+        self.make_current(next);
         self.threads[next].started = true;
         self.threads[next].state = ThreadState::Running;
         Ok(self.threads[next].saved_stack_pointer)
+    }
+
+    /// Every switch of the running thread goes through here so a user thread never
+    /// resumes with another thread's FPU/SSE registers.
+    pub(super) fn make_current(&mut self, next: usize) {
+        self.current_thread = Some(next);
+        #[cfg(not(test))]
+        if self.threads[next].kind == ThreadKind::User {
+            fpu::activate_user_slot(next);
+        }
+    }
+
+    pub(crate) fn current_slot(&self) -> Option<usize> {
+        self.current_thread
     }
 
     pub(super) fn current_thread_descriptor(&self) -> Result<Thread, &'static str> {
@@ -409,7 +426,7 @@ impl Scheduler {
             }
             return Err("scheduler lost all runnable threads during timer interrupt");
         };
-        self.current_thread = Some(next);
+        self.make_current(next);
         self.threads[next].state = ThreadState::Running;
         if next != current && !self.preemption_observed {
             self.preemption_observed = true;
@@ -450,7 +467,7 @@ impl Scheduler {
             }
             return Err("scheduler lost all runnable threads during block yield");
         };
-        self.current_thread = Some(next);
+        self.make_current(next);
         self.threads[next].state = ThreadState::Running;
         if !self.threads[next].started {
             self.threads[next].started = true;
@@ -498,7 +515,7 @@ impl Scheduler {
         let idle = IDLE_THREAD_INDEX;
         if let Some(next) = self.next_runnable_from(Some(idle)) {
             self.threads[idle].state = ThreadState::Ready;
-            self.current_thread = Some(next);
+            self.make_current(next);
             self.threads[next].state = ThreadState::Running;
             return Ok(wait::scheduler_handoff_stack_pointer(
                 self.threads[next].saved_stack_pointer,
@@ -516,7 +533,7 @@ impl Scheduler {
             }
             return Err("scheduler lost all runnable threads during idle wake");
         };
-        self.current_thread = Some(next);
+        self.make_current(next);
         self.threads[next].state = ThreadState::Running;
         Ok(wait::scheduler_handoff_stack_pointer(
             self.threads[next].saved_stack_pointer,
@@ -555,7 +572,7 @@ impl Scheduler {
             return Ok(None);
         };
 
-        self.current_thread = Some(next);
+        self.make_current(next);
         self.threads[next].state = ThreadState::Running;
         if !self.threads[next].started {
             self.threads[next].started = true;

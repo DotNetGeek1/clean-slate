@@ -111,6 +111,10 @@ pub(crate) fn linux_fork(
                 let _ = destroy_process_address_space(&child_space, allocator);
                 return Err("scheduler-slot-range");
             }
+            let Some(parent_slot) = scheduler_mut().current_slot() else {
+                let _ = destroy_process_address_space(&child_space, allocator);
+                return Err("parent-thread");
+            };
             if scheduler_mut().threads[scheduler_slot].state != ThreadState::Empty {
                 let _ = destroy_process_address_space(&child_space, allocator);
                 return Err("scheduler-slot-occupied");
@@ -148,6 +152,7 @@ pub(crate) fn linux_fork(
                     crate::process::linux_image::rollback_registered_process(child_pid, allocator);
                 return Err("scheduler-configure");
             }
+            crate::sched::fpu::inherit_for_fork(parent_slot, scheduler_slot);
             Ok(generation)
         }
     }) {
