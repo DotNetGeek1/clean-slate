@@ -1586,7 +1586,15 @@ fn run_m9_acceptance() -> Result<(), XtaskError> {
     let total = M9_MILESTONE_STEPS.len();
     for (index, (name, step)) in M9_MILESTONE_STEPS.iter().enumerate() {
         println!("[M9  ] step {}/{} {}", index + 1, total, name);
+        let started = std::time::Instant::now();
         step()?;
+        println!(
+            "[M9  ] step {}/{} {} ok secs={:.1}",
+            index + 1,
+            total,
+            name,
+            started.elapsed().as_secs_f64()
+        );
     }
     println!("[M9  ] PASS");
     Ok(())
@@ -2773,18 +2781,24 @@ fn run_acceptance_command(
                     print!("{}", chunk.text);
                 }
                 output.push_str(&chunk.text);
+                let guest_fail_line = output.find("[FAIL] ").and_then(|start| {
+                    output[start..]
+                        .find('\n')
+                        .map(|len| output[start..start + len].trim_end().to_owned())
+                });
                 if marker_set_is_ordered(marker_set, &M9_USERSPACE_ACCEPTANCE_MARKERS)
-                    && output.contains("[FAIL] ")
                     && !authoritative_pass
                 {
-                    terminate_child(&mut child)?;
-                    let _ = child.wait();
-                    join_output_reader(stdout_handle);
-                    join_output_reader(stderr_handle);
-                    return Err(XtaskError::CommandFailed {
-                        command: command_display,
-                        status: "guest reported an m9 userspace [FAIL]".to_owned(),
-                    });
+                    if let Some(fail_line) = guest_fail_line {
+                        terminate_child(&mut child)?;
+                        let _ = child.wait();
+                        join_output_reader(stdout_handle);
+                        join_output_reader(stderr_handle);
+                        return Err(XtaskError::CommandFailed {
+                            command: command_display,
+                            status: format!("guest reported an m9 userspace failure: {fail_line}"),
+                        });
+                    }
                 }
                 M9_RUNTIME_WALL_CLOCK.with(|slot| {
                     if slot.borrow().is_some() {
@@ -2836,7 +2850,10 @@ fn run_acceptance_command(
                                 "m9 userspace serial: {reason}"
                             )));
                         }
-                        println!("[M9  ] host validation ok");
+                        println!(
+                            "\n[M9  ] host validation ok qemu_secs={:.1}",
+                            start.elapsed().as_secs_f64()
+                        );
                     }
                     authoritative_pass = true;
                     terminate_child(&mut child)?;

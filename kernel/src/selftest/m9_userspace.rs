@@ -82,7 +82,14 @@ include!(concat!(env!("OUT_DIR"), "/m9_command_matrix.rs"));
 
 const MATRIX_LEN: usize = M9_COMMAND_MATRIX.len();
 const PASS_MARKER: &str = "[M9.8] PASS";
-const SUPERVISOR_PID: u64 = 107;
+/// Holder id of the synthetic lifecycle supervisor. Taken from the monotonic pid
+/// allocator so no Linux process launched later can be assigned it and inherit (or, on
+/// teardown, revoke) the supervisor's lifecycle and network authority.
+static SUPERVISOR_HOLDER: AtomicU64 = AtomicU64::new(0);
+
+fn supervisor_holder() -> u64 {
+    SUPERVISOR_HOLDER.load(Ordering::Relaxed)
+}
 /// Dedicated RR slot for the native sibling (storage=0, network=1, Linux=2+).
 const NATIVE_SLOT: usize = 5;
 const USERSPACE_CYCLES: u32 = 9;
@@ -515,7 +522,18 @@ impl Resources {
         }
     }
 
-    fn log(&self, label: &str) {
+    /// `cycle` is `None` for the pre-launch baseline, else the 1-based cycle number.
+    fn log(&self, cycle: Option<u32>) {
+        struct Label(Option<u32>);
+        impl core::fmt::Display for Label {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                match self.0 {
+                    None => f.write_str("baseline"),
+                    Some(cycle) => write!(f, "cycle-{cycle}"),
+                }
+            }
+        }
+        let label = Label(cycle);
         kernel_log_fmt(format_args!(
             "[M9  ] resources label={label} linux_procs={} threads={} processes={} fd_tables={} open_files={} pipes={} linux_waiters={} sockets={} net_requests={} object_requests={} capabilities={} linux_mm={} linux_signals={} tmp_files={} fs_nodes={} native_progress={}\n",
             self.linux_procs,
@@ -548,7 +566,7 @@ impl Resources {
 
 fn check_cycle_resources(cycle: u32) {
     let now = Resources::capture();
-    now.log(if cycle == 1 { "cycle-1" } else { "cycle" });
+    now.log(Some(cycle));
     let baseline = unsafe { *BASELINE.get() }
         .unwrap_or_else(|| fatal_kernel_error("m9 userspace baseline missing"));
     if now.reusable() != baseline.reusable() {
@@ -837,7 +855,7 @@ fn launch_storage_service(
     let result = controller
         .handle_control_message(
             allocator,
-            SUPERVISOR_PID,
+            supervisor_holder(),
             lifecycle_capability,
             &LifecycleMessage::ControlRequest(ControlRequest::new(
                 STORAGE_SERVICE_ID,
@@ -861,7 +879,7 @@ fn launch_network_service(
     let _ = controller
         .handle_control_message(
             allocator,
-            SUPERVISOR_PID,
+            supervisor_holder(),
             lifecycle_capability,
             &LifecycleMessage::ControlRequest(ControlRequest::new(
                 NETWORK_SERVICE_ID,
@@ -878,6 +896,10 @@ pub(crate) fn start_m9_userspace_self_test(page_allocator: PageAllocator) -> ! {
     reset_process_scheduler_world();
     unsafe {
         *id_allocator_mut() = IdAllocator::new();
+        let supervisor = id_allocator_mut()
+            .allocate_pid()
+            .unwrap_or_else(|m| fatal_kernel_error(m));
+        SUPERVISOR_HOLDER.store(supervisor, Ordering::Relaxed);
         process_registry_mut().clear();
         *scheduler_mut() = Scheduler::new();
     }
@@ -914,18 +936,18 @@ pub(crate) fn start_m9_userspace_self_test(page_allocator: PageAllocator) -> ! {
         .declare_service(NETWORK_SERVICE_ID)
         .unwrap_or_else(|m| fatal_kernel_error(m));
     let lifecycle_capability = controller
-        .grant_lifecycle_control_capability(SUPERVISOR_PID)
+        .grant_lifecycle_control_capability(supervisor_holder())
         .unwrap_or_else(|m| fatal_kernel_error(m));
 
     launch_storage_service(controller, allocator, lifecycle_capability);
     crate::selftest::m7_net_service::init_minimal_state_for_m9_socket(lifecycle_capability);
     launch_network_service(controller, allocator, lifecycle_capability);
-    crate::process::linux_socket::grant_linux_network_capabilities(SUPERVISOR_PID)
+    crate::process::linux_socket::grant_linux_network_capabilities(supervisor_holder())
         .unwrap_or_else(|_| fatal_kernel_error("network grant"));
 
     spawn_native_sibling(allocator);
     let baseline = Resources::capture();
-    baseline.log("baseline");
+    baseline.log(None);
     unsafe { *BASELINE.get() = Some(baseline) };
 
     initialize_timer();

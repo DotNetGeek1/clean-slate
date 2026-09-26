@@ -484,7 +484,14 @@ fn validate_resources(lines: &[&str], cycles: u64) -> Result<(), String> {
     }
     let mut native_progress = baseline.get("native_progress").copied().unwrap_or(0);
     let first = &cycle_snapshots[0].1;
-    for (index, (_, values)) in cycle_snapshots.iter().enumerate() {
+    for (index, (label, values)) in cycle_snapshots.iter().enumerate() {
+        let expected_label = format!("cycle-{}", index + 1);
+        if *label != expected_label {
+            return Err(format!(
+                "resource snapshot {} labelled {label:?}, expected {expected_label:?}",
+                index + 1
+            ));
+        }
         for key in REUSABLE_RESOURCES {
             if values.get(key) != baseline.get(key) || values.get(key).is_none() {
                 return Err(format!(
