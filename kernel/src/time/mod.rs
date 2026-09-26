@@ -234,8 +234,11 @@ mod tests {
         assert!(mul_div_u128(1, u128::MAX, 0).is_none());
     }
 
+    /// The APIC counter globals are process-wide, and the test harness runs
+    /// tests in parallel, so every assertion that depends on them lives in
+    /// this one test.
     #[test]
-    fn sleep_budget_ceil_never_rounds_down() {
+    fn sleep_budget_and_deadline_use_ceil_apic_period() {
         set_apic_counter_hz(62_500_000);
         set_apic_timer_initial_count(62_500);
         assert_eq!(
@@ -255,14 +258,6 @@ mod tests {
             1_000_000
         );
         assert_eq!(sleep_budget_ns_from_millis(200).unwrap(), 200_000_000);
-        set_apic_counter_hz(0);
-        set_apic_timer_initial_count(0);
-    }
-
-    #[test]
-    fn monotonic_deadline_checked_add() {
-        set_apic_counter_hz(62_500_000);
-        set_apic_timer_initial_count(62_500);
         let ts = Timespec {
             tv_sec: 0,
             tv_nsec: 200_000_000,

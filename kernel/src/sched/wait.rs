@@ -254,9 +254,17 @@ pub(crate) fn block_current_thread_with_resume(
 
         let table = wait_table_mut();
         if table.consume_pending_wake(key) {
-            thread.blocked_syscall_frame = 0;
-            set_blocked_resume(thread_index, BlockedResume::NativeOutcome);
-            return Ok(false);
+            match resume {
+                BlockedResume::NativeOutcome => {
+                    thread.blocked_syscall_frame = 0;
+                    set_blocked_resume(thread_index, BlockedResume::NativeOutcome);
+                    return Ok(false);
+                }
+                BlockedResume::RestartSyscall { .. } => {
+                    // Pending wakes may be stale (recorded when no thread was blocked).
+                    // Linux handlers re-check after a real block; ignore the shortcut.
+                }
+            }
         }
 
         let slot_index = table.allocate_slot()?;
@@ -416,6 +424,36 @@ extern "C" fn clean_slate_complete_blocked_syscall_resume() -> u64 {
         let resume = take_blocked_resume(index);
         let frame = unsafe { &mut *(frame_ptr as *mut SyscallContext) };
         apply_blocked_resume(frame, resume, outcome);
+        #[cfg(feature = "m9-linux-trace")]
+        {
+            use crate::process::personality::{
+                execution_personality_for_pid, ExecutionPersonality,
+            };
+            if let BlockedResume::RestartSyscall { nr, .. } = resume {
+                let pid = scheduler.threads[index].owner_process_id;
+                if matches!(
+                    execution_personality_for_pid(pid),
+                    Ok(ExecutionPersonality::LinuxX86_64)
+                ) {
+                    if let Some(generation) = live_instance_generation(pid) {
+                        let reason = match outcome {
+                            WaitOutcome::Woken => {
+                                crate::syscall::linux::trace::LinuxTraceReason::Woke
+                            }
+                            WaitOutcome::TimedOut => {
+                                crate::syscall::linux::trace::LinuxTraceReason::Timeout
+                            }
+                            WaitOutcome::Cancelled => {
+                                crate::syscall::linux::trace::LinuxTraceReason::OtherErrno
+                            }
+                        };
+                        crate::syscall::linux::trace::record_wait_event(
+                            pid, generation, nr, reason,
+                        );
+                    }
+                }
+            }
+        }
         #[cfg(feature = "m9-linux-runtime-self-test")]
         if outcome == WaitOutcome::TimedOut {
             if let BlockedResume::RestartSyscall { nr, .. } = resume {
