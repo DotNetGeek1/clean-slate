@@ -16,13 +16,13 @@ use x86_64::structures::tss::TaskStateSegment;
 use x86_64::VirtAddr;
 
 use crate::arch::x86_64::asm::SYSCALL_KERNEL_STACK_TOP;
+use crate::arch::x86_64::guarded_stack::GuardedStack;
 use crate::arch::x86_64::idt::DOUBLE_FAULT_IST_INDEX;
 use crate::sync::global_cell::GlobalCell;
 
 const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
 
-#[repr(align(16))]
-pub(crate) struct DoubleFaultStack(pub(crate) [u8; DOUBLE_FAULT_STACK_SIZE]);
+pub(crate) type DoubleFaultStack = GuardedStack<DOUBLE_FAULT_STACK_SIZE>;
 
 pub(crate) struct GdtState {
     table: GlobalDescriptorTable,
@@ -35,14 +35,14 @@ pub(crate) struct GdtState {
 }
 
 pub(crate) static DOUBLE_FAULT_STACK: GlobalCell<DoubleFaultStack> =
-    GlobalCell::new(DoubleFaultStack([0; DOUBLE_FAULT_STACK_SIZE]));
+    GlobalCell::new(DoubleFaultStack::new());
 pub(crate) static GDT_STATE: GlobalCell<Option<GdtState>> = GlobalCell::new(None);
 static TSS_STATE: GlobalCell<Option<TaskStateSegment>> = GlobalCell::new(None);
 
 pub(super) fn initialize_gdt_and_tss() {
     let double_fault_stack_top = {
         let stack = unsafe { &*DOUBLE_FAULT_STACK.get() };
-        VirtAddr::from_ptr(stack.0.as_ptr_range().end)
+        VirtAddr::new(stack.top())
     };
 
     let tss_slot = unsafe { &mut *TSS_STATE.get() };
@@ -122,7 +122,7 @@ pub(crate) fn register_gdt_tss_carve_outs() -> Result<(), &'static str> {
     use crate::mm::layout::register_kernel_low_carve_out;
     use core::mem::size_of;
     let df = unsafe { &*DOUBLE_FAULT_STACK.get() };
-    let df_start = df.0.as_ptr() as u64;
+    let df_start = df.guard_start();
     register_kernel_low_carve_out(df_start, df_start + size_of::<DoubleFaultStack>() as u64)?;
     let gdt_start = GDT_STATE.get() as *const _ as u64;
     register_kernel_low_carve_out(gdt_start, gdt_start + size_of::<GdtState>() as u64)?;

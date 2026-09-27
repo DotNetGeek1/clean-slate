@@ -31,6 +31,8 @@ use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::interrupt::timer::increment_kernel_ticks;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::paging::current_root_frame_address;
+use crate::mm::stack_guard::guarded_stack_for_fault;
+use crate::mm::stack_guard::{GuardedStackRecord, SlotLabel};
 #[cfg(any(
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
@@ -148,7 +150,6 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
     let stack_pointer = context as u64;
     let context = unsafe { &*context };
     if context.vector as usize == TIMER_VECTOR {
-        crate::sched::check_task_stack_guard(stack_pointer);
         #[cfg(feature = "m3-syscall-self-test")]
         {
             increment_kernel_ticks();
@@ -341,6 +342,10 @@ fn handle_exception(context: &InterruptContext) -> u64 {
         let fault_address = Cr2::read()
             .expect("CR2 must contain a canonical fault address")
             .as_u64();
+        let interrupted_rsp = interrupted_stack_pointer(context);
+        if let Some(stack) = guarded_stack_for_fault(fault_address, interrupted_rsp) {
+            report_kernel_stack_overflow(context, stack, fault_address, "page-fault")
+        }
         let cr3 = Cr3::read().0.start_address().as_u64();
         let expected = unsafe { EXPECTED_PAGE_FAULT_ADDRESS };
 
@@ -404,8 +409,7 @@ fn handle_exception(context: &InterruptContext) -> u64 {
             context.r14,
             context.r15
         ));
-        let frame_end = (context as *const InterruptContext).wrapping_add(1) as *const u64;
-        let interrupted_rsp = unsafe { core::ptr::read(frame_end) };
+        let interrupted_rsp = interrupted_stack_pointer(context);
         kernel_log_fmt(format_args!("[PF  ] rsp={:#018x}\n", interrupted_rsp));
         kernel_log_fmt(format_args!(
             "[PF  ] kernel_root_frame={:#x} storage={:#x}\n",
@@ -433,6 +437,13 @@ fn handle_exception(context: &InterruptContext) -> u64 {
             "[DF  ] rip={:#018x} cs={:#06x} rflags={:#018x} err={:#x}\n",
             context.rip, context.cs, context.rflags, context.error_code
         ));
+        // A #PF that cannot be delivered because the stack it would be pushed
+        // onto is a guard page escalates to #DF; CR2 still names that page.
+        let fault_address = Cr2::read_raw();
+        let interrupted_rsp = interrupted_stack_pointer(context);
+        if let Some(stack) = guarded_stack_for_fault(fault_address, interrupted_rsp) {
+            report_kernel_stack_overflow(context, stack, fault_address, "double-fault")
+        }
 
         #[cfg(feature = "m2-double-fault-self-test")]
         if DOUBLE_FAULT_TEST_ACTIVE.load(Ordering::Relaxed) {
@@ -467,6 +478,48 @@ fn handle_exception(context: &InterruptContext) -> u64 {
         context.rax, context.rbx, context.rcx, context.rdx
     ));
     qemu_exit(QEMU_EXIT_FAILURE)
+}
+
+/// Long-mode exception frames always carry the interrupted RSP after RFLAGS,
+/// even without a privilege change.
+fn interrupted_stack_pointer(context: &InterruptContext) -> u64 {
+    let frame_end = (context as *const InterruptContext).wrapping_add(1) as *const u64;
+    unsafe { core::ptr::read(frame_end) }
+}
+
+/// Fail-closed report for a fault on a kernel stack guard page (#162). Runs on
+/// the double-fault IST stack when the overflow escalated to #DF.
+fn report_kernel_stack_overflow(
+    context: &InterruptContext,
+    stack: GuardedStackRecord,
+    fault_address: u64,
+    via: &'static str,
+) -> ! {
+    kernel_log_fmt(format_args!(
+        "[FAIL] kernel stack overflow slot={} kind={} guard=[{:#x},{:#x}) stack=[{:#x},{:#x}) cr2={:#x} rsp={:#x} rip={:#x} via={}\n",
+        SlotLabel(stack.kind),
+        stack.kind_label(),
+        stack.guard_start,
+        stack.base,
+        stack.base,
+        stack.top,
+        fault_address,
+        interrupted_stack_pointer(context),
+        context.rip,
+        via
+    ));
+    #[cfg(feature = "m9-stack-guard-self-test")]
+    {
+        crate::selftest::m9_stack_guard::on_kernel_stack_overflow(
+            stack,
+            via,
+            crate::arch::x86_64::cpu::read_stack_pointer(),
+        )
+    }
+    #[cfg(not(feature = "m9-stack-guard-self-test"))]
+    {
+        qemu_exit(QEMU_EXIT_FAILURE)
+    }
 }
 
 fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {

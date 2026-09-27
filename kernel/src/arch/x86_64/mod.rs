@@ -10,6 +10,7 @@ pub(crate) mod asm;
 pub(crate) mod context_switch;
 pub(crate) mod cpu;
 pub(crate) mod gdt;
+pub(crate) mod guarded_stack;
 pub(crate) mod idt;
 pub(crate) mod interrupt_context;
 pub(crate) mod msr;

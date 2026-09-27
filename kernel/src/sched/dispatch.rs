@@ -40,7 +40,8 @@ use crate::sched::ThreadKind;
         feature = "m7-tls-self-test",
         feature = "m7-tls-fail-closed-self-test",
         feature = "m7-dns-self-test",
-        feature = "m8-linux-hello-self-test"
+        feature = "m8-linux-hello-self-test",
+        feature = "m9-stack-guard-self-test"
     ),
     allow(dead_code)
 )]
