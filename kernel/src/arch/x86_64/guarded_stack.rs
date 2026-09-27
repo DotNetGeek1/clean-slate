@@ -42,4 +42,15 @@ impl<const N: usize> GuardedStack<N> {
     pub(crate) fn top(&self) -> u64 {
         self.base() + N as u64
     }
+
+    /// Deepest touched byte, measured from the top. Stacks start zeroed in
+    /// `.bss`, so the lowest non-zero byte bounds the peak use (diagnostics
+    /// only; a frame that wrote only zeros is not counted).
+    pub(crate) fn high_water_bytes(&self) -> usize {
+        let start = self.bytes.as_ptr();
+        let lowest_used = (0..N)
+            .find(|offset| unsafe { core::ptr::read_volatile(start.add(*offset)) } != 0)
+            .unwrap_or(N);
+        N - lowest_used
+    }
 }

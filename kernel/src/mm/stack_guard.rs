@@ -146,6 +146,18 @@ pub(crate) fn arm_kernel_stack_guards(
     let mut split_tables = 0usize;
     for stack in stacks {
         stack.validate()?;
+        if !guard_page_is_untouched(stack.guard_start) {
+            serial_write_fmt(format_args!(
+                "[FAIL] kernel stack overflow slot={} kind={} guard=[{:#x},{:#x}) stack=[{:#x},{:#x}) via=before-armed\n",
+                SlotLabel(stack.kind),
+                stack.kind_label(),
+                stack.guard_start,
+                stack.base,
+                stack.base,
+                stack.top
+            ));
+            return Err("kernel stack guard page was written before the guards were armed");
+        }
         split_tables += unmap_guard_page(kernel_root, stack.guard_start, &mut || {
             allocator.allocate_page()
         })?;
@@ -170,6 +182,15 @@ pub(crate) fn arm_kernel_stack_guards(
         table.count, split_tables
     ));
     Ok(())
+}
+
+/// Guard pages start zeroed in `.bss`. The boot stack runs unguarded from the
+/// switch in `boot::run` until the guards are armed, so a guard that is no
+/// longer all zero proves an overflow in that window.
+fn guard_page_is_untouched(guard_start: u64) -> bool {
+    let guard = guard_start as *const u64;
+    (0..PAGE_SIZE as usize / 8)
+        .all(|word| unsafe { core::ptr::read_volatile(guard.add(word)) } == 0)
 }
 
 /// Fails unless `root` leaves every armed guard unmapped while the stack

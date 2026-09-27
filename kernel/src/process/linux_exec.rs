@@ -369,7 +369,7 @@ pub(crate) fn pick_scheduler_slot_for_relaunch() -> Result<(usize, u64), &'stati
             if scheduler.threads[slot].state != ThreadState::Empty {
                 continue;
             }
-            let base = stack.0.as_ptr() as u64;
+            let base = stack.base();
             let top = task_stack_top(stack);
             if rsp > base && rsp <= top {
                 continue;

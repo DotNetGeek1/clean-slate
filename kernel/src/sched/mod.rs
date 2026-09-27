@@ -670,14 +670,6 @@ pub(crate) unsafe fn task_stacks_mut() -> &'static mut [TaskStack; SCHEDULER_THR
 /// Deepest byte ever written in `stack`. Stacks start zeroed in `.bss`, so the
 /// lowest non-zero byte bounds the high-water mark (reads only usable bytes,
 /// never the unmapped guard page).
-pub(crate) fn task_stack_high_water_bytes(stack: &TaskStack) -> usize {
-    let start = stack.base() as *const u8;
-    let lowest_used = (0..TASK_STACK_SIZE)
-        .find(|offset| unsafe { core::ptr::read_volatile(start.add(*offset)) } != 0)
-        .unwrap_or(TASK_STACK_SIZE);
-    TASK_STACK_SIZE - lowest_used
-}
-
 /// Fault diagnostics: logs each task stack's range and deepest touched byte.
 pub(crate) fn log_task_stack_high_water() {
     let stacks = unsafe { &*TASK_STACKS.get() };
@@ -686,7 +678,7 @@ pub(crate) fn log_task_stack_high_water() {
             "[PF  ] task_stack[{}] base={:#x} used={:#x}/{:#x}\n",
             slot,
             stack.base(),
-            task_stack_high_water_bytes(stack),
+            stack.high_water_bytes(),
             TASK_STACK_SIZE
         ));
     }
