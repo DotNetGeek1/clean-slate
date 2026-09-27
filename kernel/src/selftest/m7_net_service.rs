@@ -143,6 +143,7 @@ fn read_fixture_bootstrap(pid: u64, kernel_root: u64) -> NetworkServiceBootstrap
         unsafe { core::ptr::addr_of!((*bootstrap_ptr).tls_heap_checkpoint).read_volatile() };
     let tls_heap_after_last =
         unsafe { core::ptr::addr_of!((*bootstrap_ptr).tls_heap_after_last).read_volatile() };
+    let occupancy = unsafe { core::ptr::addr_of!((*bootstrap_ptr).occupancy).read_volatile() };
     activate_address_space_root(kernel_root);
     NetworkServiceBootstrap {
         mode,
@@ -158,6 +159,7 @@ fn read_fixture_bootstrap(pid: u64, kernel_root: u64) -> NetworkServiceBootstrap
         tls_transactions,
         tls_heap_checkpoint,
         tls_heap_after_last,
+        occupancy,
     }
 }
 

@@ -250,13 +250,14 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 9] = [
     "[M9.E] PASS",
 ];
 const M9_USERSPACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(300);
-const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 18] = [
+const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[M9  ] creating",
     "[M9  ] busybox verified",
     "[M9  ] matrix commands=",
     "[STOR] object-service started",
-    "[M9  ] resources label=baseline",
     "[TIME] timer initialized",
+    "[M9  ] resources label=baseline",
+    "[M9  ] net-service resources label=baseline",
     "[M9  ] fs PASS",
     "[M9  ] process-pipe PASS",
     "[M9  ] dns PASS",

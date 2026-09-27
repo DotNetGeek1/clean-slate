@@ -65,6 +65,8 @@ const REUSABLE_RESOURCES: &[&str] = &[
     "linux_waiters",
     "sockets",
     "net_requests",
+    "net_in_service",
+    "net_holder_exits",
     "object_requests",
     "capabilities",
     "linux_mm",
@@ -72,6 +74,20 @@ const REUSABLE_RESOURCES: &[&str] = &[
 ];
 /// Persistent `/tmp` state created by cycle 1 and reused afterwards.
 const PERSISTENT_RESOURCES: &[&str] = &["tmp_files", "fs_nodes"];
+/// Network-service table rows (`[M9  ] net-service resources`) that must equal the
+/// baseline after every cycle.
+const NET_SERVICE_RESOURCES: &[&str] = &[
+    "sessions",
+    "session_pending",
+    "tcp_conns",
+    "tcp_maps",
+    "udp_endpoints",
+    "udp_maps",
+    "udp_queued",
+    "udp_recvs",
+    "dns_queries",
+    "heap_bytes",
+];
 
 /// `[M9  ] ...` payload of a serial line (guest stdout may precede it on the same line).
 fn m9_payload(line: &str) -> Option<&str> {
@@ -473,11 +489,18 @@ fn validate_sleep_evidence(lines: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_resources(lines: &[&str], cycles: u64) -> Result<(), String> {
-    let snapshots: Vec<(&str, BTreeMap<&str, u64>)> = lines
+type Snapshot<'a> = (&'a str, BTreeMap<&'a str, u64>);
+
+/// `label=baseline` followed by `label=cycle-1..=cycles` snapshots with `prefix`.
+fn resource_snapshots<'a>(
+    lines: &[&'a str],
+    prefix: &str,
+    cycles: u64,
+) -> Result<(BTreeMap<&'a str, u64>, Vec<BTreeMap<&'a str, u64>>), String> {
+    let snapshots: Vec<Snapshot<'a>> = lines
         .iter()
         .filter_map(|l| m9_payload(l))
-        .filter_map(|p| p.strip_prefix("resources "))
+        .filter_map(|p| p.strip_prefix(prefix))
         .map(|p| {
             let label = field(p, "label").unwrap_or_default();
             let values = p
@@ -489,37 +512,66 @@ fn validate_resources(lines: &[&str], cycles: u64) -> Result<(), String> {
             (label, values)
         })
         .collect();
-    let (label, baseline) = snapshots.first().ok_or("missing resource baseline")?;
-    if *label != "baseline" {
-        return Err("first resource snapshot is not the baseline".into());
+    let mut snapshots = snapshots.into_iter();
+    let (label, baseline) = snapshots
+        .next()
+        .ok_or_else(|| format!("missing `{prefix}` baseline"))?;
+    if label != "baseline" {
+        return Err(format!("first `{prefix}` snapshot is not the baseline"));
     }
-    let cycle_snapshots = &snapshots[1..];
-    if cycle_snapshots.len() as u64 != cycles {
-        return Err(format!(
-            "{} cycle resource snapshots, expected {cycles}",
-            cycle_snapshots.len()
-        ));
-    }
-    let mut native_progress = baseline.get("native_progress").copied().unwrap_or(0);
-    let first = &cycle_snapshots[0].1;
-    for (index, (label, values)) in cycle_snapshots.iter().enumerate() {
+    let mut per_cycle = Vec::new();
+    for (index, (label, values)) in snapshots.enumerate() {
         let expected_label = format!("cycle-{}", index + 1);
-        if *label != expected_label {
+        if label != expected_label {
             return Err(format!(
-                "resource snapshot {} labelled {label:?}, expected {expected_label:?}",
+                "`{prefix}` snapshot {} labelled {label:?}, expected {expected_label:?}",
                 index + 1
             ));
         }
-        for key in REUSABLE_RESOURCES {
-            if values.get(key) != baseline.get(key) || values.get(key).is_none() {
+        per_cycle.push(values);
+    }
+    if per_cycle.len() as u64 != cycles {
+        return Err(format!(
+            "{} cycle `{prefix}` snapshots, expected {cycles}",
+            per_cycle.len()
+        ));
+    }
+    Ok((baseline, per_cycle))
+}
+
+fn require_baseline(
+    what: &str,
+    keys: &[&str],
+    baseline: &BTreeMap<&str, u64>,
+    per_cycle: &[BTreeMap<&str, u64>],
+) -> Result<(), String> {
+    for key in keys {
+        if !baseline.contains_key(key) {
+            return Err(format!("{what} baseline lacks {key}="));
+        }
+    }
+    for (index, values) in per_cycle.iter().enumerate() {
+        for key in keys {
+            if values.get(key) != baseline.get(key) {
                 return Err(format!(
-                    "cycle {}: {key}={:?} differs from baseline {:?}",
+                    "cycle {}: {what} {key}={:?} differs from baseline {:?}",
                     index + 1,
                     values.get(key),
                     baseline.get(key)
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_resources(lines: &[&str], cycles: u64) -> Result<(), String> {
+    let (baseline, cycle_snapshots) = resource_snapshots(lines, "resources ", cycles)?;
+    require_baseline("kernel", REUSABLE_RESOURCES, &baseline, &cycle_snapshots)?;
+    validate_net_service_resources(lines, cycles)?;
+    let mut native_progress = baseline.get("native_progress").copied().unwrap_or(0);
+    let first = &cycle_snapshots[0];
+    for (index, values) in cycle_snapshots.iter().enumerate() {
         for key in PERSISTENT_RESOURCES {
             if values.get(key) != first.get(key) || values.get(key).is_none() {
                 return Err(format!(
@@ -539,6 +591,27 @@ fn validate_resources(lines: &[&str], cycles: u64) -> Result<(), String> {
     }
     if first.get("tmp_files").copied().unwrap_or(0) == 0 {
         return Err("matrix left no persistent /tmp files (M5/M6 backing unused)".into());
+    }
+    Ok(())
+}
+
+/// Every snapshot comes from a fresh network-service idle point (`idle_seq` strictly
+/// increases), and every table row count is back at its baseline.
+fn validate_net_service_resources(lines: &[&str], cycles: u64) -> Result<(), String> {
+    let (baseline, per_cycle) = resource_snapshots(lines, "net-service resources ", cycles)?;
+    require_baseline("net-service", NET_SERVICE_RESOURCES, &baseline, &per_cycle)?;
+    let mut idle_seq = *baseline
+        .get("idle_seq")
+        .ok_or("net-service baseline lacks idle_seq=")?;
+    for (index, values) in per_cycle.iter().enumerate() {
+        let seq = values.get("idle_seq").copied().unwrap_or(0);
+        if seq <= idle_seq {
+            return Err(format!(
+                "cycle {}: net-service idle_seq={seq} is not newer than {idle_seq}",
+                index + 1
+            ));
+        }
+        idle_seq = seq;
     }
     Ok(())
 }
@@ -667,6 +740,70 @@ mod tests {
             .collect();
         let err = run_matrix(&dropped, &matrix, 2).unwrap_err();
         assert!(err.contains("pwd@2"), "{err}");
+    }
+
+    fn net_service_line(label: &str, idle_seq: u64, overrides: &[(&str, u64)]) -> String {
+        let mut line = format!("[M9  ] net-service resources label={label} idle_seq={idle_seq}");
+        for key in NET_SERVICE_RESOURCES {
+            let baseline = if *key == "heap_bytes" { 8192 } else { 0 };
+            let value = overrides
+                .iter()
+                .find(|(k, _)| k == key)
+                .map_or(baseline, |(_, v)| *v);
+            line.push_str(&format!(" {key}={value}"));
+        }
+        line
+    }
+
+    fn net_service_log(cycles: u64, leak: Option<(u64, &str)>) -> String {
+        let mut log = net_service_line("baseline", 1, &[]);
+        log.push('\n');
+        for cycle in 1..=cycles {
+            let overrides: Vec<(&str, u64)> = leak
+                .filter(|(at, _)| *at == cycle)
+                .map(|(_, key)| (key, if key == "heap_bytes" { 8200 } else { 1 }))
+                .into_iter()
+                .collect();
+            let label = format!("cycle-{cycle}");
+            log.push_str(&net_service_line(&label, 1 + cycle * 7, &overrides));
+            log.push('\n');
+        }
+        log
+    }
+
+    fn run_net_service(log: &str, cycles: u64) -> Result<(), String> {
+        let lines: Vec<&str> = log.lines().collect();
+        validate_net_service_resources(&lines, cycles)
+    }
+
+    #[test]
+    fn net_service_rows_at_baseline_pass() {
+        run_net_service(&net_service_log(3, None), 3).unwrap();
+    }
+
+    #[test]
+    fn net_service_row_left_live_fails() {
+        for key in NET_SERVICE_RESOURCES {
+            for cycle in 1..=3 {
+                let err = run_net_service(&net_service_log(3, Some((cycle, key))), 3).unwrap_err();
+                assert!(
+                    err.contains(&format!("cycle {cycle}: net-service {key}=")),
+                    "{err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn net_service_snapshot_must_be_fresh_and_complete() {
+        let stale = net_service_log(2, None).replace("idle_seq=15", "idle_seq=8");
+        assert!(run_net_service(&stale, 2)
+            .unwrap_err()
+            .contains("idle_seq=8 is not newer"));
+        let missing = net_service_log(2, None).replace(" udp_recvs=0", "");
+        assert!(run_net_service(&missing, 2).is_err());
+        let short = net_service_log(1, None);
+        assert!(run_net_service(&short, 2).is_err());
     }
 
     #[test]

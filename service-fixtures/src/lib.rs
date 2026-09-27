@@ -38,9 +38,9 @@ pub use network_service::{
     AllowAllAuthorizer, DenyAllAuthorizer, NetworkAuthorizer, NetworkOp, NetworkService,
 };
 pub use network_transport::{
-    encode_request, encode_response, NetworkServiceBootstrap, NetworkServiceWorkItem,
-    NetworkServiceWorkItem as NetWorkItem, NETWORK_CAPABILITY_VERSION, NETWORK_CLIENT_DEVICE_ID,
-    NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES, NETWORK_REQUEST_SLOTS,
+    encode_request, encode_response, NetworkServiceBootstrap, NetworkServiceOccupancy,
+    NetworkServiceWorkItem, NetworkServiceWorkItem as NetWorkItem, NETWORK_CAPABILITY_VERSION,
+    NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES, NETWORK_REQUEST_SLOTS,
     NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_MODE_ACCEPTANCE,
     NETWORK_SERVICE_MODE_CAPACITY_LOOP, NETWORK_SERVICE_MODE_CLIENT,
     NETWORK_SERVICE_MODE_CONVERGED_CLIENT, NETWORK_SERVICE_MODE_INFLIGHT_ARM,

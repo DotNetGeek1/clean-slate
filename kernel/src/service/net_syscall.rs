@@ -668,6 +668,10 @@ fn handle_wait_work(frame: &mut SyscallContext) {
         frame.rax = 0;
         return;
     }
+    #[cfg(feature = "m9-userspace-self-test")]
+    if mask & NET_WAIT_WORK_REQUESTS != 0 {
+        crate::selftest::m9_userspace::on_net_service_idle();
+    }
     match block_current_thread(frame, net_service_work_wait_key(), deadline) {
         Ok(outcome) => frame.rax = encode_wait_outcome(outcome),
         Err(message) => crate::diagnostics::qemu::fatal_kernel_error(message),

@@ -297,6 +297,24 @@ impl NetBridge {
             .count()
     }
 
+    /// Request slots the service has taken with `SERVICE_NEXT` but not completed.
+    #[cfg(feature = "m9-userspace-self-test")]
+    pub(crate) fn in_service_request_slots(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| slot.state == ClientSlotState::InService)
+            .count()
+    }
+
+    /// Holder exits queued for the service or popped and not yet acknowledged.
+    #[cfg(feature = "m9-userspace-self-test")]
+    pub(crate) fn outstanding_holder_exits(&self) -> usize {
+        let queued = (usize::from(self.holder_exit_tail) + MAX_HOLDER_EXIT_QUEUE
+            - usize::from(self.holder_exit_head))
+            % MAX_HOLDER_EXIT_QUEUE;
+        queued + usize::from(self.pending_holder_exit_ack.is_some())
+    }
+
     pub fn register_service_instance(
         &mut self,
         pid: u64,
