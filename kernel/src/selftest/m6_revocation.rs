@@ -23,7 +23,8 @@ use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
 use crate::selftest::m6_fixture::{
-    fixture_service, set_report_handler, spawn_fixture, wait_exit_step, FixtureReportAction,
+    end_turn_step, fixture_service, set_report_handler, spawn_fixture, wait_exit_step,
+    wait_turn_step, FixtureReportAction,
 };
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
@@ -349,6 +350,7 @@ fn build_exiter_program() -> M6FixtureBootstrap {
     program
         .push(probe_step(arg_result(claim), Rights::READ).expect_eq(0))
         .unwrap();
+    program.push(wait_turn_step(TURN_EXITER_MAY_EXIT)).unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
 }
@@ -356,6 +358,10 @@ fn build_exiter_program() -> M6FixtureBootstrap {
 /// Owner2's child derives from the exiter's root, so it is revoked by the exiter's
 /// teardown; owner2 re-probes only after that teardown completes.
 const PREDICTED_EXITER_PID: u64 = 5;
+/// Owner2 holds turn 0 until its first probe has seen the child live.
+const TURN_OWNER2_FIRST_PROBE: u64 = 0;
+/// The exiter reports (and is torn down) only on this turn.
+const TURN_EXITER_MAY_EXIT: u64 = 1;
 
 fn build_owner2_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
@@ -364,6 +370,9 @@ fn build_owner2_program() -> M6FixtureBootstrap {
         .unwrap();
     program
         .push(probe_step(arg_result(claim), Rights::READ).expect_eq(0))
+        .unwrap();
+    program
+        .push(end_turn_step(TURN_OWNER2_FIRST_PROBE))
         .unwrap();
     program.push(wait_exit_step(PREDICTED_EXITER_PID)).unwrap();
     program

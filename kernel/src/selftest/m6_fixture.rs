@@ -14,8 +14,8 @@ use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::current_process_id;
 use crate::process::domain::teardown_current_process;
-use crate::process::process_registry_mut;
 use crate::sched::wait::{block_current_thread_with_resume, wake_all, BlockedResume, WaitKey};
+use crate::selftest::m6_fixture_exits::{ExitWait, FixtureExitLog};
 use crate::service::spawn::launch_builtin_service;
 use crate::service::spawn::SpawnedServiceInstance;
 use crate::sync::global_cell::GlobalCell;
@@ -29,13 +29,15 @@ use clean_slate_service_lifecycle::ServiceId;
 pub(crate) const M6_FIXTURE_SERVICE_ID_BASE: u64 = 0x6000;
 
 /// Self-test builds only: `rsi = n` blocks until the harness turn is `n`
-/// (`EINVAL` once the turn has moved past `n`).
+/// (`EINVAL` once the turn has moved past `n`). Only turn `n`'s holder may end
+/// turn `n`, so a turn already past `n` means the script is wrong, not a lost wakeup.
 pub(crate) const FIXTURE_SUBOP_WAIT_TURN: u64 = 0x100;
 /// Self-test builds only: `rsi = n` hands turn `n` to `n + 1` and wakes the waiters
 /// (`EINVAL` unless the turn is exactly `n`).
 pub(crate) const FIXTURE_SUBOP_END_TURN: u64 = 0x101;
-/// Self-test builds only: `rsi = pid` blocks until that fixture has reported or
-/// faulted and been torn down.
+/// Self-test builds only: `rsi = pid` blocks until that fixture has reported,
+/// faulted or been terminated, and been torn down. Returns 0 at once if it already
+/// has; `EINVAL` if `pid` was never a fixture in this run.
 pub(crate) const FIXTURE_SUBOP_WAIT_EXIT: u64 = 0x102;
 /// Self-test builds only: blocks the caller until something tears it down.
 pub(crate) const FIXTURE_SUBOP_PARK: u64 = 0x103;
@@ -73,6 +75,9 @@ static FIXTURE_PROGRAMS: GlobalCell<[Option<FixtureProgramSlot>; MAX_FIXTURE_REG
 static FIXTURE_PIDS: GlobalCell<[u64; MAX_FIXTURE_REGISTRY]> =
     GlobalCell::new([0; MAX_FIXTURE_REGISTRY]);
 static FIXTURE_PID_COUNT: GlobalCell<usize> = GlobalCell::new(0);
+/// Every fixture spawn registers a pid, so this holds at most one run's worth.
+static FIXTURE_EXITS: GlobalCell<FixtureExitLog<MAX_FIXTURE_REGISTRY>> =
+    GlobalCell::new(FixtureExitLog::new());
 static FIXTURE_REPORTS: GlobalCell<[Option<FixtureReportSlot>; MAX_FIXTURE_REPORTS]> =
     GlobalCell::new([None; MAX_FIXTURE_REPORTS]);
 type FixtureReportHandler = fn(u64, &M6FixtureBootstrap) -> FixtureReportAction;
@@ -95,15 +100,16 @@ pub(crate) fn is_fixture_pid(pid: u64) -> bool {
     }
 }
 
-fn register_fixture_pid(pid: u64) {
+fn register_fixture_pid(pid: u64) -> Result<(), &'static str> {
     unsafe {
         let count = *FIXTURE_PID_COUNT.get();
         if count >= MAX_FIXTURE_REGISTRY {
-            return;
+            return Err("fixture pid registry full");
         }
         (*FIXTURE_PIDS.get())[count] = pid;
         *FIXTURE_PID_COUNT.get() = count + 1;
     }
+    Ok(())
 }
 
 fn unregister_fixture_pid(pid: u64) {
@@ -182,7 +188,7 @@ pub(crate) fn spawn_fixture(
 ) -> Result<SpawnedServiceInstance, &'static str> {
     set_fixture_program(service, program)?;
     let spawned = launch_builtin_service(allocator, kernel_stack_top, scheduler_slot, service)?;
-    register_fixture_pid(spawned.pid);
+    register_fixture_pid(spawned.pid)?;
     Ok(spawned)
 }
 
@@ -260,10 +266,12 @@ fn run_harness_subop(frame: &mut SyscallContext) {
             }
         }
         FIXTURE_SUBOP_WAIT_EXIT => {
-            if unsafe { process_registry_mut().get(frame.rsi).is_none() } {
-                frame.rax = 0;
-            } else {
-                block_harness_caller(frame, FIXTURE_EXIT_KEY);
+            let pid = frame.rsi;
+            let exits = unsafe { &*FIXTURE_EXITS.get() };
+            match exits.wait_state(pid, is_fixture_pid(pid)) {
+                ExitWait::Exited => frame.rax = 0,
+                ExitWait::Pending => block_harness_caller(frame, FIXTURE_EXIT_KEY),
+                ExitWait::NotAFixture => frame.rax = SYSCALL_EINVAL,
             }
         }
         _ => block_harness_caller(frame, FIXTURE_PARK_KEY),
@@ -287,10 +295,18 @@ fn block_harness_caller(frame: &mut SyscallContext, key: WaitKey) {
     }
 }
 
-/// Called with interrupts masked just before a fixture's own teardown (report or
-/// fault). The woken `WAIT_EXIT` callers cannot run until that teardown finishes,
-/// and they re-check the process registry when their syscall restarts.
-pub(crate) fn on_fixture_exiting() {
+/// Called with interrupts masked around a fixture's teardown: just before its own
+/// teardown (report or fault), or just after a process-control terminate. A woken
+/// `WAIT_EXIT` caller cannot run until that teardown finishes, and a later caller
+/// finds `pid` in the exit log. Non-fixture pids are ignored.
+pub(crate) fn on_fixture_exiting(pid: u64) {
+    if !is_fixture_pid(pid) {
+        return;
+    }
+    unregister_fixture_pid(pid);
+    unsafe { &mut *FIXTURE_EXITS.get() }
+        .record(pid)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
     wake_all(FIXTURE_EXIT_KEY);
 }
 
@@ -364,8 +380,7 @@ pub(crate) fn handle_fixture_report(allocator: &mut PageAllocator) -> u64 {
         kernel_log_line(marker);
         qemu_exit(QEMU_EXIT_SUCCESS);
     }
-    unregister_fixture_pid(pid);
-    on_fixture_exiting();
+    on_fixture_exiting(pid);
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 0, false)
         .unwrap_or_else(|message| fatal_kernel_error(message));
     match action {

@@ -77,6 +77,18 @@ pub(crate) mod m6_delegation;
     feature = "m7-net-caps-self-test"
 ))]
 pub(crate) mod m6_fixture;
+#[cfg(any(
+    test,
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m7-net-caps-self-test"
+))]
+pub(crate) mod m6_fixture_exits;
 #[cfg(feature = "m6-fixture-smoke-self-test")]
 pub(crate) mod m6_fixture_smoke;
 #[cfg(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test"))]

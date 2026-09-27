@@ -526,7 +526,7 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
         feature = "m6-fixture-smoke-self-test",
         feature = "m7-net-caps-self-test"
     ))]
-    crate::selftest::m6_fixture::on_fixture_exiting();
+    crate::selftest::m6_fixture::on_fixture_exiting(pid);
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 1, true)
         .unwrap_or_else(|message| fatal_kernel_error(message));
     #[cfg(feature = "m9-userspace-self-test")]
