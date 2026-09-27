@@ -437,14 +437,9 @@ fn handle_exception(context: &InterruptContext) -> u64 {
             "[DF  ] rip={:#018x} cs={:#06x} rflags={:#018x} err={:#x}\n",
             context.rip, context.cs, context.rflags, context.error_code
         ));
-        // A #PF that cannot be delivered because the stack it would be pushed
-        // onto is a guard page escalates to #DF; CR2 still names that page.
-        let fault_address = Cr2::read_raw();
-        let interrupted_rsp = interrupted_stack_pointer(context);
-        if let Some(stack) = guarded_stack_for_fault(fault_address, interrupted_rsp) {
-            report_kernel_stack_overflow(context, stack, fault_address, "double-fault")
-        }
 
+        // The M2 self-test's nested #PF recursion exhausts the boot stack on
+        // purpose, so its #DF lands on the boot-stack guard by design.
         #[cfg(feature = "m2-double-fault-self-test")]
         if DOUBLE_FAULT_TEST_ACTIVE.load(Ordering::Relaxed) {
             if double_fault_stack_contains(context as *const _ as u64) {
@@ -454,6 +449,14 @@ fn handle_exception(context: &InterruptContext) -> u64 {
             }
             kernel_log_line("[DF  ] emergency stack missing");
             qemu_exit(QEMU_EXIT_FAILURE)
+        }
+
+        // A #PF that cannot be delivered because the stack it would be pushed
+        // onto is a guard page escalates to #DF; CR2 still names that page.
+        let fault_address = Cr2::read_raw();
+        let interrupted_rsp = interrupted_stack_pointer(context);
+        if let Some(stack) = guarded_stack_for_fault(fault_address, interrupted_rsp) {
+            report_kernel_stack_overflow(context, stack, fault_address, "double-fault")
         }
 
         qemu_exit(QEMU_EXIT_FAILURE)
