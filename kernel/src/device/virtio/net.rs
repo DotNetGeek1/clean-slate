@@ -923,39 +923,26 @@ impl VirtioNetDevice {
     }
 }
 
-impl NetworkLink for VirtioNetDevice {
-    fn link(&self) -> LinkProperties {
-        self.link
-    }
-
-    fn state(&self) -> DeviceState {
+impl VirtioNetDevice {
+    /// Body of [`NetworkLink::transmit`], borrowing the frame so each error path does not move
+    /// the caller's `FrameBuf` (debug builds reserve a copy per return site).
+    pub(crate) fn transmit_slice(&mut self, frame: &[u8]) -> Result<(), NetworkDeviceError> {
         if self.released {
-            DeviceState::Poisoned
-        } else {
-            self.device_state
-        }
-    }
-
-    fn transmit(&mut self, frame: FrameBuf) -> Result<(), (NetworkDeviceError, FrameBuf)> {
-        if self.released {
-            return Err((NetworkDeviceError::Poisoned, frame));
+            return Err(NetworkDeviceError::Poisoned);
         }
         if self.device_state != DeviceState::Ready {
-            return Err((self.map_not_ready(), frame));
+            return Err(self.map_not_ready());
         }
         if frame.len() > MAX_ETHERNET_FRAME_BYTES {
-            return Err((NetworkDeviceError::Oversized, frame));
+            return Err(NetworkDeviceError::Oversized);
         }
         let frame_len = frame.len();
         let frame_len_u32 = match u32::try_from(frame_len) {
             Ok(value) => value,
-            Err(_) => return Err((NetworkDeviceError::DeviceError, frame)),
+            Err(_) => return Err(NetworkDeviceError::DeviceError),
         };
 
-        let slot = match self.claim_tx_slot() {
-            Ok(slot) => slot,
-            Err(error) => return Err((error, frame)),
-        };
+        let slot = self.claim_tx_slot()?;
 
         let slot_ptr = unsafe { core::ptr::addr_of_mut!(TX_BUFFER_POOL.slots[slot]) as *mut u8 };
         let header = VirtioNetHdr {
@@ -969,7 +956,7 @@ impl NetworkLink for VirtioNetDevice {
         unsafe {
             core::ptr::write_unaligned(slot_ptr as *mut VirtioNetHdr, header);
             core::ptr::copy_nonoverlapping(
-                frame.as_slice().as_ptr(),
+                frame.as_ptr(),
                 slot_ptr.add(TX_FRAME_OFFSET),
                 frame_len,
             );
@@ -977,7 +964,7 @@ impl NetworkLink for VirtioNetDevice {
         let slot_physical =
             match physical_address_for_contiguous_range(slot_ptr, TX_FRAME_OFFSET + frame_len) {
                 Ok(value) => value,
-                Err(_) => return Err((NetworkDeviceError::DeviceError, frame)),
+                Err(_) => return Err(NetworkDeviceError::DeviceError),
             };
 
         let header_desc = (slot * 2) as u16;
@@ -1004,6 +991,27 @@ impl NetworkLink for VirtioNetDevice {
         self.registers
             .write_u16(VIRTIO_PCI_QUEUE_NOTIFY, TX_QUEUE_INDEX);
         Ok(())
+    }
+}
+
+impl NetworkLink for VirtioNetDevice {
+    fn link(&self) -> LinkProperties {
+        self.link
+    }
+
+    fn state(&self) -> DeviceState {
+        if self.released {
+            DeviceState::Poisoned
+        } else {
+            self.device_state
+        }
+    }
+
+    fn transmit(&mut self, frame: FrameBuf) -> Result<(), (NetworkDeviceError, FrameBuf)> {
+        match self.transmit_slice(frame.as_slice()) {
+            Ok(()) => Ok(()),
+            Err(error) => Err((error, frame)),
+        }
     }
 
     fn receive(&mut self) -> Result<Option<FrameBuf>, NetworkDeviceError> {

@@ -87,7 +87,7 @@ fn current_rsp() -> u64 {
 
 #[cfg(feature = "m8-linux-hello")]
 fn task_stack_contains_rsp(stack: &TaskStack, rsp: u64) -> bool {
-    stack_range_contains_rsp(stack.0.as_ptr() as u64, TASK_STACK_SIZE as u64, rsp)
+    stack_range_contains_rsp(stack.base(), TASK_STACK_SIZE as u64, rsp)
 }
 
 /// Refuse a scheduler slot whose kernel stack is the one we are currently

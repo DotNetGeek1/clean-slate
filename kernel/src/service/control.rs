@@ -901,7 +901,7 @@ mod tests {
     use crate::sched::ThreadKind;
 
     fn test_allocator() -> PageAllocator {
-        use crate::boot::uefi::normalize_memory_map;
+        use crate::boot::uefi::normalize_memory_map_boxed;
         use uefi::mem::memory_map::{MemoryAttribute, MemoryDescriptor, MemoryType};
 
         #[repr(align(4096))]
@@ -915,7 +915,7 @@ mod tests {
             page_count: 4,
             att: MemoryAttribute::empty(),
         }];
-        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
+        let map = normalize_memory_map_boxed(descriptors.iter(), &[]).expect("normalize map");
         PageAllocator::new(&map).expect("allocator")
     }
 

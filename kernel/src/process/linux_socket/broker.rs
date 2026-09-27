@@ -7,6 +7,7 @@ use clean_slate_network::protocol::{NetworkRequest, NetworkResponse};
 use clean_slate_network::session::SessionGeneration;
 use clean_slate_service_fixtures::NETWORK_MAX_PAYLOAD_BYTES;
 
+use crate::arch::x86_64::cpu::without_interrupts;
 use crate::capability::network::{authorize_network_op, NetworkOp};
 use crate::capability::with_capability_space;
 use crate::sched::wait::Deadline;
@@ -14,6 +15,7 @@ use crate::service::instance_generation::{
     live_instance_generation_for_pid, live_network_service_generation,
 };
 use crate::service::net_bridge::{net_bridge_mut, NetBridgeError};
+use crate::sync::global_cell::GlobalCell;
 use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
 use crate::syscall::linux::table::LinuxSyscallContext;
 use crate::time::{monotonic_deadline_from_millis, monotonic_ns};
@@ -72,9 +74,16 @@ pub(super) fn authorize_session_receive(pid: u64) -> Result<(), LinuxErrno> {
 
 pub(crate) struct BrokerOutcome {
     pub response: NetworkResponse,
+    /// Bytes of a `Receive` payload copied into the caller's `receive_into`.
     pub payload_len: usize,
-    pub payload: [u8; NETWORK_MAX_PAYLOAD_BYTES],
 }
+
+/// Landing buffer for a completed bridge response. The service may attach a
+/// payload to any response, so `poll` always gets full capacity; only the
+/// requested bytes reach the caller. Filled and drained with interrupts
+/// masked, so no other syscall can observe or overwrite it in between.
+static BROKER_RESPONSE_PAYLOAD: GlobalCell<[u8; NETWORK_MAX_PAYLOAD_BYTES]> =
+    GlobalCell::new([0; NETWORK_MAX_PAYLOAD_BYTES]);
 
 /// Session-scoped ops must authorize against the live network-service resource
 /// generation (M6 `ResourceRef`), not the M7 session id embedded generation alone.
@@ -101,80 +110,92 @@ pub(crate) fn broker_sync(
     inflight_request_id: &mut Option<u64>,
     network_request: NetworkRequest,
     payload: &[u8],
+    receive_into: &mut [u8],
     session_generation: Option<SessionGeneration>,
     on_timeout: Option<LinuxTimeoutResult>,
 ) -> Result<BrokerOutcome, LinuxSyscallResult> {
-    let session_generation = session_generation_for_broker(&network_request, session_generation);
-    let holder = HolderId(ctx.pid);
-    let handle = network_client_handle(holder).ok_or(Err(clean_slate_linux_abi::EACCES))?;
-    let op = match &network_request {
-        NetworkRequest::Open { .. } => NetworkOp::Connect,
-        NetworkRequest::Connect { .. } => NetworkOp::Connect,
-        NetworkRequest::Send { .. } => NetworkOp::Send,
-        NetworkRequest::Receive { .. } => NetworkOp::Receive,
-        NetworkRequest::Close { .. } => NetworkOp::Receive,
-        NetworkRequest::Resolve { .. } => NetworkOp::Resolve,
-    };
-    if let Err(reason) = authorize_network_op(holder, handle, op, session_generation) {
-        return Err(Err(denial_errno(reason)));
-    }
-    let generation = live_instance_generation_for_pid(ctx.pid)
-        .map(|g| u64::from(g.0))
-        .ok_or(Err(clean_slate_linux_abi::EACCES))?;
-
-    let request_id = if let Some(id) = *inflight_request_id {
-        id
-    } else {
-        let wire = network_request.encode();
-        let id = net_bridge_mut()
-            .submit(ctx.pid, ctx.pid, generation, &wire, payload)
-            .map_err(|e| Err(bridge_err(e)))?;
-        *inflight_request_id = Some(id);
-        id
-    };
-
-    let key = linux_socket_request_wait_key(request_id);
-    let deadline = match on_timeout {
-        Some(_) => Some(Deadline::MonotonicNs(
-            monotonic_deadline_from_millis(monotonic_ns(), super::LINUX_TCP_CONNECT_TIMEOUT_MS)
-                .map_err(Err)?,
-        )),
-        None => None,
-    };
     let timeout = on_timeout.unwrap_or(LinuxTimeoutResult::Zero);
+    // Each pass re-authorizes (the capability or instance may have been
+    // revoked while blocked), then completes, fails, or blocks until the
+    // bridge wakes the request key. Looping rather than recursing keeps the
+    // stack flat however often the request is resumed.
+    loop {
+        let effective_generation =
+            session_generation_for_broker(&network_request, session_generation);
+        let holder = HolderId(ctx.pid);
+        let handle = network_client_handle(holder).ok_or(Err(clean_slate_linux_abi::EACCES))?;
+        let op = match &network_request {
+            NetworkRequest::Open { .. } => NetworkOp::Connect,
+            NetworkRequest::Connect { .. } => NetworkOp::Connect,
+            NetworkRequest::Send { .. } => NetworkOp::Send,
+            NetworkRequest::Receive { .. } => NetworkOp::Receive,
+            NetworkRequest::Close { .. } => NetworkOp::Receive,
+            NetworkRequest::Resolve { .. } => NetworkOp::Resolve,
+        };
+        if let Err(reason) = authorize_network_op(holder, handle, op, effective_generation) {
+            return Err(Err(denial_errno(reason)));
+        }
+        let generation = live_instance_generation_for_pid(ctx.pid)
+            .map(|g| u64::from(g.0))
+            .ok_or(Err(clean_slate_linux_abi::EACCES))?;
 
-    let mut out = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-    match net_bridge_mut().poll(ctx.pid, ctx.pid, generation, request_id, &mut out) {
-        Ok(response) => {
-            *inflight_request_id = None;
-            let len = match response {
-                NetworkResponse::Receive { payload_len } => payload_len as usize,
-                _ => 0,
-            };
-            Ok(BrokerOutcome {
-                response,
-                payload_len: len.min(NETWORK_MAX_PAYLOAD_BYTES),
-                payload: out,
-            })
-        }
-        Err(NetBridgeError::Pending) => {
-            match block_linux_syscall(request, ctx, key, deadline, timeout) {
-                Ok(_nr) => broker_sync(
-                    request,
-                    ctx,
-                    _socket_id,
-                    inflight_request_id,
-                    network_request,
-                    payload,
-                    session_generation,
-                    on_timeout,
-                ),
-                Err(errno) => Err(Err(errno)),
+        let request_id = if let Some(id) = *inflight_request_id {
+            id
+        } else {
+            let wire = network_request.encode();
+            let id = net_bridge_mut()
+                .submit(ctx.pid, ctx.pid, generation, &wire, payload)
+                .map_err(|e| Err(bridge_err(e)))?;
+            *inflight_request_id = Some(id);
+            id
+        };
+        let key = linux_socket_request_wait_key(request_id);
+
+        let polled = without_interrupts(|| {
+            let landing = unsafe { &mut *BROKER_RESPONSE_PAYLOAD.get() };
+            net_bridge_mut()
+                .poll(ctx.pid, ctx.pid, generation, request_id, landing)
+                .map(|response| {
+                    let copied = match response {
+                        NetworkResponse::Receive { payload_len } => {
+                            let copied = (payload_len as usize)
+                                .min(NETWORK_MAX_PAYLOAD_BYTES)
+                                .min(receive_into.len());
+                            receive_into[..copied].copy_from_slice(&landing[..copied]);
+                            copied
+                        }
+                        _ => 0,
+                    };
+                    BrokerOutcome {
+                        response,
+                        payload_len: copied,
+                    }
+                })
+        });
+        match polled {
+            Ok(outcome) => {
+                *inflight_request_id = None;
+                return Ok(outcome);
             }
-        }
-        Err(e) => {
-            *inflight_request_id = None;
-            Err(Err(bridge_err(e)))
+            Err(NetBridgeError::Pending) => {
+                let deadline = match on_timeout {
+                    Some(_) => Some(Deadline::MonotonicNs(
+                        monotonic_deadline_from_millis(
+                            monotonic_ns(),
+                            super::LINUX_TCP_CONNECT_TIMEOUT_MS,
+                        )
+                        .map_err(Err)?,
+                    )),
+                    None => None,
+                };
+                if let Err(errno) = block_linux_syscall(request, ctx, key, deadline, timeout) {
+                    return Err(Err(errno));
+                }
+            }
+            Err(e) => {
+                *inflight_request_id = None;
+                return Err(Err(bridge_err(e)));
+            }
         }
     }
 }

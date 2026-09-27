@@ -208,6 +208,7 @@ fn udp_send_payload(
                 dest,
             },
             &[],
+            &mut [],
             Some(session_gen),
             None,
         ) {
@@ -232,6 +233,7 @@ fn udp_send_payload(
             payload_len: payload.len() as u32,
         },
         payload,
+        &mut [],
         Some(session_gen),
         None,
     ) {

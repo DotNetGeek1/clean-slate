@@ -279,6 +279,15 @@ pub(crate) fn prepare_linux_image(
     allocator: &mut PageAllocator,
     spec: &LinuxExecSpec<'_>,
 ) -> Result<PreparedLinuxImage, LinuxImageError> {
+    crate::diagnostics::stack_high_water::measure_stack_peak("prepare_linux_image", || {
+        prepare_linux_image_unmeasured(allocator, spec)
+    })
+}
+
+fn prepare_linux_image_unmeasured(
+    allocator: &mut PageAllocator,
+    spec: &LinuxExecSpec<'_>,
+) -> Result<PreparedLinuxImage, LinuxImageError> {
     assert_kernel_task_stack_margin("prepare_linux_image exhausted task stack headroom");
     validate_spec_strings(spec)?;
     with_kernel_initial_stack_scratch(|initial_stack| {
@@ -369,7 +378,7 @@ pub(crate) fn pick_scheduler_slot_for_relaunch() -> Result<(usize, u64), &'stati
             if scheduler.threads[slot].state != ThreadState::Empty {
                 continue;
             }
-            let base = stack.0.as_ptr() as u64;
+            let base = stack.base();
             let top = task_stack_top(stack);
             if rsp > base && rsp <= top {
                 continue;
@@ -497,8 +506,20 @@ fn destroy_old_exec_address_space(
     feature = "m2-timer-self-test"
 )))]
 #[cfg_attr(not(feature = "m9-linux-exec-self-test"), allow(dead_code))]
-#[inline(never)]
 pub(crate) fn commit_exec(
+    frame: &mut SyscallContext,
+    allocator: &mut PageAllocator,
+    pid: u64,
+    generation: InstanceGeneration,
+    prepared: PreparedLinuxImage,
+) -> Result<(), LinuxImageError> {
+    crate::diagnostics::stack_high_water::measure_stack_peak("commit_exec", || {
+        commit_exec_unmeasured(frame, allocator, pid, generation, prepared)
+    })
+}
+
+#[inline(never)]
+fn commit_exec_unmeasured(
     frame: &mut SyscallContext,
     allocator: &mut PageAllocator,
     pid: u64,

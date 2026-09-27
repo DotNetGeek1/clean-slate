@@ -225,6 +225,7 @@ pub(crate) fn write_stream(
             payload_len: bytes.len() as u32,
         },
         bytes,
+        &mut [],
         Some(clean_slate_network::session::SessionGeneration::new(
             socket.session_generation,
         )),

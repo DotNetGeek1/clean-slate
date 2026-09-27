@@ -257,6 +257,18 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 10] = [
     "[M9.E] cycles=8 waiters=0",
     "[M9.E] PASS",
 ];
+const M9_STACK_GUARD_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The overflow line is the production fail-closed diagnostic; the probe only
+/// passes when it names the probe's slot and was reported from the #DF IST.
+const M9_STACK_GUARD_ACCEPTANCE_MARKERS: [&str; 7] = [
+    "[MM  ] kernel stack guards armed stacks=",
+    "[TIME] timer initialized",
+    "[KSTK] probe start slot=1 ",
+    "[DF  ] double fault",
+    "[FAIL] kernel stack overflow slot=1 kind=task ",
+    "[KSTK] caught via=double-fault on_ist=true expected_slot=true",
+    "[KSTK] PASS",
+];
 const M9_USERSPACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(300);
 const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[M9  ] creating",
@@ -754,7 +766,7 @@ type M9MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
 /// personality tests, every M9 production-path QEMU constituent, then the #107
 /// convergence boot (`test-m9-userspace`) with its host serial validator. Each step has
 /// a finite timeout; `[M9  ] PASS` is printed only after all of them succeed.
-const M9_MILESTONE_STEPS: [M9MilestoneStep; 17] = [
+const M9_MILESTONE_STEPS: [M9MilestoneStep; 18] = [
     ("verify-m9-fixture", run_m9_verify_fixture_step),
     ("clean-slate-linux-abi (host)", run_m8_linux_abi_host_tests),
     ("clean-slate-elf (host)", run_m8_elf_host_tests),
@@ -768,6 +780,7 @@ const M9_MILESTONE_STEPS: [M9MilestoneStep; 17] = [
     ("test-m9-linux-exec", run_m9_linux_exec_acceptance),
     ("test-m9-fd-core", run_m9_fd_core_acceptance),
     ("test-m9-block-wake", run_m9_block_wake_acceptance),
+    ("test-m9-stack-guard", run_m9_stack_guard_acceptance),
     ("test-m9-linux-runtime", run_m9_linux_runtime_acceptance),
     ("test-m9-linux-proc", run_m9_linux_proc_acceptance),
     ("test-m9-rootfs", run_m9_rootfs_acceptance),
@@ -812,6 +825,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM8LinuxDispatch => run_m8_linux_dispatch_acceptance(),
         ParsedCommand::TestM9SyscallFailClosed => run_m9_syscall_fail_closed_acceptance(),
         ParsedCommand::TestM9BlockWake => run_m9_block_wake_acceptance(),
+        ParsedCommand::TestM9StackGuard => run_m9_stack_guard_acceptance(),
         ParsedCommand::TestM9FdCore => run_m9_fd_core_acceptance(),
         ParsedCommand::TestM9LinuxTrace => run_m9_linux_trace_acceptance(),
         ParsedCommand::TestM9LinuxSocket => run_m9_linux_socket_acceptance(),
@@ -1454,6 +1468,18 @@ fn run_m9_block_wake_acceptance() -> Result<(), XtaskError> {
         Some((
             MarkerSet::Ordered(&M9_BLOCK_WAKE_ACCEPTANCE_MARKERS),
             M9_BLOCK_WAKE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+fn run_m9_stack_guard_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m9-stack-guard-self-test"],
+        Some((
+            MarkerSet::Ordered(&M9_STACK_GUARD_ACCEPTANCE_MARKERS),
+            M9_STACK_GUARD_ACCEPTANCE_TIMEOUT,
         )),
     )
 }
@@ -3603,6 +3629,7 @@ fn print_help() {
     println!("  test-m8-linux-dispatch Build the M8.3 Linux personality dispatch kernel, run QEMU, and validate [M8.3] PASS");
     println!("  test-m9-syscall-fail-closed Build the M9 #143 fail-closed syscall kernel, run QEMU, and validate [M9.C] PASS");
     println!("  test-m9-block-wake Build the M9 #145 block/wake scheduler kernel, run QEMU, and validate [M9.E] PASS");
+    println!("  test-m9-stack-guard Build the #162 kernel stack guard kernel, overflow a task stack, and validate the #PF -> #DF overflow diagnostic (aliases: m9-stack-guard, m9.162)");
     println!("  test-m9-fd-core Build the M9 #147 fd-core kernel, run QEMU, and validate pool equality + [M9.G] PASS (aliases: m9-fd-core, m9.147)");
     println!("  test-m9-linux-trace M9 #106 bounded Linux syscall trace QEMU acceptance (aliases: m9-linux-trace, m9.106)");
     println!("  test-m9-linux-socket M9 #105 socket syscalls + M7 data plane + probe ELF (aliases: m9-linux-socket, m9.105)");
@@ -3691,6 +3718,7 @@ enum ParsedCommand {
     TestM8LinuxDispatch,
     TestM9SyscallFailClosed,
     TestM9BlockWake,
+    TestM9StackGuard,
     TestM9FdCore,
     TestM9LinuxTrace,
     TestM8LinuxHello,
@@ -3795,6 +3823,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-m9-block-wake" || cmd == "m9-block-wake" || cmd == "m9.145" => {
             ParsedCommand::TestM9BlockWake
+        }
+        Some(cmd) if cmd == "test-m9-stack-guard" || cmd == "m9-stack-guard" || cmd == "m9.162" => {
+            ParsedCommand::TestM9StackGuard
         }
         Some(cmd) if cmd == "test-m9-fd-core" || cmd == "m9-fd-core" || cmd == "m9.147" => {
             ParsedCommand::TestM9FdCore
@@ -4712,6 +4743,7 @@ mod tests {
             "test-m9-linux-exec",
             "test-m9-fd-core",
             "test-m9-block-wake",
+            "test-m9-stack-guard",
             "test-m9-linux-runtime",
             "test-m9-linux-proc",
             "test-m9-rootfs",

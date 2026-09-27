@@ -32,6 +32,7 @@ use crate::arch::x86_64::asm::clean_slate_restore_context;
     feature = "m2-timer-self-test"
 )))]
 use crate::arch::x86_64::gdt::userspace_gdt_state;
+use crate::arch::x86_64::guarded_stack::GuardedStack;
 #[cfg(not(any(
     feature = "m1-self-test",
     feature = "m2-double-fault-self-test",
@@ -55,9 +56,6 @@ const fn align_down(value: u64, align: u64) -> u64 {
 /// Debug builds of the Linux exec/launch path peak near 63 KiB of kernel stack
 /// before interrupt nesting; keep `TASK_STACK_MIN_MARGIN_BYTES` above that.
 pub(crate) const TASK_STACK_SIZE: usize = 128 * 1024;
-/// Lowest bytes of each task stack hold a pattern checked on timer and syscall
-/// entry; there are no guard pages yet (#162), so this is the overflow tripwire.
-pub(crate) const TASK_STACK_GUARD_BYTES: usize = 1024;
 
 #[cfg(not(any(
     feature = "m1-self-test",
@@ -66,8 +64,9 @@ pub(crate) const TASK_STACK_GUARD_BYTES: usize = 1024;
 )))]
 pub(crate) const USER_TEST_RFLAGS: u64 = 0x202;
 
-#[repr(align(16))]
-pub(crate) struct TaskStack(pub(crate) [u8; TASK_STACK_SIZE]);
+/// One scheduler slot's kernel stack. The same bytes serve as the slot's TSS
+/// RSP0 and SYSCALL entry stack, so its guard page covers all three uses.
+pub(crate) type TaskStack = GuardedStack<TASK_STACK_SIZE>;
 
 // Consumed by arch/x86_64/asm.rs (bootstrap trampolines read the next task's RSP).
 #[unsafe(no_mangle)]
@@ -114,7 +113,7 @@ pub(crate) unsafe fn next_task() -> (u64, u64) {
 }
 
 pub(crate) fn task_stack_top(stack: &TaskStack) -> u64 {
-    align_down(((stack.0.as_ptr() as usize) + stack.0.len()) as u64, 16)
+    align_down(stack.top(), 16)
 }
 
 /// True when `rsp` points into one of the static per-slot task stacks (not user memory).
@@ -137,7 +136,7 @@ pub(crate) fn rsp_on_static_task_stack(rsp: u64) -> bool {
 pub(crate) fn task_stack_margin_bytes(rsp: u64) -> Option<u64> {
     let stacks = unsafe { crate::sched::task_stacks_mut() };
     stacks.iter().find_map(|stack| {
-        let base = stack.0.as_ptr() as u64;
+        let base = stack.base();
         let top = task_stack_top(stack);
         if rsp > base && rsp <= top {
             Some(rsp - base)
@@ -161,6 +160,26 @@ pub(crate) unsafe fn restore_task_context(stack_pointer: u64) -> ! {
             "jmp {restore}",
             stack_pointer = in(reg) stack_pointer,
             restore = sym clean_slate_restore_context,
+            options(noreturn)
+        );
+    }
+}
+
+/// Abandons the current stack and calls `entry` on a fresh one.
+///
+/// # Safety
+/// `stack_top` must be the 16-byte aligned top of a mapped, otherwise unused
+/// stack; nothing on the abandoned stack may be referenced afterwards.
+pub(crate) unsafe fn call_on_fresh_stack(stack_top: u64, entry: extern "C" fn() -> !) -> ! {
+    unsafe {
+        asm!(
+            "mov rsp, {stack_top}",
+            // Win64 (UEFI target) shadow space; keeps RSP 16-byte aligned at the call.
+            "sub rsp, 32",
+            "call {entry}",
+            "ud2",
+            stack_top = in(reg) stack_top,
+            entry = in(reg) entry,
             options(noreturn)
         );
     }

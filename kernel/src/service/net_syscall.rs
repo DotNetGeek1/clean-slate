@@ -400,10 +400,14 @@ fn handle_service_next(frame: &mut SyscallContext) {
             unsafe {
                 ptr::copy_nonoverlapping(meta.as_ptr(), frame.r10 as *mut u8, meta.len());
             }
-            if let Some(payload) = net_bridge_mut().service_take_payload(request_id) {
+            if let Some(payload) = net_bridge_mut().service_payload(request_id) {
                 unsafe {
                     let dest = (frame.r10 as *mut u8).add(NETWORK_SERVICE_NEXT_METADATA_BYTES);
-                    ptr::copy_nonoverlapping(payload.as_ptr(), dest, payload_len_usize);
+                    ptr::copy_nonoverlapping(
+                        payload.as_ptr(),
+                        dest,
+                        payload.len().min(payload_len_usize),
+                    );
                 }
             }
             frame.rax = request_id;
