@@ -3,9 +3,11 @@
 //! Each cycle runs the exact #100 command matrix (generated from
 //! `fixtures/busybox/frozen/commands.toml` by `build.rs`) as
 //! `/bin/sh -c "export PATH=/bin; <shell>"`, then capability-denial and timeout probes.
-//! Every cycle ends with a resource snapshot that must equal the baseline. The host
-//! validator (`cargo xtask test-m9-userspace`) re-checks the logged stdout bytes against
-//! `commands.toml` together with the sleep, denial and resource evidence.
+//! Every command's stdout is checked against `commands.toml` and, from cycle 2 on,
+//! byte-for-byte against the bytes cycle 1 produced; every cycle's bytes are also logged
+//! as hex. Every cycle ends with a resource snapshot that must equal the baseline. The
+//! host validator (`cargo xtask test-m9-userspace`) re-checks the logged stdout bytes of
+//! every cycle together with the sleep, denial and resource evidence.
 
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::gdt::set_privilege_stack;
@@ -190,8 +192,14 @@ const M9_STDOUT_CAP: usize = 4096;
 static M9_STDOUT_BUF: GlobalCell<[u8; M9_STDOUT_CAP]> = GlobalCell::new([0; M9_STDOUT_CAP]);
 static M9_STDOUT_OPEN: GlobalCell<Option<OpenDescriptionId>> = GlobalCell::new(None);
 static BUSYBOX_EXEC_BYTES: GlobalCell<Option<&'static [u8]>> = GlobalCell::new(None);
-/// `(stdout_len, fnv)` per matrix command from cycle 1; later cycles must repeat them.
-static FIRST_CYCLE_STDOUT: GlobalCell<[(usize, u32); MATRIX_LEN]> =
+/// Cycle-1 stdout of every matrix command, back to back; later cycles must reproduce
+/// each command's bytes exactly.
+const FIRST_CYCLE_STDOUT_CAP: usize = 4096;
+static FIRST_CYCLE_STDOUT: GlobalCell<[u8; FIRST_CYCLE_STDOUT_CAP]> =
+    GlobalCell::new([0; FIRST_CYCLE_STDOUT_CAP]);
+static FIRST_CYCLE_STDOUT_USED: AtomicUsize = AtomicUsize::new(0);
+/// `(start, len)` of each command's cycle-1 stdout inside [`FIRST_CYCLE_STDOUT`].
+static FIRST_CYCLE_SPANS: GlobalCell<[(usize, usize); MATRIX_LEN]> =
     GlobalCell::new([(0, 0); MATRIX_LEN]);
 static BASELINE: GlobalCell<Option<Resources>> = GlobalCell::new(None);
 static FIRST_CYCLE_RESOURCES: GlobalCell<Option<Resources>> = GlobalCell::new(None);
@@ -582,15 +590,37 @@ fn check_cycle_resources(cycle: u32) {
     }
 }
 
-pub(crate) const fn fnv1a32(bytes: &[u8]) -> u32 {
-    let mut hash = 0x811c_9dc5u32;
-    let mut index = 0usize;
-    while index < bytes.len() {
-        hash ^= bytes[index] as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
-        index += 1;
+/// Offset of the first byte where `actual` departs from `expected` (the shorter length
+/// when one is a prefix of the other); `None` when they are identical.
+fn first_difference(expected: &[u8], actual: &[u8]) -> Option<usize> {
+    expected
+        .iter()
+        .zip(actual)
+        .position(|(e, a)| e != a)
+        .or((expected.len() != actual.len()).then(|| expected.len().min(actual.len())))
+}
+
+/// Keeps `out` as `index`'s cycle-1 stdout.
+fn record_first_cycle_stdout(index: usize, out: &[u8]) {
+    let start = FIRST_CYCLE_STDOUT_USED.load(Ordering::Relaxed);
+    let Some(end) = start
+        .checked_add(out.len())
+        .filter(|end| *end <= FIRST_CYCLE_STDOUT_CAP)
+    else {
+        fatal_kernel_error("m9 userspace cycle-1 stdout exceeded its bound");
+    };
+    unsafe {
+        (&mut *FIRST_CYCLE_STDOUT.get())[start..end].copy_from_slice(out);
+        (*FIRST_CYCLE_SPANS.get())[index] = (start, out.len());
     }
-    hash
+    FIRST_CYCLE_STDOUT_USED.store(end, Ordering::Relaxed);
+}
+
+fn first_cycle_stdout(index: usize) -> &'static [u8] {
+    unsafe {
+        let (start, len) = (*FIRST_CYCLE_SPANS.get())[index];
+        &(&*FIRST_CYCLE_STDOUT.get())[start..start + len]
+    }
 }
 
 fn stdout_slice() -> &'static [u8] {
@@ -622,7 +652,7 @@ pub(crate) fn observe_console_description_write(open: OpenDescriptionId, bytes: 
     M9_STDOUT_LEN.store(end, Ordering::Relaxed);
 }
 
-fn log_stdout_hex(name: &str, out: &[u8]) {
+fn log_stdout_hex(name: &str, cycle: u32, out: &[u8]) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for (chunk_index, chunk) in out.chunks(STDOUT_HEX_CHUNK).enumerate() {
         let mut text = [0u8; STDOUT_HEX_CHUNK * 2];
@@ -632,7 +662,7 @@ fn log_stdout_hex(name: &str, out: &[u8]) {
         }
         let hex = core::str::from_utf8(&text[..chunk.len() * 2]).unwrap_or("?");
         kernel_log_fmt(format_args!(
-            "[M9  ] stdout cmd={name} off={} hex={hex}\n",
+            "[M9  ] stdout cmd={name} cycle={cycle} off={} hex={hex}\n",
             chunk_index * STDOUT_HEX_CHUNK
         ));
     }
@@ -657,12 +687,12 @@ fn finish_matrix_command(index: usize, status: u64) {
     let cmd = &M9_COMMAND_MATRIX[index];
     let cycle = cycle();
     let out = stdout_slice();
-    let fnv = fnv1a32(out);
     kernel_log_fmt(format_args!(
-        "[M9  ] cmd={} cycle={cycle} status={status} stdout_len={} fnv=0x{fnv:08x}\n",
+        "[M9  ] cmd={} cycle={cycle} status={status} stdout_len={}\n",
         cmd.name,
         out.len()
     ));
+    log_stdout_hex(cmd.name, cycle, out);
     log_sleep_stats(cmd.name);
     if status != u64::from(cmd.exit_status) {
         fatal_kernel_error("m9 userspace command exit status");
@@ -670,15 +700,24 @@ fn finish_matrix_command(index: usize, status: u64) {
     if proc_table_invariant_violations() > 0 {
         fatal_kernel_error("m9 userspace proc-table invariant");
     }
-    let first = unsafe { &mut (*FIRST_CYCLE_STDOUT.get())[index] };
+    if !stdout_matches(cmd, out) {
+        fatal_kernel_error("m9 userspace command stdout differs from commands.toml");
+    }
     if cycle == 1 {
-        log_stdout_hex(cmd.name, out);
-        if !stdout_matches(cmd, out) {
-            fatal_kernel_error("m9 userspace command stdout differs from commands.toml");
+        record_first_cycle_stdout(index, out);
+    } else {
+        let first = first_cycle_stdout(index);
+        if let Some(offset) = first_difference(first, out) {
+            kernel_log_fmt(format_args!(
+                "[M9  ] stdout mismatch cmd={} cycle={cycle} offset={offset} cycle1_len={} len={} cycle1_byte={:?} byte={:?}\n",
+                cmd.name,
+                first.len(),
+                out.len(),
+                first.get(offset),
+                out.get(offset)
+            ));
+            fatal_kernel_error("m9 userspace command stdout changed across reuse cycles");
         }
-        *first = (out.len(), fnv);
-    } else if *first != (out.len(), fnv) {
-        fatal_kernel_error("m9 userspace command stdout changed across reuse cycles");
     }
     if cycle != 1 {
         return;
