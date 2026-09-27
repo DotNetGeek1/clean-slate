@@ -131,7 +131,7 @@ pub(crate) fn refresh_receive(id: LinuxSocketId) -> Result<bool, LinuxErrno> {
 /// `service_complete` hook: delivers the prefetch `request_id` belongs to, if any.
 /// Returns the owning socket so the caller can wake its readers.
 pub(crate) fn deliver_completed_prefetch(request_id: u64) -> Option<(LinuxSocketId, u64)> {
-    let id = super::udp_socket_with_pending_receive(request_id)?;
+    let id = super::socket_with_pending_receive(super::SocketKindLinux::Udp, request_id)?;
     with_socket_mut(id, |socket| {
         complete_prefetch(socket);
         socket.owner_pid

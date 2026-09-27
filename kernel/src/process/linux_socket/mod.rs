@@ -77,7 +77,8 @@ pub(crate) struct LinuxSocket {
     tcp_rx_len: u16,
     tcp_eof: bool,
     inflight_request_id: Option<u64>,
-    /// Outstanding prefetch `Receive` (see `udp`): lets `poll(2)` observe datagrams.
+    /// Outstanding prefetch `Receive` (see `udp` and `tcp`): lets `poll(2)` observe
+    /// datagrams and stream bytes without a reader blocked in the service.
     pending_rx_req: Option<u64>,
     /// Receive failure reported by the service, returned once to the next reader.
     rx_error: Option<LinuxErrno>,
@@ -149,14 +150,17 @@ pub(crate) fn pool_live_count() -> usize {
     unsafe { (*SOCKET_POOL.get()).live_count() }
 }
 
-pub(super) fn udp_socket_with_pending_receive(request_id: u64) -> Option<LinuxSocketId> {
+pub(super) fn socket_with_pending_receive(
+    kind: SocketKindLinux,
+    request_id: u64,
+) -> Option<LinuxSocketId> {
     let pool = unsafe { &*SOCKET_POOL.get() };
     pool.slots
         .iter()
         .enumerate()
         .find(|(_, slot)| {
             slot.state != SocketState::Closed
-                && slot.kind == SocketKindLinux::Udp
+                && slot.kind == kind
                 && slot.pending_rx_req == Some(request_id)
         })
         .map(|(index, slot)| LinuxSocketId {
@@ -165,11 +169,13 @@ pub(super) fn udp_socket_with_pending_receive(request_id: u64) -> Option<LinuxSo
         })
 }
 
-/// `service_complete` hook: wakes the broker waiter for `request_id`, or delivers a UDP
-/// prefetch into its socket queue and wakes that socket's readers and `poll(2)` waiters.
+/// `service_complete` hook: wakes the broker waiter for `request_id`, or delivers a UDP or
+/// TCP prefetch into its socket and wakes that socket's readers and `poll(2)` waiters.
 pub(crate) fn deliver_prefetch_receive(request_id: u64) -> usize {
     let mut woken = crate::service::net_request_wake::notify_net_request_complete(request_id);
-    if let Some((id, owner_pid)) = udp::deliver_completed_prefetch(request_id) {
+    let delivered = udp::deliver_completed_prefetch(request_id)
+        .or_else(|| tcp::deliver_completed_prefetch(request_id));
+    if let Some((id, owner_pid)) = delivered {
         woken = woken
             .saturating_add(wake_all(linux_socket_wait_key(id)))
             .saturating_add(crate::syscall::linux::poll::wake_poll_waiters_for_pid(
@@ -561,10 +567,11 @@ pub(crate) fn refresh_readiness_for_fd(
     }
     let socket_ref = crate::process::linux_fd::socket_ref_for_open(open)?;
     let id = socket_ref_to_id(socket_ref);
-    if with_socket_mut(id, |socket| socket.kind)? != SocketKindLinux::Udp {
-        return Ok(());
-    }
-    if udp::refresh_receive(id)? {
+    let changed = match with_socket_mut(id, |socket| socket.kind)? {
+        SocketKindLinux::Udp => udp::refresh_receive(id)?,
+        SocketKindLinux::Tcp => tcp::refresh_receive(id)?,
+    };
+    if changed {
         crate::syscall::linux::poll::notify_readiness_changed(open);
     }
     Ok(())
@@ -654,7 +661,9 @@ pub(crate) fn readiness_for(id: LinuxSocketId) -> Readiness {
         .filter(|s| s.state != SocketState::Closed && s.generation == id.generation);
     match socket {
         Some(socket) => {
-            let readable = socket.rx_count > 0 || socket.tcp_rx_len > 0 || socket.tcp_eof;
+            let stream_error = socket.kind == SocketKindLinux::Tcp && socket.rx_error.is_some();
+            let readable =
+                socket.rx_count > 0 || socket.tcp_rx_len > 0 || socket.tcp_eof || stream_error;
             let writable =
                 socket.state == SocketState::Connected || socket.kind == SocketKindLinux::Udp;
             Readiness {

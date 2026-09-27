@@ -59,6 +59,17 @@ fn denial_errno(reason: DenialReason) -> LinuxErrno {
     }
 }
 
+/// Capability check for a prefetch `Receive` submitted outside `broker_sync`.
+pub(super) fn authorize_session_receive(pid: u64) -> Result<(), LinuxErrno> {
+    let holder = HolderId(pid);
+    let handle = network_client_handle(holder).ok_or(clean_slate_linux_abi::EACCES)?;
+    let session_generation =
+        live_network_service_generation().map(|g| SessionGeneration::new(u64::from(g.0)));
+    authorize_network_op(holder, handle, NetworkOp::Receive, session_generation)
+        .map(|_| ())
+        .map_err(denial_errno)
+}
+
 pub(crate) struct BrokerOutcome {
     pub response: NetworkResponse,
     pub payload_len: usize,
