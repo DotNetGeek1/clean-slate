@@ -1,5 +1,3 @@
-use core::hint::spin_loop;
-
 use clean_slate_network::addr::{EtherType, MacAddr};
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{NetworkDeviceError, NetworkLink};
@@ -7,11 +5,14 @@ use clean_slate_network::fixture::{GUEST_MAC, PEER_IPV4, PEER_MAC};
 use clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES;
 
 use crate::device::virtio::net::{NetInterruptSinks, VirtioNetDevice};
+use crate::selftest::boot_wait;
 use crate::{serial_write_fmt, serial_write_line};
 
-const POLL_SPIN_LIMIT: usize = 50_000_000;
+/// Real-time budget for the fixture peer's ARP reply.
+const ARP_REPLY_BUDGET_MS: u64 = 2_000;
 
 pub(crate) fn run_m7_net_device_self_test() -> Result<(), &'static str> {
+    boot_wait::init_clock()?;
     let mut device = VirtioNetDevice::discover(NetInterruptSinks::NONE)?;
     let link = device.link();
     let (rx_qsize, tx_qsize) = device.queue_sizes();
@@ -97,18 +98,18 @@ fn build_arp_request() -> Result<FrameBuf, &'static str> {
     Ok(frame)
 }
 fn wait_for_arp_reply(device: &mut VirtioNetDevice) -> Result<FrameBuf, &'static str> {
-    for _ in 0..POLL_SPIN_LIMIT {
-        match device.receive() {
-            Ok(Some(frame)) => {
+    boot_wait::wait_until(
+        ARP_REPLY_BUDGET_MS,
+        "timed out waiting for ARP reply",
+        |_| {
+            while let Some(frame) = device.receive().map_err(map_device_error)? {
                 if is_arp_reply_from_peer(frame.as_slice()) {
-                    return Ok(frame);
+                    return Ok(Some(frame));
                 }
             }
-            Ok(None) => spin_loop(),
-            Err(error) => return Err(map_device_error(error)),
-        }
-    }
-    Err("timed out waiting for ARP reply")
+            Ok(None)
+        },
+    )
 }
 
 fn is_arp_reply_from_peer(frame: &[u8]) -> bool {

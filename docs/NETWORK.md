@@ -367,8 +367,6 @@ Each queued datagram stores `SocketAddrV4` + length + 1472-byte fixed buffer (14
 
 - `receive` is non-blocking; returns `Ok(None)` if the queue is empty.
 - On success, returns `(from, full_payload_len)` and copies `min(full_payload_len, out.len())` bytes (truncation is visible when `full_payload_len > out.len()`).
-- `receive_with_deadline(now, deadline_tick, …)` polls until the deadline (inclusive) or returns `NetworkError::Timeout`.
-
 ### DNS lane (#85) API
 
 Use the same [`SessionId`](../network/src/session.rs) / [`SessionGeneration`](../network/src/session.rs) as the network service:
@@ -377,7 +375,7 @@ Use the same [`SessionId`](../network/src/session.rs) / [`SessionGeneration`](..
 2. `UdpTable::connect(id, owner, dns_server)` when a default peer is desired.
 3. `UdpTransport::send(now, id, owner, dest, payload)` — `dest` optional if connected.
 4. `UdpTransport::poll(now)` on every service tick (and after `Unreachable` on send).
-5. `UdpTransport::receive(id, owner, buf)` or `receive_with_deadline` for replies.
+5. `UdpTransport::receive(id, owner, buf)` for replies, after each `poll`.
 
 Non-UDP `Inbound` from `L3Stack::poll` is ignored by UDP `poll` today; #88 will route one RX frame to UDP and TCP dispatchers.
 
@@ -479,7 +477,7 @@ Enable in consumers: `clean-slate-network` feature `tls` (kernel: `m7-tls-self-t
 - Server authentication: single **pinned DER trust anchor** (`TlsConfig::trust_anchor_der`), hostname/SAN vs `TlsConfig::server_name`.
 - **Fixed validation time** [`VALIDATION_TIME_UNIX`](../network/src/tls/verify.rs) = 2030-01-01 UTC (guest has no wall clock).
 - Record buffers: [`TLS_RECORD_BUFFER_BYTES`](../network/src/tls/mod.rs) = 16_640 bytes each (read + write), caller-provided.
-- I/O timeouts: the network service's TLS job uses a `TlsTransactionBudget` (handshake 8192 ms, per-phase I/O 2000 ms) measured on the service clock. The in-kernel self-test lanes still use [`TLS_HANDSHAKE_TIMEOUT_TICKS`](../network/src/tls/io.rs) / [`TLS_IO_TIMEOUT_TICKS`](../network/src/tls/io.rs) in the blocking `TcpRecordIo`.
+- I/O timeouts: every client (the network service's TLS job and the in-kernel `m7-tls` lanes) runs `tls_transaction` with a `TlsTransactionBudget` of handshake 8192 ms and per-phase I/O 2000 ms, measured on the calibrated TSC clock.
 
 ### Hermetic trust model
 
@@ -501,10 +499,10 @@ Enable in consumers: `clean-slate-network` feature `tls` (kernel: `m7-tls-self-t
 ### Public API (network service)
 
 - `TlsConfig { server_name, trust_anchor_der, validation_time_unix }`
-- `TlsSession::connect(now, transport, owner, remote, config, rng, read_buf, write_buf)`
-- `write` / `read` / `close` / `abort`, `peer_name()`
 - `tls_transaction(transport, clock, budget, owner, remote, config, rng, read_buf, write_buf, request, response)`: one connect, handshake, request, response and close as a future over the async `embedded-tls` API. The network service sets `TlsTransactionClock::set_now` and polls it with a no-op waker once per loop iteration; nothing busy-polls and no ticks are invented. A pending poll leaves the service free for other requests. `phase_deadline()` feeds the idle timeout, and the service fails the job with `Timeout` once it passes. Dropping the future aborts the TCP connection. Each request uses its own connection; the shared `TcpTransport` is not reset between requests.
-- Host tests: `TlsSession::connect_with_peer_tick(..., Some(&mut peer_driver))` to poll a fake TCP peer.
+- It is the only TLS client; there is no blocking session API.
+- In-kernel lanes (`m7-tls-self-test`, `m7-dns-self-test`, `m7-net-device-self-test`) run in boot context before any scheduler thread exists. They poll on the calibrated TSC clock and, while nothing is ready, halt with interrupts enabled until the next interrupt (`selftest::boot_wait`): the periodic APIC timer bounds each halt to one tick and a virtio-net completion ends it early. The timer ISR only counts and acknowledges ticks that arrive during such a halt.
+- Host tests drive `tls_transaction` against the rustls fixture peer over `FakeLink` on a simulated clock (one tick per loop iteration), with the same phase-deadline handling as the service.
 
 ### Fixture peer (xtask)
 
