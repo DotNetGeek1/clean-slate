@@ -165,16 +165,17 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         Some(TcpEchoService::new(&mut sockets, tcp_echo_handle))
     };
 
-    let tls_listen = tcp::Socket::new(
-        tcp::SocketBuffer::new(vec![0u8; 8192]),
-        tcp::SocketBuffer::new(vec![0u8; 8192]),
-    );
-    let tls_handle = sockets.add(tls_listen);
+    let tls_listeners = core::array::from_fn(|_| {
+        sockets.add(tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0u8; 8192]),
+            tcp::SocketBuffer::new(vec![0u8; 8192]),
+        ))
+    });
     let tls_cert = match options.tls_cert {
         WhichCert::Correct => FixtureTlsCert::Correct,
         WhichCert::WrongName => FixtureTlsCert::WrongName,
     };
-    let mut tls_service = TlsService::new(&mut sockets, tls_handle, tls_cert);
+    let mut tls_service = TlsService::new(&mut sockets, tls_listeners, tls_cert);
 
     let mut m9_http_service = None;
     let mut m9_banner_service = None;

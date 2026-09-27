@@ -86,8 +86,13 @@ impl TcpEchoService {
     }
 }
 
+/// Listening sockets on `TLS_PORT`. A closed connection's socket sits in LAST-ACK until the
+/// guest acks our FIN and cannot listen meanwhile; a guest that connects again straight
+/// away must still find a listener, or smoltcp answers its SYN with RST.
+pub const TLS_LISTEN_BACKLOG: usize = 4;
+
 pub struct TlsService {
-    listen: SocketHandle,
+    listeners: [SocketHandle; TLS_LISTEN_BACKLOG],
     active: Option<SocketHandle>,
     server_config: Arc<ServerConfig>,
     connection: Option<ServerConnection>,
@@ -98,14 +103,16 @@ pub struct TlsService {
 impl TlsService {
     pub fn new(
         sockets: &mut smoltcp::iface::SocketSet,
-        listen: SocketHandle,
+        listeners: [SocketHandle; TLS_LISTEN_BACKLOG],
         cert: FixtureTlsCert,
     ) -> Self {
-        let socket = sockets.get_mut::<tcp::Socket>(listen);
-        socket.listen(TLS_PORT).expect("tls listen");
+        for handle in listeners {
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            socket.listen(TLS_PORT).expect("tls listen");
+        }
         let server_config = Arc::new(load_server_config(cert));
         Self {
-            listen,
+            listeners,
             active: None,
             server_config,
             connection: None,
@@ -115,10 +122,21 @@ impl TlsService {
     }
 
     pub fn poll(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+        for handle in self.listeners {
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            if socket.state() == tcp::State::Closed {
+                let _ = socket.listen(TLS_PORT);
+            }
+        }
         if self.active.is_none() {
-            let socket = sockets.get_mut::<tcp::Socket>(self.listen);
-            if socket.is_active() {
-                self.active = Some(self.listen);
+            let accepted = self.listeners.into_iter().find(|&handle| {
+                matches!(
+                    sockets.get::<tcp::Socket>(handle).state(),
+                    tcp::State::SynReceived | tcp::State::Established
+                )
+            });
+            if let Some(handle) = accepted {
+                self.active = Some(handle);
                 self.connection = Some(
                     ServerConnection::new(self.server_config.clone())
                         .expect("tls server connection"),
@@ -131,7 +149,7 @@ impl TlsService {
         let active = self.active.expect("tls active");
         let socket = sockets.get_mut::<tcp::Socket>(active);
         if !socket.is_active() {
-            self.reset_listen(sockets);
+            self.release_active();
             return;
         }
         let Some(conn) = self.connection.as_mut() else {
@@ -181,19 +199,16 @@ impl TlsService {
         }
         if socket.state() == tcp::State::CloseWait {
             socket.close();
-            self.reset_listen(sockets);
+            self.release_active();
         }
     }
 
-    fn reset_listen(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+    /// Forgets the served connection; its socket listens again once it reaches CLOSED.
+    fn release_active(&mut self) {
         self.active = None;
         self.connection = None;
         self.recv_acc.clear();
         self.sni_logged = false;
-        let socket = sockets.get_mut::<tcp::Socket>(self.listen);
-        if !socket.is_listening() {
-            let _ = socket.listen(TLS_PORT);
-        }
     }
 }
 
