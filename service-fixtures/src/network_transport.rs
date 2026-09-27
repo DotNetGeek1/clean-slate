@@ -106,8 +106,17 @@ pub struct NetworkServiceOccupancy {
     pub udp_mappings: u64,
     /// Datagrams queued on UDP endpoints.
     pub udp_queued: u64,
-    /// Deferred Linux UDP receives (their bridge slots stay in service).
-    pub udp_receives: u64,
+    /// Parked requests (their bridge slots stay in service), by kind: Linux TCP
+    /// connects waiting for the handshake,
+    pub parked_connects: u64,
+    /// Linux TCP receives (the kernel's per-socket prefetch),
+    pub parked_tcp_receives: u64,
+    /// Linux UDP receives (the kernel's per-socket prefetch),
+    pub parked_udp_receives: u64,
+    /// and cache-miss resolves.
+    pub parked_resolves: u64,
+    /// In-flight TLS transactions (at most one).
+    pub tls_jobs: u64,
     /// In-flight DNS queries.
     pub dns_queries: u64,
     /// Bump-heap bytes allocated (the heap never frees).
@@ -125,7 +134,11 @@ impl NetworkServiceOccupancy {
             udp_endpoints: 0,
             udp_mappings: 0,
             udp_queued: 0,
-            udp_receives: 0,
+            parked_connects: 0,
+            parked_tcp_receives: 0,
+            parked_udp_receives: 0,
+            parked_resolves: 0,
+            tls_jobs: 0,
             dns_queries: 0,
             heap_bytes: 0,
         }

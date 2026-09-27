@@ -191,7 +191,7 @@ Each supervised network-service instance owns a fixed `SessionGeneration` assign
 
 ### Userspace service idle (M9 #105 / #107)
 
-Each loop iteration drains holder exits, feeds buffered NIC ingress to the UDP and TCP stacks (`drain_ingress`, which also runs the TCP retransmit / TIME-WAIT timers), completes deferred Linux UDP receives whose endpoint now holds a datagram, and then takes one `service_next` request. When none of that made progress the service idles in `wait_for_service_work`: if either stack still has stashed frames it loops at once; otherwise it blocks in `NET_SUBOP_WAIT_WORK(REQUESTS | RX)` with the timeout set to the TCP stack's `next_timer_deadline()` (none when no timer is armed). There is no yield or spin idle path. See [Blocking waits](#blocking-waits-and-virtio-interrupts-167-170) for the primitive.
+Each loop iteration drains holder exits (cancelling that holder's parked requests and TLS job with `Reset`), feeds buffered NIC ingress to the UDP and TCP stacks (`drain_ingress`, which also runs the TCP retransmit / TIME-WAIT timers), advances every parked request and the TLS job once, and then takes one `service_next` request. When none of that made progress the service idles in `wait_for_service_work`: if either stack still has stashed frames it loops at once; otherwise it blocks in `NET_SUBOP_WAIT_WORK(REQUESTS | RX)` with the timeout set to the earliest of the TCP timer deadline, parked connect deadlines, the DNS resolver's `next_deadline()` and the TLS job's phase deadline (none when nothing is armed). There is no yield, spin or poll-burst path. The tick period is read with `NET_SUBOP_TICK_PERIOD_NS` once at start-up; a zero or failed answer stops the service (`finish(ERROR)`) instead of assuming 1 ms. See [Blocking waits](#blocking-waits-and-virtio-interrupts-167-170) for the primitive.
 
 ### Acceptance markers
 
@@ -203,7 +203,7 @@ Ordered QEMU markers for `cargo xtask test-m7-net-service`:
 4. `[NET ] holder exit reclaimed sessions=… pending=…`
 5. `[NET ] denied pid=… reason=no-authority`
 6. `[NET ] service restarted pid=… generation=…`
-7. `[NET ] inflight failed count=…`
+7. `[NET ] inflight failed count=1` (the fixture parks one UDP receive, proves the service took it with a follow-up round trip, and the kernel checks that exactly that request is in service before terminating)
 8. `[NET ] stale-session denied generation=…`
 9. `[NET ] capacity baseline ok`
 10. `[M7.3] PASS`
@@ -221,7 +221,9 @@ M7 clients block on per-request wait keys (`0x54 << 56 | request_id`) via the #1
 - Readiness is evaluated with interrupts masked immediately before the waiter registers; wakes in between become #145 pending wakes, so no wake is lost. RX readiness is the virtio used ring being ahead of the consumed index (or a loopback frame queued).
 - Wakers: `NetBridge::submit`, `requeue_in_service`, holder-exit enqueue (requests); the virtio-net RX interrupt and loopback transmit (RX); deadline expiry and process cancel.
 
-**Service idle:** between requests the service calls `TcpTransport::poll` once (ingests ACKs, in-order data for connected Linux sockets, and fires retransmit / TIME-WAIT timers), then `WAIT_WORK(REQUESTS | RX, timeout = next_timer_deadline() - now)` converted from ticks to ns. The service clock (`NET_SUBOP_MONOTONIC_TICKS`) is calibrated TSC time in `NET_SUBOP_TICK_PERIOD_NS` units, not a count of delivered IRQs, so its timers run on real time. Server-first data that arrives between `connect` and the first `recv` is therefore acknowledged and buffered while the application does other work. **In-flight requests** (connect, plain TCP recv, UDP send/recv, DNS resolve, TLS close drain) never spin: each iteration polls the relevant stack, then `WAIT_WORK(RX)` bounded by the request deadline and the TCP timer deadline. Only one request is in service at a time; a request that must wait for the network holds the service until its own deadline. The exception is a Linux UDP `Receive` with no datagram queued: it is parked in a bounded table (`MAX_PENDING_LINUX_UDP_RECV`; a full table completes the request with `QueueFull`) and the service returns to its loop, which completes it when ingress delivers a datagram. Parked receives carry no service-side deadline: each Linux UDP socket keeps at most one outstanding receive (its kernel prefetch, which outlives a caller's timeout), and the service cancels parked entries with `Reset` on the socket's `Close` and on holder exit. So the idle timeout is the TCP timer deadline alone, and `RX` always stays in the idle mask.
+**Service idle and multiplexing (#177):** between requests the service polls the stacks once (ingests ACKs, in-order data for connected Linux sockets, and fires retransmit / TIME-WAIT timers), then blocks in `WAIT_WORK(REQUESTS | RX)` until the earliest armed deadline, converted from ticks to ns. The service clock (`NET_SUBOP_MONOTONIC_TICKS`) is calibrated TSC time in `NET_SUBOP_TICK_PERIOD_NS` units, not a count of delivered IRQs, so its timers run on real time. Server-first data that arrives between `connect` and the first `recv` is therefore acknowledged and buffered while the application does other work. A request that must wait for the network never holds the service. A plain TCP connect, a TCP or Linux UDP `Receive` with no data, and a DNS resolve that misses the cache are parked in one bounded table (`MAX_PARKED_REQUESTS` = `MAX_SESSIONS`); a full table completes the request with `QueueFull` and counts it. Each loop iteration re-checks every parked entry against stack state (connect established or timed out, bytes or EOF queued, resolver result ready) and completes it in place. Connects carry their own `TCP_CONNECT_TIMEOUT_MS` deadline. Receives carry none: each Linux socket keeps at most one outstanding receive (its kernel prefetch, which outlives a caller's timeout), and the service cancels parked entries with `Reset` on the socket's `Close` and on holder exit. A TLS send runs as a single resumable job (see [TLS](#public-api-network-service)). At most one job is active; a second is refused with `QueueFull` and counted, and other requests keep being served while it waits. UDP send is single shot. NIC ingress is bounded: when a stack's stash is full the service stops reading raw frames (the virtio RX ring absorbs the burst), and a refused push is counted rather than evicting.
+
+**Kernel TCP receive prefetch:** a connected Linux TCP socket keeps one `Receive { max_len: 4096 }` outstanding in the service, authorized against the live service generation, armed after `connect` and after each drain. `recv` / `read` copy from the completed prefetch, return `EAGAIN` for non-blocking sockets, and otherwise block on the socket wait key (`RestartSyscall`) until the service completes the prefetch. EOF and a receive error are latched on the socket; `poll` / `select` readiness uses the same state.
 
 **Virtio-net interrupts (#170):** RX and TX completions are interrupt driven; nothing harvests the device from the timer. `VirtioNetDevice::discover` routes the device in this order: MSI-X when the capability exposes at least two table entries (entry 0 = RX queue, entry 1 = TX queue, config-change vector `0xffff`), otherwise legacy INTx through the IOAPIC (q35 PIRQ swizzle, GSI `20 + (slot + pin - 1) % 4`, level / active-high, IOAPIC found from the ACPI MADT captured before `ExitBootServices`). A present-but-unusable MSI-X table, a missing MADT / IOAPIC, vector-table exhaustion or a queue-vector readback of `0xffff` fails net init with `[NET ] virtio init failed: <reason>` and the raw backend stays `Failed`; there is no polling fallback. Device vectors are `0x30..0x3f`, allocated from the bounded table in `interrupt::irq` (shared with future drivers; unowned vectors are counted and acknowledged). The ISR only counts and wakes: RX wakes the net work key (`0x55 << 56`), TX wakes the TX-space key (`0x56 << 56`); INTx reads (and so acknowledges) the legacy ISR status register first and counts a clear bit 0 as spurious. `RAW_RECEIVE` consumes completions in thread context. Init prints `[NET ] rx irq vector=N mode=msix tx_vector=M` or `[NET ] rx irq vector=N mode=intx gsi=G`; the one-shot `[NET ] rx-diag …` line (service shutdown or a device error) reports `rx_irq`, `tx_irq`, `spurious_irq`, `unhandled_irq`, ring indices and delivery / drop / error / `tx_full` counters. xtask pins `vectors=3` on the QEMU device so QEMU 8.2 (CI) and newer local QEMU expose the same MSI-X table.
 
@@ -365,8 +367,6 @@ Each queued datagram stores `SocketAddrV4` + length + 1472-byte fixed buffer (14
 
 - `receive` is non-blocking; returns `Ok(None)` if the queue is empty.
 - On success, returns `(from, full_payload_len)` and copies `min(full_payload_len, out.len())` bytes (truncation is visible when `full_payload_len > out.len()`).
-- `receive_with_deadline(now, deadline_tick, …)` polls until the deadline (inclusive) or returns `NetworkError::Timeout`.
-
 ### DNS lane (#85) API
 
 Use the same [`SessionId`](../network/src/session.rs) / [`SessionGeneration`](../network/src/session.rs) as the network service:
@@ -375,7 +375,7 @@ Use the same [`SessionId`](../network/src/session.rs) / [`SessionGeneration`](..
 2. `UdpTable::connect(id, owner, dns_server)` when a default peer is desired.
 3. `UdpTransport::send(now, id, owner, dest, payload)` — `dest` optional if connected.
 4. `UdpTransport::poll(now)` on every service tick (and after `Unreachable` on send).
-5. `UdpTransport::receive(id, owner, buf)` or `receive_with_deadline` for replies.
+5. `UdpTransport::receive(id, owner, buf)` for replies, after each `poll`.
 
 Non-UDP `Inbound` from `L3Stack::poll` is ignored by UDP `poll` today; #88 will route one RX frame to UDP and TCP dispatchers.
 
@@ -477,7 +477,7 @@ Enable in consumers: `clean-slate-network` feature `tls` (kernel: `m7-tls-self-t
 - Server authentication: single **pinned DER trust anchor** (`TlsConfig::trust_anchor_der`), hostname/SAN vs `TlsConfig::server_name`.
 - **Fixed validation time** [`VALIDATION_TIME_UNIX`](../network/src/tls/verify.rs) = 2030-01-01 UTC (guest has no wall clock).
 - Record buffers: [`TLS_RECORD_BUFFER_BYTES`](../network/src/tls/mod.rs) = 16_640 bytes each (read + write), caller-provided.
-- I/O timeouts: [`TLS_HANDSHAKE_TIMEOUT_TICKS`](../network/src/tls/io.rs) / [`TLS_IO_TIMEOUT_TICKS`](../network/src/tls/io.rs) monotonic ticks in `TcpRecordIo`.
+- I/O timeouts: every client (the network service's TLS job and the in-kernel `m7-tls` lanes) runs `tls_transaction` with a `TlsTransactionBudget` of handshake 8192 ms and per-phase I/O 2000 ms, measured on the calibrated TSC clock.
 
 ### Hermetic trust model
 
@@ -499,9 +499,10 @@ Enable in consumers: `clean-slate-network` feature `tls` (kernel: `m7-tls-self-t
 ### Public API (network service)
 
 - `TlsConfig { server_name, trust_anchor_der, validation_time_unix }`
-- `TlsSession::connect(now, transport, owner, remote, config, rng, read_buf, write_buf)`
-- `write` / `read` / `close` / `abort`, `peer_name()`
-- Host tests: `TlsSession::connect_with_peer_tick(..., Some(&mut peer_driver))` to poll a fake TCP peer.
+- `tls_transaction(transport, clock, budget, owner, remote, config, rng, read_buf, write_buf, request, response)`: one connect, handshake, request, response and close as a future over the async `embedded-tls` API. The network service sets `TlsTransactionClock::set_now` and polls it with a no-op waker once per loop iteration; nothing busy-polls and no ticks are invented. A pending poll leaves the service free for other requests. `phase_deadline()` feeds the idle timeout, and the service fails the job with `Timeout` once it passes. Dropping the future aborts the TCP connection. Each request uses its own connection; the shared `TcpTransport` is not reset between requests.
+- It is the only TLS client; there is no blocking session API.
+- In-kernel lanes (`m7-tls-self-test`, `m7-dns-self-test`, `m7-net-device-self-test`) run in boot context before any scheduler thread exists. They poll on the calibrated TSC clock and, while nothing is ready, halt with interrupts enabled until the next interrupt (`selftest::boot_wait`): the periodic APIC timer bounds each halt to one tick and a virtio-net completion ends it early. The timer ISR only counts and acknowledges ticks that arrive during such a halt.
+- Host tests drive `tls_transaction` against the rustls fixture peer over `FakeLink` on a simulated clock (one tick per loop iteration), with the same phase-deadline handling as the service.
 
 ### Fixture peer (xtask)
 
@@ -537,7 +538,7 @@ UEFI builds set `--cfg aes_force_soft` in [`.cargo/config.toml`](../.cargo/confi
 
 ### TCP transport storage
 
-[`TcpTransport`](../network/src/tcp/transport.rs) is ~310 KiB in `no_std` (32 × ~9.7 KiB connection slots). Do not construct it on boot stacks; use zeroed static storage and [`TcpTransport::init_in_place`](../network/src/tcp/transport.rs).
+[`TcpTransport`](../network/src/tcp/transport.rs) is ~310 KiB in `no_std` (32 × ~9.7 KiB connection slots). Do not construct it on boot stacks; use zeroed static storage and [`TcpTransport::init_in_place`](../network/src/tcp/transport.rs). The same applies to the ~136 KiB `NetworkService` session table: the userspace service initializes it in static storage with `NetworkService::init_in_place`, which keeps the converged DNS+TLS stack high-water at about 91 KiB of the fixed 320 KiB service stack.
 
 ## M7.5 DNS
 

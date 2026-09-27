@@ -168,6 +168,17 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
             return stack_pointer;
         }
 
+        #[cfg(any(
+            feature = "m7-dns-self-test",
+            feature = "m7-net-device-self-test",
+            feature = "m7-tls-self-test"
+        ))]
+        if crate::selftest::boot_wait::is_halted() {
+            increment_kernel_ticks();
+            acknowledge_timer_interrupt();
+            return stack_pointer;
+        }
+
         #[cfg(not(feature = "m3-syscall-self-test"))]
         #[cfg(not(feature = "m2-timer-self-test"))]
         {

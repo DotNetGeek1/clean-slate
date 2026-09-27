@@ -23,7 +23,8 @@ mod integration {
     use crate::addr::SocketAddrV4;
     use crate::fake::FakeLink;
     use crate::fixture::{
-        APP_REQUEST_BYTES, GUEST_IPV4, GUEST_MAC, PEER_IPV4, PEER_MAC, TLS_PORT, TLS_SERVER_NAME,
+        APP_REQUEST_BYTES, APP_RESPONSE_BYTES, GUEST_IPV4, GUEST_MAC, PEER_IPV4, PEER_MAC,
+        TLS_PORT, TLS_SERVER_NAME,
     };
     use crate::protocol::TrustedCaller;
     use crate::session::SessionGeneration;
@@ -32,14 +33,17 @@ mod integration {
         load_fixture_server_config, server_config_from_der, TcpState, TcpTransport, TlsPeerCert,
         TlsPeerFault, TlsTestPeer,
     };
-    use crate::tls::io::TLS_HANDSHAKE_TIMEOUT_TICKS;
     use crate::tls::verify::VALIDATION_TIME_UNIX;
-    use crate::tls::{TlsConfig, TlsError, TlsSession, TLS_RECORD_BUFFER_BYTES};
+    use crate::tls::{
+        tls_transaction, TlsConfig, TlsError, TlsTransactionBudget, TlsTransactionClock,
+        TLS_RECORD_BUFFER_BYTES,
+    };
 
     use rand_core::{CryptoRng, RngCore};
 
     const ARP_TTL: u64 = 1000;
     const OWNER: TrustedCaller = TrustedCaller::new(1, 1, 1);
+    const PINNED_CA: &[u8] = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
 
     struct SeededRng(u64);
 
@@ -104,61 +108,145 @@ mod integration {
         }
     }
 
-    #[test]
-    fn pinned_ca_handshake_and_app_bytes() {
-        let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
-        let (mut guest, mut peer) = setup_tls_pair(TlsPeerCert::FixtureCorrect, TlsPeerFault::None);
+    const HANDSHAKE_BUDGET_TICKS: u64 = 3_000;
+    const TRANSACTION_BUDGET: TlsTransactionBudget = TlsTransactionBudget {
+        handshake_ticks: HANDSHAKE_BUDGET_TICKS,
+        io_ticks: 2_000,
+    };
+    /// Longer than every phase budget together, so only the phase deadlines end a run.
+    const RUN_TICKS: u64 = 20_000;
+
+    /// Drives `future` the way the service loop does, on a simulated clock that advances
+    /// one tick per iteration: poll with a no-op waker, drop the future (aborting its
+    /// connection) once the phase deadline passes, then poll both stacks. Returns the
+    /// outcome and the tick it was reached on.
+    fn run_transaction<F: core::future::Future<Output = Result<usize, TlsError>>>(
+        future: F,
+        clock: &TlsTransactionClock,
+        guest: *mut TcpTransport<FakeLink>,
+        peer: &mut TlsTestPeer<FakeLink>,
+        start: u64,
+    ) -> (Result<usize, TlsError>, u64) {
+        let mut future = core::pin::pin!(Some(future));
+        let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+        for tick in start..start + RUN_TICKS {
+            clock.set_now(tick);
+            let pending = future
+                .as_mut()
+                .as_pin_mut()
+                .expect("polled after completion");
+            let output = match pending.poll(&mut cx) {
+                core::task::Poll::Ready(output) => Some(output),
+                core::task::Poll::Pending if tick >= clock.phase_deadline() => {
+                    Some(Err(TlsError::Timeout))
+                }
+                core::task::Poll::Pending => None,
+            };
+            if let Some(output) = output {
+                future.set(None);
+                return (output, tick);
+            }
+            // SAFETY: the future holds no reference to the transport between polls.
+            let _ = unsafe { &mut *guest }.poll(tick);
+            let _ = peer.poll(tick);
+        }
+        panic!("transaction outlived every phase deadline");
+    }
+
+    /// One client transaction against `peer`, trusting `anchor`, starting at `start`.
+    fn run_client(
+        guest: *mut TcpTransport<FakeLink>,
+        peer: &mut TlsTestPeer<FakeLink>,
+        anchor: &[u8],
+        seed: u64,
+        start: u64,
+        response: &mut [u8],
+    ) -> (Result<usize, TlsError>, u64) {
+        let clock = TlsTransactionClock::new();
+        clock.set_now(start);
         let mut read_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
         let mut write_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
-        let remote = SocketAddrV4::new(PEER_IPV4, TLS_PORT);
-        let config = TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX);
-        let mut peer_tick = |tick: u64| {
-            let _ = peer.poll(tick);
+        // SAFETY: `guest` outlives the future and is only touched between polls.
+        let future = unsafe {
+            tls_transaction(
+                guest,
+                &clock,
+                TRANSACTION_BUDGET,
+                OWNER,
+                SocketAddrV4::new(PEER_IPV4, TLS_PORT),
+                TlsConfig::new(TLS_SERVER_NAME, anchor, VALIDATION_TIME_UNIX),
+                SeededRng(seed),
+                &mut read_buf,
+                &mut write_buf,
+                APP_REQUEST_BYTES,
+                response,
+            )
         };
-        let (mut tls, _) = TlsSession::connect_with_peer_tick(
-            0,
-            TLS_HANDSHAKE_TIMEOUT_TICKS,
-            &mut guest,
-            OWNER,
-            remote,
-            config,
-            SeededRng(42),
-            &mut read_buf,
-            &mut write_buf,
-            Some(&mut peer_tick),
-        )
-        .unwrap_or_else(|e| panic!("handshake failed: {e:?}"));
-        assert_eq!(tls.peer_name(), TLS_SERVER_NAME);
-        let sent = tls.write(10, APP_REQUEST_BYTES).unwrap();
-        assert_eq!(sent, APP_REQUEST_BYTES.len());
-        // Full encrypted round-trip is covered by `cargo xtask test-m7-tls` (smoltcp + rustls peer).
-        tls.close(700).unwrap();
+        run_transaction(future, &clock, guest, peer, start)
     }
 
     #[test]
-    fn wrong_name_cert_peer_identity() {
-        let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
+    fn transaction_round_trip_then_clean_close() {
+        let (mut guest, mut peer) = setup_tls_pair(TlsPeerCert::FixtureCorrect, TlsPeerFault::None);
+        let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+        let mut response = [0u8; 64];
+        let (result, done) = run_client(guest, &mut peer, PINNED_CA, 42, 0, &mut response);
+        let len = result.unwrap_or_else(|e| panic!("transaction failed: {e:?}"));
+        assert_eq!(&response[..len], APP_RESPONSE_BYTES);
+        let guest = unsafe { &mut *guest };
+        for tick in done..done + 1_000 {
+            let _ = guest.poll(tick);
+            let _ = peer.poll(tick);
+        }
+        assert_eq!(guest.connections_in_use(), 0);
+    }
+
+    #[test]
+    fn wrong_name_cert_fails_peer_identity_and_aborts() {
         let (mut guest, mut peer) =
             setup_tls_pair(TlsPeerCert::FixtureWrongName, TlsPeerFault::None);
+        let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+        let mut response = [0u8; 64];
+        let (result, _) = run_client(guest, &mut peer, PINNED_CA, 7, 0, &mut response);
+        assert!(matches!(result, Err(TlsError::PeerIdentity)), "{result:?}");
+        assert_eq!(unsafe { &*guest }.connections_in_use(), 0);
+    }
+
+    #[test]
+    fn dropped_transaction_aborts_connection_and_waits_without_progress() {
+        let (mut guest, _peer) = setup_tls_pair(TlsPeerCert::FixtureCorrect, TlsPeerFault::None);
+        let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+        let clock = TlsTransactionClock::new();
         let mut read_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
         let mut write_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
-        let mut peer_tick = |tick: u64| {
-            let _ = peer.poll(tick);
+        let mut response = [0u8; 64];
+        clock.set_now(100);
+        // SAFETY: as in `run_client`.
+        let future = unsafe {
+            tls_transaction(
+                guest,
+                &clock,
+                TRANSACTION_BUDGET,
+                OWNER,
+                SocketAddrV4::new(PEER_IPV4, TLS_PORT),
+                TlsConfig::new(TLS_SERVER_NAME, PINNED_CA, VALIDATION_TIME_UNIX),
+                SeededRng(3),
+                &mut read_buf,
+                &mut write_buf,
+                APP_REQUEST_BYTES,
+                &mut response,
+            )
         };
-        let result = TlsSession::connect_with_peer_tick(
-            0,
-            TLS_HANDSHAKE_TIMEOUT_TICKS,
-            &mut guest,
-            OWNER,
-            SocketAddrV4::new(PEER_IPV4, TLS_PORT),
-            TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX),
-            SeededRng(7),
-            &mut read_buf,
-            &mut write_buf,
-            Some(&mut peer_tick),
-        );
-        assert!(matches!(result, Err(TlsError::PeerIdentity)));
-        assert_eq!(guest.connections_in_use(), 0);
+        let mut future = alloc::boxed::Box::pin(future);
+        let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+        // The peer never answers: the SYN is out and every poll stays pending.
+        for _ in 0..3 {
+            assert!(core::future::Future::poll(future.as_mut(), &mut cx).is_pending());
+        }
+        assert_eq!(clock.phase_deadline(), 100 + HANDSHAKE_BUDGET_TICKS);
+        assert_eq!(unsafe { &*guest }.connections_in_use(), 1);
+        drop(future);
+        assert_eq!(unsafe { &*guest }.connections_in_use(), 0);
     }
 
     #[test]
@@ -174,89 +262,48 @@ mod integration {
         params.not_after = datetime!(2120-01-01 0:00 UTC);
         let cert = params.self_signed(&key).unwrap();
         let config = server_config_from_der(cert.der().to_vec(), key.serialize_der());
-        let pinned_ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
         let (mut guest, mut peer) = setup_tls_pair_custom(config);
-        let mut read_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
-        let mut write_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
-        let mut peer_tick = |tick: u64| {
-            let _ = peer.poll(tick);
-        };
-        let result = TlsSession::connect_with_peer_tick(
-            0,
-            TLS_HANDSHAKE_TIMEOUT_TICKS,
-            &mut guest,
-            OWNER,
-            SocketAddrV4::new(PEER_IPV4, TLS_PORT),
-            TlsConfig::new(TLS_SERVER_NAME, pinned_ca, VALIDATION_TIME_UNIX),
-            SeededRng(9),
-            &mut read_buf,
-            &mut write_buf,
-            Some(&mut peer_tick),
-        );
-        assert!(matches!(result, Err(TlsError::PeerIdentity)));
+        let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+        let mut response = [0u8; 64];
+        let (result, _) = run_client(guest, &mut peer, PINNED_CA, 9, 0, &mut response);
+        assert!(matches!(result, Err(TlsError::PeerIdentity)), "{result:?}");
+        assert_eq!(unsafe { &*guest }.connections_in_use(), 0);
     }
 
     #[test]
     fn garbage_record_fails_protocol() {
-        let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
         let (mut guest, mut peer) =
             setup_tls_pair(TlsPeerCert::FixtureCorrect, TlsPeerFault::GarbageTlsRecord);
-        let mut read_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
-        let mut write_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
-        let mut peer_tick = |tick: u64| {
-            let _ = peer.poll(tick);
-        };
-        let result = TlsSession::connect_with_peer_tick(
-            0,
-            TLS_HANDSHAKE_TIMEOUT_TICKS,
-            &mut guest,
-            OWNER,
-            SocketAddrV4::new(PEER_IPV4, TLS_PORT),
-            TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX),
-            SeededRng(3),
-            &mut read_buf,
-            &mut write_buf,
-            Some(&mut peer_tick),
+        let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+        let mut response = [0u8; 64];
+        let (result, _) = run_client(guest, &mut peer, PINNED_CA, 3, 0, &mut response);
+        assert!(
+            matches!(
+                result,
+                Err(TlsError::Handshake
+                    | TlsError::Protocol
+                    | TlsError::TruncatedRecord
+                    | TlsError::Timeout)
+            ),
+            "{result:?}"
         );
-        assert!(matches!(
-            result,
-            Err(TlsError::Handshake
-                | TlsError::Protocol
-                | TlsError::TruncatedRecord
-                | TlsError::Timeout)
-        ));
+        assert_eq!(unsafe { &*guest }.connections_in_use(), 0);
     }
 
     #[test]
-    fn handshake_timeout() {
-        let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
+    fn silent_peer_times_out_at_the_handshake_deadline() {
         let (mut guest, mut peer) =
             setup_tls_pair(TlsPeerCert::FixtureCorrect, TlsPeerFault::SilentAfterTcp);
-        let remote = SocketAddrV4::new(PEER_IPV4, TLS_PORT);
-        let config = TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX);
-        let mut read_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
-        let mut write_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
-        let mut peer_tick = |tick: u64| {
-            let _ = peer.poll(tick);
-        };
-        let result = TlsSession::connect_with_peer_tick(
-            0,
-            TLS_HANDSHAKE_TIMEOUT_TICKS,
-            &mut guest,
-            OWNER,
-            remote,
-            config,
-            SeededRng(1),
-            &mut read_buf,
-            &mut write_buf,
-            Some(&mut peer_tick),
-        );
-        assert!(matches!(result, Err(TlsError::Timeout)));
+        let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+        let mut response = [0u8; 64];
+        let (result, done) = run_client(guest, &mut peer, PINNED_CA, 1, 0, &mut response);
+        assert!(matches!(result, Err(TlsError::Timeout)), "{result:?}");
+        assert_eq!(done, HANDSHAKE_BUDGET_TICKS);
+        assert_eq!(unsafe { &*guest }.connections_in_use(), 0);
     }
 
     #[test]
     fn reset_mid_handshake_releases_slot() {
-        let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
         let (mut guest, mut peer) = setup_tls_pair(TlsPeerCert::FixtureCorrect, TlsPeerFault::None);
         let remote = SocketAddrV4::new(PEER_IPV4, TLS_PORT);
         let id = guest.connect(0, OWNER, remote).unwrap();
@@ -264,24 +311,11 @@ mod integration {
         assert_eq!(guest.state(id, OWNER).unwrap(), TcpState::Established);
         guest.reset(50).unwrap();
         assert_eq!(guest.connections_in_use(), 0);
-        let mut read_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
-        let mut write_buf = [0u8; TLS_RECORD_BUFFER_BYTES];
-        let mut peer_tick = |tick: u64| {
-            let _ = peer.poll(tick);
-        };
-        let reconnect = TlsSession::connect_with_peer_tick(
-            100,
-            100 + TLS_HANDSHAKE_TIMEOUT_TICKS,
-            &mut guest,
-            OWNER,
-            SocketAddrV4::new(PEER_IPV4, TLS_PORT),
-            TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX),
-            SeededRng(5),
-            &mut read_buf,
-            &mut write_buf,
-            Some(&mut peer_tick),
-        );
-        assert!(reconnect.is_ok());
+        let guest: *mut TcpTransport<FakeLink> = &mut *guest;
+        let mut response = [0u8; 64];
+        let (result, _) = run_client(guest, &mut peer, PINNED_CA, 5, 200, &mut response);
+        let len = result.unwrap_or_else(|e| panic!("reconnect failed: {e:?}"));
+        assert_eq!(&response[..len], APP_RESPONSE_BYTES);
     }
 
     #[test]

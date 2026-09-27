@@ -16,6 +16,12 @@ pub(crate) mod m1_memory;
 pub(crate) mod m2_double_fault;
 // Always compiled: it owns the `no_mangle` `clean_slate_timer_self_test_task`
 // symbol that `arch::x86_64::asm` references unconditionally.
+#[cfg(any(
+    feature = "m7-dns-self-test",
+    feature = "m7-net-device-self-test",
+    feature = "m7-tls-self-test"
+))]
+pub(crate) mod boot_wait;
 pub(crate) mod m2_timer;
 #[cfg(feature = "m3-address-space-self-test")]
 pub(crate) mod m3_address_space;

@@ -37,3 +37,8 @@ lto = "thin"
 
 [profile.release.package.clean-slate-supervisor]
 opt-level = "z"
+
+# The network service image is held to a fixed mapped-page budget (kernel spawn.rs);
+# crypto dependencies keep the default level.
+[profile.release.package.clean-slate-net-service]
+opt-level = "s"

@@ -572,6 +572,9 @@ impl Scheduler {
         self.threads[current].state = ThreadState::Exited;
 
         let Some(next) = self.next_runnable_from(Some(current)) else {
+            if self.has_blocked_threads() {
+                return idle::handoff_to_idle_thread().map(Some);
+            }
             self.current_thread = None;
             return Ok(None);
         };
