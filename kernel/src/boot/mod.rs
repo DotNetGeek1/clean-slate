@@ -362,6 +362,7 @@ fn register_boot_kernel_low_carve_outs(
 #[allow(unreachable_code)]
 fn run_inner() -> Result<(), &'static str> {
     let mut reserved_ranges = collect_reserved_ranges_from_firmware()?;
+    crate::interrupt::acpi::capture_interrupt_topology_from_firmware();
 
     let mut memory_map = unsafe { ::uefi::boot::exit_boot_services(None) };
     memory_map.sort();

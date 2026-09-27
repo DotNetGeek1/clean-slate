@@ -77,6 +77,22 @@ declare_interrupt_entries!(
     clean_slate_interrupt_31,
     clean_slate_interrupt_32,
     clean_slate_interrupt_33,
+    clean_slate_interrupt_48,
+    clean_slate_interrupt_49,
+    clean_slate_interrupt_50,
+    clean_slate_interrupt_51,
+    clean_slate_interrupt_52,
+    clean_slate_interrupt_53,
+    clean_slate_interrupt_54,
+    clean_slate_interrupt_55,
+    clean_slate_interrupt_56,
+    clean_slate_interrupt_57,
+    clean_slate_interrupt_58,
+    clean_slate_interrupt_59,
+    clean_slate_interrupt_60,
+    clean_slate_interrupt_61,
+    clean_slate_interrupt_62,
+    clean_slate_interrupt_63,
 );
 
 #[cfg(any(
@@ -440,6 +456,22 @@ clean_slate_syscall_entry:
     CLEAN_SLATE_INTERRUPT_NO_ERROR 31
     CLEAN_SLATE_INTERRUPT_NO_ERROR 32
     CLEAN_SLATE_INTERRUPT_NO_ERROR 33
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 48
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 49
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 50
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 51
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 52
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 53
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 54
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 55
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 56
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 57
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 58
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 59
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 60
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 61
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 62
+    CLEAN_SLATE_INTERRUPT_NO_ERROR 63
     CLEAN_SLATE_INTERRUPT_NO_ERROR 128
 "#,
 );

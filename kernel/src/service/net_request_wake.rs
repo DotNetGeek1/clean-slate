@@ -17,6 +17,17 @@ pub(crate) fn wake_net_service_work() {
     wake_all(NET_SERVICE_WORK_KEY);
 }
 
+/// A raw transmit found the NIC's TX ring full and waits for a completion.
+const NET_TX_SPACE_KEY: WaitKey = WaitKey(0x56_u64 << 56);
+
+pub(crate) fn net_tx_space_wait_key() -> WaitKey {
+    NET_TX_SPACE_KEY
+}
+
+pub(crate) fn wake_net_tx_space() {
+    wake_all(NET_TX_SPACE_KEY);
+}
+
 pub(crate) fn notify_net_request_complete(request_id: u64) -> usize {
     wake_all(net_bridge_request_wait_key(request_id))
 }

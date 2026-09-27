@@ -13,6 +13,7 @@ pub(crate) mod gdt;
 pub(crate) mod guarded_stack;
 pub(crate) mod idt;
 pub(crate) mod interrupt_context;
+pub(crate) mod ioapic;
 pub(crate) mod msr;
 pub(crate) mod port;
 
@@ -22,6 +23,9 @@ pub(crate) const PAGE_FAULT_VECTOR: usize = 14;
 pub(crate) const GENERAL_PROTECTION_VECTOR: usize = 13;
 pub(crate) const TIMER_VECTOR: usize = 32;
 pub(crate) const SPURIOUS_VECTOR: usize = 33;
+/// Device interrupt vectors `0x30..0x40`; allocation policy lives in `interrupt::irq`.
+pub(crate) const DEVICE_VECTOR_FIRST: usize = 0x30;
+pub(crate) const DEVICE_VECTOR_COUNT: usize = 16;
 #[cfg(any(
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",

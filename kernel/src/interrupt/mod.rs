@@ -2,7 +2,10 @@
 //! `arch/x86_64/asm.rs`: timer handling, exception reporting and the
 //! feature-gated hand-offs into the self-tests.
 
+pub(crate) mod acpi;
+pub(crate) mod irq;
 pub(crate) mod timer;
+use crate::arch::x86_64::apic::acknowledge_interrupt;
 use crate::arch::x86_64::apic::acknowledge_timer_interrupt;
 use crate::arch::x86_64::bit;
 use crate::arch::x86_64::cpu::without_interrupts;
@@ -171,7 +174,6 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
             increment_kernel_ticks();
             #[cfg(feature = "m9-linux-runtime-self-test")]
             crate::selftest::m9_linux_runtime_latency::observe_timer_irq();
-            crate::service::net_bridge::timer_poll_net_virtio_rx();
             crate::sched::wait::expire_deadlines();
             #[cfg(feature = "m9-block-wake-self-test")]
             crate::selftest::m9_block_wake::observe_timer_while_consumer_blocked();
@@ -186,6 +188,12 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
             acknowledge_timer_interrupt();
             return next_stack_pointer;
         }
+    }
+
+    if irq::is_device_vector(context.vector as usize) {
+        irq::dispatch_device_interrupt(context.vector as u8);
+        acknowledge_interrupt();
+        return stack_pointer;
     }
 
     if context.vector as usize == SPURIOUS_VECTOR {

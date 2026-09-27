@@ -70,7 +70,9 @@ const M5_HOST_SENTINEL: &[u8] = b"CLEAN-SLATE-M5-PERSISTENCE-SENTINEL-v1";
 const M5_QEMU_DISK_ID: &str = "m5disk";
 const M5_QEMU_DEVICE: &str =
     "virtio-blk-pci,drive=m5disk,serial=clean-slate-m5-data,disable-modern=on";
-const M7_QEMU_NET_DEVICE: &str = "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on";
+// `vectors=3` pins the MSI-X table size: QEMU 8.2 defaults to 3, newer QEMU sizes it per queue.
+const M7_QEMU_NET_DEVICE: &str =
+    "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on,vectors=3";
 const M4_RECOVERY_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[CAP ] supervisor console capability granted pid=1"),
     MarkerStep::Ordered("[SUP ] started pid=1"),

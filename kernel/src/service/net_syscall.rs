@@ -34,8 +34,15 @@ use crate::sched::wait::{
 use crate::service::instance_generation::live_instance_generation_for_pid;
 use crate::service::net_bridge::{net_bridge_mut, NetBridgeError};
 use crate::service::net_request_wake::{
-    net_bridge_request_wait_key, net_service_work_wait_key, wake_net_service_work,
+    net_bridge_request_wait_key, net_service_work_wait_key, net_tx_space_wait_key,
+    wake_net_service_work,
 };
+use clean_slate_network::device::NetworkDeviceError;
+
+/// How long `RAW_TRANSMIT` waits for the NIC to retire a frame when its TX
+/// ring is full before failing with `ENOSPC` (a healthy device retires frames
+/// within microseconds; this only bounds a stalled one).
+const TX_SPACE_TIMEOUT_NS: u64 = 500_000_000;
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::current_syscall_caller_pid;
 use crate::time::{irq_period_ns, monotonic_ns, monotonic_period_ticks, tsc_hz};
@@ -91,6 +98,7 @@ fn denial_status(reason: DenialReason) -> u64 {
 fn block_net_syscall_restart(
     frame: &mut SyscallContext,
     key: WaitKey,
+    deadline: Option<Deadline>,
     timeout_rax: u64,
     retry: fn(&mut SyscallContext),
 ) {
@@ -98,7 +106,7 @@ fn block_net_syscall_restart(
     match block_current_thread_with_resume(
         frame,
         key,
-        None,
+        deadline,
         BlockedResume::RestartSyscall { nr, timeout_rax },
     ) {
         Ok(WaitOutcome::Woken) => retry(frame),
@@ -341,6 +349,7 @@ fn handle_poll(frame: &mut SyscallContext) {
         Err(NetBridgeError::Pending) => block_net_syscall_restart(
             frame,
             wait_key,
+            None,
             bridge_error_status(NetBridgeError::Pending),
             handle_poll,
         ),
@@ -538,6 +547,23 @@ fn handle_raw_transmit(frame: &mut SyscallContext) {
     };
     match net_bridge_mut().raw_transmit(holder.0, frame_buf) {
         Ok(()) => frame.rax = 0,
+        // Every TX slot is in flight and the TX completion interrupt is armed:
+        // wait for it, then restart the syscall to resubmit the frame.
+        Err(NetworkDeviceError::QueueFull) => {
+            if tsc_hz().is_none() {
+                frame.rax = SYSCALL_ENOSPC;
+                return;
+            }
+            let deadline =
+                Deadline::MonotonicNs(monotonic_ns().saturating_add(TX_SPACE_TIMEOUT_NS));
+            block_net_syscall_restart(
+                frame,
+                net_tx_space_wait_key(),
+                Some(deadline),
+                SYSCALL_ENOSPC,
+                handle_raw_transmit,
+            );
+        }
         Err(_) => frame.rax = SYSCALL_EINVAL,
     }
 }

@@ -6,13 +6,13 @@ use clean_slate_network::device::{NetworkDeviceError, NetworkLink};
 use clean_slate_network::fixture::{GUEST_MAC, PEER_IPV4, PEER_MAC};
 use clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES;
 
-use crate::device::virtio::net::VirtioNetDevice;
+use crate::device::virtio::net::{NetInterruptSinks, VirtioNetDevice};
 use crate::{serial_write_fmt, serial_write_line};
 
 const POLL_SPIN_LIMIT: usize = 50_000_000;
 
 pub(crate) fn run_m7_net_device_self_test() -> Result<(), &'static str> {
-    let mut device = VirtioNetDevice::discover()?;
+    let mut device = VirtioNetDevice::discover(NetInterruptSinks::NONE)?;
     let link = device.link();
     let (rx_qsize, tx_qsize) = device.queue_sizes();
     serial_write_fmt(format_args!("[NET ] virtio ready mac="));

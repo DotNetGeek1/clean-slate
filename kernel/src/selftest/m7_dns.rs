@@ -11,7 +11,7 @@ use clean_slate_network::protocol::TrustedCaller;
 use clean_slate_network::session::SessionGeneration;
 use clean_slate_network::stack::L3Stack;
 
-use crate::device::virtio::net::VirtioNetDevice;
+use crate::device::virtio::net::{NetInterruptSinks, VirtioNetDevice};
 use crate::diagnostics::qemu::{qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::interrupt::timer::initialize_timer;
 use crate::{serial_write_fmt, serial_write_line};
@@ -29,7 +29,7 @@ pub(crate) fn run_m7_dns_self_test() -> Result<(), &'static str> {
     initialize_timer();
     // `m3-entry-self-test` (pulled in by this feature) skips calibration inside `initialize_timer`.
     crate::time::calibration::calibrate_apic_tick();
-    let device = VirtioNetDevice::discover()?;
+    let device = VirtioNetDevice::discover(NetInterruptSinks::NONE)?;
     let mac = device.link().mac;
     serial_write_fmt(format_args!("[DNS ] virtio ready mac="));
     mac.write_to(&mut SerialWriter)
