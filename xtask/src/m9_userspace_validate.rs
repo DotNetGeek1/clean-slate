@@ -270,7 +270,9 @@ fn validate_matrix(
     matrix: &clean_slate_rootfs::commands::CommandMatrix,
     cycles: u64,
 ) -> Result<(), String> {
-    let mut hex: BTreeMap<(String, u64), Vec<(u64, Vec<u8>)>> = BTreeMap::new();
+    // `(cmd, cycle)` -> `(offset, bytes)` hex chunks.
+    type StdoutChunks = Vec<(u64, Vec<u8>)>;
+    let mut hex: BTreeMap<(String, u64), StdoutChunks> = BTreeMap::new();
     let mut results: Vec<(String, u64, u64, u64)> = Vec::new();
     for payload in lines.iter().filter_map(|l| m9_payload(l)) {
         if let Some(rest) = payload.strip_prefix("stdout ") {
@@ -489,14 +491,16 @@ fn validate_sleep_evidence(lines: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-type Snapshot<'a> = (&'a str, BTreeMap<&'a str, u64>);
+/// `key=value` counts of one resource snapshot line.
+type Counts<'a> = BTreeMap<&'a str, u64>;
+type Snapshot<'a> = (&'a str, Counts<'a>);
 
 /// `label=baseline` followed by `label=cycle-1..=cycles` snapshots with `prefix`.
 fn resource_snapshots<'a>(
     lines: &[&'a str],
     prefix: &str,
     cycles: u64,
-) -> Result<(BTreeMap<&'a str, u64>, Vec<BTreeMap<&'a str, u64>>), String> {
+) -> Result<(Counts<'a>, Vec<Counts<'a>>), String> {
     let snapshots: Vec<Snapshot<'a>> = lines
         .iter()
         .filter_map(|l| m9_payload(l))
@@ -542,8 +546,8 @@ fn resource_snapshots<'a>(
 fn require_baseline(
     what: &str,
     keys: &[&str],
-    baseline: &BTreeMap<&str, u64>,
-    per_cycle: &[BTreeMap<&str, u64>],
+    baseline: &Counts<'_>,
+    per_cycle: &[Counts<'_>],
 ) -> Result<(), String> {
     for key in keys {
         if !baseline.contains_key(key) {
