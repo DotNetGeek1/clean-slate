@@ -6,7 +6,7 @@ _start:
     mov     rax, 1
     mov     rdi, 1
     lea     rsi, [rip + msg]
-    mov     rdx, 15
+    mov     rdx, OFFSET .Lmsg_len
     syscall
 
     mov     rax, 60
@@ -16,4 +16,5 @@ _start:
     .section .rodata, "a", @progbits
 msg:
     .ascii  "M9 low VA ok.\n"
+    .set    .Lmsg_len, . - msg
     .size   msg, .-msg

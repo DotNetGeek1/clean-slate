@@ -36,7 +36,7 @@ _start:
     mov     rax, 1
     mov     rdi, 1
     lea     rsi, [rip + msg]
-    mov     rdx, 18
+    mov     rdx, OFFSET .Lmsg_len
     syscall
 
     /* (3) exit(0) */
@@ -47,4 +47,5 @@ _start:
     .section .rodata, "a", @progbits
 msg:
     .ascii  "Hello from Linux.\n"
+    .set    .Lmsg_len, . - msg
     .size   msg, .-msg

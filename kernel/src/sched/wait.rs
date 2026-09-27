@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 //!
-//! `Deadline` is either absolute `kernel_ticks()` or calibrated `monotonic_ns()` (#103).
+//! `Deadline` is an absolute calibrated `monotonic_ns()` value (#103, #180).
 
 use crate::arch::x86_64::context_switch::resume_after_scheduler_handoff;
 use crate::arch::x86_64::context_switch::SYSCALL_BLOCKED_RESUME_SENTINEL;
@@ -29,7 +29,8 @@ pub(crate) enum WaitOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Deadline {
-    IrqTicks(u64),
+    /// Absolute calibrated TSC time (`time::monotonic_ns`). There is no IRQ-tick
+    /// variant: the tick delivery rate under QEMU TCG follows host timer resolution.
     MonotonicNs(u64),
 }
 
@@ -383,20 +384,20 @@ pub(crate) fn cancel_waiters_for_process(pid: u64, generation: InstanceGeneratio
     })
 }
 
-pub(super) fn waiter_deadline_due(deadline: Option<Deadline>, now_ticks: u64, now_ns: u64) -> bool {
+pub(super) fn waiter_deadline_due(deadline: Option<Deadline>, now_ns: u64) -> bool {
     match deadline {
-        Some(Deadline::IrqTicks(ticks)) => now_ticks >= ticks,
         Some(Deadline::MonotonicNs(ns)) => now_ns >= ns,
         None => false,
     }
 }
 
-pub(crate) fn expire_deadlines(now_ticks: u64) -> usize {
-    let now_ns = if crate::time::tsc_hz().is_some() {
-        crate::time::monotonic_ns()
-    } else {
-        0
-    };
+pub(crate) fn expire_deadlines() -> usize {
+    // Every deadline is built from `monotonic_ns()`, which is fatal without a
+    // calibrated TSC, so an uncalibrated kernel has no deadlines to expire.
+    if crate::time::tsc_hz().is_none() {
+        return 0;
+    }
+    let now_ns = crate::time::monotonic_ns();
     without_interrupts(|| {
         let mut expired = 0usize;
         let table = wait_table_mut();
@@ -404,7 +405,7 @@ pub(crate) fn expire_deadlines(now_ticks: u64) -> usize {
             if !slot.active {
                 continue;
             }
-            if !waiter_deadline_due(slot.deadline, now_ticks, now_ns) {
+            if !waiter_deadline_due(slot.deadline, now_ns) {
                 continue;
             }
             let index = slot.thread_index;
@@ -615,15 +616,10 @@ mod tests {
     }
 
     #[test]
-    fn waiter_deadline_due_only_at_or_after_tick() {
-        assert!(!waiter_deadline_due(Some(Deadline::IrqTicks(5)), 4, 0));
-        assert!(waiter_deadline_due(Some(Deadline::IrqTicks(5)), 5, 0));
-        assert!(waiter_deadline_due(
-            Some(Deadline::MonotonicNs(100)),
-            0,
-            100
-        ));
-        assert!(!waiter_deadline_due(None, 100, 100));
+    fn waiter_deadline_due_only_at_or_after_deadline() {
+        assert!(!waiter_deadline_due(Some(Deadline::MonotonicNs(100)), 99));
+        assert!(waiter_deadline_due(Some(Deadline::MonotonicNs(100)), 100));
+        assert!(!waiter_deadline_due(None, u64::MAX));
     }
 
     #[test]
