@@ -115,15 +115,17 @@ pub(crate) fn dup2_fd(
     let old = table.get(old_fd).ok_or(EBADF)?;
     let open = old.open;
     let flags = FdFlags { cloexec: false };
-    if table.get(new_fd).is_some() {
-        close_fd_entry(table, pool, new_fd)?;
-    }
     let index = usize::try_from(new_fd)
         .ok()
         .filter(|i| *i < LINUX_FD_TABLE_CAPACITY)
         .ok_or(EBADF)?;
+    // Take the new reference before touching `new_fd`, so a failure leaves it open.
     pool.add_ref(open)?;
-    table.entries[index] = Some(FdEntry { open, flags });
+    let replaced = table.entries[index].replace(FdEntry { open, flags });
+    if let Some(replaced) = replaced {
+        // As in Linux, errors from the implicit close of `new_fd` are not reported.
+        let _ = pool.release_ref(replaced.open);
+    }
     Ok(())
 }
 
@@ -135,7 +137,10 @@ pub(crate) fn inherit_table(
     *child = LinuxFdTable::empty();
     for (index, entry) in parent.entries.iter().enumerate() {
         if let Some(entry) = entry {
-            pool.add_ref(entry.open)?;
+            if let Err(errno) = pool.add_ref(entry.open) {
+                let _ = release_table(child, pool);
+                return Err(errno);
+            }
             child.entries[index] = Some(*entry);
         }
     }
@@ -181,7 +186,9 @@ pub(crate) fn install_stdio_entries(
         append: false,
     };
     let stdout_open = pool.alloc_console(pid, sink, write_status)?;
-    let stderr_open = pool.alloc_console(pid, sink, write_status)?;
+    let stderr_open = pool
+        .alloc_console(pid, sink, write_status)
+        .inspect_err(|_| pool.free_unattached(stdout_open))?;
     pool.attach_first_ref(stdout_open)?;
     pool.attach_first_ref(stderr_open)?;
     table.entries[LINUX_STDOUT_FD as usize] = Some(FdEntry {

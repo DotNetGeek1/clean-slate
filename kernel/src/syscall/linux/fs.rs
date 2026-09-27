@@ -50,6 +50,9 @@ pub(crate) fn handle_sys_open(
     let _mode = request.args[2];
     let fd_flags = open_fd_flags(flags)?;
     let path = copy_path_from_user(path_ptr)?;
+    // As in Linux, a missing fd fails the open before the path is resolved, so an
+    // EMFILE/ENFILE open never creates or truncates a file.
+    linux_fd::check_description_and_fd_available(ctx.pid, ctx.instance_generation)?;
     check_write_allowed(path.as_bytes(), flags)?;
     if open_write_intent(flags) && is_tmp_path(path.as_bytes())? {
         authorize_tmp_namespace_write(ctx.pid)?;
@@ -112,8 +115,13 @@ const OPEN_SUPPORTED_FLAGS: u32 =
     OPEN_ACCESS_MASK | O_CREAT | O_TRUNC | O_DIRECTORY | O_LARGEFILE | O_CLOEXEC;
 
 /// Validates `open(2)` flags and derives the per-fd flags of the new descriptor.
+/// `O_CREAT | O_DIRECTORY` is refused as in Linux 6.4+, rather than creating a
+/// file and then failing with `ENOTDIR`.
 fn open_fd_flags(flags: u32) -> Result<FdFlags, LinuxErrno> {
-    if flags & !OPEN_SUPPORTED_FLAGS != 0 || flags & OPEN_ACCESS_MASK == OPEN_ACCESS_MASK {
+    if flags & !OPEN_SUPPORTED_FLAGS != 0
+        || flags & OPEN_ACCESS_MASK == OPEN_ACCESS_MASK
+        || flags & (O_CREAT | O_DIRECTORY) == O_CREAT | O_DIRECTORY
+    {
         return Err(EINVAL);
     }
     Ok(FdFlags {
@@ -332,6 +340,7 @@ mod tests {
             O_WRONLY | O_NONBLOCK,
             O_RDONLY | O_CLOEXEC | 0x4000_0000,
             OPEN_ACCESS_MASK,
+            O_RDWR | O_CREAT | O_DIRECTORY,
         ] {
             assert_eq!(open_fd_flags(flags), Err(EINVAL), "flags={flags:#x}");
         }
