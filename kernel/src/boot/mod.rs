@@ -15,6 +15,7 @@ use crate::arch::x86_64::idt::install_interrupt_handlers;
 use crate::arch::x86_64::idt::register_idt_carve_out;
 use crate::boot::uefi::collect_reserved_ranges_from_firmware;
 use crate::boot::uefi::normalize_memory_map;
+use crate::boot::uefi::MemoryMapScratch;
 use crate::diagnostics::gdb::gdb_entry_handoff;
 use crate::diagnostics::qemu::halt_loop;
 use crate::diagnostics::qemu::qemu_exit_failure;
@@ -84,6 +85,7 @@ use crate::mm::layout::{
 ))]
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::inspect_current_mapping;
+use crate::mm::region::NormalizedMemoryMap;
 use crate::mm::region::ReservedRange;
 use crate::mm::stack_guard::arm_kernel_stack_guards;
 use crate::mm::stack_guard::{GuardedStackRecord, KernelStackKind};
@@ -275,6 +277,18 @@ const BOOT_STACK_SIZE: usize = 256 * 1024;
 
 static BOOT_STACK: GlobalCell<GuardedStack<BOOT_STACK_SIZE>> = GlobalCell::new(GuardedStack::new());
 
+/// The normalized firmware memory map and its working arrays (several KiB
+/// each), kept off the boot stack.
+struct BootMemoryMap {
+    scratch: MemoryMapScratch,
+    normalized: NormalizedMemoryMap,
+}
+
+static BOOT_MEMORY_MAP: GlobalCell<BootMemoryMap> = GlobalCell::new(BootMemoryMap {
+    scratch: MemoryMapScratch::new(),
+    normalized: NormalizedMemoryMap::new(),
+});
+
 pub(crate) fn run() -> Status {
     let boot_stack_top = unsafe { (*BOOT_STACK.get()).top() };
     unsafe { call_on_fresh_stack(boot_stack_top, run_on_boot_stack) }
@@ -352,7 +366,14 @@ fn run_inner() -> Result<(), &'static str> {
         memory_map.buffer().len() as u64,
     ))?;
 
-    let normalized = normalize_memory_map(memory_map.entries(), reserved_ranges.as_slice())?;
+    let boot_memory_map = unsafe { &mut *BOOT_MEMORY_MAP.get() };
+    normalize_memory_map(
+        memory_map.entries(),
+        reserved_ranges.as_slice(),
+        &mut boot_memory_map.scratch,
+        &mut boot_memory_map.normalized,
+    )?;
+    let normalized = &boot_memory_map.normalized;
     drop(memory_map);
     serial_write_fmt(format_args!(
         "[MEM ] usable: {} MiB\n",
@@ -363,7 +384,7 @@ fn run_inner() -> Result<(), &'static str> {
         normalized.reserved_bytes() / (1024 * 1024)
     ));
 
-    let mut allocator = PageAllocator::new(&normalized)?;
+    let mut allocator = PageAllocator::new(normalized)?;
     let stats = allocator.stats();
     serial_write_fmt(format_args!(
         "[MEM ] pages: total={} allocated={} free={}\n",
@@ -387,7 +408,7 @@ fn run_inner() -> Result<(), &'static str> {
     set_privilege_stack(syscall_kernel_stack_top)?;
     initialize_syscall_abi(syscall_kernel_stack_top)?;
 
-    let kernel_root = install_kernel_owned_root(&mut allocator, &normalized)?;
+    let kernel_root = install_kernel_owned_root(&mut allocator, normalized)?;
     serial_write_fmt(format_args!(
         "[MM  ] kernel-owned root installed: {:#018x}\n",
         kernel_root
