@@ -20,14 +20,14 @@ use crate::process::process_registry_mut;
 use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
-use crate::selftest::m6_fixture::{fixture_service, spawn_fixture};
+use crate::selftest::m6_fixture::{fixture_service, park_step, spawn_fixture};
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 use clean_slate_capability::{delegate, HolderId, Rights};
 use clean_slate_network::error::DenialReason;
 use clean_slate_network::session::{SessionGeneration, SessionId};
-use clean_slate_service_fixtures::m6_fixture::{M6FixtureBootstrap, M6FixtureStep};
+use clean_slate_service_fixtures::m6_fixture::M6FixtureBootstrap;
 
 const PASS_MARKER: &str = "[M7.7] PASS";
 const FIXTURE_HOLDER: u64 = 0;
@@ -35,9 +35,9 @@ const FIXTURE_UNRELATED: u64 = 1;
 const PREDICTED_HOLDER_PID: u64 = 1;
 const PREDICTED_UNRELATED_PID: u64 = 2;
 
-fn build_spin_fixture() -> M6FixtureBootstrap {
+fn build_parked_fixture() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
-    program.push(M6FixtureStep::spin(0)).unwrap();
+    program.push(park_step()).unwrap();
     program
 }
 
@@ -76,7 +76,7 @@ pub(crate) fn start_m7_net_caps_self_test(allocator: PageAllocator) -> ! {
         task_stack_top(&stacks[0]),
         0,
         fixture_service(FIXTURE_HOLDER),
-        &build_spin_fixture(),
+        &build_parked_fixture(),
     )
     .unwrap_or_else(|message| fatal_kernel_error(message));
     let unrelated_spawned = spawn_fixture(
@@ -84,7 +84,7 @@ pub(crate) fn start_m7_net_caps_self_test(allocator: PageAllocator) -> ! {
         task_stack_top(&stacks[1]),
         1,
         fixture_service(FIXTURE_UNRELATED),
-        &build_spin_fixture(),
+        &build_parked_fixture(),
     )
     .unwrap_or_else(|message| fatal_kernel_error(message));
     if holder_spawned.pid != PREDICTED_HOLDER_PID

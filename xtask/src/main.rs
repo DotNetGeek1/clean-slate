@@ -102,12 +102,13 @@ const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
 ];
 const M9_LOW_VA_ACCEPTANCE_MARKERS: [&str; 2] = ["[M9.0] creating", "[M9.0] PASS"];
 const M9_LOW_VA_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 7] = [
+const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[M9.F] creating",
     "[M9.F] phase-1 argv line",
     "[M9.F] argv/envp/auxv OK",
     "[M9.F] exec committed pid=",
     "[M9.F] phase-2 argv line",
+    "[M9.F] exec closed FD_CLOEXEC fd, kept plain fd",
     "[M9.F] exec rejected ENOEXEC",
     "[M9.F] PASS",
 ];
@@ -146,7 +147,7 @@ const M9_LINUX_PROC_ACCEPTANCE_MARKERS: [&str; 3] =
 const M9_LINUX_PROC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M9_ROOTFS_ACCEPTANCE_MARKERS: [&str; 2] = ["[RFS ] rootfs entries=", "[M9.K] PASS"];
 const M9_ROOTFS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 14] = [
+const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[M9.H] creating",
     "[M9.H] getcwd=/\n",
     "[M9.H] hostname=m9-fixture\n",
@@ -158,6 +159,7 @@ const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 14] = [
     "[STOR] write object=",
     "[M9.H] big write/read ok",
     "[M9.H] negative cases ok",
+    "[M9.H] open cloexec ok",
     "[M9.H] pool_before",
     "[M9.H] pool_after",
     "[M9.H] PASS",
@@ -240,25 +242,30 @@ const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS: [&str; 3] = [
     "[M9.C] PASS",
 ];
 const M9_BLOCK_WAKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(45);
-const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 9] = [
+/// `no progress while blocked` (3 timer IRQs with the blocked consumer's progress
+/// flat) is required during the 24 s idle soak: the 5 ms cycle blocks that follow
+/// can end before one IRQ arrives when the host timer rate drops under load.
+const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 10] = [
     "[TIME] timer initialized",
+    "[M9.E] blocked tid=",
+    "[M9.E] no progress while blocked",
     "[M9.E] idle_ticks=",
     "[M9.E] timeout resumed after idle",
     "[M9.E] blocked tid=",
-    "[M9.E] no progress while blocked",
     "[M9.E] woken ",
     "[M9.E] timeout resumed",
     "[M9.E] cycles=8 waiters=0",
     "[M9.E] PASS",
 ];
 const M9_USERSPACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(300);
-const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 18] = [
+const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[M9  ] creating",
     "[M9  ] busybox verified",
     "[M9  ] matrix commands=",
     "[STOR] object-service started",
-    "[M9  ] resources label=baseline",
     "[TIME] timer initialized",
+    "[M9  ] resources label=baseline",
+    "[M9  ] net-service resources label=baseline",
     "[M9  ] fs PASS",
     "[M9  ] process-pipe PASS",
     "[M9  ] dns PASS",
@@ -1265,6 +1272,7 @@ fn run_m9_linux_runtime_acceptance() -> Result<(), XtaskError> {
     let wall = M9_RUNTIME_WALL_CLOCK.with(|slot| slot.borrow_mut().take());
     let serial = M9_RUNTIME_SERIAL.with(|slot| slot.borrow().clone());
     result?;
+    validate_m9_runtime_probe_lines(&serial)?;
     wall.ok_or_else(|| XtaskError::InvalidCommand("m9 runtime wall clock missing".to_owned()))?
         .validate(&serial)
 }
@@ -2692,6 +2700,101 @@ fn parse_wall_brackets(serial: &str) -> Result<Vec<WallBracket>, XtaskError> {
         .collect()
 }
 
+/// Every line the runtime probe writes, one `write(2)` each, per cycle.
+const M9_RUNTIME_PROBE_LINES: [&str; 9] = [
+    "[M9.J] nanosleep wall start",
+    "[M9.J] nanosleep wall end",
+    "[M9.J] fs base survives switch",
+    "[M9.J] brk ok",
+    "[M9.J] mmap ok",
+    "[M9.J] uname=Linux",
+    "[M9.J] signals ok",
+    "[M9.J] poll timeout ok",
+    "[M9.J] probe done",
+];
+
+/// A serial line opens with a four-character tag such as `[M9.J]` or `[LNX ]`.
+fn starts_with_serial_tag(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() >= 6
+        && bytes[0] == b'['
+        && bytes[5] == b']'
+        && !bytes[1..5].contains(&b'[')
+        && !bytes[1..5].contains(&b']')
+}
+
+/// Byte-exact check of the probe's own output (#175): a write whose length overruns
+/// its string leaks the next string's first bytes onto serial. Each probe line must
+/// appear whole, once per cycle, and the line after it must start with a clean tag,
+/// so leaked bytes cannot hide in front of the next kernel or probe line.
+fn validate_m9_runtime_probe_lines(serial: &str) -> Result<(), XtaskError> {
+    let lines: Vec<&str> = serial
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    let cycles = lines
+        .iter()
+        .filter(|line| line.starts_with("[M9.J] cycle="))
+        .count();
+    if cycles == 0 {
+        return Err(XtaskError::MissingMarker("[M9.J] cycle=".to_owned()));
+    }
+    for (index, line) in lines.iter().enumerate() {
+        if let Some(offset) = line.find("[M9.J]") {
+            if offset != 0 || line[offset + 1..].contains("[M9.J]") {
+                return Err(XtaskError::InvalidCommand(format!(
+                    "m9 runtime serial line has bytes around an [M9.J] marker: {line:?}"
+                )));
+            }
+        }
+        if !M9_RUNTIME_PROBE_LINES.contains(line) {
+            continue;
+        }
+        match lines.get(index + 1) {
+            Some(next) if starts_with_serial_tag(next) => {}
+            next => {
+                return Err(XtaskError::InvalidCommand(format!(
+                    "m9 runtime probe line {line:?} is followed by stray bytes: {next:?}"
+                )));
+            }
+        }
+    }
+    for expected in M9_RUNTIME_PROBE_LINES {
+        let exact = lines.iter().filter(|line| **line == expected).count();
+        if exact != cycles {
+            return Err(XtaskError::InvalidCommand(format!(
+                "m9 runtime probe line {expected:?} appears exactly {exact} times for {cycles} cycles"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The low-VA fixture's only output, byte-exact: one whole line, and the next line
+/// starts with a clean tag (an overrunning write length leaked a NUL there, #175).
+fn validate_m9_low_va_hello_line(serial: &str) -> Result<(), XtaskError> {
+    const HELLO: &str = "M9 low VA ok.";
+    let lines: Vec<&str> = serial
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    let exact: Vec<usize> = (0..lines.len())
+        .filter(|&index| lines[index] == HELLO)
+        .collect();
+    let [index] = exact[..] else {
+        return Err(XtaskError::InvalidCommand(format!(
+            "m9 low-va serial has {} exact {HELLO:?} lines, expected 1",
+            exact.len()
+        )));
+    };
+    match lines.get(index + 1) {
+        Some(next) if starts_with_serial_tag(next) => Ok(()),
+        next => Err(XtaskError::InvalidCommand(format!(
+            "m9 low-va hello line is followed by stray bytes: {next:?}"
+        ))),
+    }
+}
+
 /// Guest-requested span of each probe wall bracket: five 200 ms nanosleeps.
 const M9_RUNTIME_WALL_REQUESTED: Duration = Duration::from_secs(1);
 /// Largest difference, either way, between the host and guest spans from the
@@ -2754,6 +2857,63 @@ fn validate_nanosleep_wall_clock(
         brackets.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod runtime_probe_line_tests {
+    use super::validate_m9_runtime_probe_lines;
+
+    const CLEAN_CYCLE: &str = "[M9.J] nanosleep wall start\n\
+        [M9.J] nanosleep 200ms tsc_ns=200293252\n\
+        [M9.J] nanosleep wall irq_ticks=642 tsc_ns=1007996318 start_ns=123498216\n\
+        [M9.J] nanosleep wall end\n\
+        [M9.J] fs base survives switch\n\
+        [M9.J] brk ok\n\
+        [M9.J] mmap ok\n\
+        [M9.J] uname=Linux\n\
+        [M9.J] signals ok\n\
+        [M9.J] poll timeout ok\n\
+        [M9.J] probe done\n\
+        [LNX ] exit pid=1 status=0\n\
+        [M9.J] cycle=0 mem=0 sig=0 poll=0 fd=0\n";
+
+    #[test]
+    fn accepts_exact_probe_lines() {
+        validate_m9_runtime_probe_lines(CLEAN_CYCLE).unwrap();
+        validate_m9_runtime_probe_lines(&CLEAN_CYCLE.replace('\n', "\r\n")).unwrap();
+        validate_m9_runtime_probe_lines(&CLEAN_CYCLE.repeat(2)).unwrap();
+    }
+
+    /// Serial shape of the #175 overrun: each write carried the first bytes of
+    /// the next string in `.rodata`.
+    #[test]
+    fn rejects_overrun_bytes_before_next_line() {
+        let leaked = CLEAN_CYCLE.replace("[M9.J] brk ok\n", "[M[M9.J] brk ok\n[M9");
+        assert!(validate_m9_runtime_probe_lines(&leaked).is_err());
+        let done_leak = CLEAN_CYCLE.replace("[LNX ] exit", "[M[LNX ] exit");
+        assert!(validate_m9_runtime_probe_lines(&done_leak).is_err());
+        let suffix = CLEAN_CYCLE.replace("[M9.J] signals ok\n", "[M9.J] signals okX\n");
+        assert!(validate_m9_runtime_probe_lines(&suffix).is_err());
+    }
+
+    #[test]
+    fn low_va_hello_line_is_byte_exact() {
+        use super::validate_m9_low_va_hello_line;
+        let clean = "[M9.0] write observed\r\nM9 low VA ok.\r\n[LNX ] exit pid=2 status=0\r\n";
+        validate_m9_low_va_hello_line(clean).unwrap();
+        let nul_leak = clean.replace("\r\n[LNX ]", "\r\n\0[LNX ]");
+        assert!(validate_m9_low_va_hello_line(&nul_leak).is_err());
+        assert!(validate_m9_low_va_hello_line("[M9.0] PASS\n").is_err());
+    }
+
+    #[test]
+    fn rejects_missing_or_extra_probe_lines() {
+        let missing = CLEAN_CYCLE.replace("[M9.J] uname=Linux\n", "");
+        assert!(validate_m9_runtime_probe_lines(&missing).is_err());
+        let extra = CLEAN_CYCLE.replace("[M9.J] mmap ok\n", "[M9.J] mmap ok\n[M9.J] mmap ok\n");
+        assert!(validate_m9_runtime_probe_lines(&extra).is_err());
+        assert!(validate_m9_runtime_probe_lines("[M9.J] probe done\n[LNX ] exit\n").is_err());
+    }
 }
 
 #[cfg(test)]
@@ -2891,9 +3051,7 @@ fn run_acceptance_command(
                         .find('\n')
                         .map(|len| output[start..start + len].trim_end().to_owned())
                 });
-                if marker_set_is_ordered(marker_set, &M9_USERSPACE_ACCEPTANCE_MARKERS)
-                    && !authoritative_pass
-                {
+                if fails_fast_on_guest_fail(marker_set) && !authoritative_pass {
                     if let Some(fail_line) = guest_fail_line {
                         terminate_child(&mut child)?;
                         let _ = child.wait();
@@ -2901,7 +3059,7 @@ fn run_acceptance_command(
                         join_output_reader(stderr_handle);
                         return Err(XtaskError::CommandFailed {
                             command: command_display,
-                            status: format!("guest reported an m9 userspace failure: {fail_line}"),
+                            status: format!("guest reported a failure: {fail_line}"),
                         });
                     }
                 }
@@ -2918,6 +3076,15 @@ fn run_acceptance_command(
                 if tracker.consume(&output) && !authoritative_pass {
                     if marker_set_is_ordered(marker_set, &M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS) {
                         if let Err(error) = validate_m9_stdio_bytes_line(&output) {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(error);
+                        }
+                    }
+                    if marker_set_is_ordered(marker_set, &M9_LOW_VA_ACCEPTANCE_MARKERS) {
+                        if let Err(error) = validate_m9_low_va_hello_line(&output) {
                             terminate_child(&mut child)?;
                             let _ = child.wait();
                             join_output_reader(stdout_handle);
@@ -2963,6 +3130,19 @@ fn run_acceptance_command(
                     authoritative_pass = true;
                     terminate_child(&mut child)?;
                     child_status = Some(child.wait()?);
+                } else if !authoritative_pass {
+                    if let Some(pass_marker) = final_guest_marker(marker_set) {
+                        if output.contains(pass_marker) {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(XtaskError::MissingMarker(format!(
+                                "{} (guest printed {pass_marker} first)",
+                                tracker.pending_label()
+                            )));
+                        }
+                    }
                 }
             }
             Ok(OutputEvent::Finished) => {
@@ -3014,6 +3194,44 @@ fn run_acceptance_command(
 
 fn marker_set_is_ordered(set: MarkerSet<'_>, markers: &[&str]) -> bool {
     matches!(set, MarkerSet::Ordered(m) if m == markers)
+}
+
+/// M6 constituents whose guest stops after its PASS line: once it is printed while
+/// earlier markers are still pending, the ordered set can never complete.
+const M6_ORDERED_MARKER_SETS: [&[&str]; 6] = [
+    &M6_FIXTURE_SMOKE_ACCEPTANCE_MARKERS,
+    &M6_OBJECT_ACCEPTANCE_MARKERS,
+    &M6_PROCESS_CONTROL_ACCEPTANCE_MARKERS,
+    &M6_DELEGATION_ACCEPTANCE_MARKERS,
+    &M6_AUDIT_ACCEPTANCE_MARKERS,
+    &M6_CAPABILITIES_ACCEPTANCE_MARKERS,
+];
+
+fn is_m6_revocation_spec(set: MarkerSet<'_>) -> bool {
+    matches!(set, MarkerSet::Steps(M6_REVOCATION_ACCEPTANCE_SPEC))
+}
+
+/// Constituents where any guest `[FAIL] ` line is terminal. QEMU on some hosts keeps
+/// running after the guest writes the debug-exit port, so without this a guest
+/// failure only surfaces as the constituent timeout.
+fn fails_fast_on_guest_fail(set: MarkerSet<'_>) -> bool {
+    marker_set_is_ordered(set, &M9_USERSPACE_ACCEPTANCE_MARKERS)
+        || M6_ORDERED_MARKER_SETS
+            .iter()
+            .any(|markers| marker_set_is_ordered(set, markers))
+        || is_m6_revocation_spec(set)
+}
+
+fn final_guest_marker(set: MarkerSet<'_>) -> Option<&str> {
+    if is_m6_revocation_spec(set) {
+        return Some("[M6.6] PASS");
+    }
+    match set {
+        MarkerSet::Ordered(markers) if M6_ORDERED_MARKER_SETS.contains(&markers) => {
+            markers.last().copied()
+        }
+        _ => None,
+    }
 }
 
 fn validate_output_markers(output: &str, marker_set: MarkerSet<'static>) -> Result<(), XtaskError> {
@@ -3204,8 +3422,12 @@ fn assert_no_ipc_framed_linux_hello(output: &str) -> Result<(), XtaskError> {
     Ok(())
 }
 
+/// The fixtures hand turns to each other, so the log order is fixed except for the
+/// reader's and owner's final reports: each is issued right after its last
+/// `END_TURN`, and the fixture woken by that turn may run first. Report progress is
+/// each fixture's completed step count.
 fn validate_m6_capabilities_markers(output: &str) -> Result<(), XtaskError> {
-    const PREFIX: [&str; 18] = [
+    const ORDERED: [&str; 28] = [
         "[STOR] object-service started pid=",
         "[CAP ] object grant holder=3 object=7",
         "[TEST] unrelated workload progress=1",
@@ -3224,37 +3446,40 @@ fn validate_m6_capabilities_markers(output: &str) -> Result<(), XtaskError> {
         "[PROC] teardown pid=",
         "[CAP ] process-control denied holder=7 target=? op=observe reason=stale",
         "[TEST] unrelated workload progress=3",
-    ];
-    const TAIL_REQUIRED: [&str; 10] = [
         "[CAP ] revoke branch=",
         "[CAP ] stale denied holder=4 reason=revoked",
-        "[M6.F] report pid=4 status=2 progress=580",
         "[CAP ] object allowed holder=3 object=7 op=read",
         "actor=8 class=audit resource=0 op=audit_read outcome=allowed",
-        "[M6.F] report pid=8 status=2 progress=680",
-        "[M6.F] report pid=3 status=2 progress=606",
+        "[M6.F] report pid=8 status=2 progress=3 failed_step=",
         "actor=9 class=audit resource=0 op=audit_read outcome=invalid-handle",
         "actor=9 class=audit resource=0 op=audit_read outcome=wrong-holder",
-        "[M6.F] report pid=9 status=2 progress=0",
+        "[M6.F] report pid=9 status=2 progress=2 failed_step=",
+        "[TEST] unrelated workload progress=4",
+        "[M6.8] PASS",
     ];
-    const SUFFIX: [&str; 2] = ["[TEST] unrelated workload progress=4", "[M6.8] PASS"];
-    let mut prefix = MarkerTracker::from_ordered(&PREFIX);
-    if !prefix.consume(output) {
-        return Err(XtaskError::MissingMarker(prefix.pending_label()));
+    const FLOATING_REPORTS: [(&str, &str); 2] = [
+        (
+            "[CAP ] stale denied holder=4 reason=revoked",
+            "[M6.F] report pid=4 status=2 progress=9 failed_step=",
+        ),
+        (
+            "[CAP ] object allowed holder=3 object=7 op=read",
+            "[M6.F] report pid=3 status=2 progress=18 failed_step=",
+        ),
+    ];
+    let mut ordered = MarkerTracker::from_ordered(&ORDERED);
+    if !ordered.consume(output) {
+        return Err(XtaskError::MissingMarker(ordered.pending_label()));
     }
-    let tail = &output[prefix.search_start..];
-    for marker in TAIL_REQUIRED {
-        if !tail.contains(marker) {
-            return Err(XtaskError::MissingMarker(marker.to_owned()));
+    for (after, report) in FLOATING_REPORTS {
+        let after_start = output
+            .rfind(after)
+            .ok_or_else(|| XtaskError::MissingMarker(after.to_owned()))?;
+        if !output[after_start..].contains(report) {
+            return Err(XtaskError::MissingMarker(report.to_owned()));
         }
     }
-    let mut suffix = MarkerTracker::from_ordered(&SUFFIX);
-    suffix.search_start = prefix.search_start;
-    if suffix.consume(output) {
-        Ok(())
-    } else {
-        Err(XtaskError::MissingMarker(suffix.pending_label()))
-    }
+    Ok(())
 }
 
 struct OutputChunk {
@@ -4225,7 +4450,7 @@ mod tests {
     }
 
     #[test]
-    fn m6_capabilities_markers_accept_post_revoke_partial_order() {
+    fn m6_capabilities_markers_accept_handshake_order() {
         let output = "\
 [STOR] object-service started pid=1\n\
 [CAP ] object grant holder=3 object=7\n\
@@ -4245,14 +4470,14 @@ mod tests {
 [TEST] unrelated workload progress=3\n\
 [CAP ] revoke branch=4\n\
 [CAP ] stale denied holder=4 reason=revoked\n\
-[M6.F] report pid=4 status=2 progress=580\n\
+[M6.F] report pid=4 status=2 progress=9 failed_step=0\n\
 [CAP ] object allowed holder=3 object=7 op=read\n\
 [AUD ] seq=1 actor=8 class=audit resource=0 op=audit_read outcome=allowed depth=0\n\
-[M6.F] report pid=8 status=2 progress=680\n\
-[M6.F] report pid=3 status=2 progress=606\n\
+[M6.F] report pid=8 status=2 progress=3 failed_step=0\n\
+[M6.F] report pid=3 status=2 progress=18 failed_step=0\n\
 [AUD ] seq=2 actor=9 class=audit resource=0 op=audit_read outcome=invalid-handle depth=0\n\
 [AUD ] seq=3 actor=9 class=audit resource=0 op=audit_read outcome=wrong-holder depth=0\n\
-[M6.F] report pid=9 status=2 progress=0\n\
+[M6.F] report pid=9 status=2 progress=2 failed_step=0\n\
 [TEST] unrelated workload progress=4\n\
 [M6.8] PASS\n";
         assert!(validate_output_markers(
@@ -4263,7 +4488,7 @@ mod tests {
     }
 
     #[test]
-    fn m6_capabilities_markers_accept_audit_before_revoke_tail() {
+    fn m6_capabilities_markers_reject_audit_before_revoke() {
         let output = "\
 [STOR] object-service started pid=1\n\
 [CAP ] object grant holder=3 object=7\n\
@@ -4282,22 +4507,60 @@ mod tests {
 [CAP ] process-control denied holder=7 target=? op=observe reason=stale\n\
 [TEST] unrelated workload progress=3\n\
 [AUD ] seq=1 actor=8 class=audit resource=0 op=audit_read outcome=allowed depth=0\n\
-[M6.F] report pid=8 status=2 progress=680\n\
+[M6.F] report pid=8 status=2 progress=3 failed_step=0\n\
 [AUD ] seq=2 actor=9 class=audit resource=0 op=audit_read outcome=invalid-handle depth=0\n\
 [AUD ] seq=3 actor=9 class=audit resource=0 op=audit_read outcome=wrong-holder depth=0\n\
-[M6.F] report pid=9 status=2 progress=0\n\
+[M6.F] report pid=9 status=2 progress=2 failed_step=0\n\
 [CAP ] revoke branch=5:1 actor=3 count=1\n\
 [CAP ] stale denied holder=4 reason=revoked\n\
-[M6.F] report pid=4 status=2 progress=580\n\
+[M6.F] report pid=4 status=2 progress=9 failed_step=0\n\
 [CAP ] object allowed holder=3 object=7 op=read\n\
-[M6.F] report pid=3 status=2 progress=606\n\
+[M6.F] report pid=3 status=2 progress=18 failed_step=0\n\
 [TEST] unrelated workload progress=4\n\
 [M6.8] PASS\n";
         assert!(validate_output_markers(
             output,
             MarkerSet::Ordered(&M6_CAPABILITIES_ACCEPTANCE_MARKERS)
         )
-        .is_ok());
+        .is_err());
+    }
+
+    #[test]
+    fn m6_capabilities_markers_reject_report_before_last_step() {
+        let output = "\
+[STOR] object-service started pid=1\n\
+[CAP ] object grant holder=3 object=7\n\
+[TEST] unrelated workload progress=1\n\
+[CAP ] process-control denied holder=6 target=? op=terminate reason=invalid-handle\n\
+[CAP ] object allowed holder=3 object=7 op=write\n\
+[CAP ] deny holder=5 object=7 op=read reason=no-authority\n\
+[CAP ] object allowed holder=3 object=7 op=read\n\
+[CAP ] delegate from=3 to=4 rights=read depth=1\n\
+[CAP ] object allowed holder=4 object=7 op=read\n\
+[CAP ] deny holder=4 object=7 op=write reason=missing-right\n\
+[CAP ] process-control allowed holder=7 target=2 op=observe\n\
+[CAP ] process-control denied holder=7 target=2 op=terminate reason=missing-right\n\
+[CAP ] process-control allowed holder=7 target=2 op=terminate\n\
+[PROC] teardown pid=2 resources=0\n\
+[CAP ] process-control denied holder=7 target=? op=observe reason=stale\n\
+[TEST] unrelated workload progress=3\n\
+[M6.F] report pid=4 status=2 progress=9 failed_step=0\n\
+[CAP ] revoke branch=5:1 actor=3 count=1\n\
+[CAP ] stale denied holder=4 reason=revoked\n\
+[CAP ] object allowed holder=3 object=7 op=read\n\
+[M6.F] report pid=3 status=2 progress=18 failed_step=0\n\
+[AUD ] seq=1 actor=8 class=audit resource=0 op=audit_read outcome=allowed depth=0\n\
+[M6.F] report pid=8 status=2 progress=3 failed_step=0\n\
+[AUD ] seq=2 actor=9 class=audit resource=0 op=audit_read outcome=invalid-handle depth=0\n\
+[AUD ] seq=3 actor=9 class=audit resource=0 op=audit_read outcome=wrong-holder depth=0\n\
+[M6.F] report pid=9 status=2 progress=2 failed_step=0\n\
+[TEST] unrelated workload progress=4\n\
+[M6.8] PASS\n";
+        assert!(validate_output_markers(
+            output,
+            MarkerSet::Ordered(&M6_CAPABILITIES_ACCEPTANCE_MARKERS)
+        )
+        .is_err());
     }
 
     #[test]

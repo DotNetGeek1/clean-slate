@@ -194,7 +194,7 @@ pub(crate) fn tmp_scratch_for(
 }
 
 pub(crate) fn object_wait_key(request_id: u64) -> crate::sched::wait::WaitKey {
-    crate::sched::wait::WaitKey(0x46_u64 << 56 | (request_id & 0x00FF_FFFF_FFFF_FFFF))
+    crate::capability::object::object_request_wait_key(request_id)
 }
 
 /// Result of a synchronous object queue operation (may require syscall restart).

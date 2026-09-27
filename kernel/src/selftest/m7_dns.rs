@@ -13,11 +13,12 @@ use clean_slate_network::stack::L3Stack;
 
 use crate::device::virtio::net::{NetInterruptSinks, VirtioNetDevice};
 use crate::diagnostics::qemu::{qemu_exit, QEMU_EXIT_SUCCESS};
-use crate::interrupt::timer::{initialize_timer, kernel_ticks};
+use crate::interrupt::timer::initialize_timer;
 use crate::{serial_write_fmt, serial_write_line};
 
-/// ~40 s ARP cache TTL at 1 ms LAPIC tick (was 50_000 ticks @ ~0.8 ms self-test reprogram).
-const ARP_TTL_TICKS: u64 = 40_000;
+/// The stack and resolver clock is calibrated TSC milliseconds ([`now_ms`]).
+const ARP_TTL_MS: u64 = 40_000;
+const MS_PER_SEC: u64 = 1000;
 const POLL_SPIN_LIMIT: usize = 50_000_000;
 const DNS_OWNER: TrustedCaller = TrustedCaller::new(0x4D37, 0, 1);
 
@@ -26,6 +27,8 @@ static mut RESOLVER_STORAGE: MaybeUninit<DnsResolver<VirtioNetDevice>> = MaybeUn
 #[allow(static_mut_refs)]
 pub(crate) fn run_m7_dns_self_test() -> Result<(), &'static str> {
     initialize_timer();
+    // `m3-entry-self-test` (pulled in by this feature) skips calibration inside `initialize_timer`.
+    crate::time::calibration::calibrate_apic_tick();
     let device = VirtioNetDevice::discover(NetInterruptSinks::NONE)?;
     let mac = device.link().mac;
     serial_write_fmt(format_args!("[DNS ] virtio ready mac="));
@@ -36,10 +39,10 @@ pub(crate) fn run_m7_dns_self_test() -> Result<(), &'static str> {
     unsafe {
         DnsResolver::init_in_place(
             RESOLVER_STORAGE.as_mut_ptr(),
-            L3Stack::new(device, mac, GUEST_IPV4, ARP_TTL_TICKS),
+            L3Stack::new(device, mac, GUEST_IPV4, ARP_TTL_MS),
             SessionGeneration::new(1),
             DNS_SERVER_ADDR,
-            DnsResolver::<VirtioNetDevice>::DEFAULT_TICKS_PER_SEC,
+            MS_PER_SEC,
         );
         run_cases(&mut *RESOLVER_STORAGE.as_mut_ptr())?;
     }
@@ -52,6 +55,10 @@ fn run_cases(resolver: &mut DnsResolver<VirtioNetDevice>) -> Result<(), &'static
     resolve_cache_hit(resolver, FIXTURE_HOSTNAME)?;
     resolve_nxdomain(resolver, "nope.fixture.test")?;
     Ok(())
+}
+
+fn now_ms() -> u64 {
+    crate::time::monotonic_ns() / 1_000_000
 }
 
 struct SerialWriter;
@@ -68,7 +75,7 @@ fn resolve_and_print(
     name: &str,
     expect_addr: bool,
 ) -> Result<(), &'static str> {
-    let mut now = kernel_ticks();
+    let mut now = now_ms();
     let outcome = resolver
         .resolve(now, DNS_OWNER, name)
         .map_err(map_dns_error)?;
@@ -81,7 +88,7 @@ fn resolve_and_print(
     };
 
     for _ in 0..POLL_SPIN_LIMIT {
-        now = kernel_ticks();
+        now = now_ms();
         resolver.poll(now).map_err(map_dns_error)?;
         if let Some(result) = resolver.take_result(query_id, DNS_OWNER) {
             match result {
@@ -122,7 +129,7 @@ fn resolve_nxdomain(
     resolver: &mut DnsResolver<VirtioNetDevice>,
     name: &str,
 ) -> Result<(), &'static str> {
-    let mut now = kernel_ticks();
+    let mut now = now_ms();
     let query_id = match resolver
         .resolve(now, DNS_OWNER, name)
         .map_err(map_dns_error)?
@@ -131,7 +138,7 @@ fn resolve_nxdomain(
         _ => return Err("expected pending nxdomain query"),
     };
     for _ in 0..POLL_SPIN_LIMIT {
-        now = kernel_ticks();
+        now = now_ms();
         resolver.poll(now).map_err(map_dns_error)?;
         if let Some(result) = resolver.take_result(query_id, DNS_OWNER) {
             match result {

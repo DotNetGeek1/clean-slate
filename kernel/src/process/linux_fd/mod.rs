@@ -7,7 +7,7 @@ pub(crate) mod open_description;
 pub(crate) mod readiness;
 pub(crate) mod table;
 
-use clean_slate_linux_abi::{LinuxErrno, EBADF, EMFILE};
+use clean_slate_linux_abi::{LinuxErrno, EBADF, EINVAL, EMFILE, ENFILE};
 use clean_slate_service_lifecycle::InstanceGeneration;
 use console::write_console;
 use open_description::{
@@ -26,6 +26,7 @@ use table::{
     install_stdio_entries, release_table, LinuxFdTable,
 };
 
+use super::linux_proc::pipe;
 use super::personality::ExecutionPersonality;
 use super::process_registry_mut;
 use super::KERNEL_PROCESS_ID;
@@ -273,12 +274,61 @@ impl LinuxFdRegistry {
         }
     }
 
-    pub(crate) fn alloc_pipe_description(
+    /// Allocates a pipe and installs both ends at the two lowest free fds. Every
+    /// resource is claimed before either fd is published, and any failure releases
+    /// what was taken, so the pipe, its reader/writer counts and the fd table are
+    /// left as they were.
+    pub(crate) fn open_pipe(
         &mut self,
-        owner_pid: u64,
-        pipe: PipeRef,
-    ) -> Result<OpenDescriptionId, LinuxErrno> {
-        self.pool.alloc_pipe(owner_pid, pipe)
+        pid: u64,
+        generation: InstanceGeneration,
+    ) -> Result<[i32; 2], LinuxErrno> {
+        let index = self.ensure_slot_index(pid, generation).map_err(|_| EBADF)?;
+        let mut free_fds = self.slots[index]
+            .as_ref()
+            .expect("slot")
+            .table
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.is_none())
+            .map(|(fd, _)| fd as u64);
+        let (Some(read_fd), Some(write_fd)) = (free_fds.next(), free_fds.next()) else {
+            return Err(EMFILE);
+        };
+        let (read, write) = pipe::open_pipe_refs(pipe::pool_mut())?;
+        let installed = self.install_pipe_ends(index, pid, [read_fd, write_fd], read, write);
+        if installed.is_err() {
+            pipe::discard_unattached_pipe(read);
+        }
+        installed
+    }
+
+    fn install_pipe_ends(
+        &mut self,
+        index: usize,
+        pid: u64,
+        [read_fd, write_fd]: [u64; 2],
+        read: PipeRef,
+        write: PipeRef,
+    ) -> Result<[i32; 2], LinuxErrno> {
+        let read_open = self.pool.alloc_pipe(pid, read)?;
+        let write_open = self
+            .pool
+            .alloc_pipe(pid, write)
+            .inspect_err(|_| self.pool.free_unattached(read_open))?;
+        let table = &mut self.slots[index].as_mut().expect("slot").table;
+        if let Err(errno) = table.set_at(&mut self.pool, read_fd, read_open, FdFlags::default()) {
+            self.pool.free_unattached(read_open);
+            self.pool.free_unattached(write_open);
+            return Err(errno);
+        }
+        if let Err(errno) = table.set_at(&mut self.pool, write_fd, write_open, FdFlags::default()) {
+            let _ = close_fd_entry(table, &mut self.pool, read_fd);
+            self.pool.free_unattached(write_open);
+            return Err(errno);
+        }
+        Ok([read_fd as i32, write_fd as i32])
     }
 
     fn pool_mut(&mut self) -> &mut OpenDescriptionPool {
@@ -449,8 +499,7 @@ impl LinuxFdRegistry {
             return Ok(());
         };
         let table = &mut self.slots[index].as_mut().expect("slot").table;
-        close_cloexec_in_table(table, &mut self.pool);
-        Ok(())
+        close_cloexec_in_table(table, &mut self.pool)
     }
 
     pub(crate) fn open_description_id_for_fd(
@@ -526,8 +575,9 @@ impl LinuxFdRegistry {
         let open = table.get(old_fd).ok_or(EBADF)?.open;
         let start = usize::try_from(min_fd)
             .ok()
-            .filter(|i| *i < LINUX_FD_TABLE_CAPACITY);
-        for slot_index in start.unwrap_or(0)..LINUX_FD_TABLE_CAPACITY {
+            .filter(|i| *i < LINUX_FD_TABLE_CAPACITY)
+            .ok_or(EINVAL)?;
+        for slot_index in start..LINUX_FD_TABLE_CAPACITY {
             if table.entries[slot_index].is_none() {
                 self.pool.add_ref(open)?;
                 table.entries[slot_index] = Some(FdEntry {
@@ -558,6 +608,24 @@ impl LinuxFdRegistry {
         )?;
         let table = &mut self.slots[index].as_mut().expect("slot").table;
         table.alloc_lowest(&mut self.pool, open, FdFlags::default())
+    }
+
+    /// Fails with the error `alloc_description_and_fd` would return for lack of an fd
+    /// or a description, so a caller can check before side effects such as `O_TRUNC`.
+    pub(crate) fn check_description_and_fd_available(
+        &self,
+        pid: u64,
+        generation: InstanceGeneration,
+    ) -> Result<(), LinuxErrno> {
+        let slot_index = self.slot_index(pid, generation).ok_or(EBADF)?;
+        let table = &self.slots[slot_index].as_ref().expect("slot").table;
+        if table.entries.iter().all(Option::is_some) {
+            return Err(EMFILE);
+        }
+        if !self.pool.has_free_slot() {
+            return Err(ENFILE);
+        }
+        Ok(())
     }
 
     pub(crate) fn alloc_description_and_fd(
@@ -722,21 +790,9 @@ pub(crate) fn read_kind_for_fd(
     registry_mut().read_kind_for_fd(pid, generation, fd)
 }
 
-pub(crate) fn alloc_pipe_end(
-    pid: u64,
-    generation: InstanceGeneration,
-    pipe: PipeRef,
-) -> Result<i32, LinuxErrno> {
-    let registry = registry_mut();
-    let index = registry
-        .ensure_slot_index(pid, generation)
-        .map_err(|_| EBADF)?;
-    let open = registry.alloc_pipe_description(pid, pipe)?;
-    registry.slots[index]
-        .as_mut()
-        .expect("slot")
-        .table
-        .alloc_lowest(&mut registry.pool, open, FdFlags::default())
+/// `pipe(2)`: `[read_fd, write_fd]` of a new pipe, or an error with nothing allocated.
+pub(crate) fn open_pipe(pid: u64, generation: InstanceGeneration) -> Result<[i32; 2], LinuxErrno> {
+    registry_mut().open_pipe(pid, generation)
 }
 
 pub(crate) fn open_description_kind(
@@ -906,18 +962,26 @@ pub(crate) fn alloc_lowest_fd(
     registry_mut().alloc_lowest_fd(pid, generation, open, flags)
 }
 
+pub(crate) fn check_description_and_fd_available(
+    pid: u64,
+    generation: InstanceGeneration,
+) -> Result<(), LinuxErrno> {
+    registry_mut().check_description_and_fd_available(pid, generation)
+}
+
 pub(crate) fn alloc_file_description(
     pid: u64,
     generation: InstanceGeneration,
     file: open_description::FileHandleRef,
     status: OpenStatus,
+    flags: FdFlags,
 ) -> Result<i32, LinuxErrno> {
     registry_mut().alloc_description_and_fd(
         pid,
         generation,
         DescriptorKind::File(file),
         status,
-        FdFlags::default(),
+        flags,
     )
 }
 
@@ -926,13 +990,14 @@ pub(crate) fn alloc_dir_description(
     generation: InstanceGeneration,
     dir: open_description::DirHandleRef,
     status: OpenStatus,
+    flags: FdFlags,
 ) -> Result<i32, LinuxErrno> {
     registry_mut().alloc_description_and_fd(
         pid,
         generation,
         DescriptorKind::Dir(dir),
         status,
-        FdFlags::default(),
+        flags,
     )
 }
 
@@ -997,6 +1062,7 @@ pub(crate) use table::{FdEntry, FdFlags, LINUX_FD_TABLE_CAPACITY};
 mod tests {
     use super::*;
     use crate::process::personality::ExecutionPersonality;
+    use open_description::OPEN_DESCRIPTION_CAPACITY;
 
     fn local_pair() -> (LinuxFdRegistry, IpcEndpointTable) {
         (LinuxFdRegistry::new(), IpcEndpointTable::new())
@@ -1125,6 +1191,135 @@ mod tests {
         assert!(fds.table_get_for_test(4, gen, LINUX_STDERR_FD).is_none());
     }
 
+    fn read_only_status() -> OpenStatus {
+        OpenStatus {
+            access: OpenAccess::ReadOnly,
+            nonblock: false,
+            append: false,
+        }
+    }
+
+    fn fs_node(index: u16) -> open_description::LinuxFsNodeId {
+        open_description::LinuxFsNodeId {
+            index,
+            generation: 1,
+        }
+    }
+
+    fn alloc_file(
+        fds: &mut LinuxFdRegistry,
+        pid: u64,
+        gen: InstanceGeneration,
+        cloexec: bool,
+    ) -> u64 {
+        let file = open_description::FileHandleRef { node: fs_node(1) };
+        fds.alloc_description_and_fd(
+            pid,
+            gen,
+            DescriptorKind::File(file),
+            read_only_status(),
+            FdFlags { cloexec },
+        )
+        .expect("file fd") as u64
+    }
+
+    fn alloc_dir(
+        fds: &mut LinuxFdRegistry,
+        pid: u64,
+        gen: InstanceGeneration,
+        cloexec: bool,
+    ) -> u64 {
+        let dir = open_description::DirHandleRef { node: fs_node(2) };
+        fds.alloc_description_and_fd(
+            pid,
+            gen,
+            DescriptorKind::Dir(dir),
+            read_only_status(),
+            FdFlags { cloexec },
+        )
+        .expect("dir fd") as u64
+    }
+
+    #[test]
+    fn file_and_dir_fds_carry_initial_cloexec() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 11, gen);
+        let file_cloexec = alloc_file(&mut fds, 11, gen, true);
+        let dir_cloexec = alloc_dir(&mut fds, 11, gen, true);
+        let file_plain = alloc_file(&mut fds, 11, gen, false);
+        let dir_plain = alloc_dir(&mut fds, 11, gen, false);
+        assert!(fds.get_fd_cloexec(11, gen, file_cloexec).expect("file"));
+        assert!(fds.get_fd_cloexec(11, gen, dir_cloexec).expect("dir"));
+        assert!(!fds.get_fd_cloexec(11, gen, file_plain).expect("file plain"));
+        assert!(!fds.get_fd_cloexec(11, gen, dir_plain).expect("dir plain"));
+    }
+
+    #[test]
+    fn exec_drops_cloexec_file_and_dir_fds_without_setfd() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 12, gen);
+        let baseline = fds.open_description_live_count();
+        let file_cloexec = alloc_file(&mut fds, 12, gen, true);
+        let dir_cloexec = alloc_dir(&mut fds, 12, gen, true);
+        let file_plain = alloc_file(&mut fds, 12, gen, false);
+        assert_eq!(fds.open_description_live_count(), baseline + 3);
+
+        fds.close_on_exec_for_process(12, gen).expect("exec");
+
+        assert!(fds.table_get_for_test(12, gen, file_cloexec).is_none());
+        assert!(fds.table_get_for_test(12, gen, dir_cloexec).is_none());
+        assert!(fds.table_get_for_test(12, gen, file_plain).is_some());
+        assert!(fds.table_get_for_test(12, gen, LINUX_STDOUT_FD).is_some());
+        assert_eq!(fds.open_description_live_count(), baseline + 1);
+    }
+
+    #[test]
+    fn exec_keeps_description_shared_with_a_plain_dup() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 13, gen);
+        let baseline = fds.open_description_live_count();
+        let file_cloexec = alloc_file(&mut fds, 13, gen, true);
+        fds.dup2(13, gen, file_cloexec, 7).expect("dup2");
+        assert!(!fds.get_fd_cloexec(13, gen, 7).expect("dup2 clears cloexec"));
+
+        fds.close_on_exec_for_process(13, gen).expect("exec");
+
+        assert!(fds.table_get_for_test(13, gen, file_cloexec).is_none());
+        assert!(fds.table_get_for_test(13, gen, 7).is_some());
+        assert_eq!(fds.open_description_live_count(), baseline + 1);
+    }
+
+    #[test]
+    fn dupfd_cloexec_sets_cloexec_at_or_above_min() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 14, gen);
+        let new_fd = fds
+            .dup_to_lowest_at_or_above(14, gen, LINUX_STDOUT_FD, 10)
+            .expect("dupfd") as u64;
+        assert_eq!(new_fd, 10);
+        assert!(fds.get_fd_cloexec(14, gen, new_fd).expect("get"));
+    }
+
+    #[test]
+    fn dupfd_cloexec_min_beyond_table_is_einval() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 15, gen);
+        let baseline = fds.open_description_live_count();
+        for min_fd in [LINUX_FD_TABLE_CAPACITY as u64, u64::MAX] {
+            assert_eq!(
+                fds.dup_to_lowest_at_or_above(15, gen, LINUX_STDOUT_FD, min_fd),
+                Err(EINVAL)
+            );
+        }
+        assert!(fds.table_get_for_test(15, gen, 0).is_none());
+        assert_eq!(fds.open_description_live_count(), baseline);
+    }
+
     #[test]
     fn inheritance_bumps_refcounts() {
         let (mut fds, mut ipc) = local_pair();
@@ -1149,6 +1344,209 @@ mod tests {
         assert_eq!(
             fds.projection_for(7, gen, LINUX_STDOUT_FD),
             Ok(LinuxFdProjection::Closed)
+        );
+    }
+
+    fn free_fd_count(fds: &LinuxFdRegistry, pid: u64, generation: InstanceGeneration) -> usize {
+        let index = fds.slot_index(pid, generation).expect("fd table");
+        let table = &fds.slots[index].as_ref().expect("slot").table;
+        table.entries.iter().filter(|entry| entry.is_none()).count()
+    }
+
+    fn fill_fds_leaving(
+        fds: &mut LinuxFdRegistry,
+        pid: u64,
+        generation: InstanceGeneration,
+        free: usize,
+    ) {
+        while free_fd_count(fds, pid, generation) > free {
+            fds.alloc_self_test_placeholder_file(pid, generation)
+                .expect("placeholder fd");
+        }
+    }
+
+    /// Fills the shared description pool from filler processes until `free` slots remain.
+    fn fill_descriptions_leaving(fds: &mut LinuxFdRegistry, free: usize) {
+        let gen = InstanceGeneration(1);
+        let mut filler_pid = 90;
+        while usize::from(fds.open_description_live_count()) < OPEN_DESCRIPTION_CAPACITY - free {
+            match fds.alloc_self_test_placeholder_file(filler_pid, gen) {
+                Ok(_) => {}
+                Err(EMFILE) => filler_pid += 1,
+                Err(errno) => panic!("filler fd failed: {errno:?}"),
+            }
+        }
+    }
+
+    fn pipe_handle_for_fd(
+        fds: &LinuxFdRegistry,
+        pid: u64,
+        gen: InstanceGeneration,
+        fd: i32,
+    ) -> pipe::PipeHandle {
+        let read = fds
+            .pipe_read_ref(pid, gen, fd as u64)
+            .or_else(|| fds.pipe_write_ref(pid, gen, fd as u64))
+            .expect("pipe fd");
+        pipe::pipe_ref_to_handle(read)
+    }
+
+    #[test]
+    fn pipe_installs_both_ends_and_close_frees_the_pipe() {
+        let _pipes = pipe::PIPE_POOL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 20, gen);
+        let descriptions = fds.open_description_live_count();
+        let live_pipes = pipe::pool().live_count();
+        let [read_fd, write_fd] = fds.open_pipe(20, gen).expect("pipe");
+        assert_eq!([read_fd, write_fd], [0, 3]);
+        let handle = pipe_handle_for_fd(&fds, 20, gen, read_fd);
+        assert_eq!(pipe::pool().end_counts(handle), Some((1, 1)));
+        assert_eq!(fds.open_description_live_count(), descriptions + 2);
+        fds.close_fd(20, gen, read_fd as u64).expect("close read");
+        fds.close_fd(20, gen, write_fd as u64).expect("close write");
+        assert_eq!(pipe::pool().end_counts(handle), None);
+        assert_eq!(pipe::pool().live_count(), live_pipes);
+        assert_eq!(fds.open_description_live_count(), descriptions);
+    }
+
+    #[test]
+    fn pipe_emfile_on_first_or_second_fd_leaves_nothing_behind() {
+        let _pipes = pipe::PIPE_POOL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for free in [0, 1] {
+            let (mut fds, mut ipc) = local_pair();
+            let gen = InstanceGeneration(1);
+            install_test_stdio(&mut fds, &mut ipc, 21, gen);
+            fill_fds_leaving(&mut fds, 21, gen, free);
+            let descriptions = fds.open_description_live_count();
+            let live_pipes = pipe::pool().live_count();
+            assert_eq!(fds.open_pipe(21, gen), Err(EMFILE), "free fds={free}");
+            assert_eq!(free_fd_count(&fds, 21, gen), free);
+            assert_eq!(fds.open_description_live_count(), descriptions);
+            assert_eq!(pipe::pool().live_count(), live_pipes);
+        }
+    }
+
+    #[test]
+    fn pipe_enfile_on_either_description_leaves_nothing_behind() {
+        let _pipes = pipe::PIPE_POOL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for free in [0, 1] {
+            let (mut fds, mut ipc) = local_pair();
+            let gen = InstanceGeneration(1);
+            install_test_stdio(&mut fds, &mut ipc, 22, gen);
+            fill_descriptions_leaving(&mut fds, free);
+            let live_pipes = pipe::pool().live_count();
+            assert_eq!(
+                fds.open_pipe(22, gen),
+                Err(ENFILE),
+                "free descriptions={free}"
+            );
+            assert_eq!(free_fd_count(&fds, 22, gen), LINUX_FD_TABLE_CAPACITY - 2);
+            assert_eq!(
+                usize::from(fds.open_description_live_count()),
+                OPEN_DESCRIPTION_CAPACITY - free
+            );
+            assert_eq!(pipe::pool().live_count(), live_pipes);
+        }
+    }
+
+    #[test]
+    fn dup2_failure_leaves_the_target_fd_open() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 23, gen);
+        let target = fds
+            .open_description_for_fd(23, gen, LINUX_STDERR_FD)
+            .unwrap();
+        let source = fds
+            .open_description_for_fd(23, gen, LINUX_STDOUT_FD)
+            .unwrap();
+        fds.pool.get_mut(source).unwrap().refcount = open_description::OPEN_DESCRIPTION_REF_MAX;
+        assert_eq!(
+            fds.dup2(23, gen, LINUX_STDOUT_FD, LINUX_STDERR_FD),
+            Err(EMFILE)
+        );
+        assert_eq!(
+            fds.open_description_for_fd(23, gen, LINUX_STDERR_FD),
+            Ok(target)
+        );
+        assert_eq!(fds.pool.get(target).unwrap().refcount, 1);
+    }
+
+    #[test]
+    fn dup2_onto_an_open_fd_replaces_it() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 24, gen);
+        let replaced = fds
+            .open_description_for_fd(24, gen, LINUX_STDERR_FD)
+            .unwrap();
+        let source = fds
+            .open_description_for_fd(24, gen, LINUX_STDOUT_FD)
+            .unwrap();
+        let descriptions = fds.open_description_live_count();
+        fds.dup2(24, gen, LINUX_STDOUT_FD, LINUX_STDERR_FD)
+            .expect("dup2");
+        assert_eq!(
+            fds.open_description_for_fd(24, gen, LINUX_STDERR_FD),
+            Ok(source)
+        );
+        assert_eq!(fds.pool.get(source).unwrap().refcount, 2);
+        assert!(fds.pool.get(replaced).is_err());
+        assert_eq!(fds.open_description_live_count(), descriptions - 1);
+    }
+
+    #[test]
+    fn failed_inheritance_releases_the_refs_already_taken() {
+        let (mut fds, mut ipc) = local_pair();
+        let parent_gen = InstanceGeneration(1);
+        let child_gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 25, parent_gen);
+        let stdout = fds
+            .open_description_for_fd(25, parent_gen, LINUX_STDOUT_FD)
+            .unwrap();
+        let stderr = fds
+            .open_description_for_fd(25, parent_gen, LINUX_STDERR_FD)
+            .unwrap();
+        fds.pool.get_mut(stderr).unwrap().refcount = open_description::OPEN_DESCRIPTION_REF_MAX;
+        assert_eq!(
+            fds.inherit_for_child(25, parent_gen, 26, child_gen),
+            Err(EMFILE)
+        );
+        assert_eq!(fds.pool.get(stdout).unwrap().refcount, 1);
+        assert_eq!(free_fd_count(&fds, 26, child_gen), LINUX_FD_TABLE_CAPACITY);
+    }
+
+    #[test]
+    fn failed_stdio_install_frees_the_first_description() {
+        let mut pool = OpenDescriptionPool::new();
+        let mut ipc = IpcEndpointTable::new();
+        ipc.grant_console_capability_for_pid(27).expect("grant");
+        let sink = console_sink_ref_from_table(&ipc).expect("sink");
+        let file = open_description::FileHandleRef {
+            node: open_description::LinuxFsNodeId {
+                index: 1,
+                generation: 1,
+            },
+        };
+        while usize::from(pool.live_count()) < OPEN_DESCRIPTION_CAPACITY - 1 {
+            pool.alloc_placeholder_file(28, file).expect("filler");
+        }
+        let mut table = LinuxFdTable::empty();
+        assert_eq!(
+            install_stdio_entries(&mut table, &mut pool, 27, sink),
+            Err(ENFILE)
+        );
+        assert_eq!(
+            usize::from(pool.live_count()),
+            OPEN_DESCRIPTION_CAPACITY - 1
         );
     }
 

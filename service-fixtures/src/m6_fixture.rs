@@ -4,20 +4,17 @@ pub const M6_FIXTURE_BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0020_0000;
 pub const M6_FIXTURE_MAGIC: u64 = 0x4d36_4649_5854_5552;
 pub const M6_FIXTURE_MAX_STEPS: usize = 32;
 pub const M6_FIXTURE_DATA_BYTES: usize = 1024;
-pub const M6_FIXTURE_MAX_REPEATS: u64 = 200_000;
 
 pub const STEP_KIND_END: u64 = 0;
 pub const STEP_KIND_SYSCALL: u64 = 1;
-pub const STEP_KIND_SPIN: u64 = 2;
+// Kind 2 was a busy-wait spin; fixtures now order themselves with blocking
+// harness syscalls, and the runner rejects the retired kind as a mismatch.
 pub const STEP_KIND_FAULT: u64 = 3;
 pub const STEP_KIND_REPORT: u64 = 4;
 
 pub const EXPECT_IGNORE: u64 = 0;
 pub const EXPECT_EQ: u64 = 1;
 pub const EXPECT_NE: u64 = 2;
-
-pub const REPEAT_NONE: u64 = 0;
-pub const REPEAT_WHILE_EQ: u64 = 1;
 
 pub const ARG_DATA_PTR: u64 = 1 << 62;
 pub const ARG_RESULT_OF: u64 = 1 << 61;
@@ -35,8 +32,6 @@ pub struct M6FixtureStep {
     pub args: [u64; 6],
     pub expect_mode: u64,
     pub expect: u64,
-    pub repeat_mode: u64,
-    pub repeat_value: u64,
     pub result: u64,
 }
 
@@ -46,6 +41,7 @@ pub struct M6FixtureBootstrap {
     pub magic: u64,
     pub status: u64,
     pub failed_step: u64,
+    /// Steps the runner completed (a blocking step counts once it returns).
     pub progress: u64,
     pub step_count: u64,
     pub steps: [M6FixtureStep; M6_FIXTURE_MAX_STEPS],
@@ -59,8 +55,6 @@ impl M6FixtureStep {
         args: [0; 6],
         expect_mode: EXPECT_IGNORE,
         expect: 0,
-        repeat_mode: REPEAT_NONE,
-        repeat_value: 0,
         result: 0,
     };
 
@@ -71,8 +65,6 @@ impl M6FixtureStep {
             args,
             expect_mode: EXPECT_IGNORE,
             expect: 0,
-            repeat_mode: REPEAT_NONE,
-            repeat_value: 0,
             result: 0,
         }
     }
@@ -93,27 +85,6 @@ impl M6FixtureStep {
         }
     }
 
-    pub const fn repeat_while_eq(self, v: u64) -> Self {
-        Self {
-            repeat_mode: REPEAT_WHILE_EQ,
-            repeat_value: v,
-            ..self
-        }
-    }
-
-    pub const fn spin(rounds: u64) -> Self {
-        Self {
-            kind: STEP_KIND_SPIN,
-            nr: 0,
-            args: [rounds, 0, 0, 0, 0, 0],
-            expect_mode: EXPECT_IGNORE,
-            expect: 0,
-            repeat_mode: REPEAT_NONE,
-            repeat_value: 0,
-            result: 0,
-        }
-    }
-
     pub const fn fault() -> Self {
         Self {
             kind: STEP_KIND_FAULT,
@@ -121,8 +92,6 @@ impl M6FixtureStep {
             args: [0, 0, 0, 0, 0, 0],
             expect_mode: EXPECT_IGNORE,
             expect: 0,
-            repeat_mode: REPEAT_NONE,
-            repeat_value: 0,
             result: 0,
         }
     }
@@ -134,8 +103,6 @@ impl M6FixtureStep {
             args: [0; 6],
             expect_mode: EXPECT_IGNORE,
             expect: 0,
-            repeat_mode: REPEAT_NONE,
-            repeat_value: 0,
             result: 0,
         }
     }
@@ -296,11 +263,10 @@ mod tests {
 
     #[test]
     fn builder_constructors_and_size() {
-        let step = M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [0; 6])
-            .expect_eq(1)
-            .repeat_while_eq(0);
+        let step = M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [0; 6]).expect_eq(1);
+        assert_eq!(step.kind, STEP_KIND_SYSCALL);
         assert_eq!(step.expect_mode, EXPECT_EQ);
-        assert_eq!(step.repeat_mode, REPEAT_WHILE_EQ);
+        assert_eq!(step.expect, 1);
         assert_eq!(
             M6_FIXTURE_BOOTSTRAP_BYTES,
             core::mem::size_of::<M6FixtureBootstrap>()

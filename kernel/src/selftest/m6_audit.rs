@@ -85,7 +85,6 @@ fn build_auditor_program() -> M6FixtureBootstrap {
             .expect_ne(0),
         )
         .unwrap();
-    program.push(M6FixtureStep::spin(2)).unwrap();
     program
         .push(
             M6FixtureStep::syscall(

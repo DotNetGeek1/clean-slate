@@ -6,6 +6,7 @@ use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::process::linux_fd::{
     self,
     open_description::{DescriptorKind, DirHandleRef, FileHandleRef, OpenAccess, OpenStatus},
+    FdFlags,
 };
 use crate::process::linux_fs::namespace::{
     check_write_allowed, is_tmp_path, open_write_intent, NodeId,
@@ -16,8 +17,8 @@ use crate::process::linux_fs::table_mut;
 use crate::process::linux_rootfs;
 use clean_slate_linux_abi::{
     encode_dirent64, encode_stat144, LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EFAULT,
-    EINVAL, EISDIR, ENOTDIR, O_CREAT, O_DIRECTORY, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SYS_GETCWD,
-    SYS_GETDENTS64, SYS_LSTAT, SYS_MKDIR, SYS_OPEN, SYS_STAT,
+    EINVAL, EISDIR, ENOTDIR, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_LARGEFILE, O_RDONLY, O_RDWR,
+    O_TRUNC, O_WRONLY, SYS_GETCWD, SYS_GETDENTS64, SYS_LSTAT, SYS_MKDIR, SYS_OPEN, SYS_STAT,
 };
 
 pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
@@ -47,7 +48,11 @@ pub(crate) fn handle_sys_open(
     let path_ptr = request.args[0];
     let flags = request.args[1] as u32;
     let _mode = request.args[2];
+    let fd_flags = open_fd_flags(flags)?;
     let path = copy_path_from_user(path_ptr)?;
+    // As in Linux, a missing fd fails the open before the path is resolved, so an
+    // EMFILE/ENFILE open never creates or truncates a file.
+    linux_fd::check_description_and_fd_available(ctx.pid, ctx.instance_generation)?;
     check_write_allowed(path.as_bytes(), flags)?;
     if open_write_intent(flags) && is_tmp_path(path.as_bytes())? {
         authorize_tmp_namespace_write(ctx.pid)?;
@@ -83,6 +88,7 @@ pub(crate) fn handle_sys_open(
                 ctx.instance_generation,
                 DirHandleRef { node },
                 status,
+                fd_flags,
             )?
         }
         _ => {
@@ -94,10 +100,33 @@ pub(crate) fn handle_sys_open(
                 ctx.instance_generation,
                 FileHandleRef { node },
                 status,
+                fd_flags,
             )?
         }
     };
     Ok(fd as u64)
+}
+
+const OPEN_ACCESS_MASK: u32 = 0b11;
+/// `O_LARGEFILE` is accepted as a no-op (x86-64 offsets are already 64-bit). Every
+/// other bit outside this set, including `O_APPEND`/`O_NONBLOCK`, is not implemented
+/// for filesystem opens and is refused rather than silently ignored.
+const OPEN_SUPPORTED_FLAGS: u32 =
+    OPEN_ACCESS_MASK | O_CREAT | O_TRUNC | O_DIRECTORY | O_LARGEFILE | O_CLOEXEC;
+
+/// Validates `open(2)` flags and derives the per-fd flags of the new descriptor.
+/// `O_CREAT | O_DIRECTORY` is refused as in Linux 6.4+, rather than creating a
+/// file and then failing with `ENOTDIR`.
+fn open_fd_flags(flags: u32) -> Result<FdFlags, LinuxErrno> {
+    if flags & !OPEN_SUPPORTED_FLAGS != 0
+        || flags & OPEN_ACCESS_MASK == OPEN_ACCESS_MASK
+        || flags & (O_CREAT | O_DIRECTORY) == O_CREAT | O_DIRECTORY
+    {
+        return Err(EINVAL);
+    }
+    Ok(FdFlags {
+        cloexec: flags & O_CLOEXEC != 0,
+    })
 }
 
 pub(crate) fn handle_sys_stat(
@@ -272,4 +301,48 @@ fn copy_path_from_user(ptr: u64) -> Result<UserPathBuf, LinuxErrno> {
         storage,
         len: norm_len,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clean_slate_linux_abi::{O_APPEND, O_NONBLOCK};
+
+    #[test]
+    fn open_cloexec_sets_fd_cloexec() {
+        let frozen_file = O_RDONLY | O_LARGEFILE | O_CLOEXEC;
+        let frozen_dir = O_RDONLY | O_LARGEFILE | O_CLOEXEC | O_DIRECTORY;
+        assert_eq!(open_fd_flags(frozen_file), Ok(FdFlags { cloexec: true }));
+        assert_eq!(open_fd_flags(frozen_dir), Ok(FdFlags { cloexec: true }));
+        assert_eq!(
+            open_fd_flags(O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC),
+            Ok(FdFlags { cloexec: true })
+        );
+    }
+
+    #[test]
+    fn open_without_cloexec_leaves_fd_flags_clear() {
+        for flags in [
+            O_RDONLY,
+            O_RDONLY | O_LARGEFILE,
+            O_RDONLY | O_DIRECTORY,
+            O_WRONLY | O_CREAT | O_TRUNC | O_LARGEFILE,
+            O_RDWR,
+        ] {
+            assert_eq!(open_fd_flags(flags), Ok(FdFlags { cloexec: false }));
+        }
+    }
+
+    #[test]
+    fn open_unsupported_flags_are_einval() {
+        for flags in [
+            O_RDONLY | O_APPEND,
+            O_WRONLY | O_NONBLOCK,
+            O_RDONLY | O_CLOEXEC | 0x4000_0000,
+            OPEN_ACCESS_MASK,
+            O_RDWR | O_CREAT | O_DIRECTORY,
+        ] {
+            assert_eq!(open_fd_flags(flags), Err(EINVAL), "flags={flags:#x}");
+        }
+    }
 }

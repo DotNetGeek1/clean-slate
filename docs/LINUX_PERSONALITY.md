@@ -413,7 +413,7 @@ Linux fd integers remain compatibility-local. Authority lives in a **global boun
 
 Each fd entry stores `FdEntry { open: OpenDescriptionId, flags: FdFlags }` where `OpenDescriptionId { index, generation }` never aliases a replaced object. Open descriptions carry shared `OpenStatus` / `offset`, `DescriptorKind` (console, file/dir/pipe/socket placeholders), and a refcount; `close` drops one ref, final ref runs a kind-specific release hook.
 
-Syscalls wired for this lane: `close(3)`, `writev(20)`, `dup2(33)`, `fcntl(72)` (`F_GETFD`/`F_SETFD`/`F_GETFL`/`F_SETFL`/`F_DUPFD_CLOEXEC`). `write(1)` uses the same console backend via open descriptions. Errno mapping: `EBADF` stale/closed, `EMFILE` per-process table full, `ENFILE` pool full, `EINVAL` bad `fcntl`/`writev` iovcnt.
+Syscalls wired for this lane: `close(3)`, `writev(20)`, `dup2(33)`, `fcntl(72)` (`F_GETFD`/`F_SETFD`/`F_GETFL`/`F_SETFL`/`F_DUPFD_CLOEXEC`). `write(1)` uses the same console backend via open descriptions. Errno mapping: `EBADF` stale/closed, `EMFILE` per-process table full, `ENFILE` pool full, `EINVAL` bad `fcntl` (including an `F_DUPFD_CLOEXEC` minimum at or beyond the fd table)/`writev` iovcnt. `FD_CLOEXEC` is set by `open(O_CLOEXEC)`, `socket(SOCK_CLOEXEC)`, `F_DUPFD_CLOEXEC` and `F_SETFD`; `dup2` and `pipe` clear it; a committed `execve` closes every fd that has it.
 
 QEMU: `cargo xtask test-m9-fd-core` (`m9-fd-core-self-test`), markers `[M9.G] pool_before_boot=` plus the M8.3 dispatch proof on the new substrate.
 
