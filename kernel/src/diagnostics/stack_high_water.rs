@@ -9,8 +9,9 @@
 //! M9 acceptance build (which enable the feature), too much for production.
 //! A frame that reserved stack but stored only zeros is not counted.
 //!
-//! [`measure_stack_peak`] reports the peak of one call (exec prepare/commit)
-//! by zeroing the dead bytes below the current `rsp` first.
+//! [`measure_stack_peak`] measures the peak of one call (exec prepare/commit)
+//! by zeroing the dead bytes below the current `rsp` first, and logs it
+//! whenever that label reaches a new maximum.
 //!
 //! Without the feature both entry points compile to plain pass-throughs.
 
@@ -46,6 +47,37 @@ mod checked {
     static BOOT_PEAK_LOGGED: GlobalCell<bool> = GlobalCell::new(false);
     /// Boot stack peak seen before [`measure_stack_peak`] cleared its dead bytes.
     static BOOT_PEAK_BEFORE_CLEAR: GlobalCell<usize> = GlobalCell::new(0);
+
+    /// Largest `(call_peak, peak_depth)` logged per [`measure_stack_peak`]
+    /// label, so only new maxima reach the serial log.
+    struct LoggedPeak {
+        label: &'static str,
+        call_peak: usize,
+        peak_depth: usize,
+    }
+    const MAX_MEASURED_LABELS: usize = 4;
+    static LOGGED_PEAKS: GlobalCell<[Option<LoggedPeak>; MAX_MEASURED_LABELS]> =
+        GlobalCell::new([const { None }; MAX_MEASURED_LABELS]);
+
+    /// True when `call_peak` or `peak_depth` beats what `label` last logged
+    /// (always true once the table is full: logging more is the safe side).
+    fn is_new_peak(label: &'static str, call_peak: usize, peak_depth: usize) -> bool {
+        let peaks = unsafe { &mut *LOGGED_PEAKS.get() };
+        if let Some(logged) = peaks.iter_mut().flatten().find(|p| p.label == label) {
+            let is_new = call_peak > logged.call_peak || peak_depth > logged.peak_depth;
+            logged.call_peak = logged.call_peak.max(call_peak);
+            logged.peak_depth = logged.peak_depth.max(peak_depth);
+            return is_new;
+        }
+        if let Some(free) = peaks.iter_mut().find(|p| p.is_none()) {
+            *free = Some(LoggedPeak {
+                label,
+                call_peak,
+                peak_depth,
+            });
+        }
+        true
+    }
 
     #[derive(Clone, Copy)]
     enum StackKind {
@@ -189,15 +221,18 @@ mod checked {
         let result = call();
         let peak = span.used_beyond(0).unwrap_or(0);
         let entry_depth = (span.top() - entry_rsp) as usize;
-        let (kind, slot) = match span.kind {
-            StackKind::Task { slot } => ("task", slot),
-            StackKind::Boot => ("boot", 0),
-        };
-        serial_write_fmt(format_args!(
-            "[STK ] {label} stack={kind}[{slot}] entry_depth={entry_depth:#x} peak_depth={peak:#x} call_peak={:#x} size={:#x}\n",
-            peak.saturating_sub(entry_depth),
-            span.size
-        ));
+        let call_peak = peak.saturating_sub(entry_depth);
+        let is_new = without_interrupts(|| is_new_peak(label, call_peak, peak));
+        if is_new {
+            let (kind, slot) = match span.kind {
+                StackKind::Task { slot } => ("task", slot),
+                StackKind::Boot => ("boot", 0),
+            };
+            serial_write_fmt(format_args!(
+                "[STK ] {label} stack={kind}[{slot}] entry_depth={entry_depth:#x} peak_depth={peak:#x} call_peak={call_peak:#x} size={:#x}\n",
+                span.size
+            ));
+        }
         result
     }
 }
