@@ -732,14 +732,13 @@ impl NetBridge {
             return Err(NetworkDeviceError::NotReady);
         }
         let result = match &mut self.raw_backend {
-            RawBackend::Loopback => self.loopback.transmit(frame),
+            RawBackend::Loopback => self.loopback.transmit(frame).map_err(|(err, _)| err),
             RawBackend::Virtio => match self.virtio.as_mut() {
-                Some(device) => device.transmit(frame),
-                None => Err((NetworkDeviceError::NotReady, frame)),
+                Some(device) => device.transmit_slice(frame.as_slice()),
+                None => Err(NetworkDeviceError::NotReady),
             },
-            RawBackend::Failed => Err((NetworkDeviceError::Poisoned, frame)),
-        }
-        .map_err(|(err, _)| err);
+            RawBackend::Failed => Err(NetworkDeviceError::Poisoned),
+        };
         if result == Err(NetworkDeviceError::QueueFull) {
             self.virtio_rx_stats.tx_ring_full = self.virtio_rx_stats.tx_ring_full.saturating_add(1);
         }
@@ -787,25 +786,28 @@ impl NetBridge {
         let Some(device) = self.virtio.as_mut() else {
             return Err(NetworkDeviceError::NotReady);
         };
+        // `received` is returned as-is rather than re-wrapped per arm: each `FrameBuf` move
+        // costs a frame-sized stack slot in debug builds.
         for _ in 0..RAW_RECEIVE_SKIP_BUDGET {
-            match device.receive() {
-                Ok(Some(frame)) => {
+            let received = device.receive();
+            match &received {
+                Ok(Some(_)) => {
                     self.virtio_rx_stats.delivered =
                         self.virtio_rx_stats.delivered.saturating_add(1);
-                    return Ok(Some(frame));
+                    return received;
                 }
-                Ok(None) => return Ok(None),
+                Ok(None) => return received,
                 Err(NetworkDeviceError::Malformed | NetworkDeviceError::Oversized)
                     if device.state() == DeviceState::Ready =>
                 {
                     self.virtio_rx_stats.dropped_bad_frame =
                         self.virtio_rx_stats.dropped_bad_frame.saturating_add(1);
                 }
-                Err(error) => {
+                Err(_) => {
                     self.virtio_rx_stats.device_err =
                         self.virtio_rx_stats.device_err.saturating_add(1);
                     self.log_virtio_rx_diagnostic_once("device-error");
-                    return Err(error);
+                    return received;
                 }
             }
         }

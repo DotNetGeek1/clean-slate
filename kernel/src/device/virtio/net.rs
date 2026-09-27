@@ -926,7 +926,7 @@ impl VirtioNetDevice {
 impl VirtioNetDevice {
     /// Body of [`NetworkLink::transmit`], borrowing the frame so each error path does not move
     /// the caller's `FrameBuf` (debug builds reserve a copy per return site).
-    fn transmit_slice(&mut self, frame: &[u8]) -> Result<(), NetworkDeviceError> {
+    pub(crate) fn transmit_slice(&mut self, frame: &[u8]) -> Result<(), NetworkDeviceError> {
         if self.released {
             return Err(NetworkDeviceError::Poisoned);
         }
