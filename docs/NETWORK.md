@@ -203,7 +203,7 @@ Ordered QEMU markers for `cargo xtask test-m7-net-service`:
 4. `[NET ] holder exit reclaimed sessions=… pending=…`
 5. `[NET ] denied pid=… reason=no-authority`
 6. `[NET ] service restarted pid=… generation=…`
-7. `[NET ] inflight failed count=…`
+7. `[NET ] inflight failed count=1` (the fixture parks one UDP receive, proves the service took it with a follow-up round trip, and the kernel checks that exactly that request is in service before terminating)
 8. `[NET ] stale-session denied generation=…`
 9. `[NET ] capacity baseline ok`
 10. `[M7.3] PASS`

@@ -16,7 +16,7 @@ use clean_slate_network::error::{DenialReason, NetworkError};
 use clean_slate_network::ethernet::EthernetFrame;
 use clean_slate_network::fixture::{
     APP_REQUEST_BYTES, APP_RESPONSE_BYTES, DNS_SERVER_ADDR, FIXTURE_A_RECORD, FIXTURE_A_TTL_SECS,
-    FIXTURE_HOSTNAME, GUEST_IPV4, PEER_MAC, TLS_PORT, TLS_SERVER_NAME,
+    FIXTURE_HOSTNAME, GUEST_IPV4, PEER_IPV4, PEER_MAC, TLS_PORT, TLS_SERVER_NAME,
 };
 use clean_slate_network::ipv4::Ipv4Header;
 use clean_slate_network::limits::MAX_SESSIONS;
@@ -130,7 +130,7 @@ pub extern "C" fn _start() -> ! {
     bootstrap.result_code = NETWORK_SERVICE_RESULT_ERROR;
     bootstrap.aux_status = 0;
     bootstrap.net_role_handle = 0;
-    // `session_id_raw` is an input for the inflight and stale-close fixtures.
+    // `session_id_raw` is an input for the stale-close fixture.
     bootstrap.echo_len = 0;
     bootstrap.reclaimed_sessions = 0;
     bootstrap.reclaimed_pending = 0;
@@ -169,7 +169,7 @@ fn run(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
         NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE => run_unauthorized_probe(),
         NETWORK_SERVICE_MODE_CLIENT => run_client_echo(bootstrap),
         NETWORK_SERVICE_MODE_CONVERGED_CLIENT => run_converged_client(bootstrap),
-        NETWORK_SERVICE_MODE_INFLIGHT_ARM => run_inflight_arm(bootstrap),
+        NETWORK_SERVICE_MODE_INFLIGHT_ARM => run_inflight_arm(),
         NETWORK_SERVICE_MODE_STALE_CLOSE => run_stale_close(bootstrap),
         NETWORK_SERVICE_MODE_CAPACITY_LOOP => run_capacity_loop(bootstrap),
         _ => Err(0),
@@ -2206,7 +2206,7 @@ fn run_converged_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, 
     bootstrap.echo_len = (first_len + second_len) as u64;
     // Like `run_client_echo`, leave exactly one session open at exit: the kernel test
     // expects holder-exit reclamation of that session and reuses its id for the
-    // inflight-failure and stale-generation-denial phases.
+    // stale-generation-denial phase.
     let handle = client_handle()?;
     bootstrap.net_role_handle = handle;
     let lingering = open_udp_session(handle)?;
@@ -2312,15 +2312,25 @@ fn run_client_echo(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> 
     Ok(NETWORK_SERVICE_RESULT_OK)
 }
 
-fn run_inflight_arm(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
+/// Discard port on the fixture peer: nothing is ever sent to it, so nothing comes back.
+const INFLIGHT_SILENT_PEER: SocketAddrV4 = SocketAddrV4::new(PEER_IPV4, 9);
+
+/// Leaves exactly one request parked in the service for the kernel to fail at termination.
+///
+/// The receive waits on a connected UDP endpoint whose peer never sends, so only shutdown
+/// can end it. The service takes pending requests lowest slot first and the receive was
+/// queued first, so once the follow-up open completes the receive is already parked.
+fn run_inflight_arm() -> Result<u64, u64> {
     let handle = client_handle()?;
-    let session = SessionId::from_raw(bootstrap.session_id_raw);
-    let send = NetworkRequest::Send {
+    let session = open_session(handle, SocketKind::LinuxUdp)?;
+    connect_session(handle, session, INFLIGHT_SILENT_PEER)?;
+    let receive = NetworkRequest::Receive {
         session,
-        payload_len: 4,
+        max_len: 64,
     }
     .encode();
-    let _ = client_submit(handle, &send, b"halt")?;
+    let _ = client_submit(handle, &receive, &[])?;
+    let _ = open_udp_session(handle)?;
     Ok(NETWORK_SERVICE_RESULT_OK)
 }
 

@@ -468,11 +468,10 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
             {
                 fatal_kernel_error("m7 unauthorized probe before holder exit ack");
             }
-            let mut bootstrap = NetworkServiceBootstrap::new(
+            let bootstrap = NetworkServiceBootstrap::new(
                 NETWORK_SERVICE_MODE_INFLIGHT_ARM,
                 test_state.service_generation,
             );
-            bootstrap.session_id_raw = session_id_raw;
             fixtures.inflight =
                 launch_aux_with_bootstrap(controller, allocator, INFLIGHT_SLOT, bootstrap, true)
                     .pid;
@@ -486,8 +485,21 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 ));
                 fatal_kernel_error("m7 inflight arm failed");
             }
+            let bridge = crate::service::net_bridge::net_bridge_mut();
+            if bridge.unfinished_requests_for(test_state.fixtures.inflight) != (0, 1) {
+                fatal_kernel_error("m7 inflight arm did not leave exactly one parked request");
+            }
+            let failed_before = bridge.inflight_failed();
             terminate_network_service(controller, allocator, test_state.lifecycle_capability);
-            let inflight_failed = crate::service::net_bridge::net_bridge_mut().inflight_failed();
+            let inflight_failed = crate::service::net_bridge::net_bridge_mut()
+                .inflight_failed()
+                .saturating_sub(failed_before);
+            if inflight_failed != 1 {
+                kernel_log_fmt(format_args!(
+                    "[NET ] inflight failed count={inflight_failed}\n"
+                ));
+                fatal_kernel_error("m7 inflight termination did not fail exactly one request");
+            }
             service_generation = 2;
             set_state(Some(M7NetSelfTestState {
                 lifecycle_capability: test_state.lifecycle_capability,
