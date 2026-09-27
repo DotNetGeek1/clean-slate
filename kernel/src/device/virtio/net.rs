@@ -707,38 +707,26 @@ impl VirtioNetDevice {
     }
 }
 
-impl NetworkLink for VirtioNetDevice {
-    fn link(&self) -> LinkProperties {
-        self.link
-    }
-
-    fn state(&self) -> DeviceState {
+impl VirtioNetDevice {
+    /// Body of [`NetworkLink::transmit`], borrowing the frame so each error path does not move
+    /// the caller's `FrameBuf` (debug builds reserve a copy per return site).
+    fn transmit_slice(&mut self, frame: &[u8]) -> Result<(), NetworkDeviceError> {
         if self.released {
-            DeviceState::Poisoned
-        } else {
-            self.device_state
-        }
-    }
-
-    fn transmit(&mut self, frame: FrameBuf) -> Result<(), (NetworkDeviceError, FrameBuf)> {
-        if self.released {
-            return Err((NetworkDeviceError::Poisoned, frame));
+            return Err(NetworkDeviceError::Poisoned);
         }
         if self.device_state != DeviceState::Ready {
-            return Err((self.map_not_ready(), frame));
+            return Err(self.map_not_ready());
         }
         if frame.len() > MAX_ETHERNET_FRAME_BYTES {
-            return Err((NetworkDeviceError::Oversized, frame));
+            return Err(NetworkDeviceError::Oversized);
         }
         let frame_len = frame.len();
         let frame_len_u32 = match u32::try_from(frame_len) {
             Ok(value) => value,
-            Err(_) => return Err((NetworkDeviceError::DeviceError, frame)),
+            Err(_) => return Err(NetworkDeviceError::DeviceError),
         };
 
-        if let Err(error) = self.wait_for_tx_completion() {
-            return Err((error, frame));
-        }
+        self.wait_for_tx_completion()?;
 
         self.tx_header = VirtioNetHdr {
             flags: 0,
@@ -748,17 +736,17 @@ impl NetworkLink for VirtioNetDevice {
             csum_start: 0,
             csum_offset: 0,
         };
-        self.tx_frame[..frame_len].copy_from_slice(frame.as_slice());
+        self.tx_frame[..frame_len].copy_from_slice(frame);
 
         let header_physical =
             match virtual_to_physical_address(&self.tx_header as *const _ as *const u8) {
                 Ok(value) => value,
-                Err(_) => return Err((NetworkDeviceError::DeviceError, frame)),
+                Err(_) => return Err(NetworkDeviceError::DeviceError),
             };
         let frame_physical =
             match physical_address_for_contiguous_range(self.tx_frame.as_ptr(), frame_len) {
                 Ok(value) => value,
-                Err(_) => return Err((NetworkDeviceError::DeviceError, frame)),
+                Err(_) => return Err(NetworkDeviceError::DeviceError),
             };
 
         self.tx_queue.write_desc(
@@ -785,19 +773,36 @@ impl NetworkLink for VirtioNetDevice {
             .write_u16(VIRTIO_PCI_QUEUE_NOTIFY, TX_QUEUE_INDEX);
 
         match self.tx_queue.wait_for_completion() {
-            Ok(used) => {
-                if let Err(error) = self.complete_tx(used) {
-                    return Err((error, frame));
-                }
-            }
+            Ok(used) => self.complete_tx(used)?,
             Err(NetworkDeviceError::Timeout) => {
                 self.device_state = DeviceState::ResetRequired;
-                return Err((NetworkDeviceError::ResetRequired, frame));
+                return Err(NetworkDeviceError::ResetRequired);
             }
-            Err(error) => return Err((error, frame)),
+            Err(error) => return Err(error),
         }
 
         Ok(())
+    }
+}
+
+impl NetworkLink for VirtioNetDevice {
+    fn link(&self) -> LinkProperties {
+        self.link
+    }
+
+    fn state(&self) -> DeviceState {
+        if self.released {
+            DeviceState::Poisoned
+        } else {
+            self.device_state
+        }
+    }
+
+    fn transmit(&mut self, frame: FrameBuf) -> Result<(), (NetworkDeviceError, FrameBuf)> {
+        match self.transmit_slice(frame.as_slice()) {
+            Ok(()) => Ok(()),
+            Err(error) => Err((error, frame)),
+        }
     }
 
     fn receive(&mut self) -> Result<Option<FrameBuf>, NetworkDeviceError> {

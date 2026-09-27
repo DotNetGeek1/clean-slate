@@ -413,6 +413,7 @@ pub(crate) mod syscalls {
                 &mut socket.inflight_request_id,
                 NetworkRequest::Open { kind: m7_kind },
                 &[],
+                &mut [],
                 None,
                 None,
             ) {
@@ -493,6 +494,7 @@ pub(crate) mod syscalls {
                     dest,
                 },
                 &[],
+                &mut [],
                 Some(clean_slate_network::session::SessionGeneration::new(
                     socket.session_generation,
                 )),
