@@ -19,7 +19,7 @@ use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
 use crate::selftest::m6_fixture::{
-    fixture_service, set_report_handler, spawn_fixture, FixtureReportAction,
+    fixture_service, park_step, set_report_handler, spawn_fixture, FixtureReportAction,
 };
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
@@ -76,25 +76,22 @@ fn process_gone(pid: u64) -> bool {
 
 fn build_target_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
-    program.push(M6FixtureStep::spin(0)).unwrap();
+    program.push(park_step()).unwrap();
     program
 }
 
 fn build_controller_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     let observe_out = 0usize;
-    program.push(M6FixtureStep::spin(1)).unwrap();
     let claim_full = program
         .push(
             M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0])
-                .repeat_while_eq(0)
                 .expect_ne(0),
         )
         .unwrap();
     let claim_observe_only = program
         .push(
             M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0])
-                .repeat_while_eq(0)
                 .expect_ne(0),
         )
         .unwrap();
@@ -190,7 +187,7 @@ fn build_unrelated_program() -> M6FixtureBootstrap {
             .expect_ne(0),
         )
         .unwrap();
-    program.push(M6FixtureStep::spin(0)).unwrap();
+    program.push(park_step()).unwrap();
     program
 }
 
@@ -200,7 +197,6 @@ fn build_wrong_target_program() -> M6FixtureBootstrap {
     let claim = program
         .push(
             M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0])
-                .repeat_while_eq(0)
                 .expect_ne(0),
         )
         .unwrap();

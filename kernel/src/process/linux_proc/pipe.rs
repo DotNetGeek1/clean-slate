@@ -156,8 +156,24 @@ impl PipePool {
         Ok(take)
     }
 
+    /// Frees a pipe no open description ever attached to (failed `pipe(2)` install).
+    pub(crate) fn discard_unattached(&mut self, handle: PipeHandle) {
+        if let Some(slot) = self.slot_mut(handle) {
+            if slot.readers == 0 && slot.writers == 0 {
+                slot.live = false;
+            }
+        }
+    }
+
     pub(crate) fn live_count(&self) -> usize {
         self.slots.iter().filter(|s| s.live).count()
+    }
+
+    /// `(readers, writers)` of a live pipe.
+    #[cfg(test)]
+    pub(crate) fn end_counts(&self, handle: PipeHandle) -> Option<(u16, u16)> {
+        let slot = self.slots.get(usize::from(handle.index))?;
+        (slot.live && slot.generation == handle.generation).then_some((slot.readers, slot.writers))
     }
 
     fn slot_mut(&mut self, handle: PipeHandle) -> Option<&mut PipeSlot> {
@@ -219,6 +235,11 @@ fn wake_pipe_writers(handle: PipeHandle) {
 
 static PIPE_POOL: GlobalCell<PipePool> = GlobalCell::new(PipePool::new());
 
+/// Host tests that attach fds to pipes touch the shared `PIPE_POOL` (attach and
+/// release always go through it) and must hold this lock.
+#[cfg(test)]
+pub(crate) static PIPE_POOL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) fn pool_mut() -> &'static mut PipePool {
     unsafe { &mut *PIPE_POOL.get() }
 }
@@ -240,6 +261,10 @@ pub(crate) fn pipe_ref_to_handle(pipe: PipeRef) -> PipeHandle {
 
 pub(crate) fn release_pipe_end(pipe: PipeRef) {
     pool_mut().release_end(pipe_ref_to_handle(pipe), pipe.end);
+}
+
+pub(crate) fn discard_unattached_pipe(pipe: PipeRef) {
+    pool_mut().discard_unattached(pipe_ref_to_handle(pipe));
 }
 
 pub(crate) fn attach_pipe_end(pipe: PipeRef) {

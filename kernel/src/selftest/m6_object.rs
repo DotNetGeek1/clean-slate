@@ -16,7 +16,8 @@ use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
 use crate::selftest::m6_fixture::{
-    fixture_service, set_report_handler, spawn_fixture, FixtureReportAction,
+    end_turn_step, fixture_service, set_report_handler, spawn_fixture, wait_exit_step,
+    wait_turn_step, FixtureReportAction,
 };
 use crate::service::control::ServiceLifecycleController;
 use crate::service::service_lifecycle_controller_mut;
@@ -29,8 +30,8 @@ use clean_slate_service_fixtures::m6_fixture::{
 };
 use clean_slate_service_fixtures::{
     StorageServiceBootstrap, OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_STATUS_NOT_FOUND,
-    OBJECT_STATUS_PENDING, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, OBJECT_SUBOP_POLL,
-    OBJECT_SUBOP_SUBMIT, STORAGE_SERVICE_ID, STORAGE_SERVICE_MODE_OBJECT_SERVICE,
+    OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT, STORAGE_SERVICE_ID,
+    STORAGE_SERVICE_MODE_OBJECT_SERVICE,
 };
 use clean_slate_service_lifecycle::{
     ControlRequest, ControlRequestKind, LifecycleMessage, ServiceId,
@@ -94,19 +95,17 @@ fn arg_result(step_index: usize) -> u64 {
     ARG_RESULT_OF | (step_index as u64 & 0xff)
 }
 
+fn claim_object_grant_step() -> M6FixtureStep {
+    M6FixtureStep::syscall(
+        SYSCALL_NR_CAP_OBJECT,
+        [OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, 0, 0, 0, 0, 0],
+    )
+    .expect_ne(SYSCALL_EINVAL)
+}
+
 fn build_leaker_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
-    program.push(M6FixtureStep::spin(2)).unwrap();
-    let claim = program
-        .push(
-            M6FixtureStep::syscall(
-                SYSCALL_NR_CAP_OBJECT,
-                [OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, 0, 0, 0, 0, 0],
-            )
-            .repeat_while_eq(0)
-            .expect_ne(0),
-        )
-        .unwrap();
+    let claim = program.push(claim_object_grant_step()).unwrap();
     let handle = arg_result(claim);
     program
         .push(M6FixtureStep::syscall(
@@ -129,29 +128,10 @@ fn build_owner_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     let write_data_offset = 0usize;
     let read_buf_offset = 64usize;
-    program.push(M6FixtureStep::spin(8)).unwrap();
     program.set_data(write_data_offset, ALPHA_V1).unwrap();
-    let claim = program
-        .push(
-            M6FixtureStep::syscall(
-                SYSCALL_NR_CAP_OBJECT,
-                [OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, 0, 0, 0, 0, 0],
-            )
-            .repeat_while_eq(0)
-            .expect_ne(0),
-        )
-        .unwrap();
+    let claim = program.push(claim_object_grant_step()).unwrap();
     let handle = arg_result(claim);
-    let claim_missing = program
-        .push(
-            M6FixtureStep::syscall(
-                SYSCALL_NR_CAP_OBJECT,
-                [OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, 0, 0, 0, 0, 0],
-            )
-            .repeat_while_eq(0)
-            .expect_ne(0),
-        )
-        .unwrap();
+    let claim_missing = program.push(claim_object_grant_step()).unwrap();
     let missing_handle = arg_result(claim_missing);
     let submit_missing_read = program
         .push(M6FixtureStep::syscall(
@@ -166,7 +146,6 @@ fn build_owner_program() -> M6FixtureBootstrap {
             ],
         ))
         .unwrap();
-    program.push(M6FixtureStep::spin(8)).unwrap();
     program
         .push(
             M6FixtureStep::syscall(
@@ -180,7 +159,6 @@ fn build_owner_program() -> M6FixtureBootstrap {
                     0,
                 ],
             )
-            .repeat_while_eq(OBJECT_STATUS_PENDING)
             .expect_eq(OBJECT_STATUS_NOT_FOUND),
         )
         .unwrap();
@@ -197,18 +175,15 @@ fn build_owner_program() -> M6FixtureBootstrap {
             ],
         ))
         .unwrap();
-    program.push(M6FixtureStep::spin(8)).unwrap();
     program
         .push(
             M6FixtureStep::syscall(
                 SYSCALL_NR_CAP_OBJECT,
                 [OBJECT_SUBOP_POLL, arg_result(submit_write), 0, 0, 0, 0],
             )
-            .repeat_while_eq(OBJECT_STATUS_PENDING)
             .expect_eq(0),
         )
         .unwrap();
-    program.push(M6FixtureStep::spin(48)).unwrap();
     let submit_read = program
         .push(M6FixtureStep::syscall(
             SYSCALL_NR_CAP_OBJECT,
@@ -222,7 +197,6 @@ fn build_owner_program() -> M6FixtureBootstrap {
             ],
         ))
         .unwrap();
-    program.push(M6FixtureStep::spin(1)).unwrap();
     program
         .push(
             M6FixtureStep::syscall(
@@ -236,7 +210,6 @@ fn build_owner_program() -> M6FixtureBootstrap {
                     0,
                 ],
             )
-            .repeat_while_eq(OBJECT_STATUS_PENDING)
             .expect_eq(ALPHA_V1.len() as u64),
         )
         .unwrap();
@@ -244,10 +217,14 @@ fn build_owner_program() -> M6FixtureBootstrap {
     program
 }
 
+/// The readonly holder's turn ends after its `missing-right` denial, so the
+/// unrelated holder's `no-authority` follows it (acceptance marker order).
+const TURN_READONLY_DENY: u64 = 0;
+const TURN_UNRELATED_DENY: u64 = 1;
+
 fn build_unrelated_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
-    // Run after the readonly holder exercises missing-right on write (acceptance marker order).
-    program.push(M6FixtureStep::spin(40)).unwrap();
+    program.push(wait_turn_step(TURN_UNRELATED_DENY)).unwrap();
     program
         .push(
             M6FixtureStep::syscall(
@@ -261,19 +238,12 @@ fn build_unrelated_program() -> M6FixtureBootstrap {
     program
 }
 
-fn build_readonly_program() -> M6FixtureBootstrap {
+/// Runs once the leaker's fault teardown has logged its queue reclaim (acceptance
+/// marker order), then hands over to the unrelated holder.
+fn build_readonly_program(leaker_pid: u64) -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
-    program.push(M6FixtureStep::spin(24)).unwrap();
-    let claim = program
-        .push(
-            M6FixtureStep::syscall(
-                SYSCALL_NR_CAP_OBJECT,
-                [OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, 0, 0, 0, 0, 0],
-            )
-            .repeat_while_eq(0)
-            .expect_ne(0),
-        )
-        .unwrap();
+    program.push(wait_exit_step(leaker_pid)).unwrap();
+    let claim = program.push(claim_object_grant_step()).unwrap();
     let handle = arg_result(claim);
     program
         .push(
@@ -291,6 +261,7 @@ fn build_readonly_program() -> M6FixtureBootstrap {
             .expect_eq(SYSCALL_EACCES),
         )
         .unwrap();
+    program.push(end_turn_step(TURN_READONLY_DENY)).unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
 }
@@ -409,23 +380,19 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
         fixture_service(FIXTURE_READONLY),
         fixture_service(FIXTURE_UNRELATED),
     ];
-    let programs = [
-        build_leaker_program(),
-        build_owner_program(),
-        build_readonly_program(),
-        build_unrelated_program(),
-    ];
     let mut pids = [0u64; 4];
     for index in 0..4 {
+        let program = match index {
+            FIXTURE_SPAWN_INDEX_LEAKER => build_leaker_program(),
+            FIXTURE_SPAWN_INDEX_OWNER => build_owner_program(),
+            FIXTURE_SPAWN_INDEX_READONLY => {
+                build_readonly_program(pids[FIXTURE_SPAWN_INDEX_LEAKER])
+            }
+            _ => build_unrelated_program(),
+        };
         let stack_top = unsafe { task_stack_top(&(*task_stacks_mut())[index + 1]) };
-        let spawned = spawn_fixture(
-            allocator,
-            stack_top,
-            index + 1,
-            services[index],
-            &programs[index],
-        )
-        .unwrap_or_else(|message| fatal_kernel_error(message));
+        let spawned = spawn_fixture(allocator, stack_top, index + 1, services[index], &program)
+            .unwrap_or_else(|message| fatal_kernel_error(message));
         pids[index] = spawned.pid;
         let holder = HolderId(spawned.pid);
         if index == FIXTURE_SPAWN_INDEX_OWNER {

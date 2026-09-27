@@ -201,13 +201,68 @@ fn raw_syscall(nr: u64, args: [u64; 6]) -> u64 {
 /// parked request, TLS transaction or new request made progress. Loops at once while
 /// frames are stashed; otherwise blocks until a client request, a NIC frame, or
 /// `deadline` (the earliest stack timer or parked-work deadline).
-fn wait_for_service_work(now: u64, deadline: Option<u64>) {
+fn wait_for_service_work(
+    parked: &ParkedRequests,
+    tls_active: bool,
+    now: u64,
+    deadline: Option<u64>,
+) {
     if nic_ingress_stashed(StackConsumer::Udp) > 0 || nic_ingress_stashed(StackConsumer::Tcp) > 0 {
         return;
     }
+    publish_occupancy(parked, tls_active);
     if wait_net_work(NET_WAIT_WORK_REQUESTS | NET_WAIT_WORK_RX, now, deadline).is_err() {
         finish();
     }
+}
+
+fn occupied<T>(rows: &[Option<T>]) -> u64 {
+    rows.iter().filter(|row| row.is_some()).count() as u64
+}
+
+/// Counts every bounded table the service keeps across requests into the bootstrap page
+/// (see `NetworkServiceOccupancy`). Runs only at the idle point, right before blocking.
+fn publish_occupancy(parked: &ParkedRequests, tls_active: bool) {
+    let (sessions, session_pending) =
+        unsafe { (*service_state_slot()).as_ref() }.map_or((0, 0), |service| {
+            (
+                u64::from(service.sessions_in_use()),
+                u64::from(service.pending_requests()),
+            )
+        });
+    let (udp_endpoints, udp_queued, dns_queries) = match udp_resolver() {
+        Ok(resolver) => {
+            let dns_queries = resolver.pending_queries() as u64;
+            let table = resolver.udp_mut().table();
+            (
+                table.endpoints_in_use() as u64,
+                table.queued_datagrams() as u64,
+                dns_queries,
+            )
+        }
+        Err(_) => (0, 0, 0),
+    };
+    let occupancy = &mut bootstrap_mut().occupancy;
+    occupancy.sessions = sessions;
+    occupancy.session_pending = session_pending;
+    occupancy.tcp_connections = shared_tcp_transport_mut().connections_in_use() as u64;
+    occupancy.tcp_mappings = occupied(unsafe { &*core::ptr::addr_of!(PLAIN_TCP_BY_SESSION) });
+    occupancy.udp_endpoints = udp_endpoints;
+    occupancy.udp_mappings = occupied(unsafe { &*core::ptr::addr_of!(UDP_ENDPOINT_BY_SESSION) });
+    occupancy.udp_queued = udp_queued;
+    let parked_kind = |kind: fn(&ParkedWork) -> bool| {
+        parked.slots.iter().flatten().filter(|entry| kind(&entry.work)).count() as u64
+    };
+    occupancy.parked_connects = parked_kind(|work| matches!(work, ParkedWork::TcpConnect { .. }));
+    occupancy.parked_tcp_receives =
+        parked_kind(|work| matches!(work, ParkedWork::TcpReceive { .. }));
+    occupancy.parked_udp_receives =
+        parked_kind(|work| matches!(work, ParkedWork::UdpReceive { .. }));
+    occupancy.parked_resolves = parked_kind(|work| matches!(work, ParkedWork::Resolve { .. }));
+    occupancy.tls_jobs = u64::from(tls_active);
+    occupancy.dns_queries = dns_queries;
+    occupancy.heap_bytes = current_heap_offset() as u64;
+    occupancy.publications = occupancy.publications.wrapping_add(1);
 }
 
 fn monotonic_ticks() -> Result<u64, u64> {
@@ -877,7 +932,7 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         if found == 0 {
             if !progressed {
                 let deadline = next_service_deadline(&ctx, &tls);
-                wait_for_service_work(now, deadline);
+                wait_for_service_work(ctx.parked, tls.future.is_some(), now, deadline);
             }
             continue;
         }

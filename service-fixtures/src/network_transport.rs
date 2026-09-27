@@ -36,6 +36,8 @@ pub const NET_SUBOP_RAW_TRANSMIT: u64 = 6;
 pub const NET_SUBOP_RAW_RECEIVE: u64 = 7;
 pub const NET_SUBOP_POP_HOLDER_EXIT: u64 = 8;
 pub const NET_SUBOP_ACK_HOLDER_EXIT: u64 = 9;
+/// Returns calibrated TSC time in whole [`NET_SUBOP_TICK_PERIOD_NS`] periods (EINVAL if
+/// the TSC is uncalibrated). Not a count of delivered IRQs.
 pub const NET_SUBOP_MONOTONIC_TICKS: u64 = 10;
 /// Returns LAPIC IRQ period in nanoseconds (0 if uncalibrated).
 pub const NET_SUBOP_TICK_PERIOD_NS: u64 = 11;
@@ -77,6 +79,70 @@ pub struct NetworkServiceBootstrap {
     pub tls_transactions: u64,
     pub tls_heap_checkpoint: u64,
     pub tls_heap_after_last: u64,
+    pub occupancy: NetworkServiceOccupancy,
+}
+
+/// Occupancy of the service's bounded tables, counted from the tables themselves each time
+/// the service loop goes idle, immediately before its `NET_SUBOP_WAIT_WORK` that includes
+/// [`NET_WAIT_WORK_REQUESTS`]. The kernel reads it only from inside that call, when the
+/// single-threaded service cannot be changing it and has already drained every client
+/// request and holder-exit notification queued before the call.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetworkServiceOccupancy {
+    /// Idle points published so far (strictly increasing).
+    pub publications: u64,
+    /// Open application sessions (`NetworkService` session table).
+    pub sessions: u64,
+    /// Requests parked on those sessions.
+    pub session_pending: u64,
+    /// Live connections in the shared TCP transport.
+    pub tcp_connections: u64,
+    /// Linux TCP session -> shared-transport connection rows.
+    pub tcp_mappings: u64,
+    /// Open endpoints in the UDP table.
+    pub udp_endpoints: u64,
+    /// Linux UDP session -> datagram endpoint rows.
+    pub udp_mappings: u64,
+    /// Datagrams queued on UDP endpoints.
+    pub udp_queued: u64,
+    /// Parked requests (their bridge slots stay in service), by kind: Linux TCP
+    /// connects waiting for the handshake,
+    pub parked_connects: u64,
+    /// Linux TCP receives (the kernel's per-socket prefetch),
+    pub parked_tcp_receives: u64,
+    /// Linux UDP receives (the kernel's per-socket prefetch),
+    pub parked_udp_receives: u64,
+    /// and cache-miss resolves.
+    pub parked_resolves: u64,
+    /// In-flight TLS transactions (at most one).
+    pub tls_jobs: u64,
+    /// In-flight DNS queries.
+    pub dns_queries: u64,
+    /// Bump-heap bytes allocated (the heap never frees).
+    pub heap_bytes: u64,
+}
+
+impl NetworkServiceOccupancy {
+    pub const fn zero() -> Self {
+        Self {
+            publications: 0,
+            sessions: 0,
+            session_pending: 0,
+            tcp_connections: 0,
+            tcp_mappings: 0,
+            udp_endpoints: 0,
+            udp_mappings: 0,
+            udp_queued: 0,
+            parked_connects: 0,
+            parked_tcp_receives: 0,
+            parked_udp_receives: 0,
+            parked_resolves: 0,
+            tls_jobs: 0,
+            dns_queries: 0,
+            heap_bytes: 0,
+        }
+    }
 }
 
 impl NetworkServiceBootstrap {
@@ -95,6 +161,7 @@ impl NetworkServiceBootstrap {
             tls_transactions: 0,
             tls_heap_checkpoint: 0,
             tls_heap_after_last: 0,
+            occupancy: NetworkServiceOccupancy::zero(),
         }
     }
 }

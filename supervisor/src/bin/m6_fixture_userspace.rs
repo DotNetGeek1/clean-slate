@@ -6,11 +6,9 @@
 use clean_slate_service_fixtures::m6_fixture::{
     resolve_arg, M6FixtureBootstrap, M6FixtureStep, EXPECT_EQ, EXPECT_IGNORE, EXPECT_NE,
     FIXTURE_STATUS_DONE, FIXTURE_STATUS_MISMATCH, FIXTURE_STATUS_RUNNING,
-    M6_FIXTURE_BOOTSTRAP_ADDRESS, M6_FIXTURE_MAX_REPEATS, REPEAT_WHILE_EQ, STEP_KIND_END,
-    STEP_KIND_FAULT, STEP_KIND_REPORT, STEP_KIND_SPIN, STEP_KIND_SYSCALL,
+    M6_FIXTURE_BOOTSTRAP_ADDRESS, STEP_KIND_END, STEP_KIND_FAULT, STEP_KIND_REPORT,
+    STEP_KIND_SYSCALL,
 };
-
-const SYSCALL_NR_VERSION: u64 = 0;
 
 fn bootstrap() -> &'static mut M6FixtureBootstrap {
     unsafe { &mut *(M6_FIXTURE_BOOTSTRAP_ADDRESS as *mut M6FixtureBootstrap) }
@@ -54,9 +52,9 @@ fn expect_ok(step: &M6FixtureStep) -> bool {
 
 fn run_syscall_at(header: &mut M6FixtureBootstrap, index: usize) {
     let step_count = header.step_count as usize;
-    let (nr, args, repeat_mode, repeat_value) = {
+    let (nr, args) = {
         let step = &header.steps[index];
-        (step.nr, step.args, step.repeat_mode, step.repeat_value)
+        (step.nr, step.args)
     };
     let steps_ref = &header.steps[..step_count];
     let mut resolved_args = [0u64; 6];
@@ -64,43 +62,7 @@ fn run_syscall_at(header: &mut M6FixtureBootstrap, index: usize) {
         resolved_args[slot] =
             resolve_arg(M6_FIXTURE_BOOTSTRAP_ADDRESS, steps_ref, *arg).unwrap_or(u64::MAX);
     }
-    let mut result = raw_syscall(nr, resolved_args);
-    if repeat_mode == REPEAT_WHILE_EQ {
-        let mut repeats = 0u64;
-        while result == repeat_value && repeats < M6_FIXTURE_MAX_REPEATS {
-            result = raw_syscall(nr, resolved_args);
-            repeats = repeats.saturating_add(1);
-        }
-    }
-    header.steps[index].result = result;
-}
-
-fn spin_round(header: &mut M6FixtureBootstrap, iterations: u64) {
-    let mut counter = 0u64;
-    while counter < iterations {
-        counter = counter.saturating_add(1);
-        core::hint::spin_loop();
-    }
-    header.progress = header.progress.saturating_add(1);
-    let _ = raw_syscall(SYSCALL_NR_VERSION, [0; 6]);
-}
-
-fn run_spin(header: &mut M6FixtureBootstrap, index: usize) {
-    let rounds = header.steps[index].args[0];
-    let iterations = if header.steps[index].args[1] == 0 {
-        10_000
-    } else {
-        header.steps[index].args[1]
-    };
-    if rounds == 0 {
-        loop {
-            spin_round(header, iterations);
-        }
-    } else {
-        for _ in 0..rounds {
-            spin_round(header, iterations);
-        }
-    }
+    header.steps[index].result = raw_syscall(nr, resolved_args);
 }
 
 fn run_steps(header: &mut M6FixtureBootstrap) {
@@ -117,8 +79,8 @@ fn run_steps(header: &mut M6FixtureBootstrap) {
                     header.failed_step = index as u64;
                     report_to_kernel();
                 }
+                header.progress = header.progress.saturating_add(1);
             }
-            STEP_KIND_SPIN => run_spin(header, index),
             STEP_KIND_FAULT => {
                 let addr = header.steps[index].args[0];
                 unsafe {

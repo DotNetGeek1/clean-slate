@@ -7,7 +7,6 @@ use super::poll::{
 };
 use super::table::{LinuxSyscallContext, LinuxSyscallHandler};
 use super::user_copy::{copy_user_bytes, LINUX_USER_COPY_MAX_BYTES};
-use crate::interrupt::timer::kernel_ticks;
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::process::linux_fd::{self, readiness::Readiness};
 use crate::process::linux_mem;
@@ -475,16 +474,12 @@ fn write_zero_timespec(ptr: u64) -> Result<(), LinuxErrno> {
 }
 
 fn deadline_due(deadline: Deadline) -> bool {
-    match deadline {
-        Deadline::MonotonicNs(ns) => monotonic_ns() >= ns,
-        Deadline::IrqTicks(ticks) => kernel_ticks() >= ticks,
-    }
+    let Deadline::MonotonicNs(ns) = deadline;
+    monotonic_ns() >= ns
 }
 
 fn write_remaining_timespec(ptr: u64, deadline: Deadline) -> Result<(), LinuxErrno> {
-    let Deadline::MonotonicNs(deadline_ns) = deadline else {
-        return Err(EINVAL);
-    };
+    let Deadline::MonotonicNs(deadline_ns) = deadline;
     let ts = timespec_from_remaining_ns(deadline_ns, monotonic_ns())?;
     let mut bytes = [0u8; 16];
     bytes[0..8].copy_from_slice(&ts.tv_sec.to_le_bytes());

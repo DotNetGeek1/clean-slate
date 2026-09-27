@@ -3,7 +3,9 @@
 use super::namespace::{
     check_write_allowed, resolve_executable_bytes, NodeId, NodeKind, NodeTable, LINUX_FS_MAX_NODES,
 };
-use super::object_backend::{tmp_file_create, LINUX_TMP_MAX_ENTRIES, LINUX_TMP_MAX_FILES};
+use super::object_backend::{
+    tmp_file_create, tmp_file_lookup_by_path, LINUX_TMP_MAX_ENTRIES, LINUX_TMP_MAX_FILES,
+};
 use super::path::{normalize_path, LINUX_PATH_MAX};
 use crate::process::linux_rootfs;
 use clean_slate_linux_abi::{
@@ -145,6 +147,14 @@ fn node_table_exhaustion_and_reuse() {
     assert_eq!(table.live_count() as usize, LINUX_FS_MAX_NODES);
     let overflow = format!("{parent_path}/extra");
     assert_eq!(table.mkdir(overflow.as_bytes(), &img).unwrap_err(), ENFILE);
+    let overflow_file = format!("{parent_path}/extra-file");
+    assert_eq!(
+        table
+            .open_create_file(overflow_file.as_bytes(), false, &img)
+            .unwrap_err(),
+        ENFILE
+    );
+    assert_eq!(tmp_file_lookup_by_path(overflow_file.as_bytes()), None);
     table.host_test_evict_node(last).expect("evict");
     let reuse = format!("{parent_path}/reuse");
     table.mkdir(reuse.as_bytes(), &img).expect("reuse slot");

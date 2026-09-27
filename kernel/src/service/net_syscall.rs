@@ -25,7 +25,6 @@ use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::network::{authorize_network_op, NetworkOp};
 use crate::capability::with_capability_space;
-use crate::interrupt::timer::kernel_ticks;
 use crate::mm::user_mapping::validate_user_pointer_range;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::sched::wait::{
@@ -46,7 +45,7 @@ use clean_slate_network::device::NetworkDeviceError;
 const TX_SPACE_TIMEOUT_NS: u64 = 500_000_000;
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::current_syscall_caller_pid;
-use crate::time::{irq_period_ns, monotonic_ns, tsc_hz};
+use crate::time::{irq_period_ns, monotonic_ns, monotonic_period_ticks, tsc_hz};
 use clean_slate_service_fixtures::NETWORK_SERVICE_ID;
 
 fn current_holder() -> Result<HolderId, u64> {
@@ -573,7 +572,8 @@ fn handle_raw_receive(frame: &mut SyscallContext) {
             return;
         }
     };
-    if buflen > clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES
+    // A full-frame buffer is required so no received frame is ever truncated.
+    if buflen != clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES
         || validate_user_writable_pointer_range(frame.rdx, frame.r10).is_err()
     {
         frame.rax = SYSCALL_EINVAL;
@@ -594,11 +594,10 @@ fn handle_raw_receive(frame: &mut SyscallContext) {
         Ok(None) => frame.rax = u64::MAX,
         Ok(Some(frame_buf)) => {
             let bytes = frame_buf.as_slice();
-            let len = bytes.len().min(buflen);
             unsafe {
-                ptr::copy_nonoverlapping(bytes.as_ptr(), frame.rdx as *mut u8, len);
+                ptr::copy_nonoverlapping(bytes.as_ptr(), frame.rdx as *mut u8, bytes.len());
             }
-            frame.rax = len as u64;
+            frame.rax = bytes.len() as u64;
         }
         Err(_) => frame.rax = SYSCALL_EINVAL,
     }
@@ -694,6 +693,10 @@ fn handle_wait_work(frame: &mut SyscallContext) {
         frame.rax = 0;
         return;
     }
+    #[cfg(feature = "m9-userspace-self-test")]
+    if mask & NET_WAIT_WORK_REQUESTS != 0 {
+        crate::selftest::m9_userspace::on_net_service_idle();
+    }
     match block_current_thread(frame, net_service_work_wait_key(), deadline) {
         Ok(outcome) => frame.rax = encode_wait_outcome(outcome),
         Err(message) => crate::diagnostics::qemu::fatal_kernel_error(message),
@@ -701,7 +704,7 @@ fn handle_wait_work(frame: &mut SyscallContext) {
 }
 
 fn handle_monotonic_ticks(frame: &mut SyscallContext) {
-    frame.rax = kernel_ticks();
+    frame.rax = monotonic_period_ticks().unwrap_or(SYSCALL_EINVAL);
 }
 
 fn handle_tick_period_ns(frame: &mut SyscallContext) {

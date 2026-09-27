@@ -2,9 +2,10 @@
 //!
 //! The guest already fails closed on every check below; this validator re-derives them
 //! from the log so the acceptance verdict does not rest on the guest's own `PASS` line:
-//! exact matrix order/status/stdout bytes against `commands.toml`, reuse-cycle stdout
-//! equality, conventional low-VA entry, authority-denial evidence, sleep-with-native-
-//! progress evidence, resource return-to-baseline, and BusyBox integrity.
+//! exact matrix order/status, every cycle's stdout bytes against `commands.toml` and
+//! byte-for-byte against cycle 1, conventional low-VA entry, authority-denial evidence,
+//! sleep-with-native-progress evidence, kernel and network-service resource
+//! return-to-baseline, and BusyBox integrity.
 
 use crate::m9_fixture::{load_command_matrix, BUSYBOX_SHA256, ROOTFS_IMAGE_SHA256};
 use std::collections::BTreeMap;
@@ -63,7 +64,12 @@ const REUSABLE_RESOURCES: &[&str] = &[
     "pipes",
     "linux_waiters",
     "sockets",
+    "tcp_prefetches",
+    "udp_prefetches",
     "net_requests",
+    "net_in_service",
+    "net_holder_exits",
+    "net_holders",
     "object_requests",
     "capabilities",
     "linux_mm",
@@ -71,6 +77,24 @@ const REUSABLE_RESOURCES: &[&str] = &[
 ];
 /// Persistent `/tmp` state created by cycle 1 and reused afterwards.
 const PERSISTENT_RESOURCES: &[&str] = &["tmp_files", "fs_nodes"];
+/// Network-service table rows (`[M9  ] net-service resources`) that must equal the
+/// baseline after every cycle.
+const NET_SERVICE_RESOURCES: &[&str] = &[
+    "sessions",
+    "session_pending",
+    "tcp_conns",
+    "tcp_maps",
+    "udp_endpoints",
+    "udp_maps",
+    "udp_queued",
+    "parked_connects",
+    "parked_tcp_recvs",
+    "parked_udp_recvs",
+    "parked_resolves",
+    "tls_jobs",
+    "dns_queries",
+    "heap_bytes",
+];
 
 /// `[M9  ] ...` payload of a serial line (guest stdout may precede it on the same line).
 fn m9_payload(line: &str) -> Option<&str> {
@@ -90,12 +114,6 @@ fn field_u64(payload: &str, key: &str) -> Result<u64, String> {
         None => raw.parse(),
     };
     parsed.map_err(|_| format!("bad {key}={raw} in `{payload}`"))
-}
-
-fn fnv1a32(bytes: &[u8]) -> u32 {
-    bytes.iter().fold(0x811c_9dc5u32, |hash, byte| {
-        (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
-    })
 }
 
 fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
@@ -245,26 +263,39 @@ fn validate_launch_sequence(
     Ok(())
 }
 
+/// Offset of the first byte where `actual` departs from `expected`.
+fn first_difference(expected: &[u8], actual: &[u8]) -> Option<usize> {
+    expected
+        .iter()
+        .zip(actual)
+        .position(|(e, a)| e != a)
+        .or((expected.len() != actual.len()).then(|| expected.len().min(actual.len())))
+}
+
 fn validate_matrix(
     lines: &[&str],
     matrix: &clean_slate_rootfs::commands::CommandMatrix,
     cycles: u64,
 ) -> Result<(), String> {
-    let mut hex: BTreeMap<String, Vec<(u64, Vec<u8>)>> = BTreeMap::new();
-    let mut results: Vec<(String, u64, u64, u64, u64)> = Vec::new();
+    // `(cmd, cycle)` -> `(offset, bytes)` hex chunks.
+    type StdoutChunks = Vec<(u64, Vec<u8>)>;
+    let mut hex: BTreeMap<(String, u64), StdoutChunks> = BTreeMap::new();
+    let mut results: Vec<(String, u64, u64, u64)> = Vec::new();
     for payload in lines.iter().filter_map(|l| m9_payload(l)) {
         if let Some(rest) = payload.strip_prefix("stdout ") {
             let name = field(rest, "cmd").ok_or("stdout line without cmd=")?;
+            let cycle = field_u64(rest, "cycle")?;
             let off = field_u64(rest, "off")?;
             let bytes = decode_hex(field(rest, "hex").ok_or("stdout line without hex=")?)?;
-            hex.entry(name.to_string()).or_default().push((off, bytes));
+            hex.entry((name.to_string(), cycle))
+                .or_default()
+                .push((off, bytes));
         } else if payload.starts_with("cmd=") {
             results.push((
                 field(payload, "cmd").unwrap_or_default().to_string(),
                 field_u64(payload, "cycle")?,
                 field_u64(payload, "status")?,
                 field_u64(payload, "stdout_len")?,
-                field_u64(payload, "fnv")?,
             ));
         }
     }
@@ -275,8 +306,8 @@ fn validate_matrix(
             results.len()
         ));
     }
-    let mut first_cycle: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
-    for (index, (name, cycle, status, len, fnv)) in results.iter().enumerate() {
+    let mut first_cycle: BTreeMap<&str, Vec<u8>> = BTreeMap::new();
+    for (index, (name, cycle, status, len)) in results.iter().enumerate() {
         let spec = &matrix.commands[index % matrix.commands.len()];
         let expected_cycle = (index / matrix.commands.len()) as u64 + 1;
         if name != &spec.name || *cycle != expected_cycle {
@@ -291,30 +322,42 @@ fn validate_matrix(
                 spec.exit_status
             ));
         }
-        if *cycle == 1 {
-            let mut chunks = hex.remove(name.as_str()).unwrap_or_default();
-            chunks.sort_by_key(|(off, _)| *off);
-            let mut stdout = Vec::new();
-            for (off, bytes) in chunks {
-                if off != stdout.len() as u64 {
-                    return Err(format!("{name}: stdout hex gap at offset {off}"));
+        let mut chunks = hex.remove(&(name.clone(), *cycle)).unwrap_or_default();
+        chunks.sort_by_key(|(off, _)| *off);
+        let mut stdout = Vec::new();
+        for (off, bytes) in chunks {
+            if off != stdout.len() as u64 {
+                return Err(format!("{name}@{cycle}: stdout hex gap at offset {off}"));
+            }
+            stdout.extend_from_slice(&bytes);
+        }
+        if stdout.len() as u64 != *len {
+            return Err(format!(
+                "{name}@{cycle}: stdout hex ({} bytes) does not match logged stdout_len={len}",
+                stdout.len()
+            ));
+        }
+        spec.check_stdout(&stdout)
+            .map_err(|err| format!("cycle {cycle}: {err}"))?;
+        match first_cycle.get(spec.name.as_str()) {
+            None if *cycle == 1 => {
+                first_cycle.insert(spec.name.as_str(), stdout);
+            }
+            None => return Err(format!("{name}@{cycle}: no cycle-1 stdout to compare")),
+            Some(first) => {
+                if let Some(offset) = first_difference(first, &stdout) {
+                    return Err(format!(
+                        "{name}@{cycle}: stdout differs from cycle 1 at offset {offset} \
+                         (cycle-1 {} bytes, cycle-{cycle} {} bytes)",
+                        first.len(),
+                        stdout.len()
+                    ));
                 }
-                stdout.extend_from_slice(&bytes);
             }
-            if stdout.len() as u64 != *len || u64::from(fnv1a32(&stdout)) != *fnv {
-                return Err(format!(
-                    "{name}: stdout hex ({} bytes) does not match logged len={len} fnv={fnv:#x}",
-                    stdout.len()
-                ));
-            }
-            spec.check_stdout(&stdout)?;
-            first_cycle.insert(spec.name.as_str(), (*len, *fnv));
-        } else if first_cycle.get(spec.name.as_str()) != Some(&(*len, *fnv)) {
-            return Err(format!("{name}@{cycle}: stdout differs from cycle 1"));
         }
     }
-    if let Some(extra) = hex.keys().next() {
-        return Err(format!("unexpected stdout hex for {extra}"));
+    if let Some((extra, cycle)) = hex.keys().next() {
+        return Err(format!("unexpected stdout hex for {extra}@{cycle}"));
     }
     Ok(())
 }
@@ -455,11 +498,20 @@ fn validate_sleep_evidence(lines: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_resources(lines: &[&str], cycles: u64) -> Result<(), String> {
-    let snapshots: Vec<(&str, BTreeMap<&str, u64>)> = lines
+/// `key=value` counts of one resource snapshot line.
+type Counts<'a> = BTreeMap<&'a str, u64>;
+type Snapshot<'a> = (&'a str, Counts<'a>);
+
+/// `label=baseline` followed by `label=cycle-1..=cycles` snapshots with `prefix`.
+fn resource_snapshots<'a>(
+    lines: &[&'a str],
+    prefix: &str,
+    cycles: u64,
+) -> Result<(Counts<'a>, Vec<Counts<'a>>), String> {
+    let snapshots: Vec<Snapshot<'a>> = lines
         .iter()
         .filter_map(|l| m9_payload(l))
-        .filter_map(|p| p.strip_prefix("resources "))
+        .filter_map(|p| p.strip_prefix(prefix))
         .map(|p| {
             let label = field(p, "label").unwrap_or_default();
             let values = p
@@ -471,37 +523,66 @@ fn validate_resources(lines: &[&str], cycles: u64) -> Result<(), String> {
             (label, values)
         })
         .collect();
-    let (label, baseline) = snapshots.first().ok_or("missing resource baseline")?;
-    if *label != "baseline" {
-        return Err("first resource snapshot is not the baseline".into());
+    let mut snapshots = snapshots.into_iter();
+    let (label, baseline) = snapshots
+        .next()
+        .ok_or_else(|| format!("missing `{prefix}` baseline"))?;
+    if label != "baseline" {
+        return Err(format!("first `{prefix}` snapshot is not the baseline"));
     }
-    let cycle_snapshots = &snapshots[1..];
-    if cycle_snapshots.len() as u64 != cycles {
-        return Err(format!(
-            "{} cycle resource snapshots, expected {cycles}",
-            cycle_snapshots.len()
-        ));
-    }
-    let mut native_progress = baseline.get("native_progress").copied().unwrap_or(0);
-    let first = &cycle_snapshots[0].1;
-    for (index, (label, values)) in cycle_snapshots.iter().enumerate() {
+    let mut per_cycle = Vec::new();
+    for (index, (label, values)) in snapshots.enumerate() {
         let expected_label = format!("cycle-{}", index + 1);
-        if *label != expected_label {
+        if label != expected_label {
             return Err(format!(
-                "resource snapshot {} labelled {label:?}, expected {expected_label:?}",
+                "`{prefix}` snapshot {} labelled {label:?}, expected {expected_label:?}",
                 index + 1
             ));
         }
-        for key in REUSABLE_RESOURCES {
-            if values.get(key) != baseline.get(key) || values.get(key).is_none() {
+        per_cycle.push(values);
+    }
+    if per_cycle.len() as u64 != cycles {
+        return Err(format!(
+            "{} cycle `{prefix}` snapshots, expected {cycles}",
+            per_cycle.len()
+        ));
+    }
+    Ok((baseline, per_cycle))
+}
+
+fn require_baseline(
+    what: &str,
+    keys: &[&str],
+    baseline: &Counts<'_>,
+    per_cycle: &[Counts<'_>],
+) -> Result<(), String> {
+    for key in keys {
+        if !baseline.contains_key(key) {
+            return Err(format!("{what} baseline lacks {key}="));
+        }
+    }
+    for (index, values) in per_cycle.iter().enumerate() {
+        for key in keys {
+            if values.get(key) != baseline.get(key) {
                 return Err(format!(
-                    "cycle {}: {key}={:?} differs from baseline {:?}",
+                    "cycle {}: {what} {key}={:?} differs from baseline {:?}",
                     index + 1,
                     values.get(key),
                     baseline.get(key)
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_resources(lines: &[&str], cycles: u64) -> Result<(), String> {
+    let (baseline, cycle_snapshots) = resource_snapshots(lines, "resources ", cycles)?;
+    require_baseline("kernel", REUSABLE_RESOURCES, &baseline, &cycle_snapshots)?;
+    validate_net_service_resources(lines, cycles)?;
+    let mut native_progress = baseline.get("native_progress").copied().unwrap_or(0);
+    let first = &cycle_snapshots[0];
+    for (index, values) in cycle_snapshots.iter().enumerate() {
         for key in PERSISTENT_RESOURCES {
             if values.get(key) != first.get(key) || values.get(key).is_none() {
                 return Err(format!(
@@ -525,26 +606,215 @@ fn validate_resources(lines: &[&str], cycles: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Every snapshot comes from a fresh network-service idle point (`idle_seq` strictly
+/// increases), and every table row count is back at its baseline.
+fn validate_net_service_resources(lines: &[&str], cycles: u64) -> Result<(), String> {
+    let (baseline, per_cycle) = resource_snapshots(lines, "net-service resources ", cycles)?;
+    require_baseline("net-service", NET_SERVICE_RESOURCES, &baseline, &per_cycle)?;
+    let mut idle_seq = *baseline
+        .get("idle_seq")
+        .ok_or("net-service baseline lacks idle_seq=")?;
+    for (index, values) in per_cycle.iter().enumerate() {
+        let seq = values.get("idle_seq").copied().unwrap_or(0);
+        if seq <= idle_seq {
+            return Err(format!(
+                "cycle {}: net-service idle_seq={seq} is not newer than {idle_seq}",
+                index + 1
+            ));
+        }
+        idle_seq = seq;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use clean_slate_rootfs::commands::CommandSpec;
+
     #[test]
     fn payload_and_fields() {
-        let line = "test[M9  ] cmd=pwd cycle=1 status=0 stdout_len=2 fnv=0x85d2393c";
+        let line = "test[M9  ] cmd=pwd cycle=1 status=0 stdout_len=2 off=0x10";
         let payload = m9_payload(line).unwrap();
         assert_eq!(field(payload, "cmd"), Some("pwd"));
-        assert_eq!(field_u64(payload, "fnv").unwrap(), 0x85d2_393c);
+        assert_eq!(field_u64(payload, "off").unwrap(), 0x10);
         assert_eq!(field_u64(payload, "stdout_len").unwrap(), 2);
         assert!(field_u64(payload, "missing").is_err());
     }
 
     #[test]
-    fn fnv_matches_guest() {
-        assert_eq!(fnv1a32(b""), 0x811c_9dc5);
-        assert_eq!(fnv1a32(b"/\n"), 0x85d2_393c);
+    fn hex_decoding() {
         assert_eq!(decode_hex("2f0a").unwrap(), b"/\n");
         assert!(decode_hex("2f0").is_err());
+    }
+
+    /// Stdout that satisfies `spec` and spans more than one 32-byte hex chunk when the
+    /// spec leaves room for extra bytes.
+    fn sample_stdout(spec: &CommandSpec) -> Vec<u8> {
+        if let Some(exact) = &spec.stdout {
+            return exact.clone();
+        }
+        let mut out = spec.stdout_prefix.clone().unwrap_or_default();
+        for needle in &spec.stdout_contains {
+            out.extend_from_slice(needle);
+            out.push(b'\n');
+        }
+        out.extend_from_slice(b"cat\necho\nenv\ngrep\nls\nmkdir\nnslookup\n");
+        out
+    }
+
+    /// Matrix result and stdout hex lines as the guest logs them, one entry per
+    /// `(cycle, command)`.
+    fn matrix_log(
+        matrix: &clean_slate_rootfs::commands::CommandMatrix,
+        cycles: u64,
+        mut stdout_for: impl FnMut(u64, &CommandSpec) -> Vec<u8>,
+    ) -> String {
+        let mut log = String::new();
+        for cycle in 1..=cycles {
+            for spec in &matrix.commands {
+                let out = stdout_for(cycle, spec);
+                log.push_str(&format!(
+                    "[M9  ] cmd={} cycle={cycle} status={} stdout_len={}\n",
+                    spec.name,
+                    spec.exit_status,
+                    out.len()
+                ));
+                for (chunk_index, chunk) in out.chunks(32).enumerate() {
+                    let hex: String = chunk.iter().map(|b| format!("{b:02x}")).collect();
+                    log.push_str(&format!(
+                        "[M9  ] stdout cmd={} cycle={cycle} off={} hex={hex}\n",
+                        spec.name,
+                        chunk_index * 32
+                    ));
+                }
+            }
+        }
+        log
+    }
+
+    fn run_matrix(
+        log: &str,
+        matrix: &clean_slate_rootfs::commands::CommandMatrix,
+        cycles: u64,
+    ) -> Result<(), String> {
+        let lines: Vec<&str> = log.lines().collect();
+        validate_matrix(&lines, matrix, cycles)
+    }
+
+    #[test]
+    fn matrix_accepts_identical_cycles() {
+        let matrix = load_command_matrix().unwrap();
+        let log = matrix_log(&matrix, 3, |_, spec| sample_stdout(spec));
+        run_matrix(&log, &matrix, 3).unwrap();
+    }
+
+    #[test]
+    fn matrix_rejects_one_changed_byte_in_a_later_cycle() {
+        let matrix = load_command_matrix().unwrap();
+        let target = matrix
+            .commands
+            .iter()
+            .find(|spec| spec.stdout.is_none() && spec.stdout_prefix.is_some())
+            .expect("a prefix-only command")
+            .name
+            .clone();
+        for bad_cycle in 2..=3u64 {
+            let log = matrix_log(&matrix, 3, |cycle, spec| {
+                let mut out = sample_stdout(spec);
+                if cycle == bad_cycle && spec.name == target {
+                    let last = out.len() - 2;
+                    out[last] ^= 0x01;
+                }
+                out
+            });
+            let err = run_matrix(&log, &matrix, 3).unwrap_err();
+            let expected_offset =
+                sample_stdout(matrix.commands.iter().find(|s| s.name == target).unwrap()).len() - 2;
+            assert!(
+                err.contains(&format!("{target}@{bad_cycle}"))
+                    && err.contains(&format!("offset {expected_offset}")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn matrix_rejects_a_later_cycle_without_stdout_hex() {
+        let matrix = load_command_matrix().unwrap();
+        let log = matrix_log(&matrix, 2, |_, spec| sample_stdout(spec));
+        let dropped: String = log
+            .lines()
+            .filter(|l| !(l.contains("stdout cmd=pwd cycle=2 ")))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let err = run_matrix(&dropped, &matrix, 2).unwrap_err();
+        assert!(err.contains("pwd@2"), "{err}");
+    }
+
+    fn net_service_line(label: &str, idle_seq: u64, overrides: &[(&str, u64)]) -> String {
+        let mut line = format!("[M9  ] net-service resources label={label} idle_seq={idle_seq}");
+        for key in NET_SERVICE_RESOURCES {
+            let baseline = if *key == "heap_bytes" { 8192 } else { 0 };
+            let value = overrides
+                .iter()
+                .find(|(k, _)| k == key)
+                .map_or(baseline, |(_, v)| *v);
+            line.push_str(&format!(" {key}={value}"));
+        }
+        line
+    }
+
+    fn net_service_log(cycles: u64, leak: Option<(u64, &str)>) -> String {
+        let mut log = net_service_line("baseline", 1, &[]);
+        log.push('\n');
+        for cycle in 1..=cycles {
+            let overrides: Vec<(&str, u64)> = leak
+                .filter(|(at, _)| *at == cycle)
+                .map(|(_, key)| (key, if key == "heap_bytes" { 8200 } else { 1 }))
+                .into_iter()
+                .collect();
+            let label = format!("cycle-{cycle}");
+            log.push_str(&net_service_line(&label, 1 + cycle * 7, &overrides));
+            log.push('\n');
+        }
+        log
+    }
+
+    fn run_net_service(log: &str, cycles: u64) -> Result<(), String> {
+        let lines: Vec<&str> = log.lines().collect();
+        validate_net_service_resources(&lines, cycles)
+    }
+
+    #[test]
+    fn net_service_rows_at_baseline_pass() {
+        run_net_service(&net_service_log(3, None), 3).unwrap();
+    }
+
+    #[test]
+    fn net_service_row_left_live_fails() {
+        for key in NET_SERVICE_RESOURCES {
+            for cycle in 1..=3 {
+                let err = run_net_service(&net_service_log(3, Some((cycle, key))), 3).unwrap_err();
+                assert!(
+                    err.contains(&format!("cycle {cycle}: net-service {key}=")),
+                    "{err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn net_service_snapshot_must_be_fresh_and_complete() {
+        let stale = net_service_log(2, None).replace("idle_seq=15", "idle_seq=8");
+        assert!(run_net_service(&stale, 2)
+            .unwrap_err()
+            .contains("idle_seq=8 is not newer"));
+        let missing = net_service_log(2, None).replace(" tls_jobs=0", "");
+        assert!(run_net_service(&missing, 2).is_err());
+        let short = net_service_log(1, None);
+        assert!(run_net_service(&short, 2).is_err());
     }
 
     #[test]

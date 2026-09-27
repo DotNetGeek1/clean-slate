@@ -56,7 +56,8 @@ const PROBE_SLOT: usize = 0;
 const NATIVE_VERSION_SYSCALL_NR: u64 = 0;
 const NATIVE_REQUIRED_PROGRESS: u64 = 2;
 const LINUX_WRITE_SYSCALL_NR: u64 = 1;
-const LOW_HELLO_DELIVERED_BYTES: u64 = 15;
+/// The fixture's one `write(2)`: `"M9 low VA ok.\n"`, no more (#175).
+const LOW_HELLO_DELIVERED_BYTES: u64 = b"M9 low VA ok.\n".len() as u64;
 
 const NATIVE_SIBLING_CODE: [u8; 6] = [0x31, 0xC0, 0x0F, 0x05, 0xEB, 0xFA];
 

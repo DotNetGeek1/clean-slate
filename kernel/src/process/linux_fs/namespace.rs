@@ -317,8 +317,10 @@ impl NodeTable {
         if tmp_children_count(parent.index, &self.nodes) >= LINUX_TMP_MAX_ENTRIES {
             return Err(ENOSPC);
         }
-        let object_id = tmp_file_create(norm)?;
+        // `alloc_node` only picks a free index, so claim it before creating the
+        // backing object: a node-table ENFILE then leaves no object behind.
         let index = self.alloc_node()?;
+        let object_id = tmp_file_create(norm)?;
         self.fill_node(
             index,
             parent.index,

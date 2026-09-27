@@ -946,6 +946,11 @@ impl<L: NetworkLink> DnsResolver<L> {
         None
     }
 
+    /// Queries still holding a pending slot (in flight or awaiting `take_result`).
+    pub fn pending_queries(&self) -> usize {
+        self.pending.iter().filter(|query| query.live).count()
+    }
+
     pub fn on_holder_exit(&mut self, owner: TrustedCaller) {
         for i in 0..PENDING_SLOTS {
             if self.pending[i].live && self.pending[i].owner == owner {

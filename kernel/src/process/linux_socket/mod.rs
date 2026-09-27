@@ -30,8 +30,6 @@ pub(crate) use sockaddr::read_sockaddr_in;
 pub(crate) const LINUX_SOCKET_MAX: usize = 8;
 pub(crate) const LINUX_UDP_MAX_DATAGRAM: usize = 512;
 pub(crate) const LINUX_TCP_CONNECT_TIMEOUT_MS: u64 = 5000;
-/// `sched::wait::Deadline` uses APIC timer IRQ ticks (~750/s in QEMU), not milliseconds (#103).
-pub(crate) const LINUX_TCP_CONNECT_TIMEOUT_TICKS: u64 = LINUX_TCP_CONNECT_TIMEOUT_MS * 750 / 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxSocketId {
@@ -148,6 +146,18 @@ pub(crate) fn linux_socket_request_wait_key(request_id: u64) -> WaitKey {
 
 pub(crate) fn pool_live_count() -> usize {
     unsafe { (*SOCKET_POOL.get()).live_count() }
+}
+
+/// Live `kind` sockets with a prefetch `Receive` outstanding in the service.
+#[cfg_attr(not(feature = "m9-userspace-self-test"), allow(dead_code))]
+pub(crate) fn outstanding_prefetches(kind: SocketKindLinux) -> usize {
+    let pool = unsafe { &*SOCKET_POOL.get() };
+    pool.slots
+        .iter()
+        .filter(|slot| {
+            slot.state != SocketState::Closed && slot.kind == kind && slot.pending_rx_req.is_some()
+        })
+        .count()
 }
 
 pub(super) fn socket_with_pending_receive(
