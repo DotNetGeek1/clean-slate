@@ -4,7 +4,7 @@
 //! The kernel registers the owner's bootstrap grant after both are spawned. The owner
 //! program embeds the reader pid for outbound delegation; the reader re-delegates to
 //! its own pid so the missing-right denial is a real `SYSCALL_NR_CAP_DELEGATE` without
-//! cross-fixture pid handoff. The owner ends with `spin(0)` so holder-exit revocation
+//! cross-fixture pid handoff. The owner ends parked so holder-exit revocation
 //! does not tear down the delegated child before the reader runs.
 
 use crate::arch::x86_64::context_switch::restore_task_context;
@@ -24,7 +24,7 @@ use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
 use crate::selftest::m6_fixture::{
-    fixture_service, set_report_handler, spawn_fixture, FixtureReportAction,
+    fixture_service, park_step, set_report_handler, spawn_fixture, FixtureReportAction,
 };
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
@@ -170,7 +170,6 @@ fn build_owner_program(reader_pid: u64) -> M6FixtureBootstrap {
     let claim = program
         .push(
             M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0])
-                .repeat_while_eq(0)
                 .expect_ne(0),
         )
         .unwrap();
@@ -234,7 +233,7 @@ fn build_owner_program(reader_pid: u64) -> M6FixtureBootstrap {
             [DELEGATE_OP_LIST, 0, arg_data(list_offset), 0, 0, 0],
         ))
         .unwrap();
-    program.push(M6FixtureStep::spin(0)).unwrap();
+    program.push(park_step()).unwrap();
     program
 }
 

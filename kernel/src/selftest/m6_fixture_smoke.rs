@@ -64,8 +64,8 @@ fn smoke_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReportAction {
         }
         state.p1_reported = true;
     } else if pid == state.p2_pid {
-        if report.status != FIXTURE_STATUS_DONE || report.progress != 5 {
-            return FixtureReportAction::Fail("fixture P2 spin progress mismatch");
+        if report.status != FIXTURE_STATUS_DONE || report.progress != P2_SYSCALL_STEPS as u64 {
+            return FixtureReportAction::Fail("fixture P2 step progress mismatch");
         }
         state.p2_reported = true;
     } else {
@@ -89,9 +89,16 @@ fn build_p1_program() -> M6FixtureBootstrap {
     program
 }
 
+/// P2 checks that the fixture's `progress` counts each completed step.
+const P2_SYSCALL_STEPS: usize = 5;
+
 fn build_p2_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
-    program.push(M6FixtureStep::spin(5)).unwrap();
+    for _ in 0..P2_SYSCALL_STEPS {
+        program
+            .push(M6FixtureStep::syscall(0, [0; 6]).expect_eq(1))
+            .unwrap();
+    }
     program.push(M6FixtureStep::END).unwrap();
     program
 }

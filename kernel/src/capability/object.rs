@@ -3,7 +3,7 @@
 use core::ptr;
 
 use clean_slate_capability::syscall_abi::{
-    SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSPC, SYSCALL_ENOSYS,
+    SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSPC, SYSCALL_ENOSYS, SYSCALL_NR_CAP_OBJECT,
 };
 use clean_slate_capability::{
     CapabilityError, CapabilityHandle, CapabilityState, HolderId, ResourceClass, ResourceRef,
@@ -18,7 +18,9 @@ use clean_slate_service_fixtures::{
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
+use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
+use crate::sched::wait::{block_current_thread_with_resume, wake_one, BlockedResume, WaitKey};
 use crate::sync::global_cell::GlobalCell;
 
 use super::{
@@ -201,12 +203,15 @@ impl ObjectRequestQueue {
         slot.status = status;
         slot.len = len;
         slot.payload[..len].copy_from_slice(payload);
-        // #101: wake blocked Linux fs syscalls waiting on this object request.
-        crate::sched::wait::wake_one(crate::sched::wait::WaitKey(
-            0x46_u64 << 56 | (request_id & 0x00FF_FFFF_FFFF_FFFF),
-        ));
+        wake_one(object_request_wait_key(request_id));
         Ok(())
     }
+}
+
+/// Wait key the client of `request_id` blocks on until the object service completes
+/// it (native `OBJECT_SUBOP_POLL` and the Linux `/tmp` projection).
+pub(crate) fn object_request_wait_key(request_id: u64) -> WaitKey {
+    WaitKey(0x46_u64 << 56 | (request_id & 0x00FF_FFFF_FFFF_FFFF))
 }
 
 /// Kernel-internal authority check for a holder acting on an object without a raw
@@ -557,7 +562,7 @@ fn handle_poll(frame: &mut SyscallContext) {
     let mut scratch = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
     let out = &mut scratch[..len.min(OBJECT_MAX_PAYLOAD_BYTES)];
     match queue_mut().poll(holder, request_id, out) {
-        Ok(OBJECT_STATUS_PENDING) => frame.rax = OBJECT_STATUS_PENDING,
+        Ok(OBJECT_STATUS_PENDING) => block_until_request_completes(frame, request_id),
         Ok(written) => {
             unsafe {
                 ptr::copy_nonoverlapping(out.as_ptr(), frame.r10 as *mut u8, written as usize);
@@ -565,6 +570,25 @@ fn handle_poll(frame: &mut SyscallContext) {
             frame.rax = written;
         }
         Err(error) => frame.rax = error.syscall_status(),
+    }
+}
+
+/// A poll of a pending request blocks until `service_complete` wakes the request's
+/// key; the restarted syscall then polls again with the caller's original arguments.
+/// Syscalls run with interrupts masked, so the completion cannot slip in between
+/// the pending check and the block.
+fn block_until_request_completes(frame: &mut SyscallContext, request_id: u64) {
+    match block_current_thread_with_resume(
+        frame as *mut SyscallContext,
+        object_request_wait_key(request_id),
+        None,
+        BlockedResume::RestartSyscall {
+            nr: SYSCALL_NR_CAP_OBJECT,
+            timeout_rax: 0,
+        },
+    ) {
+        Ok(_) => handle_poll(frame),
+        Err(message) => fatal_kernel_error(message),
     }
 }
 

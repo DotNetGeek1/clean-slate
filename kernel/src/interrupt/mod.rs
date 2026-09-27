@@ -516,6 +516,17 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));
+    #[cfg(any(
+        feature = "m6-object-self-test",
+        feature = "m6-process-control-self-test",
+        feature = "m6-delegation-self-test",
+        feature = "m6-revocation-self-test",
+        feature = "m6-audit-self-test",
+        feature = "m6-capabilities-self-test",
+        feature = "m6-fixture-smoke-self-test",
+        feature = "m7-net-caps-self-test"
+    ))]
+    crate::selftest::m6_fixture::on_fixture_exiting(pid);
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 1, true)
         .unwrap_or_else(|message| fatal_kernel_error(message));
     #[cfg(feature = "m9-userspace-self-test")]
