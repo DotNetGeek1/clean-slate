@@ -8,6 +8,8 @@ use x86_64::PhysAddr;
 use crate::mm::kernel_map_ptr;
 use crate::mm::region::{MemoryRegion, MemoryRegionKind, NormalizedMemoryMap, MAX_MEMORY_REGIONS};
 use crate::mm::PAGE_SIZE;
+#[cfg(not(test))]
+use crate::sync::global_cell::GlobalCell;
 
 #[cfg(debug_assertions)]
 const FRAME_POISON_QWORD: u64 = 0xDEAD_BEEF_DEAD_BEEF;
@@ -56,9 +58,39 @@ pub(crate) fn physical_frame_ptr(frame: u64) -> *mut u8 {
     }
 }
 
+type UsableRegionTable = [MemoryRegion; MAX_MEMORY_REGIONS];
+
+/// The region table lives outside `PageAllocator` so the allocator stays a
+/// few words and can be moved by value into self-tests and the syscall
+/// allocator slot without multi-KiB stack copies.
+#[cfg(not(test))]
+fn claim_usable_region_table() -> Result<&'static mut UsableRegionTable, &'static str> {
+    struct ClaimableRegionTable {
+        is_claimed: bool,
+        regions: UsableRegionTable,
+    }
+    static TABLE: GlobalCell<ClaimableRegionTable> = GlobalCell::new(ClaimableRegionTable {
+        is_claimed: false,
+        regions: [MemoryRegion::EMPTY; MAX_MEMORY_REGIONS],
+    });
+    let table = unsafe { &mut *TABLE.get() };
+    if table.is_claimed {
+        return Err("page allocator region table is already owned by an allocator");
+    }
+    table.is_claimed = true;
+    Ok(&mut table.regions)
+}
+
+#[cfg(test)]
+fn claim_usable_region_table() -> Result<&'static mut UsableRegionTable, &'static str> {
+    Ok(std::boxed::Box::leak(std::boxed::Box::new(
+        [MemoryRegion::EMPTY; MAX_MEMORY_REGIONS],
+    )))
+}
+
 #[derive(Debug)]
 pub(crate) struct PageAllocator {
-    usable_regions: [MemoryRegion; MAX_MEMORY_REGIONS],
+    usable_regions: &'static mut UsableRegionTable,
     usable_region_count: usize,
     current_region: usize,
     next_page: u64,
@@ -79,7 +111,7 @@ pub(crate) struct PageAllocatorStats {
 impl PageAllocator {
     pub(crate) fn new(memory_map: &NormalizedMemoryMap) -> Result<Self, &'static str> {
         let mut allocator = Self {
-            usable_regions: [MemoryRegion::EMPTY; MAX_MEMORY_REGIONS],
+            usable_regions: claim_usable_region_table()?,
             usable_region_count: 0,
             current_region: 0,
             next_page: 0,
@@ -292,7 +324,7 @@ mod tests {
     use std::vec::Vec;
     use uefi::mem::memory_map::{MemoryAttribute, MemoryDescriptor, MemoryType};
 
-    use crate::boot::uefi::normalize_memory_map;
+    use crate::boot::uefi::normalize_memory_map_boxed;
     use crate::mm::region::ReservedRange;
 
     fn descriptor(ty: MemoryType, start: u64, pages: u64) -> MemoryDescriptor {
@@ -315,7 +347,7 @@ mod tests {
         assert_eq!(base % PAGE_SIZE, 0);
 
         let descriptors = [descriptor(MemoryType::CONVENTIONAL, base, 4)];
-        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
+        let map = normalize_memory_map_boxed(descriptors.iter(), &[]).expect("normalize map");
         let mut allocator = PageAllocator::new(&map).expect("allocator");
 
         let first = allocator.allocate_page().expect("first page");
@@ -345,7 +377,7 @@ mod tests {
         let mut pages = AlignedPages([0; (PAGE_SIZE as usize) * 4]);
         let base = pages.0.as_mut_ptr() as u64;
         let descriptors = [descriptor(MemoryType::CONVENTIONAL, base, 4)];
-        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
+        let map = normalize_memory_map_boxed(descriptors.iter(), &[]).expect("normalize map");
         let mut allocator = PageAllocator::new(&map).expect("allocator");
         let frame = allocator.allocate_page().expect("page");
         unsafe {
@@ -363,7 +395,7 @@ mod tests {
         let mut pages = AlignedPages([0; (PAGE_SIZE as usize) * 4]);
         let base = pages.0.as_mut_ptr() as u64;
         let descriptors = [descriptor(MemoryType::CONVENTIONAL, base, 4)];
-        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
+        let map = normalize_memory_map_boxed(descriptors.iter(), &[]).expect("normalize map");
         let mut allocator = PageAllocator::new(&map).expect("allocator");
 
         let frame = allocator.allocate_page().expect("allocated page");
@@ -379,7 +411,7 @@ mod tests {
         let mut pages = AlignedPages([0; (PAGE_SIZE as usize) * 4]);
         let base = pages.0.as_mut_ptr() as u64;
         let descriptors = [descriptor(MemoryType::CONVENTIONAL, base, 4)];
-        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
+        let map = normalize_memory_map_boxed(descriptors.iter(), &[]).expect("normalize map");
         let mut allocator = PageAllocator::new(&map).expect("allocator");
 
         let never_allocated = unsafe { allocator.free_page(base + PAGE_SIZE) };
@@ -400,7 +432,7 @@ mod tests {
             descriptor(MemoryType::CONVENTIONAL, 0x7000, 2),
         ];
         let reserved = [ReservedRange::from_base_and_size(0x2000, PAGE_SIZE)];
-        let map = normalize_memory_map(descriptors.iter(), &reserved).expect("normalize map");
+        let map = normalize_memory_map_boxed(descriptors.iter(), &reserved).expect("normalize map");
         let mut allocator = PageAllocator::new(&map).expect("allocator");
 
         let mut allocated = Vec::new();

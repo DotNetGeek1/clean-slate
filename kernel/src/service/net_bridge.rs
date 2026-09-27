@@ -236,6 +236,22 @@ impl ClientSlot {
             discard_result: false,
         }
     }
+
+    /// Resets this slot to [`Self::free`] in place: a by-value `ClientSlot` is ~8 KiB of stack.
+    fn release(&mut self) {
+        self.state = ClientSlotState::Free;
+        self.client = TrustedCaller::new(0, 0, 0);
+        self.request_id = 0;
+        self.request = NetworkRequest::Close {
+            session: clean_slate_network::session::SessionId::from_raw(0),
+        };
+        self.payload_len = 0;
+        self.payload.fill(0);
+        self.response = NetworkResponse::Close;
+        self.response_payload_len = 0;
+        self.response_payload.fill(0);
+        self.discard_result = false;
+    }
 }
 
 const VIRTIO_RX_PENDING_DEPTH: usize =
@@ -543,7 +559,8 @@ impl NetBridge {
         self.admit_holder(caller)?;
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
-        let mut slot = ClientSlot::free();
+        let slot = &mut self.slots[slot_index];
+        slot.release();
         slot.state = ClientSlotState::Pending;
         slot.client = caller;
         slot.request_id = request_id;
@@ -551,7 +568,6 @@ impl NetBridge {
         let copy_len = payload.len().min(NETWORK_MAX_PAYLOAD_BYTES);
         slot.payload[..copy_len].copy_from_slice(&payload[..copy_len]);
         slot.payload_len = copy_len as u32;
-        self.slots[slot_index] = slot;
         crate::service::net_request_wake::wake_net_service_work();
         Ok(request_id)
     }
@@ -584,7 +600,7 @@ impl NetBridge {
                 }
                 out_payload[..len].copy_from_slice(&slot.response_payload[..len]);
                 let response = slot.response;
-                self.slots[index] = ClientSlot::free();
+                self.slots[index].release();
                 Ok(response)
             }
             ClientSlotState::Free => Err(NetBridgeError::InvalidRequest),
@@ -621,7 +637,7 @@ impl NetBridge {
             return Err(NetBridgeError::Unauthorized);
         }
         if slot.state == ClientSlotState::Done {
-            *slot = ClientSlot::free();
+            slot.release();
         } else {
             slot.discard_result = true;
         }
@@ -652,7 +668,7 @@ impl NetBridge {
             .ok_or(NetBridgeError::InvalidRequest)?;
         let len = payload.len().min(NETWORK_MAX_PAYLOAD_BYTES);
         if self.slots[index].discard_result {
-            self.slots[index] = ClientSlot::free();
+            self.slots[index].release();
             return Ok(());
         }
         let slot = &mut self.slots[index];
@@ -663,19 +679,16 @@ impl NetBridge {
         Ok(())
     }
 
-    pub fn service_take_payload(&self, request_id: u64) -> Option<[u8; NETWORK_MAX_PAYLOAD_BYTES]> {
+    pub fn service_payload(&self, request_id: u64) -> Option<&[u8]> {
         let slot = self.slots.iter().find(|s| s.request_id == request_id)?;
-        let mut buf = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-        let len = slot.payload_len as usize;
-        buf[..len].copy_from_slice(&slot.payload[..len]);
-        Some(buf)
+        Some(&slot.payload[..slot.payload_len as usize])
     }
 
     pub fn reclaim_for_holder(&mut self, pid: u64) -> usize {
         let mut reclaimed = 0usize;
         for slot in &mut self.slots {
             if slot.state != ClientSlotState::Free && slot.client.pid == pid {
-                *slot = ClientSlot::free();
+                slot.release();
                 reclaimed += 1;
             }
         }
@@ -687,7 +700,7 @@ impl NetBridge {
         for slot in &mut self.slots {
             if slot.state == ClientSlotState::Pending || slot.state == ClientSlotState::InService {
                 if slot.discard_result {
-                    *slot = ClientSlot::free();
+                    slot.release();
                     continue;
                 }
                 slot.response = NetworkResponse::Error {

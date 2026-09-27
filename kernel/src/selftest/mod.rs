@@ -135,6 +135,8 @@ pub(crate) mod m9_linux_trace;
 pub(crate) mod m9_low_va;
 #[cfg(feature = "m9-rootfs-self-test")]
 pub(crate) mod m9_rootfs;
+#[cfg(feature = "m9-stack-guard-self-test")]
+pub(crate) mod m9_stack_guard;
 #[cfg(feature = "m9-syscall-fail-closed-self-test")]
 pub(crate) mod m9_syscall_fail_closed;
 #[cfg(feature = "m9-userspace-self-test")]

@@ -49,18 +49,39 @@ impl BootReservedRanges {
     }
 }
 
+/// Working arrays for [`normalize_memory_map`]. They are several KiB each, so
+/// callers keep them in static (boot) or heap (host test) storage instead of
+/// on the stack.
+pub(crate) struct MemoryMapScratch {
+    descriptors: [Option<RawDescriptor>; MAX_MEMORY_REGIONS],
+    reserved: [Option<ReservedRange>; MAX_RESERVED_RANGES],
+}
+
+impl MemoryMapScratch {
+    pub(crate) const fn new() -> Self {
+        Self {
+            descriptors: [None; MAX_MEMORY_REGIONS],
+            reserved: [None; MAX_RESERVED_RANGES],
+        }
+    }
+}
+
+/// Rebuilds `normalized` from the firmware descriptors, carving out
+/// `reserved_ranges`.
 pub(crate) fn normalize_memory_map<'a>(
     descriptors: impl IntoIterator<Item = &'a MemoryDescriptor>,
     reserved_ranges: &[ReservedRange],
-) -> Result<NormalizedMemoryMap, &'static str> {
-    let mut descriptors = collect_descriptors(descriptors)?;
-    sort_descriptors(&mut descriptors);
+    scratch: &mut MemoryMapScratch,
+    normalized: &mut NormalizedMemoryMap,
+) -> Result<(), &'static str> {
+    collect_descriptors(descriptors, &mut scratch.descriptors)?;
+    sort_descriptors(&mut scratch.descriptors);
 
-    let mut ranges = collect_reserved_ranges(reserved_ranges)?;
-    sort_reserved_ranges(&mut ranges);
+    collect_reserved_ranges(reserved_ranges, &mut scratch.reserved)?;
+    sort_reserved_ranges(&mut scratch.reserved);
 
-    let mut normalized = NormalizedMemoryMap::default();
-    for descriptor in descriptors.iter().flatten() {
+    normalized.clear();
+    for descriptor in scratch.descriptors.iter().flatten() {
         let start = align_up(descriptor.start, PAGE_SIZE);
         let end = align_down(descriptor.end, PAGE_SIZE);
         if start >= end {
@@ -69,7 +90,7 @@ pub(crate) fn normalize_memory_map<'a>(
 
         if is_usable_memory_type(descriptor.ty) {
             let mut cursor = start;
-            for reserved in ranges.iter().flatten() {
+            for reserved in scratch.reserved.iter().flatten() {
                 if reserved.end <= cursor || reserved.start >= end {
                     continue;
                 }
@@ -108,6 +129,18 @@ pub(crate) fn normalize_memory_map<'a>(
         }
     }
 
+    Ok(())
+}
+
+/// Host-test wrapper that keeps both working arrays on the heap.
+#[cfg(test)]
+pub(crate) fn normalize_memory_map_boxed<'a>(
+    descriptors: impl IntoIterator<Item = &'a MemoryDescriptor>,
+    reserved_ranges: &[ReservedRange],
+) -> Result<std::boxed::Box<NormalizedMemoryMap>, &'static str> {
+    let mut scratch = std::boxed::Box::new(MemoryMapScratch::new());
+    let mut normalized = std::boxed::Box::new(NormalizedMemoryMap::new());
+    normalize_memory_map(descriptors, reserved_ranges, &mut scratch, &mut normalized)?;
     Ok(normalized)
 }
 
@@ -120,8 +153,9 @@ struct RawDescriptor {
 
 fn collect_descriptors<'a>(
     descriptors: impl IntoIterator<Item = &'a MemoryDescriptor>,
-) -> Result<[Option<RawDescriptor>; MAX_MEMORY_REGIONS], &'static str> {
-    let mut collected = [None; MAX_MEMORY_REGIONS];
+    collected: &mut [Option<RawDescriptor>; MAX_MEMORY_REGIONS],
+) -> Result<(), &'static str> {
+    collected.fill(None);
     for (count, descriptor) in descriptors.into_iter().enumerate() {
         if count == MAX_MEMORY_REGIONS {
             return Err("UEFI memory map exceeded fixed descriptor capacity");
@@ -136,7 +170,7 @@ fn collect_descriptors<'a>(
         });
     }
 
-    Ok(collected)
+    Ok(())
 }
 
 fn sort_descriptors(descriptors: &mut [Option<RawDescriptor>; MAX_MEMORY_REGIONS]) {
@@ -162,8 +196,9 @@ fn sort_descriptors(descriptors: &mut [Option<RawDescriptor>; MAX_MEMORY_REGIONS
 
 fn collect_reserved_ranges(
     reserved_ranges: &[ReservedRange],
-) -> Result<[Option<ReservedRange>; MAX_RESERVED_RANGES], &'static str> {
-    let mut collected = [None; MAX_RESERVED_RANGES];
+    collected: &mut [Option<ReservedRange>; MAX_RESERVED_RANGES],
+) -> Result<(), &'static str> {
+    collected.fill(None);
     let mut count = 0usize;
 
     collected[count] = Some(RESERVED_PHYSICAL_ZERO_PAGE);
@@ -190,7 +225,7 @@ fn collect_reserved_ranges(
         collected[count] = Some(range);
         count += 1;
     }
-    Ok(collected)
+    Ok(())
 }
 
 fn sort_reserved_ranges(ranges: &mut [Option<ReservedRange>; MAX_RESERVED_RANGES]) {
@@ -267,7 +302,7 @@ mod tests {
         ];
         let reserved = [ReservedRange::from_base_and_size(0x4000, PAGE_SIZE)];
 
-        let map = normalize_memory_map(descriptors.iter(), &reserved).expect("normalize map");
+        let map = normalize_memory_map_boxed(descriptors.iter(), &reserved).expect("normalize map");
         assert_eq!(
             map.regions(),
             &[
@@ -305,7 +340,7 @@ mod tests {
             ReservedRange::from_base_and_size(0x5000, PAGE_SIZE * 2),
         ];
 
-        let map = normalize_memory_map(descriptors.iter(), &reserved).expect("normalize map");
+        let map = normalize_memory_map_boxed(descriptors.iter(), &reserved).expect("normalize map");
         assert_eq!(
             map.regions(),
             &[
@@ -341,7 +376,7 @@ mod tests {
     #[test]
     fn normalize_reserves_physical_frame_zero_when_firmware_reports_it_usable() {
         let descriptors = [descriptor(MemoryType::CONVENTIONAL, 0, 3)];
-        let map = normalize_memory_map(descriptors.iter(), &[]).expect("normalize map");
+        let map = normalize_memory_map_boxed(descriptors.iter(), &[]).expect("normalize map");
 
         assert_eq!(
             map.regions(),
@@ -382,7 +417,7 @@ mod tests {
             *range = ReservedRange::new(start, start + PAGE_SIZE);
         }
 
-        let error = normalize_memory_map(descriptors.iter(), &reserved).unwrap_err();
+        let error = normalize_memory_map_boxed(descriptors.iter(), &reserved).unwrap_err();
         assert_eq!(error, "reserved range capacity exceeded");
     }
 
@@ -398,7 +433,7 @@ mod tests {
             })
             .collect();
 
-        let error = normalize_memory_map(descriptors.iter(), &[]).unwrap_err();
+        let error = normalize_memory_map_boxed(descriptors.iter(), &[]).unwrap_err();
         assert_eq!(error, "UEFI memory map exceeded fixed descriptor capacity");
     }
 }

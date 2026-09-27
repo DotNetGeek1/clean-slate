@@ -54,7 +54,5 @@ pub(crate) fn trigger_nested_double_fault() -> ! {
 #[cfg(feature = "m2-double-fault-self-test")]
 pub(crate) fn double_fault_stack_contains(address: u64) -> bool {
     let stack = unsafe { &*DOUBLE_FAULT_STACK.get() };
-    let start = stack.0.as_ptr() as u64;
-    let end = start + stack.0.len() as u64;
-    address >= start && address < end
+    address >= stack.base() && address < stack.top()
 }

@@ -40,10 +40,12 @@ use x86_64::structures::paging::Translate;
 use x86_64::PhysAddr;
 use x86_64::VirtAddr;
 
-// `ProcessAddressSpace` is a fixed-size value type that is moved by value
-// through the spawn path while running on a 64 KiB per-thread kernel stack, so
-// these tables must stay small: every extra mapping slot costs 16 bytes in
-// each of the several copies that live on the stack during a launch.
+use crate::sync::global_cell::GlobalCell;
+
+// `ProcessAddressSpace` is moved by value through the spawn/exec/fork paths on
+// a per-thread kernel stack. Its user-mapping table lives out of line in a
+// bounded pool (`UserMappingTableSlot`); the page-table frame list below stays
+// inline, so it must stay small.
 // User mapping page-table budget (excluding the fixed carve-out private tables).
 #[cfg(feature = "m9-userspace-self-test")]
 const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 21;
@@ -234,13 +236,76 @@ pub(crate) struct AddressSpaceResourceCounts {
     pub(crate) page_table_frames: usize,
 }
 
+type UserMappingTable = [OwnedUserMapping; MAX_ADDRESS_SPACE_USER_MAPPINGS];
+
+/// Address spaces that can own a mapping table at once: every process
+/// registry slot plus spaces in flight (an exec replacement or fork child
+/// before it is committed, a spawn before registration, self-test fixtures).
+const USER_MAPPING_TABLE_POOL_SIZE: usize = crate::process::PROCESS_REGISTRY_CAPACITY + 8;
+
+struct UserMappingTablePool {
+    is_claimed: [bool; USER_MAPPING_TABLE_POOL_SIZE],
+    tables: [UserMappingTable; USER_MAPPING_TABLE_POOL_SIZE],
+}
+
+static USER_MAPPING_TABLES: GlobalCell<UserMappingTablePool> =
+    GlobalCell::new(UserMappingTablePool {
+        is_claimed: [false; USER_MAPPING_TABLE_POOL_SIZE],
+        tables: [[OwnedUserMapping::EMPTY; MAX_ADDRESS_SPACE_USER_MAPPINGS];
+            USER_MAPPING_TABLE_POOL_SIZE],
+    });
+
+/// Exclusive owner of one pooled mapping table, returned to the pool on drop.
+/// Keeping the table out of line leaves `ProcessAddressSpace` a few hundred
+/// bytes, so the spawn/exec/fork paths can move it by value without
+/// multi-KiB stack copies.
+#[derive(Debug)]
+struct UserMappingTableSlot(usize);
+
+impl UserMappingTableSlot {
+    fn claim() -> Result<Self, &'static str> {
+        let pool = unsafe { &mut *USER_MAPPING_TABLES.get() };
+        let index = pool
+            .is_claimed
+            .iter()
+            .position(|is_claimed| !is_claimed)
+            .ok_or("process address-space mapping table pool exhausted")?;
+        pool.is_claimed[index] = true;
+        pool.tables[index] = [OwnedUserMapping::EMPTY; MAX_ADDRESS_SPACE_USER_MAPPINGS];
+        Ok(Self(index))
+    }
+
+    fn table(&self) -> &UserMappingTable {
+        unsafe { &(*USER_MAPPING_TABLES.get()).tables[self.0] }
+    }
+
+    fn table_mut(&mut self) -> &mut UserMappingTable {
+        unsafe { &mut (*USER_MAPPING_TABLES.get()).tables[self.0] }
+    }
+}
+
+impl Drop for UserMappingTableSlot {
+    fn drop(&mut self) {
+        let pool = unsafe { &mut *USER_MAPPING_TABLES.get() };
+        pool.is_claimed[self.0] = false;
+    }
+}
+
+impl PartialEq for UserMappingTableSlot {
+    fn eq(&self, other: &Self) -> bool {
+        self.table() == other.table()
+    }
+}
+
+impl Eq for UserMappingTableSlot {}
+
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ProcessAddressSpace {
     pub(crate) root_frame: u64,
     page_table_frames: [u64; MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES],
     page_table_frame_count: usize,
-    user_mappings: [OwnedUserMapping; MAX_ADDRESS_SPACE_USER_MAPPINGS],
+    user_mappings: UserMappingTableSlot,
     user_mapping_count: usize,
 }
 
@@ -251,7 +316,7 @@ impl ProcessAddressSpace {
             root_frame,
             page_table_frames: [0; MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES],
             page_table_frame_count: 0,
-            user_mappings: [OwnedUserMapping::EMPTY; MAX_ADDRESS_SPACE_USER_MAPPINGS],
+            user_mappings: UserMappingTableSlot::claim()?,
             user_mapping_count: 0,
         };
         address_space.record_page_table_frame(root_frame)?;
@@ -272,10 +337,10 @@ impl ProcessAddressSpace {
         virtual_address: u64,
         frame_address: u64,
     ) -> Result<(), &'static str> {
-        if self.user_mapping_count == self.user_mappings.len() {
+        if self.user_mapping_count == MAX_ADDRESS_SPACE_USER_MAPPINGS {
             return Err("process address-space mapping tracking capacity exceeded");
         }
-        self.user_mappings[self.user_mapping_count] = OwnedUserMapping {
+        self.user_mappings.table_mut()[self.user_mapping_count] = OwnedUserMapping {
             virtual_address,
             frame_address,
         };
@@ -298,7 +363,11 @@ impl ProcessAddressSpace {
         if index >= self.user_mapping_count {
             return None;
         }
-        Some(self.user_mappings[index])
+        Some(self.user_mappings.table()[index])
+    }
+
+    fn user_mappings(&self) -> &[OwnedUserMapping] {
+        &self.user_mappings.table()[..self.user_mapping_count]
     }
 }
 
@@ -454,6 +523,7 @@ pub(crate) fn verify_carve_out_attach_at_boot(
     if kernel_phys != process_phys {
         return Err("carve-out leaf physical address diverged from kernel root");
     }
+    crate::mm::stack_guard::verify_guard_holes_in_root(space.root_frame)?;
 
     destroy_process_address_space(&space, allocator)?;
     if allocator.stats().free_pages != free_before {
@@ -587,11 +657,11 @@ pub(crate) fn unmap_process_page_at(
 ) -> Result<(), &'static str> {
     let aligned = align_down(virtual_address, PAGE_SIZE);
     let index = address_space
-        .user_mappings
+        .user_mappings()
         .iter()
         .position(|mapping| mapping.virtual_address == aligned);
     let index = index.ok_or("unmap target was not tracked")?;
-    let mapping = address_space.user_mappings[index];
+    let mapping = address_space.user_mappings()[index];
     let mut mapper = unsafe { offset_page_table_for_root(address_space.root_frame) };
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(mapping.virtual_address));
     let frame = unmap_userspace_page(&mut mapper, page)?;
@@ -601,10 +671,10 @@ pub(crate) fn unmap_process_page_at(
     unsafe {
         free_frame(allocator, mapping.frame_address)?;
     }
-    for slot in index..address_space.user_mapping_count - 1 {
-        address_space.user_mappings[slot] = address_space.user_mappings[slot + 1];
-    }
-    address_space.user_mappings[address_space.user_mapping_count - 1] = OwnedUserMapping::EMPTY;
+    let count = address_space.user_mapping_count;
+    let table = address_space.user_mappings.table_mut();
+    table.copy_within(index + 1..count, index);
+    table[count - 1] = OwnedUserMapping::EMPTY;
     address_space.user_mapping_count -= 1;
     Ok(())
 }
@@ -619,7 +689,7 @@ pub(crate) fn unmap_last_user_mapping(
         return Err("no user mapping available to roll back");
     }
     let index = address_space.user_mapping_count - 1;
-    let mapping = address_space.user_mappings[index];
+    let mapping = address_space.user_mappings()[index];
     let mut mapper = unsafe { offset_page_table_for_root(address_space.root_frame) };
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(mapping.virtual_address));
     let frame = unmap_userspace_page(&mut mapper, page)?;
@@ -629,7 +699,7 @@ pub(crate) fn unmap_last_user_mapping(
     unsafe {
         free_frame(allocator, mapping.frame_address)?;
     }
-    address_space.user_mappings[index] = OwnedUserMapping::EMPTY;
+    address_space.user_mappings.table_mut()[index] = OwnedUserMapping::EMPTY;
     address_space.user_mapping_count = index;
     Ok(())
 }
@@ -652,10 +722,7 @@ pub(crate) fn destroy_process_address_space(
     allocator: &mut PageAllocator,
 ) -> Result<(), &'static str> {
     let mut mapper = unsafe { offset_page_table_for_root(address_space.root_frame) };
-    for mapping in address_space.user_mappings[..address_space.user_mapping_count]
-        .iter()
-        .rev()
-    {
+    for mapping in address_space.user_mappings().iter().rev() {
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(mapping.virtual_address));
         let frame = unmap_userspace_page(&mut mapper, page)?;
         if frame.start_address().as_u64() != mapping.frame_address {
@@ -682,6 +749,29 @@ pub(crate) fn destroy_process_address_space(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mapping_table_pool_is_bounded_released_on_drop_and_reset_on_reuse() {
+        let mut slots = std::vec::Vec::new();
+        for _ in 0..USER_MAPPING_TABLE_POOL_SIZE {
+            slots.push(UserMappingTableSlot::claim().expect("pooled table"));
+        }
+        assert_eq!(
+            UserMappingTableSlot::claim().unwrap_err(),
+            "process address-space mapping table pool exhausted"
+        );
+
+        slots[0].table_mut()[0] = OwnedUserMapping {
+            virtual_address: 0x40_0000,
+            frame_address: 0x20_0000,
+        };
+        drop(slots.remove(0));
+        let reused = UserMappingTableSlot::claim().expect("released table");
+        assert!(reused
+            .table()
+            .iter()
+            .all(|mapping| *mapping == OwnedUserMapping::EMPTY));
+    }
 
     #[test]
     fn kernel_root_sanitization_clears_user_flags_and_user_slots() {
