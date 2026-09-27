@@ -19,6 +19,13 @@
 //! [`guarded_stack_for_fault`] and fails closed. A #PF that is delivered
 //! normally (RSP still above the guard, access below it) is classified the same
 //! way from the #PF handler.
+//!
+//! Limits: an overflow of the double-fault IST stack itself hits its guard
+//! during #DF delivery and triple-faults (QEMU runs with `-no-reboot`, so the
+//! boot stops rather than continuing corrupted). The boot stack runs unguarded
+//! from the switch in `boot::run` until this module arms it; arming rejects a
+//! guard page that is no longer zero, which catches an overflow in that window
+//! after the fact.
 
 use crate::diagnostics::serial::serial_write_fmt;
 use crate::mm::frame_allocator::PageAllocator;
