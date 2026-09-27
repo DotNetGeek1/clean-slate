@@ -20,13 +20,14 @@ Each thread’s `kernel_stack_top` is published to `SYSCALL_KERNEL_STACK_TOP` on
 
 `MAX_WAITERS == TASK_COUNT` (fixed waiter table, no heap). Exhaustion returns an error from `block_current_thread`.
 
-## Tick contract
+## Time contract
 
-`Deadline` is an absolute value from `kernel_ticks()` (APIC timer increments in `interrupt::timer`). This is **not** wall-clock nanoseconds.
+`Deadline::MonotonicNs` is the only deadline: an absolute calibrated TSC value from `time::monotonic_ns()`. There is no IRQ-tick deadline (#180). Under QEMU TCG the LAPIC interrupt delivery rate follows the host timer resolution (about 1010/s on CI Linux, about 670/s on Windows at 1 ms resolution, as low as 64/s at the 15.6 ms Windows default), so a count of delivered ticks is not a clock.
 
-- **Rate today:** one tick per local APIC timer interrupt (`interrupt::timer::increment_kernel_ticks` on the periodic LAPIC path). Timer init calibrates the LAPIC counter (PIT sample) and derives the reload count for a ~1 ms IRQ; self-tests log `initial_count=62500 tick-rate=uncalibrated` when calibration is skipped.
-- **#103 (`nanosleep` / `poll`):** Linux lanes turn requested durations into exact TSC `Deadline::MonotonicNs` values (`kernel/src/time`, `now + request`, no tick rounding; see [M9.md](M9.md), "Timed wait latency"); `NET_SUBOP_TICK_PERIOD_NS` for net-service.
-- **Supervisors:** recovery bootstrap publishes `tick_period_ns` so CPL3 liveness windows stay wall-time stable across tick-rate changes.
+- **Ticks:** `kernel_ticks()` counts delivered LAPIC timer interrupts. Timer IRQs only bound how late a due deadline is noticed (`expire_deadlines` runs on each IRQ and in the idle loop). Tick counts remain valid as evidence that interrupts were delivered (for example "blocked across N timer IRQs"), not as durations.
+- **Calibration:** timer init calibrates the LAPIC counter and TSC against the PIT. Builds with `m3-entry-self-test` skip that inside `initialize_timer`, so any self-test that arms a deadline calls `calibrate_apic_tick()` itself. Building a deadline without a calibrated TSC is fatal.
+- **#103 (`nanosleep` / `poll`):** Linux lanes turn requested durations into exact TSC deadlines (`kernel/src/time`, `now + request`, no tick rounding; see [M9.md](M9.md), "Timed wait latency").
+- **Tick-unit clients:** the net service (`NET_SUBOP_MONOTONIC_TICKS`) and the recovery supervisor bootstrap take a clock in `tick_period_ns` units. Both are fed `time::monotonic_period_ticks()`, TSC time divided by the IRQ period, so their timers run on real time.
 
 ## Idle
 

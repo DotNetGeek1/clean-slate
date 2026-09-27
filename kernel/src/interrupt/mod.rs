@@ -167,11 +167,11 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         #[cfg(not(feature = "m3-syscall-self-test"))]
         #[cfg(not(feature = "m2-timer-self-test"))]
         {
-            let _previous_ticks = increment_kernel_ticks();
+            increment_kernel_ticks();
             #[cfg(feature = "m9-linux-runtime-self-test")]
             crate::selftest::m9_linux_runtime_latency::observe_timer_irq();
             crate::service::net_bridge::timer_poll_net_virtio_rx();
-            crate::sched::wait::expire_deadlines(_previous_ticks + 1);
+            crate::sched::wait::expire_deadlines();
             #[cfg(feature = "m9-block-wake-self-test")]
             crate::selftest::m9_block_wake::observe_timer_while_consumer_blocked();
             let next_stack_pointer =

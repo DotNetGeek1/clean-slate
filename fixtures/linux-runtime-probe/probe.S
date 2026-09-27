@@ -64,95 +64,95 @@
     .section .rodata, "a", @progbits
 m_fs_ok:
     .ascii  "[M9.J] fs base survives switch\n"
-    .equ    m_fs_ok_len, 33
+    .equ    m_fs_ok_len, . - m_fs_ok
 m_brk:
     .ascii  "[M9.J] brk ok\n"
-    .equ    m_brk_len, 17
+    .equ    m_brk_len, . - m_brk
 m_mmap:
     .ascii  "[M9.J] mmap ok\n"
-    .equ    m_mmap_len, 18
+    .equ    m_mmap_len, . - m_mmap
 m_uname:
     .ascii  "[M9.J] uname=Linux\n"
-    .equ    m_uname_len, 22
+    .equ    m_uname_len, . - m_uname
 m_sig:
     .ascii  "[M9.J] signals ok\n"
-    .equ    m_sig_len, 20
+    .equ    m_sig_len, . - m_sig
 m_poll:
     .ascii  "[M9.J] poll timeout ok\n"
-    .equ    m_poll_len, 25
+    .equ    m_poll_len, . - m_poll
 m_done:
     .ascii  "[M9.J] probe done\n"
-    .equ    m_done_len, 20
+    .equ    m_done_len, . - m_done
 m_wall_start:
     .ascii  "[M9.J] nanosleep wall start\n"
-    .equ    m_wall_start_len, 30
+    .equ    m_wall_start_len, . - m_wall_start
 m_wall_end:
     .ascii  "[M9.J] nanosleep wall end\n"
-    .equ    m_wall_end_len, 28
+    .equ    m_wall_end_len, . - m_wall_end
 m_linux:
     .ascii  "Linux"
-    .equ    m_linux_len, 5
+    .equ    m_linux_len, . - m_linux
 
 m_fail_arch:
     .ascii  "[M9.J] FAIL arch_prctl\n"
-    .equ    m_fail_arch_len, 24
+    .equ    m_fail_arch_len, . - m_fail_arch
 m_fail_fs0:
     .ascii  "[M9.J] FAIL fs0\n"
-    .equ    m_fail_fs0_len, 18
+    .equ    m_fail_fs0_len, . - m_fail_fs0
 m_fail_getfs:
     .ascii  "[M9.J] FAIL get_fs\n"
-    .equ    m_fail_getfs_len, 21
+    .equ    m_fail_getfs_len, . - m_fail_getfs
 m_fail_tid:
     .ascii  "[M9.J] FAIL set_tid\n"
-    .equ    m_fail_tid_len, 22
+    .equ    m_fail_tid_len, . - m_fail_tid
 m_fail_brk:
     .ascii  "[M9.J] FAIL brk\n"
-    .equ    m_fail_brk_len, 18
+    .equ    m_fail_brk_len, . - m_fail_brk
 m_fail_brk_enomem:
     .ascii  "[M9.J] FAIL brk_enomem\n"
-    .equ    m_fail_brk_enomem_len, 26
+    .equ    m_fail_brk_enomem_len, . - m_fail_brk_enomem
 m_fail_mmap:
     .ascii  "[M9.J] FAIL mmap\n"
-    .equ    m_fail_mmap_len, 19
+    .equ    m_fail_mmap_len, . - m_fail_mmap
 m_fail_mmap_wx:
     .ascii  "[M9.J] FAIL mmap_wx\n"
-    .equ    m_fail_mmap_wx_len, 22
+    .equ    m_fail_mmap_wx_len, . - m_fail_mmap_wx
 m_fail_mmap_fixed:
     .ascii  "[M9.J] FAIL mmap_fixed\n"
-    .equ    m_fail_mmap_fixed_len, 25
+    .equ    m_fail_mmap_fixed_len, . - m_fail_mmap_fixed
 m_fail_munmap:
     .ascii  "[M9.J] FAIL munmap\n"
-    .equ    m_fail_munmap_len, 21
+    .equ    m_fail_munmap_len, . - m_fail_munmap
 m_fail_uname:
     .ascii  "[M9.J] FAIL uname\n"
-    .equ    m_fail_uname_len, 20
+    .equ    m_fail_uname_len, . - m_fail_uname
 m_fail_ioctl:
     .ascii  "[M9.J] FAIL ioctl\n"
-    .equ    m_fail_ioctl_len, 20
+    .equ    m_fail_ioctl_len, . - m_fail_ioctl
 m_fail_sigaction:
     .ascii  "[M9.J] FAIL sigaction\n"
-    .equ    m_fail_sigaction_len, 24
+    .equ    m_fail_sigaction_len, . - m_fail_sigaction
 m_fail_sigmask:
     .ascii  "[M9.J] FAIL sigmask\n"
-    .equ    m_fail_sigmask_len, 22
+    .equ    m_fail_sigmask_len, . - m_fail_sigmask
 m_fail_nanosleep:
     .ascii  "[M9.J] FAIL nanosleep\n"
-    .equ    m_fail_nanosleep_len, 24
+    .equ    m_fail_nanosleep_len, . - m_fail_nanosleep
 m_fail_poll:
     .ascii  "[M9.J] FAIL poll\n"
-    .equ    m_fail_poll_len, 19
+    .equ    m_fail_poll_len, . - m_fail_poll
 m_fail_poll0:
     .ascii  "[M9.J] FAIL poll0\n"
-    .equ    m_fail_poll0_len, 20
+    .equ    m_fail_poll0_len, . - m_fail_poll0
 m_fail_preempt:
     .ascii  "[M9.J] FAIL preempt\n"
-    .equ    m_fail_preempt_len, 23
+    .equ    m_fail_preempt_len, . - m_fail_preempt
 m_fail_uname_fault:
     .ascii  "[M9.J] FAIL uname_fault\n"
-    .equ    m_fail_uname_fault_len, 27
+    .equ    m_fail_uname_fault_len, . - m_fail_uname_fault
 m_fail_ts_bad:
     .ascii  "[M9.J] FAIL ts_bad\n"
-    .equ    m_fail_ts_bad_len, 21
+    .equ    m_fail_ts_bad_len, . - m_fail_ts_bad
 
     .section .data
 tls_cell:
