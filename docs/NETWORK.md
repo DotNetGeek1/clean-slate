@@ -538,7 +538,7 @@ UEFI builds set `--cfg aes_force_soft` in [`.cargo/config.toml`](../.cargo/confi
 
 ### TCP transport storage
 
-[`TcpTransport`](../network/src/tcp/transport.rs) is ~310 KiB in `no_std` (32 × ~9.7 KiB connection slots). Do not construct it on boot stacks; use zeroed static storage and [`TcpTransport::init_in_place`](../network/src/tcp/transport.rs).
+[`TcpTransport`](../network/src/tcp/transport.rs) is ~310 KiB in `no_std` (32 × ~9.7 KiB connection slots). Do not construct it on boot stacks; use zeroed static storage and [`TcpTransport::init_in_place`](../network/src/tcp/transport.rs). The same applies to the ~136 KiB `NetworkService` session table: the userspace service initializes it in static storage with `NetworkService::init_in_place`, which keeps the converged DNS+TLS stack high-water at about 91 KiB of the fixed 320 KiB service stack.
 
 ## M7.5 DNS
 

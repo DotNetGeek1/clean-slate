@@ -224,7 +224,7 @@ fn occupied<T>(rows: &[Option<T>]) -> u64 {
 /// (see `NetworkServiceOccupancy`). Runs only at the idle point, right before blocking.
 fn publish_occupancy(parked: &ParkedRequests, tls_active: bool) {
     let (sessions, session_pending) =
-        unsafe { (*service_state_slot()).as_ref() }.map_or((0, 0), |service| {
+        unsafe { service_state().map(|state| &*state) }.map_or((0, 0), |service| {
             (
                 u64::from(service.sessions_in_use()),
                 u64::from(service.pending_requests()),
@@ -614,7 +614,8 @@ impl NetworkLink for DemuxLink {
 type ServiceLink = DemuxLink;
 type ServiceState = NetworkService<ServiceLink, AllowAllAuthorizer>;
 
-static mut SERVICE_STATE: Option<ServiceState> = None;
+static mut SERVICE_STATE: MaybeUninit<ServiceState> = MaybeUninit::uninit();
+static SERVICE_STATE_READY: AtomicBool = AtomicBool::new(false);
 static mut SERVICE_DNS_RESOLVER: Option<Box<DnsResolver<ServiceLink>>> = None;
 static mut SERVICE_TLS_TRANSPORT: MaybeUninit<TcpTransport<ServiceLink>> = MaybeUninit::uninit();
 /// Linux TCP session -> shared-transport connection, owned by the caller that connected it.
@@ -814,8 +815,15 @@ fn empty_tls_slot<F>(_start: fn(TlsJobInput) -> F) -> Option<F> {
 }
 
 /// Single-threaded service loop; use raw pointers to satisfy `static_mut_refs` under `-D warnings`.
-unsafe fn service_state_slot() -> *mut Option<ServiceState> {
-    core::ptr::addr_of_mut!(SERVICE_STATE)
+unsafe fn service_state_ptr() -> *mut ServiceState {
+    core::ptr::addr_of_mut!(SERVICE_STATE).cast::<ServiceState>()
+}
+
+/// The service state once `run_service_loop` has initialized it in place.
+unsafe fn service_state() -> Option<*mut ServiceState> {
+    SERVICE_STATE_READY
+        .load(Ordering::Acquire)
+        .then(|| unsafe { service_state_ptr() })
 }
 
 unsafe fn service_dns_resolver_slot() -> *mut Option<Box<DnsResolver<ServiceLink>>> {
@@ -871,10 +879,9 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     nic_ingress_init(raw_handle);
     let raw_mac = DemuxLink::raw_geometry().mac;
     unsafe {
-        *service_state_slot() = Some(NetworkService::new(generation, AllowAllAuthorizer));
-        if let Some(service) = (*service_state_slot()).as_mut() {
-            service.attach_backend(DemuxLink::for_udp());
-        }
+        NetworkService::init_in_place(service_state_ptr(), generation, AllowAllAuthorizer);
+        (*service_state_ptr()).attach_backend(DemuxLink::for_udp());
+        SERVICE_STATE_READY.store(true, Ordering::Release);
         *service_dns_resolver_slot() = Some(DnsResolver::alloc_boxed(
             L3Stack::new(
                 DemuxLink::for_udp(),
@@ -901,7 +908,7 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         bootstrap.tls_heap_checkpoint = heap_checkpoint as u64;
         bootstrap.tls_heap_after_last = heap_checkpoint as u64;
     }
-    let Some(service) = (unsafe { (*service_state_slot()).as_mut() }) else {
+    let Some(service) = (unsafe { service_state().map(|state| &mut *state) }) else {
         finish();
     };
     let mut parked = ParkedRequests::new();

@@ -113,6 +113,27 @@ where
         }
     }
 
+    /// Initializes `*slot` like [`Self::new`] without materializing the ~136 KiB value on the
+    /// caller's stack (the userspace service stack is fixed-size).
+    ///
+    /// # Safety
+    ///
+    /// `slot` must point to valid, aligned, writable storage for `Self` with no live references.
+    /// Any previous contents are overwritten without being dropped.
+    pub unsafe fn init_in_place(slot: *mut Self, generation: SessionGeneration, authorizer: A) {
+        unsafe {
+            core::ptr::addr_of_mut!((*slot).generation).write(generation);
+            let sessions = core::ptr::addr_of_mut!((*slot).sessions).cast::<SessionEntry>();
+            for index in 0..MAX_SESSIONS as usize {
+                sessions.add(index).write(SessionEntry::empty());
+            }
+            core::ptr::addr_of_mut!((*slot).next_session_index).write(0);
+            core::ptr::addr_of_mut!((*slot).total_pending).write(0);
+            core::ptr::addr_of_mut!((*slot).authorizer).write(authorizer);
+            core::ptr::addr_of_mut!((*slot).link).write(None);
+        }
+    }
+
     pub const fn generation(&self) -> SessionGeneration {
         self.generation
     }
@@ -629,6 +650,36 @@ mod tests {
                 code: c
             } if c == NetworkError::Denied(DenialReason::StaleGeneration).code()
         ));
+    }
+
+    #[test]
+    fn init_in_place_matches_new() {
+        let mut storage = std::boxed::Box::new(core::mem::MaybeUninit::<
+            NetworkService<FakeLink, AllowAllAuthorizer>,
+        >::uninit());
+        let service = unsafe {
+            NetworkService::init_in_place(
+                storage.as_mut_ptr(),
+                SessionGeneration::new(7),
+                AllowAllAuthorizer,
+            );
+            storage.assume_init_mut()
+        };
+        assert_eq!(service.generation(), SessionGeneration::new(7));
+        assert_eq!(service.sessions_in_use(), 0);
+        assert_eq!(service.pending_requests(), 0);
+        service.attach_backend(FakeLink::new(test_mac(), true));
+        let mut out = mut_buf();
+        let (open, _) = service.handle_request(
+            caller(1),
+            NetworkRequest::Open {
+                kind: SocketKind::Udp,
+            },
+            &[],
+            &mut out,
+        );
+        assert!(matches!(open, NetworkResponse::Open { .. }));
+        assert_eq!(service.sessions_in_use(), 1);
     }
 
     #[test]
