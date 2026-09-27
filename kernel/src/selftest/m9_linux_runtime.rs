@@ -199,10 +199,10 @@ pub(crate) fn observe_linux_console_write_bytes(bytes: &[u8]) {
             "[M9.J] nanosleep wall irq_ticks={} tsc_ns={} start_ns={}\n",
             irq_ticks, tsc_ns, start_ns
         ));
-        // Five 200 ms sleeps. Each one's guest latency is bounded as it
-        // resumes; the bracket's upper end also carries host timer lateness,
-        // so only the lower end is a guest property. xtask compares the
-        // `start_ns` stamps across cycles with host wall time.
+        // Five 200 ms sleeps, each checked as it resumes
+        // (`m9_linux_runtime_latency`). The bracket's upper end carries host
+        // timer lateness, so only the lower end is a guest property. xtask
+        // compares the `start_ns` stamps across cycles with host wall time.
         if tsc_ns < WALL_REQUESTED_NS {
             fatal_kernel_error("m9 runtime nanosleep wall bracket shorter than requested");
         }
