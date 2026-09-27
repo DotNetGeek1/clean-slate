@@ -205,11 +205,22 @@ pub(crate) fn recovery_clock_ticks() -> u64 {
         .unwrap_or_else(|| fatal_kernel_error("recovery clock requires a calibrated TSC"))
 }
 
+/// The supervisor's `tick_period_ns`, fixed once at bootstrap creation. Boot
+/// calibrates the APIC timer and TSC before starting this self-test; without
+/// calibration there is no real period to publish, so the test fails closed.
+fn recovery_tick_period_ns() -> u64 {
+    if crate::time::tsc_hz().is_none() {
+        fatal_kernel_error("recovery supervisor started before TSC calibration");
+    }
+    crate::time::irq_period_ns().unwrap_or_else(|| {
+        fatal_kernel_error("recovery supervisor started before APIC timer calibration")
+    })
+}
+
 pub(crate) fn publish_recovery_bootstrap(update: impl FnOnce(&mut RecoveryBootstrap)) {
     let Some(bootstrap) = (unsafe { (&mut *RECOVERY_BOOTSTRAP.get()).as_mut() }) else {
         return;
     };
-    bootstrap.tick_period_ns = crate::time::irq_period_ns().unwrap_or(1_000_000);
     update(bootstrap);
     let published = *bootstrap;
     if let Ok(state) = recovery_state() {
@@ -629,6 +640,7 @@ pub(crate) fn recovery_complete_and_exit() {
 }
 
 pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
+    let tick_period_ns = recovery_tick_period_ns();
     unsafe {
         *id_allocator_mut() = IdAllocator::new();
         process_registry_mut().clear();
@@ -662,7 +674,6 @@ pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
         .unwrap_or_else(|message| fatal_kernel_error(message));
     kernel_log_line("[CAP ] supervisor console capability granted pid=1");
     install_crash_spawn_hook(crash_spawn_hook);
-    let tick_period_ns = crate::time::irq_period_ns().unwrap_or(1_000_000);
     let bootstrap = RecoveryBootstrap {
         self_pid: USERSPACE_SUPERVISOR_TEST_PID,
         console_capability,
