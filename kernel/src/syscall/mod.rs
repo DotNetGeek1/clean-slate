@@ -690,6 +690,7 @@ extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 
         SyscallRoute::FailClosed { reason } => fail_closed_unresolved_syscall_caller(reason),
     }
 
+    crate::diagnostics::stack_high_water::check_task_stack_high_water_on_syscall_return();
     frame as *mut SyscallContext as u64
 }
 

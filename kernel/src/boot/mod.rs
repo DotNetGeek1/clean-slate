@@ -277,6 +277,12 @@ const BOOT_STACK_SIZE: usize = 256 * 1024;
 
 static BOOT_STACK: GlobalCell<GuardedStack<BOOT_STACK_SIZE>> = GlobalCell::new(GuardedStack::new());
 
+/// Usable boot stack bytes as `(base, size)` for the headroom diagnostics.
+#[cfg(feature = "stack-high-water-check")]
+pub(crate) fn boot_stack_extent() -> (u64, usize) {
+    (unsafe { (*BOOT_STACK.get()).base() }, BOOT_STACK_SIZE)
+}
+
 /// The normalized firmware memory map and its working arrays (several KiB
 /// each), kept off the boot stack.
 struct BootMemoryMap {
