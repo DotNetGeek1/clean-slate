@@ -52,6 +52,16 @@ pub(crate) fn disable_interrupts() {
     }
 }
 
+/// `sti; hlt` as one instruction pair: the STI shadow holds off interrupts
+/// until `hlt` has started, so one that becomes pending after the caller's
+/// last check wakes the halt instead of being handled before it. With a
+/// separate `enable_interrupts()` call the shadow only covers its `ret`.
+pub(crate) fn enable_interrupts_and_halt() {
+    unsafe {
+        asm!("sti", "hlt", options(nomem, nostack, preserves_flags));
+    }
+}
+
 pub(crate) fn read_code_segment() -> u16 {
     let mut selector = MaybeUninit::<u16>::uninit();
     unsafe {

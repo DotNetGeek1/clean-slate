@@ -141,46 +141,24 @@ fn duration_ns_from_timespec(ts: Timespec) -> Result<u64, LinuxErrno> {
     u64::try_from(ns).map_err(|_| EINVAL)
 }
 
-/// Ceil of a timespec to whole IRQ periods in nanoseconds (never wake early).
-pub(crate) fn sleep_budget_ns_from_timespec(ts: Timespec) -> Result<u64, LinuxErrno> {
-    let request = duration_ns_from_timespec(ts)?;
-    if request == 0 {
-        return Ok(0);
-    }
-    let period = irq_period_ns().ok_or(EINVAL)?;
-    let budget = u128::from(request)
-        .checked_mul(1)
-        .map(|n| n.div_ceil(u128::from(period)))
-        .and_then(|ticks| ticks.checked_mul(u128::from(period)))
-        .ok_or(EINVAL)?;
-    u64::try_from(budget.max(u128::from(period))).map_err(|_| EINVAL)
-}
-
-pub(crate) fn sleep_budget_ns_from_millis(ms: u64) -> Result<u64, LinuxErrno> {
-    if ms == 0 {
-        return Ok(0);
-    }
-    let period = irq_period_ns().ok_or(EINVAL)?;
-    let request = ms.checked_mul(1_000_000).ok_or(EINVAL)?;
-    let budget = u128::from(request)
-        .div_ceil(u128::from(period))
-        .checked_mul(u128::from(period))
-        .ok_or(EINVAL)?;
-    u64::try_from(budget.max(u128::from(period))).map_err(|_| EINVAL)
-}
-
-/// Absolute monotonic-ns deadline from now + ceil-rounded sleep budget.
+/// Absolute monotonic-ns deadline: `now + request`, not rounded to IRQ periods.
+///
+/// Waiters are expired by the first deadline check that observes
+/// `monotonic_ns() >= deadline`, so they never wake early; the tick period
+/// only bounds how late that first check can be.
 pub(crate) fn monotonic_deadline_from_timespec(
     now_ns: u64,
     ts: Timespec,
 ) -> Result<u64, LinuxErrno> {
-    let budget = sleep_budget_ns_from_timespec(ts)?;
-    now_ns.checked_add(budget).ok_or(EINVAL)
+    now_ns
+        .checked_add(duration_ns_from_timespec(ts)?)
+        .ok_or(EINVAL)
 }
 
 pub(crate) fn monotonic_deadline_from_millis(now_ns: u64, ms: u64) -> Result<u64, LinuxErrno> {
-    let budget = sleep_budget_ns_from_millis(ms)?;
-    now_ns.checked_add(budget).ok_or(EINVAL)
+    now_ns
+        .checked_add(ms.checked_mul(1_000_000).ok_or(EINVAL)?)
+        .ok_or(EINVAL)
 }
 
 pub(crate) fn timespec_from_monotonic_ns(ns: u64) -> Timespec {
@@ -250,36 +228,27 @@ mod tests {
     }
 
     #[test]
-    fn sleep_budget_and_deadline_use_ceil_apic_period() {
-        set_apic_counter_hz(62_500_000);
-        set_apic_timer_initial_count(62_500);
+    fn deadlines_are_exact_requests() {
+        let ts = |tv_sec, tv_nsec| Timespec { tv_sec, tv_nsec };
         assert_eq!(
-            sleep_budget_ns_from_timespec(Timespec {
-                tv_sec: 0,
-                tv_nsec: 1
-            })
-            .unwrap(),
-            1_000_000
+            monotonic_deadline_from_timespec(100, ts(0, 1)).unwrap(),
+            101
         );
         assert_eq!(
-            sleep_budget_ns_from_timespec(Timespec {
-                tv_sec: 0,
-                tv_nsec: 999_999,
-            })
-            .unwrap(),
-            1_000_000
+            monotonic_deadline_from_timespec(100, ts(0, 20_000_000)).unwrap(),
+            20_000_100
         );
-        assert_eq!(sleep_budget_ns_from_millis(200).unwrap(), 200_000_000);
-        let ts = Timespec {
-            tv_sec: 0,
-            tv_nsec: 200_000_000,
-        };
         assert_eq!(
-            monotonic_deadline_from_timespec(100, ts).unwrap(),
-            100 + 200_000_000
+            monotonic_deadline_from_timespec(0, ts(2, 5)).unwrap(),
+            2_000_000_005
         );
-        set_apic_counter_hz(0);
-        set_apic_timer_initial_count(0);
+        assert_eq!(monotonic_deadline_from_millis(7, 30).unwrap(), 30_000_007);
+        assert_eq!(
+            monotonic_deadline_from_timespec(u64::MAX, ts(0, 1)),
+            Err(EINVAL)
+        );
+        assert_eq!(monotonic_deadline_from_millis(0, u64::MAX), Err(EINVAL));
+        assert_eq!(monotonic_deadline_from_timespec(0, ts(-1, 0)), Err(EINVAL));
     }
 
     #[test]

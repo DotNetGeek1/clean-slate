@@ -6,7 +6,7 @@ use crate::arch::x86_64::context_switch::set_next_task;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::context_switch::FRESH_TASK_SENTINEL;
 use crate::arch::x86_64::cpu::disable_interrupts;
-use crate::arch::x86_64::cpu::enable_interrupts;
+use crate::arch::x86_64::cpu::enable_interrupts_and_halt;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::interrupt::timer::kernel_ticks;
@@ -39,10 +39,9 @@ fn idle_thread_one_wait() {
     assert_idle_stack_within_guard();
     #[cfg(feature = "m9-block-wake-self-test")]
     crate::selftest::m9_block_wake::on_idle_loop_wake();
-    enable_interrupts();
-    unsafe {
-        core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));
-    }
+    #[cfg(feature = "m9-linux-runtime-self-test")]
+    crate::selftest::m9_linux_runtime_latency::observe_idle_halt();
+    enable_interrupts_and_halt();
     // Interrupts stay masked from the scheduler decision through the stack
     // switch. `wake_from_idle_loop` moves `current_thread` to the selected
     // thread; if a timer IRQ landed between that and `restore_task_context`,
@@ -51,6 +50,8 @@ fn idle_thread_one_wait() {
     // restored frame's RFLAGS (or `sysretq` r11) re-enables interrupts; the
     // no-runnable path re-enables them at the top of the next wait.
     disable_interrupts();
+    #[cfg(feature = "m9-linux-runtime-self-test")]
+    crate::selftest::m9_linux_runtime_latency::observe_idle_resumed();
     let next_stack = {
         let _ = wait::expire_deadlines(kernel_ticks());
         unsafe { scheduler_mut().wake_from_idle_loop() }

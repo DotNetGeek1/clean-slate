@@ -88,9 +88,6 @@ pub(crate) fn block_linux_syscall(
                 .unwrap_or_else(|| fatal_kernel_error("linux block: user rip underflow"));
             block_restart_result()
         }
-        #[cfg(feature = "m9-linux-runtime-self-test")]
-        Ok(WaitOutcome::TimedOut) => Ok(on_timeout.encode()),
-        #[cfg(not(feature = "m9-linux-runtime-self-test"))]
         Ok(WaitOutcome::TimedOut) => {
             fatal_kernel_error("linux block: unexpected immediate TimedOut")
         }

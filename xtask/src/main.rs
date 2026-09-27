@@ -133,7 +133,6 @@ const M9_LINUX_RUNTIME_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[M9.J] PASS"),
 ];
 const M9_RUNTIME_WALL_START: &str = "[M9.J] nanosleep wall start";
-const M9_RUNTIME_WALL_END: &str = "[M9.J] nanosleep wall end";
 
 thread_local! {
     static M9_RUNTIME_WALL_CLOCK: RefCell<Option<NanosleepWallClock>> = const { RefCell::new(None) };
@@ -2629,98 +2628,204 @@ fn run_timed_command(command: &mut Command, timeout: Duration) -> Result<(), Xta
         })
     }
 }
+/// Host arrival of every probe `wall start` marker, stamped by the output
+/// reader thread when the chunk completing the marker was read.
 #[derive(Default)]
 struct NanosleepWallClock {
-    start: Option<std::time::Instant>,
-    end: Option<std::time::Instant>,
+    starts: Vec<std::time::Instant>,
+    next_search: usize,
 }
 
 impl NanosleepWallClock {
-    fn observe(&mut self, output: &str) {
-        if self.start.is_none() && output.contains(M9_RUNTIME_WALL_START) {
-            self.start = Some(std::time::Instant::now());
-        }
-        if self.start.is_some() && self.end.is_none() && output.contains(M9_RUNTIME_WALL_END) {
-            self.end = Some(std::time::Instant::now());
+    fn observe(&mut self, output: &str, received_at: std::time::Instant) {
+        while let Some(offset) = output
+            .get(self.next_search..)
+            .and_then(|rest| rest.find(M9_RUNTIME_WALL_START))
+        {
+            self.starts.push(received_at);
+            self.next_search += offset + M9_RUNTIME_WALL_START.len();
         }
     }
 
     fn validate(self, serial: &str) -> Result<(), XtaskError> {
-        let start = self
-            .start
-            .ok_or_else(|| XtaskError::MissingMarker(M9_RUNTIME_WALL_START.to_owned()))?;
-        let end = self
-            .end
-            .ok_or_else(|| XtaskError::MissingMarker(M9_RUNTIME_WALL_END.to_owned()))?;
-        let elapsed = end.duration_since(start);
-        validate_nanosleep_wall_budget(elapsed, serial)?;
-        Ok(())
+        let (Some(first), Some(last)) = (self.starts.first(), self.starts.last()) else {
+            return Err(XtaskError::MissingMarker(M9_RUNTIME_WALL_START.to_owned()));
+        };
+        validate_nanosleep_wall_clock(
+            self.starts.len(),
+            last.duration_since(*first),
+            &parse_wall_brackets(serial)?,
+        )
     }
 }
 
-fn parse_first_wall_tsc_ns(serial: &str) -> Result<u64, XtaskError> {
-    const PREFIX: &str = "[M9.J] nanosleep wall irq_ticks=";
-    let rest = serial
-        .split(PREFIX)
-        .nth(1)
-        .ok_or_else(|| XtaskError::MissingMarker(PREFIX.to_owned()))?;
-    let line = rest.lines().next().unwrap_or(rest).trim_end_matches('\r');
-    let tsc_part = line
-        .split("tsc_ns=")
-        .nth(1)
-        .ok_or_else(|| XtaskError::MissingMarker("wall tsc_ns".to_owned()))?;
-    tsc_part
-        .split_whitespace()
-        .next()
-        .unwrap_or(tsc_part)
-        .trim()
+/// One `[M9.J] nanosleep wall` kernel line: the guest TSC span of the
+/// probe's five 200 ms sleeps and the guest monotonic time of its start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WallBracket {
+    tsc_ns: u64,
+    start_ns: u64,
+}
+
+fn wall_field(line: &str, name: &str) -> Result<u64, XtaskError> {
+    line.split_whitespace()
+        .find_map(|token| token.strip_prefix(name))
+        .ok_or_else(|| XtaskError::MissingMarker(format!("wall {name}")))?
         .parse::<u64>()
-        .map_err(|_| XtaskError::MissingMarker("wall tsc_ns parse".to_owned()))
+        .map_err(|_| XtaskError::MissingMarker(format!("wall {name} parse")))
 }
 
-fn validate_nanosleep_wall_budget(host: Duration, serial: &str) -> Result<(), XtaskError> {
-    let guest_tsc_ns = parse_first_wall_tsc_ns(serial)?;
-    if !(1_000_000_000..=1_050_000_000).contains(&guest_tsc_ns) {
+fn parse_wall_brackets(serial: &str) -> Result<Vec<WallBracket>, XtaskError> {
+    const PREFIX: &str = "[M9.J] nanosleep wall irq_ticks=";
+    serial
+        .split(PREFIX)
+        .skip(1)
+        .map(|rest| {
+            let line = rest.lines().next().unwrap_or(rest);
+            Ok(WallBracket {
+                tsc_ns: wall_field(line, "tsc_ns=")?,
+                start_ns: wall_field(line, "start_ns=")?,
+            })
+        })
+        .collect()
+}
+
+/// Guest-requested span of each probe wall bracket: five 200 ms nanosleeps.
+const M9_RUNTIME_WALL_REQUESTED: Duration = Duration::from_secs(1);
+/// Largest amount guest time may run ahead of host time between the first
+/// and last probe `wall start` markers (seven probe cycles, about 8-10 s).
+///
+/// Guest sleep precision is asserted in the kernel against guest TSC (see
+/// docs/M9.md, "Timed wait latency"). This host comparison only rejects fake
+/// time: a guest clock running faster than host time would let short real
+/// sleeps look long enough to the guest. Under QEMU TCG the guest TSC is host
+/// time, so the spans differ only by the TSC calibration error and by how late
+/// each marker crosses serial -> QEMU stdout -> the reader thread, which
+/// stamps it. Measured host-minus-guest: -3.9 to +1.7 ms over 98 runs, 49 of
+/// them with every host CPU busy. A TSC calibrated 0.25% low (first-run
+/// translation delaying the APIC/TSC reads behind the PIT latch) showed as
+/// -19 to -21 ms, so 10 ms is ~2.5x the worst observed skew and still rejects
+/// that bias.
+const M9_RUNTIME_WALL_GUEST_AHEAD_MAX: Duration = Duration::from_millis(10);
+/// Largest amount host time may run ahead of guest time over the same span;
+/// rejects a guest clock running slow. Same noise sources and data as
+/// [`M9_RUNTIME_WALL_GUEST_AHEAD_MAX`].
+const M9_RUNTIME_WALL_HOST_AHEAD_MAX: Duration = Duration::from_millis(10);
+
+fn validate_nanosleep_wall_clock(
+    host_marks: usize,
+    host: Duration,
+    brackets: &[WallBracket],
+) -> Result<(), XtaskError> {
+    let (Some(first), Some(last)) = (brackets.first(), brackets.last()) else {
+        return Err(XtaskError::MissingMarker(
+            "[M9.J] nanosleep wall irq_ticks=".to_owned(),
+        ));
+    };
+    if brackets.len() < 2 || host_marks != brackets.len() {
         return Err(XtaskError::InvalidCommand(format!(
-            "m9 runtime guest wall tsc_ns {guest_tsc_ns} outside 1000000000..=1050000000"
+            "m9 runtime wall: {host_marks} host start markers for {} guest brackets (need at least 2, equal)",
+            brackets.len()
         )));
     }
-    let min = Duration::from_millis(1000);
-    let max = Duration::from_millis(1050);
-    if host < min || host > max {
+    if let Some(short) = brackets
+        .iter()
+        .find(|bracket| Duration::from_nanos(bracket.tsc_ns) < M9_RUNTIME_WALL_REQUESTED)
+    {
         return Err(XtaskError::InvalidCommand(format!(
-            "m9 runtime nanosleep wall clock {host:?} outside {min:?}..={max:?}"
+            "m9 runtime guest wall bracket {:?} shorter than requested {M9_RUNTIME_WALL_REQUESTED:?}",
+            Duration::from_nanos(short.tsc_ns)
         )));
     }
+    let guest = Duration::from_nanos(last.start_ns.saturating_sub(first.start_ns));
+    if guest > host + M9_RUNTIME_WALL_GUEST_AHEAD_MAX {
+        return Err(XtaskError::InvalidCommand(format!(
+            "m9 runtime guest span {guest:?} exceeds host span {host:?} by more than {M9_RUNTIME_WALL_GUEST_AHEAD_MAX:?}: guest time ran faster than host time"
+        )));
+    }
+    if host > guest + M9_RUNTIME_WALL_HOST_AHEAD_MAX {
+        return Err(XtaskError::InvalidCommand(format!(
+            "m9 runtime host span {host:?} exceeds guest span {guest:?} by more than {M9_RUNTIME_WALL_HOST_AHEAD_MAX:?}: guest time ran slower than host time"
+        )));
+    }
+    let host_minus_guest_ms = (host.as_secs_f64() - guest.as_secs_f64()) * 1000.0;
     println!(
-        "m9 runtime nanosleep wall clock: {host:?} guest_tsc_ns={guest_tsc_ns} (strict 1.00-1.05s)"
+        "m9 runtime nanosleep wall: brackets={} host_span={host:?} guest_span={guest:?} host_minus_guest_ms={host_minus_guest_ms:.3}",
+        brackets.len()
     );
     Ok(())
 }
 
 #[cfg(test)]
 mod nanosleep_wall_clock_tests {
-    use super::{parse_first_wall_tsc_ns, validate_nanosleep_wall_budget};
+    use super::{parse_wall_brackets, validate_nanosleep_wall_clock, WallBracket};
     use std::time::Duration;
 
-    const SAMPLE: &str = "[M9.J] nanosleep wall irq_ticks=1005 tsc_ns=1005000000\n";
+    const SAMPLE: &str =
+        "[M9.J] nanosleep wall irq_ticks=700 tsc_ns=1005000000 start_ns=2000000000\r\n\
+        [LNX ] exit pid=1 status=0\n\
+        [M9.J] nanosleep wall irq_ticks=650 tsc_ns=1170000000 start_ns=11000000000\n";
 
-    #[test]
-    fn parses_wall_tsc_ns() {
-        assert_eq!(parse_first_wall_tsc_ns(SAMPLE).unwrap(), 1_005_000_000);
+    fn brackets() -> Vec<WallBracket> {
+        parse_wall_brackets(SAMPLE).unwrap()
     }
 
     #[test]
-    fn accepts_strict_host_window() {
-        validate_nanosleep_wall_budget(Duration::from_millis(1025), SAMPLE).unwrap();
+    fn parses_every_wall_bracket() {
+        assert_eq!(
+            brackets(),
+            [
+                WallBracket {
+                    tsc_ns: 1_005_000_000,
+                    start_ns: 2_000_000_000
+                },
+                WallBracket {
+                    tsc_ns: 1_170_000_000,
+                    start_ns: 11_000_000_000
+                },
+            ]
+        );
+        assert!(parse_wall_brackets("[M9.J] nanosleep wall irq_ticks=1 tsc_ns=5\n").is_err());
     }
 
     #[test]
-    fn rejects_late_host_or_bad_guest_tsc() {
-        assert!(validate_nanosleep_wall_budget(Duration::from_millis(1051), SAMPLE).is_err());
-        assert!(validate_nanosleep_wall_budget(Duration::from_millis(999), SAMPLE).is_err());
-        let bad = SAMPLE.replace("1005000000", "900000000");
-        assert!(validate_nanosleep_wall_budget(Duration::from_millis(1025), &bad).is_err());
+    fn accepts_marker_delivery_jitter() {
+        validate_nanosleep_wall_clock(2, Duration::from_millis(9_000), &brackets()).unwrap();
+        validate_nanosleep_wall_clock(2, Duration::from_millis(8_990), &brackets()).unwrap();
+        validate_nanosleep_wall_clock(2, Duration::from_millis(9_010), &brackets()).unwrap();
+    }
+
+    #[test]
+    fn rejects_guest_bracket_shorter_than_request() {
+        let short = SAMPLE.replace("tsc_ns=1170000000", "tsc_ns=999999999");
+        let short = parse_wall_brackets(&short).unwrap();
+        assert!(validate_nanosleep_wall_clock(2, Duration::from_millis(9_000), &short).is_err());
+    }
+
+    #[test]
+    fn rejects_guest_time_faster_than_host() {
+        assert!(
+            validate_nanosleep_wall_clock(2, Duration::from_millis(8_989), &brackets()).is_err()
+        );
+        assert!(
+            validate_nanosleep_wall_clock(2, Duration::from_millis(4_500), &brackets()).is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_guest_time_slower_than_host() {
+        assert!(
+            validate_nanosleep_wall_clock(2, Duration::from_millis(9_011), &brackets()).is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_unmatched_markers() {
+        assert!(
+            validate_nanosleep_wall_clock(1, Duration::from_millis(9_000), &brackets()).is_err()
+        );
+        assert!(validate_nanosleep_wall_clock(1, Duration::ZERO, &brackets()[..1]).is_err());
+        assert!(validate_nanosleep_wall_clock(0, Duration::ZERO, &[]).is_err());
     }
 }
 
@@ -2806,7 +2911,7 @@ fn run_acceptance_command(
                             *serial.borrow_mut() = output.clone();
                         });
                         if let Some(wall) = slot.borrow_mut().as_mut() {
-                            wall.observe(&output);
+                            wall.observe(&output, chunk.received_at);
                         }
                     }
                 });
@@ -3155,6 +3260,7 @@ fn validate_m6_capabilities_markers(output: &str) -> Result<(), XtaskError> {
 struct OutputChunk {
     is_stderr: bool,
     text: String,
+    received_at: std::time::Instant,
 }
 
 enum OutputEvent {
@@ -3177,8 +3283,13 @@ fn spawn_output_reader<R: Read + Send + 'static>(
                     break;
                 }
                 Ok(bytes_read) => {
+                    let received_at = std::time::Instant::now();
                     let text = String::from_utf8_lossy(&buffer[..bytes_read]).into_owned();
-                    let _ = tx.send(OutputEvent::Chunk(OutputChunk { is_stderr, text }));
+                    let _ = tx.send(OutputEvent::Chunk(OutputChunk {
+                        is_stderr,
+                        text,
+                        received_at,
+                    }));
                 }
                 Err(error) => {
                     let _ = tx.send(OutputEvent::ReadError(error));

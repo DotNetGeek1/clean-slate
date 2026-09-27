@@ -201,6 +201,33 @@ pub(crate) fn dispatch(frame: &mut SyscallContext, pid: u64, generation: Instanc
     dispatch_with(frame, pid, generation, state);
 }
 
+/// Scheduler-side completion of a Linux wait that ended by deadline.
+///
+/// A `TimedOut` wait returns straight to user space without re-running its
+/// handler, so the per-process restart deadline (and `poll` interest) the
+/// handler left behind must be dropped here; otherwise the next `nanosleep` /
+/// `poll` in the process would pick up the stale, already-due deadline.
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
+pub(crate) fn complete_timed_out_linux_wait(pid: u64, nr: u64) {
+    use clean_slate_linux_abi::{SYS_NANOSLEEP, SYS_POLL};
+    if nr != SYS_NANOSLEEP && nr != SYS_POLL {
+        return;
+    }
+    let Some(generation) = crate::process::live_instance_generation(pid) else {
+        crate::diagnostics::qemu::fatal_kernel_error("timed-out linux wait without live process");
+    };
+    if nr == SYS_NANOSLEEP {
+        crate::process::linux_mem::set_pending_sleep_deadline(pid, generation, None);
+    } else {
+        crate::process::linux_mem::set_pending_poll_deadline(pid, generation, None);
+        poll::clear_poll_interest_for_pid(pid);
+    }
+}
+
 /// Fail closed when a Linux-tagged caller has no live instance generation.
 ///
 /// Sets `RAX = -ESRCH` and emits a bounded `[LNX ] missing generation` line.

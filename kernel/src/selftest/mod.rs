@@ -113,6 +113,8 @@ pub(crate) mod m9_linux_fs;
 pub(crate) mod m9_linux_proc;
 #[cfg(feature = "m9-linux-runtime-self-test")]
 pub(crate) mod m9_linux_runtime;
+#[cfg(feature = "m9-linux-runtime-self-test")]
+pub(crate) mod m9_linux_runtime_latency;
 #[cfg(feature = "m9-linux-socket-self-test")]
 pub(crate) mod m9_linux_socket;
 #[cfg(feature = "m9-linux-trace-self-test")]
