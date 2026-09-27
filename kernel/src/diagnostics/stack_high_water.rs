@@ -20,6 +20,14 @@
 pub(crate) fn check_task_stack_high_water_on_syscall_return() {}
 
 #[cfg(not(feature = "stack-high-water-check"))]
+#[cfg_attr(
+    any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test"
+    ),
+    allow(dead_code)
+)]
 #[inline(always)]
 pub(crate) fn measure_stack_peak<R>(_label: &'static str, call: impl FnOnce() -> R) -> R {
     call()
