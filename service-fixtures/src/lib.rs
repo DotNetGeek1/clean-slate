@@ -19,7 +19,8 @@ mod storage_service;
 mod unrelated_workload;
 
 pub use block_transport::{
-    handle_block_request, BlockTransportDecodeError, BlockTransportOp, BlockTransportRequest,
+    block_io_status, block_response, classify_block_request, invalid_protocol_response,
+    BlockRequestAction, BlockTransportDecodeError, BlockTransportOp, BlockTransportRequest,
     BlockTransportResponse, BlockTransportStatus, BLOCK_TRANSPORT_MAGIC,
     BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES, BLOCK_TRANSPORT_REQUEST_BYTES,
     BLOCK_TRANSPORT_RESPONSE_BYTES, BLOCK_TRANSPORT_VERSION, STORAGE_BLOCK_DEVICE_ID,

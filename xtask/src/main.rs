@@ -69,7 +69,7 @@ const M5_HOST_SENTINEL_OFFSET: u64 = 4096;
 const M5_HOST_SENTINEL: &[u8] = b"CLEAN-SLATE-M5-PERSISTENCE-SENTINEL-v1";
 const M5_QEMU_DISK_ID: &str = "m5disk";
 const M5_QEMU_DEVICE: &str =
-    "virtio-blk-pci,drive=m5disk,serial=clean-slate-m5-data,disable-modern=on";
+    "virtio-blk-pci,drive=m5disk,serial=clean-slate-m5-data,disable-modern=on,vectors=2";
 // `vectors=3` pins the MSI-X table size: QEMU 8.2 defaults to 3, newer QEMU sizes it per queue.
 const M7_QEMU_NET_DEVICE: &str =
     "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,disable-modern=on,vectors=3";
@@ -599,12 +599,14 @@ const M8_LINUX_IMAGE_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[M8.2] linux torn down pid=",
     "[M8.2] PASS",
 ];
-const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 6] = [
+const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 8] = [
+    "[BLK ] irq vector=",
     "[VIRT] block device found",
     "[BLK ] virtio-block ready blocks=",
     "[BLK ] write lba=",
     "[BLK ] flush complete",
     "[BLK ] read lba=",
+    "[BLK ] completion interrupts=",
     "[M5.2] PASS",
 ];
 const M7_TLS_ACCEPTANCE_MARKERS: [&str; 6] = [

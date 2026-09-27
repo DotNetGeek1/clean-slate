@@ -1,33 +1,32 @@
 #![cfg_attr(not(feature = "m5-block-self-test"), allow(dead_code))]
 
 use core::convert::TryFrom;
-use core::hint::spin_loop;
 use core::mem::{align_of, size_of};
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{compiler_fence, fence, Ordering};
 
 use clean_slate_block::{
-    BlockDevice, BlockDeviceId, BlockGeometry, BlockGeometryError, BlockIoError, BlockRequestError,
+    BlockDeviceId, BlockGeometry, BlockGeometryError, BlockIoError, BlockRequestError,
     BlockTransportError, BlockUnsupportedError,
 };
 
+use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::port::{
     port_in, port_in_u16, port_in_u32, port_out, port_out_u16, port_out_u32,
 };
+use crate::device::pci::{
+    find_single_function, release_intx, route_intx, IntxRoute, MsixCapability, PciFunction,
+    PCI_COMMAND_BUS_MASTER, PCI_COMMAND_IO_SPACE,
+};
+use crate::diagnostics::log::kernel_log_fmt;
+use crate::interrupt::irq::{allocate_device_vector, msi_message, release_device_vector};
 use crate::mm::address_space::translate_address_in_root;
 use crate::mm::paging::current_root_frame_address;
 use crate::sync::global_cell::GlobalCell;
 use x86_64::VirtAddr;
 
-const PCI_CONFIG_ADDRESS_PORT: u16 = 0x0cf8;
-const PCI_CONFIG_DATA_PORT: u16 = 0x0cfc;
 const PCI_VENDOR_ID: u16 = 0x1af4;
 const PCI_DEVICE_ID_VIRTIO_BLOCK_LEGACY: u16 = 0x1001;
-
-const PCI_COMMAND_OFFSET: u8 = 0x04;
-const PCI_BAR0_OFFSET: u8 = 0x10;
-const PCI_COMMAND_IO_SPACE: u16 = 1 << 0;
-const PCI_COMMAND_BUS_MASTER: u16 = 1 << 2;
 
 const VIRTIO_PCI_HOST_FEATURES: u16 = 0x00;
 const VIRTIO_PCI_GUEST_FEATURES: u16 = 0x04;
@@ -36,7 +35,19 @@ const VIRTIO_PCI_QUEUE_NUM: u16 = 0x0c;
 const VIRTIO_PCI_QUEUE_SEL: u16 = 0x0e;
 const VIRTIO_PCI_QUEUE_NOTIFY: u16 = 0x10;
 const VIRTIO_PCI_STATUS: u16 = 0x12;
-const VIRTIO_PCI_DEVICE_CONFIG: u16 = 0x14;
+/// Reading the legacy ISR status acknowledges the interrupt and deasserts INTx.
+const VIRTIO_PCI_ISR_STATUS: u16 = 0x13;
+/// With MSI-X enabled the legacy header grows by the two vector registers and
+/// device config moves from 0x14 to 0x18.
+const VIRTIO_MSI_CONFIG_VECTOR: u16 = 0x14;
+const VIRTIO_MSI_QUEUE_VECTOR: u16 = 0x16;
+const VIRTIO_PCI_DEVICE_CONFIG_INTX: u16 = 0x14;
+const VIRTIO_PCI_DEVICE_CONFIG_MSIX: u16 = 0x18;
+const VIRTIO_MSI_NO_VECTOR: u16 = 0xffff;
+const VIRTIO_ISR_QUEUE_INTERRUPT: u8 = 1;
+
+/// MSI-X table entry used for the request queue (config changes get no vector).
+const MSIX_QUEUE_ENTRY: u16 = 0;
 
 const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
 const VIRTIO_STATUS_DRIVER: u8 = 2;
@@ -62,8 +73,11 @@ const VIRTQ_QUEUE_SELECT_0: u16 = 0;
 const VIRTQ_QUEUE_MAX_ENTRIES: u16 = 256;
 const VIRTQ_MEMORY_BYTES: usize = 16 * 1024;
 const DMA_DATA_BUFFER_BYTES: usize = 8 * 1024;
-const COMPLETION_SPIN_LIMIT: usize = 20_000_000;
 const LOGICAL_SECTOR_BYTES: u32 = 512;
+
+/// Real-time bound on one request; a device that has not completed by then is
+/// reset-required and the request fails closed.
+pub(crate) const BLOCK_COMPLETION_TIMEOUT_NS: u64 = 5_000_000_000;
 
 #[repr(C, align(4096))]
 struct QueueMemory {
@@ -89,11 +103,71 @@ fn dma_data_ptr() -> *mut u8 {
     unsafe { core::ptr::addr_of_mut!((*DMA_DATA.get()).bytes) as *mut u8 }
 }
 
+/// How the device signals request completions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlockInterruptRoute {
+    Msix { vector: u8 },
+    Intx { vector: u8, gsi: u32 },
+}
+
+impl BlockInterruptRoute {
+    fn device_config_offset(self) -> u16 {
+        match self {
+            Self::Msix { .. } => VIRTIO_PCI_DEVICE_CONFIG_MSIX,
+            Self::Intx { .. } => VIRTIO_PCI_DEVICE_CONFIG_INTX,
+        }
+    }
+}
+
+/// Interrupt counters since discovery.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BlockInterruptStats {
+    pub(crate) queue: u64,
+    pub(crate) spurious: u64,
+}
+
+/// State shared with the interrupt handlers, written with interrupts masked.
 #[derive(Clone, Copy)]
-struct PciFunction {
-    bus: u8,
-    device: u8,
-    function: u8,
+struct InterruptState {
+    sink: fn(),
+    intx_io_base: u16,
+    stats: BlockInterruptStats,
+}
+
+static INTERRUPT_STATE: GlobalCell<InterruptState> = GlobalCell::new(InterruptState {
+    sink: ignore_interrupt,
+    intx_io_base: 0,
+    stats: BlockInterruptStats {
+        queue: 0,
+        spurious: 0,
+    },
+});
+
+fn ignore_interrupt() {}
+
+fn interrupt_state_mut() -> &'static mut InterruptState {
+    unsafe { &mut *INTERRUPT_STATE.get() }
+}
+
+pub(crate) fn block_interrupt_stats() -> BlockInterruptStats {
+    without_interrupts(|| interrupt_state_mut().stats)
+}
+
+fn virtio_block_msix_interrupt() {
+    let state = interrupt_state_mut();
+    state.stats.queue = state.stats.queue.saturating_add(1);
+    (state.sink)();
+}
+
+fn virtio_block_intx_interrupt() {
+    let state = interrupt_state_mut();
+    let status = port_in(state.intx_io_base + VIRTIO_PCI_ISR_STATUS);
+    if status & VIRTIO_ISR_QUEUE_INTERRUPT == 0 {
+        state.stats.spurious = state.stats.spurious.saturating_add(1);
+        return;
+    }
+    state.stats.queue = state.stats.queue.saturating_add(1);
+    (state.sink)();
 }
 
 #[repr(C)]
@@ -199,11 +273,9 @@ struct LegacyRegisters {
 
 impl LegacyRegisters {
     fn from_pci(function: PciFunction) -> Result<Self, &'static str> {
-        let mut command = pci_config_read_u16(function, PCI_COMMAND_OFFSET);
-        command |= PCI_COMMAND_IO_SPACE | PCI_COMMAND_BUS_MASTER;
-        pci_config_write_u16(function, PCI_COMMAND_OFFSET, command);
+        function.update_command(PCI_COMMAND_IO_SPACE | PCI_COMMAND_BUS_MASTER, 0);
 
-        let bar0 = pci_config_read_u32(function, PCI_BAR0_OFFSET);
+        let bar0 = function.bar(0);
         if (bar0 & 1) == 0 {
             return Err("virtio legacy block BAR0 is not I/O space");
         }
@@ -300,19 +372,16 @@ impl QueueState {
         }
     }
 
-    fn wait_for_completion(&mut self) -> Result<VirtqUsedElem, BlockIoError> {
-        for _ in 0..COMPLETION_SPIN_LIMIT {
-            let used_idx = unsafe { read_volatile(self.used_idx_ptr()) };
-            if used_idx != self.last_used_idx {
-                let ring_index = self.last_used_idx % self.layout.size;
-                let element =
-                    unsafe { read_volatile(self.used_ring_ptr().add(usize::from(ring_index))) };
-                self.last_used_idx = self.last_used_idx.wrapping_add(1);
-                return Ok(element);
-            }
-            spin_loop();
+    /// Consume the next used-ring element if the device has posted one.
+    fn take_used(&mut self) -> Option<VirtqUsedElem> {
+        let used_idx = unsafe { read_volatile(self.used_idx_ptr()) };
+        if used_idx == self.last_used_idx {
+            return None;
         }
-        Err(BlockIoError::Transport(BlockTransportError::Timeout))
+        let ring_index = self.last_used_idx % self.layout.size;
+        let element = unsafe { read_volatile(self.used_ring_ptr().add(usize::from(ring_index))) };
+        self.last_used_idx = self.last_used_idx.wrapping_add(1);
+        Some(element)
     }
 
     fn clear_ring(&mut self) {
@@ -334,29 +403,78 @@ struct RequestState {
     status: u8,
 }
 
+/// The one request the device owns between submission and its used-ring completion.
+#[derive(Clone, Copy)]
+struct InFlightOperation {
+    request_type: u32,
+    data_len: usize,
+    device_writes_data: bool,
+    minimum_used_len: u32,
+}
+
+/// Legacy virtio-block device with a single request in flight at a time.
+///
+/// Submission and completion are split: `submit_*` hands one request to the
+/// device and returns, the queue interrupt runs the discovery sink, and the
+/// waiter harvests the result with [`Self::take_completion`]. Nothing here
+/// waits; callers block on their own wait key with a real-time deadline and
+/// call [`Self::abandon_in_flight`] when it passes.
 pub(crate) struct VirtioBlockDevice {
     registers: LegacyRegisters,
     queue: QueueState,
     request: RequestState,
     geometry: BlockGeometry,
     sectors_per_block: u64,
+    in_flight: Option<InFlightOperation>,
     queue_poisoned: bool,
 }
 
 impl VirtioBlockDevice {
-    pub(crate) fn discover() -> Result<Self, &'static str> {
-        let function = discover_single_legacy_block_pci_function()?;
+    /// Find, route, and bring up the device; `sink` runs in interrupt context
+    /// for every queue interrupt and must only wake waiters.
+    pub(crate) fn discover(sink: fn()) -> Result<Self, &'static str> {
+        let function = find_single_function(PCI_VENDOR_ID, PCI_DEVICE_ID_VIRTIO_BLOCK_LEGACY)
+            .map_err(|_| "multiple legacy virtio block devices found")?
+            .ok_or("legacy virtio block device not found")?;
         let registers = LegacyRegisters::from_pci(function)?;
+        registers.write_u8(VIRTIO_PCI_STATUS, 0);
+        let (interrupts, msix) = configure_interrupt_route(function, &registers, sink)?;
+        let device = match Self::bring_up(function, registers, interrupts) {
+            Ok(device) => device,
+            Err(error) => {
+                LegacyRegisters::from_pci(function)?.write_u8(VIRTIO_PCI_STATUS, 0);
+                release_interrupt_route(function, interrupts, msix);
+                return Err(error);
+            }
+        };
+        match interrupts {
+            BlockInterruptRoute::Msix { vector } => {
+                kernel_log_fmt(format_args!("[BLK ] irq vector={vector} mode=msix\n"))
+            }
+            BlockInterruptRoute::Intx { vector, gsi } => kernel_log_fmt(format_args!(
+                "[BLK ] irq vector={vector} mode=intx gsi={gsi}\n"
+            )),
+        }
+        Ok(device)
+    }
+
+    fn bring_up(
+        function: PciFunction,
+        registers: LegacyRegisters,
+        interrupts: BlockInterruptRoute,
+    ) -> Result<Self, &'static str> {
         initialize_device_status(&registers);
 
         let host_features = registers.read_u32(VIRTIO_PCI_HOST_FEATURES);
         let negotiated_features = negotiate_features(host_features)?;
         registers.write_u32(VIRTIO_PCI_GUEST_FEATURES, negotiated_features);
 
+        let config_offset = interrupts.device_config_offset();
         let queue_size = initialize_queue_0(&registers)?;
         let readonly = feature_enabled(negotiated_features, VIRTIO_BLK_F_RO);
-        let block_size = read_logical_block_size(&registers, negotiated_features)?;
-        let (block_count, sectors_per_block) = read_block_count(&registers, block_size)?;
+        let block_size = read_logical_block_size(&registers, config_offset, negotiated_features)?;
+        let (block_count, sectors_per_block) =
+            read_block_count(&registers, config_offset, block_size)?;
         let max_transfer_blocks = calculate_max_transfer_blocks(block_size)?;
         let device_id = BlockDeviceId::new(encode_device_id(function));
         let geometry = BlockGeometry::new(
@@ -388,6 +506,10 @@ impl VirtioBlockDevice {
         let queue_pfn = queue_pfn_from_physical_address(queue_physical)?;
         registers.write_u16(VIRTIO_PCI_QUEUE_SEL, VIRTQ_QUEUE_SELECT_0);
         registers.write_u32(VIRTIO_PCI_QUEUE_PFN, queue_pfn);
+        if matches!(interrupts, BlockInterruptRoute::Msix { .. }) {
+            registers.write_u16(VIRTIO_MSI_CONFIG_VECTOR, VIRTIO_MSI_NO_VECTOR);
+            assign_queue_vector(&registers, VIRTQ_QUEUE_SELECT_0, MSIX_QUEUE_ENTRY)?;
+        }
 
         let status = registers.read_u8(VIRTIO_PCI_STATUS) | VIRTIO_STATUS_DRIVER_OK;
         registers.write_u8(VIRTIO_PCI_STATUS, status);
@@ -405,18 +527,122 @@ impl VirtioBlockDevice {
             },
             geometry,
             sectors_per_block,
+            in_flight: None,
             queue_poisoned: false,
         })
     }
 
-    fn execute_rw(
+    pub(crate) fn geometry(&self) -> BlockGeometry {
+        self.geometry
+    }
+
+    /// Submit a read of `len` bytes; the data lands in the DMA buffer and is
+    /// copied out by [`Self::take_completion`].
+    pub(crate) fn submit_read(
+        &mut self,
+        lba: u64,
+        blocks: u32,
+        len: usize,
+    ) -> Result<(), BlockIoError> {
+        self.geometry.validate_read(lba, blocks, len)?;
+        self.submit_rw(VIRTIO_BLK_T_IN, lba, blocks, None, len)
+    }
+
+    pub(crate) fn submit_write(
+        &mut self,
+        lba: u64,
+        blocks: u32,
+        data: &[u8],
+    ) -> Result<(), BlockIoError> {
+        self.geometry.validate_write(lba, blocks, data.len())?;
+        self.submit_rw(VIRTIO_BLK_T_OUT, lba, blocks, Some(data), data.len())
+    }
+
+    pub(crate) fn submit_flush(&mut self) -> Result<(), BlockIoError> {
+        self.ensure_queue_available()?;
+        self.request.header = VirtioBlkReqHeader {
+            request_type: VIRTIO_BLK_T_FLUSH,
+            reserved: 0,
+            sector: 0,
+        };
+        self.request.status = 0xff;
+
+        let header_physical =
+            virtual_to_physical_address(&self.request.header as *const _ as *const u8)
+                .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
+        let status_physical = virtual_to_physical_address(&self.request.status as *const u8)
+            .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
+
+        self.queue.write_desc(
+            0,
+            VirtqDesc {
+                addr: header_physical,
+                len: size_of::<VirtioBlkReqHeader>() as u32,
+                flags: VIRTQ_DESC_F_NEXT,
+                next: 1,
+            },
+        );
+        self.queue.write_desc(
+            1,
+            VirtqDesc {
+                addr: status_physical,
+                len: 1,
+                flags: VIRTQ_DESC_F_WRITE,
+                next: 0,
+            },
+        );
+        self.start(InFlightOperation {
+            request_type: VIRTIO_BLK_T_FLUSH,
+            data_len: 0,
+            device_writes_data: false,
+            minimum_used_len: 1,
+        });
+        Ok(())
+    }
+
+    /// Harvest the in-flight request if the device has completed it. Read data
+    /// is copied into `read_into` (which must be the submitted length); `None`
+    /// discards it. Returns `None` while the device still owns the request.
+    pub(crate) fn take_completion(
+        &mut self,
+        read_into: Option<&mut [u8]>,
+    ) -> Option<Result<(), BlockIoError>> {
+        let operation = self.in_flight?;
+        let used = self.queue.take_used()?;
+        self.in_flight = None;
+        let result = self.check_completion(operation, used);
+        if result.is_err() || !operation.device_writes_data {
+            return Some(result);
+        }
+        let Some(target) = read_into else {
+            return Some(result);
+        };
+        if target.len() != operation.data_len {
+            return Some(Err(BlockIoError::InvalidRequest(
+                BlockRequestError::BufferLengthOverflow,
+            )));
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(dma_data_ptr(), target.as_mut_ptr(), target.len());
+        }
+        Some(result)
+    }
+
+    /// Give up on the in-flight request after its deadline. The device may still
+    /// write the descriptors it owns, so the queue is poisoned until reset.
+    pub(crate) fn abandon_in_flight(&mut self) {
+        if self.in_flight.take().is_some() {
+            self.queue_poisoned = true;
+        }
+    }
+
+    fn submit_rw(
         &mut self,
         request_type: u32,
         lba: u64,
         blocks: u32,
-        data: *mut u8,
+        write_data: Option<&[u8]>,
         data_len: usize,
-        device_writes_data: bool,
     ) -> Result<(), BlockIoError> {
         self.ensure_queue_available()?;
         let data_len_u32 = u32::try_from(data_len)
@@ -437,9 +663,10 @@ impl VirtioBlockDevice {
             ));
         }
 
-        if !device_writes_data {
+        let device_writes_data = write_data.is_none();
+        if let Some(data) = write_data {
             unsafe {
-                core::ptr::copy_nonoverlapping(data as *const u8, dma_data_ptr(), data_len);
+                core::ptr::copy_nonoverlapping(data.as_ptr(), dma_data_ptr(), data_len);
             }
         }
 
@@ -457,6 +684,7 @@ impl VirtioBlockDevice {
             .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
         let dma_physical = physical_address_for_contiguous_range(dma_data_ptr(), data_len)
             .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
+        let minimum_used_len = minimum_used_len_for_rw(device_writes_data, data_len_u32)?;
 
         let mut data_flags = VIRTQ_DESC_F_NEXT;
         if device_writes_data {
@@ -490,92 +718,47 @@ impl VirtioBlockDevice {
                 next: 0,
             },
         );
-
-        self.queue.submit_head(0);
-        self.registers.write_u16(VIRTIO_PCI_QUEUE_NOTIFY, 0);
-        let min_used_len = minimum_used_len_for_rw(device_writes_data, data_len_u32)?;
-        self.complete_submission(request_type, min_used_len)?;
-
-        if device_writes_data {
-            unsafe {
-                core::ptr::copy_nonoverlapping(dma_data_ptr(), data, data_len);
-            }
-        }
-
+        self.start(InFlightOperation {
+            request_type,
+            data_len,
+            device_writes_data,
+            minimum_used_len,
+        });
         Ok(())
     }
 
-    fn execute_flush(&mut self) -> Result<(), BlockIoError> {
-        self.ensure_queue_available()?;
-        self.request.header = VirtioBlkReqHeader {
-            request_type: VIRTIO_BLK_T_FLUSH,
-            reserved: 0,
-            sector: 0,
-        };
-        self.request.status = 0xff;
-
-        let header_physical =
-            virtual_to_physical_address(&self.request.header as *const _ as *const u8)
-                .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
-        let status_physical = virtual_to_physical_address(&self.request.status as *const u8)
-            .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
-
-        self.queue.write_desc(
-            0,
-            VirtqDesc {
-                addr: header_physical,
-                len: size_of::<VirtioBlkReqHeader>() as u32,
-                flags: VIRTQ_DESC_F_NEXT,
-                next: 1,
-            },
-        );
-        self.queue.write_desc(
-            1,
-            VirtqDesc {
-                addr: status_physical,
-                len: 1,
-                flags: VIRTQ_DESC_F_WRITE,
-                next: 0,
-            },
-        );
-
+    fn start(&mut self, operation: InFlightOperation) {
+        self.in_flight = Some(operation);
         self.queue.submit_head(0);
         self.registers.write_u16(VIRTIO_PCI_QUEUE_NOTIFY, 0);
-        self.complete_submission(VIRTIO_BLK_T_FLUSH, 1)
     }
 
+    /// Descriptors 0..2 are reused per request, so a second submission while the
+    /// device owns them would corrupt the in-flight one.
     fn ensure_queue_available(&self) -> Result<(), BlockIoError> {
-        if self.queue_poisoned {
+        if self.queue_poisoned || self.in_flight.is_some() {
             return Err(BlockIoError::Transport(BlockTransportError::ResetRequired));
         }
         Ok(())
     }
 
-    fn complete_submission(
+    fn check_completion(
         &mut self,
-        request_type: u32,
-        minimum_used_len: u32,
+        operation: InFlightOperation,
+        used: VirtqUsedElem,
     ) -> Result<(), BlockIoError> {
-        let used = match self.queue.wait_for_completion() {
-            Ok(used) => used,
-            Err(BlockIoError::Transport(BlockTransportError::Timeout)) => {
-                self.queue_poisoned = true;
-                return Err(BlockIoError::Transport(BlockTransportError::ResetRequired));
-            }
-            Err(error) => return Err(error),
-        };
         if used.id != 0 {
             self.queue_poisoned = true;
             return Err(BlockIoError::Transport(BlockTransportError::ResetRequired));
         }
-        if used.len < minimum_used_len {
+        if used.len < operation.minimum_used_len {
             self.queue_poisoned = true;
             return Err(BlockIoError::Transport(BlockTransportError::DeviceFault));
         }
 
         fence(Ordering::Acquire);
         compiler_fence(Ordering::Acquire);
-        self.map_completion_status(request_type)
+        self.map_completion_status(operation.request_type)
     }
 
     fn map_completion_status(&self, request_type: u32) -> Result<(), BlockIoError> {
@@ -592,68 +775,71 @@ impl VirtioBlockDevice {
     }
 }
 
-impl BlockDevice for VirtioBlockDevice {
-    fn geometry(&self) -> BlockGeometry {
-        self.geometry
+/// Install `sink` and route the queue interrupt: MSI-X when the function
+/// exposes a table, otherwise its INTx line. A present-but-failing MSI-X table
+/// is an error, not a reason to fall back.
+fn configure_interrupt_route(
+    function: PciFunction,
+    registers: &LegacyRegisters,
+    sink: fn(),
+) -> Result<(BlockInterruptRoute, Option<MsixCapability>), &'static str> {
+    without_interrupts(|| {
+        *interrupt_state_mut() = InterruptState {
+            sink,
+            intx_io_base: registers.io_base,
+            stats: BlockInterruptStats::default(),
+        };
+    });
+    let msix =
+        MsixCapability::probe(function)?.filter(|msix| msix.table_entries > MSIX_QUEUE_ENTRY);
+    let Some(msix) = msix else {
+        let IntxRoute { vector, gsi } = route_intx(function, virtio_block_intx_interrupt)?;
+        return Ok((BlockInterruptRoute::Intx { vector, gsi }, None));
+    };
+    let vector = allocate_device_vector(virtio_block_msix_interrupt)?;
+    let route = BlockInterruptRoute::Msix { vector };
+    msix.enable_masked();
+    if let Err(error) = msix.program_entry(MSIX_QUEUE_ENTRY, msi_message(vector)) {
+        release_interrupt_route(function, route, Some(msix));
+        return Err(error);
     }
-
-    fn read_blocks(
-        &mut self,
-        lba: u64,
-        blocks: u32,
-        buffer: &mut [u8],
-    ) -> Result<(), BlockIoError> {
-        self.geometry.validate_read(lba, blocks, buffer.len())?;
-        self.execute_rw(
-            VIRTIO_BLK_T_IN,
-            lba,
-            blocks,
-            buffer.as_mut_ptr(),
-            buffer.len(),
-            true,
-        )
-    }
-
-    fn write_blocks(&mut self, lba: u64, blocks: u32, buffer: &[u8]) -> Result<(), BlockIoError> {
-        self.geometry.validate_write(lba, blocks, buffer.len())?;
-        self.execute_rw(
-            VIRTIO_BLK_T_OUT,
-            lba,
-            blocks,
-            buffer.as_ptr() as *mut u8,
-            buffer.len(),
-            false,
-        )
-    }
-
-    fn flush(&mut self) -> Result<(), BlockIoError> {
-        self.execute_flush()
-    }
+    msix.unmask_function();
+    Ok((route, Some(msix)))
 }
 
-fn discover_single_legacy_block_pci_function() -> Result<PciFunction, &'static str> {
-    let mut found = None;
-    for device in 0u8..32 {
-        for function in 0u8..8 {
-            let candidate = PciFunction {
-                bus: 0,
-                device,
-                function,
-            };
-            let vendor_id = pci_config_read_u16(candidate, 0x00);
-            if vendor_id == 0xffff {
-                continue;
+fn release_interrupt_route(
+    function: PciFunction,
+    route: BlockInterruptRoute,
+    msix: Option<MsixCapability>,
+) {
+    match route {
+        BlockInterruptRoute::Msix { vector } => {
+            if let Some(msix) = msix {
+                let _ = msix.mask_entry(MSIX_QUEUE_ENTRY);
+                msix.disable();
             }
-            let device_id = pci_config_read_u16(candidate, 0x02);
-            if vendor_id == PCI_VENDOR_ID && device_id == PCI_DEVICE_ID_VIRTIO_BLOCK_LEGACY {
-                if found.is_some() {
-                    return Err("multiple legacy virtio block devices found");
-                }
-                found = Some(candidate);
-            }
+            release_device_vector(vector);
+        }
+        BlockInterruptRoute::Intx { vector, gsi } => {
+            release_intx(function, IntxRoute { vector, gsi })
         }
     }
-    found.ok_or("legacy virtio block device not found")
+    without_interrupts(|| interrupt_state_mut().sink = ignore_interrupt);
+}
+
+/// Point `queue_index` at MSI-X table `entry`; the device answers
+/// `VIRTIO_MSI_NO_VECTOR` on readback when it could not allocate the vector.
+fn assign_queue_vector(
+    registers: &LegacyRegisters,
+    queue_index: u16,
+    entry: u16,
+) -> Result<(), &'static str> {
+    registers.write_u16(VIRTIO_PCI_QUEUE_SEL, queue_index);
+    registers.write_u16(VIRTIO_MSI_QUEUE_VECTOR, entry);
+    if registers.read_u16(VIRTIO_MSI_QUEUE_VECTOR) != entry {
+        return Err("virtio block rejected its MSI-X queue vector");
+    }
+    Ok(())
 }
 
 fn initialize_device_status(registers: &LegacyRegisters) {
@@ -689,10 +875,11 @@ fn negotiate_features(host_features: u32) -> Result<u32, &'static str> {
 
 fn read_logical_block_size(
     registers: &LegacyRegisters,
+    config_offset: u16,
     features: u32,
 ) -> Result<u32, &'static str> {
     let block_size = if feature_enabled(features, VIRTIO_BLK_F_BLK_SIZE) {
-        registers.read_u32(VIRTIO_PCI_DEVICE_CONFIG + 20)
+        registers.read_u32(config_offset + 20)
     } else {
         LOGICAL_SECTOR_BYTES
     };
@@ -707,9 +894,10 @@ fn read_logical_block_size(
 
 fn read_block_count(
     registers: &LegacyRegisters,
+    config_offset: u16,
     block_size: u32,
 ) -> Result<(u64, u64), &'static str> {
-    let capacity_sectors = registers.read_u64(VIRTIO_PCI_DEVICE_CONFIG);
+    let capacity_sectors = registers.read_u64(config_offset);
     block_count_from_capacity(capacity_sectors, block_size)
 }
 
@@ -815,41 +1003,6 @@ fn encode_device_id(function: PciFunction) -> u64 {
     (u64::from(function.bus) << 16)
         | (u64::from(function.device) << 8)
         | u64::from(function.function)
-}
-
-fn pci_config_address(function: PciFunction, offset: u8) -> u32 {
-    0x8000_0000
-        | (u32::from(function.bus) << 16)
-        | (u32::from(function.device) << 11)
-        | (u32::from(function.function) << 8)
-        | (u32::from(offset) & 0xfc)
-}
-
-fn pci_config_read_u32(function: PciFunction, offset: u8) -> u32 {
-    port_out_u32(
-        PCI_CONFIG_ADDRESS_PORT,
-        pci_config_address(function, offset),
-    );
-    port_in_u32(PCI_CONFIG_DATA_PORT)
-}
-
-fn pci_config_read_u16(function: PciFunction, offset: u8) -> u16 {
-    let value = pci_config_read_u32(function, offset & !0x3);
-    let shift = u32::from((offset & 0x2) * 8);
-    ((value >> shift) & 0xffff) as u16
-}
-
-fn pci_config_write_u16(function: PciFunction, offset: u8, value: u16) {
-    let aligned_offset = offset & !0x3;
-    let shift = u32::from((offset & 0x2) * 8);
-    let current = pci_config_read_u32(function, aligned_offset);
-    let masked = current & !(0xffffu32 << shift);
-    let merged = masked | (u32::from(value) << shift);
-    port_out_u32(
-        PCI_CONFIG_ADDRESS_PORT,
-        pci_config_address(function, aligned_offset),
-    );
-    port_out_u32(PCI_CONFIG_DATA_PORT, merged);
 }
 
 #[cfg(test)]

@@ -19,18 +19,15 @@ use clean_slate_network::device::{
 use clean_slate_network::limits::{MAX_DEVICE_RX_QUEUE_DEPTH, MAX_ETHERNET_FRAME_BYTES};
 
 use crate::arch::x86_64::cpu::without_interrupts;
-use crate::arch::x86_64::ioapic::{Polarity, TriggerMode};
 use crate::arch::x86_64::port::{
     port_in, port_in_u16, port_in_u32, port_out, port_out_u16, port_out_u32,
 };
 use crate::device::pci::{
-    find_single_function, MsixCapability, PciFunction, PCI_COMMAND_BUS_MASTER,
-    PCI_COMMAND_INTX_DISABLE, PCI_COMMAND_IO_SPACE,
+    find_single_function, release_intx, route_intx, IntxRoute, MsixCapability, PciFunction,
+    PCI_COMMAND_BUS_MASTER, PCI_COMMAND_IO_SPACE,
 };
 use crate::diagnostics::log::kernel_log_fmt;
-use crate::interrupt::irq::{
-    allocate_device_vector, msi_message, release_device_vector, route_gsi,
-};
+use crate::interrupt::irq::{allocate_device_vector, msi_message, release_device_vector};
 use crate::mm::address_space::translate_address_in_root;
 use crate::mm::paging::current_root_frame_address;
 use crate::sync::global_cell::GlobalCell;
@@ -63,13 +60,6 @@ const VIRTIO_ISR_QUEUE_INTERRUPT: u8 = 1;
 /// MSI-X table entries used for the two queues (config changes get no vector).
 const MSIX_RX_ENTRY: u16 = 0;
 const MSIX_TX_ENTRY: u16 = 1;
-
-/// q35 (ICH9) INTx routing: slots below 25 use the fixed default
-/// `PIRQ[E..H] = (slot + pin) % 4`, and in APIC mode PIRQ E..H drive GSI 20..23
-/// level-triggered, active-high. Other chipsets and slots fail closed.
-const Q35_HOST_BRIDGE_ID: (u16, u16) = (0x8086, 0x29c0);
-const Q35_FIRST_REMAPPABLE_SLOT: u8 = 25;
-const Q35_PIRQ_E_GSI: u32 = 20;
 
 const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
 const VIRTIO_STATUS_DRIVER: u8 = 2;
@@ -1127,33 +1117,8 @@ fn configure_interrupt_route(
 }
 
 fn configure_intx_route(function: PciFunction) -> Result<InterruptRoute, &'static str> {
-    let pin = function
-        .interrupt_pin()
-        .ok_or("virtio net has neither an MSI-X table nor an INTx pin")?;
-    let gsi = q35_intx_gsi(function, pin)?;
-    let vector = allocate_device_vector(virtio_net_intx_interrupt)?;
-    if let Err(error) = route_gsi(gsi, vector, TriggerMode::Level, Polarity::ActiveHigh) {
-        release_device_vector(vector);
-        return Err(error);
-    }
-    function.update_command(0, PCI_COMMAND_INTX_DISABLE);
+    let IntxRoute { vector, gsi } = route_intx(function, virtio_net_intx_interrupt)?;
     Ok(InterruptRoute::Intx { vector, gsi })
-}
-
-fn q35_intx_gsi(function: PciFunction, pin: u8) -> Result<u32, &'static str> {
-    if PciFunction::new(0, 0, 0).vendor_device() != Q35_HOST_BRIDGE_ID {
-        return Err("virtio net INTx routing is only known for the q35 chipset");
-    }
-    q35_pirq_gsi(function, pin)
-}
-
-/// GSI for `pin` (1 = INTA) of a bus-0 function under the q35 default PIRQ routing.
-fn q35_pirq_gsi(function: PciFunction, pin: u8) -> Result<u32, &'static str> {
-    if function.bus != 0 || function.device >= Q35_FIRST_REMAPPABLE_SLOT || !(1..=4).contains(&pin)
-    {
-        return Err("virtio net INTx routing is unknown for this PCI slot");
-    }
-    Ok(Q35_PIRQ_E_GSI + u32::from((function.device + pin - 1) & 0x3))
 }
 
 fn release_interrupt_route(
@@ -1174,10 +1139,7 @@ fn release_interrupt_route(
             release_device_vector(rx_vector);
             release_device_vector(tx_vector);
         }
-        InterruptRoute::Intx { vector, .. } => {
-            function.update_command(PCI_COMMAND_INTX_DISABLE, 0);
-            release_device_vector(vector);
-        }
+        InterruptRoute::Intx { vector, gsi } => release_intx(function, IntxRoute { vector, gsi }),
     }
     without_interrupts(|| interrupt_state_mut().sinks = NetInterruptSinks::NONE);
 }
@@ -1301,17 +1263,6 @@ mod tests {
         assert!(validate_queue_size(256).is_ok());
         assert!(validate_queue_size(0).is_err());
         assert!(validate_queue_size(3).is_err());
-    }
-
-    #[test]
-    fn q35_intx_routes_slot_and_pin_onto_pirq_e_through_h() {
-        assert_eq!(q35_pirq_gsi(PciFunction::new(0, 2, 0), 1), Ok(22));
-        assert_eq!(q35_pirq_gsi(PciFunction::new(0, 3, 0), 1), Ok(23));
-        assert_eq!(q35_pirq_gsi(PciFunction::new(0, 4, 0), 1), Ok(20));
-        assert_eq!(q35_pirq_gsi(PciFunction::new(0, 4, 0), 2), Ok(21));
-        assert!(q35_pirq_gsi(PciFunction::new(0, 25, 0), 1).is_err());
-        assert!(q35_pirq_gsi(PciFunction::new(1, 2, 0), 1).is_err());
-        assert!(q35_pirq_gsi(PciFunction::new(0, 2, 0), 0).is_err());
     }
 
     #[test]
