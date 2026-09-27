@@ -35,9 +35,9 @@ impl<'a> TlsConfig<'a> {
     }
 }
 
-struct M7CryptoProvider<'a, R> {
-    rng: R,
-    verifier: crate::tls::verify::PinnedVerifier<'a>,
+pub(super) struct M7CryptoProvider<'a, R> {
+    pub(super) rng: R,
+    pub(super) verifier: crate::tls::verify::PinnedVerifier<'a>,
 }
 
 impl<'a, R: rand_core::CryptoRngCore> CryptoProvider for M7CryptoProvider<'a, R> {

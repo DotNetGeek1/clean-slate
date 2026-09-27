@@ -911,6 +911,16 @@ impl<L: NetworkLink> DnsResolver<L> {
         Ok(())
     }
 
+    /// Earliest tick at which [`Self::poll`] times out an in-flight query (`poll` expires a
+    /// query once `now` passes its deadline), or `None` with nothing in flight.
+    pub fn next_deadline(&self) -> Option<u64> {
+        self.pending
+            .iter()
+            .filter(|p| p.live && matches!(p.state, PendingState::InFlight))
+            .map(|p| p.deadline.saturating_add(1))
+            .min()
+    }
+
     pub fn take_result(
         &mut self,
         query_id: u32,
@@ -1287,6 +1297,29 @@ mod tests {
                     resolver.take_result(qid, OWNER).unwrap(),
                     Err(DnsError::NameNotFound)
                 );
+            });
+        }
+
+        #[test]
+        fn next_deadline_is_the_first_tick_poll_times_out() {
+            run_on_large_stack(|| {
+                let (a, _b) = FakeLink::pair();
+                let mut resolver = make_resolver(a);
+                assert_eq!(resolver.next_deadline(), None);
+                let qid = match resolver.resolve(5, OWNER, FIXTURE_HOSTNAME).unwrap() {
+                    ResolveOutcome::Pending { query_id } => query_id,
+                    _ => panic!("expected pending"),
+                };
+                let deadline = resolver.next_deadline().expect("query in flight");
+                assert_eq!(deadline, 5 + DNS_QUERY_TIMEOUT_TICKS + 1);
+                resolver.poll(deadline - 1).unwrap();
+                assert_eq!(resolver.take_result(qid, OWNER), None);
+                resolver.poll(deadline).unwrap();
+                assert_eq!(
+                    resolver.take_result(qid, OWNER).unwrap(),
+                    Err(DnsError::Timeout)
+                );
+                assert_eq!(resolver.next_deadline(), None);
             });
         }
 
