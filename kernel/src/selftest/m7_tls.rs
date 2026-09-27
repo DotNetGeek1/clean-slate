@@ -20,7 +20,7 @@ use clean_slate_network::tls::{
 };
 use rand_core::{CryptoRng, RngCore};
 
-use crate::device::virtio::net::VirtioNetDevice;
+use crate::device::virtio::net::{NetInterruptSinks, VirtioNetDevice};
 use crate::{serial_write_fmt, serial_write_line};
 
 const OWNER: TrustedCaller = TrustedCaller::new(1, 0, 1);
@@ -131,7 +131,7 @@ pub(crate) fn run_m7_tls_fail_closed_self_test() -> Result<(), &'static str> {
 fn tcp_transport() -> Result<&'static mut TcpTransport<VirtioNetDevice>, &'static str> {
     unsafe {
         if !TCP_TRANSPORT_READY {
-            let device = VirtioNetDevice::discover()?;
+            let device = VirtioNetDevice::discover(NetInterruptSinks::NONE)?;
             let mac = device.link().mac;
             let stack = L3Stack::new(device, mac, GUEST_IPV4, ARP_TTL);
             let slot = TCP_TRANSPORT.as_mut_ptr();

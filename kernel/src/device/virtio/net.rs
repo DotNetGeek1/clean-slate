@@ -8,10 +8,9 @@
 )]
 
 use core::convert::TryFrom;
-use core::hint::spin_loop;
 use core::mem::{align_of, size_of};
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{compiler_fence, AtomicBool, Ordering};
+use core::sync::atomic::{compiler_fence, fence, AtomicBool, Ordering};
 
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{
@@ -19,22 +18,29 @@ use clean_slate_network::device::{
 };
 use clean_slate_network::limits::{MAX_DEVICE_RX_QUEUE_DEPTH, MAX_ETHERNET_FRAME_BYTES};
 
+use crate::arch::x86_64::cpu::without_interrupts;
+use crate::arch::x86_64::ioapic::{Polarity, TriggerMode};
 use crate::arch::x86_64::port::{
     port_in, port_in_u16, port_in_u32, port_out, port_out_u16, port_out_u32,
 };
+use crate::device::pci::{
+    find_single_function, MsixCapability, PciFunction, PCI_COMMAND_BUS_MASTER,
+    PCI_COMMAND_INTX_DISABLE, PCI_COMMAND_IO_SPACE,
+};
+use crate::diagnostics::log::kernel_log_fmt;
+use crate::interrupt::irq::{
+    allocate_device_vector, msi_message, release_device_vector, route_gsi,
+};
 use crate::mm::address_space::translate_address_in_root;
 use crate::mm::paging::current_root_frame_address;
+use crate::sync::global_cell::GlobalCell;
 use x86_64::VirtAddr;
 
-const PCI_CONFIG_ADDRESS_PORT: u16 = 0x0cf8;
-const PCI_CONFIG_DATA_PORT: u16 = 0x0cfc;
 const PCI_VENDOR_ID: u16 = 0x1af4;
 const PCI_DEVICE_ID_VIRTIO_NET_LEGACY: u16 = 0x1000;
 
-const PCI_COMMAND_OFFSET: u8 = 0x04;
-const PCI_BAR0_OFFSET: u8 = 0x10;
-const PCI_COMMAND_IO_SPACE: u16 = 1 << 0;
-const PCI_COMMAND_BUS_MASTER: u16 = 1 << 2;
+/// Discovery error when no NIC is attached (as opposed to a NIC that failed to initialize).
+pub(crate) const VIRTIO_NET_NOT_FOUND: &str = "legacy virtio net device not found";
 
 const VIRTIO_PCI_HOST_FEATURES: u16 = 0x00;
 const VIRTIO_PCI_GUEST_FEATURES: u16 = 0x04;
@@ -43,7 +49,27 @@ const VIRTIO_PCI_QUEUE_NUM: u16 = 0x0c;
 const VIRTIO_PCI_QUEUE_SEL: u16 = 0x0e;
 const VIRTIO_PCI_QUEUE_NOTIFY: u16 = 0x10;
 const VIRTIO_PCI_STATUS: u16 = 0x12;
-const VIRTIO_PCI_DEVICE_CONFIG: u16 = 0x14;
+/// Reading the legacy ISR status acknowledges the interrupt and deasserts INTx.
+const VIRTIO_PCI_ISR_STATUS: u16 = 0x13;
+/// With MSI-X enabled the legacy header grows by the two vector registers and
+/// device config moves from 0x14 to 0x18.
+const VIRTIO_MSI_CONFIG_VECTOR: u16 = 0x14;
+const VIRTIO_MSI_QUEUE_VECTOR: u16 = 0x16;
+const VIRTIO_PCI_DEVICE_CONFIG_INTX: u16 = 0x14;
+const VIRTIO_PCI_DEVICE_CONFIG_MSIX: u16 = 0x18;
+const VIRTIO_MSI_NO_VECTOR: u16 = 0xffff;
+const VIRTIO_ISR_QUEUE_INTERRUPT: u8 = 1;
+
+/// MSI-X table entries used for the two queues (config changes get no vector).
+const MSIX_RX_ENTRY: u16 = 0;
+const MSIX_TX_ENTRY: u16 = 1;
+
+/// q35 (ICH9) INTx routing: slots below 25 use the fixed default
+/// `PIRQ[E..H] = (slot + pin) % 4`, and in APIC mode PIRQ E..H drive GSI 20..23
+/// level-triggered, active-high. Other chipsets and slots fail closed.
+const Q35_HOST_BRIDGE_ID: (u16, u16) = (0x8086, 0x29c0);
+const Q35_FIRST_REMAPPABLE_SLOT: u8 = 25;
+const Q35_PIRQ_E_GSI: u32 = 20;
 
 const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
 const VIRTIO_STATUS_DRIVER: u8 = 2;
@@ -60,17 +86,26 @@ const RX_SLOT_BYTES: usize = VIRTIO_NET_HDR_BYTES + MAX_ETHERNET_FRAME_BYTES;
 
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
+/// Driver-side used-ring suppression hint (no event index is negotiated: the
+/// RX side wants every completion and the TX side toggles this flag instead).
+const VRING_AVAIL_F_NO_INTERRUPT: u16 = 1;
 
 const VIRTQ_ALIGN: usize = 4096;
 const VIRTQ_QUEUE_MAX_ENTRIES: u16 = 256;
 const VIRTQ_MEMORY_BYTES: usize = 16 * 1024;
-const COMPLETION_SPIN_LIMIT: usize = 20_000_000;
 
 const RX_QUEUE_INDEX: u16 = 0;
 const TX_QUEUE_INDEX: u16 = 1;
 
-const TX_DESC_HEADER: u16 = 0;
-const TX_DESC_FRAME: u16 = 1;
+/// In-flight TX frames; each uses a header descriptor `2 * slot` chained to a
+/// frame descriptor `2 * slot + 1`.
+const TX_POOL_SIZE: usize = 16;
+/// A slot holds the 10-byte legacy header, padding, then the frame; 2 KiB
+/// slots in a 4 KiB-aligned pool never straddle a page.
+const TX_SLOT_BYTES: usize = 2048;
+const TX_FRAME_OFFSET: usize = 16;
+const _: () = assert!(TX_FRAME_OFFSET + MAX_ETHERNET_FRAME_BYTES <= TX_SLOT_BYTES);
+const _: () = assert!(size_of::<VirtioNetHdr>() <= TX_FRAME_OFFSET);
 
 #[repr(C, align(4096))]
 struct QueueMemory {
@@ -97,17 +132,114 @@ static mut RX_BUFFER_POOL: RxBufferPool = RxBufferPool {
     slots: [[0; RX_SLOT_BYTES]; RX_POOL_SIZE],
 };
 
+#[repr(C, align(4096))]
+struct TxBufferPool {
+    slots: [[u8; TX_SLOT_BYTES]; TX_POOL_SIZE],
+}
+
+static mut TX_BUFFER_POOL: TxBufferPool = TxBufferPool {
+    slots: [[0; TX_SLOT_BYTES]; TX_POOL_SIZE],
+};
+
 /// Guards the single static DMA region: at most one live [`VirtioNetDevice`]
 /// may exist. A replacement instance can only be discovered after the previous
 /// one has been [`VirtioNetDevice::release`]d, which resets the device first so
 /// no device-owned descriptor can be inherited.
 static DEVICE_CLAIMED: AtomicBool = AtomicBool::new(false);
 
+/// Wake hooks the interrupt handlers call; they run in interrupt context and
+/// must only wake waiters.
 #[derive(Clone, Copy)]
-struct PciFunction {
-    bus: u8,
-    device: u8,
-    function: u8,
+pub(crate) struct NetInterruptSinks {
+    pub(crate) rx: fn(),
+    pub(crate) tx: fn(),
+}
+
+impl NetInterruptSinks {
+    #[allow(dead_code)] // in-kernel device lanes drive the rings without waiters
+    pub(crate) const NONE: Self = Self {
+        rx: ignore_interrupt,
+        tx: ignore_interrupt,
+    };
+}
+
+fn ignore_interrupt() {}
+
+/// How the device signals queue completions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InterruptRoute {
+    Msix { rx_vector: u8, tx_vector: u8 },
+    Intx { vector: u8, gsi: u32 },
+}
+
+impl InterruptRoute {
+    fn device_config_offset(self) -> u16 {
+        match self {
+            Self::Msix { .. } => VIRTIO_PCI_DEVICE_CONFIG_MSIX,
+            Self::Intx { .. } => VIRTIO_PCI_DEVICE_CONFIG_INTX,
+        }
+    }
+}
+
+/// Interrupt counters since discovery; INTx queue interrupts count as RX.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NetInterruptStats {
+    pub(crate) rx: u64,
+    pub(crate) tx: u64,
+    pub(crate) spurious: u64,
+}
+
+/// State shared with the interrupt handlers, written with interrupts masked.
+#[derive(Clone, Copy)]
+struct InterruptState {
+    sinks: NetInterruptSinks,
+    intx_io_base: u16,
+    stats: NetInterruptStats,
+}
+
+static INTERRUPT_STATE: GlobalCell<InterruptState> = GlobalCell::new(InterruptState {
+    sinks: NetInterruptSinks {
+        rx: ignore_interrupt,
+        tx: ignore_interrupt,
+    },
+    intx_io_base: 0,
+    stats: NetInterruptStats {
+        rx: 0,
+        tx: 0,
+        spurious: 0,
+    },
+});
+
+fn interrupt_state_mut() -> &'static mut InterruptState {
+    unsafe { &mut *INTERRUPT_STATE.get() }
+}
+
+pub(crate) fn net_interrupt_stats() -> NetInterruptStats {
+    without_interrupts(|| interrupt_state_mut().stats)
+}
+
+fn virtio_net_rx_interrupt() {
+    let state = interrupt_state_mut();
+    state.stats.rx = state.stats.rx.saturating_add(1);
+    (state.sinks.rx)();
+}
+
+fn virtio_net_tx_interrupt() {
+    let state = interrupt_state_mut();
+    state.stats.tx = state.stats.tx.saturating_add(1);
+    (state.sinks.tx)();
+}
+
+fn virtio_net_intx_interrupt() {
+    let state = interrupt_state_mut();
+    let status = port_in(state.intx_io_base + VIRTIO_PCI_ISR_STATUS);
+    if status & VIRTIO_ISR_QUEUE_INTERRUPT == 0 {
+        state.stats.spurious = state.stats.spurious.saturating_add(1);
+        return;
+    }
+    state.stats.rx = state.stats.rx.saturating_add(1);
+    (state.sinks.rx)();
+    (state.sinks.tx)();
 }
 
 #[repr(C)]
@@ -225,11 +357,9 @@ struct LegacyRegisters {
 
 impl LegacyRegisters {
     fn from_pci(function: PciFunction) -> Result<Self, &'static str> {
-        let mut command = pci_config_read_u16(function, PCI_COMMAND_OFFSET);
-        command |= PCI_COMMAND_IO_SPACE | PCI_COMMAND_BUS_MASTER;
-        pci_config_write_u16(function, PCI_COMMAND_OFFSET, command);
+        function.update_command(PCI_COMMAND_IO_SPACE | PCI_COMMAND_BUS_MASTER, 0);
 
-        let bar0 = pci_config_read_u32(function, PCI_BAR0_OFFSET);
+        let bar0 = function.bar(0);
         if (bar0 & 1) == 0 {
             return Err("virtio legacy net BAR0 is not I/O space");
         }
@@ -339,14 +469,22 @@ impl QueueState {
         Some(element)
     }
 
-    fn wait_for_completion(&mut self) -> Result<VirtqUsedElem, NetworkDeviceError> {
-        for _ in 0..COMPLETION_SPIN_LIMIT {
-            if let Some(element) = self.poll_completion() {
-                return Ok(element);
-            }
-            spin_loop();
+    fn has_unconsumed_completion(&self) -> bool {
+        self.used_index() != self.last_used_idx
+    }
+
+    fn set_interrupt_suppressed(&mut self, suppressed: bool) {
+        let flags = if suppressed {
+            VRING_AVAIL_F_NO_INTERRUPT
+        } else {
+            0
+        };
+        unsafe {
+            write_volatile(self.avail_flags_ptr(), flags);
         }
-        Err(NetworkDeviceError::Timeout)
+        // Full fence: the device must observe the flag before the caller
+        // re-reads the used index, or a completion could slip between them.
+        fence(Ordering::SeqCst);
     }
 
     fn clear_ring(&mut self) {
@@ -369,9 +507,11 @@ pub(crate) struct VirtioNetDevice {
     rx_queue: QueueState,
     tx_queue: QueueState,
     rx_ownership: [DescriptorOwnership; RX_POOL_SIZE],
-    tx_header: VirtioNetHdr,
-    tx_frame: [u8; MAX_ETHERNET_FRAME_BYTES],
-    tx_in_flight: bool,
+    tx_in_flight: [bool; TX_POOL_SIZE],
+    /// TX completion interrupts are requested only while the ring is full.
+    tx_interrupt_armed: bool,
+    interrupts: InterruptRoute,
+    msix: Option<MsixCapability>,
     link: LinkProperties,
     #[allow(dead_code)]
     device_id: NetworkDeviceId,
@@ -386,16 +526,21 @@ pub(crate) struct VirtioNetDevice {
 impl VirtioNetDevice {
     /// Discovers and brings up the single QEMU VirtIO-net device.
     ///
+    /// Completions are signalled by MSI-X (one vector per queue) or, when the
+    /// function has no usable MSI-X table, by its INTx line through the I/O
+    /// APIC. `sinks` are called from those interrupt handlers. Without either
+    /// route discovery fails: there is no polling fallback.
+    ///
     /// Fails with `"virtio net device already claimed"` if a live instance
     /// exists; call [`Self::release`] on the old instance first.
-    pub(crate) fn discover() -> Result<Self, &'static str> {
+    pub(crate) fn discover(sinks: NetInterruptSinks) -> Result<Self, &'static str> {
         if DEVICE_CLAIMED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
             return Err("virtio net device already claimed");
         }
-        match Self::discover_unguarded() {
+        match Self::discover_unguarded(sinks) {
             Ok(device) => Ok(device),
             Err(error) => {
                 DEVICE_CLAIMED.store(false, Ordering::Release);
@@ -404,19 +549,46 @@ impl VirtioNetDevice {
         }
     }
 
-    fn discover_unguarded() -> Result<Self, &'static str> {
-        let pci_function = discover_single_legacy_net_pci_function()?;
+    fn discover_unguarded(sinks: NetInterruptSinks) -> Result<Self, &'static str> {
+        let pci_function = find_single_function(PCI_VENDOR_ID, PCI_DEVICE_ID_VIRTIO_NET_LEGACY)
+            .map_err(|_| "multiple legacy virtio net devices found")?
+            .ok_or(VIRTIO_NET_NOT_FOUND)?;
         let registers = LegacyRegisters::from_pci(pci_function)?;
-        let mut device = Self::bring_up(registers, pci_function)?;
-        device.post_all_rx_buffers()?;
+        registers.write_u8(VIRTIO_PCI_STATUS, 0);
+        let (interrupts, msix) = configure_interrupt_route(pci_function, &registers, sinks)?;
+        let device =
+            Self::bring_up(registers, pci_function, interrupts, msix).and_then(|mut device| {
+                device.post_all_rx_buffers()?;
+                Ok(device)
+            });
+        let device = match device {
+            Ok(device) => device,
+            Err(error) => {
+                LegacyRegisters::from_pci(pci_function)?.write_u8(VIRTIO_PCI_STATUS, 0);
+                release_interrupt_route(pci_function, interrupts, msix);
+                return Err(error);
+            }
+        };
         let status = device.registers.read_u8(VIRTIO_PCI_STATUS) | VIRTIO_STATUS_DRIVER_OK;
         device.registers.write_u8(VIRTIO_PCI_STATUS, status);
+        match interrupts {
+            InterruptRoute::Msix {
+                rx_vector,
+                tx_vector,
+            } => kernel_log_fmt(format_args!(
+                "[NET ] rx irq vector={rx_vector} mode=msix tx_vector={tx_vector}\n"
+            )),
+            InterruptRoute::Intx { vector, gsi } => kernel_log_fmt(format_args!(
+                "[NET ] rx irq vector={vector} mode=intx gsi={gsi}\n"
+            )),
+        }
         Ok(device)
     }
 
     /// Reset the device and poison local state so a replacement service cannot
-    /// reuse device-owned descriptors, then release the static DMA claim so a
-    /// replacement instance may call [`Self::discover`].
+    /// reuse device-owned descriptors, then tear down the interrupt route and
+    /// release the static DMA claim so a replacement instance may call
+    /// [`Self::discover`].
     #[allow(dead_code)]
     pub(crate) fn release(mut self) {
         self.registers.write_u8(VIRTIO_PCI_STATUS, 0);
@@ -425,8 +597,18 @@ impl VirtioNetDevice {
         for slot in &mut self.rx_ownership {
             *slot = DescriptorOwnership::DriverOwned;
         }
-        self.tx_in_flight = false;
+        self.tx_in_flight = [false; TX_POOL_SIZE];
+        release_interrupt_route(self.pci_function, self.interrupts, self.msix);
         DEVICE_CLAIMED.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn interrupt_route(&self) -> InterruptRoute {
+        self.interrupts
+    }
+
+    /// Whether the device has posted RX completions not yet consumed by [`NetworkLink::receive`].
+    pub(crate) fn rx_completion_pending(&self) -> bool {
+        self.rx_queue.has_unconsumed_completion()
     }
 
     #[allow(dead_code)]
@@ -462,7 +644,15 @@ impl VirtioNetDevice {
         "bad-desc"
     }
 
-    fn bring_up(registers: LegacyRegisters, function: PciFunction) -> Result<Self, &'static str> {
+    /// Reset and configure the device. A virtio reset clears the queue vector
+    /// assignments (the PCI-level MSI-X table persists), so every bring-up
+    /// reassigns them for `interrupts`.
+    fn bring_up(
+        registers: LegacyRegisters,
+        function: PciFunction,
+        interrupts: InterruptRoute,
+        msix: Option<MsixCapability>,
+    ) -> Result<Self, &'static str> {
         registers.write_u8(VIRTIO_PCI_STATUS, 0);
         registers.write_u8(
             VIRTIO_PCI_STATUS,
@@ -473,7 +663,11 @@ impl VirtioNetDevice {
         let negotiated_features = negotiate_features(host_features)?;
         registers.write_u32(VIRTIO_PCI_GUEST_FEATURES, negotiated_features);
 
-        let mac = read_mac_address(&registers, negotiated_features)?;
+        let mac = read_mac_address(
+            &registers,
+            negotiated_features,
+            interrupts.device_config_offset(),
+        )?;
         let link = LinkProperties::new(mac, true);
 
         let rx_queue_size = initialize_queue(&registers, RX_QUEUE_INDEX)?;
@@ -483,8 +677,8 @@ impl VirtioNetDevice {
         if usize::from(rx_queue_size) < RX_POOL_SIZE {
             return Err("virtio net RX queue is smaller than the static RX pool");
         }
-        if usize::from(tx_queue_size) < 2 {
-            return Err("virtio net TX queue is too small");
+        if usize::from(tx_queue_size) < 2 * TX_POOL_SIZE {
+            return Err("virtio net TX queue is smaller than the static TX pool");
         }
 
         let rx_layout = QueueLayout::compute(rx_queue_size, VIRTQ_ALIGN)?;
@@ -508,12 +702,17 @@ impl VirtioNetDevice {
         };
         rx_queue.clear_ring();
         tx_queue.clear_ring();
+        tx_queue.set_interrupt_suppressed(true);
 
         validate_dma_range(rx_memory_base, rx_layout.total_bytes)?;
         validate_dma_range(tx_memory_base, tx_layout.total_bytes)?;
         validate_dma_range(
             unsafe { core::ptr::addr_of_mut!(RX_BUFFER_POOL.slots) as *mut u8 },
             RX_POOL_SIZE * RX_SLOT_BYTES,
+        )?;
+        validate_dma_range(
+            unsafe { core::ptr::addr_of_mut!(TX_BUFFER_POOL.slots) as *mut u8 },
+            TX_POOL_SIZE * TX_SLOT_BYTES,
         )?;
 
         let rx_physical = physical_address_for_contiguous_range(
@@ -535,6 +734,11 @@ impl VirtioNetDevice {
             VIRTIO_PCI_QUEUE_PFN,
             queue_pfn_from_physical_address(tx_physical)?,
         );
+        if matches!(interrupts, InterruptRoute::Msix { .. }) {
+            registers.write_u16(VIRTIO_MSI_CONFIG_VECTOR, VIRTIO_MSI_NO_VECTOR);
+            assign_queue_vector(&registers, RX_QUEUE_INDEX, MSIX_RX_ENTRY)?;
+            assign_queue_vector(&registers, TX_QUEUE_INDEX, MSIX_TX_ENTRY)?;
+        }
 
         Ok(Self {
             pci_function: function,
@@ -542,16 +746,10 @@ impl VirtioNetDevice {
             rx_queue,
             tx_queue,
             rx_ownership: [DescriptorOwnership::DriverOwned; RX_POOL_SIZE],
-            tx_header: VirtioNetHdr {
-                flags: 0,
-                gso_type: 0,
-                hdr_len: 0,
-                gso_size: 0,
-                csum_start: 0,
-                csum_offset: 0,
-            },
-            tx_frame: [0; MAX_ETHERNET_FRAME_BYTES],
-            tx_in_flight: false,
+            tx_in_flight: [false; TX_POOL_SIZE],
+            tx_interrupt_armed: false,
+            interrupts,
+            msix,
             link,
             device_id: NetworkDeviceId::new(encode_device_id(function)),
             rx_queue_size,
@@ -677,26 +875,44 @@ impl VirtioNetDevice {
     }
 
     fn complete_tx(&mut self, used: VirtqUsedElem) -> Result<(), NetworkDeviceError> {
-        if used.id != u32::from(TX_DESC_HEADER) {
+        let slot = usize::try_from(used.id / 2).unwrap_or(TX_POOL_SIZE);
+        if used.id % 2 != 0 || slot >= TX_POOL_SIZE || !self.tx_in_flight[slot] {
             self.device_state = DeviceState::ResetRequired;
             return Err(NetworkDeviceError::Malformed);
         }
-        self.tx_in_flight = false;
+        self.tx_in_flight[slot] = false;
         Ok(())
     }
 
-    fn wait_for_tx_completion(&mut self) -> Result<(), NetworkDeviceError> {
-        if !self.tx_in_flight {
-            return Ok(());
+    /// Retire every TX completion the device has posted. Once a slot is free
+    /// again the TX interrupt goes back to suppressed.
+    fn reclaim_tx(&mut self) -> Result<(), NetworkDeviceError> {
+        while let Some(used) = self.tx_queue.poll_completion() {
+            self.complete_tx(used)?;
         }
-        match self.tx_queue.wait_for_completion() {
-            Ok(used) => self.complete_tx(used),
-            Err(NetworkDeviceError::Timeout) => {
-                self.device_state = DeviceState::ResetRequired;
-                Err(NetworkDeviceError::ResetRequired)
-            }
-            Err(error) => Err(error),
+        if self.tx_interrupt_armed && self.free_tx_slot().is_some() {
+            self.tx_queue.set_interrupt_suppressed(true);
+            self.tx_interrupt_armed = false;
         }
+        Ok(())
+    }
+
+    fn free_tx_slot(&self) -> Option<usize> {
+        self.tx_in_flight.iter().position(|busy| !busy)
+    }
+
+    /// A free TX slot, or `QueueFull` with the TX completion interrupt armed so
+    /// the caller can block until the device retires a frame. The used ring is
+    /// re-read after arming so a completion that raced the arm is not missed.
+    fn claim_tx_slot(&mut self) -> Result<usize, NetworkDeviceError> {
+        self.reclaim_tx()?;
+        if let Some(slot) = self.free_tx_slot() {
+            return Ok(slot);
+        }
+        self.tx_queue.set_interrupt_suppressed(false);
+        self.tx_interrupt_armed = true;
+        self.reclaim_tx()?;
+        self.free_tx_slot().ok_or(NetworkDeviceError::QueueFull)
     }
 
     pub(crate) fn rx_ring_snapshot(&self) -> (u16, u16) {
@@ -736,11 +952,13 @@ impl NetworkLink for VirtioNetDevice {
             Err(_) => return Err((NetworkDeviceError::DeviceError, frame)),
         };
 
-        if let Err(error) = self.wait_for_tx_completion() {
-            return Err((error, frame));
-        }
+        let slot = match self.claim_tx_slot() {
+            Ok(slot) => slot,
+            Err(error) => return Err((error, frame)),
+        };
 
-        self.tx_header = VirtioNetHdr {
+        let slot_ptr = unsafe { core::ptr::addr_of_mut!(TX_BUFFER_POOL.slots[slot]) as *mut u8 };
+        let header = VirtioNetHdr {
             flags: 0,
             gso_type: 0,
             hdr_len: 0,
@@ -748,55 +966,43 @@ impl NetworkLink for VirtioNetDevice {
             csum_start: 0,
             csum_offset: 0,
         };
-        self.tx_frame[..frame_len].copy_from_slice(frame.as_slice());
-
-        let header_physical =
-            match virtual_to_physical_address(&self.tx_header as *const _ as *const u8) {
+        unsafe {
+            core::ptr::write_unaligned(slot_ptr as *mut VirtioNetHdr, header);
+            core::ptr::copy_nonoverlapping(
+                frame.as_slice().as_ptr(),
+                slot_ptr.add(TX_FRAME_OFFSET),
+                frame_len,
+            );
+        }
+        let slot_physical =
+            match physical_address_for_contiguous_range(slot_ptr, TX_FRAME_OFFSET + frame_len) {
                 Ok(value) => value,
                 Err(_) => return Err((NetworkDeviceError::DeviceError, frame)),
             };
-        let frame_physical =
-            match physical_address_for_contiguous_range(self.tx_frame.as_ptr(), frame_len) {
-                Ok(value) => value,
-                Err(_) => return Err((NetworkDeviceError::DeviceError, frame)),
-            };
 
+        let header_desc = (slot * 2) as u16;
         self.tx_queue.write_desc(
-            TX_DESC_HEADER,
+            header_desc,
             VirtqDesc {
-                addr: header_physical,
+                addr: slot_physical,
                 len: size_of::<VirtioNetHdr>() as u32,
                 flags: VIRTQ_DESC_F_NEXT,
-                next: TX_DESC_FRAME,
+                next: header_desc + 1,
             },
         );
         self.tx_queue.write_desc(
-            TX_DESC_FRAME,
+            header_desc + 1,
             VirtqDesc {
-                addr: frame_physical,
+                addr: slot_physical + TX_FRAME_OFFSET as u64,
                 len: frame_len_u32,
                 flags: 0,
                 next: 0,
             },
         );
-        self.tx_queue.submit_head(TX_DESC_HEADER);
-        self.tx_in_flight = true;
+        self.tx_queue.submit_head(header_desc);
+        self.tx_in_flight[slot] = true;
         self.registers
             .write_u16(VIRTIO_PCI_QUEUE_NOTIFY, TX_QUEUE_INDEX);
-
-        match self.tx_queue.wait_for_completion() {
-            Ok(used) => {
-                if let Err(error) = self.complete_tx(used) {
-                    return Err((error, frame));
-                }
-            }
-            Err(NetworkDeviceError::Timeout) => {
-                self.device_state = DeviceState::ResetRequired;
-                return Err((NetworkDeviceError::ResetRequired, frame));
-            }
-            Err(error) => return Err((error, frame)),
-        }
-
         Ok(())
     }
 
@@ -822,7 +1028,7 @@ impl NetworkLink for VirtioNetDevice {
             return Err(NetworkDeviceError::Poisoned);
         }
         self.registers.write_u8(VIRTIO_PCI_STATUS, 0);
-        self.tx_in_flight = false;
+        self.tx_in_flight = [false; TX_POOL_SIZE];
         for slot in &mut self.rx_ownership {
             *slot = DescriptorOwnership::DriverOwned;
         }
@@ -831,7 +1037,7 @@ impl NetworkLink for VirtioNetDevice {
             self.device_state = DeviceState::Poisoned;
             NetworkDeviceError::Poisoned
         })?;
-        match Self::bring_up(registers, self.pci_function) {
+        match Self::bring_up(registers, self.pci_function, self.interrupts, self.msix) {
             Ok(fresh) => {
                 *self = fresh;
             }
@@ -869,29 +1075,118 @@ fn validate_dma_range(base: *mut u8, len: usize) -> Result<(), &'static str> {
     physical_address_for_contiguous_range(base, len).map(|_| ())
 }
 
-fn discover_single_legacy_net_pci_function() -> Result<PciFunction, &'static str> {
-    let mut found = None;
-    for device in 0u8..32 {
-        for function in 0u8..8 {
-            let candidate = PciFunction {
-                bus: 0,
-                device,
-                function,
-            };
-            let vendor_id = pci_config_read_u16(candidate, 0x00);
-            if vendor_id == 0xffff {
-                continue;
+/// Install `sinks` and route the device's queue interrupts: MSI-X when the
+/// function exposes a table with an entry per queue, otherwise its INTx line.
+/// A present-but-failing MSI-X table is an error, not a reason to fall back.
+fn configure_interrupt_route(
+    function: PciFunction,
+    registers: &LegacyRegisters,
+    sinks: NetInterruptSinks,
+) -> Result<(InterruptRoute, Option<MsixCapability>), &'static str> {
+    without_interrupts(|| {
+        *interrupt_state_mut() = InterruptState {
+            sinks,
+            intx_io_base: registers.io_base,
+            stats: NetInterruptStats::default(),
+        };
+    });
+    let msix = MsixCapability::probe(function)?.filter(|msix| msix.table_entries > MSIX_TX_ENTRY);
+    let Some(msix) = msix else {
+        return configure_intx_route(function).map(|route| (route, None));
+    };
+    let rx_vector = allocate_device_vector(virtio_net_rx_interrupt)?;
+    let tx_vector = match allocate_device_vector(virtio_net_tx_interrupt) {
+        Ok(vector) => vector,
+        Err(error) => {
+            release_device_vector(rx_vector);
+            return Err(error);
+        }
+    };
+    let route = InterruptRoute::Msix {
+        rx_vector,
+        tx_vector,
+    };
+    msix.enable_masked();
+    let programmed = msix
+        .program_entry(MSIX_RX_ENTRY, msi_message(rx_vector))
+        .and_then(|()| msix.program_entry(MSIX_TX_ENTRY, msi_message(tx_vector)));
+    if let Err(error) = programmed {
+        release_interrupt_route(function, route, Some(msix));
+        return Err(error);
+    }
+    msix.unmask_function();
+    Ok((route, Some(msix)))
+}
+
+fn configure_intx_route(function: PciFunction) -> Result<InterruptRoute, &'static str> {
+    let pin = function
+        .interrupt_pin()
+        .ok_or("virtio net has neither an MSI-X table nor an INTx pin")?;
+    let gsi = q35_intx_gsi(function, pin)?;
+    let vector = allocate_device_vector(virtio_net_intx_interrupt)?;
+    if let Err(error) = route_gsi(gsi, vector, TriggerMode::Level, Polarity::ActiveHigh) {
+        release_device_vector(vector);
+        return Err(error);
+    }
+    function.update_command(0, PCI_COMMAND_INTX_DISABLE);
+    Ok(InterruptRoute::Intx { vector, gsi })
+}
+
+fn q35_intx_gsi(function: PciFunction, pin: u8) -> Result<u32, &'static str> {
+    if PciFunction::new(0, 0, 0).vendor_device() != Q35_HOST_BRIDGE_ID {
+        return Err("virtio net INTx routing is only known for the q35 chipset");
+    }
+    q35_pirq_gsi(function, pin)
+}
+
+/// GSI for `pin` (1 = INTA) of a bus-0 function under the q35 default PIRQ routing.
+fn q35_pirq_gsi(function: PciFunction, pin: u8) -> Result<u32, &'static str> {
+    if function.bus != 0 || function.device >= Q35_FIRST_REMAPPABLE_SLOT || !(1..=4).contains(&pin)
+    {
+        return Err("virtio net INTx routing is unknown for this PCI slot");
+    }
+    Ok(Q35_PIRQ_E_GSI + u32::from((function.device + pin - 1) & 0x3))
+}
+
+fn release_interrupt_route(
+    function: PciFunction,
+    route: InterruptRoute,
+    msix: Option<MsixCapability>,
+) {
+    match route {
+        InterruptRoute::Msix {
+            rx_vector,
+            tx_vector,
+        } => {
+            if let Some(msix) = msix {
+                let _ = msix.mask_entry(MSIX_RX_ENTRY);
+                let _ = msix.mask_entry(MSIX_TX_ENTRY);
+                msix.disable();
             }
-            let device_id = pci_config_read_u16(candidate, 0x02);
-            if vendor_id == PCI_VENDOR_ID && device_id == PCI_DEVICE_ID_VIRTIO_NET_LEGACY {
-                if found.is_some() {
-                    return Err("multiple legacy virtio net devices found");
-                }
-                found = Some(candidate);
-            }
+            release_device_vector(rx_vector);
+            release_device_vector(tx_vector);
+        }
+        InterruptRoute::Intx { vector, .. } => {
+            function.update_command(PCI_COMMAND_INTX_DISABLE, 0);
+            release_device_vector(vector);
         }
     }
-    found.ok_or("legacy virtio net device not found")
+    without_interrupts(|| interrupt_state_mut().sinks = NetInterruptSinks::NONE);
+}
+
+/// Point `queue_index` at MSI-X table `entry`; the device answers
+/// `VIRTIO_MSI_NO_VECTOR` on readback when it could not allocate the vector.
+fn assign_queue_vector(
+    registers: &LegacyRegisters,
+    queue_index: u16,
+    entry: u16,
+) -> Result<(), &'static str> {
+    registers.write_u16(VIRTIO_PCI_QUEUE_SEL, queue_index);
+    registers.write_u16(VIRTIO_MSI_QUEUE_VECTOR, entry);
+    if registers.read_u16(VIRTIO_MSI_QUEUE_VECTOR) != entry {
+        return Err("virtio net rejected its MSI-X queue vector");
+    }
+    Ok(())
 }
 
 fn initialize_queue(registers: &LegacyRegisters, queue_index: u16) -> Result<u16, &'static str> {
@@ -917,13 +1212,14 @@ fn negotiate_features(host_features: u32) -> Result<u32, &'static str> {
 fn read_mac_address(
     registers: &LegacyRegisters,
     features: u32,
+    device_config_offset: u16,
 ) -> Result<clean_slate_network::addr::MacAddr, &'static str> {
     if !feature_enabled(features, VIRTIO_NET_F_MAC) {
         return Err("virtio net MAC feature was not negotiated");
     }
     let mut octets = [0u8; 6];
     for (index, slot) in octets.iter_mut().enumerate() {
-        *slot = registers.read_u8(VIRTIO_PCI_DEVICE_CONFIG + index as u16);
+        *slot = registers.read_u8(device_config_offset + index as u16);
     }
     clean_slate_network::addr::MacAddr::from_bytes(&octets)
         .map_err(|_| "virtio net MAC address was malformed")
@@ -982,41 +1278,6 @@ fn encode_device_id(function: PciFunction) -> u64 {
         | u64::from(function.function)
 }
 
-fn pci_config_address(function: PciFunction, offset: u8) -> u32 {
-    0x8000_0000
-        | (u32::from(function.bus) << 16)
-        | (u32::from(function.device) << 11)
-        | (u32::from(function.function) << 8)
-        | (u32::from(offset) & 0xfc)
-}
-
-fn pci_config_read_u32(function: PciFunction, offset: u8) -> u32 {
-    port_out_u32(
-        PCI_CONFIG_ADDRESS_PORT,
-        pci_config_address(function, offset),
-    );
-    port_in_u32(PCI_CONFIG_DATA_PORT)
-}
-
-fn pci_config_read_u16(function: PciFunction, offset: u8) -> u16 {
-    let value = pci_config_read_u32(function, offset & !0x3);
-    let shift = u32::from((offset & 0x2) * 8);
-    ((value >> shift) & 0xffff) as u16
-}
-
-fn pci_config_write_u16(function: PciFunction, offset: u8, value: u16) {
-    let aligned_offset = offset & !0x3;
-    let shift = u32::from((offset & 0x2) * 8);
-    let current = pci_config_read_u32(function, aligned_offset);
-    let masked = current & !(0xffffu32 << shift);
-    let merged = masked | (u32::from(value) << shift);
-    port_out_u32(
-        PCI_CONFIG_ADDRESS_PORT,
-        pci_config_address(function, aligned_offset),
-    );
-    port_out_u32(PCI_CONFIG_DATA_PORT, merged);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1032,6 +1293,17 @@ mod tests {
         assert!(validate_queue_size(256).is_ok());
         assert!(validate_queue_size(0).is_err());
         assert!(validate_queue_size(3).is_err());
+    }
+
+    #[test]
+    fn q35_intx_routes_slot_and_pin_onto_pirq_e_through_h() {
+        assert_eq!(q35_pirq_gsi(PciFunction::new(0, 2, 0), 1), Ok(22));
+        assert_eq!(q35_pirq_gsi(PciFunction::new(0, 3, 0), 1), Ok(23));
+        assert_eq!(q35_pirq_gsi(PciFunction::new(0, 4, 0), 1), Ok(20));
+        assert_eq!(q35_pirq_gsi(PciFunction::new(0, 4, 0), 2), Ok(21));
+        assert!(q35_pirq_gsi(PciFunction::new(0, 25, 0), 1).is_err());
+        assert!(q35_pirq_gsi(PciFunction::new(1, 2, 0), 1).is_err());
+        assert!(q35_pirq_gsi(PciFunction::new(0, 2, 0), 0).is_err());
     }
 
     #[test]

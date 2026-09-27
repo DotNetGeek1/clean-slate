@@ -17,6 +17,7 @@ const APIC_BASE_MSR: u32 = 0x1b;
 const APIC_BASE_ADDRESS_MASK: u64 = 0xffff_f000;
 const APIC_ENABLE: u64 = 1 << 11;
 const APIC_SPURIOUS_INTERRUPT_VECTOR: u32 = 0x100 | (SPURIOUS_VECTOR as u32);
+const APIC_REGISTER_ID: usize = 0x20;
 const APIC_REGISTER_TPR: usize = 0x80;
 const APIC_REGISTER_EOI: usize = 0xb0;
 const APIC_REGISTER_SVR: usize = 0xf0;
@@ -89,7 +90,18 @@ pub(crate) fn reprogram_local_apic_timer(initial_count: u32) {
 }
 
 pub(crate) fn acknowledge_timer_interrupt() {
+    acknowledge_interrupt();
+}
+
+/// End-of-interrupt for the in-service vector; for level-triggered I/O APIC
+/// sources the EOI broadcast also clears the redirection entry's remote IRR.
+pub(crate) fn acknowledge_interrupt() {
     local_apic_write(APIC_REGISTER_EOI, 0);
+}
+
+/// This CPU's local APIC ID: the physical destination for MSI and I/O APIC routes.
+pub(crate) fn local_apic_id() -> u8 {
+    (local_apic_read(APIC_REGISTER_ID) >> 24) as u8
 }
 
 /// Current APIC timer count (down-counter); for calibration with interrupts masked.

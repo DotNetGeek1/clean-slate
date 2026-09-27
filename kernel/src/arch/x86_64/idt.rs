@@ -28,9 +28,14 @@ use crate::arch::x86_64::asm::{
     clean_slate_interrupt_25, clean_slate_interrupt_26, clean_slate_interrupt_27,
     clean_slate_interrupt_28, clean_slate_interrupt_29, clean_slate_interrupt_3,
     clean_slate_interrupt_30, clean_slate_interrupt_31, clean_slate_interrupt_32,
-    clean_slate_interrupt_33, clean_slate_interrupt_4, clean_slate_interrupt_5,
-    clean_slate_interrupt_6, clean_slate_interrupt_7, clean_slate_interrupt_8,
-    clean_slate_interrupt_9,
+    clean_slate_interrupt_33, clean_slate_interrupt_4, clean_slate_interrupt_48,
+    clean_slate_interrupt_49, clean_slate_interrupt_5, clean_slate_interrupt_50,
+    clean_slate_interrupt_51, clean_slate_interrupt_52, clean_slate_interrupt_53,
+    clean_slate_interrupt_54, clean_slate_interrupt_55, clean_slate_interrupt_56,
+    clean_slate_interrupt_57, clean_slate_interrupt_58, clean_slate_interrupt_59,
+    clean_slate_interrupt_6, clean_slate_interrupt_60, clean_slate_interrupt_61,
+    clean_slate_interrupt_62, clean_slate_interrupt_63, clean_slate_interrupt_7,
+    clean_slate_interrupt_8, clean_slate_interrupt_9,
 };
 use crate::arch::x86_64::cpu::read_code_segment;
 use crate::arch::x86_64::gdt::initialize_gdt_and_tss;
@@ -42,7 +47,9 @@ use crate::arch::x86_64::gdt::initialize_gdt_and_tss;
     feature = "m3-entry-self-test"
 ))]
 use crate::arch::x86_64::USER_TEST_VECTOR;
-use crate::arch::x86_64::{DOUBLE_FAULT_VECTOR, SPURIOUS_VECTOR};
+use crate::arch::x86_64::{
+    DEVICE_VECTOR_COUNT, DEVICE_VECTOR_FIRST, DOUBLE_FAULT_VECTOR, SPURIOUS_VECTOR,
+};
 
 pub(super) const DOUBLE_FAULT_IST_INDEX: u16 = 1;
 
@@ -154,11 +161,33 @@ static INTERRUPT_HANDLERS: [unsafe extern "C" fn(); SPURIOUS_VECTOR + 1] = [
     clean_slate_interrupt_33,
 ];
 
+static DEVICE_INTERRUPT_HANDLERS: [unsafe extern "C" fn(); DEVICE_VECTOR_COUNT] = [
+    clean_slate_interrupt_48,
+    clean_slate_interrupt_49,
+    clean_slate_interrupt_50,
+    clean_slate_interrupt_51,
+    clean_slate_interrupt_52,
+    clean_slate_interrupt_53,
+    clean_slate_interrupt_54,
+    clean_slate_interrupt_55,
+    clean_slate_interrupt_56,
+    clean_slate_interrupt_57,
+    clean_slate_interrupt_58,
+    clean_slate_interrupt_59,
+    clean_slate_interrupt_60,
+    clean_slate_interrupt_61,
+    clean_slate_interrupt_62,
+    clean_slate_interrupt_63,
+];
+
 pub(crate) fn install_interrupt_handlers() {
     initialize_gdt_and_tss();
     unsafe {
         for (vector, handler) in INTERRUPT_HANDLERS.iter().enumerate() {
             IDT.entries[vector].set_handler(*handler);
+        }
+        for (index, handler) in DEVICE_INTERRUPT_HANDLERS.iter().enumerate() {
+            IDT.entries[DEVICE_VECTOR_FIRST + index].set_handler(*handler);
         }
         IDT.entries[DOUBLE_FAULT_VECTOR]
             .set_handler_with_ist(clean_slate_interrupt_8, DOUBLE_FAULT_IST_INDEX);

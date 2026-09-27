@@ -5,6 +5,7 @@ pub(crate) mod frame_allocator;
 pub(crate) mod image_loader;
 pub(crate) mod kernel_bootstrap;
 pub(crate) mod layout;
+pub(crate) mod mmio;
 pub(crate) mod paging;
 pub(crate) mod region;
 pub(crate) mod user_mapping;
