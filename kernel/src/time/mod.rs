@@ -109,24 +109,6 @@ pub(crate) fn irq_period_ns_from(counter_hz: u64, initial_count: u32) -> Option<
     u64::try_from(1_000_000_000u128 * ic / hz).ok()
 }
 
-/// Ceil of `ms` wall time in IRQ ticks (`ms * hz / (1000 * initial_count)`).
-pub(crate) fn millis_to_irq_ticks_ceil(
-    ms: u64,
-    counter_hz: u64,
-    initial_count: u32,
-) -> Option<u64> {
-    if ms == 0 {
-        return Some(0);
-    }
-    if counter_hz == 0 || initial_count == 0 {
-        return None;
-    }
-    let num = u128::from(ms) * u128::from(counter_hz);
-    let den = 1000u128 * u128::from(initial_count);
-    let ticks = num.div_ceil(den);
-    u64::try_from(ticks.max(1)).ok()
-}
-
 fn duration_ns_from_timespec(ts: Timespec) -> Result<u64, LinuxErrno> {
     if ts.tv_sec == 0 && ts.tv_nsec == 0 {
         return Ok(0);
@@ -174,40 +156,6 @@ pub(crate) fn timespec_from_remaining_ns(
 ) -> Result<Timespec, LinuxErrno> {
     let rem = deadline_ns.saturating_sub(now_ns);
     Ok(timespec_from_monotonic_ns(rem))
-}
-
-/// Ceil of a Linux timespec in IRQ ticks (legacy / self-test tick windows).
-#[allow(dead_code)]
-pub(crate) fn ticks_from_timespec(ts: Timespec) -> Result<u64, LinuxErrno> {
-    if ts.tv_sec == 0 && ts.tv_nsec == 0 {
-        return Ok(0);
-    }
-    if ts.tv_sec < 0 || ts.tv_nsec < 0 {
-        return Err(EINVAL);
-    }
-    let counter_hz = apic_counter_hz().ok_or(EINVAL)?;
-    let initial_count = apic_timer_initial_count();
-    let ns = (ts.tv_sec as u128)
-        .checked_mul(1_000_000_000)
-        .and_then(|n| n.checked_add(ts.tv_nsec as u128))
-        .ok_or(EINVAL)?;
-    let den = 1_000_000_000u128 * u128::from(initial_count);
-    let num = ns.checked_mul(u128::from(counter_hz)).ok_or(EINVAL)?;
-    let ticks = num.div_ceil(den);
-    u64::try_from(ticks.max(1)).map_err(|_| EINVAL)
-}
-
-#[allow(dead_code)]
-pub(crate) fn ticks_from_millis(ms: u64) -> Result<u64, LinuxErrno> {
-    if ms == 0 {
-        return Ok(0);
-    }
-    millis_to_irq_ticks_ceil(
-        ms,
-        apic_counter_hz().ok_or(EINVAL)?,
-        apic_timer_initial_count(),
-    )
-    .ok_or(EINVAL)
 }
 
 #[cfg(test)]
@@ -263,15 +211,6 @@ mod tests {
                 tv_nsec: 500_000_000,
             }
         );
-    }
-
-    #[test]
-    fn millis_ticks_ceil_one_ms_tick() {
-        let hz = 62_500_000;
-        let ic = 62_500;
-        assert_eq!(millis_to_irq_ticks_ceil(0, hz, ic), Some(0));
-        assert_eq!(millis_to_irq_ticks_ceil(1, hz, ic), Some(1));
-        assert_eq!(millis_to_irq_ticks_ceil(200, hz, ic), Some(200));
     }
 
     #[test]
