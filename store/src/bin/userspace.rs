@@ -32,7 +32,6 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 const SYSCALL_NR_BLOCK_CAPABILITY: u64 = 6;
 const SYSCALL_NR_BLOCK_REQUEST: u64 = 7;
 const SYSCALL_NR_CAP_OBJECT: u64 = 8;
-const SYSCALL_NR_VERSION: u64 = 0;
 const SYSCALL_EACCES: u64 = u64::MAX - 12;
 const SYSCALL_ESTALE: u64 = u64::MAX - 116;
 
@@ -163,10 +162,9 @@ fn run_object_service(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u6
     bootstrap.mounted_generation = store.committed_generation();
     let mut request_buf = [0u8; OBJECT_SERVICE_REQUEST_BYTES];
     loop {
-        let found = object_service_next(role_handle, &mut request_buf)?;
-        if found == 0 {
-            let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
-            continue;
+        // Blocks in the kernel until a request is pending; it never reports an empty queue.
+        if object_service_next(role_handle, &mut request_buf)? != 1 {
+            return Err(0);
         }
         let request = ObjectServiceRequest::decode(&request_buf).map_err(|_| 0u64)?;
         let len = usize::try_from(request.len).map_err(|_| 0u64)?;
