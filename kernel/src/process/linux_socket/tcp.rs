@@ -102,6 +102,7 @@ pub(crate) fn read_stream(
                 max_len: scratch.len().min(4096) as u32,
             },
             &[],
+            scratch,
             Some(clean_slate_network::session::SessionGeneration::new(
                 socket.session_generation,
             )),
@@ -116,10 +117,7 @@ pub(crate) fn read_stream(
                     socket.tcp_eof = true;
                     return Ok(0);
                 }
-                let n = payload_len as usize;
-                let copy = n.min(scratch.len());
-                scratch[..copy].copy_from_slice(&outcome.payload[..copy]);
-                return Ok(copy as u64);
+                return Ok(outcome.payload_len as u64);
             }
             NetworkResponse::Error { code } if code == NetworkError::Timeout.code() => {
                 if nonblock {
@@ -154,6 +152,7 @@ pub(crate) fn write_stream(
             payload_len: bytes.len() as u32,
         },
         bytes,
+        &mut [],
         Some(clean_slate_network::session::SessionGeneration::new(
             socket.session_generation,
         )),

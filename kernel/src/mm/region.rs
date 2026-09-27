@@ -64,6 +64,22 @@ pub(crate) struct NormalizedMemoryMap {
 }
 
 impl NormalizedMemoryMap {
+    pub(crate) const fn new() -> Self {
+        Self {
+            regions: [MemoryRegion::EMPTY; MAX_MEMORY_REGIONS],
+            region_count: 0,
+            usable_bytes: 0,
+            reserved_bytes: 0,
+        }
+    }
+
+    /// Empties the map in place (it is too large to rebuild by value).
+    pub(crate) fn clear(&mut self) {
+        self.region_count = 0;
+        self.usable_bytes = 0;
+        self.reserved_bytes = 0;
+    }
+
     pub(crate) fn regions(&self) -> &[MemoryRegion] {
         &self.regions[..self.region_count]
     }
@@ -109,11 +125,6 @@ impl NormalizedMemoryMap {
 
 impl Default for NormalizedMemoryMap {
     fn default() -> Self {
-        Self {
-            regions: [MemoryRegion::EMPTY; MAX_MEMORY_REGIONS],
-            region_count: 0,
-            usable_bytes: 0,
-            reserved_bytes: 0,
-        }
+        Self::new()
     }
 }

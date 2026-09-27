@@ -5,13 +5,17 @@
 
 pub(crate) mod uefi;
 
+use crate::arch::x86_64::context_switch::call_on_fresh_stack;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::gdt::register_gdt_tss_carve_outs;
 use crate::arch::x86_64::gdt::set_privilege_stack;
+use crate::arch::x86_64::gdt::DOUBLE_FAULT_STACK;
+use crate::arch::x86_64::guarded_stack::GuardedStack;
 use crate::arch::x86_64::idt::install_interrupt_handlers;
 use crate::arch::x86_64::idt::register_idt_carve_out;
 use crate::boot::uefi::collect_reserved_ranges_from_firmware;
 use crate::boot::uefi::normalize_memory_map;
+use crate::boot::uefi::MemoryMapScratch;
 use crate::diagnostics::gdb::gdb_entry_handoff;
 use crate::diagnostics::qemu::halt_loop;
 use crate::diagnostics::qemu::qemu_exit_failure;
@@ -81,7 +85,10 @@ use crate::mm::layout::{
 ))]
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::inspect_current_mapping;
+use crate::mm::region::NormalizedMemoryMap;
 use crate::mm::region::ReservedRange;
+use crate::mm::stack_guard::arm_kernel_stack_guards;
+use crate::mm::stack_guard::{GuardedStackRecord, KernelStackKind};
 use crate::mm::PAGE_SIZE;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
@@ -99,7 +106,8 @@ use crate::process::process_registry_mut;
     feature = "m7-net-device-self-test",
     feature = "m7-tls-self-test",
     feature = "m7-tls-fail-closed-self-test",
-    feature = "m7-dns-self-test"
+    feature = "m7-dns-self-test",
+    feature = "m9-stack-guard-self-test"
 )))]
 use crate::sched::dispatch::initialize_scheduler;
 #[cfg(not(any(
@@ -119,6 +127,7 @@ use crate::sched::dispatch::initialize_scheduler;
 )))]
 use crate::sched::dispatch::start_scheduler;
 use crate::sched::task_stacks_mut;
+use crate::sched::SCHEDULER_THREAD_SLOTS;
 #[cfg(feature = "m1-self-test")]
 use crate::selftest::m1_memory::exercise_mapping;
 #[cfg(feature = "m1-self-test")]
@@ -251,11 +260,48 @@ use crate::selftest::m9_low_va::start_m9_low_va_self_test;
     not(feature = "m9-block-wake-self-test")
 ))]
 use crate::selftest::m9_syscall_fail_closed::start_m9_syscall_fail_closed_self_test;
+use crate::sync::global_cell::GlobalCell;
 use crate::syscall::initialize_syscall_abi;
 use ::uefi::mem::memory_map::{MemoryMap, MemoryMapMut};
 use ::uefi::Status;
 
+/// Stack for everything `run` does before the first scheduler dispatch
+/// (firmware calls, ExitBootServices, allocator and page-table bring-up and the
+/// boot-context self-tests). The firmware's own stack has no guard page and
+/// an unknown extent, so `run` leaves it immediately.
+///
+/// With the memory map and allocator tables static, debug M9 acceptance
+/// builds peak at 43 KiB here, but the M6 capabilities self-test still reaches
+/// ~105 KiB (its fixture frames run in boot context), so 128 KiB would leave
+/// no real margin. The `stack-high-water-check` feature logs the peak.
+const BOOT_STACK_SIZE: usize = 256 * 1024;
+
+static BOOT_STACK: GlobalCell<GuardedStack<BOOT_STACK_SIZE>> = GlobalCell::new(GuardedStack::new());
+
+/// Usable boot stack bytes as `(base, size)` for the headroom diagnostics.
+#[cfg(feature = "stack-high-water-check")]
+pub(crate) fn boot_stack_extent() -> (u64, usize) {
+    (unsafe { (*BOOT_STACK.get()).base() }, BOOT_STACK_SIZE)
+}
+
+/// The normalized firmware memory map and its working arrays (several KiB
+/// each), kept off the boot stack.
+struct BootMemoryMap {
+    scratch: MemoryMapScratch,
+    normalized: NormalizedMemoryMap,
+}
+
+static BOOT_MEMORY_MAP: GlobalCell<BootMemoryMap> = GlobalCell::new(BootMemoryMap {
+    scratch: MemoryMapScratch::new(),
+    normalized: NormalizedMemoryMap::new(),
+});
+
 pub(crate) fn run() -> Status {
+    let boot_stack_top = unsafe { (*BOOT_STACK.get()).top() };
+    unsafe { call_on_fresh_stack(boot_stack_top, run_on_boot_stack) }
+}
+
+extern "C" fn run_on_boot_stack() -> ! {
     serial_init();
     gdb_entry_handoff();
 
@@ -265,6 +311,33 @@ pub(crate) fn run() -> Status {
     }
 
     halt_loop()
+}
+
+/// Every kernel stack that gets an unmapped guard page (see `mm::stack_guard`):
+/// each scheduler slot's task stack (also its TSS RSP0 and SYSCALL stack), the
+/// boot stack and the double-fault IST stack.
+fn kernel_guarded_stacks() -> [GuardedStackRecord; SCHEDULER_THREAD_SLOTS + 2] {
+    fn record<const N: usize>(
+        kind: KernelStackKind,
+        stack: &GuardedStack<N>,
+    ) -> GuardedStackRecord {
+        GuardedStackRecord {
+            kind,
+            guard_start: stack.guard_start(),
+            base: stack.base(),
+            top: stack.top(),
+        }
+    }
+    let task_stacks = unsafe { &*task_stacks_mut() };
+    let boot_stack = unsafe { &*BOOT_STACK.get() };
+    let double_fault_stack = unsafe { &*DOUBLE_FAULT_STACK.get() };
+    core::array::from_fn(|index| match index {
+        slot if slot < SCHEDULER_THREAD_SLOTS => {
+            record(KernelStackKind::Task { slot }, &task_stacks[slot])
+        }
+        SCHEDULER_THREAD_SLOTS => record(KernelStackKind::Boot, boot_stack),
+        _ => record(KernelStackKind::DoubleFaultIst, double_fault_stack),
+    })
 }
 
 fn register_boot_kernel_low_carve_outs(
@@ -295,14 +368,20 @@ fn run_inner() -> Result<(), &'static str> {
     memory_map.sort();
     serial_write_line("[BOOT] UEFI memory map acquired");
     serial_write_line("[BOOT] ExitBootServices OK");
-    crate::sched::arm_task_stack_guards();
 
     reserved_ranges.push(ReservedRange::from_base_and_size(
         memory_map.buffer().as_ptr() as u64,
         memory_map.buffer().len() as u64,
     ))?;
 
-    let normalized = normalize_memory_map(memory_map.entries(), reserved_ranges.as_slice())?;
+    let boot_memory_map = unsafe { &mut *BOOT_MEMORY_MAP.get() };
+    normalize_memory_map(
+        memory_map.entries(),
+        reserved_ranges.as_slice(),
+        &mut boot_memory_map.scratch,
+        &mut boot_memory_map.normalized,
+    )?;
+    let normalized = &boot_memory_map.normalized;
     drop(memory_map);
     serial_write_fmt(format_args!(
         "[MEM ] usable: {} MiB\n",
@@ -313,7 +392,7 @@ fn run_inner() -> Result<(), &'static str> {
         normalized.reserved_bytes() / (1024 * 1024)
     ));
 
-    let mut allocator = PageAllocator::new(&normalized)?;
+    let mut allocator = PageAllocator::new(normalized)?;
     let stats = allocator.stats();
     serial_write_fmt(format_args!(
         "[MEM ] pages: total={} allocated={} free={}\n",
@@ -337,13 +416,14 @@ fn run_inner() -> Result<(), &'static str> {
     set_privilege_stack(syscall_kernel_stack_top)?;
     initialize_syscall_abi(syscall_kernel_stack_top)?;
 
-    let kernel_root = install_kernel_owned_root(&mut allocator, &normalized)?;
+    let kernel_root = install_kernel_owned_root(&mut allocator, normalized)?;
     serial_write_fmt(format_args!(
         "[MM  ] kernel-owned root installed: {:#018x}\n",
         kernel_root
     ));
     set_kernel_root_frame(kernel_root);
     set_kernel_direct_map_ready();
+    arm_kernel_stack_guards(kernel_root, &mut allocator, &kernel_guarded_stacks())?;
     install_shared_carve_out_page_tables(kernel_root, &mut allocator)?;
     serial_write_fmt(format_args!(
         "[MM  ] carve-out private tables per process: {}\n",
@@ -893,7 +973,10 @@ fn run_inner() -> Result<(), &'static str> {
         let controller = unsafe { crate::service::service_lifecycle_controller_mut() };
         controller.clear();
         controller.configure_launch_context(kernel_root_frame);
+        #[cfg(not(feature = "m9-stack-guard-self-test"))]
         initialize_scheduler()?;
+        #[cfg(feature = "m9-stack-guard-self-test")]
+        crate::selftest::m9_stack_guard::configure_stack_guard_probe_thread()?;
         #[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
         {
             // Load failure must never be kernel-fatal. The launch path already

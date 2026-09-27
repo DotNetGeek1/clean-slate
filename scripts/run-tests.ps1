@@ -148,6 +148,7 @@ $AllTests = [ordered]@{
     "test-m8-linux-dispatch"    = @{ Aliases = @("m8-linux-dispatch", "m8.3"); Description = "M8.3 Linux personality dispatch QEMU constituent acceptance"; Role = "Constituent" }
     "test-m9-syscall-fail-closed" = @{ Aliases = @("m9-syscall-fail-closed", "m9.143"); Description = "M9 #143 unresolved syscall caller fail-closed QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
     "test-m9-block-wake" = @{ Aliases = @("m9-block-wake", "m9.145"); Description = "M9 #145 native block/wake scheduler substrate QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
+    "test-m9-stack-guard" = @{ Aliases = @("m9-stack-guard", "m9.162"); Description = "M9 #162 kernel stack guard overflow QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
     "test-m9-fd-core"            = @{ Aliases = @("m9-fd-core", "m9.147"); Description = "M9 #147 Linux fd / open-description core QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
     "test-m9-linux-trace"        = @{ Aliases = @("m9-linux-trace", "m9.106"); Description = "M9 #106 bounded Linux compatibility trace QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
     "test-m9-linux-socket"       = @{ Aliases = @("m9-linux-socket", "m9.105"); Description = "M9 #105 Linux socket syscalls brokered onto M7"; Role = "Constituent"; CoveredBy = "test-m9" }

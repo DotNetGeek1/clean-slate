@@ -16,6 +16,7 @@ use crate::arch::x86_64::port::{
 };
 use crate::mm::address_space::translate_address_in_root;
 use crate::mm::paging::current_root_frame_address;
+use crate::sync::global_cell::GlobalCell;
 use x86_64::VirtAddr;
 
 const PCI_CONFIG_ADDRESS_PORT: u16 = 0x0cf8;
@@ -72,6 +73,21 @@ struct QueueMemory {
 static mut QUEUE_MEMORY: QueueMemory = QueueMemory {
     bytes: [0; VIRTQ_MEMORY_BYTES],
 };
+
+#[repr(C, align(4096))]
+struct DmaDataBuffer {
+    bytes: [u8; DMA_DATA_BUFFER_BYTES],
+}
+
+/// Bounce buffer of the single legacy virtio-block device (discovery rejects a second one).
+/// Kept out of [`VirtioBlockDevice`] so constructing the device moves no 8 KiB value.
+static DMA_DATA: GlobalCell<DmaDataBuffer> = GlobalCell::new(DmaDataBuffer {
+    bytes: [0; DMA_DATA_BUFFER_BYTES],
+});
+
+fn dma_data_ptr() -> *mut u8 {
+    unsafe { core::ptr::addr_of_mut!((*DMA_DATA.get()).bytes) as *mut u8 }
+}
 
 #[derive(Clone, Copy)]
 struct PciFunction {
@@ -324,7 +340,6 @@ pub(crate) struct VirtioBlockDevice {
     request: RequestState,
     geometry: BlockGeometry,
     sectors_per_block: u64,
-    dma_data: [u8; DMA_DATA_BUFFER_BYTES],
     queue_poisoned: bool,
 }
 
@@ -390,7 +405,6 @@ impl VirtioBlockDevice {
             },
             geometry,
             sectors_per_block,
-            dma_data: [0; DMA_DATA_BUFFER_BYTES],
             queue_poisoned: false,
         })
     }
@@ -417,7 +431,7 @@ impl VirtioBlockDevice {
                     },
                 ))?;
 
-        if data_len > self.dma_data.len() {
+        if data_len > DMA_DATA_BUFFER_BYTES {
             return Err(BlockIoError::InvalidRequest(
                 BlockRequestError::BufferLengthOverflow,
             ));
@@ -425,11 +439,7 @@ impl VirtioBlockDevice {
 
         if !device_writes_data {
             unsafe {
-                core::ptr::copy_nonoverlapping(
-                    data as *const u8,
-                    self.dma_data.as_mut_ptr(),
-                    data_len,
-                );
+                core::ptr::copy_nonoverlapping(data as *const u8, dma_data_ptr(), data_len);
             }
         }
 
@@ -445,7 +455,7 @@ impl VirtioBlockDevice {
                 .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
         let status_physical = virtual_to_physical_address(&self.request.status as *const u8)
             .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
-        let dma_physical = physical_address_for_contiguous_range(self.dma_data.as_ptr(), data_len)
+        let dma_physical = physical_address_for_contiguous_range(dma_data_ptr(), data_len)
             .map_err(|_| BlockIoError::Transport(BlockTransportError::ResetRequired))?;
 
         let mut data_flags = VIRTQ_DESC_F_NEXT;
@@ -488,7 +498,7 @@ impl VirtioBlockDevice {
 
         if device_writes_data {
             unsafe {
-                core::ptr::copy_nonoverlapping(self.dma_data.as_ptr(), data, data_len);
+                core::ptr::copy_nonoverlapping(dma_data_ptr(), data, data_len);
             }
         }
 
