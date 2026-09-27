@@ -284,6 +284,17 @@ impl UserPathBuf {
     }
 }
 
+fn copy_path_from_user(ptr: u64) -> Result<UserPathBuf, LinuxErrno> {
+    let mut scratch = [0u8; LINUX_PATH_MAX];
+    let len = copy_user_path_cstring(ptr, &mut scratch)?;
+    let mut storage = [0u8; LINUX_PATH_MAX];
+    let norm_len = resolve_path(b"/", &scratch[..len], &mut storage)?;
+    Ok(UserPathBuf {
+        storage,
+        len: norm_len,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,15 +336,4 @@ mod tests {
             assert_eq!(open_fd_flags(flags), Err(EINVAL), "flags={flags:#x}");
         }
     }
-}
-
-fn copy_path_from_user(ptr: u64) -> Result<UserPathBuf, LinuxErrno> {
-    let mut scratch = [0u8; LINUX_PATH_MAX];
-    let len = copy_user_path_cstring(ptr, &mut scratch)?;
-    let mut storage = [0u8; LINUX_PATH_MAX];
-    let norm_len = resolve_path(b"/", &scratch[..len], &mut storage)?;
-    Ok(UserPathBuf {
-        storage,
-        len: norm_len,
-    })
 }
