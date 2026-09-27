@@ -41,6 +41,7 @@ const OK_MARKER: &[u8] = b"[M9.F] argv/envp/auxv OK\n";
 const PHASE1_LINE: &[u8] = b"[M9.F] phase-1 argv line\n";
 const PHASE2_LINE: &[u8] = b"[M9.F] phase-2 argv line\n";
 const ENOEXEC_SURVIVOR: &[u8] = b"[M9.F] still running after ENOEXEC\n";
+const CLOEXEC_MARKER: &[u8] = b"[M9.F] exec closed FD_CLOEXEC fd, kept plain fd\n";
 const LINUX_SLOT: usize = 0;
 const OUTPUT_CAP: usize = 4096;
 
@@ -279,6 +280,12 @@ pub(crate) fn observe_linux_exit(pid: u64, _teardown: &DomainTeardownResult) {
     }
     if test.stage != Stage::AwaitEnoexecSurvivor {
         fatal_kernel_error("m9 linux exit at unexpected stage");
+    }
+    if !output_contains(CLOEXEC_MARKER) {
+        fatal_kernel_error("m9 exec close-on-exec marker missing");
+    }
+    if !output_contains(ENOEXEC_SURVIVOR) {
+        fatal_kernel_error("m9 ENOEXEC survivor marker missing");
     }
     test.stage = Stage::Done;
     maybe_finish(test);

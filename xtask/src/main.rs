@@ -100,12 +100,13 @@ const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
 ];
 const M9_LOW_VA_ACCEPTANCE_MARKERS: [&str; 2] = ["[M9.0] creating", "[M9.0] PASS"];
 const M9_LOW_VA_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 7] = [
+const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[M9.F] creating",
     "[M9.F] phase-1 argv line",
     "[M9.F] argv/envp/auxv OK",
     "[M9.F] exec committed pid=",
     "[M9.F] phase-2 argv line",
+    "[M9.F] exec closed FD_CLOEXEC fd, kept plain fd",
     "[M9.F] exec rejected ENOEXEC",
     "[M9.F] PASS",
 ];
