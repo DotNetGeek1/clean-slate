@@ -251,7 +251,12 @@ fn publish_occupancy(parked: &ParkedRequests, tls_active: bool) {
     occupancy.udp_mappings = occupied(unsafe { &*core::ptr::addr_of!(UDP_ENDPOINT_BY_SESSION) });
     occupancy.udp_queued = udp_queued;
     let parked_kind = |kind: fn(&ParkedWork) -> bool| {
-        parked.slots.iter().flatten().filter(|entry| kind(&entry.work)).count() as u64
+        parked
+            .slots
+            .iter()
+            .flatten()
+            .filter(|entry| kind(&entry.work))
+            .count() as u64
     };
     occupancy.parked_connects = parked_kind(|work| matches!(work, ParkedWork::TcpConnect { .. }));
     occupancy.parked_tcp_receives =
@@ -1085,8 +1090,8 @@ fn close_linux_tcp_connections_for_caller(
     service_generation: u64,
     caller: clean_slate_network::protocol::TrustedCaller,
 ) {
-    for index in 0..MAX_SESSIONS as usize {
-        let slot = unsafe { &mut *core::ptr::addr_of_mut!(PLAIN_TCP_BY_SESSION[index]) };
+    let mappings = unsafe { &mut *core::ptr::addr_of_mut!(PLAIN_TCP_BY_SESSION) };
+    for slot in mappings.iter_mut() {
         close_tcp_mapping_owned_by(service_generation, caller, slot);
     }
 }
@@ -1162,9 +1167,7 @@ fn connect_linux_udp_endpoint(
         code: NetworkError::Timeout.code(),
     })?;
     let udp = udp_resolver()?.udp_mut();
-    let to_response = |err| NetworkResponse::Error {
-        code: NetworkError::from(err).code(),
-    };
+    let to_response = |err: NetworkError| NetworkResponse::Error { code: err.code() };
     udp.stack_mut()
         .arp_cache_mut()
         .insert(dest.addr, PEER_MAC, tick);
@@ -1201,8 +1204,8 @@ fn linux_udp_endpoint(
 }
 
 fn forget_linux_udp_endpoints_for_caller(caller: clean_slate_network::protocol::TrustedCaller) {
-    for index in 0..MAX_SESSIONS as usize {
-        let slot = unsafe { &mut *core::ptr::addr_of_mut!(UDP_ENDPOINT_BY_SESSION[index]) };
+    let mappings = unsafe { &mut *core::ptr::addr_of_mut!(UDP_ENDPOINT_BY_SESSION) };
+    for slot in mappings.iter_mut() {
         if slot.is_some_and(|mapping| mapping.owner == caller) {
             *slot = None;
         }
@@ -1236,9 +1239,7 @@ fn handle_service_udp_send(
         .insert(dest.addr, PEER_MAC, now);
     let sent = udp
         .send(now, udp_sid, caller, Some(dest), payload)
-        .map_err(|err| NetworkResponse::Error {
-            code: NetworkError::from(err).code(),
-        })?;
+        .map_err(|err| NetworkResponse::Error { code: err.code() })?;
     let _ = udp.poll(now);
     Ok(sent as u32)
 }
@@ -1260,9 +1261,7 @@ fn try_udp_receive_once(
         // `receive` reports the full datagram length; only `want` bytes were copied.
         Ok(Some((_from, datagram_len))) => Ok(Some(datagram_len.min(want) as u32)),
         Ok(None) => Ok(None),
-        Err(err) => Err(NetworkResponse::Error {
-            code: NetworkError::from(err).code(),
-        }),
+        Err(err) => Err(NetworkResponse::Error { code: err.code() }),
     }
 }
 
@@ -1560,9 +1559,7 @@ fn try_tcp_receive_once(
         Ok(0) => Ok(None),
         Ok(n) => Ok(Some(n as u32)),
         Err(NetworkError::Closed) => Ok(Some(0)),
-        Err(err) => Err(NetworkResponse::Error {
-            code: NetworkError::from(err).code(),
-        }),
+        Err(err) => Err(NetworkResponse::Error { code: err.code() }),
     }
 }
 /// Linux UDP/TCP session requests. Anything else (M7 sessions, resolve) is `NotHandled`.

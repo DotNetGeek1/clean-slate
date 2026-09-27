@@ -152,8 +152,9 @@ pub extern "C" fn _start() -> ! {
     }
     drain_service(&mut supervisor, CRASH_SERVICE_ID);
 
-    while config.complete == 0 {
-        let ticks = config.kernel_ticks;
+    // The kernel writes both fields while this loop runs.
+    while unsafe { core::ptr::addr_of!(config.complete).read_volatile() } == 0 {
+        let ticks = unsafe { core::ptr::addr_of!(config.kernel_ticks).read_volatile() };
         supervisor.set_virtual_ticks(ticks);
         if supervisor.advance_ticks(ticks).is_err() {
             fail();

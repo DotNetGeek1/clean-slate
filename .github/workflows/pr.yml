@@ -87,6 +87,24 @@ jobs:
       - name: Clippy (store)
         run: cargo clippy -p clean-slate-store --all-targets -- -D warnings
 
+      - name: Clippy (service libraries)
+        run: |
+          cargo clippy -p clean-slate-service-fixtures --all-targets -- -D warnings
+          cargo clippy -p clean-slate-service-lifecycle --all-targets -- -D warnings
+          cargo clippy -p clean-slate-supervisor --all-targets -- -D warnings
+          cargo clippy -p clean-slate-rootfs --all-targets -- -D warnings
+
+      # Same target, features and build-std set as the xtask builds that embed these ELFs.
+      - name: Clippy (userspace binaries)
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: |
+          for bin in clean-slate-supervisor-userspace clean-slate-supervisor-restart-policy-userspace clean-slate-supervisor-recovery-userspace clean-slate-m6-fixture-userspace; do
+            cargo clippy -p clean-slate-supervisor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
+          done
+          cargo clippy -p clean-slate-store --bin clean-slate-storage-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
+          cargo clippy -p clean-slate-net-service --bin clean-slate-network-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
+
       - name: Clippy (kernel UEFI)
         run: |
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi -- -D warnings
