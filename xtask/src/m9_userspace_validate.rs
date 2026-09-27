@@ -64,6 +64,8 @@ const REUSABLE_RESOURCES: &[&str] = &[
     "pipes",
     "linux_waiters",
     "sockets",
+    "tcp_prefetches",
+    "udp_prefetches",
     "net_requests",
     "net_in_service",
     "net_holder_exits",
@@ -85,7 +87,11 @@ const NET_SERVICE_RESOURCES: &[&str] = &[
     "udp_endpoints",
     "udp_maps",
     "udp_queued",
-    "udp_recvs",
+    "parked_connects",
+    "parked_tcp_recvs",
+    "parked_udp_recvs",
+    "parked_resolves",
+    "tls_jobs",
     "dns_queries",
     "heap_bytes",
 ];
@@ -805,7 +811,7 @@ mod tests {
         assert!(run_net_service(&stale, 2)
             .unwrap_err()
             .contains("idle_seq=8 is not newer"));
-        let missing = net_service_log(2, None).replace(" udp_recvs=0", "");
+        let missing = net_service_log(2, None).replace(" tls_jobs=0", "");
         assert!(run_net_service(&missing, 2).is_err());
         let short = net_service_log(1, None);
         assert!(run_net_service(&short, 2).is_err());

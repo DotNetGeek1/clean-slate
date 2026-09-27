@@ -38,6 +38,7 @@ use crate::process::linux_proc::{
     table::{proc_table_invariant_violations, table},
 };
 use crate::process::linux_rootfs;
+use crate::process::linux_socket::SocketKindLinux;
 use crate::process::live_instance_generation;
 use crate::process::personality::{execution_personality_for_pid, ExecutionPersonality};
 use crate::process::process_registry_mut;
@@ -502,6 +503,9 @@ struct Resources {
     pipes: usize,
     linux_waiters: usize,
     sockets: usize,
+    /// Linux sockets with a prefetch `Receive` outstanding in the service, by kind.
+    tcp_prefetches: usize,
+    udp_prefetches: usize,
     net_requests: usize,
     net_in_service: usize,
     net_holder_exits: usize,
@@ -535,6 +539,12 @@ impl Resources {
                 )
             }),
             sockets: crate::process::linux_socket::pool_live_count(),
+            tcp_prefetches: crate::process::linux_socket::outstanding_prefetches(
+                SocketKindLinux::Tcp,
+            ),
+            udp_prefetches: crate::process::linux_socket::outstanding_prefetches(
+                SocketKindLinux::Udp,
+            ),
             net_requests: bridge.occupied_request_slots(),
             net_in_service: bridge.in_service_request_slots(),
             net_holder_exits: bridge.outstanding_holder_exits(),
@@ -563,7 +573,7 @@ impl Resources {
         let label = Label(cycle);
         let net = &self.net;
         kernel_log_fmt(format_args!(
-            "[M9  ] resources label={label} linux_procs={} threads={} processes={} fd_tables={} open_files={} pipes={} linux_waiters={} sockets={} net_requests={} net_in_service={} net_holder_exits={} net_holders={} object_requests={} capabilities={} linux_mm={} linux_signals={} tmp_files={} fs_nodes={} native_progress={}\n",
+            "[M9  ] resources label={label} linux_procs={} threads={} processes={} fd_tables={} open_files={} pipes={} linux_waiters={} sockets={} tcp_prefetches={} udp_prefetches={} net_requests={} net_in_service={} net_holder_exits={} net_holders={} object_requests={} capabilities={} linux_mm={} linux_signals={} tmp_files={} fs_nodes={} native_progress={}\n",
             self.linux_procs,
             self.threads,
             self.processes,
@@ -572,6 +582,8 @@ impl Resources {
             self.pipes,
             self.linux_waiters,
             self.sockets,
+            self.tcp_prefetches,
+            self.udp_prefetches,
             self.net_requests,
             self.net_in_service,
             self.net_holder_exits,
@@ -585,7 +597,7 @@ impl Resources {
             NATIVE_PROGRESS.load(Ordering::Relaxed),
         ));
         kernel_log_fmt(format_args!(
-            "[M9  ] net-service resources label={label} idle_seq={} sessions={} session_pending={} tcp_conns={} tcp_maps={} udp_endpoints={} udp_maps={} udp_queued={} udp_recvs={} dns_queries={} heap_bytes={}\n",
+            "[M9  ] net-service resources label={label} idle_seq={} sessions={} session_pending={} tcp_conns={} tcp_maps={} udp_endpoints={} udp_maps={} udp_queued={} parked_connects={} parked_tcp_recvs={} parked_udp_recvs={} parked_resolves={} tls_jobs={} dns_queries={} heap_bytes={}\n",
             net.publications,
             net.sessions,
             net.session_pending,
@@ -594,7 +606,11 @@ impl Resources {
             net.udp_endpoints,
             net.udp_mappings,
             net.udp_queued,
-            net.udp_receives,
+            net.parked_connects,
+            net.parked_tcp_receives,
+            net.parked_udp_receives,
+            net.parked_resolves,
+            net.tls_jobs,
             net.dns_queries,
             net.heap_bytes,
         ));

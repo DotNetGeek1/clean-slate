@@ -651,25 +651,6 @@ impl<L: NetworkLink> UdpTransport<L> {
         }
     }
 
-    /// Polls until `deadline_tick` (inclusive) and returns the first datagram or [`NetworkError::Timeout`].
-    pub fn receive_with_deadline(
-        &mut self,
-        mut now: u64,
-        deadline_tick: u64,
-        id: SessionId,
-        owner: TrustedCaller,
-        out: &mut [u8],
-    ) -> Result<(SocketAddrV4, usize), NetworkError> {
-        while now <= deadline_tick {
-            self.poll(now)?;
-            if let Some(pair) = self.receive(id, owner, out)? {
-                return Ok(pair);
-            }
-            now = now.saturating_add(1);
-        }
-        Err(NetworkError::Timeout)
-    }
-
     /// Clears endpoints and resets the underlying stack (new table generation is a separate `new`).
     pub fn reset(&mut self) -> Result<(), NetworkError> {
         self.table.clear();

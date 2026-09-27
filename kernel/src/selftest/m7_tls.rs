@@ -1,6 +1,9 @@
 use core::arch::x86_64::{__cpuid, _rdrand64_step};
-use core::hint::spin_loop;
+use core::future::Future;
 use core::mem::MaybeUninit;
+use core::pin::pin;
+use core::sync::atomic::{AtomicU64, Ordering};
+use core::task::{Context, Poll, Waker};
 
 use clean_slate_network::addr::SocketAddrV4;
 use clean_slate_network::device::NetworkLink;
@@ -16,28 +19,39 @@ use clean_slate_network::stack::L3Stack;
 use clean_slate_network::tcp::{TcpState, TcpTransport};
 use clean_slate_network::tls::HANDSHAKE_MARKER;
 use clean_slate_network::tls::{
-    TlsConfig, TlsError, TlsSession, TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
+    tls_transaction, TlsConfig, TlsError, TlsTransactionBudget, TlsTransactionClock,
+    TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
 };
 use rand_core::{CryptoRng, RngCore};
 
 use crate::device::virtio::net::{NetInterruptSinks, VirtioNetDevice};
+use crate::diagnostics::qemu::fatal_kernel_error;
+use crate::selftest::boot_wait::{self, now_ms};
 use crate::{serial_write_fmt, serial_write_line};
 
 const OWNER: TrustedCaller = TrustedCaller::new(1, 0, 1);
-const ARP_TTL: u64 = 50_000;
-const POLL_LIMIT: usize = 50_000_000;
-/// Monotonic tick budget for TLS TCP connect + handshake after the echo phase.
-/// With 4096-idle poll burst, the observed handshake is 0–2 logical ticks; allow TCP
-/// connect slack (`TCP_CONNECT_TIMEOUT_TICKS`) and per-op TLS I/O windows.
-const M7_TLS_HANDSHAKE_TICK_BUDGET: u64 = 8_192;
-/// Echo phase polls outrun the fixture's 1 ms clock unless time is paced.
-const TCP_POLL_TICK_BURST: u64 = 4096;
+/// The stack clock is calibrated TSC milliseconds ([`now_ms`]).
+const ARP_TTL_MS: u64 = 50_000;
+/// Echo phase: connect, response and connection release, each.
+const TCP_ECHO_BUDGET_MS: u64 = 2_000;
+/// Same budgets as the network service's TLS job.
+const TLS_BUDGET: TlsTransactionBudget = TlsTransactionBudget {
+    handshake_ticks: 8_192,
+    io_ticks: 2_000,
+};
+/// Backstop over the transaction's own phase deadlines, which fail it first.
+const TLS_WAIT_BUDGET_MS: u64 = TLS_BUDGET.handshake_ticks + 3 * TLS_BUDGET.io_ticks;
+/// RDRAND can transiently underflow; Intel's guidance is ten retries.
+const RDRAND_RETRIES: usize = 10;
 
 static mut TCP_TRANSPORT: MaybeUninit<TcpTransport<VirtioNetDevice>> = MaybeUninit::uninit();
 static mut TCP_TRANSPORT_READY: bool = false;
 
 static mut TLS_READ_BUF: [u8; TLS_RECORD_BUFFER_BYTES] = [0; TLS_RECORD_BUFFER_BYTES];
 static mut TLS_WRITE_BUF: [u8; TLS_RECORD_BUFFER_BYTES] = [0; TLS_RECORD_BUFFER_BYTES];
+
+/// [`now_ms`] when the handshake trace reported "handshake finished".
+static HANDSHAKE_FINISHED_MS: AtomicU64 = AtomicU64::new(0);
 
 pub struct RdrandRng;
 
@@ -56,6 +70,18 @@ impl RdrandRng {
     }
 }
 
+/// One RDRAND word. `RngCore` cannot report failure, so persistent underflow is fatal
+/// instead of spinning.
+fn rdrand_word() -> u64 {
+    for _ in 0..RDRAND_RETRIES {
+        let mut word = 0u64;
+        if unsafe { _rdrand64_step(&mut word) } != 0 {
+            return word;
+        }
+    }
+    fatal_kernel_error("m7 tls rdrand exhausted its retries");
+}
+
 impl CryptoRng for RdrandRng {}
 
 impl RngCore for RdrandRng {
@@ -66,23 +92,12 @@ impl RngCore for RdrandRng {
     }
 
     fn next_u64(&mut self) -> u64 {
-        let mut word = 0u64;
-        while unsafe { _rdrand64_step(&mut word) } == 0 {
-            spin_loop();
-        }
-        word
+        rdrand_word()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        let mut offset = 0usize;
-        while offset < dest.len() {
-            let mut word = 0u64;
-            while unsafe { _rdrand64_step(&mut word) } == 0 {
-                spin_loop();
-            }
-            let take = (dest.len() - offset).min(8);
-            dest[offset..offset + take].copy_from_slice(&word.to_le_bytes()[..take]);
-            offset += take;
+        for chunk in dest.chunks_mut(8) {
+            chunk.copy_from_slice(&rdrand_word().to_le_bytes()[..chunk.len()]);
         }
     }
 
@@ -97,8 +112,10 @@ fn tls_handshake_marker(step: &'static str) {
         "tcp syn sent" => "[TLS ] step tcp syn sent",
         "tcp established" => "[TLS ] step tcp connected",
         "client hello begin" => "[TLS ] step client hello",
-        "client hello written" => "[TLS ] step client hello written",
-        "handshake finished" => "[TLS ] step finished",
+        "handshake finished" => {
+            HANDSHAKE_FINISHED_MS.store(now_ms(), Ordering::Relaxed);
+            "[TLS ] step finished"
+        }
         other => {
             serial_write_fmt(format_args!("[TLS ] step {other}\n"));
             return;
@@ -114,17 +131,18 @@ fn install_tls_handshake_trace() {
 }
 
 pub(crate) fn run_m7_tls_self_test() -> Result<(), &'static str> {
+    boot_wait::init_clock()?;
     install_tls_handshake_trace();
     let tcp = tcp_transport()?;
-    let mut tick = 0u64;
-    tick = run_tcp_echo_phase(tcp, tick)?;
-    run_tls_phase(tcp, false, tick)
+    run_tcp_echo_phase(tcp)?;
+    run_tls_phase(tcp, false)
 }
 
 pub(crate) fn run_m7_tls_fail_closed_self_test() -> Result<(), &'static str> {
+    boot_wait::init_clock()?;
     install_tls_handshake_trace();
     let tcp = tcp_transport()?;
-    run_tls_phase(tcp, true, 0)
+    run_tls_phase(tcp, true)
 }
 
 #[allow(static_mut_refs)]
@@ -133,13 +151,13 @@ fn tcp_transport() -> Result<&'static mut TcpTransport<VirtioNetDevice>, &'stati
         if !TCP_TRANSPORT_READY {
             let device = VirtioNetDevice::discover(NetInterruptSinks::NONE)?;
             let mac = device.link().mac;
-            let stack = L3Stack::new(device, mac, GUEST_IPV4, ARP_TTL);
+            let stack = L3Stack::new(device, mac, GUEST_IPV4, ARP_TTL_MS);
             let slot = TCP_TRANSPORT.as_mut_ptr();
             TcpTransport::init_in_place(slot, stack, SessionGeneration::new(1));
             (*TCP_TRANSPORT.as_mut_ptr())
                 .stack_mut()
                 .arp_cache_mut()
-                .insert(PEER_IPV4, PEER_MAC, 0);
+                .insert(PEER_IPV4, PEER_MAC, now_ms());
             TCP_TRANSPORT_READY = true;
         }
         Ok(&mut *TCP_TRANSPORT.as_mut_ptr())
@@ -147,16 +165,20 @@ fn tcp_transport() -> Result<&'static mut TcpTransport<VirtioNetDevice>, &'stati
 }
 
 #[inline(never)]
-fn run_tcp_echo_phase(
-    tcp: &mut TcpTransport<VirtioNetDevice>,
-    tick: u64,
-) -> Result<u64, &'static str> {
+fn run_tcp_echo_phase(tcp: &mut TcpTransport<VirtioNetDevice>) -> Result<(), &'static str> {
     let remote_echo = SocketAddrV4::new(PEER_IPV4, TCP_ECHO_PORT);
-    let mut tick = tick;
     let echo_id = tcp
-        .connect(tick, OWNER, remote_echo)
+        .connect(now_ms(), OWNER, remote_echo)
         .map_err(|_| "tcp echo connect failed")?;
-    tick = drive_tcp_until(tcp, echo_id, tick, TcpState::Established)?;
+    boot_wait::wait_until(TCP_ECHO_BUDGET_MS, "tcp connect timeout", |now| {
+        tcp.poll(now).map_err(|_| "tcp poll failed")?;
+        match tcp.state(echo_id, OWNER) {
+            Ok(TcpState::Established) => Ok(Some(())),
+            Ok(TcpState::Reset) | Ok(TcpState::Closed) => Err("tcp drive reset"),
+            Err(_) => Err("tcp drive stale session"),
+            Ok(_) => Ok(None),
+        }
+    })?;
     serial_write_fmt(format_args!(
         "[TCP ] connected peer={}.{}.{}.{}:{}\n",
         PEER_IPV4.octets()[0],
@@ -165,25 +187,44 @@ fn run_tcp_echo_phase(
         PEER_IPV4.octets()[3],
         TCP_ECHO_PORT
     ));
-    tcp.send(tick, echo_id, OWNER, APP_REQUEST_BYTES)
+    tcp.send(now_ms(), echo_id, OWNER, APP_REQUEST_BYTES)
         .map_err(|_| "tcp echo send failed")?;
-    tick = poll_for_ticks(tcp, tick.saturating_add(1), 256)?;
     let mut buf = [0u8; 64];
-    let (n, tick) = receive_all(tcp, echo_id, tick, &mut buf)?;
+    let n = receive_all(tcp, echo_id, &mut buf)?;
     if &buf[..n] != APP_RESPONSE_BYTES {
         return Err("tcp echo response mismatch");
     }
     serial_write_fmt(format_args!("[TCP ] echo ok len={n}\n"));
-    let _ = tcp.close(tick, echo_id, OWNER);
-    poll_for_ticks(tcp, tick.saturating_add(1), 10_000)?;
-    Ok(tick)
+    let _ = tcp.close(now_ms(), echo_id, OWNER);
+    boot_wait::wait_until(TCP_ECHO_BUDGET_MS, "tcp echo close timeout", |now| {
+        tcp.poll(now).map_err(|_| "tcp poll failed")?;
+        Ok((tcp.connections_in_use() == 0).then_some(()))
+    })
+}
+
+fn receive_all(
+    tcp: &mut TcpTransport<VirtioNetDevice>,
+    id: SessionId,
+    out: &mut [u8],
+) -> Result<usize, &'static str> {
+    let mut total = 0usize;
+    boot_wait::wait_until(TCP_ECHO_BUDGET_MS, "tcp receive timeout", |now| {
+        tcp.poll(now).map_err(|_| "tcp poll failed")?;
+        match tcp.receive(id, OWNER, &mut out[total..]) {
+            Ok(n) => total += n,
+            Err(NetworkError::Reset) if total == 0 => return Err("tcp recv reset"),
+            Err(NetworkError::Closed | NetworkError::NotFound) if total == 0 => {}
+            Err(NetworkError::NotFound) => return Err("tcp recv stale"),
+            Err(_) => return Err("tcp recv"),
+        }
+        Ok((total >= APP_RESPONSE_BYTES.len()).then_some(total))
+    })
 }
 
 #[inline(never)]
 fn run_tls_phase(
     tcp: &mut TcpTransport<VirtioNetDevice>,
     expect_identity_failure: bool,
-    mut tick: u64,
 ) -> Result<(), &'static str> {
     let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
     let config = TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX);
@@ -196,23 +237,34 @@ fn run_tls_phase(
         }
     })?;
     serial_write_line("[TLS ] rng=rdrand");
-    tick = tick.saturating_add(1);
-    let handshake_deadline = tick.saturating_add(M7_TLS_HANDSHAKE_TICK_BUDGET);
-    let tls_result = TlsSession::connect_with_handshake_deadline(
-        tick,
-        handshake_deadline,
-        tcp,
-        OWNER,
-        remote_tls,
-        config,
-        rng,
-        read_buf,
-        write_buf,
-        None,
-    );
+    let transport: *mut TcpTransport<VirtioNetDevice> = tcp;
+    let clock = TlsTransactionClock::new();
+    let started_ms = now_ms();
+    clock.set_now(started_ms);
+    let mut response = [0u8; 64];
+    // SAFETY: the transport is a static that outlives the future, and `drive_transaction`
+    // only touches it through `transport` between polls.
+    let transaction = unsafe {
+        tls_transaction(
+            transport,
+            &clock,
+            TLS_BUDGET,
+            OWNER,
+            remote_tls,
+            config,
+            rng,
+            read_buf,
+            write_buf,
+            APP_REQUEST_BYTES,
+            &mut response,
+        )
+    };
+    let result = drive_transaction(transaction, &clock, transport)?;
+    // SAFETY: the transaction future is gone.
+    let connections_left = unsafe { &*transport }.connections_in_use();
     if expect_identity_failure {
-        return match tls_result {
-            Err(TlsError::PeerIdentity) => {
+        return match result {
+            Err(TlsError::PeerIdentity) if connections_left == 0 => {
                 serial_write_fmt(format_args!(
                     "[TLS ] peer identity rejected name={}\n",
                     TLS_SERVER_NAME
@@ -220,142 +272,54 @@ fn run_tls_phase(
                 serial_write_line("[M7.6] FAIL-CLOSED OK");
                 Ok(())
             }
-            Ok((_, _)) => Err("expected peer identity failure"),
+            Err(TlsError::PeerIdentity) => Err("rejected peer left its connection open"),
+            Ok(_) => Err("expected peer identity failure"),
             Err(_) => Err("unexpected tls error for fail-closed boot"),
         };
     }
-    let (mut tls, handshake_ticks) = tls_result.map_err(|_| "tls connect failed")?;
-    if handshake_ticks > M7_TLS_HANDSHAKE_TICK_BUDGET {
-        return Err("tls handshake budget exceeded");
-    }
-    serial_write_fmt(format_args!("[TLS ] handshake ticks={handshake_ticks}\n"));
+    let n = result.map_err(|_| "tls transaction failed")?;
+    let handshake_ms = HANDSHAKE_FINISHED_MS
+        .load(Ordering::Relaxed)
+        .saturating_sub(started_ms);
+    serial_write_fmt(format_args!("[TLS ] handshake ms={handshake_ms}\n"));
+    // The pinned verifier accepted the peer's chain for this name.
     serial_write_fmt(format_args!(
-        "[TLS ] authenticated peer={}\n",
-        tls.peer_name()
+        "[TLS ] authenticated peer={TLS_SERVER_NAME}\n"
     ));
-    tick = tick.saturating_add(1);
-    drive_tls_app_write(&mut tls, tick, APP_REQUEST_BYTES)?;
-    let mut app_buf = [0u8; 64];
-    let n = drive_tls_app_read(&mut tls, tick, &mut app_buf)?;
-    if &app_buf[..n] != APP_RESPONSE_BYTES {
+    if &response[..n] != APP_RESPONSE_BYTES {
         return Err("tls app response mismatch");
     }
     serial_write_fmt(format_args!("[TLS ] app bytes ok len={n}\n"));
-    tick = tick.saturating_add(100);
-    tls.close(tick).map_err(|_| "tls close failed")?;
     serial_write_line("[TLS ] closed");
     serial_write_line("[M7.6] PASS");
     Ok(())
 }
 
-fn drive_tls_app_write(
-    tls: &mut TlsSession<'_, '_, VirtioNetDevice>,
-    mut tick: u64,
-    data: &[u8],
-) -> Result<(), &'static str> {
-    let mut offset = 0usize;
-    for _ in 0..POLL_LIMIT {
-        match tls.write(tick, &data[offset..]) {
-            Ok(0) => {}
-            Ok(n) => offset = offset.saturating_add(n),
-            Err(_) => return Err("tls write failed"),
-        }
-        if offset >= data.len() {
-            tls.flush().map_err(|_| "tls write flush failed")?;
-            return Ok(());
-        }
-        tick = tick.saturating_add(1);
-        spin_loop();
-    }
-    Err("tls write timeout")
-}
-
-fn drive_tls_app_read(
-    tls: &mut TlsSession<'_, '_, VirtioNetDevice>,
-    mut tick: u64,
-    out: &mut [u8],
-) -> Result<usize, &'static str> {
-    for _ in 0..POLL_LIMIT {
-        match tls.read(tick, out) {
-            Ok(0) => {}
-            Ok(n) => return Ok(n),
-            Err(TlsError::Timeout) => {}
-            Err(_) => return Err("tls read failed"),
-        }
-        tick = tick.saturating_add(1);
-        spin_loop();
-    }
-    Err("tls read timeout")
-}
-
-fn drive_tcp_until(
-    tcp: &mut TcpTransport<VirtioNetDevice>,
-    id: SessionId,
-    mut tick: u64,
-    target: TcpState,
-) -> Result<u64, &'static str> {
-    for polls in 0..POLL_LIMIT {
-        tcp.poll(tick).map_err(|_| "tcp poll failed")?;
-        match tcp.state(id, OWNER) {
-            Ok(s) if s == target => return Ok(tick),
-            Ok(TcpState::Reset) | Ok(TcpState::Closed) => return Err("tcp drive reset"),
-            Err(_) => return Err("tcp drive stale session"),
-            Ok(_) => {}
-        }
-        if polls as u64 % TCP_POLL_TICK_BURST == TCP_POLL_TICK_BURST - 1 {
-            tick = tick.saturating_add(1);
-        }
-        spin_loop();
-    }
-    Err("tcp drive timeout")
-}
-
-fn poll_for_ticks(
-    tcp: &mut TcpTransport<VirtioNetDevice>,
-    mut tick: u64,
-    count: usize,
-) -> Result<u64, &'static str> {
-    for polls in 0..count {
-        tcp.poll(tick).map_err(|_| "tcp poll failed")?;
-        if polls as u64 % TCP_POLL_TICK_BURST == TCP_POLL_TICK_BURST - 1 {
-            tick = tick.saturating_add(1);
-        }
-        spin_loop();
-    }
-    Ok(tick)
-}
-
-fn receive_all(
-    tcp: &mut TcpTransport<VirtioNetDevice>,
-    id: SessionId,
-    mut tick: u64,
-    out: &mut [u8],
-) -> Result<(usize, u64), &'static str> {
-    let mut total = 0usize;
-    for polls in 0..POLL_LIMIT {
-        tcp.poll(tick).map_err(|_| "tcp poll failed")?;
-        let n = match tcp.receive(id, OWNER, &mut out[total..]) {
-            Ok(n) => n,
-            Err(NetworkError::Reset) if total == 0 => return Err("tcp recv reset"),
-            Err(NetworkError::Closed) if total == 0 => {
-                spin_loop();
-                continue;
-            }
-            Err(NetworkError::NotFound) if total == 0 => {
-                spin_loop();
-                continue;
-            }
-            Err(NetworkError::NotFound) => return Err("tcp recv stale"),
-            Err(_) => return Err("tcp recv"),
+/// Drives `transaction` the way the network service does: poll the stack and then the
+/// future on the real clock, drop the future (aborting its connection) once its phase
+/// deadline passes, and halt until the next interrupt while it is pending.
+fn drive_transaction<F: Future<Output = Result<usize, TlsError>>>(
+    transaction: F,
+    clock: &TlsTransactionClock,
+    transport: *mut TcpTransport<VirtioNetDevice>,
+) -> Result<Result<usize, TlsError>, &'static str> {
+    let mut transaction = pin!(Some(transaction));
+    let mut cx = Context::from_waker(Waker::noop());
+    boot_wait::wait_until(TLS_WAIT_BUDGET_MS, "tls transaction timeout", |now| {
+        // SAFETY: no reference into the transport is live between polls.
+        unsafe { &mut *transport }
+            .poll(now)
+            .map_err(|_| "tcp poll failed")?;
+        clock.set_now(now);
+        let Some(future) = transaction.as_mut().as_pin_mut() else {
+            return Err("tls transaction polled after completion");
         };
-        total += n;
-        if total >= APP_RESPONSE_BYTES.len() {
-            return Ok((total, tick));
-        }
-        if polls as u64 % TCP_POLL_TICK_BURST == TCP_POLL_TICK_BURST - 1 {
-            tick = tick.saturating_add(1);
-        }
-        spin_loop();
-    }
-    Err("tcp receive timeout")
+        let output = match future.poll(&mut cx) {
+            Poll::Ready(output) => output,
+            Poll::Pending if now >= clock.phase_deadline() => Err(TlsError::Timeout),
+            Poll::Pending => return Ok(None),
+        };
+        transaction.set(None);
+        Ok(Some(output))
+    })
 }

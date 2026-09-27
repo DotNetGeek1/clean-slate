@@ -18,7 +18,7 @@ use clean_slate_network::ipv4::Ipv4Header;
 use clean_slate_network::tcp::{parse_tcp_segment, write_tcp_segment, TcpFlags, TcpSegment};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
-use smoltcp::socket::{tcp, udp};
+use smoltcp::socket::udp;
 
 use crate::m7_fixture_tcp::{
     FixtureTlsCert, M9BannerService, M9HttpService, TcpEchoService, TlsService,
@@ -157,40 +157,20 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
     let mut tcp_echo_service = if options.m9_profile {
         None
     } else {
-        let tcp_echo = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0u8; 4096]),
-            tcp::SocketBuffer::new(vec![0u8; 4096]),
-        );
-        let tcp_echo_handle = sockets.add(tcp_echo);
-        Some(TcpEchoService::new(&mut sockets, tcp_echo_handle))
+        Some(TcpEchoService::new(&mut sockets))
     };
 
-    let tls_listen = tcp::Socket::new(
-        tcp::SocketBuffer::new(vec![0u8; 8192]),
-        tcp::SocketBuffer::new(vec![0u8; 8192]),
-    );
-    let tls_handle = sockets.add(tls_listen);
     let tls_cert = match options.tls_cert {
         WhichCert::Correct => FixtureTlsCert::Correct,
         WhichCert::WrongName => FixtureTlsCert::WrongName,
     };
-    let mut tls_service = TlsService::new(&mut sockets, tls_handle, tls_cert);
+    let mut tls_service = TlsService::new(&mut sockets, tls_cert);
 
     let mut m9_http_service = None;
     let mut m9_banner_service = None;
     if options.m9_profile {
-        let m9_tcp = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0u8; 8192]),
-            tcp::SocketBuffer::new(vec![0u8; 8192]),
-        );
-        let m9_handle = sockets.add(m9_tcp);
-        m9_http_service = Some(M9HttpService::new(&mut sockets, m9_handle));
-        let m9_banner_tcp = tcp::Socket::new(
-            tcp::SocketBuffer::new(vec![0u8; 4096]),
-            tcp::SocketBuffer::new(vec![0u8; 4096]),
-        );
-        let m9_banner_handle = sockets.add(m9_banner_tcp);
-        m9_banner_service = Some(M9BannerService::new(&mut sockets, m9_banner_handle));
+        m9_http_service = Some(M9HttpService::new(&mut sockets));
+        m9_banner_service = Some(M9BannerService::new(&mut sockets));
     }
 
     let mut timestamp = Instant::from_millis(0);

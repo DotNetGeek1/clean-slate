@@ -208,6 +208,14 @@ impl Write for LineBuffer {
     }
 }
 
+// Test-only accessor to avoid widening the public API surface.
+#[cfg(test)]
+impl<C, D, const N: usize> Supervisor<C, D, N> {
+    fn registry_mut(&mut self) -> &mut ServiceRegistry<N> {
+        &mut self.registry
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,13 +324,5 @@ mod tests {
             snapshot.state,
             clean_slate_service_lifecycle::ServiceLifecycleState::Starting
         );
-    }
-}
-
-// Test-only accessor to avoid widening the public API surface.
-#[cfg(test)]
-impl<C, D, const N: usize> Supervisor<C, D, N> {
-    fn registry_mut(&mut self) -> &mut ServiceRegistry<N> {
-        &mut self.registry
     }
 }

@@ -426,6 +426,19 @@ impl NetBridge {
         self.inflight_failed
     }
 
+    /// `(pending, in_service)` request counts held by client `pid`.
+    #[cfg(feature = "m7-net-service-self-test")]
+    pub fn unfinished_requests_for(&self, pid: u64) -> (usize, usize) {
+        self.slots
+            .iter()
+            .filter(|slot| slot.client.pid == pid)
+            .fold((0, 0), |(pending, in_service), slot| match slot.state {
+                ClientSlotState::Pending => (pending + 1, in_service),
+                ClientSlotState::InService => (pending, in_service + 1),
+                _ => (pending, in_service),
+            })
+    }
+
     #[allow(dead_code)]
     pub fn clear_inflight_failed(&mut self) {
         self.inflight_failed = 0;

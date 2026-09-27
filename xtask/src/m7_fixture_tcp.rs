@@ -9,7 +9,7 @@ use clean_slate_network::fixture::{
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::ServerConnection;
 use rustls::ServerConfig;
-use smoltcp::iface::SocketHandle;
+use smoltcp::iface::{SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
 use smoltcp::wire::{IpAddress, IpListenEndpoint};
 
@@ -18,41 +18,87 @@ pub enum FixtureTlsCert {
     WrongName,
 }
 
+/// Listening sockets per fixture port. After a passive close a served connection's socket
+/// sits in LAST-ACK until the guest acks our FIN and cannot listen meanwhile; a guest that
+/// connects again in that window must still find a listener, or smoltcp answers its SYN
+/// with RST.
+const LISTEN_BACKLOG: usize = 4;
+
+/// The listening sockets of one fixture service.
+struct ListenerPool {
+    handles: [SocketHandle; LISTEN_BACKLOG],
+    endpoint: IpListenEndpoint,
+}
+
+impl ListenerPool {
+    fn new(sockets: &mut SocketSet<'_>, buffer_bytes: usize, endpoint: IpListenEndpoint) -> Self {
+        let handles = core::array::from_fn(|_| {
+            let mut socket = tcp::Socket::new(
+                tcp::SocketBuffer::new(vec![0u8; buffer_bytes]),
+                tcp::SocketBuffer::new(vec![0u8; buffer_bytes]),
+            );
+            socket.listen(endpoint).expect("fixture listen");
+            sockets.add(socket)
+        });
+        Self { handles, endpoint }
+    }
+
+    /// Puts every socket whose connection is over back in LISTEN. TIME-WAIT (after an
+    /// active close) is cut short: the guest reuses source ports, and smoltcp would swallow
+    /// a new SYN on the old 4-tuple instead of reopening the connection.
+    fn relisten_closed(&self, sockets: &mut SocketSet<'_>) {
+        for handle in self.handles {
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            if matches!(socket.state(), tcp::State::Closed | tcp::State::TimeWait) {
+                let _ = socket.listen(self.endpoint);
+            }
+        }
+    }
+
+    /// A socket holding a connection no service call has taken yet. Services close a
+    /// connection before releasing it, so these states only occur before it is taken.
+    fn accept(&self, sockets: &SocketSet<'_>) -> Option<SocketHandle> {
+        self.handles.into_iter().find(|&handle| {
+            matches!(
+                sockets.get::<tcp::Socket>(handle).state(),
+                tcp::State::SynReceived | tcp::State::Established | tcp::State::CloseWait
+            )
+        })
+    }
+}
+
 pub struct TcpEchoService {
-    listen: SocketHandle,
+    pool: ListenerPool,
     active: Option<SocketHandle>,
     recv_len: usize,
     echoed: bool,
 }
 
 impl TcpEchoService {
-    pub fn new(sockets: &mut smoltcp::iface::SocketSet, listen: SocketHandle) -> Self {
-        let socket = sockets.get_mut::<tcp::Socket>(listen);
-        socket.listen(TCP_ECHO_PORT).expect("tcp echo listen");
+    pub fn new(sockets: &mut SocketSet<'_>) -> Self {
         Self {
-            listen,
+            pool: ListenerPool::new(sockets, 4096, TCP_ECHO_PORT.into()),
             active: None,
             recv_len: 0,
             echoed: false,
         }
     }
 
-    pub fn poll(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) {
+        self.pool.relisten_closed(sockets);
         if self.active.is_none() {
-            let socket = sockets.get_mut::<tcp::Socket>(self.listen);
-            if socket.is_active() {
-                println!("[FIX ] tcp echo connect");
-                self.active = Some(self.listen);
-                self.recv_len = 0;
-                self.echoed = false;
-            } else if socket.is_listening() {
+            let Some(handle) = self.pool.accept(sockets) else {
                 return;
-            }
+            };
+            println!("[FIX ] tcp echo connect");
+            self.active = Some(handle);
+            self.recv_len = 0;
+            self.echoed = false;
         }
         let active = self.active.expect("active handle");
         let socket = sockets.get_mut::<tcp::Socket>(active);
         if !socket.is_active() {
-            self.relisten(sockets);
+            self.release_active();
             return;
         }
         if socket.may_recv() {
@@ -71,23 +117,20 @@ impl TcpEchoService {
         }
         if socket.state() == tcp::State::CloseWait {
             socket.close();
-            self.relisten(sockets);
+            self.release_active();
         }
     }
 
-    fn relisten(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+    /// Forgets the served connection; its socket listens again once it reaches CLOSED.
+    fn release_active(&mut self) {
         self.active = None;
         self.recv_len = 0;
         self.echoed = false;
-        let socket = sockets.get_mut::<tcp::Socket>(self.listen);
-        if !socket.is_listening() {
-            let _ = socket.listen(TCP_ECHO_PORT);
-        }
     }
 }
 
 pub struct TlsService {
-    listen: SocketHandle,
+    pool: ListenerPool,
     active: Option<SocketHandle>,
     server_config: Arc<ServerConfig>,
     connection: Option<ServerConnection>,
@@ -96,29 +139,22 @@ pub struct TlsService {
 }
 
 impl TlsService {
-    pub fn new(
-        sockets: &mut smoltcp::iface::SocketSet,
-        listen: SocketHandle,
-        cert: FixtureTlsCert,
-    ) -> Self {
-        let socket = sockets.get_mut::<tcp::Socket>(listen);
-        socket.listen(TLS_PORT).expect("tls listen");
-        let server_config = Arc::new(load_server_config(cert));
+    pub fn new(sockets: &mut SocketSet<'_>, cert: FixtureTlsCert) -> Self {
         Self {
-            listen,
+            pool: ListenerPool::new(sockets, 8192, TLS_PORT.into()),
             active: None,
-            server_config,
+            server_config: Arc::new(load_server_config(cert)),
             connection: None,
             recv_acc: Vec::new(),
             sni_logged: false,
         }
     }
 
-    pub fn poll(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) {
+        self.pool.relisten_closed(sockets);
         if self.active.is_none() {
-            let socket = sockets.get_mut::<tcp::Socket>(self.listen);
-            if socket.is_active() {
-                self.active = Some(self.listen);
+            if let Some(handle) = self.pool.accept(sockets) {
+                self.active = Some(handle);
                 self.connection = Some(
                     ServerConnection::new(self.server_config.clone())
                         .expect("tls server connection"),
@@ -131,7 +167,7 @@ impl TlsService {
         let active = self.active.expect("tls active");
         let socket = sockets.get_mut::<tcp::Socket>(active);
         if !socket.is_active() {
-            self.reset_listen(sockets);
+            self.release_active();
             return;
         }
         let Some(conn) = self.connection.as_mut() else {
@@ -181,53 +217,50 @@ impl TlsService {
         }
         if socket.state() == tcp::State::CloseWait {
             socket.close();
-            self.reset_listen(sockets);
+            self.release_active();
         }
     }
 
-    fn reset_listen(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+    /// Forgets the served connection; its socket listens again once it reaches CLOSED.
+    fn release_active(&mut self) {
         self.active = None;
         self.connection = None;
         self.recv_acc.clear();
         self.sni_logged = false;
-        let socket = sockets.get_mut::<tcp::Socket>(self.listen);
-        if !socket.is_listening() {
-            let _ = socket.listen(TLS_PORT);
-        }
     }
 }
 
+const M9_SERVICE_ADDR: IpAddress = IpAddress::v4(10, 77, 0, 50);
 const M9_HTTP_PORT: u16 = 4001;
 
 pub struct M9HttpService {
-    listen: SocketHandle,
+    pool: ListenerPool,
     active: Option<SocketHandle>,
     sent: bool,
     closed: bool,
 }
 
 impl M9HttpService {
-    pub fn new(sockets: &mut smoltcp::iface::SocketSet, listen: SocketHandle) -> Self {
-        let socket = sockets.get_mut::<tcp::Socket>(listen);
+    pub fn new(sockets: &mut SocketSet<'_>) -> Self {
         let endpoint = IpListenEndpoint {
-            addr: Some(IpAddress::v4(10, 77, 0, 50)),
+            addr: Some(M9_SERVICE_ADDR),
             port: M9_HTTP_PORT,
         };
-        socket.listen(endpoint).expect("m9 http listen");
         Self {
-            listen,
+            pool: ListenerPool::new(sockets, 8192, endpoint),
             active: None,
             sent: false,
             closed: false,
         }
     }
 
-    pub fn poll(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) {
+        self.pool.relisten_closed(sockets);
         if self.active.is_none() {
-            let socket = sockets.get_mut::<tcp::Socket>(self.listen);
-            if socket.is_active() {
-                self.active = Some(self.listen);
+            if let Some(handle) = self.pool.accept(sockets) {
+                self.active = Some(handle);
                 self.sent = false;
+                self.closed = false;
                 println!("[FIX ] m9 http connect");
             }
             return;
@@ -235,7 +268,7 @@ impl M9HttpService {
         let active = self.active.expect("m9 http active");
         let socket = sockets.get_mut::<tcp::Socket>(active);
         if !socket.is_active() {
-            self.relisten(sockets);
+            self.release_active();
             return;
         }
         if socket.may_recv() {
@@ -260,22 +293,15 @@ impl M9HttpService {
         }
         if self.sent && socket.state() == tcp::State::CloseWait {
             socket.close();
-            self.relisten(sockets);
+            self.release_active();
         }
     }
 
-    fn relisten(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+    /// Forgets the served connection; its socket listens again once it reaches CLOSED.
+    fn release_active(&mut self) {
         self.active = None;
         self.sent = false;
         self.closed = false;
-        let socket = sockets.get_mut::<tcp::Socket>(self.listen);
-        if !socket.is_listening() {
-            let endpoint = IpListenEndpoint {
-                addr: Some(IpAddress::v4(10, 77, 0, 50)),
-                port: M9_HTTP_PORT,
-            };
-            let _ = socket.listen(endpoint);
-        }
     }
 }
 
@@ -283,31 +309,29 @@ const M9_BANNER_PORT: u16 = 4002;
 const M9_BANNER_BYTES: &[u8] = b"M9-BANNER-FIX\n";
 
 pub struct M9BannerService {
-    listen: SocketHandle,
+    pool: ListenerPool,
     active: Option<SocketHandle>,
     sent: bool,
 }
 
 impl M9BannerService {
-    pub fn new(sockets: &mut smoltcp::iface::SocketSet, listen: SocketHandle) -> Self {
-        let socket = sockets.get_mut::<tcp::Socket>(listen);
+    pub fn new(sockets: &mut SocketSet<'_>) -> Self {
         let endpoint = IpListenEndpoint {
-            addr: Some(IpAddress::v4(10, 77, 0, 50)),
+            addr: Some(M9_SERVICE_ADDR),
             port: M9_BANNER_PORT,
         };
-        socket.listen(endpoint).expect("m9 banner listen");
         Self {
-            listen,
+            pool: ListenerPool::new(sockets, 4096, endpoint),
             active: None,
             sent: false,
         }
     }
 
-    pub fn poll(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) {
+        self.pool.relisten_closed(sockets);
         if self.active.is_none() {
-            let socket = sockets.get_mut::<tcp::Socket>(self.listen);
-            if socket.is_active() {
-                self.active = Some(self.listen);
+            if let Some(handle) = self.pool.accept(sockets) {
+                self.active = Some(handle);
                 self.sent = false;
                 println!("[FIX ] m9 banner connect");
             }
@@ -316,7 +340,7 @@ impl M9BannerService {
         let active = self.active.expect("m9 banner active");
         let socket = sockets.get_mut::<tcp::Socket>(active);
         if !socket.is_active() {
-            self.relisten(sockets);
+            self.release_active();
             return;
         }
         if !self.sent && socket.may_send() && socket.send_slice(M9_BANNER_BYTES).is_ok() {
@@ -325,21 +349,14 @@ impl M9BannerService {
         }
         if self.sent && socket.state() == tcp::State::CloseWait {
             socket.close();
-            self.relisten(sockets);
+            self.release_active();
         }
     }
 
-    fn relisten(&mut self, sockets: &mut smoltcp::iface::SocketSet) {
+    /// Forgets the served connection; its socket listens again once it reaches CLOSED.
+    fn release_active(&mut self) {
         self.active = None;
         self.sent = false;
-        let socket = sockets.get_mut::<tcp::Socket>(self.listen);
-        if !socket.is_listening() {
-            let endpoint = IpListenEndpoint {
-                addr: Some(IpAddress::v4(10, 77, 0, 50)),
-                port: M9_BANNER_PORT,
-            };
-            let _ = socket.listen(endpoint);
-        }
     }
 }
 

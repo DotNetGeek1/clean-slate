@@ -158,6 +158,7 @@ version = "0.0.1"
 dependencies = [
  "aes",
  "embedded-io",
+ "embedded-io-async",
  "embedded-tls",
  "rand_core",
  "rcgen",
