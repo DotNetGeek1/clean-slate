@@ -11,7 +11,7 @@ use clean_slate_capability::syscall_abi::{
 use clean_slate_network::addr::{BoundedHostname, EtherType, IpProtocol, Ipv4Addr, SocketAddrV4};
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
-use clean_slate_network::dns::{DnsResolver, ResolveOutcome, DNS_QUERY_TIMEOUT_MS};
+use clean_slate_network::dns::{DnsResolver, ResolveOutcome};
 use clean_slate_network::error::{DenialReason, NetworkError};
 use clean_slate_network::ethernet::EthernetFrame;
 use clean_slate_network::fixture::{
@@ -28,7 +28,8 @@ use clean_slate_network::stack::L3Stack;
 use clean_slate_network::tcp::TcpState;
 use clean_slate_network::tcp::TcpTransport;
 use clean_slate_network::tls::{
-    TlsConfig, TlsError, TlsSession, TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
+    tls_transaction, TlsConfig, TlsError, TlsTransactionBudget, TlsTransactionClock,
+    TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
 };
 use clean_slate_service_fixtures::{
     AllowAllAuthorizer, NetworkService, NetworkServiceBootstrap, NETWORK_CAPABILITY_VERSION,
@@ -46,22 +47,25 @@ use clean_slate_service_fixtures::{
 };
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::x86_64::{__cpuid, _rdrand64_step};
-use core::hint::spin_loop;
+use core::future::Future;
 use core::mem::{size_of, MaybeUninit};
+use core::pin::{pin, Pin};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::task::{Context, Poll, Waker};
 use rand_core::{CryptoRng, RngCore};
 
-const SYSCALL_NR_VERSION: u64 = 0;
 /// ARP cache TTL (~40 s wall time at production 1 ms LAPIC tick).
 const ARP_TTL_MS: u64 = 40_000;
-const DNS_POLL_LIMIT: usize = 5_000_000;
-const TLS_POLL_LIMIT: usize = 10_000_000;
+/// TCP connect plus TLS handshake budget for one service TLS transaction.
+const TLS_HANDSHAKE_TIMEOUT_MS: u64 = 8_192;
+/// Budget for the TLS request write, and separately for the response read.
 const TLS_IO_TIMEOUT_MS: u64 = 2_000;
-const PLAIN_TCP_IO_TIMEOUT_MS: u64 = 2_000;
-const TLS_CLOSE_TIMEOUT_MS: u64 = 100;
 /// Active-open timeout while waiting for SYN-ACK (matches `TCP_CONNECT_TIMEOUT_TICKS` at 1 ms/tick).
 const TCP_CONNECT_TIMEOUT_MS: u64 = 500;
+/// Consecutive RDRAND underflows tolerated before the service fails closed (Intel SDM
+/// guidance: ten retries make exhaustion vanishingly unlikely on healthy hardware).
+const RDRAND_RETRIES: usize = 10;
 
 struct BumpAllocator;
 
@@ -126,7 +130,7 @@ pub extern "C" fn _start() -> ! {
     bootstrap.result_code = NETWORK_SERVICE_RESULT_ERROR;
     bootstrap.aux_status = 0;
     bootstrap.net_role_handle = 0;
-    bootstrap.session_id_raw = 0;
+    // `session_id_raw` is an input for the inflight and stale-close fixtures.
     bootstrap.echo_len = 0;
     bootstrap.reclaimed_sessions = 0;
     bootstrap.reclaimed_pending = 0;
@@ -155,35 +159,19 @@ fn finish() -> ! {
     }
 }
 
-fn wait_fixture_phase_gate() {
-    while bootstrap_mut().aux_status == 0 {
-        let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
-    }
-}
-
+/// Phase fixtures start only once the kernel self-test spawns them for their phase, so no
+/// mode waits for a release signal.
 fn run(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
     match bootstrap.mode {
         NETWORK_SERVICE_MODE_ACCEPTANCE => {
             run_service_loop(bootstrap);
         }
-        NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE => {
-            wait_fixture_phase_gate();
-            run_unauthorized_probe()
-        }
+        NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE => run_unauthorized_probe(),
         NETWORK_SERVICE_MODE_CLIENT => run_client_echo(bootstrap),
         NETWORK_SERVICE_MODE_CONVERGED_CLIENT => run_converged_client(bootstrap),
-        NETWORK_SERVICE_MODE_INFLIGHT_ARM => {
-            wait_fixture_phase_gate();
-            run_inflight_arm(bootstrap)
-        }
-        NETWORK_SERVICE_MODE_STALE_CLOSE => {
-            wait_fixture_phase_gate();
-            run_stale_close(bootstrap)
-        }
-        NETWORK_SERVICE_MODE_CAPACITY_LOOP => {
-            wait_fixture_phase_gate();
-            run_capacity_loop(bootstrap)
-        }
+        NETWORK_SERVICE_MODE_INFLIGHT_ARM => run_inflight_arm(bootstrap),
+        NETWORK_SERVICE_MODE_STALE_CLOSE => run_stale_close(bootstrap),
+        NETWORK_SERVICE_MODE_CAPACITY_LOOP => run_capacity_loop(bootstrap),
         _ => Err(0),
     }
 }
@@ -209,24 +197,15 @@ fn raw_syscall(nr: u64, args: [u64; 6]) -> u64 {
     result
 }
 
-fn yield_cpu() {
-    let _ = raw_syscall(SYSCALL_NR_VERSION, [0, 0, 0, 0, 0, 0]);
-}
-
 /// Idle point of the service loop, entered after `drain_ingress` fed both stacks and no
-/// request or deferred UDP receive completed. Loops at once while frames are stashed;
-/// otherwise blocks until a client request, a NIC frame, or the TCP stack's next timer.
-/// RX stays in the mask: live connections and deferred UDP receives (which have no
-/// service-side deadline; their clients own the timeout) only progress on ingress.
-fn wait_for_service_work() {
+/// parked request, TLS transaction or new request made progress. Loops at once while
+/// frames are stashed; otherwise blocks until a client request, a NIC frame, or
+/// `deadline` (the earliest stack timer or parked-work deadline).
+fn wait_for_service_work(now: u64, deadline: Option<u64>) {
     if nic_ingress_stashed(StackConsumer::Udp) > 0 || nic_ingress_stashed(StackConsumer::Tcp) > 0 {
         return;
     }
-    let Ok(now) = monotonic_ticks() else {
-        finish();
-    };
-    let timer = shared_tcp_transport_mut().next_timer_deadline();
-    if wait_net_work(NET_WAIT_WORK_REQUESTS | NET_WAIT_WORK_RX, now, timer).is_err() {
+    if wait_net_work(NET_WAIT_WORK_REQUESTS | NET_WAIT_WORK_RX, now, deadline).is_err() {
         finish();
     }
 }
@@ -239,26 +218,27 @@ fn monotonic_ticks() -> Result<u64, u64> {
     Ok(ticks)
 }
 
-fn tick_period_ns() -> u64 {
-    let cached = TICK_PERIOD_NS.load(Ordering::Relaxed);
-    if cached != 0 {
-        return cached;
-    }
+/// Reads the kernel IRQ-tick period once. Every service deadline is derived from it, so
+/// the service refuses to start without one instead of assuming a period.
+fn init_tick_period() -> Result<(), u64> {
     let period = net_request([NET_SUBOP_TICK_PERIOD_NS, 0, 0, 0, 0, 0]);
     if period == 0 || period >= u64::MAX - 4095 {
-        return 1_000_000;
+        return Err(period);
     }
     TICK_PERIOD_NS.store(period, Ordering::Relaxed);
-    period
+    Ok(())
+}
+
+fn tick_period_ns() -> u64 {
+    TICK_PERIOD_NS.load(Ordering::Relaxed)
 }
 
 fn ms_to_irq_ticks(ms: u64) -> u64 {
     if ms == 0 {
         return 0;
     }
-    let period = tick_period_ns();
     let ns = ms.saturating_mul(1_000_000);
-    ns.div_ceil(period).max(1)
+    ns.div_ceil(tick_period_ns()).max(1)
 }
 
 fn network_capability(device_id: u64) -> Result<u64, u64> {
@@ -292,23 +272,6 @@ fn wait_net_work(mask: u64, now: u64, deadline: Option<u64>) -> Result<(), u64> 
     Ok(())
 }
 
-/// In-request wait for `consumer`'s next frame, a stack timer (`stack_deadline`), or the
-/// request `deadline`, all in IRQ ticks.
-fn wait_request_ingress(
-    consumer: StackConsumer,
-    now: u64,
-    deadline: u64,
-    stack_deadline: Option<u64>,
-) -> Result<(), NetworkResponse> {
-    if nic_ingress_stashed(consumer) > 0 {
-        return Ok(());
-    }
-    let until = stack_deadline.map_or(deadline, |timer| timer.min(deadline));
-    wait_net_work(NET_WAIT_WORK_RX, now, Some(until)).map_err(|_| NetworkResponse::Error {
-        code: NetworkError::Protocol.code(),
-    })
-}
-
 fn run_unauthorized_probe() -> Result<u64, u64> {
     match network_capability(NETWORK_CLIENT_DEVICE_ID) {
         Err(SYSCALL_EACCES) => {}
@@ -328,7 +291,9 @@ fn run_unauthorized_probe() -> Result<u64, u64> {
     }
 }
 
-/// One raw NIC reader demuxes frames into bounded per-stack queues (depth 4).
+/// One raw NIC reader demuxes frames into bounded per-stack queues (depth 4). Raw reads
+/// stop while either queue is full, so frames wait in the kernel RX ring (whose own
+/// overflow is counted in rx-diag) instead of being evicted here.
 const INGRESS_DEPTH: usize = 4;
 /// Max kernel `RAW_RECEIVE` pulls per demux dequeue when the consumer queue is empty.
 const INGRESS_READ_BUDGET: usize = 8;
@@ -352,14 +317,16 @@ impl PendingFrames {
         }
     }
 
+    fn is_full(&self) -> bool {
+        self.len >= INGRESS_DEPTH
+    }
+
+    /// Callers only read raw frames while every queue has room (see `nic_ingress_dequeue`);
+    /// a push into a full queue is still refused and counted rather than evicting.
     fn push(&mut self, frame: FrameBuf) {
-        if self.len >= INGRESS_DEPTH {
-            let _ = self.slots[0].take();
-            for i in 1..INGRESS_DEPTH {
-                self.slots[i - 1] = self.slots[i].take();
-            }
-            self.len = INGRESS_DEPTH - 1;
+        if self.is_full() {
             INGRESS_DROP_FULL.fetch_add(1, Ordering::Relaxed);
+            return;
         }
         self.slots[self.len] = Some(frame);
         self.len += 1;
@@ -489,11 +456,19 @@ fn nic_ingress_take_pending(consumer: StackConsumer) -> Option<FrameBuf> {
     }
 }
 
+#[allow(static_mut_refs)]
+fn nic_ingress_has_room() -> bool {
+    unsafe { !NIC_INGRESS.pending_udp.is_full() && !NIC_INGRESS.pending_tcp.is_full() }
+}
+
 fn nic_ingress_dequeue(consumer: StackConsumer) -> Result<Option<FrameBuf>, NetworkDeviceError> {
     if let Some(frame) = nic_ingress_take_pending(consumer) {
         return Ok(Some(frame));
     }
     for _ in 0..INGRESS_READ_BUDGET {
+        if !nic_ingress_has_room() {
+            break;
+        }
         let frame = match nic_ingress_read_raw()? {
             Some(frame) => frame,
             None => break,
@@ -609,18 +584,174 @@ static mut SERVICE_RESPONSE_BUF: [u8; NETWORK_RESPONSE_BYTES] = [0; NETWORK_RESP
 static mut SERVICE_RESPONSE_PAYLOAD: [u8; NETWORK_MAX_PAYLOAD_BYTES] =
     [0; NETWORK_MAX_PAYLOAD_BYTES];
 
-const MAX_PENDING_LINUX_UDP_RECV: usize = 16;
+/// Clock and phase deadline shared with the in-flight TLS transaction future.
+static TLS_CLOCK: TlsTransactionClock = TlsTransactionClock::new();
+/// Requests refused because the table they would park in was full.
+static PARKED_REFUSED_FULL: AtomicUsize = AtomicUsize::new(0);
+/// TLS sends refused because a transaction was already in flight.
+static TLS_REFUSED_BUSY: AtomicUsize = AtomicUsize::new(0);
+
+/// Parked requests: one per Linux socket session, plus the resolver's in-flight queries.
+const MAX_PARKED_REQUESTS: usize = MAX_SESSIONS as usize;
+
+/// A request whose response waits on the network. The service loop keeps serving other
+/// requests and completes it from `pump_parked_requests` when its condition holds.
+#[derive(Clone, Copy)]
+enum ParkedWork {
+    /// Linux UDP receive: completes when the endpoint holds a datagram. No service
+    /// deadline; the client owns the timeout and cancels by closing.
+    UdpReceive { session: SessionId, max_len: u32 },
+    /// Linux TCP receive: completes on data, end of stream or a connection error. No
+    /// service deadline, as for UDP.
+    TcpReceive { session: SessionId, max_len: u32 },
+    /// Linux TCP connect waiting for the handshake to finish by `deadline`.
+    TcpConnect {
+        session: SessionId,
+        dest: SocketAddrV4,
+        connection: SessionId,
+        deadline: u64,
+    },
+    /// Cache-miss resolve; the resolver enforces the query deadline.
+    Resolve { query_id: u32 },
+}
 
 #[derive(Clone, Copy)]
-struct PendingLinuxUdpReceive {
+struct ParkedRequest {
+    request_id: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    work: ParkedWork,
+}
+
+impl ParkedRequest {
+    fn session(&self) -> Option<SessionId> {
+        match self.work {
+            ParkedWork::UdpReceive { session, .. }
+            | ParkedWork::TcpReceive { session, .. }
+            | ParkedWork::TcpConnect { session, .. } => Some(session),
+            ParkedWork::Resolve { .. } => None,
+        }
+    }
+}
+
+struct ParkedRequests {
+    slots: [Option<ParkedRequest>; MAX_PARKED_REQUESTS],
+}
+
+impl ParkedRequests {
+    const fn new() -> Self {
+        Self {
+            slots: [None; MAX_PARKED_REQUESTS],
+        }
+    }
+
+    fn contains(&self, request_id: u64) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| slot.is_some_and(|entry| entry.request_id == request_id))
+    }
+
+    fn has_room(&self) -> bool {
+        self.slots.iter().any(Option::is_none)
+    }
+
+    /// Callers check `has_room` first when parking has side effects to undo.
+    fn park(&mut self, entry: ParkedRequest) -> bool {
+        match self.slots.iter_mut().find(|slot| slot.is_none()) {
+            Some(slot) => {
+                *slot = Some(entry);
+                true
+            }
+            None => {
+                PARKED_REFUSED_FULL.fetch_add(1, Ordering::Relaxed);
+                false
+            }
+        }
+    }
+
+    /// Earliest deadline the service itself enforces for parked work.
+    fn next_deadline(&self) -> Option<u64> {
+        self.slots
+            .iter()
+            .flatten()
+            .filter_map(|entry| match entry.work {
+                ParkedWork::TcpConnect { deadline, .. } => Some(deadline),
+                _ => None,
+            })
+            .min()
+    }
+}
+
+fn queue_full() -> NetworkResponse {
+    NetworkResponse::Error {
+        code: NetworkError::QueueFull.code(),
+    }
+}
+
+const TLS_TRUST_ANCHOR: &[u8] = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
+
+/// The request that owns the in-flight TLS transaction.
+struct ActiveTls {
     request_id: u64,
     caller: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
-    max_len: u32,
+    bytes_sent: u32,
+    scratch: TlsScratchGuard,
 }
 
-static mut PENDING_LINUX_UDP_RECV: [Option<PendingLinuxUdpReceive>; MAX_PENDING_LINUX_UDP_RECV] =
-    [None; MAX_PENDING_LINUX_UDP_RECV];
+struct TlsJobInput {
+    remote: SocketAddrV4,
+    owner: clean_slate_network::protocol::TrustedCaller,
+    budget: TlsTransactionBudget,
+    rng: RdrandRng,
+    request: [u8; NETWORK_MAX_PAYLOAD_BYTES],
+    request_len: usize,
+}
+
+struct TlsJobOutput {
+    result: Result<usize, TlsError>,
+    response: [u8; NETWORK_MAX_PAYLOAD_BYTES],
+}
+
+/// The service's single TLS transaction slot. The future lives in `run_service_loop`'s
+/// frame (the loop never returns), which keeps it pinned without static storage.
+struct TlsJob<'a, F> {
+    future: Pin<&'a mut Option<F>>,
+    start: fn(TlsJobInput) -> F,
+    active: Option<ActiveTls>,
+}
+
+async fn start_tls_job(input: TlsJobInput) -> TlsJobOutput {
+    let mut response = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
+    let config = TlsConfig::new(TLS_SERVER_NAME, TLS_TRUST_ANCHOR, VALIDATION_TIME_UNIX);
+    // SAFETY: only the service loop uses the TLS buffers and the shared transport, and
+    // it holds no reference to either while it polls or drops this future.
+    let transaction = unsafe {
+        let read_buf = &mut *service_tls_read_buf_ptr();
+        let write_buf = &mut *service_tls_write_buf_ptr();
+        read_buf.fill(0);
+        write_buf.fill(0);
+        tls_transaction(
+            service_tls_transport_ptr(),
+            &TLS_CLOCK,
+            input.budget,
+            input.owner,
+            input.remote,
+            config,
+            input.rng,
+            read_buf,
+            write_buf,
+            &input.request[..input.request_len],
+            &mut response,
+        )
+    };
+    let result = transaction.await;
+    TlsJobOutput { result, response }
+}
+
+/// An empty TLS slot for futures made by `start`, pinned by the caller.
+fn empty_tls_slot<F>(_start: fn(TlsJobInput) -> F) -> Option<F> {
+    None
+}
 
 /// Single-threaded service loop; use raw pointers to satisfy `static_mut_refs` under `-D warnings`.
 unsafe fn service_state_slot() -> *mut Option<ServiceState> {
@@ -672,6 +803,9 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         Ok(handle) => handle,
         Err(_) => finish(),
     };
+    if init_tick_period().is_err() {
+        finish();
+    }
     bootstrap.net_role_handle = raw_handle;
     let generation = SessionGeneration::new(bootstrap.service_generation);
     nic_ingress_init(raw_handle);
@@ -710,28 +844,40 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     let Some(service) = (unsafe { (*service_state_slot()).as_mut() }) else {
         finish();
     };
+    let mut parked = ParkedRequests::new();
+    let start: fn(TlsJobInput) -> _ = start_tls_job;
+    let tls_future = pin!(empty_tls_slot(start));
+    let mut tls = TlsJob {
+        future: tls_future,
+        start,
+        active: None,
+    };
+    let mut ctx = ServiceContext {
+        service,
+        service_generation: bootstrap.service_generation,
+        raw_handle,
+        parked: &mut parked,
+        response_buf: unsafe { &mut *service_response_buf_ptr() },
+        response_payload: unsafe { &mut *service_response_payload_ptr() },
+    };
     loop {
         let request_buf = unsafe { &mut *service_request_buf_ptr() };
         let payload_buf = unsafe { &mut *service_payload_buf_ptr() };
-        let response_buf = unsafe { &mut *service_response_buf_ptr() };
-        let response_payload = unsafe { &mut *service_response_payload_ptr() };
-        drain_holder_exits(
-            service,
-            bootstrap.service_generation,
-            raw_handle,
-            response_buf,
-            response_payload,
-        );
+        drain_holder_exits(&mut ctx, &mut tls);
         drain_ingress();
-        let completed_receives =
-            pump_pending_linux_udp_receives(raw_handle, response_buf, response_payload);
+        let Ok(now) = monotonic_ticks() else {
+            finish();
+        };
+        let progressed =
+            pump_parked_requests(&mut ctx, now) | pump_tls_job(&mut ctx, &mut tls, now);
         let Ok(found) = service_next(raw_handle, request_buf, payload_buf) else {
             // Denied or stale authority is permanent for this instance.
             finish();
         };
         if found == 0 {
-            if !completed_receives {
-                wait_for_service_work();
+            if !progressed {
+                let deadline = next_service_deadline(&ctx, &tls);
+                wait_for_service_work(now, deadline);
             }
             continue;
         }
@@ -741,34 +887,88 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             let response = NetworkResponse::Error {
                 code: NetworkError::InvalidRequest.code(),
             };
-            response_buf.copy_from_slice(&response.encode());
-            let _ = service_complete(raw_handle, request_id, response_buf, 0, &[]);
+            ctx.complete(request_id, response, 0);
             continue;
         };
-        match handle_service_request(
-            service,
-            bootstrap.service_generation,
-            request_id,
-            caller,
-            request,
-            payload,
-            response_payload,
-        ) {
-            Some((response, out_len)) => {
-                response_buf.copy_from_slice(&response.encode());
-                let _ = service_complete(
-                    raw_handle,
-                    request_id,
-                    response_buf,
-                    out_len,
-                    &response_payload[..out_len as usize],
-                );
-            }
-            None => {
-                // Deferred Linux UDP receive: bridge slot stays InService; pump completes it.
-            }
+        if let Some((response, out_len)) =
+            handle_service_request(&mut ctx, &mut tls, request_id, caller, request, payload)
+        {
+            ctx.complete(request_id, response, out_len);
         }
     }
+}
+
+/// State every request handler needs; built once by `run_service_loop`.
+struct ServiceContext<'a> {
+    service: &'a mut ServiceState,
+    service_generation: u64,
+    raw_handle: u64,
+    parked: &'a mut ParkedRequests,
+    response_buf: &'a mut [u8; NETWORK_RESPONSE_BYTES],
+    response_payload: &'a mut [u8; NETWORK_MAX_PAYLOAD_BYTES],
+}
+
+impl ServiceContext<'_> {
+    /// Completes `request_id` with `response` and the first `out_len` bytes of
+    /// `response_payload`.
+    fn complete(&mut self, request_id: u64, response: NetworkResponse, out_len: u32) {
+        self.response_buf.copy_from_slice(&response.encode());
+        let _ = service_complete(
+            self.raw_handle,
+            request_id,
+            self.response_buf,
+            out_len,
+            &self.response_payload[..out_len as usize],
+        );
+    }
+
+    /// Completes (with `Reset`) every parked request matching `matches`, releasing what
+    /// the parked work holds.
+    fn cancel_parked_where(&mut self, matches: impl Fn(&ParkedRequest) -> bool) {
+        let reset = NetworkResponse::Error {
+            code: NetworkError::Reset.code(),
+        };
+        for index in 0..MAX_PARKED_REQUESTS {
+            let Some(entry) = self.parked.slots[index].filter(|entry| matches(entry)) else {
+                continue;
+            };
+            self.parked.slots[index] = None;
+            if let ParkedWork::TcpConnect { connection, .. } = entry.work {
+                let owner = plain_tcp_owner(self.service_generation);
+                let _ = shared_tcp_transport_mut().abort(connection, owner);
+            }
+            self.complete(entry.request_id, reset, 0);
+        }
+    }
+
+    fn cancel_session(
+        &mut self,
+        caller: clean_slate_network::protocol::TrustedCaller,
+        session: SessionId,
+    ) {
+        self.cancel_parked_where(|entry| {
+            entry.caller == caller && entry.session() == Some(session)
+        });
+    }
+}
+
+/// Earliest tick at which the loop must run even without a request or frame: the TCP
+/// stack's timers, parked connect deadlines, the resolver's query deadline, and the TLS
+/// transaction's phase deadline.
+fn next_service_deadline<F>(ctx: &ServiceContext<'_>, tls: &TlsJob<'_, F>) -> Option<u64> {
+    let tls_deadline = tls.active.as_ref().map(|_| TLS_CLOCK.phase_deadline());
+    let resolver_deadline = udp_resolver()
+        .ok()
+        .and_then(|resolver| resolver.next_deadline());
+    [
+        shared_tcp_transport_mut().next_timer_deadline(),
+        ctx.parked.next_deadline(),
+        resolver_deadline,
+        tls_deadline,
+    ]
+    .into_iter()
+    .flatten()
+    .min()
 }
 
 /// Splits a `SERVICE_NEXT` record into the request, its trusted caller, and its payload.
@@ -969,107 +1169,23 @@ fn handle_service_udp_send(
         }
         Err(response) => return Err(response),
     };
-    let start = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+    let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
         code: NetworkError::Timeout.code(),
     })?;
-    let deadline = start.saturating_add(ms_to_irq_ticks(DNS_QUERY_TIMEOUT_MS));
     let udp_sid = linux_udp_endpoint(caller, session)?;
-    let resolver = udp_resolver()?;
-    for _ in 0..DNS_POLL_LIMIT {
-        let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
-            code: NetworkError::Timeout.code(),
+    let udp = udp_resolver()?.udp_mut();
+    // Every Linux UDP peer is reached through the fixture next hop that `connect` pinned;
+    // refresh the pin so a send after the ARP TTL never waits on neighbour discovery.
+    udp.stack_mut()
+        .arp_cache_mut()
+        .insert(dest.addr, PEER_MAC, now);
+    let sent = udp
+        .send(now, udp_sid, caller, Some(dest), payload)
+        .map_err(|err| NetworkResponse::Error {
+            code: NetworkError::from(err).code(),
         })?;
-        let udp = resolver.udp_mut();
-        match udp.send(now, udp_sid, caller, Some(dest), payload) {
-            Ok(sent) => {
-                let _ = udp.poll(now);
-                return Ok(sent as u32);
-            }
-            Err(NetworkError::Unreachable) => {
-                let _ = udp.poll(now);
-            }
-            Err(err) => {
-                return Err(NetworkResponse::Error {
-                    code: NetworkError::from(err).code(),
-                });
-            }
-        }
-        if now >= deadline {
-            break;
-        }
-        wait_request_ingress(StackConsumer::Udp, now, deadline, None)?;
-    }
-    Err(NetworkResponse::Error {
-        code: NetworkError::Timeout.code(),
-    })
-}
-
-fn pending_linux_udp_receives(
-) -> &'static mut [Option<PendingLinuxUdpReceive>; MAX_PENDING_LINUX_UDP_RECV] {
-    unsafe { &mut *core::ptr::addr_of_mut!(PENDING_LINUX_UDP_RECV) }
-}
-
-fn pending_linux_udp_contains(request_id: u64) -> bool {
-    pending_linux_udp_receives()
-        .iter()
-        .any(|slot| slot.is_some_and(|entry| entry.request_id == request_id))
-}
-
-fn enqueue_pending_linux_udp_receive(entry: PendingLinuxUdpReceive) -> bool {
-    match pending_linux_udp_receives()
-        .iter_mut()
-        .find(|slot| slot.is_none())
-    {
-        Some(slot) => {
-            *slot = Some(entry);
-            true
-        }
-        None => false,
-    }
-}
-
-fn complete_pending_linux_udp_raw(
-    raw_handle: u64,
-    request_id: u64,
-    response: NetworkResponse,
-    out_len: u32,
-    response_payload: &[u8],
-    response_buf: &mut [u8; NETWORK_RESPONSE_BYTES],
-) {
-    response_buf.copy_from_slice(&response.encode());
-    let _ = service_complete(
-        raw_handle,
-        request_id,
-        response_buf,
-        out_len,
-        &response_payload[..out_len as usize],
-    );
-}
-
-/// Completes (with `Reset`) every deferred receive matching `matches`.
-fn cancel_pending_linux_udp_where(
-    raw_handle: u64,
-    response_buf: &mut [u8; NETWORK_RESPONSE_BYTES],
-    response_payload: &mut [u8; NETWORK_MAX_PAYLOAD_BYTES],
-    matches: impl Fn(&PendingLinuxUdpReceive) -> bool,
-) {
-    let reset = NetworkResponse::Error {
-        code: NetworkError::Reset.code(),
-    };
-    for slot in pending_linux_udp_receives().iter_mut() {
-        let Some(entry) = slot.filter(|entry| matches(entry)) else {
-            continue;
-        };
-        *slot = None;
-        complete_pending_linux_udp_raw(
-            raw_handle,
-            entry.request_id,
-            reset,
-            0,
-            response_payload,
-            response_buf,
-        );
-    }
+    let _ = udp.poll(now);
+    Ok(sent as u32)
 }
 
 /// One non-blocking receive attempt on the session's endpoint. Ingress is drained by
@@ -1111,40 +1227,83 @@ fn drain_ingress() {
     let _ = shared_tcp_transport_mut().poll(now);
 }
 
-/// Completes deferred Linux UDP receives whose endpoint now holds a datagram. Each
-/// completion is sent before the next receive reuses `response_payload`.
-fn pump_pending_linux_udp_receives(
-    raw_handle: u64,
-    response_buf: &mut [u8; NETWORK_RESPONSE_BYTES],
-    response_payload: &mut [u8; NETWORK_MAX_PAYLOAD_BYTES],
-) -> bool {
+/// Completes parked requests whose condition now holds (after `drain_ingress` fed the
+/// stacks). Each completion is sent before the next one reuses `response_payload`.
+/// Returns whether any request completed.
+fn pump_parked_requests(ctx: &mut ServiceContext<'_>, now: u64) -> bool {
     let mut completed = false;
-    for slot in pending_linux_udp_receives().iter_mut() {
-        let Some(entry) = *slot else {
+    for index in 0..MAX_PARKED_REQUESTS {
+        let Some(entry) = ctx.parked.slots[index] else {
             continue;
         };
-        let (response, out_len) = match try_udp_receive_once(
-            entry.caller,
-            entry.session,
-            entry.max_len,
-            response_payload,
-        ) {
-            Ok(None) => continue,
-            Ok(Some(n)) => (NetworkResponse::Receive { payload_len: n }, n),
-            Err(response) => (response, 0),
+        let Some((response, out_len)) = poll_parked(ctx, &entry, now) else {
+            continue;
         };
-        *slot = None;
-        complete_pending_linux_udp_raw(
-            raw_handle,
-            entry.request_id,
-            response,
-            out_len,
-            response_payload,
-            response_buf,
-        );
+        ctx.parked.slots[index] = None;
+        ctx.complete(entry.request_id, response, out_len);
         completed = true;
     }
     completed
+}
+
+/// One non-blocking check of a parked request; `None` while it must keep waiting.
+fn poll_parked(
+    ctx: &mut ServiceContext<'_>,
+    entry: &ParkedRequest,
+    now: u64,
+) -> Option<(NetworkResponse, u32)> {
+    let caller = entry.caller;
+    let received = |result: Result<Option<u32>, NetworkResponse>| match result {
+        Ok(None) => None,
+        Ok(Some(n)) => Some((NetworkResponse::Receive { payload_len: n }, n)),
+        Err(response) => Some((response, 0)),
+    };
+    match entry.work {
+        ParkedWork::UdpReceive { session, max_len } => received(try_udp_receive_once(
+            caller,
+            session,
+            max_len,
+            &mut ctx.response_payload[..],
+        )),
+        ParkedWork::TcpReceive { session, max_len } => received(try_tcp_receive_once(
+            ctx.service_generation,
+            caller,
+            session,
+            max_len,
+            &mut ctx.response_payload[..],
+        )),
+        ParkedWork::TcpConnect {
+            session,
+            dest,
+            connection,
+            deadline,
+        } => match plain_tcp_connect_progress(ctx.service_generation, connection) {
+            Ok(false) if now < deadline => None,
+            Ok(false) => {
+                let _ = shared_tcp_transport_mut()
+                    .abort(connection, plain_tcp_owner(ctx.service_generation));
+                Some((
+                    NetworkResponse::Error {
+                        code: NetworkError::Timeout.code(),
+                    },
+                    0,
+                ))
+            }
+            Ok(true) => Some((
+                attach_plain_tcp_connection(ctx, caller, session, dest, connection),
+                0,
+            )),
+            Err(response) => {
+                let _ = shared_tcp_transport_mut()
+                    .abort(connection, plain_tcp_owner(ctx.service_generation));
+                Some((response, 0))
+            }
+        },
+        ParkedWork::Resolve { query_id } => {
+            let result = udp_resolver().ok()?.take_result(query_id, caller)?;
+            Some((resolve_response(result), 0))
+        }
+    }
 }
 
 enum LinuxSocketDispatch {
@@ -1153,158 +1312,171 @@ enum LinuxSocketDispatch {
     Deferred,
 }
 
-fn handle_service_udp_receive(
+/// Answers at once when `attempt` has a result, otherwise parks `work` until the pump sees
+/// its condition hold.
+fn receive_or_park(
+    ctx: &mut ServiceContext<'_>,
     request_id: u64,
     caller: clean_slate_network::protocol::TrustedCaller,
-    session: SessionId,
-    max_len: u32,
-    response_payload: &mut [u8],
+    work: ParkedWork,
+    attempt: Result<Option<u32>, NetworkResponse>,
 ) -> LinuxSocketDispatch {
-    if pending_linux_udp_contains(request_id) {
-        return LinuxSocketDispatch::Deferred;
-    }
-    match try_udp_receive_once(caller, session, max_len, response_payload) {
+    match attempt {
         Ok(Some(n)) => LinuxSocketDispatch::Done(NetworkResponse::Receive { payload_len: n }, n),
-        Ok(None) => {
-            if enqueue_pending_linux_udp_receive(PendingLinuxUdpReceive {
-                request_id,
-                caller,
-                session,
-                max_len,
-            }) {
-                LinuxSocketDispatch::Deferred
-            } else {
-                LinuxSocketDispatch::Done(
-                    NetworkResponse::Error {
-                        code: NetworkError::QueueFull.code(),
-                    },
-                    0,
-                )
-            }
-        }
+        Ok(None) => park_or_refuse(ctx, request_id, caller, work),
         Err(response) => LinuxSocketDispatch::Done(response, 0),
     }
 }
 
-fn poll_plain_tcp_until<F>(
-    tcp: &mut TcpTransport<ServiceLink>,
-    start: u64,
-    deadline_ticks: u64,
-    mut ready: F,
-) -> Result<(), NetworkResponse>
-where
-    F: FnMut(&mut TcpTransport<ServiceLink>, u64) -> Result<bool, NetworkResponse>,
-{
-    for _ in 0..TLS_POLL_LIMIT {
-        let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
-            code: NetworkError::Timeout.code(),
-        })?;
-        tcp.poll(now)
-            .map_err(|err| NetworkResponse::Error { code: err.code() })?;
-        if ready(tcp, now)? {
-            return Ok(());
-        }
-        let deadline = start.saturating_add(deadline_ticks);
-        if now >= deadline {
-            break;
-        }
-        wait_request_ingress(StackConsumer::Tcp, now, deadline, tcp.next_timer_deadline())?;
+fn park_or_refuse(
+    ctx: &mut ServiceContext<'_>,
+    request_id: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    work: ParkedWork,
+) -> LinuxSocketDispatch {
+    if ctx.parked.park(ParkedRequest {
+        request_id,
+        caller,
+        work,
+    }) {
+        LinuxSocketDispatch::Deferred
+    } else {
+        LinuxSocketDispatch::Done(queue_full(), 0)
     }
-    Err(NetworkResponse::Error {
-        code: NetworkError::Timeout.code(),
-    })
 }
 
-fn establish_plain_tcp_session(
-    _raw_handle: u64,
+/// Whether the handshake of `connection` finished (`Ok(true)`), is still running
+/// (`Ok(false)`), or failed.
+fn plain_tcp_connect_progress(
     service_generation: u64,
+    connection: SessionId,
+) -> Result<bool, NetworkResponse> {
+    let reset = NetworkResponse::Error {
+        code: NetworkError::Reset.code(),
+    };
+    match shared_tcp_transport_mut().state(connection, plain_tcp_owner(service_generation)) {
+        // The peer may send data and FIN before the pump observes the connection.
+        Ok(TcpState::Established) | Ok(TcpState::CloseWait) => Ok(true),
+        Ok(TcpState::Reset) | Ok(TcpState::Closed) => Err(reset),
+        Ok(_) => Ok(false),
+        // `poll` frees the slot after an acceptable RST; connect must still fail closed.
+        Err(NetworkError::NotFound) => Err(reset),
+        Err(err) => Err(NetworkResponse::Error { code: err.code() }),
+    }
+}
+
+/// Records an established connection as the session's stream and answers the connect.
+fn attach_plain_tcp_connection(
+    ctx: &mut ServiceContext<'_>,
     caller: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
     dest: SocketAddrV4,
-) -> Result<SessionId, NetworkResponse> {
-    let tick = monotonic_ticks().map_err(|_| NetworkResponse::Error {
-        code: NetworkError::Timeout.code(),
-    })?;
-    let tcp = shared_tcp_transport_mut();
-    tcp.stack_mut()
-        .arp_cache_mut()
-        .insert(dest.addr, PEER_MAC, tick);
-    let slot = plain_tcp_slot(session).ok_or(NetworkResponse::Error {
-        code: NetworkError::InvalidRequest.code(),
-    })?;
-    let owner = plain_tcp_owner(service_generation);
-    let (tcp_session, is_new) = match *slot {
-        Some(mapping) if mapping.owner == caller => (mapping.connection, false),
-        Some(_) => {
-            return Err(NetworkResponse::Error {
-                code: NetworkError::InvalidRequest.code(),
-            });
-        }
-        None => (
-            tcp.connect(tick, owner, dest)
-                .map_err(|err| NetworkResponse::Error { code: err.code() })?,
-            true,
-        ),
+    connection: SessionId,
+) -> NetworkResponse {
+    let owner = plain_tcp_owner(ctx.service_generation);
+    let Some(slot) = plain_tcp_slot(session).filter(|slot| slot.is_none()) else {
+        let _ = shared_tcp_transport_mut().abort(connection, owner);
+        return NetworkResponse::Error {
+            code: NetworkError::InvalidRequest.code(),
+        };
     };
-    let established = poll_plain_tcp_until(
-        tcp,
-        tick,
-        ms_to_irq_ticks(TCP_CONNECT_TIMEOUT_MS),
-        |tcp, _now| {
-            match tcp.state(tcp_session, owner) {
-                // The peer may send data and FIN before this predicate runs again.
-                Ok(TcpState::Established) | Ok(TcpState::CloseWait) => Ok(true),
-                Ok(TcpState::Reset) | Ok(TcpState::Closed) => Err(NetworkResponse::Error {
-                    code: NetworkError::Reset.code(),
-                }),
-                Ok(_) => Ok(false),
-                // `poll` frees the slot after an acceptable RST; connect must still fail closed.
-                Err(NetworkError::NotFound) => Err(NetworkResponse::Error {
-                    code: NetworkError::Reset.code(),
-                }),
-                Err(err) => Err(NetworkResponse::Error { code: err.code() }),
-            }
-        },
-    );
-    if let Err(response) = established {
-        if is_new {
-            let _ = tcp.abort(tcp_session, owner);
-        }
-        return Err(response);
+    if let Err(response) = ctx.service.attach_connected_dest(caller, session, dest) {
+        let _ = shared_tcp_transport_mut().abort(connection, owner);
+        return response;
     }
     *slot = Some(LinuxTcpConnection {
         owner: caller,
-        connection: tcp_session,
+        connection,
     });
-    Ok(tcp_session)
+    NetworkResponse::Connect
 }
+
+/// Linux TCP `connect`: opens a shared-transport connection and parks the request until
+/// the handshake finishes or `TCP_CONNECT_TIMEOUT_MS` passes. A session that already
+/// holds a connection answers from its state at once.
+fn handle_service_plain_tcp_connect(
+    ctx: &mut ServiceContext<'_>,
+    request_id: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    session: SessionId,
+    dest: SocketAddrV4,
+) -> LinuxSocketDispatch {
+    let invalid = NetworkResponse::Error {
+        code: NetworkError::InvalidRequest.code(),
+    };
+    let Some(slot) = plain_tcp_slot(session) else {
+        return LinuxSocketDispatch::Done(invalid, 0);
+    };
+    match *slot {
+        Some(mapping) if mapping.owner == caller => {
+            let response =
+                match plain_tcp_connect_progress(ctx.service_generation, mapping.connection) {
+                    Ok(true) => NetworkResponse::Connect,
+                    Ok(false) => invalid,
+                    Err(response) => response,
+                };
+            return LinuxSocketDispatch::Done(response, 0);
+        }
+        Some(_) => return LinuxSocketDispatch::Done(invalid, 0),
+        None => {}
+    }
+    let connecting = ctx.parked.slots.iter().flatten().any(|entry| {
+        entry.caller == caller
+            && matches!(entry.work, ParkedWork::TcpConnect { session: s, .. } if s == session)
+    });
+    if connecting || !ctx.parked.has_room() {
+        if !connecting {
+            PARKED_REFUSED_FULL.fetch_add(1, Ordering::Relaxed);
+        }
+        return LinuxSocketDispatch::Done(if connecting { invalid } else { queue_full() }, 0);
+    }
+    let Ok(now) = monotonic_ticks() else {
+        return LinuxSocketDispatch::Done(
+            NetworkResponse::Error {
+                code: NetworkError::Timeout.code(),
+            },
+            0,
+        );
+    };
+    let tcp = shared_tcp_transport_mut();
+    tcp.stack_mut()
+        .arp_cache_mut()
+        .insert(dest.addr, PEER_MAC, now);
+    let connection = match tcp.connect(now, plain_tcp_owner(ctx.service_generation), dest) {
+        Ok(connection) => connection,
+        Err(err) => {
+            return LinuxSocketDispatch::Done(NetworkResponse::Error { code: err.code() }, 0)
+        }
+    };
+    park_or_refuse(
+        ctx,
+        request_id,
+        caller,
+        ParkedWork::TcpConnect {
+            session,
+            dest,
+            connection,
+            deadline: now.saturating_add(ms_to_irq_ticks(TCP_CONNECT_TIMEOUT_MS)),
+        },
+    )
+}
+
 fn handle_service_plain_tcp_send(
-    service: &mut ServiceState,
-    raw_handle: u64,
     service_generation: u64,
     caller: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
     payload: &[u8],
 ) -> Result<u32, NetworkResponse> {
-    let dest = match service.connected_dest(caller, session) {
-        Ok(Some(dest)) => dest,
-        Ok(None) => {
-            return Err(NetworkResponse::Error {
-                code: NetworkError::InvalidRequest.code(),
-            });
-        }
-        Err(response) => return Err(response),
-    };
+    let connection = linux_tcp_connection(caller, session).ok_or(NetworkResponse::Error {
+        code: NetworkError::InvalidRequest.code(),
+    })?;
     let tick = monotonic_ticks().map_err(|_| NetworkResponse::Error {
         code: NetworkError::Timeout.code(),
     })?;
-    let tcp_session =
-        establish_plain_tcp_session(raw_handle, service_generation, caller, session, dest)?;
-    let tcp = shared_tcp_transport_mut();
-    let sent = tcp
+    let sent = shared_tcp_transport_mut()
         .send(
             tick,
-            tcp_session,
+            connection,
             plain_tcp_owner(service_generation),
             payload,
         )
@@ -1312,327 +1484,155 @@ fn handle_service_plain_tcp_send(
     Ok(sent)
 }
 
-fn handle_service_plain_tcp_receive(
+/// One non-blocking receive attempt on the session's stream: bytes, `Some(0)` at end of
+/// stream, or `None` while the connection has nothing buffered.
+fn try_tcp_receive_once(
     service_generation: u64,
     caller: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
     max_len: u32,
     response_payload: &mut [u8],
-) -> (NetworkResponse, u32) {
-    let tcp_session = match linux_tcp_connection(caller, session) {
-        Some(id) => id,
-        None => {
-            return (
-                NetworkResponse::Error {
-                    code: NetworkError::InvalidRequest.code(),
-                },
-                0,
-            );
-        }
-    };
-    let tick = match monotonic_ticks() {
-        Ok(tick) => tick,
-        Err(_) => {
-            return (
-                NetworkResponse::Error {
-                    code: NetworkError::Timeout.code(),
-                },
-                0,
-            );
-        }
-    };
-    let tcp = shared_tcp_transport_mut();
-    let owner = plain_tcp_owner(service_generation);
-    let max_len = max_len as usize;
-    let want = max_len
-        .min(response_payload.len())
-        .min(NETWORK_MAX_PAYLOAD_BYTES);
-    let deadline = tick.saturating_add(ms_to_irq_ticks(PLAIN_TCP_IO_TIMEOUT_MS));
-    let mut now = tick;
-    for _ in 0..TLS_POLL_LIMIT {
-        let _ = tcp.poll(now);
-        match tcp.receive(tcp_session, owner, &mut response_payload[..want]) {
-            Ok(0) => {}
-            Ok(n) => {
-                return (
-                    NetworkResponse::Receive {
-                        payload_len: n as u32,
-                    },
-                    n as u32,
-                );
-            }
-            Err(NetworkError::Closed) => {
-                return (NetworkResponse::Receive { payload_len: 0 }, 0);
-            }
-            Err(err) => {
-                return (
-                    NetworkResponse::Error {
-                        code: NetworkError::from(err).code(),
-                    },
-                    0,
-                );
-            }
-        }
-        if now >= deadline {
-            break;
-        }
-        if let Err(response) =
-            wait_request_ingress(StackConsumer::Tcp, now, deadline, tcp.next_timer_deadline())
-        {
-            return (response, 0);
-        }
-        now = match monotonic_ticks() {
-            Ok(now) => now,
-            Err(_) => break,
-        };
-    }
-    (
-        NetworkResponse::Error {
-            code: NetworkError::Timeout.code(),
-        },
-        0,
-    )
-}
-mod linux_socket_data_plane {
-    use super::*;
-
-    pub(super) fn handle(
-        service: &mut ServiceState,
-        raw_handle: u64,
-        service_generation: u64,
-        request_id: u64,
-        caller: clean_slate_network::protocol::TrustedCaller,
-        request: NetworkRequest,
-        payload: &[u8],
-        response_payload: &mut [u8],
-    ) -> LinuxSocketDispatch {
-        match request {
-            NetworkRequest::Connect { session, dest }
-                if matches!(
-                    service.session_kind(caller, session),
-                    Ok(SocketKind::LinuxUdp)
-                ) =>
-            {
-                let (response, out_len) = service.handle_request(
-                    caller,
-                    NetworkRequest::Connect { session, dest },
-                    payload,
-                    response_payload,
-                );
-                if !matches!(response, NetworkResponse::Connect) {
-                    return LinuxSocketDispatch::Done(response, out_len);
-                }
-                match connect_linux_udp_endpoint(caller, session, dest) {
-                    Ok(()) => LinuxSocketDispatch::Done(response, out_len),
-                    Err(response) => LinuxSocketDispatch::Done(response, 0),
-                }
-            }
-            NetworkRequest::Connect { session, dest }
-                if matches!(
-                    service.session_kind(caller, session),
-                    Ok(SocketKind::LinuxTcp)
-                ) =>
-            {
-                let (response, out_len) = match establish_plain_tcp_session(
-                    raw_handle,
-                    service_generation,
-                    caller,
-                    session,
-                    dest,
-                ) {
-                    Ok(_) => {
-                        if let Err(response) = service.attach_connected_dest(caller, session, dest)
-                        {
-                            return LinuxSocketDispatch::Done(response, 0);
-                        }
-                        (NetworkResponse::Connect, 0)
-                    }
-                    Err(response) => (response, 0),
-                };
-                LinuxSocketDispatch::Done(response, out_len)
-            }
-            NetworkRequest::Send {
-                session,
-                payload_len,
-            } if matches!(
-                service.session_kind(caller, session),
-                Ok(SocketKind::LinuxTcp)
-            ) =>
-            {
-                if payload.len() != payload_len as usize {
-                    return LinuxSocketDispatch::Done(
-                        NetworkResponse::Error {
-                            code: NetworkError::InvalidRequest.code(),
-                        },
-                        0,
-                    );
-                }
-                {
-                    let (response, out_len) = match handle_service_plain_tcp_send(
-                        service,
-                        raw_handle,
-                        service_generation,
-                        caller,
-                        session,
-                        payload,
-                    ) {
-                        Ok(bytes_sent) => (NetworkResponse::Send { bytes_sent }, 0),
-                        Err(response) => (response, 0),
-                    };
-                    LinuxSocketDispatch::Done(response, out_len)
-                }
-            }
-            NetworkRequest::Send {
-                session,
-                payload_len,
-            } if matches!(
-                service.session_kind(caller, session),
-                Ok(SocketKind::LinuxUdp)
-            ) =>
-            {
-                if payload.len() != payload_len as usize {
-                    return LinuxSocketDispatch::Done(
-                        NetworkResponse::Error {
-                            code: NetworkError::InvalidRequest.code(),
-                        },
-                        0,
-                    );
-                }
-                let (response, out_len) =
-                    match handle_service_udp_send(service, caller, session, payload) {
-                        Ok(bytes_sent) => (NetworkResponse::Send { bytes_sent }, 0),
-                        Err(response) => (response, 0),
-                    };
-                LinuxSocketDispatch::Done(response, out_len)
-            }
-            NetworkRequest::Close { session }
-                if matches!(
-                    service.session_kind(caller, session),
-                    Ok(SocketKind::LinuxUdp)
-                ) =>
-            {
-                cancel_pending_linux_udp_where(
-                    raw_handle,
-                    unsafe { &mut *service_response_buf_ptr() },
-                    unsafe { &mut *service_response_payload_ptr() },
-                    |entry| entry.caller == caller && entry.session == session,
-                );
-                close_linux_udp_endpoint(caller, session);
-                {
-                    let (response, out_len) = service.handle_request(
-                        caller,
-                        NetworkRequest::Close { session },
-                        payload,
-                        response_payload,
-                    );
-                    LinuxSocketDispatch::Done(response, out_len)
-                }
-            }
-            NetworkRequest::Close { session }
-                if matches!(
-                    service.session_kind(caller, session),
-                    Ok(SocketKind::LinuxTcp)
-                ) =>
-            {
-                close_linux_tcp_connection(service_generation, caller, session);
-                let (response, out_len) = service.handle_request(
-                    caller,
-                    NetworkRequest::Close { session },
-                    payload,
-                    response_payload,
-                );
-                LinuxSocketDispatch::Done(response, out_len)
-            }
-            NetworkRequest::Receive { session, max_len }
-                if matches!(
-                    service.session_kind(caller, session),
-                    Ok(SocketKind::LinuxUdp)
-                ) =>
-            {
-                handle_service_udp_receive(request_id, caller, session, max_len, response_payload)
-            }
-            NetworkRequest::Receive { session, max_len }
-                if matches!(
-                    service.session_kind(caller, session),
-                    Ok(SocketKind::LinuxTcp)
-                ) =>
-            {
-                let (response, out_len) = handle_service_plain_tcp_receive(
-                    service_generation,
-                    caller,
-                    session,
-                    max_len,
-                    response_payload,
-                );
-                LinuxSocketDispatch::Done(response, out_len)
-            }
-            _ => LinuxSocketDispatch::NotHandled,
-        }
-    }
-}
-
-fn handle_linux_socket_data_plane(
-    service: &mut ServiceState,
-    raw_handle: u64,
-    service_generation: u64,
-    request_id: u64,
-    caller: clean_slate_network::protocol::TrustedCaller,
-    request: NetworkRequest,
-    payload: &[u8],
-    response_payload: &mut [u8],
-) -> LinuxSocketDispatch {
-    linux_socket_data_plane::handle(
-        service,
-        raw_handle,
-        service_generation,
-        request_id,
-        caller,
-        request,
-        payload,
-        response_payload,
-    )
-}
-
-fn handle_service_request(
-    service: &mut ServiceState,
-    service_generation: u64,
-    request_id: u64,
-    caller: clean_slate_network::protocol::TrustedCaller,
-    request: NetworkRequest,
-    payload: &[u8],
-    response_payload: &mut [u8],
-) -> Option<(NetworkResponse, u32)> {
-    let raw_handle = bootstrap_mut().net_role_handle;
-    match handle_linux_socket_data_plane(
-        service,
-        raw_handle,
-        service_generation,
-        request_id,
-        caller,
-        request,
-        payload,
-        response_payload,
+) -> Result<Option<u32>, NetworkResponse> {
+    let connection = linux_tcp_connection(caller, session).ok_or(NetworkResponse::Error {
+        code: NetworkError::InvalidRequest.code(),
+    })?;
+    let want = (max_len as usize).min(response_payload.len());
+    match shared_tcp_transport_mut().receive(
+        connection,
+        plain_tcp_owner(service_generation),
+        &mut response_payload[..want],
     ) {
+        Ok(0) => Ok(None),
+        Ok(n) => Ok(Some(n as u32)),
+        Err(NetworkError::Closed) => Ok(Some(0)),
+        Err(err) => Err(NetworkResponse::Error {
+            code: NetworkError::from(err).code(),
+        }),
+    }
+}
+/// Linux UDP/TCP session requests. Anything else (M7 sessions, resolve) is `NotHandled`.
+fn handle_linux_socket_data_plane(
+    ctx: &mut ServiceContext<'_>,
+    request_id: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    request: NetworkRequest,
+    payload: &[u8],
+) -> LinuxSocketDispatch {
+    let session = match request {
+        NetworkRequest::Connect { session, .. }
+        | NetworkRequest::Send { session, .. }
+        | NetworkRequest::Receive { session, .. }
+        | NetworkRequest::Close { session } => session,
+        _ => return LinuxSocketDispatch::NotHandled,
+    };
+    let kind = match ctx.service.session_kind(caller, session) {
+        Ok(kind @ (SocketKind::LinuxUdp | SocketKind::LinuxTcp)) => kind,
+        _ => return LinuxSocketDispatch::NotHandled,
+    };
+    let invalid = NetworkResponse::Error {
+        code: NetworkError::InvalidRequest.code(),
+    };
+    let sent = |result: Result<u32, NetworkResponse>| match result {
+        Ok(bytes_sent) => LinuxSocketDispatch::Done(NetworkResponse::Send { bytes_sent }, 0),
+        Err(response) => LinuxSocketDispatch::Done(response, 0),
+    };
+    match (request, kind) {
+        (NetworkRequest::Connect { dest, .. }, SocketKind::LinuxUdp) => {
+            let (response, out_len) =
+                ctx.service
+                    .handle_request(caller, request, payload, &mut ctx.response_payload[..]);
+            if !matches!(response, NetworkResponse::Connect) {
+                return LinuxSocketDispatch::Done(response, out_len);
+            }
+            match connect_linux_udp_endpoint(caller, session, dest) {
+                Ok(()) => LinuxSocketDispatch::Done(response, out_len),
+                Err(response) => LinuxSocketDispatch::Done(response, 0),
+            }
+        }
+        (NetworkRequest::Connect { dest, .. }, _) => {
+            handle_service_plain_tcp_connect(ctx, request_id, caller, session, dest)
+        }
+        (NetworkRequest::Send { payload_len, .. }, _) if payload.len() != payload_len as usize => {
+            LinuxSocketDispatch::Done(invalid, 0)
+        }
+        (NetworkRequest::Send { .. }, SocketKind::LinuxUdp) => sent(handle_service_udp_send(
+            ctx.service,
+            caller,
+            session,
+            payload,
+        )),
+        (NetworkRequest::Send { .. }, _) => sent(handle_service_plain_tcp_send(
+            ctx.service_generation,
+            caller,
+            session,
+            payload,
+        )),
+        (NetworkRequest::Receive { max_len, .. }, SocketKind::LinuxUdp) => {
+            let attempt =
+                try_udp_receive_once(caller, session, max_len, &mut ctx.response_payload[..]);
+            let work = ParkedWork::UdpReceive { session, max_len };
+            receive_or_park(ctx, request_id, caller, work, attempt)
+        }
+        (NetworkRequest::Receive { max_len, .. }, _) => {
+            let attempt = try_tcp_receive_once(
+                ctx.service_generation,
+                caller,
+                session,
+                max_len,
+                &mut ctx.response_payload[..],
+            );
+            let work = ParkedWork::TcpReceive { session, max_len };
+            receive_or_park(ctx, request_id, caller, work, attempt)
+        }
+        (NetworkRequest::Close { .. }, _) => {
+            ctx.cancel_session(caller, session);
+            if kind == SocketKind::LinuxUdp {
+                close_linux_udp_endpoint(caller, session);
+            } else {
+                close_linux_tcp_connection(ctx.service_generation, caller, session);
+            }
+            let (response, out_len) =
+                ctx.service
+                    .handle_request(caller, request, payload, &mut ctx.response_payload[..]);
+            LinuxSocketDispatch::Done(response, out_len)
+        }
+        _ => LinuxSocketDispatch::NotHandled,
+    }
+}
+
+/// Answers `request` at once, or returns `None` when it was parked or started a TLS
+/// transaction; the pumps complete those later.
+fn handle_service_request<F: Future<Output = TlsJobOutput>>(
+    ctx: &mut ServiceContext<'_>,
+    tls: &mut TlsJob<'_, F>,
+    request_id: u64,
+    caller: clean_slate_network::protocol::TrustedCaller,
+    request: NetworkRequest,
+    payload: &[u8],
+) -> Option<(NetworkResponse, u32)> {
+    if ctx.parked.contains(request_id)
+        || tls
+            .active
+            .as_ref()
+            .is_some_and(|active| active.request_id == request_id)
+    {
+        return None;
+    }
+    match handle_linux_socket_data_plane(ctx, request_id, caller, request, payload) {
         LinuxSocketDispatch::Done(response, out_len) => return Some((response, out_len)),
         LinuxSocketDispatch::Deferred => return None,
         LinuxSocketDispatch::NotHandled => {}
     }
     match request {
-        NetworkRequest::Resolve { name } => Some((handle_service_resolve(caller, name), 0)),
-        NetworkRequest::Connect { session, dest }
-            if matches!(service.session_kind(caller, session), Ok(SocketKind::Tcp)) =>
-        {
-            Some(service.handle_request(
-                caller,
-                NetworkRequest::Connect { session, dest },
-                payload,
-                response_payload,
-            ))
-        }
+        NetworkRequest::Resolve { name } => handle_service_resolve(ctx, request_id, caller, name),
         NetworkRequest::Send {
             session,
             payload_len,
-        } if matches!(service.session_kind(caller, session), Ok(SocketKind::Tcp)) => {
+        } if matches!(
+            ctx.service.session_kind(caller, session),
+            Ok(SocketKind::Tcp)
+        ) =>
+        {
             if payload.len() != payload_len as usize {
                 return Some((
                     NetworkResponse::Error {
@@ -1641,101 +1641,84 @@ fn handle_service_request(
                     0,
                 ));
             }
+            match start_service_tls_send(ctx, tls, request_id, caller, session, payload) {
+                Ok(()) => None,
+                Err(response) => Some((response, 0)),
+            }
+        }
+        other => {
             Some(
-                match handle_service_tls_send(service, service_generation, caller, session, payload)
-                {
-                    Ok(bytes_sent) => (NetworkResponse::Send { bytes_sent }, 0),
-                    Err(response) => (response, 0),
-                },
+                ctx.service
+                    .handle_request(caller, other, payload, &mut ctx.response_payload[..]),
             )
         }
-        other => Some(service.handle_request(caller, other, payload, response_payload)),
     }
 }
 
+fn resolve_response(
+    result: Result<(Ipv4Addr, u32), clean_slate_network::dns::DnsError>,
+) -> NetworkResponse {
+    match result {
+        Ok((addr, ttl)) => NetworkResponse::Resolve { addr, ttl },
+        Err(err) => NetworkResponse::Error {
+            code: NetworkError::from(err).code(),
+        },
+    }
+}
+
+/// Answers from the cache, or starts a query and parks the request; the resolver's own
+/// deadline (enforced in `drain_ingress`) bounds the wait.
 fn handle_service_resolve(
+    ctx: &mut ServiceContext<'_>,
+    request_id: u64,
     caller: clean_slate_network::protocol::TrustedCaller,
     name: BoundedHostname,
-) -> NetworkResponse {
-    let name = match name.as_str() {
-        Ok(name) => name,
-        Err(_) => {
-            return NetworkResponse::Error {
-                code: NetworkError::InvalidRequest.code(),
-            };
-        }
+) -> Option<(NetworkResponse, u32)> {
+    let error = |err: NetworkError| Some((NetworkResponse::Error { code: err.code() }, 0));
+    let Ok(name) = name.as_str() else {
+        return error(NetworkError::InvalidRequest);
     };
-    let resolver = unsafe {
-        match (*service_dns_resolver_slot()).as_mut() {
-            Some(resolver) => resolver,
-            None => {
-                return NetworkResponse::Error {
-                    code: NetworkError::NotFound.code(),
-                };
-            }
-        }
+    let Ok(resolver) = udp_resolver() else {
+        return error(NetworkError::NotFound);
     };
-    let start = match monotonic_ticks() {
-        Ok(tick) => tick,
-        Err(_) => {
-            return NetworkResponse::Error {
-                code: NetworkError::Timeout.code(),
-            };
-        }
+    let Ok(now) = monotonic_ticks() else {
+        return error(NetworkError::Timeout);
     };
-    let deadline = start.saturating_add(ms_to_irq_ticks(DNS_QUERY_TIMEOUT_MS));
-    let query_id = match resolver.resolve(start, caller, name) {
-        Ok(ResolveOutcome::Cached { addr, ttl }) => return NetworkResponse::Resolve { addr, ttl },
+    if !ctx.parked.has_room() {
+        PARKED_REFUSED_FULL.fetch_add(1, Ordering::Relaxed);
+        return Some((queue_full(), 0));
+    }
+    let query_id = match resolver.resolve(now, caller, name) {
+        Ok(ResolveOutcome::Cached { addr, ttl }) => {
+            return Some((NetworkResponse::Resolve { addr, ttl }, 0));
+        }
         Ok(ResolveOutcome::Pending { query_id }) => query_id,
-        Err(err) => {
-            return NetworkResponse::Error {
-                code: NetworkError::from(err).code(),
-            };
-        }
+        Err(err) => return error(NetworkError::from(err)),
     };
-    for _ in 0..DNS_POLL_LIMIT {
-        let now = match monotonic_ticks() {
-            Ok(tick) => tick,
-            Err(_) => {
-                return NetworkResponse::Error {
-                    code: NetworkError::Timeout.code(),
-                };
-            }
-        };
-        if let Err(err) = resolver.poll(now) {
-            return NetworkResponse::Error {
-                code: NetworkError::from(err).code(),
-            };
-        }
-        if let Some(result) = resolver.take_result(query_id, caller) {
-            return match result {
-                Ok((addr, ttl)) => NetworkResponse::Resolve { addr, ttl },
-                Err(err) => NetworkResponse::Error {
-                    code: NetworkError::from(err).code(),
-                },
-            };
-        }
-        if now >= deadline {
-            break;
-        }
-        if let Err(response) = wait_request_ingress(StackConsumer::Udp, now, deadline, None) {
-            return response;
-        }
-    }
-    NetworkResponse::Error {
-        code: NetworkError::Timeout.code(),
-    }
+    ctx.parked.park(ParkedRequest {
+        request_id,
+        caller,
+        work: ParkedWork::Resolve { query_id },
+    });
+    None
 }
 
-fn handle_service_tls_send(
-    service: &mut ServiceState,
-    service_generation: u64,
+/// Starts the TLS transaction for an M7 TCP `Send`: copies the request, claims the TLS
+/// scratch, and installs the transaction future that `pump_tls_job` drives.
+fn start_service_tls_send<F: Future<Output = TlsJobOutput>>(
+    ctx: &mut ServiceContext<'_>,
+    tls: &mut TlsJob<'_, F>,
+    request_id: u64,
     caller: clean_slate_network::protocol::TrustedCaller,
     session: SessionId,
     payload: &[u8],
-) -> Result<u32, NetworkResponse> {
+) -> Result<(), NetworkResponse> {
+    if tls.active.is_some() {
+        TLS_REFUSED_BUSY.fetch_add(1, Ordering::Relaxed);
+        return Err(queue_full());
+    }
     let scratch = TlsScratchGuard::claim()?;
-    let dest = match service.connected_dest(caller, session) {
+    let remote = match ctx.service.connected_dest(caller, session) {
         Ok(Some(dest)) => dest,
         Ok(None) => {
             return Err(NetworkResponse::Error {
@@ -1744,71 +1727,111 @@ fn handle_service_tls_send(
         }
         Err(response) => return Err(response),
     };
-    let tick = monotonic_ticks().map_err(|_| NetworkResponse::Error {
+    let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
         code: NetworkError::Timeout.code(),
     })?;
-    let tcp = unsafe { &mut *service_tls_transport_ptr() };
-    tcp.reset(tick).map_err(|err| NetworkResponse::Error {
-        code: NetworkError::from(err).code(),
+    let rng = RdrandRng::new().map_err(|_| NetworkResponse::Error {
+        code: NetworkError::Protocol.code(),
     })?;
-    tcp.stack_mut()
+    shared_tcp_transport_mut()
+        .stack_mut()
         .arp_cache_mut()
-        .insert(dest.addr, PEER_MAC, tick);
-    let read_buf = unsafe { &mut *service_tls_read_buf_ptr() };
-    let write_buf = unsafe { &mut *service_tls_write_buf_ptr() };
-    read_buf.fill(0);
-    write_buf.fill(0);
-    let mut app_buf = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-    let response_len = {
-        let ca = include_bytes!("../../../xtask/fixtures/m7/ca.crt");
-        let config = TlsConfig::new(TLS_SERVER_NAME, ca, VALIDATION_TIME_UNIX);
-        let rng = RdrandRng::new().map_err(|_| NetworkResponse::Error {
-            code: NetworkError::Protocol.code(),
-        })?;
-        let service_owner =
-            clean_slate_network::protocol::TrustedCaller::new(0x5200, 0, service_generation);
-        let handshake_deadline = tick.saturating_add(8_192);
-        let (mut tls, _) = TlsSession::connect_with_handshake_deadline(
-            tick,
-            handshake_deadline,
-            tcp,
-            service_owner,
-            dest,
-            config,
-            rng,
-            read_buf,
-            write_buf,
-            None,
-        )
-        .map_err(|err| NetworkResponse::Error {
-            code: map_tls_error_code(err) as u16,
-        })?;
-        write_all_tls(&mut tls, tick.saturating_add(1), payload)
-            .map_err(|err| NetworkResponse::Error { code: err as u16 })?;
-        let response_len = read_tls(&mut tls, tick.saturating_add(2), &mut app_buf)
-            .map_err(|err| NetworkResponse::Error { code: err as u16 })?;
-        let tcp_session = tls.tcp_session_id();
-        let close_now = monotonic_ticks()
-            .map_err(|_| NetworkResponse::Error {
-                code: NetworkError::Timeout.code(),
-            })?
-            .saturating_add(ms_to_irq_ticks(TLS_CLOSE_TIMEOUT_MS));
-        tls.close(close_now).map_err(|err| NetworkResponse::Error {
-            code: map_tls_error_code(err) as u16,
-        })?;
-        drop(tls);
-        drain_tcp_close(tcp, service_owner, tcp_session, close_now)?;
-        response_len
+        .insert(remote.addr, PEER_MAC, now);
+    let mut input = TlsJobInput {
+        remote,
+        owner: plain_tcp_owner(ctx.service_generation),
+        budget: TlsTransactionBudget {
+            handshake_ticks: ms_to_irq_ticks(TLS_HANDSHAKE_TIMEOUT_MS),
+            io_ticks: ms_to_irq_ticks(TLS_IO_TIMEOUT_MS),
+        },
+        rng,
+        request: [0u8; NETWORK_MAX_PAYLOAD_BYTES],
+        request_len: payload.len(),
     };
-    let reset_now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
-        code: NetworkError::Timeout.code(),
-    })?;
-    tcp.reset(reset_now).map_err(|err| NetworkResponse::Error {
-        code: NetworkError::from(err).code(),
-    })?;
-    scratch.verify_reused()?;
-    service.stage_response_payload(caller, session, &app_buf[..response_len])?;
-    Ok(payload.len() as u32)
+    input
+        .request
+        .get_mut(..payload.len())
+        .ok_or(NetworkResponse::Error {
+            code: NetworkError::InvalidRequest.code(),
+        })?
+        .copy_from_slice(payload);
+    tls.future.set(Some((tls.start)(input)));
+    tls.active = Some(ActiveTls {
+        request_id,
+        caller,
+        session,
+        bytes_sent: payload.len() as u32,
+        scratch,
+    });
+    Ok(())
+}
+
+/// Polls the in-flight TLS transaction once and completes its request when it resolves or
+/// its phase deadline passes. Returns whether the request completed.
+fn pump_tls_job<F: Future<Output = TlsJobOutput>>(
+    ctx: &mut ServiceContext<'_>,
+    tls: &mut TlsJob<'_, F>,
+    now: u64,
+) -> bool {
+    let Some(future) = tls.future.as_mut().as_pin_mut() else {
+        return false;
+    };
+    TLS_CLOCK.set_now(now);
+    let output = match future.poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(output) => Some(output),
+        Poll::Pending if now >= TLS_CLOCK.phase_deadline() => None,
+        Poll::Pending => return false,
+    };
+    // Dropping an unfinished transaction aborts its TCP connection.
+    tls.future.set(None);
+    let Some(active) = tls.active.take() else {
+        return true;
+    };
+    let tls_error = |err| NetworkResponse::Error {
+        code: map_tls_error_code(err) as u16,
+    };
+    let response = match output {
+        None => tls_error(TlsError::Timeout),
+        Some(TlsJobOutput {
+            result: Ok(len),
+            response,
+        }) => match active.scratch.verify_reused().and_then(|()| {
+            ctx.service
+                .stage_response_payload(active.caller, active.session, &response[..len])
+        }) {
+            Ok(()) => NetworkResponse::Send {
+                bytes_sent: active.bytes_sent,
+            },
+            Err(response) => response,
+        },
+        Some(TlsJobOutput {
+            result: Err(err), ..
+        }) => tls_error(err),
+    };
+    ctx.complete(active.request_id, response, 0);
+    true
+}
+
+/// Drops the in-flight TLS transaction (aborting its connection) if `caller` owns it.
+fn cancel_tls_job_for<F>(
+    ctx: &mut ServiceContext<'_>,
+    tls: &mut TlsJob<'_, F>,
+    caller: clean_slate_network::protocol::TrustedCaller,
+) {
+    if !tls
+        .active
+        .as_ref()
+        .is_some_and(|active| active.caller == caller)
+    {
+        return;
+    }
+    tls.future.set(None);
+    if let Some(active) = tls.active.take() {
+        let reset = NetworkResponse::Error {
+            code: NetworkError::Reset.code(),
+        };
+        ctx.complete(active.request_id, reset, 0);
+    }
 }
 
 fn current_heap_offset() -> usize {
@@ -1859,13 +1882,7 @@ impl Drop for TlsScratchGuard {
     }
 }
 
-fn drain_holder_exits(
-    service: &mut NetworkService<ServiceLink, AllowAllAuthorizer>,
-    service_generation: u64,
-    raw_handle: u64,
-    response_buf: &mut [u8; NETWORK_RESPONSE_BYTES],
-    response_payload: &mut [u8; NETWORK_MAX_PAYLOAD_BYTES],
-) {
+fn drain_holder_exits<F>(ctx: &mut ServiceContext<'_>, tls: &mut TlsJob<'_, F>) {
     loop {
         let mut caller_buf = [0u8; 24];
         let status = net_request([
@@ -1887,15 +1904,14 @@ fn drain_holder_exits(
             u64::from_le_bytes(caller_buf[8..16].try_into().unwrap()),
             u64::from_le_bytes(caller_buf[16..24].try_into().unwrap()),
         );
-        cancel_pending_linux_udp_where(raw_handle, response_buf, response_payload, |entry| {
-            entry.caller == caller
-        });
+        ctx.cancel_parked_where(|entry| entry.caller == caller);
+        cancel_tls_job_for(ctx, tls, caller);
         if let Some(resolver) = unsafe { (*service_dns_resolver_slot()).as_mut() } {
             resolver.on_holder_exit(caller);
         }
         forget_linux_udp_endpoints_for_caller(caller);
-        close_linux_tcp_connections_for_caller(service_generation, caller);
-        let (sessions, pending) = service.on_holder_exit(caller);
+        close_linux_tcp_connections_for_caller(ctx.service_generation, caller);
+        let (sessions, pending) = ctx.service.on_holder_exit(caller);
         let ack = net_request([
             NET_SUBOP_ACK_HOLDER_EXIT,
             sessions as u64,
@@ -2024,6 +2040,18 @@ impl RdrandRng {
     }
 }
 
+/// One RDRAND word. `RngCore` cannot report failure, so persistent underflow ends the
+/// process through the panic handler (result `ERROR`) instead of spinning.
+fn rdrand_word() -> u64 {
+    for _ in 0..RDRAND_RETRIES {
+        let mut word = 0u64;
+        if unsafe { _rdrand64_step(&mut word) } != 0 {
+            return word;
+        }
+    }
+    panic!("rdrand exhausted");
+}
+
 impl CryptoRng for RdrandRng {}
 
 impl RngCore for RdrandRng {
@@ -2034,23 +2062,12 @@ impl RngCore for RdrandRng {
     }
 
     fn next_u64(&mut self) -> u64 {
-        let mut word = 0u64;
-        while unsafe { _rdrand64_step(&mut word) } == 0 {
-            spin_loop();
-        }
-        word
+        rdrand_word()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        let mut offset = 0usize;
-        while offset < dest.len() {
-            let mut word = 0u64;
-            while unsafe { _rdrand64_step(&mut word) } == 0 {
-                spin_loop();
-            }
-            let take = (dest.len() - offset).min(8);
-            dest[offset..offset + take].copy_from_slice(&word.to_le_bytes()[..take]);
-            offset += take;
+        for chunk in dest.chunks_mut(8) {
+            chunk.copy_from_slice(&rdrand_word().to_le_bytes()[..chunk.len()]);
         }
     }
 
@@ -2106,19 +2123,16 @@ fn client_poll(
     Ok(status)
 }
 
+/// The kernel blocks `POLL` until the request completes; it only answers `PENDING` when
+/// that wait was cancelled, which the fixtures treat as a failure rather than re-polling.
 fn poll_until_done(
     handle: u64,
     request_id: u64,
     out_payload: &mut [u8],
 ) -> Result<NetworkResponse, u64> {
     let mut response_wire = [0u8; NETWORK_RESPONSE_BYTES];
-    loop {
-        match client_poll(handle, request_id, &mut response_wire, out_payload) {
-            Ok(_) => return NetworkResponse::decode(&response_wire).map_err(|_| 0u64),
-            Err(NETWORK_STATUS_PENDING) => {}
-            Err(error) => return Err(error),
-        }
-    }
+    client_poll(handle, request_id, &mut response_wire, out_payload)?;
+    NetworkResponse::decode(&response_wire).map_err(|_| 0u64)
 }
 
 fn run_converged_client(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
@@ -2182,81 +2196,6 @@ fn run_tls_phase(resolved_addr: Ipv4Addr) -> Result<usize, u64> {
         NetworkResponse::Error { code } => Err(code as u64),
         _ => Err(0),
     }
-}
-
-fn drain_tcp_close(
-    tcp: &mut TcpTransport<ServiceLink>,
-    owner: clean_slate_network::protocol::TrustedCaller,
-    session: SessionId,
-    start_tick: u64,
-) -> Result<(), NetworkResponse> {
-    let deadline = start_tick.saturating_add(ms_to_irq_ticks(TLS_CLOSE_TIMEOUT_MS));
-    for _ in 0..TLS_POLL_LIMIT {
-        let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
-            code: NetworkError::Timeout.code(),
-        })?;
-        tcp.poll(now)
-            .map_err(|err| NetworkResponse::Error { code: err.code() })?;
-        match tcp.state(session, owner) {
-            Ok(state) if state.is_terminal() => return Ok(()),
-            Err(NetworkError::NotFound) => return Ok(()),
-            Ok(_) => {}
-            Err(err) => return Err(NetworkResponse::Error { code: err.code() }),
-        }
-        if now >= deadline {
-            break;
-        }
-        wait_request_ingress(StackConsumer::Tcp, now, deadline, tcp.next_timer_deadline())?;
-    }
-    Ok(())
-}
-
-fn write_all_tls(
-    tls: &mut TlsSession<'_, '_, ServiceLink>,
-    start_tick: u64,
-    data: &[u8],
-) -> Result<(), u64> {
-    let deadline = start_tick.saturating_add(ms_to_irq_ticks(TLS_IO_TIMEOUT_MS));
-    let mut offset = 0usize;
-    for _ in 0..TLS_POLL_LIMIT {
-        let tick = monotonic_ticks()?;
-        match tls.write(tick, &data[offset..]) {
-            Ok(0) => {}
-            Ok(written) => offset = offset.saturating_add(written),
-            Err(err) => return Err(map_tls_error_code(err)),
-        }
-        if offset >= data.len() {
-            tls.flush().map_err(map_tls_error_code)?;
-            return Ok(());
-        }
-        if tick >= deadline {
-            break;
-        }
-        yield_cpu();
-    }
-    Err(0)
-}
-
-fn read_tls(
-    tls: &mut TlsSession<'_, '_, ServiceLink>,
-    start_tick: u64,
-    out: &mut [u8],
-) -> Result<usize, u64> {
-    let deadline = start_tick.saturating_add(ms_to_irq_ticks(TLS_IO_TIMEOUT_MS));
-    for _ in 0..TLS_POLL_LIMIT {
-        let tick = monotonic_ticks()?;
-        match tls.read(tick, out) {
-            Ok(0) => {}
-            Ok(n) => return Ok(n),
-            Err(TlsError::Timeout) => {}
-            Err(err) => return Err(map_tls_error_code(err)),
-        }
-        if tick >= deadline {
-            break;
-        }
-        yield_cpu();
-    }
-    Err(0)
 }
 
 fn map_tls_error_code(err: TlsError) -> u64 {

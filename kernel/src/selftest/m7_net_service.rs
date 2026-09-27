@@ -56,9 +56,6 @@ const INFLIGHT_SLOT: usize = 3;
 const STALE_SLOT: usize = 4;
 const CAPACITY_SLOT: usize = 5;
 
-/// `aux_status == 1` releases a pre-spawned fixture from its idle loop (M6-style RR).
-const FIXTURE_PHASE_RELEASED: u64 = 1;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum M7Phase {
     AwaitClientEcho,
@@ -99,21 +96,6 @@ fn set_state(state: Option<M7NetSelfTestState>) {
 
 fn state() -> M7NetSelfTestState {
     unsafe { (*M7_NET_SELF_TEST_STATE.get()).expect("m7 net self-test state was not initialized") }
-}
-
-fn patch_fixture_bootstrap(
-    pid: u64,
-    kernel_root: u64,
-    patch: impl FnOnce(&mut NetworkServiceBootstrap),
-) {
-    let root =
-        userspace_process_root_frame(pid).unwrap_or_else(|message| fatal_kernel_error(message));
-    activate_address_space_root(root);
-    unsafe {
-        let bootstrap = &mut *(NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *mut NetworkServiceBootstrap);
-        patch(bootstrap);
-    }
-    activate_address_space_root(kernel_root);
 }
 
 fn read_fixture_bootstrap(pid: u64, kernel_root: u64) -> NetworkServiceBootstrap {
@@ -161,10 +143,14 @@ fn read_fixture_bootstrap(pid: u64, kernel_root: u64) -> NetworkServiceBootstrap
     }
 }
 
-fn release_fixture_phase(pid: u64, kernel_root: u64) {
-    patch_fixture_bootstrap(pid, kernel_root, |bootstrap| {
-        bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
-    });
+/// Starts the fixture for the next phase. Each fixture is spawned only when its phase
+/// begins, so none of them has to wait (or spin) for a release signal.
+fn spawn_phase_fixture(slot: usize, bootstrap: NetworkServiceBootstrap, grant_client: bool) -> u64 {
+    let allocator = service_lifecycle_syscall_allocator_mut()
+        .as_mut()
+        .unwrap_or_else(|| fatal_kernel_error("m7 net allocator missing"));
+    let controller = unsafe { service_lifecycle_controller_mut() };
+    launch_aux_with_bootstrap(controller, allocator, slot, bootstrap, grant_client).pid
 }
 
 pub(crate) fn on_holder_exit_acked(holder_pid: u64, sessions: u64, pending: u64) {
@@ -178,20 +164,21 @@ pub(crate) fn on_holder_exit_acked(holder_pid: u64, sessions: u64, pending: u64)
     if sessions != 1 || pending != 0 {
         fatal_kernel_error("m7 holder exit ack counts mismatch");
     }
-    let service_root = unsafe {
-        service_lifecycle_controller_mut()
-            .live_pid(NETWORK_SERVICE_ID)
-            .and_then(|pid| userspace_process_root_frame(pid).ok())
-            .unwrap_or_else(kernel_root_frame)
-    };
-    release_fixture_phase(test_state.fixtures.unauthorized, service_root);
+    let unauthorized = spawn_phase_fixture(
+        UNAUTHORIZED_SLOT,
+        NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE, 0),
+        false,
+    );
     set_state(Some(M7NetSelfTestState {
         lifecycle_capability: test_state.lifecycle_capability,
         phase: M7Phase::AwaitUnauthorized,
         session_id_raw: test_state.session_id_raw,
         service_generation: test_state.service_generation,
         service_pid: test_state.service_pid,
-        fixtures: test_state.fixtures,
+        fixtures: M7FixturePids {
+            unauthorized,
+            ..test_state.fixtures
+        },
     }));
 }
 
@@ -282,7 +269,7 @@ pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
         NETWORK_SERVICE_ID,
     );
     log_service_started(controller, 1);
-    let fixtures = spawn_all_fixtures(controller, allocator);
+    let fixtures = spawn_primary_client(controller, allocator);
     set_state(Some(M7NetSelfTestState {
         lifecycle_capability,
         phase: M7Phase::AwaitClientEcho,
@@ -327,49 +314,25 @@ fn launch_network_service(
         .unwrap_or_else(|_| fatal_kernel_error("m7 network service launch failed"));
 }
 
-fn spawn_all_fixtures(
+/// Only the primary client starts with the service; the phase fixtures are spawned as
+/// their phase begins (see `spawn_phase_fixture` and `handle_userspace_network_entry`).
+fn spawn_primary_client(
     controller: &mut ServiceLifecycleController,
     allocator: &mut PageAllocator,
 ) -> M7FixturePids {
-    let generation = 1;
-    let mut client_bootstrap = NetworkServiceBootstrap::new(PRIMARY_CLIENT_MODE, generation);
-    client_bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
-    let client =
-        launch_aux_with_bootstrap(controller, allocator, CLIENT_SLOT, client_bootstrap, true);
-    let unauthorized = launch_aux_with_bootstrap(
+    let client = launch_aux_with_bootstrap(
         controller,
         allocator,
-        UNAUTHORIZED_SLOT,
-        NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE, 0),
-        false,
-    );
-    let inflight = launch_aux_with_bootstrap(
-        controller,
-        allocator,
-        INFLIGHT_SLOT,
-        NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_INFLIGHT_ARM, generation),
-        true,
-    );
-    let stale = launch_aux_with_bootstrap(
-        controller,
-        allocator,
-        STALE_SLOT,
-        NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_STALE_CLOSE, 2),
-        true,
-    );
-    let capacity = launch_aux_with_bootstrap(
-        controller,
-        allocator,
-        CAPACITY_SLOT,
-        NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_CAPACITY_LOOP, generation),
+        CLIENT_SLOT,
+        NetworkServiceBootstrap::new(PRIMARY_CLIENT_MODE, 1),
         true,
     );
     M7FixturePids {
         client: client.pid,
-        unauthorized: unauthorized.pid,
-        inflight: inflight.pid,
-        stale: stale.pid,
-        capacity: capacity.pid,
+        unauthorized: 0,
+        inflight: 0,
+        stale: 0,
+        capacity: 0,
     }
 }
 
@@ -431,6 +394,7 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
     let kernel_root = kernel_root_frame();
     let mut session_id_raw = test_state.session_id_raw;
     let mut service_generation = test_state.service_generation;
+    let mut fixtures = test_state.fixtures;
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("m7 net allocator missing"));
@@ -502,14 +466,22 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
             {
                 fatal_kernel_error("m7 unauthorized probe before holder exit ack");
             }
-            patch_fixture_bootstrap(test_state.fixtures.inflight, kernel_root, |bootstrap| {
-                bootstrap.session_id_raw = session_id_raw;
-                bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
-            });
+            let mut bootstrap = NetworkServiceBootstrap::new(
+                NETWORK_SERVICE_MODE_INFLIGHT_ARM,
+                test_state.service_generation,
+            );
+            bootstrap.session_id_raw = session_id_raw;
+            fixtures.inflight =
+                launch_aux_with_bootstrap(controller, allocator, INFLIGHT_SLOT, bootstrap, true)
+                    .pid;
             M7Phase::AwaitInflightArm
         }
         (M7Phase::AwaitInflightArm, NETWORK_SERVICE_MODE_INFLIGHT_ARM) => {
             if report.result_code != NETWORK_SERVICE_RESULT_OK {
+                kernel_log_fmt(format_args!(
+                    "[NET ] inflight arm error code={}\n",
+                    report.aux_status
+                ));
                 fatal_kernel_error("m7 inflight arm failed");
             }
             terminate_network_service(controller, allocator, test_state.lifecycle_capability);
@@ -521,7 +493,7 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 session_id_raw,
                 service_generation,
                 service_pid: test_state.service_pid,
-                fixtures: test_state.fixtures,
+                fixtures,
             }));
             launch_network_service(
                 controller,
@@ -537,19 +509,13 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
             kernel_log_fmt(format_args!(
                 "[NET ] inflight failed count={inflight_failed}\n"
             ));
-            for pid in [test_state.fixtures.stale, test_state.fixtures.capacity] {
-                controller
-                    .grant_network_client_capability(pid)
-                    .unwrap_or_else(|message| fatal_kernel_error(message));
-            }
-            patch_fixture_bootstrap(test_state.fixtures.stale, kernel_root, |bootstrap| {
-                bootstrap.session_id_raw = session_id_raw;
-                bootstrap.service_generation = service_generation;
-                bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
-            });
-            patch_fixture_bootstrap(test_state.fixtures.capacity, kernel_root, |bootstrap| {
-                bootstrap.service_generation = service_generation;
-            });
+            // Stale-generation probe: a client granted by the new instance presents the
+            // session id minted by the terminated one.
+            let mut bootstrap =
+                NetworkServiceBootstrap::new(NETWORK_SERVICE_MODE_STALE_CLOSE, service_generation);
+            bootstrap.session_id_raw = session_id_raw;
+            fixtures.stale =
+                launch_aux_with_bootstrap(controller, allocator, STALE_SLOT, bootstrap, true).pid;
             M7Phase::AwaitStaleClose
         }
         (M7Phase::AwaitStaleClose, NETWORK_SERVICE_MODE_STALE_CLOSE) => {
@@ -560,10 +526,17 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
                 "[NET ] stale-session denied generation={}\n",
                 report.aux_status
             ));
-            patch_fixture_bootstrap(test_state.fixtures.capacity, kernel_root, |bootstrap| {
-                bootstrap.service_generation = service_generation;
-                bootstrap.aux_status = FIXTURE_PHASE_RELEASED;
-            });
+            fixtures.capacity = launch_aux_with_bootstrap(
+                controller,
+                allocator,
+                CAPACITY_SLOT,
+                NetworkServiceBootstrap::new(
+                    NETWORK_SERVICE_MODE_CAPACITY_LOOP,
+                    service_generation,
+                ),
+                true,
+            )
+            .pid;
             M7Phase::AwaitCapacityLoop
         }
         (M7Phase::AwaitCapacityLoop, NETWORK_SERVICE_MODE_CAPACITY_LOOP) => {
@@ -587,7 +560,7 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
         } else {
             test_state.service_pid
         },
-        fixtures: test_state.fixtures,
+        fixtures,
     }));
 
     let teardown = teardown_current_process(allocator, kernel_root, 0, false)
