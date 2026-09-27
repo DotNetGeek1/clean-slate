@@ -27,12 +27,15 @@ use crate::syscall::block_current_syscall;
 use crate::syscall::initialize_syscall_abi;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
+use crate::time::monotonic_ns;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 pub(crate) const M9_BLOCK_WAKE_PASS_MARKER: &str = "[M9.E] PASS";
 
 const TEST_WAIT_KEY: u64 = 0x145;
 const REQUIRED_CYCLES: usize = 8;
+/// Timer IRQs that must land while the consumer is blocked, with its progress
+/// counter flat. This counts interrupt deliveries (proof it isn't spinning), not time.
 const PROGRESS_FLAT_TICKS: u64 = 3;
 
 /// Consumer: progress syscall then block (key in rdi, deadline in rsi).
@@ -70,10 +73,11 @@ static CONSUMER_TID: AtomicU64 = AtomicU64::new(0);
 static TEST_PASSED: AtomicUsize = AtomicUsize::new(0);
 static IDLE_SOAK_DONE: AtomicUsize = AtomicUsize::new(0);
 static IDLE_TICKS: AtomicU64 = AtomicU64::new(0);
+static BLOCK_NS: AtomicU64 = AtomicU64::new(0);
 /// Historical acceptance: 150 ticks at ~160 ms uncalibrated LAPIC period (~24 s idle soak).
-fn idle_soak_ticks() -> u64 {
-    crate::time::ticks_from_millis(24_000).ok().unwrap_or(150)
-}
+const IDLE_SOAK_NS: u64 = 24_000_000_000;
+/// Odd cycles resume by timeout instead of wake.
+const CYCLE_TIMEOUT_NS: u64 = 5_000_000;
 const PRODUCER_BLOCK_KEY: u64 = 0x146;
 
 fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
@@ -86,6 +90,7 @@ fn install_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
     TEST_PASSED.store(0, Ordering::Relaxed);
     IDLE_SOAK_DONE.store(0, Ordering::Relaxed);
     IDLE_TICKS.store(0, Ordering::Relaxed);
+    BLOCK_NS.store(0, Ordering::Relaxed);
 
     let stacks = unsafe { &*task_stacks_mut() };
     let consumer = spawn_native_userspace_process_with_code(
@@ -127,6 +132,8 @@ pub(crate) fn start_m9_block_wake_self_test(allocator: PageAllocator) -> ! {
         fatal_kernel_error(message);
     }
     initialize_timer();
+    // `m3-entry-self-test` (pulled in by this feature) skips calibration inside `initialize_timer`.
+    crate::time::calibration::calibrate_apic_tick();
     serial_write_line("[TIME] timer initialized");
 
     let frame_pointer = match start_current_scheduler_thread() {
@@ -170,30 +177,21 @@ pub(crate) fn handle_wait_block_syscall(frame: &mut SyscallContext) {
         block_current_syscall(frame, key, None);
         return;
     }
-    if IDLE_SOAK_DONE.load(Ordering::Relaxed) == 0 {
-        let key = WaitKey(TEST_WAIT_KEY);
-        let deadline = Some(Deadline::IrqTicks(
-            kernel_ticks().saturating_add(idle_soak_ticks()),
-        ));
-        CONSUMER_BLOCKED.store(1, Ordering::Relaxed);
-        BLOCK_TICK.store(kernel_ticks(), Ordering::Relaxed);
-        BLOCK_PROGRESS_SNAPSHOT.store(CONSUMER_PROGRESS.load(Ordering::Relaxed), Ordering::Relaxed);
-        FLAT_PROGRESS_LOGGED.store(0, Ordering::Relaxed);
-        block_current_syscall(frame, key, deadline);
-        return;
-    }
-    let key = WaitKey(TEST_WAIT_KEY);
-    let cycle = CYCLES_DONE.load(Ordering::Relaxed);
-    let deadline = if cycle % 2 == 1 {
-        Some(Deadline::IrqTicks(kernel_ticks() + 5))
+    let timeout_ns = if IDLE_SOAK_DONE.load(Ordering::Relaxed) == 0 {
+        Some(IDLE_SOAK_NS)
+    } else if CYCLES_DONE.load(Ordering::Relaxed) % 2 == 1 {
+        Some(CYCLE_TIMEOUT_NS)
     } else {
         None
     };
+    let now_ns = monotonic_ns();
+    let deadline = timeout_ns.map(|ns| Deadline::MonotonicNs(now_ns.saturating_add(ns)));
     CONSUMER_BLOCKED.store(1, Ordering::Relaxed);
     BLOCK_TICK.store(kernel_ticks(), Ordering::Relaxed);
+    BLOCK_NS.store(now_ns, Ordering::Relaxed);
     BLOCK_PROGRESS_SNAPSHOT.store(CONSUMER_PROGRESS.load(Ordering::Relaxed), Ordering::Relaxed);
     FLAT_PROGRESS_LOGGED.store(0, Ordering::Relaxed);
-    block_current_syscall(frame, key, deadline);
+    block_current_syscall(frame, WaitKey(TEST_WAIT_KEY), deadline);
 }
 
 pub(crate) fn on_blocked_syscall_resumed(outcome: WaitOutcome, result_rax: u64) {
@@ -208,12 +206,24 @@ pub(crate) fn on_blocked_syscall_resumed(outcome: WaitOutcome, result_rax: u64) 
         return;
     }
     CONSUMER_BLOCKED.store(0, Ordering::Relaxed);
+    if CONSUMER_PROGRESS.load(Ordering::Relaxed) != BLOCK_PROGRESS_SNAPSHOT.load(Ordering::Relaxed)
+    {
+        fatal_kernel_error("consumer made progress while blocked");
+    }
     if IDLE_SOAK_DONE.load(Ordering::Relaxed) == 0 {
+        // Only the soak is long enough to guarantee timer IRQs at any host tick
+        // rate; the 5 ms cycle blocks can end before a single IRQ lands.
+        if FLAT_PROGRESS_LOGGED.load(Ordering::Relaxed) == 0 {
+            fatal_kernel_error("idle soak saw no timer IRQs while blocked");
+        }
         let ticks = IDLE_TICKS.load(Ordering::Relaxed);
-        let elapsed = kernel_ticks().saturating_sub(BLOCK_TICK.load(Ordering::Relaxed));
-        kernel_log_fmt(format_args!("[M9.E] idle_ticks={}\n", ticks));
-        if elapsed < idle_soak_ticks() {
-            fatal_kernel_error("idle soak did not run long enough");
+        let elapsed_ns = monotonic_ns().saturating_sub(BLOCK_NS.load(Ordering::Relaxed));
+        kernel_log_fmt(format_args!(
+            "[M9.E] idle_ticks={} idle_ns={}\n",
+            ticks, elapsed_ns
+        ));
+        if outcome != WaitOutcome::TimedOut || elapsed_ns < IDLE_SOAK_NS {
+            fatal_kernel_error("idle soak did not time out at its deadline");
         }
         kernel_log_line("[M9.E] timeout resumed after idle");
         IDLE_SOAK_DONE.store(1, Ordering::Relaxed);
