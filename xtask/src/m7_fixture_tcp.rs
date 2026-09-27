@@ -18,9 +18,9 @@ pub enum FixtureTlsCert {
     WrongName,
 }
 
-/// Listening sockets per fixture port. A served connection's socket cannot listen until it
-/// is fully CLOSED (LAST-ACK after a passive close, TIME-WAIT after an active one); a guest
-/// that connects again meanwhile must still find a listener, or smoltcp answers its SYN
+/// Listening sockets per fixture port. After a passive close a served connection's socket
+/// sits in LAST-ACK until the guest acks our FIN and cannot listen meanwhile; a guest that
+/// connects again in that window must still find a listener, or smoltcp answers its SYN
 /// with RST.
 const LISTEN_BACKLOG: usize = 4;
 
@@ -43,11 +43,13 @@ impl ListenerPool {
         Self { handles, endpoint }
     }
 
-    /// Puts every fully closed socket back in LISTEN.
+    /// Puts every socket whose connection is over back in LISTEN. TIME-WAIT (after an
+    /// active close) is cut short: the guest reuses source ports, and smoltcp would swallow
+    /// a new SYN on the old 4-tuple instead of reopening the connection.
     fn relisten_closed(&self, sockets: &mut SocketSet<'_>) {
         for handle in self.handles {
             let socket = sockets.get_mut::<tcp::Socket>(handle);
-            if socket.state() == tcp::State::Closed {
+            if matches!(socket.state(), tcp::State::Closed | tcp::State::TimeWait) {
                 let _ = socket.listen(self.endpoint);
             }
         }
