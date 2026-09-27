@@ -100,12 +100,13 @@ const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
 ];
 const M9_LOW_VA_ACCEPTANCE_MARKERS: [&str; 2] = ["[M9.0] creating", "[M9.0] PASS"];
 const M9_LOW_VA_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 7] = [
+const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[M9.F] creating",
     "[M9.F] phase-1 argv line",
     "[M9.F] argv/envp/auxv OK",
     "[M9.F] exec committed pid=",
     "[M9.F] phase-2 argv line",
+    "[M9.F] exec closed FD_CLOEXEC fd, kept plain fd",
     "[M9.F] exec rejected ENOEXEC",
     "[M9.F] PASS",
 ];
@@ -144,7 +145,7 @@ const M9_LINUX_PROC_ACCEPTANCE_MARKERS: [&str; 3] =
 const M9_LINUX_PROC_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M9_ROOTFS_ACCEPTANCE_MARKERS: [&str; 2] = ["[RFS ] rootfs entries=", "[M9.K] PASS"];
 const M9_ROOTFS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 14] = [
+const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[M9.H] creating",
     "[M9.H] getcwd=/\n",
     "[M9.H] hostname=m9-fixture\n",
@@ -156,6 +157,7 @@ const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 14] = [
     "[STOR] write object=",
     "[M9.H] big write/read ok",
     "[M9.H] negative cases ok",
+    "[M9.H] open cloexec ok",
     "[M9.H] pool_before",
     "[M9.H] pool_after",
     "[M9.H] PASS",
@@ -254,13 +256,14 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 10] = [
     "[M9.E] PASS",
 ];
 const M9_USERSPACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(300);
-const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 18] = [
+const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[M9  ] creating",
     "[M9  ] busybox verified",
     "[M9  ] matrix commands=",
     "[STOR] object-service started",
-    "[M9  ] resources label=baseline",
     "[TIME] timer initialized",
+    "[M9  ] resources label=baseline",
+    "[M9  ] net-service resources label=baseline",
     "[M9  ] fs PASS",
     "[M9  ] process-pipe PASS",
     "[M9  ] dns PASS",

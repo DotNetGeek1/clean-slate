@@ -77,6 +77,7 @@ MSG msg_tmp_read,  "[M9.H] tmp read="
 MSG msg_tmp,       "[M9.H] tmp write/read ok\n"
 MSG msg_big,       "[M9.H] big write/read ok\n"
 MSG msg_neg,       "[M9.H] negative cases ok\n"
+MSG msg_cloexec,   "[M9.H] open cloexec ok\n"
 MSG msg_pass,      "[M9.H] PASS\n"
 MSG msg_fail,      "[FAIL] m9 fs probe step="
 MSG msg_rax,       " rax=0x"
@@ -228,6 +229,33 @@ dents_found:
     SYS 83, "lea rdi, [rip + path_etc_x]", "mov esi, 0755"
     EXPECT_EQ -30, 36
     PRINT msg_neg
+
+    /* open(O_CLOEXEC) sets FD_CLOEXEC itself (no F_SETFD) for a file and a directory;
+     * a plain open leaves F_GETFD clear; unsupported O_APPEND fails closed with EINVAL. */
+    SYS 2, "lea rdi, [rip + path_hostname]", "mov esi, 0x88000"
+    EXPECT_FD 37
+    mov r12, rax
+    SYS 72, "mov rdi, r12", "mov esi, 1"
+    EXPECT_EQ 1, 38
+    SYS 3, "mov rdi, r12"
+    EXPECT_EQ 0, 39
+    SYS 2, "lea rdi, [rip + path_bin]", "mov esi, 0x98000"
+    EXPECT_FD 40
+    mov r13, rax
+    SYS 72, "mov rdi, r13", "mov esi, 1"
+    EXPECT_EQ 1, 41
+    SYS 3, "mov rdi, r13"
+    EXPECT_EQ 0, 42
+    SYS 2, "lea rdi, [rip + path_hostname]", "mov esi, 0x8000"
+    EXPECT_FD 43
+    mov r12, rax
+    SYS 72, "mov rdi, r12", "mov esi, 1"
+    EXPECT_EQ 0, 44
+    SYS 3, "mov rdi, r12"
+    EXPECT_EQ 0, 45
+    SYS 2, "lea rdi, [rip + path_hostname]", "mov esi, 0x400"
+    EXPECT_EQ -22, 46
+    PRINT msg_cloexec
     PRINT msg_pass
 
     SYS 60, "xor edi, edi"
