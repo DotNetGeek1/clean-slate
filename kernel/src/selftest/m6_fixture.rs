@@ -13,7 +13,7 @@ use crate::service::spawn::launch_builtin_service;
 use crate::service::spawn::SpawnedServiceInstance;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_service_fixtures::m6_fixture::{
-    M6FixtureBootstrap, M6_FIXTURE_BOOTSTRAP_ADDRESS, M6_FIXTURE_MAGIC,
+    M6FixtureBootstrap, FIXTURE_STATUS_MISMATCH, M6_FIXTURE_BOOTSTRAP_ADDRESS, M6_FIXTURE_MAGIC,
 };
 use clean_slate_service_lifecycle::ServiceId;
 
@@ -217,6 +217,17 @@ pub(crate) fn handle_fixture_report(allocator: &mut PageAllocator) -> u64 {
         "[M6.F] report pid={pid} status={} progress={} failed_step={}\n",
         report.status, report.progress, report.failed_step
     ));
+    if report.status == FIXTURE_STATUS_MISMATCH {
+        let step = usize::try_from(report.failed_step)
+            .ok()
+            .and_then(|index| report.steps.get(index));
+        if let Some(step) = step {
+            kernel_log_fmt(format_args!(
+                "[M6.F] mismatch pid={pid} step={} nr={} result={:#x} expect={:#x}\n",
+                report.failed_step, step.nr, step.result, step.expect
+            ));
+        }
+    }
     let handler = unsafe { *FIXTURE_REPORT_HANDLER.get() }
         .unwrap_or_else(|| fatal_kernel_error("fixture report handler was not installed"));
     let action = handler(pid, &report);
