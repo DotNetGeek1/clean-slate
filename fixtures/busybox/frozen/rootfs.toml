@@ -53,6 +53,11 @@ kind = "link"
 target = "/bin/busybox"
 
 [[entry]]
+path = "/bin/env"
+kind = "link"
+target = "/bin/busybox"
+
+[[entry]]
 path = "/bin/grep"
 kind = "link"
 target = "/bin/busybox"

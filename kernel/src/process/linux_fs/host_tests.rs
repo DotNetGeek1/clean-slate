@@ -59,8 +59,7 @@ fn root_getdents_names_encode() {
         .list_children(root, &img, &mut children)
         .expect("list");
     assert!(count >= 3, "expected bin etc tmp at minimum");
-    for index in 0..count {
-        let (node, _dt) = children[index];
+    for &(node, _dt) in &children[..count] {
         let name = table.dirent_name(node).expect("dirent name");
         let mut scratch = [0u8; 256];
         assert!(

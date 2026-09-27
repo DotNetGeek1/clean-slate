@@ -680,21 +680,32 @@ fn tmp_children_count(parent: u16, nodes: &[Node]) -> usize {
         .count()
 }
 
-pub(crate) fn check_write_allowed(path: &[u8], flags: u32) -> Result<(), LinuxErrno> {
-    let mut norm = [0u8; LINUX_PATH_MAX];
-    let len = normalize_path(path, &mut norm)?;
-    let norm = &norm[..len];
-    let write_intent = (flags
+pub(crate) fn open_write_intent(flags: u32) -> bool {
+    (flags
         & (clean_slate_linux_abi::O_WRONLY
             | clean_slate_linux_abi::O_RDWR
             | clean_slate_linux_abi::O_CREAT
             | clean_slate_linux_abi::O_TRUNC
             | clean_slate_linux_abi::O_APPEND))
-        != 0;
-    if write_intent && !norm.starts_with(b"/tmp") {
+        != 0
+}
+
+pub(crate) fn check_write_allowed(path: &[u8], flags: u32) -> Result<(), LinuxErrno> {
+    let mut norm = [0u8; LINUX_PATH_MAX];
+    let len = normalize_path(path, &mut norm)?;
+    let norm = &norm[..len];
+    if open_write_intent(flags) && !norm.starts_with(b"/tmp") {
         return Err(EROFS);
     }
     Ok(())
+}
+
+/// Whether `path` normalizes to `/tmp` or a descendant of it.
+pub(crate) fn is_tmp_path(path: &[u8]) -> Result<bool, LinuxErrno> {
+    let mut norm = [0u8; LINUX_PATH_MAX];
+    let len = normalize_path(path, &mut norm)?;
+    let norm = &norm[..len];
+    Ok(norm == b"/tmp" || norm.starts_with(b"/tmp/"))
 }
 
 fn node_id(table: &NodeTable, index: u16) -> NodeId {

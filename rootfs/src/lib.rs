@@ -348,6 +348,8 @@ fn read_u32_le(bytes: &[u8], offset: usize) -> u32 {
 }
 
 #[cfg(feature = "std")]
+pub mod commands;
+#[cfg(feature = "std")]
 mod manifest;
 #[cfg(feature = "std")]
 mod pack;

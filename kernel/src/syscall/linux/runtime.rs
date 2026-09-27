@@ -17,8 +17,6 @@ use crate::time::{
     monotonic_deadline_from_millis, monotonic_deadline_from_timespec, monotonic_ns,
     timespec_from_monotonic_ns, timespec_from_remaining_ns,
 };
-#[cfg(feature = "m9-linux-runtime-self-test")]
-use crate::time::{sleep_budget_ns_from_millis, sleep_budget_ns_from_timespec};
 use clean_slate_linux_abi::{
     decode_pollfd, decode_sigaction, decode_timespec, encode_pollfd, encode_sigaction, LinuxErrno,
     LinuxSyscallRequest, LinuxSyscallResult, PollFd, Sigaction, CLOCK_MONOTONIC, EFAULT, EINVAL,
@@ -248,9 +246,13 @@ fn handle_sys_nanosleep(
             let d = Deadline::MonotonicNs(abs);
             linux_mem::set_pending_sleep_deadline(ctx.pid, ctx.instance_generation, Some(d));
             #[cfg(feature = "m9-linux-runtime-self-test")]
-            {
-                crate::selftest::m9_linux_runtime::record_nanosleep_self_test(ctx.pid, ts, now);
-            }
+            crate::selftest::m9_linux_runtime_latency::observe_timed_wait_armed(
+                ctx.pid,
+                SYS_NANOSLEEP,
+                (ts.tv_sec as u64) * 1_000_000_000 + ts.tv_nsec as u64,
+                now,
+                abs,
+            );
             d
         }
     };
@@ -260,11 +262,7 @@ fn handle_sys_nanosleep(
             write_zero_timespec(rem_ptr)?;
         }
         #[cfg(feature = "m9-linux-runtime-self-test")]
-        {
-            let budget = sleep_budget_ns_from_timespec(ts)?;
-            let block_start = monotonic_deadline_ns(deadline).saturating_sub(budget);
-            crate::selftest::m9_linux_runtime::on_nanosleep_complete_ns(ctx.pid, ts, block_start);
-        }
+        crate::selftest::m9_linux_runtime_latency::observe_timed_wait_due(ctx.pid, SYS_NANOSLEEP);
         return Ok(0);
     }
     let result = block_linux_syscall(
@@ -279,16 +277,6 @@ fn handle_sys_nanosleep(
             write_remaining_timespec(rem_ptr, deadline)?;
         }
         return result;
-    }
-    #[cfg(feature = "m9-linux-runtime-self-test")]
-    if result == Ok(0) {
-        let budget = sleep_budget_ns_from_timespec(ts)?;
-        let block_start = monotonic_deadline_ns(deadline).saturating_sub(budget);
-        crate::selftest::m9_linux_runtime::on_nanosleep_complete_ns(ctx.pid, ts, block_start);
-        linux_mem::set_pending_sleep_deadline(ctx.pid, ctx.instance_generation, None);
-        if rem_ptr != 0 {
-            write_zero_timespec(rem_ptr)?;
-        }
     }
     result
 }
@@ -368,6 +356,14 @@ fn poll_wait_with_timeout(
             let abs = monotonic_deadline_from_millis(now, timeout_ms as u64)?;
             let d = Deadline::MonotonicNs(abs);
             linux_mem::set_pending_poll_deadline(ctx.pid, ctx.instance_generation, Some(d));
+            #[cfg(feature = "m9-linux-runtime-self-test")]
+            crate::selftest::m9_linux_runtime_latency::observe_timed_wait_armed(
+                ctx.pid,
+                SYS_POLL,
+                timeout_ms as u64 * 1_000_000,
+                now,
+                abs,
+            );
             Some(d)
         }
     };
@@ -379,39 +375,17 @@ fn poll_wait_with_timeout(
             clear_poll_interest_for_pid(ctx.pid);
             linux_mem::set_pending_poll_deadline(ctx.pid, ctx.instance_generation, None);
             #[cfg(feature = "m9-linux-runtime-self-test")]
-            if nfds == 0 && timeout_ms > 0 {
-                let budget = sleep_budget_ns_from_millis(timeout_ms as u64)?;
-                let block_start = monotonic_deadline_ns(d).saturating_sub(budget);
-                crate::selftest::m9_linux_runtime::on_poll_timeout_complete_ns(
-                    ctx.pid,
-                    timeout_ms as u64,
-                    block_start,
-                );
-            }
+            crate::selftest::m9_linux_runtime_latency::observe_timed_wait_due(ctx.pid, SYS_POLL);
             return Ok(0);
         }
     }
-    let result = block_linux_syscall(
+    block_linux_syscall(
         request,
         ctx,
         poll_wait_key(ctx.pid),
         deadline,
         LinuxTimeoutResult::Zero,
-    );
-    #[cfg(feature = "m9-linux-runtime-self-test")]
-    if result == Ok(0) && nfds == 0 && timeout_ms > 0 {
-        if let Some(d) = deadline {
-            let budget = sleep_budget_ns_from_millis(timeout_ms as u64)?;
-            let block_start = monotonic_deadline_ns(d).saturating_sub(budget);
-            crate::selftest::m9_linux_runtime::on_poll_timeout_complete_ns(
-                ctx.pid,
-                timeout_ms as u64,
-                block_start,
-            );
-        }
-        linux_mem::set_pending_poll_deadline(ctx.pid, ctx.instance_generation, None);
-    }
-    result
+    )
 }
 
 fn fd_readiness(
@@ -498,14 +472,6 @@ fn read_u64(ptr: u64) -> Result<u64, LinuxErrno> {
 
 fn write_zero_timespec(ptr: u64) -> Result<(), LinuxErrno> {
     write_user(ptr, &[0u8; 16])
-}
-
-#[cfg_attr(not(feature = "m9-linux-runtime-self-test"), allow(dead_code))]
-fn monotonic_deadline_ns(deadline: Deadline) -> u64 {
-    match deadline {
-        Deadline::MonotonicNs(ns) => ns,
-        Deadline::IrqTicks(_) => 0,
-    }
 }
 
 fn deadline_due(deadline: Deadline) -> bool {

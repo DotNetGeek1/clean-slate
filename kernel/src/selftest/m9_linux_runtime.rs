@@ -25,15 +25,13 @@ use crate::process::personality::execution_personality_for_pid;
 use crate::process::process_registry_mut;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::{scheduler_mut, Scheduler};
+use crate::selftest::m9_linux_runtime_latency;
 use crate::syscall::initialize_syscall_abi;
 use crate::syscall::linux::poll::interest_occupied;
 use crate::syscall::{
     install_service_lifecycle_syscall_allocator, service_lifecycle_syscall_allocator_mut,
 };
-use crate::time::{
-    irq_period_ns, monotonic_ns, sleep_budget_ns_from_millis, sleep_budget_ns_from_timespec,
-};
-use clean_slate_linux_abi::Timespec;
+use crate::time::monotonic_ns;
 use clean_slate_service_lifecycle::InstanceGeneration;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -47,83 +45,12 @@ static BASELINE_MEM: AtomicU32 = AtomicU32::new(0);
 static BASELINE_SIG: AtomicU32 = AtomicU32::new(0);
 static BASELINE_POLL: AtomicU32 = AtomicU32::new(0);
 static BASELINE_FD: AtomicU32 = AtomicU32::new(0);
-static NANOSLEEP_LOGGED: AtomicU32 = AtomicU32::new(0);
-static POLL_ZERO_LOGGED: AtomicU32 = AtomicU32::new(0);
-static OBS_PID: AtomicU64 = AtomicU64::new(0);
-static OBS_NSEC: AtomicU64 = AtomicU64::new(0);
-static OBS_BLOCK_START_NS: AtomicU64 = AtomicU64::new(0);
 static WALL_TICKS_START: AtomicU64 = AtomicU64::new(0);
 static WALL_TSC_START: AtomicU64 = AtomicU64::new(0);
-
-pub(crate) fn record_nanosleep_self_test(pid: u64, ts: Timespec, block_start_ns: u64) {
-    OBS_PID.store(pid, Ordering::Relaxed);
-    OBS_NSEC.store(ts.tv_nsec as u64, Ordering::Relaxed);
-    OBS_BLOCK_START_NS.store(block_start_ns, Ordering::Relaxed);
-}
-
-pub(crate) fn on_scheduler_nanosleep_timeout(pid: u64) {
-    if pid != OBS_PID.load(Ordering::Relaxed) {
-        return;
-    }
-    let ts = Timespec {
-        tv_sec: 0,
-        tv_nsec: OBS_NSEC.load(Ordering::Relaxed) as i64,
-    };
-    on_nanosleep_complete_ns(pid, ts, OBS_BLOCK_START_NS.load(Ordering::Relaxed));
-}
-
-pub(crate) fn on_nanosleep_complete_ns(pid: u64, ts: Timespec, block_start_ns: u64) {
-    if pid != RUNTIME_PID.load(Ordering::Relaxed) {
-        return;
-    }
-    if ts.tv_sec != 0 || ts.tv_nsec != 20_000_000 {
-        return;
-    }
-    if NANOSLEEP_LOGGED.swap(1, Ordering::Relaxed) != 0 {
-        return;
-    }
-    let budget = sleep_budget_ns_from_timespec(ts).unwrap_or(20_000_000);
-    let slack = irq_period_ns().unwrap_or(1_000_000);
-    let elapsed_ns = monotonic_ns().saturating_sub(block_start_ns);
-    // One LAPIC tick of IRQ coalescing plus syscall restart overhead on TCG.
-    let max_ns = budget.saturating_add(slack.saturating_mul(3));
-    if elapsed_ns < budget || elapsed_ns > max_ns {
-        kernel_log_fmt(format_args!(
-            "[M9.J] nanosleep 20ms tsc_ns={} (expected {}..={})\n",
-            elapsed_ns, budget, max_ns
-        ));
-        fatal_kernel_error("m9 runtime nanosleep monotonic window");
-    }
-    kernel_log_fmt(format_args!(
-        "[M9.J] nanosleep 20ms tsc_ns={}\n",
-        elapsed_ns
-    ));
-}
-
-pub(crate) fn on_poll_timeout_complete_ns(pid: u64, timeout_ms: u64, block_start_ns: u64) {
-    if pid != RUNTIME_PID.load(Ordering::Relaxed) {
-        return;
-    }
-    if POLL_ZERO_LOGGED.swap(1, Ordering::Relaxed) != 0 {
-        return;
-    }
-    let budget = sleep_budget_ns_from_millis(timeout_ms).unwrap_or(timeout_ms * 1_000_000);
-    let slack = irq_period_ns().unwrap_or(1_000_000);
-    let elapsed_ns = monotonic_ns().saturating_sub(block_start_ns);
-    let max_ns = budget.saturating_add(slack.saturating_mul(3));
-    if elapsed_ns < budget || elapsed_ns > max_ns {
-        kernel_log_fmt(format_args!(
-            "[M9.J] poll timeout tsc_ns={} (expected {}..={})\n",
-            elapsed_ns, budget, max_ns
-        ));
-        fatal_kernel_error("m9 runtime poll zero-fds monotonic window");
-    }
-}
+const WALL_REQUESTED_NS: u64 = 5 * 200_000_000;
 
 fn launch_probe(allocator: &mut PageAllocator) -> u64 {
     crate::process::linux_exec::reset_prepare_linux_image_scratch();
-    NANOSLEEP_LOGGED.store(0, Ordering::Relaxed);
-    POLL_ZERO_LOGGED.store(0, Ordering::Relaxed);
     let argv: [&[u8]; 1] = [b"linux-runtime-probe"];
     let envp: [&[u8]; 1] = [b"HOME=/"];
     let spec = LinuxExecSpec {
@@ -155,6 +82,7 @@ fn launch_probe(allocator: &mut PageAllocator) -> u64 {
         .unwrap_or_else(|_| fatal_kernel_error("m9 linux runtime stdio"));
     RUNTIME_PID.store(launched.pid, Ordering::Relaxed);
     RUNTIME_GENERATION.store(generation.0, Ordering::Relaxed);
+    m9_linux_runtime_latency::begin_probe_cycle(launched.pid);
     launched.pid
 }
 
@@ -192,6 +120,7 @@ pub(crate) fn after_linux_runtime_probe_exit(
         fatal_kernel_error("m9 linux runtime probe exited non-zero");
     }
     let cycle = RUNTIME_CYCLE.load(Ordering::Relaxed);
+    m9_linux_runtime_latency::end_probe_cycle();
     assert_baseline_unchanged(cycle);
     kernel_log_fmt(format_args!(
         "[M9.J] cycle={} mem={} sig={} poll={} fd={}\n",
@@ -264,13 +193,18 @@ pub(crate) fn observe_linux_console_write_bytes(bytes: &[u8]) {
     }
     if bytes_contains(bytes, WALL_END) {
         let irq_ticks = kernel_ticks().saturating_sub(WALL_TICKS_START.load(Ordering::Relaxed));
-        let tsc_ns = monotonic_ns().saturating_sub(WALL_TSC_START.load(Ordering::Relaxed));
+        let start_ns = WALL_TSC_START.load(Ordering::Relaxed);
+        let tsc_ns = monotonic_ns().saturating_sub(start_ns);
         kernel_log_fmt(format_args!(
-            "[M9.J] nanosleep wall irq_ticks={} tsc_ns={}\n",
-            irq_ticks, tsc_ns
+            "[M9.J] nanosleep wall irq_ticks={} tsc_ns={} start_ns={}\n",
+            irq_ticks, tsc_ns, start_ns
         ));
-        if !(1_000_000_000..=1_050_000_000).contains(&tsc_ns) {
-            fatal_kernel_error("m9 runtime nanosleep wall monotonic window");
+        // Five 200 ms sleeps, each checked as it resumes
+        // (`m9_linux_runtime_latency`). The bracket's upper end carries host
+        // timer lateness, so only the lower end is a guest property. xtask
+        // compares the `start_ns` stamps across cycles with host wall time.
+        if tsc_ns < WALL_REQUESTED_NS {
+            fatal_kernel_error("m9 runtime nanosleep wall bracket shorter than requested");
         }
     }
 }

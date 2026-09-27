@@ -186,7 +186,7 @@ mod tests {
         // Old chunked path needs a second 64-byte read past the terminator span.
         assert_eq!(scan_path_like_old_chunked(&slack), Err(EFAULT));
 
-        let mut no_nul = [b'x'; LINUX_PATH_MAX];
+        let no_nul = [b'x'; LINUX_PATH_MAX];
         assert_eq!(scan_path_like_production(&no_nul), Err(ENAMETOOLONG));
         assert_eq!(scan_path_like_old_chunked(&no_nul), Err(ENAMETOOLONG));
     }

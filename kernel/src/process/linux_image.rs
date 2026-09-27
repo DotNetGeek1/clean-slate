@@ -498,7 +498,11 @@ impl LinuxInitialStack {
 static KERNEL_INITIAL_STACK_SCRATCH: GlobalCell<LinuxInitialStack> =
     GlobalCell::new(LinuxInitialStack::empty());
 static KERNEL_LAUNCH_LOAD_PLAN: GlobalCell<Option<LoadPlan>> = GlobalCell::new(None);
+#[cfg(not(test))]
 static KERNEL_INITIAL_STACK_SCRATCH_BUSY: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static KERNEL_INITIAL_STACK_SCRATCH_BUSY: crate::sync::per_test_thread::PerTestThread<AtomicBool> =
+    crate::sync::per_test_thread::PerTestThread::new(AtomicBool::new(false));
 
 /// Single-CPU scratch for building stack images without placing 8 KiB buffers on
 /// the task stack. Exec and launch never nest.

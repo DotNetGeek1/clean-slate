@@ -811,6 +811,8 @@ fn dispatch_native(frame: &mut SyscallContext) {
             }
             #[cfg(feature = "m9-syscall-fail-closed-self-test")]
             crate::selftest::m9_syscall_fail_closed::observe_native_sibling_progress();
+            #[cfg(feature = "m9-userspace-self-test")]
+            crate::selftest::m9_userspace::observe_native_progress();
             frame.rax = SYSCALL_ABI_VERSION;
         }
         #[cfg(feature = "m3-syscall-self-test")]

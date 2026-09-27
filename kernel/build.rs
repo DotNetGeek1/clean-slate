@@ -71,6 +71,9 @@ fn embed_m9_rootfs_image() {
     use clean_slate_rootfs::{pack, Manifest};
 
     const BUSYBOX_SHA256: &str = "7ba56acec9fb89deace4ebfab6f4baaa8d1b778754b8f7ae3dbd7cf7990fe380";
+    // Keep in sync with `xtask/src/m9_fixture.rs` (`cargo xtask verify-m9-fixture`).
+    const ROOTFS_IMAGE_SHA256: &str =
+        "03bd40c0f1f7ae56551f597d5f2b33672cc9d1617e13c22360866236aa367a5d";
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let fixture_dir = manifest_dir
@@ -100,17 +103,83 @@ fn embed_m9_rootfs_image() {
         fs::read(fixture_dir.join(rel))
     })
     .expect("pack m9 rootfs image");
+    let image_hash = hex_sha256(&image);
+    if image_hash != ROOTFS_IMAGE_SHA256 {
+        panic!("M9 rootfs image SHA-256 drift: expected {ROOTFS_IMAGE_SHA256}, got {image_hash}");
+    }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let out_path = out_dir.join("m9-rootfs.img");
     fs::write(&out_path, &image).expect("write m9-rootfs.img");
+    fs::write(
+        out_dir.join("m9_fixture_pins.rs"),
+        format!(
+            "const BUSYBOX_SHA256: &str = {BUSYBOX_SHA256:?};\n\
+             const BUSYBOX_BYTES: usize = {};\n\
+             const BUSYBOX_CRC32: u32 = {:#010x};\n\
+             const ROOTFS_IMAGE_SHA256: &str = {ROOTFS_IMAGE_SHA256:?};\n",
+            busybox_bytes.len(),
+            clean_slate_rootfs::crc32(&busybox_bytes),
+        ),
+    )
+    .expect("write m9_fixture_pins.rs");
+
+    let commands_path = fixture_dir.join("commands.toml");
+    let commands_toml = fs::read_to_string(&commands_path).expect("read commands.toml");
+    let matrix = clean_slate_rootfs::commands::CommandMatrix::parse_toml(&commands_toml)
+        .unwrap_or_else(|e| panic!("parse fixtures/busybox/frozen/commands.toml: {e}"));
+    if matrix.busybox_sha256 != BUSYBOX_SHA256 {
+        panic!("commands.toml busybox_sha256 does not match the pinned BusyBox");
+    }
+    let mut generated = String::from("const M9_COMMAND_MATRIX: &[MatrixCommand] = &[\n");
+    for spec in &matrix.commands {
+        let stage = match (&spec.stage_path, &spec.stage_body) {
+            (Some(path), Some(body)) => format!(
+                "Some(({}, {}))",
+                byte_string_literal(path.as_bytes()),
+                byte_string_literal(body)
+            ),
+            _ => "None".to_string(),
+        };
+        let optional = |bytes: &Option<Vec<u8>>| match bytes {
+            Some(bytes) => format!("Some({})", byte_string_literal(bytes)),
+            None => "None".to_string(),
+        };
+        let contains: Vec<String> = spec
+            .stdout_contains
+            .iter()
+            .map(|needle| byte_string_literal(needle))
+            .collect();
+        generated.push_str(&format!(
+            "    MatrixCommand {{ name: {:?}, invocation: {}, exit_status: {}, stdout: {}, \
+             stdout_prefix: {}, stdout_contains: &[{}], stage: {stage} }},\n",
+            spec.name,
+            byte_string_literal(spec.invocation().as_bytes()),
+            spec.exit_status,
+            optional(&spec.stdout),
+            optional(&spec.stdout_prefix),
+            contains.join(", "),
+        ));
+    }
+    generated.push_str("];\n");
+    fs::write(out_dir.join("m9_command_matrix.rs"), generated).expect("write m9_command_matrix.rs");
 
     println!("cargo:rerun-if-changed={}", busybox_path.display());
     println!("cargo:rerun-if-changed={}", manifest_path.display());
+    println!("cargo:rerun-if-changed={}", commands_path.display());
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join("build.rs").display()
     );
+}
+
+fn byte_string_literal(bytes: &[u8]) -> String {
+    let mut out = String::from("b\"");
+    for byte in bytes {
+        out.extend(std::ascii::escape_default(*byte).map(char::from));
+    }
+    out.push('"');
+    out
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {

@@ -8,7 +8,7 @@ use crate::process::linux_rootfs;
 use crate::syscall::linux::table::LinuxSyscallContext;
 use crate::syscall::linux::user_copy::{copy_user_bytes, LINUX_USER_COPY_MAX_BYTES};
 use clean_slate_linux_abi::{
-    LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EBADF, EFAULT, EFBIG, EINVAL,
+    LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EACCES, EBADF, EFAULT, EFBIG, EINVAL,
 };
 use clean_slate_service_fixtures::OBJECT_MAX_PAYLOAD_BYTES;
 use clean_slate_service_lifecycle::InstanceGeneration;
@@ -52,10 +52,10 @@ pub(crate) fn read_file_fd(
     }
     if let Ok(object_id) = table.object_id_for_node(file.node) {
         let start = desc.offset as usize;
-        if let Ok(take) =
-            crate::process::linux_fs::object_backend::tmp_file_read_local(object_id, start, buf)
-        {
-            if take > 0 || tmp_file_by_len(object_id) <= start {
+        match crate::process::linux_fs::object_backend::tmp_file_read_local(
+            pid, object_id, start, buf,
+        ) {
+            Ok(take) if take > 0 || tmp_file_by_len(object_id) <= start => {
                 linux_fd::set_open_description_offset(
                     pid,
                     generation,
@@ -64,6 +64,8 @@ pub(crate) fn read_file_fd(
                 )?;
                 return Ok(take as u64);
             }
+            Err(errno) if errno == EACCES => return Err(errno),
+            _ => {}
         }
         let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
         match object_read_sync(request, ctx, pid, object_id, &mut payload)? {

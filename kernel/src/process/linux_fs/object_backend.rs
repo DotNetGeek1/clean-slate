@@ -7,7 +7,8 @@ use clean_slate_service_fixtures::{
 };
 
 use crate::capability::object::{
-    grant_object_capability, object_queue_poll, object_queue_submit, SyscallQueueError,
+    authorize_holder_object_op, grant_object_capability, object_queue_poll, object_queue_submit,
+    SyscallQueueError,
 };
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
@@ -100,6 +101,12 @@ pub(crate) fn tmp_file_create(path: &[u8]) -> Result<u64, LinuxErrno> {
     Err(clean_slate_linux_abi::ENOSPC)
 }
 
+/// Allocated `/tmp` backing-object slots.
+#[cfg(feature = "m9-userspace-self-test")]
+pub(crate) fn tmp_file_live_count() -> usize {
+    store_mut().files.iter().flatten().count()
+}
+
 pub(crate) fn tmp_file_lookup_by_path(path: &[u8]) -> Option<u64> {
     let store = store_mut();
     for state in store.files.iter().flatten() {
@@ -110,12 +117,26 @@ pub(crate) fn tmp_file_lookup_by_path(path: &[u8]) -> Option<u64> {
     None
 }
 
+/// Mutating the `/tmp` namespace (create, truncate, mkdir, write-intent open) requires
+/// `WRITE` on every `/tmp` backing object: the projection grant, not one file's right.
+pub(crate) fn authorize_tmp_namespace_write(pid: u64) -> Result<(), LinuxErrno> {
+    let holder = HolderId(pid);
+    for index in 0..LINUX_TMP_MAX_FILES {
+        let object_id = LINUX_TMP_OBJECT_ID_BASE + index as u64;
+        authorize_holder_object_op(holder, object_id, OBJECT_OP_WRITE).map_err(queue_err)?;
+    }
+    Ok(())
+}
+
 /// Read bytes from the in-kernel tmp scratch (authoritative after a completed write).
+/// The scratch mirrors object bytes, so reading it requires the object's `READ` right.
 pub(crate) fn tmp_file_read_local(
+    pid: u64,
     object_id: u64,
     offset: usize,
     out: &mut [u8],
 ) -> Result<usize, LinuxErrno> {
+    authorize_holder_object_op(HolderId(pid), object_id, OBJECT_OP_READ).map_err(queue_err)?;
     let state = tmp_file_by_object_id(object_id).ok_or(clean_slate_linux_abi::ENOENT)?;
     if offset >= state.len {
         return Ok(0);
@@ -186,6 +207,7 @@ pub(crate) enum ObjectIo {
 fn queue_err(e: SyscallQueueError) -> LinuxErrno {
     match e {
         SyscallQueueError::QueueFull => clean_slate_linux_abi::ENOSPC,
+        SyscallQueueError::UnauthorizedHolder => clean_slate_linux_abi::EACCES,
         SyscallQueueError::CompletionStatus(_) => clean_slate_linux_abi::EIO,
         _ => clean_slate_linux_abi::EINVAL,
     }

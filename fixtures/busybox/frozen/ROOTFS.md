@@ -27,8 +27,8 @@ No host `/etc`, resolver, network, or timestamps participate in the image bytes.
 cargo xtask verify-m9-fixture
 ```
 
-Checks BusyBox SHA-256, ELF metadata (ET_EXEC, x86-64, first PT_LOAD at `0x400000`, no interpreter/dynamic), applet coverage vs `commands.toml`, manifest link names vs `applets.txt`, and deterministic double-pack equality.
+Checks BusyBox SHA-256 (`busybox.sha256`, `commands.toml` meta and the manifest pin agree), ELF metadata (ET_EXEC, x86-64, first PT_LOAD at `0x400000`, no interpreter/dynamic), that `commands.toml` matches `run-traces.sh` (command order, the `/tmp/script.sh` heredoc byte-for-byte, a trace per command), that every applet a command uses has a `/bin/<applet>` link, manifest link names vs `applets.txt`, deterministic double-pack equality, and the pinned image SHA-256 (`ROOTFS_IMAGE_SHA256` in `xtask/src/m9_fixture.rs` and `kernel/build.rs`).
 
 ## Kernel embed
 
-With `m9-rootfs`, `kernel/build.rs` packs `rootfs.toml` into `$OUT_DIR/m9-rootfs.img` after verifying the BusyBox hash. `process::linux_rootfs::image()` parses the embedded bytes via `clean-slate-rootfs` (no_std reader).
+With `m9-rootfs`, `kernel/build.rs` packs `rootfs.toml` into `$OUT_DIR/m9-rootfs.img` after verifying the BusyBox hash and the pinned image hash, and generates the command matrix and BusyBox CRC/length pins that `test-m9-userspace` uses (see [docs/M9.md](../../../docs/M9.md)). `process::linux_rootfs::image()` parses the embedded bytes via `clean-slate-rootfs` (no_std reader).

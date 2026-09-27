@@ -187,6 +187,22 @@ pub(crate) fn apply_fallback_apic_timer_config() {
     apply_apic_timer_config(QEMU_APIC_COUNTER_HZ_FALLBACK);
 }
 
+/// One reading of all three clocks. The window's start and end come from
+/// this same code, so its PIT-latch-to-APIC/TSC skew cancels.
+#[derive(Clone, Copy)]
+struct ClockSample {
+    pit: u16,
+    apic: u32,
+    tsc: u64,
+}
+
+#[inline(never)]
+fn sample_clocks() -> ClockSample {
+    let pit = pit_read_count();
+    let apic = local_apic_timer_current_count();
+    let tsc = read_tsc();
+    ClockSample { pit, apic, tsc }
+}
 /// Measure APIC down-counter and TSC rates (Hz) using PIT channel 2 as reference.
 pub(crate) fn calibrate_apic_tick() {
     without_interrupts(|| {
@@ -194,32 +210,37 @@ pub(crate) fn calibrate_apic_tick() {
         prepare_local_apic_timer_for_calibration();
         pit_program_channel2();
         let target_pit_delta = (PIT_HZ * CALIBRATION_MS) / 1000;
-        let start_pit = pit_read_count();
-        let start_apic = local_apic_timer_current_count();
-        let start_tsc = read_tsc();
+        // Discard the first sample: under TCG its execution includes translating
+        // the sampling code, which would delay the APIC/TSC reads behind the PIT
+        // latch at the window start only and bias both rates low.
+        let _ = sample_clocks();
+        let start = sample_clocks();
+        // Accumulate per-poll deltas: the 16-bit counter wraps every ~55 ms, so a single
+        // start-to-now difference loses whole wraps whenever one poll gap straddles the
+        // target (the vCPU can stall for several ms under TCG), inflating the TSC rate.
+        let mut end = start;
+        let mut pit_delta = 0u64;
         let mut polls = 0u32;
-        loop {
+        while pit_delta < target_pit_delta {
             polls = polls.saturating_add(1);
             if polls > PIT_POLL_MAX {
                 kernel_log_fmt(format_args!("[FAIL] apic calibration pit-timeout\n"));
                 fatal_kernel_error("apic/tsc calibration pit timeout");
             }
-            let elapsed = pit_elapsed_ticks(start_pit, pit_read_count());
-            if elapsed >= target_pit_delta {
-                break;
-            }
+            let now = sample_clocks();
+            pit_delta += pit_elapsed_ticks(end.pit, now.pit);
+            end = now;
         }
-        let pit_delta = pit_elapsed_ticks(start_pit, pit_read_count());
-        let end_apic = local_apic_timer_current_count();
-        let end_tsc = read_tsc();
-        let apic_delta = u64::from(start_apic.wrapping_sub(end_apic));
+        let apic_delta = u64::from(start.apic.wrapping_sub(end.apic));
         if apic_delta == 0 || pit_delta == 0 {
             kernel_log_fmt(format_args!("[FAIL] apic/tsc calibration zero-delta\n"));
             fatal_kernel_error("apic/tsc calibration zero delta");
         }
+        // Scale by the measured PIT span, not the nominal CALIBRATION_MS: the last
+        // poll can land well past the target when the vCPU stalls.
         let counter_hz = match apic_delta
-            .checked_mul(1000)
-            .and_then(|n| n.checked_div(CALIBRATION_MS))
+            .checked_mul(PIT_HZ)
+            .and_then(|n| n.checked_div(pit_delta))
         {
             Some(value) if value > 0 => value,
             _ => {
@@ -227,7 +248,7 @@ pub(crate) fn calibrate_apic_tick() {
                 fatal_kernel_error("apic calibration overflow");
             }
         };
-        let tsc_delta = end_tsc.wrapping_sub(start_tsc);
+        let tsc_delta = end.tsc.wrapping_sub(start.tsc);
         if tsc_delta == 0 {
             kernel_log_fmt(format_args!("[FAIL] tsc calibration zero-delta\n"));
             fatal_kernel_error("tsc calibration zero delta");
@@ -241,7 +262,7 @@ pub(crate) fn calibrate_apic_tick() {
             fatal_kernel_error("tsc calibration overflow");
         };
         apply_apic_timer_config(counter_hz);
-        apply_tsc_config(tsc_hz, end_tsc);
+        apply_tsc_config(tsc_hz, end.tsc);
         program_local_apic_timer();
     });
 }

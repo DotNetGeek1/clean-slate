@@ -7,7 +7,10 @@ use crate::process::linux_fd::{
     self,
     open_description::{DescriptorKind, DirHandleRef, FileHandleRef, OpenAccess, OpenStatus},
 };
-use crate::process::linux_fs::namespace::{check_write_allowed, NodeId};
+use crate::process::linux_fs::namespace::{
+    check_write_allowed, is_tmp_path, open_write_intent, NodeId,
+};
+use crate::process::linux_fs::object_backend::authorize_tmp_namespace_write;
 use crate::process::linux_fs::path::{resolve_path, LINUX_PATH_MAX};
 use crate::process::linux_fs::table_mut;
 use crate::process::linux_rootfs;
@@ -46,6 +49,9 @@ pub(crate) fn handle_sys_open(
     let _mode = request.args[2];
     let path = copy_path_from_user(path_ptr)?;
     check_write_allowed(path.as_bytes(), flags)?;
+    if open_write_intent(flags) && is_tmp_path(path.as_bytes())? {
+        authorize_tmp_namespace_write(ctx.pid)?;
+    }
     let image = image();
     let table = table_mut();
     let access = flags & 0b11;
@@ -148,11 +154,14 @@ pub(crate) fn handle_sys_getcwd(
 
 pub(crate) fn handle_sys_mkdir(
     request: &LinuxSyscallRequest,
-    _ctx: &mut LinuxSyscallContext<'_>,
+    ctx: &mut LinuxSyscallContext<'_>,
 ) -> LinuxSyscallResult {
     let path_ptr = request.args[0];
     let _mode = request.args[1];
     let path = copy_path_from_user(path_ptr)?;
+    if is_tmp_path(path.as_bytes())? {
+        authorize_tmp_namespace_write(ctx.pid)?;
+    }
     let image = image();
     table_mut().mkdir(path.as_bytes(), &image).map(|()| 0)
 }

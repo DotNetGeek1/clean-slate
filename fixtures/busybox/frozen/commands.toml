@@ -89,6 +89,9 @@ stdout = "exit_code=3\n"
 name = "script-sh"
 shell = "sh /tmp/script.sh"
 exit_status = 0
+# Written by the harness before the command runs (run-traces.sh heredoc, byte-exact).
+stage_path = "/tmp/script.sh"
+stage_body = "pwd\nls /\ncat /etc/hostname\nmkdir -p /tmp/demo2\nprintf script > /tmp/demo2/file\ncat /tmp/demo2/file\necho hi | grep hi\nuname\nsleep 0\nexit 0\n"
 stdout_contains = ["/", "m9-fixture", "script", "hi", "Linux"]
 
 [[command]]
@@ -111,7 +114,7 @@ stdout = "hello\n"
 
 [[command]]
 name = "grep-via-busybox"
-shell = "/bin/busybox grep hello (heredoc)"
+shell = "/bin/busybox grep hello <<EOF\nhello\nEOF"
 exit_status = 0
 stdout = "hello\n"
 

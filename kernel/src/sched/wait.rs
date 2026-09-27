@@ -193,6 +193,18 @@ pub(crate) fn waiter_occupancy() -> usize {
     without_interrupts(|| wait_table_mut().occupied())
 }
 
+/// Active waiters whose owning pid satisfies `owned_by`.
+#[cfg(feature = "m9-userspace-self-test")]
+pub(crate) fn waiter_occupancy_where(mut owned_by: impl FnMut(u64) -> bool) -> usize {
+    without_interrupts(|| {
+        wait_table_mut()
+            .slots
+            .iter()
+            .filter(|slot| slot.active && owned_by(slot.pid))
+            .count()
+    })
+}
+
 fn log_stale_wake(pid: u64, generation: InstanceGeneration) {
     let observed = STALE_WAKE_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
     if observed < STALE_WAKE_LOG_LIMIT {
@@ -211,6 +223,8 @@ fn wake_thread_at_index(thread_index: usize, outcome: WaitOutcome) {
     }
     thread.wait_resume_outcome = outcome;
     thread.state = ThreadState::Ready;
+    #[cfg(feature = "m9-userspace-self-test")]
+    crate::selftest::m9_userspace::on_thread_woken(thread_index, outcome);
 }
 
 /// Called ONLY from a syscall handler on the current thread.
@@ -279,6 +293,8 @@ pub(crate) fn block_current_thread_with_resume(
         };
 
         scheduler.threads[thread_index].state = ThreadState::Blocked;
+        #[cfg(feature = "m9-userspace-self-test")]
+        crate::selftest::m9_userspace::on_thread_blocked(thread_index, pid);
         kernel_log_fmt(format_args!("[M9.E] blocked tid={} key={}\n", tid, key.0));
         Ok(true)
     })?;
@@ -393,6 +409,8 @@ pub(crate) fn expire_deadlines(now_ticks: u64) -> usize {
             }
             let index = slot.thread_index;
             slot.active = false;
+            #[cfg(feature = "m9-linux-runtime-self-test")]
+            crate::selftest::m9_linux_runtime_latency::observe_timed_wait_expired(slot.pid, now_ns);
             wake_thread_at_index(index, WaitOutcome::TimedOut);
             expired += 1;
         }
@@ -454,18 +472,17 @@ extern "C" fn clean_slate_complete_blocked_syscall_resume() -> u64 {
                 }
             }
         }
-        #[cfg(feature = "m9-linux-runtime-self-test")]
+        #[cfg(not(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        )))]
         if outcome == WaitOutcome::TimedOut {
             if let BlockedResume::RestartSyscall { nr, .. } = resume {
-                if nr == clean_slate_linux_abi::SYS_NANOSLEEP {
-                    let pid = scheduler.threads[index].owner_process_id;
-                    if let Some(generation) = crate::process::live_instance_generation(pid) {
-                        crate::process::linux_mem::set_pending_sleep_deadline(
-                            pid, generation, None,
-                        );
-                    }
-                    crate::selftest::m9_linux_runtime::on_scheduler_nanosleep_timeout(pid);
-                }
+                let pid = scheduler.threads[index].owner_process_id;
+                crate::syscall::linux::complete_timed_out_linux_wait(pid, nr);
+                #[cfg(feature = "m9-linux-runtime-self-test")]
+                crate::selftest::m9_linux_runtime_latency::observe_timed_wait_resumed(pid, nr);
             }
         }
         #[cfg(feature = "m9-block-wake-self-test")]

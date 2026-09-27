@@ -58,6 +58,8 @@ impl<const MAX_EVENTS: usize> SyscallLifecycleControl<MAX_EVENTS> {
                 in("r8") reply.len(),
                 in("r10") reply.as_mut_ptr(),
                 lateout("rax") result,
+                lateout("rcx") _,
+                lateout("r11") _,
                 options(nostack),
             );
         }
@@ -93,6 +95,8 @@ impl<const MAX_EVENTS: usize> SyscallLifecycleControl<MAX_EVENTS> {
                 in("r8") reply.len(),
                 in("r10") reply.as_mut_ptr(),
                 lateout("rax") result,
+                lateout("rcx") _,
+                lateout("r11") _,
                 options(nostack),
             );
         }

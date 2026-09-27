@@ -83,7 +83,11 @@ impl Registry {
         }
     }
 
-    #[cfg(any(test, feature = "m9-linux-runtime-self-test"))]
+    #[cfg(any(
+        test,
+        feature = "m9-linux-runtime-self-test",
+        feature = "m9-userspace-self-test"
+    ))]
     fn occupied(&self) -> usize {
         self.slots.iter().filter(|slot| slot.is_some()).count()
     }
@@ -184,7 +188,10 @@ pub(crate) fn reset_registry_for_selftest() {
     unsafe { *REGISTRY.get() = Registry::new() };
 }
 
-#[cfg(feature = "m9-linux-runtime-self-test")]
+#[cfg(any(
+    feature = "m9-linux-runtime-self-test",
+    feature = "m9-userspace-self-test"
+))]
 pub(crate) fn occupied_slots() -> usize {
     registry_mut().occupied()
 }

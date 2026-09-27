@@ -65,6 +65,16 @@ pub(crate) fn with_capability_space<R>(f: impl FnOnce(&CapabilityTable<MAX_SLOTS
     f(unsafe { &*CAPABILITY_SPACE.get() })
 }
 
+/// Live capability records across all holders.
+#[cfg(feature = "m9-userspace-self-test")]
+pub(crate) fn live_capability_count() -> usize {
+    with_capability_space(|table| {
+        (0..table.capacity())
+            .filter(|slot| table.state_at(*slot) == clean_slate_capability::CapabilityState::Live)
+            .count()
+    })
+}
+
 pub(crate) fn current_holder() -> Result<HolderId, &'static str> {
     current_process_id().map(HolderId)
 }
