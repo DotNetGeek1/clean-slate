@@ -7,7 +7,7 @@ pub(crate) mod open_description;
 pub(crate) mod readiness;
 pub(crate) mod table;
 
-use clean_slate_linux_abi::{LinuxErrno, EBADF, EMFILE};
+use clean_slate_linux_abi::{LinuxErrno, EBADF, EINVAL, EMFILE};
 use clean_slate_service_lifecycle::InstanceGeneration;
 use console::write_console;
 use open_description::{
@@ -449,8 +449,7 @@ impl LinuxFdRegistry {
             return Ok(());
         };
         let table = &mut self.slots[index].as_mut().expect("slot").table;
-        close_cloexec_in_table(table, &mut self.pool);
-        Ok(())
+        close_cloexec_in_table(table, &mut self.pool)
     }
 
     pub(crate) fn open_description_id_for_fd(
@@ -526,8 +525,9 @@ impl LinuxFdRegistry {
         let open = table.get(old_fd).ok_or(EBADF)?.open;
         let start = usize::try_from(min_fd)
             .ok()
-            .filter(|i| *i < LINUX_FD_TABLE_CAPACITY);
-        for slot_index in start.unwrap_or(0)..LINUX_FD_TABLE_CAPACITY {
+            .filter(|i| *i < LINUX_FD_TABLE_CAPACITY)
+            .ok_or(EINVAL)?;
+        for slot_index in start..LINUX_FD_TABLE_CAPACITY {
             if table.entries[slot_index].is_none() {
                 self.pool.add_ref(open)?;
                 table.entries[slot_index] = Some(FdEntry {
@@ -911,13 +911,14 @@ pub(crate) fn alloc_file_description(
     generation: InstanceGeneration,
     file: open_description::FileHandleRef,
     status: OpenStatus,
+    flags: FdFlags,
 ) -> Result<i32, LinuxErrno> {
     registry_mut().alloc_description_and_fd(
         pid,
         generation,
         DescriptorKind::File(file),
         status,
-        FdFlags::default(),
+        flags,
     )
 }
 
@@ -926,13 +927,14 @@ pub(crate) fn alloc_dir_description(
     generation: InstanceGeneration,
     dir: open_description::DirHandleRef,
     status: OpenStatus,
+    flags: FdFlags,
 ) -> Result<i32, LinuxErrno> {
     registry_mut().alloc_description_and_fd(
         pid,
         generation,
         DescriptorKind::Dir(dir),
         status,
-        FdFlags::default(),
+        flags,
     )
 }
 
@@ -1123,6 +1125,135 @@ mod tests {
         fds.close_on_exec_for_process(4, gen).expect("exec");
         assert!(fds.table_get_for_test(4, gen, LINUX_STDOUT_FD).is_some());
         assert!(fds.table_get_for_test(4, gen, LINUX_STDERR_FD).is_none());
+    }
+
+    fn read_only_status() -> OpenStatus {
+        OpenStatus {
+            access: OpenAccess::ReadOnly,
+            nonblock: false,
+            append: false,
+        }
+    }
+
+    fn fs_node(index: u16) -> open_description::LinuxFsNodeId {
+        open_description::LinuxFsNodeId {
+            index,
+            generation: 1,
+        }
+    }
+
+    fn alloc_file(
+        fds: &mut LinuxFdRegistry,
+        pid: u64,
+        gen: InstanceGeneration,
+        cloexec: bool,
+    ) -> u64 {
+        let file = open_description::FileHandleRef { node: fs_node(1) };
+        fds.alloc_description_and_fd(
+            pid,
+            gen,
+            DescriptorKind::File(file),
+            read_only_status(),
+            FdFlags { cloexec },
+        )
+        .expect("file fd") as u64
+    }
+
+    fn alloc_dir(
+        fds: &mut LinuxFdRegistry,
+        pid: u64,
+        gen: InstanceGeneration,
+        cloexec: bool,
+    ) -> u64 {
+        let dir = open_description::DirHandleRef { node: fs_node(2) };
+        fds.alloc_description_and_fd(
+            pid,
+            gen,
+            DescriptorKind::Dir(dir),
+            read_only_status(),
+            FdFlags { cloexec },
+        )
+        .expect("dir fd") as u64
+    }
+
+    #[test]
+    fn file_and_dir_fds_carry_initial_cloexec() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 11, gen);
+        let file_cloexec = alloc_file(&mut fds, 11, gen, true);
+        let dir_cloexec = alloc_dir(&mut fds, 11, gen, true);
+        let file_plain = alloc_file(&mut fds, 11, gen, false);
+        let dir_plain = alloc_dir(&mut fds, 11, gen, false);
+        assert!(fds.get_fd_cloexec(11, gen, file_cloexec).expect("file"));
+        assert!(fds.get_fd_cloexec(11, gen, dir_cloexec).expect("dir"));
+        assert!(!fds.get_fd_cloexec(11, gen, file_plain).expect("file plain"));
+        assert!(!fds.get_fd_cloexec(11, gen, dir_plain).expect("dir plain"));
+    }
+
+    #[test]
+    fn exec_drops_cloexec_file_and_dir_fds_without_setfd() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 12, gen);
+        let baseline = fds.open_description_live_count();
+        let file_cloexec = alloc_file(&mut fds, 12, gen, true);
+        let dir_cloexec = alloc_dir(&mut fds, 12, gen, true);
+        let file_plain = alloc_file(&mut fds, 12, gen, false);
+        assert_eq!(fds.open_description_live_count(), baseline + 3);
+
+        fds.close_on_exec_for_process(12, gen).expect("exec");
+
+        assert!(fds.table_get_for_test(12, gen, file_cloexec).is_none());
+        assert!(fds.table_get_for_test(12, gen, dir_cloexec).is_none());
+        assert!(fds.table_get_for_test(12, gen, file_plain).is_some());
+        assert!(fds.table_get_for_test(12, gen, LINUX_STDOUT_FD).is_some());
+        assert_eq!(fds.open_description_live_count(), baseline + 1);
+    }
+
+    #[test]
+    fn exec_keeps_description_shared_with_a_plain_dup() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 13, gen);
+        let baseline = fds.open_description_live_count();
+        let file_cloexec = alloc_file(&mut fds, 13, gen, true);
+        fds.dup2(13, gen, file_cloexec, 7).expect("dup2");
+        assert!(!fds.get_fd_cloexec(13, gen, 7).expect("dup2 clears cloexec"));
+
+        fds.close_on_exec_for_process(13, gen).expect("exec");
+
+        assert!(fds.table_get_for_test(13, gen, file_cloexec).is_none());
+        assert!(fds.table_get_for_test(13, gen, 7).is_some());
+        assert_eq!(fds.open_description_live_count(), baseline + 1);
+    }
+
+    #[test]
+    fn dupfd_cloexec_sets_cloexec_at_or_above_min() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 14, gen);
+        let new_fd = fds
+            .dup_to_lowest_at_or_above(14, gen, LINUX_STDOUT_FD, 10)
+            .expect("dupfd") as u64;
+        assert_eq!(new_fd, 10);
+        assert!(fds.get_fd_cloexec(14, gen, new_fd).expect("get"));
+    }
+
+    #[test]
+    fn dupfd_cloexec_min_beyond_table_is_einval() {
+        let (mut fds, mut ipc) = local_pair();
+        let gen = InstanceGeneration(1);
+        install_test_stdio(&mut fds, &mut ipc, 15, gen);
+        let baseline = fds.open_description_live_count();
+        for min_fd in [LINUX_FD_TABLE_CAPACITY as u64, u64::MAX] {
+            assert_eq!(
+                fds.dup_to_lowest_at_or_above(15, gen, LINUX_STDOUT_FD, min_fd),
+                Err(EINVAL)
+            );
+        }
+        assert!(fds.table_get_for_test(15, gen, 0).is_none());
+        assert_eq!(fds.open_description_live_count(), baseline);
     }
 
     #[test]

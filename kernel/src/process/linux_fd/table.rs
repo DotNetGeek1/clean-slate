@@ -142,14 +142,18 @@ pub(crate) fn inherit_table(
     Ok(())
 }
 
-pub(crate) fn close_on_exec(table: &mut LinuxFdTable, pool: &mut OpenDescriptionPool) {
+pub(crate) fn close_on_exec(
+    table: &mut LinuxFdTable,
+    pool: &mut OpenDescriptionPool,
+) -> Result<(), LinuxErrno> {
     for index in 0..LINUX_FD_TABLE_CAPACITY {
         if let Some(entry) = table.entries[index] {
             if entry.flags.cloexec {
-                let _ = close_fd_entry(table, pool, index as u64);
+                close_fd_entry(table, pool, index as u64)?;
             }
         }
     }
+    Ok(())
 }
 
 pub(crate) fn release_table(
