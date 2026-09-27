@@ -547,7 +547,8 @@ fn handle_raw_receive(frame: &mut SyscallContext) {
             return;
         }
     };
-    if buflen > clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES
+    // A full-frame buffer is required so no received frame is ever truncated.
+    if buflen != clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES
         || validate_user_writable_pointer_range(frame.rdx, frame.r10).is_err()
     {
         frame.rax = SYSCALL_EINVAL;
@@ -568,11 +569,10 @@ fn handle_raw_receive(frame: &mut SyscallContext) {
         Ok(None) => frame.rax = u64::MAX,
         Ok(Some(frame_buf)) => {
             let bytes = frame_buf.as_slice();
-            let len = bytes.len().min(buflen);
             unsafe {
-                ptr::copy_nonoverlapping(bytes.as_ptr(), frame.rdx as *mut u8, len);
+                ptr::copy_nonoverlapping(bytes.as_ptr(), frame.rdx as *mut u8, bytes.len());
             }
-            frame.rax = len as u64;
+            frame.rax = bytes.len() as u64;
         }
         Err(_) => frame.rax = SYSCALL_EINVAL,
     }

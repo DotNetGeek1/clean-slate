@@ -67,6 +67,7 @@ const REUSABLE_RESOURCES: &[&str] = &[
     "net_requests",
     "net_in_service",
     "net_holder_exits",
+    "net_holders",
     "object_requests",
     "capabilities",
     "linux_mm",

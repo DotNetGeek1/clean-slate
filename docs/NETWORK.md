@@ -171,6 +171,8 @@ Each supervised network-service instance owns a fixed `SessionGeneration` assign
 | Invariant | Enforcement |
 |-----------|-------------|
 | Holder exit reclaims sessions, queued work, and staged payload for that holder | `NetworkService::on_holder_exit` + kernel client queue `reclaim_for_holder` (process teardown in `kernel/src/process/domain.rs`) |
+| No holder exit is lost | `NetBridge` keeps one holder entry per caller that has submitted to the live instance (`2 × PROCESS_REGISTRY_CAPACITY` entries). Teardown turns that entry into the pending exit (no allocation), `POP_HOLDER_EXIT` re-returns an unacknowledged exit, and `ACK_HOLDER_EXIT` frees it. A full table refuses a new caller's first submit with `QueueFull`; it never drops an exit |
+| `RAW_RECEIVE` never truncates a frame | the buffer length must equal `MAX_ETHERNET_FRAME_BYTES` (`EINVAL` otherwise) |
 | Service shutdown fails in-flight work with `NetworkError::Reset`, clears tables, resets backend | `NetworkService::shutdown` / `NetBridge::shutdown_service` |
 | Service holder exit requeues in-service client work | `NetBridge::requeue_in_service` via `recover_net_queue_for_service_holder_exit` |
 | Raw NIC authority revoked before instance is gone | Backend `NetworkLink::reset` on shutdown; only the live network-service PID may perform raw-device bridge ops (`authorize_raw_device_access`) |

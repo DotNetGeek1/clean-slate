@@ -505,6 +505,7 @@ struct Resources {
     net_requests: usize,
     net_in_service: usize,
     net_holder_exits: usize,
+    net_holders: usize,
     object_requests: usize,
     capabilities: usize,
     linux_mm: usize,
@@ -537,6 +538,7 @@ impl Resources {
             net_requests: bridge.occupied_request_slots(),
             net_in_service: bridge.in_service_request_slots(),
             net_holder_exits: bridge.outstanding_holder_exits(),
+            net_holders: bridge.holder_entries_in_use(),
             object_requests: crate::capability::object::object_queue_occupied_slots(),
             capabilities: crate::capability::live_capability_count(),
             linux_mm: linux_mem::occupied_slots(),
@@ -561,7 +563,7 @@ impl Resources {
         let label = Label(cycle);
         let net = &self.net;
         kernel_log_fmt(format_args!(
-            "[M9  ] resources label={label} linux_procs={} threads={} processes={} fd_tables={} open_files={} pipes={} linux_waiters={} sockets={} net_requests={} net_in_service={} net_holder_exits={} object_requests={} capabilities={} linux_mm={} linux_signals={} tmp_files={} fs_nodes={} native_progress={}\n",
+            "[M9  ] resources label={label} linux_procs={} threads={} processes={} fd_tables={} open_files={} pipes={} linux_waiters={} sockets={} net_requests={} net_in_service={} net_holder_exits={} net_holders={} object_requests={} capabilities={} linux_mm={} linux_signals={} tmp_files={} fs_nodes={} native_progress={}\n",
             self.linux_procs,
             self.threads,
             self.processes,
@@ -573,6 +575,7 @@ impl Resources {
             self.net_requests,
             self.net_in_service,
             self.net_holder_exits,
+            self.net_holders,
             self.object_requests,
             self.capabilities,
             self.linux_mm,
