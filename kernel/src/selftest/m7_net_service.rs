@@ -602,6 +602,10 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
 
     match teardown.next_stack_pointer {
         Some(next_stack_pointer) => next_stack_pointer,
-        None => fatal_kernel_error("m7 net self-test teardown found no runnable thread"),
+        None => match crate::sched::idle::idle_handoff_while_threads_blocked() {
+            Ok(Some(idle_stack_pointer)) => idle_stack_pointer,
+            Ok(None) => fatal_kernel_error("m7 net self-test teardown found no runnable thread"),
+            Err(message) => fatal_kernel_error(message),
+        },
     }
 }

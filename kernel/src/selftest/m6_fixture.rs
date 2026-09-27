@@ -14,6 +14,7 @@ use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::current_process_id;
 use crate::process::domain::teardown_current_process;
+use crate::sched::idle::idle_handoff_while_threads_blocked;
 use crate::sched::wait::{block_current_thread_with_resume, wake_all, BlockedResume, WaitKey};
 use crate::selftest::m6_fixture_exits::{ExitWait, FixtureExitLog};
 use crate::service::spawn::launch_builtin_service;
@@ -390,10 +391,14 @@ pub(crate) fn handle_fixture_report(allocator: &mut PageAllocator) -> u64 {
         FixtureReportAction::Fail(message) => fatal_kernel_error(message),
         FixtureReportAction::Continue => match teardown.next_stack_pointer {
             Some(next_stack_pointer) => next_stack_pointer,
-            None => {
-                kernel_log_line("[M6  ] fixture: no runnable work remains");
-                fatal_kernel_error("fixture self-test lost all runnable threads")
-            }
+            None => match idle_handoff_while_threads_blocked() {
+                Ok(Some(idle_stack_pointer)) => idle_stack_pointer,
+                Ok(None) => {
+                    kernel_log_line("[M6  ] fixture: no runnable work remains");
+                    fatal_kernel_error("fixture self-test lost all runnable threads")
+                }
+                Err(message) => fatal_kernel_error(message),
+            },
         },
     }
 }

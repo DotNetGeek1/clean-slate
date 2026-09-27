@@ -116,6 +116,19 @@ pub(crate) fn ensure_idle_thread_configured() -> Result<(), &'static str> {
     })
 }
 
+/// Thread exit found nothing runnable. While other threads are still blocked on an
+/// interrupt, deadline, or wake key, that is not lost work: park in the idle thread
+/// until one of them wakes. Returns `None` only when no thread remains blocked.
+pub(crate) fn idle_handoff_while_threads_blocked() -> Result<Option<u64>, &'static str> {
+    without_interrupts(|| {
+        if unsafe { scheduler_mut() }.has_blocked_threads() {
+            handoff_to_idle_thread().map(Some)
+        } else {
+            Ok(None)
+        }
+    })
+}
+
 pub(crate) fn handoff_to_idle_thread() -> Result<u64, &'static str> {
     ensure_idle_thread_configured()?;
     let scheduler = unsafe { scheduler_mut() };

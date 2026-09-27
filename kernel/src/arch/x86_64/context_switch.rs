@@ -212,7 +212,13 @@ pub(crate) fn resume_after_scheduler_handoff(
             clean_slate_blocked_syscall_resume_from_schedule()
         },
         Some(stack_pointer) => unsafe { restore_task_context(stack_pointer) },
-        None => fatal_kernel_error(no_runnable_message),
+        None => match crate::sched::idle::idle_handoff_while_threads_blocked() {
+            Ok(Some(idle_stack_pointer)) => {
+                resume_after_scheduler_handoff(Some(idle_stack_pointer), no_runnable_message)
+            }
+            Ok(None) => fatal_kernel_error(no_runnable_message),
+            Err(message) => fatal_kernel_error(message),
+        },
     }
 }
 
