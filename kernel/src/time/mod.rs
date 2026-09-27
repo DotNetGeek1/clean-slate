@@ -95,6 +95,15 @@ pub(crate) fn monotonic_ns() -> u64 {
     mul_div_u128(delta, 1_000_000_000, u128::from(hz)).unwrap_or(u64::MAX)
 }
 
+/// Calibrated TSC time in whole [`irq_period_ns`] units, for clients whose clock ABI is
+/// "ticks times `tick_period_ns`" (net service, recovery supervisor). It advances with
+/// real time; counting delivered IRQs would follow the host timer resolution instead.
+pub(crate) fn monotonic_period_ticks() -> Option<u64> {
+    let period_ns = irq_period_ns()?;
+    tsc_hz()?;
+    Some(monotonic_ns() / period_ns)
+}
+
 /// IRQ period in nanoseconds from calibrated counter rate and reload count.
 pub(crate) fn irq_period_ns() -> Option<u64> {
     irq_period_ns_from(apic_counter_hz()?, apic_timer_initial_count())

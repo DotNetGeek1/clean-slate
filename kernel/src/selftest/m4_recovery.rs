@@ -18,7 +18,6 @@ use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
-use crate::interrupt::timer::kernel_ticks;
 use crate::ipc::endpoint_table_mut;
 use crate::ipc::IpcEndpointTable;
 use crate::ipc::USERSPACE_SUPERVISOR_TEST_PID;
@@ -197,6 +196,13 @@ pub(crate) fn recovery_state() -> Result<&'static mut RecoverySelfTestState, &'s
             .as_mut()
             .ok_or("recovery self-test state was not initialized")
     }
+}
+
+/// The supervisor's liveness clock: `kernel_ticks` in the bootstrap is read as
+/// `tick_period_ns` units, so it must advance with real time.
+pub(crate) fn recovery_clock_ticks() -> u64 {
+    crate::time::monotonic_period_ticks()
+        .unwrap_or_else(|| fatal_kernel_error("recovery clock requires a calibrated TSC"))
 }
 
 pub(crate) fn publish_recovery_bootstrap(update: impl FnOnce(&mut RecoveryBootstrap)) {
@@ -743,7 +749,7 @@ pub(crate) fn handle_recovery_userspace_entry(
         if state.stage == RecoveryStage::Complete {
             recovery_complete_and_exit();
         }
-        publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = kernel_ticks());
+        publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = recovery_clock_ticks());
         if state.skip_workload_respawn_once {
             state.skip_workload_respawn_once = false;
         } else if matches!(state.stage, RecoveryStage::Recovered)
@@ -977,6 +983,6 @@ pub(crate) fn observe_recovery_fault_after_containment(
     state.last_faulted_service_pid = pid;
     state.service_process = None;
     state.stage = RecoveryStage::Faulted;
-    publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = kernel_ticks() + 1);
+    publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = recovery_clock_ticks() + 1);
     Ok(())
 }
