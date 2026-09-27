@@ -652,8 +652,10 @@ aggregate boot path inside `test-m8` itself.
 
 **Time:** APIC timer rate is calibrated once at boot against PIT channel 2 with
 interrupts masked (`[TIME] apic tick calibrated: ticks/s=N ref=pit`). Linux
-`nanosleep` / `poll` timeouts derive absolute `Deadline` values via
-`ticks_from_timespec` / `ticks_from_millis` (round up; no fabricated ns).
+`nanosleep` / `poll` timeouts are exact `Deadline::MonotonicNs` values
+(`monotonic_deadline_from_timespec` / `monotonic_deadline_from_millis`:
+TSC `now + request`, no tick rounding). The periodic tick adds under one
+period before the expiring check; see `M9.md`, "Timed wait latency".
 
 **Memory:** per-process brk/mmap bookkeeping in `linux_mem` (bounded tables;
 anonymous `MAP_PRIVATE|MAP_ANONYMOUS` only; W^X rejects `PROT_EXEC|PROT_WRITE`).

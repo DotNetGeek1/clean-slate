@@ -2703,7 +2703,7 @@ const M9_RUNTIME_WALL_REQUESTED: Duration = Duration::from_secs(1);
 /// guest TSC is host time, so the spans differ only by the TSC calibration
 /// error and by how late each marker crosses serial -> QEMU stdout -> the
 /// reader thread, which stamps it. Measured host-minus-guest: -0.46 to
-/// -0.22 ms over 15 solo runs, -0.94 to +5.0 ms over 15 runs with every host
+/// -0.14 ms over 30 solo runs, -0.94 to +5.0 ms over 30 runs with every host
 /// CPU busy. 20 ms is 4x the worst of those and still rejects any guest clock
 /// more than ~0.3% off, such as IRQ-tick time (the tick rate follows host
 /// timer resolution) or the 0.06-0.35% low TSC calibration seen before the
