@@ -113,6 +113,19 @@ pub(crate) fn discard_bootstrap_grants_for_holder(holder: HolderId) -> usize {
 }
 
 pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
+    #[cfg(any(
+        feature = "m6-object-self-test",
+        feature = "m6-process-control-self-test",
+        feature = "m6-delegation-self-test",
+        feature = "m6-revocation-self-test",
+        feature = "m6-audit-self-test",
+        feature = "m6-capabilities-self-test",
+        feature = "m6-fixture-smoke-self-test",
+        feature = "m7-net-caps-self-test"
+    ))]
+    if crate::selftest::m6_fixture::handle_harness_subop(frame) {
+        return;
+    }
     if frame.rdi != GRANT_SUBOP_CLAIM {
         frame.rax = SYSCALL_EINVAL;
         return;

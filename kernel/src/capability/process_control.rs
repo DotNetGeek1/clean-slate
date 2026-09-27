@@ -296,6 +296,17 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
             log_allowed(holder, target_pid, op);
             match teardown_process_by_id(allocator, kernel_root_frame(), target_pid, 0, false) {
                 Ok(_result) => {
+                    #[cfg(any(
+                        feature = "m6-object-self-test",
+                        feature = "m6-process-control-self-test",
+                        feature = "m6-delegation-self-test",
+                        feature = "m6-revocation-self-test",
+                        feature = "m6-audit-self-test",
+                        feature = "m6-capabilities-self-test",
+                        feature = "m6-fixture-smoke-self-test",
+                        feature = "m7-net-caps-self-test"
+                    ))]
+                    crate::selftest::m6_fixture::on_fixture_exiting(target_pid);
                     let resources = remaining_owned_resource_count(target_pid);
                     kernel_log_fmt(format_args!(
                         "[PROC] teardown pid={target_pid} resources={resources}\n"

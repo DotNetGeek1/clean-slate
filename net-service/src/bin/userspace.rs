@@ -226,9 +226,50 @@ fn wait_for_service_work() {
         finish();
     };
     let timer = shared_tcp_transport_mut().next_timer_deadline();
+    publish_occupancy();
     if wait_net_work(NET_WAIT_WORK_REQUESTS | NET_WAIT_WORK_RX, now, timer).is_err() {
         finish();
     }
+}
+
+fn occupied<T>(rows: &[Option<T>]) -> u64 {
+    rows.iter().filter(|row| row.is_some()).count() as u64
+}
+
+/// Counts every bounded table the service keeps across requests into the bootstrap page
+/// (see `NetworkServiceOccupancy`). Runs only at the idle point, right before blocking.
+fn publish_occupancy() {
+    let (sessions, session_pending) =
+        unsafe { (*service_state_slot()).as_ref() }.map_or((0, 0), |service| {
+            (
+                u64::from(service.sessions_in_use()),
+                u64::from(service.pending_requests()),
+            )
+        });
+    let (udp_endpoints, udp_queued, dns_queries) = match udp_resolver() {
+        Ok(resolver) => {
+            let dns_queries = resolver.pending_queries() as u64;
+            let table = resolver.udp_mut().table();
+            (
+                table.endpoints_in_use() as u64,
+                table.queued_datagrams() as u64,
+                dns_queries,
+            )
+        }
+        Err(_) => (0, 0, 0),
+    };
+    let occupancy = &mut bootstrap_mut().occupancy;
+    occupancy.sessions = sessions;
+    occupancy.session_pending = session_pending;
+    occupancy.tcp_connections = shared_tcp_transport_mut().connections_in_use() as u64;
+    occupancy.tcp_mappings = occupied(unsafe { &*core::ptr::addr_of!(PLAIN_TCP_BY_SESSION) });
+    occupancy.udp_endpoints = udp_endpoints;
+    occupancy.udp_mappings = occupied(unsafe { &*core::ptr::addr_of!(UDP_ENDPOINT_BY_SESSION) });
+    occupancy.udp_queued = udp_queued;
+    occupancy.udp_receives = occupied(pending_linux_udp_receives());
+    occupancy.dns_queries = dns_queries;
+    occupancy.heap_bytes = current_heap_offset() as u64;
+    occupancy.publications = occupancy.publications.wrapping_add(1);
 }
 
 fn monotonic_ticks() -> Result<u64, u64> {

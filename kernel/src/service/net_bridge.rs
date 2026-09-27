@@ -14,7 +14,37 @@ use clean_slate_service_fixtures::{
 use core::sync::atomic::{AtomicBool, Ordering};
 
 const LOOPBACK_MAC: MacAddr = MacAddr([0x02, 0x10, 0x77, 0, 0, 1]);
-const MAX_HOLDER_EXIT_QUEUE: usize = 8;
+/// Callers the live service may hold state for. A `Live` entry belongs to a registered
+/// process, so at most `PROCESS_REGISTRY_CAPACITY` are live; the other half holds exits the
+/// service has not acknowledged yet. An exit reuses its holder's entry, so it is never dropped;
+/// when every entry is taken, a new caller's first submit fails with `QueueFull` instead.
+const NET_HOLDER_SLOTS: usize = 2 * crate::process::PROCESS_REGISTRY_CAPACITY;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HolderState {
+    Free,
+    /// Has submitted to the live service instance and has not exited.
+    Live,
+    /// Exited; the service has not popped the exit yet.
+    ExitPending,
+    /// Popped by the service, awaiting `NET_SUBOP_ACK_HOLDER_EXIT`.
+    ExitPopped,
+}
+
+#[derive(Clone, Copy)]
+struct HolderEntry {
+    state: HolderState,
+    caller: TrustedCaller,
+}
+
+impl HolderEntry {
+    const fn free() -> Self {
+        Self {
+            state: HolderState::Free,
+            caller: TrustedCaller::new(0, 0, 0),
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct RingSlot {
@@ -269,11 +299,7 @@ pub(crate) struct NetBridge {
     slots: [ClientSlot; NETWORK_REQUEST_SLOTS],
     next_request_id: u64,
     inflight_failed: u32,
-    holder_exit_queue: [TrustedCaller; MAX_HOLDER_EXIT_QUEUE],
-    holder_exit_head: u8,
-    holder_exit_tail: u8,
-    /// Holder exit popped by the live service, awaiting `NET_SUBOP_ACK_HOLDER_EXIT`.
-    pending_holder_exit_ack: Option<TrustedCaller>,
+    holders: [HolderEntry; NET_HOLDER_SLOTS],
     #[cfg(feature = "m7-net-service-self-test")]
     holder_exit_acked_pid: Option<u64>,
 }
@@ -295,10 +321,7 @@ impl NetBridge {
             slots: [ClientSlot::free(); NETWORK_REQUEST_SLOTS],
             next_request_id: 1,
             inflight_failed: 0,
-            holder_exit_queue: [TrustedCaller::new(0, 0, 0); MAX_HOLDER_EXIT_QUEUE],
-            holder_exit_head: 0,
-            holder_exit_tail: 0,
-            pending_holder_exit_ack: None,
+            holders: [HolderEntry::free(); NET_HOLDER_SLOTS],
             #[cfg(feature = "m7-net-service-self-test")]
             holder_exit_acked_pid: None,
         }
@@ -313,6 +336,38 @@ impl NetBridge {
             .count()
     }
 
+    /// Request slots the service has taken with `SERVICE_NEXT` but not completed.
+    #[cfg(feature = "m9-userspace-self-test")]
+    pub(crate) fn in_service_request_slots(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| slot.state == ClientSlotState::InService)
+            .count()
+    }
+
+    /// Holder exits queued for the service or popped and not yet acknowledged.
+    #[cfg(any(test, feature = "m9-userspace-self-test"))]
+    pub(crate) fn outstanding_holder_exits(&self) -> usize {
+        self.holders
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.state,
+                    HolderState::ExitPending | HolderState::ExitPopped
+                )
+            })
+            .count()
+    }
+
+    /// Holder entries in any non-free state (live callers plus unacknowledged exits).
+    #[cfg(feature = "m9-userspace-self-test")]
+    pub(crate) fn holder_entries_in_use(&self) -> usize {
+        self.holders
+            .iter()
+            .filter(|entry| entry.state != HolderState::Free)
+            .count()
+    }
+
     pub fn register_service_instance(
         &mut self,
         pid: u64,
@@ -320,9 +375,15 @@ impl NetBridge {
         generation: u64,
     ) -> SessionGeneration {
         self.ensure_virtio_backend();
-        self.holder_exit_head = 0;
-        self.holder_exit_tail = 0;
-        self.pending_holder_exit_ack = None;
+        // A new instance holds no per-caller state, except for requests still queued for it.
+        // Their callers are live processes (exit reclaims a holder's slots), so they fit.
+        self.holders = [HolderEntry::free(); NET_HOLDER_SLOTS];
+        for index in 0..self.slots.len() {
+            if self.slots[index].state == ClientSlotState::Pending {
+                let admitted = self.admit_holder(self.slots[index].client);
+                debug_assert!(admitted.is_ok(), "queued callers exceed NET_HOLDER_SLOTS");
+            }
+        }
         // The timer ISR harvests into the pending ring; reset device and ring atomically.
         crate::arch::x86_64::cpu::without_interrupts(|| {
             let _ = self
@@ -391,18 +452,40 @@ impl NetBridge {
         TrustedCaller::new(pid, domain, instance_generation)
     }
 
-    pub fn push_holder_exit(&mut self, caller: TrustedCaller) {
-        let next = (self.holder_exit_tail + 1) % MAX_HOLDER_EXIT_QUEUE as u8;
-        if next == self.holder_exit_head {
-            return;
+    /// Records `caller` as a holder the service may keep state for. Idempotent for a live caller.
+    fn admit_holder(&mut self, caller: TrustedCaller) -> Result<(), NetBridgeError> {
+        if self
+            .holders
+            .iter()
+            .any(|entry| entry.state == HolderState::Live && entry.caller == caller)
+        {
+            return Ok(());
         }
-        self.holder_exit_queue[self.holder_exit_tail as usize] = caller;
-        self.holder_exit_tail = next;
-        crate::service::net_request_wake::wake_net_service_work();
+        let entry = self
+            .holders
+            .iter_mut()
+            .find(|entry| entry.state == HolderState::Free)
+            .ok_or(NetBridgeError::QueueFull)?;
+        *entry = HolderEntry {
+            state: HolderState::Live,
+            caller,
+        };
+        Ok(())
     }
 
-    fn holder_exit_caller(&self, pid: u64, domain: u64, instance_generation: u64) -> TrustedCaller {
-        TrustedCaller::new(pid, domain, instance_generation)
+    /// Marks every live entry of `pid` exited. Needs no allocation, so it cannot fail.
+    pub fn mark_holder_exit(&mut self, pid: u64) -> usize {
+        let mut marked = 0usize;
+        for entry in &mut self.holders {
+            if entry.state == HolderState::Live && entry.caller.pid == pid {
+                entry.state = HolderState::ExitPending;
+                marked += 1;
+            }
+        }
+        if marked > 0 {
+            crate::service::net_request_wake::wake_net_service_work();
+        }
+        marked
     }
 
     #[cfg(feature = "m7-net-service-self-test")]
@@ -410,14 +493,22 @@ impl NetBridge {
         self.holder_exit_acked_pid == Some(pid)
     }
 
+    /// Next exit for the service. An exit popped but not yet acknowledged is returned again,
+    /// so a second pop cannot orphan it.
     pub fn pop_holder_exit(&mut self) -> Option<TrustedCaller> {
-        if self.holder_exit_head == self.holder_exit_tail {
-            return None;
+        if let Some(entry) = self
+            .holders
+            .iter()
+            .find(|entry| entry.state == HolderState::ExitPopped)
+        {
+            return Some(entry.caller);
         }
-        let caller = self.holder_exit_queue[self.holder_exit_head as usize];
-        self.holder_exit_head = (self.holder_exit_head + 1) % MAX_HOLDER_EXIT_QUEUE as u8;
-        self.pending_holder_exit_ack = Some(caller);
-        Some(caller)
+        let entry = self
+            .holders
+            .iter_mut()
+            .find(|entry| entry.state == HolderState::ExitPending)?;
+        entry.state = HolderState::ExitPopped;
+        Some(entry.caller)
     }
 
     pub fn ack_holder_exit(
@@ -429,10 +520,13 @@ impl NetBridge {
         if !self.is_live_service(service_pid) {
             return Err(NetBridgeError::NotService);
         }
-        let caller = self
-            .pending_holder_exit_ack
-            .take()
+        let entry = self
+            .holders
+            .iter_mut()
+            .find(|entry| entry.state == HolderState::ExitPopped)
             .ok_or(NetBridgeError::InvalidRequest)?;
+        let caller = entry.caller;
+        *entry = HolderEntry::free();
         kernel_log_fmt(format_args!(
             "[NET ] holder exit reclaimed sessions={sessions} pending={pending}\n"
         ));
@@ -461,13 +555,14 @@ impl NetBridge {
             .iter()
             .position(|slot| slot.state == ClientSlotState::Free)
             .ok_or(NetBridgeError::QueueFull)?;
+        let caller = self.trusted_caller(pid, domain, instance_generation);
+        self.admit_holder(caller)?;
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
-        let client = self.trusted_caller(pid, domain, instance_generation);
         let slot = &mut self.slots[slot_index];
         slot.release();
         slot.state = ClientSlotState::Pending;
-        slot.client = client;
+        slot.client = caller;
         slot.request_id = request_id;
         slot.request = request;
         let copy_len = payload.len().min(NETWORK_MAX_PAYLOAD_BYTES);
@@ -516,7 +611,10 @@ impl NetBridge {
         self.slots
             .iter()
             .any(|slot| slot.state == ClientSlotState::Pending)
-            || self.holder_exit_head != self.holder_exit_tail
+            || self
+                .holders
+                .iter()
+                .any(|entry| entry.state == HolderState::ExitPending)
     }
 
     /// The client no longer wants `request_id`'s response (e.g. its socket was released):
@@ -588,18 +686,11 @@ impl NetBridge {
 
     pub fn reclaim_for_holder(&mut self, pid: u64) -> usize {
         let mut reclaimed = 0usize;
-        let mut caller = None;
         for slot in &mut self.slots {
             if slot.state != ClientSlotState::Free && slot.client.pid == pid {
-                if caller.is_none() {
-                    caller = Some(slot.client);
-                }
                 slot.release();
                 reclaimed += 1;
             }
-        }
-        if let Some(caller) = caller {
-            self.push_holder_exit(caller);
         }
         reclaimed
     }
@@ -893,13 +984,9 @@ pub(crate) fn reclaim_net_requests_for_holder(pid: u64) -> usize {
     reclaimed
 }
 
-pub(crate) fn notify_holder_exit_for_process(process_id: u64, instance_generation: u64) {
-    let bridge = net_bridge_mut();
-    if bridge.service_pid() == 0 || bridge.service_pid() == process_id {
-        return;
-    }
-    let caller = bridge.holder_exit_caller(process_id, process_id, instance_generation);
-    bridge.push_holder_exit(caller);
+/// Queues the service's cleanup for `process_id` if it ever submitted to the live instance.
+pub(crate) fn notify_holder_exit_for_process(process_id: u64) {
+    net_bridge_mut().mark_holder_exit(process_id);
 }
 
 pub(crate) fn shutdown_net_service_instance() -> u32 {
@@ -963,19 +1050,137 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn reclaim_for_holder_preserves_original_trusted_caller_generation() {
-        let mut bridge = NetBridge::new();
-        bridge.register_service_instance(10, 1, 3);
-        let open = NetworkRequest::Open {
+    fn open_wire() -> [u8; 64] {
+        NetworkRequest::Open {
             kind: SocketKind::Udp,
         }
-        .encode();
-        bridge.submit(20, 20, 7, &open, &[]).unwrap();
+        .encode()
+    }
+
+    /// Submits, has the service complete, and collects one request for `pid`, leaving the
+    /// caller admitted with no request slot held.
+    fn round_trip(bridge: &mut NetBridge, pid: u64, generation: u64) {
+        let id = bridge
+            .submit(pid, pid, generation, &open_wire(), &[])
+            .unwrap();
+        let (taken, ..) = bridge.service_next().unwrap();
+        assert_eq!(taken, id);
+        bridge
+            .service_complete(id, NetworkResponse::Connect, &[])
+            .unwrap();
+        let mut payload = [0u8; 64];
+        bridge.poll(pid, pid, generation, id, &mut payload).unwrap();
+    }
+
+    fn drain_exits(bridge: &mut NetBridge, service_pid: u64) -> Vec<TrustedCaller> {
+        let mut exits = Vec::new();
+        while let Some(caller) = bridge.pop_holder_exit() {
+            exits.push(caller);
+            bridge.ack_holder_exit(service_pid, 0, 0).unwrap();
+        }
+        exits
+    }
+
+    #[test]
+    fn holder_exit_preserves_original_trusted_caller_generation() {
+        let mut bridge = NetBridge::new();
+        bridge.register_service_instance(10, 1, 3);
+        bridge.submit(20, 20, 7, &open_wire(), &[]).unwrap();
         assert_eq!(bridge.reclaim_for_holder(20), 1);
+        assert_eq!(bridge.mark_holder_exit(20), 1);
         assert_eq!(
             bridge.pop_holder_exit(),
             Some(TrustedCaller::new(20, 20, 7))
+        );
+    }
+
+    #[test]
+    fn more_simultaneous_holder_exits_than_the_old_queue_are_all_delivered() {
+        const OLD_QUEUE_CAPACITY: usize = 8;
+        let holders = OLD_QUEUE_CAPACITY + 4;
+        assert!(holders <= NET_HOLDER_SLOTS);
+        let mut bridge = NetBridge::new();
+        bridge.register_service_instance(10, 1, 3);
+        for pid in 100..100 + holders as u64 {
+            round_trip(&mut bridge, pid, pid + 1);
+        }
+        for pid in 100..100 + holders as u64 {
+            assert_eq!(bridge.mark_holder_exit(pid), 1);
+        }
+        assert_eq!(bridge.outstanding_holder_exits(), holders);
+        assert!(bridge.net_service_has_work());
+
+        let mut exits = drain_exits(&mut bridge, 10);
+        exits.sort_by_key(|caller| caller.pid);
+        let expected: Vec<_> = (100..100 + holders as u64)
+            .map(|pid| TrustedCaller::new(pid, pid, pid + 1))
+            .collect();
+        assert_eq!(exits, expected);
+        assert_eq!(bridge.outstanding_holder_exits(), 0);
+        assert!(!bridge.net_service_has_work());
+    }
+
+    #[test]
+    fn full_holder_table_refuses_new_callers_without_losing_exits() {
+        let mut bridge = NetBridge::new();
+        bridge.register_service_instance(10, 1, 3);
+        let slots = NET_HOLDER_SLOTS as u64;
+        for pid in 100..100 + slots {
+            round_trip(&mut bridge, pid, 1);
+            bridge.mark_holder_exit(pid);
+        }
+        assert!(matches!(
+            bridge.submit(500, 500, 1, &open_wire(), &[]),
+            Err(NetBridgeError::QueueFull)
+        ));
+        assert!(bridge
+            .slots
+            .iter()
+            .all(|slot| slot.state == ClientSlotState::Free));
+
+        let exits = drain_exits(&mut bridge, 10);
+        assert_eq!(exits.len(), NET_HOLDER_SLOTS);
+        bridge.submit(500, 500, 1, &open_wire(), &[]).unwrap();
+    }
+
+    #[test]
+    fn unacknowledged_pop_is_redelivered_not_orphaned() {
+        let mut bridge = NetBridge::new();
+        bridge.register_service_instance(10, 1, 3);
+        round_trip(&mut bridge, 20, 1);
+        round_trip(&mut bridge, 21, 1);
+        bridge.mark_holder_exit(20);
+        bridge.mark_holder_exit(21);
+        let first = bridge.pop_holder_exit().unwrap();
+        assert_eq!(bridge.pop_holder_exit(), Some(first));
+        bridge.ack_holder_exit(10, 0, 0).unwrap();
+        let second = bridge.pop_holder_exit().unwrap();
+        assert_ne!(second, first);
+        bridge.ack_holder_exit(10, 0, 0).unwrap();
+        assert_eq!(bridge.pop_holder_exit(), None);
+        assert!(bridge.ack_holder_exit(10, 0, 0).is_err());
+    }
+
+    #[test]
+    fn exit_of_a_holder_that_never_submitted_queues_nothing() {
+        let mut bridge = NetBridge::new();
+        bridge.register_service_instance(10, 1, 3);
+        assert_eq!(bridge.mark_holder_exit(20), 0);
+        assert_eq!(bridge.pop_holder_exit(), None);
+    }
+
+    #[test]
+    fn service_restart_keeps_callers_of_still_queued_requests() {
+        let mut bridge = NetBridge::new();
+        bridge.register_service_instance(10, 1, 3);
+        round_trip(&mut bridge, 20, 1);
+        bridge.submit(21, 21, 1, &open_wire(), &[]).unwrap();
+        bridge.register_service_instance(11, 1, 4);
+        assert_eq!(bridge.mark_holder_exit(20), 0);
+        assert_eq!(bridge.mark_holder_exit(21), 1);
+        assert_eq!(
+            bridge.pop_holder_exit(),
+            Some(TrustedCaller::new(21, 21, 1))
         );
     }
 }
