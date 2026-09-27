@@ -270,9 +270,10 @@ use ::uefi::Status;
 /// boot-context self-tests). The firmware's own stack has no guard page and
 /// an unknown extent, so `run` leaves it immediately.
 ///
-/// Debug builds peak at about 143 KiB here (`run_inner` and
-/// `normalize_memory_map` frames alone are ~57 KiB and ~69 KiB), before the
-/// guards are armed; 128 KiB overflowed.
+/// With the memory map and allocator tables static, debug M9 acceptance
+/// builds peak at 43 KiB here, but the M6 capabilities self-test still reaches
+/// ~118 KiB (its fixture frames run in boot context), so 128 KiB would leave
+/// no real margin. The `stack-high-water-check` feature logs the peak.
 const BOOT_STACK_SIZE: usize = 256 * 1024;
 
 static BOOT_STACK: GlobalCell<GuardedStack<BOOT_STACK_SIZE>> = GlobalCell::new(GuardedStack::new());
