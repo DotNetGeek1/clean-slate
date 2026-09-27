@@ -23,7 +23,7 @@ use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
 use crate::selftest::m6_fixture::{
-    fixture_service, set_report_handler, spawn_fixture, FixtureReportAction,
+    fixture_service, set_report_handler, spawn_fixture, wait_exit_step, FixtureReportAction,
 };
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
@@ -353,6 +353,10 @@ fn build_exiter_program() -> M6FixtureBootstrap {
     program
 }
 
+/// Owner2's child derives from the exiter's root, so it is revoked by the exiter's
+/// teardown; owner2 re-probes only after that teardown completes.
+const PREDICTED_EXITER_PID: u64 = 5;
+
 fn build_owner2_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     let claim = program
@@ -361,8 +365,7 @@ fn build_owner2_program() -> M6FixtureBootstrap {
     program
         .push(probe_step(arg_result(claim), Rights::READ).expect_eq(0))
         .unwrap();
-    program.push(M6FixtureStep::spin(3)).unwrap();
-    program.push(M6FixtureStep::spin(16)).unwrap();
+    program.push(wait_exit_step(PREDICTED_EXITER_PID)).unwrap();
     program
         .push(probe_step(arg_result(claim), Rights::READ).expect_ne(0))
         .unwrap();
@@ -454,13 +457,10 @@ fn report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReportAction 
         }
         state.unrelated_reported = true;
     } else if pid == state.owner2_pid {
-        if report.status == FIXTURE_STATUS_DONE
-            || (report.status == FIXTURE_STATUS_MISMATCH && state.exiter_reported)
-        {
-            state.owner2_reported = true;
-        } else {
-            return FixtureReportAction::Fail("owner2 fixture failed before exiter teardown");
+        if report.status != FIXTURE_STATUS_DONE {
+            return FixtureReportAction::Fail("owner2 fixture finished with unexpected status");
         }
+        state.owner2_reported = true;
     } else if pid == state.exiter_pid {
         state.exiter_reported = true;
     } else {
@@ -509,7 +509,7 @@ pub(crate) fn start_m6_revocation_self_test(allocator: PageAllocator) -> ! {
     emit_workload_progress(1);
 
     let (child_handle, grandchild_handle, owner_root_slot) = install_reader_tree(1, 2, 3);
-    let exiter_root_slot = install_exiter_tree(5, 6);
+    let exiter_root_slot = install_exiter_tree(PREDICTED_EXITER_PID, 6);
     register_faulter_grant(7);
 
     let owner_root_encoded = with_capability_space(|table| {

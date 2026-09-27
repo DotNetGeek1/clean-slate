@@ -1,5 +1,10 @@
 //! M6 scripted fixture launch registry and USER_TEST_VECTOR report handling.
+//!
+//! Fixtures never order themselves with spin counts or poll retries. Cross-fixture
+//! ordering uses the harness sub-operations on `SYSCALL_NR_CAP_GRANT` below, which
+//! block the caller on a wait key until the awaited event has happened.
 
+use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
@@ -9,15 +14,37 @@ use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::current_process_id;
 use crate::process::domain::teardown_current_process;
+use crate::process::process_registry_mut;
+use crate::sched::wait::{block_current_thread_with_resume, wake_all, BlockedResume, WaitKey};
 use crate::service::spawn::launch_builtin_service;
 use crate::service::spawn::SpawnedServiceInstance;
 use crate::sync::global_cell::GlobalCell;
+use clean_slate_capability::syscall_abi::{SYSCALL_EINVAL, SYSCALL_NR_CAP_GRANT};
 use clean_slate_service_fixtures::m6_fixture::{
-    M6FixtureBootstrap, FIXTURE_STATUS_MISMATCH, M6_FIXTURE_BOOTSTRAP_ADDRESS, M6_FIXTURE_MAGIC,
+    M6FixtureBootstrap, M6FixtureStep, FIXTURE_STATUS_MISMATCH, M6_FIXTURE_BOOTSTRAP_ADDRESS,
+    M6_FIXTURE_MAGIC,
 };
 use clean_slate_service_lifecycle::ServiceId;
 
 pub(crate) const M6_FIXTURE_SERVICE_ID_BASE: u64 = 0x6000;
+
+/// Self-test builds only: `rsi = n` blocks until the harness turn is `n`
+/// (`EINVAL` once the turn has moved past `n`).
+pub(crate) const FIXTURE_SUBOP_WAIT_TURN: u64 = 0x100;
+/// Self-test builds only: `rsi = n` hands turn `n` to `n + 1` and wakes the waiters
+/// (`EINVAL` unless the turn is exactly `n`).
+pub(crate) const FIXTURE_SUBOP_END_TURN: u64 = 0x101;
+/// Self-test builds only: `rsi = pid` blocks until that fixture has reported or
+/// faulted and been torn down.
+pub(crate) const FIXTURE_SUBOP_WAIT_EXIT: u64 = 0x102;
+/// Self-test builds only: blocks the caller until something tears it down.
+pub(crate) const FIXTURE_SUBOP_PARK: u64 = 0x103;
+
+const FIXTURE_TURN_KEY: WaitKey = WaitKey(0x670);
+const FIXTURE_EXIT_KEY: WaitKey = WaitKey(0x671);
+const FIXTURE_PARK_KEY: WaitKey = WaitKey(0x672);
+
+static FIXTURE_TURN: GlobalCell<u64> = GlobalCell::new(0);
 
 const MAX_FIXTURE_REGISTRY: usize = 12;
 const MAX_FIXTURE_REPORTS: usize = 12;
@@ -165,6 +192,108 @@ pub(crate) fn set_report_handler(handler: fn(u64, &M6FixtureBootstrap) -> Fixtur
     }
 }
 
+fn harness_step(subop: u64, arg: u64) -> M6FixtureStep {
+    M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [subop, arg, 0, 0, 0, 0])
+}
+
+/// Blocks the fixture until the harness turn reaches `turn`.
+pub(crate) fn wait_turn_step(turn: u64) -> M6FixtureStep {
+    harness_step(FIXTURE_SUBOP_WAIT_TURN, turn).expect_eq(0)
+}
+
+/// Hands the harness turn from `turn` to `turn + 1`.
+pub(crate) fn end_turn_step(turn: u64) -> M6FixtureStep {
+    harness_step(FIXTURE_SUBOP_END_TURN, turn).expect_eq(0)
+}
+
+/// Blocks the fixture until fixture `pid` has been torn down.
+pub(crate) fn wait_exit_step(pid: u64) -> M6FixtureStep {
+    harness_step(FIXTURE_SUBOP_WAIT_EXIT, pid).expect_eq(0)
+}
+
+/// Keeps the fixture alive, blocked, until it is terminated or the test exits.
+pub(crate) fn park_step() -> M6FixtureStep {
+    harness_step(FIXTURE_SUBOP_PARK, 0)
+}
+
+/// Serves the harness sub-operations of `SYSCALL_NR_CAP_GRANT`; returns `false` for
+/// any other sub-operation so the production claim path handles it.
+pub(crate) fn handle_harness_subop(frame: &mut SyscallContext) -> bool {
+    if !matches!(
+        frame.rdi,
+        FIXTURE_SUBOP_WAIT_TURN
+            | FIXTURE_SUBOP_END_TURN
+            | FIXTURE_SUBOP_WAIT_EXIT
+            | FIXTURE_SUBOP_PARK
+    ) {
+        return false;
+    }
+    let is_fixture_caller = current_process_id().is_ok_and(is_fixture_pid);
+    if !is_fixture_caller {
+        frame.rax = SYSCALL_EINVAL;
+        return true;
+    }
+    run_harness_subop(frame);
+    true
+}
+
+fn run_harness_subop(frame: &mut SyscallContext) {
+    match frame.rdi {
+        FIXTURE_SUBOP_WAIT_TURN => {
+            let turn = unsafe { *FIXTURE_TURN.get() };
+            if turn == frame.rsi {
+                frame.rax = 0;
+            } else if turn > frame.rsi {
+                frame.rax = SYSCALL_EINVAL;
+            } else {
+                block_harness_caller(frame, FIXTURE_TURN_KEY);
+            }
+        }
+        FIXTURE_SUBOP_END_TURN => {
+            let turn = unsafe { &mut *FIXTURE_TURN.get() };
+            if *turn == frame.rsi {
+                *turn += 1;
+                wake_all(FIXTURE_TURN_KEY);
+                frame.rax = 0;
+            } else {
+                frame.rax = SYSCALL_EINVAL;
+            }
+        }
+        FIXTURE_SUBOP_WAIT_EXIT => {
+            if unsafe { process_registry_mut().get(frame.rsi).is_none() } {
+                frame.rax = 0;
+            } else {
+                block_harness_caller(frame, FIXTURE_EXIT_KEY);
+            }
+        }
+        _ => block_harness_caller(frame, FIXTURE_PARK_KEY),
+    }
+}
+
+/// Blocks until `key` is woken, then re-runs the syscall so the condition is
+/// re-checked with the caller's original arguments.
+fn block_harness_caller(frame: &mut SyscallContext, key: WaitKey) {
+    match block_current_thread_with_resume(
+        frame as *mut SyscallContext,
+        key,
+        None,
+        BlockedResume::RestartSyscall {
+            nr: SYSCALL_NR_CAP_GRANT,
+            timeout_rax: 0,
+        },
+    ) {
+        Ok(_) => run_harness_subop(frame),
+        Err(message) => fatal_kernel_error(message),
+    }
+}
+
+/// Called with interrupts masked just before a fixture's own teardown (report or
+/// fault). The woken `WAIT_EXIT` callers cannot run until that teardown finishes,
+/// and they re-check the process registry when their syscall restarts.
+pub(crate) fn on_fixture_exiting() {
+    wake_all(FIXTURE_EXIT_KEY);
+}
+
 fn store_report(pid: u64, report: M6FixtureBootstrap) -> Result<(), &'static str> {
     unsafe {
         let slots = &mut *FIXTURE_REPORTS.get();
@@ -236,6 +365,7 @@ pub(crate) fn handle_fixture_report(allocator: &mut PageAllocator) -> u64 {
         qemu_exit(QEMU_EXIT_SUCCESS);
     }
     unregister_fixture_pid(pid);
+    on_fixture_exiting();
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 0, false)
         .unwrap_or_else(|message| fatal_kernel_error(message));
     match action {

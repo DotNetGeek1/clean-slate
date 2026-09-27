@@ -25,7 +25,8 @@ use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
 use crate::selftest::m6_fixture::{
-    fixture_service, set_report_handler, spawn_fixture, FixtureReportAction,
+    end_turn_step, fixture_service, park_step, set_report_handler, spawn_fixture, wait_exit_step,
+    wait_turn_step, FixtureReportAction,
 };
 use crate::service::control::ServiceLifecycleController;
 use crate::service::service_lifecycle_controller_mut;
@@ -42,8 +43,8 @@ use clean_slate_service_fixtures::m6_fixture::{
     FIXTURE_STATUS_MISMATCH,
 };
 use clean_slate_service_fixtures::{
-    StorageServiceBootstrap, OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_STATUS_PENDING,
-    OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT, STORAGE_SERVICE_ID,
+    StorageServiceBootstrap, OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT,
+    OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT, STORAGE_SERVICE_ID,
     STORAGE_SERVICE_MODE_OBJECT_SERVICE,
 };
 use clean_slate_service_lifecycle::{
@@ -75,6 +76,21 @@ const PREDICTED_AUDITOR_PID: u64 = 8;
 const PREDICTED_INTRUDER_PID: u64 = 9;
 
 const AUDIT_DATA_BYTES: usize = AUDIT_EVENT_SIZE_BYTES * 8;
+
+// Harness turns: the acceptance markers are one strict serial order across
+// fixtures, so each phase blocks until the previous one has handed over.
+const TURN_UNRELATED_PC: u64 = 0;
+const TURN_OWNER_WRITE: u64 = 1;
+const TURN_UNRELATED_OBJ: u64 = 2;
+const TURN_OWNER_READ_DELEGATE: u64 = 3;
+const TURN_READER_OBJECT_OPS: u64 = 4;
+/// After this turn the owner also waits for the controller's teardown, so the
+/// controller report (and its `workload progress=3`) precedes the revoke.
+const TURN_CONTROLLER: u64 = 5;
+const TURN_OWNER_REVOKE: u64 = 6;
+const TURN_READER_PROBE: u64 = 7;
+const TURN_OWNER_READ_BACK: u64 = 8;
+const TURN_AUDITOR: u64 = 9;
 
 struct CapabilitiesSelfTestState {
     owner_pid: u64,
@@ -144,24 +160,57 @@ fn process_gone(pid: u64) -> bool {
 
 fn build_target_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
-    program.push(M6FixtureStep::spin(0)).unwrap();
+    program.push(park_step()).unwrap();
     program
 }
 
-fn build_owner_program(reader_pid: u64) -> M6FixtureBootstrap {
+/// Submits a read of the test object and blocks until the read-back lands in
+/// `buf_offset`.
+fn push_object_read(program: &mut M6FixtureBootstrap, handle: u64, buf_offset: usize) {
+    let submit = program
+        .push(M6FixtureStep::syscall(
+            SYSCALL_NR_CAP_OBJECT,
+            [
+                OBJECT_SUBOP_SUBMIT,
+                handle,
+                OBJECT_OP_READ,
+                TEST_OBJECT_ID,
+                0,
+                0,
+            ],
+        ))
+        .unwrap();
+    program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_OBJECT,
+                [
+                    OBJECT_SUBOP_POLL,
+                    arg_result(submit),
+                    ALPHA_V1.len() as u64,
+                    arg_data(buf_offset),
+                    0,
+                    0,
+                ],
+            )
+            .expect_eq(ALPHA_V1.len() as u64),
+        )
+        .unwrap();
+}
+
+fn build_owner_program(reader_pid: u64, controller_pid: u64) -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     let write_data_offset = 0usize;
     let read_buf_offset = 64usize;
-    program.push(M6FixtureStep::spin(12)).unwrap();
     program.set_data(write_data_offset, ALPHA_V1).unwrap();
+    program.push(wait_turn_step(TURN_OWNER_WRITE)).unwrap();
     let claim = program
         .push(
             M6FixtureStep::syscall(
                 SYSCALL_NR_CAP_OBJECT,
                 [OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, 0, 0, 0, 0, 0],
             )
-            .repeat_while_eq(0)
-            .expect_ne(0),
+            .expect_ne(SYSCALL_EINVAL),
         )
         .unwrap();
     let handle = arg_result(claim);
@@ -178,49 +227,20 @@ fn build_owner_program(reader_pid: u64) -> M6FixtureBootstrap {
             ],
         ))
         .unwrap();
-    program.push(M6FixtureStep::spin(8)).unwrap();
     program
         .push(
             M6FixtureStep::syscall(
                 SYSCALL_NR_CAP_OBJECT,
                 [OBJECT_SUBOP_POLL, arg_result(submit_write), 0, 0, 0, 0],
             )
-            .repeat_while_eq(OBJECT_STATUS_PENDING)
             .expect_eq(0),
         )
         .unwrap();
-    program.push(M6FixtureStep::spin(48)).unwrap();
-    let submit_read = program
-        .push(M6FixtureStep::syscall(
-            SYSCALL_NR_CAP_OBJECT,
-            [
-                OBJECT_SUBOP_SUBMIT,
-                handle,
-                OBJECT_OP_READ,
-                TEST_OBJECT_ID,
-                0,
-                0,
-            ],
-        ))
-        .unwrap();
-    program.push(M6FixtureStep::spin(1)).unwrap();
+    program.push(end_turn_step(TURN_OWNER_WRITE)).unwrap();
     program
-        .push(
-            M6FixtureStep::syscall(
-                SYSCALL_NR_CAP_OBJECT,
-                [
-                    OBJECT_SUBOP_POLL,
-                    arg_result(submit_read),
-                    ALPHA_V1.len() as u64,
-                    arg_data(read_buf_offset),
-                    0,
-                    0,
-                ],
-            )
-            .repeat_while_eq(OBJECT_STATUS_PENDING)
-            .expect_eq(ALPHA_V1.len() as u64),
-        )
+        .push(wait_turn_step(TURN_OWNER_READ_DELEGATE))
         .unwrap();
+    push_object_read(&mut program, handle, read_buf_offset);
     let delegate = program
         .push(
             M6FixtureStep::syscall(
@@ -238,46 +258,21 @@ fn build_owner_program(reader_pid: u64) -> M6FixtureBootstrap {
         )
         .unwrap();
     let child = arg_result(delegate);
-    program.push(M6FixtureStep::spin(480)).unwrap();
+    program
+        .push(end_turn_step(TURN_OWNER_READ_DELEGATE))
+        .unwrap();
+    program.push(wait_turn_step(TURN_OWNER_REVOKE)).unwrap();
+    program.push(wait_exit_step(controller_pid)).unwrap();
     program
         .push(M6FixtureStep::syscall(
             SYSCALL_NR_CAP_REVOKE,
             [REVOKE_OP_REVOKE, child, 0, 0, 0, 0],
         ))
         .unwrap();
-    program.push(M6FixtureStep::spin(8)).unwrap();
-    program.push(M6FixtureStep::spin(48)).unwrap();
-    let submit_read2 = program
-        .push(M6FixtureStep::syscall(
-            SYSCALL_NR_CAP_OBJECT,
-            [
-                OBJECT_SUBOP_SUBMIT,
-                handle,
-                OBJECT_OP_READ,
-                TEST_OBJECT_ID,
-                0,
-                0,
-            ],
-        ))
-        .unwrap();
-    program.push(M6FixtureStep::spin(1)).unwrap();
-    program
-        .push(
-            M6FixtureStep::syscall(
-                SYSCALL_NR_CAP_OBJECT,
-                [
-                    OBJECT_SUBOP_POLL,
-                    arg_result(submit_read2),
-                    ALPHA_V1.len() as u64,
-                    arg_data(read_buf_offset),
-                    0,
-                    0,
-                ],
-            )
-            .repeat_while_eq(OBJECT_STATUS_PENDING)
-            .expect_eq(ALPHA_V1.len() as u64),
-        )
-        .unwrap();
+    program.push(end_turn_step(TURN_OWNER_REVOKE)).unwrap();
+    program.push(wait_turn_step(TURN_OWNER_READ_BACK)).unwrap();
+    push_object_read(&mut program, handle, read_buf_offset);
+    program.push(end_turn_step(TURN_OWNER_READ_BACK)).unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
 }
@@ -285,46 +280,17 @@ fn build_owner_program(reader_pid: u64) -> M6FixtureBootstrap {
 fn build_reader_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     let read_buf_offset = 128usize;
-    program.push(M6FixtureStep::spin(220)).unwrap();
+    program
+        .push(wait_turn_step(TURN_READER_OBJECT_OPS))
+        .unwrap();
     let claim = program
         .push(
             M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0])
-                .repeat_while_eq(0)
                 .expect_ne(0),
         )
         .unwrap();
     let handle = arg_result(claim);
-    let submit_read = program
-        .push(M6FixtureStep::syscall(
-            SYSCALL_NR_CAP_OBJECT,
-            [
-                OBJECT_SUBOP_SUBMIT,
-                handle,
-                OBJECT_OP_READ,
-                TEST_OBJECT_ID,
-                0,
-                0,
-            ],
-        ))
-        .unwrap();
-    program.push(M6FixtureStep::spin(160)).unwrap();
-    program
-        .push(
-            M6FixtureStep::syscall(
-                SYSCALL_NR_CAP_OBJECT,
-                [
-                    OBJECT_SUBOP_POLL,
-                    arg_result(submit_read),
-                    ALPHA_V1.len() as u64,
-                    arg_data(read_buf_offset),
-                    0,
-                    0,
-                ],
-            )
-            .repeat_while_eq(OBJECT_STATUS_PENDING)
-            .expect_eq(ALPHA_V1.len() as u64),
-        )
-        .unwrap();
+    push_object_read(&mut program, handle, read_buf_offset);
     program
         .push(
             M6FixtureStep::syscall(
@@ -341,7 +307,8 @@ fn build_reader_program() -> M6FixtureBootstrap {
             .expect_eq(SYSCALL_EACCES),
         )
         .unwrap();
-    program.push(M6FixtureStep::spin(200)).unwrap();
+    program.push(end_turn_step(TURN_READER_OBJECT_OPS)).unwrap();
+    program.push(wait_turn_step(TURN_READER_PROBE)).unwrap();
     program
         .push(
             M6FixtureStep::syscall(
@@ -351,13 +318,14 @@ fn build_reader_program() -> M6FixtureBootstrap {
             .expect_ne(0),
         )
         .unwrap();
+    program.push(end_turn_step(TURN_READER_PROBE)).unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
 }
 
 fn build_unrelated_object_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
-    program.push(M6FixtureStep::spin(52)).unwrap();
+    program.push(wait_turn_step(TURN_UNRELATED_OBJ)).unwrap();
     program
         .push(
             M6FixtureStep::syscall(
@@ -367,6 +335,7 @@ fn build_unrelated_object_program() -> M6FixtureBootstrap {
             .expect_eq(SYSCALL_EINVAL),
         )
         .unwrap();
+    program.push(end_turn_step(TURN_UNRELATED_OBJ)).unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
 }
@@ -391,24 +360,23 @@ fn build_unrelated_pc_program() -> M6FixtureBootstrap {
             .expect_eq(SYSCALL_EACCES),
         )
         .unwrap();
+    program.push(end_turn_step(TURN_UNRELATED_PC)).unwrap();
     program
 }
 
 fn build_controller_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     let observe_out = 0usize;
-    program.push(M6FixtureStep::spin(520)).unwrap();
+    program.push(wait_turn_step(TURN_CONTROLLER)).unwrap();
     let claim_full = program
         .push(
             M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0])
-                .repeat_while_eq(0)
                 .expect_ne(0),
         )
         .unwrap();
     let claim_observe_only = program
         .push(
             M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0])
-                .repeat_while_eq(0)
                 .expect_ne(0),
         )
         .unwrap();
@@ -480,6 +448,7 @@ fn build_controller_program() -> M6FixtureBootstrap {
             .expect_eq(SYSCALL_ESTALE),
         )
         .unwrap();
+    program.push(end_turn_step(TURN_CONTROLLER)).unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
 }
@@ -487,11 +456,10 @@ fn build_controller_program() -> M6FixtureBootstrap {
 fn build_auditor_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     let out_offset = 0usize;
-    program.push(M6FixtureStep::spin(680)).unwrap();
+    program.push(wait_turn_step(TURN_AUDITOR)).unwrap();
     let claim = program
         .push(
             M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0])
-                .repeat_while_eq(0)
                 .expect_ne(0),
         )
         .unwrap();
@@ -624,11 +592,12 @@ fn capabilities_report_handler(pid: u64, report: &M6FixtureBootstrap) -> Fixture
         if report.status != FIXTURE_STATUS_DONE {
             return FixtureReportAction::Fail("controller fixture did not complete");
         }
-        state.controller_reported = true;
-        if process_gone(state.target_pid) {
-            state.target_torn_down = true;
-            emit_workload_progress(3);
+        if !process_gone(state.target_pid) {
+            return FixtureReportAction::Fail("controller reported before target teardown");
         }
+        state.controller_reported = true;
+        state.target_torn_down = true;
+        emit_workload_progress(3);
     } else if pid == state.auditor_pid {
         if let Err(message) = validate_auditor_report(report) {
             return FixtureReportAction::Fail(message);
@@ -751,7 +720,7 @@ pub(crate) fn start_m6_capabilities_self_test(allocator: PageAllocator) -> ! {
     ];
     let programs = [
         build_target_program(),
-        build_owner_program(PREDICTED_READER_PID),
+        build_owner_program(PREDICTED_READER_PID, PREDICTED_CONTROLLER_PID),
         build_reader_program(),
         build_unrelated_object_program(),
         build_unrelated_pc_program(),

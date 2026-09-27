@@ -2889,9 +2889,7 @@ fn run_acceptance_command(
                         .find('\n')
                         .map(|len| output[start..start + len].trim_end().to_owned())
                 });
-                if marker_set_is_ordered(marker_set, &M9_USERSPACE_ACCEPTANCE_MARKERS)
-                    && !authoritative_pass
-                {
+                if fails_fast_on_guest_fail(marker_set) && !authoritative_pass {
                     if let Some(fail_line) = guest_fail_line {
                         terminate_child(&mut child)?;
                         let _ = child.wait();
@@ -2899,7 +2897,7 @@ fn run_acceptance_command(
                         join_output_reader(stderr_handle);
                         return Err(XtaskError::CommandFailed {
                             command: command_display,
-                            status: format!("guest reported an m9 userspace failure: {fail_line}"),
+                            status: format!("guest reported a failure: {fail_line}"),
                         });
                     }
                 }
@@ -2961,6 +2959,19 @@ fn run_acceptance_command(
                     authoritative_pass = true;
                     terminate_child(&mut child)?;
                     child_status = Some(child.wait()?);
+                } else if !authoritative_pass {
+                    if let Some(pass_marker) = final_guest_marker(marker_set) {
+                        if output.contains(pass_marker) {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(XtaskError::MissingMarker(format!(
+                                "{} (guest printed {pass_marker} first)",
+                                tracker.pending_label()
+                            )));
+                        }
+                    }
                 }
             }
             Ok(OutputEvent::Finished) => {
@@ -3012,6 +3023,44 @@ fn run_acceptance_command(
 
 fn marker_set_is_ordered(set: MarkerSet<'_>, markers: &[&str]) -> bool {
     matches!(set, MarkerSet::Ordered(m) if m == markers)
+}
+
+/// M6 constituents whose guest stops after its PASS line: once it is printed while
+/// earlier markers are still pending, the ordered set can never complete.
+const M6_ORDERED_MARKER_SETS: [&[&str]; 6] = [
+    &M6_FIXTURE_SMOKE_ACCEPTANCE_MARKERS,
+    &M6_OBJECT_ACCEPTANCE_MARKERS,
+    &M6_PROCESS_CONTROL_ACCEPTANCE_MARKERS,
+    &M6_DELEGATION_ACCEPTANCE_MARKERS,
+    &M6_AUDIT_ACCEPTANCE_MARKERS,
+    &M6_CAPABILITIES_ACCEPTANCE_MARKERS,
+];
+
+fn is_m6_revocation_spec(set: MarkerSet<'_>) -> bool {
+    matches!(set, MarkerSet::Steps(M6_REVOCATION_ACCEPTANCE_SPEC))
+}
+
+/// Constituents where any guest `[FAIL] ` line is terminal. QEMU on some hosts keeps
+/// running after the guest writes the debug-exit port, so without this a guest
+/// failure only surfaces as the constituent timeout.
+fn fails_fast_on_guest_fail(set: MarkerSet<'_>) -> bool {
+    marker_set_is_ordered(set, &M9_USERSPACE_ACCEPTANCE_MARKERS)
+        || M6_ORDERED_MARKER_SETS
+            .iter()
+            .any(|markers| marker_set_is_ordered(set, markers))
+        || is_m6_revocation_spec(set)
+}
+
+fn final_guest_marker(set: MarkerSet<'_>) -> Option<&str> {
+    if is_m6_revocation_spec(set) {
+        return Some("[M6.6] PASS");
+    }
+    match set {
+        MarkerSet::Ordered(markers) if M6_ORDERED_MARKER_SETS.contains(&markers) => {
+            markers.last().copied()
+        }
+        _ => None,
+    }
 }
 
 fn validate_output_markers(output: &str, marker_set: MarkerSet<'static>) -> Result<(), XtaskError> {
@@ -3202,8 +3251,12 @@ fn assert_no_ipc_framed_linux_hello(output: &str) -> Result<(), XtaskError> {
     Ok(())
 }
 
+/// The fixtures hand turns to each other, so the log order is fixed except for the
+/// reader's and owner's final reports: each is issued right after its last
+/// `END_TURN`, and the fixture woken by that turn may run first. Report progress is
+/// each fixture's completed step count.
 fn validate_m6_capabilities_markers(output: &str) -> Result<(), XtaskError> {
-    const PREFIX: [&str; 18] = [
+    const ORDERED: [&str; 28] = [
         "[STOR] object-service started pid=",
         "[CAP ] object grant holder=3 object=7",
         "[TEST] unrelated workload progress=1",
@@ -3222,37 +3275,40 @@ fn validate_m6_capabilities_markers(output: &str) -> Result<(), XtaskError> {
         "[PROC] teardown pid=",
         "[CAP ] process-control denied holder=7 target=? op=observe reason=stale",
         "[TEST] unrelated workload progress=3",
-    ];
-    const TAIL_REQUIRED: [&str; 10] = [
         "[CAP ] revoke branch=",
         "[CAP ] stale denied holder=4 reason=revoked",
-        "[M6.F] report pid=4 status=2 progress=580",
         "[CAP ] object allowed holder=3 object=7 op=read",
         "actor=8 class=audit resource=0 op=audit_read outcome=allowed",
-        "[M6.F] report pid=8 status=2 progress=680",
-        "[M6.F] report pid=3 status=2 progress=606",
+        "[M6.F] report pid=8 status=2 progress=3 failed_step=",
         "actor=9 class=audit resource=0 op=audit_read outcome=invalid-handle",
         "actor=9 class=audit resource=0 op=audit_read outcome=wrong-holder",
-        "[M6.F] report pid=9 status=2 progress=0",
+        "[M6.F] report pid=9 status=2 progress=2 failed_step=",
+        "[TEST] unrelated workload progress=4",
+        "[M6.8] PASS",
     ];
-    const SUFFIX: [&str; 2] = ["[TEST] unrelated workload progress=4", "[M6.8] PASS"];
-    let mut prefix = MarkerTracker::from_ordered(&PREFIX);
-    if !prefix.consume(output) {
-        return Err(XtaskError::MissingMarker(prefix.pending_label()));
+    const FLOATING_REPORTS: [(&str, &str); 2] = [
+        (
+            "[CAP ] stale denied holder=4 reason=revoked",
+            "[M6.F] report pid=4 status=2 progress=9 failed_step=",
+        ),
+        (
+            "[CAP ] object allowed holder=3 object=7 op=read",
+            "[M6.F] report pid=3 status=2 progress=18 failed_step=",
+        ),
+    ];
+    let mut ordered = MarkerTracker::from_ordered(&ORDERED);
+    if !ordered.consume(output) {
+        return Err(XtaskError::MissingMarker(ordered.pending_label()));
     }
-    let tail = &output[prefix.search_start..];
-    for marker in TAIL_REQUIRED {
-        if !tail.contains(marker) {
-            return Err(XtaskError::MissingMarker(marker.to_owned()));
+    for (after, report) in FLOATING_REPORTS {
+        let after_start = output
+            .rfind(after)
+            .ok_or_else(|| XtaskError::MissingMarker(after.to_owned()))?;
+        if !output[after_start..].contains(report) {
+            return Err(XtaskError::MissingMarker(report.to_owned()));
         }
     }
-    let mut suffix = MarkerTracker::from_ordered(&SUFFIX);
-    suffix.search_start = prefix.search_start;
-    if suffix.consume(output) {
-        Ok(())
-    } else {
-        Err(XtaskError::MissingMarker(suffix.pending_label()))
-    }
+    Ok(())
 }
 
 struct OutputChunk {
@@ -4223,7 +4279,7 @@ mod tests {
     }
 
     #[test]
-    fn m6_capabilities_markers_accept_post_revoke_partial_order() {
+    fn m6_capabilities_markers_accept_handshake_order() {
         let output = "\
 [STOR] object-service started pid=1\n\
 [CAP ] object grant holder=3 object=7\n\
@@ -4243,14 +4299,14 @@ mod tests {
 [TEST] unrelated workload progress=3\n\
 [CAP ] revoke branch=4\n\
 [CAP ] stale denied holder=4 reason=revoked\n\
-[M6.F] report pid=4 status=2 progress=580\n\
+[M6.F] report pid=4 status=2 progress=9 failed_step=0\n\
 [CAP ] object allowed holder=3 object=7 op=read\n\
 [AUD ] seq=1 actor=8 class=audit resource=0 op=audit_read outcome=allowed depth=0\n\
-[M6.F] report pid=8 status=2 progress=680\n\
-[M6.F] report pid=3 status=2 progress=606\n\
+[M6.F] report pid=8 status=2 progress=3 failed_step=0\n\
+[M6.F] report pid=3 status=2 progress=18 failed_step=0\n\
 [AUD ] seq=2 actor=9 class=audit resource=0 op=audit_read outcome=invalid-handle depth=0\n\
 [AUD ] seq=3 actor=9 class=audit resource=0 op=audit_read outcome=wrong-holder depth=0\n\
-[M6.F] report pid=9 status=2 progress=0\n\
+[M6.F] report pid=9 status=2 progress=2 failed_step=0\n\
 [TEST] unrelated workload progress=4\n\
 [M6.8] PASS\n";
         assert!(validate_output_markers(
@@ -4261,7 +4317,7 @@ mod tests {
     }
 
     #[test]
-    fn m6_capabilities_markers_accept_audit_before_revoke_tail() {
+    fn m6_capabilities_markers_reject_audit_before_revoke() {
         let output = "\
 [STOR] object-service started pid=1\n\
 [CAP ] object grant holder=3 object=7\n\
@@ -4280,22 +4336,60 @@ mod tests {
 [CAP ] process-control denied holder=7 target=? op=observe reason=stale\n\
 [TEST] unrelated workload progress=3\n\
 [AUD ] seq=1 actor=8 class=audit resource=0 op=audit_read outcome=allowed depth=0\n\
-[M6.F] report pid=8 status=2 progress=680\n\
+[M6.F] report pid=8 status=2 progress=3 failed_step=0\n\
 [AUD ] seq=2 actor=9 class=audit resource=0 op=audit_read outcome=invalid-handle depth=0\n\
 [AUD ] seq=3 actor=9 class=audit resource=0 op=audit_read outcome=wrong-holder depth=0\n\
-[M6.F] report pid=9 status=2 progress=0\n\
+[M6.F] report pid=9 status=2 progress=2 failed_step=0\n\
 [CAP ] revoke branch=5:1 actor=3 count=1\n\
 [CAP ] stale denied holder=4 reason=revoked\n\
-[M6.F] report pid=4 status=2 progress=580\n\
+[M6.F] report pid=4 status=2 progress=9 failed_step=0\n\
 [CAP ] object allowed holder=3 object=7 op=read\n\
-[M6.F] report pid=3 status=2 progress=606\n\
+[M6.F] report pid=3 status=2 progress=18 failed_step=0\n\
 [TEST] unrelated workload progress=4\n\
 [M6.8] PASS\n";
         assert!(validate_output_markers(
             output,
             MarkerSet::Ordered(&M6_CAPABILITIES_ACCEPTANCE_MARKERS)
         )
-        .is_ok());
+        .is_err());
+    }
+
+    #[test]
+    fn m6_capabilities_markers_reject_report_before_last_step() {
+        let output = "\
+[STOR] object-service started pid=1\n\
+[CAP ] object grant holder=3 object=7\n\
+[TEST] unrelated workload progress=1\n\
+[CAP ] process-control denied holder=6 target=? op=terminate reason=invalid-handle\n\
+[CAP ] object allowed holder=3 object=7 op=write\n\
+[CAP ] deny holder=5 object=7 op=read reason=no-authority\n\
+[CAP ] object allowed holder=3 object=7 op=read\n\
+[CAP ] delegate from=3 to=4 rights=read depth=1\n\
+[CAP ] object allowed holder=4 object=7 op=read\n\
+[CAP ] deny holder=4 object=7 op=write reason=missing-right\n\
+[CAP ] process-control allowed holder=7 target=2 op=observe\n\
+[CAP ] process-control denied holder=7 target=2 op=terminate reason=missing-right\n\
+[CAP ] process-control allowed holder=7 target=2 op=terminate\n\
+[PROC] teardown pid=2 resources=0\n\
+[CAP ] process-control denied holder=7 target=? op=observe reason=stale\n\
+[TEST] unrelated workload progress=3\n\
+[M6.F] report pid=4 status=2 progress=9 failed_step=0\n\
+[CAP ] revoke branch=5:1 actor=3 count=1\n\
+[CAP ] stale denied holder=4 reason=revoked\n\
+[CAP ] object allowed holder=3 object=7 op=read\n\
+[M6.F] report pid=3 status=2 progress=18 failed_step=0\n\
+[AUD ] seq=1 actor=8 class=audit resource=0 op=audit_read outcome=allowed depth=0\n\
+[M6.F] report pid=8 status=2 progress=3 failed_step=0\n\
+[AUD ] seq=2 actor=9 class=audit resource=0 op=audit_read outcome=invalid-handle depth=0\n\
+[AUD ] seq=3 actor=9 class=audit resource=0 op=audit_read outcome=wrong-holder depth=0\n\
+[M6.F] report pid=9 status=2 progress=2 failed_step=0\n\
+[TEST] unrelated workload progress=4\n\
+[M6.8] PASS\n";
+        assert!(validate_output_markers(
+            output,
+            MarkerSet::Ordered(&M6_CAPABILITIES_ACCEPTANCE_MARKERS)
+        )
+        .is_err());
     }
 
     #[test]
