@@ -385,7 +385,7 @@ M4.4 adds supervisor-side liveness tracking in `service-lifecycle` (`health_trac
 
 - Health reports use the M4.1 `LifecycleMessage::HealthReport` envelope over explicit IPC.
 - `ServiceHealthRecord` / `ServiceHealthTracker` track the active `InstanceGeneration`, last valid report, and a finite `deadline_ticks` derived from `LivenessConfig::report_period_ticks`.
-- `MonotonicTicks` is an opaque `u64` mapped from kernel LAPIC ticks (`kernel_ticks()` today; userspace syscall later). Deadlines use saturating tick arithmetic only — no wall-clock time.
+- `MonotonicTicks` is an opaque `u64` in `tick_period_ns` units. The M4 recovery bootstrap feeds it calibrated TSC time (`time::monotonic_period_ticks()`), not a count of delivered LAPIC IRQs. Deadlines use saturating tick arithmetic only.
 - Stale-generation reports are ignored and cannot refresh a replacement instance's deadline.
 - `notify_lifecycle_failure` maps `Exited` / `Faulted` lifecycle events to immediate unhealthy state with distinct reasons (`exit`, `fault`, `timeout`, `self_reported`).
 - `HealthFailureEvent` and `HealthReportOutcome` are narrow integration surfaces for the M4.3 supervisor (#37); they do not encode restart actions.

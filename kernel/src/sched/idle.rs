@@ -9,7 +9,6 @@ use crate::arch::x86_64::cpu::disable_interrupts;
 use crate::arch::x86_64::cpu::enable_interrupts_and_halt;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::diagnostics::qemu::fatal_kernel_error;
-use crate::interrupt::timer::kernel_ticks;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::KERNEL_PROCESS_ID;
 use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
@@ -53,7 +52,7 @@ fn idle_thread_one_wait() {
     #[cfg(feature = "m9-linux-runtime-self-test")]
     crate::selftest::m9_linux_runtime_latency::observe_idle_resumed();
     let next_stack = {
-        let _ = wait::expire_deadlines(kernel_ticks());
+        let _ = wait::expire_deadlines();
         unsafe { scheduler_mut().wake_from_idle_loop() }
     };
     match next_stack {
