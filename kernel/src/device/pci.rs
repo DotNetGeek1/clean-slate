@@ -7,8 +7,11 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
+use crate::arch::x86_64::ioapic::{Polarity, TriggerMode};
 use crate::arch::x86_64::port::{port_in_u32, port_out_u32};
-use crate::interrupt::irq::MsiMessage;
+use crate::interrupt::irq::{
+    allocate_device_vector, release_device_vector, route_gsi, DeviceInterruptHandler, MsiMessage,
+};
 use crate::mm::mmio::with_kernel_identity_mmio;
 
 const PCI_CONFIG_ADDRESS_PORT: u16 = 0x0cf8;
@@ -175,6 +178,61 @@ pub(crate) fn find_single_function(
     Ok(found)
 }
 
+/// q35 (ICH9) INTx routing: slots below 25 use the fixed default
+/// `PIRQ[E..H] = (slot + pin) % 4`, and in APIC mode PIRQ E..H drive GSI 20..23
+/// level-triggered, active-high. Other chipsets and slots fail closed.
+const Q35_HOST_BRIDGE_ID: (u16, u16) = (0x8086, 0x29c0);
+const Q35_FIRST_REMAPPABLE_SLOT: u8 = 25;
+const Q35_PIRQ_E_GSI: u32 = 20;
+
+/// Legacy INTx line of a function, routed through the I/O APIC to a device vector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IntxRoute {
+    pub(crate) vector: u8,
+    pub(crate) gsi: u32,
+}
+
+/// Route `function`'s INTx pin to a newly allocated device vector running
+/// `handler`, then clear the function's INTx disable bit.
+pub(crate) fn route_intx(
+    function: PciFunction,
+    handler: DeviceInterruptHandler,
+) -> Result<IntxRoute, &'static str> {
+    let pin = function
+        .interrupt_pin()
+        .ok_or("PCI function has neither an MSI-X table nor an INTx pin")?;
+    let gsi = q35_intx_gsi(function, pin)?;
+    let vector = allocate_device_vector(handler)?;
+    if let Err(error) = route_gsi(gsi, vector, TriggerMode::Level, Polarity::ActiveHigh) {
+        release_device_vector(vector);
+        return Err(error);
+    }
+    function.update_command(0, PCI_COMMAND_INTX_DISABLE);
+    Ok(IntxRoute { vector, gsi })
+}
+
+/// Disable `function`'s INTx and free the route's vector (masking its GSI).
+pub(crate) fn release_intx(function: PciFunction, route: IntxRoute) {
+    function.update_command(PCI_COMMAND_INTX_DISABLE, 0);
+    release_device_vector(route.vector);
+}
+
+fn q35_intx_gsi(function: PciFunction, pin: u8) -> Result<u32, &'static str> {
+    if PciFunction::new(0, 0, 0).vendor_device() != Q35_HOST_BRIDGE_ID {
+        return Err("PCI INTx routing is only known for the q35 chipset");
+    }
+    q35_pirq_gsi(function, pin)
+}
+
+/// GSI for `pin` (1 = INTA) of a bus-0 function under the q35 default PIRQ routing.
+fn q35_pirq_gsi(function: PciFunction, pin: u8) -> Result<u32, &'static str> {
+    if function.bus != 0 || function.device >= Q35_FIRST_REMAPPABLE_SLOT || !(1..=4).contains(&pin)
+    {
+        return Err("PCI INTx routing is unknown for this PCI slot");
+    }
+    Ok(Q35_PIRQ_E_GSI + u32::from((function.device + pin - 1) & 0x3))
+}
+
 /// Decoded MSI-X capability: table location and size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct MsixCapability {
@@ -260,5 +318,21 @@ impl MsixCapability {
             return Err("MSI-X table entry out of range");
         }
         Ok(self.table_base + u64::from(entry) * MSIX_TABLE_ENTRY_BYTES)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn q35_intx_routes_slot_and_pin_onto_pirq_e_through_h() {
+        assert_eq!(q35_pirq_gsi(PciFunction::new(0, 2, 0), 1), Ok(22));
+        assert_eq!(q35_pirq_gsi(PciFunction::new(0, 3, 0), 1), Ok(23));
+        assert_eq!(q35_pirq_gsi(PciFunction::new(0, 4, 0), 1), Ok(20));
+        assert_eq!(q35_pirq_gsi(PciFunction::new(0, 4, 0), 2), Ok(21));
+        assert!(q35_pirq_gsi(PciFunction::new(0, 25, 0), 1).is_err());
+        assert!(q35_pirq_gsi(PciFunction::new(1, 2, 0), 1).is_err());
+        assert!(q35_pirq_gsi(PciFunction::new(0, 2, 0), 0).is_err());
     }
 }

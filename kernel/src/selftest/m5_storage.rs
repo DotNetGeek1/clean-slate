@@ -19,6 +19,7 @@ use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::halt_loop;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
+use crate::interrupt::timer::initialize_timer;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
@@ -150,6 +151,10 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
         .unwrap_or_else(|| fatal_kernel_error("storage self-test allocator was missing"));
     let controller = unsafe { service_lifecycle_controller_mut() };
     launch_phase(initial_state, controller, allocator);
+    initialize_timer();
+    // `m3-entry-self-test` skips calibration inside `initialize_timer`; block
+    // completion waits use TSC `MonotonicNs` deadlines, expired by the timer IRQ.
+    crate::time::calibration::calibrate_apic_tick();
     let frame_pointer =
         start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
     unsafe { restore_task_context(frame_pointer) }

@@ -1,7 +1,7 @@
 //! Bounded M5 block request/response transport shared by userspace service and kernel adapter.
 
 use clean_slate_block::{
-    BlockDevice, BlockIoError, BlockRequestError, BlockTransportError, BlockUnsupportedError,
+    BlockGeometry, BlockIoError, BlockRequestError, BlockTransportError, BlockUnsupportedError,
 };
 
 pub const STORAGE_BLOCK_DEVICE_ID: u64 = 1;
@@ -170,70 +170,74 @@ impl BlockTransportResponse {
     }
 }
 
-pub fn handle_block_request<B: BlockDevice>(
-    backend: &mut B,
-    request: &[u8; BLOCK_TRANSPORT_REQUEST_BYTES],
-    payload: &mut [u8],
-) -> [u8; BLOCK_TRANSPORT_RESPONSE_BYTES] {
-    let decoded = match BlockTransportRequest::decode(request) {
-        Ok(request) => request,
-        Err(_) => {
-            return BlockTransportResponse {
-                request_id: 0,
-                device_id: 0,
-                operation: BlockTransportOp::Geometry,
-                status: BlockTransportStatus::InvalidProtocol,
-                logical_block_size: 0,
-                block_count: 0,
-                max_transfer_blocks: 0,
-            }
-            .encode();
+/// What a decoded request needs: an immediate status, or one device operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockRequestAction {
+    Respond(BlockTransportStatus),
+    Read,
+    Write,
+    Flush,
+}
+
+/// Transport checks every backend shares: device id, payload length, and the
+/// zero-argument shape of geometry and flush. LBA range checks stay with the device.
+pub fn classify_block_request(
+    request: &BlockTransportRequest,
+    geometry: BlockGeometry,
+    payload_len: usize,
+) -> BlockRequestAction {
+    if request.device_id != geometry.device_id().get() {
+        return BlockRequestAction::Respond(BlockTransportStatus::InvalidRequest);
+    }
+    let request_len = usize::try_from(request.buffer_len).unwrap_or(usize::MAX);
+    if request_len > BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES || request_len != payload_len {
+        return BlockRequestAction::Respond(BlockTransportStatus::InvalidRequest);
+    }
+    let zero_arguments = request.blocks == 0 && request.lba == 0 && request.buffer_len == 0;
+    match request.operation {
+        BlockTransportOp::Geometry if zero_arguments => {
+            BlockRequestAction::Respond(BlockTransportStatus::Ok)
         }
-    };
-    let geometry = backend.geometry();
-    let mut response = BlockTransportResponse {
-        request_id: decoded.request_id,
-        device_id: decoded.device_id,
-        operation: decoded.operation,
-        status: BlockTransportStatus::Ok,
+        BlockTransportOp::Flush if zero_arguments => BlockRequestAction::Flush,
+        BlockTransportOp::Geometry | BlockTransportOp::Flush => {
+            BlockRequestAction::Respond(BlockTransportStatus::InvalidRequest)
+        }
+        BlockTransportOp::Read => BlockRequestAction::Read,
+        BlockTransportOp::Write => BlockRequestAction::Write,
+    }
+}
+
+/// Response to `request` carrying `status` and the backend's geometry.
+pub fn block_response(
+    request: &BlockTransportRequest,
+    geometry: BlockGeometry,
+    status: BlockTransportStatus,
+) -> BlockTransportResponse {
+    BlockTransportResponse {
+        request_id: request.request_id,
+        device_id: request.device_id,
+        operation: request.operation,
+        status,
         logical_block_size: geometry.logical_block_size(),
         block_count: geometry.block_count(),
         max_transfer_blocks: geometry.max_transfer_blocks(),
-    };
-    if decoded.device_id != geometry.device_id().get() {
-        response.status = BlockTransportStatus::InvalidRequest;
-        return response.encode();
     }
-    let request_len = usize::try_from(decoded.buffer_len).unwrap_or(usize::MAX);
-    if request_len > BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES || request_len != payload.len() {
-        response.status = BlockTransportStatus::InvalidRequest;
-        return response.encode();
-    }
-    let result = match decoded.operation {
-        BlockTransportOp::Geometry => {
-            if decoded.blocks != 0 || decoded.lba != 0 || decoded.buffer_len != 0 {
-                response.status = BlockTransportStatus::InvalidRequest;
-            }
-            Ok(())
-        }
-        BlockTransportOp::Read => backend.read_blocks(decoded.lba, decoded.blocks, payload),
-        BlockTransportOp::Write => backend.write_blocks(decoded.lba, decoded.blocks, payload),
-        BlockTransportOp::Flush => {
-            if decoded.blocks != 0 || decoded.lba != 0 || decoded.buffer_len != 0 {
-                response.status = BlockTransportStatus::InvalidRequest;
-                Ok(())
-            } else {
-                backend.flush()
-            }
-        }
-    };
-    if let Err(error) = result {
-        response.status = map_status(error);
-    }
-    response.encode()
 }
 
-fn map_status(error: BlockIoError) -> BlockTransportStatus {
+/// Response to a request that did not decode.
+pub fn invalid_protocol_response() -> BlockTransportResponse {
+    BlockTransportResponse {
+        request_id: 0,
+        device_id: 0,
+        operation: BlockTransportOp::Geometry,
+        status: BlockTransportStatus::InvalidProtocol,
+        logical_block_size: 0,
+        block_count: 0,
+        max_transfer_blocks: 0,
+    }
+}
+
+pub fn block_io_status(error: BlockIoError) -> BlockTransportStatus {
     match error {
         BlockIoError::InvalidRequest(
             BlockRequestError::ZeroBlocks
@@ -259,104 +263,111 @@ fn map_status(error: BlockIoError) -> BlockTransportStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clean_slate_block::fake::FakeBlockDevice;
-    use clean_slate_block::{BlockDeviceId, BlockGeometry};
+    use clean_slate_block::BlockDeviceId;
 
-    fn fake() -> FakeBlockDevice {
-        FakeBlockDevice::new(BlockGeometry::new(BlockDeviceId::new(1), 512, 8, 4, false).unwrap())
-            .unwrap()
+    fn geometry() -> BlockGeometry {
+        BlockGeometry::new(BlockDeviceId::new(1), 512, 8, 4, false).unwrap()
     }
 
-    #[test]
-    fn transport_read_write_and_flush_round_trip() {
-        let mut backend = fake();
-        let write_request = BlockTransportRequest {
+    fn request(
+        operation: BlockTransportOp,
+        lba: u64,
+        blocks: u32,
+        buffer_len: u32,
+    ) -> BlockTransportRequest {
+        BlockTransportRequest {
             request_id: 7,
             device_id: 1,
-            operation: BlockTransportOp::Write,
-            lba: 2,
-            blocks: 1,
-            buffer_len: 512,
-        };
-        let mut write_payload = [0x5a; 512];
-        let write_response =
-            handle_block_request(&mut backend, &write_request.encode(), &mut write_payload);
-        let write = BlockTransportResponse::decode(&write_response).expect("decode write");
-        assert_eq!(write.status, BlockTransportStatus::Ok);
-
-        let flush_request = BlockTransportRequest {
-            request_id: 8,
-            device_id: 1,
-            operation: BlockTransportOp::Flush,
-            lba: 0,
-            blocks: 0,
-            buffer_len: 0,
-        };
-        let mut flush_payload = [];
-        let flush_response =
-            handle_block_request(&mut backend, &flush_request.encode(), &mut flush_payload);
-        let flush = BlockTransportResponse::decode(&flush_response).expect("decode flush");
-        assert_eq!(flush.status, BlockTransportStatus::Ok);
-        assert_eq!(backend.flush_count(), 1);
-
-        let read_request = BlockTransportRequest {
-            request_id: 9,
-            device_id: 1,
-            operation: BlockTransportOp::Read,
-            lba: 2,
-            blocks: 1,
-            buffer_len: 512,
-        };
-        let mut read_payload = [0u8; 512];
-        let read_response =
-            handle_block_request(&mut backend, &read_request.encode(), &mut read_payload);
-        let read = BlockTransportResponse::decode(&read_response).expect("decode read");
-        assert_eq!(read.status, BlockTransportStatus::Ok);
-        assert_eq!(read_payload, [0x5a; 512]);
+            operation,
+            lba,
+            blocks,
+            buffer_len,
+        }
     }
 
     #[test]
-    fn transport_rejects_wrong_device_as_invalid_request() {
-        let mut backend = fake();
-        let request = BlockTransportRequest {
-            request_id: 12,
-            device_id: 9,
-            operation: BlockTransportOp::Read,
-            lba: 0,
-            blocks: 1,
-            buffer_len: 512,
-        };
-        let mut payload = [0u8; 512];
-        let response = handle_block_request(&mut backend, &request.encode(), &mut payload);
-        let decoded = BlockTransportResponse::decode(&response).expect("decode");
-        assert_eq!(decoded.status, BlockTransportStatus::InvalidRequest);
+    fn classifies_device_operations() {
+        let read = request(BlockTransportOp::Read, 2, 1, 512);
+        assert_eq!(
+            classify_block_request(&read, geometry(), 512),
+            BlockRequestAction::Read
+        );
+        let write = request(BlockTransportOp::Write, 2, 1, 512);
+        assert_eq!(
+            classify_block_request(&write, geometry(), 512),
+            BlockRequestAction::Write
+        );
+        let flush = request(BlockTransportOp::Flush, 0, 0, 0);
+        assert_eq!(
+            classify_block_request(&flush, geometry(), 0),
+            BlockRequestAction::Flush
+        );
+        let geometry_request = BlockTransportRequest::geometry(1, 1);
+        assert_eq!(
+            classify_block_request(&geometry_request, geometry(), 0),
+            BlockRequestAction::Respond(BlockTransportStatus::Ok)
+        );
     }
 
     #[test]
-    fn transport_rejects_malformed_request() {
-        let mut backend = fake();
-        let mut request = BlockTransportRequest::geometry(1, 1).encode();
-        request[0] = 0;
-        let mut payload = [];
-        let response = handle_block_request(&mut backend, &request, &mut payload);
-        let decoded = BlockTransportResponse::decode(&response).expect("decode");
-        assert_eq!(decoded.status, BlockTransportStatus::InvalidProtocol);
+    fn rejects_wrong_device_and_length_mismatch() {
+        let mut wrong_device = request(BlockTransportOp::Read, 0, 1, 512);
+        wrong_device.device_id = 9;
+        assert_eq!(
+            classify_block_request(&wrong_device, geometry(), 512),
+            BlockRequestAction::Respond(BlockTransportStatus::InvalidRequest)
+        );
+        let short_payload = request(BlockTransportOp::Write, 0, 1, 512);
+        assert_eq!(
+            classify_block_request(&short_payload, geometry(), 256),
+            BlockRequestAction::Respond(BlockTransportStatus::InvalidRequest)
+        );
+        let oversized = request(BlockTransportOp::Read, 0, 16, 8192);
+        assert_eq!(
+            classify_block_request(&oversized, geometry(), 8192),
+            BlockRequestAction::Respond(BlockTransportStatus::InvalidRequest)
+        );
     }
 
     #[test]
-    fn transport_rejects_invalid_bounds() {
-        let mut backend = fake();
-        let request = BlockTransportRequest {
-            request_id: 15,
-            device_id: 1,
-            operation: BlockTransportOp::Read,
-            lba: 8,
-            blocks: 1,
-            buffer_len: 512,
-        };
-        let mut payload = [0u8; 512];
-        let response = handle_block_request(&mut backend, &request.encode(), &mut payload);
-        let decoded = BlockTransportResponse::decode(&response).expect("decode");
-        assert_eq!(decoded.status, BlockTransportStatus::InvalidRequest);
+    fn rejects_flush_and_geometry_with_arguments() {
+        let flush = request(BlockTransportOp::Flush, 1, 0, 0);
+        assert_eq!(
+            classify_block_request(&flush, geometry(), 0),
+            BlockRequestAction::Respond(BlockTransportStatus::InvalidRequest)
+        );
+        let geometry_request = request(BlockTransportOp::Geometry, 0, 1, 0);
+        assert_eq!(
+            classify_block_request(&geometry_request, geometry(), 0),
+            BlockRequestAction::Respond(BlockTransportStatus::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn malformed_request_does_not_decode() {
+        let mut wire = BlockTransportRequest::geometry(1, 1).encode();
+        wire[0] = 0;
+        assert_eq!(
+            BlockTransportRequest::decode(&wire),
+            Err(BlockTransportDecodeError::BadMagic)
+        );
+        assert_eq!(
+            invalid_protocol_response().status,
+            BlockTransportStatus::InvalidProtocol
+        );
+    }
+
+    #[test]
+    fn transport_errors_map_to_statuses() {
+        assert_eq!(
+            block_io_status(BlockIoError::Transport(BlockTransportError::ResetRequired)),
+            BlockTransportStatus::ResetRequired
+        );
+        assert_eq!(
+            block_io_status(BlockIoError::Unsupported(
+                BlockUnsupportedError::WriteProtected
+            )),
+            BlockTransportStatus::Unsupported
+        );
     }
 }

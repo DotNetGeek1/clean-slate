@@ -20,7 +20,9 @@ use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
-use crate::sched::wait::{block_current_thread_with_resume, wake_one, BlockedResume, WaitKey};
+use crate::sched::wait::{
+    block_current_thread_with_resume, wake_all, wake_one, BlockedResume, WaitKey,
+};
 use crate::sync::global_cell::GlobalCell;
 
 use super::{
@@ -105,6 +107,7 @@ impl ObjectRequestQueue {
         slot.len = len;
         slot.payload[..len].copy_from_slice(payload);
         self.slots[slot_index] = slot;
+        wake_all(OBJECT_SERVICE_WORK_KEY);
         Ok(request_id)
     }
 
@@ -180,6 +183,9 @@ impl ObjectRequestQueue {
                 requeued += 1;
             }
         }
+        if requeued > 0 {
+            wake_all(OBJECT_SERVICE_WORK_KEY);
+        }
         requeued
     }
 
@@ -213,6 +219,10 @@ impl ObjectRequestQueue {
 pub(crate) fn object_request_wait_key(request_id: u64) -> WaitKey {
     WaitKey(0x46_u64 << 56 | (request_id & 0x00FF_FFFF_FFFF_FFFF))
 }
+
+/// Wait key the storage service blocks on in `OBJECT_SUBOP_SERVICE_NEXT` while no
+/// request is `Pending`; woken by every submit and by a service-exit requeue.
+const OBJECT_SERVICE_WORK_KEY: WaitKey = WaitKey(0x47_u64 << 56);
 
 /// Kernel-internal authority check for a holder acting on an object without a raw
 /// handle (Linux `/tmp` projection). Denials are logged like native submit denials.
@@ -618,7 +628,26 @@ fn handle_service_next(frame: &mut SyscallContext) {
             }
             frame.rax = 1;
         }
-        None => frame.rax = 0,
+        None => block_until_service_work(frame),
+    }
+}
+
+/// An empty queue blocks the storage service on [`OBJECT_SERVICE_WORK_KEY`] with no
+/// deadline; the restarted syscall dequeues the request that woke it. Syscalls run
+/// with interrupts masked, so a submit cannot slip in between the empty check and
+/// the block.
+fn block_until_service_work(frame: &mut SyscallContext) {
+    match block_current_thread_with_resume(
+        frame as *mut SyscallContext,
+        OBJECT_SERVICE_WORK_KEY,
+        None,
+        BlockedResume::RestartSyscall {
+            nr: SYSCALL_NR_CAP_OBJECT,
+            timeout_rax: SYSCALL_EINVAL,
+        },
+    ) {
+        Ok(_) => handle_service_next(frame),
+        Err(message) => fatal_kernel_error(message),
     }
 }
 

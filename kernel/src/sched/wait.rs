@@ -67,6 +67,10 @@ pub(crate) enum BlockedResume {
     /// `Woken`/`Cancelled`: `user_rip -= SYSCALL_INSTRUCTION_BYTES`, `RAX = nr`.
     /// `TimedOut`: `RAX = timeout_rax` (already errno-encoded by the caller).
     RestartSyscall { nr: u64, timeout_rax: u64 },
+    /// Every outcome, `TimedOut` included, re-executes the syscall with
+    /// `RAX = nr`: the handler owns its deadline and completes the timeout
+    /// itself (block I/O must fail the in-flight request closed on re-entry).
+    RetrySyscall { nr: u64 },
 }
 
 /// Length of the `syscall` instruction (`0F 05`); SYSCALL saves the address of
@@ -103,19 +107,22 @@ pub(crate) fn apply_blocked_resume(
         BlockedResume::NativeOutcome => frame.rax = encode_wait_outcome(outcome),
         BlockedResume::RestartSyscall { nr, timeout_rax } => match outcome {
             WaitOutcome::TimedOut => frame.rax = timeout_rax,
-            WaitOutcome::Woken | WaitOutcome::Cancelled => {
-                frame.user_rip = frame
-                    .user_rip
-                    .checked_sub(SYSCALL_INSTRUCTION_BYTES)
-                    .unwrap_or_else(|| {
-                        crate::diagnostics::qemu::fatal_kernel_error(
-                            "blocked syscall restart: user rip underflow",
-                        )
-                    });
-                frame.rax = nr;
-            }
+            WaitOutcome::Woken | WaitOutcome::Cancelled => restart_syscall(frame, nr),
         },
+        BlockedResume::RetrySyscall { nr } => restart_syscall(frame, nr),
     }
+}
+
+fn restart_syscall(frame: &mut SyscallContext, nr: u64) {
+    frame.user_rip = frame
+        .user_rip
+        .checked_sub(SYSCALL_INSTRUCTION_BYTES)
+        .unwrap_or_else(|| {
+            crate::diagnostics::qemu::fatal_kernel_error(
+                "blocked syscall restart: user rip underflow",
+            )
+        });
+    frame.rax = nr;
 }
 
 #[derive(Clone, Copy)]
@@ -275,7 +282,7 @@ pub(crate) fn block_current_thread_with_resume(
                     set_blocked_resume(thread_index, BlockedResume::NativeOutcome);
                     return Ok(false);
                 }
-                BlockedResume::RestartSyscall { .. } => {
+                BlockedResume::RestartSyscall { .. } | BlockedResume::RetrySyscall { .. } => {
                     // Pending wakes may be stale (recorded when no thread was blocked).
                     // Linux handlers re-check after a real block; ignore the shortcut.
                 }
@@ -589,6 +596,21 @@ mod tests {
         );
         assert_eq!(frame.user_rip, 0x40_1002, "no restart on timeout");
         assert_eq!(frame.rax, timeout_rax);
+    }
+
+    #[test]
+    fn retry_resume_reexecutes_syscall_on_every_outcome() {
+        for outcome in [
+            WaitOutcome::Woken,
+            WaitOutcome::TimedOut,
+            WaitOutcome::Cancelled,
+        ] {
+            let mut frame = frame_at(0x40_1002);
+            apply_blocked_resume(&mut frame, BlockedResume::RetrySyscall { nr: 7 }, outcome);
+            assert_eq!(frame.user_rip, 0x40_1000, "rip backs up over `syscall`");
+            assert_eq!(frame.rax, 7);
+            assert_eq!((frame.rdi, frame.rsi, frame.rdx), (1, 2, 3));
+        }
     }
 
     #[test]

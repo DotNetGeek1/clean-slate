@@ -800,6 +800,9 @@ pub(crate) fn start_m6_capabilities_self_test(allocator: PageAllocator) -> ! {
     ));
 
     initialize_timer();
+    // `m3-entry-self-test` skips calibration inside `initialize_timer`; the storage
+    // service's block completion waits use TSC `MonotonicNs` deadlines.
+    crate::time::calibration::calibrate_apic_tick();
     let frame_pointer =
         start_current_scheduler_thread().unwrap_or_else(|message| fatal_kernel_error(message));
     unsafe { restore_task_context(frame_pointer) }

@@ -61,6 +61,7 @@ use crate::process::personality::ExecutionPersonality;
 use crate::process::personality::SyscallDispatchTarget;
 use crate::process::process_registry_mut;
 use crate::process::KERNEL_PROCESS_ID;
+use crate::sched::wait::{block_current_thread_with_resume, BlockedResume, Deadline};
 use crate::sched::with_scheduler;
 use crate::sched::ThreadKind;
 #[cfg(feature = "m3-syscall-self-test")]
@@ -95,7 +96,9 @@ use crate::selftest::m4_supervisor::observe_supervisor_console_line;
 use crate::selftest::m5_storage::observe_userspace_block_operation;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::USER_TEST_CODE_ADDRESS;
-use crate::service::block_bridge::handle_kernel_block_request;
+use crate::service::block_bridge::{
+    step_kernel_block_request, BlockCaller, BlockRequestStep, BLOCK_COMPLETION_KEY,
+};
 use crate::service::service_lifecycle_controller_mut;
 use crate::service::LifecycleControlError;
 use crate::sync::global_cell::GlobalCell;
@@ -551,41 +554,29 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
             return;
         }
     }
-    let mut payload = [0u8; BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES];
-    if matches!(request.operation, BlockTransportOp::Write) && payload_len > 0 {
-        unsafe {
-            ptr::copy_nonoverlapping(frame.r8 as *const u8, payload.as_mut_ptr(), payload_len);
-        }
-    }
-    kernel_log_fmt(format_args!(
-        "[BLK ] request op={} id={}\n",
-        block_op_name(request.operation),
-        request.request_id
-    ));
-    let response_bytes = handle_kernel_block_request(&request_bytes, &mut payload[..payload_len]);
-    let (response, response_wire) = match BlockTransportResponse::decode(&response_bytes) {
-        Ok(decoded) => (decoded, response_bytes),
-        Err(_) => {
-            let fallback = BlockTransportResponse {
-                request_id: request.request_id,
-                device_id: request.device_id,
-                operation: request.operation,
-                status: BlockTransportStatus::InvalidProtocol,
-                logical_block_size: 0,
-                block_count: 0,
-                max_transfer_blocks: 0,
-            };
-            (fallback, fallback.encode())
+    let Some(generation) = live_instance_generation(caller_pid) else {
+        frame.rax = SYSCALL_ESTALE;
+        return;
+    };
+    let caller = BlockCaller {
+        pid: caller_pid,
+        generation,
+    };
+    // The pointer ranges were validated above for the caller's address space,
+    // which stays current across a restart of this syscall.
+    let payload: &mut [u8] = if payload_len == 0 {
+        &mut []
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(frame.r8 as *mut u8, payload_len) }
+    };
+    let response = match step_kernel_block_request(caller, &request, payload) {
+        BlockRequestStep::Complete(response) => response,
+        BlockRequestStep::Wait { deadline_ns } => {
+            block_until_block_completion(frame, deadline_ns);
+            return;
         }
     };
-    if matches!(request.operation, BlockTransportOp::Read)
-        && matches!(response.status, BlockTransportStatus::Ok)
-        && payload_len > 0
-    {
-        unsafe {
-            ptr::copy_nonoverlapping(payload.as_ptr(), frame.r8 as *mut u8, payload_len);
-        }
-    }
+    let response_wire = response.encode();
     unsafe {
         ptr::copy_nonoverlapping(
             response_wire.as_ptr(),
@@ -611,15 +602,21 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
     frame.rax = BLOCK_TRANSPORT_RESPONSE_BYTES as u64;
 }
 
-fn block_op_name(op: BlockTransportOp) -> &'static str {
-    match op {
-        BlockTransportOp::Geometry => "geometry",
-        BlockTransportOp::Read => "read",
-        BlockTransportOp::Write => "write",
-        BlockTransportOp::Flush => "flush",
+/// Wait for the device's completion interrupt; every outcome (including the
+/// deadline) re-executes the request so the bridge harvests or fails it closed.
+fn block_until_block_completion(frame: &mut SyscallContext, deadline_ns: u64) {
+    match block_current_thread_with_resume(
+        frame as *mut SyscallContext,
+        BLOCK_COMPLETION_KEY,
+        Some(Deadline::MonotonicNs(deadline_ns)),
+        BlockedResume::RetrySyscall {
+            nr: SYSCALL_NR_BLOCK_REQUEST,
+        },
+    ) {
+        Ok(_) => handle_syscall_block_request(frame),
+        Err(message) => fatal_kernel_error(message),
     }
 }
-
 fn block_status_name(raw: u8) -> &'static str {
     match raw {
         0 => "ok",
