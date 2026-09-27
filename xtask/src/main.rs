@@ -1263,6 +1263,7 @@ fn run_m9_linux_runtime_acceptance() -> Result<(), XtaskError> {
     let wall = M9_RUNTIME_WALL_CLOCK.with(|slot| slot.borrow_mut().take());
     let serial = M9_RUNTIME_SERIAL.with(|slot| slot.borrow().clone());
     result?;
+    validate_m9_runtime_probe_lines(&serial)?;
     wall.ok_or_else(|| XtaskError::InvalidCommand("m9 runtime wall clock missing".to_owned()))?
         .validate(&serial)
 }
@@ -2690,6 +2691,101 @@ fn parse_wall_brackets(serial: &str) -> Result<Vec<WallBracket>, XtaskError> {
         .collect()
 }
 
+/// Every line the runtime probe writes, one `write(2)` each, per cycle.
+const M9_RUNTIME_PROBE_LINES: [&str; 9] = [
+    "[M9.J] nanosleep wall start",
+    "[M9.J] nanosleep wall end",
+    "[M9.J] fs base survives switch",
+    "[M9.J] brk ok",
+    "[M9.J] mmap ok",
+    "[M9.J] uname=Linux",
+    "[M9.J] signals ok",
+    "[M9.J] poll timeout ok",
+    "[M9.J] probe done",
+];
+
+/// A serial line opens with a four-character tag such as `[M9.J]` or `[LNX ]`.
+fn starts_with_serial_tag(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() >= 6
+        && bytes[0] == b'['
+        && bytes[5] == b']'
+        && !bytes[1..5].contains(&b'[')
+        && !bytes[1..5].contains(&b']')
+}
+
+/// Byte-exact check of the probe's own output (#175): a write whose length overruns
+/// its string leaks the next string's first bytes onto serial. Each probe line must
+/// appear whole, once per cycle, and the line after it must start with a clean tag,
+/// so leaked bytes cannot hide in front of the next kernel or probe line.
+fn validate_m9_runtime_probe_lines(serial: &str) -> Result<(), XtaskError> {
+    let lines: Vec<&str> = serial
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    let cycles = lines
+        .iter()
+        .filter(|line| line.starts_with("[M9.J] cycle="))
+        .count();
+    if cycles == 0 {
+        return Err(XtaskError::MissingMarker("[M9.J] cycle=".to_owned()));
+    }
+    for (index, line) in lines.iter().enumerate() {
+        if let Some(offset) = line.find("[M9.J]") {
+            if offset != 0 || line[offset + 1..].contains("[M9.J]") {
+                return Err(XtaskError::InvalidCommand(format!(
+                    "m9 runtime serial line has bytes around an [M9.J] marker: {line:?}"
+                )));
+            }
+        }
+        if !M9_RUNTIME_PROBE_LINES.contains(line) {
+            continue;
+        }
+        match lines.get(index + 1) {
+            Some(next) if starts_with_serial_tag(next) => {}
+            next => {
+                return Err(XtaskError::InvalidCommand(format!(
+                    "m9 runtime probe line {line:?} is followed by stray bytes: {next:?}"
+                )));
+            }
+        }
+    }
+    for expected in M9_RUNTIME_PROBE_LINES {
+        let exact = lines.iter().filter(|line| **line == expected).count();
+        if exact != cycles {
+            return Err(XtaskError::InvalidCommand(format!(
+                "m9 runtime probe line {expected:?} appears exactly {exact} times for {cycles} cycles"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The low-VA fixture's only output, byte-exact: one whole line, and the next line
+/// starts with a clean tag (an overrunning write length leaked a NUL there, #175).
+fn validate_m9_low_va_hello_line(serial: &str) -> Result<(), XtaskError> {
+    const HELLO: &str = "M9 low VA ok.";
+    let lines: Vec<&str> = serial
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    let exact: Vec<usize> = (0..lines.len())
+        .filter(|&index| lines[index] == HELLO)
+        .collect();
+    let [index] = exact[..] else {
+        return Err(XtaskError::InvalidCommand(format!(
+            "m9 low-va serial has {} exact {HELLO:?} lines, expected 1",
+            exact.len()
+        )));
+    };
+    match lines.get(index + 1) {
+        Some(next) if starts_with_serial_tag(next) => Ok(()),
+        next => Err(XtaskError::InvalidCommand(format!(
+            "m9 low-va hello line is followed by stray bytes: {next:?}"
+        ))),
+    }
+}
+
 /// Guest-requested span of each probe wall bracket: five 200 ms nanosleeps.
 const M9_RUNTIME_WALL_REQUESTED: Duration = Duration::from_secs(1);
 /// Largest difference, either way, between the host and guest spans from the
@@ -2752,6 +2848,63 @@ fn validate_nanosleep_wall_clock(
         brackets.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod runtime_probe_line_tests {
+    use super::validate_m9_runtime_probe_lines;
+
+    const CLEAN_CYCLE: &str = "[M9.J] nanosleep wall start\n\
+        [M9.J] nanosleep 200ms tsc_ns=200293252\n\
+        [M9.J] nanosleep wall irq_ticks=642 tsc_ns=1007996318 start_ns=123498216\n\
+        [M9.J] nanosleep wall end\n\
+        [M9.J] fs base survives switch\n\
+        [M9.J] brk ok\n\
+        [M9.J] mmap ok\n\
+        [M9.J] uname=Linux\n\
+        [M9.J] signals ok\n\
+        [M9.J] poll timeout ok\n\
+        [M9.J] probe done\n\
+        [LNX ] exit pid=1 status=0\n\
+        [M9.J] cycle=0 mem=0 sig=0 poll=0 fd=0\n";
+
+    #[test]
+    fn accepts_exact_probe_lines() {
+        validate_m9_runtime_probe_lines(CLEAN_CYCLE).unwrap();
+        validate_m9_runtime_probe_lines(&CLEAN_CYCLE.replace('\n', "\r\n")).unwrap();
+        validate_m9_runtime_probe_lines(&CLEAN_CYCLE.repeat(2)).unwrap();
+    }
+
+    /// Serial shape of the #175 overrun: each write carried the first bytes of
+    /// the next string in `.rodata`.
+    #[test]
+    fn rejects_overrun_bytes_before_next_line() {
+        let leaked = CLEAN_CYCLE.replace("[M9.J] brk ok\n", "[M[M9.J] brk ok\n[M9");
+        assert!(validate_m9_runtime_probe_lines(&leaked).is_err());
+        let done_leak = CLEAN_CYCLE.replace("[LNX ] exit", "[M[LNX ] exit");
+        assert!(validate_m9_runtime_probe_lines(&done_leak).is_err());
+        let suffix = CLEAN_CYCLE.replace("[M9.J] signals ok\n", "[M9.J] signals okX\n");
+        assert!(validate_m9_runtime_probe_lines(&suffix).is_err());
+    }
+
+    #[test]
+    fn low_va_hello_line_is_byte_exact() {
+        use super::validate_m9_low_va_hello_line;
+        let clean = "[M9.0] write observed\r\nM9 low VA ok.\r\n[LNX ] exit pid=2 status=0\r\n";
+        validate_m9_low_va_hello_line(clean).unwrap();
+        let nul_leak = clean.replace("\r\n[LNX ]", "\r\n\0[LNX ]");
+        assert!(validate_m9_low_va_hello_line(&nul_leak).is_err());
+        assert!(validate_m9_low_va_hello_line("[M9.0] PASS\n").is_err());
+    }
+
+    #[test]
+    fn rejects_missing_or_extra_probe_lines() {
+        let missing = CLEAN_CYCLE.replace("[M9.J] uname=Linux\n", "");
+        assert!(validate_m9_runtime_probe_lines(&missing).is_err());
+        let extra = CLEAN_CYCLE.replace("[M9.J] mmap ok\n", "[M9.J] mmap ok\n[M9.J] mmap ok\n");
+        assert!(validate_m9_runtime_probe_lines(&extra).is_err());
+        assert!(validate_m9_runtime_probe_lines("[M9.J] probe done\n[LNX ] exit\n").is_err());
+    }
 }
 
 #[cfg(test)]
@@ -2916,6 +3069,15 @@ fn run_acceptance_command(
                 if tracker.consume(&output) && !authoritative_pass {
                     if marker_set_is_ordered(marker_set, &M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS) {
                         if let Err(error) = validate_m9_stdio_bytes_line(&output) {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(error);
+                        }
+                    }
+                    if marker_set_is_ordered(marker_set, &M9_LOW_VA_ACCEPTANCE_MARKERS) {
+                        if let Err(error) = validate_m9_low_va_hello_line(&output) {
                             terminate_child(&mut child)?;
                             let _ = child.wait();
                             join_output_reader(stdout_handle);
