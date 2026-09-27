@@ -206,7 +206,16 @@ pub(crate) fn on_blocked_syscall_resumed(outcome: WaitOutcome, result_rax: u64) 
         return;
     }
     CONSUMER_BLOCKED.store(0, Ordering::Relaxed);
+    if CONSUMER_PROGRESS.load(Ordering::Relaxed) != BLOCK_PROGRESS_SNAPSHOT.load(Ordering::Relaxed)
+    {
+        fatal_kernel_error("consumer made progress while blocked");
+    }
     if IDLE_SOAK_DONE.load(Ordering::Relaxed) == 0 {
+        // Only the soak is long enough to guarantee timer IRQs at any host tick
+        // rate; the 5 ms cycle blocks can end before a single IRQ lands.
+        if FLAT_PROGRESS_LOGGED.load(Ordering::Relaxed) == 0 {
+            fatal_kernel_error("idle soak saw no timer IRQs while blocked");
+        }
         let ticks = IDLE_TICKS.load(Ordering::Relaxed);
         let elapsed_ns = monotonic_ns().saturating_sub(BLOCK_NS.load(Ordering::Relaxed));
         kernel_log_fmt(format_args!(

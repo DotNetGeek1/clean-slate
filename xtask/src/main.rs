@@ -238,12 +238,16 @@ const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS: [&str; 3] = [
     "[M9.C] PASS",
 ];
 const M9_BLOCK_WAKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(45);
-const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 9] = [
+/// `no progress while blocked` (3 timer IRQs with the blocked consumer's progress
+/// flat) is required during the 24 s idle soak: the 5 ms cycle blocks that follow
+/// can end before one IRQ arrives when the host timer rate drops under load.
+const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 10] = [
     "[TIME] timer initialized",
+    "[M9.E] blocked tid=",
+    "[M9.E] no progress while blocked",
     "[M9.E] idle_ticks=",
     "[M9.E] timeout resumed after idle",
     "[M9.E] blocked tid=",
-    "[M9.E] no progress while blocked",
     "[M9.E] woken ",
     "[M9.E] timeout resumed",
     "[M9.E] cycles=8 waiters=0",
