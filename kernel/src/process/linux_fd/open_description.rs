@@ -102,7 +102,7 @@ pub(crate) struct OpenDescription {
 /// `ENFILE` and is covered by host tests.
 pub(crate) const OPEN_DESCRIPTION_CAPACITY: usize = 48;
 
-const OPEN_DESCRIPTION_REF_MAX: u16 = 4096;
+pub(crate) const OPEN_DESCRIPTION_REF_MAX: u16 = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PoolSlot {
@@ -149,6 +149,10 @@ impl OpenDescriptionPool {
 
     pub(crate) fn live_count(&self) -> u16 {
         self.live_count
+    }
+
+    pub(crate) fn has_free_slot(&self) -> bool {
+        self.find_free_slot().is_some()
     }
 
     pub(crate) fn alloc_console(
