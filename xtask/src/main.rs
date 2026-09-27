@@ -2692,25 +2692,23 @@ fn parse_wall_brackets(serial: &str) -> Result<Vec<WallBracket>, XtaskError> {
 
 /// Guest-requested span of each probe wall bracket: five 200 ms nanosleeps.
 const M9_RUNTIME_WALL_REQUESTED: Duration = Duration::from_secs(1);
-/// Largest amount guest time may run ahead of host time between the first
-/// and last probe `wall start` markers (seven probe cycles, about 8-10 s).
+/// Largest difference, either way, between the host and guest spans from the
+/// first to the last probe `wall start` marker (seven probe cycles, about
+/// 7.5 s solo and 9-10 s under load).
 ///
 /// Guest sleep precision is asserted in the kernel against guest TSC (see
 /// docs/M9.md, "Timed wait latency"). This host comparison only rejects fake
-/// time: a guest clock running faster than host time would let short real
-/// sleeps look long enough to the guest. Under QEMU TCG the guest TSC is host
-/// time, so the spans differ only by the TSC calibration error and by how late
-/// each marker crosses serial -> QEMU stdout -> the reader thread, which
-/// stamps it. Measured host-minus-guest: -3.9 to +1.7 ms over 98 runs, 49 of
-/// them with every host CPU busy. A TSC calibrated 0.25% low (first-run
-/// translation delaying the APIC/TSC reads behind the PIT latch) showed as
-/// -19 to -21 ms, so 10 ms is ~2.5x the worst observed skew and still rejects
-/// that bias.
-const M9_RUNTIME_WALL_GUEST_AHEAD_MAX: Duration = Duration::from_millis(10);
-/// Largest amount host time may run ahead of guest time over the same span;
-/// rejects a guest clock running slow. Same noise sources and data as
-/// [`M9_RUNTIME_WALL_GUEST_AHEAD_MAX`].
-const M9_RUNTIME_WALL_HOST_AHEAD_MAX: Duration = Duration::from_millis(10);
+/// time: a guest clock running fast would let short real sleeps look long
+/// enough to the guest, and a slow one would stretch them. Under QEMU TCG the
+/// guest TSC is host time, so the spans differ only by the TSC calibration
+/// error and by how late each marker crosses serial -> QEMU stdout -> the
+/// reader thread, which stamps it. Measured host-minus-guest: -0.46 to
+/// -0.22 ms over 15 solo runs, -0.94 to +5.0 ms over 15 runs with every host
+/// CPU busy. 20 ms is 4x the worst of those and still rejects any guest clock
+/// more than ~0.3% off, such as IRQ-tick time (the tick rate follows host
+/// timer resolution) or the 0.06-0.35% low TSC calibration seen before the
+/// calibration took its window from one warm sampling routine.
+const M9_RUNTIME_WALL_SKEW_MAX: Duration = Duration::from_millis(20);
 
 fn validate_nanosleep_wall_clock(
     host_marks: usize,
@@ -2738,14 +2736,14 @@ fn validate_nanosleep_wall_clock(
         )));
     }
     let guest = Duration::from_nanos(last.start_ns.saturating_sub(first.start_ns));
-    if guest > host + M9_RUNTIME_WALL_GUEST_AHEAD_MAX {
+    if guest > host + M9_RUNTIME_WALL_SKEW_MAX {
         return Err(XtaskError::InvalidCommand(format!(
-            "m9 runtime guest span {guest:?} exceeds host span {host:?} by more than {M9_RUNTIME_WALL_GUEST_AHEAD_MAX:?}: guest time ran faster than host time"
+            "m9 runtime guest span {guest:?} exceeds host span {host:?} by more than {M9_RUNTIME_WALL_SKEW_MAX:?}: guest time ran faster than host time"
         )));
     }
-    if host > guest + M9_RUNTIME_WALL_HOST_AHEAD_MAX {
+    if host > guest + M9_RUNTIME_WALL_SKEW_MAX {
         return Err(XtaskError::InvalidCommand(format!(
-            "m9 runtime host span {host:?} exceeds guest span {guest:?} by more than {M9_RUNTIME_WALL_HOST_AHEAD_MAX:?}: guest time ran slower than host time"
+            "m9 runtime host span {host:?} exceeds guest span {guest:?} by more than {M9_RUNTIME_WALL_SKEW_MAX:?}: guest time ran slower than host time"
         )));
     }
     let host_minus_guest_ms = (host.as_secs_f64() - guest.as_secs_f64()) * 1000.0;
@@ -2791,8 +2789,8 @@ mod nanosleep_wall_clock_tests {
     #[test]
     fn accepts_marker_delivery_jitter() {
         validate_nanosleep_wall_clock(2, Duration::from_millis(9_000), &brackets()).unwrap();
-        validate_nanosleep_wall_clock(2, Duration::from_millis(8_990), &brackets()).unwrap();
-        validate_nanosleep_wall_clock(2, Duration::from_millis(9_010), &brackets()).unwrap();
+        validate_nanosleep_wall_clock(2, Duration::from_millis(8_980), &brackets()).unwrap();
+        validate_nanosleep_wall_clock(2, Duration::from_millis(9_020), &brackets()).unwrap();
     }
 
     #[test]
@@ -2805,7 +2803,7 @@ mod nanosleep_wall_clock_tests {
     #[test]
     fn rejects_guest_time_faster_than_host() {
         assert!(
-            validate_nanosleep_wall_clock(2, Duration::from_millis(8_989), &brackets()).is_err()
+            validate_nanosleep_wall_clock(2, Duration::from_millis(8_979), &brackets()).is_err()
         );
         assert!(
             validate_nanosleep_wall_clock(2, Duration::from_millis(4_500), &brackets()).is_err()
@@ -2815,7 +2813,7 @@ mod nanosleep_wall_clock_tests {
     #[test]
     fn rejects_guest_time_slower_than_host() {
         assert!(
-            validate_nanosleep_wall_clock(2, Duration::from_millis(9_011), &brackets()).is_err()
+            validate_nanosleep_wall_clock(2, Duration::from_millis(9_021), &brackets()).is_err()
         );
     }
 

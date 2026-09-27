@@ -11,10 +11,12 @@
 //! How late a wait resumes is logged, not bounded. Under QEMU TCG the guest
 //! TSC and the LAPIC timer run on host time, and the host can raise the timer
 //! interrupt late or deschedule the running vCPU; either shows up as guest
-//! TSC time. Each line therefore records whether the CPU sat halted from
-//! before the deadline until the interrupt that expired the wait (`halted=1`),
-//! in which case everything past one tick period in `irq_ns` is the host
-//! raising the interrupt late.
+//! TSC time. Each line splits `late_ns` into deadline to the expiring timer
+//! interrupt (`irq_ns`), interrupt to expiry (`expiry_ns`) and expiry to the
+//! return to user space (`resume_ns`), and records how long the CPU had been
+//! halted when that interrupt arrived (`halted_ns`). Of
+//! `min(irq_ns, halted_ns)`, everything past one tick period is the host
+//! raising the interrupt late: the guest sat in `sti; hlt` throughout.
 
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::qemu::fatal_kernel_error;
@@ -63,8 +65,8 @@ enum Phase {
 #[derive(Clone, Copy)]
 struct DeadlineIrq {
     at_ns: u64,
-    /// The idle loop had been in `sti; hlt` since before the deadline.
-    halted_since_deadline: bool,
+    /// How long the idle loop had been in `sti; hlt` when it arrived (0: not halted).
+    halted_ns: u64,
 }
 
 struct Observer {
@@ -205,7 +207,7 @@ pub(crate) fn observe_timer_irq() {
     if obs.deadline_irq.is_none() {
         obs.deadline_irq = Some(DeadlineIrq {
             at_ns,
-            halted_since_deadline: obs.halted_at_ns.is_some_and(|at| at <= obs.deadline_ns),
+            halted_ns: obs.halted_at_ns.map_or(0, |halted_at| at_ns - halted_at),
         });
     }
 }
@@ -275,24 +277,21 @@ fn complete(obs: &mut Observer, resume_ns: u64, blocked: bool) {
     }
     // `irq`: expired by the first post-deadline timer interrupt; `idle`: by the
     // idle loop's check after another interrupt; `handler`: never blocked.
-    let (via, irq_ns, halted, wake_from_ns) = match (blocked, obs.deadline_irq) {
-        (false, _) => ("handler", 0, false, resume_ns),
-        (true, Some(irq)) => (
-            "irq",
-            irq.at_ns - obs.deadline_ns,
-            irq.halted_since_deadline,
-            irq.at_ns,
-        ),
-        (true, None) => ("idle", 0, false, obs.expired_ns),
+    let (via, irq) = match (blocked, obs.deadline_irq) {
+        (false, _) => ("handler", None),
+        (true, Some(irq)) => ("irq", Some(irq)),
+        (true, None) => ("idle", None),
     };
+    let expiry_from_ns = irq.map_or(obs.deadline_ns, |irq| irq.at_ns);
     kernel_log_fmt(format_args!(
-        "[M9.J] {} tsc_ns={} late_ns={} irq_ns={} halted={} wake_ns={} via={}\n",
+        "[M9.J] {} tsc_ns={} late_ns={} irq_ns={} halted_ns={} expiry_ns={} resume_ns={} via={}\n",
         wait.label,
         resume_ns - obs.start_ns,
         resume_ns - obs.deadline_ns,
-        irq_ns,
-        u8::from(halted),
-        resume_ns - wake_from_ns,
+        irq.map_or(0, |irq| irq.at_ns - obs.deadline_ns),
+        irq.map_or(0, |irq| irq.halted_ns),
+        obs.expired_ns - expiry_from_ns,
+        resume_ns - obs.expired_ns,
         via
     ));
     obs.phase = Phase::Idle;
