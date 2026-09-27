@@ -25,7 +25,6 @@ use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::network::{authorize_network_op, NetworkOp};
 use crate::capability::with_capability_space;
-use crate::interrupt::timer::kernel_ticks;
 use crate::mm::user_mapping::validate_user_pointer_range;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::sched::wait::{
@@ -39,7 +38,7 @@ use crate::service::net_request_wake::{
 };
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::current_syscall_caller_pid;
-use crate::time::{irq_period_ns, monotonic_ns, tsc_hz};
+use crate::time::{irq_period_ns, monotonic_ns, monotonic_period_ticks, tsc_hz};
 use clean_slate_service_fixtures::NETWORK_SERVICE_ID;
 
 fn current_holder() -> Result<HolderId, u64> {
@@ -679,7 +678,7 @@ fn handle_wait_work(frame: &mut SyscallContext) {
 }
 
 fn handle_monotonic_ticks(frame: &mut SyscallContext) {
-    frame.rax = kernel_ticks();
+    frame.rax = monotonic_period_ticks().unwrap_or(SYSCALL_EINVAL);
 }
 
 fn handle_tick_period_ns(frame: &mut SyscallContext) {

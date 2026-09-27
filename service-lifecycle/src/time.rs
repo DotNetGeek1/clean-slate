@@ -1,9 +1,9 @@
-//! Monotonic tick time for health deadlines (kernel LAPIC ticks in production).
+//! Monotonic tick time for health deadlines, in `tick_period_ns` units.
 
 /// Opaque monotonic tick count; must not use wall-clock/calendar time.
 ///
-/// Supervisors map this to `kernel::interrupt::timer::kernel_ticks()` (or a
-/// future userspace syscall) when integrating with the running kernel.
+/// The kernel publishes calibrated TSC time divided by the IRQ period
+/// (`kernel::time::monotonic_period_ticks()`), not a count of delivered IRQs.
 pub type MonotonicTicks = u64;
 
 /// Bounded liveness window between valid health reports for an active instance.

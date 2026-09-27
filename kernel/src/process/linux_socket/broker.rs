@@ -10,7 +10,6 @@ use clean_slate_service_fixtures::NETWORK_MAX_PAYLOAD_BYTES;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::capability::network::{authorize_network_op, NetworkOp};
 use crate::capability::with_capability_space;
-use crate::interrupt::timer::kernel_ticks;
 use crate::sched::wait::Deadline;
 use crate::service::instance_generation::{
     live_instance_generation_for_pid, live_network_service_generation,
@@ -19,6 +18,7 @@ use crate::service::net_bridge::{net_bridge_mut, NetBridgeError};
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
 use crate::syscall::linux::table::LinuxSyscallContext;
+use crate::time::{monotonic_deadline_from_millis, monotonic_ns};
 use clean_slate_linux_abi::{LinuxSyscallRequest, LinuxSyscallResult};
 
 use super::{linux_socket_request_wait_key, LinuxSocketId};
@@ -167,11 +167,16 @@ pub(crate) fn broker_sync(
                 return Ok(outcome);
             }
             Err(NetBridgeError::Pending) => {
-                let deadline = on_timeout.map(|_| {
-                    Deadline::IrqTicks(
-                        kernel_ticks().saturating_add(super::LINUX_TCP_CONNECT_TIMEOUT_TICKS),
-                    )
-                });
+                let deadline = match on_timeout {
+                    Some(_) => Some(Deadline::MonotonicNs(
+                        monotonic_deadline_from_millis(
+                            monotonic_ns(),
+                            super::LINUX_TCP_CONNECT_TIMEOUT_MS,
+                        )
+                        .map_err(Err)?,
+                    )),
+                    None => None,
+                };
                 if let Err(errno) = block_linux_syscall(request, ctx, key, deadline, timeout) {
                     return Err(Err(errno));
                 }

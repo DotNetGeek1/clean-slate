@@ -30,8 +30,6 @@ pub(crate) use sockaddr::read_sockaddr_in;
 pub(crate) const LINUX_SOCKET_MAX: usize = 8;
 pub(crate) const LINUX_UDP_MAX_DATAGRAM: usize = 512;
 pub(crate) const LINUX_TCP_CONNECT_TIMEOUT_MS: u64 = 5000;
-/// `sched::wait::Deadline` uses APIC timer IRQ ticks (~750/s in QEMU), not milliseconds (#103).
-pub(crate) const LINUX_TCP_CONNECT_TIMEOUT_TICKS: u64 = LINUX_TCP_CONNECT_TIMEOUT_MS * 750 / 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LinuxSocketId {

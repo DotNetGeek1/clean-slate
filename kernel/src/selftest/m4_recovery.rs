@@ -18,7 +18,6 @@ use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
-use crate::interrupt::timer::kernel_ticks;
 use crate::ipc::endpoint_table_mut;
 use crate::ipc::IpcEndpointTable;
 use crate::ipc::USERSPACE_SUPERVISOR_TEST_PID;
@@ -199,11 +198,29 @@ pub(crate) fn recovery_state() -> Result<&'static mut RecoverySelfTestState, &'s
     }
 }
 
+/// The supervisor's liveness clock: `kernel_ticks` in the bootstrap is read as
+/// `tick_period_ns` units, so it must advance with real time.
+pub(crate) fn recovery_clock_ticks() -> u64 {
+    crate::time::monotonic_period_ticks()
+        .unwrap_or_else(|| fatal_kernel_error("recovery clock requires a calibrated TSC"))
+}
+
+/// The supervisor's `tick_period_ns`, fixed once at bootstrap creation. Boot
+/// calibrates the APIC timer and TSC before starting this self-test; without
+/// calibration there is no real period to publish, so the test fails closed.
+fn recovery_tick_period_ns() -> u64 {
+    if crate::time::tsc_hz().is_none() {
+        fatal_kernel_error("recovery supervisor started before TSC calibration");
+    }
+    crate::time::irq_period_ns().unwrap_or_else(|| {
+        fatal_kernel_error("recovery supervisor started before APIC timer calibration")
+    })
+}
+
 pub(crate) fn publish_recovery_bootstrap(update: impl FnOnce(&mut RecoveryBootstrap)) {
     let Some(bootstrap) = (unsafe { (&mut *RECOVERY_BOOTSTRAP.get()).as_mut() }) else {
         return;
     };
-    bootstrap.tick_period_ns = crate::time::irq_period_ns().unwrap_or(1_000_000);
     update(bootstrap);
     let published = *bootstrap;
     if let Ok(state) = recovery_state() {
@@ -623,6 +640,7 @@ pub(crate) fn recovery_complete_and_exit() {
 }
 
 pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
+    let tick_period_ns = recovery_tick_period_ns();
     unsafe {
         *id_allocator_mut() = IdAllocator::new();
         process_registry_mut().clear();
@@ -656,7 +674,6 @@ pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
         .unwrap_or_else(|message| fatal_kernel_error(message));
     kernel_log_line("[CAP ] supervisor console capability granted pid=1");
     install_crash_spawn_hook(crash_spawn_hook);
-    let tick_period_ns = crate::time::irq_period_ns().unwrap_or(1_000_000);
     let bootstrap = RecoveryBootstrap {
         self_pid: USERSPACE_SUPERVISOR_TEST_PID,
         console_capability,
@@ -743,7 +760,7 @@ pub(crate) fn handle_recovery_userspace_entry(
         if state.stage == RecoveryStage::Complete {
             recovery_complete_and_exit();
         }
-        publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = kernel_ticks());
+        publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = recovery_clock_ticks());
         if state.skip_workload_respawn_once {
             state.skip_workload_respawn_once = false;
         } else if matches!(state.stage, RecoveryStage::Recovered)
@@ -977,6 +994,6 @@ pub(crate) fn observe_recovery_fault_after_containment(
     state.last_faulted_service_pid = pid;
     state.service_process = None;
     state.stage = RecoveryStage::Faulted;
-    publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = kernel_ticks() + 1);
+    publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = recovery_clock_ticks() + 1);
     Ok(())
 }

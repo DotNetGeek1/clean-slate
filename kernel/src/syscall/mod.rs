@@ -36,8 +36,6 @@ use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::interrupt::timer::kernel_ticks;
-#[cfg(feature = "m4-recovery-self-test")]
-use crate::interrupt::timer::kernel_ticks;
 use crate::ipc::endpoint_table_mut;
 use crate::ipc::IpcEndpointKind;
 use crate::ipc::IpcSendError;
@@ -853,8 +851,8 @@ fn dispatch_native(frame: &mut SyscallContext) {
         SYSCALL_NR_FINISH => frame.rax = SYSCALL_ENOSYS,
         #[cfg(feature = "m4-recovery-self-test")]
         SYSCALL_NR_FINISH => {
-            use crate::selftest::m4_recovery::publish_recovery_bootstrap;
-            publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = kernel_ticks());
+            use crate::selftest::m4_recovery::{publish_recovery_bootstrap, recovery_clock_ticks};
+            publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = recovery_clock_ticks());
             use crate::selftest::m4_recovery::recovery_acceptance_complete;
             if recovery_acceptance_complete() {
                 recovery_complete_and_exit();
