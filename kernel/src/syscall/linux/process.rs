@@ -39,7 +39,6 @@ mod enabled {
     use crate::process::linux_proc::exec_resolve::resolve_executable;
     use crate::process::linux_proc::{
         fork::linux_fork,
-        pipe::{open_pipe_refs, pool_mut},
         table::{table_mut, ProcId},
         wait::linux_wait4,
     };
@@ -102,9 +101,7 @@ mod enabled {
             return Err(EFAULT);
         }
         validate_user_writable_pointer_range(user_ptr, 8).map_err(|_| EFAULT)?;
-        let (read_ref, write_ref) = open_pipe_refs(pool_mut())?;
-        let read_fd = linux_fd::alloc_pipe_end(ctx.pid, ctx.instance_generation, read_ref)?;
-        let write_fd = linux_fd::alloc_pipe_end(ctx.pid, ctx.instance_generation, write_ref)?;
+        let [read_fd, write_fd] = linux_fd::open_pipe(ctx.pid, ctx.instance_generation)?;
         let pair = [read_fd as u32, write_fd as u32];
         unsafe {
             core::ptr::copy_nonoverlapping(pair.as_ptr(), user_ptr as *mut u32, 2);

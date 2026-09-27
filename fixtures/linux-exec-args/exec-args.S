@@ -19,6 +19,9 @@ marker_phase2_len = . - marker_phase2
 marker_enoexec_ok:
     .ascii  "[M9.F] still running after ENOEXEC\n"
 marker_enoexec_ok_len = . - marker_enoexec_ok
+marker_cloexec:
+    .ascii  "[M9.F] exec closed FD_CLOEXEC fd, kept plain fd\n"
+marker_cloexec_len = . - marker_cloexec
 name_phase1:
     .ascii  "linux-exec-args"
     .byte   0
@@ -67,6 +70,13 @@ do_execve:
     xor     rdi, rdi
     xor     rsi, rsi
     xor     rdx, rdx
+    syscall
+    ret
+
+/* fcntl(rdi, F_GETFD) -> rax */
+get_fd_flags:
+    mov     rax, 72
+    mov     rsi, 1
     syscall
     ret
 
@@ -177,11 +187,46 @@ dump_stack:
     jmp     .Lcmp2
 
 .Lphase1_exec:
+    /* fd 5 = F_DUPFD_CLOEXEC(1) has FD_CLOEXEC with no F_SETFD; fd 6 = dup2(1) has it clear. */
+    mov     rax, 72
+    mov     rdi, 1
+    mov     rsi, 1030                     /* F_DUPFD_CLOEXEC */
+    mov     rdx, 5
+    syscall
+    cmp     rax, 5
+    jne     .Lbad_exec_result
+    mov     rax, 33
+    mov     rdi, 1
+    mov     rsi, 6
+    syscall
+    cmp     rax, 6
+    jne     .Lbad_exec_result
+    mov     rdi, 5
+    call    get_fd_flags
+    cmp     rax, 1
+    jne     .Lbad_exec_result
+    mov     rdi, 6
+    call    get_fd_flags
+    test    rax, rax
+    jnz     .Lbad_exec_result
+.Lphase1_retry:
     call    do_execve
     /* Successful exec does not return. */
-    jmp     .Lphase1_exec
+    jmp     .Lphase1_retry
 
 .Lafter_phase2_dump:
+    /* The committed exec closed FD_CLOEXEC fd 5 (EBADF) and kept plain fd 6. */
+    mov     rdi, 5
+    call    get_fd_flags
+    cmp     rax, -9
+    jne     .Lbad_exec_result
+    mov     rdi, 6
+    call    get_fd_flags
+    test    rax, rax
+    jnz     .Lbad_exec_result
+    lea     rsi, [rip + marker_cloexec]
+    mov     rdx, marker_cloexec_len
+    call    write_lit
     call    do_execve
     /* Expect ENOEXEC; rax is -errno. */
     test    rax, rax
