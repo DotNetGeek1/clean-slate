@@ -3,9 +3,11 @@
 //! Each cycle runs the exact #100 command matrix (generated from
 //! `fixtures/busybox/frozen/commands.toml` by `build.rs`) as
 //! `/bin/sh -c "export PATH=/bin; <shell>"`, then capability-denial and timeout probes.
-//! Every cycle ends with a resource snapshot that must equal the baseline. The host
-//! validator (`cargo xtask test-m9-userspace`) re-checks the logged stdout bytes against
-//! `commands.toml` together with the sleep, denial and resource evidence.
+//! Every command's stdout is checked against `commands.toml` and, from cycle 2 on,
+//! byte-for-byte against the bytes cycle 1 produced; every cycle's bytes are also logged
+//! as hex. Every cycle ends with a resource snapshot that must equal the baseline. The
+//! host validator (`cargo xtask test-m9-userspace`) re-checks the logged stdout bytes of
+//! every cycle together with the sleep, denial and resource evidence.
 
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::gdt::set_privilege_stack;
@@ -55,7 +57,8 @@ use crate::syscall::{
 };
 use clean_slate_rootfs::EntryKind;
 use clean_slate_service_fixtures::{
-    StorageServiceBootstrap, NETWORK_SERVICE_ID, STORAGE_SERVICE_ID,
+    NetworkServiceBootstrap, NetworkServiceOccupancy, StorageServiceBootstrap,
+    NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID, STORAGE_SERVICE_ID,
     STORAGE_SERVICE_MODE_OBJECT_SERVICE,
 };
 use clean_slate_service_lifecycle::{
@@ -176,11 +179,17 @@ const PROBES: &[Probe] = &[
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
+    /// No Linux process is live; the resource snapshot is taken at the network service's
+    /// next idle point ([`on_net_service_idle`]). `0` is the pre-launch baseline, otherwise
+    /// the 1-based cycle that just finished.
+    AwaitNetIdle(u32),
     Command(usize),
     Probe(usize),
 }
 
-static M9_PHASE: GlobalCell<Phase> = GlobalCell::new(Phase::Command(0));
+static M9_PHASE: GlobalCell<Phase> = GlobalCell::new(Phase::AwaitNetIdle(0));
+/// `publications` of the last network-service occupancy snapshot taken.
+static LAST_NET_PUBLICATION: AtomicU64 = AtomicU64::new(0);
 static M9_LINUX_PID: AtomicU64 = AtomicU64::new(0);
 static M9_CHECKLIST_FAULT: AtomicBool = AtomicBool::new(false);
 /// 1-based cycle currently running.
@@ -190,8 +199,14 @@ const M9_STDOUT_CAP: usize = 4096;
 static M9_STDOUT_BUF: GlobalCell<[u8; M9_STDOUT_CAP]> = GlobalCell::new([0; M9_STDOUT_CAP]);
 static M9_STDOUT_OPEN: GlobalCell<Option<OpenDescriptionId>> = GlobalCell::new(None);
 static BUSYBOX_EXEC_BYTES: GlobalCell<Option<&'static [u8]>> = GlobalCell::new(None);
-/// `(stdout_len, fnv)` per matrix command from cycle 1; later cycles must repeat them.
-static FIRST_CYCLE_STDOUT: GlobalCell<[(usize, u32); MATRIX_LEN]> =
+/// Cycle-1 stdout of every matrix command, back to back; later cycles must reproduce
+/// each command's bytes exactly.
+const FIRST_CYCLE_STDOUT_CAP: usize = 4096;
+static FIRST_CYCLE_STDOUT: GlobalCell<[u8; FIRST_CYCLE_STDOUT_CAP]> =
+    GlobalCell::new([0; FIRST_CYCLE_STDOUT_CAP]);
+static FIRST_CYCLE_STDOUT_USED: AtomicUsize = AtomicUsize::new(0);
+/// `(start, len)` of each command's cycle-1 stdout inside [`FIRST_CYCLE_STDOUT`].
+static FIRST_CYCLE_SPANS: GlobalCell<[(usize, usize); MATRIX_LEN]> =
     GlobalCell::new([(0, 0); MATRIX_LEN]);
 static BASELINE: GlobalCell<Option<Resources>> = GlobalCell::new(None);
 static FIRST_CYCLE_RESOURCES: GlobalCell<Option<Resources>> = GlobalCell::new(None);
@@ -475,7 +490,8 @@ fn log_sleep_stats(name: &str) {
     ));
 }
 
-/// Kernel object occupancy; the reusable part must return to the baseline every cycle.
+/// Kernel and network-service occupancy; the reusable part must return to the baseline
+/// every cycle.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Resources {
     linux_procs: usize,
@@ -487,17 +503,24 @@ struct Resources {
     linux_waiters: usize,
     sockets: usize,
     net_requests: usize,
+    net_in_service: usize,
+    net_holder_exits: usize,
+    net_holders: usize,
     object_requests: usize,
     capabilities: usize,
     linux_mm: usize,
     linux_signals: usize,
+    /// The network service's own tables, published at the idle point the snapshot is
+    /// taken from.
+    net: NetworkServiceOccupancy,
     /// Persistent `/tmp` state: created in cycle 1 by the matrix, then reused.
     tmp_files: usize,
     fs_nodes: usize,
 }
 
 impl Resources {
-    fn capture() -> Self {
+    fn capture(net: NetworkServiceOccupancy) -> Self {
+        let bridge = crate::service::net_bridge::net_bridge_mut();
         Self {
             linux_procs: table().occupied(),
             threads: unsafe { scheduler_mut() }.occupied_thread_slots(),
@@ -512,11 +535,15 @@ impl Resources {
                 )
             }),
             sockets: crate::process::linux_socket::pool_live_count(),
-            net_requests: crate::service::net_bridge::net_bridge_mut().occupied_request_slots(),
+            net_requests: bridge.occupied_request_slots(),
+            net_in_service: bridge.in_service_request_slots(),
+            net_holder_exits: bridge.outstanding_holder_exits(),
+            net_holders: bridge.holder_entries_in_use(),
             object_requests: crate::capability::object::object_queue_occupied_slots(),
             capabilities: crate::capability::live_capability_count(),
             linux_mm: linux_mem::occupied_slots(),
             linux_signals: crate::process::linux_signal::occupied_slots(),
+            net,
             tmp_files: tmp_file_live_count(),
             fs_nodes: usize::from(crate::process::linux_fs::table().live_count()),
         }
@@ -534,8 +561,9 @@ impl Resources {
             }
         }
         let label = Label(cycle);
+        let net = &self.net;
         kernel_log_fmt(format_args!(
-            "[M9  ] resources label={label} linux_procs={} threads={} processes={} fd_tables={} open_files={} pipes={} linux_waiters={} sockets={} net_requests={} object_requests={} capabilities={} linux_mm={} linux_signals={} tmp_files={} fs_nodes={} native_progress={}\n",
+            "[M9  ] resources label={label} linux_procs={} threads={} processes={} fd_tables={} open_files={} pipes={} linux_waiters={} sockets={} net_requests={} net_in_service={} net_holder_exits={} net_holders={} object_requests={} capabilities={} linux_mm={} linux_signals={} tmp_files={} fs_nodes={} native_progress={}\n",
             self.linux_procs,
             self.threads,
             self.processes,
@@ -545,6 +573,9 @@ impl Resources {
             self.linux_waiters,
             self.sockets,
             self.net_requests,
+            self.net_in_service,
+            self.net_holder_exits,
+            self.net_holders,
             self.object_requests,
             self.capabilities,
             self.linux_mm,
@@ -553,19 +584,36 @@ impl Resources {
             self.fs_nodes,
             NATIVE_PROGRESS.load(Ordering::Relaxed),
         ));
+        kernel_log_fmt(format_args!(
+            "[M9  ] net-service resources label={label} idle_seq={} sessions={} session_pending={} tcp_conns={} tcp_maps={} udp_endpoints={} udp_maps={} udp_queued={} udp_recvs={} dns_queries={} heap_bytes={}\n",
+            net.publications,
+            net.sessions,
+            net.session_pending,
+            net.tcp_connections,
+            net.tcp_mappings,
+            net.udp_endpoints,
+            net.udp_mappings,
+            net.udp_queued,
+            net.udp_receives,
+            net.dns_queries,
+            net.heap_bytes,
+        ));
     }
 
     fn reusable(&self) -> Self {
         Self {
             tmp_files: 0,
             fs_nodes: 0,
+            net: NetworkServiceOccupancy {
+                publications: 0,
+                ..self.net
+            },
             ..*self
         }
     }
 }
 
-fn check_cycle_resources(cycle: u32) {
-    let now = Resources::capture();
+fn check_cycle_resources(now: &Resources, cycle: u32) {
     now.log(Some(cycle));
     let baseline = unsafe { *BASELINE.get() }
         .unwrap_or_else(|| fatal_kernel_error("m9 userspace baseline missing"));
@@ -574,7 +622,7 @@ fn check_cycle_resources(cycle: u32) {
     }
     let first = unsafe { &mut *FIRST_CYCLE_RESOURCES.get() };
     match first {
-        None => *first = Some(now),
+        None => *first = Some(*now),
         Some(first) if first.tmp_files != now.tmp_files || first.fs_nodes != now.fs_nodes => {
             fatal_kernel_error("m9 userspace persistent tmp state grew after cycle 1");
         }
@@ -582,15 +630,37 @@ fn check_cycle_resources(cycle: u32) {
     }
 }
 
-pub(crate) const fn fnv1a32(bytes: &[u8]) -> u32 {
-    let mut hash = 0x811c_9dc5u32;
-    let mut index = 0usize;
-    while index < bytes.len() {
-        hash ^= bytes[index] as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
-        index += 1;
+/// Offset of the first byte where `actual` departs from `expected` (the shorter length
+/// when one is a prefix of the other); `None` when they are identical.
+fn first_difference(expected: &[u8], actual: &[u8]) -> Option<usize> {
+    expected
+        .iter()
+        .zip(actual)
+        .position(|(e, a)| e != a)
+        .or((expected.len() != actual.len()).then(|| expected.len().min(actual.len())))
+}
+
+/// Keeps `out` as `index`'s cycle-1 stdout.
+fn record_first_cycle_stdout(index: usize, out: &[u8]) {
+    let start = FIRST_CYCLE_STDOUT_USED.load(Ordering::Relaxed);
+    let Some(end) = start
+        .checked_add(out.len())
+        .filter(|end| *end <= FIRST_CYCLE_STDOUT_CAP)
+    else {
+        fatal_kernel_error("m9 userspace cycle-1 stdout exceeded its bound");
+    };
+    unsafe {
+        (&mut *FIRST_CYCLE_STDOUT.get())[start..end].copy_from_slice(out);
+        (*FIRST_CYCLE_SPANS.get())[index] = (start, out.len());
     }
-    hash
+    FIRST_CYCLE_STDOUT_USED.store(end, Ordering::Relaxed);
+}
+
+fn first_cycle_stdout(index: usize) -> &'static [u8] {
+    unsafe {
+        let (start, len) = (*FIRST_CYCLE_SPANS.get())[index];
+        &(&*FIRST_CYCLE_STDOUT.get())[start..start + len]
+    }
 }
 
 fn stdout_slice() -> &'static [u8] {
@@ -622,7 +692,7 @@ pub(crate) fn observe_console_description_write(open: OpenDescriptionId, bytes: 
     M9_STDOUT_LEN.store(end, Ordering::Relaxed);
 }
 
-fn log_stdout_hex(name: &str, out: &[u8]) {
+fn log_stdout_hex(name: &str, cycle: u32, out: &[u8]) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     for (chunk_index, chunk) in out.chunks(STDOUT_HEX_CHUNK).enumerate() {
         let mut text = [0u8; STDOUT_HEX_CHUNK * 2];
@@ -632,7 +702,7 @@ fn log_stdout_hex(name: &str, out: &[u8]) {
         }
         let hex = core::str::from_utf8(&text[..chunk.len() * 2]).unwrap_or("?");
         kernel_log_fmt(format_args!(
-            "[M9  ] stdout cmd={name} off={} hex={hex}\n",
+            "[M9  ] stdout cmd={name} cycle={cycle} off={} hex={hex}\n",
             chunk_index * STDOUT_HEX_CHUNK
         ));
     }
@@ -657,12 +727,12 @@ fn finish_matrix_command(index: usize, status: u64) {
     let cmd = &M9_COMMAND_MATRIX[index];
     let cycle = cycle();
     let out = stdout_slice();
-    let fnv = fnv1a32(out);
     kernel_log_fmt(format_args!(
-        "[M9  ] cmd={} cycle={cycle} status={status} stdout_len={} fnv=0x{fnv:08x}\n",
+        "[M9  ] cmd={} cycle={cycle} status={status} stdout_len={}\n",
         cmd.name,
         out.len()
     ));
+    log_stdout_hex(cmd.name, cycle, out);
     log_sleep_stats(cmd.name);
     if status != u64::from(cmd.exit_status) {
         fatal_kernel_error("m9 userspace command exit status");
@@ -670,15 +740,24 @@ fn finish_matrix_command(index: usize, status: u64) {
     if proc_table_invariant_violations() > 0 {
         fatal_kernel_error("m9 userspace proc-table invariant");
     }
-    let first = unsafe { &mut (*FIRST_CYCLE_STDOUT.get())[index] };
+    if !stdout_matches(cmd, out) {
+        fatal_kernel_error("m9 userspace command stdout differs from commands.toml");
+    }
     if cycle == 1 {
-        log_stdout_hex(cmd.name, out);
-        if !stdout_matches(cmd, out) {
-            fatal_kernel_error("m9 userspace command stdout differs from commands.toml");
+        record_first_cycle_stdout(index, out);
+    } else {
+        let first = first_cycle_stdout(index);
+        if let Some(offset) = first_difference(first, out) {
+            kernel_log_fmt(format_args!(
+                "[M9  ] stdout mismatch cmd={} cycle={cycle} offset={offset} cycle1_len={} len={} cycle1_byte={:?} byte={:?}\n",
+                cmd.name,
+                first.len(),
+                out.len(),
+                first.get(offset),
+                out.get(offset)
+            ));
+            fatal_kernel_error("m9 userspace command stdout changed across reuse cycles");
         }
-        *first = (out.len(), fnv);
-    } else if *first != (out.len(), fnv) {
-        fatal_kernel_error("m9 userspace command stdout changed across reuse cycles");
     }
     if cycle != 1 {
         return;
@@ -769,6 +848,7 @@ fn dispatch_phase(allocator: &mut PageAllocator) {
             let probe = &PROBES[index];
             launch_shell(allocator, probe.name, probe.invocation, probe.authority);
         }
+        Phase::AwaitNetIdle(_) => {}
     }
 }
 
@@ -787,6 +867,7 @@ pub(crate) fn on_checklist_command_fault(pid: u64, context: &InterruptContext) {
     let name = match phase() {
         Phase::Command(index) => M9_COMMAND_MATRIX[index].name,
         Phase::Probe(index) => PROBES[index].name,
+        Phase::AwaitNetIdle(_) => "between-cycles",
     };
     let cr2 = if context.vector as usize == 14 {
         x86_64::registers::control::Cr2::read()
@@ -831,20 +912,53 @@ pub(crate) fn after_linux_exit_group(
             if index + 1 < PROBES.len() {
                 Phase::Probe(index + 1)
             } else {
-                let finished = cycle();
-                check_cycle_resources(finished);
-                kernel_log_fmt(format_args!("[M9  ] cycle={finished}\n"));
-                if finished >= USERSPACE_CYCLES {
-                    finish_run();
-                }
-                M9_CYCLE.store(finished + 1, Ordering::Relaxed);
-                Phase::Command(0)
+                Phase::AwaitNetIdle(cycle())
             }
         }
+        Phase::AwaitNetIdle(_) => fatal_kernel_error("m9 userspace shell exited between cycles"),
     };
     set_phase(next);
-    dispatch_phase(allocator);
+    if matches!(next, Phase::AwaitNetIdle(_)) {
+        // Every holder exit of the cycle is queued by now. The wake sends the service
+        // around its loop once more even if nothing is queued, so it drains the queue
+        // and reaches its idle point.
+        crate::service::net_request_wake::wake_net_service_work();
+    } else {
+        dispatch_phase(allocator);
+    }
     Some(start_current_scheduler_thread().unwrap_or_else(|m| fatal_kernel_error(m)))
+}
+
+/// The network service is about to block with no client request or holder exit queued,
+/// having just published its occupancy. While a snapshot is due, take it (kernel pools
+/// and the service's tables together) and start the next cycle, or finish the run.
+pub(crate) fn on_net_service_idle() {
+    let Phase::AwaitNetIdle(finished) = phase() else {
+        return;
+    };
+    // Called from the service's own `WAIT_WORK`, so its bootstrap page is mapped.
+    let occupancy = unsafe {
+        let bootstrap = NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *const NetworkServiceBootstrap;
+        core::ptr::addr_of!((*bootstrap).occupancy).read_volatile()
+    };
+    if occupancy.publications <= LAST_NET_PUBLICATION.load(Ordering::Relaxed) {
+        fatal_kernel_error("m9 userspace network-service occupancy was not republished");
+    }
+    LAST_NET_PUBLICATION.store(occupancy.publications, Ordering::Relaxed);
+    let now = Resources::capture(occupancy);
+    if finished == 0 {
+        now.log(None);
+        unsafe { *BASELINE.get() = Some(now) };
+    } else {
+        check_cycle_resources(&now, finished);
+        kernel_log_fmt(format_args!("[M9  ] cycle={finished}\n"));
+        if finished >= USERSPACE_CYCLES {
+            finish_run();
+        }
+        M9_CYCLE.store(finished + 1, Ordering::Relaxed);
+    }
+    set_phase(Phase::Command(0));
+    dispatch_phase(allocator());
 }
 
 fn launch_storage_service(
@@ -946,9 +1060,6 @@ pub(crate) fn start_m9_userspace_self_test(page_allocator: PageAllocator) -> ! {
         .unwrap_or_else(|_| fatal_kernel_error("network grant"));
 
     spawn_native_sibling(allocator);
-    let baseline = Resources::capture();
-    baseline.log(None);
-    unsafe { *BASELINE.get() = Some(baseline) };
 
     initialize_timer();
     // `m3-entry-self-test` skips calibration inside `initialize_timer`; the net service's
@@ -956,8 +1067,9 @@ pub(crate) fn start_m9_userspace_self_test(page_allocator: PageAllocator) -> ! {
     crate::time::calibration::calibrate_apic_tick();
     kernel_log_line("[TIME] timer initialized");
 
-    set_phase(Phase::Command(0));
-    dispatch_phase(allocator);
+    // The baseline is taken, and the first command launched, once the network service
+    // has initialised and first goes idle.
+    set_phase(Phase::AwaitNetIdle(0));
     let frame = start_current_scheduler_thread().unwrap_or_else(|m| fatal_kernel_error(m));
     unsafe { restore_task_context(frame) }
 }
