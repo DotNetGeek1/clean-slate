@@ -2592,6 +2592,7 @@ fn run_timed_command(command: &mut Command, timeout: Duration) -> Result<(), Xta
             return Err(XtaskError::CommandTimedOut {
                 command: command_display,
                 timeout: timeout.as_secs(),
+                context: timeout_context(&output, None),
             });
         }
 
@@ -2989,6 +2990,42 @@ mod nanosleep_wall_clock_tests {
     }
 }
 
+/// Lines of trailing output quoted in a timeout error.
+const TIMEOUT_TAIL_LINES: usize = 3;
+const TIMEOUT_TAIL_LINE_CHARS: usize = 160;
+
+/// Suffix for [`XtaskError::CommandTimedOut`]: the marker still awaited and the last
+/// non-empty output lines, on one line so failure excerpts keep it.
+fn timeout_context(output: &str, pending_marker: Option<&str>) -> String {
+    let mut context = String::new();
+    if let Some(marker) = pending_marker {
+        context.push_str(&format!("; waiting for `{marker}`"));
+    }
+    let mut tail: Vec<String> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .rev()
+        .take(TIMEOUT_TAIL_LINES)
+        .map(|line| {
+            format!(
+                "`{}`",
+                line.chars()
+                    .take(TIMEOUT_TAIL_LINE_CHARS)
+                    .collect::<String>()
+            )
+        })
+        .collect();
+    tail.reverse();
+    if tail.is_empty() {
+        context.push_str("; no output");
+    } else {
+        context.push_str("; last output: ");
+        context.push_str(&tail.join(" | "));
+    }
+    context
+}
+
 fn run_acceptance_command(
     command: &mut Command,
     marker_set: MarkerSet<'static>,
@@ -3035,6 +3072,7 @@ fn run_acceptance_command(
             return Err(XtaskError::CommandTimedOut {
                 command: command_display,
                 timeout: timeout.as_secs(),
+                context: timeout_context(&output, Some(&tracker.pending_label())),
             });
         }
 
@@ -3900,6 +3938,9 @@ enum XtaskError {
     CommandTimedOut {
         command: String,
         timeout: u64,
+        /// Last output lines (and the marker still awaited), so a hang is diagnosable
+        /// from the one-line error.
+        context: String,
     },
     InvalidCommand(String),
     InvalidOption(String),
@@ -3928,8 +3969,12 @@ impl Display for XtaskError {
             XtaskError::CommandFailed { command, status } => {
                 write!(f, "command `{command}` failed with status {status}")
             }
-            XtaskError::CommandTimedOut { command, timeout } => {
-                write!(f, "command `{command}` timed out after {timeout}s")
+            XtaskError::CommandTimedOut {
+                command,
+                timeout,
+                context,
+            } => {
+                write!(f, "command `{command}` timed out after {timeout}s{context}")
             }
             XtaskError::InvalidCommand(command) => write!(f, "unknown command `{command}`"),
             XtaskError::InvalidOption(option) => {
@@ -3982,6 +4027,21 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn timeout_context_quotes_pending_marker_and_last_lines() {
+        let output = "[BOOT] a\n\n[M9.0] b\r\n[M9.0] c\n[M9.0] d\n";
+        assert_eq!(
+            timeout_context(output, Some("[M9.0] PASS")),
+            "; waiting for `[M9.0] PASS`; last output: `[M9.0] b` | `[M9.0] c` | `[M9.0] d`"
+        );
+        assert_eq!(timeout_context("", None), "; no output");
+        let long = "x".repeat(400);
+        assert_eq!(
+            timeout_context(&long, None).len(),
+            "; last output: ``".len() + TIMEOUT_TAIL_LINE_CHARS
+        );
+    }
 
     fn m5_disk_test_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
