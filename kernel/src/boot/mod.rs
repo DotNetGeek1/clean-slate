@@ -272,7 +272,7 @@ use ::uefi::Status;
 ///
 /// With the memory map and allocator tables static, debug M9 acceptance
 /// builds peak at 43 KiB here, but the M6 capabilities self-test still reaches
-/// ~118 KiB (its fixture frames run in boot context), so 128 KiB would leave
+/// ~105 KiB (its fixture frames run in boot context), so 128 KiB would leave
 /// no real margin. The `stack-high-water-check` feature logs the peak.
 const BOOT_STACK_SIZE: usize = 256 * 1024;
 
