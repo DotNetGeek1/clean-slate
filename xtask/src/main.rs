@@ -2250,7 +2250,6 @@ fn run_vm_inner_with_config(
         .arg("-display")
         .arg("none")
         .arg("-no-reboot")
-        .arg("-no-shutdown")
         .arg("-device")
         .arg("isa-debug-exit,iobase=0xf4,iosize=0x04")
         .arg("-drive")
@@ -3209,13 +3208,26 @@ fn run_acceptance_command(
 
     let status = child_status.unwrap_or(child.wait()?);
     if !(status.success() || status.code() == Some(QEMU_DEBUG_EXIT_SUCCESS)) {
+        let status = match first_guest_failure_line(&output) {
+            Some(line) => format!("{status}; guest reported a failure: {line}"),
+            None => status.to_string(),
+        };
         return Err(XtaskError::CommandFailed {
             command: command_display,
-            status: status.to_string(),
+            status,
         });
     }
 
     validate_output_markers(&output, marker_set)
+}
+
+/// First guest `[FAIL]` or `[EXC ]` serial line, for reporting a guest that exited
+/// through the debug-exit port with a failure code.
+fn first_guest_failure_line(output: &str) -> Option<&str> {
+    output.lines().find_map(|line| {
+        let start = line.find("[FAIL]").or_else(|| line.find("[EXC "))?;
+        Some(line[start..].trim_end())
+    })
 }
 
 fn marker_set_is_ordered(set: MarkerSet<'_>, markers: &[&str]) -> bool {
@@ -3237,9 +3249,8 @@ fn is_m6_revocation_spec(set: MarkerSet<'_>) -> bool {
     matches!(set, MarkerSet::Steps(M6_REVOCATION_ACCEPTANCE_SPEC))
 }
 
-/// Constituents where any guest `[FAIL] ` line is terminal. QEMU on some hosts keeps
-/// running after the guest writes the debug-exit port, so without this a guest
-/// failure only surfaces as the constituent timeout.
+/// Constituents where any guest `[FAIL] ` line is terminal, even when the guest
+/// keeps running instead of writing the debug-exit port.
 fn fails_fast_on_guest_fail(set: MarkerSet<'_>) -> bool {
     marker_set_is_ordered(set, &M9_USERSPACE_ACCEPTANCE_MARKERS)
         || M6_ORDERED_MARKER_SETS
@@ -4025,6 +4036,20 @@ mod tests {
     fn kernel_debug_artifact_path_is_expected() {
         let artifact = kernel_artifact(false);
         assert!(artifact.ends_with("target/x86_64-unknown-uefi/debug/clean-slate-kernel.efi"));
+    }
+
+    #[test]
+    fn guest_failure_line_reports_first_fail_or_exception() {
+        let serial = "[BOOT] ok\r\n[EXC ] vector=14 name=page-fault err=0x2\r\n[FAIL] later\n";
+        assert_eq!(
+            first_guest_failure_line(serial),
+            Some("[EXC ] vector=14 name=page-fault err=0x2")
+        );
+        assert_eq!(
+            first_guest_failure_line("x[FAIL] virtio block transport failed\n"),
+            Some("[FAIL] virtio block transport failed")
+        );
+        assert_eq!(first_guest_failure_line("[M5.2] PASS\n"), None);
     }
 
     #[test]
