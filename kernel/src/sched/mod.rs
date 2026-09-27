@@ -45,6 +45,7 @@ const fn task_count_for_features() -> usize {
 use crate::arch::x86_64::context_switch::set_next_task;
 use crate::arch::x86_64::context_switch::TaskStack;
 use crate::arch::x86_64::context_switch::FRESH_TASK_SENTINEL;
+use crate::arch::x86_64::context_switch::SYSCALL_BLOCKED_RESUME_SENTINEL;
 use crate::arch::x86_64::context_switch::TASK_STACK_SIZE;
 use crate::process::KERNEL_PROCESS_ID;
 use crate::sync::global_cell::GlobalCell;
@@ -197,6 +198,9 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Mid-run callers (a self-test harness after a teardown) can pick a woken thread
+    /// whose syscall is still blocked; it has no interrupt frame to `iretq` through
+    /// and must resume via [`SYSCALL_BLOCKED_RESUME_SENTINEL`] like every other switch.
     fn start(&mut self) -> Result<u64, &'static str> {
         let next = self
             .next_runnable_from(None)
@@ -204,6 +208,9 @@ impl Scheduler {
         self.make_current(next);
         self.threads[next].started = true;
         self.threads[next].state = ThreadState::Running;
+        if self.threads[next].blocked_syscall_frame != 0 {
+            return Ok(SYSCALL_BLOCKED_RESUME_SENTINEL);
+        }
         Ok(self.threads[next].saved_stack_pointer)
     }
 
@@ -771,6 +778,21 @@ mod tests {
         assert!(scheduler.preemption_observed);
         assert!(scheduler.thread_should_exit(1));
         assert!(!scheduler.thread_should_exit(2));
+    }
+
+    #[test]
+    fn start_resumes_a_woken_blocked_syscall_through_the_sentinel() {
+        let mut scheduler = Scheduler::new();
+        scheduler
+            .configure_kernel_thread(0, 1, 0x1000, 0x1000)
+            .expect("task 1");
+        scheduler.threads[0].started = true;
+        scheduler.threads[0].blocked_syscall_frame = 0x1f00;
+        assert_eq!(
+            scheduler.start().expect("start"),
+            SYSCALL_BLOCKED_RESUME_SENTINEL
+        );
+        assert_eq!(scheduler.current_thread, Some(0));
     }
 
     #[test]
