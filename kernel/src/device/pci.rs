@@ -515,6 +515,14 @@ pub(crate) fn release_intx(function: PciFunction, route: IntxRoute) {
     release_device_vector(route.vector);
 }
 
+/// GSI that [`route_intx`] would route `function`'s INTx pin to.
+pub(crate) fn intx_gsi(function: PciFunction) -> Result<u32, &'static str> {
+    let pin = function
+        .interrupt_pin()
+        .ok_or("PCI function has neither an MSI-X table nor an INTx pin")?;
+    q35_intx_gsi(function, pin)
+}
+
 fn q35_intx_gsi(function: PciFunction, pin: u8) -> Result<u32, &'static str> {
     if PciFunction::new(0, 0, 0).vendor_device() != Q35_HOST_BRIDGE_ID {
         return Err("PCI INTx routing is only known for the q35 chipset");
