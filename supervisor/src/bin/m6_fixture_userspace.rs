@@ -4,10 +4,10 @@
 #![no_main]
 
 use clean_slate_service_fixtures::m6_fixture::{
-    resolve_arg, M6FixtureBootstrap, M6FixtureStep, EXPECT_EQ, EXPECT_IGNORE, EXPECT_NE,
-    FIXTURE_STATUS_DONE, FIXTURE_STATUS_MISMATCH, FIXTURE_STATUS_RUNNING,
-    M6_FIXTURE_BOOTSTRAP_ADDRESS, STEP_KIND_END, STEP_KIND_FAULT, STEP_KIND_REPORT,
-    STEP_KIND_SYSCALL,
+    pattern_byte, resolve_arg, M6FixtureBootstrap, M6FixtureStep, EXPECT_EQ, EXPECT_IGNORE,
+    EXPECT_NE, FIXTURE_STATUS_DONE, FIXTURE_STATUS_MISMATCH, FIXTURE_STATUS_RUNNING,
+    M6_FIXTURE_BOOTSTRAP_ADDRESS, STEP_KIND_END, STEP_KIND_EXEC, STEP_KIND_FAULT, STEP_KIND_FILL,
+    STEP_KIND_REPORT, STEP_KIND_SYSCALL, STEP_KIND_VERIFY,
 };
 
 fn bootstrap() -> &'static mut M6FixtureBootstrap {
@@ -65,6 +65,56 @@ fn run_syscall_at(header: &mut M6FixtureBootstrap, index: usize) {
     header.steps[index].result = raw_syscall(nr, resolved_args);
 }
 
+fn resolve_step_arg(header: &M6FixtureBootstrap, index: usize, arg_index: usize) -> Option<u64> {
+    let step_count = header.step_count as usize;
+    let steps_ref = &header.steps[..step_count];
+    let arg = header.steps[index].args[arg_index];
+    resolve_arg(M6_FIXTURE_BOOTSTRAP_ADDRESS, steps_ref, arg).ok()
+}
+
+fn run_fill_or_verify(header: &mut M6FixtureBootstrap, index: usize, verify: bool) {
+    let addr = resolve_step_arg(header, index, 0);
+    let len = resolve_step_arg(header, index, 1);
+    let seed = resolve_step_arg(header, index, 2);
+    let mode = resolve_step_arg(header, index, 3);
+    let (addr, len, seed, mode) = match (addr, len, seed, mode) {
+        (Some(addr), Some(len), Some(seed), Some(mode)) => (addr, len, seed, mode),
+        _ => {
+            header.status = FIXTURE_STATUS_MISMATCH;
+            header.failed_step = index as u64;
+            report_to_kernel();
+        }
+    };
+    let mut offset = 0u64;
+    while offset < len {
+        let expected = pattern_byte(seed, mode, offset);
+        let byte = match expected {
+            Some(byte) => byte,
+            None => {
+                header.status = FIXTURE_STATUS_MISMATCH;
+                header.failed_step = index as u64;
+                report_to_kernel();
+            }
+        };
+        let ptr = (addr + offset) as *mut u8;
+        if verify {
+            let actual = unsafe { core::ptr::read_volatile(ptr) };
+            if actual != byte {
+                header.steps[index].result = offset;
+                header.status = FIXTURE_STATUS_MISMATCH;
+                header.failed_step = index as u64;
+                report_to_kernel();
+            }
+        } else {
+            unsafe {
+                core::ptr::write_volatile(ptr, byte);
+            }
+        }
+        offset += 1;
+    }
+    header.progress = header.progress.saturating_add(1);
+}
+
 fn run_steps(header: &mut M6FixtureBootstrap) {
     header.status = FIXTURE_STATUS_RUNNING;
     let count = header.step_count as usize;
@@ -82,13 +132,37 @@ fn run_steps(header: &mut M6FixtureBootstrap) {
                 header.progress = header.progress.saturating_add(1);
             }
             STEP_KIND_FAULT => {
-                let addr = header.steps[index].args[0];
+                let addr = match resolve_step_arg(header, index, 0) {
+                    Some(addr) => addr,
+                    None => {
+                        header.status = FIXTURE_STATUS_MISMATCH;
+                        header.failed_step = index as u64;
+                        report_to_kernel();
+                    }
+                };
                 unsafe {
                     core::ptr::write_volatile(addr as *mut u64, 0xdead);
                 }
                 loop {
                     core::hint::spin_loop();
                 }
+            }
+            STEP_KIND_FILL => run_fill_or_verify(header, index, false),
+            STEP_KIND_VERIFY => run_fill_or_verify(header, index, true),
+            STEP_KIND_EXEC => {
+                let addr = match resolve_step_arg(header, index, 0) {
+                    Some(addr) => addr,
+                    None => {
+                        header.status = FIXTURE_STATUS_MISMATCH;
+                        header.failed_step = index as u64;
+                        report_to_kernel();
+                    }
+                };
+                let target: extern "C" fn() = unsafe { core::mem::transmute(addr) };
+                target();
+                header.status = FIXTURE_STATUS_MISMATCH;
+                header.failed_step = index as u64;
+                report_to_kernel();
             }
             STEP_KIND_REPORT => {
                 header.status = FIXTURE_STATUS_DONE;

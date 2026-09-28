@@ -20,6 +20,8 @@ const fn task_count_for_features() -> usize {
         8
     } else if cfg!(feature = "m6-capabilities-self-test") {
         9
+    } else if cfg!(feature = "m10-shared-buffer-self-test") {
+        7
     } else if cfg!(any(
         feature = "m4-recovery-self-test",
         feature = "m6-fixture-smoke-self-test",

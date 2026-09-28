@@ -159,6 +159,7 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
 #[cfg(all(
     feature = "m3-entry-self-test",
     not(feature = "m10-nxe-self-test"),
+    not(feature = "m10-shared-buffer-self-test"),
     not(feature = "m3-ipc-self-test"),
     not(feature = "m3-syscall-self-test"),
     not(feature = "m8-linux-dispatch-self-test"),
@@ -183,6 +184,7 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m7-net-service-self-test"),
     not(feature = "m7-net-caps-self-test"),
     not(feature = "m10-port-self-test"),
+    not(feature = "m10-shared-buffer-self-test"),
     not(feature = "m7-dns-self-test"),
     not(feature = "m7-net-device-self-test"),
     not(feature = "m10-virtio-modern-self-test"),
@@ -717,9 +719,15 @@ fn run_inner() -> Result<(), &'static str> {
         crate::selftest::m10_nxe::start_m10_nxe_self_test(allocator)
     }
 
+    #[cfg(feature = "m10-shared-buffer-self-test")]
+    {
+        crate::selftest::m10_shared_buffer::start_m10_shared_buffer_self_test(allocator)
+    }
+
     #[cfg(all(
         feature = "m3-entry-self-test",
         not(feature = "m10-nxe-self-test"),
+        not(feature = "m10-shared-buffer-self-test"),
         not(feature = "m8-linux-dispatch-self-test"),
         not(feature = "m8-linux-hello-self-test"),
         not(feature = "m9-syscall-fail-closed-self-test"),
@@ -780,7 +788,8 @@ fn run_inner() -> Result<(), &'static str> {
                 feature = "m5-crash-late-self-test",
                 feature = "m5-crash-recovery-self-test"
             )),
-            feature = "m7-net-caps-self-test"
+            feature = "m7-net-caps-self-test",
+            not(feature = "m10-shared-buffer-self-test")
         ))]
         {
             start_m7_net_caps_self_test(allocator)

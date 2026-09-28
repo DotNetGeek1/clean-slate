@@ -18,7 +18,8 @@ fn main() {
         || env::var("CARGO_FEATURE_M6_OBJECT_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M6_CAPABILITIES_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M7_NET_CAPS_SELF_TEST").is_ok()
-        || env::var("CARGO_FEATURE_M10_PORT_SELF_TEST").is_ok();
+        || env::var("CARGO_FEATURE_M10_PORT_SELF_TEST").is_ok()
+        || env::var("CARGO_FEATURE_M10_SHARED_BUFFER_SELF_TEST").is_ok();
     let m6_self_test = env::var("CARGO_FEATURE_M6_OBJECT_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M6_CAPABILITIES_SELF_TEST").is_ok()
         || m6_fixture_self_test;

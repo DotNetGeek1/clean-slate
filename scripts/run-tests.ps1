@@ -167,6 +167,7 @@ $AllTests = [ordered]@{
     "test-qmp-smoke"            = @{ Aliases = @("qmp-smoke"); Description = "M10 #197 QMP input/screenshot harness smoke (SeaBIOS fixture, no kernel)"; Role = "Constituent" }
     "test-m10-virtio-modern"    = @{ Aliases = @("m10-virtio-modern"); Description = "M10 #196 modern VirtIO PCI transport: host tests plus MSI-X and INTx QEMU boots (constituent)"; Role = "Constituent" }
     "test-m10-framebuffer"      = @{ Aliases = @("m10-framebuffer"); Description = "M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (constituent)"; Role = "Constituent" }
+    "test-m10-shared-buffer"    = @{ Aliases = @("m10-shared-buffer"); Description = "M10 #195 shared-buffer acceptance (constituent)"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {

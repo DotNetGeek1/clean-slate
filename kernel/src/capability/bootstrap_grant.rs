@@ -126,7 +126,8 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
         feature = "m6-capabilities-self-test",
         feature = "m6-fixture-smoke-self-test",
         feature = "m7-net-caps-self-test",
-        feature = "m10-port-self-test"
+        feature = "m10-port-self-test",
+        feature = "m10-shared-buffer-self-test"
     ))]
     if crate::selftest::m6_fixture::handle_harness_subop(frame) {
         return;

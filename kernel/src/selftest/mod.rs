@@ -29,6 +29,8 @@ pub(crate) mod m10_framebuffer;
 pub(crate) mod m10_nxe;
 #[cfg(feature = "m10-port-self-test")]
 pub(crate) mod m10_port;
+#[cfg(feature = "m10-shared-buffer-self-test")]
+pub(crate) mod m10_shared_buffer;
 #[cfg(feature = "m10-virtio-modern-self-test")]
 pub(crate) mod m10_virtio_modern;
 pub(crate) mod m2_timer;
@@ -92,7 +94,8 @@ pub(crate) mod m6_delegation;
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test",
     feature = "m7-net-caps-self-test",
-    feature = "m10-port-self-test"
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
 ))]
 pub(crate) mod m6_fixture;
 #[cfg(any(
@@ -105,7 +108,8 @@ pub(crate) mod m6_fixture;
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test",
     feature = "m7-net-caps-self-test",
-    feature = "m10-port-self-test"
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
 ))]
 pub(crate) mod m6_fixture_exits;
 #[cfg(feature = "m6-fixture-smoke-self-test")]

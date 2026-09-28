@@ -67,7 +67,11 @@ pub(crate) fn with_capability_space<R>(f: impl FnOnce(&CapabilityTable<MAX_SLOTS
 }
 
 /// Live capability records across all holders.
-#[cfg(any(feature = "m9-userspace-self-test", feature = "m10-port-self-test"))]
+#[cfg(any(
+    feature = "m9-userspace-self-test",
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 pub(crate) fn live_capability_count() -> usize {
     with_capability_space(|table| {
         (0..table.capacity())
