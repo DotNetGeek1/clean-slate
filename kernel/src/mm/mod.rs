@@ -8,6 +8,7 @@ pub(crate) mod layout;
 pub(crate) mod mmio;
 pub(crate) mod paging;
 pub(crate) mod region;
+pub(crate) mod shared_buffer;
 pub(crate) mod stack_guard;
 pub(crate) mod user_mapping;
 

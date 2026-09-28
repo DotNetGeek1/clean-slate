@@ -641,6 +641,9 @@ pub(crate) fn map_process_page(
     if va_overlaps_kernel_low_reserved(virtual_address, page_end) {
         return Err("user mapping overlaps kernel low carve-out");
     }
+    if crate::mm::shared_buffer::overlaps_shared_window(virtual_address, page_end) {
+        return Err("user mapping overlaps the shared-buffer window");
+    }
     if pd_entry_points_at_shared_carve_out_pt(address_space.root_frame, virtual_address) {
         return Err("user mapping targets shared carve-out page table");
     }
@@ -731,6 +734,12 @@ pub(crate) fn destroy_process_address_space(
     address_space: &ProcessAddressSpace,
     allocator: &mut PageAllocator,
 ) -> Result<(), &'static str> {
+    if !unsafe { crate::mm::paging::page_table_mut(address_space.root_frame) }
+        [crate::mm::shared_buffer::WINDOW_PML4_INDEX]
+        .is_unused()
+    {
+        return Err("address-space teardown found a live shared window");
+    }
     let mut mapper = unsafe { offset_page_table_for_root(address_space.root_frame) };
     for mapping in address_space.user_mappings().iter().rev() {
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(mapping.virtual_address));

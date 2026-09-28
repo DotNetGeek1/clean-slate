@@ -889,6 +889,9 @@ fn dispatch_native(frame: &mut SyscallContext) {
         cap_abi::SYSCALL_NR_NETWORK_CAPABILITY => {
             crate::service::net_syscall::handle_syscall_network_capability(frame)
         }
+        cap_abi::SYSCALL_NR_SHARED_BUFFER => {
+            crate::mm::shared_buffer::syscall::handle_syscall(frame)
+        }
         cap_abi::SYSCALL_NR_NETWORK_REQUEST => {
             crate::service::net_syscall::handle_syscall_network_request(frame)
         }
@@ -974,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_native_reserved_m10_nrs_return_enosys() {
+    fn dispatch_native_reserved_m10_nrs_return_enosys_except_shared_buffer() {
         use clean_slate_capability::syscall_abi::{
             SYSCALL_EINVAL, SYSCALL_NR_DISPLAY, SYSCALL_NR_INPUT, SYSCALL_NR_SERVICE_PORT,
             SYSCALL_NR_SHARED_BUFFER, SYSCALL_NR_WORK_SET,
@@ -1017,10 +1020,9 @@ mod tests {
             frame.rax
         };
 
-        // 17 and 20 are live (#200); 16 and 19 wait for #195 and #113.
-        for nr in [SYSCALL_NR_SHARED_BUFFER, SYSCALL_NR_INPUT] {
-            assert_eq!(dispatch(nr, 0), SYSCALL_ENOSYS, "nr {nr}");
-        }
+        // 16 (#195), 17 and 20 (#200) are live; 19 waits for #113.
+        assert_ne!(dispatch(SYSCALL_NR_SHARED_BUFFER, 0), SYSCALL_ENOSYS);
+        assert_eq!(dispatch(SYSCALL_NR_INPUT, 0), SYSCALL_ENOSYS);
         // #111 routes 18; only its gated subops stay ENOSYS.
         assert_eq!(dispatch(SYSCALL_NR_DISPLAY, 0), SYSCALL_EINVAL);
         for subop in [

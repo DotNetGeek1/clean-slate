@@ -11,6 +11,8 @@ use clean_slate_capability::{
     delegate, delegation_depth, list_holder, CapabilityError, CapabilityHandle, HolderId, Rights,
 };
 
+use crate::mm::shared_buffer;
+
 use super::bootstrap_grant::register_bootstrap_grant;
 use super::{capability_space_mut, current_holder};
 
@@ -83,8 +85,13 @@ fn is_live_userspace_process(pid: u64) -> bool {
 fn rollback_installed_child(child: CapabilityHandle) {
     let table = unsafe { capability_space_mut() };
     let slot = usize::from(child.slot);
+    let resource = table.record(child).map(|record| record.resource);
     if table.revoke(child).is_ok() {
         table.release_slot(slot);
+    }
+    if let Ok(resource) = resource {
+        shared_buffer::reconcile_resource(resource);
+        shared_buffer::drain_pending_in_syscall();
     }
 }
 

@@ -16,11 +16,12 @@ pub(crate) mod revocation;
 use core::fmt::{self, Write};
 
 use clean_slate_capability::{
-    list_holder, release_revoked, revoke_holder_tree, revoke_resource_tree, CapabilityError,
-    CapabilityHandle, CapabilityRecord, CapabilityTable, HolderId, Provenance, ResourceClass,
-    ResourceRef, Rights, MAX_SLOTS,
+    list_holder, release_revoked, revoke_holder_tree_visiting, revoke_resource_tree,
+    CapabilityError, CapabilityHandle, CapabilityRecord, CapabilityTable, HolderId, Provenance,
+    ResourceClass, ResourceRef, Rights, MAX_SLOTS,
 };
 
+use crate::mm::shared_buffer::{reconcile_resource, RevokedBuffers};
 use crate::process::current_process_id;
 use crate::sync::global_cell::GlobalCell;
 
@@ -194,7 +195,13 @@ pub(crate) fn grant_root(
 }
 
 pub(crate) fn revoke_for_holder(holder: HolderId) -> usize {
-    revoke_holder_tree(unsafe { capability_space_mut() }, holder)
+    let mut revoked_buffers = RevokedBuffers::default();
+    let revoked =
+        revoke_holder_tree_visiting(unsafe { capability_space_mut() }, holder, |resource| {
+            revoked_buffers.note(resource)
+        });
+    revoked_buffers.reconcile();
+    revoked
 }
 
 /// Duplicates every live capability held by `parent` onto `child` for Linux `fork(2)`.
@@ -272,13 +279,17 @@ fn rollback_fork_inherited(handles: &[Option<CapabilityHandle>]) {
 
 #[allow(dead_code)] // M6 adapters revoke exact ResourceRef (M6.3+).
 pub(crate) fn revoke_for_resource(resource: ResourceRef) -> usize {
-    revoke_resource_tree(
+    let revoked = revoke_resource_tree(
         unsafe { capability_space_mut() },
         resource.class,
         resource.id,
-    )
+    );
+    reconcile_resource(resource);
+    revoked
 }
 
+/// Revokes `ProcessControl` capabilities only, which never name a shared buffer, so
+/// there is nothing to reconcile.
 pub(crate) fn revoke_for_process_resource(process_id: u64) -> usize {
     revoke_resource_tree(
         unsafe { capability_space_mut() },

@@ -513,6 +513,7 @@ fn run_inner() -> Result<(), &'static str> {
         KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES
     ));
     crate::mm::address_space::verify_carve_out_attach_at_boot(&mut allocator)?;
+    crate::mm::shared_buffer::init(&mut allocator)?;
 
     let inspected = inspect_current_mapping()?;
     serial_write_fmt(format_args!(

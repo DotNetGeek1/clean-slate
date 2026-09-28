@@ -8,6 +8,7 @@ use clean_slate_capability::{
 };
 
 use super::{authorize_current_class, capability_space_mut, current_holder, with_capability_space};
+use crate::mm::shared_buffer::{drain_pending_in_syscall, reconcile_resource};
 
 pub(crate) const REVOKE_OP_REVOKE: u64 = 1;
 pub(crate) const REVOKE_OP_PROBE: u64 = 2;
@@ -59,7 +60,13 @@ fn handle_revoke(frame: &mut SyscallContext) {
         frame.rax = error.syscall_status();
         return;
     }
+    let resource =
+        with_capability_space(|table| table.record(handle)).map(|record| record.resource);
     let result = revoke_subtree(unsafe { capability_space_mut() }, handle);
+    if let Ok(resource) = resource {
+        reconcile_resource(resource);
+        drain_pending_in_syscall();
+    }
     match result {
         Ok(count) => {
             kernel_log_fmt(format_args!(
