@@ -18,6 +18,7 @@ mod m9_fixture;
 mod m9_userspace_validate;
 mod marker_spec;
 mod ovmf_vars;
+mod qmp;
 
 use marker_spec::{MarkerSet, MarkerStep, MarkerTracker};
 use ovmf_vars::RuntimeVarsCopy;
