@@ -901,6 +901,10 @@ fn dispatch_native(frame: &mut SyscallContext) {
             crate::service::display_syscall::handle_syscall_display(frame)
         }
         cap_abi::SYSCALL_NR_INPUT => crate::service::input_syscall::handle_syscall(frame),
+        #[cfg(feature = "m10-input-self-test")]
+        crate::selftest::m10_input::SYSCALL_NR_M10_INPUT_REPORT => {
+            crate::selftest::m10_input::handle_report_syscall(frame);
+        }
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 }

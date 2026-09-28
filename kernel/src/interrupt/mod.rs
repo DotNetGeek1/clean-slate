@@ -192,7 +192,8 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         #[cfg(any(
             feature = "m7-dns-self-test",
             feature = "m7-net-device-self-test",
-            feature = "m7-tls-self-test"
+            feature = "m7-tls-self-test",
+            feature = "m10-input-self-test"
         ))]
         if crate::selftest::boot_wait::is_halted() {
             increment_kernel_ticks();

@@ -142,6 +142,8 @@ use crate::sched::task_stacks_mut;
 use crate::sched::SCHEDULER_THREAD_SLOTS;
 #[cfg(feature = "m10-framebuffer-self-test")]
 use crate::selftest::m10_framebuffer::run_m10_framebuffer_self_test;
+#[cfg(feature = "m10-input-self-test")]
+use crate::selftest::m10_input::start_m10_input_self_test;
 #[cfg(feature = "m10-port-self-test")]
 use crate::selftest::m10_port::start_m10_port_self_test;
 #[cfg(feature = "m10-virtio-modern-self-test")]
@@ -197,7 +199,8 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m9-linux-trace-self-test"),
     not(feature = "m9-rootfs-self-test"),
     not(feature = "m9-linux-fs-self-test"),
-    not(feature = "m9-fd-core-self-test")
+    not(feature = "m9-fd-core-self-test"),
+    not(feature = "m10-input-self-test")
 ))]
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
 #[cfg(feature = "m3-ipc-self-test")]
@@ -725,6 +728,11 @@ fn run_inner() -> Result<(), &'static str> {
         crate::selftest::m10_shared_buffer::start_m10_shared_buffer_self_test(allocator)
     }
 
+    #[cfg(feature = "m10-input-self-test")]
+    {
+        start_m10_input_self_test(allocator)
+    }
+
     #[cfg(all(
         feature = "m3-entry-self-test",
         not(feature = "m10-nxe-self-test"),
@@ -741,7 +749,8 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-linux-trace-self-test"),
         not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-linux-fs-self-test"),
-        not(feature = "m9-fd-core-self-test")
+        not(feature = "m9-fd-core-self-test"),
+        not(feature = "m10-input-self-test")
     ))]
     {
         #[cfg(feature = "m7-net-service-self-test")]

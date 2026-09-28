@@ -308,6 +308,24 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 10] = [
     "[M9.E] cycles=8 waiters=0",
     "[M9.E] PASS",
 ];
+const M10_INPUT_SMOKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+/// #113 smoke lane: the i8042 controller's write-output-buffer commands stand in for host
+/// injection (#197), so every record still crosses IRQ 1/12, the decoders and the raw queue.
+const M10_INPUT_SMOKE_ACCEPTANCE_MARKERS: [&str; 13] = [
+    "[TIME] timer initialized",
+    "[M10.input] ready kbd=",
+    "[M10.input] rec seq=1 kbd key=0x04 down",
+    "[M10.input] routed irqs=",
+    "[M10.input] queue full len=128 pending_dropped=4",
+    "[M10.input] idle ms=300 ",
+    "[M10.input] boot phase complete",
+    "[M10.input] cpl3 query devices ok",
+    "[M10.input] cpl3 drained records=128 overflow dropped=4",
+    "[M10.input] cpl3 unauthorized refused",
+    "[M10.input] consumer released bindings=1 then=0",
+    "[M10.input] cpl3 exclusive consumer ok",
+    "[M10.input] PASS",
+];
 const M9_STACK_GUARD_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 /// The overflow line is the production fail-closed diagnostic; the probe only
 /// passes when it names the probe's slot and was reported from the #DF IST.
@@ -996,6 +1014,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10VirtioModern => run_m10_virtio_modern_acceptance(),
         ParsedCommand::TestM10Framebuffer => run_m10_framebuffer_acceptance(),
         ParsedCommand::TestM10SharedBuffer => run_m10_shared_buffer_acceptance(),
+        ParsedCommand::TestM10InputSmoke => run_m10_input_smoke_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -2086,6 +2105,18 @@ fn run_m10_virtio_modern_acceptance() -> Result<(), XtaskError> {
     )?;
     println!("[M10.virtio-modern] PASS");
     Ok(())
+}
+
+fn run_m10_input_smoke_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m10-input-self-test"],
+        Some((
+            MarkerSet::Ordered(&M10_INPUT_SMOKE_ACCEPTANCE_MARKERS),
+            M10_INPUT_SMOKE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
 }
 
 /// M10 contract gate (#110 Stage F): host tests for graphics/capability ABI crates plus
@@ -4326,6 +4357,7 @@ fn print_help() {
     println!(
         "  test-m10-shared-buffer  M10 #195 shared buffers: native-abi/service-fixtures/capability and kernel shared-buffer host tests, then the scripted fixture lane (NX, map/read, deny, stale, exhaustion, reuse, kernel-owned, ro-write, shared-exec, owner exit, reader exit, root revoke, port transfer); prints [M10.shared-buffer] PASS (aliases: m10-shared-buffer)"
     );
+    println!("  test-m10-input-smoke M10 #113 i8042 input smoke lane: init, IRQ 1/12 routing, raw queue and syscall 19 from CPL3, stimulated by the controller itself (no host injection); prints [M10.input] PASS (aliases: m10-input-smoke)");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
@@ -4468,6 +4500,7 @@ enum ParsedCommand {
     TestM10VirtioModern,
     TestM10Framebuffer,
     TestM10SharedBuffer,
+    TestM10InputSmoke,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -4609,6 +4642,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-m10-shared-buffer" || cmd == "m10-shared-buffer" => {
             ParsedCommand::TestM10SharedBuffer
+        }
+        Some(cmd) if cmd == "test-m10-input-smoke" || cmd == "m10-input-smoke" => {
+            ParsedCommand::TestM10InputSmoke
         }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
@@ -5089,6 +5125,14 @@ mod tests {
         assert_eq!(
             parse_command(Some("m10-shared-buffer".as_ref())),
             ParsedCommand::TestM10SharedBuffer
+        );
+        assert_eq!(
+            parse_command(Some("test-m10-input-smoke".as_ref())),
+            ParsedCommand::TestM10InputSmoke
+        );
+        assert_eq!(
+            parse_command(Some("m10-input-smoke".as_ref())),
+            ParsedCommand::TestM10InputSmoke
         );
         assert_eq!(
             parse_command(Some("test-m7-net-caps".as_ref())),
