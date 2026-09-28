@@ -30,6 +30,7 @@ use crate::service::net_bridge::{
     notify_holder_exit_for_process, reclaim_net_requests_for_holder,
     recover_net_queue_for_service_holder_exit,
 };
+use crate::service::port;
 
 // Process teardown and resource accounting are only exercised end-to-end by
 // the M3 self-test features today; the normal boot path picks them up later.
@@ -44,18 +45,26 @@ pub(crate) struct ResourceSnapshot {
     pub(crate) threads: usize,
     pub(crate) runnable_threads: usize,
     pub(crate) work_sets: usize,
+    pub(crate) ports_served: usize,
+    pub(crate) port_connections: usize,
 }
 
 /// What the M10 teardown slots released; both exit paths compare it with the snapshot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct HolderReleaseCounts {
     work_sets: usize,
+    ports: clean_slate_port::PortReleaseCounts,
 }
 
 impl HolderReleaseCounts {
     fn matches(self, snapshot: &ResourceSnapshot) -> Result<(), &'static str> {
         if self.work_sets != snapshot.work_sets {
             return Err("work-set teardown count diverged from the recorded process snapshot");
+        }
+        if self.ports.served_ports != snapshot.ports_served
+            || self.ports.client_connections != snapshot.port_connections
+        {
+            return Err("port teardown count diverged from the recorded process snapshot");
         }
         Ok(())
     }
@@ -85,6 +94,12 @@ pub(crate) fn remaining_owned_resource_count(process_id: u64) -> usize {
         + ipc_resources.owned_endpoints
         + ipc_resources.held_capabilities
         + work_set::count_for(HolderId(process_id))
+        + port_resource_count(HolderId(process_id))
+}
+
+fn port_resource_count(holder: HolderId) -> usize {
+    let counts = port::counts_for(holder);
+    counts.ports_served + counts.port_connections
 }
 
 pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'static str> {
@@ -98,6 +113,7 @@ pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'s
     let thread_resources =
         without_interrupts(|| unsafe { scheduler_mut().resources_for_process(process_id) });
     let ipc_resources = unsafe { endpoint_table_mut().resources_for_pid(process_id) };
+    let ports = port::counts_for(HolderId(process_id));
     Ok(ResourceSnapshot {
         user_pages: address_space.user_pages,
         page_table_frames: address_space.page_table_frames,
@@ -107,6 +123,8 @@ pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'s
         threads: thread_resources.threads,
         runnable_threads: thread_resources.runnable_threads,
         work_sets: work_set::count_for(HolderId(process_id)),
+        ports_served: ports.ports_served,
+        port_connections: ports.port_connections,
     })
 }
 
@@ -293,6 +311,8 @@ fn run_teardown_hook(
     released: &mut ReleasedResources,
 ) -> Result<(), &'static str> {
     let holder = HolderId(ctx.process_id);
+    #[cfg(feature = "m10-port-self-test")]
+    crate::selftest::m10_port::trace_teardown_hook(holder, hook);
     match hook {
         TeardownHook::IpcEndpoints => {
             released.ipc =
@@ -312,7 +332,7 @@ fn run_teardown_hook(
         TeardownHook::NetHolderExitNotice => {
             notify_holder_exit_for_process(holder.0);
         }
-        TeardownHook::Port => release_ports(ctx)?,
+        TeardownHook::Port => released.holder.ports = release_ports(ctx),
         TeardownHook::DisplayPresenter => release_display_presenter(ctx)?,
         TeardownHook::InputConsumer => release_input_consumer(ctx)?,
         TeardownHook::WorkSet => released.holder.work_sets = release_work_set(ctx),
@@ -342,8 +362,8 @@ fn run_teardown_hook(
     Ok(())
 }
 
-fn release_ports(_ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {
-    Ok(())
+fn release_ports(ctx: &mut TeardownContext<'_>) -> clean_slate_port::PortReleaseCounts {
+    port::on_holder_exit(HolderId(ctx.process_id))
 }
 
 fn release_display_presenter(_ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {

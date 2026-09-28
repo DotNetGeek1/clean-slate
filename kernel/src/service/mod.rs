@@ -15,6 +15,8 @@ pub(crate) mod linux_launch;
 pub(crate) mod net_bridge;
 pub(crate) mod net_request_wake;
 pub(crate) mod net_syscall;
+pub(crate) mod port;
+pub(crate) mod port_syscall;
 pub(crate) mod spawn;
 
 #[cfg(feature = "m4-recovery-self-test")]

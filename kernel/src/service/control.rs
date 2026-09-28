@@ -276,6 +276,7 @@ impl ServiceLifecycleController {
         feature = "m6-process-control-self-test",
         feature = "m6-delegation-self-test",
         feature = "m7-net-caps-self-test",
+        feature = "m10-port-self-test",
         feature = "m6-revocation-self-test",
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",

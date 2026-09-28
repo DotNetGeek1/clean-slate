@@ -2,7 +2,7 @@
 
 pub const M6_FIXTURE_BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0020_0000;
 pub const M6_FIXTURE_MAGIC: u64 = 0x4d36_4649_5854_5552;
-pub const M6_FIXTURE_MAX_STEPS: usize = 32;
+pub const M6_FIXTURE_MAX_STEPS: usize = 64;
 pub const M6_FIXTURE_DATA_BYTES: usize = 1024;
 
 pub const STEP_KIND_END: u64 = 0;

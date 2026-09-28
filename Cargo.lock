@@ -134,6 +134,7 @@ dependencies = [
  "clean-slate-linux-abi",
  "clean-slate-native-abi",
  "clean-slate-network",
+ "clean-slate-port",
  "clean-slate-rootfs",
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",

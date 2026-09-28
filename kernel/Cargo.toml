@@ -24,6 +24,7 @@ m9-syscall-fail-closed-self-test = ["m3-entry-self-test", "stack-high-water-chec
 m9-block-wake-self-test = ["m3-entry-self-test", "stack-high-water-check"]
 m9-stack-guard-self-test = ["stack-high-water-check"]
 m9-fd-core-self-test = ["m3-entry-self-test", "stack-high-water-check"]
+m10-port-self-test = ["m3-entry-self-test", "stack-high-water-check"]
 m4-crash-service-self-test = []
 m4-service-lifecycle-self-test = ["m3-entry-self-test"]
 m4-supervisor-self-test = ["m3-entry-self-test"]
@@ -117,6 +118,7 @@ rand_core = { version = "=0.6.4", default-features = false, optional = true }
 clean-slate-capability = { path = "../capability" }
 clean-slate-linux-abi = { path = "../linux-abi" }
 clean-slate-native-abi = { path = "../native-abi" }
+clean-slate-port = { path = "../port" }
 clean-slate-rootfs = { path = "../rootfs", optional = true }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }

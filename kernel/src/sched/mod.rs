@@ -25,6 +25,7 @@ const fn task_count_for_features() -> usize {
         feature = "m6-process-control-self-test",
         feature = "m6-delegation-self-test",
         feature = "m7-net-caps-self-test",
+        feature = "m10-port-self-test",
         feature = "m7-net-service-self-test",
         feature = "m6-object-self-test",
         feature = "m6-audit-self-test",

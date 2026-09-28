@@ -304,7 +304,8 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
                         feature = "m6-audit-self-test",
                         feature = "m6-capabilities-self-test",
                         feature = "m6-fixture-smoke-self-test",
-                        feature = "m7-net-caps-self-test"
+                        feature = "m7-net-caps-self-test",
+                        feature = "m10-port-self-test"
                     ))]
                     crate::selftest::m6_fixture::on_fixture_exiting(target_pid);
                     let resources = remaining_owned_resource_count(target_pid);

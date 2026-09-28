@@ -196,6 +196,7 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
     feature = "m7-net-caps-self-test",
+    feature = "m10-port-self-test",
     feature = "m7-net-service-self-test",
     feature = "m8-linux-image-self-test",
     feature = "m8-linux-hello-self-test",

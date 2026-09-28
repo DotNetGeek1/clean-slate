@@ -129,6 +129,8 @@ use crate::sched::dispatch::initialize_scheduler;
 use crate::sched::dispatch::start_scheduler;
 use crate::sched::task_stacks_mut;
 use crate::sched::SCHEDULER_THREAD_SLOTS;
+#[cfg(feature = "m10-port-self-test")]
+use crate::selftest::m10_port::start_m10_port_self_test;
 #[cfg(feature = "m1-self-test")]
 use crate::selftest::m1_memory::exercise_mapping;
 #[cfg(feature = "m1-self-test")]
@@ -165,6 +167,7 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m6-capabilities-self-test"),
     not(feature = "m7-net-service-self-test"),
     not(feature = "m7-net-caps-self-test"),
+    not(feature = "m10-port-self-test"),
     not(feature = "m7-dns-self-test"),
     not(feature = "m7-net-device-self-test"),
     not(feature = "m8-linux-image-self-test"),
@@ -722,6 +725,23 @@ fn run_inner() -> Result<(), &'static str> {
                 feature = "m5-crash-recovery-self-test"
             )),
             not(feature = "m7-net-caps-self-test"),
+            feature = "m10-port-self-test"
+        ))]
+        {
+            start_m10_port_self_test(allocator)
+        }
+        #[cfg(all(
+            not(feature = "m4-service-lifecycle-self-test"),
+            not(feature = "m4-supervisor-self-test"),
+            not(any(
+                feature = "m5-storage-self-test",
+                feature = "m5-persistence-self-test",
+                feature = "m5-crash-early-self-test",
+                feature = "m5-crash-late-self-test",
+                feature = "m5-crash-recovery-self-test"
+            )),
+            not(feature = "m7-net-caps-self-test"),
+            not(feature = "m10-port-self-test"),
             feature = "m6-revocation-self-test"
         ))]
         {
@@ -852,6 +872,7 @@ fn run_inner() -> Result<(), &'static str> {
             not(feature = "m6-revocation-self-test"),
             not(feature = "m6-capabilities-self-test"),
             not(feature = "m7-net-caps-self-test"),
+            not(feature = "m10-port-self-test"),
             not(feature = "m7-net-service-self-test"),
             feature = "m8-linux-image-self-test"
         ))]
@@ -880,6 +901,7 @@ fn run_inner() -> Result<(), &'static str> {
             not(feature = "m6-revocation-self-test"),
             not(feature = "m6-capabilities-self-test"),
             not(feature = "m7-net-caps-self-test"),
+            not(feature = "m10-port-self-test"),
             not(feature = "m9-low-va-self-test"),
             not(feature = "m9-linux-exec-self-test"),
             not(feature = "m9-rootfs-self-test"),

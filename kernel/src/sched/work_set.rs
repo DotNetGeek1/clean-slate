@@ -143,7 +143,6 @@ impl<const N: usize> WorkSetTable<N> {
         (slot.holder.is_some() && slot.generation == id.generation()).then_some(index)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn check_owner(&self, holder: HolderId, id: WorkSetId) -> Result<(), WorkSetError> {
         self.owned_index(holder, id).map(|_| ())
     }
@@ -196,7 +195,6 @@ impl<const N: usize> WorkSetTable<N> {
     ///
     /// Waking only on newly set armed bits loses nothing: a thread blocks only while none
     /// of its bits are ready, so the signal that makes one ready always sets it anew.
-    #[allow(dead_code)]
     pub(crate) fn signal(&mut self, id: WorkSetId, bits: u32) -> bool {
         let Some(index) = self.live_index(id) else {
             return false;
@@ -245,7 +243,6 @@ fn work_sets_mut() -> &'static mut WorkSetTable<WORK_SET_CAPACITY> {
 /// A validated work set a source signals. It stays valid after the work set is destroyed:
 /// [`signal`] on it is then a no-op.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct WorkSetBinding(WorkSetId);
 
 impl WorkSetBinding {
@@ -256,7 +253,6 @@ impl WorkSetBinding {
 }
 
 /// Validates a `BIND_WAKE` target: `raw` must name a live work set owned by `holder`.
-#[allow(dead_code)]
 pub(crate) fn bind(holder: HolderId, raw: u64) -> Result<WorkSetBinding, WorkSetError> {
     let id = WorkSetId::decode(raw).map_err(|_| WorkSetError::Invalid)?;
     without_interrupts(|| work_sets_mut().check_owner(holder, id))?;
@@ -264,7 +260,6 @@ pub(crate) fn bind(holder: HolderId, raw: u64) -> Result<WorkSetBinding, WorkSet
 }
 
 /// Validates a `BIND_WAKE` bit index.
-#[allow(dead_code)]
 pub(crate) fn bind_bit(raw: u64) -> Result<u32, WorkSetError> {
     u32::try_from(raw)
         .ok()
@@ -274,7 +269,6 @@ pub(crate) fn bind_bit(raw: u64) -> Result<u32, WorkSetError> {
 
 /// Sets `bit` on the bound work set and wakes its waiters. Safe from IRQ context: it takes no
 /// lock, allocates nothing, and touches only the work-set and wait tables.
-#[allow(dead_code)]
 pub(crate) fn signal(binding: WorkSetBinding, bit: u32) {
     let Some(bits) = 1u32.checked_shl(bit) else {
         return;
@@ -411,6 +405,8 @@ fn handle_wait(frame: &mut SyscallContext, holder: HolderId) -> u64 {
     };
     let deadline = args.deadline_ns.map(Deadline::MonotonicNs);
     let check = || {
+        #[cfg(feature = "m10-port-self-test")]
+        crate::selftest::m10_port::inside_work_set_wait_check(holder);
         let deadline_passed = args
             .deadline_ns
             .is_some_and(|deadline_ns| monotonic_ns() >= deadline_ns);

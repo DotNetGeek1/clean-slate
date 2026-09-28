@@ -235,6 +235,17 @@ pub(crate) fn waiter_occupancy() -> usize {
     without_interrupts(|| wait_table_mut().occupied())
 }
 
+/// Whether `pid` has an active waiter on a key satisfying `matches`.
+#[cfg(feature = "m10-port-self-test")]
+pub(crate) fn has_waiter_where(pid: u64, matches: impl Fn(WaitKey) -> bool) -> bool {
+    without_interrupts(|| {
+        wait_table_mut()
+            .slots
+            .iter()
+            .any(|slot| slot.active && slot.pid == pid && matches(slot.key))
+    })
+}
+
 /// Active waiters whose owning pid satisfies `owned_by`.
 #[cfg(feature = "m9-userspace-self-test")]
 pub(crate) fn waiter_occupancy_where(mut owned_by: impl FnMut(u64) -> bool) -> usize {
