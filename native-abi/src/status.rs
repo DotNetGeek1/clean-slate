@@ -18,6 +18,10 @@ pub const STATUS_ESTALE: u64 = SYSCALL_ESTALE;
 
 pub const STATUS_EBADF: u64 = u64::MAX - 8;
 pub const STATUS_EAGAIN: u64 = u64::MAX - 10;
+pub const STATUS_EEXIST: u64 = u64::MAX - 16;
+pub const STATUS_EPIPE: u64 = u64::MAX - 31;
+pub const STATUS_ETIMEDOUT: u64 = u64::MAX - 109;
+pub const STATUS_ECONNREFUSED: u64 = u64::MAX - 110;
 
 pub const STATUS_RANGE_START: u64 = u64::MAX - 4095;
 
