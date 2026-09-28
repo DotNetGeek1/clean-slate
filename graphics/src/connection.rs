@@ -128,11 +128,11 @@ impl ConnectionPhase {
                             features,
                         }
                     }
-                    Err(code) => self.fail(RequestError {
+                    Err(_code) => self.fail(RequestError {
                         tag,
                         object,
                         opcode: OP_HELLO,
-                        code,
+                        code: ProtocolError::UnsupportedVersion,
                     }),
                 }
             }
