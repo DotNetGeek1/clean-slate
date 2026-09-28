@@ -154,6 +154,134 @@ impl PciFunction {
     }
 }
 
+/// Config-space reads, abstracted so capability and BAR decoding run against
+/// a host fake.
+pub(crate) trait PciConfigRead {
+    fn read_u8(&self, offset: u8) -> u8;
+    fn read_u16(&self, offset: u8) -> u16;
+    fn read_u32(&self, offset: u8) -> u32;
+}
+
+/// Config-space writes. `write_u32` replaces the whole dword, so writing
+/// COMMAND through it with a zero STATUS half clears no RW1C status bits.
+pub(crate) trait PciConfigWrite: PciConfigRead {
+    fn write_u16(&self, offset: u8, value: u16);
+    fn write_u32(&self, offset: u8, value: u32);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PciError {
+    /// Capability pointer below 0x40, past config space, looping, or over the walk bound.
+    ListMalformed,
+    BarIndex,
+    IoBar,
+    ReservedBarType,
+    /// A 64-bit BAR at index 5 has no upper half.
+    NoUpperHalf,
+    Unassigned,
+    ZeroSize,
+    MisalignedBase,
+    BarOverflow,
+}
+
+/// A sized memory BAR.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MemoryBar {
+    pub(crate) index: u8,
+    pub(crate) base: u64,
+    pub(crate) size: u64,
+    pub(crate) is_64: bool,
+    pub(crate) prefetchable: bool,
+}
+
+/// Walk of the standard capability list, yielding `(offset, id)`.
+pub(crate) struct CapabilityIter<'a, C: PciConfigRead> {
+    cfg: &'a C,
+    next: u8,
+    visited: [bool; 256],
+    walked: usize,
+    failed: bool,
+}
+
+/// Capability list of `cfg`; empty when STATUS has no capabilities list.
+pub(crate) fn capabilities<C: PciConfigRead>(cfg: &C) -> CapabilityIter<'_, C> {
+    let _ = (cfg, PCI_CAPABILITIES_POINTER_OFFSET);
+    todo!("#196 stage 1")
+}
+
+impl<C: PciConfigRead> Iterator for CapabilityIter<'_, C> {
+    type Item = Result<(u8, u8), PciError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let _ = (self.cfg, self.next, self.visited, self.walked, self.failed);
+        todo!("#196 stage 1")
+    }
+}
+
+/// Size memory BAR `index` by the all-ones probe, restoring the BAR and COMMAND.
+pub(crate) fn memory_bar<C: PciConfigWrite>(cfg: &C, index: u8) -> Result<MemoryBar, PciError> {
+    let _ = (cfg, index);
+    todo!("#196 stage 1")
+}
+
+/// Host model of one function's 256-byte config space.
+#[cfg(test)]
+pub(crate) struct FakeConfigSpace {
+    bytes: core::cell::RefCell<[u8; 256]>,
+    /// Size of each BAR's decoded window (0 = unimplemented); drives the all-ones probe.
+    pub(crate) bar_sizes: [u64; 6],
+}
+
+#[cfg(test)]
+impl FakeConfigSpace {
+    pub(crate) fn new() -> Self {
+        Self {
+            bytes: core::cell::RefCell::new([0; 256]),
+            bar_sizes: [0; 6],
+        }
+    }
+
+    pub(crate) fn set_u8(&self, offset: u8, value: u8) {
+        self.bytes.borrow_mut()[usize::from(offset)] = value;
+    }
+
+    pub(crate) fn set_u16(&self, offset: u8, value: u16) {
+        for (index, byte) in value.to_le_bytes().into_iter().enumerate() {
+            self.set_u8(offset + index as u8, byte);
+        }
+    }
+
+    pub(crate) fn set_u32(&self, offset: u8, value: u32) {
+        for (index, byte) in value.to_le_bytes().into_iter().enumerate() {
+            self.set_u8(offset + index as u8, byte);
+        }
+    }
+}
+
+#[cfg(test)]
+impl PciConfigRead for FakeConfigSpace {
+    fn read_u8(&self, offset: u8) -> u8 {
+        self.bytes.borrow()[usize::from(offset)]
+    }
+
+    fn read_u16(&self, offset: u8) -> u16 {
+        let offset = usize::from(offset & !0x1);
+        let bytes = self.bytes.borrow();
+        u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+    }
+
+    fn read_u32(&self, offset: u8) -> u32 {
+        let offset = usize::from(offset & !0x3);
+        let bytes = self.bytes.borrow();
+        u32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
+    }
+}
+
 /// Scan bus 0 for exactly one function matching `vendor`/`device`.
 pub(crate) fn find_single_function(
     vendor: u16,
