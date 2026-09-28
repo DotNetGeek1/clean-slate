@@ -680,6 +680,42 @@ Representative tests:
 
 The VM should shut down automatically with a machine-readable pass/fail result.
 
+### QMP harness (#197)
+
+Some acceptance lanes need guest keyboard or pointer input, or a framebuffer capture, while serial output remains the pass/fail oracle. QEMU still runs headless (`-display none` in `qemu_command`). QMP is opt-in per lane: lanes that do not attach a driver keep using `NoDriver`, and the host test `qemu_argv_without_qmp_options_is_unchanged` pins the baseline QEMU argv so existing lanes stay unchanged.
+
+**Endpoint (`xtask/src/qmp/endpoint.rs`).** Each run binds `127.0.0.1:0` and holds the listener from bind until accept. QEMU connects out with `-qmp tcp:127.0.0.1:<port>` and `-name <nonce>` (`clean-slate-<pid>-<seq>`). A non-loopback peer is refused at accept (`PeerNotLoopback`); after the handshake xtask runs `query-name` and refuses a name that is not the nonce (`PeerMismatch`). Exactly one connection is accepted; the listener is dropped immediately after accept, so later connects are refused. Nothing polls: accept blocks on its own thread; a one-shot connect timer or cancel wakes it via a throwaway loopback connection.
+
+**Client (`QmpClient`).** Validates the greeting, logs `[qmp ] <lane> QEMU <ver> (<pkg>) on 127.0.0.1:<port>`, requires QEMU ≥ 2.6.0, negotiates `qmp_capabilities` without OOB, sends command ids `xtask-<n>` and requires the reply id to match (`IdMismatch`). Events before a reply are kept in a ring of 64 (oldest dropped and counted). Lines over 256 KiB are rejected (`LineTooLong`). Every read, write, and accept has a finite deadline (defaults: connect 15 s, greeting 10 s, command 10 s). JSON is parsed by a bounded hand-rolled parser (depth 32); no new dependencies. Errors name their phase or command, for example `QMP no-such-command (id xtask-3) failed: CommandNotFound: …`.
+
+**Input (`InputAction`, `QCode`, `MouseButton`).** Steps use `InputAction::{Key, Button, Rel}`; helpers `InputAction::tap(QCode::A)` and `InputAction::move_rel(dx, dy)`. `QCode` constants only (typos are compile errors). One `input-send-event` carries 1–8 events (`MAX_EVENTS_PER_COMMAND`). The PS/2 mouse emits one packet per command with button state at the end of the command, so press and release must be separate `Input` steps (there is no click helper). Relative Y follows QEMU's screen convention (positive down); the PS/2 packet inverts it. Input lanes pass `machine_extra: Some("vmport=off")` in `VmLaunchConfig` so the PS/2 mouse is the only pointer. `input-send-event` fails while the VM is paused, so QMP-driven lanes never use `-S`.
+
+**Screenshots.** `screendump` is sent without `format`, so QEMU writes binary PPM (P6) on every supported version; xtask parses it (at most 8192×8192 and 192 MiB RGB) and writes PNG itself (stored-deflate zlib with CRC-32 and Adler-32; no external tools). `Screenshot` exposes `width()`, `height()`, `pixel(x, y)`, and `rgb()`.
+
+**Script driver (`QmpScriptDriver`, `ScriptStep`).** `AwaitLine(text)` waits for the next complete serial line containing `text`; one line satisfies at most one await; lines seen before QEMU connects are replayed. Other steps: `Input`, `Screendump { name, check }`, `Command { command, arguments, check }`, `CommandError { command, class }`, `Quit`. Pacing is marker-driven only (no sleeps). On each stdout chunk the driver runs before the marker tracker; `before_teardown` runs after markers pass but before QEMU is stopped, and an unterminated final serial tail counts as a line—so a `Screendump` immediately after the `AwaitLine` for the lane's final marker captures before teardown. On a driver error the acceptance loop stops and reaps QEMU, and on every exit path `ShutdownOnDrop` closes the driver's connection or pending endpoint; failures look like `<lane> QMP script at step i/n (…): …`.
+
+**Artifacts.** Runs write under `target/qmp-artifacts/<lane>/<pid>.<seq>/`; PNG is `<name>.png`. The intermediate PPM is removed after a passing check and kept next to the PNG when the check fails. At most eight run directories per lane (oldest pruned).
+
+**Kernel lanes.** `run_vm_with_driver(features, marker_set, timeout, config, &mut driver)` builds and boots like other acceptance lanes, appends the driver's QEMU args, and returns captured serial output.
+
+**Smoke gate.** `cargo xtask test-qmp-smoke` (alias `qmp-smoke`; Constituent in `scripts/run-tests.sh` and `scripts/run-tests.ps1`) needs only `qemu-system-x86_64` with SeaBIOS (no kernel, no OVMF). xtask builds a 512-byte real-mode boot sector on a 1 MiB raw disk (SeaBIOS computes zero CHS cylinders on smaller disks), paints a blue/red text screen, and echoes every i8042 byte on COM1 as `[QMPFIX] kbd xx` / `[QMPFIX] aux xx`. The script injects taps, pointer motion, and a left press and release—each paced on the echoed bytes—checks the serial trace, exercises `CommandError` for `no-such-command`, validates screenshot pixels and the PNG header, quits, and requires a `SHUTDOWN` event plus a released port. A second run fails its screenshot check on purpose and proves QEMU closed the QMP socket and the port is refused. Success prints `[QMP.smoke] PASS`.
+
+Example lane script (types in `xtask/src/qmp/`):
+
+```rust
+let steps = vec![
+    ScriptStep::AwaitLine("[M10.input] ready"),
+    ScriptStep::Input(InputAction::tap(QCode::A).to_vec()),
+    ScriptStep::AwaitLine("[M10.input] key a down"),
+    ScriptStep::Screendump {
+        name: "frame",
+        check: check_frame,
+    },
+];
+let mut driver = QmpScriptDriver::new("m10-input", steps, artifact_root)?;
+// run_vm_with_driver(features, markers, timeout, config, &mut driver)?;
+```
+
 ### Real hardware tests
 
 A dedicated development/sacrificial machine should be used before Clean-Slate is trusted on important hardware.
