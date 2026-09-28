@@ -165,6 +165,7 @@ $AllTests = [ordered]@{
     "test-m10-nxe"              = @{ Aliases = @("m10-nxe"); Description = "M10 #195 EFER.NXE enforced: CPL3 fetch from an RW+NX page faults 0x15 (constituent)"; Role = "Constituent" }
     "test-m10-port"             = @{ Aliases = @("m10-port", "m10.200"); Description = "M10 #200 service port, capability transfer and work sets (constituent)"; Role = "Constituent" }
     "test-qmp-smoke"            = @{ Aliases = @("qmp-smoke"); Description = "M10 #197 QMP input/screenshot harness smoke (SeaBIOS fixture, no kernel)"; Role = "Constituent" }
+    "test-m10-virtio-modern"    = @{ Aliases = @("m10-virtio-modern"); Description = "M10 #196 modern VirtIO PCI transport: host tests plus MSI-X and INTx QEMU boots (constituent)"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {
