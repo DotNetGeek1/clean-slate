@@ -92,6 +92,161 @@ pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'s
     })
 }
 
+/// One stage of holder-resource release. Both teardown paths run exactly
+/// [`TEARDOWN_HOOK_ORDER`]; subsystems plug into their named slot rather than
+/// adding calls to either path (M10 W5, P4 order).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TeardownHook {
+    IpcEndpoints,
+    ObjectQueues,
+    NetQueues,
+    NetworkCapabilities,
+    NetHolderExitNotice,
+    /// P4 step 1: service ports served or connected by the holder (#200).
+    Port,
+    /// P4 step 2: display presenter binding (#111/#114).
+    DisplayPresenter,
+    /// P4 step 3: raw-input consumer binding (#113).
+    InputConsumer,
+    /// The holder's work set (#200); after every wake source is unbound.
+    WorkSet,
+    /// P4 step 4.
+    RevokeHolderCapabilities,
+    RevokeProcessResource,
+    DiscardBootstrapGrants,
+    /// P4 step 5: shared-buffer mappings (#195); needs the kernel root active.
+    SharedMappings,
+    ThreadReap,
+    /// P4 step 6: the private address space and the process record.
+    AddressSpace,
+}
+
+pub(crate) const TEARDOWN_HOOK_ORDER: [TeardownHook; 15] = [
+    TeardownHook::IpcEndpoints,
+    TeardownHook::ObjectQueues,
+    TeardownHook::NetQueues,
+    TeardownHook::NetworkCapabilities,
+    TeardownHook::NetHolderExitNotice,
+    TeardownHook::Port,
+    TeardownHook::DisplayPresenter,
+    TeardownHook::InputConsumer,
+    TeardownHook::WorkSet,
+    TeardownHook::RevokeHolderCapabilities,
+    TeardownHook::RevokeProcessResource,
+    TeardownHook::DiscardBootstrapGrants,
+    TeardownHook::SharedMappings,
+    TeardownHook::ThreadReap,
+    TeardownHook::AddressSpace,
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TeardownPath {
+    /// `teardown_current_process`: the exiting thread is the caller.
+    Current,
+    /// `teardown_process_by_id`: supervisor-initiated, target is not running.
+    External,
+}
+
+impl TeardownPath {
+    const fn thread_reap_diverged(self) -> &'static str {
+        match self {
+            Self::Current => "scheduler thread cleanup count diverged from teardown snapshot",
+            Self::External => {
+                "scheduler thread cleanup count diverged from external teardown snapshot"
+            }
+        }
+    }
+
+    const fn record_missing(self) -> &'static str {
+        match self {
+            Self::Current => "process missing from registry during resource teardown",
+            Self::External => "process missing from registry during external resource teardown",
+        }
+    }
+
+    const fn address_space_missing(self) -> &'static str {
+        match self {
+            Self::Current => "process address space was missing during teardown",
+            Self::External => "process address space was missing during external teardown",
+        }
+    }
+}
+
+/// Runs [`TEARDOWN_HOOK_ORDER`] for `process_id` with the kernel root active.
+fn run_holder_teardown_hooks(
+    process_id: u64,
+    allocator: &mut PageAllocator,
+    path: TeardownPath,
+) -> Result<(IpcProcessResources, ThreadProcessResources), &'static str> {
+    let holder = HolderId(process_id);
+    let mut released_ipc = None;
+    let mut reaped_threads = None;
+    for hook in TEARDOWN_HOOK_ORDER {
+        match hook {
+            TeardownHook::IpcEndpoints => {
+                released_ipc =
+                    Some(unsafe { endpoint_table_mut().teardown_resources_for_pid(process_id)? });
+            }
+            TeardownHook::ObjectQueues => {
+                recover_object_queue_for_service_holder_exit(holder);
+                reclaim_object_requests_for_holder(holder);
+            }
+            TeardownHook::NetQueues => {
+                recover_net_queue_for_service_holder_exit(holder.0);
+                reclaim_net_requests_for_holder(holder.0);
+            }
+            TeardownHook::NetworkCapabilities => {
+                crate::capability::network::on_holder_exit(holder);
+            }
+            TeardownHook::NetHolderExitNotice => {
+                notify_holder_exit_for_process(holder.0);
+            }
+            TeardownHook::Port
+            | TeardownHook::DisplayPresenter
+            | TeardownHook::InputConsumer
+            | TeardownHook::WorkSet
+            | TeardownHook::SharedMappings => {}
+            TeardownHook::RevokeHolderCapabilities => {
+                revoke_for_holder(holder);
+            }
+            TeardownHook::RevokeProcessResource => {
+                revoke_for_process_resource(process_id);
+            }
+            TeardownHook::DiscardBootstrapGrants => {
+                discard_bootstrap_grants_for_holder(holder);
+            }
+            TeardownHook::ThreadReap => {
+                reaped_threads = Some(without_interrupts(|| unsafe {
+                    let scheduler = scheduler_mut();
+                    let resources = scheduler.resources_for_process(process_id);
+                    let reaped = scheduler.reap_threads_for_process(process_id)?;
+                    if reaped != resources.threads {
+                        return Err(path.thread_reap_diverged());
+                    }
+                    Ok::<ThreadProcessResources, &'static str>(resources)
+                })?);
+            }
+            TeardownHook::AddressSpace => {
+                let process_record = unsafe {
+                    process_registry_mut()
+                        .get_mut(process_id)
+                        .ok_or(path.record_missing())?
+                };
+                let address_space = process_record
+                    .resource_domain
+                    .take_address_space()
+                    .ok_or(path.address_space_missing())?;
+                destroy_process_address_space(&address_space, allocator)?;
+                reap_process_record(process_record)?;
+            }
+        }
+    }
+    Ok((
+        released_ipc.ok_or("teardown hook order omitted IPC endpoint release")?,
+        reaped_threads.ok_or("teardown hook order omitted thread reap")?,
+    ))
+}
+
 #[allow(dead_code)]
 pub(crate) fn teardown_current_process(
     allocator: &mut PageAllocator,
@@ -169,40 +324,8 @@ pub(crate) fn teardown_current_process(
     linux_fd::release_stale_registry_slots(&registry_live);
     #[cfg(feature = "m8-linux-image")]
     crate::process::linux_proc::table::table_mut().retire_stale_live_slots(&registry_live);
-    let released_ipc: IpcProcessResources =
-        unsafe { endpoint_table_mut().teardown_resources_for_pid(process_id)? };
-    let holder = HolderId(process_id);
-    recover_object_queue_for_service_holder_exit(holder);
-    reclaim_object_requests_for_holder(holder);
-    recover_net_queue_for_service_holder_exit(holder.0);
-    reclaim_net_requests_for_holder(holder.0);
-    crate::capability::network::on_holder_exit(holder);
-    notify_holder_exit_for_process(holder.0);
-    revoke_for_holder(holder);
-    revoke_for_process_resource(process_id);
-    discard_bootstrap_grants_for_holder(holder);
-    let reaped_threads: ThreadProcessResources = without_interrupts(|| unsafe {
-        let scheduler = scheduler_mut();
-        let resources = scheduler.resources_for_process(process_id);
-        let reaped_threads = scheduler.reap_threads_for_process(process_id)?;
-        if reaped_threads != resources.threads {
-            return Err("scheduler thread cleanup count diverged from teardown snapshot");
-        }
-        Ok::<ThreadProcessResources, &'static str>(resources)
-    })?;
-    {
-        let process_record = unsafe {
-            process_registry_mut()
-                .get_mut(process_id)
-                .ok_or("process missing from registry during resource teardown")?
-        };
-        let address_space = process_record
-            .resource_domain
-            .take_address_space()
-            .ok_or("process address space was missing during teardown")?;
-        destroy_process_address_space(&address_space, allocator)?;
-        reap_process_record(process_record)?;
-    }
+    let (released_ipc, reaped_threads) =
+        run_holder_teardown_hooks(process_id, allocator, TeardownPath::Current)?;
     if next_stack_pointer.is_some() {
         prepare_current_scheduler_thread_dispatch()?;
     }
@@ -283,51 +406,10 @@ pub(crate) fn teardown_process_by_id(
     let caller_root = current_root_frame_address();
     let released_resources = resource_snapshot(process_id)?;
     activate_address_space_root(kernel_root_frame);
-    let teardown_result = (|| {
-        if let Some(generation) = live_instance_generation(process_id) {
-            linux_fd::release_for_process(process_id, generation);
-        }
-        let released_ipc: IpcProcessResources =
-            unsafe { endpoint_table_mut().teardown_resources_for_pid(process_id)? };
-        let holder = HolderId(process_id);
-        recover_object_queue_for_service_holder_exit(holder);
-        reclaim_object_requests_for_holder(holder);
-        recover_net_queue_for_service_holder_exit(holder.0);
-        reclaim_net_requests_for_holder(holder.0);
-        crate::capability::network::on_holder_exit(holder);
-        notify_holder_exit_for_process(holder.0);
-        revoke_for_holder(holder);
-        revoke_for_process_resource(process_id);
-        discard_bootstrap_grants_for_holder(holder);
-        let reaped_threads: ThreadProcessResources = without_interrupts(|| unsafe {
-            let scheduler = scheduler_mut();
-            let resources = scheduler.resources_for_process(process_id);
-            let reaped_threads = scheduler.reap_threads_for_process(process_id)?;
-            if reaped_threads != resources.threads {
-                return Err(
-                    "scheduler thread cleanup count diverged from external teardown snapshot",
-                );
-            }
-            Ok::<ThreadProcessResources, &'static str>(resources)
-        })?;
-        {
-            let process_record = unsafe {
-                process_registry_mut()
-                    .get_mut(process_id)
-                    .ok_or("process missing from registry during external resource teardown")?
-            };
-            let address_space = process_record
-                .resource_domain
-                .take_address_space()
-                .ok_or("process address space was missing during external teardown")?;
-            destroy_process_address_space(&address_space, allocator)?;
-            reap_process_record(process_record)?;
-        }
-        Ok::<(IpcProcessResources, ThreadProcessResources), &'static str>((
-            released_ipc,
-            reaped_threads,
-        ))
-    })();
+    if let Some(generation) = live_instance_generation(process_id) {
+        linux_fd::release_for_process(process_id, generation);
+    }
+    let teardown_result = run_holder_teardown_hooks(process_id, allocator, TeardownPath::External);
     activate_address_space_root(caller_root);
     let (released_ipc, reaped_threads) = teardown_result?;
     unsafe { process_registry_mut().release_reaped(process_id)? };
@@ -349,4 +431,86 @@ pub(crate) fn teardown_process_by_id(
         released_resources,
         next_stack_pointer: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TeardownHook, TEARDOWN_HOOK_ORDER};
+
+    fn position(hook: TeardownHook) -> usize {
+        TEARDOWN_HOOK_ORDER
+            .iter()
+            .position(|candidate| *candidate == hook)
+            .expect("every teardown hook has a slot in the shared order")
+    }
+
+    #[test]
+    fn teardown_hook_order_is_pinned() {
+        assert_eq!(
+            TEARDOWN_HOOK_ORDER,
+            [
+                TeardownHook::IpcEndpoints,
+                TeardownHook::ObjectQueues,
+                TeardownHook::NetQueues,
+                TeardownHook::NetworkCapabilities,
+                TeardownHook::NetHolderExitNotice,
+                TeardownHook::Port,
+                TeardownHook::DisplayPresenter,
+                TeardownHook::InputConsumer,
+                TeardownHook::WorkSet,
+                TeardownHook::RevokeHolderCapabilities,
+                TeardownHook::RevokeProcessResource,
+                TeardownHook::DiscardBootstrapGrants,
+                TeardownHook::SharedMappings,
+                TeardownHook::ThreadReap,
+                TeardownHook::AddressSpace,
+            ]
+        );
+    }
+
+    #[test]
+    fn teardown_hooks_follow_p4_order_once_each() {
+        for (index, hook) in TEARDOWN_HOOK_ORDER.iter().enumerate() {
+            assert_eq!(position(*hook), index, "{hook:?} appears more than once");
+        }
+        let p4 = [
+            TeardownHook::Port,
+            TeardownHook::DisplayPresenter,
+            TeardownHook::InputConsumer,
+            TeardownHook::RevokeHolderCapabilities,
+            TeardownHook::SharedMappings,
+            TeardownHook::AddressSpace,
+        ];
+        for pair in p4.windows(2) {
+            assert!(position(pair[0]) < position(pair[1]), "{pair:?}");
+        }
+        assert!(position(TeardownHook::InputConsumer) < position(TeardownHook::WorkSet));
+        assert!(position(TeardownHook::WorkSet) < position(TeardownHook::RevokeHolderCapabilities));
+        assert!(position(TeardownHook::ThreadReap) < position(TeardownHook::AddressSpace));
+    }
+
+    #[test]
+    fn both_teardown_paths_share_one_hook_sequence() {
+        let source = include_str!("domain.rs");
+        let production = source
+            .split("mod tests {")
+            .next()
+            .expect("domain.rs has a production section");
+        assert_eq!(
+            production
+                .matches("run_holder_teardown_hooks(process_id, allocator, TeardownPath::")
+                .count(),
+            2
+        );
+        for call in [
+            "endpoint_table_mut().teardown_resources_for_pid(",
+            "notify_holder_exit_for_process(",
+            "revoke_for_holder(holder)",
+            "discard_bootstrap_grants_for_holder(holder)",
+            "reap_threads_for_process(",
+            "destroy_process_address_space(&address_space",
+        ] {
+            assert_eq!(production.matches(call).count(), 1, "{call}");
+        }
+    }
 }
