@@ -10,7 +10,7 @@ pub const GFX_SHELL_BIT: u32 = 1 << 15;
 pub const GFX_OVERLAY_BIT: u32 = 1 << 16;
 
 /// Role authority derived only from the raw rights bits the port envelope reports for the
-/// caller's `Graphics` capability (planned, #NEW); never from request fields.
+/// caller's `Graphics` capability (planned, #200); never from request fields.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RoleGrant {
     connect: bool,
