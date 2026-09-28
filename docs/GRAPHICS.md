@@ -72,7 +72,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 | 1 | #200 | port and work-set ABI in `native-abi` (`port.rs`, `work_set.rs`, `status.rs`); class-agnostic port engine in `port/` (`clean-slate-port`, feature `fake` for host tests); `kernel/src/service/port.rs`, `kernel/src/service/port_syscall.rs`, `kernel/src/sched/work_set.rs`; syscalls 17 and 20; capability transfer on send; gate `test-m10-port` |
 | 1 | #111 | `raster/` (`clean-slate-raster`); `kernel/src/boot/gop.rs`; `kernel/src/device/display/{mod.rs, gop.rs}`; `kernel/src/service/display_syscall.rs`; syscall 18; gate `test-m10-framebuffer` (all planned) |
 | 1 | #113 | `kernel/src/device/input/{mod.rs, i8042.rs}`; `kernel/src/service/input_syscall.rs`; syscall 19; scancode to HID usage table in `graphics::input` (all planned) |
-| 1 | #196 | `kernel/src/device/virtio/{modern.rs, virtqueue.rs}` (planned) |
+| 1 | #196 | `kernel/src/device/virtio/{modern.rs, modern/, virtqueue.rs, dma.rs}`; `kernel/src/sched/timeout.rs` (W3); `cargo xtask test-m10-virtio-modern` |
 | 1 | #197 | `xtask/src/qmp/` (QMP endpoint, client, input and screendump helpers, PPM to PNG, marker-paced script driver); `AcceptanceDriver` hooks in `xtask/src/main.rs`; gate `test-qmp-smoke` |
 | 1–3 | #116 | `ui/` (`clean-slate-ui`), `desktop-shell/`, `docs/design/DESIGN-SYSTEM.md` (planned). Token and documentation work may start in Wave 1 |
 | 2 | #112 | `compositor/` (`clean-slate-compositor`); P5 launch policy, grant policy (`kernel/src/capability/graphics.rs`) and sizing (planned) |
