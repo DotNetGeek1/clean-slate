@@ -2,6 +2,7 @@
 
 use super::error::ProtocolError;
 use super::event::Event;
+use super::frame_spec::{EVENT_SPECS, REQUEST_SPECS};
 use super::request::{Request, DAMAGE_RECTS_PER_FRAME, REGION_RECTS_PER_FRAME};
 use super::*;
 use crate::geometry::{BufferRect, Fixed24_8, Rect, Scale120, Size};
@@ -310,91 +311,167 @@ fn all_events_round_trip() {
     round_trip_event(Event::InputReset);
 }
 
+/// Hand-derived from §2.3 / §3.3 (surface slot 1 gen 1 → `0x0101`, window slot 2 gen 1 → `0x0102`).
+const GOLDEN_HELLO: [u8; 64] = {
+    let mut b = [0u8; 64];
+    b[0] = 0x01;
+    b[4] = 0x01;
+    b[5] = 0x00;
+    b[6] = 0xA5;
+    b[7] = 0xA5;
+    b[12] = 0x01;
+    b
+};
+
+const GOLDEN_ATTACH: [u8; 64] = {
+    let mut b = [0u8; 64];
+    b[0] = 0x23;
+    b[4] = 0x01;
+    b[5] = 0x00;
+    b[6] = 0xA5;
+    b[7] = 0xA5;
+    b[8] = 0x01;
+    b[9] = 0x01;
+    b[16] = 0x78;
+    b
+};
+
+const GOLDEN_SET_OPAQUE_REGION: [u8; 64] = {
+    let mut b = [0u8; 64];
+    b[0] = 0x25;
+    b[4] = 0x01;
+    b[5] = 0x00;
+    b[6] = 0xA5;
+    b[7] = 0xA5;
+    b[8] = 0x01;
+    b[9] = 0x01;
+    b[12] = 3;
+    b[13] = 1;
+    b[16] = 1;
+    b[20] = 2;
+    b[24] = 3;
+    b[28] = 4;
+    b[32] = 5;
+    b[36] = 6;
+    b[40] = 7;
+    b[44] = 8;
+    b[48] = 9;
+    b[52] = 10;
+    b[56] = 11;
+    b[60] = 12;
+    b
+};
+
+const GOLDEN_CONFIGURE: [u8; 64] = {
+    let mut b = [0u8; 64];
+    b[0] = 0x31;
+    b[1] = 0x80;
+    b[8] = 0x02;
+    b[9] = 0x01;
+    b[12] = 99;
+    b[16] = 0x80;
+    b[17] = 0x02;
+    b[20] = 0xE0;
+    b[21] = 0x01;
+    b[24] = 0x78;
+    b[26] = 1;
+    b
+};
+
+const GOLDEN_KEY: [u8; 64] = {
+    let mut b = [0u8; 64];
+    b[0] = 0x41;
+    b[1] = 0x80;
+    b[12] = 42;
+    b[16] = 100;
+    b[24] = 0x04;
+    b[26] = 1;
+    b
+};
+
 #[test]
 fn golden_frames() {
-    let hello = Request::Hello {
-        version: ProtocolVersion { major: 1, minor: 0 },
-        features: Features(0),
-    }
-    .encode(TAG)
-    .unwrap();
-    let mut expected = [0u8; 64];
-    expected[0] = 0x01;
-    expected[4..8].copy_from_slice(&TAG.to_le_bytes());
-    expected[12] = 0x01;
-    assert_eq!(hello, expected);
-
-    let attach = Request::Attach {
-        surface: surf(1),
-        buffer: None,
-        buffer_scale: Scale120::ONE,
-    }
-    .encode(TAG)
-    .unwrap();
-    assert_eq!(read_u16_le(&attach, 0), OP_ATTACH);
-    assert_eq!(read_u16_le(&attach, 16), 120);
-    assert_eq!(attach[4..8], TAG.to_le_bytes());
-
-    let region = Request::SetOpaqueRegion {
-        surface: surf(1),
-        count: 3,
-        replace: true,
-        rects: [
-            Rect {
-                x: 1,
-                y: 2,
-                width: 3,
-                height: 4,
+    assert_eq!(Request::decode(&GOLDEN_HELLO).unwrap().tag, TAG);
+    assert_eq!(
+        Request::decode(&GOLDEN_HELLO).unwrap().message,
+        Request::Hello {
+            version: ProtocolVersion { major: 1, minor: 0 },
+            features: Features(0),
+        }
+    );
+    assert_eq!(
+        Request::decode(&GOLDEN_ATTACH).unwrap().message,
+        Request::Attach {
+            surface: surf(1),
+            buffer: None,
+            buffer_scale: Scale120::ONE,
+        }
+    );
+    assert_eq!(
+        Request::decode(&GOLDEN_SET_OPAQUE_REGION).unwrap().message,
+        Request::SetOpaqueRegion {
+            surface: surf(1),
+            count: 3,
+            replace: true,
+            rects: [
+                Rect {
+                    x: 1,
+                    y: 2,
+                    width: 3,
+                    height: 4,
+                },
+                Rect {
+                    x: 5,
+                    y: 6,
+                    width: 7,
+                    height: 8,
+                },
+                Rect {
+                    x: 9,
+                    y: 10,
+                    width: 11,
+                    height: 12,
+                },
+            ],
+        }
+    );
+    assert_eq!(
+        Event::decode(&GOLDEN_CONFIGURE).unwrap().message,
+        Event::Configure {
+            window: win(1),
+            serial: Serial(99),
+            size: Size {
+                width: 640,
+                height: 480,
             },
-            Rect {
-                x: 5,
-                y: 6,
-                width: 7,
-                height: 8,
+            scale: Scale120::ONE,
+            decoration: DecorationMode::Server,
+            states: WindowStates::from_bits(0).unwrap(),
+            bounds: Size {
+                width: 0,
+                height: 0,
             },
-            Rect {
-                x: 9,
-                y: 10,
-                width: 11,
-                height: 12,
-            },
-        ],
-    }
-    .encode(TAG)
-    .unwrap();
-    assert_eq!(region[12], 3);
-    assert_eq!(region[13], 1);
+        }
+    );
+    assert_eq!(
+        Event::decode(&GOLDEN_KEY).unwrap().message,
+        Event::Key {
+            serial: Serial(42),
+            time_ns: 100,
+            usage: KEY_A,
+            state: KeyState::Pressed,
+            modifiers: Modifiers::from_bits(0).unwrap(),
+        }
+    );
+}
 
-    let configure = Event::Configure {
-        window: win(1),
-        serial: Serial(99),
-        size: Size {
-            width: 640,
-            height: 480,
-        },
-        scale: Scale120::ONE,
-        decoration: DecorationMode::Server,
-        states: WindowStates::EMPTY,
-        bounds: Size {
-            width: 0,
-            height: 0,
-        },
-    }
-    .encode(0)
-    .unwrap();
-    assert_eq!(read_u32_le(&configure, 12), 99);
-
-    let key = Event::Key {
-        serial: Serial(42),
-        time_ns: 100,
-        usage: KEY_A,
-        state: KeyState::Pressed,
-        modifiers: Modifiers::from_bits(0).unwrap(),
-    }
-    .encode(0)
-    .unwrap();
-    assert_eq!(read_u32_le(&key, 12), 42);
-    assert_eq!(read_u16_le(&key, 24), 0x04);
+#[test]
+fn features_contains_all_bits_semantics() {
+    let subset = Features(0x05);
+    assert!(Features(0x07).contains(subset));
+    assert!(!Features(0x04).contains(subset));
+    assert!(Features(0).is_empty());
+    assert!(!Features(1).is_empty());
 }
 
 #[test]
@@ -661,36 +738,29 @@ fn request_object_rules() {
 }
 
 #[test]
-fn request_pad_bytes_table() {
-    const PADS: &[(u16, &[(usize, usize)])] = &[
-        (OP_HELLO, &[(24, 64)]),
-        (OP_REGISTER_BUFFER, &[(25, 64)]),
-        (OP_UNREGISTER_BUFFER, &[(12, 64)]),
-        (OP_CREATE_SURFACE, &[(12, 64)]),
-        (OP_DESTROY_SURFACE, &[(12, 64)]),
-        (OP_ASSIGN_ROLE, &[(13, 16), (20, 64)]),
-        (OP_ATTACH, &[(18, 64)]),
-        (OP_DAMAGE, &[(13, 16), (56, 64)]),
-        (OP_SET_OPAQUE_REGION, &[(14, 16)]),
-        (OP_COMMIT, &[(14, 16), (20, 64)]),
-        (OP_CREATE_WINDOW, &[(12, 64)]),
-        (OP_DESTROY_WINDOW, &[(12, 64)]),
-        (OP_SET_TITLE, &[(53, 64)]),
-        (OP_SET_SIZE_LIMITS, &[(28, 64)]),
-        (OP_SHOW, &[(12, 64)]),
-        (OP_HIDE, &[(12, 64)]),
-        (OP_BEGIN_MOVE, &[(16, 64)]),
-        (OP_BEGIN_RESIZE, &[(17, 64)]),
-        (OP_ACK_CONFIGURE, &[(16, 64)]),
-    ];
-    for (op, ranges) in PADS {
-        let frame = canonical_request_for_opcode(*op);
-        for &(start, end) in *ranges {
+fn pad_byte_matrix_all_opcodes() {
+    for spec in REQUEST_SPECS {
+        let frame = canonical_request_for_opcode(spec.opcode);
+        for &(start, end) in spec.pads {
             for off in start..end {
-                mutate_decode_request(frame, off, 1, ProtocolError::ReservedBitsSet);
+                mutate_decode_request(frame, off as usize, 1, ProtocolError::ReservedBitsSet);
             }
         }
     }
+    for spec in EVENT_SPECS {
+        let frame = canonical_event_for_opcode(spec.opcode);
+        for &(start, end) in spec.pads {
+            for off in start..end {
+                mutate_decode_event(frame, off as usize, 1, ProtocolError::ReservedBitsSet);
+            }
+        }
+    }
+}
+
+fn mutate_decode_event(mut frame: [u8; FRAME_BYTES], off: usize, val: u8, code: ProtocolError) {
+    frame[off] = val;
+    let err = Event::decode(&frame).unwrap_err();
+    assert_eq!(err.code, code);
 }
 
 fn canonical_request_for_opcode(op: u16) -> [u8; FRAME_BYTES] {
@@ -788,6 +858,126 @@ fn canonical_request_for_opcode(op: u16) -> [u8; FRAME_BYTES] {
         _ => panic!("opcode"),
     };
     req.encode(TAG).unwrap()
+}
+
+fn canonical_event_for_opcode(op: u16) -> [u8; FRAME_BYTES] {
+    let ev = match op {
+        OP_WELCOME => Event::Welcome {
+            version: SERVER_VERSION,
+            features: Features(0),
+            output: OutputInfo {
+                id: OutputId::new(0, 1).unwrap(),
+                mode: REFERENCE_MODE,
+                logical_size: Size {
+                    width: 1280,
+                    height: 800,
+                },
+            },
+        },
+        OP_ERROR => Event::Error {
+            object: 0,
+            request_opcode: OP_HELLO,
+            code: ProtocolError::InvalidObject,
+        },
+        OP_BUFFER_REGISTERED => Event::BufferRegistered { buffer: buf(1) },
+        OP_BUFFER_RELEASED => Event::BufferReleased { buffer: buf(1) },
+        OP_BUFFER_UNREGISTERED => Event::BufferUnregistered { buffer: buf(1) },
+        OP_SURFACE_CREATED => Event::SurfaceCreated { surface: surf(1) },
+        OP_FRAME_DONE => Event::FrameDone {
+            surface: surf(1),
+            presented_ns: 1,
+            output_seq: 2,
+        },
+        OP_WINDOW_CREATED => Event::WindowCreated { window: win(1) },
+        OP_CONFIGURE => Event::Configure {
+            window: win(1),
+            serial: Serial(1),
+            size: Size {
+                width: 100,
+                height: 100,
+            },
+            scale: Scale120::ONE,
+            decoration: DecorationMode::Server,
+            states: WindowStates::from_bits(0).unwrap(),
+            bounds: Size {
+                width: 0,
+                height: 0,
+            },
+        },
+        OP_CLOSE_REQUESTED => Event::CloseRequested { window: win(1) },
+        OP_KEYBOARD_FOCUS => Event::KeyboardFocus { surface: None },
+        OP_KEY => Event::Key {
+            serial: Serial(1),
+            time_ns: 0,
+            usage: KeyUsage(0x04),
+            state: KeyState::Pressed,
+            modifiers: Modifiers::from_bits(0).unwrap(),
+        },
+        OP_MODIFIERS_CHANGED => Event::ModifiersChanged {
+            modifiers: Modifiers::from_bits(0).unwrap(),
+        },
+        OP_POINTER_ENTER => Event::PointerEnter {
+            serial: Serial(1),
+            surface: surf(1),
+            x: Fixed24_8(0),
+            y: Fixed24_8(0),
+        },
+        OP_POINTER_LEAVE => Event::PointerLeave {
+            serial: Serial(1),
+            surface: surf(1),
+        },
+        OP_POINTER_MOTION => Event::PointerMotion {
+            time_ns: 0,
+            x: Fixed24_8(0),
+            y: Fixed24_8(0),
+        },
+        OP_POINTER_BUTTON => Event::PointerButton {
+            serial: Serial(1),
+            time_ns: 0,
+            button: PointerButton::Left,
+            state: KeyState::Pressed,
+        },
+        OP_POINTER_AXIS => Event::PointerAxis {
+            time_ns: 0,
+            vertical: AxisValue120(0),
+            horizontal: AxisValue120(0),
+        },
+        OP_INPUT_RESET => Event::InputReset,
+        _ => panic!("opcode"),
+    };
+    ev.encode(0).unwrap()
+}
+
+#[test]
+fn decode_order_object_before_static_pad() {
+    let mut f = Request::DestroySurface { surface: surf(1) }
+        .encode(TAG)
+        .unwrap();
+    write_u32_le(&mut f, 8, 0);
+    f[12] = 1;
+    assert_eq!(
+        Request::decode(&f).unwrap_err().code,
+        ProtocolError::InvalidObject
+    );
+    let mut g = Request::SetOpaqueRegion {
+        surface: surf(1),
+        count: 1,
+        replace: false,
+        rects: [Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }; REGION_RECTS_PER_FRAME],
+    }
+    .encode(TAG)
+    .unwrap();
+    g[12] = 4;
+    g[14] = 1;
+    assert_eq!(
+        Request::decode(&g).unwrap_err().code,
+        ProtocolError::ReservedBitsSet
+    );
 }
 
 #[test]

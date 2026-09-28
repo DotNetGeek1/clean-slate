@@ -1,7 +1,7 @@
 //! Compositor → client events (§3).
 
 use crate::geometry::{Fixed24_8, Scale120, Size};
-use crate::ids::{ClientBufferId, OutputId, Serial, SurfaceId, WindowId};
+use crate::ids::{ClientBufferId, ObjectId, OutputId, Serial, SurfaceId, WindowId};
 use crate::input::{AxisValue120, KeyState, KeyUsage, Modifiers, PointerButton};
 use crate::mode::{DisplayMode, OutputInfo};
 use crate::pixel::PixelFormat;
@@ -131,7 +131,6 @@ impl Event {
                 features,
                 output,
             } => {
-                object_must_be_zero(0)?;
                 Self::encode_welcome_body(&mut out, version, features, output)?;
             }
             Self::Error {
@@ -198,11 +197,9 @@ impl Event {
                 state,
                 modifiers,
             } => {
-                object_must_be_zero(0)?;
                 Self::encode_key_body(&mut out, serial, time_ns, usage, state, modifiers)?;
             }
             Self::ModifiersChanged { modifiers } => {
-                object_must_be_zero(0)?;
                 Self::encode_modifiers_body(&mut out, modifiers)?;
             }
             Self::PointerEnter {
@@ -223,7 +220,6 @@ impl Event {
                 write_u32_le(&mut out, 12, serial.0);
             }
             Self::PointerMotion { time_ns, x, y } => {
-                object_must_be_zero(0)?;
                 write_u64_le(&mut out, 12, time_ns);
                 write_i32_le(&mut out, 20, x.0);
                 write_i32_le(&mut out, 24, y.0);
@@ -234,7 +230,6 @@ impl Event {
                 button,
                 state,
             } => {
-                object_must_be_zero(0)?;
                 serial_required_event(serial.0)?;
                 write_u32_le(&mut out, 12, serial.0);
                 write_u64_le(&mut out, 16, time_ns);
@@ -246,14 +241,11 @@ impl Event {
                 vertical,
                 horizontal,
             } => {
-                object_must_be_zero(0)?;
                 write_u64_le(&mut out, 12, time_ns);
                 write_i32_le(&mut out, 20, vertical.0);
                 write_i32_le(&mut out, 24, horizontal.0);
             }
-            Self::InputReset => {
-                object_must_be_zero(0)?;
-            }
+            Self::InputReset => {}
         }
         Ok(out)
     }
@@ -264,18 +256,11 @@ impl Event {
         let opcode = read_u16_le(bytes, 0);
         let tag = read_u32_le(bytes, 4);
         let object = read_u32_le(bytes, 8);
-        if !is_event_opcode(opcode) {
-            return Err(decode_error(ProtocolError::UnknownOpcode, bytes));
-        }
+        run_decode_prelude(bytes, EVENT_SPECS, opcode, object)
+            .map_err(|c| decode_error(c, bytes))?;
         let message = match opcode {
-            OP_WELCOME => {
-                object_must_be_zero(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 41, 42).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 56, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::decode_welcome_body(bytes).map_err(|c| decode_error(c, bytes))?
-            }
+            OP_WELCOME => Self::decode_welcome_body(bytes).map_err(|c| decode_error(c, bytes))?,
             OP_ERROR => {
-                check_range_zero(bytes, 16, 64).map_err(|c| decode_error(c, bytes))?;
                 let code_raw = read_u16_le(bytes, 12);
                 let code = ProtocolError::from_u16(code_raw)
                     .ok_or(ProtocolError::MalformedFrame)
@@ -286,145 +271,77 @@ impl Event {
                     code,
                 }
             }
-            OP_BUFFER_REGISTERED => {
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                let id = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                Self::BufferRegistered {
-                    buffer: ClientBufferId(id),
-                }
-            }
-            OP_BUFFER_RELEASED => {
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                let id = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                Self::BufferReleased {
-                    buffer: ClientBufferId(id),
-                }
-            }
-            OP_BUFFER_UNREGISTERED => {
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                let id = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                Self::BufferUnregistered {
-                    buffer: ClientBufferId(id),
-                }
-            }
-            OP_SURFACE_CREATED => {
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                let id = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                Self::SurfaceCreated {
-                    surface: SurfaceId(id),
-                }
-            }
-            OP_FRAME_DONE => {
-                let surface = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 28, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::FrameDone {
-                    surface: SurfaceId(surface),
-                    presented_ns: read_u64_le(bytes, 12),
-                    output_seq: read_u64_le(bytes, 20),
-                }
-            }
-            OP_WINDOW_CREATED => {
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                let id = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                Self::WindowCreated {
-                    window: WindowId(id),
-                }
-            }
-            OP_CONFIGURE => {
-                let window = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 27, 28).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 40, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::decode_configure_body(bytes, WindowId(window))
+            OP_BUFFER_REGISTERED => Self::BufferRegistered {
+                buffer: ClientBufferId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            },
+            OP_BUFFER_RELEASED => Self::BufferReleased {
+                buffer: ClientBufferId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            },
+            OP_BUFFER_UNREGISTERED => Self::BufferUnregistered {
+                buffer: ClientBufferId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            },
+            OP_SURFACE_CREATED => Self::SurfaceCreated {
+                surface: SurfaceId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            },
+            OP_FRAME_DONE => Self::FrameDone {
+                surface: SurfaceId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+                presented_ns: read_u64_le(bytes, 12),
+                output_seq: read_u64_le(bytes, 20),
+            },
+            OP_WINDOW_CREATED => Self::WindowCreated {
+                window: WindowId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            },
+            OP_CONFIGURE => Self::decode_configure_body(
+                bytes,
+                WindowId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            )
+            .map_err(|c| decode_error(c, bytes))?,
+            OP_CLOSE_REQUESTED => Self::CloseRequested {
+                window: WindowId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            },
+            OP_KEYBOARD_FOCUS => Self::KeyboardFocus {
+                surface: decode_object_optional(object)
                     .map_err(|c| decode_error(c, bytes))?
-            }
-            OP_CLOSE_REQUESTED => {
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                let id = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                Self::CloseRequested {
-                    window: WindowId(id),
-                }
-            }
-            OP_KEYBOARD_FOCUS => {
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                let surface = decode_object_optional(object)
-                    .map_err(|c| decode_error(c, bytes))?
-                    .map(SurfaceId);
-                Self::KeyboardFocus { surface }
-            }
-            OP_KEY => {
-                object_must_be_zero(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 27, 28).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 30, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::decode_key_body(bytes).map_err(|c| decode_error(c, bytes))?
-            }
+                    .map(SurfaceId),
+            },
+            OP_KEY => Self::decode_key_body(bytes).map_err(|c| decode_error(c, bytes))?,
             OP_MODIFIERS_CHANGED => {
-                object_must_be_zero(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 14, 64).map_err(|c| decode_error(c, bytes))?;
                 Self::decode_modifiers_body(bytes).map_err(|c| decode_error(c, bytes))?
             }
-            OP_POINTER_ENTER => {
-                let surface = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 24, 64).map_err(|c| decode_error(c, bytes))?;
-                let serial = serial_required_event(read_u32_le(bytes, 12))
-                    .map_err(|c| decode_error(c, bytes))?;
-                Self::PointerEnter {
-                    serial,
-                    surface: SurfaceId(surface),
-                    x: Fixed24_8(read_i32_le(bytes, 16)),
-                    y: Fixed24_8(read_i32_le(bytes, 20)),
-                }
-            }
-            OP_POINTER_LEAVE => {
-                let surface = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 16, 64).map_err(|c| decode_error(c, bytes))?;
-                let serial = serial_required_event(read_u32_le(bytes, 12))
-                    .map_err(|c| decode_error(c, bytes))?;
-                Self::PointerLeave {
-                    serial,
-                    surface: SurfaceId(surface),
-                }
-            }
-            OP_POINTER_MOTION => {
-                object_must_be_zero(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 28, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::PointerMotion {
-                    time_ns: read_u64_le(bytes, 12),
-                    x: Fixed24_8(read_i32_le(bytes, 20)),
-                    y: Fixed24_8(read_i32_le(bytes, 24)),
-                }
-            }
-            OP_POINTER_BUTTON => {
-                object_must_be_zero(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 27, 64).map_err(|c| decode_error(c, bytes))?;
-                let serial = serial_required_event(read_u32_le(bytes, 12))
-                    .map_err(|c| decode_error(c, bytes))?;
-                let button = PointerButton::from_u16(read_u16_le(bytes, 24))
+            OP_POINTER_ENTER => Self::PointerEnter {
+                serial: serial_required_event(read_u32_le(bytes, 12))
+                    .map_err(|c| decode_error(c, bytes))?,
+                surface: SurfaceId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+                x: Fixed24_8(read_i32_le(bytes, 16)),
+                y: Fixed24_8(read_i32_le(bytes, 20)),
+            },
+            OP_POINTER_LEAVE => Self::PointerLeave {
+                serial: serial_required_event(read_u32_le(bytes, 12))
+                    .map_err(|c| decode_error(c, bytes))?,
+                surface: SurfaceId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            },
+            OP_POINTER_MOTION => Self::PointerMotion {
+                time_ns: read_u64_le(bytes, 12),
+                x: Fixed24_8(read_i32_le(bytes, 20)),
+                y: Fixed24_8(read_i32_le(bytes, 24)),
+            },
+            OP_POINTER_BUTTON => Self::PointerButton {
+                serial: serial_required_event(read_u32_le(bytes, 12))
+                    .map_err(|c| decode_error(c, bytes))?,
+                time_ns: read_u64_le(bytes, 16),
+                button: PointerButton::from_u16(read_u16_le(bytes, 24))
                     .ok_or(ProtocolError::MalformedFrame)
-                    .map_err(|c| decode_error(c, bytes))?;
-                let state = KeyState::from_u8(bytes[26])
+                    .map_err(|c| decode_error(c, bytes))?,
+                state: KeyState::from_u8(bytes[26])
                     .ok_or(ProtocolError::MalformedFrame)
-                    .map_err(|c| decode_error(c, bytes))?;
-                Self::PointerButton {
-                    serial,
-                    time_ns: read_u64_le(bytes, 16),
-                    button,
-                    state,
-                }
-            }
-            OP_INPUT_RESET => {
-                object_must_be_zero(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::InputReset
-            }
-            OP_POINTER_AXIS => {
-                object_must_be_zero(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 28, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::PointerAxis {
-                    time_ns: read_u64_le(bytes, 12),
-                    vertical: AxisValue120(read_i32_le(bytes, 20)),
-                    horizontal: AxisValue120(read_i32_le(bytes, 24)),
-                }
-            }
+                    .map_err(|c| decode_error(c, bytes))?,
+            },
+            OP_POINTER_AXIS => Self::PointerAxis {
+                time_ns: read_u64_le(bytes, 12),
+                vertical: AxisValue120(read_i32_le(bytes, 20)),
+                horizontal: AxisValue120(read_i32_le(bytes, 24)),
+            },
+            OP_INPUT_RESET => Self::InputReset,
             _ => return Err(decode_error(ProtocolError::UnknownOpcode, bytes)),
         };
         Ok(Tagged { tag, message })
@@ -607,4 +524,8 @@ impl Event {
             Modifiers::from_bits(read_u16_le(bytes, 12)).ok_or(ProtocolError::ReservedBitsSet)?;
         Ok(Self::ModifiersChanged { modifiers })
     }
+}
+
+fn required_id(raw: u32) -> Result<ObjectId, ProtocolError> {
+    decode_object_required(raw)
 }

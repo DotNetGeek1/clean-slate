@@ -90,6 +90,38 @@ fn request_field_malformed_matrix() {
         Request::decode(&reg2).unwrap_err().code,
         ProtocolError::InvalidLayout
     );
+    let mut stride_bad = Request::RegisterBuffer {
+        layout: BufferLayout::packed(4, 4, PixelFormat::Xrgb8888).unwrap(),
+    }
+    .encode(TAG)
+    .unwrap();
+    write_u32_le(&mut stride_bad, 20, 5);
+    assert_eq!(
+        Request::decode(&stride_bad).unwrap_err().code,
+        ProtocolError::InvalidLayout
+    );
+    let mut stride_small = Request::RegisterBuffer {
+        layout: BufferLayout::packed(4, 4, PixelFormat::Xrgb8888).unwrap(),
+    }
+    .encode(TAG)
+    .unwrap();
+    write_u32_le(&mut stride_small, 20, 8);
+    assert_eq!(
+        Request::decode(&stride_small).unwrap_err().code,
+        ProtocolError::InvalidLayout
+    );
+    let mut huge = Request::RegisterBuffer {
+        layout: BufferLayout::packed(4, 4, PixelFormat::Xrgb8888).unwrap(),
+    }
+    .encode(TAG)
+    .unwrap();
+    write_u32_le(&mut huge, 12, 16_384);
+    write_u32_le(&mut huge, 16, 16_384);
+    write_u32_le(&mut huge, 20, 16_384 * 4);
+    assert_eq!(
+        Request::decode(&huge).unwrap_err().code,
+        ProtocolError::InvalidLayout
+    );
 
     let mut commit = Request::Commit {
         surface: surf(1),

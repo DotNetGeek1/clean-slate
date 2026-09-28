@@ -1,7 +1,11 @@
 //! Compositor protocol 1.0: fixed 64-byte frames (§1).
+//!
+//! Per-opcode body offset tables live in [`reference`]; [`frame_spec`] drives decode steps 4–6.
 
 pub mod error;
 pub mod event;
+pub mod frame_spec;
+pub mod reference;
 pub mod request;
 
 pub use error::{DisconnectReason, ProtocolError};
@@ -76,8 +80,13 @@ impl Features {
         self.0
     }
 
-    pub const fn contains(self, mask: u64) -> bool {
-        (self.0 & mask) != 0
+    /// True when every bit set in `other` is also set in `self`.
+    pub const fn contains(self, other: Features) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
     }
 
     pub const fn intersection(self, other: Features) -> Features {
@@ -85,7 +94,8 @@ impl Features {
     }
 }
 
-// Request opcodes (§2.1)
+// Request opcodes (§2.1). Body layouts: [`reference`](reference).
+/// `Hello` (`0x0001`): see [`reference`] § Hello.
 pub const OP_HELLO: u16 = 0x0001;
 pub const OP_REGISTER_BUFFER: u16 = 0x0010;
 pub const OP_UNREGISTER_BUFFER: u16 = 0x0011;
@@ -297,58 +307,11 @@ pub(crate) fn object_must_be_zero(raw: u32) -> Result<(), ProtocolError> {
     }
 }
 
-pub(crate) fn is_request_opcode(op: u16) -> bool {
-    matches!(
-        op,
-        OP_HELLO
-            | OP_REGISTER_BUFFER
-            | OP_UNREGISTER_BUFFER
-            | OP_CREATE_SURFACE
-            | OP_DESTROY_SURFACE
-            | OP_ASSIGN_ROLE
-            | OP_ATTACH
-            | OP_DAMAGE
-            | OP_SET_OPAQUE_REGION
-            | OP_SET_INPUT_REGION
-            | OP_COMMIT
-            | OP_CREATE_WINDOW
-            | OP_DESTROY_WINDOW
-            | OP_SET_TITLE
-            | OP_SET_SIZE_LIMITS
-            | OP_SHOW
-            | OP_HIDE
-            | OP_BEGIN_MOVE
-            | OP_BEGIN_RESIZE
-            | OP_ACK_CONFIGURE
-    )
-}
-
-pub(crate) fn is_event_opcode(op: u16) -> bool {
-    matches!(
-        op,
-        OP_WELCOME
-            | OP_ERROR
-            | OP_BUFFER_REGISTERED
-            | OP_BUFFER_RELEASED
-            | OP_BUFFER_UNREGISTERED
-            | OP_SURFACE_CREATED
-            | OP_FRAME_DONE
-            | OP_WINDOW_CREATED
-            | OP_CONFIGURE
-            | OP_CLOSE_REQUESTED
-            | OP_KEYBOARD_FOCUS
-            | OP_KEY
-            | OP_MODIFIERS_CHANGED
-            | OP_POINTER_ENTER
-            | OP_POINTER_LEAVE
-            | OP_POINTER_MOTION
-            | OP_POINTER_BUTTON
-            | OP_POINTER_AXIS
-            | OP_INPUT_RESET
-    )
-}
+pub(crate) use frame_spec::{run_decode_prelude, EVENT_SPECS, REQUEST_SPECS};
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_layout;
 #[cfg(test)]
 mod tests_malformed;

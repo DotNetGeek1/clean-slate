@@ -1,7 +1,7 @@
 //! Client → compositor requests (§2).
 
 use crate::geometry::{BufferRect, Rect, Scale120, Size};
-use crate::ids::{ClientBufferId, Serial, SurfaceId, WindowId};
+use crate::ids::{ClientBufferId, ObjectId, Serial, SurfaceId, WindowId};
 use crate::pixel::{BufferLayout, ColorSpace, PixelFormat};
 use crate::role::SurfaceRole;
 use crate::window::{ResizeEdges, WindowTitle};
@@ -132,19 +132,15 @@ impl Request {
         write_u32_le(&mut out, 4, tag);
         match *self {
             Self::Hello { version, features } => {
-                object_must_be_zero(0)?;
                 Self::encode_hello_body(&mut out, version, features)?;
             }
             Self::RegisterBuffer { layout } => {
-                object_must_be_zero(0)?;
                 Self::encode_register_buffer_body(&mut out, layout)?;
             }
             Self::UnregisterBuffer { buffer } => {
                 write_u32_le(&mut out, 8, buffer.0.encode());
             }
-            Self::CreateSurface => {
-                object_must_be_zero(0)?;
-            }
+            Self::CreateSurface => {}
             Self::DestroySurface { surface } => {
                 write_u32_le(&mut out, 8, surface.0.encode());
             }
@@ -252,145 +248,92 @@ impl Request {
         let opcode = read_u16_le(bytes, 0);
         let tag = read_u32_le(bytes, 4);
         let object = read_u32_le(bytes, 8);
-        if !is_request_opcode(opcode) {
-            return Err(decode_error(ProtocolError::UnknownOpcode, bytes));
-        }
+        run_decode_prelude(bytes, REQUEST_SPECS, opcode, object)
+            .map_err(|c| decode_error(c, bytes))?;
         let message = match opcode {
-            OP_HELLO => {
-                object_must_be_zero(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 24, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::decode_hello_body(bytes).map_err(|c| decode_error(c, bytes))?
-            }
+            OP_HELLO => Self::decode_hello_body(bytes).map_err(|c| decode_error(c, bytes))?,
             OP_REGISTER_BUFFER => {
-                object_must_be_zero(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 25, 64).map_err(|c| decode_error(c, bytes))?;
                 Self::decode_register_buffer_body(bytes).map_err(|c| decode_error(c, bytes))?
             }
-            OP_UNREGISTER_BUFFER => {
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                let id = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                Self::UnregisterBuffer {
-                    buffer: ClientBufferId(id),
-                }
-            }
-            OP_CREATE_SURFACE => {
-                object_must_be_zero(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::CreateSurface
-            }
-            OP_DESTROY_SURFACE => {
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                let id = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                Self::DestroySurface {
-                    surface: SurfaceId(id),
-                }
-            }
-            OP_ASSIGN_ROLE => {
-                let surface = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 13, 16).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 20, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::decode_assign_role_body(bytes, SurfaceId(surface))
-                    .map_err(|c| decode_error(c, bytes))?
-            }
-            OP_ATTACH => {
-                let surface = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 18, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::decode_attach_body(bytes, SurfaceId(surface))
-                    .map_err(|c| decode_error(c, bytes))?
-            }
-            OP_DAMAGE => {
-                let surface = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 13, 16).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 56, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::decode_damage_body(bytes, SurfaceId(surface))
-                    .map_err(|c| decode_error(c, bytes))?
-            }
-            OP_SET_OPAQUE_REGION | OP_SET_INPUT_REGION => {
-                let surface = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                Self::decode_region_body(bytes, SurfaceId(surface), opcode == OP_SET_OPAQUE_REGION)
-                    .map_err(|c| decode_error(c, bytes))?
-            }
-            OP_COMMIT => {
-                let surface = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 14, 16).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 20, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::decode_commit_body(bytes, SurfaceId(surface))
-                    .map_err(|c| decode_error(c, bytes))?
-            }
-            OP_CREATE_WINDOW => {
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                let id = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                Self::CreateWindow {
-                    surface: SurfaceId(id),
-                }
-            }
-            OP_DESTROY_WINDOW => {
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                let id = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                Self::DestroyWindow {
-                    window: WindowId(id),
-                }
-            }
-            OP_SET_TITLE => {
-                let window = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 53, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::decode_set_title_body(bytes, WindowId(window))
-                    .map_err(|c| decode_error(c, bytes))?
-            }
-            OP_SET_SIZE_LIMITS => {
-                let window = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 28, 64).map_err(|c| decode_error(c, bytes))?;
-                Self::decode_set_size_limits_body(bytes, WindowId(window))
-                    .map_err(|c| decode_error(c, bytes))?
-            }
-            OP_SHOW => {
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                let id = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                Self::Show {
-                    window: WindowId(id),
-                }
-            }
-            OP_HIDE => {
-                check_range_zero(bytes, 12, 64).map_err(|c| decode_error(c, bytes))?;
-                let id = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                Self::Hide {
-                    window: WindowId(id),
-                }
-            }
-            OP_BEGIN_MOVE => {
-                let window = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 16, 64).map_err(|c| decode_error(c, bytes))?;
-                let serial = serial_required_request(read_u32_le(bytes, 12))
-                    .map_err(|c| decode_error(c, bytes))?;
-                Self::BeginMove {
-                    window: WindowId(window),
-                    serial,
-                }
-            }
-            OP_BEGIN_RESIZE => {
-                let window = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 17, 64).map_err(|c| decode_error(c, bytes))?;
-                let serial = serial_required_request(read_u32_le(bytes, 12))
-                    .map_err(|c| decode_error(c, bytes))?;
-                let edges = ResizeEdges::from_u8(bytes[16])
+            OP_UNREGISTER_BUFFER => Self::UnregisterBuffer {
+                buffer: ClientBufferId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            },
+            OP_CREATE_SURFACE => Self::CreateSurface,
+            OP_DESTROY_SURFACE => Self::DestroySurface {
+                surface: SurfaceId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            },
+            OP_ASSIGN_ROLE => Self::decode_assign_role_body(
+                bytes,
+                SurfaceId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            )
+            .map_err(|c| decode_error(c, bytes))?,
+            OP_ATTACH => Self::decode_attach_body(
+                bytes,
+                SurfaceId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            )
+            .map_err(|c| decode_error(c, bytes))?,
+            OP_DAMAGE => Self::decode_damage_body(
+                bytes,
+                SurfaceId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            )
+            .map_err(|c| decode_error(c, bytes))?,
+            OP_SET_OPAQUE_REGION => Self::decode_region_body(
+                bytes,
+                SurfaceId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+                true,
+            )
+            .map_err(|c| decode_error(c, bytes))?,
+            OP_SET_INPUT_REGION => Self::decode_region_body(
+                bytes,
+                SurfaceId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+                false,
+            )
+            .map_err(|c| decode_error(c, bytes))?,
+            OP_COMMIT => Self::decode_commit_body(
+                bytes,
+                SurfaceId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            )
+            .map_err(|c| decode_error(c, bytes))?,
+            OP_CREATE_WINDOW => Self::CreateWindow {
+                surface: SurfaceId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            },
+            OP_DESTROY_WINDOW => Self::DestroyWindow {
+                window: WindowId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            },
+            OP_SET_TITLE => Self::decode_set_title_body(
+                bytes,
+                WindowId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            )
+            .map_err(|c| decode_error(c, bytes))?,
+            OP_SET_SIZE_LIMITS => Self::decode_set_size_limits_body(
+                bytes,
+                WindowId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            )
+            .map_err(|c| decode_error(c, bytes))?,
+            OP_SHOW => Self::Show {
+                window: WindowId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            },
+            OP_HIDE => Self::Hide {
+                window: WindowId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+            },
+            OP_BEGIN_MOVE => Self::BeginMove {
+                window: WindowId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+                serial: serial_required_request(read_u32_le(bytes, 12))
+                    .map_err(|c| decode_error(c, bytes))?,
+            },
+            OP_BEGIN_RESIZE => Self::BeginResize {
+                window: WindowId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+                serial: serial_required_request(read_u32_le(bytes, 12))
+                    .map_err(|c| decode_error(c, bytes))?,
+                edges: ResizeEdges::from_u8(bytes[16])
                     .ok_or(ProtocolError::MalformedFrame)
-                    .map_err(|c| decode_error(c, bytes))?;
-                Self::BeginResize {
-                    window: WindowId(window),
-                    serial,
-                    edges,
-                }
-            }
-            OP_ACK_CONFIGURE => {
-                let window = decode_object_required(object).map_err(|c| decode_error(c, bytes))?;
-                check_range_zero(bytes, 16, 64).map_err(|c| decode_error(c, bytes))?;
-                let serial = serial_required_request(read_u32_le(bytes, 12))
-                    .map_err(|c| decode_error(c, bytes))?;
-                Self::AckConfigure {
-                    window: WindowId(window),
-                    serial,
-                }
-            }
+                    .map_err(|c| decode_error(c, bytes))?,
+            },
+            OP_ACK_CONFIGURE => Self::AckConfigure {
+                window: WindowId(required_id(object).map_err(|c| decode_error(c, bytes))?),
+                serial: serial_required_request(read_u32_le(bytes, 12))
+                    .map_err(|c| decode_error(c, bytes))?,
+            },
             _ => return Err(decode_error(ProtocolError::UnknownOpcode, bytes)),
         };
         Ok(Tagged { tag, message })
@@ -588,7 +531,6 @@ impl Request {
             return Err(ProtocolError::InvalidRegion);
         }
         let replace = decode_bool(bytes[13])?;
-        check_range_zero(bytes, 14, 16)?;
         let mut rects = [Rect {
             x: 0,
             y: 0,
@@ -730,4 +672,8 @@ fn read_rect(bytes: &[u8], base: usize) -> Result<Rect, ProtocolError> {
         width: read_u32_le(bytes, base + 8),
         height: read_u32_le(bytes, base + 12),
     })
+}
+
+fn required_id(raw: u32) -> Result<ObjectId, ProtocolError> {
+    decode_object_required(raw)
 }
