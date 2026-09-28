@@ -2,8 +2,10 @@
 //! common, notify, ISR and device-config regions and validates each against
 //! its sized BAR before any MMIO touches it.
 
+use crate::device::pci::capabilities;
+use crate::device::pci::memory_bar;
 use crate::device::pci::MemoryBar;
-use crate::device::pci::{PciConfigRead, PciConfigWrite};
+use crate::device::pci::{PciConfigRead, PciConfigWrite, PciError};
 
 pub(crate) const VIRTIO_PCI_VENDOR_ID: u16 = 0x1af4;
 pub(crate) const VIRTIO_PCI_MODERN_DEVICE_BASE: u16 = 0x1040;
@@ -55,8 +57,26 @@ pub(crate) struct Bars(pub(crate) [BarKind; 6]);
 impl Bars {
     /// Size every BAR of `cfg`. Must run before bus mastering is enabled.
     pub(crate) fn probe<C: PciConfigWrite>(cfg: &C) -> Self {
-        let _ = cfg;
-        todo!("#196 stage 2")
+        let mut upper_half = [false; 6];
+        let mut kinds = [BarKind::Unusable; 6];
+        for index in 0usize..6 {
+            let low = cfg.read_u32(0x10 + 4 * index as u8);
+            if low & 1 == 0 && (low >> 1) & 0x3 == 2 && index + 1 < 6 {
+                upper_half[index + 1] = true;
+            }
+        }
+        for index in 0usize..6 {
+            if upper_half[index] {
+                kinds[index] = BarKind::Unusable;
+            } else {
+                kinds[index] = match memory_bar(cfg, index as u8) {
+                    Ok(bar) => BarKind::Memory(bar),
+                    Err(PciError::IoBar) => BarKind::Io,
+                    Err(_) => BarKind::Unusable,
+                };
+            }
+        }
+        Bars(kinds)
     }
 }
 
@@ -90,8 +110,16 @@ pub(crate) fn check_device_identity(
     revision: u8,
     virtio_id: u16,
 ) -> Result<(), CapError> {
-    let _ = (vendor, device, revision, virtio_id);
-    todo!("#196 stage 2")
+    if vendor != VIRTIO_PCI_VENDOR_ID {
+        return Err(CapError::NotModern);
+    }
+    if VIRTIO_PCI_MODERN_DEVICE_BASE.checked_add(virtio_id) != Some(device) {
+        return Err(CapError::NotModern);
+    }
+    if revision < 1 {
+        return Err(CapError::NotModern);
+    }
+    Ok(())
 }
 
 /// Decode and validate the VirtIO vendor capabilities of `cfg`.
@@ -99,8 +127,153 @@ pub(crate) fn decode_modern_layout<C: PciConfigRead>(
     cfg: &C,
     bars: &Bars,
 ) -> Result<ModernLayout, CapError> {
-    let _ = (cfg, bars);
-    todo!("#196 stage 2")
+    if cfg.read_u16(0x06) & (1 << 4) == 0 {
+        return Err(CapError::NoCapabilityList);
+    }
+
+    let mut common = None;
+    let mut notify = None;
+    let mut notify_off_multiplier = 0u32;
+    let mut isr = None;
+    let mut device = None;
+    let mut ignored = 0u8;
+    let mut duplicates = 0u8;
+
+    const VENDOR_CAP_ID: u8 = 0x09;
+
+    for item in capabilities(cfg) {
+        let (off, id) = item.map_err(|_| CapError::ListMalformed)?;
+        if id != VENDOR_CAP_ID {
+            continue;
+        }
+
+        let cap_len = cfg.read_u8(off + 2);
+        if off as usize + cap_len as usize > 256 || cap_len < 16 {
+            return Err(CapError::Malformed);
+        }
+        let cfg_type = cfg.read_u8(off + 3);
+        if cfg_type == CFG_TYPE_NOTIFY && cap_len < 20 {
+            return Err(CapError::Malformed);
+        }
+
+        if !matches!(
+            cfg_type,
+            CFG_TYPE_COMMON | CFG_TYPE_NOTIFY | CFG_TYPE_ISR | CFG_TYPE_DEVICE
+        ) {
+            ignored = ignored.saturating_add(1);
+            continue;
+        }
+
+        let bar = cfg.read_u8(off + 4);
+        if bar > 5 {
+            ignored = ignored.saturating_add(1);
+            continue;
+        }
+
+        let memory_bar = match bars.0[usize::from(bar)] {
+            BarKind::Io => {
+                ignored = ignored.saturating_add(1);
+                continue;
+            }
+            BarKind::Unusable => return Err(CapError::Bar),
+            BarKind::Memory(b) => b,
+        };
+
+        let offset = cfg.read_u32(off + 8);
+        let length = cfg.read_u32(off + 12);
+        let end = offset.checked_add(length);
+        if end.is_none() || u64::from(end.unwrap()) > memory_bar.size {
+            return Err(CapError::OutOfBar);
+        }
+
+        let aligned = match cfg_type {
+            CFG_TYPE_COMMON | CFG_TYPE_DEVICE => offset.is_multiple_of(4),
+            CFG_TYPE_NOTIFY => offset.is_multiple_of(2),
+            CFG_TYPE_ISR => true,
+            _ => true,
+        };
+        if !aligned {
+            return Err(CapError::Misaligned);
+        }
+
+        let min_len = match cfg_type {
+            CFG_TYPE_COMMON => COMMON_CFG_MIN_LEN,
+            CFG_TYPE_NOTIFY => 2,
+            CFG_TYPE_ISR | CFG_TYPE_DEVICE => 1,
+            _ => 0,
+        };
+        if length < min_len {
+            return Err(CapError::TooShort);
+        }
+
+        let mult = if cfg_type == CFG_TYPE_NOTIFY {
+            let mult = cfg.read_u32(off + 16);
+            if mult != 0 && (mult < 2 || !mult.is_power_of_two()) {
+                return Err(CapError::BadMultiplier);
+            }
+            mult
+        } else {
+            0
+        };
+
+        let phys = memory_bar
+            .base
+            .checked_add(u64::from(offset))
+            .ok_or(CapError::OutOfBar)?;
+        let region = Region {
+            bar,
+            offset,
+            length,
+            phys,
+        };
+
+        match cfg_type {
+            CFG_TYPE_COMMON => {
+                if common.is_some() {
+                    duplicates = duplicates.saturating_add(1);
+                } else {
+                    common = Some(region);
+                }
+            }
+            CFG_TYPE_NOTIFY => {
+                if notify.is_some() {
+                    duplicates = duplicates.saturating_add(1);
+                } else {
+                    notify = Some(region);
+                    notify_off_multiplier = mult;
+                }
+            }
+            CFG_TYPE_ISR => {
+                if isr.is_some() {
+                    duplicates = duplicates.saturating_add(1);
+                } else {
+                    isr = Some(region);
+                }
+            }
+            CFG_TYPE_DEVICE => {
+                if device.is_some() {
+                    duplicates = duplicates.saturating_add(1);
+                } else {
+                    device = Some(region);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let common = common.ok_or(CapError::Missing(CapKind::Common))?;
+    let notify = notify.ok_or(CapError::Missing(CapKind::Notify))?;
+    let isr = isr.ok_or(CapError::Missing(CapKind::Isr))?;
+
+    Ok(ModernLayout {
+        common,
+        notify,
+        notify_off_multiplier,
+        isr,
+        device,
+        ignored,
+        duplicates,
+    })
 }
 
 /// Notify address of a queue: `notify.phys + queue_notify_off * multiplier`,
@@ -650,5 +823,55 @@ mod tests {
             notify_address(&notify, 4, 4),
             Err(CapError::NotifyOutOfRange)
         );
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use crate::device::pci::FakeConfigSpace;
+
+    #[test]
+    fn bars_probe_classifies_qemu_layout() {
+        let mut cfg = FakeConfigSpace::new();
+        cfg.bar_sizes[1] = 0x1000;
+        cfg.bar_sizes[4] = 0x4000;
+        cfg.set_u32(0x14, 0xfebd_1000);
+        cfg.set_u32(0x20, 0x0000_000c);
+        cfg.set_u32(0x24, 0x0000_0080);
+        cfg.set_u32(0x18, 0x0000_0001);
+        let bars = Bars::probe(&cfg);
+        assert!(matches!(bars.0[0], BarKind::Unusable));
+        assert_eq!(
+            bars.0[1],
+            BarKind::Memory(MemoryBar {
+                index: 1,
+                base: 0xfebd_1000,
+                size: 0x1000,
+                is_64: false,
+                prefetchable: false,
+            })
+        );
+        assert_eq!(bars.0[2], BarKind::Io);
+        assert!(matches!(bars.0[3], BarKind::Unusable));
+        if let BarKind::Memory(bar) = bars.0[4] {
+            assert_eq!(bar.base, 0x80_0000_0000);
+            assert_eq!(bar.size, 0x4000);
+            assert!(bar.is_64);
+            assert!(bar.prefetchable);
+        } else {
+            panic!("expected memory BAR4");
+        }
+        assert!(matches!(bars.0[5], BarKind::Unusable));
+    }
+
+    #[test]
+    fn bars_probe_marks_unassigned_64bit_upper_half_unusable() {
+        let mut cfg = FakeConfigSpace::new();
+        cfg.bar_sizes[4] = 0x4000;
+        cfg.set_u32(0x20, 0x0000_000c);
+        cfg.set_u32(0x24, 0);
+        let bars = Bars::probe(&cfg);
+        assert!(matches!(bars.0[5], BarKind::Unusable));
     }
 }
