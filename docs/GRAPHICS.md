@@ -9,6 +9,7 @@ The code is authoritative. Offsets, constants and error codes live in three crat
 | `clean-slate-graphics` | `graphics/` | geometry, pixels, reference mode, ids, limits, 64-byte protocol codecs, display/input ABI wire types, raw input records, and the reference state machines (roles, surfaces, buffers, windows, input trackers, object tables, connection admission, `FakeDisplay`) |
 | `clean-slate-native-abi` | `native-abi/` | `SharedBufferId`, `SharedBufferAccess`, proposed #195 memory limits; port and work-set ABI (`port.rs`, `work_set.rs`, `status.rs`, #200) |
 | `clean-slate-capability` | `capability/` | `ResourceClass`, `Rights`, `ResourceRef` constructors, delegation checks, syscall numbers and status sentinels |
+| `clean-slate-raster` | `raster/` | CPU rasterizer and bootstrap text over `clean-slate-graphics` buffer layouts; Spleen 8x16 vendored under BSD-2-Clause. The kernel depends on it (GOP RGBX conversion, framebuffer lane), so it must stay `no_std`, `forbid(unsafe_code)` and allocation-free, with `clean-slate-graphics` as its only dependency |
 
 Items marked **(planned)** are fixed in shape but not implemented; their owning lane implements them without changing this contract. Everything else is landed and host-tested (`cargo xtask test-m10-contract`).
 
@@ -70,7 +71,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 | 0 | #110 | `graphics/` (whole crate); `native-abi/` skeleton; M10 classes, rights and syscall reservations in `capability/`; `cargo xtask test-m10-contract`; this document |
 | 1 | #195 | `native-abi/src/shared_buffer.rs` contents and memory-level limits; `kernel/src/mm/shared_buffer.rs`, `kernel/src/mm/shared_mapping.rs` (planned); syscall 16; first stage enables and verifies `EFER.NXE` (A4); gate `test-m10-shared-buffer` (planned) |
 | 1 | #200 | port and work-set ABI in `native-abi` (`port.rs`, `work_set.rs`, `status.rs`); class-agnostic port engine in `port/` (`clean-slate-port`, feature `fake` for host tests); `kernel/src/service/port.rs`, `kernel/src/service/port_syscall.rs`, `kernel/src/sched/work_set.rs`; syscalls 17 and 20; capability transfer on send; gate `test-m10-port` |
-| 1 | #111 | `raster/` (`clean-slate-raster`); `kernel/src/boot/gop.rs`; `kernel/src/device/display/{mod.rs, gop.rs}`; `kernel/src/service/display_syscall.rs`; syscall 18; gate `test-m10-framebuffer` (all planned) |
+| 1 | #111 | **Landed:** GOP framebuffer backend at 1280x800 Xrgb8888 (BGRX; RGBX converted at present-copy), aperture mapped uncached (UC) and excluded from the write-back direct map (WC via PAT deferred, P10 limitation); `raster/` (`clean-slate-raster`, kernel dependency by design); `kernel/src/boot/gop.rs`; `kernel/src/device/display/{mod.rs, gop.rs}`; syscall 18 `FIND_HANDLE` / `QUERY_MODE` / `PRESENT_STATUS` live (`MAP_SCANOUT` / `PRESENT` `ENOSYS` until #195 S6; `BIND_WAKE` `ENOSYS` until #200 W2); missing GOP/mode => no backend (`ENODEV`), boot continues; gate `cargo xtask test-m10-framebuffer` (`-vga std`) |
 | 1 | #113 | `kernel/src/device/input/{mod.rs, i8042.rs}`; `kernel/src/service/input_syscall.rs`; syscall 19; scancode to HID usage table in `graphics::input` (all planned) |
 | 1 | #196 | `kernel/src/device/virtio/{modern.rs, modern/, virtqueue.rs, dma.rs}`; `kernel/src/sched/timeout.rs` (W3); `cargo xtask test-m10-virtio-modern` |
 | 1 | #197 | `xtask/src/qmp/` (QMP endpoint, client, input and screendump helpers, PPM to PNG, marker-paced script driver); `AcceptanceDriver` hooks in `xtask/src/main.rs`; gate `test-qmp-smoke` |
@@ -515,7 +516,7 @@ Per-frame limits: `Damage` carries at most `DAMAGE_RECTS_PER_FRAME` (5) `BufferR
 
 ## Display ABI (syscall 18)
 
-Authoritative: `graphics::abi::display`, `graphics::abi::status`. Kernel implementation: #111 (GOP) and #114 (VirtIO-GPU), both behind one `ScanoutBackend` (planned).
+Authoritative: `graphics::abi::display`, `graphics::abi::status`. Kernel implementation: #111 GOP (landed) and #114 VirtIO-GPU (planned), both behind one `ScanoutBackend`.
 
 Register convention (matches the network syscall, `SYSCALL_NR_NETWORK_CAPABILITY` = 14): `rax` = 18, `rdi` = subop, `rsi` = capability handle (ignored by `FIND_HANDLE`), `rdx`, `r10`, `r8`, `r9` = arguments; `rax` out = success value or a status sentinel. User pointers are validated over the exact declared struct length; a wrong length is `EINVAL`. **Non-blocking**: waiting happens only through work sets.
 
@@ -764,7 +765,9 @@ On success it prints `[M10.port] PASS` (not `[M10  ] PASS`, which belongs to #11
 
 The `fake` feature enables `graphics::fake`: `FakeDisplay`, a model of the display ABI with R8 copy semantics, a single present in flight, timeouts, reset and poisoning. It is for host tests only; production code must not enable it. `clean-slate-port` exposes `FakePort` / `FakeConnection` behind feature `fake` for the same port semantics in host tests (#112).
 
-Planned gates, each owned by its lane: `test-m10-shared-buffer` (#195), `test-m10-framebuffer` (#111, `-vga std`), `test-m10-virtio-gpu` (#114), `test-m10-desktop` (#118), and `test-m10` with `[M10 ] PASS` (#119).
+`cargo xtask test-m10-framebuffer` (alias `m10-framebuffer`) is the #111 gate: `cargo test -p clean-slate-raster`, then a QEMU boot with `-vga std` that proves kernel-internal present, damage-only scanout copy, and guest aperture readback against host `clean-slate-raster` expectations (`[M10.2] PASS`). Screenshot validation joins it once #197's QMP client lands.
+
+Planned gates, each owned by its lane: `test-m10-shared-buffer` (#195), `test-m10-virtio-gpu` (#114), `test-m10-desktop` (#118), and `test-m10` with `[M10 ] PASS` (#119).
 
 Contract-level properties that are host-tested today: the size and layout assertions (`frame_layout_assertions`, `abi_size_assertions`, `state_sizes_stay_bounded`), golden frames and round trips for every message, the malformed-frame matrices, negotiation, the role matrix, the buffer handoff property test (`property_buffer_handoff_conserves_buffers`), the scanout model property test (`property_double_buffered_producer_matches_scanout_model`), and the capability `valid_for` and delegation matrices.
 

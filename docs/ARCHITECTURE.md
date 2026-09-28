@@ -295,14 +295,15 @@ Examples of repair actions:
 
 ## M1 virtual memory layout
 
-M1 keeps paging and physical-memory policy inside the kernel. The initial implementation intentionally stays conservative:
+M1 keeps paging and physical-memory policy inside the kernel. The current kernel-owned layout (`kernel/src/mm/layout.rs`, `kernel/src/mm/kernel_bootstrap.rs`):
 
 - only `EfiConventionalMemory` pages from the post-`ExitBootServices` UEFI map are considered allocator-usable;
 - the running kernel image and the current early stack are reserved explicitly before allocator setup;
 - the kernel relies on the firmware-provided early identity mapping (`phys + 0`) to inspect existing page tables and bootstrap new mappings;
-- a high-half test slot at `0xffff_8000_0000_0000` is reserved for controlled map/unmap and page-fault diagnostics.
+- a direct physical map at `0xffff_8000_0000_0000` (PML4 slot 256, 512 GiB, write-back) is shared by every process root (slots >= 256 are copied from the kernel root);
+- device apertures such as the GOP framebuffer are mapped 4 KiB uncached at their direct-map address (`phys_to_virt`) and excluded from the write-back physmap bootstrap.
 
-This keeps M1 trustworthy while leaving a clear path to a richer higher-half kernel layout once dedicated bootstrap page tables and stacks exist.
+`KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE` at `0xffff_a000_0000_0000` remains an unmapped diagnostic slot for deliberate fault probes.
 
 ## M2 interrupt and scheduling direction
 

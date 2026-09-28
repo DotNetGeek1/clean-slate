@@ -231,6 +231,13 @@ cargo xtask test-m10-port
 ```
 
 In order it runs `cargo test -p clean-slate-native-abi`; `cargo test -p clean-slate-port --features fake`; a `x86_64-unknown-uefi` build of `clean-slate-port` with feature `fake`; `cargo test -p clean-slate-kernel -- service::port sched::work_set sched::wait`; `build_m6_fixture_userspace` and `build_storage_userspace`; then QEMU with feature `m10-port-self-test`, ordered `[M10.port]` serial markers and a 60 s timeout. On success it prints `[M10.port] PASS` (not `[M10  ] PASS`, which is the #119 aggregate gate). Aliases: `m10-port`, `m10.200`. See [GRAPHICS.md](GRAPHICS.md) Tests and gate.
+For the M10 #111 GOP framebuffer lane (host raster tests plus QEMU with `-vga std`; aliases `m10-framebuffer`, `test-m10-framebuffer`):
+
+```bash
+cargo xtask test-m10-framebuffer
+```
+
+The boot runs `m10-framebuffer-self-test` in boot context: GOP mode 1280x800, kernel-internal present with damage-only copy, aperture readback CRC and probes matched on the host, then `[M10.2] PASS`. See [GRAPHICS.md](GRAPHICS.md).
 
 For the M10 #196 VirtIO modern PCI transport (host tests plus two QEMU boots):
 
@@ -594,20 +601,20 @@ kernel/src
     └── m3_entry.rs, m3_address_space.rs, m3_resources.rs, m3_syscall.rs, m3_ipc.rs
 ```
 
-Planned M10 kernel additions (none exist yet; each lands with its lane against [GRAPHICS.md](GRAPHICS.md)):
+M10 kernel additions (see [GRAPHICS.md](GRAPHICS.md) for the full wave map):
 
 ```text
 kernel/src
-├── boot/gop.rs                    (planned, #111) GOP mode capture and fail-closed SetMode before ExitBootServices
+├── boot/gop.rs                    (#111) GOP mode capture and fail-closed SetMode before ExitBootServices
+├── device/display/                (#111) ScanoutBackend: mod.rs, gop.rs; virtio_gpu.rs (#114 planned)
+├── service/display_syscall.rs     (#111/#114) syscall 18
 ├── mm/shared_buffer.rs            (planned, #195) SharedBuffer objects, quotas, syscall 16
 ├── mm/shared_mapping.rs           (planned, #195) per-process shared mappings (NX, teardown without freeing frames)
 ├── capability/graphics.rs         (planned, #112/#118) Graphics/Display/Input grant policy for the M10 launch set
 ├── service/port.rs                (planned, service-port issue) compositor connections and capability transfer
 ├── service/port_syscall.rs        (planned, service-port issue) syscall 17
-├── service/display_syscall.rs     (planned, #111/#114) syscall 18
 ├── service/input_syscall.rs       (planned, #113) syscall 19
 ├── sched/work_set.rs              (planned, service-port issue) work sets, syscall 20
-├── device/display/                (planned) ScanoutBackend: mod.rs, gop.rs (#111), virtio_gpu.rs (#114)
 ├── device/input/                  (planned, #113) mod.rs, i8042.rs, RawInputQueue<128>
 └── device/virtio/                 existing; modern.rs (+ modern/), virtqueue.rs, dma.rs (#196)
 ```
