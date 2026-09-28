@@ -22,7 +22,7 @@ use crate::process::{process_registry_mut, PROCESS_REGISTRY_CAPACITY};
 use crate::sync::global_cell::GlobalCell;
 
 use table::{Attachment, BufferOwner, FrameSource, PendingFrees, ShareError, SharedBufferTable};
-use window::{fill_zero_table, MappingAuthority, RowState, WindowPool};
+use window::{fill_zero_table, MapTarget, MappingAuthority, RowState, WindowPool};
 pub(crate) use window::{overlaps_shared_window, WINDOW_PML4_INDEX};
 
 #[derive(Clone, Copy)]
@@ -308,9 +308,14 @@ fn map_into_root(
         return Err(ShareError::Busy);
     }
     state.table.can_attach(id)?;
-    let va = state
-        .windows
-        .map(pid, root_frame, id, &buffer, access, authority, frames)?;
+    let va = state.windows.map(
+        MapTarget { pid, root_frame },
+        id,
+        &buffer,
+        access,
+        authority,
+        frames,
+    )?;
     let row = state
         .windows
         .get(pid)

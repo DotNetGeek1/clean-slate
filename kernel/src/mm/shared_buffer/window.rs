@@ -186,6 +186,13 @@ impl ProcessWindow {
     }
 }
 
+/// The process whose window receives a mapping, and the private root it must be built in.
+#[derive(Clone, Copy)]
+pub(crate) struct MapTarget {
+    pub(crate) pid: u64,
+    pub(crate) root_frame: u64,
+}
+
 pub(crate) struct WindowPool<const N: usize> {
     windows: [Option<ProcessWindow>; N],
 }
@@ -217,11 +224,9 @@ impl<const N: usize> WindowPool<N> {
 
     /// Maps every page of `record` into the lowest free row of `pid`'s window.
     /// Every failure leaves the page tables, the pool and `frames` as they were.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn map(
         &mut self,
-        pid: u64,
-        root_frame: u64,
+        MapTarget { pid, root_frame }: MapTarget,
         id: SharedBufferId,
         record: &BufferRecord,
         access: SharedBufferAccess,
@@ -488,8 +493,10 @@ mod tests {
         ) -> Result<u64, ShareError> {
             let record = *self.table.live(id).unwrap();
             self.pool.map(
-                PID,
-                self.root,
+                MapTarget {
+                    pid: PID,
+                    root_frame: self.root,
+                },
                 id,
                 &record,
                 access,
@@ -718,8 +725,10 @@ mod tests {
             fixture
                 .pool
                 .map(
-                    100 + pid,
-                    root,
+                    MapTarget {
+                        pid: 100 + pid,
+                        root_frame: root,
+                    },
                     id,
                     &record,
                     SharedBufferAccess::Read,
