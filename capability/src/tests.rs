@@ -465,7 +465,7 @@ fn display_and_input_grant_reject_delegate_via_valid_for() {
 }
 
 #[test]
-fn graphics_delegation_strips_root_only_rights() {
+fn graphics_delegation_refuses_root_only_rights() {
     let holder = HolderId(2);
     let resource = ResourceRef::graphics(0x5300, 1);
     let handle = CapabilityHandle::new(0, 1);
