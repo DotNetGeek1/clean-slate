@@ -48,6 +48,10 @@ mod tests {
             (STATUS_ENOSYS, 38),
             (STATUS_EBADF, 9),
             (STATUS_EAGAIN, 11),
+            (STATUS_EEXIST, 17),
+            (STATUS_EPIPE, 32),
+            (STATUS_ETIMEDOUT, 110),
+            (STATUS_ECONNREFUSED, 111),
         ];
         for (status, errno) in cases {
             assert_eq!(status, u64::MAX - (errno - 1));
@@ -68,6 +72,10 @@ mod tests {
             STATUS_ESTALE,
             STATUS_EBADF,
             STATUS_EAGAIN,
+            STATUS_EEXIST,
+            STATUS_EPIPE,
+            STATUS_ETIMEDOUT,
+            STATUS_ECONNREFUSED,
         ];
         for i in 0..statuses.len() {
             assert!(is_status(statuses[i]));
