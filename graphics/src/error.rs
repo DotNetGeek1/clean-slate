@@ -7,6 +7,7 @@ pub enum GeometryError {
     EmptyExtent,
     ExtentTooLarge,
     StrideTooSmall,
+    StrideTooLarge,
     StrideMisaligned,
     BufferTooLarge,
     OutOfBounds,

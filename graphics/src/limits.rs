@@ -58,4 +58,3 @@ pub const MAX_CLIENT_STALL_ITERATIONS: u32 = 8;
 const _: () = assert!(MAX_STRIDE_BYTES == MAX_SURFACE_EXTENT * 4);
 const _: () = assert!(MAX_SURFACES_PER_CLIENT <= MAX_SURFACES);
 const _: () = assert!(MAX_WINDOWS_PER_CLIENT <= MAX_WINDOWS);
-const _: () = assert!(4_096_000u64 <= MAX_BUFFER_BYTES);

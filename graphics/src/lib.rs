@@ -26,6 +26,7 @@ pub use error::{GeometryError, LimitError, LookupError};
 pub use geometry::{BufferRect, Fixed24_8, Point, Rect, RectSet, Scale120, Size};
 pub use ids::{
     ClientBufferId, GenSlotTable, InputDeviceId, ObjectId, OutputId, Serial, SurfaceId, WindowId,
+    KEYBOARD_INDEX, MOUSE_INDEX,
 };
 pub use limits::{
     CLIENT_EVENT_QUEUE_DEPTH, DISPLAY_COMMAND_TIMEOUT_NS, MAX_BUFFERS_PER_CLIENT, MAX_BUFFER_BYTES,
@@ -58,7 +59,7 @@ mod integration_tests {
             width: 1,
             height: 1,
         };
-        assert_eq!(a.intersect(b), Some(a));
+        assert_eq!(a.intersect(b), Ok(Some(a)));
     }
 
     #[test]

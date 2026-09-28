@@ -2,6 +2,25 @@
 
 use crate::error::{LimitError, LookupError};
 
+const SLOT_INDEX_MASK: u32 = 0xFF;
+const GENERATION_SHIFT: u32 = 8;
+const MAX_PACKED_GENERATION: u32 = 0x00FF_FFFF;
+
+fn encode_index_generation(index: u8, generation: u32) -> Result<u32, LookupError> {
+    if generation == 0 || generation > MAX_PACKED_GENERATION {
+        return Err(LookupError::Invalid);
+    }
+    Ok(u32::from(index) | (generation << GENERATION_SHIFT))
+}
+
+fn decode_index_generation(raw: u32) -> Result<(u8, u32), LookupError> {
+    let generation = raw >> GENERATION_SHIFT;
+    if generation == 0 || generation > MAX_PACKED_GENERATION {
+        return Err(LookupError::Invalid);
+    }
+    Ok(((raw & SLOT_INDEX_MASK) as u8, generation))
+}
+
 /// Compositor-minted object reference: slot in bits 0..8, generation in 8..32.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ObjectId(u32);
@@ -22,7 +41,12 @@ pub struct ClientBufferId(pub ObjectId);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct OutputId(u32);
 
-/// Kernel-minted input device identity.
+/// Kernel input device index for the keyboard (M10 seat 0).
+pub const KEYBOARD_INDEX: u8 = 0;
+/// Kernel input device index for the mouse (M10 seat 0).
+pub const MOUSE_INDEX: u8 = 1;
+
+/// Kernel-minted input device identity: index in 0..8, generation in 8..32.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct InputDeviceId(u32);
 
@@ -30,38 +54,38 @@ pub struct InputDeviceId(u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Serial(pub u32);
 
-const OBJECT_SLOT_MASK: u32 = 0xFF;
-const OBJECT_GEN_SHIFT: u32 = 8;
-const MAX_OBJECT_GENERATION: u32 = 0x00FF_FFFF;
-
 impl ObjectId {
-    pub const INVALID: Self = Self(0);
-
     pub fn encode(self) -> u32 {
         self.0
     }
 
     pub fn decode(raw: u32) -> Result<Self, LookupError> {
-        let generation = raw >> OBJECT_GEN_SHIFT;
-        if generation == 0 || generation > MAX_OBJECT_GENERATION {
-            return Err(LookupError::Invalid);
+        decode_index_generation(raw).map(|_| Self(raw))
+    }
+
+    /// Wire helper: raw `0` means no object; nonzero values use [`Self::decode`].
+    pub fn decode_optional(raw: u32) -> Result<Option<Self>, LookupError> {
+        if raw == 0 {
+            Ok(None)
+        } else {
+            Self::decode(raw).map(Some)
         }
-        Ok(Self(raw))
+    }
+
+    pub fn encode_optional(id: Option<ObjectId>) -> u32 {
+        id.map_or(0, ObjectId::encode)
     }
 
     pub fn new(slot: u8, generation: u32) -> Result<Self, LookupError> {
-        if generation == 0 || generation > MAX_OBJECT_GENERATION {
-            return Err(LookupError::Invalid);
-        }
-        Ok(Self(u32::from(slot) | (generation << OBJECT_GEN_SHIFT)))
+        encode_index_generation(slot, generation).map(Self)
     }
 
     pub fn slot(self) -> u8 {
-        (self.0 & OBJECT_SLOT_MASK) as u8
+        (self.0 & SLOT_INDEX_MASK) as u8
     }
 
     pub fn generation(self) -> u32 {
-        self.0 >> OBJECT_GEN_SHIFT
+        self.0 >> GENERATION_SHIFT
     }
 }
 
@@ -71,26 +95,41 @@ impl OutputId {
     }
 
     pub fn decode(raw: u32) -> Result<Self, LookupError> {
-        let epoch = raw >> OBJECT_GEN_SHIFT;
-        if epoch == 0 {
-            return Err(LookupError::Invalid);
-        }
-        Ok(Self(raw))
+        decode_index_generation(raw).map(|_| Self(raw))
     }
 
     pub fn new(index: u8, backend_epoch: u32) -> Result<Self, LookupError> {
-        if backend_epoch == 0 {
-            return Err(LookupError::Invalid);
-        }
-        Ok(Self(u32::from(index) | (backend_epoch << OBJECT_GEN_SHIFT)))
+        encode_index_generation(index, backend_epoch).map(Self)
     }
 
     pub fn index(self) -> u8 {
-        (self.0 & OBJECT_SLOT_MASK) as u8
+        (self.0 & SLOT_INDEX_MASK) as u8
     }
 
     pub fn backend_epoch(self) -> u32 {
-        self.0 >> OBJECT_GEN_SHIFT
+        self.0 >> GENERATION_SHIFT
+    }
+}
+
+impl InputDeviceId {
+    pub fn encode(self) -> u32 {
+        self.0
+    }
+
+    pub fn decode(raw: u32) -> Result<Self, LookupError> {
+        decode_index_generation(raw).map(|_| Self(raw))
+    }
+
+    pub fn new(index: u8, generation: u32) -> Result<Self, LookupError> {
+        encode_index_generation(index, generation).map(Self)
+    }
+
+    pub fn index(self) -> u8 {
+        (self.0 & SLOT_INDEX_MASK) as u8
+    }
+
+    pub fn generation(self) -> u32 {
+        self.0 >> GENERATION_SHIFT
     }
 }
 
@@ -102,6 +141,8 @@ struct Slot<T> {
 }
 
 /// Fixed-size generational table; slots retire instead of wrapping generation.
+///
+/// Capacity `N` must be ≤ 256 so slot indices fit in bits 0..8 of [`ObjectId`].
 pub struct GenSlotTable<T, const N: usize> {
     slots: [Slot<T>; N],
 }
@@ -113,9 +154,10 @@ impl<T, const N: usize> Default for GenSlotTable<T, N> {
 }
 
 impl<T, const N: usize> GenSlotTable<T, N> {
-    const _N_LE_256: () = assert!(N <= 256);
+    const N_WITHIN_SLOT_BITS: () = assert!(N <= 256);
 
     pub const fn new() -> Self {
+        let () = Self::N_WITHIN_SLOT_BITS;
         Self {
             slots: [const {
                 Slot {
@@ -132,12 +174,13 @@ impl<T, const N: usize> GenSlotTable<T, N> {
             if slot.retired || slot.value.is_some() {
                 continue;
             }
+            let slot_index = u8::try_from(index).map_err(|_| LimitError::Exhausted)?;
             let generation = if slot.generation == 0 {
                 1
             } else {
                 slot.generation
             };
-            let id = ObjectId::new(index as u8, generation).map_err(|_| LimitError::Exhausted)?;
+            let id = ObjectId::new(slot_index, generation).map_err(|_| LimitError::Exhausted)?;
             slot.generation = generation;
             slot.value = Some(value);
             return Ok(id);
@@ -227,7 +270,7 @@ impl<T, const N: usize> GenSlotTable<T, N> {
 }
 
 const fn next_generation(current: u32) -> Option<u32> {
-    if current >= MAX_OBJECT_GENERATION {
+    if current >= MAX_PACKED_GENERATION {
         None
     } else {
         Some(current + 1)
@@ -246,6 +289,15 @@ mod tests {
         assert_eq!(id.generation(), 42);
         assert_eq!(ObjectId::decode(3), Err(LookupError::Invalid));
         assert_eq!(ObjectId::new(0, 0), Err(LookupError::Invalid));
+    }
+
+    #[test]
+    fn object_id_optional_wire_zero() {
+        assert_eq!(ObjectId::decode_optional(0), Ok(None));
+        assert_eq!(ObjectId::encode_optional(None), 0);
+        let id = ObjectId::new(1, 1).unwrap();
+        assert_eq!(ObjectId::decode_optional(id.encode()), Ok(Some(id)));
+        assert_eq!(ObjectId::encode_optional(Some(id)), id.encode());
     }
 
     #[test]
@@ -279,14 +331,31 @@ mod tests {
     #[test]
     fn gen_slot_table_retire_at_max_generation() {
         let mut table = GenSlotTable::<u32, 1>::new();
-        table.seed_vacant_generation(0, MAX_OBJECT_GENERATION);
+        table.seed_vacant_generation(0, MAX_PACKED_GENERATION);
         let id = table.insert(7).unwrap();
-        assert_eq!(id.generation(), MAX_OBJECT_GENERATION);
+        assert_eq!(id.generation(), MAX_PACKED_GENERATION);
         assert_eq!(table.remove(id), Ok(7));
         assert!(table.is_retired(0));
         assert_eq!(table.insert(8), Err(LimitError::Exhausted));
-        let stale = ObjectId::new(0, MAX_OBJECT_GENERATION).unwrap();
+        let stale = ObjectId::new(0, MAX_PACKED_GENERATION).unwrap();
         assert_eq!(table.get(stale), Err(LookupError::Retired));
+    }
+
+    #[test]
+    fn gen_slot_table_slot_indices_are_not_truncated() {
+        let mut table = GenSlotTable::<u32, 256>::new();
+        let mut ids = [ObjectId::new(0, 1).unwrap(); 256];
+        for expected in 0u8..=255 {
+            let id = table.insert(u32::from(expected)).unwrap();
+            assert_eq!(id.slot(), expected);
+            ids[usize::from(expected)] = id;
+        }
+        for expected in 0u8..=255 {
+            assert_eq!(
+                table.get(ids[usize::from(expected)]),
+                Ok(&u32::from(expected))
+            );
+        }
     }
 
     #[test]
@@ -294,5 +363,26 @@ mod tests {
         assert_eq!(OutputId::new(0, 0), Err(LookupError::Invalid));
         let id = OutputId::new(0, 5).unwrap();
         assert_eq!(OutputId::decode(id.encode()), Ok(id));
+    }
+
+    #[test]
+    fn output_id_rejects_epoch_above_max_packed() {
+        assert_eq!(
+            OutputId::new(0, MAX_PACKED_GENERATION + 1),
+            Err(LookupError::Invalid)
+        );
+        assert_eq!(OutputId::new(0, 0x0100_0000), Err(LookupError::Invalid));
+    }
+
+    #[test]
+    fn input_device_id_round_trip_and_indices() {
+        assert_eq!(KEYBOARD_INDEX, 0);
+        assert_eq!(MOUSE_INDEX, 1);
+        let kb = InputDeviceId::new(KEYBOARD_INDEX, 1).unwrap();
+        let mouse = InputDeviceId::new(MOUSE_INDEX, 2).unwrap();
+        assert_eq!(InputDeviceId::decode(kb.encode()), Ok(kb));
+        assert_eq!(kb.index(), KEYBOARD_INDEX);
+        assert_eq!(mouse.generation(), 2);
+        assert_eq!(InputDeviceId::new(0, 0), Err(LookupError::Invalid));
     }
 }

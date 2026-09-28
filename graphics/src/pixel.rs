@@ -33,10 +33,10 @@ pub enum ColorSpace {
 /// Validated buffer geometry shared by clients and the compositor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BufferLayout {
-    pub width: u32,
-    pub height: u32,
-    pub stride_bytes: u32,
-    pub format: PixelFormat,
+    width: u32,
+    height: u32,
+    stride_bytes: u32,
+    format: PixelFormat,
 }
 
 impl BufferLayout {
@@ -60,7 +60,7 @@ impl BufferLayout {
             return Err(GeometryError::StrideTooSmall);
         }
         if stride_bytes > MAX_STRIDE_BYTES {
-            return Err(GeometryError::StrideTooSmall);
+            return Err(GeometryError::StrideTooLarge);
         }
         let byte_len = u64::from(stride_bytes)
             .checked_mul(u64::from(height))
@@ -83,6 +83,22 @@ impl BufferLayout {
         let row = width.checked_mul(4).ok_or(GeometryError::Overflow)?;
         let stride = align_up_u32(row, 64)?;
         Self::new(width, height, stride, format)
+    }
+
+    pub fn width(self) -> u32 {
+        self.width
+    }
+
+    pub fn height(self) -> u32 {
+        self.height
+    }
+
+    pub fn stride_bytes(self) -> u32 {
+        self.stride_bytes
+    }
+
+    pub fn format(self) -> PixelFormat {
+        self.format
     }
 
     pub fn byte_len(&self) -> usize {
@@ -116,8 +132,15 @@ fn align_up_u32(value: u32, alignment: u32) -> Result<u32, GeometryError> {
 
 /// Exact `div255` rounding shared by raster, compositor, and tests.
 #[inline]
-pub fn div255(x: u32) -> u32 {
+pub const fn div255(x: u16) -> u32 {
+    let x = x as u32;
     (x + 128 + ((x + 128) >> 8)) >> 8
+}
+
+#[inline]
+fn blend_dst_channel(dst_channel: u8, inv: u32) -> u32 {
+    let product = u32::from(dst_channel) * inv;
+    div255(product as u16)
 }
 
 /// Reference premultiplied B,G,R,A `over` (bytes in that order).
@@ -127,14 +150,10 @@ pub fn over(src: [u8; 4], dst: [u8; 4]) -> [u8; 4] {
     let sg = u32::from(src[1].min(a));
     let sr = u32::from(src[2].min(a));
     let inv = 255u32 - u32::from(a);
-    let db = u32::from(dst[0]);
-    let dg = u32::from(dst[1]);
-    let dr = u32::from(dst[2]);
-    let da = u32::from(dst[3]);
-    let out_b = sb + div255(db * inv);
-    let out_g = sg + div255(dg * inv);
-    let out_r = sr + div255(dr * inv);
-    let out_a = u32::from(a) + div255(da * inv);
+    let out_b = sb + blend_dst_channel(dst[0], inv);
+    let out_g = sg + blend_dst_channel(dst[1], inv);
+    let out_r = sr + blend_dst_channel(dst[2], inv);
+    let out_a = u32::from(a) + blend_dst_channel(dst[3], inv);
     [
         out_b.min(255) as u8,
         out_g.min(255) as u8,
@@ -177,7 +196,7 @@ mod tests {
                 MAX_STRIDE_BYTES + 4,
                 PixelFormat::Xrgb8888
             ),
-            Err(GeometryError::StrideTooSmall)
+            Err(GeometryError::StrideTooLarge)
         );
         let tall = (MAX_BUFFER_BYTES / u64::from(MAX_STRIDE_BYTES)) as u32 + 1;
         assert_eq!(
@@ -198,9 +217,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reference.byte_len(), 4_096_000);
+        assert_eq!(reference.width(), REFERENCE_MODE.width_px);
 
         let packed = BufferLayout::packed(127, 1, PixelFormat::Xrgb8888).unwrap();
-        assert_eq!(packed.stride_bytes, 512);
+        assert_eq!(packed.stride_bytes(), 512);
+    }
+
+    #[test]
+    fn buffer_layout_fields_not_constructible_without_validation() {
+        fn uses_accessors(layout: BufferLayout) -> u32 {
+            layout.width() + layout.stride_bytes()
+        }
+        let layout = BufferLayout::new(10, 10, 40, PixelFormat::Xrgb8888).unwrap();
+        assert_eq!(uses_accessors(layout), 50);
     }
 
     #[test]
@@ -208,6 +237,12 @@ mod tests {
         let layout = BufferLayout::new(10, 10, 40, PixelFormat::Xrgb8888).unwrap();
         assert!(layout.fits_in(400));
         assert!(!layout.fits_in(399));
+    }
+
+    #[test]
+    fn div255_accepts_full_blend_domain() {
+        assert_eq!(div255(65025), 255);
+        assert_eq!(div255(0), 0);
     }
 
     #[test]
@@ -246,10 +281,10 @@ mod tests {
         let dr = u32::from(dst[2]);
         let da = u32::from(dst[3]);
         [
-            sb + div255(db * inv),
-            sg + div255(dg * inv),
-            sr + div255(dr * inv),
-            u32::from(a) + div255(da * inv),
+            sb + div255(u16::try_from(db * inv).unwrap()),
+            sg + div255(u16::try_from(dg * inv).unwrap()),
+            sr + div255(u16::try_from(dr * inv).unwrap()),
+            u32::from(a) + div255(u16::try_from(da * inv).unwrap()),
         ]
     }
 

@@ -1,6 +1,7 @@
 //! Logical and buffer-space geometry with checked arithmetic.
 
 use crate::error::GeometryError;
+
 /// Logical point in global or surface-local space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Point {
@@ -45,9 +46,56 @@ impl Scale120 {
     pub const ONE: Self = Self(120);
 }
 
+impl BufferRect {
+    pub fn to_rect(self) -> Rect {
+        Rect {
+            x: i32::from(self.x),
+            y: i32::from(self.y),
+            width: u32::from(self.width),
+            height: u32::from(self.height),
+        }
+    }
+
+    /// Clips to `[0, width) × [0, height)` in buffer space using `u32` arithmetic.
+    pub fn clip_to_extent(self, width: u32, height: u32) -> Option<BufferRect> {
+        if self.width == 0 || self.height == 0 {
+            return None;
+        }
+        let x0 = u32::from(self.x);
+        let y0 = u32::from(self.y);
+        let x1 = x0.checked_add(u32::from(self.width))?;
+        let y1 = y0.checked_add(u32::from(self.height))?;
+        if x0 >= width || y0 >= height {
+            return None;
+        }
+        let clip_x1 = x1.min(width);
+        let clip_y1 = y1.min(height);
+        let w = clip_x1.checked_sub(x0)?;
+        let h = clip_y1.checked_sub(y0)?;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        Some(BufferRect {
+            x: u16::try_from(x0).ok()?,
+            y: u16::try_from(y0).ok()?,
+            width: u16::try_from(w).ok()?,
+            height: u16::try_from(h).ok()?,
+        })
+    }
+}
+
 impl Rect {
     pub fn is_empty(self) -> bool {
         self.width == 0 || self.height == 0
+    }
+
+    pub fn validate(self) -> Result<Rect, GeometryError> {
+        if self.width > i32::MAX as u32 || self.height > i32::MAX as u32 {
+            return Err(GeometryError::Overflow);
+        }
+        self.checked_right()?;
+        self.checked_bottom()?;
+        Ok(self)
     }
 
     pub fn checked_right(self) -> Result<i32, GeometryError> {
@@ -62,25 +110,27 @@ impl Rect {
             .ok_or(GeometryError::Overflow)
     }
 
-    pub fn intersect(self, other: Rect) -> Option<Rect> {
+    pub fn intersect(self, other: Rect) -> Result<Option<Rect>, GeometryError> {
+        self.validate()?;
+        other.validate()?;
         let left = self.x.max(other.x);
         let top = self.y.max(other.y);
-        let right = self.checked_right().ok()?.min(other.checked_right().ok()?);
-        let bottom = self
-            .checked_bottom()
-            .ok()?
-            .min(other.checked_bottom().ok()?);
-        let width = right.checked_sub(left);
-        let height = bottom.checked_sub(top);
-        match (width, height) {
-            (Some(w), Some(h)) if w > 0 && h > 0 => Some(Rect {
-                x: left,
-                y: top,
-                width: u32::try_from(w).ok()?,
-                height: u32::try_from(h).ok()?,
-            }),
-            _ => None,
-        }
+        let right = self.checked_right()?.min(other.checked_right()?);
+        let bottom = self.checked_bottom()?.min(other.checked_bottom()?);
+        let width = match right.checked_sub(left) {
+            Some(w) if w > 0 => w,
+            _ => return Ok(None),
+        };
+        let height = match bottom.checked_sub(top) {
+            Some(h) if h > 0 => h,
+            _ => return Ok(None),
+        };
+        Ok(Some(Rect {
+            x: left,
+            y: top,
+            width: u32::try_from(width).map_err(|_| GeometryError::Overflow)?,
+            height: u32::try_from(height).map_err(|_| GeometryError::Overflow)?,
+        }))
     }
 
     pub fn union_bounds(self, other: Rect) -> Result<Rect, GeometryError> {
@@ -107,9 +157,13 @@ impl Rect {
         })
     }
 
-    pub fn clip_to(self, bounds: Size) -> Option<Rect> {
+    pub fn clip_to(self, bounds: Size) -> Result<Option<Rect>, GeometryError> {
+        if bounds.width > i32::MAX as u32 || bounds.height > i32::MAX as u32 {
+            return Err(GeometryError::Overflow);
+        }
+        self.validate()?;
         if self.is_empty() {
-            return None;
+            return Ok(None);
         }
         let clip = Rect {
             x: 0,
@@ -117,9 +171,7 @@ impl Rect {
             width: bounds.width,
             height: bounds.height,
         };
-        if i32::try_from(bounds.width).is_err() || i32::try_from(bounds.height).is_err() {
-            return None;
-        }
+        clip.validate()?;
         self.intersect(clip)
     }
 }
@@ -152,15 +204,15 @@ impl<const N: usize> RectSet<N> {
         }
     }
 
-    pub fn len(self) -> usize {
+    pub fn len(&self) -> usize {
         self.len
     }
 
-    pub fn is_empty(self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    pub fn is_collapsed(self) -> bool {
+    pub fn is_collapsed(&self) -> bool {
         self.collapsed
     }
 
@@ -172,6 +224,7 @@ impl<const N: usize> RectSet<N> {
         if rect.is_empty() {
             return Ok(());
         }
+        rect.validate()?;
         if self.len < N {
             self.rects[self.len] = rect;
             self.len += 1;
@@ -182,6 +235,7 @@ impl<const N: usize> RectSet<N> {
             acc = acc.union_bounds(self.rects[i])?;
         }
         acc = acc.union_bounds(rect)?;
+        acc.validate()?;
         self.rects[0] = acc;
         self.len = 1;
         self.collapsed = true;
@@ -192,6 +246,7 @@ impl<const N: usize> RectSet<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::limits::MAX_SURFACE_EXTENT;
 
     fn rect(x: i32, y: i32, w: u32, h: u32) -> Rect {
         Rect {
@@ -216,12 +271,54 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_non_representable_extent() {
+        assert_eq!(
+            rect(0, 0, u32::MAX, 1).validate(),
+            Err(GeometryError::Overflow)
+        );
+    }
+
+    #[test]
     fn intersect_commutative_and_empty() {
         let a = rect(0, 0, 10, 10);
         let b = rect(5, 5, 10, 10);
         assert_eq!(a.intersect(b), b.intersect(a));
-        assert_eq!(a.intersect(b), Some(rect(5, 5, 5, 5)));
-        assert_eq!(a.intersect(rect(20, 0, 5, 5)), None);
+        assert_eq!(a.intersect(b), Ok(Some(rect(5, 5, 5, 5))));
+        assert_eq!(a.intersect(rect(20, 0, 5, 5)), Ok(None));
+    }
+
+    #[test]
+    fn intersect_err_on_overflowing_operand() {
+        let bad = rect(i32::MAX, 0, 1, 1);
+        let ok = rect(0, 0, 10, 10);
+        assert_eq!(bad.intersect(ok), Err(GeometryError::Overflow));
+        assert_eq!(ok.intersect(bad), Err(GeometryError::Overflow));
+    }
+
+    #[test]
+    fn clip_to_err_on_overflowing_rect_or_bounds() {
+        let bad = rect(i32::MAX, 0, 1, 1);
+        assert_eq!(
+            bad.clip_to(Size {
+                width: 10,
+                height: 10
+            }),
+            Err(GeometryError::Overflow)
+        );
+        assert_eq!(
+            rect(0, 0, 1, 1).clip_to(Size {
+                width: u32::MAX,
+                height: 1
+            }),
+            Err(GeometryError::Overflow)
+        );
+    }
+
+    #[test]
+    fn union_bounds_empty_operand() {
+        let a = rect(1, 2, 3, 4);
+        assert_eq!(a.union_bounds(rect(0, 0, 0, 5)), Ok(a));
+        assert_eq!(rect(0, 0, 0, 5).union_bounds(a), Ok(a));
     }
 
     #[test]
@@ -237,21 +334,21 @@ mod tests {
                 width: 10,
                 height: 10
             }),
-            Some(inside)
+            Ok(Some(inside))
         );
         assert_eq!(
             rect(8, 8, 5, 5).clip_to(Size {
                 width: 10,
                 height: 10
             }),
-            Some(rect(8, 8, 2, 2))
+            Ok(Some(rect(8, 8, 2, 2)))
         );
         assert_eq!(
             rect(10, 0, 1, 1).clip_to(Size {
                 width: 10,
                 height: 10
             }),
-            None
+            Ok(None)
         );
     }
 
@@ -271,5 +368,67 @@ mod tests {
         let mut set = RectSet::<4>::new();
         assert!(set.insert(rect(0, 0, 0, 5)).is_ok());
         assert_eq!(set.len(), 0);
+    }
+
+    #[test]
+    fn rect_set_unchanged_on_validate_failure() {
+        let mut set = RectSet::<2>::new();
+        assert!(set.insert(rect(0, 0, 10, 10)).is_ok());
+        let before = set;
+        assert_eq!(
+            set.insert(rect(i32::MAX, 0, 1, 1)),
+            Err(GeometryError::Overflow)
+        );
+        assert_eq!(set, before);
+
+        let mut full = RectSet::<2>::new();
+        assert!(full.insert(rect(0, 0, 10, 10)).is_ok());
+        assert!(full.insert(rect(20, 0, 5, 5)).is_ok());
+        let before_full = full;
+        assert_eq!(
+            full.insert(rect(i32::MAX, 0, 1, 1)),
+            Err(GeometryError::Overflow)
+        );
+        assert_eq!(full, before_full);
+    }
+
+    #[test]
+    fn buffer_rect_clip_at_u16_max_and_extent() {
+        let edge = BufferRect {
+            x: u16::MAX,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+        assert!(edge.clip_to_extent(u32::from(u16::MAX) + 1, 1).is_some());
+        assert!(edge.clip_to_extent(u32::from(u16::MAX), 1).is_none());
+
+        let partial = BufferRect {
+            x: 100,
+            y: 100,
+            width: 500,
+            height: 500,
+        };
+        let clipped = partial
+            .clip_to_extent(MAX_SURFACE_EXTENT, MAX_SURFACE_EXTENT)
+            .unwrap();
+        assert_eq!(clipped.x, 100);
+        assert_eq!(clipped.width, 500);
+        assert!(partial
+            .clip_to_extent(200, 200)
+            .is_some_and(|r| r.width == 100 && r.height == 100));
+    }
+
+    #[test]
+    fn buffer_rect_to_rect_round_trip_fields() {
+        let br = BufferRect {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        };
+        let r = br.to_rect();
+        assert_eq!(r.x, 1);
+        assert_eq!(r.width, 3);
     }
 }

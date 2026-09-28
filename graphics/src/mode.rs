@@ -3,6 +3,7 @@
 use crate::geometry::Scale120;
 use crate::geometry::Size;
 use crate::ids::OutputId;
+use crate::limits::MAX_BUFFER_BYTES;
 use crate::pixel::PixelFormat;
 
 /// Physical scanout parameters visible to clients after negotiation.
@@ -42,3 +43,4 @@ const _: () = assert!(
         == REFERENCE_MODE.stride_bytes as usize * REFERENCE_MODE.height_px as usize
 );
 const _: () = assert!(REFERENCE_FRAME_BYTES == 1000 * 4096);
+const _: () = assert!((REFERENCE_FRAME_BYTES as u64) <= MAX_BUFFER_BYTES);
