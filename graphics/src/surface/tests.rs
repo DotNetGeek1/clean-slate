@@ -597,8 +597,7 @@ fn opaque_append_at_capacity_with_only_dropped_rects_stays_rects() {
     assert!(
         matches!(s.pending().opaque(), OpaqueRegion::Rects(set) if set.len() == MAX_REGION_RECTS)
     );
-    s.set_opaque_region(&[rect(-10, -10, 1, 1)], false)
-        .unwrap();
+    s.set_opaque_region(&[rect(-10, -10, 1, 1)], false).unwrap();
     assert!(
         matches!(s.pending().opaque(), OpaqueRegion::Rects(set) if set.len() == MAX_REGION_RECTS)
     );
