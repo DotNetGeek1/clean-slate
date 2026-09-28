@@ -1,0 +1,19 @@
+[package]
+name = "clean-slate-native-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Generic native kernel ABI shared by kernel and userspace (shared buffers, port, work sets)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+clean-slate-capability = { path = "../capability" }
+
+[dev-dependencies]
+clean-slate-graphics = { path = "../graphics" }
+
+[lints]
+workspace = true

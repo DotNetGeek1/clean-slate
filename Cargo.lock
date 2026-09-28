@@ -147,6 +147,14 @@ name = "clean-slate-linux-abi"
 version = "0.0.1"
 
 [[package]]
+name = "clean-slate-native-abi"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-capability",
+ "clean-slate-graphics",
+]
+
+[[package]]
 name = "clean-slate-net-service"
 version = "0.0.1"
 dependencies = [
