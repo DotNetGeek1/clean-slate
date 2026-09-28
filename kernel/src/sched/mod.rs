@@ -6,6 +6,7 @@ pub(crate) mod dispatch;
 pub(crate) mod fpu;
 pub(crate) mod idle;
 pub(crate) mod wait;
+pub(crate) mod work_set;
 
 /// Application / userspace thread slots (`MAX_WAITERS` matches this count).
 pub(super) const TASK_COUNT: usize = task_count_for_features();

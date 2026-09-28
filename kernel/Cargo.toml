@@ -116,6 +116,7 @@ clean-slate-network = { path = "../network" }
 rand_core = { version = "=0.6.4", default-features = false, optional = true }
 clean-slate-capability = { path = "../capability" }
 clean-slate-linux-abi = { path = "../linux-abi" }
+clean-slate-native-abi = { path = "../native-abi" }
 clean-slate-rootfs = { path = "../rootfs", optional = true }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
