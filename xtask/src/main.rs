@@ -1808,7 +1808,7 @@ fn run_cargo_package_tests(package: &str, filter: &[&str]) -> Result<(), XtaskEr
     run_host_test_command(&mut test)
 }
 
-fn run_cargo_package_build_uefi(package: &str) -> Result<(), XtaskError> {
+fn run_cargo_package_build_uefi(package: &str, features: &[&str]) -> Result<(), XtaskError> {
     let mut build = Command::new("cargo");
     build
         .current_dir(workspace_root())
@@ -1817,6 +1817,9 @@ fn run_cargo_package_build_uefi(package: &str) -> Result<(), XtaskError> {
         .arg(package)
         .arg("--target")
         .arg(KERNEL_TARGET);
+    if !features.is_empty() {
+        build.arg("--features").arg(features.join(","));
+    }
     run_host_test_command(&mut build)
 }
 
@@ -1834,8 +1837,8 @@ fn run_m10_contract_acceptance() -> Result<(), XtaskError> {
         .arg("-p")
         .arg("clean-slate-capability");
     run_host_test_command(&mut test)?;
-    run_cargo_package_build_uefi("clean-slate-graphics")?;
-    run_cargo_package_build_uefi("clean-slate-native-abi")?;
+    run_cargo_package_build_uefi("clean-slate-graphics", &["fake"])?;
+    run_cargo_package_build_uefi("clean-slate-native-abi", &[])?;
     println!("[M10.contract] PASS");
     Ok(())
 }
