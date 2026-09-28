@@ -463,6 +463,72 @@ fn golden_frames() {
             modifiers: Modifiers::from_bits(0).unwrap(),
         }
     );
+
+    let hello_val = Request::Hello {
+        version: ProtocolVersion { major: 1, minor: 0 },
+        features: Features(0),
+    };
+    assert_eq!(hello_val.encode(TAG).unwrap(), GOLDEN_HELLO);
+
+    let attach_val = Request::Attach {
+        surface: surf(1),
+        buffer: None,
+        buffer_scale: Scale120::ONE,
+    };
+    assert_eq!(attach_val.encode(TAG).unwrap(), GOLDEN_ATTACH);
+
+    let region_val = Request::SetOpaqueRegion {
+        surface: surf(1),
+        count: 3,
+        replace: true,
+        rects: [
+            Rect {
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4,
+            },
+            Rect {
+                x: 5,
+                y: 6,
+                width: 7,
+                height: 8,
+            },
+            Rect {
+                x: 9,
+                y: 10,
+                width: 11,
+                height: 12,
+            },
+        ],
+    };
+    assert_eq!(region_val.encode(TAG).unwrap(), GOLDEN_SET_OPAQUE_REGION);
+
+    let configure_val = Event::Configure {
+        window: win(1),
+        serial: Serial(99),
+        size: Size {
+            width: 640,
+            height: 480,
+        },
+        scale: Scale120::ONE,
+        decoration: DecorationMode::Server,
+        states: WindowStates::from_bits(0).unwrap(),
+        bounds: Size {
+            width: 0,
+            height: 0,
+        },
+    };
+    assert_eq!(configure_val.encode(0).unwrap(), GOLDEN_CONFIGURE);
+
+    let key_val = Event::Key {
+        serial: Serial(42),
+        time_ns: 100,
+        usage: KEY_A,
+        state: KeyState::Pressed,
+        modifiers: Modifiers::from_bits(0).unwrap(),
+    };
+    assert_eq!(key_val.encode(0).unwrap(), GOLDEN_KEY);
 }
 
 #[test]

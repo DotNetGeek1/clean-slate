@@ -15,6 +15,7 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod abi;
 pub mod error;
 pub mod geometry;
 pub mod ids;
@@ -23,9 +24,11 @@ pub mod limits;
 pub mod mode;
 pub mod pixel;
 pub mod protocol;
+pub mod raw_input;
 pub mod role;
 pub mod window;
 
+pub use abi::{display, input as input_abi, status as abi_status};
 pub use error::{GeometryError, LimitError, LookupError};
 pub use geometry::{BufferRect, Fixed24_8, Point, Rect, RectSet, Scale120, Size};
 pub use ids::{
@@ -53,6 +56,7 @@ pub use protocol::{
     ProtocolVersion, Request, Tagged, BODY_BYTES, BODY_OFFSET, FRAME_BYTES, HEADER_BYTES,
     M10_SERVER_FEATURES, PROTOCOL_MAJOR, PROTOCOL_MINOR, SERVER_VERSION,
 };
+pub use raw_input::{RawInputDecodeError, RawInputKind, RawInputRecord, RAW_INPUT_RECORD_BYTES};
 pub use role::{Layer, SurfaceRole};
 pub use window::{DecorationMode, ResizeEdges, WindowStates, WindowTitle};
 
