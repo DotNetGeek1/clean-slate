@@ -21,6 +21,7 @@ impl JsonNumber {
         &self.0
     }
 
+    #[cfg(test)]
     pub(crate) fn as_i64(&self) -> Option<i64> {
         let s = &self.0;
         if s.contains('.') || s.contains('e') || s.contains('E') {
@@ -41,6 +42,7 @@ impl JsonNumber {
     }
 }
 
+#[cfg(test)]
 fn parse_i64_lexeme(s: &str) -> Option<i64> {
     if s.is_empty() {
         return None;
@@ -566,6 +568,7 @@ impl JsonValue {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn as_i64(&self) -> Option<i64> {
         match self {
             JsonValue::Number(n) => n.as_i64(),

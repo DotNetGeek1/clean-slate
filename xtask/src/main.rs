@@ -5,10 +5,10 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode, ExitStatus, Stdio};
 use std::sync::{mpsc, Once};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 mod m7_certs;
 mod m7_fixture;
@@ -913,6 +913,9 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10Contract => run_m10_contract_acceptance(),
         ParsedCommand::TestM10Nxe => run_m10_nxe_acceptance(),
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
+        ParsedCommand::TestQmpSmoke => {
+            qmp::smoke::run(&workspace_root().join("target").join("qmp-artifacts"))
+        }
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -955,6 +958,7 @@ fn run_m5_block_acceptance() -> Result<(), XtaskError> {
             m7_fixture_port: None,
             kernel_release: false,
             cpu_model: None,
+            machine_extra: None,
         },
     )
 }
@@ -981,6 +985,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             m7_fixture_port: Some(port),
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
+            machine_extra: None,
         },
     );
     peer.shutdown();
@@ -1007,6 +1012,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             m7_fixture_port: Some(port),
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
+            machine_extra: None,
         },
     );
     peer.shutdown();
@@ -1030,6 +1036,7 @@ fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
             m7_fixture_port: Some(port),
             kernel_release: false,
             cpu_model: None,
+            machine_extra: None,
         },
     );
     peer.shutdown();
@@ -1058,6 +1065,7 @@ fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
             m7_fixture_port: Some(port),
             kernel_release: false,
             cpu_model: None,
+            machine_extra: None,
         },
     );
     peer.shutdown();
@@ -1231,6 +1239,7 @@ fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
             m7_fixture_port: None,
             kernel_release: false,
             cpu_model: None,
+            machine_extra: None,
         };
 
         println!("[M5.H] phase 1/2 boot");
@@ -1411,6 +1420,7 @@ fn run_m9_userspace_acceptance() -> Result<(), XtaskError> {
             m7_fixture_port: Some(port),
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
+            machine_extra: None,
         },
     );
     peer.shutdown();
@@ -1551,6 +1561,7 @@ fn run_m9_linux_socket_acceptance() -> Result<(), XtaskError> {
             m7_fixture_port: Some(port),
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
+            machine_extra: None,
         },
     );
     peer.shutdown();
@@ -2035,6 +2046,7 @@ fn run_m7_network_acceptance() -> Result<(), XtaskError> {
             m7_fixture_port: Some(port),
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
+            machine_extra: None,
         },
     );
     peer.shutdown();
@@ -2205,6 +2217,7 @@ fn m5_storage_vm_config() -> VmLaunchConfig {
         m7_fixture_port: None,
         kernel_release: false,
         cpu_model: None,
+        machine_extra: None,
     }
 }
 
@@ -2293,6 +2306,9 @@ struct VmLaunchConfig {
     kernel_release: bool,
     /// Optional QEMU `-cpu` model (TLS lane needs RDRAND).
     cpu_model: Option<&'static str>,
+    /// Appended to `-machine q35,`; input lanes pass `vmport=off` so the
+    /// PS/2 mouse is the only pointer.
+    machine_extra: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2323,6 +2339,42 @@ fn run_vm_inner_with_config(
     acceptance: Option<(MarkerSet<'static>, Duration)>,
     config: VmLaunchConfig,
 ) -> Result<(), XtaskError> {
+    let mut vm = prepare_vm(wait_for_gdb, debug_entry, features, config)?;
+    match acceptance {
+        Some((marker_set, timeout)) => run_acceptance_command(&mut vm.qemu, marker_set, timeout),
+        None => run_command(&mut vm.qemu),
+    }
+}
+
+/// Boots an acceptance kernel with `driver` attached (for example a
+/// [`qmp::QmpScriptDriver`]) and returns the captured output. Never waits
+/// for gdb: a paused VM rejects input.
+#[allow(dead_code)]
+fn run_vm_with_driver(
+    features: &[&str],
+    marker_set: MarkerSet<'static>,
+    timeout: Duration,
+    config: VmLaunchConfig,
+    driver: &mut dyn AcceptanceDriver,
+) -> Result<String, XtaskError> {
+    let mut vm = prepare_vm(false, false, features, config)?;
+    vm.qemu.args(driver.qemu_args());
+    run_driven_acceptance_command(&mut vm.qemu, marker_set, timeout, driver)
+}
+
+/// A ready-to-spawn QEMU command. The runtime vars copy is dropped with it,
+/// after the caller has reaped QEMU.
+struct PreparedVm {
+    qemu: Command,
+    _runtime_vars: Option<RuntimeVarsCopy>,
+}
+
+fn prepare_vm(
+    wait_for_gdb: bool,
+    debug_entry: bool,
+    features: &[&str],
+    config: VmLaunchConfig,
+) -> Result<PreparedVm, XtaskError> {
     let release = config.kernel_release;
     build_kernel(release, debug_entry, features)?;
 
@@ -2343,26 +2395,41 @@ fn run_vm_inner_with_config(
     // (common when OVMF_VARS env points at a working copy) leaves the next
     // boot stuck before BDS or timing out after PASS. Always launch from a
     // fresh runtime copy.
-    let m5_vars;
-    let runtime_vars_copy;
-    let runtime_vars: &Path = if config.reset_ovmf_vars {
-        m5_vars = m5_fixture_dir().join("OVMF_VARS.fd");
+    let (runtime_vars, runtime_vars_copy) = if config.reset_ovmf_vars {
+        let m5_vars = m5_fixture_dir().join("OVMF_VARS.fd");
         if let Some(parent) = m5_vars.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::copy(&ovmf.vars_template, &m5_vars)?;
-        &m5_vars
+        (m5_vars, None)
     } else {
         let target_dir = workspace_root().join("target");
         sweep_stale_runtime_vars_once(&target_dir);
-        // Dropped after the QEMU child below has been killed and reaped.
-        runtime_vars_copy = RuntimeVarsCopy::create(&target_dir, &ovmf.vars_template)?;
-        runtime_vars_copy.path()
+        // Dropped with the `PreparedVm`, after the QEMU child has been reaped.
+        let copy = RuntimeVarsCopy::create(&target_dir, &ovmf.vars_template)?;
+        (copy.path().to_path_buf(), Some(copy))
     };
 
+    Ok(PreparedVm {
+        qemu: qemu_command(&ovmf, &runtime_vars, &esp_dir, &config, wait_for_gdb),
+        _runtime_vars: runtime_vars_copy,
+    })
+}
+
+fn qemu_command(
+    ovmf: &OvmfPaths,
+    runtime_vars: &Path,
+    esp_dir: &Path,
+    config: &VmLaunchConfig,
+    wait_for_gdb: bool,
+) -> Command {
     let mut qemu = Command::new("qemu-system-x86_64");
+    let machine = match config.machine_extra {
+        Some(extra) => format!("q35,{extra}"),
+        None => "q35".to_owned(),
+    };
     qemu.arg("-machine")
-        .arg("q35")
+        .arg(machine)
         .arg("-m")
         .arg("512M")
         .arg("-serial")
@@ -2387,8 +2454,8 @@ fn run_vm_inner_with_config(
     if let Some(cpu) = config.cpu_model {
         qemu.arg("-cpu").arg(cpu);
     }
-    if let Some(m5_data_disk) = config.m5_data_disk {
-        append_m5_disk_args(&mut qemu, &m5_data_disk);
+    if let Some(m5_data_disk) = &config.m5_data_disk {
+        append_m5_disk_args(&mut qemu, m5_data_disk);
     }
     if let Some(port) = config.m7_fixture_port {
         append_m7_net_args(&mut qemu, port);
@@ -2397,11 +2464,7 @@ fn run_vm_inner_with_config(
     if wait_for_gdb {
         qemu.arg("-S").arg("-s");
     }
-
-    match acceptance {
-        Some((marker_set, timeout)) => run_acceptance_command(&mut qemu, marker_set, timeout),
-        None => run_command(&mut qemu),
-    }
+    qemu
 }
 
 /// Clears runtime vars copies left by earlier xtask processes that died
@@ -2778,7 +2841,7 @@ fn run_timed_command(command: &mut Command, timeout: Duration) -> Result<(), Xta
                 join_output_reader(stderr_handle);
                 return Err(XtaskError::Io(error));
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(OutputEvent::DriverWake) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => readers_finished = 2,
         }
 
@@ -3191,12 +3254,83 @@ fn timeout_context(output: &str, pending_marker: Option<&str>) -> String {
     context
 }
 
+/// Mid-run hooks for [`run_driven_acceptance_command`]. Every hook runs on
+/// the acceptance loop's thread, so serial capture keeps buffering in the
+/// reader threads while a hook blocks on a bounded QMP call.
+trait AcceptanceDriver {
+    /// Extra QEMU arguments, appended after the lane's own.
+    fn qemu_args(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Called once, right after QEMU is spawned.
+    fn start(&mut self, _wake: DriverWake) -> Result<(), XtaskError> {
+        Ok(())
+    }
+    /// Called with each stdout chunk until the lane passes.
+    fn on_serial(&mut self, _text: &str, _deadline: Instant) -> Result<(), XtaskError> {
+        Ok(())
+    }
+    /// Called when the driver's own background work asked to be run.
+    fn on_wake(&mut self, _deadline: Instant) -> Result<(), XtaskError> {
+        Ok(())
+    }
+    /// Called after the markers pass and before xtask stops QEMU; captures
+    /// that must see the final frame run here at the latest.
+    fn before_teardown(&mut self, _deadline: Instant) -> Result<(), XtaskError> {
+        Ok(())
+    }
+    /// Called when QEMU exited on its own with a success status.
+    fn after_exit(&mut self, _status: ExitStatus) -> Result<(), XtaskError> {
+        Ok(())
+    }
+    /// What the driver is waiting for, quoted in timeout errors.
+    fn pending(&self) -> Option<String> {
+        None
+    }
+    /// Releases the driver's connections; runs on every exit path.
+    fn shutdown(&mut self) {}
+}
+
+struct NoDriver;
+
+impl AcceptanceDriver for NoDriver {}
+
+/// Re-enters the acceptance loop from a driver's helper thread.
+struct DriverWake(mpsc::Sender<OutputEvent>);
+
+impl DriverWake {
+    fn wake(&self) {
+        let _ = self.0.send(OutputEvent::DriverWake);
+    }
+}
+
+/// Declared after the QEMU child so it drops, and shuts the driver down,
+/// before the child is killed and reaped.
+struct ShutdownOnDrop<'a>(&'a mut dyn AcceptanceDriver);
+
+impl Drop for ShutdownOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.shutdown();
+    }
+}
+
 fn run_acceptance_command(
     command: &mut Command,
     marker_set: MarkerSet<'static>,
     timeout: Duration,
 ) -> Result<(), XtaskError> {
+    run_driven_acceptance_command(command, marker_set, timeout, &mut NoDriver).map(drop)
+}
+
+/// [`run_acceptance_command`] with mid-run hooks; returns the captured output.
+fn run_driven_acceptance_command(
+    command: &mut Command,
+    marker_set: MarkerSet<'static>,
+    timeout: Duration,
+    driver: &mut dyn AcceptanceDriver,
+) -> Result<String, XtaskError> {
     let start = std::time::Instant::now();
+    let deadline = start + timeout;
     let command_display = format!(
         "{} {}",
         command.get_program().to_string_lossy(),
@@ -3219,10 +3353,20 @@ fn run_acceptance_command(
         .ok_or_else(|| std::io::Error::other("failed to capture child stderr"))?;
     let (tx, rx) = mpsc::channel();
     let stdout_handle = spawn_output_reader(stdout, false, tx.clone());
-    let stderr_handle = spawn_output_reader(stderr, true, tx);
+    let stderr_handle = spawn_output_reader(stderr, true, tx.clone());
+    let driver = ShutdownOnDrop(driver);
+    let mut output = String::new();
+    if let Err(error) = driver.0.start(DriverWake(tx)) {
+        return Err(abort_driven_acceptance(
+            &mut child,
+            [stdout_handle, stderr_handle],
+            &rx,
+            &mut output,
+            error,
+        ));
+    }
 
     let mut tracker = MarkerTracker::from_set(marker_set);
-    let mut output = String::new();
     let mut readers_finished = 0usize;
     let mut authoritative_pass = false;
     let mut child_status = None;
@@ -3234,14 +3378,31 @@ fn run_acceptance_command(
             join_output_reader(stdout_handle);
             join_output_reader(stderr_handle);
             drain_output_events(&rx, &mut output);
+            let mut context = timeout_context(&output, Some(&tracker.pending_label()));
+            if let Some(pending) = driver.0.pending() {
+                context.push_str(&format!("; {pending}"));
+            }
             return Err(XtaskError::CommandTimedOut {
                 command: command_display,
                 timeout: timeout.as_secs(),
-                context: timeout_context(&output, Some(&tracker.pending_label())),
+                context,
             });
         }
 
         match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(OutputEvent::DriverWake) => {
+                if !authoritative_pass {
+                    if let Err(error) = driver.0.on_wake(deadline) {
+                        return Err(abort_driven_acceptance(
+                            &mut child,
+                            [stdout_handle, stderr_handle],
+                            &rx,
+                            &mut output,
+                            error,
+                        ));
+                    }
+                }
+            }
             Ok(OutputEvent::Chunk(chunk)) => {
                 if chunk.is_stderr {
                     eprint!("{}", chunk.text);
@@ -3276,7 +3437,27 @@ fn run_acceptance_command(
                         }
                     }
                 });
+                if !chunk.is_stderr && !authoritative_pass {
+                    if let Err(error) = driver.0.on_serial(&chunk.text, deadline) {
+                        return Err(abort_driven_acceptance(
+                            &mut child,
+                            [stdout_handle, stderr_handle],
+                            &rx,
+                            &mut output,
+                            error,
+                        ));
+                    }
+                }
                 if tracker.consume(&output) && !authoritative_pass {
+                    if let Err(error) = driver.0.before_teardown(deadline) {
+                        return Err(abort_driven_acceptance(
+                            &mut child,
+                            [stdout_handle, stderr_handle],
+                            &rx,
+                            &mut output,
+                            error,
+                        ));
+                    }
                     if marker_set_is_ordered(marker_set, &M8_LINUX_DISPATCH_ACCEPTANCE_MARKERS) {
                         if let Err(error) = validate_m9_stdio_bytes_line(&output) {
                             terminate_child(&mut child)?;
@@ -3381,7 +3562,7 @@ fn run_acceptance_command(
         if markers_require_verbatim_linux_hello(marker_set) {
             assert_no_ipc_framed_linux_hello(&output)?;
         }
-        return Ok(());
+        return Ok(output);
     }
 
     let status = child_status.unwrap_or(child.wait()?);
@@ -3395,8 +3576,36 @@ fn run_acceptance_command(
             status,
         });
     }
+    if let Err(error) = driver.0.after_exit(status) {
+        return Err(XtaskError::DriverFailed {
+            reason: error.to_string(),
+            context: timeout_context(&output, None),
+        });
+    }
 
-    validate_output_markers(&output, marker_set)
+    validate_output_markers(&output, marker_set)?;
+    Ok(output)
+}
+
+/// Stops QEMU after a driver error and attaches the output tail, as the
+/// timeout path does.
+fn abort_driven_acceptance(
+    child: &mut std::process::Child,
+    readers: [thread::JoinHandle<()>; 2],
+    rx: &mpsc::Receiver<OutputEvent>,
+    output: &mut String,
+    error: XtaskError,
+) -> XtaskError {
+    let _ = terminate_child(child);
+    let _ = child.wait();
+    for reader in readers {
+        join_output_reader(reader);
+    }
+    drain_output_events(rx, output);
+    XtaskError::DriverFailed {
+        reason: error.to_string(),
+        context: timeout_context(output, None),
+    }
 }
 
 /// First guest `[FAIL]` or `[EXC ]` serial line, for reporting a guest that exited
@@ -3707,6 +3916,7 @@ enum OutputEvent {
     Chunk(OutputChunk),
     Finished,
     ReadError(std::io::Error),
+    DriverWake,
 }
 
 fn spawn_output_reader<R: Read + Send + 'static>(
@@ -3818,6 +4028,9 @@ fn print_help() {
     println!("  test-m10-nxe  M10 #195 S0: EFER.NXE host tests, then a CPL3 fetch from an RW+NX page must fault err=0x15 (aliases: m10-nxe)");
     println!(
         "  test-m10-port   M10 #200 service port: port/kernel host tests, then the m10-port-self-test QEMU lane with ordered markers; prints [M10.port] PASS (aliases: m10-port, m10.200)"
+    );
+    println!(
+        "  test-qmp-smoke  QMP harness smoke: SeaBIOS boot-sector fixture, marker-paced key/pointer injection, PNG screendump, failure cleanup; no kernel or OVMF; prints [QMP.smoke] PASS (aliases: qmp-smoke)"
     );
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
@@ -3953,6 +4166,7 @@ enum ParsedCommand {
     TestM10Contract,
     TestM10Nxe,
     TestM10Port,
+    TestQmpSmoke,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -4084,6 +4298,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m10-port" || cmd == "m10-port" || cmd == "m10.200" => {
             ParsedCommand::TestM10Port
         }
+        Some(cmd) if cmd == "test-qmp-smoke" || cmd == "qmp-smoke" => ParsedCommand::TestQmpSmoke,
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
         Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,
@@ -4184,6 +4399,16 @@ enum XtaskError {
     MissingOvmf,
     UnsafePath(PathBuf),
     Validation(String),
+    Qmp {
+        lane: &'static str,
+        step: String,
+        error: qmp::QmpError,
+    },
+    /// An [`AcceptanceDriver`] hook failed; QEMU has been stopped.
+    DriverFailed {
+        reason: String,
+        context: String,
+    },
 }
 
 impl Display for XtaskError {
@@ -4236,6 +4461,12 @@ impl Display for XtaskError {
                 "refusing to modify non-test-owned disk path {}",
                 path.display()
             ),
+            XtaskError::Qmp { lane, step, error } => {
+                write!(f, "{lane} QMP script at {step}: {error}")
+            }
+            XtaskError::DriverFailed { reason, context } => {
+                write!(f, "acceptance driver failed: {reason}{context}")
+            }
         }
     }
 }
@@ -4251,6 +4482,70 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn qemu_argv(config: &VmLaunchConfig, wait_for_gdb: bool) -> Vec<String> {
+        let ovmf = OvmfPaths {
+            code: PathBuf::from("CODE.fd"),
+            vars_template: PathBuf::from("TEMPLATE.fd"),
+        };
+        qemu_command(
+            &ovmf,
+            Path::new("RUN_VARS.fd"),
+            Path::new("ESP"),
+            config,
+            wait_for_gdb,
+        )
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+    }
+
+    #[test]
+    fn qemu_argv_without_qmp_options_is_unchanged() {
+        let config = VmLaunchConfig {
+            cpu_model: Some("qemu64,+rdrand"),
+            ..VmLaunchConfig::default()
+        };
+        assert_eq!(
+            qemu_argv(&config, true),
+            [
+                "-machine",
+                "q35",
+                "-m",
+                "512M",
+                "-serial",
+                "stdio",
+                "-display",
+                "none",
+                "-no-reboot",
+                "-device",
+                "isa-debug-exit,iobase=0xf4,iosize=0x04",
+                "-drive",
+                "if=pflash,format=raw,readonly=on,file=CODE.fd",
+                "-drive",
+                "if=pflash,format=raw,file=RUN_VARS.fd",
+                "-drive",
+                "format=raw,file=fat:rw:ESP",
+                "-cpu",
+                "qemu64,+rdrand",
+                "-S",
+                "-s",
+            ]
+        );
+    }
+
+    #[test]
+    fn machine_extra_only_extends_the_machine_argument() {
+        let plain = qemu_argv(&VmLaunchConfig::default(), false);
+        let config = VmLaunchConfig {
+            machine_extra: Some("vmport=off"),
+            ..VmLaunchConfig::default()
+        };
+        let extended = qemu_argv(&config, false);
+        assert_eq!(extended[1], "q35,vmport=off");
+        assert_eq!(extended[..1], plain[..1]);
+        assert_eq!(extended[2..], plain[2..]);
+    }
 
     #[test]
     fn timeout_context_quotes_pending_marker_and_last_lines() {
@@ -4397,6 +4692,14 @@ mod tests {
         assert_eq!(
             parse_command(Some("m10-nxe".as_ref())),
             ParsedCommand::TestM10Nxe
+        );
+        assert_eq!(
+            parse_command(Some("test-qmp-smoke".as_ref())),
+            ParsedCommand::TestQmpSmoke
+        );
+        assert_eq!(
+            parse_command(Some("qmp-smoke".as_ref())),
+            ParsedCommand::TestQmpSmoke
         );
         assert_eq!(
             parse_command(Some("test-m7-net-caps".as_ref())),

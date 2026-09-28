@@ -44,6 +44,7 @@ impl Screenshot {
         self.height
     }
 
+    /// Row-major RGB, three bytes per pixel.
     pub(crate) fn rgb(&self) -> &[u8] {
         &self.rgb
     }
@@ -327,6 +328,7 @@ pub(crate) fn crc32_update(crc: u32, bytes: &[u8]) -> u32 {
     state ^ 0xFFFF_FFFF
 }
 
+#[cfg(test)]
 pub(crate) fn crc32(bytes: &[u8]) -> u32 {
     crc32_update(0, bytes)
 }
