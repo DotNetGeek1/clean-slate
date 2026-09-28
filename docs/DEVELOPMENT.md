@@ -247,6 +247,14 @@ cargo xtask test-m10-virtio-modern
 
 It runs the kernel `device::virtio` and `sched::timeout` host tests. It then boots the `m10-virtio-modern-self-test` kernel twice against a modern-only `virtio-blk-pci` (`disable-legacy=on`, `ioeventfd=off`) backed by `target/m10-virtio-modern.img`, a 1 MiB image with a sentinel in sector 1. The first boot uses MSI-X (`vectors=2`) and also attaches `virtio-gpu-pci`, which is brought up to queue setup with no GPU commands. The second boot is INTx-only (`vectors=0`). Each boot logs the modern BAR placement (`[VIRTIO] modern bb:dd.f barN base=…`) and reads the sentinel, waiting for both the used entry and the queue interrupt, then checks that no W3 timeout is left armed. It then forces an unnotified request to time out from the timer path (`[VMOD] timeout -> reset-required`), resets and checks that the old token is stale, and finally releases and rediscovers the device. The gate prints `[M10.virtio-modern] PASS`. QEMU is started with `-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=0`, but local QEMU 11.1 OVMF on Windows still places the 64-bit BARs at `0xc0_0000_0000`. That address is inside the firmware identity map the kernel inherits. The Linux CI OVMF honours the option and places them below 4 GiB (`0x800c0000`). The rule is identity-mapped or fail closed, not below 4 GiB: discovery fails closed on any region outside the identity map.
 
+For M10 #195 bounded shared user buffers (host tests plus QEMU scripted lane):
+
+```bash
+cargo xtask test-m10-shared-buffer
+```
+
+Kernel feature: `m10-shared-buffer-self-test`. Host steps: `cargo test -p clean-slate-native-abi`, `cargo test -p clean-slate-service-fixtures`, `cargo test -p clean-slate-capability` (READ-only delegated children), and the kernel `mm::shared_buffer` (object model, window mapping, reconcile and teardown), `frame_allocator` (frame runs) and `nx_` tests. QEMU boots the kernel with that feature and runs the `m10-shared-buffer` scripted fixture lane: an NX phase (same `err=0x15` instruction-fetch check as `test-m10-nxe`), then production syscall-16 phases (cross-process map/read, denial, stale generation, exhaustion, reuse zeroing, kernel-owned pin) and a resource baseline check. Owner-exit, reader-exit, and fault-teardown QEMU phases land with W5/#205 (`SharedMappings` wired into `teardown_current_process`). Ordered markers: `[CPU ] NXE enabled nx=1`, `[M10.SB] creating`, `[M10.SB] nx exec fault err=0x15 OK`, `[M10.SB] cross-process map/read OK`, `[M10.SB] unauthorized denied OK`, `[M10.SB] stale id denied OK`, `[M10.SB] exhaustion deterministic OK`, `[M10.SB] reuse zeroed OK`, `[M10.SB] kernel-owned map OK`, `[M10.SB] baseline OK`, `[M10.SB] PASS`; success prints `[M10.shared-buffer] PASS` (alias `m10-shared-buffer`). See [GRAPHICS.md](GRAPHICS.md#shared-buffers-syscall-16-195).
+
 For M4.2 kernel lifecycle control (host tests + optional QEMU acceptance):
 
 ```bash
@@ -608,8 +616,7 @@ kernel/src
 ├── boot/gop.rs                    (#111) GOP mode capture and fail-closed SetMode before ExitBootServices
 ├── device/display/                (#111) ScanoutBackend: mod.rs, gop.rs; virtio_gpu.rs (#114 planned)
 ├── service/display_syscall.rs     (#111/#114) syscall 18
-├── mm/shared_buffer.rs            (planned, #195) SharedBuffer objects, quotas, syscall 16
-├── mm/shared_mapping.rs           (planned, #195) per-process shared mappings (NX, teardown without freeing frames)
+├── mm/shared_buffer/              (#195) SharedBuffer table, per-process window (PML4 slot 160), syscall 16, W6 transfer attestation, W7 kernel-owned buffers
 ├── capability/graphics.rs         (planned, #112/#118) Graphics/Display/Input grant policy for the M10 launch set
 ├── service/port.rs                (planned, service-port issue) compositor connections and capability transfer
 ├── service/port_syscall.rs        (planned, service-port issue) syscall 17
@@ -619,7 +626,7 @@ kernel/src
 └── device/virtio/                 existing; modern.rs (+ modern/), virtqueue.rs, dma.rs (#196)
 ```
 
-`process/domain.rs` teardown gains, in order (planned, P4): port teardown, display presenter release, input-consumer release, `revoke_for_holder`, shared-mapping teardown, then `destroy_process_address_space`.
+`process/domain.rs` teardown gains, in order (planned, P4): port teardown, display presenter release, input-consumer release, `revoke_for_holder` (step 4 — shared-buffer reconcile via `RevokedBuffers`), **shared-mapping teardown (step 5, W5/#205 — `teardown_process` in `mm/shared_buffer`, not yet wired)**, then `destroy_process_address_space` (step 6 — refuses a live PML4 slot 160).
 
 Conventions:
 
@@ -804,7 +811,7 @@ Preferred order:
 M10 covers steps 2–4 in waves; a lane starts when the issues it depends on have merged (see [GRAPHICS.md](GRAPHICS.md) "Module ownership"):
 
 - Wave 0: #110 shared contract (`clean-slate-graphics`, `clean-slate-native-abi`, `cargo xtask test-m10-contract`).
-- Wave 1: #195 shared buffers, the service-port issue, #111 UEFI framebuffer and raster, #113 i8042 input, #196 VirtIO modern transport, #197 QMP screenshots; #116 may start design tokens and documentation.
+- Wave 1: #195 shared buffers (`test-m10-nxe`, `test-m10-shared-buffer`; teardown step 5 pending #205), the service-port issue, #111 UEFI framebuffer and raster, #113 i8042 input, #196 VirtIO modern transport, #197 QMP screenshots; #116 may start design tokens and documentation.
 - Wave 2: #112 compositor (after #195, the service port and #110), #114 VirtIO GPU (after #196).
 - Wave 3: #115 window management, #116 UI toolkit and desktop shell, #117 playground app.
 - Wave 4: #118 desktop integration.

@@ -7,7 +7,7 @@ The code is authoritative. Offsets, constants and error codes live in three crat
 | Crate | Path | Contents |
 |---|---|---|
 | `clean-slate-graphics` | `graphics/` | geometry, pixels, reference mode, ids, limits, 64-byte protocol codecs, display/input ABI wire types, raw input records, and the reference state machines (roles, surfaces, buffers, windows, input trackers, object tables, connection admission, `FakeDisplay`) |
-| `clean-slate-native-abi` | `native-abi/` | `SharedBufferId`, `SharedBufferAccess`, proposed #195 memory limits; port and work-set ABI (`port.rs`, `work_set.rs`, `status.rs`, #200) |
+| `clean-slate-native-abi` | `native-abi/` | `SharedBufferId`, `SharedBufferAccess`, #195 memory limits and syscall-16 wire types; port and work-set ABI (`port.rs`, `work_set.rs`, `status.rs`, #200) |
 | `clean-slate-capability` | `capability/` | `ResourceClass`, `Rights`, `ResourceRef` constructors, delegation checks, syscall numbers and status sentinels |
 | `clean-slate-raster` | `raster/` | CPU rasterizer and bootstrap text over `clean-slate-graphics` buffer layouts; Spleen 8x16 vendored under BSD-2-Clause. The kernel depends on it (GOP RGBX conversion, framebuffer lane), so it must stay `no_std`, `forbid(unsafe_code)` and allocation-free, with `clean-slate-graphics` as its only dependency |
 
@@ -69,7 +69,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 | Wave | Issue | Owns |
 |---|---|---|
 | 0 | #110 | `graphics/` (whole crate); `native-abi/` skeleton; M10 classes, rights and syscall reservations in `capability/`; `cargo xtask test-m10-contract`; this document |
-| 1 | #195 | `native-abi/src/shared_buffer.rs` contents and memory-level limits; `kernel/src/mm/shared_buffer.rs`, `kernel/src/mm/shared_mapping.rs` (planned); syscall 16; first stage enables and verifies `EFER.NXE` (A4); gate `test-m10-shared-buffer` (planned) |
+| 1 | #195 | **Core landed:** `native-abi/src/shared_buffer.rs`; `kernel/src/mm/shared_buffer/` (object table, per-process window, syscall 16, transfer attestation W6, kernel-owned buffers W7); `EFER.NXE` at boot; gates `test-m10-nxe` and `test-m10-shared-buffer`. **Pending W5/#205:** process teardown step 5 (`SharedMappings` — drop every window row before private address-space destroy) |
 | 1 | #200 | port and work-set ABI in `native-abi` (`port.rs`, `work_set.rs`, `status.rs`); class-agnostic port engine in `port/` (`clean-slate-port`, feature `fake` for host tests); `kernel/src/service/port.rs`, `kernel/src/service/port_syscall.rs`, `kernel/src/sched/work_set.rs`; syscalls 17 and 20; capability transfer on send; gate `test-m10-port` |
 | 1 | #111 | **Landed:** GOP framebuffer backend at 1280x800 Xrgb8888 (BGRX; RGBX converted at present-copy), aperture excluded from the write-back direct map and mapped uncached (UC) where the write path is built (WC via PAT deferred, P10 limitation; the inherited firmware identity alias is covered in ARCHITECTURE.md "M1 virtual memory layout"); `raster/` (`clean-slate-raster`, kernel dependency by design); `kernel/src/boot/gop.rs`; `kernel/src/device/display/{mod.rs, gop.rs}`; syscall 18 `FIND_HANDLE` / `QUERY_MODE` / `PRESENT_STATUS` live (`MAP_SCANOUT` / `PRESENT` `ENOSYS` until #195 S6; `BIND_WAKE` `ENOSYS` until a later #111 stage wires it to the #200 work sets); missing GOP/mode => no backend (`ENODEV`), boot continues; gate `cargo xtask test-m10-framebuffer` (`-vga std`) |
 | 1 | #113 | `kernel/src/device/input/{mod.rs, i8042.rs}`; `kernel/src/service/input_syscall.rs`; syscall 19; scancode to HID usage table in `graphics::input` (all planned) |
@@ -111,6 +111,8 @@ Authoritative source: `capability/src/{resource,rights,authorize,error}.rs`.
 
 **Root-only rights.** `Rights::root_only_for(Graphics)` is `GFX_SHELL | GFX_OVERLAY | GFX_SERVE`; every other class returns the empty set. `validate_delegation` refuses any request whose rights intersect that mask with `CapabilityError::NotDelegable` (`EACCES`), even when the parent holds them. A delegated `Graphics` capability therefore carries at most `GFX_CONNECT | DELEGATE | REVOKE`, and role authority cannot be laundered through delegation.
 
+**SharedBuffer delegation.** `Rights::root_only_for(SharedBuffer)` is `WRITE | DELEGATE | REVOKE`. The owner's root grant is `READ | WRITE | DELEGATE | REVOKE`; every delegated child is `READ` only (`shared_buffer_delegation_allows_only_read_children`). `validate_delegation` enforces this on every delegation path. Fork capability inheritance (#203) is out of scope; a Linux `fork` duplicate cannot widen rights.
+
 **Display authority (S10).** `ResourceRef::display(i)` names physical output `i`. The backend epoch lives only in wire `OutputId` values (`PresentRequest`, `PresentStatus`, `DisplayModeInfo`); `PresentRequest::validate` returns `StaleEpoch` when the caller's epoch does not match the kernel's current output. Revoking display id `i` drops every capability for that output index, independent of epoch.
 
 **No `DELEGATE` for Display and Input.** `DELEGATE` is outside `valid_for(Display)` and `valid_for(Input)`, so a grant that includes it fails with `InvalidRights`, and no holder can ever delegate either class. They are structurally non-delegable.
@@ -139,7 +141,7 @@ Numbers are reserved in `clean_slate_capability::syscall_abi` and aliased in `na
 
 | Number | Constant | Owner | Status |
 |---|---|---|---|
-| 16 | `SYSCALL_NR_SHARED_BUFFER` | #195 | `ENOSYS` for every subop |
+| 16 | `SYSCALL_NR_SHARED_BUFFER` | #195 | implemented for the native personality (Linux-personality callers never reach it): subops 1-5 ([Shared buffers](#shared-buffers-syscall-16-195)); 0 and 6.. `EINVAL` |
 | 17 | `SYSCALL_NR_SERVICE_PORT` | #200 | implemented: subops 1–9 ([Service port ABI](#service-port-abi-syscall-17)); 0 and 10.. → `EINVAL` |
 | 18 | `SYSCALL_NR_DISPLAY` | #111, #114 | subops 1, 2, 5 (`FIND_HANDLE`, `QUERY_MODE`, `PRESENT_STATUS`) implemented; 3, 4 (`MAP_SCANOUT`, `PRESENT`) `ENOSYS` until #195 S6; 6 (`BIND_WAKE`) `ENOSYS` until a later #111 stage wires it to the #200 work sets; 0 and 7.. `EINVAL`; subops frozen in `graphics::abi::display` |
 | 19 | `SYSCALL_NR_INPUT` | #113 | `ENOSYS` for every subop; subops frozen in `graphics::abi::input` |
@@ -202,6 +204,54 @@ Register convention: `rax = 20`, `rdi = subop`; arguments in `rsi`, `rdx`, `r10`
 | 5.. | reserved | — | — | — | — | `EINVAL` |
 
 `WorkSetId` uses the same encoding as `ConnectionId` (slot 0..16, generation 16..48). `work_set::signal` is kernel-internal and IRQ-safe; stale ids are a silent no-op. Port `BIND_WAKE`, and (when they land) display and input `BIND_WAKE`, store `(WorkSetId, bit)` and signal through `work_set::signal`.
+
+## Shared buffers (syscall 16, #195)
+
+Authoritative constants and limits: `clean_slate_native_abi::shared_buffer`. Kernel object model: `kernel/src/mm/shared_buffer/`. Process teardown ordering for the window is in [ARCHITECTURE.md](ARCHITECTURE.md) (step 5 pending #205).
+
+### Syscall contract
+
+All subops use `rdi` = subop, `rax` = return value (0 or a positive handle/VA on success; a `STATUS_*` sentinel on failure). Status sentinels match `SHARED_BUFFER_STATUS_*` in `native-abi` (`EINVAL`, `EACCES`, `ESTALE`, `ENOSPC`, `EAGAIN`, `EBADF`; unknown subop → `EINVAL`).
+
+| Subop | `rdi` | `rsi` | `rdx` | `r10` | Success `rax` | Typical errors |
+|---|---|---|---|---|---|---|
+| `ALLOCATE` (1) | 1 | — | `byte_len` (1..`MAX_SHARED_BUFFER_BYTES`) | `flags` (must be 0) | root capability handle (encoded) | `EINVAL`, `ENOSPC` |
+| `MAP` (2) | 2 | capability handle | `access` (`0` = read, `1` = read/write) | — | mapped VA in the shared window | `EINVAL`, `EACCES`, `ESTALE`, `ENOSPC`, `EAGAIN` |
+| `UNMAP` (3) | 3 | — | slot VA from `MAP` | — | 0 | `EINVAL`, `EBADF` |
+| `QUERY` (4) | 4 | capability handle | user `out` pointer | `out_len` (= 40) | 0 | `EINVAL`, `EACCES`, `ESTALE` |
+| `RELEASE` (5) | 5 | capability handle | — | — | 0 | `EACCES`, `ESTALE`, `EAGAIN` |
+
+`MAP` checks the handle's rights against the requested access (`READ` for read-only, `READ|WRITE` for read/write). `RELEASE` requires `REVOKE`, owner depth 0, and no live row for that buffer in the caller's window (`EAGAIN` if still mapped).
+
+`QUERY` writes a 40-byte `SharedBufferInfo` (little-endian): `id@0`, `byte_len@8`, `page_count@16`, `rights_bits@20`, `flags@24`, reserved zero `@28`, `mapped_va@32` (0 when unmapped). Flags: `CALLER_IS_OWNER` (1), `CALLER_MAPPED_READ_WRITE` (2).
+
+### Limits and rationale
+
+| Constant | Value | Role |
+|---|---|---|
+| `MAX_SHARED_BUFFERS` | 32 | system-wide buffer objects |
+| `MAX_SHARED_BUFFERS_PER_OWNER` | 8 | per owning process (≥ `MAX_BUFFERS_PER_CLIENT`) |
+| `MAX_SHARED_PAGES_TOTAL` | 8192 (32 MiB) | system-wide backing pages |
+| `MAX_SHARED_PAGES_PER_OWNER` | 4096 | per owner (≥ `MAX_BUFFER_BYTES` in pages) |
+| `MAX_ATTACHMENTS_PER_BUFFER` | 2 | live window rows per buffer (owner map + one reader, e.g. compositor) |
+| `MAX_SHARED_MAPPINGS_PER_PROCESS` | 20 | window rows per process (≥ `MAX_REGISTERED_BUFFERS` + `SCANOUT_BUFFER_COUNT`) |
+| `MAX_EXTENTS_PER_BUFFER` | 16 | physical extents per buffer |
+| `MAX_SHARED_BUFFER_BYTES` | 8 MiB | max `byte_len` (= `MAX_BUFFER_BYTES`) |
+| `SHARED_WINDOW_BASE` | `0x0000_5000_0000_0000` | fixed VA window base |
+| `SHARED_WINDOW_SLOT_STRIDE` | 16 MiB | per-row span (≥ 2× `MAX_SHARED_BUFFER_BYTES`, 2 MiB-aligned) |
+
+`proposed_limits_satisfy_graphics_protocol_budget` (`native-abi`) checks compositor headroom: mapping slots, per-owner page quota, and per-owner buffer count versus protocol caps.
+
+### Kernel semantics
+
+- **Identity.** `SharedBufferId`: slot in bits 0..16, generation in 16..48 (generation 0 invalid). Slot reuse bumps generation (`ESTALE` on stale handles).
+- **Allocate.** Frames are zero-filled; the owner receives a root capability with `READ | WRITE | DELEGATE | REVOKE`.
+- **Map / unmap.** At most one row per (process, buffer); `MAX_ATTACHMENTS_PER_BUFFER` caps cross-process maps. Window page tables are NX at every level; leaves are writable only for `ReadWrite` mappings.
+- **Revocation and owner release.** `revoke_for_resource` / `revoke_for_holder` (teardown step 4) call `RevokedBuffers::reconcile`: O(attachments) per noted buffer, no table scans. When the root capability dies or the owner `RELEASE`s, the buffer becomes `Dying`; each attachment whose buffer or capability authority is gone is retargeted to a shared zero page (reads as zeros) and detached. Buffer frames are queued on a pending-free list and reclaimed exactly once when an allocator is available.
+- **W6 — `attest_for_transfer`.** Host-tested; no production caller until port SEND (#200). Confirms `DELEGATE` on a live buffer and returns kernel-attested `(id, byte_len)` for the transfer slot. Transferred children remain `READ` only.
+- **W7 — kernel-owned buffers and pins.** Host-tested; consumers land with presenter (#111) and scanout. Kernel-owned buffers have no capability; `allocate_kernel_owned`, `map_kernel_owned_into`, `pin` / `unpin` support scanout without widening app authority.
+
+Acceptance: `cargo xtask test-m10-nxe` and `cargo xtask test-m10-shared-buffer` ([DEVELOPMENT.md](DEVELOPMENT.md)). The shared-buffer QEMU lane runs an NX baseline plus production syscall-16 phases (cross-process map/read, denial, stale generation, exhaustion, reuse zeroing, kernel-owned pin) and a resource baseline check; owner-exit, reader-exit, and fault-teardown phases arrive with #205 (W5 `SharedMappings`).
 
 ## Reference mode
 
@@ -530,7 +580,7 @@ Register convention (matches the network syscall, `SYSCALL_NR_NETWORK_CAPABILITY
 | 6 | `BIND_WAKE` | work-set handle, bit 0..=31 | `DISPLAY_PRESENT` + bound presenter | 0 |
 | 0, 7.. | reserved | — | — | `EINVAL` |
 
-Until the owning stage lands: `BIND_WAKE` returns `ENOSYS` until a later #111 stage wires it to the work sets (syscall 20); `MAP_SCANOUT` and `PRESENT` return `ENOSYS` until #195's kernel-owned buffer stage (R2). Before then #111 proves `test-m10-framebuffer` with a kernel-internal present.
+Until the owning stage lands: `BIND_WAKE` returns `ENOSYS` until a later #111 stage wires it to the work sets (syscall 20); `MAP_SCANOUT` and `PRESENT` return `ENOSYS` until #111 wires presenter scanout onto #195's kernel-owned buffers (R2). The kernel-owned allocation and pin APIs exist (W7, host-tested). Before then #111 proves `test-m10-framebuffer` with a kernel-internal present.
 
 - **Presenter.** The first successful `MAP_SCANOUT` binds the caller's holder. `MAP_SCANOUT`, `PRESENT` and `BIND_WAKE` from any other holder → `NotPresenter`. Only process teardown releases the binding. `MAP_SCANOUT` is idempotent per index. Mappings are user read-write and NX, and persist across epoch bumps.
 - **Scanout buffers.** `SCANOUT_BUFFER_COUNT` (2) kernel-owned buffers of the reference mode (stride 5120, `byte_len` 4,096,000). The compositor renders into the one that is not in flight.
@@ -595,7 +645,7 @@ Kernel semantics, binding on #113 (planned):
 
 ## Bounds
 
-Every table and queue is fixed-size. Protocol bounds live in `graphics::limits`; memory bounds proposed for #195 live in `clean_slate_native_abi::shared_buffer` (#195 owns them and may adjust within `MAX_BUFFER_BYTES`). Exceeding an object bound is `LimitExceeded`.
+Every table and queue is fixed-size. Protocol bounds live in `graphics::limits`; memory bounds for shared buffers live in `clean_slate_native_abi::shared_buffer` (#195 owns them and may adjust within `MAX_BUFFER_BYTES`). Exceeding an object bound is `LimitExceeded`.
 
 | Constant | Value | Bounds |
 |---|---|---|
@@ -765,9 +815,12 @@ On success it prints `[M10.port] PASS` (not `[M10  ] PASS`, which belongs to #11
 
 The `fake` feature enables `graphics::fake`: `FakeDisplay`, a model of the display ABI with R8 copy semantics, a single present in flight, timeouts, reset and poisoning. It is for host tests only; production code must not enable it. `clean-slate-port` exposes `FakePort` / `FakeConnection` behind feature `fake` for the same port semantics in host tests (#112).
 
+<<<<<<< HEAD
 `cargo xtask test-m10-framebuffer` (alias `m10-framebuffer`) is the #111 gate: `cargo test -p clean-slate-raster`, then a QEMU boot with `-vga std` that proves kernel-internal present, damage-only scanout copy, and guest aperture readback against host `clean-slate-raster` expectations (`[M10.2] PASS`). Screenshot validation is a separate #111 stage: a `QmpScriptDriver` `Screendump` step with a `check` against the host render, writing under `xtask_artifact_root()` (`target/xtask-artifacts/m10-framebuffer/`).
 
-Planned gates, each owned by its lane: `test-m10-shared-buffer` (#195), `test-m10-virtio-gpu` (#114), `test-m10-desktop` (#118), and `test-m10` with `[M10 ] PASS` (#119).
+#195 gates (landed): `cargo xtask test-m10-nxe` (alias `m10-nxe`) and `cargo xtask test-m10-shared-buffer` (alias `m10-shared-buffer`); see [DEVELOPMENT.md](DEVELOPMENT.md).
+
+Planned gates, each owned by its lane: `test-m10-virtio-gpu` (#114), `test-m10-desktop` (#118), and `test-m10` with `[M10 ] PASS` (#119).
 
 Contract-level properties that are host-tested today: the size and layout assertions (`frame_layout_assertions`, `abi_size_assertions`, `state_sizes_stay_bounded`), golden frames and round trips for every message, the malformed-frame matrices, negotiation, the role matrix, the buffer handoff property test (`property_buffer_handoff_conserves_buffers`), the scanout model property test (`property_double_buffered_producer_matches_scanout_model`), and the capability `valid_for` and delegation matrices.
 
