@@ -37,9 +37,19 @@ pub(crate) fn allocate_kernel_owned(
         .allocate(BufferOwner::Kernel, byte_len, frames)
 }
 
-/// Maps a kernel-owned buffer into the process whose page-table root is `root_frame`
-/// as a kernel grant. Idempotent per (process, buffer): an existing Live row with the
-/// same access is returned as-is.
+/// Maps a kernel-owned buffer into `pid` as a kernel grant. Idempotent per (process,
+/// buffer): an existing Live row with the same access is returned as-is.
+#[cfg(feature = "m10-shared-buffer-self-test")]
+pub(crate) fn map_kernel_owned_into(
+    id: SharedBufferId,
+    pid: u64,
+    access: SharedBufferAccess,
+    frames: &mut impl FrameSource,
+) -> Result<u64, ShareError> {
+    map_kernel_owned_into_root(id, pid, super::process_root(pid)?, access, frames)
+}
+
+/// [`map_kernel_owned_into`] for the process whose page-table root is `root_frame`.
 pub(super) fn map_kernel_owned_into_root(
     id: SharedBufferId,
     pid: u64,

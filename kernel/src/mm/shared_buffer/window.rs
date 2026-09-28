@@ -85,7 +85,7 @@ impl MappingRow {
         pde_count: 0,
     };
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
     pub(crate) fn private_page_tables(&self) -> usize {
         match self.state {
             RowState::Live => usize::from(self.pde_count),
@@ -127,7 +127,7 @@ impl ProcessWindow {
     }
 
     /// Directory frames plus the private page tables of every Live row.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
     pub(crate) fn page_table_frames(&self) -> usize {
         2 + self
             .rows
@@ -202,6 +202,11 @@ impl<const N: usize> WindowPool<N> {
             .iter()
             .flatten()
             .find(|window| window.pid == pid)
+    }
+
+    #[cfg(feature = "m10-shared-buffer-self-test")]
+    pub(crate) fn windows(&self) -> impl Iterator<Item = &ProcessWindow> {
+        self.windows.iter().flatten()
     }
 
     fn index_of(&self, pid: u64) -> Option<usize> {

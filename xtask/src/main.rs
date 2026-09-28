@@ -133,10 +133,16 @@ const M10_NXE_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[M10.NX] PASS",
 ];
 const M10_NXE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M10_SHARED_BUFFER_ACCEPTANCE_MARKERS: [&str; 5] = [
+const M10_SHARED_BUFFER_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[CPU ] NXE enabled nx=1",
     "[M10.SB] creating",
     "[M10.SB] nx exec fault err=0x15 OK",
+    "[M10.SB] cross-process map/read OK",
+    "[M10.SB] unauthorized denied OK",
+    "[M10.SB] stale id denied OK",
+    "[M10.SB] exhaustion deterministic OK",
+    "[M10.SB] reuse zeroed OK",
+    "[M10.SB] kernel-owned map OK",
     "[M10.SB] baseline OK",
     "[M10.SB] PASS",
 ];
@@ -2135,9 +2141,14 @@ fn run_m10_port_acceptance() -> Result<(), XtaskError> {
     )
 }
 
+/// M10 #195 gate: ABI, delegation policy, object-model, window-mapping, frame-run and
+/// NXE host tests, then the QEMU lane through production syscall 16.
 fn run_m10_shared_buffer_acceptance() -> Result<(), XtaskError> {
     run_cargo_package_tests("clean-slate-native-abi", &[])?;
     run_cargo_package_tests("clean-slate-service-fixtures", &[])?;
+    run_cargo_package_tests("clean-slate-capability", &[])?;
+    run_cargo_package_tests("clean-slate-kernel", &["mm::shared_buffer"])?;
+    run_cargo_package_tests("clean-slate-kernel", &["frame_allocator"])?;
     run_cargo_package_tests("clean-slate-kernel", &["nx_"])?;
     run_vm_inner(
         false,
