@@ -17,9 +17,7 @@ pub(crate) struct KernelFrame {
 }
 
 impl KernelFrame {
-    /// Takes `FRAME_PAGES` consecutive frames from the allocator and zeroes them through the direct
-    /// map. Relies on the boot-time allocator handing out a linear run; anything else is released
-    /// and refused.
+    /// Takes `FRAME_PAGES` physically consecutive frames and zeroes them through the direct map.
     pub(crate) fn allocate(
         allocator: &mut PageAllocator,
         generation: u64,
@@ -31,23 +29,9 @@ impl KernelFrame {
             REFERENCE_MODE.format,
         )
         .map_err(|_| "reference layout invalid")?;
-        let first = allocator.allocate_page().ok_or("frame allocation failed")?;
-        let mut taken = 1u64;
-        while taken < FRAME_PAGES {
-            let expected = first + taken * PAGE_SIZE;
-            match allocator.allocate_page() {
-                Some(page) if page == expected => taken += 1,
-                other => {
-                    if let Some(page) = other {
-                        let _ = unsafe { allocator.free_page(page) };
-                    }
-                    for index in 0..taken {
-                        let _ = unsafe { allocator.free_page(first + index * PAGE_SIZE) };
-                    }
-                    return Err("frame not contiguous");
-                }
-            }
-        }
+        let first = allocator
+            .allocate_contiguous(FRAME_PAGES)
+            .ok_or("frame allocation failed")?;
         let bytes = unsafe {
             core::slice::from_raw_parts_mut(phys_to_virt(first) as *mut u8, REFERENCE_FRAME_BYTES)
         };
