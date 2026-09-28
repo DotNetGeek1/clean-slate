@@ -6,9 +6,9 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Once};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 mod m7_certs;
 mod m7_fixture;
@@ -17,8 +17,10 @@ mod m8_fixture;
 mod m9_fixture;
 mod m9_userspace_validate;
 mod marker_spec;
+mod ovmf_vars;
 
 use marker_spec::{MarkerSet, MarkerStep, MarkerTracker};
+use ovmf_vars::RuntimeVarsCopy;
 
 use m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
 
@@ -2221,26 +2223,28 @@ fn run_vm_inner_with_config(
     fs::copy(&kernel, esp_boot_dir.join("BOOTX64.EFI"))?;
 
     let ovmf = find_ovmf()?;
-    let runtime_vars = if config.reset_ovmf_vars {
-        workspace_root()
-            .join("target")
-            .join("m5")
-            .join("OVMF_VARS.fd")
-    } else {
-        workspace_root()
-            .join("target")
-            .join(format!("OVMF_VARS.runtime.{}.fd", std::process::id()))
-    };
     // Every boot starts from the pristine variable store (`vars_template`).
     // OVMF rewrites NV variables on each boot and acceptance tests SIGKILL
     // QEMU as soon as markers match, so writing back into the template path
     // (common when OVMF_VARS env points at a working copy) leaves the next
     // boot stuck before BDS or timing out after PASS. Always launch from a
     // fresh runtime copy.
-    if let Some(parent) = runtime_vars.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::copy(&ovmf.vars_template, &runtime_vars)?;
+    let m5_vars;
+    let runtime_vars_copy;
+    let runtime_vars: &Path = if config.reset_ovmf_vars {
+        m5_vars = m5_fixture_dir().join("OVMF_VARS.fd");
+        if let Some(parent) = m5_vars.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&ovmf.vars_template, &m5_vars)?;
+        &m5_vars
+    } else {
+        let target_dir = workspace_root().join("target");
+        sweep_stale_runtime_vars_once(&target_dir);
+        // Dropped after the QEMU child below has been killed and reaped.
+        runtime_vars_copy = RuntimeVarsCopy::create(&target_dir, &ovmf.vars_template)?;
+        runtime_vars_copy.path()
+    };
 
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.arg("-machine")
@@ -2284,6 +2288,26 @@ fn run_vm_inner_with_config(
         Some((marker_set, timeout)) => run_acceptance_command(&mut qemu, marker_set, timeout),
         None => run_command(&mut qemu),
     }
+}
+
+/// Clears runtime vars copies left by earlier xtask processes that died
+/// before their guard ran (abort on panic, external kill). Runs once per
+/// process; copies held by concurrent runs are kept.
+fn sweep_stale_runtime_vars_once(target_dir: &Path) {
+    static SWEEP: Once = Once::new();
+    SWEEP.call_once(
+        || match ovmf_vars::sweep_stale(target_dir, SystemTime::now()) {
+            Ok(report) if report.removed > 0 || report.failed > 0 => println!(
+                "[OVMF] swept stale runtime vars: removed={} kept={} failed={}",
+                report.removed, report.kept, report.failed
+            ),
+            Ok(_) => {}
+            Err(error) => eprintln!(
+                "[OVMF] warning: runtime vars sweep of {} failed: {error}",
+                target_dir.display()
+            ),
+        },
+    );
 }
 
 fn ensure_m5_block_disk_image() -> Result<PathBuf, XtaskError> {
@@ -3070,7 +3094,7 @@ fn run_acceptance_command(
     );
 
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn()?;
+    let mut child = ReapOnDrop(command.spawn()?);
     let stdout = child
         .stdout
         .take()
@@ -3602,6 +3626,31 @@ fn spawn_output_reader<R: Read + Send + 'static>(
     })
 }
 
+/// Kills and reaps the child on every exit path, including `?` returns, so
+/// QEMU has closed its drive files before the caller's guards delete them.
+struct ReapOnDrop(std::process::Child);
+
+impl std::ops::Deref for ReapOnDrop {
+    type Target = std::process::Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ReapOnDrop {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for ReapOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 fn terminate_child(child: &mut std::process::Child) -> Result<(), XtaskError> {
     if child.try_wait()?.is_some() {
         return Ok(());
@@ -3940,7 +3989,7 @@ fn ovmf_vars_env_is_mutable_working_copy(path: &Path) -> bool {
     if path
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with("OVMF_VARS.runtime."))
+        .is_some_and(|name| name.starts_with(ovmf_vars::RUNTIME_VARS_PREFIX))
     {
         return true;
     }
