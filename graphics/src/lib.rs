@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 pub mod abi;
+pub mod connection;
 pub mod error;
 pub mod geometry;
 pub mod ids;
