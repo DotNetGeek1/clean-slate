@@ -30,6 +30,8 @@ m4-service-lifecycle-self-test = ["m3-entry-self-test"]
 m4-supervisor-self-test = ["m3-entry-self-test"]
 m4-recovery-self-test = []
 m5-block-self-test = []
+# #111: boot-context GOP framebuffer lane (kernel-internal present + aperture readback).
+m10-framebuffer-self-test = []
 m7-tls-self-test = [
     "clean-slate-network/tls",
     "clean-slate-network/m7-handshake-trace",
@@ -120,15 +122,21 @@ clean-slate-elf = { path = "../elf" }
 clean-slate-network = { path = "../network" }
 rand_core = { version = "=0.6.4", default-features = false, optional = true }
 clean-slate-capability = { path = "../capability" }
+clean-slate-graphics = { path = "../graphics" }
 clean-slate-linux-abi = { path = "../linux-abi" }
 clean-slate-native-abi = { path = "../native-abi" }
 clean-slate-port = { path = "../port" }
+clean-slate-raster = { path = "../raster" }
 clean-slate-rootfs = { path = "../rootfs", optional = true }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 clean-slate-store = { path = "../store", optional = true }
 uefi = "0.37.0"
+uefi-raw = "0.14.0"
 x86_64 = { version = "0.15.5", default-features = false, features = ["instructions"] }
+
+[dev-dependencies]
+clean-slate-graphics = { path = "../graphics", features = ["fake"] }
 
 [build-dependencies]
 clean-slate-elf = { path = "../elf" }

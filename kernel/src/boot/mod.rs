@@ -3,6 +3,7 @@
 //! `ExitBootServices`, allocator/IDT/GDT/syscall bring-up and then either
 //! dispatches into the selected milestone self-test or starts the scheduler.
 
+pub(crate) mod gop;
 pub(crate) mod uefi;
 
 use crate::arch::x86_64::context_switch::call_on_fresh_stack;
@@ -58,7 +59,9 @@ use crate::mm::address_space::KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES;
 use crate::mm::carve_out_shared::install_shared_carve_out_page_tables;
 use crate::mm::frame_allocator::set_kernel_direct_map_ready;
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::kernel_bootstrap::install_kernel_owned_root;
+use crate::mm::kernel_bootstrap::{
+    install_kernel_owned_root, map_device_aperture_uncached, PhysExclusion,
+};
 use crate::mm::layout::{
     assert_conventional_linux_window_clear, init_kernel_low_carve_outs_from_reserved,
     log_kernel_low_carve_outs, register_kernel_low_carve_out,
@@ -372,10 +375,36 @@ fn register_boot_kernel_low_carve_outs(
     assert_conventional_linux_window_clear()
 }
 
+/// Maps the captured aperture and installs the GOP backend. Every failure leaves the system with no
+/// display backend (`ENODEV` on syscall 18) and boot continues.
+fn install_display_backend(
+    kernel_root: u64,
+    allocator: &mut PageAllocator,
+    framebuffer: Result<gop::BootFramebuffer, gop::GopRejection>,
+) {
+    let mapped = framebuffer.and_then(|fb| {
+        map_device_aperture_uncached(kernel_root, allocator, fb.phys_base, fb.map_len)
+            .map(|virt| (fb, virt))
+            .map_err(|_| gop::GopRejection::ApertureMapFailed)
+    });
+    let (framebuffer, aperture_virt) = match mapped {
+        Ok(mapped) => mapped,
+        Err(reason) => return gop::log_rejection(reason),
+    };
+    serial_write_fmt(format_args!(
+        "[FB  ] aperture mapped pages={} cache=uc\n",
+        framebuffer.page_count()
+    ));
+    if crate::device::display::install_gop_backend(&framebuffer, aperture_virt).is_err() {
+        gop::log_rejection(gop::GopRejection::ApertureMapFailed);
+    }
+}
+
 #[allow(unreachable_code)]
 fn run_inner() -> Result<(), &'static str> {
     let mut reserved_ranges = collect_reserved_ranges_from_firmware()?;
     crate::interrupt::acpi::capture_interrupt_topology_from_firmware();
+    let boot_framebuffer = gop::capture_boot_framebuffer();
 
     let mut memory_map = unsafe { ::uefi::boot::exit_boot_services(None) };
     memory_map.sort();
@@ -434,11 +463,18 @@ fn run_inner() -> Result<(), &'static str> {
     set_privilege_stack(syscall_kernel_stack_top)?;
     initialize_syscall_abi(syscall_kernel_stack_top)?;
 
-    let kernel_root = install_kernel_owned_root(&mut allocator, normalized)?;
+    let boot_framebuffer = boot_framebuffer
+        .and_then(|fb| gop::aperture_conflicts(normalized.regions(), &fb).map(|()| fb));
+    let aperture_exclusion = boot_framebuffer.as_ref().ok().map(|fb| PhysExclusion {
+        start: fb.phys_base,
+        end: fb.phys_end(),
+    });
+    let kernel_root = install_kernel_owned_root(&mut allocator, normalized, aperture_exclusion)?;
     serial_write_fmt(format_args!(
         "[MM  ] kernel-owned root installed: {:#018x}\n",
         kernel_root
     ));
+    install_display_backend(kernel_root, &mut allocator, boot_framebuffer);
     set_kernel_root_frame(kernel_root);
     set_kernel_direct_map_ready();
     arm_kernel_stack_guards(kernel_root, &mut allocator, &kernel_guarded_stacks())?;

@@ -131,16 +131,19 @@ dependencies = [
  "clean-slate-block",
  "clean-slate-capability",
  "clean-slate-elf",
+ "clean-slate-graphics",
  "clean-slate-linux-abi",
  "clean-slate-native-abi",
  "clean-slate-network",
  "clean-slate-port",
+ "clean-slate-raster",
  "clean-slate-rootfs",
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
  "clean-slate-store",
  "rand_core",
  "uefi",
+ "uefi-raw",
  "x86_64",
 ]
 
@@ -188,6 +191,13 @@ version = "0.0.1"
 dependencies = [
  "clean-slate-capability",
  "clean-slate-native-abi",
+]
+
+[[package]]
+name = "clean-slate-raster"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-graphics",
 ]
 
 [[package]]

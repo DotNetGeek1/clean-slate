@@ -5,7 +5,9 @@ use crate::mm::region::ReservedRange;
 use crate::mm::{align_down, align_up};
 use crate::sync::global_cell::GlobalCell;
 
-/// Start of the supervisor-only direct physical map (512 GiB window at PML4 slot 511).
+/// Start of the supervisor-only direct physical map (512 GiB window at PML4 slot 256, shared by
+/// every process root). Write-back, except a device aperture, which is mapped uncached at its
+/// direct-map address and excluded from the write-back map.
 pub(crate) const PHYSMAP_BASE: u64 = 0xffff_8000_0000_0000;
 pub(crate) const PHYSMAP_SPAN: u64 = 512 * 1024 * 1024 * 1024;
 pub(crate) const PHYSMAP_END: u64 = PHYSMAP_BASE + PHYSMAP_SPAN;
