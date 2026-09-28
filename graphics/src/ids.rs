@@ -183,7 +183,9 @@ impl<T, const N: usize> GenSlotTable<T, N> {
             } else {
                 slot.generation
             };
-            let id = ObjectId::new(slot_index, generation).map_err(|_| LimitError::Exhausted)?;
+            let Ok(id) = ObjectId::new(slot_index, generation) else {
+                continue;
+            };
             slot.generation = generation;
             slot.value = Some(value);
             return Ok(id);
@@ -256,6 +258,17 @@ impl<T, const N: usize> GenSlotTable<T, N> {
             return Err(LookupError::Stale);
         }
         Ok(())
+    }
+
+    /// Clears every slot in place (same observable state as [`Self::new`]).
+    pub fn clear_in_place(&mut self) {
+        for slot in self.slots.iter_mut() {
+            *slot = Slot {
+                value: None,
+                generation: 0,
+                retired: false,
+            };
+        }
     }
 
     #[cfg(test)]
