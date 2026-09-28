@@ -51,8 +51,8 @@ const FIXTURE_PARK_KEY: WaitKey = WaitKey(0x672);
 
 static FIXTURE_TURN: GlobalCell<u64> = GlobalCell::new(0);
 
-const MAX_FIXTURE_REGISTRY: usize = 12;
-const MAX_FIXTURE_REPORTS: usize = 12;
+const MAX_FIXTURE_REGISTRY: usize = 24;
+const MAX_FIXTURE_REPORTS: usize = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FixtureReportAction {

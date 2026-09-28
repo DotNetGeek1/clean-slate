@@ -1,4 +1,4 @@
-//! M10 #195: scripted fixture lane for bounded shared user buffers (phases `nx` … `kernel-owned`).
+//! M10 #195: scripted fixture lane for bounded shared user buffers (phases `nx` … `reader-exit`).
 
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::gdt::selector_rpl;
@@ -66,6 +66,13 @@ const CHECK_DELEGATED_READ_CHILD: u64 = 14;
 const CHECK_CLAIMED_READ_CHILD: u64 = 15;
 const CHECK_REUSE_DIRTY_NEXT_RUN: u64 = 16;
 const CHECK_REUSE_GOT_DIRTIED_RUN: u64 = 17;
+const CHECK_RO_WRITE_FAULT: u64 = 18;
+const CHECK_RO_WRITE_POST: u64 = 19;
+const CHECK_SHARED_EXEC: u64 = 20;
+const CHECK_SHARED_EXEC_RECLAIM: u64 = 21;
+const CHECK_OWNER_EXIT: u64 = 22;
+const CHECK_READER_EXIT_POST: u64 = 23;
+const CHECK_RECORD_FAULT_VA: u64 = 24;
 
 /// Every fixture's first live mapping lands in row 0 of its window.
 const FIRST_ROW_VA: u64 = SHARED_WINDOW_BASE;
@@ -106,6 +113,20 @@ const TURN_STALE_R2: u64 = 11;
 const TURN_STALE_W3: u64 = 12;
 const TURN_STALE_R3: u64 = 13;
 const TURN_STALE_W4: u64 = 14;
+const TURN_RO_W_HANDOFF: u64 = 14;
+const TURN_RO_R_START: u64 = 15;
+const TURN_OE_W_HANDOFF: u64 = 15;
+const TURN_OE_R_START: u64 = 16;
+const TURN_OE_W_RELEASE: u64 = 16;
+const TURN_OE_W_EXIT: u64 = 17;
+const TURN_RE_W_HANDOFF: u64 = 17;
+const TURN_RE_R_START: u64 = 18;
+
+const EXPECTED_RO_WRITE_FAULT_ERROR: u64 = 0x7;
+const RO_WRITE_FILL_SEED: u64 = 0x5a;
+const OWNER_EXIT_FILL_SEED: u64 = 0x6d;
+const READER_EXIT_FILL_SEED: u64 = 0x7e;
+const SHARED_EXEC_OPCODE: u64 = 0xc3;
 
 const FIXTURE_NX_EXEC: u64 = 0;
 const FIXTURE_NX_OBSERVER: u64 = 1;
@@ -119,6 +140,10 @@ enum PhaseId {
     Exhaust = 4,
     Reuse = 5,
     KernelOwned = 6,
+    RoWrite = 7,
+    SharedExec = 8,
+    OwnerExit = 9,
+    ReaderExit = 10,
 }
 
 struct FaultObservation {
@@ -150,6 +175,7 @@ struct LaneState {
     ko_token: Option<PinToken>,
     ko_reclaimed_before: u64,
     reuse_dirtied_base: u64,
+    expected_fault_va: u64,
 }
 
 static LANE_STATE: GlobalCell<Option<LaneState>> = GlobalCell::new(None);
@@ -938,6 +964,343 @@ fn spawn_kernel_owned_fixtures(phase_index: usize) {
     state_mut().last_reporter_pid = k.pid;
 }
 
+// --- Read-only write fault phase ---
+
+fn build_ro_write_writer_program() -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    push_step(&mut program, wait_exit_step(state_mut().last_reporter_pid));
+    let alloc = push_step(
+        &mut program,
+        step_sb_allocate(KIB_64).expect_ne(STATUS_ENOSPC),
+    );
+    let handle = arg_result(alloc);
+    push_step(
+        &mut program,
+        step_lane_ok(CHECK_RECORD_OWNER_HANDLE, handle),
+    );
+    let map = push_step(
+        &mut program,
+        step_sb_map(handle, SHARED_BUFFER_ACCESS_READ_WRITE).expect_eq(FIRST_ROW_VA),
+    );
+    let va = arg_result(map);
+    push_step(
+        &mut program,
+        M6FixtureStep::fill(va, KIB_64, RO_WRITE_FILL_SEED, PATTERN_INCREMENTING),
+    );
+    let reader_pid = push_step(&mut program, step_lane_query(CHECK_PEER_PID, ROLE_R));
+    push_delegate_read(&mut program, handle, arg_result(reader_pid));
+    push_step(&mut program, end_turn_step(TURN_RO_W_HANDOFF));
+    push_step(&mut program, wait_exit_step(arg_result(reader_pid)));
+    push_step(&mut program, step_lane_ok(CHECK_RO_WRITE_FAULT, 0));
+    push_step(&mut program, step_lane_ok(CHECK_RO_WRITE_POST, 0));
+    push_step(&mut program, step_sb_unmap(va).expect_eq(0));
+    push_step(&mut program, step_sb_release(handle).expect_eq(0));
+    push_step(&mut program, step_lane_ok(CHECK_BUFFER_RECLAIMED, 0));
+    push_step(
+        &mut program,
+        lane_check_step(CHECK_PHASE_DONE, PhaseId::RoWrite as u64),
+    );
+    push_step(&mut program, M6FixtureStep::report());
+    program
+}
+
+fn build_ro_write_reader_program() -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    push_step(&mut program, wait_turn_step(TURN_RO_R_START));
+    let claim = push_claim_read(&mut program);
+    let hr = arg_result(claim);
+    let map = push_step(
+        &mut program,
+        step_sb_map(hr, SHARED_BUFFER_ACCESS_READ).expect_eq(FIRST_ROW_VA),
+    );
+    let vr = arg_result(map);
+    push_step(
+        &mut program,
+        M6FixtureStep::verify(vr, KIB_64, RO_WRITE_FILL_SEED, PATTERN_INCREMENTING),
+    );
+    push_step(&mut program, step_lane_ok(CHECK_RECORD_FAULT_VA, vr));
+    push_step(&mut program, M6FixtureStep::fault_at(vr));
+    program
+}
+
+fn spawn_ro_write_fixtures(phase_index: usize) {
+    kernel_log_line("[M10.SB] phase ro-write start");
+    let stacks = unsafe { &*task_stacks_mut() };
+    let slot_w = scheduler_slot_for(phase_index, 0);
+    assert_scheduler_slot_free(slot_w);
+    let w = spawn_fixture(
+        allocator(),
+        task_stack_top(&stacks[slot_w]),
+        slot_w,
+        fixture_service(0x70),
+        &build_ro_write_writer_program(),
+    )
+    .unwrap_or_else(|message| fatal_kernel_error(message));
+    state_mut().peer_pids[ROLE_W as usize] = w.pid;
+
+    let slot_r = scheduler_slot_for(phase_index, 1);
+    assert_scheduler_slot_free(slot_r);
+    let r = spawn_fixture(
+        allocator(),
+        task_stack_top(&stacks[slot_r]),
+        slot_r,
+        fixture_service(0x71),
+        &build_ro_write_reader_program(),
+    )
+    .unwrap_or_else(|message| fatal_kernel_error(message));
+    state_mut().peer_pids[ROLE_R as usize] = r.pid;
+    state_mut().last_reporter_pid = w.pid;
+}
+
+// --- Shared exec fault phase ---
+
+fn build_shared_exec_writer_program() -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    push_step(&mut program, wait_exit_step(state_mut().last_reporter_pid));
+    let alloc = push_step(
+        &mut program,
+        step_sb_allocate(KIB_64).expect_ne(STATUS_ENOSPC),
+    );
+    let handle = arg_result(alloc);
+    push_step(
+        &mut program,
+        step_lane_ok(CHECK_RECORD_OWNER_HANDLE, handle),
+    );
+    let map = push_step(
+        &mut program,
+        step_sb_map(handle, SHARED_BUFFER_ACCESS_READ_WRITE).expect_eq(FIRST_ROW_VA),
+    );
+    let va = arg_result(map);
+    push_step(
+        &mut program,
+        M6FixtureStep::fill(va, 1, SHARED_EXEC_OPCODE, PATTERN_CONSTANT),
+    );
+    push_step(&mut program, step_lane_ok(CHECK_RECORD_FAULT_VA, va));
+    push_step(&mut program, M6FixtureStep::exec(va));
+    program
+}
+
+fn build_shared_exec_observer_program(writer_pid: u64) -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    push_step(&mut program, wait_exit_step(writer_pid));
+    push_step(&mut program, lane_check_step(CHECK_SHARED_EXEC, 0));
+    push_step(&mut program, lane_check_step(CHECK_SHARED_EXEC_RECLAIM, 0));
+    push_step(
+        &mut program,
+        lane_check_step(CHECK_PHASE_DONE, PhaseId::SharedExec as u64),
+    );
+    push_step(&mut program, M6FixtureStep::report());
+    program
+}
+
+fn spawn_shared_exec_fixtures(phase_index: usize) {
+    kernel_log_line("[M10.SB] phase shared-exec start");
+    let stacks = unsafe { &*task_stacks_mut() };
+    let slot_w = scheduler_slot_for(phase_index, 0);
+    assert_scheduler_slot_free(slot_w);
+    let w = spawn_fixture(
+        allocator(),
+        task_stack_top(&stacks[slot_w]),
+        slot_w,
+        fixture_service(0x72),
+        &build_shared_exec_writer_program(),
+    )
+    .unwrap_or_else(|message| fatal_kernel_error(message));
+    state_mut().peer_pids[ROLE_W as usize] = w.pid;
+
+    let slot_b = scheduler_slot_for(phase_index, 1);
+    assert_scheduler_slot_free(slot_b);
+    let observer = spawn_fixture(
+        allocator(),
+        task_stack_top(&stacks[slot_b]),
+        slot_b,
+        fixture_service(0x73),
+        &build_shared_exec_observer_program(w.pid),
+    )
+    .unwrap_or_else(|message| fatal_kernel_error(message));
+    state_mut().last_reporter_pid = observer.pid;
+}
+
+// --- Owner exit phase ---
+
+fn build_owner_exit_writer_program() -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    push_step(&mut program, wait_exit_step(state_mut().last_reporter_pid));
+    let alloc = push_step(
+        &mut program,
+        step_sb_allocate(KIB_64).expect_ne(STATUS_ENOSPC),
+    );
+    let handle = arg_result(alloc);
+    push_step(
+        &mut program,
+        step_lane_ok(CHECK_RECORD_OWNER_HANDLE, handle),
+    );
+    let map = push_step(
+        &mut program,
+        step_sb_map(handle, SHARED_BUFFER_ACCESS_READ_WRITE).expect_eq(FIRST_ROW_VA),
+    );
+    let va = arg_result(map);
+    push_step(
+        &mut program,
+        M6FixtureStep::fill(va, KIB_64, OWNER_EXIT_FILL_SEED, PATTERN_INCREMENTING),
+    );
+    let reader_pid = push_step(&mut program, step_lane_query(CHECK_PEER_PID, ROLE_R));
+    push_delegate_read(&mut program, handle, arg_result(reader_pid));
+    push_step(&mut program, end_turn_step(TURN_OE_W_HANDOFF));
+    push_step(&mut program, wait_turn_step(TURN_OE_W_EXIT));
+    push_step(&mut program, M6FixtureStep::report());
+    program
+}
+
+fn build_owner_exit_reader_program(writer_pid: u64) -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    push_step(&mut program, wait_turn_step(TURN_OE_R_START));
+    let claim = push_claim_read(&mut program);
+    let hr = arg_result(claim);
+    let map = push_step(
+        &mut program,
+        step_sb_map(hr, SHARED_BUFFER_ACCESS_READ).expect_eq(FIRST_ROW_VA),
+    );
+    let vr = arg_result(map);
+    push_step(
+        &mut program,
+        M6FixtureStep::verify(vr, KIB_64, OWNER_EXIT_FILL_SEED, PATTERN_INCREMENTING),
+    );
+    push_step(&mut program, end_turn_step(TURN_OE_W_RELEASE));
+    push_step(&mut program, wait_exit_step(writer_pid));
+    push_step(&mut program, step_lane_ok(CHECK_OWNER_EXIT, 0));
+    push_step(
+        &mut program,
+        M6FixtureStep::verify(vr, KIB_64, 0, PATTERN_CONSTANT),
+    );
+    push_step(&mut program, step_sb_unmap(vr).expect_eq(0));
+    push_step(
+        &mut program,
+        lane_check_step(CHECK_PHASE_DONE, PhaseId::OwnerExit as u64),
+    );
+    push_step(&mut program, M6FixtureStep::report());
+    program
+}
+
+fn spawn_owner_exit_fixtures(phase_index: usize) {
+    kernel_log_line("[M10.SB] phase owner-exit start");
+    let stacks = unsafe { &*task_stacks_mut() };
+    let slot_w = scheduler_slot_for(phase_index, 0);
+    assert_scheduler_slot_free(slot_w);
+    let w = spawn_fixture(
+        allocator(),
+        task_stack_top(&stacks[slot_w]),
+        slot_w,
+        fixture_service(0x74),
+        &build_owner_exit_writer_program(),
+    )
+    .unwrap_or_else(|message| fatal_kernel_error(message));
+    state_mut().peer_pids[ROLE_W as usize] = w.pid;
+
+    let slot_r = scheduler_slot_for(phase_index, 1);
+    assert_scheduler_slot_free(slot_r);
+    let r = spawn_fixture(
+        allocator(),
+        task_stack_top(&stacks[slot_r]),
+        slot_r,
+        fixture_service(0x75),
+        &build_owner_exit_reader_program(w.pid),
+    )
+    .unwrap_or_else(|message| fatal_kernel_error(message));
+    state_mut().peer_pids[ROLE_R as usize] = r.pid;
+    state_mut().last_reporter_pid = r.pid;
+}
+
+// --- Reader exit phase ---
+
+fn build_reader_exit_writer_program() -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    push_step(&mut program, wait_exit_step(state_mut().last_reporter_pid));
+    let alloc = push_step(
+        &mut program,
+        step_sb_allocate(KIB_64).expect_ne(STATUS_ENOSPC),
+    );
+    let handle = arg_result(alloc);
+    push_step(
+        &mut program,
+        step_lane_ok(CHECK_RECORD_OWNER_HANDLE, handle),
+    );
+    let map = push_step(
+        &mut program,
+        step_sb_map(handle, SHARED_BUFFER_ACCESS_READ_WRITE).expect_eq(FIRST_ROW_VA),
+    );
+    let va = arg_result(map);
+    push_step(
+        &mut program,
+        M6FixtureStep::fill(va, KIB_64, READER_EXIT_FILL_SEED, PATTERN_INCREMENTING),
+    );
+    let reader_pid = push_step(&mut program, step_lane_query(CHECK_PEER_PID, ROLE_R));
+    push_delegate_read(&mut program, handle, arg_result(reader_pid));
+    push_step(&mut program, end_turn_step(TURN_RE_W_HANDOFF));
+    push_step(&mut program, wait_exit_step(arg_result(reader_pid)));
+    push_step(&mut program, step_lane_ok(CHECK_READER_EXIT_POST, 0));
+    push_step(
+        &mut program,
+        M6FixtureStep::verify(va, KIB_64, READER_EXIT_FILL_SEED, PATTERN_INCREMENTING),
+    );
+    push_step(&mut program, step_sb_unmap(va).expect_eq(0));
+    push_step(&mut program, step_sb_release(handle).expect_eq(0));
+    push_step(&mut program, step_lane_ok(CHECK_BUFFER_RECLAIMED, 0));
+    push_step(
+        &mut program,
+        lane_check_step(CHECK_PHASE_DONE, PhaseId::ReaderExit as u64),
+    );
+    push_step(&mut program, M6FixtureStep::report());
+    program
+}
+
+fn build_reader_exit_reader_program() -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    push_step(&mut program, wait_turn_step(TURN_RE_R_START));
+    let claim = push_claim_read(&mut program);
+    let hr = arg_result(claim);
+    let map = push_step(
+        &mut program,
+        step_sb_map(hr, SHARED_BUFFER_ACCESS_READ).expect_eq(FIRST_ROW_VA),
+    );
+    let vr = arg_result(map);
+    push_step(
+        &mut program,
+        M6FixtureStep::verify(vr, KIB_64, READER_EXIT_FILL_SEED, PATTERN_INCREMENTING),
+    );
+    push_step(&mut program, M6FixtureStep::report());
+    program
+}
+
+fn spawn_reader_exit_fixtures(phase_index: usize) {
+    kernel_log_line("[M10.SB] phase reader-exit start");
+    let stacks = unsafe { &*task_stacks_mut() };
+    let slot_w = scheduler_slot_for(phase_index, 0);
+    assert_scheduler_slot_free(slot_w);
+    let w = spawn_fixture(
+        allocator(),
+        task_stack_top(&stacks[slot_w]),
+        slot_w,
+        fixture_service(0x76),
+        &build_reader_exit_writer_program(),
+    )
+    .unwrap_or_else(|message| fatal_kernel_error(message));
+    state_mut().peer_pids[ROLE_W as usize] = w.pid;
+
+    let slot_r = scheduler_slot_for(phase_index, 1);
+    assert_scheduler_slot_free(slot_r);
+    let r = spawn_fixture(
+        allocator(),
+        task_stack_top(&stacks[slot_r]),
+        slot_r,
+        fixture_service(0x77),
+        &build_reader_exit_reader_program(),
+    )
+    .unwrap_or_else(|message| fatal_kernel_error(message));
+    state_mut().peer_pids[ROLE_R as usize] = r.pid;
+    state_mut().last_reporter_pid = w.pid;
+}
+
 fn start_phase(phase: PhaseId) {
     let phase_index = state_mut().phase_index;
     match phase {
@@ -948,6 +1311,10 @@ fn start_phase(phase: PhaseId) {
         PhaseId::Exhaust => spawn_exhaust_fixtures(phase_index),
         PhaseId::Reuse => spawn_reuse_fixtures(phase_index),
         PhaseId::KernelOwned => spawn_kernel_owned_fixtures(phase_index),
+        PhaseId::RoWrite => spawn_ro_write_fixtures(phase_index),
+        PhaseId::SharedExec => spawn_shared_exec_fixtures(phase_index),
+        PhaseId::OwnerExit => spawn_owner_exit_fixtures(phase_index),
+        PhaseId::ReaderExit => spawn_reader_exit_fixtures(phase_index),
     }
 }
 
@@ -979,7 +1346,23 @@ fn advance_after_phase_done(done_index: usize) {
             kernel_log_line("[M10.SB] phase reuse done");
             start_phase(PhaseId::KernelOwned);
         }
-        6 => kernel_log_line("[M10.SB] phase kernel-owned done"),
+        6 => {
+            kernel_log_line("[M10.SB] phase kernel-owned done");
+            start_phase(PhaseId::RoWrite);
+        }
+        7 => {
+            kernel_log_line("[M10.SB] phase ro-write done");
+            start_phase(PhaseId::SharedExec);
+        }
+        8 => {
+            kernel_log_line("[M10.SB] phase shared-exec done");
+            start_phase(PhaseId::OwnerExit);
+        }
+        9 => {
+            kernel_log_line("[M10.SB] phase owner-exit done");
+            start_phase(PhaseId::ReaderExit);
+        }
+        10 => kernel_log_line("[M10.SB] phase reader-exit done"),
         _ => fatal_kernel_error("[M10.SB] unknown phase done"),
     }
 }
@@ -1017,6 +1400,18 @@ fn lane_check_handler(pid: u64, check: u64, arg: u64) -> u64 {
             }
             if arg == PhaseId::Reuse as u64 {
                 kernel_log_line("[M10.SB] reuse zeroed OK");
+            }
+            if arg == PhaseId::RoWrite as u64 {
+                kernel_log_line("[M10.SB] read-only write fault OK");
+            }
+            if arg == PhaseId::SharedExec as u64 {
+                kernel_log_line("[M10.SB] shared exec fault err=0x15 OK");
+            }
+            if arg == PhaseId::OwnerExit as u64 {
+                kernel_log_line("[M10.SB] owner exit orphaned reader OK");
+            }
+            if arg == PhaseId::ReaderExit as u64 {
+                kernel_log_line("[M10.SB] reader exit left owner intact OK");
             }
             advance_after_phase_done(arg as usize);
             0
@@ -1073,6 +1468,10 @@ fn lane_check_handler(pid: u64, check: u64, arg: u64) -> u64 {
                     fatal_kernel_error("[M10.SB] reuse buffer did not receive the dirtied frames");
                 }
             }
+            0
+        }
+        CHECK_RECORD_FAULT_VA => {
+            state_mut().expected_fault_va = arg;
             0
         }
         CHECK_MAP => {
@@ -1199,6 +1598,134 @@ fn lane_check_handler(pid: u64, check: u64, arg: u64) -> u64 {
             kernel_log_line("[M10.SB] kernel-owned map OK");
             0
         }
+        CHECK_RO_WRITE_FAULT => {
+            let state = state_mut();
+            let observation = state
+                .latest_fault
+                .as_ref()
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] ro-write check without fault"));
+            if observation.pid != state.peer_pids[ROLE_R as usize] {
+                fatal_kernel_error("[M10.SB] ro-write fault pid mismatch");
+            }
+            if observation.error_code != EXPECTED_RO_WRITE_FAULT_ERROR {
+                fatal_kernel_error("[M10.SB] ro-write fault error code mismatch");
+            }
+            if observation.cr2 != state.expected_fault_va {
+                fatal_kernel_error("[M10.SB] ro-write fault address mismatch");
+            }
+            state.latest_fault = None;
+            0
+        }
+        CHECK_RO_WRITE_POST => {
+            let state = state_mut();
+            let w_pid = state.peer_pids[ROLE_W as usize];
+            let r_pid = state.peer_pids[ROLE_R as usize];
+            let id = state.active_buffer_id;
+            if inspect::mapping(r_pid, id).is_some() {
+                fatal_kernel_error("[M10.SB] ro-write reader window lingered");
+            }
+            let live = inspect::buffer(id)
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] ro-write buffer missing"));
+            if live.0 != BufferState::Live || live.1 != 1 {
+                fatal_kernel_error("[M10.SB] ro-write attachment count");
+            }
+            let (w_va, w_live, w_access) = inspect::mapping(w_pid, id)
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] ro-write owner mapping missing"));
+            if !w_live || w_access != SharedBufferAccess::ReadWrite {
+                fatal_kernel_error("[M10.SB] ro-write owner mapping state");
+            }
+            let leaf = inspect::leaf(w_pid, w_va)
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] ro-write owner leaf missing"));
+            if !leaf.writable {
+                fatal_kernel_error("[M10.SB] ro-write owner leaf not writable");
+            }
+            inspect::check_consistency()
+                .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] consistency"));
+            0
+        }
+        CHECK_SHARED_EXEC => {
+            let state = state_mut();
+            let observation = state
+                .latest_fault
+                .as_ref()
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] shared-exec check without fault"));
+            if observation.pid != state.peer_pids[ROLE_W as usize] {
+                fatal_kernel_error("[M10.SB] shared-exec fault pid mismatch");
+            }
+            if observation.error_code != EXPECTED_NX_FETCH_ERROR {
+                fatal_kernel_error("[M10.SB] shared-exec fault error code mismatch");
+            }
+            if observation.cr2 != state.expected_fault_va
+                || observation.rip != state.expected_fault_va
+            {
+                fatal_kernel_error("[M10.SB] shared-exec fault address mismatch");
+            }
+            state.latest_fault = None;
+            0
+        }
+        CHECK_SHARED_EXEC_RECLAIM => {
+            buffer_fully_reclaimed(state_mut().active_buffer_id);
+            let (rows, tables) = inspect::window_usage();
+            if rows != 0 || tables != 0 {
+                fatal_kernel_error("[M10.SB] shared-exec window not drained");
+            }
+            inspect::check_consistency()
+                .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] consistency"));
+            0
+        }
+        CHECK_OWNER_EXIT => {
+            let state = state_mut();
+            let r_pid = state.peer_pids[ROLE_R as usize];
+            let id = state.active_buffer_id;
+            let zero_frame = inspect::shared_zero_leaf_frame()
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] shared zero frame missing"));
+            let (va, live, _) = inspect::mapping(r_pid, id)
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] owner-exit reader row missing"));
+            if live {
+                fatal_kernel_error("[M10.SB] owner-exit reader row still live");
+            }
+            let leaf = inspect::leaf(r_pid, va)
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] owner-exit reader leaf missing"));
+            if leaf.frame != zero_frame
+                || leaf.writable
+                || !leaf.no_execute_every_level
+                || !leaf.user_every_level
+            {
+                fatal_kernel_error("[M10.SB] owner-exit orphan leaf mismatch");
+            }
+            buffer_fully_reclaimed(id);
+            inspect::check_consistency()
+                .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] consistency"));
+            0
+        }
+        CHECK_READER_EXIT_POST => {
+            let state = state_mut();
+            let w_pid = state.peer_pids[ROLE_W as usize];
+            let r_pid = state.peer_pids[ROLE_R as usize];
+            let id = state.active_buffer_id;
+            if inspect::mapping(r_pid, id).is_some() {
+                fatal_kernel_error("[M10.SB] reader-exit reader window lingered");
+            }
+            let live = inspect::buffer(id)
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] reader-exit buffer missing"));
+            if live.0 != BufferState::Live || live.1 != 1 {
+                fatal_kernel_error("[M10.SB] reader-exit attachment count");
+            }
+            let (w_va, w_live, w_access) = inspect::mapping(w_pid, id).unwrap_or_else(|| {
+                fatal_kernel_error("[M10.SB] reader-exit owner mapping missing")
+            });
+            if !w_live || w_access != SharedBufferAccess::ReadWrite {
+                fatal_kernel_error("[M10.SB] reader-exit owner mapping state");
+            }
+            let leaf = inspect::leaf(w_pid, w_va)
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] reader-exit owner leaf missing"));
+            if !leaf.writable {
+                fatal_kernel_error("[M10.SB] reader-exit owner leaf not writable");
+            }
+            inspect::check_consistency()
+                .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] consistency"));
+            0
+        }
         _ => SYSCALL_EINVAL,
     }
 }
@@ -1317,6 +1844,7 @@ pub(crate) fn start_m10_shared_buffer_self_test(page_allocator: PageAllocator) -
             ko_token: None,
             ko_reclaimed_before: 0,
             reuse_dirtied_base: 0,
+            expected_fault_va: 0,
         });
     }
     set_report_handler(report_handler);

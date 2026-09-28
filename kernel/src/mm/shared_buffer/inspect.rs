@@ -62,6 +62,16 @@ pub(crate) struct Leaf {
     pub(crate) user_every_level: bool,
 }
 
+/// Physical frame every orphaned shared leaf maps through the zero page table.
+pub(crate) fn shared_zero_leaf_frame() -> Option<u64> {
+    let zero_pt = state().zero?.zero_pt;
+    let entry = &unsafe { page_table_mut(zero_pt) }[0];
+    if !entry.flags().contains(PageTableFlags::PRESENT) {
+        return None;
+    }
+    Some(entry.addr().as_u64())
+}
+
 pub(crate) fn leaf(pid: u64, va: u64) -> Option<Leaf> {
     let va = x86_64::VirtAddr::try_new(va).ok()?;
     let mut table = state().windows.get(pid)?.root_frame;
