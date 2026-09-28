@@ -19,6 +19,7 @@ mod m9_userspace_validate;
 mod marker_spec;
 mod ovmf_vars;
 mod qmp;
+mod raster_font;
 
 use marker_spec::{MarkerSet, MarkerStep, MarkerTracker};
 use ovmf_vars::RuntimeVarsCopy;
@@ -932,6 +933,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
             m7_certs::generate_m7_fixture_certs().map_err(XtaskError::InvalidCommand)?;
             Ok(())
         }
+        ParsedCommand::GenRasterFont => run_gen_raster_font(&trailing_args),
         ParsedCommand::VerifyM8Fixture => run_m8_verify_fixture_verbose(),
         ParsedCommand::VerifyM9Fixture => run_m9_verify_fixture_verbose(),
         ParsedCommand::TestM7Dns => run_m7_dns_acceptance(),
@@ -2884,6 +2886,36 @@ fn workspace_root() -> &'static Path {
         .expect("xtask in workspace")
 }
 
+fn run_gen_raster_font(trailing_args: &[OsString]) -> Result<(), XtaskError> {
+    let root = workspace_root();
+    let bdf_path = trailing_args
+        .first()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("raster/fonts/spleen-8x16.bdf"));
+    let out_path = root.join("raster/src/font/spleen_8x16.rs");
+    let bdf = fs::read_to_string(&bdf_path)
+        .map_err(|e| XtaskError::InvalidCommand(format!("read {}: {e}", bdf_path.display())))?;
+    let generated = raster_font::generate(&bdf).map_err(XtaskError::InvalidCommand)?;
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| XtaskError::InvalidCommand(format!("create {}: {e}", parent.display())))?;
+    }
+    fs::write(&out_path, generated)
+        .map_err(|e| XtaskError::InvalidCommand(format!("write {}: {e}", out_path.display())))?;
+    let status = Command::new("rustfmt")
+        .arg(&out_path)
+        .status()
+        .map_err(|e| XtaskError::InvalidCommand(format!("rustfmt {}: {e}", out_path.display())))?;
+    if !status.success() {
+        return Err(XtaskError::InvalidCommand(format!(
+            "rustfmt {} failed with {}",
+            out_path.display(),
+            status
+        )));
+    }
+    Ok(())
+}
+
 fn run_command(command: &mut Command) -> Result<(), XtaskError> {
     let command_display = format!(
         "{} {}",
@@ -4185,6 +4217,9 @@ fn print_help() {
     println!("  test-m7-net-device Build the M7.2 virtio-net kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m7-tls       M7.6 TLS client acceptance (pass + fail-closed QEMU boots)");
     println!("  gen-m7-fixture-certs  Regenerate repository-owned M7 TLS fixture certificates");
+    println!(
+        "  gen-raster-font       Regenerate raster/src/font/spleen_8x16.rs from the vendored BDF"
+    );
     println!("  verify-m8-fixture Verify committed Linux hello ELF hash and pinned metadata");
     println!(
         "  verify-m9-fixture Verify BusyBox hash, ELF metadata, and deterministic rootfs image"
@@ -4272,6 +4307,7 @@ enum ParsedCommand {
     TestM7NetDevice,
     TestM7Tls,
     GenM7FixtureCerts,
+    GenRasterFont,
     VerifyM8Fixture,
     VerifyM9Fixture,
     TestM7Dns,
@@ -4396,6 +4432,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
             ParsedCommand::TestM7Tls
         }
         Some(cmd) if cmd == "gen-m7-fixture-certs" => ParsedCommand::GenM7FixtureCerts,
+        Some(cmd) if cmd == "gen-raster-font" => ParsedCommand::GenRasterFont,
         Some(cmd) if cmd == "verify-m8-fixture" => ParsedCommand::VerifyM8Fixture,
         Some(cmd) if cmd == "verify-m9-fixture" => ParsedCommand::VerifyM9Fixture,
         Some(cmd) if cmd == "test-m7-dns" || cmd == "m7-dns" || cmd == "m7.5" => {
@@ -4980,6 +5017,10 @@ mod tests {
         assert_eq!(
             parse_command(Some("m5-disk-inspect".as_ref())),
             ParsedCommand::M5DiskInspect
+        );
+        assert_eq!(
+            parse_command(Some("gen-raster-font".as_ref())),
+            ParsedCommand::GenRasterFont
         );
     }
 
