@@ -404,16 +404,46 @@ fn same_size_swap_uses_pending_damage_clipped_to_the_buffer() {
 }
 
 #[test]
-fn same_size_swap_without_damage_schedules_nothing() {
+fn same_size_swap_without_damage_schedules_composite() {
     let mut s = SurfaceState::new();
     let mut t = Tracker::new();
     let id = sid(1);
     map(&mut s, id, &mut t, bid(1), 64, 32);
     s.latch(id, &mut t);
     let outcome = map(&mut s, id, &mut t, bid(2), 64, 32);
-    assert!(!outcome.schedule_composite);
+    assert!(outcome.schedule_composite);
     assert!(s.unlatched_damage().is_empty());
     assert_eq!(t.latest(id), Some(bid(2)), "the swap is still tracked");
+    let latch = s.latch(id, &mut t);
+    assert_eq!(latch.released, Some(bid(1)));
+    assert!(!t.is_busy(bid(1)), "latch releases the old current buffer");
+}
+
+#[test]
+fn redundant_commit_without_changes_schedules_nothing() {
+    let mut s = SurfaceState::new();
+    let mut t = Tracker::new();
+    let id = sid(1);
+    map(&mut s, id, &mut t, bid(1), 64, 32);
+    s.latch(id, &mut t);
+    assert!(
+        !commit_plain(&mut s, id, &mut t).schedule_composite,
+        "Unchanged commit with no damage and no frame request"
+    );
+}
+
+#[test]
+fn latch_damage_is_clipped_to_the_latched_buffer() {
+    let mut s = SurfaceState::new();
+    let mut t = Tracker::new();
+    let id = sid(1);
+    map(&mut s, id, &mut t, bid(1), 100, 100);
+    s.latch(id, &mut t);
+    s.damage(&[brect(0, 0, 100, 100)]).unwrap();
+    map(&mut s, id, &mut t, bid(2), 50, 50);
+    let latch = s.latch(id, &mut t);
+    assert!(latch.geometry_changed);
+    assert_eq!(latch.damage.rects(), &[rect(0, 0, 50, 50)]);
 }
 
 #[test]
@@ -555,6 +585,23 @@ fn opaque_overflow_degrades_to_not_opaque_and_is_sticky_until_replace() {
     s.set_opaque_region(&[rect(0, 0, 2, 2)], true).unwrap();
     commit_plain(&mut s, id, &mut t);
     assert_eq!(*s.committed().opaque(), region(&[rect(0, 0, 2, 2)]));
+}
+
+#[test]
+fn opaque_append_at_capacity_with_only_dropped_rects_stays_rects() {
+    let mut s = SurfaceState::new();
+    let rects = diagonal(0, MAX_REGION_RECTS);
+    s.set_opaque_region(&rects[0..3], true).unwrap();
+    s.set_opaque_region(&rects[3..6], false).unwrap();
+    s.set_opaque_region(&rects[6..8], false).unwrap();
+    assert!(
+        matches!(s.pending().opaque(), OpaqueRegion::Rects(set) if set.len() == MAX_REGION_RECTS)
+    );
+    s.set_opaque_region(&[rect(-10, -10, 1, 1)], false)
+        .unwrap();
+    assert!(
+        matches!(s.pending().opaque(), OpaqueRegion::Rects(set) if set.len() == MAX_REGION_RECTS)
+    );
 }
 
 // --- input region -------------------------------------------------------------------------
@@ -1366,6 +1413,18 @@ fn remove_surface_releases_current_then_latest() {
 }
 
 #[test]
+fn remove_surface_after_pending_detach_returns_only_current() {
+    let mut s = SurfaceState::new();
+    let mut t = Tracker::new();
+    let id = sid(1);
+    map(&mut s, id, &mut t, bid(1), 8, 8);
+    s.latch(id, &mut t);
+    s.attach(None, Scale120::ONE, &t).unwrap();
+    commit_plain(&mut s, id, &mut t);
+    assert_eq!(t.remove_surface(id), [Some(bid(1)), None]);
+}
+
+#[test]
 fn tracker_entries_are_per_surface_and_independent() {
     let mut a = SurfaceState::new();
     let mut b = SurfaceState::new();
@@ -1455,6 +1514,14 @@ fn property_buffer_handoff_conserves_buffers() {
                         if let PendingBuffer::Attach(b) = pending {
                             owner[usize::from(b.0.slot())] = Some(si);
                             became_busy += 1;
+                        }
+                        if let Some(buf) = surfaces[si].committed().buffer() {
+                            let expected = t.latest(id).or_else(|| t.current(id));
+                            assert_eq!(
+                                Some(buf.id),
+                                expected,
+                                "committed buffer id matches tracker (step {step})"
+                            );
                         }
                     }
                 }

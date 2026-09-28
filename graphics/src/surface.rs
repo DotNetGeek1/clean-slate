@@ -39,7 +39,7 @@ pub enum PendingBuffer {
 pub enum OpaqueRegion {
     /// Empty set = not opaque.
     Rects(RegionSet),
-    /// Overflowed: not opaque; appends ignored until `replace = true`.
+    /// More than [`MAX_REGION_RECTS`] rects: not opaque; appends ignored until `replace = true`.
     Degraded,
 }
 
@@ -234,7 +234,8 @@ pub struct CommitOutcome {
     pub acked: Option<Serial>,
     /// This commit moved the frame callback `Idle → Armed`.
     pub frame_armed: bool,
-    /// Geometry changed, damage non-empty, or a frame was requested.
+    /// Geometry changed, commit damage non-empty, buffer identity changed, or a frame was
+    /// requested.
     pub schedule_composite: bool,
 }
 
@@ -456,6 +457,10 @@ impl SurfaceState {
     /// 2. window present, never configured, `ack` is `None` → `NotConfigured`.
     /// 3. `PendingBuffer::Attach(b)`: `resolve(b)` error passed through unchanged.
     /// 4. `tracker.check_commit`: `BufferBusy`, then `LimitExceeded`.
+    ///
+    /// `schedule_composite` is true when geometry changed, commit damage is non-empty, the
+    /// committed buffer identity changed (`Attach` to a different id or `Detach` while mapped),
+    /// or `request_frame` is set.
     pub fn commit<const N: usize, F>(
         &mut self,
         surface: SurfaceId,
@@ -483,12 +488,19 @@ impl SurfaceState {
         };
         tracker.check_commit(surface, self.pending.buffer)?;
 
+        let pending_buffer = self.pending.buffer;
+        let buffer_identity_changed = match pending_buffer {
+            PendingBuffer::Unchanged => false,
+            PendingBuffer::Detach => self.committed.buffer.is_some(),
+            PendingBuffer::Attach(id) => self.committed.buffer.map(|b| b.id) != Some(id),
+        };
+
         // Apply (infallible from here on).
         let acked = match (window, request.ack) {
             (Some(w), Some(s)) => w.ack(s).ok().map(|_| s),
             _ => None,
         };
-        let released = tracker.commit(surface, self.pending.buffer).unwrap_or(None);
+        let released = tracker.commit(surface, pending_buffer).unwrap_or(None);
 
         let old_size = self
             .committed
@@ -553,20 +565,30 @@ impl SurfaceState {
             frame_armed,
             schedule_composite: geometry_changed
                 || !commit_damage.is_empty()
-                || request.request_frame,
+                || request.request_frame
+                || buffer_identity_changed,
         })
     }
 
     /// Start of composition: promotes the latest committed buffer, releases the previously
-    /// displayed one, and hands over accumulated damage.
+    /// displayed one, and hands over accumulated damage clipped to the committed buffer size.
     pub fn latch<const N: usize>(
         &mut self,
         surface: SurfaceId,
         tracker: &mut BufferTracker<N>,
     ) -> Latch {
+        let latch_size = self.committed.size();
+        let mut damage = DamageSet::new();
+        if latch_size.width > 0 && latch_size.height > 0 {
+            for r in self.unlatched_damage.rects() {
+                if let Ok(Some(c)) = r.clip_to(latch_size) {
+                    let _ = damage.insert(c);
+                }
+            }
+        }
         let latch = Latch {
             released: tracker.composited(surface),
-            damage: self.unlatched_damage,
+            damage,
             geometry_changed: self.unlatched_geometry,
         };
         self.unlatched_damage = DamageSet::new();
