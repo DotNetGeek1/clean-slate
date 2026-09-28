@@ -1166,32 +1166,20 @@ pub(crate) struct LaunchedLinuxProcess {
     pub(crate) page_table_frames: usize,
 }
 
-/// Remove a process that was inserted but whose scheduler configuration failed:
-/// destroy its address space, reap the record and release the registry slot.
+/// Rollback for a Linux process that was inserted but failed registration
+/// before its first dispatch.
 #[cfg(not(any(
     feature = "m1-self-test",
     feature = "m2-double-fault-self-test",
     feature = "m2-timer-self-test"
 )))]
-pub(crate) fn rollback_registered_process(
-    pid: u64,
-    allocator: &mut PageAllocator,
-) -> Result<(), &'static str> {
-    use super::{process_registry_mut, reap_process_record};
-
-    let registry = unsafe { process_registry_mut() };
-    let record = registry
-        .get_mut(pid)
-        .ok_or("linux launch rollback: process missing from registry")?;
-    let address_space = record
-        .resource_domain
-        .take_address_space()
-        .ok_or("linux launch rollback: process had no address space")?;
-    destroy_process_address_space(&address_space, allocator)?;
-    record.live_threads = 0;
-    reap_process_record(record)?;
-    registry.release_reaped(pid)
-}
+pub(crate) const LINUX_LAUNCH_ROLLBACK: super::domain::RegistrationRollback =
+    super::domain::RegistrationRollback {
+        revokes_capabilities: true,
+        best_effort: false,
+        process_missing: "linux launch rollback: process missing from registry",
+        address_space_missing: "linux launch rollback: process had no address space",
+    };
 
 /// Register a built image as a `LinuxX86_64` process and configure its
 /// scheduler thread, in the same order `service::spawn::register_spawned_process`
@@ -1210,6 +1198,7 @@ pub(crate) fn register_linux_process(
     image: LinuxProcessImage,
     page_table_frames: usize,
 ) -> Result<LaunchedLinuxProcess, LinuxImageError> {
+    use super::domain::rollback_registered_process;
     use super::id_allocator::id_allocator_mut;
     use super::personality::ExecutionPersonality;
     use super::{
@@ -1317,10 +1306,12 @@ pub(crate) fn register_linux_process(
             pid,
             instance_generation,
         ) {
-            return Err(match rollback_registered_process(pid, allocator) {
-                Ok(()) => LinuxImageError::Registry(message),
-                Err(rollback) => LinuxImageError::Rollback(rollback),
-            });
+            return Err(
+                match rollback_registered_process(pid, allocator, LINUX_LAUNCH_ROLLBACK) {
+                    Ok(()) => LinuxImageError::Registry(message),
+                    Err(rollback) => LinuxImageError::Rollback(rollback),
+                },
+            );
         }
         if let Err(message) = scheduler_mut().configure_thread(
             scheduler_slot,
@@ -1337,10 +1328,12 @@ pub(crate) fn register_linux_process(
                     generation: instance_generation,
                 },
             );
-            return Err(match rollback_registered_process(pid, allocator) {
-                Ok(()) => LinuxImageError::Scheduler(message),
-                Err(rollback) => LinuxImageError::Rollback(rollback),
-            });
+            return Err(
+                match rollback_registered_process(pid, allocator, LINUX_LAUNCH_ROLLBACK) {
+                    Ok(()) => LinuxImageError::Scheduler(message),
+                    Err(rollback) => LinuxImageError::Rollback(rollback),
+                },
+            );
         }
         Ok(instance_generation)
     });

@@ -7,18 +7,17 @@ use crate::arch::x86_64::context_switch::build_fork_child_userspace_frame;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::inherit_capabilities_for_fork;
-use crate::capability::revoke_for_holder;
 use crate::mm::address_space::destroy_process_address_space;
 use crate::mm::fork_clone::{fork_child_address_space, LINUX_FORK_MAX_PAGES};
 use crate::mm::frame_allocator::PageAllocator;
+use crate::process::domain::{rollback_registered_process, RegistrationRollback};
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::linux_fd;
-use crate::process::linux_image::LINUX_USER_WINDOW_BASE;
+use crate::process::linux_image::{LINUX_LAUNCH_ROLLBACK, LINUX_USER_WINDOW_BASE};
 use crate::process::linux_mem;
 use crate::process::linux_signal;
 use crate::process::{
-    personality::ExecutionPersonality, process_registry_mut, reap_process_record, Process,
-    ProcessState, ResourceDomain,
+    personality::ExecutionPersonality, process_registry_mut, Process, ProcessState, ResourceDomain,
 };
 use crate::sched::{scheduler_mut, Thread, ThreadKind, ThreadState};
 use clean_slate_capability::HolderId;
@@ -112,8 +111,7 @@ pub(crate) fn linux_fork(
                 execution_personality: ExecutionPersonality::LinuxX86_64,
             };
             if let Err(_message) = process_registry_mut().insert(process) {
-                let _ =
-                    crate::process::linux_image::rollback_registered_process(child_pid, allocator);
+                let _ = rollback_registered_process(child_pid, allocator, LINUX_LAUNCH_ROLLBACK);
                 return Err("registry-insert");
             }
             let generation = process_registry_mut()
@@ -131,8 +129,7 @@ pub(crate) fn linux_fork(
                 )
                 .is_err()
             {
-                let _ =
-                    crate::process::linux_image::rollback_registered_process(child_pid, allocator);
+                let _ = rollback_registered_process(child_pid, allocator, LINUX_LAUNCH_ROLLBACK);
                 return Err("scheduler-configure");
             }
             crate::sched::fpu::inherit_for_fork(parent_slot, scheduler_slot);
@@ -196,9 +193,6 @@ fn abort_fork_child(child_pid: u64, cleanup: &ForkChildCleanup, allocator: &mut 
     if cleanup.fd_inherited {
         linux_fd::release_for_process(child_pid, cleanup.child_gen);
     }
-    if cleanup.caps_inherited {
-        revoke_for_holder(HolderId(child_pid));
-    }
     if cleanup.proc_registered {
         table_mut().reap_zombie(ProcId {
             pid: child_pid,
@@ -207,15 +201,16 @@ fn abort_fork_child(child_pid: u64, cleanup: &ForkChildCleanup, allocator: &mut 
     }
     if cleanup.registry_committed {
         without_interrupts(|| {
-            let registry = unsafe { process_registry_mut() };
-            if let Some(record) = registry.get_mut(child_pid) {
-                if let Some(space) = record.resource_domain.take_address_space() {
-                    let _ = destroy_process_address_space(&space, allocator);
-                }
-                record.live_threads = 0;
-                let _ = reap_process_record(record);
-                let _ = registry.release_reaped(child_pid);
-            }
+            let _ = rollback_registered_process(
+                child_pid,
+                allocator,
+                RegistrationRollback {
+                    revokes_capabilities: cleanup.caps_inherited,
+                    best_effort: true,
+                    process_missing: "fork rollback: child missing from registry",
+                    address_space_missing: "fork rollback: child had no address space",
+                },
+            );
             for thread in unsafe { scheduler_mut() }.threads.iter_mut() {
                 if thread.owner_process_id == child_pid {
                     *thread = Thread::EMPTY;
