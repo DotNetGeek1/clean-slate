@@ -6,6 +6,9 @@ const SLOT_INDEX_MASK: u32 = 0xFF;
 const GENERATION_SHIFT: u32 = 8;
 const MAX_PACKED_GENERATION: u32 = 0x00FF_FFFF;
 
+/// Largest generation an [`ObjectId`] can carry; a slot retires after releasing it.
+pub const MAX_OBJECT_GENERATION: u32 = MAX_PACKED_GENERATION;
+
 fn encode_index_generation(index: u8, generation: u32) -> Result<u32, LookupError> {
     if generation == 0 || generation > MAX_PACKED_GENERATION {
         return Err(LookupError::Invalid);
@@ -386,3 +389,6 @@ mod tests {
         assert_eq!(InputDeviceId::new(0, 0), Err(LookupError::Invalid));
     }
 }
+
+#[cfg(test)]
+mod tests_capacity;

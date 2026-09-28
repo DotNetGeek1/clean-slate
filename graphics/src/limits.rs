@@ -53,6 +53,12 @@ pub const DISPLAY_COMMAND_TIMEOUT_NS: u64 = 1_000_000_000;
 /// Consecutive compositor iterations with a full client event ring before disconnect.
 pub const MAX_CLIENT_STALL_ITERATIONS: u32 = 8;
 
+/// Sent-but-unacknowledged configures per window (Stage D).
+pub const MAX_OUTSTANDING_CONFIGURES: usize = 4;
+/// Per-connection object table capacity: every kind shares one id space (Stage D).
+pub const MAX_OBJECTS_PER_CLIENT: usize =
+    MAX_SURFACES_PER_CLIENT + MAX_WINDOWS_PER_CLIENT + MAX_BUFFERS_PER_CLIENT;
+
 // Proposed for #195 (memory-level; #195 owns and may adjust within MAX_BUFFER_BYTES):
 //   MAX_SHARED_BUFFERS = 32, MAX_SHARED_BUFFERS_PER_OWNER = 8, MAX_SHARED_PAGES_TOTAL = 8192 (32 MiB),
 //   MAX_SHARED_PAGES_PER_OWNER = 4096, MAX_ATTACHMENTS_PER_BUFFER = 2,
@@ -62,3 +68,4 @@ const _: () = assert!(MAX_STRIDE_BYTES == MAX_SURFACE_EXTENT * 4);
 const _: () = assert!(MAX_BUFFERS_PER_CLIENT <= MAX_REGISTERED_BUFFERS);
 const _: () = assert!(MAX_SURFACES_PER_CLIENT <= MAX_SURFACES);
 const _: () = assert!(MAX_WINDOWS_PER_CLIENT <= MAX_WINDOWS);
+const _: () = assert!(MAX_OBJECTS_PER_CLIENT <= 256);
