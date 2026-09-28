@@ -5,8 +5,9 @@ use crate::error::syscall_abi::{
 };
 use crate::{
     authorize, authorize_audited, validate_delegation, AuditEvent, AuditOutcome, AuditSink,
-    CapabilityError, CapabilityHandle, CapabilityRecord, CapabilityState, Generation, HolderId,
-    Provenance, ResourceClass, ResourceRef, Rights, AUDIT_EVENT_SIZE_BYTES, MAX_DELEGATION_DEPTH,
+    CapabilityError, CapabilityHandle, CapabilityRecord, CapabilityState, CapabilityTable,
+    Generation, HolderId, Provenance, ResourceClass, ResourceRef, Rights, AUDIT_EVENT_SIZE_BYTES,
+    MAX_DELEGATION_DEPTH,
 };
 
 struct VecSink {
@@ -63,7 +64,7 @@ fn rights_subset_and_names() {
     assert!(Rights::READ.is_subset_of(full));
     assert_eq!(full.attenuate(Rights::READ), Rights::READ);
     assert!(!Rights::WRITE.is_subset_of(Rights::READ));
-    assert_eq!(Rights::from_bits(1 << 14), None);
+    assert_eq!(Rights::from_bits(1 << 20), None);
     let mut buf = alloc::string::String::new();
     full.write_names(&mut buf).unwrap();
     assert_eq!(buf, "read|write|delegate");
@@ -317,7 +318,7 @@ fn network_rights_mask_and_authorization() {
     let handle = CapabilityHandle::new(0, 1);
     let valid = Rights::valid_for(ResourceClass::Network);
     assert!(valid.contains(Rights::NET_SEND));
-    assert_eq!(Rights::from_bits(valid.bits() | (1 << 14)), None);
+    assert_eq!(Rights::from_bits(valid.bits() | (1 << 20)), None);
     assert!(!Rights::NET_SEND.is_subset_of(Rights::valid_for(ResourceClass::BlockDevice)));
 
     let parent = live_record(holder, resource, valid, 1);
@@ -383,4 +384,226 @@ fn network_resource_ref_constructors() {
     let stale = ResourceRef::network(0x5200, 1);
     let live = ResourceRef::network(0x5200, 2);
     assert_ne!(stale, live);
+}
+
+fn shared_buffer_id_raw(slot: u16, generation: u32) -> u64 {
+    u64::from(slot) | (u64::from(generation) << 16)
+}
+
+#[test]
+fn resource_class_from_u8_includes_m10_classes() {
+    for raw in 1u8..=11 {
+        assert_eq!(ResourceClass::from_u8(raw).map(|c| c.as_u8()), Some(raw));
+    }
+    assert_eq!(ResourceClass::from_u8(0), None);
+    assert_eq!(ResourceClass::from_u8(12), None);
+}
+
+#[test]
+fn m10_valid_for_masks_exact() {
+    assert_eq!(
+        Rights::valid_for(ResourceClass::SharedBuffer),
+        Rights::READ
+            .union(Rights::WRITE)
+            .union(Rights::DELEGATE)
+            .union(Rights::REVOKE)
+    );
+    assert_eq!(
+        Rights::valid_for(ResourceClass::Graphics),
+        Rights::GFX_CONNECT
+            .union(Rights::GFX_SHELL)
+            .union(Rights::GFX_OVERLAY)
+            .union(Rights::GFX_SERVE)
+            .union(Rights::DELEGATE)
+            .union(Rights::REVOKE)
+    );
+    assert_eq!(
+        Rights::valid_for(ResourceClass::Display),
+        Rights::DISPLAY_PRESENT.union(Rights::INSPECT)
+    );
+    assert_eq!(
+        Rights::valid_for(ResourceClass::Input),
+        Rights::INPUT_CONSUME.union(Rights::INSPECT)
+    );
+    assert_eq!(
+        Rights::root_only_for(ResourceClass::PersistentObject),
+        Rights::empty()
+    );
+}
+
+#[test]
+fn display_and_input_grant_reject_delegate_via_valid_for() {
+    let mut table = CapabilityTable::<4>::new();
+    let holder = HolderId(1);
+    let prov = Provenance::root(holder);
+    let display = ResourceRef::display(1);
+    let input = ResourceRef::input(0);
+    assert_eq!(
+        table.grant(
+            holder,
+            display,
+            Rights::DISPLAY_PRESENT.union(Rights::DELEGATE),
+            prov
+        ),
+        Err(CapabilityError::InvalidRights)
+    );
+    assert_eq!(
+        table.grant(
+            holder,
+            input,
+            Rights::INPUT_CONSUME.union(Rights::DELEGATE),
+            prov
+        ),
+        Err(CapabilityError::InvalidRights)
+    );
+    assert!(table
+        .grant(holder, display, Rights::DISPLAY_PRESENT, prov)
+        .is_ok());
+    assert!(table
+        .grant(holder, input, Rights::INPUT_CONSUME, prov)
+        .is_ok());
+}
+
+#[test]
+fn graphics_delegation_refuses_root_only_rights() {
+    let holder = HolderId(2);
+    let resource = ResourceRef::graphics(0x5300, 1);
+    let handle = CapabilityHandle::new(0, 1);
+    let parent = live_record(
+        holder,
+        resource,
+        Rights::GFX_CONNECT
+            .union(Rights::GFX_SHELL)
+            .union(Rights::GFX_OVERLAY)
+            .union(Rights::GFX_SERVE)
+            .union(Rights::DELEGATE),
+        1,
+    );
+    assert_eq!(
+        validate_delegation(&parent, handle, holder, Rights::GFX_CONNECT),
+        Ok(Rights::GFX_CONNECT)
+    );
+    assert_eq!(
+        validate_delegation(&parent, handle, holder, Rights::GFX_SHELL),
+        Err(CapabilityError::NotDelegable)
+    );
+    assert_eq!(
+        validate_delegation(
+            &parent,
+            handle,
+            holder,
+            Rights::GFX_CONNECT.union(Rights::GFX_SERVE)
+        ),
+        Err(CapabilityError::NotDelegable)
+    );
+}
+
+#[test]
+fn existing_class_delegation_unaffected_by_root_only_mask() {
+    let holder = HolderId(3);
+    let resource = ResourceRef::object(9);
+    let handle = CapabilityHandle::new(1, 1);
+    let parent = live_record(
+        holder,
+        resource,
+        Rights::READ.union(Rights::WRITE).union(Rights::DELEGATE),
+        1,
+    );
+    assert_eq!(
+        validate_delegation(&parent, handle, holder, Rights::READ),
+        Ok(Rights::READ)
+    );
+}
+
+#[test]
+fn m10_rights_write_names() {
+    let rights = Rights::GFX_CONNECT
+        .union(Rights::GFX_SHELL)
+        .union(Rights::GFX_OVERLAY)
+        .union(Rights::GFX_SERVE)
+        .union(Rights::DISPLAY_PRESENT)
+        .union(Rights::INPUT_CONSUME);
+    let mut buf = alloc::string::String::new();
+    rights.write_names(&mut buf).unwrap();
+    assert_eq!(
+        buf,
+        "gfx_connect|gfx_shell|gfx_overlay|gfx_serve|display_present|input_consume"
+    );
+}
+
+#[test]
+fn shared_buffer_resource_ref_and_revoke_by_full_id() {
+    let raw_gen1 = shared_buffer_id_raw(1, 1);
+    let raw_gen2 = shared_buffer_id_raw(1, 2);
+    let r1 = ResourceRef::shared_buffer(raw_gen1);
+    assert_eq!(r1.id, raw_gen1);
+    assert_eq!(r1.instance_generation, 0);
+
+    let mut table = CapabilityTable::<4>::new();
+    let h1 = HolderId(10);
+    let h2 = HolderId(11);
+    table
+        .grant(h1, r1, Rights::READ, Provenance::root(h1))
+        .unwrap();
+    table
+        .grant(
+            h2,
+            ResourceRef::shared_buffer(raw_gen2),
+            Rights::READ,
+            Provenance::root(h2),
+        )
+        .unwrap();
+    assert_eq!(
+        table.revoke_resource_id(ResourceClass::SharedBuffer, raw_gen1),
+        1
+    );
+    assert_eq!(table.live_count(), 1);
+}
+
+#[test]
+fn display_resource_ref_names_output_index_only() {
+    for index in 0u8..=255 {
+        let resource = ResourceRef::display(index);
+        assert_eq!(resource.class, ResourceClass::Display);
+        assert_eq!(resource.id, u64::from(index));
+        assert_eq!(resource.instance_generation, 0);
+    }
+}
+
+#[test]
+fn display_resource_ref_revoke_is_per_output_index() {
+    let mut table = CapabilityTable::<4>::new();
+    let h1 = HolderId(20);
+    let h2 = HolderId(21);
+    table
+        .grant(
+            h1,
+            ResourceRef::display(1),
+            Rights::DISPLAY_PRESENT,
+            Provenance::root(h1),
+        )
+        .unwrap();
+    table
+        .grant(
+            h2,
+            ResourceRef::display(2),
+            Rights::DISPLAY_PRESENT,
+            Provenance::root(h2),
+        )
+        .unwrap();
+    assert_eq!(table.revoke_resource_id(ResourceClass::Display, 1), 1);
+    assert_eq!(table.live_count(), 1);
+}
+
+#[test]
+fn m10_resource_ref_constructors() {
+    let gfx = ResourceRef::graphics(0x5300, 4);
+    assert_eq!(gfx.class, ResourceClass::Graphics);
+    assert_eq!(gfx.id, 0x5300);
+    assert_eq!(gfx.instance_generation, 4);
+    let disp = ResourceRef::display(3);
+    assert_eq!(disp.id, 3);
+    let inp = ResourceRef::input(0);
+    assert_eq!(inp.id, 0);
+    assert_eq!(inp.instance_generation, 0);
 }

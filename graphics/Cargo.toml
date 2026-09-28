@@ -1,0 +1,17 @@
+[package]
+name = "clean-slate-graphics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Shared M10 graphics contract: geometry, pixels, protocol limits, and Stage D state machines"
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[features]
+# Host-test fakes (FakeDisplay) for downstream crates' dev-dependencies; never enabled by kernel or userspace builds.
+fake = []

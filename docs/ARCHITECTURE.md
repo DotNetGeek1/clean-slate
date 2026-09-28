@@ -43,6 +43,8 @@ Expected services include:
 
 These services should communicate through explicit contracts and capability-bearing IPC rather than shared global state.
 
+M10 amendment: the graphics compositor is the input consumer. It drains the kernel raw input queue directly (`Input{INPUT_CONSUME}`); there is no separate input service in M10, and the M10 display backend is kernel-resident rather than a GPU service process. See [GRAPHICS.md](GRAPHICS.md).
+
 ## Application domains
 
 Every executable component runs inside a revocable security domain.
@@ -218,6 +220,21 @@ userspace storage service   IPC/service boundary
 persistent store crate      dual-superblock object-store policy using only clean-slate-block
 host storage test kit       fake/fault backends and crash-model tests
 xtask/scripts               QEMU persistence harness
+```
+
+## M10 graphics layering
+
+M10 introduces `clean-slate-graphics` (`no_std`, zero-dependency) and `clean-slate-native-abi`: the frozen contract between the kernel display and input mechanism, the userspace compositor, and its clients. The kernel owns every device, queue, BAR and physical address, and exposes only four capability classes (`SharedBuffer`, `Graphics`, `Display`, `Input`). The compositor is an ordinary supervised service and the only holder of `Display` and `Input`. Apps and the shell are compositor clients that render into their own shared buffers and exchange 64-byte protocol frames over a service port; surfaces and windows are connection-scoped compositor objects, not kernel capabilities. See [GRAPHICS.md](GRAPHICS.md) for the authority split, module ownership, process and thread boundaries, lifecycles and the #110 acceptance mapping.
+
+```text
+graphics / native-abi        shared contract crates (#110)
+kernel mm shared buffers     SharedBuffer objects and mappings (#195)
+kernel service port          connections, work sets, capability transfer (planned)
+kernel display backends      GOP (#111) and VirtIO-GPU (#114) behind ScanoutBackend
+kernel input                 i8042 driver and raw input queue (#113)
+raster / ui                  CPU rendering and UI toolkit (#111, #116)
+compositor (+ wm)            composition, focus, window policy (#112, #115)
+desktop-shell / playground   clients (#116, #117)
 ```
 
 ## Driver description experiment

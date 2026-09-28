@@ -5,7 +5,9 @@ on:
     paths:
       - "block/**"
       - "capability/**"
+      - "graphics/**"
       - "kernel/**"
+      - "native-abi/**"
       - "network/**"
       - "store/**"
       - "fixtures/**"
@@ -22,7 +24,9 @@ on:
     paths:
       - "block/**"
       - "capability/**"
+      - "graphics/**"
       - "kernel/**"
+      - "native-abi/**"
       - "network/**"
       - "store/**"
       - "fixtures/**"

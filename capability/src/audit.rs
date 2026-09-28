@@ -122,6 +122,10 @@ fn resource_class_name(class: ResourceClass) -> &'static str {
         ResourceClass::LifecycleControl => "lifecycle-control",
         ResourceClass::Audit => "audit",
         ResourceClass::Network => "network",
+        ResourceClass::SharedBuffer => "shared-buffer",
+        ResourceClass::Graphics => "graphics",
+        ResourceClass::Display => "display",
+        ResourceClass::Input => "input",
     }
 }
 

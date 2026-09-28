@@ -969,6 +969,48 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_native_reserved_m10_nrs_return_enosys() {
+        use clean_slate_capability::syscall_abi::{
+            SYSCALL_NR_DISPLAY, SYSCALL_NR_INPUT, SYSCALL_NR_SERVICE_PORT,
+            SYSCALL_NR_SHARED_BUFFER, SYSCALL_NR_WORK_SET,
+        };
+
+        assert_eq!(SYSCALL_NR_SHARED_BUFFER, 16);
+        assert_eq!(SYSCALL_NR_SERVICE_PORT, 17);
+        assert_eq!(SYSCALL_NR_DISPLAY, 18);
+        assert_eq!(SYSCALL_NR_INPUT, 19);
+        assert_eq!(SYSCALL_NR_WORK_SET, 20);
+        assert_eq!(
+            SYSCALL_NR_WORK_SET - SYSCALL_NR_SHARED_BUFFER,
+            4,
+            "M10 reserved numbers are contiguous 16..=20"
+        );
+
+        for nr in SYSCALL_NR_SHARED_BUFFER..=SYSCALL_NR_WORK_SET {
+            let mut frame = SyscallContext {
+                rax: nr,
+                rdx: 0,
+                rbx: 0,
+                rbp: 0,
+                rsi: 0,
+                rdi: 0,
+                r8: 0,
+                r9: 0,
+                r10: 0,
+                r12: 0,
+                r13: 0,
+                r14: 0,
+                r15: 0,
+                user_rip: 0,
+                user_rflags: 0,
+                user_rsp: 0,
+            };
+            dispatch_native(&mut frame);
+            assert_eq!(frame.rax, SYSCALL_ENOSYS, "nr {nr}");
+        }
+    }
+
+    #[test]
     fn route_syscall_trusted_native_selects_native() {
         let route = route_syscall(Ok(ResolvedSyscallCaller {
             pid: 4,

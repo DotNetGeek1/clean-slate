@@ -15,6 +15,8 @@ pub enum CapabilityError {
     DelegationDepthExceeded = 8,
     CapacityExhausted = 9,
     GenerationExhausted = 10,
+    /// Parent lacks `DELEGATE`, or requested rights include [`crate::rights::Rights::root_only_for`]
+    /// bits that must not be delegated.
     NotDelegable = 11,
 }
 
@@ -95,6 +97,14 @@ pub mod syscall_abi {
     pub const SYSCALL_NR_CAP_GRANT: u64 = 13;
     pub const SYSCALL_NR_NETWORK_CAPABILITY: u64 = 14;
     pub const SYSCALL_NR_NETWORK_REQUEST: u64 = 15;
+
+    /// Reserved by #110 for M10; the kernel dispatcher returns `SYSCALL_ENOSYS` until the owning
+    /// issue implements each number (#195, service-port issue, #111/#114, #113, service-port issue).
+    pub const SYSCALL_NR_SHARED_BUFFER: u64 = 16;
+    pub const SYSCALL_NR_SERVICE_PORT: u64 = 17;
+    pub const SYSCALL_NR_DISPLAY: u64 = 18;
+    pub const SYSCALL_NR_INPUT: u64 = 19;
+    pub const SYSCALL_NR_WORK_SET: u64 = 20;
 
     /// Best-effort inverse of `CapabilityError::syscall_status` (lossy: many errors share a status).
     pub fn error_from_status(status: u64) -> Option<CapabilityError> {
