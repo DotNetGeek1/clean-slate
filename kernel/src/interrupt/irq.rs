@@ -207,6 +207,16 @@ pub(crate) fn unhandled_device_interrupts() -> u64 {
     without_interrupts(|| irq_table_mut().unhandled)
 }
 
+#[allow(dead_code)] // first consumer: the #196 modern transport
+pub(crate) fn gsi_is_routed(gsi: u32) -> bool {
+    without_interrupts(|| {
+        irq_table_mut()
+            .slots
+            .iter()
+            .any(|slot| slot.handler.is_some() && slot.routed_gsi == Some(gsi))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +283,16 @@ mod tests {
             isa_irq_route(&topology, 1),
             (1, TriggerMode::Edge, Polarity::ActiveHigh)
         );
+    }
+
+    #[test]
+    fn gsi_is_routed_reflects_allocated_vector_routes() {
+        let vector = allocate_device_vector(noop).expect("free vector");
+        let index = slot_index(vector).expect("device vector");
+        without_interrupts(|| irq_table_mut().slots[index].routed_gsi = Some(23));
+        assert!(gsi_is_routed(23));
+        assert!(!gsi_is_routed(22));
+        release_device_vector(vector);
+        assert!(!gsi_is_routed(23));
     }
 }
