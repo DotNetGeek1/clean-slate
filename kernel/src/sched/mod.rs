@@ -5,6 +5,7 @@ pub(crate) mod demo_tasks;
 pub(crate) mod dispatch;
 pub(crate) mod fpu;
 pub(crate) mod idle;
+pub(crate) mod timeout;
 pub(crate) mod wait;
 pub(crate) mod work_set;
 
