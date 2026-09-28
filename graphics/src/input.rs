@@ -106,3 +106,148 @@ impl Modifiers {
 /// Wheel delta in 1/120 detent units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AxisValue120(pub i32);
+
+/// Pure modifier state machine (wire §6.4, frozen).
+///
+/// Held set: usages `0xE0..=0xE7`, tracked individually. Lock set: `0x39` → `CAPS_LOCK`,
+/// `0x53` → `NUM_LOCK`, toggled only on a released→pressed transition of the lock key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ModifierTracker {
+    /// Bit `i` set iff usage `0xE0 + i` is held.
+    held: u8,
+    /// Bit 0: Caps Lock key held; bit 1: Num Lock key held.
+    lock_keys_down: u8,
+    /// `Modifiers::CAPS_LOCK | Modifiers::NUM_LOCK` subset.
+    locks: u16,
+}
+
+const LOCK_KEY_CAPS: u8 = 1 << 0;
+const LOCK_KEY_NUM: u8 = 1 << 1;
+
+impl ModifierTracker {
+    pub const fn new() -> Self {
+        Self {
+            held: 0,
+            lock_keys_down: 0,
+            locks: 0,
+        }
+    }
+
+    pub const fn modifiers(&self) -> Modifiers {
+        let held = self.held;
+        let mut bits = self.locks;
+        if held & ((1 << 1) | (1 << 5)) != 0 {
+            bits |= Modifiers::SHIFT;
+        }
+        if held & ((1 << 0) | (1 << 4)) != 0 {
+            bits |= Modifiers::CTRL;
+        }
+        if held & ((1 << 2) | (1 << 6)) != 0 {
+            bits |= Modifiers::ALT;
+        }
+        if held & ((1 << 3) | (1 << 7)) != 0 {
+            bits |= Modifiers::SUPER;
+        }
+        Modifiers(bits)
+    }
+
+    /// Applies one key transition; `Some(new)` only if the modifier value changed.
+    pub fn fold(&mut self, usage: KeyUsage, state: KeyState) -> Option<Modifiers> {
+        let before = self.modifiers();
+        match usage.0 {
+            0xE0..=0xE7 => {
+                let bit = 1u8 << (usage.0 - 0xE0);
+                match state {
+                    KeyState::Pressed => self.held |= bit,
+                    KeyState::Released => self.held &= !bit,
+                }
+            }
+            0x39 => self.fold_lock(LOCK_KEY_CAPS, Modifiers::CAPS_LOCK, state),
+            0x53 => self.fold_lock(LOCK_KEY_NUM, Modifiers::NUM_LOCK, state),
+            _ => return None,
+        }
+        let after = self.modifiers();
+        (after != before).then_some(after)
+    }
+
+    fn fold_lock(&mut self, key: u8, lock: u16, state: KeyState) {
+        match state {
+            KeyState::Pressed => {
+                if self.lock_keys_down & key == 0 {
+                    self.lock_keys_down |= key;
+                    self.locks ^= lock;
+                }
+            }
+            KeyState::Released => self.lock_keys_down &= !key,
+        }
+    }
+
+    /// Clears every held key (including the lock keys' held state) and keeps lock bits.
+    /// `Some(new)` only if the modifier value changed.
+    pub fn reset(&mut self) -> Option<Modifiers> {
+        let before = self.modifiers();
+        self.held = 0;
+        self.lock_keys_down = 0;
+        let after = self.modifiers();
+        (after != before).then_some(after)
+    }
+}
+
+/// Pressed pointer buttons (seat 0).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ButtonTracker {
+    /// Bit `button - 1` set iff pressed.
+    pressed: u8,
+}
+
+impl ButtonTracker {
+    pub const fn new() -> Self {
+        Self { pressed: 0 }
+    }
+
+    /// `true` iff `state` is a transition (a duplicate press or release returns `false`).
+    pub fn fold(&mut self, button: PointerButton, state: KeyState) -> bool {
+        let bit = 1u8 << (button.as_u16() - 1);
+        let was_pressed = self.pressed & bit != 0;
+        match state {
+            KeyState::Pressed => self.pressed |= bit,
+            KeyState::Released => self.pressed &= !bit,
+        }
+        was_pressed != (state == KeyState::Pressed)
+    }
+
+    pub const fn is_pressed(&self, button: PointerButton) -> bool {
+        self.pressed & (1u8 << (button.as_u16() - 1)) != 0
+    }
+
+    pub const fn any_pressed(&self) -> bool {
+        self.pressed != 0
+    }
+
+    /// Releases every button; `true` iff any was pressed.
+    pub fn reset(&mut self) -> bool {
+        let any = self.pressed != 0;
+        self.pressed = 0;
+        any
+    }
+}
+
+/// Raw `Overflow` / input-lost path: resets both trackers and returns the events to post to
+/// the focused client, in order: `InputReset`, then `ModifiersChanged` carrying the post-reset
+/// modifiers (always sent, so the client never has to guess the lock state).
+pub fn reset_seat(
+    modifiers: &mut ModifierTracker,
+    buttons: &mut ButtonTracker,
+) -> [crate::protocol::Event; 2] {
+    let _ = modifiers.reset();
+    let _ = buttons.reset();
+    [
+        crate::protocol::Event::InputReset,
+        crate::protocol::Event::ModifiersChanged {
+            modifiers: modifiers.modifiers(),
+        },
+    ]
+}
+
+#[cfg(test)]
+mod tests;
