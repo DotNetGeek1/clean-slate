@@ -22,6 +22,7 @@ pub mod ids;
 pub mod input;
 pub mod limits;
 pub mod mode;
+pub mod objects;
 pub mod pixel;
 pub mod protocol;
 pub mod raw_input;
