@@ -72,7 +72,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 | 1 | #195 | **Core landed:** `native-abi/src/shared_buffer.rs`; `kernel/src/mm/shared_buffer/` (object table, per-process window, syscall 16, kernel-owned buffers W7); process teardown step 5 (`SharedMappings` — drop every window row before private address-space destroy); `EFER.NXE` at boot; gates `test-m10-nxe` and `test-m10-shared-buffer`; transfer attestation W6 (`attest_for_transfer`), which port SEND (syscall 17) calls on every production kernel |
 | 1 | #200 | port and work-set ABI in `native-abi` (`port.rs`, `work_set.rs`, `status.rs`); class-agnostic port engine in `port/` (`clean-slate-port`, feature `fake` for host tests); `kernel/src/service/port.rs`, `kernel/src/service/port_syscall.rs`, `kernel/src/sched/work_set.rs`; syscalls 17 and 20; capability transfer on send; gate `test-m10-port` |
 | 1 | #111 | **Landed:** GOP framebuffer backend at 1280x800 Xrgb8888 (BGRX; RGBX converted at present-copy), aperture excluded from the write-back direct map and mapped uncached (UC) where the write path is built (WC via PAT deferred, P10 limitation; the inherited firmware identity alias is covered in ARCHITECTURE.md "M1 virtual memory layout"); `raster/` (`clean-slate-raster`, kernel dependency by design); `kernel/src/boot/gop.rs`; `kernel/src/device/display/{mod.rs, gop.rs}`; syscall 18 `FIND_HANDLE` / `QUERY_MODE` / `PRESENT_STATUS` live (`MAP_SCANOUT` / `PRESENT` `ENOSYS` until #195 S6; `BIND_WAKE` `ENOSYS` until a later #111 stage wires it to the #200 work sets); missing GOP/mode => no backend (`ENODEV`), boot continues; gate `cargo xtask test-m10-framebuffer` (`-vga std`) |
-| 1 | #113 | `kernel/src/device/input/{mod.rs, i8042.rs}`; `kernel/src/service/input_syscall.rs`; syscall 19; scancode to HID usage table in `graphics::input` (all planned) |
+| 1 | #113 | `kernel/src/device/input/{mod.rs, i8042.rs, keyboard.rs, mouse.rs, queue.rs}` (the scancode to HID usage table is kernel code in `keyboard.rs`); `kernel/src/service/input_syscall.rs`; syscall 19 (`BIND_WAKE` and consumer teardown wait on #200) |
 | 1 | #196 | `kernel/src/device/virtio/{modern.rs, modern/, virtqueue.rs, dma.rs}`; `kernel/src/sched/timeout.rs` (W3); `cargo xtask test-m10-virtio-modern` |
 | 1 | #197 | `xtask/src/qmp/` (QMP endpoint, client, input and screendump helpers, PPM to PNG, marker-paced script driver); `AcceptanceDriver` hooks in `xtask/src/main.rs`; gate `test-qmp-smoke` |
 | 1–3 | #116 | `ui/` (`clean-slate-ui`), `desktop-shell/`, `docs/design/DESIGN-SYSTEM.md` (planned). Token and documentation work may start in Wave 1 |
@@ -144,7 +144,7 @@ Numbers are reserved in `clean_slate_capability::syscall_abi` and aliased in `na
 | 16 | `SYSCALL_NR_SHARED_BUFFER` | #195 | implemented: subops 1–5 ([Shared buffers](#shared-buffers-syscall-16-195)); 0 and 6.. → `EINVAL` |
 | 17 | `SYSCALL_NR_SERVICE_PORT` | #200 | implemented: subops 1–9 ([Service port ABI](#service-port-abi-syscall-17)); 0 and 10.. → `EINVAL` |
 | 18 | `SYSCALL_NR_DISPLAY` | #111, #114 | subops 1, 2, 5 (`FIND_HANDLE`, `QUERY_MODE`, `PRESENT_STATUS`) implemented; 3, 4 (`MAP_SCANOUT`, `PRESENT`) `ENOSYS` until #111 wires them onto #195's kernel-owned buffers (W7); 6 (`BIND_WAKE`) `ENOSYS` until a later #111 stage wires it to the #200 work sets; 0 and 7.. `EINVAL`; subops frozen in `graphics::abi::display` |
-| 19 | `SYSCALL_NR_INPUT` | #113 | `ENOSYS` for every subop; subops frozen in `graphics::abi::input` |
+| 19 | `SYSCALL_NR_INPUT` | #113 | implemented: subops 1–3 ([Input ABI](#input-abi-syscall-19)); `BIND_WAKE` → `ENOSYS` until its integration stage; 0 and 5.. → `EINVAL` |
 | 20 | `SYSCALL_NR_WORK_SET` | #200 | implemented: subops 1–4 ([Work set ABI](#work-set-abi-syscall-20)); 0 and 5.. → `EINVAL` |
 
 Subop numbers belong to `native-abi` (16, 17, 20) and `graphics::abi` (18, 19), never to `service-fixtures`.
@@ -605,7 +605,7 @@ Until the owning stage lands: `BIND_WAKE` returns `ENOSYS` until a later #111 st
 
 ## Input ABI (syscall 19)
 
-Authoritative: `graphics::abi::input`, `graphics::raw_input`, `graphics::input`. Kernel implementation: #113 (planned). Same register convention as the display ABI; non-blocking.
+Authoritative: `graphics::abi::input`, `graphics::raw_input`, `graphics::input`. Kernel implementation: #113 (`BIND_WAKE` planned with #200). Same register convention as the display ABI; non-blocking.
 
 | Subop | Name | Arguments | Authority | Returns |
 |---|---|---|---|---|
@@ -618,6 +618,7 @@ Authoritative: `graphics::abi::input`, `graphics::raw_input`, `graphics::input`.
 - **`READ_BATCH` never blocks**; an empty queue returns 0.
 - **Copy rule (R9).** The kernel copies one 32-byte record at a time to user memory and never stages a whole batch (up to 4096 bytes) on the kernel stack. Only fixed structs of at most 256 bytes (`PresentRequest`, 136 bytes, is the largest) are staged on the stack.
 - **Wake is edge-triggered.** The bound bit is signalled when a record is queued into an empty queue or an `Overflow` becomes pending on an empty queue. The consumer must drain with `READ_BATCH` until it returns 0 before waiting again.
+- **One consumer.** The first holder to `READ_BATCH` binds the seat; another `INPUT_CONSUME` holder gets `EACCES` until that binding is released. Release turns unread records into one pending `Overflow`.
 
 ## Raw input records
 
@@ -632,8 +633,9 @@ Authoritative: `graphics::abi::input`, `graphics::raw_input`, `graphics::input`.
 | 21 | 3 | padding, zero |
 | 24 | 8 | payload per kind |
 
-Kernel semantics, binding on #113 (planned):
+Kernel semantics, binding on #113:
 
+- **Driver.** The i8042 keyboard runs scancode set 2 with controller translation off, and the controller is drained once at the end of init. A keyboard overrun or an unsolicited reset (BAT) is a loss and becomes an `Overflow`; a reset also bumps the keyboard's `InputDeviceId` generation.
 - **Queue.** `RAW_INPUT_QUEUE_DEPTH` (128) records, filled in IRQ context without allocation.
 - **Sequence.** `seq` starts at 1 and increases by exactly 1 per queued record, including `Overflow` records; dropped records get no seq, so the consumer always sees contiguous seqs.
 - **Coalescing.** At or above `RAW_INPUT_COALESCE_HIGH_WATER` (96) queued records, a new `RelMotion` merges into an unread tail `RelMotion` from the same device with a saturating add per axis. Nothing else is coalesced: keys, buttons and wheel steps are never merged.
