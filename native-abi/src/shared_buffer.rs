@@ -1,5 +1,6 @@
 //! Shared-buffer identity and proposed memory-level limits (#195 owns adjustment).
 
+use clean_slate_capability::syscall_abi::SYSCALL_NR_SHARED_BUFFER as CAPABILITY_SYSCALL_NR_SHARED_BUFFER;
 use clean_slate_capability::{ResourceRef, Rights};
 
 /// Proposed memory-level limits; #195 owns these values and may adjust within protocol bounds.
@@ -11,7 +12,7 @@ pub const MAX_ATTACHMENTS_PER_BUFFER: usize = 2;
 pub const MAX_SHARED_MAPPINGS_PER_PROCESS: usize = 20;
 pub const MAX_EXTENTS_PER_BUFFER: usize = 16;
 
-pub const SYSCALL_NR_SHARED_BUFFER: u64 = 16;
+pub const SYSCALL_NR_SHARED_BUFFER: u64 = CAPABILITY_SYSCALL_NR_SHARED_BUFFER;
 
 pub const SHARED_BUFFER_SUBOP_ALLOCATE: u64 = 1;
 pub const SHARED_BUFFER_SUBOP_MAP: u64 = 2;
@@ -22,6 +23,8 @@ pub const SHARED_BUFFER_SUBOP_RELEASE: u64 = 5;
 pub const SHARED_BUFFER_ACCESS_READ: u64 = 0;
 pub const SHARED_BUFFER_ACCESS_READ_WRITE: u64 = 1;
 
+pub const SHARED_BUFFER_ALLOCATE_FLAGS_MASK: u64 = 0;
+
 pub const MAX_SHARED_BUFFER_BYTES: u64 = 8 * 1024 * 1024;
 pub const SHARED_BUFFER_PAGE_BYTES: u64 = 4096;
 
@@ -31,6 +34,14 @@ pub const fn page_count_for_bytes(byte_len: u64) -> Option<u32> {
     } else {
         Some(byte_len.div_ceil(SHARED_BUFFER_PAGE_BYTES) as u32)
     }
+}
+
+pub const fn allocate_flags_valid(flags: u64) -> bool {
+    flags & !SHARED_BUFFER_ALLOCATE_FLAGS_MASK == 0
+}
+
+pub const fn validate_allocate_args(byte_len: u64, flags: u64) -> bool {
+    allocate_flags_valid(flags) && page_count_for_bytes(byte_len).is_some()
 }
 
 pub const SHARED_WINDOW_BASE: u64 = 0x0000_5000_0000_0000;
@@ -58,6 +69,8 @@ const _: () = assert!(SHARED_WINDOW_BASE + SHARED_WINDOW_BYTES <= 1 << 47);
 pub const SHARED_BUFFER_INFO_BYTES: usize = 40;
 pub const SHARED_BUFFER_INFO_CALLER_IS_OWNER: u32 = 1;
 pub const SHARED_BUFFER_INFO_CALLER_MAPPED_READ_WRITE: u32 = 2;
+pub const SHARED_BUFFER_INFO_CALLER_FLAGS_MASK: u32 =
+    SHARED_BUFFER_INFO_CALLER_IS_OWNER | SHARED_BUFFER_INFO_CALLER_MAPPED_READ_WRITE;
 
 /// QUERY reply, little-endian: id@0, byte_len@8, page_count@16, rights@20, flags@24,
 /// reserved-zero@28, mapped_va@32 (0 when the caller has no mapping).
@@ -76,6 +89,7 @@ pub enum SharedBufferInfoError {
     WrongLength,
     ReservedNonZero,
     UnknownFlags,
+    InvalidArgument,
     InvalidId(SharedBufferIdError),
 }
 
@@ -99,17 +113,22 @@ impl SharedBufferInfo {
             return Err(SharedBufferInfoError::ReservedNonZero);
         }
         let flags = read_u32_le(bytes, 24);
-        let allowed =
-            SHARED_BUFFER_INFO_CALLER_IS_OWNER | SHARED_BUFFER_INFO_CALLER_MAPPED_READ_WRITE;
-        if flags & !allowed != 0 {
+        if flags & !SHARED_BUFFER_INFO_CALLER_FLAGS_MASK != 0 {
             return Err(SharedBufferInfoError::UnknownFlags);
         }
         let id = SharedBufferId::decode(read_u64_le(bytes, 0))
             .map_err(SharedBufferInfoError::InvalidId)?;
+        let byte_len = read_u64_le(bytes, 8);
+        let page_count = read_u32_le(bytes, 16);
+        if byte_len > MAX_SHARED_BUFFER_BYTES
+            || page_count_for_bytes(byte_len) != Some(page_count)
+        {
+            return Err(SharedBufferInfoError::InvalidArgument);
+        }
         Ok(Self {
             id,
-            byte_len: read_u64_le(bytes, 8),
-            page_count: read_u32_le(bytes, 16),
+            byte_len,
+            page_count,
             rights_bits: read_u32_le(bytes, 20),
             flags,
             mapped_va: read_u64_le(bytes, 32),
@@ -425,38 +444,40 @@ mod tests {
     }
 
     #[test]
-    fn shared_buffer_status_sentinels() {
-        use clean_slate_graphics::abi::status::{
-            STATUS_EACCES, STATUS_EAGAIN, STATUS_EBADF, STATUS_EINVAL, STATUS_ENOSPC,
-            STATUS_ENOSYS, STATUS_ESTALE,
+    fn validate_allocate_args_cases() {
+        assert!(validate_allocate_args(4096, 0));
+        assert!(!validate_allocate_args(0, 0));
+        assert!(!validate_allocate_args(MAX_SHARED_BUFFER_BYTES + 1, 0));
+        assert!(!validate_allocate_args(4096, 1));
+    }
+
+    #[test]
+    fn shared_buffer_info_rejects_inconsistent_attestation() {
+        let id = SharedBufferId::new(1, 1).unwrap();
+        let base = SharedBufferInfo {
+            id,
+            byte_len: 8192,
+            page_count: 2,
+            rights_bits: 0,
+            flags: 0,
+            mapped_va: 0,
         };
+        let bytes = base.encode();
+        assert_eq!(SharedBufferInfo::decode(&bytes), Ok(base));
 
-        const NETWORK_STATUS_PENDING: u64 = u64::MAX - 15;
+        let mut bad_page_count = bytes;
+        write_u32_le(&mut bad_page_count, 16, 3);
+        assert_eq!(
+            SharedBufferInfo::decode(&bad_page_count),
+            Err(SharedBufferInfoError::InvalidArgument)
+        );
 
-        let statuses = [
-            SHARED_BUFFER_STATUS_EINVAL,
-            SHARED_BUFFER_STATUS_EACCES,
-            SHARED_BUFFER_STATUS_ESTALE,
-            SHARED_BUFFER_STATUS_ENOSPC,
-            SHARED_BUFFER_STATUS_ENOSYS,
-            SHARED_BUFFER_STATUS_EAGAIN,
-            SHARED_BUFFER_STATUS_EBADF,
-        ];
-        for i in 0..statuses.len() {
-            assert!(crate::status::is_status(statuses[i]));
-            assert_ne!(statuses[i], NETWORK_STATUS_PENDING);
-            for j in (i + 1)..statuses.len() {
-                assert_ne!(statuses[i], statuses[j]);
-            }
-        }
-        assert_eq!(SHARED_BUFFER_STATUS_EAGAIN, STATUS_EAGAIN);
-        assert_eq!(SHARED_BUFFER_STATUS_EBADF, STATUS_EBADF);
-        assert_eq!(SHARED_BUFFER_STATUS_EACCES, STATUS_EACCES);
-        assert_eq!(SHARED_BUFFER_STATUS_EINVAL, STATUS_EINVAL);
-        assert_eq!(SHARED_BUFFER_STATUS_ENOSPC, STATUS_ENOSPC);
-        assert_eq!(SHARED_BUFFER_STATUS_ENOSYS, STATUS_ENOSYS);
-        assert_eq!(SHARED_BUFFER_STATUS_ESTALE, STATUS_ESTALE);
-        assert_eq!(MAX_SHARED_BUFFER_BYTES, MAX_BUFFER_BYTES);
+        let mut oversize = bytes;
+        write_u64_le(&mut oversize, 8, MAX_SHARED_BUFFER_BYTES + 1);
+        assert_eq!(
+            SharedBufferInfo::decode(&oversize),
+            Err(SharedBufferInfoError::InvalidArgument)
+        );
     }
 
     #[test]
@@ -479,5 +500,6 @@ mod tests {
             per_owner >= per_client,
             "per-owner buffer cap {per_owner} must cover per-client cap {per_client}"
         );
+        assert_eq!(MAX_SHARED_BUFFER_BYTES, MAX_BUFFER_BYTES);
     }
 }

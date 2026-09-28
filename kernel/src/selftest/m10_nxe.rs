@@ -6,7 +6,6 @@
 use crate::arch::x86_64::context_switch::{
     build_userspace_entry_frame, restore_task_context, task_stack_top,
 };
-use crate::arch::x86_64::gdt::selector_rpl;
 use crate::arch::x86_64::interrupt_context::InterruptContext;
 use crate::arch::x86_64::msr::read_msr;
 use crate::arch::x86_64::{IA32_EFER_MSR, IA32_EFER_NXE};
@@ -151,13 +150,12 @@ fn launch_nx_fetch_probe(allocator: &mut PageAllocator) -> Result<u64, &'static 
     Ok(spawned.pid)
 }
 
-/// Records the probe's fault and returns `None` so the production CPL3 fault
-/// path performs the teardown.
-pub(crate) fn observe_page_fault(context: &InterruptContext) -> Option<u64> {
-    if selector_rpl(context.cs) != 3 {
-        return None;
-    }
-    let test = state()?;
+/// Records the probe's fault so the production CPL3 fault path performs teardown.
+pub(crate) fn observe_page_fault(context: &InterruptContext) {
+    let test = match state() {
+        Some(test) => test,
+        None => return,
+    };
     if test.observation.is_some() {
         fatal_kernel_error("m10 nxe probe faulted twice");
     }
@@ -169,7 +167,6 @@ pub(crate) fn observe_page_fault(context: &InterruptContext) -> Option<u64> {
         cr2,
         rip: context.rip,
     });
-    None
 }
 
 /// Called by the production fault path once the probe is torn down and no

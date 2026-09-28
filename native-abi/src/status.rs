@@ -1,9 +1,14 @@
-//! Native syscall status sentinels (`u64::MAX - (errno - 1)`), defined once for every native subsystem.
-//! `u64::MAX - 15` is the network `PENDING` sentinel and is never reused.
+//! Native syscall status sentinels for every native subsystem.
+//!
+//! New statuses follow `u64::MAX - (errno - 1)` and must not reuse `u64::MAX - 15`
+//! (the network `PENDING` sentinel). Legacy `ENOSPC` and `ESTALE` use `u64::MAX - errno`
+//! instead and stay frozen.
 
 use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSPC, SYSCALL_ENOSYS, SYSCALL_ESTALE,
 };
+
+pub const NETWORK_STATUS_PENDING: u64 = u64::MAX - 15;
 
 pub const STATUS_EACCES: u64 = SYSCALL_EACCES;
 pub const STATUS_EINVAL: u64 = SYSCALL_EINVAL;
@@ -29,7 +34,28 @@ mod tests {
         STATUS_ESTALE as GFX_ESTALE, STATUS_RANGE_START as GFX_RANGE_START,
     };
 
-    const NETWORK_STATUS_PENDING: u64 = u64::MAX - 15;
+    const LEGACY_ERRNO_SENTINELS: &[(u64, u64)] = &[
+        (STATUS_ENOSPC, 28),
+        (STATUS_ESTALE, 116),
+    ];
+
+    #[test]
+    fn new_status_sentinels_match_errno_formula() {
+        let cases = [
+            (STATUS_EACCES, 13_u64),
+            (STATUS_EINVAL, 22),
+            (STATUS_ENOSYS, 38),
+            (STATUS_EBADF, 9),
+            (STATUS_EAGAIN, 11),
+        ];
+        for (status, errno) in cases {
+            assert_eq!(status, u64::MAX - (errno - 1));
+        }
+        for &(status, errno) in LEGACY_ERRNO_SENTINELS {
+            assert_eq!(status, u64::MAX - errno);
+            assert_ne!(status, u64::MAX - (errno - 1));
+        }
+    }
 
     #[test]
     fn status_sentinels_pairwise_distinct_and_in_range() {
@@ -41,15 +67,17 @@ mod tests {
             STATUS_ESTALE,
             STATUS_EBADF,
             STATUS_EAGAIN,
-            STATUS_RANGE_START,
         ];
         for i in 0..statuses.len() {
             assert!(is_status(statuses[i]));
+            assert!(statuses[i] >= STATUS_RANGE_START);
             assert_ne!(statuses[i], NETWORK_STATUS_PENDING);
             for j in (i + 1)..statuses.len() {
                 assert_ne!(statuses[i], statuses[j]);
             }
         }
+        assert!(is_status(STATUS_RANGE_START));
+        assert_ne!(STATUS_RANGE_START, NETWORK_STATUS_PENDING);
     }
 
     #[test]

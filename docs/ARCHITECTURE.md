@@ -334,7 +334,7 @@ CR3 switching and page-table construction should stay behind narrow memory-manag
 
 M3.3 uses the x86-64 `syscall/sysretq` mechanism (not Linux ABI) as the first native userspace/kernel call boundary. Linux ABI dispatch is a separate process personality; see [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md).
 
-- `IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK`, and `IA32_EFER.SCE` are initialized before the first userspace syscall.
+- `IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK`, and `IA32_EFER.SCE` are initialized before the first userspace syscall; boot also enables `IA32_EFER.NXE` on the BSP so `NO_EXECUTE` page-table bits are enforced (each additional core must set NXE and SCE before activating the kernel page tables).
 - The GDT SYSRET selector triplet is ordered deliberately as `base`, `base+8` (user data/SS), `base+16` (user code/CS) so STAR-derived selectors are valid in normal builds.
 - `IA32_FMASK` masks unsafe userspace flags on entry (`IF`, `DF`, `TF`, `IOPL`, `NT`, `RF`, `AC`) so Rust kernel code does not inherit user-controlled execution flags.
 - The syscall entry stub immediately switches from untrusted userspace `RSP` to a trusted kernel stack before calling Rust.

@@ -365,10 +365,7 @@ fn handle_exception(context: &InterruptContext) -> u64 {
 
         #[cfg(feature = "m10-nxe-self-test")]
         if selector_rpl(context.cs) == 3 {
-            if let Some(next_stack_pointer) = crate::selftest::m10_nxe::observe_page_fault(context)
-            {
-                return next_stack_pointer;
-            }
+            crate::selftest::m10_nxe::observe_page_fault(context);
         }
 
         if selector_rpl(context.cs) == 3 {

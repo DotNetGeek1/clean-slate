@@ -26,6 +26,8 @@ pub(crate) struct NxeReport {
 /// Must run before any root containing `NO_EXECUTE` entries is activated.
 /// Firmware that left NXE clear cannot have NX bits in its own live tables,
 /// so setting it here is safe on the firmware root.
+/// EFER is per CPU: every additional core must set NXE (and SCE) before loading
+/// the kernel's page tables.
 pub(crate) fn enable_and_verify_nxe() -> Result<NxeReport, &'static str> {
     let max_extended_leaf = unsafe { __cpuid(CPUID_EXTENDED_MAX_LEAF) }.eax;
     let ext_edx = if max_extended_leaf >= CPUID_EXTENDED_FEATURES_LEAF {
