@@ -3,7 +3,7 @@
 use crate::error::CapabilityError;
 use crate::handle::{CapabilityHandle, MAX_DELEGATION_DEPTH};
 use crate::holder::HolderId;
-use crate::resource::ResourceClass;
+use crate::resource::{ResourceClass, ResourceRef};
 use crate::state::CapabilityState;
 use crate::table::CapabilityTable;
 
@@ -63,12 +63,24 @@ pub fn revoke_holder_tree<const N: usize>(
     table: &mut CapabilityTable<N>,
     holder: HolderId,
 ) -> usize {
+    revoke_holder_tree_visiting(table, holder, |_| {})
+}
+
+/// [`revoke_holder_tree`], calling `visit` with the resource of each live capability
+/// `holder` held before its subtree is revoked. Descendants name the same resource, so
+/// the visited resources are exactly the ones whose capabilities this call revokes.
+pub fn revoke_holder_tree_visiting<const N: usize>(
+    table: &mut CapabilityTable<N>,
+    holder: HolderId,
+    mut visit: impl FnMut(ResourceRef),
+) -> usize {
     let mut revoked = 0usize;
     for slot in 0..N {
         let record = table.record_at(slot);
         if record.state != CapabilityState::Live || record.holder != holder {
             continue;
         }
+        visit(record.resource);
         let handle = table.handle_at(slot).expect("live slot must have a handle");
         revoked += revoke_subtree(table, handle).unwrap_or(0);
     }
@@ -305,6 +317,24 @@ mod tests {
             table.authorize(OTHER, b, OBJ, Rights::READ),
             Err(CapabilityError::Revoked)
         );
+    }
+
+    #[test]
+    fn revoke_holder_tree_visits_each_held_resource_once_per_capability() {
+        let mut table = CapabilityTable::<16>::new();
+        let root = grant_root(&mut table, OWNER, OBJ, Rights::READ.union(Rights::DELEGATE));
+        let _reader = install_child(&mut table, root, READER, Rights::READ);
+        let _other = grant_root(&mut table, OWNER, OBJ_OTHER, Rights::READ);
+        let _unrelated = grant_root(&mut table, READER, OBJ_OTHER, Rights::READ);
+
+        let mut visited = [None; 4];
+        let mut count = 0;
+        let revoked = revoke_holder_tree_visiting(&mut table, OWNER, |resource| {
+            visited[count] = Some(resource);
+            count += 1;
+        });
+        assert_eq!(revoked, 3, "both roots and the delegated child");
+        assert_eq!(visited[..count], [Some(OBJ), Some(OBJ_OTHER)]);
     }
 
     #[test]

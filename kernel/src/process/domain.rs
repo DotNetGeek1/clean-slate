@@ -849,9 +849,10 @@ mod tests {
 
     /// Calls that dismantle part of a registered process. Outside the teardown
     /// block they are allowed only where no registered process is dismantled.
-    const DIRECT_TEARDOWN_CALLS: [&str; 5] = [
+    const DIRECT_TEARDOWN_CALLS: [&str; 6] = [
         concat!("revoke_for_holder", "("),
         concat!("revoke_holder_tree", "("),
+        concat!("revoke_holder_tree_visiting", "("),
         concat!("take_address_space", "("),
         concat!("destroy_process_address_space", "("),
         concat!("run_teardown_hooks", "("),
@@ -889,7 +890,7 @@ mod tests {
         (
             "capability/mod.rs",
             "revoke_for_holder",
-            "revoke_holder_tree",
+            "revoke_holder_tree_visiting",
         ),
         // Address spaces built before any process record exists.
         (

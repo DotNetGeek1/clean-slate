@@ -1179,16 +1179,33 @@ fn transfer_beyond_the_delegation_depth_is_no_space() {
     let mut w = World::new(SMALL);
     let a = w.connect(A);
     let root = w.buffer(A, 1, 64);
-    let mut parent = root.handle;
-    for _ in 0..clean_slate_capability::MAX_DELEGATION_DEPTH {
-        parent = clean_slate_capability::delegate(
+    // DELEGATE is root-only for SharedBuffer, so `delegate` cannot build this chain and a real
+    // transfer always installs a depth-1 child. The chain is installed directly to prove the
+    // engine's depth check still fails closed.
+    assert_eq!(
+        clean_slate_capability::delegate(
             &mut w.table,
             A.holder,
-            parent,
+            root.handle,
             A.holder,
             Rights::READ.union(Rights::DELEGATE),
-        )
-        .unwrap();
+        ),
+        Err(CapabilityError::NotDelegable)
+    );
+    let mut parent = root.handle;
+    for _ in 0..clean_slate_capability::MAX_DELEGATION_DEPTH {
+        let parent_record = w.table.record(parent).unwrap();
+        parent = w
+            .table
+            .install(CapabilityRecord {
+                state: CapabilityState::Live,
+                holder: A.holder,
+                resource: parent_record.resource,
+                rights: Rights::READ.union(Rights::DELEGATE),
+                provenance: Provenance::child_of(parent, &parent_record.provenance).unwrap(),
+                generation: 0,
+            })
+            .unwrap();
     }
     let before = snapshot(&w.table);
     assert_eq!(
