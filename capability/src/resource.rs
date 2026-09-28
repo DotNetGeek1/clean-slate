@@ -111,12 +111,13 @@ impl ResourceRef {
         }
     }
 
-    /// `id` packs output index (bits 0..8) and backend epoch (bits 8..32); `instance_generation`
-    /// is always `0`.
-    pub const fn display(output_index: u64, backend_epoch: u64) -> Self {
+    /// `id` is the packed `clean_slate_graphics::OutputId` encoding (index bits 0..8, backend
+    /// epoch bits 8..32), validated by the caller; epoch lives in `id` because
+    /// `revoke_resource_id` ignores `instance_generation`.
+    pub const fn display(output_id_raw: u32) -> Self {
         Self {
             class: ResourceClass::Display,
-            id: output_index | (backend_epoch << 8),
+            id: output_id_raw as u64,
             instance_generation: 0,
         }
     }

@@ -393,10 +393,7 @@ fn shared_buffer_id_raw(slot: u16, generation: u32) -> u64 {
 #[test]
 fn resource_class_from_u8_includes_m10_classes() {
     for raw in 1u8..=11 {
-        assert_eq!(
-            ResourceClass::from_u8(raw).map(|c| c.as_u8()),
-            Some(raw)
-        );
+        assert_eq!(ResourceClass::from_u8(raw).map(|c| c.as_u8()), Some(raw));
     }
     assert_eq!(ResourceClass::from_u8(0), None);
     assert_eq!(ResourceClass::from_u8(12), None);
@@ -428,7 +425,10 @@ fn m10_valid_for_masks_exact() {
         Rights::valid_for(ResourceClass::Input),
         Rights::INPUT_CONSUME.union(Rights::INSPECT)
     );
-    assert_eq!(Rights::root_only_for(ResourceClass::PersistentObject), Rights::empty());
+    assert_eq!(
+        Rights::root_only_for(ResourceClass::PersistentObject),
+        Rights::empty()
+    );
 }
 
 #[test]
@@ -436,7 +436,7 @@ fn display_and_input_grant_reject_delegate_via_valid_for() {
     let mut table = CapabilityTable::<4>::new();
     let holder = HolderId(1);
     let prov = Provenance::root(holder);
-    let display = ResourceRef::display(0, 1);
+    let display = ResourceRef::display(1 << 8);
     let input = ResourceRef::input(0);
     assert_eq!(
         table.grant(
@@ -543,12 +543,7 @@ fn shared_buffer_resource_ref_and_revoke_by_full_id() {
     let h1 = HolderId(10);
     let h2 = HolderId(11);
     table
-        .grant(
-            h1,
-            r1,
-            Rights::READ,
-            Provenance::root(h1),
-        )
+        .grant(h1, r1, Rights::READ, Provenance::root(h1))
         .unwrap();
     table
         .grant(
@@ -565,14 +560,50 @@ fn shared_buffer_resource_ref_and_revoke_by_full_id() {
     assert_eq!(table.live_count(), 1);
 }
 
+fn packed_output_id(index: u8, backend_epoch: u32) -> u32 {
+    u32::from(index) | (backend_epoch << 8)
+}
+
+#[test]
+fn display_resource_ref_revoke_by_packed_output_id_epoch() {
+    let raw_epoch1 = packed_output_id(0, 1);
+    let raw_epoch2 = packed_output_id(0, 2);
+    assert_ne!(raw_epoch1, raw_epoch2);
+
+    let mut table = CapabilityTable::<4>::new();
+    let h1 = HolderId(20);
+    let h2 = HolderId(21);
+    table
+        .grant(
+            h1,
+            ResourceRef::display(raw_epoch1),
+            Rights::DISPLAY_PRESENT,
+            Provenance::root(h1),
+        )
+        .unwrap();
+    table
+        .grant(
+            h2,
+            ResourceRef::display(raw_epoch2),
+            Rights::DISPLAY_PRESENT,
+            Provenance::root(h2),
+        )
+        .unwrap();
+    assert_eq!(
+        table.revoke_resource_id(ResourceClass::Display, u64::from(raw_epoch1)),
+        1
+    );
+    assert_eq!(table.live_count(), 1);
+}
+
 #[test]
 fn m10_resource_ref_constructors() {
     let gfx = ResourceRef::graphics(0x5300, 4);
     assert_eq!(gfx.class, ResourceClass::Graphics);
     assert_eq!(gfx.id, 0x5300);
     assert_eq!(gfx.instance_generation, 4);
-    let disp = ResourceRef::display(0, 3);
-    assert_eq!(disp.id, 3 << 8);
+    let disp = ResourceRef::display(3 << 8);
+    assert_eq!(disp.id, (3 << 8) as u64);
     let inp = ResourceRef::input(0);
     assert_eq!(inp.id, 0);
     assert_eq!(inp.instance_generation, 0);
