@@ -1,7 +1,3 @@
-//! Destination: `native-abi/src/graphics_role_crosscheck.rs`, included from
-//! `native-abi/src/lib.rs` with `#[cfg(test)] mod graphics_role_crosscheck;` (next to the
-//! existing `graphics_status_mirrors_capability_syscall_abi` module).
-//!
 //! `clean-slate-graphics` has zero dependencies, so it mirrors the `Graphics` rights bits as
 //! raw `u32` constants. native-abi is the one crate that sees both sides (capability as a
 //! dependency, graphics as a dev-dependency), so the mirror is proven equal here.

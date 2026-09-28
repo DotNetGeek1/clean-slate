@@ -1,4 +1,4 @@
-//! Input wire types (client events and raw-input payloads in Stage C-2).
+//! Input wire types and per-seat modifier/button state machines (Stage D).
 
 /// USB HID keyboard/page-0x07 usage id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

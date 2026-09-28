@@ -1,4 +1,5 @@
-//! Shared M10 graphics contract: geometry, pixels, identities, and protocol limits.
+//! Shared M10 graphics contract: geometry, pixels, identities, protocol limits, and reference
+//! state machines for surfaces, windows, input, objects and connection admission (Stage D).
 //!
 //! **Authority split.** Applications render into shared buffers they own. The compositor
 //! consumes pixel data only through capability-controlled read mappings of buffers
@@ -10,7 +11,8 @@
 //! display present, and raw input consumption only.
 //!
 //! This crate is `no_std`, dependency-free, and host-tested so every lane shares one
-//! definition of limits, coordinates, blending, and generational ids.
+//! definition of limits, coordinates, blending, generational ids, and compositor-side
+//! lifecycle rules.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -29,8 +31,8 @@ pub mod objects;
 pub mod pixel;
 pub mod protocol;
 pub mod raw_input;
-pub mod surface;
 pub mod role;
+pub mod surface;
 pub mod window;
 
 pub use abi::{display, input as input_abi, status as abi_status};
@@ -49,9 +51,9 @@ pub use limits::{
     CLIENT_EVENT_QUEUE_DEPTH, DISPLAY_COMMAND_TIMEOUT_NS, MAX_BUFFERS_PER_CLIENT, MAX_BUFFER_BYTES,
     MAX_CLIENTS, MAX_CLIENT_STALL_ITERATIONS, MAX_DAMAGE_RECTS_PER_COMMIT,
     MAX_IN_FLIGHT_BUFFERS_PER_SURFACE, MAX_OBJECTS_PER_CLIENT, MAX_OUTPUTS,
-    MAX_OUTSTANDING_CONFIGURES, MAX_OUTSTANDING_REQUESTS_PER_CLIENT,
-    MAX_PRESENT_DAMAGE_RECTS, MAX_REGION_RECTS, MAX_REGISTERED_BUFFERS, MAX_STRIDE_BYTES,
-    MAX_SURFACES, MAX_SURFACES_PER_CLIENT, MAX_SURFACE_EXTENT, MAX_TITLE_BYTES, MAX_WINDOWS,
+    MAX_OUTSTANDING_CONFIGURES, MAX_OUTSTANDING_REQUESTS_PER_CLIENT, MAX_PRESENT_DAMAGE_RECTS,
+    MAX_REGION_RECTS, MAX_REGISTERED_BUFFERS, MAX_STRIDE_BYTES, MAX_SURFACES,
+    MAX_SURFACES_PER_CLIENT, MAX_SURFACE_EXTENT, MAX_TITLE_BYTES, MAX_WINDOWS,
     MAX_WINDOWS_PER_CLIENT, RAW_INPUT_COALESCE_HIGH_WATER, RAW_INPUT_QUEUE_DEPTH,
     SCANOUT_BUFFER_COUNT, SERVER_REQUEST_QUEUE_DEPTH,
 };

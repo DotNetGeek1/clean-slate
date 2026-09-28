@@ -1,4 +1,4 @@
-//! Window wire types (configure and title).
+//! Window configure/ack state machine and wire types (Stage D).
 
 use crate::geometry::{Scale120, Size};
 use crate::ids::{Serial, WindowId};
@@ -103,7 +103,9 @@ impl WindowConfig {
 /// Configure/ack state machine for one window.
 ///
 /// Outstanding configures are kept oldest first. Acking serial `s` consumes `s` and every
-/// older outstanding configure; each serial can be acknowledged at most once.
+/// older outstanding configure; each serial can be acknowledged at most once. Serial uniqueness
+/// while a configure is outstanding assumes fewer than 2³² [`SerialMinter::mint`] calls before
+/// the client acks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConfigureState {
     outstanding: [Option<(Serial, WindowConfig)>; MAX_OUTSTANDING_CONFIGURES],
