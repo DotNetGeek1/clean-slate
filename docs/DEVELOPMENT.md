@@ -65,7 +65,9 @@ This command runs three bounded headless QEMU boots:
 2. a standalone timer acceptance path that proves the kernel receives a bounded minimum number of monotonic LAPIC ticks;
 3. the scheduler/preemption acceptance path that proves reusable interrupt setup, timer-driven preemption, and two kernel tasks making progress before `[M2  ] PASS`.
 
-The shared acceptance runner treats the ordered serial PASS markers as authoritative, terminates QEMU from the host as soon as those markers arrive, and only falls back to `isa-debug-exit` or the timeout path if the expected sequence never completes. This keeps the test reliable on hosts where the guest can print PASS but QEMU does not shut down cleanly on its own.
+The shared acceptance runner treats the ordered serial PASS markers as authoritative and terminates QEMU from the host as soon as those markers arrive, so a guest that prints PASS but never powers off still passes promptly. QEMU runs with `-no-reboot` and without `-no-shutdown`, so a guest write to the `isa-debug-exit` port, or a triple fault, ends the QEMU process at once instead of pausing the VM. A failing exit status fails the lane immediately and reports the first guest `[FAIL]` / `[EXC ]` line; the constituent timeout only bounds a guest that neither completes its markers nor exits.
+
+Each boot starts from a fresh copy of the OVMF vars template, `target/OVMF_VARS.runtime.<pid>.<seq>.fd`. The copy is deleted when the run ends, on success, failure and timeout alike, after the QEMU child has been killed and reaped (Windows cannot delete a file QEMU still holds open). The owning xtask holds an exclusive lock on a sidecar `.lock` file for the whole run, so the first boot of each xtask process can sweep copies left behind by an xtask that was killed or aborted, without touching copies that concurrent runs in the same `target/` are using.
 
 M2 timer acceptance boots with `m2-timer-self-test`, which logs an explicit LAPIC contract line (`initial_count=62500 tick-rate=uncalibrated` when PIT calibration is skipped in that image). Production kernels calibrate the LAPIC against the PIT, derive `initial_count` for a ~1 ms IRQ (~`counter_hz/1000`), and log `initial_count`, `counter_hz`, and `tick_ns` on the `[TIME] contract=lapic` line. All paths expose monotonic `[TIME] ticks=<n>`; the standalone timer test still requires the documented minimum tick count within its bounded host window.
 
@@ -356,7 +358,7 @@ For the bounded M5.2 VirtIO block transport acceptance path:
 cargo xtask test-m5-block
 ```
 
-This command builds the kernel with `m5-block-self-test`, creates a disposable raw disk image under `target/m5-block.img`, boots QEMU with a legacy (`disable-modern=on`) `virtio-blk-pci` device, and validates ordered discovery/write/flush/read markers through `[M5.2] PASS`.
+This command builds the kernel with `m5-block-self-test`, creates a disposable raw disk image under `target/m5-block.img`, boots QEMU with a legacy (`disable-modern=on`) `virtio-blk-pci` device, and validates ordered discovery/write/flush/read markers through `[M5.2] PASS`. The lane runs in boot context with the timer running: after each submit it halts (`sti; hlt`) until the queue interrupt or a timer tick ends the halt, harvests the used ring with interrupts masked, and fails the request as timed out once the 5 s TSC deadline passes. `[BLK ] irq vector=N mode=msix` (or `mode=intx gsi=G`) records the interrupt route, and the lane fails unless `[BLK ] completion interrupts=N` reports at least one queue interrupt. See [M5 storage layering](ARCHITECTURE.md#m5-storage-layering) for the production completion path.
 
 For the host-side M5.6 crash-consistency matrix:
 

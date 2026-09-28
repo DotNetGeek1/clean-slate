@@ -1,6 +1,6 @@
 # M9 block/wake scheduler substrate (#145)
 
-Native mechanism for sleeping and waking scheduler threads. Linux `wait4`, pipes, poll, and socket receive lanes consume this API; they do not reimplement wait queues.
+Native mechanism for sleeping and waking scheduler threads. Linux `wait4`, pipes, poll, and socket receive lanes consume this API, as do the native net service (`NET_SUBOP_WAIT_WORK`), the object-service queue and the virtio-blk completion wait; none of them reimplements wait queues.
 
 ## State machine
 
@@ -15,6 +15,12 @@ Wait registration and the “already woken?” check run with interrupts disable
 ## Syscall continuation (design a)
 
 Each thread’s `kernel_stack_top` is published to `SYSCALL_KERNEL_STACK_TOP` on dispatch (`prepare_thread_dispatch`). Before blocking, the syscall handler arms `blocked_syscall_frame` with the live `SyscallContext` pointer on that stack. After wake, the scheduler returns `SYSCALL_BLOCKED_RESUME_SENTINEL` and the assembly tail completes the syscall via `sysretq` with updated `RAX`.
+
+`block_current_thread_with_resume` takes a `BlockedResume` that decides how the blocked syscall completes:
+
+- `NativeOutcome`: `RAX` is the encoded #145 outcome (`WOKEN` / `TIMEOUT` / `CANCEL`). `NET_SUBOP_WAIT_WORK` uses it.
+- `RestartSyscall { nr, timeout_rax }`: a wake or cancel re-executes the syscall, and a timeout returns `timeout_rax`. Used, for example, by `NET_SUBOP_POLL` and by the storage service's `OBJECT_SUBOP_SERVICE_NEXT`, which blocks on the object-service work key (`0x47 << 56`) with no deadline while the queue is empty.
+- `RetrySyscall { nr }`: every outcome, the timeout included, re-executes the syscall, so the handler owns its deadline. The virtio-blk completion wait uses it: the block request syscall blocks on `0x48 << 56` with a 5 s `MonotonicNs` deadline, and the re-executed syscall either harvests the completion or fails the in-flight request closed (see [ARCHITECTURE.md](ARCHITECTURE.md#m5-storage-layering)).
 
 ## Capacity
 
