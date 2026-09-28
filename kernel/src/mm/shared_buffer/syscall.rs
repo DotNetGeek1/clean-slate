@@ -2,6 +2,7 @@
 //! handle, then `rdx`, `r10`. Linux-personality callers never reach this dispatcher.
 
 use clean_slate_capability::{CapabilityHandle, ResourceClass, Rights};
+use clean_slate_native_abi::shared_buffer::allocate_flags_valid;
 use clean_slate_native_abi::{
     SharedBufferAccess, SharedBufferId, SharedBufferInfo, SHARED_BUFFER_INFO_BYTES,
     SHARED_BUFFER_INFO_CALLER_IS_OWNER, SHARED_BUFFER_INFO_CALLER_MAPPED_READ_WRITE,
@@ -51,7 +52,7 @@ fn allocate(
     flags: u64,
     allocator: &mut PageAllocator,
 ) -> Result<u64, u64> {
-    if flags != 0 {
+    if !allocate_flags_valid(flags) {
         return Err(STATUS_EINVAL);
     }
     allocate_client(pid, byte_len, allocator).map(|(_, root)| root.encode())
