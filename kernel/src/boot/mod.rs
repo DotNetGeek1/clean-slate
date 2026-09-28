@@ -1118,6 +1118,7 @@ fn run_inner() -> Result<(), &'static str> {
         initialize_timer();
         serial_write_line("[TIME] timer initialized");
         report_timer_contract();
+        crate::device::input::initialize_and_log();
         serial_write_line("[KERN] scheduler initialized");
         start_scheduler()
     }

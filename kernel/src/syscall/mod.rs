@@ -900,6 +900,7 @@ fn dispatch_native(frame: &mut SyscallContext) {
         cap_abi::SYSCALL_NR_DISPLAY => {
             crate::service::display_syscall::handle_syscall_display(frame)
         }
+        cap_abi::SYSCALL_NR_INPUT => crate::service::input_syscall::handle_syscall(frame),
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 }
@@ -1007,6 +1008,7 @@ mod tests {
             SYSCALL_NR_DISPLAY, SYSCALL_NR_INPUT, SYSCALL_NR_SERVICE_PORT,
             SYSCALL_NR_SHARED_BUFFER, SYSCALL_NR_WORK_SET,
         };
+        use clean_slate_graphics::abi::input::INPUT_SUBOP_BIND_WAKE;
         use clean_slate_graphics::display::{
             DISPLAY_SUBOP_BIND_WAKE, DISPLAY_SUBOP_MAP_SCANOUT, DISPLAY_SUBOP_PRESENT,
         };
@@ -1022,8 +1024,7 @@ mod tests {
             "M10 reserved numbers are contiguous 16..=20"
         );
 
-        // 19 waits for #113 (#206); #111 routes 18, but its gated subops stay ENOSYS.
-        assert_eq!(dispatch_native_zeroed(SYSCALL_NR_INPUT, 0), SYSCALL_ENOSYS);
+        // #111 routes 18 and #113 routes 19; only their gated subops stay ENOSYS.
         for subop in [
             DISPLAY_SUBOP_MAP_SCANOUT,
             DISPLAY_SUBOP_PRESENT,
@@ -1035,13 +1036,21 @@ mod tests {
                 "subop {subop}"
             );
         }
+        assert_eq!(
+            dispatch_native_zeroed(SYSCALL_NR_INPUT, INPUT_SUBOP_BIND_WAKE),
+            SYSCALL_ENOSYS,
+            "BIND_WAKE until #200 W2"
+        );
     }
 
     #[test]
     fn dispatch_native_implemented_m10_nrs_reach_their_handlers() {
         use clean_slate_capability::syscall_abi::{
-            SYSCALL_EINVAL, SYSCALL_NR_DISPLAY, SYSCALL_NR_SERVICE_PORT, SYSCALL_NR_SHARED_BUFFER,
-            SYSCALL_NR_WORK_SET,
+            SYSCALL_EINVAL, SYSCALL_NR_DISPLAY, SYSCALL_NR_INPUT, SYSCALL_NR_SERVICE_PORT,
+            SYSCALL_NR_SHARED_BUFFER, SYSCALL_NR_WORK_SET,
+        };
+        use clean_slate_graphics::abi::input::{
+            INPUT_SUBOP_FIND_HANDLE, INPUT_SUBOP_QUERY_DEVICES, INPUT_SUBOP_READ_BATCH,
         };
         use clean_slate_graphics::display::{
             DISPLAY_SUBOP_FIND_HANDLE, DISPLAY_SUBOP_PRESENT_STATUS, DISPLAY_SUBOP_QUERY_MODE,
@@ -1067,6 +1076,22 @@ mod tests {
                 dispatch_native_zeroed(SYSCALL_NR_DISPLAY, subop),
                 SYSCALL_ENOSYS,
                 "subop {subop}"
+            );
+        }
+        assert_eq!(
+            dispatch_native_zeroed(SYSCALL_NR_INPUT, 0),
+            SYSCALL_EINVAL,
+            "reserved input subop 0"
+        );
+        for subop in [
+            INPUT_SUBOP_FIND_HANDLE,
+            INPUT_SUBOP_QUERY_DEVICES,
+            INPUT_SUBOP_READ_BATCH,
+        ] {
+            assert_ne!(
+                dispatch_native_zeroed(SYSCALL_NR_INPUT, subop),
+                SYSCALL_ENOSYS,
+                "input subop {subop}"
             );
         }
     }

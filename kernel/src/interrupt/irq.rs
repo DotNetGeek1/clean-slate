@@ -141,13 +141,11 @@ pub(crate) fn route_gsi(
 
 /// Route legacy ISA `irq` (keyboard, pointer, ...) to `vector`, applying any
 /// MADT source override; ISA lines default to edge-triggered, active-high.
-#[allow(dead_code)] // first consumers are the M10 input devices
 pub(crate) fn route_isa_irq(irq: u8, vector: u8) -> Result<(), &'static str> {
     let (gsi, trigger, polarity) = isa_irq_route(&interrupt_topology()?, irq);
     route_gsi(gsi, vector, trigger, polarity)
 }
 
-#[allow(dead_code)] // see `route_isa_irq`
 fn isa_irq_route(topology: &InterruptTopology, irq: u8) -> (u32, TriggerMode, Polarity) {
     let Some(source_override) = topology.source_override(irq) else {
         return (u32::from(irq), TriggerMode::Edge, Polarity::ActiveHigh);

@@ -69,7 +69,6 @@ impl InterruptTopology {
         &self.io_apics[..self.io_apic_count]
     }
 
-    #[allow(dead_code)] // ISA (keyboard/pointer) routing is the M10 consumer.
     pub(crate) fn source_override(&self, source_irq: u8) -> Option<SourceOverride> {
         self.overrides[..self.override_count]
             .iter()
