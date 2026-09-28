@@ -1,17 +1,51 @@
-//! CPU-local register helpers: interrupt flag control, RFLAGS/CS/RSP reads and
-//! the CR0.WP toggle used while editing live page tables.
+//! CPU-local register helpers: interrupt flag control, RFLAGS/CS/RSP reads,
+//! the CR0.WP toggle used while editing live page tables and the boot-time
+//! EFER.NXE enable.
 //!
 //! Why unsafe: `sti`/`cli` and CR0 writes change global CPU state. Callers of
 //! `without_interrupts` must not block or yield inside the closure; callers of
 //! `without_write_protect` must finish all page-table writes before the guard
-//! restores CR0. No link contracts.
+//! restores CR0. `__cpuid` only reads identification leaves. No link contracts.
 
 use core::arch::asm;
+use core::arch::x86_64::__cpuid;
 use core::mem::MaybeUninit;
 
 use x86_64::registers::control::{Cr0, Cr0Flags};
 
-use crate::arch::x86_64::{bit, RFLAGS_INTERRUPT_ENABLE_BIT};
+use crate::arch::x86_64::msr::{read_msr, write_msr};
+use crate::arch::x86_64::{
+    bit, nx_supported_from_cpuid, CPUID_EXTENDED_FEATURES_LEAF, CPUID_EXTENDED_MAX_LEAF,
+    IA32_EFER_MSR, IA32_EFER_NXE, RFLAGS_INTERRUPT_ENABLE_BIT,
+};
+
+pub(crate) struct NxeReport {
+    pub(crate) firmware_had_nxe: bool,
+}
+
+/// Must run before any root containing `NO_EXECUTE` entries is activated.
+/// Firmware that left NXE clear cannot have NX bits in its own live tables,
+/// so setting it here is safe on the firmware root.
+pub(crate) fn enable_and_verify_nxe() -> Result<NxeReport, &'static str> {
+    let max_extended_leaf = unsafe { __cpuid(CPUID_EXTENDED_MAX_LEAF) }.eax;
+    let ext_edx = if max_extended_leaf >= CPUID_EXTENDED_FEATURES_LEAF {
+        unsafe { __cpuid(CPUID_EXTENDED_FEATURES_LEAF) }.edx
+    } else {
+        0
+    };
+    if !nx_supported_from_cpuid(max_extended_leaf, ext_edx) {
+        return Err("CPU does not support NX (CPUID 8000_0001 EDX.20)");
+    }
+    let efer = read_msr(IA32_EFER_MSR);
+    let firmware_had_nxe = efer & IA32_EFER_NXE != 0;
+    if !firmware_had_nxe {
+        write_msr(IA32_EFER_MSR, efer | IA32_EFER_NXE);
+    }
+    if read_msr(IA32_EFER_MSR) & IA32_EFER_NXE == 0 {
+        return Err("EFER.NXE did not latch");
+    }
+    Ok(NxeReport { firmware_had_nxe })
+}
 
 pub(crate) fn without_interrupts<T>(f: impl FnOnce() -> T) -> T {
     // Host unit tests run in ring 3 where `cli`/`sti` fault

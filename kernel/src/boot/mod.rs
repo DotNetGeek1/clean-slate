@@ -7,6 +7,7 @@ pub(crate) mod uefi;
 
 use crate::arch::x86_64::context_switch::call_on_fresh_stack;
 use crate::arch::x86_64::context_switch::task_stack_top;
+use crate::arch::x86_64::cpu::enable_and_verify_nxe;
 use crate::arch::x86_64::gdt::register_gdt_tss_carve_outs;
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::arch::x86_64::gdt::DOUBLE_FAULT_STACK;
@@ -140,6 +141,7 @@ use crate::selftest::m2_timer::start_timer_self_test_task;
 use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
 #[cfg(all(
     feature = "m3-entry-self-test",
+    not(feature = "m10-nxe-self-test"),
     not(feature = "m3-ipc-self-test"),
     not(feature = "m3-syscall-self-test"),
     not(feature = "m8-linux-dispatch-self-test"),
@@ -368,6 +370,11 @@ fn run_inner() -> Result<(), &'static str> {
     memory_map.sort();
     serial_write_line("[BOOT] UEFI memory map acquired");
     serial_write_line("[BOOT] ExitBootServices OK");
+    let nxe = enable_and_verify_nxe()?;
+    serial_write_fmt(format_args!(
+        "[CPU ] NXE enabled nx=1 firmware_nxe={}\n",
+        nxe.firmware_had_nxe as u8
+    ));
 
     reserved_ranges.push(ReservedRange::from_base_and_size(
         memory_map.buffer().as_ptr() as u64,
@@ -631,8 +638,14 @@ fn run_inner() -> Result<(), &'static str> {
         start_m8_linux_dispatch_self_test(allocator)
     }
 
+    #[cfg(feature = "m10-nxe-self-test")]
+    {
+        crate::selftest::m10_nxe::start_m10_nxe_self_test(allocator)
+    }
+
     #[cfg(all(
         feature = "m3-entry-self-test",
+        not(feature = "m10-nxe-self-test"),
         not(feature = "m8-linux-dispatch-self-test"),
         not(feature = "m8-linux-hello-self-test"),
         not(feature = "m9-syscall-fail-closed-self-test"),

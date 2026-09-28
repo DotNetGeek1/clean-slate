@@ -78,11 +78,12 @@ TEST_NAMES=(
   verify-m8-fixture
   verify-m9-fixture
   test-m10-contract
+  test-m10-nxe
 )
 
 test_role() {
   case "$1" in
-    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls | test-m8-linux-hello | test-m8-linux-image | test-m8-linux-dispatch | test-m9-syscall-fail-closed | test-m9-block-wake | test-m9-stack-guard | test-m9-fd-core | test-m9-linux-trace | test-m9-linux-socket | test-m9-low-va | test-m9-linux-exec | test-m9-linux-proc | test-m9-linux-runtime | test-m9-rootfs | test-m9-linux-fs | test-m9-userspace | verify-m8-fixture | verify-m9-fixture | test-m10-contract)
+    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls | test-m8-linux-hello | test-m8-linux-image | test-m8-linux-dispatch | test-m9-syscall-fail-closed | test-m9-block-wake | test-m9-stack-guard | test-m9-fd-core | test-m9-linux-trace | test-m9-linux-socket | test-m9-low-va | test-m9-linux-exec | test-m9-linux-proc | test-m9-linux-runtime | test-m9-rootfs | test-m9-linux-fs | test-m9-userspace | verify-m8-fixture | verify-m9-fixture | test-m10-contract | test-m10-nxe)
       echo Constituent
       ;;
     test-m3 | test-m4 | test-m5 | test-m6 | test-m7 | test-m8 | test-m9)
@@ -175,6 +176,7 @@ test_description() {
     verify-m8-fixture) echo "M8.6 fixture SHA-256 and ELF metadata verify (host)" ;;
     verify-m9-fixture) echo "M9 #104 BusyBox + rootfs fixture verify (host)" ;;
     test-m10-contract) echo "M10 #110 graphics contract host tests and UEFI builds (constituent)" ;;
+    test-m10-nxe) echo "M10 #195 EFER.NXE enforced: CPL3 fetch from an RW+NX page faults 0x15 (constituent)" ;;
     *) echo "" ;;
   esac
 }
@@ -239,6 +241,7 @@ test_aliases() {
     verify-m8-fixture) echo "verify-m8-fixture" ;;
     verify-m9-fixture) echo "verify-m9-fixture" ;;
     test-m10-contract) echo "m10-contract" ;;
+    test-m10-nxe) echo "m10-nxe" ;;
     *) echo "" ;;
   esac
 }

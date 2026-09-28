@@ -98,6 +98,8 @@ m9-linux-trace-self-test = [
     "m3-entry-self-test",
     "stack-high-water-check",
 ]
+# M10 #195 S0: CPL3 fetch from an RW+NX page faults 0x15 (EFER.NXE enforced).
+m10-nxe-self-test = ["m3-entry-self-test", "stack-high-water-check"]
 
 [lib]
 path = "src/lib.rs"

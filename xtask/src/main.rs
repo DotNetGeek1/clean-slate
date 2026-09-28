@@ -104,6 +104,16 @@ const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
 ];
 const M9_LOW_VA_ACCEPTANCE_MARKERS: [&str; 2] = ["[M9.0] creating", "[M9.0] PASS"];
 const M9_LOW_VA_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M10_NXE_ACCEPTANCE_MARKERS: [&str; 7] = [
+    "[CPU ] NXE enabled nx=1",
+    "[M10.NX] creating",
+    "[M10.NX] efer nxe=1",
+    "[PROC] fault pid=",
+    "[M10.NX] nx exec fault err=0x15 OK",
+    "[M10.NX] baseline OK",
+    "[M10.NX] PASS",
+];
+const M10_NXE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[M9.F] creating",
     "[M9.F] phase-1 argv line",
@@ -874,6 +884,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM7 => run_m7_acceptance(),
         ParsedCommand::TestM6 => run_m6_acceptance(),
         ParsedCommand::TestM10Contract => run_m10_contract_acceptance(),
+        ParsedCommand::TestM10Nxe => run_m10_nxe_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -1841,6 +1852,22 @@ fn run_m10_contract_acceptance() -> Result<(), XtaskError> {
     run_cargo_package_build_uefi("clean-slate-native-abi", &[])?;
     println!("[M10.contract] PASS");
     Ok(())
+}
+
+/// M10 #195 S0 gate: CPUID/EFER NXE host tests, then a CPL3 instruction fetch
+/// from an RW+NX page must fault with exactly `0x15` through the production
+/// fault/teardown path.
+fn run_m10_nxe_acceptance() -> Result<(), XtaskError> {
+    run_cargo_package_tests("clean-slate-kernel", &["nx_"])?;
+    run_vm_inner(
+        false,
+        false,
+        &["m10-nxe-self-test"],
+        Some((
+            MarkerSet::Ordered(&M10_NXE_ACCEPTANCE_MARKERS),
+            M10_NXE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
 }
 
 fn run_m5_crash_matrix() -> Result<(), XtaskError> {
@@ -3737,6 +3764,7 @@ fn print_help() {
     println!(
         "  test-m10-contract M10 graphics contract host tests plus UEFI builds of graphics and native-abi; prints [M10.contract] PASS (aliases: m10-contract)"
     );
+    println!("  test-m10-nxe  M10 #195 S0: EFER.NXE host tests, then a CPL3 fetch from an RW+NX page must fault err=0x15 (aliases: m10-nxe)");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
@@ -3869,6 +3897,7 @@ enum ParsedCommand {
     TestM7,
     TestM6,
     TestM10Contract,
+    TestM10Nxe,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -3996,6 +4025,7 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m10-contract" || cmd == "m10-contract" => {
             ParsedCommand::TestM10Contract
         }
+        Some(cmd) if cmd == "test-m10-nxe" || cmd == "m10-nxe" => ParsedCommand::TestM10Nxe,
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
         Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,
@@ -4295,6 +4325,14 @@ mod tests {
         assert_eq!(
             parse_command(Some("m10-contract".as_ref())),
             ParsedCommand::TestM10Contract
+        );
+        assert_eq!(
+            parse_command(Some("test-m10-nxe".as_ref())),
+            ParsedCommand::TestM10Nxe
+        );
+        assert_eq!(
+            parse_command(Some("m10-nxe".as_ref())),
+            ParsedCommand::TestM10Nxe
         );
         assert_eq!(
             parse_command(Some("test-m7-net-caps".as_ref())),
