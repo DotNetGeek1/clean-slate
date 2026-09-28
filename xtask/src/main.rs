@@ -913,9 +913,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10Contract => run_m10_contract_acceptance(),
         ParsedCommand::TestM10Nxe => run_m10_nxe_acceptance(),
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
-        ParsedCommand::TestQmpSmoke => {
-            qmp::smoke::run(&workspace_root().join("target").join("qmp-artifacts"))
-        }
+        ParsedCommand::TestQmpSmoke => qmp::smoke::run(&xtask_artifact_root()),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -2360,6 +2358,11 @@ fn run_vm_with_driver(
     let mut vm = prepare_vm(false, false, features, config)?;
     vm.qemu.args(driver.qemu_args());
     run_driven_acceptance_command(&mut vm.qemu, marker_set, timeout, driver)
+}
+
+/// Per-lane run directories for screenshots and other lane artifacts.
+fn xtask_artifact_root() -> PathBuf {
+    workspace_root().join("target").join("xtask-artifacts")
 }
 
 /// A ready-to-spawn QEMU command. The runtime vars copy is dropped with it,

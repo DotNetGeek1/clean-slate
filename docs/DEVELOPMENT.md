@@ -694,7 +694,7 @@ Some acceptance lanes need guest keyboard or pointer input, or a framebuffer cap
 
 **Script driver (`QmpScriptDriver`, `ScriptStep`).** `AwaitLine(text)` waits for the next complete serial line containing `text`; one line satisfies at most one await; lines seen before QEMU connects are replayed. Other steps: `Input`, `Screendump { name, check }`, `Command { command, arguments, check }`, `CommandError { command, class }`, `Quit`. Pacing is marker-driven only (no sleeps). On each stdout chunk the driver runs before the marker tracker; `before_teardown` runs after markers pass but before QEMU is stopped, and an unterminated final serial tail counts as a line—so a `Screendump` immediately after the `AwaitLine` for the lane's final marker captures before teardown. On a driver error the acceptance loop stops and reaps QEMU, and on every exit path `ShutdownOnDrop` closes the driver's connection or pending endpoint; failures look like `<lane> QMP script at step i/n (…): …`.
 
-**Artifacts.** Runs write under `target/qmp-artifacts/<lane>/<pid>.<seq>/`; PNG is `<name>.png`. The intermediate PPM is removed after a passing check and kept next to the PNG when the check fails. At most eight run directories per lane (oldest pruned).
+**Artifacts.** Runs write under `target/xtask-artifacts/<lane>/<pid>.<seq>/` (`xtask_artifact_root()`); PNG is `<name>.png`. The intermediate PPM is removed after a passing check and kept next to the PNG when the check fails. At most eight run directories per lane (oldest pruned).
 
 **Kernel lanes.** `run_vm_with_driver(features, marker_set, timeout, config, &mut driver)` builds and boots like other acceptance lanes, appends the driver's QEMU args, and returns captured serial output.
 
