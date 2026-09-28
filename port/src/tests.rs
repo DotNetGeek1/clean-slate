@@ -204,8 +204,12 @@ impl World {
     }
 
     fn exit(&mut self, who: Caller) -> crate::PortReleaseCounts {
-        self.core
-            .on_holder_exit(&mut self.table, who.holder, &mut self.effects)
+        self.core.on_holder_exit(
+            &mut self.table,
+            who.holder,
+            who.generation,
+            &mut self.effects,
+        )
     }
 
     fn take_effects(&mut self) -> Vec<Effect<u32>> {
@@ -983,6 +987,26 @@ fn client_exit_leaves_notices_and_frees_terminal_connections() {
 }
 
 #[test]
+fn holder_exit_releases_only_the_exiting_instance_generation() {
+    let mut w = World::new(SMALL);
+    w.connect(A);
+    let stale_client = Caller {
+        generation: A.generation + 1,
+        ..A
+    };
+    let stale_server = Caller {
+        generation: SERVER.generation + 1,
+        ..SERVER
+    };
+    assert_eq!(w.exit(stale_client), Default::default());
+    assert_eq!(w.exit(stale_server), Default::default());
+    assert_eq!(w.core.counts_for(A.holder).port_connections, 1);
+    assert_eq!(w.core.global_counts().ports, 1);
+    assert_eq!(w.exit(A).client_connections, 1);
+    assert_eq!(w.exit(SERVER).served_ports, 1);
+}
+
+#[test]
 fn reconnect_and_reregistration_leave_old_ids_stale() {
     let mut w = World::new(SMALL);
     let a_cap = w.client_cap(A);
@@ -1033,7 +1057,7 @@ fn connection_slot_retires_at_the_last_generation() {
     core.set_connection_generation_for_test(0, u32::MAX - 1);
     let last = core.connect(&table, A, cap, GRAPHICS, SERVICE).unwrap();
     assert_eq!(last.generation(), u32::MAX);
-    core.on_holder_exit(&mut table, A.holder, &mut effects);
+    core.on_holder_exit(&mut table, A.holder, A.generation, &mut effects);
     let serve = table
         .grant(
             SERVER.holder,

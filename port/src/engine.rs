@@ -729,17 +729,20 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
         &mut self,
         table: &mut CapabilityTable<N>,
         holder: HolderId,
+        generation: u64,
         effects: &mut Effects<B>,
     ) -> PortReleaseCounts {
         let mut counts = PortReleaseCounts::default();
         for index in 0..PORTS {
-            if self.ports[index].live && self.ports[index].server == holder {
+            let port = &self.ports[index];
+            if port.live && port.server == holder && port.server_generation == generation {
                 self.teardown_port(table, index, effects);
                 counts.served_ports += 1;
             }
         }
         for index in 0..CONNS {
-            if self.connections[index].client != holder {
+            let conn = &self.connections[index];
+            if conn.client != holder || conn.client_generation != generation {
                 continue;
             }
             match self.connections[index].state {

@@ -227,9 +227,13 @@ impl FakePort {
 
     pub fn exit_holder(&mut self, holder: HolderId) -> PortReleaseCounts {
         self.effects.clear();
-        let counts = self
-            .core
-            .on_holder_exit(&mut self.table, holder, &mut self.effects);
+        let exiting = Self::caller(holder);
+        let counts = self.core.on_holder_exit(
+            &mut self.table,
+            exiting.holder,
+            exiting.generation,
+            &mut self.effects,
+        );
         revoke_holder_tree(&mut self.table, holder);
         counts
     }

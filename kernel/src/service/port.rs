@@ -350,8 +350,13 @@ pub(crate) fn server_bind_wake(
 /// The W5 `Port` teardown slot: ports `holder` serves go away (`ServerGone`), then its client
 /// connections become exit notices or are freed. Undelivered transfer children are released
 /// here, before the holder's capabilities are revoked.
-pub(crate) fn on_holder_exit(holder: HolderId) -> PortReleaseCounts {
-    with_ports(|core, table, effects| core.on_holder_exit(table, holder, effects))
+pub(crate) fn on_holder_exit(
+    holder: HolderId,
+    generation: InstanceGeneration,
+) -> PortReleaseCounts {
+    with_ports(|core, table, effects| {
+        core.on_holder_exit(table, holder, u64::from(generation.0), effects)
+    })
 }
 
 pub(crate) fn counts_for(holder: HolderId) -> HolderPortCounts {

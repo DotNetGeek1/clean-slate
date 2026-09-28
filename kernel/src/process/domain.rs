@@ -363,7 +363,7 @@ fn run_teardown_hook(
 }
 
 fn release_ports(ctx: &mut TeardownContext<'_>) -> clean_slate_port::PortReleaseCounts {
-    port::on_holder_exit(HolderId(ctx.process_id))
+    port::on_holder_exit(HolderId(ctx.process_id), ctx.instance_generation)
 }
 
 fn release_display_presenter(_ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {
