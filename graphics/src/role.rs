@@ -9,8 +9,8 @@ pub const GFX_SHELL_BIT: u32 = 1 << 15;
 /// Mirror of `clean_slate_capability::Rights::GFX_OVERLAY`.
 pub const GFX_OVERLAY_BIT: u32 = 1 << 16;
 
-/// Role authority derived only from the kernel-stamped rights bits of the caller's
-/// `Graphics` capability (`TrustedEnvelope.granted_rights`); never from request fields.
+/// Role authority derived only from the raw rights bits the port envelope reports for the
+/// caller's `Graphics` capability (planned, #NEW); never from request fields.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RoleGrant {
     connect: bool,
