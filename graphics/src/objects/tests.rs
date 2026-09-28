@@ -242,12 +242,26 @@ fn global_budgets_are_shared_across_connections() {
         for other in KINDS.into_iter().filter(|k| *k != kind) {
             assert!(insert(&mut fresh, &mut budget, other, 0).is_ok());
         }
-        tables.pop().unwrap().close(&mut budget);
+        if let Some(table) = tables.last_mut() {
+            table.close(&mut budget);
+            tables.pop();
+        }
         assert!(
             insert(&mut fresh, &mut budget, kind, 0).is_ok(),
             "{kind:?} after close"
         );
     }
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "GlobalBudget underflow")]
+fn removing_with_a_foreign_budget_is_detected() {
+    let mut budget = GlobalBudget::new();
+    let mut table = Table::new();
+    let id = insert(&mut table, &mut budget, ObjectKind::Surface, 0).unwrap();
+    let mut foreign = GlobalBudget::new();
+    let _ = table.remove_surface(&mut foreign, SurfaceId(id));
 }
 
 #[test]

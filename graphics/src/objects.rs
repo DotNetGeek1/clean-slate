@@ -70,6 +70,16 @@ impl GlobalBudget {
     }
 }
 
+fn release_budget(budget: &mut GlobalBudget, kind: ObjectKind, n: usize) {
+    let index = kind.index();
+    debug_assert!(
+        budget.used[index] >= n,
+        "GlobalBudget underflow for {kind:?}: used {} release {n}",
+        budget.used[index]
+    );
+    budget.used[index] = budget.used[index].saturating_sub(n);
+}
+
 enum Entry<S, W, B> {
     Surface(S),
     Window(W),
@@ -222,7 +232,7 @@ impl<S, W, B> ObjectTable<S, W, B> {
         }
         let entry = self.table.remove(id).map_err(lookup_error_code)?;
         self.counts[kind.index()] -= 1;
-        budget.used[kind.index()] = budget.used[kind.index()].saturating_sub(1);
+        release_budget(budget, kind, 1);
         Ok(entry)
     }
 
@@ -259,12 +269,20 @@ impl<S, W, B> ObjectTable<S, W, B> {
         }
     }
 
-    /// Connection teardown: returns every live object's budget. Retired slots die with the
-    /// table; the next connection starts from a fresh [`ObjectTable::new`].
-    pub fn close(self, budget: &mut GlobalBudget) {
-        for (used, count) in budget.used.iter_mut().zip(self.counts) {
-            *used = used.saturating_sub(count);
+    /// Connection teardown: returns every live object's budget and clears the table in place.
+    ///
+    /// Mandatory on every connection teardown path (exit, revoke, protocol disconnect).
+    /// Retired slots die with the table; the next connection reuses the same storage with
+    /// [`Self::new`]-equivalent state.
+    pub fn close(&mut self, budget: &mut GlobalBudget) {
+        for kind in [ObjectKind::Surface, ObjectKind::Window, ObjectKind::Buffer] {
+            let count = self.counts[kind.index()];
+            if count > 0 {
+                release_budget(budget, kind, count);
+            }
         }
+        self.counts = [0; 3];
+        self.table.clear_in_place();
     }
 
     #[cfg(test)]
