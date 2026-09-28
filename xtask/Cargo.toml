@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+clean-slate-raster = { path = "../raster" }
 clean-slate-rootfs = { path = "../rootfs", features = ["std"] }
 clean-slate-network = { path = "../network" }
 rcgen = { version = "=0.13.2", default-features = false, features = ["pem", "crypto", "ring"] }

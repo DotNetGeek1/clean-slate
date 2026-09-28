@@ -3,12 +3,10 @@
 //! Backends carry no UI policy (no cursor, layout or background). Clients never see the aperture,
 //! its stride, or physical addresses; they get the frozen reference mode through syscall 18.
 
-// `MAP_SCANOUT`/`PRESENT` (gated on #195 S6) are the production callers of bind/present/complete;
-// until they land only the framebuffer lane and host tests drive that half.
-#![cfg_attr(
-    not(any(test, feature = "m10-framebuffer-self-test")),
-    allow(dead_code)
-)]
+// `MAP_SCANOUT`/`PRESENT` (gated on #195 S6) and the #114 backend are the production callers of
+// present/complete/expire/reset and of shared-buffer sources. Until they land, host tests drive the
+// whole engine; kernel builds, the framebuffer lane included, drive only the presenter path.
+#![cfg_attr(not(test), allow(dead_code))]
 
 pub(crate) mod aperture;
 pub(crate) mod engine;

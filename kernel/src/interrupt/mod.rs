@@ -53,14 +53,16 @@ use crate::process::process_registry_mut;
 #[cfg(not(any(
     feature = "m2-timer-self-test",
     feature = "m3-syscall-self-test",
-    feature = "m5-block-self-test"
+    feature = "m5-block-self-test",
+    feature = "m10-framebuffer-self-test"
 )))]
 use crate::sched::dispatch::prepare_current_scheduler_thread_dispatch;
 use crate::sched::scheduler_mut;
 #[cfg(not(any(
     feature = "m2-timer-self-test",
     feature = "m3-syscall-self-test",
-    feature = "m5-block-self-test"
+    feature = "m5-block-self-test",
+    feature = "m10-framebuffer-self-test"
 )))]
 use crate::sched::with_scheduler;
 #[cfg(feature = "m2-double-fault-self-test")]
@@ -173,7 +175,11 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
 
         // Boot-context lanes without a scheduler thread: the timer only counts ticks.
         #[cfg(not(feature = "m3-syscall-self-test"))]
-        #[cfg(any(feature = "m2-timer-self-test", feature = "m5-block-self-test"))]
+        #[cfg(any(
+            feature = "m2-timer-self-test",
+            feature = "m5-block-self-test",
+            feature = "m10-framebuffer-self-test"
+        ))]
         {
             increment_kernel_ticks();
             acknowledge_timer_interrupt();
@@ -201,7 +207,11 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         }
 
         #[cfg(not(feature = "m3-syscall-self-test"))]
-        #[cfg(not(any(feature = "m2-timer-self-test", feature = "m5-block-self-test")))]
+        #[cfg(not(any(
+            feature = "m2-timer-self-test",
+            feature = "m5-block-self-test",
+            feature = "m10-framebuffer-self-test"
+        )))]
         {
             increment_kernel_ticks();
             #[cfg(feature = "m9-linux-runtime-self-test")]

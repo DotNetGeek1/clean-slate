@@ -1159,6 +1159,7 @@ name = "xtask"
 version = "0.0.1"
 dependencies = [
  "clean-slate-network",
+ "clean-slate-raster",
  "clean-slate-rootfs",
  "rcgen",
  "rustls",

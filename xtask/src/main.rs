@@ -10,6 +10,7 @@ use std::sync::{mpsc, Once};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+mod m10_framebuffer_validate;
 mod m7_certs;
 mod m7_fixture;
 mod m7_fixture_tcp;
@@ -24,6 +25,7 @@ mod raster_font;
 use marker_spec::{MarkerSet, MarkerStep, MarkerTracker};
 use ovmf_vars::RuntimeVarsCopy;
 
+use m10_framebuffer_validate::validate_m10_framebuffer_serial;
 use m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
 
 const KERNEL_PACKAGE: &str = "clean-slate-kernel";
@@ -60,6 +62,7 @@ const M6_CAPABILITIES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(180);
 const M7_NET_CAPS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M10_PORT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
+const M10_FRAMEBUFFER_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M7_NET_DEVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M7_TLS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 const M7_DNS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -692,6 +695,17 @@ const M10_VMOD_INTX_MARKERS: [&str; 12] = [
     "[VMOD] gpu absent",
     "[VMOD] PASS mode=intx",
 ];
+const M10_FRAMEBUFFER_ACCEPTANCE_MARKERS: [&str; 9] = [
+    "[GOP ] set-mode 1280x800 fmt=bgrx stride=5120",
+    "[FB  ] aperture mapped pages=1000 cache=uc",
+    "[DISP] backend=gop output=0 epoch=1",
+    "[FB  ] present seq=1 rects=1",
+    "[FB  ] present seq=2 rects=3",
+    "[FB  ] idle skipped submits=2",
+    "[FB  ] readback crc32=",
+    "[FB  ] status idle seq=2",
+    "[M10.2] PASS",
+];
 const M7_TLS_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[TCP ] connected peer=10.77.0.1:4001",
     "[TCP ] echo ok len=",
@@ -960,6 +974,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
         ParsedCommand::TestQmpSmoke => qmp::smoke::run(&xtask_artifact_root()),
         ParsedCommand::TestM10VirtioModern => run_m10_virtio_modern_acceptance(),
+        ParsedCommand::TestM10Framebuffer => run_m10_framebuffer_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -1004,6 +1019,35 @@ fn run_m5_block_acceptance() -> Result<(), XtaskError> {
             kernel_release: false,
             cpu_model: None,
             machine_extra: None,
+            vga: None,
+        },
+    )
+}
+
+fn run_m10_framebuffer_acceptance() -> Result<(), XtaskError> {
+    let mut test = Command::new("cargo");
+    test.current_dir(workspace_root())
+        .arg("test")
+        .arg("-p")
+        .arg("clean-slate-raster");
+    run_host_test_command(&mut test)?;
+    run_vm_inner_with_config(
+        false,
+        false,
+        &["m10-framebuffer-self-test"],
+        Some((
+            MarkerSet::Ordered(&M10_FRAMEBUFFER_ACCEPTANCE_MARKERS),
+            M10_FRAMEBUFFER_ACCEPTANCE_TIMEOUT,
+        )),
+        VmLaunchConfig {
+            m5_data_disk: None,
+            reset_ovmf_vars: false,
+            m7_fixture_port: None,
+            kernel_release: false,
+            cpu_model: None,
+            vga: Some("std"),
+            machine_extra: None,
+            m10_virtio_modern: None,
         },
     )
 }
@@ -1032,6 +1076,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
+            vga: None,
         },
     );
     peer.shutdown();
@@ -1060,6 +1105,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
+            vga: None,
         },
     );
     peer.shutdown();
@@ -1085,6 +1131,7 @@ fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
             kernel_release: false,
             cpu_model: None,
             machine_extra: None,
+            vga: None,
         },
     );
     peer.shutdown();
@@ -1115,6 +1162,7 @@ fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
             kernel_release: false,
             cpu_model: None,
             machine_extra: None,
+            vga: None,
         },
     );
     peer.shutdown();
@@ -1290,6 +1338,7 @@ fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
             kernel_release: false,
             cpu_model: None,
             machine_extra: None,
+            vga: None,
         };
 
         println!("[M5.H] phase 1/2 boot");
@@ -1472,6 +1521,7 @@ fn run_m9_userspace_acceptance() -> Result<(), XtaskError> {
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
+            vga: None,
         },
     );
     peer.shutdown();
@@ -1614,6 +1664,7 @@ fn run_m9_linux_socket_acceptance() -> Result<(), XtaskError> {
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
+            vga: None,
         },
     );
     peer.shutdown();
@@ -2191,6 +2242,7 @@ fn run_m7_network_acceptance() -> Result<(), XtaskError> {
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
+            vga: None,
         },
     );
     peer.shutdown();
@@ -2363,6 +2415,7 @@ fn m5_storage_vm_config() -> VmLaunchConfig {
         kernel_release: false,
         cpu_model: None,
         machine_extra: None,
+        vga: None,
     }
 }
 
@@ -2455,6 +2508,8 @@ struct VmLaunchConfig {
     /// Appended to `-machine q35,`; input lanes pass `vmport=off` so the
     /// PS/2 mouse is the only pointer.
     machine_extra: Option<&'static str>,
+    /// Optional QEMU `-vga` model (M10 GOP framebuffer lane uses `std`).
+    vga: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2588,6 +2643,9 @@ fn qemu_command(
         .arg(format!("format=raw,file=fat:rw:{}", esp_dir.display()));
     if let Some(cpu) = config.cpu_model {
         qemu.arg("-cpu").arg(cpu);
+    }
+    if let Some(vga) = config.vga {
+        qemu.arg("-vga").arg(vga);
     }
     if let Some(m5_data_disk) = &config.m5_data_disk {
         append_m5_disk_args(&mut qemu, m5_data_disk);
@@ -3679,6 +3737,16 @@ fn run_driven_acceptance_command(
                             start.elapsed().as_secs_f64()
                         );
                     }
+                    if marker_set_is_ordered(marker_set, &M10_FRAMEBUFFER_ACCEPTANCE_MARKERS) {
+                        // TODO(#197): take the QMP screendump here (1280x800 PNG) and validate it against the host render; see docs/GRAPHICS.md.
+                        if let Err(error) = validate_m10_framebuffer_serial(&output) {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(error);
+                        }
+                    }
                     authoritative_pass = true;
                     terminate_child(&mut child)?;
                     child_status = Some(child.wait()?);
@@ -3808,6 +3876,7 @@ fn is_m6_revocation_spec(set: MarkerSet<'_>) -> bool {
 /// keeps running instead of writing the debug-exit port.
 fn fails_fast_on_guest_fail(set: MarkerSet<'_>) -> bool {
     marker_set_is_ordered(set, &M9_USERSPACE_ACCEPTANCE_MARKERS)
+        || marker_set_is_ordered(set, &M10_FRAMEBUFFER_ACCEPTANCE_MARKERS)
         || M6_ORDERED_MARKER_SETS
             .iter()
             .any(|markers| marker_set_is_ordered(set, markers))
@@ -4203,6 +4272,9 @@ fn print_help() {
     println!(
         "  test-m10-virtio-modern M10 #196 modern VirtIO PCI transport host tests plus MSI-X and INTx QEMU boots; prints [M10.virtio-modern] PASS (aliases: m10-virtio-modern)"
     );
+    println!(
+        "  test-m10-framebuffer M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (aliases: m10-framebuffer)"
+    );
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
@@ -4343,6 +4415,7 @@ enum ParsedCommand {
     TestM10Port,
     TestQmpSmoke,
     TestM10VirtioModern,
+    TestM10Framebuffer,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -4478,6 +4551,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-qmp-smoke" || cmd == "qmp-smoke" => ParsedCommand::TestQmpSmoke,
         Some(cmd) if cmd == "test-m10-virtio-modern" || cmd == "m10-virtio-modern" => {
             ParsedCommand::TestM10VirtioModern
+        }
+        Some(cmd) if cmd == "test-m10-framebuffer" || cmd == "m10-framebuffer" => {
+            ParsedCommand::TestM10Framebuffer
         }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
@@ -4928,6 +5004,28 @@ mod tests {
         assert_eq!(
             parse_command(Some("m10-virtio-modern".as_ref())),
             ParsedCommand::TestM10VirtioModern
+        );
+        assert_eq!(
+            parse_command(Some("test-m10-framebuffer".as_ref())),
+            ParsedCommand::TestM10Framebuffer
+        );
+        assert_eq!(
+            parse_command(Some("m10-framebuffer".as_ref())),
+            ParsedCommand::TestM10Framebuffer
+        );
+        assert_eq!(
+            M10_FRAMEBUFFER_ACCEPTANCE_MARKERS,
+            [
+                "[GOP ] set-mode 1280x800 fmt=bgrx stride=5120",
+                "[FB  ] aperture mapped pages=1000 cache=uc",
+                "[DISP] backend=gop output=0 epoch=1",
+                "[FB  ] present seq=1 rects=1",
+                "[FB  ] present seq=2 rects=3",
+                "[FB  ] idle skipped submits=2",
+                "[FB  ] readback crc32=",
+                "[FB  ] status idle seq=2",
+                "[M10.2] PASS",
+            ]
         );
         assert_eq!(
             parse_command(Some("test-m7-net-caps".as_ref())),

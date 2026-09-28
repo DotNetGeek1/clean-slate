@@ -1,0 +1,180 @@
+//! Host-side parity checks for the M10 #111 GOP framebuffer lane serial transcript.
+
+use clean_slate_raster::{
+    draw_reference_a, draw_reference_b, pixel_at, reference_layout, visible_crc32, Canvas,
+    REFERENCE_PROBES,
+};
+
+use crate::XtaskError;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GuestProbe {
+    pub x: u32,
+    pub y: u32,
+    pub bgrx: [u8; 4],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GuestReadback {
+    pub crc32: u32,
+    pub probes: Vec<GuestProbe>,
+}
+
+pub(crate) fn host_scanout_expectations() -> (u32, Vec<GuestProbe>) {
+    let layout = reference_layout();
+    let mut bytes = vec![0u8; layout.byte_len()];
+    let mut canvas = Canvas::new(&mut bytes, layout).expect("reference layout");
+    draw_reference_a(&mut canvas);
+    draw_reference_b(&mut canvas);
+    let crc = visible_crc32(&bytes, layout).expect("reference crc");
+    let probes = REFERENCE_PROBES
+        .iter()
+        .map(|&(x, y)| GuestProbe {
+            x,
+            y,
+            bgrx: pixel_at(&bytes, layout, x, y).expect("probe pixel"),
+        })
+        .collect();
+    (crc, probes)
+}
+
+pub(crate) fn parse_guest_readback(serial: &str) -> Option<GuestReadback> {
+    let mut crc32 = None;
+    let mut probes = Vec::new();
+    for line in serial.lines() {
+        let line = line.trim_end();
+        if let Some(rest) = line.strip_prefix("[FB  ] readback crc32=0x") {
+            let hex = rest.trim();
+            if hex.len() != 8 {
+                return None;
+            }
+            crc32 = u32::from_str_radix(hex, 16).ok();
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("[FB  ] probe x=") {
+            let (coords, colors) = rest.split_once(" bgrx=")?;
+            let (x, y) = coords
+                .split_once(" y=")
+                .and_then(|(x, y)| Some((x.parse::<u32>().ok()?, y.parse::<u32>().ok()?)))?;
+            if colors.len() != 8 {
+                return None;
+            }
+            let mut bgrx = [0u8; 4];
+            for (index, chunk) in colors.as_bytes().chunks(2).enumerate() {
+                if chunk.len() != 2 {
+                    return None;
+                }
+                let pair = std::str::from_utf8(chunk).ok()?;
+                bgrx[index] = u8::from_str_radix(pair, 16).ok()?;
+            }
+            probes.push(GuestProbe { x, y, bgrx });
+        }
+    }
+    let crc32 = crc32?;
+    if probes.len() != REFERENCE_PROBES.len() {
+        return None;
+    }
+    Some(GuestReadback { crc32, probes })
+}
+
+pub(crate) fn compare_readback(
+    guest: &GuestReadback,
+    expected_crc: u32,
+    expected_probes: &[GuestProbe],
+) -> Result<(), String> {
+    if guest.crc32 != expected_crc {
+        return Err(format!(
+            "crc32 expected=0x{expected_crc:08x} actual=0x{actual:08x}",
+            actual = guest.crc32
+        ));
+    }
+    for (guest_probe, expected) in guest.probes.iter().zip(expected_probes.iter()) {
+        if guest_probe.x != expected.x
+            || guest_probe.y != expected.y
+            || guest_probe.bgrx != expected.bgrx
+        {
+            return Err(format!(
+                "probe ({}, {}) expected bgrx={:02x}{:02x}{:02x}{:02x} actual bgrx={:02x}{:02x}{:02x}{:02x}",
+                guest_probe.x,
+                guest_probe.y,
+                expected.bgrx[0],
+                expected.bgrx[1],
+                expected.bgrx[2],
+                expected.bgrx[3],
+                guest_probe.bgrx[0],
+                guest_probe.bgrx[1],
+                guest_probe.bgrx[2],
+                guest_probe.bgrx[3],
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_m10_framebuffer_serial(serial: &str) -> Result<(), XtaskError> {
+    let guest = parse_guest_readback(serial).ok_or_else(|| {
+        XtaskError::Validation("m10 framebuffer: missing or malformed readback/probe lines".into())
+    })?;
+    let (expected_crc, expected_probes) = host_scanout_expectations();
+    compare_readback(&guest, expected_crc, &expected_probes).map_err(|detail| {
+        eprintln!("[FAIL] m10-framebuffer readback {detail}");
+        XtaskError::Validation(format!("m10 framebuffer readback: {detail}"))
+    })?;
+    println!("[M10.2] host readback match crc32=0x{:08x}", expected_crc);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clean_slate_raster::{draw_reference_a, pixel_at, reference_layout, REFERENCE_PROBES};
+
+    #[test]
+    fn host_expectation_crc_matches_golden() {
+        let (crc, _) = host_scanout_expectations();
+        assert_eq!(crc, 0x20F2_EEC9);
+    }
+
+    #[test]
+    fn decoy_probe_matches_pattern_a_only() {
+        let layout = reference_layout();
+        let mut bytes = vec![0u8; layout.byte_len()];
+        draw_reference_a(&mut Canvas::new(&mut bytes, layout).unwrap());
+        let (dx, dy) = REFERENCE_PROBES[5];
+        let a_px = pixel_at(&bytes, layout, dx, dy).unwrap();
+        let (_, probes) = host_scanout_expectations();
+        let expected = probes
+            .iter()
+            .find(|p| p.x == dx && p.y == dy)
+            .expect("decoy probe");
+        assert_eq!(expected.bgrx, a_px);
+    }
+
+    #[test]
+    fn parse_readback_round_trip() {
+        let (crc, probes) = host_scanout_expectations();
+        let mut serial = String::new();
+        serial.push_str(&format!("[FB  ] readback crc32=0x{crc:08x}\n"));
+        for probe in &probes {
+            serial.push_str(&format!(
+                "[FB  ] probe x={} y={} bgrx={:02x}{:02x}{:02x}{:02x}\n",
+                probe.x, probe.y, probe.bgrx[0], probe.bgrx[1], probe.bgrx[2], probe.bgrx[3],
+            ));
+        }
+        let parsed = parse_guest_readback(&serial).expect("parse");
+        assert_eq!(parsed.crc32, crc);
+        assert_eq!(parsed.probes, probes);
+    }
+
+    #[test]
+    fn corrupted_probe_reports_mismatch() {
+        let (crc, probes) = host_scanout_expectations();
+        let mut guest = GuestReadback {
+            crc32: crc,
+            probes: probes.clone(),
+        };
+        guest.probes[0].bgrx[0] ^= 0x01;
+        let err = compare_readback(&guest, crc, &probes).unwrap_err();
+        assert!(err.contains("probe"));
+    }
+}

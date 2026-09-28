@@ -23,6 +23,8 @@ pub(crate) mod m2_double_fault;
     feature = "m7-tls-self-test"
 ))]
 pub(crate) mod boot_wait;
+#[cfg(feature = "m10-framebuffer-self-test")]
+pub(crate) mod m10_framebuffer;
 #[cfg(feature = "m10-nxe-self-test")]
 pub(crate) mod m10_nxe;
 #[cfg(feature = "m10-port-self-test")]

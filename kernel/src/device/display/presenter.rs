@@ -36,6 +36,7 @@ impl KernelPresenter {
         self.counters
     }
 
+    #[cfg(test)]
     pub(crate) fn pending_rects(&self) -> usize {
         self.damage.len()
     }
