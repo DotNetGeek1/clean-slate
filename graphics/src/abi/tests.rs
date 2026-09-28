@@ -318,6 +318,22 @@ fn present_status_decode_matrix() {
         Err(DisplayWireError::Malformed)
     );
 
+    let mut reset_with_idx = ok;
+    reset_with_idx[4] = PresentState::ResetRequired as u8;
+    reset_with_idx[5] = 0;
+    assert_eq!(
+        PresentStatus::decode(&reset_with_idx),
+        Err(DisplayWireError::Malformed)
+    );
+
+    let mut poisoned_with_idx = ok;
+    poisoned_with_idx[4] = PresentState::Poisoned as u8;
+    poisoned_with_idx[5] = 1;
+    assert_eq!(
+        PresentStatus::decode(&poisoned_with_idx),
+        Err(DisplayWireError::Malformed)
+    );
+
     let mut err10 = ok;
     err10[6] = 10;
     assert_eq!(

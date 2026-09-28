@@ -396,11 +396,10 @@ impl PresentStatus {
         } else {
             return Err(DisplayWireError::Malformed);
         };
-        match (state, in_flight_index) {
-            (PresentState::InFlight, None) | (PresentState::Idle, Some(_)) => {
-                return Err(DisplayWireError::Malformed);
-            }
-            _ => {}
+        let in_flight_matches_state =
+            in_flight_index.is_some() == matches!(state, PresentState::InFlight);
+        if !in_flight_matches_state {
+            return Err(DisplayWireError::Malformed);
         }
         let last_error_raw = read_u16_le(bytes, 6);
         let last_error = if last_error_raw == 0 {
