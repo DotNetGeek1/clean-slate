@@ -73,8 +73,26 @@ pub const SERVER_VERSION: ProtocolVersion = ProtocolVersion {
 pub struct Features(pub u64);
 
 impl Features {
+    /// Text input (IME): requests `0x0100..=0x01FF`, events `0x8100..=0x81FF`.
+    pub const TEXT_INPUT: u64 = 1 << 0;
+    /// Presentation detail feedback: requests `0x0200..=0x02FF`, events `0x8200..=0x82FF`.
+    pub const PRESENTATION_DETAIL: u64 = 1 << 1;
+    /// Relative pointer and pointer lock: requests `0x0300..=0x03FF`, events `0x8300..=0x83FF`.
+    pub const RELATIVE_POINTER: u64 = 1 << 2;
+    /// Fractional scale (`Scale120` ≠ 120): requests `0x0400..=0x04FF`, events `0x8400..=0x84FF`.
+    pub const FRACTIONAL_SCALE: u64 = 1 << 3;
+    /// Client-side decorations: requests `0x0500..=0x05FF`, events `0x8500..=0x85FF`.
+    pub const CLIENT_DECORATIONS: u64 = 1 << 4;
+    /// Subsurfaces and stacking: requests `0x0600..=0x06FF`, events `0x8600..=0x86FF`.
+    pub const SUBSURFACES: u64 = 1 << 5;
+
     /// Bits assigned in protocol 1.x (§5.2).
-    pub const KNOWN: u64 = 0x3F;
+    pub const KNOWN: u64 = Self::TEXT_INPUT
+        | Self::PRESENTATION_DETAIL
+        | Self::RELATIVE_POINTER
+        | Self::FRACTIONAL_SCALE
+        | Self::CLIENT_DECORATIONS
+        | Self::SUBSURFACES;
 
     pub const fn bits(self) -> u64 {
         self.0

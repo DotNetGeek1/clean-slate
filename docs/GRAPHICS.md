@@ -638,7 +638,7 @@ None collides with `NETWORK_STATUS_PENDING` (`u64::MAX - 15`). Capability failur
 
 - **Version.** `ProtocolVersion { major, minor }`, 1.0 in M10. A major bump is incompatible and rejected at `Hello`. A minor bump may only add opcodes inside the reserved ranges below, and the server may use them only when the negotiated minor allows it.
 - **Opcodes.** In 1.0 every reserved or unassigned opcode decodes to `UnknownOpcode` (recoverable). Core growth: requests `0x0002..=0x000F` and unused holes in `0x0010..=0x00FF`; events `0x8003..=0x800F` (`0x8003` is earmarked for `OutputChanged` when `MAX_OUTPUTS > 1`) and unused holes in `0x8010..=0x80FF`. Unassigned: `0x0700..=0x7FFF` and `0x8700..=0xFFFF`.
-- **Features.** `Features(u64)`; `Features::KNOWN` = `0x3F`. The M10 compositor offers `Features(0)`, so every feature below is negotiated off and its opcodes are `UnknownOpcode`. The bit assignments and opcode ranges are frozen; the code has no named constants for them yet.
+- **Features.** `Features(u64)`; `Features::KNOWN` = `0x3F` (the OR of `Features::TEXT_INPUT` … `Features::SUBSURFACES`). The M10 compositor offers `Features(0)`, so every feature below is negotiated off and its opcodes are `UnknownOpcode`. The bit assignments and opcode ranges are frozen in `graphics::protocol`.
 
 | Bit | Feature | Opcodes (request / event) | Future content |
 |---|---|---|---|

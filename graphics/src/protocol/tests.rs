@@ -55,6 +55,23 @@ const _: () = assert!(16 + DAMAGE_RECTS_PER_FRAME * 8 <= 64);
 const _: () = assert!(16 + REGION_RECTS_PER_FRAME * 16 == 64);
 const _: () = assert!(13 + MAX_TITLE_BYTES <= 64);
 const _: () = assert!(Features::KNOWN == 0x3F);
+
+#[test]
+fn feature_bits_are_distinct_powers_of_two_and_or_to_known() {
+    const BITS: [u64; 6] = [
+        Features::TEXT_INPUT,
+        Features::PRESENTATION_DETAIL,
+        Features::RELATIVE_POINTER,
+        Features::FRACTIONAL_SCALE,
+        Features::CLIENT_DECORATIONS,
+        Features::SUBSURFACES,
+    ];
+    for bit in BITS {
+        assert_ne!(bit, 0);
+        assert_eq!(bit & (bit - 1), 0, "{bit:#x} is not a power of two");
+    }
+    assert_eq!(BITS.iter().fold(0u64, |acc, b| acc | b), Features::KNOWN);
+}
 const _: () = assert!(WindowStates::ALL == 0x1F);
 const _: () = assert!(Modifiers::ALL == 0x3F);
 
