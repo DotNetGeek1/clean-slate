@@ -4,6 +4,7 @@ use super::RAW_INPUT_RECORD_BYTES;
 
 type Range = (u8, u8);
 
+#[allow(clippy::needless_range_loop)]
 fn assert_tiles(fields: &[Range], pads: &[Range]) {
     let mut covered = [false; RAW_INPUT_RECORD_BYTES];
     for &(s, e) in fields {

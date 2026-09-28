@@ -7,6 +7,7 @@ use super::input::INPUT_DEVICE_INFO_BYTES;
 
 type Range = (usize, usize);
 
+#[allow(clippy::needless_range_loop)]
 fn assert_tiles(size: usize, fields: &[Range], pads: &[Range]) {
     let mut covered = vec![false; size];
     for &(s, e) in fields {

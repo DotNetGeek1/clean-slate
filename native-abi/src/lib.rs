@@ -44,3 +44,6 @@ mod graphics_status_mirrors_capability_syscall_abi {
         assert_ne!(STATUS_EAGAIN, NETWORK_STATUS_PENDING);
     }
 }
+
+#[cfg(test)]
+mod graphics_role_crosscheck;

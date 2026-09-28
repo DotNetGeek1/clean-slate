@@ -11,3 +11,7 @@ path = "src/lib.rs"
 
 [lints]
 workspace = true
+
+[features]
+# Host-test fakes (FakeDisplay) for downstream crates' dev-dependencies; never enabled by kernel or userspace builds.
+fake = []
