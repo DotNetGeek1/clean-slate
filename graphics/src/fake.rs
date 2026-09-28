@@ -64,6 +64,11 @@ impl<const BYTES: usize> FakeDisplay<BYTES> {
         self.output
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_output_for_test(&mut self, output: OutputId) {
+        self.output = output;
+    }
+
     pub fn mode(&self) -> DisplayMode {
         self.mode
     }
@@ -166,7 +171,8 @@ impl<const BYTES: usize> FakeDisplay<BYTES> {
         Some(flight.seq)
     }
 
-    /// Ends `ResetRequired`: success bumps the output epoch; failure poisons for good.
+    /// Ends `ResetRequired`: success bumps the output epoch; failure poisons for good. Success
+    /// at the maximum epoch poisons because the epoch cannot advance further.
     pub fn finish_reset(&mut self, success: bool) {
         if !self.reset_required || self.poisoned {
             return;

@@ -446,6 +446,24 @@ fn failed_reset_poisons_permanently() {
 }
 
 #[test]
+fn finish_reset_at_max_epoch_poisons() {
+    use crate::ids::MAX_OBJECT_GENERATION;
+
+    let mut display = Fake::new(mode()).unwrap();
+    display.set_output_for_test(OutputId::new(0, MAX_OBJECT_GENERATION).unwrap());
+    let out = display.output();
+    display.present(&request(out, 0, &[full()])).unwrap();
+    display.fail_in_flight(1).unwrap();
+    display.finish_reset(true);
+    assert_eq!(display.status().state, PresentState::Poisoned);
+    assert_eq!(
+        display.output(),
+        out,
+        "epoch does not advance past the maximum"
+    );
+}
+
+#[test]
 fn finish_reset_outside_reset_required_is_a_no_op() {
     let mut display = Fake::new(mode()).unwrap();
     let out = display.output();
