@@ -3731,6 +3731,9 @@ fn print_help() {
     println!("  test-m8-linux-hello Boot M8.7 self-test then production feature (hello + clean [M2] PASS); 40s for two launches (aliases: m8-linux-hello, m8.7)");
     println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
     println!("  test-m9         M9 milestone gate: verify pinned BusyBox fixture, linux-abi/elf/rootfs/kernel host tests, every test-m9-* constituent, then test-m9-userspace; prints [M9  ] PASS (aliases: m9, m9.9)");
+    println!(
+        "  test-m10-contract M10 graphics contract host tests plus UEFI builds of graphics and native-abi; prints [M10.contract] PASS (aliases: m10-contract)"
+    );
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
@@ -3752,9 +3755,6 @@ fn print_help() {
     println!("  test-m7-dns         Build the M7.5 DNS resolver kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
-    println!(
-        "  test-m10-contract M10 graphics contract host tests plus UEFI builds of graphics and native-abi; prints [M10.contract] PASS (aliases: m10-contract)"
-    );
     println!("  test-m5-persistence Two-boot persistent-disk M5 acceptance using the production storage path");
     println!("  test-m5-crash-recovery Four-boot abrupt-stop crash-recovery M5 acceptance");
     println!("                 Pass --keep-disk to preserve target/m5/m5-data.img for debugging");
