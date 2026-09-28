@@ -120,8 +120,7 @@ impl SharedBufferInfo {
             .map_err(SharedBufferInfoError::InvalidId)?;
         let byte_len = read_u64_le(bytes, 8);
         let page_count = read_u32_le(bytes, 16);
-        if byte_len > MAX_SHARED_BUFFER_BYTES
-            || page_count_for_bytes(byte_len) != Some(page_count)
+        if byte_len > MAX_SHARED_BUFFER_BYTES || page_count_for_bytes(byte_len) != Some(page_count)
         {
             return Err(SharedBufferInfoError::InvalidArgument);
         }

@@ -34,10 +34,7 @@ mod tests {
         STATUS_ESTALE as GFX_ESTALE, STATUS_RANGE_START as GFX_RANGE_START,
     };
 
-    const LEGACY_ERRNO_SENTINELS: &[(u64, u64)] = &[
-        (STATUS_ENOSPC, 28),
-        (STATUS_ESTALE, 116),
-    ];
+    const LEGACY_ERRNO_SENTINELS: &[(u64, u64)] = &[(STATUS_ENOSPC, 28), (STATUS_ESTALE, 116)];
 
     #[test]
     fn new_status_sentinels_match_errno_formula() {
