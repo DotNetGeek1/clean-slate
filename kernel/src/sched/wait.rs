@@ -168,6 +168,40 @@ impl WaitTable {
             .ok_or("waiter table exhausted")
     }
 
+    fn enqueue(&mut self, waiter: WaiterSlot) -> Result<usize, &'static str> {
+        let index = self.allocate_slot()?;
+        self.slots[index] = waiter;
+        Ok(index)
+    }
+
+    /// Deactivates waiters on `key` whose generation `is_live` accepts and reports each
+    /// thread index to `woken`. Returns whether any waiter (live or stale) matched `key`.
+    fn take_registered(
+        &mut self,
+        key: WaitKey,
+        all: bool,
+        is_live: impl Fn(u64, InstanceGeneration) -> bool,
+        mut woken: impl FnMut(usize),
+    ) -> bool {
+        let mut found = false;
+        for slot in &mut self.slots {
+            if !slot.active || slot.key.0 != key.0 {
+                continue;
+            }
+            found = true;
+            if !is_live(slot.pid, slot.generation) {
+                log_stale_wake(slot.pid, slot.generation);
+                continue;
+            }
+            slot.active = false;
+            woken(slot.thread_index);
+            if !all {
+                break;
+            }
+        }
+        found
+    }
+
     fn occupied(&self) -> usize {
         self.slots.iter().filter(|slot| slot.active).count()
     }
@@ -259,27 +293,11 @@ pub(crate) fn block_current_thread_with_resume(
     resume: BlockedResume,
 ) -> Result<WaitOutcome, &'static str> {
     let must_yield = without_interrupts(|| {
-        let scheduler = unsafe { scheduler_mut() };
-        let thread_index = scheduler
-            .current_thread
-            .ok_or("block required a current scheduler thread")?;
-        let thread = &mut scheduler.threads[thread_index];
-        if thread.state != ThreadState::Running {
-            return Err("block required the running thread state");
-        }
-        thread.blocked_syscall_frame = frame as u64;
-        set_blocked_resume(thread_index, resume);
-        let tid = thread.id;
-        let pid = thread.owner_process_id;
-        let generation =
-            live_instance_generation(pid).ok_or("block process had no live generation")?;
-
-        let table = wait_table_mut();
-        if table.consume_pending_wake(key) {
+        let waiter = arm_current_waiter(frame, key, deadline, resume)?;
+        if wait_table_mut().consume_pending_wake(key) {
             match resume {
                 BlockedResume::NativeOutcome => {
-                    thread.blocked_syscall_frame = 0;
-                    set_blocked_resume(thread_index, BlockedResume::NativeOutcome);
+                    disarm_current_waiter(waiter.thread_index);
                     return Ok(false);
                 }
                 BlockedResume::RestartSyscall { .. } | BlockedResume::RetrySyscall { .. } => {
@@ -288,22 +306,7 @@ pub(crate) fn block_current_thread_with_resume(
                 }
             }
         }
-
-        let slot_index = table.allocate_slot()?;
-        table.slots[slot_index] = WaiterSlot {
-            active: true,
-            pid,
-            generation,
-            tid,
-            thread_index,
-            key,
-            deadline,
-        };
-
-        scheduler.threads[thread_index].state = ThreadState::Blocked;
-        #[cfg(feature = "m9-userspace-self-test")]
-        crate::selftest::m9_userspace::on_thread_blocked(thread_index, pid);
-        kernel_log_fmt(format_args!("[M9.E] blocked tid={} key={}\n", tid, key.0));
+        enqueue_current_waiter(waiter)?;
         Ok(true)
     })?;
 
@@ -314,12 +317,108 @@ pub(crate) fn block_current_thread_with_resume(
     scheduler_block_and_switch();
 }
 
+/// Readiness verdict for [`block_current_thread_unless`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlockCheck {
+    /// Complete the syscall now with this `RAX`; nothing is registered.
+    Ready(u64),
+    Block,
+}
+
+/// Atomic check-then-block (M10 W1). Called ONLY from a syscall handler on the current thread.
+///
+/// `check` runs inside the same interrupts-disabled section that registers the waiter, so a
+/// producer (IRQ or another syscall on the single CPU) runs either wholly before `check`,
+/// which then observes its state change, or wholly after registration, and finds the waiter.
+/// Pending wakes are neither consumed nor recorded: producers use [`wake_all_registered`].
+///
+/// Returns the ready `RAX` without yielding; otherwise the thread blocks and the scheduler
+/// completes the syscall per `resume`. `check` may mutate and wake, but must not block.
+pub(crate) fn block_current_thread_unless(
+    frame: *mut SyscallContext,
+    key: WaitKey,
+    deadline: Option<Deadline>,
+    resume: BlockedResume,
+    check: impl FnOnce() -> BlockCheck,
+) -> Result<u64, &'static str> {
+    let ready = without_interrupts(|| {
+        if let BlockCheck::Ready(rax) = check() {
+            return Ok(Some(rax));
+        }
+        let waiter = arm_current_waiter(frame, key, deadline, resume)?;
+        enqueue_current_waiter(waiter)?;
+        Ok::<Option<u64>, &'static str>(None)
+    })?;
+    match ready {
+        Some(rax) => Ok(rax),
+        None => scheduler_block_and_switch(),
+    }
+}
+
+/// Arms the current thread's blocked-syscall completion; the caller holds interrupts disabled.
+fn arm_current_waiter(
+    frame: *mut SyscallContext,
+    key: WaitKey,
+    deadline: Option<Deadline>,
+    resume: BlockedResume,
+) -> Result<WaiterSlot, &'static str> {
+    let scheduler = unsafe { scheduler_mut() };
+    let thread_index = scheduler
+        .current_thread
+        .ok_or("block required a current scheduler thread")?;
+    let thread = &mut scheduler.threads[thread_index];
+    if thread.state != ThreadState::Running {
+        return Err("block required the running thread state");
+    }
+    thread.blocked_syscall_frame = frame as u64;
+    set_blocked_resume(thread_index, resume);
+    let pid = thread.owner_process_id;
+    let generation = live_instance_generation(pid).ok_or("block process had no live generation")?;
+    Ok(WaiterSlot {
+        active: true,
+        pid,
+        generation,
+        tid: thread.id,
+        thread_index,
+        key,
+        deadline,
+    })
+}
+
+fn disarm_current_waiter(thread_index: usize) {
+    unsafe { scheduler_mut() }.threads[thread_index].blocked_syscall_frame = 0;
+    set_blocked_resume(thread_index, BlockedResume::NativeOutcome);
+}
+
+fn enqueue_current_waiter(waiter: WaiterSlot) -> Result<(), &'static str> {
+    wait_table_mut().enqueue(waiter)?;
+    unsafe { scheduler_mut() }.threads[waiter.thread_index].state = ThreadState::Blocked;
+    #[cfg(feature = "m9-userspace-self-test")]
+    crate::selftest::m9_userspace::on_thread_blocked(waiter.thread_index, waiter.pid);
+    // A 60 Hz compositor blocks every frame; only the M9 lane needs the per-block line.
+    #[cfg(feature = "m9-block-wake-self-test")]
+    kernel_log_fmt(format_args!(
+        "[M9.E] blocked tid={} key={}\n",
+        waiter.tid, waiter.key.0
+    ));
+    Ok(())
+}
+
 pub(crate) fn wake_one(key: WaitKey) -> usize {
-    without_interrupts(|| wake_matching(key, false))
+    without_interrupts(|| wake_matching(key, false, true))
 }
 
 pub(crate) fn wake_all(key: WaitKey) -> usize {
-    without_interrupts(|| wake_matching(key, true))
+    without_interrupts(|| wake_matching(key, true, true))
+}
+
+/// Wakes every waiter on `key` and never records a pending wake (M10 W1).
+///
+/// Consumers of these keys block with [`block_current_thread_unless`], so a wake with no
+/// waiter has nothing to deliver; recording one would spend a slot of the bounded
+/// pending-wake table that [`wake_all`] users (the net service) depend on.
+pub(crate) fn wake_all_registered(key: WaitKey) -> usize {
+    without_interrupts(|| wake_matching(key, true, false))
 }
 
 /// Voluntary yield from a syscall handler; may resume via blocked-syscall sentinel.
@@ -346,29 +445,19 @@ pub(crate) fn voluntary_yield_from_syscall(frame: *mut SyscallContext) -> ! {
     )
 }
 
-fn wake_matching(key: WaitKey, all: bool) -> usize {
+fn wake_matching(key: WaitKey, all: bool, record_pending: bool) -> usize {
     let mut woken = 0usize;
     let table = wait_table_mut();
-    let mut found = false;
-    for slot in &mut table.slots {
-        if !slot.active || slot.key.0 != key.0 {
-            continue;
-        }
-        found = true;
-        let live = live_instance_generation(slot.pid);
-        if live != Some(slot.generation) {
-            log_stale_wake(slot.pid, slot.generation);
-            continue;
-        }
-        let index = slot.thread_index;
-        slot.active = false;
-        wake_thread_at_index(index, WaitOutcome::Woken);
-        woken += 1;
-        if !all {
-            break;
-        }
-    }
-    if !found {
+    let found = table.take_registered(
+        key,
+        all,
+        |pid, generation| live_instance_generation(pid) == Some(generation),
+        |index| {
+            wake_thread_at_index(index, WaitOutcome::Woken);
+            woken += 1;
+        },
+    );
+    if !found && record_pending {
         table.record_pending_wake(key);
     }
     woken
@@ -682,6 +771,145 @@ mod tests {
         }
         assert!(!table.slots[slot].active);
         assert!(table.slots[other].active);
+    }
+
+    fn waiter_for(thread_index: usize, key: WaitKey) -> WaiterSlot {
+        WaiterSlot {
+            active: true,
+            pid: 7,
+            generation: InstanceGeneration(1),
+            tid: thread_index as u64,
+            thread_index,
+            key,
+            deadline: None,
+        }
+    }
+
+    /// One producer: publish readiness, then wake only registered waiters (never record).
+    fn produce(table: &mut WaitTable, ready: &mut bool, key: WaitKey) -> Vec<usize> {
+        *ready = true;
+        let mut woken = Vec::new();
+        table.take_registered(key, true, |_, _| true, |index| woken.push(index));
+        woken
+    }
+
+    /// The `block_current_thread_unless` sequence: `check` then `enqueue`, with nothing
+    /// in between. `Ok(Some(rax))` means ready without registering.
+    fn atomic_block(
+        table: &mut WaitTable,
+        ready: &mut bool,
+        key: WaitKey,
+        check: impl FnOnce(&mut bool) -> BlockCheck,
+    ) -> Option<u64> {
+        match check(ready) {
+            BlockCheck::Ready(rax) => Some(rax),
+            BlockCheck::Block => {
+                table.enqueue(waiter_for(3, key)).expect("slot");
+                None
+            }
+        }
+    }
+
+    fn check_ready(ready: &mut bool) -> BlockCheck {
+        if *ready {
+            BlockCheck::Ready(1)
+        } else {
+            BlockCheck::Block
+        }
+    }
+
+    #[test]
+    fn atomic_check_then_block_never_loses_a_wake() {
+        let key = WaitKey(0x5A << 56 | 1);
+
+        // Producer ran before the critical section: the check sees it, nothing registers.
+        let mut table = WaitTable::new();
+        let mut ready = false;
+        assert!(produce(&mut table, &mut ready, key).is_empty());
+        assert_eq!(
+            atomic_block(&mut table, &mut ready, key, check_ready),
+            Some(1)
+        );
+        assert_eq!(table.occupied(), 0);
+
+        // Producer ran after registration: it finds and wakes the waiter.
+        let mut table = WaitTable::new();
+        let mut ready = false;
+        assert_eq!(atomic_block(&mut table, &mut ready, key, check_ready), None);
+        assert_eq!(produce(&mut table, &mut ready, key), vec![3]);
+        assert_eq!(table.occupied(), 0);
+
+        // An interrupt raised inside the check is delivered only after registration
+        // (IF=0 for the whole section), which is the case above.
+        let mut table = WaitTable::new();
+        let mut ready = false;
+        let mut irq_pending = false;
+        let blocked = atomic_block(&mut table, &mut ready, key, |ready| {
+            irq_pending = true;
+            check_ready(ready)
+        });
+        assert_eq!(blocked, None);
+        assert!(irq_pending);
+        assert_eq!(produce(&mut table, &mut ready, key), vec![3]);
+        assert_eq!(table.pending_wake_keys, [0; MAX_WAITERS]);
+    }
+
+    #[test]
+    fn split_check_then_block_loses_a_wake_without_pending_records() {
+        // The G2 shape (check in one section, register in another) with a producer in the
+        // gap: the wake finds no waiter and records nothing, so the waiter sleeps on.
+        let key = WaitKey(0x5A << 56 | 2);
+        let mut table = WaitTable::new();
+        let mut ready = false;
+        assert_eq!(check_ready(&mut ready), BlockCheck::Block);
+        assert!(produce(&mut table, &mut ready, key).is_empty());
+        table.enqueue(waiter_for(3, key)).expect("slot");
+        assert!(ready);
+        assert_eq!(
+            table.occupied(),
+            1,
+            "waiter stranded although its source is ready"
+        );
+    }
+
+    #[test]
+    fn take_registered_skips_stale_generations_and_other_keys() {
+        let key = WaitKey(0x57 << 56 | 1);
+        let mut table = WaitTable::new();
+        table.enqueue(waiter_for(1, key)).expect("slot");
+        table
+            .enqueue(waiter_for(2, WaitKey(0x58 << 56)))
+            .expect("slot");
+        let mut woken = Vec::new();
+        let found = table.take_registered(key, true, |_, _| false, |i| woken.push(i));
+        assert!(found);
+        assert!(woken.is_empty());
+        assert_eq!(table.occupied(), 2);
+        let found = table.take_registered(key, true, |_, _| true, |i| woken.push(i));
+        assert!(found);
+        assert_eq!(woken, vec![1]);
+        assert_eq!(table.occupied(), 1);
+    }
+
+    #[test]
+    fn wake_all_registered_never_records_a_pending_wake() {
+        let key = WaitKey(0x5A << 56 | 0xE200);
+        assert_eq!(wake_all_registered(key), 0);
+        assert!(!wait_table_mut().pending_wake_keys.contains(&key.0));
+        assert_eq!(wake_all(key), 0);
+        assert!(wait_table_mut().consume_pending_wake(key));
+    }
+
+    #[test]
+    fn pending_wake_table_drops_records_when_full() {
+        // Why port and work-set keys must never use `wake_all` (#200 K1).
+        let mut table = WaitTable::new();
+        for key in 1..=MAX_WAITERS as u64 {
+            table.record_pending_wake(WaitKey(key));
+        }
+        let net_key = WaitKey(0x54 << 56);
+        table.record_pending_wake(net_key);
+        assert!(!table.consume_pending_wake(net_key));
     }
 
     #[test]
