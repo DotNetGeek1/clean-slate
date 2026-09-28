@@ -30,6 +30,19 @@ impl Rights {
     /// Raw NIC/device authority (driver or network service only).
     pub const NET_RAW_DEVICE: Self = Self(1 << 13);
 
+    /// Open a compositor connection; Toplevel/Popup surface roles.
+    pub const GFX_CONNECT: Self = Self(1 << 14);
+    /// Background/ShellPanel surface roles (shell holder).
+    pub const GFX_SHELL: Self = Self(1 << 15);
+    /// SystemOverlay surface role (no holder in M10).
+    pub const GFX_OVERLAY: Self = Self(1 << 16);
+    /// Serve the compositor port (recv/post/disconnect).
+    pub const GFX_SERVE: Self = Self(1 << 17);
+    /// Map scanout buffers, present, and query display mode.
+    pub const DISPLAY_PRESENT: Self = Self(1 << 18);
+    /// Drain the kernel normalised raw input queue.
+    pub const INPUT_CONSUME: Self = Self(1 << 19);
+
     const ALL_KNOWN: u32 = (1 << 0)
         | (1 << 1)
         | (1 << 2)
@@ -43,7 +56,13 @@ impl Rights {
         | (1 << 10)
         | (1 << 11)
         | (1 << 12)
-        | (1 << 13);
+        | (1 << 13)
+        | (1 << 14)
+        | (1 << 15)
+        | (1 << 16)
+        | (1 << 17)
+        | (1 << 18)
+        | (1 << 19);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -67,6 +86,10 @@ impl Rights {
 
     pub const fn is_subset_of(self, allowed: Self) -> bool {
         (self.0 & allowed.0) == self.0
+    }
+
+    pub const fn intersects(self, other: Self) -> bool {
+        (self.0 & other.0) != 0
     }
 
     /// Bitwise AND — delegation and attenuation never add bits.
@@ -115,12 +138,36 @@ impl Rights {
                     | Self::DELEGATE.0
                     | Self::REVOKE.0,
             ),
+            ResourceClass::SharedBuffer => {
+                Self(Self::READ.0 | Self::WRITE.0 | Self::DELEGATE.0 | Self::REVOKE.0)
+            }
+            ResourceClass::Graphics => Self(
+                Self::GFX_CONNECT.0
+                    | Self::GFX_SHELL.0
+                    | Self::GFX_OVERLAY.0
+                    | Self::GFX_SERVE.0
+                    | Self::DELEGATE.0
+                    | Self::REVOKE.0,
+            ),
+            ResourceClass::Display => Self(Self::DISPLAY_PRESENT.0 | Self::INSPECT.0),
+            ResourceClass::Input => Self(Self::INPUT_CONSUME.0 | Self::INSPECT.0),
+        }
+    }
+
+    /// Rights that may exist only on root kernel grants for `class` and must never appear on a
+    /// delegated child (prevents laundering role authority through delegation).
+    pub const fn root_only_for(class: ResourceClass) -> Self {
+        match class {
+            ResourceClass::Graphics => {
+                Self(Self::GFX_SHELL.0 | Self::GFX_OVERLAY.0 | Self::GFX_SERVE.0)
+            }
+            _ => Self::empty(),
         }
     }
 
     /// Lowercase, pipe-separated names in deterministic bit order.
     pub fn write_names(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        const NAMES: [(&str, u32); 14] = [
+        const NAMES: [(&str, u32); 20] = [
             ("read", 1 << 0),
             ("write", 1 << 1),
             ("inspect", 1 << 2),
@@ -135,6 +182,12 @@ impl Rights {
             ("net_send", 1 << 11),
             ("net_receive", 1 << 12),
             ("net_raw_device", 1 << 13),
+            ("gfx_connect", 1 << 14),
+            ("gfx_shell", 1 << 15),
+            ("gfx_overlay", 1 << 16),
+            ("gfx_serve", 1 << 17),
+            ("display_present", 1 << 18),
+            ("input_consume", 1 << 19),
         ];
         let mut first = true;
         for (name, bit) in NAMES {

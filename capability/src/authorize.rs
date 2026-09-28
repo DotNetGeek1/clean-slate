@@ -56,8 +56,8 @@ pub fn authorize(
 /// (the requested subset).
 ///
 /// When the parent lacks `DELEGATE`, this returns [`CapabilityError::MissingRight`].
-/// [`CapabilityError::NotDelegable`] is the documented protocol alias for the same condition
-/// in higher-level messages; new kernel code should prefer `MissingRight` from this function.
+/// When the requested child rights include [`Rights::root_only_for`] bits for the parent's
+/// class, this returns [`CapabilityError::NotDelegable`] even if the parent holds them.
 pub fn validate_delegation(
     parent: &CapabilityRecord,
     parent_handle: CapabilityHandle,
@@ -76,6 +76,9 @@ pub fn validate_delegation(
     }
     if !requested.is_subset_of(Rights::valid_for(parent.resource.class)) {
         return Err(CapabilityError::InvalidRights);
+    }
+    if requested.intersects(Rights::root_only_for(parent.resource.class)) {
+        return Err(CapabilityError::NotDelegable);
     }
     Ok(requested)
 }

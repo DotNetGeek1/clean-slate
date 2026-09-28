@@ -11,6 +11,10 @@ pub enum ResourceClass {
     LifecycleControl = 5,
     Audit = 6,
     Network = 7,
+    SharedBuffer = 8,
+    Graphics = 9,
+    Display = 10,
+    Input = 11,
 }
 
 impl ResourceClass {
@@ -27,6 +31,10 @@ impl ResourceClass {
             5 => Some(Self::LifecycleControl),
             6 => Some(Self::Audit),
             7 => Some(Self::Network),
+            8 => Some(Self::SharedBuffer),
+            9 => Some(Self::Graphics),
+            10 => Some(Self::Display),
+            11 => Some(Self::Input),
             _ => None,
         }
     }
@@ -79,6 +87,45 @@ impl ResourceRef {
         Self {
             class: ResourceClass::IpcEndpoint,
             id: endpoint_slot,
+            instance_generation: 0,
+        }
+    }
+
+    /// `id` is the full [`SharedBufferId`] wire encoding (slot and generation in `id` because
+    /// `revoke_resource_id` matches class+id and ignores `instance_generation`).
+    pub const fn shared_buffer(shared_buffer_id_raw: u64) -> Self {
+        Self {
+            class: ResourceClass::SharedBuffer,
+            id: shared_buffer_id_raw,
+            instance_generation: 0,
+        }
+    }
+
+    /// Compositor port resource: `id` is the service id; `instance_generation` is the live
+    /// compositor instance (stale after restart, mirroring [`Self::network`]).
+    pub const fn graphics(service_id: u64, instance_generation: u64) -> Self {
+        Self {
+            class: ResourceClass::Graphics,
+            id: service_id,
+            instance_generation,
+        }
+    }
+
+    /// `id` packs output index (bits 0..8) and backend epoch (bits 8..32); `instance_generation`
+    /// is always `0`.
+    pub const fn display(output_index: u64, backend_epoch: u64) -> Self {
+        Self {
+            class: ResourceClass::Display,
+            id: output_index | (backend_epoch << 8),
+            instance_generation: 0,
+        }
+    }
+
+    /// Input seat resource: `id` is the seat index; `instance_generation` is always `0`.
+    pub const fn input(seat: u64) -> Self {
+        Self {
+            class: ResourceClass::Input,
+            id: seat,
             instance_generation: 0,
         }
     }
