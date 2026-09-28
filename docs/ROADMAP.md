@@ -162,6 +162,8 @@ Progression:
 
 Acceptance: native graphical test application opens, renders, receives input, and exits cleanly.
 
+The frozen graphics, surface, input and window contract (#110), including the wave plan and module ownership, is in [GRAPHICS.md](GRAPHICS.md).
+
 ## M11 — Can it run Doom? (Linux)
 
 **Goal:** Run a real Linux Doom port/binary through generic Linux compatibility infrastructure.
