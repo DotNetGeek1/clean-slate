@@ -894,6 +894,9 @@ fn dispatch_native(frame: &mut SyscallContext) {
         }
         cap_abi::SYSCALL_NR_SERVICE_PORT => crate::service::port_syscall::handle_syscall(frame),
         cap_abi::SYSCALL_NR_WORK_SET => crate::sched::work_set::handle_syscall(frame),
+        cap_abi::SYSCALL_NR_DISPLAY => {
+            crate::service::display_syscall::handle_syscall_display(frame)
+        }
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 }
@@ -973,8 +976,11 @@ mod tests {
     #[test]
     fn dispatch_native_reserved_m10_nrs_return_enosys() {
         use clean_slate_capability::syscall_abi::{
-            SYSCALL_NR_DISPLAY, SYSCALL_NR_INPUT, SYSCALL_NR_SERVICE_PORT,
+            SYSCALL_EINVAL, SYSCALL_NR_DISPLAY, SYSCALL_NR_INPUT, SYSCALL_NR_SERVICE_PORT,
             SYSCALL_NR_SHARED_BUFFER, SYSCALL_NR_WORK_SET,
+        };
+        use clean_slate_graphics::display::{
+            DISPLAY_SUBOP_BIND_WAKE, DISPLAY_SUBOP_MAP_SCANOUT, DISPLAY_SUBOP_PRESENT,
         };
 
         assert_eq!(SYSCALL_NR_SHARED_BUFFER, 16);
@@ -988,18 +994,14 @@ mod tests {
             "M10 reserved numbers are contiguous 16..=20"
         );
 
-        for nr in [
-            SYSCALL_NR_SHARED_BUFFER,
-            SYSCALL_NR_DISPLAY,
-            SYSCALL_NR_INPUT,
-        ] {
+        let dispatch = |nr: u64, subop: u64| {
             let mut frame = SyscallContext {
                 rax: nr,
                 rdx: 0,
                 rbx: 0,
                 rbp: 0,
                 rsi: 0,
-                rdi: 0,
+                rdi: subop,
                 r8: 0,
                 r9: 0,
                 r10: 0,
@@ -1012,7 +1014,25 @@ mod tests {
                 user_rsp: 0,
             };
             dispatch_native(&mut frame);
-            assert_eq!(frame.rax, SYSCALL_ENOSYS, "nr {nr}");
+            frame.rax
+        };
+
+        // 17 and 20 are live (#200); 16 and 19 wait for #195 and #113.
+        for nr in [SYSCALL_NR_SHARED_BUFFER, SYSCALL_NR_INPUT] {
+            assert_eq!(dispatch(nr, 0), SYSCALL_ENOSYS, "nr {nr}");
+        }
+        // #111 routes 18; only its gated subops stay ENOSYS.
+        assert_eq!(dispatch(SYSCALL_NR_DISPLAY, 0), SYSCALL_EINVAL);
+        for subop in [
+            DISPLAY_SUBOP_MAP_SCANOUT,
+            DISPLAY_SUBOP_PRESENT,
+            DISPLAY_SUBOP_BIND_WAKE,
+        ] {
+            assert_eq!(
+                dispatch(SYSCALL_NR_DISPLAY, subop),
+                SYSCALL_ENOSYS,
+                "subop {subop}"
+            );
         }
     }
 
