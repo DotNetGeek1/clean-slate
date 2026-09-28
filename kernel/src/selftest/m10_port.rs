@@ -116,6 +116,8 @@ const IDLE_BIT: u32 = 7;
 const LONG_DEADLINE_NS: u64 = 2_000_000_000;
 const SERVER_EXIT_DEADLINE_NS: u64 = 5_000_000_000;
 const SHORT_DEADLINE_NS: u64 = 50_000_000;
+/// Nonzero (zero means no deadline) and already behind the monotonic clock.
+const PAST_DEADLINE_NS: u64 = 1;
 
 // ---- harness sub-operations on SYSCALL_NR_CAP_GRANT (this lane only) ----
 
@@ -293,6 +295,8 @@ struct LaneState {
     race_delivered: bool,
     race_vector: u8,
     baseline_capabilities: usize,
+    /// Free pages expected once every fixture except the still-running `O` is torn down.
+    final_free_pages: u64,
     restarted_serve: u64,
     traces: [Trace; TRACE_CAPACITY],
     trace_count: usize,
@@ -312,6 +316,7 @@ static STATE: GlobalCell<LaneState> = GlobalCell::new(LaneState {
     race_delivered: false,
     race_vector: 0,
     baseline_capabilities: 0,
+    final_free_pages: 0,
     restarted_serve: 0,
     traces: [Trace::EMPTY; TRACE_CAPACITY],
     trace_count: 0,
@@ -611,6 +616,10 @@ fn server_script(handles: &Handles, lane: &mut LaneState) -> M6FixtureBootstrap 
             [ws, 1 << IDLE_BIT, result_of(idle_deadline), 0],
         )
         .expect_eq(STATUS_ETIMEDOUT),
+    );
+    s.step(
+        work_set_step(WORK_SET_OP_WAIT, [ws, 1 << IDLE_BIT, PAST_DEADLINE_NS, 0])
+            .expect_eq(STATUS_ETIMEDOUT),
     );
     s.step(
         work_set_step(
@@ -1034,7 +1043,12 @@ pub(crate) fn start_m10_port_self_test(allocator: PageAllocator) -> ! {
         .unwrap_or_else(|| fail("allocator missing"));
     let stacks = unsafe { task_stacks_mut() };
     let expected_pids = [S_PID, A_PID, B_PID, K_PID, I_PID, O_PID];
+    let baseline_free_pages = allocator.stats().free_pages;
+    let mut free_pages_before_o = 0;
     for (role, (service, slot)) in CAST.into_iter().enumerate() {
+        if expected_pids[role] == O_PID {
+            free_pages_before_o = allocator.stats().free_pages;
+        }
         let program = match role {
             0 => server_script(&handles, lane),
             1 => client_a_script(&handles, lane),
@@ -1056,6 +1070,8 @@ pub(crate) fn start_m10_port_self_test(allocator: PageAllocator) -> ! {
             "fixture pid prediction mismatch",
         );
     }
+    let o_pages = free_pages_before_o - allocator.stats().free_pages;
+    lane.final_free_pages = baseline_free_pages - o_pages;
 
     prove_registration_limits(HolderId(S_PID), live_generation(S_PID));
     lane.race_vector =
@@ -1725,5 +1741,15 @@ fn check_final(lane: &LaneState) {
         "capabilities leaked",
     );
     ensure(waiter_occupancy() == 0, "waiter leaked");
+    let free_pages = service_lifecycle_syscall_allocator_mut()
+        .as_ref()
+        .map_or(0, |allocator| allocator.stats().free_pages);
+    if free_pages != lane.final_free_pages {
+        kernel_log_fmt(format_args!(
+            "[M10.port] free pages expected={} actual={free_pages}\n",
+            lane.final_free_pages
+        ));
+        fail("frames leaked");
+    }
     marker("baseline restored");
 }
