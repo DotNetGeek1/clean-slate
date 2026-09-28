@@ -72,10 +72,6 @@ impl DmaRegion {
         })
     }
 
-    pub(crate) fn len(&self) -> u32 {
-        self.len
-    }
-
     pub(crate) fn readable(&self, offset: u32, len: u32) -> Result<DmaSegment, DmaError> {
         self.segment(offset, len, false)
     }
