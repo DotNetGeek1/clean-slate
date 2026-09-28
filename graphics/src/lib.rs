@@ -26,6 +26,7 @@ pub mod objects;
 pub mod pixel;
 pub mod protocol;
 pub mod raw_input;
+pub mod surface;
 pub mod role;
 pub mod window;
 
