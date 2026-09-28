@@ -15,6 +15,9 @@ pub const MAX_WINDOWS_PER_CLIENT: usize = 4;
 pub const MAX_WINDOWS: usize = 16;
 /// Maximum registered [`crate::ids::ClientBufferId`] values per client.
 pub const MAX_BUFFERS_PER_CLIENT: usize = 8;
+/// Compositor-wide registered client buffers; per-connection cap remains
+/// [`MAX_BUFFERS_PER_CLIENT`]. Exceeding either limit yields `LimitExceeded`.
+pub const MAX_REGISTERED_BUFFERS: usize = 16;
 /// Displayed plus latest pending commit per surface.
 pub const MAX_IN_FLIGHT_BUFFERS_PER_SURFACE: usize = 2;
 /// Damage rectangles per commit; overflow collapses to the bounding box.
@@ -56,5 +59,6 @@ pub const MAX_CLIENT_STALL_ITERATIONS: u32 = 8;
 //   MAX_SHARED_MAPPINGS_PER_PROCESS = 16, MAX_EXTENTS_PER_BUFFER = 16
 
 const _: () = assert!(MAX_STRIDE_BYTES == MAX_SURFACE_EXTENT * 4);
+const _: () = assert!(MAX_BUFFERS_PER_CLIENT <= MAX_REGISTERED_BUFFERS);
 const _: () = assert!(MAX_SURFACES_PER_CLIENT <= MAX_SURFACES);
 const _: () = assert!(MAX_WINDOWS_PER_CLIENT <= MAX_WINDOWS);
