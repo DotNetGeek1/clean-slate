@@ -7,7 +7,7 @@ The code is authoritative. Offsets, constants and error codes live in three crat
 | Crate | Path | Contents |
 |---|---|---|
 | `clean-slate-graphics` | `graphics/` | geometry, pixels, reference mode, ids, limits, 64-byte protocol codecs, display/input ABI wire types, raw input records, and the reference state machines (roles, surfaces, buffers, windows, input trackers, object tables, connection admission, `FakeDisplay`) |
-| `clean-slate-native-abi` | `native-abi/` | `SharedBufferId`, `SharedBufferAccess`, proposed #195 memory limits; later the port and work-set ABI (#200) |
+| `clean-slate-native-abi` | `native-abi/` | `SharedBufferId`, `SharedBufferAccess`, proposed #195 memory limits; port and work-set ABI (`port.rs`, `work_set.rs`, `status.rs`, #200) |
 | `clean-slate-capability` | `capability/` | `ResourceClass`, `Rights`, `ResourceRef` constructors, delegation checks, syscall numbers and status sentinels |
 
 Items marked **(planned)** are fixed in shape but not implemented; their owning lane implements them without changing this contract. Everything else is landed and host-tested (`cargo xtask test-m10-contract`).
@@ -53,13 +53,13 @@ client:     PORT_RECV_EVENT (blocks) -> handle -> maybe render + commit -> loop
 kernel:     IRQ handlers enqueue and signal work-set bits only
 ```
 
-`WAIT_WORK`, `PORT_RECV_EVENT` and the work-set bits are **(planned)** in #200 (syscalls 17 and 20). Display and input syscalls never block (see [Display ABI](#display-abi-syscall-18)).
+`WAIT_WORK` (syscall 20 `WORK_SET WAIT`), `PORT_RECV_EVENT` (syscall 17) and the work-set bits are landed in #200. Display and input syscalls never block (see [Display ABI](#display-abi-syscall-18)).
 
 Process boundaries:
 
 - one compositor process; one shell process; one process per app;
 - the display backend, input driver, port and shared-buffer mechanism are kernel code, not processes;
-- a compositor restart gives every client `ServerGone` (planned, #200); clients exit and are relaunched by supervisor policy. There is no transparent reconnection, and old `Graphics` capabilities are stale (`ResourceRef::graphics` binds the compositor instance generation).
+- a compositor restart gives every client `ServerGone` (#200); clients exit and are relaunched by supervisor policy. There is no transparent reconnection, and old `Graphics` capabilities are stale (`ResourceRef::graphics` binds the compositor instance generation).
 
 ## Module ownership
 
@@ -69,7 +69,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 |---|---|---|
 | 0 | #110 | `graphics/` (whole crate); `native-abi/` skeleton; M10 classes, rights and syscall reservations in `capability/`; `cargo xtask test-m10-contract`; this document |
 | 1 | #195 | `native-abi/src/shared_buffer.rs` contents and memory-level limits; `kernel/src/mm/shared_buffer.rs`, `kernel/src/mm/shared_mapping.rs` (planned); syscall 16; first stage enables and verifies `EFER.NXE` (A4); gate `test-m10-shared-buffer` (planned) |
-| 1 | #200 | port and work-set ABI in `native-abi` (`port.rs`, `work_set.rs`); `kernel/src/service/port.rs`, `kernel/src/service/port_syscall.rs`, `kernel/src/sched/work_set.rs`; syscalls 17 and 20; capability transfer on send (all planned) |
+| 1 | #200 | port and work-set ABI in `native-abi` (`port.rs`, `work_set.rs`, `status.rs`); class-agnostic port engine in `port/` (`clean-slate-port`, feature `fake` for host tests); `kernel/src/service/port.rs`, `kernel/src/service/port_syscall.rs`, `kernel/src/sched/work_set.rs`; syscalls 17 and 20; capability transfer on send; gate `test-m10-port` |
 | 1 | #111 | `raster/` (`clean-slate-raster`); `kernel/src/boot/gop.rs`; `kernel/src/device/display/{mod.rs, gop.rs}`; `kernel/src/service/display_syscall.rs`; syscall 18; gate `test-m10-framebuffer` (all planned) |
 | 1 | #113 | `kernel/src/device/input/{mod.rs, i8042.rs}`; `kernel/src/service/input_syscall.rs`; syscall 19; scancode to HID usage table in `graphics::input` (all planned) |
 | 1 | #196 | `kernel/src/device/virtio/{modern.rs, virtqueue.rs}` (planned) |
@@ -116,7 +116,7 @@ Authoritative source: `capability/src/{resource,rights,authorize,error}.rs`.
 
 **Role-bit mirrors.** `graphics` cannot depend on `capability`, so `graphics::role` mirrors the three role bits as `GFX_CONNECT_BIT`, `GFX_SHELL_BIT` and `GFX_OVERLAY_BIT`. `native-abi` cross-checks them against `Rights` (module `graphics_role_crosscheck`, e.g. `graphics_role_bit_mirrors_equal_capability_rights`).
 
-**Grant and transfer policy (planned: P5 in #112/#118, P2 in #200).**
+**Grant and transfer policy (P2 landed in #200; P5 in #112/#118 planned).**
 
 - A port transfer of a `SharedBuffer` capability installs a child for the server holder with `READ` only. The sender must hold `DELEGATE`. The kernel rolls the child back if the enqueue fails.
 - `Display` and `Input` are granted only to the live compositor PID.
@@ -134,17 +134,73 @@ Shared-buffer allocation is ambient but bounded by a per-owner quota (#195); sha
 
 ## Reserved syscalls
 
-Reserved in `clean_slate_capability::syscall_abi`. The kernel dispatcher has no arm for them, so each returns `SYSCALL_ENOSYS` (`u64::MAX - 37`) until its owning lane lands.
+Reserved in `clean_slate_capability::syscall_abi`. Syscalls 16, 18 and 19 remain unimplemented and return `SYSCALL_ENOSYS` (`u64::MAX - 37`). Syscalls 17 and 20 are implemented by #200; see [Service port ABI](#service-port-abi-syscall-17) and [Work set ABI](#work-set-abi-syscall-20). Port and work-set status sentinels live in `native-abi/src/status.rs`.
 
 | Number | Constant | Owner | Status |
 |---|---|---|---|
 | 16 | `SYSCALL_NR_SHARED_BUFFER` | #195 | `ENOSYS` |
-| 17 | `SYSCALL_NR_SERVICE_PORT` | #200 | `ENOSYS` |
+| 17 | `SYSCALL_NR_SERVICE_PORT` | #200 | syscall 17 (see below) |
 | 18 | `SYSCALL_NR_DISPLAY` | #111, #114 | `ENOSYS`; subops frozen in `graphics::abi::display` |
 | 19 | `SYSCALL_NR_INPUT` | #113 | `ENOSYS`; subops frozen in `graphics::abi::input` |
-| 20 | `SYSCALL_NR_WORK_SET` | #200 | `ENOSYS` |
+| 20 | `SYSCALL_NR_WORK_SET` | #200 | syscall 20 (see below) |
 
 Subop numbers belong to `native-abi` (16, 17, 20) and `graphics::abi` (18, 19), never to `service-fixtures`.
+
+## Service port ABI (syscall 17)
+
+Authoritative: `native-abi/src/port.rs`, `native-abi/src/status.rs`. Port state machine: `clean-slate-port` (`port/`); kernel glue: `kernel/src/service/port.rs`, `kernel/src/service/port_syscall.rs`.
+
+Register convention: `rax = 17`, `rdi = subop`; `rsi` = capability handle for capability-authorised subops, or flags on the connection data path (`SEND`, `RECV_EVENT`); arguments in `rdx`, `r10`, `r8`, `r9`; result in `rax`. Deadlines are absolute monotonic nanoseconds (`0` = none). A nonzero deadline requires a calibrated clock, otherwise `EINVAL`. `NONBLOCK` combined with a deadline gives `EINVAL`. Nonzero unused registers give `EINVAL`.
+
+| # | Subop | `rsi` | `rdx` | `r10` | `r8` | `r9` | Success |
+|---|---|---|---|---|---|---|---|
+| 0 | reserved | — | — | — | — | — | `EINVAL` |
+| 1 | `FIND_HANDLE` | 0 | class (`u8`) | resource id | role: `PORT_ROLE_CONNECT` (1) or `PORT_ROLE_SERVE` (2) | 0 | handle raw |
+| 2 | `CONNECT` | client cap | class | resource id | 0 | 0 | `ConnectionId` raw |
+| 3 | `SEND` | flags: bit 0 `PORT_SEND_WAIT` | conn | frame ptr (64 B) | transfer handle or 0 | deadline | 0 |
+| 4 | `RECV_EVENT` | flags: bit 0 `PORT_RECV_NONBLOCK` | conn | out ptr | out len (80) | deadline | `EventKind` (1–3) |
+| 5 | `CLOSE` | 0 | conn | reason (`u32`) | 0 | 0 | 0 |
+| 6 | `RECV` | serve cap | out ptr | out len (152) | flags: bit 0 `PORT_RECV_NONBLOCK` | deadline | `RecvKind` (1–4) |
+| 7 | `POST` | serve cap | conn | frame ptr | 0 | 0 | 0 |
+| 8 | `DISCONNECT` | serve cap | conn | reason (`u32`) | 0 | 0 | 0 |
+| 9 | `BIND_WAKE` | serve cap | work-set id | request bit (0..=31) | notice bit (0..=31) | 0 | 0 |
+| 10.. | reserved | — | — | — | — | — | `EINVAL` |
+
+`TrustedEnvelope` (80 bytes), `PortRecvRecord` (152 bytes) and `PortEventRecord` (80 bytes) use explicit little-endian `encode`/`decode` with the offsets documented on the types in `native-abi/src/port.rs` (no `repr(C)` transmute). The kernel stamps every envelope field; frame bytes are opaque.
+
+| Name | Value | Used for |
+|---|---|---|
+| `STATUS_EACCES` | `u64::MAX - 12` | wrong resource, missing right, wrong holder |
+| `STATUS_EINVAL` | `u64::MAX - 21` | bad subop, flags, pointer, length or class |
+| `STATUS_ENOSPC` | `u64::MAX - 28` | connection or transfer limits; capability table full |
+| `STATUS_ENOSYS` | `u64::MAX - 37` | unchanged |
+| `STATUS_EAGAIN` | `u64::MAX - 10` | queue full or nothing pending with `NONBLOCK` |
+| `STATUS_EEXIST` | `u64::MAX - 16` | second `WORK_SET CREATE` by the same holder |
+| `STATUS_EPIPE` | `u64::MAX - 31` | peer closed |
+| `STATUS_ETIMEDOUT` | `u64::MAX - 109` | deadline expiry |
+| `STATUS_ECONNREFUSED` | `u64::MAX - 110` | no live port for `(class, id)` |
+| `STATUS_ESTALE` | `u64::MAX - 116` | stale connection, capability or work set |
+
+`u64::MAX - 15` is the network pending value and is never returned as a port status. Success values are at most 2^48 or a small kind, so they never fall in `STATUS_RANGE_START` (`u64::MAX - 4095`).
+
+ABI maxima (`PORT_MAX_*`, `PortParams::validate`) and `port_rights_for` are in `native-abi/src/port.rs`. Blocking uses `block_current_thread_unless` with `RestartSyscall` and absolute deadlines; port wakes use `wake_all_registered` (never the pending-wake table).
+
+## Work set ABI (syscall 20)
+
+Authoritative: `native-abi/src/work_set.rs`. Kernel table: `kernel/src/sched/work_set.rs` (`WORK_SET_CAPACITY` = 8 slots; at most one work set per holder).
+
+Register convention: `rax = 20`, `rdi = subop`; arguments in `rsi`, `rdx`, `r10`, `r8`; result in `rax`. Deadlines match the port rules above.
+
+| # | Subop | `rsi` | `rdx` | `r10` | `r8` | Success |
+|---|---|---|---|---|---|---|
+| 0 | reserved | — | — | — | — | `EINVAL` |
+| 1 | `CREATE` | 0 | 0 | 0 | 0 | `WorkSetId` raw (`EEXIST` if the holder already has one; `ENOSPC` if full) |
+| 2 | `WAIT` | ws | mask (`u32`, nonzero) | deadline (abs ns, 0 = none) | flags: bit 0 `WORK_SET_WAIT_NONBLOCK` | `ready & mask`, cleared on return; `ETIMEDOUT`; `EAGAIN` with `NONBLOCK` |
+| 3 | `DESTROY` | ws | 0 | 0 | 0 | 0 |
+| 4 | `NOW` | 0 | 0 | 0 | 0 | monotonic ns (`EINVAL` if uncalibrated) |
+| 5.. | reserved | — | — | — | — | `EINVAL` |
+
+`WorkSetId` uses the same encoding as `ConnectionId` (slot 0..16, generation 16..48). `work_set::signal` is kernel-internal and IRQ-safe; stale ids are a silent no-op. Port `BIND_WAKE`, and (when they land) display and input `BIND_WAKE`, store `(WorkSetId, bit)` and signal through `work_set::signal`.
 
 ## Reference mode
 
@@ -211,7 +267,7 @@ Every generation starts at 1; generation 0 is invalid on the wire. Releasing a s
 | Id | Width | Layout | Minted by | Scope |
 |---|---|---|---|---|
 | `SharedBufferId` | u64 | slot 0..16, generation 16..48, bits 48..64 zero | kernel (#195) | global; also `ResourceRef.id` |
-| `ConnectionId` (planned) | u64 | same shape as `SharedBufferId` | kernel port (#200) | bound to (client holder, compositor instance) |
+| `ConnectionId` | u64 | same shape as `SharedBufferId` | kernel port (#200) | bound to (client holder, compositor instance) |
 | `ObjectId` (`SurfaceId`, `WindowId`, `ClientBufferId`) | u32 | slot 0..8, generation 8..32 (max `MAX_OBJECT_GENERATION` = `0xFF_FFFF`) | compositor | one connection |
 | `OutputId` | u32 | output index 0..8, backend epoch 8..32 | kernel display module | global; epoch bumps on reset or mode change |
 | `InputDeviceId` | u32 | device index 0..8 (`KEYBOARD_INDEX` 0, `MOUSE_INDEX` 1), generation 8..32 | kernel input module | informational, never authority |
@@ -370,7 +426,7 @@ Rules (S3):
 
 - **Connection close (S8).** Every connection teardown path (client exit, revoke, protocol disconnect, queue overflow) calls `ObjectTable::close(&mut budget)`. It returns every live object's budget to the `GlobalBudget` and resets the table in place; the next connection starts with a table equivalent to `ObjectTable::new()`. Budget release `debug_assert!`s against underflow (a foreign or mismatched budget) and saturates in release builds.
 - **Storage (S8).** An `ObjectTable<SurfaceState, _, _>` is about 24 KB per connection. The compositor keeps its tables in static or heap memory, never on the stack; `close` works in place so no by-value move is needed.
-- **Kernel ordering (P4, planned in #200, #111/#114, #113, #195, #118).** In `teardown_current_process`: port teardown (close the holder's connections and notify the server, or mark every connection `ServerGone` if the holder was the server); display presenter release (drop the scanout mappings, leave the last frame on screen); input-consumer release; `revoke_for_holder`; shared-mapping teardown (unmap without freeing frames); `destroy_process_address_space` for private pages. `ResourceSnapshot` gains counters for shared mappings, port connections and presenter/consumer bindings so #118 can prove return to baseline.
+- **Kernel ordering (P4).** Port teardown and work-set release are landed in #200 (`port::on_holder_exit`, `work_set::on_holder_exit` in the shared teardown hook order before `revoke_for_holder`). Display presenter release, input-consumer release, shared-mapping teardown and the #118 baseline proof remain planned (#111/#114, #113, #195, #118). On every registered teardown path: port teardown (close the holder's connections and notify the server, or mark every connection `ServerGone` if the holder was the server); display presenter release (planned); input-consumer release (planned); `revoke_for_holder`; shared-mapping teardown (planned); `destroy_process_address_space` for private pages. `ResourceSnapshot` includes `port_connections`, `ports_served` and `work_sets` (#200); shared mappings and presenter/consumer bindings remain planned for later lanes.
 
 ## Surface roles
 
@@ -695,7 +751,18 @@ Visual target (#109, #116; north star `docs/Desktop-design.png`):
 
 On success it prints `[M10.contract] PASS`. It is a runner constituent (`scripts/run-tests.sh`, `scripts/run-tests.ps1`) and runs under `--exhaustive`. It boots nothing.
 
-The `fake` feature enables `graphics::fake`: `FakeDisplay`, a model of the display ABI with R8 copy semantics, a single present in flight, timeouts, reset and poisoning. It is for host tests only; production code must not enable it. `FakeConnection` (an in-memory port) is deferred to #200.
+`cargo xtask test-m10-port` (aliases `m10-port`, `m10.200`) is the #200 gate. In order it runs:
+
+1. `cargo test -p clean-slate-native-abi`;
+2. `cargo test -p clean-slate-port --features fake`;
+3. a `x86_64-unknown-uefi` build of `clean-slate-port` with feature `fake`;
+4. `cargo test -p clean-slate-kernel -- service::port sched::work_set sched::wait`;
+5. `build_m6_fixture_userspace`;
+6. QEMU with feature `m10-port-self-test`, ordered `[M10.port]` markers and a 60 s timeout.
+
+On success it prints `[M10.port] PASS` (not `[M10  ] PASS`, which belongs to #119). It is a runner constituent and runs under `--exhaustive`.
+
+The `fake` feature enables `graphics::fake`: `FakeDisplay`, a model of the display ABI with R8 copy semantics, a single present in flight, timeouts, reset and poisoning. It is for host tests only; production code must not enable it. `clean-slate-port` exposes `FakePort` / `FakeConnection` behind feature `fake` for the same port semantics in host tests (#112).
 
 Planned gates, each owned by its lane: `test-m10-shared-buffer` (#195), `test-m10-framebuffer` (#111, `-vga std`), `test-m10-virtio-gpu` (#114), `test-m10-desktop` (#118), and `test-m10` with `[M10 ] PASS` (#119).
 
@@ -712,7 +779,7 @@ Each acceptance item of #110, with the section of this document that records it 
 | 3 | The protocol references #195 shared buffers through opaque generation-safe handles; no physical addresses cross the app-facing ABI | [Identities and generations](#identities-and-generations); [Buffers](#buffers) | `shared_buffer_id_round_trip_and_rejections`; `shared_buffer_resource_ref_fields`; `shared_buffer_resource_ref_and_revoke_by_full_id`; `object_id_round_trip_and_generation_zero`; `request_body_layout_tiles_with_spec_fields` (`RegisterBuffer` carries only the layout) |
 | 4 | No design requires full pixel frames to travel through 64-byte IPC messages | [Wire protocol summary](#wire-protocol-summary) | `frame_layout_assertions`; `golden_frames`; `abi_size_assertions` |
 | 5 | Buffer acquire/submit/release lifetime is explicit and stale-safe | [Buffers](#buffers); [Surfaces](#surfaces) | `superseded_latest_is_released_at_commit_and_old_current_at_latch`; `remove_surface_releases_current_then_latest`; `commit_rolls_back_and_passes_resolver_errors_through`; `destroyed_ids_are_stale_for_every_operation_and_reuse_mints_a_new_generation`; `a_released_buffer_can_be_attached_again` |
-| 6 | Apps cannot address another surface by guessing an ID | [Identities and generations](#identities-and-generations) (S1) | `the_same_raw_id_names_each_tables_own_object_or_nothing`; `the_same_raw_id_resolves_independently_per_table`; `retirement_only_exhausts_the_retiring_connection`; `retiring_connection_leaves_no_trace_for_the_next_connection`; `wrong_kind_lookups_and_removes_fail_without_side_effects`; `live_slot_with_other_generation_is_stale`. The kernel-stamped connection identity that selects the table is planned (#200) |
+| 6 | Apps cannot address another surface by guessing an ID | [Identities and generations](#identities-and-generations) (S1) | `the_same_raw_id_names_each_tables_own_object_or_nothing`; `the_same_raw_id_resolves_independently_per_table`; `retirement_only_exhausts_the_retiring_connection`; `retiring_connection_leaves_no_trace_for_the_next_connection`; `wrong_kind_lookups_and_removes_fail_without_side_effects`; `live_slot_with_other_generation_is_stale`. The kernel-stamped `ConnectionId` that selects the table is landed (#200) |
 | 7 | Damage and coordinates use checked arithmetic and clipping rules | [Coordinate model](#coordinate-model); [Surfaces](#surfaces) | `checked_right_bottom_extremes`; `validate_rejects_non_representable_extent`; `clip_to_err_on_overflowing_rect_or_bounds`; `buffer_rect_clip_at_u16_max_and_extent`; `rect_set_overflow_collapses_to_bbox`; `buffer_layout_matrix`; `damage_drops_empty_and_out_of_extent_rects_and_clips_the_rest`; `damage_overflow_collapses_to_the_bounding_box_instead_of_failing`; `region_requests_with_an_overflowing_rect_fail_atomically`; `latch_damage_is_clipped_to_the_latched_buffer`; `present_request_validate_matrix` |
 | 8 | Logical coordinates and output scale are represented even if M10 uses only scale 1 | [Coordinate model](#coordinate-model) | `attach_rejects_non_unit_scale_first_and_leaves_pending_unchanged`; `send_enforces_m10_vocabulary_without_consuming_a_serial`; `window_config_new_uses_m10_scale_and_server_decorations`; `all_events_round_trip` (`Welcome` with `REFERENCE_MODE` and a separate logical size); `encode_parity_invalid_values` |
 | 9 | Alpha-capable surface semantics are defined without requiring translucency/blur in M10 | [Pixels, alpha and colour](#pixels-alpha-and-colour); [Non-goals and visual target](#non-goals-and-visual-target) | `over_fixed_vectors`; `over_clamps_invariant_violating_src`; `over_never_exceeds_255`; `div255_accepts_full_blend_domain`; `opaque_overflow_degrades_to_not_opaque_and_is_sticky_until_replace` |
