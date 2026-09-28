@@ -283,8 +283,16 @@ pub(crate) fn notify_address(
     multiplier: u32,
     queue_notify_off: u16,
 ) -> Result<u64, CapError> {
-    let _ = (notify, multiplier, queue_notify_off);
-    todo!("#196 stage 3a")
+    let byte_off = u64::from(queue_notify_off) * u64::from(multiplier);
+    let end = byte_off + 2;
+    if end > u64::from(notify.length) {
+        return Err(CapError::NotifyOutOfRange);
+    }
+    notify
+        .phys
+        .checked_add(end)
+        .ok_or(CapError::NotifyOutOfRange)?;
+    Ok(notify.phys + byte_off)
 }
 
 #[cfg(test)]

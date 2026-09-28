@@ -20,8 +20,17 @@ pub(crate) fn negotiate(
     required: u64,
     optional: u64,
 ) -> Result<u64, NegotiationError> {
-    let _ = (offered, required, optional);
-    todo!("#196 stage 3a")
+    if (required | optional) & !DEVICE_CLASS_MASK != 0 {
+        return Err(NegotiationError::InvalidRequest);
+    }
+    if offered & VERSION_1 == 0 {
+        return Err(NegotiationError::FeatureRequired(VERSION_1));
+    }
+    let missing = required & !offered;
+    if missing != 0 {
+        return Err(NegotiationError::FeatureRequired(missing));
+    }
+    Ok(VERSION_1 | required | (optional & offered))
 }
 
 #[cfg(test)]
