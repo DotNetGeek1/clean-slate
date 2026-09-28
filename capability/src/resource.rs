@@ -111,13 +111,17 @@ impl ResourceRef {
         }
     }
 
-    /// `id` is the packed `clean_slate_graphics::OutputId` encoding (index bits 0..8, backend
-    /// epoch bits 8..32), validated by the caller; epoch lives in `id` because
-    /// `revoke_resource_id` ignores `instance_generation`.
-    pub const fn display(output_id_raw: u32) -> Self {
+    /// Display authority for one physical output: `id` is the output index (0..=255 in M10).
+    ///
+    /// The backend epoch is **not** part of this resource. Each present and status query carries
+    /// an `OutputId` on the wire; the kernel compares it to the live output and rejects stale
+    /// values with `StaleEpoch`. Because [`revoke_resource_id`](crate::CapabilityTable::revoke_resource_id)
+    /// matches class and `id` only, revoking a display capability revokes every holder for that
+    /// output index regardless of which epoch they last observed.
+    pub const fn display(output_index: u8) -> Self {
         Self {
             class: ResourceClass::Display,
-            id: output_id_raw as u64,
+            id: output_index as u64,
             instance_generation: 0,
         }
     }

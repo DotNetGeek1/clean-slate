@@ -1,5 +1,9 @@
 //! Display syscall ABI wire types (`SYSCALL_NR_DISPLAY = 18`, §8).
 //!
+//! Capability `ResourceRef::display(output_index)` names the physical output only (S10); wire
+//! structs such as [`DisplayModeInfo`] and [`PresentRequest`] carry the full [`OutputId`] including
+//! backend epoch, checked with [`DisplayError::StaleEpoch`].
+//!
 //! # Syscall convention (§7)
 //!
 //! See [`super`] and [`crate::abi::input`]: `rax` = 18, `rdi` subop, `rsi` capability handle,

@@ -94,10 +94,10 @@ Authoritative source: `capability/src/{resource,rights,authorize,error}.rs`.
 |---|---|---|---|
 | `SharedBuffer` | 8 | `READ \| WRITE \| DELEGATE \| REVOKE` | `shared_buffer(raw)`: `id` = full `SharedBufferId` encoding (slot and generation), `instance_generation = 0` |
 | `Graphics` | 9 | `GFX_CONNECT \| GFX_SHELL \| GFX_OVERLAY \| GFX_SERVE \| DELEGATE \| REVOKE` | `graphics(service_id, instance_generation)`: the compositor service id and live instance, stale after restart (as `network`) |
-| `Display` | 10 | `DISPLAY_PRESENT \| INSPECT` | `display(output_id_raw)`: `id` = packed `OutputId` (index and backend epoch), `instance_generation = 0` |
+| `Display` | 10 | `DISPLAY_PRESENT \| INSPECT` | `display(output_index)`: `id` = output index, `instance_generation = 0` (S10) |
 | `Input` | 11 | `INPUT_CONSUME \| INSPECT` | `input(seat)`: `id` = seat index (0 in M10), `instance_generation = 0` |
 
-`revoke_resource_tree` matches class and id only and ignores `instance_generation`, so every class whose resource can be reincarnated puts its generation or epoch inside `id`.
+`revoke_resource_tree` matches class and id only and ignores `instance_generation`. Reincarnation is encoded in `id` (`SharedBuffer`), or in `instance_generation` (`Network`, `Graphics`). `Display` and `Input` name a stable physical slot in `id` only; the display backend epoch is not part of the capability resource (S10).
 
 | Right | Bit | Meaning |
 |---|---|---|
@@ -109,6 +109,8 @@ Authoritative source: `capability/src/{resource,rights,authorize,error}.rs`.
 | `INPUT_CONSUME` | `1 << 19` | drain the normalised raw input queue |
 
 **Root-only rights.** `Rights::root_only_for(Graphics)` is `GFX_SHELL | GFX_OVERLAY | GFX_SERVE`; every other class returns the empty set. `validate_delegation` refuses any request whose rights intersect that mask with `CapabilityError::NotDelegable` (`EACCES`), even when the parent holds them. A delegated `Graphics` capability therefore carries at most `GFX_CONNECT | DELEGATE | REVOKE`, and role authority cannot be laundered through delegation.
+
+**Display authority (S10).** `ResourceRef::display(i)` names physical output `i`. The backend epoch lives only in wire `OutputId` values (`PresentRequest`, `PresentStatus`, `DisplayModeInfo`); `PresentRequest::validate` returns `StaleEpoch` when the caller's epoch does not match the kernel's current output. Revoking display id `i` drops every capability for that output index, independent of epoch.
 
 **No `DELEGATE` for Display and Input.** `DELEGATE` is outside `valid_for(Display)` and `valid_for(Input)`, so a grant that includes it fails with `InvalidRights`, and no holder can ever delegate either class. They are structurally non-delegable.
 
@@ -463,8 +465,8 @@ Register convention (matches the network syscall, `SYSCALL_NR_NETWORK_CAPABILITY
 
 | Subop | Name | Arguments | Authority | Returns |
 |---|---|---|---|---|
-| 1 | `FIND_HANDLE` | `rdx` = `DISPLAY_ABI_VERSION` (1) | a live `Display` capability | handle |
-| 2 | `QUERY_MODE` | out ptr, len 32 (`DisplayModeInfo`) | `INSPECT` or `DISPLAY_PRESENT` | 0 |
+| 1 | `FIND_HANDLE` | `rdx` = `DISPLAY_ABI_VERSION` (1) | a live `Display` capability | handle for that output index (S10) |
+| 2 | `QUERY_MODE` | out ptr, len 32 (`DisplayModeInfo`) | `INSPECT` or `DISPLAY_PRESENT` | 0; `DisplayModeInfo.output` is the current `OutputId` |
 | 3 | `MAP_SCANOUT` | buffer index, out ptr, len 32 (`ScanoutMapping`) | `DISPLAY_PRESENT`; binds the presenter | 0 |
 | 4 | `PRESENT` | in ptr, len 136 (`PresentRequest`) | `DISPLAY_PRESENT` + bound presenter | `present_seq` ≥ 1 |
 | 5 | `PRESENT_STATUS` | out ptr, len 40 (`PresentStatus`) | `INSPECT` or `DISPLAY_PRESENT` | 0 |
@@ -718,7 +720,7 @@ Each acceptance item of #110, with the section of this document that records it 
 | 11 | Raw key events are distinct from future text-input events | [Versioning and extension points](#versioning-and-extension-points) | `unknown_opcodes` (text-input range is `UnknownOpcode` in 1.0); `negotiate_matrix`; `key_usage_boundaries` |
 | 12 | One concrete M10 reference mode/pixel format is frozen for deterministic acceptance | [Reference mode](#reference-mode) | const assertions in `graphics/src/mode.rs`; `buffer_layout_matrix`; `present_request_validate_matrix`; `all_events_round_trip` |
 | 13 | Backend-independent API supports UEFI framebuffer and VirtIO-GPU | [Display ABI](#display-abi-syscall-18); [Reference mode](#reference-mode) | `display_abi_round_trips`; `present_request_validate_matrix`; `present_status_decode_matrix`; `completion_copies_only_damaged_pixels`; `property_double_buffered_producer_matches_scanout_model`; `timeout_enters_reset_required_without_copying`. The GOP and VirtIO-GPU backends are planned (#111, #114) |
-| 14 | Display/raw-device authority is distinct from application surface authority | [Capability classes and rights](#capability-classes-and-rights) | `m10_valid_for_masks_exact`; `display_and_input_grant_reject_delegate_via_valid_for`; `graphics_delegation_refuses_root_only_rights`; `gfx_serve_alone_authorises_no_client_role` |
+| 14 | Display/raw-device authority is distinct from application surface authority | [Capability classes and rights](#capability-classes-and-rights) (S10) | `m10_valid_for_masks_exact`; `display_and_input_grant_reject_delegate_via_valid_for`; `display_resource_ref_names_output_index_only`; `display_resource_ref_revoke_is_per_output_index`; `graphics_delegation_refuses_root_only_rights`; `gfx_serve_alone_authorises_no_client_role` |
 | 15 | Surface roles cannot be forged to gain trusted-system-overlay authority | [Surface roles](#surface-roles) | `system_overlay_requires_overlay_right`; `overlay_right_does_not_imply_shell_roles`; `delegated_graphics_rights_never_authorise_shell_or_overlay_roles`; `shell_and_overlay_are_root_only_and_connect_is_delegable`; `validate_role_full_matrix_matches_spec_table`; `grant_ignores_every_non_role_bit`; `failed_role_assignment_leaves_the_surface_role_less` |
 | 16 | Protocol leaves room for later Linux/Windows surfaces without adopting Wayland/X11/Win32 semantics | [Versioning and extension points](#versioning-and-extension-points); [Non-goals and visual target](#non-goals-and-visual-target) | design property; `negotiate_matrix` and `unknown_opcodes` prove the growth mechanism only |
 | 17 | Protocol has a version/feature-negotiation story | [Connection](#connection); [Versioning and extension points](#versioning-and-extension-points) | `negotiate_matrix`; `hello_establishes_and_welcomes_with_negotiated_version_and_features`; `failed_negotiation_is_fatal_with_hello_tag_and_no_welcome`; `second_hello_is_fatal_unsupported_version`; `first_request_other_than_hello_is_fatal_unsupported_version` |
