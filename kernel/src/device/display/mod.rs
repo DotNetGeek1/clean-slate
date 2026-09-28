@@ -107,6 +107,32 @@ impl ActiveDisplay {
             .present(self.backend.scanout(), source, request, now_ns)
     }
 
+    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
+    pub(crate) fn add_damage(
+        &self,
+        presenter: &mut presenter::KernelPresenter,
+        rect: clean_slate_graphics::Rect,
+    ) -> Result<(), clean_slate_graphics::GeometryError> {
+        presenter.add_damage(&self.state, rect)
+    }
+
+    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
+    pub(crate) fn present_pending(
+        &mut self,
+        presenter: &mut presenter::KernelPresenter,
+        source: &dyn FrameSource,
+        buffer_index: u8,
+        now_ns: u64,
+    ) -> Result<Option<u64>, DisplayError> {
+        presenter.present_pending(
+            &mut self.state,
+            self.backend.scanout(),
+            source,
+            buffer_index,
+            now_ns,
+        )
+    }
+
     /// Leaves `ResetRequired` through a backend reset: a new epoch on success, `Poisoned` otherwise.
     pub(crate) fn recover(&mut self) {
         if self.state.status().state == PresentState::ResetRequired {

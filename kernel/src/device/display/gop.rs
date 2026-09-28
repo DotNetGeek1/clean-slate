@@ -123,10 +123,12 @@ mod tests {
     use super::GopBackend;
     use crate::boot::gop::GopPixelOrder;
     use crate::device::display::aperture::ApertureWriter;
+    use crate::device::display::presenter::KernelPresenter;
     use crate::device::display::source::{
         ContiguousFrame, FrameSource, FrameSourceId, FrameSourceKind, PhysExtent, SourceError,
     };
     use crate::device::display::{ActiveDisplay, Backend, BackendError, ScanoutBackend};
+    use clean_slate_graphics::Rect;
 
     const W: usize = 1280;
     const H: usize = 800;
@@ -459,5 +461,44 @@ mod tests {
         let req = request(&display, &damage);
         assert_eq!(display.present(&source, &req, 8), Ok(3));
         assert_scanout(&scanout, &frame, &damage, GopPixelOrder::Bgrx);
+    }
+
+    #[test]
+    fn active_display_drives_the_kernel_presenter_and_skips_idle_frames() {
+        let frame = patterned_frame();
+        let mut scanout = Scanout::new(5120);
+        let backend = scanout.backend(GopPixelOrder::Rgbx);
+        let mut display = ActiveDisplay::new(Backend::Gop(backend)).expect("display");
+        let source = frame_source(&frame);
+        display.bind(0, &source).expect("bind");
+        let mut presenter = KernelPresenter::new();
+
+        assert_eq!(
+            display.present_pending(&mut presenter, &source, 0, 1),
+            Ok(None)
+        );
+        let damage = Rect {
+            x: -5,
+            y: 790,
+            width: 70,
+            height: 20,
+        };
+        display.add_damage(&mut presenter, damage).expect("damage");
+        assert_eq!(
+            display.present_pending(&mut presenter, &source, 0, 2),
+            Ok(Some(1))
+        );
+        assert_eq!(
+            display.present_pending(&mut presenter, &source, 0, 3),
+            Ok(None)
+        );
+        let counters = presenter.counters();
+        assert_eq!((counters.submits, counters.skipped_empty), (1, 2));
+        assert_scanout(
+            &scanout,
+            &frame,
+            &[rect(0, 790, 65, 10)],
+            GopPixelOrder::Rgbx,
+        );
     }
 }
