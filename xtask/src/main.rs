@@ -873,6 +873,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM7NetCaps => run_m7_net_caps_acceptance(),
         ParsedCommand::TestM7 => run_m7_acceptance(),
         ParsedCommand::TestM6 => run_m6_acceptance(),
+        ParsedCommand::TestM10Contract => run_m10_contract_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -1805,6 +1806,38 @@ fn run_cargo_package_tests(package: &str, filter: &[&str]) -> Result<(), XtaskEr
         test.arg(arg);
     }
     run_host_test_command(&mut test)
+}
+
+fn run_cargo_package_build_uefi(package: &str) -> Result<(), XtaskError> {
+    let mut build = Command::new("cargo");
+    build
+        .current_dir(workspace_root())
+        .arg("build")
+        .arg("-p")
+        .arg(package)
+        .arg("--target")
+        .arg(KERNEL_TARGET);
+    run_host_test_command(&mut build)
+}
+
+/// M10 contract gate (#110 Stage F): host tests for graphics/capability ABI crates plus
+/// `no_std` UEFI builds of the shared contract crates. Does not print `[M10  ] PASS` (that
+/// belongs to the #119 milestone aggregate).
+fn run_m10_contract_acceptance() -> Result<(), XtaskError> {
+    let mut test = Command::new("cargo");
+    test.current_dir(workspace_root())
+        .arg("test")
+        .arg("-p")
+        .arg("clean-slate-graphics")
+        .arg("-p")
+        .arg("clean-slate-native-abi")
+        .arg("-p")
+        .arg("clean-slate-capability");
+    run_host_test_command(&mut test)?;
+    run_cargo_package_build_uefi("clean-slate-graphics")?;
+    run_cargo_package_build_uefi("clean-slate-native-abi")?;
+    println!("[M10.contract] PASS");
+    Ok(())
 }
 
 fn run_m5_crash_matrix() -> Result<(), XtaskError> {
@@ -3719,6 +3752,9 @@ fn print_help() {
     println!("  test-m7-dns         Build the M7.5 DNS resolver kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
+    println!(
+        "  test-m10-contract M10 graphics contract host tests plus UEFI builds of graphics and native-abi; prints [M10.contract] PASS (aliases: m10-contract)"
+    );
     println!("  test-m5-persistence Two-boot persistent-disk M5 acceptance using the production storage path");
     println!("  test-m5-crash-recovery Four-boot abrupt-stop crash-recovery M5 acceptance");
     println!("                 Pass --keep-disk to preserve target/m5/m5-data.img for debugging");
@@ -3829,6 +3865,7 @@ enum ParsedCommand {
     TestM7NetCaps,
     TestM7,
     TestM6,
+    TestM10Contract,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -3953,6 +3990,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-m7" || cmd == "m7" || cmd == "m7.9" => ParsedCommand::TestM7,
         Some(cmd) if cmd == "test-m6" || cmd == "m6" || cmd == "m6.9" => ParsedCommand::TestM6,
+        Some(cmd) if cmd == "test-m10-contract" || cmd == "m10-contract" => {
+            ParsedCommand::TestM10Contract
+        }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
         Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,
@@ -4245,6 +4285,14 @@ mod tests {
             ParsedCommand::TestM6
         );
         assert_eq!(parse_command(Some("m6.9".as_ref())), ParsedCommand::TestM6);
+        assert_eq!(
+            parse_command(Some("test-m10-contract".as_ref())),
+            ParsedCommand::TestM10Contract
+        );
+        assert_eq!(
+            parse_command(Some("m10-contract".as_ref())),
+            ParsedCommand::TestM10Contract
+        );
         assert_eq!(
             parse_command(Some("test-m7-net-caps".as_ref())),
             ParsedCommand::TestM7NetCaps

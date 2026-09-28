@@ -161,6 +161,7 @@ $AllTests = [ordered]@{
     "test-m9-userspace"         = @{ Aliases = @("m9-userspace", "m9.107"); Description = "M9 #107 BusyBox userspace convergence acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
     "verify-m8-fixture"         = @{ Aliases = @("verify-m8-fixture"); Description = "M8.6 fixture SHA-256 and ELF metadata verify (host)"; Role = "Constituent" }
     "verify-m9-fixture"         = @{ Aliases = @("verify-m9-fixture"); Description = "M9 #104 BusyBox + rootfs fixture verify (host)"; Role = "Constituent"; CoveredBy = "test-m9" }
+    "test-m10-contract"         = @{ Aliases = @("m10-contract"); Description = "M10 #110 graphics contract host tests and UEFI builds (constituent)"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {
