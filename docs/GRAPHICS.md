@@ -643,16 +643,6 @@ Kernel semantics, binding on #113:
 
 **Compositor seat rule (#113, #112).** On `Overflow`, or whenever the compositor decides to send `InputReset`, it calls `reset_seat(&mut ModifierTracker, &mut ButtonTracker)`. That clears held keys and buttons (lock bits survive) and returns `[InputReset, ModifiersChanged]`; the compositor sends **both**, in that order, to the focused client. `ModifiersChanged` is sent even if nothing changed. Outside a reset, `ModifierTracker::fold` returns `Some` only on a real change, and the compositor sends `ModifiersChanged` exactly then.
 
-### Input implementation (#113)
-
-Implementation rules of the #113 kernel lane. They are not part of the frozen #110 contract above and change with the lane.
-
-- **One consumer.** The first holder to `READ_BATCH` binds the seat; another `INPUT_CONSUME` holder gets `EACCES` until that binding is released. Release turns unread records into one pending `Overflow`. Release runs from teardown slot 3 (#200 W5); until that slot is wired, a consumer that exits keeps the seat.
-- **Driver.** The i8042 keyboard runs scancode set 2 with controller translation off. Boot runs only the controller-register bootstrap (bounded handshakes, W4 amendment), routes IRQ 1 and IRQ 12 to separate vectors, drains the controller once, and starts each device's init program; reset, BAT, set selection, typematic, mouse ID negotiation and scan enable are then advanced from the IRQ handlers, each awaited response guarded by a W3 timeout. A device is reported by `QUERY_DEVICES` only once its program finishes; before that it reads as `None` and queues nothing. Bytes the bootstrap flushes are counted, never decoded.
-- **Losses.** A keyboard overrun, or a byte that breaks the Pause sequence, is a loss and becomes an `Overflow`; the breaking byte is then decoded from idle.
-- **Device self-reset.** A keyboard `0xAA` in any decoder state, or a mouse `AA 00` at a packet start, is a BAT the driver did not ask for: the device's input is lost (an `Overflow` under the old generation), it reads as `None`, and its init program runs again. It reappears with the next `InputDeviceId` generation once the program finishes, or stays `None` if it fails.
-- **Readiness wakes.** Every readiness change (a device published or lost) also signals the consumer's input work, so it re-queries `QUERY_DEVICES`.
-
 ## Bounds
 
 Every table and queue is fixed-size. Protocol bounds live in `graphics::limits`; memory bounds for shared buffers live in `clean_slate_native_abi::shared_buffer` (#195 owns them and may adjust within `MAX_BUFFER_BYTES`). Exceeding an object bound is `LimitExceeded`.
@@ -865,3 +855,14 @@ Scope notes against the #110 issue text:
 - **Focus.** "create/show/hide/move/resize/focus/close" maps to `CreateWindow`, `Show`, `Hide`, `BeginMove`, `BeginResize`, `CloseRequested` / `DestroyWindow`. Focus is compositor policy, reported by `KeyboardFocus` and `Configure` `ACTIVATED`; there is no client focus request.
 - **Frame opportunities.** Withholding frame callbacks from occluded surfaces, and the no-busy-poll wake model, are recorded in [Frames](#frames) and [Event-driven rule and failure states](#event-driven-rule-and-failure-states).
 - **Reserved syscalls.** Each row of the syscall table above carries its own status. Syscall 16 falls through the dispatcher's default arm to `ENOSYS`; 17 and 20 are dispatched to the port and work-set handlers, 18 to the display handler, and 19 to the #113 input service. Kernel host tests cover the default arm with `dispatch_native_unknown_nr_returns_native_enosys_sentinel` (unrelated number) and `dispatch_native_reserved_m10_nrs_return_enosys`, which lists exactly what is still unimplemented on this tree: 16, syscall 18 subops 3, 4 and 6 (`ENOSYS`) with subop 0 `EINVAL`, and syscall 19 subop 4 (`BIND_WAKE`, `ENOSYS`). The PR that lands later re-composes it (W12).
+
+## Appendix: Input implementation (#113)
+
+Implementation rules of the #113 kernel lane. They are not part of the frozen #110 contract and change with the lane.
+
+- **One consumer.** The first holder to `READ_BATCH` binds the seat; another `INPUT_CONSUME` holder gets `EACCES` until that binding is released. Release turns unread records into one pending `Overflow`. Release runs from teardown slot 3 (#200 W5); until that slot is wired, a consumer that exits keeps the seat.
+- **Driver.** The i8042 keyboard runs scancode set 2 with controller translation off. Boot runs only the controller-register bootstrap (bounded handshakes, W4 amendment), routes IRQ 1 and IRQ 12 to separate vectors, disables any port that passed its test but got no route, drains the controller once, and starts each device's init program; reset, BAT, set selection, typematic, mouse ID negotiation and scan enable are then advanced from the IRQ handlers, each awaited response guarded by a W3 timeout. A device is reported by `QUERY_DEVICES` only once its program finishes; before that it reads as `None` and queues nothing. Bytes the bootstrap flushes are counted, never decoded.
+- **Controller failure (W11).** Handing a byte to a device waits on the controller's input buffer (20 ms, or 40 ms through `D4`). The first such timeout latches the controller failed: every started device fails (a ready one is lost first and reads as `None`), both ports are disabled if the controller still accepts commands, and no device byte is sent again, so a dead controller costs that wait once.
+- **Losses.** A keyboard overrun, or a byte that breaks the Pause sequence, is a loss and becomes an `Overflow`; the breaking byte is then decoded from idle.
+- **Device self-reset.** A keyboard `0xAA` in any decoder state, or a mouse `AA 00` at a packet start, is a BAT the driver did not ask for: the device's input is lost (an `Overflow` under the old generation), it reads as `None`, and its init program runs again. It reappears with the next `InputDeviceId` generation once the program finishes, or stays `None` if it fails.
+- **Readiness wakes.** Every readiness change (a device published or lost) also signals the consumer's input work, so it re-queries `QUERY_DEVICES`.
