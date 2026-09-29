@@ -1006,10 +1006,15 @@ mod tests {
             "destroy_old_exec_address_space",
             "destroy_process_address_space",
         ),
-        // Capability-table host test; no process exists.
+        // Capability-table host tests; no process exists.
         (
             "capability/object.rs",
             "pending_bootstrap_grant_rolls_back_when_bootstrap_table_is_full",
+            "revoke_for_holder",
+        ),
+        (
+            "capability/input.rs",
+            "root_grant_carries_exactly_the_requested_seat_zero_rights",
             "revoke_for_holder",
         ),
         // Shared-buffer host tests replay step 4 on a bare capability table.

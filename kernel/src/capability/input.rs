@@ -56,23 +56,44 @@ mod tests {
 
     #[test]
     fn root_grant_carries_exactly_the_requested_seat_zero_rights() {
-        use crate::capability::holder_has_resource_rights;
+        use clean_slate_capability::delegate;
+
+        use crate::capability::{
+            capability_space_mut, holder_has_resource_rights, revoke_for_holder,
+        };
 
         let holder = HolderId(88_113);
+        let other = HolderId(88_114);
         let seat = ResourceRef::input(SEAT);
-        grant_input_authority(holder, Rights::INPUT_CONSUME).expect("grant consume");
+        let handle = grant_input_authority(holder, Rights::INPUT_CONSUME).expect("grant consume");
         assert!(holder_has_resource_rights(
             holder,
             seat,
             Rights::INPUT_CONSUME
         ));
         assert!(!holder_has_resource_rights(holder, seat, Rights::INSPECT));
+        assert!(!holder_has_resource_rights(holder, seat, Rights::DELEGATE));
         assert_eq!(
             grant_input_authority(holder, Rights::INPUT_CONSUME.union(Rights::DELEGATE)),
             Err(CapabilityError::InvalidRights)
         );
+        assert!(delegate(
+            unsafe { capability_space_mut() },
+            holder,
+            handle,
+            other,
+            Rights::INPUT_CONSUME
+        )
+        .is_err());
         assert!(!holder_has_resource_rights(
-            HolderId(88_114),
+            other,
+            seat,
+            Rights::INPUT_CONSUME
+        ));
+
+        assert_eq!(revoke_for_holder(holder), 1);
+        assert!(!holder_has_resource_rights(
+            holder,
             seat,
             Rights::INPUT_CONSUME
         ));
