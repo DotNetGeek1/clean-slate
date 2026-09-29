@@ -243,7 +243,8 @@ impl i8042::InputSink for QueueSink {
         feature = "m9-low-va-self-test",
         feature = "m9-linux-exec-self-test",
         feature = "m9-rootfs-self-test",
-        feature = "m9-linux-fs-self-test"
+        feature = "m9-linux-fs-self-test",
+        feature = "m10-framebuffer-self-test"
     ),
     allow(dead_code)
 )]
