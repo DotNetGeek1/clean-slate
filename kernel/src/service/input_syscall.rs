@@ -75,6 +75,9 @@ fn query_devices(raw_handle: u64, out: u64, len: u64) -> u64 {
         return error.syscall_status();
     }
     let info = input::device_info().encode();
+    // SAFETY: `validate_user_writable_pointer_range` confirmed all `len` bytes at `out` are
+    // mapped user-writable in the caller's address space, which stays current for this syscall;
+    // `len` equals `info.len()`, and a user page cannot overlap the kernel-stack source.
     unsafe { ptr::copy_nonoverlapping(info.as_ptr(), out as *mut u8, info.len()) };
     0
 }
@@ -103,6 +106,9 @@ fn read_batch(raw_handle: u64, out: u64, max_count: u64) -> u64 {
         };
         let wire = record.encode();
         let dest = out + (copied * RAW_INPUT_RECORD_BYTES) as u64;
+        // SAFETY: the whole `count * RAW_INPUT_RECORD_BYTES` range at `out` was validated
+        // user-writable before the first pop, `copied < count` keeps `dest..dest + 32` inside
+        // it, and nothing between here and that check unmaps caller pages.
         unsafe { ptr::copy_nonoverlapping(wire.as_ptr(), dest as *mut u8, wire.len()) };
         copied += 1;
     }

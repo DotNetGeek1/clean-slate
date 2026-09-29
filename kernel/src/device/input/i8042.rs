@@ -627,6 +627,9 @@ static DRIVER: GlobalCell<DriverState> = GlobalCell::new(DriverState {
 });
 
 fn driver_mut() -> &'static mut DriverState {
+    // SAFETY: single CPU, and the driver is borrowed only in interrupt context (interrupts
+    // masked), under `without_interrupts`, or by `begin_init` before interrupts are first
+    // enabled, so no two borrows overlap.
     unsafe { &mut *DRIVER.get() }
 }
 

@@ -63,6 +63,7 @@ impl ConsumerSlot {
         }
     }
 
+    #[cfg(any(test, feature = "m10-input-self-test"))]
     fn release(&mut self, holder: HolderId) -> bool {
         if self.holder != Some(holder) {
             return false;
@@ -71,6 +72,7 @@ impl ConsumerSlot {
         true
     }
 
+    #[cfg(any(test, feature = "m10-input-self-test"))]
     fn bindings_for(&self, holder: HolderId) -> usize {
         usize::from(self.holder == Some(holder))
     }
@@ -160,6 +162,7 @@ impl InputState {
         }
     }
 
+    #[cfg(any(test, feature = "m10-input-self-test"))]
     fn release_consumer(&mut self, holder: HolderId) -> usize {
         if !self.consumer.release(holder) {
             return 0;
@@ -172,6 +175,8 @@ impl InputState {
 static INPUT: GlobalCell<InputState> = GlobalCell::new(InputState::new());
 
 fn input_mut() -> &'static mut InputState {
+    // SAFETY: single CPU, and every caller runs in IRQ context or under `without_interrupts`
+    // and drops the reference before interrupts are re-enabled, so no two borrows overlap.
     unsafe { &mut *INPUT.get() }
 }
 
@@ -270,12 +275,12 @@ pub(crate) fn read_one() -> Option<RawInputRecord> {
 /// Teardown slot 3 of the shared hook block (after the port and presenter, before
 /// `revoke_for_holder`). Unread records become one pending `Overflow`, so the next consumer
 /// resets its seat instead of seeing a dead holder's stale presses.
-#[allow(dead_code)] // wired into process teardown by the W5 hook block (#200)
+#[cfg(any(test, feature = "m10-input-self-test"))]
 pub(crate) fn release_consumer_for_holder(holder: HolderId) -> usize {
     without_interrupts(|| input_mut().release_consumer(holder))
 }
 
-#[allow(dead_code)] // `ResourceSnapshot` accounting lands with the W5 hook block (#200)
+#[cfg(any(test, feature = "m10-input-self-test"))]
 pub(crate) fn consumer_bindings_for(holder: HolderId) -> usize {
     without_interrupts(|| input_mut().consumer.bindings_for(holder))
 }
@@ -424,6 +429,16 @@ mod tests {
         assert_eq!(overflow.kind, RawInputKind::Overflow { dropped: 2 });
         assert_eq!(overflow.seq, 3);
         assert_eq!(state.queue.pop(20), None);
+    }
+
+    #[test]
+    fn teardown_entry_points_release_the_global_binding_exactly_once() {
+        let holder = HolderId(0x113);
+        assert_eq!(bind_consumer(holder), Ok(()));
+        assert_eq!(consumer_bindings_for(holder), 1);
+        assert_eq!(release_consumer_for_holder(holder), 1);
+        assert_eq!(release_consumer_for_holder(holder), 0);
+        assert_eq!(consumer_bindings_for(holder), 0);
     }
 
     #[test]
