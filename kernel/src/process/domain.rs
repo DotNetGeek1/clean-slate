@@ -378,7 +378,8 @@ fn release_work_set(ctx: &mut TeardownContext<'_>) -> usize {
     work_set::on_holder_exit(HolderId(ctx.process_id))
 }
 
-fn release_shared_mappings(_ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {
+fn release_shared_mappings(ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {
+    crate::mm::shared_buffer::teardown_process(ctx.process_id, ctx.allocator);
     Ok(())
 }
 
@@ -978,6 +979,22 @@ mod tests {
         (
             "capability/object.rs",
             "pending_bootstrap_grant_rolls_back_when_bootstrap_table_is_full",
+            "revoke_for_holder",
+        ),
+        // Shared-buffer host tests replay step 4 on a bare capability table.
+        (
+            "mm/shared_buffer/tests.rs",
+            "teardown_both",
+            "revoke_for_holder",
+        ),
+        (
+            "mm/shared_buffer/tests.rs",
+            "shared_buffer_owner_exit_orphans_reader_to_zero_page_and_reclaims_once",
+            "revoke_for_holder",
+        ),
+        (
+            "mm/shared_buffer/tests.rs",
+            "shared_buffer_reader_exit_leaves_owner_mapping_live",
             "revoke_for_holder",
         ),
     ];

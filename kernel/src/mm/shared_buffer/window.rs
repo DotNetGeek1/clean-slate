@@ -294,7 +294,6 @@ impl<const N: usize> WindowPool<N> {
 
     /// Removes every row of `pid` (teardown), calling `on_removed` for each, and
     /// releases the window. Returns the number of rows removed.
-    #[cfg(test)]
     pub(crate) fn remove_process(
         &mut self,
         pid: u64,

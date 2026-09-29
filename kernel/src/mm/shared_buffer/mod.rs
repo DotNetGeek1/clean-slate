@@ -202,7 +202,6 @@ fn reconcile_slot(slot: usize) {
 /// the private address space is destroyed (step 6). Removes every row of `pid` in any
 /// state, drops the attachments it held and frees everything queued. Revocation in step
 /// 4 already retired the buffers `pid` owned.
-#[cfg(test)]
 pub(crate) fn teardown_process(pid: u64, frames: &mut impl FrameSource) -> usize {
     let state = state();
     let root = state.windows.get(pid).map(|window| window.root_frame);
