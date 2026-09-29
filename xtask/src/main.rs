@@ -313,7 +313,7 @@ const M10_INPUT_SMOKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 /// injection (#197), so every record still crosses IRQ 1/12, the decoders and the raw queue.
 const M10_INPUT_SMOKE_ACCEPTANCE_MARKERS: [&str; 18] = [
     "[TIME] timer initialized",
-    "[M10.input] init begun devices=none",
+    "[M10.input] init begun devices=none timeouts_armed=2",
     "[M10.input] init settled kbd=ready mouse=ready ",
     "[M10.input] rec seq=1 kbd overflow dropped=1",
     "[M10.input] rec seq=2 mouse overflow dropped=1",

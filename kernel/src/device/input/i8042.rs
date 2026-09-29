@@ -25,6 +25,8 @@ use crate::arch::x86_64::port::{port_in, port_out};
 use crate::interrupt::irq::{
     allocate_device_vector, release_device_vector, route_isa_irq, DeviceInterruptHandler,
 };
+use crate::sched::timeout::{self, TimeoutHandle};
+use crate::sched::wait::Deadline;
 use crate::sync::global_cell::GlobalCell;
 
 const DATA_PORT: u16 = 0x60;
@@ -576,7 +578,6 @@ impl Driver {
 
     /// Expiry of a response timeout. Runs in timer-interrupt context and never touches the
     /// controller: the device is only marked failed, and stays unpublished.
-    #[cfg_attr(not(test), allow(dead_code))] // called by the W3 timeout handler (#196)
     pub(super) fn timeout(&mut self, device_index: u8, epoch: u32) -> bool {
         let Some(port) = Port::from_device_index(device_index) else {
             return false;
@@ -723,31 +724,56 @@ impl ControllerIo for HardwarePorts {
     }
 }
 
-/// Response timeouts are W3 registry entries (#196). Until that registry exists nothing is
-/// armed, so a device that never answers stays `Pending` and is reported as `None`.
-struct W3ResponseTimers;
+/// Each device's in-flight response timeout, as a W3 registry entry.
+struct W3ResponseTimers {
+    handles: [Option<TimeoutHandle>; 2],
+}
 
 impl ResponseTimers for W3ResponseTimers {
-    fn arm(
-        &mut self,
-        _device_index: u8,
-        _wait_ns: u64,
-        _epoch: u32,
-    ) -> Result<(), TimeoutsExhausted> {
+    fn arm(&mut self, device_index: u8, wait_ns: u64, epoch: u32) -> Result<(), TimeoutsExhausted> {
+        self.cancel(device_index);
+        let slot = self
+            .handles
+            .get_mut(usize::from(device_index))
+            .ok_or(TimeoutsExhausted)?;
+        let deadline = Deadline::MonotonicNs(crate::time::monotonic_ns().saturating_add(wait_ns));
+        let context = u64::from(device_index) << 32 | u64::from(epoch);
+        *slot =
+            Some(timeout::arm(deadline, response_timeout, context).map_err(|_| TimeoutsExhausted)?);
         Ok(())
     }
 
-    fn cancel(&mut self, _device_index: u8) {}
+    fn cancel(&mut self, device_index: u8) {
+        if let Some(handle) = self
+            .handles
+            .get_mut(usize::from(device_index))
+            .and_then(Option::take)
+        {
+            let _ = timeout::cancel(handle);
+        }
+    }
+}
+
+/// W3 expiry handler, from the timer deadline path. A handle the drain already cancelled never
+/// gets here; one that raced the response carries a stale epoch and changes nothing.
+fn response_timeout(context: u64) {
+    let device_index = (context >> 32) as u8;
+    let epoch = context as u32;
+    without_interrupts(|| {
+        driver_mut().driver.timeout(device_index, epoch);
+    });
 }
 
 struct DriverState {
     driver: Driver,
+    timers: W3ResponseTimers,
     keyboard_vector: Option<u8>,
     mouse_vector: Option<u8>,
 }
 
 static DRIVER: GlobalCell<DriverState> = GlobalCell::new(DriverState {
     driver: Driver::new(),
+    timers: W3ResponseTimers { handles: [None; 2] },
     keyboard_vector: None,
     mouse_vector: None,
 });
@@ -769,21 +795,18 @@ fn route_device(irq: u8, handler: DeviceInterruptHandler) -> Option<u8> {
 }
 
 fn keyboard_interrupt() {
-    driver_mut().driver.interrupt(
+    let DriverState { driver, timers, .. } = driver_mut();
+    driver.interrupt(
         Port::Keyboard,
         &mut HardwarePorts,
         &mut super::QueueSink,
-        &mut W3ResponseTimers,
+        timers,
     );
 }
 
 fn mouse_interrupt() {
-    driver_mut().driver.interrupt(
-        Port::Aux,
-        &mut HardwarePorts,
-        &mut super::QueueSink,
-        &mut W3ResponseTimers,
-    );
+    let DriverState { driver, timers, .. } = driver_mut();
+    driver.interrupt(Port::Aux, &mut HardwarePorts, &mut super::QueueSink, timers);
 }
 
 const KEYBOARD_IRQ: u8 = 1;
@@ -817,7 +840,7 @@ pub(crate) fn begin_init() -> Result<Ports, ControllerError> {
             &mut HardwarePorts,
             routed,
             &mut super::QueueSink,
-            &mut W3ResponseTimers,
+            &mut state.timers,
         );
         Ok(())
     });

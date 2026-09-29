@@ -192,8 +192,7 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         #[cfg(any(
             feature = "m7-dns-self-test",
             feature = "m7-net-device-self-test",
-            feature = "m7-tls-self-test",
-            feature = "m10-input-self-test"
+            feature = "m7-tls-self-test"
         ))]
         if crate::selftest::boot_wait::is_halted() {
             increment_kernel_ticks();
@@ -201,8 +200,11 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
             return stack_pointer;
         }
 
-        // The probe's device timeouts (W3) expire here; there are no waiters to wake.
-        #[cfg(feature = "m10-virtio-modern-self-test")]
+        // Boot-context device timeouts (W3) expire here; there are no waiters to wake.
+        #[cfg(any(
+            feature = "m10-virtio-modern-self-test",
+            feature = "m10-input-self-test"
+        ))]
         if crate::selftest::boot_wait::is_halted() {
             increment_kernel_ticks();
             crate::sched::wait::expire_deadlines();

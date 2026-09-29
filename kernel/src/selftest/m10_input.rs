@@ -33,6 +33,7 @@ use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::user_mapping::validate_user_pointer_range;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::task_stacks_mut;
+use crate::sched::timeout;
 use crate::sched::wait::{block_current_thread, wake_one, WaitKey, WaitOutcome};
 use crate::selftest::boot_wait;
 use crate::selftest::userspace_process::{
@@ -255,7 +256,14 @@ fn begin_and_await_devices() -> Result<MouseProtocol, &'static str> {
     if (keyboard, mouse) != (InitStatus::Pending, InitStatus::Pending) {
         return Err("init programs did not wait for the IRQ path");
     }
-    serial_write_line("[M10.input] init begun devices=none");
+    let armed = timeout::armed_count();
+    if armed != 2 {
+        return Err("each initialising device must hold one response timeout");
+    }
+    kernel_log_fmt(format_args!(
+        "[M10.input] init begun devices=none timeouts_armed={}\n",
+        armed
+    ));
 
     let start_ms = boot_wait::now_ms();
     boot_wait::wait_until(DEVICE_INIT_WAIT_MS, "input devices did not settle", |_| {
@@ -264,15 +272,20 @@ fn begin_and_await_devices() -> Result<MouseProtocol, &'static str> {
         Ok((settled(keyboard) && settled(mouse)).then_some(()))
     })?;
     let (keyboard, mouse, protocol) = input::init_status();
+    let armed = timeout::armed_count();
     kernel_log_fmt(format_args!(
-        "[M10.input] init settled kbd={} mouse={} ms={} readiness_changes={}\n",
+        "[M10.input] init settled kbd={} mouse={} ms={} readiness_changes={} timeouts_armed={}\n",
         keyboard.name(),
         mouse.name(),
         boot_wait::now_ms().saturating_sub(start_ms),
-        input::queue_stats().readiness_changes
+        input::queue_stats().readiness_changes,
+        armed
     ));
     if (keyboard, mouse) != (InitStatus::Ready, InitStatus::Ready) {
         return Err("input device init failed");
+    }
+    if armed != 0 {
+        return Err("a response timeout outlived its device's init program");
     }
     Ok(protocol)
 }
@@ -533,6 +546,9 @@ fn hold_idle() -> Result<(), &'static str> {
     ));
     if after.irqs != before.irqs || accesses != 0 {
         return Err("driver touched the controller while idle");
+    }
+    if timeout::armed_count() != 0 {
+        return Err("a response timeout was armed while idle");
     }
     if ticks == 0 {
         return Err("no timer interrupts arrived during the idle hold");
