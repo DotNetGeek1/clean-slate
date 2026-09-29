@@ -39,6 +39,12 @@ pub(crate) const IA32_STAR_MSR: u32 = 0xc000_0081;
 pub(crate) const IA32_LSTAR_MSR: u32 = 0xc000_0082;
 pub(crate) const IA32_FMASK_MSR: u32 = 0xc000_0084;
 pub(crate) const IA32_EFER_SCE: u64 = 1;
+/// Without it bit 63 of every paging entry is reserved, so any `NO_EXECUTE`
+/// entry takes a reserved-bit #PF instead of enforcing no-execute.
+pub(crate) const IA32_EFER_NXE: u64 = 1 << 11;
+pub(crate) const CPUID_EXTENDED_MAX_LEAF: u32 = 0x8000_0000;
+pub(crate) const CPUID_EXTENDED_FEATURES_LEAF: u32 = 0x8000_0001;
+const CPUID_EXTENDED_FEATURES_EDX_NX: u32 = 1 << 20;
 pub(crate) const RFLAGS_TRAP_FLAG_BIT: u64 = 8;
 pub(crate) const RFLAGS_INTERRUPT_ENABLE_BIT: u64 = 9;
 pub(crate) const RFLAGS_DIRECTION_FLAG_BIT: u64 = 10;
@@ -63,4 +69,37 @@ pub(crate) const RFLAGS_STATUS_FLAGS_MASK: u64 = (1u64 << RFLAGS_CARRY_FLAG_BIT)
 
 pub(crate) const fn bit(value: u64, index: u32) -> u8 {
     ((value >> index) & 1) as u8
+}
+
+/// `ext_edx` is CPUID `0x8000_0001` EDX, meaningful only when
+/// `max_extended_leaf` reaches that leaf.
+pub(crate) const fn nx_supported_from_cpuid(max_extended_leaf: u32, ext_edx: u32) -> bool {
+    max_extended_leaf >= CPUID_EXTENDED_FEATURES_LEAF
+        && ext_edx & CPUID_EXTENDED_FEATURES_EDX_NX != 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nx_supported_from_cpuid_requires_leaf_and_bit() {
+        assert!(!nx_supported_from_cpuid(CPUID_EXTENDED_MAX_LEAF, u32::MAX));
+        assert!(!nx_supported_from_cpuid(CPUID_EXTENDED_FEATURES_LEAF, 0));
+        assert!(!nx_supported_from_cpuid(
+            CPUID_EXTENDED_FEATURES_LEAF,
+            !CPUID_EXTENDED_FEATURES_EDX_NX
+        ));
+        assert!(nx_supported_from_cpuid(
+            CPUID_EXTENDED_FEATURES_LEAF,
+            1 << 20
+        ));
+        assert!(nx_supported_from_cpuid(0x8000_0008, 1 << 20));
+    }
+
+    #[test]
+    fn nx_efer_bit_is_bit_11() {
+        assert_eq!(IA32_EFER_NXE, 0x800);
+        assert_eq!(IA32_EFER_NXE & IA32_EFER_SCE, 0);
+    }
 }

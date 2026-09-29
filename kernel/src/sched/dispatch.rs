@@ -206,7 +206,8 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
     feature = "m9-fd-core-self-test",
     feature = "m9-linux-trace-self-test",
     feature = "m9-syscall-fail-closed-self-test",
-    feature = "m9-block-wake-self-test"
+    feature = "m9-block-wake-self-test",
+    feature = "m10-nxe-self-test"
 ))]
 pub(crate) fn start_current_scheduler_thread() -> Result<u64, &'static str> {
     let stack_pointer = without_interrupts(|| with_scheduler(|scheduler| scheduler.start()))?;

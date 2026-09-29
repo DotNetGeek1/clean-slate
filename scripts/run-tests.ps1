@@ -162,6 +162,7 @@ $AllTests = [ordered]@{
     "verify-m8-fixture"         = @{ Aliases = @("verify-m8-fixture"); Description = "M8.6 fixture SHA-256 and ELF metadata verify (host)"; Role = "Constituent" }
     "verify-m9-fixture"         = @{ Aliases = @("verify-m9-fixture"); Description = "M9 #104 BusyBox + rootfs fixture verify (host)"; Role = "Constituent"; CoveredBy = "test-m9" }
     "test-m10-contract"         = @{ Aliases = @("m10-contract"); Description = "M10 #110 graphics contract host tests and UEFI builds (constituent)"; Role = "Constituent" }
+    "test-m10-nxe"              = @{ Aliases = @("m10-nxe"); Description = "M10 #195 EFER.NXE enforced: CPL3 fetch from an RW+NX page faults 0x15 (constituent)"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {

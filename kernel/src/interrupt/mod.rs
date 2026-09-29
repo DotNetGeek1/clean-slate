@@ -363,6 +363,11 @@ fn handle_exception(context: &InterruptContext) -> u64 {
             }
         }
 
+        #[cfg(feature = "m10-nxe-self-test")]
+        if selector_rpl(context.cs) == 3 {
+            crate::selftest::m10_nxe::observe_page_fault(context);
+        }
+
         if selector_rpl(context.cs) == 3 {
             return handle_faulted_userspace_exception(context);
         }
@@ -646,11 +651,16 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
         {
             crate::selftest::m6_object::maybe_continue_after_fixture_fault(pid);
         }
+        #[cfg(feature = "m10-nxe-self-test")]
+        {
+            crate::selftest::m10_nxe::finish_after_probe_fault(pid);
+        }
         #[cfg(not(any(
             feature = "m6-fixture-smoke-self-test",
             feature = "m6-revocation-self-test",
             feature = "m6-object-self-test",
-            feature = "m9-userspace-self-test"
+            feature = "m9-userspace-self-test",
+            feature = "m10-nxe-self-test"
         )))]
         {
             fatal_kernel_error("no runnable thread remained after userspace fault");

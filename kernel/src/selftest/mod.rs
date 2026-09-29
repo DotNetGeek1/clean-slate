@@ -22,6 +22,8 @@ pub(crate) mod m2_double_fault;
     feature = "m7-tls-self-test"
 ))]
 pub(crate) mod boot_wait;
+#[cfg(feature = "m10-nxe-self-test")]
+pub(crate) mod m10_nxe;
 pub(crate) mod m2_timer;
 #[cfg(feature = "m3-address-space-self-test")]
 pub(crate) mod m3_address_space;
