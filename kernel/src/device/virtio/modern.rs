@@ -13,7 +13,7 @@
 //! The legacy block/net drivers never reach this module: it matches only
 //! modern-only device IDs (`0x1040 + id`, revision >= 1).
 
-#![allow(dead_code)]
+#![cfg_attr(not(feature = "m10-virtio-modern-self-test"), allow(dead_code))]
 
 pub(crate) mod caps;
 #[cfg(test)]
@@ -51,7 +51,7 @@ use crate::interrupt::irq::{
 };
 use crate::mm::mmio::with_kernel_identity_mmio;
 use crate::sched::timeout::{self, CancelOutcome, TimeoutHandle};
-use crate::sched::wait::{Deadline, WaitKey};
+use crate::sched::wait::Deadline;
 use crate::sync::global_cell::GlobalCell;
 
 /// Probe device plus the #114 GPU.
@@ -63,7 +63,6 @@ const MAX_RESET_READS: usize = 4;
 pub(crate) const MAX_CONFIG_GENERATION_ATTEMPTS: u8 = 4;
 /// Every queue shares MSI-X table entry 0; config changes get no vector.
 const MSIX_QUEUE_ENTRY: u16 = 0;
-const WAIT_KEY_LANE: u64 = 0x57 << 56;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct QueueRequest {
@@ -506,10 +505,6 @@ impl<A: DeviceAccess> ModernTransport<A> {
         &self.layout
     }
 
-    pub(crate) fn irq_mode(&self) -> IrqMode {
-        self.irq_mode
-    }
-
     pub(crate) fn queue_size(&self, queue: u16) -> Option<u16> {
         self.queue_position(queue)
             .ok()
@@ -518,11 +513,6 @@ impl<A: DeviceAccess> ModernTransport<A> {
 
     pub(crate) fn interrupt_stats(&self) -> InterruptStats {
         without_interrupts(|| slots_mut()[self.slot].stats)
-    }
-
-    /// Key a syscall-context consumer blocks on; its sink wakes it.
-    pub(crate) fn wait_key(&self) -> WaitKey {
-        WaitKey(WAIT_KEY_LANE | self.slot as u64)
     }
 
     /// Read device config through the generation loop: `read` runs until the
@@ -548,6 +538,7 @@ impl<A: DeviceAccess> ModernTransport<A> {
         Err(TransportError::ConfigUnstable)
     }
 
+    #[cfg(test)]
     pub(crate) fn write_device_config_u32(
         &mut self,
         offset: u32,
@@ -960,10 +951,12 @@ impl<A: DeviceAccess> DeviceConfigReader<'_, A> {
             .map_err(access_error)
     }
 
+    #[cfg(test)]
     pub(crate) fn read_u8(&mut self, offset: u32) -> Result<u8, TransportError> {
         Ok(self.read(offset, Width::U8)? as u8)
     }
 
+    #[cfg(test)]
     pub(crate) fn read_u16(&mut self, offset: u32) -> Result<u16, TransportError> {
         Ok(self.read(offset, Width::U16)? as u16)
     }

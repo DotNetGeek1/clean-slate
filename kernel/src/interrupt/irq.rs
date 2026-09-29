@@ -207,7 +207,6 @@ pub(crate) fn unhandled_device_interrupts() -> u64 {
     without_interrupts(|| irq_table_mut().unhandled)
 }
 
-#[allow(dead_code)] // first consumer: the #196 modern transport
 pub(crate) fn gsi_is_routed(gsi: u32) -> bool {
     without_interrupts(|| {
         irq_table_mut()

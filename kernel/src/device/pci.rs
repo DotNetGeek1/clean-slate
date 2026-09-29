@@ -170,17 +170,12 @@ impl PciConfigRead for PciFunction {
 }
 
 impl PciConfigWrite for PciFunction {
-    fn write_u16(&self, offset: u8, value: u16) {
-        PciFunction::write_u16(*self, offset, value);
-    }
-
     fn write_u32(&self, offset: u8, value: u32) {
         port_out_u32(PCI_CONFIG_ADDRESS_PORT, self.config_address(offset));
         port_out_u32(PCI_CONFIG_DATA_PORT, value);
     }
 }
 
-#[allow(dead_code)] // first consumer: the #196 modern transport
 pub(crate) fn revision_id<C: PciConfigRead>(cfg: &C) -> u8 {
     cfg.read_u8(PCI_REVISION_ID_OFFSET)
 }
@@ -196,8 +191,6 @@ pub(crate) trait PciConfigRead {
 /// Config-space writes. `write_u32` replaces the whole dword, so writing
 /// COMMAND through it with a zero STATUS half clears no RW1C status bits.
 pub(crate) trait PciConfigWrite: PciConfigRead {
-    #[allow(dead_code)] // first consumer: the #196 modern transport
-    fn write_u16(&self, offset: u8, value: u16);
     fn write_u32(&self, offset: u8, value: u32);
 }
 
@@ -422,11 +415,6 @@ impl PciConfigRead for FakeConfigSpace {
 
 #[cfg(test)]
 impl PciConfigWrite for FakeConfigSpace {
-    fn write_u16(&self, offset: u8, value: u16) {
-        self.writes.borrow_mut().push((offset, u32::from(value)));
-        self.set_u16(offset, value);
-    }
-
     fn write_u32(&self, offset: u8, value: u32) {
         self.writes.borrow_mut().push((offset, value));
         if (0x10..=0x24).contains(&offset) && offset & 0x3 == 0 {
@@ -584,7 +572,6 @@ fn msix_table_checked<C: PciConfigRead>(
 }
 
 impl MsixCapability {
-    #[allow(dead_code)] // first consumer: the #196 modern transport
     pub(crate) fn probe_checked(
         function: PciFunction,
         bar: impl Fn(u8) -> Option<MemoryBar>,

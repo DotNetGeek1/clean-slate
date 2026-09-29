@@ -189,10 +189,7 @@ pub(crate) fn expire_due(now_ns: u64) -> usize {
     count
 }
 
-#[cfg_attr(
-    not(any(test, feature = "m10-virtio-modern-self-test")),
-    allow(dead_code)
-)]
+#[cfg(any(test, feature = "m10-timeout-introspection"))]
 pub(crate) fn armed_count() -> usize {
     without_interrupts(|| timeout_table_mut().armed)
 }
