@@ -10,7 +10,15 @@ Native mechanism for sleeping and waking scheduler threads. Linux `wait4`, pipes
 
 ## Lost-wake discipline
 
-Wait registration and the “already woken?” check run with interrupts disabled. `wake_one` records a **pending wake** when no waiter is registered yet; the next `block_current_thread` on that `WaitKey` consumes it and returns `Woken` without sleeping.
+Wait registration and the “already woken?” check run with interrupts disabled. `wake_one` / `wake_all` record a **pending wake** when no waiter is registered yet; the next `block_current_thread` on that `WaitKey` consumes it and returns `Woken` without sleeping. The pending-wake table has `MAX_WAITERS` entries and silently drops records once full, and `RestartSyscall` / `RetrySyscall` blocks consume and ignore them.
+
+### Atomic check-then-block (M10 W1)
+
+`block_current_thread_unless(frame, key, deadline, resume, check)` evaluates the readiness predicate `check` inside the same interrupts-disabled section that registers the waiter. On the single CPU a producer (an IRQ or another thread's syscall) therefore runs either wholly before `check`, which then sees its state change and returns `BlockCheck::Ready(rax)` without registering anything, or wholly after registration, and finds the waiter. An interrupt raised inside `check` is delivered only after the thread is registered. It neither consumes nor records pending wakes.
+
+Producers for such waiters call `wake_all_registered(key)`, which wakes registered waiters and **never records a pending wake**. New code must not call `wake_all` / `wake_one` for these keys: a wake of a key with no waiter would spend a slot of the bounded pending-wake table, and a full table silently drops the network service's `NET_SUBOP_WAIT_WORK` wakes.
+
+The network service still checks readiness in one critical section and blocks in another, relying on the pending-wake table to close the gap. It is unchanged by M10; the service port and work sets (#200) use the atomic form.
 
 ## Syscall continuation (design a)
 
@@ -39,6 +47,12 @@ Each thread’s `kernel_stack_top` is published to `SYSCALL_KERNEL_STACK_TOP` on
 
 When no application thread is `Ready`/`Running` but blocked threads or deadlines remain, the scheduler dispatches a dedicated **idle kernel thread** at `IDLE_THREAD_INDEX` (`TASK_COUNT`), using its own `TaskStack`. That thread’s loop is `hlt` with interrupts enabled, then `expire_deadlines` and a runnable pick. While the idle thread is current, timer interrupts update only the idle thread’s `saved_stack_pointer` (never a `Blocked` thread’s), scan deadlines, and either return into the idle loop or hand off to a newly runnable thread. A guard fatal fires if `rsp` leaves the top 1 KiB of the idle stack (detects IRQ nesting / stack growth bugs).
 
-## Timer preemption
+## Interrupt state during syscalls
 
-Timer preemption is **not** suppressed for arbitrary syscall handlers. Lost-wake protection uses interrupts-disabled registration in `block_current_thread` (including arming `blocked_syscall_frame` under the same critical section). Linux relaunch and other long syscall paths rely on ordinary timer preemption.
+Every syscall, native and Linux, runs with interrupts disabled from entry to return. `IA32_FMASK` clears `IF` on `syscall` entry (`SYSCALL_ENTRY_RFLAGS_MASK` in `kernel/src/syscall/mod.rs`), the entry trampoline never executes `sti`, and `without_interrupts` only restores `IF` when it was set on entry. Interrupts are taken again only after `sysretq` restores the user `RFLAGS`, or once a block or yield has switched to another thread whose restored frame re-enables them. A timer interrupt therefore never preempts a syscall handler: long syscall paths (Linux relaunch, exec) run to completion or block. The kernel is single-CPU, so every syscall handler is atomic with respect to IRQ handlers and to every other thread.
+
+Lost-wake protection relies on this: registration in `block_current_thread` (including arming `blocked_syscall_frame`) and the whole of `block_current_thread_unless` happen in one interrupts-disabled section.
+
+## Serial logging
+
+`[M9.E] blocked tid=… key=…` is logged on every block only in `m9-block-wake-self-test` builds, whose ordered markers need it. Other builds do not log per block, so a thread that blocks every frame cannot flood the serial console.

@@ -1,0 +1,20 @@
+[package]
+name = "clean-slate-port"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Bounded, class-agnostic service port engine shared by the kernel and host fakes"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+fake = []
+
+[dependencies]
+clean-slate-capability = { path = "../capability" }
+clean-slate-native-abi = { path = "../native-abi" }
+
+[lints]
+workspace = true

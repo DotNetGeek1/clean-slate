@@ -21,6 +21,12 @@ const APIC_REGISTER_ID: usize = 0x20;
 const APIC_REGISTER_TPR: usize = 0x80;
 const APIC_REGISTER_EOI: usize = 0xb0;
 const APIC_REGISTER_SVR: usize = 0xf0;
+#[cfg(feature = "m10-port-self-test")]
+const APIC_REGISTER_ICR_LOW: usize = 0x300;
+#[cfg(feature = "m10-port-self-test")]
+const APIC_ICR_LEVEL_ASSERT: u32 = 1 << 14;
+#[cfg(feature = "m10-port-self-test")]
+const APIC_ICR_SHORTHAND_SELF: u32 = 1 << 18;
 const APIC_REGISTER_LVT_TIMER: usize = 0x320;
 const APIC_REGISTER_INITIAL_COUNT: usize = 0x380;
 #[cfg_attr(
@@ -97,6 +103,16 @@ pub(crate) fn acknowledge_timer_interrupt() {
 /// sources the EOI broadcast also clears the redirection entry's remote IRR.
 pub(crate) fn acknowledge_interrupt() {
     local_apic_write(APIC_REGISTER_EOI, 0);
+}
+
+/// Fixed, edge-triggered IPI to this CPU. With interrupts masked it stays pending in the IRR
+/// until the next `sti` or `iretq` to an interrupts-enabled context.
+#[cfg(feature = "m10-port-self-test")]
+pub(crate) fn send_self_ipi(vector: u8) {
+    local_apic_write(
+        APIC_REGISTER_ICR_LOW,
+        APIC_ICR_SHORTHAND_SELF | APIC_ICR_LEVEL_ASSERT | u32::from(vector),
+    );
 }
 
 /// This CPU's local APIC ID: the physical destination for MSI and I/O APIC routes.

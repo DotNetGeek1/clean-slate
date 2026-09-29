@@ -9,6 +9,7 @@ on:
       - "kernel/**"
       - "native-abi/**"
       - "network/**"
+      - "port/**"
       - "store/**"
       - "fixtures/**"
       - "xtask/**"
@@ -28,6 +29,7 @@ on:
       - "kernel/**"
       - "native-abi/**"
       - "network/**"
+      - "port/**"
       - "store/**"
       - "fixtures/**"
       - "xtask/**"
@@ -81,6 +83,11 @@ jobs:
 
       - name: Clippy (capability)
         run: cargo clippy -p clean-slate-capability --all-targets -- -D warnings
+
+      - name: Clippy (port)
+        run: |
+          cargo clippy -p clean-slate-port --all-targets -- -D warnings
+          cargo clippy -p clean-slate-port --all-targets --features fake -- -D warnings
 
       - name: Clippy (linux-abi)
         run: cargo clippy -p clean-slate-linux-abi --all-targets -- -D warnings
@@ -138,6 +145,8 @@ jobs:
           # built (with RUSTFLAGS=-D warnings) by the acceptance job via xtask.
           # m9-userspace-self-test embeds storage + network userspace ELFs and the
           # M9 rootfs image; built (with RUSTFLAGS=-D warnings) via xtask test-m9-userspace.
+          # m10-port-self-test embeds the M6 fixture userspace ELF; built (with
+          # RUSTFLAGS=-D warnings) by the acceptance job via xtask test-m10-port.
 
       - name: Clippy (kernel host tests)
         run: |
@@ -167,6 +176,8 @@ jobs:
           cargo test -p clean-slate-network --features alloc,tls
           cargo test -p clean-slate-store
           cargo test -p clean-slate-capability
+          cargo test -p clean-slate-port
+          cargo test -p clean-slate-port --features fake
           cargo test -p clean-slate-linux-abi
           cargo test -p clean-slate-elf
           # verify-m9-fixture, clean-slate-rootfs --features std and the M9-gated kernel

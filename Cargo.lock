@@ -132,7 +132,9 @@ dependencies = [
  "clean-slate-capability",
  "clean-slate-elf",
  "clean-slate-linux-abi",
+ "clean-slate-native-abi",
  "clean-slate-network",
+ "clean-slate-port",
  "clean-slate-rootfs",
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
@@ -178,6 +180,14 @@ dependencies = [
  "rustls-pemfile",
  "sha2",
  "time",
+]
+
+[[package]]
+name = "clean-slate-port"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-capability",
+ "clean-slate-native-abi",
 ]
 
 [[package]]

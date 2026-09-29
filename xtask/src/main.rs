@@ -56,6 +56,7 @@ const M6_REVOCATION_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
 const M6_AUDIT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 const M6_CAPABILITIES_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(180);
 const M7_NET_CAPS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
+const M10_PORT_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M5_BLOCK_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 const M7_NET_DEVICE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M7_TLS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -546,6 +547,31 @@ const M7_NET_CAPS_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[CAP ] net released holder=1 count=2",
     "[M7.7] PASS",
 ];
+/// One marker per #200 acceptance item proven in QEMU through syscalls 17/20.
+const M10_PORT_ACCEPTANCE_MARKERS: [&str; 22] = [
+    "[TIME] timer initialized",
+    "[M10.port] registration limits enforced",
+    "[M10.port] port registered class=graphics",
+    "[M10.port] two clients connected",
+    "[M10.port] envelope stamped",
+    "[M10.port] forged fields ignored",
+    "[M10.port] events isolated",
+    "[M10.port] connect denied",
+    "[M10.port] serve denied",
+    "[M10.port] capacity limits enforced",
+    "[M10.port] transfer attested",
+    "[M10.port] transfer denied",
+    "[M10.port] transfer rollback exact",
+    "[M10.port] work-set race woken",
+    "[M10.port] deadlines expired",
+    "[M10.port] kernel client ok",
+    "[M10.port] client exit reclaimed",
+    "[M10.port] server exit ServerGone waiters=0",
+    "[M10.port] stale connection refused",
+    "[M10.port] teardown order ok",
+    "[M10.port] baseline restored",
+    "[M10.port] PASS",
+];
 const M6_CAPABILITIES_ACCEPTANCE_MARKERS: [&str; 31] = [
     "[STOR] object-service started pid=",
     "[CAP ] object grant holder=3 object=7",
@@ -885,6 +911,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM6 => run_m6_acceptance(),
         ParsedCommand::TestM10Contract => run_m10_contract_acceptance(),
         ParsedCommand::TestM10Nxe => run_m10_nxe_acceptance(),
+        ParsedCommand::TestM10Port => run_m10_port_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -1866,6 +1893,29 @@ fn run_m10_nxe_acceptance() -> Result<(), XtaskError> {
         Some((
             MarkerSet::Ordered(&M10_NXE_ACCEPTANCE_MARKERS),
             M10_NXE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
+}
+
+/// M10 #200 service-port gate: port engine and kernel port/work-set host tests, a UEFI build of
+/// the `fake` port surface, then the `m10-port-self-test` QEMU lane.
+fn run_m10_port_acceptance() -> Result<(), XtaskError> {
+    run_cargo_package_tests("clean-slate-native-abi", &[])?;
+    run_cargo_package_tests("clean-slate-port", &["--features", "fake"])?;
+    run_cargo_package_build_uefi("clean-slate-port", &["fake"])?;
+    run_cargo_package_tests(
+        "clean-slate-kernel",
+        &["--", "service::port", "sched::work_set", "sched::wait"],
+    )?;
+    build_m6_fixture_userspace(true)?;
+    build_storage_userspace(true)?;
+    run_vm_inner(
+        false,
+        false,
+        &["m10-port-self-test"],
+        Some((
+            MarkerSet::Ordered(&M10_PORT_ACCEPTANCE_MARKERS),
+            M10_PORT_ACCEPTANCE_TIMEOUT,
         )),
     )
 }
@@ -3765,6 +3815,9 @@ fn print_help() {
         "  test-m10-contract M10 graphics contract host tests plus UEFI builds of graphics and native-abi; prints [M10.contract] PASS (aliases: m10-contract)"
     );
     println!("  test-m10-nxe  M10 #195 S0: EFER.NXE host tests, then a CPL3 fetch from an RW+NX page must fault err=0x15 (aliases: m10-nxe)");
+    println!(
+        "  test-m10-port   M10 #200 service port: port/kernel host tests, then the m10-port-self-test QEMU lane with ordered markers; prints [M10.port] PASS (aliases: m10-port, m10.200)"
+    );
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
@@ -3898,6 +3951,7 @@ enum ParsedCommand {
     TestM6,
     TestM10Contract,
     TestM10Nxe,
+    TestM10Port,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -4026,6 +4080,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
             ParsedCommand::TestM10Contract
         }
         Some(cmd) if cmd == "test-m10-nxe" || cmd == "m10-nxe" => ParsedCommand::TestM10Nxe,
+        Some(cmd) if cmd == "test-m10-port" || cmd == "m10-port" || cmd == "m10.200" => {
+            ParsedCommand::TestM10Port
+        }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
         Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,
@@ -4326,6 +4383,12 @@ mod tests {
             parse_command(Some("m10-contract".as_ref())),
             ParsedCommand::TestM10Contract
         );
+        for alias in ["test-m10-port", "m10-port", "m10.200"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestM10Port
+            );
+        }
         assert_eq!(
             parse_command(Some("test-m10-nxe".as_ref())),
             ParsedCommand::TestM10Nxe

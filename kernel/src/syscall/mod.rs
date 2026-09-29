@@ -892,6 +892,8 @@ fn dispatch_native(frame: &mut SyscallContext) {
         cap_abi::SYSCALL_NR_NETWORK_REQUEST => {
             crate::service::net_syscall::handle_syscall_network_request(frame)
         }
+        cap_abi::SYSCALL_NR_SERVICE_PORT => crate::service::port_syscall::handle_syscall(frame),
+        cap_abi::SYSCALL_NR_WORK_SET => crate::sched::work_set::handle_syscall(frame),
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 }
@@ -986,7 +988,11 @@ mod tests {
             "M10 reserved numbers are contiguous 16..=20"
         );
 
-        for nr in SYSCALL_NR_SHARED_BUFFER..=SYSCALL_NR_WORK_SET {
+        for nr in [
+            SYSCALL_NR_SHARED_BUFFER,
+            SYSCALL_NR_DISPLAY,
+            SYSCALL_NR_INPUT,
+        ] {
             let mut frame = SyscallContext {
                 rax: nr,
                 rdx: 0,

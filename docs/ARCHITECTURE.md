@@ -226,10 +226,12 @@ xtask/scripts               QEMU persistence harness
 
 M10 introduces `clean-slate-graphics` (`no_std`, zero-dependency) and `clean-slate-native-abi`: the frozen contract between the kernel display and input mechanism, the userspace compositor, and its clients. The kernel owns every device, queue, BAR and physical address, and exposes only four capability classes (`SharedBuffer`, `Graphics`, `Display`, `Input`). The compositor is an ordinary supervised service and the only holder of `Display` and `Input`. Apps and the shell are compositor clients that render into their own shared buffers and exchange 64-byte protocol frames over a service port; surfaces and windows are connection-scoped compositor objects, not kernel capabilities. See [GRAPHICS.md](GRAPHICS.md) for the authority split, module ownership, process and thread boundaries, lifecycles and the #110 acceptance mapping.
 
+The bounded service port (#200) is a class-agnostic engine in `clean-slate-port` (`port/`), instantiated once in the kernel (`kernel/src/service/port.rs`) with thin syscall wrappers (`port_syscall.rs`). Clients and servers use syscall 17 (`SYSCALL_NR_SERVICE_PORT`): 64-byte frames, kernel-stamped `TrustedEnvelope` metadata, and optional `SharedBuffer` capability transfer on `SEND` (child installed with `READ` only). Compositors multiplex port readiness (and display and input readiness once #111/#113 bind to them) through syscall 20 work sets (`kernel/src/sched/work_set.rs`, `WORK_SET_CAPACITY` = 8). Blocking uses atomic check-then-block (`block_current_thread_unless`) with absolute monotonic deadlines and `wake_all_registered` (no pending-wake pollution). Process teardown runs port and work-set hooks in the shared P4 order before `revoke_for_holder`; `ResourceSnapshot` records `port_connections`, `ports_served` and `work_sets`. Acceptance: `cargo xtask test-m10-port` (`[M10.port] PASS`). See [GRAPHICS.md](GRAPHICS.md) service-port and work-set ABI sections.
+
 ```text
 graphics / native-abi        shared contract crates (#110)
 kernel mm shared buffers     SharedBuffer objects and mappings (#195)
-kernel service port          connections, work sets, capability transfer (planned)
+kernel service port          connections, work sets, capability transfer (#200)
 kernel display backends      GOP (#111) and VirtIO-GPU (#114) behind ScanoutBackend
 kernel input                 i8042 driver and raw input queue (#113)
 raster / ui                  CPU rendering and UI toolkit (#111, #116)

@@ -113,6 +113,10 @@ pub(crate) fn discard_bootstrap_grants_for_holder(holder: HolderId) -> usize {
 }
 
 pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
+    #[cfg(feature = "m10-port-self-test")]
+    if crate::selftest::m10_port::handle_harness_subop(frame) {
+        return;
+    }
     #[cfg(any(
         feature = "m6-object-self-test",
         feature = "m6-process-control-self-test",
@@ -121,7 +125,8 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
         feature = "m6-fixture-smoke-self-test",
-        feature = "m7-net-caps-self-test"
+        feature = "m7-net-caps-self-test",
+        feature = "m10-port-self-test"
     ))]
     if crate::selftest::m6_fixture::handle_harness_subop(frame) {
         return;

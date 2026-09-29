@@ -41,6 +41,7 @@ use crate::mm::stack_guard::{GuardedStackRecord, SlotLabel};
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
     feature = "m7-net-caps-self-test",
+    feature = "m10-port-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -119,6 +120,7 @@ use crate::selftest::m5_storage::handle_userspace_storage_entry;
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
     feature = "m7-net-caps-self-test",
+    feature = "m10-port-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -130,6 +132,7 @@ use crate::selftest::m6_fixture::handle_fixture_report;
     feature = "m6-process-control-self-test",
     feature = "m6-delegation-self-test",
     feature = "m7-net-caps-self-test",
+    feature = "m10-port-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -233,6 +236,7 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         feature = "m6-process-control-self-test",
         feature = "m6-delegation-self-test",
         feature = "m7-net-caps-self-test",
+        feature = "m10-port-self-test",
         feature = "m6-revocation-self-test",
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
@@ -613,7 +617,8 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
         feature = "m6-fixture-smoke-self-test",
-        feature = "m7-net-caps-self-test"
+        feature = "m7-net-caps-self-test",
+        feature = "m10-port-self-test"
     ))]
     crate::selftest::m6_fixture::on_fixture_exiting(pid);
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 1, true)
