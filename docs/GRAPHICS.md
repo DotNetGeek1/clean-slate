@@ -815,7 +815,6 @@ On success it prints `[M10.port] PASS` (not `[M10  ] PASS`, which belongs to #11
 
 The `fake` feature enables `graphics::fake`: `FakeDisplay`, a model of the display ABI with R8 copy semantics, a single present in flight, timeouts, reset and poisoning. It is for host tests only; production code must not enable it. `clean-slate-port` exposes `FakePort` / `FakeConnection` behind feature `fake` for the same port semantics in host tests (#112).
 
-<<<<<<< HEAD
 `cargo xtask test-m10-framebuffer` (alias `m10-framebuffer`) is the #111 gate: `cargo test -p clean-slate-raster`, then a QEMU boot with `-vga std` that proves kernel-internal present, damage-only scanout copy, and guest aperture readback against host `clean-slate-raster` expectations (`[M10.2] PASS`). Screenshot validation is a separate #111 stage: a `QmpScriptDriver` `Screendump` step with a `check` against the host render, writing under `xtask_artifact_root()` (`target/xtask-artifacts/m10-framebuffer/`).
 
 #195 gates (landed): `cargo xtask test-m10-nxe` (alias `m10-nxe`) and `cargo xtask test-m10-shared-buffer` (alias `m10-shared-buffer`); see [DEVELOPMENT.md](DEVELOPMENT.md).
