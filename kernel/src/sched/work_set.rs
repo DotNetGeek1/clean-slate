@@ -223,7 +223,7 @@ impl<const N: usize> WorkSetTable<N> {
             .count()
     }
 
-    #[allow(dead_code)]
+    #[cfg(any(test, feature = "m10-port-self-test"))]
     pub(crate) fn live_count(&self) -> usize {
         self.slots
             .iter()
@@ -246,7 +246,7 @@ fn work_sets_mut() -> &'static mut WorkSetTable<WORK_SET_CAPACITY> {
 pub(crate) struct WorkSetBinding(WorkSetId);
 
 impl WorkSetBinding {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) const fn id(self) -> WorkSetId {
         self.0
     }
@@ -290,7 +290,7 @@ pub(crate) fn count_for(holder: HolderId) -> usize {
     without_interrupts(|| work_sets_mut().count_for(holder))
 }
 
-#[allow(dead_code)]
+#[cfg(any(test, feature = "m10-port-self-test"))]
 pub(crate) fn live_count() -> usize {
     without_interrupts(|| work_sets_mut().live_count())
 }

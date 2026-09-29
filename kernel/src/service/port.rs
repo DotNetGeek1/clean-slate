@@ -8,17 +8,21 @@
 //! The syscall layer (`port_syscall.rs`) and the in-kernel client entries share these functions,
 //! so a CPL3 client and the M11 Linux-personality shim take one code path.
 
+#[cfg(feature = "m10-port-self-test")]
+use clean_slate_capability::ResourceRef;
 use clean_slate_capability::{
-    CapabilityHandle, CapabilityTable, HolderId, ResourceClass, ResourceRef, MAX_SLOTS,
+    CapabilityHandle, CapabilityTable, HolderId, ResourceClass, MAX_SLOTS,
 };
 use clean_slate_native_abi::port::PORT_MAX_CONNECTIONS;
-use clean_slate_native_abi::{
-    ConnectionId, PortEventRecord, PortParams, PortRecvRecord, SharedBufferId,
-};
+#[cfg(feature = "m10-port-self-test")]
+use clean_slate_native_abi::PortParams;
+use clean_slate_native_abi::{ConnectionId, PortEventRecord, PortRecvRecord, SharedBufferId};
 use clean_slate_port::{
-    Caller, Effect, Effects, HolderPortCounts, PortCore, PortCounts, PortError, PortKey,
-    PortReleaseCounts, RegistrationError, Transfer,
+    Caller, Effect, Effects, HolderPortCounts, PortCore, PortError, PortKey, PortReleaseCounts,
+    Transfer,
 };
+#[cfg(feature = "m10-port-self-test")]
+use clean_slate_port::{PortCounts, RegistrationError};
 use clean_slate_service_lifecycle::InstanceGeneration;
 
 use crate::arch::x86_64::cpu::without_interrupts;
@@ -111,7 +115,7 @@ fn caller_for(holder: HolderId) -> Result<Caller, PortError> {
 // ---- launch policy ----
 
 /// Only launch policy registers a port: after spawning `server` and before it runs.
-#[cfg_attr(not(feature = "m10-port-self-test"), allow(dead_code))]
+#[cfg(feature = "m10-port-self-test")]
 pub(crate) fn register_port(
     resource: ResourceRef,
     server: HolderId,
@@ -130,13 +134,6 @@ pub(crate) fn register_port(
         let core = unsafe { &mut *PORTS.get() };
         core.register(resource, server, generation, params)
     })
-}
-
-#[cfg_attr(not(feature = "m10-port-self-test"), allow(dead_code))]
-pub(crate) fn unregister_port_on_failed_launch(key: PortKey) {
-    with_ports(|core, table, effects| {
-        core.unregister(table, key, effects);
-    });
 }
 
 // ---- W6: shared-buffer attestation (owned by #195) ----
@@ -268,12 +265,6 @@ pub(crate) fn kernel_client_close(
     })
 }
 
-/// Predicate for a shim blocking on [`connection_wait_key`] with `block_current_thread_unless`.
-#[cfg_attr(not(feature = "m10-port-self-test"), allow(dead_code))]
-pub(crate) fn kernel_client_event_ready(connection: ConnectionId) -> bool {
-    with_ports(|core, _, _| core.event_ready(connection.encode()))
-}
-
 pub(crate) fn connection_port_key(connection: ConnectionId) -> Result<PortKey, PortError> {
     with_ports(|core, _, _| core.connection_port_key(connection.encode()))
 }
@@ -363,7 +354,7 @@ pub(crate) fn counts_for(holder: HolderId) -> HolderPortCounts {
     with_ports(|core, _, _| core.counts_for(holder))
 }
 
-#[cfg_attr(not(feature = "m10-port-self-test"), allow(dead_code))]
+#[cfg(feature = "m10-port-self-test")]
 pub(crate) fn global_counts() -> PortCounts {
     with_ports(|core, _, _| core.global_counts())
 }
@@ -371,6 +362,8 @@ pub(crate) fn global_counts() -> PortCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clean_slate_capability::ResourceRef;
+    use clean_slate_native_abi::PortParams;
 
     #[test]
     fn wait_keys_are_disjoint_per_role_and_per_port() {
