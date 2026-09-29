@@ -68,10 +68,9 @@ fn copy_out<const N: usize>(
     out_len: u64,
     encode: impl FnOnce(&DisplayState) -> [u8; N],
 ) -> u64 {
-    let pointer_valid = validate_user_writable_pointer_range(out_ptr, out_len).is_ok();
     let bytes = query(
         out_len,
-        pointer_valid,
+        || validate_user_writable_pointer_range(out_ptr, out_len).is_ok(),
         current_holder,
         |holder| authorize_display_query(holder, raw_handle, PRIMARY_OUTPUT_INDEX).map(|_| ()),
         || with_active_display(|display| display.map(|display| encode(display.state()))),
@@ -108,16 +107,17 @@ fn find_handle(
     handle
 }
 
-/// `QUERY_MODE` / `PRESENT_STATUS`: exact length and pointer → caller → capability → backend.
-/// `snapshot` returns `None` when boot found no backend. A poisoned backend still answers.
+/// `QUERY_MODE` / `PRESENT_STATUS`: exact length, then pointer → caller → capability → backend.
+/// The pointer range is only walked once `out_len` is the exact struct length. `snapshot` returns
+/// `None` when boot found no backend. A poisoned backend still answers.
 fn query<const N: usize>(
     out_len: u64,
-    pointer_valid: bool,
+    pointer_valid: impl FnOnce() -> bool,
     holder: impl FnOnce() -> Result<HolderId, u64>,
     authorize: impl FnOnce(HolderId) -> Result<(), CapabilityError>,
     snapshot: impl FnOnce() -> Option<[u8; N]>,
 ) -> Result<[u8; N], u64> {
-    if out_len != N as u64 || !pointer_valid {
+    if out_len != N as u64 || !pointer_valid() {
         return Err(SYSCALL_EINVAL);
     }
     let holder = holder()?;
@@ -190,7 +190,7 @@ mod tests {
     ) -> Result<[u8; DISPLAY_MODE_INFO_BYTES], u64> {
         query(
             out_len,
-            true,
+            || true,
             caller,
             |holder| authorize_display_query_in(table, holder, handle, 0).map(|_| ()),
             || state.map(|state| state.mode_info().encode()),
@@ -224,10 +224,11 @@ mod tests {
             0,
             DISPLAY_MODE_INFO_BYTES as u64 - 1,
             DISPLAY_MODE_INFO_BYTES as u64 + 1,
+            u64::MAX,
         ] {
             let result = query::<DISPLAY_MODE_INFO_BYTES>(
                 out_len,
-                true,
+                || unreachable!("pointer walked before the length check"),
                 unreachable_caller,
                 |_| unreachable!(),
                 || unreachable!(),
@@ -236,7 +237,7 @@ mod tests {
         }
         let result = query::<PRESENT_STATUS_BYTES>(
             PRESENT_STATUS_BYTES as u64,
-            false,
+            || false,
             unreachable_caller,
             |_| unreachable!(),
             || unreachable!(),
@@ -252,7 +253,7 @@ mod tests {
 
         let result = query::<DISPLAY_MODE_INFO_BYTES>(
             len,
-            true,
+            || true,
             no_caller,
             |_| unreachable!(),
             || unreachable!(),
@@ -309,7 +310,7 @@ mod tests {
 
             let status = query::<PRESENT_STATUS_BYTES>(
                 PRESENT_STATUS_BYTES as u64,
-                true,
+                || true,
                 caller,
                 |holder| authorize_display_query_in(&table, holder, handle, 0).map(|_| ()),
                 || Some(state.status().encode()),
