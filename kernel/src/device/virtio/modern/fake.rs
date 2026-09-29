@@ -104,10 +104,6 @@ impl FakeDevice {
         device
     }
 
-    pub(crate) fn status(&self) -> u8 {
-        self.status
-    }
-
     pub(crate) fn raise_needs_reset(&mut self) {
         self.status |= STATUS_DEVICE_NEEDS_RESET;
     }
