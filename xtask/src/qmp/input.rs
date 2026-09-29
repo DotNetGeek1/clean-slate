@@ -19,11 +19,10 @@ pub(crate) const MAX_EVENTS_PER_COMMAND: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct QCode(&'static str);
 
-// The key and button sets are the vocabulary for input lanes; each lane
-// uses a subset.
+// Every constant must have a live user; an input lane appends the keys it
+// sends.
 macro_rules! qcodes {
     ($($constant:ident => $name:literal),+ $(,)?) => {
-        #[allow(dead_code)]
         impl QCode {
             $(pub(crate) const $constant: QCode = QCode($name);)+
             #[cfg(test)]
@@ -33,19 +32,7 @@ macro_rules! qcodes {
 }
 
 qcodes! {
-    A => "a", B => "b", C => "c", D => "d", E => "e", F => "f", G => "g",
-    H => "h", I => "i", J => "j", K => "k", L => "l", M => "m", N => "n",
-    O => "o", P => "p", Q => "q", R => "r", S => "s", T => "t", U => "u",
-    V => "v", W => "w", X => "x", Y => "y", Z => "z",
-    DIGIT_0 => "0", DIGIT_1 => "1", DIGIT_2 => "2", DIGIT_3 => "3", DIGIT_4 => "4",
-    DIGIT_5 => "5", DIGIT_6 => "6", DIGIT_7 => "7", DIGIT_8 => "8", DIGIT_9 => "9",
-    SHIFT => "shift", SHIFT_R => "shift_r", CTRL => "ctrl", CTRL_R => "ctrl_r",
-    ALT => "alt", ALT_R => "alt_r", META_L => "meta_l", META_R => "meta_r",
-    RET => "ret", ESC => "esc", SPC => "spc", TAB => "tab", BACKSPACE => "backspace",
-    UP => "up", DOWN => "down", LEFT => "left", RIGHT => "right",
-    KP_ENTER => "kp_enter", PRINT => "print", PAUSE => "pause",
-    F1 => "f1", F2 => "f2", F3 => "f3", F4 => "f4", F5 => "f5", F6 => "f6",
-    F7 => "f7", F8 => "f8", F9 => "f9", F10 => "f10", F11 => "f11", F12 => "f12",
+    A => "a", S => "s", SHIFT => "shift", RET => "ret",
 }
 
 impl QCode {
@@ -54,14 +41,11 @@ impl QCode {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MouseButton {
     Left,
     Middle,
     Right,
-    WheelUp,
-    WheelDown,
 }
 
 impl MouseButton {
@@ -70,8 +54,6 @@ impl MouseButton {
             MouseButton::Left => "left",
             MouseButton::Middle => "middle",
             MouseButton::Right => "right",
-            MouseButton::WheelUp => "wheel-up",
-            MouseButton::WheelDown => "wheel-down",
         }
     }
 }

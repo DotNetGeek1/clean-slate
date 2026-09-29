@@ -10,7 +10,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use super::image::{self, Screenshot, MAX_PPM_FILE_BYTES};
-use super::json::{self, JsonValue};
+use super::json::{self, JsonError, JsonErrorKind, JsonValue};
 use super::{QmpError, QmpTimeouts};
 
 /// Longest QMP line accepted, excluding its terminator.
@@ -315,9 +315,12 @@ impl QmpClient {
                         limit: MAX_LINE_BYTES,
                     });
                 }
-                return String::from_utf8(line).map_err(|_| QmpError::Protocol {
+                return String::from_utf8(line).map_err(|error| QmpError::Malformed {
                     context: context.to_owned(),
-                    detail: "line is not UTF-8".to_owned(),
+                    error: JsonError {
+                        offset: error.utf8_error().valid_up_to(),
+                        kind: JsonErrorKind::InvalidUtf8,
+                    },
                 });
             }
             self.scanned = self.buffer.len();

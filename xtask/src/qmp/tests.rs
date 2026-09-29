@@ -14,7 +14,8 @@ use super::client::{EVENT_RING_CAPACITY, MAX_LINE_BYTES};
 use super::fake::{self, Act};
 use super::image::Screenshot;
 use super::input::MAX_EVENTS_PER_COMMAND;
-use super::json::JsonValue;
+use super::json::{JsonError, JsonErrorKind, JsonValue};
+use super::script::MAX_SERIAL_LINE_BYTES;
 use super::{InputAction, MouseButton, QCode, QmpClient, QmpEndpoint, QmpError, QmpTimeouts};
 use super::{QmpScriptDriver, ScriptStep};
 use crate::{AcceptanceDriver, DriverWake, OutputEvent, XtaskError};
@@ -114,6 +115,22 @@ fn greeting_without_a_qmp_object_is_a_protocol_error() {
     let error = error_of(client);
     assert!(
         matches!(&error, QmpError::Protocol { context, .. } if context == "greeting"),
+        "{error}"
+    );
+}
+
+#[test]
+fn invalid_utf8_is_malformed_at_its_offset() {
+    let (client, _peer) = session(GENEROUS, |_| {
+        vec![Act::send(&b"{\"QMP\": \xff}\n"[..]), Act::WaitEof]
+    });
+    let error = error_of(client);
+    assert!(
+        matches!(
+            &error,
+            QmpError::Malformed { context, error: JsonError { offset: 8, kind: JsonErrorKind::InvalidUtf8 } }
+                if context == "greeting"
+        ),
         "{error}"
     );
 }
@@ -452,7 +469,7 @@ fn input_events_use_the_qmp_input_event_schema() {
     let mut actions = InputAction::tap(QCode::A).to_vec();
     actions.extend(InputAction::move_rel(5, -5));
     actions.push(InputAction::Button {
-        button: MouseButton::WheelUp,
+        button: MouseButton::Middle,
         down: true,
     });
     client
@@ -469,7 +486,7 @@ fn input_events_use_the_qmp_input_event_schema() {
             r#"{"type":"key","data":{"down":false,"key":{"type":"qcode","data":"a"}}},"#,
             r#"{"type":"rel","data":{"axis":"x","value":5}},"#,
             r#"{"type":"rel","data":{"axis":"y","value":-5}},"#,
-            r#"{"type":"btn","data":{"down":true,"button":"wheel-up"}}"#,
+            r#"{"type":"btn","data":{"down":true,"button":"middle"}}"#,
             r#"]}"#
         )
     );
@@ -478,7 +495,7 @@ fn input_events_use_the_qmp_input_event_schema() {
 #[test]
 fn input_batches_outside_the_bound_are_rejected_before_sending() {
     let (mut client, peer) = connected(vec![Act::returns("query-status", "{}")]);
-    let too_many = vec![InputAction::tap(QCode::B)[0]; MAX_EVENTS_PER_COMMAND + 1];
+    let too_many = vec![InputAction::tap(QCode::A)[0]; MAX_EVENTS_PER_COMMAND + 1];
     for batch in [&[][..], &too_many[..]] {
         let error = error_of(client.send_input(batch, GENEROUS.command));
         assert!(matches!(error, QmpError::InvalidRequest { .. }), "{error}");
@@ -642,6 +659,48 @@ fn one_serial_line_satisfies_one_await() {
     harness.serial("tick\nother\n").unwrap();
     assert!(!harness.driver.is_complete());
     harness.serial("tick\n").unwrap();
+    assert!(harness.driver.is_complete());
+}
+
+#[test]
+fn lines_received_before_an_input_never_satisfy_a_later_await() {
+    let mut harness = DriverHarness::start(
+        "input-causality",
+        vec![
+            ScriptStep::AwaitLine("go"),
+            ScriptStep::Input(InputAction::tap(QCode::A).to_vec()),
+            ScriptStep::AwaitLine("ack"),
+        ],
+    );
+    let peer = harness.connect(vec![Act::returns("input-send-event", "{}")]);
+    harness.serial("go\nack\nac").unwrap();
+    harness.serial("k\n").unwrap();
+    assert!(
+        !harness.driver.is_complete(),
+        "matched output that predates the input"
+    );
+    harness.serial("ack\n").unwrap();
+    assert!(harness.driver.is_complete());
+    harness.driver.shutdown();
+    requests(peer);
+}
+
+#[test]
+fn an_over_long_serial_line_is_dropped_through_its_newline() {
+    let mut harness = DriverHarness::start("over-long-line", vec![ScriptStep::AwaitLine("go")]);
+    harness
+        .serial(&format!("go{}\n", "x".repeat(MAX_SERIAL_LINE_BYTES)))
+        .unwrap();
+    harness
+        .serial(&"x".repeat(MAX_SERIAL_LINE_BYTES + 1))
+        .unwrap();
+    harness.serial("go").unwrap();
+    harness.serial(" still the long line\n").unwrap();
+    assert!(
+        !harness.driver.is_complete(),
+        "matched part of an over-long line"
+    );
+    harness.serial("go\n").unwrap();
     assert!(harness.driver.is_complete());
 }
 

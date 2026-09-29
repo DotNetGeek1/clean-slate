@@ -16,8 +16,8 @@ const PEER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) type Responder = Box<dyn FnOnce(&str, &JsonValue) -> String + Send>;
 
 pub(crate) enum Act {
-    /// Raw text, written as one chunk.
-    Send(String),
+    /// Raw bytes, written as one chunk.
+    Send(Vec<u8>),
     /// Raw text, one byte per write.
     SendBytewise(String),
     /// Reads one request, checks its command, and writes what `respond`
@@ -33,7 +33,7 @@ pub(crate) enum Act {
 }
 
 impl Act {
-    pub(crate) fn send(text: impl Into<String>) -> Self {
+    pub(crate) fn send(text: impl Into<Vec<u8>>) -> Self {
         Act::Send(text.into())
     }
 
@@ -102,7 +102,7 @@ fn play(stream: TcpStream, acts: Vec<Act>) -> Result<Vec<JsonValue>, String> {
         match act {
             Act::Send(text) => {
                 // The client may already have given up on an oversize line.
-                let _ = writer.write_all(text.as_bytes());
+                let _ = writer.write_all(&text);
             }
             Act::SendBytewise(text) => {
                 for byte in text.as_bytes() {

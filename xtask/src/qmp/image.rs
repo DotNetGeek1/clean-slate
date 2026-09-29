@@ -337,14 +337,16 @@ pub(crate) fn adler32(bytes: &[u8]) -> u32 {
     const MOD: u32 = 65521;
     let mut a: u32 = 1;
     let mut b: u32 = 0;
-    let mut off = 0usize;
-    while off < bytes.len() {
-        let end = (off + 5552).min(bytes.len());
-        for &byte in &bytes[off..end] {
-            a = (a + u32::from(byte)) % MOD;
-            b = (b + a) % MOD;
+    // The longest run of bytes after which `b` still fits in a u32 when both
+    // sums start just below MOD (zlib's NMAX).
+    const BLOCK: usize = 5552;
+    for block in bytes.chunks(BLOCK) {
+        for &byte in block {
+            a += u32::from(byte);
+            b += a;
         }
-        off = end;
+        a %= MOD;
+        b %= MOD;
     }
     (b << 16) | a
 }

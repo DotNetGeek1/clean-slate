@@ -2344,22 +2344,6 @@ fn run_vm_inner_with_config(
     }
 }
 
-/// Boots an acceptance kernel with `driver` attached (for example a
-/// [`qmp::QmpScriptDriver`]) and returns the captured output. Never waits
-/// for gdb: a paused VM rejects input.
-#[allow(dead_code)]
-fn run_vm_with_driver(
-    features: &[&str],
-    marker_set: MarkerSet<'static>,
-    timeout: Duration,
-    config: VmLaunchConfig,
-    driver: &mut dyn AcceptanceDriver,
-) -> Result<String, XtaskError> {
-    let mut vm = prepare_vm(false, false, features, config)?;
-    vm.qemu.args(driver.qemu_args());
-    run_driven_acceptance_command(&mut vm.qemu, marker_set, timeout, driver)
-}
-
 /// Per-lane run directories for screenshots and other lane artifacts.
 fn xtask_artifact_root() -> PathBuf {
     workspace_root().join("target").join("xtask-artifacts")

@@ -101,6 +101,7 @@ pub(crate) enum JsonErrorKind {
     DuplicateKey,
     DepthExceeded,
     TrailingCharacters,
+    InvalidUtf8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +128,7 @@ impl std::fmt::Display for JsonError {
             JsonErrorKind::TrailingCharacters => {
                 write!(f, "trailing characters at byte {}", self.offset)
             }
+            JsonErrorKind::InvalidUtf8 => write!(f, "invalid UTF-8 at byte {}", self.offset),
         }
     }
 }

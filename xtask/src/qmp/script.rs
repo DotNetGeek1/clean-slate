@@ -98,6 +98,9 @@ pub(crate) struct QmpScriptDriver {
     steps: Vec<ScriptStep>,
     next_step: usize,
     partial_line: String,
+    /// Serial text through the next newline belongs to a line that was
+    /// dropped (over-long, or begun before an input was sent).
+    discarding_line: bool,
     queued_lines: VecDeque<String>,
     run_dir: PathBuf,
     captures: Vec<Capture>,
@@ -135,6 +138,7 @@ impl QmpScriptDriver {
             steps,
             next_step: 0,
             partial_line: String::new(),
+            discarding_line: false,
             queued_lines: VecDeque::new(),
             run_dir,
             captures: Vec::new(),
@@ -311,6 +315,12 @@ impl QmpScriptDriver {
         let outcome = match &self.steps[self.next_step] {
             ScriptStep::AwaitLine(_) => Ok(None),
             ScriptStep::Input(actions) => {
+                // Output received so far cannot be a response to this input.
+                self.queued_lines.clear();
+                if !self.partial_line.is_empty() {
+                    self.partial_line.clear();
+                    self.discarding_line = true;
+                }
                 client.send_input(actions, command_timeout).map(|()| None)
             }
             ScriptStep::Screendump { name, check } => {
@@ -467,13 +477,28 @@ impl AcceptanceDriver for QmpScriptDriver {
     }
 
     fn on_serial(&mut self, text: &str, deadline: Instant) -> Result<(), XtaskError> {
+        let text = if self.discarding_line {
+            match text.find('\n') {
+                Some(end) => {
+                    self.discarding_line = false;
+                    &text[end + 1..]
+                }
+                None => "",
+            }
+        } else {
+            text
+        };
         self.partial_line.push_str(text);
         while let Some(end) = self.partial_line.find('\n') {
             let line: String = self.partial_line.drain(..=end).collect();
-            self.push_line(&line[..line.len() - 1])?;
+            let line = &line[..line.len() - 1];
+            if line.len() <= MAX_SERIAL_LINE_BYTES {
+                self.push_line(line)?;
+            }
         }
         if self.partial_line.len() > MAX_SERIAL_LINE_BYTES {
             self.partial_line.clear();
+            self.discarding_line = true;
         }
         self.pump(deadline)
     }

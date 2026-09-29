@@ -131,6 +131,11 @@ impl AcceptShared {
             .compare_exchange(WAITING, reason, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
+            // A failed wake is harmless when the accept has already returned
+            // (the listener is closed, so the connect is refused). Otherwise
+            // it means the host cannot open a loopback socket; the accept
+            // then stays blocked until a peer connects, and `join` waits with
+            // it, because std offers no other way to interrupt `accept`.
             let _ = TcpStream::connect_timeout(
                 &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
                 WAKE_CONNECT_TIMEOUT,

@@ -40,7 +40,7 @@ const READY: &str = "[QMPFIX] ready";
 /// Every `[QMPFIX]` line the fixture prints, in order. PS/2 packets are
 /// `flags dx dy` with dy inverted relative to QMP, and each
 /// `input-send-event` produces exactly one packet.
-const SMOKE_LINES: [&str; 22] = [
+const SMOKE_LINES: [&str; 31] = [
     READY,
     "[QMPFIX] aux fa",
     "[QMPFIX] kbd 1e",
@@ -54,6 +54,15 @@ const SMOKE_LINES: [&str; 22] = [
     "[QMPFIX] aux fd",
     "[QMPFIX] aux fc",
     "[QMPFIX] aux 09",
+    "[QMPFIX] aux 00",
+    "[QMPFIX] aux 00",
+    "[QMPFIX] aux 08",
+    "[QMPFIX] aux 00",
+    "[QMPFIX] aux 00",
+    "[QMPFIX] aux 0a",
+    "[QMPFIX] aux 00",
+    "[QMPFIX] aux 00",
+    "[QMPFIX] aux 0c",
     "[QMPFIX] aux 00",
     "[QMPFIX] aux 00",
     "[QMPFIX] aux 08",
@@ -115,7 +124,7 @@ fn run_passing_script(artifact_root: &Path) -> Result<QemuVersion, XtaskError> {
     check_png_header(&capture.png, &capture.screenshot)?;
     expect_port_released(LANE, driver.port())?;
     println!(
-        "[QMP.smoke] injected 3 keystrokes and 4 pointer packets; `{}` {}x{} at {}",
+        "[QMP.smoke] injected 3 keystrokes and 7 pointer packets; `{}` {}x{} at {}",
         capture.name,
         capture.screenshot.width(),
         capture.screenshot.height(),
@@ -186,6 +195,33 @@ fn smoke_steps() -> Vec<ScriptStep> {
         AwaitLine("[QMPFIX] aux 00"),
         Input(vec![InputAction::Button {
             button: MouseButton::Left,
+            down: false,
+        }]),
+        AwaitLine("[QMPFIX] aux 08"),
+        AwaitLine("[QMPFIX] aux 00"),
+        AwaitLine("[QMPFIX] aux 00"),
+        Input(vec![InputAction::Button {
+            button: MouseButton::Right,
+            down: true,
+        }]),
+        AwaitLine("[QMPFIX] aux 0a"),
+        AwaitLine("[QMPFIX] aux 00"),
+        AwaitLine("[QMPFIX] aux 00"),
+        Input(vec![
+            InputAction::Button {
+                button: MouseButton::Right,
+                down: false,
+            },
+            InputAction::Button {
+                button: MouseButton::Middle,
+                down: true,
+            },
+        ]),
+        AwaitLine("[QMPFIX] aux 0c"),
+        AwaitLine("[QMPFIX] aux 00"),
+        AwaitLine("[QMPFIX] aux 00"),
+        Input(vec![InputAction::Button {
+            button: MouseButton::Middle,
             down: false,
         }]),
         AwaitLine("[QMPFIX] aux 08"),
