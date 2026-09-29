@@ -3,9 +3,11 @@
 use clean_slate_native_abi::{SharedBufferAccess, SharedBufferId, MAX_SHARED_BUFFERS};
 
 pub(crate) use super::table::{BufferState, SharedBufferStats};
-use super::window::RowState;
+use super::window::{RowState, READ_LEAF_FLAGS};
 use super::{row_for, state};
+use crate::mm::frame_allocator::physical_frame_ptr;
 use crate::mm::paging::page_table_mut;
+use crate::mm::PAGE_SIZE;
 use x86_64::structures::paging::PageTableFlags;
 
 pub(crate) fn stats() -> SharedBufferStats {
@@ -85,6 +87,28 @@ pub(crate) fn leaf(pid: u64, va: u64) -> Option<Leaf> {
         }
     }
     None
+}
+
+/// Every entry of the zero page table still maps one frame read-only and NX, and that
+/// frame is still all zero.
+pub(crate) fn check_zero_page() -> Result<(), &'static str> {
+    let zero_pt = state()
+        .zero
+        .ok_or("shared-buffer zero pages missing")?
+        .zero_pt;
+    let table = unsafe { page_table_mut(zero_pt) };
+    let zero_frame = table[0].addr().as_u64();
+    for entry in table.iter() {
+        if entry.flags() != READ_LEAF_FLAGS || entry.addr().as_u64() != zero_frame {
+            return Err("shared-buffer zero page table entry changed");
+        }
+    }
+    let bytes =
+        unsafe { core::slice::from_raw_parts(physical_frame_ptr(zero_frame), PAGE_SIZE as usize) };
+    if bytes.iter().any(|byte| *byte != 0) {
+        return Err("shared-buffer zero frame is not zero");
+    }
+    Ok(())
 }
 
 /// Every Live row is recorded as an attachment of a buffer that still holds frames,

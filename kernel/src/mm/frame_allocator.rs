@@ -252,6 +252,26 @@ impl PageAllocator {
         Some((frame, 1))
     }
 
+    /// The run the next `allocate_run(max_pages)` would return while the bump region
+    /// still has pages; `None` once it would fall back to the free list.
+    #[cfg(feature = "m10-shared-buffer-self-test")]
+    pub(crate) fn peek_bump_run(&self, max_pages: u64) -> Option<(u64, u64)> {
+        let mut region_index = self.current_region;
+        let mut next_page = self.next_page;
+        while region_index < self.usable_region_count {
+            let region = self.usable_regions[region_index];
+            let remaining = region.end.saturating_sub(next_page) / PAGE_SIZE;
+            if remaining > 0 {
+                return Some((next_page, remaining.min(max_pages)));
+            }
+            region_index += 1;
+            if region_index < self.usable_region_count {
+                next_page = self.usable_regions[region_index].start;
+            }
+        }
+        None
+    }
+
     /// Frees `pages` contiguous frames from `base`, validating the whole run before
     /// changing anything; the free list is scanned once for the run, not per frame.
     pub(crate) unsafe fn free_run(&mut self, base: u64, pages: u64) -> Result<(), &'static str> {

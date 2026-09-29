@@ -9,7 +9,7 @@ use crate::capability::{live_capability_count, with_capability_space};
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::interrupt::timer::initialize_timer;
-use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::frame_allocator::{physical_frame_ptr, PageAllocator};
 use crate::mm::shared_buffer::inspect::{self, BufferState, SharedBufferStats};
 use crate::mm::shared_buffer::kernel_owned::{
     allocate_kernel_owned, extents, map_kernel_owned_into, pin, release_kernel_owned,
@@ -39,7 +39,8 @@ use clean_slate_native_abi::{
     MAX_SHARED_BUFFERS_PER_OWNER, MAX_SHARED_BUFFER_BYTES, SHARED_BUFFER_ACCESS_READ,
     SHARED_BUFFER_ACCESS_READ_WRITE, SHARED_BUFFER_INFO_BYTES, SHARED_BUFFER_SUBOP_ALLOCATE,
     SHARED_BUFFER_SUBOP_MAP, SHARED_BUFFER_SUBOP_QUERY, SHARED_BUFFER_SUBOP_RELEASE,
-    SHARED_BUFFER_SUBOP_UNMAP, STATUS_EACCES, STATUS_EINVAL, STATUS_ENOSPC, STATUS_ESTALE,
+    SHARED_BUFFER_SUBOP_UNMAP, SHARED_WINDOW_BASE, STATUS_EACCES, STATUS_EINVAL, STATUS_ENOSPC,
+    STATUS_ESTALE,
 };
 use clean_slate_service_fixtures::m6_fixture::{
     pattern_byte, M6FixtureBootstrap, M6FixtureStep, ARG_DATA_PTR, ARG_RESULT_OF,
@@ -61,6 +62,14 @@ const CHECK_KO_MAP: u64 = 10;
 const CHECK_KO_RELEASE: u64 = 11;
 const CHECK_OWNER_ROOT_RAW: u64 = 12;
 const CHECK_BUFFER_ID_WIRE: u64 = 13;
+const CHECK_DELEGATED_READ_CHILD: u64 = 14;
+const CHECK_CLAIMED_READ_CHILD: u64 = 15;
+const CHECK_REUSE_DIRTY_NEXT_RUN: u64 = 16;
+const CHECK_REUSE_GOT_DIRTIED_RUN: u64 = 17;
+
+/// Every fixture's first live mapping lands in row 0 of its window.
+const FIRST_ROW_VA: u64 = SHARED_WINDOW_BASE;
+const REUSE_PAGES: usize = (KIB_64 / PAGE) as usize;
 
 const ROLE_W: u64 = 0;
 const ROLE_R: u64 = 1;
@@ -140,6 +149,7 @@ struct LaneState {
     ko_id: SharedBufferId,
     ko_token: Option<PinToken>,
     ko_reclaimed_before: u64,
+    reuse_dirtied_base: u64,
 }
 
 static LANE_STATE: GlobalCell<Option<LaneState>> = GlobalCell::new(None);
@@ -236,16 +246,41 @@ fn step_delegate(parent: u64, target_pid: u64, rights: u64) -> M6FixtureStep {
     )
 }
 
-fn step_claim() -> M6FixtureStep {
-    M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0]).expect_ne(0)
+/// Delegates READ of `handle` to `target_pid`; the lane then checks the returned handle
+/// is exactly a READ child of the recorded owner root held by a peer.
+fn push_delegate_read(program: &mut M6FixtureBootstrap, handle: u64, target_pid: u64) -> usize {
+    let delegate = push_step(
+        program,
+        step_delegate(handle, target_pid, Rights::READ.bits() as u64),
+    );
+    push_step(
+        program,
+        step_lane_ok(CHECK_DELEGATED_READ_CHILD, arg_result(delegate)),
+    );
+    delegate
 }
 
+/// Claims the pending grant; the lane then checks the returned handle is exactly a READ
+/// child of the recorded owner root held by the caller.
+fn push_claim_read(program: &mut M6FixtureBootstrap) -> usize {
+    let claim = push_step(
+        program,
+        M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0]),
+    );
+    push_step(
+        program,
+        step_lane_ok(CHECK_CLAIMED_READ_CHILD, arg_result(claim)),
+    );
+    claim
+}
+
+/// The lane fails closed on a query it can't answer; each result is checked exactly
+/// where it is consumed.
 fn step_lane_query(check: u64, arg: u64) -> M6FixtureStep {
     M6FixtureStep::syscall(
         SYSCALL_NR_CAP_GRANT,
         [FIXTURE_SUBOP_LANE_CHECK, check, arg, 0, 0, 0],
     )
-    .expect_ne(0)
 }
 
 fn step_lane_ok(check: u64, arg: u64) -> M6FixtureStep {
@@ -254,6 +289,28 @@ fn step_lane_ok(check: u64, arg: u64) -> M6FixtureStep {
         [FIXTURE_SUBOP_LANE_CHECK, check, arg, 0, 0, 0],
     )
     .expect_eq(0)
+}
+
+/// Fails closed unless `raw_handle` is a Live READ-only child of the recorded owner root
+/// for the active buffer, and returns its holder.
+fn read_child_holder(raw_handle: u64) -> HolderId {
+    let state = state_mut();
+    let handle = CapabilityHandle::decode(raw_handle)
+        .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] child handle decode"));
+    let root = CapabilityHandle::decode(state.owner_root_handle)
+        .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] owner root decode"));
+    let record = with_capability_space(|table| table.record(handle))
+        .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] child handle record"));
+    if record.state != CapabilityState::Live
+        || record.resource.class != ResourceClass::SharedBuffer
+        || record.resource.id != state.active_buffer_id.encode()
+        || record.rights != Rights::READ
+        || record.provenance.depth != 1
+        || record.provenance.parent != Some(root)
+    {
+        fatal_kernel_error("[M10.SB] child handle is not a READ child of the owner root");
+    }
+    record.holder
 }
 
 fn record_owner_handle(pid: u64, raw_handle: u64) {
@@ -401,7 +458,7 @@ fn build_map_writer_program() -> M6FixtureBootstrap {
     );
     let map = push_step(
         &mut program,
-        step_sb_map(handle, SHARED_BUFFER_ACCESS_READ_WRITE).expect_ne(0),
+        step_sb_map(handle, SHARED_BUFFER_ACCESS_READ_WRITE).expect_eq(FIRST_ROW_VA),
     );
     let va = arg_result(map);
     push_step(
@@ -409,10 +466,7 @@ fn build_map_writer_program() -> M6FixtureBootstrap {
         M6FixtureStep::fill(va, MIB, 0x5a, PATTERN_INCREMENTING),
     );
     let reader_pid = push_step(&mut program, step_lane_query(CHECK_PEER_PID, ROLE_R));
-    push_step(
-        &mut program,
-        step_delegate(handle, arg_result(reader_pid), Rights::READ.bits() as u64).expect_ne(0),
-    );
+    push_delegate_read(&mut program, handle, arg_result(reader_pid));
     push_step(&mut program, end_turn_step(TURN_MAP_W));
 
     push_step(&mut program, wait_turn_step(TURN_MAP_W_CLEANUP));
@@ -430,11 +484,11 @@ fn build_map_writer_program() -> M6FixtureBootstrap {
 fn build_map_reader_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     push_step(&mut program, wait_turn_step(TURN_MAP_R));
-    let claim = push_step(&mut program, step_claim());
+    let claim = push_claim_read(&mut program);
     let hr = arg_result(claim);
     let map = push_step(
         &mut program,
-        step_sb_map(hr, SHARED_BUFFER_ACCESS_READ).expect_ne(0),
+        step_sb_map(hr, SHARED_BUFFER_ACCESS_READ).expect_eq(FIRST_ROW_VA),
     );
     let vr = arg_result(map);
     push_step(
@@ -490,19 +544,13 @@ fn build_deny_writer_program() -> M6FixtureBootstrap {
     );
     let map = push_step(
         &mut program,
-        step_sb_map(handle, SHARED_BUFFER_ACCESS_READ_WRITE).expect_ne(0),
+        step_sb_map(handle, SHARED_BUFFER_ACCESS_READ_WRITE).expect_eq(FIRST_ROW_VA),
     );
     let va = arg_result(map);
     let r_pid = push_step(&mut program, step_lane_query(CHECK_PEER_PID, ROLE_R));
     let x_pid = push_step(&mut program, step_lane_query(CHECK_PEER_PID, ROLE_X));
-    push_step(
-        &mut program,
-        step_delegate(handle, arg_result(r_pid), Rights::READ.bits() as u64).expect_ne(0),
-    );
-    push_step(
-        &mut program,
-        step_delegate(handle, arg_result(x_pid), Rights::READ.bits() as u64).expect_ne(0),
-    );
+    push_delegate_read(&mut program, handle, arg_result(r_pid));
+    push_delegate_read(&mut program, handle, arg_result(x_pid));
     push_step(
         &mut program,
         step_delegate(
@@ -547,7 +595,7 @@ fn build_deny_intruder_program() -> M6FixtureBootstrap {
     push_step(&mut program, end_turn_step(TURN_DENY_X));
 
     push_step(&mut program, wait_turn_step(TURN_DENY_X2));
-    let claim = push_step(&mut program, step_claim());
+    let claim = push_claim_read(&mut program);
     let hr = arg_result(claim);
     push_step(
         &mut program,
@@ -561,11 +609,11 @@ fn build_deny_intruder_program() -> M6FixtureBootstrap {
 fn build_deny_reader_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     push_step(&mut program, wait_turn_step(TURN_DENY_R));
-    let claim = push_step(&mut program, step_claim());
+    let claim = push_claim_read(&mut program);
     let hr = arg_result(claim);
     let map = push_step(
         &mut program,
-        step_sb_map(hr, SHARED_BUFFER_ACCESS_READ).expect_ne(0),
+        step_sb_map(hr, SHARED_BUFFER_ACCESS_READ).expect_eq(FIRST_ROW_VA),
     );
     let vr = arg_result(map);
     push_step(&mut program, end_turn_step(TURN_DENY_R));
@@ -630,10 +678,7 @@ fn build_stale_writer_program() -> M6FixtureBootstrap {
     );
     push_step(&mut program, step_lane_ok(CHECK_STALE_SLOT_GEN, 0));
     let r_pid = push_step(&mut program, step_lane_query(CHECK_PEER_PID, ROLE_R));
-    push_step(
-        &mut program,
-        step_delegate(handle, arg_result(r_pid), Rights::READ.bits() as u64).expect_ne(0),
-    );
+    push_delegate_read(&mut program, handle, arg_result(r_pid));
     push_step(&mut program, end_turn_step(TURN_STALE_W));
 
     push_step(&mut program, wait_turn_step(TURN_STALE_W2));
@@ -660,11 +705,11 @@ fn build_stale_writer_program() -> M6FixtureBootstrap {
 fn build_stale_reader_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     push_step(&mut program, wait_turn_step(TURN_STALE_R));
-    let claim = push_step(&mut program, step_claim());
+    let claim = push_claim_read(&mut program);
     let hr = arg_result(claim);
     let map = push_step(
         &mut program,
-        step_sb_map(hr, SHARED_BUFFER_ACCESS_READ).expect_ne(0),
+        step_sb_map(hr, SHARED_BUFFER_ACCESS_READ).expect_eq(FIRST_ROW_VA),
     );
     let vr = arg_result(map);
     push_step(&mut program, step_sb_unmap(vr).expect_eq(0));
@@ -799,9 +844,10 @@ fn build_reuse_program() -> M6FixtureBootstrap {
         step_sb_allocate(KIB_64).expect_ne(STATUS_ENOSPC),
     );
     let h1 = arg_result(a1);
+    push_step(&mut program, step_lane_ok(CHECK_RECORD_OWNER_HANDLE, h1));
     let m1 = push_step(
         &mut program,
-        step_sb_map(h1, SHARED_BUFFER_ACCESS_READ_WRITE).expect_ne(0),
+        step_sb_map(h1, SHARED_BUFFER_ACCESS_READ_WRITE).expect_eq(FIRST_ROW_VA),
     );
     let v1 = arg_result(m1);
     push_step(
@@ -811,14 +857,17 @@ fn build_reuse_program() -> M6FixtureBootstrap {
     push_step(&mut program, step_sb_unmap(v1).expect_eq(0));
     push_step(&mut program, step_sb_release(h1).expect_eq(0));
 
+    push_step(&mut program, step_lane_ok(CHECK_REUSE_DIRTY_NEXT_RUN, 0));
     let a2 = push_step(
         &mut program,
         step_sb_allocate(KIB_64).expect_ne(STATUS_ENOSPC),
     );
     let h2 = arg_result(a2);
+    push_step(&mut program, step_lane_ok(CHECK_RECORD_OWNER_HANDLE, h2));
+    push_step(&mut program, step_lane_ok(CHECK_REUSE_GOT_DIRTIED_RUN, 0));
     let m2 = push_step(
         &mut program,
-        step_sb_map(h2, SHARED_BUFFER_ACCESS_READ_WRITE).expect_ne(0),
+        step_sb_map(h2, SHARED_BUFFER_ACCESS_READ_WRITE).expect_eq(FIRST_ROW_VA),
     );
     let v2 = arg_result(m2);
     push_step(
@@ -856,7 +905,10 @@ fn spawn_reuse_fixtures(phase_index: usize) {
 fn build_kernel_owned_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     push_step(&mut program, wait_exit_step(state_mut().last_reporter_pid));
-    let va = push_step(&mut program, step_lane_query(CHECK_KO_MAP, 0));
+    let va = push_step(
+        &mut program,
+        step_lane_query(CHECK_KO_MAP, 0).expect_eq(FIRST_ROW_VA),
+    );
     push_step(
         &mut program,
         M6FixtureStep::verify(arg_result(va), KO_BYTES, 0x3c, PATTERN_INCREMENTING),
@@ -982,6 +1034,45 @@ fn lane_check_handler(pid: u64, check: u64, arg: u64) -> u64 {
         }
         CHECK_RECORD_OWNER_HANDLE => {
             record_owner_handle(pid, arg);
+            0
+        }
+        CHECK_DELEGATED_READ_CHILD => {
+            let holder = read_child_holder(arg);
+            let peers = &state_mut().peer_pids;
+            if holder == HolderId(pid) || !peers.iter().any(|peer| HolderId(*peer) == holder) {
+                fatal_kernel_error("[M10.SB] delegated child holder is not a peer");
+            }
+            0
+        }
+        CHECK_CLAIMED_READ_CHILD => {
+            if read_child_holder(arg) != HolderId(pid) {
+                fatal_kernel_error("[M10.SB] claimed child holder mismatch");
+            }
+            0
+        }
+        CHECK_REUSE_DIRTY_NEXT_RUN => {
+            let (base, pages) = allocator()
+                .peek_bump_run(REUSE_PAGES as u64)
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] reuse bump region empty"));
+            if pages != REUSE_PAGES as u64 {
+                fatal_kernel_error("[M10.SB] reuse next run is short");
+            }
+            let dirty = unsafe {
+                core::slice::from_raw_parts_mut(physical_frame_ptr(base), KIB_64 as usize)
+            };
+            dirty.fill(0xa5);
+            state_mut().reuse_dirtied_base = base;
+            0
+        }
+        CHECK_REUSE_GOT_DIRTIED_RUN => {
+            let state = state_mut();
+            for page in 0..REUSE_PAGES {
+                let frame = inspect::frame_of(state.active_buffer_id, page as u32)
+                    .unwrap_or_else(|| fatal_kernel_error("[M10.SB] reuse frame missing"));
+                if frame != state.reuse_dirtied_base + page as u64 * PAGE {
+                    fatal_kernel_error("[M10.SB] reuse buffer did not receive the dirtied frames");
+                }
+            }
             0
         }
         CHECK_MAP => {
@@ -1158,6 +1249,7 @@ fn finish_all_exited() -> ! {
         ));
         fatal_kernel_error("[M10.SB] baseline mismatch");
     }
+    inspect::check_zero_page().unwrap_or_else(|message| fatal_kernel_error(message));
     kernel_log_line("[M10.SB] baseline OK");
     kernel_log_line("[M10.SB] PASS");
     qemu_exit(QEMU_EXIT_SUCCESS)
@@ -1224,6 +1316,7 @@ pub(crate) fn start_m10_shared_buffer_self_test(page_allocator: PageAllocator) -
                 .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] init id")),
             ko_token: None,
             ko_reclaimed_before: 0,
+            reuse_dirtied_base: 0,
         });
     }
     set_report_handler(report_handler);
