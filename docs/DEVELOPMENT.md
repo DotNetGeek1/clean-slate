@@ -230,7 +230,7 @@ For the M10 #200 service port, capability transfer on send and work sets:
 cargo xtask test-m10-port
 ```
 
-In order it runs `cargo test -p clean-slate-native-abi`; `cargo test -p clean-slate-port --features fake`; a `x86_64-unknown-uefi` build of `clean-slate-port` with feature `fake`; `cargo test -p clean-slate-kernel -- service::port sched::work_set sched::wait`; `build_m6_fixture_userspace`; then QEMU with feature `m10-port-self-test`, ordered `[M10.port]` serial markers and a 60 s timeout. On success it prints `[M10.port] PASS` (not `[M10  ] PASS`, which is the #119 aggregate gate). Aliases: `m10-port`, `m10.200`. See [GRAPHICS.md](GRAPHICS.md) Tests and gate.
+In order it runs `cargo test -p clean-slate-native-abi`; `cargo test -p clean-slate-port --features fake`; a `x86_64-unknown-uefi` build of `clean-slate-port` with feature `fake`; `cargo test -p clean-slate-kernel -- service::port sched::work_set sched::wait`; `build_m6_fixture_userspace` and `build_storage_userspace`; then QEMU with feature `m10-port-self-test`, ordered `[M10.port]` serial markers and a 60 s timeout. On success it prints `[M10.port] PASS` (not `[M10  ] PASS`, which is the #119 aggregate gate). Aliases: `m10-port`, `m10.200`. See [GRAPHICS.md](GRAPHICS.md) Tests and gate.
 
 For M4.2 kernel lifecycle control (host tests + optional QEMU acceptance):
 

@@ -757,7 +757,7 @@ On success it prints `[M10.contract] PASS`. It is a runner constituent (`scripts
 2. `cargo test -p clean-slate-port --features fake`;
 3. a `x86_64-unknown-uefi` build of `clean-slate-port` with feature `fake`;
 4. `cargo test -p clean-slate-kernel -- service::port sched::work_set sched::wait`;
-5. `build_m6_fixture_userspace`;
+5. `build_m6_fixture_userspace` and `build_storage_userspace`, since the feature embeds both ELFs;
 6. QEMU with feature `m10-port-self-test`, ordered `[M10.port]` markers and a 60 s timeout.
 
 On success it prints `[M10.port] PASS` (not `[M10  ] PASS`, which belongs to #119). It is a runner constituent and runs under `--exhaustive`.

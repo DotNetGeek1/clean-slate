@@ -1908,6 +1908,7 @@ fn run_m10_port_acceptance() -> Result<(), XtaskError> {
         &["--", "service::port", "sched::work_set", "sched::wait"],
     )?;
     build_m6_fixture_userspace(true)?;
+    build_storage_userspace(true)?;
     run_vm_inner(
         false,
         false,
