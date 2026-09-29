@@ -100,7 +100,7 @@ pub(crate) fn leaf(pid: u64, va: u64) -> Option<Leaf> {
 }
 
 /// Every entry of the zero page table still maps one frame read-only and NX, and that
-/// frame is still all zero.
+/// frame is still all zero. The CPU sets ACCESSED when an orphaned row is read.
 pub(crate) fn check_zero_page() -> Result<(), &'static str> {
     let zero_pt = state()
         .zero
@@ -109,7 +109,8 @@ pub(crate) fn check_zero_page() -> Result<(), &'static str> {
     let table = unsafe { page_table_mut(zero_pt) };
     let zero_frame = table[0].addr().as_u64();
     for entry in table.iter() {
-        if entry.flags() != READ_LEAF_FLAGS || entry.addr().as_u64() != zero_frame {
+        let flags = entry.flags() - PageTableFlags::ACCESSED;
+        if flags != READ_LEAF_FLAGS || entry.addr().as_u64() != zero_frame {
             return Err("shared-buffer zero page table entry changed");
         }
     }
