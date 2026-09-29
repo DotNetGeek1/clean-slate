@@ -530,7 +530,7 @@ Register convention (matches the network syscall, `SYSCALL_NR_NETWORK_CAPABILITY
 | 6 | `BIND_WAKE` | work-set handle, bit 0..=31 | `DISPLAY_PRESENT` + bound presenter | 0 |
 | 0, 7.. | reserved | — | — | `EINVAL` |
 
-Until the owning stage lands: `BIND_WAKE` returns `ENOSYS` until syscall 20 exists; `MAP_SCANOUT` and `PRESENT` return `ENOSYS` until #195's kernel-owned buffer stage (R2). Before then #111 proves `test-m10-framebuffer` with a kernel-internal present.
+Until the owning stage lands: `BIND_WAKE` returns `ENOSYS` until a later #111 stage wires it to the work sets (syscall 20); `MAP_SCANOUT` and `PRESENT` return `ENOSYS` until #195's kernel-owned buffer stage (R2). Before then #111 proves `test-m10-framebuffer` with a kernel-internal present.
 
 - **Presenter.** The first successful `MAP_SCANOUT` binds the caller's holder. `MAP_SCANOUT`, `PRESENT` and `BIND_WAKE` from any other holder → `NotPresenter`. Only process teardown releases the binding. `MAP_SCANOUT` is idempotent per index. Mappings are user read-write and NX, and persist across epoch bumps.
 - **Scanout buffers.** `SCANOUT_BUFFER_COUNT` (2) kernel-owned buffers of the reference mode (stride 5120, `byte_len` 4,096,000). The compositor renders into the one that is not in flight.
@@ -765,7 +765,7 @@ On success it prints `[M10.port] PASS` (not `[M10  ] PASS`, which belongs to #11
 
 The `fake` feature enables `graphics::fake`: `FakeDisplay`, a model of the display ABI with R8 copy semantics, a single present in flight, timeouts, reset and poisoning. It is for host tests only; production code must not enable it. `clean-slate-port` exposes `FakePort` / `FakeConnection` behind feature `fake` for the same port semantics in host tests (#112).
 
-`cargo xtask test-m10-framebuffer` (alias `m10-framebuffer`) is the #111 gate: `cargo test -p clean-slate-raster`, then a QEMU boot with `-vga std` that proves kernel-internal present, damage-only scanout copy, and guest aperture readback against host `clean-slate-raster` expectations (`[M10.2] PASS`). Screenshot validation joins it once #197's QMP client lands.
+`cargo xtask test-m10-framebuffer` (alias `m10-framebuffer`) is the #111 gate: `cargo test -p clean-slate-raster`, then a QEMU boot with `-vga std` that proves kernel-internal present, damage-only scanout copy, and guest aperture readback against host `clean-slate-raster` expectations (`[M10.2] PASS`). Screenshot validation is a separate #111 stage: a `QmpScriptDriver` `Screendump` step with a `check` against the host render, writing under `xtask_artifact_root()` (`target/xtask-artifacts/m10-framebuffer/`).
 
 Planned gates, each owned by its lane: `test-m10-shared-buffer` (#195), `test-m10-virtio-gpu` (#114), `test-m10-desktop` (#118), and `test-m10` with `[M10 ] PASS` (#119).
 

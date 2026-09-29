@@ -3738,7 +3738,10 @@ fn run_driven_acceptance_command(
                         );
                     }
                     if marker_set_is_ordered(marker_set, &M10_FRAMEBUFFER_ACCEPTANCE_MARKERS) {
-                        // TODO(#197): take the QMP screendump here (1280x800 PNG) and validate it against the host render; see docs/GRAPHICS.md.
+                        // TODO(#111 screenshot stage): boot this lane through a kernel-lane wrapper with
+                        // QmpScriptDriver::new("m10-framebuffer", steps, &xtask_artifact_root()) and a
+                        // ScriptStep::Screendump whose check compares against the host raster render;
+                        // see docs/DEVELOPMENT.md "Kernel lanes".
                         if let Err(error) = validate_m10_framebuffer_serial(&output) {
                             terminate_child(&mut child)?;
                             let _ = child.wait();

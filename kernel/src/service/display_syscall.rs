@@ -1,7 +1,7 @@
 //! Syscall 18 (display) wiring: the read-only subops (#111 D1).
 //!
 //! `MAP_SCANOUT` and `PRESENT` return `ENOSYS` until #195's kernel-owned scanout buffers land (W7,
-//! R2); `BIND_WAKE` returns `ENOSYS` until the work-set signal API lands (W2). Every status is the
+//! R2); `BIND_WAKE` returns `ENOSYS` until a later #111 stage wires it to the work sets. Every status is the
 //! frozen `docs/GRAPHICS.md` mapping; checks run in its order: length/pointer → capability → backend.
 
 use core::ptr;
