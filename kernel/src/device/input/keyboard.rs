@@ -90,6 +90,8 @@ const fn set2_usage_table() -> [u8; 256] {
     t[0x7D] = 0x61;
     t[0x7E] = 0x47;
     t[0x83] = 0x40;
+    // Alt+PrintScreen (SysRq); the #110 contract has no separate SysRq usage.
+    t[0x84] = 0x46;
     t
 }
 
@@ -147,7 +149,9 @@ pub(crate) enum Set2Event {
     DeviceReset,
     Overrun,
     ControllerReply,
-    Resync,
+    /// A byte that does not continue the Pause sequence: the sequence is lost and the byte must
+    /// be fed again from idle.
+    PauseBroken(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +188,12 @@ impl Set2Decoder {
             self.state = Set2State::Idle;
             return Set2Event::Overrun;
         }
+        // No set-2 sequence contains 0xAA, so it is the keyboard's BAT after a self-reset
+        // wherever it arrives.
+        if byte == 0xAA {
+            self.state = Set2State::Idle;
+            return Set2Event::DeviceReset;
+        }
         match self.state {
             Set2State::Idle => match byte {
                 0xE0 => {
@@ -198,7 +208,6 @@ impl Set2Decoder {
                     self.state = Set2State::Pause(1);
                     Set2Event::None
                 }
-                0xAA => Set2Event::DeviceReset,
                 0xFA | 0xFE | 0xEE => Set2Event::ControllerReply,
                 code => match set2_usage(false, code) {
                     Some(usage) => Set2Event::Key(usage, KeyState::Pressed),
@@ -254,7 +263,7 @@ impl Set2Decoder {
                     }
                 } else {
                     self.state = Set2State::Idle;
-                    Set2Event::Resync
+                    Set2Event::PauseBroken(byte)
                 }
             }
         }
@@ -323,10 +332,15 @@ mod tests {
     }
 
     #[test]
-    fn table_mappings_are_injective() {
+    fn table_mappings_are_injective_apart_from_sysrq() {
+        const ALT_SYSRQ: usize = 0x84;
         let mut seen = [false; 256];
-        for table in [&SET2_USAGE, &SET2_EXTENDED_USAGE] {
-            for &raw in table.iter().filter(|&&v| v != 0) {
+        for (table, alias) in [(&SET2_USAGE, Some(ALT_SYSRQ)), (&SET2_EXTENDED_USAGE, None)] {
+            let codes = table
+                .iter()
+                .enumerate()
+                .filter(|&(code, &v)| v != 0 && Some(code) != alias);
+            for (_, &raw) in codes {
                 assert!(!seen[raw as usize], "duplicate usage {raw:#04x}");
                 seen[raw as usize] = true;
             }
@@ -407,12 +421,39 @@ mod tests {
     }
 
     #[test]
-    fn pause_corruption_resync_then_key() {
+    fn pause_corruption_hands_back_the_breaking_byte_from_idle() {
         let mut dec = Set2Decoder::new();
-        let mut events = collect_keys(&mut dec, &[0xE1, 0x14, 0x33]);
-        assert_eq!(events, [Set2Event::Resync]);
-        events.extend(collect_keys(&mut dec, &[0x1C]));
-        assert_eq!(events[1], Set2Event::Key(KeyUsage(0x04), KeyState::Pressed));
+        let events = collect_keys(&mut dec, &[0xE1, 0x14, 0x33]);
+        assert_eq!(events, [Set2Event::PauseBroken(0x33)]);
+        assert_eq!(
+            dec.feed(0x33),
+            Set2Event::Key(KeyUsage(0x0B), KeyState::Pressed)
+        );
+    }
+
+    #[test]
+    fn bat_mid_sequence_is_a_device_reset() {
+        let mut dec = Set2Decoder::new();
+        for prefix in [&[0xE0][..], &[0xF0], &[0xE0, 0xF0], &[0xE1, 0x14]] {
+            assert!(collect_keys(&mut dec, prefix).is_empty());
+            assert_eq!(dec.feed(0xAA), Set2Event::DeviceReset);
+            assert_eq!(
+                dec.feed(0x1C),
+                Set2Event::Key(KeyUsage(0x04), KeyState::Pressed)
+            );
+        }
+    }
+
+    #[test]
+    fn alt_sysrq_reports_print_screen() {
+        let mut dec = Set2Decoder::new();
+        assert_eq!(
+            collect_keys(&mut dec, &[0x84, 0xF0, 0x84]),
+            [
+                Set2Event::Key(KeyUsage(0x46), KeyState::Pressed),
+                Set2Event::Key(KeyUsage(0x46), KeyState::Released),
+            ]
+        );
     }
 
     #[test]

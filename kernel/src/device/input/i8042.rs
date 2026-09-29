@@ -270,10 +270,11 @@ pub(super) fn enable_irqs<Io: ControllerIo>(
 /// Where decoded input goes; the kernel implementation is the raw-input queue.
 pub(super) trait InputSink {
     fn record(&mut self, device_index: u8, kind: RawInputKind);
-    /// Input from `device_index` was lost outside the queue (overrun, device reset).
+    /// Input from `device_index` was lost outside the queue (overrun, broken sequence).
     fn loss(&mut self, device_index: u8);
-    /// The device reset itself; its held state is gone and its generation moves on.
-    fn device_reset(&mut self, device_index: u8);
+    /// The device reset itself: its input since the last record is lost and it is unpublished
+    /// until its init program runs to Ready again.
+    fn device_lost(&mut self, device_index: u8);
     /// The device finished its init program and now produces input.
     fn device_ready(&mut self, device_index: u8);
 }
@@ -302,6 +303,7 @@ pub(crate) struct DriverStats {
     pub(crate) controller_replies: u32,
     pub(crate) mouse_resyncs: u32,
     pub(crate) mouse_overflows: u32,
+    pub(crate) mouse_resets: u32,
     pub(crate) init_drained: u32,
     /// Bytes an init program did not accept (scancodes typed during boot, stray bytes).
     pub(crate) init_noise: u32,
@@ -323,6 +325,7 @@ impl DriverStats {
         controller_replies: 0,
         mouse_resyncs: 0,
         mouse_overflows: 0,
+        mouse_resets: 0,
         init_drained: 0,
         init_noise: 0,
         init_discarded: 0,
@@ -349,7 +352,13 @@ impl Decoders {
         }
     }
 
-    fn keyboard_byte(&mut self, byte: u8, stats: &mut DriverStats, sink: &mut impl InputSink) {
+    /// Returns whether the keyboard reset itself and must run its init program again.
+    fn keyboard_byte(
+        &mut self,
+        byte: u8,
+        stats: &mut DriverStats,
+        sink: &mut impl InputSink,
+    ) -> bool {
         match self.keyboard.feed(byte) {
             Set2Event::Key(usage, state) => {
                 if self.pressed.filter(usage, state) {
@@ -370,7 +379,12 @@ impl Decoders {
                 }
             }
             Set2Event::Unmapped => bump(&mut stats.unmapped),
-            Set2Event::Resync => bump(&mut stats.keyboard_resyncs),
+            Set2Event::PauseBroken(refeed) => {
+                bump(&mut stats.keyboard_resyncs);
+                sink.loss(KEYBOARD_INDEX);
+                // The decoder is idle again, so this cannot recurse a second time.
+                return self.keyboard_byte(refeed, stats, sink);
+            }
             Set2Event::ControllerReply => bump(&mut stats.controller_replies),
             Set2Event::Overrun => {
                 bump(&mut stats.keyboard_overruns);
@@ -380,19 +394,22 @@ impl Decoders {
             }
             Set2Event::DeviceReset => {
                 bump(&mut stats.keyboard_resets);
-                self.keyboard.reset();
-                self.pressed.clear();
-                sink.loss(KEYBOARD_INDEX);
-                sink.device_reset(KEYBOARD_INDEX);
+                return true;
             }
             Set2Event::None | Set2Event::Ignored => {}
         }
+        false
     }
 
-    fn mouse_byte(&mut self, byte: u8, stats: &mut DriverStats, sink: &mut impl InputSink) {
+    /// Returns whether the mouse reset itself and must run its init program again.
+    fn mouse_byte(&mut self, byte: u8, stats: &mut DriverStats, sink: &mut impl InputSink) -> bool {
         match self.mouse.feed(byte) {
             MouseFeed::Pending => {}
             MouseFeed::Resync => bump(&mut stats.mouse_resyncs),
+            MouseFeed::DeviceReset => {
+                bump(&mut stats.mouse_resets);
+                return true;
+            }
             MouseFeed::Packet {
                 events,
                 axis_overflow,
@@ -405,6 +422,7 @@ impl Decoders {
                 }
             }
         }
+        false
     }
 }
 
@@ -486,10 +504,14 @@ impl Driver {
             };
             match (self.init_mut(port).status(), port) {
                 (InitStatus::Ready, Port::Keyboard) => {
-                    self.decoders.keyboard_byte(byte, &mut self.stats, sink);
+                    if self.decoders.keyboard_byte(byte, &mut self.stats, sink) {
+                        self.reinit(io, port, sink, timers);
+                    }
                 }
                 (InitStatus::Ready, Port::Aux) => {
-                    self.decoders.mouse_byte(byte, &mut self.stats, sink);
+                    if self.decoders.mouse_byte(byte, &mut self.stats, sink) {
+                        self.reinit(io, port, sink, timers);
+                    }
                 }
                 (InitStatus::Pending, _) => {
                     let step = self.init_mut(port).on_byte(byte);
@@ -517,6 +539,20 @@ impl Driver {
             bump(&mut self.stats.init_failures);
         }
         failed
+    }
+
+    /// A ready device reset itself: unpublish it and run its init program from the top, so
+    /// its mode (scan set, mouse protocol) is negotiated again before it produces input.
+    fn reinit<Io: ControllerIo>(
+        &mut self,
+        io: &mut Io,
+        port: Port,
+        sink: &mut impl InputSink,
+        timers: &mut impl ResponseTimers,
+    ) {
+        sink.device_lost(port.device_index());
+        let step = self.init_mut(port).start();
+        self.apply(io, port, step, sink, timers);
     }
 
     fn apply<Io: ControllerIo>(

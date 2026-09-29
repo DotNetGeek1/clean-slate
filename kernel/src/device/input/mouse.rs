@@ -3,6 +3,9 @@
 use clean_slate_graphics::input::{AxisValue120, KeyState, PointerButton};
 use clean_slate_graphics::raw_input::RawInputKind;
 
+const MOUSE_BAT_PASSED: u8 = 0xAA;
+const MOUSE_RESET_ID: u8 = 0x00;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MouseProtocol {
     Standard,
@@ -51,6 +54,8 @@ impl MouseEvents {
 pub(crate) enum MouseFeed {
     Pending,
     Resync,
+    /// `AA 00` at a packet start: the mouse reset itself and is back in standard mode.
+    DeviceReset,
     Packet {
         events: MouseEvents,
         axis_overflow: bool,
@@ -77,6 +82,13 @@ impl MousePacketDecoder {
     pub(crate) fn feed(&mut self, byte: u8) -> MouseFeed {
         if self.len == 0 && byte & 0x08 == 0 {
             return MouseFeed::Resync;
+        }
+        // A header of 0xAA would also need Y overflow with a zero X delta, which real motion
+        // does not produce.
+        if self.len == 1 && self.buf[0] == MOUSE_BAT_PASSED && byte == MOUSE_RESET_ID {
+            self.len = 0;
+            self.buttons = 0;
+            return MouseFeed::DeviceReset;
         }
 
         self.buf[self.len] = byte;
@@ -185,10 +197,34 @@ mod tests {
         for &b in bytes {
             match decoder.feed(b) {
                 MouseFeed::Packet { events, .. } => out.extend(events.iter()),
-                MouseFeed::Pending | MouseFeed::Resync => {}
+                MouseFeed::Pending | MouseFeed::Resync | MouseFeed::DeviceReset => {}
             }
         }
         out
+    }
+
+    #[test]
+    fn bat_and_id_at_a_packet_start_is_a_device_reset() {
+        let mut dec = MousePacketDecoder::new(MouseProtocol::Explorer);
+        assert!(packet_events(&mut dec, &[0x09, 0, 0, 0]).len() == 1);
+        assert!(matches!(dec.feed(0xAA), MouseFeed::Pending));
+        assert!(matches!(dec.feed(0x00), MouseFeed::DeviceReset));
+        // Held buttons are forgotten: the next packet reports the press again.
+        assert_eq!(
+            packet_events(&mut dec, &[0x09, 0, 0, 0]),
+            [RawInputKind::Button {
+                button: PointerButton::Left,
+                state: KeyState::Pressed
+            }]
+        );
+    }
+
+    #[test]
+    fn aa_header_with_motion_is_still_a_packet() {
+        let mut dec = MousePacketDecoder::new(MouseProtocol::Standard);
+        assert!(matches!(dec.feed(0xAA), MouseFeed::Pending));
+        assert!(matches!(dec.feed(0x05), MouseFeed::Pending));
+        assert!(matches!(dec.feed(0x00), MouseFeed::Packet { .. }));
     }
 
     fn feed_packet(decoder: &mut MousePacketDecoder, bytes: &[u8]) -> MouseFeed {

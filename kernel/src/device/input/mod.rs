@@ -147,10 +147,16 @@ impl InputState {
         self.signal_input_work();
     }
 
-    fn device_reset(&mut self, index: u8) {
-        if self.device(index).is_some() {
-            self.publish(index, true);
+    /// The loss is queued while the old generation is still published, so the consumer drops
+    /// that device's held state before the device reads as `None`.
+    fn device_lost(&mut self, index: u8) {
+        if self.device(index).is_none() {
+            return;
         }
+        self.loss(index);
+        self.publish(index, false);
+        self.readiness_changes = self.readiness_changes.saturating_add(1);
+        self.signal_input_work();
     }
 
     fn device_info(&self) -> InputDeviceInfo {
@@ -202,8 +208,8 @@ impl i8042::InputSink for QueueSink {
         input_mut().loss(device_index);
     }
 
-    fn device_reset(&mut self, device_index: u8) {
-        input_mut().device_reset(device_index);
+    fn device_lost(&mut self, device_index: u8) {
+        input_mut().device_lost(device_index);
     }
 
     fn device_ready(&mut self, device_index: u8) {
@@ -333,13 +339,14 @@ mod tests {
     }
 
     #[test]
-    fn device_generations_start_at_one_bump_on_reset_and_skip_zero() {
+    fn device_generations_start_at_one_bump_on_ready_again_and_skip_zero() {
         let mut state = state_with_devices();
         assert_eq!(
             state.device(KEYBOARD_INDEX).map(|d| d.generation()),
             Some(1)
         );
-        state.device_reset(KEYBOARD_INDEX);
+        state.device_lost(KEYBOARD_INDEX);
+        state.device_ready(KEYBOARD_INDEX);
         assert_eq!(
             state.device(KEYBOARD_INDEX).map(|d| d.generation()),
             Some(2)
@@ -350,12 +357,34 @@ mod tests {
     }
 
     #[test]
+    fn a_lost_device_queues_its_loss_then_reads_none_until_ready() {
+        let mut state = state_with_devices();
+        state.device_lost(KEYBOARD_INDEX);
+        assert_eq!(state.readiness_changes, 1);
+        assert_eq!(state.wake_edges, 1);
+        assert_eq!(state.device_info().keyboard, None);
+        assert!(state.device_info().mouse.is_some());
+        state.record(KEYBOARD_INDEX, key(), 10);
+        assert_eq!(state.queue.len(), 0);
+
+        let overflow = state
+            .queue
+            .pop(11)
+            .expect("the reset is reported as a loss");
+        assert_eq!(overflow.kind, RawInputKind::Overflow { dropped: 1 });
+        assert_eq!(overflow.device.generation(), 1);
+
+        state.device_lost(KEYBOARD_INDEX);
+        assert_eq!(state.readiness_changes, 1);
+    }
+
+    #[test]
     fn absent_devices_report_none_and_queue_nothing() {
         let mut state = InputState::new();
         state.publish(KEYBOARD_INDEX, false);
         state.record(KEYBOARD_INDEX, key(), 10);
         state.loss(KEYBOARD_INDEX);
-        state.device_reset(KEYBOARD_INDEX);
+        state.device_lost(KEYBOARD_INDEX);
         let info = state.device_info();
         assert_eq!((info.keyboard, info.mouse), (None, None));
         assert_eq!((info.queue_depth, info.record_bytes), (128, 32));

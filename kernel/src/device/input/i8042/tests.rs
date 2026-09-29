@@ -231,7 +231,7 @@ impl ControllerIo for FakeController {
 enum Sunk {
     Record(u8, RawInputKind),
     Loss(u8),
-    Reset(u8),
+    Lost(u8),
     Ready(u8),
 }
 
@@ -247,8 +247,8 @@ impl InputSink for RecordingSink {
         self.0.push(Sunk::Loss(device_index));
     }
 
-    fn device_reset(&mut self, device_index: u8) {
-        self.0.push(Sunk::Reset(device_index));
+    fn device_lost(&mut self, device_index: u8) {
+        self.0.push(Sunk::Lost(device_index));
     }
 
     fn device_ready(&mut self, device_index: u8) {
@@ -771,22 +771,77 @@ fn keyboard_overrun_is_a_loss_and_forgets_held_keys() {
 }
 
 #[test]
-fn unsolicited_keyboard_bat_reports_loss_before_the_reset() {
+fn keyboard_self_reset_is_lost_then_runs_its_init_program_again() {
     let mut harness = ready_harness(MouseProtocol::Standard);
-    for byte in [0x12, 0xAA, 0x12] {
+    let writes = harness.fake.device_writes.len();
+    // 0xAA mid-sequence (after the E0 prefix) is still the BAT.
+    for byte in [0x12, 0xE0, 0xAA] {
+        harness.fake.push(byte, false);
+    }
+    harness.pump();
+    assert_eq!(
+        harness.sink.0,
+        [
+            key(0xE1, KeyState::Pressed),
+            Sunk::Lost(KEYBOARD_INDEX),
+            Sunk::Ready(KEYBOARD_INDEX),
+        ]
+    );
+    assert_eq!(harness.driver.stats.keyboard_resets, 1);
+    assert_eq!(harness.fake.device_writes[writes], (DEVICE_RESET, false));
+    assert_eq!(harness.timers.armed, [None, None]);
+    harness.sink.0.clear();
+    // Held keys were forgotten with the old decoder.
+    harness.fake.push(0x12, false);
+    harness.pump();
+    assert_eq!(harness.sink.0, [key(0xE1, KeyState::Pressed)]);
+}
+
+#[test]
+fn keyboard_that_goes_silent_after_a_self_reset_fails_on_its_timeout() {
+    let mut harness = ready_harness(MouseProtocol::Standard);
+    harness.fake.push(0xAA, false);
+    harness.fake.keyboard_present = false;
+    harness.pump();
+    assert_eq!(harness.sink.0, [Sunk::Lost(KEYBOARD_INDEX)]);
+    assert_eq!(harness.driver.status().0, InitStatus::Pending);
+    assert!(harness.expire(KEYBOARD_INDEX));
+    assert_eq!(
+        harness.driver.status().0,
+        InitStatus::Failed(InitFailure::Timeout)
+    );
+    assert_eq!(harness.driver.status().1, InitStatus::Ready);
+}
+
+#[test]
+fn mouse_self_reset_renegotiates_its_protocol_before_producing_input() {
+    let mut harness = ready_harness(MouseProtocol::Explorer);
+    harness.fake.mouse_id = 0;
+    harness.fake.push(0xAA, true);
+    harness.fake.push(0x00, true);
+    harness.pump();
+    assert_eq!(
+        harness.sink.0,
+        [Sunk::Lost(MOUSE_INDEX), Sunk::Ready(MOUSE_INDEX)]
+    );
+    assert_eq!(harness.driver.stats.mouse_resets, 1);
+    assert_eq!(harness.driver.status().1, InitStatus::Ready);
+    assert_eq!(harness.driver.mouse_protocol(), MouseProtocol::Explorer);
+    assert_eq!(harness.timers.armed, [None, None]);
+}
+
+#[test]
+fn broken_pause_sequence_is_a_loss_and_the_byte_decodes_from_idle() {
+    let mut harness = ready_harness(MouseProtocol::Standard);
+    for byte in [0xE1, 0x14, 0x1C] {
         harness.fake.push(byte, false);
     }
     let (sunk, stats) = drain(&mut harness);
     assert_eq!(
         sunk,
-        [
-            key(0xE1, KeyState::Pressed),
-            Sunk::Loss(KEYBOARD_INDEX),
-            Sunk::Reset(KEYBOARD_INDEX),
-            key(0xE1, KeyState::Pressed),
-        ]
+        [Sunk::Loss(KEYBOARD_INDEX), key(0x04, KeyState::Pressed)]
     );
-    assert_eq!(stats.keyboard_resets, 1);
+    assert_eq!(stats.keyboard_resyncs, 1);
 }
 
 #[test]
