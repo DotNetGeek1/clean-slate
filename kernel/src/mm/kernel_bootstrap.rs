@@ -120,7 +120,7 @@ pub(crate) fn install_kernel_owned_root(
 /// address with 4 KiB leaves, so nothing past the validated range is reachable. The range sits in
 /// PML4 slot 256, which every process root shares, and must already be excluded from the cached
 /// physmap. Page-table frames are permanent.
-#[cfg(feature = "m10-framebuffer-self-test")]
+#[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
 pub(crate) fn map_device_aperture_uncached(
     root_frame: u64,
     allocator: &mut PageAllocator,
@@ -161,13 +161,13 @@ pub(crate) fn map_device_aperture_uncached(
 }
 
 /// Proof that `map_device_aperture_uncached` mapped this range; only that function creates one.
-#[cfg(feature = "m10-framebuffer-self-test")]
+#[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
 pub(crate) struct UncachedAperture {
     phys_base: u64,
     map_len: u64,
 }
 
-#[cfg(feature = "m10-framebuffer-self-test")]
+#[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
 impl UncachedAperture {
     pub(crate) fn phys_base(&self) -> u64 {
         self.phys_base

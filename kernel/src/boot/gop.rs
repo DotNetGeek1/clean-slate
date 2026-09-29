@@ -97,7 +97,7 @@ pub(crate) enum GopRejection {
     RangeOverflow,
     BeyondPhysmapSpan,
     OverlapsUsableRam,
-    #[cfg(feature = "m10-framebuffer-self-test")]
+    #[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
     ApertureMapFailed,
 }
 
@@ -119,7 +119,7 @@ impl GopRejection {
             Self::RangeOverflow => "range-overflow",
             Self::BeyondPhysmapSpan => "beyond-physmap-span",
             Self::OverlapsUsableRam => "overlaps-usable-ram",
-            #[cfg(feature = "m10-framebuffer-self-test")]
+            #[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
             Self::ApertureMapFailed => "aperture-map-failed",
         }
     }

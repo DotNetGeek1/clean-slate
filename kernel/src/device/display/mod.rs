@@ -29,7 +29,7 @@ use clean_slate_graphics::display::{PresentRequest, PresentState};
 use clean_slate_graphics::{BufferRect, DisplayMode};
 
 use crate::arch::x86_64::cpu::without_interrupts;
-#[cfg(feature = "m10-framebuffer-self-test")]
+#[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
 use crate::boot::gop::BootFramebuffer;
 use crate::sync::global_cell::GlobalCell;
 
@@ -179,7 +179,7 @@ pub(crate) fn install_gop_display() -> Result<(), DisplayError> {
 
 /// Installs the GOP backend over the aperture `map_device_aperture_uncached` mapped for
 /// `framebuffer`.
-#[cfg(feature = "m10-framebuffer-self-test")]
+#[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
 pub(crate) fn install_gop_display(
     framebuffer: &BootFramebuffer,
     aperture: crate::mm::kernel_bootstrap::UncachedAperture,

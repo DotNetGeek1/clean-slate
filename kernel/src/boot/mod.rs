@@ -395,7 +395,7 @@ fn install_display_backend(framebuffer: Result<gop::BootFramebuffer, gop::GopRej
 
 /// Maps the captured aperture uncached and installs the GOP backend over it. Every failure leaves
 /// the system with no display backend (`ENODEV` on syscall 18) and boot continues.
-#[cfg(feature = "m10-framebuffer-self-test")]
+#[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
 fn install_display_backend(
     kernel_root: u64,
     allocator: &mut PageAllocator,
@@ -500,7 +500,7 @@ fn run_inner() -> Result<(), &'static str> {
     ));
     #[cfg(not(any(test, feature = "m10-framebuffer-self-test")))]
     install_display_backend(boot_framebuffer);
-    #[cfg(feature = "m10-framebuffer-self-test")]
+    #[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
     install_display_backend(kernel_root, &mut allocator, boot_framebuffer);
     set_kernel_root_frame(kernel_root);
     set_kernel_direct_map_ready();
