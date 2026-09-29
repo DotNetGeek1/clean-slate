@@ -63,7 +63,6 @@ impl ConsumerSlot {
         }
     }
 
-    #[cfg(any(test, feature = "m10-input-self-test"))]
     fn release(&mut self, holder: HolderId) -> bool {
         if self.holder != Some(holder) {
             return false;
@@ -168,7 +167,6 @@ impl InputState {
         }
     }
 
-    #[cfg(any(test, feature = "m10-input-self-test"))]
     fn release_consumer(&mut self, holder: HolderId) -> usize {
         if !self.consumer.release(holder) {
             return 0;
@@ -281,7 +279,6 @@ pub(crate) fn read_one() -> Option<RawInputRecord> {
 /// Teardown slot 3 of the shared hook block (after the port and presenter, before
 /// `revoke_for_holder`). Unread records become one pending `Overflow`, so the next consumer
 /// resets its seat instead of seeing a dead holder's stale presses.
-#[cfg(any(test, feature = "m10-input-self-test"))]
 pub(crate) fn release_consumer_for_holder(holder: HolderId) -> usize {
     without_interrupts(|| input_mut().release_consumer(holder))
 }
@@ -458,16 +455,6 @@ mod tests {
         assert_eq!(overflow.kind, RawInputKind::Overflow { dropped: 2 });
         assert_eq!(overflow.seq, 3);
         assert_eq!(state.queue.pop(20), None);
-    }
-
-    #[test]
-    fn teardown_entry_points_release_the_global_binding_exactly_once() {
-        let holder = HolderId(0x113);
-        assert_eq!(bind_consumer(holder), Ok(()));
-        assert_eq!(consumer_bindings_for(holder), 1);
-        assert_eq!(release_consumer_for_holder(holder), 1);
-        assert_eq!(release_consumer_for_holder(holder), 0);
-        assert_eq!(consumer_bindings_for(holder), 0);
     }
 
     #[test]

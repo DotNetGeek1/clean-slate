@@ -14,6 +14,7 @@ use crate::capability::object::{
     reclaim_object_requests_for_holder, recover_object_queue_for_service_holder_exit,
 };
 use crate::capability::{revoke_for_holder, revoke_for_process_resource};
+use crate::device::input;
 use crate::ipc::endpoint_table_mut;
 use crate::ipc::IpcProcessResources;
 use crate::mm::address_space::activate_address_space_root;
@@ -334,7 +335,7 @@ fn run_teardown_hook(
         }
         TeardownHook::Port => released.holder.ports = release_ports(ctx),
         TeardownHook::DisplayPresenter => release_display_presenter(ctx)?,
-        TeardownHook::InputConsumer => release_input_consumer(ctx)?,
+        TeardownHook::InputConsumer => release_input_consumer(ctx),
         TeardownHook::WorkSet => released.holder.work_sets = release_work_set(ctx),
         TeardownHook::RevokeHolderCapabilities => {
             revoke_for_holder(holder);
@@ -370,8 +371,8 @@ fn release_display_presenter(_ctx: &mut TeardownContext<'_>) -> Result<(), &'sta
     Ok(())
 }
 
-fn release_input_consumer(_ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {
-    Ok(())
+fn release_input_consumer(ctx: &mut TeardownContext<'_>) {
+    input::release_consumer_for_holder(HolderId(ctx.process_id));
 }
 
 fn release_work_set(ctx: &mut TeardownContext<'_>) -> usize {
@@ -851,6 +852,37 @@ mod tests {
         );
         assert_eq!(result, Err("port hook failed"));
         assert_eq!(stopped, [TeardownHook::Port]);
+    }
+
+    #[test]
+    fn input_consumer_hook_hands_the_seat_to_the_next_holder() {
+        let exiting = HolderId(0x113);
+        let next = HolderId(0x114);
+        assert_eq!(input::bind_consumer(exiting), Ok(()));
+        assert!(input::bind_consumer(next).is_err());
+
+        let mut allocator = test_allocator();
+        let mut ctx = TeardownContext {
+            process_id: exiting.0,
+            instance_generation: InstanceGeneration(1),
+            address_space_root: 0x20_0000,
+            allocator: &mut allocator,
+        };
+        let mut released = ReleasedResources::default();
+        for _ in 0..2 {
+            assert_eq!(
+                run_teardown_hook(
+                    TeardownHook::InputConsumer,
+                    &mut ctx,
+                    &CURRENT_TEARDOWN,
+                    &mut released
+                ),
+                Ok(())
+            );
+            assert_eq!(input::consumer_bindings_for(exiting), 0);
+        }
+        assert_eq!(input::bind_consumer(next), Ok(()));
+        assert_eq!(input::release_consumer_for_holder(next), 1);
     }
 
     /// Calls that dismantle part of a registered process. Outside the teardown

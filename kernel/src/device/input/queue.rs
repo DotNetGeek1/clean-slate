@@ -125,7 +125,6 @@ impl<const N: usize> RawInputQueue<N> {
         edge
     }
 
-    #[cfg(any(test, feature = "m10-input-self-test"))]
     pub(crate) fn clear_into_loss(&mut self) {
         if self.len == 0 {
             return;
