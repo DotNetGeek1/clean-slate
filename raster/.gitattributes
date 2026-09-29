@@ -1,0 +1,3 @@
+# gen-raster-font embeds the BDF's SHA-256; keep the vendored bytes exact on every checkout.
+fonts/spleen-8x16.bdf -text
+fonts/LICENSE.spleen text eol=lf

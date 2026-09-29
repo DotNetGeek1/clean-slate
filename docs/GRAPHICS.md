@@ -9,6 +9,7 @@ The code is authoritative. Offsets, constants and error codes live in three crat
 | `clean-slate-graphics` | `graphics/` | geometry, pixels, reference mode, ids, limits, 64-byte protocol codecs, display/input ABI wire types, raw input records, and the reference state machines (roles, surfaces, buffers, windows, input trackers, object tables, connection admission, `FakeDisplay`) |
 | `clean-slate-native-abi` | `native-abi/` | `SharedBufferId`, `SharedBufferAccess`, proposed #195 memory limits; port and work-set ABI (`port.rs`, `work_set.rs`, `status.rs`, #200) |
 | `clean-slate-capability` | `capability/` | `ResourceClass`, `Rights`, `ResourceRef` constructors, delegation checks, syscall numbers and status sentinels |
+| `clean-slate-raster` | `raster/` | CPU rasterizer and bootstrap text over `clean-slate-graphics` buffer layouts; Spleen 8x16 vendored under BSD-2-Clause. The kernel depends on it (GOP RGBX conversion, framebuffer lane), so it must stay `no_std`, `forbid(unsafe_code)` and allocation-free, with `clean-slate-graphics` as its only dependency |
 
 Items marked **(planned)** are fixed in shape but not implemented; their owning lane implements them without changing this contract. Everything else is landed and host-tested (`cargo xtask test-m10-contract`).
 
@@ -70,7 +71,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 | 0 | #110 | `graphics/` (whole crate); `native-abi/` skeleton; M10 classes, rights and syscall reservations in `capability/`; `cargo xtask test-m10-contract`; this document |
 | 1 | #195 | `native-abi/src/shared_buffer.rs` contents and memory-level limits; `kernel/src/mm/shared_buffer.rs`, `kernel/src/mm/shared_mapping.rs` (planned); syscall 16; first stage enables and verifies `EFER.NXE` (A4); gate `test-m10-shared-buffer` (planned) |
 | 1 | #200 | port and work-set ABI in `native-abi` (`port.rs`, `work_set.rs`, `status.rs`); class-agnostic port engine in `port/` (`clean-slate-port`, feature `fake` for host tests); `kernel/src/service/port.rs`, `kernel/src/service/port_syscall.rs`, `kernel/src/sched/work_set.rs`; syscalls 17 and 20; capability transfer on send; gate `test-m10-port` |
-| 1 | #111 | `raster/` (`clean-slate-raster`); `kernel/src/boot/gop.rs`; `kernel/src/device/display/{mod.rs, gop.rs}`; `kernel/src/service/display_syscall.rs`; syscall 18; gate `test-m10-framebuffer` (all planned) |
+| 1 | #111 | **Landed:** GOP framebuffer backend at 1280x800 Xrgb8888 (BGRX; RGBX converted at present-copy), aperture excluded from the write-back direct map and mapped uncached (UC) where the write path is built (WC via PAT deferred, P10 limitation; the inherited firmware identity alias is covered in ARCHITECTURE.md "M1 virtual memory layout"); `raster/` (`clean-slate-raster`, kernel dependency by design); `kernel/src/boot/gop.rs`; `kernel/src/device/display/{mod.rs, gop.rs}`; syscall 18 `FIND_HANDLE` / `QUERY_MODE` / `PRESENT_STATUS` live (`MAP_SCANOUT` / `PRESENT` `ENOSYS` until #195 S6; `BIND_WAKE` `ENOSYS` until a later #111 stage wires it to the #200 work sets); missing GOP/mode => no backend (`ENODEV`), boot continues; gate `cargo xtask test-m10-framebuffer` (`-vga std`) |
 | 1 | #113 | `kernel/src/device/input/{mod.rs, i8042.rs}`; `kernel/src/service/input_syscall.rs`; syscall 19; scancode to HID usage table in `graphics::input` (all planned) |
 | 1 | #196 | `kernel/src/device/virtio/{modern.rs, modern/, virtqueue.rs, dma.rs}`; `kernel/src/sched/timeout.rs` (W3); `cargo xtask test-m10-virtio-modern` |
 | 1 | #197 | `xtask/src/qmp/` (QMP endpoint, client, input and screendump helpers, PPM to PNG, marker-paced script driver); `AcceptanceDriver` hooks in `xtask/src/main.rs`; gate `test-qmp-smoke` |
@@ -140,7 +141,7 @@ Numbers are reserved in `clean_slate_capability::syscall_abi` and aliased in `na
 |---|---|---|---|
 | 16 | `SYSCALL_NR_SHARED_BUFFER` | #195 | `ENOSYS` for every subop |
 | 17 | `SYSCALL_NR_SERVICE_PORT` | #200 | implemented: subops 1–9 ([Service port ABI](#service-port-abi-syscall-17)); 0 and 10.. → `EINVAL` |
-| 18 | `SYSCALL_NR_DISPLAY` | #111, #114 | `ENOSYS` for every subop; subops frozen in `graphics::abi::display` |
+| 18 | `SYSCALL_NR_DISPLAY` | #111, #114 | subops 1, 2, 5 (`FIND_HANDLE`, `QUERY_MODE`, `PRESENT_STATUS`) implemented; 3, 4 (`MAP_SCANOUT`, `PRESENT`) `ENOSYS` until #195 S6; 6 (`BIND_WAKE`) `ENOSYS` until a later #111 stage wires it to the #200 work sets; 0 and 7.. `EINVAL`; subops frozen in `graphics::abi::display` |
 | 19 | `SYSCALL_NR_INPUT` | #113 | `ENOSYS` for every subop; subops frozen in `graphics::abi::input` |
 | 20 | `SYSCALL_NR_WORK_SET` | #200 | implemented: subops 1–4 ([Work set ABI](#work-set-abi-syscall-20)); 0 and 5.. → `EINVAL` |
 
@@ -515,7 +516,7 @@ Per-frame limits: `Damage` carries at most `DAMAGE_RECTS_PER_FRAME` (5) `BufferR
 
 ## Display ABI (syscall 18)
 
-Authoritative: `graphics::abi::display`, `graphics::abi::status`. Kernel implementation: #111 (GOP) and #114 (VirtIO-GPU), both behind one `ScanoutBackend` (planned).
+Authoritative: `graphics::abi::display`, `graphics::abi::status`. Kernel implementation: #111 GOP (landed) and #114 VirtIO-GPU (planned), both behind one `ScanoutBackend`.
 
 Register convention (matches the network syscall, `SYSCALL_NR_NETWORK_CAPABILITY` = 14): `rax` = 18, `rdi` = subop, `rsi` = capability handle (ignored by `FIND_HANDLE`), `rdx`, `r10`, `r8`, `r9` = arguments; `rax` out = success value or a status sentinel. User pointers are validated over the exact declared struct length; a wrong length is `EINVAL`. **Non-blocking**: waiting happens only through work sets.
 
@@ -529,7 +530,7 @@ Register convention (matches the network syscall, `SYSCALL_NR_NETWORK_CAPABILITY
 | 6 | `BIND_WAKE` | work-set handle, bit 0..=31 | `DISPLAY_PRESENT` + bound presenter | 0 |
 | 0, 7.. | reserved | — | — | `EINVAL` |
 
-Until the owning stage lands: `BIND_WAKE` returns `ENOSYS` until syscall 20 exists; `MAP_SCANOUT` and `PRESENT` return `ENOSYS` until #195's kernel-owned buffer stage (R2). Before then #111 proves `test-m10-framebuffer` with a kernel-internal present.
+Until the owning stage lands: `BIND_WAKE` returns `ENOSYS` until a later #111 stage wires it to the work sets (syscall 20); `MAP_SCANOUT` and `PRESENT` return `ENOSYS` until #195's kernel-owned buffer stage (R2). Before then #111 proves `test-m10-framebuffer` with a kernel-internal present.
 
 - **Presenter.** The first successful `MAP_SCANOUT` binds the caller's holder. `MAP_SCANOUT`, `PRESENT` and `BIND_WAKE` from any other holder → `NotPresenter`. Only process teardown releases the binding. `MAP_SCANOUT` is idempotent per index. Mappings are user read-write and NX, and persist across epoch bumps.
 - **Scanout buffers.** `SCANOUT_BUFFER_COUNT` (2) kernel-owned buffers of the reference mode (stride 5120, `byte_len` 4,096,000). The compositor renders into the one that is not in flight.
@@ -764,7 +765,9 @@ On success it prints `[M10.port] PASS` (not `[M10  ] PASS`, which belongs to #11
 
 The `fake` feature enables `graphics::fake`: `FakeDisplay`, a model of the display ABI with R8 copy semantics, a single present in flight, timeouts, reset and poisoning. It is for host tests only; production code must not enable it. `clean-slate-port` exposes `FakePort` / `FakeConnection` behind feature `fake` for the same port semantics in host tests (#112).
 
-Planned gates, each owned by its lane: `test-m10-shared-buffer` (#195), `test-m10-framebuffer` (#111, `-vga std`), `test-m10-virtio-gpu` (#114), `test-m10-desktop` (#118), and `test-m10` with `[M10 ] PASS` (#119).
+`cargo xtask test-m10-framebuffer` (alias `m10-framebuffer`) is the #111 gate: `cargo test -p clean-slate-raster`, then a QEMU boot with `-vga std` that proves kernel-internal present, damage-only scanout copy, and guest aperture readback against host `clean-slate-raster` expectations (`[M10.2] PASS`). Screenshot validation is a separate #111 stage: a `QmpScriptDriver` `Screendump` step with a `check` against the host render, writing under `xtask_artifact_root()` (`target/xtask-artifacts/m10-framebuffer/`).
+
+Planned gates, each owned by its lane: `test-m10-shared-buffer` (#195), `test-m10-virtio-gpu` (#114), `test-m10-desktop` (#118), and `test-m10` with `[M10 ] PASS` (#119).
 
 Contract-level properties that are host-tested today: the size and layout assertions (`frame_layout_assertions`, `abi_size_assertions`, `state_sizes_stay_bounded`), golden frames and round trips for every message, the malformed-frame matrices, negotiation, the role matrix, the buffer handoff property test (`property_buffer_handoff_conserves_buffers`), the scanout model property test (`property_double_buffered_producer_matches_scanout_model`), and the capability `valid_for` and delegation matrices.
 
@@ -798,4 +801,4 @@ Scope notes against the #110 issue text:
 - **Capability classes.** The scope lists "shared-buffer/surface" and "window authority" classes. Surfaces and windows are deliberately *not* kernel capabilities: they are connection-scoped compositor objects, and window authority is the `Graphics` role rights. The kernel classes are exactly `SharedBuffer`, `Graphics`, `Display` and `Input`.
 - **Focus.** "create/show/hide/move/resize/focus/close" maps to `CreateWindow`, `Show`, `Hide`, `BeginMove`, `BeginResize`, `CloseRequested` / `DestroyWindow`. Focus is compositor policy, reported by `KeyboardFocus` and `Configure` `ACTIVATED`; there is no client focus request.
 - **Frame opportunities.** Withholding frame callbacks from occluded surfaces, and the no-busy-poll wake model, are recorded in [Frames](#frames) and [Event-driven rule and failure states](#event-driven-rule-and-failure-states).
-- **Reserved syscalls.** Syscalls 16, 18 and 19 fall through the dispatcher's default arm to `ENOSYS`; 17 and 20 are dispatched to the port and work-set handlers. Kernel host tests cover the default arm with `dispatch_native_unknown_nr_returns_native_enosys_sentinel` (unrelated number) and `dispatch_native_reserved_m10_nrs_return_enosys`, which lists exactly the M10 numbers still unimplemented on this tree (16, 18, 19). The PR that lands later re-composes it (W12).
+- **Reserved syscalls.** Each row of the syscall table above carries its own status. Syscalls 16 and 19 fall through the dispatcher's default arm to `ENOSYS`; 17 and 20 are dispatched to the port and work-set handlers, and 18 to the display handler. Kernel host tests cover the default arm with `dispatch_native_unknown_nr_returns_native_enosys_sentinel` (unrelated number) and `dispatch_native_reserved_m10_nrs_return_enosys`, which lists exactly what is still unimplemented on this tree: 16 and 19, plus syscall 18 subops 3, 4 and 6 (`ENOSYS`) with subop 0 `EINVAL`. The PR that lands later re-composes it (W12).

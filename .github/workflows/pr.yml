@@ -10,6 +10,7 @@ on:
       - "native-abi/**"
       - "network/**"
       - "port/**"
+      - "raster/**"
       - "store/**"
       - "fixtures/**"
       - "xtask/**"
@@ -30,6 +31,7 @@ on:
       - "native-abi/**"
       - "network/**"
       - "port/**"
+      - "raster/**"
       - "store/**"
       - "fixtures/**"
       - "xtask/**"
@@ -80,6 +82,9 @@ jobs:
           cargo clippy -p clean-slate-network --all-targets -- -D warnings
           cargo clippy -p clean-slate-network --all-targets --features alloc -- -D warnings
           cargo clippy -p clean-slate-network --all-targets --features alloc,tls -- -D warnings
+
+      - name: Clippy (raster)
+        run: cargo clippy -p clean-slate-raster --all-targets -- -D warnings
 
       - name: Clippy (capability)
         run: cargo clippy -p clean-slate-capability --all-targets -- -D warnings
@@ -141,6 +146,7 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-rootfs-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-nxe-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-virtio-modern-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-framebuffer-self-test -- -D warnings
           # m9-linux-fs-self-test implies m6-object-self-test and embeds the storage
           # userspace ELF at build time; like the M5/M6 self-test features it is
           # built (with RUSTFLAGS=-D warnings) by the acceptance job via xtask.
@@ -176,6 +182,7 @@ jobs:
           cargo test -p clean-slate-network --features alloc
           cargo test -p clean-slate-network --features alloc,tls
           cargo test -p clean-slate-store
+          cargo test -p clean-slate-raster
           cargo test -p clean-slate-capability
           cargo test -p clean-slate-port
           cargo test -p clean-slate-port --features fake

@@ -231,6 +231,13 @@ cargo xtask test-m10-port
 ```
 
 In order it runs `cargo test -p clean-slate-native-abi`; `cargo test -p clean-slate-port --features fake`; a `x86_64-unknown-uefi` build of `clean-slate-port` with feature `fake`; `cargo test -p clean-slate-kernel -- service::port sched::work_set sched::wait`; `build_m6_fixture_userspace` and `build_storage_userspace`; then QEMU with feature `m10-port-self-test`, ordered `[M10.port]` serial markers and a 60 s timeout. On success it prints `[M10.port] PASS` (not `[M10  ] PASS`, which is the #119 aggregate gate). Aliases: `m10-port`, `m10.200`. See [GRAPHICS.md](GRAPHICS.md) Tests and gate.
+For the M10 #111 GOP framebuffer lane (host raster tests plus QEMU with `-vga std`; aliases `m10-framebuffer`, `test-m10-framebuffer`):
+
+```bash
+cargo xtask test-m10-framebuffer
+```
+
+The boot runs `m10-framebuffer-self-test` in boot context: GOP mode 1280x800, kernel-internal present with damage-only copy, aperture readback CRC and probes matched on the host, then `[M10.2] PASS`. See [GRAPHICS.md](GRAPHICS.md).
 
 For the M10 #196 VirtIO modern PCI transport (host tests plus two QEMU boots):
 
@@ -440,9 +447,9 @@ cargo xtask m5-disk-create
 cargo xtask m5-disk-reset
 ```
 
-On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, `test-m5`, `test-m6`, `test-m7`, `test-m8`, and `test-m9`, which covers the milestone gates already wired into the aggregate flows without redundantly rerunning constituents. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, `test-m5-crash-recovery`, `test-m5-disk-harness`, each `test-m6-*` / `test-m7-*` / `test-m8-*` constituent, `test-m10-contract` (alias `m10-contract`), `test-m10-nxe` (alias `m10-nxe`), `test-m10-port` (aliases `m10-port`, `m10.200`) and `test-m10-virtio-modern` (alias `m10-virtio-modern`); `test-m9-*` constituents and `verify-m9-fixture` run once inside `test-m9` and are not repeated. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `m5`, `m6`/`m6.9`, `m7`/`m7.9`, `m8`/`m8.9`, `m9`/`m9.9`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, `m5-disk-harness`/`m5-harness`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, `m6-capabilities`/`m6.8`), for example `.\scripts\run-tests.ps1 -Test m6`; `-List` prints the available names.
+On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, `test-m5`, `test-m6`, `test-m7`, `test-m8`, and `test-m9`, which covers the milestone gates already wired into the aggregate flows without redundantly rerunning constituents. `-Exhaustive` additionally runs every individual `test-m3-*`, `test-m4-*`, `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, `test-m5-crash-recovery`, `test-m5-disk-harness`, each `test-m6-*` / `test-m7-*` / `test-m8-*` constituent, `test-m10-contract` (alias `m10-contract`), `test-m10-nxe` (alias `m10-nxe`), `test-m10-port` (aliases `m10-port`, `m10.200`), `test-m10-virtio-modern` (alias `m10-virtio-modern`) and `test-m10-framebuffer` (alias `m10-framebuffer`); `test-m9-*` constituents and `verify-m9-fixture` run once inside `test-m9` and are not repeated. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `m5`, `m6`/`m6.9`, `m7`/`m7.9`, `m8`/`m8.9`, `m9`/`m9.9`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, `m5-disk-harness`/`m5-harness`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, `m6-capabilities`/`m6.8`), for example `.\scripts\run-tests.ps1 -Test m6`; `-List` prints the available names.
 
-On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m6`/`m6.9`, `m7`/`m7.9`, `m8`/`m8.9`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, `m6-capabilities`/`m6.8`, `m8-linux-hello`/`m8.7`, `m8-linux-image`/`m8.2`, `m8-linux-dispatch`/`m8.3`, `verify-m8-fixture`, `m10-contract`, `m10-nxe`, `m10-port`/`m10.200` and `m10-virtio-modern`); `--exhaustive` also runs `test-m10-contract`, `test-m10-nxe`, `test-m10-port` and `test-m10-virtio-modern`. OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests including `clean-slate-capability`) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive therefore exercises every M3–M8 constituent plus all milestone aggregates with the existing `qemu-system-x86` and `ovmf` package setup from `.github/workflows/pr.yml`.
+On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m6`/`m6.9`, `m7`/`m7.9`, `m8`/`m8.9`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, `m6-capabilities`/`m6.8`, `m8-linux-hello`/`m8.7`, `m8-linux-image`/`m8.2`, `m8-linux-dispatch`/`m8.3`, `verify-m8-fixture`, `m10-contract`, `m10-nxe`, `m10-port`/`m10.200`, `m10-virtio-modern` and `m10-framebuffer`); `--exhaustive` also runs `test-m10-contract`, `test-m10-nxe`, `test-m10-port`, `test-m10-virtio-modern` and `test-m10-framebuffer`. OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests including `clean-slate-capability`) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive therefore exercises every M3–M8 constituent plus all milestone aggregates with the existing `qemu-system-x86` and `ovmf` package setup from `.github/workflows/pr.yml`.
 
 For the M8.6 committed Linux hello ELF provenance check (hash + pinned metadata; no QEMU):
 
@@ -594,20 +601,20 @@ kernel/src
     └── m3_entry.rs, m3_address_space.rs, m3_resources.rs, m3_syscall.rs, m3_ipc.rs
 ```
 
-Planned M10 kernel additions (none exist yet; each lands with its lane against [GRAPHICS.md](GRAPHICS.md)):
+M10 kernel additions (see [GRAPHICS.md](GRAPHICS.md) for the full wave map):
 
 ```text
 kernel/src
-├── boot/gop.rs                    (planned, #111) GOP mode capture and fail-closed SetMode before ExitBootServices
+├── boot/gop.rs                    (#111) GOP mode capture and fail-closed SetMode before ExitBootServices
+├── device/display/                (#111) ScanoutBackend: mod.rs, gop.rs; virtio_gpu.rs (#114 planned)
+├── service/display_syscall.rs     (#111/#114) syscall 18
 ├── mm/shared_buffer.rs            (planned, #195) SharedBuffer objects, quotas, syscall 16
 ├── mm/shared_mapping.rs           (planned, #195) per-process shared mappings (NX, teardown without freeing frames)
 ├── capability/graphics.rs         (planned, #112/#118) Graphics/Display/Input grant policy for the M10 launch set
 ├── service/port.rs                (planned, service-port issue) compositor connections and capability transfer
 ├── service/port_syscall.rs        (planned, service-port issue) syscall 17
-├── service/display_syscall.rs     (planned, #111/#114) syscall 18
 ├── service/input_syscall.rs       (planned, #113) syscall 19
 ├── sched/work_set.rs              (planned, service-port issue) work sets, syscall 20
-├── device/display/                (planned) ScanoutBackend: mod.rs, gop.rs (#111), virtio_gpu.rs (#114)
 ├── device/input/                  (planned, #113) mod.rs, i8042.rs, RawInputQueue<128>
 └── device/virtio/                 existing; modern.rs (+ modern/), virtqueue.rs, dma.rs (#196)
 ```

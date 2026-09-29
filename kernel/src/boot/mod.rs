@@ -3,6 +3,7 @@
 //! `ExitBootServices`, allocator/IDT/GDT/syscall bring-up and then either
 //! dispatches into the selected milestone self-test or starts the scheduler.
 
+pub(crate) mod gop;
 pub(crate) mod uefi;
 
 use crate::arch::x86_64::context_switch::call_on_fresh_stack;
@@ -31,6 +32,7 @@ use crate::diagnostics::serial::serial_write_line;
     feature = "m4-crash-service-self-test",
     feature = "m3-entry-self-test",
     feature = "m5-block-self-test",
+    feature = "m10-framebuffer-self-test",
     feature = "m7-net-device-self-test",
     feature = "m10-virtio-modern-self-test",
     feature = "m7-tls-self-test",
@@ -46,6 +48,7 @@ use crate::interrupt::timer::initialize_timer;
     feature = "m4-crash-service-self-test",
     feature = "m3-entry-self-test",
     feature = "m5-block-self-test",
+    feature = "m10-framebuffer-self-test",
     feature = "m7-net-device-self-test",
     feature = "m10-virtio-modern-self-test",
     feature = "m7-tls-self-test",
@@ -58,7 +61,7 @@ use crate::mm::address_space::KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES;
 use crate::mm::carve_out_shared::install_shared_carve_out_page_tables;
 use crate::mm::frame_allocator::set_kernel_direct_map_ready;
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::kernel_bootstrap::install_kernel_owned_root;
+use crate::mm::kernel_bootstrap::{install_kernel_owned_root, PhysExclusion};
 use crate::mm::layout::{
     assert_conventional_linux_window_clear, init_kernel_low_carve_outs_from_reserved,
     log_kernel_low_carve_outs, register_kernel_low_carve_out,
@@ -75,6 +78,7 @@ use crate::mm::layout::{
     not(feature = "m8-linux-dispatch-self-test"),
     not(feature = "m8-linux-hello-self-test"),
     not(feature = "m5-block-self-test"),
+    not(feature = "m10-framebuffer-self-test"),
     not(feature = "m7-net-device-self-test"),
     not(feature = "m10-virtio-modern-self-test"),
     not(feature = "m7-tls-self-test"),
@@ -107,6 +111,7 @@ use crate::process::process_registry_mut;
     feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test",
     feature = "m5-block-self-test",
+    feature = "m10-framebuffer-self-test",
     feature = "m7-net-device-self-test",
     feature = "m10-virtio-modern-self-test",
     feature = "m7-tls-self-test",
@@ -125,6 +130,7 @@ use crate::sched::dispatch::initialize_scheduler;
     feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test",
     feature = "m5-block-self-test",
+    feature = "m10-framebuffer-self-test",
     feature = "m7-net-device-self-test",
     feature = "m10-virtio-modern-self-test",
     feature = "m7-tls-self-test",
@@ -134,6 +140,8 @@ use crate::sched::dispatch::initialize_scheduler;
 use crate::sched::dispatch::start_scheduler;
 use crate::sched::task_stacks_mut;
 use crate::sched::SCHEDULER_THREAD_SLOTS;
+#[cfg(feature = "m10-framebuffer-self-test")]
+use crate::selftest::m10_framebuffer::run_m10_framebuffer_self_test;
 #[cfg(feature = "m10-port-self-test")]
 use crate::selftest::m10_port::start_m10_port_self_test;
 #[cfg(feature = "m10-virtio-modern-self-test")]
@@ -372,10 +380,55 @@ fn register_boot_kernel_low_carve_outs(
     assert_conventional_linux_window_clear()
 }
 
+/// Installs output 0 for the syscall 18 query subops. Every failure leaves the system with no
+/// display backend (`ENODEV` on syscall 18) and boot continues.
+#[cfg(not(any(test, feature = "m10-framebuffer-self-test")))]
+fn install_display_backend(framebuffer: Result<gop::BootFramebuffer, gop::GopRejection>) {
+    let installed = framebuffer.and_then(|_| {
+        crate::device::display::install_gop_display()
+            .map_err(|_| gop::GopRejection::ReferenceModeAbsent)
+    });
+    if let Err(reason) = installed {
+        gop::log_rejection(reason);
+    }
+}
+
+/// Maps the captured aperture uncached and installs the GOP backend over it. Every failure leaves
+/// the system with no display backend (`ENODEV` on syscall 18) and boot continues.
+#[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
+fn install_display_backend(
+    kernel_root: u64,
+    allocator: &mut PageAllocator,
+    framebuffer: Result<gop::BootFramebuffer, gop::GopRejection>,
+) {
+    let mapped = framebuffer.and_then(|fb| {
+        crate::mm::kernel_bootstrap::map_device_aperture_uncached(
+            kernel_root,
+            allocator,
+            fb.phys_base,
+            fb.map_len,
+        )
+        .map(|aperture| (fb, aperture))
+        .map_err(|_| gop::GopRejection::ApertureMapFailed)
+    });
+    let (framebuffer, aperture) = match mapped {
+        Ok(mapped) => mapped,
+        Err(reason) => return gop::log_rejection(reason),
+    };
+    serial_write_fmt(format_args!(
+        "[FB  ] aperture mapped pages={} cache=uc\n",
+        framebuffer.page_count()
+    ));
+    if crate::device::display::install_gop_display(&framebuffer, aperture).is_err() {
+        gop::log_rejection(gop::GopRejection::ApertureMapFailed);
+    }
+}
+
 #[allow(unreachable_code)]
 fn run_inner() -> Result<(), &'static str> {
     let mut reserved_ranges = collect_reserved_ranges_from_firmware()?;
     crate::interrupt::acpi::capture_interrupt_topology_from_firmware();
+    let boot_framebuffer = gop::capture_boot_framebuffer();
 
     let mut memory_map = unsafe { ::uefi::boot::exit_boot_services(None) };
     memory_map.sort();
@@ -434,11 +487,21 @@ fn run_inner() -> Result<(), &'static str> {
     set_privilege_stack(syscall_kernel_stack_top)?;
     initialize_syscall_abi(syscall_kernel_stack_top)?;
 
-    let kernel_root = install_kernel_owned_root(&mut allocator, normalized)?;
+    let boot_framebuffer = boot_framebuffer
+        .and_then(|fb| gop::aperture_conflicts(normalized.regions(), &fb).map(|()| fb));
+    let aperture_exclusion = boot_framebuffer.as_ref().ok().map(|fb| PhysExclusion {
+        start: fb.phys_base,
+        end: fb.phys_end(),
+    });
+    let kernel_root = install_kernel_owned_root(&mut allocator, normalized, aperture_exclusion)?;
     serial_write_fmt(format_args!(
         "[MM  ] kernel-owned root installed: {:#018x}\n",
         kernel_root
     ));
+    #[cfg(not(any(test, feature = "m10-framebuffer-self-test")))]
+    install_display_backend(boot_framebuffer);
+    #[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
+    install_display_backend(kernel_root, &mut allocator, boot_framebuffer);
     set_kernel_root_frame(kernel_root);
     set_kernel_direct_map_ready();
     arm_kernel_stack_guards(kernel_root, &mut allocator, &kernel_guarded_stacks())?;
@@ -964,6 +1027,11 @@ fn run_inner() -> Result<(), &'static str> {
         run_m5_block_self_test()
     }
 
+    #[cfg(feature = "m10-framebuffer-self-test")]
+    {
+        run_m10_framebuffer_self_test(&mut allocator)
+    }
+
     #[cfg(feature = "m7-net-device-self-test")]
     {
         run_m7_net_device_self_test()
@@ -1006,6 +1074,7 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-syscall-fail-closed-self-test"),
         not(feature = "m9-block-wake-self-test"),
         not(feature = "m5-block-self-test"),
+        not(feature = "m10-framebuffer-self-test"),
         not(feature = "m7-net-device-self-test"),
         not(feature = "m10-virtio-modern-self-test"),
         not(feature = "m7-tls-self-test"),

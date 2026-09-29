@@ -174,6 +174,53 @@ impl PageAllocator {
         None
     }
 
+    /// Takes `pages` consecutive frames from the not-yet-allocated tail, moving to a later region
+    /// when the current one cannot hold them; the skipped tail pages go to the free list. The free
+    /// list itself is never used because its order carries no adjacency. On failure nothing changes.
+    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
+    pub(crate) fn allocate_contiguous(&mut self, pages: u64) -> Option<u64> {
+        if pages == 0 {
+            return None;
+        }
+        let bytes = pages.checked_mul(PAGE_SIZE)?;
+        let mut region_index = self.current_region;
+        let mut start = self.next_page;
+        while region_index < self.usable_region_count {
+            let region = self.usable_regions[region_index];
+            if region_index != self.current_region {
+                start = region.start;
+            }
+            if region.end.saturating_sub(start) >= bytes {
+                break;
+            }
+            region_index += 1;
+        }
+        if region_index == self.usable_region_count {
+            return None;
+        }
+
+        let skipped_from_region = self.current_region;
+        let skipped_from = self.next_page;
+        self.current_region = region_index;
+        self.next_page = start + bytes;
+        self.available_pages -= pages;
+        for index in skipped_from_region..region_index {
+            let region = self.usable_regions[index];
+            let mut frame = if index == skipped_from_region {
+                skipped_from.max(region.start)
+            } else {
+                region.start
+            };
+            while frame < region.end {
+                self.available_pages -= 1;
+                let released = unsafe { self.free_page(frame) };
+                debug_assert!(released.is_ok());
+                frame += PAGE_SIZE;
+            }
+        }
+        Some(start)
+    }
+
     pub(crate) unsafe fn free_page(&mut self, frame: u64) -> Result<(), &'static str> {
         if frame % PAGE_SIZE != 0 {
             return Err("attempted to free a non-page-aligned frame");
@@ -422,6 +469,53 @@ mod tests {
 
         let unaligned = unsafe { allocator.free_page(base + 1) };
         assert_eq!(unaligned, Err("attempted to free a non-page-aligned frame"));
+    }
+
+    #[repr(align(4096))]
+    struct AlignedPages12([u8; (PAGE_SIZE as usize) * 12]);
+
+    #[test]
+    fn contiguous_allocation_skips_short_regions_and_bypasses_the_free_list() {
+        let mut pages = AlignedPages12([0; (PAGE_SIZE as usize) * 12]);
+        let base = pages.0.as_mut_ptr() as u64;
+        let descriptors = [
+            descriptor(MemoryType::CONVENTIONAL, base, 4),
+            descriptor(MemoryType::ACPI_NON_VOLATILE, base + 4 * PAGE_SIZE, 1),
+            descriptor(MemoryType::CONVENTIONAL, base + 5 * PAGE_SIZE, 7),
+        ];
+        let map = normalize_memory_map_boxed(descriptors.iter(), &[]).expect("normalize map");
+        let mut allocator = PageAllocator::new(&map).expect("allocator");
+
+        let first = allocator.allocate_page().expect("first page");
+        unsafe {
+            allocator.free_page(first).expect("free first");
+        }
+        let second = allocator.allocate_page().expect("recycled page");
+        assert_eq!(second, first);
+        let _ = allocator.allocate_page().expect("bump page");
+
+        assert_eq!(allocator.allocate_contiguous(8), None);
+        assert_eq!(allocator.stats().allocated_pages, 2);
+
+        let run = allocator.allocate_contiguous(4).expect("contiguous run");
+        assert_eq!(run, base + 5 * PAGE_SIZE);
+        assert_eq!(
+            allocator.stats(),
+            PageAllocatorStats {
+                total_pages: 11,
+                allocated_pages: 6,
+                free_pages: 5,
+            }
+        );
+
+        let mut recycled = [
+            allocator.allocate_page().expect("skipped tail page"),
+            allocator.allocate_page().expect("skipped tail page"),
+        ];
+        recycled.sort_unstable();
+        assert_eq!(recycled, [base + 2 * PAGE_SIZE, base + 3 * PAGE_SIZE]);
+        assert_eq!(allocator.allocate_page(), Some(base + 9 * PAGE_SIZE));
+        assert_eq!(allocator.allocate_contiguous(0), None);
     }
 
     #[test]
