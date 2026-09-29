@@ -12,7 +12,7 @@ const IOWIN_OFFSET: u64 = 0x10;
 const IOAPIC_REGISTER_VERSION: u32 = 0x01;
 const IOAPIC_REGISTER_REDIRECTION_BASE: u32 = 0x10;
 
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 const REDIRECTION_ACTIVE_LOW: u64 = 1 << 13;
 const REDIRECTION_LEVEL_TRIGGERED: u64 = 1 << 15;
 pub(crate) const REDIRECTION_MASKED: u64 = 1 << 16;
@@ -24,7 +24,7 @@ pub(crate) const IOAPIC_WINDOW_BYTES: u64 = 0x20;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TriggerMode {
     /// Only ISA routing (`route_isa_irq`) programs edge-triggered lines.
-    #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+    #[cfg(any(test, clean_slate_isa_irq))]
     Edge,
     Level,
 }
@@ -33,7 +33,7 @@ pub(crate) enum TriggerMode {
 pub(crate) enum Polarity {
     ActiveHigh,
     /// Only ISA routing (`route_isa_irq`) applies an active-low source override.
-    #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+    #[cfg(any(test, clean_slate_isa_irq))]
     ActiveLow,
 }
 
@@ -49,7 +49,7 @@ pub(crate) struct Redirection {
 impl Redirection {
     pub(crate) const fn encode(self) -> u64 {
         let mut value = self.vector as u64;
-        #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+        #[cfg(any(test, clean_slate_isa_irq))]
         if matches!(self.polarity, Polarity::ActiveLow) {
             value |= REDIRECTION_ACTIVE_LOW;
         }

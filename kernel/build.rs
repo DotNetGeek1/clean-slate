@@ -9,9 +9,9 @@ const SHT_RELA: u32 = 4;
 const R_X86_64_RELATIVE: u32 = 8;
 const USERSPACE_IMAGE_LOAD_BASE: u64 = 0x0000_4000_0000_0000;
 
-/// Self-test builds whose `boot::run_inner` exits QEMU before the boot tail (scheduler, timer
-/// and boot-tail device init). Any one of them unsets `clean_slate_boot_tail`.
-const BOOT_TAIL_EARLY_EXIT_FEATURES: &[&str] = &[
+/// Self-test builds that compile the boot tail out of `run_inner`. Any one of them unsets
+/// `clean_slate_boot_tail`. Other self-tests may still diverge before it.
+const BOOT_TAIL_COMPILED_OUT_FEATURES: &[&str] = &[
     "m1-self-test",
     "m2-double-fault-self-test",
     "m2-timer-self-test",
@@ -38,22 +38,33 @@ const BOOT_TAIL_EARLY_EXIT_FEATURES: &[&str] = &[
     "m9-linux-fs-self-test",
 ];
 
-fn emit_boot_tail_cfg() {
-    println!("cargo::rustc-check-cfg=cfg(clean_slate_boot_tail)");
-    let exits_early = BOOT_TAIL_EARLY_EXIT_FEATURES.iter().any(|feature| {
+/// Self-test builds that compile the ISA IRQ path (`route_isa_irq` and its consumers) without the
+/// boot tail. The boot tail, or any one of these, sets `clean_slate_isa_irq`.
+const ISA_IRQ_WITHOUT_BOOT_TAIL_FEATURES: &[&str] = &["m10-input-self-test"];
+
+fn any_feature_enabled(features: &[&str]) -> bool {
+    features.iter().any(|feature| {
         let var = format!(
             "CARGO_FEATURE_{}",
             feature.to_ascii_uppercase().replace('-', "_")
         );
         env::var_os(var).is_some()
-    });
-    if !exits_early {
-        println!("cargo::rustc-cfg=clean_slate_boot_tail");
-    }
+    })
 }
 
+fn emit_boot_tail_cfgs() {
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_boot_tail)");
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_isa_irq)");
+    let boot_tail = !any_feature_enabled(BOOT_TAIL_COMPILED_OUT_FEATURES);
+    if boot_tail {
+        println!("cargo::rustc-cfg=clean_slate_boot_tail");
+    }
+    if boot_tail || any_feature_enabled(ISA_IRQ_WITHOUT_BOOT_TAIL_FEATURES) {
+        println!("cargo::rustc-cfg=clean_slate_isa_irq");
+    }
+}
 fn main() {
-    emit_boot_tail_cfg();
+    emit_boot_tail_cfgs();
     let m6_fixture_self_test = env::var("CARGO_FEATURE_M6_PROCESS_CONTROL_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M6_DELEGATION_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M6_REVOCATION_SELF_TEST").is_ok()

@@ -10,7 +10,7 @@
 //! Single CPU: driver state is mutated only in IRQ context or with interrupts masked. SMP needs
 //! the `GlobalCell`s behind an IRQ-safe spin lock.
 
-#[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(clean_slate_isa_irq)]
 mod hardware;
 
 use clean_slate_graphics::ids::{KEYBOARD_INDEX, MOUSE_INDEX};
@@ -25,7 +25,7 @@ use crate::sched::timeout::{self, TimeoutHandle};
 use crate::sched::wait::Deadline;
 use crate::sync::global_cell::GlobalCell;
 
-#[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(clean_slate_isa_irq)]
 pub(crate) use hardware::begin_init;
 #[cfg(feature = "m10-input-self-test")]
 pub(crate) use hardware::{inject, port_accesses};
@@ -88,7 +88,7 @@ pub(super) trait ControllerIo {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ControllerError {
-    #[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
+    #[cfg(clean_slate_isa_irq)]
     ClockUnavailable,
     Absent,
     SelfTestFailed,
@@ -96,7 +96,7 @@ pub(crate) enum ControllerError {
 }
 
 impl ControllerError {
-    #[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
+    #[cfg(clean_slate_isa_irq)]
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::ClockUnavailable => "clock-unavailable",
@@ -741,9 +741,9 @@ fn response_timeout(context: u64) {
 struct DriverState {
     driver: Driver,
     timers: W3ResponseTimers,
-    #[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
+    #[cfg(clean_slate_isa_irq)]
     keyboard_vector: Option<u8>,
-    #[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
+    #[cfg(clean_slate_isa_irq)]
     mouse_vector: Option<u8>,
 }
 
@@ -752,9 +752,9 @@ impl DriverState {
         Self {
             driver: Driver::new(),
             timers: W3ResponseTimers { handles: [None; 2] },
-            #[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
+            #[cfg(clean_slate_isa_irq)]
             keyboard_vector: None,
-            #[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
+            #[cfg(clean_slate_isa_irq)]
             mouse_vector: None,
         }
     }

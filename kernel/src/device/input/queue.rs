@@ -1,12 +1,12 @@
 //! Bounded raw-input queue with in-order loss records (wire §6.2, C5/C6).
 
 use clean_slate_graphics::ids::InputDeviceId;
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 use clean_slate_graphics::limits::RAW_INPUT_COALESCE_HIGH_WATER;
 use clean_slate_graphics::raw_input::{RawInputKind, RawInputRecord};
 
 /// What one [`RawInputQueue::push`] did.
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PushOutcome {
     /// The queue went from empty to non-empty (the consumer wake edge).
@@ -38,7 +38,7 @@ impl<const N: usize> RawInputQueue<N> {
         }
     }
 
-    #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+    #[cfg(any(test, clean_slate_isa_irq))]
     pub(crate) fn push(
         &mut self,
         device: InputDeviceId,
@@ -119,7 +119,7 @@ impl<const N: usize> RawInputQueue<N> {
         None
     }
 
-    #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+    #[cfg(any(test, clean_slate_isa_irq))]
     pub(crate) fn record_loss(&mut self, device: InputDeviceId) -> bool {
         let edge = self.len == 0 && self.pending_dropped == 0;
         self.pending_dropped = self.pending_dropped.saturating_add(1);
@@ -168,7 +168,7 @@ impl<const N: usize> RawInputQueue<N> {
         seq
     }
 
-    #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+    #[cfg(any(test, clean_slate_isa_irq))]
     fn push_record(&mut self, device: InputDeviceId, kind: RawInputKind, now: u64) {
         let idx = (self.head + self.len) % N;
         let seq = self.take_next_seq();
@@ -181,7 +181,7 @@ impl<const N: usize> RawInputQueue<N> {
         self.len += 1;
     }
 
-    #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+    #[cfg(any(test, clean_slate_isa_irq))]
     fn materialize_pending_overflow(&mut self, now: u64) -> bool {
         if self.pending_dropped == 0 || self.len >= N {
             return false;

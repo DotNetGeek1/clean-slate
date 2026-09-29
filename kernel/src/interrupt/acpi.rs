@@ -69,7 +69,7 @@ impl InterruptTopology {
         &self.io_apics[..self.io_apic_count]
     }
 
-    #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+    #[cfg(any(test, clean_slate_isa_irq))]
     pub(crate) fn source_override(&self, source_irq: u8) -> Option<SourceOverride> {
         self.overrides[..self.override_count]
             .iter()

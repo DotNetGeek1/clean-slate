@@ -7,17 +7,19 @@
 //! [`InputState::signal_input_work`] only counts, and `BIND_WAKE` stays `ENOSYS`, so a
 //! consumer drains with `READ_BATCH` without blocking.
 //!
-//! The driver half (the i8042 modules and the queue's producer side) is compiled only where
-//! something runs it: the boot tail, the input self-test and host tests. Host tests use a fake
-//! controller, so the hardware bring-up and [`QueueSink`] are left out of them.
+//! The driver half (the i8042 modules and the queue's producer side) is compiled with
+//! `clean_slate_isa_irq` (the boot tail or the input self-test) and for host tests. The hardware
+//! bring-up and [`QueueSink`] need `clean_slate_isa_irq`. A plain host-test build sets it, since
+//! no feature is enabled, but host tests never call them: they drive the driver through
+//! `FakeController`.
 
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 mod device_init;
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 mod i8042;
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 mod keyboard;
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 mod mouse;
 mod queue;
 
@@ -25,7 +27,7 @@ use clean_slate_capability::HolderId;
 use clean_slate_graphics::abi::input::InputDeviceInfo;
 use clean_slate_graphics::ids::{InputDeviceId, KEYBOARD_INDEX, MOUSE_INDEX};
 use clean_slate_graphics::limits::RAW_INPUT_QUEUE_DEPTH;
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 use clean_slate_graphics::raw_input::RawInputKind;
 use clean_slate_graphics::raw_input::{RawInputRecord, RAW_INPUT_RECORD_BYTES};
 
@@ -35,15 +37,15 @@ use crate::diagnostics::log::kernel_log_fmt;
 use crate::sync::global_cell::GlobalCell;
 use queue::RawInputQueue;
 
-#[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(clean_slate_isa_irq)]
 pub(crate) use i8042::begin_init;
 
 const DEVICE_SLOTS: usize = 2;
 /// `InputDeviceId` carries a 24-bit generation; 0 is never issued.
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 const MAX_DEVICE_GENERATION: u32 = (1 << 24) - 1;
 
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 const fn next_generation(generation: u32) -> u32 {
     if generation >= MAX_DEVICE_GENERATION {
         1
@@ -97,9 +99,9 @@ struct InputState {
     generations: [u32; DEVICE_SLOTS],
     present: [bool; DEVICE_SLOTS],
     consumer: ConsumerSlot,
-    #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+    #[cfg(any(test, clean_slate_isa_irq))]
     wake_edges: u32,
-    #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+    #[cfg(any(test, clean_slate_isa_irq))]
     readiness_changes: u32,
 }
 
@@ -110,9 +112,9 @@ impl InputState {
             generations: [0; DEVICE_SLOTS],
             present: [false; DEVICE_SLOTS],
             consumer: ConsumerSlot::new(),
-            #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+            #[cfg(any(test, clean_slate_isa_irq))]
             wake_edges: 0,
-            #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+            #[cfg(any(test, clean_slate_isa_irq))]
             readiness_changes: 0,
         }
     }
@@ -143,7 +145,7 @@ impl InputState {
     }
 }
 
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 impl InputState {
     fn publish(&mut self, index: u8, present: bool) {
         let slot = usize::from(index);
@@ -217,10 +219,10 @@ fn now_ns() -> u64 {
 }
 
 /// IRQ-context sink for the driver: interrupts are already masked.
-#[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(clean_slate_isa_irq)]
 struct QueueSink;
 
-#[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(clean_slate_isa_irq)]
 impl i8042::InputSink for QueueSink {
     fn record(&mut self, device_index: u8, kind: RawInputKind) {
         input_mut().record(device_index, kind, now_ns());

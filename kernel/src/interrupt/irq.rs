@@ -13,7 +13,7 @@ use crate::arch::x86_64::ioapic::{
 };
 use crate::arch::x86_64::{DEVICE_VECTOR_COUNT, DEVICE_VECTOR_FIRST};
 use crate::interrupt::acpi::interrupt_topology;
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 use crate::interrupt::acpi::InterruptTopology;
 use crate::mm::mmio::with_kernel_identity_mmio;
 use crate::sync::global_cell::GlobalCell;
@@ -24,13 +24,13 @@ const MSI_ADDRESS_BASE: u64 = 0xfee0_0000;
 const MSI_ADDRESS_DESTINATION_SHIFT: u32 = 12;
 
 /// MPS INTI flag encodings used by MADT source overrides.
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 const INTI_POLARITY_MASK: u16 = 0x3;
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 const INTI_POLARITY_ACTIVE_LOW: u16 = 0x3;
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 const INTI_TRIGGER_MASK: u16 = 0xc;
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 const INTI_TRIGGER_LEVEL: u16 = 0xc;
 
 pub(crate) type DeviceInterruptHandler = fn();
@@ -147,14 +147,14 @@ pub(crate) fn route_gsi(
 
 /// Route legacy ISA `irq` (keyboard, pointer, ...) to `vector`, applying any
 /// MADT source override; ISA lines default to edge-triggered, active-high.
-/// Its only consumer is the i8042 hardware bring-up, so it is compiled where that runs.
-#[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
+/// Compiled with `clean_slate_isa_irq`, the builds that compile an ISA IRQ consumer.
+#[cfg(clean_slate_isa_irq)]
 pub(crate) fn route_isa_irq(irq: u8, vector: u8) -> Result<(), &'static str> {
     let (gsi, trigger, polarity) = isa_irq_route(&interrupt_topology()?, irq);
     route_gsi(gsi, vector, trigger, polarity)
 }
 
-#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+#[cfg(any(test, clean_slate_isa_irq))]
 fn isa_irq_route(topology: &InterruptTopology, irq: u8) -> (u32, TriggerMode, Polarity) {
     let Some(source_override) = topology.source_override(irq) else {
         return (u32::from(irq), TriggerMode::Edge, Polarity::ActiveHigh);

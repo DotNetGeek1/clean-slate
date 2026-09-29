@@ -1,6 +1,7 @@
 //! The real controller behind [`ControllerIo`]: port I/O, IRQ 1/12 routing and handlers, and
-//! [`begin_init`]. Host tests drive the driver through a fake controller instead, so this is
-//! compiled only where something starts the hardware: the boot tail and the input self-test.
+//! [`begin_init`]. Compiled with `clean_slate_isa_irq` (the boot tail or the input self-test).
+//! A plain host-test build sets that cfg too, but host tests never call this module: they drive
+//! the driver through `FakeController`.
 
 #[cfg(feature = "m10-input-self-test")]
 use core::sync::atomic::{AtomicU32, Ordering};
