@@ -94,6 +94,9 @@ fn read_frame(pointer: u64) -> Result<Frame, PortError> {
     validate_user_pointer_range(pointer, PORT_FRAME_BYTES as u64)
         .map_err(|_| PortError::Invalid)?;
     let mut frame = [0u8; PORT_FRAME_BYTES];
+    // SAFETY: the range was just validated as user-mapped in the caller's active address space,
+    // and nothing unmaps it before the copy: the syscall runs with interrupts disabled on the
+    // only CPU. `frame` is a distinct kernel stack buffer of the same length.
     unsafe {
         ptr::copy_nonoverlapping(pointer as *const u8, frame.as_mut_ptr(), frame.len());
     }
@@ -109,7 +112,12 @@ fn writable_out(pointer: u64, length: u64, expected: usize) -> Result<u64, PortE
     Ok(pointer)
 }
 
+/// `pointer` must come from [`writable_out`] for `bytes.len()` in the same syscall attempt.
 fn write_out(pointer: u64, bytes: &[u8]) {
+    // SAFETY: `writable_out` validated `pointer..pointer + bytes.len()` as user-writable in the
+    // caller's active address space during this attempt. A blocked call restarts the syscall
+    // and validates again, and with interrupts disabled on the only CPU nothing unmaps the
+    // range in between. User memory never aliases the kernel-owned `bytes`.
     unsafe {
         ptr::copy_nonoverlapping(bytes.as_ptr(), pointer as *mut u8, bytes.len());
     }
