@@ -3456,7 +3456,8 @@ mod runtime_probe_line_tests {
 mod m10_input_count_tests {
     use super::validate_m10_input_counts;
 
-    const CLEAN: &str = "[M10.input] routed kbd_bytes=18 irq1=18 aux_bytes=24 irq12=24 spurious=0 port_reads=42\r\n\
+    const CLEAN: &str = "[M10.input] init settled kbd=ready mouse=ready ms=3 readiness_changes=2 timeouts_armed=0\r\n\
+        [M10.input] routed kbd_bytes=18 irq1=18 aux_bytes=24 irq12=24 spurious=0 port_reads=42\r\n\
         [M10.input] queue full len=128 pending_dropped=4 wake_edges=+1\r\n\
         [M10.input] idle ms=300 ticks=30 irqs=+0 port_accesses=+0\r\n";
 
@@ -3477,6 +3478,8 @@ mod m10_input_count_tests {
             ("irqs=+0", "irqs=+1"),
             ("port_accesses=+0", "port_accesses=+3"),
             ("irq12=24 ", ""),
+            ("timeouts_armed=0", "timeouts_armed=1"),
+            (" timeouts_armed=0", ""),
         ] {
             let bad = CLEAN.replace(from, to);
             assert!(validate_m10_input_counts(&bad).is_err(), "{from} -> {to}");
@@ -4073,6 +4076,13 @@ fn validate_m10_input_counts(output: &str) -> Result<(), XtaskError> {
             )))
         }
     };
+
+    let settled = line("[M10.input] init settled ")?;
+    check(
+        field(settled, "timeouts_armed=")? == 0,
+        "response timeouts armed after init",
+        settled,
+    )?;
 
     let routed = line("[M10.input] routed ")?;
     let kbd_bytes = field(routed, "kbd_bytes=")?;
