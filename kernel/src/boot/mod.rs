@@ -1079,32 +1079,7 @@ fn run_inner() -> Result<(), &'static str> {
         run_m7_tls_fail_closed_self_test()
     }
 
-    #[cfg(all(
-        not(feature = "m1-self-test"),
-        not(feature = "m2-double-fault-self-test"),
-        not(feature = "m2-timer-self-test"),
-        not(feature = "m3-address-space-self-test"),
-        not(feature = "m3-resources-self-test"),
-        not(feature = "m4-crash-service-self-test"),
-        not(feature = "m4-recovery-self-test"),
-        not(feature = "m3-entry-self-test"),
-        not(feature = "m8-linux-dispatch-self-test"),
-        not(feature = "m8-linux-hello-self-test"),
-        not(feature = "m9-syscall-fail-closed-self-test"),
-        not(feature = "m9-block-wake-self-test"),
-        not(feature = "m5-block-self-test"),
-        not(feature = "m10-framebuffer-self-test"),
-        not(feature = "m7-net-device-self-test"),
-        not(feature = "m10-virtio-modern-self-test"),
-        not(feature = "m7-tls-self-test"),
-        not(feature = "m7-tls-fail-closed-self-test"),
-        not(feature = "m7-dns-self-test"),
-        not(feature = "m8-linux-image-self-test"),
-        not(feature = "m9-low-va-self-test"),
-        not(feature = "m9-linux-exec-self-test"),
-        not(feature = "m9-rootfs-self-test"),
-        not(feature = "m9-linux-fs-self-test")
-    ))]
+    #[cfg(clean_slate_boot_tail)]
     {
         let kernel_root_frame = current_root_frame_address();
         crate::syscall::install_service_lifecycle_syscall_allocator(allocator);

@@ -669,12 +669,7 @@ fn exhausted_timeout_registry_fails_the_device_without_sending() {
 /// Bootstraps `fake` and starts both programs on the global driver, with its W3 timers.
 fn begin_global(fake: &mut FakeController, sink: &mut RecordingSink) {
     let state = driver_mut();
-    *state = DriverState {
-        driver: Driver::new(),
-        timers: W3ResponseTimers { handles: [None; 2] },
-        keyboard_vector: None,
-        mouse_vector: None,
-    };
+    *state = DriverState::new();
     let ports = bootstrap(fake, &mut state.driver.stats).expect("controller present");
     enable_irqs(fake, ports, ports, &mut state.driver.stats).expect("irqs enabled");
     state.driver.start(fake, ports, sink, &mut state.timers);

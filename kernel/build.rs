@@ -9,7 +9,51 @@ const SHT_RELA: u32 = 4;
 const R_X86_64_RELATIVE: u32 = 8;
 const USERSPACE_IMAGE_LOAD_BASE: u64 = 0x0000_4000_0000_0000;
 
+/// Self-test builds whose `boot::run_inner` exits QEMU before the boot tail (scheduler, timer
+/// and boot-tail device init). Any one of them unsets `clean_slate_boot_tail`.
+const BOOT_TAIL_EARLY_EXIT_FEATURES: &[&str] = &[
+    "m1-self-test",
+    "m2-double-fault-self-test",
+    "m2-timer-self-test",
+    "m3-address-space-self-test",
+    "m3-resources-self-test",
+    "m4-crash-service-self-test",
+    "m4-recovery-self-test",
+    "m3-entry-self-test",
+    "m8-linux-dispatch-self-test",
+    "m8-linux-hello-self-test",
+    "m9-syscall-fail-closed-self-test",
+    "m9-block-wake-self-test",
+    "m5-block-self-test",
+    "m10-framebuffer-self-test",
+    "m7-net-device-self-test",
+    "m10-virtio-modern-self-test",
+    "m7-tls-self-test",
+    "m7-tls-fail-closed-self-test",
+    "m7-dns-self-test",
+    "m8-linux-image-self-test",
+    "m9-low-va-self-test",
+    "m9-linux-exec-self-test",
+    "m9-rootfs-self-test",
+    "m9-linux-fs-self-test",
+];
+
+fn emit_boot_tail_cfg() {
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_boot_tail)");
+    let exits_early = BOOT_TAIL_EARLY_EXIT_FEATURES.iter().any(|feature| {
+        let var = format!(
+            "CARGO_FEATURE_{}",
+            feature.to_ascii_uppercase().replace('-', "_")
+        );
+        env::var_os(var).is_some()
+    });
+    if !exits_early {
+        println!("cargo::rustc-cfg=clean_slate_boot_tail");
+    }
+}
+
 fn main() {
+    emit_boot_tail_cfg();
     let m6_fixture_self_test = env::var("CARGO_FEATURE_M6_PROCESS_CONTROL_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M6_DELEGATION_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M6_REVOCATION_SELF_TEST").is_ok()

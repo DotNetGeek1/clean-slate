@@ -6,10 +6,18 @@
 //! until then it reads as `None` and queues nothing. Until `BIND_WAKE`'s integration stage,
 //! [`InputState::signal_input_work`] only counts, and `BIND_WAKE` stays `ENOSYS`, so a
 //! consumer drains with `READ_BATCH` without blocking.
+//!
+//! The driver half (the i8042 modules and the queue's producer side) is compiled only where
+//! something runs it: the boot tail, the input self-test and host tests. Host tests use a fake
+//! controller, so the hardware bring-up and [`QueueSink`] are left out of them.
 
+#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
 mod device_init;
+#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
 mod i8042;
+#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
 mod keyboard;
+#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
 mod mouse;
 mod queue;
 
@@ -17,19 +25,25 @@ use clean_slate_capability::HolderId;
 use clean_slate_graphics::abi::input::InputDeviceInfo;
 use clean_slate_graphics::ids::{InputDeviceId, KEYBOARD_INDEX, MOUSE_INDEX};
 use clean_slate_graphics::limits::RAW_INPUT_QUEUE_DEPTH;
-use clean_slate_graphics::raw_input::{RawInputKind, RawInputRecord, RAW_INPUT_RECORD_BYTES};
+#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+use clean_slate_graphics::raw_input::RawInputKind;
+use clean_slate_graphics::raw_input::{RawInputRecord, RAW_INPUT_RECORD_BYTES};
 
 use crate::arch::x86_64::cpu::without_interrupts;
+#[cfg(clean_slate_boot_tail)]
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::sync::global_cell::GlobalCell;
 use queue::RawInputQueue;
 
+#[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
 pub(crate) use i8042::begin_init;
 
 const DEVICE_SLOTS: usize = 2;
 /// `InputDeviceId` carries a 24-bit generation; 0 is never issued.
+#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
 const MAX_DEVICE_GENERATION: u32 = (1 << 24) - 1;
 
+#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
 const fn next_generation(generation: u32) -> u32 {
     if generation >= MAX_DEVICE_GENERATION {
         1
@@ -83,7 +97,9 @@ struct InputState {
     generations: [u32; DEVICE_SLOTS],
     present: [bool; DEVICE_SLOTS],
     consumer: ConsumerSlot,
+    #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
     wake_edges: u32,
+    #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
     readiness_changes: u32,
 }
 
@@ -94,7 +110,9 @@ impl InputState {
             generations: [0; DEVICE_SLOTS],
             present: [false; DEVICE_SLOTS],
             consumer: ConsumerSlot::new(),
+            #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
             wake_edges: 0,
+            #[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
             readiness_changes: 0,
         }
     }
@@ -107,6 +125,26 @@ impl InputState {
         InputDeviceId::new(index, self.generations[slot]).ok()
     }
 
+    fn device_info(&self) -> InputDeviceInfo {
+        InputDeviceInfo {
+            keyboard: self.device(KEYBOARD_INDEX),
+            mouse: self.device(MOUSE_INDEX),
+            queue_depth: RAW_INPUT_QUEUE_DEPTH as u16,
+            record_bytes: RAW_INPUT_RECORD_BYTES as u16,
+        }
+    }
+
+    fn release_consumer(&mut self, holder: HolderId) -> usize {
+        if !self.consumer.release(holder) {
+            return 0;
+        }
+        self.queue.clear_into_loss();
+        1
+    }
+}
+
+#[cfg(any(test, clean_slate_boot_tail, feature = "m10-input-self-test"))]
+impl InputState {
     fn publish(&mut self, index: u8, present: bool) {
         let slot = usize::from(index);
         if present {
@@ -158,23 +196,6 @@ impl InputState {
         self.readiness_changes = self.readiness_changes.saturating_add(1);
         self.signal_input_work();
     }
-
-    fn device_info(&self) -> InputDeviceInfo {
-        InputDeviceInfo {
-            keyboard: self.device(KEYBOARD_INDEX),
-            mouse: self.device(MOUSE_INDEX),
-            queue_depth: RAW_INPUT_QUEUE_DEPTH as u16,
-            record_bytes: RAW_INPUT_RECORD_BYTES as u16,
-        }
-    }
-
-    fn release_consumer(&mut self, holder: HolderId) -> usize {
-        if !self.consumer.release(holder) {
-            return 0;
-        }
-        self.queue.clear_into_loss();
-        1
-    }
 }
 
 static INPUT: GlobalCell<InputState> = GlobalCell::new(InputState::new());
@@ -196,8 +217,10 @@ fn now_ns() -> u64 {
 }
 
 /// IRQ-context sink for the driver: interrupts are already masked.
+#[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
 struct QueueSink;
 
+#[cfg(any(clean_slate_boot_tail, feature = "m10-input-self-test"))]
 impl i8042::InputSink for QueueSink {
     fn record(&mut self, device_index: u8, kind: RawInputKind) {
         input_mut().record(device_index, kind, now_ns());
@@ -219,35 +242,7 @@ impl i8042::InputSink for QueueSink {
 /// Boot-tail bring-up: returns once the device init programs are started; the devices appear
 /// later, from IRQ context. A missing or failed controller leaves the seat without devices;
 /// input is never boot-fatal.
-// Boot-tail entry point: these self-test builds exit QEMU before reaching it.
-#[cfg_attr(
-    any(
-        feature = "m1-self-test",
-        feature = "m2-double-fault-self-test",
-        feature = "m2-timer-self-test",
-        feature = "m3-address-space-self-test",
-        feature = "m3-resources-self-test",
-        feature = "m4-crash-service-self-test",
-        feature = "m4-recovery-self-test",
-        feature = "m3-entry-self-test",
-        feature = "m8-linux-dispatch-self-test",
-        feature = "m8-linux-hello-self-test",
-        feature = "m9-syscall-fail-closed-self-test",
-        feature = "m9-block-wake-self-test",
-        feature = "m5-block-self-test",
-        feature = "m7-net-device-self-test",
-        feature = "m7-tls-self-test",
-        feature = "m7-tls-fail-closed-self-test",
-        feature = "m7-dns-self-test",
-        feature = "m8-linux-image-self-test",
-        feature = "m9-low-va-self-test",
-        feature = "m9-linux-exec-self-test",
-        feature = "m9-rootfs-self-test",
-        feature = "m9-linux-fs-self-test",
-        feature = "m10-framebuffer-self-test"
-    ),
-    allow(dead_code)
-)]
+#[cfg(clean_slate_boot_tail)]
 pub(crate) fn begin_init_and_log() {
     let port = |started: bool| if started { "init" } else { "absent" };
     match begin_init() {
