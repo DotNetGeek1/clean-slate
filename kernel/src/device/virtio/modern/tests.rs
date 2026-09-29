@@ -360,11 +360,14 @@ fn config_generation_changes_once_retries() {
 #[test]
 fn config_generation_unstable_after_4_is_reset_required() {
     let mut transport = ready(IrqMode::Msix);
+    transport.submit(0, &block_read(), at(100)).expect("submit");
     transport.access.config_changes = u32::MAX;
     assert_eq!(
         transport.read_device_config(|config| config.read_u32(0)),
         Err(TransportError::ConfigUnstable)
     );
+    assert_eq!(registry::armed_count(), 0);
+    assert_eq!(registry::expire_due(u64::MAX), 0);
     let generation_reads = transport
         .access
         .log
@@ -670,11 +673,14 @@ fn failed_reset_poisons_and_writes_failed() {
 fn protocol_violation_requires_reset_then_recovers() {
     let mut transport = ready(IrqMode::Msix);
     transport.submit(0, &block_read(), at(100)).expect("submit");
+    assert_eq!(registry::armed_count(), 1);
     transport.queues[0].device_push_used(9, 0);
     assert_eq!(
         transport.take_completion(0),
         Err(TransportError::ResetRequired)
     );
+    assert_eq!(registry::armed_count(), 0);
+    assert_eq!(registry::expire_due(u64::MAX), 0);
     assert_eq!(
         transport.state(),
         TransportState::ResetRequired(ResetReason::ProtocolViolation)
@@ -694,6 +700,7 @@ fn protocol_violation_requires_reset_then_recovers() {
 #[test]
 fn device_needs_reset_is_detected_at_submit() {
     let mut transport = ready(IrqMode::Msix);
+    transport.submit(0, &block_read(), at(100)).expect("submit");
     transport.access.raise_needs_reset();
     assert_eq!(
         transport.submit(0, &block_read(), at(10)),

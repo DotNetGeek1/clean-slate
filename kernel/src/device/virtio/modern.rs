@@ -451,8 +451,9 @@ fn validate_request(request: &DeviceRequest) -> Result<(), TransportError> {
 }
 
 impl<A: DeviceAccess> ModernTransport<A> {
-    /// Claim a slot and bring the device up from reset. On failure the device
-    /// is left FAILED with bus mastering off and the slot is free again.
+    /// Validate `request` and claim a slot without touching the device.
+    /// `initialize` brings it up; after a failed bring-up the device is FAILED
+    /// with bus mastering off, and only `release()` frees its interrupts and slot.
     fn attach(
         access: A,
         layout: ModernLayout,
@@ -534,7 +535,7 @@ impl<A: DeviceAccess> ModernTransport<A> {
                 return Ok((value, attempt));
             }
         }
-        self.state = TransportState::ResetRequired(ResetReason::ConfigUnstable);
+        self.require_reset(ResetReason::ConfigUnstable);
         Err(TransportError::ConfigUnstable)
     }
 
@@ -750,6 +751,16 @@ impl<A: DeviceAccess> ModernTransport<A> {
         TransportError::ResetRequired
     }
 
+    /// A non-timeout `ResetRequired`. The registry entry must not outlive the
+    /// `Ready` state it guards.
+    fn require_reset(&mut self, reason: ResetReason) -> TransportError {
+        if let Some((handle, _)) = self.timeout.take() {
+            timeout::cancel(handle);
+        }
+        self.state = TransportState::ResetRequired(reason);
+        TransportError::ResetRequired
+    }
+
     /// Fold what the handlers recorded into `state`.
     fn observe(&mut self) {
         if self.state != TransportState::Ready {
@@ -863,8 +874,7 @@ impl<A: DeviceAccess> VirtqueueTransport for ModernTransport<A> {
         self.ensure_ready()?;
         let position = self.queue_position(queue)?;
         if self.read_status()? & STATUS_DEVICE_NEEDS_RESET != 0 {
-            self.state = TransportState::ResetRequired(ResetReason::DeviceNeedsReset);
-            return Err(TransportError::ResetRequired);
+            return Err(self.require_reset(ResetReason::DeviceNeedsReset));
         }
         self.queues[position]
             .check_chain(chain)
@@ -894,10 +904,7 @@ impl<A: DeviceAccess> VirtqueueTransport for ModernTransport<A> {
                 self.track_earliest_deadline()?;
                 Ok(Some(completion))
             }
-            Err(_) => {
-                self.state = TransportState::ResetRequired(ResetReason::ProtocolViolation);
-                Err(TransportError::ResetRequired)
-            }
+            Err(_) => Err(self.require_reset(ResetReason::ProtocolViolation)),
         }
     }
 
