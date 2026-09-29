@@ -142,6 +142,8 @@ use crate::sched::task_stacks_mut;
 use crate::sched::SCHEDULER_THREAD_SLOTS;
 #[cfg(feature = "m10-framebuffer-self-test")]
 use crate::selftest::m10_framebuffer::run_m10_framebuffer_self_test;
+#[cfg(feature = "m10-input-self-test")]
+use crate::selftest::m10_input::start_m10_input_self_test;
 #[cfg(feature = "m10-port-self-test")]
 use crate::selftest::m10_port::start_m10_port_self_test;
 #[cfg(feature = "m10-virtio-modern-self-test")]
@@ -197,7 +199,8 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m9-linux-trace-self-test"),
     not(feature = "m9-rootfs-self-test"),
     not(feature = "m9-linux-fs-self-test"),
-    not(feature = "m9-fd-core-self-test")
+    not(feature = "m9-fd-core-self-test"),
+    not(feature = "m10-input-self-test")
 ))]
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
 #[cfg(feature = "m3-ipc-self-test")]
@@ -725,6 +728,11 @@ fn run_inner() -> Result<(), &'static str> {
         crate::selftest::m10_shared_buffer::start_m10_shared_buffer_self_test(allocator)
     }
 
+    #[cfg(feature = "m10-input-self-test")]
+    {
+        start_m10_input_self_test(allocator)
+    }
+
     #[cfg(all(
         feature = "m3-entry-self-test",
         not(feature = "m10-nxe-self-test"),
@@ -741,7 +749,8 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-linux-trace-self-test"),
         not(feature = "m9-rootfs-self-test"),
         not(feature = "m9-linux-fs-self-test"),
-        not(feature = "m9-fd-core-self-test")
+        not(feature = "m9-fd-core-self-test"),
+        not(feature = "m10-input-self-test")
     ))]
     {
         #[cfg(feature = "m7-net-service-self-test")]
@@ -1070,32 +1079,7 @@ fn run_inner() -> Result<(), &'static str> {
         run_m7_tls_fail_closed_self_test()
     }
 
-    #[cfg(all(
-        not(feature = "m1-self-test"),
-        not(feature = "m2-double-fault-self-test"),
-        not(feature = "m2-timer-self-test"),
-        not(feature = "m3-address-space-self-test"),
-        not(feature = "m3-resources-self-test"),
-        not(feature = "m4-crash-service-self-test"),
-        not(feature = "m4-recovery-self-test"),
-        not(feature = "m3-entry-self-test"),
-        not(feature = "m8-linux-dispatch-self-test"),
-        not(feature = "m8-linux-hello-self-test"),
-        not(feature = "m9-syscall-fail-closed-self-test"),
-        not(feature = "m9-block-wake-self-test"),
-        not(feature = "m5-block-self-test"),
-        not(feature = "m10-framebuffer-self-test"),
-        not(feature = "m7-net-device-self-test"),
-        not(feature = "m10-virtio-modern-self-test"),
-        not(feature = "m7-tls-self-test"),
-        not(feature = "m7-tls-fail-closed-self-test"),
-        not(feature = "m7-dns-self-test"),
-        not(feature = "m8-linux-image-self-test"),
-        not(feature = "m9-low-va-self-test"),
-        not(feature = "m9-linux-exec-self-test"),
-        not(feature = "m9-rootfs-self-test"),
-        not(feature = "m9-linux-fs-self-test")
-    ))]
+    #[cfg(clean_slate_boot_tail)]
     {
         let kernel_root_frame = current_root_frame_address();
         crate::syscall::install_service_lifecycle_syscall_allocator(allocator);
@@ -1118,6 +1102,7 @@ fn run_inner() -> Result<(), &'static str> {
         initialize_timer();
         serial_write_line("[TIME] timer initialized");
         report_timer_contract();
+        crate::device::input::begin_init_and_log();
         serial_write_line("[KERN] scheduler initialized");
         start_scheduler()
     }

@@ -20,11 +20,14 @@ pub(crate) mod m2_double_fault;
     feature = "m7-dns-self-test",
     feature = "m7-net-device-self-test",
     feature = "m10-virtio-modern-self-test",
-    feature = "m7-tls-self-test"
+    feature = "m7-tls-self-test",
+    feature = "m10-input-self-test"
 ))]
 pub(crate) mod boot_wait;
 #[cfg(feature = "m10-framebuffer-self-test")]
 pub(crate) mod m10_framebuffer;
+#[cfg(feature = "m10-input-self-test")]
+pub(crate) mod m10_input;
 #[cfg(feature = "m10-nxe-self-test")]
 pub(crate) mod m10_nxe;
 #[cfg(feature = "m10-port-self-test")]
@@ -168,6 +171,7 @@ pub(crate) mod m9_userspace;
     feature = "m3-syscall-self-test",
     feature = "m9-syscall-fail-closed-self-test",
     feature = "m9-block-wake-self-test",
+    feature = "m10-input-self-test",
     feature = "m9-fd-core-self-test",
     feature = "m9-linux-socket-self-test",
     feature = "m9-linux-proc-self-test",
@@ -253,7 +257,8 @@ pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SI
     feature = "m9-fd-core-self-test",
     feature = "m9-linux-fs-self-test",
     feature = "m9-userspace-self-test",
-    feature = "m9-linux-trace-self-test"
+    feature = "m9-linux-trace-self-test",
+    feature = "m10-input-self-test"
 ))]
 pub(super) const USER_TEST_PROCESS_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + (PAGE_SIZE * 2);
 #[cfg(feature = "m4-recovery-self-test")]
