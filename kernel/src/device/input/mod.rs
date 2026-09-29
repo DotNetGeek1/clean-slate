@@ -294,7 +294,7 @@ pub(crate) fn consumer_bindings_for(holder: HolderId) -> usize {
 #[cfg(feature = "m10-input-self-test")]
 pub(crate) use device_init::InitStatus;
 #[cfg(feature = "m10-input-self-test")]
-pub(crate) use i8042::{init_status, inject, stats as driver_stats};
+pub(crate) use i8042::{init_status, inject, port_accesses, stats as driver_stats};
 #[cfg(feature = "m10-input-self-test")]
 pub(crate) use mouse::MouseProtocol;
 

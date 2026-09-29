@@ -298,8 +298,8 @@ impl Harness {
 
     /// Bootstrap, IRQ enable and program start, as `begin_init` runs them.
     fn begin(&mut self) -> Ports {
-        let ports = bootstrap(&mut self.fake).expect("controller present");
-        enable_irqs(&mut self.fake, ports).expect("irqs enabled");
+        let ports = bootstrap(&mut self.fake, &mut self.driver.stats).expect("controller present");
+        enable_irqs(&mut self.fake, ports, &mut self.driver.stats).expect("irqs enabled");
         self.driver
             .start(&mut self.fake, ports, &mut self.sink, &mut self.timers);
         ports
@@ -363,7 +363,9 @@ fn drain(harness: &mut Harness) -> (Vec<Sunk>, DriverStats) {
 fn bootstrap_configures_the_controller_without_talking_to_devices() {
     let mut fake = FakeController::qemu();
     fake.push(0x1C, false);
-    let ports = bootstrap(&mut fake).expect("controller present");
+    let mut stats = DriverStats::default();
+    let ports = bootstrap(&mut fake, &mut stats).expect("controller present");
+    assert_eq!(stats.init_flushed, 1);
     assert_eq!(
         ports,
         Ports {
@@ -386,7 +388,10 @@ fn bootstrap_configures_the_controller_without_talking_to_devices() {
 fn bootstrap_reports_an_absent_controller_without_waiting() {
     let mut fake = FakeController::qemu();
     fake.absent = true;
-    assert_eq!(bootstrap(&mut fake), Err(ControllerError::Absent));
+    assert_eq!(
+        bootstrap(&mut fake, &mut DriverStats::default()),
+        Err(ControllerError::Absent)
+    );
     assert_eq!(fake.status_reads, 1);
     assert!(fake.commands.is_empty());
 }
@@ -395,14 +400,20 @@ fn bootstrap_reports_an_absent_controller_without_waiting() {
 fn bootstrap_fails_when_the_controller_self_test_fails() {
     let mut fake = FakeController::qemu();
     fake.self_test_result = 0xFC;
-    assert_eq!(bootstrap(&mut fake), Err(ControllerError::SelfTestFailed));
+    assert_eq!(
+        bootstrap(&mut fake, &mut DriverStats::default()),
+        Err(ControllerError::SelfTestFailed)
+    );
 }
 
 #[test]
 fn stuck_controller_handshake_times_out_within_its_deadline() {
     let mut fake = FakeController::qemu();
     fake.input_stuck = true;
-    assert_eq!(bootstrap(&mut fake), Err(ControllerError::Timeout));
+    assert_eq!(
+        bootstrap(&mut fake, &mut DriverStats::default()),
+        Err(ControllerError::Timeout)
+    );
     assert!(fake.commands.is_empty());
     assert!(fake.clock_ns >= HANDSHAKE_TIMEOUT_NS);
     assert!(fake.clock_ns < HANDSHAKE_TIMEOUT_NS + 100_000);
@@ -431,7 +442,10 @@ fn handshake_reads_are_capped_when_the_clock_stands_still() {
     let mut fake = FakeController::qemu();
     fake.input_stuck = true;
     let mut frozen = FrozenClock(fake);
-    assert_eq!(bootstrap(&mut frozen), Err(ControllerError::Timeout));
+    assert_eq!(
+        bootstrap(&mut frozen, &mut DriverStats::default()),
+        Err(ControllerError::Timeout)
+    );
     assert_eq!(
         frozen.0.status_reads as u64,
         1 + HANDSHAKE_TIMEOUT_NS / MIN_STATUS_READ_NS
@@ -442,7 +456,7 @@ fn handshake_reads_are_capped_when_the_clock_stands_still() {
 fn single_channel_controller_has_no_aux_port_and_skips_its_test() {
     let mut fake = FakeController::qemu();
     fake.dual_channel = false;
-    let ports = bootstrap(&mut fake).expect("controller present");
+    let ports = bootstrap(&mut fake, &mut DriverStats::default()).expect("controller present");
     assert_eq!(
         ports,
         Ports {
@@ -454,16 +468,18 @@ fn single_channel_controller_has_no_aux_port_and_skips_its_test() {
 }
 
 #[test]
-fn enable_irqs_sets_bits_for_routed_ports_and_drains_stale_bytes() {
+fn enable_irqs_sets_bits_for_routed_ports_and_counts_every_discarded_byte() {
     let mut fake = FakeController::qemu();
-    bootstrap(&mut fake).expect("controller present");
+    let mut stats = DriverStats::default();
+    bootstrap(&mut fake, &mut stats).expect("controller present");
     fake.push(0x1C, false);
     fake.arrive_on_irq_enable = vec![(0x1C, false), (0x08, true)];
     let keyboard_only = Ports {
         keyboard: true,
         aux: false,
     };
-    assert_eq!(enable_irqs(&mut fake, keyboard_only), Ok(2));
+    assert_eq!(enable_irqs(&mut fake, keyboard_only, &mut stats), Ok(()));
+    assert_eq!((stats.init_flushed, stats.init_drained), (1, 2));
     assert!(fake.output.is_empty());
     assert_eq!(fake.config & CONFIG_KEYBOARD_IRQ, CONFIG_KEYBOARD_IRQ);
     assert_eq!(fake.config & (CONFIG_AUX_IRQ | CONFIG_TRANSLATE), 0);
@@ -471,7 +487,8 @@ fn enable_irqs_sets_bits_for_routed_ports_and_drains_stale_bytes() {
         keyboard: true,
         aux: true,
     };
-    assert_eq!(enable_irqs(&mut fake, both), Ok(0));
+    assert_eq!(enable_irqs(&mut fake, both, &mut stats), Ok(()));
+    assert_eq!((stats.init_flushed, stats.init_drained), (1, 2));
     assert_eq!(
         fake.config & (CONFIG_KEYBOARD_IRQ | CONFIG_AUX_IRQ),
         CONFIG_KEYBOARD_IRQ | CONFIG_AUX_IRQ
@@ -641,8 +658,9 @@ fn exhausted_timeout_registry_fails_the_device_without_sending() {
 #[test]
 fn controller_refusing_a_device_byte_fails_that_device() {
     let mut harness = Harness::new(FakeController::qemu());
-    let ports = bootstrap(&mut harness.fake).expect("controller present");
-    enable_irqs(&mut harness.fake, ports).expect("irqs enabled");
+    let ports =
+        bootstrap(&mut harness.fake, &mut harness.driver.stats).expect("controller present");
+    enable_irqs(&mut harness.fake, ports, &mut harness.driver.stats).expect("irqs enabled");
     harness.fake.input_stuck = true;
     harness.driver.start(
         &mut harness.fake,
@@ -663,12 +681,13 @@ fn controller_refusing_a_device_byte_fails_that_device() {
 #[test]
 fn unrouted_ports_are_never_started() {
     let mut harness = Harness::new(FakeController::qemu());
-    let ports = bootstrap(&mut harness.fake).expect("controller present");
+    let ports =
+        bootstrap(&mut harness.fake, &mut harness.driver.stats).expect("controller present");
     let keyboard_only = Ports {
         keyboard: ports.keyboard,
         aux: false,
     };
-    enable_irqs(&mut harness.fake, keyboard_only).expect("irqs enabled");
+    enable_irqs(&mut harness.fake, keyboard_only, &mut harness.driver.stats).expect("irqs enabled");
     harness.driver.start(
         &mut harness.fake,
         keyboard_only,
@@ -699,6 +718,35 @@ fn drain_demultiplexes_keyboard_and_mouse_bytes_by_the_aux_bit() {
         ]
     );
     assert_eq!((stats.irqs, stats.port_reads, stats.spurious), (1, 4, 0));
+}
+
+#[test]
+fn each_vector_counts_its_own_interrupts() {
+    let mut harness = ready_harness(MouseProtocol::Standard);
+    let Harness {
+        fake,
+        driver,
+        sink,
+        timers,
+    } = &mut harness;
+    fake.push(0x1C, false);
+    driver.interrupt(Port::Keyboard, fake, sink, timers);
+    for byte in [0x08, 1, 0] {
+        fake.push(byte, true);
+        driver.interrupt(Port::Aux, fake, sink, timers);
+    }
+    driver.interrupt(Port::Aux, fake, sink, timers);
+    let stats = driver.stats;
+    assert_eq!(
+        (
+            stats.keyboard_irqs,
+            stats.mouse_irqs,
+            stats.irqs,
+            stats.spurious
+        ),
+        (1, 4, 5, 1)
+    );
+    assert_eq!(stats.port_reads, 4);
 }
 
 #[test]

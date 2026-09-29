@@ -10,6 +10,9 @@
 //! Single CPU: driver state is mutated only in IRQ context or with interrupts masked. SMP needs
 //! the `GlobalCell`s behind an IRQ-safe spin lock.
 
+#[cfg(feature = "m10-input-self-test")]
+use core::sync::atomic::{AtomicU32, Ordering};
+
 use clean_slate_graphics::ids::{KEYBOARD_INDEX, MOUSE_INDEX};
 use clean_slate_graphics::input::KeyState;
 use clean_slate_graphics::raw_input::RawInputKind;
@@ -19,7 +22,9 @@ use super::keyboard::{PressedKeys, Set2Decoder, Set2Event, PAUSE_USAGE};
 use super::mouse::{MouseFeed, MousePacketDecoder, MouseProtocol};
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::port::{port_in, port_out};
-use crate::interrupt::irq::{allocate_device_vector, release_device_vector, route_isa_irq};
+use crate::interrupt::irq::{
+    allocate_device_vector, release_device_vector, route_isa_irq, DeviceInterruptHandler,
+};
 use crate::sync::global_cell::GlobalCell;
 
 const DATA_PORT: u16 = 0x60;
@@ -212,15 +217,18 @@ impl<Io: ControllerIo> Controller<'_, Io> {
 
 /// Resets and tests the controller with both ports disabled and controller IRQs off, then
 /// enables the ports that pass their interface test. Talks to no device. Only a missing or
-/// failed controller is an error.
-pub(super) fn bootstrap<Io: ControllerIo>(io: &mut Io) -> Result<Ports, ControllerError> {
+/// failed controller is an error. Stale bytes it discards are added to `init_flushed`.
+pub(super) fn bootstrap<Io: ControllerIo>(
+    io: &mut Io,
+    stats: &mut DriverStats,
+) -> Result<Ports, ControllerError> {
     if io.status() == STATUS_ABSENT {
         return Err(ControllerError::Absent);
     }
     let mut controller = Controller { io };
     controller.command(CMD_DISABLE_KEYBOARD)?;
     controller.command(CMD_DISABLE_AUX)?;
-    controller.flush();
+    stats.init_flushed = stats.init_flushed.saturating_add(controller.flush());
 
     let config = controller.command_response(CMD_READ_CONFIG)?
         & !(CONFIG_KEYBOARD_IRQ | CONFIG_AUX_IRQ | CONFIG_TRANSLATE);
@@ -249,13 +257,15 @@ pub(super) fn bootstrap<Io: ControllerIo>(io: &mut Io) -> Result<Ports, Controll
 
 /// Enables controller interrupts for `ports`, then drains anything already in the output
 /// buffer: with edge-triggered ISA routing a byte that arrived before the enable raises no edge
-/// and would block the line forever. Returns the number of bytes drained.
+/// and would block the line forever. Bytes discarded before the config read are added to
+/// `init_flushed`, and bytes drained after the enable to `init_drained`.
 pub(super) fn enable_irqs<Io: ControllerIo>(
     io: &mut Io,
     ports: Ports,
-) -> Result<u32, ControllerError> {
+    stats: &mut DriverStats,
+) -> Result<(), ControllerError> {
     let mut controller = Controller { io };
-    controller.flush();
+    stats.init_flushed = stats.init_flushed.saturating_add(controller.flush());
     let mut config = controller.command_response(CMD_READ_CONFIG)? & !CONFIG_TRANSLATE;
     if ports.keyboard {
         config |= CONFIG_KEYBOARD_IRQ;
@@ -264,7 +274,8 @@ pub(super) fn enable_irqs<Io: ControllerIo>(
         config |= CONFIG_AUX_IRQ;
     }
     controller.write_config(config)?;
-    Ok(controller.flush())
+    stats.init_drained = stats.init_drained.saturating_add(controller.flush());
+    Ok(())
 }
 
 /// Where decoded input goes; the kernel implementation is the raw-input queue.
@@ -293,6 +304,8 @@ pub(super) trait ResponseTimers {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DriverStats {
     pub(crate) irqs: u32,
+    pub(crate) keyboard_irqs: u32,
+    pub(crate) mouse_irqs: u32,
     pub(crate) spurious: u32,
     pub(crate) port_reads: u32,
     pub(crate) unmapped: u32,
@@ -304,6 +317,9 @@ pub(crate) struct DriverStats {
     pub(crate) mouse_resyncs: u32,
     pub(crate) mouse_overflows: u32,
     pub(crate) mouse_resets: u32,
+    /// Stale bytes discarded by bootstrap and before the IRQ-enabling config read.
+    pub(crate) init_flushed: u32,
+    /// Bytes drained right after IRQs were enabled, before any init program started.
     pub(crate) init_drained: u32,
     /// Bytes an init program did not accept (scancodes typed during boot, stray bytes).
     pub(crate) init_noise: u32,
@@ -315,6 +331,8 @@ pub(crate) struct DriverStats {
 impl DriverStats {
     const ZERO: Self = Self {
         irqs: 0,
+        keyboard_irqs: 0,
+        mouse_irqs: 0,
         spurious: 0,
         port_reads: 0,
         unmapped: 0,
@@ -326,6 +344,7 @@ impl DriverStats {
         mouse_resyncs: 0,
         mouse_overflows: 0,
         mouse_resets: 0,
+        init_flushed: 0,
         init_drained: 0,
         init_noise: 0,
         init_discarded: 0,
@@ -477,6 +496,21 @@ impl Driver {
         }
     }
 
+    /// Entry from the IRQ 1 (`Port::Keyboard`) or IRQ 12 (`Port::Aux`) vector.
+    fn interrupt<Io: ControllerIo>(
+        &mut self,
+        vector: Port,
+        io: &mut Io,
+        sink: &mut impl InputSink,
+        timers: &mut impl ResponseTimers,
+    ) {
+        bump(match vector {
+            Port::Keyboard => &mut self.stats.keyboard_irqs,
+            Port::Aux => &mut self.stats.mouse_irqs,
+        });
+        self.drain(io, sink, timers);
+    }
+
     /// IRQ-context drain shared by both vectors. The keyboard and mouse share one output buffer,
     /// so the status AUX bit, not the vector, selects the device.
     pub(super) fn drain<Io: ControllerIo>(
@@ -609,22 +643,35 @@ impl Driver {
     }
 }
 
+/// Every access to the controller's ports, for the smoke lane's no-polling proof.
+#[cfg(feature = "m10-input-self-test")]
+static PORT_ACCESSES: AtomicU32 = AtomicU32::new(0);
+
+fn count_port_access() {
+    #[cfg(feature = "m10-input-self-test")]
+    PORT_ACCESSES.fetch_add(1, Ordering::Relaxed);
+}
+
 struct HardwarePorts;
 
 impl ControllerIo for HardwarePorts {
     fn status(&mut self) -> u8 {
+        count_port_access();
         port_in(STATUS_COMMAND_PORT)
     }
 
     fn read_data(&mut self) -> u8 {
+        count_port_access();
         port_in(DATA_PORT)
     }
 
     fn write_command(&mut self, command: u8) {
+        count_port_access();
         port_out(STATUS_COMMAND_PORT, command);
     }
 
     fn write_data(&mut self, byte: u8) {
+        count_port_access();
         port_out(DATA_PORT, byte);
     }
 
@@ -669,8 +716,8 @@ fn driver_mut() -> &'static mut DriverState {
     unsafe { &mut *DRIVER.get() }
 }
 
-fn route_device(irq: u8) -> Option<u8> {
-    let vector = allocate_device_vector(controller_interrupt).ok()?;
+fn route_device(irq: u8, handler: DeviceInterruptHandler) -> Option<u8> {
+    let vector = allocate_device_vector(handler).ok()?;
     if route_isa_irq(irq, vector).is_err() {
         release_device_vector(vector);
         return None;
@@ -678,8 +725,18 @@ fn route_device(irq: u8) -> Option<u8> {
     Some(vector)
 }
 
-fn controller_interrupt() {
-    driver_mut().driver.drain(
+fn keyboard_interrupt() {
+    driver_mut().driver.interrupt(
+        Port::Keyboard,
+        &mut HardwarePorts,
+        &mut super::QueueSink,
+        &mut W3ResponseTimers,
+    );
+}
+
+fn mouse_interrupt() {
+    driver_mut().driver.interrupt(
+        Port::Aux,
         &mut HardwarePorts,
         &mut super::QueueSink,
         &mut W3ResponseTimers,
@@ -697,17 +754,22 @@ pub(crate) fn begin_init() -> Result<Ports, ControllerError> {
     if crate::time::tsc_hz().is_none() {
         return Err(ControllerError::ClockUnavailable);
     }
-    let ports = without_interrupts(|| bootstrap(&mut HardwarePorts))?;
     let state = driver_mut();
-    state.keyboard_vector = ports.keyboard.then(|| route_device(KEYBOARD_IRQ)).flatten();
-    state.mouse_vector = ports.aux.then(|| route_device(MOUSE_IRQ)).flatten();
+    let ports = without_interrupts(|| bootstrap(&mut HardwarePorts, &mut state.driver.stats))?;
+    state.keyboard_vector = ports
+        .keyboard
+        .then(|| route_device(KEYBOARD_IRQ, keyboard_interrupt))
+        .flatten();
+    state.mouse_vector = ports
+        .aux
+        .then(|| route_device(MOUSE_IRQ, mouse_interrupt))
+        .flatten();
     let routed = Ports {
         keyboard: state.keyboard_vector.is_some(),
         aux: state.mouse_vector.is_some(),
     };
     let enabled = without_interrupts(|| {
-        let drained = enable_irqs(&mut HardwarePorts, routed)?;
-        state.driver.stats.init_drained = drained;
+        enable_irqs(&mut HardwarePorts, routed, &mut state.driver.stats)?;
         state.driver.start(
             &mut HardwarePorts,
             routed,
@@ -736,6 +798,11 @@ fn release_routes() {
 #[cfg(feature = "m10-input-self-test")]
 pub(crate) fn stats() -> DriverStats {
     without_interrupts(|| driver_mut().driver.stats)
+}
+
+#[cfg(feature = "m10-input-self-test")]
+pub(crate) fn port_accesses() -> u32 {
+    PORT_ACCESSES.load(Ordering::Relaxed)
 }
 
 /// Keyboard and mouse init status, and the negotiated mouse protocol.

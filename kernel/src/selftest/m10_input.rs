@@ -277,20 +277,59 @@ fn begin_and_await_devices() -> Result<MouseProtocol, &'static str> {
     Ok(protocol)
 }
 
+/// An unasked BAT (keyboard `AA`, mouse `AA 00`) means the device reset itself: its old
+/// generation gets one `Overflow`, it is unpublished, and its init program runs again against
+/// the real device before it reappears with the next generation.
+fn self_reset(aux: bool, bat: &[u8]) -> Result<InputDeviceId, &'static str> {
+    let info = input::device_info();
+    let old = if aux { info.mouse } else { info.keyboard }.ok_or("device missing before reset")?;
+    for byte in bat {
+        inject_and_wait(aux, *byte)?;
+    }
+    boot_wait::wait_until(DEVICE_INIT_WAIT_MS, "reset device did not re-init", |_| {
+        let (keyboard, mouse, _) = input::init_status();
+        let status = if aux { mouse } else { keyboard };
+        Ok((status == InitStatus::Ready).then_some(()))
+    })?;
+    expect_next(old, RawInputKind::Overflow { dropped: 1 })?;
+    let info = input::device_info();
+    let new = if aux { info.mouse } else { info.keyboard }.ok_or("device missing after reset")?;
+    if new.index() != old.index() || new.generation() != old.generation() + 1 {
+        return Err("re-initialised device did not move to the next generation");
+    }
+    Ok(new)
+}
+
 fn run_boot_phase() -> Result<(), &'static str> {
     let protocol = begin_and_await_devices()?;
+    let readiness_before = input::queue_stats().readiness_changes;
+    self_reset(false, &[0xAA])?;
+    self_reset(true, &[0xAA, 0x00])?;
+    let stats = input::driver_stats();
+    let (_, _, protocol_after) = input::init_status();
+    if (stats.keyboard_resets, stats.mouse_resets) != (1, 1) || protocol_after != protocol {
+        return Err("self-reset was not counted or the mouse protocol was lost");
+    }
     let info = input::device_info();
     let keyboard = info.keyboard.ok_or("keyboard device id missing")?;
     let mouse = info.mouse.ok_or("mouse device id missing")?;
+    kernel_log_fmt(format_args!(
+        "[M10.input] self-reset kbd=0x{:08x} mouse=0x{:08x} readiness_changes=+{}\n",
+        keyboard.encode(),
+        mouse.encode(),
+        input::queue_stats().readiness_changes - readiness_before
+    ));
     let lane = lane_mut();
     lane.keyboard = Some(keyboard);
     lane.mouse = Some(mouse);
+    let settled = input::driver_stats();
     kernel_log_fmt(format_args!(
-        "[M10.input] ready kbd=0x{:08x} mouse=0x{:08x} proto={} drained={}\n",
+        "[M10.input] ready kbd=0x{:08x} mouse=0x{:08x} proto={} flushed={} drained={}\n",
         keyboard.encode(),
         mouse.encode(),
         protocol.device_id(),
-        input::driver_stats().init_drained
+        settled.init_flushed,
+        settled.init_drained
     ));
 
     for byte in KEYBOARD_STIMULUS {
@@ -301,9 +340,11 @@ fn run_boot_phase() -> Result<(), &'static str> {
     }
 
     let packet_len = protocol.packet_len();
-    let mouse_expect = |packet: [u8; 4], kinds: &[RawInputKind]| {
+    let mut aux_bytes = 0u32;
+    let mut mouse_expect = |packet: [u8; 4], kinds: &[RawInputKind]| {
         for byte in &packet[..packet_len] {
             inject_and_wait(true, *byte)?;
+            aux_bytes += 1;
         }
         kinds.iter().try_for_each(|kind| expect_next(mouse, *kind))
     };
@@ -349,13 +390,27 @@ fn run_boot_phase() -> Result<(), &'static str> {
     if stats.keyboard_resyncs != 0 || stats.mouse_resyncs != 0 || stats.mouse_overflows != 0 {
         return Err("decoder resynced on clean stimulus");
     }
+    if (stats.keyboard_resets, stats.mouse_resets)
+        != (settled.keyboard_resets, settled.mouse_resets)
+    {
+        return Err("a device reset itself during the stimulus");
+    }
+    // One byte is injected per IRQ, so each vector fires exactly once per byte on its port.
+    let kbd_bytes = KEYBOARD_STIMULUS.len() as u32;
+    let irq1 = stats.keyboard_irqs - settled.keyboard_irqs;
+    let irq12 = stats.mouse_irqs - settled.mouse_irqs;
+    let spurious = stats.spurious - settled.spurious;
+    let port_reads = stats.port_reads - settled.port_reads;
     kernel_log_fmt(format_args!(
-        "[M10.input] routed irqs={} port_reads={} spurious={} wake_edges={}\n",
-        stats.irqs,
-        stats.port_reads,
-        stats.spurious,
-        input::queue_stats().wake_edges
+        "[M10.input] routed kbd_bytes={} irq1={} aux_bytes={} irq12={} spurious={} port_reads={}\n",
+        kbd_bytes, irq1, aux_bytes, irq12, spurious, port_reads
     ));
+    if irq1 != kbd_bytes || irq12 != aux_bytes || spurious != 0 {
+        return Err("IRQ 1/12 counts did not match the bytes injected on each port");
+    }
+    if port_reads != kbd_bytes + aux_bytes {
+        return Err("data-port reads did not match the injected bytes");
+    }
 
     fill_queue_past_capacity()?;
     hold_idle()?;
@@ -429,7 +484,13 @@ fn log_record(record: &RawInputRecord) {
 }
 
 /// Leaves a full queue plus a pending loss for the CPL3 consumer to drain.
+/// Filling from empty and then dropping must raise the consumer's wake exactly once: on the
+/// first record, never on later records or on the loss behind a non-empty queue.
 fn fill_queue_past_capacity() -> Result<(), &'static str> {
+    let before = input::queue_stats();
+    if before.len != 0 || before.pending_dropped != 0 {
+        return Err("queue was not empty before the fill");
+    }
     for _ in 0..HOLD_TAPS {
         for byte in [0x1C, 0xF0, 0x1C] {
             inject_and_wait(false, byte)?;
@@ -439,10 +500,14 @@ fn fill_queue_past_capacity() -> Result<(), &'static str> {
     if queue.len != RAW_INPUT_QUEUE_DEPTH || queue.pending_dropped != HOLD_DROPPED {
         return Err("full queue did not hold depth records plus a pending loss");
     }
+    let wake_edges = queue.wake_edges - before.wake_edges;
     kernel_log_fmt(format_args!(
-        "[M10.input] queue full len={} pending_dropped={}\n",
-        queue.len, queue.pending_dropped
+        "[M10.input] queue full len={} pending_dropped={} wake_edges=+{}\n",
+        queue.len, queue.pending_dropped, wake_edges
     ));
+    if wake_edges != 1 {
+        return Err("filling the queue past capacity did not wake exactly once");
+    }
     Ok(())
 }
 
@@ -450,23 +515,28 @@ fn fill_queue_past_capacity() -> Result<(), &'static str> {
 /// controller (no polling) while timer ticks keep arriving.
 fn hold_idle() -> Result<(), &'static str> {
     let before = input::driver_stats();
+    let accesses_before = input::port_accesses();
     let ticks_before = kernel_ticks();
     let start_ms = boot_wait::now_ms();
     boot_wait::wait_until(IDLE_HOLD_MS * 2, "idle hold overran its budget", |now_ms| {
         Ok((now_ms >= start_ms + IDLE_HOLD_MS).then_some(()))
     })?;
     let after = input::driver_stats();
+    let accesses = input::port_accesses() - accesses_before;
     let ticks = kernel_ticks().saturating_sub(ticks_before);
-    if after.irqs != before.irqs || after.port_reads != before.port_reads {
+    kernel_log_fmt(format_args!(
+        "[M10.input] idle ms={} ticks={} irqs=+{} port_accesses=+{}\n",
+        IDLE_HOLD_MS,
+        ticks,
+        after.irqs - before.irqs,
+        accesses
+    ));
+    if after.irqs != before.irqs || accesses != 0 {
         return Err("driver touched the controller while idle");
     }
     if ticks == 0 {
         return Err("no timer interrupts arrived during the idle hold");
     }
-    kernel_log_fmt(format_args!(
-        "[M10.input] idle ms={} ticks={} irqs=+0 port_reads=+0\n",
-        IDLE_HOLD_MS, ticks
-    ));
     Ok(())
 }
 
