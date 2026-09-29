@@ -18,14 +18,6 @@ impl MouseProtocol {
         }
     }
 
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Standard => "standard",
-            Self::Wheel => "wheel",
-            Self::Explorer => "explorer",
-        }
-    }
-
     pub(crate) const fn device_id(self) -> u8 {
         match self {
             Self::Standard => 0,

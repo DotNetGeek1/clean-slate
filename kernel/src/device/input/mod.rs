@@ -2,9 +2,12 @@
 //! that `READ_BATCH` drains (wire §6.2).
 //!
 //! Queue state is mutated in IRQ context (interrupts masked) or under `without_interrupts`.
-//! Until the work-set signal API (#200 W2) exists a wake edge is only counted, and `BIND_WAKE`
-//! stays `ENOSYS`, so a consumer drains with `READ_BATCH` without blocking.
+//! A device is published (`QUERY_DEVICES` reports its id) only once its init program finishes;
+//! until then it reads as `None` and queues nothing. Until the work-set signal API (#200 W2)
+//! exists, [`InputState::signal_input_work`] only counts, and `BIND_WAKE` stays `ENOSYS`, so a
+//! consumer drains with `READ_BATCH` without blocking.
 
+mod device_init;
 mod i8042;
 mod keyboard;
 mod mouse;
@@ -21,7 +24,7 @@ use crate::diagnostics::log::kernel_log_fmt;
 use crate::sync::global_cell::GlobalCell;
 use queue::RawInputQueue;
 
-pub(crate) use i8042::initialize;
+pub(crate) use i8042::begin_init;
 
 const DEVICE_SLOTS: usize = 2;
 /// `InputDeviceId` carries a 24-bit generation; 0 is never issued.
@@ -80,6 +83,7 @@ struct InputState {
     present: [bool; DEVICE_SLOTS],
     consumer: ConsumerSlot,
     wake_edges: u32,
+    readiness_changes: u32,
 }
 
 impl InputState {
@@ -90,6 +94,7 @@ impl InputState {
             present: [false; DEVICE_SLOTS],
             consumer: ConsumerSlot::new(),
             wake_edges: 0,
+            readiness_changes: 0,
         }
     }
 
@@ -109,16 +114,18 @@ impl InputState {
         self.present[slot] = present;
     }
 
-    fn signal_consumer(&mut self) {
-        self.wake_edges = self.wake_edges.saturating_add(1);
-    }
+    /// The consumer's input work bit: `BIND_WAKE` (#200 W2) signals its bound work-set bit here.
+    /// Raised on the queue's empty-to-non-empty edge and on every device readiness change, so
+    /// the consumer re-reads or re-queries.
+    fn signal_input_work(&mut self) {}
 
     fn record(&mut self, index: u8, kind: RawInputKind, now_ns: u64) {
         let Some(device) = self.device(index) else {
             return;
         };
         if self.queue.push(device, kind, now_ns).queued_into_empty {
-            self.signal_consumer();
+            self.wake_edges = self.wake_edges.saturating_add(1);
+            self.signal_input_work();
         }
     }
 
@@ -127,8 +134,15 @@ impl InputState {
             return;
         };
         if self.queue.record_loss(device) {
-            self.signal_consumer();
+            self.wake_edges = self.wake_edges.saturating_add(1);
+            self.signal_input_work();
         }
+    }
+
+    fn device_ready(&mut self, index: u8) {
+        self.publish(index, true);
+        self.readiness_changes = self.readiness_changes.saturating_add(1);
+        self.signal_input_work();
     }
 
     fn device_reset(&mut self, index: u8) {
@@ -186,18 +200,15 @@ impl i8042::InputSink for QueueSink {
     fn device_reset(&mut self, device_index: u8) {
         input_mut().device_reset(device_index);
     }
+
+    fn device_ready(&mut self, device_index: u8) {
+        input_mut().device_ready(device_index);
+    }
 }
 
-fn publish_devices(keyboard: bool, mouse: bool) {
-    without_interrupts(|| {
-        let state = input_mut();
-        state.publish(KEYBOARD_INDEX, keyboard);
-        state.publish(MOUSE_INDEX, mouse);
-    });
-}
-
-/// Boot-tail bring-up. A missing or failed controller leaves the seat without devices; input
-/// is never boot-fatal.
+/// Boot-tail bring-up: returns once the device init programs are started; the devices appear
+/// later, from IRQ context. A missing or failed controller leaves the seat without devices;
+/// input is never boot-fatal.
 // Boot-tail entry point: these self-test builds exit QEMU before reaching it.
 #[cfg_attr(
     any(
@@ -226,12 +237,13 @@ fn publish_devices(keyboard: bool, mouse: bool) {
     ),
     allow(dead_code)
 )]
-pub(crate) fn initialize_and_log() {
-    match initialize() {
-        Ok(report) => kernel_log_fmt(format_args!(
+pub(crate) fn begin_init_and_log() {
+    let port = |started: bool| if started { "init" } else { "absent" };
+    match begin_init() {
+        Ok(ports) => kernel_log_fmt(format_args!(
             "[INPT] i8042 keyboard={} mouse={}\n",
-            if report.keyboard { "present" } else { "absent" },
-            report.mouse.map_or("absent", |protocol| protocol.name())
+            port(ports.keyboard),
+            port(ports.aux)
         )),
         Err(error) => kernel_log_fmt(format_args!(
             "[INPT] i8042 unavailable reason={}\n",
@@ -269,13 +281,18 @@ pub(crate) fn consumer_bindings_for(holder: HolderId) -> usize {
 }
 
 #[cfg(feature = "m10-input-self-test")]
-pub(crate) use i8042::{inject, stats as driver_stats};
+pub(crate) use device_init::InitStatus;
+#[cfg(feature = "m10-input-self-test")]
+pub(crate) use i8042::{init_status, inject, stats as driver_stats};
+#[cfg(feature = "m10-input-self-test")]
+pub(crate) use mouse::MouseProtocol;
 
 #[cfg(feature = "m10-input-self-test")]
 pub(crate) struct QueueStats {
     pub(crate) len: usize,
     pub(crate) pending_dropped: u32,
     pub(crate) wake_edges: u32,
+    pub(crate) readiness_changes: u32,
 }
 
 #[cfg(feature = "m10-input-self-test")]
@@ -286,6 +303,7 @@ pub(crate) fn queue_stats() -> QueueStats {
             len: state.queue.len(),
             pending_dropped: state.queue.pending_dropped(),
             wake_edges: state.wake_edges,
+            readiness_changes: state.readiness_changes,
         }
     })
 }
@@ -338,6 +356,26 @@ mod tests {
         assert_eq!((info.queue_depth, info.record_bytes), (128, 32));
         assert!(state.queue.is_empty_including_pending());
         assert_eq!(state.wake_edges, 0);
+    }
+
+    #[test]
+    fn devices_read_as_none_and_queue_nothing_until_ready() {
+        let mut state = InputState::new();
+        state.record(KEYBOARD_INDEX, key(), 10);
+        assert_eq!(state.device_info().keyboard, None);
+        assert!(state.queue.is_empty_including_pending());
+
+        state.device_ready(KEYBOARD_INDEX);
+        assert_eq!(state.readiness_changes, 1);
+        let info = state.device_info();
+        assert_eq!(info.keyboard.map(|d| d.generation()), Some(1));
+        assert_eq!(info.mouse, None);
+        state.record(KEYBOARD_INDEX, key(), 11);
+        assert_eq!(state.queue.len(), 1);
+
+        state.device_ready(MOUSE_INDEX);
+        assert_eq!(state.readiness_changes, 2);
+        assert!(state.device_info().mouse.is_some());
     }
 
     #[test]

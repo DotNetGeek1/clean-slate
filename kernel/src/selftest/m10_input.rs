@@ -24,7 +24,7 @@ use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::input::grant_input_authority;
-use crate::device::input;
+use crate::device::input::{self, InitStatus, MouseProtocol};
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::diagnostics::serial::serial_write_line;
@@ -86,6 +86,8 @@ const PARK_KEY: u64 = 0x113_00FF;
 
 /// Per injected byte: one IRQ on QEMU, bounded well above a timer tick.
 const IRQ_WAIT_MS: u64 = 1_000;
+/// Both init programs, including a full BAT timeout, fit well inside this.
+const DEVICE_INIT_WAIT_MS: u64 = 3_000;
 /// No stimulus for this long must leave the driver's IRQ and port counters untouched.
 const IDLE_HOLD_MS: u64 = 300;
 /// Taps that fill the queue (two records each) and then drop two taps' worth of records.
@@ -238,12 +240,45 @@ pub(crate) fn start_m10_input_self_test(allocator: PageAllocator) -> ! {
     unsafe { restore_task_context(frame_pointer) }
 }
 
-fn run_boot_phase() -> Result<(), &'static str> {
-    let report = input::initialize().map_err(|error| error.name())?;
-    let protocol = report.mouse.ok_or("i8042 mouse missing")?;
-    if !report.keyboard {
-        return Err("i8042 keyboard missing");
+/// `begin_init` returns before either device has answered; the IRQ handlers then run each init
+/// program to Ready, or to failure once the program's response timeout expires.
+fn begin_and_await_devices() -> Result<MouseProtocol, &'static str> {
+    let ports = input::begin_init().map_err(|error| error.name())?;
+    if !ports.keyboard || !ports.aux {
+        return Err("i8042 port missing or unrouted");
     }
+    let info = input::device_info();
+    let (keyboard, mouse, _) = input::init_status();
+    if info.keyboard.is_some() || info.mouse.is_some() {
+        return Err("devices were published before their init programs finished");
+    }
+    if (keyboard, mouse) != (InitStatus::Pending, InitStatus::Pending) {
+        return Err("init programs did not wait for the IRQ path");
+    }
+    serial_write_line("[M10.input] init begun devices=none");
+
+    let start_ms = boot_wait::now_ms();
+    boot_wait::wait_until(DEVICE_INIT_WAIT_MS, "input devices did not settle", |_| {
+        let (keyboard, mouse, _) = input::init_status();
+        let settled = |status| !matches!(status, InitStatus::Idle | InitStatus::Pending);
+        Ok((settled(keyboard) && settled(mouse)).then_some(()))
+    })?;
+    let (keyboard, mouse, protocol) = input::init_status();
+    kernel_log_fmt(format_args!(
+        "[M10.input] init settled kbd={} mouse={} ms={} readiness_changes={}\n",
+        keyboard.name(),
+        mouse.name(),
+        boot_wait::now_ms().saturating_sub(start_ms),
+        input::queue_stats().readiness_changes
+    ));
+    if (keyboard, mouse) != (InitStatus::Ready, InitStatus::Ready) {
+        return Err("input device init failed");
+    }
+    Ok(protocol)
+}
+
+fn run_boot_phase() -> Result<(), &'static str> {
+    let protocol = begin_and_await_devices()?;
     let info = input::device_info();
     let keyboard = info.keyboard.ok_or("keyboard device id missing")?;
     let mouse = info.mouse.ok_or("mouse device id missing")?;
