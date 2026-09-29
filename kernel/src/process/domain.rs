@@ -868,17 +868,11 @@ mod tests {
             address_space_root: 0x20_0000,
             allocator: &mut allocator,
         };
-        let mut released = ReleasedResources::default();
+        // The slot functions, not `run_teardown_hook`: the port lane's hook trace requires every
+        // teardown to start at the first hook.
         for _ in 0..2 {
-            assert_eq!(
-                run_teardown_hook(
-                    TeardownHook::InputConsumer,
-                    &mut ctx,
-                    &CURRENT_TEARDOWN,
-                    &mut released
-                ),
-                Ok(())
-            );
+            release_input_consumer(&mut ctx);
+            assert_eq!(release_shared_mappings(&mut ctx), Ok(()));
             assert_eq!(input::consumer_bindings_for(exiting), 0);
         }
         assert_eq!(input::bind_consumer(next), Ok(()));
