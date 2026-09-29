@@ -53,6 +53,9 @@ static FIXTURE_TURN: GlobalCell<u64> = GlobalCell::new(0);
 
 const MAX_FIXTURE_REGISTRY: usize = 24;
 const MAX_FIXTURE_REPORTS: usize = 24;
+/// The pid registry reuses slots as fixtures exit, but the exit log keeps every exit of the
+/// run, so it bounds the total fixtures one lane may spawn.
+const MAX_FIXTURE_EXITS: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FixtureReportAction {
@@ -78,8 +81,7 @@ static FIXTURE_PROGRAMS: GlobalCell<[Option<FixtureProgramSlot>; MAX_FIXTURE_REG
 static FIXTURE_PIDS: GlobalCell<[u64; MAX_FIXTURE_REGISTRY]> =
     GlobalCell::new([0; MAX_FIXTURE_REGISTRY]);
 static FIXTURE_PID_COUNT: GlobalCell<usize> = GlobalCell::new(0);
-/// Every fixture spawn registers a pid, so this holds at most one run's worth.
-static FIXTURE_EXITS: GlobalCell<FixtureExitLog<MAX_FIXTURE_REGISTRY>> =
+static FIXTURE_EXITS: GlobalCell<FixtureExitLog<MAX_FIXTURE_EXITS>> =
     GlobalCell::new(FixtureExitLog::new());
 static FIXTURE_REPORTS: GlobalCell<[Option<FixtureReportSlot>; MAX_FIXTURE_REPORTS]> =
     GlobalCell::new([None; MAX_FIXTURE_REPORTS]);

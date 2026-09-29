@@ -5,6 +5,7 @@ use crate::arch::x86_64::gdt::selector_rpl;
 use crate::arch::x86_64::interrupt_context::InterruptContext;
 use crate::capability::bootstrap_grant::GRANT_SUBOP_CLAIM;
 use crate::capability::delegation::DELEGATE_OP_DELEGATE;
+use crate::capability::grant_root;
 use crate::capability::revocation::REVOKE_OP_REVOKE;
 use crate::capability::{live_capability_count, with_capability_space};
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
@@ -26,16 +27,22 @@ use crate::selftest::m6_fixture::{
     set_lane_check_handler, set_report_handler, spawn_fixture, wait_exit_step, wait_turn_step,
     FixtureReportAction, FIXTURE_SUBOP_LANE_CHECK,
 };
+use crate::service::instance_generation::live_instance_generation_for_pid;
+use crate::service::port;
+use crate::service::spawn::SpawnedServiceInstance;
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::{
     install_service_lifecycle_syscall_allocator, service_lifecycle_syscall_allocator_mut,
 };
 use clean_slate_capability::syscall_abi::{
     SYSCALL_EINVAL, SYSCALL_NR_CAP_DELEGATE, SYSCALL_NR_CAP_GRANT, SYSCALL_NR_CAP_REVOKE,
-    SYSCALL_NR_SHARED_BUFFER,
+    SYSCALL_NR_SERVICE_PORT, SYSCALL_NR_SHARED_BUFFER,
 };
-use clean_slate_capability::{CapabilityHandle, HolderId, Rights};
+use clean_slate_capability::{CapabilityHandle, HolderId, ResourceRef, Rights};
 use clean_slate_capability::{CapabilityState, ResourceClass};
+use clean_slate_native_abi::port::{
+    PORT_OP_CONNECT, PORT_OP_RECV, PORT_OP_SEND, PORT_RECV_NONBLOCK,
+};
 use clean_slate_native_abi::{
     page_count_for_bytes, SharedBufferAccess, SharedBufferId, SharedBufferInfo,
     MAX_SHARED_BUFFERS_PER_OWNER, MAX_SHARED_BUFFER_BYTES, SHARED_BUFFER_ACCESS_READ,
@@ -44,6 +51,7 @@ use clean_slate_native_abi::{
     SHARED_BUFFER_SUBOP_UNMAP, SHARED_WINDOW_BASE, STATUS_EACCES, STATUS_EINVAL, STATUS_ENOSPC,
     STATUS_ESTALE,
 };
+use clean_slate_native_abi::{PortParams, PortRecvRecord, RecvKind};
 use clean_slate_service_fixtures::m6_fixture::{
     pattern_byte, M6FixtureBootstrap, M6FixtureStep, ARG_DATA_PTR, ARG_RESULT_OF,
     FIXTURE_STATUS_MISMATCH, M6_FIXTURE_BOOTSTRAP_ADDRESS, PATTERN_CONSTANT, PATTERN_INCREMENTING,
@@ -77,6 +85,10 @@ const CHECK_READER_EXIT_POST: u64 = 23;
 const CHECK_RECORD_FAULT_VA: u64 = 24;
 const CHECK_ROOT_REVOKED: u64 = 25;
 const CHECK_ROOT_REVOKE_OWNER_GONE: u64 = 26;
+const CHECK_TX_HANDLE: u64 = 27;
+const CHECK_TX_RECEIVED: u64 = 28;
+const CHECK_TX_RECEIVER_GONE: u64 = 29;
+const CHECK_TX_RECLAIMED: u64 = 30;
 
 /// Every fixture's first live mapping lands in row 0 of its window.
 const FIRST_ROW_VA: u64 = SHARED_WINDOW_BASE;
@@ -129,6 +141,22 @@ const TURN_RV_W_HANDOFF: u64 = 18;
 const TURN_RV_R_START: u64 = 19;
 const TURN_RV_R_MAPPED: u64 = 19;
 const TURN_RV_W_REVOKE: u64 = 20;
+const TURN_TX_W_SENT: u64 = 20;
+const TURN_TX_S_START: u64 = 21;
+
+/// The transfer phase's port: a graphics service the lane registers for its server fixture.
+const TX_SERVICE_ID: u64 = 0x195;
+const TX_RESOURCE: ResourceRef = ResourceRef::graphics(TX_SERVICE_ID, 1);
+const TX_PARAMS: PortParams = PortParams {
+    event_depth: 2,
+    request_depth: 2,
+    max_connections: 1,
+    max_outstanding: 1,
+    max_connections_per_holder: 1,
+};
+const TX_ROLE_CONNECT: u64 = 0;
+const TX_ROLE_SERVE: u64 = 1;
+const TX_FILL_SEED: u64 = 0x2c;
 
 /// CAP_REVOKE of the owner root takes the root and its one READ child.
 const ROOT_REVOKE_COUNT: u64 = 2;
@@ -157,6 +185,7 @@ enum PhaseId {
     OwnerExit = 9,
     ReaderExit = 10,
     RootRevoke = 11,
+    Transfer = 12,
 }
 
 struct FaultObservation {
@@ -189,6 +218,10 @@ struct LaneState {
     ko_reclaimed_before: u64,
     reuse_dirtied_base: u64,
     expected_fault_va: u64,
+    tx_connect_handle: u64,
+    tx_serve_handle: u64,
+    tx_child_handle: u64,
+    tx_reclaimed_before: u64,
 }
 
 static LANE_STATE: GlobalCell<Option<LaneState>> = GlobalCell::new(None);
@@ -220,6 +253,28 @@ fn assert_scheduler_slot_free(slot: usize) {
     if scheduler.threads[slot].state != ThreadState::Empty {
         fatal_kernel_error("[M10.SB] scheduler slot was not empty");
     }
+}
+
+/// Spawns fixture `fixture_index` of phase `phase_index`. Phases start on a fixture's syscall
+/// stack, and the fixture spawn path beneath this is deep, so each program is built here, one
+/// at a time, rather than as a per-role temporary in the phase's spawn function.
+fn spawn_role(
+    phase_index: usize,
+    fixture_index: usize,
+    service_id: u64,
+    build: impl FnOnce() -> M6FixtureBootstrap,
+) -> SpawnedServiceInstance {
+    let slot = scheduler_slot_for(phase_index, fixture_index);
+    assert_scheduler_slot_free(slot);
+    let stacks = unsafe { &*task_stacks_mut() };
+    spawn_fixture(
+        allocator(),
+        task_stack_top(&stacks[slot]),
+        slot,
+        fixture_service(service_id),
+        &build(),
+    )
+    .unwrap_or_else(|message| fatal_kernel_error(message))
 }
 
 fn push_step(program: &mut M6FixtureBootstrap, step: M6FixtureStep) -> usize {
@@ -458,29 +513,12 @@ fn build_nx_observer_program(exec_pid: u64) -> M6FixtureBootstrap {
 
 fn spawn_nx_fixtures(phase_index: usize) {
     kernel_log_line("[M10.SB] phase nx start");
-    let stacks = unsafe { &*task_stacks_mut() };
-    let slot_a = scheduler_slot_for(phase_index, 0);
-    assert_scheduler_slot_free(slot_a);
-    let exec_spawned = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_a]),
-        slot_a,
-        fixture_service(FIXTURE_NX_EXEC),
-        &build_nx_exec_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let exec_spawned = spawn_role(phase_index, 0, FIXTURE_NX_EXEC, build_nx_exec_program);
     state_mut().nx_exec_pid = exec_spawned.pid;
 
-    let slot_b = scheduler_slot_for(phase_index, 1);
-    assert_scheduler_slot_free(slot_b);
-    let observer = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_b]),
-        slot_b,
-        fixture_service(FIXTURE_NX_OBSERVER),
-        &build_nx_observer_program(exec_spawned.pid),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let observer = spawn_role(phase_index, 1, FIXTURE_NX_OBSERVER, || {
+        build_nx_observer_program(exec_spawned.pid)
+    });
     state_mut().last_reporter_pid = observer.pid;
 }
 
@@ -543,29 +581,10 @@ fn build_map_reader_program() -> M6FixtureBootstrap {
 
 fn spawn_map_fixtures(phase_index: usize) {
     kernel_log_line("[M10.SB] phase map start");
-    let stacks = unsafe { &*task_stacks_mut() };
-    let slot_w = scheduler_slot_for(phase_index, 0);
-    assert_scheduler_slot_free(slot_w);
-    let w = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_w]),
-        slot_w,
-        fixture_service(0x10),
-        &build_map_writer_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let w = spawn_role(phase_index, 0, 0x10, build_map_writer_program);
     state_mut().peer_pids[ROLE_W as usize] = w.pid;
 
-    let slot_r = scheduler_slot_for(phase_index, 1);
-    assert_scheduler_slot_free(slot_r);
-    let r = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_r]),
-        slot_r,
-        fixture_service(0x11),
-        &build_map_reader_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let r = spawn_role(phase_index, 1, 0x11, build_map_reader_program);
     state_mut().peer_pids[ROLE_R as usize] = r.pid;
     state_mut().last_reporter_pid = w.pid;
 }
@@ -665,41 +684,13 @@ fn build_deny_reader_program() -> M6FixtureBootstrap {
 
 fn spawn_deny_fixtures(phase_index: usize) {
     kernel_log_line("[M10.SB] phase deny start");
-    let stacks = unsafe { &*task_stacks_mut() };
-    let slot_w = scheduler_slot_for(phase_index, 0);
-    assert_scheduler_slot_free(slot_w);
-    let w = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_w]),
-        slot_w,
-        fixture_service(0x20),
-        &build_deny_writer_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let w = spawn_role(phase_index, 0, 0x20, build_deny_writer_program);
     state_mut().peer_pids[ROLE_W as usize] = w.pid;
 
-    let slot_x = scheduler_slot_for(phase_index, 1);
-    assert_scheduler_slot_free(slot_x);
-    let x = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_x]),
-        slot_x,
-        fixture_service(0x21),
-        &build_deny_intruder_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let x = spawn_role(phase_index, 1, 0x21, build_deny_intruder_program);
     state_mut().peer_pids[ROLE_X as usize] = x.pid;
 
-    let slot_r = scheduler_slot_for(phase_index, 2);
-    assert_scheduler_slot_free(slot_r);
-    let r = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_r]),
-        slot_r,
-        fixture_service(0x22),
-        &build_deny_reader_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let r = spawn_role(phase_index, 2, 0x22, build_deny_reader_program);
     state_mut().peer_pids[ROLE_R as usize] = r.pid;
     state_mut().last_reporter_pid = w.pid;
 }
@@ -776,29 +767,10 @@ fn build_stale_reader_program() -> M6FixtureBootstrap {
 
 fn spawn_stale_fixtures(phase_index: usize) {
     kernel_log_line("[M10.SB] phase stale start");
-    let stacks = unsafe { &*task_stacks_mut() };
-    let slot_w = scheduler_slot_for(phase_index, 0);
-    assert_scheduler_slot_free(slot_w);
-    let w = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_w]),
-        slot_w,
-        fixture_service(0x30),
-        &build_stale_writer_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let w = spawn_role(phase_index, 0, 0x30, build_stale_writer_program);
     state_mut().peer_pids[ROLE_W as usize] = w.pid;
 
-    let slot_r = scheduler_slot_for(phase_index, 1);
-    assert_scheduler_slot_free(slot_r);
-    let r = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_r]),
-        slot_r,
-        fixture_service(0x31),
-        &build_stale_reader_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let r = spawn_role(phase_index, 1, 0x31, build_stale_reader_program);
     state_mut().peer_pids[ROLE_R as usize] = r.pid;
     state_mut().last_reporter_pid = w.pid;
 }
@@ -858,17 +830,7 @@ fn append_exhaust_quota_steps(program: &mut M6FixtureBootstrap) {
 
 fn spawn_exhaust_fixtures(phase_index: usize) {
     kernel_log_line("[M10.SB] phase exhaust start");
-    let stacks = unsafe { &*task_stacks_mut() };
-    let slot_w = scheduler_slot_for(phase_index, 0);
-    assert_scheduler_slot_free(slot_w);
-    let w = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_w]),
-        slot_w,
-        fixture_service(0x40),
-        &build_exhaust_writer_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let w = spawn_role(phase_index, 0, 0x40, build_exhaust_writer_program);
     state_mut().peer_pids[ROLE_W as usize] = w.pid;
     state_mut().last_reporter_pid = w.pid;
 }
@@ -925,17 +887,7 @@ fn build_reuse_program() -> M6FixtureBootstrap {
 
 fn spawn_reuse_fixtures(phase_index: usize) {
     kernel_log_line("[M10.SB] phase reuse start");
-    let stacks = unsafe { &*task_stacks_mut() };
-    let slot = scheduler_slot_for(phase_index, 0);
-    assert_scheduler_slot_free(slot);
-    let w = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot]),
-        slot,
-        fixture_service(0x50),
-        &build_reuse_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let w = spawn_role(phase_index, 0, 0x50, build_reuse_program);
     state_mut().last_reporter_pid = w.pid;
 }
 
@@ -963,17 +915,7 @@ fn build_kernel_owned_program() -> M6FixtureBootstrap {
 
 fn spawn_kernel_owned_fixtures(phase_index: usize) {
     kernel_log_line("[M10.SB] phase kernel-owned start");
-    let stacks = unsafe { &*task_stacks_mut() };
-    let slot = scheduler_slot_for(phase_index, 0);
-    assert_scheduler_slot_free(slot);
-    let k = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot]),
-        slot,
-        fixture_service(0x60),
-        &build_kernel_owned_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let k = spawn_role(phase_index, 0, 0x60, build_kernel_owned_program);
     state_mut().last_reporter_pid = k.pid;
 }
 
@@ -1038,29 +980,10 @@ fn build_ro_write_reader_program() -> M6FixtureBootstrap {
 
 fn spawn_ro_write_fixtures(phase_index: usize) {
     kernel_log_line("[M10.SB] phase ro-write start");
-    let stacks = unsafe { &*task_stacks_mut() };
-    let slot_w = scheduler_slot_for(phase_index, 0);
-    assert_scheduler_slot_free(slot_w);
-    let w = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_w]),
-        slot_w,
-        fixture_service(0x70),
-        &build_ro_write_writer_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let w = spawn_role(phase_index, 0, 0x70, build_ro_write_writer_program);
     state_mut().peer_pids[ROLE_W as usize] = w.pid;
 
-    let slot_r = scheduler_slot_for(phase_index, 1);
-    assert_scheduler_slot_free(slot_r);
-    let r = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_r]),
-        slot_r,
-        fixture_service(0x71),
-        &build_ro_write_reader_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let r = spawn_role(phase_index, 1, 0x71, build_ro_write_reader_program);
     state_mut().peer_pids[ROLE_R as usize] = r.pid;
     state_mut().last_reporter_pid = w.pid;
 }
@@ -1108,29 +1031,12 @@ fn build_shared_exec_observer_program(writer_pid: u64) -> M6FixtureBootstrap {
 
 fn spawn_shared_exec_fixtures(phase_index: usize) {
     kernel_log_line("[M10.SB] phase shared-exec start");
-    let stacks = unsafe { &*task_stacks_mut() };
-    let slot_w = scheduler_slot_for(phase_index, 0);
-    assert_scheduler_slot_free(slot_w);
-    let w = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_w]),
-        slot_w,
-        fixture_service(0x72),
-        &build_shared_exec_writer_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let w = spawn_role(phase_index, 0, 0x72, build_shared_exec_writer_program);
     state_mut().peer_pids[ROLE_W as usize] = w.pid;
 
-    let slot_b = scheduler_slot_for(phase_index, 1);
-    assert_scheduler_slot_free(slot_b);
-    let observer = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_b]),
-        slot_b,
-        fixture_service(0x73),
-        &build_shared_exec_observer_program(w.pid),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let observer = spawn_role(phase_index, 1, 0x73, || {
+        build_shared_exec_observer_program(w.pid)
+    });
     state_mut().last_reporter_pid = observer.pid;
 }
 
@@ -1197,29 +1103,12 @@ fn build_owner_exit_reader_program(writer_pid: u64) -> M6FixtureBootstrap {
 
 fn spawn_owner_exit_fixtures(phase_index: usize) {
     kernel_log_line("[M10.SB] phase owner-exit start");
-    let stacks = unsafe { &*task_stacks_mut() };
-    let slot_w = scheduler_slot_for(phase_index, 0);
-    assert_scheduler_slot_free(slot_w);
-    let w = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_w]),
-        slot_w,
-        fixture_service(0x74),
-        &build_owner_exit_writer_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let w = spawn_role(phase_index, 0, 0x74, build_owner_exit_writer_program);
     state_mut().peer_pids[ROLE_W as usize] = w.pid;
 
-    let slot_r = scheduler_slot_for(phase_index, 1);
-    assert_scheduler_slot_free(slot_r);
-    let r = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_r]),
-        slot_r,
-        fixture_service(0x75),
-        &build_owner_exit_reader_program(w.pid),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let r = spawn_role(phase_index, 1, 0x75, || {
+        build_owner_exit_reader_program(w.pid)
+    });
     state_mut().peer_pids[ROLE_R as usize] = r.pid;
     state_mut().last_reporter_pid = r.pid;
 }
@@ -1287,29 +1176,10 @@ fn build_reader_exit_reader_program() -> M6FixtureBootstrap {
 
 fn spawn_reader_exit_fixtures(phase_index: usize) {
     kernel_log_line("[M10.SB] phase reader-exit start");
-    let stacks = unsafe { &*task_stacks_mut() };
-    let slot_w = scheduler_slot_for(phase_index, 0);
-    assert_scheduler_slot_free(slot_w);
-    let w = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_w]),
-        slot_w,
-        fixture_service(0x76),
-        &build_reader_exit_writer_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let w = spawn_role(phase_index, 0, 0x76, build_reader_exit_writer_program);
     state_mut().peer_pids[ROLE_W as usize] = w.pid;
 
-    let slot_r = scheduler_slot_for(phase_index, 1);
-    assert_scheduler_slot_free(slot_r);
-    let r = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_r]),
-        slot_r,
-        fixture_service(0x77),
-        &build_reader_exit_reader_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let r = spawn_role(phase_index, 1, 0x77, build_reader_exit_reader_program);
     state_mut().peer_pids[ROLE_R as usize] = r.pid;
     state_mut().last_reporter_pid = w.pid;
 }
@@ -1390,31 +1260,163 @@ fn build_root_revoke_reader_program(writer_pid: u64) -> M6FixtureBootstrap {
 
 fn spawn_root_revoke_fixtures(phase_index: usize) {
     kernel_log_line("[M10.SB] phase root-revoke start");
-    let stacks = unsafe { &*task_stacks_mut() };
-    let slot_w = scheduler_slot_for(phase_index, 0);
-    assert_scheduler_slot_free(slot_w);
-    let w = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_w]),
-        slot_w,
-        fixture_service(0x78),
-        &build_root_revoke_writer_program(),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let w = spawn_role(phase_index, 0, 0x78, build_root_revoke_writer_program);
     state_mut().peer_pids[ROLE_W as usize] = w.pid;
 
-    let slot_r = scheduler_slot_for(phase_index, 1);
-    assert_scheduler_slot_free(slot_r);
-    let r = spawn_fixture(
-        allocator(),
-        task_stack_top(&stacks[slot_r]),
-        slot_r,
-        fixture_service(0x79),
-        &build_root_revoke_reader_program(w.pid),
-    )
-    .unwrap_or_else(|message| fatal_kernel_error(message));
+    let r = spawn_role(phase_index, 1, 0x79, || {
+        build_root_revoke_reader_program(w.pid)
+    });
     state_mut().peer_pids[ROLE_R as usize] = r.pid;
     state_mut().last_reporter_pid = r.pid;
+}
+
+// --- Port transfer phase (W6 production attestation) ---
+
+fn step_port(subop: u64, args: [u64; 5]) -> M6FixtureStep {
+    M6FixtureStep::syscall(
+        SYSCALL_NR_SERVICE_PORT,
+        [subop, args[0], args[1], args[2], args[3], args[4]],
+    )
+}
+
+/// Owner and client: sends its root over the port, then outlives the receiver's fault and
+/// exits still mapping the buffer, so its own teardown reclaims it.
+fn build_transfer_owner_program(server_pid: u64) -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    push_step(&mut program, wait_exit_step(state_mut().last_reporter_pid));
+    let alloc = push_step(
+        &mut program,
+        step_sb_allocate(KIB_64).expect_ne(STATUS_ENOSPC),
+    );
+    let handle = arg_result(alloc);
+    push_step(
+        &mut program,
+        step_lane_ok(CHECK_RECORD_OWNER_HANDLE, handle),
+    );
+    let map = push_step(
+        &mut program,
+        step_sb_map(handle, SHARED_BUFFER_ACCESS_READ_WRITE).expect_eq(FIRST_ROW_VA),
+    );
+    let va = arg_result(map);
+    push_step(
+        &mut program,
+        M6FixtureStep::fill(va, KIB_64, TX_FILL_SEED, PATTERN_INCREMENTING),
+    );
+    let connect_cap = push_step(
+        &mut program,
+        step_lane_query(CHECK_TX_HANDLE, TX_ROLE_CONNECT),
+    );
+    let connection = push_step(
+        &mut program,
+        step_port(
+            PORT_OP_CONNECT,
+            [
+                arg_result(connect_cap),
+                u64::from(ResourceClass::Graphics.as_u8()),
+                TX_SERVICE_ID,
+                0,
+                0,
+            ],
+        ),
+    );
+    push_step(
+        &mut program,
+        step_port(
+            PORT_OP_SEND,
+            [0, arg_result(connection), arg_data(0), handle, 0],
+        )
+        .expect_eq(0),
+    );
+    push_step(&mut program, end_turn_step(TURN_TX_W_SENT));
+    push_step(&mut program, wait_exit_step(server_pid));
+    push_step(&mut program, step_lane_ok(CHECK_TX_RECEIVER_GONE, 0));
+    push_step(
+        &mut program,
+        M6FixtureStep::verify(va, KIB_64, TX_FILL_SEED, PATTERN_INCREMENTING),
+    );
+    push_step(&mut program, M6FixtureStep::report());
+    program
+}
+
+/// Server and receiver: maps the transferred child read-only, then writes to it.
+fn build_transfer_server_program() -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    push_step(&mut program, wait_turn_step(TURN_TX_S_START));
+    let serve = push_step(
+        &mut program,
+        step_lane_query(CHECK_TX_HANDLE, TX_ROLE_SERVE),
+    );
+    push_step(
+        &mut program,
+        step_port(
+            PORT_OP_RECV,
+            [
+                arg_result(serve),
+                arg_data(0),
+                PortRecvRecord::BYTES as u64,
+                PORT_RECV_NONBLOCK,
+                0,
+            ],
+        )
+        .expect_eq(RecvKind::Request as u64),
+    );
+    let child = push_step(&mut program, step_lane_query(CHECK_TX_RECEIVED, 0));
+    push_step(
+        &mut program,
+        step_sb_map(arg_result(child), SHARED_BUFFER_ACCESS_READ_WRITE).expect_eq(STATUS_EACCES),
+    );
+    let map = push_step(
+        &mut program,
+        step_sb_map(arg_result(child), SHARED_BUFFER_ACCESS_READ).expect_eq(FIRST_ROW_VA),
+    );
+    let va = arg_result(map);
+    push_step(
+        &mut program,
+        M6FixtureStep::verify(va, KIB_64, TX_FILL_SEED, PATTERN_INCREMENTING),
+    );
+    push_step(&mut program, step_lane_ok(CHECK_RECORD_FAULT_VA, va));
+    push_step(&mut program, M6FixtureStep::fault_at(va));
+    program
+}
+
+fn build_transfer_checker_program(owner_pid: u64) -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    push_step(&mut program, wait_exit_step(owner_pid));
+    push_step(&mut program, step_lane_ok(CHECK_TX_RECLAIMED, 0));
+    push_step(
+        &mut program,
+        lane_check_step(CHECK_PHASE_DONE, PhaseId::Transfer as u64),
+    );
+    push_step(&mut program, M6FixtureStep::report());
+    program
+}
+
+fn spawn_transfer_fixtures(phase_index: usize) {
+    kernel_log_line("[M10.SB] phase transfer start");
+    let s = spawn_role(phase_index, 0, 0x7a, build_transfer_server_program);
+
+    let w = spawn_role(phase_index, 1, 0x7b, || build_transfer_owner_program(s.pid));
+
+    let c = spawn_role(phase_index, 2, 0x7c, || {
+        build_transfer_checker_program(w.pid)
+    });
+
+    let serve = grant_root(HolderId(s.pid), TX_RESOURCE, Rights::GFX_SERVE)
+        .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] transfer serve grant"));
+    let connect = grant_root(HolderId(w.pid), TX_RESOURCE, Rights::GFX_CONNECT)
+        .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] transfer connect grant"));
+    let generation = live_instance_generation_for_pid(s.pid)
+        .unwrap_or_else(|| fatal_kernel_error("[M10.SB] transfer server not live"));
+    port::register_port(TX_RESOURCE, HolderId(s.pid), generation, TX_PARAMS)
+        .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] transfer port registration"));
+
+    let state = state_mut();
+    state.peer_pids[ROLE_W as usize] = w.pid;
+    state.peer_pids[ROLE_R as usize] = s.pid;
+    state.peer_pids[ROLE_X as usize] = c.pid;
+    state.tx_serve_handle = serve.encode();
+    state.tx_connect_handle = connect.encode();
+    state.last_reporter_pid = c.pid;
 }
 
 /// Both rows of the active buffer are orphaned onto the read-only NX zero page.
@@ -1452,6 +1454,7 @@ fn start_phase(phase: PhaseId) {
         PhaseId::OwnerExit => spawn_owner_exit_fixtures(phase_index),
         PhaseId::ReaderExit => spawn_reader_exit_fixtures(phase_index),
         PhaseId::RootRevoke => spawn_root_revoke_fixtures(phase_index),
+        PhaseId::Transfer => spawn_transfer_fixtures(phase_index),
     }
 }
 
@@ -1503,7 +1506,11 @@ fn advance_after_phase_done(done_index: usize) {
             kernel_log_line("[M10.SB] phase reader-exit done");
             start_phase(PhaseId::RootRevoke);
         }
-        11 => kernel_log_line("[M10.SB] phase root-revoke done"),
+        11 => {
+            kernel_log_line("[M10.SB] phase root-revoke done");
+            start_phase(PhaseId::Transfer);
+        }
+        12 => kernel_log_line("[M10.SB] phase transfer done"),
         _ => fatal_kernel_error("[M10.SB] unknown phase done"),
     }
 }
@@ -1553,6 +1560,9 @@ fn lane_check_handler(pid: u64, check: u64, arg: u64) -> u64 {
             }
             if arg == PhaseId::RootRevoke as u64 {
                 kernel_log_line("[M10.SB] root revoke while mapped OK");
+            }
+            if arg == PhaseId::Transfer as u64 {
+                kernel_log_line("[M10.SB] port transfer read-only OK");
             }
             if arg == PhaseId::ReaderExit as u64 {
                 kernel_log_line("[M10.SB] reader exit left owner intact OK");
@@ -1635,6 +1645,125 @@ fn lane_check_handler(pid: u64, check: u64, arg: u64) -> u64 {
                 fatal_kernel_error("[M10.SB] root-revoke owner window lingered");
             }
             assert_orphaned_to_zero_page(state.peer_pids[ROLE_R as usize], id);
+            inspect::check_consistency()
+                .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] consistency"));
+            0
+        }
+        CHECK_TX_HANDLE => {
+            let state = state_mut();
+            let (holder, handle) = match arg {
+                TX_ROLE_CONNECT => (state.peer_pids[ROLE_W as usize], state.tx_connect_handle),
+                TX_ROLE_SERVE => (state.peer_pids[ROLE_R as usize], state.tx_serve_handle),
+                _ => fatal_kernel_error("[M10.SB] transfer handle role"),
+            };
+            if pid != holder || handle == 0 {
+                fatal_kernel_error("[M10.SB] transfer handle asked by the wrong fixture");
+            }
+            handle
+        }
+        CHECK_TX_RECEIVED => {
+            // Runs in the server's syscall context: its RECV record is at data offset 0.
+            let state = state_mut();
+            if pid != state.peer_pids[ROLE_R as usize] {
+                fatal_kernel_error("[M10.SB] transfer receive checked by the wrong fixture");
+            }
+            let bootstrap =
+                unsafe { &*(M6_FIXTURE_BOOTSTRAP_ADDRESS as *const M6FixtureBootstrap) };
+            let bytes: &[u8; PortRecvRecord::BYTES] = bootstrap.data[..PortRecvRecord::BYTES]
+                .try_into()
+                .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] transfer record bounds"));
+            let record = PortRecvRecord::decode(bytes)
+                .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] transfer record malformed"));
+            let transfer = record
+                .envelope
+                .transfer
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] transfer missing from request"));
+            if record.kind != RecvKind::Request
+                || record.envelope.pid != state.peer_pids[ROLE_W as usize]
+                || transfer.buffer_id != state.active_buffer_id.encode()
+                || transfer.byte_len != KIB_64
+                || transfer.rights != Rights::READ.bits()
+                || transfer.class != ResourceClass::SharedBuffer.as_u8()
+            {
+                fatal_kernel_error("[M10.SB] transferred capability fields wrong");
+            }
+            if read_child_holder(transfer.handle) != HolderId(pid) {
+                fatal_kernel_error("[M10.SB] transferred child not held by the receiver");
+            }
+            if port::global_counts().undelivered_transfers != 0 {
+                fatal_kernel_error("[M10.SB] delivered transfer still counted undelivered");
+            }
+            let state = state_mut();
+            state.tx_child_handle = transfer.handle;
+            transfer.handle
+        }
+        CHECK_TX_RECEIVER_GONE => {
+            let state = state_mut();
+            let w_pid = state.peer_pids[ROLE_W as usize];
+            let s_pid = state.peer_pids[ROLE_R as usize];
+            let id = state.active_buffer_id;
+            let observation = state
+                .latest_fault
+                .take()
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] transfer check without fault"));
+            if observation.pid != s_pid
+                || observation.error_code != EXPECTED_RO_WRITE_FAULT_ERROR
+                || observation.cr2 != state.expected_fault_va
+            {
+                fatal_kernel_error("[M10.SB] transfer receiver write fault mismatch");
+            }
+            if inspect::mapping(s_pid, id).is_some() {
+                fatal_kernel_error("[M10.SB] transfer receiver window lingered");
+            }
+            let child = CapabilityHandle::decode(state.tx_child_handle)
+                .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] transfer child decode"));
+            let child_live = with_capability_space(|table| {
+                table
+                    .record(child)
+                    .is_ok_and(|record| record.state == CapabilityState::Live)
+            });
+            if child_live {
+                fatal_kernel_error("[M10.SB] transfer child outlived the receiver");
+            }
+            let live = inspect::buffer(id)
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] transfer buffer missing"));
+            if live.0 != BufferState::Live || live.1 != 1 {
+                fatal_kernel_error("[M10.SB] transfer buffer state after receiver exit");
+            }
+            let (w_va, w_live, w_access) = inspect::mapping(w_pid, id)
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] transfer owner mapping missing"));
+            let leaf = inspect::leaf(w_pid, w_va)
+                .unwrap_or_else(|| fatal_kernel_error("[M10.SB] transfer owner leaf missing"));
+            if !w_live || w_access != SharedBufferAccess::ReadWrite || !leaf.writable {
+                fatal_kernel_error("[M10.SB] transfer owner mapping state");
+            }
+            inspect::check_consistency()
+                .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] consistency"));
+            state.tx_reclaimed_before = inspect::stats().reclaimed_buffers;
+            0
+        }
+        CHECK_TX_RECLAIMED => {
+            let state = state_mut();
+            let id = state.active_buffer_id;
+            if inspect::mapping(state.peer_pids[ROLE_W as usize], id).is_some() {
+                fatal_kernel_error("[M10.SB] transfer owner window lingered");
+            }
+            buffer_fully_reclaimed(id);
+            if inspect::stats().reclaimed_buffers != state.tx_reclaimed_before + 1 {
+                fatal_kernel_error("[M10.SB] transfer buffer not reclaimed exactly once");
+            }
+            let counts = port::global_counts();
+            if counts.ports != 0
+                || counts.connections != 0
+                || counts.queued_requests != 0
+                || counts.queued_events != 0
+                || counts.undelivered_transfers != 0
+            {
+                fatal_kernel_error("[M10.SB] transfer left port state");
+            }
+            if inspect::window_usage() != (0, 0) {
+                fatal_kernel_error("[M10.SB] transfer left a shared window");
+            }
             inspect::check_consistency()
                 .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] consistency"));
             0
@@ -2010,6 +2139,10 @@ pub(crate) fn start_m10_shared_buffer_self_test(page_allocator: PageAllocator) -
             ko_reclaimed_before: 0,
             reuse_dirtied_base: 0,
             expected_fault_va: 0,
+            tx_connect_handle: 0,
+            tx_serve_handle: 0,
+            tx_child_handle: 0,
+            tx_reclaimed_before: 0,
         });
     }
     set_report_handler(report_handler);

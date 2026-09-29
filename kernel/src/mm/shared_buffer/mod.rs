@@ -357,12 +357,13 @@ fn unmap_at(pid: u64, va: u64, frames: &mut impl FrameSource) -> Result<(), Shar
     Ok(())
 }
 
-/// W6 (`attest_for_transfer`) and W7 (kernel-owned buffers and pins) have no production
-/// caller until the port SEND (#200) and presenter (#111) lanes land; until then they
-/// build only where the lane and the host tests exercise them.
+/// W7 (kernel-owned buffers and pins) has no production caller until the presenter (#111)
+/// lands; until then it builds only where the lane and the host tests exercise it.
 #[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
 pub(crate) mod kernel_owned;
-#[cfg(test)]
+/// W6: port SEND attests transfers here. The `m10-port-self-test` kernel attests from its
+/// own fixture table instead.
+#[cfg(any(test, not(feature = "m10-port-self-test")))]
 pub(crate) mod transfer;
 
 #[cfg(feature = "m10-shared-buffer-self-test")]

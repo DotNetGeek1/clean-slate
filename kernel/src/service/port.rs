@@ -8,20 +8,29 @@
 //! The syscall layer (`port_syscall.rs`) and the in-kernel client entries share these functions,
 //! so a CPL3 client and the M11 Linux-personality shim take one code path.
 
-#[cfg(feature = "m10-port-self-test")]
+#[cfg(any(
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 use clean_slate_capability::ResourceRef;
 use clean_slate_capability::{
     CapabilityHandle, CapabilityTable, HolderId, ResourceClass, MAX_SLOTS,
 };
 use clean_slate_native_abi::port::PORT_MAX_CONNECTIONS;
-#[cfg(feature = "m10-port-self-test")]
+#[cfg(any(
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 use clean_slate_native_abi::PortParams;
 use clean_slate_native_abi::{ConnectionId, PortEventRecord, PortRecvRecord, SharedBufferId};
 use clean_slate_port::{
     Caller, Effect, Effects, HolderPortCounts, PortCore, PortError, PortKey, PortReleaseCounts,
     Transfer,
 };
-#[cfg(feature = "m10-port-self-test")]
+#[cfg(any(
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 use clean_slate_port::{PortCounts, RegistrationError};
 use clean_slate_service_lifecycle::InstanceGeneration;
 
@@ -115,7 +124,10 @@ fn caller_for(holder: HolderId) -> Result<Caller, PortError> {
 // ---- launch policy ----
 
 /// Only launch policy registers a port: after spawning `server` and before it runs.
-#[cfg(feature = "m10-port-self-test")]
+#[cfg(any(
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 pub(crate) fn register_port(
     resource: ResourceRef,
     server: HolderId,
@@ -138,14 +150,15 @@ pub(crate) fn register_port(
 
 // ---- W6: shared-buffer attestation (owned by #195) ----
 
-/// `shared_buffer::attest_for_transfer` per wave-1 decision W6. Production fails closed until
-/// #195 implements it; the M10 port self-test attests from a fixture table.
+/// `shared_buffer::attest_for_transfer` per wave-1 decision W6: a Live `SharedBuffer`
+/// capability with `DELEGATE` naming a Live buffer, or `ESTALE`/`EACCES`. The M10 port
+/// self-test attests from a fixture table instead, so its buffers need no backing frames.
 #[cfg(not(feature = "m10-port-self-test"))]
 fn attest_for_transfer(
-    _holder: HolderId,
-    _handle: CapabilityHandle,
+    holder: HolderId,
+    handle: CapabilityHandle,
 ) -> Result<(SharedBufferId, u64), u64> {
-    Err(clean_slate_native_abi::status::STATUS_EACCES)
+    crate::mm::shared_buffer::transfer::attest_for_transfer(holder, handle)
 }
 
 #[cfg(feature = "m10-port-self-test")]
@@ -354,7 +367,10 @@ pub(crate) fn counts_for(holder: HolderId) -> HolderPortCounts {
     with_ports(|core, _, _| core.counts_for(holder))
 }
 
-#[cfg(feature = "m10-port-self-test")]
+#[cfg(any(
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 pub(crate) fn global_counts() -> PortCounts {
     with_ports(|core, _, _| core.global_counts())
 }
