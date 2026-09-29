@@ -301,7 +301,7 @@ M1 keeps paging and physical-memory policy inside the kernel. The current kernel
 - the running kernel image and the current early stack are reserved explicitly before allocator setup;
 - the kernel relies on the firmware-provided early identity mapping (`phys + 0`) to inspect existing page tables and bootstrap new mappings;
 - a direct physical map at `0xffff_8000_0000_0000` (PML4 slot 256, 512 GiB, write-back) is shared by every process root (slots >= 256 are copied from the kernel root);
-- device apertures such as the GOP framebuffer are mapped 4 KiB uncached at their direct-map address (`phys_to_virt`) and excluded from the write-back physmap bootstrap.
+- device apertures such as the GOP framebuffer are excluded from the write-back physmap bootstrap, and mapped 4 KiB uncached at their direct-map address (`phys_to_virt`) where a scanout write path is built. The kernel root inherits the firmware's lower-half identity map for early bootstrap, and that still covers the aperture's physical range: OVMF's MTRRs make the range uncached today, and the aliasing risk on real hardware (for example a write-combining MTRR) is noted for M17.
 
 `KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE` at `0xffff_a000_0000_0000` remains an unmapped diagnostic slot for deliberate fault probes.
 
