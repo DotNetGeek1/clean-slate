@@ -196,7 +196,6 @@ struct TeardownPath {
     best_effort: bool,
     record_missing: &'static str,
     address_space_missing: &'static str,
-    thread_reap_diverged: &'static str,
 }
 
 /// `teardown_current_process`: the exiting thread is the caller.
@@ -206,7 +205,6 @@ const CURRENT_TEARDOWN: TeardownPath = TeardownPath {
     best_effort: false,
     record_missing: "process missing from registry during resource teardown",
     address_space_missing: "process address space was missing during teardown",
-    thread_reap_diverged: "scheduler thread cleanup count diverged from teardown snapshot",
 };
 
 /// `teardown_process_by_id`: supervisor-initiated, target is not running.
@@ -216,7 +214,6 @@ const EXTERNAL_TEARDOWN: TeardownPath = TeardownPath {
     best_effort: false,
     record_missing: "process missing from registry during external resource teardown",
     address_space_missing: "process address space was missing during external teardown",
-    thread_reap_diverged: "scheduler thread cleanup count diverged from external teardown snapshot",
 };
 
 impl TeardownPath {
@@ -315,7 +312,7 @@ fn run_teardown_hook(
                 let resources = scheduler.resources_for_process(ctx.process_id);
                 let reaped = scheduler.reap_threads_for_process(ctx.process_id)?;
                 if reaped != resources.threads {
-                    return Err(path.thread_reap_diverged);
+                    return Err("scheduler thread cleanup count diverged from teardown snapshot");
                 }
                 Ok::<ThreadProcessResources, &'static str>(resources)
             })?);
@@ -356,6 +353,9 @@ fn release_address_space(
     };
     if process_record.resource_domain.dispatch_root_frame() != ctx.address_space_root {
         return Err("process address space was replaced while teardown hooks held its root");
+    }
+    if current_root_frame_address() == ctx.address_space_root {
+        return Err("teardown would free the active address-space root");
     }
     let destroyed = match process_record.resource_domain.take_address_space() {
         Some(address_space) => destroy_process_address_space(&address_space, ctx.allocator),
@@ -423,7 +423,6 @@ pub(crate) fn rollback_registered_process(
         best_effort: rollback.best_effort,
         record_missing: rollback.process_missing,
         address_space_missing: rollback.address_space_missing,
-        thread_reap_diverged: "registration rollback does not reap scheduler threads",
     };
     let mut ctx =
         TeardownContext::for_registered(process_id, allocator).ok_or(rollback.process_missing)?;
@@ -712,7 +711,6 @@ mod tests {
             best_effort,
             record_missing: "rollback record missing",
             address_space_missing: "rollback address space missing",
-            thread_reap_diverged: "rollback thread reap",
         }
     }
 
@@ -800,8 +798,9 @@ mod tests {
 
     /// Calls that dismantle part of a registered process. Outside the teardown
     /// block they are allowed only where no registered process is dismantled.
-    const DIRECT_TEARDOWN_CALLS: [&str; 4] = [
+    const DIRECT_TEARDOWN_CALLS: [&str; 5] = [
         concat!("revoke_for_holder", "("),
+        concat!("revoke_holder_tree", "("),
         concat!("take_address_space", "("),
         concat!("destroy_process_address_space", "("),
         concat!("run_teardown_hooks", "("),
@@ -836,6 +835,11 @@ mod tests {
             "run_teardown_hooks",
         ),
         ("process/domain.rs", "hooks_run_by", "run_teardown_hooks"),
+        (
+            "capability/mod.rs",
+            "revoke_for_holder",
+            "revoke_holder_tree",
+        ),
         // Address spaces built before any process record exists.
         (
             "mm/fork_clone.rs",
@@ -860,6 +864,11 @@ mod tests {
         (
             "mm/address_space.rs",
             "verify_carve_out_attach_at_boot",
+            "destroy_process_address_space",
+        ),
+        (
+            "selftest/m10_nxe.rs",
+            "launch_nx_fetch_probe",
             "destroy_process_address_space",
         ),
         (
