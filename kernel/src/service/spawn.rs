@@ -547,35 +547,6 @@ fn registration_preconditions_ok(
     Ok(())
 }
 
-/// Remove a process that was inserted but whose scheduler configuration failed:
-/// destroy its address space, reap the record and release the registry slot.
-#[cfg(not(any(
-    feature = "m1-self-test",
-    feature = "m2-double-fault-self-test",
-    feature = "m2-timer-self-test"
-)))]
-fn rollback_registered_spawned_process(
-    pid: u64,
-    allocator: &mut PageAllocator,
-) -> Result<(), &'static str> {
-    use crate::mm::address_space::destroy_process_address_space;
-    use crate::process::process_registry_mut;
-    use crate::process::reap_process_record;
-
-    let registry = unsafe { process_registry_mut() };
-    let record = registry
-        .get_mut(pid)
-        .ok_or("supervised launch rollback: process missing from registry")?;
-    let address_space = record
-        .resource_domain
-        .take_address_space()
-        .ok_or("supervised launch rollback: process had no address space")?;
-    destroy_process_address_space(&address_space, allocator)?;
-    record.live_threads = 0;
-    reap_process_record(record)?;
-    registry.release_reaped(pid)
-}
-
 /// Transactional registration: pre-check scheduler/registry under
 /// `without_interrupts`, destroy the address space on precondition failure, and
 /// roll back a post-insert `configure_thread` failure fail-closed.
@@ -597,6 +568,7 @@ pub(crate) fn register_spawned_process_checked(
 ) -> Result<SpawnedServiceInstance, &'static str> {
     use crate::arch::x86_64::cpu::without_interrupts;
     use crate::ipc::endpoint_table_mut;
+    use crate::process::domain::{rollback_registered_process, RegistrationRollback};
     use crate::process::personality::ExecutionPersonality;
     use crate::process::process_registry_mut;
     use crate::process::Process;
@@ -683,7 +655,17 @@ pub(crate) fn register_spawned_process_checked(
             discard_address_space(address_space, allocator, message)
         }
         RegisterOutcome::ConfigureFailed { pid, message } => {
-            match rollback_registered_spawned_process(pid, allocator) {
+            match rollback_registered_process(
+                pid,
+                allocator,
+                RegistrationRollback {
+                    revokes_capabilities: true,
+                    best_effort: false,
+                    process_missing: "supervised launch rollback: process missing from registry",
+                    address_space_missing:
+                        "supervised launch rollback: process had no address space",
+                },
+            ) {
                 Ok(()) => Err(message),
                 Err(rollback) => Err(rollback),
             }
