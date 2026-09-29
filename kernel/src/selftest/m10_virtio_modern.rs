@@ -267,6 +267,11 @@ fn read_sentinel(block: &mut MmioTransport, page: &mut DmaRegion) -> Result<(), 
     if data != SENTINEL {
         return Err(ProbeError::Unexpected("sentinel mismatch"));
     }
+    if timeout::armed_count() != 0 {
+        return Err(ProbeError::Unexpected(
+            "completed read left its timeout armed",
+        ));
+    }
     Ok(())
 }
 
