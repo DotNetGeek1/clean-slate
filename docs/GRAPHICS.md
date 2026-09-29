@@ -69,7 +69,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 | Wave | Issue | Owns |
 |---|---|---|
 | 0 | #110 | `graphics/` (whole crate); `native-abi/` skeleton; M10 classes, rights and syscall reservations in `capability/`; `cargo xtask test-m10-contract`; this document |
-| 1 | #195 | **Core landed:** `native-abi/src/shared_buffer.rs`; `kernel/src/mm/shared_buffer/` (object table, per-process window, syscall 16, transfer attestation W6, kernel-owned buffers W7); `EFER.NXE` at boot; gates `test-m10-nxe` and `test-m10-shared-buffer`. **Pending W5/#205:** process teardown step 5 (`SharedMappings` — drop every window row before private address-space destroy) |
+| 1 | #195 | **Core landed:** `native-abi/src/shared_buffer.rs`; `kernel/src/mm/shared_buffer/` (object table, per-process window, syscall 16, kernel-owned buffers W7); process teardown step 5 (`SharedMappings` — drop every window row before private address-space destroy); `EFER.NXE` at boot; gates `test-m10-nxe` and `test-m10-shared-buffer`. **(planned)** Transfer attestation W6 (`attest_for_transfer`) exists host-tested only (`cfg(test)`) until a port SEND consumes it (#211) |
 | 1 | #200 | port and work-set ABI in `native-abi` (`port.rs`, `work_set.rs`, `status.rs`); class-agnostic port engine in `port/` (`clean-slate-port`, feature `fake` for host tests); `kernel/src/service/port.rs`, `kernel/src/service/port_syscall.rs`, `kernel/src/sched/work_set.rs`; syscalls 17 and 20; capability transfer on send; gate `test-m10-port` |
 | 1 | #111 | **Landed:** GOP framebuffer backend at 1280x800 Xrgb8888 (BGRX; RGBX converted at present-copy), aperture excluded from the write-back direct map and mapped uncached (UC) where the write path is built (WC via PAT deferred, P10 limitation; the inherited firmware identity alias is covered in ARCHITECTURE.md "M1 virtual memory layout"); `raster/` (`clean-slate-raster`, kernel dependency by design); `kernel/src/boot/gop.rs`; `kernel/src/device/display/{mod.rs, gop.rs}`; syscall 18 `FIND_HANDLE` / `QUERY_MODE` / `PRESENT_STATUS` live (`MAP_SCANOUT` / `PRESENT` `ENOSYS` until #195 S6; `BIND_WAKE` `ENOSYS` until a later #111 stage wires it to the #200 work sets); missing GOP/mode => no backend (`ENODEV`), boot continues; gate `cargo xtask test-m10-framebuffer` (`-vga std`) |
 | 1 | #113 | `kernel/src/device/input/{mod.rs, i8042.rs}`; `kernel/src/service/input_syscall.rs`; syscall 19; scancode to HID usage table in `graphics::input` (all planned) |
@@ -207,7 +207,7 @@ Register convention: `rax = 20`, `rdi = subop`; arguments in `rsi`, `rdx`, `r10`
 
 ## Shared buffers (syscall 16, #195)
 
-Authoritative constants and limits: `clean_slate_native_abi::shared_buffer`. Kernel object model: `kernel/src/mm/shared_buffer/`. Process teardown ordering for the window is in [ARCHITECTURE.md](ARCHITECTURE.md) (step 5 pending #205).
+Authoritative constants and limits: `clean_slate_native_abi::shared_buffer`. Kernel object model: `kernel/src/mm/shared_buffer/`. Process teardown ordering for the window is in [ARCHITECTURE.md](ARCHITECTURE.md) (step 5).
 
 ### Syscall contract
 
@@ -251,7 +251,7 @@ All subops use `rdi` = subop, `rax` = return value (0 or a positive handle/VA on
 - **W6 — `attest_for_transfer`.** Host-tested; no production caller until port SEND (#200). Confirms `DELEGATE` on a live buffer and returns kernel-attested `(id, byte_len)` for the transfer slot. Transferred children remain `READ` only.
 - **W7 — kernel-owned buffers and pins.** Host-tested; consumers land with presenter (#111) and scanout. Kernel-owned buffers have no capability; `allocate_kernel_owned`, `map_kernel_owned_into`, `pin` / `unpin` support scanout without widening app authority.
 
-Acceptance: `cargo xtask test-m10-nxe` and `cargo xtask test-m10-shared-buffer` ([DEVELOPMENT.md](DEVELOPMENT.md)). The shared-buffer QEMU lane runs an NX baseline plus production syscall-16 phases (cross-process map/read, denial, stale generation, exhaustion, reuse zeroing, kernel-owned pin) and a resource baseline check; owner-exit, reader-exit, and fault-teardown phases arrive with #205 (W5 `SharedMappings`).
+Acceptance: `cargo xtask test-m10-nxe` and `cargo xtask test-m10-shared-buffer` ([DEVELOPMENT.md](DEVELOPMENT.md)). The shared-buffer QEMU lane runs an NX baseline plus production syscall-16 phases (cross-process map/read, denial, stale generation, exhaustion, reuse zeroing, kernel-owned pin, read-only write fault, shared-window exec fault, owner exit, reader exit, CAP_REVOKE of the root while mapped) and a resource baseline check. The exit, fault and revoke phases prove each path ends in teardown step 5 (`SharedMappings`) rather than `fatal_kernel_error`.
 
 ## Reference mode
 

@@ -1,10 +1,11 @@
-//! M10 #195: scripted fixture lane for bounded shared user buffers (phases `nx` … `reader-exit`).
+//! M10 #195: scripted fixture lane for bounded shared user buffers (phases `nx` … `root-revoke`).
 
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::gdt::selector_rpl;
 use crate::arch::x86_64::interrupt_context::InterruptContext;
 use crate::capability::bootstrap_grant::GRANT_SUBOP_CLAIM;
 use crate::capability::delegation::DELEGATE_OP_DELEGATE;
+use crate::capability::revocation::REVOKE_OP_REVOKE;
 use crate::capability::{live_capability_count, with_capability_space};
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
@@ -30,7 +31,8 @@ use crate::syscall::{
     install_service_lifecycle_syscall_allocator, service_lifecycle_syscall_allocator_mut,
 };
 use clean_slate_capability::syscall_abi::{
-    SYSCALL_EINVAL, SYSCALL_NR_CAP_DELEGATE, SYSCALL_NR_CAP_GRANT, SYSCALL_NR_SHARED_BUFFER,
+    SYSCALL_EINVAL, SYSCALL_NR_CAP_DELEGATE, SYSCALL_NR_CAP_GRANT, SYSCALL_NR_CAP_REVOKE,
+    SYSCALL_NR_SHARED_BUFFER,
 };
 use clean_slate_capability::{CapabilityHandle, HolderId, Rights};
 use clean_slate_capability::{CapabilityState, ResourceClass};
@@ -73,6 +75,8 @@ const CHECK_SHARED_EXEC_RECLAIM: u64 = 21;
 const CHECK_OWNER_EXIT: u64 = 22;
 const CHECK_READER_EXIT_POST: u64 = 23;
 const CHECK_RECORD_FAULT_VA: u64 = 24;
+const CHECK_ROOT_REVOKED: u64 = 25;
+const CHECK_ROOT_REVOKE_OWNER_GONE: u64 = 26;
 
 /// Every fixture's first live mapping lands in row 0 of its window.
 const FIRST_ROW_VA: u64 = SHARED_WINDOW_BASE;
@@ -121,6 +125,14 @@ const TURN_OE_W_RELEASE: u64 = 16;
 const TURN_OE_W_EXIT: u64 = 17;
 const TURN_RE_W_HANDOFF: u64 = 17;
 const TURN_RE_R_START: u64 = 18;
+const TURN_RV_W_HANDOFF: u64 = 18;
+const TURN_RV_R_START: u64 = 19;
+const TURN_RV_R_MAPPED: u64 = 19;
+const TURN_RV_W_REVOKE: u64 = 20;
+
+/// CAP_REVOKE of the owner root takes the root and its one READ child.
+const ROOT_REVOKE_COUNT: u64 = 2;
+const ROOT_REVOKE_FILL_SEED: u64 = 0x4b;
 
 const EXPECTED_RO_WRITE_FAULT_ERROR: u64 = 0x7;
 const RO_WRITE_FILL_SEED: u64 = 0x5a;
@@ -144,6 +156,7 @@ enum PhaseId {
     SharedExec = 8,
     OwnerExit = 9,
     ReaderExit = 10,
+    RootRevoke = 11,
 }
 
 struct FaultObservation {
@@ -1301,6 +1314,129 @@ fn spawn_reader_exit_fixtures(phase_index: usize) {
     state_mut().last_reporter_pid = w.pid;
 }
 
+// --- Root revoke while mapped phase ---
+
+fn build_root_revoke_writer_program() -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    push_step(&mut program, wait_exit_step(state_mut().last_reporter_pid));
+    let alloc = push_step(
+        &mut program,
+        step_sb_allocate(KIB_64).expect_ne(STATUS_ENOSPC),
+    );
+    let handle = arg_result(alloc);
+    push_step(
+        &mut program,
+        step_lane_ok(CHECK_RECORD_OWNER_HANDLE, handle),
+    );
+    let map = push_step(
+        &mut program,
+        step_sb_map(handle, SHARED_BUFFER_ACCESS_READ_WRITE).expect_eq(FIRST_ROW_VA),
+    );
+    let va = arg_result(map);
+    push_step(
+        &mut program,
+        M6FixtureStep::fill(va, KIB_64, ROOT_REVOKE_FILL_SEED, PATTERN_INCREMENTING),
+    );
+    let reader_pid = push_step(&mut program, step_lane_query(CHECK_PEER_PID, ROLE_R));
+    push_delegate_read(&mut program, handle, arg_result(reader_pid));
+    push_step(&mut program, end_turn_step(TURN_RV_W_HANDOFF));
+    push_step(&mut program, wait_turn_step(TURN_RV_W_REVOKE));
+    push_step(
+        &mut program,
+        M6FixtureStep::syscall(
+            SYSCALL_NR_CAP_REVOKE,
+            [REVOKE_OP_REVOKE, handle, 0, 0, 0, 0],
+        )
+        .expect_eq(ROOT_REVOKE_COUNT),
+    );
+    push_step(&mut program, step_lane_ok(CHECK_ROOT_REVOKED, 0));
+    push_step(
+        &mut program,
+        M6FixtureStep::verify(va, KIB_64, 0, PATTERN_CONSTANT),
+    );
+    push_step(&mut program, M6FixtureStep::report());
+    program
+}
+
+fn build_root_revoke_reader_program(writer_pid: u64) -> M6FixtureBootstrap {
+    let mut program = M6FixtureBootstrap::new();
+    push_step(&mut program, wait_turn_step(TURN_RV_R_START));
+    let claim = push_claim_read(&mut program);
+    let hr = arg_result(claim);
+    let map = push_step(
+        &mut program,
+        step_sb_map(hr, SHARED_BUFFER_ACCESS_READ).expect_eq(FIRST_ROW_VA),
+    );
+    let vr = arg_result(map);
+    push_step(
+        &mut program,
+        M6FixtureStep::verify(vr, KIB_64, ROOT_REVOKE_FILL_SEED, PATTERN_INCREMENTING),
+    );
+    push_step(&mut program, end_turn_step(TURN_RV_R_MAPPED));
+    push_step(&mut program, wait_exit_step(writer_pid));
+    push_step(&mut program, step_lane_ok(CHECK_ROOT_REVOKE_OWNER_GONE, 0));
+    push_step(
+        &mut program,
+        M6FixtureStep::verify(vr, KIB_64, 0, PATTERN_CONSTANT),
+    );
+    push_step(&mut program, step_sb_unmap(vr).expect_eq(0));
+    push_step(
+        &mut program,
+        lane_check_step(CHECK_PHASE_DONE, PhaseId::RootRevoke as u64),
+    );
+    push_step(&mut program, M6FixtureStep::report());
+    program
+}
+
+fn spawn_root_revoke_fixtures(phase_index: usize) {
+    kernel_log_line("[M10.SB] phase root-revoke start");
+    let stacks = unsafe { &*task_stacks_mut() };
+    let slot_w = scheduler_slot_for(phase_index, 0);
+    assert_scheduler_slot_free(slot_w);
+    let w = spawn_fixture(
+        allocator(),
+        task_stack_top(&stacks[slot_w]),
+        slot_w,
+        fixture_service(0x78),
+        &build_root_revoke_writer_program(),
+    )
+    .unwrap_or_else(|message| fatal_kernel_error(message));
+    state_mut().peer_pids[ROLE_W as usize] = w.pid;
+
+    let slot_r = scheduler_slot_for(phase_index, 1);
+    assert_scheduler_slot_free(slot_r);
+    let r = spawn_fixture(
+        allocator(),
+        task_stack_top(&stacks[slot_r]),
+        slot_r,
+        fixture_service(0x79),
+        &build_root_revoke_reader_program(w.pid),
+    )
+    .unwrap_or_else(|message| fatal_kernel_error(message));
+    state_mut().peer_pids[ROLE_R as usize] = r.pid;
+    state_mut().last_reporter_pid = r.pid;
+}
+
+/// Both rows of the active buffer are orphaned onto the read-only NX zero page.
+fn assert_orphaned_to_zero_page(pid: u64, id: SharedBufferId) {
+    let zero_frame = inspect::shared_zero_leaf_frame()
+        .unwrap_or_else(|| fatal_kernel_error("[M10.SB] shared zero frame missing"));
+    let (va, live, _) = inspect::mapping(pid, id)
+        .unwrap_or_else(|| fatal_kernel_error("[M10.SB] root-revoke row missing"));
+    if live {
+        fatal_kernel_error("[M10.SB] root-revoke row still live");
+    }
+    let leaf = inspect::leaf(pid, va)
+        .unwrap_or_else(|| fatal_kernel_error("[M10.SB] root-revoke leaf missing"));
+    if leaf.frame != zero_frame
+        || leaf.writable
+        || !leaf.no_execute_every_level
+        || !leaf.user_every_level
+    {
+        fatal_kernel_error("[M10.SB] root-revoke orphan leaf mismatch");
+    }
+}
+
 fn start_phase(phase: PhaseId) {
     let phase_index = state_mut().phase_index;
     match phase {
@@ -1315,6 +1451,7 @@ fn start_phase(phase: PhaseId) {
         PhaseId::SharedExec => spawn_shared_exec_fixtures(phase_index),
         PhaseId::OwnerExit => spawn_owner_exit_fixtures(phase_index),
         PhaseId::ReaderExit => spawn_reader_exit_fixtures(phase_index),
+        PhaseId::RootRevoke => spawn_root_revoke_fixtures(phase_index),
     }
 }
 
@@ -1362,7 +1499,11 @@ fn advance_after_phase_done(done_index: usize) {
             kernel_log_line("[M10.SB] phase owner-exit done");
             start_phase(PhaseId::ReaderExit);
         }
-        10 => kernel_log_line("[M10.SB] phase reader-exit done"),
+        10 => {
+            kernel_log_line("[M10.SB] phase reader-exit done");
+            start_phase(PhaseId::RootRevoke);
+        }
+        11 => kernel_log_line("[M10.SB] phase root-revoke done"),
         _ => fatal_kernel_error("[M10.SB] unknown phase done"),
     }
 }
@@ -1409,6 +1550,9 @@ fn lane_check_handler(pid: u64, check: u64, arg: u64) -> u64 {
             }
             if arg == PhaseId::OwnerExit as u64 {
                 kernel_log_line("[M10.SB] owner exit orphaned reader OK");
+            }
+            if arg == PhaseId::RootRevoke as u64 {
+                kernel_log_line("[M10.SB] root revoke while mapped OK");
             }
             if arg == PhaseId::ReaderExit as u64 {
                 kernel_log_line("[M10.SB] reader exit left owner intact OK");
@@ -1472,6 +1616,27 @@ fn lane_check_handler(pid: u64, check: u64, arg: u64) -> u64 {
         }
         CHECK_RECORD_FAULT_VA => {
             state_mut().expected_fault_va = arg;
+            0
+        }
+        CHECK_ROOT_REVOKED => {
+            let state = state_mut();
+            let id = state.active_buffer_id;
+            assert_orphaned_to_zero_page(state.peer_pids[ROLE_W as usize], id);
+            assert_orphaned_to_zero_page(state.peer_pids[ROLE_R as usize], id);
+            buffer_fully_reclaimed(id);
+            inspect::check_consistency()
+                .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] consistency"));
+            0
+        }
+        CHECK_ROOT_REVOKE_OWNER_GONE => {
+            let state = state_mut();
+            let id = state.active_buffer_id;
+            if inspect::mapping(state.peer_pids[ROLE_W as usize], id).is_some() {
+                fatal_kernel_error("[M10.SB] root-revoke owner window lingered");
+            }
+            assert_orphaned_to_zero_page(state.peer_pids[ROLE_R as usize], id);
+            inspect::check_consistency()
+                .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] consistency"));
             0
         }
         CHECK_MAP => {

@@ -133,7 +133,7 @@ const M10_NXE_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[M10.NX] PASS",
 ];
 const M10_NXE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M10_SHARED_BUFFER_ACCEPTANCE_MARKERS: [&str; 15] = [
+const M10_SHARED_BUFFER_ACCEPTANCE_MARKERS: [&str; 16] = [
     "[CPU ] NXE enabled nx=1",
     "[M10.SB] creating",
     "[M10.SB] nx exec fault err=0x15 OK",
@@ -147,6 +147,7 @@ const M10_SHARED_BUFFER_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[M10.SB] shared exec fault err=0x15 OK",
     "[M10.SB] owner exit orphaned reader OK",
     "[M10.SB] reader exit left owner intact OK",
+    "[M10.SB] root revoke while mapped OK",
     "[M10.SB] baseline OK",
     "[M10.SB] PASS",
 ];
