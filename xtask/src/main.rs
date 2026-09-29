@@ -311,8 +311,10 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 10] = [
 const M10_INPUT_SMOKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 /// #113 smoke lane: the i8042 controller's write-output-buffer commands stand in for host
 /// injection (#197), so every record still crosses IRQ 1/12, the decoders and the raw queue.
-const M10_INPUT_SMOKE_ACCEPTANCE_MARKERS: [&str; 13] = [
+const M10_INPUT_SMOKE_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[TIME] timer initialized",
+    "[M10.input] init begun devices=none",
+    "[M10.input] init settled kbd=ready mouse=ready ",
     "[M10.input] ready kbd=",
     "[M10.input] rec seq=1 kbd key=0x04 down",
     "[M10.input] routed irqs=",
