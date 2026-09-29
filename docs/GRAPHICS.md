@@ -134,15 +134,15 @@ Shared-buffer allocation is ambient but bounded by a per-owner quota (#195); sha
 
 ## Reserved syscalls
 
-Reserved in `clean_slate_capability::syscall_abi`. Syscalls 16, 18 and 19 remain unimplemented and return `SYSCALL_ENOSYS` (`u64::MAX - 37`). Syscalls 17 and 20 are implemented by #200; see [Service port ABI](#service-port-abi-syscall-17) and [Work set ABI](#work-set-abi-syscall-20). Port and work-set status sentinels live in `native-abi/src/status.rs`.
+Numbers are reserved in `clean_slate_capability::syscall_abi` and aliased in `native-abi`. Each row gives that syscall's status on this tree; an unimplemented number returns `SYSCALL_ENOSYS` (`u64::MAX - 37`) for every subop. Status sentinels live in `native-abi/src/status.rs`.
 
 | Number | Constant | Owner | Status |
 |---|---|---|---|
-| 16 | `SYSCALL_NR_SHARED_BUFFER` | #195 | `ENOSYS` |
-| 17 | `SYSCALL_NR_SERVICE_PORT` | #200 | syscall 17 (see below) |
-| 18 | `SYSCALL_NR_DISPLAY` | #111, #114 | `ENOSYS`; subops frozen in `graphics::abi::display` |
-| 19 | `SYSCALL_NR_INPUT` | #113 | `ENOSYS`; subops frozen in `graphics::abi::input` |
-| 20 | `SYSCALL_NR_WORK_SET` | #200 | syscall 20 (see below) |
+| 16 | `SYSCALL_NR_SHARED_BUFFER` | #195 | `ENOSYS` for every subop |
+| 17 | `SYSCALL_NR_SERVICE_PORT` | #200 | implemented: subops 1–9 ([Service port ABI](#service-port-abi-syscall-17)); 0 and 10.. → `EINVAL` |
+| 18 | `SYSCALL_NR_DISPLAY` | #111, #114 | `ENOSYS` for every subop; subops frozen in `graphics::abi::display` |
+| 19 | `SYSCALL_NR_INPUT` | #113 | `ENOSYS` for every subop; subops frozen in `graphics::abi::input` |
+| 20 | `SYSCALL_NR_WORK_SET` | #200 | implemented: subops 1–4 ([Work set ABI](#work-set-abi-syscall-20)); 0 and 5.. → `EINVAL` |
 
 Subop numbers belong to `native-abi` (16, 17, 20) and `graphics::abi` (18, 19), never to `service-fixtures`.
 
@@ -798,4 +798,4 @@ Scope notes against the #110 issue text:
 - **Capability classes.** The scope lists "shared-buffer/surface" and "window authority" classes. Surfaces and windows are deliberately *not* kernel capabilities: they are connection-scoped compositor objects, and window authority is the `Graphics` role rights. The kernel classes are exactly `SharedBuffer`, `Graphics`, `Display` and `Input`.
 - **Focus.** "create/show/hide/move/resize/focus/close" maps to `CreateWindow`, `Show`, `Hide`, `BeginMove`, `BeginResize`, `CloseRequested` / `DestroyWindow`. Focus is compositor policy, reported by `KeyboardFocus` and `Configure` `ACTIVATED`; there is no client focus request.
 - **Frame opportunities.** Withholding frame callbacks from occluded surfaces, and the no-busy-poll wake model, are recorded in [Frames](#frames) and [Event-driven rule and failure states](#event-driven-rule-and-failure-states).
-- **Reserved syscalls.** Syscalls 16–20 fall through the dispatcher's default arm to `ENOSYS`; kernel host tests cover that arm with `dispatch_native_unknown_nr_returns_native_enosys_sentinel` (unrelated number) and `dispatch_native_reserved_m10_nrs_return_enosys` (16–20 via `syscall_abi` constants).
+- **Reserved syscalls.** Syscalls 16, 18 and 19 fall through the dispatcher's default arm to `ENOSYS`; 17 and 20 are dispatched to the port and work-set handlers. Kernel host tests cover the default arm with `dispatch_native_unknown_nr_returns_native_enosys_sentinel` (unrelated number) and `dispatch_native_reserved_m10_nrs_return_enosys`, which lists exactly the M10 numbers still unimplemented on this tree (16, 18, 19). The PR that lands later re-composes it (W12).
