@@ -50,7 +50,7 @@ fn state() -> &'static mut SharedBufferState {
 
 impl FrameSource for PageAllocator {
     fn allocate_run(&mut self, max_pages: u64) -> Option<(u64, u64)> {
-        PageAllocator::allocate_run(self, max_pages)
+        PageAllocator::allocate_run(self, 1, max_pages)
     }
 
     fn free_run(&mut self, base: u64, pages: u64) -> Result<(), &'static str> {

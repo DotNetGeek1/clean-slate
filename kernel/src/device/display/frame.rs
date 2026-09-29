@@ -29,8 +29,8 @@ impl KernelFrame {
             REFERENCE_MODE.format,
         )
         .map_err(|_| "reference layout invalid")?;
-        let first = allocator
-            .allocate_contiguous(FRAME_PAGES)
+        let (first, _) = allocator
+            .allocate_run(FRAME_PAGES, FRAME_PAGES)
             .ok_or("frame allocation failed")?;
         let bytes = unsafe {
             core::slice::from_raw_parts_mut(phys_to_virt(first) as *mut u8, REFERENCE_FRAME_BYTES)
