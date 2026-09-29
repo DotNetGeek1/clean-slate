@@ -617,8 +617,7 @@ Authoritative: `graphics::abi::input`, `graphics::raw_input`, `graphics::input`.
 
 - **`READ_BATCH` never blocks**; an empty queue returns 0.
 - **Copy rule (R9).** The kernel copies one 32-byte record at a time to user memory and never stages a whole batch (up to 4096 bytes) on the kernel stack. Only fixed structs of at most 256 bytes (`PresentRequest`, 136 bytes, is the largest) are staged on the stack.
-- **Wake is edge-triggered.** The bound bit is signalled when a record is queued into an empty queue or an `Overflow` becomes pending on an empty queue. The consumer must drain with `READ_BATCH` until it returns 0 before waiting again.
-- **One consumer.** The first holder to `READ_BATCH` binds the seat; another `INPUT_CONSUME` holder gets `EACCES` until that binding is released. Release turns unread records into one pending `Overflow`.
+- **Wake is edge-triggered.** The bound bit is signalled when a record is queued into an empty queue or an `Overflow` becomes pending on an empty queue, where empty means no queued records and no pending `Overflow`. The consumer must drain with `READ_BATCH` until it returns 0 before waiting again.
 
 ## Raw input records
 
@@ -635,7 +634,6 @@ Authoritative: `graphics::abi::input`, `graphics::raw_input`, `graphics::input`.
 
 Kernel semantics, binding on #113:
 
-- **Driver.** The i8042 keyboard runs scancode set 2 with controller translation off. Boot runs only the controller-register bootstrap (bounded handshakes, W4 amendment), routes IRQ 1/12, drains the controller once, and starts each device's init program; reset, BAT, set selection, typematic, mouse ID negotiation and scan enable are then advanced from the IRQ handlers, each awaited response guarded by a W3 timeout. A device is reported by `QUERY_DEVICES` only once its program finishes; before that it reads as `None` and queues nothing. A keyboard overrun or an unsolicited reset (BAT) is a loss and becomes an `Overflow`; a reset also bumps the keyboard's `InputDeviceId` generation.
 - **Queue.** `RAW_INPUT_QUEUE_DEPTH` (128) records, filled in IRQ context without allocation.
 - **Sequence.** `seq` starts at 1 and increases by exactly 1 per queued record, including `Overflow` records; dropped records get no seq, so the consumer always sees contiguous seqs.
 - **Coalescing.** At or above `RAW_INPUT_COALESCE_HIGH_WATER` (96) queued records, a new `RelMotion` merges into an unread tail `RelMotion` from the same device with a saturating add per axis. Nothing else is coalesced: keys, buttons and wheel steps are never merged.
@@ -644,6 +642,16 @@ Kernel semantics, binding on #113:
 - **Keys.** `KeyUsage` is a USB HID page 0x07 usage; `is_valid` accepts `0x04..=0xA4`, `0xB0..=0xDD` and `0xE0..=0xE7`. The driver emits `Pressed` and `Released` only on transitions, so typematic repeat is suppressed (repeat is compositor or client policy). Unmapped scancodes are dropped and counted in a driver statistic, not in `Overflow`. Buttons are `PointerButton` 1..=5.
 
 **Compositor seat rule (#113, #112).** On `Overflow`, or whenever the compositor decides to send `InputReset`, it calls `reset_seat(&mut ModifierTracker, &mut ButtonTracker)`. That clears held keys and buttons (lock bits survive) and returns `[InputReset, ModifiersChanged]`; the compositor sends **both**, in that order, to the focused client. `ModifiersChanged` is sent even if nothing changed. Outside a reset, `ModifierTracker::fold` returns `Some` only on a real change, and the compositor sends `ModifiersChanged` exactly then.
+
+### Input implementation (#113)
+
+Implementation rules of the #113 kernel lane. They are not part of the frozen #110 contract above and change with the lane.
+
+- **One consumer.** The first holder to `READ_BATCH` binds the seat; another `INPUT_CONSUME` holder gets `EACCES` until that binding is released. Release turns unread records into one pending `Overflow`. Release runs from teardown slot 3 (#200 W5); until that slot is wired, a consumer that exits keeps the seat.
+- **Driver.** The i8042 keyboard runs scancode set 2 with controller translation off. Boot runs only the controller-register bootstrap (bounded handshakes, W4 amendment), routes IRQ 1 and IRQ 12 to separate vectors, drains the controller once, and starts each device's init program; reset, BAT, set selection, typematic, mouse ID negotiation and scan enable are then advanced from the IRQ handlers, each awaited response guarded by a W3 timeout. A device is reported by `QUERY_DEVICES` only once its program finishes; before that it reads as `None` and queues nothing. Bytes the bootstrap flushes are counted, never decoded.
+- **Losses.** A keyboard overrun, or a byte that breaks the Pause sequence, is a loss and becomes an `Overflow`; the breaking byte is then decoded from idle.
+- **Device self-reset.** A keyboard `0xAA` in any decoder state, or a mouse `AA 00` at a packet start, is a BAT the driver did not ask for: the device's input is lost (an `Overflow` under the old generation), it reads as `None`, and its init program runs again. It reappears with the next `InputDeviceId` generation once the program finishes, or stays `None` if it fails.
+- **Readiness wakes.** Every readiness change (a device published or lost) also signals the consumer's input work, so it re-queries `QUERY_DEVICES`.
 
 ## Bounds
 
@@ -856,4 +864,4 @@ Scope notes against the #110 issue text:
 - **Capability classes.** The scope lists "shared-buffer/surface" and "window authority" classes. Surfaces and windows are deliberately *not* kernel capabilities: they are connection-scoped compositor objects, and window authority is the `Graphics` role rights. The kernel classes are exactly `SharedBuffer`, `Graphics`, `Display` and `Input`.
 - **Focus.** "create/show/hide/move/resize/focus/close" maps to `CreateWindow`, `Show`, `Hide`, `BeginMove`, `BeginResize`, `CloseRequested` / `DestroyWindow`. Focus is compositor policy, reported by `KeyboardFocus` and `Configure` `ACTIVATED`; there is no client focus request.
 - **Frame opportunities.** Withholding frame callbacks from occluded surfaces, and the no-busy-poll wake model, are recorded in [Frames](#frames) and [Event-driven rule and failure states](#event-driven-rule-and-failure-states).
-- **Reserved syscalls.** Each row of the syscall table above carries its own status. Syscalls 16 and 19 fall through the dispatcher's default arm to `ENOSYS`; 17 and 20 are dispatched to the port and work-set handlers, and 18 to the display handler. Kernel host tests cover the default arm with `dispatch_native_unknown_nr_returns_native_enosys_sentinel` (unrelated number) and `dispatch_native_reserved_m10_nrs_return_enosys`, which lists exactly what is still unimplemented on this tree: 16 and 19, plus syscall 18 subops 3, 4 and 6 (`ENOSYS`) with subop 0 `EINVAL`. The PR that lands later re-composes it (W12).
+- **Reserved syscalls.** Each row of the syscall table above carries its own status. Syscall 16 falls through the dispatcher's default arm to `ENOSYS`; 17 and 20 are dispatched to the port and work-set handlers, 18 to the display handler, and 19 to the #113 input service. Kernel host tests cover the default arm with `dispatch_native_unknown_nr_returns_native_enosys_sentinel` (unrelated number) and `dispatch_native_reserved_m10_nrs_return_enosys`, which lists exactly what is still unimplemented on this tree: 16, syscall 18 subops 3, 4 and 6 (`ENOSYS`) with subop 0 `EINVAL`, and syscall 19 subop 4 (`BIND_WAKE`, `ENOSYS`). The PR that lands later re-composes it (W12).
