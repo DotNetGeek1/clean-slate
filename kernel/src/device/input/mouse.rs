@@ -83,8 +83,8 @@ impl MousePacketDecoder {
         if self.len == 0 && byte & 0x08 == 0 {
             return MouseFeed::Resync;
         }
-        // A header of 0xAA would also need Y overflow with a zero X delta, which real motion
-        // does not produce.
+        // A motion packet starting `AA 00` needs Y overflow with a zero X delta, which real
+        // motion rarely produces; that packet is taken as a reset.
         if self.len == 1 && self.buf[0] == MOUSE_BAT_PASSED && byte == MOUSE_RESET_ID {
             self.len = 0;
             self.buttons = 0;

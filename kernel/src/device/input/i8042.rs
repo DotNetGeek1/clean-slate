@@ -67,8 +67,9 @@ const PORT_TEST_PASSED: u8 = 0x00;
 const HANDSHAKE_TIMEOUT_NS: u64 = 20_000_000;
 /// Self-test runs the controller's internal RAM/ROM checks before it answers.
 const SELF_TEST_TIMEOUT_NS: u64 = 50_000_000;
-/// An ISA port read takes about a microsecond; one status read per 500 ns of deadline bounds a
-/// handshake's reads even if the clock stops advancing.
+/// Backstop behind the handshake deadline, which is what normally ends a wait: an ISA port read
+/// takes about a microsecond, so one status read per 500 ns of deadline still ends a handshake
+/// if the clock stops advancing.
 const MIN_STATUS_READ_NS: u64 = 500;
 /// Stale bytes discarded before a config read and after IRQs are enabled; bounds the drain even
 /// if OBF never clears.
@@ -255,16 +256,24 @@ pub(super) fn bootstrap<Io: ControllerIo>(
     Ok(Ports { keyboard, aux })
 }
 
-/// Enables controller interrupts for `ports`, then drains anything already in the output
+/// Disables every port that passed its test (`tested`) but got no IRQ route, then enables
+/// controller interrupts for the routed `ports` and drains anything already in the output
 /// buffer: with edge-triggered ISA routing a byte that arrived before the enable raises no edge
 /// and would block the line forever. Bytes discarded before the config read are added to
 /// `init_flushed`, and bytes drained after the enable to `init_drained`.
 pub(super) fn enable_irqs<Io: ControllerIo>(
     io: &mut Io,
+    tested: Ports,
     ports: Ports,
     stats: &mut DriverStats,
 ) -> Result<(), ControllerError> {
     let mut controller = Controller { io };
+    if tested.keyboard && !ports.keyboard {
+        controller.command(CMD_DISABLE_KEYBOARD)?;
+    }
+    if tested.aux && !ports.aux {
+        controller.command(CMD_DISABLE_AUX)?;
+    }
     stats.init_flushed = stats.init_flushed.saturating_add(controller.flush());
     let mut config = controller.command_response(CMD_READ_CONFIG)? & !CONFIG_TRANSLATE;
     if ports.keyboard {
@@ -450,6 +459,9 @@ pub(super) struct Driver {
     stats: DriverStats,
     keyboard: DeviceInit,
     mouse: DeviceInit,
+    /// Latched by the first input-buffer timeout (W11): no device byte is sent again, so a dead
+    /// controller costs that wait at most once.
+    controller_failed: bool,
 }
 
 impl Driver {
@@ -459,6 +471,7 @@ impl Driver {
             stats: DriverStats::ZERO,
             keyboard: DeviceInit::keyboard(),
             mouse: DeviceInit::mouse(),
+            controller_failed: false,
         }
     }
 
@@ -613,8 +626,12 @@ impl Driver {
             TimerAction::Keep => {}
         }
         if let Some(byte) = step.send {
-            if (Controller { io }).send_device(port, byte).is_err() {
+            if self.controller_failed {
                 self.fail_init(port, InitFailure::ControllerTimeout, timers);
+                return;
+            }
+            if (Controller { io }).send_device(port, byte).is_err() {
+                self.fail_controller(io, sink, timers);
                 return;
             }
         }
@@ -633,6 +650,32 @@ impl Driver {
             }
             InitStatus::Failed(_) => bump(&mut self.stats.init_failures),
             InitStatus::Idle | InitStatus::Pending => {}
+        }
+    }
+
+    /// W11: the controller stopped accepting bytes. Every started device fails (a ready one is
+    /// lost first), and both ports are disabled if the controller still takes commands; a
+    /// controller whose input buffer is still full gets no further wait.
+    fn fail_controller<Io: ControllerIo>(
+        &mut self,
+        io: &mut Io,
+        sink: &mut impl InputSink,
+        timers: &mut impl ResponseTimers,
+    ) {
+        self.controller_failed = true;
+        for port in [Port::Keyboard, Port::Aux] {
+            match self.init_mut(port).status() {
+                InitStatus::Idle | InitStatus::Failed(_) => continue,
+                InitStatus::Ready => sink.device_lost(port.device_index()),
+                InitStatus::Pending => {}
+            }
+            self.fail_init(port, InitFailure::ControllerTimeout, timers);
+        }
+        let mut controller = Controller { io };
+        if controller.io.status() & STATUS_INPUT_FULL == 0 {
+            let _ = controller
+                .command(CMD_DISABLE_KEYBOARD)
+                .and_then(|()| controller.command(CMD_DISABLE_AUX));
         }
     }
 
@@ -769,7 +812,7 @@ pub(crate) fn begin_init() -> Result<Ports, ControllerError> {
         aux: state.mouse_vector.is_some(),
     };
     let enabled = without_interrupts(|| {
-        enable_irqs(&mut HardwarePorts, routed, &mut state.driver.stats)?;
+        enable_irqs(&mut HardwarePorts, ports, routed, &mut state.driver.stats)?;
         state.driver.start(
             &mut HardwarePorts,
             routed,
