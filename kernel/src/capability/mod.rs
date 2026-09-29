@@ -277,7 +277,6 @@ fn rollback_fork_inherited(handles: &[Option<CapabilityHandle>]) {
     }
 }
 
-#[allow(dead_code)] // M6 adapters revoke exact ResourceRef (M6.3+).
 pub(crate) fn revoke_for_resource(resource: ResourceRef) -> usize {
     let revoked = revoke_resource_tree(
         unsafe { capability_space_mut() },

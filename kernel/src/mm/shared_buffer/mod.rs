@@ -321,13 +321,16 @@ fn map_into_root(
         .get(pid)
         .and_then(|window| window.row_at_va(va))
         .expect("mapped row is present");
-    state.table.attach(
-        id,
-        Attachment {
-            pid,
-            row: row as u8,
-        },
-    )?;
+    state
+        .table
+        .attach(
+            id,
+            Attachment {
+                pid,
+                row: row as u8,
+            },
+        )
+        .expect("can_attach succeeded before the row was mapped");
     Ok(va)
 }
 
