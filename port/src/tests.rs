@@ -1315,24 +1315,58 @@ fn a_full_table_reclaims_revoked_slots_and_otherwise_fails_exactly() {
     assert_eq!(w.table.record(victim), Err(CapabilityError::StaleHandle));
 }
 
+/// Purges A's connection (given with A's connect capability) by one path.
+type PurgePath = fn(&mut World, ConnectionId, u64);
+
 #[test]
 fn every_purge_path_reports_the_revoked_child_resource_once() {
-    // Client close (connection purge).
+    // One undelivered child from A, then each purge path on a fresh world.
+    let paths: [(&str, PurgePath); 6] = [
+        ("client close", |w, a, _| w.close(A, a, 0).unwrap()),
+        ("client exit", |w, _, _| {
+            w.exit(A);
+        }),
+        ("client revoked", |w, a, cap| {
+            w.table
+                .revoke(CapabilityHandle::decode(cap).unwrap())
+                .unwrap();
+            assert_eq!(w.send(A, a, 2), Err(PortError::Stale));
+        }),
+        ("server disconnect", |w, a, _| w.disconnect(a, 0).unwrap()),
+        ("server exit", |w, _, _| {
+            w.exit(SERVER);
+        }),
+        ("unregister", |w, _, _| {
+            assert!(w.core.unregister(&mut w.table, w.key, &mut w.effects));
+        }),
+    ];
+    for (path, purge) in paths {
+        let mut w = World::new(SMALL);
+        let cap = w.client_cap(A);
+        let a = w.connect_with(A, cap).unwrap();
+        let transfer = w.buffer(A, 1, 64);
+        let resource = w.table.record(transfer.handle).unwrap().resource;
+        w.send_transfer(A, a, transfer).unwrap();
+        w.take_effects();
+        assert_eq!(w.effects.revoked_transfers().count(), 0, "{path}: pending");
+        purge(&mut w, a, cap);
+        assert!(!w.effects.overflowed(), "{path}");
+        assert_eq!(
+            w.effects.revoked_transfers().collect::<Vec<_>>(),
+            [resource],
+            "{path}"
+        );
+        assert!(w.core.undelivered_children_for_test().is_empty(), "{path}");
+    }
+
+    // Server exit (port teardown) with two undelivered children on distinct buffers,
+    // after a first purge on the same world.
     let mut w = World::new(SMALL);
     let a = w.connect(A);
     let first = w.buffer(A, 1, 64);
-    let first_resource = w.table.record(first.handle).unwrap().resource;
     w.send_transfer(A, a, first).unwrap();
-    w.take_effects();
-    assert_eq!(w.effects.revoked_transfers().count(), 0, "delivery pending");
     w.close(A, a, 0).unwrap();
-    assert_eq!(
-        w.effects.revoked_transfers().collect::<Vec<_>>(),
-        [first_resource]
-    );
     w.take_effects();
-
-    // Server exit (port teardown) with two undelivered children on distinct buffers.
     let b = w.connect(B);
     let c = w.connect(C);
     let second = w.buffer(B, 2, 64);
