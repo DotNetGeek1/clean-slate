@@ -379,6 +379,11 @@ fn release_work_set(ctx: &mut TeardownContext<'_>) -> usize {
 }
 
 fn release_shared_mappings(ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {
+    debug_assert!(
+        crate::mm::shared_buffer::window_root(ctx.process_id)
+            .is_none_or(|root| root == ctx.address_space_root),
+        "shared window was built in a different root than the one being torn down"
+    );
     crate::mm::shared_buffer::teardown_process(ctx.process_id, ctx.allocator);
     Ok(())
 }
