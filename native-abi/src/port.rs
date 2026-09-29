@@ -20,7 +20,10 @@
 //! | 9 | BIND_WAKE    | serve cap         | work-set id         | request bit (0..=31)   | notice bit (0..=31)| 0        | 0             |
 //! ```
 
+use clean_slate_capability::syscall_abi::SYSCALL_NR_SERVICE_PORT as CAPABILITY_SYSCALL_NR_SERVICE_PORT;
 use clean_slate_capability::{ResourceClass, Rights};
+
+pub const SYSCALL_NR_SERVICE_PORT: u64 = CAPABILITY_SYSCALL_NR_SERVICE_PORT;
 
 macro_rules! slot_generation_id {
     ($name:ident, $error:ident) => {

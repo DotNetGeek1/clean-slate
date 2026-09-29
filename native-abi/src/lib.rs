@@ -37,8 +37,9 @@ pub use status::{
 pub use port::{
     port_rights_for, ConnectionId, ConnectionIdError, EventKind, PortEventRecord, PortParamError,
     PortParams, PortRecvRecord, PortRights, RecordError, RecvKind, TransferredCap, TrustedEnvelope,
+    SYSCALL_NR_SERVICE_PORT,
 };
-pub use work_set::{WorkSetId, WorkSetIdError};
+pub use work_set::{WorkSetId, WorkSetIdError, SYSCALL_NR_WORK_SET};
 
 #[cfg(test)]
 mod graphics_status_mirrors_capability_syscall_abi {
@@ -57,9 +58,16 @@ mod graphics_status_mirrors_capability_syscall_abi {
         STATUS_ESTALE as GFX_ESTALE, STATUS_ETIMEDOUT as GFX_ETIMEDOUT,
     };
 
+    use clean_slate_graphics::abi::display::DisplayError;
+
+    use crate::shared_buffer::{
+        SHARED_BUFFER_STATUS_EACCES, SHARED_BUFFER_STATUS_EAGAIN, SHARED_BUFFER_STATUS_EBADF,
+        SHARED_BUFFER_STATUS_EINVAL, SHARED_BUFFER_STATUS_ENOSPC, SHARED_BUFFER_STATUS_ENOSYS,
+        SHARED_BUFFER_STATUS_ESTALE,
+    };
     use crate::status::{
-        self, STATUS_EACCES, STATUS_EAGAIN, STATUS_ECONNREFUSED, STATUS_EEXIST, STATUS_EINVAL,
-        STATUS_ENOSPC, STATUS_ENOSYS, STATUS_EPIPE, STATUS_ESTALE, STATUS_ETIMEDOUT,
+        self, STATUS_EACCES, STATUS_EAGAIN, STATUS_EBADF, STATUS_ECONNREFUSED, STATUS_EEXIST,
+        STATUS_EINVAL, STATUS_ENOSPC, STATUS_ENOSYS, STATUS_EPIPE, STATUS_ESTALE, STATUS_ETIMEDOUT,
         STATUS_RANGE_START,
     };
     use crate::{ConnectionId, WorkSetId};
@@ -74,13 +82,20 @@ mod graphics_status_mirrors_capability_syscall_abi {
     }
 
     #[test]
+    fn native_syscall_numbers_alias_the_capability_abi() {
+        assert_eq!(crate::SYSCALL_NR_SHARED_BUFFER, 16);
+        assert_eq!(crate::SYSCALL_NR_SERVICE_PORT, 17);
+        assert_eq!(crate::SYSCALL_NR_WORK_SET, 20);
+    }
+
+    #[test]
     fn status_eagain_not_network_pending_literal() {
         assert_ne!(GFX_EAGAIN, status::NETWORK_STATUS_PENDING);
     }
 
     #[test]
     fn w8_native_and_graphics_status_distinctness() {
-        let entries: [(&str, u64); 22] = [
+        let entries: &[(&str, u64)] = &[
             ("native.EACCES", STATUS_EACCES),
             ("native.EINVAL", STATUS_EINVAL),
             ("native.ENOSPC", STATUS_ENOSPC),
@@ -91,6 +106,15 @@ mod graphics_status_mirrors_capability_syscall_abi {
             ("native.EPIPE", STATUS_EPIPE),
             ("native.ETIMEDOUT", STATUS_ETIMEDOUT),
             ("native.ECONNREFUSED", STATUS_ECONNREFUSED),
+            ("native.EBADF", STATUS_EBADF),
+            ("shared_buffer.EINVAL", SHARED_BUFFER_STATUS_EINVAL),
+            ("shared_buffer.EACCES", SHARED_BUFFER_STATUS_EACCES),
+            ("shared_buffer.ESTALE", SHARED_BUFFER_STATUS_ESTALE),
+            ("shared_buffer.ENOSPC", SHARED_BUFFER_STATUS_ENOSPC),
+            ("shared_buffer.ENOSYS", SHARED_BUFFER_STATUS_ENOSYS),
+            ("shared_buffer.EAGAIN", SHARED_BUFFER_STATUS_EAGAIN),
+            ("shared_buffer.EBADF", SHARED_BUFFER_STATUS_EBADF),
+            // Display (18) and input (19) return these `clean_slate_graphics::abi::status` values.
             ("graphics.EACCES", GFX_EACCES),
             ("graphics.EINVAL", GFX_EINVAL),
             ("graphics.ENOSPC", GFX_ENOSPC),
@@ -103,9 +127,18 @@ mod graphics_status_mirrors_capability_syscall_abi {
             ("graphics.ERANGE", GFX_ERANGE),
             ("graphics.ETIMEDOUT", GFX_ETIMEDOUT),
             ("graphics.ENOTRECOVERABLE", GFX_ENOTRECOVERABLE),
+            ("display.EACCES", DisplayError::NotPresenter.status()),
+            ("display.ESTALE", DisplayError::StaleEpoch.status()),
+            ("display.EBADF", DisplayError::InvalidBuffer.status()),
+            ("display.EAGAIN", DisplayError::BufferBusy.status()),
+            ("display.ERANGE", DisplayError::InvalidDamage.status()),
+            ("display.ENODEV", DisplayError::ModeUnavailable.status()),
+            ("display.ETIMEDOUT", DisplayError::DeviceTimeout.status()),
+            ("display.EIO", DisplayError::ResetRequired.status()),
+            ("display.ENOTRECOVERABLE", DisplayError::Poisoned.status()),
         ];
 
-        for (name, value) in &entries {
+        for (name, value) in entries {
             assert!(status::is_status(*value), "{name} must be a status");
             assert_ne!(
                 *value,

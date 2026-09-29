@@ -8,6 +8,10 @@
 //! | 4 | NOW     | 0   | 0                | 0                      | 0                   | monotonic ns (EINVAL if uncalibrated) |
 //! ```
 
+use clean_slate_capability::syscall_abi::SYSCALL_NR_WORK_SET as CAPABILITY_SYSCALL_NR_WORK_SET;
+
+pub const SYSCALL_NR_WORK_SET: u64 = CAPABILITY_SYSCALL_NR_WORK_SET;
+
 slot_generation_id!(WorkSetId, WorkSetIdError);
 
 pub const WORK_SET_OP_CREATE: u64 = 1;
