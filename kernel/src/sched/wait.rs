@@ -505,6 +505,7 @@ pub(crate) fn expire_deadlines() -> usize {
         return 0;
     }
     let now_ns = crate::time::monotonic_ns();
+    crate::sched::timeout::expire_due(now_ns);
     without_interrupts(|| {
         let mut expired = 0usize;
         let table = wait_table_mut();

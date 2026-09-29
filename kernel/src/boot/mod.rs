@@ -32,6 +32,7 @@ use crate::diagnostics::serial::serial_write_line;
     feature = "m3-entry-self-test",
     feature = "m5-block-self-test",
     feature = "m7-net-device-self-test",
+    feature = "m10-virtio-modern-self-test",
     feature = "m7-tls-self-test",
     feature = "m7-tls-fail-closed-self-test",
     feature = "m7-dns-self-test"
@@ -46,6 +47,7 @@ use crate::interrupt::timer::initialize_timer;
     feature = "m3-entry-self-test",
     feature = "m5-block-self-test",
     feature = "m7-net-device-self-test",
+    feature = "m10-virtio-modern-self-test",
     feature = "m7-tls-self-test",
     feature = "m7-tls-fail-closed-self-test",
     feature = "m7-dns-self-test"
@@ -74,6 +76,7 @@ use crate::mm::layout::{
     not(feature = "m8-linux-hello-self-test"),
     not(feature = "m5-block-self-test"),
     not(feature = "m7-net-device-self-test"),
+    not(feature = "m10-virtio-modern-self-test"),
     not(feature = "m7-tls-self-test"),
     not(feature = "m7-tls-fail-closed-self-test"),
     not(feature = "m7-dns-self-test"),
@@ -105,6 +108,7 @@ use crate::process::process_registry_mut;
     feature = "m3-entry-self-test",
     feature = "m5-block-self-test",
     feature = "m7-net-device-self-test",
+    feature = "m10-virtio-modern-self-test",
     feature = "m7-tls-self-test",
     feature = "m7-tls-fail-closed-self-test",
     feature = "m7-dns-self-test",
@@ -122,6 +126,7 @@ use crate::sched::dispatch::initialize_scheduler;
     feature = "m3-entry-self-test",
     feature = "m5-block-self-test",
     feature = "m7-net-device-self-test",
+    feature = "m10-virtio-modern-self-test",
     feature = "m7-tls-self-test",
     feature = "m7-tls-fail-closed-self-test",
     feature = "m7-dns-self-test"
@@ -131,6 +136,8 @@ use crate::sched::task_stacks_mut;
 use crate::sched::SCHEDULER_THREAD_SLOTS;
 #[cfg(feature = "m10-port-self-test")]
 use crate::selftest::m10_port::start_m10_port_self_test;
+#[cfg(feature = "m10-virtio-modern-self-test")]
+use crate::selftest::m10_virtio_modern::run_m10_virtio_modern_self_test;
 #[cfg(feature = "m1-self-test")]
 use crate::selftest::m1_memory::exercise_mapping;
 #[cfg(feature = "m1-self-test")]
@@ -170,6 +177,7 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m10-port-self-test"),
     not(feature = "m7-dns-self-test"),
     not(feature = "m7-net-device-self-test"),
+    not(feature = "m10-virtio-modern-self-test"),
     not(feature = "m8-linux-image-self-test"),
     not(feature = "m8-linux-hello-self-test"),
     not(feature = "m9-low-va-self-test"),
@@ -883,6 +891,7 @@ fn run_inner() -> Result<(), &'static str> {
             not(feature = "m7-net-service-self-test"),
             not(feature = "m7-dns-self-test"),
             not(feature = "m7-net-device-self-test"),
+            not(feature = "m10-virtio-modern-self-test"),
             not(feature = "m8-linux-image-self-test"),
             not(feature = "m4-service-lifecycle-self-test"),
             not(feature = "m4-supervisor-self-test"),
@@ -960,6 +969,11 @@ fn run_inner() -> Result<(), &'static str> {
         run_m7_net_device_self_test()
     }
 
+    #[cfg(feature = "m10-virtio-modern-self-test")]
+    {
+        run_m10_virtio_modern_self_test()
+    }
+
     #[cfg(feature = "m7-dns-self-test")]
     {
         run_m7_dns_self_test()
@@ -993,6 +1007,7 @@ fn run_inner() -> Result<(), &'static str> {
         not(feature = "m9-block-wake-self-test"),
         not(feature = "m5-block-self-test"),
         not(feature = "m7-net-device-self-test"),
+        not(feature = "m10-virtio-modern-self-test"),
         not(feature = "m7-tls-self-test"),
         not(feature = "m7-tls-fail-closed-self-test"),
         not(feature = "m7-dns-self-test"),

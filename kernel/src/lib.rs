@@ -68,6 +68,7 @@ mod service;
         feature = "m4-service-lifecycle-self-test",
         feature = "m5-block-self-test",
         feature = "m7-net-device-self-test",
+        feature = "m10-virtio-modern-self-test",
         feature = "m7-tls-self-test",
         feature = "m7-tls-fail-closed-self-test",
         feature = "m7-dns-self-test",

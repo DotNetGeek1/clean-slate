@@ -66,6 +66,19 @@ const M5_CRASH_MATRIX_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_PERSISTENCE_BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_CRASH_RECOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_BLOCK_DISK_BYTES: u64 = 16 * 1024 * 1024;
+const M10_VMOD_DISK_ID: &str = "m10vmod";
+const M10_VMOD_DISK_BYTES: u64 = 1024 * 1024;
+const M10_VMOD_SENTINEL: &[u8] = b"CLEAN-SLATE-M10-VMOD\0";
+const M10_VMOD_SENTINEL_OFFSET: u64 = 512; // sector 1
+const M10_VMOD_BLOCK_MSIX_DEVICE: &str =
+    "virtio-blk-pci,drive=m10vmod,disable-legacy=on,vectors=2,ioeventfd=off";
+const M10_VMOD_BLOCK_INTX_DEVICE: &str =
+    "virtio-blk-pci,drive=m10vmod,disable-legacy=on,vectors=0,ioeventfd=off";
+const M10_VMOD_GPU_DEVICE: &str = "virtio-gpu-pci,disable-legacy=on,xres=1280,yres=800";
+/// Requests no 64-bit PCI aperture from OVMF; discovery still fails closed on any
+/// BAR region outside the kernel identity map.
+const M10_VMOD_OVMF_MMIO64: &str = "name=opt/ovmf/X-PciMmio64Mb,string=0";
+const M10_VMOD_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M5_DISK_HARNESS_TIMEOUT: Duration = Duration::from_secs(20);
 const M5_DATA_DISK_FILENAME: &str = "m5-data.img";
 const M5_DATA_DISK_SIZE_BYTES: u64 = 64 * 1024 * 1024;
@@ -648,6 +661,36 @@ const M5_BLOCK_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[BLK ] completion interrupts=",
     "[M5.2] PASS",
 ];
+const M10_VMOD_MSIX_MARKERS: [&str; 14] = [
+    "[VIRTIO] modern ",
+    "[VIRTIO] modern id=2 slot=0 irq=msix vector=",
+    "[VMOD] caps common=bar",
+    "[VMOD] features accepted=0x100000000",
+    "[VMOD] config capacity=2048 gen_attempts=",
+    "[VMOD] queue0 size=16 irq=msix",
+    "[VMOD] read ok irq_count=",
+    "[VMOD] timeout -> reset-required",
+    "[VMOD] reset ok generation=2 stale-token-rejected",
+    "[VIRTIO] modern id=2 slot=0 irq=msix vector=",
+    "[VMOD] release ok rediscover ok generation=3",
+    "[VIRTIO] modern id=16 slot=1 irq=msix vector=",
+    "[VMOD] gpu controlq ok size=16 cursorq size=8 scanouts=1",
+    "[VMOD] PASS mode=msix",
+];
+const M10_VMOD_INTX_MARKERS: [&str; 12] = [
+    "[VIRTIO] modern ",
+    "[VIRTIO] modern id=2 slot=0 irq=intx vector=",
+    "[VMOD] caps common=bar",
+    "[VMOD] features accepted=0x100000000",
+    "[VMOD] config capacity=2048 gen_attempts=",
+    "[VMOD] queue0 size=16 irq=intx",
+    "[VMOD] read ok irq_count=",
+    "[VMOD] timeout -> reset-required",
+    "[VMOD] reset ok generation=2 stale-token-rejected",
+    "[VMOD] release ok rediscover ok generation=3",
+    "[VMOD] gpu absent",
+    "[VMOD] PASS mode=intx",
+];
 const M7_TLS_ACCEPTANCE_MARKERS: [&str; 6] = [
     "[TCP ] connected peer=10.77.0.1:4001",
     "[TCP ] echo ok len=",
@@ -914,6 +957,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10Nxe => run_m10_nxe_acceptance(),
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
         ParsedCommand::TestQmpSmoke => qmp::smoke::run(&xtask_artifact_root()),
+        ParsedCommand::TestM10VirtioModern => run_m10_virtio_modern_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -954,6 +998,7 @@ fn run_m5_block_acceptance() -> Result<(), XtaskError> {
             m5_data_disk: Some(disk),
             reset_ovmf_vars: false,
             m7_fixture_port: None,
+            m10_virtio_modern: None,
             kernel_release: false,
             cpu_model: None,
             machine_extra: None,
@@ -981,6 +1026,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             m5_data_disk: None,
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
+            m10_virtio_modern: None,
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
@@ -1008,6 +1054,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             m5_data_disk: None,
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
+            m10_virtio_modern: None,
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
@@ -1032,6 +1079,7 @@ fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
             m5_data_disk: None,
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
+            m10_virtio_modern: None,
             kernel_release: false,
             cpu_model: None,
             machine_extra: None,
@@ -1061,6 +1109,7 @@ fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
             m5_data_disk: None,
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
+            m10_virtio_modern: None,
             kernel_release: false,
             cpu_model: None,
             machine_extra: None,
@@ -1235,6 +1284,7 @@ fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
             m5_data_disk: Some(disk.clone()),
             reset_ovmf_vars: true,
             m7_fixture_port: None,
+            m10_virtio_modern: None,
             kernel_release: false,
             cpu_model: None,
             machine_extra: None,
@@ -1416,6 +1466,7 @@ fn run_m9_userspace_acceptance() -> Result<(), XtaskError> {
             m5_data_disk: Some(m5_data_disk_path()),
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
+            m10_virtio_modern: None,
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
@@ -1557,6 +1608,7 @@ fn run_m9_linux_socket_acceptance() -> Result<(), XtaskError> {
             m5_data_disk: None,
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
+            m10_virtio_modern: None,
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
@@ -1871,6 +1923,97 @@ fn run_cargo_package_build_uefi(package: &str, features: &[&str]) -> Result<(), 
     run_host_test_command(&mut build)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum M10VmodIrq {
+    Msix,
+    Intx,
+}
+
+fn m10_vmod_disk_bytes() -> Vec<u8> {
+    let mut bytes = vec![0u8; M10_VMOD_DISK_BYTES as usize];
+    let offset = M10_VMOD_SENTINEL_OFFSET as usize;
+    bytes[offset..offset + M10_VMOD_SENTINEL.len()].copy_from_slice(M10_VMOD_SENTINEL);
+    bytes
+}
+
+fn write_m10_vmod_disk_image() -> Result<PathBuf, XtaskError> {
+    let path = workspace_root()
+        .join("target")
+        .join("m10-virtio-modern.img");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, m10_vmod_disk_bytes())?;
+    Ok(path)
+}
+
+fn m10_vmod_qemu_args(disk: &Path, irq: M10VmodIrq) -> Vec<String> {
+    let mut args = vec![
+        "-drive".to_string(),
+        format!(
+            "if=none,format=raw,id={},file={}",
+            M10_VMOD_DISK_ID,
+            disk.display()
+        ),
+    ];
+    let block_device = match irq {
+        M10VmodIrq::Msix => M10_VMOD_BLOCK_MSIX_DEVICE,
+        M10VmodIrq::Intx => M10_VMOD_BLOCK_INTX_DEVICE,
+    };
+    args.push("-device".to_string());
+    args.push(block_device.to_string());
+    if irq == M10VmodIrq::Msix {
+        args.push("-device".to_string());
+        args.push(M10_VMOD_GPU_DEVICE.to_string());
+    }
+    args.push("-vga".to_string());
+    args.push("none".to_string());
+    args.push("-fw_cfg".to_string());
+    args.push(M10_VMOD_OVMF_MMIO64.to_string());
+    args
+}
+
+fn append_m10_vmod_args(qemu: &mut Command, disk: &Path, irq: M10VmodIrq) {
+    for arg in m10_vmod_qemu_args(disk, irq) {
+        qemu.arg(arg);
+    }
+}
+
+/// M10 #196 modern VirtIO PCI transport constituent; does not print `[M10  ] PASS`.
+fn run_m10_virtio_modern_acceptance() -> Result<(), XtaskError> {
+    run_cargo_package_tests("clean-slate-kernel", &["device::virtio"])?;
+    run_cargo_package_tests("clean-slate-kernel", &["sched::timeout"])?;
+    let disk = write_m10_vmod_disk_image()?;
+    run_vm_inner_with_config(
+        false,
+        false,
+        &["m10-virtio-modern-self-test"],
+        Some((
+            MarkerSet::Ordered(&M10_VMOD_MSIX_MARKERS),
+            M10_VMOD_ACCEPTANCE_TIMEOUT,
+        )),
+        VmLaunchConfig {
+            m10_virtio_modern: Some((disk.clone(), M10VmodIrq::Msix)),
+            ..VmLaunchConfig::default()
+        },
+    )?;
+    run_vm_inner_with_config(
+        false,
+        false,
+        &["m10-virtio-modern-self-test"],
+        Some((
+            MarkerSet::Ordered(&M10_VMOD_INTX_MARKERS),
+            M10_VMOD_ACCEPTANCE_TIMEOUT,
+        )),
+        VmLaunchConfig {
+            m10_virtio_modern: Some((disk, M10VmodIrq::Intx)),
+            ..VmLaunchConfig::default()
+        },
+    )?;
+    println!("[M10.virtio-modern] PASS");
+    Ok(())
+}
+
 /// M10 contract gate (#110 Stage F): host tests for graphics/capability ABI crates plus
 /// `no_std` UEFI builds of the shared contract crates. Does not print `[M10  ] PASS` (that
 /// belongs to the #119 milestone aggregate).
@@ -2042,6 +2185,7 @@ fn run_m7_network_acceptance() -> Result<(), XtaskError> {
             m5_data_disk: None,
             reset_ovmf_vars: false,
             m7_fixture_port: Some(port),
+            m10_virtio_modern: None,
             kernel_release: true,
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
@@ -2213,6 +2357,7 @@ fn m5_storage_vm_config() -> VmLaunchConfig {
         m5_data_disk: Some(m5_data_disk_path()),
         reset_ovmf_vars: true,
         m7_fixture_port: None,
+        m10_virtio_modern: None,
         kernel_release: false,
         cpu_model: None,
         machine_extra: None,
@@ -2300,6 +2445,7 @@ struct VmLaunchConfig {
     m5_data_disk: Option<PathBuf>,
     reset_ovmf_vars: bool,
     m7_fixture_port: Option<u16>,
+    m10_virtio_modern: Option<(PathBuf, M10VmodIrq)>,
     /// Work around Windows debug UEFI codegen for AES-GCM (TLS); release builds succeed.
     kernel_release: bool,
     /// Optional QEMU `-cpu` model (TLS lane needs RDRAND).
@@ -2446,6 +2592,9 @@ fn qemu_command(
     }
     if let Some(port) = config.m7_fixture_port {
         append_m7_net_args(&mut qemu, port);
+    }
+    if let Some((disk, irq)) = &config.m10_virtio_modern {
+        append_m10_vmod_args(&mut qemu, disk, *irq);
     }
 
     if wait_for_gdb {
@@ -4019,6 +4168,9 @@ fn print_help() {
     println!(
         "  test-qmp-smoke  QMP harness smoke: SeaBIOS boot-sector fixture, marker-paced key/pointer injection, PNG screendump, failure cleanup; no kernel or OVMF; prints [QMP.smoke] PASS (aliases: qmp-smoke)"
     );
+    println!(
+        "  test-m10-virtio-modern M10 #196 modern VirtIO PCI transport host tests plus MSI-X and INTx QEMU boots; prints [M10.virtio-modern] PASS (aliases: m10-virtio-modern)"
+    );
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
@@ -4154,6 +4306,7 @@ enum ParsedCommand {
     TestM10Nxe,
     TestM10Port,
     TestQmpSmoke,
+    TestM10VirtioModern,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -4286,6 +4439,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
             ParsedCommand::TestM10Port
         }
         Some(cmd) if cmd == "test-qmp-smoke" || cmd == "qmp-smoke" => ParsedCommand::TestQmpSmoke,
+        Some(cmd) if cmd == "test-m10-virtio-modern" || cmd == "m10-virtio-modern" => {
+            ParsedCommand::TestM10VirtioModern
+        }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
         Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,
@@ -4557,6 +4713,46 @@ mod tests {
     }
 
     #[test]
+    fn m10_vmod_disk_bytes_layout() {
+        let bytes = m10_vmod_disk_bytes();
+        assert_eq!(bytes.len(), M10_VMOD_DISK_BYTES as usize);
+        let offset = M10_VMOD_SENTINEL_OFFSET as usize;
+        assert_eq!(
+            &bytes[offset..offset + M10_VMOD_SENTINEL.len()],
+            M10_VMOD_SENTINEL
+        );
+        assert!(bytes[..offset].iter().all(|byte| *byte == 0));
+        let after = offset + M10_VMOD_SENTINEL.len();
+        assert!(bytes[after..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn m10_vmod_qemu_args_msix_includes_gpu() {
+        let disk = Path::new("/tmp/m10-virtio-modern.img");
+        let args = m10_vmod_qemu_args(disk, M10VmodIrq::Msix);
+        assert!(args.contains(&"-vga".to_string()));
+        assert!(args.contains(&"none".to_string()));
+        assert!(args.contains(&"-fw_cfg".to_string()));
+        assert!(args.contains(&M10_VMOD_OVMF_MMIO64.to_string()));
+        assert!(args.contains(&M10_VMOD_BLOCK_MSIX_DEVICE.to_string()));
+        assert!(args.contains(&M10_VMOD_GPU_DEVICE.to_string()));
+        assert!(!args.contains(&M10_VMOD_BLOCK_INTX_DEVICE.to_string()));
+    }
+
+    #[test]
+    fn m10_vmod_qemu_args_intx_omits_gpu() {
+        let disk = Path::new("/tmp/m10-virtio-modern.img");
+        let args = m10_vmod_qemu_args(disk, M10VmodIrq::Intx);
+        assert!(args.contains(&"-vga".to_string()));
+        assert!(args.contains(&"none".to_string()));
+        assert!(args.contains(&"-fw_cfg".to_string()));
+        assert!(args.contains(&M10_VMOD_OVMF_MMIO64.to_string()));
+        assert!(args.contains(&M10_VMOD_BLOCK_INTX_DEVICE.to_string()));
+        assert!(!args.contains(&M10_VMOD_GPU_DEVICE.to_string()));
+        assert!(!args.contains(&M10_VMOD_BLOCK_MSIX_DEVICE.to_string()));
+    }
+
+    #[test]
     fn kernel_debug_artifact_path_is_expected() {
         let artifact = kernel_artifact(false);
         assert!(artifact.ends_with("target/x86_64-unknown-uefi/debug/clean-slate-kernel.efi"));
@@ -4687,6 +4883,14 @@ mod tests {
         assert_eq!(
             parse_command(Some("qmp-smoke".as_ref())),
             ParsedCommand::TestQmpSmoke
+        );
+        assert_eq!(
+            parse_command(Some("test-m10-virtio-modern".as_ref())),
+            ParsedCommand::TestM10VirtioModern
+        );
+        assert_eq!(
+            parse_command(Some("m10-virtio-modern".as_ref())),
+            ParsedCommand::TestM10VirtioModern
         );
         assert_eq!(
             parse_command(Some("test-m7-net-caps".as_ref())),

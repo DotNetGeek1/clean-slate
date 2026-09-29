@@ -19,6 +19,7 @@ pub(crate) mod m2_double_fault;
 #[cfg(any(
     feature = "m7-dns-self-test",
     feature = "m7-net-device-self-test",
+    feature = "m10-virtio-modern-self-test",
     feature = "m7-tls-self-test"
 ))]
 pub(crate) mod boot_wait;
@@ -26,6 +27,8 @@ pub(crate) mod boot_wait;
 pub(crate) mod m10_nxe;
 #[cfg(feature = "m10-port-self-test")]
 pub(crate) mod m10_port;
+#[cfg(feature = "m10-virtio-modern-self-test")]
+pub(crate) mod m10_virtio_modern;
 pub(crate) mod m2_timer;
 #[cfg(feature = "m3-address-space-self-test")]
 pub(crate) mod m3_address_space;

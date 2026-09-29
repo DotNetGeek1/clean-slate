@@ -191,6 +191,15 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
             return stack_pointer;
         }
 
+        // The probe's device timeouts (W3) expire here; there are no waiters to wake.
+        #[cfg(feature = "m10-virtio-modern-self-test")]
+        if crate::selftest::boot_wait::is_halted() {
+            increment_kernel_ticks();
+            crate::sched::wait::expire_deadlines();
+            acknowledge_timer_interrupt();
+            return stack_pointer;
+        }
+
         #[cfg(not(feature = "m3-syscall-self-test"))]
         #[cfg(not(any(feature = "m2-timer-self-test", feature = "m5-block-self-test")))]
         {
