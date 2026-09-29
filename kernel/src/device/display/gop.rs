@@ -108,6 +108,7 @@ impl ScanoutBackend for GopBackend {
         Ok(Submitted::Completed)
     }
 
+    #[cfg(test)]
     fn reset(&mut self) -> Result<(), BackendError> {
         Ok(())
     }

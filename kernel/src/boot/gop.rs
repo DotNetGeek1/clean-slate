@@ -97,10 +97,12 @@ pub(crate) enum GopRejection {
     RangeOverflow,
     BeyondPhysmapSpan,
     OverlapsUsableRam,
+    #[cfg(feature = "m10-framebuffer-self-test")]
     ApertureMapFailed,
 }
 
 impl GopRejection {
+    #[cfg(not(test))]
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::NoGopHandle => "no-gop-handle",
@@ -117,6 +119,7 @@ impl GopRejection {
             Self::RangeOverflow => "range-overflow",
             Self::BeyondPhysmapSpan => "beyond-physmap-span",
             Self::OverlapsUsableRam => "overlaps-usable-ram",
+            #[cfg(feature = "m10-framebuffer-self-test")]
             Self::ApertureMapFailed => "aperture-map-failed",
         }
     }
@@ -150,6 +153,7 @@ pub(crate) struct BootFramebuffer {
 }
 
 impl BootFramebuffer {
+    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     pub(crate) const fn page_count(&self) -> u64 {
         self.map_len / PAGE_SIZE
     }
@@ -244,6 +248,7 @@ pub(crate) fn aperture_conflicts(
     Ok(())
 }
 
+#[cfg(not(test))]
 pub(crate) fn log_rejection(reason: GopRejection) {
     crate::diagnostics::serial::serial_write_fmt(format_args!(
         "[GOP ] unavailable reason={}\n",

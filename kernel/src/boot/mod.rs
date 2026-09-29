@@ -61,9 +61,7 @@ use crate::mm::address_space::KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES;
 use crate::mm::carve_out_shared::install_shared_carve_out_page_tables;
 use crate::mm::frame_allocator::set_kernel_direct_map_ready;
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::kernel_bootstrap::{
-    install_kernel_owned_root, map_device_aperture_uncached, PhysExclusion,
-};
+use crate::mm::kernel_bootstrap::{install_kernel_owned_root, PhysExclusion};
 use crate::mm::layout::{
     assert_conventional_linux_window_clear, init_kernel_low_carve_outs_from_reserved,
     log_kernel_low_carve_outs, register_kernel_low_carve_out,
@@ -382,19 +380,38 @@ fn register_boot_kernel_low_carve_outs(
     assert_conventional_linux_window_clear()
 }
 
-/// Maps the captured aperture and installs the GOP backend. Every failure leaves the system with no
+/// Installs output 0 for the syscall 18 query subops. Every failure leaves the system with no
 /// display backend (`ENODEV` on syscall 18) and boot continues.
+#[cfg(not(any(test, feature = "m10-framebuffer-self-test")))]
+fn install_display_backend(framebuffer: Result<gop::BootFramebuffer, gop::GopRejection>) {
+    let installed = framebuffer.and_then(|_| {
+        crate::device::display::install_gop_display()
+            .map_err(|_| gop::GopRejection::ReferenceModeAbsent)
+    });
+    if let Err(reason) = installed {
+        gop::log_rejection(reason);
+    }
+}
+
+/// Maps the captured aperture uncached and installs the GOP backend over it. Every failure leaves
+/// the system with no display backend (`ENODEV` on syscall 18) and boot continues.
+#[cfg(feature = "m10-framebuffer-self-test")]
 fn install_display_backend(
     kernel_root: u64,
     allocator: &mut PageAllocator,
     framebuffer: Result<gop::BootFramebuffer, gop::GopRejection>,
 ) {
     let mapped = framebuffer.and_then(|fb| {
-        map_device_aperture_uncached(kernel_root, allocator, fb.phys_base, fb.map_len)
-            .map(|virt| (fb, virt))
-            .map_err(|_| gop::GopRejection::ApertureMapFailed)
+        crate::mm::kernel_bootstrap::map_device_aperture_uncached(
+            kernel_root,
+            allocator,
+            fb.phys_base,
+            fb.map_len,
+        )
+        .map(|aperture| (fb, aperture))
+        .map_err(|_| gop::GopRejection::ApertureMapFailed)
     });
-    let (framebuffer, aperture_virt) = match mapped {
+    let (framebuffer, aperture) = match mapped {
         Ok(mapped) => mapped,
         Err(reason) => return gop::log_rejection(reason),
     };
@@ -402,7 +419,7 @@ fn install_display_backend(
         "[FB  ] aperture mapped pages={} cache=uc\n",
         framebuffer.page_count()
     ));
-    if crate::device::display::install_gop_backend(&framebuffer, aperture_virt).is_err() {
+    if crate::device::display::install_gop_display(&framebuffer, aperture).is_err() {
         gop::log_rejection(gop::GopRejection::ApertureMapFailed);
     }
 }
@@ -481,6 +498,9 @@ fn run_inner() -> Result<(), &'static str> {
         "[MM  ] kernel-owned root installed: {:#018x}\n",
         kernel_root
     ));
+    #[cfg(not(any(test, feature = "m10-framebuffer-self-test")))]
+    install_display_backend(boot_framebuffer);
+    #[cfg(feature = "m10-framebuffer-self-test")]
     install_display_backend(kernel_root, &mut allocator, boot_framebuffer);
     set_kernel_root_frame(kernel_root);
     set_kernel_direct_map_ready();

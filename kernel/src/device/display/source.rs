@@ -10,6 +10,7 @@ use clean_slate_graphics::BufferLayout;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FrameSourceKind {
     KernelFrame = 1,
+    #[cfg(test)]
     SharedBuffer = 2,
 }
 
@@ -51,6 +52,7 @@ pub(crate) trait FrameSource {
         visit: &mut dyn FnMut(&[u8]),
     ) -> Result<(), SourceError>;
 
+    #[cfg(test)]
     fn phys_extents(&self) -> &[PhysExtent];
 }
 
@@ -59,6 +61,7 @@ pub(crate) struct ContiguousFrame<'a> {
     id: FrameSourceId,
     layout: BufferLayout,
     bytes: &'a [u8],
+    #[cfg(test)]
     extent: [PhysExtent; 1],
 }
 
@@ -78,6 +81,7 @@ impl<'a> ContiguousFrame<'a> {
             id,
             layout,
             bytes,
+            #[cfg(test)]
             extent: [extent],
         })
     }
@@ -104,6 +108,7 @@ impl FrameSource for ContiguousFrame<'_> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn phys_extents(&self) -> &[PhysExtent] {
         &self.extent
     }

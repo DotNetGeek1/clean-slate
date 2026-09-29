@@ -2,51 +2,64 @@
 //!
 //! Backends carry no UI policy (no cursor, layout or background). Clients never see the aperture,
 //! its stride, or physical addresses; they get the frozen reference mode through syscall 18.
+//!
+//! Kernel builds install output 0 for the syscall 18 query subops. The scanout write path (the
+//! uncached aperture mapping, `ScanoutBackend` and the present half of the engine) is compiled only
+//! where something presents: host tests and the framebuffer lane now, `MAP_SCANOUT`/`PRESENT`
+//! (#195 S6) and the #114 backend later.
 
-// `MAP_SCANOUT`/`PRESENT` (gated on #195 S6) and the #114 backend are the production callers of
-// present/complete/expire/reset and of shared-buffer sources. Until they land, host tests drive the
-// whole engine; kernel builds, the framebuffer lane included, drive only the presenter path.
-#![cfg_attr(not(test), allow(dead_code))]
-
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 pub(crate) mod aperture;
 pub(crate) mod engine;
 #[cfg(feature = "m10-framebuffer-self-test")]
 pub(crate) mod frame;
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 pub(crate) mod gop;
 #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 pub(crate) mod presenter;
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 pub(crate) mod source;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-use clean_slate_graphics::display::{DisplayError, PresentRequest, PresentState};
+use clean_slate_graphics::display::DisplayError;
+#[cfg(test)]
+use clean_slate_graphics::display::{PresentRequest, PresentState};
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 use clean_slate_graphics::{BufferRect, DisplayMode};
 
 use crate::arch::x86_64::cpu::without_interrupts;
+#[cfg(feature = "m10-framebuffer-self-test")]
 use crate::boot::gop::BootFramebuffer;
 use crate::sync::global_cell::GlobalCell;
 
-use aperture::ApertureWriter;
 use engine::DisplayState;
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 use gop::GopBackend;
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 use source::FrameSource;
 
 /// M10 drives exactly one physical output (`MAX_OUTPUTS`); capabilities name it by index (S10).
 pub(crate) const PRIMARY_OUTPUT_INDEX: u8 = 0;
 
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Submitted {
     Completed,
+    #[cfg(test)]
     Pending,
 }
 
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BackendError {
+    #[cfg(test)]
     Timeout,
     Failed,
     SourceRejected,
 }
 
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 pub(crate) trait ScanoutBackend {
     fn mode(&self) -> DisplayMode;
 
@@ -61,13 +74,16 @@ pub(crate) trait ScanoutBackend {
         damage: &[BufferRect],
     ) -> Result<Submitted, BackendError>;
 
+    #[cfg(test)]
     fn reset(&mut self) -> Result<(), BackendError>;
 }
 
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 pub(crate) enum Backend {
     Gop(GopBackend),
 }
 
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 impl Backend {
     fn scanout(&mut self) -> &mut dyn ScanoutBackend {
         match self {
@@ -78,10 +94,12 @@ impl Backend {
 
 pub(crate) struct ActiveDisplay {
     state: DisplayState,
+    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     backend: Backend,
 }
 
 impl ActiveDisplay {
+    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     pub(crate) fn new(mut backend: Backend) -> Result<Self, DisplayError> {
         let state = DisplayState::new(backend.scanout().mode())?;
         Ok(Self { state, backend })
@@ -91,10 +109,12 @@ impl ActiveDisplay {
         &self.state
     }
 
+    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     pub(crate) fn bind(&mut self, index: u8, source: &dyn FrameSource) -> Result<(), DisplayError> {
         self.state.bind(self.backend.scanout(), index, source)
     }
 
+    #[cfg(test)]
     pub(crate) fn present(
         &mut self,
         source: &dyn FrameSource,
@@ -132,6 +152,7 @@ impl ActiveDisplay {
     }
 
     /// Leaves `ResetRequired` through a backend reset: a new epoch on success, `Poisoned` otherwise.
+    #[cfg(test)]
     pub(crate) fn recover(&mut self) {
         if self.state.status().state == PresentState::ResetRequired {
             let reset = self.backend.scanout().reset();
@@ -140,7 +161,7 @@ impl ActiveDisplay {
     }
 
     #[cfg(feature = "m10-framebuffer-self-test")]
-    pub(crate) fn gop_aperture(&self) -> Option<&ApertureWriter> {
+    pub(crate) fn gop_aperture(&self) -> Option<&aperture::ApertureWriter> {
         match &self.backend {
             Backend::Gop(gop) => Some(gop.aperture()),
         }
@@ -149,16 +170,28 @@ impl ActiveDisplay {
 
 static ACTIVE_DISPLAY: GlobalCell<Option<ActiveDisplay>> = GlobalCell::new(None);
 
-/// Installs the GOP backend over an aperture already mapped uncached at `aperture_virt`.
-pub(crate) fn install_gop_backend(
+/// Installs output 0 for the query subops once boot has captured GOP in the reference mode.
+#[cfg(not(any(test, feature = "m10-framebuffer-self-test")))]
+pub(crate) fn install_gop_display() -> Result<(), DisplayError> {
+    let state = DisplayState::new(clean_slate_graphics::REFERENCE_MODE)?;
+    publish(ActiveDisplay { state })
+}
+
+/// Installs the GOP backend over the aperture `map_device_aperture_uncached` mapped for
+/// `framebuffer`.
+#[cfg(feature = "m10-framebuffer-self-test")]
+pub(crate) fn install_gop_display(
     framebuffer: &BootFramebuffer,
-    aperture_virt: u64,
+    aperture: crate::mm::kernel_bootstrap::UncachedAperture,
 ) -> Result<(), DisplayError> {
+    if aperture.phys_base() != framebuffer.phys_base || aperture.len() < framebuffer.byte_len {
+        return Err(DisplayError::ModeUnavailable);
+    }
     let byte_len =
         usize::try_from(framebuffer.byte_len).map_err(|_| DisplayError::ModeUnavailable)?;
-    let aperture = unsafe {
-        ApertureWriter::new(
-            aperture_virt as *mut u8,
+    let writer = unsafe {
+        aperture::ApertureWriter::new(
+            aperture.as_mut_ptr(),
             byte_len,
             framebuffer.stride_bytes,
             framebuffer.width,
@@ -167,8 +200,12 @@ pub(crate) fn install_gop_backend(
     }
     .map_err(|_| DisplayError::ModeUnavailable)?;
     let backend =
-        GopBackend::new(aperture, framebuffer.order).map_err(|_| DisplayError::ModeUnavailable)?;
-    let display = ActiveDisplay::new(Backend::Gop(backend))?;
+        GopBackend::new(writer, framebuffer.order).map_err(|_| DisplayError::ModeUnavailable)?;
+    publish(ActiveDisplay::new(Backend::Gop(backend))?)
+}
+
+#[cfg(not(test))]
+fn publish(display: ActiveDisplay) -> Result<(), DisplayError> {
     let output = display.state().output();
     without_interrupts(|| unsafe { *ACTIVE_DISPLAY.get() = Some(display) });
     crate::diagnostics::serial::serial_write_fmt(format_args!(

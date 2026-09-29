@@ -119,13 +119,14 @@ pub(crate) fn install_kernel_owned_root(
 /// Maps `[phys_base, phys_base + map_len)` uncached (PCD|PWT, PAT index 3) at its direct-map
 /// address with 4 KiB leaves, so nothing past the validated range is reachable. The range sits in
 /// PML4 slot 256, which every process root shares, and must already be excluded from the cached
-/// physmap. Returns the kernel virtual base. Page-table frames are permanent.
+/// physmap. Page-table frames are permanent.
+#[cfg(feature = "m10-framebuffer-self-test")]
 pub(crate) fn map_device_aperture_uncached(
     root_frame: u64,
     allocator: &mut PageAllocator,
     phys_base: u64,
     map_len: u64,
-) -> Result<u64, &'static str> {
+) -> Result<UncachedAperture, &'static str> {
     if phys_base % PAGE_SIZE != 0 || map_len == 0 || map_len % PAGE_SIZE != 0 {
         return Err("aperture range not page aligned");
     }
@@ -156,7 +157,29 @@ pub(crate) fn map_device_aperture_uncached(
             .flush();
         phys += PAGE_SIZE;
     }
-    Ok(PHYSMAP_BASE.wrapping_add(phys_base))
+    Ok(UncachedAperture { phys_base, map_len })
+}
+
+/// Proof that `map_device_aperture_uncached` mapped this range; only that function creates one.
+#[cfg(feature = "m10-framebuffer-self-test")]
+pub(crate) struct UncachedAperture {
+    phys_base: u64,
+    map_len: u64,
+}
+
+#[cfg(feature = "m10-framebuffer-self-test")]
+impl UncachedAperture {
+    pub(crate) fn phys_base(&self) -> u64 {
+        self.phys_base
+    }
+
+    pub(crate) fn len(&self) -> u64 {
+        self.map_len
+    }
+
+    pub(crate) fn as_mut_ptr(&self) -> *mut u8 {
+        PHYSMAP_BASE.wrapping_add(self.phys_base) as *mut u8
+    }
 }
 
 fn map_physmap_from_memory_map(

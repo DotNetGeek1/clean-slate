@@ -6,20 +6,29 @@
 //! and timeout are events delivered by the backend's interrupt path and the kernel timeout
 //! registry; nothing here polls.
 
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
+use clean_slate_graphics::display::PresentRequest;
 use clean_slate_graphics::display::{
-    DisplayError, DisplayModeInfo, PresentRequest, PresentState, PresentStatus,
-    MAX_PRESENTS_IN_FLIGHT,
+    DisplayError, DisplayModeInfo, PresentState, PresentStatus, MAX_PRESENTS_IN_FLIGHT,
 };
+#[cfg(test)]
+use clean_slate_graphics::DISPLAY_COMMAND_TIMEOUT_NS;
 use clean_slate_graphics::{
-    BufferLayout, DisplayMode, OutputId, PixelFormat, DISPLAY_COMMAND_TIMEOUT_NS,
-    MAX_PRESENT_DAMAGE_RECTS, SCANOUT_BUFFER_COUNT,
+    BufferLayout, DisplayMode, OutputId, PixelFormat, MAX_PRESENT_DAMAGE_RECTS,
+    SCANOUT_BUFFER_COUNT,
 };
 
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 use super::source::{FrameSource, FrameSourceId};
-use super::{BackendError, ScanoutBackend, Submitted, PRIMARY_OUTPUT_INDEX};
+use super::PRIMARY_OUTPUT_INDEX;
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
+use super::{BackendError, ScanoutBackend, Submitted};
 
 const _: () = assert!(MAX_PRESENTS_IN_FLIGHT == 1);
 
+/// Only asynchronous backends leave a present in flight; the synchronous GOP copy never does, so
+/// this state exists only for the host-tested engine until #114.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct InFlight {
     index: u8,
@@ -30,10 +39,11 @@ struct InFlight {
 pub(crate) struct DisplayState {
     output: OutputId,
     mode: DisplayMode,
-    layout: BufferLayout,
+    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     bound: [Option<FrameSourceId>; SCANOUT_BUFFER_COUNT],
     reset_required: bool,
     poisoned: bool,
+    #[cfg(test)]
     in_flight: Option<InFlight>,
     last_error: Option<DisplayError>,
     submitted_seq: u64,
@@ -44,13 +54,7 @@ pub(crate) struct DisplayState {
 impl DisplayState {
     /// `ModeUnavailable` unless `mode` is a valid `Xrgb8888` layout.
     pub(crate) fn new(mode: DisplayMode) -> Result<Self, DisplayError> {
-        let layout = BufferLayout::new(
-            mode.width_px,
-            mode.height_px,
-            mode.stride_bytes,
-            mode.format,
-        )
-        .map_err(|_| DisplayError::ModeUnavailable)?;
+        mode_layout(&mode)?;
         if mode.format != PixelFormat::Xrgb8888 {
             return Err(DisplayError::ModeUnavailable);
         }
@@ -58,10 +62,11 @@ impl DisplayState {
             output: OutputId::new(PRIMARY_OUTPUT_INDEX, 1)
                 .map_err(|_| DisplayError::ModeUnavailable)?,
             mode,
-            layout,
+            #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
             bound: [None; SCANOUT_BUFFER_COUNT],
             reset_required: false,
             poisoned: false,
+            #[cfg(test)]
             in_flight: None,
             last_error: None,
             submitted_seq: 0,
@@ -88,7 +93,7 @@ impl DisplayState {
             PresentState::Poisoned
         } else if self.reset_required {
             PresentState::ResetRequired
-        } else if self.in_flight.is_some() {
+        } else if self.in_flight_index().is_some() {
             PresentState::InFlight
         } else {
             PresentState::Idle
@@ -96,7 +101,7 @@ impl DisplayState {
         PresentStatus {
             output: self.output,
             state,
-            in_flight_index: self.in_flight.map(|flight| flight.index),
+            in_flight_index: self.in_flight_index(),
             last_error: self.last_error,
             submitted_seq: self.submitted_seq,
             completed_seq: self.completed_seq,
@@ -104,18 +109,39 @@ impl DisplayState {
         }
     }
 
+    #[cfg(test)]
+    fn in_flight_index(&self) -> Option<u8> {
+        self.in_flight.map(|flight| flight.index)
+    }
+
+    #[cfg(not(test))]
+    fn in_flight_index(&self) -> Option<u8> {
+        None
+    }
+
     /// Binds scanout buffer `index` to `source`; later presents of `index` must name the same source.
+    /// Refused while the output needs a reset or is poisoned, and while `index` is being scanned out.
+    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     pub(crate) fn bind(
         &mut self,
         backend: &mut dyn ScanoutBackend,
         index: u8,
         source: &dyn FrameSource,
     ) -> Result<(), DisplayError> {
+        if self.poisoned {
+            return Err(DisplayError::Poisoned);
+        }
+        if self.reset_required {
+            return Err(DisplayError::ResetRequired);
+        }
+        if self.in_flight_index() == Some(index) {
+            return Err(DisplayError::BufferBusy);
+        }
         let slot = self
             .bound
             .get_mut(usize::from(index))
             .ok_or(DisplayError::InvalidBuffer)?;
-        if source.layout() != self.layout {
+        if Ok(source.layout()) != mode_layout(&self.mode) {
             return Err(DisplayError::InvalidBuffer);
         }
         backend
@@ -127,6 +153,7 @@ impl DisplayState {
 
     /// Returns `present_seq`. A backend failure after acceptance is reported through
     /// `PresentStatus`, never as this call's error.
+    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     pub(crate) fn present(
         &mut self,
         backend: &mut dyn ScanoutBackend,
@@ -142,11 +169,11 @@ impl DisplayState {
         }
         request.validate(self.output, &self.mode)?;
         if self.bound[usize::from(request.buffer_index)] != Some(source.id())
-            || source.layout() != self.layout
+            || Ok(source.layout()) != mode_layout(&self.mode)
         {
             return Err(DisplayError::InvalidBuffer);
         }
-        if self.in_flight.is_some() {
+        if self.in_flight_index().is_some() {
             return Err(DisplayError::BufferBusy);
         }
         self.submitted_seq += 1;
@@ -154,6 +181,7 @@ impl DisplayState {
         let damage = &request.rects[..usize::from(request.damage_count)];
         match backend.submit(request.buffer_index, source, damage) {
             Ok(Submitted::Completed) => self.record_success(seq, now_ns),
+            #[cfg(test)]
             Ok(Submitted::Pending) => {
                 self.in_flight = Some(InFlight {
                     index: request.buffer_index,
@@ -167,11 +195,13 @@ impl DisplayState {
     }
 
     /// Deadline for arming the kernel timeout registry while a present is in flight.
+    #[cfg(test)]
     pub(crate) fn in_flight_deadline(&self) -> Option<u64> {
         self.in_flight.map(|flight| flight.deadline_ns)
     }
 
     /// Backend completion event for the in-flight present.
+    #[cfg(test)]
     pub(crate) fn complete(
         &mut self,
         result: Result<(), BackendError>,
@@ -186,6 +216,7 @@ impl DisplayState {
     }
 
     /// Timeout event: fails the in-flight present with `DeviceTimeout` once its deadline passed.
+    #[cfg(test)]
     pub(crate) fn expire(&mut self, now_ns: u64) -> Option<u64> {
         match self.in_flight {
             Some(flight) if now_ns >= flight.deadline_ns => {
@@ -197,6 +228,7 @@ impl DisplayState {
 
     /// Ends `ResetRequired`: success bumps the output epoch; failure, or success at the maximum
     /// epoch, poisons until reboot.
+    #[cfg(test)]
     pub(crate) fn finish_reset(&mut self, success: bool) {
         if !self.reset_required || self.poisoned {
             return;
@@ -212,19 +244,34 @@ impl DisplayState {
         }
     }
 
+    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     fn record_success(&mut self, seq: u64, now_ns: u64) {
         self.completed_seq = seq;
         self.completed_ns = now_ns.max(1);
     }
 
+    /// Every failure other than a timeout needs a reset: a failed or rejected copy leaves scanout
+    /// contents undefined.
+    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     fn record_failure(&mut self, seq: u64, error: BackendError, now_ns: u64) {
         self.record_success(seq, now_ns);
         self.last_error = Some(match error {
+            #[cfg(test)]
             BackendError::Timeout => DisplayError::DeviceTimeout,
             BackendError::Failed | BackendError::SourceRejected => DisplayError::ResetRequired,
         });
         self.reset_required = true;
     }
+}
+
+fn mode_layout(mode: &DisplayMode) -> Result<BufferLayout, DisplayError> {
+    BufferLayout::new(
+        mode.width_px,
+        mode.height_px,
+        mode.stride_bytes,
+        mode.format,
+    )
+    .map_err(|_| DisplayError::ModeUnavailable)
 }
 
 #[cfg(test)]
@@ -635,6 +682,66 @@ mod tests {
         assert_eq!(status.state, PresentState::ResetRequired);
         assert_eq!(status.last_error, Some(DisplayError::ResetRequired));
         assert_eq!((status.submitted_seq, status.completed_seq), (1, 1));
+    }
+
+    #[test]
+    fn a_successful_reset_at_the_maximum_epoch_poisons_and_keeps_the_epoch() {
+        let frames = [vec![0u8; BYTES], vec![0u8; BYTES]];
+        let (mut state, mut backend) = bound_engine(Reply::Fail(BackendError::Failed), &frames);
+        let max_epoch = clean_slate_graphics::ids::MAX_OBJECT_GENERATION;
+        state.output = OutputId::new(0, max_epoch).expect("max epoch output");
+        let req = request(state.output(), 0, &[rect(0, 0, 1, 1)]);
+        assert_eq!(
+            state.present(&mut backend, &source(0, &frames[0]), &req, 5),
+            Ok(1)
+        );
+        assert_eq!(state.status().state, PresentState::ResetRequired);
+
+        state.finish_reset(true);
+        let status = state.status();
+        assert_eq!(status.state, PresentState::Poisoned);
+        assert_eq!(status.output.backend_epoch(), max_epoch);
+        assert_eq!(state.mode_info().output, status.output);
+        assert_status_round_trips(&state);
+        assert_eq!(
+            state.present(&mut backend, &source(0, &frames[0]), &req, 6),
+            Err(DisplayError::Poisoned)
+        );
+    }
+
+    #[test]
+    fn bind_refuses_the_in_flight_index_and_a_reset_or_poisoned_output() {
+        let frames = [vec![0u8; BYTES], vec![0u8; BYTES]];
+        let (mut state, mut backend) = bound_engine(Reply::Pending, &frames);
+        let req = request(state.output(), 0, &[rect(0, 0, 1, 1)]);
+        assert_eq!(
+            state.present(&mut backend, &source(0, &frames[0]), &req, 1),
+            Ok(1)
+        );
+        let binds = backend.binds;
+        assert_eq!(
+            state.bind(&mut backend, 0, &source(2, &frames[0])),
+            Err(DisplayError::BufferBusy)
+        );
+        assert_eq!(state.bind(&mut backend, 1, &source(3, &frames[1])), Ok(()));
+        assert_eq!(backend.binds, binds + 1);
+
+        assert_eq!(state.complete(Err(BackendError::Failed), 2), Some(1));
+        assert_eq!(
+            state.bind(&mut backend, 1, &source(4, &frames[1])),
+            Err(DisplayError::ResetRequired)
+        );
+        state.finish_reset(false);
+        assert_eq!(
+            state.bind(&mut backend, 1, &source(5, &frames[1])),
+            Err(DisplayError::Poisoned)
+        );
+        assert_eq!(backend.binds, binds + 1);
+        let present_bound = request(state.output(), 1, &[rect(0, 0, 1, 1)]);
+        assert_eq!(
+            state.present(&mut backend, &source(3, &frames[1]), &present_bound, 3),
+            Err(DisplayError::Poisoned)
+        );
     }
 
     #[test]
