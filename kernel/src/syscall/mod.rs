@@ -977,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_native_reserved_m10_nrs_return_enosys_except_shared_buffer() {
+    fn dispatch_native_reserved_m10_nrs_return_enosys() {
         use clean_slate_capability::syscall_abi::{
             SYSCALL_EINVAL, SYSCALL_NR_DISPLAY, SYSCALL_NR_INPUT, SYSCALL_NR_SERVICE_PORT,
             SYSCALL_NR_SHARED_BUFFER, SYSCALL_NR_WORK_SET,
@@ -1021,7 +1021,13 @@ mod tests {
         };
 
         // 16 (#195), 17 and 20 (#200) are live; 19 waits for #113.
-        assert_ne!(dispatch(SYSCALL_NR_SHARED_BUFFER, 0), SYSCALL_ENOSYS);
+        for nr in [
+            SYSCALL_NR_SHARED_BUFFER,
+            SYSCALL_NR_SERVICE_PORT,
+            SYSCALL_NR_WORK_SET,
+        ] {
+            assert_ne!(dispatch(nr, 0), SYSCALL_ENOSYS, "nr {nr} is implemented");
+        }
         assert_eq!(dispatch(SYSCALL_NR_INPUT, 0), SYSCALL_ENOSYS);
         // #111 routes 18; only its gated subops stay ENOSYS.
         assert_eq!(dispatch(SYSCALL_NR_DISPLAY, 0), SYSCALL_EINVAL);

@@ -155,7 +155,7 @@ jobs:
           # xtask test-m10-shared-buffer in the acceptance job.
           # m9-userspace-self-test embeds storage + network userspace ELFs and the
           # M9 rootfs image; built (with RUSTFLAGS=-D warnings) via xtask test-m9-userspace.
-          # m10-port-self-test embeds the M6 fixture userspace ELF; built (with
+          # m10-port-self-test embeds the M6 fixture and storage userspace ELFs; built (with
           # RUSTFLAGS=-D warnings) by the acceptance job via xtask test-m10-port.
 
       - name: Clippy (kernel host tests)
