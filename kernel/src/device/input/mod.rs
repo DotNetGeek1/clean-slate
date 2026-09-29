@@ -3,8 +3,8 @@
 //!
 //! Queue state is mutated in IRQ context (interrupts masked) or under `without_interrupts`.
 //! A device is published (`QUERY_DEVICES` reports its id) only once its init program finishes;
-//! until then it reads as `None` and queues nothing. Until the work-set signal API (#200 W2)
-//! exists, [`InputState::signal_input_work`] only counts, and `BIND_WAKE` stays `ENOSYS`, so a
+//! until then it reads as `None` and queues nothing. Until `BIND_WAKE`'s integration stage,
+//! [`InputState::signal_input_work`] only counts, and `BIND_WAKE` stays `ENOSYS`, so a
 //! consumer drains with `READ_BATCH` without blocking.
 
 mod device_init;
@@ -115,7 +115,8 @@ impl InputState {
         self.present[slot] = present;
     }
 
-    /// The consumer's input work bit: `BIND_WAKE` (#200 W2) signals its bound work-set bit here.
+    /// The consumer's input work bit: once `BIND_WAKE` is integrated, its bound work-set bit is
+    /// signalled here with `work_set::signal`.
     /// Raised on the queue's empty-to-non-empty edge and on every device readiness change, so
     /// the consumer re-reads or re-queries.
     fn signal_input_work(&mut self) {}

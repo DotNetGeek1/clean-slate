@@ -1043,7 +1043,7 @@ mod tests {
         assert_eq!(
             dispatch_native_zeroed(SYSCALL_NR_INPUT, INPUT_SUBOP_BIND_WAKE),
             SYSCALL_ENOSYS,
-            "BIND_WAKE until #200 W2"
+            "BIND_WAKE until its integration stage"
         );
     }
 

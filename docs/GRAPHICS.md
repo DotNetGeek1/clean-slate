@@ -605,14 +605,14 @@ Until the owning stage lands: `BIND_WAKE` returns `ENOSYS` until a later #111 st
 
 ## Input ABI (syscall 19)
 
-Authoritative: `graphics::abi::input`, `graphics::raw_input`, `graphics::input`. Kernel implementation: #113 (`BIND_WAKE` planned with #200). Same register convention as the display ABI; non-blocking.
+Authoritative: `graphics::abi::input`, `graphics::raw_input`, `graphics::input`. Kernel implementation: #113 (`BIND_WAKE` at its integration stage). Same register convention as the display ABI; non-blocking.
 
 | Subop | Name | Arguments | Authority | Returns |
 |---|---|---|---|---|
 | 1 | `FIND_HANDLE` | `rdx` = `INPUT_ABI_VERSION` (1) | a live `Input` capability | handle |
 | 2 | `QUERY_DEVICES` | out ptr, len 16 (`InputDeviceInfo`) | `INSPECT` or `INPUT_CONSUME` | 0 |
 | 3 | `READ_BATCH` | out ptr, `max_count` in `1..=READ_BATCH_MAX_RECORDS` (128) | `INPUT_CONSUME` | records written, `0..=max_count` |
-| 4 | `BIND_WAKE` | work-set handle, bit 0..=31 | `INPUT_CONSUME` | 0 (`ENOSYS` until syscall 20) |
+| 4 | `BIND_WAKE` | work-set handle, bit 0..=31 | `INPUT_CONSUME` | 0 (`ENOSYS` until its integration stage) |
 | 0, 5.. | reserved | — | — | `EINVAL` |
 
 - **`READ_BATCH` never blocks**; an empty queue returns 0.

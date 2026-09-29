@@ -1,6 +1,6 @@
 //! Input syscall 19 (#113): capability-checked, non-blocking access to the raw-input queue.
 //!
-//! `BIND_WAKE` returns `ENOSYS` until the work-set signal API (#200 W2) lands.
+//! `BIND_WAKE` returns `ENOSYS` until its integration stage.
 
 use core::ptr;
 
