@@ -306,9 +306,14 @@ pub(super) struct TimeoutsExhausted;
 
 /// One response timeout per device, armed while its init program awaits a byte.
 pub(super) trait ResponseTimers {
-    /// Replaces the device's armed timeout, if any, with one `wait_ns` from now whose expiry
-    /// calls [`Driver::timeout`] with `epoch`.
-    fn arm(&mut self, device_index: u8, wait_ns: u64, epoch: u32) -> Result<(), TimeoutsExhausted>;
+    /// Replaces the device's armed timeout, if any, with one due at monotonic `deadline_ns` whose
+    /// expiry calls [`Driver::timeout`] with `epoch`.
+    fn arm(
+        &mut self,
+        device_index: u8,
+        deadline_ns: u64,
+        epoch: u32,
+    ) -> Result<(), TimeoutsExhausted>;
     fn cancel(&mut self, device_index: u8);
 }
 
@@ -618,7 +623,8 @@ impl Driver {
         let index = port.device_index();
         match step.timer {
             TimerAction::Arm { wait_ns, epoch } => {
-                if timers.arm(index, wait_ns, epoch).is_err() {
+                let deadline_ns = io.now_ns().saturating_add(wait_ns);
+                if timers.arm(index, deadline_ns, epoch).is_err() {
                     self.fail_init(port, InitFailure::TimeoutsExhausted, timers);
                     return;
                 }
@@ -730,13 +736,18 @@ struct W3ResponseTimers {
 }
 
 impl ResponseTimers for W3ResponseTimers {
-    fn arm(&mut self, device_index: u8, wait_ns: u64, epoch: u32) -> Result<(), TimeoutsExhausted> {
+    fn arm(
+        &mut self,
+        device_index: u8,
+        deadline_ns: u64,
+        epoch: u32,
+    ) -> Result<(), TimeoutsExhausted> {
         self.cancel(device_index);
         let slot = self
             .handles
             .get_mut(usize::from(device_index))
             .ok_or(TimeoutsExhausted)?;
-        let deadline = Deadline::MonotonicNs(crate::time::monotonic_ns().saturating_add(wait_ns));
+        let deadline = Deadline::MonotonicNs(deadline_ns);
         let context = u64::from(device_index) << 32 | u64::from(epoch);
         *slot =
             Some(timeout::arm(deadline, response_timeout, context).map_err(|_| TimeoutsExhausted)?);

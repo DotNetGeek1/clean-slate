@@ -268,12 +268,17 @@ struct FakeTimers {
 }
 
 impl ResponseTimers for FakeTimers {
-    fn arm(&mut self, device_index: u8, wait_ns: u64, epoch: u32) -> Result<(), TimeoutsExhausted> {
+    fn arm(
+        &mut self,
+        device_index: u8,
+        deadline_ns: u64,
+        epoch: u32,
+    ) -> Result<(), TimeoutsExhausted> {
         if self.exhausted {
             return Err(TimeoutsExhausted);
         }
         self.arms += 1;
-        self.armed[usize::from(device_index)] = Some((wait_ns, epoch));
+        self.armed[usize::from(device_index)] = Some((deadline_ns, epoch));
         Ok(())
     }
 
@@ -659,6 +664,87 @@ fn exhausted_timeout_registry_fails_the_device_without_sending() {
     );
     assert!(harness.fake.device_writes.is_empty());
     assert_eq!(harness.driver.stats.init_failures, 2);
+}
+
+/// Bootstraps `fake` and starts both programs on the global driver, with its W3 timers.
+fn begin_global(fake: &mut FakeController, sink: &mut RecordingSink) {
+    let state = driver_mut();
+    *state = DriverState {
+        driver: Driver::new(),
+        timers: W3ResponseTimers { handles: [None; 2] },
+        keyboard_vector: None,
+        mouse_vector: None,
+    };
+    let ports = bootstrap(fake, &mut state.driver.stats).expect("controller present");
+    enable_irqs(fake, ports, ports, &mut state.driver.stats).expect("irqs enabled");
+    state.driver.start(fake, ports, sink, &mut state.timers);
+}
+
+fn pump_global(fake: &mut FakeController, sink: &mut RecordingSink) {
+    while !fake.output.is_empty() {
+        let DriverState { driver, timers, .. } = driver_mut();
+        driver.drain(fake, sink, timers);
+    }
+}
+
+fn ignore_timeout(_context: u64) {}
+
+#[test]
+fn w3_registry_holds_one_entry_per_awaited_response_and_none_after_init() {
+    assert_eq!(timeout::armed_count(), 0);
+
+    let mut fake = FakeController::qemu();
+    fake.keyboard_set = 0x01;
+    fake.mouse_present = false;
+    let mut sink = RecordingSink::default();
+    begin_global(&mut fake, &mut sink);
+    assert_eq!(timeout::armed_count(), 2);
+    pump_global(&mut fake, &mut sink);
+    assert_eq!(
+        driver_mut().driver.status(),
+        (
+            InitStatus::Failed(InitFailure::ScanSetRejected),
+            InitStatus::Pending
+        )
+    );
+    assert_eq!(timeout::armed_count(), 1);
+    assert_eq!(timeout::expire_due(u64::MAX), 1);
+    assert_eq!(
+        driver_mut().driver.status().1,
+        InitStatus::Failed(InitFailure::Timeout)
+    );
+    assert_eq!(timeout::armed_count(), 0);
+
+    let mut fake = FakeController::qemu();
+    let mut sink = RecordingSink::default();
+    begin_global(&mut fake, &mut sink);
+    pump_global(&mut fake, &mut sink);
+    assert_eq!(
+        driver_mut().driver.status(),
+        (InitStatus::Ready, InitStatus::Ready)
+    );
+    assert_eq!(timeout::armed_count(), 0);
+
+    let prefill: Vec<TimeoutHandle> = (0..timeout::MAX_TIMEOUTS as u64)
+        .map(|context| {
+            timeout::arm(Deadline::MonotonicNs(u64::MAX), ignore_timeout, context).expect("prefill")
+        })
+        .collect();
+    let mut fake = FakeController::qemu();
+    let mut sink = RecordingSink::default();
+    begin_global(&mut fake, &mut sink);
+    assert_eq!(
+        driver_mut().driver.status(),
+        (
+            InitStatus::Failed(InitFailure::TimeoutsExhausted),
+            InitStatus::Failed(InitFailure::TimeoutsExhausted)
+        )
+    );
+    assert_eq!(timeout::armed_count(), timeout::MAX_TIMEOUTS);
+    for handle in prefill {
+        timeout::cancel(handle);
+    }
+    assert_eq!(timeout::armed_count(), 0);
 }
 
 #[test]
