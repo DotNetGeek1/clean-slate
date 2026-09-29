@@ -42,6 +42,8 @@ pub(crate) const FIXTURE_SUBOP_END_TURN: u64 = 0x101;
 pub(crate) const FIXTURE_SUBOP_WAIT_EXIT: u64 = 0x102;
 /// Self-test builds only: blocks the caller until something tears it down.
 pub(crate) const FIXTURE_SUBOP_PARK: u64 = 0x103;
+/// Self-test builds only: `rsi` = check id, `rdx` = arg; runs a lane-specific checker.
+pub(crate) const FIXTURE_SUBOP_LANE_CHECK: u64 = 0x104;
 
 const FIXTURE_TURN_KEY: WaitKey = WaitKey(0x670);
 const FIXTURE_EXIT_KEY: WaitKey = WaitKey(0x671);
@@ -49,8 +51,11 @@ const FIXTURE_PARK_KEY: WaitKey = WaitKey(0x672);
 
 static FIXTURE_TURN: GlobalCell<u64> = GlobalCell::new(0);
 
-const MAX_FIXTURE_REGISTRY: usize = 12;
-const MAX_FIXTURE_REPORTS: usize = 12;
+const MAX_FIXTURE_REGISTRY: usize = 24;
+const MAX_FIXTURE_REPORTS: usize = 24;
+/// The pid registry reuses slots as fixtures exit, but the exit log keeps every exit of the
+/// run, so it bounds the total fixtures one lane may spawn.
+const MAX_FIXTURE_EXITS: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FixtureReportAction {
@@ -76,14 +81,19 @@ static FIXTURE_PROGRAMS: GlobalCell<[Option<FixtureProgramSlot>; MAX_FIXTURE_REG
 static FIXTURE_PIDS: GlobalCell<[u64; MAX_FIXTURE_REGISTRY]> =
     GlobalCell::new([0; MAX_FIXTURE_REGISTRY]);
 static FIXTURE_PID_COUNT: GlobalCell<usize> = GlobalCell::new(0);
-/// Every fixture spawn registers a pid, so this holds at most one run's worth.
-static FIXTURE_EXITS: GlobalCell<FixtureExitLog<MAX_FIXTURE_REGISTRY>> =
+static FIXTURE_EXITS: GlobalCell<FixtureExitLog<MAX_FIXTURE_EXITS>> =
     GlobalCell::new(FixtureExitLog::new());
 static FIXTURE_REPORTS: GlobalCell<[Option<FixtureReportSlot>; MAX_FIXTURE_REPORTS]> =
     GlobalCell::new([None; MAX_FIXTURE_REPORTS]);
 type FixtureReportHandler = fn(u64, &M6FixtureBootstrap) -> FixtureReportAction;
+type FixtureLaneCheckHandler = fn(pid: u64, check: u64, arg: u64) -> u64;
+type FixtureAllExitedHandler = fn() -> !;
 
 static FIXTURE_REPORT_HANDLER: GlobalCell<Option<FixtureReportHandler>> = GlobalCell::new(None);
+static FIXTURE_LANE_CHECK_HANDLER: GlobalCell<Option<FixtureLaneCheckHandler>> =
+    GlobalCell::new(None);
+static FIXTURE_ALL_EXITED_HANDLER: GlobalCell<Option<FixtureAllExitedHandler>> =
+    GlobalCell::new(None);
 
 pub(crate) const fn fixture_service(n: u64) -> ServiceId {
     ServiceId((M6_FIXTURE_SERVICE_ID_BASE + n) as u32)
@@ -199,6 +209,18 @@ pub(crate) fn set_report_handler(handler: fn(u64, &M6FixtureBootstrap) -> Fixtur
     }
 }
 
+pub(crate) fn set_lane_check_handler(handler: FixtureLaneCheckHandler) {
+    unsafe {
+        *FIXTURE_LANE_CHECK_HANDLER.get() = Some(handler);
+    }
+}
+
+pub(crate) fn set_all_exited_handler(handler: FixtureAllExitedHandler) {
+    unsafe {
+        *FIXTURE_ALL_EXITED_HANDLER.get() = Some(handler);
+    }
+}
+
 fn harness_step(subop: u64, arg: u64) -> M6FixtureStep {
     M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [subop, arg, 0, 0, 0, 0])
 }
@@ -223,6 +245,15 @@ pub(crate) fn park_step() -> M6FixtureStep {
     harness_step(FIXTURE_SUBOP_PARK, 0)
 }
 
+/// Lane-specific kernel assertion invoked from a fixture (`expect_eq(0)`).
+pub(crate) fn lane_check_step(check: u64, arg: u64) -> M6FixtureStep {
+    M6FixtureStep::syscall(
+        SYSCALL_NR_CAP_GRANT,
+        [FIXTURE_SUBOP_LANE_CHECK, check, arg, 0, 0, 0],
+    )
+    .expect_eq(0)
+}
+
 /// Serves the harness sub-operations of `SYSCALL_NR_CAP_GRANT`; returns `false` for
 /// any other sub-operation so the production claim path handles it.
 pub(crate) fn handle_harness_subop(frame: &mut SyscallContext) -> bool {
@@ -232,6 +263,7 @@ pub(crate) fn handle_harness_subop(frame: &mut SyscallContext) -> bool {
             | FIXTURE_SUBOP_END_TURN
             | FIXTURE_SUBOP_WAIT_EXIT
             | FIXTURE_SUBOP_PARK
+            | FIXTURE_SUBOP_LANE_CHECK
     ) {
         return false;
     }
@@ -273,6 +305,16 @@ fn run_harness_subop(frame: &mut SyscallContext) {
                 ExitWait::Exited => frame.rax = 0,
                 ExitWait::Pending => block_harness_caller(frame, FIXTURE_EXIT_KEY),
                 ExitWait::NotAFixture => frame.rax = SYSCALL_EINVAL,
+            }
+        }
+        FIXTURE_SUBOP_LANE_CHECK => {
+            let handler = unsafe { *FIXTURE_LANE_CHECK_HANDLER.get() };
+            match handler {
+                None => frame.rax = SYSCALL_EINVAL,
+                Some(handler) => {
+                    let pid = current_process_id().unwrap_or(0);
+                    frame.rax = handler(pid, frame.rsi, frame.rdx);
+                }
             }
         }
         _ => block_harness_caller(frame, FIXTURE_PARK_KEY),
@@ -394,6 +436,9 @@ pub(crate) fn handle_fixture_report(allocator: &mut PageAllocator) -> u64 {
             None => match idle_handoff_while_threads_blocked() {
                 Ok(Some(idle_stack_pointer)) => idle_stack_pointer,
                 Ok(None) => {
+                    if let Some(handler) = unsafe { *FIXTURE_ALL_EXITED_HANDLER.get() } {
+                        handler();
+                    }
                     kernel_log_line("[M6  ] fixture: no runnable work remains");
                     fatal_kernel_error("fixture self-test lost all runnable threads")
                 }

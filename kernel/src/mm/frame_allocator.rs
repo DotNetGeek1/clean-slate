@@ -174,15 +174,23 @@ impl PageAllocator {
         None
     }
 
-    /// Takes `pages` consecutive frames from the not-yet-allocated tail, moving to a later region
-    /// when the current one cannot hold them; the skipped tail pages go to the free list. The free
-    /// list itself is never used because its order carries no adjacency. On failure nothing changes.
-    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
-    pub(crate) fn allocate_contiguous(&mut self, pages: u64) -> Option<u64> {
-        if pages == 0 {
+    pub(crate) unsafe fn free_page(&mut self, frame: u64) -> Result<(), &'static str> {
+        unsafe { self.free_run(frame, 1) }
+    }
+
+    /// Between `min_pages` and `max_pages` physically contiguous frames as `(base, pages)`.
+    ///
+    /// Takes the run from the not-yet-allocated tail, moving to a later region when the current
+    /// one has fewer than `min_pages` left; the skipped tail pages go to the free list. Only
+    /// when `min_pages == 1` and the tail is exhausted does it fall back to one free-list frame,
+    /// because the free list's order carries no adjacency. The frames are not zeroed. Returns
+    /// `None` without changing anything when `min_pages` is 0, exceeds `max_pages`, or no
+    /// region can hold it.
+    pub(crate) fn allocate_run(&mut self, min_pages: u64, max_pages: u64) -> Option<(u64, u64)> {
+        if min_pages == 0 || min_pages > max_pages {
             return None;
         }
-        let bytes = pages.checked_mul(PAGE_SIZE)?;
+        let min_bytes = min_pages.checked_mul(PAGE_SIZE)?;
         let mut region_index = self.current_region;
         let mut start = self.next_page;
         while region_index < self.usable_region_count {
@@ -190,19 +198,26 @@ impl PageAllocator {
             if region_index != self.current_region {
                 start = region.start;
             }
-            if region.end.saturating_sub(start) >= bytes {
+            if region.end.saturating_sub(start) >= min_bytes {
                 break;
             }
             region_index += 1;
         }
         if region_index == self.usable_region_count {
-            return None;
+            if min_pages != 1 {
+                return None;
+            }
+            let frame = self.pop_free_page()?;
+            self.available_pages -= 1;
+            return Some((frame, 1));
         }
 
+        let region_end = self.usable_regions[region_index].end;
+        let pages = ((region_end - start) / PAGE_SIZE).min(max_pages);
         let skipped_from_region = self.current_region;
         let skipped_from = self.next_page;
         self.current_region = region_index;
-        self.next_page = start + bytes;
+        self.next_page = start + pages * PAGE_SIZE;
         self.available_pages -= pages;
         for index in skipped_from_region..region_index {
             let region = self.usable_regions[index];
@@ -218,23 +233,62 @@ impl PageAllocator {
                 frame += PAGE_SIZE;
             }
         }
-        Some(start)
+        Some((start, pages))
     }
 
-    pub(crate) unsafe fn free_page(&mut self, frame: u64) -> Result<(), &'static str> {
-        if frame % PAGE_SIZE != 0 {
+    /// The run the next `allocate_run(1, max_pages)` would return while the bump region
+    /// still has pages; `None` once it would fall back to the free list.
+    #[cfg(feature = "m10-shared-buffer-self-test")]
+    pub(crate) fn peek_bump_run(&self, max_pages: u64) -> Option<(u64, u64)> {
+        let mut region_index = self.current_region;
+        let mut next_page = self.next_page;
+        while region_index < self.usable_region_count {
+            let region = self.usable_regions[region_index];
+            let remaining = region.end.saturating_sub(next_page) / PAGE_SIZE;
+            if remaining > 0 {
+                return Some((next_page, remaining.min(max_pages)));
+            }
+            region_index += 1;
+            if region_index < self.usable_region_count {
+                next_page = self.usable_regions[region_index].start;
+            }
+        }
+        None
+    }
+
+    /// Frees `pages` contiguous frames from `base`, validating the whole run before
+    /// changing anything; the free list is scanned once for the run, not per frame.
+    pub(crate) unsafe fn free_run(&mut self, base: u64, pages: u64) -> Result<(), &'static str> {
+        if base % PAGE_SIZE != 0 {
             return Err("attempted to free a non-page-aligned frame");
         }
-        if !self.contains_usable_frame(frame) {
+        let end = pages
+            .checked_mul(PAGE_SIZE)
+            .and_then(|bytes| base.checked_add(bytes))
+            .filter(|end| *end > base)
+            .ok_or("attempted to free an empty or overflowing frame run")?;
+        let Some(region) = self.region_index_containing(base) else {
             return Err("attempted to free a frame outside usable memory");
+        };
+        if end > self.usable_regions[region].end {
+            return Err("attempted to free a frame run crossing a usable region");
         }
-        if !self.was_ever_allocated(frame) {
+        if !self.was_ever_allocated(end - PAGE_SIZE) {
             return Err("attempted to free a frame that was never allocated");
         }
-        if self.free_list_contains(frame) {
+        if self.free_list_intersects(base, end) {
             return Err("attempted to free an already-free frame");
         }
+        let mut frame = base;
+        while frame < end {
+            self.push_free_page(frame);
+            frame += PAGE_SIZE;
+        }
+        self.available_pages += pages;
+        Ok(())
+    }
 
+    fn push_free_page(&mut self, frame: u64) {
         #[cfg(not(debug_assertions))]
         {
             let node_ptr = physical_frame_ptr(frame) as *mut FreePageNode;
@@ -253,8 +307,6 @@ impl PageAllocator {
             poison_freed_frame(frame);
             self.push_free_page_fifo(frame);
         }
-        self.available_pages += 1;
-        Ok(())
     }
 
     pub(crate) fn stats(&self) -> PageAllocatorStats {
@@ -306,12 +358,6 @@ impl PageAllocator {
         self.free_list_tail = Some(frame);
     }
 
-    fn contains_usable_frame(&self, frame: u64) -> bool {
-        self.usable_regions[..self.usable_region_count]
-            .iter()
-            .any(|region| frame >= region.start && frame < region.end)
-    }
-
     fn was_ever_allocated(&self, frame: u64) -> bool {
         let Some(region_index) = self.region_index_containing(frame) else {
             return false;
@@ -330,10 +376,10 @@ impl PageAllocator {
             .position(|region| frame >= region.start && frame < region.end)
     }
 
-    fn free_list_contains(&self, frame: u64) -> bool {
+    fn free_list_intersects(&self, start: u64, end: u64) -> bool {
         let mut current = self.free_list_head;
         while let Some(candidate) = current {
-            if candidate == frame {
+            if (start..end).contains(&candidate) {
                 return true;
             }
             let node_ptr = physical_frame_ptr(candidate) as *const FreePageNode;
@@ -494,11 +540,11 @@ mod tests {
         assert_eq!(second, first);
         let _ = allocator.allocate_page().expect("bump page");
 
-        assert_eq!(allocator.allocate_contiguous(8), None);
+        assert_eq!(allocator.allocate_run(8, 8), None);
         assert_eq!(allocator.stats().allocated_pages, 2);
 
-        let run = allocator.allocate_contiguous(4).expect("contiguous run");
-        assert_eq!(run, base + 5 * PAGE_SIZE);
+        let run = allocator.allocate_run(4, 4).expect("contiguous run");
+        assert_eq!(run, (base + 5 * PAGE_SIZE, 4));
         assert_eq!(
             allocator.stats(),
             PageAllocatorStats {
@@ -515,7 +561,88 @@ mod tests {
         recycled.sort_unstable();
         assert_eq!(recycled, [base + 2 * PAGE_SIZE, base + 3 * PAGE_SIZE]);
         assert_eq!(allocator.allocate_page(), Some(base + 9 * PAGE_SIZE));
-        assert_eq!(allocator.allocate_contiguous(0), None);
+        assert_eq!(allocator.allocate_run(0, 0), None);
+        assert_eq!(allocator.allocate_run(2, 1), None);
+    }
+
+    fn four_page_allocator(pages: &mut AlignedPages) -> (u64, PageAllocator) {
+        let base = pages.0.as_mut_ptr() as u64;
+        let descriptors = [descriptor(MemoryType::CONVENTIONAL, base, 4)];
+        let map = normalize_memory_map_boxed(descriptors.iter(), &[]).expect("normalize map");
+        (base, PageAllocator::new(&map).expect("allocator"))
+    }
+
+    #[test]
+    fn frame_allocator_run_is_contiguous_then_falls_back_to_single_free_frames() {
+        let mut pages = AlignedPages([0; (PAGE_SIZE as usize) * 4]);
+        let (base, mut allocator) = four_page_allocator(&mut pages);
+
+        assert_eq!(allocator.allocate_run(0, 4), None);
+        assert_eq!(allocator.allocate_run(1, 3), Some((base, 3)));
+        assert_eq!(
+            allocator.allocate_run(2, 8),
+            None,
+            "one page left is below the minimum"
+        );
+        assert_eq!(
+            allocator.stats().free_pages,
+            1,
+            "a refused run changes nothing"
+        );
+        assert_eq!(
+            allocator.allocate_run(1, 8),
+            Some((base + 3 * PAGE_SIZE, 1))
+        );
+        assert_eq!(allocator.allocate_run(1, 1), None);
+
+        unsafe {
+            allocator.free_run(base, 2).expect("free run");
+        }
+        assert_eq!(allocator.stats().free_pages, 2);
+        assert_eq!(
+            allocator.allocate_run(2, 2),
+            None,
+            "the free list serves only single-frame minimums"
+        );
+        let first = allocator.allocate_run(1, 2).expect("free-list frame");
+        assert_eq!(first.1, 1, "free-list fallback hands out single frames");
+        assert!(allocator.allocate_run(1, 2).is_some());
+        assert_eq!(allocator.stats().free_pages, 0);
+    }
+
+    #[test]
+    fn frame_allocator_free_run_validates_the_whole_run_before_changing_anything() {
+        let mut pages = AlignedPages([0; (PAGE_SIZE as usize) * 4]);
+        let (base, mut allocator) = four_page_allocator(&mut pages);
+        allocator.allocate_run(1, 2).expect("run");
+
+        let beyond_bump = unsafe { allocator.free_run(base, 3) };
+        assert_eq!(
+            beyond_bump,
+            Err("attempted to free a frame that was never allocated")
+        );
+        let empty = unsafe { allocator.free_run(base, 0) };
+        assert_eq!(
+            empty,
+            Err("attempted to free an empty or overflowing frame run")
+        );
+        let crossing = unsafe { allocator.free_run(base, 5) };
+        assert_eq!(
+            crossing,
+            Err("attempted to free a frame run crossing a usable region")
+        );
+        assert_eq!(
+            allocator.stats().free_pages,
+            2,
+            "failed frees change nothing"
+        );
+
+        unsafe {
+            allocator.free_page(base + PAGE_SIZE).expect("free one");
+        }
+        let overlapping = unsafe { allocator.free_run(base, 2) };
+        assert_eq!(overlapping, Err("attempted to free an already-free frame"));
+        assert_eq!(allocator.stats().free_pages, 3);
     }
 
     #[test]

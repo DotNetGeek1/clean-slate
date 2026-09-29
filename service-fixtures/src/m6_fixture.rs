@@ -1,4 +1,7 @@
 //! M6 scripted CPL3 fixture bootstrap protocol (shared with kernel and userspace).
+//!
+//! `ARG_DATA_PTR` and `ARG_RESULT_OF` resolve in `args` for `STEP_KIND_SYSCALL`,
+//! `STEP_KIND_FAULT`, `STEP_KIND_FILL`, `STEP_KIND_VERIFY`, and `STEP_KIND_EXEC`.
 
 pub const M6_FIXTURE_BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0020_0000;
 pub const M6_FIXTURE_MAGIC: u64 = 0x4d36_4649_5854_5552;
@@ -11,6 +14,12 @@ pub const STEP_KIND_SYSCALL: u64 = 1;
 // harness syscalls, and the runner rejects the retired kind as a mismatch.
 pub const STEP_KIND_FAULT: u64 = 3;
 pub const STEP_KIND_REPORT: u64 = 4;
+pub const STEP_KIND_FILL: u64 = 5;
+pub const STEP_KIND_VERIFY: u64 = 6;
+pub const STEP_KIND_EXEC: u64 = 7;
+
+pub const PATTERN_INCREMENTING: u64 = 0;
+pub const PATTERN_CONSTANT: u64 = 1;
 
 pub const EXPECT_IGNORE: u64 = 0;
 pub const EXPECT_EQ: u64 = 1;
@@ -86,10 +95,47 @@ impl M6FixtureStep {
     }
 
     pub const fn fault() -> Self {
+        Self::fault_at(0)
+    }
+
+    pub const fn fault_at(addr: u64) -> Self {
         Self {
             kind: STEP_KIND_FAULT,
             nr: 0,
-            args: [0, 0, 0, 0, 0, 0],
+            args: [addr, 0, 0, 0, 0, 0],
+            expect_mode: EXPECT_IGNORE,
+            expect: 0,
+            result: 0,
+        }
+    }
+
+    pub const fn fill(addr: u64, len: u64, seed: u64, mode: u64) -> Self {
+        Self {
+            kind: STEP_KIND_FILL,
+            nr: 0,
+            args: [addr, len, seed, mode, 0, 0],
+            expect_mode: EXPECT_IGNORE,
+            expect: 0,
+            result: 0,
+        }
+    }
+
+    pub const fn verify(addr: u64, len: u64, seed: u64, mode: u64) -> Self {
+        Self {
+            kind: STEP_KIND_VERIFY,
+            nr: 0,
+            args: [addr, len, seed, mode, 0, 0],
+            expect_mode: EXPECT_IGNORE,
+            expect: 0,
+            result: 0,
+        }
+    }
+
+    pub const fn exec(addr: u64) -> Self {
+        Self {
+            kind: STEP_KIND_EXEC,
+            nr: 0,
+            args: [addr, 0, 0, 0, 0, 0],
             expect_mode: EXPECT_IGNORE,
             expect: 0,
             result: 0,
@@ -174,6 +220,14 @@ pub const fn data_offset() -> usize {
 pub const M6_FIXTURE_BOOTSTRAP_BYTES: usize = core::mem::size_of::<M6FixtureBootstrap>();
 
 const _: () = assert!(M6_FIXTURE_BOOTSTRAP_BYTES <= 8192);
+
+pub fn pattern_byte(seed: u64, mode: u64, index: u64) -> Option<u8> {
+    match mode {
+        PATTERN_INCREMENTING => Some((seed.wrapping_add(index)) as u8),
+        PATTERN_CONSTANT => Some(seed as u8),
+        _ => None,
+    }
+}
 
 pub fn resolve_arg(
     bootstrap_address: u64,
@@ -262,15 +316,47 @@ mod tests {
     }
 
     #[test]
+    fn pattern_byte_modes() {
+        assert_eq!(pattern_byte(10, PATTERN_INCREMENTING, 0), Some(10));
+        assert_eq!(pattern_byte(10, PATTERN_INCREMENTING, 3), Some(13));
+        assert_eq!(pattern_byte(0xff, PATTERN_INCREMENTING, 1), Some(0));
+        assert_eq!(pattern_byte(0xab, PATTERN_CONSTANT, 99), Some(0xab));
+        assert!(pattern_byte(0, 2, 0).is_none());
+    }
+
+    #[test]
     fn builder_constructors_and_size() {
+        const EXPECTED_STEP_BYTES: usize = 88;
+        const EXPECTED_BOOTSTRAP_BYTES: usize = 6696;
+
         let step = M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [0; 6]).expect_eq(1);
         assert_eq!(step.kind, STEP_KIND_SYSCALL);
         assert_eq!(step.expect_mode, EXPECT_EQ);
         assert_eq!(step.expect, 1);
+
+        let fill = M6FixtureStep::fill(0x1000, 16, 7, PATTERN_INCREMENTING);
+        assert_eq!(fill.kind, STEP_KIND_FILL);
+        assert_eq!(fill.args, [0x1000, 16, 7, PATTERN_INCREMENTING, 0, 0]);
+
+        let verify = M6FixtureStep::verify(0x2000, 8, 3, PATTERN_CONSTANT);
+        assert_eq!(verify.kind, STEP_KIND_VERIFY);
+        assert_eq!(verify.args, [0x2000, 8, 3, PATTERN_CONSTANT, 0, 0]);
+
+        let exec = M6FixtureStep::exec(0x3000);
+        assert_eq!(exec.kind, STEP_KIND_EXEC);
+        assert_eq!(exec.args[0], 0x3000);
+
+        let fault = M6FixtureStep::fault_at(0x4000);
+        assert_eq!(fault.kind, STEP_KIND_FAULT);
+        assert_eq!(fault.args[0], 0x4000);
+
+        assert_eq!(core::mem::size_of::<M6FixtureStep>(), EXPECTED_STEP_BYTES);
         assert_eq!(
-            M6_FIXTURE_BOOTSTRAP_BYTES,
-            core::mem::size_of::<M6FixtureBootstrap>()
+            core::mem::size_of::<M6FixtureBootstrap>(),
+            EXPECTED_BOOTSTRAP_BYTES
         );
+        assert_eq!(M6_FIXTURE_BOOTSTRAP_BYTES, EXPECTED_BOOTSTRAP_BYTES);
+
         let mut bootstrap = M6FixtureBootstrap::new();
         bootstrap.push(step).unwrap();
         assert_eq!(bootstrap.result(0), Some(0));

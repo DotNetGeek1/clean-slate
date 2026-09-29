@@ -10,6 +10,7 @@ use clean_slate_capability::{
 use clean_slate_native_abi::status::{STATUS_EACCES, STATUS_EINVAL, STATUS_ENOSPC};
 use clean_slate_native_abi::{SharedBufferId, TransferredCap};
 
+use crate::effects::Effects;
 use crate::PortError;
 
 /// A capability offered with a SEND, and the verdict of the shared-buffer attestation (M10 W6,
@@ -126,18 +127,21 @@ pub(crate) fn install_child<const N: usize>(
     })
 }
 
-/// Revokes and releases an undelivered child, but only if the slot still holds that child.
-pub(crate) fn release_child<const N: usize>(
+/// Revokes and releases an undelivered child, but only if the slot still holds that child,
+/// and notes its resource in `effects` so the caller reconciles mappings made through it.
+pub(crate) fn release_child<const N: usize, B: Copy + PartialEq>(
     table: &mut CapabilityTable<N>,
     child: &TransferredCap,
+    effects: &mut Effects<B>,
 ) {
     let Ok(handle) = CapabilityHandle::decode(child.handle) else {
         return;
     };
-    if table.record(handle).is_err() {
+    let Ok(record) = table.record(handle) else {
         return;
-    }
+    };
     let slot = usize::from(handle.slot);
     table.revoke_slot(slot);
     table.release_slot(slot);
+    effects.note_revoked(record.resource);
 }

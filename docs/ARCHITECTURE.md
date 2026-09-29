@@ -241,6 +241,28 @@ desktop-shell / playground   clients (#116, #117)
 
 The VirtIO 1.x modern PCI transport (#196, `device::virtio::modern`) is the kernel substrate for #114. It matches only modern-only functions (device ID `0x1040 + id`, revision ≥ 1), sizes every BAR, validates the vendor capabilities against their BARs, and fails closed on any region outside the kernel identity map. Bring-up follows the virtio 1.2 status sequence, re-reads `FEATURES_OK`, and negotiates `VERSION_1` plus requested device-class bits only. Queues are split virtqueues with 64-bit ring addresses (`device::virtio::virtqueue`) over kernel-static DMA memory. Completion is interrupt driven: MSI-X table entry 0 serves every queue, or INTx acknowledged through the ISR byte on a GSI no other driver has routed. The transport has three states: `Ready`, `ResetRequired` (timeout, ring protocol violation, `DEVICE_NEEDS_RESET`, config generation unstable after four reads) and `Poisoned` (reset stuck, bring-up failed, generation exhausted, interrupt lost). `reset()` resets the device, then brings it up again under a new generation, so every earlier token is stale. Nothing in the transport waits (W4). Each device arms one entry in the bounded kernel timeout registry (`sched::timeout`, W3: 8 slots, `Exhausted` when full) at the earliest in-flight deadline. It cancels that entry when the last completion is harvested, and whenever the device leaves `Ready` for any reason other than the timeout itself. Entries expire from the same timer path as `Deadline::MonotonicNs` waiters, so an idle registry costs one comparison per tick. Expiry moves the device to `ResetRequired`. It never retries.
 
+### Shared-buffer VA window (#195)
+
+Client and compositor pixels live in kernel-allocated **shared buffers** mapped into a dedicated canonical window, separate from each process's private `map_process_page` mappings.
+
+| Field | Value |
+|---|---|
+| PML4 index | 160 (`WINDOW_PML4_INDEX`; derived from `SHARED_WINDOW_BASE`) |
+| Base VA | `0x0000_5000_0000_0000` (`SHARED_WINDOW_BASE`) |
+| Slot stride | 16 MiB (`SHARED_WINDOW_SLOT_STRIDE`) |
+| Slots per process | 20 (`MAX_SHARED_MAPPINGS_PER_PROCESS`) |
+| Window span | base + 20 × stride (fits below the 47-bit user ceiling) |
+
+Each process root that maps shared buffers installs a private PDPT/PD subtree under PML4 slot 160 (not inherited from the kernel half of the root). Rows own only their page-table frames, never buffer backing frames. Directory entries are always `PRESENT | WRITABLE | USER | NO_EXECUTE`; leaf `WRITABLE` is set only for `ReadWrite` mappings. `map_process_page` rejects any private mapping that overlaps the window; `destroy_process_address_space` refuses teardown while slot 160 is still populated (`address-space teardown found a live shared window`). That refusal is a structural invariant backstop, not a recovery path: a refused teardown is kernel-fatal. Step 5 below is what guarantees the slot is empty by then; before it was wired, a native exit with a live window reached `fatal_kernel_error`.
+
+**Process teardown (P4; the step-5 slot comes from W5/#205).** After port/display/input steps and `revoke_for_holder` (step 4), capability reconciliation retargets orphaned reader rows to a shared zero page and queues frame reclaim. **Step 5 (`SharedMappings`, wired by #195):** `release_shared_mappings` calls `mm::shared_buffer::teardown_process`, which removes every window row for the exiting PID (live or orphaned), detaches attachments without freeing buffer frames owned elsewhere, and frees the window's page-table frames. **Step 6:** `destroy_process_address_space` for private pages only. The `test-m10-shared-buffer` lane proves exit, fault (read-only write, shared-window exec) and CAP_REVOKE of the root while mapped all end in step 5 rather than `fatal_kernel_error`.
+
+**TLB model.** Documented at shared-buffer init: single CPU, `CR4.PCIDE=0`, interrupts masked around page-table edits. Non-active roots need no shootdown; edits to the active root reload CR3 before freed page-table frames are reused. Boot logs `[MM  ] shared-buffer tlb model single-cpu no-pcid`. SMP bring-up must replace this with an explicit shootdown protocol.
+
+**NX enforcement.** Boot calls `enable_and_verify_nxe` immediately after `ExitBootServices` and logs `[CPU ] NXE enabled nx=1 firmware_nxe=<0|1>`. Without `EFER.NXE`, `NO_EXECUTE` PTEs would fault as reserved-bit violations instead of instruction-fetch faults; `cargo xtask test-m10-nxe` locks this down before shared-buffer mappings rely on NX leaves.
+
+Syscall-16 ABI, limits, and capability rules: [GRAPHICS.md](GRAPHICS.md#shared-buffers-syscall-16-195).
+
 ## Driver description experiment
 
 A long-term research direction is a declarative device description format describing registers, queues, interrupts, DMA structures, reset/power sequences, and protocol semantics.

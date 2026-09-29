@@ -21,7 +21,7 @@ pub mod fake;
 #[cfg(test)]
 mod tests;
 
-pub use effects::{Effect, Effects, EFFECTS_CAPACITY};
+pub use effects::{Effect, Effects, EFFECTS_CAPACITY, REVOKED_TRANSFERS_CAPACITY};
 pub use engine::{
     HolderPortCounts, PortCore, PortCounts, PortReleaseCounts, RegistrationError, WakeBinding,
 };

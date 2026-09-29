@@ -161,6 +161,8 @@ impl Rights {
             ResourceClass::Graphics => {
                 Self(Self::GFX_SHELL.0 | Self::GFX_OVERLAY.0 | Self::GFX_SERVE.0)
             }
+            // A delegated shared buffer is read-only and cannot be passed on or revoked.
+            ResourceClass::SharedBuffer => Self(Self::WRITE.0 | Self::DELEGATE.0 | Self::REVOKE.0),
             _ => Self::empty(),
         }
     }

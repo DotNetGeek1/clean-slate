@@ -277,6 +277,7 @@ impl ServiceLifecycleController {
         feature = "m6-delegation-self-test",
         feature = "m7-net-caps-self-test",
         feature = "m10-port-self-test",
+        feature = "m10-shared-buffer-self-test",
         feature = "m6-revocation-self-test",
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
@@ -1012,21 +1013,22 @@ mod tests {
                     0x1000,
                 )
                 .expect("occupy slot zero");
-            #[cfg(feature = "m8-linux-hello")]
-            {
-                // TASK_COUNT is 3 under this feature; occupy slot 2 so the
-                // wrap from next_scheduler_slot=2 still lands on empty slot 1.
+            // TASK_COUNT varies by feature; occupy every slot from 2 up so the
+            // search from next_scheduler_slot=2 must wrap to empty slot 1.
+            let capacity = crate::sched::scheduler_mut().thread_capacity();
+            for slot in 2..capacity {
+                let id = slot as u64 + 1;
                 crate::sched::scheduler_mut()
                     .configure_thread(
-                        2,
-                        3,
-                        3,
+                        slot,
+                        id,
+                        id,
                         ThreadKind::User,
-                        crate::sched::Scheduler::user_kernel_stack_top(2),
-                        0x3000,
-                        0x3000,
+                        crate::sched::Scheduler::user_kernel_stack_top(slot),
+                        id * 0x1000,
+                        id * 0x1000,
                     )
-                    .expect("occupy slot two");
+                    .expect("occupy slots from two");
             }
         }
 

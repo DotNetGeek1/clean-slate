@@ -133,6 +133,26 @@ const M10_NXE_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[M10.NX] PASS",
 ];
 const M10_NXE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+const M10_SHARED_BUFFER_ACCEPTANCE_MARKERS: [&str; 17] = [
+    "[CPU ] NXE enabled nx=1",
+    "[M10.SB] creating",
+    "[M10.SB] nx exec fault err=0x15 OK",
+    "[M10.SB] cross-process map/read OK",
+    "[M10.SB] unauthorized denied OK",
+    "[M10.SB] stale id denied OK",
+    "[M10.SB] exhaustion deterministic OK",
+    "[M10.SB] reuse zeroed OK",
+    "[M10.SB] kernel-owned map OK",
+    "[M10.SB] read-only write fault OK",
+    "[M10.SB] shared exec fault err=0x15 OK",
+    "[M10.SB] owner exit orphaned reader OK",
+    "[M10.SB] reader exit left owner intact OK",
+    "[M10.SB] root revoke while mapped OK",
+    "[M10.SB] port transfer read-only OK",
+    "[M10.SB] baseline OK",
+    "[M10.SB] PASS",
+];
+const M10_SHARED_BUFFER_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
 const M9_LINUX_EXEC_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[M9.F] creating",
     "[M9.F] phase-1 argv line",
@@ -975,6 +995,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestQmpSmoke => qmp::smoke::run(&xtask_artifact_root()),
         ParsedCommand::TestM10VirtioModern => run_m10_virtio_modern_acceptance(),
         ParsedCommand::TestM10Framebuffer => run_m10_framebuffer_acceptance(),
+        ParsedCommand::TestM10SharedBuffer => run_m10_shared_buffer_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -2124,6 +2145,30 @@ fn run_m10_port_acceptance() -> Result<(), XtaskError> {
             M10_PORT_ACCEPTANCE_TIMEOUT,
         )),
     )
+}
+
+/// M10 #195 gate: ABI, delegation policy, object-model, window-mapping, frame-run and
+/// NXE host tests, then the QEMU lane through production syscall 16.
+fn run_m10_shared_buffer_acceptance() -> Result<(), XtaskError> {
+    run_cargo_package_tests("clean-slate-native-abi", &[])?;
+    run_cargo_package_tests("clean-slate-service-fixtures", &[])?;
+    run_cargo_package_tests("clean-slate-capability", &[])?;
+    run_cargo_package_tests("clean-slate-kernel", &["mm::shared_buffer"])?;
+    run_cargo_package_tests("clean-slate-kernel", &["frame_allocator"])?;
+    run_cargo_package_tests("clean-slate-kernel", &["nx_"])?;
+    build_m6_fixture_userspace(true)?;
+    build_storage_userspace(true)?;
+    run_vm_inner(
+        false,
+        false,
+        &["m10-shared-buffer-self-test"],
+        Some((
+            MarkerSet::Ordered(&M10_SHARED_BUFFER_ACCEPTANCE_MARKERS),
+            M10_SHARED_BUFFER_ACCEPTANCE_TIMEOUT,
+        )),
+    )?;
+    println!("[M10.shared-buffer] PASS");
+    Ok(())
 }
 
 fn run_m5_crash_matrix() -> Result<(), XtaskError> {
@@ -4278,6 +4323,9 @@ fn print_help() {
     println!(
         "  test-m10-framebuffer M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (aliases: m10-framebuffer)"
     );
+    println!(
+        "  test-m10-shared-buffer  M10 #195 shared buffers: native-abi/service-fixtures/capability and kernel shared-buffer host tests, then the scripted fixture lane (NX, map/read, deny, stale, exhaustion, reuse, kernel-owned, ro-write, shared-exec, owner exit, reader exit, root revoke, port transfer); prints [M10.shared-buffer] PASS (aliases: m10-shared-buffer)"
+    );
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
@@ -4419,6 +4467,7 @@ enum ParsedCommand {
     TestQmpSmoke,
     TestM10VirtioModern,
     TestM10Framebuffer,
+    TestM10SharedBuffer,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -4557,6 +4606,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-m10-framebuffer" || cmd == "m10-framebuffer" => {
             ParsedCommand::TestM10Framebuffer
+        }
+        Some(cmd) if cmd == "test-m10-shared-buffer" || cmd == "m10-shared-buffer" => {
+            ParsedCommand::TestM10SharedBuffer
         }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
@@ -5029,6 +5081,14 @@ mod tests {
                 "[FB  ] status idle seq=2",
                 "[M10.2] PASS",
             ]
+        );
+        assert_eq!(
+            parse_command(Some("test-m10-shared-buffer".as_ref())),
+            ParsedCommand::TestM10SharedBuffer
+        );
+        assert_eq!(
+            parse_command(Some("m10-shared-buffer".as_ref())),
+            ParsedCommand::TestM10SharedBuffer
         );
         assert_eq!(
             parse_command(Some("test-m7-net-caps".as_ref())),

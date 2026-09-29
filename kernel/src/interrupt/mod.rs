@@ -42,6 +42,7 @@ use crate::mm::stack_guard::{GuardedStackRecord, SlotLabel};
     feature = "m6-delegation-self-test",
     feature = "m7-net-caps-self-test",
     feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -123,6 +124,7 @@ use crate::selftest::m5_storage::handle_userspace_storage_entry;
     feature = "m6-delegation-self-test",
     feature = "m7-net-caps-self-test",
     feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -135,6 +137,7 @@ use crate::selftest::m6_fixture::handle_fixture_report;
     feature = "m6-delegation-self-test",
     feature = "m7-net-caps-self-test",
     feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test",
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
@@ -256,6 +259,7 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         feature = "m6-delegation-self-test",
         feature = "m7-net-caps-self-test",
         feature = "m10-port-self-test",
+        feature = "m10-shared-buffer-self-test",
         feature = "m6-revocation-self-test",
         feature = "m6-audit-self-test",
         feature = "m6-capabilities-self-test",
@@ -389,6 +393,11 @@ fn handle_exception(context: &InterruptContext) -> u64 {
         #[cfg(feature = "m10-nxe-self-test")]
         if selector_rpl(context.cs) == 3 {
             crate::selftest::m10_nxe::observe_page_fault(context);
+        }
+
+        #[cfg(feature = "m10-shared-buffer-self-test")]
+        if selector_rpl(context.cs) == 3 {
+            crate::selftest::m10_shared_buffer::record_page_fault(context);
         }
 
         if selector_rpl(context.cs) == 3 {
@@ -637,7 +646,8 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
         feature = "m6-capabilities-self-test",
         feature = "m6-fixture-smoke-self-test",
         feature = "m7-net-caps-self-test",
-        feature = "m10-port-self-test"
+        feature = "m10-port-self-test",
+        feature = "m10-shared-buffer-self-test"
     ))]
     crate::selftest::m6_fixture::on_fixture_exiting(pid);
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 1, true)
@@ -679,12 +689,17 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
         {
             crate::selftest::m10_nxe::finish_after_probe_fault(pid);
         }
+        #[cfg(feature = "m10-shared-buffer-self-test")]
+        {
+            crate::selftest::m10_shared_buffer::maybe_continue_after_fixture_fault(pid);
+        }
         #[cfg(not(any(
             feature = "m6-fixture-smoke-self-test",
             feature = "m6-revocation-self-test",
             feature = "m6-object-self-test",
             feature = "m9-userspace-self-test",
-            feature = "m10-nxe-self-test"
+            feature = "m10-nxe-self-test",
+            feature = "m10-shared-buffer-self-test"
         )))]
         {
             fatal_kernel_error("no runnable thread remained after userspace fault");

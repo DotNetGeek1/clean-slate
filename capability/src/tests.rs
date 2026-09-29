@@ -499,6 +499,29 @@ fn graphics_delegation_refuses_root_only_rights() {
 }
 
 #[test]
+fn shared_buffer_delegation_allows_only_read_children() {
+    let holder = HolderId(2);
+    let resource = ResourceRef::shared_buffer(shared_buffer_id_raw(3, 1));
+    let handle = CapabilityHandle::new(0, 1);
+    let parent = live_record(
+        holder,
+        resource,
+        Rights::valid_for(ResourceClass::SharedBuffer),
+        1,
+    );
+    assert_eq!(
+        validate_delegation(&parent, handle, holder, Rights::READ),
+        Ok(Rights::READ)
+    );
+    for right in [Rights::WRITE, Rights::DELEGATE, Rights::REVOKE] {
+        assert_eq!(
+            validate_delegation(&parent, handle, holder, Rights::READ.union(right)),
+            Err(CapabilityError::NotDelegable)
+        );
+    }
+}
+
+#[test]
 fn existing_class_delegation_unaffected_by_root_only_mask() {
     let holder = HolderId(3);
     let resource = ResourceRef::object(9);

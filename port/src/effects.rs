@@ -1,3 +1,4 @@
+use clean_slate_capability::ResourceRef;
 use clean_slate_native_abi::ConnectionId;
 
 use crate::PortKey;
@@ -20,10 +21,18 @@ pub enum Effect<B> {
 /// asserts that bound fits.
 pub const EFFECTS_CAPACITY: usize = 32;
 
-/// Deduplicated, fixed-capacity effect list.
+/// One operation revokes at most every undelivered transfer child, which is at most
+/// `PORTS * PORT_MAX_TRANSFERS_IN_FLIGHT`; `PortCore::new` asserts that bound fits.
+pub const REVOKED_TRANSFERS_CAPACITY: usize = 16;
+
+/// Deduplicated, fixed-capacity effect list, plus the resources of the undelivered transfer
+/// children the operation revoked. The caller must reconcile each of those resources (for a
+/// `SharedBuffer`, drop mappings made through the child) once it has released the table.
 pub struct Effects<B> {
     items: [Option<Effect<B>>; EFFECTS_CAPACITY],
     len: usize,
+    revoked: [Option<ResourceRef>; REVOKED_TRANSFERS_CAPACITY],
+    revoked_len: usize,
     overflowed: bool,
 }
 
@@ -38,6 +47,8 @@ impl<B: Copy + PartialEq> Effects<B> {
         Self {
             items: [None; EFFECTS_CAPACITY],
             len: 0,
+            revoked: [None; REVOKED_TRANSFERS_CAPACITY],
+            revoked_len: 0,
             overflowed: false,
         }
     }
@@ -55,19 +66,42 @@ impl<B: Copy + PartialEq> Effects<B> {
         }
     }
 
+    pub(crate) fn note_revoked(&mut self, resource: ResourceRef) {
+        if self
+            .revoked_transfers()
+            .any(|existing| existing == resource)
+        {
+            return;
+        }
+        match self.revoked.get_mut(self.revoked_len) {
+            Some(slot) => {
+                *slot = Some(resource);
+                self.revoked_len += 1;
+            }
+            None => self.overflowed = true,
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = Effect<B>> + '_ {
         self.items[..self.len].iter().flatten().copied()
     }
 
+    /// Resources of the undelivered transfer children this operation revoked, deduplicated.
+    pub fn revoked_transfers(&self) -> impl Iterator<Item = ResourceRef> + '_ {
+        self.revoked[..self.revoked_len].iter().flatten().copied()
+    }
+
+    /// Counts wakes and signals only; see [`Self::revoked_transfers`].
     pub const fn len(&self) -> usize {
         self.len
     }
 
+    /// No wakes or signals; see [`Self::revoked_transfers`].
     pub const fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    /// Never true for a `PortCore` whose bound fits; callers treat it as fatal.
+    /// Never true for a `PortCore` whose bounds fit; callers treat it as fatal.
     pub const fn overflowed(&self) -> bool {
         self.overflowed
     }

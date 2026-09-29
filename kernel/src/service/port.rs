@@ -3,30 +3,41 @@
 //! One [`PortCore`] for the whole kernel. Every entry runs the engine with interrupts disabled
 //! against the global capability table, then applies the returned effects, so state always
 //! changes before any waiter or work set observes it. Single CPU: the core needs no lock; SMP
-//! would need one, taken before the work-set and wait tables.
+//! would need one, taken before the work-set and wait tables and released before the
+//! shared-buffer state is touched (transfer-purge reconcile), like the capability table.
 //!
 //! The syscall layer (`port_syscall.rs`) and the in-kernel client entries share these functions,
 //! so a CPL3 client and the M11 Linux-personality shim take one code path.
 
-#[cfg(feature = "m10-port-self-test")]
+#[cfg(any(
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 use clean_slate_capability::ResourceRef;
 use clean_slate_capability::{
     CapabilityHandle, CapabilityTable, HolderId, ResourceClass, MAX_SLOTS,
 };
-use clean_slate_native_abi::port::PORT_MAX_CONNECTIONS;
-#[cfg(feature = "m10-port-self-test")]
+use clean_slate_native_abi::port::{PORT_MAX_CONNECTIONS, PORT_MAX_TRANSFERS_IN_FLIGHT};
+#[cfg(any(
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 use clean_slate_native_abi::PortParams;
 use clean_slate_native_abi::{ConnectionId, PortEventRecord, PortRecvRecord, SharedBufferId};
 use clean_slate_port::{
     Caller, Effect, Effects, HolderPortCounts, PortCore, PortError, PortKey, PortReleaseCounts,
-    Transfer,
+    Transfer, REVOKED_TRANSFERS_CAPACITY,
 };
-#[cfg(feature = "m10-port-self-test")]
+#[cfg(any(
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 use clean_slate_port::{PortCounts, RegistrationError};
 use clean_slate_service_lifecycle::InstanceGeneration;
 
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::capability::capability_space_mut;
+use crate::mm::shared_buffer::reconcile_resource;
 use crate::sched::wait::{wake_all_registered, WaitKey};
 use crate::sched::work_set::{self, WorkSetBinding};
 use crate::service::instance_generation::live_instance_generation_for_pid;
@@ -34,7 +45,11 @@ use crate::sync::global_cell::GlobalCell;
 
 pub(crate) const PORT_REGISTRY_CAPACITY: usize = 4;
 
-type KernelPortCore = PortCore<PORT_REGISTRY_CAPACITY, PORT_MAX_CONNECTIONS, WorkSetBinding>;
+pub(crate) type KernelPortCore =
+    PortCore<PORT_REGISTRY_CAPACITY, PORT_MAX_CONNECTIONS, WorkSetBinding>;
+
+const _: () =
+    assert!(PORT_REGISTRY_CAPACITY * PORT_MAX_TRANSFERS_IN_FLIGHT <= REVOKED_TRANSFERS_CAPACITY);
 
 static PORTS: GlobalCell<KernelPortCore> = GlobalCell::new(PortCore::new());
 
@@ -59,6 +74,12 @@ pub(crate) fn connection_wait_key(connection: ConnectionId) -> WaitKey {
 
 /// Runs `operation` on the port core and the capability table with interrupts disabled, then
 /// applies its effects. No other reference to either may be live.
+///
+/// An operation that purges undelivered transfers has revoked their children in the table, so
+/// mappings a server made through a child (it may map one before `RECV`) must go too. As at
+/// every other revocation site, the table borrow ends before `reconcile_resource` reads it and
+/// edits the shared-buffer windows; that runs before the wakes, still with interrupts disabled,
+/// so no woken waiter or preempting thread can reach a row whose authority is gone.
 fn with_ports<R>(
     operation: impl FnOnce(
         &mut KernelPortCore,
@@ -73,16 +94,31 @@ fn with_ports<R>(
             let table = unsafe { capability_space_mut() };
             operation(core, table, &mut effects)
         };
+        // `PortCore::new` bounds one operation's effects and revoked transfers.
+        if effects.overflowed() {
+            crate::diagnostics::qemu::fatal_kernel_error("service port effects overflowed");
+        }
+        for resource in effects.revoked_transfers() {
+            reconcile_resource(resource);
+        }
         apply(&effects);
         result
     })
 }
 
+/// Host tests have no live process registry, so they drive the core with explicit callers.
+#[cfg(test)]
+pub(crate) fn with_ports_for_test<R>(
+    operation: impl FnOnce(
+        &mut KernelPortCore,
+        &mut CapabilityTable<MAX_SLOTS>,
+        &mut Effects<WorkSetBinding>,
+    ) -> R,
+) -> R {
+    with_ports(operation)
+}
+
 fn apply(effects: &Effects<WorkSetBinding>) {
-    // `PortCore::new` bounds one operation's distinct effects by `EFFECTS_CAPACITY`.
-    if effects.overflowed() {
-        crate::diagnostics::qemu::fatal_kernel_error("service port effects overflowed");
-    }
     for effect in effects.iter() {
         match effect {
             Effect::WakeServer(key) => {
@@ -115,7 +151,10 @@ fn caller_for(holder: HolderId) -> Result<Caller, PortError> {
 // ---- launch policy ----
 
 /// Only launch policy registers a port: after spawning `server` and before it runs.
-#[cfg(feature = "m10-port-self-test")]
+#[cfg(any(
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 pub(crate) fn register_port(
     resource: ResourceRef,
     server: HolderId,
@@ -138,14 +177,15 @@ pub(crate) fn register_port(
 
 // ---- W6: shared-buffer attestation (owned by #195) ----
 
-/// `shared_buffer::attest_for_transfer` per wave-1 decision W6. Production fails closed until
-/// #195 implements it; the M10 port self-test attests from a fixture table.
+/// `shared_buffer::attest_for_transfer` per wave-1 decision W6: a Live `SharedBuffer`
+/// capability with `DELEGATE` naming a Live buffer, or `ESTALE`/`EACCES`. The M10 port
+/// self-test attests from a fixture table instead, so its buffers need no backing frames.
 #[cfg(not(feature = "m10-port-self-test"))]
 fn attest_for_transfer(
-    _holder: HolderId,
-    _handle: CapabilityHandle,
+    holder: HolderId,
+    handle: CapabilityHandle,
 ) -> Result<(SharedBufferId, u64), u64> {
-    Err(clean_slate_native_abi::status::STATUS_EACCES)
+    crate::mm::shared_buffer::transfer::attest_for_transfer(holder, handle)
 }
 
 #[cfg(feature = "m10-port-self-test")]
@@ -354,7 +394,10 @@ pub(crate) fn counts_for(holder: HolderId) -> HolderPortCounts {
     with_ports(|core, _, _| core.counts_for(holder))
 }
 
-#[cfg(feature = "m10-port-self-test")]
+#[cfg(any(
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 pub(crate) fn global_counts() -> PortCounts {
     with_ports(|core, _, _| core.global_counts())
 }

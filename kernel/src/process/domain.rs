@@ -378,7 +378,13 @@ fn release_work_set(ctx: &mut TeardownContext<'_>) -> usize {
     work_set::on_holder_exit(HolderId(ctx.process_id))
 }
 
-fn release_shared_mappings(_ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {
+fn release_shared_mappings(ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {
+    debug_assert!(
+        crate::mm::shared_buffer::window_root(ctx.process_id)
+            .is_none_or(|root| root == ctx.address_space_root),
+        "shared window was built in a different root than the one being torn down"
+    );
+    crate::mm::shared_buffer::teardown_process(ctx.process_id, ctx.allocator);
     Ok(())
 }
 
@@ -849,9 +855,10 @@ mod tests {
 
     /// Calls that dismantle part of a registered process. Outside the teardown
     /// block they are allowed only where no registered process is dismantled.
-    const DIRECT_TEARDOWN_CALLS: [&str; 5] = [
+    const DIRECT_TEARDOWN_CALLS: [&str; 6] = [
         concat!("revoke_for_holder", "("),
         concat!("revoke_holder_tree", "("),
+        concat!("revoke_holder_tree_visiting", "("),
         concat!("take_address_space", "("),
         concat!("destroy_process_address_space", "("),
         concat!("run_teardown_hooks", "("),
@@ -889,7 +896,7 @@ mod tests {
         (
             "capability/mod.rs",
             "revoke_for_holder",
-            "revoke_holder_tree",
+            "revoke_holder_tree_visiting",
         ),
         // Address spaces built before any process record exists.
         (
@@ -977,6 +984,22 @@ mod tests {
         (
             "capability/object.rs",
             "pending_bootstrap_grant_rolls_back_when_bootstrap_table_is_full",
+            "revoke_for_holder",
+        ),
+        // Shared-buffer host tests replay step 4 on a bare capability table.
+        (
+            "mm/shared_buffer/tests.rs",
+            "teardown_both",
+            "revoke_for_holder",
+        ),
+        (
+            "mm/shared_buffer/tests.rs",
+            "shared_buffer_owner_exit_orphans_reader_to_zero_page_and_reclaims_once",
+            "revoke_for_holder",
+        ),
+        (
+            "mm/shared_buffer/tests.rs",
+            "shared_buffer_reader_exit_leaves_owner_mapping_live",
             "revoke_for_holder",
         ),
     ];

@@ -1179,16 +1179,33 @@ fn transfer_beyond_the_delegation_depth_is_no_space() {
     let mut w = World::new(SMALL);
     let a = w.connect(A);
     let root = w.buffer(A, 1, 64);
-    let mut parent = root.handle;
-    for _ in 0..clean_slate_capability::MAX_DELEGATION_DEPTH {
-        parent = clean_slate_capability::delegate(
+    // DELEGATE is root-only for SharedBuffer, so `delegate` cannot build this chain and a real
+    // transfer always installs a depth-1 child. The chain is installed directly to prove the
+    // engine's depth check still fails closed.
+    assert_eq!(
+        clean_slate_capability::delegate(
             &mut w.table,
             A.holder,
-            parent,
+            root.handle,
             A.holder,
             Rights::READ.union(Rights::DELEGATE),
-        )
-        .unwrap();
+        ),
+        Err(CapabilityError::NotDelegable)
+    );
+    let mut parent = root.handle;
+    for _ in 0..clean_slate_capability::MAX_DELEGATION_DEPTH {
+        let parent_record = w.table.record(parent).unwrap();
+        parent = w
+            .table
+            .install(CapabilityRecord {
+                state: CapabilityState::Live,
+                holder: A.holder,
+                resource: parent_record.resource,
+                rights: Rights::READ.union(Rights::DELEGATE),
+                provenance: Provenance::child_of(parent, &parent_record.provenance).unwrap(),
+                generation: 0,
+            })
+            .unwrap();
     }
     let before = snapshot(&w.table);
     assert_eq!(
@@ -1296,6 +1313,102 @@ fn a_full_table_reclaims_revoked_slots_and_otherwise_fails_exactly() {
     );
     w.send_transfer(A, a, transfer).unwrap();
     assert_eq!(w.table.record(victim), Err(CapabilityError::StaleHandle));
+}
+
+/// Purges A's connection (given with A's connect capability) by one path.
+type PurgePath = fn(&mut World, ConnectionId, u64);
+
+#[test]
+fn every_purge_path_reports_the_revoked_child_resource_once() {
+    // One undelivered child from A, then each purge path on a fresh world.
+    let paths: [(&str, PurgePath); 6] = [
+        ("client close", |w, a, _| w.close(A, a, 0).unwrap()),
+        ("client exit", |w, _, _| {
+            w.exit(A);
+        }),
+        ("client revoked", |w, a, cap| {
+            w.table
+                .revoke(CapabilityHandle::decode(cap).unwrap())
+                .unwrap();
+            assert_eq!(w.send(A, a, 2), Err(PortError::Stale));
+        }),
+        ("server disconnect", |w, a, _| w.disconnect(a, 0).unwrap()),
+        ("server exit", |w, _, _| {
+            w.exit(SERVER);
+        }),
+        ("unregister", |w, _, _| {
+            assert!(w.core.unregister(&mut w.table, w.key, &mut w.effects));
+        }),
+    ];
+    for (path, purge) in paths {
+        let mut w = World::new(SMALL);
+        let cap = w.client_cap(A);
+        let a = w.connect_with(A, cap).unwrap();
+        let transfer = w.buffer(A, 1, 64);
+        let resource = w.table.record(transfer.handle).unwrap().resource;
+        w.send_transfer(A, a, transfer).unwrap();
+        w.take_effects();
+        assert_eq!(w.effects.revoked_transfers().count(), 0, "{path}: pending");
+        purge(&mut w, a, cap);
+        assert!(!w.effects.overflowed(), "{path}");
+        assert_eq!(
+            w.effects.revoked_transfers().collect::<Vec<_>>(),
+            [resource],
+            "{path}"
+        );
+        assert!(w.core.undelivered_children_for_test().is_empty(), "{path}");
+    }
+
+    // Server exit (port teardown) with two undelivered children on distinct buffers,
+    // after a first purge on the same world.
+    let mut w = World::new(SMALL);
+    let a = w.connect(A);
+    let first = w.buffer(A, 1, 64);
+    w.send_transfer(A, a, first).unwrap();
+    w.close(A, a, 0).unwrap();
+    w.take_effects();
+    let b = w.connect(B);
+    let c = w.connect(C);
+    let second = w.buffer(B, 2, 64);
+    let third = w.buffer(C, 3, 64);
+    let resources = [second, third].map(|t| w.table.record(t.handle).unwrap().resource);
+    w.send_transfer(B, b, second).unwrap();
+    w.send_transfer(C, c, third).unwrap();
+    w.take_effects();
+    w.exit(SERVER);
+    assert_eq!(w.effects.revoked_transfers().collect::<Vec<_>>(), resources);
+    assert!(!w.effects.overflowed());
+}
+
+#[test]
+fn delivered_and_reused_children_are_not_reported_revoked() {
+    let mut w = World::new(SMALL);
+    let a = w.connect(A);
+    let first = w.buffer(A, 1, 64);
+    w.send_transfer(A, a, first).unwrap();
+    w.recv().unwrap();
+    w.take_effects();
+    w.close(A, a, 0).unwrap();
+    assert_eq!(
+        w.effects.revoked_transfers().count(),
+        0,
+        "a delivered child is the server's"
+    );
+    w.take_effects();
+
+    let b = w.connect(B);
+    let second = w.buffer(B, 2, 64);
+    w.send_transfer(B, b, second).unwrap();
+    let child = w.core.undelivered_children_for_test()[0];
+    w.table.revoke(child).unwrap();
+    w.table.release_slot(usize::from(child.slot));
+    w.take_effects();
+    w.close(B, b, 0).unwrap();
+    assert_eq!(
+        w.effects.revoked_transfers().count(),
+        0,
+        "a slot that no longer holds the child is left alone"
+    );
 }
 
 #[test]
