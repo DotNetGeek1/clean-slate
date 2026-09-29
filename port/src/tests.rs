@@ -1316,6 +1316,68 @@ fn a_full_table_reclaims_revoked_slots_and_otherwise_fails_exactly() {
 }
 
 #[test]
+fn every_purge_path_reports_the_revoked_child_resource_once() {
+    // Client close (connection purge).
+    let mut w = World::new(SMALL);
+    let a = w.connect(A);
+    let first = w.buffer(A, 1, 64);
+    let first_resource = w.table.record(first.handle).unwrap().resource;
+    w.send_transfer(A, a, first).unwrap();
+    w.take_effects();
+    assert_eq!(w.effects.revoked_transfers().count(), 0, "delivery pending");
+    w.close(A, a, 0).unwrap();
+    assert_eq!(
+        w.effects.revoked_transfers().collect::<Vec<_>>(),
+        [first_resource]
+    );
+    w.take_effects();
+
+    // Server exit (port teardown) with two undelivered children on distinct buffers.
+    let b = w.connect(B);
+    let c = w.connect(C);
+    let second = w.buffer(B, 2, 64);
+    let third = w.buffer(C, 3, 64);
+    let resources = [second, third].map(|t| w.table.record(t.handle).unwrap().resource);
+    w.send_transfer(B, b, second).unwrap();
+    w.send_transfer(C, c, third).unwrap();
+    w.take_effects();
+    w.exit(SERVER);
+    assert_eq!(w.effects.revoked_transfers().collect::<Vec<_>>(), resources);
+    assert!(!w.effects.overflowed());
+}
+
+#[test]
+fn delivered_and_reused_children_are_not_reported_revoked() {
+    let mut w = World::new(SMALL);
+    let a = w.connect(A);
+    let first = w.buffer(A, 1, 64);
+    w.send_transfer(A, a, first).unwrap();
+    w.recv().unwrap();
+    w.take_effects();
+    w.close(A, a, 0).unwrap();
+    assert_eq!(
+        w.effects.revoked_transfers().count(),
+        0,
+        "a delivered child is the server's"
+    );
+    w.take_effects();
+
+    let b = w.connect(B);
+    let second = w.buffer(B, 2, 64);
+    w.send_transfer(B, b, second).unwrap();
+    let child = w.core.undelivered_children_for_test()[0];
+    w.table.revoke(child).unwrap();
+    w.table.release_slot(usize::from(child.slot));
+    w.take_effects();
+    w.close(B, b, 0).unwrap();
+    assert_eq!(
+        w.effects.revoked_transfers().count(),
+        0,
+        "a slot that no longer holds the child is left alone"
+    );
+}
+
+#[test]
 fn purge_releases_undelivered_children_but_never_a_reused_slot() {
     let mut w = World::new(SMALL);
     let a = w.connect(A);

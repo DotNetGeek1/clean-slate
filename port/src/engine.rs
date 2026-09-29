@@ -18,7 +18,7 @@ use clean_slate_native_abi::{
     PortRecvRecord, PortRights, RecvKind, TransferredCap, TrustedEnvelope,
 };
 
-use crate::effects::{Effect, Effects, EFFECTS_CAPACITY};
+use crate::effects::{Effect, Effects, EFFECTS_CAPACITY, REVOKED_TRANSFERS_CAPACITY};
 use crate::transfer::{self, capability_error, Transfer};
 use crate::{Caller, PortError, PortKey};
 
@@ -266,6 +266,7 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
         assert!(PORTS > 0 && PORTS <= u8::MAX as usize);
         assert!(CONNS > 0 && CONNS <= u16::MAX as usize);
         assert!(4 * PORTS + CONNS <= EFFECTS_CAPACITY);
+        assert!(PORTS * PORT_MAX_TRANSFERS_IN_FLIGHT <= REVOKED_TRANSFERS_CAPACITY);
         Self {
             ports: [Port::EMPTY; PORTS],
             connections: [Connection::EMPTY; CONNS],
@@ -676,7 +677,7 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
                 return Err(PortError::Stale)
             }
         }
-        self.purge_connection(table, port_index, index);
+        self.purge_connection(table, port_index, index, effects);
         let seq = self.ports[port_index].next_seq();
         let conn = &mut self.connections[index];
         conn.close_seq = seq;
@@ -1051,7 +1052,7 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
         let Some(port_index) = self.port_index(self.connections[index].port) else {
             return;
         };
-        self.purge_connection(table, port_index, index);
+        self.purge_connection(table, port_index, index, effects);
         let port = &mut self.ports[port_index];
         let seq = port.next_seq();
         let wake = port.wake;
@@ -1074,6 +1075,7 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
         table: &mut CapabilityTable<N>,
         port_index: usize,
         index: usize,
+        effects: &mut Effects<B>,
     ) {
         let id = self.connection_id(index);
         let port = &mut self.ports[port_index];
@@ -1082,7 +1084,7 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
                 continue;
             }
             if let Some(child) = request.transfer {
-                transfer::release_child(table, &child);
+                transfer::release_child(table, &child, effects);
                 port.transfers_in_flight = port.transfers_in_flight.saturating_sub(1);
             }
             *request = Request::EMPTY;
@@ -1102,7 +1104,7 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
         let port = &mut self.ports[port_index];
         for request in port.requests.iter_mut() {
             if let Some(child) = request.transfer.filter(|_| request.is_live()) {
-                transfer::release_child(table, &child);
+                transfer::release_child(table, &child, effects);
             }
             *request = Request::EMPTY;
         }

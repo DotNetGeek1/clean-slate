@@ -234,6 +234,143 @@ fn shared_buffer_child_revoke_orphans_only_the_reader() {
     harness.teardown_both();
 }
 
+/// How a port operation purges the undelivered transfer in [`purged_transfer_case`].
+#[derive(Clone, Copy)]
+enum Purge {
+    ClientClose,
+    ServerExit,
+}
+
+/// OWNER sends its root over a port READER serves. Before any `RECV`, READER finds the
+/// undelivered child in its own capabilities and maps it; the purge must then treat that row
+/// like a CAP_REVOKE of the child: orphaned onto the zero page, owner and buffer untouched.
+fn purged_transfer_case(purge: Purge) {
+    use crate::service::port::with_ports_for_test;
+    use clean_slate_capability::{list_holder, ResourceClass};
+    use clean_slate_native_abi::PortParams;
+    use clean_slate_port::{Caller, Transfer};
+
+    const SERVICE: u64 = 0x195;
+    let resource = ResourceRef::graphics(SERVICE, 1);
+    let client = Caller {
+        holder: HolderId(OWNER),
+        generation: 1,
+        domain: OWNER,
+    };
+    let server = Caller {
+        holder: HolderId(READER),
+        generation: 1,
+        domain: READER,
+    };
+    let params = PortParams {
+        event_depth: 2,
+        request_depth: 2,
+        max_connections: 1,
+        max_outstanding: 1,
+        max_connections_per_holder: 1,
+    };
+
+    let mut harness = Harness::new();
+    let (id, root) = harness.allocate(1);
+    let owner_va = harness
+        .map(OWNER, id, SharedBufferAccess::ReadWrite, root)
+        .unwrap();
+    let grant = |holder: u64, rights: Rights| {
+        crate::capability::grant_root(HolderId(holder), resource, rights).unwrap()
+    };
+    grant(READER, Rights::GFX_SERVE);
+    let connect_cap = grant(OWNER, Rights::GFX_CONNECT);
+    let attestation = attest_for_transfer(HolderId(OWNER), root);
+    let connection = with_ports_for_test(|core, table, effects| {
+        core.register(resource, server.holder, server.generation, params)
+            .unwrap();
+        let connection = core
+            .connect(
+                table,
+                client,
+                connect_cap.encode(),
+                u64::from(ResourceClass::Graphics.as_u8()),
+                SERVICE,
+            )
+            .unwrap();
+        let transfer = Transfer {
+            handle: root,
+            attestation,
+        };
+        core.send(
+            table,
+            client,
+            connection.encode(),
+            &[0; 64],
+            Some(transfer),
+            effects,
+        )
+        .unwrap();
+        connection
+    });
+
+    let child = {
+        let table = unsafe { capability_space_mut() };
+        let mut cursor = 0;
+        loop {
+            let (next, handle, record) =
+                list_holder(table, server.holder, cursor).expect("the undelivered child");
+            if record.resource == id.resource_ref() {
+                break handle;
+            }
+            cursor = next;
+        }
+    };
+    let reader_va = harness
+        .map(READER, id, SharedBufferAccess::Read, child)
+        .unwrap();
+    assert_eq!(
+        harness.leaf(READER, reader_va),
+        harness.leaf(OWNER, owner_va),
+        "the guessed child maps the buffer"
+    );
+
+    with_ports_for_test(|core, table, effects| match purge {
+        Purge::ClientClose => core
+            .close(table, client, connection.encode(), 0, effects)
+            .unwrap(),
+        Purge::ServerExit => {
+            core.on_holder_exit(table, server.holder, server.generation, effects);
+        }
+    });
+
+    assert!(!capability_is_live(child), "the purge revoked the child");
+    assert_eq!(harness.row_state(READER, id), Some(RowState::Orphaned));
+    assert_eq!(harness.leaf(READER, reader_va), harness.zero_frame);
+    assert_eq!(harness.row_state(OWNER, id), Some(RowState::Live));
+    assert_ne!(harness.leaf(OWNER, owner_va), harness.zero_frame);
+    assert_eq!(buffer_state(id), Some(BufferState::Live));
+    assert_eq!(
+        state()
+            .table
+            .record_at(usize::from(id.slot()))
+            .mapping_count(),
+        1,
+        "only the owner stays attached"
+    );
+    with_ports_for_test(|core, table, effects| {
+        core.on_holder_exit(table, client.holder, client.generation, effects);
+        core.on_holder_exit(table, server.holder, server.generation, effects);
+        assert_eq!(core.global_counts().undelivered_transfers, 0);
+    });
+    harness.teardown_both();
+}
+
+#[test]
+fn shared_buffer_port_close_purge_orphans_a_mapped_undelivered_child() {
+    purged_transfer_case(Purge::ClientClose);
+}
+
+#[test]
+fn shared_buffer_port_server_exit_purge_orphans_a_mapped_undelivered_child() {
+    purged_transfer_case(Purge::ServerExit);
+}
+
 #[test]
 fn shared_buffer_release_by_resource_orphans_every_row_and_goes_stale() {
     let mut harness = Harness::new();
