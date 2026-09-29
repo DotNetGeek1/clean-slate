@@ -976,10 +976,35 @@ mod tests {
         assert_eq!(SYSCALL_ENOSYS, u64::MAX - 37);
     }
 
+    /// Dispatches `nr` natively with `subop` in `rdi`, every other register zero, and
+    /// returns `rax`.
+    fn dispatch_native_zeroed(nr: u64, subop: u64) -> u64 {
+        let mut frame = SyscallContext {
+            rax: nr,
+            rdx: 0,
+            rbx: 0,
+            rbp: 0,
+            rsi: 0,
+            rdi: subop,
+            r8: 0,
+            r9: 0,
+            r10: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            user_rip: 0,
+            user_rflags: 0,
+            user_rsp: 0,
+        };
+        dispatch_native(&mut frame);
+        frame.rax
+    }
+
     #[test]
     fn dispatch_native_reserved_m10_nrs_return_enosys() {
         use clean_slate_capability::syscall_abi::{
-            SYSCALL_EINVAL, SYSCALL_NR_DISPLAY, SYSCALL_NR_INPUT, SYSCALL_NR_SERVICE_PORT,
+            SYSCALL_NR_DISPLAY, SYSCALL_NR_INPUT, SYSCALL_NR_SERVICE_PORT,
             SYSCALL_NR_SHARED_BUFFER, SYSCALL_NR_WORK_SET,
         };
         use clean_slate_graphics::display::{
@@ -997,53 +1022,54 @@ mod tests {
             "M10 reserved numbers are contiguous 16..=20"
         );
 
-        let dispatch = |nr: u64, subop: u64| {
-            let mut frame = SyscallContext {
-                rax: nr,
-                rdx: 0,
-                rbx: 0,
-                rbp: 0,
-                rsi: 0,
-                rdi: subop,
-                r8: 0,
-                r9: 0,
-                r10: 0,
-                r12: 0,
-                r13: 0,
-                r14: 0,
-                r15: 0,
-                user_rip: 0,
-                user_rflags: 0,
-                user_rsp: 0,
-            };
-            dispatch_native(&mut frame);
-            frame.rax
-        };
-
-        // 16 (#195), 17 and 20 (#200) are live; 19 waits for #113.
-        for nr in [
-            SYSCALL_NR_SHARED_BUFFER,
-            SYSCALL_NR_SERVICE_PORT,
-            SYSCALL_NR_WORK_SET,
-        ] {
-            assert_ne!(dispatch(nr, 0), SYSCALL_ENOSYS, "nr {nr} is implemented");
-        }
-        assert_eq!(dispatch(SYSCALL_NR_INPUT, 0), SYSCALL_ENOSYS);
-        // #111 routes 18; only its gated subops stay ENOSYS.
-        assert_eq!(dispatch(SYSCALL_NR_DISPLAY, 0), SYSCALL_EINVAL);
+        // 19 waits for #113 (#206); #111 routes 18, but its gated subops stay ENOSYS.
+        assert_eq!(dispatch_native_zeroed(SYSCALL_NR_INPUT, 0), SYSCALL_ENOSYS);
         for subop in [
             DISPLAY_SUBOP_MAP_SCANOUT,
             DISPLAY_SUBOP_PRESENT,
             DISPLAY_SUBOP_BIND_WAKE,
         ] {
             assert_eq!(
-                dispatch(SYSCALL_NR_DISPLAY, subop),
+                dispatch_native_zeroed(SYSCALL_NR_DISPLAY, subop),
                 SYSCALL_ENOSYS,
                 "subop {subop}"
             );
         }
     }
 
+    #[test]
+    fn dispatch_native_implemented_m10_nrs_reach_their_handlers() {
+        use clean_slate_capability::syscall_abi::{
+            SYSCALL_EINVAL, SYSCALL_NR_DISPLAY, SYSCALL_NR_SERVICE_PORT, SYSCALL_NR_SHARED_BUFFER,
+            SYSCALL_NR_WORK_SET,
+        };
+        use clean_slate_graphics::display::{
+            DISPLAY_SUBOP_FIND_HANDLE, DISPLAY_SUBOP_PRESENT_STATUS, DISPLAY_SUBOP_QUERY_MODE,
+        };
+
+        for nr in [
+            SYSCALL_NR_SHARED_BUFFER,
+            SYSCALL_NR_SERVICE_PORT,
+            SYSCALL_NR_WORK_SET,
+        ] {
+            assert_ne!(dispatch_native_zeroed(nr, 0), SYSCALL_ENOSYS, "nr {nr}");
+        }
+        assert_eq!(
+            dispatch_native_zeroed(SYSCALL_NR_DISPLAY, 0),
+            SYSCALL_EINVAL
+        );
+        for subop in [
+            DISPLAY_SUBOP_FIND_HANDLE,
+            DISPLAY_SUBOP_QUERY_MODE,
+            DISPLAY_SUBOP_PRESENT_STATUS,
+        ] {
+            assert_ne!(
+                dispatch_native_zeroed(SYSCALL_NR_DISPLAY, subop),
+                SYSCALL_ENOSYS,
+                "subop {subop}"
+            );
+        }
+    }
     #[test]
     fn route_syscall_trusted_native_selects_native() {
         let route = route_syscall(Ok(ResolvedSyscallCaller {

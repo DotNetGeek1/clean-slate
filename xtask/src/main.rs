@@ -4324,7 +4324,7 @@ fn print_help() {
         "  test-m10-framebuffer M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (aliases: m10-framebuffer)"
     );
     println!(
-        "  test-m10-shared-buffer  M10 #195 shared buffers: native-abi/service-fixtures/capability and kernel shared-buffer host tests, then the scripted fixture lane (NX, map/read, deny, stale, exhaustion, reuse, kernel-owned, teardown); prints [M10.shared-buffer] PASS (aliases: m10-shared-buffer)"
+        "  test-m10-shared-buffer  M10 #195 shared buffers: native-abi/service-fixtures/capability and kernel shared-buffer host tests, then the scripted fixture lane (NX, map/read, deny, stale, exhaustion, reuse, kernel-owned, ro-write, shared-exec, owner exit, reader exit, root revoke, port transfer); prints [M10.shared-buffer] PASS (aliases: m10-shared-buffer)"
     );
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");

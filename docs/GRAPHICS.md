@@ -143,7 +143,7 @@ Numbers are reserved in `clean_slate_capability::syscall_abi` and aliased in `na
 |---|---|---|---|
 | 16 | `SYSCALL_NR_SHARED_BUFFER` | #195 | implemented: subops 1–5 ([Shared buffers](#shared-buffers-syscall-16-195)); 0 and 6.. → `EINVAL` |
 | 17 | `SYSCALL_NR_SERVICE_PORT` | #200 | implemented: subops 1–9 ([Service port ABI](#service-port-abi-syscall-17)); 0 and 10.. → `EINVAL` |
-| 18 | `SYSCALL_NR_DISPLAY` | #111, #114 | subops 1, 2, 5 (`FIND_HANDLE`, `QUERY_MODE`, `PRESENT_STATUS`) implemented; 3, 4 (`MAP_SCANOUT`, `PRESENT`) `ENOSYS` until #195 S6; 6 (`BIND_WAKE`) `ENOSYS` until a later #111 stage wires it to the #200 work sets; 0 and 7.. `EINVAL`; subops frozen in `graphics::abi::display` |
+| 18 | `SYSCALL_NR_DISPLAY` | #111, #114 | subops 1, 2, 5 (`FIND_HANDLE`, `QUERY_MODE`, `PRESENT_STATUS`) implemented; 3, 4 (`MAP_SCANOUT`, `PRESENT`) `ENOSYS` until #111 wires them onto #195's kernel-owned buffers (W7); 6 (`BIND_WAKE`) `ENOSYS` until a later #111 stage wires it to the #200 work sets; 0 and 7.. `EINVAL`; subops frozen in `graphics::abi::display` |
 | 19 | `SYSCALL_NR_INPUT` | #113 | `ENOSYS` for every subop; subops frozen in `graphics::abi::input` |
 | 20 | `SYSCALL_NR_WORK_SET` | #200 | implemented: subops 1–4 ([Work set ABI](#work-set-abi-syscall-20)); 0 and 5.. → `EINVAL` |
 

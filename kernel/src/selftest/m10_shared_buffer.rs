@@ -2072,6 +2072,7 @@ fn finish_all_exited() -> ! {
     }
     inspect::check_zero_page().unwrap_or_else(|message| fatal_kernel_error(message));
     kernel_log_line("[M10.SB] baseline OK");
+    crate::sched::log_task_stack_high_water();
     kernel_log_line("[M10.SB] PASS");
     qemu_exit(QEMU_EXIT_SUCCESS)
 }
