@@ -380,7 +380,6 @@ impl SharedBufferTable {
         self.reclaim_if_eligible(slot, pending);
     }
 
-    #[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
     pub(crate) fn pin(&mut self, id: SharedBufferId) -> Result<(), ShareError> {
         self.live(id)?;
         let record = &mut self.records[usize::from(id.slot())];
@@ -388,7 +387,6 @@ impl SharedBufferTable {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
     pub(crate) fn unpin(&mut self, id: SharedBufferId, pending: &mut PendingFrees) {
         let slot = usize::from(id.slot());
         assert!(

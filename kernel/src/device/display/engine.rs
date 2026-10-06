@@ -6,29 +6,25 @@
 //! and timeout are events delivered by the backend's interrupt path and the kernel timeout
 //! registry; nothing here polls.
 
-#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
-use clean_slate_graphics::display::PresentRequest;
 use clean_slate_graphics::display::{
-    DisplayError, DisplayModeInfo, PresentState, PresentStatus, MAX_PRESENTS_IN_FLIGHT,
+    DisplayError, DisplayModeInfo, PresentRequest, PresentState, PresentStatus,
+    MAX_PRESENTS_IN_FLIGHT,
 };
-#[cfg(test)]
+#[cfg(any(test, clean_slate_virtio_gpu))]
 use clean_slate_graphics::DISPLAY_COMMAND_TIMEOUT_NS;
 use clean_slate_graphics::{
     BufferLayout, DisplayMode, OutputId, PixelFormat, MAX_PRESENT_DAMAGE_RECTS,
     SCANOUT_BUFFER_COUNT,
 };
 
-#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 use super::source::{FrameSource, FrameSourceId};
 use super::PRIMARY_OUTPUT_INDEX;
-#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 use super::{BackendError, ScanoutBackend, Submitted};
 
 const _: () = assert!(MAX_PRESENTS_IN_FLIGHT == 1);
 
-/// Only asynchronous backends leave a present in flight; the synchronous GOP copy never does, so
-/// this state exists only for the host-tested engine until #114.
-#[cfg(test)]
+/// Only asynchronous backends (#114 VirtIO-GPU) leave a present in flight; the synchronous GOP copy
+/// never does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct InFlight {
     index: u8,
@@ -39,11 +35,9 @@ struct InFlight {
 pub(crate) struct DisplayState {
     output: OutputId,
     mode: DisplayMode,
-    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     bound: [Option<FrameSourceId>; SCANOUT_BUFFER_COUNT],
     reset_required: bool,
     poisoned: bool,
-    #[cfg(test)]
     in_flight: Option<InFlight>,
     last_error: Option<DisplayError>,
     submitted_seq: u64,
@@ -62,11 +56,9 @@ impl DisplayState {
             output: OutputId::new(PRIMARY_OUTPUT_INDEX, 1)
                 .map_err(|_| DisplayError::ModeUnavailable)?,
             mode,
-            #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
             bound: [None; SCANOUT_BUFFER_COUNT],
             reset_required: false,
             poisoned: false,
-            #[cfg(test)]
             in_flight: None,
             last_error: None,
             submitted_seq: 0,
@@ -109,31 +101,30 @@ impl DisplayState {
         }
     }
 
-    #[cfg(test)]
     fn in_flight_index(&self) -> Option<u8> {
         self.in_flight.map(|flight| flight.index)
     }
 
-    #[cfg(not(test))]
-    fn in_flight_index(&self) -> Option<u8> {
-        None
-    }
-
-    /// Binds scanout buffer `index` to `source`; later presents of `index` must name the same source.
-    /// Refused while the output needs a reset or is poisoned, and while `index` is being scanned out.
-    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
-    pub(crate) fn bind(
-        &mut self,
-        backend: &mut dyn ScanoutBackend,
-        index: u8,
-        source: &dyn FrameSource,
-    ) -> Result<(), DisplayError> {
+    /// `Poisoned`, then `ResetRequired`: the backend-state step of every write subop.
+    pub(crate) fn check_accepting(&self) -> Result<(), DisplayError> {
         if self.poisoned {
             return Err(DisplayError::Poisoned);
         }
         if self.reset_required {
             return Err(DisplayError::ResetRequired);
         }
+        Ok(())
+    }
+
+    /// Binds scanout buffer `index` to `source`; later presents of `index` must name the same source.
+    /// Refused while the output needs a reset or is poisoned, and while `index` is being scanned out.
+    pub(crate) fn bind(
+        &mut self,
+        backend: &mut dyn ScanoutBackend,
+        index: u8,
+        source: &dyn FrameSource,
+    ) -> Result<(), DisplayError> {
+        self.check_accepting()?;
         if self.in_flight_index() == Some(index) {
             return Err(DisplayError::BufferBusy);
         }
@@ -153,7 +144,6 @@ impl DisplayState {
 
     /// Returns `present_seq`. A backend failure after acceptance is reported through
     /// `PresentStatus`, never as this call's error.
-    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     pub(crate) fn present(
         &mut self,
         backend: &mut dyn ScanoutBackend,
@@ -161,12 +151,7 @@ impl DisplayState {
         request: &PresentRequest,
         now_ns: u64,
     ) -> Result<u64, DisplayError> {
-        if self.poisoned {
-            return Err(DisplayError::Poisoned);
-        }
-        if self.reset_required {
-            return Err(DisplayError::ResetRequired);
-        }
+        self.check_accepting()?;
         request.validate(self.output, &self.mode)?;
         if self.bound[usize::from(request.buffer_index)] != Some(source.id())
             || Ok(source.layout()) != mode_layout(&self.mode)
@@ -181,7 +166,7 @@ impl DisplayState {
         let damage = &request.rects[..usize::from(request.damage_count)];
         match backend.submit(request.buffer_index, source, damage) {
             Ok(Submitted::Completed) => self.record_success(seq, now_ns),
-            #[cfg(test)]
+            #[cfg(any(test, clean_slate_virtio_gpu))]
             Ok(Submitted::Pending) => {
                 self.in_flight = Some(InFlight {
                     index: request.buffer_index,
@@ -195,13 +180,11 @@ impl DisplayState {
     }
 
     /// Deadline for arming the kernel timeout registry while a present is in flight.
-    #[cfg(test)]
     pub(crate) fn in_flight_deadline(&self) -> Option<u64> {
         self.in_flight.map(|flight| flight.deadline_ns)
     }
 
     /// Backend completion event for the in-flight present.
-    #[cfg(test)]
     pub(crate) fn complete(
         &mut self,
         result: Result<(), BackendError>,
@@ -216,7 +199,6 @@ impl DisplayState {
     }
 
     /// Timeout event: fails the in-flight present with `DeviceTimeout` once its deadline passed.
-    #[cfg(test)]
     pub(crate) fn expire(&mut self, now_ns: u64) -> Option<u64> {
         match self.in_flight {
             Some(flight) if now_ns >= flight.deadline_ns => {
@@ -228,7 +210,6 @@ impl DisplayState {
 
     /// Ends `ResetRequired`: success bumps the output epoch; failure, or success at the maximum
     /// epoch, poisons until reboot.
-    #[cfg(test)]
     pub(crate) fn finish_reset(&mut self, success: bool) {
         if !self.reset_required || self.poisoned {
             return;
@@ -244,7 +225,16 @@ impl DisplayState {
         }
     }
 
-    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
+    /// A backend failure with no present in flight (VirtIO-GPU bring-up): the output needs a reset;
+    /// no sequence number completes.
+    pub(crate) fn fault(&mut self, error: BackendError) {
+        if self.poisoned || self.in_flight.is_some() {
+            return;
+        }
+        self.last_error = Some(failure_error(error));
+        self.reset_required = true;
+    }
+
     fn record_success(&mut self, seq: u64, now_ns: u64) {
         self.completed_seq = seq;
         self.completed_ns = now_ns.max(1);
@@ -252,15 +242,17 @@ impl DisplayState {
 
     /// Every failure other than a timeout needs a reset: a failed or rejected copy leaves scanout
     /// contents undefined.
-    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     fn record_failure(&mut self, seq: u64, error: BackendError, now_ns: u64) {
         self.record_success(seq, now_ns);
-        self.last_error = Some(match error {
-            #[cfg(test)]
-            BackendError::Timeout => DisplayError::DeviceTimeout,
-            BackendError::Failed | BackendError::SourceRejected => DisplayError::ResetRequired,
-        });
+        self.last_error = Some(failure_error(error));
         self.reset_required = true;
+    }
+}
+
+fn failure_error(error: BackendError) -> DisplayError {
+    match error {
+        BackendError::Timeout => DisplayError::DeviceTimeout,
+        BackendError::Failed | BackendError::SourceRejected => DisplayError::ResetRequired,
     }
 }
 

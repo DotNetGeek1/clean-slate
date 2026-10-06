@@ -1,10 +1,14 @@
-//! Host-side parity checks for the M10 #111 GOP framebuffer lane serial transcript.
+//! Host-side parity checks for the M10 #111 GOP framebuffer lane: the serial readback and the
+//! QMP screendump of the final frame.
+
+use std::sync::OnceLock;
 
 use clean_slate_raster::{
     draw_reference_a, draw_reference_b, pixel_at, reference_layout, visible_crc32, Canvas,
     REFERENCE_PROBES,
 };
 
+use crate::qmp::image::Screenshot;
 use crate::XtaskError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,12 +24,19 @@ pub(crate) struct GuestReadback {
     pub probes: Vec<GuestProbe>,
 }
 
-pub(crate) fn host_scanout_expectations() -> (u32, Vec<GuestProbe>) {
+/// The guest's final scanout: pattern A, then pattern B over it (the decoy is never damaged).
+fn host_scanout_bytes() -> Vec<u8> {
     let layout = reference_layout();
     let mut bytes = vec![0u8; layout.byte_len()];
     let mut canvas = Canvas::new(&mut bytes, layout).expect("reference layout");
     draw_reference_a(&mut canvas);
     draw_reference_b(&mut canvas);
+    bytes
+}
+
+pub(crate) fn host_scanout_expectations() -> (u32, Vec<GuestProbe>) {
+    let layout = reference_layout();
+    let bytes = host_scanout_bytes();
     let crc = visible_crc32(&bytes, layout).expect("reference crc");
     let probes = REFERENCE_PROBES
         .iter()
@@ -111,6 +122,63 @@ pub(crate) fn compare_readback(
     Ok(())
 }
 
+/// Host render of the final scanout as screendump RGB (BGRX bytes reordered, X dropped).
+fn host_scanout_rgb() -> &'static [u8] {
+    static RGB: OnceLock<Vec<u8>> = OnceLock::new();
+    RGB.get_or_init(|| {
+        let layout = reference_layout();
+        let bytes = host_scanout_bytes();
+        let mut rgb = Vec::with_capacity(layout.width() as usize * layout.height() as usize * 3);
+        for y in 0..layout.height() {
+            for x in 0..layout.width() {
+                let [b, g, r, _] = pixel_at(&bytes, layout, x, y).expect("visible pixel");
+                rgb.extend_from_slice(&[r, g, b]);
+            }
+        }
+        rgb
+    })
+}
+
+/// QMP screendump check for the `m10-framebuffer` lane: the whole 1280x800 frame must equal the
+/// host raster render pixel for pixel. Reports the mismatch count and the first differing pixel.
+pub(crate) fn check_m10_framebuffer_screenshot(shot: &Screenshot) -> Result<(), String> {
+    let layout = reference_layout();
+    if (shot.width(), shot.height()) != (layout.width(), layout.height()) {
+        return Err(format!(
+            "expected a {}x{} frame, got {}x{}",
+            layout.width(),
+            layout.height(),
+            shot.width(),
+            shot.height()
+        ));
+    }
+    let expected = host_scanout_rgb();
+    let mut mismatches = 0usize;
+    let mut first = None;
+    for (index, (got, want)) in shot
+        .rgb()
+        .chunks_exact(3)
+        .zip(expected.chunks_exact(3))
+        .enumerate()
+    {
+        if got != want {
+            mismatches += 1;
+            first.get_or_insert((index, [got[0], got[1], got[2]], [want[0], want[1], want[2]]));
+        }
+    }
+    match first {
+        None => Ok(()),
+        Some((index, got, want)) => {
+            let width = layout.width() as usize;
+            Err(format!(
+                "{mismatches} pixels differ from the host render; first at ({},{}) rgb={got:02x?} expected={want:02x?}",
+                index % width,
+                index / width
+            ))
+        }
+    }
+}
+
 pub(crate) fn validate_m10_framebuffer_serial(serial: &str) -> Result<(), XtaskError> {
     let guest = parse_guest_readback(serial).ok_or_else(|| {
         XtaskError::Validation("m10 framebuffer: missing or malformed readback/probe lines".into())
@@ -164,6 +232,62 @@ mod tests {
         let parsed = parse_guest_readback(&serial).expect("parse");
         assert_eq!(parsed.crc32, crc);
         assert_eq!(parsed.probes, probes);
+    }
+
+    fn host_screenshot() -> Screenshot {
+        let layout = reference_layout();
+        Screenshot::new(layout.width(), layout.height(), host_scanout_rgb().to_vec())
+            .expect("host frame")
+    }
+
+    #[test]
+    fn screenshot_of_the_host_render_passes() {
+        assert_eq!(check_m10_framebuffer_screenshot(&host_screenshot()), Ok(()));
+    }
+
+    #[test]
+    fn screenshot_rgb_is_the_bgrx_scanout_reordered() {
+        let (_, probes) = host_scanout_expectations();
+        let shot = host_screenshot();
+        for probe in probes {
+            let [b, g, r, _] = probe.bgrx;
+            assert_eq!(shot.pixel(probe.x, probe.y), Some([r, g, b]));
+        }
+    }
+
+    #[test]
+    fn one_stray_pixel_fails_the_screenshot() {
+        let layout = reference_layout();
+        let mut rgb = host_scanout_rgb().to_vec();
+        let (x, y) = REFERENCE_PROBES[5];
+        let index = (y * layout.width() + x) as usize * 3;
+        rgb[index] ^= 0x80;
+        let shot = Screenshot::new(layout.width(), layout.height(), rgb).unwrap();
+        let err = check_m10_framebuffer_screenshot(&shot).unwrap_err();
+        assert!(err.starts_with("1 pixels differ"), "{err}");
+        assert!(err.contains(&format!("({x},{y})")), "{err}");
+    }
+
+    #[test]
+    fn screenshot_with_pattern_a_only_or_the_wrong_size_fails() {
+        let layout = reference_layout();
+        let mut bytes = vec![0u8; layout.byte_len()];
+        draw_reference_a(&mut Canvas::new(&mut bytes, layout).unwrap());
+        let mut rgb = Vec::new();
+        for y in 0..layout.height() {
+            for x in 0..layout.width() {
+                let [b, g, r, _] = pixel_at(&bytes, layout, x, y).unwrap();
+                rgb.extend_from_slice(&[r, g, b]);
+            }
+        }
+        let a_only = Screenshot::new(layout.width(), layout.height(), rgb).unwrap();
+        assert!(check_m10_framebuffer_screenshot(&a_only).is_err());
+
+        let small = Screenshot::new(640, 480, vec![0; 640 * 480 * 3]).unwrap();
+        assert_eq!(
+            check_m10_framebuffer_screenshot(&small),
+            Err("expected a 1280x800 frame, got 640x480".to_owned())
+        );
     }
 
     #[test]

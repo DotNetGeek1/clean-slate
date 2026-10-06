@@ -48,7 +48,8 @@ pub(crate) struct ResourceSnapshot {
     pub(crate) work_sets: usize,
     pub(crate) ports_served: usize,
     pub(crate) port_connections: usize,
-    /// #195 shared-window rows (Live or orphaned); teardown step 5 removes every one.
+    /// #195 shared-window rows (Live or orphaned): presenter release removes its scanout
+    /// kernel-grant rows and teardown step 5 every other one.
     pub(crate) shared_mappings: usize,
 }
 
@@ -57,6 +58,8 @@ pub(crate) struct ResourceSnapshot {
 struct HolderReleaseCounts {
     work_sets: usize,
     ports: clean_slate_port::PortReleaseCounts,
+    /// Scanout kernel-grant rows the presenter slot unmapped; step 5 removes the rest.
+    presenter_grant_rows: usize,
     shared_mappings: usize,
 }
 
@@ -70,10 +73,14 @@ impl HolderReleaseCounts {
         {
             return Err("port teardown count diverged from the recorded process snapshot");
         }
-        // Earlier slots (the display presenter) may remove their kernel-grant rows first; step 5
-        // removing more rows than the snapshot held means one was created during teardown.
-        if self.shared_mappings > snapshot.shared_mappings {
-            return Err("shared-mapping teardown count exceeded the recorded process snapshot");
+        if self
+            .presenter_grant_rows
+            .saturating_add(self.shared_mappings)
+            != snapshot.shared_mappings
+        {
+            return Err(
+                "shared-mapping teardown count diverged from the recorded process snapshot",
+            );
         }
         Ok(())
     }
@@ -344,7 +351,9 @@ fn run_teardown_hook(
             notify_holder_exit_for_process(holder.0);
         }
         TeardownHook::Port => released.holder.ports = release_ports(ctx),
-        TeardownHook::DisplayPresenter => release_display_presenter(ctx)?,
+        TeardownHook::DisplayPresenter => {
+            released.holder.presenter_grant_rows = release_display_presenter(ctx);
+        }
         TeardownHook::InputConsumer => release_input_consumer(ctx),
         TeardownHook::WorkSet => released.holder.work_sets = release_work_set(ctx),
         TeardownHook::RevokeHolderCapabilities => {
@@ -379,8 +388,8 @@ fn release_ports(ctx: &mut TeardownContext<'_>) -> clean_slate_port::PortRelease
     port::on_holder_exit(HolderId(ctx.process_id), ctx.instance_generation)
 }
 
-fn release_display_presenter(_ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {
-    Ok(())
+fn release_display_presenter(ctx: &mut TeardownContext<'_>) -> usize {
+    crate::device::display::release_presenter_for_holder(HolderId(ctx.process_id), ctx.allocator)
 }
 
 fn release_input_consumer(ctx: &mut TeardownContext<'_>) {
@@ -895,22 +904,30 @@ mod tests {
     }
 
     #[test]
-    fn shared_mapping_release_never_exceeds_the_snapshot() {
+    fn shared_mapping_release_accounts_for_every_snapshot_row() {
         let snapshot = ResourceSnapshot {
-            shared_mappings: 2,
+            shared_mappings: 3,
             ..ResourceSnapshot::default()
         };
-        let released = |shared_mappings| HolderReleaseCounts {
+        let released = |presenter_grant_rows, shared_mappings| HolderReleaseCounts {
+            presenter_grant_rows,
             shared_mappings,
             ..HolderReleaseCounts::default()
         };
-        assert_eq!(released(2).matches(&snapshot), Ok(()));
+        assert_eq!(released(0, 3).matches(&snapshot), Ok(()));
         assert_eq!(
-            released(1).matches(&snapshot),
+            released(2, 1).matches(&snapshot),
             Ok(()),
-            "an earlier slot may remove its kernel-grant row first"
+            "presenter release unmaps its scanout grant rows before step 5"
         );
-        assert!(released(3).matches(&snapshot).is_err());
+        assert!(
+            released(0, 2).matches(&snapshot).is_err(),
+            "a row unaccounted for"
+        );
+        assert!(
+            released(2, 2).matches(&snapshot).is_err(),
+            "a row created during teardown"
+        );
     }
 
     /// Calls that dismantle part of a registered process. Outside the teardown

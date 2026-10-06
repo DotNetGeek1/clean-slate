@@ -63,6 +63,19 @@ pub(crate) struct Token {
     serial: u32,
 }
 
+#[cfg(test)]
+impl Token {
+    /// A token a host fake transport hands out; `serial` makes it unique.
+    pub(crate) fn fake(generation: u32, queue: u16, serial: u32) -> Self {
+        Self {
+            generation,
+            queue,
+            head: 0,
+            serial,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Completion {
     pub(crate) token: Token,

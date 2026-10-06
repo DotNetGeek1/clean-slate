@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 mod m10_framebuffer_validate;
 mod m10_input_lane;
+mod m10_virtio_gpu;
 mod m7_certs;
 mod m7_fixture;
 mod m7_fixture_tcp;
@@ -1018,10 +1019,12 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM6 => run_m6_acceptance(),
         ParsedCommand::TestM10Contract => run_m10_contract_acceptance(),
         ParsedCommand::TestM10Compositor => run_m10_compositor_acceptance(),
+        ParsedCommand::TestM10App => run_m10_app_acceptance(),
         ParsedCommand::TestM10Nxe => run_m10_nxe_acceptance(),
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
         ParsedCommand::TestQmpSmoke => qmp::smoke::run(&xtask_artifact_root()),
         ParsedCommand::TestM10VirtioModern => run_m10_virtio_modern_acceptance(),
+        ParsedCommand::TestM10VirtioGpu => m10_virtio_gpu::run_acceptance(),
         ParsedCommand::TestM10Framebuffer => run_m10_framebuffer_acceptance(),
         ParsedCommand::TestM10SharedBuffer => run_m10_shared_buffer_acceptance(),
         ParsedCommand::TestM10InputSmoke => run_m10_input_smoke_acceptance(),
@@ -1081,25 +1084,40 @@ fn run_m10_framebuffer_acceptance() -> Result<(), XtaskError> {
         .arg("-p")
         .arg("clean-slate-raster");
     run_host_test_command(&mut test)?;
-    run_vm_inner_with_config(
-        false,
-        false,
-        &["m10-framebuffer-self-test"],
-        Some((
-            MarkerSet::Ordered(&M10_FRAMEBUFFER_ACCEPTANCE_MARKERS),
-            M10_FRAMEBUFFER_ACCEPTANCE_TIMEOUT,
-        )),
-        VmLaunchConfig {
-            m5_data_disk: None,
-            reset_ovmf_vars: false,
-            m7_fixture_port: None,
-            kernel_release: false,
-            cpu_model: None,
-            vga: Some("std"),
-            machine_extra: None,
-            m10_virtio_modern: None,
+    // The final serial marker comes after the second present settles, so the frame captured on
+    // `status idle seq=2` is the one the guest's readback describes.
+    let steps = vec![
+        qmp::ScriptStep::AwaitLine("[FB  ] status idle seq=2"),
+        qmp::ScriptStep::Screendump {
+            name: "framebuffer",
+            check: m10_framebuffer_validate::check_m10_framebuffer_screenshot,
         },
-    )
+    ];
+    let mut driver = qmp::QmpScriptDriver::new("m10-framebuffer", steps, &xtask_artifact_root())?;
+    run_driven_vm_acceptance(
+        &["m10-framebuffer-self-test"],
+        VmLaunchConfig {
+            vga: Some("std"),
+            ..VmLaunchConfig::default()
+        },
+        MarkerSet::Ordered(&M10_FRAMEBUFFER_ACCEPTANCE_MARKERS),
+        M10_FRAMEBUFFER_ACCEPTANCE_TIMEOUT,
+        &mut driver,
+    )?;
+    let capture = driver
+        .captures()
+        .first()
+        .filter(|_| driver.is_complete())
+        .ok_or_else(|| {
+            XtaskError::Validation("m10 framebuffer: the screendump stage did not run".into())
+        })?;
+    println!(
+        "[M10.2] host screenshot match {}x{} png={}",
+        capture.screenshot.width(),
+        capture.screenshot.height(),
+        capture.png.display()
+    );
+    Ok(())
 }
 
 fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
@@ -2178,6 +2196,37 @@ fn run_m10_compositor_acceptance() -> Result<(), XtaskError> {
     Ok(())
 }
 
+/// M10 #117 native app gate: the playground's layout/state/damage/render tests and its session
+/// against the real compositor core over the fake port, shared memory and display; the CPL3
+/// build proves the syscall adapter compiles. The QEMU lane needs #115 window lifecycle and the
+/// #118 launch policy.
+fn run_m10_app_acceptance() -> Result<(), XtaskError> {
+    let mut test = Command::new("cargo");
+    test.current_dir(workspace_root())
+        .arg("test")
+        .arg("-p")
+        .arg("clean-slate-playground");
+    run_host_test_command(&mut test)?;
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(workspace_root())
+        .arg("build")
+        .arg("-p")
+        .arg("clean-slate-playground")
+        .arg("--bin")
+        .arg("clean-slate-playground-userspace")
+        .arg("--features")
+        .arg("userspace")
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,compiler_builtins")
+        .arg("--release")
+        .env("RUSTC_BOOTSTRAP", "1");
+    run_build_command(&mut cmd)?;
+    println!("[M10.app] PASS");
+    Ok(())
+}
+
 /// M10 #195 S0 gate: CPUID/EFER NXE host tests, then a CPL3 instruction fetch
 /// from an RW+NX page must fault with exactly `0x15` through the production
 /// fault/teardown path.
@@ -2660,6 +2709,20 @@ fn run_vm_inner_with_config(
         Some((marker_set, timeout)) => run_acceptance_command(&mut vm.qemu, marker_set, timeout),
         None => run_command(&mut vm.qemu),
     }
+}
+
+/// A kernel lane with a mid-run driver (docs/DEVELOPMENT.md "Kernel lanes"): QEMU is never
+/// started with `-S`, and the driver's arguments follow the lane's own.
+fn run_driven_vm_acceptance(
+    features: &[&str],
+    config: VmLaunchConfig,
+    marker_set: MarkerSet<'static>,
+    timeout: Duration,
+    driver: &mut dyn AcceptanceDriver,
+) -> Result<String, XtaskError> {
+    let mut vm = prepare_vm(false, false, features, config)?;
+    vm.qemu.args(driver.qemu_args());
+    run_driven_acceptance_command(&mut vm.qemu, marker_set, timeout, driver)
 }
 
 /// Per-lane run directories for screenshots and other lane artifacts.
@@ -3898,10 +3961,6 @@ fn run_driven_acceptance_command(
                         );
                     }
                     if marker_set_is_ordered(marker_set, &M10_FRAMEBUFFER_ACCEPTANCE_MARKERS) {
-                        // TODO(#111 screenshot stage): boot this lane through a kernel-lane wrapper with
-                        // QmpScriptDriver::new("m10-framebuffer", steps, &xtask_artifact_root()) and a
-                        // ScriptStep::Screendump whose check compares against the host raster render;
-                        // see docs/DEVELOPMENT.md "Kernel lanes".
                         if let Err(error) = validate_m10_framebuffer_serial(&output) {
                             terminate_child(&mut child)?;
                             let _ = child.wait();
@@ -4503,6 +4562,7 @@ fn print_help() {
         "  test-m10-contract M10 graphics contract host tests plus UEFI builds of graphics and native-abi; prints [M10.contract] PASS (aliases: m10-contract)"
     );
     println!("  test-m10-compositor M10 #112 compositor host tests (FakePort/FakeDisplay) plus CPL3 builds of the compositor and client binaries; prints [M10.compositor] PASS (aliases: m10-compositor, m10.112)");
+    println!("  test-m10-app    M10 #117 System Playground host tests (layout, damage, render, session against the compositor core) plus its CPL3 build; prints [M10.app] PASS (aliases: m10-app, m10.117)");
     println!("  test-m10-nxe  M10 #195 S0: EFER.NXE host tests, then a CPL3 fetch from an RW+NX page must fault err=0x15 (aliases: m10-nxe)");
     println!(
         "  test-m10-port   M10 #200 service port: port/kernel host tests, then the m10-port-self-test QEMU lane with ordered markers; prints [M10.port] PASS (aliases: m10-port, m10.200)"
@@ -4512,6 +4572,9 @@ fn print_help() {
     );
     println!(
         "  test-m10-virtio-modern M10 #196 modern VirtIO PCI transport host tests plus MSI-X and INTx QEMU boots; prints [M10.virtio-modern] PASS (aliases: m10-virtio-modern)"
+    );
+    println!(
+        "  test-m10-virtio-gpu M10 #114 VirtIO-GPU scanout: display/virtio host tests, then a modern-only virtio-gpu-pci QEMU boot validating create/attach/scanout/transfer/flush, damage-only buffer switch, forced timeout, reset to epoch 2 and release by guest markers and readback CRC; prints [M10.virtio-gpu] PASS (aliases: m10-virtio-gpu)"
     );
     println!(
         "  test-m10-framebuffer M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (aliases: m10-framebuffer)"
@@ -4657,10 +4720,12 @@ enum ParsedCommand {
     TestM6,
     TestM10Contract,
     TestM10Compositor,
+    TestM10App,
     TestM10Nxe,
     TestM10Port,
     TestQmpSmoke,
     TestM10VirtioModern,
+    TestM10VirtioGpu,
     TestM10Framebuffer,
     TestM10SharedBuffer,
     TestM10InputSmoke,
@@ -4797,6 +4862,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         {
             ParsedCommand::TestM10Compositor
         }
+        Some(cmd) if cmd == "test-m10-app" || cmd == "m10-app" || cmd == "m10.117" => {
+            ParsedCommand::TestM10App
+        }
         Some(cmd) if cmd == "test-m10-nxe" || cmd == "m10-nxe" => ParsedCommand::TestM10Nxe,
         Some(cmd) if cmd == "test-m10-port" || cmd == "m10-port" || cmd == "m10.200" => {
             ParsedCommand::TestM10Port
@@ -4804,6 +4872,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-qmp-smoke" || cmd == "qmp-smoke" => ParsedCommand::TestQmpSmoke,
         Some(cmd) if cmd == "test-m10-virtio-modern" || cmd == "m10-virtio-modern" => {
             ParsedCommand::TestM10VirtioModern
+        }
+        Some(cmd) if cmd == "test-m10-virtio-gpu" || cmd == "m10-virtio-gpu" => {
+            ParsedCommand::TestM10VirtioGpu
         }
         Some(cmd) if cmd == "test-m10-framebuffer" || cmd == "m10-framebuffer" => {
             ParsedCommand::TestM10Framebuffer
@@ -5240,6 +5311,12 @@ mod tests {
                 ParsedCommand::TestM10Compositor
             );
         }
+        for alias in ["test-m10-app", "m10-app", "m10.117"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestM10App
+            );
+        }
         for alias in ["test-m10-port", "m10-port", "m10.200"] {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
@@ -5269,6 +5346,14 @@ mod tests {
         assert_eq!(
             parse_command(Some("m10-virtio-modern".as_ref())),
             ParsedCommand::TestM10VirtioModern
+        );
+        assert_eq!(
+            parse_command(Some("test-m10-virtio-gpu".as_ref())),
+            ParsedCommand::TestM10VirtioGpu
+        );
+        assert_eq!(
+            parse_command(Some("m10-virtio-gpu".as_ref())),
+            ParsedCommand::TestM10VirtioGpu
         );
         assert_eq!(
             parse_command(Some("test-m10-framebuffer".as_ref())),

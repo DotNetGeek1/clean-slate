@@ -288,6 +288,27 @@ fn present_tracker_alternates_buffers_and_observes_completion() {
 }
 
 #[test]
+fn woken_present_backstop_is_never_in_the_past() {
+    use clean_slate_graphics::limits::DISPLAY_COMMAND_TIMEOUT_NS;
+
+    let backstop = 2 * DISPLAY_COMMAND_TIMEOUT_NS;
+    let mut learned = PresentTracker::new(info());
+    let _ = learned.observe(status(PresentState::InFlight, 4, 3));
+    assert!(
+        learned.in_flight().is_some(),
+        "EAGAIN race: in flight via status"
+    );
+    let now = 10 * backstop;
+    assert_eq!(learned.deadline(now, true, 7), Some(now + 7));
+
+    let mut submitted = PresentTracker::new(info());
+    submitted.submitted(1, 0, 100);
+    assert_eq!(submitted.deadline(100, true, 7), Some(100 + backstop));
+    let overdue = 100 + backstop + 1;
+    assert_eq!(submitted.deadline(overdue, true, 7), Some(overdue + 7));
+}
+
+#[test]
 fn seat_clamps_pointer_and_resets_on_overflow() {
     use clean_slate_graphics::geometry::Size;
     use clean_slate_graphics::ids::{InputDeviceId, KEYBOARD_INDEX};

@@ -163,10 +163,12 @@ $AllTests = [ordered]@{
     "verify-m9-fixture"         = @{ Aliases = @("verify-m9-fixture"); Description = "M9 #104 BusyBox + rootfs fixture verify (host)"; Role = "Constituent"; CoveredBy = "test-m9" }
     "test-m10-contract"         = @{ Aliases = @("m10-contract"); Description = "M10 #110 graphics contract host tests and UEFI builds (constituent)"; Role = "Constituent" }
     "test-m10-compositor"       = @{ Aliases = @("m10-compositor", "m10.112"); Description = "M10 #112 compositor host tests and CPL3 builds of the compositor and client (constituent)"; Role = "Constituent" }
+    "test-m10-app"              = @{ Aliases = @("m10-app", "m10.117"); Description = "M10 #117 System Playground host tests (against the compositor core) and CPL3 build (constituent)"; Role = "Constituent" }
     "test-m10-nxe"              = @{ Aliases = @("m10-nxe"); Description = "M10 #195 EFER.NXE enforced: CPL3 fetch from an RW+NX page faults 0x15 (constituent)"; Role = "Constituent" }
     "test-m10-port"             = @{ Aliases = @("m10-port", "m10.200"); Description = "M10 #200 service port, capability transfer and work sets (constituent)"; Role = "Constituent" }
     "test-qmp-smoke"            = @{ Aliases = @("qmp-smoke"); Description = "M10 #197 QMP input/screenshot harness smoke (SeaBIOS fixture, no kernel)"; Role = "Constituent" }
     "test-m10-virtio-modern"    = @{ Aliases = @("m10-virtio-modern"); Description = "M10 #196 modern VirtIO PCI transport: host tests plus MSI-X and INTx QEMU boots (constituent)"; Role = "Constituent" }
+    "test-m10-virtio-gpu"       = @{ Aliases = @("m10-virtio-gpu"); Description = "M10 #114 VirtIO-GPU scanout: display/virtio host tests plus a modern-only virtio-gpu-pci QEMU boot (constituent)"; Role = "Constituent" }
     "test-m10-framebuffer"      = @{ Aliases = @("m10-framebuffer"); Description = "M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (constituent)"; Role = "Constituent" }
     "test-m10-shared-buffer"    = @{ Aliases = @("m10-shared-buffer"); Description = "M10 #195 shared-buffer acceptance (constituent)"; Role = "Constituent" }
     "test-m10-input-smoke"      = @{ Aliases = @("m10-input-smoke"); Description = "M10 #113 i8042 input QEMU lane (controller stimulus, then QMP-injected keyboard/pointer, headless)"; Role = "Constituent" }
