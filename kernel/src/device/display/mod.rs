@@ -100,6 +100,15 @@ impl Backend {
     }
 }
 
+#[cfg(feature = "m10-desktop")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DisplayCounters {
+    pub(crate) presenter: bool,
+    pub(crate) wake: bool,
+    pub(crate) scanout_buffers: usize,
+    pub(crate) gpu_resources: usize,
+}
+
 pub(crate) struct ActiveDisplay {
     state: DisplayState,
     backend: Backend,
@@ -300,6 +309,27 @@ impl ActiveDisplay {
     #[cfg(test)]
     pub(crate) fn recover(&mut self) {
         self.service(0, true);
+    }
+
+    /// #118 resource snapshot: presenter and wake bindings, plus the scanout buffers bound to the
+    /// backend (each one a VirtIO-GPU resource on that backend).
+    #[cfg(feature = "m10-desktop")]
+    pub(crate) fn desktop_counters(&self) -> DisplayCounters {
+        let (presenter, wake) = self.presenter.bindings();
+        let bound = self.buffers.iter().flatten().count();
+        let gpu_resources = match self.backend {
+            Backend::Gop(_) => 0,
+            #[cfg(any(test, clean_slate_virtio_gpu))]
+            Backend::VirtioGpu(_) => bound,
+            #[cfg(test)]
+            Backend::Recording(_) => 0,
+        };
+        DisplayCounters {
+            presenter,
+            wake,
+            scanout_buffers: bound,
+            gpu_resources,
+        }
     }
 
     #[cfg(feature = "m10-framebuffer-self-test")]

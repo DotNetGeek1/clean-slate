@@ -36,6 +36,10 @@ const fn task_count_for_features() -> usize {
         feature = "m9-userspace-self-test"
     )) {
         6
+    } else if cfg!(feature = "m10-desktop") {
+        // #118: 2 boot demo tasks, then compositor, shell and app, plus the replacement
+        // compositor that starts while the crashed one still holds its slot.
+        6
     } else if cfg!(feature = "m8-linux-hello") {
         3
     } else if cfg!(any(

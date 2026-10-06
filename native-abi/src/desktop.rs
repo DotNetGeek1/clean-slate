@@ -9,6 +9,13 @@ use core::fmt;
 
 /// Address of the launch page (shared with the #112 compositor and its client fixture).
 pub const DESKTOP_LAUNCH_ADDRESS: u64 = 0x0000_4000_0000_1000;
+/// Link and load address of every desktop image (`userspace.ld`): 1 MiB above the user region
+/// base, so the launch page and the user stack below it never overlap code or data.
+pub const DESKTOP_IMAGE_BASE: u64 = 0x0000_4000_0010_0000;
+/// Lowest user-stack page; the page below it (above the launch page) stays unmapped as a guard.
+pub const DESKTOP_STACK_ADDRESS: u64 = DESKTOP_LAUNCH_ADDRESS + 2 * 4096;
+
+const _: () = assert!(DESKTOP_STACK_ADDRESS < DESKTOP_IMAGE_BASE);
 
 /// Launch page layout.
 #[repr(C)]

@@ -3,7 +3,8 @@ ENTRY(_start)
 
 SECTIONS
 {
-  . = 0x0000400000000000;
+  /* clean_slate_native_abi::desktop::DESKTOP_IMAGE_BASE: the launch page and stack sit below. */
+  . = 0x0000400000100000;
   .text : {
     *(.text .text.*)
   }

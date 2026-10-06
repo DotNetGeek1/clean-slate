@@ -219,6 +219,12 @@ pub(crate) fn mapping_count(pid: u64) -> usize {
     })
 }
 
+/// Table-wide buffer, page and mapping totals for the #118 desktop resource snapshot.
+#[cfg(feature = "m10-desktop")]
+pub(crate) fn desktop_stats() -> table::SharedBufferStats {
+    crate::arch::x86_64::cpu::without_interrupts(|| state().table.stats())
+}
+
 /// Private root that `pid`'s shared window was built in, if it has one.
 pub(crate) fn window_root(pid: u64) -> Option<u64> {
     state().windows.get(pid).map(|window| window.root_frame)

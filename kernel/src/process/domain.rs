@@ -146,6 +146,57 @@ pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'s
     })
 }
 
+/// System-wide counters the #118 desktop compares against its baseline after an app closes or
+/// crashes and after a compositor restart: every M10 resource a desktop process can own.
+#[cfg(feature = "m10-desktop")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DesktopResourceSnapshot {
+    pub(crate) processes: usize,
+    pub(crate) capabilities: usize,
+    pub(crate) work_sets: usize,
+    pub(crate) ports: usize,
+    pub(crate) port_connections: usize,
+    pub(crate) port_queued_requests: usize,
+    pub(crate) port_queued_events: usize,
+    pub(crate) port_undelivered_transfers: usize,
+    pub(crate) shared_buffers: usize,
+    pub(crate) shared_buffer_pages: u64,
+    pub(crate) shared_mappings: usize,
+    pub(crate) presenter_bound: bool,
+    pub(crate) presenter_wake_bound: bool,
+    pub(crate) input_consumer_bound: bool,
+    pub(crate) scanout_buffers: usize,
+    pub(crate) gpu_resources: usize,
+}
+
+#[cfg(feature = "m10-desktop")]
+pub(crate) fn desktop_resource_snapshot() -> DesktopResourceSnapshot {
+    let ports = port::global_counts();
+    let buffers = crate::mm::shared_buffer::desktop_stats();
+    let display = crate::device::display::with_active_display(|display| {
+        display.map(|display| display.desktop_counters())
+    })
+    .unwrap_or_default();
+    DesktopResourceSnapshot {
+        processes: unsafe { process_registry_mut().occupied_slots() },
+        capabilities: crate::capability::live_capability_count(),
+        work_sets: work_set::live_count(),
+        ports: ports.ports,
+        port_connections: ports.connections,
+        port_queued_requests: ports.queued_requests,
+        port_queued_events: ports.queued_events,
+        port_undelivered_transfers: ports.undelivered_transfers,
+        shared_buffers: buffers.live_buffers + buffers.dying_buffers,
+        shared_buffer_pages: buffers.pages_held,
+        shared_mappings: buffers.mappings,
+        presenter_bound: display.presenter,
+        presenter_wake_bound: display.wake,
+        input_consumer_bound: input::consumer_bound(),
+        scanout_buffers: display.scanout_buffers,
+        gpu_resources: display.gpu_resources,
+    }
+}
+
 const TEARDOWN_HOOK_COUNT: usize = 15;
 
 /// One step of the teardown sequence shared by every path that dismantles a
@@ -974,6 +1025,12 @@ mod tests {
             "capability/mod.rs",
             "revoke_for_holder",
             "revoke_holder_tree_visiting",
+        ),
+        // Grant tests on bare holders that never registered a process.
+        (
+            "capability/graphics.rs",
+            "grants_land_on_one_holder_and_teardown_revokes_them",
+            "revoke_for_holder",
         ),
         // Address spaces built before any process record exists.
         (

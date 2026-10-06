@@ -211,7 +211,7 @@ impl PendingFrees {
     }
 }
 
-#[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
+#[cfg(any(test, feature = "m10-shared-buffer-self-test", feature = "m10-desktop"))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SharedBufferStats {
     pub(crate) live_buffers: usize,
@@ -421,7 +421,7 @@ impl SharedBufferTable {
         true
     }
 
-    #[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
+    #[cfg(any(test, feature = "m10-shared-buffer-self-test", feature = "m10-desktop"))]
     pub(crate) fn stats(&self) -> SharedBufferStats {
         let mut stats = SharedBufferStats {
             reclaimed_buffers: self.reclaimed_buffers,

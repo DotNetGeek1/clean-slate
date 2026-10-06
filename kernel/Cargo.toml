@@ -112,6 +112,11 @@ m10-nxe-self-test = ["m3-entry-self-test", "stack-high-water-check"]
 # M10 #195 S2: scripted fixture lane for bounded shared user buffers (phase `nx`).
 m10-shared-buffer-self-test = ["m3-entry-self-test", "stack-high-water-check"]
 # M10 #113: i8042 input smoke lane (controller write-output-buffer stimulus, no host injection).
+# #118: the M10 desktop: the supervised compositor, desktop shell and playground launched as
+# CPL3 services at the end of boot. Embeds their userspace ELFs at build time.
+m10-desktop = []
+# #119: m10-desktop plus the self-test fault keys and the `[M10.9]` desktop lane diagnostics.
+m10-desktop-self-test = ["m10-desktop"]
 m10-input-self-test = ["m3-entry-self-test", "stack-high-water-check", "m10-timeout-introspection"]
 
 [lib]

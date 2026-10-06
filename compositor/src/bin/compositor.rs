@@ -529,8 +529,7 @@ pub extern "C" fn _start() -> ! {
     } else {
         QualityTier::Q1
     };
-    *compositor.policy_mut() =
-        DefaultPolicy::with_theme(&CLEAN_SLATE_DARK, tier, ShellConfig::M10);
+    *compositor.policy_mut() = DefaultPolicy::with_theme(&CLEAN_SLATE_DARK, tier, ShellConfig::M10);
     compositor.set_config(Config {
         display_wakes,
         ..Config::DEFAULT

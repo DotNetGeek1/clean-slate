@@ -223,7 +223,7 @@ impl<const N: usize> WorkSetTable<N> {
             .count()
     }
 
-    #[cfg(any(test, feature = "m10-port-self-test"))]
+    #[cfg(any(test, feature = "m10-port-self-test", feature = "m10-desktop"))]
     pub(crate) fn live_count(&self) -> usize {
         self.slots
             .iter()
@@ -296,7 +296,7 @@ pub(crate) fn count_for(holder: HolderId) -> usize {
     without_interrupts(|| work_sets_mut().count_for(holder))
 }
 
-#[cfg(any(test, feature = "m10-port-self-test"))]
+#[cfg(any(test, feature = "m10-port-self-test", feature = "m10-desktop"))]
 pub(crate) fn live_count() -> usize {
     without_interrupts(|| work_sets_mut().live_count())
 }

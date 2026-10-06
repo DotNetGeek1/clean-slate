@@ -131,6 +131,24 @@ fn main() {
     if env::var("CARGO_FEATURE_M9_ROOTFS").is_ok() {
         embed_m9_rootfs_image();
     }
+    if env::var("CARGO_FEATURE_M10_DESKTOP").is_ok() {
+        for (raw_name, bin_name) in [
+            (
+                "compositor_userspace.bin",
+                "clean-slate-compositor-userspace",
+            ),
+            (
+                "desktop_shell_userspace.bin",
+                "clean-slate-desktop-shell-userspace",
+            ),
+            (
+                "playground_userspace.bin",
+                "clean-slate-playground-userspace",
+            ),
+        ] {
+            embed_userspace_image(raw_name, bin_name, true);
+        }
+    }
 }
 
 fn embed_m9_rootfs_image() {
@@ -382,6 +400,12 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
             "storage_userspace.bin" => ("storage_userspace_entry.rs", "STORAGE_USERSPACE"),
             "m6_fixture_userspace.bin" => ("m6_fixture_userspace_entry.rs", "M6_FIXTURE_USERSPACE"),
             "network_userspace.bin" => ("network_userspace_entry.rs", "NETWORK_USERSPACE"),
+            "compositor_userspace.bin" => ("compositor_userspace_entry.rs", "COMPOSITOR_USERSPACE"),
+            "desktop_shell_userspace.bin" => (
+                "desktop_shell_userspace_entry.rs",
+                "DESKTOP_SHELL_USERSPACE",
+            ),
+            "playground_userspace.bin" => ("playground_userspace_entry.rs", "PLAYGROUND_USERSPACE"),
             _ => panic!("unexpected userspace image {raw_name}"),
         };
         let generated = out_dir.join(generated_file);
