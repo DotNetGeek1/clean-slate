@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 mod m10_framebuffer_validate;
+mod m10_input_lane;
 mod m7_certs;
 mod m7_fixture;
 mod m7_fixture_tcp;
@@ -308,10 +309,9 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 10] = [
     "[M9.E] cycles=8 waiters=0",
     "[M9.E] PASS",
 ];
-const M10_INPUT_SMOKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
-/// #113 smoke lane: the i8042 controller's write-output-buffer commands stand in for host
-/// injection (#197), so every record still crosses IRQ 1/12, the decoders and the raw queue.
-const M10_INPUT_SMOKE_ACCEPTANCE_MARKERS: [&str; 18] = [
+/// #113 lane: the i8042 controller's write-output-buffer commands drive the boot phase, then
+/// `m10_input_lane` injects real PS/2 keyboard and pointer events over QMP (#197).
+const M10_INPUT_SMOKE_ACCEPTANCE_MARKERS: [&str; 21] = [
     "[TIME] timer initialized",
     "[M10.input] init begun devices=none timeouts_armed=2",
     "[M10.input] init settled kbd=ready mouse=ready ",
@@ -326,9 +326,12 @@ const M10_INPUT_SMOKE_ACCEPTANCE_MARKERS: [&str; 18] = [
     "[M10.input] boot phase complete",
     "[M10.input] cpl3 query devices ok",
     "[M10.input] cpl3 drained records=128 overflow dropped=4",
+    "[M10.input] cpl3 bind wake ok",
     "[M10.input] cpl3 unauthorized refused",
-    "[M10.input] consumer released bindings=1 then=0",
+    "[M10.input] consumer released bindings=1 then=0 wake=cleared",
     "[M10.input] cpl3 exclusive consumer ok",
+    "[M10.input] qmp ready",
+    "[M10.input] qmp done records=",
     "[M10.input] PASS",
 ];
 const M9_STACK_GUARD_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -2113,15 +2116,7 @@ fn run_m10_virtio_modern_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m10_input_smoke_acceptance() -> Result<(), XtaskError> {
-    run_vm_inner(
-        false,
-        false,
-        &["m10-input-self-test"],
-        Some((
-            MarkerSet::Ordered(&M10_INPUT_SMOKE_ACCEPTANCE_MARKERS),
-            M10_INPUT_SMOKE_ACCEPTANCE_TIMEOUT,
-        )),
-    )
+    m10_input_lane::run()
 }
 
 /// M10 contract gate (#110 Stage F): host tests for graphics/capability ABI crates plus
@@ -4484,7 +4479,7 @@ fn print_help() {
     println!(
         "  test-m10-shared-buffer  M10 #195 shared buffers: native-abi/service-fixtures/capability and kernel shared-buffer host tests, then the scripted fixture lane (NX, map/read, deny, stale, exhaustion, reuse, kernel-owned, ro-write, shared-exec, owner exit, reader exit, root revoke, port transfer); prints [M10.shared-buffer] PASS (aliases: m10-shared-buffer)"
     );
-    println!("  test-m10-input-smoke M10 #113 i8042 input smoke lane: init, IRQ 1/12 routing, raw queue and syscall 19 from CPL3, stimulated by the controller itself (no host injection); prints [M10.input] PASS (aliases: m10-input-smoke)");
+    println!("  test-m10-input-smoke M10 #113 i8042 input lane: init, IRQ 1/12 routing, raw queue and syscall 19 from CPL3 (controller stimulus), then BIND_WAKE-woken CPL3 consumer checked against keyboard + pointer events injected over a private QMP socket; prints [M10.input] PASS (aliases: m10-input-smoke)");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
