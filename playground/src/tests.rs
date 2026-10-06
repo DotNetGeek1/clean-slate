@@ -609,6 +609,14 @@ fn diagnostics_report_only_observable_state_changes() {
         diag::exit_line("closed").as_str(),
         "[APP ] exit reason=closed"
     );
+    assert_eq!(
+        diag::authority_line(true, true).as_str(),
+        "[APP ] authority display=denied input=denied"
+    );
+    assert_eq!(
+        diag::authority_line(false, true).as_str(),
+        "[APP ] authority display=granted input=denied"
+    );
     for _ in 0..TEXT_CAPACITY {
         tap(&mut app, KEY_A, none());
     }

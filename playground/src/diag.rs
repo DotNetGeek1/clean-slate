@@ -81,6 +81,17 @@ pub fn focus_line(focus: Focus) -> ConsoleLine {
     ))
 }
 
+/// `[APP ] authority display=denied input=denied`: what syscall 18 and 19 `FIND_HANDLE`
+/// answered this process (`granted` would mean direct scanout or raw input authority).
+pub fn authority_line(display_denied: bool, input_denied: bool) -> ConsoleLine {
+    let word = |denied: bool| if denied { "denied" } else { "granted" };
+    ConsoleLine::format(format_args!(
+        "[APP ] authority display={} input={}",
+        word(display_denied),
+        word(input_denied)
+    ))
+}
+
 /// `[APP ] exit reason=<reason>`; `closed` after a #115 close.
 pub fn exit_line(reason: &str) -> ConsoleLine {
     ConsoleLine::format(format_args!("[APP ] exit reason={reason}"))

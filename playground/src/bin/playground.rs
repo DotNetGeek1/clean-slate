@@ -14,6 +14,8 @@
 use core::ptr::addr_of_mut;
 
 use clean_slate_capability::ResourceClass;
+use clean_slate_graphics::abi::display::{DISPLAY_ABI_VERSION, DISPLAY_SUBOP_FIND_HANDLE};
+use clean_slate_graphics::abi::input::{INPUT_ABI_VERSION, INPUT_SUBOP_FIND_HANDLE};
 use clean_slate_graphics::input::{KeyState, KeyUsage};
 use clean_slate_graphics::protocol::{Event, Request};
 use clean_slate_native_abi::desktop::{ConsoleLine, SYSCALL_NR_IPC_SEND};
@@ -31,6 +33,8 @@ use clean_slate_playground::session::{buffer_layout, BUFFER_COUNT};
 use clean_slate_playground::{diag, BufferSlot, ExitReason, Host, HostError, Outcome, Session};
 use clean_slate_ui::QualityTier;
 
+const SYSCALL_NR_DISPLAY: u64 = 18;
+const SYSCALL_NR_INPUT: u64 = 19;
 /// HID usage of F12 (the self-test fault key).
 const KEY_F12: KeyUsage = KeyUsage(0x45);
 
@@ -274,6 +278,29 @@ fn is_fault_key(boot: &PlaygroundBootstrap, event: &Event) -> bool {
         )
 }
 
+/// Asks for the scanout and raw-input handles a compositor would use; an app must get neither.
+fn probe_authority() -> ConsoleLine {
+    let display = syscall(
+        SYSCALL_NR_DISPLAY,
+        DISPLAY_SUBOP_FIND_HANDLE,
+        0,
+        DISPLAY_ABI_VERSION,
+        0,
+        0,
+        0,
+    );
+    let input = syscall(
+        SYSCALL_NR_INPUT,
+        INPUT_SUBOP_FIND_HANDLE,
+        0,
+        INPUT_ABI_VERSION,
+        0,
+        0,
+        0,
+    );
+    diag::authority_line(is_status(display), is_status(input))
+}
+
 fn run(boot: &PlaygroundBootstrap, session: &mut Session, tier: QualityTier) {
     let Some(mut kernel) = Kernel::connect(boot.graphics_resource_id) else {
         console(boot, &diag::exit_line("connect"));
@@ -336,6 +363,7 @@ pub extern "C" fn _start() -> ! {
     // SAFETY: single-threaded process; this is the only reference to `SESSION`.
     let session = unsafe { &mut *addr_of_mut!(SESSION) };
     *session = Session::new(tier);
+    console(&boot, &probe_authority());
     run(&boot, session, tier);
     exit();
 }

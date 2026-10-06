@@ -190,7 +190,7 @@ impl Presenter {
     }
 
     /// `(presenter bound, completion wake bound)`.
-    #[cfg(any(test, feature = "m10-desktop"))]
+    #[cfg(feature = "m10-desktop")]
     pub(crate) fn bindings(&self) -> (bool, bool) {
         (self.holder.is_some(), self.wake.is_some())
     }

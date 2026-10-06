@@ -19,13 +19,14 @@
 //! Every quiescent stretch of [`IDLE_PROOF_NS`] after activity logs `[IDLE ]` with the number of
 //! presents submitted during it, which the desktop lane requires to be zero.
 
-use clean_slate_capability::{HolderId, ResourceRef};
+use clean_slate_capability::{CapabilityHandle, HolderId, ResourceClass, ResourceRef};
 use clean_slate_graphics::{
     CLIENT_EVENT_QUEUE_DEPTH, MAX_OUTSTANDING_REQUESTS_PER_CLIENT, SERVER_REQUEST_QUEUE_DEPTH,
 };
 use clean_slate_native_abi::desktop::{
-    DesktopLaunchPage, LAUNCH_FLAG_FAULT_KEY, LAUNCH_TIER_Q1, NO_CONSOLE,
+    DesktopLaunchPage, LAUNCH_FLAG_FAULT_KEY, LAUNCH_TIER_Q0, LAUNCH_TIER_Q1, NO_CONSOLE,
 };
+use clean_slate_native_abi::port::PORT_ROLE_CONNECT;
 use clean_slate_native_abi::PortParams;
 use clean_slate_service_lifecycle::{ControlRequest, ControlRequestKind, ServiceId};
 
@@ -140,6 +141,8 @@ struct DesktopState {
     reaped: [Option<(DesktopRole, u64)>; 3],
     idle: Option<IdleWindow>,
     idle_reported: bool,
+    /// The live app's graphics handle, which its successor must fail to use.
+    app_handle: Option<CapabilityHandle>,
 }
 
 impl DesktopState {
@@ -155,6 +158,7 @@ impl DesktopState {
             reaped: [None; 3],
             idle: None,
             idle_reported: false,
+            app_handle: None,
         }
     }
 
@@ -193,7 +197,11 @@ pub(crate) fn launch_page_for(pid: u64) -> DesktopLaunchPage {
         } else {
             0
         },
-        tier: LAUNCH_TIER_Q1,
+        tier: if cfg!(feature = "m10-desktop-q0") {
+            LAUNCH_TIER_Q0
+        } else {
+            LAUNCH_TIER_Q1
+        },
     }
 }
 
@@ -242,7 +250,39 @@ fn start_role(allocator: &mut PageAllocator, role: DesktopRole) -> Result<u64, &
         "[DESK] launch role={} pid={pid} gen={generation}\n",
         role.name()
     ));
+    if role == DesktopRole::App {
+        probe_stale_app_handle(pid);
+    }
     Ok(pid)
+}
+
+/// The new app tries its predecessor's graphics handle (revoked at teardown, so its slot
+/// generation is gone), then the new handle is remembered for its own successor.
+fn probe_stale_app_handle(pid: u64) {
+    let holder = HolderId(pid);
+    let graphics_class = ResourceClass::Graphics;
+    let graphics_id = u64::from(COMPOSITOR_SERVICE_ID.0);
+    let desktop = state();
+    if let Some(stale) = desktop.app_handle.take() {
+        let rejected =
+            super::port::kernel_client_connect(holder, stale, graphics_class, graphics_id);
+        if let Ok(connection) = rejected {
+            let _ = super::port::kernel_client_close(holder, connection, 0);
+        }
+        kernel_log_fmt(format_args!(
+            "[RSRC] stale handle pid={pid} handle={:#x} rejected={}\n",
+            stale.encode(),
+            u8::from(rejected.is_err())
+        ));
+    }
+    desktop.app_handle = super::port::find_handle(
+        holder,
+        u64::from(graphics_class.as_u8()),
+        graphics_id,
+        PORT_ROLE_CONNECT,
+    )
+    .ok()
+    .and_then(|raw| CapabilityHandle::decode(raw).ok());
 }
 
 fn wire_role(role: DesktopRole, pid: u64) -> Result<(), &'static str> {
@@ -466,7 +506,7 @@ mod tests {
     fn port_admits_the_shell_and_apps_one_connection_each() {
         assert_eq!(COMPOSITOR_PORT_PARAMS.validate(), Ok(()));
         assert_eq!(COMPOSITOR_PORT_PARAMS.max_connections_per_holder, 1);
-        assert!(COMPOSITOR_PORT_PARAMS.max_connections >= 2);
+        assert_eq!(COMPOSITOR_PORT_PARAMS.max_connections, 4);
     }
 
     #[test]
