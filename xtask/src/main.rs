@@ -1017,6 +1017,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM6 => run_m6_acceptance(),
         ParsedCommand::TestM10Contract => run_m10_contract_acceptance(),
         ParsedCommand::TestM10Compositor => run_m10_compositor_acceptance(),
+        ParsedCommand::TestM10App => run_m10_app_acceptance(),
         ParsedCommand::TestM10Nxe => run_m10_nxe_acceptance(),
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
         ParsedCommand::TestQmpSmoke => qmp::smoke::run(&xtask_artifact_root()),
@@ -2174,6 +2175,37 @@ fn run_m10_compositor_acceptance() -> Result<(), XtaskError> {
         run_build_command(&mut cmd)?;
     }
     println!("[M10.compositor] PASS");
+    Ok(())
+}
+
+/// M10 #117 native app gate: the playground's layout/state/damage/render tests and its session
+/// against the real compositor core over the fake port, shared memory and display; the CPL3
+/// build proves the syscall adapter compiles. The QEMU lane needs #115 window lifecycle and the
+/// #118 launch policy.
+fn run_m10_app_acceptance() -> Result<(), XtaskError> {
+    let mut test = Command::new("cargo");
+    test.current_dir(workspace_root())
+        .arg("test")
+        .arg("-p")
+        .arg("clean-slate-playground");
+    run_host_test_command(&mut test)?;
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(workspace_root())
+        .arg("build")
+        .arg("-p")
+        .arg("clean-slate-playground")
+        .arg("--bin")
+        .arg("clean-slate-playground-userspace")
+        .arg("--features")
+        .arg("userspace")
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,compiler_builtins")
+        .arg("--release")
+        .env("RUSTC_BOOTSTRAP", "1");
+    run_build_command(&mut cmd)?;
+    println!("[M10.app] PASS");
     Ok(())
 }
 
@@ -4502,6 +4534,7 @@ fn print_help() {
         "  test-m10-contract M10 graphics contract host tests plus UEFI builds of graphics and native-abi; prints [M10.contract] PASS (aliases: m10-contract)"
     );
     println!("  test-m10-compositor M10 #112 compositor host tests (FakePort/FakeDisplay) plus CPL3 builds of the compositor and client binaries; prints [M10.compositor] PASS (aliases: m10-compositor, m10.112)");
+    println!("  test-m10-app    M10 #117 System Playground host tests (layout, damage, render, session against the compositor core) plus its CPL3 build; prints [M10.app] PASS (aliases: m10-app, m10.117)");
     println!("  test-m10-nxe  M10 #195 S0: EFER.NXE host tests, then a CPL3 fetch from an RW+NX page must fault err=0x15 (aliases: m10-nxe)");
     println!(
         "  test-m10-port   M10 #200 service port: port/kernel host tests, then the m10-port-self-test QEMU lane with ordered markers; prints [M10.port] PASS (aliases: m10-port, m10.200)"
@@ -4656,6 +4689,7 @@ enum ParsedCommand {
     TestM6,
     TestM10Contract,
     TestM10Compositor,
+    TestM10App,
     TestM10Nxe,
     TestM10Port,
     TestQmpSmoke,
@@ -4795,6 +4829,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
             if cmd == "test-m10-compositor" || cmd == "m10-compositor" || cmd == "m10.112" =>
         {
             ParsedCommand::TestM10Compositor
+        }
+        Some(cmd) if cmd == "test-m10-app" || cmd == "m10-app" || cmd == "m10.117" => {
+            ParsedCommand::TestM10App
         }
         Some(cmd) if cmd == "test-m10-nxe" || cmd == "m10-nxe" => ParsedCommand::TestM10Nxe,
         Some(cmd) if cmd == "test-m10-port" || cmd == "m10-port" || cmd == "m10.200" => {
@@ -5237,6 +5274,12 @@ mod tests {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
                 ParsedCommand::TestM10Compositor
+            );
+        }
+        for alias in ["test-m10-app", "m10-app", "m10.117"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestM10App
             );
         }
         for alias in ["test-m10-port", "m10-port", "m10.200"] {

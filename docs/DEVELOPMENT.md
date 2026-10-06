@@ -216,6 +216,14 @@ cargo xtask test-m10-contract
 
 It runs the `clean-slate-graphics`, `clean-slate-native-abi` and `clean-slate-capability` host tests, builds `clean-slate-graphics --features fake` and `clean-slate-native-abi` for `x86_64-unknown-uefi`, and prints `[M10.contract] PASS`. See [GRAPHICS.md](GRAPHICS.md).
 
+For the M10 #117 System Playground app (host-tested plus a CPL3 build; no QEMU boot yet):
+
+```bash
+cargo xtask test-m10-app
+```
+
+It runs `cargo test -p clean-slate-playground` (layout, input state, damage minimality and damaged-vs-full repaint at Q0/Q1, plus the protocol session against the real compositor core over `FakePort` / `FakeSharedMemory` / `FakeDisplay`), builds `clean-slate-playground-userspace` for `x86_64-unknown-none`, and prints `[M10.app] PASS` (aliases `m10-app`, `m10.117`). The QEMU lane needs #115 window lifecycle and the #118 launch policy. See [GRAPHICS.md](GRAPHICS.md#playground-117).
+
 For M10 #195 Stage 0, `EFER.NXE` enforcement (host tests plus one QEMU boot):
 
 ```bash
