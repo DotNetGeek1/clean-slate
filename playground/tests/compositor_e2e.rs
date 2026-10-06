@@ -668,6 +668,33 @@ fn close_releases_every_resource_and_relaunch_gets_fresh_identities() {
 }
 
 #[test]
+fn close_exits_without_waiting_for_unregister_answers() {
+    big_stack(|| {
+        let mut world = World::new();
+        let mut app = world.launch(7, QualityTier::Q0);
+        assert!(world.comp.request_close(World::key(&app)));
+        world.waiter.raise(WAKE_REQUESTS);
+        world.pump();
+        // The compositor is never run again, so none of the close requests is answered.
+        assert_eq!(world.deliver(&mut app), 1, "only CloseRequested");
+        assert_eq!(app.exit, Some(ExitReason::Closed));
+        assert_eq!(app.session.buffers(), [None, None]);
+        assert_eq!(
+            world.comp.budget().used(ObjectKind::Buffer),
+            2,
+            "unanswered"
+        );
+
+        world.exit(&app);
+        assert_eq!(world.comp.client_count(), 0);
+        for kind in [ObjectKind::Surface, ObjectKind::Window, ObjectKind::Buffer] {
+            assert_eq!(world.comp.budget().used(kind), 0, "{kind:?} released");
+        }
+        assert_eq!(world.shm.live_mappings(), 0);
+    });
+}
+
+#[test]
 fn compositor_loss_ends_the_session() {
     big_stack(|| {
         let mut world = World::new();

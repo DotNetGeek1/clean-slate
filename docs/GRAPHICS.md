@@ -72,7 +72,7 @@ Items marked **(planned)** are fixed in shape but not implemented; their owning 
 - **Rendering.** The panel is a pure function of a `View` snapshot. An event's damage is the set of regions whose view changed, and a damaged repaint is byte-identical to a full repaint (host-tested at Q0 and Q1).
 - **Buffers.** Two buffers, never written while busy (#110 release rule). Each buffer keeps the regions it is missing. A change with neither buffer free waits for `BufferReleased`. Commits use `request_frame = false` and never wait for `FrameDone`.
 - **Idle.** No timers. The binary blocks in `RECV_EVENT`, and an event that changes nothing visible sends nothing.
-- **Close.** `CloseRequested` leads to `DestroyWindow`, `DestroySurface` and `UnregisterBuffer` for both buffers, then waits for both answers. The binary then sends `CLOSE`, `UNMAP`s and `RELEASE`s its buffers, and exits.
+- **Close.** `CloseRequested` leads to `DestroyWindow`, `DestroySurface` and `UnregisterBuffer` for both buffers, and exits without waiting for answers, so a compositor that never answers cannot keep it alive. The binary then sends `CLOSE`, `UNMAP`s and `RELEASE`s its buffers, and exits; the compositor's disconnect path and process teardown release anything the requests did not.
 - **Launch page (#118).** `{ self_pid: u64, graphics_resource_id: u64 }` at `0x0000_4000_0000_1000`. The session lives in a static, so the user stack only holds frames.
 
 ## Process and thread boundaries

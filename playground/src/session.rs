@@ -10,7 +10,7 @@
 //! Configure        -> paint both buffers, Attach(0), Commit{ack}, SetTitle, SetSizeLimits, Show
 //! running          -> input/configure events update the app; changed regions are repainted into
 //!                     a released buffer and committed with exactly those Damage rects
-//! CloseRequested   -> DestroyWindow, DestroySurface, UnregisterBuffer x2 -> exit
+//! CloseRequested   -> DestroyWindow, DestroySurface, UnregisterBuffer x2 -> exit (no wait)
 //! ```
 //!
 //! **Buffers.** Two buffers alternate. A committed buffer is busy until `BufferReleased`
@@ -27,8 +27,7 @@ use clean_slate_graphics::ids::{ClientBufferId, Serial, SurfaceId, WindowId};
 use clean_slate_graphics::pixel::{BufferLayout, ColorSpace, PixelFormat};
 use clean_slate_graphics::protocol::request::REGION_RECTS_PER_FRAME;
 use clean_slate_graphics::protocol::{
-    Event, Features, ProtocolError, ProtocolVersion, Request, OP_UNREGISTER_BUFFER, PROTOCOL_MAJOR,
-    PROTOCOL_MINOR,
+    Event, Features, ProtocolError, ProtocolVersion, Request, PROTOCOL_MAJOR, PROTOCOL_MINOR,
 };
 use clean_slate_graphics::role::SurfaceRole;
 use clean_slate_graphics::window::{WindowStates, WindowTitle};
@@ -108,7 +107,6 @@ enum Phase {
     CreatingSurface,
     AwaitingConfigure,
     Running,
-    Closing { awaiting_unregister: u8 },
     Done,
 }
 
@@ -251,9 +249,6 @@ impl Session {
         match self.phase {
             Phase::New | Phase::Done => Outcome::Continue,
             Phase::Running => self.running(event, host),
-            Phase::Closing {
-                awaiting_unregister,
-            } => self.closing(event, awaiting_unregister),
             _ => self.setup(event, host),
         }
     }
@@ -524,8 +519,10 @@ impl Session {
 
     // ---- close ------------------------------------------------------------------------------
 
+    /// Destroys the window and surface and unregisters both buffers, then exits without
+    /// waiting for answers: the binary's `CLOSE` and process exit release whatever the
+    /// compositor has not, so a compositor that never answers cannot keep the app alive.
     fn begin_close(&mut self, host: &mut dyn Host) -> Outcome {
-        let mut awaiting = 0u8;
         if let Some(window) = self.window.take() {
             if let Outcome::Exit(reason) = self.send(host, &Request::DestroyWindow { window }, None)
             {
@@ -539,55 +536,20 @@ impl Session {
                 return Outcome::Exit(reason);
             }
         }
-        for slot in BufferSlot::ALL {
-            let Some(buffer) = self.slots[slot.index()].id else {
+        for slot in &mut self.slots {
+            let Some(buffer) = slot.id.take() else {
                 continue;
             };
-            self.slots[slot.index()].busy = false;
-            if let Outcome::Exit(reason) =
-                self.send(host, &Request::UnregisterBuffer { buffer }, None)
+            slot.busy = false;
+            if host
+                .send(&Request::UnregisterBuffer { buffer }, None)
+                .is_err()
             {
-                return Outcome::Exit(reason);
+                break;
             }
-            awaiting += 1;
         }
-        self.finish_or_wait(awaiting)
-    }
-
-    fn closing(&mut self, event: &Event, awaiting: u8) -> Outcome {
-        let answered = match *event {
-            Event::BufferUnregistered { buffer } => {
-                for slot in &mut self.slots {
-                    if slot.id == Some(buffer) {
-                        slot.id = None;
-                    }
-                }
-                true
-            }
-            Event::Error { request_opcode, .. } => {
-                self.stats.protocol_errors += 1;
-                request_opcode == OP_UNREGISTER_BUFFER
-            }
-            _ => false,
-        };
-        let awaiting = if answered {
-            awaiting.saturating_sub(1)
-        } else {
-            awaiting
-        };
-        self.finish_or_wait(awaiting)
-    }
-
-    fn finish_or_wait(&mut self, awaiting: u8) -> Outcome {
-        if awaiting == 0 {
-            self.phase = Phase::Done;
-            Outcome::Exit(ExitReason::Closed)
-        } else {
-            self.phase = Phase::Closing {
-                awaiting_unregister: awaiting,
-            };
-            Outcome::Continue
-        }
+        self.phase = Phase::Done;
+        Outcome::Exit(ExitReason::Closed)
     }
 
     // ---- sending ----------------------------------------------------------------------------
