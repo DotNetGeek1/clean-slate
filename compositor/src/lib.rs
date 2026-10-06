@@ -18,9 +18,9 @@
 //! **Kernel boundary.** All kernel access goes through the traits in [`backend`]; the userspace
 //! binary implements them over syscalls 16–20 and host tests over [`fake`].
 //!
-//! **Window management (#115).** Placement and interactive operations are asked of a
-//! [`wm::WindowPolicy`]; movement, raising, hit testing, configure and close are compositor
-//! operations the policy layer drives.
+//! **Window management (#115).** [`wm`] owns focus, z-order, hit targets, interactive
+//! move/resize, server-side decorations and the software cursor; a [`wm::WindowPolicy`]
+//! supplies only placement and look (the #116 `ChromeStyle` and cursor image).
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -40,7 +40,7 @@ pub use compositor::{
     Compositor, Config, Io, Iteration, OutputDamage, ServiceError, Stats, WaitPlan, UNSOLICITED_TAG,
 };
 pub use scene::SurfaceKey;
-pub use wm::{DefaultPolicy, WindowPolicy};
+pub use wm::{DefaultPolicy, WindowPolicy, WmHit};
 
 #[cfg(test)]
 mod tests;

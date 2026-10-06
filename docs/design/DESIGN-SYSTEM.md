@@ -231,4 +231,4 @@ Blending happens in sRGB-encoded space with the shared `over()` rounding (`Color
 
 ## Integration status
 
-Done here: the tokens, primitives, chrome look and metrics, cursor visual, shell zones, surface plan, rail behaviour, and this specification. Still to come, once #112 and #115 land: the `desktop-shell/` binary (connect, create the two surfaces, register buffers, assign roles, attach, damage and commit, then forward rail input), `compositor::wm` consuming `ChromeStyle` and drawing the cursor layer, and on-target screenshots.
+Done here: the tokens, primitives, chrome look and metrics, cursor visual, shell zones, surface plan, rail behaviour, and this specification. #115 wires them into the compositor: `compositor::wm::DefaultPolicy` paints `CleanSlateChrome` frames with live focus, hover and pressed state, places windows in `ShellZones::window_area`, and draws `ARROW` as the compositor-owned cursor layer. Still to come: the `desktop-shell/` binary (connect, create the two surfaces, register buffers, assign roles, attach, damage and commit, then forward rail input) and on-target screenshots.

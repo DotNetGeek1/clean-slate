@@ -125,6 +125,7 @@ dependencies = [
  "clean-slate-native-abi",
  "clean-slate-port",
  "clean-slate-raster",
+ "clean-slate-ui",
 ]
 
 [[package]]

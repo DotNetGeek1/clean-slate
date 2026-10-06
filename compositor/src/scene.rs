@@ -31,6 +31,8 @@ pub struct SceneEntry {
     pub origin: Option<Point>,
     /// Screen rect as last composited, used to expose damage on move, resize, hide or destroy.
     pub shown: Option<Rect>,
+    /// Screen rect of the server-side decoration (frame plus shadow) as last composited.
+    pub decor_shown: Option<Rect>,
 }
 
 /// Bounded scene: at most [`MAX_SURFACES`] entries, one per live surface of any connection.
@@ -91,6 +93,7 @@ impl Scene {
                     z,
                     origin: None,
                     shown: None,
+                    decor_shown: None,
                 });
                 true
             }
@@ -138,11 +141,12 @@ impl Scene {
         self.find(key).and_then(|i| self.get(i))
     }
 
-    /// Removes `key`; returns the rect it occupied on screen, which is now exposed.
+    /// Removes `key`; returns the rect it occupied on screen (decoration included), which is
+    /// now exposed.
     pub fn remove(&mut self, key: SurfaceKey) -> Option<Option<Rect>> {
         let index = self.find(key)?;
         let entry = self.entries[index].take()?;
-        Some(entry.shown)
+        Some(entry.decor_shown.or(entry.shown))
     }
 
     /// Removes every entry of `connection`, calling `exposed` with each shown rect.
@@ -150,7 +154,7 @@ impl Scene {
         for slot in &mut self.entries {
             if let Some(entry) = slot {
                 if entry.key.connection == connection {
-                    if let Some(rect) = entry.shown {
+                    if let Some(rect) = entry.decor_shown.or(entry.shown) {
                         exposed(rect);
                     }
                     *slot = None;

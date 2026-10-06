@@ -87,32 +87,55 @@ pub fn occluded(rect: Rect, above: &[Footprint]) -> bool {
 #[derive(Clone, Copy, Debug)]
 pub struct Visual<'a> {
     pub footprint: Footprint,
+    /// Everything the surface's server-side decoration may touch, painted just below it.
+    pub frame: Option<Rect>,
     pub layout: BufferLayout,
     pub bytes: &'a [u8],
 }
 
-/// Paints every rect of `damage` into `dst` from `visuals` (bottom to top) over `background`.
+/// Compositor-drawn content, painted by the caller into a canvas clipped to one damage rect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decor {
+    /// The decoration of `visuals[index]`.
+    Frame(usize),
+    /// The software cursor, above every surface.
+    Cursor,
+}
+
+fn intersects(a: Rect, b: Rect) -> bool {
+    matches!(a.intersect(b), Ok(Some(_)))
+}
+
+/// Paints every rect of `damage` into `dst` from `visuals` (bottom to top) over `background`,
+/// then the cursor at `cursor`.
 ///
 /// Per rect, painting starts at the topmost visual that covers it; everything below is skipped
 /// (occlusion rejection), and the background is filled only when no visual covers the rect.
-/// Returns how many surface blits were performed, for tests and diagnostics.
+/// A visual's frame is painted just before its surface, except for the starting visual whose
+/// surface covers the rect anyway. Returns how many surface blits were performed, for tests and
+/// diagnostics.
 pub fn paint(
     dst: &mut Canvas<'_>,
     damage: &[Rect],
     visuals: &[Visual<'_>],
     background: Color,
+    cursor: Option<Rect>,
+    decor: &mut dyn FnMut(&mut Canvas<'_>, Decor),
 ) -> usize {
     let mut blits = 0;
     for &rect in damage {
-        let start = visuals
-            .iter()
-            .rposition(|v| v.footprint.covers(rect))
-            .unwrap_or(0);
+        let covered = visuals.iter().rposition(|v| v.footprint.covers(rect));
+        let start = covered.unwrap_or(0);
         let mut clipped = dst.with_clip(rect);
-        if !visuals.get(start).is_some_and(|v| v.footprint.covers(rect)) {
+        if covered.is_none() {
             clipped.fill_rect(rect, background);
         }
-        for visual in &visuals[start.min(visuals.len())..] {
+        for (index, visual) in visuals.iter().enumerate().skip(start) {
+            if let Some(frame) = visual.frame {
+                if Some(index) != covered && intersects(frame, rect) {
+                    decor(&mut clipped, Decor::Frame(index));
+                }
+            }
             let Ok(Some(part)) = visual.footprint.rect.intersect(rect) else {
                 continue;
             };
@@ -138,6 +161,9 @@ pub fn paint(
             {
                 blits += 1;
             }
+        }
+        if cursor.is_some_and(|c| intersects(c, rect)) {
+            decor(&mut clipped, Decor::Cursor);
         }
     }
     blits
