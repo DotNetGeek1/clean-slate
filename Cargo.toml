@@ -2,6 +2,7 @@
 members = [ "block",
     "rootfs",
     "capability",
+    "compositor",
     "elf",
     "graphics",
     "kernel",
