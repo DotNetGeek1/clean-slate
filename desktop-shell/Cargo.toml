@@ -1,0 +1,36 @@
+[package]
+name = "clean-slate-desktop-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "M10 desktop shell: persistent left rail and background as an ordinary GFX_SHELL compositor client"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "clean-slate-desktop-shell-userspace"
+path = "src/bin/desktop-shell.rs"
+required-features = ["userspace"]
+
+[features]
+default = []
+userspace = []
+
+[dependencies]
+clean-slate-capability = { path = "../capability" }
+clean-slate-graphics = { path = "../graphics" }
+clean-slate-native-abi = { path = "../native-abi" }
+clean-slate-raster = { path = "../raster" }
+clean-slate-ui = { path = "../ui" }
+
+[dev-dependencies]
+clean-slate-compositor = { path = "../compositor", features = ["fake"] }
+clean-slate-graphics = { path = "../graphics", features = ["fake"] }
+clean-slate-playground = { path = "../playground" }
+clean-slate-port = { path = "../port", features = ["fake"] }
+
+[lints]
+workspace = true

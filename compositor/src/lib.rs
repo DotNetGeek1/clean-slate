@@ -29,6 +29,7 @@ pub mod backend;
 pub mod client;
 pub mod compose;
 pub mod compositor;
+pub mod diag;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 pub mod input;

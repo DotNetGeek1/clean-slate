@@ -129,6 +129,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "clean-slate-desktop-shell"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-capability",
+ "clean-slate-compositor",
+ "clean-slate-graphics",
+ "clean-slate-native-abi",
+ "clean-slate-playground",
+ "clean-slate-port",
+ "clean-slate-raster",
+ "clean-slate-ui",
+]
+
+[[package]]
 name = "clean-slate-elf"
 version = "0.0.1"
 
