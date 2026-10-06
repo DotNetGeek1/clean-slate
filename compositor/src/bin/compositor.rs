@@ -6,8 +6,9 @@
 //!
 //! Startup reads [`CompositorBootstrap`] from the launch page, finds its `Graphics{GFX_SERVE}`,
 //! `Display` and (optional) `Input` capabilities, creates its work set and binds every wake
-//! source it can. Display completion without `BIND_WAKE` (`ENOSYS` until #111 wires it) falls
-//! back to a bounded deadline while a present is in flight. Input is read only on its own wake
+//! source it can. Display `BIND_WAKE` follows the first `MAP_SCANOUT`, which makes the compositor
+//! the presenter; if either fails, completion falls back to a bounded deadline while a present is
+//! in flight. Input is read only on its own wake
 //! bit, so the compositor consumes input only once syscall 19 `BIND_WAKE` succeeds (it also makes
 //! the compositor the seat consumer); otherwise it runs without input. Neither adds an idle poll.
 
@@ -422,15 +423,21 @@ pub extern "C" fn _start() -> ! {
     if port_bound.is_err() {
         exit();
     }
-    let display_wakes = checked(syscall(
-        SYSCALL_NR_DISPLAY,
-        DISPLAY_SUBOP_BIND_WAKE,
-        display_handle,
-        work_set,
-        u64::from(WAKE_DISPLAY.trailing_zeros()),
-        0,
-    ))
-    .is_ok();
+    let mut display = KernelDisplay {
+        handle: display_handle,
+        scanout: [None; SCANOUT_BUFFER_COUNT],
+    };
+    // Display `BIND_WAKE` is presenter-only, and the first `MAP_SCANOUT` binds the presenter.
+    let display_wakes = display.scanout(0).is_ok()
+        && checked(syscall(
+            SYSCALL_NR_DISPLAY,
+            DISPLAY_SUBOP_BIND_WAKE,
+            display_handle,
+            work_set,
+            u64::from(WAKE_DISPLAY.trailing_zeros()),
+            0,
+        ))
+        .is_ok();
     let input_handle = input_handle.filter(|&handle| {
         checked(syscall(
             SYSCALL_NR_INPUT,
@@ -445,10 +452,6 @@ pub extern "C" fn _start() -> ! {
 
     let mut port = KernelPort { serve };
     let mut buffers = KernelSharedBuffers;
-    let mut display = KernelDisplay {
-        handle: display_handle,
-        scanout: [None; SCANOUT_BUFFER_COUNT],
-    };
     let mut kernel_input = input_handle.map(|handle| KernelInput { handle });
     let mut no_input = NoInput;
     let mut waiter = KernelWorkSet {

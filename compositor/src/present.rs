@@ -101,19 +101,23 @@ impl PresentTracker {
 
     /// When the loop must look at the display even without a display wake.
     ///
-    /// `display_wakes` is `false` while syscall 18 `BIND_WAKE` is unavailable; completion is then
+    /// `display_wakes` is `false` when syscall 18 `BIND_WAKE` failed; completion is then
     /// observed by a bounded poll that runs only while a present is in flight or a reset is
-    /// pending, never on an idle desktop.
+    /// pending, never on an idle desktop. With wakes the in-flight deadline is only a backstop,
+    /// and it is never earlier than one poll interval from now: a present learned from
+    /// `PRESENT_STATUS` has no local submit time, and a backstop in the past would busy-poll.
     pub fn deadline(&self, now_ns: u64, display_wakes: bool, poll_ns: u64) -> Option<u64> {
+        let poll = now_ns.saturating_add(poll_ns);
         match (self.health, self.in_flight) {
             (DisplayHealth::Poisoned, _) => None,
-            (DisplayHealth::Resetting, _) => Some(now_ns.saturating_add(poll_ns)),
+            (DisplayHealth::Resetting, _) => Some(poll),
             (DisplayHealth::Ready, Some(flight)) => Some(if display_wakes {
                 flight
                     .submitted_ns
                     .saturating_add(DISPLAY_COMMAND_TIMEOUT_NS.saturating_mul(2))
+                    .max(poll)
             } else {
-                now_ns.saturating_add(poll_ns)
+                poll
             }),
             (DisplayHealth::Ready, None) => None,
         }
