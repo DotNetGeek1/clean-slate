@@ -503,6 +503,13 @@ pub extern "C" fn _start() -> ! {
             0,
         ))
         .is_ok();
+    // The kernel allocates a scanout buffer on its first `MAP_SCANOUT`. Mapping every buffer now
+    // keeps the display's allocations fixed from the first frame on, so a resource baseline
+    // taken after startup does not depend on how many presents preceded it. A failure here
+    // leaves that buffer to the lazy mapping in `scanout`.
+    for index in 1..SCANOUT_BUFFER_COUNT as u8 {
+        let _ = display.scanout(index);
+    }
     let input_handle = input_handle.filter(|&handle| {
         checked(syscall(
             SYSCALL_NR_INPUT,
