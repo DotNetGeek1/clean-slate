@@ -385,22 +385,9 @@ fn register_boot_kernel_low_carve_outs(
     assert_conventional_linux_window_clear()
 }
 
-/// Installs output 0 for the syscall 18 query subops. Every failure leaves the system with no
-/// display backend (`ENODEV` on syscall 18) and boot continues.
-#[cfg(not(any(test, feature = "m10-framebuffer-self-test")))]
-fn install_display_backend(framebuffer: Result<gop::BootFramebuffer, gop::GopRejection>) {
-    let installed = framebuffer.and_then(|_| {
-        crate::device::display::install_gop_display()
-            .map_err(|_| gop::GopRejection::ReferenceModeAbsent)
-    });
-    if let Err(reason) = installed {
-        gop::log_rejection(reason);
-    }
-}
-
 /// Maps the captured aperture uncached and installs the GOP backend over it. Every failure leaves
 /// the system with no display backend (`ENODEV` on syscall 18) and boot continues.
-#[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
+#[cfg(not(test))]
 fn install_display_backend(
     kernel_root: u64,
     allocator: &mut PageAllocator,
@@ -503,9 +490,7 @@ fn run_inner() -> Result<(), &'static str> {
         "[MM  ] kernel-owned root installed: {:#018x}\n",
         kernel_root
     ));
-    #[cfg(not(any(test, feature = "m10-framebuffer-self-test")))]
-    install_display_backend(boot_framebuffer);
-    #[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
+    #[cfg(not(test))]
     install_display_backend(kernel_root, &mut allocator, boot_framebuffer);
     set_kernel_root_frame(kernel_root);
     set_kernel_direct_map_ready();

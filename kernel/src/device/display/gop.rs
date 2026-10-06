@@ -425,10 +425,12 @@ mod tests {
         );
         assert_eq!((status.submitted_seq, status.completed_seq), (1, 1));
         let mut readback = [0u8; 30 * 4];
-        match &display.backend {
-            Backend::Gop(gop) => gop.aperture().read_row_segment(20, 10, &mut readback),
-        }
-        .expect("readback");
+        let Backend::Gop(gop) = &display.backend else {
+            panic!("gop backend");
+        };
+        gop.aperture()
+            .read_row_segment(20, 10, &mut readback)
+            .expect("readback");
         assert_eq!(
             &readback[..],
             &frame[20 * FRAME_STRIDE + 40..20 * FRAME_STRIDE + 160]

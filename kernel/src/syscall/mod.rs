@@ -1013,9 +1013,6 @@ mod tests {
             SYSCALL_NR_SHARED_BUFFER, SYSCALL_NR_WORK_SET,
         };
         use clean_slate_graphics::abi::input::INPUT_SUBOP_BIND_WAKE;
-        use clean_slate_graphics::display::{
-            DISPLAY_SUBOP_BIND_WAKE, DISPLAY_SUBOP_MAP_SCANOUT, DISPLAY_SUBOP_PRESENT,
-        };
 
         assert_eq!(SYSCALL_NR_SHARED_BUFFER, 16);
         assert_eq!(SYSCALL_NR_SERVICE_PORT, 17);
@@ -1028,18 +1025,7 @@ mod tests {
             "M10 reserved numbers are contiguous 16..=20"
         );
 
-        // #111 routes 18 and #113 routes 19; only their gated subops stay ENOSYS.
-        for subop in [
-            DISPLAY_SUBOP_MAP_SCANOUT,
-            DISPLAY_SUBOP_PRESENT,
-            DISPLAY_SUBOP_BIND_WAKE,
-        ] {
-            assert_eq!(
-                dispatch_native_zeroed(SYSCALL_NR_DISPLAY, subop),
-                SYSCALL_ENOSYS,
-                "subop {subop}"
-            );
-        }
+        // #111 routes every display subop; only #113's input BIND_WAKE stays ENOSYS.
         assert_eq!(
             dispatch_native_zeroed(SYSCALL_NR_INPUT, INPUT_SUBOP_BIND_WAKE),
             SYSCALL_ENOSYS,
@@ -1057,7 +1043,8 @@ mod tests {
             INPUT_SUBOP_FIND_HANDLE, INPUT_SUBOP_QUERY_DEVICES, INPUT_SUBOP_READ_BATCH,
         };
         use clean_slate_graphics::display::{
-            DISPLAY_SUBOP_FIND_HANDLE, DISPLAY_SUBOP_PRESENT_STATUS, DISPLAY_SUBOP_QUERY_MODE,
+            DISPLAY_SUBOP_BIND_WAKE, DISPLAY_SUBOP_FIND_HANDLE, DISPLAY_SUBOP_MAP_SCANOUT,
+            DISPLAY_SUBOP_PRESENT, DISPLAY_SUBOP_PRESENT_STATUS, DISPLAY_SUBOP_QUERY_MODE,
         };
 
         for nr in [
@@ -1074,7 +1061,10 @@ mod tests {
         for subop in [
             DISPLAY_SUBOP_FIND_HANDLE,
             DISPLAY_SUBOP_QUERY_MODE,
+            DISPLAY_SUBOP_MAP_SCANOUT,
+            DISPLAY_SUBOP_PRESENT,
             DISPLAY_SUBOP_PRESENT_STATUS,
+            DISPLAY_SUBOP_BIND_WAKE,
         ] {
             assert_ne!(
                 dispatch_native_zeroed(SYSCALL_NR_DISPLAY, subop),

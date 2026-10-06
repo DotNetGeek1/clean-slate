@@ -1,6 +1,8 @@
 //! Host-test scanout backend with `FakeDisplay`'s copy-at-completion semantics.
 
-use clean_slate_graphics::{BufferLayout, BufferRect, DisplayMode, PixelFormat, Scale120};
+use clean_slate_graphics::{
+    BufferLayout, BufferRect, DisplayMode, PixelFormat, Scale120, REFERENCE_MODE,
+};
 
 use super::source::{ContiguousFrame, FrameSource, FrameSourceId, FrameSourceKind, PhysExtent};
 use super::{BackendError, ScanoutBackend, Submitted};
@@ -57,6 +59,7 @@ pub(crate) enum Reply {
 }
 
 pub(crate) struct RecordingScanout {
+    mode: DisplayMode,
     pub(crate) scanout: Vec<u8>,
     pub(crate) reply: Reply,
     pub(crate) reject_bind: bool,
@@ -67,8 +70,18 @@ pub(crate) struct RecordingScanout {
 
 impl RecordingScanout {
     pub(crate) fn new(reply: Reply) -> Self {
+        Self::with_mode(small_mode(), reply)
+    }
+
+    /// A backend in the frozen reference mode, for the kernel-owned scanout buffers.
+    pub(crate) fn reference(reply: Reply) -> Self {
+        Self::with_mode(REFERENCE_MODE, reply)
+    }
+
+    fn with_mode(mode: DisplayMode, reply: Reply) -> Self {
         Self {
-            scanout: vec![SENTINEL; BYTES],
+            mode,
+            scanout: vec![SENTINEL; mode.stride_bytes as usize * mode.height_px as usize],
             reply,
             reject_bind: false,
             binds: 0,
@@ -80,7 +93,7 @@ impl RecordingScanout {
     /// Hardware finished the pending present: its damage lands on scanout now.
     pub(crate) fn finish(&mut self) {
         if let Some((frame, damage)) = self.staged.take() {
-            copy_damage(&frame, &damage, &mut self.scanout);
+            copy_damage(&frame, &damage, self.mode.stride_bytes, &mut self.scanout);
         }
     }
 
@@ -90,12 +103,12 @@ impl RecordingScanout {
     }
 }
 
-fn copy_damage(frame: &[u8], damage: &[BufferRect], scanout: &mut [u8]) {
+fn copy_damage(frame: &[u8], damage: &[BufferRect], stride: u32, scanout: &mut [u8]) {
     for r in damage {
         let x0 = usize::from(r.x) * 4;
         let x1 = x0 + usize::from(r.width) * 4;
         for row in usize::from(r.y)..usize::from(r.y) + usize::from(r.height) {
-            let base = row * STRIDE as usize;
+            let base = row * stride as usize;
             scanout[base + x0..base + x1].copy_from_slice(&frame[base + x0..base + x1]);
         }
     }
@@ -103,7 +116,7 @@ fn copy_damage(frame: &[u8], damage: &[BufferRect], scanout: &mut [u8]) {
 
 impl ScanoutBackend for RecordingScanout {
     fn mode(&self) -> DisplayMode {
-        small_mode()
+        self.mode
     }
 
     fn bind(&mut self, _index: u8, _source: &dyn FrameSource) -> Result<(), BackendError> {
@@ -121,13 +134,14 @@ impl ScanoutBackend for RecordingScanout {
         damage: &[BufferRect],
     ) -> Result<Submitted, BackendError> {
         self.submits += 1;
-        let mut frame = Vec::with_capacity(BYTES);
+        let len = self.scanout.len();
+        let mut frame = Vec::with_capacity(len);
         source
-            .for_each_span(0, BYTES, &mut |span| frame.extend_from_slice(span))
+            .for_each_span(0, len, &mut |span| frame.extend_from_slice(span))
             .map_err(|_| BackendError::SourceRejected)?;
         match self.reply {
             Reply::Completed => {
-                copy_damage(&frame, damage, &mut self.scanout);
+                copy_damage(&frame, damage, self.mode.stride_bytes, &mut self.scanout);
                 Ok(Submitted::Completed)
             }
             Reply::Pending => {

@@ -6,10 +6,9 @@
 //! and timeout are events delivered by the backend's interrupt path and the kernel timeout
 //! registry; nothing here polls.
 
-#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
-use clean_slate_graphics::display::PresentRequest;
 use clean_slate_graphics::display::{
-    DisplayError, DisplayModeInfo, PresentState, PresentStatus, MAX_PRESENTS_IN_FLIGHT,
+    DisplayError, DisplayModeInfo, PresentRequest, PresentState, PresentStatus,
+    MAX_PRESENTS_IN_FLIGHT,
 };
 #[cfg(test)]
 use clean_slate_graphics::DISPLAY_COMMAND_TIMEOUT_NS;
@@ -18,10 +17,8 @@ use clean_slate_graphics::{
     SCANOUT_BUFFER_COUNT,
 };
 
-#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 use super::source::{FrameSource, FrameSourceId};
 use super::PRIMARY_OUTPUT_INDEX;
-#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 use super::{BackendError, ScanoutBackend, Submitted};
 
 const _: () = assert!(MAX_PRESENTS_IN_FLIGHT == 1);
@@ -39,7 +36,6 @@ struct InFlight {
 pub(crate) struct DisplayState {
     output: OutputId,
     mode: DisplayMode,
-    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     bound: [Option<FrameSourceId>; SCANOUT_BUFFER_COUNT],
     reset_required: bool,
     poisoned: bool,
@@ -62,7 +58,6 @@ impl DisplayState {
             output: OutputId::new(PRIMARY_OUTPUT_INDEX, 1)
                 .map_err(|_| DisplayError::ModeUnavailable)?,
             mode,
-            #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
             bound: [None; SCANOUT_BUFFER_COUNT],
             reset_required: false,
             poisoned: false,
@@ -119,21 +114,26 @@ impl DisplayState {
         None
     }
 
-    /// Binds scanout buffer `index` to `source`; later presents of `index` must name the same source.
-    /// Refused while the output needs a reset or is poisoned, and while `index` is being scanned out.
-    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
-    pub(crate) fn bind(
-        &mut self,
-        backend: &mut dyn ScanoutBackend,
-        index: u8,
-        source: &dyn FrameSource,
-    ) -> Result<(), DisplayError> {
+    /// `Poisoned`, then `ResetRequired`: the backend-state step of every write subop.
+    pub(crate) fn check_accepting(&self) -> Result<(), DisplayError> {
         if self.poisoned {
             return Err(DisplayError::Poisoned);
         }
         if self.reset_required {
             return Err(DisplayError::ResetRequired);
         }
+        Ok(())
+    }
+
+    /// Binds scanout buffer `index` to `source`; later presents of `index` must name the same source.
+    /// Refused while the output needs a reset or is poisoned, and while `index` is being scanned out.
+    pub(crate) fn bind(
+        &mut self,
+        backend: &mut dyn ScanoutBackend,
+        index: u8,
+        source: &dyn FrameSource,
+    ) -> Result<(), DisplayError> {
+        self.check_accepting()?;
         if self.in_flight_index() == Some(index) {
             return Err(DisplayError::BufferBusy);
         }
@@ -153,7 +153,6 @@ impl DisplayState {
 
     /// Returns `present_seq`. A backend failure after acceptance is reported through
     /// `PresentStatus`, never as this call's error.
-    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     pub(crate) fn present(
         &mut self,
         backend: &mut dyn ScanoutBackend,
@@ -161,12 +160,7 @@ impl DisplayState {
         request: &PresentRequest,
         now_ns: u64,
     ) -> Result<u64, DisplayError> {
-        if self.poisoned {
-            return Err(DisplayError::Poisoned);
-        }
-        if self.reset_required {
-            return Err(DisplayError::ResetRequired);
-        }
+        self.check_accepting()?;
         request.validate(self.output, &self.mode)?;
         if self.bound[usize::from(request.buffer_index)] != Some(source.id())
             || Ok(source.layout()) != mode_layout(&self.mode)
@@ -244,7 +238,6 @@ impl DisplayState {
         }
     }
 
-    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     fn record_success(&mut self, seq: u64, now_ns: u64) {
         self.completed_seq = seq;
         self.completed_ns = now_ns.max(1);
@@ -252,7 +245,6 @@ impl DisplayState {
 
     /// Every failure other than a timeout needs a reset: a failed or rejected copy leaves scanout
     /// contents undefined.
-    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     fn record_failure(&mut self, seq: u64, error: BackendError, now_ns: u64) {
         self.record_success(seq, now_ns);
         self.last_error = Some(match error {
