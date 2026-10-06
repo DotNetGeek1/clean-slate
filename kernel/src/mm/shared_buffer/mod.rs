@@ -198,6 +198,16 @@ fn reconcile_slot(slot: usize) {
     }
 }
 
+/// Whether `handle` is the authority of a Live row in `pid`'s window. A capability drop refuses
+/// such a handle rather than orphaning the row, as owner `RELEASE` refuses a mapped buffer.
+pub(crate) fn capability_backs_live_row(pid: u64, handle: CapabilityHandle) -> bool {
+    state().windows.get(pid).is_some_and(|window| {
+        window.rows().iter().any(|row| {
+            row.state == RowState::Live && row.authority == MappingAuthority::Capability(handle)
+        })
+    })
+}
+
 /// Rows of any state in `pid`'s window (teardown step 5 removes exactly these).
 pub(crate) fn mapping_count(pid: u64) -> usize {
     state().windows.get(pid).map_or(0, |window| {

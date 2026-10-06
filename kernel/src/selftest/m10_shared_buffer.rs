@@ -6,7 +6,7 @@ use crate::arch::x86_64::interrupt_context::InterruptContext;
 use crate::capability::bootstrap_grant::GRANT_SUBOP_CLAIM;
 use crate::capability::delegation::DELEGATE_OP_DELEGATE;
 use crate::capability::grant_root;
-use crate::capability::revocation::REVOKE_OP_REVOKE;
+use crate::capability::revocation::{REVOKE_OP_DROP, REVOKE_OP_REVOKE};
 use crate::capability::{live_capability_count, with_capability_space};
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
@@ -48,8 +48,8 @@ use clean_slate_native_abi::{
     MAX_SHARED_BUFFERS_PER_OWNER, MAX_SHARED_BUFFER_BYTES, SHARED_BUFFER_ACCESS_READ,
     SHARED_BUFFER_ACCESS_READ_WRITE, SHARED_BUFFER_INFO_BYTES, SHARED_BUFFER_SUBOP_ALLOCATE,
     SHARED_BUFFER_SUBOP_MAP, SHARED_BUFFER_SUBOP_QUERY, SHARED_BUFFER_SUBOP_RELEASE,
-    SHARED_BUFFER_SUBOP_UNMAP, SHARED_WINDOW_BASE, STATUS_EACCES, STATUS_EINVAL, STATUS_ENOSPC,
-    STATUS_ESTALE,
+    SHARED_BUFFER_SUBOP_UNMAP, SHARED_WINDOW_BASE, STATUS_EACCES, STATUS_EAGAIN, STATUS_EINVAL,
+    STATUS_ENOSPC, STATUS_ESTALE,
 };
 use clean_slate_native_abi::{PortParams, PortRecvRecord, RecvKind};
 use clean_slate_service_fixtures::m6_fixture::{
@@ -89,6 +89,7 @@ const CHECK_TX_HANDLE: u64 = 27;
 const CHECK_TX_RECEIVED: u64 = 28;
 const CHECK_TX_RECEIVER_GONE: u64 = 29;
 const CHECK_TX_RECLAIMED: u64 = 30;
+const CHECK_HOLDER_DROPPED: u64 = 31;
 
 /// Every fixture's first live mapping lands in row 0 of its window.
 const FIRST_ROW_VA: u64 = SHARED_WINDOW_BASE;
@@ -333,6 +334,10 @@ fn step_sb_release(handle: u64) -> M6FixtureStep {
     )
 }
 
+fn step_cap_drop(handle: u64) -> M6FixtureStep {
+    M6FixtureStep::syscall(SYSCALL_NR_CAP_REVOKE, [REVOKE_OP_DROP, handle, 0, 0, 0, 0])
+}
+
 fn step_delegate(parent: u64, target_pid: u64, rights: u64) -> M6FixtureStep {
     M6FixtureStep::syscall(
         SYSCALL_NR_CAP_DELEGATE,
@@ -483,6 +488,39 @@ fn check_map_phase(pid_w: u64, pid_r: u64, id: SharedBufferId) {
     kernel_log_line("[M10.SB] cross-process map/read OK");
 }
 
+/// #200: `pid` dropped its read child `raw_handle`; only that record went away.
+fn check_holder_dropped(pid: u64, raw_handle: u64) {
+    let state = state_mut();
+    let id = state.active_buffer_id;
+    let w_pid = state.peer_pids[ROLE_W as usize];
+    let child = CapabilityHandle::decode(raw_handle)
+        .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] dropped handle decode"));
+    let root = CapabilityHandle::decode(state.owner_root_handle)
+        .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] owner root decode"));
+    if with_capability_space(|table| table.record(child)).is_ok() {
+        fatal_kernel_error("[M10.SB] dropped handle still resolves");
+    }
+    let owner = with_capability_space(|table| table.record(root))
+        .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] drop took the owner root"));
+    if owner.state != CapabilityState::Live || owner.holder != HolderId(w_pid) {
+        fatal_kernel_error("[M10.SB] owner root changed by a holder drop");
+    }
+    let live = inspect::buffer(id)
+        .unwrap_or_else(|| fatal_kernel_error("[M10.SB] holder drop retired the buffer"));
+    if live.0 != BufferState::Live || live.1 != 1 {
+        fatal_kernel_error("[M10.SB] holder drop attachment count");
+    }
+    if inspect::mapping(pid, id).is_some() || crate::mm::shared_buffer::mapping_count(pid) != 0 {
+        fatal_kernel_error("[M10.SB] holder drop left a reader row");
+    }
+    match inspect::mapping(w_pid, id) {
+        Some((_, true, SharedBufferAccess::ReadWrite)) => {}
+        _ => fatal_kernel_error("[M10.SB] holder drop touched the owner mapping"),
+    }
+    inspect::check_consistency().unwrap_or_else(|_| fatal_kernel_error("[M10.SB] consistency"));
+    kernel_log_line("[M10.SB] holder drop left owner intact OK");
+}
+
 fn buffer_fully_reclaimed(id: SharedBufferId) {
     match inspect::buffer(id) {
         None => {}
@@ -574,7 +612,15 @@ fn build_map_reader_program() -> M6FixtureBootstrap {
     );
     push_step(&mut program, step_sb_query(hr, arg_data(0)).expect_eq(0));
     push_step(&mut program, step_lane_ok(CHECK_MAP, 0));
+    push_step(&mut program, step_cap_drop(hr).expect_eq(STATUS_EAGAIN));
     push_step(&mut program, step_sb_unmap(vr).expect_eq(0));
+    push_step(&mut program, step_cap_drop(hr).expect_eq(0));
+    push_step(&mut program, step_lane_ok(CHECK_HOLDER_DROPPED, hr));
+    push_step(&mut program, step_cap_drop(hr).expect_eq(STATUS_ESTALE));
+    push_step(
+        &mut program,
+        step_sb_map(hr, SHARED_BUFFER_ACCESS_READ).expect_eq(STATUS_ESTALE),
+    );
     push_step(&mut program, end_turn_step(TURN_MAP_R));
     program
 }
@@ -644,6 +690,10 @@ fn build_deny_intruder_program() -> M6FixtureBootstrap {
     push_step(
         &mut program,
         step_sb_query(arg_result(raw), arg_data(0)).expect_eq(STATUS_EACCES),
+    );
+    push_step(
+        &mut program,
+        step_cap_drop(arg_result(raw)).expect_eq(STATUS_EACCES),
     );
     let wire = push_step(&mut program, step_lane_query(CHECK_BUFFER_ID_WIRE, 0));
     push_step(
@@ -1374,6 +1424,10 @@ fn build_transfer_server_program() -> M6FixtureBootstrap {
         &mut program,
         M6FixtureStep::verify(va, KIB_64, TX_FILL_SEED, PATTERN_INCREMENTING),
     );
+    push_step(
+        &mut program,
+        step_cap_drop(arg_result(child)).expect_eq(STATUS_EAGAIN),
+    );
     push_step(&mut program, step_lane_ok(CHECK_RECORD_FAULT_VA, va));
     push_step(&mut program, M6FixtureStep::fault_at(va));
     program
@@ -1779,6 +1833,10 @@ fn lane_check_handler(pid: u64, check: u64, arg: u64) -> u64 {
         }
         CHECK_BUFFER_RECLAIMED => {
             buffer_fully_reclaimed(state_mut().active_buffer_id);
+            0
+        }
+        CHECK_HOLDER_DROPPED => {
+            check_holder_dropped(pid, arg);
             0
         }
         CHECK_OWNER_ROOT_RAW => state_mut().owner_root_handle,

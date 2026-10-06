@@ -134,11 +134,12 @@ const M10_NXE_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[M10.NX] PASS",
 ];
 const M10_NXE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M10_SHARED_BUFFER_ACCEPTANCE_MARKERS: [&str; 17] = [
+const M10_SHARED_BUFFER_ACCEPTANCE_MARKERS: [&str; 18] = [
     "[CPU ] NXE enabled nx=1",
     "[M10.SB] creating",
     "[M10.SB] nx exec fault err=0x15 OK",
     "[M10.SB] cross-process map/read OK",
+    "[M10.SB] holder drop left owner intact OK",
     "[M10.SB] unauthorized denied OK",
     "[M10.SB] stale id denied OK",
     "[M10.SB] exhaustion deterministic OK",
