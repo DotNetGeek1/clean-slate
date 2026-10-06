@@ -45,19 +45,20 @@ Items marked **(planned)** are fixed in shape but not implemented; their owning 
 
 ### Compositor (#112)
 
-`clean-slate-compositor` is `no_std` and `forbid(unsafe_code)`. The core never issues a syscall; it reaches the kernel only through five traits in `compositor::backend`, so the CPL3 adapter (`src/bin/compositor.rs`) is a thin layer over syscalls 16–20 and host tests drive the same core:
+`clean-slate-compositor` is `no_std`. Its library (`src/lib.rs`: the core, backend traits and fakes) is `forbid(unsafe_code)`; the CPL3 adapter binaries are not — `src/bin/compositor.rs` uses `unsafe` for the `syscall` instruction, the launch page, scanout slices and volatile reads of client shared buffers. The core never issues a syscall; it reaches the kernel only through five traits in `compositor::backend`, so the CPL3 adapter (`src/bin/compositor.rs`) is a thin layer over syscalls 16–20 and host tests drive the same core:
 
 | Trait | Kernel surface | Host fake |
 |---|---|---|
 | `PortServer` | syscall 17 `RECV` (non-blocking), `POST`, `DISCONNECT` | `FakePort` |
-| `SharedBufferMapper` | syscall 16 `MAP` (read) / `UNMAP` of the transferred `SharedBuffer{READ}` child | `FakeSharedMemory` |
+| `SharedBufferMapper` | syscall 16 `MAP` (read) / `UNMAP` of the transferred `SharedBuffer{READ}` child, then `CAP_REVOKE` `DROP` of that child; `read` copies a bounded span out of the mapping | `FakeSharedMemory` |
 | `DisplayBackend` | syscall 18 `QUERY_MODE`, `MAP_SCANOUT`, `PRESENT`, `PRESENT_STATUS` | `FakeDisplay` |
 | `InputSource` | syscall 19 `READ_BATCH` (woken by syscall 19 `BIND_WAKE`, bit 2) | `FakeInput` |
 | `WorkWaiter` | syscall 20 `WAIT`, `NOW` | `ScriptedWaiter` |
 
-- **Wake bits.** Port requests bit 0, port notices bit 1, input bit 2, display bit 3 (`compositor::backend::WAKE_*`). Without display `BIND_WAKE` the loop sets a bounded deadline only while a present is in flight; an idle desktop always blocks with no deadline. Input is read only on bit 2: each input wake re-reads `READ_BATCH` without waiting until a batch comes back short (the queue is then empty, as the edge-triggered wake requires). If input `BIND_WAKE` is refused, the adapter runs without input.
+- **Wake bits.** Port requests bit 0, port notices bit 1, input bit 2, display bit 3 (`compositor::backend::WAKE_*`). Without display `BIND_WAKE` the loop sets a bounded deadline only while a present is in flight; an idle desktop always blocks with no deadline. A deadline needs a calibrated clock (`WORK_SET NOW` succeeds): without one `WaitRequest::plan` turns every wait into a blocking wait on wake bits, never `NONBLOCK`, and the adapter refuses to start unless display `BIND_WAKE` succeeded (`can_observe_presents`), since nothing else could report a completed present without spinning. Once the display wakes the work set, the clock is needed only for the present timeout and stall retries. Input is read only on bit 2: each input wake re-reads `READ_BATCH` without waiting until a batch comes back short (the queue is then empty, as the edge-triggered wake requires). If input `BIND_WAKE` is refused, the adapter runs without input.
 - **Isolation.** Every object lookup goes through the connection's own `ObjectTable`; scene and stacking keys are `(ConnectionId, SurfaceId)`. Role authority comes only from the kernel envelope's rights.
-- **Pixels.** Read only through the mapping of an explicit `RegisterBuffer` transfer, bounded to the attested `byte_len`. The compositor never sees a physical address.
+- **Pixels.** Read only through the mapping of an explicit `RegisterBuffer` transfer, bounded to the attested `byte_len`. The client can write its buffer at any time, so the core never borrows mapped memory: `compose::paint` copies each damaged row span into a stack stage through `SharedBufferMapper::read` (volatile loads in the adapter) and blits from the copy. A concurrent write can tear a frame, never the compositor. The compositor never sees a physical address.
+- **Capability release.** Every transferred child is released exactly once: `UNMAP` then `DROP` when its registration ends (`UnregisterBuffer`, client close, exit or revoke, compositor teardown), or `DROP` alone for a rejected or stray transfer.
 - **Presentation.** Damage is clipped to the output, merged into at most `MAX_PRESENT_DAMAGE_RECTS`, and skipped where opaque surfaces above cover it. Fully occluded surfaces get no frame callback. A move or restack damages the old and new footprint and needs no client repaint.
 - **Launch bootstrap (P5, planned).** The adapter reads `{ self_pid, graphics_resource_id }` from the launch page and finds its `Graphics{GFX_SERVE}`, `Display` and `Input` handles with each `FIND_HANDLE`.
 - **#115 hooks.** `WindowPolicy` (placement, interactive move/resize, seat events with hit-test results), `Compositor::{move_surface, raise, configure_window, request_close, post_event, mint_serial, surface_at}`.

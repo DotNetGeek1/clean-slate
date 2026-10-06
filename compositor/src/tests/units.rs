@@ -9,8 +9,13 @@ use clean_slate_graphics::protocol::{DisconnectReason, Tagged};
 use clean_slate_graphics::role::Layer;
 use clean_slate_raster::{Canvas, Color};
 
+use clean_slate_capability::Rights;
+use clean_slate_native_abi::TransferredCap;
+
+use crate::backend::{BufferMapping, SharedBufferMapper};
 use crate::client::{ClientSlot, Outbox};
 use crate::compose::{self, Footprint, OpaqueCover, Visual};
+use crate::fake::FakeSharedMemory;
 use crate::input::{Seat, SeatEvent};
 use crate::present::{DisplayHealth, PresentTracker};
 use crate::scene::Scene;
@@ -55,12 +60,29 @@ fn opaque_cover_follows_format_and_region() {
     assert!(compose::contains(r(0, 0, 4, 4), r(0, 0, 0, 0)));
 }
 
+type SmallShm = FakeSharedMemory<2, 256>;
+
+/// Allocates `buffer_id` filled with `pixel` and maps it as a compositor read child.
+fn mapped(shm: &mut SmallShm, buffer_id: u64, byte_len: usize, pixel: [u8; 4]) -> BufferMapping {
+    assert!(shm.allocate(buffer_id, byte_len));
+    super::fill(shm.client_bytes(buffer_id).unwrap(), pixel);
+    shm.map_read(&TransferredCap {
+        handle: 0x100 + buffer_id,
+        buffer_id,
+        byte_len: byte_len as u64,
+        rights: Rights::READ.bits(),
+        class: clean_slate_capability::ResourceClass::SharedBuffer.as_u8(),
+    })
+    .unwrap()
+}
+
 #[test]
 fn paint_skips_everything_below_the_topmost_opaque_cover() {
     let dst_layout = layout(8, 8, PixelFormat::Xrgb8888);
     let mut dst = vec![0u8; dst_layout.byte_len()];
-    let red = [0u8, 0, 0xff, 0xff].repeat(64);
-    let blue = [0xffu8, 0, 0, 0xff].repeat(64);
+    let mut shm = SmallShm::new();
+    let red = mapped(&mut shm, 1, 256, [0, 0, 0xff, 0xff]);
+    let blue = mapped(&mut shm, 2, 64, [0xff, 0, 0, 0xff]);
     let visuals = [
         Visual {
             footprint: Footprint {
@@ -68,7 +90,7 @@ fn paint_skips_everything_below_the_topmost_opaque_cover() {
                 cover: OpaqueCover::Full,
             },
             layout: dst_layout,
-            bytes: &red,
+            mapping: red,
         },
         Visual {
             footprint: Footprint {
@@ -76,27 +98,76 @@ fn paint_skips_everything_below_the_topmost_opaque_cover() {
                 cover: OpaqueCover::Full,
             },
             layout: layout(4, 4, PixelFormat::Xrgb8888),
-            bytes: &blue[..64],
+            mapping: blue,
         },
     ];
-    let mut canvas = Canvas::new(&mut dst, dst_layout).unwrap();
     let background = Color::opaque(1, 2, 3);
+    let paint = |dst: &mut [u8], damage: Rect, visuals: &[Visual]| {
+        let mut canvas = Canvas::new(dst, dst_layout).unwrap();
+        compose::paint(&mut canvas, &[damage], visuals, &shm, background)
+    };
+    let px = |dst: &[u8], x: usize, y: usize| dst[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4].to_vec();
     // Inside the top surface: one blit; straddling: both; outside everything: background only.
+    assert_eq!(paint(&mut dst, r(3, 3, 2, 2), &visuals), 1);
+    assert_eq!(paint(&mut dst, r(0, 0, 4, 4), &visuals), 2);
+    assert_eq!(px(&dst, 1, 1), [0, 0, 0xff, 0xff], "painted from the copy");
+    assert_eq!(px(&dst, 3, 3), [0xff, 0, 0, 0xff]);
+    assert_eq!(paint(&mut dst, r(0, 0, 8, 8), &visuals[1..]), 1);
+    assert_eq!(px(&dst, 0, 0), [3, 2, 1, 0xff]);
+    assert_eq!(px(&dst, 3, 3), [0xff, 0, 0, 0xff]);
+}
+
+#[test]
+fn paint_never_reads_past_the_attested_length() {
+    let dst_layout = layout(8, 8, PixelFormat::Xrgb8888);
+    let mut dst = vec![0u8; dst_layout.byte_len()];
+    let mut shm = SmallShm::new();
+    // 4x4 layout needs 64 bytes; the kernel attested only 60.
+    let short = mapped(&mut shm, 1, 60, [0xff, 0, 0, 0xff]);
+    let visual = Visual {
+        footprint: Footprint {
+            rect: r(0, 0, 4, 4),
+            cover: OpaqueCover::Full,
+        },
+        layout: layout(4, 4, PixelFormat::Xrgb8888),
+        mapping: short,
+    };
+    let mut canvas = Canvas::new(&mut dst, dst_layout).unwrap();
     assert_eq!(
-        compose::paint(&mut canvas, &[r(3, 3, 2, 2)], &visuals, background),
-        1
+        compose::paint(
+            &mut canvas,
+            &[r(0, 0, 4, 4)],
+            &[visual],
+            &shm,
+            Color::opaque(1, 2, 3)
+        ),
+        0
     );
-    assert_eq!(
-        compose::paint(&mut canvas, &[r(0, 0, 4, 4)], &visuals, background),
-        2
+    assert!(dst.chunks_exact(4).all(|px| px != [0xff, 0, 0, 0xff]));
+}
+
+#[test]
+fn shared_buffer_reads_are_bounded_copies() {
+    let mut shm = SmallShm::new();
+    let mapping = mapped(&mut shm, 1, 16, [1, 2, 3, 4]);
+    let mut out = [0u8; 8];
+    assert!(shm.read(&mapping, 8, &mut out));
+    assert_eq!(out, [1, 2, 3, 4, 1, 2, 3, 4]);
+    // The client writes after the copy; the compositor's copy is unaffected.
+    shm.client_bytes(1).unwrap()[8] = 9;
+    assert_eq!(out[0], 1);
+    let mut out = [7u8; 8];
+    assert!(!shm.read(&mapping, 9, &mut out), "span ends past byte_len");
+    assert!(!shm.read(&mapping, u64::MAX, &mut out), "offset overflow");
+    assert_eq!(out, [7; 8], "a refused read copies nothing");
+    assert!(
+        shm.read(&mapping, 16, &mut []),
+        "an empty read checks liveness"
     );
-    assert_eq!(
-        compose::paint(&mut canvas, &[r(0, 0, 8, 8)], &visuals[1..], background),
-        1
-    );
-    let px = |x: usize, y: usize| dst[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4].to_vec();
-    assert_eq!(px(0, 0), [3, 2, 1, 0xff]);
-    assert_eq!(px(3, 3), [0xff, 0, 0, 0xff]);
+    assert!(!shm.read(&BufferMapping::NONE, 0, &mut []));
+    shm.unmap(mapping);
+    assert!(!shm.read(&mapping, 0, &mut []), "unmapped");
+    assert_eq!(shm.released_handles(), &[0x101]);
 }
 
 #[test]

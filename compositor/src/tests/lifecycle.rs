@@ -60,6 +60,43 @@ fn orderly_close_releases_the_same_resources() {
 }
 
 #[test]
+fn every_registration_releases_its_capability_exactly_once() {
+    let mut h = Harness::new();
+    let mut a = h.client(2);
+    let mut b = h.client(3);
+    let shown = h.buffer(&mut a, 8, 8, RED);
+    let unregistered = h.buffer(&mut a, 8, 8, GREEN);
+    let _crashed = h.buffer(&mut b, 8, 8, BLUE);
+    h.toplevel(&mut a, shown, Point { x: 0, y: 0 });
+    let mapped = h.shm.mapped_handles().to_vec();
+    assert_eq!(mapped.len(), 3);
+    assert!(h.shm.released_handles().is_empty());
+
+    let inbox = h.roundtrip(
+        &mut a,
+        Request::UnregisterBuffer {
+            buffer: unregistered,
+        },
+    );
+    assert!(inbox.errors().is_empty(), "{inbox:?}");
+    assert_eq!(h.shm.released_handles(), &[mapped[1]], "UnregisterBuffer");
+
+    h.port.exit_holder(b.holder);
+    h.waiter.raise(WAKE_NOTICES);
+    h.pump();
+    assert_eq!(h.shm.released_handles(), &[mapped[1], mapped[2]], "exit");
+
+    a.conn.close(&mut h.port, 1).unwrap();
+    h.waiter.raise(WAKE_NOTICES);
+    h.pump();
+    for handle in &mapped {
+        assert_eq!(h.shm.releases_of(*handle), 1, "handle {handle:#x}");
+    }
+    assert_eq!(h.shm.released_handles().len(), mapped.len(), "close");
+    assert_eq!(h.shm.live_mappings(), 0);
+}
+
+#[test]
 fn ids_from_a_dead_connection_are_meaningless_to_its_successor() {
     let mut h = Harness::new();
     let mut a = h.client(2);

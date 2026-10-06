@@ -8,7 +8,7 @@ use clean_slate_graphics::surface::FrameState;
 
 use clean_slate_graphics::abi::input::READ_BATCH_MAX_RECORDS;
 
-use crate::backend::{WAKE_INPUT, WAKE_REQUESTS};
+use crate::backend::{can_observe_presents, WaitRequest, WorkWaiter, WAKE_INPUT, WAKE_REQUESTS};
 use crate::present::DisplayHealth;
 
 fn idle(h: &mut Harness) {
@@ -115,6 +115,87 @@ fn present_in_flight_sets_a_bounded_deadline_not_a_poll() {
     polled.iterate().unwrap();
     assert!(polled.comp.present().unwrap().in_flight().is_none());
     idle(&mut polled);
+}
+
+/// The production adapter's `WAIT` policy on a kernel without a calibrated clock: `NOW` fails
+/// (reads as 0) and every planned deadline goes through [`WaitRequest::plan`].
+struct ClocklessWaiter<'a> {
+    inner: &'a mut ScriptedWaiter,
+}
+
+impl WorkWaiter for ClocklessWaiter<'_> {
+    fn wait(&mut self, mask: u32, deadline_ns: Option<u64>) -> Result<u32, WaitFailure> {
+        match WaitRequest::plan(deadline_ns, false) {
+            WaitRequest::Until(deadline) => self.inner.wait(mask, Some(deadline)),
+            WaitRequest::Forever => self.inner.wait(mask, None),
+        }
+    }
+
+    fn now_ns(&mut self) -> u64 {
+        0
+    }
+}
+
+fn iterate_clockless(h: &mut Harness) -> Result<Iteration, ServiceError> {
+    let mut waiter = ClocklessWaiter {
+        inner: &mut h.waiter,
+    };
+    let mut io = Io {
+        port: &mut h.port,
+        buffers: &mut *h.shm,
+        display: &mut h.display,
+        input: &mut *h.input,
+        waiter: &mut waiter,
+    };
+    h.comp.iterate(&mut io)
+}
+
+#[test]
+fn clockless_wait_policy_never_degrades_to_a_poll() {
+    assert_eq!(WaitRequest::plan(Some(7), true), WaitRequest::Until(7));
+    assert_eq!(WaitRequest::plan(Some(7), false), WaitRequest::Forever);
+    assert_eq!(WaitRequest::plan(None, true), WaitRequest::Forever);
+    assert_eq!(WaitRequest::plan(None, false), WaitRequest::Forever);
+    assert!(can_observe_presents(true, false));
+    assert!(can_observe_presents(false, true));
+    assert!(
+        !can_observe_presents(false, false),
+        "no clock and no display wake: the adapter refuses to start"
+    );
+}
+
+#[test]
+fn present_in_flight_without_a_clock_blocks_instead_of_spinning() {
+    let mut h = Harness::new();
+    h.auto_complete = false;
+    iterate_clockless(&mut h).unwrap();
+    assert_eq!(h.presents(), 1, "the first paint is in flight");
+    assert!(h.comp.present().unwrap().in_flight().is_some());
+    assert!(
+        matches!(h.comp.plan_wait(0), WaitPlan::Block(Some(_))),
+        "the core still plans a present deadline"
+    );
+
+    let waits = h.waiter.waits;
+    for n in 1..=8 {
+        assert_eq!(
+            iterate_clockless(&mut h),
+            Err(ServiceError::Wait(WaitFailure(WAIT_WOULD_BLOCK_FOREVER))),
+            "iteration {n} must block in WAIT"
+        );
+        assert_eq!(h.waiter.waits, waits + n, "exactly one WAIT per iteration");
+    }
+    assert_eq!(h.waiter.deadline_wakes, 0, "no deadline reached the kernel");
+    assert_eq!(h.presents(), 1);
+
+    h.complete_present();
+    iterate_clockless(&mut h).unwrap();
+    assert!(h.comp.present().unwrap().in_flight().is_none());
+    assert_eq!(
+        iterate_clockless(&mut h),
+        Err(ServiceError::Wait(WaitFailure(WAIT_WOULD_BLOCK_FOREVER))),
+        "idle again after the display wake"
+    );
 }
 
 #[test]

@@ -27,8 +27,9 @@ use clean_slate_native_abi::{
 use clean_slate_raster::{Canvas, Color};
 
 use crate::backend::{
-    DisplayBackend, InputSource, MapFailure, PortFailure, PortServer, SharedBufferMapper,
-    WaitFailure, WorkWaiter, WAKE_ALL, WAKE_DISPLAY, WAKE_INPUT, WAKE_NOTICES, WAKE_REQUESTS,
+    BufferMapping, DisplayBackend, InputSource, MapFailure, PortFailure, PortServer,
+    SharedBufferMapper, WaitFailure, WorkWaiter, WAKE_ALL, WAKE_DISPLAY, WAKE_INPUT, WAKE_NOTICES,
+    WAKE_REQUESTS,
 };
 use crate::client::{BufferEntry, ClientIdentity, ClientSlot, SurfaceEntry, WindowEntry};
 use crate::compose::{self, Footprint, OpaqueCover, Visual};
@@ -1163,7 +1164,7 @@ impl<P: WindowPolicy> Compositor<P> {
                     cover: OpaqueCover::None,
                 },
                 layout: dst_layout,
-                bytes: &[],
+                mapping: BufferMapping::NONE,
             };
             let mut visuals = [filler; MAX_SURFACES];
             let mut n = 0;
@@ -1181,13 +1182,13 @@ impl<P: WindowPolicy> Compositor<P> {
                 let Ok(entry) = self.clients[client].objects.buffer(buffer) else {
                     continue;
                 };
-                let Some(bytes) = buffers.bytes(&entry.mapping) else {
+                if !buffers.read(&entry.mapping, 0, &mut []) {
                     continue;
-                };
+                }
                 visuals[n] = Visual {
                     footprint: footprints[position],
                     layout,
-                    bytes,
+                    mapping: entry.mapping,
                 };
                 n += 1;
             }
@@ -1209,6 +1210,7 @@ impl<P: WindowPolicy> Compositor<P> {
                 &mut canvas,
                 &damage_rects[..damage_len],
                 &visuals[..n],
+                buffers,
                 background,
             )
         };
