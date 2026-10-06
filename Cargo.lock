@@ -197,6 +197,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "clean-slate-playground"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-capability",
+ "clean-slate-compositor",
+ "clean-slate-graphics",
+ "clean-slate-native-abi",
+ "clean-slate-port",
+ "clean-slate-raster",
+ "clean-slate-ui",
+]
+
+[[package]]
 name = "clean-slate-port"
 version = "0.0.1"
 dependencies = [

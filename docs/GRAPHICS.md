@@ -62,6 +62,19 @@ Items marked **(planned)** are fixed in shape but not implemented; their owning 
 - **Launch bootstrap (P5, planned).** The adapter reads `{ self_pid, graphics_resource_id }` from the launch page and finds its `Graphics{GFX_SERVE}`, `Display` and `Input` handles with each `FIND_HANDLE`.
 - **#115 hooks.** `WindowPolicy` (placement, interactive move/resize, seat events with hit-test results), `Compositor::{move_surface, raise, configure_window, request_close, post_event, mint_serial, surface_at}`.
 
+### Playground (#117)
+
+`clean-slate-playground` is the reference native app. The library is `no_std` and `forbid(unsafe_code)`; `src/bin/playground.rs` only adapts syscalls 16 and 17 to the `session::Host` trait.
+
+- **Authority.** One `Graphics{GFX_CONNECT}` capability (found with `FIND_HANDLE` for the launch page's `graphics_resource_id`) and the two buffers it allocates. No `Display`, `Input` or framebuffer access.
+- **Window.** A fixed 520x360 `Toplevel` (`SetSizeLimits` min = max) titled `System Playground`, opaque `Xrgb8888` at every tier with an opaque region covering it. It draws no title bar or frame; chrome belongs to the window manager.
+- **Input.** Only events the compositor routes to its connection: `KeyboardFocus`, `Key`, `ModifiersChanged`, pointer enter/leave/motion/button, `InputReset`, and `Configure` `ACTIVATED`.
+- **Rendering.** The panel is a pure function of a `View` snapshot. An event's damage is the set of regions whose view changed, and a damaged repaint is byte-identical to a full repaint (host-tested at Q0 and Q1).
+- **Buffers.** Two buffers, never written while busy (#110 release rule). Each buffer keeps the regions it is missing. A change with neither buffer free waits for `BufferReleased`. Commits use `request_frame = false` and never wait for `FrameDone`.
+- **Idle.** No timers. The binary blocks in `RECV_EVENT`, and an event that changes nothing visible sends nothing.
+- **Close.** `CloseRequested` leads to `DestroyWindow`, `DestroySurface` and `UnregisterBuffer` for both buffers, and exits without waiting for answers, so a compositor that never answers cannot keep it alive. The binary then sends `CLOSE`, `UNMAP`s and `RELEASE`s its buffers, and exits; the compositor's disconnect path and process teardown release anything the requests did not.
+- **Launch page (#118).** `{ self_pid: u64, graphics_resource_id: u64 }` at `0x0000_4000_0000_1000`. The session lives in a static, so the user stack only holds frames.
+
 ## Process and thread boundaries
 
 Native processes are single-threaded in M10. Each process runs one event loop that blocks; nothing spins or polls.
@@ -98,7 +111,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 | 2 | #112 | **Core landed:** `compositor/` (`clean-slate-compositor`): service loop, scene, composition, present tracking and the backend traits, host-tested against `FakePort` / `FakeDisplay` ([Compositor (#112)](#compositor-112)); CPL3 adapter `clean-slate-compositor-userspace` and client fixture `clean-slate-compositor-client-userspace`; gate `cargo xtask test-m10-compositor`. P5 launch policy, grant policy (`kernel/src/capability/graphics.rs`), sizing and the QEMU desktop lane (planned, #118) |
 | 2 | #114 | `kernel/src/device/display/{virtio_gpu.rs, virtio_gpu/}`; `kernel/src/selftest/m10_virtio_gpu.rs`; gate `test-m10-virtio-gpu` |
 | 3 | #115 | `compositor::wm` (planned) |
-| 3 | #117 | `playground/` (`clean-slate-playground`) (planned) |
+| 3 | #117 | **App landed (host side):** `playground/` (`clean-slate-playground`): layout, state, damage and rendering on `clean-slate-ui`, the sans-IO protocol session, host-tested against the compositor core ([Playground (#117)](#playground-117)); CPL3 binary `clean-slate-playground-userspace`; gate `cargo xtask test-m10-app`. Launch (service id `0x5302`) and the QEMU lane need #115 and #118 (planned) |
 | 4 | #118 | integration; P4 teardown ordering and `ResourceSnapshot` counters in `kernel/src/process/domain.rs`; gate `test-m10-desktop` (planned) |
 | 5 | #119 | `cargo xtask test-m10` and `[M10 ] PASS` (planned) |
 
