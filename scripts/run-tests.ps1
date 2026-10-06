@@ -5,11 +5,11 @@
 .DESCRIPTION
     Sets OVMF_CODE / OVMF_VARS when they are not already in the environment,
     then runs one or more `cargo xtask` acceptance tests. By default the
-    milestone gates run (test-m1, test-m2, test-m3, test-m4, test-m5, test-m6, test-m7, test-m8, test-m9); the individual
+    milestone gates run (test-m1, test-m2, test-m3, test-m4, test-m5, test-m6, test-m7, test-m8, test-m9, test-m10); the individual
     test-m3-* and test-m4-* boots are constituents of those aggregates and are skipped unless
     named explicitly or -Exhaustive is given. Constituents marked CoveredBy (every test-m9-*
-    boot and verify-m9-fixture) are steps of their aggregate, so -Exhaustive runs them only
-    through that aggregate. Pass test names (or short
+    boot and verify-m9-fixture; every test-m10-* lane and test-qmp-smoke) are steps of their
+    aggregate, so -Exhaustive runs them only through that aggregate. Pass test names (or short
     aliases) to target a subset.
 
 .PARAMETER Test
@@ -27,6 +27,7 @@
       m7 / test-m7,
       m8 / test-m8,
       m9 / m9.9 / test-m9,
+      m10 / m10.119 / test-m10, m10-desktop / m10.118 / test-m10-desktop,
       m6-fixture-smoke, m6-object / m6.3, m6-process-control / m6.4,
       m6-delegation / m6.5, m6-revocation / m6.6, m6-audit / m6.7,
       m6-capabilities / m6.8
@@ -130,6 +131,7 @@ $AllTests = [ordered]@{
     "test-m7"                   = @{ Aliases = @("m7", "m7.9"); Description = "M7 milestone gate (converged network-service path + DNS/TLS + capability broker)"; Role = "Aggregate" }
     "test-m8"                   = @{ Aliases = @("m8", "m8.9"); Description = "M8 milestone gate (fixture verify, elf/linux-abi/#92 host tests, Linux hello production path)"; Role = "Aggregate" }
     "test-m9"                   = @{ Aliases = @("m9", "m9.9"); Description = "M9 milestone gate (pinned fixture verify, ABI/ELF/rootfs/kernel host tests, every M9 constituent, BusyBox userspace convergence)"; Role = "Aggregate" }
+    "test-m10"                  = @{ Aliases = @("m10", "m10.119"); Description = "M10 milestone gate (every M10 constituent and the QMP harness smoke, then the desktop lane on both backends)"; Role = "Aggregate" }
     "test-m6-fixture-smoke"     = @{ Aliases = @("m6-fixture-smoke"); Description = "M6 scripted fixture harness smoke (constituent)"; Role = "Constituent" }
     "test-m6-object"            = @{ Aliases = @("m6-object", "m6.3"); Description = "M6.3 object-capability constituent acceptance"; Role = "Constituent" }
     "test-m7-net-service"       = @{ Aliases = @("m7-net-service", "m7.3"); Description = "M7.3 network service and driver-domain seam acceptance"; Role = "Constituent" }
@@ -161,17 +163,18 @@ $AllTests = [ordered]@{
     "test-m9-userspace"         = @{ Aliases = @("m9-userspace", "m9.107"); Description = "M9 #107 BusyBox userspace convergence acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
     "verify-m8-fixture"         = @{ Aliases = @("verify-m8-fixture"); Description = "M8.6 fixture SHA-256 and ELF metadata verify (host)"; Role = "Constituent" }
     "verify-m9-fixture"         = @{ Aliases = @("verify-m9-fixture"); Description = "M9 #104 BusyBox + rootfs fixture verify (host)"; Role = "Constituent"; CoveredBy = "test-m9" }
-    "test-m10-contract"         = @{ Aliases = @("m10-contract"); Description = "M10 #110 graphics contract host tests and UEFI builds (constituent)"; Role = "Constituent" }
-    "test-m10-compositor"       = @{ Aliases = @("m10-compositor", "m10.112"); Description = "M10 #112 compositor host tests and CPL3 builds of the compositor and client (constituent)"; Role = "Constituent" }
-    "test-m10-app"              = @{ Aliases = @("m10-app", "m10.117"); Description = "M10 #117 System Playground host tests (against the compositor core) and CPL3 build (constituent)"; Role = "Constituent" }
-    "test-m10-nxe"              = @{ Aliases = @("m10-nxe"); Description = "M10 #195 EFER.NXE enforced: CPL3 fetch from an RW+NX page faults 0x15 (constituent)"; Role = "Constituent" }
-    "test-m10-port"             = @{ Aliases = @("m10-port", "m10.200"); Description = "M10 #200 service port, capability transfer and work sets (constituent)"; Role = "Constituent" }
-    "test-qmp-smoke"            = @{ Aliases = @("qmp-smoke"); Description = "M10 #197 QMP input/screenshot harness smoke (SeaBIOS fixture, no kernel)"; Role = "Constituent" }
-    "test-m10-virtio-modern"    = @{ Aliases = @("m10-virtio-modern"); Description = "M10 #196 modern VirtIO PCI transport: host tests plus MSI-X and INTx QEMU boots (constituent)"; Role = "Constituent" }
-    "test-m10-virtio-gpu"       = @{ Aliases = @("m10-virtio-gpu"); Description = "M10 #114 VirtIO-GPU scanout: display/virtio host tests plus a modern-only virtio-gpu-pci QEMU boot (constituent)"; Role = "Constituent" }
-    "test-m10-framebuffer"      = @{ Aliases = @("m10-framebuffer"); Description = "M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (constituent)"; Role = "Constituent" }
-    "test-m10-shared-buffer"    = @{ Aliases = @("m10-shared-buffer"); Description = "M10 #195 shared-buffer acceptance (constituent)"; Role = "Constituent" }
-    "test-m10-input-smoke"      = @{ Aliases = @("m10-input-smoke"); Description = "M10 #113 i8042 input QEMU lane (controller stimulus, then QMP-injected keyboard/pointer, headless)"; Role = "Constituent" }
+    "test-m10-contract"         = @{ Aliases = @("m10-contract"); Description = "M10 #110 graphics contract host tests and UEFI builds (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
+    "test-m10-compositor"       = @{ Aliases = @("m10-compositor", "m10.112"); Description = "M10 #112 compositor host tests and CPL3 builds of the compositor and client (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
+    "test-m10-app"              = @{ Aliases = @("m10-app", "m10.117"); Description = "M10 #117 System Playground host tests (against the compositor core) and CPL3 build (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
+    "test-m10-nxe"              = @{ Aliases = @("m10-nxe"); Description = "M10 #195 EFER.NXE enforced: CPL3 fetch from an RW+NX page faults 0x15 (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
+    "test-m10-port"             = @{ Aliases = @("m10-port", "m10.200"); Description = "M10 #200 service port, capability transfer and work sets (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
+    "test-qmp-smoke"            = @{ Aliases = @("qmp-smoke"); Description = "M10 #197 QMP input/screenshot harness smoke (SeaBIOS fixture, no kernel)"; Role = "Constituent"; CoveredBy = "test-m10" }
+    "test-m10-virtio-modern"    = @{ Aliases = @("m10-virtio-modern"); Description = "M10 #196 modern VirtIO PCI transport: host tests plus MSI-X and INTx QEMU boots (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
+    "test-m10-virtio-gpu"       = @{ Aliases = @("m10-virtio-gpu"); Description = "M10 #114 VirtIO-GPU scanout: display/virtio host tests plus a modern-only virtio-gpu-pci QEMU boot (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
+    "test-m10-framebuffer"      = @{ Aliases = @("m10-framebuffer"); Description = "M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
+    "test-m10-shared-buffer"    = @{ Aliases = @("m10-shared-buffer"); Description = "M10 #195 shared-buffer acceptance (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
+    "test-m10-input-smoke"      = @{ Aliases = @("m10-input-smoke"); Description = "M10 #113 i8042 input QEMU lane (controller stimulus, then QMP-injected keyboard/pointer, headless)"; Role = "Constituent"; CoveredBy = "test-m10" }
+    "test-m10-desktop"          = @{ Aliases = @("m10-desktop", "m10.118"); Description = "M10 #118 supervised desktop on VirtIO-GPU (Q1) and the GOP framebuffer (Q0), QMP-driven, with screendump checks (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
 }
 
 function Get-DefaultSuite {
