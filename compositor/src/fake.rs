@@ -95,7 +95,15 @@ pub struct FakeSharedMemory<const SLOTS: usize, const BYTES: usize> {
     discarded: u32,
     /// Remaining `map_read` calls before `NoSpace` (`u32::MAX` = unlimited).
     map_budget: u32,
+    /// Child handles released by `unmap` or `discard`, in order (the first [`RELEASE_LOG`]).
+    released: [u64; RELEASE_LOG],
+    released_count: usize,
+    /// Child handles successfully mapped, in order (the first [`RELEASE_LOG`]).
+    mapped_log: [u64; RELEASE_LOG],
 }
+
+/// Released handles [`FakeSharedMemory`] remembers.
+pub const RELEASE_LOG: usize = 64;
 
 impl<const SLOTS: usize, const BYTES: usize> FakeSharedMemory<SLOTS, BYTES> {
     pub const fn new() -> Self {
@@ -106,6 +114,9 @@ impl<const SLOTS: usize, const BYTES: usize> FakeSharedMemory<SLOTS, BYTES> {
             unmapped: 0,
             discarded: 0,
             map_budget: u32::MAX,
+            released: [0; RELEASE_LOG],
+            released_count: 0,
+            mapped_log: [0; RELEASE_LOG],
         }
     }
 
@@ -149,6 +160,31 @@ impl<const SLOTS: usize, const BYTES: usize> FakeSharedMemory<SLOTS, BYTES> {
         self.discarded
     }
 
+    /// Child handles the compositor mapped, in order.
+    pub fn mapped_handles(&self) -> &[u64] {
+        &self.mapped_log[..(self.mapped as usize).min(RELEASE_LOG)]
+    }
+
+    /// Child handles the compositor released, in order.
+    pub fn released_handles(&self) -> &[u64] {
+        &self.released[..self.released_count.min(RELEASE_LOG)]
+    }
+
+    /// How many times `handle` was released.
+    pub fn releases_of(&self, handle: u64) -> usize {
+        self.released_handles()
+            .iter()
+            .filter(|&&released| released == handle)
+            .count()
+    }
+
+    fn note_release(&mut self, handle: u64) {
+        if let Some(slot) = self.released.get_mut(self.released_count) {
+            *slot = handle;
+        }
+        self.released_count += 1;
+    }
+
     /// Makes the next `n` maps succeed and every later one fail with `NoSpace`.
     pub fn limit_maps(&mut self, n: u32) {
         self.map_budget = n;
@@ -177,6 +213,9 @@ impl<const SLOTS: usize, const BYTES: usize> SharedBufferMapper for FakeSharedMe
         }
         let backing = self.backing[slot].as_mut().ok_or(MapFailure::Denied)?;
         backing.mappings += 1;
+        if let Some(slot) = self.mapped_log.get_mut(self.mapped as usize) {
+            *slot = transfer.handle;
+        }
         self.mapped += 1;
         Ok(BufferMapping {
             handle: transfer.handle,
@@ -186,16 +225,28 @@ impl<const SLOTS: usize, const BYTES: usize> SharedBufferMapper for FakeSharedMe
         })
     }
 
-    fn bytes(&self, mapping: &BufferMapping) -> Option<&[u8]> {
-        let slot = usize::try_from(mapping.token).ok()?;
-        let backing = (*self.backing.get(slot)?)?;
+    fn read(&self, mapping: &BufferMapping, offset: u64, dst: &mut [u8]) -> bool {
+        let Some(slot) = usize::try_from(mapping.token).ok() else {
+            return false;
+        };
+        let Some(Some(backing)) = self.backing.get(slot).copied() else {
+            return false;
+        };
         if backing.buffer_id != mapping.buffer_id || backing.mappings == 0 {
-            return None;
+            return false;
         }
-        let len = usize::try_from(mapping.byte_len)
-            .ok()?
-            .min(backing.byte_len);
-        Some(&self.store[slot][..len])
+        let limit = mapping.byte_len.min(backing.byte_len as u64);
+        let (Ok(start), Some(end)) = (
+            usize::try_from(offset),
+            offset.checked_add(dst.len() as u64),
+        ) else {
+            return false;
+        };
+        if end > limit {
+            return false;
+        }
+        dst.copy_from_slice(&self.store[slot][start..start + dst.len()]);
+        true
     }
 
     fn unmap(&mut self, mapping: BufferMapping) {
@@ -206,10 +257,12 @@ impl<const SLOTS: usize, const BYTES: usize> SharedBufferMapper for FakeSharedMe
             backing.mappings = backing.mappings.saturating_sub(1);
         }
         self.unmapped += 1;
+        self.note_release(mapping.handle);
     }
 
-    fn discard(&mut self, _transfer: &TransferredCap) {
+    fn discard(&mut self, transfer: &TransferredCap) {
         self.discarded += 1;
+        self.note_release(transfer.handle);
     }
 }
 

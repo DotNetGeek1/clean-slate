@@ -37,10 +37,12 @@ fn backend_present() -> bool {
     with_active_display(|display| display.is_some())
 }
 
+/// Every entry harvests backend completions (as the interrupt sink does); a pending reset starts
+/// only inside a subop, after its capability check (`authorize_then_reset`).
 pub(crate) fn handle_syscall_display(frame: &mut SyscallContext) {
     with_active_display(|display| {
         if let Some(display) = display {
-            display.service(monotonic_ns(), true);
+            display.service(monotonic_ns(), false);
         }
     });
     frame.rax = match frame.rdi {
@@ -67,8 +69,46 @@ pub(crate) fn handle_syscall_display(frame: &mut SyscallContext) {
     };
 }
 
+/// The subop's capability check, then the pending-reset step for a caller whose handle also
+/// carries `DISPLAY_PRESENT` (`holds_present`). A caller that fails `authorize` gets its status and
+/// never reaches the device; `reset` itself only acts for the (bindable) presenter.
+fn authorize_then_reset(
+    holder: HolderId,
+    authorize: impl FnOnce(HolderId) -> Result<(), CapabilityError>,
+    holds_present: impl FnOnce(HolderId) -> bool,
+    reset: impl FnOnce(HolderId),
+) -> Result<(), CapabilityError> {
+    authorize(holder)?;
+    if holds_present(holder) {
+        reset(holder);
+    }
+    Ok(())
+}
+
+fn start_pending_reset(holder: HolderId) {
+    with_active_display(|display| {
+        if let Some(display) = display {
+            display.service_for_presenter(holder, monotonic_ns());
+        }
+    });
+}
+
 fn authorize_present(holder: HolderId, raw_handle: u64) -> Result<(), CapabilityError> {
-    authorize_display_present(holder, raw_handle, PRIMARY_OUTPUT_INDEX).map(|_| ())
+    authorize_then_reset(
+        holder,
+        |holder| authorize_display_present(holder, raw_handle, PRIMARY_OUTPUT_INDEX).map(|_| ()),
+        |_| true,
+        start_pending_reset,
+    )
+}
+
+fn authorize_query(holder: HolderId, raw_handle: u64) -> Result<(), CapabilityError> {
+    authorize_then_reset(
+        holder,
+        |holder| authorize_display_query(holder, raw_handle, PRIMARY_OUTPUT_INDEX).map(|_| ()),
+        |holder| authorize_display_present(holder, raw_handle, PRIMARY_OUTPUT_INDEX).is_ok(),
+        start_pending_reset,
+    )
 }
 
 fn handle_map_scanout(raw_handle: u64, buffer_index: u64, out_ptr: u64, out_len: u64) -> u64 {
@@ -219,7 +259,7 @@ fn copy_out<const N: usize>(
         out_len,
         || validate_user_writable_pointer_range(out_ptr, out_len).is_ok(),
         current_holder,
-        |holder| authorize_display_query(holder, raw_handle, PRIMARY_OUTPUT_INDEX).map(|_| ()),
+        |holder| authorize_query(holder, raw_handle),
         || with_active_display(|display| display.map(|display| encode(display.state()))),
     );
     match bytes {
@@ -288,11 +328,17 @@ mod tests {
         BufferRect, OutputId, MAX_PRESENT_DAMAGE_RECTS, REFERENCE_FRAME_BYTES, REFERENCE_MODE,
     };
 
-    use super::{bind_wake, find_handle, map_scanout, present, query};
+    use core::cell::RefCell;
+
+    use super::{authorize_then_reset, bind_wake, find_handle, map_scanout, present, query};
     use crate::capability::display::{
         authorize_display_present_in, authorize_display_query_in, find_display_handle_in,
     };
     use crate::device::display::engine::DisplayState;
+    use crate::device::display::{reset_pending_for_test, ActiveDisplay};
+    use crate::mm::shared_buffer::ArenaFrames;
+
+    const SCANOUT_PAGES: u64 = (REFERENCE_FRAME_BYTES / crate::mm::PAGE_SIZE as usize) as u64;
 
     type AuthResult = Result<(), CapabilityError>;
 
@@ -705,6 +751,145 @@ mod tests {
                 Ok(())
             )),
             0
+        );
+    }
+
+    const STRANGER: HolderId = HolderId(12);
+
+    fn grant(holder: HolderId, rights: Rights) -> (CapabilityTable<8>, u64) {
+        let mut table = CapabilityTable::<8>::new();
+        let handle = table
+            .grant(
+                holder,
+                ResourceRef::display(0),
+                rights,
+                Provenance::root(holder),
+            )
+            .expect("grant")
+            .encode();
+        (table, handle)
+    }
+
+    /// `PRESENT_STATUS` as `holder`, wired like `copy_out`: query authorisation, then the reset step.
+    fn status_as(
+        holder: HolderId,
+        table: &CapabilityTable<8>,
+        handle: u64,
+        display: &RefCell<ActiveDisplay>,
+    ) -> Result<PresentStatus, u64> {
+        query::<PRESENT_STATUS_BYTES>(
+            PRESENT_STATUS_BYTES as u64,
+            || true,
+            || Ok(holder),
+            |holder| {
+                authorize_then_reset(
+                    holder,
+                    |holder| authorize_display_query_in(table, holder, handle, 0).map(|_| ()),
+                    |holder| authorize_display_present_in(table, holder, handle, 0).is_ok(),
+                    |holder| display.borrow_mut().service_for_presenter(holder, 0),
+                )
+            },
+            || Some(display.borrow().state().status().encode()),
+        )
+        .map(|bytes| PresentStatus::decode(&bytes).expect("decode"))
+    }
+
+    /// `PRESENT` as `holder`, wired like `handle_present`; the submit step is never reached here.
+    fn present_as(
+        holder: HolderId,
+        table: &CapabilityTable<8>,
+        handle: u64,
+        display: &RefCell<ActiveDisplay>,
+    ) -> u64 {
+        present(
+            PRESENT_REQUEST_BYTES as u64,
+            || Some(valid_request()),
+            || Ok(holder),
+            |holder| {
+                authorize_then_reset(
+                    holder,
+                    |holder| authorize_display_present_in(table, holder, handle, 0).map(|_| ()),
+                    |_| true,
+                    |holder| display.borrow_mut().service_for_presenter(holder, 0),
+                )
+            },
+            |_, _| Some(Err(DisplayError::ResetRequired)),
+        )
+    }
+
+    fn pending_state(display: &RefCell<ActiveDisplay>) -> PresentState {
+        display.borrow().state().status().state
+    }
+
+    #[test]
+    fn unprivileged_callers_get_their_status_and_leave_the_reset_pending() {
+        let mut frames = ArenaFrames::new(SCANOUT_PAGES + 64);
+        let display = RefCell::new(reset_pending_for_test(CALLER, &mut frames));
+        let epoch = display.borrow().state().output();
+        let (_, stranger_present) = grant(STRANGER, Rights::DISPLAY_PRESENT);
+        let (empty, _) = table_with(None);
+
+        assert_eq!(
+            status_as(STRANGER, &empty, u64::MAX, &display),
+            Err(SYSCALL_EINVAL),
+            "no capability: the bad handle's status"
+        );
+        assert!(
+            status_as(CALLER, &empty, stranger_present, &display).is_err(),
+            "a handle the caller's table does not hold"
+        );
+        assert_ne!(
+            present_as(STRANGER, &empty, u64::MAX, &display),
+            0,
+            "PRESENT without a capability"
+        );
+        assert_eq!(pending_state(&display), PresentState::ResetRequired);
+
+        let (inspect, inspect_handle) = grant(STRANGER, Rights::INSPECT);
+        let status = status_as(STRANGER, &inspect, inspect_handle, &display).expect("query right");
+        assert_eq!(
+            (status.state, status.output),
+            (PresentState::ResetRequired, epoch),
+            "a query-only holder reads the status but cannot reset"
+        );
+
+        let (present_table, present_handle) = grant(STRANGER, Rights::DISPLAY_PRESENT);
+        let status =
+            status_as(STRANGER, &present_table, present_handle, &display).expect("present right");
+        assert_eq!(
+            status.state,
+            PresentState::ResetRequired,
+            "DISPLAY_PRESENT alone is not presenter authority while another holder is bound"
+        );
+        assert_eq!(
+            present_as(STRANGER, &present_table, present_handle, &display),
+            DisplayError::ResetRequired.status()
+        );
+        assert_eq!(pending_state(&display), PresentState::ResetRequired);
+    }
+
+    #[test]
+    fn presenter_starts_the_pending_reset() {
+        let mut frames = ArenaFrames::new(SCANOUT_PAGES + 64);
+        let (table, handle) = grant(CALLER, Rights::DISPLAY_PRESENT);
+
+        let display = RefCell::new(reset_pending_for_test(CALLER, &mut frames));
+        let epoch = display.borrow().state().output().backend_epoch();
+        let status = status_as(CALLER, &table, handle, &display).expect("presenter status");
+        assert_eq!(
+            status.state,
+            PresentState::Idle,
+            "reset ran before the snapshot"
+        );
+        assert_eq!(status.output.backend_epoch(), epoch + 1);
+
+        let mut frames = ArenaFrames::new(SCANOUT_PAGES + 64);
+        let display = RefCell::new(reset_pending_for_test(CALLER, &mut frames));
+        present_as(CALLER, &table, handle, &display);
+        assert_eq!(
+            pending_state(&display),
+            PresentState::Idle,
+            "via PRESENT too"
         );
     }
 }

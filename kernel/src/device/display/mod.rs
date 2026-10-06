@@ -287,6 +287,15 @@ impl ActiveDisplay {
         }
     }
 
+    /// The syscall-18 reset step, run only once the caller's `DISPLAY_PRESENT` authority has been
+    /// checked: starts a pending reset for the bound presenter, or for any such caller while no
+    /// presenter is bound (it could bind by mapping). Everyone else leaves the reset pending.
+    pub(crate) fn service_for_presenter(&mut self, holder: HolderId, now_ns: u64) {
+        if self.presenter.check(holder, true).is_ok() {
+            self.service(now_ns, true);
+        }
+    }
+
     /// Leaves `ResetRequired` through a backend reset: a new epoch on success, `Poisoned` otherwise.
     #[cfg(test)]
     pub(crate) fn recover(&mut self) {
@@ -416,6 +425,57 @@ fn publish(display: ActiveDisplay, backend: &str) -> Result<(), DisplayError> {
 #[cfg(test)]
 pub(crate) fn install_for_test(display: Option<ActiveDisplay>) {
     without_interrupts(|| unsafe { *ACTIVE_DISPLAY.get() = display });
+}
+
+/// A recording output whose `presenter` mapped buffer 0 and whose last present failed, leaving
+/// `ResetRequired` pending.
+#[cfg(test)]
+pub(crate) fn reset_pending_for_test(
+    presenter: HolderId,
+    frames: &mut crate::mm::shared_buffer::ArenaFrames,
+) -> ActiveDisplay {
+    use test_support::{RecordingScanout, Reply};
+
+    let mut display = ActiveDisplay::new(Backend::Recording(RecordingScanout::reference(
+        Reply::Completed,
+    )))
+    .expect("display");
+    display
+        .map_scanout(presenter, 0, frames, |id, _| {
+            Ok(0x4000_0000 + u64::from(id.slot()) * 0x40_0000)
+        })
+        .expect("map 0");
+    let Backend::Recording(recording) = &mut display.backend else {
+        unreachable!("recording backend");
+    };
+    recording.reply = Reply::Fail(BackendError::Failed);
+    let damage = BufferRect {
+        x: 0,
+        y: 0,
+        width: 8,
+        height: 2,
+    };
+    let mut request = PresentRequest {
+        output: display.state().output(),
+        buffer_index: 0,
+        damage_count: 1,
+        rects: [damage; clean_slate_graphics::MAX_PRESENT_DAMAGE_RECTS],
+    };
+    request.rects[1..].fill(BufferRect {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    });
+    display
+        .present_scanout(presenter, &request, 1)
+        .expect("accepted");
+    assert_eq!(display.state().status().state, PresentState::ResetRequired);
+    let Backend::Recording(recording) = &mut display.backend else {
+        unreachable!("recording backend");
+    };
+    recording.reply = Reply::Completed;
+    display
 }
 
 /// Runs `f` on the installed output, or `None` when boot found no display backend.

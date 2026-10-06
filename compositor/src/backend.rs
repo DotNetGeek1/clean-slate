@@ -57,20 +57,37 @@ pub struct BufferMapping {
     pub handle: u64,
     /// Raw kernel `SharedBufferId` attested by the port transfer.
     pub buffer_id: u64,
-    /// Kernel-attested buffer length; [`SharedBufferMapper::bytes`] never exceeds it.
+    /// Kernel-attested buffer length; [`SharedBufferMapper::read`] never reads past it.
     pub byte_len: u64,
     pub token: u64,
 }
 
+impl BufferMapping {
+    /// No mapping; every [`SharedBufferMapper::read`] of it fails.
+    pub const NONE: Self = Self {
+        handle: 0,
+        buffer_id: 0,
+        byte_len: 0,
+        token: 0,
+    };
+}
+
 /// Read access to client pixels, only through explicit #195 shared-buffer grants.
+///
+/// The owning client keeps a read-write mapping of every buffer and may write it at any time, so
+/// the core never borrows mapped memory: [`Self::read`] copies a bounded span into
+/// compositor-owned memory. A concurrent write can tear the copy, never the compositor.
 pub trait SharedBufferMapper {
     /// Maps the transferred `SharedBuffer{READ}` child read-only.
     fn map_read(&mut self, transfer: &TransferredCap) -> Result<BufferMapping, MapFailure>;
-    /// The mapped bytes, exactly `mapping.byte_len` long, or `None` if the mapping is unknown.
-    fn bytes(&self, mapping: &BufferMapping) -> Option<&[u8]>;
-    /// Unmaps and drops the child capability; called exactly once per successful map.
+    /// Copies `dst.len()` bytes starting `offset` bytes into the mapping. Returns `false`, copying
+    /// nothing, if the mapping is unknown or the span ends past `mapping.byte_len`; an empty
+    /// `dst` therefore checks only that the mapping is live.
+    fn read(&self, mapping: &BufferMapping, offset: u64, dst: &mut [u8]) -> bool;
+    /// Unmaps, then releases the child capability (`CAP_REVOKE` `DROP`); called exactly once per
+    /// successful map.
     fn unmap(&mut self, mapping: BufferMapping);
-    /// Drops a transferred child that was never mapped (rejected or unexpected transfer).
+    /// Releases a transferred child that was never mapped (rejected or unexpected transfer).
     fn discard(&mut self, transfer: &TransferredCap);
 }
 
@@ -138,4 +155,32 @@ pub trait WorkWaiter {
     fn wait(&mut self, mask: u32, deadline_ns: Option<u64>) -> Result<u32, WaitFailure>;
     /// Monotonic nanoseconds (`WORK_SET NOW`).
     fn now_ns(&mut self) -> u64;
+}
+
+/// The `WAIT` a [`WorkWaiter`] adapter issues for a planned deadline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitRequest {
+    /// Block until a wake bit or the absolute deadline.
+    Until(u64),
+    /// Block until a wake bit.
+    Forever,
+}
+
+impl WaitRequest {
+    /// A deadline needs a calibrated clock (`WORK_SET NOW` succeeds). Without one the wait blocks
+    /// on wake bits alone; it never degrades to a non-blocking check, which would spin the
+    /// service loop for as long as the core keeps planning a deadline.
+    pub fn plan(deadline_ns: Option<u64>, has_clock: bool) -> Self {
+        match deadline_ns {
+            Some(deadline) if has_clock => Self::Until(deadline),
+            _ => Self::Forever,
+        }
+    }
+}
+
+/// Whether the loop can learn that a present completed without spinning: either the display
+/// wakes the work set ([`WAKE_DISPLAY`]) or a clock bounds the status poll. A compositor with
+/// neither must not start.
+pub fn can_observe_presents(has_clock: bool, display_wakes: bool) -> bool {
+    has_clock || display_wakes
 }

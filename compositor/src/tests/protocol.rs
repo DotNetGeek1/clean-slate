@@ -125,6 +125,11 @@ fn buffers_register_only_with_an_explicit_shared_buffer_grant() {
         assert_eq!(h.drain(&a).errors(), [ProtocolError::TransferWrongClass]);
     }
     assert_eq!(h.shm.live_mappings(), 0);
+    assert_eq!(
+        h.shm.releases_of(0x55),
+        2,
+        "rejected transfers are released, not leaked"
+    );
 
     // The successful mapping is bounded by the kernel-attested length.
     let (buffer, id) = h.buffer_with_id(&mut a, 8, 8, RED);
@@ -150,6 +155,12 @@ fn buffers_register_only_with_an_explicit_shared_buffer_grant() {
         [(_, Event::SurfaceCreated { .. })]
     ));
     assert_eq!(h.shm.discarded(), discarded + 1);
+    let stray = *h.shm.released_handles().last().unwrap();
+    assert_eq!(h.shm.releases_of(stray), 1);
+    assert!(
+        !h.shm.mapped_handles().contains(&stray),
+        "a stray child is released unmapped"
+    );
 }
 
 #[test]
