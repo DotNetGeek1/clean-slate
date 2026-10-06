@@ -1,28 +1,33 @@
-//! The playground session against the real #112 compositor core over the fake port, shared
-//! memory and display: setup, visible input response, double buffering, idle behaviour,
-//! close-time resource release, and relaunch with fresh identities.
+//! The playground session against the real compositor core (#112) and window manager (#115)
+//! with the Clean-Slate desktop policy, over the fake port, shared memory, display and raw
+//! input: setup, visible input response, double buffering, idle behaviour, window lifecycle
+//! (move, focus, close through the server-side chrome), close-time resource release, and
+//! relaunch with fresh identities.
 //!
-//! Window-manager actions (#115) are driven through the compositor's policy hooks
-//! (`post_event`, `request_close`); the CPL3 launch path (#118) is modelled by connecting a
-//! fresh holder, and exit by `CLOSE` plus `exit_holder`.
+//! Input enters as raw `RawInputRecord`s and reaches the app only through the seat and the
+//! window manager's focus and hit-test routing. The CPL3 launch path (#118) is modelled by
+//! connecting a fresh holder, and exit by `CLOSE` plus `exit_holder`.
 
 use std::boxed::Box;
 use std::vec::Vec;
 
 use clean_slate_capability::{HolderId, Rights};
-use clean_slate_compositor::backend::{WaitFailure, WAKE_DISPLAY, WAKE_REQUESTS};
+use clean_slate_compositor::backend::{WaitFailure, WAKE_DISPLAY, WAKE_INPUT, WAKE_REQUESTS};
 use clean_slate_compositor::fake::{
     FakeInput, FakeSharedMemory, ScriptedWaiter, WAIT_WOULD_BLOCK_FOREVER,
 };
-use clean_slate_compositor::{Compositor, Config, DefaultPolicy, Io, ServiceError, SurfaceKey};
+use clean_slate_compositor::{
+    Compositor, Config, DefaultPolicy, Io, ServiceError, SurfaceKey, WindowPolicy,
+};
 use clean_slate_graphics::fake::FakeDisplay;
-use clean_slate_graphics::geometry::{Fixed24_8, Point, Rect, Scale120};
-use clean_slate_graphics::ids::SurfaceId;
-use clean_slate_graphics::input::{KeyState, Modifiers, PointerButton, KEY_A};
+use clean_slate_graphics::geometry::{Point, Rect, Scale120};
+use clean_slate_graphics::ids::{InputDeviceId, KEYBOARD_INDEX, MOUSE_INDEX};
+use clean_slate_graphics::input::{KeyState, PointerButton, KEY_A};
 use clean_slate_graphics::mode::DisplayMode;
 use clean_slate_graphics::objects::ObjectKind;
 use clean_slate_graphics::pixel::PixelFormat;
 use clean_slate_graphics::protocol::{Event, Request};
+use clean_slate_graphics::raw_input::{RawInputKind, RawInputRecord};
 use clean_slate_native_abi::{EventKind, PortParams, SharedBufferId};
 use clean_slate_playground::layout::PANEL_SIZE;
 use clean_slate_playground::session::{buffer_layout, BUFFER_COUNT};
@@ -31,16 +36,23 @@ use clean_slate_playground::{
 };
 use clean_slate_port::fake::{FakeConnection, FakePort};
 use clean_slate_raster::Canvas;
+use clean_slate_ui::chrome::{ChromeControl, ChromeStyle};
 use clean_slate_ui::QualityTier;
 
-const WIDTH: u32 = 640;
-const HEIGHT: u32 = 480;
+/// The M10 reference mode, so the real Clean-Slate chrome and shell zones apply unscaled.
+const WIDTH: u32 = 1280;
+const HEIGHT: u32 = 800;
 const STRIDE: u32 = WIDTH * 4;
 const FRAME: usize = (STRIDE * HEIGHT) as usize;
 const SHM_SLOTS: usize = 4;
 /// One panel buffer (`BufferLayout::packed` may pad the stride).
 const SHM_BYTES: usize = 800 << 10;
-const STACK_BYTES: usize = 64 << 20;
+const STACK_BYTES: usize = 128 << 20;
+/// Bottom-right output corner: outside the shell rail and every cascaded window.
+const PARK: Point = Point {
+    x: WIDTH as i32 - 1,
+    y: HEIGHT as i32 - 1,
+};
 
 type Shm = FakeSharedMemory<SHM_SLOTS, SHM_BYTES>;
 
@@ -165,7 +177,7 @@ impl World {
     }
 
     /// What the #118 launch path provides: a connection and two read-write buffers whose
-    /// capabilities the app may transfer.
+    /// capabilities the app may transfer. The pointer is parked off every window afterwards.
     fn launch(&mut self, holder: u64, tier: QualityTier) -> App {
         let holder = HolderId(holder);
         let cap = self.port.add_client(holder).expect("graphics capability");
@@ -203,7 +215,8 @@ impl World {
             session.start(&mut link)
         };
         app.note(outcome);
-        self.settle(&mut app);
+        self.settle(&mut [&mut app]);
+        self.pointer_to(&mut [&mut app], PARK);
         app
     }
 
@@ -246,22 +259,72 @@ impl World {
         delivered
     }
 
-    /// Alternates compositor and app until neither has work.
-    fn settle(&mut self, app: &mut App) {
+    /// Alternates compositor and apps until none has work.
+    fn settle(&mut self, apps: &mut [&mut App]) {
         for _ in 0..64 {
             self.pump();
-            if self.deliver(app) == 0 {
+            let delivered: usize = apps.iter_mut().map(|app| self.deliver(app)).sum();
+            if delivered == 0 {
                 return;
             }
         }
-        panic!("app and compositor never settled");
+        panic!("apps and compositor never settled");
     }
 
-    /// The window manager posts `event` to the app (#115 input routing), then settles.
-    fn post(&mut self, app: &mut App, event: Event) {
-        assert!(self.comp.post_event(app.conn.id(), event));
-        self.waiter.raise(WAKE_REQUESTS);
-        self.settle(app);
+    /// Raw input from `device`, routed by the seat and the window manager, then settled.
+    fn feed(&mut self, apps: &mut [&mut App], device: u8, kinds: &[RawInputKind]) {
+        for kind in kinds {
+            assert!(self.input.push(RawInputRecord {
+                seq: 0,
+                time_ns: self.waiter.now_ns,
+                device: InputDeviceId::new(device, 1).expect("device"),
+                kind: *kind,
+            }));
+        }
+        self.waiter.raise(WAKE_INPUT);
+        self.settle(apps);
+    }
+
+    fn pointer_to(&mut self, apps: &mut [&mut App], to: Point) {
+        let at = self.comp.seat().pointer();
+        self.feed(
+            apps,
+            MOUSE_INDEX,
+            &[RawInputKind::RelMotion {
+                dx: to.x - at.x,
+                dy: to.y - at.y,
+            }],
+        );
+        assert_eq!(self.comp.seat().pointer(), to, "pointer reached {to:?}");
+    }
+
+    fn button(&mut self, apps: &mut [&mut App], button: PointerButton, state: KeyState) {
+        self.feed(apps, MOUSE_INDEX, &[RawInputKind::Button { button, state }]);
+    }
+
+    /// Left click at global `at`, then the pointer is parked so the cursor covers no window.
+    fn click_at(&mut self, apps: &mut [&mut App], at: Point) {
+        self.pointer_to(apps, at);
+        self.button(apps, PointerButton::Left, KeyState::Pressed);
+        self.button(apps, PointerButton::Left, KeyState::Released);
+        self.pointer_to(apps, PARK);
+    }
+
+    /// Left click at panel-local `local` of `app`.
+    fn click(&mut self, app: &mut App, local: Point) {
+        let at = offset(self.origin(app), local);
+        self.click_at(&mut [app], at);
+    }
+
+    fn type_key(&mut self, app: &mut App, state: KeyState) {
+        self.feed(
+            &mut [app],
+            KEYBOARD_INDEX,
+            &[RawInputKind::Key {
+                usage: KEY_A,
+                state,
+            }],
+        );
     }
 
     fn key(app: &App) -> SurfaceKey {
@@ -279,65 +342,44 @@ impl World {
             .expect("placed")
     }
 
-    fn click(&mut self, app: &mut App, at: Point) {
-        let surface = app.session.surface().expect("surface");
-        let serial = self.comp.mint_serial(app.conn.id(), false).expect("serial");
-        self.post(
-            app,
-            Event::PointerEnter {
-                serial,
-                surface,
-                x: fixed(at.x),
-                y: fixed(at.y),
-            },
-        );
-        for state in [KeyState::Pressed, KeyState::Released] {
-            let serial = self
-                .comp
-                .mint_serial(app.conn.id(), state == KeyState::Pressed)
-                .expect("serial");
-            self.post(
-                app,
-                Event::PointerButton {
-                    serial,
-                    time_ns: self.waiter.now_ns,
-                    button: PointerButton::Left,
-                    state,
-                },
-            );
+    fn chrome(&self) -> &dyn ChromeStyle {
+        self.comp.policy().chrome().expect("Clean-Slate chrome")
+    }
+
+    fn content(&self, app: &App) -> Rect {
+        let at = self.origin(app);
+        Rect {
+            x: at.x,
+            y: at.y,
+            width: PANEL_SIZE.width,
+            height: PANEL_SIZE.height,
         }
     }
 
-    fn focus(&mut self, app: &mut App, surface: Option<SurfaceId>) {
-        self.post(app, Event::KeyboardFocus { surface });
+    fn frame(&self, app: &App) -> Rect {
+        self.chrome().frame_rect(self.content(app))
     }
 
-    fn type_key(&mut self, app: &mut App, state: KeyState) {
-        let serial = self.comp.mint_serial(app.conn.id(), false).expect("serial");
-        self.post(
-            app,
-            Event::Key {
-                serial,
-                time_ns: self.waiter.now_ns,
-                usage: KEY_A,
-                state,
-                modifiers: Modifiers::from_bits(0).expect("no modifiers"),
-            },
-        );
+    fn focused(&self) -> Option<SurfaceKey> {
+        self.comp.wm().focus
     }
 
-    /// The app's panel as the display shows it (BGR of each pixel).
-    fn shown(&self, app: &App) -> Vec<u8> {
-        let origin = self.origin(app);
+    /// BGR of every display pixel in global `r`.
+    fn shown_rect(&self, r: Rect) -> Vec<u8> {
         let scanout = self.display.scanout();
         let mut out = Vec::new();
-        for y in 0..PANEL_SIZE.height {
-            for x in 0..PANEL_SIZE.width {
-                let at = ((origin.y as u32 + y) * STRIDE + (origin.x as u32 + x) * 4) as usize;
+        for y in r.y..r.y + r.height as i32 {
+            for x in r.x..r.x + r.width as i32 {
+                let at = (y as u32 * STRIDE + x as u32 * 4) as usize;
                 out.extend_from_slice(&scanout[at..at + 3]);
             }
         }
         out
+    }
+
+    /// The app's panel as the display shows it (BGR of each pixel).
+    fn shown(&self, app: &App) -> Vec<u8> {
+        self.shown_rect(self.content(app))
     }
 
     /// Closes the app as the binary does after `Exit(Closed)`: `CLOSE`, then process exit.
@@ -357,8 +399,11 @@ impl App {
     }
 }
 
-fn fixed(v: i32) -> Fixed24_8 {
-    Fixed24_8(v << 8)
+fn offset(at: Point, by: Point) -> Point {
+    Point {
+        x: at.x + by.x,
+        y: at.y + by.y,
+    }
 }
 
 fn center(r: Rect) -> Point {
@@ -401,7 +446,7 @@ fn assert_shown(world: &World, app: &App, what: &str) {
 }
 
 #[test]
-fn setup_maps_a_titled_fixed_size_toplevel_and_shows_the_panel() {
+fn setup_maps_a_focused_fixed_size_toplevel_and_shows_the_panel() {
     big_stack(|| {
         for tier in [QualityTier::Q0, QualityTier::Q1] {
             let mut world = World::new();
@@ -409,8 +454,12 @@ fn setup_maps_a_titled_fixed_size_toplevel_and_shows_the_panel() {
             assert_eq!(app.exit, None);
             assert!(app.session.is_running(), "{tier:?}");
             assert!(app.session.window().is_some());
-            assert_eq!(app.session.stats().commits, 1);
             assert_eq!(app.session.stats().protocol_errors, 0);
+            assert!(
+                app.session.app().view().window_active,
+                "{tier:?}: mapped focused"
+            );
+            assert_eq!(world.focused(), Some(World::key(&app)));
             assert_eq!(world.comp.client_count(), 1);
             assert_eq!(world.comp.budget().used(ObjectKind::Buffer), 2);
             assert_eq!(world.comp.budget().used(ObjectKind::Surface), 1);
@@ -427,8 +476,6 @@ fn clicks_and_keys_visibly_change_the_displayed_panel() {
         let mut world = World::new();
         let mut app = world.launch(7, QualityTier::Q1);
         let layout = *app.session.app().layout();
-        let surface = app.session.surface();
-        world.focus(&mut app, surface);
         let before = world.shown(&app);
 
         world.click(&mut app, center(layout.increment));
@@ -489,42 +536,34 @@ fn a_change_with_both_buffers_busy_waits_for_a_release() {
         let mut world = World::new();
         let mut app = world.launch(7, QualityTier::Q1);
         let layout = *app.session.app().layout();
-        let surface = app.session.surface().expect("surface");
-        let at = center(layout.increment);
-        let id = app.conn.id();
-        let enter = world.comp.mint_serial(id, false).expect("serial");
-        let press = world.comp.mint_serial(id, true).expect("serial");
-        let release = world.comp.mint_serial(id, false).expect("serial");
-        // All three arrive in one batch: the first commit takes the free buffer, the next
-        // changes find both busy until the compositor latches and releases one.
-        for event in [
-            Event::PointerEnter {
-                serial: enter,
-                surface,
-                x: fixed(at.x),
-                y: fixed(at.y),
-            },
-            Event::PointerButton {
-                serial: press,
-                time_ns: 0,
-                button: PointerButton::Left,
-                state: KeyState::Pressed,
-            },
-            Event::PointerButton {
-                serial: release,
-                time_ns: 0,
-                button: PointerButton::Left,
-                state: KeyState::Released,
-            },
-        ] {
-            assert!(world.comp.post_event(id, event));
-        }
-        world.waiter.raise(WAKE_REQUESTS);
-        world.settle(&mut app);
+        let at = offset(world.origin(&app), center(layout.increment));
+        let from = world.comp.seat().pointer();
+        // One raw batch: enter, press and release reach the app together, so the first
+        // commit takes the free buffer and the next changes find both busy until the
+        // compositor latches and releases one.
+        world.feed(
+            &mut [&mut app],
+            MOUSE_INDEX,
+            &[
+                RawInputKind::RelMotion {
+                    dx: at.x - from.x,
+                    dy: at.y - from.y,
+                },
+                RawInputKind::Button {
+                    button: PointerButton::Left,
+                    state: KeyState::Pressed,
+                },
+                RawInputKind::Button {
+                    button: PointerButton::Left,
+                    state: KeyState::Released,
+                },
+            ],
+        );
         let stats = app.session.stats();
         assert!(stats.deferred >= 1, "{stats:?}");
         assert_eq!(stats.protocol_errors, 0);
         assert_eq!(app.session.app().clicks(), 1);
+        world.pointer_to(&mut [&mut app], PARK);
         assert_shown(&world, &app, "after the deferred commit");
     });
 }
@@ -535,8 +574,6 @@ fn damage_sent_is_limited_to_changed_regions() {
         let mut world = World::new();
         let mut app = world.launch(7, QualityTier::Q0);
         let layout = *app.session.app().layout();
-        let surface = app.session.surface();
-        world.focus(&mut app, surface);
         let before = app.session.stats();
         world.type_key(&mut app, KeyState::Pressed);
         let after = app.session.stats();
@@ -564,60 +601,187 @@ fn idle_and_invisible_events_cause_no_commits() {
         let mut world = World::new();
         let mut app = world.launch(7, QualityTier::Q1);
         let layout = *app.session.app().layout();
-        let surface = app.session.surface().expect("surface");
-        let commits = app.session.stats().commits;
+        let stats = app.session.stats();
 
         // Nothing happens: the compositor idles and the app receives nothing.
         world.pump();
         assert_eq!(world.deliver(&mut app), 0);
 
-        let serial = world
-            .comp
-            .mint_serial(app.conn.id(), false)
-            .expect("serial");
-        let title = center(layout.title);
-        world.post(
-            &mut app,
-            Event::PointerEnter {
-                serial,
-                surface,
-                x: fixed(title.x),
-                y: fixed(title.y),
-            },
-        );
+        // Pointer over the static heading, wiggling, then a right click: delivered, but
+        // nothing the panel shows changes.
+        let title = offset(world.origin(&app), center(layout.title));
+        world.pointer_to(&mut [&mut app], title);
         for dx in 1..6 {
-            world.post(
-                &mut app,
-                Event::PointerMotion {
-                    time_ns: world.waiter.now_ns,
-                    x: fixed(title.x + dx),
-                    y: fixed(title.y),
-                },
+            world.feed(
+                &mut [&mut app],
+                MOUSE_INDEX,
+                &[RawInputKind::RelMotion { dx: 1, dy: 0 }],
             );
+            assert_eq!(world.comp.seat().pointer().x, title.x + dx);
         }
-        world.post(
-            &mut app,
-            Event::PointerButton {
-                serial,
-                time_ns: 0,
-                button: PointerButton::Right,
-                state: KeyState::Pressed,
-            },
-        );
-        assert_eq!(
-            app.session.stats().commits,
-            commits,
-            "no visible change, no commit"
-        );
-        assert_eq!(
-            app.session.stats().repainted_px,
-            2 * u64::from(PANEL_SIZE.width) * u64::from(PANEL_SIZE.height)
-        );
+        world.button(&mut [&mut app], PointerButton::Right, KeyState::Pressed);
+        world.button(&mut [&mut app], PointerButton::Right, KeyState::Released);
+        let after = app.session.stats();
+        assert!(after.events > stats.events, "events reached the app");
+        assert_eq!(after.commits, stats.commits, "no visible change, no commit");
+        assert_eq!(after.repainted_px, stats.repainted_px);
+        assert_eq!(after.protocol_errors, 0);
     });
 }
 
 #[test]
-fn close_releases_every_resource_and_relaunch_gets_fresh_identities() {
+fn server_side_chrome_surrounds_the_panel_and_the_app_draws_none() {
+    big_stack(|| {
+        let mut world = World::new();
+        let app = world.launch(7, QualityTier::Q1);
+        let content = world.content(&app);
+        let frame = world.frame(&app);
+        let bar = world.chrome().title_bar_rect(frame);
+        // The app's buffer is exactly the content; the frame and title bar lie outside it.
+        assert_eq!(
+            (content.width, content.height),
+            (PANEL_SIZE.width, PANEL_SIZE.height)
+        );
+        assert!(frame.width > content.width && frame.height > content.height);
+        assert_eq!(
+            bar.intersect(content).unwrap(),
+            None,
+            "title bar is not app pixels"
+        );
+        // The compositor painted the bar: it is not the bare desktop behind the window.
+        let desktop = world.shown_rect(Rect {
+            x: PARK.x - 1,
+            y: PARK.y - 1,
+            width: 1,
+            height: 1,
+        });
+        let shown = world.shown_rect(bar);
+        assert!(
+            shown.chunks_exact(3).any(|px| px != &desktop[..]),
+            "title bar is drawn"
+        );
+        for control in ChromeControl::ALL {
+            let r = world.chrome().control_rect(frame, control);
+            assert_eq!(r.intersect(content).unwrap(), None, "{control:?} is chrome");
+        }
+    });
+}
+
+#[test]
+fn title_bar_drag_moves_the_window_without_an_app_repaint() {
+    big_stack(|| {
+        let mut world = World::new();
+        let mut app = world.launch(7, QualityTier::Q1);
+        let before = world.origin(&app);
+        let stats = app.session.stats();
+        let bar = world.chrome().title_bar_rect(world.frame(&app));
+        let grip = Point {
+            x: bar.x + 8,
+            y: bar.y + (bar.height / 2) as i32,
+        };
+        world.pointer_to(&mut [&mut app], grip);
+        world.button(&mut [&mut app], PointerButton::Left, KeyState::Pressed);
+        world.feed(
+            &mut [&mut app],
+            MOUSE_INDEX,
+            &[RawInputKind::RelMotion { dx: 90, dy: 40 }],
+        );
+        world.button(&mut [&mut app], PointerButton::Left, KeyState::Released);
+        world.pointer_to(&mut [&mut app], PARK);
+
+        assert_eq!(
+            world.origin(&app),
+            Point {
+                x: before.x + 90,
+                y: before.y + 40
+            }
+        );
+        let after = app.session.stats();
+        assert_eq!(after.commits, stats.commits, "a move asks for no repaint");
+        assert_eq!(after.repainted_px, stats.repainted_px);
+        assert_eq!(after.protocol_errors, 0);
+        assert_shown(&world, &app, "moved panel");
+    });
+}
+
+#[test]
+fn click_focuses_the_other_app_and_keys_follow_focus() {
+    big_stack(|| {
+        let mut world = World::new();
+        let mut first = world.launch(7, QualityTier::Q1);
+        let mut second = world.launch(8, QualityTier::Q1);
+        // No focus stealing: the second client's window opens behind the focused one.
+        assert_eq!(world.focused(), Some(World::key(&first)));
+        assert!(first.session.app().view().window_active);
+        assert!(!second.session.app().view().window_active);
+        let first_bar = world.chrome().title_bar_rect(world.frame(&first));
+        let focused_bar = world.shown_rect(first_bar);
+
+        // Keys go only to the focused app.
+        world.feed(
+            &mut [&mut first, &mut second],
+            KEYBOARD_INDEX,
+            &[RawInputKind::Key {
+                usage: KEY_A,
+                state: KeyState::Pressed,
+            }],
+        );
+        assert_eq!(first.session.app().text(), "a");
+        assert_eq!(second.session.app().text(), "");
+
+        // Click the part of the second window the first does not cover.
+        let second_content = world.content(&second);
+        let first_reach = world.chrome().resize_rect(world.frame(&first));
+        let visible = Point {
+            x: second_content.x + second_content.width as i32 - 4,
+            y: second_content.y + second_content.height as i32 - 4,
+        };
+        assert!(
+            visible.x >= first_reach.x + first_reach.width as i32
+                || visible.y >= first_reach.y + first_reach.height as i32,
+            "click point clear of the first window"
+        );
+        world.click_at(&mut [&mut first, &mut second], visible);
+        assert_eq!(world.focused(), Some(World::key(&second)));
+        assert!(second.session.app().view().window_active);
+        assert!(!first.session.app().view().window_active);
+        assert_ne!(
+            world.shown_rect(first_bar),
+            focused_bar,
+            "the inactive title bar looks different"
+        );
+        assert_shown(&world, &second, "raised and focused");
+
+        world.feed(
+            &mut [&mut first, &mut second],
+            KEYBOARD_INDEX,
+            &[RawInputKind::Key {
+                usage: KEY_A,
+                state: KeyState::Released,
+            }],
+        );
+        world.feed(
+            &mut [&mut first, &mut second],
+            KEYBOARD_INDEX,
+            &[RawInputKind::Key {
+                usage: KEY_A,
+                state: KeyState::Pressed,
+            }],
+        );
+        assert_eq!(second.session.app().text(), "a");
+        assert_eq!(first.session.app().text(), "a", "unchanged while unfocused");
+        for app in [&first, &second] {
+            assert_eq!(
+                app.session.stats().protocol_errors,
+                0,
+                "every Configure acked"
+            );
+        }
+    });
+}
+
+#[test]
+fn close_control_releases_every_resource_and_relaunch_gets_fresh_identities() {
     big_stack(|| {
         let mut world = World::new();
         let mut first = world.launch(7, QualityTier::Q0);
@@ -625,12 +789,12 @@ fn close_releases_every_resource_and_relaunch_gets_fresh_identities() {
         world.click(&mut first, center(layout.increment));
         let old_conn = first.conn;
         let old_caps = first.caps;
-        let key = World::key(&first);
 
-        // #115 close: the window manager asks; the app destroys everything and exits.
-        assert!(world.comp.request_close(key));
-        world.waiter.raise(WAKE_REQUESTS);
-        world.settle(&mut first);
+        // #115 close: press and release on the server-side close control.
+        let close = world
+            .chrome()
+            .control_rect(world.frame(&first), ChromeControl::Close);
+        world.click_at(&mut [&mut first], center(close));
         assert_eq!(first.exit, Some(ExitReason::Closed));
         assert_eq!(first.session.buffers(), [None, None]);
         for kind in [ObjectKind::Surface, ObjectKind::Window, ObjectKind::Buffer] {
@@ -646,6 +810,7 @@ fn close_releases_every_resource_and_relaunch_gets_fresh_identities() {
             "compositor dropped its buffer mappings"
         );
         assert!(world.comp.scene().is_empty());
+        assert_eq!(world.focused(), None);
 
         world.exit(&first);
         assert_eq!(world.comp.client_count(), 0);
@@ -660,6 +825,7 @@ fn close_releases_every_resource_and_relaunch_gets_fresh_identities() {
         assert!(second.session.is_running());
         assert_ne!(second.conn.id(), old_conn.id());
         assert_eq!(second.session.app().clicks(), 0, "fresh state");
+        assert_eq!(world.focused(), Some(World::key(&second)));
         world.click(&mut second, center(layout.increment));
         assert_eq!(second.session.app().clicks(), 1);
         assert_shown(&world, &second, "relaunched instance");
