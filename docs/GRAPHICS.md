@@ -75,7 +75,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 | 1 | #113 | `kernel/src/device/input/{mod.rs, i8042.rs, device_init.rs, keyboard.rs, mouse.rs, queue.rs}` (the scancode to HID usage table is kernel code in `keyboard.rs`); `kernel/src/service/input_syscall.rs`; syscall 19 subops 1–4 live (`BIND_WAKE` on the #200 work sets); teardown slot 3 releases the consumer and its wake; gate `cargo xtask test-m10-input-smoke` (controller stimulus, then keyboard + pointer injected over a private QMP socket, `xtask/src/qmp/inject.rs`) |
 | 1 | #196 | `kernel/src/device/virtio/{modern.rs, modern/, virtqueue.rs, dma.rs}`; `kernel/src/sched/timeout.rs` (W3); `cargo xtask test-m10-virtio-modern` |
 | 1 | #197 | `xtask/src/qmp/` (QMP endpoint, client, input and screendump helpers, PPM to PNG, marker-paced script driver); `AcceptanceDriver` hooks in `xtask/src/main.rs`; gate `test-qmp-smoke` |
-| 1–3 | #116 | `ui/` (`clean-slate-ui`), `desktop-shell/`, `docs/design/DESIGN-SYSTEM.md` (planned). Token and documentation work may start in Wave 1 |
+| 1–3 | #116 | **Landed (host side):** `ui/` (`clean-slate-ui`: tokens, quality tiers, primitives, `ChromeStyle`, cursor visual, shell zones and rail) and [`docs/design/DESIGN-SYSTEM.md`](design/DESIGN-SYSTEM.md). **Planned:** `desktop-shell/` client wiring on #112/#115 |
 | 2 | #112 | `compositor/` (`clean-slate-compositor`); P5 launch policy, grant policy (`kernel/src/capability/graphics.rs`) and sizing (planned) |
 | 2 | #114 | `kernel/src/device/display/virtio_gpu.rs`; gate `test-m10-virtio-gpu` (planned) |
 | 3 | #115 | `compositor::wm` (planned) |
@@ -786,7 +786,7 @@ Direct scanout of a fullscreen client buffer is a possible later optimisation. I
 
 M10 non-goals (#109): 3D; OpenGL or Vulkan; Wayland or X11 compatibility; full text shaping; an accessibility stack; multiple monitors; HiDPI perfection (the scale path exists but only 1.0 is accepted); an animation system; any dependency on blur; vendor GPU drivers; an application suite; search, calendar, weather and media widgets. In addition, the #110 contract itself implements no renderer, compositor, driver, visual theme, font shaping or IME.
 
-Visual target (#109, #116; north star `docs/Desktop-design.png`):
+Visual target (#109, #116; north star `docs/Desktop-design.png`; tokens and rules in [design/DESIGN-SYSTEM.md](design/DESIGN-SYSTEM.md)):
 
 - a dark, cinematic desktop with a persistent **left rail**; **no bottom dock**;
 - understated, monochrome server-side window chrome; **no macOS-style red, yellow and green traffic-light controls**;

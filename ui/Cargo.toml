@@ -1,0 +1,17 @@
+[package]
+name = "clean-slate-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "M10 Clean-Slate design tokens, UI primitives, window chrome visuals and shell rendering over clean-slate-raster"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+clean-slate-graphics = { path = "../graphics" }
+clean-slate-raster = { path = "../raster" }
+
+[lints]
+workspace = true
