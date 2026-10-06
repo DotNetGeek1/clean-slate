@@ -1205,9 +1205,13 @@ dependencies = [
 name = "xtask"
 version = "0.0.1"
 dependencies = [
+ "clean-slate-compositor",
+ "clean-slate-graphics",
  "clean-slate-network",
+ "clean-slate-playground",
  "clean-slate-raster",
  "clean-slate-rootfs",
+ "clean-slate-ui",
  "rcgen",
  "rustls",
  "smoltcp",

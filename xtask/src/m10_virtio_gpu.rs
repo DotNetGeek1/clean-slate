@@ -54,7 +54,7 @@ pub(crate) fn qemu_args() -> Vec<String> {
     .collect()
 }
 
-/// Constituent; does not print `[M10  ] PASS`.
+/// Constituent; does not print `[M10 ] PASS`.
 pub(crate) fn run_acceptance() -> Result<(), XtaskError> {
     run_cargo_package_tests("clean-slate-kernel", &["device::display"])?;
     run_cargo_package_tests("clean-slate-kernel", &["device::virtio"])?;

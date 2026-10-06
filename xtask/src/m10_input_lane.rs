@@ -181,6 +181,7 @@ pub(crate) fn run() -> Result<(), XtaskError> {
             markers: MarkerSet::Ordered(&crate::M10_INPUT_SMOKE_ACCEPTANCE_MARKERS),
             timeout: TIMEOUT,
             config: input_lane_config(),
+            extra_args: Vec::new(),
         },
         qmp_injection_steps(),
     )?;
@@ -206,6 +207,8 @@ mod tests {
             "ret" => 0x28,
             "right" => 0x4F,
             "esc" => 0x29,
+            "f11" => 0x44,
+            "f12" => 0x45,
             other => panic!("no usage for qcode `{other}`"),
         }
     }
