@@ -6,9 +6,10 @@
 //!
 //! Startup reads [`CompositorBootstrap`] from the launch page, finds its `Graphics{GFX_SERVE}`,
 //! `Display` and (optional) `Input` capabilities, creates its work set and binds every wake
-//! source it can. A wake source whose `BIND_WAKE` is not implemented yet (`ENOSYS`) degrades
-//! as follows: display completion falls back to a bounded deadline while a present is in
-//! flight; input is drained whenever another wake runs the loop. Neither adds an idle poll.
+//! source it can. Display completion without `BIND_WAKE` (`ENOSYS` until #111 wires it) falls
+//! back to a bounded deadline while a present is in flight. Input is read only on its own wake
+//! bit, so the compositor consumes input only once syscall 19 `BIND_WAKE` succeeds (it also makes
+//! the compositor the seat consumer); otherwise it runs without input. Neither adds an idle poll.
 
 #![no_std]
 #![no_main]
@@ -430,16 +431,17 @@ pub extern "C" fn _start() -> ! {
         0,
     ))
     .is_ok();
-    if let Some(handle) = input_handle {
-        let _ = syscall(
+    let input_handle = input_handle.filter(|&handle| {
+        checked(syscall(
             SYSCALL_NR_INPUT,
             INPUT_SUBOP_BIND_WAKE,
             handle,
             work_set,
             u64::from(WAKE_INPUT.trailing_zeros()),
             0,
-        );
-    }
+        ))
+        .is_ok()
+    });
 
     let mut port = KernelPort { serve };
     let mut buffers = KernelSharedBuffers;

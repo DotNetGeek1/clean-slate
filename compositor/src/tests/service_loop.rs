@@ -6,7 +6,9 @@ use clean_slate_graphics::limits::DISPLAY_COMMAND_TIMEOUT_NS;
 use clean_slate_graphics::raw_input::{RawInputKind, RawInputRecord};
 use clean_slate_graphics::surface::FrameState;
 
-use crate::backend::WAKE_INPUT;
+use clean_slate_graphics::abi::input::READ_BATCH_MAX_RECORDS;
+
+use crate::backend::{WAKE_INPUT, WAKE_REQUESTS};
 use crate::present::DisplayHealth;
 
 fn idle(h: &mut Harness) {
@@ -229,6 +231,40 @@ fn raw_input_is_drained_in_bounded_batches() {
         },
         "pointer clamped to the output"
     );
+    idle(&mut h);
+}
+
+/// Input is read only on the input `BIND_WAKE` bit, and every input wake drains to an empty
+/// queue (a short batch) before the loop blocks again, as the edge-triggered wake requires.
+#[test]
+fn raw_input_is_read_only_on_the_input_wake_and_drained_to_empty() {
+    let mut h = Harness::new();
+    h.pump();
+    for seq in 0..3 {
+        assert!(h.input.push(motion(seq, 1, 0)));
+    }
+    h.waiter.raise(WAKE_REQUESTS);
+    let port_only = h.iterate().unwrap();
+    assert_eq!(
+        port_only.input_records, 0,
+        "a port wake does not read input"
+    );
+    assert_eq!(h.input.len(), 3);
+
+    h.waiter.raise(WAKE_INPUT);
+    assert_eq!(h.iterate().unwrap().input_records, 3);
+    assert!(h.input.is_empty());
+
+    // A batch that fills `READ_BATCH` exactly may have more behind it: read again, without
+    // blocking, until a short (here empty) batch proves the queue is drained.
+    for seq in 3..3 + READ_BATCH_MAX_RECORDS as u64 {
+        assert!(h.input.push(motion(seq, 0, 1)));
+    }
+    h.waiter.raise(WAKE_INPUT);
+    assert_eq!(h.iterate().unwrap().input_records, READ_BATCH_MAX_RECORDS);
+    let empty = h.iterate().unwrap();
+    assert!(!empty.waited, "a full batch is re-read before waiting");
+    assert_eq!(empty.input_records, 0);
     idle(&mut h);
 }
 

@@ -52,10 +52,10 @@ Items marked **(planned)** are fixed in shape but not implemented; their owning 
 | `PortServer` | syscall 17 `RECV` (non-blocking), `POST`, `DISCONNECT` | `FakePort` |
 | `SharedBufferMapper` | syscall 16 `MAP` (read) / `UNMAP` of the transferred `SharedBuffer{READ}` child | `FakeSharedMemory` |
 | `DisplayBackend` | syscall 18 `QUERY_MODE`, `MAP_SCANOUT`, `PRESENT`, `PRESENT_STATUS` | `FakeDisplay` |
-| `InputSource` | syscall 19 `READ_BATCH` | `FakeInput` |
+| `InputSource` | syscall 19 `READ_BATCH` (woken by syscall 19 `BIND_WAKE`, bit 2) | `FakeInput` |
 | `WorkWaiter` | syscall 20 `WAIT`, `NOW` | `ScriptedWaiter` |
 
-- **Wake bits.** Port requests bit 0, port notices bit 1, input bit 2, display bit 3 (`compositor::backend::WAKE_*`). Without display `BIND_WAKE` the loop sets a bounded deadline only while a present is in flight; an idle desktop always blocks with no deadline.
+- **Wake bits.** Port requests bit 0, port notices bit 1, input bit 2, display bit 3 (`compositor::backend::WAKE_*`). Without display `BIND_WAKE` the loop sets a bounded deadline only while a present is in flight; an idle desktop always blocks with no deadline. Input is read only on bit 2: each input wake re-reads `READ_BATCH` without waiting until a batch comes back short (the queue is then empty, as the edge-triggered wake requires). If input `BIND_WAKE` is refused, the adapter runs without input.
 - **Isolation.** Every object lookup goes through the connection's own `ObjectTable`; scene and stacking keys are `(ConnectionId, SurfaceId)`. Role authority comes only from the kernel envelope's rights.
 - **Pixels.** Read only through the mapping of an explicit `RegisterBuffer` transfer, bounded to the attested `byte_len`. The compositor never sees a physical address.
 - **Presentation.** Damage is clipped to the output, merged into at most `MAX_PRESENT_DAMAGE_RECTS`, and skipped where opaque surfaces above cover it. Fully occluded surfaces get no frame callback. A move or restack damages the old and new footprint and needs no client repaint.
