@@ -620,9 +620,9 @@ kernel/src
 ├── capability/graphics.rs         (planned, #112/#118) Graphics/Display/Input grant policy for the M10 launch set
 ├── service/port.rs                (planned, service-port issue) compositor connections and capability transfer
 ├── service/port_syscall.rs        (planned, service-port issue) syscall 17
-├── service/input_syscall.rs       (planned, #113) syscall 19
+├── service/input_syscall.rs       (#113) syscall 19, BIND_WAKE on the work sets
 ├── sched/work_set.rs              (planned, service-port issue) work sets, syscall 20
-├── device/input/                  (planned, #113) mod.rs, i8042.rs, RawInputQueue<128>
+├── device/input/                  (#113) i8042 driver, PS/2 decoders, RawInputQueue<128>, consumer wake binding
 └── device/virtio/                 existing; modern.rs (+ modern/), virtqueue.rs, dma.rs (#196)
 ```
 
@@ -710,7 +710,7 @@ Some acceptance lanes need guest keyboard or pointer input, or a framebuffer cap
 
 **Client (`QmpClient`).** Validates the greeting, logs `[qmp ] <lane> QEMU <ver> (<pkg>) on 127.0.0.1:<port>`, requires QEMU ≥ 2.6.0, negotiates `qmp_capabilities` without OOB, sends command ids `xtask-<n>` and requires the reply id to match (`IdMismatch`). Events before a reply are kept in a ring of 64 (oldest dropped and counted). Lines over 256 KiB are rejected (`LineTooLong`). Every read, write, and accept has a finite deadline (defaults: connect 15 s, greeting 10 s, command 10 s). JSON is parsed by a bounded hand-rolled parser (depth 32); no new dependencies. Errors name their phase or command, for example `QMP no-such-command (id xtask-3) failed: CommandNotFound: …`.
 
-**Input (`InputAction`, `QCode`, `MouseButton`).** Steps use `InputAction::{Key, Button, Rel}`; helpers `InputAction::tap(QCode::A)` and `InputAction::move_rel(dx, dy)`. `QCode` constants only (typos are compile errors); only the keys some lane sends are defined, so an input lane appends the `QCode`s it needs. `MouseButton` is `Left`, `Middle`, or `Right`. One `input-send-event` carries 1–8 events (`MAX_EVENTS_PER_COMMAND`). The PS/2 mouse emits one packet per command with button state at the end of the command, so press and release must be separate `Input` steps (there is no click helper). Relative Y follows QEMU's screen convention (positive down); the PS/2 packet inverts it. Input lanes pass `machine_extra: Some("vmport=off")` in `VmLaunchConfig` so the PS/2 mouse is the only pointer. `input-send-event` fails while the VM is paused, so QMP-driven lanes never use `-S`.
+**Input (`InputAction`, `QCode`, `MouseButton`).** Steps use `InputAction::{Key, Button, Rel}`; helpers `InputAction::tap(QCode::A)` and `InputAction::move_rel(dx, dy)`. `QCode` constants only (typos are compile errors); only the keys some lane sends are defined, so an input lane appends the `QCode`s it needs. `MouseButton` is `Left`, `Middle`, `Right`, `WheelUp`, or `WheelDown`; a wheel "button" is one detent per press (`InputAction::scroll`, press and release in one command, gives one packet). One `input-send-event` carries 1–8 events (`MAX_EVENTS_PER_COMMAND`). The PS/2 mouse emits one packet per command with button state at the end of the command, so press and release must be separate `Input` steps (there is no click helper). Relative Y follows QEMU's screen convention (positive down); the PS/2 packet inverts it. Input lanes pass `machine_extra: Some("vmport=off")` in `VmLaunchConfig` so the PS/2 mouse is the only pointer. `input-send-event` fails while the VM is paused, so QMP-driven lanes never use `-S`.
 
 **Screenshots.** `screendump` is sent without `format`, so QEMU writes binary PPM (P6) on every supported version; xtask parses it (at most 8192×8192 and 192 MiB RGB) and writes PNG itself (stored-deflate zlib with CRC-32 and Adler-32; no external tools). `Screenshot` exposes `width()`, `height()`, `pixel(x, y)`, and `rgb()`.
 
@@ -718,24 +718,26 @@ Some acceptance lanes need guest keyboard or pointer input, or a framebuffer cap
 
 **Artifacts.** Runs write under `target/xtask-artifacts/<lane>/<pid>.<seq>/` (`xtask_artifact_root()`); PNG is `<name>.png`. The intermediate PPM is removed after a passing check and kept next to the PNG when the check fails. At most eight run directories per lane (oldest pruned).
 
-**Kernel lanes.** There is no kernel-lane wrapper yet; the first kernel lane that attaches a driver adds one. It builds the command with `prepare_vm(false, false, features, config)` (never `-S`), appends `driver.qemu_args()`, and calls `run_driven_acceptance_command(&mut vm.qemu, marker_set, timeout, &mut driver)`, which returns the captured serial output.
+**Kernel lanes (`xtask/src/qmp/lane.rs`).** `run_kernel_lane(KernelLane { lane, features, markers, timeout, config }, steps)` builds the kernel with `prepare_vm(false, false, features, config)` (never `-S`), binds a `QmpScriptDriver`, appends its `-name`/`-qmp tcp:127.0.0.1:<port>` arguments, and runs `run_driven_acceptance_command`, returning the captured serial output for the lane's own checks. Input lanes pass `input_lane_config()` (`vmport=off`). The host test `input_lane_is_headless_with_one_private_client_qmp_endpoint` pins that such a lane keeps `-display none`, has exactly one client-mode loopback `-qmp`, and never adds `-S`, a monitor, or a display backend.
+
+**Input injection (`xtask/src/qmp/inject.rs`).** A lane states its stimulus as a static `&[InputStimulus]`: each entry is one `input-send-event` (`actions`) and the exact serial lines the guest must log for it (`expect`). `injection_steps(ready, stimuli)` awaits `ready`, then sends each stimulus and awaits its last expected line before the next one, so pacing never depends on timing; `validate_exact_sequence(output, prefix, stimuli)` then requires the lines containing `prefix` to equal the expected lines exactly (count, order, text); `check_stimuli` rejects tables that cannot be paced. The #113 lane (`xtask/src/m10_input_lane.rs`, `cargo xtask test-m10-input-smoke`) is the reference user: its `QMP_STIMULI` table is cross-checked by a host test against an independent derivation from the actions, and #119 can splice `qmp_injection_steps()` into its own script and call `validate_qmp_output`.
 
 **Smoke gate.** `cargo xtask test-qmp-smoke` (alias `qmp-smoke`; Constituent in `scripts/run-tests.sh` and `scripts/run-tests.ps1`) needs only `qemu-system-x86_64` with SeaBIOS (no kernel, no OVMF). xtask builds a 512-byte real-mode boot sector on a 1 MiB raw disk (SeaBIOS computes zero CHS cylinders on smaller disks), paints a blue/red text screen, and echoes every i8042 byte on COM1 as `[QMPFIX] kbd xx` / `[QMPFIX] aux xx`. The script injects taps, pointer motion, and left, right, and middle presses and releases—each paced on the echoed bytes—checks the serial trace, exercises `CommandError` for `no-such-command`, validates screenshot pixels and the PNG header, quits, and requires a `SHUTDOWN` event plus a released port. A second run fails its screenshot check on purpose and proves QEMU closed the QMP socket and the port is refused. Success prints `[QMP.smoke] PASS`.
 
 Example lane script (types in `xtask/src/qmp/`):
 
 ```rust
-let steps = vec![
-    ScriptStep::AwaitLine("[M10.input] ready"),
-    ScriptStep::Input(InputAction::tap(QCode::A).to_vec()),
-    ScriptStep::AwaitLine("[M10.input] key a down"),
-    ScriptStep::Screendump {
-        name: "frame",
-        check: check_frame,
-    },
-];
-let mut driver = QmpScriptDriver::new("m10-input", steps, artifact_root)?;
-// Then boot it as described under "Kernel lanes" above.
+const STIMULI: &[InputStimulus] = &[InputStimulus {
+    actions: &InputAction::tap(QCode::A),
+    expect: &["[LANE] rec 1 kbd key=0x04 down", "[LANE] rec 2 kbd key=0x04 up"],
+}];
+let mut steps = injection_steps("[LANE] ready", STIMULI);
+steps.push(ScriptStep::Screendump {
+    name: "frame",
+    check: check_frame,
+});
+let output = run_kernel_lane(lane, steps)?;
+validate_exact_sequence(&output, "[LANE] rec ", STIMULI).map_err(XtaskError::Validation)?;
 ```
 
 ### Real hardware tests

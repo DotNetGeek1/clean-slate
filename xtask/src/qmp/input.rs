@@ -32,7 +32,7 @@ macro_rules! qcodes {
 }
 
 qcodes! {
-    A => "a", S => "s", SHIFT => "shift", RET => "ret",
+    A => "a", S => "s", SHIFT => "shift", RET => "ret", RIGHT => "right", ESC => "esc",
 }
 
 impl QCode {
@@ -41,19 +41,25 @@ impl QCode {
     }
 }
 
+/// A QEMU `InputButton`. The wheel "buttons" are detents: QEMU's PS/2 mouse counts one per
+/// press and ignores the release.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MouseButton {
     Left,
     Middle,
     Right,
+    WheelUp,
+    WheelDown,
 }
 
 impl MouseButton {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             MouseButton::Left => "left",
             MouseButton::Middle => "middle",
             MouseButton::Right => "right",
+            MouseButton::WheelUp => "wheel-up",
+            MouseButton::WheelDown => "wheel-down",
         }
     }
 }
@@ -77,14 +83,25 @@ pub(crate) enum InputAction {
 impl InputAction {
     /// Key down then up, in one command; the keyboard queues a scancode per
     /// event so nothing collapses.
-    pub(crate) fn tap(qcode: QCode) -> [InputAction; 2] {
+    pub(crate) const fn tap(qcode: QCode) -> [InputAction; 2] {
         [
             InputAction::Key { qcode, down: true },
             InputAction::Key { qcode, down: false },
         ]
     }
 
-    pub(crate) fn move_rel(dx: i32, dy: i32) -> [InputAction; 2] {
+    /// One wheel detent in one command, so the PS/2 mouse sends one packet.
+    pub(crate) const fn scroll(button: MouseButton) -> [InputAction; 2] {
+        [
+            InputAction::Button { button, down: true },
+            InputAction::Button {
+                button,
+                down: false,
+            },
+        ]
+    }
+
+    pub(crate) const fn move_rel(dx: i32, dy: i32) -> [InputAction; 2] {
         [
             InputAction::Rel {
                 axis: Axis::X,
