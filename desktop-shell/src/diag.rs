@@ -41,3 +41,27 @@ pub fn activation_line(index: usize) -> ConsoleLine {
 pub fn exit_line(reason: &str) -> ConsoleLine {
     ConsoleLine::format(format_args!("[SHELL] exit reason={reason}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lines_match_what_the_desktop_lane_parses() {
+        assert!(ready_line(&ShellSession::new(QualityTier::Q1)).is_none());
+        assert_eq!(exit_line("closed").as_str(), "[SHELL] exit reason=closed");
+        let first = rail_entry(0).expect("rail entry 0").label;
+        assert_eq!(
+            activation_line(0).as_str(),
+            format!("[SHELL] rail selected=0 {first}")
+        );
+        assert_eq!(activation_line(99).as_str(), "[SHELL] rail selected=99 ?");
+    }
+
+    #[test]
+    fn tiers_above_q1_report_as_the_m10_clamp() {
+        assert_eq!(tier_name(QualityTier::Q0), "Q0");
+        assert_eq!(tier_name(QualityTier::Q1), "Q1");
+        assert_eq!(tier_name(QualityTier::Q3), "Q1");
+    }
+}
