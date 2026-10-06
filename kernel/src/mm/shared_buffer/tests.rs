@@ -2,7 +2,9 @@ use clean_slate_capability::{
     delegate, revoke_subtree, syscall_abi, CapabilityError, CapabilityHandle, HolderId,
     ResourceRef, Rights,
 };
-use clean_slate_native_abi::{SharedBufferAccess, SharedBufferId, STATUS_EACCES, STATUS_ESTALE};
+use clean_slate_native_abi::{
+    SharedBufferAccess, SharedBufferId, STATUS_EACCES, STATUS_EAGAIN, STATUS_EINVAL, STATUS_ESTALE,
+};
 
 use super::kernel_owned::{
     allocate_kernel_owned, extents, map_kernel_owned_into_root, pin, release_kernel_owned,
@@ -389,6 +391,122 @@ fn shared_buffer_release_by_resource_orphans_every_row_and_goes_stale() {
         Err(ShareError::Stale)
     );
     harness.teardown_both();
+}
+
+fn drop_status(pid: u64, handle: CapabilityHandle) -> Result<(), u64> {
+    crate::capability::revocation::drop_for(HolderId(pid), handle.encode())
+}
+
+#[test]
+fn shared_buffer_holder_drop_refuses_while_mapped_and_spares_the_owner() {
+    let mut harness = Harness::new();
+    let (id, root) = harness.allocate(1);
+    let child = harness.delegate_read(root);
+    harness
+        .map(OWNER, id, SharedBufferAccess::ReadWrite, root)
+        .unwrap();
+    let reader_va = harness
+        .map(READER, id, SharedBufferAccess::Read, child)
+        .unwrap();
+    assert_eq!(mapping_count(OWNER), 1);
+    assert_eq!(mapping_count(READER), 1);
+
+    assert_eq!(drop_status(READER, child), Err(STATUS_EAGAIN), "mapped");
+    assert_eq!(
+        drop_status(OWNER, child),
+        Err(STATUS_EACCES),
+        "not the holder"
+    );
+    assert_eq!(
+        drop_status(READER, root),
+        Err(STATUS_EACCES),
+        "not the holder"
+    );
+    assert_eq!(drop_status(OWNER, root), Err(STATUS_EAGAIN), "delegated");
+    assert_eq!(harness.row_state(READER, id), Some(RowState::Live));
+
+    unmap_at(READER, reader_va, &mut harness.frames).unwrap();
+    assert_eq!(mapping_count(READER), 0);
+    assert_eq!(drop_status(READER, child), Ok(()));
+    assert_eq!(
+        unsafe { capability_space_mut() }.record(child).map(|_| ()),
+        Err(CapabilityError::StaleHandle)
+    );
+    assert!(unsafe { capability_space_mut() }.record(root).is_ok());
+    assert_eq!(harness.row_state(OWNER, id), Some(RowState::Live));
+    assert_eq!(buffer_state(id), Some(BufferState::Live));
+    assert_eq!(
+        state()
+            .table
+            .record_at(usize::from(id.slot()))
+            .mapping_count(),
+        1
+    );
+
+    assert_eq!(drop_status(READER, child), Err(STATUS_ESTALE), "idempotent");
+    assert_eq!(
+        crate::capability::revocation::drop_for(HolderId(READER), u64::MAX),
+        Err(STATUS_EINVAL)
+    );
+    harness.teardown_both();
+}
+
+#[test]
+fn shared_buffer_owner_drop_of_an_unmapped_root_retires_the_buffer() {
+    let mut harness = Harness::new();
+    let (id, root) = harness.allocate(1);
+    let owner_va = harness
+        .map(OWNER, id, SharedBufferAccess::ReadWrite, root)
+        .unwrap();
+    assert_eq!(drop_status(OWNER, root), Err(STATUS_EAGAIN));
+    unmap_at(OWNER, owner_va, &mut harness.frames).unwrap();
+    assert_eq!(drop_status(OWNER, root), Ok(()));
+    drain_pending(&mut harness.frames);
+    assert_eq!(buffer_state(id), Some(BufferState::Free));
+    assert_eq!(drop_status(OWNER, root), Err(STATUS_ESTALE));
+    harness.teardown_both();
+}
+
+#[test]
+fn shared_buffer_drop_reclaims_a_handle_whose_row_is_already_orphaned() {
+    let mut harness = Harness::new();
+    let (id, root) = harness.allocate(1);
+    let child = harness.delegate_read(root);
+    harness
+        .map(READER, id, SharedBufferAccess::Read, child)
+        .unwrap();
+    revoke_subtree(unsafe { capability_space_mut() }, child).unwrap();
+    reconcile_resource(id.resource_ref());
+    assert_eq!(harness.row_state(READER, id), Some(RowState::Orphaned));
+    assert_eq!(
+        drop_status(READER, child),
+        Ok(()),
+        "an orphaned row never blocks"
+    );
+    assert_eq!(drop_status(READER, child), Err(STATUS_ESTALE));
+    assert_eq!(harness.row_state(READER, id), Some(RowState::Orphaned));
+    harness.teardown_both();
+}
+
+#[test]
+fn shared_buffer_teardown_returns_the_mapping_count_to_baseline() {
+    let mut harness = Harness::new();
+    let (id, root) = harness.allocate(1);
+    let child = harness.delegate_read(root);
+    harness
+        .map(OWNER, id, SharedBufferAccess::ReadWrite, root)
+        .unwrap();
+    harness
+        .map(READER, id, SharedBufferAccess::Read, child)
+        .unwrap();
+    revoke_subtree(unsafe { capability_space_mut() }, child).unwrap();
+    reconcile_resource(id.resource_ref());
+    assert_eq!(mapping_count(READER), 1, "an orphaned row still counts");
+    assert_eq!(teardown_process(READER, &mut harness.frames), 1);
+    assert_eq!(mapping_count(READER), 0);
+    assert_eq!(mapping_count(OWNER), 1);
+    harness.teardown_both();
+    assert_eq!(mapping_count(OWNER), 0);
 }
 
 #[test]

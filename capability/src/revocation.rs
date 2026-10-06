@@ -168,6 +168,52 @@ pub fn authorize_revoke<const N: usize>(
     Err(CapabilityError::UnauthorizedHolder)
 }
 
+/// Why [`drop_own`] refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropRefusal {
+    /// `handle` does not resolve (`InvalidHandle`, `StaleHandle`), or `actor` is not its holder
+    /// (`UnauthorizedHolder`).
+    Capability(CapabilityError),
+    /// A live capability was delegated from `handle`. Dropping it would leave that child with a
+    /// dangling parent, so its holder (or an ancestor) must revoke the child first.
+    Delegated,
+}
+
+/// Removes `actor`'s own capability `handle` and returns its slot to the pool, leaving every
+/// other record untouched: no descendant, sibling, ancestor or other holder is revoked. A handle
+/// an ancestor already revoked is released the same way, so a holder can reclaim it.
+///
+/// Returns the resource the dropped record named so the caller can reconcile it. A second drop
+/// of the same handle is `StaleHandle` (the release bumped the slot generation).
+pub fn drop_own<const N: usize>(
+    table: &mut CapabilityTable<N>,
+    actor: HolderId,
+    handle: CapabilityHandle,
+) -> Result<ResourceRef, DropRefusal> {
+    let record = table.record(handle).map_err(DropRefusal::Capability)?;
+    if record.holder != actor {
+        return Err(DropRefusal::Capability(CapabilityError::UnauthorizedHolder));
+    }
+    if has_live_child(table, handle) {
+        return Err(DropRefusal::Delegated);
+    }
+    let slot = usize::from(handle.slot);
+    table.revoke_slot(slot);
+    table.release_slot(slot);
+    Ok(record.resource)
+}
+
+/// Whether a live record names `handle` as its provenance parent.
+pub fn has_live_child<const N: usize>(
+    table: &CapabilityTable<N>,
+    handle: CapabilityHandle,
+) -> bool {
+    (0..N).any(|slot| {
+        let record = table.record_at(slot);
+        record.state == CapabilityState::Live && record.provenance.parent == Some(handle)
+    })
+}
+
 fn slot_for_handle<const N: usize>(
     table: &CapabilityTable<N>,
     handle: CapabilityHandle,
@@ -400,6 +446,94 @@ mod tests {
         assert!(authorize_revoke(&table, READER2, b).is_ok());
         assert!(authorize_revoke(&table, OWNER, root).is_ok());
         assert!(authorize_revoke(&table, SIBLING_HOLDER, s).is_ok());
+    }
+
+    #[test]
+    fn drop_own_releases_only_the_callers_record() {
+        let mut table = CapabilityTable::<8>::new();
+        let root = grant_root(&mut table, OWNER, OBJ, Rights::READ.union(Rights::DELEGATE));
+        let child = install_child(&mut table, root, READER, Rights::READ);
+        let sibling = install_child(&mut table, root, SIBLING_HOLDER, Rights::READ);
+
+        assert_eq!(drop_own(&mut table, READER, child), Ok(OBJ));
+        assert_eq!(
+            table.state_at(usize::from(child.slot)),
+            CapabilityState::Empty
+        );
+        assert_eq!(table.live_count(), 2);
+        assert!(table.authorize(OWNER, root, OBJ, Rights::READ).is_ok());
+        assert!(table
+            .authorize(SIBLING_HOLDER, sibling, OBJ, Rights::READ)
+            .is_ok());
+        assert_eq!(
+            table.authorize(READER, child, OBJ, Rights::READ),
+            Err(CapabilityError::StaleHandle)
+        );
+        // Idempotent and stale-safe: the old handle never resolves again.
+        assert_eq!(
+            drop_own(&mut table, READER, child),
+            Err(DropRefusal::Capability(CapabilityError::StaleHandle))
+        );
+        let reused = grant_root(&mut table, OTHER, OBJ_OTHER, Rights::READ);
+        assert_eq!(reused.slot, child.slot);
+        assert_eq!(
+            drop_own(&mut table, READER, child),
+            Err(DropRefusal::Capability(CapabilityError::StaleHandle))
+        );
+        assert!(table
+            .authorize(OTHER, reused, OBJ_OTHER, Rights::READ)
+            .is_ok());
+        assert_eq!(
+            drop_own(&mut table, READER, CapabilityHandle::new(9, 1)),
+            Err(DropRefusal::Capability(CapabilityError::InvalidHandle))
+        );
+    }
+
+    #[test]
+    fn drop_own_refuses_other_holders_and_delegated_parents() {
+        let mut table = CapabilityTable::<8>::new();
+        let root = grant_root(&mut table, OWNER, OBJ, Rights::READ.union(Rights::DELEGATE));
+        let child = install_child(&mut table, root, READER, Rights::READ);
+
+        // Neither the owner (an ancestor) nor a stranger drops someone else's handle.
+        for actor in [OWNER, OTHER] {
+            assert_eq!(
+                drop_own(&mut table, actor, child),
+                Err(DropRefusal::Capability(CapabilityError::UnauthorizedHolder))
+            );
+        }
+        assert_eq!(
+            drop_own(&mut table, READER, root),
+            Err(DropRefusal::Capability(CapabilityError::UnauthorizedHolder))
+        );
+        // The owner cannot drop a root with a live child under it.
+        assert_eq!(
+            drop_own(&mut table, OWNER, root),
+            Err(DropRefusal::Delegated)
+        );
+        assert_eq!(table.live_count(), 2, "refusals change nothing");
+
+        assert_eq!(drop_own(&mut table, READER, child), Ok(OBJ));
+        assert_eq!(drop_own(&mut table, OWNER, root), Ok(OBJ));
+        assert_eq!(table.live_count(), 0);
+    }
+
+    #[test]
+    fn drop_own_reclaims_a_handle_an_ancestor_revoked() {
+        let mut table = CapabilityTable::<8>::new();
+        let root = grant_root(&mut table, OWNER, OBJ, Rights::READ.union(Rights::DELEGATE));
+        let child = install_child(&mut table, root, READER, Rights::READ);
+        assert_eq!(revoke_subtree(&mut table, child), Ok(1));
+        assert_eq!(
+            table.state_at(usize::from(child.slot)),
+            CapabilityState::Revoked
+        );
+        assert_eq!(drop_own(&mut table, READER, child), Ok(OBJ));
+        assert_eq!(
+            table.state_at(usize::from(child.slot)),
+            CapabilityState::Empty
+        );
+        assert!(table.authorize(OWNER, root, OBJ, Rights::READ).is_ok());
     }
 
     #[test]

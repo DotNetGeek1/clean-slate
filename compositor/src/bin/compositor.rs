@@ -8,21 +8,26 @@
 //! `Display` and (optional) `Input` capabilities, creates its work set and binds every wake
 //! source it can. Display `BIND_WAKE` follows the first `MAP_SCANOUT`, which makes the compositor
 //! the presenter; if either fails, completion falls back to a bounded deadline while a present is
-//! in flight. Input is read only on its own wake
-//! bit, so the compositor consumes input only once syscall 19 `BIND_WAKE` succeeds (it also makes
-//! the compositor the seat consumer); otherwise it runs without input. Neither adds an idle poll.
+//! in flight, which needs a calibrated clock. With neither the display wake nor a clock the
+//! compositor exits rather than spin, and every `WAIT` blocks (never `NONBLOCK`). Input is read
+//! only on its own wake bit, so the compositor consumes input only once syscall 19 `BIND_WAKE`
+//! succeeds (it also makes the compositor the seat consumer); otherwise it runs without input.
+//! Neither adds an idle poll.
+//!
+//! Client pixels are copied out of the shared window with volatile loads, never referenced, and
+//! each transferred child capability is released with `CAP_REVOKE` `DROP` once unmapped.
 
 #![no_std]
 #![no_main]
 
 use core::ptr::addr_of_mut;
 
-use clean_slate_capability::syscall_abi::SYSCALL_NR_CAP_REVOKE;
+use clean_slate_capability::syscall_abi::{CAP_REVOKE_OP_DROP, SYSCALL_NR_CAP_REVOKE};
 use clean_slate_capability::ResourceClass;
 use clean_slate_compositor::backend::{
-    BufferMapping, DisplayBackend, InputFailure, InputSource, MapFailure, NoInput, PortFailure,
-    PortServer, SharedBufferMapper, WaitFailure, WorkWaiter, WAKE_DISPLAY, WAKE_INPUT,
-    WAKE_NOTICES, WAKE_REQUESTS,
+    can_observe_presents, BufferMapping, DisplayBackend, InputFailure, InputSource, MapFailure,
+    NoInput, PortFailure, PortServer, SharedBufferMapper, WaitFailure, WaitRequest, WorkWaiter,
+    WAKE_DISPLAY, WAKE_INPUT, WAKE_NOTICES, WAKE_REQUESTS,
 };
 use clean_slate_compositor::{Compositor, Config, DefaultPolicy, Io};
 use clean_slate_graphics::abi::display::{
@@ -43,9 +48,7 @@ use clean_slate_native_abi::port::{
     PORT_OP_BIND_WAKE, PORT_OP_DISCONNECT, PORT_OP_FIND_HANDLE, PORT_OP_POST, PORT_OP_RECV,
     PORT_RECV_NONBLOCK, PORT_ROLE_SERVE,
 };
-use clean_slate_native_abi::work_set::{
-    WORK_SET_OP_CREATE, WORK_SET_OP_NOW, WORK_SET_OP_WAIT, WORK_SET_WAIT_NONBLOCK,
-};
+use clean_slate_native_abi::work_set::{WORK_SET_OP_CREATE, WORK_SET_OP_NOW, WORK_SET_OP_WAIT};
 use clean_slate_native_abi::{
     is_status, ConnectionId, PortRecvRecord, TransferredCap, SHARED_BUFFER_ACCESS_READ,
     SHARED_BUFFER_SUBOP_MAP, SHARED_BUFFER_SUBOP_UNMAP, STATUS_EAGAIN, STATUS_ENOSPC, STATUS_EPIPE,
@@ -57,7 +60,6 @@ use clean_slate_native_abi::{
 const BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0000_1000;
 const SYSCALL_NR_DISPLAY: u64 = 18;
 const SYSCALL_NR_INPUT: u64 = 19;
-const CAP_REVOKE_OP_REVOKE: u64 = 1;
 
 /// Layout the launch policy writes for the compositor (P5).
 #[repr(C)]
@@ -188,15 +190,21 @@ impl SharedBufferMapper for KernelSharedBuffers {
         }
     }
 
-    fn bytes(&self, mapping: &BufferMapping) -> Option<&[u8]> {
-        if mapping.token == 0 {
-            return None;
+    fn read(&self, mapping: &BufferMapping, offset: u64, dst: &mut [u8]) -> bool {
+        let Some(end) = offset.checked_add(dst.len() as u64) else {
+            return false;
+        };
+        let Some(start) = mapping.token.checked_add(offset) else {
+            return false;
+        };
+        if mapping.token == 0 || end > mapping.byte_len {
+            return false;
         }
-        // The kernel mapped at least `byte_len` readable bytes at `token` and keeps the row
-        // alive until `unmap`, which takes the mapping by value.
-        Some(unsafe {
-            core::slice::from_raw_parts(mapping.token as *const u8, mapping.byte_len as usize)
-        })
+        // The kernel mapped at least `byte_len` readable bytes at `token` and keeps the row (or
+        // its zero-page orphan) until `unmap`, which takes the mapping by value. The client
+        // writes the same frames concurrently, so they are only ever read volatilely.
+        unsafe { volatile_copy(start as *const u8, dst) };
+        true
     }
 
     fn unmap(&mut self, mapping: BufferMapping) {
@@ -217,10 +225,36 @@ impl SharedBufferMapper for KernelSharedBuffers {
 }
 
 impl KernelSharedBuffers {
-    /// A `READ` child cannot revoke itself, so this fails with `EACCES` until the kernel grows a
-    /// holder-side drop; the child is then reclaimed at compositor teardown.
+    /// `DROP` releases only this process's child record; the client's root and mapping are
+    /// untouched. Called after `UNMAP`, so the kernel's "still mapped" `EAGAIN` cannot occur, and
+    /// `ESTALE` (already purged by a client revoke) needs no handling.
     fn discard_handle(&mut self, handle: u64) {
-        syscall(SYSCALL_NR_CAP_REVOKE, CAP_REVOKE_OP_REVOKE, handle, 0, 0, 0);
+        syscall(SYSCALL_NR_CAP_REVOKE, CAP_REVOKE_OP_DROP, handle, 0, 0, 0);
+    }
+}
+
+/// Copies `dst.len()` bytes from `src` with volatile loads: `u64` words over the aligned middle,
+/// bytes at either end.
+///
+/// # Safety
+///
+/// `src..src + dst.len()` must stay mapped and readable for the whole call.
+unsafe fn volatile_copy(src: *const u8, dst: &mut [u8]) {
+    let len = dst.len();
+    let head = src.align_offset(core::mem::align_of::<u64>()).min(len);
+    let mut at = 0;
+    while at < head {
+        dst[at] = unsafe { core::ptr::read_volatile(src.add(at)) };
+        at += 1;
+    }
+    while at + 8 <= len {
+        let word = unsafe { core::ptr::read_volatile(src.add(at).cast::<u64>()) };
+        dst[at..at + 8].copy_from_slice(&word.to_ne_bytes());
+        at += 8;
+    }
+    while at < len {
+        dst[at] = unsafe { core::ptr::read_volatile(src.add(at)) };
+        at += 1;
     }
 }
 
@@ -334,17 +368,16 @@ impl InputSource for KernelInput {
 
 struct KernelWorkSet {
     id: u64,
-    /// `WAIT` with a deadline needs a calibrated clock; without one a deadline wait degrades to
-    /// a non-blocking check, which the core only plans while a present is in flight.
+    /// `WORK_SET NOW` succeeds (the TSC is calibrated). A deadline `WAIT` needs it; without it
+    /// every wait blocks on wake bits alone (see [`WaitRequest::plan`]).
     has_clock: bool,
 }
 
 impl WorkWaiter for KernelWorkSet {
     fn wait(&mut self, mask: u32, deadline_ns: Option<u64>) -> Result<u32, WaitFailure> {
-        let (deadline, flags) = match deadline_ns {
-            Some(deadline) if self.has_clock => (deadline.max(1), 0),
-            Some(_) => (0, WORK_SET_WAIT_NONBLOCK),
-            None => (0, 0),
+        let deadline = match WaitRequest::plan(deadline_ns, self.has_clock) {
+            WaitRequest::Until(deadline) => deadline.max(1),
+            WaitRequest::Forever => 0,
         };
         let raw = syscall(
             SYSCALL_NR_WORK_SET,
@@ -352,11 +385,11 @@ impl WorkWaiter for KernelWorkSet {
             self.id,
             u64::from(mask),
             deadline,
-            flags,
+            0,
         );
         match checked(raw) {
             Ok(bits) => Ok(bits as u32),
-            Err(STATUS_ETIMEDOUT | STATUS_EAGAIN) => Ok(0),
+            Err(STATUS_ETIMEDOUT) => Ok(0),
             Err(status) => Err(WaitFailure(status)),
         }
     }
@@ -456,9 +489,11 @@ pub extern "C" fn _start() -> ! {
     let mut no_input = NoInput;
     let mut waiter = KernelWorkSet {
         id: work_set,
-        has_clock: false,
+        has_clock: checked(syscall(SYSCALL_NR_WORK_SET, WORK_SET_OP_NOW, 0, 0, 0, 0)).is_ok(),
     };
-    waiter.has_clock = waiter.now_ns() != 0;
+    if !can_observe_presents(waiter.has_clock, display_wakes) {
+        exit();
+    }
 
     let compositor = unsafe { &mut *addr_of_mut!(COMPOSITOR) };
     compositor.set_config(Config {

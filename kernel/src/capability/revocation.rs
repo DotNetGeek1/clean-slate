@@ -2,16 +2,23 @@
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
-use clean_slate_capability::syscall_abi::SYSCALL_EINVAL;
-use clean_slate_capability::{
-    authorize_revoke, revoke_subtree, CapabilityError, CapabilityHandle, Rights,
+use clean_slate_capability::syscall_abi::{
+    CAP_REVOKE_OP_DROP, CAP_REVOKE_OP_PROBE, CAP_REVOKE_OP_REVOKE, SYSCALL_EINVAL,
 };
+use clean_slate_capability::{
+    authorize_revoke, drop_own, revoke_subtree, CapabilityError, CapabilityHandle, DropRefusal,
+    HolderId, ResourceClass, Rights,
+};
+use clean_slate_native_abi::STATUS_EAGAIN;
 
 use super::{authorize_current_class, capability_space_mut, current_holder, with_capability_space};
-use crate::mm::shared_buffer::{drain_pending_in_syscall, reconcile_resource};
+use crate::mm::shared_buffer::{
+    capability_backs_live_row, drain_pending_in_syscall, reconcile_resource,
+};
 
-pub(crate) const REVOKE_OP_REVOKE: u64 = 1;
-pub(crate) const REVOKE_OP_PROBE: u64 = 2;
+pub(crate) const REVOKE_OP_REVOKE: u64 = CAP_REVOKE_OP_REVOKE;
+pub(crate) const REVOKE_OP_PROBE: u64 = CAP_REVOKE_OP_PROBE;
+pub(crate) const REVOKE_OP_DROP: u64 = CAP_REVOKE_OP_DROP;
 /// M6.6 self-test only: returns 1 once both reader fixtures probed, else 0.
 #[cfg(feature = "m6-revocation-self-test")]
 pub(crate) const REVOKE_OP_WAIT_READERS: u64 = 3;
@@ -19,10 +26,15 @@ pub(crate) const REVOKE_OP_WAIT_READERS: u64 = 3;
 #[cfg(feature = "m6-revocation-self-test")]
 pub(crate) const REVOKE_OP_WAIT_OWNER: u64 = 4;
 
+#[cfg(feature = "m6-revocation-self-test")]
+const _: () =
+    assert!(REVOKE_OP_DROP != REVOKE_OP_WAIT_READERS && REVOKE_OP_DROP != REVOKE_OP_WAIT_OWNER);
+
 pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
     match frame.rdi {
         REVOKE_OP_REVOKE => handle_revoke(frame),
         REVOKE_OP_PROBE => handle_probe(frame),
+        REVOKE_OP_DROP => handle_drop(frame),
         #[cfg(feature = "m6-revocation-self-test")]
         REVOKE_OP_WAIT_READERS => {
             crate::selftest::m6_revocation::handle_wait_for_readers(frame);
@@ -79,6 +91,54 @@ fn handle_revoke(frame: &mut SyscallContext) {
             frame.rax = error.syscall_status();
         }
     }
+}
+
+fn handle_drop(frame: &mut SyscallContext) {
+    let actor = match current_holder() {
+        Ok(holder) => holder,
+        Err(_) => {
+            frame.rax = CapabilityError::UnauthorizedHolder.syscall_status();
+            return;
+        }
+    };
+    frame.rax = match drop_for(actor, frame.rsi) {
+        Ok(()) => 0,
+        Err(status) => status,
+    };
+}
+
+/// `REVOKE_OP_DROP`: `actor` gives up its own capability `raw_handle`.
+///
+/// Statuses: `EINVAL` (malformed or never-issued handle), `ESTALE` (already dropped or
+/// released), `EACCES` (`actor` is not the holder, ancestors included), `EAGAIN` (a live child
+/// was delegated from it, or it is the authority of a live shared-window row of `actor`; `UNMAP`
+/// first). Holder checks run before the busy checks, so a non-holder learns nothing about
+/// another holder's mappings or delegations.
+pub(crate) fn drop_for(actor: HolderId, raw_handle: u64) -> Result<(), u64> {
+    let handle = CapabilityHandle::decode(raw_handle).map_err(|error| error.syscall_status())?;
+    let record = with_capability_space(|table| table.record(handle))
+        .map_err(|error| error.syscall_status())?;
+    if record.holder != actor {
+        return Err(CapabilityError::UnauthorizedHolder.syscall_status());
+    }
+    if record.resource.class == ResourceClass::SharedBuffer
+        && capability_backs_live_row(actor.0, handle)
+    {
+        return Err(STATUS_EAGAIN);
+    }
+    let resource = drop_own(unsafe { capability_space_mut() }, actor, handle).map_err(
+        |refusal| match refusal {
+            DropRefusal::Capability(error) => error.syscall_status(),
+            DropRefusal::Delegated => STATUS_EAGAIN,
+        },
+    )?;
+    reconcile_resource(resource);
+    drain_pending_in_syscall();
+    kernel_log_fmt(format_args!(
+        "[CAP ] drop handle={}:{} holder={}\n",
+        handle.slot, handle.generation, actor.0,
+    ));
+    Ok(())
 }
 
 fn handle_probe(frame: &mut SyscallContext) {

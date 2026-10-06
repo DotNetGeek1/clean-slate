@@ -27,8 +27,9 @@ use clean_slate_native_abi::{
 use clean_slate_raster::{Canvas, Color};
 
 use crate::backend::{
-    DisplayBackend, InputSource, MapFailure, PortFailure, PortServer, SharedBufferMapper,
-    WaitFailure, WorkWaiter, WAKE_ALL, WAKE_DISPLAY, WAKE_INPUT, WAKE_NOTICES, WAKE_REQUESTS,
+    BufferMapping, DisplayBackend, InputSource, MapFailure, PortFailure, PortServer,
+    SharedBufferMapper, WaitFailure, WorkWaiter, WAKE_ALL, WAKE_DISPLAY, WAKE_INPUT, WAKE_NOTICES,
+    WAKE_REQUESTS,
 };
 use crate::client::{BufferEntry, ClientIdentity, ClientSlot, SurfaceEntry, WindowEntry};
 use crate::compose::{self, Decor, Footprint, OpaqueCover, Visual};
@@ -1228,7 +1229,7 @@ impl<P: WindowPolicy> Compositor<P> {
                 },
                 frame: None,
                 layout: dst_layout,
-                bytes: &[],
+                mapping: BufferMapping::NONE,
             };
             let mut visuals = [filler; MAX_SURFACES];
             let mut frames: [Option<FrameInfo>; MAX_SURFACES] = [None; MAX_SURFACES];
@@ -1252,9 +1253,9 @@ impl<P: WindowPolicy> Compositor<P> {
                 let Ok(entry) = objects.buffer(buffer) else {
                     continue;
                 };
-                let Some(bytes) = buffers.bytes(&entry.mapping) else {
+                if !buffers.read(&entry.mapping, 0, &mut []) {
                     continue;
-                };
+                }
                 let title = window.and_then(|w| objects.window(w).ok()).map(|w| w.title);
                 frames[n] = match (frame, title, self.scene.get(scene)) {
                     (Some(frame), Some(title), Some(entry)) => {
@@ -1279,7 +1280,7 @@ impl<P: WindowPolicy> Compositor<P> {
                     footprint: footprints[position],
                     frame: frames[n].and(decor),
                     layout,
-                    bytes,
+                    mapping: entry.mapping,
                 };
                 n += 1;
             }
@@ -1311,6 +1312,7 @@ impl<P: WindowPolicy> Compositor<P> {
                 &mut canvas,
                 &damage_rects[..damage_len],
                 &visuals[..n],
+                buffers,
                 background,
                 cursor_rect,
                 &mut decor,
