@@ -12,6 +12,7 @@ on:
       - "port/**"
       - "raster/**"
       - "store/**"
+      - "ui/**"
       - "fixtures/**"
       - "xtask/**"
       - "scripts/**"
@@ -33,6 +34,7 @@ on:
       - "port/**"
       - "raster/**"
       - "store/**"
+      - "ui/**"
       - "fixtures/**"
       - "xtask/**"
       - "scripts/**"
@@ -85,6 +87,11 @@ jobs:
 
       - name: Clippy (raster)
         run: cargo clippy -p clean-slate-raster --all-targets -- -D warnings
+
+      - name: Clippy (ui)
+        run: |
+          cargo clippy -p clean-slate-ui --all-targets -- -D warnings
+          cargo clippy -p clean-slate-ui --target x86_64-unknown-uefi -- -D warnings
 
       - name: Clippy (capability)
         run: cargo clippy -p clean-slate-capability --all-targets -- -D warnings
@@ -187,6 +194,7 @@ jobs:
           cargo test -p clean-slate-network --features alloc,tls
           cargo test -p clean-slate-store
           cargo test -p clean-slate-raster
+          cargo test -p clean-slate-ui
           cargo test -p clean-slate-capability
           cargo test -p clean-slate-port
           cargo test -p clean-slate-port --features fake
