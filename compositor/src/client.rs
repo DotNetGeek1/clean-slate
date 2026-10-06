@@ -136,6 +136,18 @@ impl Outbox {
     pub fn clear(&mut self) {
         *self = Self::new();
     }
+
+    /// Drops every queued event for which `keep` is false, preserving order.
+    pub fn retain(&mut self, mut keep: impl FnMut(&Tagged<Event>) -> bool) {
+        let mut kept = Self::new();
+        while let Some(event) = self.front() {
+            self.pop();
+            if keep(&event) {
+                kept.push(event);
+            }
+        }
+        *self = kept;
+    }
 }
 
 impl Default for Outbox {
@@ -168,8 +180,9 @@ pub struct ClientSlot {
     pub(crate) stall_iterations: u32,
     /// Set by a fatal protocol error or overflow; applied at the next flush.
     pub(crate) pending_disconnect: Option<DisconnectReason>,
-    /// Serial of the newest pointer press delivered to this client (`BeginMove`/`BeginResize`).
-    pub(crate) last_press_serial: Option<Serial>,
+    /// Serial and surface of the pointer press delivered to this client while its button is
+    /// still held: the only authority for `BeginMove` / `BeginResize`.
+    pub(crate) live_press: Option<(Serial, SurfaceId)>,
 }
 
 impl ClientSlot {
@@ -184,7 +197,7 @@ impl ClientSlot {
             outbox: Outbox::new(),
             stall_iterations: 0,
             pending_disconnect: None,
-            last_press_serial: None,
+            live_press: None,
         }
     }
 
@@ -245,7 +258,23 @@ impl ClientSlot {
         self.outbox.clear();
         self.stall_iterations = 0;
         self.pending_disconnect = None;
-        self.last_press_serial = None;
+        self.live_press = None;
+    }
+
+    /// Drops queued unsolicited events about `window` or `surface` once they are destroyed.
+    pub(crate) fn purge_events(&mut self, window: Option<WindowId>, surface: Option<SurfaceId>) {
+        self.outbox.retain(|event| {
+            if event.tag != crate::UNSOLICITED_TAG {
+                return true;
+            }
+            match event.message {
+                Event::Configure { window: w, .. } | Event::CloseRequested { window: w } => {
+                    Some(w) != window
+                }
+                Event::FrameDone { surface: s, .. } => Some(s) != surface,
+                _ => true,
+            }
+        });
     }
 }
 

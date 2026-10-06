@@ -32,6 +32,7 @@ clean-slate-graphics = { path = "../graphics" }
 clean-slate-native-abi = { path = "../native-abi" }
 clean-slate-port = { path = "../port", optional = true }
 clean-slate-raster = { path = "../raster" }
+clean-slate-ui = { path = "../ui" }
 
 [dev-dependencies]
 clean-slate-graphics = { path = "../graphics", features = ["fake"] }

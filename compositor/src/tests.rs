@@ -6,6 +6,7 @@ mod limits;
 mod protocol;
 mod service_loop;
 mod units;
+mod windows;
 
 use std::boxed::Box;
 use std::vec::Vec;
@@ -29,9 +30,130 @@ use clean_slate_native_abi::{
 };
 use clean_slate_port::fake::{FakeConnection, FakePort};
 
+use clean_slate_graphics::geometry::Rect;
+use clean_slate_raster::{Canvas, Color};
+use clean_slate_ui::chrome::{ChromeControl, ChromeState, ChromeStyle};
+use clean_slate_ui::tokens::ChromeMetrics;
+
 use crate::backend::{DisplayBackend, WaitFailure, WAKE_DISPLAY, WAKE_REQUESTS};
 use crate::fake::{FakeInput, FakeSharedMemory, ScriptedWaiter, WAIT_WOULD_BLOCK_FOREVER};
-use crate::{Compositor, Config, DefaultPolicy, Io, Iteration, ServiceError, SurfaceKey, WaitPlan};
+use crate::wm::{PlaceRequest, CASCADE_STEP, CASCADE_WRAP};
+use crate::{Compositor, Config, Io, Iteration, ServiceError, SurfaceKey, WaitPlan, WindowPolicy};
+
+/// Placeholder chrome metrics small enough for the 64×48 test output (lane-local, #115).
+pub(crate) const TEST_METRICS: ChromeMetrics = ChromeMetrics {
+    title_bar_height: 4,
+    border_width: 1,
+    corner_radius: 0,
+    control_size: 2,
+    control_gap: 1,
+    control_inset: 1,
+    title_padding: 1,
+    resize_margin: 2,
+};
+
+pub(crate) const FRAME_FOCUSED: [u8; 4] = [0xee, 0xee, 0x00, 0xff];
+pub(crate) const FRAME_INACTIVE: [u8; 4] = [0x44, 0x44, 0x44, 0xff];
+pub(crate) const CONTROL: [u8; 4] = [0x99, 0x00, 0x99, 0xff];
+pub(crate) const CONTROL_PRESSED: [u8; 4] = [0x11, 0x00, 0x99, 0xff];
+pub(crate) const CURSOR: [u8; 4] = [0xfe, 0xfe, 0xfe, 0xff];
+
+fn color(bgrx: [u8; 4]) -> Color {
+    Color::opaque(bgrx[2], bgrx[1], bgrx[0])
+}
+
+/// Solid-colour placeholder chrome: the frame strips show focus, controls show press state.
+#[derive(Clone, Copy)]
+pub(crate) struct TestChrome;
+
+impl ChromeStyle for TestChrome {
+    fn metrics(&self) -> ChromeMetrics {
+        TEST_METRICS
+    }
+
+    fn visual_rect(&self, frame: Rect) -> Rect {
+        frame
+    }
+
+    fn paint_frame(&self, canvas: &mut Canvas<'_>, frame: Rect, _title: &str, state: ChromeState) {
+        let fill = color(if state.focused {
+            FRAME_FOCUSED
+        } else {
+            FRAME_INACTIVE
+        });
+        let content = self.content_rect(frame);
+        for strip in crate::wm::chrome_strips(frame, content) {
+            canvas.fill_rect(strip, fill);
+        }
+        for control in ChromeControl::ALL {
+            let pressed = state.pressed == Some(control);
+            let c = color(if pressed { CONTROL_PRESSED } else { CONTROL });
+            canvas.fill_rect(self.control_rect(frame, control), c);
+        }
+    }
+}
+
+/// Lane policy: #112 cascade placement, optional placeholder chrome and a 2×2 cursor.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct LanePolicy {
+    pub chrome: Option<TestChrome>,
+    pub cursor: bool,
+    placed: u32,
+}
+
+impl LanePolicy {
+    pub const fn plain() -> Self {
+        Self {
+            chrome: None,
+            cursor: false,
+            placed: 0,
+        }
+    }
+
+    pub const fn decorated() -> Self {
+        Self {
+            chrome: Some(TestChrome),
+            cursor: true,
+            placed: 0,
+        }
+    }
+}
+
+impl WindowPolicy for LanePolicy {
+    fn place(&mut self, request: PlaceRequest) -> Point {
+        match request.role {
+            SurfaceRole::Toplevel => {
+                let step = (self.placed % CASCADE_WRAP) as i32;
+                self.placed += 1;
+                Point {
+                    x: CASCADE_STEP * (step + 1),
+                    y: CASCADE_STEP * (step + 1),
+                }
+            }
+            SurfaceRole::Popup => request.parent_origin.unwrap_or(Point { x: 0, y: 0 }),
+            _ => Point { x: 0, y: 0 },
+        }
+    }
+
+    fn chrome(&self) -> Option<&dyn ChromeStyle> {
+        self.chrome.as_ref().map(|c| c as &dyn ChromeStyle)
+    }
+
+    fn cursor_rect(&self, hotspot: Point) -> Option<Rect> {
+        self.cursor.then_some(Rect {
+            x: hotspot.x,
+            y: hotspot.y,
+            width: 2,
+            height: 2,
+        })
+    }
+
+    fn paint_cursor(&self, canvas: &mut Canvas<'_>, hotspot: Point) {
+        if let Some(rect) = self.cursor_rect(hotspot) {
+            canvas.fill_rect(rect, color(CURSOR));
+        }
+    }
+}
 
 pub(crate) const WIDTH: u32 = 64;
 pub(crate) const HEIGHT: u32 = 48;
@@ -84,8 +206,8 @@ impl DisplayBackend for RecordingDisplay {
     }
 }
 
-pub(crate) struct Harness {
-    pub comp: Box<Compositor<DefaultPolicy>>,
+pub(crate) struct Harness<P: WindowPolicy = LanePolicy> {
+    pub comp: Box<Compositor<P>>,
     pub port: FakePort,
     pub shm: Box<Shm>,
     pub display: RecordingDisplay,
@@ -168,7 +290,18 @@ impl Harness {
     }
 
     pub fn with(params: PortParams, config: Config) -> Self {
-        let mut comp = Box::new(Compositor::new(DefaultPolicy::new(), config));
+        Harness::with_policy(LanePolicy::plain(), params, config)
+    }
+
+    /// Placeholder chrome and cursor (#115 lane tests).
+    pub fn decorated() -> Self {
+        Harness::with_policy(LanePolicy::decorated(), port_params(), Config::DEFAULT)
+    }
+}
+
+impl<P: WindowPolicy> Harness<P> {
+    pub fn with_policy(policy: P, params: PortParams, config: Config) -> Self {
+        let mut comp = Box::new(Compositor::new(policy, config));
         let mut display = RecordingDisplay {
             inner: Box::new(FakeDisplay::new(test_mode()).unwrap()),
             presents: Vec::new(),
@@ -185,7 +318,9 @@ impl Harness {
             next_buffer_slot: 1,
         }
     }
+}
 
+impl<P: WindowPolicy> Harness<P> {
     pub fn iterate(&mut self) -> Result<Iteration, ServiceError> {
         let mut io = Io {
             port: &mut self.port,
@@ -437,7 +572,26 @@ impl Harness {
         self.comp.move_surface(client.key(surface), at);
         let inbox = self.roundtrip(client, Request::Show { window });
         assert!(inbox.errors().is_empty(), "{inbox:?}");
+        self.ack_last_configure(client, window, &inbox);
+        // Stack it on top the way a user click would, without moving keyboard focus (the
+        // map-time stacking and focus policy is covered in `tests::windows`).
+        self.comp.raise_window(client.key(surface));
+        self.pump();
         (surface, window)
+    }
+
+    /// Acks the newest `Configure` for `window` in `inbox`, as a well-behaved client does.
+    pub fn ack_last_configure(&mut self, client: &mut Client, window: WindowId, inbox: &Inbox) {
+        let serial = inbox.events.iter().rev().find_map(|(_, e)| match e {
+            Event::Configure {
+                window: w, serial, ..
+            } if *w == window => Some(*serial),
+            _ => None,
+        });
+        if let Some(serial) = serial {
+            let inbox = self.roundtrip(client, Request::AckConfigure { window, serial });
+            assert!(inbox.errors().is_empty(), "{inbox:?}");
+        }
     }
 
     pub fn attach_commit(

@@ -284,15 +284,19 @@ fn window_rules_follow_the_contract() {
     // Interactive operations need a live press serial.
     let inbox = h.roundtrip(&mut a, Request::BeginMove { window, serial });
     assert_eq!(inbox.errors(), [ProtocolError::SerialMismatch]);
-    let press = h.comp.mint_serial(a.conn.id(), true).unwrap();
+    let minted = h.comp.mint_serial(a.conn.id()).unwrap();
     let inbox = h.roundtrip(
         &mut a,
         Request::BeginMove {
             window,
-            serial: press,
+            serial: minted,
         },
     );
-    assert!(inbox.errors().is_empty());
+    assert_eq!(
+        inbox.errors(),
+        [ProtocolError::SerialMismatch],
+        "a serial that is not a live press authorises nothing (see tests::windows)"
+    );
 
     // The codec refuses to encode an out-of-range limit, so patch `max.width` in the frame.
     let mut frame = Request::SetSizeLimits {

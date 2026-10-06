@@ -31,11 +31,15 @@ use crate::backend::{
     WaitFailure, WorkWaiter, WAKE_ALL, WAKE_DISPLAY, WAKE_INPUT, WAKE_NOTICES, WAKE_REQUESTS,
 };
 use crate::client::{BufferEntry, ClientIdentity, ClientSlot, SurfaceEntry, WindowEntry};
-use crate::compose::{self, Footprint, OpaqueCover, Visual};
+use crate::compose::{self, Decor, Footprint, OpaqueCover, Visual};
 use crate::input::{Hit, Seat};
 use crate::present::{DisplayHealth, PresentTracker};
 use crate::scene::{Scene, SurfaceKey};
-use crate::wm::{Interactive, PlaceRequest, WindowPolicy};
+use crate::wm::{GrabKind, PlaceRequest, Target, WindowPolicy, Wm, WmHit};
+use clean_slate_graphics::window::WindowTitle;
+use clean_slate_ui::chrome::ChromeState;
+
+mod routing;
 
 /// Output damage accumulated between presents; overflow collapses to the bounding box.
 pub type OutputDamage = RectSet<MAX_PRESENT_DAMAGE_RECTS>;
@@ -130,6 +134,19 @@ struct Work {
     cover: OpaqueCover,
     layout: Option<BufferLayout>,
     buffer: Option<ClientBufferId>,
+    /// Window of a toplevel, which gets a server-side decoration.
+    window: Option<WindowId>,
+    /// Decoration frame and everything it may paint, when decorated and shown.
+    frame: Option<Rect>,
+    decor: Option<Rect>,
+}
+
+/// One server-side decoration to paint.
+#[derive(Clone, Copy, Debug)]
+struct FrameInfo {
+    frame: Rect,
+    title: WindowTitle,
+    state: ChromeState,
 }
 
 const EMPTY_RECT: Rect = Rect {
@@ -149,6 +166,7 @@ pub struct Compositor<P: WindowPolicy> {
     needs_composite: bool,
     backlog: bool,
     seat: Seat,
+    wm: Wm,
     policy: P,
     config: Config,
     stats: Stats,
@@ -165,6 +183,7 @@ impl<P: WindowPolicy> Compositor<P> {
             needs_composite: false,
             backlog: false,
             seat: Seat::new(),
+            wm: Wm::new(),
             policy,
             config,
             stats: Stats {
@@ -258,7 +277,10 @@ impl<P: WindowPolicy> Compositor<P> {
 
     /// Raises `key` to the top of its layer.
     pub fn raise(&mut self, key: SurfaceKey) -> bool {
-        let shown = self.scene.entry(key).and_then(|e| e.shown);
+        let shown = self
+            .scene
+            .entry(key)
+            .and_then(|e| e.decor_shown.or(e.shown));
         if !self.scene.raise(key) {
             return false;
         }
@@ -273,9 +295,16 @@ impl<P: WindowPolicy> Compositor<P> {
         self.add_damage(rect);
     }
 
-    /// Topmost surface whose committed input region accepts `point`.
+    /// Surface whose committed input region accepts `point`, unless a decoration or nothing is
+    /// the topmost target there (see [`Self::window_at`]).
     pub fn surface_at(&self, point: Point) -> Option<Hit> {
-        hit_test(&self.scene, &self.clients, point)
+        match self.window_at(point)? {
+            WmHit {
+                key,
+                target: Target::Content { local },
+            } => Some(Hit { key, local }),
+            _ => None,
+        }
     }
 
     /// Sends `config` to the window of `key` (coalesced past `MAX_OUTSTANDING_CONFIGURES`).
@@ -325,16 +354,11 @@ impl<P: WindowPolicy> Compositor<P> {
         }
     }
 
-    /// Mints an input serial for `connection`; a press serial also authorises `BeginMove` /
-    /// `BeginResize`.
-    pub fn mint_serial(&mut self, connection: ConnectionId, is_press: bool) -> Option<Serial> {
+    /// Mints a serial for `connection`. It never authorises `BeginMove` / `BeginResize`: only
+    /// a press the window manager delivered, still held, does.
+    pub fn mint_serial(&mut self, connection: ConnectionId) -> Option<Serial> {
         let slot = self.slot_of(connection)?;
-        let client = &mut self.clients[slot];
-        let serial = client.minter.mint();
-        if is_press {
-            client.last_press_serial = Some(serial);
-        }
-        Some(serial)
+        Some(self.clients[slot].minter.mint())
     }
 
     // ---- service loop -----------------------------------------------------------------------
@@ -344,6 +368,16 @@ impl<P: WindowPolicy> Compositor<P> {
         let info = display.query_mode().map_err(ServiceError::Display)?;
         self.present = Some(PresentTracker::new(info));
         self.damage_full_output();
+        if self.policy.cursor_at_start() {
+            let output = self.output_size();
+            let centre = Point {
+                x: (output.width / 2) as i32,
+                y: (output.height / 2) as i32,
+            };
+            self.seat.warp(centre, output);
+            let at = self.seat.pointer();
+            self.move_cursor(at);
+        }
         Ok(())
     }
 
@@ -404,8 +438,10 @@ impl<P: WindowPolicy> Compositor<P> {
         if woke & (WAKE_REQUESTS | WAKE_NOTICES) != 0 {
             iteration.records = self.drain_port(io)?;
         }
+        self.wm_refresh();
         if woke & WAKE_INPUT != 0 {
             iteration.input_records = self.drain_input(io);
+            self.wm_refresh();
         }
         let display_due = woke & WAKE_DISPLAY != 0
             || self
@@ -547,6 +583,34 @@ impl<P: WindowPolicy> Compositor<P> {
         transfer: &mut Option<TransferredCap>,
         io: &mut Io<'_>,
     ) -> Result<(), ProtocolError> {
+        match request {
+            Request::BeginMove { window, serial } => {
+                return self.begin_interactive_request(slot, window, serial, GrabKind::Move);
+            }
+            Request::BeginResize {
+                window,
+                serial,
+                edges,
+            } => {
+                let kind = GrabKind::Resize {
+                    edges: edges.bits(),
+                };
+                return self.begin_interactive_request(slot, window, serial, kind);
+            }
+            Request::SetTitle { window, title } => {
+                let surface = {
+                    let entry = self.clients[slot].objects.window_mut(window)?;
+                    entry.title = title;
+                    entry.surface
+                };
+                self.damage_title(SurfaceKey {
+                    connection: envelope.connection,
+                    surface,
+                });
+                return Ok(());
+            }
+            _ => {}
+        }
         let in_flight = self.present.and_then(|p| p.in_flight()).map(|f| f.seq);
         let output = self.present.map(|p| p.size()).unwrap_or(Size {
             width: 0,
@@ -558,7 +622,6 @@ impl<P: WindowPolicy> Compositor<P> {
             scene,
             needs_composite,
             damage,
-            policy,
             ..
         } = self;
         let client = &mut clients[slot];
@@ -597,6 +660,7 @@ impl<P: WindowPolicy> Compositor<P> {
                 if let Some(window) = entry.window {
                     let _ = client.objects.remove_window(budget, window);
                 }
+                client.purge_events(entry.window, Some(surface));
                 for buffer in client.tracker.remove_surface(surface).into_iter().flatten() {
                     client.queue(UNSOLICITED_TAG, Event::BufferReleased { buffer });
                 }
@@ -770,13 +834,11 @@ impl<P: WindowPolicy> Compositor<P> {
                 if let Ok(surface) = client.objects.surface_mut(entry.surface) {
                     surface.window = None;
                 }
+                client.purge_events(Some(window), None);
                 *needs_composite = true;
                 Ok(())
             }
-            Request::SetTitle { window, title } => {
-                client.objects.window_mut(window)?.title = title;
-                Ok(())
-            }
+            Request::SetTitle { .. } => Ok(()),
             Request::SetSizeLimits { window, min, max } => {
                 let entry = client.objects.window_mut(window)?;
                 entry.min_size = min;
@@ -793,31 +855,7 @@ impl<P: WindowPolicy> Compositor<P> {
                 *needs_composite = true;
                 Ok(())
             }
-            Request::BeginMove { window, serial } => {
-                let surface = client.objects.window(window)?.surface;
-                if client.last_press_serial != Some(serial) {
-                    return Err(ProtocolError::SerialMismatch);
-                }
-                policy.begin_interactive(key(surface), Interactive::Move);
-                Ok(())
-            }
-            Request::BeginResize {
-                window,
-                serial,
-                edges,
-            } => {
-                let surface = client.objects.window(window)?.surface;
-                if client.last_press_serial != Some(serial) {
-                    return Err(ProtocolError::SerialMismatch);
-                }
-                policy.begin_interactive(
-                    key(surface),
-                    Interactive::Resize {
-                        edges: edges.bits(),
-                    },
-                );
-                Ok(())
-            }
+            Request::BeginMove { .. } | Request::BeginResize { .. } => Ok(()),
             Request::AckConfigure { window, serial } => {
                 client.objects.window_mut(window)?.configure.ack(serial)?;
                 resend_wanted(client, window);
@@ -911,18 +949,10 @@ impl<P: WindowPolicy> Compositor<P> {
 
     fn drain_input(&mut self, io: &mut Io<'_>) -> usize {
         let output = self.output_size();
-        let Self {
-            seat,
-            policy,
-            scene,
-            clients,
-            ..
-        } = self;
         let mut sink = |record: RawInputRecord| {
-            let (events, n) = seat.fold(&record, output);
+            let (events, n) = self.seat.fold(&record, output);
             for event in events.iter().take(n).flatten() {
-                let hit = hit_test(scene, clients, seat.pointer());
-                policy.on_seat_event(*event, hit);
+                self.on_seat_event(*event);
             }
         };
         match io.input.read_batch(READ_BATCH_MAX_RECORDS, &mut sink) {
@@ -1022,11 +1052,12 @@ impl<P: WindowPolicy> Compositor<P> {
             };
             let client = &mut self.clients[entry.client];
             let visible = surface_visible(client, entry.key.surface);
-            let parent = client
+            let (parent, window) = client
                 .objects
                 .surface(entry.key.surface)
-                .ok()
-                .and_then(|e| e.parent);
+                .map(|e| (e.parent, e.window))
+                .unwrap_or((None, None));
+            let window = window.filter(|_| entry.role == Some(SurfaceRole::Toplevel));
             let tracker = &mut client.tracker;
             let Ok(surface) = client.objects.surface_mut(entry.key.surface) else {
                 continue;
@@ -1058,6 +1089,20 @@ impl<P: WindowPolicy> Compositor<P> {
                 origin = Some(placed);
             }
             let buffer = committed.buffer();
+            if let (Some(anchor), Some(at), Some(_)) = (self.wm.anchor, origin, buffer) {
+                if anchor.key == entry.key {
+                    let size = committed.size();
+                    let anchored = anchor.origin_for(at, size);
+                    if anchored != at {
+                        self.scene.set_origin(entry.key, anchored);
+                        origin = Some(anchored);
+                    }
+                    let gesture_over = self.wm.grab.is_none_or(|g| g.key != anchor.key);
+                    if gesture_over && size == anchor.target {
+                        self.wm.anchor = None;
+                    }
+                }
+            }
             let rect = match (visible, origin, buffer) {
                 (true, Some(at), Some(_)) => Some(Rect {
                     x: at.x,
@@ -1066,6 +1111,13 @@ impl<P: WindowPolicy> Compositor<P> {
                     height: committed.size().height,
                 }),
                 _ => None,
+            };
+            let (frame, decor) = match (rect, window, self.policy.chrome()) {
+                (Some(r), Some(_), Some(chrome)) => {
+                    let frame = chrome.frame_rect(r);
+                    (Some(frame), Some(chrome.visual_rect(frame)))
+                }
+                _ => (None, None),
             };
             let cover = match (rect, buffer) {
                 (Some(r), Some(b)) => {
@@ -1080,6 +1132,9 @@ impl<P: WindowPolicy> Compositor<P> {
                 cover,
                 layout: buffer.map(|b| b.layout),
                 buffer: buffer.map(|b| b.id),
+                window,
+                frame,
+                decor,
             });
             latched[position] = Some(latch.damage);
         }
@@ -1112,7 +1167,14 @@ impl<P: WindowPolicy> Compositor<P> {
                 continue;
             };
             let old = entry.shown;
+            let old_decor = entry.decor_shown;
             entry.shown = w.rect;
+            entry.decor_shown = w.decor;
+            if old_decor != w.decor {
+                for rect in [old_decor, w.decor].into_iter().flatten() {
+                    insert_damage(&mut self.damage, output, rect);
+                }
+            }
             if old != w.rect {
                 for rect in [old, w.rect].into_iter().flatten() {
                     insert_damage(&mut self.damage, output, rect);
@@ -1154,6 +1216,8 @@ impl<P: WindowPolicy> Compositor<P> {
         let damage_len = self.damage.rects().len();
         damage_rects[..damage_len].copy_from_slice(self.damage.rects());
         let background = self.config.background;
+        let cursor = self.wm.cursor;
+        let cursor_rect = cursor.shown.filter(|_| cursor.visible);
 
         let blits = {
             let buffers: &dyn SharedBufferMapper = &*io.buffers;
@@ -1162,30 +1226,58 @@ impl<P: WindowPolicy> Compositor<P> {
                     rect: EMPTY_RECT,
                     cover: OpaqueCover::None,
                 },
+                frame: None,
                 layout: dst_layout,
                 bytes: &[],
             };
             let mut visuals = [filler; MAX_SURFACES];
+            let mut frames: [Option<FrameInfo>; MAX_SURFACES] = [None; MAX_SURFACES];
             let mut n = 0;
             for (position, w) in work.iter().enumerate().take(count) {
                 let Some(Work {
+                    scene,
                     rect: Some(_),
                     client,
                     layout: Some(layout),
                     buffer: Some(buffer),
+                    window,
+                    frame,
+                    decor,
                     ..
                 }) = *w
                 else {
                     continue;
                 };
-                let Ok(entry) = self.clients[client].objects.buffer(buffer) else {
+                let objects = &self.clients[client].objects;
+                let Ok(entry) = objects.buffer(buffer) else {
                     continue;
                 };
                 let Some(bytes) = buffers.bytes(&entry.mapping) else {
                     continue;
                 };
+                let title = window.and_then(|w| objects.window(w).ok()).map(|w| w.title);
+                frames[n] = match (frame, title, self.scene.get(scene)) {
+                    (Some(frame), Some(title), Some(entry)) => {
+                        let key = entry.key;
+                        let control = |c: Option<(SurfaceKey, _)>| {
+                            c.filter(|(k, _)| *k == key).map(|(_, control)| control)
+                        };
+                        Some(FrameInfo {
+                            frame,
+                            title,
+                            state: ChromeState {
+                                focused: self.wm.focus == Some(key),
+                                hovered: control(self.wm.hover),
+                                pressed: control(self.wm.control_press),
+                                maximized: false,
+                            },
+                        })
+                    }
+                    _ => None,
+                };
                 visuals[n] = Visual {
                     footprint: footprints[position],
+                    frame: frames[n].and(decor),
                     layout,
                     bytes,
                 };
@@ -1205,11 +1297,23 @@ impl<P: WindowPolicy> Compositor<P> {
             let Ok(mut canvas) = Canvas::new(dst, dst_layout) else {
                 return None;
             };
+            let policy = &self.policy;
+            let chrome = policy.chrome();
+            let mut decor = |canvas: &mut Canvas<'_>, decor: Decor| match decor {
+                Decor::Frame(i) => {
+                    if let (Some(chrome), Some(Some(f))) = (chrome, frames.get(i)) {
+                        chrome.paint_frame(canvas, f.frame, f.title.as_str(), f.state);
+                    }
+                }
+                Decor::Cursor => policy.paint_cursor(canvas, cursor.position),
+            };
             compose::paint(
                 &mut canvas,
                 &damage_rects[..damage_len],
                 &visuals[..n],
                 background,
+                cursor_rect,
+                &mut decor,
             )
         };
         self.stats.blits += blits as u64;
@@ -1305,43 +1409,6 @@ fn insert_damage(damage: &mut OutputDamage, output: Size, rect: Rect) {
     if let Ok(Some(clipped)) = rect.clip_to(output) {
         let _ = damage.insert(clipped);
     }
-}
-
-/// Topmost shown surface under `point` whose committed input region accepts it.
-fn hit_test(scene: &Scene, clients: &[ClientSlot; MAX_CLIENTS], point: Point) -> Option<Hit> {
-    let order = scene.order();
-    for &index in order.as_slice().iter().rev() {
-        let entry = scene.get(usize::from(index))?;
-        let Some(rect) = entry.shown else {
-            continue;
-        };
-        if !compose::contains(
-            rect,
-            Rect {
-                x: point.x,
-                y: point.y,
-                width: 1,
-                height: 1,
-            },
-        ) {
-            continue;
-        }
-        let local = Point {
-            x: point.x - rect.x,
-            y: point.y - rect.y,
-        };
-        let accepts = clients[entry.client]
-            .objects
-            .surface(entry.key.surface)
-            .is_ok_and(|s| s.state.committed().accepts_input_at(local));
-        if accepts {
-            return Some(Hit {
-                key: entry.key,
-                local,
-            });
-        }
-    }
-    None
 }
 
 /// Composited iff role-assigned and mapped; a `Toplevel` also needs a shown window and a

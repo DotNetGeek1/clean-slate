@@ -2,8 +2,8 @@
 //!
 //! #112 drains the raw queue (so input never wakes the loop forever), keeps pointer, button and
 //! modifier state, and resolves the surface under the pointer against each surface's committed
-//! input region. Focus and event delivery to clients are window-manager policy (#115), reached
-//! through [`crate::wm::WindowPolicy::on_seat_event`].
+//! input region. Focus and event delivery to clients are window-manager behaviour (#115,
+//! [`crate::wm`]).
 
 use clean_slate_graphics::geometry::{Point, Size};
 use clean_slate_graphics::input::{
@@ -87,6 +87,17 @@ impl Seat {
 
     pub fn any_button_pressed(&self) -> bool {
         self.buttons.any_pressed()
+    }
+
+    /// Places the pointer at `to`, clamped to `output` (start-up placement only; input moves
+    /// it relatively).
+    pub fn warp(&mut self, to: Point, output: Size) {
+        let clamp =
+            |v: i32, extent: u32| v.clamp(0, extent.saturating_sub(1).min(i32::MAX as u32) as i32);
+        self.pointer = Point {
+            x: clamp(to.x, output.width),
+            y: clamp(to.y, output.height),
+        };
     }
 
     /// Folds one raw record; returns the seat events it produced (at most two).

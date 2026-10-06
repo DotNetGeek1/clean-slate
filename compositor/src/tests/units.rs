@@ -67,6 +67,7 @@ fn paint_skips_everything_below_the_topmost_opaque_cover() {
                 rect: r(0, 0, 8, 8),
                 cover: OpaqueCover::Full,
             },
+            frame: None,
             layout: dst_layout,
             bytes: &red,
         },
@@ -75,28 +76,90 @@ fn paint_skips_everything_below_the_topmost_opaque_cover() {
                 rect: r(2, 2, 4, 4),
                 cover: OpaqueCover::Full,
             },
+            frame: None,
             layout: layout(4, 4, PixelFormat::Xrgb8888),
             bytes: &blue[..64],
         },
     ];
     let mut canvas = Canvas::new(&mut dst, dst_layout).unwrap();
     let background = Color::opaque(1, 2, 3);
+    let paint = |canvas: &mut Canvas<'_>, damage: &[_], visuals: &[Visual<'_>]| {
+        compose::paint(canvas, damage, visuals, background, None, &mut |_, _| {
+            panic!("no decorations")
+        })
+    };
     // Inside the top surface: one blit; straddling: both; outside everything: background only.
-    assert_eq!(
-        compose::paint(&mut canvas, &[r(3, 3, 2, 2)], &visuals, background),
-        1
-    );
-    assert_eq!(
-        compose::paint(&mut canvas, &[r(0, 0, 4, 4)], &visuals, background),
-        2
-    );
-    assert_eq!(
-        compose::paint(&mut canvas, &[r(0, 0, 8, 8)], &visuals[1..], background),
-        1
-    );
+    assert_eq!(paint(&mut canvas, &[r(3, 3, 2, 2)], &visuals), 1);
+    assert_eq!(paint(&mut canvas, &[r(0, 0, 4, 4)], &visuals), 2);
+    assert_eq!(paint(&mut canvas, &[r(0, 0, 8, 8)], &visuals[1..]), 1);
     let px = |x: usize, y: usize| dst[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4].to_vec();
     assert_eq!(px(0, 0), [3, 2, 1, 0xff]);
     assert_eq!(px(3, 3), [0xff, 0, 0, 0xff]);
+}
+
+/// Frames paint just below their surface and above lower surfaces; the cursor paints last and
+/// only where damage meets it; a covering surface skips its own frame.
+#[test]
+fn paint_orders_frames_between_surfaces_and_the_cursor_on_top() {
+    use crate::compose::Decor;
+    let dst_layout = layout(8, 8, PixelFormat::Xrgb8888);
+    let mut dst = vec![0u8; dst_layout.byte_len()];
+    let red = [0u8, 0, 0xff, 0xff].repeat(64);
+    let blue = [0xffu8, 0, 0, 0xff].repeat(16);
+    let visuals = [
+        Visual {
+            footprint: Footprint {
+                rect: r(0, 0, 8, 8),
+                cover: OpaqueCover::Full,
+            },
+            frame: None,
+            layout: dst_layout,
+            bytes: &red,
+        },
+        Visual {
+            footprint: Footprint {
+                rect: r(3, 3, 2, 2),
+                cover: OpaqueCover::Full,
+            },
+            frame: Some(r(2, 2, 4, 4)),
+            layout: layout(2, 2, PixelFormat::Xrgb8888),
+            bytes: &blue,
+        },
+    ];
+    let mut canvas = Canvas::new(&mut dst, dst_layout).unwrap();
+    let mut calls = Vec::new();
+    let green = Color::opaque(0, 0xff, 0);
+    let white = Color::opaque(0xff, 0xff, 0xff);
+    let mut decor = |c: &mut Canvas<'_>, d: Decor| {
+        calls.push(d);
+        match d {
+            Decor::Frame(_) => c.fill_rect(r(2, 2, 4, 4), green),
+            Decor::Cursor => c.fill_rect(r(0, 0, 1, 1), white),
+        }
+    };
+    let black = Color::opaque(0, 0, 0);
+    compose::paint(
+        &mut canvas,
+        &[r(0, 0, 8, 8)],
+        &visuals,
+        black,
+        Some(r(0, 0, 1, 1)),
+        &mut decor,
+    );
+    compose::paint(
+        &mut canvas,
+        &[r(3, 3, 1, 1)],
+        &visuals,
+        black,
+        Some(r(0, 0, 1, 1)),
+        &mut decor,
+    );
+    assert_eq!(calls, [Decor::Frame(1), Decor::Cursor]);
+    let px = |x: usize, y: usize| dst[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4].to_vec();
+    assert_eq!(px(0, 0), [0xff, 0xff, 0xff, 0xff], "cursor");
+    assert_eq!(px(2, 2), [0, 0xff, 0, 0xff], "frame over the lower surface");
+    assert_eq!(px(3, 3), [0xff, 0, 0, 0xff], "surface over its frame");
+    assert_eq!(px(7, 7), [0, 0, 0xff, 0xff]);
 }
 
 #[test]
