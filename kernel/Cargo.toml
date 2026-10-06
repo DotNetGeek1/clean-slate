@@ -109,6 +109,8 @@ m9-linux-trace-self-test = [
 m10-nxe-self-test = ["m3-entry-self-test", "stack-high-water-check"]
 # M10 #195 S2: scripted fixture lane for bounded shared user buffers (phase `nx`).
 m10-shared-buffer-self-test = ["m3-entry-self-test", "stack-high-water-check"]
+# M10 #113: i8042 input smoke lane (controller write-output-buffer stimulus, no host injection).
+m10-input-self-test = ["m3-entry-self-test", "stack-high-water-check", "m10-timeout-introspection"]
 
 [lib]
 path = "src/lib.rs"

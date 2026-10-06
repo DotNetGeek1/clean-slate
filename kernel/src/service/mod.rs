@@ -10,6 +10,7 @@ pub(crate) mod block_bridge;
 pub(crate) mod capability;
 pub(crate) mod control;
 pub(crate) mod display_syscall;
+pub(crate) mod input_syscall;
 pub(crate) mod instance_generation;
 #[cfg(feature = "m8-linux-image")]
 pub(crate) mod linux_launch;

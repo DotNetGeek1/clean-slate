@@ -308,6 +308,29 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 10] = [
     "[M9.E] cycles=8 waiters=0",
     "[M9.E] PASS",
 ];
+const M10_INPUT_SMOKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+/// #113 smoke lane: the i8042 controller's write-output-buffer commands stand in for host
+/// injection (#197), so every record still crosses IRQ 1/12, the decoders and the raw queue.
+const M10_INPUT_SMOKE_ACCEPTANCE_MARKERS: [&str; 18] = [
+    "[TIME] timer initialized",
+    "[M10.input] init begun devices=none timeouts_armed=2",
+    "[M10.input] init settled kbd=ready mouse=ready ",
+    "[M10.input] rec seq=1 kbd overflow dropped=1",
+    "[M10.input] rec seq=2 mouse overflow dropped=1",
+    "[M10.input] self-reset kbd=0x00000200 mouse=0x00000201 readiness_changes=+4",
+    "[M10.input] ready kbd=0x00000200 mouse=0x00000201 proto=4 ",
+    "[M10.input] rec seq=3 kbd key=0x04 down",
+    "[M10.input] routed kbd_bytes=",
+    "[M10.input] queue full len=128 pending_dropped=4 wake_edges=",
+    "[M10.input] idle ms=300 ",
+    "[M10.input] boot phase complete",
+    "[M10.input] cpl3 query devices ok",
+    "[M10.input] cpl3 drained records=128 overflow dropped=4",
+    "[M10.input] cpl3 unauthorized refused",
+    "[M10.input] consumer released bindings=1 then=0",
+    "[M10.input] cpl3 exclusive consumer ok",
+    "[M10.input] PASS",
+];
 const M9_STACK_GUARD_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
 /// The overflow line is the production fail-closed diagnostic; the probe only
 /// passes when it names the probe's slot and was reported from the #DF IST.
@@ -996,6 +1019,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10VirtioModern => run_m10_virtio_modern_acceptance(),
         ParsedCommand::TestM10Framebuffer => run_m10_framebuffer_acceptance(),
         ParsedCommand::TestM10SharedBuffer => run_m10_shared_buffer_acceptance(),
+        ParsedCommand::TestM10InputSmoke => run_m10_input_smoke_acceptance(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -2086,6 +2110,18 @@ fn run_m10_virtio_modern_acceptance() -> Result<(), XtaskError> {
     )?;
     println!("[M10.virtio-modern] PASS");
     Ok(())
+}
+
+fn run_m10_input_smoke_acceptance() -> Result<(), XtaskError> {
+    run_vm_inner(
+        false,
+        false,
+        &["m10-input-self-test"],
+        Some((
+            MarkerSet::Ordered(&M10_INPUT_SMOKE_ACCEPTANCE_MARKERS),
+            M10_INPUT_SMOKE_ACCEPTANCE_TIMEOUT,
+        )),
+    )
 }
 
 /// M10 contract gate (#110 Stage F): host tests for graphics/capability ABI crates plus
@@ -3417,6 +3453,42 @@ mod runtime_probe_line_tests {
 }
 
 #[cfg(test)]
+mod m10_input_count_tests {
+    use super::validate_m10_input_counts;
+
+    const CLEAN: &str = "[M10.input] init settled kbd=ready mouse=ready ms=3 readiness_changes=2 timeouts_armed=0\r\n\
+        [M10.input] routed kbd_bytes=18 irq1=18 aux_bytes=24 irq12=24 spurious=0 port_reads=42\r\n\
+        [M10.input] queue full len=128 pending_dropped=4 wake_edges=+1\r\n\
+        [M10.input] idle ms=300 ticks=30 irqs=+0 port_accesses=+0\r\n";
+
+    #[test]
+    fn accepts_matching_counts() {
+        validate_m10_input_counts(CLEAN).unwrap();
+    }
+
+    #[test]
+    fn rejects_counts_that_do_not_match_the_injected_bytes() {
+        for (from, to) in [
+            ("irq1=18", "irq1=17"),
+            ("irq12=24", "irq12=25"),
+            ("spurious=0", "spurious=1"),
+            ("port_reads=42", "port_reads=43"),
+            ("kbd_bytes=18 irq1=18", "kbd_bytes=0 irq1=0"),
+            ("wake_edges=+1", "wake_edges=+2"),
+            ("irqs=+0", "irqs=+1"),
+            ("port_accesses=+0", "port_accesses=+3"),
+            ("irq12=24 ", ""),
+            ("timeouts_armed=0", "timeouts_armed=1"),
+            (" timeouts_armed=0", ""),
+        ] {
+            let bad = CLEAN.replace(from, to);
+            assert!(validate_m10_input_counts(&bad).is_err(), "{from} -> {to}");
+        }
+        assert!(validate_m10_input_counts("[M10.input] PASS\n").is_err());
+    }
+}
+
+#[cfg(test)]
 mod nanosleep_wall_clock_tests {
     use super::{parse_wall_brackets, validate_nanosleep_wall_clock, WallBracket};
     use std::time::Duration;
@@ -3765,6 +3837,15 @@ fn run_driven_acceptance_command(
                             return Err(error);
                         }
                     }
+                    if marker_set_is_ordered(marker_set, &M10_INPUT_SMOKE_ACCEPTANCE_MARKERS) {
+                        if let Err(error) = validate_m10_input_counts(&output) {
+                            terminate_child(&mut child)?;
+                            let _ = child.wait();
+                            join_output_reader(stdout_handle);
+                            join_output_reader(stderr_handle);
+                            return Err(error);
+                        }
+                    }
                     if marker_set_is_ordered(marker_set, &M9_USERSPACE_ACCEPTANCE_MARKERS) {
                         if let Err(reason) =
                             m9_userspace_validate::validate_m9_userspace_serial(&output)
@@ -3958,6 +4039,9 @@ fn validate_output_markers(output: &str, marker_set: MarkerSet<'static>) -> Resu
         if marker_set_is_ordered(marker_set, &M9_LINUX_TRACE_ACCEPTANCE_MARKERS) {
             validate_m9_linux_trace_ltrc(output)?;
         }
+        if marker_set_is_ordered(marker_set, &M10_INPUT_SMOKE_ACCEPTANCE_MARKERS) {
+            validate_m10_input_counts(output)?;
+        }
         if markers_require_verbatim_linux_hello(marker_set) {
             assert_no_ipc_framed_linux_hello(output)?;
         }
@@ -3965,6 +4049,80 @@ fn validate_output_markers(output: &str, marker_set: MarkerSet<'static>) -> Resu
     } else {
         Err(XtaskError::MissingMarker(tracker.pending_label()))
     }
+}
+
+/// The smoke lane's counters, checked by value rather than by line prefix: each IRQ vector
+/// fired once per byte injected on its port with no spurious IRQ, filling the queue woke the
+/// consumer exactly once, and the idle hold touched no controller port.
+fn validate_m10_input_counts(output: &str) -> Result<(), XtaskError> {
+    let line = |prefix: &str| {
+        output
+            .lines()
+            .find_map(|line| line.find(prefix).map(|at| line[at..].trim_end()))
+            .ok_or_else(|| XtaskError::MissingMarker(prefix.to_owned()))
+    };
+    let field = |line: &str, name: &str| {
+        line.split_whitespace()
+            .find_map(|token| token.strip_prefix(name))
+            .and_then(|value| value.trim_start_matches('+').parse::<u64>().ok())
+            .ok_or_else(|| XtaskError::Validation(format!("m10 input: no {name} in {line:?}")))
+    };
+    let check = |ok: bool, what: &str, line: &str| {
+        if ok {
+            Ok(())
+        } else {
+            Err(XtaskError::Validation(format!(
+                "m10 input: {what}: {line:?}"
+            )))
+        }
+    };
+
+    let settled = line("[M10.input] init settled ")?;
+    check(
+        field(settled, "timeouts_armed=")? == 0,
+        "response timeouts armed after init",
+        settled,
+    )?;
+
+    let routed = line("[M10.input] routed ")?;
+    let kbd_bytes = field(routed, "kbd_bytes=")?;
+    let aux_bytes = field(routed, "aux_bytes=")?;
+    check(
+        kbd_bytes > 0 && aux_bytes > 0,
+        "no bytes injected on a port",
+        routed,
+    )?;
+    check(
+        field(routed, "irq1=")? == kbd_bytes,
+        "IRQ 1 count differs from keyboard bytes",
+        routed,
+    )?;
+    check(
+        field(routed, "irq12=")? == aux_bytes,
+        "IRQ 12 count differs from mouse bytes",
+        routed,
+    )?;
+    check(field(routed, "spurious=")? == 0, "spurious IRQs", routed)?;
+    check(
+        field(routed, "port_reads=")? == kbd_bytes + aux_bytes,
+        "data reads differ from injected bytes",
+        routed,
+    )?;
+
+    let full = line("[M10.input] queue full ")?;
+    check(
+        field(full, "wake_edges=")? == 1,
+        "fill did not wake exactly once",
+        full,
+    )?;
+
+    let idle = line("[M10.input] idle ")?;
+    check(field(idle, "irqs=")? == 0, "IRQs while idle", idle)?;
+    check(
+        field(idle, "port_accesses=")? == 0,
+        "port accesses while idle",
+        idle,
+    )
 }
 
 fn markers_require_verbatim_linux_hello(marker_set: MarkerSet<'_>) -> bool {
@@ -4326,6 +4484,7 @@ fn print_help() {
     println!(
         "  test-m10-shared-buffer  M10 #195 shared buffers: native-abi/service-fixtures/capability and kernel shared-buffer host tests, then the scripted fixture lane (NX, map/read, deny, stale, exhaustion, reuse, kernel-owned, ro-write, shared-exec, owner exit, reader exit, root revoke, port transfer); prints [M10.shared-buffer] PASS (aliases: m10-shared-buffer)"
     );
+    println!("  test-m10-input-smoke M10 #113 i8042 input smoke lane: init, IRQ 1/12 routing, raw queue and syscall 19 from CPL3, stimulated by the controller itself (no host injection); prints [M10.input] PASS (aliases: m10-input-smoke)");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
@@ -4468,6 +4627,7 @@ enum ParsedCommand {
     TestM10VirtioModern,
     TestM10Framebuffer,
     TestM10SharedBuffer,
+    TestM10InputSmoke,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -4609,6 +4769,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-m10-shared-buffer" || cmd == "m10-shared-buffer" => {
             ParsedCommand::TestM10SharedBuffer
+        }
+        Some(cmd) if cmd == "test-m10-input-smoke" || cmd == "m10-input-smoke" => {
+            ParsedCommand::TestM10InputSmoke
         }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
@@ -5089,6 +5252,14 @@ mod tests {
         assert_eq!(
             parse_command(Some("m10-shared-buffer".as_ref())),
             ParsedCommand::TestM10SharedBuffer
+        );
+        assert_eq!(
+            parse_command(Some("test-m10-input-smoke".as_ref())),
+            ParsedCommand::TestM10InputSmoke
+        );
+        assert_eq!(
+            parse_command(Some("m10-input-smoke".as_ref())),
+            ParsedCommand::TestM10InputSmoke
         );
         assert_eq!(
             parse_command(Some("test-m7-net-caps".as_ref())),

@@ -72,7 +72,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 | 1 | #195 | **Core landed:** `native-abi/src/shared_buffer.rs`; `kernel/src/mm/shared_buffer/` (object table, per-process window, syscall 16, kernel-owned buffers W7); process teardown step 5 (`SharedMappings` — drop every window row before private address-space destroy); `EFER.NXE` at boot; gates `test-m10-nxe` and `test-m10-shared-buffer`; transfer attestation W6 (`attest_for_transfer`), which port SEND (syscall 17) calls on every production kernel |
 | 1 | #200 | port and work-set ABI in `native-abi` (`port.rs`, `work_set.rs`, `status.rs`); class-agnostic port engine in `port/` (`clean-slate-port`, feature `fake` for host tests); `kernel/src/service/port.rs`, `kernel/src/service/port_syscall.rs`, `kernel/src/sched/work_set.rs`; syscalls 17 and 20; capability transfer on send; gate `test-m10-port` |
 | 1 | #111 | **Landed:** GOP framebuffer backend at 1280x800 Xrgb8888 (BGRX; RGBX converted at present-copy), aperture excluded from the write-back direct map and mapped uncached (UC) where the write path is built (WC via PAT deferred, P10 limitation; the inherited firmware identity alias is covered in ARCHITECTURE.md "M1 virtual memory layout"); `raster/` (`clean-slate-raster`, kernel dependency by design); `kernel/src/boot/gop.rs`; `kernel/src/device/display/{mod.rs, gop.rs}`; syscall 18 `FIND_HANDLE` / `QUERY_MODE` / `PRESENT_STATUS` live (`MAP_SCANOUT` / `PRESENT` `ENOSYS` until #195 S6; `BIND_WAKE` `ENOSYS` until a later #111 stage wires it to the #200 work sets); missing GOP/mode => no backend (`ENODEV`), boot continues; gate `cargo xtask test-m10-framebuffer` (`-vga std`) |
-| 1 | #113 | `kernel/src/device/input/{mod.rs, i8042.rs}`; `kernel/src/service/input_syscall.rs`; syscall 19; scancode to HID usage table in `graphics::input` (all planned) |
+| 1 | #113 | `kernel/src/device/input/{mod.rs, i8042.rs, device_init.rs, keyboard.rs, mouse.rs, queue.rs}` (the scancode to HID usage table is kernel code in `keyboard.rs`); `kernel/src/service/input_syscall.rs`; syscall 19 (`BIND_WAKE` waits for its integration stage); teardown slot 3 releases the consumer |
 | 1 | #196 | `kernel/src/device/virtio/{modern.rs, modern/, virtqueue.rs, dma.rs}`; `kernel/src/sched/timeout.rs` (W3); `cargo xtask test-m10-virtio-modern` |
 | 1 | #197 | `xtask/src/qmp/` (QMP endpoint, client, input and screendump helpers, PPM to PNG, marker-paced script driver); `AcceptanceDriver` hooks in `xtask/src/main.rs`; gate `test-qmp-smoke` |
 | 1–3 | #116 | `ui/` (`clean-slate-ui`), `desktop-shell/`, `docs/design/DESIGN-SYSTEM.md` (planned). Token and documentation work may start in Wave 1 |
@@ -144,7 +144,7 @@ Numbers are reserved in `clean_slate_capability::syscall_abi` and aliased in `na
 | 16 | `SYSCALL_NR_SHARED_BUFFER` | #195 | implemented: subops 1–5 ([Shared buffers](#shared-buffers-syscall-16-195)); 0 and 6.. → `EINVAL` |
 | 17 | `SYSCALL_NR_SERVICE_PORT` | #200 | implemented: subops 1–9 ([Service port ABI](#service-port-abi-syscall-17)); 0 and 10.. → `EINVAL` |
 | 18 | `SYSCALL_NR_DISPLAY` | #111, #114 | subops 1, 2, 5 (`FIND_HANDLE`, `QUERY_MODE`, `PRESENT_STATUS`) implemented; 3, 4 (`MAP_SCANOUT`, `PRESENT`) `ENOSYS` until #111 wires them onto #195's kernel-owned buffers (W7); 6 (`BIND_WAKE`) `ENOSYS` until a later #111 stage wires it to the #200 work sets; 0 and 7.. `EINVAL`; subops frozen in `graphics::abi::display` |
-| 19 | `SYSCALL_NR_INPUT` | #113 | `ENOSYS` for every subop; subops frozen in `graphics::abi::input` |
+| 19 | `SYSCALL_NR_INPUT` | #113 | implemented: subops 1–3 ([Input ABI](#input-abi-syscall-19)); `BIND_WAKE` → `ENOSYS` until its integration stage; 0 and 5.. → `EINVAL` |
 | 20 | `SYSCALL_NR_WORK_SET` | #200 | implemented: subops 1–4 ([Work set ABI](#work-set-abi-syscall-20)); 0 and 5.. → `EINVAL` |
 
 Subop numbers belong to `native-abi` (16, 17, 20) and `graphics::abi` (18, 19), never to `service-fixtures`.
@@ -477,7 +477,7 @@ Rules (S3):
 
 - **Connection close (S8).** Every connection teardown path (client exit, revoke, protocol disconnect, queue overflow) calls `ObjectTable::close(&mut budget)`. It returns every live object's budget to the `GlobalBudget` and resets the table in place; the next connection starts with a table equivalent to `ObjectTable::new()`. Budget release `debug_assert!`s against underflow (a foreign or mismatched budget) and saturates in release builds.
 - **Storage (S8).** An `ObjectTable<SurfaceState, _, _>` is about 24 KB per connection. The compositor keeps its tables in static or heap memory, never on the stack; `close` works in place so no by-value move is needed.
-- **Kernel ordering (P4).** Port teardown and work-set release are landed in #200 (`port::on_holder_exit`, `work_set::on_holder_exit` in the shared teardown hook order before `revoke_for_holder`). Shared-mapping teardown is landed in #195 (`TeardownHook::SharedMappings`, after `revoke_for_holder` and before thread reap and address-space destroy). Display presenter release, input-consumer release and the #118 baseline proof remain planned (#111/#114, #113, #118). On every registered teardown path: port teardown (close the holder's connections and notify the server, or mark every connection `ServerGone` if the holder was the server); display presenter release (planned); input-consumer release (planned); `revoke_for_holder`; shared-mapping teardown; `destroy_process_address_space` for private pages. `ResourceSnapshot` includes `port_connections`, `ports_served` and `work_sets` (#200); shared mappings and presenter/consumer bindings remain planned for later lanes.
+- **Kernel ordering (P4).** Port teardown and work-set release are landed in #200 (`port::on_holder_exit`, `work_set::on_holder_exit`), and input-consumer release in #113 (`input::release_consumer_for_holder`), all in the shared teardown hook order before `revoke_for_holder`. Shared-mapping teardown is landed in #195 (`TeardownHook::SharedMappings`, after `revoke_for_holder` and before thread reap and address-space destroy). Display presenter release and the #118 baseline proof remain planned (#111/#114, #118). On every registered teardown path: port teardown (close the holder's connections and notify the server, or mark every connection `ServerGone` if the holder was the server); display presenter release (planned); input-consumer release; `revoke_for_holder`; shared-mapping teardown; `destroy_process_address_space` for private pages. `ResourceSnapshot` includes `port_connections`, `ports_served` and `work_sets` (#200); shared mappings and presenter/consumer bindings remain planned for later lanes.
 
 ## Surface roles
 
@@ -605,19 +605,19 @@ Until the owning stage lands: `BIND_WAKE` returns `ENOSYS` until a later #111 st
 
 ## Input ABI (syscall 19)
 
-Authoritative: `graphics::abi::input`, `graphics::raw_input`, `graphics::input`. Kernel implementation: #113 (planned). Same register convention as the display ABI; non-blocking.
+Authoritative: `graphics::abi::input`, `graphics::raw_input`, `graphics::input`. Kernel implementation: #113 (`BIND_WAKE` at its integration stage). Same register convention as the display ABI; non-blocking.
 
 | Subop | Name | Arguments | Authority | Returns |
 |---|---|---|---|---|
 | 1 | `FIND_HANDLE` | `rdx` = `INPUT_ABI_VERSION` (1) | a live `Input` capability | handle |
 | 2 | `QUERY_DEVICES` | out ptr, len 16 (`InputDeviceInfo`) | `INSPECT` or `INPUT_CONSUME` | 0 |
 | 3 | `READ_BATCH` | out ptr, `max_count` in `1..=READ_BATCH_MAX_RECORDS` (128) | `INPUT_CONSUME` | records written, `0..=max_count` |
-| 4 | `BIND_WAKE` | work-set handle, bit 0..=31 | `INPUT_CONSUME` | 0 (`ENOSYS` until syscall 20) |
+| 4 | `BIND_WAKE` | work-set handle, bit 0..=31 | `INPUT_CONSUME` | 0 (`ENOSYS` until its integration stage) |
 | 0, 5.. | reserved | — | — | `EINVAL` |
 
 - **`READ_BATCH` never blocks**; an empty queue returns 0.
 - **Copy rule (R9).** The kernel copies one 32-byte record at a time to user memory and never stages a whole batch (up to 4096 bytes) on the kernel stack. Only fixed structs of at most 256 bytes (`PresentRequest`, 136 bytes, is the largest) are staged on the stack.
-- **Wake is edge-triggered.** The bound bit is signalled when a record is queued into an empty queue or an `Overflow` becomes pending on an empty queue. The consumer must drain with `READ_BATCH` until it returns 0 before waiting again.
+- **Wake is edge-triggered.** The bound bit is signalled when a record is queued into an empty queue or an `Overflow` becomes pending on an empty queue, where empty means no queued records and no pending `Overflow`. The consumer must drain with `READ_BATCH` until it returns 0 before waiting again.
 
 ## Raw input records
 
@@ -632,7 +632,7 @@ Authoritative: `graphics::abi::input`, `graphics::raw_input`, `graphics::input`.
 | 21 | 3 | padding, zero |
 | 24 | 8 | payload per kind |
 
-Kernel semantics, binding on #113 (planned):
+Kernel semantics, binding on #113:
 
 - **Queue.** `RAW_INPUT_QUEUE_DEPTH` (128) records, filled in IRQ context without allocation.
 - **Sequence.** `seq` starts at 1 and increases by exactly 1 per queued record, including `Overflow` records; dropped records get no seq, so the consumer always sees contiguous seqs.
@@ -815,7 +815,6 @@ On success it prints `[M10.port] PASS` (not `[M10  ] PASS`, which belongs to #11
 
 The `fake` feature enables `graphics::fake`: `FakeDisplay`, a model of the display ABI with R8 copy semantics, a single present in flight, timeouts, reset and poisoning. It is for host tests only; production code must not enable it. `clean-slate-port` exposes `FakePort` / `FakeConnection` behind feature `fake` for the same port semantics in host tests (#112).
 
-<<<<<<< HEAD
 `cargo xtask test-m10-framebuffer` (alias `m10-framebuffer`) is the #111 gate: `cargo test -p clean-slate-raster`, then a QEMU boot with `-vga std` that proves kernel-internal present, damage-only scanout copy, and guest aperture readback against host `clean-slate-raster` expectations (`[M10.2] PASS`). Screenshot validation is a separate #111 stage: a `QmpScriptDriver` `Screendump` step with a `check` against the host render, writing under `xtask_artifact_root()` (`target/xtask-artifacts/m10-framebuffer/`).
 
 #195 gates (landed): `cargo xtask test-m10-nxe` (alias `m10-nxe`) and `cargo xtask test-m10-shared-buffer` (alias `m10-shared-buffer`); see [DEVELOPMENT.md](DEVELOPMENT.md).
@@ -854,4 +853,15 @@ Scope notes against the #110 issue text:
 - **Capability classes.** The scope lists "shared-buffer/surface" and "window authority" classes. Surfaces and windows are deliberately *not* kernel capabilities: they are connection-scoped compositor objects, and window authority is the `Graphics` role rights. The kernel classes are exactly `SharedBuffer`, `Graphics`, `Display` and `Input`.
 - **Focus.** "create/show/hide/move/resize/focus/close" maps to `CreateWindow`, `Show`, `Hide`, `BeginMove`, `BeginResize`, `CloseRequested` / `DestroyWindow`. Focus is compositor policy, reported by `KeyboardFocus` and `Configure` `ACTIVATED`; there is no client focus request.
 - **Frame opportunities.** Withholding frame callbacks from occluded surfaces, and the no-busy-poll wake model, are recorded in [Frames](#frames) and [Event-driven rule and failure states](#event-driven-rule-and-failure-states).
-- **Reserved syscalls.** Each row of the syscall table above carries its own status. Syscalls 16 and 19 fall through the dispatcher's default arm to `ENOSYS`; 17 and 20 are dispatched to the port and work-set handlers, and 18 to the display handler. Kernel host tests cover the default arm with `dispatch_native_unknown_nr_returns_native_enosys_sentinel` (unrelated number) and `dispatch_native_reserved_m10_nrs_return_enosys`, which lists exactly what is still unimplemented on this tree: 16 and 19, plus syscall 18 subops 3, 4 and 6 (`ENOSYS`) with subop 0 `EINVAL`. The PR that lands later re-composes it (W12).
+- **Reserved syscalls.** Each row of the syscall table above carries its own status. Syscall 16 is dispatched to the shared-buffer handler, 17 and 20 to the port and work-set handlers, 18 to the display handler and 19 to the #113 input service; none of them reaches the dispatcher's default arm, which `dispatch_native_unknown_nr_returns_native_enosys_sentinel` covers with an unrelated number. `dispatch_native_reserved_m10_nrs_return_enosys` lists exactly what is still unimplemented on this tree: syscall 18 subops 3, 4 and 6, and syscall 19 subop 4 (`BIND_WAKE`), all `ENOSYS`. `dispatch_native_implemented_m10_nrs_reach_their_handlers` covers the rest: 16, 17 and 20 are not `ENOSYS`, 18 and 19 subop 0 are `EINVAL`, and 18 subops 1, 2 and 5 and 19 subops 1–3 are not `ENOSYS`. The PR that lands later re-composes both (W12).
+
+## Appendix: Input implementation (#113)
+
+Implementation rules of the #113 kernel lane. They are not part of the frozen #110 contract and change with the lane.
+
+- **One consumer.** The first holder to `READ_BATCH` binds the seat; another `INPUT_CONSUME` holder gets `EACCES` until that binding is released. Release turns unread records into one pending `Overflow`. Process teardown releases it from slot 3 (#200 W5), so a consumer that exits frees the seat.
+- **Driver.** The i8042 keyboard runs scancode set 2 with controller translation off. Boot runs only the controller-register bootstrap (bounded handshakes, W4 amendment), routes IRQ 1 and IRQ 12 to separate vectors, disables any port that passed its test but got no route, drains the controller once, and starts each device's init program; reset, BAT, set selection, typematic, mouse ID negotiation and scan enable are then advanced from the IRQ handlers, each awaited response guarded by a W3 timeout. A device is reported by `QUERY_DEVICES` only once its program finishes; before that it reads as `None` and queues nothing. Bytes the bootstrap flushes are counted, never decoded.
+- **Controller failure (W11).** Handing a byte to a device waits on the controller's input buffer (20 ms, or 40 ms through `D4`). The first such timeout latches the controller failed: every started device fails (a ready one is lost first and reads as `None`), both ports are disabled if the controller still accepts commands, and no device byte is sent again, so a dead controller costs that wait once.
+- **Losses.** A keyboard overrun, or a byte that breaks the Pause sequence, is a loss and becomes an `Overflow`; the breaking byte is then decoded from idle.
+- **Device self-reset.** A keyboard `0xAA` in any decoder state, or a mouse `AA 00` at a packet start, is a BAT the driver did not ask for: the device's input is lost (an `Overflow` under the old generation), it reads as `None`, and its init program runs again. It reappears with the next `InputDeviceId` generation once the program finishes, or stays `None` if it fails.
+- **Readiness wakes.** Every readiness change (a device published or lost) also signals the consumer's input work, so it re-queries `QUERY_DEVICES`.
