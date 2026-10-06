@@ -250,6 +250,12 @@ impl WorkSetBinding {
     pub(crate) const fn id(self) -> WorkSetId {
         self.0
     }
+
+    /// An unvalidated binding for sources' host tests; signalling a never-created id is a no-op.
+    #[cfg(test)]
+    pub(crate) const fn for_test(id: WorkSetId) -> Self {
+        Self(id)
+    }
 }
 
 /// Validates a `BIND_WAKE` target: `raw` must name a live work set owned by `holder`.

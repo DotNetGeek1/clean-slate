@@ -3,9 +3,9 @@
 //!
 //! Queue state is mutated in IRQ context (interrupts masked) or under `without_interrupts`.
 //! A device is published (`QUERY_DEVICES` reports its id) only once its init program finishes;
-//! until then it reads as `None` and queues nothing. Until `BIND_WAKE`'s integration stage,
-//! [`InputState::signal_input_work`] only counts, and `BIND_WAKE` stays `ENOSYS`, so a
-//! consumer drains with `READ_BATCH` without blocking.
+//! until then it reads as `None` and queues nothing. The consumer binds one work-set bit with
+//! `BIND_WAKE`; [`InputState::signal_input_work`] sets it from the IRQ handler, so an idle
+//! consumer blocks in `WORK_SET` `WAIT` and nothing polls the controller.
 //!
 //! The driver half (the i8042 modules and the queue's producer side) is compiled with
 //! `clean_slate_isa_irq` (the boot tail or the input self-test) and for host tests. The hardware
@@ -34,6 +34,7 @@ use clean_slate_graphics::raw_input::{RawInputRecord, RAW_INPUT_RECORD_BYTES};
 use crate::arch::x86_64::cpu::without_interrupts;
 #[cfg(clean_slate_boot_tail)]
 use crate::diagnostics::log::kernel_log_fmt;
+use crate::sched::work_set::{self, WorkSetBinding};
 use crate::sync::global_cell::GlobalCell;
 use queue::RawInputQueue;
 
@@ -93,12 +94,24 @@ impl ConsumerSlot {
     }
 }
 
+/// The consumer's `BIND_WAKE` target: one bit of a work set the consumer owns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WakeTarget {
+    binding: WorkSetBinding,
+    bit: u32,
+}
+
 struct InputState {
     queue: RawInputQueue<RAW_INPUT_QUEUE_DEPTH>,
     /// Last generation issued per device index.
     generations: [u32; DEVICE_SLOTS],
     present: [bool; DEVICE_SLOTS],
     consumer: ConsumerSlot,
+    /// Only the bound consumer sets it; releasing the consumer clears it.
+    wake: Option<WakeTarget>,
+    /// Signals delivered to `wake`.
+    #[cfg(any(test, feature = "m10-input-self-test"))]
+    wake_signals: u32,
     #[cfg(any(test, clean_slate_isa_irq))]
     wake_edges: u32,
     #[cfg(any(test, clean_slate_isa_irq))]
@@ -112,11 +125,45 @@ impl InputState {
             generations: [0; DEVICE_SLOTS],
             present: [false; DEVICE_SLOTS],
             consumer: ConsumerSlot::new(),
+            wake: None,
+            #[cfg(any(test, feature = "m10-input-self-test"))]
+            wake_signals: 0,
             #[cfg(any(test, clean_slate_isa_irq))]
             wake_edges: 0,
             #[cfg(any(test, clean_slate_isa_irq))]
             readiness_changes: 0,
         }
+    }
+
+    /// Sets the bound consumer's work-set bit. A destroyed work set makes this a no-op inside
+    /// `work_set::signal`, so the binding never needs to be unwound from the work-set side.
+    fn signal_input_work(&mut self) {
+        let Some(wake) = self.wake else {
+            return;
+        };
+        #[cfg(any(test, feature = "m10-input-self-test"))]
+        {
+            self.wake_signals = self.wake_signals.saturating_add(1);
+        }
+        work_set::signal(wake.binding, wake.bit);
+    }
+
+    /// Replaces the consumer's wake target. Binding while records or a loss are already pending
+    /// signals at once: the wake is edge-triggered, and that edge happened before the bind.
+    fn bind_wake(
+        &mut self,
+        holder: HolderId,
+        binding: WorkSetBinding,
+        bit: u32,
+    ) -> Result<(), ConsumerBusy> {
+        if self.consumer.holder != Some(holder) {
+            return Err(ConsumerBusy);
+        }
+        self.wake = Some(WakeTarget { binding, bit });
+        if !self.queue.is_empty_including_pending() {
+            self.signal_input_work();
+        }
+        Ok(())
     }
 
     fn device(&self, index: u8) -> Option<InputDeviceId> {
@@ -140,6 +187,7 @@ impl InputState {
         if !self.consumer.release(holder) {
             return 0;
         }
+        self.wake = None;
         self.queue.clear_into_loss();
         1
     }
@@ -154,12 +202,6 @@ impl InputState {
         }
         self.present[slot] = present;
     }
-
-    /// The consumer's input work bit: once `BIND_WAKE` is integrated, its bound work-set bit is
-    /// signalled here with `work_set::signal`.
-    /// Raised on the queue's empty-to-non-empty edge and on every device readiness change, so
-    /// the consumer re-reads or re-queries.
-    fn signal_input_work(&mut self) {}
 
     fn record(&mut self, index: u8, kind: RawInputKind, now_ns: u64) {
         let Some(device) = self.device(index) else {
@@ -269,6 +311,15 @@ pub(crate) fn bind_consumer(holder: HolderId) -> Result<(), ConsumerBusy> {
     without_interrupts(|| input_mut().consumer.bind(holder))
 }
 
+/// `BIND_WAKE`: `holder` must already be the seat's consumer.
+pub(crate) fn bind_wake(
+    holder: HolderId,
+    binding: WorkSetBinding,
+    bit: u32,
+) -> Result<(), ConsumerBusy> {
+    without_interrupts(|| input_mut().bind_wake(holder, binding, bit))
+}
+
 /// Pops one record for `READ_BATCH`, materialising a pending `Overflow` once the queue is empty.
 pub(crate) fn read_one() -> Option<RawInputRecord> {
     let now = now_ns();
@@ -300,6 +351,8 @@ pub(crate) struct QueueStats {
     pub(crate) pending_dropped: u32,
     pub(crate) wake_edges: u32,
     pub(crate) readiness_changes: u32,
+    pub(crate) wake_bound: bool,
+    pub(crate) wake_signals: u32,
 }
 
 #[cfg(feature = "m10-input-self-test")]
@@ -311,6 +364,8 @@ pub(crate) fn queue_stats() -> QueueStats {
             pending_dropped: state.queue.pending_dropped(),
             wake_edges: state.wake_edges,
             readiness_changes: state.readiness_changes,
+            wake_bound: state.wake.is_some(),
+            wake_signals: state.wake_signals,
         }
     })
 }
@@ -454,6 +509,115 @@ mod tests {
         assert_eq!(overflow.kind, RawInputKind::Overflow { dropped: 2 });
         assert_eq!(overflow.seq, 3);
         assert_eq!(state.queue.pop(20), None);
+    }
+
+    /// Slot 7 at the last generation is never issued by the host tests' work-set table, so
+    /// signalling it is a no-op there.
+    fn binding() -> WorkSetBinding {
+        let id = clean_slate_native_abi::WorkSetId::new(7, u32::MAX).expect("work-set id");
+        WorkSetBinding::for_test(id)
+    }
+
+    #[test]
+    fn bind_wake_requires_the_bound_consumer() {
+        let mut state = state_with_devices();
+        assert_eq!(
+            state.bind_wake(HolderId(7), binding(), 3),
+            Err(ConsumerBusy)
+        );
+        state.consumer.bind(HolderId(7)).expect("bind");
+        assert_eq!(
+            state.bind_wake(HolderId(8), binding(), 3),
+            Err(ConsumerBusy)
+        );
+        assert_eq!(state.wake, None);
+        assert_eq!(state.bind_wake(HolderId(7), binding(), 3), Ok(()));
+        assert_eq!(
+            state.wake,
+            Some(WakeTarget {
+                binding: binding(),
+                bit: 3
+            })
+        );
+        assert_eq!(
+            state.wake_signals, 0,
+            "binding on an empty queue does not signal"
+        );
+    }
+
+    #[test]
+    fn bound_wake_is_signalled_on_each_empty_to_non_empty_edge_only() {
+        let mut state = state_with_devices();
+        state.consumer.bind(HolderId(7)).expect("bind");
+        state
+            .bind_wake(HolderId(7), binding(), 0)
+            .expect("bind wake");
+        state.record(KEYBOARD_INDEX, key(), 10);
+        state.record(KEYBOARD_INDEX, key(), 11);
+        assert_eq!(state.wake_signals, 1);
+        while state.queue.pop(12).is_some() {}
+        state.record(KEYBOARD_INDEX, key(), 13);
+        assert_eq!(state.wake_signals, 2);
+        assert_eq!(state.wake_signals, state.wake_edges);
+    }
+
+    #[test]
+    fn readiness_changes_signal_the_bound_wake() {
+        let mut state = state_with_devices();
+        state.consumer.bind(HolderId(7)).expect("bind");
+        state
+            .bind_wake(HolderId(7), binding(), 0)
+            .expect("bind wake");
+        state.device_lost(MOUSE_INDEX);
+        // The loss edge and the readiness change.
+        assert_eq!(state.wake_signals, 2);
+        while state.queue.pop(20).is_some() {}
+        state.device_ready(MOUSE_INDEX);
+        assert_eq!(state.wake_signals, 3);
+    }
+
+    #[test]
+    fn binding_with_records_or_a_loss_pending_signals_at_once() {
+        let mut state = state_with_devices();
+        state.consumer.bind(HolderId(7)).expect("bind");
+        state.record(KEYBOARD_INDEX, key(), 10);
+        state
+            .bind_wake(HolderId(7), binding(), 1)
+            .expect("bind wake");
+        assert_eq!(state.wake_signals, 1);
+
+        let mut lossy = state_with_devices();
+        lossy.consumer.bind(HolderId(7)).expect("bind");
+        lossy.loss(KEYBOARD_INDEX);
+        lossy
+            .bind_wake(HolderId(7), binding(), 1)
+            .expect("bind wake");
+        assert_eq!(lossy.wake_signals, 1);
+    }
+
+    #[test]
+    fn rebinding_replaces_the_target_and_release_clears_it() {
+        let mut state = state_with_devices();
+        state.consumer.bind(HolderId(7)).expect("bind");
+        state
+            .bind_wake(HolderId(7), binding(), 1)
+            .expect("bind wake");
+        state
+            .bind_wake(HolderId(7), binding(), 5)
+            .expect("rebind wake");
+        assert_eq!(state.wake.map(|wake| wake.bit), Some(5));
+        assert_eq!(state.release_consumer(HolderId(7)), 1);
+        assert_eq!(state.wake, None);
+        state.record(KEYBOARD_INDEX, key(), 10);
+        assert_eq!(
+            state.wake_signals, 0,
+            "a released consumer is never signalled"
+        );
+        state.consumer.bind(HolderId(8)).expect("next consumer");
+        assert_eq!(
+            state.bind_wake(HolderId(7), binding(), 1),
+            Err(ConsumerBusy)
+        );
     }
 
     #[test]

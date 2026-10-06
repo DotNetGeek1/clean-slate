@@ -1,10 +1,11 @@
 //! Input syscall 19 (#113): capability-checked, non-blocking access to the raw-input queue.
 //!
-//! `BIND_WAKE` returns `ENOSYS` until its integration stage.
+//! `BIND_WAKE` binds one bit of the consumer's own work set (syscall 20); the IRQ path sets it
+//! on the queue's empty-to-non-empty edge, so the consumer blocks in `WAIT` instead of polling.
 
 use core::ptr;
 
-use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSYS};
+use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL};
 use clean_slate_capability::{CapabilityHandle, CapabilityState, HolderId, ResourceClass, Rights};
 use clean_slate_graphics::abi::input::{
     INPUT_ABI_VERSION, INPUT_DEVICE_INFO_BYTES, INPUT_SUBOP_BIND_WAKE, INPUT_SUBOP_FIND_HANDLE,
@@ -16,6 +17,7 @@ use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::{authorize_current_class, with_capability_space};
 use crate::device::input;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
+use crate::sched::work_set;
 use crate::syscall::current_syscall_caller_pid;
 
 pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
@@ -23,7 +25,7 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
         INPUT_SUBOP_FIND_HANDLE => find_handle(frame.rdx),
         INPUT_SUBOP_QUERY_DEVICES => query_devices(frame.rsi, frame.rdx, frame.r10),
         INPUT_SUBOP_READ_BATCH => read_batch(frame.rsi, frame.rdx, frame.r10),
-        INPUT_SUBOP_BIND_WAKE => SYSCALL_ENOSYS,
+        INPUT_SUBOP_BIND_WAKE => bind_wake(frame),
         _ => SYSCALL_EINVAL,
     };
 }
@@ -115,11 +117,51 @@ fn read_batch(raw_handle: u64, out: u64, max_count: u64) -> u64 {
     copied as u64
 }
 
+/// `rsi` handle, `rdx` work-set id, `r10` bit, `r8` and `r9` zero. The capability is checked
+/// before the work set, so a caller without `INPUT_CONSUME` learns nothing about work sets.
+/// Every check runs before the consumer is bound, so a refused call changes nothing.
+fn bind_wake(frame: &SyscallContext) -> u64 {
+    if frame.r8 != 0 || frame.r9 != 0 {
+        return SYSCALL_EINVAL;
+    }
+    let record =
+        match authorize_current_class(frame.rsi, ResourceClass::Input, Rights::INPUT_CONSUME) {
+            Ok(record) => record,
+            Err(error) => return error.syscall_status(),
+        };
+    let target = match work_set::bind(record.holder, frame.rdx) {
+        Ok(target) => target,
+        Err(error) => return error.status(),
+    };
+    let bit = match work_set::bind_bit(frame.r10) {
+        Ok(bit) => bit,
+        Err(error) => return error.status(),
+    };
+    if input::bind_consumer(record.holder).is_err() {
+        return SYSCALL_EACCES;
+    }
+    match input::bind_wake(record.holder, target, bit) {
+        Ok(()) => 0,
+        Err(_) => SYSCALL_EACCES,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn frame(subop: u64, rsi: u64, rdx: u64, r10: u64) -> SyscallContext {
+        frame_with_r8_r9(subop, rsi, rdx, r10, 0, 0)
+    }
+
+    fn frame_with_r8_r9(
+        subop: u64,
+        rsi: u64,
+        rdx: u64,
+        r10: u64,
+        r8: u64,
+        r9: u64,
+    ) -> SyscallContext {
         SyscallContext {
             rax: clean_slate_capability::syscall_abi::SYSCALL_NR_INPUT,
             rdx,
@@ -127,8 +169,8 @@ mod tests {
             rbp: 0,
             rsi,
             rdi: subop,
-            r8: 0,
-            r9: 0,
+            r8,
+            r9,
             r10,
             r12: 0,
             r13: 0,
@@ -154,8 +196,32 @@ mod tests {
     }
 
     #[test]
-    fn bind_wake_is_enosys_until_work_sets_exist() {
-        assert_eq!(call(INPUT_SUBOP_BIND_WAKE, 1, 2, 3), SYSCALL_ENOSYS);
+    fn bind_wake_rejects_non_zero_reserved_registers_first() {
+        for (r8, r9) in [(1, 0), (0, 1), (u64::MAX, u64::MAX)] {
+            let mut frame = frame_with_r8_r9(INPUT_SUBOP_BIND_WAKE, 1, 2, 3, r8, r9);
+            handle_syscall(&mut frame);
+            assert_eq!(frame.rax, SYSCALL_EINVAL, "r8={r8} r9={r9}");
+        }
+    }
+
+    #[test]
+    fn bind_wake_checks_the_capability_before_the_work_set_and_bit() {
+        // No trusted caller: refused before the (invalid) work-set id or bit is looked at.
+        for (work_set, bit) in [(0, 0), (u64::MAX, 32), (1, u64::MAX)] {
+            assert_eq!(
+                call(INPUT_SUBOP_BIND_WAKE, 1, work_set, bit),
+                SYSCALL_EACCES,
+                "work_set={work_set} bit={bit}"
+            );
+        }
+    }
+
+    #[test]
+    fn bind_wake_is_implemented() {
+        assert_ne!(
+            call(INPUT_SUBOP_BIND_WAKE, 0, 0, 0),
+            clean_slate_capability::syscall_abi::SYSCALL_ENOSYS
+        );
     }
 
     #[test]
