@@ -28,6 +28,7 @@ const BOOT_TAIL_COMPILED_OUT_FEATURES: &[&str] = &[
     "m10-framebuffer-self-test",
     "m7-net-device-self-test",
     "m10-virtio-modern-self-test",
+    "m10-virtio-gpu-self-test",
     "m7-tls-self-test",
     "m7-tls-fail-closed-self-test",
     "m7-dns-self-test",
@@ -42,6 +43,10 @@ const BOOT_TAIL_COMPILED_OUT_FEATURES: &[&str] = &[
 /// boot tail. The boot tail, or any one of these, sets `clean_slate_isa_irq`.
 const ISA_IRQ_WITHOUT_BOOT_TAIL_FEATURES: &[&str] = &["m10-input-self-test"];
 
+/// Self-test builds that bring VirtIO-GPU up without the boot tail. The boot tail, or any one of
+/// these, sets `clean_slate_virtio_gpu`.
+const VIRTIO_GPU_WITHOUT_BOOT_TAIL_FEATURES: &[&str] = &["m10-virtio-gpu-self-test"];
+
 fn any_feature_enabled(features: &[&str]) -> bool {
     features.iter().any(|feature| {
         let var = format!(
@@ -55,12 +60,16 @@ fn any_feature_enabled(features: &[&str]) -> bool {
 fn emit_boot_tail_cfgs() {
     println!("cargo::rustc-check-cfg=cfg(clean_slate_boot_tail)");
     println!("cargo::rustc-check-cfg=cfg(clean_slate_isa_irq)");
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_virtio_gpu)");
     let boot_tail = !any_feature_enabled(BOOT_TAIL_COMPILED_OUT_FEATURES);
     if boot_tail {
         println!("cargo::rustc-cfg=clean_slate_boot_tail");
     }
     if boot_tail || any_feature_enabled(ISA_IRQ_WITHOUT_BOOT_TAIL_FEATURES) {
         println!("cargo::rustc-cfg=clean_slate_isa_irq");
+    }
+    if boot_tail || any_feature_enabled(VIRTIO_GPU_WITHOUT_BOOT_TAIL_FEATURES) {
+        println!("cargo::rustc-cfg=clean_slate_virtio_gpu");
     }
 }
 fn main() {

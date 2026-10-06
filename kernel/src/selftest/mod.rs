@@ -20,6 +20,7 @@ pub(crate) mod m2_double_fault;
     feature = "m7-dns-self-test",
     feature = "m7-net-device-self-test",
     feature = "m10-virtio-modern-self-test",
+    feature = "m10-virtio-gpu-self-test",
     feature = "m7-tls-self-test",
     feature = "m10-input-self-test"
 ))]
@@ -34,6 +35,8 @@ pub(crate) mod m10_nxe;
 pub(crate) mod m10_port;
 #[cfg(feature = "m10-shared-buffer-self-test")]
 pub(crate) mod m10_shared_buffer;
+#[cfg(feature = "m10-virtio-gpu-self-test")]
+pub(crate) mod m10_virtio_gpu;
 #[cfg(feature = "m10-virtio-modern-self-test")]
 pub(crate) mod m10_virtio_modern;
 pub(crate) mod m2_timer;

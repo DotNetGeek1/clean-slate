@@ -1,25 +1,31 @@
-//! Syscall 18 (display) wiring: the read-only subops (#111 D1).
+//! Syscall 18 (display) wiring (#111).
 //!
-//! `MAP_SCANOUT` and `PRESENT` return `ENOSYS` until #195's kernel-owned scanout buffers land (W7,
-//! R2); `BIND_WAKE` returns `ENOSYS` until a later #111 stage wires it to the work sets. Every status is the
-//! frozen `docs/GRAPHICS.md` mapping; checks run in its order: length/pointer → capability → backend.
+//! Every status is the frozen `docs/GRAPHICS.md` mapping; checks run in its order: argument
+//! length/pointer → caller → capability → backend → presenter → the subop's own validation.
 
 use core::ptr;
 
-use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSYS};
+use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL};
 use clean_slate_capability::{CapabilityError, HolderId};
 use clean_slate_graphics::display::{
-    DisplayError, DISPLAY_ABI_VERSION, DISPLAY_MODE_INFO_BYTES, DISPLAY_SUBOP_BIND_WAKE,
-    DISPLAY_SUBOP_FIND_HANDLE, DISPLAY_SUBOP_MAP_SCANOUT, DISPLAY_SUBOP_PRESENT,
-    DISPLAY_SUBOP_PRESENT_STATUS, DISPLAY_SUBOP_QUERY_MODE, PRESENT_STATUS_BYTES,
+    DisplayError, PresentRequest, ScanoutMapping, DISPLAY_ABI_VERSION, DISPLAY_MODE_INFO_BYTES,
+    DISPLAY_SUBOP_BIND_WAKE, DISPLAY_SUBOP_FIND_HANDLE, DISPLAY_SUBOP_MAP_SCANOUT,
+    DISPLAY_SUBOP_PRESENT, DISPLAY_SUBOP_PRESENT_STATUS, DISPLAY_SUBOP_QUERY_MODE,
+    PRESENT_REQUEST_BYTES, PRESENT_STATUS_BYTES, SCANOUT_MAPPING_BYTES,
 };
+use clean_slate_native_abi::SharedBufferAccess;
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
-use crate::capability::display::{authorize_display_query, find_display_handle};
+use crate::capability::display::{
+    authorize_display_present, authorize_display_query, find_display_handle,
+};
 use crate::device::display::engine::DisplayState;
-use crate::device::display::{with_active_display, PRIMARY_OUTPUT_INDEX};
-use crate::mm::user_mapping::validate_user_writable_pointer_range;
-use crate::syscall::current_syscall_caller_pid;
+use crate::device::display::{with_active_display, ActiveDisplay, PRIMARY_OUTPUT_INDEX};
+use crate::mm::shared_buffer::kernel_owned::map_kernel_owned_into;
+use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
+use crate::sched::work_set;
+use crate::syscall::{current_syscall_caller_pid, service_lifecycle_syscall_allocator_mut};
+use crate::time::monotonic_ns;
 
 fn current_holder() -> Result<HolderId, u64> {
     current_syscall_caller_pid()
@@ -32,6 +38,11 @@ fn backend_present() -> bool {
 }
 
 pub(crate) fn handle_syscall_display(frame: &mut SyscallContext) {
+    with_active_display(|display| {
+        if let Some(display) = display {
+            display.service(monotonic_ns(), true);
+        }
+    });
     frame.rax = match frame.rdi {
         DISPLAY_SUBOP_FIND_HANDLE => find_handle(
             frame.rdx,
@@ -49,16 +60,152 @@ pub(crate) fn handle_syscall_display(frame: &mut SyscallContext) {
                 state.status().encode()
             })
         }
-        other => unrouted_subop(other),
+        DISPLAY_SUBOP_MAP_SCANOUT => handle_map_scanout(frame.rsi, frame.rdx, frame.r10, frame.r8),
+        DISPLAY_SUBOP_PRESENT => handle_present(frame.rsi, frame.rdx, frame.r10),
+        DISPLAY_SUBOP_BIND_WAKE => handle_bind_wake(frame.rsi, frame.rdx, frame.r10),
+        _ => SYSCALL_EINVAL,
     };
 }
 
-fn unrouted_subop(subop: u64) -> u64 {
-    match subop {
-        DISPLAY_SUBOP_MAP_SCANOUT | DISPLAY_SUBOP_PRESENT | DISPLAY_SUBOP_BIND_WAKE => {
-            SYSCALL_ENOSYS
+fn authorize_present(holder: HolderId, raw_handle: u64) -> Result<(), CapabilityError> {
+    authorize_display_present(holder, raw_handle, PRIMARY_OUTPUT_INDEX).map(|_| ())
+}
+
+fn handle_map_scanout(raw_handle: u64, buffer_index: u64, out_ptr: u64, out_len: u64) -> u64 {
+    let index = u8::try_from(buffer_index).unwrap_or(u8::MAX);
+    let mapping = map_scanout(
+        out_len,
+        || validate_user_writable_pointer_range(out_ptr, out_len).is_ok(),
+        current_holder,
+        |holder| authorize_present(holder, raw_handle),
+        |holder| {
+            with_active_display(|display| {
+                display.map(|display| map_into_caller(display, holder, index))
+            })
+        },
+    );
+    match mapping {
+        Ok(bytes) => {
+            unsafe {
+                ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr as *mut u8, SCANOUT_MAPPING_BYTES)
+            };
+            0
         }
-        _ => SYSCALL_EINVAL,
+        Err(status) => status,
+    }
+}
+
+fn map_into_caller(
+    display: &mut ActiveDisplay,
+    holder: HolderId,
+    index: u8,
+) -> Result<ScanoutMapping, u64> {
+    let frames = service_lifecycle_syscall_allocator_mut()
+        .as_mut()
+        .ok_or(DisplayError::ModeUnavailable.status())?;
+    display.map_scanout(holder, index, frames, |id, frames| {
+        map_kernel_owned_into(id, holder.0, SharedBufferAccess::ReadWrite, frames)
+    })
+}
+
+fn handle_present(raw_handle: u64, in_ptr: u64, in_len: u64) -> u64 {
+    present(
+        in_len,
+        || {
+            validate_user_pointer_range(in_ptr, in_len).ok()?;
+            let mut bytes = [0u8; PRESENT_REQUEST_BYTES];
+            unsafe {
+                ptr::copy_nonoverlapping(in_ptr as *const u8, bytes.as_mut_ptr(), bytes.len())
+            };
+            Some(bytes)
+        },
+        current_holder,
+        |holder| authorize_present(holder, raw_handle),
+        |holder, request| {
+            with_active_display(|display| {
+                display.map(|display| display.present_scanout(holder, request, monotonic_ns()))
+            })
+        },
+    )
+}
+
+fn handle_bind_wake(raw_handle: u64, raw_work_set: u64, raw_bit: u64) -> u64 {
+    bind_wake(
+        raw_bit,
+        current_holder,
+        |holder| authorize_present(holder, raw_handle),
+        |holder, bit| {
+            with_active_display(|display| {
+                display.map(|display| {
+                    display.bind_wake(holder, || {
+                        work_set::bind(holder, raw_work_set)
+                            .map(|binding| (binding, bit))
+                            .map_err(work_set::WorkSetError::status)
+                    })
+                })
+            })
+        },
+    )
+}
+
+/// `MAP_SCANOUT`: exact length and pointer → caller → `DISPLAY_PRESENT` → backend → presenter →
+/// index (`EBADF`) → allocate, pin and bind on first use → map read-write into the caller.
+fn map_scanout(
+    out_len: u64,
+    pointer_valid: impl FnOnce() -> bool,
+    holder: impl FnOnce() -> Result<HolderId, u64>,
+    authorize: impl FnOnce(HolderId) -> Result<(), CapabilityError>,
+    map: impl FnOnce(HolderId) -> Option<Result<ScanoutMapping, u64>>,
+) -> Result<[u8; SCANOUT_MAPPING_BYTES], u64> {
+    if out_len != SCANOUT_MAPPING_BYTES as u64 || !pointer_valid() {
+        return Err(SYSCALL_EINVAL);
+    }
+    let holder = holder()?;
+    authorize(holder).map_err(CapabilityError::syscall_status)?;
+    let mapping = map(holder).ok_or(DisplayError::ModeUnavailable.status())??;
+    Ok(mapping.encode())
+}
+
+/// `PRESENT`: exact length and readable pointer → caller → `DISPLAY_PRESENT` → decode → the
+/// engine's backend → presenter → validate → mapped → in-flight order.
+fn present(
+    in_len: u64,
+    read: impl FnOnce() -> Option<[u8; PRESENT_REQUEST_BYTES]>,
+    holder: impl FnOnce() -> Result<HolderId, u64>,
+    authorize: impl FnOnce(HolderId) -> Result<(), CapabilityError>,
+    submit: impl FnOnce(HolderId, &PresentRequest) -> Option<Result<u64, DisplayError>>,
+) -> u64 {
+    let status = (|| {
+        if in_len != PRESENT_REQUEST_BYTES as u64 {
+            return Err(SYSCALL_EINVAL);
+        }
+        let bytes = read().ok_or(SYSCALL_EINVAL)?;
+        let holder = holder()?;
+        authorize(holder).map_err(CapabilityError::syscall_status)?;
+        let request = PresentRequest::decode(&bytes).map_err(|_| SYSCALL_EINVAL)?;
+        submit(holder, &request)
+            .ok_or(DisplayError::ModeUnavailable.status())?
+            .map_err(DisplayError::status)
+    })();
+    status.unwrap_or_else(|status| status)
+}
+
+/// `BIND_WAKE`: bit 0..=31 → caller → `DISPLAY_PRESENT` → backend → presenter → work-set handle.
+fn bind_wake(
+    raw_bit: u64,
+    holder: impl FnOnce() -> Result<HolderId, u64>,
+    authorize: impl FnOnce(HolderId) -> Result<(), CapabilityError>,
+    bind: impl FnOnce(HolderId, u32) -> Option<Result<(), u64>>,
+) -> u64 {
+    let status = (|| {
+        let bit = work_set::bind_bit(raw_bit).map_err(work_set::WorkSetError::status)?;
+        let holder = holder()?;
+        authorize(holder).map_err(CapabilityError::syscall_status)?;
+        bind(holder, bit).ok_or(DisplayError::ModeUnavailable.status())?
+    })();
+    match status {
+        Ok(()) => 0,
+        Err(status) => status,
     }
 }
 
@@ -127,21 +274,27 @@ fn query<const N: usize>(
 
 #[cfg(test)]
 mod tests {
-    use clean_slate_capability::syscall_abi::{
-        SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSYS, SYSCALL_ESTALE,
-    };
+    use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ESTALE};
     use clean_slate_capability::{
-        CapabilityTable, HolderId, Provenance, ResourceClass, ResourceRef, Rights,
+        CapabilityError, CapabilityTable, HolderId, Provenance, ResourceClass, ResourceRef, Rights,
     };
     use clean_slate_graphics::abi_status::STATUS_ENODEV;
     use clean_slate_graphics::display::{
-        DisplayModeInfo, PresentState, PresentStatus, DISPLAY_MODE_INFO_BYTES, PRESENT_STATUS_BYTES,
+        DisplayError, DisplayModeInfo, PresentRequest, PresentState, PresentStatus, ScanoutMapping,
+        DISPLAY_MODE_INFO_BYTES, PRESENT_REQUEST_BYTES, PRESENT_STATUS_BYTES,
+        SCANOUT_MAPPING_BYTES,
     };
-    use clean_slate_graphics::REFERENCE_MODE;
+    use clean_slate_graphics::{
+        BufferRect, OutputId, MAX_PRESENT_DAMAGE_RECTS, REFERENCE_FRAME_BYTES, REFERENCE_MODE,
+    };
 
-    use super::{find_handle, query, unrouted_subop};
-    use crate::capability::display::{authorize_display_query_in, find_display_handle_in};
+    use super::{bind_wake, find_handle, map_scanout, present, query};
+    use crate::capability::display::{
+        authorize_display_present_in, authorize_display_query_in, find_display_handle_in,
+    };
     use crate::device::display::engine::DisplayState;
+
+    type AuthResult = Result<(), CapabilityError>;
 
     const CALLER: HolderId = HolderId(11);
 
@@ -322,13 +475,236 @@ mod tests {
         }
     }
 
+    fn present_auth(
+        table: &CapabilityTable<8>,
+        handle: u64,
+    ) -> impl FnOnce(HolderId) -> AuthResult + '_ {
+        move |holder| authorize_display_present_in(table, holder, handle, 0).map(|_| ())
+    }
+
+    fn valid_request() -> [u8; PRESENT_REQUEST_BYTES] {
+        let damage = BufferRect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+        PresentRequest {
+            output: OutputId::new(0, 1).expect("output"),
+            buffer_index: 0,
+            damage_count: 1,
+            rects: [damage; MAX_PRESENT_DAMAGE_RECTS],
+        }
+        .encode()
+    }
+
     #[test]
-    fn gated_subops_are_enosys_and_unknown_subops_einval() {
-        for subop in [3, 4, 6] {
-            assert_eq!(unrouted_subop(subop), SYSCALL_ENOSYS, "subop {subop}");
+    fn map_scanout_checks_length_caller_capability_then_backend() {
+        let (table, handle) = table_with(Some(Rights::DISPLAY_PRESENT));
+        let (inspect, inspect_handle) = table_with(Some(Rights::INSPECT));
+        let len = SCANOUT_MAPPING_BYTES as u64;
+        for out_len in [0, len - 1, len + 1] {
+            assert_eq!(
+                map_scanout(
+                    out_len,
+                    || unreachable!(),
+                    unreachable_caller,
+                    |_| unreachable!(),
+                    |_| unreachable!()
+                ),
+                Err(SYSCALL_EINVAL)
+            );
         }
-        for subop in [0, 7, u64::MAX] {
-            assert_eq!(unrouted_subop(subop), SYSCALL_EINVAL, "subop {subop}");
-        }
+        assert_eq!(
+            map_scanout(
+                len,
+                || false,
+                unreachable_caller,
+                |_| unreachable!(),
+                |_| unreachable!()
+            ),
+            Err(SYSCALL_EINVAL)
+        );
+        assert_eq!(
+            map_scanout(
+                len,
+                || true,
+                no_caller,
+                |_| unreachable!(),
+                |_| unreachable!()
+            ),
+            Err(SYSCALL_EACCES)
+        );
+        assert_eq!(
+            map_scanout(
+                len,
+                || true,
+                caller,
+                present_auth(&inspect, inspect_handle),
+                |_| unreachable!()
+            ),
+            Err(SYSCALL_EACCES),
+            "INSPECT cannot map scanout"
+        );
+        assert_eq!(
+            map_scanout(len, || true, caller, present_auth(&table, handle), |_| None),
+            Err(STATUS_ENODEV)
+        );
+        assert_eq!(
+            map_scanout(
+                len,
+                || true,
+                caller,
+                present_auth(&table, handle),
+                |_| Some(Err(DisplayError::NotPresenter.status()))
+            ),
+            Err(SYSCALL_EACCES)
+        );
+        let mapping = ScanoutMapping {
+            output: OutputId::new(0, 1).expect("output"),
+            buffer_index: 1,
+            user_va: 0x4000_0000,
+            byte_len: REFERENCE_FRAME_BYTES as u64,
+            stride_bytes: REFERENCE_MODE.stride_bytes,
+        };
+        let bytes = map_scanout(
+            len,
+            || true,
+            caller,
+            present_auth(&table, handle),
+            |holder| {
+                assert_eq!(holder, CALLER);
+                Some(Ok(mapping))
+            },
+        )
+        .expect("mapped");
+        assert_eq!(ScanoutMapping::decode(&bytes), Ok(mapping));
+    }
+
+    #[test]
+    fn present_checks_length_pointer_capability_decode_then_backend() {
+        let (table, handle) = table_with(Some(Rights::DISPLAY_PRESENT));
+        let (inspect, inspect_handle) = table_with(Some(Rights::INSPECT));
+        let len = PRESENT_REQUEST_BYTES as u64;
+        assert_eq!(
+            present(
+                len - 1,
+                || unreachable!(),
+                unreachable_caller,
+                |_| unreachable!(),
+                |_, _| unreachable!()
+            ),
+            SYSCALL_EINVAL
+        );
+        assert_eq!(
+            present(
+                len,
+                || None,
+                unreachable_caller,
+                |_| unreachable!(),
+                |_, _| unreachable!()
+            ),
+            SYSCALL_EINVAL
+        );
+        let mut malformed = valid_request();
+        malformed[6] = 1;
+        assert_eq!(
+            present(
+                len,
+                || Some(malformed),
+                caller,
+                present_auth(&inspect, inspect_handle),
+                |_, _| unreachable!()
+            ),
+            SYSCALL_EACCES,
+            "capability before decode"
+        );
+        assert_eq!(
+            present(
+                len,
+                || Some(malformed),
+                caller,
+                present_auth(&table, handle),
+                |_, _| unreachable!()
+            ),
+            SYSCALL_EINVAL
+        );
+        assert_eq!(
+            present(
+                len,
+                || Some(valid_request()),
+                caller,
+                present_auth(&table, handle),
+                |_, _| None
+            ),
+            STATUS_ENODEV
+        );
+        assert_eq!(
+            present(
+                len,
+                || Some(valid_request()),
+                caller,
+                present_auth(&table, handle),
+                |_, _| Some(Err(DisplayError::BufferBusy))
+            ),
+            DisplayError::BufferBusy.status()
+        );
+        assert_eq!(
+            present(
+                len,
+                || Some(valid_request()),
+                caller,
+                present_auth(&table, handle),
+                |holder, request| {
+                    assert_eq!(
+                        (holder, request.buffer_index, request.damage_count),
+                        (CALLER, 0, 1)
+                    );
+                    Some(Ok(7))
+                }
+            ),
+            7
+        );
+    }
+
+    #[test]
+    fn bind_wake_checks_bit_caller_capability_then_backend() {
+        let (table, handle) = table_with(Some(Rights::DISPLAY_PRESENT));
+        let (inspect, inspect_handle) = table_with(Some(Rights::INSPECT));
+        assert_eq!(
+            bind_wake(
+                32,
+                unreachable_caller,
+                |_| unreachable!(),
+                |_, _| unreachable!()
+            ),
+            SYSCALL_EINVAL
+        );
+        assert_eq!(
+            bind_wake(
+                3,
+                caller,
+                present_auth(&inspect, inspect_handle),
+                |_, _| unreachable!()
+            ),
+            SYSCALL_EACCES
+        );
+        assert_eq!(
+            bind_wake(3, caller, present_auth(&table, handle), |_, _| None),
+            STATUS_ENODEV
+        );
+        assert_eq!(
+            bind_wake(3, caller, present_auth(&table, handle), |_, bit| {
+                assert_eq!(bit, 3);
+                Some(Err(SYSCALL_ESTALE))
+            }),
+            SYSCALL_ESTALE
+        );
+        assert_eq!(
+            bind_wake(31, caller, present_auth(&table, handle), |_, _| Some(
+                Ok(())
+            )),
+            0
+        );
     }
 }

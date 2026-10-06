@@ -334,7 +334,7 @@ fn run_teardown_hook(
             notify_holder_exit_for_process(holder.0);
         }
         TeardownHook::Port => released.holder.ports = release_ports(ctx),
-        TeardownHook::DisplayPresenter => release_display_presenter(ctx)?,
+        TeardownHook::DisplayPresenter => release_display_presenter(ctx),
         TeardownHook::InputConsumer => release_input_consumer(ctx),
         TeardownHook::WorkSet => released.holder.work_sets = release_work_set(ctx),
         TeardownHook::RevokeHolderCapabilities => {
@@ -367,8 +367,8 @@ fn release_ports(ctx: &mut TeardownContext<'_>) -> clean_slate_port::PortRelease
     port::on_holder_exit(HolderId(ctx.process_id), ctx.instance_generation)
 }
 
-fn release_display_presenter(_ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {
-    Ok(())
+fn release_display_presenter(ctx: &mut TeardownContext<'_>) {
+    crate::device::display::release_presenter_for_holder(HolderId(ctx.process_id), ctx.allocator);
 }
 
 fn release_input_consumer(ctx: &mut TeardownContext<'_>) {

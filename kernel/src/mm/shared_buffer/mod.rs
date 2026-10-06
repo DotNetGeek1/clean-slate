@@ -21,7 +21,7 @@ use crate::mm::paging::zero_page;
 use crate::process::{process_registry_mut, PROCESS_REGISTRY_CAPACITY};
 use crate::sync::global_cell::GlobalCell;
 
-use table::{Attachment, BufferOwner, FrameSource, PendingFrees, ShareError, SharedBufferTable};
+use table::{Attachment, BufferOwner, FrameSource, PendingFrees, SharedBufferTable};
 use window::{fill_zero_table, MapTarget, MappingAuthority, RowState, WindowPool};
 pub(crate) use window::{overlaps_shared_window, WINDOW_PML4_INDEX};
 
@@ -357,10 +357,11 @@ fn unmap_at(pid: u64, va: u64, frames: &mut impl FrameSource) -> Result<(), Shar
     Ok(())
 }
 
-/// W7 (kernel-owned buffers and pins) has no production caller until the presenter (#111)
-/// lands; until then it builds only where the lane and the host tests exercise it.
-#[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
+/// W7: kernel-owned buffers and pins; the display presenter's scanout buffers (#111).
 pub(crate) mod kernel_owned;
+#[cfg(test)]
+pub(crate) use table::test_support::ArenaFrames;
+pub(crate) use table::{FrameSource as BufferFrames, ShareError};
 /// W6: port SEND attests transfers here. The `m10-port-self-test` kernel attests from its
 /// own fixture table instead.
 #[cfg(any(test, not(feature = "m10-port-self-test")))]
