@@ -35,6 +35,7 @@ use crate::diagnostics::serial::serial_write_line;
     feature = "m10-framebuffer-self-test",
     feature = "m7-net-device-self-test",
     feature = "m10-virtio-modern-self-test",
+    feature = "m10-virtio-gpu-self-test",
     feature = "m7-tls-self-test",
     feature = "m7-tls-fail-closed-self-test",
     feature = "m7-dns-self-test"
@@ -51,6 +52,7 @@ use crate::interrupt::timer::initialize_timer;
     feature = "m10-framebuffer-self-test",
     feature = "m7-net-device-self-test",
     feature = "m10-virtio-modern-self-test",
+    feature = "m10-virtio-gpu-self-test",
     feature = "m7-tls-self-test",
     feature = "m7-tls-fail-closed-self-test",
     feature = "m7-dns-self-test"
@@ -81,6 +83,7 @@ use crate::mm::layout::{
     not(feature = "m10-framebuffer-self-test"),
     not(feature = "m7-net-device-self-test"),
     not(feature = "m10-virtio-modern-self-test"),
+    not(feature = "m10-virtio-gpu-self-test"),
     not(feature = "m7-tls-self-test"),
     not(feature = "m7-tls-fail-closed-self-test"),
     not(feature = "m7-dns-self-test"),
@@ -114,6 +117,7 @@ use crate::process::process_registry_mut;
     feature = "m10-framebuffer-self-test",
     feature = "m7-net-device-self-test",
     feature = "m10-virtio-modern-self-test",
+    feature = "m10-virtio-gpu-self-test",
     feature = "m7-tls-self-test",
     feature = "m7-tls-fail-closed-self-test",
     feature = "m7-dns-self-test",
@@ -133,6 +137,7 @@ use crate::sched::dispatch::initialize_scheduler;
     feature = "m10-framebuffer-self-test",
     feature = "m7-net-device-self-test",
     feature = "m10-virtio-modern-self-test",
+    feature = "m10-virtio-gpu-self-test",
     feature = "m7-tls-self-test",
     feature = "m7-tls-fail-closed-self-test",
     feature = "m7-dns-self-test"
@@ -146,6 +151,8 @@ use crate::selftest::m10_framebuffer::run_m10_framebuffer_self_test;
 use crate::selftest::m10_input::start_m10_input_self_test;
 #[cfg(feature = "m10-port-self-test")]
 use crate::selftest::m10_port::start_m10_port_self_test;
+#[cfg(feature = "m10-virtio-gpu-self-test")]
+use crate::selftest::m10_virtio_gpu::run_m10_virtio_gpu_self_test;
 #[cfg(feature = "m10-virtio-modern-self-test")]
 use crate::selftest::m10_virtio_modern::run_m10_virtio_modern_self_test;
 #[cfg(feature = "m1-self-test")]
@@ -190,6 +197,7 @@ use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
     not(feature = "m7-dns-self-test"),
     not(feature = "m7-net-device-self-test"),
     not(feature = "m10-virtio-modern-self-test"),
+    not(feature = "m10-virtio-gpu-self-test"),
     not(feature = "m8-linux-image-self-test"),
     not(feature = "m8-linux-hello-self-test"),
     not(feature = "m9-low-va-self-test"),
@@ -959,6 +967,7 @@ fn run_inner() -> Result<(), &'static str> {
             not(feature = "m7-dns-self-test"),
             not(feature = "m7-net-device-self-test"),
             not(feature = "m10-virtio-modern-self-test"),
+            not(feature = "m10-virtio-gpu-self-test"),
             not(feature = "m8-linux-image-self-test"),
             not(feature = "m4-service-lifecycle-self-test"),
             not(feature = "m4-supervisor-self-test"),
@@ -1046,6 +1055,11 @@ fn run_inner() -> Result<(), &'static str> {
         run_m10_virtio_modern_self_test()
     }
 
+    #[cfg(feature = "m10-virtio-gpu-self-test")]
+    {
+        run_m10_virtio_gpu_self_test(&mut allocator)
+    }
+
     #[cfg(feature = "m7-dns-self-test")]
     {
         run_m7_dns_self_test()
@@ -1088,6 +1102,8 @@ fn run_inner() -> Result<(), &'static str> {
         serial_write_line("[TIME] timer initialized");
         report_timer_contract();
         crate::device::input::begin_init_and_log();
+        #[cfg(not(test))]
+        crate::device::display::begin_virtio_gpu_and_log();
         serial_write_line("[KERN] scheduler initialized");
         start_scheduler()
     }

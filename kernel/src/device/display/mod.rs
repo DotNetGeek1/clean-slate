@@ -15,9 +15,10 @@ pub(crate) mod scanout;
 pub(crate) mod source;
 #[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(any(test, clean_slate_virtio_gpu))]
+pub(crate) mod virtio_gpu;
 
 use clean_slate_capability::HolderId;
-#[cfg(test)]
 use clean_slate_graphics::display::PresentState;
 use clean_slate_graphics::display::{DisplayError, PresentRequest, ScanoutMapping};
 use clean_slate_graphics::{BufferRect, DisplayMode, REFERENCE_FRAME_BYTES, SCANOUT_BUFFER_COUNT};
@@ -41,13 +42,12 @@ pub(crate) const PRIMARY_OUTPUT_INDEX: u8 = 0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Submitted {
     Completed,
-    #[cfg(test)]
+    #[cfg(any(test, clean_slate_virtio_gpu))]
     Pending,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BackendError {
-    #[cfg(test)]
     Timeout,
     Failed,
     SourceRejected,
@@ -59,7 +59,7 @@ pub(crate) trait ScanoutBackend {
     fn bind(&mut self, index: u8, source: &dyn FrameSource) -> Result<(), BackendError>;
 
     /// Copies exactly `damage` (already validated against the mode) from `source` to scanout.
-    /// `Pending` completes later through `DisplayState::complete`.
+    /// `Pending` completes later: [`Self::poll`] reports it.
     fn submit(
         &mut self,
         index: u8,
@@ -67,12 +67,23 @@ pub(crate) trait ScanoutBackend {
         damage: &[BufferRect],
     ) -> Result<Submitted, BackendError>;
 
-    #[cfg(test)]
-    fn reset(&mut self) -> Result<(), BackendError>;
+    /// Harvests device completions. `Some` ends whatever was pending (a present, a reset, or the
+    /// VirtIO-GPU bring-up) exactly once. Runs with interrupts masked, including from the backend's
+    /// interrupt sink.
+    fn poll(&mut self) -> Option<Result<(), BackendError>> {
+        None
+    }
+
+    /// Leaves `ResetRequired`: `Completed` when the backend is usable now, `Pending` when [`Self::poll`]
+    /// reports the outcome later. Strands everything submitted before it.
+    fn reset(&mut self) -> Result<Submitted, BackendError>;
 }
 
 pub(crate) enum Backend {
     Gop(GopBackend),
+    /// The boot's one GPU lives in its own static (`virtio_gpu::install`).
+    #[cfg(any(test, clean_slate_virtio_gpu))]
+    VirtioGpu(&'static mut virtio_gpu::MmioGpuBackend),
     #[cfg(test)]
     Recording(test_support::RecordingScanout),
 }
@@ -81,6 +92,8 @@ impl Backend {
     fn scanout(&mut self) -> &mut dyn ScanoutBackend {
         match self {
             Self::Gop(gop) => gop,
+            #[cfg(any(test, clean_slate_virtio_gpu))]
+            Self::VirtioGpu(gpu) => *gpu,
             #[cfg(test)]
             Self::Recording(recording) => recording,
         }
@@ -92,6 +105,8 @@ pub(crate) struct ActiveDisplay {
     backend: Backend,
     presenter: Presenter,
     buffers: [Option<ScanoutBuffer>; SCANOUT_BUFFER_COUNT],
+    /// A backend reset was submitted and has not been reported by `poll` yet.
+    resetting: bool,
 }
 
 impl ActiveDisplay {
@@ -102,6 +117,7 @@ impl ActiveDisplay {
             backend,
             presenter: Presenter::default(),
             buffers: [const { None }; SCANOUT_BUFFER_COUNT],
+            resetting: false,
         })
     }
 
@@ -237,22 +253,81 @@ impl ActiveDisplay {
         )
     }
 
+    /// Advances the output on a device event or at a syscall-18 entry: harvest the backend, fail an
+    /// in-flight present whose deadline passed, and (`may_reset`, never from interrupt context)
+    /// start the reset `ResetRequired` asks for. Every visible status change signals the wake bit.
+    pub(crate) fn service(&mut self, now_ns: u64, may_reset: bool) {
+        let before = self.state.status();
+        match self.backend.scanout().poll() {
+            Some(result) if self.resetting => {
+                self.resetting = false;
+                self.state.finish_reset(result.is_ok());
+            }
+            Some(result) if self.state.in_flight_deadline().is_some() => {
+                self.state.complete(result, now_ns);
+            }
+            Some(Err(error)) => self.state.fault(error),
+            Some(Ok(())) => {}
+            None if !self.resetting => {
+                self.state.expire(now_ns);
+            }
+            None => {}
+        }
+        if may_reset && !self.resetting && self.state.status().state == PresentState::ResetRequired
+        {
+            match self.backend.scanout().reset() {
+                Ok(Submitted::Completed) => self.state.finish_reset(true),
+                #[cfg(any(test, clean_slate_virtio_gpu))]
+                Ok(Submitted::Pending) => self.resetting = true,
+                Err(_) => self.state.finish_reset(false),
+            }
+        }
+        if self.state.status() != before {
+            self.presenter.signal();
+        }
+    }
+
     /// Leaves `ResetRequired` through a backend reset: a new epoch on success, `Poisoned` otherwise.
     #[cfg(test)]
     pub(crate) fn recover(&mut self) {
-        if self.state.status().state == PresentState::ResetRequired {
-            let reset = self.backend.scanout().reset();
-            self.state.finish_reset(reset.is_ok());
-        }
+        self.service(0, true);
     }
 
     #[cfg(feature = "m10-framebuffer-self-test")]
     pub(crate) fn gop_aperture(&self) -> Option<&aperture::ApertureWriter> {
         match &self.backend {
             Backend::Gop(gop) => Some(gop.aperture()),
+            #[cfg(any(test, clean_slate_virtio_gpu))]
+            Backend::VirtioGpu(_) => None,
             #[cfg(test)]
             Backend::Recording(_) => None,
         }
+    }
+
+    #[cfg(feature = "m10-virtio-gpu-self-test")]
+    pub(crate) fn virtio_gpu_mut(&mut self) -> Option<&mut virtio_gpu::MmioGpuBackend> {
+        match &mut self.backend {
+            Backend::VirtioGpu(gpu) => Some(*gpu),
+            Backend::Gop(_) => None,
+            #[cfg(test)]
+            Backend::Recording(_) => None,
+        }
+    }
+
+    #[cfg(feature = "m10-virtio-gpu-self-test")]
+    pub(crate) fn scanout_buffer(&self, index: u8) -> Option<&ScanoutBuffer> {
+        self.buffers.get(usize::from(index))?.as_ref()
+    }
+}
+
+/// Uninstalls the output and hands back its VirtIO-GPU backend, if that is what it was. The
+/// scanout buffers stay pinned for the rest of the boot.
+#[cfg(all(not(test), feature = "m10-virtio-gpu-self-test"))]
+pub(crate) fn take_virtio_gpu() -> Option<virtio_gpu::MmioGpuBackend> {
+    let display = without_interrupts(|| unsafe { (*ACTIVE_DISPLAY.get()).take() })?;
+    match display.backend {
+        Backend::VirtioGpu(_) => virtio_gpu::take_installed(),
+        Backend::Gop(_) => None,
     }
 }
 
@@ -282,15 +357,56 @@ pub(crate) fn install_gop_display(
     .map_err(|_| DisplayError::ModeUnavailable)?;
     let backend =
         GopBackend::new(writer, framebuffer.order).map_err(|_| DisplayError::ModeUnavailable)?;
-    publish(ActiveDisplay::new(Backend::Gop(backend))?)
+    publish(ActiveDisplay::new(Backend::Gop(backend))?, "gop")
+}
+
+/// Claims the modern `virtio-gpu-pci` function when GOP left no display, and installs it with its
+/// bring-up batch in flight (#114). Interrupts and the W3 timeout path must already be live; the
+/// bring-up completes asynchronously and a failure surfaces as `ResetRequired` and then `Poisoned`.
+#[cfg(all(not(test), clean_slate_virtio_gpu))]
+pub(crate) fn install_virtio_gpu_display() -> Result<(), virtio_gpu::GpuInitError> {
+    if with_active_display(|display| display.is_some()) {
+        return Err(virtio_gpu::GpuInitError::DisplayPresent);
+    }
+    let backend = virtio_gpu::install(virtio_gpu::begin_mmio(on_backend_interrupt)?)?;
+    publish(
+        ActiveDisplay::new(Backend::VirtioGpu(backend))
+            .map_err(|_| virtio_gpu::GpuInitError::Mode)?,
+        "virtio-gpu",
+    )
+    .map_err(|_| virtio_gpu::GpuInitError::Mode)
+}
+
+/// Production boot tail: brings up VirtIO-GPU only when GOP left no display installed.
+#[cfg(all(not(test), clean_slate_boot_tail))]
+pub(crate) fn begin_virtio_gpu_and_log() {
+    match install_virtio_gpu_display() {
+        Ok(()) | Err(virtio_gpu::GpuInitError::DisplayPresent) => {}
+        Err(error) => crate::diagnostics::serial::serial_write_fmt(format_args!(
+            "[DISP] virtio-gpu unavailable reason={}\n",
+            error.name()
+        )),
+    }
+}
+
+/// The VirtIO-GPU queue and W3 timeout sink (interrupt context, single CPU, interrupts masked):
+/// harvest completions into the engine and wake the presenter. Never resets.
+#[cfg(all(not(test), clean_slate_virtio_gpu))]
+fn on_backend_interrupt() {
+    let now_ns = crate::time::monotonic_ns();
+    with_active_display(|display| {
+        if let Some(display) = display {
+            display.service(now_ns, false);
+        }
+    });
 }
 
 #[cfg(not(test))]
-fn publish(display: ActiveDisplay) -> Result<(), DisplayError> {
+fn publish(display: ActiveDisplay, backend: &str) -> Result<(), DisplayError> {
     let output = display.state().output();
     without_interrupts(|| unsafe { *ACTIVE_DISPLAY.get() = Some(display) });
     crate::diagnostics::serial::serial_write_fmt(format_args!(
-        "[DISP] backend=gop output={} epoch={}\n",
+        "[DISP] backend={backend} output={} epoch={}\n",
         output.index(),
         output.backend_epoch()
     ));

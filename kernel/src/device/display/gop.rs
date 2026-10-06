@@ -108,9 +108,9 @@ impl ScanoutBackend for GopBackend {
         Ok(Submitted::Completed)
     }
 
-    #[cfg(test)]
-    fn reset(&mut self) -> Result<(), BackendError> {
-        Ok(())
+    /// The aperture holds no device state: the next present rewrites what it damages.
+    fn reset(&mut self) -> Result<Submitted, BackendError> {
+        Ok(Submitted::Completed)
     }
 }
 

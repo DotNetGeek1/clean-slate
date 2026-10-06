@@ -7,7 +7,11 @@ use clean_slate_native_abi::{SharedBufferAccess, SharedBufferId, MAX_SHARED_MAPP
 use super::table::{BufferOwner, ExtentList, FrameSource, ShareError};
 use super::window::{MappingAuthority, ProcessWindow, RowState};
 use super::{drain_pending, map_into_root, reconcile_slot, row_for, state, unmap_at};
-#[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
+#[cfg(any(
+    test,
+    feature = "m10-shared-buffer-self-test",
+    feature = "m10-virtio-gpu-self-test"
+))]
 use crate::mm::{frame_allocator::physical_frame_ptr, PAGE_SIZE};
 
 /// Proof that a kernel-owned buffer's frames stay allocated. Not `Copy`: [`unpin`]
@@ -115,7 +119,11 @@ pub(crate) fn extents(token: &PinToken) -> ExtentList {
 
 /// Calls `write` with each physmap chunk of `[offset, offset + len)` of a pinned
 /// buffer, and the chunk's offset from `offset`; chunks never cross a page boundary.
-#[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
+#[cfg(any(
+    test,
+    feature = "m10-shared-buffer-self-test",
+    feature = "m10-virtio-gpu-self-test"
+))]
 pub(crate) fn with_kernel_bytes_mut(
     token: &PinToken,
     offset: u64,

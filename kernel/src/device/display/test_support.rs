@@ -65,6 +65,8 @@ pub(crate) struct RecordingScanout {
     pub(crate) reject_bind: bool,
     pub(crate) binds: usize,
     pub(crate) submits: usize,
+    /// What the next `poll` reports: the device finished (or failed) asynchronously.
+    pub(crate) outcome: Option<Result<(), BackendError>>,
     staged: Option<(Vec<u8>, Vec<BufferRect>)>,
 }
 
@@ -86,6 +88,7 @@ impl RecordingScanout {
             reject_bind: false,
             binds: 0,
             submits: 0,
+            outcome: None,
             staged: None,
         }
     }
@@ -152,8 +155,12 @@ impl ScanoutBackend for RecordingScanout {
         }
     }
 
-    fn reset(&mut self) -> Result<(), BackendError> {
+    fn poll(&mut self) -> Option<Result<(), BackendError>> {
+        self.outcome.take()
+    }
+
+    fn reset(&mut self) -> Result<Submitted, BackendError> {
         self.staged = None;
-        Ok(())
+        Ok(Submitted::Completed)
     }
 }

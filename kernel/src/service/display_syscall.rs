@@ -38,6 +38,11 @@ fn backend_present() -> bool {
 }
 
 pub(crate) fn handle_syscall_display(frame: &mut SyscallContext) {
+    with_active_display(|display| {
+        if let Some(display) = display {
+            display.service(monotonic_ns(), true);
+        }
+    });
     frame.rax = match frame.rdi {
         DISPLAY_SUBOP_FIND_HANDLE => find_handle(
             frame.rdx,

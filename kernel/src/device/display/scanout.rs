@@ -67,6 +67,18 @@ impl ScanoutBuffer {
         self.id
     }
 
+    /// Overwrites the whole frame from `src` (boot-context self-test).
+    #[cfg(feature = "m10-virtio-gpu-self-test")]
+    pub(crate) fn write_frame(&self, src: &[u8]) -> Result<(), ShareError> {
+        if src.len() != REFERENCE_FRAME_BYTES {
+            return Err(ShareError::Invalid);
+        }
+        kernel_owned::with_kernel_bytes_mut(&self.pin, 0, src.len() as u64, |offset, chunk| {
+            let offset = offset as usize;
+            chunk.copy_from_slice(&src[offset..offset + chunk.len()]);
+        })
+    }
+
     /// Unpins and retires the buffer; its frames return once no mapping is left.
     pub(crate) fn release(self, frames: &mut impl BufferFrames) {
         kernel_owned::unpin(self.pin, frames);
