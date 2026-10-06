@@ -1076,25 +1076,40 @@ fn run_m10_framebuffer_acceptance() -> Result<(), XtaskError> {
         .arg("-p")
         .arg("clean-slate-raster");
     run_host_test_command(&mut test)?;
-    run_vm_inner_with_config(
-        false,
-        false,
-        &["m10-framebuffer-self-test"],
-        Some((
-            MarkerSet::Ordered(&M10_FRAMEBUFFER_ACCEPTANCE_MARKERS),
-            M10_FRAMEBUFFER_ACCEPTANCE_TIMEOUT,
-        )),
-        VmLaunchConfig {
-            m5_data_disk: None,
-            reset_ovmf_vars: false,
-            m7_fixture_port: None,
-            kernel_release: false,
-            cpu_model: None,
-            vga: Some("std"),
-            machine_extra: None,
-            m10_virtio_modern: None,
+    // The final serial marker comes after the second present settles, so the frame captured on
+    // `status idle seq=2` is the one the guest's readback describes.
+    let steps = vec![
+        qmp::ScriptStep::AwaitLine("[FB  ] status idle seq=2"),
+        qmp::ScriptStep::Screendump {
+            name: "framebuffer",
+            check: m10_framebuffer_validate::check_m10_framebuffer_screenshot,
         },
-    )
+    ];
+    let mut driver = qmp::QmpScriptDriver::new("m10-framebuffer", steps, &xtask_artifact_root())?;
+    run_driven_vm_acceptance(
+        &["m10-framebuffer-self-test"],
+        VmLaunchConfig {
+            vga: Some("std"),
+            ..VmLaunchConfig::default()
+        },
+        MarkerSet::Ordered(&M10_FRAMEBUFFER_ACCEPTANCE_MARKERS),
+        M10_FRAMEBUFFER_ACCEPTANCE_TIMEOUT,
+        &mut driver,
+    )?;
+    let capture = driver
+        .captures()
+        .first()
+        .filter(|_| driver.is_complete())
+        .ok_or_else(|| {
+            XtaskError::Validation("m10 framebuffer: the screendump stage did not run".into())
+        })?;
+    println!(
+        "[M10.2] host screenshot match {}x{} png={}",
+        capture.screenshot.width(),
+        capture.screenshot.height(),
+        capture.png.display()
+    );
+    Ok(())
 }
 
 fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
@@ -2628,6 +2643,20 @@ fn run_vm_inner_with_config(
     }
 }
 
+/// A kernel lane with a mid-run driver (docs/DEVELOPMENT.md "Kernel lanes"): QEMU is never
+/// started with `-S`, and the driver's arguments follow the lane's own.
+fn run_driven_vm_acceptance(
+    features: &[&str],
+    config: VmLaunchConfig,
+    marker_set: MarkerSet<'static>,
+    timeout: Duration,
+    driver: &mut dyn AcceptanceDriver,
+) -> Result<String, XtaskError> {
+    let mut vm = prepare_vm(false, false, features, config)?;
+    vm.qemu.args(driver.qemu_args());
+    run_driven_acceptance_command(&mut vm.qemu, marker_set, timeout, driver)
+}
+
 /// Per-lane run directories for screenshots and other lane artifacts.
 fn xtask_artifact_root() -> PathBuf {
     workspace_root().join("target").join("xtask-artifacts")
@@ -3864,10 +3893,6 @@ fn run_driven_acceptance_command(
                         );
                     }
                     if marker_set_is_ordered(marker_set, &M10_FRAMEBUFFER_ACCEPTANCE_MARKERS) {
-                        // TODO(#111 screenshot stage): boot this lane through a kernel-lane wrapper with
-                        // QmpScriptDriver::new("m10-framebuffer", steps, &xtask_artifact_root()) and a
-                        // ScriptStep::Screendump whose check compares against the host raster render;
-                        // see docs/DEVELOPMENT.md "Kernel lanes".
                         if let Err(error) = validate_m10_framebuffer_serial(&output) {
                             terminate_child(&mut child)?;
                             let _ = child.wait();

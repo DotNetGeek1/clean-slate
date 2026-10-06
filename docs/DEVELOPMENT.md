@@ -237,7 +237,7 @@ For the M10 #111 GOP framebuffer lane (host raster tests plus QEMU with `-vga st
 cargo xtask test-m10-framebuffer
 ```
 
-The boot runs `m10-framebuffer-self-test` in boot context: GOP mode 1280x800, kernel-internal present with damage-only copy, aperture readback CRC and probes matched on the host, then `[M10.2] PASS`. See [GRAPHICS.md](GRAPHICS.md).
+The boot runs `m10-framebuffer-self-test` in boot context: GOP mode 1280x800, kernel-internal present with damage-only copy, aperture readback CRC and probes matched on the host, then `[M10.2] PASS`. The lane boots through the kernel-lane QMP driver (`m10-framebuffer`): on `[FB  ] status idle seq=2` it takes a screendump to `target/xtask-artifacts/m10-framebuffer/<run>/framebuffer.png` and requires all 1280x800 pixels to equal the host raster render (pattern A, then B; the undamaged decoy must not appear). Success prints `[M10.2] host readback match …` and `[M10.2] host screenshot match 1280x800 png=…`. See [GRAPHICS.md](GRAPHICS.md).
 
 For the M10 #196 VirtIO modern PCI transport (host tests plus two QEMU boots):
 
@@ -718,7 +718,7 @@ Some acceptance lanes need guest keyboard or pointer input, or a framebuffer cap
 
 **Artifacts.** Runs write under `target/xtask-artifacts/<lane>/<pid>.<seq>/` (`xtask_artifact_root()`); PNG is `<name>.png`. The intermediate PPM is removed after a passing check and kept next to the PNG when the check fails. At most eight run directories per lane (oldest pruned).
 
-**Kernel lanes.** There is no kernel-lane wrapper yet; the first kernel lane that attaches a driver adds one. It builds the command with `prepare_vm(false, false, features, config)` (never `-S`), appends `driver.qemu_args()`, and calls `run_driven_acceptance_command(&mut vm.qemu, marker_set, timeout, &mut driver)`, which returns the captured serial output.
+**Kernel lanes.** `run_driven_vm_acceptance(features, config, marker_set, timeout, &mut driver)` in `xtask/src/main.rs` boots a kernel lane under a driver: it builds the command with `prepare_vm(false, false, features, config)` (never `-S`), appends `driver.qemu_args()`, and calls `run_driven_acceptance_command`, which returns the captured serial output. `test-m10-framebuffer` is the first user.
 
 **Smoke gate.** `cargo xtask test-qmp-smoke` (alias `qmp-smoke`; Constituent in `scripts/run-tests.sh` and `scripts/run-tests.ps1`) needs only `qemu-system-x86_64` with SeaBIOS (no kernel, no OVMF). xtask builds a 512-byte real-mode boot sector on a 1 MiB raw disk (SeaBIOS computes zero CHS cylinders on smaller disks), paints a blue/red text screen, and echoes every i8042 byte on COM1 as `[QMPFIX] kbd xx` / `[QMPFIX] aux xx`. The script injects taps, pointer motion, and left, right, and middle presses and releases—each paced on the echoed bytes—checks the serial trace, exercises `CommandError` for `no-such-command`, validates screenshot pixels and the PNG header, quits, and requires a `SHUTDOWN` event plus a released port. A second run fails its screenshot check on purpose and proves QEMU closed the QMP socket and the port is refused. Success prints `[QMP.smoke] PASS`.
 
