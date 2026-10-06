@@ -166,6 +166,7 @@ $AllTests = [ordered]@{
     "test-m10-port"             = @{ Aliases = @("m10-port", "m10.200"); Description = "M10 #200 service port, capability transfer and work sets (constituent)"; Role = "Constituent" }
     "test-qmp-smoke"            = @{ Aliases = @("qmp-smoke"); Description = "M10 #197 QMP input/screenshot harness smoke (SeaBIOS fixture, no kernel)"; Role = "Constituent" }
     "test-m10-virtio-modern"    = @{ Aliases = @("m10-virtio-modern"); Description = "M10 #196 modern VirtIO PCI transport: host tests plus MSI-X and INTx QEMU boots (constituent)"; Role = "Constituent" }
+    "test-m10-virtio-gpu"       = @{ Aliases = @("m10-virtio-gpu"); Description = "M10 #114 VirtIO-GPU scanout: display/virtio host tests plus a modern-only virtio-gpu-pci QEMU boot (constituent)"; Role = "Constituent" }
     "test-m10-framebuffer"      = @{ Aliases = @("m10-framebuffer"); Description = "M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (constituent)"; Role = "Constituent" }
     "test-m10-shared-buffer"    = @{ Aliases = @("m10-shared-buffer"); Description = "M10 #195 shared-buffer acceptance (constituent)"; Role = "Constituent" }
     "test-m10-input-smoke"      = @{ Aliases = @("m10-input-smoke"); Description = "M10 #113 i8042 input smoke QEMU lane (controller stimulus, no host injection)"; Role = "Constituent" }

@@ -77,7 +77,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 | 1 | #197 | `xtask/src/qmp/` (QMP endpoint, client, input and screendump helpers, PPM to PNG, marker-paced script driver); `AcceptanceDriver` hooks in `xtask/src/main.rs`; gate `test-qmp-smoke` |
 | 1–3 | #116 | `ui/` (`clean-slate-ui`), `desktop-shell/`, `docs/design/DESIGN-SYSTEM.md` (planned). Token and documentation work may start in Wave 1 |
 | 2 | #112 | `compositor/` (`clean-slate-compositor`); P5 launch policy, grant policy (`kernel/src/capability/graphics.rs`) and sizing (planned) |
-| 2 | #114 | `kernel/src/device/display/virtio_gpu.rs`; gate `test-m10-virtio-gpu` (planned) |
+| 2 | #114 | `kernel/src/device/display/{virtio_gpu.rs, virtio_gpu/}`; `kernel/src/selftest/m10_virtio_gpu.rs`; gate `test-m10-virtio-gpu` |
 | 3 | #115 | `compositor::wm` (planned) |
 | 3 | #117 | `playground/` (`clean-slate-playground`) (planned) |
 | 4 | #118 | integration; P4 teardown ordering and `ResourceSnapshot` counters in `kernel/src/process/domain.rs`; gate `test-m10-desktop` (planned) |
@@ -566,7 +566,7 @@ Per-frame limits: `Damage` carries at most `DAMAGE_RECTS_PER_FRAME` (5) `BufferR
 
 ## Display ABI (syscall 18)
 
-Authoritative: `graphics::abi::display`, `graphics::abi::status`. Kernel implementation: #111 GOP (landed) and #114 VirtIO-GPU (planned), both behind one `ScanoutBackend`.
+Authoritative: `graphics::abi::display`, `graphics::abi::status`. Kernel implementation: #111 GOP and #114 VirtIO-GPU (both landed), behind one `ScanoutBackend`. Syscall 18 cannot tell them apart: the same mode, buffers, `PresentRequest`, order, statuses and R8 semantics apply to both.
 
 Register convention (matches the network syscall, `SYSCALL_NR_NETWORK_CAPABILITY` = 14): `rax` = 18, `rdi` = subop, `rsi` = capability handle (ignored by `FIND_HANDLE`), `rdx`, `r10`, `r8`, `r9` = arguments; `rax` out = success value or a status sentinel. User pointers are validated over the exact declared struct length; a wrong length is `EINVAL`. **Non-blocking**: waiting happens only through work sets.
 
@@ -606,6 +606,16 @@ Kernel wiring: `kernel/src/service/display_syscall.rs` (order and status mapping
 | `Poisoned` | 9 | `ENOTRECOVERABLE` | reset failed; permanent for this boot |
 
 `DisplayError::from_status` is lossy for `EACCES` and `ESTALE`, which capability failures share.
+
+### VirtIO-GPU backend (#114)
+
+Production boot claims the modern-only `virtio-gpu-pci` function (#196 transport, MSI-X or INTx; no legacy I/O path exists) only when GOP capture left no display. Interrupts and the W3 timeout path are already live at that point.
+
+- **One host resource.** Resource 1 (`B8G8R8X8_UNORM`, the reference mode) is scanout 0 for the boot. Bring-up is one batch: `GET_DISPLAY_INFO` (scanout 0 must be enabled at 1280×800, otherwise the backend fails closed), `RESOURCE_CREATE_2D`, `SET_SCANOUT`. It completes asynchronously. A `PRESENT` accepted before it finishes queues behind it on the in-order control queue. A failed bring-up moves the output to `ResetRequired`.
+- **Present.** If the named buffer is not the attached backing, the present detaches the old backing and attaches the buffer's pinned extents (`RESOURCE_ATTACH_BACKING`, ≤ 16 page-aligned extents covering exactly 4,096,000 bytes). It then sends one `TRANSFER_TO_HOST_2D` per damage rect (offset `y·5120 + x·4`) and one `RESOURCE_FLUSH` of the damage bounding box. Host pixels outside the damage keep their content (R8). The whole present is one batch behind one notify, and every command carries the `DISPLAY_COMMAND_TIMEOUT_NS` W3 deadline.
+- **Completion is interrupt driven.** The transport's queue interrupt and W3 expiry both call the backend sink. The sink harvests completions into the engine (`ActiveDisplay::service`) and signals the wake bit. It never resets. A timeout, transport failure, unknown token or any response other than `OK_NODATA` / `OK_DISPLAY_INFO` ends the present with `DeviceTimeout` or `ResetRequired`, exactly once.
+- **Reset.** The next syscall-18 entry starts it: a device reset under a new transport generation, which strands every earlier token, forgets the attached backing, then repeats the bring-up batch. Success bumps the epoch. Failure, or a second bring-up failure, poisons the output. **After an epoch bump the host resource is blank** and nothing is attached, so the compositor's first present on the new epoch must carry full-frame damage. It is redrawing everything anyway.
+- **Memory.** Descriptors name only 24 static 1 KiB command slots (request at 0, response at 512) and the extents of a bound, pinned scanout buffer. A batch is refused, never partially queued, when the slots are short.
 
 ## Input ABI (syscall 19)
 
@@ -823,7 +833,19 @@ The `fake` feature enables `graphics::fake`: `FakeDisplay`, a model of the displ
 
 #195 gates (landed): `cargo xtask test-m10-nxe` (alias `m10-nxe`) and `cargo xtask test-m10-shared-buffer` (alias `m10-shared-buffer`); see [DEVELOPMENT.md](DEVELOPMENT.md).
 
-Planned gates, each owned by its lane: `test-m10-virtio-gpu` (#114), `test-m10-desktop` (#118), and `test-m10` with `[M10 ] PASS` (#119).
+`cargo xtask test-m10-virtio-gpu` (alias `m10-virtio-gpu`) is the #114 gate. It runs the kernel `device::display` and `device::virtio` host tests. It then boots the `m10-virtio-gpu-self-test` kernel with `-vga none -device virtio-gpu-pci,disable-legacy=on,xres=1280,yres=800,ioeventfd=off`. The guest uses the syscall-18 `MAP_SCANOUT` / `PRESENT` path with a kernel holder and only reads the status while it waits, so every completion arrives through the interrupt sink. It checks, in order:
+
+1. bring-up;
+2. a full present of pattern A from buffer 0 (attach, one transfer, one flush);
+3. a switch to buffer 1 with the three B rects (detach, attach, three transfers, one flush, and only the damaged bytes moved);
+4. a guest-side readback model: the logged transfers replayed from the scanout buffers must give the #111 golden CRC `0x20F2EEC9`, with the decoy absent;
+5. a forced timeout (an unnotified batch): `DeviceTimeout`, `ResetRequired`, and `PRESENT` refused;
+6. a reset to epoch 2 under a new transport generation, followed by a present that re-attaches the backing;
+7. detach, unref and device-resetting release.
+
+The host checks the ordered `[VGPU]` markers and the figures they carry, then prints `[M10.virtio-gpu] PASS`. Visual screenshot proof of VirtIO scanout is owned by #118/#119 through #197.
+
+Planned gates, each owned by its lane: `test-m10-desktop` (#118), and `test-m10` with `[M10 ] PASS` (#119).
 
 Contract-level properties that are host-tested today: the size and layout assertions (`frame_layout_assertions`, `abi_size_assertions`, `state_sizes_stay_bounded`), golden frames and round trips for every message, the malformed-frame matrices, negotiation, the role matrix, the buffer handoff property test (`property_buffer_handoff_conserves_buffers`), the scanout model property test (`property_double_buffered_producer_matches_scanout_model`), and the capability `valid_for` and delegation matrices.
 
@@ -845,7 +867,7 @@ Each acceptance item of #110, with the section of this document that records it 
 | 10 | Input events carry no caller-trusted focus identity | [Wire protocol summary](#wire-protocol-summary) (input events); [Raw input records](#raw-input-records) | `raw_input_round_trips_all_kinds` (records carry a device, never a surface); `key_record_layout_tiles`; `event_body_layout_tiles_with_spec_fields`. Focus routing is planned (#112, #115) |
 | 11 | Raw key events are distinct from future text-input events | [Versioning and extension points](#versioning-and-extension-points) | `unknown_opcodes` (text-input range is `UnknownOpcode` in 1.0); `negotiate_matrix`; `key_usage_boundaries` |
 | 12 | One concrete M10 reference mode/pixel format is frozen for deterministic acceptance | [Reference mode](#reference-mode) | const assertions in `graphics/src/mode.rs`; `buffer_layout_matrix`; `present_request_validate_matrix`; `all_events_round_trip` |
-| 13 | Backend-independent API supports UEFI framebuffer and VirtIO-GPU | [Display ABI](#display-abi-syscall-18); [Reference mode](#reference-mode) | `display_abi_round_trips`; `present_request_validate_matrix`; `present_status_decode_matrix`; `completion_copies_only_damaged_pixels`; `property_double_buffered_producer_matches_scanout_model`; `timeout_enters_reset_required_without_copying`. The GOP and VirtIO-GPU backends are planned (#111, #114) |
+| 13 | Backend-independent API supports UEFI framebuffer and VirtIO-GPU | [Display ABI](#display-abi-syscall-18); [Reference mode](#reference-mode) | `display_abi_round_trips`; `present_request_validate_matrix`; `present_status_decode_matrix`; `completion_copies_only_damaged_pixels`; `property_double_buffered_producer_matches_scanout_model`; `timeout_enters_reset_required_without_copying`. Both backends landed: GOP (#111, `test-m10-framebuffer`) and VirtIO-GPU (#114, `device::display::virtio_gpu::tests`, `test-m10-virtio-gpu`) |
 | 14 | Display/raw-device authority is distinct from application surface authority | [Capability classes and rights](#capability-classes-and-rights) (S10) | `m10_valid_for_masks_exact`; `display_and_input_grant_reject_delegate_via_valid_for`; `display_resource_ref_names_output_index_only`; `display_resource_ref_revoke_is_per_output_index`; `graphics_delegation_refuses_root_only_rights`; `gfx_serve_alone_authorises_no_client_role` |
 | 15 | Surface roles cannot be forged to gain trusted-system-overlay authority | [Surface roles](#surface-roles) | `system_overlay_requires_overlay_right`; `overlay_right_does_not_imply_shell_roles`; `delegated_graphics_rights_never_authorise_shell_or_overlay_roles`; `shell_and_overlay_are_root_only_and_connect_is_delegable`; `validate_role_full_matrix_matches_spec_table`; `grant_ignores_every_non_role_bit`; `failed_role_assignment_leaves_the_surface_role_less` |
 | 16 | Protocol leaves room for later Linux/Windows surfaces without adopting Wayland/X11/Win32 semantics | [Versioning and extension points](#versioning-and-extension-points); [Non-goals and visual target](#non-goals-and-visual-target) | design property; `negotiate_matrix` and `unknown_opcodes` prove the growth mechanism only |

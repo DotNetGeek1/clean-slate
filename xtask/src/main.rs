@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 mod m10_framebuffer_validate;
+mod m10_virtio_gpu;
 mod m7_certs;
 mod m7_fixture;
 mod m7_fixture_tcp;
@@ -1017,6 +1018,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
         ParsedCommand::TestQmpSmoke => qmp::smoke::run(&xtask_artifact_root()),
         ParsedCommand::TestM10VirtioModern => run_m10_virtio_modern_acceptance(),
+        ParsedCommand::TestM10VirtioGpu => m10_virtio_gpu::run_acceptance(),
         ParsedCommand::TestM10Framebuffer => run_m10_framebuffer_acceptance(),
         ParsedCommand::TestM10SharedBuffer => run_m10_shared_buffer_acceptance(),
         ParsedCommand::TestM10InputSmoke => run_m10_input_smoke_acceptance(),
@@ -4504,6 +4506,9 @@ fn print_help() {
         "  test-m10-virtio-modern M10 #196 modern VirtIO PCI transport host tests plus MSI-X and INTx QEMU boots; prints [M10.virtio-modern] PASS (aliases: m10-virtio-modern)"
     );
     println!(
+        "  test-m10-virtio-gpu M10 #114 VirtIO-GPU scanout: display/virtio host tests, then a modern-only virtio-gpu-pci QEMU boot validating create/attach/scanout/transfer/flush, damage-only buffer switch, forced timeout, reset to epoch 2 and release by guest markers and readback CRC; prints [M10.virtio-gpu] PASS (aliases: m10-virtio-gpu)"
+    );
+    println!(
         "  test-m10-framebuffer M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (aliases: m10-framebuffer)"
     );
     println!(
@@ -4650,6 +4655,7 @@ enum ParsedCommand {
     TestM10Port,
     TestQmpSmoke,
     TestM10VirtioModern,
+    TestM10VirtioGpu,
     TestM10Framebuffer,
     TestM10SharedBuffer,
     TestM10InputSmoke,
@@ -4788,6 +4794,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-qmp-smoke" || cmd == "qmp-smoke" => ParsedCommand::TestQmpSmoke,
         Some(cmd) if cmd == "test-m10-virtio-modern" || cmd == "m10-virtio-modern" => {
             ParsedCommand::TestM10VirtioModern
+        }
+        Some(cmd) if cmd == "test-m10-virtio-gpu" || cmd == "m10-virtio-gpu" => {
+            ParsedCommand::TestM10VirtioGpu
         }
         Some(cmd) if cmd == "test-m10-framebuffer" || cmd == "m10-framebuffer" => {
             ParsedCommand::TestM10Framebuffer
@@ -5247,6 +5256,14 @@ mod tests {
         assert_eq!(
             parse_command(Some("m10-virtio-modern".as_ref())),
             ParsedCommand::TestM10VirtioModern
+        );
+        assert_eq!(
+            parse_command(Some("test-m10-virtio-gpu".as_ref())),
+            ParsedCommand::TestM10VirtioGpu
+        );
+        assert_eq!(
+            parse_command(Some("m10-virtio-gpu".as_ref())),
+            ParsedCommand::TestM10VirtioGpu
         );
         assert_eq!(
             parse_command(Some("test-m10-framebuffer".as_ref())),
