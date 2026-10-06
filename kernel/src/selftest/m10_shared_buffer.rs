@@ -1997,7 +1997,9 @@ fn lane_check_handler(pid: u64, check: u64, arg: u64) -> u64 {
             let w_pid = state.peer_pids[ROLE_W as usize];
             let r_pid = state.peer_pids[ROLE_R as usize];
             let id = state.active_buffer_id;
-            if inspect::mapping(r_pid, id).is_some() {
+            if inspect::mapping(r_pid, id).is_some()
+                || crate::mm::shared_buffer::mapping_count(r_pid) != 0
+            {
                 fatal_kernel_error("[M10.SB] reader-exit reader window lingered");
             }
             let live = inspect::buffer(id)

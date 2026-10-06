@@ -48,6 +48,8 @@ pub(crate) struct ResourceSnapshot {
     pub(crate) work_sets: usize,
     pub(crate) ports_served: usize,
     pub(crate) port_connections: usize,
+    /// #195 shared-window rows (Live or orphaned); teardown step 5 removes every one.
+    pub(crate) shared_mappings: usize,
 }
 
 /// What the M10 teardown slots released; both exit paths compare it with the snapshot.
@@ -55,6 +57,7 @@ pub(crate) struct ResourceSnapshot {
 struct HolderReleaseCounts {
     work_sets: usize,
     ports: clean_slate_port::PortReleaseCounts,
+    shared_mappings: usize,
 }
 
 impl HolderReleaseCounts {
@@ -66,6 +69,11 @@ impl HolderReleaseCounts {
             || self.ports.client_connections != snapshot.port_connections
         {
             return Err("port teardown count diverged from the recorded process snapshot");
+        }
+        // Earlier slots (the display presenter) may remove their kernel-grant rows first; step 5
+        // removing more rows than the snapshot held means one was created during teardown.
+        if self.shared_mappings > snapshot.shared_mappings {
+            return Err("shared-mapping teardown count exceeded the recorded process snapshot");
         }
         Ok(())
     }
@@ -96,6 +104,7 @@ pub(crate) fn remaining_owned_resource_count(process_id: u64) -> usize {
         + ipc_resources.held_capabilities
         + work_set::count_for(HolderId(process_id))
         + port_resource_count(HolderId(process_id))
+        + crate::mm::shared_buffer::mapping_count(process_id)
 }
 
 fn port_resource_count(holder: HolderId) -> usize {
@@ -126,6 +135,7 @@ pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'s
         work_sets: work_set::count_for(HolderId(process_id)),
         ports_served: ports.ports_served,
         port_connections: ports.port_connections,
+        shared_mappings: crate::mm::shared_buffer::mapping_count(process_id),
     })
 }
 
@@ -346,7 +356,9 @@ fn run_teardown_hook(
         TeardownHook::DiscardBootstrapGrants => {
             discard_bootstrap_grants_for_holder(holder);
         }
-        TeardownHook::SharedMappings => release_shared_mappings(ctx)?,
+        TeardownHook::SharedMappings => {
+            released.holder.shared_mappings = release_shared_mappings(ctx)?;
+        }
         TeardownHook::ThreadReap => {
             released.threads = Some(without_interrupts(|| unsafe {
                 let scheduler = scheduler_mut();
@@ -379,14 +391,17 @@ fn release_work_set(ctx: &mut TeardownContext<'_>) -> usize {
     work_set::on_holder_exit(HolderId(ctx.process_id))
 }
 
-fn release_shared_mappings(ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {
+fn release_shared_mappings(ctx: &mut TeardownContext<'_>) -> Result<usize, &'static str> {
     debug_assert!(
         crate::mm::shared_buffer::window_root(ctx.process_id)
             .is_none_or(|root| root == ctx.address_space_root),
         "shared window was built in a different root than the one being torn down"
     );
-    crate::mm::shared_buffer::teardown_process(ctx.process_id, ctx.allocator);
-    Ok(())
+    let removed = crate::mm::shared_buffer::teardown_process(ctx.process_id, ctx.allocator);
+    if crate::mm::shared_buffer::mapping_count(ctx.process_id) != 0 {
+        return Err("shared-mapping teardown left rows for the exiting process");
+    }
+    Ok(removed)
 }
 
 fn release_address_space(
@@ -872,11 +887,30 @@ mod tests {
         // teardown to start at the first hook.
         for _ in 0..2 {
             release_input_consumer(&mut ctx);
-            assert_eq!(release_shared_mappings(&mut ctx), Ok(()));
+            assert_eq!(release_shared_mappings(&mut ctx), Ok(0));
             assert_eq!(input::consumer_bindings_for(exiting), 0);
         }
         assert_eq!(input::bind_consumer(next), Ok(()));
         assert_eq!(input::release_consumer_for_holder(next), 1);
+    }
+
+    #[test]
+    fn shared_mapping_release_never_exceeds_the_snapshot() {
+        let snapshot = ResourceSnapshot {
+            shared_mappings: 2,
+            ..ResourceSnapshot::default()
+        };
+        let released = |shared_mappings| HolderReleaseCounts {
+            shared_mappings,
+            ..HolderReleaseCounts::default()
+        };
+        assert_eq!(released(2).matches(&snapshot), Ok(()));
+        assert_eq!(
+            released(1).matches(&snapshot),
+            Ok(()),
+            "an earlier slot may remove its kernel-grant row first"
+        );
+        assert!(released(3).matches(&snapshot).is_err());
     }
 
     /// Calls that dismantle part of a registered process. Outside the teardown

@@ -198,6 +198,17 @@ fn reconcile_slot(slot: usize) {
     }
 }
 
+/// Rows of any state in `pid`'s window (teardown step 5 removes exactly these).
+pub(crate) fn mapping_count(pid: u64) -> usize {
+    state().windows.get(pid).map_or(0, |window| {
+        window
+            .rows()
+            .iter()
+            .filter(|row| row.state != RowState::Empty)
+            .count()
+    })
+}
+
 /// Private root that `pid`'s shared window was built in, if it has one.
 pub(crate) fn window_root(pid: u64) -> Option<u64> {
     state().windows.get(pid).map(|window| window.root_frame)
@@ -206,7 +217,7 @@ pub(crate) fn window_root(pid: u64) -> Option<u64> {
 /// Teardown step 5 (W5 `SharedMappings`): after `revoke_for_holder` (step 4) and before
 /// the private address space is destroyed (step 6). Removes every row of `pid` in any
 /// state, drops the attachments it held and frees everything queued. Revocation in step
-/// 4 already retired the buffers `pid` owned.
+/// 4 already retired the buffers `pid` owned. Returns the rows removed.
 pub(crate) fn teardown_process(pid: u64, frames: &mut impl FrameSource) -> usize {
     let root = window_root(pid);
     let state = state();

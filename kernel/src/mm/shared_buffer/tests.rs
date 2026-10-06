@@ -392,6 +392,27 @@ fn shared_buffer_release_by_resource_orphans_every_row_and_goes_stale() {
 }
 
 #[test]
+fn shared_buffer_teardown_returns_the_mapping_count_to_baseline() {
+    let mut harness = Harness::new();
+    let (id, root) = harness.allocate(1);
+    let child = harness.delegate_read(root);
+    harness
+        .map(OWNER, id, SharedBufferAccess::ReadWrite, root)
+        .unwrap();
+    harness
+        .map(READER, id, SharedBufferAccess::Read, child)
+        .unwrap();
+    revoke_subtree(unsafe { capability_space_mut() }, child).unwrap();
+    reconcile_resource(id.resource_ref());
+    assert_eq!(mapping_count(READER), 1, "an orphaned row still counts");
+    assert_eq!(teardown_process(READER, &mut harness.frames), 1);
+    assert_eq!(mapping_count(READER), 0);
+    assert_eq!(mapping_count(OWNER), 1);
+    harness.teardown_both();
+    assert_eq!(mapping_count(OWNER), 0);
+}
+
+#[test]
 fn shared_buffer_third_mapping_is_refused_with_no_space() {
     let mut harness = Harness::new();
     let (id, root) = harness.allocate(1);
