@@ -168,7 +168,7 @@ $AllTests = [ordered]@{
     "test-m10-virtio-modern"    = @{ Aliases = @("m10-virtio-modern"); Description = "M10 #196 modern VirtIO PCI transport: host tests plus MSI-X and INTx QEMU boots (constituent)"; Role = "Constituent" }
     "test-m10-framebuffer"      = @{ Aliases = @("m10-framebuffer"); Description = "M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (constituent)"; Role = "Constituent" }
     "test-m10-shared-buffer"    = @{ Aliases = @("m10-shared-buffer"); Description = "M10 #195 shared-buffer acceptance (constituent)"; Role = "Constituent" }
-    "test-m10-input-smoke"      = @{ Aliases = @("m10-input-smoke"); Description = "M10 #113 i8042 input smoke QEMU lane (controller stimulus, no host injection)"; Role = "Constituent" }
+    "test-m10-input-smoke"      = @{ Aliases = @("m10-input-smoke"); Description = "M10 #113 i8042 input QEMU lane (controller stimulus, then QMP-injected keyboard/pointer, headless)"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {

@@ -72,7 +72,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 | 1 | #195 | **Core landed:** `native-abi/src/shared_buffer.rs`; `kernel/src/mm/shared_buffer/` (object table, per-process window, syscall 16, kernel-owned buffers W7); process teardown step 5 (`SharedMappings` — drop every window row before private address-space destroy); `EFER.NXE` at boot; gates `test-m10-nxe` and `test-m10-shared-buffer`; transfer attestation W6 (`attest_for_transfer`), which port SEND (syscall 17) calls on every production kernel |
 | 1 | #200 | port and work-set ABI in `native-abi` (`port.rs`, `work_set.rs`, `status.rs`); class-agnostic port engine in `port/` (`clean-slate-port`, feature `fake` for host tests); `kernel/src/service/port.rs`, `kernel/src/service/port_syscall.rs`, `kernel/src/sched/work_set.rs`; syscalls 17 and 20; capability transfer on send; gate `test-m10-port` |
 | 1 | #111 | **Landed:** GOP framebuffer backend at 1280x800 Xrgb8888 (BGRX; RGBX converted at present-copy), aperture excluded from the write-back direct map and mapped uncached (UC) where the write path is built (WC via PAT deferred, P10 limitation; the inherited firmware identity alias is covered in ARCHITECTURE.md "M1 virtual memory layout"); `raster/` (`clean-slate-raster`, kernel dependency by design); `kernel/src/boot/gop.rs`; `kernel/src/device/display/{mod.rs, gop.rs}`; syscall 18 `FIND_HANDLE` / `QUERY_MODE` / `PRESENT_STATUS` live (`MAP_SCANOUT` / `PRESENT` `ENOSYS` until #195 S6; `BIND_WAKE` `ENOSYS` until a later #111 stage wires it to the #200 work sets); missing GOP/mode => no backend (`ENODEV`), boot continues; gate `cargo xtask test-m10-framebuffer` (`-vga std`) |
-| 1 | #113 | `kernel/src/device/input/{mod.rs, i8042.rs, device_init.rs, keyboard.rs, mouse.rs, queue.rs}` (the scancode to HID usage table is kernel code in `keyboard.rs`); `kernel/src/service/input_syscall.rs`; syscall 19 (`BIND_WAKE` waits for its integration stage); teardown slot 3 releases the consumer |
+| 1 | #113 | `kernel/src/device/input/{mod.rs, i8042.rs, device_init.rs, keyboard.rs, mouse.rs, queue.rs}` (the scancode to HID usage table is kernel code in `keyboard.rs`); `kernel/src/service/input_syscall.rs`; syscall 19 subops 1–4 live (`BIND_WAKE` on the #200 work sets); teardown slot 3 releases the consumer and its wake; gate `cargo xtask test-m10-input-smoke` (controller stimulus, then keyboard + pointer injected over a private QMP socket, `xtask/src/qmp/inject.rs`) |
 | 1 | #196 | `kernel/src/device/virtio/{modern.rs, modern/, virtqueue.rs, dma.rs}`; `kernel/src/sched/timeout.rs` (W3); `cargo xtask test-m10-virtio-modern` |
 | 1 | #197 | `xtask/src/qmp/` (QMP endpoint, client, input and screendump helpers, PPM to PNG, marker-paced script driver); `AcceptanceDriver` hooks in `xtask/src/main.rs`; gate `test-qmp-smoke` |
 | 1–3 | #116 | `ui/` (`clean-slate-ui`), `desktop-shell/`, `docs/design/DESIGN-SYSTEM.md` (planned). Token and documentation work may start in Wave 1 |
@@ -144,7 +144,7 @@ Numbers are reserved in `clean_slate_capability::syscall_abi` and aliased in `na
 | 16 | `SYSCALL_NR_SHARED_BUFFER` | #195 | implemented: subops 1–5 ([Shared buffers](#shared-buffers-syscall-16-195)); 0 and 6.. → `EINVAL` |
 | 17 | `SYSCALL_NR_SERVICE_PORT` | #200 | implemented: subops 1–9 ([Service port ABI](#service-port-abi-syscall-17)); 0 and 10.. → `EINVAL` |
 | 18 | `SYSCALL_NR_DISPLAY` | #111, #114 | subops 1, 2, 5 (`FIND_HANDLE`, `QUERY_MODE`, `PRESENT_STATUS`) implemented; 3, 4 (`MAP_SCANOUT`, `PRESENT`) `ENOSYS` until #111 wires them onto #195's kernel-owned buffers (W7); 6 (`BIND_WAKE`) `ENOSYS` until a later #111 stage wires it to the #200 work sets; 0 and 7.. `EINVAL`; subops frozen in `graphics::abi::display` |
-| 19 | `SYSCALL_NR_INPUT` | #113 | implemented: subops 1–3 ([Input ABI](#input-abi-syscall-19)); `BIND_WAKE` → `ENOSYS` until its integration stage; 0 and 5.. → `EINVAL` |
+| 19 | `SYSCALL_NR_INPUT` | #113 | implemented: subops 1–4 ([Input ABI](#input-abi-syscall-19)); 0 and 5.. → `EINVAL` |
 | 20 | `SYSCALL_NR_WORK_SET` | #200 | implemented: subops 1–4 ([Work set ABI](#work-set-abi-syscall-20)); 0 and 5.. → `EINVAL` |
 
 Subop numbers belong to `native-abi` (16, 17, 20) and `graphics::abi` (18, 19), never to `service-fixtures`.
@@ -203,7 +203,7 @@ Register convention: `rax = 20`, `rdi = subop`; arguments in `rsi`, `rdx`, `r10`
 | 4 | `NOW` | 0 | 0 | 0 | 0 | monotonic ns (`EINVAL` if uncalibrated) |
 | 5.. | reserved | — | — | — | — | `EINVAL` |
 
-`WorkSetId` uses the same encoding as `ConnectionId` (slot 0..16, generation 16..48). `work_set::signal` is kernel-internal and IRQ-safe; stale ids are a silent no-op. Port `BIND_WAKE`, and (when they land) display and input `BIND_WAKE`, store `(WorkSetId, bit)` and signal through `work_set::signal`.
+`WorkSetId` uses the same encoding as `ConnectionId` (slot 0..16, generation 16..48). `work_set::signal` is kernel-internal and IRQ-safe; stale ids are a silent no-op. Port and input `BIND_WAKE`, and (when it lands) display `BIND_WAKE`, store `(WorkSetId, bit)` and signal through `work_set::signal`.
 
 ## Shared buffers (syscall 16, #195)
 
@@ -605,19 +605,20 @@ Until the owning stage lands: `BIND_WAKE` returns `ENOSYS` until a later #111 st
 
 ## Input ABI (syscall 19)
 
-Authoritative: `graphics::abi::input`, `graphics::raw_input`, `graphics::input`. Kernel implementation: #113 (`BIND_WAKE` at its integration stage). Same register convention as the display ABI; non-blocking.
+Authoritative: `graphics::abi::input`, `graphics::raw_input`, `graphics::input`. Kernel implementation: #113. Same register convention as the display ABI; non-blocking (a consumer blocks only in `WORK_SET` `WAIT`).
 
 | Subop | Name | Arguments | Authority | Returns |
 |---|---|---|---|---|
 | 1 | `FIND_HANDLE` | `rdx` = `INPUT_ABI_VERSION` (1) | a live `Input` capability | handle |
 | 2 | `QUERY_DEVICES` | out ptr, len 16 (`InputDeviceInfo`) | `INSPECT` or `INPUT_CONSUME` | 0 |
 | 3 | `READ_BATCH` | out ptr, `max_count` in `1..=READ_BATCH_MAX_RECORDS` (128) | `INPUT_CONSUME` | records written, `0..=max_count` |
-| 4 | `BIND_WAKE` | work-set handle, bit 0..=31 | `INPUT_CONSUME` | 0 (`ENOSYS` until its integration stage) |
+| 4 | `BIND_WAKE` | `rdx` = caller's own work-set id, `r10` = bit 0..=31; `r8`, `r9` = 0 | `INPUT_CONSUME`; binds the seat consumer | 0 |
 | 0, 5.. | reserved | — | — | `EINVAL` |
 
 - **`READ_BATCH` never blocks**; an empty queue returns 0.
 - **Copy rule (R9).** The kernel copies one 32-byte record at a time to user memory and never stages a whole batch (up to 4096 bytes) on the kernel stack. Only fixed structs of at most 256 bytes (`PresentRequest`, 136 bytes, is the largest) are staged on the stack.
-- **Wake is edge-triggered.** The bound bit is signalled when a record is queued into an empty queue or an `Overflow` becomes pending on an empty queue, where empty means no queued records and no pending `Overflow`. The consumer must drain with `READ_BATCH` until it returns 0 before waiting again.
+- **Wake is edge-triggered.** The bound bit is signalled when a record is queued into an empty queue or an `Overflow` becomes pending on an empty queue, where empty means no queued records and no pending `Overflow`, and on every device readiness change. The consumer must drain with `READ_BATCH` until it returns 0 before waiting again. Binding while records or a loss are already pending signals at once.
+- **`BIND_WAKE` statuses.** Non-zero `r8`/`r9` or bit ≥ 32 or an undecodable id → `EINVAL`; missing or wrong capability → its capability status (checked before the work set); a work set that is not live → `ESTALE`; another holder's work set, or another holder already the seat consumer → `EACCES`. A refused call binds nothing. A second `BIND_WAKE` replaces the target; releasing the consumer (teardown slot 3) clears it; destroying the work set makes later signals no-ops.
 
 ## Raw input records
 
@@ -853,7 +854,7 @@ Scope notes against the #110 issue text:
 - **Capability classes.** The scope lists "shared-buffer/surface" and "window authority" classes. Surfaces and windows are deliberately *not* kernel capabilities: they are connection-scoped compositor objects, and window authority is the `Graphics` role rights. The kernel classes are exactly `SharedBuffer`, `Graphics`, `Display` and `Input`.
 - **Focus.** "create/show/hide/move/resize/focus/close" maps to `CreateWindow`, `Show`, `Hide`, `BeginMove`, `BeginResize`, `CloseRequested` / `DestroyWindow`. Focus is compositor policy, reported by `KeyboardFocus` and `Configure` `ACTIVATED`; there is no client focus request.
 - **Frame opportunities.** Withholding frame callbacks from occluded surfaces, and the no-busy-poll wake model, are recorded in [Frames](#frames) and [Event-driven rule and failure states](#event-driven-rule-and-failure-states).
-- **Reserved syscalls.** Each row of the syscall table above carries its own status. Syscall 16 is dispatched to the shared-buffer handler, 17 and 20 to the port and work-set handlers, 18 to the display handler and 19 to the #113 input service; none of them reaches the dispatcher's default arm, which `dispatch_native_unknown_nr_returns_native_enosys_sentinel` covers with an unrelated number. `dispatch_native_reserved_m10_nrs_return_enosys` lists exactly what is still unimplemented on this tree: syscall 18 subops 3, 4 and 6, and syscall 19 subop 4 (`BIND_WAKE`), all `ENOSYS`. `dispatch_native_implemented_m10_nrs_reach_their_handlers` covers the rest: 16, 17 and 20 are not `ENOSYS`, 18 and 19 subop 0 are `EINVAL`, and 18 subops 1, 2 and 5 and 19 subops 1–3 are not `ENOSYS`. The PR that lands later re-composes both (W12).
+- **Reserved syscalls.** Each row of the syscall table above carries its own status. Syscall 16 is dispatched to the shared-buffer handler, 17 and 20 to the port and work-set handlers, 18 to the display handler and 19 to the #113 input service; none of them reaches the dispatcher's default arm, which `dispatch_native_unknown_nr_returns_native_enosys_sentinel` covers with an unrelated number. `dispatch_native_reserved_m10_nrs_return_enosys` lists exactly what is still unimplemented on this tree: syscall 18 subops 3, 4 and 6, all `ENOSYS`. `dispatch_native_implemented_m10_nrs_reach_their_handlers` covers the rest: 16, 17 and 20 are not `ENOSYS`, 18 and 19 subop 0 are `EINVAL`, and 18 subops 1, 2 and 5 and 19 subops 1–4 are not `ENOSYS`. The PR that lands later re-composes both (W12).
 
 ## Appendix: Input implementation (#113)
 
@@ -865,3 +866,5 @@ Implementation rules of the #113 kernel lane. They are not part of the frozen #1
 - **Losses.** A keyboard overrun, or a byte that breaks the Pause sequence, is a loss and becomes an `Overflow`; the breaking byte is then decoded from idle.
 - **Device self-reset.** A keyboard `0xAA` in any decoder state, or a mouse `AA 00` at a packet start, is a BAT the driver did not ask for: the device's input is lost (an `Overflow` under the old generation), it reads as `None`, and its init program runs again. It reappears with the next `InputDeviceId` generation once the program finishes, or stays `None` if it fails.
 - **Readiness wakes.** Every readiness change (a device published or lost) also signals the consumer's input work, so it re-queries `QUERY_DEVICES`.
+- **Wake binding.** `BIND_WAKE` stores one `(WorkSetBinding, bit)` beside the consumer slot. The IRQ handler sets it with `work_set::signal` (no lock, no allocation), so an idle consumer sleeps in `WAIT` while the CPU halts in the idle thread; nothing polls the controller.
+- **Acceptance (`test-m10-input-smoke`).** The boot phase injects bytes with the controller's `D2`/`D3` commands (routing, decoders, queue fill, idle hold). The CPL3 phase proves syscall 19 authority, `BIND_WAKE`, and the exclusive consumer. The QMP phase: the rebound consumer binds its own work set, prints `[M10.input] qmp ready`, and blocks; xtask (`m10_input_lane::QMP_STIMULI`, through `qmp::inject`) injects keys (plain, Shift-wrapped, extended), motion in both signs, a drag, left/right/middle, and wheel down/up through QEMU's real PS/2 devices over the lane's private QMP socket, pacing each command on the previous one's last record line. The kernel logs every record as `[M10.input] qmp rec <n> <record>` up to the Escape release, and xtask requires exactly the expected lines in order plus `wakes <= signals <= records`. QEMU stays `-display none`; #119 reuses `qmp::lane::run_kernel_lane` and `m10_input_lane::qmp_injection_steps` / `validate_qmp_output`.

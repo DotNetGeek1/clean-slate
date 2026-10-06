@@ -188,7 +188,7 @@ test_description() {
     test-m10-virtio-modern) echo "M10 #196 modern VirtIO PCI transport: host tests plus MSI-X and INTx QEMU boots (constituent)" ;;
     test-m10-framebuffer) echo "M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (constituent)" ;;
     test-m10-shared-buffer) echo "M10 #195 shared-buffer acceptance (constituent)" ;;
-    test-m10-input-smoke) echo "M10 #113 i8042 input smoke QEMU lane (controller stimulus, no host injection)" ;;
+    test-m10-input-smoke) echo "M10 #113 i8042 input QEMU lane (controller stimulus, then QMP-injected keyboard/pointer, headless)" ;;
     *) echo "" ;;
   esac
 }
