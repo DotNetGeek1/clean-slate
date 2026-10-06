@@ -117,6 +117,17 @@ name = "clean-slate-capability"
 version = "0.0.1"
 
 [[package]]
+name = "clean-slate-compositor"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-capability",
+ "clean-slate-graphics",
+ "clean-slate-native-abi",
+ "clean-slate-port",
+ "clean-slate-raster",
+]
+
+[[package]]
 name = "clean-slate-elf"
 version = "0.0.1"
 

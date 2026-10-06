@@ -43,6 +43,25 @@ Items marked **(planned)** are fixed in shape but not implemented; their owning 
 
 **Input consumer.** In M10 the compositor drains the kernel raw input queue directly. There is no separate input service. The vocabulary leaves room for one later (it would hold `Input{INPUT_CONSUME}` and speak to the compositor) without a protocol change.
 
+### Compositor (#112)
+
+`clean-slate-compositor` is `no_std` and `forbid(unsafe_code)`. The core never issues a syscall; it reaches the kernel only through five traits in `compositor::backend`, so the CPL3 adapter (`src/bin/compositor.rs`) is a thin layer over syscalls 16–20 and host tests drive the same core:
+
+| Trait | Kernel surface | Host fake |
+|---|---|---|
+| `PortServer` | syscall 17 `RECV` (non-blocking), `POST`, `DISCONNECT` | `FakePort` |
+| `SharedBufferMapper` | syscall 16 `MAP` (read) / `UNMAP` of the transferred `SharedBuffer{READ}` child | `FakeSharedMemory` |
+| `DisplayBackend` | syscall 18 `QUERY_MODE`, `MAP_SCANOUT`, `PRESENT`, `PRESENT_STATUS` | `FakeDisplay` |
+| `InputSource` | syscall 19 `READ_BATCH` | `FakeInput` |
+| `WorkWaiter` | syscall 20 `WAIT`, `NOW` | `ScriptedWaiter` |
+
+- **Wake bits.** Port requests bit 0, port notices bit 1, input bit 2, display bit 3 (`compositor::backend::WAKE_*`). Without display `BIND_WAKE` the loop sets a bounded deadline only while a present is in flight; an idle desktop always blocks with no deadline.
+- **Isolation.** Every object lookup goes through the connection's own `ObjectTable`; scene and stacking keys are `(ConnectionId, SurfaceId)`. Role authority comes only from the kernel envelope's rights.
+- **Pixels.** Read only through the mapping of an explicit `RegisterBuffer` transfer, bounded to the attested `byte_len`. The compositor never sees a physical address.
+- **Presentation.** Damage is clipped to the output, merged into at most `MAX_PRESENT_DAMAGE_RECTS`, and skipped where opaque surfaces above cover it. Fully occluded surfaces get no frame callback. A move or restack damages the old and new footprint and needs no client repaint.
+- **Launch bootstrap (P5, planned).** The adapter reads `{ self_pid, graphics_resource_id }` from the launch page and finds its `Graphics{GFX_SERVE}`, `Display` and `Input` handles with each `FIND_HANDLE`.
+- **#115 hooks.** `WindowPolicy` (placement, interactive move/resize, seat events with hit-test results), `Compositor::{move_surface, raise, configure_window, request_close, post_event, mint_serial, surface_at}`.
+
 ## Process and thread boundaries
 
 Native processes are single-threaded in M10. Each process runs one event loop that blocks; nothing spins or polls.
@@ -76,7 +95,7 @@ Wave order follows #109. A lane may start when every issue it depends on has mer
 | 1 | #196 | `kernel/src/device/virtio/{modern.rs, modern/, virtqueue.rs, dma.rs}`; `kernel/src/sched/timeout.rs` (W3); `cargo xtask test-m10-virtio-modern` |
 | 1 | #197 | `xtask/src/qmp/` (QMP endpoint, client, input and screendump helpers, PPM to PNG, marker-paced script driver); `AcceptanceDriver` hooks in `xtask/src/main.rs`; gate `test-qmp-smoke` |
 | 1–3 | #116 | **Landed (host side):** `ui/` (`clean-slate-ui`: tokens, quality tiers, primitives, `ChromeStyle`, cursor visual, shell zones and rail) and [`docs/design/DESIGN-SYSTEM.md`](design/DESIGN-SYSTEM.md). **Planned:** `desktop-shell/` client wiring on #112/#115 |
-| 2 | #112 | `compositor/` (`clean-slate-compositor`); P5 launch policy, grant policy (`kernel/src/capability/graphics.rs`) and sizing (planned) |
+| 2 | #112 | **Core landed:** `compositor/` (`clean-slate-compositor`): service loop, scene, composition, present tracking and the backend traits, host-tested against `FakePort` / `FakeDisplay` ([Compositor (#112)](#compositor-112)); CPL3 adapter `clean-slate-compositor-userspace` and client fixture `clean-slate-compositor-client-userspace`; gate `cargo xtask test-m10-compositor`. P5 launch policy, grant policy (`kernel/src/capability/graphics.rs`), sizing and the QEMU desktop lane (planned; need #111 `MAP_SCANOUT` / `PRESENT`) |
 | 2 | #114 | `kernel/src/device/display/virtio_gpu.rs`; gate `test-m10-virtio-gpu` (planned) |
 | 3 | #115 | `compositor::wm` (planned) |
 | 3 | #117 | `playground/` (`clean-slate-playground`) (planned) |

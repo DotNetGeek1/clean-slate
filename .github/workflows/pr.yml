@@ -5,6 +5,7 @@ on:
     paths:
       - "block/**"
       - "capability/**"
+      - "compositor/**"
       - "graphics/**"
       - "kernel/**"
       - "native-abi/**"
@@ -27,6 +28,7 @@ on:
     paths:
       - "block/**"
       - "capability/**"
+      - "compositor/**"
       - "graphics/**"
       - "kernel/**"
       - "native-abi/**"
@@ -101,6 +103,11 @@ jobs:
           cargo clippy -p clean-slate-port --all-targets -- -D warnings
           cargo clippy -p clean-slate-port --all-targets --features fake -- -D warnings
 
+      - name: Clippy (compositor)
+        run: |
+          cargo clippy -p clean-slate-compositor --all-targets -- -D warnings
+          cargo clippy -p clean-slate-compositor --all-targets --features fake -- -D warnings
+
       - name: Clippy (linux-abi)
         run: cargo clippy -p clean-slate-linux-abi --all-targets -- -D warnings
 
@@ -124,6 +131,9 @@ jobs:
         run: |
           for bin in clean-slate-supervisor-userspace clean-slate-supervisor-restart-policy-userspace clean-slate-supervisor-recovery-userspace clean-slate-m6-fixture-userspace; do
             cargo clippy -p clean-slate-supervisor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
+          done
+          for bin in clean-slate-compositor-userspace clean-slate-compositor-client-userspace; do
+            cargo clippy -p clean-slate-compositor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           done
           cargo clippy -p clean-slate-store --bin clean-slate-storage-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-net-service --bin clean-slate-network-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
@@ -198,6 +208,7 @@ jobs:
           cargo test -p clean-slate-capability
           cargo test -p clean-slate-port
           cargo test -p clean-slate-port --features fake
+          cargo test -p clean-slate-compositor
           cargo test -p clean-slate-linux-abi
           cargo test -p clean-slate-elf
           # verify-m9-fixture, clean-slate-rootfs --features std and the M9-gated kernel

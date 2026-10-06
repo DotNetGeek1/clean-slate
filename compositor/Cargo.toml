@@ -1,0 +1,41 @@
+[package]
+name = "clean-slate-compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "M10 userspace compositor: surface protocol server, damage-driven software composition and present scheduling"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "clean-slate-compositor-userspace"
+path = "src/bin/compositor.rs"
+required-features = ["userspace"]
+
+[[bin]]
+name = "clean-slate-compositor-client-userspace"
+path = "src/bin/client.rs"
+required-features = ["userspace"]
+
+[features]
+default = []
+# Backend adapters over the host fakes (`FakeDisplay`, `FakePort`); never enabled by userspace builds.
+fake = ["clean-slate-graphics/fake", "dep:clean-slate-port", "clean-slate-port/fake"]
+userspace = []
+
+[dependencies]
+clean-slate-capability = { path = "../capability" }
+clean-slate-graphics = { path = "../graphics" }
+clean-slate-native-abi = { path = "../native-abi" }
+clean-slate-port = { path = "../port", optional = true }
+clean-slate-raster = { path = "../raster" }
+
+[dev-dependencies]
+clean-slate-graphics = { path = "../graphics", features = ["fake"] }
+clean-slate-port = { path = "../port", features = ["fake"] }
+
+[lints]
+workspace = true
