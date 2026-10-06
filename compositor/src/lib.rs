@@ -42,3 +42,5 @@ pub use compositor::{
 pub use scene::SurfaceKey;
 pub use wm::{DefaultPolicy, WindowPolicy};
 
+#[cfg(test)]
+mod tests;
