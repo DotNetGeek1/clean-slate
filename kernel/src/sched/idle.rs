@@ -1,4 +1,4 @@
-﻿//! Dedicated kernel idle thread: `hlt` with interrupts enabled while all app threads are blocked.
+//! Dedicated kernel idle thread: `hlt` with interrupts enabled while all app threads are blocked.
 
 use crate::arch::x86_64::asm::clean_slate_idle_thread_bootstrap_entry;
 use crate::arch::x86_64::context_switch::resume_after_scheduler_handoff;
@@ -41,7 +41,10 @@ fn idle_thread_one_wait() {
     #[cfg(feature = "m9-linux-runtime-self-test")]
     crate::selftest::m9_linux_runtime_latency::observe_idle_halt();
     #[cfg(feature = "m10-desktop")]
-    let made_ready = crate::service::desktop_launch::on_idle(crate::time::monotonic_ns());
+    // The desktop state is also reached from the CPL3 fault path; masked here so the first
+    // idle entry (whose interrupt flag comes from the bootstrap frame) cannot interleave.
+    let made_ready =
+        without_interrupts(|| crate::service::desktop_launch::on_idle(crate::time::monotonic_ns()));
     #[cfg(not(feature = "m10-desktop"))]
     let made_ready = false;
     if !made_ready {
