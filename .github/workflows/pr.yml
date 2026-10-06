@@ -146,11 +146,14 @@ jobs:
             cargo clippy -p clean-slate-compositor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           done
           cargo clippy -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
+          cargo clippy -p clean-slate-compositor --bin clean-slate-compositor-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys -- -D warnings
+          cargo clippy -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys -- -D warnings
           cargo clippy -p clean-slate-desktop-shell --bin clean-slate-desktop-shell-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-store --bin clean-slate-storage-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-net-service --bin clean-slate-network-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
 
-      # The m10-desktop kernel features embed these three ELFs (kernel/build.rs).
+      # The m10-desktop kernel features embed these three ELFs (kernel/build.rs);
+      # m10-desktop-self-test swaps in the fault-keys compositor and playground from target/fault-keys.
       - name: Build M10 desktop userspace images
         env:
           RUSTC_BOOTSTRAP: "1"
@@ -158,6 +161,8 @@ jobs:
           cargo build -p clean-slate-compositor --bin clean-slate-compositor-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
           cargo build -p clean-slate-desktop-shell --bin clean-slate-desktop-shell-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
           cargo build -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
+          cargo build -p clean-slate-compositor --bin clean-slate-compositor-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys
+          cargo build -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys
 
       - name: Clippy (kernel UEFI)
         run: |

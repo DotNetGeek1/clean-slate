@@ -16,6 +16,7 @@ use core::ptr::addr_of_mut;
 use clean_slate_capability::ResourceClass;
 use clean_slate_graphics::abi::display::{DISPLAY_ABI_VERSION, DISPLAY_SUBOP_FIND_HANDLE};
 use clean_slate_graphics::abi::input::{INPUT_ABI_VERSION, INPUT_SUBOP_FIND_HANDLE};
+#[cfg(feature = "fault-keys")]
 use clean_slate_graphics::input::{KeyState, KeyUsage};
 use clean_slate_graphics::protocol::{Event, Request};
 use clean_slate_native_abi::desktop::{ConsoleLine, SYSCALL_NR_IPC_SEND};
@@ -36,6 +37,7 @@ use clean_slate_ui::QualityTier;
 const SYSCALL_NR_DISPLAY: u64 = 18;
 const SYSCALL_NR_INPUT: u64 = 19;
 /// HID usage of F12 (the self-test fault key).
+#[cfg(feature = "fault-keys")]
 const KEY_F12: KeyUsage = KeyUsage(0x45);
 
 /// Kept out of the user stack, whose size is the launch policy's choice.
@@ -266,6 +268,7 @@ fn console(boot: &PlaygroundBootstrap, line: &ConsoleLine) {
 
 /// Self-test launches only: the fault key makes the app crash (an invalid opcode) so the
 /// desktop lane can prove crash containment. Keys arrive only while the app has focus.
+#[cfg(feature = "fault-keys")]
 fn is_fault_key(boot: &PlaygroundBootstrap, event: &Event) -> bool {
     boot.fault_key_armed()
         && matches!(
@@ -316,6 +319,7 @@ fn run(boot: &PlaygroundBootstrap, session: &mut Session, tier: QualityTier) {
             let Some(event) = kernel.next_event() else {
                 break;
             };
+            #[cfg(feature = "fault-keys")]
             if is_fault_key(boot, &event) {
                 console(boot, &diag::exit_line("fault-key"));
                 // SAFETY: deliberately raises #UD; the kernel tears this process down.

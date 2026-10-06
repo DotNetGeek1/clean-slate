@@ -95,7 +95,7 @@ Items marked **(planned)** are fixed in shape but not implemented; their owning 
 - **Resource proof.** At the first quiescence the kernel logs `[RSRC] baseline` (`DesktopResourceSnapshot`: processes, capabilities, work sets, ports, connections, queued port requests and events, undelivered transfers, shared buffers, pages and mappings, presenter, presenter wake and input-consumer bindings, scanout buffers, VirtIO-GPU resources). After each exit it logs a `[RSRC] snapshot`, `[RSRC] compare after=<app-exit|compositor-restart> baseline=<match|mismatch>` and `[RSRC] reaped role= pid= residue=<owned objects left>`. Each relaunched app first retries its predecessor's graphics handle (`[RSRC] stale handle … rejected=1`). The compositor reports its own rows (`[COMP] rows clients= surfaces= windows=`).
 - **Idle proof.** Every quiet stretch of 500 ms after activity logs `[IDLE ] quiet ms= presents= seq=`; `presents` counts presents submitted during the stretch.
 - **Authority probe.** The playground logs `[APP ] authority display=<denied|granted> input=<denied|granted>` from syscall 18 and 19 `FIND_HANDLE` attempts.
-- **Self-test keys.** With `LAUNCH_FLAG_FAULT_KEY`, F12 makes the focused playground execute `ud2` and F11 makes the compositor execute `ud2`.
+- **Self-test keys.** With `LAUNCH_FLAG_FAULT_KEY`, F12 makes the focused playground execute `ud2` and F11 makes the compositor execute `ud2`. The key handling is compiled only into the `fault-keys` builds of the compositor and playground (`--features userspace,fault-keys --target-dir target/fault-keys`), which only the `m10-desktop-self-test` kernel embeds; production `m10-desktop` images contain no fault-key code.
 
 ## Process and thread boundaries
 

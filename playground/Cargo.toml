@@ -18,6 +18,9 @@ required-features = ["userspace"]
 [features]
 default = []
 userspace = []
+# Self-test fault key (F12 crashes the app). Only the `m10-desktop-self-test` kernel embeds a
+# build with it (`target/fault-keys`); production desktop images never contain the code.
+fault-keys = ["userspace"]
 
 [dependencies]
 clean-slate-capability = { path = "../capability" }

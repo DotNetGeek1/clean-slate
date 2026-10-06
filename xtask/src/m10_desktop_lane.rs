@@ -744,7 +744,7 @@ pub(crate) fn interactive(
 
 pub(crate) fn run() -> Result<(), XtaskError> {
     crate::run_cargo_package_tests("clean-slate-desktop-shell", &[])?;
-    crate::build_desktop_userspace()?;
+    crate::build_desktop_self_test_userspace()?;
     for desktop in RUNS {
         let plan = plan(desktop.tier);
         let run = run_kernel_lane_capturing(

@@ -770,7 +770,7 @@ validate_exact_sequence(&output, "[LANE] rec ", STIMULI).map_err(XtaskError::Val
 
 ### Graphical desktop lane (#118/#119)
 
-**Graphical launch.** `cargo xtask run-m10-desktop` builds the three desktop ELFs and an `m10-desktop` kernel and boots it in a QEMU window on VirtIO-GPU at Q1; `cargo xtask run-m10-desktop --framebuffer` uses the `-vga std` GOP framebuffer at Q0. Serial goes to stdout. The window uses `-display gtk` unless `QEMU_DISPLAY` names another display (for example `sdl`). The machine has `vmport=off`, so the pointer is QEMU's relative PS/2 mouse: click into the window to grab it, and press Ctrl+Alt+G to release it. The self-test fault keys are not armed in this build.
+**Graphical launch.** `cargo xtask run-m10-desktop` builds the three desktop ELFs and an `m10-desktop` kernel and boots it in a QEMU window on VirtIO-GPU at Q1; `cargo xtask run-m10-desktop --framebuffer` uses the `-vga std` GOP framebuffer at Q0. Serial goes to stdout. The window uses `-display gtk` unless `QEMU_DISPLAY` names another display (for example `sdl`). The machine has `vmport=off`, so the pointer is QEMU's relative PS/2 mouse: click into the window to grab it, and press Ctrl+Alt+G to release it. The self-test fault keys are not compiled into this build: `test-m10-desktop` additionally builds `fault-keys` variants of the compositor and playground into `target/fault-keys`, and only its `m10-desktop-self-test` kernel embeds them.
 
 **Lane flow (`xtask/src/m10_desktop_lane.rs`).** `plan(tier)` builds the QMP script. The pointer is homed to the bottom-right corner, then every target is reached with motion commands of at most 120 per axis (PS/2 saturates at ±127). Press and release are always separate commands. The script, in order:
 

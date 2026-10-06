@@ -2223,6 +2223,16 @@ fn run_m10_compositor_acceptance() -> Result<(), XtaskError> {
 
 /// Release CPL3 build of one `userspace`-feature binary (what `kernel/build.rs` embeds).
 fn build_native_userspace_bin(package: &str, bin: &str) -> Result<(), XtaskError> {
+    build_native_userspace_variant(package, bin, "userspace", "target")
+}
+
+/// [`build_native_userspace_bin`] with `features` into the cargo target directory `target_dir`.
+fn build_native_userspace_variant(
+    package: &str,
+    bin: &str,
+    features: &str,
+    target_dir: &str,
+) -> Result<(), XtaskError> {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(workspace_root())
         .arg("build")
@@ -2231,7 +2241,9 @@ fn build_native_userspace_bin(package: &str, bin: &str) -> Result<(), XtaskError
         .arg("--bin")
         .arg(bin)
         .arg("--features")
-        .arg("userspace")
+        .arg(features)
+        .arg("--target-dir")
+        .arg(workspace_root().join(target_dir))
         .arg("--target")
         .arg("x86_64-unknown-none")
         .arg("-Z")
@@ -2254,6 +2266,28 @@ const M10_DESKTOP_USERSPACE_BINS: [(&str, &str); 3] = [
 fn build_desktop_userspace() -> Result<(), XtaskError> {
     for (package, bin) in M10_DESKTOP_USERSPACE_BINS {
         build_native_userspace_bin(package, bin)?;
+    }
+    Ok(())
+}
+
+/// The `fault-keys` compositor and playground an `m10-desktop-self-test` kernel embeds instead
+/// of the production ones (`kernel/build.rs` reads them from this target directory).
+const M10_DESKTOP_FAULT_KEY_BINS: [(&str, &str); 2] = [
+    ("clean-slate-compositor", "clean-slate-compositor-userspace"),
+    ("clean-slate-playground", "clean-slate-playground-userspace"),
+];
+const M10_DESKTOP_FAULT_KEY_TARGET_DIR: &str = "target/fault-keys";
+
+/// Production desktop images plus the self-test `fault-keys` variants.
+fn build_desktop_self_test_userspace() -> Result<(), XtaskError> {
+    build_desktop_userspace()?;
+    for (package, bin) in M10_DESKTOP_FAULT_KEY_BINS {
+        build_native_userspace_variant(
+            package,
+            bin,
+            "userspace,fault-keys",
+            M10_DESKTOP_FAULT_KEY_TARGET_DIR,
+        )?;
     }
     Ok(())
 }

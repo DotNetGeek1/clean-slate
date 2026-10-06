@@ -25,6 +25,9 @@ default = []
 # Backend adapters over the host fakes (`FakeDisplay`, `FakePort`); never enabled by userspace builds.
 fake = ["clean-slate-graphics/fake", "dep:clean-slate-port", "clean-slate-port/fake"]
 userspace = []
+# Self-test fault key (F11 crashes the compositor). Only the `m10-desktop-self-test` kernel embeds
+# a build with it (`target/fault-keys`); production desktop images never contain the code.
+fault-keys = ["userspace"]
 
 [dependencies]
 clean-slate-capability = { path = "../capability" }
