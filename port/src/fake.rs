@@ -140,7 +140,12 @@ impl FakePort {
     }
 
     pub fn add_client(&mut self, holder: HolderId) -> Result<u64, u64> {
-        grant_capability(&mut self.table, holder, FAKE_RESOURCE, Rights::GFX_CONNECT)
+        self.add_client_with_rights(holder, Rights::GFX_CONNECT)
+    }
+
+    /// A client capability carrying `rights` (e.g. `GFX_CONNECT | GFX_SHELL` for the shell).
+    pub fn add_client_with_rights(&mut self, holder: HolderId, rights: Rights) -> Result<u64, u64> {
+        grant_capability(&mut self.table, holder, FAKE_RESOURCE, rights)
     }
 
     pub fn grant_shared_buffer(

@@ -129,6 +129,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "clean-slate-desktop-shell"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-capability",
+ "clean-slate-compositor",
+ "clean-slate-graphics",
+ "clean-slate-native-abi",
+ "clean-slate-playground",
+ "clean-slate-port",
+ "clean-slate-raster",
+ "clean-slate-ui",
+]
+
+[[package]]
 name = "clean-slate-elf"
 version = "0.0.1"
 
@@ -1191,9 +1205,13 @@ dependencies = [
 name = "xtask"
 version = "0.0.1"
 dependencies = [
+ "clean-slate-compositor",
+ "clean-slate-graphics",
  "clean-slate-network",
+ "clean-slate-playground",
  "clean-slate-raster",
  "clean-slate-rootfs",
+ "clean-slate-ui",
  "rcgen",
  "rustls",
  "smoltcp",

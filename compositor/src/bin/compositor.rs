@@ -4,7 +4,9 @@
 //! ABI (syscalls 16–20); the core never issues a syscall. The adapter names no device: the
 //! display is reached only through syscall 18, identical for every scanout backend.
 //!
-//! Startup reads [`CompositorBootstrap`] from the launch page, finds its `Graphics{GFX_SERVE}`,
+//! Startup reads the [`DesktopLaunchPage`] (resource id, console, quality tier and, in
+//! `fault-keys` builds only, the self-test fault key) the #118 launch policy writes, finds its
+//! `Graphics{GFX_SERVE}`,
 //! `Display` and (optional) `Input` capabilities, creates its work set and binds every wake
 //! source it can. Display `BIND_WAKE` follows the first `MAP_SCANOUT`, which makes the compositor
 //! the presenter; if either fails, completion falls back to a bounded deadline while a present is
@@ -29,6 +31,7 @@ use clean_slate_compositor::backend::{
     NoInput, PortFailure, PortServer, SharedBufferMapper, WaitFailure, WaitRequest, WorkWaiter,
     WAKE_DISPLAY, WAKE_INPUT, WAKE_NOTICES, WAKE_REQUESTS,
 };
+use clean_slate_compositor::diag::{self, DiagTracker};
 use clean_slate_compositor::{Compositor, Config, DefaultPolicy, Io};
 use clean_slate_graphics::abi::display::{
     DisplayError, DisplayModeInfo, PresentRequest, PresentStatus, ScanoutMapping,
@@ -41,9 +44,16 @@ use clean_slate_graphics::abi::input::{
     INPUT_ABI_VERSION, INPUT_SUBOP_BIND_WAKE, INPUT_SUBOP_FIND_HANDLE, INPUT_SUBOP_READ_BATCH,
     READ_BATCH_MAX_RECORDS,
 };
+#[cfg(feature = "fault-keys")]
+use clean_slate_graphics::input::{KeyState, KeyUsage};
 use clean_slate_graphics::limits::SCANOUT_BUFFER_COUNT;
 use clean_slate_graphics::protocol::DisconnectReason;
+#[cfg(feature = "fault-keys")]
+use clean_slate_graphics::raw_input::RawInputKind;
 use clean_slate_graphics::raw_input::{RawInputRecord, RAW_INPUT_RECORD_BYTES};
+use clean_slate_native_abi::desktop::{
+    ConsoleLine, DesktopLaunchPage, DESKTOP_LAUNCH_ADDRESS, SYSCALL_NR_IPC_SEND,
+};
 use clean_slate_native_abi::port::{
     PORT_OP_BIND_WAKE, PORT_OP_DISCONNECT, PORT_OP_FIND_HANDLE, PORT_OP_POST, PORT_OP_RECV,
     PORT_RECV_NONBLOCK, PORT_ROLE_SERVE,
@@ -55,22 +65,18 @@ use clean_slate_native_abi::{
     STATUS_ESTALE, STATUS_ETIMEDOUT, SYSCALL_NR_SERVICE_PORT, SYSCALL_NR_SHARED_BUFFER,
     SYSCALL_NR_WORK_SET,
 };
+use clean_slate_ui::shell::ShellConfig;
+use clean_slate_ui::{QualityTier, CLEAN_SLATE_DARK};
 
-/// Launch page shared with the supervisor images.
-const BOOTSTRAP_ADDRESS: u64 = 0x0000_4000_0000_1000;
 const SYSCALL_NR_DISPLAY: u64 = 18;
 const SYSCALL_NR_INPUT: u64 = 19;
-
-/// Layout the launch policy writes for the compositor (P5).
-#[repr(C)]
-struct CompositorBootstrap {
-    self_pid: u64,
-    /// Resource id of the compositor's `Graphics` port (`ResourceRef::graphics`).
-    graphics_resource_id: u64,
-}
+/// HID usage of F11, the compositor's self-test fault key.
+#[cfg(feature = "fault-keys")]
+const KEY_F11: u16 = 0x44;
 
 static mut COMPOSITOR: Compositor<DefaultPolicy> =
     Compositor::new(DefaultPolicy::new(), Config::DEFAULT);
+static mut DIAG: DiagTracker = DiagTracker::new();
 
 fn syscall(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     let result: u64;
@@ -337,6 +343,10 @@ impl DisplayBackend for KernelDisplay {
 
 struct KernelInput {
     handle: u64,
+    /// Self-test launches only: F11 makes the compositor crash (an invalid opcode) so the
+    /// desktop lane can prove compositor restart.
+    #[cfg(feature = "fault-keys")]
+    fault_key_armed: bool,
 }
 
 impl InputSource for KernelInput {
@@ -359,6 +369,18 @@ impl InputSource for KernelInput {
         let count = count.min(max);
         for chunk in out[..count * RAW_INPUT_RECORD_BYTES].chunks_exact(RAW_INPUT_RECORD_BYTES) {
             if let Ok(record) = RawInputRecord::decode(chunk) {
+                #[cfg(feature = "fault-keys")]
+                if self.fault_key_armed
+                    && matches!(
+                        record.kind,
+                        RawInputKind::Key {
+                            usage: KeyUsage(KEY_F11),
+                            state: KeyState::Pressed,
+                        }
+                    )
+                {
+                    unsafe { core::arch::asm!("ud2", options(noreturn)) };
+                }
                 sink(record);
             }
         }
@@ -399,8 +421,18 @@ impl WorkWaiter for KernelWorkSet {
     }
 }
 
-fn bootstrap() -> &'static CompositorBootstrap {
-    unsafe { &*(BOOTSTRAP_ADDRESS as *const CompositorBootstrap) }
+fn console(boot: &DesktopLaunchPage, line: &ConsoleLine) {
+    if let Some(handle) = boot.console() {
+        let bytes = line.as_bytes();
+        syscall(
+            SYSCALL_NR_IPC_SEND,
+            handle,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+            0,
+            0,
+        );
+    }
 }
 
 fn exit() -> ! {
@@ -411,8 +443,8 @@ fn exit() -> ! {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    let boot = bootstrap();
-    let _ = boot.self_pid;
+    // SAFETY: the launch policy maps and fills the launch page before entry.
+    let boot = unsafe { *(DESKTOP_LAUNCH_ADDRESS as *const DesktopLaunchPage) };
     let Ok(serve) = checked(syscall(
         SYSCALL_NR_SERVICE_PORT,
         PORT_OP_FIND_HANDLE,
@@ -471,6 +503,13 @@ pub extern "C" fn _start() -> ! {
             0,
         ))
         .is_ok();
+    // The kernel allocates a scanout buffer on its first `MAP_SCANOUT`. Mapping every buffer now
+    // keeps the display's allocations fixed from the first frame on, so a resource baseline
+    // taken after startup does not depend on how many presents preceded it. A failure here
+    // leaves that buffer to the lazy mapping in `scanout`.
+    for index in 1..SCANOUT_BUFFER_COUNT as u8 {
+        let _ = display.scanout(index);
+    }
     let input_handle = input_handle.filter(|&handle| {
         checked(syscall(
             SYSCALL_NR_INPUT,
@@ -485,7 +524,11 @@ pub extern "C" fn _start() -> ! {
 
     let mut port = KernelPort { serve };
     let mut buffers = KernelSharedBuffers;
-    let mut kernel_input = input_handle.map(|handle| KernelInput { handle });
+    let mut kernel_input = input_handle.map(|handle| KernelInput {
+        handle,
+        #[cfg(feature = "fault-keys")]
+        fault_key_armed: boot.fault_key_armed(),
+    });
     let mut no_input = NoInput;
     let mut waiter = KernelWorkSet {
         id: work_set,
@@ -496,13 +539,31 @@ pub extern "C" fn _start() -> ! {
     }
 
     let compositor = unsafe { &mut *addr_of_mut!(COMPOSITOR) };
+    let tier = if boot.is_opaque_tier() {
+        QualityTier::Q0
+    } else {
+        QualityTier::Q1
+    };
+    *compositor.policy_mut() = DefaultPolicy::with_theme(&CLEAN_SLATE_DARK, tier, ShellConfig::M10);
     compositor.set_config(Config {
         display_wakes,
         ..Config::DEFAULT
     });
     if compositor.start(&mut display).is_err() {
+        console(&boot, &diag::exit_line("start-failed"));
         exit();
     }
+    if let Ok(mode) = display.query_mode() {
+        console(
+            &boot,
+            &diag::started_line(
+                mode.mode.width_px,
+                mode.mode.height_px,
+                boot.is_opaque_tier(),
+            ),
+        );
+    }
+    let tracker = unsafe { &mut *addr_of_mut!(DIAG) };
     let input: &mut dyn InputSource = match kernel_input.as_mut() {
         Some(input) => input,
         None => &mut no_input,
@@ -514,7 +575,10 @@ pub extern "C" fn _start() -> ! {
         input,
         waiter: &mut waiter,
     };
-    while compositor.iterate(&mut io).is_ok() {}
+    while compositor.iterate(&mut io).is_ok() {
+        tracker.observe(compositor, &mut |line| console(&boot, &line));
+    }
+    console(&boot, &diag::exit_line("service-error"));
     exit();
 }
 

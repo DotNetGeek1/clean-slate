@@ -385,6 +385,9 @@ pub(crate) enum BuiltinServiceImage {
     /// Frozen M8 Linux hello fixture launched through `service::linux_launch` (#97).
     #[cfg(feature = "m8-linux-hello")]
     LinuxHello,
+    /// #118 desktop images launched by `service::desktop_launch`.
+    #[cfg(feature = "m10-desktop")]
+    Desktop(super::desktop_launch::DesktopRole),
 }
 
 impl BuiltinServiceImage {
@@ -447,6 +450,18 @@ impl BuiltinServiceImage {
             }
             #[cfg(feature = "m8-linux-hello")]
             id if id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID.0 => Self::LinuxHello,
+            #[cfg(feature = "m10-desktop")]
+            id if id == super::desktop_launch::COMPOSITOR_SERVICE_ID.0 => {
+                Self::Desktop(super::desktop_launch::DesktopRole::Compositor)
+            }
+            #[cfg(feature = "m10-desktop")]
+            id if id == super::desktop_launch::SHELL_SERVICE_ID.0 => {
+                Self::Desktop(super::desktop_launch::DesktopRole::Shell)
+            }
+            #[cfg(feature = "m10-desktop")]
+            id if id == super::desktop_launch::PLAYGROUND_SERVICE_ID.0 => {
+                Self::Desktop(super::desktop_launch::DesktopRole::App)
+            }
             _ => Self::ImmediateExit,
         }
     }
@@ -545,6 +560,10 @@ pub(crate) fn launch_builtin_service(
                 domain_id: launched.pid,
                 scheduler_slot: launched.scheduler_slot,
             })
+        }
+        #[cfg(feature = "m10-desktop")]
+        BuiltinServiceImage::Desktop(role) => {
+            launch_desktop_image(allocator, kernel_stack_top, scheduler_slot, role)
         }
         _ => launch_single_page_service(allocator, kernel_stack_top, scheduler_slot, image),
     }
@@ -908,6 +927,10 @@ fn launch_single_page_service(
             #[cfg(feature = "m8-linux-hello")]
             BuiltinServiceImage::LinuxHello => {
                 return Err("linux hello image must use the linux_launch path");
+            }
+            #[cfg(feature = "m10-desktop")]
+            BuiltinServiceImage::Desktop(_) => {
+                return Err("desktop image must use the desktop launch path");
             }
             BuiltinServiceImage::ImmediateExit => unsafe {
                 ptr::write(
@@ -1384,6 +1407,177 @@ fn launch_network_userspace_with_bootstrap(
             let address_space = slot
                 .take()
                 .ok_or("supervised service address space missing")?;
+            register_spawned_process_checked(
+                allocator,
+                address_space,
+                pid,
+                tid,
+                kernel_stack_top,
+                saved_stack_pointer,
+                entry_rip,
+                scheduler_slot,
+            )
+        },
+    )
+}
+
+#[cfg(feature = "m10-desktop")]
+mod desktop_images {
+    include!(concat!(env!("OUT_DIR"), "/compositor_userspace_entry.rs"));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/desktop_shell_userspace_entry.rs"
+    ));
+    include!(concat!(env!("OUT_DIR"), "/playground_userspace_entry.rs"));
+
+    pub(super) const COMPOSITOR_USERSPACE_IMAGE: &[u8] =
+        include_bytes!(concat!(env!("OUT_DIR"), "/compositor_userspace.bin"));
+    pub(super) const DESKTOP_SHELL_USERSPACE_IMAGE: &[u8] =
+        include_bytes!(concat!(env!("OUT_DIR"), "/desktop_shell_userspace.bin"));
+    pub(super) const PLAYGROUND_USERSPACE_IMAGE: &[u8] =
+        include_bytes!(concat!(env!("OUT_DIR"), "/playground_userspace.bin"));
+}
+
+/// One embedded #118 desktop image and its fixed user layout.
+#[cfg(feature = "m10-desktop")]
+struct DesktopImage {
+    bytes: &'static [u8],
+    segments: &'static [crate::mm::image_loader::EmbeddedSegment],
+    image_base: u64,
+    entry_offset: u64,
+    mapped_code_pages: usize,
+    stack_pages: u64,
+}
+
+#[cfg(feature = "m10-desktop")]
+impl DesktopImage {
+    const fn for_role(role: super::desktop_launch::DesktopRole) -> Self {
+        use super::desktop_launch::DesktopRole;
+        use desktop_images::*;
+        match role {
+            DesktopRole::Compositor => Self {
+                bytes: COMPOSITOR_USERSPACE_IMAGE,
+                segments: &COMPOSITOR_USERSPACE_SEGMENTS,
+                image_base: COMPOSITOR_USERSPACE_IMAGE_BASE,
+                entry_offset: COMPOSITOR_USERSPACE_ENTRY_OFFSET,
+                mapped_code_pages: COMPOSITOR_USERSPACE_MAPPED_CODE_PAGES,
+                stack_pages: role.stack_pages(),
+            },
+            DesktopRole::Shell => Self {
+                bytes: DESKTOP_SHELL_USERSPACE_IMAGE,
+                segments: &DESKTOP_SHELL_USERSPACE_SEGMENTS,
+                image_base: DESKTOP_SHELL_USERSPACE_IMAGE_BASE,
+                entry_offset: DESKTOP_SHELL_USERSPACE_ENTRY_OFFSET,
+                mapped_code_pages: DESKTOP_SHELL_USERSPACE_MAPPED_CODE_PAGES,
+                stack_pages: role.stack_pages(),
+            },
+            DesktopRole::App => Self {
+                bytes: PLAYGROUND_USERSPACE_IMAGE,
+                segments: &PLAYGROUND_USERSPACE_SEGMENTS,
+                image_base: PLAYGROUND_USERSPACE_IMAGE_BASE,
+                entry_offset: PLAYGROUND_USERSPACE_ENTRY_OFFSET,
+                mapped_code_pages: PLAYGROUND_USERSPACE_MAPPED_CODE_PAGES,
+                stack_pages: role.stack_pages(),
+            },
+        }
+    }
+
+    /// Image + stack + launch page.
+    const fn mapped_pages(&self) -> usize {
+        self.mapped_code_pages + self.stack_pages as usize + 1
+    }
+}
+
+#[cfg(feature = "m10-desktop")]
+const _: () = {
+    use super::desktop_launch::DesktopRole;
+    use clean_slate_native_abi::desktop::{
+        DESKTOP_IMAGE_BASE, DESKTOP_LAUNCH_ADDRESS, DESKTOP_STACK_ADDRESS,
+    };
+    let roles = [
+        DesktopRole::Compositor,
+        DesktopRole::Shell,
+        DesktopRole::App,
+    ];
+    let mut index = 0;
+    while index < roles.len() {
+        let image = DesktopImage::for_role(roles[index]);
+        assert!(image.image_base == DESKTOP_IMAGE_BASE);
+        assert!(DESKTOP_STACK_ADDRESS + image.stack_pages * PAGE_SIZE <= DESKTOP_IMAGE_BASE);
+        assert!(image.mapped_pages() <= crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS);
+        index += 1;
+    }
+    assert!(DESKTOP_LAUNCH_ADDRESS >= SERVICE_USER_CODE_ADDRESS);
+};
+
+/// Maps a desktop image at its link address, its stack, and the launch page the desktop launch
+/// policy fills for the new pid, then registers the process Ready.
+#[cfg(feature = "m10-desktop")]
+#[inline(never)]
+fn launch_desktop_image(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    scheduler_slot: usize,
+    role: super::desktop_launch::DesktopRole,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
+    use crate::mm::address_space::map_process_page;
+    use crate::mm::image_loader::{map_embedded_segments, map_user_stack_pages};
+    use crate::mm::paging::zero_page;
+    use crate::mm::phys_to_virt;
+    use crate::process::id_allocator::id_allocator_mut;
+    use clean_slate_native_abi::desktop::{
+        DesktopLaunchPage, DESKTOP_LAUNCH_ADDRESS, DESKTOP_STACK_ADDRESS,
+    };
+    use core::ptr;
+    use x86_64::structures::paging::PageTableFlags;
+    use x86_64::VirtAddr;
+
+    let image = DesktopImage::for_role(role);
+    with_process_address_space(
+        allocator,
+        VirtAddr::new(SERVICE_USER_CODE_ADDRESS),
+        |allocator, slot| {
+            let address_space = slot
+                .as_mut()
+                .ok_or("desktop service address space missing")?;
+            let (pid, tid) = {
+                let ids = unsafe { id_allocator_mut() };
+                (ids.allocate_pid()?, ids.allocate_tid()?)
+            };
+            map_embedded_segments(
+                address_space,
+                allocator,
+                image.image_base,
+                image.bytes,
+                image.segments,
+            )?;
+            map_user_stack_pages(
+                address_space,
+                allocator,
+                DESKTOP_STACK_ADDRESS,
+                image.stack_pages,
+            )?;
+            let page = super::desktop_launch::launch_page_for(pid);
+            let data_frame = allocator
+                .allocate_page()
+                .ok_or("allocator could not provide a desktop launch page")?;
+            zero_page(data_frame);
+            unsafe { ptr::write(phys_to_virt(data_frame) as *mut DesktopLaunchPage, page) };
+            map_process_page(
+                address_space,
+                DESKTOP_LAUNCH_ADDRESS,
+                data_frame,
+                PageTableFlags::PRESENT
+                    | PageTableFlags::NO_EXECUTE
+                    | PageTableFlags::USER_ACCESSIBLE,
+                allocator,
+            )?;
+            let user_stack_pointer = DESKTOP_STACK_ADDRESS + image.stack_pages * PAGE_SIZE;
+            let entry_rip = image.image_base + image.entry_offset;
+            let saved_stack_pointer =
+                build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
+            let address_space = slot.take().ok_or("desktop service address space missing")?;
             register_spawned_process_checked(
                 allocator,
                 address_space,

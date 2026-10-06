@@ -1,26 +1,23 @@
 [package]
-name = "clean-slate-playground"
+name = "clean-slate-desktop-shell"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "M10 System Playground: native graphical test app over the compositor protocol and shared UI primitives"
+description = "M10 desktop shell: persistent left rail and background as an ordinary GFX_SHELL compositor client"
 build = "build.rs"
 
 [lib]
 path = "src/lib.rs"
 
 [[bin]]
-name = "clean-slate-playground-userspace"
-path = "src/bin/playground.rs"
+name = "clean-slate-desktop-shell-userspace"
+path = "src/bin/desktop-shell.rs"
 required-features = ["userspace"]
 
 [features]
 default = []
 userspace = []
-# Self-test fault key (F12 crashes the app). Only the `m10-desktop-self-test` kernel embeds a
-# build with it (`target/fault-keys`); production desktop images never contain the code.
-fault-keys = ["userspace"]
 
 [dependencies]
 clean-slate-capability = { path = "../capability" }
@@ -32,6 +29,7 @@ clean-slate-ui = { path = "../ui" }
 [dev-dependencies]
 clean-slate-compositor = { path = "../compositor", features = ["fake"] }
 clean-slate-graphics = { path = "../graphics", features = ["fake"] }
+clean-slate-playground = { path = "../playground" }
 clean-slate-port = { path = "../port", features = ["fake"] }
 
 [lints]

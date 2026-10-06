@@ -577,3 +577,52 @@ fn accent_toggle_recolours_the_pointer_marker() {
     let marker = l.mark_rect(app.style(), p, crate::layout::MARKER_SIZE);
     assert_ne!(region(&cyan, marker), region(&magenta, marker));
 }
+
+#[test]
+fn diagnostics_report_only_observable_state_changes() {
+    use crate::diag;
+
+    let mut app = app(QualityTier::Q1);
+    let layout = *app.layout();
+    let idle = diag::Summary::of(&app);
+    app.pointer_motion(center(layout.title));
+    assert_eq!(diag::Summary::of(&app), idle, "hover is not a state change");
+
+    click(&mut app, center(layout.increment));
+    click(&mut app, center(layout.toggle));
+    tap(&mut app, KEY_A, none());
+    let changed = diag::Summary::of(&app);
+    assert_ne!(changed, idle);
+    assert_eq!(
+        diag::input_line(&app).as_str(),
+        "[APP ] input state=changed clicks=1 magenta=1 presses=1 text=a"
+    );
+    assert_eq!(
+        diag::ready_line(QualityTier::Q0).as_str(),
+        "[APP ] ready size=520x360 tier=Q0"
+    );
+    assert_eq!(
+        diag::focus_line(diag::Focus::of(&app)).as_str(),
+        "[APP ] focus active=1 keyboard=1"
+    );
+    assert_eq!(
+        diag::exit_line("closed").as_str(),
+        "[APP ] exit reason=closed"
+    );
+    assert_eq!(
+        diag::authority_line(true, true).as_str(),
+        "[APP ] authority display=denied input=denied"
+    );
+    assert_eq!(
+        diag::authority_line(false, true).as_str(),
+        "[APP ] authority display=granted input=denied"
+    );
+    for _ in 0..TEXT_CAPACITY {
+        tap(&mut app, KEY_A, none());
+    }
+    assert_eq!(
+        diag::input_line(&app).as_bytes().len(),
+        64,
+        "truncated to one message"
+    );
+}

@@ -1,12 +1,12 @@
-//! CPL3 System Playground (#117).
+//! CPL3 desktop shell (#116/#118).
 //!
-//! Thin syscall adapter over [`clean_slate_playground::Session`]: connects to the compositor
-//! port named on the launch page, allocates and maps two shared pixel buffers, then blocks in
-//! `RECV_EVENT` and hands each event to the session. It never wakes on its own; every frame is
-//! the result of an event that changed what the panel shows.
+//! Thin syscall adapter over [`clean_slate_desktop_shell::ShellSession`]: connects to the
+//! compositor port named on the launch page with its `Graphics{GFX_CONNECT|GFX_SHELL}`
+//! capability, allocates and maps the background and rail buffers once the output size is known,
+//! then blocks in `RECV_EVENT` and hands each event to the session. It never wakes on its own.
 //!
-//! Authority is exactly the `Graphics{GFX_CONNECT}` capability the launch policy granted plus
-//! the buffers this process allocates. There is no framebuffer, display or input access.
+//! When the compositor goes away the shell releases everything and exits; the desktop launch
+//! policy relaunches it against the restarted compositor.
 
 #![no_std]
 #![no_main]
@@ -14,12 +14,12 @@
 use core::ptr::addr_of_mut;
 
 use clean_slate_capability::ResourceClass;
-use clean_slate_graphics::abi::display::{DISPLAY_ABI_VERSION, DISPLAY_SUBOP_FIND_HANDLE};
-use clean_slate_graphics::abi::input::{INPUT_ABI_VERSION, INPUT_SUBOP_FIND_HANDLE};
-#[cfg(feature = "fault-keys")]
-use clean_slate_graphics::input::{KeyState, KeyUsage};
+use clean_slate_desktop_shell::session::BUFFER_COUNT;
+use clean_slate_desktop_shell::{diag, BufferSlot, Host, HostError, Outcome, ShellSession};
 use clean_slate_graphics::protocol::{Event, Request};
-use clean_slate_native_abi::desktop::{ConsoleLine, SYSCALL_NR_IPC_SEND};
+use clean_slate_native_abi::desktop::{
+    ConsoleLine, DesktopLaunchPage, DESKTOP_LAUNCH_ADDRESS, SYSCALL_NR_IPC_SEND,
+};
 use clean_slate_native_abi::port::{
     PortEventRecord, PORT_OP_CLOSE, PORT_OP_CONNECT, PORT_OP_FIND_HANDLE, PORT_OP_RECV_EVENT,
     PORT_OP_SEND, PORT_ROLE_CONNECT, PORT_SEND_WAIT,
@@ -29,19 +29,10 @@ use clean_slate_native_abi::{
     SHARED_BUFFER_SUBOP_MAP, SHARED_BUFFER_SUBOP_RELEASE, SHARED_BUFFER_SUBOP_UNMAP,
     SYSCALL_NR_SERVICE_PORT, SYSCALL_NR_SHARED_BUFFER,
 };
-use clean_slate_playground::launch::{PlaygroundBootstrap, BOOTSTRAP_ADDRESS};
-use clean_slate_playground::session::{buffer_layout, BUFFER_COUNT};
-use clean_slate_playground::{diag, BufferSlot, ExitReason, Host, HostError, Outcome, Session};
 use clean_slate_ui::QualityTier;
 
-const SYSCALL_NR_DISPLAY: u64 = 18;
-const SYSCALL_NR_INPUT: u64 = 19;
-/// HID usage of F12 (the self-test fault key).
-#[cfg(feature = "fault-keys")]
-const KEY_F12: KeyUsage = KeyUsage(0x45);
-
 /// Kept out of the user stack, whose size is the launch policy's choice.
-static mut SESSION: Session = Session::new(QualityTier::Q1);
+static mut SESSION: ShellSession = ShellSession::new(QualityTier::Q1);
 
 fn syscall(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
     let result: u64;
@@ -77,6 +68,21 @@ fn exit() -> ! {
     }
 }
 
+fn console(boot: &DesktopLaunchPage, line: &ConsoleLine) {
+    if let Some(handle) = boot.console() {
+        let bytes = line.as_bytes();
+        syscall(
+            SYSCALL_NR_IPC_SEND,
+            handle,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+            0,
+            0,
+            0,
+        );
+    }
+}
+
 /// One mapped shared buffer.
 #[derive(Clone, Copy)]
 struct Mapping {
@@ -92,6 +98,44 @@ struct Kernel {
 }
 
 impl Host for Kernel {
+    fn allocate(&mut self, slot: BufferSlot, byte_len: usize) -> Result<(), HostError> {
+        let entry = self
+            .buffers
+            .get_mut(usize::from(slot.0))
+            .ok_or(HostError::Failed(0))?;
+        let handle = checked(syscall(
+            SYSCALL_NR_SHARED_BUFFER,
+            SHARED_BUFFER_SUBOP_ALLOCATE,
+            0,
+            byte_len as u64,
+            0,
+            0,
+            0,
+        ))
+        .map_err(HostError::Failed)?;
+        *entry = Some(Mapping {
+            handle,
+            va: 0,
+            len: byte_len,
+        });
+        let va = checked(syscall(
+            SYSCALL_NR_SHARED_BUFFER,
+            SHARED_BUFFER_SUBOP_MAP,
+            handle,
+            SHARED_BUFFER_ACCESS_READ_WRITE,
+            0,
+            0,
+            0,
+        ))
+        .map_err(HostError::Failed)?;
+        *entry = Some(Mapping {
+            handle,
+            va,
+            len: byte_len,
+        });
+        Ok(())
+    }
+
     fn send(&mut self, request: &Request, transfer: Option<BufferSlot>) -> Result<(), HostError> {
         let tag = self.next_tag;
         self.next_tag = self.next_tag.wrapping_add(1).max(1);
@@ -119,8 +163,11 @@ impl Host for Kernel {
 
     fn pixels(&mut self, slot: BufferSlot) -> Option<&mut [u8]> {
         let mapping = self.buffers.get(usize::from(slot.0)).copied().flatten()?;
+        if mapping.va == 0 {
+            return None;
+        }
         // SAFETY: MAP returned `len` writable bytes at `va` for this process, mapped until
-        // `release_buffers`; the returned borrow is tied to `&mut self`, so no alias outlives it.
+        // `release_buffers`; the borrow is tied to `&mut self`, so no alias outlives it.
         Some(unsafe { core::slice::from_raw_parts_mut(mapping.va as *mut u8, mapping.len) })
     }
 }
@@ -153,36 +200,6 @@ impl Kernel {
             next_tag: 1,
             buffers: [None; BUFFER_COUNT],
         })
-    }
-
-    /// Allocates and maps both pixel buffers.
-    fn allocate_buffers(&mut self) -> Option<()> {
-        let len = buffer_layout()?.byte_len();
-        for slot in &mut self.buffers {
-            let handle = checked(syscall(
-                SYSCALL_NR_SHARED_BUFFER,
-                SHARED_BUFFER_SUBOP_ALLOCATE,
-                0,
-                len as u64,
-                0,
-                0,
-                0,
-            ))
-            .ok()?;
-            *slot = Some(Mapping { handle, va: 0, len });
-            let va = checked(syscall(
-                SYSCALL_NR_SHARED_BUFFER,
-                SHARED_BUFFER_SUBOP_MAP,
-                handle,
-                SHARED_BUFFER_ACCESS_READ_WRITE,
-                0,
-                0,
-                0,
-            ))
-            .ok()?;
-            *slot = Some(Mapping { handle, va, len });
-        }
-        Some(())
     }
 
     /// Blocks until the next event; `None` once the compositor is gone or disconnected us.
@@ -251,114 +268,41 @@ impl Kernel {
     }
 }
 
-fn console(boot: &PlaygroundBootstrap, line: &ConsoleLine) {
-    if let Some(handle) = boot.console() {
-        let bytes = line.as_bytes();
-        syscall(
-            SYSCALL_NR_IPC_SEND,
-            handle,
-            bytes.as_ptr() as u64,
-            bytes.len() as u64,
-            0,
-            0,
-            0,
-        );
-    }
-}
-
-/// Self-test launches only: the fault key makes the app crash (an invalid opcode) so the
-/// desktop lane can prove crash containment. Keys arrive only while the app has focus.
-#[cfg(feature = "fault-keys")]
-fn is_fault_key(boot: &PlaygroundBootstrap, event: &Event) -> bool {
-    boot.fault_key_armed()
-        && matches!(
-            event,
-            Event::Key {
-                usage: KEY_F12,
-                state: KeyState::Pressed,
-                ..
-            }
-        )
-}
-
-/// Asks for the scanout and raw-input handles a compositor would use; an app must get neither.
-fn probe_authority() -> ConsoleLine {
-    let display = syscall(
-        SYSCALL_NR_DISPLAY,
-        DISPLAY_SUBOP_FIND_HANDLE,
-        0,
-        DISPLAY_ABI_VERSION,
-        0,
-        0,
-        0,
-    );
-    let input = syscall(
-        SYSCALL_NR_INPUT,
-        INPUT_SUBOP_FIND_HANDLE,
-        0,
-        INPUT_ABI_VERSION,
-        0,
-        0,
-        0,
-    );
-    diag::authority_line(is_status(display), is_status(input))
-}
-
-fn run(boot: &PlaygroundBootstrap, session: &mut Session, tier: QualityTier) {
+fn run(boot: &DesktopLaunchPage, session: &mut ShellSession) {
     let Some(mut kernel) = Kernel::connect(boot.graphics_resource_id) else {
         console(boot, &diag::exit_line("connect"));
         return;
     };
-    let mut outcome = Outcome::Exit(ExitReason::NoPixels);
-    if kernel.allocate_buffers().is_some() {
-        outcome = session.start(&mut kernel);
-        let mut announced = false;
-        let mut summary = diag::Summary::of(session.app());
-        let mut focus = diag::Focus::default();
-        while outcome == Outcome::Continue {
-            let Some(event) = kernel.next_event() else {
-                break;
-            };
-            #[cfg(feature = "fault-keys")]
-            if is_fault_key(boot, &event) {
-                console(boot, &diag::exit_line("fault-key"));
-                // SAFETY: deliberately raises #UD; the kernel tears this process down.
-                unsafe { core::arch::asm!("ud2", options(noreturn)) };
+    let mut outcome = session.start(&mut kernel);
+    let mut announced = false;
+    while outcome == Outcome::Continue {
+        let Some(event) = kernel.next_event() else {
+            break;
+        };
+        outcome = session.handle(&event, &mut kernel);
+        if !announced && session.is_running() {
+            announced = true;
+            if let Some(line) = diag::ready_line(session) {
+                console(boot, &line);
             }
-            outcome = session.handle(&event, &mut kernel);
-            if !session.is_running() {
-                continue;
-            }
-            if !announced {
-                announced = true;
-                console(boot, &diag::ready_line(tier));
-            }
-            let now = diag::Focus::of(session.app());
-            if now != focus {
-                focus = now;
-                console(boot, &diag::focus_line(focus));
-            }
-            let now = diag::Summary::of(session.app());
-            if now != summary {
-                summary = now;
-                console(boot, &diag::input_line(session.app()));
-            }
+        }
+        if let Some(index) = session.take_activation() {
+            console(boot, &diag::activation_line(index));
         }
     }
     let reason = match outcome {
-        Outcome::Exit(ExitReason::Closed) => "closed",
         Outcome::Continue => "compositor-gone",
-        Outcome::Exit(_) => "failed",
+        Outcome::Exit(_) => "setup-failed",
     };
+    console(boot, &diag::exit_line(reason));
     kernel.close();
     kernel.release_buffers();
-    console(boot, &diag::exit_line(reason));
 }
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     // SAFETY: the launch policy maps and fills the launch page before entry.
-    let boot = unsafe { *(BOOTSTRAP_ADDRESS as *const PlaygroundBootstrap) };
+    let boot = unsafe { *(DESKTOP_LAUNCH_ADDRESS as *const DesktopLaunchPage) };
     let tier = if boot.is_opaque_tier() {
         QualityTier::Q0
     } else {
@@ -366,9 +310,8 @@ pub extern "C" fn _start() -> ! {
     };
     // SAFETY: single-threaded process; this is the only reference to `SESSION`.
     let session = unsafe { &mut *addr_of_mut!(SESSION) };
-    *session = Session::new(tier);
-    console(&boot, &probe_authority());
-    run(&boot, session, tier);
+    *session = ShellSession::new(tier);
+    run(&boot, session);
     exit();
 }
 

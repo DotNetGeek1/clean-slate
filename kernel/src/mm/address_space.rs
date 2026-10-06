@@ -150,9 +150,11 @@ pub(crate) const MAX_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize =
     BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES + KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES;
 #[cfg(any(feature = "m4-recovery-self-test", feature = "m4-supervisor-self-test"))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 32;
+/// The #118 compositor image is about 92 pages plus a 64-page stack.
 #[cfg(any(
     feature = "m7-net-service-self-test",
-    feature = "m9-userspace-self-test"
+    feature = "m9-userspace-self-test",
+    feature = "m10-desktop"
 ))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 384;
 /// Storage and network userspace images map up to their configured code-page
@@ -206,7 +208,8 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 104;
     feature = "m9-linux-runtime-self-test",
     feature = "m9-linux-exec-self-test",
     feature = "m9-linux-proc-self-test",
-    feature = "m9-linux-trace-self-test"
+    feature = "m9-linux-trace-self-test",
+    feature = "m10-desktop"
 )))]
 pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 4;
 

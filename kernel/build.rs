@@ -131,6 +131,35 @@ fn main() {
     if env::var("CARGO_FEATURE_M9_ROOTFS").is_ok() {
         embed_m9_rootfs_image();
     }
+    if env::var("CARGO_FEATURE_M10_DESKTOP").is_ok() {
+        // The self-test kernel embeds the `fault-keys` builds of the compositor and playground
+        // (built into `target/fault-keys`); every other desktop kernel embeds images without
+        // that code.
+        let fault_keys = if env::var("CARGO_FEATURE_M10_DESKTOP_SELF_TEST").is_ok() {
+            "target/fault-keys"
+        } else {
+            "target"
+        };
+        for (target_dir, raw_name, bin_name) in [
+            (
+                fault_keys,
+                "compositor_userspace.bin",
+                "clean-slate-compositor-userspace",
+            ),
+            (
+                "target",
+                "desktop_shell_userspace.bin",
+                "clean-slate-desktop-shell-userspace",
+            ),
+            (
+                fault_keys,
+                "playground_userspace.bin",
+                "clean-slate-playground-userspace",
+            ),
+        ] {
+            embed_userspace_image_from(target_dir, raw_name, bin_name, true);
+        }
+    }
 }
 
 fn embed_m9_rootfs_image() {
@@ -341,9 +370,19 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 }
 
 fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bool) {
+    embed_userspace_image_from("target", raw_name, bin_name, record_entry_offset);
+}
+
+/// [`embed_userspace_image`] from the cargo target directory `target_dir` (workspace-relative).
+fn embed_userspace_image_from(
+    target_dir: &str,
+    raw_name: &str,
+    bin_name: &str,
+    record_entry_offset: bool,
+) {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let profile = env::var("PROFILE").expect("PROFILE");
-    let elf = userspace_elf(&manifest_dir, &profile, bin_name);
+    let elf = userspace_elf(&manifest_dir, target_dir, &profile, bin_name);
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let raw_image = out_dir.join(raw_name);
 
@@ -382,6 +421,12 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
             "storage_userspace.bin" => ("storage_userspace_entry.rs", "STORAGE_USERSPACE"),
             "m6_fixture_userspace.bin" => ("m6_fixture_userspace_entry.rs", "M6_FIXTURE_USERSPACE"),
             "network_userspace.bin" => ("network_userspace_entry.rs", "NETWORK_USERSPACE"),
+            "compositor_userspace.bin" => ("compositor_userspace_entry.rs", "COMPOSITOR_USERSPACE"),
+            "desktop_shell_userspace.bin" => (
+                "desktop_shell_userspace_entry.rs",
+                "DESKTOP_SHELL_USERSPACE",
+            ),
+            "playground_userspace.bin" => ("playground_userspace_entry.rs", "PLAYGROUND_USERSPACE"),
             _ => panic!("unexpected userspace image {raw_name}"),
         };
         let generated = out_dir.join(generated_file);
@@ -637,10 +682,10 @@ fn read_cstr(table: &[u8], offset: usize) -> Result<&str, String> {
     std::str::from_utf8(&tail[..end]).map_err(|_| "section name was not valid UTF-8".into())
 }
 
-fn userspace_elf(manifest_dir: &Path, profile: &str, bin_name: &str) -> PathBuf {
+fn userspace_elf(manifest_dir: &Path, target_dir: &str, profile: &str, bin_name: &str) -> PathBuf {
     let base = manifest_dir
         .join("..")
-        .join("target")
+        .join(target_dir)
         .join("x86_64-unknown-none");
     for profile in [profile, "release"] {
         let candidate = base.join(profile).join(bin_name);

@@ -1098,6 +1098,15 @@ fn run_inner() -> Result<(), &'static str> {
                 .ok_or("linux hello: service lifecycle allocator missing")?;
             let _ = crate::service::linux_launch::start_linux_hello_service(allocator, 0);
         }
+        #[cfg(feature = "m10-desktop")]
+        {
+            let allocator = crate::syscall::service_lifecycle_syscall_allocator_mut()
+                .as_mut()
+                .ok_or("desktop: service lifecycle allocator missing")?;
+            if let Err(message) = crate::service::desktop_launch::start_desktop(allocator) {
+                serial_write_fmt(format_args!("[DESK] launch failed: {message}\n"));
+            }
+        }
         initialize_timer();
         serial_write_line("[TIME] timer initialized");
         report_timer_contract();

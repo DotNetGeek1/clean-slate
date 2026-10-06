@@ -333,6 +333,12 @@ pub(crate) fn release_consumer_for_holder(holder: HolderId) -> usize {
     without_interrupts(|| input_mut().release_consumer(holder))
 }
 
+/// Whether any holder is bound as the seat-0 consumer (#118 resource snapshot).
+#[cfg(feature = "m10-desktop")]
+pub(crate) fn consumer_bound() -> bool {
+    without_interrupts(|| input_mut().consumer.holder.is_some())
+}
+
 #[cfg(any(test, feature = "m10-input-self-test"))]
 pub(crate) fn consumer_bindings_for(holder: HolderId) -> usize {
     without_interrupts(|| input_mut().consumer.bindings_for(holder))

@@ -641,6 +641,8 @@ fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));
+    #[cfg(feature = "m10-desktop")]
+    crate::service::desktop_launch::on_process_exiting(allocator, pid, context.vector);
     #[cfg(any(
         feature = "m6-object-self-test",
         feature = "m6-process-control-self-test",

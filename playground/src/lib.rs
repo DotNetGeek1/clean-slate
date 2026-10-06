@@ -13,6 +13,7 @@
 //!   view, so a damage-clipped repaint equals a full repaint.
 //! - [`session`]: the sans-IO protocol client (setup, double buffering, input routing, close).
 //! - [`launch`]: the launch-page layout the CPL3 binary reads.
+//! - [`diag`]: the serial diagnostic lines the CPL3 binary prints through the console.
 //!
 //! The app is event-driven: it renders only when an event changed the view and a buffer is
 //! free, and it never redraws because time passed.
@@ -21,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 pub mod app;
+pub mod diag;
 pub mod keys;
 pub mod launch;
 pub mod layout;

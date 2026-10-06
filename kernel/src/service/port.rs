@@ -11,7 +11,8 @@
 
 #[cfg(any(
     feature = "m10-port-self-test",
-    feature = "m10-shared-buffer-self-test"
+    feature = "m10-shared-buffer-self-test",
+    feature = "m10-desktop"
 ))]
 use clean_slate_capability::ResourceRef;
 use clean_slate_capability::{
@@ -20,7 +21,8 @@ use clean_slate_capability::{
 use clean_slate_native_abi::port::{PORT_MAX_CONNECTIONS, PORT_MAX_TRANSFERS_IN_FLIGHT};
 #[cfg(any(
     feature = "m10-port-self-test",
-    feature = "m10-shared-buffer-self-test"
+    feature = "m10-shared-buffer-self-test",
+    feature = "m10-desktop"
 ))]
 use clean_slate_native_abi::PortParams;
 use clean_slate_native_abi::{ConnectionId, PortEventRecord, PortRecvRecord, SharedBufferId};
@@ -30,7 +32,8 @@ use clean_slate_port::{
 };
 #[cfg(any(
     feature = "m10-port-self-test",
-    feature = "m10-shared-buffer-self-test"
+    feature = "m10-shared-buffer-self-test",
+    feature = "m10-desktop"
 ))]
 use clean_slate_port::{PortCounts, RegistrationError};
 use clean_slate_service_lifecycle::InstanceGeneration;
@@ -153,7 +156,8 @@ fn caller_for(holder: HolderId) -> Result<Caller, PortError> {
 /// Only launch policy registers a port: after spawning `server` and before it runs.
 #[cfg(any(
     feature = "m10-port-self-test",
-    feature = "m10-shared-buffer-self-test"
+    feature = "m10-shared-buffer-self-test",
+    feature = "m10-desktop"
 ))]
 pub(crate) fn register_port(
     resource: ResourceRef,
@@ -396,7 +400,8 @@ pub(crate) fn counts_for(holder: HolderId) -> HolderPortCounts {
 
 #[cfg(any(
     feature = "m10-port-self-test",
-    feature = "m10-shared-buffer-self-test"
+    feature = "m10-shared-buffer-self-test",
+    feature = "m10-desktop"
 ))]
 pub(crate) fn global_counts() -> PortCounts {
     with_ports(|core, _, _| core.global_counts())
