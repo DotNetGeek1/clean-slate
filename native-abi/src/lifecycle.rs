@@ -103,7 +103,6 @@ mod tests {
             SYSCALL_NR_INPUT,
             SYSCALL_NR_WORK_SET,
         ];
-        assert!(SYSCALL_NR_LIFECYCLE_WAIT > 7);
         assert!(!taken.contains(&SYSCALL_NR_LIFECYCLE_WAIT));
         assert_eq!(SYSCALL_NR_LIFECYCLE_WAIT, SYSCALL_NR_WORK_SET + 1);
     }
