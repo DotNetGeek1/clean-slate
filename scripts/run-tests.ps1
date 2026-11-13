@@ -265,7 +265,8 @@ function Set-OvmfEnvironment {
         exit 1
     }
     if (-not (Test-Path -LiteralPath $env:OVMF_VARS)) {
-        Write-Host "OVMF_VARS not found: $($env:OVMF_VARS)" -ForegroundColor Red
+        Write-Host "OVMF_VARS not found." -ForegroundColor Red
+        Write-Host ("OVMF_VARS value seen: [{0}]" -f $env:OVMF_VARS)
         Write-Host "Pass -OvmfVars or set `$env:OVMF_VARS."
         exit 1
     }
