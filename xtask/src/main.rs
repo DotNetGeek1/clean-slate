@@ -22,7 +22,7 @@ mod ovmf_vars;
 mod qmp;
 mod raster_font;
 
-use marker_spec::{MarkerSet, MarkerStep, MarkerTracker};
+use marker_spec::{unexpected_guest_failure, MarkerSet, MarkerStep, MarkerTracker};
 use ovmf_vars::RuntimeVarsCopy;
 
 use m10_framebuffer_validate::validate_m10_framebuffer_serial;
@@ -3872,13 +3872,8 @@ fn run_driven_acceptance_command(
                     print!("{}", chunk.text);
                 }
                 output.push_str(&chunk.text);
-                let guest_fail_line = output.find("[FAIL] ").and_then(|start| {
-                    output[start..]
-                        .find('\n')
-                        .map(|len| output[start..start + len].trim_end().to_owned())
-                });
-                if fails_fast_on_guest_fail(marker_set) && !authoritative_pass {
-                    if let Some(fail_line) = guest_fail_line {
+                if !authoritative_pass {
+                    if let Some(fail_line) = unexpected_guest_failure(&output, marker_set, false) {
                         terminate_child(&mut child)?;
                         let _ = child.wait();
                         join_output_reader(stdout_handle);
@@ -3911,6 +3906,16 @@ fn run_driven_acceptance_command(
                     }
                 }
                 if tracker.consume(&output) && !authoritative_pass {
+                    if let Some(fail_line) = unexpected_guest_failure(&output, marker_set, true) {
+                        terminate_child(&mut child)?;
+                        let _ = child.wait();
+                        join_output_reader(stdout_handle);
+                        join_output_reader(stderr_handle);
+                        return Err(XtaskError::CommandFailed {
+                            command: command_display,
+                            status: format!("guest reported a failure: {fail_line}"),
+                        });
+                    }
                     if let Err(error) = driver.0.before_teardown(deadline) {
                         return Err(abort_driven_acceptance(
                             &mut child,
@@ -4129,17 +4134,6 @@ fn is_m6_revocation_spec(set: MarkerSet<'_>) -> bool {
     matches!(set, MarkerSet::Steps(M6_REVOCATION_ACCEPTANCE_SPEC))
 }
 
-/// Constituents where any guest `[FAIL] ` line is terminal, even when the guest
-/// keeps running instead of writing the debug-exit port.
-fn fails_fast_on_guest_fail(set: MarkerSet<'_>) -> bool {
-    marker_set_is_ordered(set, &M9_USERSPACE_ACCEPTANCE_MARKERS)
-        || marker_set_is_ordered(set, &M10_FRAMEBUFFER_ACCEPTANCE_MARKERS)
-        || M6_ORDERED_MARKER_SETS
-            .iter()
-            .any(|markers| marker_set_is_ordered(set, markers))
-        || is_m6_revocation_spec(set)
-}
-
 fn final_guest_marker(set: MarkerSet<'_>) -> Option<&str> {
     if is_m6_revocation_spec(set) {
         return Some("[M6.6] PASS");
@@ -4153,6 +4147,11 @@ fn final_guest_marker(set: MarkerSet<'_>) -> Option<&str> {
 }
 
 fn validate_output_markers(output: &str, marker_set: MarkerSet<'static>) -> Result<(), XtaskError> {
+    if let Some(fail_line) = unexpected_guest_failure(output, marker_set, true) {
+        return Err(XtaskError::Validation(format!(
+            "guest reported a failure: {fail_line}"
+        )));
+    }
     if marker_set_is_ordered(marker_set, &M6_CAPABILITIES_ACCEPTANCE_MARKERS) {
         return validate_m6_capabilities_markers(output);
     }

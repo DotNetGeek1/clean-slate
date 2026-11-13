@@ -191,6 +191,55 @@ impl<'a> MarkerTracker<'a> {
     }
 }
 
+impl<'a> MarkerSet<'a> {
+    /// Every text the set requires: ordered markers, group members and line prefixes.
+    pub fn required_texts(self) -> Vec<&'a str> {
+        match self {
+            MarkerSet::Ordered(markers) => markers.to_vec(),
+            MarkerSet::Steps(steps) => steps
+                .iter()
+                .flat_map(|step| match step {
+                    MarkerStep::Ordered(text) => core::slice::from_ref(text),
+                    MarkerStep::UnorderedGroup(texts)
+                    | MarkerStep::UnorderedGroupAnywhere(texts) => texts,
+                    MarkerStep::Line { prefix, .. } => core::slice::from_ref(prefix),
+                })
+                .copied()
+                .collect(),
+        }
+    }
+}
+
+/// First guest `[FAIL]` line in `output` that the lane did not ask for. A `[FAIL]` line is
+/// expected only when it contains one of the set's own required texts that itself contains
+/// `[FAIL]`, so each lane's allow-list is exactly the failure markers it requires. An
+/// unterminated last line is checked only with `include_tail`, so a required failure marker is
+/// not judged before it has fully arrived.
+pub fn unexpected_guest_failure(
+    output: &str,
+    set: MarkerSet<'_>,
+    include_tail: bool,
+) -> Option<String> {
+    const FAIL_TAG: &str = "[FAIL]";
+    let expected: Vec<&str> = set
+        .required_texts()
+        .into_iter()
+        .filter(|text| text.contains(FAIL_TAG))
+        .collect();
+    let complete = match output.rfind('\n') {
+        _ if include_tail => output,
+        Some(end) => &output[..=end],
+        None => "",
+    };
+    complete.lines().find_map(|line| {
+        let start = line.find(FAIL_TAG)?;
+        if expected.iter().any(|text| line.contains(text)) {
+            return None;
+        }
+        Some(line[start..].trim_end().to_owned())
+    })
+}
+
 fn line_label(prefix: &str, fields: &[(&str, &str)]) -> String {
     let expected: Vec<String> = fields
         .iter()
@@ -221,6 +270,64 @@ fn check_line_fields(line: &str, fields: &[(&str, &str)]) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unexpected_guest_failure_reports_any_fail_line_the_lane_did_not_require() {
+        let set = MarkerSet::Ordered(&["[BOOT] ok", "[M1  ] PASS"]);
+        assert_eq!(
+            unexpected_guest_failure("[BOOT] ok\n[M1  ] PASS\n", set, true),
+            None
+        );
+        assert_eq!(
+            unexpected_guest_failure("[BOOT] ok\nx[FAIL] injected\r\n[M1  ] PASS\n", set, false),
+            Some("[FAIL] injected".to_owned())
+        );
+    }
+
+    #[test]
+    fn unexpected_guest_failure_allows_only_required_failure_markers() {
+        const STEPS: &[MarkerStep<'static>] = &[
+            MarkerStep::Ordered("[M9.G] probe"),
+            MarkerStep::UnorderedGroup(&["[FAIL] kernel stack overflow slot=1 ", "[M9.G] PASS"]),
+        ];
+        let set = MarkerSet::Steps(STEPS);
+        assert_eq!(set.required_texts().len(), 3);
+        let expected = "[M9.G] probe\n[FAIL] kernel stack overflow slot=1 kind=task\n[M9.G] PASS\n";
+        assert_eq!(unexpected_guest_failure(expected, set, true), None);
+        assert_eq!(
+            unexpected_guest_failure(
+                &format!("{expected}[FAIL] kernel stack overflow slot=2\n"),
+                set,
+                true
+            ),
+            Some("[FAIL] kernel stack overflow slot=2".to_owned())
+        );
+    }
+
+    #[test]
+    fn unexpected_guest_failure_waits_for_the_line_unless_told_to_include_the_tail() {
+        let set = MarkerSet::Ordered(&["[FAIL] kernel stack overflow slot=1 "]);
+        assert_eq!(
+            unexpected_guest_failure("[FAIL] kernel stack ov", set, false),
+            None
+        );
+        assert_eq!(
+            unexpected_guest_failure("[FAIL] kernel stack ov", set, true),
+            Some("[FAIL] kernel stack ov".to_owned())
+        );
+        let line_set = MarkerSet::Steps(&[MarkerStep::Line {
+            prefix: "[CRSH] inject",
+            fields: &[],
+        }]);
+        assert_eq!(
+            unexpected_guest_failure("[FAIL] boom", line_set, false),
+            None
+        );
+        assert_eq!(
+            unexpected_guest_failure("[FAIL] boom", line_set, true),
+            Some("[FAIL] boom".to_owned())
+        );
+    }
 
     #[test]
     fn ordered_markers_must_follow_sequence() {
