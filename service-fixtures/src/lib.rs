@@ -17,6 +17,8 @@ mod network_service;
 mod network_transport;
 /// M6.3 object-capability protocol (lane-owned).
 pub mod object_capability;
+/// #218 `SERVICE_READY` detail words of the system services.
+pub mod ready_detail;
 mod storage_service;
 mod unrelated_workload;
 

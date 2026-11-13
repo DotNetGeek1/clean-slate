@@ -89,11 +89,36 @@ struct InFlightRequest {
     deadline_ns: u64,
 }
 
+/// Write requests received from the most recent process that sent one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WriteRequestCount {
+    pid: u64,
+    requests: u64,
+}
+
+impl WriteRequestCount {
+    fn record(&mut self, pid: u64) {
+        if self.pid != pid {
+            *self = Self { pid, requests: 0 };
+        }
+        self.requests = self.requests.saturating_add(1);
+    }
+
+    fn requests_from(&self, pid: u64) -> u64 {
+        if self.pid == pid {
+            self.requests
+        } else {
+            0
+        }
+    }
+}
+
 struct KernelBlockBackend {
     transport_initialized: bool,
     virtio: Option<VirtioBlockDevice>,
     in_flight: Option<InFlightRequest>,
     reported_uncalibrated_clock: bool,
+    write_requests: WriteRequestCount,
 }
 
 impl KernelBlockBackend {
@@ -103,6 +128,10 @@ impl KernelBlockBackend {
             virtio: None,
             in_flight: None,
             reported_uncalibrated_clock: false,
+            write_requests: WriteRequestCount {
+                pid: 0,
+                requests: 0,
+            },
         }
     }
 
@@ -132,6 +161,13 @@ impl KernelBlockBackend {
 
 static BLOCK_BACKEND: GlobalCell<KernelBlockBackend> = GlobalCell::new(KernelBlockBackend::new());
 
+/// Block write requests the bridge has received from `pid`, counted on each request's first
+/// syscall entry (a resumed request is not counted again). 0 once another process has written.
+pub(crate) fn write_requests_from(pid: u64) -> u64 {
+    let backend = unsafe { &*BLOCK_BACKEND.get() };
+    backend.write_requests.requests_from(pid)
+}
+
 /// Interrupt context: only wakes the waiter; the harvest runs in its syscall.
 fn wake_block_completion() {
     wake_all(BLOCK_COMPLETION_KEY);
@@ -156,6 +192,9 @@ pub(crate) fn step_kernel_block_request(
             block_op_name(request.operation),
             request.request_id
         ));
+        if request.operation == BlockTransportOp::Write {
+            backend.write_requests.record(caller.pid);
+        }
     }
     backend.ensure_transport();
     let Some(device) = backend.virtio.as_mut() else {
@@ -338,6 +377,23 @@ fn publish_contract_geometry(transport_geometry: BlockGeometry) -> BlockGeometry
 mod tests {
     use super::*;
     use clean_slate_block::BlockTransportError;
+
+    #[test]
+    fn write_requests_are_counted_for_the_latest_writer_only() {
+        let mut count = WriteRequestCount {
+            pid: 0,
+            requests: 0,
+        };
+        assert_eq!(count.requests_from(7), 0);
+        count.record(7);
+        count.record(7);
+        assert_eq!(count.requests_from(7), 2);
+        assert_eq!(count.requests_from(8), 0);
+        // A replacement instance starts from zero; the old pid no longer reports a count.
+        count.record(8);
+        assert_eq!(count.requests_from(8), 1);
+        assert_eq!(count.requests_from(7), 0);
+    }
 
     const TEST_BLOCK_BYTES: usize = 512;
     const TEST_BLOCK_COUNT: usize = 8;

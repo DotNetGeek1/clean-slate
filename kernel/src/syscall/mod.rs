@@ -920,6 +920,9 @@ fn dispatch_native(frame: &mut SyscallContext) {
         lifecycle_abi::SYSCALL_NR_LIFECYCLE_WAIT => {
             crate::service::lifecycle_wait::handle_syscall(frame)
         }
+        clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY => {
+            crate::service::service_ready::handle_syscall(frame)
+        }
         cap_abi::SYSCALL_NR_DISPLAY => {
             crate::service::display_syscall::handle_syscall_display(frame)
         }
@@ -1114,6 +1117,16 @@ mod tests {
         // An unresolvable caller is refused instead of blocking.
         assert_eq!(
             dispatch_native_zeroed(lifecycle_abi::SYSCALL_NR_LIFECYCLE_WAIT, 0),
+            SYSCALL_EACCES
+        );
+    }
+
+    #[test]
+    fn dispatch_native_service_ready_reaches_its_handler() {
+        use clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY;
+        // An unresolvable caller is not a service instance.
+        assert_eq!(
+            dispatch_native_zeroed(SYSCALL_NR_SERVICE_READY, 0),
             SYSCALL_EACCES
         );
     }
