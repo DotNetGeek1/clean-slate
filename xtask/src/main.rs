@@ -287,10 +287,22 @@ const M9_STDIO_BLOCK_LEN_EXPECTED: usize = 158;
 /// FNV-1a 32-bit of `M9_STDIO_BLOCK` (host test `m9_block_fnv_matches_payload_module` locks this).
 const M9_STDIO_BLOCK_FNV_EXPECTED: u32 = 0x736c_e50e;
 const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS: [&str; 3] = [
-    "[TIME] timer initialized",
+/// The fail-closed offender and the #215 hostile offenders are separate
+/// processes, so their containment lines race; the kernel prints the summary
+/// lines only once every offender is gone and the sibling still runs.
+const M9_SYSCALL_FAIL_CLOSED_CONTAINMENT_GROUP: &[&str] = &[
     "[SYSC] unresolved caller reason=syscall caller process did not match active address space fail-closed",
-    "[M9.C] PASS",
+    "[SYSC] non-canonical user return state rip=",
+    " vector=13 err=0x0",
+];
+const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_SPEC: &[MarkerStep] = &[
+    MarkerStep::Ordered("[M9.C] failed mmap/brk left free frames and mappings unchanged OK"),
+    MarkerStep::Ordered("[TIME] timer initialized"),
+    MarkerStep::UnorderedGroup(M9_SYSCALL_FAIL_CLOSED_CONTAINMENT_GROUP),
+    MarkerStep::Ordered("[M9.C] non-canonical syscall rsp terminated native offender OK"),
+    MarkerStep::Ordered("[M9.C] arch_prctl(ARCH_SET_FS, non-canonical) returned EPERM OK"),
+    MarkerStep::Ordered("[M9.C] non-canonical syscall rsp terminated linux offender OK"),
+    MarkerStep::Ordered("[M9.C] PASS"),
 ];
 const M9_BLOCK_WAKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(45);
 /// `no progress while blocked` (3 timer IRQs with the blocked consumer's progress
@@ -1654,7 +1666,7 @@ fn run_m9_syscall_fail_closed_acceptance() -> Result<(), XtaskError> {
         false,
         &["m9-syscall-fail-closed-self-test"],
         Some((
-            MarkerSet::Ordered(&M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_MARKERS),
+            MarkerSet::Steps(M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_SPEC),
             M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_TIMEOUT,
         )),
     )
@@ -4456,7 +4468,7 @@ fn print_help() {
     println!("  test-m3-entry Build the M3.1 userspace-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-syscall Build the M3.3 syscall-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m8-linux-dispatch Build the M8.3 Linux personality dispatch kernel, run QEMU, and validate [M8.3] PASS");
-    println!("  test-m9-syscall-fail-closed Build the M9 #143 fail-closed syscall kernel, run QEMU, and validate [M9.C] PASS");
+    println!("  test-m9-syscall-fail-closed Build the M9 #143/#215 syscall containment kernel, run QEMU, and validate [M9.C] PASS");
     println!("  test-m9-block-wake Build the M9 #145 block/wake scheduler kernel, run QEMU, and validate [M9.E] PASS");
     println!("  test-m9-stack-guard Build the #162 kernel stack guard kernel, overflow a task stack, and validate the #PF -> #DF overflow diagnostic (aliases: m9-stack-guard, m9.162)");
     println!("  test-m9-fd-core Build the M9 #147 fd-core kernel, run QEMU, and validate pool equality + [M9.G] PASS (aliases: m9-fd-core, m9.147)");

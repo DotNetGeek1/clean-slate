@@ -43,6 +43,8 @@ const fn task_count_for_features() -> usize {
         feature = "m9-linux-trace-self-test"
     )) {
         6
+    } else if cfg!(feature = "m9-syscall-fail-closed-self-test") {
+        4
     } else {
         2
     }
