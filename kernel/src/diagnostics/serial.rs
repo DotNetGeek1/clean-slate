@@ -2,7 +2,8 @@ use core::fmt::{self, Write};
 
 use crate::arch::x86_64::port::{port_in, port_out};
 
-const COM1: u16 = 0x3F8;
+pub(crate) const COM1: u16 = 0x3F8;
+const LSR_TRANSMIT_EMPTY: u8 = 0x20;
 
 pub(crate) fn serial_init() {
     port_out(COM1 + 1, 0x00);
@@ -29,12 +30,16 @@ pub fn serial_write_fmt(arguments: fmt::Arguments<'_>) {
     let _ = SerialPort.write_fmt(arguments);
 }
 
-/// Write raw bytes to COM1 without UTF-8 interpretation or formatting.
+/// Write raw bytes to COM1 without UTF-8 interpretation or formatting, as one record like
+/// [`serial_write_fmt`], so serial console echo can never land inside it.
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) fn serial_write_bytes(bytes: &[u8]) {
-    for byte in bytes {
-        serial_write_byte(*byte);
-    }
+    #[cfg(not(test))]
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        bytes.iter().for_each(|byte| serial_write_byte(*byte));
+    });
+    #[cfg(test)]
+    bytes.iter().for_each(|byte| serial_write_byte(*byte));
 }
 
 struct SerialPort;
@@ -49,6 +54,15 @@ impl Write for SerialPort {
 }
 
 fn serial_write_byte(byte: u8) {
-    while (port_in(COM1 + 5) & 0x20) == 0 {}
+    while (line_status() & LSR_TRANSMIT_EMPTY) == 0 {}
     port_out(COM1, byte);
+}
+
+/// Reading the line status clears its receive error bits; with receive compiled in, they are
+/// handed to the receive interrupt so a flagged byte is still discarded there.
+fn line_status() -> u8 {
+    let lsr = port_in(COM1 + 5);
+    #[cfg(clean_slate_serial_console)]
+    crate::device::serial_console::note_transmit_line_status(lsr);
+    lsr
 }
