@@ -4293,6 +4293,12 @@ fn run_driven_acceptance_command(
     drain_output_events(&rx, &mut output);
 
     if authoritative_pass {
+        if let Some(fail_line) = unexpected_guest_failure(&output, marker_set, true) {
+            return Err(XtaskError::CommandFailed {
+                command: command_display,
+                status: format!("guest reported a failure after its markers: {fail_line}"),
+            });
+        }
         if markers_require_verbatim_linux_hello(marker_set) {
             assert_no_ipc_framed_linux_hello(&output)?;
         }
