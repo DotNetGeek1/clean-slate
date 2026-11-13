@@ -801,21 +801,60 @@ const M5_PERSISTENCE_READ_MARKERS: [&str; 9] = [
     "[STOR] read object=beta id=2 bytes=",
     "[TEST] persistence phase=read PASS",
 ];
-const M5_CRASH_ARM_EARLY_MARKERS: [&str; 6] = [
-    "[STOR] recovered generation=2",
-    "[STOR] read object=alpha id=1 bytes=",
-    "[STOR] read object=beta id=2 bytes=",
-    "[CRSH] armed trigger=after-write=1",
-    "[STOR] write object=alpha id=1 bytes=",
-    "[CRSH] inject after-write=1",
+/// The service's own report, read by the kernel at the injected stop: it mounted
+/// generation 2, read both objects back as generation 2 wrote them, and was committing
+/// alpha's 700-byte third version.
+const M5_PRE_CRASH_REPORT: [MarkerStep; 4] = [
+    MarkerStep::Line {
+        prefix: "[STOR] recovered generation=",
+        fields: &[("generation=", "2")],
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] read object=alpha id=1 ",
+        fields: &[
+            ("bytes=", "900"),
+            ("checksum=", "00007788"),
+            ("match=", "yes"),
+        ],
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] read object=beta id=2 ",
+        fields: M5_BETA_V1_READ_FIELDS,
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] write object=alpha id=1 ",
+        fields: &[("bytes=", "700"), ("checksum=", "00008b74")],
+    },
 ];
-const M5_CRASH_ARM_LATE_MARKERS: [&str; 6] = [
-    "[STOR] recovered generation=2",
-    "[STOR] read object=alpha id=1 bytes=",
-    "[STOR] read object=beta id=2 bytes=",
-    "[CRSH] armed trigger=after-write=3",
-    "[STOR] write object=alpha id=1 bytes=",
-    "[CRSH] inject after-write=3",
+const M5_CRASH_ARM_EARLY_SPEC: &[MarkerStep] = &[
+    MarkerStep::Line {
+        prefix: "[CRSH] armed trigger=",
+        fields: &[("after-write=", "1")],
+    },
+    M5_PRE_CRASH_REPORT[0],
+    M5_PRE_CRASH_REPORT[1],
+    M5_PRE_CRASH_REPORT[2],
+    M5_PRE_CRASH_REPORT[3],
+    MarkerStep::Line {
+        prefix: "[CRSH] inject after-write=",
+        fields: &[("after-write=", "1")],
+    },
+];
+/// Superblock slots are LBA 0 and 1; generation 3 goes to slot 1, so the third write
+/// landing there is what makes `new-commit` the required late recovery outcome.
+const M5_CRASH_ARM_LATE_SPEC: &[MarkerStep] = &[
+    MarkerStep::Line {
+        prefix: "[CRSH] armed trigger=",
+        fields: &[("after-write=", "3")],
+    },
+    M5_PRE_CRASH_REPORT[0],
+    M5_PRE_CRASH_REPORT[1],
+    M5_PRE_CRASH_REPORT[2],
+    M5_PRE_CRASH_REPORT[3],
+    MarkerStep::Line {
+        prefix: "[CRSH] inject after-write=",
+        fields: &[("after-write=", "3"), ("lba=", "1")],
+    },
 ];
 /// Read-back evidence for `beta`, which no crash phase rewrites.
 const M5_BETA_V1_READ_FIELDS: &[(&str, &str)] = &[
@@ -1360,7 +1399,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             &["m5-crash-early-self-test"],
             Some((
-                MarkerSet::Ordered(&M5_CRASH_ARM_EARLY_MARKERS),
+                MarkerSet::Steps(M5_CRASH_ARM_EARLY_SPEC),
                 M5_PERSISTENCE_BOOT_TIMEOUT,
             )),
             config.clone(),
@@ -1391,7 +1430,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             &["m5-crash-late-self-test"],
             Some((
-                MarkerSet::Ordered(&M5_CRASH_ARM_LATE_MARKERS),
+                MarkerSet::Steps(M5_CRASH_ARM_LATE_SPEC),
                 M5_PERSISTENCE_BOOT_TIMEOUT,
             )),
             config.clone(),

@@ -30,6 +30,11 @@ pub struct StorageServiceBootstrap {
     pub beta_len: u64,
     pub beta_checksum: u64,
     pub object_role_handle: u64,
+    /// The object write the service is committing, set before its first block write so a
+    /// crash injected mid-commit can report what was in flight.
+    pub pending_object_id: u64,
+    pub pending_len: u64,
+    pub pending_checksum: u64,
 }
 
 impl StorageServiceBootstrap {
@@ -48,6 +53,9 @@ impl StorageServiceBootstrap {
             beta_len: 0,
             beta_checksum: 0,
             object_role_handle: 0,
+            pending_object_id: 0,
+            pending_len: 0,
+            pending_checksum: 0,
         }
     }
 }

@@ -112,6 +112,9 @@ pub extern "C" fn _start() -> ! {
     bootstrap.alpha_checksum = 0;
     bootstrap.beta_len = 0;
     bootstrap.beta_checksum = 0;
+    bootstrap.pending_object_id = 0;
+    bootstrap.pending_len = 0;
+    bootstrap.pending_checksum = 0;
 
     bootstrap.result_code = match run(bootstrap) {
         Ok(code) => code,
@@ -452,6 +455,9 @@ fn run_crash_arm(
         return Err(expected_generation);
     }
     verify_and_record(&mut store, bootstrap, &PERSISTENCE_ALPHA_V2, OBJECT_BETA_V1)?;
+    bootstrap.pending_object_id = OBJECT_ALPHA_ID;
+    bootstrap.pending_len = PERSISTENCE_ALPHA_V3.len() as u64;
+    bootstrap.pending_checksum = checksum(&PERSISTENCE_ALPHA_V3) as u64;
     store
         .write_object(OBJECT_ALPHA_ID, OBJECT_ALPHA_NAME, &PERSISTENCE_ALPHA_V3)
         .map_err(store_error_code)?;

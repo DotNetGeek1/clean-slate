@@ -134,14 +134,8 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
     };
     set_self_test_state(Some(initial_state));
     match mode {
-        M5StorageSelfTestMode::CrashArmEarly => {
-            arm_crash_after_write(CRASH_AFTER_WRITE_EARLY);
-            log_crash_arm_markers(CRASH_AFTER_WRITE_EARLY);
-        }
-        M5StorageSelfTestMode::CrashArmLate => {
-            arm_crash_after_write(CRASH_AFTER_WRITE_LATE);
-            log_crash_arm_markers(CRASH_AFTER_WRITE_LATE);
-        }
+        M5StorageSelfTestMode::CrashArmEarly => arm_crash_after_write(CRASH_AFTER_WRITE_EARLY),
+        M5StorageSelfTestMode::CrashArmLate => arm_crash_after_write(CRASH_AFTER_WRITE_LATE),
         M5StorageSelfTestMode::Integration
         | M5StorageSelfTestMode::Persistence
         | M5StorageSelfTestMode::CrashRecovery => {}
@@ -391,7 +385,9 @@ fn handle_integration_phase(
     }
 }
 
-pub(crate) fn observe_userspace_block_operation(operation: BlockTransportOp) {
+/// Called after the device completed `operation` for the storage service, still inside
+/// its block syscall, so the service's address space (and its report page) is current.
+pub(crate) fn observe_userspace_block_operation(operation: BlockTransportOp, lba: u64) {
     match operation {
         BlockTransportOp::Write => {
             let plan = unsafe { &mut *M5_CRASH_PLAN.get() };
@@ -400,9 +396,12 @@ pub(crate) fn observe_userspace_block_operation(operation: BlockTransportOp) {
             };
             crash_plan.writes_seen = crash_plan.writes_seen.saturating_add(1);
             if crash_plan.writes_seen == crash_plan.after_write {
-                let after_write = crash_plan.after_write;
+                let after_write = crash_plan.writes_seen;
                 *plan = None;
-                kernel_log_fmt(format_args!("[CRSH] inject after-write={after_write}\n"));
+                log_pre_crash_report();
+                kernel_log_fmt(format_args!(
+                    "[CRSH] inject after-write={after_write} lba={lba}\n"
+                ));
                 halt_loop();
             }
         }
@@ -418,31 +417,35 @@ fn arm_crash_after_write(after_write: u64) {
             writes_seen: 0,
         });
     }
-}
-
-fn log_crash_arm_markers(after_write: u64) {
-    kernel_log_line("[STOR] recovered generation=2");
-    log_read_marker(
-        OBJECT_ALPHA_NAME,
-        OBJECT_ALPHA_ID,
-        PERSISTENCE_ALPHA_V2.len(),
-        checksum(&PERSISTENCE_ALPHA_V2),
-    );
-    log_read_marker(
-        OBJECT_BETA_NAME,
-        OBJECT_BETA_ID,
-        OBJECT_BETA_V1.len(),
-        checksum(OBJECT_BETA_V1),
-    );
     kernel_log_fmt(format_args!(
         "[CRSH] armed trigger=after-write={after_write}\n"
     ));
-    log_write_marker(
-        OBJECT_ALPHA_NAME,
-        OBJECT_ALPHA_ID,
-        PERSISTENCE_ALPHA_V3.len(),
-        checksum(&PERSISTENCE_ALPHA_V3),
-    );
+}
+
+/// What the crash-arm service reported before the injected stop: the generation it
+/// mounted, the objects it read back, and the write it was committing.
+fn log_pre_crash_report() {
+    let report = unsafe { &*(STORAGE_SERVICE_BOOTSTRAP_ADDRESS as *const StorageServiceBootstrap) };
+    kernel_log_fmt(format_args!(
+        "[STOR] recovered generation={}\n",
+        report.mounted_generation
+    ));
+    log_reported_reads(report, &PERSISTENCE_ALPHA_V2, OBJECT_BETA_V1);
+    kernel_log_fmt(format_args!(
+        "[STOR] write object={} id={} bytes={} checksum={:08x}\n",
+        object_name(report.pending_object_id),
+        report.pending_object_id,
+        report.pending_len,
+        report.pending_checksum
+    ));
+}
+
+fn object_name(id: u64) -> &'static str {
+    match id {
+        OBJECT_ALPHA_ID => OBJECT_ALPHA_NAME,
+        OBJECT_BETA_ID => OBJECT_BETA_NAME,
+        _ => "none",
+    }
 }
 
 fn validate_integration_initial(report: &StorageServiceBootstrap) -> Result<(), &'static str> {
