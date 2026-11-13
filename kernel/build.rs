@@ -481,6 +481,20 @@ fn embed_userspace_image_from(
     );
 }
 
+/// Storage and network launches map with `RELOCATED_BASE` and the segment array.
+/// `IMAGE_BASE` and `SEGMENT_COUNT` are still emitted so every image's metadata has
+/// the same fields. The two M4 builds deny `dead_code` in `service` and compile those
+/// launches without reading the two fields, so only those items are allowed.
+fn metadata_item(prefix: &str, field: &str, item: &str) -> String {
+    let unused_by_launch = matches!(prefix, "STORAGE_USERSPACE" | "NETWORK_USERSPACE")
+        && matches!(field, "IMAGE_BASE" | "SEGMENT_COUNT");
+    if unused_by_launch {
+        format!("#[allow(dead_code)]\n{item}")
+    } else {
+        item.to_string()
+    }
+}
+
 fn format_segment_metadata(
     prefix: &str,
     entry_offset: u64,
@@ -496,15 +510,21 @@ fn format_segment_metadata(
     out.push_str(&format!(
         "pub(super) const {prefix}_MAPPED_CODE_PAGES: usize = {mapped_pages};\n"
     ));
-    out.push_str(&format!(
-        "pub(super) const {prefix}_IMAGE_BASE: u64 = {image_base:#x};\n"
+    out.push_str(&metadata_item(
+        prefix,
+        "IMAGE_BASE",
+        &format!("pub(super) const {prefix}_IMAGE_BASE: u64 = {image_base:#x};\n"),
     ));
     out.push_str(&format!(
         "pub(super) const {prefix}_RELOCATED_BASE: u64 = {load_base:#x};\n"
     ));
-    out.push_str(&format!(
-        "pub(super) const {prefix}_SEGMENT_COUNT: usize = {};\n",
-        plan.segment_count
+    out.push_str(&metadata_item(
+        prefix,
+        "SEGMENT_COUNT",
+        &format!(
+            "pub(super) const {prefix}_SEGMENT_COUNT: usize = {};\n",
+            plan.segment_count
+        ),
     ));
     out.push_str(&format!(
         "pub(super) static {prefix}_SEGMENTS: [crate::mm::image_loader::EmbeddedSegment; {}] = [\n",
