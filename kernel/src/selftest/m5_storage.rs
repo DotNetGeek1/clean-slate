@@ -454,7 +454,8 @@ fn validate_integration_initial(report: &StorageServiceBootstrap) -> Result<(), 
         STORAGE_SERVICE_MODE_INTEGRATION_INITIAL,
         STORAGE_SERVICE_RESULT_OK,
     )?;
-    if report.mounted_generation != 0
+    if report.formatted != 1
+        || report.mounted_generation != 0
         || report.committed_generation != 1
         || report.capability_handle == 0
     {
@@ -462,18 +463,22 @@ fn validate_integration_initial(report: &StorageServiceBootstrap) -> Result<(), 
     }
     ensure_object(report.alpha_len, report.alpha_checksum, OBJECT_ALPHA_V1)?;
     ensure_object(report.beta_len, report.beta_checksum, OBJECT_BETA_V1)?;
-    kernel_log_line("[STOR] format generation=0");
     kernel_log_fmt(format_args!(
-        "[STOR] write object={} bytes={}\n",
-        OBJECT_ALPHA_ID,
-        OBJECT_ALPHA_V1.len()
+        "[STOR] format generation={}\n",
+        report.mounted_generation
     ));
     kernel_log_fmt(format_args!(
-        "[STOR] write object={} bytes={}\n",
-        OBJECT_BETA_ID,
-        OBJECT_BETA_V1.len()
+        "[STOR] write object={OBJECT_ALPHA_ID} bytes={}\n",
+        report.alpha_len
     ));
-    kernel_log_line("[STOR] commit generation=1");
+    kernel_log_fmt(format_args!(
+        "[STOR] write object={OBJECT_BETA_ID} bytes={}\n",
+        report.beta_len
+    ));
+    kernel_log_fmt(format_args!(
+        "[STOR] commit generation={}\n",
+        report.committed_generation
+    ));
     Ok(())
 }
 
@@ -503,17 +508,38 @@ fn validate_integration_restart(
     {
         return Err("restarted storage service reported unexpected generations");
     }
+    ensure_object(
+        report.mounted_alpha_len,
+        report.mounted_alpha_checksum,
+        OBJECT_ALPHA_V1,
+    )?;
+    ensure_object(
+        report.mounted_beta_len,
+        report.mounted_beta_checksum,
+        OBJECT_BETA_V1,
+    )?;
     ensure_object(report.alpha_len, report.alpha_checksum, OBJECT_ALPHA_V2)?;
     ensure_object(report.beta_len, report.beta_checksum, OBJECT_BETA_V1)?;
+    if report.malformed_mount_error == 0 {
+        return Err("restarted storage service did not report the malformed-media mount error");
+    }
     kernel_log_fmt(format_args!("[BLK ] stale handle denied pid={pid}\n"));
-    kernel_log_line("[STOR] mounted generation=1");
     kernel_log_fmt(format_args!(
-        "[STOR] write object={} bytes={}\n",
-        OBJECT_ALPHA_ID,
-        OBJECT_ALPHA_V2.len()
+        "[STOR] mounted generation={}\n",
+        report.mounted_generation
     ));
-    kernel_log_line("[STOR] commit generation=2");
-    kernel_log_line("[STOR] malformed media rejected");
+    kernel_log_fmt(format_args!(
+        "[STOR] write object={OBJECT_ALPHA_ID} bytes={}\n",
+        report.alpha_len
+    ));
+    kernel_log_fmt(format_args!(
+        "[STOR] commit generation={}\n",
+        report.committed_generation
+    ));
+    kernel_log_fmt(format_args!(
+        "[STOR] malformed media rejected error={}\n",
+        report.malformed_mount_error
+    ));
     Ok(())
 }
 
@@ -528,70 +554,78 @@ fn validate_persistence(report: &StorageServiceBootstrap) -> Result<(), &'static
         report.committed_generation,
         report.remounted_generation,
     ) {
-        (0, 1, 0) => {
+        (0, 1, 0) if report.formatted == 1 => {
             ensure_object(
                 report.alpha_len,
                 report.alpha_checksum,
                 &PERSISTENCE_ALPHA_V1,
             )?;
             ensure_object(report.beta_len, report.beta_checksum, OBJECT_BETA_V1)?;
-            kernel_log_line("[STOR] mounted generation=fresh");
+            kernel_log_fmt(format_args!(
+                "[STOR] mounted generation=fresh formatted={}\n",
+                report.formatted
+            ));
             log_write_marker(
                 OBJECT_ALPHA_NAME,
                 OBJECT_ALPHA_ID,
-                PERSISTENCE_ALPHA_V1.len(),
-                checksum(&PERSISTENCE_ALPHA_V1),
+                report.alpha_len,
+                report.alpha_checksum,
             );
             log_write_marker(
                 OBJECT_BETA_NAME,
                 OBJECT_BETA_ID,
-                OBJECT_BETA_V1.len(),
-                checksum(OBJECT_BETA_V1),
+                report.beta_len,
+                report.beta_checksum,
             );
-            kernel_log_line("[STOR] commit generation=1");
+            kernel_log_fmt(format_args!(
+                "[STOR] commit generation={}\n",
+                report.committed_generation
+            ));
             kernel_log_line("[TEST] persistence phase=write PASS");
             Ok(())
         }
         (1, 2, 2) => {
+            ensure_object(
+                report.mounted_alpha_len,
+                report.mounted_alpha_checksum,
+                &PERSISTENCE_ALPHA_V1,
+            )?;
+            ensure_object(
+                report.mounted_beta_len,
+                report.mounted_beta_checksum,
+                OBJECT_BETA_V1,
+            )?;
             ensure_object(
                 report.alpha_len,
                 report.alpha_checksum,
                 &PERSISTENCE_ALPHA_V2,
             )?;
             ensure_object(report.beta_len, report.beta_checksum, OBJECT_BETA_V1)?;
-            kernel_log_line("[STOR] recovered generation=1");
-            log_read_marker(
-                OBJECT_ALPHA_NAME,
-                OBJECT_ALPHA_ID,
-                PERSISTENCE_ALPHA_V1.len(),
-                checksum(&PERSISTENCE_ALPHA_V1),
-            );
-            log_read_marker(
-                OBJECT_BETA_NAME,
-                OBJECT_BETA_ID,
-                OBJECT_BETA_V1.len(),
-                checksum(OBJECT_BETA_V1),
+            kernel_log_fmt(format_args!(
+                "[STOR] recovered generation={}\n",
+                report.mounted_generation
+            ));
+            log_object_reads(
+                (report.mounted_alpha_len, report.mounted_alpha_checksum),
+                (report.mounted_beta_len, report.mounted_beta_checksum),
+                &PERSISTENCE_ALPHA_V1,
+                OBJECT_BETA_V1,
             );
             log_write_marker(
                 OBJECT_ALPHA_NAME,
                 OBJECT_ALPHA_ID,
-                PERSISTENCE_ALPHA_V2.len(),
-                checksum(&PERSISTENCE_ALPHA_V2),
+                report.alpha_len,
+                report.alpha_checksum,
             );
-            kernel_log_line("[STOR] commit generation=2");
-            kernel_log_line("[STOR] recovered generation=2");
-            log_read_marker(
-                OBJECT_ALPHA_NAME,
-                OBJECT_ALPHA_ID,
-                PERSISTENCE_ALPHA_V2.len(),
-                checksum(&PERSISTENCE_ALPHA_V2),
-            );
-            log_read_marker(
-                OBJECT_BETA_NAME,
-                OBJECT_BETA_ID,
-                OBJECT_BETA_V1.len(),
-                checksum(OBJECT_BETA_V1),
-            );
+            kernel_log_fmt(format_args!(
+                "[STOR] commit generation={}\n",
+                report.committed_generation
+            ));
+            kernel_log_fmt(format_args!(
+                "[STOR] recovered generation={}\n",
+                report.remounted_generation
+            ));
+            log_reported_reads(report, &PERSISTENCE_ALPHA_V2, OBJECT_BETA_V1);
             kernel_log_line("[TEST] persistence phase=read PASS");
             Ok(())
         }
@@ -647,36 +681,33 @@ fn ensure_object(
     Ok(())
 }
 
-fn log_write_marker(name: &str, id: u64, bytes: usize, checksum: u32) {
+fn log_write_marker(name: &str, id: u64, bytes: u64, checksum: u64) {
     kernel_log_fmt(format_args!(
         "[STOR] write object={name} id={id} bytes={bytes} checksum={checksum:08x}\n"
-    ));
-}
-
-fn log_read_marker(name: &str, id: u64, bytes: usize, checksum: u32) {
-    kernel_log_fmt(format_args!(
-        "[STOR] read object={name} id={id} bytes={bytes} checksum={checksum:08x} match=yes\n"
     ));
 }
 
 /// Read lines carrying the object lengths and checksums the service put in its report,
 /// with `match` comparing them against the bytes that generation should hold.
 fn log_reported_reads(report: &StorageServiceBootstrap, alpha: &[u8], beta: &[u8]) {
-    for (name, id, len, checksum, expected) in [
-        (
-            OBJECT_ALPHA_NAME,
-            OBJECT_ALPHA_ID,
-            report.alpha_len,
-            report.alpha_checksum,
-            alpha,
-        ),
-        (
-            OBJECT_BETA_NAME,
-            OBJECT_BETA_ID,
-            report.beta_len,
-            report.beta_checksum,
-            beta,
-        ),
+    log_object_reads(
+        (report.alpha_len, report.alpha_checksum),
+        (report.beta_len, report.beta_checksum),
+        alpha,
+        beta,
+    );
+}
+
+/// `alpha` and `beta` are reported `(length, checksum)` pairs.
+fn log_object_reads(
+    alpha: (u64, u64),
+    beta: (u64, u64),
+    expected_alpha: &[u8],
+    expected_beta: &[u8],
+) {
+    for (name, id, (len, checksum), expected) in [
+        (OBJECT_ALPHA_NAME, OBJECT_ALPHA_ID, alpha, expected_alpha),
+        (OBJECT_BETA_NAME, OBJECT_BETA_ID, beta, expected_beta),
     ] {
         let matched = if ensure_object(len, checksum, expected).is_ok() {
             "yes"
