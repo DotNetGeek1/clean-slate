@@ -92,7 +92,7 @@ fn run(allocator: &mut PageAllocator) -> Probe<()> {
     draw(staging, draw_reference_a)?;
     write_buffer(0, staging)?;
     let seq = present(0, &[FULL_FRAME])?;
-    let stats = wait_present(seq)?;
+    let stats = wait_present(seq, None)?;
     if (
         stats.attaches,
         stats.scanouts,
@@ -120,7 +120,7 @@ fn run(allocator: &mut PageAllocator) -> Probe<()> {
     write_buffer(1, staging)?;
     let before = stats.transferred_bytes;
     let seq = present(1, &damage)?;
-    let stats = wait_present(seq)?;
+    let stats = wait_present(seq, None)?;
     if (
         stats.attaches,
         stats.scanouts,
@@ -244,11 +244,13 @@ fn wait_settled(budget: &'static str) -> Probe<PresentStatus> {
     })
 }
 
-fn wait_present(seq: u64) -> Probe<GpuStats> {
+/// `last_error` is sticky (it survives later successes and resets), so a clean present leaves it at
+/// `last_error`, the value before the present was submitted.
+fn wait_present(seq: u64, last_error: Option<DisplayError>) -> Probe<GpuStats> {
     let status = wait_settled("present budget")?;
     if status.state != PresentState::Idle
         || status.completed_seq != seq
-        || status.last_error.is_some()
+        || status.last_error != last_error
     {
         return Err("present did not complete cleanly");
     }
@@ -341,7 +343,7 @@ fn reset_and_present() -> Probe<()> {
     ));
 
     let seq = present(1, &[FULL_FRAME])?;
-    let stats = wait_present(seq)?;
+    let stats = wait_present(seq, Some(DisplayError::DeviceTimeout))?;
     if stats.attaches != before.attaches + 1 {
         return Err("present after reset did not re-attach the backing");
     }
