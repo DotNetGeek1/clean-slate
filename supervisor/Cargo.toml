@@ -30,12 +30,18 @@ name = "clean-slate-m6-fixture-userspace"
 path = "src/bin/m6_fixture_userspace.rs"
 required-features = ["userspace"]
 
+[[bin]]
+name = "clean-slate-supervisor-init"
+path = "src/bin/init.rs"
+required-features = ["userspace"]
+
 [features]
 default = []
 userspace = []
 
 [dependencies]
 clean-slate-capability = { path = "../capability" }
+clean-slate-native-abi = { path = "../native-abi" }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 

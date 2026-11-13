@@ -14,6 +14,7 @@ mod restart_policy;
 mod runtime;
 #[cfg(feature = "userspace")]
 mod syscall_lifecycle;
+mod system_init;
 
 pub use control::{FakeLifecycleControl, LifecycleControl, LifecycleControlError};
 pub use convergence::{ConvergedSupervisor, ConvergedSupervisorError, ServiceConvergenceConfig};
@@ -29,5 +30,6 @@ pub use restart_policy::{
 pub use runtime::{DiagnosticSink, Supervisor, SupervisorError};
 #[cfg(feature = "userspace")]
 pub use syscall_lifecycle::SyscallLifecycleControl;
+pub use system_init::{restart_policy, SystemInit, INIT_READY_TIMEOUT_NS};
 
 pub const DEFAULT_REGISTRY_CAPACITY: usize = 8;
