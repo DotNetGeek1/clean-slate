@@ -33,7 +33,7 @@ On `SYSCALL` (Linux x86-64):
 
 Decoded request shape: `LinuxSyscallRequest { nr, args: [u64; 6] }`.
 
-M8 required numbers: `SYS_WRITE = 1`, `SYS_EXIT = 60`. Any other number returns `-ENOSYS`; the process continues.
+M8 required `SYS_WRITE = 1` and `SYS_EXIT = 60`. On this branch the registered Linux syscalls are the set in [Linux ABI on this branch](COMPATIBILITY.md#linux-abi-on-this-branch). A number with no handler returns `-ENOSYS` and the process continues.
 
 ## Load policies and VA windows (M9 / #142)
 
@@ -154,15 +154,21 @@ blocking (`WaitKey` namespace `0x50 << 56`: pipe reader
 (idempotent restart; no spin, no `EAGAIN`). Pipe `write` with no readers returns
 `EPIPE` (no `SIGPIPE` delivery in M9). `read(0)` front-end lives in
 `syscall/linux/fd.rs` (`ensure_open_fd`, 1024-byte scratch, kind dispatch); pipe
-bytes use `linux_proc/pipe::read_fd`. `fork` copies parent PTE flags faithfully
-(`mm/fork_clone.rs`, W^X preserved), delegates every parent capability via
-`list_holder` + `delegate`, and returns `EAGAIN` when `LINUX_MAX_PROC_ENTRIES`
-(6) is full. Fault exits publish `WIFSIGNALED` (`SIGSEGV` / `SIGILL`) through
-`linux_proc/fault.rs` + `teardown_process_by_id`. Until #101 lands,
-`linux_proc/exec_resolve.rs::resolve_executable(pid, gen, path, resolved_out)` stubs
-`/bin/busybox`, `/bin/sh`, and self-test fixture paths (orchestrator replaces with
-`linux_fs::resolve_executable`). `#103` stubs: `linux_mem_clone_for_fork_stub` /
-`linux_signal_clone_for_fork_stub` in `fork.rs`.
+bytes use `linux_proc/pipe::read_fd`. `fork` copies each parent user page into a new frame
+(`mm/fork_clone.rs`). The child PTE keeps the parent's present, user, writable,
+and no-execute bits (`user_copy_flags`). Capability inheritance is
+`inherit_capabilities_for_fork`: it walks the parent with `list_holder` and
+installs a child record with the same rights. It does not call `delegate` and
+does not require `Rights::DELEGATE` (`kernel/src/capability/mod.rs`). `fork`
+returns `EAGAIN` when `LINUX_MAX_PROC_ENTRIES` (6) is full. Fault exits publish
+a signalled wait status (`SIGSEGV` for page fault and general protection,
+`SIGILL` for invalid opcode) through `linux_proc/fault.rs` before teardown.
+With `m9-rootfs`, `exec_resolve::resolve_executable` calls
+`linux_fs::resolve_executable`. Without `m9-rootfs`, `/bin/busybox` and
+`/bin/sh` resolve to the M8 hello ELF (`LINUX_M8_FIXTURE`); the proc, exec-args,
+and runtime probe paths resolve only on their self-test features. `fork.rs`
+does not contain `linux_mem_clone_for_fork_stub` or
+`linux_signal_clone_for_fork_stub`.
 
 ### Acceptance
 
@@ -485,7 +491,7 @@ Production `teardown_current_process` / `teardown_process_by_id` call `release_f
 
 ## M8.4 — write and exit (#94)
 
-`kernel/src/syscall/linux/write.rs` and `exit.rs` replace the #93 placeholders in `table.rs`. Only `SYS_WRITE = 1` and `SYS_EXIT = 60` are wired; every other number (including `brk`, `arch_prctl`, `set_tid_address`, `exit_group`, `futex`, `mmap`) still takes the #93 unsupported path (`-ENOSYS`, bounded diagnostic, process continues). The handler type `LinuxSyscallHandler` and `LinuxSyscallContext { pid, instance_generation, frame }` are unchanged.
+`kernel/src/syscall/linux/write.rs` and `exit.rs` are the `write` and `exit` handlers. At M8.4 they were the only wired Linux syscalls. On `main`, `lookup_handler` in `kernel/src/syscall/linux/table.rs` also registers the calls listed under [Linux ABI on this branch](COMPATIBILITY.md#linux-abi-on-this-branch). `brk`, `arch_prctl`, `set_tid_address`, `exit_group`, and `mmap` have handlers when the features named there are enabled. `futex` still has no handler. A number with no handler still returns `-ENOSYS` with a bounded `[LNX ] unsupported syscall=<nr> errno=ENOSYS` line, and the process continues. The handler type `LinuxSyscallHandler` and `LinuxSyscallContext { pid, instance_generation, frame }` are unchanged. The rest of this section is the `write` and `exit` contract.
 
 ### `write(fd, buf, count)` — `rdi`, `rsi`, `rdx`
 

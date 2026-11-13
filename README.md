@@ -8,7 +8,19 @@ The project is intentionally a clean-sheet design. It is not intended to be anot
 
 ## Project status
 
-Very early research/design phase. The immediate engineering target is a Rust kernel booting under UEFI in QEMU with serial diagnostics. Real hardware comes later, after the execution, memory, IPC, capability, and device models are stable enough to debug sensibly.
+`cargo xtask run` builds the kernel with no Cargo features and boots it under QEMU. The boot tail in `kernel/src/boot/mod.rs` calls `initialize_scheduler`, which starts two kernel demo threads (`kernel/src/sched/dispatch.rs`, `kernel/src/sched/demo_tasks.rs`). That image does not launch a supervisor, a network service, a shell, or a Linux process. Those are separate feature builds, and the default image does not run them together.
+
+The milestone gates are separate kernels, each checking the markers named by `cargo xtask` help:
+
+- `test-m1` and `test-m2` build those self-test kernels and check their PASS markers.
+- `test-m3` runs the M3 acceptance boots in order.
+- `test-m4` is the recovery QEMU boot plus the M4.6 host policy tests. No supervisor runs in the default image.
+- `test-m5` is the block, storage, persistence, and crash-recovery acceptance.
+- `test-m6` is the capability host tests plus the fixture-smoke and QEMU constituents.
+- `test-m7` checks the network service against the hermetic fixture, whose TLS trust anchor is the committed test CA.
+- `test-m8` runs one static Linux hello ELF.
+- `test-m9` runs the 18 BusyBox commands in `fixtures/busybox/frozen/commands.toml`. `install_stdio_entries` opens file descriptors 1 and 2 only, so that gate has no stdin and is not an interactive shell.
+- `test-m10` runs every `test-m10-*` constituent, the `clean-slate-ui` host tests, and `test-qmp-smoke`, then `test-m10-desktop`. The compositor, desktop shell, and playground are in this tree. `cargo xtask run` does not enable `m10-desktop`, so it does not launch them.
 
 ## Design principles
 
@@ -122,5 +134,5 @@ for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
 dual licensed as above, without any additional terms or conditions.
 
 That dual licence covers the Rust code in this repository. It does not cover
-third-party material listed in [NOTICE](NOTICE). The BusyBox binary at
-fixtures/busybox/frozen/busybox is version 1.37.0 under GPL-2.0 only.
+third-party material listed in [NOTICE](NOTICE). `fixtures/busybox/frozen/busybox`
+is BusyBox 1.37.0 under GPL-2.0 only.

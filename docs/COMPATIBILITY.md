@@ -19,16 +19,15 @@ The user should not need to understand the implementation details in normal use.
 
 ## Linux compatibility
 
-The first practical compatibility target is Linux userspace. The M8.1 execution contract (personality boundary, syscall/errno encoding, initial stack/auxv layout) is documented in [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md).
+The first practical compatibility target is Linux userspace. The execution contract (personality boundary, syscall/errno encoding, initial stack/auxv layout) is documented in [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md).
 
-### Supported M8 Linux ABI
+### Linux ABI on this branch
 
-M8 runs an unmodified Linux x86-64 `ET_EXEC` ELF through the production Linux personality (#97). Supported syscalls:
+`cargo xtask test-m8` still runs one unmodified static Linux x86-64 `ET_EXEC` that writes stdout/stderr and exits ([M8 acceptance (#98)](LINUX_PERSONALITY.md#m8-acceptance-98)). That is not the whole table on `main`.
 
-- `write(1, …)` and `write(2, …)` — stdout/stderr via the capability-controlled fd projection (#95); payloads reach serial **verbatim** (no `[IPC ] console` framing).
-- `exit(status)` — production teardown (`teardown_current_process`); status is `status & 0xff`.
+`lookup_handler` in `kernel/src/syscall/linux/table.rs` registers `read`, `write`, `close`, `writev`, `dup2`, `fcntl`, `lseek`, and `exit`; the filesystem calls `open`, `stat`, `lstat`, `getcwd`, `mkdir`, and `getdents64`; the runtime calls `arch_prctl`, `brk`, `clock_gettime`, `getpid`, `geteuid`, `ioctl`, `mmap`, `munmap`, `nanosleep`, `poll`, `rt_sigaction`, `rt_sigprocmask`, `set_tid_address`, and `uname`; and the socket calls `socket`, `connect`, `bind`, `sendto`, and `recvmsg`. `pipe`, `fork`, `wait4`, `getppid`, `exit_group`, and `execve` are registered only when `m8-linux-image` is enabled. The runtime calls are not registered on the `m1-self-test`, `m2-double-fault-self-test`, and `m2-timer-self-test` builds. `futex` has no handler.
 
-Any other Linux syscall number returns `-ENOSYS` (`encode_rax(Err(ENOSYS))`) with bounded serial logging (`[LNX ] unsupported syscall=<nr> errno=ENOSYS`); never panic/fatal. Fixture provenance, rebuild, and verify: [M8_FIXTURE.md](M8_FIXTURE.md). Authoritative gate: `cargo xtask test-m8` ([M8 acceptance (#98)](LINUX_PERSONALITY.md#m8-acceptance-98)).
+A number with no handler returns `-ENOSYS` and logs `[LNX ] unsupported syscall=<nr> errno=ENOSYS` while the dispatch budget allows it. The process continues. `install_stdio_entries` opens file descriptors 1 and 2 only, so there is no stdin and no interactive shell. `cargo xtask test-m9` runs the 18 scripted commands in `fixtures/busybox/frozen/commands.toml`. Stdout and stderr still go out through the capability-controlled fd projection; payloads reach serial verbatim. `exit` still uses production teardown, and the recorded status is `status & 0xff`. M8 fixture provenance: [M8_FIXTURE.md](M8_FIXTURE.md).
 
 The project should begin by supporting unmodified ELF64 applications that expect the Linux syscall ABI. Compatibility can then grow toward a useful Linux environment with libc, shells, CLI tools, graphical applications, and package import.
 
