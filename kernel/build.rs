@@ -47,6 +47,11 @@ const ISA_IRQ_WITHOUT_BOOT_TAIL_FEATURES: &[&str] = &["m10-input-self-test"];
 /// these, sets `clean_slate_virtio_gpu`.
 const VIRTIO_GPU_WITHOUT_BOOT_TAIL_FEATURES: &[&str] = &["m10-virtio-gpu-self-test"];
 
+/// Builds that compile the COM1 receive path (`device::serial_console`). Any one of them sets
+/// `clean_slate_serial_console`, and with it `clean_slate_isa_irq` for the IRQ 4 route. Every
+/// other build leaves COM1 output-only, so input on the line is never echoed.
+const SERIAL_CONSOLE_FEATURES: &[&str] = &["serial-input-self-test"];
+
 fn any_feature_enabled(features: &[&str]) -> bool {
     features.iter().any(|feature| {
         let var = format!(
@@ -61,11 +66,16 @@ fn emit_boot_tail_cfgs() {
     println!("cargo::rustc-check-cfg=cfg(clean_slate_boot_tail)");
     println!("cargo::rustc-check-cfg=cfg(clean_slate_isa_irq)");
     println!("cargo::rustc-check-cfg=cfg(clean_slate_virtio_gpu)");
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_serial_console)");
     let boot_tail = !any_feature_enabled(BOOT_TAIL_COMPILED_OUT_FEATURES);
     if boot_tail {
         println!("cargo::rustc-cfg=clean_slate_boot_tail");
     }
-    if boot_tail || any_feature_enabled(ISA_IRQ_WITHOUT_BOOT_TAIL_FEATURES) {
+    let serial_console = any_feature_enabled(SERIAL_CONSOLE_FEATURES);
+    if serial_console {
+        println!("cargo::rustc-cfg=clean_slate_serial_console");
+    }
+    if boot_tail || serial_console || any_feature_enabled(ISA_IRQ_WITHOUT_BOOT_TAIL_FEATURES) {
         println!("cargo::rustc-cfg=clean_slate_isa_irq");
     }
     if boot_tail || any_feature_enabled(VIRTIO_GPU_WITHOUT_BOOT_TAIL_FEATURES) {

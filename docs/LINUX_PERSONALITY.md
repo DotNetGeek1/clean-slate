@@ -33,7 +33,7 @@ On `SYSCALL` (Linux x86-64):
 
 Decoded request shape: `LinuxSyscallRequest { nr, args: [u64; 6] }`.
 
-M8 required numbers: `SYS_WRITE = 1`, `SYS_EXIT = 60`. Any other number returns `-ENOSYS`; the process continues.
+M8 required `SYS_WRITE = 1` and `SYS_EXIT = 60`. In this tree the registered Linux syscalls are the set in [Supported Linux ABI](COMPATIBILITY.md#supported-linux-abi). A number with no handler returns `-ENOSYS` and the process continues.
 
 ## Load policies and VA windows (M9 / #142)
 
@@ -154,15 +154,21 @@ blocking (`WaitKey` namespace `0x50 << 56`: pipe reader
 (idempotent restart; no spin, no `EAGAIN`). Pipe `write` with no readers returns
 `EPIPE` (no `SIGPIPE` delivery in M9). `read(0)` front-end lives in
 `syscall/linux/fd.rs` (`ensure_open_fd`, 1024-byte scratch, kind dispatch); pipe
-bytes use `linux_proc/pipe::read_fd`. `fork` copies parent PTE flags faithfully
-(`mm/fork_clone.rs`, W^X preserved), delegates every parent capability via
-`list_holder` + `delegate`, and returns `EAGAIN` when `LINUX_MAX_PROC_ENTRIES`
-(6) is full. Fault exits publish `WIFSIGNALED` (`SIGSEGV` / `SIGILL`) through
-`linux_proc/fault.rs` + `teardown_process_by_id`. Until #101 lands,
-`linux_proc/exec_resolve.rs::resolve_executable(pid, gen, path, resolved_out)` stubs
-`/bin/busybox`, `/bin/sh`, and self-test fixture paths (orchestrator replaces with
-`linux_fs::resolve_executable`). `#103` stubs: `linux_mem_clone_for_fork_stub` /
-`linux_signal_clone_for_fork_stub` in `fork.rs`.
+bytes use `linux_proc/pipe::read_fd`. `fork` copies each parent user page into a new frame
+(`mm/fork_clone.rs`). The child PTE keeps the parent's present, user, writable,
+and no-execute bits (`user_copy_flags`). Capability inheritance is
+`inherit_capabilities_for_fork`: it walks the parent with `list_holder` and
+installs a child record with the same rights. It does not call `delegate` and
+does not require `Rights::DELEGATE` (`kernel/src/capability/mod.rs`). `fork`
+returns `EAGAIN` when `LINUX_MAX_PROC_ENTRIES` (6) is full. Fault exits publish
+a signalled wait status (`SIGSEGV` for page fault and general protection,
+`SIGILL` for invalid opcode) through `linux_proc/fault.rs` before teardown.
+With `m9-rootfs`, `exec_resolve::resolve_executable` calls
+`linux_fs::resolve_executable`. Without `m9-rootfs`, `/bin/busybox` and
+`/bin/sh` resolve to the M8 hello ELF (`LINUX_M8_FIXTURE`); the proc, exec-args,
+and runtime probe paths resolve only on their self-test features. `fork.rs`
+does not contain `linux_mem_clone_for_fork_stub` or
+`linux_signal_clone_for_fork_stub`.
 
 ### Acceptance
 
@@ -483,9 +489,25 @@ line against `linux_stdio_m9_payload::M9_STDIO_BLOCK_FNV`.
 
 Production `teardown_current_process` / `teardown_process_by_id` call `release_for_process` before IPC capability teardown. A replacement process with the same pid and a new generation gets a fresh table; lookups with a stale generation fail closed (`EBADF`). Holder capability slots are reclaimed so sequential relaunches do not grow endpoint/capability occupancy.
 
+## Serial console input (#218 S4)
+
+COM1 receive feeds a canonical-mode line discipline (`kernel/src/device/serial_console/`) that a future fd 0 reads. The receiver is compiled only with the `clean_slate_serial_console` cfg (today only `serial-input-self-test`) and is off until `serial_console::enable()` runs; every other build leaves IER at 0 and never echoes.
+
+- **Printable ASCII** (`0x20`–`0x7E`) is echoed and appended to the edit line.
+- **CR or LF** commits the line with a trailing `\n` and echoes `\r\n`. A CR LF pair is two lines, the second empty.
+- **BS or DEL** erases one byte and echoes `\b \b`; on an empty line it does nothing and echoes nothing.
+- **Ctrl-U** erases the whole edit line, echoing `\b \b` once per byte.
+- **Ctrl-D** on an empty line records one end-of-file, which is delivered after the committed bytes typed before it. Only one end-of-file can be pending, so a second one before the first is taken is dropped and counted. On a non-empty line, Ctrl-D commits the line without a newline, and a read stops at its end. Ctrl-D is not echoed.
+- **Every other byte** (other control bytes, bytes `0x80`–`0xFF`, escape sequences byte by byte) is dropped without echo and counted.
+- **Limits.** The edit line holds 256 typed bytes, so a full line commits as 257 bytes with its `\n`. Further printable bytes are dropped, not echoed, and counted; editing keys still work on a full line. The committed buffer holds 1024 bytes. A finished line that does not fit is echoed but held back whole, never split or truncated. While it is held back, every received byte is refused and counted, so a typed-ahead line can never be torn. The held line is committed when a read frees enough space.
+- **Reads.** `read` copies at most one line and stops after `\n`, at the end of a Ctrl-D line, or before a pending end-of-file. A small buffer gets a line in pieces. `would_block` is true when there is nothing to read and no end-of-file is next, and `take_eof` consumes the end-of-file once it is next. Committing a line or recording an end-of-file wakes waiters on `CONSOLE_INPUT_KEY` from the IRQ (with no waiters this is a no-op), then calls the optional input notifier.
+- **UART errors.** A byte with a framing, parity or break error is discarded and counted. A receive overrun (bytes the 16-byte FIFO lost) is counted, since the bytes are already gone. One interrupt drains at most 16 bytes and re-arms IER if the UART still has an interrupt pending, so a stuck or flooding line cannot hold the CPU in the handler. Echo is written from the interrupt, at most three bytes per byte read, except that Ctrl-U on a full line echoes 768.
+- **Sharing COM1 with kernel output.** There is no lock. Every kernel write (`serial_write_fmt`, `serial_write_bytes`, the fatal and panic paths) emits its whole record with interrupts masked, and the receive interrupt runs with interrupts masked, so echo lands between records, never inside one, and nothing can deadlock on the port. Reading the line status on the transmit path clears the receive error bits; the transmit path hands them to the receive interrupt so the flagged byte is still discarded.
+- **Not supported:** raw or non-canonical mode, termios or `ioctl`, `VINTR`/`VQUIT`/`VSUSP` (Ctrl-C, Ctrl-\ and Ctrl-Z are ordinary dropped control bytes, not signals), job control, UTF-8 or other multibyte input, and output processing beyond the echo listed above.
+
 ## M8.4 — write and exit (#94)
 
-`kernel/src/syscall/linux/write.rs` and `exit.rs` replace the #93 placeholders in `table.rs`. Only `SYS_WRITE = 1` and `SYS_EXIT = 60` are wired; every other number (including `brk`, `arch_prctl`, `set_tid_address`, `exit_group`, `futex`, `mmap`) still takes the #93 unsupported path (`-ENOSYS`, bounded diagnostic, process continues). The handler type `LinuxSyscallHandler` and `LinuxSyscallContext { pid, instance_generation, frame }` are unchanged.
+`kernel/src/syscall/linux/write.rs` and `exit.rs` are the `write` and `exit` handlers. At M8.4 they were the only wired Linux syscalls. In this tree, `lookup_handler` in `kernel/src/syscall/linux/table.rs` also registers the calls listed under [Supported Linux ABI](COMPATIBILITY.md#supported-linux-abi). `brk`, `arch_prctl`, `set_tid_address`, `exit_group`, and `mmap` have handlers when the features named there are enabled. `futex` still has no handler. A number with no handler still returns `-ENOSYS` with a bounded `[LNX ] unsupported syscall=<nr> errno=ENOSYS` line, and the process continues. The handler type `LinuxSyscallHandler` and `LinuxSyscallContext { pid, instance_generation, frame }` are unchanged. The rest of this section is the `write` and `exit` contract.
 
 ### `write(fd, buf, count)` — `rdi`, `rsi`, `rdx`
 
@@ -579,14 +601,16 @@ see [M8_FIXTURE.md](M8_FIXTURE.md) and [M8.7 — integrated launch path (#97)](#
 
 ### What it proves
 
-Ordered phases (`[M8  ] step N/5 <name>`):
+Ordered phases (`[M8  ] step N/7 <name>`):
 
 1. `verify-m8-fixture` — SHA-256 + pinned ELF metadata for the committed hello binary.
 2. `clean-slate-elf` host tests — segment-aware load-plan foundation (#129).
 3. `clean-slate-linux-abi` host tests — errno/syscall/stack contract (#91).
 4. `linux-image loader (host)` — `#92` `process::linux_image` + malformed corpus
    (`cargo test -p clean-slate-kernel --features m8-linux-image process::linux_image`).
-5. `test-m8-linux-hello` — composed once (self-test then production QEMU); not
+5. `test-m8-linux-image` — M8.2 ELF loader self-test boot.
+6. `test-m8-linux-dispatch` — M8.3 personality dispatch self-test boot.
+7. `test-m8-linux-hello` — composed once (self-test then production QEMU); not
    re-booted inside the aggregate.
 
 ### Marker order (production build first for launch/output/exit)

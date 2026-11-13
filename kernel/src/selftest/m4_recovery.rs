@@ -30,6 +30,7 @@ use crate::mm::paging::current_root_frame_address;
 use crate::mm::paging::zero_page;
 use crate::mm::phys_to_virt;
 use crate::mm::PAGE_SIZE;
+use crate::process::domain::remaining_owned_resource_count;
 use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
@@ -147,7 +148,6 @@ pub(crate) struct RecoverySelfTestState {
     bootstrap_frame: u64,
     skip_workload_respawn_once: bool,
     gen2_ready_poll_pending: Option<ServiceInstanceId>,
-    last_faulted_service_pid: u64,
     gen1_health_observed: bool,
     gen1_fault_inject_blocked: bool,
     gen1_inject_logged: bool,
@@ -613,13 +613,6 @@ pub(crate) fn observe_recovery_supervisor_line(sender_pid: u64, message: &str) {
         if message.contains(GEN1_HEALTH_MARKER) {
             recovery_note_gen1_health_emitted(state);
         }
-        if message.contains("failure service=16640 pid=") && state.last_faulted_service_pid != 0 {
-            kernel_log_fmt(format_args!(
-                "[PROC] teardown pid={} resources=0\n",
-                state.last_faulted_service_pid
-            ));
-            state.last_faulted_service_pid = 0;
-        }
         if message.contains("[M4  ] PASS") {
             state.stage = RecoveryStage::Complete;
         }
@@ -732,7 +725,6 @@ pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
             bootstrap_frame,
             skip_workload_respawn_once: false,
             gen2_ready_poll_pending: None,
-            last_faulted_service_pid: 0,
             gen1_health_observed: false,
             gen1_fault_inject_blocked: false,
             gen1_inject_logged: false,
@@ -994,7 +986,10 @@ pub(crate) fn observe_recovery_fault_after_containment(
         return Err("recovery fault event pid diverged from faulted process");
     }
     state.harness.on_faulted(fault_event.instance);
-    state.last_faulted_service_pid = pid;
+    let resources = remaining_owned_resource_count(pid);
+    kernel_log_fmt(format_args!(
+        "[PROC] teardown pid={pid} resources={resources}\n"
+    ));
     state.service_process = None;
     state.stage = RecoveryStage::Faulted;
     publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = recovery_clock_ticks() + 1);

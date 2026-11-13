@@ -1,4 +1,5 @@
-//! Linux syscall handler table (M8: `write` and `exit` only, #94).
+//! Linux syscall dispatch table. Core arms live in this file; the filesystem,
+//! process, runtime, and socket families register from their own modules.
 
 use super::exit::handle_sys_exit;
 use super::fd::{
