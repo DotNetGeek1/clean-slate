@@ -45,10 +45,7 @@ use personality::ExecutionPersonality;
 
 pub(super) const KERNEL_PROCESS_ID: u64 = 0;
 /// Fixed process-registry bound; Linux fd registry capacity (#95) is derived from this.
-#[cfg(feature = "m6-capabilities-self-test")]
-pub(crate) const PROCESS_REGISTRY_CAPACITY: usize = 12;
-#[cfg(not(feature = "m6-capabilities-self-test"))]
-pub(crate) const PROCESS_REGISTRY_CAPACITY: usize = 8;
+pub(crate) use crate::limits::PROCESS_REGISTRY_CAPACITY;
 
 /// Trusted userspace process id from the current scheduler thread (never from syscall args).
 pub(crate) fn current_process_id() -> Result<u64, &'static str> {

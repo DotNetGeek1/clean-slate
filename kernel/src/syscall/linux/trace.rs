@@ -68,19 +68,76 @@ pub(crate) const fn classify_errno(errno: LinuxErrno) -> LinuxTraceReason {
 
 const RING_CAPACITY: usize = 32;
 const MAX_PROCESS_TRACE_SLOTS: usize = 16;
-#[cfg(feature = "m9-linux-trace-self-test")]
-const GLOBAL_MAX_TOKENS: u32 = 32;
-#[cfg(not(feature = "m9-linux-trace-self-test"))]
+/// Production trace budget. The trace self-test installs a smaller,
+/// non-refilling budget through [`set_trace_budget`] before it floods.
 const GLOBAL_MAX_TOKENS: u32 = 64;
-#[cfg(feature = "m9-linux-trace-self-test")]
-const PER_PROCESS_MAX_TOKENS: u32 = 16;
-#[cfg(not(feature = "m9-linux-trace-self-test"))]
 const PER_PROCESS_MAX_TOKENS: u32 = 32;
+const TOKENS_PER_TICK: u32 = 2;
 
 #[cfg(feature = "m9-linux-trace-self-test")]
-const TOKENS_PER_TICK: u32 = 0;
-#[cfg(not(feature = "m9-linux-trace-self-test"))]
-const TOKENS_PER_TICK: u32 = 2;
+struct TraceBudget {
+    global_max: u32,
+    per_process_max: u32,
+    tokens_per_tick: u32,
+}
+
+#[cfg(feature = "m9-linux-trace-self-test")]
+static TRACE_BUDGET: crate::sync::global_cell::GlobalCell<TraceBudget> =
+    crate::sync::global_cell::GlobalCell::new(TraceBudget {
+        global_max: GLOBAL_MAX_TOKENS,
+        per_process_max: PER_PROCESS_MAX_TOKENS,
+        tokens_per_tick: TOKENS_PER_TICK,
+    });
+
+#[cfg(feature = "m9-linux-trace-self-test")]
+fn global_max_tokens() -> u32 {
+    unsafe { (*TRACE_BUDGET.get()).global_max }
+}
+
+fn per_process_max_tokens() -> u32 {
+    #[cfg(feature = "m9-linux-trace-self-test")]
+    {
+        return unsafe { (*TRACE_BUDGET.get()).per_process_max };
+    }
+    #[cfg(not(feature = "m9-linux-trace-self-test"))]
+    {
+        PER_PROCESS_MAX_TOKENS
+    }
+}
+
+fn tokens_per_tick() -> u32 {
+    #[cfg(feature = "m9-linux-trace-self-test")]
+    {
+        return unsafe { (*TRACE_BUDGET.get()).tokens_per_tick };
+    }
+    #[cfg(not(feature = "m9-linux-trace-self-test"))]
+    {
+        TOKENS_PER_TICK
+    }
+}
+
+/// Trace state using the active budget. The const constructor stays at the
+/// production values so the static initialiser needs no runtime cell.
+#[cfg(feature = "m9-linux-trace-self-test")]
+fn trace_state_with_active_budget() -> LinuxTraceState {
+    let mut state = LinuxTraceState::new();
+    state.global_bucket = TokenBucket::new(global_max_tokens());
+    state
+}
+
+/// Install the trace lane's own budget. Compiled only for that self-test, so
+/// an integrated image has no setter.
+#[cfg(feature = "m9-linux-trace-self-test")]
+pub(crate) fn set_trace_budget(global_max: u32, per_process_max: u32, tokens_per_tick: u32) {
+    unsafe {
+        *TRACE_BUDGET.get() = TraceBudget {
+            global_max,
+            per_process_max,
+            tokens_per_tick,
+        };
+        *LINUX_TRACE_STATE.get() = trace_state_with_active_budget();
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TraceIdentity {
@@ -129,7 +186,7 @@ impl TokenBucket {
         }
         let elapsed = now - self.last_tick;
         self.last_tick = now;
-        let added = elapsed.saturating_mul(TOKENS_PER_TICK as u64) as u32;
+        let added = elapsed.saturating_mul(tokens_per_tick() as u64) as u32;
         self.tokens = self.tokens.saturating_add(added).min(self.max_tokens);
     }
 
@@ -239,7 +296,7 @@ impl LinuxTraceState {
             if !slot.active() {
                 self.processes[index] = PerProcessTrace {
                     identity,
-                    bucket: TokenBucket::new(PER_PROCESS_MAX_TOKENS),
+                    bucket: TokenBucket::new(per_process_max_tokens()),
                     pending_drops: 0,
                 };
                 return index;
@@ -248,7 +305,7 @@ impl LinuxTraceState {
         // Evict the oldest slot (index 0) — bounded, not unbounded.
         self.processes[0] = PerProcessTrace {
             identity,
-            bucket: TokenBucket::new(PER_PROCESS_MAX_TOKENS),
+            bucket: TokenBucket::new(per_process_max_tokens()),
             pending_drops: 0,
         };
         0
@@ -563,7 +620,7 @@ pub(crate) fn flush_all_pending_drops() {
 #[cfg(feature = "m9-linux-trace-self-test")]
 pub(crate) fn reset_trace_state() {
     unsafe {
-        *LINUX_TRACE_STATE.get() = LinuxTraceState::new();
+        *LINUX_TRACE_STATE.get() = trace_state_with_active_budget();
     }
 }
 

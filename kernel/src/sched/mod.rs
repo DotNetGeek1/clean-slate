@@ -9,50 +9,11 @@ pub(crate) mod timeout;
 pub(crate) mod wait;
 pub(crate) mod work_set;
 
-/// Application / userspace thread slots (`MAX_WAITERS` matches this count).
-pub(super) const TASK_COUNT: usize = task_count_for_features();
 /// Includes one dedicated idle thread slot at `IDLE_THREAD_INDEX`.
-pub(super) const SCHEDULER_THREAD_SLOTS: usize = TASK_COUNT + 1;
+pub(super) use crate::limits::SCHEDULER_THREAD_SLOTS;
+/// Application / userspace thread slots (`MAX_WAITERS` matches this count).
+pub(super) use crate::limits::TASK_COUNT;
 pub(super) const IDLE_THREAD_INDEX: usize = TASK_COUNT;
-
-const fn task_count_for_features() -> usize {
-    if cfg!(feature = "m6-revocation-self-test") {
-        8
-    } else if cfg!(feature = "m6-capabilities-self-test") {
-        9
-    } else if cfg!(feature = "m10-shared-buffer-self-test") {
-        7
-    } else if cfg!(any(
-        feature = "m4-recovery-self-test",
-        feature = "m6-fixture-smoke-self-test",
-        feature = "m6-process-control-self-test",
-        feature = "m6-delegation-self-test",
-        feature = "m7-net-caps-self-test",
-        feature = "m10-port-self-test",
-        feature = "m7-net-service-self-test",
-        feature = "m6-object-self-test",
-        feature = "m6-audit-self-test",
-        // #107: storage(0)+net(1)+spinner(5)+shell+fork child (#100 pipe-grep peak).
-        feature = "m9-userspace-self-test"
-    )) {
-        6
-    } else if cfg!(feature = "m10-desktop") {
-        // #118: 2 boot demo tasks, then compositor, shell and app, plus one spare. A replacement
-        // starts only after its predecessor's teardown has freed its slot (#227).
-        6
-    } else if cfg!(feature = "m8-linux-hello") {
-        3
-    } else if cfg!(any(
-        feature = "m9-linux-proc-self-test",
-        feature = "m9-linux-trace-self-test"
-    )) {
-        6
-    } else if cfg!(feature = "m9-syscall-fail-closed-self-test") {
-        4
-    } else {
-        2
-    }
-}
 use crate::arch::x86_64::context_switch::set_next_task;
 use crate::arch::x86_64::context_switch::TaskStack;
 use crate::arch::x86_64::context_switch::FRESH_TASK_SENTINEL;

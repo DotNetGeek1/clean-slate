@@ -90,7 +90,8 @@ const READ_BATCH_RECORDS: u64 = 8;
 const _: () = assert!(READ_BATCH_RECORDS as usize * RAW_INPUT_RECORD_BYTES <= 512);
 const KERNEL_BUFFER_ADDRESS: u64 = 0xFFFF_8000_0000_0000;
 
-/// Scheduler slot `TASK_COUNT` (2) is the idle thread, so the lane has two user slots.
+/// This lane drives two fixtures, in scheduler slots 0 and 1. Idle is
+/// `TASK_COUNT`, which is no longer 2.
 const FIXTURES: usize = 2;
 const CONSUMER: usize = 0;
 const SECOND: usize = 1;

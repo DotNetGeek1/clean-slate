@@ -27,7 +27,8 @@ use clean_slate_service_lifecycle::ServiceLifecycleState;
 use clean_slate_service_lifecycle::TransitionError;
 use clean_slate_service_lifecycle::TransitionInput;
 
-const SERVICE_REGISTRY_CAPACITY: usize = 4;
+use crate::limits::SERVICE_REGISTRY_CAPACITY;
+
 const SERVICE_PENDING_EVENTS: usize = 16;
 const SERVICE_TERMINATE_STATUS: u64 = 0;
 #[cfg(feature = "m4-recovery-self-test")]
