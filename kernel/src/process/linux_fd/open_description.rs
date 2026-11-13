@@ -97,8 +97,8 @@ pub(crate) struct OpenDescription {
 ///
 /// Justification: at most [`super::LINUX_FD_TABLE_CAPACITY`] unique descriptions
 /// per live process × [`crate::process::PROCESS_REGISTRY_CAPACITY`] processes
-/// in the worst case (no sharing). 48 slots = 6× headroom over 8×16=128 upper
-/// bound is intentionally tighter to keep kernel RAM fixed; exhaustion returns
+/// in the worst case (no sharing). The pool stays at 48, tighter than that
+/// product, so kernel RAM does not grow with the registry; exhaustion returns
 /// `ENFILE` and is covered by host tests.
 pub(crate) const OPEN_DESCRIPTION_CAPACITY: usize = 48;
 

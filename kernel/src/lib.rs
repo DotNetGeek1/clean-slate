@@ -38,6 +38,7 @@ mod device;
 mod diagnostics;
 mod interrupt;
 mod ipc;
+mod limits;
 mod mm;
 mod process;
 mod sched;

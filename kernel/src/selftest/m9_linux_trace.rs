@@ -54,7 +54,11 @@ pub(crate) enum TraceExitHook {
 
 const M9_TRACE_CYCLES: u32 = 2;
 const LINUX_SLOT: usize = 0;
-/// Enough unsupported syscalls to exhaust the self-test token budget (see `GLOBAL_MAX_TOKENS`).
+/// Enough unsupported syscalls to exhaust the budget installed below
+/// (32 global tokens, 16 per process, no refill).
+const TRACE_SELF_TEST_GLOBAL_MAX_TOKENS: u32 = 32;
+const TRACE_SELF_TEST_PER_PROCESS_MAX_TOKENS: u32 = 16;
+const TRACE_SELF_TEST_TOKENS_PER_TICK: u32 = 0;
 const FLOOD_COUNT: u32 = 128;
 
 static M9_LINUX_PID: AtomicU64 = AtomicU64::new(0);
@@ -330,6 +334,11 @@ pub(crate) fn after_probe_exit_group(
 }
 
 pub(crate) fn start_m9_linux_trace_self_test(allocator: PageAllocator) -> ! {
+    crate::syscall::linux::trace::set_trace_budget(
+        TRACE_SELF_TEST_GLOBAL_MAX_TOKENS,
+        TRACE_SELF_TEST_PER_PROCESS_MAX_TOKENS,
+        TRACE_SELF_TEST_TOKENS_PER_TICK,
+    );
     install_service_lifecycle_syscall_allocator(allocator);
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()

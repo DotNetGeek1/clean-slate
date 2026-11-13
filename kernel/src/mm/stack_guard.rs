@@ -40,12 +40,12 @@ use x86_64::structures::paging::PageTableFlags;
 use x86_64::PhysAddr;
 use x86_64::VirtAddr;
 
+use crate::limits::MAX_GUARDED_STACKS;
+
 const TWO_MIB: u64 = 2 * 1024 * 1024;
 const ONE_GIB: u64 = 1024 * 1024 * 1024;
 /// PAT selector bit of a 2 MiB / 1 GiB leaf (bit 12, inside the address field).
 const HUGE_LEAF_PAT_BIT: u64 = 1 << 12;
-/// Task slots plus the boot stack and the double-fault IST stack.
-const MAX_GUARDED_STACKS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KernelStackKind {

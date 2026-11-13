@@ -56,11 +56,21 @@ pub(crate) const M9_MAP_FAILURE_ROLLBACK_MARKER: &str =
 /// Repetitions of each failing call; one leaked frame per call would show as
 /// thousands of missing frames.
 const MAP_FAILURE_ATTEMPTS: u64 = 2048;
-/// Inside the 2 MiB the offender's code already uses, so no call in the probe
-/// needs a new page-table frame.
+/// Mapping-table slots left empty when the probe samples `mappings_before`.
+/// The refused `brk` then asks for `MAPPING_TABLE_HEADROOM + 1` pages and
+/// rolls back only the headroom.
+const MAPPING_TABLE_HEADROOM: usize = 2;
+/// The hole below the mmap window, the offender's code page and the window
+/// all sit in the one 2 MiB span whose page table that code page already
+/// populated. The refused `brk` stays in the hole, so it allocates no
+/// page-table frame. The window is the rest of that span, which is large
+/// enough to fill the mapping table before the measurement.
 const PROBE_BRK_BASE: u64 = USER_TEST_CODE_ADDRESS + 0x8000;
 const PROBE_MMAP_WINDOW: Range<u64> =
-    USER_TEST_CODE_ADDRESS + 0x10000..USER_TEST_CODE_ADDRESS + 0x20000;
+    USER_TEST_CODE_ADDRESS + 0x10000..USER_TEST_CODE_ADDRESS + 0x20_0000;
+const PROBE_BRK_HOLE_PAGES: u64 = (PROBE_MMAP_WINDOW.start - PROBE_BRK_BASE) / PAGE_SIZE;
+// `HEADROOM < hole` is `HEADROOM + 1` pages fitting in the hole.
+const _: () = assert!((MAPPING_TABLE_HEADROOM as u64) < PROBE_BRK_HOLE_PAGES);
 
 /// Registry poison value for the offender; must not be `0` (a transient CR3 of zero
 /// would match and let native dispatch loop instead of fail-closed).
@@ -266,6 +276,37 @@ fn prove_failed_maps_release_their_frames(pid: u64) {
 
     let mapped = mmap_page(0, read_write, anonymous)
         .unwrap_or_else(|_| fatal_kernel_error("m9 map probe: first mmap failed"));
+    let (_, mappings_at_fill) = user_space(pid);
+    let frames_at_fill = free_frames();
+    let fill_target = MAX_ADDRESS_SPACE_USER_MAPPINGS - MAPPING_TABLE_HEADROOM;
+    if mappings_at_fill > fill_target {
+        fatal_kernel_error("m9 map probe filler started past the mapping headroom");
+    }
+    let filler_pages = (fill_target - mappings_at_fill) as u64;
+    let filler_addr = PROBE_MMAP_WINDOW.start;
+    let filler_len = filler_pages * PAGE_SIZE;
+    let filler_end = filler_addr + filler_len;
+    if filler_end > PROBE_MMAP_WINDOW.end || filler_end > mapped {
+        fatal_kernel_error("m9 map probe filler does not fit beside the probe mmap");
+    }
+    match sys_mmap(
+        filler_addr,
+        filler_len,
+        read_write,
+        anonymous | MAP_FIXED,
+        -1,
+        0,
+        pid,
+        generation,
+    ) {
+        Ok(addr) if addr == filler_addr => {}
+        Ok(_) => fatal_kernel_error("m9 map probe filler mmap returned an unexpected address"),
+        Err(_) => fatal_kernel_error("m9 map probe filler mmap failed"),
+    }
+    let (_, filled) = user_space(pid);
+    if filled != fill_target {
+        fatal_kernel_error("m9 map probe filler did not leave the mapping headroom");
+    }
     let (root, mappings_before) = user_space(pid);
     let frames_before = free_frames();
 
@@ -332,6 +373,20 @@ fn prove_failed_maps_release_their_frames(pid: u64) {
         fatal_kernel_error("m9 failed mmap/brk leaked frames or mappings");
     }
     kernel_log_line(M9_MAP_FAILURE_ROLLBACK_MARKER);
+    if sys_munmap(filler_addr, filler_len, pid, generation).is_err() {
+        fatal_kernel_error("m9 map probe could not unmap the filler");
+    }
+    let (_, mappings_released) = user_space(pid);
+    let frames_released = free_frames();
+    kernel_log_fmt(format_args!(
+        "[M9.C] map probe filler release frames before_fill={frames_at_fill} after_unmap={frames_released} mappings before_fill={mappings_at_fill} after_unmap={mappings_released}\n"
+    ));
+    if mappings_released != mappings_at_fill {
+        fatal_kernel_error("m9 map probe filler unmap did not restore the mapping count");
+    }
+    if frames_released != frames_at_fill {
+        fatal_kernel_error("m9 map probe filler unmap did not restore the free-frame count");
+    }
 }
 
 pub(crate) fn observe_syscall_fail_closed(reason: &'static str, torn_down_pid: u64) {

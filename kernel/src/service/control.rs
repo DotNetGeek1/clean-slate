@@ -27,13 +27,10 @@ use clean_slate_service_lifecycle::ServiceLifecycleState;
 use clean_slate_service_lifecycle::TransitionError;
 use clean_slate_service_lifecycle::TransitionInput;
 
-const SERVICE_REGISTRY_CAPACITY: usize = 4;
+use crate::limits::SERVICE_REGISTRY_CAPACITY;
+
 const SERVICE_PENDING_EVENTS: usize = 16;
 const SERVICE_TERMINATE_STATUS: u64 = 0;
-#[cfg(feature = "m4-recovery-self-test")]
-const SERVICE_SCHEDULER_SLOT_START: usize = 2;
-#[cfg(not(feature = "m4-recovery-self-test"))]
-const SERVICE_SCHEDULER_SLOT_START: usize = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LiveServiceInstance {
@@ -101,7 +98,7 @@ impl ServiceLifecycleController {
             services: [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY],
             pending: [None; SERVICE_PENDING_EVENTS],
             pending_count: 0,
-            next_scheduler_slot: SERVICE_SCHEDULER_SLOT_START,
+            next_scheduler_slot: 0,
             kernel_root_frame: 0,
         }
     }
@@ -112,7 +109,14 @@ impl ServiceLifecycleController {
         self.services = [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY];
         self.pending = [None; SERVICE_PENDING_EVENTS];
         self.pending_count = 0;
-        self.next_scheduler_slot = SERVICE_SCHEDULER_SLOT_START;
+        self.next_scheduler_slot = 0;
+    }
+
+    /// First scheduler slot a later service launch may take. Recovery occupies
+    /// slots 0 and 1 itself and sets this to 2 after [`Self::clear`].
+    #[cfg(feature = "m4-recovery-self-test")]
+    pub(crate) fn set_scheduler_slot_start(&mut self, slot: usize) {
+        self.next_scheduler_slot = slot;
     }
 
     #[allow(dead_code)]
@@ -1013,8 +1017,8 @@ mod tests {
                     0x1000,
                 )
                 .expect("occupy slot zero");
-            // TASK_COUNT varies by feature; occupy every slot from 2 up so the
-            // search from next_scheduler_slot=2 must wrap to empty slot 1.
+            // Occupy every slot from 2 up so the search from
+            // next_scheduler_slot=2 must wrap to empty slot 1.
             let capacity = crate::sched::scheduler_mut().thread_capacity();
             for slot in 2..capacity {
                 let id = slot as u64 + 1;
