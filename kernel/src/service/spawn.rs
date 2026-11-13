@@ -613,7 +613,7 @@ pub(crate) fn launch_builtin_service(
         }
         #[cfg(feature = "m7-net-service-self-test")]
         BuiltinServiceImage::NetworkUserspacePayload => {
-            launch_network_userspace_service(allocator, kernel_stack_top, scheduler_slot, service)
+            launch_network_userspace_service(allocator, kernel_stack_top, scheduler_slot, context)
         }
         #[cfg(feature = "m8-linux-hello")]
         BuiltinServiceImage::LinuxHello => {
@@ -1394,9 +1394,10 @@ fn launch_network_userspace_service(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
     scheduler_slot: usize,
-    service: ServiceId,
+    context: LaunchContext,
 ) -> Result<SpawnedServiceInstance, &'static str> {
-    let bootstrap = crate::selftest::m7_net_service::network_service_bootstrap(service)?;
+    let spec = context.spec.ok_or("network service has no manifest row")?;
+    let bootstrap = NetworkServiceBootstrap::new(spec.mode, u64::from(context.generation.0));
     launch_network_userspace_with_bootstrap(allocator, kernel_stack_top, scheduler_slot, bootstrap)
 }
 
