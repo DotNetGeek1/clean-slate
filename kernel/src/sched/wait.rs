@@ -236,7 +236,10 @@ pub(crate) fn waiter_occupancy() -> usize {
 }
 
 /// Whether `pid` has an active waiter on a key satisfying `matches`.
-#[cfg(feature = "m10-port-self-test")]
+#[cfg(any(
+    feature = "m10-port-self-test",
+    feature = "m4-service-lifecycle-self-test"
+))]
 pub(crate) fn has_waiter_where(pid: u64, matches: impl Fn(WaitKey) -> bool) -> bool {
     without_interrupts(|| {
         wait_table_mut()

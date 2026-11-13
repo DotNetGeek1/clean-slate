@@ -1,14 +1,11 @@
 //! M4.2 service lifecycle control acceptance: capability-gated launch, terminate,
-//! and restart with fresh instance identity markers.
+//! and restart with fresh instance identity markers, then the `LIFECYCLE_WAIT`
+//! acceptance in `m4_lifecycle_wait`.
 
 #[cfg(feature = "m4-service-lifecycle-self-test")]
 use crate::diagnostics::log::kernel_log_line;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
 use crate::diagnostics::qemu::fatal_kernel_error;
-#[cfg(feature = "m4-service-lifecycle-self-test")]
-use crate::diagnostics::qemu::qemu_exit;
-#[cfg(feature = "m4-service-lifecycle-self-test")]
-use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
 use crate::mm::frame_allocator::PageAllocator;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
@@ -133,6 +130,5 @@ pub(crate) fn start_service_lifecycle_self_test(allocator: PageAllocator) -> ! {
         _ => fatal_kernel_error("unauthorized lifecycle control was accepted"),
     }
     kernel_log_line(SERVICE_LIFECYCLE_UNAUTHORIZED_MARKER);
-    kernel_log_line(SERVICE_LIFECYCLE_PASS_MARKER);
-    qemu_exit(QEMU_EXIT_SUCCESS)
+    super::m4_lifecycle_wait::start_lifecycle_wait_self_test(allocator, replacement_event)
 }

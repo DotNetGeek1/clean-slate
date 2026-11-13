@@ -7,6 +7,7 @@ use crate::process::process_registry_mut;
 use crate::service::capability::LifecycleControlCapabilityError;
 use crate::service::capability::{BlockDeviceCapabilityError, BlockDeviceCapabilityTable};
 use crate::service::grants::{apply_instance_grants, InstanceGrantAuthority};
+use crate::service::lifecycle_wait::wake_lifecycle_waiters;
 use crate::service::spawn::{launch_builtin_service, LaunchContext};
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_service_fixtures::manifest::{find_service, Grant, ServiceSpec, SYSTEM_MANIFEST};
@@ -33,6 +34,9 @@ use crate::limits::SERVICE_REGISTRY_CAPACITY;
 
 const SERVICE_PENDING_EVENTS: usize = 16;
 const SERVICE_TERMINATE_STATUS: u64 = 0;
+
+// Init declares every system service, so the registry must hold the whole manifest.
+const _: () = assert!(SYSTEM_MANIFEST.len() <= SERVICE_REGISTRY_CAPACITY);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LiveServiceInstance {
@@ -141,6 +145,7 @@ impl ServiceLifecycleController {
             .ok_or(Self::event_queue_full_error())?;
         *slot = Some(event);
         self.pending_count += 1;
+        wake_lifecycle_waiters();
         Ok(())
     }
 
@@ -166,17 +171,20 @@ impl ServiceLifecycleController {
                 )
             {
                 *pending = Some(event);
+                wake_lifecycle_waiters();
                 return Ok(());
             }
         }
         if let Some(slot) = self.pending.iter_mut().find(|entry| entry.is_none()) {
             *slot = Some(event);
             self.pending_count = self.pending_count.saturating_add(1);
+            wake_lifecycle_waiters();
             return Ok(());
         }
         if let Some(slot) = self.pending.first_mut() {
             *slot = Some(event);
             self.pending_count = SERVICE_PENDING_EVENTS;
+            wake_lifecycle_waiters();
             return Ok(());
         }
         Ok(())
@@ -224,6 +232,22 @@ impl ServiceLifecycleController {
     ) -> Result<Option<LifecycleEvent>, LifecycleControlError> {
         self.authorize_lifecycle_control(supervisor_pid, capability_handle)?;
         self.poll_pending_event(service)
+    }
+
+    /// The service of some pending message, left queued for [`Self::poll_pending_event`].
+    /// Authorized exactly as a poll is.
+    pub(crate) fn pending_service_authorized(
+        &self,
+        supervisor_pid: u64,
+        capability_handle: u64,
+    ) -> Result<Option<ServiceId>, LifecycleControlError> {
+        self.authorize_lifecycle_control(supervisor_pid, capability_handle)?;
+        Ok(self
+            .pending
+            .iter()
+            .flatten()
+            .map(|event| event.instance.service)
+            .find(|service| service.0 != 0))
     }
 
     #[allow(dead_code)]
@@ -363,6 +387,16 @@ impl ServiceLifecycleController {
     ) -> Result<u64, &'static str> {
         self.capabilities
             .grant_lifecycle_control_capability(holder_pid)
+    }
+
+    /// A capability of another kind for the lifecycle-wait refusal check.
+    #[cfg(feature = "m4-service-lifecycle-self-test")]
+    pub(crate) fn grant_block_device_capability_for_self_test(
+        &mut self,
+        holder_pid: u64,
+    ) -> Result<u64, &'static str> {
+        self.block_capabilities
+            .grant_block_device_capability(holder_pid, STORAGE_BLOCK_DEVICE_ID)
     }
 
     pub(crate) fn acquire_block_device_capability(
@@ -1535,6 +1569,222 @@ mod tests {
             .expect("event");
         assert_eq!(
             controller.authorize_block_device_request(77, handle, STORAGE_BLOCK_DEVICE_ID),
+            Err(LifecycleControlError::StaleHandle)
+        );
+    }
+
+    #[test]
+    fn registry_holds_eight_services_and_refuses_the_ninth() {
+        assert_eq!(SERVICE_REGISTRY_CAPACITY, 8);
+        let mut controller = ServiceLifecycleController::new();
+        for id in 1..=8 {
+            controller
+                .declare_service(ServiceId(id))
+                .expect("declare within capacity");
+        }
+        assert_eq!(
+            controller.declare_service(ServiceId(9)),
+            Err("service registry capacity exceeded")
+        );
+        assert!(controller.find_service(ServiceId(9)).is_none());
+        for id in 1..=8 {
+            assert!(controller.find_service(ServiceId(id)).is_some());
+        }
+        assert_eq!(
+            controller.declare_service(ServiceId(8)),
+            Err("service was already declared")
+        );
+    }
+
+    fn live_record(service: ServiceId, pid: u64) -> ServiceRecord {
+        ServiceRecord {
+            service,
+            state: ServiceLifecycleState::Running,
+            authoritative_generation: InstanceGeneration(1),
+            live: Some(LiveServiceInstance {
+                pid,
+                tid: 1,
+                domain_id: pid,
+                generation: InstanceGeneration(1),
+                scheduler_slot: 0,
+            }),
+        }
+    }
+
+    fn event_for(service: ServiceId, pid: u64, kind: LifecycleEventKind) -> LifecycleEvent {
+        LifecycleEvent::new(
+            ServiceInstanceId::new(
+                service,
+                InstanceGeneration(1),
+                ProcessId(pid),
+                DomainId(pid),
+            ),
+            kind,
+        )
+    }
+
+    /// Runs `queue` and returns how many lifecycle wakes it requested.
+    fn wakes_during(queue: impl FnOnce()) -> u64 {
+        let before = crate::service::lifecycle_wait::test_wake_count();
+        queue();
+        crate::service::lifecycle_wait::test_wake_count() - before
+    }
+
+    #[test]
+    fn every_queued_message_wakes_lifecycle_waiters() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = ServiceRecord {
+            state: ServiceLifecycleState::Starting,
+            ..live_record(ServiceId(20), 60)
+        };
+        assert_eq!(
+            wakes_during(|| controller.notify_instance_ready(ServiceId(20)).unwrap()),
+            1
+        );
+        assert_eq!(
+            wakes_during(|| controller
+                .replay_pending_lifecycle_event(event_for(
+                    ServiceId(21),
+                    61,
+                    LifecycleEventKind::Ready
+                ))
+                .unwrap()),
+            1
+        );
+        assert_eq!(
+            wakes_during(|| {
+                controller.notify_faulted_live_process(60, 3).unwrap();
+            }),
+            1
+        );
+    }
+
+    #[test]
+    fn a_full_queue_wakes_only_when_a_message_is_stored() {
+        // Full of non-terminal events: a ready notification is refused and wakes nobody.
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = ServiceRecord {
+            state: ServiceLifecycleState::Starting,
+            ..live_record(ServiceId(22), 62)
+        };
+        controller.pending =
+            [Some(event_for(ServiceId(30), 1, LifecycleEventKind::Ready)); SERVICE_PENDING_EVENTS];
+        controller.pending_count = SERVICE_PENDING_EVENTS;
+        assert_eq!(
+            wakes_during(|| {
+                controller.notify_instance_ready(ServiceId(22)).unwrap_err();
+            }),
+            0
+        );
+        // A terminal event replaces a non-terminal one.
+        controller.services[0].state = ServiceLifecycleState::Running;
+        assert_eq!(
+            wakes_during(|| {
+                controller.notify_faulted_live_process(62, 0).unwrap();
+            }),
+            1
+        );
+
+        // Full of other services' terminal events: the first slot is overwritten.
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = live_record(ServiceId(23), 63);
+        controller.pending =
+            [Some(event_for(ServiceId(31), 2, LifecycleEventKind::Exited)); SERVICE_PENDING_EVENTS];
+        controller.pending_count = SERVICE_PENDING_EVENTS;
+        assert_eq!(
+            wakes_during(|| {
+                controller.notify_faulted_live_process(63, 0).unwrap();
+            }),
+            1
+        );
+        assert_eq!(
+            controller.pending[0].map(|event| event.instance.service),
+            Some(ServiceId(23))
+        );
+
+        // A count that says full over an empty slot still stores and wakes.
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = live_record(ServiceId(24), 64);
+        controller.pending_count = SERVICE_PENDING_EVENTS;
+        assert_eq!(
+            wakes_during(|| {
+                controller.notify_faulted_live_process(64, 0).unwrap();
+            }),
+            1
+        );
+    }
+
+    #[test]
+    fn pending_service_peek_is_authorized_like_a_poll_and_consumes_nothing() {
+        let mut controller = ServiceLifecycleController::new();
+        let capability = controller
+            .grant_lifecycle_control_capability(100)
+            .expect("grant capability");
+        assert_eq!(
+            controller.pending_service_authorized(100, capability),
+            Ok(None)
+        );
+
+        controller
+            .replay_pending_lifecycle_event(event_for(
+                ServiceId(25),
+                65,
+                LifecycleEventKind::Exited,
+            ))
+            .unwrap();
+        assert_eq!(
+            controller.pending_service_authorized(100, capability),
+            Ok(Some(ServiceId(25)))
+        );
+        assert_eq!(
+            controller.pending_service_authorized(100, capability),
+            Ok(Some(ServiceId(25)))
+        );
+
+        // Another process holding the same handle value, a handle of the wrong slot or
+        // generation, and a revoked capability are all refused.
+        assert_eq!(
+            controller.pending_service_authorized(101, capability),
+            Err(LifecycleControlError::Unauthorized)
+        );
+        use crate::service::capability::LifecycleControlHandleParts;
+        let parts = LifecycleControlHandleParts::decode(capability);
+        let wrong_generation = LifecycleControlHandleParts {
+            capability_generation: parts.capability_generation + 1,
+            ..parts
+        }
+        .encode();
+        assert_eq!(
+            controller.pending_service_authorized(100, wrong_generation),
+            Err(LifecycleControlError::StaleHandle)
+        );
+        assert_eq!(
+            controller.pending_service_authorized(100, 0xffff),
+            Err(LifecycleControlError::InvalidHandle)
+        );
+        let block_handle = controller
+            .block_capabilities
+            .grant_block_device_capability(101, STORAGE_BLOCK_DEVICE_ID)
+            .expect("grant block capability");
+        assert_eq!(
+            controller.pending_service_authorized(101, block_handle),
+            Err(LifecycleControlError::Unauthorized),
+            "a block-device handle held by a process without lifecycle control is refused"
+        );
+
+        let event = controller
+            .poll_pending_event_authorized(100, capability, ServiceId(25))
+            .expect("poll")
+            .expect("event");
+        assert_eq!(event.instance.service, ServiceId(25));
+        assert_eq!(
+            controller.pending_service_authorized(100, capability),
+            Ok(None)
+        );
+
+        controller.capabilities.revoke_capabilities_for_pid(100);
+        assert_eq!(
+            controller.pending_service_authorized(100, capability),
             Err(LifecycleControlError::StaleHandle)
         );
     }

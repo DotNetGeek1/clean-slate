@@ -665,6 +665,54 @@ mod tests {
         );
     }
 
+    fn now_frame(rsi: u64, rdx: u64, r10: u64, r8: u64) -> SyscallContext {
+        SyscallContext {
+            rax: clean_slate_native_abi::SYSCALL_NR_WORK_SET,
+            rdx,
+            rbx: 0,
+            rbp: 0,
+            rsi,
+            rdi: WORK_SET_OP_NOW,
+            r8,
+            r9: 0,
+            r10,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            user_rip: 0,
+            user_rflags: 0,
+            user_rsp: 0,
+        }
+    }
+
+    #[test]
+    fn now_returns_monotonic_ns_below_the_status_range() {
+        use clean_slate_native_abi::status::STATUS_RANGE_START;
+        // 1 GHz with origin 0: one TSC count is one nanosecond.
+        crate::time::set_test_monotonic_tsc(1_000_000_000, 0);
+        let first = handle_now(&now_frame(0, 0, 0, 0));
+        let second = handle_now(&now_frame(0, 0, 0, 0));
+        assert!(first < STATUS_RANGE_START);
+        assert!(second < STATUS_RANGE_START);
+        assert!(second >= first, "the clock never runs backwards");
+    }
+
+    #[test]
+    fn now_refuses_reserved_arguments_and_an_uncalibrated_clock() {
+        crate::time::set_test_monotonic_tsc(1_000_000_000, 0);
+        for frame in [
+            now_frame(1, 0, 0, 0),
+            now_frame(0, 1, 0, 0),
+            now_frame(0, 0, 1, 0),
+            now_frame(0, 0, 0, 1),
+        ] {
+            assert_eq!(handle_now(&frame), STATUS_EINVAL);
+        }
+        crate::time::set_test_monotonic_tsc(0, 0);
+        assert_eq!(handle_now(&now_frame(0, 0, 0, 0)), STATUS_EINVAL);
+    }
+
     #[test]
     fn work_set_code_never_records_pending_wakes() {
         let source = include_str!("work_set.rs");

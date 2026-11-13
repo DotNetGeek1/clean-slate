@@ -60,6 +60,8 @@ pub(crate) mod m3_resources;
 pub(crate) mod m3_syscall;
 #[cfg(feature = "m4-crash-service-self-test")]
 pub(crate) mod m4_crash_service;
+#[cfg(feature = "m4-service-lifecycle-self-test")]
+pub(crate) mod m4_lifecycle_wait;
 #[cfg(feature = "m4-recovery-self-test")]
 pub(crate) mod m4_recovery;
 #[cfg(feature = "m4-service-lifecycle-self-test")]
@@ -177,6 +179,7 @@ pub(crate) mod serial_input;
     feature = "m9-syscall-fail-closed-self-test",
     feature = "m9-block-wake-self-test",
     feature = "m10-input-self-test",
+    feature = "m4-service-lifecycle-self-test",
     feature = "m9-fd-core-self-test",
     feature = "m9-linux-socket-self-test",
     feature = "m9-linux-proc-self-test",
