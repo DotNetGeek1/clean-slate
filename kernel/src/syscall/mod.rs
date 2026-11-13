@@ -761,6 +761,12 @@ fn fail_closed_unresolved_syscall_caller(reason: &'static str) -> ! {
     ) {
         fatal_kernel_error(reason);
     }
+    if let Ok(pid) = crate::process::current_process_id() {
+        crate::service::system_init::on_process_death(
+            pid,
+            crate::service::system_init::ProcessDeath::SyscallContainment(reason),
+        );
+    }
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));

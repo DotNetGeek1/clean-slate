@@ -504,6 +504,15 @@ impl ServiceLifecycleController {
             })
     }
 
+    /// Lifecycle-control and block-device capabilities `pid` holds, in that order.
+    #[cfg(clean_slate_system_init)]
+    pub(crate) fn capabilities_held_by(&self, pid: u64) -> (usize, usize) {
+        (
+            self.capabilities.held_by(pid),
+            self.block_capabilities.held_by(pid),
+        )
+    }
+
     #[allow(dead_code)]
     pub(crate) fn authoritative_generation(
         &self,
@@ -676,6 +685,23 @@ impl ServiceLifecycleController {
                 .map(|_| ())
             },
         )?;
+        #[cfg(clean_slate_system_init)]
+        if let Err(message) = super::system_init::audit_service_authority(
+            service_id,
+            spawned.pid,
+            grants,
+            self.capabilities_held_by(spawned.pid),
+        ) {
+            teardown_process_by_id(
+                allocator,
+                kernel_root_frame,
+                spawned.pid,
+                SERVICE_TERMINATE_STATUS,
+                false,
+            )
+            .map_err(LifecycleControlError::SpawnFailed)?;
+            return Err(LifecycleControlError::SpawnFailed(message));
+        }
         self.services[service_index].live = Some(LiveServiceInstance {
             pid: spawned.pid,
             tid: spawned.tid,
@@ -1150,6 +1176,56 @@ mod tests {
             .handle_control_message(&mut allocator, 101, capability, &message)
             .unwrap_err();
         assert_eq!(err, LifecycleControlError::Unauthorized);
+    }
+
+    /// Init holds the lifecycle-control capability. A control request names a service and an
+    /// action only, so the grants of a started instance are the manifest row's; and a request
+    /// for an id the kernel has not declared changes nothing.
+    #[test]
+    fn init_cannot_start_an_undeclared_service_or_choose_its_grants() {
+        use clean_slate_service_fixtures::manifest::SYSTEM_MANIFEST;
+        const INIT_PID: u64 = 1;
+
+        let mut controller = ServiceLifecycleController::new();
+        for spec in SYSTEM_MANIFEST {
+            controller.declare_service(spec.id).expect("declare row");
+        }
+        let capability = controller
+            .grant_lifecycle_control_capability(INIT_PID)
+            .expect("grant capability");
+        let mut allocator = test_allocator();
+        controller.configure_launch_context(0x1000);
+        let services_before = controller.services;
+        for undeclared in [ServiceId(0x5300), ServiceId(0), ServiceId(u32::MAX)] {
+            for kind in [
+                ControlRequestKind::Start,
+                ControlRequestKind::Stop,
+                ControlRequestKind::Terminate,
+                ControlRequestKind::Restart,
+            ] {
+                let message =
+                    LifecycleMessage::ControlRequest(ControlRequest::new(undeclared, kind))
+                        .encode();
+                assert_eq!(
+                    controller
+                        .handle_control_message(&mut allocator, INIT_PID, capability, &message)
+                        .unwrap_err(),
+                    LifecycleControlError::UnknownService,
+                    "{undeclared:?} {kind:?}"
+                );
+            }
+        }
+        assert_eq!(controller.services, services_before);
+        assert_eq!(controller.pending_count, 0);
+        assert!(controller.ready_pending.iter().all(Option::is_none));
+        for spec in SYSTEM_MANIFEST {
+            assert_eq!(
+                controller.launch_grants(spec.id),
+                spec.grants,
+                "{:?}",
+                spec.id
+            );
+        }
     }
 
     #[test]

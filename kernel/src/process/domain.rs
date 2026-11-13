@@ -614,6 +614,10 @@ pub(crate) fn teardown_current_process(
             instance_generation,
         ))
     })?;
+    crate::service::system_init::on_process_death(
+        process_id,
+        crate::service::system_init::ProcessDeath::TornDown("current-process teardown"),
+    );
 
     let next_stack_pointer =
         without_interrupts(|| with_scheduler(|scheduler| scheduler.finish_current_thread()))?;
@@ -685,6 +689,10 @@ pub(crate) fn teardown_process_by_id(
     if faulted {
         return Err("supervisor-initiated teardown does not model faulted exit yet");
     }
+    crate::service::system_init::on_process_death(
+        process_id,
+        crate::service::system_init::ProcessDeath::TornDown("teardown by pid"),
+    );
 
     without_interrupts(|| unsafe {
         let scheduler = scheduler_mut();

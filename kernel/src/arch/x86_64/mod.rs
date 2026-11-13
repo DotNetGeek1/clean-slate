@@ -25,14 +25,6 @@ pub(crate) const SPURIOUS_VECTOR: usize = 33;
 /// Device interrupt vectors `0x30..0x40`; allocation policy lives in `interrupt::irq`.
 pub(crate) const DEVICE_VECTOR_FIRST: usize = 0x30;
 pub(crate) const DEVICE_VECTOR_COUNT: usize = 16;
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m10-desktop"
-))]
 pub(crate) const USER_TEST_VECTOR: usize = 0x80;
 pub(crate) const IA32_EFER_MSR: u32 = 0xc000_0080;
 pub(crate) const IA32_STAR_MSR: u32 = 0xc000_0081;

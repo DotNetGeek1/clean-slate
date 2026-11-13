@@ -60,6 +60,8 @@ fn idle_thread_one_wait() {
     // restored frame's RFLAGS (or `sysretq` r11) re-enables interrupts; the
     // no-runnable path re-enables them at the top of the next wait.
     disable_interrupts();
+    #[cfg(clean_slate_system_init)]
+    crate::service::system_init::on_idle_halt();
     #[cfg(feature = "m9-linux-runtime-self-test")]
     crate::selftest::m9_linux_runtime_latency::observe_idle_resumed();
     let next_stack = {

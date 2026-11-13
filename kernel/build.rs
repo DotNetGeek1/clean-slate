@@ -5,6 +5,9 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "build_support/system_init_rule.rs"]
+mod system_init_rule;
+
 const SHT_RELA: u32 = 4;
 const R_X86_64_RELATIVE: u32 = 8;
 const USERSPACE_IMAGE_LOAD_BASE: u64 = 0x0000_4000_0000_0000;
@@ -82,8 +85,50 @@ fn emit_boot_tail_cfgs() {
         println!("cargo::rustc-cfg=clean_slate_virtio_gpu");
     }
 }
+
+/// Every enabled Cargo feature of this build, by its `Cargo.toml` name (the kernel's feature
+/// names use `-`, never `_`).
+fn enabled_features() -> Vec<String> {
+    let mut features: Vec<String> = env::vars_os()
+        .filter_map(|(name, _)| {
+            name.to_str()?
+                .strip_prefix("CARGO_FEATURE_")
+                .map(|feature| feature.to_ascii_lowercase().replace('_', "-"))
+        })
+        .collect();
+    features.sort();
+    features
+}
+
+/// Sets `clean_slate_system_init` by [`system_init_rule::launches_system_init`], and passes the
+/// enabled features on so the kernel's drift test can apply the same rule.
+fn emit_system_init_cfg() -> bool {
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_system_init)");
+    let features = enabled_features();
+    println!(
+        "cargo::rustc-env=CLEAN_SLATE_ENABLED_FEATURES={}",
+        features.join(",")
+    );
+    let system_init = system_init_rule::launches_system_init(features.iter().map(String::as_str));
+    if system_init {
+        println!("cargo::rustc-cfg=clean_slate_system_init");
+    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+            .join("build_support")
+            .join("system_init_rule.rs")
+            .display()
+    );
+    system_init
+}
+
 fn main() {
     emit_boot_tail_cfgs();
+    // Init is embedded only in the build that launches it.
+    if emit_system_init_cfg() {
+        embed_userspace_image("init_userspace.bin", "clean-slate-supervisor-init", true);
+    }
     let m6_fixture_self_test = env::var("CARGO_FEATURE_M6_PROCESS_CONTROL_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M6_DELEGATION_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M6_REVOCATION_SELF_TEST").is_ok()
@@ -377,6 +422,7 @@ fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
     match bin_name {
         "clean-slate-supervisor-userspace"
         | "clean-slate-supervisor-recovery-userspace"
+        | "clean-slate-supervisor-init"
         | "clean-slate-m6-fixture-userspace" => {
             ("clean-slate-supervisor", "core,compiler_builtins")
         }
@@ -448,6 +494,7 @@ fn embed_userspace_image_from(
         let (generated_file, prefix) = match raw_name {
             "supervisor_userspace.bin" => ("supervisor_userspace_entry.rs", "SUPERVISOR_USERSPACE"),
             "recovery_userspace.bin" => ("recovery_userspace_entry.rs", "RECOVERY_SUPERVISOR"),
+            "init_userspace.bin" => ("init_userspace_entry.rs", "INIT_USERSPACE"),
             "storage_userspace.bin" => ("storage_userspace_entry.rs", "STORAGE_USERSPACE"),
             "m6_fixture_userspace.bin" => ("m6_fixture_userspace_entry.rs", "M6_FIXTURE_USERSPACE"),
             "network_userspace.bin" => ("network_userspace_entry.rs", "NETWORK_USERSPACE"),
@@ -481,13 +528,15 @@ fn embed_userspace_image_from(
     );
 }
 
-/// Storage and network launches map with `RELOCATED_BASE` and the segment array.
+/// Storage, network and init launches map with `RELOCATED_BASE` and the segment array.
 /// `IMAGE_BASE` and `SEGMENT_COUNT` are still emitted so every image's metadata has
 /// the same fields. The two M4 builds deny `dead_code` in `service` and compile those
 /// launches without reading the two fields, so only those items are allowed.
 fn metadata_item(prefix: &str, field: &str, item: &str) -> String {
-    let unused_by_launch = matches!(prefix, "STORAGE_USERSPACE" | "NETWORK_USERSPACE")
-        && matches!(field, "IMAGE_BASE" | "SEGMENT_COUNT");
+    let unused_by_launch = matches!(
+        prefix,
+        "STORAGE_USERSPACE" | "NETWORK_USERSPACE" | "INIT_USERSPACE"
+    ) && matches!(field, "IMAGE_BASE" | "SEGMENT_COUNT");
     if unused_by_launch {
         format!("#[allow(dead_code)]\n{item}")
     } else {

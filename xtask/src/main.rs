@@ -2679,6 +2679,27 @@ fn build_network_userspace(release: bool) -> Result<(), XtaskError> {
     Ok(())
 }
 
+fn build_init_userspace(release: bool) -> Result<(), XtaskError> {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("build")
+        .arg("-p")
+        .arg("clean-slate-supervisor")
+        .arg("--bin")
+        .arg("clean-slate-supervisor-init")
+        .arg("--features")
+        .arg("userspace")
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,compiler_builtins");
+    if release {
+        cmd.arg("--release");
+    }
+    cmd.env("RUSTC_BOOTSTRAP", "1");
+    run_build_command(&mut cmd)?;
+    Ok(())
+}
+
 fn run_m6_process_control_acceptance() -> Result<(), XtaskError> {
     run_m6_constituent(
         "m6-process-control-self-test",
@@ -3295,10 +3316,12 @@ fn read_m5_host_sentinel(path: &Path) -> Result<Vec<u8>, XtaskError> {
 }
 
 /// Every kernel cargo invocation embeds both service programs (`kernel/build.rs`), including
-/// host tests that run before `build_kernel`.
+/// host tests that run before `build_kernel`; the build that launches init (no feature but
+/// `gdb-entry`) embeds init as well.
 fn ensure_embedded_service_programs() -> Result<(), XtaskError> {
     build_storage_userspace(true)?;
     build_network_userspace(true)?;
+    build_init_userspace(true)?;
     Ok(())
 }
 

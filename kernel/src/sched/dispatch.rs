@@ -2,10 +2,8 @@
 //! first thread, and switching address-space roots and kernel stacks before a
 //! thread runs.
 
-use crate::arch::x86_64::asm::clean_slate_task_one_bootstrap_entry;
-use crate::arch::x86_64::asm::clean_slate_task_two_bootstrap_entry;
+use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::start_first_task;
-use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::arch::x86_64::gdt::set_syscall_kernel_stack;
@@ -13,12 +11,9 @@ use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::mm::address_space::activate_address_space_root;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::paging::current_root_frame_address;
-use crate::process::id_allocator::id_allocator_mut;
 use crate::process::userspace_process_root_frame;
 use crate::sched::scheduler_mut;
-use crate::sched::task_stacks_mut;
 use crate::sched::with_scheduler;
-use crate::sched::Scheduler;
 use crate::sched::Thread;
 use crate::sched::ThreadKind;
 
@@ -48,7 +43,18 @@ use crate::sched::ThreadKind;
     ),
     allow(dead_code)
 )]
+///
+/// Seeds the two demo kernel tasks. The build that launches init (`clean_slate_system_init`)
+/// does not run them: init is the first thread there.
+#[cfg(not(clean_slate_system_init))]
 pub(crate) fn initialize_scheduler() -> Result<(), &'static str> {
+    use crate::arch::x86_64::asm::clean_slate_task_one_bootstrap_entry;
+    use crate::arch::x86_64::asm::clean_slate_task_two_bootstrap_entry;
+    use crate::arch::x86_64::context_switch::task_stack_top;
+    use crate::process::id_allocator::id_allocator_mut;
+    use crate::sched::task_stacks_mut;
+    use crate::sched::Scheduler;
+
     let task_stacks = unsafe { task_stacks_mut() };
     let task_stack_pointers = [
         task_stack_top(&task_stacks[0]),
@@ -101,18 +107,23 @@ pub(crate) fn initialize_scheduler() -> Result<(), &'static str> {
     allow(dead_code)
 )]
 pub(crate) fn start_scheduler() -> ! {
-    let (stack_pointer, entry_point) = match with_scheduler(|scheduler| scheduler.start()) {
+    let (stack_pointer, first) = match with_scheduler(|scheduler| scheduler.start()) {
         Ok(stack_pointer) => {
             let scheduler = unsafe { &*scheduler_mut() };
             let current = scheduler.current_thread.expect("started thread must exist");
-            (stack_pointer, scheduler.threads[current].launch_entry)
+            (stack_pointer, scheduler.threads[current])
         }
         Err(message) => fatal_kernel_error(message),
     };
     if let Err(message) = prepare_current_scheduler_thread_dispatch() {
         fatal_kernel_error(message);
     }
-    unsafe { start_first_task(stack_pointer, entry_point) }
+    match first.kind {
+        ThreadKind::Kernel => unsafe { start_first_task(stack_pointer, first.launch_entry) },
+        // A fresh user thread's saved stack pointer is the entry frame built at spawn; it is
+        // entered through `iretq`, as the timer path does, so it starts at CPL3.
+        ThreadKind::User => unsafe { restore_task_context(stack_pointer) },
+    }
 }
 
 fn prepare_thread_dispatch(thread: Thread) -> Result<(), &'static str> {

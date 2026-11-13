@@ -123,6 +123,7 @@ use crate::process::process_registry_mut;
     feature = "m7-dns-self-test",
     feature = "m9-stack-guard-self-test"
 )))]
+#[cfg(not(clean_slate_system_init))]
 use crate::sched::dispatch::initialize_scheduler;
 #[cfg(not(any(
     feature = "m1-self-test",
@@ -1088,8 +1089,23 @@ fn run_inner() -> Result<(), &'static str> {
         let controller = unsafe { crate::service::service_lifecycle_controller_mut() };
         controller.clear();
         controller.configure_launch_context(kernel_root_frame);
-        #[cfg(not(feature = "m9-stack-guard-self-test"))]
+        #[cfg(all(
+            not(feature = "m9-stack-guard-self-test"),
+            not(clean_slate_system_init)
+        ))]
         initialize_scheduler()?;
+        #[cfg(clean_slate_system_init)]
+        {
+            let allocator = crate::syscall::service_lifecycle_syscall_allocator_mut()
+                .as_mut()
+                .ok_or("init: service lifecycle allocator missing")?;
+            if let Err(message) = crate::service::system_init::launch_init(allocator) {
+                serial_write_fmt(format_args!("[KERN] init launch failed: {message}\n"));
+                crate::diagnostics::qemu::fatal_kernel_error(
+                    "init could not be launched; the system cannot continue",
+                );
+            }
+        }
         #[cfg(feature = "m9-stack-guard-self-test")]
         crate::selftest::m9_stack_guard::configure_stack_guard_probe_thread()?;
         #[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]

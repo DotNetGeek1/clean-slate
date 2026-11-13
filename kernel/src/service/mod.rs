@@ -25,6 +25,7 @@ pub(crate) mod port;
 pub(crate) mod port_syscall;
 pub(crate) mod service_ready;
 pub(crate) mod spawn;
+pub(crate) mod system_init;
 
 #[cfg(feature = "m4-recovery-self-test")]
 pub(crate) mod recovery_launch;
