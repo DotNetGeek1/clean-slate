@@ -42,13 +42,13 @@ This command:
 
 1. builds the release storage, network and init programs and the Rust `#![no_std]` UEFI kernel with no Cargo feature (the default image), which embeds them;
 2. creates an EFI boot directory at `target/esp/EFI/BOOT/BOOTX64.EFI`;
-3. creates `target/system-data.img` (64 MiB, zeroed) if it does not exist and attaches it as the data disk on every run;
+3. creates `target/system-data.img` (64 MiB, zeroed) if it does not exist and attaches it as the data disk on every run (`cargo clean` deletes it);
 4. launches QEMU with OVMF firmware and `-cpu qemu64,+rdrand`;
 5. connects serial output to the host terminal for a normal interactive boot.
 
 `cargo xtask run --net` also starts the network fixture peer and gives the guest a VirtIO network device connected to it; without `--net` there is no network device. `cargo xtask run-gdb` and `run-gdb-entry` attach the same data disk and take no options.
 
-In the default image the kernel launches userspace init instead of the two kernel demo threads. A normal boot prints, after firmware and kernel bring-up:
+In the default image the kernel launches userspace init instead of the two kernel demo threads. On a disk that is already formatted, the kernel's `[SVC ]`/`[KERN]` lines and init's `[INIT]` lines of a boot read as follows; other kernel diagnostics (`[TIME]`, `[BLK ]`, `[CAP ]`, `[NET ]`) and the supervisor library's own `[SUP ]`, `[HLTH]` and `[DEP ]` lines from init are interleaved with them. Init may announce storage ready just before or just after starting network, depending on when it picks up storage's ready message.
 
 ```text
 [SVC ] declared service=20736
@@ -62,11 +62,11 @@ In the default image the kernel launches userspace init instead of the two kerne
 [SVC ] authority service=20736 pid=2 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 other=0 matches-manifest=1
 [SVC ] launch service=20736 pid=2 gen=1
 [SVC ] ready service=20736 pid=2 gen=1 source=live-instance kernel-observed block-write-requests=0 service-reported formatted=0 store-generation=0
+[IPC ] console pid=1: [INIT] service=20736 ready gen=1
 [IPC ] console pid=1: [INIT] service=20736 ready; starting service=20992
 [SVC ] authority service=20992 pid=3 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 other=0 matches-manifest=1
 [SVC ] launch service=20992 pid=3 gen=1
 [SVC ] ready service=20992 pid=3 gen=1 source=live-instance kernel-observed block-write-requests=0 raw-backend=loopback service-reported link-up=1
-[IPC ] console pid=1: [INIT] service=20736 ready gen=1
 [IPC ] console pid=1: [INIT] service=20992 ready gen=1
 [IPC ] console pid=1: [INIT] boot settled running=2 down=0; waiting, no deadline
 [KERN] idle thread halted 16 times in a row while init pid=1 waited in LIFECYCLE_WAIT with no deadline
