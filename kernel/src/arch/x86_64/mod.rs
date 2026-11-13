@@ -19,7 +19,6 @@ pub(crate) mod port;
 
 pub(crate) const DOUBLE_FAULT_VECTOR: usize = 8;
 pub(crate) const PAGE_FAULT_VECTOR: usize = 14;
-#[cfg(feature = "m3-entry-self-test")]
 pub(crate) const GENERAL_PROTECTION_VECTOR: usize = 13;
 pub(crate) const TIMER_VECTOR: usize = 32;
 pub(crate) const SPURIOUS_VECTOR: usize = 33;
@@ -31,7 +30,8 @@ pub(crate) const DEVICE_VECTOR_COUNT: usize = 16;
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m10-desktop"
 ))]
 pub(crate) const USER_TEST_VECTOR: usize = 0x80;
 pub(crate) const IA32_EFER_MSR: u32 = 0xc000_0080;

@@ -5,7 +5,8 @@
 use crate::arch::x86_64::bit;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::arch::x86_64::cpu::read_rflags;
-use crate::arch::x86_64::interrupt_context::SyscallContext;
+use crate::arch::x86_64::interrupt_context::{InterruptContext, SyscallContext};
+use crate::arch::x86_64::GENERAL_PROTECTION_VECTOR;
 #[cfg(any(feature = "m3-syscall-self-test", test))]
 use crate::arch::x86_64::RFLAGS_DIRECTION_FLAG_BIT;
 use crate::arch::x86_64::RFLAGS_STATUS_FLAGS_MASK;
@@ -60,6 +61,36 @@ pub(crate) fn validate_canonical_user_return_state(
         return Err("syscall return RSP was not a canonical userspace address");
     }
     Ok(())
+}
+
+/// The fault frame a user-mode #GP at the syscall return site would have
+/// produced, for the CPL3 fault path. RCX/R11 hold what SYSCALL put there.
+pub(crate) fn syscall_user_fault_context(
+    frame: &SyscallContext,
+    user_code_selector: u64,
+) -> InterruptContext {
+    InterruptContext {
+        r15: frame.r15,
+        r14: frame.r14,
+        r13: frame.r13,
+        r12: frame.r12,
+        r11: frame.user_rflags,
+        r10: frame.r10,
+        r9: frame.r9,
+        r8: frame.r8,
+        rdi: frame.rdi,
+        rsi: frame.rsi,
+        rbp: frame.rbp,
+        rbx: frame.rbx,
+        rdx: frame.rdx,
+        rcx: frame.user_rip,
+        rax: frame.rax,
+        vector: GENERAL_PROTECTION_VECTOR as u64,
+        error_code: 0,
+        rip: frame.user_rip,
+        cs: user_code_selector,
+        rflags: frame.user_rflags,
+    }
 }
 
 #[cfg(feature = "m3-syscall-self-test")]
@@ -140,6 +171,60 @@ mod tests {
             SYSCALL_ENTRY_RFLAGS_MASK & (0b11u64 << RFLAGS_IOPL_SHIFT),
             0b11u64 << RFLAGS_IOPL_SHIFT
         );
+    }
+
+    fn syscall_frame(user_rip: u64, user_rsp: u64) -> SyscallContext {
+        SyscallContext {
+            rax: 39,
+            rdx: 2,
+            rbx: 3,
+            rbp: 4,
+            rsi: 5,
+            rdi: 6,
+            r8: 8,
+            r9: 9,
+            r10: 10,
+            r12: 12,
+            r13: 13,
+            r14: 14,
+            r15: 15,
+            user_rip,
+            user_rflags: 0x246,
+            user_rsp,
+        }
+    }
+
+    #[test]
+    fn user_controlled_rsp_or_rip_outside_the_user_half_is_rejected() {
+        let top = USER_CANONICAL_TOP_EXCLUSIVE;
+        assert_eq!(
+            validate_canonical_user_return_state(&syscall_frame(0x40_1000, top - 8)),
+            Ok(())
+        );
+        for rsp in [top, 0x8000_0000_0000_0000, 0xffff_8000_0000_0000, u64::MAX] {
+            assert_eq!(
+                validate_canonical_user_return_state(&syscall_frame(0x40_1000, rsp)),
+                Err("syscall return RSP was not a canonical userspace address"),
+                "rsp {rsp:#x}"
+            );
+        }
+        assert_eq!(
+            validate_canonical_user_return_state(&syscall_frame(top, 0x7fff_0000)),
+            Err("syscall return RIP was not a canonical userspace address")
+        );
+    }
+
+    #[test]
+    fn syscall_containment_reports_a_user_mode_general_protection_fault() {
+        let frame = syscall_frame(0x40_1002, 0x8000_0000_0000_0000);
+        let context = syscall_user_fault_context(&frame, 0x2b);
+        assert_eq!(context.vector, GENERAL_PROTECTION_VECTOR as u64);
+        assert_eq!(context.error_code, 0);
+        assert_eq!(context.rip, 0x40_1002);
+        assert_eq!(context.cs & 0b11, 3, "must look like a CPL3 fault");
+        assert_eq!(context.rflags, 0x246);
+        assert_eq!((context.rcx, context.r11), (0x40_1002, 0x246));
+        assert_eq!((context.rax, context.rdi, context.r15), (39, 6, 15));
     }
 
     #[test]

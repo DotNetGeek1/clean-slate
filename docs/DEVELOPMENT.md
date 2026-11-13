@@ -131,6 +131,10 @@ cargo xtask test-m9-syscall-fail-closed
 
 This command builds the kernel with `m9-syscall-fail-closed-self-test`, boots QEMU headlessly, and validates `[SYSC] unresolved caller reason=syscall caller process did not match active address space fail-closed` (registry/CR3 mismatch constructed by the self-test), production teardown of the offender, and `[M9.C] PASS` while a Native sibling keeps making version syscalls without the offender ever reaching `dispatch_native`.
 
+The same boot runs two hostile CPL3 offenders for #215: a Native process that issues `syscall` with RSP `0x8000_0000_0000_0000`, and a Linux-tagged process that requires `arch_prctl(ARCH_SET_FS, 0x8000_0000_0000_0000)` to return `-EPERM` (it exits with status 1 otherwise) and then does the same. Each must be logged as `[SYSC] non-canonical user return state …` and torn down by the CPL3 fault path as a user-mode #GP (`[PROC] fault pid=… vector=13 err=0x0`); these lines and the fail-closed line are an unordered group because the offenders race. Once every offender has left the registry, the next sibling syscall prints `[M9.C] non-canonical syscall rsp terminated native offender OK`, `[M9.C] arch_prctl(ARCH_SET_FS, non-canonical) returned EPERM OK` (also checked: the offender's saved FS base stayed 0), `[M9.C] non-canonical syscall rsp terminated linux offender OK` and `[M9.C] PASS`. QEMU TCG accepts a non-canonical `wrmsr IA32_FS_BASE`, so only the `-EPERM` result shows that vector under TCG; under `-accel whpx` the unvalidated write is a ring-0 #GP.
+
+Before the timer starts, the same boot checks #216 by calling the real `mmap`/`brk` handlers for the Linux offender (inside the 2 MiB its code already uses, so no page-table frames are needed): 2048 `MAP_FIXED` maps over a live page, a `PROT_NONE` reservation (must have no present page; a `MAP_FIXED` read/write map into it must succeed, and one `munmap` of the reservation must release that page too), and 2048 `brk` growths one page past the address-space mapping table. Every refused call must leave the free-frame count, the tracked mapping count, the break and the page tables unchanged; the boot prints `[M9.C] map probe free_frames before=… after=… mappings before=… after=…` and then `[M9.C] failed mmap/brk left free frames and mappings unchanged OK`, which the lane requires before `[TIME]`.
+
 For the M8.3 Linux personality syscall dispatch proof:
 
 ```bash
@@ -218,6 +222,14 @@ cargo xtask test-m10-contract
 
 It runs the `clean-slate-graphics`, `clean-slate-native-abi` and `clean-slate-capability` host tests, builds `clean-slate-graphics --features fake` and `clean-slate-native-abi` for `x86_64-unknown-uefi`, and prints `[M10.contract] PASS`. See [GRAPHICS.md](GRAPHICS.md).
 
+For the M10 #117 System Playground app (host-tested plus a CPL3 build; no QEMU boot yet):
+
+```bash
+cargo xtask test-m10-app
+```
+
+It runs `cargo test -p clean-slate-playground` (layout, input state, damage minimality and damaged-vs-full repaint at Q0/Q1, plus the protocol session against the real compositor core over `FakePort` / `FakeSharedMemory` / `FakeDisplay`), builds `clean-slate-playground-userspace` for `x86_64-unknown-none`, and prints `[M10.app] PASS` (aliases `m10-app`, `m10.117`). The QEMU lane needs #115 window lifecycle and the #118 launch policy. See [GRAPHICS.md](GRAPHICS.md#playground-117).
+
 For M10 #195 Stage 0, `EFER.NXE` enforcement (host tests plus one QEMU boot):
 
 ```bash
@@ -232,14 +244,14 @@ For the M10 #200 service port, capability transfer on send and work sets:
 cargo xtask test-m10-port
 ```
 
-In order it runs `cargo test -p clean-slate-native-abi`; `cargo test -p clean-slate-port --features fake`; a `x86_64-unknown-uefi` build of `clean-slate-port` with feature `fake`; `cargo test -p clean-slate-kernel -- service::port sched::work_set sched::wait`; `build_m6_fixture_userspace` and `build_storage_userspace`; then QEMU with feature `m10-port-self-test`, ordered `[M10.port]` serial markers and a 60 s timeout. On success it prints `[M10.port] PASS` (not `[M10  ] PASS`, which is the #119 aggregate gate). Aliases: `m10-port`, `m10.200`. See [GRAPHICS.md](GRAPHICS.md) Tests and gate.
+In order it runs `cargo test -p clean-slate-native-abi`; `cargo test -p clean-slate-port --features fake`; a `x86_64-unknown-uefi` build of `clean-slate-port` with feature `fake`; `cargo test -p clean-slate-kernel -- service::port sched::work_set sched::wait`; `build_m6_fixture_userspace` and `build_storage_userspace`; then QEMU with feature `m10-port-self-test`, ordered `[M10.port]` serial markers and a 60 s timeout. On success it prints `[M10.port] PASS` (not `[M10 ] PASS`, which is the #119 aggregate gate). Aliases: `m10-port`, `m10.200`. See [GRAPHICS.md](GRAPHICS.md) Tests and gate.
 For the M10 #111 GOP framebuffer lane (host raster tests plus QEMU with `-vga std`; aliases `m10-framebuffer`, `test-m10-framebuffer`):
 
 ```bash
 cargo xtask test-m10-framebuffer
 ```
 
-The boot runs `m10-framebuffer-self-test` in boot context: GOP mode 1280x800, kernel-internal present with damage-only copy, aperture readback CRC and probes matched on the host, then `[M10.2] PASS`. See [GRAPHICS.md](GRAPHICS.md).
+The boot runs `m10-framebuffer-self-test` in boot context: GOP mode 1280x800, kernel-internal present with damage-only copy, aperture readback CRC and probes matched on the host, then `[M10.2] PASS`. The lane boots through the kernel-lane QMP driver (`m10-framebuffer`): on `[FB  ] status idle seq=2` it takes a screendump to `target/xtask-artifacts/m10-framebuffer/<run>/framebuffer.png` and requires all 1280x800 pixels to equal the host raster render (pattern A, then B; the undamaged decoy must not appear). Success prints `[M10.2] host readback match …` and `[M10.2] host screenshot match 1280x800 png=…`. See [GRAPHICS.md](GRAPHICS.md).
 
 For the M10 #196 VirtIO modern PCI transport (host tests plus two QEMU boots):
 
@@ -249,13 +261,30 @@ cargo xtask test-m10-virtio-modern
 
 It runs the kernel `device::virtio` and `sched::timeout` host tests. It then boots the `m10-virtio-modern-self-test` kernel twice against a modern-only `virtio-blk-pci` (`disable-legacy=on`, `ioeventfd=off`) backed by `target/m10-virtio-modern.img`, a 1 MiB image with a sentinel in sector 1. The first boot uses MSI-X (`vectors=2`) and also attaches `virtio-gpu-pci`, which is brought up to queue setup with no GPU commands. The second boot is INTx-only (`vectors=0`). Each boot logs the modern BAR placement (`[VIRTIO] modern bb:dd.f barN base=…`) and reads the sentinel, waiting for both the used entry and the queue interrupt, then checks that no W3 timeout is left armed. It then forces an unnotified request to time out from the timer path (`[VMOD] timeout -> reset-required`), resets and checks that the old token is stale, and finally releases and rediscovers the device. The gate prints `[M10.virtio-modern] PASS`. QEMU is started with `-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=0`, but local QEMU 11.1 OVMF on Windows still places the 64-bit BARs at `0xc0_0000_0000`. That address is inside the firmware identity map the kernel inherits. The Linux CI OVMF honours the option and places them below 4 GiB (`0x800c0000`). The rule is identity-mapped or fail closed, not below 4 GiB: discovery fails closed on any region outside the identity map.
 
+For the M10 #114 VirtIO-GPU scanout backend (host tests plus one QEMU boot):
+
+```bash
+cargo xtask test-m10-virtio-gpu
+```
+
+It runs the kernel `device::display` and `device::virtio` host tests. It then boots the `m10-virtio-gpu-self-test` kernel with `-vga none -device virtio-gpu-pci,disable-legacy=on,xres=1280,yres=800,ioeventfd=off` and the same `X-PciMmio64Mb` option. OVMF's GPU GOP is blit-only, so GOP capture rejects it and the kernel installs the VirtIO-GPU display. The guest drives the syscall-18 `MAP_SCANOUT` / `PRESENT` path with a kernel holder and prints `[VGPU]` markers for each step: bring-up (display info, create), a full present that attaches the backing and then sets the scanout, a damage-only buffer switch, a guest-side readback CRC of the replayed transfers, a forced unnotified timeout to `ResetRequired`, a reset to epoch 2 with a present that re-attaches and sets the scanout again, and release. The host checks the ordered markers, the damage byte count, the frame size and the new transport generation. It also checks three QMP screendumps against host renders, taken while the guest holds at `[VGPU] hold capture=a|b|c` (after the first present, the switch, and the present after the reset), releasing each hold with a key tap. It then prints `[M10.virtio-gpu] PASS`. Captures are written to `target/xtask-artifacts/m10-virtio-gpu/<run>/` (`virtio-gpu-a.png`, `virtio-gpu-b.png`, `virtio-gpu-after-reset.png`). A failed step is preceded by `[VGPU] fault-context` lines naming the present status and the command the device rejected with its response type. Like every acceptance boot, the lane first prints `[QEMU] version=…`. See [GRAPHICS.md](GRAPHICS.md#virtio-gpu-backend-114).
+
 For M10 #195 bounded shared user buffers (host tests plus QEMU scripted lane):
 
 ```bash
 cargo xtask test-m10-shared-buffer
 ```
 
-Kernel feature: `m10-shared-buffer-self-test`. Host steps: `cargo test -p clean-slate-native-abi`, `cargo test -p clean-slate-service-fixtures`, `cargo test -p clean-slate-capability` (READ-only delegated children), and the kernel `mm::shared_buffer` (object model, window mapping, reconcile and teardown), `frame_allocator` (frame runs) and `nx_` tests. QEMU boots the kernel with that feature and runs the `m10-shared-buffer` scripted fixture lane: an NX phase (same `err=0x15` instruction-fetch check as `test-m10-nxe`), then production syscall-16 phases (cross-process map/read, denial, stale generation, exhaustion, reuse zeroing, kernel-owned pin, read-only write fault teardown, shared-window exec fault teardown, owner exit with orphaned reader, reader exit leaving owner intact, CAP_REVOKE of the owner root while both processes are mapped, a port transfer of the owner root that the receiver can map only read-only and that teardown reclaims exactly once) and a resource baseline check, including the zero page's integrity. Ordered markers: `[CPU ] NXE enabled nx=1`, `[M10.SB] creating`, `[M10.SB] nx exec fault err=0x15 OK`, `[M10.SB] cross-process map/read OK`, `[M10.SB] unauthorized denied OK`, `[M10.SB] stale id denied OK`, `[M10.SB] exhaustion deterministic OK`, `[M10.SB] reuse zeroed OK`, `[M10.SB] kernel-owned map OK`, `[M10.SB] read-only write fault OK`, `[M10.SB] shared exec fault err=0x15 OK`, `[M10.SB] owner exit orphaned reader OK`, `[M10.SB] reader exit left owner intact OK`, `[M10.SB] root revoke while mapped OK`, `[M10.SB] port transfer read-only OK`, `[M10.SB] baseline OK`, `[M10.SB] PASS`; success prints `[M10.shared-buffer] PASS` (alias `m10-shared-buffer`). See [GRAPHICS.md](GRAPHICS.md#shared-buffers-syscall-16-195).
+Kernel feature: `m10-shared-buffer-self-test`. Host steps: `cargo test -p clean-slate-native-abi`, `cargo test -p clean-slate-service-fixtures`, `cargo test -p clean-slate-capability` (READ-only delegated children), and the kernel `mm::shared_buffer` (object model, window mapping, reconcile and teardown), `frame_allocator` (frame runs) and `nx_` tests. QEMU boots the kernel with that feature and runs the `m10-shared-buffer` scripted fixture lane: an NX phase (same `err=0x15` instruction-fetch check as `test-m10-nxe`), then production syscall-16 phases (cross-process map/read, a reader's CAP_REVOKE DROP of its own child — refused while mapped, then leaving the owner intact — denial, stale generation, exhaustion, reuse zeroing, kernel-owned pin, read-only write fault teardown, shared-window exec fault teardown, owner exit with orphaned reader, reader exit leaving owner intact, CAP_REVOKE of the owner root while both processes are mapped, a port transfer of the owner root that the receiver can map only read-only and that teardown reclaims exactly once) and a resource baseline check, including the zero page's integrity. Ordered markers: `[CPU ] NXE enabled nx=1`, `[M10.SB] creating`, `[M10.SB] nx exec fault err=0x15 OK`, `[M10.SB] cross-process map/read OK`, `[M10.SB] holder drop left owner intact OK`, `[M10.SB] unauthorized denied OK`, `[M10.SB] stale id denied OK`, `[M10.SB] exhaustion deterministic OK`, `[M10.SB] reuse zeroed OK`, `[M10.SB] kernel-owned map OK`, `[M10.SB] read-only write fault OK`, `[M10.SB] shared exec fault err=0x15 OK`, `[M10.SB] owner exit orphaned reader OK`, `[M10.SB] reader exit left owner intact OK`, `[M10.SB] root revoke while mapped OK`, `[M10.SB] port transfer read-only OK`, `[M10.SB] baseline OK`, `[M10.SB] PASS`; success prints `[M10.shared-buffer] PASS` (alias `m10-shared-buffer`). See [GRAPHICS.md](GRAPHICS.md#shared-buffers-syscall-16-195).
+
+For the M10 #118 desktop (host tests, CPL3 builds, then two QMP-driven QEMU boots) and the #119 milestone gate:
+
+```bash
+cargo xtask test-m10-desktop
+cargo xtask test-m10
+```
+
+`test-m10-desktop` (aliases `m10-desktop`, `m10.118`) runs `cargo test -p clean-slate-desktop-shell`, builds the compositor, shell and playground release ELFs, and boots the supervised desktop twice: on a modern-only VirtIO-GPU at Q1 (`m10-desktop-self-test`), and on the `-vga std` GOP framebuffer at Q0 (`m10-desktop-self-test,m10-desktop-q0`). Both runs drive the desktop over a private QMP socket and check serial output and six screendumps; it prints `[M10.9] PASS` (see [Graphical desktop lane](#graphical-desktop-lane-118119)). `test-m10` (aliases `m10`, `m10.119`) runs `test-m10-contract`, the `clean-slate-ui` host tests, `test-m10-nxe`, `test-m10-shared-buffer`, `test-m10-port`, `test-qmp-smoke`, `test-m10-virtio-modern`, `test-m10-framebuffer`, `test-m10-virtio-gpu`, `test-m10-input-smoke`, `test-m10-compositor`, `test-m10-app` and finally `test-m10-desktop`, each once, printing `[M10 ] step N/13 …` lines. It prints `[M10 ] PASS` only after all of them succeed.
 
 For M4.2 kernel lifecycle control (host tests + optional QEMU acceptance):
 
@@ -462,9 +491,9 @@ cargo xtask m5-disk-create
 cargo xtask m5-disk-reset
 ```
 
-On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, `test-m5`, `test-m6`, `test-m7`, `test-m8`, and `test-m9`, which covers the milestone gates already wired into the aggregate flows without redundantly rerunning constituents. Each `test-mN` aggregate (M3 to M9) runs every registered `test-mN-*` constituent as a step; the registry marks those `CoveredBy` their aggregate, and the xtask unit test `milestone_aggregates_run_every_registered_constituent` fails when a registered constituent is missing from its aggregate or the `CoveredBy` mark disagrees. The one exception is `test-m3-address-space` and `test-m3-lifecycle`, which `test-m3` runs as one merged boot of the same kernel feature whose marker list is checked to contain both. `-Exhaustive` therefore adds those two M3 boots, `test-m10-contract` (alias `m10-contract`), `test-m10-nxe` (alias `m10-nxe`), `test-m10-port` (aliases `m10-port`, `m10.200`), `test-m10-virtio-modern` (alias `m10-virtio-modern`), `test-m10-framebuffer` (alias `m10-framebuffer`) and the other M10 lanes; constituents covered by an aggregate, `verify-m8-fixture` and `verify-m9-fixture` run once inside it and are not repeated. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `m5`, `m6`/`m6.9`, `m7`/`m7.9`, `m8`/`m8.9`, `m9`/`m9.9`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, `m5-disk-harness`/`m5-harness`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, `m6-capabilities`/`m6.8`), for example `.\scripts\run-tests.ps1 -Test m6`; `-List` prints the available names.
+On Windows, `scripts/run-tests.ps1` wraps the acceptance commands above. With no arguments it runs the default suite `test-m1`, `test-m2`, `test-m3`, `test-m4`, `test-m5`, `test-m6`, `test-m7`, `test-m8`, `test-m9` and `test-m10`, which covers the milestone gates already wired into the aggregate flows without redundantly rerunning constituents. Each `test-mN` aggregate (M3 to M10) runs every registered `test-mN-*` constituent as a step (`test-m10` also runs `test-qmp-smoke`); the registry marks those `CoveredBy` their aggregate, and the xtask unit test `milestone_aggregates_run_every_registered_constituent` fails when a registered constituent is missing from its aggregate or the `CoveredBy` mark disagrees. The one exception is `test-m3-address-space` and `test-m3-lifecycle`, which `test-m3` runs as one merged boot of the same kernel feature whose marker list is checked to contain both. `-Exhaustive` therefore adds only those two M3 boots; constituents covered by an aggregate, `verify-m8-fixture` and `verify-m9-fixture` run once inside it and are not repeated. Individual tests remain selectable by name or alias (`m1`, `m2`, `m3`, `m4`/`m4.8`, `m5`, `m6`/`m6.9`, `m7`/`m7.9`, `m8`/`m8.9`, `m9`/`m9.9`, `m10`/`m10.119`, `m10-desktop`/`m10.118`, `m10-contract`, `m10-nxe`, `m10-port`/`m10.200`, `m10-virtio-modern`, `m10-virtio-gpu`, `m10-framebuffer`, `entry`/`m3.1`, `address-space`/`m3.2`, `syscall`/`m3.3`, `lifecycle`/`m3.4`, `ipc`/`m3.5`, `resources`/`m3.6`, `m4-recovery`, `m4-restart-policy`, `m4-service-lifecycle`, `m4-crash-service`, `m4-supervisor`, `m5-block`/`block-attach`, `m5-storage`/`m5.7`, `m5-crash-matrix`/`crash-matrix`/`m5.6`, `m5-persistence`/`reboot-persistence`, `m5-crash-recovery`/`crash-recovery`, `m5-disk-harness`/`m5-harness`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, `m6-capabilities`/`m6.8`), for example `.\scripts\run-tests.ps1 -Test m6`; `-List` prints the available names.
 
-On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m6`/`m6.9`, `m7`/`m7.9`, `m8`/`m8.9`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, `m6-capabilities`/`m6.8`, `m8-linux-hello`/`m8.7`, `m8-linux-image`/`m8.2`, `m8-linux-dispatch`/`m8.3`, `verify-m8-fixture`, `m10-contract`, `m10-nxe`, `m10-port`/`m10.200`, `m10-virtio-modern` and `m10-framebuffer`); `--exhaustive` also runs `test-m10-contract`, `test-m10-nxe`, `test-m10-port`, `test-m10-virtio-modern` and `test-m10-framebuffer`. OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests including `clean-slate-capability`) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive therefore exercises every M3–M9 constituent (through its aggregate) plus all milestone aggregates with the existing `qemu-system-x86` and `ovmf` package setup from `.github/workflows/pr.yml`.
+On Linux and WSL, use `scripts/run-tests.sh` with the same default suite, `--exhaustive`, `--list`, and test aliases (including `m6`/`m6.9`, `m7`/`m7.9`, `m8`/`m8.9`, `m6-fixture-smoke`, `m6-object`/`m6.3`, `m6-process-control`/`m6.4`, `m6-delegation`/`m6.5`, `m6-revocation`/`m6.6`, `m6-audit`/`m6.7`, `m6-capabilities`/`m6.8`, `m8-linux-hello`/`m8.7`, `m8-linux-image`/`m8.2`, `m8-linux-dispatch`/`m8.3`, `verify-m8-fixture`, `m10`/`m10.119`, `m10-desktop`/`m10.118`, `m10-contract`, `m10-nxe`, `m10-port`/`m10.200`, `m10-virtio-modern`, `m10-virtio-gpu` and `m10-framebuffer`); every constituent runs once, inside its aggregate, under the same `CoveredBy` rule. OVMF is discovered by `cargo xtask` from standard distro paths when `OVMF_CODE` / `OVMF_VARS` are unset. Pull request CI on GitHub Actions runs the `check` job (format, clippy, build, host unit tests including `clean-slate-capability`) and an `acceptance` job that executes `./scripts/run-tests.sh --exhaustive` on `ubuntu-latest`; exhaustive therefore exercises every M3–M10 constituent (through its aggregate) plus all milestone aggregates with the existing `qemu-system-x86` and `ovmf` package setup from `.github/workflows/pr.yml`.
 
 For the M8.6 committed Linux hello ELF provenance check (hash + pinned metadata; no QEMU):
 
@@ -621,15 +650,16 @@ M10 kernel additions (see [GRAPHICS.md](GRAPHICS.md) for the full wave map):
 ```text
 kernel/src
 ├── boot/gop.rs                    (#111) GOP mode capture and fail-closed SetMode before ExitBootServices
-├── device/display/                (#111) ScanoutBackend: mod.rs, gop.rs; virtio_gpu.rs (#114 planned)
+├── device/display/                (#111/#114) ScanoutBackend: mod.rs, gop.rs, virtio_gpu.rs (+ virtio_gpu/ fake, tests)
 ├── service/display_syscall.rs     (#111/#114) syscall 18
 ├── mm/shared_buffer/              (#195) SharedBuffer table, per-process window (PML4 slot 160), syscall 16, W6 transfer attestation, W7 kernel-owned buffers
-├── capability/graphics.rs         (planned, #112/#118) Graphics/Display/Input grant policy for the M10 launch set
+├── capability/graphics.rs         (#118) Graphics/Display/Input grant policy for the M10 launch set
+├── service/desktop_launch.rs      (#118) supervised compositor/shell/playground launch, restart policy, [RSRC]/[IDLE ] proofs
 ├── service/port.rs                (planned, service-port issue) compositor connections and capability transfer
 ├── service/port_syscall.rs        (planned, service-port issue) syscall 17
-├── service/input_syscall.rs       (planned, #113) syscall 19
+├── service/input_syscall.rs       (#113) syscall 19, BIND_WAKE on the work sets
 ├── sched/work_set.rs              (planned, service-port issue) work sets, syscall 20
-├── device/input/                  (planned, #113) mod.rs, i8042.rs, RawInputQueue<128>
+├── device/input/                  (#113) i8042 driver, PS/2 decoders, RawInputQueue<128>, consumer wake binding
 └── device/virtio/                 existing; modern.rs (+ modern/), virtqueue.rs, dma.rs (#196)
 ```
 
@@ -717,7 +747,7 @@ Some acceptance lanes need guest keyboard or pointer input, or a framebuffer cap
 
 **Client (`QmpClient`).** Validates the greeting, logs `[qmp ] <lane> QEMU <ver> (<pkg>) on 127.0.0.1:<port>`, requires QEMU ≥ 2.6.0, negotiates `qmp_capabilities` without OOB, sends command ids `xtask-<n>` and requires the reply id to match (`IdMismatch`). Events before a reply are kept in a ring of 64 (oldest dropped and counted). Lines over 256 KiB are rejected (`LineTooLong`). Every read, write, and accept has a finite deadline (defaults: connect 15 s, greeting 10 s, command 10 s). JSON is parsed by a bounded hand-rolled parser (depth 32); no new dependencies. Errors name their phase or command, for example `QMP no-such-command (id xtask-3) failed: CommandNotFound: …`.
 
-**Input (`InputAction`, `QCode`, `MouseButton`).** Steps use `InputAction::{Key, Button, Rel}`; helpers `InputAction::tap(QCode::A)` and `InputAction::move_rel(dx, dy)`. `QCode` constants only (typos are compile errors); only the keys some lane sends are defined, so an input lane appends the `QCode`s it needs. `MouseButton` is `Left`, `Middle`, or `Right`. One `input-send-event` carries 1–8 events (`MAX_EVENTS_PER_COMMAND`). The PS/2 mouse emits one packet per command with button state at the end of the command, so press and release must be separate `Input` steps (there is no click helper). Relative Y follows QEMU's screen convention (positive down); the PS/2 packet inverts it. Input lanes pass `machine_extra: Some("vmport=off")` in `VmLaunchConfig` so the PS/2 mouse is the only pointer. `input-send-event` fails while the VM is paused, so QMP-driven lanes never use `-S`.
+**Input (`InputAction`, `QCode`, `MouseButton`).** Steps use `InputAction::{Key, Button, Rel}`; helpers `InputAction::tap(QCode::A)` and `InputAction::move_rel(dx, dy)`. `QCode` constants only (typos are compile errors); only the keys some lane sends are defined, so an input lane appends the `QCode`s it needs. `MouseButton` is `Left`, `Middle`, `Right`, `WheelUp`, or `WheelDown`; a wheel "button" is one detent per press (`InputAction::scroll`, press and release in one command, gives one packet). One `input-send-event` carries 1–8 events (`MAX_EVENTS_PER_COMMAND`). The PS/2 mouse emits one packet per command with button state at the end of the command, so press and release must be separate `Input` steps (there is no click helper). Relative Y follows QEMU's screen convention (positive down); the PS/2 packet inverts it. Input lanes pass `machine_extra: Some("vmport=off")` in `VmLaunchConfig` so the PS/2 mouse is the only pointer. `input-send-event` fails while the VM is paused, so QMP-driven lanes never use `-S`.
 
 **Screenshots.** `screendump` is sent without `format`, so QEMU writes binary PPM (P6) on every supported version; xtask parses it (at most 8192×8192 and 192 MiB RGB) and writes PNG itself (stored-deflate zlib with CRC-32 and Adler-32; no external tools). `Screenshot` exposes `width()`, `height()`, `pixel(x, y)`, and `rgb()`.
 
@@ -725,25 +755,81 @@ Some acceptance lanes need guest keyboard or pointer input, or a framebuffer cap
 
 **Artifacts.** Runs write under `target/xtask-artifacts/<lane>/<pid>.<seq>/` (`xtask_artifact_root()`); PNG is `<name>.png`. The intermediate PPM is removed after a passing check and kept next to the PNG when the check fails. At most eight run directories per lane (oldest pruned).
 
-**Kernel lanes.** There is no kernel-lane wrapper yet; the first kernel lane that attaches a driver adds one. It builds the command with `prepare_vm(false, false, features, config)` (never `-S`), appends `driver.qemu_args()`, and calls `run_driven_acceptance_command(&mut vm.qemu, marker_set, timeout, &mut driver)`, which returns the captured serial output.
+**Kernel lanes (`xtask/src/qmp/lane.rs`).** `run_kernel_lane(KernelLane { lane, features, markers, timeout, config, extra_args }, steps)` builds the kernel with `prepare_vm(false, false, features, config)` (never `-S`), appends `extra_args` (devices such as `m10_virtio_gpu::qemu_args()`), binds a `QmpScriptDriver`, appends its `-name`/`-qmp tcp:127.0.0.1:<port>` arguments, and runs `run_driven_acceptance_command`, returning the captured serial output for the lane's own checks; `run_kernel_lane_capturing` also returns the script's screendumps (`Capture { name, png, screenshot }`). Input lanes pass `input_lane_config()` (`vmport=off`). The host test `input_lane_is_headless_with_one_private_client_qmp_endpoint` pins that such a lane keeps `-display none`, has exactly one client-mode loopback `-qmp`, and never adds `-S`, a monitor, or a display backend.
+
+**Input injection (`xtask/src/qmp/inject.rs`).** A lane states its stimulus as a static `&[InputStimulus]`: each entry is one `input-send-event` (`actions`) and the exact serial lines the guest must log for it (`expect`). `injection_steps(ready, stimuli)` awaits `ready`, then sends each stimulus and awaits its last expected line before the next one, so pacing never depends on timing; `validate_exact_sequence(output, prefix, stimuli)` then requires the lines containing `prefix` to equal the expected lines exactly (count, order, text); `check_stimuli` rejects tables that cannot be paced. The #113 lane (`xtask/src/m10_input_lane.rs`, `cargo xtask test-m10-input-smoke`) is the reference user: its `QMP_STIMULI` table is cross-checked by a host test against an independent derivation from the actions, and #119 can splice `qmp_injection_steps()` into its own script and call `validate_qmp_output`.
+
+**Driven kernel lanes with a caller-owned driver.** `run_driven_vm_acceptance(features, config, marker_set, timeout, &mut driver)` in `xtask/src/main.rs` is the same boot sequence for a lane that keeps its driver afterwards (`test-m10-framebuffer` reads its screendump capture back from the `QmpScriptDriver`): `prepare_vm(false, false, features, config)` (never `-S`), then `driver.qemu_args()`, then `run_driven_acceptance_command`.
 
 **Smoke gate.** `cargo xtask test-qmp-smoke` (alias `qmp-smoke`; Constituent in `scripts/run-tests.sh` and `scripts/run-tests.ps1`) needs only `qemu-system-x86_64` with SeaBIOS (no kernel, no OVMF). xtask builds a 512-byte real-mode boot sector on a 1 MiB raw disk (SeaBIOS computes zero CHS cylinders on smaller disks), paints a blue/red text screen, and echoes every i8042 byte on COM1 as `[QMPFIX] kbd xx` / `[QMPFIX] aux xx`. The script injects taps, pointer motion, and left, right, and middle presses and releases—each paced on the echoed bytes—checks the serial trace, exercises `CommandError` for `no-such-command`, validates screenshot pixels and the PNG header, quits, and requires a `SHUTDOWN` event plus a released port. A second run fails its screenshot check on purpose and proves QEMU closed the QMP socket and the port is refused. Success prints `[QMP.smoke] PASS`.
 
 Example lane script (types in `xtask/src/qmp/`):
 
 ```rust
-let steps = vec![
-    ScriptStep::AwaitLine("[M10.input] ready"),
-    ScriptStep::Input(InputAction::tap(QCode::A).to_vec()),
-    ScriptStep::AwaitLine("[M10.input] key a down"),
-    ScriptStep::Screendump {
-        name: "frame",
-        check: check_frame,
-    },
-];
-let mut driver = QmpScriptDriver::new("m10-input", steps, artifact_root)?;
-// Then boot it as described under "Kernel lanes" above.
+const STIMULI: &[InputStimulus] = &[InputStimulus {
+    actions: &InputAction::tap(QCode::A),
+    expect: &["[LANE] rec 1 kbd key=0x04 down", "[LANE] rec 2 kbd key=0x04 up"],
+}];
+let mut steps = injection_steps("[LANE] ready", STIMULI);
+steps.push(ScriptStep::Screendump {
+    name: "frame",
+    check: check_frame,
+});
+let output = run_kernel_lane(lane, steps)?;
+validate_exact_sequence(&output, "[LANE] rec ", STIMULI).map_err(XtaskError::Validation)?;
 ```
+
+### Graphical desktop lane (#118/#119)
+
+**Graphical launch.** `cargo xtask run-m10-desktop` builds the three desktop ELFs and an `m10-desktop` kernel and boots it in a QEMU window on VirtIO-GPU at Q1; `cargo xtask run-m10-desktop --framebuffer` uses the `-vga std` GOP framebuffer at Q0. Serial goes to stdout. The window uses `-display gtk` unless `QEMU_DISPLAY` names another display (for example `sdl`). The machine has `vmport=off`, so the pointer is QEMU's relative PS/2 mouse: click into the window to grab it, and press Ctrl+Alt+G to release it. The self-test fault keys are not compiled into this build: `test-m10-desktop` additionally builds `fault-keys` variants of the compositor and playground into `target/fault-keys`, and only its `m10-desktop-self-test` kernel embeds them.
+
+**Lane flow (`xtask/src/m10_desktop_lane.rs`).** `plan(tier)` builds the QMP script. The pointer is homed to the bottom-right corner, then every target is reached with motion commands of at most 120 per axis (PS/2 saturates at ±127). Press and release are always separate commands. The script, in order:
+
+1. awaits `[APP ] ready` and `[IDLE ] quiet`, then captures `desktop`;
+2. clicks the increment button and then the toggle, awaiting each `[APP ] input state=changed` line;
+3. clicks the workspace background (the app must log nothing);
+4. taps `a` with the pointer off the window (the key goes to the focused app), then captures `input`;
+5. drags the title bar by (+200, −16) and captures `dragged`;
+6. clicks Close and awaits the `app-exit` compare and the relaunched app, then captures `relaunched`;
+7. taps F12 (app crash), then captures `recovered`;
+8. taps F11 (compositor crash and restart), then captures `restarted`.
+
+Every capture waits for an `[IDLE ] quiet` line first, so the frame is settled.
+
+**Serial checks (`validate_serial`).** The checks are:
+
+- the `[DISP] backend=` for the run, and the absence of the other backend;
+- the `[COMP] started`, `[SHELL] ready … dock=none` and `[APP ] ready` lines with the run's tier;
+- launch order `compositor, shell, app, app, app, compositor, shell, app`, with distinct pids and a new compositor generation;
+- exits `app/exit/128`, `app/crash/6`, `compositor/crash/6`, and every reaped pid with `residue=0`;
+- three `compare … baseline=match` lines, each preceded by a snapshot equal to the baseline field by field;
+- `rejected=1` stale-handle probes for apps 2–4, and `display=denied input=denied` for every app;
+- exactly three app input lines, all from app 1;
+- the window-created origins equal to the cascade positions, and the drag ending at origin + (200, −16);
+- the shell-only compositor rows before every relaunch;
+- every `[IDLE ]` line with `presents=0` and `ms>=500`;
+- no `[FAIL]`, `wiring failed` or `budget exhausted` lines.
+
+**Screendump checks (`xtask/src/m10_desktop_visual.rs`).** No whole-frame hash. The host renders the expected desktop with the guest's own `clean-slate-ui` / compositor code: shell wallpaper, focused `CleanSlateChrome` frame at the expected origin, rail blended over it and the `ARROW` cursor. Client content is never rendered. Each region is then compared with its own budget, in this order:
+
+- the rail must match and must differ from bare wallpaper;
+- the bottom 64 rows right of the rail must be bare wallpaper (no dock);
+- the title bar must match;
+- wherever focused and unfocused chrome differ, the focused render must win;
+- the window interior must not be wallpaper;
+- everything outside client content must match within 0.5%.
+
+The counter, toggle, key indicator and text line must differ between `desktop` and `input`. A failure names the capture, the PNG, the region, the mismatch count and the first differing pixel.
+
+**Screenshot artifacts.** Captures are written to `target/xtask-artifacts/m10-desktop-virtio-gpu/<run>/` and `target/xtask-artifacts/m10-desktop-framebuffer/<run>/` (`desktop.png`, `input.png`, `dragged.png`, `relaunched.png`, `recovered.png`, `restarted.png`); the serial transcript is in the xtask output. CI uploads `target/xtask-artifacts` as the `xtask-artifacts` artifact on success and on failure.
+
+**Failure-debug flow.**
+
+1. Read the xtask error first. Script failures name the step (`<lane> QMP script at step i/n (await line …)`), serial failures name the expectation, and capture failures name the region.
+2. For a stuck await, look at the serial tail for the last `[DESK]`, `[RSRC]` or `[APP ]` line. A missing input line usually means the pointer missed its target, so compare the PNG's cursor with the planned target.
+3. For a capture failure, open the PNG next to the region in the message.
+4. Rerun one backend's scenario interactively with `run-m10-desktop` (or `--framebuffer`) to reproduce by hand.
+5. The host-side logic runs without QEMU: `cargo test -p xtask m10_desktop` covers the script geometry, the serial validator (a synthetic passing transcript plus one mutation per expectation) and the visual checks (host renders that pass and corrupted ones that fail).
 
 ### Real hardware tests
 
@@ -821,8 +907,8 @@ M10 covers steps 2–4 in waves; a lane starts when the issues it depends on hav
 - Wave 1: #195 shared buffers (`test-m10-nxe`, `test-m10-shared-buffer`; wires teardown step 5), the service-port issue, #111 UEFI framebuffer and raster, #113 i8042 input, #196 VirtIO modern transport, #197 QMP screenshots; #116 may start design tokens and documentation.
 - Wave 2: #112 compositor (after #195, the service port and #110), #114 VirtIO GPU (after #196).
 - Wave 3: #115 window management, #116 UI toolkit and desktop shell, #117 playground app.
-- Wave 4: #118 desktop integration.
-- Wave 5: #119 `cargo xtask test-m10` aggregate.
+- Wave 4: #118 desktop integration (`cargo xtask test-m10-desktop`).
+- Wave 5: #119 `cargo xtask test-m10` aggregate (`[M10 ] PASS`).
 
 ## Storage safety
 

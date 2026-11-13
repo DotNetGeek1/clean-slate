@@ -6,7 +6,11 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+clean-slate-compositor = { path = "../compositor" }
+clean-slate-graphics = { path = "../graphics" }
+clean-slate-playground = { path = "../playground" }
 clean-slate-raster = { path = "../raster" }
+clean-slate-ui = { path = "../ui" }
 clean-slate-rootfs = { path = "../rootfs", features = ["std"] }
 clean-slate-network = { path = "../network" }
 rcgen = { version = "=0.13.2", default-features = false, features = ["pem", "crypto", "ring"] }

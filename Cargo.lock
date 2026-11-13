@@ -117,6 +117,32 @@ name = "clean-slate-capability"
 version = "0.0.1"
 
 [[package]]
+name = "clean-slate-compositor"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-capability",
+ "clean-slate-graphics",
+ "clean-slate-native-abi",
+ "clean-slate-port",
+ "clean-slate-raster",
+ "clean-slate-ui",
+]
+
+[[package]]
+name = "clean-slate-desktop-shell"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-capability",
+ "clean-slate-compositor",
+ "clean-slate-graphics",
+ "clean-slate-native-abi",
+ "clean-slate-playground",
+ "clean-slate-port",
+ "clean-slate-raster",
+ "clean-slate-ui",
+]
+
+[[package]]
 name = "clean-slate-elf"
 version = "0.0.1"
 
@@ -186,6 +212,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "clean-slate-playground"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-capability",
+ "clean-slate-compositor",
+ "clean-slate-graphics",
+ "clean-slate-native-abi",
+ "clean-slate-port",
+ "clean-slate-raster",
+ "clean-slate-ui",
+]
+
+[[package]]
 name = "clean-slate-port"
 version = "0.0.1"
 dependencies = [
@@ -234,6 +273,14 @@ dependencies = [
  "clean-slate-capability",
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
+]
+
+[[package]]
+name = "clean-slate-ui"
+version = "0.0.1"
+dependencies = [
+ "clean-slate-graphics",
+ "clean-slate-raster",
 ]
 
 [[package]]
@@ -1158,9 +1205,13 @@ dependencies = [
 name = "xtask"
 version = "0.0.1"
 dependencies = [
+ "clean-slate-compositor",
+ "clean-slate-graphics",
  "clean-slate-network",
+ "clean-slate-playground",
  "clean-slate-raster",
  "clean-slate-rootfs",
+ "clean-slate-ui",
  "rcgen",
  "rustls",
  "smoltcp",

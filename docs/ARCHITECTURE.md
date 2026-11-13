@@ -504,6 +504,8 @@ Implementation lives in `capability/src/revocation.rs` (generic graph) and `kern
 
 **PROBE:** `SYSCALL_NR_CAP_REVOKE` op `PROBE` runs the same `authorize_current_class` path as production operations (handle → record class → rights check). Used by fixtures and audit tests as a generic authority probe.
 
+**DROP (#200):** `SYSCALL_NR_CAP_REVOKE` op `DROP` (5; 3 and 4 stay reserved for the M6.6 self-test kernel) with `rsi = handle` releases exactly the caller's own record: the slot returns to `Empty` with a bumped generation, so a repeat or reused handle is `ESTALE`. It never touches another holder, the parent or the owner. Statuses: `0`, `EINVAL` (malformed or never issued), `ESTALE`, `EACCES` (caller is not the holder — an ancestor must use `REVOKE`), `EAGAIN` (a live child was delegated from it, or it is the authority of the caller's Live shared-window row). DROP refuses rather than unmapping: the caller `UNMAP`s first, as for owner `RELEASE`. A record an ancestor already revoked can be dropped to reclaim its slot. Dropping an unmapped, undelegated `SharedBuffer` root retires the buffer as `RELEASE` would.
+
 **Deferred:** distributed/persistent revocation (revocation lists surviving reboot), and rollback of mistaken revokes.
 
 ### Module ownership (M6.2–M6.7)

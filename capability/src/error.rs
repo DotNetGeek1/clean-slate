@@ -95,6 +95,13 @@ pub mod syscall_abi {
     pub const SYSCALL_NR_CAP_REVOKE: u64 = 11;
     pub const SYSCALL_NR_CAP_AUDIT_READ: u64 = 12;
     pub const SYSCALL_NR_CAP_GRANT: u64 = 13;
+
+    /// `SYSCALL_NR_CAP_REVOKE` ops (`rdi`); `rsi` is the capability handle. Ops 3 and 4 are
+    /// reserved for the M6.6 self-test kernel.
+    pub const CAP_REVOKE_OP_REVOKE: u64 = 1;
+    pub const CAP_REVOKE_OP_PROBE: u64 = 2;
+    /// Drops the caller's own handle and frees its slot; never touches another record.
+    pub const CAP_REVOKE_OP_DROP: u64 = 5;
     pub const SYSCALL_NR_NETWORK_CAPABILITY: u64 = 14;
     pub const SYSCALL_NR_NETWORK_REQUEST: u64 = 15;
 

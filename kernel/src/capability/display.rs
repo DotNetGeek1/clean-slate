@@ -52,6 +52,22 @@ pub(crate) fn authorize_display_query_in<const N: usize>(
     Ok(record)
 }
 
+/// `MAP_SCANOUT`, `PRESENT` and `BIND_WAKE` require `DISPLAY_PRESENT`; `INSPECT` alone is refused.
+pub(crate) fn authorize_display_present_in<const N: usize>(
+    table: &CapabilityTable<N>,
+    holder: HolderId,
+    raw_handle: u64,
+    output_index: u8,
+) -> Result<CapabilityRecord, CapabilityError> {
+    let handle = CapabilityHandle::decode(raw_handle)?;
+    table.authorize(
+        holder,
+        handle,
+        ResourceRef::display(output_index),
+        Rights::DISPLAY_PRESENT,
+    )
+}
+
 pub(crate) fn find_display_handle(holder: HolderId, output_index: u8) -> Option<u64> {
     with_capability_space(|table| find_display_handle_in(table, holder, output_index))
 }
@@ -77,6 +93,27 @@ pub(crate) fn authorize_display_query(
     result
 }
 
+/// Audited [`authorize_display_present_in`] against the global table.
+pub(crate) fn authorize_display_present(
+    holder: HolderId,
+    raw_handle: u64,
+    output_index: u8,
+) -> Result<CapabilityRecord, CapabilityError> {
+    let result = with_capability_space(|table| {
+        authorize_display_present_in(table, holder, raw_handle, output_index)
+    });
+    let depth = result.as_ref().map_or(0, |record| record.provenance.depth);
+    record_decision(
+        holder,
+        ResourceRef::display(output_index),
+        Rights::DISPLAY_PRESENT,
+        CapabilityHandle::decode(raw_handle).unwrap_or(CapabilityHandle::INVALID),
+        depth,
+        result.map(|_| ()),
+    );
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use clean_slate_capability::{
@@ -84,7 +121,7 @@ mod tests {
         ResourceRef, Rights,
     };
 
-    use super::{authorize_display_query_in, find_display_handle_in};
+    use super::{authorize_display_present_in, authorize_display_query_in, find_display_handle_in};
 
     const OWNER: HolderId = HolderId(7);
     const OTHER: HolderId = HolderId(8);
@@ -140,6 +177,31 @@ mod tests {
             let record = authorize_display_query_in(&table, OWNER, handle, 0).expect("authorized");
             assert_eq!(record.rights, rights);
         }
+    }
+
+    #[test]
+    fn present_authority_needs_the_present_right() {
+        let mut table = CapabilityTable::<8>::new();
+        let inspect = grant(&mut table, OWNER, ResourceRef::display(0), Rights::INSPECT);
+        let present = grant(
+            &mut table,
+            OWNER,
+            ResourceRef::display(0),
+            Rights::DISPLAY_PRESENT,
+        );
+        assert_eq!(
+            authorize_display_present_in(&table, OWNER, inspect, 0).map(|_| ()),
+            Err(CapabilityError::MissingRight)
+        );
+        assert!(authorize_display_present_in(&table, OWNER, present, 0).is_ok());
+        assert_eq!(
+            authorize_display_present_in(&table, OTHER, present, 0).map(|_| ()),
+            Err(CapabilityError::UnauthorizedHolder)
+        );
+        assert_eq!(
+            authorize_display_present_in(&table, OWNER, present, 1).map(|_| ()),
+            Err(CapabilityError::WrongResource)
+        );
     }
 
     #[test]

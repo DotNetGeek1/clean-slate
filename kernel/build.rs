@@ -28,6 +28,7 @@ const BOOT_TAIL_COMPILED_OUT_FEATURES: &[&str] = &[
     "m10-framebuffer-self-test",
     "m7-net-device-self-test",
     "m10-virtio-modern-self-test",
+    "m10-virtio-gpu-self-test",
     "m7-tls-self-test",
     "m7-tls-fail-closed-self-test",
     "m7-dns-self-test",
@@ -42,6 +43,10 @@ const BOOT_TAIL_COMPILED_OUT_FEATURES: &[&str] = &[
 /// boot tail. The boot tail, or any one of these, sets `clean_slate_isa_irq`.
 const ISA_IRQ_WITHOUT_BOOT_TAIL_FEATURES: &[&str] = &["m10-input-self-test"];
 
+/// Self-test builds that bring VirtIO-GPU up without the boot tail. The boot tail, or any one of
+/// these, sets `clean_slate_virtio_gpu`.
+const VIRTIO_GPU_WITHOUT_BOOT_TAIL_FEATURES: &[&str] = &["m10-virtio-gpu-self-test"];
+
 fn any_feature_enabled(features: &[&str]) -> bool {
     features.iter().any(|feature| {
         let var = format!(
@@ -55,12 +60,16 @@ fn any_feature_enabled(features: &[&str]) -> bool {
 fn emit_boot_tail_cfgs() {
     println!("cargo::rustc-check-cfg=cfg(clean_slate_boot_tail)");
     println!("cargo::rustc-check-cfg=cfg(clean_slate_isa_irq)");
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_virtio_gpu)");
     let boot_tail = !any_feature_enabled(BOOT_TAIL_COMPILED_OUT_FEATURES);
     if boot_tail {
         println!("cargo::rustc-cfg=clean_slate_boot_tail");
     }
     if boot_tail || any_feature_enabled(ISA_IRQ_WITHOUT_BOOT_TAIL_FEATURES) {
         println!("cargo::rustc-cfg=clean_slate_isa_irq");
+    }
+    if boot_tail || any_feature_enabled(VIRTIO_GPU_WITHOUT_BOOT_TAIL_FEATURES) {
+        println!("cargo::rustc-cfg=clean_slate_virtio_gpu");
     }
 }
 fn main() {
@@ -121,6 +130,35 @@ fn main() {
     }
     if env::var("CARGO_FEATURE_M9_ROOTFS").is_ok() {
         embed_m9_rootfs_image();
+    }
+    if env::var("CARGO_FEATURE_M10_DESKTOP").is_ok() {
+        // The self-test kernel embeds the `fault-keys` builds of the compositor and playground
+        // (built into `target/fault-keys`); every other desktop kernel embeds images without
+        // that code.
+        let fault_keys = if env::var("CARGO_FEATURE_M10_DESKTOP_SELF_TEST").is_ok() {
+            "target/fault-keys"
+        } else {
+            "target"
+        };
+        for (target_dir, raw_name, bin_name) in [
+            (
+                fault_keys,
+                "compositor_userspace.bin",
+                "clean-slate-compositor-userspace",
+            ),
+            (
+                "target",
+                "desktop_shell_userspace.bin",
+                "clean-slate-desktop-shell-userspace",
+            ),
+            (
+                fault_keys,
+                "playground_userspace.bin",
+                "clean-slate-playground-userspace",
+            ),
+        ] {
+            embed_userspace_image_from(target_dir, raw_name, bin_name, true);
+        }
     }
 }
 
@@ -332,9 +370,19 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 }
 
 fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bool) {
+    embed_userspace_image_from("target", raw_name, bin_name, record_entry_offset);
+}
+
+/// [`embed_userspace_image`] from the cargo target directory `target_dir` (workspace-relative).
+fn embed_userspace_image_from(
+    target_dir: &str,
+    raw_name: &str,
+    bin_name: &str,
+    record_entry_offset: bool,
+) {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let profile = env::var("PROFILE").expect("PROFILE");
-    let elf = userspace_elf(&manifest_dir, &profile, bin_name);
+    let elf = userspace_elf(&manifest_dir, target_dir, &profile, bin_name);
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let raw_image = out_dir.join(raw_name);
 
@@ -350,12 +398,14 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
     }
 
     let elf_bytes = fs::read(&elf).expect("failed to read userspace ELF");
-    let (image, plan, image_base) = materialize_elf_image(&elf_bytes).unwrap_or_else(|message| {
-        panic!(
-            "failed to materialize userspace ELF {}: {message}",
-            elf.display()
-        )
-    });
+    let load_base = userspace_map_base(raw_name);
+    let (image, plan, image_base) = materialize_elf_image(&elf_bytes, load_base, raw_name)
+        .unwrap_or_else(|message| {
+            panic!(
+                "failed to materialize userspace ELF {}: {message}",
+                elf.display()
+            )
+        });
 
     fs::write(&raw_image, &image).expect("failed to write materialized userspace image");
 
@@ -373,12 +423,25 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
             "storage_userspace.bin" => ("storage_userspace_entry.rs", "STORAGE_USERSPACE"),
             "m6_fixture_userspace.bin" => ("m6_fixture_userspace_entry.rs", "M6_FIXTURE_USERSPACE"),
             "network_userspace.bin" => ("network_userspace_entry.rs", "NETWORK_USERSPACE"),
+            "compositor_userspace.bin" => ("compositor_userspace_entry.rs", "COMPOSITOR_USERSPACE"),
+            "desktop_shell_userspace.bin" => (
+                "desktop_shell_userspace_entry.rs",
+                "DESKTOP_SHELL_USERSPACE",
+            ),
+            "playground_userspace.bin" => ("playground_userspace_entry.rs", "PLAYGROUND_USERSPACE"),
             _ => panic!("unexpected userspace image {raw_name}"),
         };
         let generated = out_dir.join(generated_file);
         fs::write(
             &generated,
-            format_segment_metadata(prefix, entry_offset, mapped_pages, image_base, &plan),
+            format_segment_metadata(
+                prefix,
+                entry_offset,
+                mapped_pages,
+                image_base,
+                load_base,
+                &plan,
+            ),
         )
         .expect("failed to write userspace_entry metadata");
     }
@@ -395,6 +458,7 @@ fn format_segment_metadata(
     entry_offset: u64,
     mapped_pages: usize,
     image_base: u64,
+    load_base: u64,
     plan: &LoadPlan,
 ) -> String {
     let mut out = String::new();
@@ -406,6 +470,9 @@ fn format_segment_metadata(
     ));
     out.push_str(&format!(
         "pub(super) const {prefix}_IMAGE_BASE: u64 = {image_base:#x};\n"
+    ));
+    out.push_str(&format!(
+        "pub(super) const {prefix}_RELOCATED_BASE: u64 = {load_base:#x};\n"
     ));
     out.push_str(&format!(
         "pub(super) const {prefix}_SEGMENT_COUNT: usize = {};\n",
@@ -445,14 +512,45 @@ fn perm_bits(perms: SegmentPermissions) -> u8 {
     flags
 }
 
+/// Address the kernel maps `raw_name` at.
+///
+/// Desktop images are mapped at [`clean_slate_native_abi::desktop::DESKTOP_IMAGE_BASE`].
+/// Every other embedded image is mapped at [`USERSPACE_IMAGE_LOAD_BASE`]. The generated
+/// `{prefix}_RELOCATED_BASE` is asserted against those constants where the kernel maps the
+/// image, so a name missing from this list fails that build.
+fn userspace_map_base(raw_name: &str) -> u64 {
+    match raw_name {
+        "compositor_userspace.bin" | "desktop_shell_userspace.bin" | "playground_userspace.bin" => {
+            clean_slate_native_abi::desktop::DESKTOP_IMAGE_BASE
+        }
+        _ => USERSPACE_IMAGE_LOAD_BASE,
+    }
+}
+
 /// Emit only file-backed PT_LOAD bytes (never `p_memsz` zero-fill) plus a validated plan.
-fn materialize_elf_image(elf: &[u8]) -> Result<(Vec<u8>, LoadPlan, u64), String> {
+///
+/// `load_base` is the address the kernel maps the image at. `R_X86_64_RELATIVE` addends are
+/// rewritten from the ELF link base to that address.
+fn materialize_elf_image(
+    elf: &[u8],
+    load_base: u64,
+    image_name: &str,
+) -> Result<(Vec<u8>, LoadPlan, u64), String> {
     let policy = LoadPlanPolicy::native_x86_64();
     let plan =
         parse_load_plan(elf, &policy).map_err(|err| format!("load-plan validation: {err:?}"))?;
     let image_base = plan
         .image_base()
         .ok_or_else(|| "ELF had no PT_LOAD segments".to_string())?;
+    // The kernel maps a desktop image at its link address and requires that address to be
+    // `DESKTOP_IMAGE_BASE`. Relocating to the constant while the ELF is linked elsewhere would
+    // aim every pointer at the wrong pages.
+    if load_base == clean_slate_native_abi::desktop::DESKTOP_IMAGE_BASE && image_base != load_base {
+        return Err(format!(
+            "{image_name}: link base {image_base:#x} does not match DESKTOP_IMAGE_BASE {load_base:#x}"
+        ));
+    }
+    let image_span = image_virtual_span(&plan, image_base)?;
 
     let mut image_end = image_base;
     for segment in plan.iter_segments() {
@@ -501,8 +599,28 @@ fn materialize_elf_image(elf: &[u8]) -> Result<(Vec<u8>, LoadPlan, u64), String>
         image[dest_start..dest_end].copy_from_slice(&elf[src_start..src_end]);
     }
 
-    apply_rela_dyn(elf, &mut image, image_base, USERSPACE_IMAGE_LOAD_BASE)?;
+    apply_rela_dyn(
+        elf, &mut image, image_base, load_base, image_span, image_name,
+    )?;
     Ok((image, plan, image_base))
+}
+
+/// Bytes from the link base through the last PT_LOAD byte, including BSS (`p_memsz`).
+fn image_virtual_span(plan: &LoadPlan, image_base: u64) -> Result<u64, String> {
+    let mut virtual_end = image_base;
+    for segment in plan.iter_segments() {
+        if segment.memsz == 0 {
+            continue;
+        }
+        let end = segment
+            .vaddr
+            .checked_add(segment.memsz)
+            .ok_or("segment memory end overflow")?;
+        virtual_end = virtual_end.max(end);
+    }
+    virtual_end
+        .checked_sub(image_base)
+        .ok_or_else(|| "image span underflow".to_string())
 }
 
 fn apply_rela_dyn(
@@ -510,6 +628,8 @@ fn apply_rela_dyn(
     image: &mut [u8],
     link_base: u64,
     load_base: u64,
+    image_span: u64,
+    image_name: &str,
 ) -> Result<(), String> {
     let e_shoff = u64::from_le_bytes(elf[0x28..0x30].try_into().map_err(|_| "e_shoff")?);
     let e_shentsize =
@@ -539,6 +659,12 @@ fn apply_rela_dyn(
         if sh_entsize != 24 {
             return Err(".rela.dyn entry size was not 24 bytes".into());
         }
+        // An addend that does not point inside the image lands outside this window after the
+        // rebase. `load_base` is whatever the caller passed; the kernel assert on
+        // `{prefix}_RELOCATED_BASE` is what checks that address against the map site.
+        let window_end = load_base
+            .checked_add(image_span)
+            .ok_or_else(|| format!("{image_name}: relocated image span overflowed"))?;
         let count = sh_size / sh_entsize;
         for entry_index in 0..count {
             let entry_offset = sh_offset + entry_index * sh_entsize;
@@ -557,6 +683,11 @@ fn apply_rela_dyn(
                     let value = (r_addend as u64)
                         .wrapping_sub(link_base)
                         .wrapping_add(load_base);
+                    if value < load_base || value >= window_end {
+                        return Err(format!(
+                            "{image_name}: relocated value {value:#x} at r_offset {r_offset:#x} is outside [{load_base:#x}, {window_end:#x})"
+                        ));
+                    }
                     write_u64(image, link_base, r_offset, value)?;
                 }
                 _ => {
@@ -628,10 +759,10 @@ fn read_cstr(table: &[u8], offset: usize) -> Result<&str, String> {
     std::str::from_utf8(&tail[..end]).map_err(|_| "section name was not valid UTF-8".into())
 }
 
-fn userspace_elf(manifest_dir: &Path, profile: &str, bin_name: &str) -> PathBuf {
+fn userspace_elf(manifest_dir: &Path, target_dir: &str, profile: &str, bin_name: &str) -> PathBuf {
     let base = manifest_dir
         .join("..")
-        .join("target")
+        .join(target_dir)
         .join("x86_64-unknown-none");
     for profile in [profile, "release"] {
         let candidate = base.join(profile).join(bin_name);

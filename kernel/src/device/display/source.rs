@@ -9,8 +9,8 @@ use clean_slate_graphics::BufferLayout;
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FrameSourceKind {
+    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     KernelFrame = 1,
-    #[cfg(test)]
     SharedBuffer = 2,
 }
 
@@ -52,19 +52,19 @@ pub(crate) trait FrameSource {
         visit: &mut dyn FnMut(&[u8]),
     ) -> Result<(), SourceError>;
 
-    #[cfg(test)]
     fn phys_extents(&self) -> &[PhysExtent];
 }
 
 /// A source backed by one contiguous kernel-visible range.
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 pub(crate) struct ContiguousFrame<'a> {
     id: FrameSourceId,
     layout: BufferLayout,
     bytes: &'a [u8],
-    #[cfg(test)]
     extent: [PhysExtent; 1],
 }
 
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 impl<'a> ContiguousFrame<'a> {
     /// `None` unless `bytes` holds the whole layout and `extent` covers it.
     pub(crate) fn new(
@@ -81,12 +81,12 @@ impl<'a> ContiguousFrame<'a> {
             id,
             layout,
             bytes,
-            #[cfg(test)]
             extent: [extent],
         })
     }
 }
 
+#[cfg(any(test, feature = "m10-framebuffer-self-test"))]
 impl FrameSource for ContiguousFrame<'_> {
     fn id(&self) -> FrameSourceId {
         self.id
@@ -108,7 +108,6 @@ impl FrameSource for ContiguousFrame<'_> {
         Ok(())
     }
 
-    #[cfg(test)]
     fn phys_extents(&self) -> &[PhysExtent] {
         &self.extent
     }

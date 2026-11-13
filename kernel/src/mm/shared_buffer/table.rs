@@ -211,7 +211,7 @@ impl PendingFrees {
     }
 }
 
-#[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
+#[cfg(any(test, feature = "m10-shared-buffer-self-test", feature = "m10-desktop"))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SharedBufferStats {
     pub(crate) live_buffers: usize,
@@ -380,7 +380,6 @@ impl SharedBufferTable {
         self.reclaim_if_eligible(slot, pending);
     }
 
-    #[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
     pub(crate) fn pin(&mut self, id: SharedBufferId) -> Result<(), ShareError> {
         self.live(id)?;
         let record = &mut self.records[usize::from(id.slot())];
@@ -388,7 +387,6 @@ impl SharedBufferTable {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
     pub(crate) fn unpin(&mut self, id: SharedBufferId, pending: &mut PendingFrees) {
         let slot = usize::from(id.slot());
         assert!(
@@ -423,7 +421,7 @@ impl SharedBufferTable {
         true
     }
 
-    #[cfg(any(test, feature = "m10-shared-buffer-self-test"))]
+    #[cfg(any(test, feature = "m10-shared-buffer-self-test", feature = "m10-desktop"))]
     pub(crate) fn stats(&self) -> SharedBufferStats {
         let mut stats = SharedBufferStats {
             reclaimed_buffers: self.reclaimed_buffers,

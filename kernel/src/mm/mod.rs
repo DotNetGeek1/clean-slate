@@ -16,7 +16,7 @@ pub(crate) use layout::{kernel_map_ptr, phys_to_virt, PHYSICAL_MEMORY_OFFSET};
 
 pub(super) const PAGE_SIZE: u64 = 4096;
 
-pub(super) const USER_CANONICAL_TOP_EXCLUSIVE: u64 = 1 << 47;
+pub(crate) const USER_CANONICAL_TOP_EXCLUSIVE: u64 = 1 << 47;
 
 pub(super) const fn align_down(value: u64, align: u64) -> u64 {
     value & !(align - 1)
