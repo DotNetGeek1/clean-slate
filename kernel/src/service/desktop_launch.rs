@@ -514,9 +514,18 @@ pub(crate) fn on_process_exiting(allocator: &mut PageAllocator, pid: u64, vector
     }
 }
 
-/// The idle thread found nothing runnable (interrupts off, idle stack). Runs pending launches at
-/// quiescence and the idle proof. Returns `true` when it made a thread Ready.
+/// The idle thread is about to halt (interrupts off, idle stack). Runs pending launches at
+/// quiescence and the idle proof. Returns `true` when a thread is Ready, so the idle thread
+/// dispatches it instead of halting.
+///
+/// The idle thread is also entered straight from an exit's teardown, which picks the next thread
+/// before its release hooks run; a hook that wakes a server (a client's exit notice) leaves that
+/// server Ready here, and the snapshot must wait until it has handled the notice.
 pub(crate) fn on_idle(now_ns: u64) -> bool {
+    if unsafe { crate::sched::scheduler_mut() }.has_runnable_threads() {
+        state().idle = None;
+        return true;
+    }
     let status = crate::device::display::with_active_display(|display| {
         display.map(|display| display.state().status())
     });

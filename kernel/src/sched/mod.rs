@@ -531,6 +531,12 @@ impl Scheduler {
         Ok(current_stack_pointer)
     }
 
+    /// Whether a thread other than the idle thread could be dispatched now.
+    #[cfg(feature = "m10-desktop")]
+    pub(crate) fn has_runnable_threads(&self) -> bool {
+        self.next_runnable_from(Some(IDLE_THREAD_INDEX)).is_some()
+    }
+
     pub(super) fn wake_from_idle_loop(&mut self) -> Result<u64, &'static str> {
         let idle = IDLE_THREAD_INDEX;
         if let Some(next) = self.next_runnable_from(Some(idle)) {
