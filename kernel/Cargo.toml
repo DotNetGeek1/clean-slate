@@ -121,6 +121,9 @@ m10-desktop-self-test = ["m10-desktop"]
 m10-desktop-q0 = ["m10-desktop"]
 # M10 #113: i8042 input smoke lane (controller write-output-buffer stimulus, no host injection).
 m10-input-self-test = ["m3-entry-self-test", "stack-high-water-check", "m10-timeout-introspection"]
+# #218 S4: COM1 receive and the canonical line discipline, driven by host-sent bytes in boot
+# context (`cargo xtask test-serial-input`).
+serial-input-self-test = []
 
 [lib]
 path = "src/lib.rs"

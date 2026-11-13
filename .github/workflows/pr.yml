@@ -195,6 +195,7 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-desktop -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-desktop-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-desktop-self-test,m10-desktop-q0 -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features serial-input-self-test -- -D warnings
           # m9-linux-fs-self-test implies m6-object-self-test and embeds the storage
           # userspace ELF at build time; like the M5/M6 self-test features it is
           # built (with RUSTFLAGS=-D warnings) by the acceptance job via xtask.

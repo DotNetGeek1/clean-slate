@@ -284,6 +284,15 @@ cargo xtask test-m10
 
 `test-m10-desktop` (aliases `m10-desktop`, `m10.118`) runs `cargo test -p clean-slate-desktop-shell`, builds the compositor, shell and playground release ELFs, and boots the supervised desktop twice: on a modern-only VirtIO-GPU at Q1 (`m10-desktop-self-test`), and on the `-vga std` GOP framebuffer at Q0 (`m10-desktop-self-test,m10-desktop-q0`). Both runs drive the desktop over a private QMP socket and check serial output and six screendumps; it prints `[M10.9] PASS` (see [Graphical desktop lane](#graphical-desktop-lane-118119)). `test-m10` (aliases `m10`, `m10.119`) runs `test-m10-contract`, the `clean-slate-ui` host tests, `test-m10-nxe`, `test-m10-shared-buffer`, `test-m10-port`, `test-qmp-smoke`, `test-m10-virtio-modern`, `test-m10-framebuffer`, `test-m10-virtio-gpu`, `test-m10-input-smoke`, `test-m10-compositor`, `test-m10-app` and finally `test-m10-desktop`, each once, printing `[M10 ] step N/13 …` lines. It prints `[M10 ] PASS` only after all of them succeed.
 
+For #218 S4 serial console receive (COM1 interrupt, line discipline, echo):
+
+```bash
+cargo test -p clean-slate-kernel serial_console
+cargo xtask test-serial-input
+```
+
+`test-serial-input` (alias `serial-input`) builds the kernel with `serial-input-self-test`, which emits the `clean_slate_serial_console` cfg, the only build in which the COM1 receiver is compiled. It is the one lane whose COM1 is not `-serial stdio`: QEMU connects out to `tcp:127.0.0.1:<port>` on a listener xtask binds to an ephemeral loopback port, as the QMP driver does. Stdio is unusable for input on Windows: with QEMU 11.1.0, `\r` written to QEMU's piped stdin never reached the guest, and an eight-line 1 KiB burst arrived with five lines truncated and two missing, because the stdio backend drops bytes the guest's receive FIFO cannot take. The socket backend holds bytes back until the FIFO has room. The guest masks the local APIC timer, turns receive on, prints `[TTY ] ready`, and logs every console read as `[TTY ] read len=N hex=…`. The host types the script in `xtask/src/serial_input_lane.rs` (a plain line, backspace and delete, Ctrl-U, a 300-byte line, a burst of six lines in one write, a committed buffer filled while the reader is held, Ctrl-D on a non-empty and then an empty line), sending each step only after the previous step's records arrived. It then requires the echo and every record to match byte for byte, the final `[TTY ] stats` counters exactly (overruns and line errors zero), and in `[TTY ] irq` wakes equal to notifier calls and the most bytes one interrupt drained between 2 and the 16-byte budget. After `[TTY ] done` the host sends one BEL, which the guest waits for before the debug exit, so a socket reset at QEMU exit cannot cut off the transcript. The transcript is kept in `target/xtask-artifacts/serial-input/serial.log`. Discipline rules: [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md#serial-console-input-218-s4).
+
 For M4.2 kernel lifecycle control (host tests + optional QEMU acceptance):
 
 ```bash

@@ -1078,6 +1078,9 @@ fn run_inner() -> Result<(), &'static str> {
         run_m7_tls_fail_closed_self_test()
     }
 
+    #[cfg(feature = "serial-input-self-test")]
+    crate::selftest::serial_input::run_serial_input_self_test();
+
     #[cfg(clean_slate_boot_tail)]
     {
         let kernel_root_frame = current_root_frame_address();

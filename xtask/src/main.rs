@@ -25,6 +25,7 @@ mod marker_spec;
 mod ovmf_vars;
 mod qmp;
 mod raster_font;
+mod serial_input_lane;
 
 use marker_spec::{MarkerSet, MarkerStep, MarkerTracker};
 use ovmf_vars::RuntimeVarsCopy;
@@ -1064,6 +1065,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10Framebuffer => run_m10_framebuffer_acceptance(),
         ParsedCommand::TestM10SharedBuffer => run_m10_shared_buffer_acceptance(),
         ParsedCommand::TestM10InputSmoke => run_m10_input_smoke_acceptance(),
+        ParsedCommand::TestSerialInput => serial_input_lane::run(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -1109,6 +1111,7 @@ fn run_m5_block_acceptance() -> Result<(), XtaskError> {
             cpu_model: None,
             machine_extra: None,
             vga: None,
+            serial_tcp_port: None,
         },
     )
 }
@@ -1181,6 +1184,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
             vga: None,
+            serial_tcp_port: None,
         },
     );
     peer.shutdown();
@@ -1210,6 +1214,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
             vga: None,
+            serial_tcp_port: None,
         },
     );
     peer.shutdown();
@@ -1236,6 +1241,7 @@ fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
             cpu_model: None,
             machine_extra: None,
             vga: None,
+            serial_tcp_port: None,
         },
     );
     peer.shutdown();
@@ -1267,6 +1273,7 @@ fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
             cpu_model: None,
             machine_extra: None,
             vga: None,
+            serial_tcp_port: None,
         },
     );
     peer.shutdown();
@@ -1443,6 +1450,7 @@ fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
             cpu_model: None,
             machine_extra: None,
             vga: None,
+            serial_tcp_port: None,
         };
 
         println!("[M5.H] phase 1/2 boot");
@@ -1626,6 +1634,7 @@ fn run_m9_userspace_acceptance() -> Result<(), XtaskError> {
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
             vga: None,
+            serial_tcp_port: None,
         },
     );
     peer.shutdown();
@@ -1769,6 +1778,7 @@ fn run_m9_linux_socket_acceptance() -> Result<(), XtaskError> {
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
             vga: None,
+            serial_tcp_port: None,
         },
     );
     peer.shutdown();
@@ -2521,6 +2531,7 @@ fn run_m7_network_acceptance() -> Result<(), XtaskError> {
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
             vga: None,
+            serial_tcp_port: None,
         },
     );
     peer.shutdown();
@@ -2694,6 +2705,7 @@ fn m5_storage_vm_config() -> VmLaunchConfig {
         cpu_model: None,
         machine_extra: None,
         vga: None,
+        serial_tcp_port: None,
     }
 }
 
@@ -2788,6 +2800,9 @@ struct VmLaunchConfig {
     machine_extra: Option<&'static str>,
     /// Optional QEMU `-vga` model (M10 GOP framebuffer lane uses `std`).
     vga: Option<&'static str>,
+    /// COM1 on a loopback socket QEMU connects out to, instead of stdio; only the serial input
+    /// lane sets it.
+    serial_tcp_port: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2910,12 +2925,16 @@ fn qemu_command(
         Some(extra) => format!("q35,{extra}"),
         None => "q35".to_owned(),
     };
+    let serial = match config.serial_tcp_port {
+        Some(port) => format!("tcp:127.0.0.1:{port}"),
+        None => "stdio".to_owned(),
+    };
     qemu.arg("-machine")
         .arg(machine)
         .arg("-m")
         .arg("512M")
         .arg("-serial")
-        .arg("stdio")
+        .arg(serial)
         .arg("-display")
         .arg("none")
         .arg("-no-reboot")
@@ -4728,6 +4747,7 @@ fn print_help() {
     println!("  test-m10-input-smoke M10 #113 i8042 input lane: init, IRQ 1/12 routing, raw queue and syscall 19 from CPL3 (controller stimulus), then BIND_WAKE-woken CPL3 consumer checked against keyboard + pointer events injected over a private QMP socket; prints [M10.input] PASS (aliases: m10-input-smoke)");
     println!("  test-m10-desktop M10 #118 desktop lane: desktop-shell host tests, CPL3 builds of the compositor/shell/playground, then the supervised desktop booted on VirtIO-GPU (Q1) and on the -vga std framebuffer (Q0), driven over private QMP (click, toggle, background click, key, title-bar drag, close, app crash, compositor crash) with serial, resource-baseline and screendump checks; artifacts under target/xtask-artifacts; prints [M10.9] PASS (aliases: m10-desktop, m10.118)");
     println!("  test-m10        M10 milestone gate: every test-m10-* constituent, clean-slate-ui host tests and test-qmp-smoke, then test-m10-desktop; prints [M10 ] PASS (aliases: m10, m10.119)");
+    println!("  test-serial-input #218 S4 serial receive lane: COM1 on a private loopback socket; the host types a script (plain line, backspace/delete, Ctrl-U, an overlong line, a burst, a full committed buffer, Ctrl-D on a non-empty and an empty line) and checks the echo and every committed read byte for byte; prints [TTY ] PASS (aliases: serial-input)");
     println!("  run-m10-desktop [--framebuffer] Boot the supervised M10 desktop in a QEMU window (QEMU_DISPLAY, default gtk; serial on stdout): VirtIO-GPU at Q1, or the -vga std framebuffer at Q0");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
@@ -4875,6 +4895,7 @@ enum ParsedCommand {
     TestM10Framebuffer,
     TestM10SharedBuffer,
     TestM10InputSmoke,
+    TestSerialInput,
     TestM10Desktop,
     TestM10,
     RunM10Desktop,
@@ -5041,6 +5062,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
             ParsedCommand::TestM10
         }
         Some(cmd) if cmd == "run-m10-desktop" => ParsedCommand::RunM10Desktop,
+        Some(cmd) if cmd == "test-serial-input" || cmd == "serial-input" => {
+            ParsedCommand::TestSerialInput
+        }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
         Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,
@@ -5572,6 +5596,12 @@ mod tests {
         }
         for alias in ["test-m10", "m10", "m10.119"] {
             assert_eq!(parse_command(Some(alias.as_ref())), ParsedCommand::TestM10);
+        }
+        for alias in ["test-serial-input", "serial-input"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestSerialInput
+            );
         }
         assert_eq!(
             parse_command(Some("run-m10-desktop".as_ref())),
