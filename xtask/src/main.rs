@@ -3856,6 +3856,34 @@ impl Drop for ShutdownOnDrop<'_> {
     }
 }
 
+/// Prints `[QEMU] version=…` before every QEMU boot, so each lane's transcript names the emulator it
+/// ran on. `--version` runs once per xtask process; a failure to run it is reported, not fatal.
+fn announce_qemu_version(command: &Command) {
+    let program = Path::new(command.get_program());
+    let is_qemu = program
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .is_some_and(|stem| stem.starts_with("qemu-system"));
+    if !is_qemu {
+        return;
+    }
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let version = VERSION.get_or_init(|| match Command::new(program).arg("--version").output() {
+        Ok(output) => qemu_version(&String::from_utf8_lossy(&output.stdout))
+            .unwrap_or("unknown (no version line)")
+            .to_owned(),
+        Err(error) => format!("unknown ({error})"),
+    });
+    println!("[QEMU] version={version}");
+}
+
+/// The text after `QEMU emulator version ` in `qemu-system-* --version` output.
+fn qemu_version(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("QEMU emulator version "))
+}
+
 fn run_acceptance_command(
     command: &mut Command,
     marker_set: MarkerSet<'static>,
@@ -3871,6 +3899,7 @@ fn run_driven_acceptance_command(
     timeout: Duration,
     driver: &mut dyn AcceptanceDriver,
 ) -> Result<String, XtaskError> {
+    announce_qemu_version(command);
     let start = std::time::Instant::now();
     let deadline = start + timeout;
     let command_display = format!(
@@ -5183,6 +5212,21 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn qemu_version_reads_the_emulator_line() {
+        let windows = "QEMU emulator version 11.1.0 (v11.1.0-12130-ge470268ff4)\r\n\
+                       Copyright (c) 2003-2026 Fabrice Bellard and the QEMU Project developers\r\n";
+        assert_eq!(
+            qemu_version(windows),
+            Some("11.1.0 (v11.1.0-12130-ge470268ff4)")
+        );
+        assert_eq!(
+            qemu_version("QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.4)\n"),
+            Some("8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.4)")
+        );
+        assert_eq!(qemu_version("qemu-system-x86_64: unknown option\n"), None);
+    }
 
     fn qemu_argv(config: &VmLaunchConfig, wait_for_gdb: bool) -> Vec<String> {
         let ovmf = OvmfPaths {

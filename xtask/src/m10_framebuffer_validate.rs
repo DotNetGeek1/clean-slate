@@ -122,26 +122,33 @@ pub(crate) fn compare_readback(
     Ok(())
 }
 
-/// Host render of the final scanout as screendump RGB (BGRX bytes reordered, X dropped).
+/// A reference-layout BGRX frame as screendump RGB (bytes reordered, X dropped).
+pub(crate) fn bgrx_frame_to_rgb(bytes: &[u8]) -> Vec<u8> {
+    let layout = reference_layout();
+    let mut rgb = Vec::with_capacity(layout.width() as usize * layout.height() as usize * 3);
+    for y in 0..layout.height() {
+        for x in 0..layout.width() {
+            let [b, g, r, _] = pixel_at(bytes, layout, x, y).expect("visible pixel");
+            rgb.extend_from_slice(&[r, g, b]);
+        }
+    }
+    rgb
+}
+
+/// Host render of the final scanout as screendump RGB.
 fn host_scanout_rgb() -> &'static [u8] {
     static RGB: OnceLock<Vec<u8>> = OnceLock::new();
-    RGB.get_or_init(|| {
-        let layout = reference_layout();
-        let bytes = host_scanout_bytes();
-        let mut rgb = Vec::with_capacity(layout.width() as usize * layout.height() as usize * 3);
-        for y in 0..layout.height() {
-            for x in 0..layout.width() {
-                let [b, g, r, _] = pixel_at(&bytes, layout, x, y).expect("visible pixel");
-                rgb.extend_from_slice(&[r, g, b]);
-            }
-        }
-        rgb
-    })
+    RGB.get_or_init(|| bgrx_frame_to_rgb(&host_scanout_bytes()))
 }
 
 /// QMP screendump check for the `m10-framebuffer` lane: the whole 1280x800 frame must equal the
 /// host raster render pixel for pixel. Reports the mismatch count and the first differing pixel.
 pub(crate) fn check_m10_framebuffer_screenshot(shot: &Screenshot) -> Result<(), String> {
+    compare_with_render(shot, host_scanout_rgb())
+}
+
+/// Exact comparison of a reference-mode screendump with a host render in screendump RGB.
+pub(crate) fn compare_with_render(shot: &Screenshot, expected: &[u8]) -> Result<(), String> {
     let layout = reference_layout();
     if (shot.width(), shot.height()) != (layout.width(), layout.height()) {
         return Err(format!(
@@ -152,7 +159,6 @@ pub(crate) fn check_m10_framebuffer_screenshot(shot: &Screenshot) -> Result<(), 
             shot.height()
         ));
     }
-    let expected = host_scanout_rgb();
     let mut mismatches = 0usize;
     let mut first = None;
     for (index, (got, want)) in shot

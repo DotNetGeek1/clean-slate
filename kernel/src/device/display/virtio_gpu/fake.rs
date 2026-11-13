@@ -1,8 +1,9 @@
 //! Host model of a `virtio-gpu` 2D device behind the control queue. Requests are read and
 //! responses written through the descriptors' physical addresses, which host tests make equal to
-//! the buffers' own addresses. Like QEMU it runs each notified command in order: a transfer
-//! copies a rect from the attached guest backing into the host resource, and a flush copies the
-//! host resource to the visible scanout.
+//! the buffers' own addresses. Like QEMU it runs each notified command in order: `SET_SCANOUT`
+//! needs a resource with backing attached, a transfer copies a rect from the attached guest
+//! backing into the host resource, and a flush copies the host resource to the visible scanout
+//! once the scanout is linked to it.
 
 use std::collections::VecDeque;
 use std::vec;
@@ -54,6 +55,8 @@ pub(crate) struct FakeGpu {
     pub(crate) display_size: (u32, u32),
     resource: Option<Vec<u8>>,
     backing: Vec<(u64, u32)>,
+    /// Scanout 0 shows the resource (`SET_SCANOUT` succeeded and the resource still exists).
+    pub(crate) linked: bool,
     pub(crate) scanout: Vec<u8>,
 }
 
@@ -75,6 +78,7 @@ impl FakeGpu {
             display_size: (REFERENCE_MODE.width_px, REFERENCE_MODE.height_px),
             resource: None,
             backing: Vec::new(),
+            linked: false,
             scanout: vec![0; REFERENCE_FRAME_BYTES],
         }
     }
@@ -170,7 +174,12 @@ impl FakeGpu {
             wire::CMD_SET_SCANOUT | wire::CMD_RESOURCE_UNREF if self.resource.is_none() => {
                 return RESP_ERR_UNSPEC;
             }
-            wire::CMD_RESOURCE_UNREF => self.resource = None,
+            wire::CMD_SET_SCANOUT if self.backing.is_empty() => return RESP_ERR_UNSPEC,
+            wire::CMD_SET_SCANOUT => self.linked = true,
+            wire::CMD_RESOURCE_UNREF => {
+                self.resource = None;
+                self.linked = false;
+            }
             wire::CMD_RESOURCE_ATTACH_BACKING => {
                 if !self.backing.is_empty() {
                     return RESP_ERR_UNSPEC;
@@ -199,6 +208,7 @@ impl FakeGpu {
                     resource[start..start + width * 4].copy_from_slice(&bytes);
                 }
             }
+            wire::CMD_RESOURCE_FLUSH if !self.linked => {}
             wire::CMD_RESOURCE_FLUSH => {
                 let (x, y, width, height) = rect(0);
                 let resource = self.resource.as_ref().expect("resource");
@@ -313,6 +323,7 @@ impl VirtqueueTransport for FakeGpu {
         self.completions.clear();
         self.resource = None;
         self.backing.clear();
+        self.linked = false;
         self.state = TransportState::Ready;
         Ok(())
     }

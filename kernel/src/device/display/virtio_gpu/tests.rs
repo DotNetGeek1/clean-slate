@@ -154,30 +154,61 @@ fn pixel_of(scanout: &[u8], x: usize, y: usize) -> u8 {
 }
 
 #[test]
-fn bring_up_sends_display_info_create_and_scanout_with_the_reference_geometry() {
+fn bring_up_sends_display_info_and_create_with_the_reference_geometry() {
     let mut gpu = backend();
     gpu.begin_bring_up().expect("bring-up");
     let device = &gpu.transport;
     assert_eq!(
         device.kinds(),
-        [
-            wire::CMD_GET_DISPLAY_INFO,
-            wire::CMD_RESOURCE_CREATE_2D,
-            wire::CMD_SET_SCANOUT
-        ]
+        [wire::CMD_GET_DISPLAY_INFO, wire::CMD_RESOURCE_CREATE_2D]
     );
     assert_eq!(device.notifies, 1, "one notify per batch");
     assert_eq!(
         device.seen[1].words,
         [1, wire::FORMAT_B8G8R8X8_UNORM, 1280, 800]
     );
-    assert_eq!(device.seen[2].words, [0, 0, 1280, 800, 0, 1]);
     assert!(device
         .deadlines
         .iter()
         .all(|deadline| *deadline == NOW_NS + DISPLAY_COMMAND_TIMEOUT_NS));
     assert_eq!(gpu.poll(), Some(Ok(())));
     assert_eq!(gpu.poll(), None, "an outcome is reported once");
+    assert!(
+        !gpu.transport.linked,
+        "the scanout waits for the resource's backing"
+    );
+}
+
+#[test]
+fn the_device_rejects_a_scanout_on_a_resource_without_backing() {
+    let mut frames = ArenaFrames::new(BUFFER_PAGES + 8);
+    let first = ScanoutBuffer::allocate(&mut frames).expect("buffer");
+    let mut gpu = backend();
+    gpu.bind(0, &first).expect("bind");
+    gpu.submit_batch(&[
+        Command::GetDisplayInfo,
+        Command::Create2d,
+        Command::SetScanout,
+    ])
+    .expect("submitted");
+    assert_eq!(gpu.poll(), Some(Err(BackendError::Failed)));
+    assert!(!gpu.transport.linked);
+    assert_eq!(
+        gpu.last_fault(),
+        Some(super::ResponseFault {
+            command: Command::SetScanout,
+            response: 0x1200,
+            written_len: wire::HEADER_BYTES as u32,
+        }),
+        "ERR_UNSPEC from the first rejected command"
+    );
+
+    gpu.reset().expect("reset");
+    assert_eq!(gpu.poll(), Some(Ok(())));
+    gpu.submit_batch(&[Command::AttachBacking(0), Command::SetScanout])
+        .expect("submitted");
+    assert_eq!(gpu.poll(), Some(Ok(())));
+    assert!(gpu.transport.linked);
 }
 
 #[test]
@@ -186,6 +217,15 @@ fn a_display_that_is_not_the_reference_mode_fails_bring_up() {
     gpu.transport.display_size = (1024, 768);
     gpu.begin_bring_up().expect("bring-up");
     assert_eq!(gpu.poll(), Some(Err(BackendError::Failed)));
+    assert_eq!(
+        gpu.last_fault(),
+        Some(super::ResponseFault {
+            command: Command::GetDisplayInfo,
+            response: wire::RESP_OK_DISPLAY_INFO,
+            written_len: wire::DISPLAY_INFO_BYTES as u32,
+        }),
+        "an OK of the wrong geometry is still the fault"
+    );
     assert_eq!(
         gpu.begin_bring_up(),
         Err(BackendError::Failed),
@@ -211,6 +251,7 @@ fn present_attaches_once_transfers_exact_damage_and_flushes_its_bounds() {
         device.kinds(),
         [
             wire::CMD_RESOURCE_ATTACH_BACKING,
+            wire::CMD_SET_SCANOUT,
             wire::CMD_TRANSFER_TO_HOST_2D,
             wire::CMD_TRANSFER_TO_HOST_2D,
             wire::CMD_RESOURCE_FLUSH
@@ -224,13 +265,19 @@ fn present_attaches_once_transfers_exact_damage_and_flushes_its_bounds() {
         let addr = u64::from(attach[at]) | (u64::from(attach[at + 1]) << 32);
         assert_eq!((addr, attach[at + 2]), (extent.phys, extent.pages * 4096));
     }
+    assert_eq!(
+        device.seen[1].words,
+        [0, 0, 1280, 800, 0, 1],
+        "full-mode scanout 0 of resource 1"
+    );
     let offset = (20 * STRIDE + 10 * 4) as u32;
-    assert_eq!(device.seen[1].words, [10, 20, 30, 2, offset, 0, 1, 0]);
-    assert_eq!(device.seen[3].words, [10, 5, 94, 40, 1, 0], "bounding box");
+    assert_eq!(device.seen[2].words, [10, 20, 30, 2, offset, 0, 1, 0]);
+    assert_eq!(device.seen[4].words, [10, 5, 94, 40, 1, 0], "bounding box");
 
     let outcome = gpu.poll().expect("completed");
     assert_eq!(state.complete(outcome, NOW_NS + 1), Some(seq));
     assert_eq!(state.status().completed_seq, seq);
+    assert!(gpu.transport.linked);
 
     gpu.transport.seen.clear();
     state
@@ -265,13 +312,16 @@ fn switching_buffers_keeps_undamaged_scanout_pixels() {
         .present(&mut gpu, &second, &request(&state, 1, &damage), NOW_NS)
         .expect("present B");
     assert_eq!(
-        gpu.transport.kinds()[..2],
+        gpu.transport.kinds()[..3],
         [
             wire::CMD_RESOURCE_DETACH_BACKING,
-            wire::CMD_RESOURCE_ATTACH_BACKING
-        ]
+            wire::CMD_RESOURCE_ATTACH_BACKING,
+            wire::CMD_TRANSFER_TO_HOST_2D
+        ],
+        "a switch keeps the scanout linked"
     );
     assert_eq!(gpu.poll(), Some(Ok(())));
+    assert_eq!(gpu.stats().scanouts, 1);
     let scanout = &gpu.transport.scanout;
     assert_eq!(pixel_of(scanout, 3, 3), 0xB0);
     assert_eq!(
@@ -317,10 +367,12 @@ fn an_error_response_fails_the_batch_once_and_needs_a_reset() {
     gpu.transport.seen.clear();
     gpu.submit(0, &first, &[rect(0, 0, 1, 1)]).expect("submit");
     assert_eq!(
-        gpu.transport.kinds()[0],
-        wire::CMD_RESOURCE_ATTACH_BACKING,
-        "the reset dropped the attachment"
+        gpu.transport.kinds()[..2],
+        [wire::CMD_RESOURCE_ATTACH_BACKING, wire::CMD_SET_SCANOUT],
+        "the reset dropped the attachment and the scanout"
     );
+    assert_eq!(gpu.poll(), Some(Ok(())));
+    assert!(gpu.transport.linked);
 }
 
 #[test]
@@ -449,7 +501,7 @@ fn present_commands_fit_beside_a_bring_up_batch() {
     assert_eq!(gpu.submit(0, &first, &damage), Ok(Submitted::Pending));
     assert_eq!(
         gpu.transport.deadlines.len(),
-        3 + 1 + MAX_PRESENT_DAMAGE_RECTS + 1
+        2 + 2 + MAX_PRESENT_DAMAGE_RECTS + 1
     );
     assert!(matches!(
         super::encode(Command::AttachBacking(1), &gpu.backings, &mut [0; 512]),
