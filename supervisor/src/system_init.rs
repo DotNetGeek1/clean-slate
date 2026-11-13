@@ -35,7 +35,9 @@ const LIVENESS_OFF: LivenessConfig = LivenessConfig::new(u64::MAX);
 /// Messages handled per wake at most, so one wake cannot turn into a loop.
 const MAX_EVENTS_PER_WAKE: usize = 16;
 
-/// The supervisor policy for a manifest row's restart spec.
+/// The supervisor policy for a manifest row's restart spec. Despite the `_ticks` field names on
+/// both sides, init's unit is nanoseconds on the `WORK_SET` `NOW` clock, the clock it passes to
+/// [`SystemInit::on_wake`].
 pub const fn restart_policy(spec: RestartSpec) -> RestartPolicy {
     match spec {
         RestartSpec::Never => RestartPolicy::Never,
