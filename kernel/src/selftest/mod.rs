@@ -170,6 +170,8 @@ pub(crate) mod m9_stack_guard;
 pub(crate) mod m9_syscall_fail_closed;
 #[cfg(feature = "m9-userspace-self-test")]
 pub(crate) mod m9_userspace;
+#[cfg(feature = "serial-input-self-test")]
+pub(crate) mod serial_input;
 #[cfg(any(
     feature = "m3-syscall-self-test",
     feature = "m9-syscall-fail-closed-self-test",

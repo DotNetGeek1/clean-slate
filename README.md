@@ -8,7 +8,19 @@ The project is intentionally a clean-sheet design. It is not intended to be anot
 
 ## Project status
 
-Very early research/design phase. The immediate engineering target is a Rust kernel booting under UEFI in QEMU with serial diagnostics. Real hardware comes later, after the execution, memory, IPC, capability, and device models are stable enough to debug sensibly.
+`cargo xtask run` builds the kernel with no Cargo features and boots it under QEMU. The boot tail in `kernel/src/boot/mod.rs` calls `initialize_scheduler`, which starts two kernel demo threads (`kernel/src/sched/dispatch.rs`, `kernel/src/sched/demo_tasks.rs`). That image does not launch a supervisor, a network service, a shell, or a Linux process. Those are separate feature builds, and the default image does not run them together.
+
+The milestone gates are separate kernels, each checking the markers named by `cargo xtask` help:
+
+- `test-m1` and `test-m2` build those self-test kernels and check their PASS markers.
+- `test-m3` runs the M3 acceptance boots in order.
+- `test-m4` is the recovery QEMU boot plus the M4.6 host policy tests. No supervisor runs in the default image.
+- `test-m5` is the block, storage, persistence, and crash-recovery acceptance.
+- `test-m6` is the capability host tests plus the fixture-smoke and QEMU constituents.
+- `test-m7` checks the network service against the hermetic fixture, whose TLS trust anchor is the committed test CA.
+- `test-m8` runs one static Linux hello ELF.
+- `test-m9` runs the 18 BusyBox commands in `fixtures/busybox/frozen/commands.toml`. `install_stdio_entries` opens file descriptors 1 and 2 only, so that gate has no stdin and is not an interactive shell.
+- `test-m10` runs every `test-m10-*` constituent, the `clean-slate-ui` host tests, and `test-qmp-smoke`, then `test-m10-desktop`. The compositor, desktop shell, and playground are in this tree. `cargo xtask run` does not enable `m10-desktop`, so it does not launch them.
 
 ## Design principles
 
@@ -77,6 +89,8 @@ The kernel is expected to be primarily Rust (`#![no_std]`) with narrowly contain
 
 ## Initial technical direction
 
+This section records the original plan. Current state is under [Project status](#project-status).
+
 The first development environment will use x86-64, UEFI, Rust, QEMU, OVMF, VirtIO devices, serial logging, and GDB/debug-symbol support.
 
 The first milestone is deliberately tiny:
@@ -107,3 +121,20 @@ From there: memory management, exceptions, scheduling, userspace, IPC, capabilit
 - Sacrifice architecture for a one-off application demo.
 
 Clean-Slate should be architecturally new **without requiring the software and hardware world to start over with it**.
+
+## Licence
+
+Licensed under either of
+
+ * Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+ * MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
+
+That dual licence covers the Rust code in this repository. It does not cover
+third-party material listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). `fixtures/busybox/frozen/busybox`
+is BusyBox 1.37.0 under GPL-2.0 only.

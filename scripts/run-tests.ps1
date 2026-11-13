@@ -6,9 +6,10 @@
     Sets OVMF_CODE / OVMF_VARS when they are not already in the environment,
     then runs one or more `cargo xtask` acceptance tests. By default the
     milestone gates run (test-m1, test-m2, test-m3, test-m4, test-m5, test-m6, test-m7, test-m8, test-m9, test-m10); the individual
-    test-m3-* and test-m4-* boots are constituents of those aggregates and are skipped unless
-    named explicitly or -Exhaustive is given. Constituents marked CoveredBy (every test-m9-*
-    boot and verify-m9-fixture; every test-m10-* lane and test-qmp-smoke) are steps of their
+    test-m3-* through test-m10-* boots are constituents of those aggregates and are skipped unless
+    named explicitly or -Exhaustive is given. Constituents marked CoveredBy (every test-m3-*
+    through test-m10-* entry except test-m3-address-space and test-m3-lifecycle, which test-m3
+    runs as one merged boot, plus verify-m8-fixture, verify-m9-fixture and test-qmp-smoke) are steps of their
     aggregate, so -Exhaustive runs them only through that aggregate. Pass test names (or short
     aliases) to target a subset.
 
@@ -36,6 +37,7 @@
       m9-low-va / m9.142 / test-m9-low-va,
       verify-m8-fixture
       verify-m9-fixture
+      serial-input / test-serial-input
 
 .PARAMETER Exhaustive
     Run every known test (milestone gates plus each individual constituent
@@ -108,46 +110,46 @@ $AllTests = [ordered]@{
     "test-m1"               = @{ Aliases = @("m1"); Description = "M1 memory acceptance"; Role = "Milestone" }
     "test-m2"               = @{ Aliases = @("m2"); Description = "M2 interrupt/timer/scheduler acceptance"; Role = "Milestone" }
     "test-m3"               = @{ Aliases = @("m3", "m3.7"); Description = "M3 milestone gate (aggregate of all M3 acceptance boots)"; Role = "Aggregate" }
-    "test-m3-entry"         = @{ Aliases = @("m3-entry", "entry", "m3.1"); Description = "M3.1 userspace-entry acceptance"; Role = "Constituent" }
+    "test-m3-entry"         = @{ Aliases = @("m3-entry", "entry", "m3.1"); Description = "M3.1 userspace-entry acceptance"; Role = "Constituent"; CoveredBy = "test-m3" }
     "test-m3-address-space" = @{ Aliases = @("m3-address-space", "address-space", "m3.2"); Description = "M3.2 address-space isolation acceptance"; Role = "Constituent" }
-    "test-m3-syscall"       = @{ Aliases = @("m3-syscall", "syscall", "m3.3"); Description = "M3.3 native-syscall acceptance"; Role = "Constituent" }
+    "test-m3-syscall"       = @{ Aliases = @("m3-syscall", "syscall", "m3.3"); Description = "M3.3 native-syscall acceptance"; Role = "Constituent"; CoveredBy = "test-m3" }
     "test-m3-lifecycle"     = @{ Aliases = @("m3-lifecycle", "lifecycle", "m3.4"); Description = "M3.4 process/thread lifecycle acceptance"; Role = "Constituent" }
-    "test-m3-ipc"           = @{ Aliases = @("m3-ipc", "ipc", "m3.5"); Description = "M3.5 capability-authorized IPC acceptance"; Role = "Constituent" }
-    "test-m3-resources"     = @{ Aliases = @("m3-resources", "resources", "m3.6"); Description = "M3.6 domain resource accounting/teardown acceptance"; Role = "Constituent" }
-    "test-m4-crash-service" = @{ Aliases = @("m4-crash-service", "crash-service", "m4.7"); Description = "M4.7 supervised crash-service fixture acceptance"; Role = "Constituent" }
-    "test-m4-service-lifecycle" = @{ Aliases = @("m4-service-lifecycle", "service-lifecycle", "m4.2"); Description = "M4.2 kernel service lifecycle control acceptance"; Role = "Constituent" }
-    "test-m4-restart-policy"    = @{ Aliases = @("m4-restart-policy", "restart-policy", "m4.6"); Description = "M4.6 supervisor restart-policy convergence (host + userspace image build)"; Role = "Constituent" }
-    "test-m4-supervisor"        = @{ Aliases = @("m4-supervisor", "supervisor", "m4.3"); Description = "M4.3 userspace supervisor runtime QEMU integration acceptance"; Role = "Constituent" }
-    "test-m4"                   = @{ Aliases = @("m4", "m4.8"); Description = "M4 milestone gate (recovery QEMU boot + M4.6 host policy tests)"; Role = "Aggregate" }
-    "test-m4-recovery"          = @{ Aliases = @("m4-recovery", "recovery", "m4.8-qemu"); Description = "M4.8 authoritative recovery QEMU acceptance"; Role = "Constituent" }
-    "test-m5"                   = @{ Aliases = @("m5"); Description = "M5 milestone gate (block I/O, storage integration, reboot persistence, crash recovery)"; Role = "Aggregate" }
-    "test-m5-block"             = @{ Aliases = @("m5-block", "block-attach"); Description = "M5.2 VirtIO block transport QEMU acceptance"; Role = "Constituent" }
-    "test-m5-storage"           = @{ Aliases = @("m5-storage", "m5.7"); Description = "M5.7 integrated storage-path acceptance"; Role = "Constituent" }
-    "test-m5-crash-matrix"      = @{ Aliases = @("m5-crash-matrix", "crash-matrix", "m5.6"); Description = "M5.6 host crash-consistency matrix"; Role = "Constituent" }
-    "test-m5-persistence"       = @{ Aliases = @("m5-persistence", "reboot-persistence"); Description = "M5 reboot-persistence acceptance on the persistent QEMU disk"; Role = "Constituent" }
-    "test-m5-crash-recovery"    = @{ Aliases = @("m5-crash-recovery", "crash-recovery"); Description = "M5 abrupt-stop crash-recovery acceptance on the persistent QEMU disk"; Role = "Constituent" }
-    "test-m5-disk-harness"      = @{ Aliases = @("m5-disk-harness", "m5-harness"); Description = "M5 harness-only two-boot disk fixture validation (host sentinel)"; Role = "Constituent" }
+    "test-m3-ipc"           = @{ Aliases = @("m3-ipc", "ipc", "m3.5"); Description = "M3.5 capability-authorized IPC acceptance"; Role = "Constituent"; CoveredBy = "test-m3" }
+    "test-m3-resources"     = @{ Aliases = @("m3-resources", "resources", "m3.6"); Description = "M3.6 domain resource accounting/teardown acceptance"; Role = "Constituent"; CoveredBy = "test-m3" }
+    "test-m4-crash-service" = @{ Aliases = @("m4-crash-service", "crash-service", "m4.7"); Description = "M4.7 supervised crash-service fixture acceptance"; Role = "Constituent"; CoveredBy = "test-m4" }
+    "test-m4-service-lifecycle" = @{ Aliases = @("m4-service-lifecycle", "service-lifecycle", "m4.2"); Description = "M4.2 kernel service lifecycle control acceptance"; Role = "Constituent"; CoveredBy = "test-m4" }
+    "test-m4-restart-policy"    = @{ Aliases = @("m4-restart-policy", "restart-policy", "m4.6"); Description = "M4.6 supervisor restart-policy convergence (host + userspace image build)"; Role = "Constituent"; CoveredBy = "test-m4" }
+    "test-m4-supervisor"        = @{ Aliases = @("m4-supervisor", "supervisor", "m4.3"); Description = "M4.3 userspace supervisor runtime QEMU integration acceptance"; Role = "Constituent"; CoveredBy = "test-m4" }
+    "test-m4"                   = @{ Aliases = @("m4", "m4.8"); Description = "M4 milestone gate (every test-m4-* constituent: service lifecycle, supervisor, crash service, recovery, restart policy)"; Role = "Aggregate" }
+    "test-m4-recovery"          = @{ Aliases = @("m4-recovery", "recovery", "m4.8-qemu"); Description = "M4.8 authoritative recovery QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m4" }
+    "test-m5"                   = @{ Aliases = @("m5"); Description = "M5 milestone gate (disk harness, block I/O, storage integration, crash matrix, reboot persistence, crash recovery)"; Role = "Aggregate" }
+    "test-m5-block"             = @{ Aliases = @("m5-block", "block-attach"); Description = "M5.2 VirtIO block transport QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m5" }
+    "test-m5-storage"           = @{ Aliases = @("m5-storage", "m5.7"); Description = "M5.7 integrated storage-path acceptance"; Role = "Constituent"; CoveredBy = "test-m5" }
+    "test-m5-crash-matrix"      = @{ Aliases = @("m5-crash-matrix", "crash-matrix", "m5.6"); Description = "M5.6 host crash-consistency matrix"; Role = "Constituent"; CoveredBy = "test-m5" }
+    "test-m5-persistence"       = @{ Aliases = @("m5-persistence", "reboot-persistence"); Description = "M5 reboot-persistence acceptance on the persistent QEMU disk"; Role = "Constituent"; CoveredBy = "test-m5" }
+    "test-m5-crash-recovery"    = @{ Aliases = @("m5-crash-recovery", "crash-recovery"); Description = "M5 abrupt-stop crash-recovery acceptance on the persistent QEMU disk"; Role = "Constituent"; CoveredBy = "test-m5" }
+    "test-m5-disk-harness"      = @{ Aliases = @("m5-disk-harness", "m5-harness"); Description = "M5 harness-only two-boot disk fixture validation (host sentinel)"; Role = "Constituent"; CoveredBy = "test-m5" }
     "test-m6"                   = @{ Aliases = @("m6", "m6.9"); Description = "M6 milestone gate (capability host tests, fixture smoke, constituents, convergence)"; Role = "Aggregate" }
-    "test-m7"                   = @{ Aliases = @("m7", "m7.9"); Description = "M7 milestone gate (converged network-service path + DNS/TLS + capability broker)"; Role = "Aggregate" }
-    "test-m8"                   = @{ Aliases = @("m8", "m8.9"); Description = "M8 milestone gate (fixture verify, elf/linux-abi/#92 host tests, Linux hello production path)"; Role = "Aggregate" }
+    "test-m7"                   = @{ Aliases = @("m7", "m7.9"); Description = "M7 milestone gate (net device, net service, converged network-service path, capability broker, DNS, TLS)"; Role = "Aggregate" }
+    "test-m8"                   = @{ Aliases = @("m8", "m8.9"); Description = "M8 milestone gate (fixture verify, elf/linux-abi/#92 host tests, Linux image and dispatch boots, Linux hello production path)"; Role = "Aggregate" }
     "test-m9"                   = @{ Aliases = @("m9", "m9.9"); Description = "M9 milestone gate (pinned fixture verify, ABI/ELF/rootfs/kernel host tests, every M9 constituent, BusyBox userspace convergence)"; Role = "Aggregate" }
     "test-m10"                  = @{ Aliases = @("m10", "m10.119"); Description = "M10 milestone gate (every M10 constituent and the QMP harness smoke, then the desktop lane on both backends)"; Role = "Aggregate" }
-    "test-m6-fixture-smoke"     = @{ Aliases = @("m6-fixture-smoke"); Description = "M6 scripted fixture harness smoke (constituent)"; Role = "Constituent" }
-    "test-m6-object"            = @{ Aliases = @("m6-object", "m6.3"); Description = "M6.3 object-capability constituent acceptance"; Role = "Constituent" }
-    "test-m7-net-service"       = @{ Aliases = @("m7-net-service", "m7.3"); Description = "M7.3 network service and driver-domain seam acceptance"; Role = "Constituent" }
-    "test-m7-network"           = @{ Aliases = @("m7-network", "m7.8"); Description = "M7.8 converged production path acceptance (service + capability + DNS/TCP/TLS)"; Role = "Constituent" }
-    "test-m6-process-control"   = @{ Aliases = @("m6-process-control", "m6.4"); Description = "M6.4 process-control capability constituent acceptance"; Role = "Constituent" }
-    "test-m6-delegation"        = @{ Aliases = @("m6-delegation", "m6.5"); Description = "M6.5 capability delegation and attenuation constituent acceptance"; Role = "Constituent" }
-    "test-m6-revocation"        = @{ Aliases = @("m6-revocation", "m6.6"); Description = "M6.6 capability revocation and teardown constituent acceptance"; Role = "Constituent" }
-    "test-m6-audit"             = @{ Aliases = @("m6-audit", "m6.7"); Description = "M6.7 capability audit events constituent acceptance"; Role = "Constituent" }
-    "test-m6-capabilities"      = @{ Aliases = @("m6-capabilities", "m6.8"); Description = "M6.8 capability convergence acceptance (object, delegation, revocation, process control, audit)"; Role = "Constituent" }
-    "test-m7-net-device"        = @{ Aliases = @("m7-net-device", "m7.2"); Description = "M7.2 VirtIO-net device-lane QEMU acceptance"; Role = "Constituent" }
-    "test-m7-tls"               = @{ Aliases = @("m7-tls", "m7.6"); Description = "M7.6 TLS client QEMU acceptance (pass + fail-closed)"; Role = "Constituent" }
-    "test-m7-net-caps"          = @{ Aliases = @("m7-net-caps", "m7.7"); Description = "M7.7 network capability broker and attribution acceptance"; Role = "Constituent" }
-    "test-m7-dns"               = @{ Aliases = @("m7-dns", "m7.5"); Description = "M7.5 DNS resolver QEMU acceptance"; Role = "Constituent" }
-    "test-m8-linux-hello"       = @{ Aliases = @("m8-linux-hello", "m8.7"); Description = "M8.7 integrated Linux hello (self-test observer + production boot)"; Role = "Constituent" }
-    "test-m8-linux-image"       = @{ Aliases = @("m8-linux-image", "m8.2"); Description = "M8.2 Linux ELF loader QEMU constituent acceptance"; Role = "Constituent" }
-    "test-m8-linux-dispatch"    = @{ Aliases = @("m8-linux-dispatch", "m8.3"); Description = "M8.3 Linux personality dispatch QEMU constituent acceptance"; Role = "Constituent" }
+    "test-m6-fixture-smoke"     = @{ Aliases = @("m6-fixture-smoke"); Description = "M6 scripted fixture harness smoke (constituent)"; Role = "Constituent"; CoveredBy = "test-m6" }
+    "test-m6-object"            = @{ Aliases = @("m6-object", "m6.3"); Description = "M6.3 object-capability constituent acceptance"; Role = "Constituent"; CoveredBy = "test-m6" }
+    "test-m7-net-service"       = @{ Aliases = @("m7-net-service", "m7.3"); Description = "M7.3 network service and driver-domain seam acceptance"; Role = "Constituent"; CoveredBy = "test-m7" }
+    "test-m7-network"           = @{ Aliases = @("m7-network", "m7.8"); Description = "M7.8 converged production path acceptance (service + capability + DNS/TCP/TLS)"; Role = "Constituent"; CoveredBy = "test-m7" }
+    "test-m6-process-control"   = @{ Aliases = @("m6-process-control", "m6.4"); Description = "M6.4 process-control capability constituent acceptance"; Role = "Constituent"; CoveredBy = "test-m6" }
+    "test-m6-delegation"        = @{ Aliases = @("m6-delegation", "m6.5"); Description = "M6.5 capability delegation and attenuation constituent acceptance"; Role = "Constituent"; CoveredBy = "test-m6" }
+    "test-m6-revocation"        = @{ Aliases = @("m6-revocation", "m6.6"); Description = "M6.6 capability revocation and teardown constituent acceptance"; Role = "Constituent"; CoveredBy = "test-m6" }
+    "test-m6-audit"             = @{ Aliases = @("m6-audit", "m6.7"); Description = "M6.7 capability audit events constituent acceptance"; Role = "Constituent"; CoveredBy = "test-m6" }
+    "test-m6-capabilities"      = @{ Aliases = @("m6-capabilities", "m6.8"); Description = "M6.8 capability convergence acceptance (object, delegation, revocation, process control, audit)"; Role = "Constituent"; CoveredBy = "test-m6" }
+    "test-m7-net-device"        = @{ Aliases = @("m7-net-device", "m7.2"); Description = "M7.2 VirtIO-net device-lane QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m7" }
+    "test-m7-tls"               = @{ Aliases = @("m7-tls", "m7.6"); Description = "M7.6 TLS client QEMU acceptance (pass + fail-closed)"; Role = "Constituent"; CoveredBy = "test-m7" }
+    "test-m7-net-caps"          = @{ Aliases = @("m7-net-caps", "m7.7"); Description = "M7.7 network capability broker and attribution acceptance"; Role = "Constituent"; CoveredBy = "test-m7" }
+    "test-m7-dns"               = @{ Aliases = @("m7-dns", "m7.5"); Description = "M7.5 DNS resolver QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m7" }
+    "test-m8-linux-hello"       = @{ Aliases = @("m8-linux-hello", "m8.7"); Description = "M8.7 integrated Linux hello (self-test observer + production boot)"; Role = "Constituent"; CoveredBy = "test-m8" }
+    "test-m8-linux-image"       = @{ Aliases = @("m8-linux-image", "m8.2"); Description = "M8.2 Linux ELF loader QEMU constituent acceptance"; Role = "Constituent"; CoveredBy = "test-m8" }
+    "test-m8-linux-dispatch"    = @{ Aliases = @("m8-linux-dispatch", "m8.3"); Description = "M8.3 Linux personality dispatch QEMU constituent acceptance"; Role = "Constituent"; CoveredBy = "test-m8" }
     "test-m9-syscall-fail-closed" = @{ Aliases = @("m9-syscall-fail-closed", "m9.143"); Description = "M9 #143 unresolved syscall caller fail-closed QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
     "test-m9-block-wake" = @{ Aliases = @("m9-block-wake", "m9.145"); Description = "M9 #145 native block/wake scheduler substrate QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
     "test-m9-stack-guard" = @{ Aliases = @("m9-stack-guard", "m9.162"); Description = "M9 #162 kernel stack guard overflow QEMU acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
@@ -161,7 +163,7 @@ $AllTests = [ordered]@{
     "test-m9-rootfs"            = @{ Aliases = @("m9-rootfs", "m9.104"); Description = "M9 #104 embedded rootfs fixture acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
     "test-m9-linux-fs"          = @{ Aliases = @("m9-linux-fs", "m9.101"); Description = "M9 #101 Linux filesystem/path projection acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
     "test-m9-userspace"         = @{ Aliases = @("m9-userspace", "m9.107"); Description = "M9 #107 BusyBox userspace convergence acceptance"; Role = "Constituent"; CoveredBy = "test-m9" }
-    "verify-m8-fixture"         = @{ Aliases = @("verify-m8-fixture"); Description = "M8.6 fixture SHA-256 and ELF metadata verify (host)"; Role = "Constituent" }
+    "verify-m8-fixture"         = @{ Aliases = @("verify-m8-fixture"); Description = "M8.6 fixture SHA-256 and ELF metadata verify (host)"; Role = "Constituent"; CoveredBy = "test-m8" }
     "verify-m9-fixture"         = @{ Aliases = @("verify-m9-fixture"); Description = "M9 #104 BusyBox + rootfs fixture verify (host)"; Role = "Constituent"; CoveredBy = "test-m9" }
     "test-m10-contract"         = @{ Aliases = @("m10-contract"); Description = "M10 #110 graphics contract host tests and UEFI builds (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
     "test-m10-compositor"       = @{ Aliases = @("m10-compositor", "m10.112"); Description = "M10 #112 compositor host tests and CPL3 builds of the compositor and client (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
@@ -175,6 +177,7 @@ $AllTests = [ordered]@{
     "test-m10-shared-buffer"    = @{ Aliases = @("m10-shared-buffer"); Description = "M10 #195 shared-buffer acceptance (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
     "test-m10-input-smoke"      = @{ Aliases = @("m10-input-smoke"); Description = "M10 #113 i8042 input QEMU lane (controller stimulus, then QMP-injected keyboard/pointer, headless)"; Role = "Constituent"; CoveredBy = "test-m10" }
     "test-m10-desktop"          = @{ Aliases = @("m10-desktop", "m10.118"); Description = "M10 #118 supervised desktop on VirtIO-GPU (Q1) and the GOP framebuffer (Q0), QMP-driven, with screendump checks (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
+    "test-serial-input"         = @{ Aliases = @("serial-input"); Description = "#218 S4 COM1 receive and line discipline over a private loopback socket (echo and committed reads checked byte for byte)"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {
@@ -265,7 +268,8 @@ function Set-OvmfEnvironment {
         exit 1
     }
     if (-not (Test-Path -LiteralPath $env:OVMF_VARS)) {
-        Write-Host "OVMF_VARS not found: $($env:OVMF_VARS)" -ForegroundColor Red
+        Write-Host "OVMF_VARS not found." -ForegroundColor Red
+        Write-Host ("OVMF_VARS value seen: [{0}]" -f $env:OVMF_VARS)
         Write-Host "Pass -OvmfVars or set `$env:OVMF_VARS."
         exit 1
     }
