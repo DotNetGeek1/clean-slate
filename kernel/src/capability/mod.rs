@@ -8,7 +8,9 @@ pub(crate) mod audit;
 pub(crate) mod bootstrap_grant;
 pub(crate) mod delegation;
 pub(crate) mod display;
-#[cfg(any(test, feature = "m10-input-self-test"))]
+#[cfg(any(test, feature = "m10-desktop"))]
+pub(crate) mod graphics;
+#[cfg(any(test, feature = "m10-input-self-test", feature = "m10-desktop"))]
 pub(crate) mod input;
 pub(crate) mod network;
 pub(crate) mod object;
@@ -73,7 +75,8 @@ pub(crate) fn with_capability_space<R>(f: impl FnOnce(&CapabilityTable<MAX_SLOTS
 #[cfg(any(
     feature = "m9-userspace-self-test",
     feature = "m10-port-self-test",
-    feature = "m10-shared-buffer-self-test"
+    feature = "m10-shared-buffer-self-test",
+    feature = "m10-desktop"
 ))]
 pub(crate) fn live_capability_count() -> usize {
     with_capability_space(|table| {

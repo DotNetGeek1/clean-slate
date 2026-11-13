@@ -30,7 +30,8 @@ pub(crate) const DEVICE_VECTOR_COUNT: usize = 16;
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m10-desktop"
 ))]
 pub(crate) const USER_TEST_VECTOR: usize = 0x80;
 pub(crate) const IA32_EFER_MSR: u32 = 0xc000_0080;

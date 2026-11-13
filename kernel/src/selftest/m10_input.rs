@@ -1,14 +1,20 @@
-//! M10 #113 input smoke lane, with no host injection.
+//! M10 #113 input lane.
 //!
-//! The i8042 controller's own write-output-buffer commands (D2/D3) stand in for the keyboard
-//! and mouse, so every record crosses the real IRQ 1/12 routes, the decoders and the raw
-//! queue. Two CPL3 fixtures then exercise syscall 19: the `INPUT_CONSUME` consumer drains the
-//! full queue and its `Overflow`; the second holder is refused everywhere without the
-//! capability, then refused as a second consumer until the first binding is released.
+//! Boot phase: the i8042 controller's own write-output-buffer commands (D2/D3) stand in for
+//! the keyboard and mouse, so every record crosses the real IRQ 1/12 routes, the decoders and
+//! the raw queue. Two CPL3 fixtures then exercise syscall 19: the `INPUT_CONSUME` consumer
+//! drains the full queue and its `Overflow` and binds its work set with `BIND_WAKE`; the second
+//! holder is refused everywhere without the capability, then refused as a second consumer until
+//! the first binding is released.
+//!
+//! QMP phase: the rebound second consumer binds its own work set, prints
+//! [`QMP_READY_MARKER`] and blocks in `WORK_SET` `WAIT`. The host injects keyboard and relative
+//! pointer events through QEMU's real PS/2 devices over a private QMP socket (xtask
+//! `qmp::inject`); each wake drains `READ_BATCH` to 0 and logs every record as
+//! `[M10.input] qmp rec <n> <record>`, which the host compares line for line with what it
+//! injected. The phase ends at the Escape release.
 
-use clean_slate_capability::syscall_abi::{
-    SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSYS, SYSCALL_NR_INPUT,
-};
+use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_NR_INPUT};
 use clean_slate_capability::{HolderId, Rights};
 use clean_slate_graphics::abi::input::{
     InputDeviceInfo, INPUT_ABI_VERSION, INPUT_DEVICE_INFO_BYTES, INPUT_SUBOP_BIND_WAKE,
@@ -19,6 +25,11 @@ use clean_slate_graphics::ids::{InputDeviceId, KEYBOARD_INDEX};
 use clean_slate_graphics::input::{AxisValue120, KeyState, KeyUsage, PointerButton};
 use clean_slate_graphics::limits::RAW_INPUT_QUEUE_DEPTH;
 use clean_slate_graphics::raw_input::{RawInputKind, RawInputRecord, RAW_INPUT_RECORD_BYTES};
+use clean_slate_native_abi::status::{STATUS_EAGAIN, STATUS_ESTALE};
+use clean_slate_native_abi::work_set::{
+    SYSCALL_NR_WORK_SET, WORK_SET_OP_CREATE, WORK_SET_OP_WAIT, WORK_SET_WAIT_NONBLOCK,
+};
+use clean_slate_native_abi::WorkSetId;
 
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::gdt::set_privilege_stack;
@@ -46,6 +57,7 @@ use crate::syscall::{
     current_syscall_caller_pid, initialize_syscall_abi,
     install_service_lifecycle_syscall_allocator, service_lifecycle_syscall_allocator_mut,
 };
+use crate::time::monotonic_ns;
 
 pub(crate) const SYSCALL_NR_M10_INPUT_REPORT: u64 = 110;
 const PASS_MARKER: &str = "[M10.input] PASS";
@@ -98,6 +110,14 @@ const HOLD_DROPPED: u32 = 4;
 const KEY_A: KeyUsage = KeyUsage(0x04);
 const KEY_RIGHT: KeyUsage = KeyUsage(0x4F);
 const KEY_PAUSE: KeyUsage = KeyUsage(0x48);
+const KEY_ESCAPE: KeyUsage = KeyUsage(0x29);
+
+/// Work-set bits each consumer binds; non-zero so a dropped bit index would show.
+const CONSUMER_WAKE_BIT: u64 = 3;
+const QMP_WAKE_BIT: u64 = 5;
+const QMP_READY_MARKER: &str = "[M10.input] qmp ready";
+/// Per `WAIT`: covers QEMU connecting to QMP and the host pacing one stimulus.
+const QMP_WAIT_NS: u64 = 30_000_000_000;
 
 /// A press, a typematic repeat (suppressed), a release; an extended press/release; Pause; and
 /// one code with no usage (counted, not queued).
@@ -141,17 +161,34 @@ impl SeqCursor {
     }
 }
 
+/// One syscall the fixture makes next: `rax` = `nr`, `rdi` = `op`, then `rsi`, `rdx`, `r10`,
+/// `r8`; `r9` is always zero.
 #[derive(Clone, Copy)]
 struct Call {
-    subop: u64,
+    nr: u64,
+    op: u64,
     rsi: u64,
     rdx: u64,
     r10: u64,
+    r8: u64,
 }
 
 enum Next {
     Call(Call),
     Done,
+}
+
+/// Host-injected phase bookkeeping.
+struct QmpPhase {
+    work_set: u64,
+    records: u64,
+    wakes: u64,
+    /// Wakes whose drain found nothing: the edge's record was already read by the previous
+    /// drain.
+    empty_wakes: u64,
+    drained_this_wake: u64,
+    escape_released: bool,
+    signals_before: u32,
 }
 
 struct Lane {
@@ -160,11 +197,13 @@ struct Lane {
     steps: [u32; FIXTURES],
     consumer_handle: u64,
     second_handle: u64,
+    consumer_work_set: u64,
     keyboard: Option<InputDeviceId>,
     mouse: Option<InputDeviceId>,
     cursor: SeqCursor,
     held_read: usize,
     overflow_read: bool,
+    qmp: QmpPhase,
 }
 
 static LANE: GlobalCell<Lane> = GlobalCell::new(Lane {
@@ -173,11 +212,21 @@ static LANE: GlobalCell<Lane> = GlobalCell::new(Lane {
     steps: [0; FIXTURES],
     consumer_handle: 0,
     second_handle: 0,
+    consumer_work_set: 0,
     keyboard: None,
     mouse: None,
     cursor: SeqCursor::new(),
     held_read: 0,
     overflow_read: false,
+    qmp: QmpPhase {
+        work_set: 0,
+        records: 0,
+        wakes: 0,
+        empty_wakes: 0,
+        drained_this_wake: 0,
+        escape_released: false,
+        signals_before: 0,
+    },
 });
 
 fn lane_mut() -> &'static mut Lane {
@@ -454,45 +503,43 @@ fn expect_next(device: InputDeviceId, kind: RawInputKind) -> Result<(), &'static
 }
 
 fn log_record(record: &RawInputRecord) {
-    let device = if record.device.index() == KEYBOARD_INDEX {
-        "kbd"
-    } else {
-        "mouse"
-    };
-    let state_name = |state: KeyState| match state {
-        KeyState::Pressed => "down",
-        KeyState::Released => "up",
-    };
-    match record.kind {
-        RawInputKind::Key { usage, state } => kernel_log_fmt(format_args!(
-            "[M10.input] rec seq={} {} key=0x{:02x} {}\n",
-            record.seq,
-            device,
-            usage.0,
-            state_name(state)
-        )),
-        RawInputKind::RelMotion { dx, dy } => kernel_log_fmt(format_args!(
-            "[M10.input] rec seq={} {} motion dx={} dy={}\n",
-            record.seq, device, dx, dy
-        )),
-        RawInputKind::Button { button, state } => kernel_log_fmt(format_args!(
-            "[M10.input] rec seq={} {} button={} {}\n",
-            record.seq,
-            device,
-            button as u16,
-            state_name(state)
-        )),
-        RawInputKind::Wheel {
-            vertical,
-            horizontal,
-        } => kernel_log_fmt(format_args!(
-            "[M10.input] rec seq={} {} wheel v={} h={}\n",
-            record.seq, device, vertical.0, horizontal.0
-        )),
-        RawInputKind::Overflow { dropped } => kernel_log_fmt(format_args!(
-            "[M10.input] rec seq={} {} overflow dropped={}\n",
-            record.seq, device, dropped
-        )),
+    kernel_log_fmt(format_args!(
+        "[M10.input] rec seq={} {}\n",
+        record.seq,
+        RecordBody(record)
+    ));
+}
+
+/// The normalized form of one record after its seq, e.g. `kbd key=0x04 down`. The QMP phase
+/// lines use it verbatim, and xtask's expected sequence spells it the same way.
+struct RecordBody<'a>(&'a RawInputRecord);
+
+impl core::fmt::Display for RecordBody<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let record = self.0;
+        let device = if record.device.index() == KEYBOARD_INDEX {
+            "kbd"
+        } else {
+            "mouse"
+        };
+        let state_name = |state: KeyState| match state {
+            KeyState::Pressed => "down",
+            KeyState::Released => "up",
+        };
+        match record.kind {
+            RawInputKind::Key { usage, state } => {
+                write!(f, "{device} key=0x{:02x} {}", usage.0, state_name(state))
+            }
+            RawInputKind::RelMotion { dx, dy } => write!(f, "{device} motion dx={dx} dy={dy}"),
+            RawInputKind::Button { button, state } => {
+                write!(f, "{device} button={} {}", button as u16, state_name(state))
+            }
+            RawInputKind::Wheel {
+                vertical,
+                horizontal,
+            } => write!(f, "{device} wheel v={} h={}", vertical.0, horizontal.0),
+            RawInputKind::Overflow { dropped } => write!(f, "{device} overflow dropped={dropped}"),
+        }
     }
 }
 
@@ -570,11 +617,54 @@ fn expect_status(result: u64, status: u64, message: &'static str) -> Result<(), 
 
 const fn call(subop: u64, rsi: u64, rdx: u64, r10: u64) -> Next {
     Next::Call(Call {
-        subop,
+        nr: SYSCALL_NR_INPUT,
+        op: subop,
         rsi,
         rdx,
         r10,
+        r8: 0,
     })
+}
+
+const fn bind_wake(handle: u64, work_set: u64, bit: u64) -> Next {
+    call(INPUT_SUBOP_BIND_WAKE, handle, work_set, bit)
+}
+
+const fn create_work_set() -> Next {
+    Next::Call(Call {
+        nr: SYSCALL_NR_WORK_SET,
+        op: WORK_SET_OP_CREATE,
+        rsi: 0,
+        rdx: 0,
+        r10: 0,
+        r8: 0,
+    })
+}
+
+const fn wait_work_set(work_set: u64, bit: u64, deadline_ns: u64, flags: u64) -> Next {
+    Next::Call(Call {
+        nr: SYSCALL_NR_WORK_SET,
+        op: WORK_SET_OP_WAIT,
+        rsi: work_set,
+        rdx: 1 << bit,
+        r10: deadline_ns,
+        r8: flags,
+    })
+}
+
+fn created_work_set(result: u64) -> Result<u64, &'static str> {
+    if is_status(result) || WorkSetId::decode(result).is_err() {
+        return Err("WORK_SET CREATE failed");
+    }
+    Ok(result)
+}
+
+/// The same slot one generation on: never issued while the original is live.
+fn stale_work_set(work_set: u64) -> Result<u64, &'static str> {
+    let id = WorkSetId::decode(work_set).map_err(|_| "work-set id did not decode")?;
+    let stale = WorkSetId::new(id.slot(), id.generation().wrapping_add(1))
+        .map_err(|_| "stale work-set id did not encode")?;
+    Ok(stale.encode())
 }
 
 const fn find_handle() -> Next {
@@ -632,7 +722,48 @@ fn consumer_step(lane: &mut Lane, step: u32, result: u64) -> Result<Next, &'stat
         }
         3 => drain_step(lane, result),
         4 => {
-            expect_status(result, SYSCALL_ENOSYS, "BIND_WAKE was not ENOSYS")?;
+            lane.consumer_work_set = created_work_set(result)?;
+            Ok(bind_wake(lane.consumer_handle, lane.consumer_work_set, 32))
+        }
+        5 => {
+            expect_status(result, SYSCALL_EINVAL, "BIND_WAKE bit 32 was not EINVAL")?;
+            Ok(bind_wake(
+                lane.consumer_handle,
+                stale_work_set(lane.consumer_work_set)?,
+                CONSUMER_WAKE_BIT,
+            ))
+        }
+        6 => {
+            expect_status(result, STATUS_ESTALE, "BIND_WAKE on a stale work set")?;
+            if input::queue_stats().wake_bound {
+                return Err("a refused BIND_WAKE bound the wake");
+            }
+            Ok(bind_wake(
+                lane.consumer_handle,
+                lane.consumer_work_set,
+                CONSUMER_WAKE_BIT,
+            ))
+        }
+        7 => {
+            expect_status(result, 0, "consumer BIND_WAKE failed")?;
+            if !input::queue_stats().wake_bound {
+                return Err("BIND_WAKE did not bind the wake");
+            }
+            Ok(wait_work_set(
+                lane.consumer_work_set,
+                CONSUMER_WAKE_BIT,
+                0,
+                WORK_SET_WAIT_NONBLOCK,
+            ))
+        }
+        8 => {
+            // The queue was drained before the bind, so no edge may be pending.
+            expect_status(
+                result,
+                STATUS_EAGAIN,
+                "bound wake was ready on an empty queue",
+            )?;
+            serial_write_line("[M10.input] cpl3 bind wake ok");
             Ok(call(
                 INPUT_SUBOP_READ_BATCH,
                 lane.consumer_handle,
@@ -640,7 +771,7 @@ fn consumer_step(lane: &mut Lane, step: u32, result: u64) -> Result<Next, &'stat
                 READ_BATCH_MAX_RECORDS as u64 + 1,
             ))
         }
-        5 => {
+        9 => {
             expect_status(
                 result,
                 SYSCALL_EINVAL,
@@ -653,7 +784,7 @@ fn consumer_step(lane: &mut Lane, step: u32, result: u64) -> Result<Next, &'stat
                 1,
             ))
         }
-        6 => {
+        10 => {
             expect_status(
                 result,
                 SYSCALL_EINVAL,
@@ -680,7 +811,7 @@ fn drain_step(lane: &mut Lane, result: u64) -> Result<Next, &'static str> {
             HOLD_DROPPED,
             lane.cursor.next_seq - 1
         ));
-        return Ok(call(INPUT_SUBOP_BIND_WAKE, lane.consumer_handle, 0, 0));
+        return Ok(create_work_set());
     }
     lane.steps[CONSUMER] = 3;
     let keyboard = lane.keyboard.ok_or("keyboard device id missing")?;
@@ -744,10 +875,14 @@ fn second_fixture_step(lane: &mut Lane, step: u32, result: u64) -> Result<Next, 
                 SYSCALL_EACCES,
                 "READ_BATCH on another holder's handle",
             )?;
-            Ok(call(INPUT_SUBOP_BIND_WAKE, lane.consumer_handle, 0, 0))
+            Ok(bind_wake(lane.consumer_handle, 0, 0))
         }
         4 => {
-            expect_status(result, SYSCALL_ENOSYS, "BIND_WAKE was not ENOSYS")?;
+            expect_status(
+                result,
+                SYSCALL_EACCES,
+                "BIND_WAKE on another holder's handle",
+            )?;
             serial_write_line("[M10.input] cpl3 unauthorized refused");
             grant_input_authority(HolderId(lane.pids[SECOND]), Rights::INPUT_CONSUME)
                 .map_err(|_| "m10 input second grant failed")?;
@@ -772,8 +907,11 @@ fn second_fixture_step(lane: &mut Lane, step: u32, result: u64) -> Result<Next, 
             if (released, again) != (1, 0) || input::consumer_bindings_for(consumer) != 0 {
                 return Err("consumer release was not exactly-once");
             }
+            if input::queue_stats().wake_bound {
+                return Err("consumer release left its wake bound");
+            }
             kernel_log_fmt(format_args!(
-                "[M10.input] consumer released bindings={} then={}\n",
+                "[M10.input] consumer released bindings={} then={} wake=cleared\n",
                 released, again
             ));
             Ok(read_batch(lane.second_handle))
@@ -784,10 +922,120 @@ fn second_fixture_step(lane: &mut Lane, step: u32, result: u64) -> Result<Next, 
                 return Err("second consumer did not bind after the release");
             }
             serial_write_line("[M10.input] cpl3 exclusive consumer ok");
-            Ok(Next::Done)
+            Ok(create_work_set())
         }
+        9 => {
+            lane.qmp.work_set = created_work_set(result)?;
+            Ok(bind_wake(
+                lane.second_handle,
+                lane.qmp.work_set,
+                QMP_WAKE_BIT,
+            ))
+        }
+        10 => {
+            expect_status(result, 0, "QMP consumer BIND_WAKE failed")?;
+            lane.qmp.signals_before = input::queue_stats().wake_signals;
+            serial_write_line(QMP_READY_MARKER);
+            Ok(qmp_wait(lane))
+        }
+        11 => qmp_woken(lane, result),
+        12 => qmp_drain(lane, result),
         _ => Err("second fixture script overran"),
     }
+}
+
+/// Blocks until the IRQ path sets the bound bit; nothing in the kernel polls meanwhile.
+fn qmp_wait(lane: &mut Lane) -> Next {
+    lane.steps[SECOND] = 11;
+    wait_work_set(
+        lane.qmp.work_set,
+        QMP_WAKE_BIT,
+        monotonic_ns().saturating_add(QMP_WAIT_NS),
+        0,
+    )
+}
+
+fn qmp_woken(lane: &mut Lane, result: u64) -> Result<Next, &'static str> {
+    if result != 1 << QMP_WAKE_BIT {
+        return Err("QMP WAIT did not return exactly the bound bit (no host input?)");
+    }
+    lane.qmp.wakes += 1;
+    lane.qmp.drained_this_wake = 0;
+    lane.steps[SECOND] = 12;
+    Ok(read_batch(lane.second_handle))
+}
+
+/// Drains to 0 before waiting again (the wake is edge-triggered); ends at the Escape release.
+fn qmp_drain(lane: &mut Lane, result: u64) -> Result<Next, &'static str> {
+    if is_status(result) || result > READ_BATCH_RECORDS {
+        return Err("QMP READ_BATCH failed");
+    }
+    if result == 0 {
+        if lane.qmp.drained_this_wake == 0 {
+            lane.qmp.empty_wakes += 1;
+        }
+        return if lane.qmp.escape_released {
+            qmp_finish(lane)
+        } else {
+            Ok(qmp_wait(lane))
+        };
+    }
+    let bytes =
+        read_user::<{ READ_BATCH_RECORDS as usize * RAW_INPUT_RECORD_BYTES }>(RECORDS_ADDRESS)?;
+    for wire in bytes
+        .chunks_exact(RAW_INPUT_RECORD_BYTES)
+        .take(result as usize)
+    {
+        let record = RawInputRecord::decode(wire)
+            .map_err(|_| "QMP READ_BATCH wrote an undecodable record")?;
+        lane.cursor.check(&record)?;
+        if lane.qmp.escape_released {
+            return Err("QMP input after the Escape release");
+        }
+        let expected_device = match record.kind {
+            RawInputKind::Overflow { .. } => return Err("QMP input overflowed"),
+            RawInputKind::Key { .. } => lane.keyboard,
+            _ => lane.mouse,
+        };
+        if Some(record.device) != expected_device {
+            return Err("QMP record came from an unexpected device id");
+        }
+        lane.qmp.records += 1;
+        lane.qmp.drained_this_wake += 1;
+        kernel_log_fmt(format_args!(
+            "[M10.input] qmp rec {} {}\n",
+            lane.qmp.records,
+            RecordBody(&record)
+        ));
+        if record.kind
+            == (RawInputKind::Key {
+                usage: KEY_ESCAPE,
+                state: KeyState::Released,
+            })
+        {
+            lane.qmp.escape_released = true;
+        }
+    }
+    lane.steps[SECOND] = 12;
+    Ok(read_batch(lane.second_handle))
+}
+
+/// Each wake answers at least one queue edge and each edge queued at least one record, so the
+/// consumer can never have woken more often than it read records.
+fn qmp_finish(lane: &mut Lane) -> Result<Next, &'static str> {
+    let qmp = &lane.qmp;
+    let signals = input::queue_stats().wake_signals - qmp.signals_before;
+    kernel_log_fmt(format_args!(
+        "[M10.input] qmp done records={} wakes={} empty_wakes={} signals={}\n",
+        qmp.records, qmp.wakes, qmp.empty_wakes, signals
+    ));
+    if qmp.wakes == 0 || qmp.wakes > qmp.records || u64::from(signals) > qmp.records {
+        return Err("QMP wakes or signals exceeded the records read");
+    }
+    if u64::from(signals) < qmp.wakes {
+        return Err("the consumer woke without a signal");
+    }
+    Ok(Next::Done)
 }
 
 /// Test-only syscall: `rdi` carries the fixture's previous syscall-19 result.
@@ -820,11 +1068,13 @@ pub(crate) fn handle_report_syscall(frame: &mut SyscallContext) {
     };
     match next {
         Ok(Next::Call(call)) => {
-            frame.rax = SYSCALL_NR_INPUT;
-            frame.rdi = call.subop;
+            frame.rax = call.nr;
+            frame.rdi = call.op;
             frame.rsi = call.rsi;
             frame.rdx = call.rdx;
             frame.r10 = call.r10;
+            frame.r8 = call.r8;
+            frame.r9 = 0;
         }
         Ok(Next::Done) => finish_fixture(frame, index),
         Err(message) => fatal_kernel_error(message),

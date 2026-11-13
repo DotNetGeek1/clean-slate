@@ -157,7 +157,6 @@ impl<const N: usize> RawInputQueue<N> {
         self.pending_dropped
     }
 
-    #[cfg(test)]
     pub(crate) fn is_empty_including_pending(&self) -> bool {
         self.len == 0 && self.pending_dropped == 0
     }

@@ -1,6 +1,5 @@
 //! Kernel root grants of seat-0 raw-input authority (#113). Launch policy (P5) decides who gets
-//! one; in M10 that is only the live compositor. Until that policy (#112/#118) lands, this module
-//! is compiled only for host tests and the input self-test.
+//! one; in M10 that is only the live compositor (`capability::graphics`, #118).
 
 use clean_slate_capability::{
     CapabilityError, CapabilityHandle, HolderId, ResourceClass, ResourceRef, Rights,

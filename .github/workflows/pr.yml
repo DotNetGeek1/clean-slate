@@ -5,13 +5,17 @@ on:
     paths:
       - "block/**"
       - "capability/**"
+      - "compositor/**"
+      - "desktop-shell/**"
       - "graphics/**"
       - "kernel/**"
       - "native-abi/**"
       - "network/**"
+      - "playground/**"
       - "port/**"
       - "raster/**"
       - "store/**"
+      - "ui/**"
       - "fixtures/**"
       - "xtask/**"
       - "scripts/**"
@@ -26,13 +30,17 @@ on:
     paths:
       - "block/**"
       - "capability/**"
+      - "compositor/**"
+      - "desktop-shell/**"
       - "graphics/**"
       - "kernel/**"
       - "native-abi/**"
       - "network/**"
+      - "playground/**"
       - "port/**"
       - "raster/**"
       - "store/**"
+      - "ui/**"
       - "fixtures/**"
       - "xtask/**"
       - "scripts/**"
@@ -86,6 +94,11 @@ jobs:
       - name: Clippy (raster)
         run: cargo clippy -p clean-slate-raster --all-targets -- -D warnings
 
+      - name: Clippy (ui)
+        run: |
+          cargo clippy -p clean-slate-ui --all-targets -- -D warnings
+          cargo clippy -p clean-slate-ui --target x86_64-unknown-uefi -- -D warnings
+
       - name: Clippy (capability)
         run: cargo clippy -p clean-slate-capability --all-targets -- -D warnings
 
@@ -93,6 +106,17 @@ jobs:
         run: |
           cargo clippy -p clean-slate-port --all-targets -- -D warnings
           cargo clippy -p clean-slate-port --all-targets --features fake -- -D warnings
+
+      - name: Clippy (compositor)
+        run: |
+          cargo clippy -p clean-slate-compositor --all-targets -- -D warnings
+          cargo clippy -p clean-slate-compositor --all-targets --features fake -- -D warnings
+
+      - name: Clippy (playground)
+        run: cargo clippy -p clean-slate-playground --all-targets -- -D warnings
+
+      - name: Clippy (desktop-shell)
+        run: cargo clippy -p clean-slate-desktop-shell --all-targets -- -D warnings
 
       - name: Clippy (linux-abi)
         run: cargo clippy -p clean-slate-linux-abi --all-targets -- -D warnings
@@ -118,8 +142,27 @@ jobs:
           for bin in clean-slate-supervisor-userspace clean-slate-supervisor-restart-policy-userspace clean-slate-supervisor-recovery-userspace clean-slate-m6-fixture-userspace; do
             cargo clippy -p clean-slate-supervisor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           done
+          for bin in clean-slate-compositor-userspace clean-slate-compositor-client-userspace; do
+            cargo clippy -p clean-slate-compositor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
+          done
+          cargo clippy -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
+          cargo clippy -p clean-slate-compositor --bin clean-slate-compositor-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys -- -D warnings
+          cargo clippy -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys -- -D warnings
+          cargo clippy -p clean-slate-desktop-shell --bin clean-slate-desktop-shell-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-store --bin clean-slate-storage-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-net-service --bin clean-slate-network-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
+
+      # The m10-desktop kernel features embed these three ELFs (kernel/build.rs);
+      # m10-desktop-self-test swaps in the fault-keys compositor and playground from target/fault-keys.
+      - name: Build M10 desktop userspace images
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: |
+          cargo build -p clean-slate-compositor --bin clean-slate-compositor-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
+          cargo build -p clean-slate-desktop-shell --bin clean-slate-desktop-shell-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
+          cargo build -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
+          cargo build -p clean-slate-compositor --bin clean-slate-compositor-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys
+          cargo build -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys
 
       - name: Clippy (kernel UEFI)
         run: |
@@ -146,8 +189,12 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-rootfs-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-nxe-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-virtio-modern-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-virtio-gpu-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-framebuffer-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-input-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-desktop -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-desktop-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-desktop-self-test,m10-desktop-q0 -- -D warnings
           # m9-linux-fs-self-test implies m6-object-self-test and embeds the storage
           # userspace ELF at build time; like the M5/M6 self-test features it is
           # built (with RUSTFLAGS=-D warnings) by the acceptance job via xtask.
@@ -163,6 +210,7 @@ jobs:
         run: |
           cargo clippy -p clean-slate-kernel --lib --tests -- -D warnings
           cargo clippy -p clean-slate-kernel --lib --tests --features m9-rootfs,m9-linux-socket,m9-linux-trace -- -D warnings
+          cargo clippy -p clean-slate-kernel --lib --tests --features m10-desktop -- -D warnings
 
       - name: Build
         run: |
@@ -187,9 +235,13 @@ jobs:
           cargo test -p clean-slate-network --features alloc,tls
           cargo test -p clean-slate-store
           cargo test -p clean-slate-raster
+          cargo test -p clean-slate-ui
           cargo test -p clean-slate-capability
           cargo test -p clean-slate-port
           cargo test -p clean-slate-port --features fake
+          cargo test -p clean-slate-compositor
+          cargo test -p clean-slate-playground
+          cargo test -p clean-slate-desktop-shell
           cargo test -p clean-slate-linux-abi
           cargo test -p clean-slate-elf
           # verify-m9-fixture, clean-slate-rootfs --features std and the M9-gated kernel
@@ -201,12 +253,13 @@ jobs:
           cargo test -p clean-slate-kernel --features m3-syscall-self-test
           cargo test -p clean-slate-kernel --features m8-linux-image
           cargo test -p clean-slate-kernel --features m8-linux-hello
+          cargo test -p clean-slate-kernel --features m10-desktop --lib
 
   acceptance:
     name: acceptance
     runs-on: ubuntu-latest
     needs: check
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -222,8 +275,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf
 
-      # test-m9 runs every test-m9-* constituent once; --exhaustive does not repeat them.
-      - name: Exhaustive QEMU acceptance (M1–M9 aggregates + constituents)
+      # test-m9 and test-m10 run each of their constituents once; --exhaustive does not repeat them.
+      - name: Exhaustive QEMU acceptance (M1–M10 aggregates + constituents)
         run: bash ./scripts/run-tests.sh --exhaustive
 
       - name: Upload test report
@@ -232,4 +285,13 @@ jobs:
         with:
           name: xtask-test-report
           path: target/xtask-test-report.txt
+          if-no-files-found: ignore
+
+      # QMP lane screendumps (the desktop lane's six captures per backend) and serial logs.
+      - name: Upload QEMU lane artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xtask-artifacts
+          path: target/xtask-artifacts
           if-no-files-found: ignore

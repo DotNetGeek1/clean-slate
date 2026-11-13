@@ -57,6 +57,8 @@ m7-dns-self-test = ["m3-entry-self-test"]
 m7-net-device-self-test = ["m3-entry-self-test"]
 # M10 #196: modern-only virtio-blk (and virtio-gpu) transport probe in boot context.
 m10-virtio-modern-self-test = ["m3-entry-self-test", "m10-timeout-introspection"]
+# M10 #114: VirtIO-GPU 2D scanout create/attach/transfer/flush/release probe in boot context.
+m10-virtio-gpu-self-test = ["m3-entry-self-test", "m10-timeout-introspection"]
 # W3 registry introspection (`sched::timeout::armed_count`) for self-test lanes.
 m10-timeout-introspection = []
 # M8.2 (#92): embeds the frozen Linux fixture bytes (`LINUX_M8_FIXTURE`).
@@ -109,6 +111,14 @@ m9-linux-trace-self-test = [
 m10-nxe-self-test = ["m3-entry-self-test", "stack-high-water-check"]
 # M10 #195 S2: scripted fixture lane for bounded shared user buffers (phase `nx`).
 m10-shared-buffer-self-test = ["m3-entry-self-test", "stack-high-water-check"]
+# #118: the M10 desktop: the supervised compositor, desktop shell and playground launched as
+# CPL3 services at the end of boot. Embeds their userspace ELFs at build time.
+m10-desktop = []
+# #119: m10-desktop plus the self-test fault keys the desktop lane presses (F12 crashes the app,
+# F11 the compositor).
+m10-desktop-self-test = ["m10-desktop"]
+# #119: launch the desktop at quality tier Q0 (opaque, no translucency) instead of Q1.
+m10-desktop-q0 = ["m10-desktop"]
 # M10 #113: i8042 input smoke lane (controller write-output-buffer stimulus, no host injection).
 m10-input-self-test = ["m3-entry-self-test", "stack-high-water-check", "m10-timeout-introspection"]
 
@@ -144,6 +154,7 @@ clean-slate-graphics = { path = "../graphics", features = ["fake"] }
 
 [build-dependencies]
 clean-slate-elf = { path = "../elf" }
+clean-slate-native-abi = { path = "../native-abi" }
 clean-slate-rootfs = { path = "../rootfs", features = ["std"] }
 
 [lints]

@@ -203,6 +203,7 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         // Boot-context device timeouts (W3) expire here; there are no waiters to wake.
         #[cfg(any(
             feature = "m10-virtio-modern-self-test",
+            feature = "m10-virtio-gpu-self-test",
             feature = "m10-input-self-test"
         ))]
         if crate::selftest::boot_wait::is_halted() {
@@ -640,6 +641,8 @@ pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> 
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));
+    #[cfg(feature = "m10-desktop")]
+    crate::service::desktop_launch::on_process_exiting(allocator, pid, context.vector);
     #[cfg(any(
         feature = "m6-object-self-test",
         feature = "m6-process-control-self-test",
@@ -705,13 +708,32 @@ pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> 
             feature = "m10-shared-buffer-self-test"
         )))]
         {
-            fatal_kernel_error("no runnable thread remained after userspace fault");
+            #[cfg(feature = "m10-desktop")]
+            {
+                idle_for_desktop_launcher(pid)
+            }
+            // Nothing on the idle path can create a thread here, so an empty run queue is final.
+            #[cfg(not(feature = "m10-desktop"))]
+            {
+                fatal_kernel_error("no runnable thread remained after userspace fault");
+            }
         }
         #[cfg(feature = "m9-userspace-self-test")]
         {
             fatal_kernel_error("no runnable thread remained after userspace fault");
         }
     })
+}
+
+/// The desktop launcher runs on the idle thread and may relaunch (or report that it stopped), so
+/// an empty run queue is not lost work: the kernel stays up and idles.
+#[cfg(feature = "m10-desktop")]
+fn idle_for_desktop_launcher(pid: u64) -> u64 {
+    kernel_log_fmt(format_args!(
+        "[PROC] no runnable thread after pid={pid} exit; idling for the desktop launcher\n"
+    ));
+    without_interrupts(crate::sched::idle::handoff_to_idle_thread)
+        .unwrap_or_else(|message| fatal_kernel_error(message))
 }
 
 fn current_userspace_fault_pid() -> Result<u64, &'static str> {

@@ -48,6 +48,9 @@ pub(crate) struct ResourceSnapshot {
     pub(crate) work_sets: usize,
     pub(crate) ports_served: usize,
     pub(crate) port_connections: usize,
+    /// #195 shared-window rows (Live or orphaned): presenter release removes its scanout
+    /// kernel-grant rows and teardown step 5 every other one.
+    pub(crate) shared_mappings: usize,
 }
 
 /// What the M10 teardown slots released; both exit paths compare it with the snapshot.
@@ -55,6 +58,9 @@ pub(crate) struct ResourceSnapshot {
 struct HolderReleaseCounts {
     work_sets: usize,
     ports: clean_slate_port::PortReleaseCounts,
+    /// Scanout kernel-grant rows the presenter slot unmapped; step 5 removes the rest.
+    presenter_grant_rows: usize,
+    shared_mappings: usize,
 }
 
 impl HolderReleaseCounts {
@@ -66,6 +72,15 @@ impl HolderReleaseCounts {
             || self.ports.client_connections != snapshot.port_connections
         {
             return Err("port teardown count diverged from the recorded process snapshot");
+        }
+        if self
+            .presenter_grant_rows
+            .saturating_add(self.shared_mappings)
+            != snapshot.shared_mappings
+        {
+            return Err(
+                "shared-mapping teardown count diverged from the recorded process snapshot",
+            );
         }
         Ok(())
     }
@@ -96,6 +111,7 @@ pub(crate) fn remaining_owned_resource_count(process_id: u64) -> usize {
         + ipc_resources.held_capabilities
         + work_set::count_for(HolderId(process_id))
         + port_resource_count(HolderId(process_id))
+        + crate::mm::shared_buffer::mapping_count(process_id)
 }
 
 fn port_resource_count(holder: HolderId) -> usize {
@@ -126,7 +142,59 @@ pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'s
         work_sets: work_set::count_for(HolderId(process_id)),
         ports_served: ports.ports_served,
         port_connections: ports.port_connections,
+        shared_mappings: crate::mm::shared_buffer::mapping_count(process_id),
     })
+}
+
+/// System-wide counters the #118 desktop compares against its baseline after an app closes or
+/// crashes and after a compositor restart: every M10 resource a desktop process can own.
+#[cfg(feature = "m10-desktop")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DesktopResourceSnapshot {
+    pub(crate) processes: usize,
+    pub(crate) capabilities: usize,
+    pub(crate) work_sets: usize,
+    pub(crate) ports: usize,
+    pub(crate) port_connections: usize,
+    pub(crate) port_queued_requests: usize,
+    pub(crate) port_queued_events: usize,
+    pub(crate) port_undelivered_transfers: usize,
+    pub(crate) shared_buffers: usize,
+    pub(crate) shared_buffer_pages: u64,
+    pub(crate) shared_mappings: usize,
+    pub(crate) presenter_bound: bool,
+    pub(crate) presenter_wake_bound: bool,
+    pub(crate) input_consumer_bound: bool,
+    pub(crate) scanout_buffers: usize,
+    pub(crate) gpu_resources: usize,
+}
+
+#[cfg(feature = "m10-desktop")]
+pub(crate) fn desktop_resource_snapshot() -> DesktopResourceSnapshot {
+    let ports = port::global_counts();
+    let buffers = crate::mm::shared_buffer::desktop_stats();
+    let display = crate::device::display::with_active_display(|display| {
+        display.map(|display| display.desktop_counters())
+    })
+    .unwrap_or_default();
+    DesktopResourceSnapshot {
+        processes: unsafe { process_registry_mut().occupied_slots() },
+        capabilities: crate::capability::live_capability_count(),
+        work_sets: work_set::live_count(),
+        ports: ports.ports,
+        port_connections: ports.connections,
+        port_queued_requests: ports.queued_requests,
+        port_queued_events: ports.queued_events,
+        port_undelivered_transfers: ports.undelivered_transfers,
+        shared_buffers: buffers.live_buffers + buffers.dying_buffers,
+        shared_buffer_pages: buffers.pages_held,
+        shared_mappings: buffers.mappings,
+        presenter_bound: display.presenter,
+        presenter_wake_bound: display.wake,
+        input_consumer_bound: input::consumer_bound(),
+        scanout_buffers: display.scanout_buffers,
+        gpu_resources: display.gpu_resources,
+    }
 }
 
 const TEARDOWN_HOOK_COUNT: usize = 15;
@@ -334,7 +402,9 @@ fn run_teardown_hook(
             notify_holder_exit_for_process(holder.0);
         }
         TeardownHook::Port => released.holder.ports = release_ports(ctx),
-        TeardownHook::DisplayPresenter => release_display_presenter(ctx)?,
+        TeardownHook::DisplayPresenter => {
+            released.holder.presenter_grant_rows = release_display_presenter(ctx);
+        }
         TeardownHook::InputConsumer => release_input_consumer(ctx),
         TeardownHook::WorkSet => released.holder.work_sets = release_work_set(ctx),
         TeardownHook::RevokeHolderCapabilities => {
@@ -346,7 +416,9 @@ fn run_teardown_hook(
         TeardownHook::DiscardBootstrapGrants => {
             discard_bootstrap_grants_for_holder(holder);
         }
-        TeardownHook::SharedMappings => release_shared_mappings(ctx)?,
+        TeardownHook::SharedMappings => {
+            released.holder.shared_mappings = release_shared_mappings(ctx)?;
+        }
         TeardownHook::ThreadReap => {
             released.threads = Some(without_interrupts(|| unsafe {
                 let scheduler = scheduler_mut();
@@ -367,8 +439,8 @@ fn release_ports(ctx: &mut TeardownContext<'_>) -> clean_slate_port::PortRelease
     port::on_holder_exit(HolderId(ctx.process_id), ctx.instance_generation)
 }
 
-fn release_display_presenter(_ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {
-    Ok(())
+fn release_display_presenter(ctx: &mut TeardownContext<'_>) -> usize {
+    crate::device::display::release_presenter_for_holder(HolderId(ctx.process_id), ctx.allocator)
 }
 
 fn release_input_consumer(ctx: &mut TeardownContext<'_>) {
@@ -379,14 +451,17 @@ fn release_work_set(ctx: &mut TeardownContext<'_>) -> usize {
     work_set::on_holder_exit(HolderId(ctx.process_id))
 }
 
-fn release_shared_mappings(ctx: &mut TeardownContext<'_>) -> Result<(), &'static str> {
+fn release_shared_mappings(ctx: &mut TeardownContext<'_>) -> Result<usize, &'static str> {
     debug_assert!(
         crate::mm::shared_buffer::window_root(ctx.process_id)
             .is_none_or(|root| root == ctx.address_space_root),
         "shared window was built in a different root than the one being torn down"
     );
-    crate::mm::shared_buffer::teardown_process(ctx.process_id, ctx.allocator);
-    Ok(())
+    let removed = crate::mm::shared_buffer::teardown_process(ctx.process_id, ctx.allocator);
+    if crate::mm::shared_buffer::mapping_count(ctx.process_id) != 0 {
+        return Err("shared-mapping teardown left rows for the exiting process");
+    }
+    Ok(removed)
 }
 
 fn release_address_space(
@@ -872,11 +947,38 @@ mod tests {
         // teardown to start at the first hook.
         for _ in 0..2 {
             release_input_consumer(&mut ctx);
-            assert_eq!(release_shared_mappings(&mut ctx), Ok(()));
+            assert_eq!(release_shared_mappings(&mut ctx), Ok(0));
             assert_eq!(input::consumer_bindings_for(exiting), 0);
         }
         assert_eq!(input::bind_consumer(next), Ok(()));
         assert_eq!(input::release_consumer_for_holder(next), 1);
+    }
+
+    #[test]
+    fn shared_mapping_release_accounts_for_every_snapshot_row() {
+        let snapshot = ResourceSnapshot {
+            shared_mappings: 3,
+            ..ResourceSnapshot::default()
+        };
+        let released = |presenter_grant_rows, shared_mappings| HolderReleaseCounts {
+            presenter_grant_rows,
+            shared_mappings,
+            ..HolderReleaseCounts::default()
+        };
+        assert_eq!(released(0, 3).matches(&snapshot), Ok(()));
+        assert_eq!(
+            released(2, 1).matches(&snapshot),
+            Ok(()),
+            "presenter release unmaps its scanout grant rows before step 5"
+        );
+        assert!(
+            released(0, 2).matches(&snapshot).is_err(),
+            "a row unaccounted for"
+        );
+        assert!(
+            released(2, 2).matches(&snapshot).is_err(),
+            "a row created during teardown"
+        );
     }
 
     /// Calls that dismantle part of a registered process. Outside the teardown
@@ -923,6 +1025,12 @@ mod tests {
             "capability/mod.rs",
             "revoke_for_holder",
             "revoke_holder_tree_visiting",
+        ),
+        // Grant tests on bare holders that never registered a process.
+        (
+            "capability/graphics.rs",
+            "grants_land_on_one_holder_and_teardown_revokes_them",
+            "revoke_for_holder",
         ),
         // Address spaces built before any process record exists.
         (

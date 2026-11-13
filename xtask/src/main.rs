@@ -10,7 +10,11 @@ use std::sync::{mpsc, Once};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+mod m10_desktop_lane;
+mod m10_desktop_visual;
 mod m10_framebuffer_validate;
+mod m10_input_lane;
+mod m10_virtio_gpu;
 mod m7_certs;
 mod m7_fixture;
 mod m7_fixture_tcp;
@@ -133,11 +137,12 @@ const M10_NXE_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[M10.NX] PASS",
 ];
 const M10_NXE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M10_SHARED_BUFFER_ACCEPTANCE_MARKERS: [&str; 17] = [
+const M10_SHARED_BUFFER_ACCEPTANCE_MARKERS: [&str; 18] = [
     "[CPU ] NXE enabled nx=1",
     "[M10.SB] creating",
     "[M10.SB] nx exec fault err=0x15 OK",
     "[M10.SB] cross-process map/read OK",
+    "[M10.SB] holder drop left owner intact OK",
     "[M10.SB] unauthorized denied OK",
     "[M10.SB] stale id denied OK",
     "[M10.SB] exhaustion deterministic OK",
@@ -320,10 +325,9 @@ const M9_BLOCK_WAKE_ACCEPTANCE_MARKERS: [&str; 10] = [
     "[M9.E] cycles=8 waiters=0",
     "[M9.E] PASS",
 ];
-const M10_INPUT_SMOKE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
-/// #113 smoke lane: the i8042 controller's write-output-buffer commands stand in for host
-/// injection (#197), so every record still crosses IRQ 1/12, the decoders and the raw queue.
-const M10_INPUT_SMOKE_ACCEPTANCE_MARKERS: [&str; 18] = [
+/// #113 lane: the i8042 controller's write-output-buffer commands drive the boot phase, then
+/// `m10_input_lane` injects real PS/2 keyboard and pointer events over QMP (#197).
+const M10_INPUT_SMOKE_ACCEPTANCE_MARKERS: [&str; 21] = [
     "[TIME] timer initialized",
     "[M10.input] init begun devices=none timeouts_armed=2",
     "[M10.input] init settled kbd=ready mouse=ready ",
@@ -338,9 +342,12 @@ const M10_INPUT_SMOKE_ACCEPTANCE_MARKERS: [&str; 18] = [
     "[M10.input] boot phase complete",
     "[M10.input] cpl3 query devices ok",
     "[M10.input] cpl3 drained records=128 overflow dropped=4",
+    "[M10.input] cpl3 bind wake ok",
     "[M10.input] cpl3 unauthorized refused",
-    "[M10.input] consumer released bindings=1 then=0",
+    "[M10.input] consumer released bindings=1 then=0 wake=cleared",
     "[M10.input] cpl3 exclusive consumer ok",
+    "[M10.input] qmp ready",
+    "[M10.input] qmp done records=",
     "[M10.input] PASS",
 ];
 const M9_STACK_GUARD_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -944,6 +951,25 @@ const M9_MILESTONE_STEPS: [M9MilestoneStep; 18] = [
     ("test-m9-userspace", run_m9_userspace_acceptance),
 ];
 
+/// Authoritative M10 gate (#119): the graphics contract and every M10 constituent (substrate
+/// boots, display backends, input, compositor and app host suites), then the #118 desktop lane
+/// on both display backends. `[M10 ] PASS` is printed only after all of them succeed.
+const M10_MILESTONE_STEPS: [M9MilestoneStep; 13] = [
+    ("test-m10-contract", run_m10_contract_acceptance),
+    ("clean-slate-ui (host)", run_m10_ui_host_tests),
+    ("test-m10-nxe", run_m10_nxe_acceptance),
+    ("test-m10-shared-buffer", run_m10_shared_buffer_acceptance),
+    ("test-m10-port", run_m10_port_acceptance),
+    ("test-qmp-smoke", run_qmp_smoke_acceptance),
+    ("test-m10-virtio-modern", run_m10_virtio_modern_acceptance),
+    ("test-m10-framebuffer", run_m10_framebuffer_acceptance),
+    ("test-m10-virtio-gpu", m10_virtio_gpu::run_acceptance),
+    ("test-m10-input-smoke", run_m10_input_smoke_acceptance),
+    ("test-m10-compositor", run_m10_compositor_acceptance),
+    ("test-m10-app", run_m10_app_acceptance),
+    ("test-m10-desktop", m10_desktop_lane::run),
+];
+
 fn main() -> ExitCode {
     match run(env::args_os()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -1025,10 +1051,16 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM7 => run_m7_acceptance(),
         ParsedCommand::TestM6 => run_m6_acceptance(),
         ParsedCommand::TestM10Contract => run_m10_contract_acceptance(),
+        ParsedCommand::TestM10Compositor => run_m10_compositor_acceptance(),
+        ParsedCommand::TestM10App => run_m10_app_acceptance(),
         ParsedCommand::TestM10Nxe => run_m10_nxe_acceptance(),
         ParsedCommand::TestM10Port => run_m10_port_acceptance(),
-        ParsedCommand::TestQmpSmoke => qmp::smoke::run(&xtask_artifact_root()),
+        ParsedCommand::TestQmpSmoke => run_qmp_smoke_acceptance(),
+        ParsedCommand::TestM10Desktop => m10_desktop_lane::run(),
+        ParsedCommand::RunM10Desktop => run_m10_desktop_interactive(&trailing_args),
+        ParsedCommand::TestM10 => run_milestone_steps("M10 ", &M10_MILESTONE_STEPS),
         ParsedCommand::TestM10VirtioModern => run_m10_virtio_modern_acceptance(),
+        ParsedCommand::TestM10VirtioGpu => m10_virtio_gpu::run_acceptance(),
         ParsedCommand::TestM10Framebuffer => run_m10_framebuffer_acceptance(),
         ParsedCommand::TestM10SharedBuffer => run_m10_shared_buffer_acceptance(),
         ParsedCommand::TestM10InputSmoke => run_m10_input_smoke_acceptance(),
@@ -1088,25 +1120,40 @@ fn run_m10_framebuffer_acceptance() -> Result<(), XtaskError> {
         .arg("-p")
         .arg("clean-slate-raster");
     run_host_test_command(&mut test)?;
-    run_vm_inner_with_config(
-        false,
-        false,
-        &["m10-framebuffer-self-test"],
-        Some((
-            MarkerSet::Ordered(&M10_FRAMEBUFFER_ACCEPTANCE_MARKERS),
-            M10_FRAMEBUFFER_ACCEPTANCE_TIMEOUT,
-        )),
-        VmLaunchConfig {
-            m5_data_disk: None,
-            reset_ovmf_vars: false,
-            m7_fixture_port: None,
-            kernel_release: false,
-            cpu_model: None,
-            vga: Some("std"),
-            machine_extra: None,
-            m10_virtio_modern: None,
+    // The final serial marker comes after the second present settles, so the frame captured on
+    // `status idle seq=2` is the one the guest's readback describes.
+    let steps = vec![
+        qmp::ScriptStep::AwaitLine("[FB  ] status idle seq=2"),
+        qmp::ScriptStep::Screendump {
+            name: "framebuffer",
+            check: m10_framebuffer_validate::check_m10_framebuffer_screenshot,
         },
-    )
+    ];
+    let mut driver = qmp::QmpScriptDriver::new("m10-framebuffer", steps, &xtask_artifact_root())?;
+    run_driven_vm_acceptance(
+        &["m10-framebuffer-self-test"],
+        VmLaunchConfig {
+            vga: Some("std"),
+            ..VmLaunchConfig::default()
+        },
+        MarkerSet::Ordered(&M10_FRAMEBUFFER_ACCEPTANCE_MARKERS),
+        M10_FRAMEBUFFER_ACCEPTANCE_TIMEOUT,
+        &mut driver,
+    )?;
+    let capture = driver
+        .captures()
+        .first()
+        .filter(|_| driver.is_complete())
+        .ok_or_else(|| {
+            XtaskError::Validation("m10 framebuffer: the screendump stage did not run".into())
+        })?;
+    println!(
+        "[M10.2] host screenshot match {}x{} png={}",
+        capture.screenshot.width(),
+        capture.screenshot.height(),
+        capture.png.display()
+    );
+    Ok(())
 }
 
 fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
@@ -1833,21 +1880,37 @@ fn run_m9_kernel_host_tests() -> Result<(), XtaskError> {
 /// M9 milestone gate (#108). Emits `[M9  ] PASS` only after every step succeeds; the
 /// first failure propagates with the failing `[M9  ] step N/…` name already printed.
 fn run_m9_acceptance() -> Result<(), XtaskError> {
-    let total = M9_MILESTONE_STEPS.len();
-    for (index, (name, step)) in M9_MILESTONE_STEPS.iter().enumerate() {
-        println!("[M9  ] step {}/{} {}", index + 1, total, name);
+    run_milestone_steps("M9  ", &M9_MILESTONE_STEPS)
+}
+
+/// Runs `steps` in order under the `[<tag>]` prefix and prints `[<tag>] PASS` only after all of
+/// them succeed; the first failure propagates after its `step N/…` line.
+fn run_milestone_steps(tag: &str, steps: &[M9MilestoneStep]) -> Result<(), XtaskError> {
+    let total = steps.len();
+    for (index, (name, step)) in steps.iter().enumerate() {
+        println!("[{tag}] step {}/{} {}", index + 1, total, name);
         let started = std::time::Instant::now();
         step()?;
         println!(
-            "[M9  ] step {}/{} {} ok secs={:.1}",
+            "[{tag}] step {}/{} {} ok secs={:.1}",
             index + 1,
             total,
             name,
             started.elapsed().as_secs_f64()
         );
     }
-    println!("[M9  ] PASS");
+    println!("[{tag}] PASS");
     Ok(())
+}
+
+/// #116 design tokens, chrome, widgets, cursor and shell zones (the desktop shell's own tests
+/// run in `test-m10-desktop`; #115 window management runs in `test-m10-compositor`).
+fn run_m10_ui_host_tests() -> Result<(), XtaskError> {
+    run_cargo_package_tests("clean-slate-ui", &[])
+}
+
+fn run_qmp_smoke_acceptance() -> Result<(), XtaskError> {
+    qmp::smoke::run(&xtask_artifact_root())
 }
 
 fn run_m8_elf_host_tests() -> Result<(), XtaskError> {
@@ -2089,7 +2152,7 @@ fn append_m10_vmod_args(qemu: &mut Command, disk: &Path, irq: M10VmodIrq) {
     }
 }
 
-/// M10 #196 modern VirtIO PCI transport constituent; does not print `[M10  ] PASS`.
+/// M10 #196 modern VirtIO PCI transport constituent; does not print `[M10 ] PASS`.
 fn run_m10_virtio_modern_acceptance() -> Result<(), XtaskError> {
     run_cargo_package_tests("clean-slate-kernel", &["device::virtio"])?;
     run_cargo_package_tests("clean-slate-kernel", &["sched::timeout"])?;
@@ -2125,19 +2188,11 @@ fn run_m10_virtio_modern_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m10_input_smoke_acceptance() -> Result<(), XtaskError> {
-    run_vm_inner(
-        false,
-        false,
-        &["m10-input-self-test"],
-        Some((
-            MarkerSet::Ordered(&M10_INPUT_SMOKE_ACCEPTANCE_MARKERS),
-            M10_INPUT_SMOKE_ACCEPTANCE_TIMEOUT,
-        )),
-    )
+    m10_input_lane::run()
 }
 
 /// M10 contract gate (#110 Stage F): host tests for graphics/capability ABI crates plus
-/// `no_std` UEFI builds of the shared contract crates. Does not print `[M10  ] PASS` (that
+/// `no_std` UEFI builds of the shared contract crates. Does not print `[M10 ] PASS` (that
 /// belongs to the #119 milestone aggregate).
 fn run_m10_contract_acceptance() -> Result<(), XtaskError> {
     let mut test = Command::new("cargo");
@@ -2153,6 +2208,136 @@ fn run_m10_contract_acceptance() -> Result<(), XtaskError> {
     run_cargo_package_build_uefi("clean-slate-graphics", &["fake"])?;
     run_cargo_package_build_uefi("clean-slate-native-abi", &[])?;
     println!("[M10.contract] PASS");
+    Ok(())
+}
+
+const M10_COMPOSITOR_USERSPACE_BINS: [&str; 2] = [
+    "clean-slate-compositor-userspace",
+    "clean-slate-compositor-client-userspace",
+];
+
+/// M10 #112 compositor gate: the host suite drives the compositor core through the shared
+/// `FakePort` / `FakeDisplay` engines; the CPL3 builds prove the kernel adapter compiles.
+/// The QEMU desktop lane needs #111 `MAP_SCANOUT` / `PRESENT` and the P5 launch policy.
+fn run_m10_compositor_acceptance() -> Result<(), XtaskError> {
+    let mut test = Command::new("cargo");
+    test.current_dir(workspace_root())
+        .arg("test")
+        .arg("-p")
+        .arg("clean-slate-compositor");
+    run_host_test_command(&mut test)?;
+    for bin in M10_COMPOSITOR_USERSPACE_BINS {
+        build_native_userspace_bin("clean-slate-compositor", bin)?;
+    }
+    println!("[M10.compositor] PASS");
+    Ok(())
+}
+
+/// Release CPL3 build of one `userspace`-feature binary (what `kernel/build.rs` embeds).
+fn build_native_userspace_bin(package: &str, bin: &str) -> Result<(), XtaskError> {
+    build_native_userspace_variant(package, bin, "userspace", "target")
+}
+
+/// [`build_native_userspace_bin`] with `features` into the cargo target directory `target_dir`.
+fn build_native_userspace_variant(
+    package: &str,
+    bin: &str,
+    features: &str,
+    target_dir: &str,
+) -> Result<(), XtaskError> {
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(workspace_root())
+        .arg("build")
+        .arg("-p")
+        .arg(package)
+        .arg("--bin")
+        .arg(bin)
+        .arg("--features")
+        .arg(features)
+        .arg("--target-dir")
+        .arg(workspace_root().join(target_dir))
+        .arg("--target")
+        .arg("x86_64-unknown-none")
+        .arg("-Z")
+        .arg("build-std=core,compiler_builtins")
+        .arg("--release")
+        .env("RUSTC_BOOTSTRAP", "1");
+    run_build_command(&mut cmd)
+}
+
+/// The three images an `m10-desktop` kernel embeds.
+const M10_DESKTOP_USERSPACE_BINS: [(&str, &str); 3] = [
+    ("clean-slate-compositor", "clean-slate-compositor-userspace"),
+    (
+        "clean-slate-desktop-shell",
+        "clean-slate-desktop-shell-userspace",
+    ),
+    ("clean-slate-playground", "clean-slate-playground-userspace"),
+];
+
+fn build_desktop_userspace() -> Result<(), XtaskError> {
+    for (package, bin) in M10_DESKTOP_USERSPACE_BINS {
+        build_native_userspace_bin(package, bin)?;
+    }
+    Ok(())
+}
+
+/// The `fault-keys` compositor and playground an `m10-desktop-self-test` kernel embeds instead
+/// of the production ones (`kernel/build.rs` reads them from this target directory).
+const M10_DESKTOP_FAULT_KEY_BINS: [(&str, &str); 2] = [
+    ("clean-slate-compositor", "clean-slate-compositor-userspace"),
+    ("clean-slate-playground", "clean-slate-playground-userspace"),
+];
+const M10_DESKTOP_FAULT_KEY_TARGET_DIR: &str = "target/fault-keys";
+
+/// Production desktop images plus the self-test `fault-keys` variants.
+fn build_desktop_self_test_userspace() -> Result<(), XtaskError> {
+    build_desktop_userspace()?;
+    for (package, bin) in M10_DESKTOP_FAULT_KEY_BINS {
+        build_native_userspace_variant(
+            package,
+            bin,
+            "userspace,fault-keys",
+            M10_DESKTOP_FAULT_KEY_TARGET_DIR,
+        )?;
+    }
+    Ok(())
+}
+
+/// The supervised desktop in a QEMU window (`QEMU_DISPLAY`, default `gtk`) with serial on
+/// stdout; VirtIO-GPU at Q1, or the `-vga std` framebuffer at Q0 with `--framebuffer`.
+fn run_m10_desktop_interactive(args: &[OsString]) -> Result<(), XtaskError> {
+    let framebuffer = match args {
+        [] => false,
+        [flag] if flag == "--framebuffer" => true,
+        _ => {
+            return Err(XtaskError::InvalidCommand(
+                "usage: cargo xtask run-m10-desktop [--framebuffer]".to_owned(),
+            ))
+        }
+    };
+    build_desktop_userspace()?;
+    let (features, config, extra_args) = m10_desktop_lane::interactive(framebuffer);
+    let display = env::var("QEMU_DISPLAY").unwrap_or_else(|_| "gtk".to_owned());
+    let mut vm = prepare_vm(false, false, features, config)?;
+    // QEMU keeps the last `-display`, replacing `qemu_command`'s `none`.
+    vm.qemu.args(extra_args).arg("-display").arg(display);
+    run_command(&mut vm.qemu)
+}
+
+/// M10 #117 native app gate: the playground's layout/state/damage/render tests and its session
+/// against the real compositor core over the fake port, shared memory and display; the CPL3
+/// build proves the syscall adapter compiles. The QEMU lane needs #115 window lifecycle and the
+/// #118 launch policy.
+fn run_m10_app_acceptance() -> Result<(), XtaskError> {
+    let mut test = Command::new("cargo");
+    test.current_dir(workspace_root())
+        .arg("test")
+        .arg("-p")
+        .arg("clean-slate-playground");
+    run_host_test_command(&mut test)?;
+    build_native_userspace_bin("clean-slate-playground", "clean-slate-playground-userspace")?;
+    println!("[M10.app] PASS");
     Ok(())
 }
 
@@ -2638,6 +2823,20 @@ fn run_vm_inner_with_config(
         Some((marker_set, timeout)) => run_acceptance_command(&mut vm.qemu, marker_set, timeout),
         None => run_command(&mut vm.qemu),
     }
+}
+
+/// A kernel lane with a mid-run driver (docs/DEVELOPMENT.md "Kernel lanes"): QEMU is never
+/// started with `-S`, and the driver's arguments follow the lane's own.
+fn run_driven_vm_acceptance(
+    features: &[&str],
+    config: VmLaunchConfig,
+    marker_set: MarkerSet<'static>,
+    timeout: Duration,
+    driver: &mut dyn AcceptanceDriver,
+) -> Result<String, XtaskError> {
+    let mut vm = prepare_vm(false, false, features, config)?;
+    vm.qemu.args(driver.qemu_args());
+    run_driven_acceptance_command(&mut vm.qemu, marker_set, timeout, driver)
 }
 
 /// Per-lane run directories for screenshots and other lane artifacts.
@@ -3669,6 +3868,34 @@ impl Drop for ShutdownOnDrop<'_> {
     }
 }
 
+/// Prints `[QEMU] version=…` before every QEMU boot, so each lane's transcript names the emulator it
+/// ran on. `--version` runs once per xtask process; a failure to run it is reported, not fatal.
+fn announce_qemu_version(command: &Command) {
+    let program = Path::new(command.get_program());
+    let is_qemu = program
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .is_some_and(|stem| stem.starts_with("qemu-system"));
+    if !is_qemu {
+        return;
+    }
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let version = VERSION.get_or_init(|| match Command::new(program).arg("--version").output() {
+        Ok(output) => qemu_version(&String::from_utf8_lossy(&output.stdout))
+            .unwrap_or("unknown (no version line)")
+            .to_owned(),
+        Err(error) => format!("unknown ({error})"),
+    });
+    println!("[QEMU] version={version}");
+}
+
+/// The text after `QEMU emulator version ` in `qemu-system-* --version` output.
+fn qemu_version(stdout: &str) -> Option<&str> {
+    stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("QEMU emulator version "))
+}
+
 fn run_acceptance_command(
     command: &mut Command,
     marker_set: MarkerSet<'static>,
@@ -3684,6 +3911,7 @@ fn run_driven_acceptance_command(
     timeout: Duration,
     driver: &mut dyn AcceptanceDriver,
 ) -> Result<String, XtaskError> {
+    announce_qemu_version(command);
     let start = std::time::Instant::now();
     let deadline = start + timeout;
     let command_display = format!(
@@ -3876,10 +4104,6 @@ fn run_driven_acceptance_command(
                         );
                     }
                     if marker_set_is_ordered(marker_set, &M10_FRAMEBUFFER_ACCEPTANCE_MARKERS) {
-                        // TODO(#111 screenshot stage): boot this lane through a kernel-lane wrapper with
-                        // QmpScriptDriver::new("m10-framebuffer", steps, &xtask_artifact_root()) and a
-                        // ScriptStep::Screendump whose check compares against the host raster render;
-                        // see docs/DEVELOPMENT.md "Kernel lanes".
                         if let Err(error) = validate_m10_framebuffer_serial(&output) {
                             terminate_child(&mut child)?;
                             let _ = child.wait();
@@ -4480,6 +4704,8 @@ fn print_help() {
     println!(
         "  test-m10-contract M10 graphics contract host tests plus UEFI builds of graphics and native-abi; prints [M10.contract] PASS (aliases: m10-contract)"
     );
+    println!("  test-m10-compositor M10 #112 compositor host tests (FakePort/FakeDisplay) plus CPL3 builds of the compositor and client binaries; prints [M10.compositor] PASS (aliases: m10-compositor, m10.112)");
+    println!("  test-m10-app    M10 #117 System Playground host tests (layout, damage, render, session against the compositor core) plus its CPL3 build; prints [M10.app] PASS (aliases: m10-app, m10.117)");
     println!("  test-m10-nxe  M10 #195 S0: EFER.NXE host tests, then a CPL3 fetch from an RW+NX page must fault err=0x15 (aliases: m10-nxe)");
     println!(
         "  test-m10-port   M10 #200 service port: port/kernel host tests, then the m10-port-self-test QEMU lane with ordered markers; prints [M10.port] PASS (aliases: m10-port, m10.200)"
@@ -4491,12 +4717,18 @@ fn print_help() {
         "  test-m10-virtio-modern M10 #196 modern VirtIO PCI transport host tests plus MSI-X and INTx QEMU boots; prints [M10.virtio-modern] PASS (aliases: m10-virtio-modern)"
     );
     println!(
+        "  test-m10-virtio-gpu M10 #114 VirtIO-GPU scanout: display/virtio host tests, then a modern-only virtio-gpu-pci QEMU boot validating create/attach/scanout/transfer/flush, damage-only buffer switch, forced timeout, reset to epoch 2 and release by guest markers and readback CRC; prints [M10.virtio-gpu] PASS (aliases: m10-virtio-gpu)"
+    );
+    println!(
         "  test-m10-framebuffer M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (aliases: m10-framebuffer)"
     );
     println!(
         "  test-m10-shared-buffer  M10 #195 shared buffers: native-abi/service-fixtures/capability and kernel shared-buffer host tests, then the scripted fixture lane (NX, map/read, deny, stale, exhaustion, reuse, kernel-owned, ro-write, shared-exec, owner exit, reader exit, root revoke, port transfer); prints [M10.shared-buffer] PASS (aliases: m10-shared-buffer)"
     );
-    println!("  test-m10-input-smoke M10 #113 i8042 input smoke lane: init, IRQ 1/12 routing, raw queue and syscall 19 from CPL3, stimulated by the controller itself (no host injection); prints [M10.input] PASS (aliases: m10-input-smoke)");
+    println!("  test-m10-input-smoke M10 #113 i8042 input lane: init, IRQ 1/12 routing, raw queue and syscall 19 from CPL3 (controller stimulus), then BIND_WAKE-woken CPL3 consumer checked against keyboard + pointer events injected over a private QMP socket; prints [M10.input] PASS (aliases: m10-input-smoke)");
+    println!("  test-m10-desktop M10 #118 desktop lane: desktop-shell host tests, CPL3 builds of the compositor/shell/playground, then the supervised desktop booted on VirtIO-GPU (Q1) and on the -vga std framebuffer (Q0), driven over private QMP (click, toggle, background click, key, title-bar drag, close, app crash, compositor crash) with serial, resource-baseline and screendump checks; artifacts under target/xtask-artifacts; prints [M10.9] PASS (aliases: m10-desktop, m10.118)");
+    println!("  test-m10        M10 milestone gate: every test-m10-* constituent, clean-slate-ui host tests and test-qmp-smoke, then test-m10-desktop; prints [M10 ] PASS (aliases: m10, m10.119)");
+    println!("  run-m10-desktop [--framebuffer] Boot the supervised M10 desktop in a QEMU window (QEMU_DISPLAY, default gtk; serial on stdout): VirtIO-GPU at Q1, or the -vga std framebuffer at Q0");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
@@ -4633,13 +4865,19 @@ enum ParsedCommand {
     TestM7,
     TestM6,
     TestM10Contract,
+    TestM10Compositor,
+    TestM10App,
     TestM10Nxe,
     TestM10Port,
     TestQmpSmoke,
     TestM10VirtioModern,
+    TestM10VirtioGpu,
     TestM10Framebuffer,
     TestM10SharedBuffer,
     TestM10InputSmoke,
+    TestM10Desktop,
+    TestM10,
+    RunM10Desktop,
     M5DiskCreate,
     M5DiskReset,
     M5DiskInspect,
@@ -4768,6 +5006,14 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m10-contract" || cmd == "m10-contract" => {
             ParsedCommand::TestM10Contract
         }
+        Some(cmd)
+            if cmd == "test-m10-compositor" || cmd == "m10-compositor" || cmd == "m10.112" =>
+        {
+            ParsedCommand::TestM10Compositor
+        }
+        Some(cmd) if cmd == "test-m10-app" || cmd == "m10-app" || cmd == "m10.117" => {
+            ParsedCommand::TestM10App
+        }
         Some(cmd) if cmd == "test-m10-nxe" || cmd == "m10-nxe" => ParsedCommand::TestM10Nxe,
         Some(cmd) if cmd == "test-m10-port" || cmd == "m10-port" || cmd == "m10.200" => {
             ParsedCommand::TestM10Port
@@ -4775,6 +5021,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-qmp-smoke" || cmd == "qmp-smoke" => ParsedCommand::TestQmpSmoke,
         Some(cmd) if cmd == "test-m10-virtio-modern" || cmd == "m10-virtio-modern" => {
             ParsedCommand::TestM10VirtioModern
+        }
+        Some(cmd) if cmd == "test-m10-virtio-gpu" || cmd == "m10-virtio-gpu" => {
+            ParsedCommand::TestM10VirtioGpu
         }
         Some(cmd) if cmd == "test-m10-framebuffer" || cmd == "m10-framebuffer" => {
             ParsedCommand::TestM10Framebuffer
@@ -4785,6 +5034,13 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         Some(cmd) if cmd == "test-m10-input-smoke" || cmd == "m10-input-smoke" => {
             ParsedCommand::TestM10InputSmoke
         }
+        Some(cmd) if cmd == "test-m10-desktop" || cmd == "m10-desktop" || cmd == "m10.118" => {
+            ParsedCommand::TestM10Desktop
+        }
+        Some(cmd) if cmd == "test-m10" || cmd == "m10" || cmd == "m10.119" => {
+            ParsedCommand::TestM10
+        }
+        Some(cmd) if cmd == "run-m10-desktop" => ParsedCommand::RunM10Desktop,
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
         Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,
@@ -4968,6 +5224,21 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn qemu_version_reads_the_emulator_line() {
+        let windows = "QEMU emulator version 11.1.0 (v11.1.0-12130-ge470268ff4)\r\n\
+                       Copyright (c) 2003-2026 Fabrice Bellard and the QEMU Project developers\r\n";
+        assert_eq!(
+            qemu_version(windows),
+            Some("11.1.0 (v11.1.0-12130-ge470268ff4)")
+        );
+        assert_eq!(
+            qemu_version("QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.4)\n"),
+            Some("8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.4)")
+        );
+        assert_eq!(qemu_version("qemu-system-x86_64: unknown option\n"), None);
+    }
 
     fn qemu_argv(config: &VmLaunchConfig, wait_for_gdb: bool) -> Vec<String> {
         let ovmf = OvmfPaths {
@@ -5205,6 +5476,18 @@ mod tests {
             parse_command(Some("m10-contract".as_ref())),
             ParsedCommand::TestM10Contract
         );
+        for alias in ["test-m10-compositor", "m10-compositor", "m10.112"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestM10Compositor
+            );
+        }
+        for alias in ["test-m10-app", "m10-app", "m10.117"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestM10App
+            );
+        }
         for alias in ["test-m10-port", "m10-port", "m10.200"] {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
@@ -5234,6 +5517,14 @@ mod tests {
         assert_eq!(
             parse_command(Some("m10-virtio-modern".as_ref())),
             ParsedCommand::TestM10VirtioModern
+        );
+        assert_eq!(
+            parse_command(Some("test-m10-virtio-gpu".as_ref())),
+            ParsedCommand::TestM10VirtioGpu
+        );
+        assert_eq!(
+            parse_command(Some("m10-virtio-gpu".as_ref())),
+            ParsedCommand::TestM10VirtioGpu
         );
         assert_eq!(
             parse_command(Some("test-m10-framebuffer".as_ref())),
@@ -5272,6 +5563,19 @@ mod tests {
         assert_eq!(
             parse_command(Some("m10-input-smoke".as_ref())),
             ParsedCommand::TestM10InputSmoke
+        );
+        for alias in ["test-m10-desktop", "m10-desktop", "m10.118"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestM10Desktop
+            );
+        }
+        for alias in ["test-m10", "m10", "m10.119"] {
+            assert_eq!(parse_command(Some(alias.as_ref())), ParsedCommand::TestM10);
+        }
+        assert_eq!(
+            parse_command(Some("run-m10-desktop".as_ref())),
+            ParsedCommand::RunM10Desktop
         );
         assert_eq!(
             parse_command(Some("test-m7-net-caps".as_ref())),
@@ -5867,6 +6171,41 @@ mod tests {
         }
         let host_steps = names.iter().filter(|name| name.ends_with("(host)")).count();
         assert_eq!(host_steps, 4);
+    }
+
+    #[test]
+    fn m10_milestone_runs_every_constituent_once_and_the_desktop_last() {
+        let names: Vec<&str> = M10_MILESTONE_STEPS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names.first(), Some(&"test-m10-contract"));
+        assert_eq!(names.last(), Some(&"test-m10-desktop"));
+        assert!(names.contains(&"clean-slate-ui (host)"));
+        for constituent in [
+            "test-m10-contract",
+            "test-m10-nxe",
+            "test-m10-shared-buffer",
+            "test-m10-port",
+            "test-qmp-smoke",
+            "test-m10-virtio-modern",
+            "test-m10-framebuffer",
+            "test-m10-virtio-gpu",
+            "test-m10-input-smoke",
+            "test-m10-compositor",
+            "test-m10-app",
+            "test-m10-desktop",
+        ] {
+            assert_eq!(
+                names.iter().filter(|name| **name == constituent).count(),
+                1,
+                "{constituent} must run exactly once in test-m10"
+            );
+            assert!(
+                !matches!(
+                    parse_command(Some(constituent.as_ref())),
+                    ParsedCommand::Invalid(_) | ParsedCommand::Help
+                ),
+                "{constituent} must be a command"
+            );
+        }
     }
 
     #[test]

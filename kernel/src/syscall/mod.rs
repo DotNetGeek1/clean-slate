@@ -1026,16 +1026,11 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_native_reserved_m10_nrs_return_enosys() {
+    fn m10_reserved_nrs_are_contiguous() {
         use clean_slate_capability::syscall_abi::{
             SYSCALL_NR_DISPLAY, SYSCALL_NR_INPUT, SYSCALL_NR_SERVICE_PORT,
             SYSCALL_NR_SHARED_BUFFER, SYSCALL_NR_WORK_SET,
         };
-        use clean_slate_graphics::abi::input::INPUT_SUBOP_BIND_WAKE;
-        use clean_slate_graphics::display::{
-            DISPLAY_SUBOP_BIND_WAKE, DISPLAY_SUBOP_MAP_SCANOUT, DISPLAY_SUBOP_PRESENT,
-        };
-
         assert_eq!(SYSCALL_NR_SHARED_BUFFER, 16);
         assert_eq!(SYSCALL_NR_SERVICE_PORT, 17);
         assert_eq!(SYSCALL_NR_DISPLAY, 18);
@@ -1046,24 +1041,6 @@ mod tests {
             4,
             "M10 reserved numbers are contiguous 16..=20"
         );
-
-        // #111 routes 18 and #113 routes 19; only their gated subops stay ENOSYS.
-        for subop in [
-            DISPLAY_SUBOP_MAP_SCANOUT,
-            DISPLAY_SUBOP_PRESENT,
-            DISPLAY_SUBOP_BIND_WAKE,
-        ] {
-            assert_eq!(
-                dispatch_native_zeroed(SYSCALL_NR_DISPLAY, subop),
-                SYSCALL_ENOSYS,
-                "subop {subop}"
-            );
-        }
-        assert_eq!(
-            dispatch_native_zeroed(SYSCALL_NR_INPUT, INPUT_SUBOP_BIND_WAKE),
-            SYSCALL_ENOSYS,
-            "BIND_WAKE until its integration stage"
-        );
     }
 
     #[test]
@@ -1073,10 +1050,12 @@ mod tests {
             SYSCALL_NR_SHARED_BUFFER, SYSCALL_NR_WORK_SET,
         };
         use clean_slate_graphics::abi::input::{
-            INPUT_SUBOP_FIND_HANDLE, INPUT_SUBOP_QUERY_DEVICES, INPUT_SUBOP_READ_BATCH,
+            INPUT_SUBOP_BIND_WAKE, INPUT_SUBOP_FIND_HANDLE, INPUT_SUBOP_QUERY_DEVICES,
+            INPUT_SUBOP_READ_BATCH,
         };
         use clean_slate_graphics::display::{
-            DISPLAY_SUBOP_FIND_HANDLE, DISPLAY_SUBOP_PRESENT_STATUS, DISPLAY_SUBOP_QUERY_MODE,
+            DISPLAY_SUBOP_BIND_WAKE, DISPLAY_SUBOP_FIND_HANDLE, DISPLAY_SUBOP_MAP_SCANOUT,
+            DISPLAY_SUBOP_PRESENT, DISPLAY_SUBOP_PRESENT_STATUS, DISPLAY_SUBOP_QUERY_MODE,
         };
 
         for nr in [
@@ -1093,7 +1072,10 @@ mod tests {
         for subop in [
             DISPLAY_SUBOP_FIND_HANDLE,
             DISPLAY_SUBOP_QUERY_MODE,
+            DISPLAY_SUBOP_MAP_SCANOUT,
+            DISPLAY_SUBOP_PRESENT,
             DISPLAY_SUBOP_PRESENT_STATUS,
+            DISPLAY_SUBOP_BIND_WAKE,
         ] {
             assert_ne!(
                 dispatch_native_zeroed(SYSCALL_NR_DISPLAY, subop),
@@ -1110,6 +1092,7 @@ mod tests {
             INPUT_SUBOP_FIND_HANDLE,
             INPUT_SUBOP_QUERY_DEVICES,
             INPUT_SUBOP_READ_BATCH,
+            INPUT_SUBOP_BIND_WAKE,
         ] {
             assert_ne!(
                 dispatch_native_zeroed(SYSCALL_NR_INPUT, subop),

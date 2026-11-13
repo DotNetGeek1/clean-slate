@@ -161,6 +161,11 @@ impl QmpScriptDriver {
         &self.captures
     }
 
+    pub(crate) fn into_captures(mut self) -> Vec<Capture> {
+        self.close_link();
+        std::mem::take(&mut self.captures)
+    }
+
     /// Events seen so far, including those drained by [`ScriptStep::Quit`].
     pub(crate) fn events(&mut self) -> &[QmpEvent] {
         if let Link::Ready(client) = &mut self.link {

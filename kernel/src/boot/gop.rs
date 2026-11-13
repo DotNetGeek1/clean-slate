@@ -97,7 +97,7 @@ pub(crate) enum GopRejection {
     RangeOverflow,
     BeyondPhysmapSpan,
     OverlapsUsableRam,
-    #[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
+    #[cfg(not(test))]
     ApertureMapFailed,
 }
 
@@ -119,7 +119,6 @@ impl GopRejection {
             Self::RangeOverflow => "range-overflow",
             Self::BeyondPhysmapSpan => "beyond-physmap-span",
             Self::OverlapsUsableRam => "overlaps-usable-ram",
-            #[cfg(all(feature = "m10-framebuffer-self-test", not(test)))]
             Self::ApertureMapFailed => "aperture-map-failed",
         }
     }
@@ -153,7 +152,6 @@ pub(crate) struct BootFramebuffer {
 }
 
 impl BootFramebuffer {
-    #[cfg(any(test, feature = "m10-framebuffer-self-test"))]
     pub(crate) const fn page_count(&self) -> u64 {
         self.map_len / PAGE_SIZE
     }

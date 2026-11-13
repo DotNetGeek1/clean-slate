@@ -1038,6 +1038,23 @@ fn reconnect_and_reregistration_leave_old_ids_stale() {
     assert!(w.connect_with(A, fresh).is_ok());
 }
 
+/// #227: a replacement server (new pid, new instance) cannot register while its predecessor's
+/// port is live, whatever the resource's instance generation; the predecessor's exit frees it.
+#[test]
+fn replacement_server_registers_only_after_the_old_server_exits() {
+    let mut w = World::new(SMALL);
+    let replacement = caller(SERVER.holder.0 + 50, 1);
+    let restarted = ResourceRef::graphics(SERVICE, INSTANCE + 1);
+    let register = |w: &mut World| {
+        w.core
+            .register(restarted, replacement.holder, replacement.generation, SMALL)
+    };
+    assert_eq!(register(&mut w), Err(RegistrationError::AlreadyRegistered));
+    assert_eq!(w.exit(SERVER).served_ports, 1);
+    assert!(register(&mut w).is_ok());
+    assert_eq!(w.core.global_counts().ports, 1);
+}
+
 #[test]
 fn connection_slot_retires_at_the_last_generation() {
     let mut core = PortCore::<1, 1, u32>::new();

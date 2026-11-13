@@ -10,8 +10,10 @@ mod endpoint;
 #[cfg(test)]
 mod fake;
 pub(crate) mod image;
-mod input;
+pub(crate) mod inject;
+pub(crate) mod input;
 pub(crate) mod json;
+pub(crate) mod lane;
 mod script;
 pub(crate) mod smoke;
 #[cfg(test)]
