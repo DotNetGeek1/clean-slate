@@ -1403,7 +1403,6 @@ fn run_m5_crash_recovery_acceptance_default() -> Result<(), XtaskError> {
 fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
     let options = parse_m5_cli_options(args)?;
     let run_result = (|| -> Result<(), XtaskError> {
-        build_storage_userspace(true)?;
         prepare_m5_data_disk_image(options.reuse_disk)?;
         let config = m5_storage_vm_config();
         println!("[M5.P] phase 1/2 boot");
@@ -1446,7 +1445,6 @@ fn run_m5_persistence_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
 fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError> {
     let options = parse_m5_cli_options(args)?;
     let run_result = (|| -> Result<(), XtaskError> {
-        build_storage_userspace(true)?;
         prepare_m5_data_disk_image(options.reuse_disk)?;
         let config = m5_storage_vm_config();
         println!("[M5.C] baseline boot 1/4");
@@ -1707,7 +1705,6 @@ fn run_m9_linux_fs_acceptance() -> Result<(), XtaskError> {
     .map_err(XtaskError::InvalidCommand)?;
     reset_m5_data_disk_image()?;
     build_m6_fixture_userspace(true)?;
-    build_storage_userspace(true)?;
     run_vm_inner_with_config(
         false,
         false,
@@ -1724,8 +1721,6 @@ fn run_m9_userspace_acceptance() -> Result<(), XtaskError> {
     m9_fixture::verify_m9_fixture().map_err(XtaskError::Validation)?;
     reset_m5_data_disk_image()?;
     build_m6_fixture_userspace(true)?;
-    build_storage_userspace(true)?;
-    build_network_userspace(true)?;
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::from_millis(5),
@@ -1869,7 +1864,6 @@ fn run_m9_stack_guard_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m9_linux_socket_acceptance() -> Result<(), XtaskError> {
-    build_network_userspace(true)?;
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::from_millis(5),
@@ -2049,6 +2043,7 @@ fn run_m8_linux_abi_host_tests() -> Result<(), XtaskError> {
 
 /// #92 loader + malformed corpus host tests (fixture bytes gated by feature).
 fn run_m8_linux_loader_host_tests() -> Result<(), XtaskError> {
+    ensure_embedded_service_programs()?;
     let mut test = Command::new("cargo");
     test.current_dir(workspace_root())
         .arg("test")
@@ -2201,6 +2196,9 @@ fn run_m4_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_cargo_package_tests(package: &str, filter: &[&str]) -> Result<(), XtaskError> {
+    if package == KERNEL_PACKAGE {
+        ensure_embedded_service_programs()?;
+    }
     let mut test = Command::new("cargo");
     test.current_dir(workspace_root())
         .arg("test")
@@ -2213,6 +2211,9 @@ fn run_cargo_package_tests(package: &str, filter: &[&str]) -> Result<(), XtaskEr
 }
 
 fn run_cargo_package_build_uefi(package: &str, features: &[&str]) -> Result<(), XtaskError> {
+    if package == KERNEL_PACKAGE {
+        ensure_embedded_service_programs()?;
+    }
     let mut build = Command::new("cargo");
     build
         .current_dir(workspace_root())
@@ -2499,7 +2500,6 @@ fn run_m10_port_acceptance() -> Result<(), XtaskError> {
         &["--", "service::port", "sched::work_set", "sched::wait"],
     )?;
     build_m6_fixture_userspace(true)?;
-    build_storage_userspace(true)?;
     run_vm_inner(
         false,
         false,
@@ -2521,7 +2521,6 @@ fn run_m10_shared_buffer_acceptance() -> Result<(), XtaskError> {
     run_cargo_package_tests("clean-slate-kernel", &["frame_allocator"])?;
     run_cargo_package_tests("clean-slate-kernel", &["nx_"])?;
     build_m6_fixture_userspace(true)?;
-    build_storage_userspace(true)?;
     run_vm_inner(
         false,
         false,
@@ -2561,7 +2560,6 @@ fn run_m6_kernel_capability_host_tests() -> Result<(), XtaskError> {
 }
 
 fn run_m5_storage_acceptance() -> Result<(), XtaskError> {
-    build_storage_userspace(true)?;
     reset_m5_data_disk_image()?;
     run_vm_inner_with_config(
         false,
@@ -2600,7 +2598,6 @@ fn run_m8_linux_image_acceptance() -> Result<(), XtaskError> {
 fn run_m6_object_acceptance() -> Result<(), XtaskError> {
     reset_m5_data_disk_image()?;
     build_m6_fixture_userspace(true)?;
-    build_storage_userspace(true)?;
     run_vm_inner_with_config(
         false,
         false,
@@ -2614,7 +2611,6 @@ fn run_m6_object_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m7_net_service_acceptance() -> Result<(), XtaskError> {
-    build_network_userspace(true)?;
     run_vm_inner(
         false,
         false,
@@ -2627,7 +2623,6 @@ fn run_m7_net_service_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m7_network_acceptance() -> Result<(), XtaskError> {
-    build_network_userspace(true)?;
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::from_millis(5),
@@ -2724,7 +2719,6 @@ fn run_m7_net_caps_acceptance() -> Result<(), XtaskError> {
 fn run_m6_capabilities_acceptance() -> Result<(), XtaskError> {
     reset_m5_data_disk_image()?;
     build_m6_fixture_userspace(true)?;
-    build_storage_userspace(true)?;
     run_vm_inner_with_config(
         false,
         false,
@@ -2743,7 +2737,6 @@ fn run_m6_constituent(
     timeout: Duration,
 ) -> Result<(), XtaskError> {
     build_m6_fixture_userspace(true)?;
-    build_storage_userspace(true)?;
     run_vm_inner(false, false, &[feature], Some((markers, timeout)))
 }
 
@@ -3297,7 +3290,17 @@ fn read_m5_host_sentinel(path: &Path) -> Result<Vec<u8>, XtaskError> {
     Ok(sentinel)
 }
 
+/// Every kernel cargo invocation embeds both service programs (`kernel/build.rs`), including
+/// host tests that run before `build_kernel`.
+fn ensure_embedded_service_programs() -> Result<(), XtaskError> {
+    build_storage_userspace(true)?;
+    build_network_userspace(true)?;
+    Ok(())
+}
+
 fn build_kernel(release: bool, debug_entry: bool, features: &[&str]) -> Result<(), XtaskError> {
+    ensure_embedded_service_programs()?;
+
     let mut cmd = Command::new("cargo");
     cmd.current_dir(workspace_root())
         .arg("build")
