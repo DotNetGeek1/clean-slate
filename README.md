@@ -134,5 +134,5 @@ for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
 dual licensed as above, without any additional terms or conditions.
 
 That dual licence covers the Rust code in this repository. It does not cover
-third-party material listed in [NOTICE](NOTICE). `fixtures/busybox/frozen/busybox`
+third-party material listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). `fixtures/busybox/frozen/busybox`
 is BusyBox 1.37.0 under GPL-2.0 only.
