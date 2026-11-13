@@ -40,10 +40,39 @@ cargo xtask run
 
 This command:
 
-1. builds the Rust `#![no_std]` UEFI kernel artifact;
+1. builds the release storage, network and init programs and the Rust `#![no_std]` UEFI kernel with no Cargo feature (the default image), which embeds them;
 2. creates an EFI boot directory at `target/esp/EFI/BOOT/BOOTX64.EFI`;
-3. launches QEMU with OVMF firmware;
-4. connects serial output to the host terminal for a normal interactive boot.
+3. creates `target/system-data.img` (64 MiB, zeroed) if it does not exist and attaches it as the data disk on every run;
+4. launches QEMU with OVMF firmware and `-cpu qemu64,+rdrand`;
+5. connects serial output to the host terminal for a normal interactive boot.
+
+`cargo xtask run --net` also starts the network fixture peer and gives the guest a VirtIO network device connected to it; without `--net` there is no network device. `cargo xtask run-gdb` and `run-gdb-entry` attach the same data disk and take no options.
+
+In the default image the kernel launches userspace init instead of the two kernel demo threads. A normal boot prints, after firmware and kernel bring-up:
+
+```text
+[SVC ] declared service=20736
+[SVC ] declared service=20992
+[KERN] init launched pid=1 slot=0 declared-services=2
+[KERN] init authority pid=1 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 other=0 expected-only-lifecycle-and-console=1
+[KERN] scheduler initialized
+[IPC ] console pid=1: [INIT] started pid=1 services=2
+[IPC ] console pid=1: [INIT] SERVICE_READY from init refused: not a service
+[IPC ] console pid=1: [INIT] starting service=20736
+[SVC ] authority service=20736 pid=2 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 other=0 matches-manifest=1
+[SVC ] launch service=20736 pid=2 gen=1
+[SVC ] ready service=20736 pid=2 gen=1 source=live-instance kernel-observed block-write-requests=0 service-reported formatted=0 store-generation=0
+[IPC ] console pid=1: [INIT] service=20736 ready; starting service=20992
+[SVC ] authority service=20992 pid=3 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 other=0 matches-manifest=1
+[SVC ] launch service=20992 pid=3 gen=1
+[SVC ] ready service=20992 pid=3 gen=1 source=live-instance kernel-observed block-write-requests=0 raw-backend=loopback service-reported link-up=1
+[IPC ] console pid=1: [INIT] service=20736 ready gen=1
+[IPC ] console pid=1: [INIT] service=20992 ready gen=1
+[IPC ] console pid=1: [INIT] boot settled running=2 down=0; waiting, no deadline
+[KERN] idle thread halted 16 times in a row while init pid=1 waited in LIFECYCLE_WAIT with no deadline
+```
+
+Service 20736 (0x5100) is storage and 20992 (0x5200) is network. `[KERN]` and `[SVC ]` lines are the kernel's; `[INIT]` lines are init's own console messages, which the kernel prefixes with the sending pid. In `ready` lines, the fields after `kernel-observed` are counted by the kernel and the fields after `service-reported` are the service's unverified claim. On the first boot of a new disk storage reports `formatted=1`. Without `--net` the network service runs on the kernel's loopback raw link (`raw-backend=loopback`), whose link is always up; with `--net` it is `raw-backend=virtio`. Which builds launch init is one rule, `kernel/build_support/system_init_rule.rs`: init launches exactly when no Cargo feature other than `gdb-entry` is enabled, and every other build that reaches the end of boot runs the demo threads. Init's death is fatal (`[KERN] init pid=N died: …`, then `[FAIL]`). Init's start order and restart policy (storage, then network once storage is ready; up to three restarts per service, the first after 2 s and each later one 2 s further apart) are in `supervisor/src/system_init.rs` and the system manifest (`service-fixtures/src/manifest.rs`).
 
 For the bounded M1 memory acceptance path:
 
@@ -294,6 +323,15 @@ cargo xtask test-serial-input
 ```
 
 `test-serial-input` (alias `serial-input`) builds the kernel with `serial-input-self-test`, which emits the `clean_slate_serial_console` cfg, the only build in which the COM1 receiver is compiled. It is the one lane whose COM1 is not `-serial stdio`: QEMU connects out to `tcp:127.0.0.1:<port>` on a listener xtask binds to an ephemeral loopback port, as the QMP driver does. Stdio is unusable for input on Windows: with QEMU 11.1.0, `\r` written to QEMU's piped stdin never reached the guest, and an eight-line 1 KiB burst arrived with five lines truncated and two missing, because the stdio backend drops bytes the guest's receive FIFO cannot take. The socket backend holds bytes back until the FIFO has room. The guest masks the local APIC timer, turns receive on, prints `[TTY ] ready`, and logs every console read as `[TTY ] read len=N hex=…`. The host types the script in `xtask/src/serial_input_lane.rs` (a plain line, backspace and delete, Ctrl-U, a 300-byte line, a burst of six lines in one write, a committed buffer filled while the reader is held, Ctrl-D on a non-empty and then an empty line), sending each step only after the previous step's records arrived. It then requires the echo and every record to match byte for byte, the final `[TTY ] stats` counters exactly (overruns and line errors zero), and in `[TTY ] irq` wakes equal to notifier calls and the most bytes one interrupt drained between 2 and the 16-byte budget. After `[TTY ] done` the host sends one BEL, which the guest waits for before the debug exit, so a socket reset at QEMU exit cannot cut off the transcript. The transcript is kept in `target/xtask-artifacts/serial-input/serial.log`. Discipline rules: [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md#serial-console-input-218-s4).
+
+For #218 S3b, the default image with userspace init:
+
+```bash
+cargo test -p clean-slate-supervisor
+cargo xtask test-system-boot
+```
+
+`test-system-boot` (alias `system-boot`) builds the default image (no Cargo feature) and boots it twice on a data disk of its own, `target/system-boot/system-data.img`, which it deletes and recreates first, with the network fixture peer attached. Each boot must print, in order, the kernel's init launch and authority lines, init's start and its refused `SERVICE_READY`, the authority, launch and ready lines of storage (0x5100) and then network (0x5200), init's settled line and the kernel's idle line, as in the [first development loop](#first-development-loop) output. The host then checks that init holds lifecycle control and the console only, that every `[INIT]` line came through init's own console capability, that each service was launched once, held exactly its manifest row's grants, and reported ready from the pid and generation the kernel launched, and that storage reported `formatted=1` with at least one block write on the first boot and `formatted=0` on the second. Any `[FAIL]` line fails the lane. It prints `[SYS ] PASS`. It is a standalone constituent of the exhaustive suite, not part of a milestone gate.
 
 For M4.2 kernel lifecycle control (host tests + optional QEMU acceptance):
 

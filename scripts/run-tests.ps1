@@ -38,6 +38,7 @@
       verify-m8-fixture
       verify-m9-fixture
       serial-input / test-serial-input
+      system-boot / test-system-boot
 
 .PARAMETER Exhaustive
     Run every known test (milestone gates plus each individual constituent
@@ -178,6 +179,7 @@ $AllTests = [ordered]@{
     "test-m10-input-smoke"      = @{ Aliases = @("m10-input-smoke"); Description = "M10 #113 i8042 input QEMU lane (controller stimulus, then QMP-injected keyboard/pointer, headless)"; Role = "Constituent"; CoveredBy = "test-m10" }
     "test-m10-desktop"          = @{ Aliases = @("m10-desktop", "m10.118"); Description = "M10 #118 supervised desktop on VirtIO-GPU (Q1) and the GOP framebuffer (Q0), QMP-driven, with screendump checks (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
     "test-serial-input"         = @{ Aliases = @("serial-input"); Description = "#218 S4 COM1 receive and line discipline over a private loopback socket (echo and committed reads checked byte for byte)"; Role = "Constituent" }
+    "test-system-boot"          = @{ Aliases = @("system-boot"); Description = "#218 S3b default image: init starts storage then network on a fresh data disk, twice (format, then mount); the kernel checks every launched grant set and ready report"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {
