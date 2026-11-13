@@ -6,10 +6,12 @@ use crate::process::domain::teardown_process_by_id;
 use crate::process::process_registry_mut;
 use crate::service::capability::LifecycleControlCapabilityError;
 use crate::service::capability::{BlockDeviceCapabilityError, BlockDeviceCapabilityTable};
+use crate::service::grants::{apply_instance_grants, InstanceGrantAuthority};
 use crate::service::spawn::launch_builtin_service;
 use crate::sync::global_cell::GlobalCell;
+use clean_slate_service_fixtures::manifest::{grants_for, Grant, ServiceSpec, SYSTEM_MANIFEST};
 use clean_slate_service_fixtures::{
-    NETWORK_DEVICE_ID, NETWORK_SERVICE_ID, STORAGE_BLOCK_DEVICE_ID, STORAGE_SERVICE_ID,
+    NETWORK_DEVICE_ID, NETWORK_SERVICE_ID, STORAGE_BLOCK_DEVICE_ID,
 };
 use clean_slate_service_lifecycle::apply_transition;
 use clean_slate_service_lifecycle::ControlRequest;
@@ -88,6 +90,8 @@ pub(crate) struct ServiceLifecycleController {
     pending_count: usize,
     next_scheduler_slot: usize,
     kernel_root_frame: u64,
+    /// Rows that decide each started service's launch grants.
+    manifest: &'static [ServiceSpec],
 }
 
 impl ServiceLifecycleController {
@@ -100,10 +104,12 @@ impl ServiceLifecycleController {
             pending_count: 0,
             next_scheduler_slot: 0,
             kernel_root_frame: 0,
+            manifest: SYSTEM_MANIFEST,
         }
     }
 
     pub(crate) fn clear(&mut self) {
+        self.manifest = SYSTEM_MANIFEST;
         self.capabilities.clear();
         self.block_capabilities.clear();
         self.services = [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY];
@@ -494,6 +500,7 @@ impl ServiceLifecycleController {
             .allocate_scheduler_slot()
             .map_err(LifecycleControlError::SpawnFailed)?;
         let kernel_stack_top = Self::resolve_kernel_stack_top(scheduler_slot)?;
+        let grants = self.launch_grants(service_id);
         let spawned = if service_id.0 == 0x0000_4100 {
             #[cfg(feature = "m4-recovery-self-test")]
             {
@@ -513,19 +520,25 @@ impl ServiceLifecycleController {
                 ));
             }
         } else {
-            launch_builtin_service(allocator, kernel_stack_top, scheduler_slot, service_id)
-                .map_err(|message| {
-                    #[cfg(feature = "m8-linux-hello")]
-                    if service_id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID {
-                        // `launch_linux_hello` already logged `[LNX ] load failed: â€¦`.
-                        return LifecycleControlError::SpawnFailed(message);
-                    }
-                    kernel_log_fmt(format_args!(
-                        "[FAIL] builtin service spawn service={} slot={} err={message}\n",
-                        service_id.0, scheduler_slot
-                    ));
-                    LifecycleControlError::SpawnFailed(message)
-                })?
+            launch_builtin_service(
+                allocator,
+                kernel_stack_top,
+                scheduler_slot,
+                service_id,
+                grants,
+            )
+            .map_err(|message| {
+                #[cfg(feature = "m8-linux-hello")]
+                if service_id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID {
+                    // `launch_linux_hello` already logged `[LNX ] load failed: â€¦`.
+                    return LifecycleControlError::SpawnFailed(message);
+                }
+                kernel_log_fmt(format_args!(
+                    "[FAIL] builtin service spawn service={} slot={} err={message}\n",
+                    service_id.0, scheduler_slot
+                ));
+                LifecycleControlError::SpawnFailed(message)
+            })?
         };
         let instance = ServiceInstanceId::new(
             service_id,
@@ -534,9 +547,10 @@ impl ServiceLifecycleController {
             DomainId(spawned.domain_id),
         );
         let kernel_root_frame = self.kernel_root_frame;
-        self.grant_storage_block_capability_with_rollback(
+        self.apply_instance_grants_with_rollback(
             spawned.pid,
             service_id,
+            grants,
             generation,
             |pid| {
                 teardown_process_by_id(
@@ -565,72 +579,53 @@ impl ServiceLifecycleController {
         })
     }
 
-    fn grant_storage_block_capability_with_rollback<F>(
+    /// Applies the post-spawn grants of `service_id`'s manifest row. A failed grant tears the
+    /// spawned instance down so the controller never records a live instance missing authority.
+    fn apply_instance_grants_with_rollback<F>(
         &mut self,
         pid: u64,
         service_id: ServiceId,
+        grants: &[Grant],
         instance_generation: InstanceGeneration,
         mut rollback_spawn: F,
     ) -> Result<(), LifecycleControlError>
     where
         F: FnMut(u64) -> Result<(), &'static str>,
     {
-        if service_id == STORAGE_SERVICE_ID {
-            if let Err(message) = self
-                .block_capabilities
-                .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
-            {
-                kernel_log_fmt(format_args!(
-                    "[FAIL] block capability grant failed pid={} service={} err={message}\n",
-                    pid, service_id.0
-                ));
-                rollback_spawn(pid).map_err(|_| {
-                    LifecycleControlError::SpawnFailed(
-                        "storage service block-capability rollback teardown failed",
-                    )
-                })?;
-                return Err(LifecycleControlError::SpawnFailed(message));
-            }
-            kernel_log_fmt(format_args!(
-                "[BLK ] authority granted pid={} device={}\n",
-                pid, STORAGE_BLOCK_DEVICE_ID
-            ));
-        } else if service_id == NETWORK_SERVICE_ID {
-            use crate::capability::network::{grant_network_authority, NetworkGrantPolicy};
-            use clean_slate_capability::{HolderId, ResourceClass, Rights};
-            let rights = Rights::valid_for(ResourceClass::Network);
-            if grant_network_authority(
-                HolderId(pid),
-                rights,
-                NetworkGrantPolicy::NetworkService,
-                Some(u64::from(instance_generation.0)),
-            )
-            .is_err()
-            {
-                kernel_log_fmt(format_args!(
-                    "[FAIL] network capability grant failed pid={} service={}\n",
-                    pid, service_id.0
-                ));
-                rollback_spawn(pid).map_err(|_| {
-                    LifecycleControlError::SpawnFailed(
-                        "network service capability rollback teardown failed",
-                    )
-                })?;
-                return Err(LifecycleControlError::SpawnFailed(
-                    "network service capability grant failed",
-                ));
-            }
-            crate::service::net_bridge::net_bridge_mut().register_service_instance(
-                pid,
-                pid,
-                u64::from(instance_generation.0),
-            );
-            kernel_log_fmt(format_args!(
-                "[NET ] authority granted pid={} device={}\n",
-                pid, NETWORK_DEVICE_ID
-            ));
+        let mut authority = KernelInstanceGrants {
+            block_capabilities: &mut self.block_capabilities,
+            service_id,
+        };
+        if let Err(failure) =
+            apply_instance_grants(grants, pid, instance_generation, &mut authority)
+        {
+            rollback_spawn(pid).map_err(|_| {
+                LifecycleControlError::SpawnFailed(rollback_failure_message(failure.grant))
+            })?;
+            return Err(LifecycleControlError::SpawnFailed(failure.message));
         }
         Ok(())
+    }
+
+    /// Replaces the system manifest until the next [`Self::clear`]. Self-tests whose services need
+    /// rows different from [`SYSTEM_MANIFEST`] install their scenario here.
+    #[cfg_attr(
+        not(any(
+            test,
+            feature = "m5-storage-self-test",
+            feature = "m5-persistence-self-test",
+            feature = "m5-crash-early-self-test",
+            feature = "m5-crash-late-self-test",
+            feature = "m5-crash-recovery-self-test"
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn use_scenario_manifest(&mut self, manifest: &'static [ServiceSpec]) {
+        self.manifest = manifest;
+    }
+
+    pub(crate) fn launch_grants(&self, service_id: ServiceId) -> &'static [Grant] {
+        grants_for(self.manifest, service_id)
     }
 
     #[cfg(feature = "m7-net-service-self-test")]
@@ -888,6 +883,73 @@ impl ServiceLifecycleController {
     }
 }
 
+struct KernelInstanceGrants<'a> {
+    block_capabilities: &'a mut BlockDeviceCapabilityTable,
+    service_id: ServiceId,
+}
+
+impl InstanceGrantAuthority for KernelInstanceGrants<'_> {
+    fn grant_block_device(&mut self, pid: u64) -> Result<(), &'static str> {
+        if let Err(message) = self
+            .block_capabilities
+            .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
+        {
+            kernel_log_fmt(format_args!(
+                "[FAIL] block capability grant failed pid={} service={} err={message}\n",
+                pid, self.service_id.0
+            ));
+            return Err(message);
+        }
+        kernel_log_fmt(format_args!(
+            "[BLK ] authority granted pid={} device={}\n",
+            pid, STORAGE_BLOCK_DEVICE_ID
+        ));
+        Ok(())
+    }
+
+    fn grant_network_service(
+        &mut self,
+        pid: u64,
+        generation: InstanceGeneration,
+    ) -> Result<(), &'static str> {
+        use crate::capability::network::{grant_network_authority, NetworkGrantPolicy};
+        use clean_slate_capability::{HolderId, ResourceClass, Rights};
+        let rights = Rights::valid_for(ResourceClass::Network);
+        if grant_network_authority(
+            HolderId(pid),
+            rights,
+            NetworkGrantPolicy::NetworkService,
+            Some(u64::from(generation.0)),
+        )
+        .is_err()
+        {
+            kernel_log_fmt(format_args!(
+                "[FAIL] network capability grant failed pid={} service={}\n",
+                pid, self.service_id.0
+            ));
+            return Err("network service capability grant failed");
+        }
+        crate::service::net_bridge::net_bridge_mut().register_service_instance(
+            pid,
+            pid,
+            u64::from(generation.0),
+        );
+        kernel_log_fmt(format_args!(
+            "[NET ] authority granted pid={} device={}\n",
+            pid, NETWORK_DEVICE_ID
+        ));
+        Ok(())
+    }
+}
+
+const fn rollback_failure_message(grant: Grant) -> &'static str {
+    match grant {
+        Grant::BlockDevice => "storage service block-capability rollback teardown failed",
+        Grant::NetworkService => "network service capability rollback teardown failed",
+        Grant::ObjectServiceRole => "object service role rollback teardown failed",
+    }
+}
+
 static SERVICE_LIFECYCLE_CONTROLLER: GlobalCell<ServiceLifecycleController> =
     GlobalCell::new(ServiceLifecycleController::new());
 
@@ -905,6 +967,7 @@ mod tests {
     use super::*;
     use crate::mm::frame_allocator::PageAllocator;
     use crate::sched::ThreadKind;
+    use clean_slate_service_fixtures::{STORAGE_SERVICE_ID, STORAGE_UNAUTHORIZED_SERVICE_ID};
 
     fn test_allocator() -> PageAllocator {
         use crate::boot::uefi::normalize_memory_map_boxed;
@@ -1079,10 +1142,12 @@ mod tests {
         }
 
         let mut rollback_pid = 0_u64;
+        let grants = controller.launch_grants(STORAGE_SERVICE_ID);
         let err = controller
-            .grant_storage_block_capability_with_rollback(
+            .apply_instance_grants_with_rollback(
                 77,
                 STORAGE_SERVICE_ID,
+                grants,
                 InstanceGeneration(1),
                 |pid| {
                     rollback_pid = pid;
@@ -1110,10 +1175,12 @@ mod tests {
             pid += 1;
         }
 
+        let grants = controller.launch_grants(STORAGE_SERVICE_ID);
         let err = controller
-            .grant_storage_block_capability_with_rollback(
+            .apply_instance_grants_with_rollback(
                 77,
                 STORAGE_SERVICE_ID,
+                grants,
                 InstanceGeneration(1),
                 |_| Err("teardown failed"),
             )
@@ -1124,6 +1191,66 @@ mod tests {
                 "storage service block-capability rollback teardown failed"
             )
         );
+    }
+
+    #[test]
+    fn launch_grants_come_from_the_active_manifest() {
+        use clean_slate_service_fixtures::manifest::{RestartSpec, ServiceImage};
+        static SCENARIO: &[ServiceSpec] = &[ServiceSpec {
+            id: STORAGE_SERVICE_ID,
+            image: ServiceImage::Storage,
+            mode: 0,
+            grants: &[Grant::BlockDevice],
+            restart: RestartSpec::Never,
+            depends_on: &[],
+        }];
+
+        let mut controller = ServiceLifecycleController::new();
+        assert_eq!(
+            controller.launch_grants(STORAGE_SERVICE_ID),
+            [Grant::BlockDevice, Grant::ObjectServiceRole]
+        );
+        assert_eq!(
+            controller.launch_grants(NETWORK_SERVICE_ID),
+            [Grant::NetworkService]
+        );
+        assert!(controller
+            .launch_grants(STORAGE_UNAUTHORIZED_SERVICE_ID)
+            .is_empty());
+
+        controller.use_scenario_manifest(SCENARIO);
+        assert_eq!(
+            controller.launch_grants(STORAGE_SERVICE_ID),
+            [Grant::BlockDevice]
+        );
+        assert!(controller.launch_grants(NETWORK_SERVICE_ID).is_empty());
+
+        controller.clear();
+        assert_eq!(
+            controller.launch_grants(NETWORK_SERVICE_ID),
+            [Grant::NetworkService]
+        );
+    }
+
+    #[test]
+    fn rows_without_post_spawn_grants_succeed_without_rollback() {
+        let mut controller = ServiceLifecycleController::new();
+        let mut rolled_back = false;
+        for grants in [&[][..], &[Grant::ObjectServiceRole][..]] {
+            controller
+                .apply_instance_grants_with_rollback(
+                    77,
+                    STORAGE_UNAUTHORIZED_SERVICE_ID,
+                    grants,
+                    InstanceGeneration(1),
+                    |_| {
+                        rolled_back = true;
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        }
+        assert!(!rolled_back);
     }
 
     #[test]
