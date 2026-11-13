@@ -408,12 +408,20 @@ fn embed_userspace_image_from(
 
     if !elf.is_file() {
         let (package, build_std) = userspace_embed_recipe(bin_name);
+        // The cargo line builds `--release`. `userspace_elf` also accepts the active
+        // profile, but when neither file exists it returns that profile's path.
+        let release_elf = manifest_dir
+            .join("..")
+            .join(target_dir)
+            .join("x86_64-unknown-none")
+            .join("release")
+            .join(bin_name);
         panic!(
             "missing userspace ELF at {}; run `cargo xtask build`, or:\n  \
              RUSTC_BOOTSTRAP=1 cargo build -p {package} \
              --bin {bin_name} --features userspace \
              --target x86_64-unknown-none -Z build-std={build_std} --release",
-            elf.display(),
+            release_elf.display(),
         );
     }
 
