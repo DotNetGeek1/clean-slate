@@ -9,13 +9,17 @@
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::gdt::set_privilege_stack;
+use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::diagnostics::serial::serial_write_line;
 use crate::interrupt::timer::initialize_timer;
+use crate::mm::address_space::{translate_address_in_root, MAX_ADDRESS_SPACE_USER_MAPPINGS};
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::PAGE_SIZE;
+use crate::process::linux_mem::{set_layout_for_selftest, sys_brk, sys_mmap, sys_munmap};
 use crate::process::live_instance_generation;
 use crate::process::process_registry_mut;
 use crate::process::spoof_registered_address_space_root_for_self_test;
@@ -27,11 +31,17 @@ use crate::selftest::userspace_process::configure_scheduler_thread_slot;
 use crate::selftest::userspace_process::reset_process_scheduler_world;
 use crate::selftest::userspace_process::spawn_linux_userspace_process_with_code;
 use crate::selftest::userspace_process::spawn_native_userspace_process_with_code;
+use crate::selftest::USER_TEST_CODE_ADDRESS;
 use crate::selftest::USER_TEST_PROCESS_STACK_ADDRESS;
 use crate::syscall::initialize_syscall_abi;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
+use clean_slate_linux_abi::{
+    ENOMEM, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE,
+};
+use core::ops::Range;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use x86_64::VirtAddr;
 
 pub(crate) const M9_SYSCALL_FAIL_CLOSED_PASS_MARKER: &str = "[M9.C] PASS";
 pub(crate) const M9_NONCANONICAL_NATIVE_MARKER: &str =
@@ -40,6 +50,17 @@ pub(crate) const M9_ARCH_SET_FS_EPERM_MARKER: &str =
     "[M9.C] arch_prctl(ARCH_SET_FS, non-canonical) returned EPERM OK";
 pub(crate) const M9_NONCANONICAL_LINUX_MARKER: &str =
     "[M9.C] non-canonical syscall rsp terminated linux offender OK";
+pub(crate) const M9_MAP_FAILURE_ROLLBACK_MARKER: &str =
+    "[M9.C] failed mmap/brk left free frames and mappings unchanged OK";
+
+/// Repetitions of each failing call; one leaked frame per call would show as
+/// thousands of missing frames.
+const MAP_FAILURE_ATTEMPTS: u64 = 2048;
+/// Inside the 2 MiB the offender's code already uses, so no call in the probe
+/// needs a new page-table frame.
+const PROBE_BRK_BASE: u64 = USER_TEST_CODE_ADDRESS + 0x8000;
+const PROBE_MMAP_WINDOW: Range<u64> =
+    USER_TEST_CODE_ADDRESS + 0x10000..USER_TEST_CODE_ADDRESS + 0x20000;
 
 /// Registry poison value for the offender; must not be `0` (a transient CR3 of zero
 /// would match and let native dispatch loop instead of fail-closed).
@@ -182,6 +203,7 @@ pub(crate) fn start_m9_syscall_fail_closed_self_test(allocator: PageAllocator) -
     if let Err(message) = install_payload(allocator) {
         fatal_kernel_error(message);
     }
+    prove_failed_maps_release_their_frames(M9_LINUX_HOSTILE_PID.load(Ordering::Relaxed));
 
     let kernel_stack_top = unsafe {
         let stacks = &*task_stacks_mut();
@@ -201,6 +223,115 @@ pub(crate) fn start_m9_syscall_fail_closed_self_test(allocator: PageAllocator) -
         Err(message) => fatal_kernel_error(message),
     };
     unsafe { restore_task_context(frame_pointer) }
+}
+
+fn free_frames() -> u64 {
+    service_lifecycle_syscall_allocator_mut()
+        .as_ref()
+        .unwrap_or_else(|| fatal_kernel_error("m9 fail-closed allocator missing"))
+        .stats()
+        .free_pages
+}
+
+/// Root frame and tracked user mapping count of `pid`'s address space.
+fn user_space(pid: u64) -> (u64, usize) {
+    let space = unsafe { process_registry_mut() }
+        .get_mut(pid)
+        .and_then(|process| process.resource_domain.address_space_mut())
+        .unwrap_or_else(|| fatal_kernel_error("m9 map probe process has no address space"));
+    (space.root_frame, space.user_mapping_count())
+}
+
+/// #216: drives the real `mmap`/`brk` handlers for the Linux offender (before it
+/// runs) through calls that must fail, and checks that they leave the free-frame
+/// count, the tracked mappings and the page tables exactly as they were.
+/// Every check runs and reports before the probe fails, so one run shows all leaks.
+fn prove_failed_maps_release_their_frames(pid: u64) {
+    let generation = live_instance_generation(pid)
+        .unwrap_or_else(|| fatal_kernel_error("m9 map probe process had no generation"));
+    if set_layout_for_selftest(pid, generation, PROBE_BRK_BASE, PROBE_MMAP_WINDOW).is_err() {
+        fatal_kernel_error("m9 map probe could not set the linux memory layout");
+    }
+    let anonymous = MAP_PRIVATE | MAP_ANONYMOUS;
+    let read_write = PROT_READ | PROT_WRITE;
+    let mmap_page =
+        |addr, prot, flags| sys_mmap(addr, PAGE_SIZE, prot, flags, -1, 0, pid, generation);
+    let mut is_failed = false;
+    let mut check = |is_ok: bool, what: &str| {
+        if !is_ok {
+            kernel_log_fmt(format_args!("[M9.C] map probe: {what}\n"));
+            is_failed = true;
+        }
+    };
+
+    let mapped = mmap_page(0, read_write, anonymous)
+        .unwrap_or_else(|_| fatal_kernel_error("m9 map probe: first mmap failed"));
+    let (root, mappings_before) = user_space(pid);
+    let frames_before = free_frames();
+
+    let fixed_refusals = (0..MAP_FAILURE_ATTEMPTS)
+        .filter(|_| mmap_page(mapped, read_write, anonymous | MAP_FIXED) == Err(ENOMEM))
+        .count() as u64;
+    check(
+        fixed_refusals == MAP_FAILURE_ATTEMPTS,
+        "MAP_FIXED over a live mapping was not refused with ENOMEM",
+    );
+
+    match mmap_page(0, PROT_NONE, anonymous) {
+        Ok(reserved) => {
+            check(
+                translate_address_in_root(root, VirtAddr::new(reserved)).is_err(),
+                "PROT_NONE reservation is backed by a present page",
+            );
+            check(
+                mmap_page(reserved, read_write, anonymous | MAP_FIXED) == Ok(reserved)
+                    && translate_address_in_root(root, VirtAddr::new(reserved)).is_ok(),
+                "MAP_FIXED into a PROT_NONE reservation did not map a page",
+            );
+            check(
+                sys_munmap(reserved, PAGE_SIZE, pid, generation).is_ok(),
+                "munmap of a PROT_NONE reservation failed",
+            );
+        }
+        Err(_) => check(false, "PROT_NONE mmap failed"),
+    }
+
+    let pages_past_capacity = (MAX_ADDRESS_SPACE_USER_MAPPINGS - mappings_before) as u64 + 1;
+    let brk_target = PROBE_BRK_BASE + pages_past_capacity * PAGE_SIZE;
+    if brk_target > PROBE_MMAP_WINDOW.start {
+        fatal_kernel_error("m9 map probe brk target would reach the mmap window");
+    }
+    let brk_refusals = (0..MAP_FAILURE_ATTEMPTS)
+        .filter(|_| {
+            sys_brk(brk_target, pid, generation) == Err(ENOMEM)
+                && sys_brk(0, pid, generation) == Ok(PROBE_BRK_BASE)
+        })
+        .count() as u64;
+    check(
+        brk_refusals == MAP_FAILURE_ATTEMPTS,
+        "brk past the mapping table was not refused, or moved the break",
+    );
+    check(
+        (PROBE_BRK_BASE..brk_target)
+            .step_by(PAGE_SIZE as usize)
+            .all(|va| translate_address_in_root(root, VirtAddr::new(va)).is_err()),
+        "a refused brk left pages mapped",
+    );
+
+    let (_, mappings_after) = user_space(pid);
+    let frames_after = free_frames();
+    kernel_log_fmt(format_args!(
+        "[M9.C] map probe free_frames before={frames_before} after={frames_after} mappings before={mappings_before} after={mappings_after}\n"
+    ));
+    check(frames_after == frames_before, "free frame count changed");
+    check(
+        mappings_after == mappings_before,
+        "tracked mapping count changed",
+    );
+    if is_failed {
+        fatal_kernel_error("m9 failed mmap/brk leaked frames or mappings");
+    }
+    kernel_log_line(M9_MAP_FAILURE_ROLLBACK_MARKER);
 }
 
 pub(crate) fn observe_syscall_fail_closed(reason: &'static str, torn_down_pid: u64) {

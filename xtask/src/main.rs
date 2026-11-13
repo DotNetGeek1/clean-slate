@@ -296,6 +296,7 @@ const M9_SYSCALL_FAIL_CLOSED_CONTAINMENT_GROUP: &[&str] = &[
     " vector=13 err=0x0",
 ];
 const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_SPEC: &[MarkerStep] = &[
+    MarkerStep::Ordered("[M9.C] failed mmap/brk left free frames and mappings unchanged OK"),
     MarkerStep::Ordered("[TIME] timer initialized"),
     MarkerStep::UnorderedGroup(M9_SYSCALL_FAIL_CLOSED_CONTAINMENT_GROUP),
     MarkerStep::Ordered("[M9.C] non-canonical syscall rsp terminated native offender OK"),

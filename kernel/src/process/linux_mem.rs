@@ -5,8 +5,9 @@ use crate::mm::address_space::{
     map_process_page, translate_address_in_root, unmap_process_page_at, ProcessAddressSpace,
 };
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::paging::zero_page;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
-use crate::mm::{align_down, align_up, phys_to_virt, PAGE_SIZE, USER_CANONICAL_TOP_EXCLUSIVE};
+use crate::mm::{align_down, align_up, PAGE_SIZE, USER_CANONICAL_TOP_EXCLUSIVE};
 use crate::process::linux_image::LinuxImageLayout;
 use crate::process::process_registry_mut;
 use crate::sched::wait::Deadline;
@@ -17,7 +18,6 @@ use clean_slate_linux_abi::{
     PROT_EXEC, PROT_NONE, PROT_READ, PROT_WRITE,
 };
 use clean_slate_service_lifecycle::InstanceGeneration;
-use core::ptr;
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
@@ -63,7 +63,6 @@ pub(crate) struct LinuxMemState {
     stack_base: u64,
     stack_pages: u64,
     mmap_regions: [MmapRegion; LINUX_MMAP_MAX_REGIONS],
-    mmap_region_count: usize,
     mmap_pages: u64,
     fs_base: u64,
     tid_address: u64,
@@ -81,7 +80,6 @@ impl LinuxMemState {
         stack_base: 0,
         stack_pages: 0,
         mmap_regions: [MmapRegion::EMPTY; LINUX_MMAP_MAX_REGIONS],
-        mmap_region_count: 0,
         mmap_pages: 0,
         fs_base: 0,
         tid_address: 0,
@@ -210,6 +208,23 @@ pub(crate) fn init_for_image(
     Ok(())
 }
 
+/// Gives a process spawned without an ELF image a brk start and mmap window.
+#[cfg(feature = "m9-syscall-fail-closed-self-test")]
+pub(crate) fn set_layout_for_selftest(
+    pid: u64,
+    generation: InstanceGeneration,
+    brk_base: u64,
+    mmap_window: core::ops::Range<u64>,
+) -> Result<(), LinuxErrno> {
+    let index = registry_mut().ensure(pid, generation)?;
+    let state = &mut registry_mut().slots[index].as_mut().ok_or(EINVAL)?.state;
+    state.brk_base = brk_base;
+    state.brk_end = brk_base;
+    state.mmap_window_lo = mmap_window.start;
+    state.mmap_window_hi = mmap_window.end;
+    Ok(())
+}
+
 #[cfg(feature = "m9-userspace-self-test")]
 pub(crate) fn log_m9_exec_layout(pid: u64, generation: InstanceGeneration, cr2: u64) {
     use crate::diagnostics::log::kernel_log_fmt;
@@ -334,6 +349,73 @@ fn unmap_range(
     Ok(())
 }
 
+/// Allocates a zeroed frame and hands it to `map`. If `map` fails the frame is
+/// freed, so a failed call owns nothing.
+fn install_zeroed_frame<E>(
+    allocator: &mut PageAllocator,
+    map: impl FnOnce(u64, &mut PageAllocator) -> Result<(), E>,
+) -> Result<(), LinuxErrno> {
+    let frame = allocator.allocate_page().ok_or(ENOMEM)?;
+    zero_page(frame);
+    if map(frame, allocator).is_err() {
+        unsafe {
+            let _ = allocator.free_page(frame);
+        }
+        return Err(ENOMEM);
+    }
+    Ok(())
+}
+
+/// Maps and unmaps single pages for [`map_pages_or_roll_back`].
+trait PageMapper {
+    fn map_page(&mut self, va: u64) -> Result<(), LinuxErrno>;
+    fn unmap_page(&mut self, va: u64) -> Result<(), LinuxErrno>;
+}
+
+struct ZeroPageMapper<'a> {
+    domain: &'a mut ProcessAddressSpace,
+    allocator: &'a mut PageAllocator,
+    writable: bool,
+    executable: bool,
+}
+
+impl PageMapper for ZeroPageMapper<'_> {
+    fn map_page(&mut self, va: u64) -> Result<(), LinuxErrno> {
+        map_zero_page(
+            va,
+            self.writable,
+            self.executable,
+            self.domain,
+            self.allocator,
+        )
+    }
+
+    fn unmap_page(&mut self, va: u64) -> Result<(), LinuxErrno> {
+        unmap_process_page_at(self.domain, va, self.allocator).map_err(|_| ENOMEM)
+    }
+}
+
+/// Maps `page_count` pages from `start`. If one fails, the pages this call
+/// already mapped are unmapped again, so the address space is left as it was.
+fn map_pages_or_roll_back(
+    mapper: &mut impl PageMapper,
+    start: u64,
+    page_count: u64,
+) -> Result<(), LinuxErrno> {
+    for index in 0..page_count {
+        let va = start
+            .checked_add(index.checked_mul(PAGE_SIZE).ok_or(EINVAL)?)
+            .ok_or(EINVAL)?;
+        if let Err(error) = mapper.map_page(va) {
+            for mapped in (0..index).rev() {
+                mapper.unmap_page(start + mapped * PAGE_SIZE)?;
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 fn map_zero_page(
     va: u64,
     writable: bool,
@@ -341,10 +423,6 @@ fn map_zero_page(
     domain: &mut ProcessAddressSpace,
     allocator: &mut PageAllocator,
 ) -> Result<(), LinuxErrno> {
-    let frame = allocator.allocate_page().ok_or(ENOMEM)?;
-    unsafe {
-        ptr::write_bytes(phys_to_virt(frame) as *mut u8, 0, PAGE_SIZE as usize);
-    }
     let flags = PageTableFlags::PRESENT
         | PageTableFlags::USER_ACCESSIBLE
         | if writable {
@@ -357,8 +435,9 @@ fn map_zero_page(
         } else {
             PageTableFlags::NO_EXECUTE
         };
-    map_process_page(domain, va, frame, flags, allocator).map_err(|_| ENOMEM)?;
-    Ok(())
+    install_zeroed_frame(allocator, |frame, allocator| {
+        map_process_page(domain, va, frame, flags, allocator)
+    })
 }
 
 /// FS base the process last set; 0 when it never called `ARCH_SET_FS`.
@@ -468,15 +547,24 @@ pub(crate) fn sys_brk(
             .brk_end = addr;
         return Ok(old_end);
     }
+    let grow_start = align_up(old_end, PAGE_SIZE);
+    let grow_end = align_up(addr, PAGE_SIZE);
+    if overlaps_any(
+        &registry_mut().slots[index].as_ref().expect("slot").state,
+        grow_start,
+        grow_end,
+    ) {
+        return Err(ENOMEM);
+    }
     let allocator = syscall_page_allocator()?;
     with_address_space(pid, generation, allocator, |domain, allocator| {
-        let mut va = align_up(old_end, PAGE_SIZE);
-        let target = align_up(addr, PAGE_SIZE);
-        while va < target {
-            map_zero_page(va, true, false, domain, allocator)?;
-            va = va.checked_add(PAGE_SIZE).ok_or(EINVAL)?;
-        }
-        Ok(())
+        let mut mapper = ZeroPageMapper {
+            domain,
+            allocator,
+            writable: true,
+            executable: false,
+        };
+        map_pages_or_roll_back(&mut mapper, grow_start, (grow_end - grow_start) / PAGE_SIZE)
     })?;
     registry_mut().slots[index]
         .as_mut()
@@ -559,72 +647,120 @@ pub(crate) fn sys_mmap(
         log_m9_mmap_enomem(pid, "single-map-page-cap", addr, len, prot, flags);
         return Err(ENOMEM);
     }
+    if prot != PROT_NONE && (prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0 {
+        return Err(EINVAL);
+    }
+    let fixed = (flags & MAP_FIXED) != 0;
     let index = registry_mut().ensure(pid, generation)?;
-    {
-        let state = &registry_mut().slots[index].as_ref().expect("slot").state;
-        if state.mmap_pages.checked_add(page_count).ok_or(ENOMEM)? > LINUX_MMAP_MAX_PAGES {
+    let plan = match plan_mmap(
+        &registry_mut().slots[index].as_ref().expect("slot").state,
+        addr,
+        page_count,
+        fixed,
+    ) {
+        Ok(plan) => plan,
+        Err((errno, _reason)) => {
             #[cfg(feature = "m9-userspace-self-test")]
-            log_m9_mmap_enomem(pid, "process-mmap-page-budget", addr, len, prot, flags);
-            return Err(ENOMEM);
+            if errno == ENOMEM {
+                log_m9_mmap_enomem(pid, _reason, addr, len, prot, flags);
+            }
+            return Err(errno);
         }
-    }
-    let (map_addr, mmap_window_lo, mmap_window_hi) = {
-        let state = &registry_mut().slots[index].as_ref().expect("slot").state;
-        let lo = state.mmap_window_lo;
-        let hi = state.mmap_window_hi;
-        let map_addr = if (flags & MAP_FIXED) != 0 {
-            if addr % PAGE_SIZE != 0 {
-                return Err(EINVAL);
-            }
-            addr
-        } else {
-            match alloc_mmap_addr(state, page_count) {
-                Ok(candidate) => candidate,
-                Err(ENOMEM) => {
-                    #[cfg(feature = "m9-userspace-self-test")]
-                    log_m9_mmap_enomem(pid, "no-anonymous-slot", addr, len, prot, flags);
-                    return Err(ENOMEM);
-                }
-                Err(other) => return Err(other),
-            }
-        };
-        (map_addr, lo, hi)
     };
-    let map_end = map_addr
-        .checked_add(page_count.checked_mul(PAGE_SIZE).ok_or(EINVAL)?)
-        .ok_or(EINVAL)?;
-    if map_addr < mmap_window_lo || map_end > mmap_window_hi {
-        #[cfg(feature = "m9-userspace-self-test")]
-        log_m9_mmap_enomem(pid, "outside-exec-mmap-window", addr, len, prot, flags);
-        return Err(ENOMEM);
-    }
     let allocator = syscall_page_allocator()?;
     with_address_space(pid, generation, allocator, |domain, allocator| {
-        let mut va = map_addr;
-        for _ in 0..page_count {
-            let readable = (prot & PROT_READ) != 0;
-            let writable = (prot & PROT_WRITE) != 0;
-            let executable = (prot & PROT_EXEC) != 0;
-            if !readable && !writable && !executable && prot != PROT_NONE {
-                return Err(EINVAL);
-            }
-            let none = prot == PROT_NONE;
-            if none {
-                map_zero_page(va, false, false, domain, allocator)?;
-            } else {
-                map_zero_page(va, writable, executable, domain, allocator)?;
-            }
-            va = va.checked_add(PAGE_SIZE).ok_or(EINVAL)?;
+        if fixed && any_page_mapped(domain.root_frame, plan.start, plan.page_count) {
+            #[cfg(feature = "m9-userspace-self-test")]
+            log_m9_mmap_enomem(pid, "map-fixed-over-present-page", addr, len, prot, flags);
+            return Err(ENOMEM);
         }
-        Ok(())
+        // PROT_NONE is a reservation only: no frame, no PTE, so any access faults.
+        if prot == PROT_NONE {
+            return Ok(());
+        }
+        let mut mapper = ZeroPageMapper {
+            domain,
+            allocator,
+            writable: (prot & PROT_WRITE) != 0,
+            executable: (prot & PROT_EXEC) != 0,
+        };
+        map_pages_or_roll_back(&mut mapper, plan.start, plan.page_count)
     })?;
-    let state = &mut registry_mut().slots[index].as_mut().expect("slot").state;
-    if let Err(ENOMEM) = record_region(state, map_addr, map_end, page_count) {
-        #[cfg(feature = "m9-userspace-self-test")]
-        log_m9_mmap_enomem(pid, "region-table-full", addr, len, prot, flags);
-        return Err(ENOMEM);
+    commit_region(
+        &mut registry_mut().slots[index].as_mut().expect("slot").state,
+        &plan,
+    );
+    Ok(plan.start)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MmapPlan {
+    start: u64,
+    end: u64,
+    page_count: u64,
+    slot: usize,
+}
+
+/// Every bookkeeping check for an `mmap`, done before anything is allocated so
+/// a refused call changes nothing. The error carries a diagnostic reason.
+fn plan_mmap(
+    state: &LinuxMemState,
+    addr: u64,
+    page_count: u64,
+    fixed: bool,
+) -> Result<MmapPlan, (LinuxErrno, &'static str)> {
+    let budget_after = state
+        .mmap_pages
+        .checked_add(page_count)
+        .ok_or((ENOMEM, "process-mmap-page-budget"))?;
+    if budget_after > LINUX_MMAP_MAX_PAGES {
+        return Err((ENOMEM, "process-mmap-page-budget"));
     }
-    Ok(map_addr)
+    let slot = state
+        .mmap_regions
+        .iter()
+        .position(|region| !region.is_live())
+        .ok_or((ENOMEM, "region-table-full"))?;
+    let start = if fixed {
+        if addr % PAGE_SIZE != 0 {
+            return Err((EINVAL, "map-fixed-unaligned"));
+        }
+        addr
+    } else {
+        alloc_mmap_addr(state, page_count).map_err(|errno| (errno, "no-anonymous-slot"))?
+    };
+    let end = page_count
+        .checked_mul(PAGE_SIZE)
+        .and_then(|bytes| start.checked_add(bytes))
+        .ok_or((EINVAL, "mmap-range-overflow"))?;
+    if start < state.mmap_window_lo || end > state.mmap_window_hi {
+        return Err((ENOMEM, "outside-exec-mmap-window"));
+    }
+    Ok(MmapPlan {
+        start,
+        end,
+        page_count,
+        slot,
+    })
+}
+
+/// `MAP_FIXED` over a present page (image, stack, brk or a region) is refused
+/// rather than replaced. The page tables decide, not the region records: a
+/// partial `munmap` leaves the record in place, and the hole it leaves, like a
+/// `PROT_NONE` reservation, may be mapped again.
+fn any_page_mapped(root_frame: u64, start: u64, page_count: u64) -> bool {
+    (0..page_count).any(|index| {
+        translate_address_in_root(root_frame, VirtAddr::new(start + index * PAGE_SIZE)).is_ok()
+    })
+}
+
+fn commit_region(state: &mut LinuxMemState, plan: &MmapPlan) {
+    state.mmap_regions[plan.slot] = MmapRegion {
+        start: plan.start,
+        end: plan.end,
+        page_count: plan.page_count,
+    };
+    state.mmap_pages += plan.page_count;
 }
 
 fn alloc_mmap_addr(state: &LinuxMemState, page_count: u64) -> Result<u64, LinuxErrno> {
@@ -658,25 +794,6 @@ fn overlaps_any(state: &LinuxMemState, start: u64, end: u64) -> bool {
         .iter()
         .filter(|r| r.is_live())
         .any(|r| start < r.end && end > r.start)
-}
-
-fn record_region(
-    state: &mut LinuxMemState,
-    start: u64,
-    end: u64,
-    page_count: u64,
-) -> Result<(), LinuxErrno> {
-    if state.mmap_region_count >= LINUX_MMAP_MAX_REGIONS {
-        return Err(ENOMEM);
-    }
-    state.mmap_regions[state.mmap_region_count] = MmapRegion {
-        start,
-        end,
-        page_count,
-    };
-    state.mmap_region_count += 1;
-    state.mmap_pages = state.mmap_pages.checked_add(page_count).ok_or(ENOMEM)?;
-    Ok(())
 }
 
 pub(crate) fn sys_munmap(
@@ -757,6 +874,217 @@ mod tests {
     fn new_registry_is_empty() {
         let registry = Registry::new();
         assert!(registry.slots.iter().all(|slot| slot.is_none()));
+    }
+
+    use crate::boot::uefi::normalize_memory_map_boxed;
+    use uefi::mem::memory_map::{MemoryAttribute, MemoryDescriptor, MemoryType};
+
+    #[repr(align(4096))]
+    struct AlignedPages([u8; (PAGE_SIZE as usize) * 4]);
+
+    fn host_allocator(pages: &mut AlignedPages) -> PageAllocator {
+        let descriptor = MemoryDescriptor {
+            ty: MemoryType::CONVENTIONAL,
+            phys_start: pages.0.as_mut_ptr() as u64,
+            virt_start: 0,
+            page_count: 4,
+            att: MemoryAttribute::empty(),
+        };
+        let map = normalize_memory_map_boxed([descriptor].iter(), &[]).expect("map");
+        PageAllocator::new(&map).expect("allocator")
+    }
+
+    #[test]
+    fn failed_page_install_returns_the_frame_to_the_allocator() {
+        let mut pages = AlignedPages([0xAA; (PAGE_SIZE as usize) * 4]);
+        let mut allocator = host_allocator(&mut pages);
+        let before = allocator.stats();
+
+        let mut seen_frame = 0;
+        let result = install_zeroed_frame(&mut allocator, |frame, _| {
+            seen_frame = frame;
+            Err("already mapped")
+        });
+        assert_eq!(result, Err(ENOMEM));
+        assert_ne!(seen_frame, 0);
+        assert_eq!(allocator.stats(), before);
+
+        let mut zeroed = false;
+        install_zeroed_frame(&mut allocator, |frame, _| {
+            zeroed = unsafe { core::slice::from_raw_parts(frame as *const u8, PAGE_SIZE as usize) }
+                .iter()
+                .all(|byte| *byte == 0);
+            Ok::<(), ()>(())
+        })
+        .expect("install");
+        assert!(zeroed);
+        assert_eq!(allocator.stats().free_pages, before.free_pages - 1);
+    }
+
+    #[test]
+    fn page_install_without_a_free_frame_changes_nothing() {
+        let mut pages = AlignedPages([0; (PAGE_SIZE as usize) * 4]);
+        let mut allocator = host_allocator(&mut pages);
+        while allocator.allocate_page().is_some() {}
+        let before = allocator.stats();
+        let mut called = false;
+        let result = install_zeroed_frame(&mut allocator, |_, _| {
+            called = true;
+            Ok::<(), ()>(())
+        });
+        assert_eq!(result, Err(ENOMEM));
+        assert!(!called);
+        assert_eq!(allocator.stats(), before);
+    }
+
+    struct FakeMapper {
+        mapped: std::vec::Vec<u64>,
+        fail_at: Option<u64>,
+        unmapped: std::vec::Vec<u64>,
+    }
+
+    impl PageMapper for FakeMapper {
+        fn map_page(&mut self, va: u64) -> Result<(), LinuxErrno> {
+            if Some(va) == self.fail_at {
+                return Err(ENOMEM);
+            }
+            self.mapped.push(va);
+            Ok(())
+        }
+
+        fn unmap_page(&mut self, va: u64) -> Result<(), LinuxErrno> {
+            assert_eq!(
+                self.mapped.pop(),
+                Some(va),
+                "rollback must unmap in reverse"
+            );
+            self.unmapped.push(va);
+            Ok(())
+        }
+    }
+
+    fn fake_mapper(fail_at: Option<u64>) -> FakeMapper {
+        FakeMapper {
+            mapped: std::vec::Vec::new(),
+            fail_at,
+            unmapped: std::vec::Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_failure_part_way_unmaps_every_page_this_call_mapped() {
+        let start = 0x40_0000;
+        let mut mapper = fake_mapper(Some(start + 3 * PAGE_SIZE));
+        assert_eq!(map_pages_or_roll_back(&mut mapper, start, 8), Err(ENOMEM));
+        assert!(mapper.mapped.is_empty());
+        assert_eq!(
+            mapper.unmapped,
+            [start + 2 * PAGE_SIZE, start + PAGE_SIZE, start]
+        );
+
+        let mut mapper = fake_mapper(Some(start));
+        assert_eq!(map_pages_or_roll_back(&mut mapper, start, 8), Err(ENOMEM));
+        assert!(mapper.mapped.is_empty() && mapper.unmapped.is_empty());
+
+        let mut mapper = fake_mapper(None);
+        assert_eq!(map_pages_or_roll_back(&mut mapper, start, 3), Ok(()));
+        assert_eq!(
+            mapper.mapped,
+            [start, start + PAGE_SIZE, start + 2 * PAGE_SIZE]
+        );
+        assert!(mapper.unmapped.is_empty());
+    }
+
+    const WINDOW_LO: u64 = 0x20_0000;
+    const WINDOW_HI: u64 = 0x60_0000;
+
+    fn mmap_state() -> LinuxMemState {
+        LinuxMemState {
+            mmap_window_lo: WINDOW_LO,
+            mmap_window_hi: WINDOW_HI,
+            ..LinuxMemState::EMPTY
+        }
+    }
+
+    fn commit(state: &mut LinuxMemState, addr: u64, page_count: u64, fixed: bool) -> MmapPlan {
+        let plan = plan_mmap(state, addr, page_count, fixed).expect("plan");
+        commit_region(state, &plan);
+        plan
+    }
+
+    #[test]
+    fn map_fixed_into_a_recorded_region_is_left_to_the_page_table_check() {
+        // A partial munmap keeps the record, so the hole must stay mappable;
+        // `any_page_mapped` refuses the call if the page is still present.
+        let mut state = mmap_state();
+        commit(&mut state, 0x30_0000, 3, true);
+        let hole = plan_mmap(&state, 0x30_1000, 1, true).expect("hole");
+        assert_eq!(
+            (hole.start, hole.end, hole.page_count),
+            (0x30_1000, 0x30_2000, 1)
+        );
+        commit_region(&mut state, &hole);
+        assert_eq!(state.mmap_pages, 4, "overlapping records are both charged");
+    }
+
+    #[test]
+    fn mmap_budget_and_region_table_are_checked_up_front() {
+        let mut state = mmap_state();
+        assert_eq!(
+            plan_mmap(&state, 0, LINUX_MMAP_MAX_PAGES + 1, false),
+            Err((ENOMEM, "process-mmap-page-budget"))
+        );
+        commit(&mut state, 0, LINUX_MMAP_MAX_PAGES - 1, false);
+        assert_eq!(
+            plan_mmap(&state, 0, 2, false),
+            Err((ENOMEM, "process-mmap-page-budget"))
+        );
+
+        let mut state = mmap_state();
+        for index in 0..LINUX_MMAP_MAX_REGIONS as u64 {
+            commit(&mut state, WINDOW_LO + index * 2 * PAGE_SIZE, 1, true);
+        }
+        assert_eq!(
+            plan_mmap(&state, 0, 1, false),
+            Err((ENOMEM, "region-table-full"))
+        );
+        state.mmap_regions[5] = MmapRegion::EMPTY;
+        assert_eq!(plan_mmap(&state, 0, 1, false).map(|plan| plan.slot), Ok(5));
+    }
+
+    #[test]
+    fn mmap_window_and_alignment_are_enforced() {
+        let state = mmap_state();
+        assert_eq!(
+            plan_mmap(&state, WINDOW_LO + 1, 1, true),
+            Err((EINVAL, "map-fixed-unaligned"))
+        );
+        assert_eq!(
+            plan_mmap(&state, WINDOW_LO - PAGE_SIZE, 1, true),
+            Err((ENOMEM, "outside-exec-mmap-window"))
+        );
+        assert_eq!(
+            plan_mmap(&state, WINDOW_HI - PAGE_SIZE, 2, true),
+            Err((ENOMEM, "outside-exec-mmap-window"))
+        );
+        assert_eq!(
+            plan_mmap(&state, u64::MAX & !(PAGE_SIZE - 1), 2, true),
+            Err((EINVAL, "mmap-range-overflow"))
+        );
+    }
+
+    #[test]
+    fn a_prot_none_reservation_is_charged_and_blocks_anonymous_maps_and_brk() {
+        let mut state = mmap_state();
+        let reservation = commit(&mut state, 0, 2, false);
+        assert_eq!(state.mmap_pages, 2, "reservation is charged");
+        let next = plan_mmap(&state, 0, 1, false).expect("plan");
+        assert!(next.end <= reservation.start || next.start >= reservation.end);
+        assert!(overlaps_any(
+            &state,
+            reservation.start - PAGE_SIZE,
+            reservation.start + 1
+        ));
     }
 
     #[test]
