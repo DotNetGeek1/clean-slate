@@ -23,7 +23,9 @@
 //! Every quiescent stretch of [`IDLE_PROOF_NS`] after activity logs `[IDLE ]` with the number of
 //! presents submitted during it, which the desktop lane requires to be zero.
 
-use clean_slate_capability::{CapabilityHandle, HolderId, ResourceClass, ResourceRef};
+use clean_slate_capability::{
+    CapabilityHandle, CapabilityState, HolderId, ResourceClass, ResourceRef,
+};
 use clean_slate_graphics::{
     CLIENT_EVENT_QUEUE_DEPTH, MAX_OUTSTANDING_REQUESTS_PER_CLIENT, SERVER_REQUEST_QUEUE_DEPTH,
 };
@@ -32,7 +34,7 @@ use clean_slate_native_abi::desktop::{
 };
 use clean_slate_native_abi::port::PORT_ROLE_CONNECT;
 use clean_slate_native_abi::PortParams;
-use clean_slate_port::RegistrationError;
+use clean_slate_port::{PortError, RegistrationError};
 use clean_slate_service_lifecycle::{ControlRequest, ControlRequestKind, ServiceId};
 
 use crate::capability::graphics::{grant_desktop_role, GraphicsGrantee};
@@ -373,21 +375,28 @@ fn start_role(allocator: &mut PageAllocator, role: DesktopRole) -> Result<u64, &
 
 /// The new app tries its predecessor's graphics handle (revoked at teardown, so its slot
 /// generation is gone), then the new handle is remembered for its own successor.
+///
+/// The probe runs as the new app, so a handle that survived teardown would still be refused for
+/// naming another holder. Only a `Stale` refusal of a handle the table no longer holds proves the
+/// revocation.
 fn probe_stale_app_handle(pid: u64) {
     let holder = HolderId(pid);
     let graphics_class = ResourceClass::Graphics;
     let graphics_id = u64::from(COMPOSITOR_SERVICE_ID.0);
     let desktop = state();
     if let Some(stale) = desktop.app_handle.take() {
-        let rejected =
+        let outcome =
             super::port::kernel_client_connect(holder, stale, graphics_class, graphics_id);
-        if let Ok(connection) = rejected {
+        if let Ok(connection) = outcome {
             let _ = super::port::kernel_client_close(holder, connection, 0);
         }
+        let revoked = !is_live_handle(stale);
         kernel_log_fmt(format_args!(
-            "[RSRC] stale handle pid={pid} handle={:#x} rejected={}\n",
+            "[RSRC] stale handle pid={pid} handle={:#x} rejected={} revoked={} result={}\n",
             stale.encode(),
-            u8::from(rejected.is_err())
+            u8::from(stale_handle_rejected(outcome, revoked)),
+            u8::from(revoked),
+            connect_outcome_name(outcome)
         ));
     }
     desktop.app_handle = super::port::find_handle(
@@ -398,6 +407,30 @@ fn probe_stale_app_handle(pid: u64) {
     )
     .ok()
     .and_then(|raw| CapabilityHandle::decode(raw).ok());
+}
+
+fn is_live_handle(handle: CapabilityHandle) -> bool {
+    crate::capability::with_capability_space(|table| {
+        table
+            .record(handle)
+            .is_ok_and(|record| record.state == CapabilityState::Live)
+    })
+}
+
+fn stale_handle_rejected<T>(outcome: Result<T, PortError>, revoked: bool) -> bool {
+    revoked && matches!(outcome, Err(PortError::Stale))
+}
+
+fn connect_outcome_name<T>(outcome: Result<T, PortError>) -> &'static str {
+    match outcome {
+        Ok(_) => "connected",
+        Err(PortError::Stale) => "stale",
+        Err(PortError::Denied) => "denied",
+        Err(PortError::Refused) => "refused",
+        Err(PortError::Invalid) => "invalid",
+        Err(PortError::NoSpace) => "nospace",
+        Err(_) => "other",
+    }
 }
 
 fn wire_role(role: DesktopRole, pid: u64) -> Result<(), &'static str> {
@@ -745,5 +778,25 @@ mod tests {
         );
         assert_eq!(desktop.live[DesktopRole::Compositor.index()], Some(10));
         assert!(!DesktopState::new().take_stopped(), "not before boot");
+    }
+
+    #[test]
+    fn the_stale_handle_probe_requires_a_revoked_handle_refused_as_stale() {
+        let connected: Result<(), PortError> = Ok(());
+        assert!(stale_handle_rejected(Err::<(), _>(PortError::Stale), true));
+        assert!(
+            !stale_handle_rejected(Err::<(), _>(PortError::Denied), false),
+            "a live handle refused only for naming another holder"
+        );
+        assert!(
+            !stale_handle_rejected(Err::<(), _>(PortError::Stale), false),
+            "refused for the old generation, but never revoked"
+        );
+        assert!(!stale_handle_rejected(connected, true));
+        assert_eq!(connect_outcome_name(connected), "connected");
+        assert_eq!(
+            connect_outcome_name(Err::<(), _>(PortError::Stale)),
+            "stale"
+        );
     }
 }
