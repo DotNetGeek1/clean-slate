@@ -598,7 +598,7 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
         feature = "m5-crash-recovery-self-test"
     ))]
     if matches!(response.status, BlockTransportStatus::Ok) {
-        observe_userspace_block_operation(request.operation);
+        observe_userspace_block_operation(request.operation, request.lba);
     }
     frame.rax = BLOCK_TRANSPORT_RESPONSE_BYTES as u64;
 }

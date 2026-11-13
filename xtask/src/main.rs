@@ -27,7 +27,7 @@ mod qmp;
 mod raster_font;
 mod serial_input_lane;
 
-use marker_spec::{MarkerSet, MarkerStep, MarkerTracker};
+use marker_spec::{unexpected_guest_failure, MarkerSet, MarkerStep, MarkerTracker};
 use ovmf_vars::RuntimeVarsCopy;
 
 use m10_framebuffer_validate::validate_m10_framebuffer_serial;
@@ -107,8 +107,11 @@ const M4_RECOVERY_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[HLTH] service=16640 healthy gen=1"),
     MarkerStep::Ordered("[TEST] crash-service injecting fault"),
     MarkerStep::Ordered("[PROC] fault pid="),
+    MarkerStep::Line {
+        prefix: "[PROC] teardown pid=",
+        fields: &[("resources=", "0")],
+    },
     MarkerStep::Ordered("[SUP ] failure service=16640 pid="),
-    MarkerStep::Ordered("[PROC] teardown pid="),
     MarkerStep::Ordered("[SUP ] restart service=16640 attempt=1"),
     MarkerStep::Ordered("[SVC ] launch service=16640 pid="),
     MarkerStep::Ordered("[HLTH] service=16640 healthy gen=2"),
@@ -128,12 +131,13 @@ const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
 ];
 const M9_LOW_VA_ACCEPTANCE_MARKERS: [&str; 2] = ["[M9.0] creating", "[M9.0] PASS"];
 const M9_LOW_VA_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M10_NXE_ACCEPTANCE_MARKERS: [&str; 7] = [
+const M10_NXE_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[CPU ] NXE enabled nx=1",
     "[M10.NX] creating",
     "[M10.NX] efer nxe=1",
     "[PROC] fault pid=",
     "[M10.NX] nx exec fault err=0x15 OK",
+    M10_NXE_BASELINE_COUNTS,
     "[M10.NX] baseline OK",
     "[M10.NX] PASS",
 ];
@@ -302,6 +306,7 @@ const M9_SYSCALL_FAIL_CLOSED_CONTAINMENT_GROUP: &[&str] = &[
     " vector=13 err=0x0",
 ];
 const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_SPEC: &[MarkerStep] = &[
+    MarkerStep::Ordered(M9_MAP_PROBE_COUNTS),
     MarkerStep::Ordered("[M9.C] failed mmap/brk left free frames and mappings unchanged OK"),
     MarkerStep::Ordered("[TIME] timer initialized"),
     MarkerStep::UnorderedGroup(M9_SYSCALL_FAIL_CLOSED_CONTAINMENT_GROUP),
@@ -821,28 +826,119 @@ const M5_PERSISTENCE_READ_MARKERS: [&str; 9] = [
     "[STOR] read object=beta id=2 bytes=",
     "[TEST] persistence phase=read PASS",
 ];
-const M5_CRASH_ARM_EARLY_MARKERS: [&str; 6] = [
-    "[STOR] recovered generation=2",
-    "[STOR] read object=alpha id=1 bytes=",
-    "[STOR] read object=beta id=2 bytes=",
-    "[CRSH] armed trigger=after-write=1",
-    "[STOR] write object=alpha id=1 bytes=",
-    "[CRSH] inject after-write=1",
+/// The service's own report, read by the kernel at the injected stop: it mounted
+/// generation 2, read both objects back as generation 2 wrote them, and was committing
+/// alpha's 700-byte third version.
+const M5_PRE_CRASH_REPORT: [MarkerStep; 4] = [
+    MarkerStep::Line {
+        prefix: "[STOR] recovered generation=",
+        fields: &[("generation=", "2")],
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] read object=alpha id=1 ",
+        fields: &[
+            ("bytes=", "900"),
+            ("checksum=", "00007788"),
+            ("match=", "yes"),
+        ],
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] read object=beta id=2 ",
+        fields: M5_BETA_V1_READ_FIELDS,
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] write object=alpha id=1 ",
+        fields: &[("bytes=", "700"), ("checksum=", "00008b74")],
+    },
 ];
-const M5_CRASH_ARM_LATE_MARKERS: [&str; 6] = [
-    "[STOR] recovered generation=2",
-    "[STOR] read object=alpha id=1 bytes=",
-    "[STOR] read object=beta id=2 bytes=",
-    "[CRSH] armed trigger=after-write=3",
-    "[STOR] write object=alpha id=1 bytes=",
-    "[CRSH] inject after-write=3",
+const M5_CRASH_ARM_EARLY_SPEC: &[MarkerStep] = &[
+    MarkerStep::Line {
+        prefix: "[CRSH] armed trigger=",
+        fields: &[("after-write=", "1")],
+    },
+    M5_PRE_CRASH_REPORT[0],
+    M5_PRE_CRASH_REPORT[1],
+    M5_PRE_CRASH_REPORT[2],
+    M5_PRE_CRASH_REPORT[3],
+    MarkerStep::Line {
+        prefix: "[CRSH] inject after-write=",
+        fields: &[("after-write=", "1")],
+    },
 ];
-const M5_CRASH_RECOVERY_MARKERS: [&str; 5] = [
-    "[BLK ] virtio-block ready blocks=",
-    "[STOR] recovered generation=",
-    "[STOR] read object=beta id=2 bytes=",
-    "[CRSH] recovery outcome=",
-    "[TEST] crash recovery PASS",
+/// Superblock slots are LBA 0 and 1; generation 3 goes to slot 1, so the third write
+/// landing there is what makes `new-commit` the required late recovery outcome.
+const M5_CRASH_ARM_LATE_SPEC: &[MarkerStep] = &[
+    MarkerStep::Line {
+        prefix: "[CRSH] armed trigger=",
+        fields: &[("after-write=", "3")],
+    },
+    M5_PRE_CRASH_REPORT[0],
+    M5_PRE_CRASH_REPORT[1],
+    M5_PRE_CRASH_REPORT[2],
+    M5_PRE_CRASH_REPORT[3],
+    MarkerStep::Line {
+        prefix: "[CRSH] inject after-write=",
+        fields: &[("after-write=", "3"), ("lba=", "1")],
+    },
+];
+/// Read-back evidence for `beta`, which no crash phase rewrites.
+const M5_BETA_V1_READ_FIELDS: &[(&str, &str)] = &[
+    ("bytes=", "11"),
+    ("checksum=", "00000444"),
+    ("match=", "yes"),
+];
+/// After a crash on the first write of the generation-3 commit (alpha's data) the
+/// superblock still names generation 2, so recovery must find the previous commit.
+const M5_CRASH_RECOVERY_EARLY_SPEC: &[MarkerStep] = &[
+    MarkerStep::Ordered("[BLK ] virtio-block ready blocks="),
+    MarkerStep::Line {
+        prefix: "[STOR] recovered generation=",
+        fields: &[("generation=", "2")],
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] read object=alpha id=1 ",
+        fields: &[
+            ("bytes=", "900"),
+            ("checksum=", "00007788"),
+            ("match=", "yes"),
+        ],
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] read object=beta id=2 ",
+        fields: M5_BETA_V1_READ_FIELDS,
+    },
+    MarkerStep::Line {
+        prefix: "[CRSH] recovery outcome=",
+        fields: &[("outcome=", "previous-commit")],
+    },
+    MarkerStep::Ordered("[TEST] crash recovery PASS"),
+];
+/// The third write of the generation-3 commit is its superblock (alpha data, beta data,
+/// superblock, then flush). The device completed it before the crash, so recovery must
+/// mount the new commit even though the flush never ran.
+const M5_CRASH_RECOVERY_LATE_SPEC: &[MarkerStep] = &[
+    MarkerStep::Ordered("[BLK ] virtio-block ready blocks="),
+    MarkerStep::Line {
+        prefix: "[STOR] recovered generation=",
+        fields: &[("generation=", "3")],
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] read object=alpha id=1 ",
+        fields: &[
+            ("bytes=", "700"),
+            ("checksum=", "00008b74"),
+            ("match=", "yes"),
+        ],
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] read object=beta id=2 ",
+        fields: M5_BETA_V1_READ_FIELDS,
+    },
+    MarkerStep::Line {
+        prefix: "[CRSH] recovery outcome=",
+        fields: &[("outcome=", "new-commit")],
+    },
+    MarkerStep::Ordered("[TEST] crash recovery PASS"),
 ];
 /// Merged M3.2 + M3.4 markers in the order the `m3-address-space-self-test`
 /// boot actually emits them, so the aggregate gate proves isolation and
@@ -877,7 +973,8 @@ const M3_MILESTONE_STEPS: [M3MilestoneStep; 5] = [
     ("test-m3-resources", run_m3_resources_acceptance),
 ];
 type M5MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
-const M5_MILESTONE_STEPS: [M5MilestoneStep; 5] = [
+const M5_MILESTONE_STEPS: [M5MilestoneStep; 6] = [
+    ("test-m5-disk-harness", run_m5_disk_harness_default),
     ("test-m5-block", run_m5_block_acceptance),
     ("test-m5-storage", run_m5_storage_acceptance),
     ("test-m5-crash-matrix", run_m5_crash_matrix),
@@ -886,6 +983,17 @@ const M5_MILESTONE_STEPS: [M5MilestoneStep; 5] = [
         "test-m5-crash-recovery",
         run_m5_crash_recovery_acceptance_default,
     ),
+];
+type M4MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
+const M4_MILESTONE_STEPS: [M4MilestoneStep; 5] = [
+    (
+        "test-m4-service-lifecycle",
+        run_m4_service_lifecycle_acceptance,
+    ),
+    ("test-m4-supervisor", run_m4_supervisor_acceptance),
+    ("test-m4-crash-service", run_m4_crash_service_acceptance),
+    ("test-m4-recovery", run_m4_recovery_acceptance),
+    ("test-m4-restart-policy", run_m4_restart_policy_acceptance),
 ];
 type M6MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
 const M6_MILESTONE_STEPS: [M6MilestoneStep; 9] = [
@@ -906,21 +1014,25 @@ const M6_MILESTONE_STEPS: [M6MilestoneStep; 9] = [
     ("test-m6-capabilities", run_m6_capabilities_acceptance),
 ];
 type M7MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
-const M7_MILESTONE_STEPS: [M7MilestoneStep; 4] = [
+const M7_MILESTONE_STEPS: [M7MilestoneStep; 6] = [
+    ("test-m7-net-device", run_m7_net_device_acceptance),
+    ("test-m7-net-service", run_m7_net_service_acceptance),
     ("test-m7-network", run_m7_network_acceptance),
     ("test-m7-net-caps", run_m7_net_caps_acceptance),
     ("test-m7-dns", run_m7_dns_acceptance),
     ("test-m7-tls", run_m7_tls_acceptance),
 ];
 type M8MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
-/// Authoritative M8 gate (#98): fixture verify + host crate/loader tests, then
-/// compose `test-m8-linux-hello` (self-test + production boots) rather than
-/// duplicating those QEMU runs.
-const M8_MILESTONE_STEPS: [M8MilestoneStep; 5] = [
+/// Authoritative M8 gate (#98): fixture verify + host crate/loader tests, the
+/// loader and dispatch QEMU constituents, then `test-m8-linux-hello`
+/// (self-test + production boots).
+const M8_MILESTONE_STEPS: [M8MilestoneStep; 7] = [
     ("verify-m8-fixture", run_m8_verify_fixture_step),
     ("clean-slate-elf (host)", run_m8_elf_host_tests),
     ("clean-slate-linux-abi (host)", run_m8_linux_abi_host_tests),
     ("linux-image loader (host)", run_m8_linux_loader_host_tests),
+    ("test-m8-linux-image", run_m8_linux_image_acceptance),
+    ("test-m8-linux-dispatch", run_m8_linux_dispatch_acceptance),
     ("test-m8-linux-hello", run_m8_linux_hello_acceptance),
 ];
 type M9MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
@@ -1374,7 +1486,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             &["m5-crash-early-self-test"],
             Some((
-                MarkerSet::Ordered(&M5_CRASH_ARM_EARLY_MARKERS),
+                MarkerSet::Steps(M5_CRASH_ARM_EARLY_SPEC),
                 M5_PERSISTENCE_BOOT_TIMEOUT,
             )),
             config.clone(),
@@ -1390,7 +1502,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             &["m5-crash-recovery-self-test"],
             Some((
-                MarkerSet::Ordered(&M5_CRASH_RECOVERY_MARKERS),
+                MarkerSet::Steps(M5_CRASH_RECOVERY_EARLY_SPEC),
                 M5_CRASH_RECOVERY_TIMEOUT,
             )),
             config.clone(),
@@ -1405,7 +1517,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             &["m5-crash-late-self-test"],
             Some((
-                MarkerSet::Ordered(&M5_CRASH_ARM_LATE_MARKERS),
+                MarkerSet::Steps(M5_CRASH_ARM_LATE_SPEC),
                 M5_PERSISTENCE_BOOT_TIMEOUT,
             )),
             config.clone(),
@@ -1421,7 +1533,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             &["m5-crash-recovery-self-test"],
             Some((
-                MarkerSet::Ordered(&M5_CRASH_RECOVERY_MARKERS),
+                MarkerSet::Steps(M5_CRASH_RECOVERY_LATE_SPEC),
                 M5_CRASH_RECOVERY_TIMEOUT,
             )),
             config,
@@ -1434,6 +1546,10 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
         Ok(())
     })();
     finalize_m5_disk_lifecycle(run_result, options.keep_disk)
+}
+
+fn run_m5_disk_harness_default() -> Result<(), XtaskError> {
+    run_m5_disk_harness(&[])
 }
 
 fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
@@ -2072,9 +2188,14 @@ fn run_m4_recovery_acceptance() -> Result<(), XtaskError> {
     )
 }
 
+/// M4 milestone gate: every M4 constituent in [`M4_MILESTONE_STEPS`] order. The
+/// first failure propagates and no PASS is printed.
 fn run_m4_acceptance() -> Result<(), XtaskError> {
-    run_m4_recovery_acceptance()?;
-    run_m4_restart_policy_acceptance()?;
+    let total = M4_MILESTONE_STEPS.len();
+    for (index, (name, step)) in M4_MILESTONE_STEPS.iter().enumerate() {
+        println!("[M4  ] step {}/{total} {name}", index + 1);
+        step()?;
+    }
     println!("[M4  ] PASS");
     Ok(())
 }
@@ -4012,13 +4133,8 @@ fn run_driven_acceptance_command(
                     print!("{}", chunk.text);
                 }
                 output.push_str(&chunk.text);
-                let guest_fail_line = output.find("[FAIL] ").and_then(|start| {
-                    output[start..]
-                        .find('\n')
-                        .map(|len| output[start..start + len].trim_end().to_owned())
-                });
-                if fails_fast_on_guest_fail(marker_set) && !authoritative_pass {
-                    if let Some(fail_line) = guest_fail_line {
+                if !authoritative_pass {
+                    if let Some(fail_line) = unexpected_guest_failure(&output, marker_set, false) {
                         terminate_child(&mut child)?;
                         let _ = child.wait();
                         join_output_reader(stdout_handle);
@@ -4051,6 +4167,16 @@ fn run_driven_acceptance_command(
                     }
                 }
                 if tracker.consume(&output) && !authoritative_pass {
+                    if let Some(fail_line) = unexpected_guest_failure(&output, marker_set, true) {
+                        terminate_child(&mut child)?;
+                        let _ = child.wait();
+                        join_output_reader(stdout_handle);
+                        join_output_reader(stderr_handle);
+                        return Err(XtaskError::CommandFailed {
+                            command: command_display,
+                            status: format!("guest reported a failure: {fail_line}"),
+                        });
+                    }
                     if let Err(error) = driver.0.before_teardown(deadline) {
                         return Err(abort_driven_acceptance(
                             &mut child,
@@ -4105,6 +4231,13 @@ fn run_driven_acceptance_command(
                             return Err(error);
                         }
                     }
+                    if let Err(error) = validate_before_after_counts(&output, marker_set) {
+                        terminate_child(&mut child)?;
+                        let _ = child.wait();
+                        join_output_reader(stdout_handle);
+                        join_output_reader(stderr_handle);
+                        return Err(error);
+                    }
                     if marker_set_is_ordered(marker_set, &M9_USERSPACE_ACCEPTANCE_MARKERS) {
                         if let Err(reason) =
                             m9_userspace_validate::validate_m9_userspace_serial(&output)
@@ -4135,6 +4268,15 @@ fn run_driven_acceptance_command(
                     terminate_child(&mut child)?;
                     child_status = Some(child.wait()?);
                 } else if !authoritative_pass {
+                    if let Some(mismatch) = tracker.mismatch() {
+                        terminate_child(&mut child)?;
+                        let _ = child.wait();
+                        join_output_reader(stdout_handle);
+                        join_output_reader(stderr_handle);
+                        return Err(XtaskError::Validation(format!(
+                            "marker value mismatch: {mismatch}"
+                        )));
+                    }
                     if let Some(pass_marker) = final_guest_marker(marker_set) {
                         if output.contains(pass_marker) {
                             terminate_child(&mut child)?;
@@ -4179,6 +4321,12 @@ fn run_driven_acceptance_command(
     drain_output_events(&rx, &mut output);
 
     if authoritative_pass {
+        if let Some(fail_line) = unexpected_guest_failure(&output, marker_set, true) {
+            return Err(XtaskError::CommandFailed {
+                command: command_display,
+                status: format!("guest reported a failure after its markers: {fail_line}"),
+            });
+        }
         if markers_require_verbatim_linux_hello(marker_set) {
             assert_no_ipc_framed_linux_hello(&output)?;
         }
@@ -4256,17 +4404,6 @@ fn is_m6_revocation_spec(set: MarkerSet<'_>) -> bool {
     matches!(set, MarkerSet::Steps(M6_REVOCATION_ACCEPTANCE_SPEC))
 }
 
-/// Constituents where any guest `[FAIL] ` line is terminal, even when the guest
-/// keeps running instead of writing the debug-exit port.
-fn fails_fast_on_guest_fail(set: MarkerSet<'_>) -> bool {
-    marker_set_is_ordered(set, &M9_USERSPACE_ACCEPTANCE_MARKERS)
-        || marker_set_is_ordered(set, &M10_FRAMEBUFFER_ACCEPTANCE_MARKERS)
-        || M6_ORDERED_MARKER_SETS
-            .iter()
-            .any(|markers| marker_set_is_ordered(set, markers))
-        || is_m6_revocation_spec(set)
-}
-
 fn final_guest_marker(set: MarkerSet<'_>) -> Option<&str> {
     if is_m6_revocation_spec(set) {
         return Some("[M6.6] PASS");
@@ -4280,6 +4417,11 @@ fn final_guest_marker(set: MarkerSet<'_>) -> Option<&str> {
 }
 
 fn validate_output_markers(output: &str, marker_set: MarkerSet<'static>) -> Result<(), XtaskError> {
+    if let Some(fail_line) = unexpected_guest_failure(output, marker_set, true) {
+        return Err(XtaskError::Validation(format!(
+            "guest reported a failure: {fail_line}"
+        )));
+    }
     if marker_set_is_ordered(marker_set, &M6_CAPABILITIES_ACCEPTANCE_MARKERS) {
         return validate_m6_capabilities_markers(output);
     }
@@ -4297,13 +4439,57 @@ fn validate_output_markers(output: &str, marker_set: MarkerSet<'static>) -> Resu
         if marker_set_is_ordered(marker_set, &M10_INPUT_SMOKE_ACCEPTANCE_MARKERS) {
             validate_m10_input_counts(output)?;
         }
+        validate_before_after_counts(output, marker_set)?;
         if markers_require_verbatim_linux_hello(marker_set) {
             assert_no_ipc_framed_linux_hello(output)?;
         }
         Ok(())
+    } else if let Some(mismatch) = tracker.mismatch() {
+        Err(XtaskError::Validation(format!(
+            "marker value mismatch: {mismatch}"
+        )))
     } else {
         Err(XtaskError::MissingMarker(tracker.pending_label()))
     }
+}
+
+const M9_MAP_PROBE_COUNTS: &str = "[M9.C] map probe free_frames before=";
+const M10_NXE_BASELINE_COUNTS: &str = "[M10.NX] teardown baseline free_frames before=";
+
+/// A lane's line reporting resource counts before and after a probe, and how many
+/// `before=`/`after=` pairs it carries.
+fn before_after_counts_line(set: MarkerSet<'_>) -> Option<(&'static str, usize)> {
+    match set {
+        MarkerSet::Steps(M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_SPEC) => Some((M9_MAP_PROBE_COUNTS, 2)),
+        MarkerSet::Ordered(markers) if markers == M10_NXE_ACCEPTANCE_MARKERS => {
+            Some((M10_NXE_BASELINE_COUNTS, 1))
+        }
+        _ => None,
+    }
+}
+
+/// Requires every `before=` value on the lane's counts line to equal its `after=` value,
+/// so the pass rests on the reported figures and not only on the kernel's own summary.
+fn validate_before_after_counts(output: &str, set: MarkerSet<'_>) -> Result<(), XtaskError> {
+    let Some((prefix, pairs)) = before_after_counts_line(set) else {
+        return Ok(());
+    };
+    let line = output
+        .lines()
+        .find_map(|line| line.find(prefix).map(|at| line[at..].trim_end()))
+        .ok_or_else(|| XtaskError::MissingMarker(prefix.to_owned()))?;
+    let values = |key: &str| -> Vec<&str> {
+        line.split_whitespace()
+            .filter_map(|token| token.strip_prefix(key))
+            .collect()
+    };
+    let (before, after) = (values("before="), values("after="));
+    if before.len() != pairs || after.len() != pairs || before != after {
+        return Err(XtaskError::Validation(format!(
+            "counts changed across the probe: {line}"
+        )));
+    }
+    Ok(())
 }
 
 /// The smoke lane's counters, checked by value rather than by line prefix: each IRQ vector
@@ -4706,7 +4892,7 @@ fn print_help() {
     println!("  run          Build kernel and launch QEMU for normal development boot");
     println!("  test-m1      Build the M1 self-test kernel, run QEMU, and validate PASS markers");
     println!("  test-m2      Build the M2 self-test kernel, run QEMU, and validate PASS markers");
-    println!("  test-m3      M3 milestone gate: run all M3 acceptance boots in order, print [M3  ] PASS only if all pass");
+    println!("  test-m3      M3 milestone gate: run every M3 acceptance boot in order (test-m3-address-space and test-m3-lifecycle as one merged boot), print [M3  ] PASS only if all pass");
     println!("  test-m3-address-space Build the M3.2 address-space kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-entry Build the M3.1 userspace-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-syscall Build the M3.3 syscall-entry kernel, run QEMU, and validate PASS markers");
@@ -4718,7 +4904,7 @@ fn print_help() {
     println!("  test-m9-linux-trace M9 #106 bounded Linux syscall trace QEMU acceptance (aliases: m9-linux-trace, m9.106)");
     println!("  test-m9-linux-socket M9 #105 socket syscalls + M7 data plane + probe ELF (aliases: m9-linux-socket, m9.105)");
     println!("  test-m8-linux-hello Boot M8.7 self-test then production feature (hello + clean [M2] PASS); 40s for two launches (aliases: m8-linux-hello, m8.7)");
-    println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
+    println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, test-m8-linux-image, test-m8-linux-dispatch, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
     println!("  test-m9         M9 milestone gate: verify pinned BusyBox fixture, linux-abi/elf/rootfs/kernel host tests, every test-m9-* constituent, then test-m9-userspace; prints [M9  ] PASS (aliases: m9, m9.9)");
     println!(
         "  test-m10-contract M10 graphics contract host tests plus UEFI builds of graphics and native-abi; prints [M10.contract] PASS (aliases: m10-contract)"
@@ -4757,8 +4943,8 @@ fn print_help() {
     println!("  test-m4-supervisor Build the M4.3 supervisor userspace image and QEMU integration self-test");
     println!("  test-m4-restart-policy Run M4.6 host restart-policy convergence tests and build the CPL3 image");
     println!("  test-m4-recovery Build the M4.8 recovery supervisor kernel boot and validate ordered markers");
-    println!("  test-m4       M4 milestone gate: recovery QEMU boot plus M4.6 host policy tests");
-    println!("  test-m5       M5 milestone gate: block, storage, persistence, and crash-recovery acceptance");
+    println!("  test-m4       M4 milestone gate: every test-m4-* constituent (service-lifecycle, supervisor, crash-service, recovery, restart-policy)");
+    println!("  test-m5       M5 milestone gate: every test-m5-* constituent (disk-harness, block, storage, crash-matrix, persistence, crash-recovery)");
     println!("  test-m5-block Build the M5.2 virtio-block kernel, run QEMU, and validate ordered markers");
     println!("  test-m7-net-device Build the M7.2 virtio-net kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m7-tls       M7.6 TLS client acceptance (pass + fail-closed QEMU boots)");
@@ -4774,7 +4960,7 @@ fn print_help() {
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
     println!("  test-m5-persistence Two-boot persistent-disk M5 acceptance using the production storage path");
-    println!("  test-m5-crash-recovery Four-boot abrupt-stop crash-recovery M5 acceptance");
+    println!("  test-m5-crash-recovery Six-boot abrupt-stop crash-recovery M5 acceptance");
     println!("                 Pass --keep-disk to preserve target/m5/m5-data.img for debugging");
     println!("  test-m5-disk-harness Two-boot M5 disk harness with host-side sentinel validation");
     println!(
@@ -4806,7 +4992,7 @@ fn print_help() {
     println!(
         "  test-m7-net-caps Build M7.7 network capability broker boot and validate ordered markers"
     );
-    println!("  test-m7          M7 milestone gate over the converged network-service path");
+    println!("  test-m7          M7 milestone gate: every test-m7-* constituent (net-device, net-service, network, net-caps, dns, tls)");
     println!("  m5-disk-create Create deterministic M5 data disk if missing (preserve existing)");
     println!("  m5-disk-reset Recreate deterministic blank M5 data disk");
     println!("  m5-disk-inspect Print M5 data disk path and size");
@@ -6117,6 +6303,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "test-m5-disk-harness",
                 "test-m5-block",
                 "test-m5-storage",
                 "test-m5-crash-matrix",
@@ -6151,6 +6338,8 @@ mod tests {
         assert_eq!(
             names,
             [
+                "test-m7-net-device",
+                "test-m7-net-service",
                 "test-m7-network",
                 "test-m7-net-caps",
                 "test-m7-dns",
@@ -6169,8 +6358,148 @@ mod tests {
                 "clean-slate-elf (host)",
                 "clean-slate-linux-abi (host)",
                 "linux-image loader (host)",
+                "test-m8-linux-image",
+                "test-m8-linux-dispatch",
                 "test-m8-linux-hello",
             ]
+        );
+    }
+
+    #[test]
+    fn m4_milestone_steps_have_deterministic_order() {
+        let names: Vec<&str> = M4_MILESTONE_STEPS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "test-m4-service-lifecycle",
+                "test-m4-supervisor",
+                "test-m4-crash-service",
+                "test-m4-recovery",
+                "test-m4-restart-policy",
+            ]
+        );
+    }
+
+    /// Every `test-mN-*` lane registered in `parse_command` or `scripts/run-tests.ps1` must be
+    /// a step of its `test-mN` aggregate, and the script must mark it `CoveredBy` that
+    /// aggregate so `-Exhaustive` runs it once. `test-m3-address-space` and `test-m3-lifecycle`
+    /// run as one merged boot whose marker list
+    /// `merged_address_space_lifecycle_markers_accept_real_transcript` keeps a superset of both,
+    /// so they stay separate script entries without `CoveredBy`. `OUTSIDE_PREFIX` lists the
+    /// constituents whose names do not carry their aggregate's prefix.
+    #[test]
+    fn milestone_aggregates_run_every_registered_constituent() {
+        const MERGED_INTO: [(&str, &str); 2] = [
+            ("test-m3-address-space", "test-m3-address-space+lifecycle"),
+            ("test-m3-lifecycle", "test-m3-address-space+lifecycle"),
+        ];
+        const OUTSIDE_PREFIX: [(&str, &str); 3] = [
+            ("verify-m8-fixture", "test-m8"),
+            ("verify-m9-fixture", "test-m9"),
+            ("test-qmp-smoke", "test-m10"),
+        ];
+        fn step_names(steps: &[M4MilestoneStep]) -> Vec<&'static str> {
+            steps.iter().map(|(name, _)| *name).collect()
+        }
+        let aggregates = [
+            ("test-m3", step_names(&M3_MILESTONE_STEPS)),
+            ("test-m4", step_names(&M4_MILESTONE_STEPS)),
+            ("test-m5", step_names(&M5_MILESTONE_STEPS)),
+            ("test-m6", step_names(&M6_MILESTONE_STEPS)),
+            ("test-m7", step_names(&M7_MILESTONE_STEPS)),
+            ("test-m8", step_names(&M8_MILESTONE_STEPS)),
+            ("test-m9", step_names(&M9_MILESTONE_STEPS)),
+            ("test-m10", step_names(&M10_MILESTONE_STEPS)),
+        ];
+        let xtask_source = include_str!("main.rs");
+        let script = include_str!("../../scripts/run-tests.ps1");
+        // Built at runtime so this test's own source does not register a lane.
+        let command_needle = ["cmd ", "== \""].concat();
+        let mut registered: Vec<&str> = xtask_source
+            .match_indices(command_needle.as_str())
+            .map(|(index, _)| {
+                let rest = &xtask_source[index + command_needle.len()..];
+                &rest[..rest.find('"').expect("command literal closes")]
+            })
+            .collect();
+        let script_entry = |line: &'static str| -> Option<&'static str> {
+            let rest = line.trim_start().strip_prefix('"')?;
+            let end = rest.find('"')?;
+            rest[end + 1..]
+                .trim_start()
+                .starts_with("= @{")
+                .then(|| &rest[..end])
+        };
+        registered.extend(script.lines().filter_map(script_entry));
+        registered.sort_unstable();
+        registered.dedup();
+
+        for (aggregate, steps) in &aggregates {
+            let prefix = format!("{aggregate}-");
+            let constituents: Vec<&str> = registered
+                .iter()
+                .copied()
+                .filter(|name| {
+                    name.starts_with(&prefix)
+                        || OUTSIDE_PREFIX
+                            .iter()
+                            .any(|(lane, owner)| lane == name && owner == aggregate)
+                })
+                .collect();
+            assert!(
+                !constituents.is_empty(),
+                "{aggregate} has no registered constituents"
+            );
+            for constituent in constituents {
+                let step = MERGED_INTO
+                    .iter()
+                    .find(|(lane, _)| *lane == constituent)
+                    .map_or(constituent, |(_, merged)| *merged);
+                assert!(
+                    steps.contains(&step),
+                    "{aggregate} does not run registered constituent {constituent}"
+                );
+                let covered_by = format!("CoveredBy = \"{aggregate}\"");
+                let marked_covered = script.lines().any(|line| {
+                    script_entry(line) == Some(constituent) && line.contains(&covered_by)
+                });
+                assert_eq!(
+                    marked_covered,
+                    step == constituent,
+                    "scripts/run-tests.ps1 CoveredBy for {constituent} disagrees with {aggregate}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn before_after_counts_must_match_on_the_lane_counts_line() {
+        let fail_closed = MarkerSet::Steps(M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_SPEC);
+        let nxe = MarkerSet::Ordered(&M10_NXE_ACCEPTANCE_MARKERS);
+        let probe = |frames: &str, mappings: &str| {
+            format!("[M9.C] map probe free_frames before=900 after={frames} mappings before=3 after={mappings}\n")
+        };
+        assert!(validate_before_after_counts(&probe("900", "3"), fail_closed).is_ok());
+        assert!(validate_before_after_counts(&probe("899", "3"), fail_closed).is_err());
+        assert!(validate_before_after_counts(&probe("900", "4"), fail_closed).is_err());
+        assert!(validate_before_after_counts(
+            "[M9.C] map probe free_frames before=900 after=900\n",
+            fail_closed
+        )
+        .is_err());
+        assert!(validate_before_after_counts("[M9.C] PASS\n", fail_closed).is_err());
+        assert!(validate_before_after_counts(
+            "[M10.NX] teardown baseline free_frames before=77 after=77\n",
+            nxe
+        )
+        .is_ok());
+        assert!(validate_before_after_counts(
+            "[M10.NX] teardown baseline free_frames before=77 after=76\n",
+            nxe
+        )
+        .is_err());
+        assert!(
+            validate_before_after_counts("", MarkerSet::Ordered(&M1_ACCEPTANCE_MARKERS)).is_ok()
         );
     }
 

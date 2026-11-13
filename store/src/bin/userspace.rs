@@ -112,6 +112,15 @@ pub extern "C" fn _start() -> ! {
     bootstrap.alpha_checksum = 0;
     bootstrap.beta_len = 0;
     bootstrap.beta_checksum = 0;
+    bootstrap.pending_object_id = 0;
+    bootstrap.pending_len = 0;
+    bootstrap.pending_checksum = 0;
+    bootstrap.formatted = 0;
+    bootstrap.mounted_alpha_len = 0;
+    bootstrap.mounted_alpha_checksum = 0;
+    bootstrap.mounted_beta_len = 0;
+    bootstrap.mounted_beta_checksum = 0;
+    bootstrap.malformed_mount_error = 0;
 
     bootstrap.result_code = match run(bootstrap) {
         Ok(code) => code,
@@ -307,6 +316,7 @@ fn run_integration_initial(bootstrap: &mut StorageServiceBootstrap) -> Result<u6
     let mut store = match ObjectStore::mount(SyscallBlockDevice::attach(bootstrap)?) {
         Ok(store) => store,
         Err(StoreError::Incompatible(IncompatibleFormatError::BadMagic)) => {
+            bootstrap.formatted = 1;
             ObjectStore::format(SyscallBlockDevice::attach(bootstrap)?).map_err(store_error_code)?
         }
         Err(error) => return Err(store_error_code(error)),
@@ -358,6 +368,7 @@ fn run_integration_restart(bootstrap: &mut StorageServiceBootstrap) -> Result<u6
     if alpha.as_slice() != OBJECT_ALPHA_V1 || beta.as_slice() != OBJECT_BETA_V1 {
         return Err(0);
     }
+    record_mounted_objects(bootstrap, &alpha, &beta);
     store
         .write_object(OBJECT_ALPHA_ID, OBJECT_ALPHA_NAME, OBJECT_ALPHA_V2)
         .map_err(store_error_code)?;
@@ -381,7 +392,10 @@ fn run_integration_restart(bootstrap: &mut StorageServiceBootstrap) -> Result<u6
     let mut device = remounted.into_inner();
     corrupt_superblocks(&mut device)?;
     match ObjectStore::mount(device) {
-        Err(StoreError::Incompatible(_) | StoreError::Corrupt(_)) => Ok(STORAGE_SERVICE_RESULT_OK),
+        Err(error @ (StoreError::Incompatible(_) | StoreError::Corrupt(_))) => {
+            bootstrap.malformed_mount_error = store_error_code(error);
+            Ok(STORAGE_SERVICE_RESULT_OK)
+        }
         Ok(_) => Err(0),
         Err(error) => Err(store_error_code(error)),
     }
@@ -393,6 +407,10 @@ fn run_persistence(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> 
             1 => {
                 bootstrap.mounted_generation = 1;
                 verify_and_record(&mut store, bootstrap, &PERSISTENCE_ALPHA_V1, OBJECT_BETA_V1)?;
+                bootstrap.mounted_alpha_len = bootstrap.alpha_len;
+                bootstrap.mounted_alpha_checksum = bootstrap.alpha_checksum;
+                bootstrap.mounted_beta_len = bootstrap.beta_len;
+                bootstrap.mounted_beta_checksum = bootstrap.beta_checksum;
                 store
                     .write_object(OBJECT_ALPHA_ID, OBJECT_ALPHA_NAME, &PERSISTENCE_ALPHA_V2)
                     .map_err(store_error_code)?;
@@ -418,6 +436,7 @@ fn run_persistence(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u64> 
         Err(StoreError::Incompatible(IncompatibleFormatError::BadMagic)) => {
             let mut store = ObjectStore::format(SyscallBlockDevice::attach(bootstrap)?)
                 .map_err(store_error_code)?;
+            bootstrap.formatted = 1;
             bootstrap.mounted_generation = 0;
             store
                 .write_object(OBJECT_ALPHA_ID, OBJECT_ALPHA_NAME, &PERSISTENCE_ALPHA_V1)
@@ -452,6 +471,9 @@ fn run_crash_arm(
         return Err(expected_generation);
     }
     verify_and_record(&mut store, bootstrap, &PERSISTENCE_ALPHA_V2, OBJECT_BETA_V1)?;
+    bootstrap.pending_object_id = OBJECT_ALPHA_ID;
+    bootstrap.pending_len = PERSISTENCE_ALPHA_V3.len() as u64;
+    bootstrap.pending_checksum = checksum(&PERSISTENCE_ALPHA_V3) as u64;
     store
         .write_object(OBJECT_ALPHA_ID, OBJECT_ALPHA_NAME, &PERSISTENCE_ALPHA_V3)
         .map_err(store_error_code)?;
@@ -488,6 +510,13 @@ fn verify_and_record(
     }
     record_objects(bootstrap, &alpha, &beta);
     Ok(())
+}
+
+fn record_mounted_objects(bootstrap: &mut StorageServiceBootstrap, alpha: &[u8], beta: &[u8]) {
+    bootstrap.mounted_alpha_len = alpha.len() as u64;
+    bootstrap.mounted_alpha_checksum = checksum(alpha) as u64;
+    bootstrap.mounted_beta_len = beta.len() as u64;
+    bootstrap.mounted_beta_checksum = checksum(beta) as u64;
 }
 
 fn record_objects(bootstrap: &mut StorageServiceBootstrap, alpha: &[u8], beta: &[u8]) {

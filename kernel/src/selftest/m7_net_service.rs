@@ -28,6 +28,7 @@ use crate::service::spawn::launch_network_aux_process;
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
+use clean_slate_network::limits::MAX_SESSIONS;
 use clean_slate_service_fixtures::{
     NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
     NETWORK_SERVICE_MODE_ACCEPTANCE, NETWORK_SERVICE_MODE_CAPACITY_LOOP,
@@ -557,7 +558,13 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
             if report.result_code != NETWORK_SERVICE_RESULT_OK {
                 fatal_kernel_error("m7 capacity loop failed");
             }
-            kernel_log_line("[NET ] capacity baseline ok");
+            if report.aux_status <= u64::from(MAX_SESSIONS) {
+                fatal_kernel_error("m7 capacity loop did not cycle past the session limit");
+            }
+            kernel_log_fmt(format_args!(
+                "[NET ] capacity baseline ok cycles={} max_sessions={MAX_SESSIONS}\n",
+                report.aux_status
+            ));
             terminate_network_service(controller, allocator, test_state.lifecycle_capability);
             M7Phase::Complete
         }

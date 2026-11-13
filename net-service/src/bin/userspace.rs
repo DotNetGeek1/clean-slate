@@ -2361,6 +2361,7 @@ fn run_stale_close(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> 
 fn run_capacity_loop(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64> {
     let handle = client_handle()?;
     let generation = SessionGeneration::new(bootstrap.service_generation);
+    bootstrap.aux_status = 0;
     for _ in 0..=(MAX_SESSIONS * 4) {
         let open = NetworkRequest::Open {
             kind: SocketKind::Udp,
@@ -2395,6 +2396,7 @@ fn run_capacity_loop(bootstrap: &mut NetworkServiceBootstrap) -> Result<u64, u64
         let close = NetworkRequest::Close { session }.encode();
         let close_id = client_submit(handle, &close, &[])?;
         let _ = poll_until_done(handle, close_id, &mut payload)?;
+        bootstrap.aux_status += 1;
     }
     bootstrap.result_code = NETWORK_SERVICE_RESULT_OK;
     Ok(NETWORK_SERVICE_RESULT_OK)

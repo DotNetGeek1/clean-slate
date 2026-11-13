@@ -30,6 +30,20 @@ pub struct StorageServiceBootstrap {
     pub beta_len: u64,
     pub beta_checksum: u64,
     pub object_role_handle: u64,
+    /// The object write the service is committing, set before its first block write so a
+    /// crash injected mid-commit can report what was in flight.
+    pub pending_object_id: u64,
+    pub pending_len: u64,
+    pub pending_checksum: u64,
+    /// 1 when this run formatted the store instead of mounting an existing one.
+    pub formatted: u64,
+    /// Objects as read right after mounting, before this run wrote anything.
+    pub mounted_alpha_len: u64,
+    pub mounted_alpha_checksum: u64,
+    pub mounted_beta_len: u64,
+    pub mounted_beta_checksum: u64,
+    /// Store error code returned when mounting the deliberately corrupted media; 0 if not tried.
+    pub malformed_mount_error: u64,
 }
 
 impl StorageServiceBootstrap {
@@ -48,6 +62,15 @@ impl StorageServiceBootstrap {
             beta_len: 0,
             beta_checksum: 0,
             object_role_handle: 0,
+            pending_object_id: 0,
+            pending_len: 0,
+            pending_checksum: 0,
+            formatted: 0,
+            mounted_alpha_len: 0,
+            mounted_alpha_checksum: 0,
+            mounted_beta_len: 0,
+            mounted_beta_checksum: 0,
+            malformed_mount_error: 0,
         }
     }
 }

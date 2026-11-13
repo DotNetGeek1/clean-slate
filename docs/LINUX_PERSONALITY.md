@@ -601,14 +601,16 @@ see [M8_FIXTURE.md](M8_FIXTURE.md) and [M8.7 — integrated launch path (#97)](#
 
 ### What it proves
 
-Ordered phases (`[M8  ] step N/5 <name>`):
+Ordered phases (`[M8  ] step N/7 <name>`):
 
 1. `verify-m8-fixture` — SHA-256 + pinned ELF metadata for the committed hello binary.
 2. `clean-slate-elf` host tests — segment-aware load-plan foundation (#129).
 3. `clean-slate-linux-abi` host tests — errno/syscall/stack contract (#91).
 4. `linux-image loader (host)` — `#92` `process::linux_image` + malformed corpus
    (`cargo test -p clean-slate-kernel --features m8-linux-image process::linux_image`).
-5. `test-m8-linux-hello` — composed once (self-test then production QEMU); not
+5. `test-m8-linux-image` — M8.2 ELF loader self-test boot.
+6. `test-m8-linux-dispatch` — M8.3 personality dispatch self-test boot.
+7. `test-m8-linux-hello` — composed once (self-test then production QEMU); not
    re-booted inside the aggregate.
 
 ### Marker order (production build first for launch/output/exit)
