@@ -303,7 +303,7 @@ cargo test -p clean-slate-kernel --features m4-service-lifecycle-self-test
 cargo xtask test-m4-service-lifecycle
 ```
 
-The `m4-service-lifecycle-self-test` feature boots a bounded launch/terminate/restart path and emits `[M4.2] PASS` when fresh PID/generation invariants hold.
+The `m4-service-lifecycle-self-test` feature boots a bounded launch/terminate/restart path, then runs two native userspace processes against `LIFECYCLE_WAIT` (syscall 21, contract in `native-abi/src/lifecycle.rs`): a capability holder whose 20 ms wait must time out at or after its deadline (read with `WORK_SET` `NOW`) and whose unbounded wait must be woken when the idle thread queues a lifecycle event, and a process whose waits with another holder's capability, a block-device capability and no capability must be refused without blocking. The kernel checks every result and emits `[M4.2] PASS` only when all of them and the fresh PID/generation invariants hold.
 
 For the M4.3 userspace supervisor runtime (host-tested registry/control + optional QEMU integration):
 

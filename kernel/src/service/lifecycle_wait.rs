@@ -107,7 +107,18 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
     let check = || {
         let controller = unsafe { service_lifecycle_controller_mut() };
         let pending = controller.pending_service_authorized(caller_pid, args.capability);
-        wait_step(pending, args.deadline_ns, monotonic_ns)
+        let mut now_read = None;
+        let step = wait_step(pending, args.deadline_ns, || {
+            *now_read.insert(monotonic_ns())
+        });
+        #[cfg(feature = "m4-service-lifecycle-self-test")]
+        crate::selftest::m4_lifecycle_wait::observe_lifecycle_wait_step(
+            caller_pid,
+            args.deadline_ns,
+            now_read,
+            step,
+        );
+        step
     };
     match block_current_thread_unless(
         frame,

@@ -389,6 +389,16 @@ impl ServiceLifecycleController {
             .grant_lifecycle_control_capability(holder_pid)
     }
 
+    /// A capability of another kind for the lifecycle-wait refusal check.
+    #[cfg(feature = "m4-service-lifecycle-self-test")]
+    pub(crate) fn grant_block_device_capability_for_self_test(
+        &mut self,
+        holder_pid: u64,
+    ) -> Result<u64, &'static str> {
+        self.block_capabilities
+            .grant_block_device_capability(holder_pid, STORAGE_BLOCK_DEVICE_ID)
+    }
+
     pub(crate) fn acquire_block_device_capability(
         &self,
         holder_pid: u64,

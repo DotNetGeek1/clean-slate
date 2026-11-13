@@ -38,6 +38,8 @@ fn idle_thread_one_wait() {
     assert_idle_stack_within_guard();
     #[cfg(feature = "m9-block-wake-self-test")]
     crate::selftest::m9_block_wake::on_idle_loop_wake();
+    #[cfg(feature = "m4-service-lifecycle-self-test")]
+    crate::selftest::m4_lifecycle_wait::on_idle_loop_wake();
     #[cfg(feature = "m9-linux-runtime-self-test")]
     crate::selftest::m9_linux_runtime_latency::observe_idle_halt();
     #[cfg(feature = "m10-desktop")]

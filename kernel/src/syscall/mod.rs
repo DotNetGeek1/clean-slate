@@ -928,6 +928,10 @@ fn dispatch_native(frame: &mut SyscallContext) {
         crate::selftest::m10_input::SYSCALL_NR_M10_INPUT_REPORT => {
             crate::selftest::m10_input::handle_report_syscall(frame);
         }
+        #[cfg(feature = "m4-service-lifecycle-self-test")]
+        crate::selftest::m4_lifecycle_wait::SYSCALL_NR_M4_LIFECYCLE_WAIT_PROBE => {
+            crate::selftest::m4_lifecycle_wait::handle_probe_syscall(frame);
+        }
         _ => frame.rax = SYSCALL_ENOSYS,
     }
 }

@@ -515,10 +515,14 @@ const M4_CRASH_SERVICE_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[M4.7] PASS",
 ];
 const M4_SERVICE_LIFECYCLE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M4_SERVICE_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 4] = [
+const M4_SERVICE_LIFECYCLE_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[SVC ] declared service=2",
     "[SVC ] launch service=2 pid=",
     "[M4.2] unauthorized denied",
+    "[M4.2] lifecycle wait refused foreign_holder=EACCES",
+    "[M4.2] lifecycle wait timed out timeout_ns=20000000",
+    "[M4.2] idle ran while waiter blocked idle_halts=",
+    "[M4.2] lifecycle wait woken service=2 poll_bytes=64",
     "[M4.2] PASS",
 ];
 const M4_SUPERVISOR_ACCEPTANCE_MARKERS: [&str; 6] = [
