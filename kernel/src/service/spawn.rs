@@ -179,6 +179,21 @@ const _: () = assert!(STORAGE_USERSPACE_MAPPED_CODE_PAGES <= STORAGE_SERVICE_MAX
     feature = "m6-capabilities-self-test",
     feature = "m6-fixture-smoke-self-test"
 ))]
+const _: () = assert!(STORAGE_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_ADDRESS);
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
 const STORAGE_SERVICE_MAPPED_PAGES: usize =
     STORAGE_USERSPACE_MAPPED_CODE_PAGES + STORAGE_SERVICE_STACK_PAGES as usize + 1;
 #[cfg(any(
@@ -212,6 +227,19 @@ const _: () = assert!(
     feature = "m6-fixture-smoke-self-test"
 ))]
 include!(concat!(env!("OUT_DIR"), "/m6_fixture_userspace_entry.rs"));
+#[cfg(any(
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m7-net-caps-self-test",
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+const _: () = assert!(M6_FIXTURE_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_ADDRESS);
 #[cfg(any(
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
@@ -1288,6 +1316,8 @@ fn launch_m6_fixture_service(
 #[cfg(feature = "m7-net-service-self-test")]
 include!(concat!(env!("OUT_DIR"), "/network_userspace_entry.rs"));
 #[cfg(feature = "m7-net-service-self-test")]
+const _: () = assert!(NETWORK_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_ADDRESS);
+#[cfg(feature = "m7-net-service-self-test")]
 const NETWORK_USERSPACE_IMAGE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/network_userspace.bin"));
 #[cfg(feature = "m7-net-service-self-test")]
@@ -1444,6 +1474,7 @@ struct DesktopImage {
     bytes: &'static [u8],
     segments: &'static [crate::mm::image_loader::EmbeddedSegment],
     image_base: u64,
+    relocated_base: u64,
     entry_offset: u64,
     mapped_code_pages: usize,
     stack_pages: u64,
@@ -1459,6 +1490,7 @@ impl DesktopImage {
                 bytes: COMPOSITOR_USERSPACE_IMAGE,
                 segments: &COMPOSITOR_USERSPACE_SEGMENTS,
                 image_base: COMPOSITOR_USERSPACE_IMAGE_BASE,
+                relocated_base: COMPOSITOR_USERSPACE_RELOCATED_BASE,
                 entry_offset: COMPOSITOR_USERSPACE_ENTRY_OFFSET,
                 mapped_code_pages: COMPOSITOR_USERSPACE_MAPPED_CODE_PAGES,
                 stack_pages: role.stack_pages(),
@@ -1467,6 +1499,7 @@ impl DesktopImage {
                 bytes: DESKTOP_SHELL_USERSPACE_IMAGE,
                 segments: &DESKTOP_SHELL_USERSPACE_SEGMENTS,
                 image_base: DESKTOP_SHELL_USERSPACE_IMAGE_BASE,
+                relocated_base: DESKTOP_SHELL_USERSPACE_RELOCATED_BASE,
                 entry_offset: DESKTOP_SHELL_USERSPACE_ENTRY_OFFSET,
                 mapped_code_pages: DESKTOP_SHELL_USERSPACE_MAPPED_CODE_PAGES,
                 stack_pages: role.stack_pages(),
@@ -1475,6 +1508,7 @@ impl DesktopImage {
                 bytes: PLAYGROUND_USERSPACE_IMAGE,
                 segments: &PLAYGROUND_USERSPACE_SEGMENTS,
                 image_base: PLAYGROUND_USERSPACE_IMAGE_BASE,
+                relocated_base: PLAYGROUND_USERSPACE_RELOCATED_BASE,
                 entry_offset: PLAYGROUND_USERSPACE_ENTRY_OFFSET,
                 mapped_code_pages: PLAYGROUND_USERSPACE_MAPPED_CODE_PAGES,
                 stack_pages: role.stack_pages(),
@@ -1503,6 +1537,7 @@ const _: () = {
     while index < roles.len() {
         let image = DesktopImage::for_role(roles[index]);
         assert!(image.image_base == DESKTOP_IMAGE_BASE);
+        assert!(image.relocated_base == DESKTOP_IMAGE_BASE);
         assert!(DESKTOP_STACK_ADDRESS + image.stack_pages * PAGE_SIZE <= DESKTOP_IMAGE_BASE);
         assert!(image.mapped_pages() <= crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS);
         index += 1;
