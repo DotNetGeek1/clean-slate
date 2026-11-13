@@ -15,7 +15,8 @@ use core::mem::size_of;
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m10-desktop"
 ))]
 use crate::arch::x86_64::asm::clean_slate_interrupt_128;
 use crate::arch::x86_64::asm::{
@@ -44,7 +45,8 @@ use crate::arch::x86_64::gdt::initialize_gdt_and_tss;
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test"
+    feature = "m3-entry-self-test",
+    feature = "m10-desktop"
 ))]
 use crate::arch::x86_64::USER_TEST_VECTOR;
 use crate::arch::x86_64::{
@@ -83,7 +85,8 @@ impl IdtEntry {
         feature = "m3-resources-self-test",
         feature = "m4-crash-service-self-test",
         feature = "m4-recovery-self-test",
-        feature = "m3-entry-self-test"
+        feature = "m3-entry-self-test",
+        feature = "m10-desktop"
     ))]
     fn set_user_handler(&mut self, handler: unsafe extern "C" fn()) {
         self.set_handler_with_privilege(handler, 0, 3);
@@ -196,7 +199,9 @@ pub(crate) fn install_interrupt_handlers() {
             feature = "m3-resources-self-test",
             feature = "m4-crash-service-self-test",
             feature = "m4-recovery-self-test",
-            feature = "m3-entry-self-test"
+            feature = "m3-entry-self-test",
+            // The desktop processes exit with `int 0x80` (#227).
+            feature = "m10-desktop"
         ))]
         IDT.entries[USER_TEST_VECTOR].set_user_handler(clean_slate_interrupt_128);
         let pointer = DescriptorTablePointer {

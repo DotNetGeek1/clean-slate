@@ -37,8 +37,8 @@ const fn task_count_for_features() -> usize {
     )) {
         6
     } else if cfg!(feature = "m10-desktop") {
-        // #118: 2 boot demo tasks, then compositor, shell and app, plus the replacement
-        // compositor that starts while the crashed one still holds its slot.
+        // #118: 2 boot demo tasks, then compositor, shell and app, plus one spare. A replacement
+        // starts only after its predecessor's teardown has freed its slot (#227).
         6
     } else if cfg!(feature = "m8-linux-hello") {
         3
@@ -529,6 +529,12 @@ impl Scheduler {
         // Stay in the idle loop across the interrupt return; it runs deadline expiry
         // and blocked-syscall resume with the correct dispatch preparation.
         Ok(current_stack_pointer)
+    }
+
+    /// Whether a thread other than the idle thread could be dispatched now.
+    #[cfg(feature = "m10-desktop")]
+    pub(crate) fn has_runnable_threads(&self) -> bool {
+        self.next_runnable_from(Some(IDLE_THREAD_INDEX)).is_some()
     }
 
     pub(super) fn wake_from_idle_loop(&mut self) -> Result<u64, &'static str> {
