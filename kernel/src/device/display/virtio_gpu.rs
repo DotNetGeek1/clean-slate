@@ -328,6 +328,16 @@ pub(crate) struct LoggedTransfer {
     pub(crate) rect: BufferRect,
 }
 
+/// The device's answer to the first command of a batch that did not get its expected OK (self-test
+/// failure context). `response` is the response header's type, 0 if the device wrote none.
+#[cfg(any(test, feature = "m10-virtio-gpu-self-test"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ResponseFault {
+    pub(crate) command: Command,
+    pub(crate) response: u32,
+    pub(crate) written_len: u32,
+}
+
 #[cfg(any(test, feature = "m10-virtio-gpu-self-test"))]
 const TRANSFER_LOG: usize = 2 * MAX_PRESENT_DAMAGE_RECTS;
 
@@ -348,6 +358,8 @@ pub(crate) struct VirtioGpuBackend<T: VirtqueueTransport> {
     hold_notify: bool,
     #[cfg(any(test, feature = "m10-virtio-gpu-self-test"))]
     transfer_log: [Option<LoggedTransfer>; TRANSFER_LOG],
+    #[cfg(any(test, feature = "m10-virtio-gpu-self-test"))]
+    last_fault: Option<ResponseFault>,
 }
 
 impl<T: VirtqueueTransport> VirtioGpuBackend<T> {
@@ -368,6 +380,8 @@ impl<T: VirtqueueTransport> VirtioGpuBackend<T> {
             hold_notify: false,
             #[cfg(any(test, feature = "m10-virtio-gpu-self-test"))]
             transfer_log: [None; TRANSFER_LOG],
+            #[cfg(any(test, feature = "m10-virtio-gpu-self-test"))]
+            last_fault: None,
         }
     }
 
@@ -472,6 +486,14 @@ impl<T: VirtqueueTransport> VirtioGpuBackend<T> {
             && written_len as usize >= response.len()
             && wire::get_u32(response, 0) == command.expected_response()
             && (command != Command::GetDisplayInfo || display_info_matches(response));
+        #[cfg(any(test, feature = "m10-virtio-gpu-self-test"))]
+        if !ok && self.batch_error.is_none() {
+            self.last_fault = Some(ResponseFault {
+                command,
+                response: wire::get_u32(response, 0),
+                written_len,
+            });
+        }
         if !ok {
             self.batch_error.get_or_insert(BackendError::Failed);
             self.needs_reset = true;
@@ -491,6 +513,10 @@ impl<T: VirtqueueTransport> VirtioGpuBackend<T> {
 
     pub(crate) fn generation(&self) -> u32 {
         self.transport.generation()
+    }
+
+    pub(crate) fn last_fault(&self) -> Option<ResponseFault> {
+        self.last_fault
     }
 
     /// No batch is waiting for its outcome.

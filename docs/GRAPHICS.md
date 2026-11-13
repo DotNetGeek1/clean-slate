@@ -900,7 +900,9 @@ The `fake` feature enables `graphics::fake`: `FakeDisplay`, a model of the displ
 6. a reset to epoch 2 under a new transport generation, followed by a present that re-attaches the backing and sets the scanout again;
 7. detach, unref and device-resetting release.
 
-The host checks the ordered `[VGPU]` markers and the figures they carry, then prints `[M10.virtio-gpu] PASS`. Visual screenshot proof of VirtIO scanout is owned by #118/#119 through #197.
+The host checks the ordered `[VGPU]` markers and the figures they carry, then prints `[M10.virtio-gpu] PASS`. Visual screenshot proof of VirtIO scanout is owned by #118/#119 through #197. On a failed step the guest prints `[VGPU] fault-context` lines before its `[FAIL]` line: the present status, the command counts, and the first command the device rejected with the device's response type (for example `command=SetScanout type=0x1200`, `ERR_UNSPEC`).
+
+Known to pass on QEMU 11.1.0 (`v11.1.0-12130-ge470268ff4`, Windows host). xtask prints `[QEMU] version=…` before every lane boot, so a transcript names the QEMU it ran on. Before #226 the lane failed on every QEMU from 6.1 onwards, which reject `SET_SCANOUT` on a resource without backing.
 
 `cargo xtask test-m10-desktop` (aliases `m10-desktop`, `m10.118`) is the #118 gate and `cargo xtask test-m10` (aliases `m10`, `m10.119`) the #119 aggregate that ends with it and prints `[M10 ] PASS`; see [DEVELOPMENT.md](DEVELOPMENT.md#graphical-desktop-lane-118119).
 

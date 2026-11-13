@@ -193,6 +193,15 @@ fn the_device_rejects_a_scanout_on_a_resource_without_backing() {
     .expect("submitted");
     assert_eq!(gpu.poll(), Some(Err(BackendError::Failed)));
     assert!(!gpu.transport.linked);
+    assert_eq!(
+        gpu.last_fault(),
+        Some(super::ResponseFault {
+            command: Command::SetScanout,
+            response: 0x1200,
+            written_len: wire::HEADER_BYTES as u32,
+        }),
+        "ERR_UNSPEC from the first rejected command"
+    );
 
     gpu.reset().expect("reset");
     assert_eq!(gpu.poll(), Some(Ok(())));
@@ -208,6 +217,15 @@ fn a_display_that_is_not_the_reference_mode_fails_bring_up() {
     gpu.transport.display_size = (1024, 768);
     gpu.begin_bring_up().expect("bring-up");
     assert_eq!(gpu.poll(), Some(Err(BackendError::Failed)));
+    assert_eq!(
+        gpu.last_fault(),
+        Some(super::ResponseFault {
+            command: Command::GetDisplayInfo,
+            response: wire::RESP_OK_DISPLAY_INFO,
+            written_len: wire::DISPLAY_INFO_BYTES as u32,
+        }),
+        "an OK of the wrong geometry is still the fault"
+    );
     assert_eq!(
         gpu.begin_bring_up(),
         Err(BackendError::Failed),

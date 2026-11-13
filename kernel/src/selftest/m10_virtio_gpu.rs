@@ -55,9 +55,27 @@ type Probe<T> = Result<T, &'static str>;
 pub(crate) fn run_m10_virtio_gpu_self_test(allocator: &mut PageAllocator) -> Probe<()> {
     boot_wait::init_clock()?;
     run(allocator).map_err(|reason| {
+        print_fault_context();
         serial_write_fmt(format_args!("[FAIL] m10-virtio-gpu: {reason}\n"));
         "m10 virtio-gpu probe failed"
     })
+}
+
+/// Printed before the `[FAIL]` line, which ends the boot: the present status, the command counts and
+/// the device's answer to the first command it rejected.
+fn print_fault_context() {
+    serial_write_fmt(format_args!(
+        "[VGPU] fault-context status={:?} stats={:?}\n",
+        status().ok(),
+        stats().ok()
+    ));
+    match gpu(|gpu| gpu.last_fault()).ok().flatten() {
+        Some(fault) => serial_write_fmt(format_args!(
+            "[VGPU] fault-context device-response command={:?} type=0x{:04x} written={}\n",
+            fault.command, fault.response, fault.written_len
+        )),
+        None => serial_write_fmt(format_args!("[VGPU] fault-context device-response none\n")),
+    }
 }
 
 fn run(allocator: &mut PageAllocator) -> Probe<()> {
