@@ -130,12 +130,13 @@ const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
 ];
 const M9_LOW_VA_ACCEPTANCE_MARKERS: [&str; 2] = ["[M9.0] creating", "[M9.0] PASS"];
 const M9_LOW_VA_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-const M10_NXE_ACCEPTANCE_MARKERS: [&str; 7] = [
+const M10_NXE_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[CPU ] NXE enabled nx=1",
     "[M10.NX] creating",
     "[M10.NX] efer nxe=1",
     "[PROC] fault pid=",
     "[M10.NX] nx exec fault err=0x15 OK",
+    M10_NXE_BASELINE_COUNTS,
     "[M10.NX] baseline OK",
     "[M10.NX] PASS",
 ];
@@ -304,6 +305,7 @@ const M9_SYSCALL_FAIL_CLOSED_CONTAINMENT_GROUP: &[&str] = &[
     " vector=13 err=0x0",
 ];
 const M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_SPEC: &[MarkerStep] = &[
+    MarkerStep::Ordered(M9_MAP_PROBE_COUNTS),
     MarkerStep::Ordered("[M9.C] failed mmap/brk left free frames and mappings unchanged OK"),
     MarkerStep::Ordered("[TIME] timer initialized"),
     MarkerStep::UnorderedGroup(M9_SYSCALL_FAIL_CLOSED_CONTAINMENT_GROUP),
@@ -4210,6 +4212,13 @@ fn run_driven_acceptance_command(
                             return Err(error);
                         }
                     }
+                    if let Err(error) = validate_before_after_counts(&output, marker_set) {
+                        terminate_child(&mut child)?;
+                        let _ = child.wait();
+                        join_output_reader(stdout_handle);
+                        join_output_reader(stderr_handle);
+                        return Err(error);
+                    }
                     if marker_set_is_ordered(marker_set, &M9_USERSPACE_ACCEPTANCE_MARKERS) {
                         if let Err(reason) =
                             m9_userspace_validate::validate_m9_userspace_serial(&output)
@@ -4411,6 +4420,7 @@ fn validate_output_markers(output: &str, marker_set: MarkerSet<'static>) -> Resu
         if marker_set_is_ordered(marker_set, &M10_INPUT_SMOKE_ACCEPTANCE_MARKERS) {
             validate_m10_input_counts(output)?;
         }
+        validate_before_after_counts(output, marker_set)?;
         if markers_require_verbatim_linux_hello(marker_set) {
             assert_no_ipc_framed_linux_hello(output)?;
         }
@@ -4422,6 +4432,45 @@ fn validate_output_markers(output: &str, marker_set: MarkerSet<'static>) -> Resu
     } else {
         Err(XtaskError::MissingMarker(tracker.pending_label()))
     }
+}
+
+const M9_MAP_PROBE_COUNTS: &str = "[M9.C] map probe free_frames before=";
+const M10_NXE_BASELINE_COUNTS: &str = "[M10.NX] teardown baseline free_frames before=";
+
+/// A lane's line reporting resource counts before and after a probe, and how many
+/// `before=`/`after=` pairs it carries.
+fn before_after_counts_line(set: MarkerSet<'_>) -> Option<(&'static str, usize)> {
+    match set {
+        MarkerSet::Steps(M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_SPEC) => Some((M9_MAP_PROBE_COUNTS, 2)),
+        MarkerSet::Ordered(markers) if markers == M10_NXE_ACCEPTANCE_MARKERS => {
+            Some((M10_NXE_BASELINE_COUNTS, 1))
+        }
+        _ => None,
+    }
+}
+
+/// Requires every `before=` value on the lane's counts line to equal its `after=` value,
+/// so the pass rests on the reported figures and not only on the kernel's own summary.
+fn validate_before_after_counts(output: &str, set: MarkerSet<'_>) -> Result<(), XtaskError> {
+    let Some((prefix, pairs)) = before_after_counts_line(set) else {
+        return Ok(());
+    };
+    let line = output
+        .lines()
+        .find_map(|line| line.find(prefix).map(|at| line[at..].trim_end()))
+        .ok_or_else(|| XtaskError::MissingMarker(prefix.to_owned()))?;
+    let values = |key: &str| -> Vec<&str> {
+        line.split_whitespace()
+            .filter_map(|token| token.strip_prefix(key))
+            .collect()
+    };
+    let (before, after) = (values("before="), values("after="));
+    if before.len() != pairs || after.len() != pairs || before != after {
+        return Err(XtaskError::Validation(format!(
+            "counts changed across the probe: {line}"
+        )));
+    }
+    Ok(())
 }
 
 /// The smoke lane's counters, checked by value rather than by line prefix: each IRQ vector
@@ -6391,6 +6440,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn before_after_counts_must_match_on_the_lane_counts_line() {
+        let fail_closed = MarkerSet::Steps(M9_SYSCALL_FAIL_CLOSED_ACCEPTANCE_SPEC);
+        let nxe = MarkerSet::Ordered(&M10_NXE_ACCEPTANCE_MARKERS);
+        let probe = |frames: &str, mappings: &str| {
+            format!("[M9.C] map probe free_frames before=900 after={frames} mappings before=3 after={mappings}\n")
+        };
+        assert!(validate_before_after_counts(&probe("900", "3"), fail_closed).is_ok());
+        assert!(validate_before_after_counts(&probe("899", "3"), fail_closed).is_err());
+        assert!(validate_before_after_counts(&probe("900", "4"), fail_closed).is_err());
+        assert!(validate_before_after_counts(
+            "[M9.C] map probe free_frames before=900 after=900\n",
+            fail_closed
+        )
+        .is_err());
+        assert!(validate_before_after_counts("[M9.C] PASS\n", fail_closed).is_err());
+        assert!(validate_before_after_counts(
+            "[M10.NX] teardown baseline free_frames before=77 after=77\n",
+            nxe
+        )
+        .is_ok());
+        assert!(validate_before_after_counts(
+            "[M10.NX] teardown baseline free_frames before=77 after=76\n",
+            nxe
+        )
+        .is_err());
+        assert!(
+            validate_before_after_counts("", MarkerSet::Ordered(&M1_ACCEPTANCE_MARKERS)).is_ok()
+        );
     }
 
     #[test]
