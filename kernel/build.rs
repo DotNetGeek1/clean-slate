@@ -94,9 +94,6 @@ fn main() {
         || env::var("CARGO_FEATURE_M7_NET_CAPS_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M10_PORT_SELF_TEST").is_ok()
         || env::var("CARGO_FEATURE_M10_SHARED_BUFFER_SELF_TEST").is_ok();
-    let m6_self_test = env::var("CARGO_FEATURE_M6_OBJECT_SELF_TEST").is_ok()
-        || env::var("CARGO_FEATURE_M6_CAPABILITIES_SELF_TEST").is_ok()
-        || m6_fixture_self_test;
     if env::var("CARGO_FEATURE_M4_SUPERVISOR_SELF_TEST").is_ok() {
         embed_userspace_image(
             "supervisor_userspace.bin",
@@ -111,19 +108,12 @@ fn main() {
             true,
         );
     }
-    if env::var("CARGO_FEATURE_M5_STORAGE_SELF_TEST").is_ok()
-        || env::var("CARGO_FEATURE_M5_PERSISTENCE_SELF_TEST").is_ok()
-        || env::var("CARGO_FEATURE_M5_CRASH_EARLY_SELF_TEST").is_ok()
-        || env::var("CARGO_FEATURE_M5_CRASH_LATE_SELF_TEST").is_ok()
-        || env::var("CARGO_FEATURE_M5_CRASH_RECOVERY_SELF_TEST").is_ok()
-        || m6_self_test
-    {
-        embed_userspace_image(
-            "storage_userspace.bin",
-            "clean-slate-storage-userspace",
-            true,
-        );
-    }
+    // Storage and network ship in every kernel. The fixture image stays behind its self-tests.
+    embed_userspace_image(
+        "storage_userspace.bin",
+        "clean-slate-storage-userspace",
+        true,
+    );
     if m6_fixture_self_test {
         embed_userspace_image(
             "m6_fixture_userspace.bin",
@@ -131,13 +121,11 @@ fn main() {
             true,
         );
     }
-    if env::var("CARGO_FEATURE_M7_NET_SERVICE_SELF_TEST").is_ok() {
-        embed_userspace_image(
-            "network_userspace.bin",
-            "clean-slate-network-userspace",
-            true,
-        );
-    }
+    embed_userspace_image(
+        "network_userspace.bin",
+        "clean-slate-network-userspace",
+        true,
+    );
     if env::var("CARGO_FEATURE_M9_ROOTFS").is_ok() {
         embed_m9_rootfs_image();
     }
@@ -383,6 +371,28 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
     embed_userspace_image_from("target", raw_name, bin_name, record_entry_offset);
 }
 
+/// Package and `-Z build-std` set for an embedded userspace bin.
+/// Storage and network are not the supervisor package, and they need `alloc`.
+fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
+    match bin_name {
+        "clean-slate-supervisor-userspace"
+        | "clean-slate-supervisor-recovery-userspace"
+        | "clean-slate-m6-fixture-userspace" => {
+            ("clean-slate-supervisor", "core,compiler_builtins")
+        }
+        "clean-slate-storage-userspace" => ("clean-slate-store", "core,alloc,compiler_builtins"),
+        "clean-slate-network-userspace" => {
+            ("clean-slate-net-service", "core,alloc,compiler_builtins")
+        }
+        "clean-slate-compositor-userspace" => ("clean-slate-compositor", "core,compiler_builtins"),
+        "clean-slate-desktop-shell-userspace" => {
+            ("clean-slate-desktop-shell", "core,compiler_builtins")
+        }
+        "clean-slate-playground-userspace" => ("clean-slate-playground", "core,compiler_builtins"),
+        _ => panic!("unexpected userspace bin {bin_name}"),
+    }
+}
+
 /// [`embed_userspace_image`] from the cargo target directory `target_dir` (workspace-relative).
 fn embed_userspace_image_from(
     target_dir: &str,
@@ -397,13 +407,13 @@ fn embed_userspace_image_from(
     let raw_image = out_dir.join(raw_name);
 
     if !elf.is_file() {
+        let (package, build_std) = userspace_embed_recipe(bin_name);
         panic!(
-            "missing userspace ELF at {}; build with:\n  \
-             RUSTC_BOOTSTRAP=1 cargo build -p clean-slate-supervisor \
+            "missing userspace ELF at {}; run `cargo xtask build`, or:\n  \
+             RUSTC_BOOTSTRAP=1 cargo build -p {package} \
              --bin {bin_name} --features userspace \
-             --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release",
+             --target x86_64-unknown-none -Z build-std={build_std} --release",
             elf.display(),
-            bin_name = bin_name
         );
     }
 
