@@ -97,7 +97,7 @@ fn global_max_tokens() -> u32 {
 fn per_process_max_tokens() -> u32 {
     #[cfg(feature = "m9-linux-trace-self-test")]
     {
-        return unsafe { (*TRACE_BUDGET.get()).per_process_max };
+        unsafe { (*TRACE_BUDGET.get()).per_process_max }
     }
     #[cfg(not(feature = "m9-linux-trace-self-test"))]
     {
@@ -108,7 +108,7 @@ fn per_process_max_tokens() -> u32 {
 fn tokens_per_tick() -> u32 {
     #[cfg(feature = "m9-linux-trace-self-test")]
     {
-        return unsafe { (*TRACE_BUDGET.get()).tokens_per_tick };
+        unsafe { (*TRACE_BUDGET.get()).tokens_per_tick }
     }
     #[cfg(not(feature = "m9-linux-trace-self-test"))]
     {

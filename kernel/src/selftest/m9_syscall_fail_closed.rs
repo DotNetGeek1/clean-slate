@@ -69,7 +69,8 @@ const PROBE_BRK_BASE: u64 = USER_TEST_CODE_ADDRESS + 0x8000;
 const PROBE_MMAP_WINDOW: Range<u64> =
     USER_TEST_CODE_ADDRESS + 0x10000..USER_TEST_CODE_ADDRESS + 0x20_0000;
 const PROBE_BRK_HOLE_PAGES: u64 = (PROBE_MMAP_WINDOW.start - PROBE_BRK_BASE) / PAGE_SIZE;
-const _: () = assert!(MAPPING_TABLE_HEADROOM + 1 <= PROBE_BRK_HOLE_PAGES as usize);
+// `HEADROOM < hole` is `HEADROOM + 1` pages fitting in the hole.
+const _: () = assert!((MAPPING_TABLE_HEADROOM as u64) < PROBE_BRK_HOLE_PAGES);
 
 /// Registry poison value for the offender; must not be `0` (a transient CR3 of zero
 /// would match and let native dispatch loop instead of fail-closed).
