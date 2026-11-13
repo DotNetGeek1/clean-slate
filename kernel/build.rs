@@ -434,7 +434,14 @@ fn embed_userspace_image_from(
         let generated = out_dir.join(generated_file);
         fs::write(
             &generated,
-            format_segment_metadata(prefix, entry_offset, mapped_pages, image_base, &plan),
+            format_segment_metadata(
+                prefix,
+                entry_offset,
+                mapped_pages,
+                image_base,
+                load_base,
+                &plan,
+            ),
         )
         .expect("failed to write userspace_entry metadata");
     }
@@ -451,6 +458,7 @@ fn format_segment_metadata(
     entry_offset: u64,
     mapped_pages: usize,
     image_base: u64,
+    load_base: u64,
     plan: &LoadPlan,
 ) -> String {
     let mut out = String::new();
@@ -462,6 +470,9 @@ fn format_segment_metadata(
     ));
     out.push_str(&format!(
         "pub(super) const {prefix}_IMAGE_BASE: u64 = {image_base:#x};\n"
+    ));
+    out.push_str(&format!(
+        "pub(super) const {prefix}_RELOCATED_BASE: u64 = {load_base:#x};\n"
     ));
     out.push_str(&format!(
         "pub(super) const {prefix}_SEGMENT_COUNT: usize = {};\n",
@@ -503,10 +514,10 @@ fn perm_bits(perms: SegmentPermissions) -> u8 {
 
 /// Address the kernel maps `raw_name` at.
 ///
-/// Desktop images are mapped at [`clean_slate_native_abi::desktop::DESKTOP_IMAGE_BASE`]
-/// (`launch_desktop_image` in `kernel/src/service/spawn.rs`). Every other embedded image is
-/// mapped at [`USERSPACE_IMAGE_LOAD_BASE`] (`SERVICE_USER_CODE_ADDRESS` /
-/// `USER_TEST_CODE_ADDRESS`).
+/// Desktop images are mapped at [`clean_slate_native_abi::desktop::DESKTOP_IMAGE_BASE`].
+/// Every other embedded image is mapped at [`USERSPACE_IMAGE_LOAD_BASE`]. The generated
+/// `{prefix}_RELOCATED_BASE` is asserted against those constants where the kernel maps the
+/// image, so a name missing from this list fails that build.
 fn userspace_map_base(raw_name: &str) -> u64 {
     match raw_name {
         "compositor_userspace.bin" | "desktop_shell_userspace.bin" | "playground_userspace.bin" => {
@@ -648,11 +659,10 @@ fn apply_rela_dyn(
         if sh_entsize != 24 {
             return Err(".rela.dyn entry size was not 24 bytes".into());
         }
-        // The window is the address the kernel maps this image at, looked up from the image
-        // name rather than from `load_base`. Relocating a desktop image to
-        // `USERSPACE_IMAGE_LOAD_BASE` writes every pointer 1 MiB below this window.
-        let window = userspace_map_base(image_name);
-        let window_end = window
+        // An addend that does not point inside the image lands outside this window after the
+        // rebase. `load_base` is whatever the caller passed; the kernel assert on
+        // `{prefix}_RELOCATED_BASE` is what checks that address against the map site.
+        let window_end = load_base
             .checked_add(image_span)
             .ok_or_else(|| format!("{image_name}: relocated image span overflowed"))?;
         let count = sh_size / sh_entsize;
@@ -673,9 +683,9 @@ fn apply_rela_dyn(
                     let value = (r_addend as u64)
                         .wrapping_sub(link_base)
                         .wrapping_add(load_base);
-                    if value < window || value >= window_end {
+                    if value < load_base || value >= window_end {
                         return Err(format!(
-                            "{image_name}: relocated value {value:#x} at r_offset {r_offset:#x} is outside [{window:#x}, {window_end:#x})"
+                            "{image_name}: relocated value {value:#x} at r_offset {r_offset:#x} is outside [{load_base:#x}, {window_end:#x})"
                         ));
                     }
                     write_u64(image, link_base, r_offset, value)?;

@@ -3,6 +3,8 @@
 
 include!(concat!(env!("OUT_DIR"), "/supervisor_userspace_entry.rs"));
 
+const _: () = assert!(SUPERVISOR_USERSPACE_RELOCATED_BASE == USER_TEST_CODE_ADDRESS);
+
 use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
