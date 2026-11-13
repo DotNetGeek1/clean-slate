@@ -3,8 +3,9 @@
 #
 # By default runs test-m1, test-m2, test-m3, test-m4, test-m5, test-m6, test-m7, test-m8, test-m9
 # (milestone gates and aggregates). Use --exhaustive for every registered xtask acceptance command
-# except constituents an aggregate already runs as a step (every test-m9-* boot and
-# verify-m9-fixture run once, inside test-m9).
+# except constituents an aggregate already runs as a step (every test-m3-* through test-m9-* boot
+# except test-m3-address-space and test-m3-lifecycle, which test-m3 runs as one merged boot, plus
+# verify-m8-fixture and verify-m9-fixture, run once inside their aggregate).
 # OVMF is discovered by xtask on Linux when
 # OVMF_CODE/OVMF_VARS are unset; override with env vars or --ovmf-code/--ovmf-vars.
 set -euo pipefail
@@ -105,6 +106,14 @@ test_role() {
 # scripts/run-tests.ps1); empty when the constituent is only run on its own.
 test_covered_by() {
   case "$1" in
+    test-m3-address-space | test-m3-lifecycle) echo "" ;;
+    test-m3-*) echo test-m3 ;;
+    test-m4-*) echo test-m4 ;;
+    test-m5-*) echo test-m5 ;;
+    test-m6-*) echo test-m6 ;;
+    test-m7-*) echo test-m7 ;;
+    test-m8-*) echo test-m8 ;;
+    verify-m8-fixture) echo test-m8 ;;
     test-m9-*) echo test-m9 ;;
     verify-m9-fixture) echo test-m9 ;;
     *) echo "" ;;
@@ -137,9 +146,9 @@ test_description() {
     test-m4-service-lifecycle) echo "M4.2 kernel service lifecycle control acceptance" ;;
     test-m4-restart-policy) echo "M4.6 supervisor restart-policy convergence (host + userspace image build)" ;;
     test-m4-supervisor) echo "M4.3 userspace supervisor runtime QEMU integration acceptance" ;;
-    test-m4) echo "M4 milestone gate (recovery QEMU boot + M4.6 host policy tests)" ;;
+    test-m4) echo "M4 milestone gate (every test-m4-* constituent: service lifecycle, supervisor, crash service, recovery, restart policy)" ;;
     test-m4-recovery) echo "M4.8 authoritative recovery QEMU acceptance" ;;
-    test-m5) echo "M5 milestone gate (block I/O, storage integration, reboot persistence, crash recovery)" ;;
+    test-m5) echo "M5 milestone gate (disk harness, block I/O, storage integration, crash matrix, reboot persistence, crash recovery)" ;;
     test-m5-block) echo "M5.2 VirtIO block transport QEMU acceptance" ;;
     test-m5-storage) echo "M5.7 integrated storage-path acceptance" ;;
     test-m5-crash-matrix) echo "M5.6 host crash-consistency matrix" ;;
@@ -160,8 +169,8 @@ test_description() {
     test-m7-net-caps) echo "M7.7 network capability broker and attribution acceptance" ;;
     test-m7-dns) echo "M7.5 DNS resolver QEMU acceptance" ;;
     test-m6) echo "M6 milestone gate (capability host tests, fixture smoke, constituents, convergence)" ;;
-    test-m7) echo "M7 milestone gate (converged network-service path + DNS/TLS + capability broker)" ;;
-    test-m8) echo "M8 milestone gate (fixture verify, elf/linux-abi/#92 host tests, Linux hello production path)" ;;
+    test-m7) echo "M7 milestone gate (net device, net service, converged network-service path, capability broker, DNS, TLS)" ;;
+    test-m8) echo "M8 milestone gate (fixture verify, elf/linux-abi/#92 host tests, Linux image and dispatch boots, Linux hello production path)" ;;
     test-m8-linux-hello) echo "M8.7 integrated Linux hello (self-test observer + production boot)" ;;
     test-m8-linux-image) echo "M8.2 Linux ELF loader QEMU constituent acceptance" ;;
     test-m8-linux-dispatch) echo "M8.3 Linux personality dispatch QEMU constituent acceptance" ;;

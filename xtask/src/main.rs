@@ -951,7 +951,8 @@ const M3_MILESTONE_STEPS: [M3MilestoneStep; 5] = [
     ("test-m3-resources", run_m3_resources_acceptance),
 ];
 type M5MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
-const M5_MILESTONE_STEPS: [M5MilestoneStep; 5] = [
+const M5_MILESTONE_STEPS: [M5MilestoneStep; 6] = [
+    ("test-m5-disk-harness", run_m5_disk_harness_default),
     ("test-m5-block", run_m5_block_acceptance),
     ("test-m5-storage", run_m5_storage_acceptance),
     ("test-m5-crash-matrix", run_m5_crash_matrix),
@@ -960,6 +961,17 @@ const M5_MILESTONE_STEPS: [M5MilestoneStep; 5] = [
         "test-m5-crash-recovery",
         run_m5_crash_recovery_acceptance_default,
     ),
+];
+type M4MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
+const M4_MILESTONE_STEPS: [M4MilestoneStep; 5] = [
+    (
+        "test-m4-service-lifecycle",
+        run_m4_service_lifecycle_acceptance,
+    ),
+    ("test-m4-supervisor", run_m4_supervisor_acceptance),
+    ("test-m4-crash-service", run_m4_crash_service_acceptance),
+    ("test-m4-recovery", run_m4_recovery_acceptance),
+    ("test-m4-restart-policy", run_m4_restart_policy_acceptance),
 ];
 type M6MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
 const M6_MILESTONE_STEPS: [M6MilestoneStep; 9] = [
@@ -980,21 +992,25 @@ const M6_MILESTONE_STEPS: [M6MilestoneStep; 9] = [
     ("test-m6-capabilities", run_m6_capabilities_acceptance),
 ];
 type M7MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
-const M7_MILESTONE_STEPS: [M7MilestoneStep; 4] = [
+const M7_MILESTONE_STEPS: [M7MilestoneStep; 6] = [
+    ("test-m7-net-device", run_m7_net_device_acceptance),
+    ("test-m7-net-service", run_m7_net_service_acceptance),
     ("test-m7-network", run_m7_network_acceptance),
     ("test-m7-net-caps", run_m7_net_caps_acceptance),
     ("test-m7-dns", run_m7_dns_acceptance),
     ("test-m7-tls", run_m7_tls_acceptance),
 ];
 type M8MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
-/// Authoritative M8 gate (#98): fixture verify + host crate/loader tests, then
-/// compose `test-m8-linux-hello` (self-test + production boots) rather than
-/// duplicating those QEMU runs.
-const M8_MILESTONE_STEPS: [M8MilestoneStep; 5] = [
+/// Authoritative M8 gate (#98): fixture verify + host crate/loader tests, the
+/// loader and dispatch QEMU constituents, then `test-m8-linux-hello`
+/// (self-test + production boots).
+const M8_MILESTONE_STEPS: [M8MilestoneStep; 7] = [
     ("verify-m8-fixture", run_m8_verify_fixture_step),
     ("clean-slate-elf (host)", run_m8_elf_host_tests),
     ("clean-slate-linux-abi (host)", run_m8_linux_abi_host_tests),
     ("linux-image loader (host)", run_m8_linux_loader_host_tests),
+    ("test-m8-linux-image", run_m8_linux_image_acceptance),
+    ("test-m8-linux-dispatch", run_m8_linux_dispatch_acceptance),
     ("test-m8-linux-hello", run_m8_linux_hello_acceptance),
 ];
 type M9MilestoneStep = (&'static str, fn() -> Result<(), XtaskError>);
@@ -1462,6 +1478,10 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
         Ok(())
     })();
     finalize_m5_disk_lifecycle(run_result, options.keep_disk)
+}
+
+fn run_m5_disk_harness_default() -> Result<(), XtaskError> {
+    run_m5_disk_harness(&[])
 }
 
 fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
@@ -2081,9 +2101,14 @@ fn run_m4_recovery_acceptance() -> Result<(), XtaskError> {
     )
 }
 
+/// M4 milestone gate: every M4 constituent in [`M4_MILESTONE_STEPS`] order. The
+/// first failure propagates and no PASS is printed.
 fn run_m4_acceptance() -> Result<(), XtaskError> {
-    run_m4_recovery_acceptance()?;
-    run_m4_restart_policy_acceptance()?;
+    let total = M4_MILESTONE_STEPS.len();
+    for (index, (name, step)) in M4_MILESTONE_STEPS.iter().enumerate() {
+        println!("[M4  ] step {}/{total} {name}", index + 1);
+        step()?;
+    }
     println!("[M4  ] PASS");
     Ok(())
 }
@@ -4558,7 +4583,7 @@ fn print_help() {
     println!("  run          Build kernel and launch QEMU for normal development boot");
     println!("  test-m1      Build the M1 self-test kernel, run QEMU, and validate PASS markers");
     println!("  test-m2      Build the M2 self-test kernel, run QEMU, and validate PASS markers");
-    println!("  test-m3      M3 milestone gate: run all M3 acceptance boots in order, print [M3  ] PASS only if all pass");
+    println!("  test-m3      M3 milestone gate: run every M3 acceptance boot in order (test-m3-address-space and test-m3-lifecycle as one merged boot), print [M3  ] PASS only if all pass");
     println!("  test-m3-address-space Build the M3.2 address-space kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-entry Build the M3.1 userspace-entry kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-syscall Build the M3.3 syscall-entry kernel, run QEMU, and validate PASS markers");
@@ -4570,7 +4595,7 @@ fn print_help() {
     println!("  test-m9-linux-trace M9 #106 bounded Linux syscall trace QEMU acceptance (aliases: m9-linux-trace, m9.106)");
     println!("  test-m9-linux-socket M9 #105 socket syscalls + M7 data plane + probe ELF (aliases: m9-linux-socket, m9.105)");
     println!("  test-m8-linux-hello Boot M8.7 self-test then production feature (hello + clean [M2] PASS); 40s for two launches (aliases: m8-linux-hello, m8.7)");
-    println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
+    println!("  test-m8         M8 milestone gate: verify fixture, elf/linux-abi/#92 host tests, test-m8-linux-image, test-m8-linux-dispatch, then test-m8-linux-hello; prints [M8  ] PASS (aliases: m8, m8.9)");
     println!("  test-m9         M9 milestone gate: verify pinned BusyBox fixture, linux-abi/elf/rootfs/kernel host tests, every test-m9-* constituent, then test-m9-userspace; prints [M9  ] PASS (aliases: m9, m9.9)");
     println!(
         "  test-m10-contract M10 graphics contract host tests plus UEFI builds of graphics and native-abi; prints [M10.contract] PASS (aliases: m10-contract)"
@@ -4600,8 +4625,8 @@ fn print_help() {
     println!("  test-m4-supervisor Build the M4.3 supervisor userspace image and QEMU integration self-test");
     println!("  test-m4-restart-policy Run M4.6 host restart-policy convergence tests and build the CPL3 image");
     println!("  test-m4-recovery Build the M4.8 recovery supervisor kernel boot and validate ordered markers");
-    println!("  test-m4       M4 milestone gate: recovery QEMU boot plus M4.6 host policy tests");
-    println!("  test-m5       M5 milestone gate: block, storage, persistence, and crash-recovery acceptance");
+    println!("  test-m4       M4 milestone gate: every test-m4-* constituent (service-lifecycle, supervisor, crash-service, recovery, restart-policy)");
+    println!("  test-m5       M5 milestone gate: every test-m5-* constituent (disk-harness, block, storage, crash-matrix, persistence, crash-recovery)");
     println!("  test-m5-block Build the M5.2 virtio-block kernel, run QEMU, and validate ordered markers");
     println!("  test-m7-net-device Build the M7.2 virtio-net kernel, run QEMU with the hermetic fixture peer, and validate ordered markers");
     println!("  test-m7-tls       M7.6 TLS client acceptance (pass + fail-closed QEMU boots)");
@@ -4617,7 +4642,7 @@ fn print_help() {
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
     println!("  test-m5-persistence Two-boot persistent-disk M5 acceptance using the production storage path");
-    println!("  test-m5-crash-recovery Four-boot abrupt-stop crash-recovery M5 acceptance");
+    println!("  test-m5-crash-recovery Six-boot abrupt-stop crash-recovery M5 acceptance");
     println!("                 Pass --keep-disk to preserve target/m5/m5-data.img for debugging");
     println!("  test-m5-disk-harness Two-boot M5 disk harness with host-side sentinel validation");
     println!(
@@ -4649,7 +4674,7 @@ fn print_help() {
     println!(
         "  test-m7-net-caps Build M7.7 network capability broker boot and validate ordered markers"
     );
-    println!("  test-m7          M7 milestone gate over the converged network-service path");
+    println!("  test-m7          M7 milestone gate: every test-m7-* constituent (net-device, net-service, network, net-caps, dns, tls)");
     println!("  m5-disk-create Create deterministic M5 data disk if missing (preserve existing)");
     println!("  m5-disk-reset Recreate deterministic blank M5 data disk");
     println!("  m5-disk-inspect Print M5 data disk path and size");
@@ -5878,6 +5903,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "test-m5-disk-harness",
                 "test-m5-block",
                 "test-m5-storage",
                 "test-m5-crash-matrix",
@@ -5912,6 +5938,8 @@ mod tests {
         assert_eq!(
             names,
             [
+                "test-m7-net-device",
+                "test-m7-net-service",
                 "test-m7-network",
                 "test-m7-net-caps",
                 "test-m7-dns",
@@ -5930,9 +5958,106 @@ mod tests {
                 "clean-slate-elf (host)",
                 "clean-slate-linux-abi (host)",
                 "linux-image loader (host)",
+                "test-m8-linux-image",
+                "test-m8-linux-dispatch",
                 "test-m8-linux-hello",
             ]
         );
+    }
+
+    #[test]
+    fn m4_milestone_steps_have_deterministic_order() {
+        let names: Vec<&str> = M4_MILESTONE_STEPS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "test-m4-service-lifecycle",
+                "test-m4-supervisor",
+                "test-m4-crash-service",
+                "test-m4-recovery",
+                "test-m4-restart-policy",
+            ]
+        );
+    }
+
+    /// Every `test-mN-*` lane registered in `parse_command` or `scripts/run-tests.ps1` must be
+    /// a step of its `test-mN` aggregate, and the script must mark it `CoveredBy` that
+    /// aggregate so `-Exhaustive` runs it once. `test-m3-address-space` and `test-m3-lifecycle`
+    /// run as one merged boot whose marker list
+    /// `merged_address_space_lifecycle_markers_accept_real_transcript` keeps a superset of both,
+    /// so they stay separate script entries without `CoveredBy`.
+    #[test]
+    fn milestone_aggregates_run_every_registered_constituent() {
+        const MERGED_INTO: [(&str, &str); 2] = [
+            ("test-m3-address-space", "test-m3-address-space+lifecycle"),
+            ("test-m3-lifecycle", "test-m3-address-space+lifecycle"),
+        ];
+        fn step_names(steps: &[M4MilestoneStep]) -> Vec<&'static str> {
+            steps.iter().map(|(name, _)| *name).collect()
+        }
+        let aggregates = [
+            ("test-m3", step_names(&M3_MILESTONE_STEPS)),
+            ("test-m4", step_names(&M4_MILESTONE_STEPS)),
+            ("test-m5", step_names(&M5_MILESTONE_STEPS)),
+            ("test-m6", step_names(&M6_MILESTONE_STEPS)),
+            ("test-m7", step_names(&M7_MILESTONE_STEPS)),
+            ("test-m8", step_names(&M8_MILESTONE_STEPS)),
+            ("test-m9", step_names(&M9_MILESTONE_STEPS)),
+        ];
+        let xtask_source = include_str!("main.rs");
+        let script = include_str!("../../scripts/run-tests.ps1");
+        // Built at runtime so this test's own source does not register a lane.
+        let command_needle = ["cmd ", "== \""].concat();
+        let mut registered: Vec<&str> = xtask_source
+            .match_indices(command_needle.as_str())
+            .map(|(index, _)| {
+                let rest = &xtask_source[index + command_needle.len()..];
+                &rest[..rest.find('"').expect("command literal closes")]
+            })
+            .collect();
+        let script_entry = |line: &'static str| -> Option<&'static str> {
+            let rest = line.trim_start().strip_prefix('"')?;
+            let end = rest.find('"')?;
+            rest[end + 1..]
+                .trim_start()
+                .starts_with("= @{")
+                .then(|| &rest[..end])
+        };
+        registered.extend(script.lines().filter_map(script_entry));
+        registered.sort_unstable();
+        registered.dedup();
+
+        for (aggregate, steps) in &aggregates {
+            let prefix = format!("{aggregate}-");
+            let constituents: Vec<&str> = registered
+                .iter()
+                .copied()
+                .filter(|name| name.starts_with(&prefix))
+                .collect();
+            assert!(
+                !constituents.is_empty(),
+                "{aggregate} has no registered constituents"
+            );
+            for constituent in constituents {
+                let step = MERGED_INTO
+                    .iter()
+                    .find(|(lane, _)| *lane == constituent)
+                    .map_or(constituent, |(_, merged)| *merged);
+                assert!(
+                    steps.contains(&step),
+                    "{aggregate} does not run registered constituent {constituent}"
+                );
+                let covered_by = format!("CoveredBy = \"{aggregate}\"");
+                let marked_covered = script.lines().any(|line| {
+                    script_entry(line) == Some(constituent) && line.contains(&covered_by)
+                });
+                assert_eq!(
+                    marked_covered,
+                    step == constituent,
+                    "scripts/run-tests.ps1 CoveredBy for {constituent} disagrees with {aggregate}"
+                );
+            }
+        }
     }
 
     #[test]
