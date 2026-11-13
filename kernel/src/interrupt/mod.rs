@@ -593,7 +593,7 @@ fn report_kernel_stack_overflow(
     }
 }
 
-fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
+pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
     let pid = current_userspace_fault_pid().unwrap_or_else(|message| fatal_kernel_error(message));
     #[cfg(feature = "m4-recovery-self-test")]
     observe_recovery_fault_before_containment(context, pid)

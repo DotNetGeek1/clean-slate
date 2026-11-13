@@ -19,7 +19,6 @@ pub(crate) mod port;
 
 pub(crate) const DOUBLE_FAULT_VECTOR: usize = 8;
 pub(crate) const PAGE_FAULT_VECTOR: usize = 14;
-#[cfg(feature = "m3-entry-self-test")]
 pub(crate) const GENERAL_PROTECTION_VECTOR: usize = 13;
 pub(crate) const TIMER_VECTOR: usize = 32;
 pub(crate) const SPURIOUS_VECTOR: usize = 33;

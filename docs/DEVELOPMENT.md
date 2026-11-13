@@ -129,6 +129,8 @@ cargo xtask test-m9-syscall-fail-closed
 
 This command builds the kernel with `m9-syscall-fail-closed-self-test`, boots QEMU headlessly, and validates `[SYSC] unresolved caller reason=syscall caller process did not match active address space fail-closed` (registry/CR3 mismatch constructed by the self-test), production teardown of the offender, and `[M9.C] PASS` while a Native sibling keeps making version syscalls without the offender ever reaching `dispatch_native`.
 
+The same boot runs two hostile CPL3 offenders for #215: a Native process that issues `syscall` with RSP `0x8000_0000_0000_0000`, and a Linux-tagged process that requires `arch_prctl(ARCH_SET_FS, 0x8000_0000_0000_0000)` to return `-EPERM` (it exits with status 1 otherwise) and then does the same. Each must be logged as `[SYSC] non-canonical user return state …` and torn down by the CPL3 fault path as a user-mode #GP (`[PROC] fault pid=… vector=13 err=0x0`); these lines and the fail-closed line are an unordered group because the offenders race. Once every offender has left the registry, the next sibling syscall prints `[M9.C] non-canonical syscall rsp terminated native offender OK`, `[M9.C] arch_prctl(ARCH_SET_FS, non-canonical) returned EPERM OK` (also checked: the offender's saved FS base stayed 0), `[M9.C] non-canonical syscall rsp terminated linux offender OK` and `[M9.C] PASS`. QEMU TCG accepts a non-canonical `wrmsr IA32_FS_BASE`, so only the `-EPERM` result shows that vector under TCG; under `-accel whpx` the unvalidated write is a ring-0 #GP.
+
 For the M8.3 Linux personality syscall dispatch proof:
 
 ```bash

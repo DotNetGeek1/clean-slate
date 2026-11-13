@@ -6,15 +6,15 @@ use crate::mm::address_space::{
 };
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
-use crate::mm::{align_down, align_up, phys_to_virt, PAGE_SIZE};
+use crate::mm::{align_down, align_up, phys_to_virt, PAGE_SIZE, USER_CANONICAL_TOP_EXCLUSIVE};
 use crate::process::linux_image::LinuxImageLayout;
 use crate::process::process_registry_mut;
 use crate::sched::wait::Deadline;
 use crate::sched::TASK_COUNT;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_linux_abi::{
-    LinuxErrno, EACCES, EFAULT, EINVAL, ENOMEM, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC,
-    PROT_NONE, PROT_READ, PROT_WRITE,
+    LinuxErrno, EACCES, EFAULT, EINVAL, ENOMEM, EPERM, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE,
+    PROT_EXEC, PROT_NONE, PROT_READ, PROT_WRITE,
 };
 use clean_slate_service_lifecycle::InstanceGeneration;
 use core::ptr;
@@ -361,17 +361,32 @@ fn map_zero_page(
     Ok(())
 }
 
+/// FS base the process last set; 0 when it never called `ARCH_SET_FS`.
+fn fs_base_in(registry: &Registry, pid: u64, generation: InstanceGeneration) -> u64 {
+    registry
+        .find(pid, generation)
+        .and_then(|index| registry.slots[index].as_ref())
+        .map_or(0, |slot| slot.state.fs_base)
+}
+
+pub(crate) fn saved_fs_base(pid: u64, generation: InstanceGeneration) -> u64 {
+    fs_base_in(registry_mut(), pid, generation)
+}
+
+/// Written on every dispatch, including 0, so a process never inherits the
+/// previous thread's FS base.
 pub(crate) fn apply_fs_base_for_process(pid: u64, generation: InstanceGeneration) {
-    if let Some(index) = registry_mut().find(pid, generation) {
-        let fs = registry_mut().slots[index]
-            .as_ref()
-            .expect("slot")
-            .state
-            .fs_base;
-        if fs != 0 {
-            write_msr(IA32_FS_BASE, fs);
-        }
+    write_msr(IA32_FS_BASE, saved_fs_base(pid, generation));
+}
+
+/// Stores a validated FS base. An address outside the user half would make
+/// `wrmsr IA32_FS_BASE` fault in ring 0, so it is refused (Linux: `EPERM`).
+fn set_fs_base_in(registry: &mut Registry, index: usize, addr: u64) -> Result<u64, LinuxErrno> {
+    if addr >= USER_CANONICAL_TOP_EXCLUSIVE {
+        return Err(EPERM);
     }
+    registry.slots[index].as_mut().ok_or(EINVAL)?.state.fs_base = addr;
+    Ok(addr)
 }
 
 pub(crate) fn sys_arch_prctl(
@@ -383,12 +398,8 @@ pub(crate) fn sys_arch_prctl(
     let index = registry_mut().ensure(pid, generation)?;
     match code {
         clean_slate_linux_abi::ARCH_SET_FS => {
-            registry_mut().slots[index]
-                .as_mut()
-                .expect("slot")
-                .state
-                .fs_base = addr;
-            write_msr(IA32_FS_BASE, addr);
+            let fs_base = set_fs_base_in(registry_mut(), index, addr)?;
+            write_msr(IA32_FS_BASE, fs_base);
             Ok(0)
         }
         clean_slate_linux_abi::ARCH_GET_FS => {
@@ -746,5 +757,50 @@ mod tests {
     fn new_registry_is_empty() {
         let registry = Registry::new();
         assert!(registry.slots.iter().all(|slot| slot.is_none()));
+    }
+
+    #[test]
+    fn arch_set_fs_refuses_addresses_outside_the_user_half_without_storing_them() {
+        let generation = InstanceGeneration(7);
+        let mut registry = Registry::new();
+        let index = registry.ensure(3, generation).expect("slot");
+        assert_eq!(
+            set_fs_base_in(&mut registry, index, 0x7f00_0000_1000),
+            Ok(0x7f00_0000_1000)
+        );
+        for addr in [
+            USER_CANONICAL_TOP_EXCLUSIVE,
+            0x8000_0000_0000_0000,
+            0xffff_8000_0000_0000,
+            u64::MAX,
+        ] {
+            assert_eq!(
+                set_fs_base_in(&mut registry, index, addr),
+                Err(EPERM),
+                "{addr:#x}"
+            );
+            assert_eq!(fs_base_in(&registry, 3, generation), 0x7f00_0000_1000);
+        }
+        assert_eq!(
+            set_fs_base_in(&mut registry, index, USER_CANONICAL_TOP_EXCLUSIVE - 1),
+            Ok(USER_CANONICAL_TOP_EXCLUSIVE - 1)
+        );
+        assert_eq!(set_fs_base_in(&mut registry, index, 0), Ok(0));
+    }
+
+    #[test]
+    fn fs_base_to_restore_is_zero_unless_the_process_set_one() {
+        let generation = InstanceGeneration(7);
+        let mut registry = Registry::new();
+        assert_eq!(fs_base_in(&registry, 3, generation), 0, "no slot");
+        let index = registry.ensure(3, generation).expect("slot");
+        assert_eq!(fs_base_in(&registry, 3, generation), 0, "never set");
+        set_fs_base_in(&mut registry, index, 0x1000).expect("set");
+        assert_eq!(fs_base_in(&registry, 3, generation), 0x1000);
+        assert_eq!(
+            fs_base_in(&registry, 3, InstanceGeneration(8)),
+            0,
+            "stale generation"
+        );
     }
 }

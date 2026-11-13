@@ -106,6 +106,7 @@ use crate::sync::global_cell::GlobalCell;
 use crate::syscall::validation::maybe_validate_syscall_entry_flags;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::syscall::validation::syscall_return_rflags_match;
+use crate::syscall::validation::syscall_user_fault_context;
 use crate::syscall::validation::validate_canonical_user_return_state;
 use crate::syscall::validation::validate_sysret_selector_triplet;
 use clean_slate_capability::syscall_abi as cap_abi;
@@ -648,8 +649,8 @@ fn sync_syscall_kernel_stack_from_current_thread() {
 extern "C" fn clean_slate_syscall_dispatch(context: *mut SyscallContext) -> u64 {
     sync_syscall_kernel_stack_from_current_thread();
     let frame = unsafe { &mut *context };
-    if let Err(message) = validate_canonical_user_return_state(frame) {
-        fatal_kernel_error(message);
+    if let Err(reason) = validate_canonical_user_return_state(frame) {
+        contain_noncanonical_user_return_state(frame, reason);
     }
     // M8.2 (#92) self-test: observe the first syscall of the launched Linux
     // image (entry proof) and the native sibling's progress. Test-only hook.
@@ -770,6 +771,24 @@ fn fail_closed_unresolved_syscall_caller(reason: &'static str) -> ! {
         teardown.process_id,
     );
     resume_after_syscall_containment(teardown.next_stack_pointer)
+}
+
+/// The saved RIP/RSP are user-controlled, so a non-canonical value is a fault
+/// of the caller, not of the kernel: terminate it through the CPL3 fault path
+/// as a user-mode #GP and run the next thread.
+fn contain_noncanonical_user_return_state(frame: &SyscallContext, reason: &'static str) -> ! {
+    kernel_log_fmt(format_args!(
+        "[SYSC] non-canonical user return state rip={:#x} rsp={:#x} reason={reason}\n",
+        frame.user_rip, frame.user_rsp
+    ));
+    let user_code_selector = userspace_gdt_state()
+        .unwrap_or_else(|message| fatal_kernel_error(message))
+        .user_code_selector;
+    let context = syscall_user_fault_context(frame, user_code_selector.0 as u64);
+    #[cfg(feature = "m9-syscall-fail-closed-self-test")]
+    crate::selftest::m9_syscall_fail_closed::observe_noncanonical_containment();
+    let next_stack_pointer = crate::interrupt::handle_faulted_userspace_exception(&context);
+    resume_after_syscall_containment(Some(next_stack_pointer))
 }
 
 fn resume_after_syscall_containment(next_stack_pointer: Option<u64>) -> ! {
