@@ -67,11 +67,11 @@ fn run(allocator: &mut PageAllocator) -> Probe<()> {
     if status.state != PresentState::Idle || status.output.backend_epoch() != 1 {
         return Err("bring-up did not leave the output idle at epoch 1");
     }
-    if stats.submitted != 3 || stats.completed != 3 {
+    if stats.submitted != 2 || stats.completed != 2 || stats.scanouts != 0 {
         return Err("bring-up command count");
     }
     serial_write_fmt(format_args!(
-        "[VGPU] bring-up ok display-info={}x{} resource=1 format=b8g8r8x8 scanout=0 completed={}\n",
+        "[VGPU] bring-up ok display-info={}x{} resource=1 format=b8g8r8x8 completed={}\n",
         REFERENCE_MODE.width_px, REFERENCE_MODE.height_px, stats.completed
     ));
 
@@ -95,16 +95,18 @@ fn run(allocator: &mut PageAllocator) -> Probe<()> {
     let stats = wait_present(seq)?;
     if (
         stats.attaches,
+        stats.scanouts,
         stats.detaches,
         stats.transfers,
         stats.flushes,
-    ) != (1, 0, 1, 1)
+    ) != (1, 1, 0, 1, 1)
     {
         return Err("first present command mix");
     }
     serial_write_fmt(format_args!(
-        "[VGPU] present seq={seq} buffer=0 attach={} transfers={} flushes={} irq-completed\n",
-        stats.attaches, stats.transfers, stats.flushes
+        "[VGPU] present seq={seq} buffer=0 attach={} set-scanout={} transfers={} flushes={} \
+         irq-completed\n",
+        stats.attaches, stats.scanouts, stats.transfers, stats.flushes
     ));
 
     let mut damage = [NO_RECT; REFERENCE_B_DAMAGE.len()];
@@ -121,10 +123,11 @@ fn run(allocator: &mut PageAllocator) -> Probe<()> {
     let stats = wait_present(seq)?;
     if (
         stats.attaches,
+        stats.scanouts,
         stats.detaches,
         stats.transfers,
         stats.flushes,
-    ) != (2, 1, 4, 2)
+    ) != (2, 1, 1, 4, 2)
     {
         return Err("buffer switch command mix");
     }
@@ -150,7 +153,6 @@ fn run(allocator: &mut PageAllocator) -> Probe<()> {
         return Err("readback crc mismatch");
     }
     serial_write_fmt(format_args!("[VGPU] readback crc32=0x{crc:08x}\n"));
-
     force_timeout(damage[0])?;
     reset_and_present()?;
     release()?;
@@ -319,7 +321,7 @@ fn force_timeout(rect: BufferRect) -> Probe<()> {
 
 /// The reset a syscall-18 entry would start, then a full present that must re-attach backing.
 fn reset_and_present() -> Probe<()> {
-    let attaches = stats()?.attaches;
+    let before = stats()?;
     with_active_display(|display| {
         if let Some(display) = display {
             display.service(monotonic_ns(), true);
@@ -340,11 +342,14 @@ fn reset_and_present() -> Probe<()> {
 
     let seq = present(1, &[FULL_FRAME])?;
     let stats = wait_present(seq)?;
-    if stats.attaches != attaches + 1 {
+    if stats.attaches != before.attaches + 1 {
         return Err("present after reset did not re-attach the backing");
     }
+    if stats.scanouts != before.scanouts + 1 {
+        return Err("present after reset did not set the scanout again");
+    }
     serial_write_fmt(format_args!(
-        "[VGPU] present seq={seq} buffer=1 epoch=2 reattached\n"
+        "[VGPU] present seq={seq} buffer=1 epoch=2 reattached set-scanout\n"
     ));
     Ok(())
 }

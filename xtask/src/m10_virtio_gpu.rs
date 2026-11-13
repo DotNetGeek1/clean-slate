@@ -28,14 +28,14 @@ const _: () = assert!(B_DAMAGE_BYTES < FRAME_BYTES);
 pub(crate) const MARKERS: [&str; 12] = [
     "[VIRTIO] modern id=16 slot=0 irq=msix vector=",
     "[DISP] backend=virtio-gpu output=0 epoch=1",
-    "[VGPU] bring-up ok display-info=1280x800 resource=1 format=b8g8r8x8 scanout=0 completed=3",
+    "[VGPU] bring-up ok display-info=1280x800 resource=1 format=b8g8r8x8 completed=2",
     "[VGPU] scanout buffers mapped=2 stride=5120",
-    "[VGPU] present seq=1 buffer=0 attach=1 transfers=1 flushes=1 irq-completed",
+    "[VGPU] present seq=1 buffer=0 attach=1 set-scanout=1 transfers=1 flushes=1 irq-completed",
     "[VGPU] present seq=2 buffer=1 detach=1 attach=2 transfers=4 flushes=2 damage-bytes=",
     "[VGPU] readback crc32=0x20f2eec9",
     "[VGPU] timeout -> reset-required seq=3 error=device-timeout present-rejected",
     "[VGPU] reset ok epoch=2 generation=",
-    "[VGPU] present seq=4 buffer=1 epoch=2 reattached",
+    "[VGPU] present seq=4 buffer=1 epoch=2 reattached set-scanout",
     "[VGPU] release ok detach=1 unref=1 device-reset=1",
     "[VGPU] PASS",
 ];
@@ -125,14 +125,14 @@ mod tests {
     const GOOD: &str = "\
 [VIRTIO] modern id=16 slot=0 irq=msix vector=0x0\r\n\
 [DISP] backend=virtio-gpu output=0 epoch=1\r\n\
-[VGPU] bring-up ok display-info=1280x800 resource=1 format=b8g8r8x8 scanout=0 completed=3\r\n\
+[VGPU] bring-up ok display-info=1280x800 resource=1 format=b8g8r8x8 completed=2\r\n\
 [VGPU] scanout buffers mapped=2 stride=5120\r\n\
-[VGPU] present seq=1 buffer=0 attach=1 transfers=1 flushes=1 irq-completed\r\n\
+[VGPU] present seq=1 buffer=0 attach=1 set-scanout=1 transfers=1 flushes=1 irq-completed\r\n\
 [VGPU] present seq=2 buffer=1 detach=1 attach=2 transfers=4 flushes=2 damage-bytes=29184 frame-bytes=4096000\r\n\
 [VGPU] readback crc32=0x20f2eec9\r\n\
 [VGPU] timeout -> reset-required seq=3 error=device-timeout present-rejected\r\n\
 [VGPU] reset ok epoch=2 generation=2\r\n\
-[VGPU] present seq=4 buffer=1 epoch=2 reattached\r\n\
+[VGPU] present seq=4 buffer=1 epoch=2 reattached set-scanout\r\n\
 [VGPU] release ok detach=1 unref=1 device-reset=1\r\n\
 [VGPU] PASS\r\n";
 

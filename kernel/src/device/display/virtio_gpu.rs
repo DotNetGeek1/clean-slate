@@ -1,10 +1,13 @@
 //! VirtIO-GPU 2D scanout backend (#114) over the #196 modern PCI transport.
 //!
 //! One host resource (`RESOURCE_ID`, `B8G8R8X8`, the reference mode) is scanout 0 for the boot.
-//! A present attaches the named kernel-owned buffer as the resource's backing when it is not the
-//! one attached already (detach, then attach its pinned extents), transfers exactly the damaged
-//! rects into the host resource and flushes their bounding box. Host pixels outside the damage
-//! keep what was presented before (R8), whichever buffer is attached.
+//! Bring-up reads the display info and creates the resource. A present attaches the named
+//! kernel-owned buffer as the resource's backing when it is not the one attached already (detach,
+//! then attach its pinned extents), transfers exactly the damaged rects into the host resource and
+//! flushes their bounding box. The first attach after a bring-up is followed by `SET_SCANOUT`:
+//! VirtIO 1.2 §5.7.6.2 links a framebuffer to a scanout only after its backing is attached, and
+//! QEMU 6.1 and later answer `SET_SCANOUT` on a resource without backing with `ERR_UNSPEC`. Host
+//! pixels outside the damage keep what was presented before (R8), whichever buffer is attached.
 //!
 //! The commands of one present go out as one batch behind one notify; the device executes a
 //! control queue in order. Every command carries the `DISPLAY_COMMAND_TIMEOUT_NS` W3 deadline.
@@ -63,9 +66,11 @@ pub(crate) const GPU_REQUEST: DeviceRequest = DeviceRequest {
 #[cfg(not(test))]
 const CONFIG_NUM_SCANOUTS: u32 = 8;
 
-/// Bring-up (3) plus the largest present: detach, attach, 16 transfers, one flush.
+/// The largest present: detach then attach, or attach then `SET_SCANOUT`; 16 transfers; one flush.
 const MAX_PRESENT_COMMANDS: usize = 3 + MAX_PRESENT_DAMAGE_RECTS;
-pub(crate) const COMMAND_SLOTS: usize = 3 + MAX_PRESENT_COMMANDS + 2;
+/// Bring-up, the largest present and release at once, rounded up to whole pages of slots.
+pub(crate) const COMMAND_SLOTS: usize = 24;
+const _: () = assert!(BRING_UP.len() + MAX_PRESENT_COMMANDS + 2 <= COMMAND_SLOTS);
 pub(crate) const SLOT_BYTES: usize = 1024;
 const REQUEST_CAPACITY: usize = 512;
 const RESPONSE_OFFSET: u32 = 512;
@@ -142,11 +147,7 @@ impl Command {
     }
 }
 
-const BRING_UP: [Command; 3] = [
-    Command::GetDisplayInfo,
-    Command::Create2d,
-    Command::SetScanout,
-];
+const BRING_UP: [Command; 2] = [Command::GetDisplayInfo, Command::Create2d];
 
 fn full_mode_rect() -> BufferRect {
     BufferRect {
@@ -311,6 +312,7 @@ pub(crate) struct GpuStats {
     pub(crate) submitted: u32,
     pub(crate) completed: u32,
     pub(crate) attaches: u32,
+    pub(crate) scanouts: u32,
     pub(crate) detaches: u32,
     pub(crate) transfers: u32,
     pub(crate) flushes: u32,
@@ -369,7 +371,7 @@ impl<T: VirtqueueTransport> VirtioGpuBackend<T> {
         }
     }
 
-    /// `GET_DISPLAY_INFO`, `RESOURCE_CREATE_2D`, `SET_SCANOUT`: the first `poll` outcome.
+    /// `GET_DISPLAY_INFO`, `RESOURCE_CREATE_2D`: the first `poll` outcome.
     pub(crate) fn begin_bring_up(&mut self) -> Result<(), BackendError> {
         self.submit_batch(&BRING_UP)
     }
@@ -439,6 +441,7 @@ impl<T: VirtqueueTransport> VirtioGpuBackend<T> {
         self.stats.submitted += 1;
         match command {
             Command::AttachBacking(_) => self.stats.attaches += 1,
+            Command::SetScanout => self.stats.scanouts += 1,
             Command::DetachBacking => self.stats.detaches += 1,
             Command::Transfer(rect) => {
                 self.stats.transfers += 1;
@@ -556,12 +559,17 @@ impl<T: VirtqueueTransport> ScanoutBackend for VirtioGpuBackend<T> {
             commands[count] = command;
             count += 1;
         };
-        let attach = self.attached != Some((index, backing.source));
-        if attach {
-            if self.attached.is_some() {
+        match self.attached {
+            Some(attached) if attached == (index, backing.source) => {}
+            Some(_) => {
                 push(Command::DetachBacking);
+                push(Command::AttachBacking(index));
             }
-            push(Command::AttachBacking(index));
+            // Nothing attached since bring-up: the scanout is not linked to the resource yet.
+            None => {
+                push(Command::AttachBacking(index));
+                push(Command::SetScanout);
+            }
         }
         for rect in damage {
             push(Command::Transfer(*rect));
