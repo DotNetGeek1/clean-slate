@@ -151,6 +151,11 @@ pub enum ManifestError {
     GrantNotSupportedByImage {
         row: usize,
     },
+    /// A storage row holds `Grant::ObjectServiceRole` without running the object-service mode,
+    /// or runs that mode without the role.
+    ObjectServiceRoleModeMismatch {
+        row: usize,
+    },
     /// `depends_on` names a service that is not declared earlier in the manifest.
     DependencyNotEarlier {
         row: usize,
@@ -189,6 +194,12 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
             }
             grant += 1;
         }
+        if matches!(spec.image, ServiceImage::Storage)
+            && spec.grants(Grant::ObjectServiceRole)
+                != (spec.mode == STORAGE_SERVICE_MODE_OBJECT_SERVICE)
+        {
+            return Err(ManifestError::ObjectServiceRoleModeMismatch { row });
+        }
         let mut dependency = 0;
         while dependency < spec.depends_on.len() {
             let mut found = false;
@@ -212,6 +223,7 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::STORAGE_SERVICE_MODE_PERSISTENCE;
 
     const fn row(id: u32, image: ServiceImage, grants: &'static [Grant]) -> ServiceSpec {
         ServiceSpec {
@@ -299,6 +311,28 @@ mod tests {
             validate_manifest(&rows),
             Err(ManifestError::GrantNotSupportedByImage { row: 0 })
         );
+    }
+
+    #[test]
+    fn validation_rejects_object_role_without_object_service_mode() {
+        let mut role_only = row(7, ServiceImage::Storage, &[Grant::ObjectServiceRole]);
+        role_only.mode = STORAGE_SERVICE_MODE_PERSISTENCE;
+        assert_eq!(
+            validate_manifest(&[role_only]),
+            Err(ManifestError::ObjectServiceRoleModeMismatch { row: 0 })
+        );
+    }
+
+    #[test]
+    fn validation_rejects_object_service_mode_without_object_role() {
+        let mut mode_only = row(7, ServiceImage::Storage, &[Grant::BlockDevice]);
+        mode_only.mode = STORAGE_SERVICE_MODE_OBJECT_SERVICE;
+        assert_eq!(
+            validate_manifest(&[mode_only]),
+            Err(ManifestError::ObjectServiceRoleModeMismatch { row: 0 })
+        );
+        mode_only.grants = &[Grant::BlockDevice, Grant::ObjectServiceRole];
+        assert_eq!(validate_manifest(&[mode_only]), Ok(()));
     }
 
     #[test]

@@ -29,12 +29,13 @@ use crate::sync::global_cell::GlobalCell;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 use clean_slate_network::limits::MAX_SESSIONS;
+#[cfg(feature = "m9-linux-socket-self-test")]
+use clean_slate_service_fixtures::NETWORK_SERVICE_MODE_ACCEPTANCE;
 use clean_slate_service_fixtures::{
     NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
-    NETWORK_SERVICE_MODE_ACCEPTANCE, NETWORK_SERVICE_MODE_CAPACITY_LOOP,
-    NETWORK_SERVICE_MODE_INFLIGHT_ARM, NETWORK_SERVICE_MODE_STALE_CLOSE,
-    NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE, NETWORK_SERVICE_RESULT_OK,
-    NETWORK_UNAUTHORIZED_SERVICE_ID,
+    NETWORK_SERVICE_MODE_CAPACITY_LOOP, NETWORK_SERVICE_MODE_INFLIGHT_ARM,
+    NETWORK_SERVICE_MODE_STALE_CLOSE, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
+    NETWORK_SERVICE_RESULT_OK, NETWORK_UNAUTHORIZED_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::{
     ControlRequest, ControlRequestKind, LifecycleMessage, ServiceId,
@@ -204,23 +205,6 @@ pub(crate) fn init_minimal_state_for_m9_socket(lifecycle_capability: u64) {
             capacity: 0,
         },
     }));
-}
-
-pub(crate) fn network_service_bootstrap(
-    service: ServiceId,
-) -> Result<NetworkServiceBootstrap, &'static str> {
-    let test_state = state();
-    match service {
-        NETWORK_SERVICE_ID => Ok(NetworkServiceBootstrap::new(
-            NETWORK_SERVICE_MODE_ACCEPTANCE,
-            test_state.service_generation,
-        )),
-        NETWORK_UNAUTHORIZED_SERVICE_ID => Ok(NetworkServiceBootstrap::new(
-            NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
-            0,
-        )),
-        _ => Err("unexpected network bootstrap service"),
-    }
 }
 
 pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {

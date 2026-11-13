@@ -104,25 +104,74 @@ static M5_STORAGE_SELF_TEST_STATE: GlobalCell<Option<M5StorageSelfTestState>> =
 static M5_CRASH_PLAN: GlobalCell<Option<M5CrashPlan>> = GlobalCell::new(None);
 
 /// M5 runs storage in modes that predate the object service, so the service gets the block device
-/// only and the unauthorized probe gets nothing. `storage_service_bootstrap` still picks each
-/// phase's mode, so these rows leave `mode` unset.
-const M5_STORAGE_SCENARIO: &[ServiceSpec] = &[
+/// only and the unauthorized probe gets nothing. Each self-test mode and integration phase runs
+/// the service in a different bootstrap mode, so each has its own manifest.
+const fn m5_storage_row(mode: u64) -> ServiceSpec {
     ServiceSpec {
-        mode: 0,
+        mode,
         grants: &[Grant::BlockDevice],
         restart: RestartSpec::Never,
         ..STORAGE_SERVICE_SPEC
-    },
-    ServiceSpec {
-        id: STORAGE_UNAUTHORIZED_SERVICE_ID,
-        image: ServiceImage::Storage,
-        mode: 0,
-        grants: &[],
-        restart: RestartSpec::Never,
-        depends_on: &[],
-    },
+    }
+}
+
+const M5_UNAUTHORIZED_ROW: ServiceSpec = ServiceSpec {
+    id: STORAGE_UNAUTHORIZED_SERVICE_ID,
+    image: ServiceImage::Storage,
+    mode: STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE,
+    grants: &[],
+    restart: RestartSpec::Never,
+    depends_on: &[],
+};
+
+const M5_PERSISTENCE_SCENARIO: &[ServiceSpec] = &[m5_storage_row(STORAGE_SERVICE_MODE_PERSISTENCE)];
+const M5_CRASH_ARM_EARLY_SCENARIO: &[ServiceSpec] =
+    &[m5_storage_row(STORAGE_SERVICE_MODE_CRASH_ARM_EARLY)];
+const M5_CRASH_ARM_LATE_SCENARIO: &[ServiceSpec] =
+    &[m5_storage_row(STORAGE_SERVICE_MODE_CRASH_ARM_LATE)];
+const M5_CRASH_RECOVERY_SCENARIO: &[ServiceSpec] =
+    &[m5_storage_row(STORAGE_SERVICE_MODE_CRASH_RECOVERY)];
+const M5_INTEGRATION_INITIAL_SCENARIO: &[ServiceSpec] = &[
+    m5_storage_row(STORAGE_SERVICE_MODE_INTEGRATION_INITIAL),
+    M5_UNAUTHORIZED_ROW,
 ];
-const _: () = assert!(validate_manifest(M5_STORAGE_SCENARIO).is_ok());
+const M5_INTEGRATION_RESTART_SCENARIO: &[ServiceSpec] = &[
+    m5_storage_row(STORAGE_SERVICE_MODE_INTEGRATION_RESTART),
+    M5_UNAUTHORIZED_ROW,
+];
+const _: () = assert!(validate_manifest(M5_PERSISTENCE_SCENARIO).is_ok());
+const _: () = assert!(validate_manifest(M5_CRASH_ARM_EARLY_SCENARIO).is_ok());
+const _: () = assert!(validate_manifest(M5_CRASH_ARM_LATE_SCENARIO).is_ok());
+const _: () = assert!(validate_manifest(M5_CRASH_RECOVERY_SCENARIO).is_ok());
+const _: () = assert!(validate_manifest(M5_INTEGRATION_INITIAL_SCENARIO).is_ok());
+const _: () = assert!(validate_manifest(M5_INTEGRATION_RESTART_SCENARIO).is_ok());
+
+/// The manifest whose rows give the instance `launch_phase` starts for `state` its mode.
+fn m5_scenario(state: &M5StorageSelfTestState) -> &'static [ServiceSpec] {
+    match state.mode {
+        M5StorageSelfTestMode::Integration => match state.phase {
+            IntegrationPhase::InitialAuthorized | IntegrationPhase::UnauthorizedProbe => {
+                M5_INTEGRATION_INITIAL_SCENARIO
+            }
+            IntegrationPhase::RestartAuthorized => M5_INTEGRATION_RESTART_SCENARIO,
+        },
+        M5StorageSelfTestMode::Persistence => M5_PERSISTENCE_SCENARIO,
+        M5StorageSelfTestMode::CrashArmEarly => M5_CRASH_ARM_EARLY_SCENARIO,
+        M5StorageSelfTestMode::CrashArmLate => M5_CRASH_ARM_LATE_SCENARIO,
+        M5StorageSelfTestMode::CrashRecovery => M5_CRASH_RECOVERY_SCENARIO,
+    }
+}
+
+/// The handle the restarted integration instance resumes from; every other start resumes from
+/// nothing.
+fn m5_previous_handle(state: &M5StorageSelfTestState) -> u64 {
+    match (state.mode, state.phase) {
+        (M5StorageSelfTestMode::Integration, IntegrationPhase::RestartAuthorized) => {
+            state.previous_handle
+        }
+        _ => 0,
+    }
+}
 
 pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
     unsafe {
@@ -137,7 +186,6 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
     let capability = {
         let controller = unsafe { service_lifecycle_controller_mut() };
         controller.clear();
-        controller.use_scenario_manifest(M5_STORAGE_SCENARIO);
         controller.configure_launch_context(kernel_root);
         controller
             .declare_service(STORAGE_SERVICE_ID)
@@ -212,53 +260,17 @@ fn set_self_test_state(state: Option<M5StorageSelfTestState>) {
     }
 }
 
-/// Bootstrap block handed to a freshly spawned storage-service process,
-/// derived from the phase recorded in the self-test state at launch time.
-pub(crate) fn storage_service_bootstrap(
-    service: ServiceId,
-) -> Result<StorageServiceBootstrap, &'static str> {
-    let state = self_test_state()?;
-    let bootstrap = match state.mode {
-        M5StorageSelfTestMode::Integration => match (state.phase, service) {
-            (IntegrationPhase::InitialAuthorized, s) if s == STORAGE_SERVICE_ID => {
-                StorageServiceBootstrap::new(STORAGE_SERVICE_MODE_INTEGRATION_INITIAL, 0)
-            }
-            (IntegrationPhase::UnauthorizedProbe, s) if s == STORAGE_UNAUTHORIZED_SERVICE_ID => {
-                StorageServiceBootstrap::new(STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE, 0)
-            }
-            (IntegrationPhase::RestartAuthorized, s) if s == STORAGE_SERVICE_ID => {
-                StorageServiceBootstrap::new(
-                    STORAGE_SERVICE_MODE_INTEGRATION_RESTART,
-                    state.previous_handle,
-                )
-            }
-            _ => return Err("unexpected storage service phase bootstrap request"),
-        },
-        M5StorageSelfTestMode::Persistence => {
-            StorageServiceBootstrap::new(STORAGE_SERVICE_MODE_PERSISTENCE, 0)
-        }
-        M5StorageSelfTestMode::CrashArmEarly => {
-            StorageServiceBootstrap::new(STORAGE_SERVICE_MODE_CRASH_ARM_EARLY, 0)
-        }
-        M5StorageSelfTestMode::CrashArmLate => {
-            StorageServiceBootstrap::new(STORAGE_SERVICE_MODE_CRASH_ARM_LATE, 0)
-        }
-        M5StorageSelfTestMode::CrashRecovery => {
-            StorageServiceBootstrap::new(STORAGE_SERVICE_MODE_CRASH_RECOVERY, 0)
-        }
-    };
-    Ok(bootstrap)
-}
-
 /// Starts the service for `state.phase` through the lifecycle controller and
-/// returns the new instance's pid. The caller must have stored `state` in the
-/// self-test cell so the spawn path can build the matching bootstrap block.
+/// returns the new instance's pid. The phase's scenario manifest decides the
+/// instance's bootstrap mode.
 fn launch_phase(
     state: M5StorageSelfTestState,
     controller: &mut ServiceLifecycleController,
     allocator: &mut PageAllocator,
 ) -> u64 {
     let service = current_service(&state);
+    controller.use_scenario_manifest(m5_scenario(&state));
+    controller.set_scenario_previous_handle(m5_previous_handle(&state));
     let result = controller
         .handle_control_message(
             allocator,

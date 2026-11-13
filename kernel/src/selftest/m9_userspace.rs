@@ -58,12 +58,11 @@ use crate::syscall::{
 };
 use clean_slate_rootfs::EntryKind;
 use clean_slate_service_fixtures::{
-    NetworkServiceBootstrap, NetworkServiceOccupancy, StorageServiceBootstrap,
-    NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID, STORAGE_SERVICE_ID,
-    STORAGE_SERVICE_MODE_OBJECT_SERVICE,
+    NetworkServiceBootstrap, NetworkServiceOccupancy, NETWORK_SERVICE_BOOTSTRAP_ADDRESS,
+    NETWORK_SERVICE_ID, STORAGE_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::{
-    ControlRequest, ControlRequestKind, InstanceGeneration, LifecycleMessage, ServiceId,
+    ControlRequest, ControlRequestKind, InstanceGeneration, LifecycleMessage,
 };
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -252,18 +251,6 @@ static SLEEP_TICKS_AT_BLOCK: [AtomicU64; SCHEDULER_THREAD_SLOTS] =
 static OBJECT_READ_DENIALS: AtomicU32 = AtomicU32::new(0);
 static OBJECT_WRITE_DENIALS: AtomicU32 = AtomicU32::new(0);
 static NETWORK_DENIALS: AtomicU32 = AtomicU32::new(0);
-
-pub(crate) fn storage_service_bootstrap(
-    service: ServiceId,
-) -> Result<StorageServiceBootstrap, &'static str> {
-    if service != STORAGE_SERVICE_ID {
-        return Err("unexpected storage bootstrap service for m9 userspace test");
-    }
-    Ok(StorageServiceBootstrap::new(
-        STORAGE_SERVICE_MODE_OBJECT_SERVICE,
-        0,
-    ))
-}
 
 fn allocator() -> &'static mut PageAllocator {
     service_lifecycle_syscall_allocator_mut()

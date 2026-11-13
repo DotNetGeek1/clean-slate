@@ -43,13 +43,10 @@ use clean_slate_service_fixtures::m6_fixture::{
     FIXTURE_STATUS_MISMATCH,
 };
 use clean_slate_service_fixtures::{
-    StorageServiceBootstrap, OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT,
-    OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT, STORAGE_SERVICE_ID,
-    STORAGE_SERVICE_MODE_OBJECT_SERVICE,
+    OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, OBJECT_SUBOP_POLL,
+    OBJECT_SUBOP_SUBMIT, STORAGE_SERVICE_ID,
 };
-use clean_slate_service_lifecycle::{
-    ControlRequest, ControlRequestKind, LifecycleMessage, ServiceId,
-};
+use clean_slate_service_lifecycle::{ControlRequest, ControlRequestKind, LifecycleMessage};
 
 const SUPERVISOR_TEST_PID: u64 = 60;
 const TEST_OBJECT_ID: u64 = 7;
@@ -121,18 +118,6 @@ fn state_mut() -> &'static mut CapabilitiesSelfTestState {
             .as_mut()
             .expect("m6 capabilities self-test state was not initialized")
     }
-}
-
-pub(crate) fn storage_service_bootstrap(
-    service: ServiceId,
-) -> Result<StorageServiceBootstrap, &'static str> {
-    if service != STORAGE_SERVICE_ID {
-        return Err("unexpected storage bootstrap service for m6.8 test");
-    }
-    Ok(StorageServiceBootstrap::new(
-        STORAGE_SERVICE_MODE_OBJECT_SERVICE,
-        0,
-    ))
 }
 
 fn arg_data(offset: usize) -> u64 {

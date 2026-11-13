@@ -26,11 +26,9 @@ use crate::service::control::ServiceLifecycleController;
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
-use clean_slate_service_fixtures::{
-    StorageServiceBootstrap, STORAGE_SERVICE_ID, STORAGE_SERVICE_MODE_OBJECT_SERVICE,
-};
+use clean_slate_service_fixtures::STORAGE_SERVICE_ID;
 use clean_slate_service_lifecycle::{
-    ControlRequest, ControlRequestKind, InstanceGeneration, LifecycleMessage, ServiceId,
+    ControlRequest, ControlRequestKind, InstanceGeneration, LifecycleMessage,
 };
 use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering};
 
@@ -57,18 +55,6 @@ enum Phase {
 }
 
 static mut M9_PHASE: Phase = Phase::MainProbe;
-
-pub(crate) fn storage_service_bootstrap(
-    service: ServiceId,
-) -> Result<StorageServiceBootstrap, &'static str> {
-    if service != STORAGE_SERVICE_ID {
-        return Err("unexpected storage bootstrap service for m9 linux fs test");
-    }
-    Ok(StorageServiceBootstrap::new(
-        STORAGE_SERVICE_MODE_OBJECT_SERVICE,
-        0,
-    ))
-}
 
 pub(crate) fn start_m9_linux_fs_self_test(page_allocator: PageAllocator) -> ! {
     kernel_log_line("[M9.H] creating");

@@ -7,9 +7,9 @@ use crate::process::process_registry_mut;
 use crate::service::capability::LifecycleControlCapabilityError;
 use crate::service::capability::{BlockDeviceCapabilityError, BlockDeviceCapabilityTable};
 use crate::service::grants::{apply_instance_grants, InstanceGrantAuthority};
-use crate::service::spawn::launch_builtin_service;
+use crate::service::spawn::{launch_builtin_service, LaunchContext};
 use crate::sync::global_cell::GlobalCell;
-use clean_slate_service_fixtures::manifest::{grants_for, Grant, ServiceSpec, SYSTEM_MANIFEST};
+use clean_slate_service_fixtures::manifest::{find_service, Grant, ServiceSpec, SYSTEM_MANIFEST};
 use clean_slate_service_fixtures::{
     NETWORK_DEVICE_ID, NETWORK_SERVICE_ID, STORAGE_BLOCK_DEVICE_ID,
 };
@@ -90,8 +90,10 @@ pub(crate) struct ServiceLifecycleController {
     pending_count: usize,
     next_scheduler_slot: usize,
     kernel_root_frame: u64,
-    /// Rows that decide each started service's launch grants.
+    /// Rows that decide each started service's bootstrap mode and launch grants.
     manifest: &'static [ServiceSpec],
+    /// Handle a restarted scenario instance resumes from; init will own this state (#218 S3).
+    scenario_previous_handle: u64,
 }
 
 impl ServiceLifecycleController {
@@ -105,11 +107,13 @@ impl ServiceLifecycleController {
             next_scheduler_slot: 0,
             kernel_root_frame: 0,
             manifest: SYSTEM_MANIFEST,
+            scenario_previous_handle: 0,
         }
     }
 
     pub(crate) fn clear(&mut self) {
         self.manifest = SYSTEM_MANIFEST;
+        self.scenario_previous_handle = 0;
         self.capabilities.clear();
         self.block_capabilities.clear();
         self.services = [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY];
@@ -500,7 +504,8 @@ impl ServiceLifecycleController {
             .allocate_scheduler_slot()
             .map_err(LifecycleControlError::SpawnFailed)?;
         let kernel_stack_top = Self::resolve_kernel_stack_top(scheduler_slot)?;
-        let grants = self.launch_grants(service_id);
+        let context = self.launch_context(service_id, generation);
+        let grants = context.grants();
         let spawned = if service_id.0 == 0x0000_4100 {
             #[cfg(feature = "m4-recovery-self-test")]
             {
@@ -525,7 +530,7 @@ impl ServiceLifecycleController {
                 kernel_stack_top,
                 scheduler_slot,
                 service_id,
-                grants,
+                context,
             )
             .map_err(|message| {
                 #[cfg(feature = "m8-linux-hello")]
@@ -624,8 +629,40 @@ impl ServiceLifecycleController {
         self.manifest = manifest;
     }
 
+    /// Sets the handle the next started storage instance resumes from, until the next
+    /// [`Self::clear`]. Only the M5 integration restart phase needs one.
+    #[cfg_attr(
+        not(any(
+            test,
+            feature = "m5-storage-self-test",
+            feature = "m5-persistence-self-test",
+            feature = "m5-crash-early-self-test",
+            feature = "m5-crash-late-self-test",
+            feature = "m5-crash-recovery-self-test"
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn set_scenario_previous_handle(&mut self, handle: u64) {
+        self.scenario_previous_handle = handle;
+    }
+
+    /// The active manifest row and scenario state an instance of `service_id` launches with.
+    fn launch_context(
+        &self,
+        service_id: ServiceId,
+        generation: InstanceGeneration,
+    ) -> LaunchContext {
+        LaunchContext {
+            spec: find_service(self.manifest, service_id),
+            generation,
+            previous_handle: self.scenario_previous_handle,
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn launch_grants(&self, service_id: ServiceId) -> &'static [Grant] {
-        grants_for(self.manifest, service_id)
+        self.launch_context(service_id, InstanceGeneration(0))
+            .grants()
     }
 
     #[cfg(feature = "m7-net-service-self-test")]
@@ -1229,6 +1266,43 @@ mod tests {
         assert_eq!(
             controller.launch_grants(NETWORK_SERVICE_ID),
             [Grant::NetworkService]
+        );
+    }
+
+    #[test]
+    fn launch_context_carries_the_row_generation_and_scenario_handle() {
+        use clean_slate_service_fixtures::manifest::STORAGE_SERVICE_SPEC;
+        use clean_slate_service_fixtures::STORAGE_SERVICE_MODE_OBJECT_SERVICE;
+
+        let mut controller = ServiceLifecycleController::new();
+        let context = controller.launch_context(STORAGE_SERVICE_ID, InstanceGeneration(3));
+        assert_eq!(context.spec, Some(&STORAGE_SERVICE_SPEC));
+        assert_eq!(
+            context.spec.map(|spec| spec.mode),
+            Some(STORAGE_SERVICE_MODE_OBJECT_SERVICE)
+        );
+        assert_eq!(context.generation, InstanceGeneration(3));
+        assert_eq!(context.previous_handle, 0);
+        assert_eq!(
+            controller
+                .launch_context(STORAGE_UNAUTHORIZED_SERVICE_ID, InstanceGeneration(1))
+                .spec,
+            None
+        );
+
+        controller.set_scenario_previous_handle(0x55);
+        assert_eq!(
+            controller
+                .launch_context(STORAGE_SERVICE_ID, InstanceGeneration(2))
+                .previous_handle,
+            0x55
+        );
+        controller.clear();
+        assert_eq!(
+            controller
+                .launch_context(STORAGE_SERVICE_ID, InstanceGeneration(2))
+                .previous_handle,
+            0
         );
     }
 
