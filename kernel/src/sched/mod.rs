@@ -37,8 +37,8 @@ const fn task_count_for_features() -> usize {
     )) {
         6
     } else if cfg!(feature = "m10-desktop") {
-        // #118: 2 boot demo tasks, then compositor, shell and app, plus the replacement
-        // compositor that starts while the crashed one still holds its slot.
+        // #118: 2 boot demo tasks, then compositor, shell and app, plus one spare. A replacement
+        // starts only after its predecessor's teardown has freed its slot (#227).
         6
     } else if cfg!(feature = "m8-linux-hello") {
         3
