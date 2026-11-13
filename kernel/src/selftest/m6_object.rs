@@ -29,13 +29,10 @@ use clean_slate_service_fixtures::m6_fixture::{
     M6FixtureBootstrap, M6FixtureStep, ARG_DATA_PTR, ARG_RESULT_OF, FIXTURE_STATUS_DONE,
 };
 use clean_slate_service_fixtures::{
-    StorageServiceBootstrap, OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_STATUS_NOT_FOUND,
-    OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT, OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT, STORAGE_SERVICE_ID,
-    STORAGE_SERVICE_MODE_OBJECT_SERVICE,
+    OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_STATUS_NOT_FOUND, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT,
+    OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT, STORAGE_SERVICE_ID,
 };
-use clean_slate_service_lifecycle::{
-    ControlRequest, ControlRequestKind, LifecycleMessage, ServiceId,
-};
+use clean_slate_service_lifecycle::{ControlRequest, ControlRequestKind, LifecycleMessage};
 
 const SUPERVISOR_TEST_PID: u64 = 60;
 const TEST_OBJECT_ID: u64 = 7;

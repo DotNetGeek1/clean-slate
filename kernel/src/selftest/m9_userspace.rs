@@ -58,12 +58,11 @@ use crate::syscall::{
 };
 use clean_slate_rootfs::EntryKind;
 use clean_slate_service_fixtures::{
-    NetworkServiceBootstrap, NetworkServiceOccupancy, StorageServiceBootstrap,
-    NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID, STORAGE_SERVICE_ID,
-    STORAGE_SERVICE_MODE_OBJECT_SERVICE,
+    NetworkServiceBootstrap, NetworkServiceOccupancy, NETWORK_SERVICE_BOOTSTRAP_ADDRESS,
+    NETWORK_SERVICE_ID, STORAGE_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::{
-    ControlRequest, ControlRequestKind, InstanceGeneration, LifecycleMessage, ServiceId,
+    ControlRequest, ControlRequestKind, InstanceGeneration, LifecycleMessage,
 };
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
