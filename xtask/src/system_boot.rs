@@ -222,7 +222,7 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
     let init_pid = number(launched, "pid")?;
     let authority = only_line(output, "[KERN] init authority pid=")?;
     let expected_authority = format!(
-        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 other=0 expected-only-lifecycle-and-console=1"
+        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 expected-only-lifecycle-and-console=1"
     );
     if authority != expected_authority {
         return Err(format!("init authority line {authority:?}"));
@@ -300,17 +300,17 @@ mod tests {
             "[SVC ] declared service=20736\n\
              [SVC ] declared service=20992\n\
              [KERN] init launched pid=3 slot=0 declared-services=2\n\
-             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 other=0 expected-only-lifecycle-and-console=1\n\
+             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 expected-only-lifecycle-and-console=1\n\
              [IPC ] console pid=3: [INIT] started pid=3 services=2\n\
              [IPC ] console pid=3: [INIT] SERVICE_READY from init refused: not a service\n\
              [IPC ] console pid=3: [INIT] starting service=20736\n\
-             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 other=0 matches-manifest=1\n\
+             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 matches-manifest=1\n\
              [SVC ] launch service=20736 pid=4 gen=1\n\
              [SVC ] ready service=20736 pid=4 gen=1 source=live-instance kernel-observed block-write-requests={writes} service-reported formatted={formatted} store-generation=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=20992\n\
-             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 other=0 matches-manifest=1\n\
+             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 matches-manifest=1\n\
              [SVC ] launch service=20992 pid=5 gen=1\n\
-             [SVC ] ready service=20992 pid=5 gen=1 source=live-instance kernel-observed block-write-requests=0 raw-backend=virtio service-reported link-up=1\n\
+             [SVC ] ready service=20992 pid=5 gen=1 source=live-instance kernel-observed raw-backend=virtio service-reported link-up=1\n\
              [IPC ] console pid=3: [INIT] service=20992 ready gen=1\n\
              [IPC ] console pid=3: [INIT] boot settled running=2 down=0; waiting, no deadline\n\
              [KERN] idle thread halted 16 times in a row while init pid=3 waited in LIFECYCLE_WAIT with no deadline\n"
@@ -373,12 +373,16 @@ mod tests {
 
     #[test]
     fn extra_authority_or_a_restart_fails() {
-        let text =
-            transcript(1, 9).replace("network=0 other=0 expected", "network=1 other=0 expected");
+        let text = transcript(1, 9).replace(
+            "pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0",
+            "pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=1",
+        );
+        assert!(validate_boot(&text, Formatted::Yes).is_err());
+        let text = transcript(1, 9).replace("linux=0 expected", "linux=1 expected");
         assert!(validate_boot(&text, Formatted::Yes).is_err());
         let text = transcript(1, 9).replace(
-            "network=1 other=0 matches-manifest=1",
-            "network=1 other=0 matches-manifest=0",
+            "raw-net-link=1 linux=0 matches-manifest=1",
+            "raw-net-link=1 linux=0 matches-manifest=0",
         );
         assert!(validate_boot(&text, Formatted::Yes).is_err());
         let text = transcript(1, 9).replace(

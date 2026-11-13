@@ -513,6 +513,16 @@ pub(crate) fn with_active_display<R>(f: impl FnOnce(Option<&mut ActiveDisplay>) 
     without_interrupts(|| f(unsafe { (*ACTIVE_DISPLAY.get()).as_mut() }))
 }
 
+/// 1 when `holder` is bound as the display presenter, else 0.
+#[cfg(clean_slate_system_init)]
+pub(crate) fn presenter_bindings_for(holder: HolderId) -> usize {
+    with_active_display(|display| {
+        display.map_or(0, |display| {
+            usize::from(display.presenter.holder() == Some(holder))
+        })
+    })
+}
+
 /// Teardown slot 2 of the shared hook block (after the port, before the input consumer): releases
 /// `holder`'s presenter binding and unmaps its scanout grants. Returns the rows unmapped.
 pub(crate) fn release_presenter_for_holder(

@@ -70,7 +70,15 @@ pub(crate) fn on_process_death(pid: u64, death: ProcessDeath) {
     fatal_kernel_error("init died; the system cannot continue");
 }
 
-/// Authority a process holds, counted in every kernel table that grants any.
+/// Authority a process holds at launch, before it has run. Counted in the capability space
+/// (every record the pid holds, by class; any class not named here is `other`) and in each
+/// kernel table outside it that ties authority or a device binding to a pid: the lifecycle
+/// controller's lifecycle-control and block-device tables, the IPC endpoint table, service
+/// ports and port connections, the display presenter, the input consumer, shared-buffer
+/// mappings, work sets, the network bridge's raw-link binding and the execution personality
+/// (Linux-personality tables only exist for Linux processes). The test
+/// `every_per_process_teardown_hook_is_counted_or_derived` keeps this list in step with
+/// process teardown, which must release everything a pid holds.
 #[cfg(clean_slate_system_init)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct HeldAuthority {
@@ -80,10 +88,76 @@ pub(crate) struct HeldAuthority {
     pub(crate) block_device: usize,
     pub(crate) object_service_role: usize,
     pub(crate) network: usize,
-    /// Capability-table records of any other kind. A console grant also records one IPC
+    /// Capability-space records of any other kind. A console grant also records one IPC
     /// endpoint capability there; those are counted as `console_records`.
     pub(crate) console_records: usize,
     pub(crate) other: usize,
+    pub(crate) outside: OutsideCapabilitySpace,
+}
+
+/// The per-pid tables outside the capability space that [`HeldAuthority`] counts besides the
+/// lifecycle controller's and the IPC send capabilities.
+#[cfg(clean_slate_system_init)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OutsideCapabilitySpace {
+    pub(crate) owned_endpoints: usize,
+    pub(crate) ports_served: usize,
+    pub(crate) port_connections: usize,
+    pub(crate) display_presenter: usize,
+    pub(crate) input_consumer: usize,
+    pub(crate) shared_mappings: usize,
+    pub(crate) work_sets: usize,
+    /// The network bridge's raw link is bound to this pid (the network service's device).
+    pub(crate) raw_network_link: usize,
+    /// 1 for a Linux-personality process.
+    pub(crate) linux_personality: usize,
+}
+
+#[cfg(clean_slate_system_init)]
+impl OutsideCapabilitySpace {
+    fn of(pid: u64) -> Self {
+        use crate::process::personality::{execution_personality_for_pid, ExecutionPersonality};
+        use clean_slate_capability::HolderId;
+
+        let holder = HolderId(pid);
+        let ports = crate::service::port::counts_for(holder);
+        Self {
+            owned_endpoints: unsafe { crate::ipc::endpoint_table_mut() }
+                .resources_for_pid(pid)
+                .owned_endpoints,
+            ports_served: ports.ports_served,
+            port_connections: ports.port_connections,
+            display_presenter: crate::device::display::presenter_bindings_for(holder),
+            input_consumer: crate::device::input::consumer_bindings_for(holder),
+            shared_mappings: crate::mm::shared_buffer::mapping_count(pid),
+            work_sets: crate::sched::work_set::count_for(holder),
+            raw_network_link: usize::from(
+                crate::service::net_bridge::net_bridge_mut().is_live_service(pid),
+            ),
+            linux_personality: usize::from(
+                execution_personality_for_pid(pid) != Ok(ExecutionPersonality::Native),
+            ),
+        }
+    }
+}
+
+#[cfg(clean_slate_system_init)]
+impl fmt::Display for OutsideCapabilitySpace {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "owned-endpoints={} ports={} port-connections={} presenter={} input-consumer={} shared-mappings={} work-sets={} raw-net-link={} linux={}",
+            self.owned_endpoints,
+            self.ports_served,
+            self.port_connections,
+            self.display_presenter,
+            self.input_consumer,
+            self.shared_mappings,
+            self.work_sets,
+            self.raw_network_link,
+            self.linux_personality,
+        )
+    }
 }
 
 #[cfg(clean_slate_system_init)]
@@ -97,16 +171,31 @@ impl HeldAuthority {
         network: 0,
         console_records: 1,
         other: 0,
+        outside: OutsideCapabilitySpace {
+            owned_endpoints: 0,
+            ports_served: 0,
+            port_connections: 0,
+            display_presenter: 0,
+            input_consumer: 0,
+            shared_mappings: 0,
+            work_sets: 0,
+            raw_network_link: 0,
+            linux_personality: 0,
+        },
     };
 
     /// What an instance started from a manifest row with `grants` must hold. Services get no
-    /// console and no lifecycle control.
+    /// console and no lifecycle control; the network grant also binds the raw network link.
     pub(crate) fn for_grants(grants: &[Grant]) -> Self {
         let held = |grant: Grant| usize::from(grants.contains(&grant));
         Self {
             block_device: held(Grant::BlockDevice),
             object_service_role: held(Grant::ObjectServiceRole),
             network: held(Grant::NetworkService),
+            outside: OutsideCapabilitySpace {
+                raw_network_link: held(Grant::NetworkService),
+                ..OutsideCapabilitySpace::default()
+            },
             ..Self::default()
         }
     }
@@ -125,6 +214,7 @@ impl HeldAuthority {
             lifecycle_control,
             console,
             block_device,
+            outside: OutsideCapabilitySpace::of(pid),
             ..Self::default()
         };
         crate::capability::with_capability_space(|table| {
@@ -152,13 +242,14 @@ impl fmt::Display for HeldAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "lifecycle-control={} console={} block-device={} object-service={} network={} other={}",
+            "lifecycle-control={} console={} block-device={} object-service={} network={} other={} {}",
             self.lifecycle_control,
             self.console,
             self.block_device,
             self.object_service_role,
             self.network,
             self.other + self.console_records.saturating_sub(self.console),
+            self.outside,
         )
     }
 }
@@ -408,6 +499,10 @@ mod tests {
             HeldAuthority::for_grants(grants_for(SYSTEM_MANIFEST, NETWORK_SERVICE_ID)),
             HeldAuthority {
                 network: 1,
+                outside: OutsideCapabilitySpace {
+                    raw_network_link: 1,
+                    ..OutsideCapabilitySpace::default()
+                },
                 ..HeldAuthority::default()
             }
         );
@@ -419,7 +514,7 @@ mod tests {
     fn init_is_expected_to_hold_lifecycle_control_and_the_console_only() {
         assert_eq!(
             std::format!("{}", HeldAuthority::INIT),
-            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 other=0"
+            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0"
         );
         let with_block = HeldAuthority {
             block_device: 1,
@@ -431,6 +526,92 @@ mod tests {
             ..HeldAuthority::INIT
         };
         assert_ne!(with_extra_record, HeldAuthority::INIT);
-        assert!(std::format!("{with_extra_record}").ends_with("other=1"));
+        assert!(std::format!("{with_extra_record}").contains(" other=1 "));
+        let outside_extras = [
+            OutsideCapabilitySpace {
+                owned_endpoints: 1,
+                ..HeldAuthority::INIT.outside
+            },
+            OutsideCapabilitySpace {
+                ports_served: 1,
+                ..HeldAuthority::INIT.outside
+            },
+            OutsideCapabilitySpace {
+                port_connections: 1,
+                ..HeldAuthority::INIT.outside
+            },
+            OutsideCapabilitySpace {
+                display_presenter: 1,
+                ..HeldAuthority::INIT.outside
+            },
+            OutsideCapabilitySpace {
+                input_consumer: 1,
+                ..HeldAuthority::INIT.outside
+            },
+            OutsideCapabilitySpace {
+                shared_mappings: 1,
+                ..HeldAuthority::INIT.outside
+            },
+            OutsideCapabilitySpace {
+                work_sets: 1,
+                ..HeldAuthority::INIT.outside
+            },
+            OutsideCapabilitySpace {
+                raw_network_link: 1,
+                ..HeldAuthority::INIT.outside
+            },
+            OutsideCapabilitySpace {
+                linux_personality: 1,
+                ..HeldAuthority::INIT.outside
+            },
+        ];
+        for outside in outside_extras {
+            let held = HeldAuthority {
+                outside,
+                ..HeldAuthority::INIT
+            };
+            assert_ne!(held, HeldAuthority::INIT, "{held}");
+            assert!(std::format!("{held} ").contains("=1 "), "{held}");
+        }
+    }
+
+    /// Process teardown must release everything a pid holds, so its hooks list every per-pid
+    /// table. Each is counted by `HeldAuthority::of` or is state that exists only under what it
+    /// counts. The match has no wildcard: a new hook does not compile until it is placed here.
+    #[cfg(clean_slate_system_init)]
+    #[test]
+    fn every_per_process_teardown_hook_is_counted_or_derived() {
+        use crate::process::domain::{TeardownHook, TEARDOWN_HOOK_ORDER};
+
+        for hook in TEARDOWN_HOOK_ORDER {
+            let counted_as = match hook {
+                TeardownHook::IpcEndpoints => "console, owned-endpoints",
+                TeardownHook::ObjectQueues => {
+                    "object-service: requests served under the role record"
+                }
+                TeardownHook::NetQueues => "network: requests served under the network record",
+                TeardownHook::NetworkCapabilities => {
+                    "network: sessions opened with the network record"
+                }
+                TeardownHook::NetHolderExitNotice => {
+                    "network: exit notices for network-record holders"
+                }
+                TeardownHook::Port => "ports, port-connections",
+                TeardownHook::DisplayPresenter => "presenter",
+                TeardownHook::InputConsumer => "input-consumer",
+                TeardownHook::WorkSet => "work-sets",
+                TeardownHook::RevokeHolderCapabilities => "the capability space, by class",
+                TeardownHook::RevokeProcessResource => {
+                    "not held by the pid: records other holders have over it"
+                }
+                TeardownHook::DiscardBootstrapGrants => {
+                    "the capability space: a parked handle names a record the pid holds"
+                }
+                TeardownHook::SharedMappings => "shared-mappings",
+                TeardownHook::ThreadReap => "not authority: the pid's own threads",
+                TeardownHook::AddressSpace => "not authority: the pid's own memory and record",
+            };
+            assert!(!counted_as.is_empty());
+        }
     }
 }

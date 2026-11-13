@@ -67,7 +67,7 @@ fn log_ready(instance: ServiceInstanceId, block_write_requests: u64, detail: u64
     } else if instance.service == NETWORK_SERVICE_ID {
         let claim = NetworkReadyDetail::decode(detail);
         kernel_log_fmt(format_args!(
-            "[SVC ] ready service={service} pid={pid} gen={generation} source=live-instance kernel-observed block-write-requests={block_write_requests} raw-backend={} service-reported link-up={}\n",
+            "[SVC ] ready service={service} pid={pid} gen={generation} source=live-instance kernel-observed raw-backend={} service-reported link-up={}\n",
             crate::service::net_bridge::net_bridge_mut().raw_backend_name(),
             u8::from(claim.link_up)
         ));

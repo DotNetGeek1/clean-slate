@@ -54,25 +54,25 @@ In the default image the kernel launches userspace init instead of the two kerne
 [SVC ] declared service=20736
 [SVC ] declared service=20992
 [KERN] init launched pid=1 slot=0 declared-services=2
-[KERN] init authority pid=1 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 other=0 expected-only-lifecycle-and-console=1
+[KERN] init authority pid=1 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 expected-only-lifecycle-and-console=1
 [KERN] scheduler initialized
 [IPC ] console pid=1: [INIT] started pid=1 services=2
 [IPC ] console pid=1: [INIT] SERVICE_READY from init refused: not a service
 [IPC ] console pid=1: [INIT] starting service=20736
-[SVC ] authority service=20736 pid=2 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 other=0 matches-manifest=1
+[SVC ] authority service=20736 pid=2 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 matches-manifest=1
 [SVC ] launch service=20736 pid=2 gen=1
 [SVC ] ready service=20736 pid=2 gen=1 source=live-instance kernel-observed block-write-requests=0 service-reported formatted=0 store-generation=0
 [IPC ] console pid=1: [INIT] service=20736 ready gen=1
 [IPC ] console pid=1: [INIT] service=20736 ready; starting service=20992
-[SVC ] authority service=20992 pid=3 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 other=0 matches-manifest=1
+[SVC ] authority service=20992 pid=3 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 matches-manifest=1
 [SVC ] launch service=20992 pid=3 gen=1
-[SVC ] ready service=20992 pid=3 gen=1 source=live-instance kernel-observed block-write-requests=0 raw-backend=loopback service-reported link-up=1
+[SVC ] ready service=20992 pid=3 gen=1 source=live-instance kernel-observed raw-backend=loopback service-reported link-up=1
 [IPC ] console pid=1: [INIT] service=20992 ready gen=1
 [IPC ] console pid=1: [INIT] boot settled running=2 down=0; waiting, no deadline
 [KERN] idle thread halted 16 times in a row while init pid=1 waited in LIFECYCLE_WAIT with no deadline
 ```
 
-Service 20736 (0x5100) is storage and 20992 (0x5200) is network. `[KERN]` and `[SVC ]` lines are the kernel's; `[INIT]` lines are init's own console messages, which the kernel prefixes with the sending pid. In `ready` lines, the fields after `kernel-observed` are counted by the kernel and the fields after `service-reported` are the service's unverified claim. On the first boot of a new disk storage reports `formatted=1`. Without `--net` the network service runs on the kernel's loopback raw link (`raw-backend=loopback`), whose link is always up; with `--net` it is `raw-backend=virtio`. Which builds launch init is one rule, `kernel/build_support/system_init_rule.rs`: init launches exactly when no Cargo feature other than `gdb-entry` is enabled, and every other build that reaches the end of boot runs the demo threads. Init's death is fatal (`[KERN] init pid=N died: …`, then `[FAIL]`). Init's start order and restart policy (storage, then network once storage is ready; up to three restarts per service, the first after 2 s and each later one 2 s further apart) are in `supervisor/src/system_init.rs` and the system manifest (`service-fixtures/src/manifest.rs`).
+Service 20736 (0x5100) is storage and 20992 (0x5200) is network. `[KERN]` and `[SVC ]` lines are the kernel's; `[INIT]` lines are init's own console messages, which the kernel prefixes with the sending pid. The `authority` lines are the kernel's count, taken at launch before the process runs, of everything the pid holds: capabilities by class (`other` is any class besides lifecycle control, console, block device, object-service role and network), then the per-process tables outside the capability space (IPC endpoints it owns, service ports and port connections, the display presenter and input consumer bindings, shared-buffer mappings, work sets, the net bridge's raw-link binding, and a Linux personality). In `ready` lines, the fields after `kernel-observed` are counted by the kernel and the fields after `service-reported` are the service's unverified claim. On the first boot of a new disk storage reports `formatted=1`. Without `--net` the network service runs on the kernel's loopback raw link (`raw-backend=loopback`), whose link is always up; with `--net` it is `raw-backend=virtio`. Which builds launch init is one rule, `kernel/build_support/system_init_rule.rs`: init launches exactly when no Cargo feature other than `gdb-entry` is enabled, and every other build that reaches the end of boot runs the demo threads. Init's death is fatal (`[KERN] init pid=N died: …`, then `[FAIL]`). Init's start order and restart policy (storage, then network once storage is ready; up to three restarts per service, the first after 2 s and each later one 2 s further apart) are in `supervisor/src/system_init.rs` and the system manifest (`service-fixtures/src/manifest.rs`).
 
 For the bounded M1 memory acceptance path:
 
