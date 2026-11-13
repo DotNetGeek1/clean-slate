@@ -2043,6 +2043,7 @@ fn run_m8_linux_abi_host_tests() -> Result<(), XtaskError> {
 
 /// #92 loader + malformed corpus host tests (fixture bytes gated by feature).
 fn run_m8_linux_loader_host_tests() -> Result<(), XtaskError> {
+    ensure_embedded_service_programs()?;
     let mut test = Command::new("cargo");
     test.current_dir(workspace_root())
         .arg("test")
@@ -2195,6 +2196,9 @@ fn run_m4_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_cargo_package_tests(package: &str, filter: &[&str]) -> Result<(), XtaskError> {
+    if package == KERNEL_PACKAGE {
+        ensure_embedded_service_programs()?;
+    }
     let mut test = Command::new("cargo");
     test.current_dir(workspace_root())
         .arg("test")
@@ -2207,6 +2211,9 @@ fn run_cargo_package_tests(package: &str, filter: &[&str]) -> Result<(), XtaskEr
 }
 
 fn run_cargo_package_build_uefi(package: &str, features: &[&str]) -> Result<(), XtaskError> {
+    if package == KERNEL_PACKAGE {
+        ensure_embedded_service_programs()?;
+    }
     let mut build = Command::new("cargo");
     build
         .current_dir(workspace_root())
@@ -3283,10 +3290,16 @@ fn read_m5_host_sentinel(path: &Path) -> Result<Vec<u8>, XtaskError> {
     Ok(sentinel)
 }
 
-fn build_kernel(release: bool, debug_entry: bool, features: &[&str]) -> Result<(), XtaskError> {
-    // Every kernel image embeds both service programs, including `cargo xtask build`.
+/// Every kernel cargo invocation embeds both service programs (`kernel/build.rs`), including
+/// host tests that run before `build_kernel`.
+fn ensure_embedded_service_programs() -> Result<(), XtaskError> {
     build_storage_userspace(true)?;
     build_network_userspace(true)?;
+    Ok(())
+}
+
+fn build_kernel(release: bool, debug_entry: bool, features: &[&str]) -> Result<(), XtaskError> {
+    ensure_embedded_service_programs()?;
 
     let mut cmd = Command::new("cargo");
     cmd.current_dir(workspace_root())
