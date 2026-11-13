@@ -6300,12 +6300,18 @@ mod tests {
     /// aggregate so `-Exhaustive` runs it once. `test-m3-address-space` and `test-m3-lifecycle`
     /// run as one merged boot whose marker list
     /// `merged_address_space_lifecycle_markers_accept_real_transcript` keeps a superset of both,
-    /// so they stay separate script entries without `CoveredBy`.
+    /// so they stay separate script entries without `CoveredBy`. `OUTSIDE_PREFIX` lists the
+    /// constituents whose names do not carry their aggregate's prefix.
     #[test]
     fn milestone_aggregates_run_every_registered_constituent() {
         const MERGED_INTO: [(&str, &str); 2] = [
             ("test-m3-address-space", "test-m3-address-space+lifecycle"),
             ("test-m3-lifecycle", "test-m3-address-space+lifecycle"),
+        ];
+        const OUTSIDE_PREFIX: [(&str, &str); 3] = [
+            ("verify-m8-fixture", "test-m8"),
+            ("verify-m9-fixture", "test-m9"),
+            ("test-qmp-smoke", "test-m10"),
         ];
         fn step_names(steps: &[M4MilestoneStep]) -> Vec<&'static str> {
             steps.iter().map(|(name, _)| *name).collect()
@@ -6318,6 +6324,7 @@ mod tests {
             ("test-m7", step_names(&M7_MILESTONE_STEPS)),
             ("test-m8", step_names(&M8_MILESTONE_STEPS)),
             ("test-m9", step_names(&M9_MILESTONE_STEPS)),
+            ("test-m10", step_names(&M10_MILESTONE_STEPS)),
         ];
         let xtask_source = include_str!("main.rs");
         let script = include_str!("../../scripts/run-tests.ps1");
@@ -6347,7 +6354,12 @@ mod tests {
             let constituents: Vec<&str> = registered
                 .iter()
                 .copied()
-                .filter(|name| name.starts_with(&prefix))
+                .filter(|name| {
+                    name.starts_with(&prefix)
+                        || OUTSIDE_PREFIX
+                            .iter()
+                            .any(|(lane, owner)| lane == name && owner == aggregate)
+                })
                 .collect();
             assert!(
                 !constituents.is_empty(),
