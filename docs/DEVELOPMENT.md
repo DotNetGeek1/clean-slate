@@ -388,7 +388,7 @@ cargo xtask test-m4-restart-policy
 cargo xtask test-m4
 ```
 
-The aggregate runs `test-m4-recovery` (QEMU) plus M4.6 host restart-policy tests, then prints `[M4  ] PASS`. Constituent `cargo xtask test-m4-recovery` expects ordered markers including `[SUP ]`, `[SVC ]`, `[HLTH]`, `[PROC] teardown pid=… resources=0`, `[TEST] unrelated workload progress=`, and `[M4  ] PASS`. Individual M4 self-test kernel features remain separate debugging boots.
+The aggregate runs `test-m4-recovery` (QEMU) plus M4.6 host restart-policy tests, then prints `[M4  ] PASS`. Constituent `cargo xtask test-m4-recovery` expects ordered markers including `[SUP ]`, `[SVC ]`, `[HLTH]`, `[PROC] teardown pid=… resources=0`, `[TEST] unrelated workload progress=`, and `[M4  ] PASS`. The kernel prints the teardown line right after the production fault teardown of the crash service, before the supervisor reports the failure, and `resources=` is the scheduler, IPC, work-set and port state still attributed to that pid at that moment; any value other than `0` fails the lane with `marker value mismatch`. Individual M4 self-test kernel features remain separate debugging boots.
 
 For the M4.7 supervised crash-service fixture (host tests + optional QEMU self-test):
 

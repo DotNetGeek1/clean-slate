@@ -102,8 +102,11 @@ const M4_RECOVERY_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[HLTH] service=16640 healthy gen=1"),
     MarkerStep::Ordered("[TEST] crash-service injecting fault"),
     MarkerStep::Ordered("[PROC] fault pid="),
+    MarkerStep::Line {
+        prefix: "[PROC] teardown pid=",
+        fields: &[("resources=", "0")],
+    },
     MarkerStep::Ordered("[SUP ] failure service=16640 pid="),
-    MarkerStep::Ordered("[PROC] teardown pid="),
     MarkerStep::Ordered("[SUP ] restart service=16640 attempt=1"),
     MarkerStep::Ordered("[SVC ] launch service=16640 pid="),
     MarkerStep::Ordered("[HLTH] service=16640 healthy gen=2"),
