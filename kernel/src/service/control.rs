@@ -1270,6 +1270,43 @@ mod tests {
     }
 
     #[test]
+    fn launch_context_carries_the_row_generation_and_scenario_handle() {
+        use clean_slate_service_fixtures::manifest::STORAGE_SERVICE_SPEC;
+        use clean_slate_service_fixtures::STORAGE_SERVICE_MODE_OBJECT_SERVICE;
+
+        let mut controller = ServiceLifecycleController::new();
+        let context = controller.launch_context(STORAGE_SERVICE_ID, InstanceGeneration(3));
+        assert_eq!(context.spec, Some(&STORAGE_SERVICE_SPEC));
+        assert_eq!(
+            context.spec.map(|spec| spec.mode),
+            Some(STORAGE_SERVICE_MODE_OBJECT_SERVICE)
+        );
+        assert_eq!(context.generation, InstanceGeneration(3));
+        assert_eq!(context.previous_handle, 0);
+        assert_eq!(
+            controller
+                .launch_context(STORAGE_UNAUTHORIZED_SERVICE_ID, InstanceGeneration(1))
+                .spec,
+            None
+        );
+
+        controller.set_scenario_previous_handle(0x55);
+        assert_eq!(
+            controller
+                .launch_context(STORAGE_SERVICE_ID, InstanceGeneration(2))
+                .previous_handle,
+            0x55
+        );
+        controller.clear();
+        assert_eq!(
+            controller
+                .launch_context(STORAGE_SERVICE_ID, InstanceGeneration(2))
+                .previous_handle,
+            0
+        );
+    }
+
+    #[test]
     fn rows_without_post_spawn_grants_succeed_without_rollback() {
         let mut controller = ServiceLifecycleController::new();
         let mut rolled_back = false;
