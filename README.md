@@ -89,6 +89,8 @@ The kernel is expected to be primarily Rust (`#![no_std]`) with narrowly contain
 
 ## Initial technical direction
 
+This section records the original plan. Current state is under [Project status](#project-status).
+
 The first development environment will use x86-64, UEFI, Rust, QEMU, OVMF, VirtIO devices, serial logging, and GDB/debug-symbol support.
 
 The first milestone is deliberately tiny:
