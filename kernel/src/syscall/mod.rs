@@ -761,6 +761,12 @@ fn fail_closed_unresolved_syscall_caller(reason: &'static str) -> ! {
     ) {
         fatal_kernel_error(reason);
     }
+    if let Ok(pid) = crate::process::current_process_id() {
+        crate::service::system_init::on_process_death(
+            pid,
+            crate::service::system_init::ProcessDeath::SyscallContainment(reason),
+        );
+    }
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));
@@ -919,6 +925,9 @@ fn dispatch_native(frame: &mut SyscallContext) {
         cap_abi::SYSCALL_NR_WORK_SET => crate::sched::work_set::handle_syscall(frame),
         lifecycle_abi::SYSCALL_NR_LIFECYCLE_WAIT => {
             crate::service::lifecycle_wait::handle_syscall(frame)
+        }
+        clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY => {
+            crate::service::service_ready::handle_syscall(frame)
         }
         cap_abi::SYSCALL_NR_DISPLAY => {
             crate::service::display_syscall::handle_syscall_display(frame)
@@ -1114,6 +1123,16 @@ mod tests {
         // An unresolvable caller is refused instead of blocking.
         assert_eq!(
             dispatch_native_zeroed(lifecycle_abi::SYSCALL_NR_LIFECYCLE_WAIT, 0),
+            SYSCALL_EACCES
+        );
+    }
+
+    #[test]
+    fn dispatch_native_service_ready_reaches_its_handler() {
+        use clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY;
+        // An unresolvable caller is not a service instance.
+        assert_eq!(
+            dispatch_native_zeroed(SYSCALL_NR_SERVICE_READY, 0),
             SYSCALL_EACCES
         );
     }

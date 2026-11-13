@@ -145,6 +145,7 @@ use crate::selftest::m6_fixture::handle_fixture_report;
 ))]
 use crate::selftest::m6_fixture::is_fixture_pid;
 use crate::service::service_lifecycle_controller_mut;
+use crate::service::system_init::ProcessDeath;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 #[cfg(feature = "m2-double-fault-self-test")]
 use core::sync::atomic::Ordering;
@@ -614,6 +615,17 @@ pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> 
             bit(context.error_code, 4)
         ));
     }
+    crate::service::system_init::on_process_death(
+        pid,
+        if context.vector as usize == crate::arch::x86_64::USER_TEST_VECTOR {
+            ProcessDeath::ExitTrap
+        } else {
+            ProcessDeath::Fault {
+                vector: context.vector,
+                error_code: context.error_code,
+            }
+        },
+    );
 
     let controller = unsafe { service_lifecycle_controller_mut() };
     let maybe_fault_event =

@@ -224,6 +224,33 @@ where
             .map_err(ConvergedSupervisorError::Supervisor)
     }
 
+    /// Restart bookkeeping of `service` (attempts, pending retry and its earliest tick), for a
+    /// caller that schedules its own wake-ups.
+    pub fn recovery_runtime(&self, service: ServiceId) -> Option<RecoveryRuntime> {
+        self.recovery
+            .iter()
+            .flatten()
+            .find(|slot| slot.service == service)
+            .map(|slot| slot.runtime)
+    }
+
+    /// Terminates `service`'s live instance. The resulting exit is a failure like any other, so
+    /// the service's restart policy applies to it.
+    pub fn terminate(&mut self, service: ServiceId) -> Result<(), ConvergedSupervisorError> {
+        self.supervisor
+            .issue_control(ControlRequest::new(service, ControlRequestKind::Terminate))
+            .map_err(ConvergedSupervisorError::Supervisor)?;
+        self.drain_events(service)?;
+        self.supervisor
+            .log_service_state_public(service)
+            .map_err(ConvergedSupervisorError::Supervisor)
+    }
+
+    /// Writes one line to the supervisor's diagnostic sink.
+    pub fn emit_diagnostic(&mut self, line: &str) -> Result<(), ConvergedSupervisorError> {
+        self.emit_line(line)
+    }
+
     pub fn request_start(&mut self, service: ServiceId) -> Result<(), ConvergedSupervisorError> {
         self.ensure_start_ready(service)?;
         self.supervisor
@@ -580,20 +607,20 @@ where
     }
 }
 
-struct LineBuffer {
+pub(crate) struct LineBuffer {
     bytes: [u8; 128],
     len: usize,
 }
 
 impl LineBuffer {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             bytes: [0; 128],
             len: 0,
         }
     }
 
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
     }
 }

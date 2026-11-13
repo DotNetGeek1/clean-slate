@@ -8,13 +8,13 @@ The project is intentionally a clean-sheet design. It is not intended to be anot
 
 ## Project status
 
-`cargo xtask run` builds the kernel with no Cargo features and boots it under QEMU. The boot tail in `kernel/src/boot/mod.rs` calls `initialize_scheduler`, which starts two kernel demo threads (`kernel/src/sched/dispatch.rs`, `kernel/src/sched/demo_tasks.rs`). That image does not launch a supervisor, a network service, a shell, or a Linux process. Those are separate feature builds, and the default image does not run them together.
+`cargo xtask run` builds the kernel with no Cargo features and boots it under QEMU with a persistent data disk, `target/system-data.img`. The boot tail in `kernel/src/boot/mod.rs` launches userspace init (`supervisor/src/bin/init.rs`), which starts the storage service, waits for it to report ready, starts the network service, and then sleeps until a service changes state. The first boot formats the data disk and later boots mount it. Without `--net` there is no network device; `cargo xtask run --net` adds one connected to the hermetic network fixture. The default image does not run a shell, a desktop or a Linux process; those are separate feature builds. Feature builds (other than `gdb-entry` alone) that reach the end of boot start the two kernel demo threads (`kernel/src/sched/demo_tasks.rs`) instead of init.
 
 The milestone gates are separate kernels, each checking the markers named by `cargo xtask` help:
 
 - `test-m1` and `test-m2` build those self-test kernels and check their PASS markers.
 - `test-m3` runs the M3 acceptance boots in order.
-- `test-m4` is the recovery QEMU boot plus the M4.6 host policy tests. No supervisor runs in the default image.
+- `test-m4` is the recovery QEMU boot plus the M4.6 host policy tests.
 - `test-m5` is the block, storage, persistence, and crash-recovery acceptance.
 - `test-m6` is the capability host tests plus the fixture-smoke and QEMU constituents.
 - `test-m7` checks the network service against the hermetic fixture, whose TLS trust anchor is the committed test CA.

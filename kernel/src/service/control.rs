@@ -86,12 +86,25 @@ pub(crate) struct LifecycleControlResult {
     pub(crate) event: Option<LifecycleEvent>,
 }
 
+/// Why a `SERVICE_READY` report was refused. A refusal changes nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ServiceReadyRefusal {
+    /// The caller is not the live instance of a declared service.
+    NotAServiceInstance,
+    /// The caller's instance is no longer starting.
+    NotStarting,
+}
+
 pub(crate) struct ServiceLifecycleController {
     capabilities: super::capability::LifecycleControlCapabilityTable,
     block_capabilities: BlockDeviceCapabilityTable,
     services: [ServiceRecord; SERVICE_REGISTRY_CAPACITY],
     pending: [Option<LifecycleEvent>; SERVICE_PENDING_EVENTS],
     pending_count: usize,
+    /// One `SERVICE_READY` message per service, indexed like `services` and kept out of
+    /// `pending` so an accepted report never depends on queue space. A newer instance's
+    /// report replaces an older one still unpolled.
+    ready_pending: [Option<LifecycleEvent>; SERVICE_REGISTRY_CAPACITY],
     next_scheduler_slot: usize,
     kernel_root_frame: u64,
     /// Rows that decide each started service's bootstrap mode and launch grants.
@@ -108,6 +121,7 @@ impl ServiceLifecycleController {
             services: [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY],
             pending: [None; SERVICE_PENDING_EVENTS],
             pending_count: 0,
+            ready_pending: [None; SERVICE_REGISTRY_CAPACITY],
             next_scheduler_slot: 0,
             kernel_root_frame: 0,
             manifest: SYSTEM_MANIFEST,
@@ -123,6 +137,7 @@ impl ServiceLifecycleController {
         self.services = [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY];
         self.pending = [None; SERVICE_PENDING_EVENTS];
         self.pending_count = 0;
+        self.ready_pending = [None; SERVICE_REGISTRY_CAPACITY];
         self.next_scheduler_slot = 0;
     }
 
@@ -207,21 +222,38 @@ impl ServiceLifecycleController {
         self.push_pending(event)
     }
 
+    /// The next message for `service`: its queued event or its ready message, whichever names
+    /// the older instance. For the same instance the ready message goes first, since an
+    /// instance reports ready before it can exit or fault.
     pub(crate) fn poll_pending_event(
         &mut self,
         service: ServiceId,
     ) -> Result<Option<LifecycleEvent>, LifecycleControlError> {
-        for entry in &mut self.pending {
-            let Some(event) = *entry else {
-                continue;
-            };
-            if event.instance.service == service {
-                *entry = None;
-                self.pending_count = self.pending_count.saturating_sub(1);
-                return Ok(Some(event));
+        let queued = self
+            .pending
+            .iter()
+            .position(|entry| entry.is_some_and(|event| event.instance.service == service));
+        let ready = self
+            .service_index(service)
+            .filter(|&index| self.ready_pending[index].is_some());
+        let take_ready = match (queued, ready) {
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(queued), Some(ready)) => {
+                let queued_generation = self.pending[queued].map(|event| event.instance.generation);
+                let ready_generation =
+                    self.ready_pending[ready].map(|event| event.instance.generation);
+                ready_generation <= queued_generation
             }
+        };
+        if take_ready {
+            return Ok(ready.and_then(|index| self.ready_pending[index].take()));
         }
-        Ok(None)
+        let Some(queued) = queued else {
+            return Ok(None);
+        };
+        self.pending_count = self.pending_count.saturating_sub(1);
+        Ok(self.pending[queued].take())
     }
 
     pub(crate) fn poll_pending_event_authorized(
@@ -245,9 +277,51 @@ impl ServiceLifecycleController {
         Ok(self
             .pending
             .iter()
+            .chain(self.ready_pending.iter())
             .flatten()
             .map(|event| event.instance.service)
             .find(|service| service.0 != 0))
+    }
+
+    /// `SERVICE_READY` from `pid`. Accepted only from the live instance of a declared service
+    /// that is still starting: the service moves to running, its ready message is stored and
+    /// lifecycle waiters are woken. A refusal changes nothing and wakes nobody.
+    pub(crate) fn report_ready_from_pid(
+        &mut self,
+        pid: u64,
+    ) -> Result<ServiceInstanceId, ServiceReadyRefusal> {
+        let service_index = self
+            .services
+            .iter()
+            .position(|entry| {
+                entry.service.0 != 0 && entry.live.is_some_and(|live| live.pid == pid)
+            })
+            .ok_or(ServiceReadyRefusal::NotAServiceInstance)?;
+        let record = self.services[service_index];
+        let live = record
+            .live
+            .ok_or(ServiceReadyRefusal::NotAServiceInstance)?;
+        if record.state != ServiceLifecycleState::Starting {
+            return Err(ServiceReadyRefusal::NotStarting);
+        }
+        let instance = ServiceInstanceId::new(
+            record.service,
+            live.generation,
+            ProcessId(live.pid),
+            DomainId(live.domain_id),
+        );
+        let (next_state, _) = apply_transition(
+            record.state,
+            record.authoritative_generation,
+            TransitionInput::Event(LifecycleEventKind::Ready),
+            Some(instance),
+        )
+        .map_err(|_| ServiceReadyRefusal::NotStarting)?;
+        self.services[service_index].state = next_state;
+        self.ready_pending[service_index] =
+            Some(LifecycleEvent::new(instance, LifecycleEventKind::Ready));
+        wake_lifecycle_waiters();
+        Ok(instance)
     }
 
     #[allow(dead_code)]
@@ -430,6 +504,15 @@ impl ServiceLifecycleController {
             })
     }
 
+    /// Lifecycle-control and block-device capabilities `pid` holds, in that order.
+    #[cfg(clean_slate_system_init)]
+    pub(crate) fn capabilities_held_by(&self, pid: u64) -> (usize, usize) {
+        (
+            self.capabilities.held_by(pid),
+            self.block_capabilities.held_by(pid),
+        )
+    }
+
     #[allow(dead_code)]
     pub(crate) fn authoritative_generation(
         &self,
@@ -602,6 +685,23 @@ impl ServiceLifecycleController {
                 .map(|_| ())
             },
         )?;
+        #[cfg(clean_slate_system_init)]
+        if let Err(message) = super::system_init::audit_service_authority(
+            service_id,
+            spawned.pid,
+            grants,
+            self.capabilities_held_by(spawned.pid),
+        ) {
+            teardown_process_by_id(
+                allocator,
+                kernel_root_frame,
+                spawned.pid,
+                SERVICE_TERMINATE_STATUS,
+                false,
+            )
+            .map_err(LifecycleControlError::SpawnFailed)?;
+            return Err(LifecycleControlError::SpawnFailed(message));
+        }
         self.services[service_index].live = Some(LiveServiceInstance {
             pid: spawned.pid,
             tid: spawned.tid,
@@ -1076,6 +1176,56 @@ mod tests {
             .handle_control_message(&mut allocator, 101, capability, &message)
             .unwrap_err();
         assert_eq!(err, LifecycleControlError::Unauthorized);
+    }
+
+    /// Init holds the lifecycle-control capability. A control request names a service and an
+    /// action only, so the grants of a started instance are the manifest row's; and a request
+    /// for an id the kernel has not declared changes nothing.
+    #[test]
+    fn init_cannot_start_an_undeclared_service_or_choose_its_grants() {
+        use clean_slate_service_fixtures::manifest::SYSTEM_MANIFEST;
+        const INIT_PID: u64 = 1;
+
+        let mut controller = ServiceLifecycleController::new();
+        for spec in SYSTEM_MANIFEST {
+            controller.declare_service(spec.id).expect("declare row");
+        }
+        let capability = controller
+            .grant_lifecycle_control_capability(INIT_PID)
+            .expect("grant capability");
+        let mut allocator = test_allocator();
+        controller.configure_launch_context(0x1000);
+        let services_before = controller.services;
+        for undeclared in [ServiceId(0x5300), ServiceId(0), ServiceId(u32::MAX)] {
+            for kind in [
+                ControlRequestKind::Start,
+                ControlRequestKind::Stop,
+                ControlRequestKind::Terminate,
+                ControlRequestKind::Restart,
+            ] {
+                let message =
+                    LifecycleMessage::ControlRequest(ControlRequest::new(undeclared, kind))
+                        .encode();
+                assert_eq!(
+                    controller
+                        .handle_control_message(&mut allocator, INIT_PID, capability, &message)
+                        .unwrap_err(),
+                    LifecycleControlError::UnknownService,
+                    "{undeclared:?} {kind:?}"
+                );
+            }
+        }
+        assert_eq!(controller.services, services_before);
+        assert_eq!(controller.pending_count, 0);
+        assert!(controller.ready_pending.iter().all(Option::is_none));
+        for spec in SYSTEM_MANIFEST {
+            assert_eq!(
+                controller.launch_grants(spec.id),
+                spec.grants,
+                "{:?}",
+                spec.id
+            );
+        }
     }
 
     #[test]
@@ -1787,6 +1937,241 @@ mod tests {
             controller.pending_service_authorized(100, capability),
             Err(LifecycleControlError::StaleHandle)
         );
+    }
+
+    fn starting_record(service: ServiceId, pid: u64, generation: u32) -> ServiceRecord {
+        ServiceRecord {
+            state: ServiceLifecycleState::Starting,
+            authoritative_generation: InstanceGeneration(generation),
+            live: Some(LiveServiceInstance {
+                generation: InstanceGeneration(generation),
+                ..live_record(service, pid).live.expect("live")
+            }),
+            ..live_record(service, pid)
+        }
+    }
+
+    type ReadyObservable = (
+        [ServiceRecord; SERVICE_REGISTRY_CAPACITY],
+        [Option<LifecycleEvent>; SERVICE_PENDING_EVENTS],
+        usize,
+        [Option<LifecycleEvent>; SERVICE_REGISTRY_CAPACITY],
+    );
+
+    /// Everything a `SERVICE_READY` report may change.
+    fn ready_observable(controller: &ServiceLifecycleController) -> ReadyObservable {
+        (
+            controller.services,
+            controller.pending,
+            controller.pending_count,
+            controller.ready_pending,
+        )
+    }
+
+    #[test]
+    fn service_ready_from_the_starting_live_instance_is_accepted_once() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[1] = starting_record(STORAGE_SERVICE_ID, 70, 1);
+        let mut accepted = None;
+        assert_eq!(
+            wakes_during(|| accepted = Some(controller.report_ready_from_pid(70))),
+            1
+        );
+        let instance = accepted.unwrap().expect("accepted");
+        assert_eq!(instance.service, STORAGE_SERVICE_ID);
+        assert_eq!(instance.pid, ProcessId(70));
+        assert_eq!(instance.generation, InstanceGeneration(1));
+        assert_eq!(controller.services[1].state, ServiceLifecycleState::Running);
+        assert_eq!(controller.pending_count, 0, "the shared queue is not used");
+
+        // The same instance again, before and after its message is polled: refused, inert.
+        for poll_first in [false, true] {
+            if poll_first {
+                let event = controller
+                    .poll_pending_event(STORAGE_SERVICE_ID)
+                    .unwrap()
+                    .expect("ready message");
+                assert_eq!(event.kind, LifecycleEventKind::Ready);
+                assert_eq!(event.instance, instance);
+                assert_eq!(controller.poll_pending_event(STORAGE_SERVICE_ID), Ok(None));
+            }
+            let before = ready_observable(&controller);
+            let mut result = None;
+            assert_eq!(
+                wakes_during(|| result = Some(controller.report_ready_from_pid(70))),
+                0
+            );
+            assert_eq!(result.unwrap(), Err(ServiceReadyRefusal::NotStarting));
+            assert_eq!(ready_observable(&controller), before);
+        }
+    }
+
+    #[test]
+    fn service_ready_from_anything_but_a_live_service_instance_is_refused_inertly() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = starting_record(STORAGE_SERVICE_ID, 70, 1);
+        // A lifecycle-control holder (init), and pids with no live instance at all.
+        controller
+            .grant_lifecycle_control_capability(100)
+            .expect("grant capability");
+        // A faulted instance keeps its record but has no live pid.
+        controller.services[1] = ServiceRecord {
+            state: ServiceLifecycleState::Faulted,
+            live: None,
+            ..live_record(NETWORK_SERVICE_ID, 71)
+        };
+        for pid in [100, 71, 0, 9999] {
+            let before = ready_observable(&controller);
+            let mut result = None;
+            assert_eq!(
+                wakes_during(|| result = Some(controller.report_ready_from_pid(pid))),
+                0
+            );
+            assert_eq!(
+                result.unwrap(),
+                Err(ServiceReadyRefusal::NotAServiceInstance),
+                "pid {pid}"
+            );
+            assert_eq!(ready_observable(&controller), before);
+        }
+    }
+
+    #[test]
+    fn service_ready_outside_starting_is_refused_inertly() {
+        for state in [
+            ServiceLifecycleState::Running,
+            ServiceLifecycleState::Stopping,
+        ] {
+            let mut controller = ServiceLifecycleController::new();
+            controller.services[0] = ServiceRecord {
+                state,
+                ..starting_record(STORAGE_SERVICE_ID, 70, 1)
+            };
+            let before = ready_observable(&controller);
+            let mut result = None;
+            assert_eq!(
+                wakes_during(|| result = Some(controller.report_ready_from_pid(70))),
+                0
+            );
+            assert_eq!(result.unwrap(), Err(ServiceReadyRefusal::NotStarting));
+            assert_eq!(ready_observable(&controller), before);
+        }
+    }
+
+    #[test]
+    fn service_ready_is_accepted_with_the_shared_queue_full() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = starting_record(NETWORK_SERVICE_ID, 72, 1);
+        let full =
+            [Some(event_for(ServiceId(30), 1, LifecycleEventKind::Exited)); SERVICE_PENDING_EVENTS];
+        controller.pending = full;
+        controller.pending_count = SERVICE_PENDING_EVENTS;
+        assert_eq!(
+            wakes_during(|| {
+                controller.report_ready_from_pid(72).expect("accepted");
+            }),
+            1
+        );
+        assert_eq!(controller.services[0].state, ServiceLifecycleState::Running);
+        assert_eq!(controller.pending, full, "queued messages are untouched");
+        assert_eq!(controller.pending_count, SERVICE_PENDING_EVENTS);
+        assert_eq!(
+            controller
+                .poll_pending_event(NETWORK_SERVICE_ID)
+                .unwrap()
+                .map(|event| event.kind),
+            Some(LifecycleEventKind::Ready)
+        );
+    }
+
+    #[test]
+    fn at_most_one_ready_message_is_held_per_service_and_the_newest_wins() {
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = starting_record(STORAGE_SERVICE_ID, 70, 1);
+        controller.report_ready_from_pid(70).expect("gen 1");
+        // Replaced before anyone polled gen 1's message.
+        controller.services[0] = starting_record(STORAGE_SERVICE_ID, 80, 2);
+        controller.report_ready_from_pid(80).expect("gen 2");
+        assert_eq!(
+            controller.ready_pending.iter().flatten().count(),
+            1,
+            "one slot per service"
+        );
+        let event = controller
+            .poll_pending_event(STORAGE_SERVICE_ID)
+            .unwrap()
+            .expect("ready");
+        assert_eq!(event.instance.generation, InstanceGeneration(2));
+        assert_eq!(event.instance.pid, ProcessId(80));
+        assert_eq!(controller.poll_pending_event(STORAGE_SERVICE_ID), Ok(None));
+    }
+
+    #[test]
+    fn ready_and_queued_messages_are_delivered_oldest_instance_first() {
+        // Same instance: ready before its fault.
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = starting_record(STORAGE_SERVICE_ID, 70, 1);
+        controller.report_ready_from_pid(70).expect("ready");
+        controller
+            .notify_faulted_live_process(70, 3)
+            .expect("fault")
+            .expect("event");
+        let kinds: Vec<_> = core::iter::from_fn(|| {
+            controller
+                .poll_pending_event(STORAGE_SERVICE_ID)
+                .unwrap()
+                .map(|event| event.kind)
+        })
+        .collect();
+        assert_eq!(
+            kinds,
+            [LifecycleEventKind::Ready, LifecycleEventKind::Faulted]
+        );
+
+        // An older instance's unpolled fault goes before the replacement's ready.
+        let mut controller = ServiceLifecycleController::new();
+        controller.services[0] = starting_record(STORAGE_SERVICE_ID, 70, 1);
+        controller
+            .notify_faulted_live_process(70, 3)
+            .expect("fault")
+            .expect("event");
+        controller.services[0] = starting_record(STORAGE_SERVICE_ID, 80, 2);
+        controller.report_ready_from_pid(80).expect("ready");
+        let order: Vec<_> = core::iter::from_fn(|| {
+            controller
+                .poll_pending_event(STORAGE_SERVICE_ID)
+                .unwrap()
+                .map(|event| (event.kind, event.instance.generation.0))
+        })
+        .collect();
+        assert_eq!(
+            order,
+            [
+                (LifecycleEventKind::Faulted, 1),
+                (LifecycleEventKind::Ready, 2)
+            ]
+        );
+        assert_eq!(controller.pending_count, 0);
+    }
+
+    #[test]
+    fn a_pending_ready_message_is_visible_to_an_authorized_peek_and_cleared_with_the_registry() {
+        let mut controller = ServiceLifecycleController::new();
+        let capability = controller
+            .grant_lifecycle_control_capability(100)
+            .expect("grant capability");
+        controller.services[2] = starting_record(NETWORK_SERVICE_ID, 72, 1);
+        controller.report_ready_from_pid(72).expect("ready");
+        assert_eq!(
+            controller.pending_service_authorized(100, capability),
+            Ok(Some(NETWORK_SERVICE_ID))
+        );
+        assert_eq!(
+            controller.pending_service_authorized(101, capability),
+            Err(LifecycleControlError::Unauthorized)
+        );
+        controller.clear();
+        assert!(controller.ready_pending.iter().all(Option::is_none));
     }
 
     #[test]

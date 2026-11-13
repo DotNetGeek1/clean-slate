@@ -101,7 +101,8 @@ declare_interrupt_entries!(
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
     feature = "m3-entry-self-test",
-    feature = "m10-desktop"
+    feature = "m10-desktop",
+    clean_slate_system_init
 ))]
 unsafe extern "C" {
     pub(crate) fn clean_slate_interrupt_128();

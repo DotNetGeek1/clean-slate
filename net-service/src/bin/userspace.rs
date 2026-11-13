@@ -8,6 +8,7 @@ use alloc::boxed::Box;
 use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_ESTALE, SYSCALL_NR_NETWORK_CAPABILITY, SYSCALL_NR_NETWORK_REQUEST,
 };
+use clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY;
 use clean_slate_network::addr::{BoundedHostname, EtherType, IpProtocol, Ipv4Addr, SocketAddrV4};
 use clean_slate_network::buffer::FrameBuf;
 use clean_slate_network::device::{DeviceState, LinkProperties, NetworkDeviceError, NetworkLink};
@@ -31,6 +32,7 @@ use clean_slate_network::tls::{
     tls_transaction, TlsConfig, TlsError, TlsTransactionBudget, TlsTransactionClock,
     TLS_RECORD_BUFFER_BYTES, VALIDATION_TIME_UNIX,
 };
+use clean_slate_service_fixtures::ready_detail::NetworkReadyDetail;
 use clean_slate_service_fixtures::{
     AllowAllAuthorizer, NetworkService, NetworkServiceBootstrap, NETWORK_CAPABILITY_VERSION,
     NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES,
@@ -877,7 +879,8 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
     bootstrap.net_role_handle = raw_handle;
     let generation = SessionGeneration::new(bootstrap.service_generation);
     nic_ingress_init(raw_handle);
-    let raw_mac = DemuxLink::raw_geometry().mac;
+    let raw_link = DemuxLink::raw_geometry();
+    let raw_mac = raw_link.mac;
     unsafe {
         NetworkService::init_in_place(service_state_ptr(), generation, AllowAllAuthorizer);
         (*service_state_ptr()).attach_backend(DemuxLink::for_udp());
@@ -927,6 +930,22 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
         response_buf: unsafe { &mut *service_response_buf_ptr() },
         response_payload: unsafe { &mut *service_response_payload_ptr() },
     };
+    // Ready once both stacks are up and the loop is about to take requests. A refusal (no
+    // supervised instance, or already reported) changes nothing in the kernel.
+    raw_syscall(
+        SYSCALL_NR_SERVICE_READY,
+        [
+            NetworkReadyDetail {
+                link_up: raw_link.link_up,
+            }
+            .encode(),
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+    );
     loop {
         let request_buf = unsafe { &mut *service_request_buf_ptr() };
         let payload_buf = unsafe { &mut *service_payload_buf_ptr() };

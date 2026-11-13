@@ -93,11 +93,12 @@ TEST_NAMES=(
   test-m10-input-smoke
   test-m10-desktop
   test-serial-input
+  test-system-boot
 )
 
 test_role() {
   case "$1" in
-    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls | test-m8-linux-hello | test-m8-linux-image | test-m8-linux-dispatch | test-m9-syscall-fail-closed | test-m9-block-wake | test-m9-stack-guard | test-m9-fd-core | test-m9-linux-trace | test-m9-linux-socket | test-m9-low-va | test-m9-linux-exec | test-m9-linux-proc | test-m9-linux-runtime | test-m9-rootfs | test-m9-linux-fs | test-m9-userspace | verify-m8-fixture | verify-m9-fixture | test-m10-contract | test-m10-compositor | test-m10-app | test-m10-nxe | test-m10-port | test-qmp-smoke | test-m10-virtio-modern | test-m10-virtio-gpu | test-m10-framebuffer | test-m10-shared-buffer | test-m10-input-smoke | test-m10-desktop | test-serial-input)
+    test-m3-entry | test-m3-address-space | test-m3-syscall | test-m3-lifecycle | test-m3-ipc | test-m3-resources | test-m4-crash-service | test-m4-service-lifecycle | test-m4-restart-policy | test-m4-recovery | test-m4-supervisor | test-m5-block | test-m5-storage | test-m5-crash-matrix | test-m5-persistence | test-m5-crash-recovery | test-m5-disk-harness | test-m6-fixture-smoke | test-m6-object | test-m6-process-control | test-m6-delegation | test-m6-revocation | test-m6-audit | test-m6-capabilities | test-m7-net-service | test-m7-network | test-m7-net-device | test-m7-net-caps | test-m7-dns | test-m7-tls | test-m8-linux-hello | test-m8-linux-image | test-m8-linux-dispatch | test-m9-syscall-fail-closed | test-m9-block-wake | test-m9-stack-guard | test-m9-fd-core | test-m9-linux-trace | test-m9-linux-socket | test-m9-low-va | test-m9-linux-exec | test-m9-linux-proc | test-m9-linux-runtime | test-m9-rootfs | test-m9-linux-fs | test-m9-userspace | verify-m8-fixture | verify-m9-fixture | test-m10-contract | test-m10-compositor | test-m10-app | test-m10-nxe | test-m10-port | test-qmp-smoke | test-m10-virtio-modern | test-m10-virtio-gpu | test-m10-framebuffer | test-m10-shared-buffer | test-m10-input-smoke | test-m10-desktop | test-serial-input | test-system-boot)
       echo Constituent
       ;;
     test-m3 | test-m4 | test-m5 | test-m6 | test-m7 | test-m8 | test-m9 | test-m10)
@@ -212,6 +213,7 @@ test_description() {
     test-m10-desktop) echo "M10 #118 supervised desktop on VirtIO-GPU (Q1) and the GOP framebuffer (Q0), QMP-driven, with screendump checks (constituent)" ;;
     test-m10) echo "M10 milestone gate (every M10 constituent and the QMP harness smoke, then the desktop lane on both backends)" ;;
     test-serial-input) echo "#218 S4 COM1 receive and line discipline over a private loopback socket (echo and committed reads checked byte for byte)" ;;
+    test-system-boot) echo "#218 S3b default image: init starts storage then network on a fresh data disk, twice (format, then mount); the kernel checks every launched grant set and ready report" ;;
     *) echo "" ;;
   esac
 }
@@ -289,6 +291,7 @@ test_aliases() {
     test-m10-desktop) echo "m10-desktop m10.118" ;;
     test-m10) echo "m10 m10.119" ;;
     test-serial-input) echo "serial-input" ;;
+    test-system-boot) echo "system-boot" ;;
     *) echo "" ;;
   esac
 }

@@ -9,6 +9,8 @@ mod block_transport;
 mod config;
 mod crash_service;
 mod diagnostics;
+/// #218 S3b userspace init bootstrap page.
+pub mod init_bootstrap;
 /// M6 scripted CPL3 fixture protocol (shared test harness).
 pub mod m6_fixture;
 /// #218 shared service manifest (kernel grants, init start order and restart policy).
@@ -17,6 +19,8 @@ mod network_service;
 mod network_transport;
 /// M6.3 object-capability protocol (lane-owned).
 pub mod object_capability;
+/// #218 `SERVICE_READY` detail words of the system services.
+pub mod ready_detail;
 mod storage_service;
 mod unrelated_workload;
 

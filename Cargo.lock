@@ -190,6 +190,7 @@ name = "clean-slate-net-service"
 version = "0.0.1"
 dependencies = [
  "clean-slate-capability",
+ "clean-slate-native-abi",
  "clean-slate-network",
  "clean-slate-service-fixtures",
  "rand_core",
@@ -263,6 +264,7 @@ version = "0.0.1"
 dependencies = [
  "clean-slate-block",
  "clean-slate-capability",
+ "clean-slate-native-abi",
  "clean-slate-service-fixtures",
 ]
 
@@ -271,6 +273,7 @@ name = "clean-slate-supervisor"
 version = "0.0.1"
 dependencies = [
  "clean-slate-capability",
+ "clean-slate-native-abi",
  "clean-slate-service-fixtures",
  "clean-slate-service-lifecycle",
 ]

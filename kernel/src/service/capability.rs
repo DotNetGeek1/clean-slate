@@ -218,9 +218,27 @@ impl BlockDeviceCapabilityTable {
             }
         }
     }
+
+    /// Active block-device capabilities `pid` holds, on any device.
+    #[cfg(clean_slate_system_init)]
+    pub(crate) fn held_by(&self, pid: u64) -> usize {
+        self.capabilities
+            .iter()
+            .filter(|capability| capability.active && capability.holder_pid == pid)
+            .count()
+    }
 }
 
 impl LifecycleControlCapabilityTable {
+    /// Active lifecycle-control capabilities `pid` holds.
+    #[cfg(clean_slate_system_init)]
+    pub(crate) fn held_by(&self, pid: u64) -> usize {
+        self.capabilities
+            .iter()
+            .filter(|capability| capability.active && capability.holder_pid == pid)
+            .count()
+    }
+
     pub(crate) const fn new() -> Self {
         Self {
             capabilities: [LifecycleControlCapability::EMPTY;
