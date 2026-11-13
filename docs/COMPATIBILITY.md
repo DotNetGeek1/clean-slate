@@ -21,9 +21,9 @@ The user should not need to understand the implementation details in normal use.
 
 The first practical compatibility target is Linux userspace. The execution contract (personality boundary, syscall/errno encoding, initial stack/auxv layout) is documented in [LINUX_PERSONALITY.md](LINUX_PERSONALITY.md).
 
-### Linux ABI on this branch
+### Supported Linux ABI
 
-`cargo xtask test-m8` still runs one unmodified static Linux x86-64 `ET_EXEC` that writes stdout/stderr and exits ([M8 acceptance (#98)](LINUX_PERSONALITY.md#m8-acceptance-98)). That is not the whole table on `main`.
+`cargo xtask test-m8` still runs one unmodified static Linux x86-64 `ET_EXEC` that writes stdout/stderr and exits ([M8 acceptance (#98)](LINUX_PERSONALITY.md#m8-acceptance-98)). That is not the whole table in this tree.
 
 `lookup_handler` in `kernel/src/syscall/linux/table.rs` registers `read`, `write`, `close`, `writev`, `dup2`, `fcntl`, `lseek`, and `exit`; the filesystem calls `open`, `stat`, `lstat`, `getcwd`, `mkdir`, and `getdents64`; the runtime calls `arch_prctl`, `brk`, `clock_gettime`, `getpid`, `geteuid`, `ioctl`, `mmap`, `munmap`, `nanosleep`, `poll`, `rt_sigaction`, `rt_sigprocmask`, `set_tid_address`, and `uname`; and the socket calls `socket`, `connect`, `bind`, `sendto`, and `recvmsg`. `pipe`, `fork`, `wait4`, `getppid`, `exit_group`, and `execve` are registered only when `m8-linux-image` is enabled. The runtime calls are not registered on the `m1-self-test`, `m2-double-fault-self-test`, and `m2-timer-self-test` builds. `futex` has no handler.
 

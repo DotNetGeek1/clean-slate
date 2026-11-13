@@ -33,7 +33,7 @@ On `SYSCALL` (Linux x86-64):
 
 Decoded request shape: `LinuxSyscallRequest { nr, args: [u64; 6] }`.
 
-M8 required `SYS_WRITE = 1` and `SYS_EXIT = 60`. On this branch the registered Linux syscalls are the set in [Linux ABI on this branch](COMPATIBILITY.md#linux-abi-on-this-branch). A number with no handler returns `-ENOSYS` and the process continues.
+M8 required `SYS_WRITE = 1` and `SYS_EXIT = 60`. In this tree the registered Linux syscalls are the set in [Supported Linux ABI](COMPATIBILITY.md#supported-linux-abi). A number with no handler returns `-ENOSYS` and the process continues.
 
 ## Load policies and VA windows (M9 / #142)
 
@@ -491,7 +491,7 @@ Production `teardown_current_process` / `teardown_process_by_id` call `release_f
 
 ## M8.4 — write and exit (#94)
 
-`kernel/src/syscall/linux/write.rs` and `exit.rs` are the `write` and `exit` handlers. At M8.4 they were the only wired Linux syscalls. On `main`, `lookup_handler` in `kernel/src/syscall/linux/table.rs` also registers the calls listed under [Linux ABI on this branch](COMPATIBILITY.md#linux-abi-on-this-branch). `brk`, `arch_prctl`, `set_tid_address`, `exit_group`, and `mmap` have handlers when the features named there are enabled. `futex` still has no handler. A number with no handler still returns `-ENOSYS` with a bounded `[LNX ] unsupported syscall=<nr> errno=ENOSYS` line, and the process continues. The handler type `LinuxSyscallHandler` and `LinuxSyscallContext { pid, instance_generation, frame }` are unchanged. The rest of this section is the `write` and `exit` contract.
+`kernel/src/syscall/linux/write.rs` and `exit.rs` are the `write` and `exit` handlers. At M8.4 they were the only wired Linux syscalls. In this tree, `lookup_handler` in `kernel/src/syscall/linux/table.rs` also registers the calls listed under [Supported Linux ABI](COMPATIBILITY.md#supported-linux-abi). `brk`, `arch_prctl`, `set_tid_address`, `exit_group`, and `mmap` have handlers when the features named there are enabled. `futex` still has no handler. A number with no handler still returns `-ENOSYS` with a bounded `[LNX ] unsupported syscall=<nr> errno=ENOSYS` line, and the process continues. The handler type `LinuxSyscallHandler` and `LinuxSyscallContext { pid, instance_generation, frame }` are unchanged. The rest of this section is the `write` and `exit` contract.
 
 ### `write(fd, buf, count)` — `rdi`, `rsi`, `rdx`
 
