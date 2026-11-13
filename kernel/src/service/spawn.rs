@@ -29,25 +29,20 @@ use clean_slate_service_fixtures::m6_fixture::{
     M6_FIXTURE_BOOTSTRAP_ADDRESS, M6_FIXTURE_BOOTSTRAP_BYTES,
 };
 use clean_slate_service_fixtures::manifest::{Grant, ServiceSpec};
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 use clean_slate_service_fixtures::{
     NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
     NETWORK_UNAUTHORIZED_SERVICE_ID,
 };
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 use clean_slate_service_fixtures::{
     StorageServiceBootstrap, STORAGE_SERVICE_BOOTSTRAP_ADDRESS, STORAGE_SERVICE_ID,
     STORAGE_UNAUTHORIZED_SERVICE_ID,
@@ -72,146 +67,65 @@ const SERVICE_USER_DATA_ADDRESS: u64 = SERVICE_USER_CODE_ADDRESS + PAGE_SIZE;
     feature = "m4-service-lifecycle-self-test"
 ))]
 const SERVICE_USER_STACK_ADDRESS: u64 = SERVICE_USER_CODE_ADDRESS + (PAGE_SIZE * 2);
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 include!(concat!(env!("OUT_DIR"), "/storage_userspace_entry.rs"));
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const STORAGE_USERSPACE_IMAGE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/storage_userspace.bin"));
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const STORAGE_SERVICE_STACK_ADDRESS: u64 = STORAGE_SERVICE_BOOTSTRAP_ADDRESS + PAGE_SIZE;
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const STORAGE_SERVICE_STACK_PAGES: u64 = 8;
 // Deliberate fixed upper bound on storage image PT_LOAD pages. The exact demand is
 // `STORAGE_USERSPACE_MAPPED_CODE_PAGES` from build-time load-plan metadata; keep this
 // ceiling so a grown image fails at compile/launch time instead of mid-map. Do not raise
 // `MAX_ADDRESS_SPACE_USER_MAPPINGS` just to absorb an oversized image.
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const STORAGE_SERVICE_MAX_CODE_PAGES: usize = 64;
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const _: () = assert!(STORAGE_USERSPACE_MAPPED_CODE_PAGES <= STORAGE_SERVICE_MAX_CODE_PAGES);
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const _: () = assert!(STORAGE_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_ADDRESS);
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const STORAGE_SERVICE_MAPPED_PAGES: usize =
     STORAGE_USERSPACE_MAPPED_CODE_PAGES + STORAGE_SERVICE_STACK_PAGES as usize + 1;
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const _: () = assert!(
     STORAGE_SERVICE_MAPPED_PAGES <= crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
 );
@@ -382,20 +296,11 @@ pub(crate) enum BuiltinServiceImage {
         feature = "m4-service-lifecycle-self-test"
     ))]
     M3UserTestPayload,
-    #[cfg(any(
-        feature = "m5-storage-self-test",
-        feature = "m5-persistence-self-test",
-        feature = "m5-crash-early-self-test",
-        feature = "m5-crash-late-self-test",
-        feature = "m5-crash-recovery-self-test",
-        feature = "m6-object-self-test",
-        feature = "m6-process-control-self-test",
-        feature = "m6-delegation-self-test",
-        feature = "m6-revocation-self-test",
-        feature = "m6-audit-self-test",
-        feature = "m6-capabilities-self-test",
-        feature = "m6-fixture-smoke-self-test"
-    ))]
+    #[cfg(not(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test"
+    )))]
     StorageUserspacePayload,
     #[cfg(any(
         feature = "m6-object-self-test",
@@ -410,7 +315,11 @@ pub(crate) enum BuiltinServiceImage {
         feature = "m10-shared-buffer-self-test"
     ))]
     M6FixturePayload,
-    #[cfg(feature = "m7-net-service-self-test")]
+    #[cfg(not(any(
+        feature = "m1-self-test",
+        feature = "m2-double-fault-self-test",
+        feature = "m2-timer-self-test"
+    )))]
     NetworkUserspacePayload,
     /// Frozen M8 Linux hello fixture launched through `service::linux_launch` (#97).
     #[cfg(feature = "m8-linux-hello")]
@@ -431,35 +340,17 @@ impl BuiltinServiceImage {
                 feature = "m4-service-lifecycle-self-test"
             ))]
             1 => Self::M3UserTestPayload,
-            #[cfg(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test",
-                feature = "m6-object-self-test",
-                feature = "m6-process-control-self-test",
-                feature = "m6-delegation-self-test",
-                feature = "m6-revocation-self-test",
-                feature = "m6-audit-self-test",
-                feature = "m6-capabilities-self-test",
-                feature = "m6-fixture-smoke-self-test"
-            ))]
+            #[cfg(not(any(
+                feature = "m1-self-test",
+                feature = "m2-double-fault-self-test",
+                feature = "m2-timer-self-test"
+            )))]
             id if id == STORAGE_SERVICE_ID.0 => Self::StorageUserspacePayload,
-            #[cfg(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test",
-                feature = "m6-object-self-test",
-                feature = "m6-process-control-self-test",
-                feature = "m6-delegation-self-test",
-                feature = "m6-revocation-self-test",
-                feature = "m6-audit-self-test",
-                feature = "m6-capabilities-self-test",
-                feature = "m6-fixture-smoke-self-test"
-            ))]
+            #[cfg(not(any(
+                feature = "m1-self-test",
+                feature = "m2-double-fault-self-test",
+                feature = "m2-timer-self-test"
+            )))]
             id if id == STORAGE_UNAUTHORIZED_SERVICE_ID.0 => Self::StorageUserspacePayload,
             #[cfg(any(
                 feature = "m6-object-self-test",
@@ -474,7 +365,11 @@ impl BuiltinServiceImage {
                 feature = "m10-shared-buffer-self-test"
             ))]
             id if id >= 0x6000 && id <= 0x60ff => Self::M6FixturePayload,
-            #[cfg(feature = "m7-net-service-self-test")]
+            #[cfg(not(any(
+                feature = "m1-self-test",
+                feature = "m2-double-fault-self-test",
+                feature = "m2-timer-self-test"
+            )))]
             id if id == NETWORK_SERVICE_ID.0 || id == NETWORK_UNAUTHORIZED_SERVICE_ID.0 => {
                 Self::NetworkUserspacePayload
             }
@@ -507,15 +402,6 @@ pub(crate) struct SpawnedServiceInstance {
 
 /// What the lifecycle controller knows about one launch that an image's bootstrap block needs.
 /// Processes spawned outside the controller pass [`LaunchContext::UNMANAGED`].
-// The two M4 builds deny dead code in `service` and compile neither the storage nor the network
-// launch, the only readers of `generation` and `previous_handle`.
-#[cfg_attr(
-    any(
-        feature = "m4-service-lifecycle-self-test",
-        feature = "m4-recovery-self-test"
-    ),
-    allow(dead_code)
-)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LaunchContext {
     /// The service's row in the controller's active manifest; `None` if it has none.
@@ -526,6 +412,8 @@ pub(crate) struct LaunchContext {
 }
 
 impl LaunchContext {
+    // Only the M6 fixture launcher names this. The M4 builds deny dead code in `service`
+    // and do not compile that launcher, so the allowance stays for those two features.
     #[cfg_attr(
         any(
             feature = "m4-service-lifecycle-self-test",
@@ -575,24 +463,13 @@ pub(crate) fn launch_builtin_service(
     service: ServiceId,
     context: LaunchContext,
 ) -> Result<SpawnedServiceInstance, &'static str> {
-    // Only the storage and network images read the context; builds without them ignore it.
-    let _ = context;
     let image = BuiltinServiceImage::for_service(service);
     match image {
-        #[cfg(any(
-            feature = "m5-storage-self-test",
-            feature = "m5-persistence-self-test",
-            feature = "m5-crash-early-self-test",
-            feature = "m5-crash-late-self-test",
-            feature = "m5-crash-recovery-self-test",
-            feature = "m6-object-self-test",
-            feature = "m6-process-control-self-test",
-            feature = "m6-delegation-self-test",
-            feature = "m6-revocation-self-test",
-            feature = "m6-audit-self-test",
-            feature = "m6-capabilities-self-test",
-            feature = "m6-fixture-smoke-self-test"
-        ))]
+        #[cfg(not(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        )))]
         BuiltinServiceImage::StorageUserspacePayload => {
             launch_storage_userspace_service(allocator, kernel_stack_top, scheduler_slot, context)
         }
@@ -611,7 +488,11 @@ pub(crate) fn launch_builtin_service(
         BuiltinServiceImage::M6FixturePayload => {
             launch_m6_fixture_service(allocator, kernel_stack_top, scheduler_slot, service)
         }
-        #[cfg(feature = "m7-net-service-self-test")]
+        #[cfg(not(any(
+            feature = "m1-self-test",
+            feature = "m2-double-fault-self-test",
+            feature = "m2-timer-self-test"
+        )))]
         BuiltinServiceImage::NetworkUserspacePayload => {
             launch_network_userspace_service(allocator, kernel_stack_top, scheduler_slot, context)
         }
@@ -965,20 +846,11 @@ fn launch_single_page_service(
                 feature = "m4-service-lifecycle-self-test"
             ))]
             BuiltinServiceImage::M3UserTestPayload => copy_m3_user_test_payload(code_frame)?,
-            #[cfg(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test",
-                feature = "m6-object-self-test",
-                feature = "m6-process-control-self-test",
-                feature = "m6-delegation-self-test",
-                feature = "m6-revocation-self-test",
-                feature = "m6-audit-self-test",
-                feature = "m6-capabilities-self-test",
-                feature = "m6-fixture-smoke-self-test"
-            ))]
+            #[cfg(not(any(
+                feature = "m1-self-test",
+                feature = "m2-double-fault-self-test",
+                feature = "m2-timer-self-test"
+            )))]
             BuiltinServiceImage::StorageUserspacePayload => {
                 return Err("storage userspace image must use the storage launch path");
             }
@@ -997,7 +869,11 @@ fn launch_single_page_service(
             BuiltinServiceImage::M6FixturePayload => {
                 return Err("m6 fixture image must use the fixture launch path");
             }
-            #[cfg(feature = "m7-net-service-self-test")]
+            #[cfg(not(any(
+                feature = "m1-self-test",
+                feature = "m2-double-fault-self-test",
+                feature = "m2-timer-self-test"
+            )))]
             BuiltinServiceImage::NetworkUserspacePayload => {
                 return Err("network userspace image must use the network launch path");
             }
@@ -1088,36 +964,18 @@ fn launch_single_page_service(
     })
 }
 
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 struct KernelBootstrapGrants;
 
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 impl crate::service::grants::BootstrapGrantAuthority for KernelBootstrapGrants {
     fn grant_object_service_role(&mut self, pid: u64) -> Result<u64, &'static str> {
         crate::capability::object::grant_object_service_role(clean_slate_capability::HolderId(pid))
@@ -1127,20 +985,11 @@ impl crate::service::grants::BootstrapGrantAuthority for KernelBootstrapGrants {
 }
 
 /// Launches the real CPL3 storage-service image (`clean-slate-storage-userspace`).
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test"
-))]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 #[inline(never)]
 fn launch_storage_userspace_service(
     allocator: &mut PageAllocator,
@@ -1349,32 +1198,72 @@ fn launch_m6_fixture_service(
     )
 }
 
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 include!(concat!(env!("OUT_DIR"), "/network_userspace_entry.rs"));
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const _: () = assert!(NETWORK_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_ADDRESS);
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const NETWORK_USERSPACE_IMAGE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/network_userspace.bin"));
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const NETWORK_SERVICE_STACK_GUARD_PAGES: u64 = 1;
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const NETWORK_SERVICE_STACK_ADDRESS: u64 =
     NETWORK_SERVICE_BOOTSTRAP_ADDRESS + (NETWORK_SERVICE_STACK_GUARD_PAGES + 1) * PAGE_SIZE;
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 /// The M7 userspace image carries both the ordinary client path and the service-owned
 /// DNS/TCP/TLS bridge logic. Exact PT_LOAD demand is `NETWORK_USERSPACE_MAPPED_CODE_PAGES`
 /// from load-plan metadata; this ceiling remains a deliberate fail-closed bound. Do not
 /// raise `MAX_ADDRESS_SPACE_USER_MAPPINGS` solely to absorb image growth.
 const NETWORK_SERVICE_STACK_PAGES: u64 = 80;
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const NETWORK_SERVICE_MAX_CODE_PAGES: usize = 302;
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const _: () = assert!(NETWORK_USERSPACE_MAPPED_CODE_PAGES <= NETWORK_SERVICE_MAX_CODE_PAGES);
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const NETWORK_SERVICE_MAPPED_PAGES: usize =
     NETWORK_USERSPACE_MAPPED_CODE_PAGES + NETWORK_SERVICE_STACK_PAGES as usize + 1;
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 const _: () = assert!(
     NETWORK_SERVICE_MAPPED_PAGES <= crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
 );
@@ -1389,7 +1278,11 @@ pub(crate) fn launch_network_aux_process(
     launch_network_userspace_with_bootstrap(allocator, kernel_stack_top, scheduler_slot, bootstrap)
 }
 
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 fn launch_network_userspace_service(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
@@ -1401,7 +1294,11 @@ fn launch_network_userspace_service(
     launch_network_userspace_with_bootstrap(allocator, kernel_stack_top, scheduler_slot, bootstrap)
 }
 
-#[cfg(feature = "m7-net-service-self-test")]
+#[cfg(not(any(
+    feature = "m1-self-test",
+    feature = "m2-double-fault-self-test",
+    feature = "m2-timer-self-test"
+)))]
 fn launch_network_userspace_with_bootstrap(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
