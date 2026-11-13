@@ -198,7 +198,9 @@ pub(crate) fn spawn_fixture(
     program: &M6FixtureBootstrap,
 ) -> Result<SpawnedServiceInstance, &'static str> {
     set_fixture_program(service, program)?;
-    let spawned = launch_builtin_service(allocator, kernel_stack_top, scheduler_slot, service)?;
+    // Fixture processes are spawned outside the controller and are not manifest services.
+    let spawned =
+        launch_builtin_service(allocator, kernel_stack_top, scheduler_slot, service, &[])?;
     register_fixture_pid(spawned.pid)?;
     Ok(spawned)
 }

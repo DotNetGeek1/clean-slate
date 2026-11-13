@@ -12,6 +12,7 @@ pub(crate) mod control;
 #[cfg(feature = "m10-desktop")]
 pub(crate) mod desktop_launch;
 pub(crate) mod display_syscall;
+pub(crate) mod grants;
 pub(crate) mod input_syscall;
 pub(crate) mod instance_generation;
 #[cfg(feature = "m8-linux-image")]

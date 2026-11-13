@@ -36,6 +36,9 @@ use crate::service::service_lifecycle_controller_mut;
 use crate::sync::global_cell::GlobalCell;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
+use clean_slate_service_fixtures::manifest::{
+    validate_manifest, Grant, RestartSpec, ServiceImage, ServiceSpec, STORAGE_SERVICE_SPEC,
+};
 use clean_slate_service_fixtures::{
     BlockTransportOp, StorageServiceBootstrap, STORAGE_SERVICE_BOOTSTRAP_ADDRESS,
     STORAGE_SERVICE_ID, STORAGE_SERVICE_MODE_CRASH_ARM_EARLY, STORAGE_SERVICE_MODE_CRASH_ARM_LATE,
@@ -100,6 +103,27 @@ static M5_STORAGE_SELF_TEST_STATE: GlobalCell<Option<M5StorageSelfTestState>> =
     GlobalCell::new(None);
 static M5_CRASH_PLAN: GlobalCell<Option<M5CrashPlan>> = GlobalCell::new(None);
 
+/// M5 runs storage in modes that predate the object service, so the service gets the block device
+/// only and the unauthorized probe gets nothing. `storage_service_bootstrap` still picks each
+/// phase's mode, so these rows leave `mode` unset.
+const M5_STORAGE_SCENARIO: &[ServiceSpec] = &[
+    ServiceSpec {
+        mode: 0,
+        grants: &[Grant::BlockDevice],
+        restart: RestartSpec::Never,
+        ..STORAGE_SERVICE_SPEC
+    },
+    ServiceSpec {
+        id: STORAGE_UNAUTHORIZED_SERVICE_ID,
+        image: ServiceImage::Storage,
+        mode: 0,
+        grants: &[],
+        restart: RestartSpec::Never,
+        depends_on: &[],
+    },
+];
+const _: () = assert!(validate_manifest(M5_STORAGE_SCENARIO).is_ok());
+
 pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
     unsafe {
         *id_allocator_mut() = IdAllocator::new();
@@ -113,6 +137,7 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
     let capability = {
         let controller = unsafe { service_lifecycle_controller_mut() };
         controller.clear();
+        controller.use_scenario_manifest(M5_STORAGE_SCENARIO);
         controller.configure_launch_context(kernel_root);
         controller
             .declare_service(STORAGE_SERVICE_ID)

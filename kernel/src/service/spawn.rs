@@ -28,6 +28,7 @@ use crate::mm::PAGE_SIZE;
 use clean_slate_service_fixtures::m6_fixture::{
     M6_FIXTURE_BOOTSTRAP_ADDRESS, M6_FIXTURE_BOOTSTRAP_BYTES,
 };
+use clean_slate_service_fixtures::manifest::Grant;
 #[cfg(feature = "m7-net-service-self-test")]
 use clean_slate_service_fixtures::{
     NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
@@ -513,6 +514,7 @@ pub(crate) fn launch_builtin_service(
     _kernel_stack_top: u64,
     _scheduler_slot: usize,
     _service: ServiceId,
+    _grants: &[Grant],
 ) -> Result<SpawnedServiceInstance, &'static str> {
     Err("built-in service launch is unavailable in early self-test builds")
 }
@@ -527,7 +529,10 @@ pub(crate) fn launch_builtin_service(
     kernel_stack_top: u64,
     scheduler_slot: usize,
     service: ServiceId,
+    grants: &[Grant],
 ) -> Result<SpawnedServiceInstance, &'static str> {
+    // Only the storage image reads bootstrap-time grants; builds without it ignore them.
+    let _ = grants;
     let image = BuiltinServiceImage::for_service(service);
     match image {
         #[cfg(any(
@@ -544,9 +549,13 @@ pub(crate) fn launch_builtin_service(
             feature = "m6-capabilities-self-test",
             feature = "m6-fixture-smoke-self-test"
         ))]
-        BuiltinServiceImage::StorageUserspacePayload => {
-            launch_storage_userspace_service(allocator, kernel_stack_top, scheduler_slot, service)
-        }
+        BuiltinServiceImage::StorageUserspacePayload => launch_storage_userspace_service(
+            allocator,
+            kernel_stack_top,
+            scheduler_slot,
+            service,
+            grants,
+        ),
         #[cfg(any(
             feature = "m6-object-self-test",
             feature = "m6-process-control-self-test",
@@ -1039,6 +1048,44 @@ fn launch_single_page_service(
     })
 }
 
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+struct KernelBootstrapGrants;
+
+#[cfg(any(
+    feature = "m5-storage-self-test",
+    feature = "m5-persistence-self-test",
+    feature = "m5-crash-early-self-test",
+    feature = "m5-crash-late-self-test",
+    feature = "m5-crash-recovery-self-test",
+    feature = "m6-object-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test"
+))]
+impl crate::service::grants::BootstrapGrantAuthority for KernelBootstrapGrants {
+    fn grant_object_service_role(&mut self, pid: u64) -> Result<u64, &'static str> {
+        crate::capability::object::grant_object_service_role(clean_slate_capability::HolderId(pid))
+            .map(|role| role.encode())
+            .map_err(|_| "object service role grant failed")
+    }
+}
+
 /// Launches the real CPL3 storage-service image (`clean-slate-storage-userspace`).
 #[cfg(any(
     feature = "m5-storage-self-test",
@@ -1060,6 +1107,7 @@ fn launch_storage_userspace_service(
     kernel_stack_top: u64,
     scheduler_slot: usize,
     service: ServiceId,
+    grants: &[Grant],
 ) -> Result<SpawnedServiceInstance, &'static str> {
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
     use crate::mm::address_space::map_process_page;
@@ -1068,6 +1116,7 @@ fn launch_storage_userspace_service(
     use crate::mm::paging::zero_page;
     use crate::mm::phys_to_virt;
     use crate::process::id_allocator::id_allocator_mut;
+    use crate::service::grants::apply_bootstrap_grants;
     use core::ptr;
     use x86_64::structures::paging::PageTableFlags;
     use x86_64::VirtAddr;
@@ -1103,7 +1152,7 @@ fn launch_storage_userspace_service(
                 .allocate_page()
                 .ok_or("allocator could not provide a storage bootstrap page")?;
             zero_page(data_frame);
-            let bootstrap = {
+            let mut bootstrap = {
                 #[cfg(any(
                     feature = "m6-object-self-test",
                     feature = "m6-capabilities-self-test",
@@ -1111,45 +1160,34 @@ fn launch_storage_userspace_service(
                     feature = "m9-userspace-self-test"
                 ))]
                 {
-                    let mut bootstrap = {
-                        #[cfg(feature = "m6-capabilities-self-test")]
-                        {
-                            crate::selftest::m6_capabilities::storage_service_bootstrap(service)?
-                        }
-                        #[cfg(all(
-                            feature = "m9-linux-fs-self-test",
-                            not(feature = "m6-capabilities-self-test"),
-                            not(feature = "m9-userspace-self-test")
-                        ))]
-                        {
-                            crate::selftest::m9_linux_fs::storage_service_bootstrap(service)?
-                        }
-                        #[cfg(all(
-                            feature = "m9-userspace-self-test",
-                            not(feature = "m6-capabilities-self-test")
-                        ))]
-                        {
-                            crate::selftest::m9_userspace::storage_service_bootstrap(service)?
-                        }
-                        #[cfg(all(
-                            feature = "m6-object-self-test",
-                            not(feature = "m6-capabilities-self-test"),
-                            not(feature = "m9-linux-fs-self-test"),
-                            not(feature = "m9-userspace-self-test")
-                        ))]
-                        {
-                            crate::selftest::m6_object::storage_service_bootstrap(service)?
-                        }
-                    };
-                    use clean_slate_capability::HolderId;
-                    use clean_slate_service_fixtures::STORAGE_SERVICE_MODE_OBJECT_SERVICE;
-                    if bootstrap.mode == STORAGE_SERVICE_MODE_OBJECT_SERVICE {
-                        let role =
-                            crate::capability::object::grant_object_service_role(HolderId(pid))
-                                .map_err(|_| "object service role grant failed")?;
-                        bootstrap.object_role_handle = role.encode();
+                    #[cfg(feature = "m6-capabilities-self-test")]
+                    {
+                        crate::selftest::m6_capabilities::storage_service_bootstrap(service)?
                     }
-                    bootstrap
+                    #[cfg(all(
+                        feature = "m9-linux-fs-self-test",
+                        not(feature = "m6-capabilities-self-test"),
+                        not(feature = "m9-userspace-self-test")
+                    ))]
+                    {
+                        crate::selftest::m9_linux_fs::storage_service_bootstrap(service)?
+                    }
+                    #[cfg(all(
+                        feature = "m9-userspace-self-test",
+                        not(feature = "m6-capabilities-self-test")
+                    ))]
+                    {
+                        crate::selftest::m9_userspace::storage_service_bootstrap(service)?
+                    }
+                    #[cfg(all(
+                        feature = "m6-object-self-test",
+                        not(feature = "m6-capabilities-self-test"),
+                        not(feature = "m9-linux-fs-self-test"),
+                        not(feature = "m9-userspace-self-test")
+                    ))]
+                    {
+                        crate::selftest::m6_object::storage_service_bootstrap(service)?
+                    }
                 }
                 #[cfg(not(any(
                     feature = "m6-object-self-test",
@@ -1161,6 +1199,10 @@ fn launch_storage_userspace_service(
                     crate::selftest::m5_storage::storage_service_bootstrap(service)?
                 }
             };
+            let handles = apply_bootstrap_grants(grants, pid, &mut KernelBootstrapGrants)?;
+            if let Some(handle) = handles.object_service_role {
+                bootstrap.object_role_handle = handle;
+            }
             unsafe {
                 ptr::write(
                     (phys_to_virt(data_frame)) as *mut StorageServiceBootstrap,

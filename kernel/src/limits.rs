@@ -28,8 +28,6 @@ pub(crate) const GUARDED_STACK_FUTURE_IST_RESERVE: usize = 1;
 pub(crate) const MAX_GUARDED_STACKS: usize =
     SCHEDULER_THREAD_SLOTS + 2 + GUARDED_STACK_FUTURE_IST_RESERVE;
 
-const _: () = assert!(SCHEDULER_THREAD_SLOTS + 2 <= MAX_GUARDED_STACKS);
-
 /// Process registry slots. The Linux fd-table registry uses the same count.
 ///
 /// Each `Process` carries an inline page-table frame list
@@ -52,6 +50,7 @@ pub(crate) const MAX_ADDRESS_SPACE_USER_MAPPINGS: usize = 384;
 /// stacks. Twenty-nine `u64`s is 232 bytes per address space.
 pub(crate) const BASE_ADDRESS_SPACE_PAGE_TABLE_FRAMES: usize = 29;
 
-/// Declared services. Six system services need five slots; eight leaves two spare.
+/// Declared services. The planned system set is six (storage, network, the Linux shell,
+/// compositor, desktop shell and one application); eight leaves two spare.
 /// A `ServiceRecord` is a few dozen bytes, so the table is under a kilobyte.
 pub(crate) const SERVICE_REGISTRY_CAPACITY: usize = 8;
