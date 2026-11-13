@@ -58,18 +58,6 @@ enum Phase {
 
 static mut M9_PHASE: Phase = Phase::MainProbe;
 
-pub(crate) fn storage_service_bootstrap(
-    service: ServiceId,
-) -> Result<StorageServiceBootstrap, &'static str> {
-    if service != STORAGE_SERVICE_ID {
-        return Err("unexpected storage bootstrap service for m9 linux fs test");
-    }
-    Ok(StorageServiceBootstrap::new(
-        STORAGE_SERVICE_MODE_OBJECT_SERVICE,
-        0,
-    ))
-}
-
 pub(crate) fn start_m9_linux_fs_self_test(page_allocator: PageAllocator) -> ! {
     kernel_log_line("[M9.H] creating");
 

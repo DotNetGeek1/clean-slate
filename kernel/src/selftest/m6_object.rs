@@ -75,18 +75,6 @@ fn state_mut() -> &'static mut ObjectSelfTestState {
     }
 }
 
-pub(crate) fn storage_service_bootstrap(
-    service: ServiceId,
-) -> Result<StorageServiceBootstrap, &'static str> {
-    if service != STORAGE_SERVICE_ID {
-        return Err("unexpected storage bootstrap service for m6 object test");
-    }
-    Ok(StorageServiceBootstrap::new(
-        STORAGE_SERVICE_MODE_OBJECT_SERVICE,
-        0,
-    ))
-}
-
 fn arg_data(offset: usize) -> u64 {
     ARG_DATA_PTR | (offset as u64 & 0xffff)
 }

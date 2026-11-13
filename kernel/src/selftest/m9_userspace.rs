@@ -253,18 +253,6 @@ static OBJECT_READ_DENIALS: AtomicU32 = AtomicU32::new(0);
 static OBJECT_WRITE_DENIALS: AtomicU32 = AtomicU32::new(0);
 static NETWORK_DENIALS: AtomicU32 = AtomicU32::new(0);
 
-pub(crate) fn storage_service_bootstrap(
-    service: ServiceId,
-) -> Result<StorageServiceBootstrap, &'static str> {
-    if service != STORAGE_SERVICE_ID {
-        return Err("unexpected storage bootstrap service for m9 userspace test");
-    }
-    Ok(StorageServiceBootstrap::new(
-        STORAGE_SERVICE_MODE_OBJECT_SERVICE,
-        0,
-    ))
-}
-
 fn allocator() -> &'static mut PageAllocator {
     service_lifecycle_syscall_allocator_mut()
         .as_mut()

@@ -18,6 +18,7 @@ use crate::sched::idle::idle_handoff_while_threads_blocked;
 use crate::sched::wait::{block_current_thread_with_resume, wake_all, BlockedResume, WaitKey};
 use crate::selftest::m6_fixture_exits::{ExitWait, FixtureExitLog};
 use crate::service::spawn::launch_builtin_service;
+use crate::service::spawn::LaunchContext;
 use crate::service::spawn::SpawnedServiceInstance;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_capability::syscall_abi::{SYSCALL_EINVAL, SYSCALL_NR_CAP_GRANT};
@@ -199,8 +200,13 @@ pub(crate) fn spawn_fixture(
 ) -> Result<SpawnedServiceInstance, &'static str> {
     set_fixture_program(service, program)?;
     // Fixture processes are spawned outside the controller and are not manifest services.
-    let spawned =
-        launch_builtin_service(allocator, kernel_stack_top, scheduler_slot, service, &[])?;
+    let spawned = launch_builtin_service(
+        allocator,
+        kernel_stack_top,
+        scheduler_slot,
+        service,
+        LaunchContext::UNMANAGED,
+    )?;
     register_fixture_pid(spawned.pid)?;
     Ok(spawned)
 }

@@ -28,7 +28,7 @@ use crate::mm::PAGE_SIZE;
 use clean_slate_service_fixtures::m6_fixture::{
     M6_FIXTURE_BOOTSTRAP_ADDRESS, M6_FIXTURE_BOOTSTRAP_BYTES,
 };
-use clean_slate_service_fixtures::manifest::Grant;
+use clean_slate_service_fixtures::manifest::{Grant, ServiceSpec};
 #[cfg(feature = "m7-net-service-self-test")]
 use clean_slate_service_fixtures::{
     NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
@@ -52,6 +52,7 @@ use clean_slate_service_fixtures::{
     StorageServiceBootstrap, STORAGE_SERVICE_BOOTSTRAP_ADDRESS, STORAGE_SERVICE_ID,
     STORAGE_UNAUTHORIZED_SERVICE_ID,
 };
+use clean_slate_service_lifecycle::InstanceGeneration;
 use clean_slate_service_lifecycle::ServiceId;
 
 const SERVICE_USER_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
@@ -504,6 +505,49 @@ pub(crate) struct SpawnedServiceInstance {
     pub(crate) scheduler_slot: usize,
 }
 
+/// What the lifecycle controller knows about one launch that an image's bootstrap block needs.
+/// Processes spawned outside the controller pass [`LaunchContext::UNMANAGED`].
+// The two M4 builds deny dead code in `service` and compile neither the storage nor the network
+// launch, the only readers of `generation` and `previous_handle`.
+#[cfg_attr(
+    any(
+        feature = "m4-service-lifecycle-self-test",
+        feature = "m4-recovery-self-test"
+    ),
+    allow(dead_code)
+)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LaunchContext {
+    /// The service's row in the controller's active manifest; `None` if it has none.
+    pub(crate) spec: Option<&'static ServiceSpec>,
+    pub(crate) generation: InstanceGeneration,
+    /// Storage handle the previous instance reported, for images that resume from it.
+    pub(crate) previous_handle: u64,
+}
+
+impl LaunchContext {
+    #[cfg_attr(
+        any(
+            feature = "m4-service-lifecycle-self-test",
+            feature = "m4-recovery-self-test"
+        ),
+        allow(dead_code)
+    )]
+    pub(crate) const UNMANAGED: Self = Self {
+        spec: None,
+        generation: InstanceGeneration(0),
+        previous_handle: 0,
+    };
+
+    /// Post-spawn and bootstrap-time grants of the row; none without one.
+    pub(crate) fn grants(&self) -> &'static [Grant] {
+        match self.spec {
+            Some(spec) => spec.grants,
+            None => &[],
+        }
+    }
+}
+
 #[cfg(any(
     feature = "m1-self-test",
     feature = "m2-double-fault-self-test",
@@ -514,7 +558,7 @@ pub(crate) fn launch_builtin_service(
     _kernel_stack_top: u64,
     _scheduler_slot: usize,
     _service: ServiceId,
-    _grants: &[Grant],
+    _context: LaunchContext,
 ) -> Result<SpawnedServiceInstance, &'static str> {
     Err("built-in service launch is unavailable in early self-test builds")
 }
@@ -529,10 +573,10 @@ pub(crate) fn launch_builtin_service(
     kernel_stack_top: u64,
     scheduler_slot: usize,
     service: ServiceId,
-    grants: &[Grant],
+    context: LaunchContext,
 ) -> Result<SpawnedServiceInstance, &'static str> {
-    // Only the storage image reads bootstrap-time grants; builds without it ignore them.
-    let _ = grants;
+    // Only the storage and network images read the context; builds without them ignore it.
+    let _ = context;
     let image = BuiltinServiceImage::for_service(service);
     match image {
         #[cfg(any(
@@ -549,13 +593,9 @@ pub(crate) fn launch_builtin_service(
             feature = "m6-capabilities-self-test",
             feature = "m6-fixture-smoke-self-test"
         ))]
-        BuiltinServiceImage::StorageUserspacePayload => launch_storage_userspace_service(
-            allocator,
-            kernel_stack_top,
-            scheduler_slot,
-            service,
-            grants,
-        ),
+        BuiltinServiceImage::StorageUserspacePayload => {
+            launch_storage_userspace_service(allocator, kernel_stack_top, scheduler_slot, context)
+        }
         #[cfg(any(
             feature = "m6-object-self-test",
             feature = "m6-process-control-self-test",
@@ -1106,8 +1146,7 @@ fn launch_storage_userspace_service(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
     scheduler_slot: usize,
-    service: ServiceId,
-    grants: &[Grant],
+    context: LaunchContext,
 ) -> Result<SpawnedServiceInstance, &'static str> {
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
     use crate::mm::address_space::map_process_page;
@@ -1124,6 +1163,7 @@ fn launch_storage_userspace_service(
     if STORAGE_USERSPACE_MAPPED_CODE_PAGES > STORAGE_SERVICE_MAX_CODE_PAGES {
         return Err("storage userspace image exceeded mapped code budget");
     }
+    let spec = context.spec.ok_or("storage service has no manifest row")?;
     with_process_address_space(
         allocator,
         VirtAddr::new(SERVICE_USER_CODE_ADDRESS),
@@ -1152,54 +1192,8 @@ fn launch_storage_userspace_service(
                 .allocate_page()
                 .ok_or("allocator could not provide a storage bootstrap page")?;
             zero_page(data_frame);
-            let mut bootstrap = {
-                #[cfg(any(
-                    feature = "m6-object-self-test",
-                    feature = "m6-capabilities-self-test",
-                    feature = "m9-linux-fs-self-test",
-                    feature = "m9-userspace-self-test"
-                ))]
-                {
-                    #[cfg(feature = "m6-capabilities-self-test")]
-                    {
-                        crate::selftest::m6_capabilities::storage_service_bootstrap(service)?
-                    }
-                    #[cfg(all(
-                        feature = "m9-linux-fs-self-test",
-                        not(feature = "m6-capabilities-self-test"),
-                        not(feature = "m9-userspace-self-test")
-                    ))]
-                    {
-                        crate::selftest::m9_linux_fs::storage_service_bootstrap(service)?
-                    }
-                    #[cfg(all(
-                        feature = "m9-userspace-self-test",
-                        not(feature = "m6-capabilities-self-test")
-                    ))]
-                    {
-                        crate::selftest::m9_userspace::storage_service_bootstrap(service)?
-                    }
-                    #[cfg(all(
-                        feature = "m6-object-self-test",
-                        not(feature = "m6-capabilities-self-test"),
-                        not(feature = "m9-linux-fs-self-test"),
-                        not(feature = "m9-userspace-self-test")
-                    ))]
-                    {
-                        crate::selftest::m6_object::storage_service_bootstrap(service)?
-                    }
-                }
-                #[cfg(not(any(
-                    feature = "m6-object-self-test",
-                    feature = "m6-capabilities-self-test",
-                    feature = "m9-linux-fs-self-test",
-                    feature = "m9-userspace-self-test"
-                )))]
-                {
-                    crate::selftest::m5_storage::storage_service_bootstrap(service)?
-                }
-            };
-            let handles = apply_bootstrap_grants(grants, pid, &mut KernelBootstrapGrants)?;
+            let mut bootstrap = StorageServiceBootstrap::new(spec.mode, context.previous_handle);
+            let handles = apply_bootstrap_grants(spec.grants, pid, &mut KernelBootstrapGrants)?;
             if let Some(handle) = handles.object_service_role {
                 bootstrap.object_role_handle = handle;
             }
