@@ -402,15 +402,6 @@ pub(crate) struct SpawnedServiceInstance {
 
 /// What the lifecycle controller knows about one launch that an image's bootstrap block needs.
 /// Processes spawned outside the controller pass [`LaunchContext::UNMANAGED`].
-// The two M4 builds deny dead code in `service` and compile neither the storage nor the network
-// launch, the only readers of `generation` and `previous_handle`.
-#[cfg_attr(
-    any(
-        feature = "m4-service-lifecycle-self-test",
-        feature = "m4-recovery-self-test"
-    ),
-    allow(dead_code)
-)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LaunchContext {
     /// The service's row in the controller's active manifest; `None` if it has none.
@@ -421,6 +412,8 @@ pub(crate) struct LaunchContext {
 }
 
 impl LaunchContext {
+    // Only the M6 fixture launcher names this. The M4 builds deny dead code in `service`
+    // and do not compile that launcher, so the allowance stays for those two features.
     #[cfg_attr(
         any(
             feature = "m4-service-lifecycle-self-test",

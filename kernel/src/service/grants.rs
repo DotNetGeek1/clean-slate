@@ -9,24 +9,6 @@ use clean_slate_service_lifecycle::InstanceGeneration;
 
 /// Grants whose handle the image reads from its bootstrap page, so they are applied while the
 /// image's address space is being built.
-#[cfg_attr(
-    not(any(
-        test,
-        feature = "m5-storage-self-test",
-        feature = "m5-persistence-self-test",
-        feature = "m5-crash-early-self-test",
-        feature = "m5-crash-late-self-test",
-        feature = "m5-crash-recovery-self-test",
-        feature = "m6-object-self-test",
-        feature = "m6-process-control-self-test",
-        feature = "m6-delegation-self-test",
-        feature = "m6-revocation-self-test",
-        feature = "m6-audit-self-test",
-        feature = "m6-capabilities-self-test",
-        feature = "m6-fixture-smoke-self-test"
-    )),
-    allow(dead_code)
-)]
 pub(crate) trait BootstrapGrantAuthority {
     /// Returns the encoded object-service role handle.
     fn grant_object_service_role(&mut self, pid: u64) -> Result<u64, &'static str>;
@@ -53,24 +35,6 @@ pub(crate) struct GrantFailure {
     pub(crate) message: &'static str,
 }
 
-#[cfg_attr(
-    not(any(
-        test,
-        feature = "m5-storage-self-test",
-        feature = "m5-persistence-self-test",
-        feature = "m5-crash-early-self-test",
-        feature = "m5-crash-late-self-test",
-        feature = "m5-crash-recovery-self-test",
-        feature = "m6-object-self-test",
-        feature = "m6-process-control-self-test",
-        feature = "m6-delegation-self-test",
-        feature = "m6-revocation-self-test",
-        feature = "m6-audit-self-test",
-        feature = "m6-capabilities-self-test",
-        feature = "m6-fixture-smoke-self-test"
-    )),
-    allow(dead_code)
-)]
 pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
     grants: &[Grant],
     pid: u64,
