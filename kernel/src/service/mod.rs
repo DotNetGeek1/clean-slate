@@ -15,6 +15,7 @@ pub(crate) mod display_syscall;
 pub(crate) mod grants;
 pub(crate) mod input_syscall;
 pub(crate) mod instance_generation;
+pub(crate) mod lifecycle_wait;
 #[cfg(feature = "m8-linux-image")]
 pub(crate) mod linux_launch;
 pub(crate) mod net_bridge;

@@ -110,6 +110,7 @@ use crate::syscall::validation::syscall_user_fault_context;
 use crate::syscall::validation::validate_canonical_user_return_state;
 use crate::syscall::validation::validate_sysret_selector_triplet;
 use clean_slate_capability::syscall_abi as cap_abi;
+use clean_slate_native_abi::lifecycle as lifecycle_abi;
 use clean_slate_service_fixtures::{
     BlockTransportOp, BlockTransportRequest, BlockTransportResponse, BlockTransportStatus,
     BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES, BLOCK_TRANSPORT_REQUEST_BYTES,
@@ -282,7 +283,7 @@ pub(super) fn install_service_lifecycle_syscall_allocator(allocator: PageAllocat
 }
 
 #[allow(dead_code)]
-fn lifecycle_control_syscall_error(error: LifecycleControlError) -> u64 {
+pub(crate) fn lifecycle_control_syscall_error(error: LifecycleControlError) -> u64 {
     match error {
         LifecycleControlError::Unauthorized => SYSCALL_EACCES,
         LifecycleControlError::StaleHandle | LifecycleControlError::StaleInstance(_) => {
@@ -916,6 +917,9 @@ fn dispatch_native(frame: &mut SyscallContext) {
         }
         cap_abi::SYSCALL_NR_SERVICE_PORT => crate::service::port_syscall::handle_syscall(frame),
         cap_abi::SYSCALL_NR_WORK_SET => crate::sched::work_set::handle_syscall(frame),
+        lifecycle_abi::SYSCALL_NR_LIFECYCLE_WAIT => {
+            crate::service::lifecycle_wait::handle_syscall(frame)
+        }
         cap_abi::SYSCALL_NR_DISPLAY => {
             crate::service::display_syscall::handle_syscall_display(frame)
         }
@@ -1101,6 +1105,15 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn dispatch_native_lifecycle_wait_reaches_its_handler() {
+        // An unresolvable caller is refused instead of blocking.
+        assert_eq!(
+            dispatch_native_zeroed(lifecycle_abi::SYSCALL_NR_LIFECYCLE_WAIT, 0),
+            SYSCALL_EACCES
+        );
+    }
+
     #[test]
     fn route_syscall_trusted_native_selects_native() {
         let route = route_syscall(Ok(ResolvedSyscallCaller {
