@@ -817,12 +817,64 @@ const M5_CRASH_ARM_LATE_MARKERS: [&str; 6] = [
     "[STOR] write object=alpha id=1 bytes=",
     "[CRSH] inject after-write=3",
 ];
-const M5_CRASH_RECOVERY_MARKERS: [&str; 5] = [
-    "[BLK ] virtio-block ready blocks=",
-    "[STOR] recovered generation=",
-    "[STOR] read object=beta id=2 bytes=",
-    "[CRSH] recovery outcome=",
-    "[TEST] crash recovery PASS",
+/// Read-back evidence for `beta`, which no crash phase rewrites.
+const M5_BETA_V1_READ_FIELDS: &[(&str, &str)] = &[
+    ("bytes=", "11"),
+    ("checksum=", "00000444"),
+    ("match=", "yes"),
+];
+/// After a crash on the first write of the generation-3 commit (alpha's data) the
+/// superblock still names generation 2, so recovery must find the previous commit.
+const M5_CRASH_RECOVERY_EARLY_SPEC: &[MarkerStep] = &[
+    MarkerStep::Ordered("[BLK ] virtio-block ready blocks="),
+    MarkerStep::Line {
+        prefix: "[STOR] recovered generation=",
+        fields: &[("generation=", "2")],
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] read object=alpha id=1 ",
+        fields: &[
+            ("bytes=", "900"),
+            ("checksum=", "00007788"),
+            ("match=", "yes"),
+        ],
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] read object=beta id=2 ",
+        fields: M5_BETA_V1_READ_FIELDS,
+    },
+    MarkerStep::Line {
+        prefix: "[CRSH] recovery outcome=",
+        fields: &[("outcome=", "previous-commit")],
+    },
+    MarkerStep::Ordered("[TEST] crash recovery PASS"),
+];
+/// The third write of the generation-3 commit is its superblock (alpha data, beta data,
+/// superblock, then flush). The device completed it before the crash, so recovery must
+/// mount the new commit even though the flush never ran.
+const M5_CRASH_RECOVERY_LATE_SPEC: &[MarkerStep] = &[
+    MarkerStep::Ordered("[BLK ] virtio-block ready blocks="),
+    MarkerStep::Line {
+        prefix: "[STOR] recovered generation=",
+        fields: &[("generation=", "3")],
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] read object=alpha id=1 ",
+        fields: &[
+            ("bytes=", "700"),
+            ("checksum=", "00008b74"),
+            ("match=", "yes"),
+        ],
+    },
+    MarkerStep::Line {
+        prefix: "[STOR] read object=beta id=2 ",
+        fields: M5_BETA_V1_READ_FIELDS,
+    },
+    MarkerStep::Line {
+        prefix: "[CRSH] recovery outcome=",
+        fields: &[("outcome=", "new-commit")],
+    },
+    MarkerStep::Ordered("[TEST] crash recovery PASS"),
 ];
 /// Merged M3.2 + M3.4 markers in the order the `m3-address-space-self-test`
 /// boot actually emits them, so the aggregate gate proves isolation and
@@ -1324,7 +1376,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             &["m5-crash-recovery-self-test"],
             Some((
-                MarkerSet::Ordered(&M5_CRASH_RECOVERY_MARKERS),
+                MarkerSet::Steps(M5_CRASH_RECOVERY_EARLY_SPEC),
                 M5_CRASH_RECOVERY_TIMEOUT,
             )),
             config.clone(),
@@ -1355,7 +1407,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             false,
             &["m5-crash-recovery-self-test"],
             Some((
-                MarkerSet::Ordered(&M5_CRASH_RECOVERY_MARKERS),
+                MarkerSet::Steps(M5_CRASH_RECOVERY_LATE_SPEC),
                 M5_CRASH_RECOVERY_TIMEOUT,
             )),
             config,
@@ -3880,6 +3932,15 @@ fn run_driven_acceptance_command(
                     terminate_child(&mut child)?;
                     child_status = Some(child.wait()?);
                 } else if !authoritative_pass {
+                    if let Some(mismatch) = tracker.mismatch() {
+                        terminate_child(&mut child)?;
+                        let _ = child.wait();
+                        join_output_reader(stdout_handle);
+                        join_output_reader(stderr_handle);
+                        return Err(XtaskError::Validation(format!(
+                            "marker value mismatch: {mismatch}"
+                        )));
+                    }
                     if let Some(pass_marker) = final_guest_marker(marker_set) {
                         if output.contains(pass_marker) {
                             terminate_child(&mut child)?;
@@ -4046,6 +4107,10 @@ fn validate_output_markers(output: &str, marker_set: MarkerSet<'static>) -> Resu
             assert_no_ipc_framed_linux_hello(output)?;
         }
         Ok(())
+    } else if let Some(mismatch) = tracker.mismatch() {
+        Err(XtaskError::Validation(format!(
+            "marker value mismatch: {mismatch}"
+        )))
     } else {
         Err(XtaskError::MissingMarker(tracker.pending_label()))
     }

@@ -606,51 +606,15 @@ fn validate_crash_recovery(report: &StorageServiceBootstrap) -> Result<(), &'sta
         "[STOR] recovered generation={}\n",
         report.mounted_generation
     ));
-    match report.mounted_generation {
-        2 => {
-            ensure_object(
-                report.alpha_len,
-                report.alpha_checksum,
-                &PERSISTENCE_ALPHA_V2,
-            )?;
-            ensure_object(report.beta_len, report.beta_checksum, OBJECT_BETA_V1)?;
-            log_read_marker(
-                OBJECT_ALPHA_NAME,
-                OBJECT_ALPHA_ID,
-                PERSISTENCE_ALPHA_V2.len(),
-                checksum(&PERSISTENCE_ALPHA_V2),
-            );
-            log_read_marker(
-                OBJECT_BETA_NAME,
-                OBJECT_BETA_ID,
-                OBJECT_BETA_V1.len(),
-                checksum(OBJECT_BETA_V1),
-            );
-            kernel_log_line("[CRSH] recovery outcome=previous-commit");
-        }
-        3 => {
-            ensure_object(
-                report.alpha_len,
-                report.alpha_checksum,
-                &PERSISTENCE_ALPHA_V3,
-            )?;
-            ensure_object(report.beta_len, report.beta_checksum, OBJECT_BETA_V1)?;
-            log_read_marker(
-                OBJECT_ALPHA_NAME,
-                OBJECT_ALPHA_ID,
-                PERSISTENCE_ALPHA_V3.len(),
-                checksum(&PERSISTENCE_ALPHA_V3),
-            );
-            log_read_marker(
-                OBJECT_BETA_NAME,
-                OBJECT_BETA_ID,
-                OBJECT_BETA_V1.len(),
-                checksum(OBJECT_BETA_V1),
-            );
-            kernel_log_line("[CRSH] recovery outcome=new-commit");
-        }
+    let (expected_alpha, outcome): (&[u8], &str) = match report.mounted_generation {
+        2 => (&PERSISTENCE_ALPHA_V2, "previous-commit"),
+        3 => (&PERSISTENCE_ALPHA_V3, "new-commit"),
         _ => return Err("unexpected recovered generation after crash"),
-    }
+    };
+    ensure_object(report.alpha_len, report.alpha_checksum, expected_alpha)?;
+    ensure_object(report.beta_len, report.beta_checksum, OBJECT_BETA_V1)?;
+    log_reported_reads(report, expected_alpha, OBJECT_BETA_V1);
+    kernel_log_fmt(format_args!("[CRSH] recovery outcome={outcome}\n"));
     kernel_log_line("[TEST] crash recovery PASS");
     Ok(())
 }
@@ -690,6 +654,36 @@ fn log_read_marker(name: &str, id: u64, bytes: usize, checksum: u32) {
     kernel_log_fmt(format_args!(
         "[STOR] read object={name} id={id} bytes={bytes} checksum={checksum:08x} match=yes\n"
     ));
+}
+
+/// Read lines carrying the object lengths and checksums the service put in its report,
+/// with `match` comparing them against the bytes that generation should hold.
+fn log_reported_reads(report: &StorageServiceBootstrap, alpha: &[u8], beta: &[u8]) {
+    for (name, id, len, checksum, expected) in [
+        (
+            OBJECT_ALPHA_NAME,
+            OBJECT_ALPHA_ID,
+            report.alpha_len,
+            report.alpha_checksum,
+            alpha,
+        ),
+        (
+            OBJECT_BETA_NAME,
+            OBJECT_BETA_ID,
+            report.beta_len,
+            report.beta_checksum,
+            beta,
+        ),
+    ] {
+        let matched = if ensure_object(len, checksum, expected).is_ok() {
+            "yes"
+        } else {
+            "no"
+        };
+        kernel_log_fmt(format_args!(
+            "[STOR] read object={name} id={id} bytes={len} checksum={checksum:08x} match={matched}\n"
+        ));
+    }
 }
 
 fn checksum(bytes: &[u8]) -> u32 {

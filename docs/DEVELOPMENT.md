@@ -423,13 +423,18 @@ cargo xtask test-m5-persistence
 
 This command resets `target/m5/m5-data.img` by default, boots the `m5-persistence-self-test` kernel twice with fresh copied OVMF vars, preserves the exact same VirtIO disk image across the reboot, and requires ordered markers proving: fresh mount/format, deterministic writes of `alpha` and `beta`, a durable commit with `[BLK ] flush complete`, reboot on the same image, exact recovery of both objects, and a post-reboot overwrite where `beta` remains intact. Pass `--keep-disk` to preserve `target/m5/m5-data.img` after the run and to reuse that kept image instead of resetting it on the next debugging invocation.
 
-For the four-boot M5 abrupt-stop crash-recovery acceptance:
+For the six-boot M5 abrupt-stop crash-recovery acceptance:
 
 ```bash
 cargo xtask test-m5-crash-recovery
 ```
 
-This command also resets `target/m5/m5-data.img` by default, rebuilds the known committed baseline on the same disk, then reboots into a deterministic crash boot that halts after the first counted store write of the interrupted commit. `xtask` kills QEMU at that crash marker (no clean storage shutdown or extra flush), then reboots the same disk with `m5-crash-recovery-self-test` and accepts only the documented old-or-new coherent recovery states. Pass `--keep-disk` to retain the image and reuse that kept disk on the next debugging invocation instead of recreating it.
+This command also resets `target/m5/m5-data.img` by default, rebuilds the known committed baseline (generations 1 and 2) on the same disk in two boots, then runs two crash/recovery pairs on that disk. Each crash boot halts the storage service inside a counted block write of the generation-3 commit, whose writes are alpha's data, beta's data, the superblock, then the flush. `xtask` kills QEMU at that crash marker (no clean storage shutdown or extra flush), then reboots the same disk with `m5-crash-recovery-self-test`. Each recovery boot has one correct outcome, and the lane checks the values, not just the line prefixes:
+
+- The early arm stops after write 1, before the superblock. Recovery must report `[STOR] recovered generation=2`, both objects as generation 2 wrote them (`bytes=` and `checksum=`), and `[CRSH] recovery outcome=previous-commit`.
+- The late arm stops after write 3, once the device has completed the generation-3 superblock but before the flush. Recovery must report `generation=3`, alpha's 700-byte third version, and `outcome=new-commit`.
+
+Any other generation, object length, checksum or outcome fails the lane at once with `marker value mismatch`. Pass `--keep-disk` to retain the image and reuse that kept disk on the next debugging invocation instead of recreating it.
 
 For the aggregate M5 milestone gate:
 
@@ -437,7 +442,7 @@ For the aggregate M5 milestone gate:
 cargo xtask test-m5
 ```
 
-The aggregate runs `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, and `test-m5-crash-recovery` in order, then prints `[M5  ] PASS`. The host emits `[TEST] rebooting with persistent disk` between QEMU phases; the recovery boot emits `[CRSH] recovery outcome=<previous-commit|new-commit>` once it has validated that no torn object/metadata state was accepted.
+The aggregate runs `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, and `test-m5-crash-recovery` in order, then prints `[M5  ] PASS`. The host emits `[TEST] rebooting with persistent disk` between QEMU phases; the recovery boot emits `[CRSH] recovery outcome=<previous-commit|new-commit>` once it has validated that no torn object/metadata state was accepted, and the lane requires `previous-commit` after the early arm and `new-commit` after the late arm.
 
 For M5.5 persistent block-harness plumbing (QEMU fixture + host sentinel):
 
