@@ -398,12 +398,14 @@ fn embed_userspace_image_from(
     }
 
     let elf_bytes = fs::read(&elf).expect("failed to read userspace ELF");
-    let (image, plan, image_base) = materialize_elf_image(&elf_bytes).unwrap_or_else(|message| {
-        panic!(
-            "failed to materialize userspace ELF {}: {message}",
-            elf.display()
-        )
-    });
+    let load_base = userspace_map_base(raw_name);
+    let (image, plan, image_base) = materialize_elf_image(&elf_bytes, load_base, raw_name)
+        .unwrap_or_else(|message| {
+            panic!(
+                "failed to materialize userspace ELF {}: {message}",
+                elf.display()
+            )
+        });
 
     fs::write(&raw_image, &image).expect("failed to write materialized userspace image");
 
@@ -432,7 +434,14 @@ fn embed_userspace_image_from(
         let generated = out_dir.join(generated_file);
         fs::write(
             &generated,
-            format_segment_metadata(prefix, entry_offset, mapped_pages, image_base, &plan),
+            format_segment_metadata(
+                prefix,
+                entry_offset,
+                mapped_pages,
+                image_base,
+                load_base,
+                &plan,
+            ),
         )
         .expect("failed to write userspace_entry metadata");
     }
@@ -449,6 +458,7 @@ fn format_segment_metadata(
     entry_offset: u64,
     mapped_pages: usize,
     image_base: u64,
+    load_base: u64,
     plan: &LoadPlan,
 ) -> String {
     let mut out = String::new();
@@ -460,6 +470,9 @@ fn format_segment_metadata(
     ));
     out.push_str(&format!(
         "pub(super) const {prefix}_IMAGE_BASE: u64 = {image_base:#x};\n"
+    ));
+    out.push_str(&format!(
+        "pub(super) const {prefix}_RELOCATED_BASE: u64 = {load_base:#x};\n"
     ));
     out.push_str(&format!(
         "pub(super) const {prefix}_SEGMENT_COUNT: usize = {};\n",
@@ -499,14 +512,45 @@ fn perm_bits(perms: SegmentPermissions) -> u8 {
     flags
 }
 
+/// Address the kernel maps `raw_name` at.
+///
+/// Desktop images are mapped at [`clean_slate_native_abi::desktop::DESKTOP_IMAGE_BASE`].
+/// Every other embedded image is mapped at [`USERSPACE_IMAGE_LOAD_BASE`]. The generated
+/// `{prefix}_RELOCATED_BASE` is asserted against those constants where the kernel maps the
+/// image, so a name missing from this list fails that build.
+fn userspace_map_base(raw_name: &str) -> u64 {
+    match raw_name {
+        "compositor_userspace.bin" | "desktop_shell_userspace.bin" | "playground_userspace.bin" => {
+            clean_slate_native_abi::desktop::DESKTOP_IMAGE_BASE
+        }
+        _ => USERSPACE_IMAGE_LOAD_BASE,
+    }
+}
+
 /// Emit only file-backed PT_LOAD bytes (never `p_memsz` zero-fill) plus a validated plan.
-fn materialize_elf_image(elf: &[u8]) -> Result<(Vec<u8>, LoadPlan, u64), String> {
+///
+/// `load_base` is the address the kernel maps the image at. `R_X86_64_RELATIVE` addends are
+/// rewritten from the ELF link base to that address.
+fn materialize_elf_image(
+    elf: &[u8],
+    load_base: u64,
+    image_name: &str,
+) -> Result<(Vec<u8>, LoadPlan, u64), String> {
     let policy = LoadPlanPolicy::native_x86_64();
     let plan =
         parse_load_plan(elf, &policy).map_err(|err| format!("load-plan validation: {err:?}"))?;
     let image_base = plan
         .image_base()
         .ok_or_else(|| "ELF had no PT_LOAD segments".to_string())?;
+    // The kernel maps a desktop image at its link address and requires that address to be
+    // `DESKTOP_IMAGE_BASE`. Relocating to the constant while the ELF is linked elsewhere would
+    // aim every pointer at the wrong pages.
+    if load_base == clean_slate_native_abi::desktop::DESKTOP_IMAGE_BASE && image_base != load_base {
+        return Err(format!(
+            "{image_name}: link base {image_base:#x} does not match DESKTOP_IMAGE_BASE {load_base:#x}"
+        ));
+    }
+    let image_span = image_virtual_span(&plan, image_base)?;
 
     let mut image_end = image_base;
     for segment in plan.iter_segments() {
@@ -555,8 +599,28 @@ fn materialize_elf_image(elf: &[u8]) -> Result<(Vec<u8>, LoadPlan, u64), String>
         image[dest_start..dest_end].copy_from_slice(&elf[src_start..src_end]);
     }
 
-    apply_rela_dyn(elf, &mut image, image_base, USERSPACE_IMAGE_LOAD_BASE)?;
+    apply_rela_dyn(
+        elf, &mut image, image_base, load_base, image_span, image_name,
+    )?;
     Ok((image, plan, image_base))
+}
+
+/// Bytes from the link base through the last PT_LOAD byte, including BSS (`p_memsz`).
+fn image_virtual_span(plan: &LoadPlan, image_base: u64) -> Result<u64, String> {
+    let mut virtual_end = image_base;
+    for segment in plan.iter_segments() {
+        if segment.memsz == 0 {
+            continue;
+        }
+        let end = segment
+            .vaddr
+            .checked_add(segment.memsz)
+            .ok_or("segment memory end overflow")?;
+        virtual_end = virtual_end.max(end);
+    }
+    virtual_end
+        .checked_sub(image_base)
+        .ok_or_else(|| "image span underflow".to_string())
 }
 
 fn apply_rela_dyn(
@@ -564,6 +628,8 @@ fn apply_rela_dyn(
     image: &mut [u8],
     link_base: u64,
     load_base: u64,
+    image_span: u64,
+    image_name: &str,
 ) -> Result<(), String> {
     let e_shoff = u64::from_le_bytes(elf[0x28..0x30].try_into().map_err(|_| "e_shoff")?);
     let e_shentsize =
@@ -593,6 +659,12 @@ fn apply_rela_dyn(
         if sh_entsize != 24 {
             return Err(".rela.dyn entry size was not 24 bytes".into());
         }
+        // An addend that does not point inside the image lands outside this window after the
+        // rebase. `load_base` is whatever the caller passed; the kernel assert on
+        // `{prefix}_RELOCATED_BASE` is what checks that address against the map site.
+        let window_end = load_base
+            .checked_add(image_span)
+            .ok_or_else(|| format!("{image_name}: relocated image span overflowed"))?;
         let count = sh_size / sh_entsize;
         for entry_index in 0..count {
             let entry_offset = sh_offset + entry_index * sh_entsize;
@@ -611,6 +683,11 @@ fn apply_rela_dyn(
                     let value = (r_addend as u64)
                         .wrapping_sub(link_base)
                         .wrapping_add(load_base);
+                    if value < load_base || value >= window_end {
+                        return Err(format!(
+                            "{image_name}: relocated value {value:#x} at r_offset {r_offset:#x} is outside [{load_base:#x}, {window_end:#x})"
+                        ));
+                    }
                     write_u64(image, link_base, r_offset, value)?;
                 }
                 _ => {

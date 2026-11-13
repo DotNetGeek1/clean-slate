@@ -154,6 +154,7 @@ clean-slate-graphics = { path = "../graphics", features = ["fake"] }
 
 [build-dependencies]
 clean-slate-elf = { path = "../elf" }
+clean-slate-native-abi = { path = "../native-abi" }
 clean-slate-rootfs = { path = "../rootfs", features = ["std"] }
 
 [lints]

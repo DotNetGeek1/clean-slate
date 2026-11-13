@@ -3,6 +3,8 @@
 
 include!(concat!(env!("OUT_DIR"), "/recovery_userspace_entry.rs"));
 
+const _: () = assert!(RECOVERY_SUPERVISOR_RELOCATED_BASE == USER_TEST_CODE_ADDRESS);
+
 use crate::arch::x86_64::asm::clean_slate_user_address_space_test_after_entry;
 use crate::arch::x86_64::asm::clean_slate_user_address_space_test_end;
 use crate::arch::x86_64::asm::clean_slate_user_address_space_test_start;
