@@ -297,8 +297,12 @@ pub(crate) fn on_idle_halt() {
 mod tests {
     use super::*;
 
-    #[path = "../../../../build_support/system_init_rule.rs"]
-    mod rule;
+    mod rule {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/build_support/system_init_rule.rs"
+        ));
+    }
 
     /// Feature names declared in the kernel's `[features]` table.
     fn declared_features() -> std::vec::Vec<&'static str> {
