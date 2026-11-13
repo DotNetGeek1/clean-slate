@@ -8,7 +8,9 @@
 //!
 //! Readback is guest-side: the 2D command set cannot read the host resource back, so the probe
 //! replays the logged transfers from the scanout buffers into a model of the host resource and
-//! checks its CRC against the #111 reference golden. Visual proof is #118/#119 through #197.
+//! checks its CRC against the #111 reference golden. The displayed frames are checked by the host:
+//! the probe holds after the first present, the buffer switch and the present after the reset
+//! until the lane has taken a screendump ([`hold_for_capture`]).
 
 use clean_slate_capability::HolderId;
 use clean_slate_graphics::display::{DisplayError, PresentRequest, PresentState, PresentStatus};
@@ -20,6 +22,7 @@ use clean_slate_raster::{
     Canvas, REFERENCE_B_DAMAGE,
 };
 
+use crate::arch::x86_64::port::port_in;
 use crate::device::display::source::FrameSource;
 use crate::device::display::virtio_gpu::{GpuStats, LoggedTransfer, MmioGpuBackend};
 use crate::device::display::{install_virtio_gpu_display, take_virtio_gpu, with_active_display};
@@ -37,6 +40,16 @@ const HOLDER: HolderId = HolderId(u64::MAX - 0x114);
 const REFERENCE_CRC: u32 = 0x20F2_EEC9;
 /// Longer than `DISPLAY_COMMAND_TIMEOUT_NS`, so W3 always decides first.
 const WAIT_BUDGET_MS: u64 = 2_500;
+/// How long a hold waits for the host's screendump acknowledgement before the probe fails.
+const HOLD_BUDGET_MS: u64 = 20_000;
+/// The i8042 ports. Nothing else in this build touches the controller: there is no boot tail and
+/// no ISA IRQ routing, so the holds poll it directly.
+const I8042_DATA: u16 = 0x60;
+const I8042_STATUS: u16 = 0x64;
+const I8042_OUTPUT_FULL: u8 = 1 << 0;
+const I8042_AUX_DATA: u8 = 1 << 5;
+/// Bytes a drain reads at most; QEMU's PS/2 queues are far shorter.
+const I8042_DRAIN_LIMIT: usize = 256;
 const FULL_FRAME: BufferRect = BufferRect {
     x: 0,
     y: 0,
@@ -126,6 +139,7 @@ fn run(allocator: &mut PageAllocator) -> Probe<()> {
          irq-completed\n",
         stats.attaches, stats.scanouts, stats.transfers, stats.flushes
     ));
+    hold_for_capture("a")?;
 
     let mut damage = [NO_RECT; REFERENCE_B_DAMAGE.len()];
     for (slot, rect) in damage.iter_mut().zip(REFERENCE_B_DAMAGE) {
@@ -162,6 +176,7 @@ fn run(allocator: &mut PageAllocator) -> Probe<()> {
          damage-bytes={damage_bytes} frame-bytes={REFERENCE_FRAME_BYTES}\n",
         stats.detaches, stats.attaches, stats.transfers, stats.flushes
     ));
+    hold_for_capture("b")?;
 
     let crc = replay_transfers(staging)?;
     if crc != REFERENCE_CRC {
@@ -371,7 +386,46 @@ fn reset_and_present() -> Probe<()> {
     serial_write_fmt(format_args!(
         "[VGPU] present seq={seq} buffer=1 epoch=2 reattached set-scanout\n"
     ));
+    hold_for_capture("c")
+}
+
+/// Keeps the scanout still until the host has captured it: prints `[VGPU] hold capture=<frame>`
+/// and waits for the acknowledgement the lane sends after its screendump, one key tap through
+/// QMP `input-send-event`. The tap's release byte (bit 7 set in scan code set 1 and set 2's 0xF0
+/// prefix alike) ends the hold; a missing acknowledgement fails the probe.
+fn hold_for_capture(frame: &str) -> Probe<()> {
+    drain_i8042();
+    serial_write_fmt(format_args!("[VGPU] hold capture={frame}\n"));
+    boot_wait::wait_until(
+        HOLD_BUDGET_MS,
+        "host capture acknowledgement budget",
+        |_| {
+            Ok(read_i8042_keyboard()
+                .filter(|byte| byte & 0x80 != 0)
+                .map(|_| ()))
+        },
+    )?;
+    drain_i8042();
     Ok(())
+}
+
+/// The next keyboard byte, if the controller has one; mouse bytes are read and dropped.
+fn read_i8042_keyboard() -> Option<u8> {
+    let status = port_in(I8042_STATUS);
+    if status & I8042_OUTPUT_FULL == 0 {
+        return None;
+    }
+    let byte = port_in(I8042_DATA);
+    (status & I8042_AUX_DATA == 0).then_some(byte)
+}
+
+fn drain_i8042() {
+    for _ in 0..I8042_DRAIN_LIMIT {
+        if port_in(I8042_STATUS) & I8042_OUTPUT_FULL == 0 {
+            return;
+        }
+        port_in(I8042_DATA);
+    }
 }
 
 fn release() -> Probe<()> {

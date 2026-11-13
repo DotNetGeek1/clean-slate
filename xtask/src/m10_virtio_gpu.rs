@@ -3,13 +3,26 @@
 //! Kernel display host tests, then one boot of the `m10-virtio-gpu-self-test` kernel against a
 //! modern-only `virtio-gpu-pci` with no VGA. The guest drives create/attach/scanout/transfer/flush,
 //! a buffer switch, a forced W3 timeout, reset to a new epoch and release, and prints `[VGPU]`
-//! markers; the host checks their order and the figures they carry. Visual proof of the scanout is
-//! #118/#119 through #197.
+//! markers; the host checks their order and the figures they carry.
+//!
+//! The host also checks what QEMU displays. After the first present, the buffer switch and the
+//! present after the reset, the guest prints `[VGPU] hold capture=<frame>` and keeps the scanout
+//! still; the lane takes a QMP screendump, compares it pixel for pixel with a host render of the
+//! frame, then releases the guest with one key tap (the guest polls the i8042 for it).
 
-use crate::marker_spec::MarkerSet;
-use crate::{prepare_vm, run_cargo_package_tests, run_driven_acceptance_command, NoDriver};
-use crate::{VmLaunchConfig, XtaskError};
+use std::sync::OnceLock;
 use std::time::Duration;
+
+use clean_slate_raster::{
+    draw_reference_a, draw_reference_b, draw_reference_decoy, reference_layout, Canvas,
+};
+
+use crate::m10_framebuffer_validate::{bgrx_frame_to_rgb, compare_with_render};
+use crate::marker_spec::MarkerSet;
+use crate::qmp::image::Screenshot;
+use crate::qmp::{InputAction, QCode, QmpScriptDriver, ScriptStep};
+use crate::{prepare_vm, run_cargo_package_tests, run_driven_acceptance_command};
+use crate::{xtask_artifact_root, AcceptanceDriver, VmLaunchConfig, XtaskError};
 
 /// `ioeventfd=off`: a request that is never notified is never seen, so the forced timeout is
 /// deterministic.
@@ -25,20 +38,122 @@ const FRAME_BYTES: u64 = 4_096_000;
 const B_DAMAGE_BYTES: u64 = (64 * 48 + 32 * 32 + 80 * 40) * 4;
 const _: () = assert!(B_DAMAGE_BYTES < FRAME_BYTES);
 
-pub(crate) const MARKERS: [&str; 12] = [
+const HOLD_A: &str = "[VGPU] hold capture=a";
+const HOLD_B: &str = "[VGPU] hold capture=b";
+const HOLD_C: &str = "[VGPU] hold capture=c";
+
+pub(crate) const MARKERS: [&str; 15] = [
     "[VIRTIO] modern id=16 slot=0 irq=msix vector=",
     "[DISP] backend=virtio-gpu output=0 epoch=1",
     "[VGPU] bring-up ok display-info=1280x800 resource=1 format=b8g8r8x8 completed=2",
     "[VGPU] scanout buffers mapped=2 stride=5120",
     "[VGPU] present seq=1 buffer=0 attach=1 set-scanout=1 transfers=1 flushes=1 irq-completed",
+    HOLD_A,
     "[VGPU] present seq=2 buffer=1 detach=1 attach=2 transfers=4 flushes=2 damage-bytes=",
+    HOLD_B,
     "[VGPU] readback crc32=0x20f2eec9",
     "[VGPU] timeout -> reset-required seq=3 error=device-timeout present-rejected",
     "[VGPU] reset ok epoch=2 generation=",
     "[VGPU] present seq=4 buffer=1 epoch=2 reattached set-scanout",
+    HOLD_C,
     "[VGPU] release ok detach=1 unref=1 device-reset=1",
     "[VGPU] PASS",
 ];
+
+/// The frames the host expects QEMU to display at each hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Frame {
+    /// The first present: buffer 0, pattern A, full frame.
+    A,
+    /// The switch to buffer 1 with B's damage only: A with B's rects (the decoy is outside them).
+    B,
+    /// The full-frame present of buffer 1 after the reset: A, B and the decoy, on a new resource.
+    AfterReset,
+}
+
+impl Frame {
+    const ALL: [Frame; 3] = [Frame::A, Frame::B, Frame::AfterReset];
+
+    fn label(self) -> &'static str {
+        match self {
+            Frame::A => "frame A after the first present",
+            Frame::B => "frame B after the damage-only buffer switch",
+            Frame::AfterReset => "the full frame after the reset",
+        }
+    }
+
+    /// The BGRX bytes the guest's scanout buffers hold, drawn as the guest draws them.
+    fn render_bgrx(self) -> Vec<u8> {
+        let layout = reference_layout();
+        let mut bytes = vec![0u8; layout.byte_len()];
+        let mut canvas = Canvas::new(&mut bytes, layout).expect("reference layout");
+        draw_reference_a(&mut canvas);
+        if self != Frame::A {
+            draw_reference_b(&mut canvas);
+        }
+        if self == Frame::AfterReset {
+            draw_reference_decoy(&mut canvas);
+        }
+        bytes
+    }
+
+    /// The render as screendump RGB. The resource is `B8G8R8X8_UNORM`, which QEMU scans out as
+    /// pixman `x8r8g8b8` and writes to the screendump as R, G, B: the same reordering as the GOP
+    /// framebuffer lane, with the X byte dropped.
+    fn expected_rgb(self) -> &'static [u8] {
+        static RENDERS: OnceLock<[Vec<u8>; 3]> = OnceLock::new();
+        let renders =
+            RENDERS.get_or_init(|| Frame::ALL.map(|frame| bgrx_frame_to_rgb(&frame.render_bgrx())));
+        &renders[self as usize]
+    }
+
+    fn check(self, shot: &Screenshot) -> Result<(), String> {
+        compare_with_render(shot, self.expected_rgb())
+            .map_err(|detail| format!("{}: {detail}", self.label()))
+    }
+
+    /// The `[VGPU]` line the guest prints while it holds this frame.
+    fn hold_line(self) -> &'static str {
+        match self {
+            Frame::A => HOLD_A,
+            Frame::B => HOLD_B,
+            Frame::AfterReset => HOLD_C,
+        }
+    }
+
+    fn capture_name(self) -> &'static str {
+        match self {
+            Frame::A => "virtio-gpu-a",
+            Frame::B => "virtio-gpu-b",
+            Frame::AfterReset => "virtio-gpu-after-reset",
+        }
+    }
+
+    fn screendump_check(self) -> fn(&Screenshot) -> Result<(), String> {
+        match self {
+            Frame::A => |shot| Frame::A.check(shot),
+            Frame::B => |shot| Frame::B.check(shot),
+            Frame::AfterReset => |shot| Frame::AfterReset.check(shot),
+        }
+    }
+}
+
+/// Await each hold, capture and check the display, then release the guest.
+fn capture_steps() -> Vec<ScriptStep> {
+    Frame::ALL
+        .into_iter()
+        .flat_map(|frame| {
+            [
+                ScriptStep::AwaitLine(frame.hold_line()),
+                ScriptStep::Screendump {
+                    name: frame.capture_name(),
+                    check: frame.screendump_check(),
+                },
+                ScriptStep::Input(InputAction::tap(QCode::A).to_vec()),
+            ]
+        })
+        .collect()
+}
 
 pub(crate) fn qemu_args() -> Vec<String> {
     [
@@ -64,14 +179,31 @@ pub(crate) fn run_acceptance() -> Result<(), XtaskError> {
         &["m10-virtio-gpu-self-test"],
         VmLaunchConfig::default(),
     )?;
+    let mut driver =
+        QmpScriptDriver::new("m10-virtio-gpu", capture_steps(), &xtask_artifact_root())?;
     vm.qemu.args(qemu_args());
+    vm.qemu.args(driver.qemu_args());
     let output = run_driven_acceptance_command(
         &mut vm.qemu,
         MarkerSet::Ordered(&MARKERS),
         TIMEOUT,
-        &mut NoDriver,
+        &mut driver,
     )?;
     validate_serial(&output).map_err(XtaskError::Validation)?;
+    if !driver.is_complete() || driver.captures().len() != Frame::ALL.len() {
+        return Err(XtaskError::Validation(
+            "m10 virtio-gpu: the host screendump stages did not all run".into(),
+        ));
+    }
+    for capture in driver.captures() {
+        println!(
+            "[M10.virtio-gpu] host screenshot match {} {}x{} png={}",
+            capture.name,
+            capture.screenshot.width(),
+            capture.screenshot.height(),
+            capture.png.display()
+        );
+    }
     println!("[M10.virtio-gpu] PASS");
     Ok(())
 }
@@ -128,11 +260,14 @@ mod tests {
 [VGPU] bring-up ok display-info=1280x800 resource=1 format=b8g8r8x8 completed=2\r\n\
 [VGPU] scanout buffers mapped=2 stride=5120\r\n\
 [VGPU] present seq=1 buffer=0 attach=1 set-scanout=1 transfers=1 flushes=1 irq-completed\r\n\
+[VGPU] hold capture=a\r\n\
 [VGPU] present seq=2 buffer=1 detach=1 attach=2 transfers=4 flushes=2 damage-bytes=29184 frame-bytes=4096000\r\n\
+[VGPU] hold capture=b\r\n\
 [VGPU] readback crc32=0x20f2eec9\r\n\
 [VGPU] timeout -> reset-required seq=3 error=device-timeout present-rejected\r\n\
 [VGPU] reset ok epoch=2 generation=2\r\n\
 [VGPU] present seq=4 buffer=1 epoch=2 reattached set-scanout\r\n\
+[VGPU] hold capture=c\r\n\
 [VGPU] release ok detach=1 unref=1 device-reset=1\r\n\
 [VGPU] PASS\r\n";
 
@@ -193,6 +328,80 @@ mod tests {
         assert!(validate_serial(&serial)
             .unwrap_err()
             .contains("damage-bytes"));
+    }
+
+    fn screenshot_of(frame: Frame) -> Screenshot {
+        let layout = reference_layout();
+        Screenshot::new(
+            layout.width(),
+            layout.height(),
+            frame.expected_rgb().to_vec(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn each_capture_accepts_its_own_frame_only() {
+        for expected in Frame::ALL {
+            for shown in Frame::ALL {
+                let result = (expected.screendump_check())(&screenshot_of(shown));
+                assert_eq!(
+                    result.is_ok(),
+                    expected == shown,
+                    "{expected:?} on {shown:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn frame_b_is_the_framebuffer_golden() {
+        let layout = reference_layout();
+        let bytes = Frame::B.render_bgrx();
+        assert_eq!(
+            clean_slate_raster::visible_crc32(&bytes, layout),
+            Some(0x20F2_EEC9)
+        );
+    }
+
+    #[test]
+    fn a_blank_display_fails_with_the_frame_named() {
+        let layout = reference_layout();
+        let blank = Screenshot::new(
+            layout.width(),
+            layout.height(),
+            vec![0; layout.width() as usize * layout.height() as usize * 3],
+        )
+        .unwrap();
+        let err = (Frame::A.screendump_check())(&blank).unwrap_err();
+        assert!(
+            err.starts_with("frame A after the first present: "),
+            "{err}"
+        );
+        assert!(err.contains("pixels differ from the host render"), "{err}");
+    }
+
+    #[test]
+    fn every_hold_is_captured_then_released_in_marker_order() {
+        let steps = capture_steps();
+        assert_eq!(steps.len(), 9);
+        let holds: Vec<&str> = steps
+            .iter()
+            .filter_map(|step| match step {
+                ScriptStep::AwaitLine(line) => Some(*line),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(holds, [HOLD_A, HOLD_B, HOLD_C]);
+        let positions: Vec<usize> = holds
+            .iter()
+            .map(|hold| MARKERS.iter().position(|marker| marker == hold).unwrap())
+            .collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        for chunk in steps.chunks(3) {
+            assert!(matches!(chunk[1], ScriptStep::Screendump { .. }));
+            assert!(matches!(chunk[2], ScriptStep::Input(_)));
+        }
     }
 
     #[test]
