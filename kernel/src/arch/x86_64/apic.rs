@@ -85,6 +85,18 @@ pub(crate) fn prepare_local_apic_timer_for_calibration() {
     local_apic_write(APIC_REGISTER_INITIAL_COUNT, u32::MAX);
 }
 
+/// Stops and masks the local APIC timer, for boot-context code that takes device interrupts
+/// with no timer handler behind them.
+#[cfg(feature = "serial-input-self-test")]
+pub(crate) fn mask_local_apic_timer() {
+    const APIC_LVT_MASKED: u32 = 1 << 16;
+    local_apic_write(APIC_REGISTER_INITIAL_COUNT, 0);
+    local_apic_write(
+        APIC_REGISTER_LVT_TIMER,
+        APIC_LVT_MASKED | (TIMER_VECTOR as u32),
+    );
+}
+
 pub(crate) fn program_local_apic_timer() {
     write_apic_timer_lvt_and_divide();
     local_apic_write(APIC_REGISTER_INITIAL_COUNT, apic_timer_initial_count());
