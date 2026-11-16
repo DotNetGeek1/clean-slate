@@ -651,6 +651,32 @@ impl NetBridge {
         }
         Ok(())
     }
+
+    /// Frees `request_id` of a socket whose network instance is gone, so no replacement
+    /// instance serves it. A request still in service (none is once the instance's death was
+    /// handled) only has its result discarded.
+    pub fn drop_request_for_lost_instance(
+        &mut self,
+        pid: u64,
+        domain: u64,
+        instance_generation: u64,
+        request_id: u64,
+    ) {
+        let caller = self.trusted_caller(pid, domain, instance_generation);
+        let Some(slot) = self.slots.iter_mut().find(|slot| {
+            slot.state != ClientSlotState::Free
+                && slot.request_id == request_id
+                && slot.client == caller
+        }) else {
+            return;
+        };
+        if slot.state == ClientSlotState::InService {
+            slot.discard_result = true;
+        } else {
+            slot.release();
+        }
+    }
+
     pub fn service_next(&mut self) -> Option<(u64, NetworkRequest, u32, TrustedCaller)> {
         let index = self
             .slots
@@ -906,6 +932,14 @@ pub(crate) fn recover_net_queue_for_service_holder_exit(service_pid: u64) {
             "[NET ] requeued in-service={requeued} service_pid={service_pid}\n"
         ));
     }
+    on_service_instance_gone();
+}
+
+/// #218 S7: the instance behind the bridge is gone. Linux sockets opened against it become
+/// unusable and their waiters are woken. Runs after the bridge has failed or requeued the
+/// instance's requests, so a lost socket's requests can be freed.
+fn on_service_instance_gone() {
+    crate::process::linux_socket::on_network_instance_gone();
 }
 
 pub(crate) fn reclaim_net_requests_for_holder(pid: u64) -> usize {
@@ -924,7 +958,9 @@ pub(crate) fn notify_holder_exit_for_process(process_id: u64) {
 }
 
 pub(crate) fn shutdown_net_service_instance() -> u32 {
-    net_bridge_mut().shutdown_service()
+    let failed = net_bridge_mut().shutdown_service();
+    on_service_instance_gone();
+    failed
 }
 
 #[allow(dead_code)]
