@@ -377,9 +377,13 @@ fn kernel_guarded_stacks() -> [GuardedStackRecord; SCHEDULER_THREAD_SLOTS + 2] {
 
 fn register_boot_kernel_low_carve_outs(
     reserved: &crate::boot::uefi::BootReservedRanges,
+    local_apic_phys: u64,
 ) -> Result<(), &'static str> {
     init_kernel_low_carve_outs_from_reserved(reserved.as_slice())?;
-    register_kernel_low_carve_out(0xFEE0_0000, 0xFEE0_0000 + PAGE_SIZE)?;
+    // Keeps user mappings out of the local APIC's 2 MiB identity window, so a stray kernel store
+    // there faults in a process root too: the shared table built for the window copies the
+    // kernel root's hole (`mm::identity_holes`) and maps nothing.
+    register_kernel_low_carve_out(local_apic_phys, local_apic_phys + PAGE_SIZE)?;
     register_idt_carve_out()?;
     register_gdt_tss_carve_outs()?;
     unsafe {
@@ -475,7 +479,11 @@ fn run_inner() -> Result<(), &'static str> {
     install_interrupt_handlers();
     serial_write_line("[INT ] IDT initialized");
     serial_write_line("[INT ] double-fault IST initialized");
-    register_boot_kernel_low_carve_outs(&reserved_ranges)?;
+    let local_apic_phys = crate::arch::x86_64::apic::local_apic_physical_base();
+    if local_apic_phys == 0 {
+        return Err("IA32_APIC_BASE names no local APIC page");
+    }
+    register_boot_kernel_low_carve_outs(&reserved_ranges, local_apic_phys)?;
     serial_write_line("[MM  ] page-fault diagnostics installed");
     let syscall_kernel_stack_top = unsafe {
         let stacks = &*task_stacks_mut();
@@ -490,11 +498,23 @@ fn run_inner() -> Result<(), &'static str> {
 
     let boot_framebuffer = boot_framebuffer
         .and_then(|fb| gop::aperture_conflicts(normalized.regions(), &fb).map(|()| fb));
-    let aperture_exclusion = boot_framebuffer.as_ref().ok().map(|fb| PhysExclusion {
-        start: fb.phys_base,
-        end: fb.phys_end(),
-    });
-    let kernel_root = install_kernel_owned_root(&mut allocator, normalized, aperture_exclusion)?;
+    let mut physmap_exclusions = [PhysExclusion {
+        start: local_apic_phys,
+        end: local_apic_phys + PAGE_SIZE,
+    }; 2];
+    let mut physmap_exclusion_count = 1;
+    if let Ok(fb) = boot_framebuffer.as_ref() {
+        physmap_exclusions[1] = PhysExclusion {
+            start: fb.phys_base,
+            end: fb.phys_end(),
+        };
+        physmap_exclusion_count = 2;
+    }
+    let kernel_root = install_kernel_owned_root(
+        &mut allocator,
+        normalized,
+        &physmap_exclusions[..physmap_exclusion_count],
+    )?;
     serial_write_fmt(format_args!(
         "[MM  ] kernel-owned root installed: {:#018x}\n",
         kernel_root
@@ -504,6 +524,8 @@ fn run_inner() -> Result<(), &'static str> {
     set_kernel_root_frame(kernel_root);
     set_kernel_direct_map_ready();
     arm_kernel_stack_guards(kernel_root, &mut allocator, &kernel_guarded_stacks())?;
+    #[cfg(not(test))]
+    crate::mm::identity_holes::arm_identity_holes(kernel_root, &mut allocator, local_apic_phys)?;
     install_shared_carve_out_page_tables(kernel_root, &mut allocator)?;
     serial_write_fmt(format_args!(
         "[MM  ] carve-out private tables per process: {}\n",

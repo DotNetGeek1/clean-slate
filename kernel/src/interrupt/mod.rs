@@ -33,6 +33,7 @@ use crate::diagnostics::qemu::QEMU_EXIT_FAILURE;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::interrupt::timer::increment_kernel_ticks;
 use crate::mm::address_space::kernel_root_frame;
+use crate::mm::identity_holes::{identity_hole_for_address, IdentityHole};
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::stack_guard::guarded_stack_for_fault;
 use crate::mm::stack_guard::{GuardedStackRecord, SlotLabel};
@@ -446,6 +447,9 @@ fn handle_exception(context: &InterruptContext) -> u64 {
         }
 
         log_unexpected_kernel_fault_context(context);
+        if let Some(hole) = identity_hole_for_address(fault_address) {
+            report_identity_hole_fault(context, hole, fault_address)
+        }
         kernel_log_line("[PF  ] unexpected page fault");
         qemu_exit(QEMU_EXIT_FAILURE)
     }
@@ -593,6 +597,23 @@ fn report_kernel_stack_overflow(
     {
         qemu_exit(QEMU_EXIT_FAILURE)
     }
+}
+
+/// Fail-closed report for a kernel access to a page cut from the identity map (#253); the `[PF  ]`
+/// dump before it carries what is needed to symbolize `rip`.
+fn report_identity_hole_fault(
+    context: &InterruptContext,
+    hole: IdentityHole,
+    fault_address: u64,
+) -> ! {
+    kernel_log_fmt(format_args!(
+        "[FAIL] kernel page fault in identity hole={} cr2={:#018x} rip={:#018x} write={}\n",
+        hole.label(),
+        fault_address,
+        context.rip,
+        bit(context.error_code, 1)
+    ));
+    qemu_exit(QEMU_EXIT_FAILURE)
 }
 
 pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {
