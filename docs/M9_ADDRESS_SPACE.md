@@ -20,6 +20,7 @@ at `0x400000` (slot 0) cannot be mapped per process.
 | Kernel direct map (physmap) | `[0xffff_8000_0000_0000, 0xffff_a000_0000_0000)` | 510–511 (512 GiB window) | Kernel root only | Supervisor-only, NX where possible; all kernel `phys_to_virt` access |
 | Kernel execution / firmware carry-over | Low canonical VAs where UEFI mapped the kernel image, stacks, and MMIO | 0–255 in **kernel root only** | Kernel | Supervisor-only; **not** inherited into process roots |
 | M8 legacy user window | `[0x0000_4000_0000_0000, 0x0000_4080_0000_0000)` | 128 | Per-process | Still valid for native services and frozen M8 fixture; not a kernel reservation |
+| Kernel device aliases | `[0xffff_c000_0000_0000, 0xffff_c080_0000_0000)` | 384 | Kernel root, shared by every process root | Supervisor-only, uncached, NX; today only the local APIC register page (#253) |
 | M1/M2 diagnostics | `0xffff_8000_0000_0000` scratch; double-fault pages at `+0x1000`, `+0x2000` | physmap slot | Kernel | Same physmap window as direct map |
 
 Constants live in `kernel/src/mm/layout.rs`:
@@ -63,13 +64,17 @@ while still running on the firmware CR3.
 - GOP framebuffer: not referenced in kernel sources reviewed for this issue.
 - APIC (`arch/x86_64/apic.rs`): the physical base comes from the
   `IA32_APIC_BASE` MSR. Since #253 the kernel reaches the registers only through
-  a 4 KiB uncached alias at `phys_to_virt(base)` (`0xffff_8000_fee0_0000` under
-  QEMU), mapped by `mm::identity_holes::arm_identity_holes`. The identity window
-  around the base (`[0xFEE0_0000, 0xFF00_0000)`) is not present in the kernel
-  root or any process root, so a stray store there faults and the page-fault
-  handler names it (`[FAIL] kernel page fault in identity hole=local-apic-window`).
-  Boot fails if the alias cannot be mapped, if the MSR base changes, or if the
-  page at the alias does not read back as an integrated local APIC.
+  a 4 KiB uncached alias at `LOCAL_APIC_ALIAS_VA` (`0xffff_c000_0000_0000`, the
+  base of PML4 slot 384, outside the direct map), mapped by
+  `mm::identity_holes::arm_identity_holes`. The 2 MiB identity window around the
+  base (`[0xFEE0_0000, 0xFF00_0000)`) and its direct-map image
+  (`[0xffff_8000_fee0_0000, 0xffff_8000_ff00_0000)`) are not present in the
+  kernel root or any process root, so a stray store through either faults and the
+  page-fault handler names it (`[FAIL] kernel page fault in identity
+  hole=local-apic-window` or `hole=local-apic-direct-map`). Boot fails if the
+  CPU's MAXPHYADDR would let `phys_to_virt` of a real frame reach slot 384, if the
+  alias cannot be mapped, if the MSR base changes, or if the page at the alias
+  does not read back as an integrated local APIC.
 
 ## Kernel root inheritance and sanitisation
 
