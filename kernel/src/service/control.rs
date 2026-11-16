@@ -395,7 +395,8 @@ impl ServiceLifecycleController {
         feature = "m6-capabilities-self-test",
         feature = "m6-fixture-smoke-self-test",
         feature = "m7-net-service-self-test",
-        feature = "m8-linux-hello"
+        feature = "m8-linux-hello",
+        clean_slate_system_init
     ))]
     pub(crate) fn notify_exited_live_process(
         &mut self,
@@ -689,7 +690,7 @@ impl ServiceLifecycleController {
         if let Err(message) = super::system_init::audit_service_authority(
             service_id,
             spawned.pid,
-            grants,
+            context.spec,
             self.capabilities_held_by(spawned.pid),
         ) {
             teardown_process_by_id(
@@ -1118,6 +1119,9 @@ const fn rollback_failure_message(grant: Grant) -> &'static str {
         Grant::BlockDevice => "storage service block-capability rollback teardown failed",
         Grant::NetworkService => "network service capability rollback teardown failed",
         Grant::ObjectServiceRole => "object service role rollback teardown failed",
+        Grant::Console | Grant::ConsoleInput | Grant::TmpObjects => {
+            "linux process grant rollback teardown failed"
+        }
     }
 }
 

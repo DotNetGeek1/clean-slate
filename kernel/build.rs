@@ -50,7 +50,8 @@ const ISA_IRQ_WITHOUT_BOOT_TAIL_FEATURES: &[&str] = &["m10-input-self-test"];
 /// these, sets `clean_slate_virtio_gpu`.
 const VIRTIO_GPU_WITHOUT_BOOT_TAIL_FEATURES: &[&str] = &["m10-virtio-gpu-self-test"];
 
-/// Builds that compile the COM1 receive path (`device::serial_console`). Any one of them sets
+/// Self-test builds that compile the COM1 receive path (`device::serial_console`). Any one of
+/// them, or the build that launches init (its shell reads the console), sets
 /// `clean_slate_serial_console`, and with it `clean_slate_isa_irq` for the IRQ 4 route. Every
 /// other build leaves COM1 output-only, so input on the line is never echoed.
 const SERIAL_CONSOLE_FEATURES: &[&str] = &["serial-input-self-test"];
@@ -65,7 +66,7 @@ fn any_feature_enabled(features: &[&str]) -> bool {
     })
 }
 
-fn emit_boot_tail_cfgs() {
+fn emit_boot_tail_cfgs(system_init: bool) {
     println!("cargo::rustc-check-cfg=cfg(clean_slate_boot_tail)");
     println!("cargo::rustc-check-cfg=cfg(clean_slate_isa_irq)");
     println!("cargo::rustc-check-cfg=cfg(clean_slate_virtio_gpu)");
@@ -74,7 +75,7 @@ fn emit_boot_tail_cfgs() {
     if boot_tail {
         println!("cargo::rustc-cfg=clean_slate_boot_tail");
     }
-    let serial_console = any_feature_enabled(SERIAL_CONSOLE_FEATURES);
+    let serial_console = system_init || any_feature_enabled(SERIAL_CONSOLE_FEATURES);
     if serial_console {
         println!("cargo::rustc-cfg=clean_slate_serial_console");
     }
@@ -123,10 +124,32 @@ fn emit_system_init_cfg() -> bool {
     system_init
 }
 
+/// The Linux process substrate (`fork`, `execve`, `wait4`, `exit_group`, exit publication) and
+/// the embedded BusyBox root filesystem. `m8-linux-image` and `m9-rootfs` compile them for the
+/// self-test builds; the build that launches init compiles both for its shell row.
+/// `clean_slate_linux_proc` and `clean_slate_linux_rootfs` say "compiled", so code gated on
+/// them never names the self-test features.
+fn emit_linux_cfgs(system_init: bool) {
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_linux_proc)");
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_linux_rootfs)");
+    if system_init || any_feature_enabled(&["m8-linux-image"]) {
+        println!("cargo::rustc-cfg=clean_slate_linux_proc");
+    }
+    if linux_rootfs_compiled(system_init) {
+        println!("cargo::rustc-cfg=clean_slate_linux_rootfs");
+    }
+}
+
+fn linux_rootfs_compiled(system_init: bool) -> bool {
+    system_init || any_feature_enabled(&["m9-rootfs"])
+}
+
 fn main() {
-    emit_boot_tail_cfgs();
+    let system_init = emit_system_init_cfg();
+    emit_boot_tail_cfgs(system_init);
+    emit_linux_cfgs(system_init);
     // Init is embedded only in the build that launches it.
-    if emit_system_init_cfg() {
+    if system_init {
         embed_userspace_image("init_userspace.bin", "clean-slate-supervisor-init", true);
     }
     let m6_fixture_self_test = env::var("CARGO_FEATURE_M6_PROCESS_CONTROL_SELF_TEST").is_ok()
@@ -171,7 +194,7 @@ fn main() {
         "clean-slate-network-userspace",
         true,
     );
-    if env::var("CARGO_FEATURE_M9_ROOTFS").is_ok() {
+    if linux_rootfs_compiled(system_init) {
         embed_m9_rootfs_image();
     }
     if env::var("CARGO_FEATURE_M10_DESKTOP").is_ok() {

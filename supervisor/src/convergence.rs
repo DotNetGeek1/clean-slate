@@ -234,6 +234,19 @@ where
             .map(|slot| slot.runtime)
     }
 
+    /// Counts `service`'s current instance as healthy for its restart policy: the next failure
+    /// is retried as the first attempt again. For callers whose policy resets on ready rather
+    /// than on health reports.
+    pub fn reset_restart_attempts(
+        &mut self,
+        service: ServiceId,
+    ) -> Result<(), ConvergedSupervisorError> {
+        let slot = self.recovery_slot_mut(service)?;
+        slot.runtime.on_healthy_instance();
+        slot.scheduled_attempt = 0;
+        Ok(())
+    }
+
     /// Terminates `service`'s live instance. The resulting exit is a failure like any other, so
     /// the service's restart policy applies to it.
     pub fn terminate(&mut self, service: ServiceId) -> Result<(), ConvergedSupervisorError> {

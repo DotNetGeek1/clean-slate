@@ -157,6 +157,12 @@ pub(crate) fn tmp_file_by_object_id(object_id: u64) -> Option<TmpFileState> {
     None
 }
 
+/// Whether `object_id` is one of the `/tmp` backing objects (launch-time authority audit).
+#[cfg(clean_slate_system_init)]
+pub(crate) fn is_tmp_object(object_id: u64) -> bool {
+    slot_index_for_object(object_id).is_some()
+}
+
 fn slot_index_for_object(object_id: u64) -> Option<usize> {
     (object_id >= LINUX_TMP_OBJECT_ID_BASE)
         .then_some((object_id - LINUX_TMP_OBJECT_ID_BASE) as usize)

@@ -346,6 +346,9 @@ pub(crate) enum BuiltinServiceImage {
     /// Frozen M8 Linux hello fixture launched through `service::linux_launch` (#97).
     #[cfg(feature = "m8-linux-hello")]
     LinuxHello,
+    /// #218 S5 serial-console BusyBox shell launched by `service::system_shell`.
+    #[cfg(clean_slate_system_init)]
+    LinuxShell,
     /// #118 desktop images launched by `service::desktop_launch`.
     #[cfg(feature = "m10-desktop")]
     Desktop(super::desktop_launch::DesktopRole),
@@ -397,6 +400,8 @@ impl BuiltinServiceImage {
             }
             #[cfg(feature = "m8-linux-hello")]
             id if id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID.0 => Self::LinuxHello,
+            #[cfg(clean_slate_system_init)]
+            id if id == clean_slate_service_fixtures::SYSTEM_SHELL_SERVICE_ID.0 => Self::LinuxShell,
             #[cfg(feature = "m10-desktop")]
             id if id == super::desktop_launch::COMPOSITOR_SERVICE_ID.0 => {
                 Self::Desktop(super::desktop_launch::DesktopRole::Compositor)
@@ -540,6 +545,10 @@ pub(crate) fn launch_builtin_service(
                 domain_id: launched.pid,
                 scheduler_slot: launched.scheduler_slot,
             })
+        }
+        #[cfg(clean_slate_system_init)]
+        BuiltinServiceImage::LinuxShell => {
+            super::system_shell::launch(allocator, kernel_stack_top, scheduler_slot, context)
         }
         #[cfg(feature = "m10-desktop")]
         BuiltinServiceImage::Desktop(role) => {
@@ -902,6 +911,10 @@ fn launch_single_page_service(
             #[cfg(feature = "m8-linux-hello")]
             BuiltinServiceImage::LinuxHello => {
                 return Err("linux hello image must use the linux_launch path");
+            }
+            #[cfg(clean_slate_system_init)]
+            BuiltinServiceImage::LinuxShell => {
+                return Err("system shell image must use the system_shell path");
             }
             #[cfg(feature = "m10-desktop")]
             BuiltinServiceImage::Desktop(_) => {

@@ -1,6 +1,8 @@
 //! Linux runtime/memory/time/poll syscall family (#103).
 
 use super::block::{block_linux_syscall, LinuxTimeoutResult};
+#[cfg(clean_slate_serial_console)]
+use super::poll::is_console_input;
 use super::poll::{
     clear_poll_interest_for_pid, nanosleep_wait_key, poll_wait_key, register_poll_interest,
     LINUX_POLL_MAX_FDS,
@@ -315,7 +317,17 @@ fn handle_sys_poll(
                 ctx.instance_generation,
                 pollfd.fd as u64,
             ) {
-                let _ = register_poll_interest(open_id, ctx.pid);
+                let registered = register_poll_interest(open_id, ctx.pid);
+                // Console input is woken only through this interest, so a full table must not
+                // turn into a poll that sleeps through the input.
+                #[cfg(clean_slate_serial_console)]
+                if registered.is_err() && is_console_input(open_id) {
+                    clear_poll_interest_for_pid(ctx.pid);
+                    linux_mem::set_pending_poll_deadline(ctx.pid, ctx.instance_generation, None);
+                    return Err(super::console_input::POLL_INTEREST_FULL);
+                }
+                #[cfg(not(clean_slate_serial_console))]
+                let _ = registered;
             }
         }
         pollfd.revents = fd_readiness(ctx, pollfd.fd, pollfd.events)?;
@@ -412,6 +424,10 @@ fn fd_readiness(
             }
             Ok(crate::process::linux_fd::open_description::DescriptorKind::Console(_)) => {
                 console_readiness()
+            }
+            #[cfg(clean_slate_serial_console)]
+            Ok(crate::process::linux_fd::open_description::DescriptorKind::ConsoleInput) => {
+                super::console_input::readiness()
             }
             _ => Readiness::default(),
         };

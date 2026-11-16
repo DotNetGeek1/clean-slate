@@ -567,7 +567,7 @@ fn run_inner() -> Result<(), &'static str> {
         start_m9_linux_proc_self_test(allocator)
     }
 
-    #[cfg(all(feature = "m9-rootfs", not(feature = "m9-rootfs-self-test")))]
+    #[cfg(all(clean_slate_linux_rootfs, not(feature = "m9-rootfs-self-test")))]
     {
         crate::process::linux_rootfs::ensure_rootfs_integrity_logged()
             .map_err(|_| "m9 rootfs: embedded image failed integrity checks")?;
@@ -1096,6 +1096,14 @@ fn run_inner() -> Result<(), &'static str> {
         initialize_scheduler()?;
         #[cfg(clean_slate_system_init)]
         {
+            // The shell row reads the serial console; receive is on before any service runs.
+            crate::device::serial_console::set_input_notifier(Some(
+                crate::syscall::linux::poll::wake_console_input_pollers,
+            ));
+            let vector = crate::device::serial_console::enable()?;
+            serial_write_fmt(format_args!(
+                "[KERN] serial console input on vector={vector}\n"
+            ));
             let allocator = crate::syscall::service_lifecycle_syscall_allocator_mut()
                 .as_mut()
                 .ok_or("init: service lifecycle allocator missing")?;

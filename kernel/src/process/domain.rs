@@ -646,7 +646,7 @@ pub(crate) fn teardown_current_process(
     linux_fd::release_for_process_by_pid(process_id);
     let registry_live = |check_pid: u64| unsafe { process_registry_mut().get(check_pid).is_some() };
     linux_fd::release_stale_registry_slots(&registry_live);
-    #[cfg(feature = "m8-linux-image")]
+    #[cfg(clean_slate_linux_proc)]
     crate::process::linux_proc::table::table_mut().retire_stale_live_slots(&registry_live);
     let mut ctx = TeardownContext::for_registered(process_id, allocator)
         .ok_or(CURRENT_TEARDOWN.record_missing)?;

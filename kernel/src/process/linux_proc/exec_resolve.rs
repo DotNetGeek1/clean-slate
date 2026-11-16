@@ -2,9 +2,9 @@
 
 use clean_slate_linux_abi::{LinuxErrno, ENOENT};
 
-#[cfg(feature = "m9-rootfs")]
+#[cfg(clean_slate_linux_rootfs)]
 pub(crate) use crate::process::linux_fs::path::LINUX_PATH_MAX;
-#[cfg(not(feature = "m9-rootfs"))]
+#[cfg(not(clean_slate_linux_rootfs))]
 pub(crate) const LINUX_PATH_MAX: usize = 256;
 
 pub(crate) struct ExecutableRef<'a> {
@@ -12,7 +12,7 @@ pub(crate) struct ExecutableRef<'a> {
     pub resolved_path_len: usize,
 }
 
-#[cfg(feature = "m9-rootfs")]
+#[cfg(clean_slate_linux_rootfs)]
 pub(crate) fn resolve_executable(
     pid: u64,
     generation: clean_slate_service_lifecycle::InstanceGeneration,
@@ -28,7 +28,7 @@ pub(crate) fn resolve_executable(
     })
 }
 
-#[cfg(not(feature = "m9-rootfs"))]
+#[cfg(not(clean_slate_linux_rootfs))]
 pub(crate) fn resolve_executable(
     _pid: u64,
     _generation: clean_slate_service_lifecycle::InstanceGeneration,

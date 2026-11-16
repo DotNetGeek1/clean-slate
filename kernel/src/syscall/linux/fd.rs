@@ -54,6 +54,18 @@ pub(crate) fn handle_sys_read(
     let mut scratch = [0u8; LINUX_READ_SCRATCH_BYTES];
     let result = match linux_fd::open_description_kind(pid, generation, fd)? {
         DescriptorKind::Console(_) => Ok(0u64),
+        DescriptorKind::ConsoleInput => {
+            #[cfg(clean_slate_serial_console)]
+            {
+                let nonblock = linux_fd::open_description_status(pid, generation, fd)?.nonblock;
+                super::console_input::read(request, ctx, nonblock, &mut scratch[..want])
+            }
+            // Only the build with COM1 receive installs console input.
+            #[cfg(not(clean_slate_serial_console))]
+            {
+                Err(EBADF)
+            }
+        }
         DescriptorKind::PipeRead(_) => {
             #[cfg(not(any(
                 feature = "m1-self-test",
@@ -82,11 +94,11 @@ pub(crate) fn handle_sys_read(
             }
         }
         DescriptorKind::File(_) => {
-            #[cfg(feature = "m9-rootfs")]
+            #[cfg(clean_slate_linux_rootfs)]
             {
                 super::fs_io::read_file_fd(request, ctx, pid, generation, fd, &mut scratch[..want])
             }
-            #[cfg(not(feature = "m9-rootfs"))]
+            #[cfg(not(clean_slate_linux_rootfs))]
             {
                 let _ = (request, ctx, pid, generation, fd);
                 Err(EBADF)
@@ -229,7 +241,7 @@ pub(crate) fn handle_sys_writev(
         if chunk.is_empty() {
             return Ok(0);
         }
-        #[cfg(feature = "m9-rootfs")]
+        #[cfg(clean_slate_linux_rootfs)]
         if matches!(projection, LinuxFdProjection::FileBackend) {
             let n = super::fs_io::write_file_fd(request, ctx, pid, generation, fd, chunk)?;
             return usize::try_from(n).map_err(|_| EINVAL);
@@ -311,11 +323,11 @@ pub(crate) fn handle_sys_lseek(
     let desc = linux_fd::open_description_snapshot(open)?;
     match desc.kind {
         DescriptorKind::File(_) => {
-            #[cfg(feature = "m9-rootfs")]
+            #[cfg(clean_slate_linux_rootfs)]
             {
                 super::fs_io::lseek_file_fd(ctx.pid, ctx.instance_generation, fd, offset, whence)
             }
-            #[cfg(not(feature = "m9-rootfs"))]
+            #[cfg(not(clean_slate_linux_rootfs))]
             {
                 let _ = (offset, whence);
                 Err(ESPIPE)

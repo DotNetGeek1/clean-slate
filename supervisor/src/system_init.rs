@@ -45,11 +45,21 @@ pub const fn restart_policy(spec: RestartSpec) -> RestartPolicy {
             max_attempts,
             backoff_base_ticks,
             initial_delay_ticks,
+        }
+        | RestartSpec::OnExitUntilUnready {
+            max_attempts,
+            backoff_base_ticks,
+            initial_delay_ticks,
         } => RestartPolicy::OnFailure(
             BoundedRestart::new(max_attempts, backoff_base_ticks)
                 .with_initial_delay(initial_delay_ticks),
         ),
     }
+}
+
+/// Whether a row's restart count goes back to zero when an instance reports ready.
+const fn resets_on_ready(spec: RestartSpec) -> bool {
+    matches!(spec, RestartSpec::OnExitUntilUnready { .. })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,6 +261,11 @@ where
                             "[INIT] service={} ready gen={}",
                             service.0, snapshot.generation
                         ));
+                        if resets_on_ready(slot.spec.restart)
+                            && self.supervisor.reset_restart_attempts(service).is_err()
+                        {
+                            self.give_up(service, "restart reset failed");
+                        }
                     }
                 }
                 ServiceLifecycleState::Faulted | ServiceLifecycleState::Exited => {
@@ -488,7 +503,9 @@ mod tests {
     use std::vec::Vec;
 
     use clean_slate_service_fixtures::manifest::SYSTEM_MANIFEST;
-    use clean_slate_service_fixtures::{NETWORK_SERVICE_ID, STORAGE_SERVICE_ID};
+    use clean_slate_service_fixtures::{
+        NETWORK_SERVICE_ID, STORAGE_SERVICE_ID, SYSTEM_SHELL_SERVICE_ID,
+    };
     use clean_slate_service_lifecycle::{
         ControlRequest, ControlRequestKind, DomainId, InstanceGeneration, LifecycleEvent,
         LifecycleEventKind, ServiceInstanceId,
@@ -693,7 +710,7 @@ mod tests {
             [(STORAGE_SERVICE_ID, ControlRequestKind::Start)]
         );
         assert_eq!(
-            harness.lines_with("[INIT] started pid=3 services=2").len(),
+            harness.lines_with("[INIT] started pid=3 services=3").len(),
             1
         );
         assert_eq!(harness.lines_with("[INIT] starting service=20736").len(), 1);
@@ -708,10 +725,11 @@ mod tests {
     }
 
     #[test]
-    fn network_starts_only_after_storage_reports_ready() {
+    fn network_and_shell_start_only_after_storage_reports_ready() {
         let mut harness = Harness::boot();
         harness.init.on_wake(SECOND, None);
         assert_eq!(harness.starts_of(NETWORK_SERVICE_ID), 0);
+        assert_eq!(harness.starts_of(SYSTEM_SHELL_SERVICE_ID), 0);
 
         harness.report(2 * SECOND, STORAGE_SERVICE_ID, LifecycleEventKind::Ready);
         assert_eq!(
@@ -719,16 +737,38 @@ mod tests {
             [
                 (STORAGE_SERVICE_ID, ControlRequestKind::Start),
                 (NETWORK_SERVICE_ID, ControlRequestKind::Start),
+                (SYSTEM_SHELL_SERVICE_ID, ControlRequestKind::Start),
             ]
         );
         let storage_ready = harness.position_of("[INIT] service=20736 ready gen=1");
         let network_start =
             harness.position_of("[INIT] service=20736 ready; starting service=20992");
+        let shell_start = harness.position_of("[INIT] service=20736 ready; starting service=21504");
         assert!(storage_ready < network_start);
+        assert!(network_start < shell_start);
     }
 
     #[test]
-    fn once_both_services_are_ready_init_waits_with_no_deadline_and_does_no_work() {
+    fn the_shell_does_not_wait_for_the_network() {
+        let mut harness = Harness::boot();
+        harness.report(SECOND, STORAGE_SERVICE_ID, LifecycleEventKind::Ready);
+        harness.report(
+            2 * SECOND,
+            SYSTEM_SHELL_SERVICE_ID,
+            LifecycleEventKind::Ready,
+        );
+        assert_eq!(
+            harness.state(NETWORK_SERVICE_ID),
+            ServiceLifecycleState::Starting
+        );
+        assert_eq!(
+            harness.lines_with("[INIT] service=21504 ready gen=1").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn once_every_service_is_ready_init_waits_with_no_deadline_and_does_no_work() {
         let mut harness = Harness::boot();
         harness.report(SECOND, STORAGE_SERVICE_ID, LifecycleEventKind::Ready);
         assert!(
@@ -736,11 +776,20 @@ mod tests {
             "network ready deadline"
         );
         harness.report(2 * SECOND, NETWORK_SERVICE_ID, LifecycleEventKind::Ready);
+        assert!(
+            harness.init.next_deadline().is_some(),
+            "shell ready deadline"
+        );
+        harness.report(
+            2 * SECOND,
+            SYSTEM_SHELL_SERVICE_ID,
+            LifecycleEventKind::Ready,
+        );
 
         assert_eq!(harness.init.next_deadline(), None);
         assert_eq!(
-            harness.lines_with("[INIT] boot settled running=2 down=0; waiting, no deadline"),
-            ["[INIT] boot settled running=2 down=0; waiting, no deadline"]
+            harness.lines_with("[INIT] boot settled running=3 down=0; waiting, no deadline"),
+            ["[INIT] boot settled running=3 down=0; waiting, no deadline"]
         );
 
         let requests = harness.requests().len();
@@ -777,10 +826,14 @@ mod tests {
             ["[INIT] gave up service=20736 restarts=3; init carries on"]
         );
         assert_eq!(
-            harness.lines_with("[INIT] not starting service=20992"),
-            ["[INIT] not starting service=20992: service=20736 is down"]
+            harness.lines_with("[INIT] not starting service="),
+            [
+                "[INIT] not starting service=20992: service=20736 is down",
+                "[INIT] not starting service=21504: service=20736 is down",
+            ]
         );
         assert_eq!(harness.starts_of(NETWORK_SERVICE_ID), 0);
+        assert_eq!(harness.starts_of(SYSTEM_SHELL_SERVICE_ID), 0);
         assert_eq!(
             harness.init.next_deadline(),
             None,
@@ -788,7 +841,7 @@ mod tests {
         );
         assert_eq!(
             harness.lines_with("[INIT] boot settled"),
-            ["[INIT] boot settled running=0 down=2; waiting, no deadline"]
+            ["[INIT] boot settled running=0 down=3; waiting, no deadline"]
         );
 
         let requests = harness.requests().len();
@@ -859,6 +912,11 @@ mod tests {
         let mut harness = Harness::boot();
         harness.report(SECOND, STORAGE_SERVICE_ID, LifecycleEventKind::Ready);
         harness.report(2 * SECOND, NETWORK_SERVICE_ID, LifecycleEventKind::Ready);
+        harness.report(
+            2 * SECOND,
+            SYSTEM_SHELL_SERVICE_ID,
+            LifecycleEventKind::Ready,
+        );
 
         harness.report(10 * SECOND, NETWORK_SERVICE_ID, LifecycleEventKind::Faulted);
         assert_eq!(harness.init.next_deadline(), Some(12 * SECOND));
@@ -883,6 +941,11 @@ mod tests {
         let mut harness = Harness::boot();
         harness.report(SECOND, STORAGE_SERVICE_ID, LifecycleEventKind::Ready);
         harness.report(2 * SECOND, NETWORK_SERVICE_ID, LifecycleEventKind::Ready);
+        harness.report(
+            2 * SECOND,
+            SYSTEM_SHELL_SERVICE_ID,
+            LifecycleEventKind::Ready,
+        );
         harness.report(10 * SECOND, STORAGE_SERVICE_ID, LifecycleEventKind::Faulted);
         harness.report(10 * SECOND, NETWORK_SERVICE_ID, LifecycleEventKind::Faulted);
 
@@ -950,6 +1013,16 @@ mod tests {
         let mut ready = Harness::boot();
         ready.report(SECOND, STORAGE_SERVICE_ID, LifecycleEventKind::Ready);
         ready.report(2 * SECOND, NETWORK_SERVICE_ID, LifecycleEventKind::Ready);
+        ready.report(
+            2 * SECOND,
+            SYSTEM_SHELL_SERVICE_ID,
+            LifecycleEventKind::Ready,
+        );
+        ready.report(
+            3 * SECOND,
+            SYSTEM_SHELL_SERVICE_ID,
+            LifecycleEventKind::Exited,
+        );
 
         let lines: Vec<String> = [harness, ready]
             .iter()
@@ -986,5 +1059,108 @@ mod tests {
                 BoundedRestart::new(3, 2 * SECOND).with_initial_delay(2 * SECOND)
             )
         );
+        assert_eq!(
+            restart_policy(RestartSpec::OnExitUntilUnready {
+                max_attempts: 3,
+                backoff_base_ticks: SECOND,
+                initial_delay_ticks: SECOND / 2,
+            }),
+            RestartPolicy::OnFailure(BoundedRestart::new(3, SECOND).with_initial_delay(SECOND / 2))
+        );
+    }
+
+    impl Harness {
+        /// Every service ready; the shell's ready report means it read stdin.
+        fn boot_to_shell_prompt() -> Self {
+            let mut harness = Self::boot();
+            harness.report(SECOND, STORAGE_SERVICE_ID, LifecycleEventKind::Ready);
+            harness.report(SECOND, NETWORK_SERVICE_ID, LifecycleEventKind::Ready);
+            harness.report(SECOND, SYSTEM_SHELL_SERVICE_ID, LifecycleEventKind::Ready);
+            harness
+        }
+
+        /// The current shell exits at `now`; init is woken at the retry deadline. Returns the
+        /// deadline.
+        fn shell_exits_and_is_retried(&mut self, now: u64) -> u64 {
+            let starts = self.starts_of(SYSTEM_SHELL_SERVICE_ID);
+            self.report(now, SYSTEM_SHELL_SERVICE_ID, LifecycleEventKind::Exited);
+            let deadline = self
+                .init
+                .next_deadline()
+                .expect("a shell retry is scheduled");
+            self.init.on_wake(deadline, None);
+            assert_eq!(self.starts_of(SYSTEM_SHELL_SERVICE_ID), starts + 1);
+            deadline
+        }
+    }
+
+    #[test]
+    fn a_shell_that_reached_its_prompt_is_restarted_after_every_exit() {
+        let mut harness = Harness::boot_to_shell_prompt();
+        let mut now = 2 * SECOND;
+        for generation in 2..=8 {
+            let launched = harness.shell_exits_and_is_retried(now);
+            assert_eq!(launched - now, SECOND / 2, "always the first retry's delay");
+            harness.report(launched, SYSTEM_SHELL_SERVICE_ID, LifecycleEventKind::Ready);
+            assert_eq!(
+                harness
+                    .lines_with(&std::format!("[INIT] service=21504 ready gen={generation}"))
+                    .len(),
+                1
+            );
+            now = launched + SECOND;
+        }
+        assert_eq!(harness.starts_of(SYSTEM_SHELL_SERVICE_ID), 8);
+        assert!(harness.lines_with("[INIT] gave up").is_empty());
+        assert_eq!(
+            harness.starts_of(STORAGE_SERVICE_ID),
+            1,
+            "storage untouched"
+        );
+    }
+
+    #[test]
+    fn a_shell_that_exits_before_its_prompt_three_times_in_a_row_is_given_up() {
+        let mut harness = Harness::boot_to_shell_prompt();
+        let mut now = 2 * SECOND;
+        let mut retry_delays = Vec::new();
+        for _ in 0..3 {
+            let launched = harness.shell_exits_and_is_retried(now);
+            retry_delays.push(launched - now);
+            now = launched + SECOND;
+        }
+        assert_eq!(
+            retry_delays,
+            [SECOND / 2, SECOND / 2 + SECOND, SECOND / 2 + 2 * SECOND]
+        );
+        harness.report(now, SYSTEM_SHELL_SERVICE_ID, LifecycleEventKind::Exited);
+        assert_eq!(
+            harness.starts_of(SYSTEM_SHELL_SERVICE_ID),
+            4,
+            "no fifth launch"
+        );
+        assert_eq!(
+            harness.lines_with("[INIT] gave up service=21504"),
+            ["[INIT] gave up service=21504 restarts=3; init carries on"]
+        );
+        assert_eq!(
+            harness.state(STORAGE_SERVICE_ID),
+            ServiceLifecycleState::Running
+        );
+    }
+
+    #[test]
+    fn a_ready_report_between_early_exits_starts_the_count_again() {
+        let mut harness = Harness::boot_to_shell_prompt();
+        let mut now = 2 * SECOND;
+        for _ in 0..2 {
+            now = harness.shell_exits_and_is_retried(now) + SECOND;
+        }
+        harness.report(now, SYSTEM_SHELL_SERVICE_ID, LifecycleEventKind::Ready);
+        for _ in 0..3 {
+            now = harness.shell_exits_and_is_retried(now) + SECOND;
+        }
+        assert!(harness.lines_with("[INIT] gave up").is_empty());
+        assert_eq!(harness.starts_of(SYSTEM_SHELL_SERVICE_ID), 6);
     }
 }

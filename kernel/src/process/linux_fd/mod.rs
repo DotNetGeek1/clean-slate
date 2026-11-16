@@ -23,7 +23,7 @@ pub(crate) enum LinuxReadKind {
 }
 use table::{
     close_fd_entry, close_on_exec as close_cloexec_in_table, dup2_fd, inherit_table,
-    install_stdio_entries, release_table, LinuxFdTable,
+    install_console_input_entry, install_stdio_entries, release_table, LinuxFdTable,
 };
 
 use super::linux_proc::pipe;
@@ -133,6 +133,35 @@ impl LinuxFdRegistry {
             .map_err(|_| "linux fd stdio install failed")
     }
 
+    /// Opens console input at fd 0 of `pid`'s table, which [`Self::install`] must have created.
+    pub(crate) fn install_console_input(
+        &mut self,
+        pid: u64,
+        generation: InstanceGeneration,
+    ) -> Result<(), &'static str> {
+        let index = self
+            .slot_index(pid, generation)
+            .ok_or("linux fd console input: the process has no fd table")?;
+        let table = &mut self.slots[index].as_mut().expect("slot").table;
+        install_console_input_entry(table, &mut self.pool, pid)
+            .map_err(|_| "linux fd console input install failed")
+    }
+
+    /// Open fds of `pid`, in any generation's table, that refer to console input.
+    pub(crate) fn console_input_fds(&self, pid: u64) -> usize {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|slot| slot.pid == pid)
+            .flat_map(|slot| slot.table.entries.iter().flatten())
+            .filter(|entry| {
+                self.pool
+                    .get(entry.open)
+                    .is_ok_and(|desc| desc.kind == DescriptorKind::ConsoleInput)
+            })
+            .count()
+    }
+
     pub(crate) fn ensure_open_fd(
         &self,
         pid: u64,
@@ -186,7 +215,10 @@ impl LinuxFdRegistry {
             DescriptorKind::PipeRead(_) | DescriptorKind::PipeWrite(_) => {
                 Ok(LinuxFdProjection::PipeBackend)
             }
-            DescriptorKind::Socket(_) => Ok(LinuxFdProjection::Closed),
+            // Not writable: `write(2)` on either is refused with `EBADF`.
+            DescriptorKind::Socket(_) | DescriptorKind::ConsoleInput => {
+                Ok(LinuxFdProjection::Closed)
+            }
         }
     }
 
@@ -230,7 +262,8 @@ impl LinuxFdRegistry {
         Ok(match desc.kind {
             DescriptorKind::Console(_) => LinuxReadKind::Console,
             DescriptorKind::Socket(socket) => LinuxReadKind::Socket(socket),
-            DescriptorKind::File(_)
+            DescriptorKind::ConsoleInput
+            | DescriptorKind::File(_)
             | DescriptorKind::Dir(_)
             | DescriptorKind::PipeRead(_)
             | DescriptorKind::PipeWrite(_) => LinuxReadKind::Unsupported,
@@ -742,6 +775,19 @@ pub(crate) fn install_stdio_for_process(
     sink: ConsoleSinkRef,
 ) -> Result<(), &'static str> {
     registry_mut().install(pid, generation, sink)
+}
+
+/// Opens serial console input at fd 0 of `pid`; [`install_stdio_for_process`] runs first.
+pub(crate) fn install_console_input_for_process(
+    pid: u64,
+    generation: InstanceGeneration,
+) -> Result<(), &'static str> {
+    registry_mut().install_console_input(pid, generation)
+}
+
+/// How many of `pid`'s fds refer to console input (launch-time authority audit).
+pub(crate) fn console_input_fd_count(pid: u64) -> usize {
+    registry_mut().console_input_fds(pid)
 }
 
 pub(crate) fn projection_for(

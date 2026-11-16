@@ -226,7 +226,7 @@ const OBJECT_SERVICE_WORK_KEY: WaitKey = WaitKey(0x47_u64 << 56);
 
 /// Kernel-internal authority check for a holder acting on an object without a raw
 /// handle (Linux `/tmp` projection). Denials are logged like native submit denials.
-#[cfg(feature = "m9-rootfs")]
+#[cfg(clean_slate_linux_rootfs)]
 pub(crate) fn authorize_holder_object_op(
     holder: HolderId,
     object_id: u64,
@@ -247,7 +247,7 @@ pub(crate) fn authorize_holder_object_op(
     }
 }
 
-#[cfg(feature = "m9-rootfs")]
+#[cfg(clean_slate_linux_rootfs)]
 pub(crate) fn object_queue_submit(
     client: HolderId,
     op: u64,
@@ -268,7 +268,7 @@ pub(crate) fn object_queue_occupied_slots() -> usize {
         .count()
 }
 
-#[cfg(feature = "m9-rootfs")]
+#[cfg(clean_slate_linux_rootfs)]
 pub(crate) fn object_queue_poll(
     client: HolderId,
     request_id: u64,
@@ -410,7 +410,7 @@ fn log_grant(holder: HolderId, object_id: u64, rights: Rights) {
         feature = "m6-object-self-test",
         feature = "m6-capabilities-self-test",
         feature = "m9-linux-fs-self-test",
-        feature = "m9-rootfs"
+        clean_slate_linux_rootfs
     )),
     allow(dead_code)
 )] // Launch-policy API; exercised by M6 self-tests and the M6.8 integration path.
