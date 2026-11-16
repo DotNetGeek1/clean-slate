@@ -229,6 +229,22 @@ const M9_LINUX_FS_ACCEPTANCE_MARKERS: [&str; 15] = [
     "[M9.H] PASS",
 ];
 const M9_LINUX_FS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
+/// #253: a store to the local APIC identity address and one to the null page each take the
+/// production page-fault report naming the address. The two `[FAIL]` lines are the only ones the
+/// step allows.
+const M2_IDENTITY_GUARD_ACCEPTANCE_MARKERS: [&str; 10] = [
+    "[MM  ] identity holes armed null-page=[0x0,0x1000) local-apic-window=[0xfee00000,0xff000000) ",
+    "[IDG ] local APIC reached through its alias id=",
+    "[IDG ] probe store hole=local-apic-window addr=0x00000000fee00000",
+    "[PF  ] cr2=0x00000000fee00000 ",
+    "[FAIL] kernel page fault in identity hole=local-apic-window cr2=0x00000000fee00000 ",
+    "[IDG ] local-apic-window store faulted",
+    "[IDG ] probe store hole=null-page addr=0x0000000000000000",
+    "[PF  ] cr2=0x0000000000000000 ",
+    "[FAIL] kernel page fault in identity hole=null-page cr2=0x0000000000000000 ",
+    "[IDG ] PASS",
+];
+const M2_IDENTITY_GUARD_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[INT ] double-fault IST initialized",
     "[DF  ] double fault",
@@ -1761,6 +1777,15 @@ fn run_m2_acceptance() -> Result<(), XtaskError> {
         Some((
             MarkerSet::Ordered(&M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS),
             M2_DOUBLE_FAULT_ACCEPTANCE_TIMEOUT,
+        )),
+    )?;
+    run_vm_inner(
+        false,
+        false,
+        &["m2-identity-guard-self-test"],
+        Some((
+            MarkerSet::Ordered(&M2_IDENTITY_GUARD_ACCEPTANCE_MARKERS),
+            M2_IDENTITY_GUARD_ACCEPTANCE_TIMEOUT,
         )),
     )?;
     run_vm_inner(
@@ -5574,6 +5599,35 @@ mod tests {
         assert_eq!(extended[1], "q35,vmport=off");
         assert_eq!(extended[..1], plain[..1]);
         assert_eq!(extended[2..], plain[2..]);
+    }
+
+    #[test]
+    fn identity_guard_step_allows_only_its_two_named_page_fault_reports() {
+        let set = MarkerSet::Ordered(&M2_IDENTITY_GUARD_ACCEPTANCE_MARKERS);
+        let passing = "\
+[MM  ] identity holes armed null-page=[0x0,0x1000) local-apic-window=[0xfee00000,0xff000000) local-apic-alias=0xffff8000fee00000 split_tables=2\n\
+[IDG ] local APIC reached through its alias id=0\n\
+[IDG ] probe store hole=local-apic-window addr=0x00000000fee00000\n\
+[PF  ] page fault\n\
+[PF  ] cr2=0x00000000fee00000 cr3=0x0000000000001000 err=0x2 present=0 write=1 user=0 instruction_fetch=0\n\
+[FAIL] kernel page fault in identity hole=local-apic-window cr2=0x00000000fee00000 rip=0x000000001d1a2b3c write=1\n\
+[IDG ] local-apic-window store faulted\n\
+[IDG ] probe store hole=null-page addr=0x0000000000000000\n\
+[PF  ] cr2=0x0000000000000000 cr3=0x0000000000001000 err=0x2 present=0 write=1 user=0 instruction_fetch=0\n\
+[FAIL] kernel page fault in identity hole=null-page cr2=0x0000000000000000 rip=0x000000001d1a2b3c write=1\n\
+[IDG ] null-page store faulted\n\
+[IDG ] PASS\n";
+        let mut tracker = MarkerTracker::from_set(set);
+        assert!(tracker.consume(passing));
+        assert_eq!(unexpected_guest_failure(passing, set, true), None);
+
+        let absent = "[FAIL] identity guard absent: store to hole=local-apic-window addr=0x00000000fee00000 did not fault\n";
+        assert_eq!(
+            unexpected_guest_failure(absent, set, true).as_deref(),
+            Some(absent.trim_end())
+        );
+        let elsewhere = "[FAIL] kernel page fault in identity hole=local-apic-window cr2=0x00000000fee00030 rip=0x1 write=1\n";
+        assert!(unexpected_guest_failure(elsewhere, set, true).is_some());
     }
 
     #[test]

@@ -560,6 +560,11 @@ fn run_inner() -> Result<(), &'static str> {
         trigger_double_fault_self_test();
     }
 
+    #[cfg(feature = "m2-identity-guard-self-test")]
+    {
+        crate::selftest::m2_identity_guard::run_identity_guard_self_test();
+    }
+
     #[cfg(feature = "m2-timer-self-test")]
     {
         initialize_timer();

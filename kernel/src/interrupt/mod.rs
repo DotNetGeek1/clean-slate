@@ -615,6 +615,13 @@ fn report_identity_hole_fault(
         context.rip,
         bit(context.error_code, 1)
     ));
+    #[cfg(feature = "m2-identity-guard-self-test")]
+    crate::selftest::m2_identity_guard::on_identity_hole_fault(
+        hole,
+        fault_address,
+        bit(context.error_code, 1) != 0,
+    );
+    #[cfg(not(feature = "m2-identity-guard-self-test"))]
     qemu_exit(QEMU_EXIT_FAILURE)
 }
 
