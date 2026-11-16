@@ -1,12 +1,15 @@
 use core::arch::asm;
 
-use crate::diagnostics::serial::serial_write_fmt;
+use crate::diagnostics::serial::{serial_drain, serial_write_fmt};
 
 const QEMU_EXIT_PORT: u16 = 0xf4;
 pub(crate) const QEMU_EXIT_SUCCESS: u32 = 0x10;
 pub(crate) const QEMU_EXIT_FAILURE: u32 = 0x11;
 
+/// The only way the kernel ends a QEMU run: every fault, panic, fatal init error and self-test
+/// verdict comes through here, so the serial drain before the exit write covers all of them.
 pub(crate) fn qemu_exit(value: u32) -> ! {
+    serial_drain();
     unsafe {
         asm!("out dx, eax", in("dx") QEMU_EXIT_PORT, in("eax") value, options(nostack, nomem, preserves_flags));
     }
