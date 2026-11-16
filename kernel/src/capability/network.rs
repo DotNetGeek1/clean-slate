@@ -418,10 +418,10 @@ pub(crate) fn revoke_network_capabilities_for_holder(holder: HolderId) {
 
 // #218 S7: the `NetworkClient` grant.
 //
-// The grant installs an entitlement record naming the network SERVICE with instance
-// generation 0. Generation 0 is never a live instance (the first start makes the network's
-// generation 1), and `authorize_network_op` refuses the entitlement even when the
-// authoritative generation is still 0, so it confers no network operation by itself. It
+// The grant installs an entitlement record naming the network SERVICE with no instance
+// generation (`NETWORK_CLIENT_ENTITLEMENT_GENERATION`, outside the `u32` range of instance
+// generations). No live resource can match it, and `authorize_network_op` refuses it
+// regardless, so it confers no network operation by itself. It
 // lives in the capability space: fork copies it, teardown revokes it, and the launch audit
 // counts it on its own.
 //
@@ -437,8 +437,10 @@ pub(crate) const NETWORK_CLIENT_RIGHTS: Rights = Rights::NET_CONNECT
     .union(Rights::NET_SEND)
     .union(Rights::NET_RECEIVE);
 
-/// Generation of the entitlement record: the network service, no instance.
-const NETWORK_CLIENT_ENTITLEMENT_GENERATION: u64 = 0;
+/// Generation of the entitlement record: the network service, no instance. Instance
+/// generations are `u32`, and an M7 grant made before the first network start sits on the
+/// authoritative generation 0, so no other network record can carry this one.
+const NETWORK_CLIENT_ENTITLEMENT_GENERATION: u64 = u64::MAX;
 
 pub(crate) const fn network_client_entitlement_resource() -> ResourceRef {
     ResourceRef::network(
@@ -451,12 +453,18 @@ pub(crate) fn is_network_client_entitlement(record: &CapabilityRecord) -> bool {
     record.resource == network_client_entitlement_resource()
 }
 
-/// A client capability bound to a network-service instance: the service resource at a
-/// non-zero generation, without raw-device authority.
+/// Whether `generation` can be a started network instance's: instances start at 1 and are
+/// numbered in `u32`.
+fn is_started_instance_generation(generation: u64) -> bool {
+    (1..=u64::from(u32::MAX)).contains(&generation)
+}
+
+/// A client capability bound to a started network-service instance, without raw-device
+/// authority.
 pub(crate) fn is_instance_bound_network_client(record: &CapabilityRecord) -> bool {
     record.resource.class == ResourceClass::Network
         && record.resource.id == u64::from(NETWORK_SERVICE_ID.0)
-        && record.resource.instance_generation != NETWORK_CLIENT_ENTITLEMENT_GENERATION
+        && is_started_instance_generation(record.resource.instance_generation)
         && !record.rights.contains(Rights::NET_RAW_DEVICE)
 }
 
@@ -523,7 +531,7 @@ fn issue_client_capability_in<const N: usize>(
     holder: HolderId,
     generation: u64,
 ) -> Result<CapabilityHandle, CapabilityError> {
-    if generation == NETWORK_CLIENT_ENTITLEMENT_GENERATION {
+    if !is_started_instance_generation(generation) {
         return Err(CapabilityError::WrongResource);
     }
     revoke_client_capabilities_in(table, holder);
@@ -868,10 +876,11 @@ mod tests {
         let handle = table.handle_at(0).unwrap();
         let record = table.record(handle).unwrap();
         assert_eq!(record.rights, NETWORK_CLIENT_RIGHTS);
-        assert_eq!(record.resource, instance(0));
+        assert_eq!(record.resource, network_client_entitlement_resource());
         assert!(is_network_client_entitlement(&record));
         assert!(!is_instance_bound_network_client(&record));
-        for generation in [1, 2, 7] {
+        // Generation 0 is the authoritative generation before the network's first start.
+        for generation in [0, 1, 2, 7, u64::from(u32::MAX)] {
             for op in [NetworkOp::Connect, NetworkOp::Send, NetworkOp::Receive] {
                 assert_eq!(
                     table.authorize(SHELL, handle, instance(generation), op.required_right()),
@@ -879,15 +888,36 @@ mod tests {
                 );
             }
         }
-        // While the network has never started its authoritative generation is still 0, which
-        // the entitlement does match; `authorize_network_op` refuses it by this predicate.
+        for generation in [0, NETWORK_CLIENT_ENTITLEMENT_GENERATION] {
+            assert_eq!(
+                issue_client_capability_in(&mut table, SHELL, generation),
+                Err(CapabilityError::WrongResource)
+            );
+        }
+        assert_eq!(held(&table, SHELL), (1, 0));
+    }
+
+    /// An M7 client granted before the network's first start sits on generation 0; it is
+    /// neither an entitlement nor a derived client, so the S7 paths never touch it.
+    #[test]
+    fn a_pre_start_m7_client_is_not_an_entitlement_or_a_derived_client() {
+        let mut table = CapabilityTable::<MAX_SLOTS>::new();
+        let handle = table
+            .grant(
+                SHELL,
+                instance(0),
+                NETWORK_CLIENT_RIGHTS,
+                Provenance::root(SHELL),
+            )
+            .unwrap();
+        let record = table.record(handle).unwrap();
+        assert!(!is_network_client_entitlement(&record));
+        assert!(!is_instance_bound_network_client(&record));
+        assert_eq!(revoke_entitled_client_capabilities_in(&mut table), 0);
+        assert_eq!(revoke_client_capabilities_in(&mut table, SHELL), 0);
         assert!(table
             .authorize(SHELL, handle, instance(0), Rights::NET_CONNECT)
-            .is_ok_and(|record| is_network_client_entitlement(&record)));
-        assert_eq!(
-            issue_client_capability_in(&mut table, SHELL, 0),
-            Err(CapabilityError::WrongResource)
-        );
+            .is_ok());
     }
 
     #[test]
