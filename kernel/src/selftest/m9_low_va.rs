@@ -1,6 +1,6 @@
 //! M9 (#142): low canonical user VA acceptance — production Linux launch at
 //! `0x400000`, CPL3 fault attribution for page zero / kernel carve-outs /
-//! physmap, LAPIC leaf flags, and allocator baselines.
+//! physmap, the unmapped LAPIC identity window, and allocator baselines.
 
 use crate::arch::x86_64::bit;
 use crate::arch::x86_64::context_switch::{
@@ -48,7 +48,8 @@ use x86_64::VirtAddr;
 const PASS_MARKER: &str = "[M9.0] PASS";
 const LOW_CODE_VA: u64 = 0x400_000;
 const LOW_DATA_VA: u64 = 0x600_000;
-const LAPIC_MMIO_VA: u64 = 0xfee0_0000;
+/// The identity address of QEMU's local APIC page, which no root maps (#253).
+const LAPIC_IDENTITY_VA: u64 = 0xfee0_0000;
 const LINUX_SLOT: usize = 0;
 const NATIVE_SLOT: usize = 1;
 const PROBE_SLOT: usize = 0;
@@ -522,13 +523,14 @@ fn prove_two_low_roots(allocator: &mut PageAllocator) {
         fatal_kernel_error("m9 page zero mapped");
     }
 
-    let lapic = VirtAddr::new(LAPIC_MMIO_VA);
-    let lapic_flags = leaf_page_flags_for_address_in_root(space_a.root_frame, lapic)
-        .unwrap_or_else(|_| fatal_kernel_error("m9 LAPIC leaf missing in process root"));
-    if lapic_flags.contains(PageTableFlags::USER_ACCESSIBLE) {
-        fatal_kernel_error("m9 LAPIC leaf is user accessible");
+    let lapic_identity =
+        leaf_page_flags_for_address_in_root(space_a.root_frame, VirtAddr::new(LAPIC_IDENTITY_VA));
+    if matches!(lapic_identity, Ok(flags) if flags.contains(PageTableFlags::PRESENT)) {
+        fatal_kernel_error("m9 LAPIC identity page mapped in process root");
     }
-    kernel_log_line("[M9.0] LAPIC leaf supervisor-only OK");
+    crate::mm::identity_holes::verify_identity_holes_in_root(space_a.root_frame)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
+    kernel_log_line("[M9.0] LAPIC identity window unmapped, alias mapped OK");
 
     destroy_process_address_space(&space_b, allocator)
         .unwrap_or_else(|_| fatal_kernel_error("m9 destroy b"));

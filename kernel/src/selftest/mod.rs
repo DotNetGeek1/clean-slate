@@ -14,6 +14,8 @@ pub(crate) mod m1_memory;
     feature = "m3-entry-self-test"
 ))]
 pub(crate) mod m2_double_fault;
+#[cfg(feature = "m2-identity-guard-self-test")]
+pub(crate) mod m2_identity_guard;
 // Always compiled: it owns the `no_mangle` `clean_slate_timer_self_test_task`
 // symbol that `arch::x86_64::asm` references unconditionally.
 #[cfg(any(

@@ -376,6 +376,7 @@ pub(crate) fn verify_carve_out_attach_at_boot(
         return Err("carve-out leaf physical address diverged from kernel root");
     }
     crate::mm::stack_guard::verify_guard_holes_in_root(space.root_frame)?;
+    crate::mm::identity_holes::verify_identity_holes_in_root(space.root_frame)?;
 
     destroy_process_address_space(&space, allocator)?;
     if allocator.stats().free_pages != free_before {

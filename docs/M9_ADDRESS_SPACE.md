@@ -61,9 +61,15 @@ while still running on the firmware CR3.
 - `reserve_mapping_page_tables` walks **current** (firmware) CR3 for kernel image
   and stack PT pages before the allocator starts.
 - GOP framebuffer: not referenced in kernel sources reviewed for this issue.
-- APIC (`arch/x86_64/apic.rs`): MMIO at `0xFEE0_0000` via physical address from
-  `IA32_APIC_BASE` MSR; requires supervisor mapping in kernel root (identity or
-  explicit MMIO map).
+- APIC (`arch/x86_64/apic.rs`): the physical base comes from the
+  `IA32_APIC_BASE` MSR. Since #253 the kernel reaches the registers only through
+  a 4 KiB uncached alias at `phys_to_virt(base)` (`0xffff_8000_fee0_0000` under
+  QEMU), mapped by `mm::identity_holes::arm_identity_holes`. The identity window
+  around the base (`[0xFEE0_0000, 0xFF00_0000)`) is not present in the kernel
+  root or any process root, so a stray store there faults and the page-fault
+  handler names it (`[FAIL] kernel page fault in identity hole=local-apic-window`).
+  Boot fails if the alias cannot be mapped, if the MSR base changes, or if the
+  page at the alias does not read back as an integrated local APIC.
 
 ## Kernel root inheritance and sanitisation
 
@@ -141,7 +147,10 @@ Process roots inherit kernel high-half mappings only; low canonical slots are
 wired by `attach_shared_carve_outs_to_process`, which installs **shared** leaf
 page tables for every registered kernel low carve-out (kernel image, MMIO, and
 similar). Per process, exactly `KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES = 3`
-private frames are allocated (PDPT + PD for GiB 0 + PD for LAPIC GiB 3).
+private frames are allocated (PDPT + PD for GiB 0 + PD for LAPIC GiB 3). The
+LAPIC carve-out stays registered so user mappings keep out of its 2 MiB window,
+but its shared table has no present leaf for the APIC page: shared tables are
+copied from the kernel root, which no longer maps it (#253).
 
 Directory entries on the attach path must **not** set `NO_EXECUTE`: on x86-64, NX
 on any non-leaf entry makes the whole subtree non-executable. PML4[0] and

@@ -17,6 +17,7 @@ use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use crate::guest_reboot::GuestRebootDetector;
 use crate::m7_fixture::{FixtureCounts, M7FixturePeer};
 use crate::serial_input_lane::{accept_serial, find, spawn_serial_reader, tail, SerialEvent};
 use crate::system_boot::{
@@ -540,6 +541,7 @@ fn drive(
     let _reader = spawn_serial_reader(stream, tx);
 
     let mut transcript = Vec::new();
+    let mut reboot_detector = GuestRebootDetector::default();
     let mut boundaries: Vec<Boundary> = Vec::new();
     let mut state: Option<(u64, Shell)> = None;
     let mut step_started = Instant::now();
@@ -575,6 +577,9 @@ fn drive(
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return fail(&transcript, "serial reader stopped".to_owned())
             }
+        }
+        if let Some(reboot) = reboot_detector.observe(&transcript) {
+            return fail(&transcript, reboot);
         }
         for forbidden in [&b"[FAIL]"[..], b"[INIT] gave up"] {
             if find(&transcript, forbidden).is_some() {
