@@ -126,9 +126,9 @@ mod tests {
                 assert!(lookup_handler(nr).is_none(), "nr {nr} must be unsupported");
             }
         }
-        #[cfg(feature = "m8-linux-image")]
+        #[cfg(clean_slate_linux_proc)]
         assert!(lookup_handler(231).is_some(), "exit_group owned by #102");
-        #[cfg(not(feature = "m8-linux-image"))]
+        #[cfg(not(clean_slate_linux_proc))]
         assert!(
             lookup_handler(231).is_none(),
             "exit_group must be unsupported"

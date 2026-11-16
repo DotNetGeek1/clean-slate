@@ -491,7 +491,7 @@ Production `teardown_current_process` / `teardown_process_by_id` call `release_f
 
 ## Serial console input (#218 S4)
 
-COM1 receive feeds a canonical-mode line discipline (`kernel/src/device/serial_console/`) that a future fd 0 reads. The receiver is compiled only with the `clean_slate_serial_console` cfg (today only `serial-input-self-test`) and is off until `serial_console::enable()` runs; every other build leaves IER at 0 and never echoes.
+COM1 receive feeds a canonical-mode line discipline (`kernel/src/device/serial_console/`) that fd 0 of the serial-console shell reads (see [Serial-console stdin](#serial-console-stdin-218-s5)). The receiver is compiled only with the `clean_slate_serial_console` cfg (the default image and `serial-input-self-test`) and is off until `serial_console::enable()` runs; every other build leaves IER at 0 and never echoes. The default image turns it on at boot, before init runs (`[KERN] serial console input on vector=N`).
 
 - **Printable ASCII** (`0x20`–`0x7E`) is echoed and appended to the edit line.
 - **CR or LF** commits the line with a trailing `\n` and echoes `\r\n`. A CR LF pair is two lines, the second empty.
@@ -504,6 +504,44 @@ COM1 receive feeds a canonical-mode line discipline (`kernel/src/device/serial_c
 - **UART errors.** A byte with a framing, parity or break error is discarded and counted. A receive overrun (bytes the 16-byte FIFO lost) is counted, since the bytes are already gone. One interrupt drains at most 16 bytes and re-arms IER if the UART still has an interrupt pending, so a stuck or flooding line cannot hold the CPU in the handler. Echo is written from the interrupt, at most three bytes per byte read, except that Ctrl-U on a full line echoes 768.
 - **Sharing COM1 with kernel output.** There is no lock. Every kernel write (`serial_write_fmt`, `serial_write_bytes`, the fatal and panic paths) emits its whole record with interrupts masked, and the receive interrupt runs with interrupts masked, so echo lands between records, never inside one, and nothing can deadlock on the port. Reading the line status on the transmit path clears the receive error bits; the transmit path hands them to the receive interrupt so the flagged byte is still discarded.
 - **Not supported:** raw or non-canonical mode, termios or `ioctl`, `VINTR`/`VQUIT`/`VSUSP` (Ctrl-C, Ctrl-\ and Ctrl-Z are ordinary dropped control bytes, not signals), job control, UTF-8 or other multibyte input, and output processing beyond the echo listed above.
+
+## Serial-console stdin (#218 S5)
+
+In the default image the system manifest's shell row (`SYSTEM_SHELL_SPEC`, service 0x5400, image `LinuxShell`) starts BusyBox as `/bin/sh -i` with `PATH=/bin` once storage is ready. `kernel/src/service/system_shell.rs` launches it.
+
+**Authority.** The row's grants are `Console`, `ConsoleInput` and `TmpObjects`, and the Linux launcher applies them while it builds the process, before it can run:
+
+- `Console`: the console capability, installed as fd 1 and fd 2. The shell's prompt, its output and its commands' output go there.
+- `ConsoleInput`: fd 0, a read-only console-input description. This is the grant that makes the shell interactive; it requires `Console` in the same row, and the manifest refuses it anywhere else.
+- `TmpObjects`: read and write capabilities on the four `/tmp` backing objects (`0x4C0000`–`0x4C0003`), so `/tmp` is writable. Storage serves them.
+
+Being a Linux process adds the Linux personality (`linux=1`). It gets no network, no block device, no object-service role, no lifecycle control and no IPC endpoints. The launch-time authority audit counts all of this; the shell's line must read `console=1 tmp-objects=4 linux=1 console-input=1` with every other count 0, and `for_grants` derives that expectation from the row's image and grants as for every other row.
+
+**fd 0.** Only a launch whose row carries `ConsoleInput` installs it. Every other process, and every other build, keeps fd 0 closed as before. Writing to fd 0 is `EBADF`. `read(0)`:
+
+- copies committed bytes and stops after a `\n` (or at the end of a line committed with Ctrl-D), so one read returns at most one line;
+- with nothing committed, returns 0 once for a pending end-of-file (Ctrl-D on an empty line), and the next read blocks again;
+- with nothing committed and no end-of-file, returns `EAGAIN` on an `O_NONBLOCK` description, and otherwise blocks on `CONSOLE_INPUT_KEY` and restarts the syscall when the receive interrupt commits a line or records an end-of-file.
+
+Syscalls run with interrupts masked: `IA32_FMASK` is written with `SYSCALL_ENTRY_RFLAGS_MASK`, which includes IF (`kernel/src/syscall/mod.rs`), the host test in `syscall/validation.rs` pins that, and the syscall path contains no `sti`. The receive interrupt therefore cannot commit a line between a reader's empty check and its waiter registration, so no wake is lost.
+
+`poll` reports fd 0 readable while a read would not block, and never writable. A `poll` that waits on fd 0 records a producer interest; after every commit or end-of-file the receive interrupt calls the input notifier, which wakes every poller with an interest in console input. If the interest table is full, a poll that includes console input returns `ENOMEM` instead of sleeping through input it could never be woken for.
+
+**Waiting cannot exhaust a kernel table.** A blocked `read(0)` takes one waiter slot, and the waiter table has one slot per scheduler thread (`MAX_WAITERS` is defined as `TASK_COUNT` in `sched/wait.rs`) and a blocked thread waits on one key at a time, so no number of blocked readers can fill it. The poll interest table is shared and fixed (16 entries, at most 8 fds per `poll`); a full table is `ENOMEM` for the caller, never a kernel error.
+
+**Children.** `fork` copies the fd table, so commands the shell runs inherit fd 0 (and fd 1, fd 2 and the `/tmp` capabilities); `exec` keeps it. A pipeline's `dup2` replaces fd 0 with the pipe in the reading command. The authority audit runs once, when the service instance is launched, so children are not audited; they hold no more than the shell did.
+
+**Readiness and restart.** The kernel reports the shell ready (`[SVC ] ready service=21504 … kernel-observed first-console-input-wait`) the first time the live instance blocks reading fd 0, which is after it printed its prompt. Linux `exit` and `exit_group` publish the exit of a live service instance to the lifecycle controller before teardown, as a CPL3 fault already did; a refused publication is fatal. Init restarts the shell after every exit, and gives up when three restarts in a row end before a ready report (`RestartSpec::OnExitUntilUnready`). Details and the values in use are in [DEVELOPMENT.md](DEVELOPMENT.md#the-serial-console-shell).
+
+**Limits.**
+
+- Ctrl-C, Ctrl-Z and Ctrl-\ are dropped control bytes, and signals are stored but never delivered, so nothing can interrupt a command.
+- All processes holding fd 0 read one input stream; each committed line goes to whichever reader takes it first.
+- `ioctl` returns `ENOTTY` for every request on every open fd, so no program sees a terminal and ash runs without line editing or history.
+- There is no job control. This BusyBox has no `jobs`, `fg` or `bg`, and a background command fails because ash opens `/dev/null` for its stdin and there is no `/dev`.
+- The prompt is `# `. A fresh shell prints it just before its banner, so the first prompt of each instance is not on the last line.
+- Output is not translated: the guest writes `\n`, and the host terminal or QEMU's stdio backend moves to the start of the line.
+- Escape sequences from arrow and function keys are not recognised: the ESC byte is dropped and the printable rest enters the line.
 
 ## M8.4 — write and exit (#94)
 

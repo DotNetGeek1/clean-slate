@@ -98,7 +98,7 @@ pub(super) fn activate_user_slot(slot: usize) {
 }
 
 /// `fork(2)`: the child resumes with the parent's register state at the syscall.
-#[cfg(feature = "m8-linux-image")]
+#[cfg(clean_slate_linux_proc)]
 pub(crate) fn inherit_for_fork(parent_slot: usize, child_slot: usize) {
     let fpu = state();
     if fpu.owner == Some(parent_slot) {

@@ -91,3 +91,5 @@ pub const STORAGE_UNAUTHORIZED_SERVICE_ID: ServiceId = ServiceId(0x0000_5101);
 pub const NETWORK_SERVICE_ID: ServiceId = ServiceId(0x0000_5200);
 /// Unrelated process used by M7 denial tests.
 pub const NETWORK_UNAUTHORIZED_SERVICE_ID: ServiceId = ServiceId(0x0000_5201);
+/// Stable logical identity for the interactive serial-console shell (#218 S5).
+pub const SYSTEM_SHELL_SERVICE_ID: ServiceId = ServiceId(0x0000_5400);

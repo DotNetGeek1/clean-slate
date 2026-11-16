@@ -163,8 +163,8 @@ pub(crate) fn spawn_linux_userspace_process_with_code(
     if let Some(process) = unsafe { process_registry_mut().get_mut(spawned.process_id) } {
         process.execution_personality = ExecutionPersonality::LinuxX86_64;
     }
-    // Exit publication (m8-linux-image) retires the proc-table slot and halts without one.
-    #[cfg(feature = "m8-linux-image")]
+    // Exit publication (`clean_slate_linux_proc`) retires the proc-table slot and halts without one.
+    #[cfg(clean_slate_linux_proc)]
     {
         let generation = crate::process::live_instance_generation(spawned.process_id)
             .ok_or("linux spawn missing instance generation")?;

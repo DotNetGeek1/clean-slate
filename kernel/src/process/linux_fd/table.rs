@@ -8,6 +8,8 @@ use clean_slate_linux_abi::{LinuxErrno, EBADF, EMFILE};
 /// Per-process fd table size (highest observed fd 11 + headroom for dup2 tests).
 pub(crate) const LINUX_FD_TABLE_CAPACITY: usize = 16;
 
+/// Linux stdin (fd 0).
+pub(crate) const LINUX_STDIN_FD: u64 = 0;
 /// Linux stdout (fd 1).
 pub(crate) const LINUX_STDOUT_FD: u64 = 1;
 /// Linux stderr (fd 2).
@@ -200,4 +202,20 @@ pub(crate) fn install_stdio_entries(
         flags: FdFlags::default(),
     });
     Ok(())
+}
+
+/// Installs a new read-only console-input description at fd 0. Fails with nothing allocated
+/// when fd 0 is already open or the pool is full.
+pub(crate) fn install_console_input_entry(
+    table: &mut LinuxFdTable,
+    pool: &mut OpenDescriptionPool,
+    pid: u64,
+) -> Result<(), LinuxErrno> {
+    if table.get(LINUX_STDIN_FD).is_some() {
+        return Err(EMFILE);
+    }
+    let open = pool.alloc_console_input(pid)?;
+    table
+        .set_at(pool, LINUX_STDIN_FD, open, FdFlags::default())
+        .inspect_err(|_| pool.free_unattached(open))
 }

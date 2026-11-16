@@ -1,10 +1,10 @@
 //! Bounded copy-in from userspace for Linux personality handlers.
 
 use crate::mm::user_mapping::validate_user_pointer_range;
-#[cfg(feature = "m9-rootfs")]
+#[cfg(clean_slate_linux_rootfs)]
 use crate::process::linux_fs::path::LINUX_PATH_MAX;
 use clean_slate_linux_abi::{LinuxErrno, EFAULT};
-#[cfg(feature = "m9-rootfs")]
+#[cfg(clean_slate_linux_rootfs)]
 use clean_slate_linux_abi::{EINVAL, ENAMETOOLONG};
 use core::ptr;
 
@@ -55,7 +55,7 @@ pub(crate) fn copy_user_bytes(
 ///
 /// Returns the byte length excluding the terminator. Empty paths are `EINVAL`.
 /// If no NUL appears within `LINUX_PATH_MAX` bytes, returns `ENAMETOOLONG`.
-#[cfg(feature = "m9-rootfs")]
+#[cfg(clean_slate_linux_rootfs)]
 pub(crate) fn copy_user_path_cstring(
     user_ptr: u64,
     out: &mut [u8; LINUX_PATH_MAX],
@@ -125,7 +125,7 @@ mod tests {
         assert_eq!(copy_user_bytes(u64::MAX - 16, 8, &mut buf), Err(EFAULT));
     }
 
-    #[cfg(feature = "m9-rootfs")]
+    #[cfg(clean_slate_linux_rootfs)]
     /// Regression for #107 `ls /` → ENAMETOOLONG: the old `copy_path_from_user`
     /// used 64-byte `copy_user_bytes` chunks. A short NUL-terminated path at a
     /// page boundary is only a few mapped bytes; validating 64 bytes at once

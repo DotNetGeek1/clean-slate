@@ -7,7 +7,7 @@
 
 use crate::{
     NETWORK_SERVICE_ID, NETWORK_SERVICE_MODE_ACCEPTANCE, STORAGE_SERVICE_ID,
-    STORAGE_SERVICE_MODE_OBJECT_SERVICE,
+    STORAGE_SERVICE_MODE_OBJECT_SERVICE, SYSTEM_SHELL_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::ServiceId;
 
@@ -29,16 +29,40 @@ pub enum ServiceImage {
     M6Fixture,
     /// Frozen M8 Linux hello fixture.
     LinuxHello,
+    /// BusyBox `ash` from the embedded rootfs, run as `/bin/sh -i` with `PATH=/bin`.
+    LinuxShell,
     Compositor,
     DesktopShell,
     Playground,
 }
 
+impl ServiceImage {
+    /// Whether the image runs under the Linux personality rather than the native ABI.
+    pub const fn is_linux(self) -> bool {
+        match self {
+            Self::LinuxHello | Self::LinuxShell => true,
+            Self::Storage
+            | Self::Network
+            | Self::ImmediateExit
+            | Self::M3UserTest
+            | Self::CrashService
+            | Self::M6Fixture
+            | Self::Compositor
+            | Self::DesktopShell
+            | Self::Playground => false,
+        }
+    }
+}
+
 /// Kernel authority applied to a service instance when its row is started.
 ///
 /// Only grants the kernel can apply at service launch today are listed. `NetworkClient`,
-/// `TmpObjects`, `Console`, `ConsoleInput`, `GraphicsPort` and `GraphicsRole` are added by the
-/// stages that give the kernel a launch-time path for them.
+/// `GraphicsPort` and `GraphicsRole` are added by the stages that give the kernel a launch-time
+/// path for them.
+///
+/// `Console`, `ConsoleInput` and `TmpObjects` are Linux-personality grants: the kernel applies
+/// them while it builds the Linux process, so only a [`ServiceImage::LinuxShell`] row may hold
+/// them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Grant {
     /// The storage block device (`STORAGE_BLOCK_DEVICE_ID`).
@@ -48,6 +72,13 @@ pub enum Grant {
     ObjectServiceRole,
     /// Network-service authority over the network device, plus net-bridge registration.
     NetworkService,
+    /// One console capability, installed as fd 1 (stdout) and fd 2 (stderr).
+    Console,
+    /// Serial console input, installed as fd 0 (stdin). Requires `Console` earlier in the row,
+    /// because fd 0 is added to the fd table `Console` creates.
+    ConsoleInput,
+    /// `READ | WRITE` on every `/tmp` backing object, so `/tmp` is writable.
+    TmpObjects,
 }
 
 /// What init does when a started service exits or faults. Init counts ticks in monotonic
@@ -57,6 +88,14 @@ pub enum Grant {
 pub enum RestartSpec {
     Never,
     OnFailure {
+        max_attempts: u32,
+        backoff_base_ticks: u64,
+        initial_delay_ticks: u64,
+    },
+    /// As `OnFailure`, but every exit is followed by a restart, and the retry count goes back to
+    /// zero each time an instance reports ready. `max_attempts` therefore bounds consecutive
+    /// instances that exit or fault before reporting ready.
+    OnExitUntilUnready {
         max_attempts: u32,
         backoff_base_ticks: u64,
         initial_delay_ticks: u64,
@@ -119,7 +158,31 @@ pub const NETWORK_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     depends_on: &[STORAGE_SERVICE_ID],
 };
 
-pub const SYSTEM_MANIFEST: &[ServiceSpec] = &[STORAGE_SERVICE_SPEC, NETWORK_SERVICE_SPEC];
+/// Provisional (#218 S5): a shell that exits (`exit`, Ctrl-D) is started again 0.5 s later. At
+/// most three restarts run without a ready report (first read of stdin) in between, after 0.5 s,
+/// 1.5 s and 2.5 s; if the third restarted shell also exits before reporting ready, init gives up.
+const SHELL_RESTART: RestartSpec = RestartSpec::OnExitUntilUnready {
+    max_attempts: 3,
+    backoff_base_ticks: NANOS_PER_SECOND,
+    initial_delay_ticks: NANOS_PER_SECOND / 2,
+};
+
+/// The interactive BusyBox shell on the serial console. Its `/tmp` is backed by storage objects,
+/// so init starts it only once storage is ready; it does not wait for the network.
+pub const SYSTEM_SHELL_SPEC: ServiceSpec = ServiceSpec {
+    id: SYSTEM_SHELL_SERVICE_ID,
+    image: ServiceImage::LinuxShell,
+    mode: 0,
+    grants: &[Grant::Console, Grant::ConsoleInput, Grant::TmpObjects],
+    restart: SHELL_RESTART,
+    depends_on: &[STORAGE_SERVICE_ID],
+};
+
+pub const SYSTEM_MANIFEST: &[ServiceSpec] = &[
+    STORAGE_SERVICE_SPEC,
+    NETWORK_SERVICE_SPEC,
+    SYSTEM_SHELL_SPEC,
+];
 
 const _: () = assert!(validate_manifest(SYSTEM_MANIFEST).is_ok());
 
@@ -166,6 +229,10 @@ pub enum ManifestError {
     DependencyNotEarlier {
         row: usize,
     },
+    /// `Grant::ConsoleInput` without `Grant::Console` before it.
+    ConsoleInputWithoutConsole {
+        row: usize,
+    },
 }
 
 /// Checks the invariants the kernel and init rely on. Kernel scenario manifests call this in a
@@ -193,10 +260,13 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
                 }
                 other += 1;
             }
-            if matches!(spec.grants[grant], Grant::ObjectServiceRole)
-                && !matches!(spec.image, ServiceImage::Storage)
-            {
+            if !grant_supported_by_image(spec.grants[grant], spec.image) {
                 return Err(ManifestError::GrantNotSupportedByImage { row });
+            }
+            if matches!(spec.grants[grant], Grant::ConsoleInput)
+                && !grants_before(spec.grants, grant, Grant::Console)
+            {
+                return Err(ManifestError::ConsoleInputWithoutConsole { row });
             }
             grant += 1;
         }
@@ -226,6 +296,29 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
     Ok(())
 }
 
+/// Linux-personality grants go only to Linux rows, and Linux rows hold nothing else: the native
+/// grants are applied through the native bootstrap page or service registration.
+const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
+    match grant {
+        Grant::ObjectServiceRole => matches!(image, ServiceImage::Storage),
+        Grant::BlockDevice | Grant::NetworkService => !matches!(image, ServiceImage::LinuxShell),
+        Grant::Console | Grant::ConsoleInput | Grant::TmpObjects => {
+            matches!(image, ServiceImage::LinuxShell)
+        }
+    }
+}
+
+const fn grants_before(grants: &[Grant], end: usize, wanted: Grant) -> bool {
+    let mut index = 0;
+    while index < end {
+        if grants[index] as u8 == wanted as u8 {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,10 +336,97 @@ mod tests {
     }
 
     #[test]
-    fn system_manifest_declares_storage_then_network() {
+    fn system_manifest_declares_storage_network_then_shell() {
         let ids: Vec<u32> = SYSTEM_MANIFEST.iter().map(|spec| spec.id.0).collect();
-        assert_eq!(ids, [0x5100, 0x5200]);
+        assert_eq!(ids, [0x5100, 0x5200, 0x5400]);
         assert_eq!(validate_manifest(SYSTEM_MANIFEST), Ok(()));
+    }
+
+    #[test]
+    fn shell_row_holds_console_stdin_and_tmp_only_and_waits_for_storage() {
+        let shell = find_service(SYSTEM_MANIFEST, SYSTEM_SHELL_SERVICE_ID).unwrap();
+        assert_eq!(shell.image, ServiceImage::LinuxShell);
+        assert_eq!(shell.mode, 0);
+        assert_eq!(
+            shell.grants,
+            [Grant::Console, Grant::ConsoleInput, Grant::TmpObjects]
+        );
+        assert_eq!(shell.depends_on, [STORAGE_SERVICE_ID]);
+        assert_eq!(
+            shell.restart,
+            RestartSpec::OnExitUntilUnready {
+                max_attempts: 3,
+                backoff_base_ticks: 1_000_000_000,
+                initial_delay_ticks: 500_000_000,
+            }
+        );
+    }
+
+    #[test]
+    fn validation_rejects_linux_grants_outside_linux_rows() {
+        for grants in [&[Grant::Console] as &'static [Grant], &[Grant::TmpObjects]] {
+            let rows = [row(7, ServiceImage::Network, grants)];
+            assert_eq!(
+                validate_manifest(&rows),
+                Err(ManifestError::GrantNotSupportedByImage { row: 0 })
+            );
+        }
+        let stdin = [row(
+            7,
+            ServiceImage::Storage,
+            &[Grant::Console, Grant::ConsoleInput],
+        )];
+        assert_eq!(
+            validate_manifest(&stdin),
+            Err(ManifestError::GrantNotSupportedByImage { row: 0 })
+        );
+    }
+
+    #[test]
+    fn validation_rejects_native_grants_on_linux_rows() {
+        for grants in [
+            &[Grant::BlockDevice] as &'static [Grant],
+            &[Grant::NetworkService],
+            &[Grant::ObjectServiceRole],
+        ] {
+            let rows = [row(7, ServiceImage::LinuxShell, grants)];
+            assert_eq!(
+                validate_manifest(&rows),
+                Err(ManifestError::GrantNotSupportedByImage { row: 0 })
+            );
+        }
+    }
+
+    #[test]
+    fn validation_requires_console_before_console_input() {
+        let missing = [row(7, ServiceImage::LinuxShell, &[Grant::ConsoleInput])];
+        assert_eq!(
+            validate_manifest(&missing),
+            Err(ManifestError::ConsoleInputWithoutConsole { row: 0 })
+        );
+        let reversed = [row(
+            7,
+            ServiceImage::LinuxShell,
+            &[Grant::ConsoleInput, Grant::Console],
+        )];
+        assert_eq!(
+            validate_manifest(&reversed),
+            Err(ManifestError::ConsoleInputWithoutConsole { row: 0 })
+        );
+        let ordered = [row(
+            7,
+            ServiceImage::LinuxShell,
+            &[Grant::Console, Grant::ConsoleInput],
+        )];
+        assert_eq!(validate_manifest(&ordered), Ok(()));
+    }
+
+    #[test]
+    fn only_the_linux_images_are_linux() {
+        assert!(ServiceImage::LinuxShell.is_linux());
+        assert!(ServiceImage::LinuxHello.is_linux());
+        assert!(!ServiceImage::Storage.is_linux());
+        assert!(!ServiceImage::Network.is_linux());
     }
 
     #[test]
@@ -268,8 +448,8 @@ mod tests {
     }
 
     #[test]
-    fn system_rows_restart_three_times_two_seconds_apart() {
-        for spec in SYSTEM_MANIFEST {
+    fn native_system_rows_restart_three_times_two_seconds_apart() {
+        for spec in [STORAGE_SERVICE_SPEC, NETWORK_SERVICE_SPEC] {
             assert_eq!(
                 spec.restart,
                 RestartSpec::OnFailure {

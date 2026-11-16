@@ -9,7 +9,11 @@
     allow(dead_code)
 )]
 
+#[cfg(clean_slate_serial_console)]
+use crate::process::linux_fd::open_description::DescriptorKind;
 use crate::process::linux_fd::open_description::OpenDescriptionId;
+#[cfg(clean_slate_system_init)]
+use crate::sched::wait::wake_all_registered;
 use crate::sched::wait::{wake_all, WaitKey};
 use crate::sync::global_cell::GlobalCell;
 
@@ -88,6 +92,28 @@ pub(crate) fn clear_poll_interest_for_pid(pid: u64) {
 
 pub(crate) fn wake_poll_waiters_for_pid(pid: u64) -> usize {
     wake_all(poll_wait_key(pid))
+}
+
+/// Whether `desc` is a live serial console input description.
+#[cfg(clean_slate_serial_console)]
+pub(crate) fn is_console_input(desc: OpenDescriptionId) -> bool {
+    crate::process::linux_fd::open_description_snapshot(desc)
+        .is_ok_and(|snapshot| snapshot.kind == DescriptorKind::ConsoleInput)
+}
+
+/// The serial console's input notifier: wakes every `poll` with a console-input fd in its
+/// interest set. Runs in the receive interrupt or in a reader's syscall, interrupts masked; the
+/// interest table and fd registry are only changed by syscalls, which run masked too.
+/// `poll` registers its waiter after the readiness check under the same mask, so a waiter
+/// absent here has not checked yet; no pending wake is recorded.
+#[cfg(clean_slate_system_init)]
+pub(crate) fn wake_console_input_pollers() {
+    let table = unsafe { &*INTEREST.get() };
+    for entry in table.entries.iter().flatten() {
+        if is_console_input(entry.desc) {
+            wake_all_registered(poll_wait_key(entry.pid));
+        }
+    }
 }
 
 #[allow(dead_code)]

@@ -233,7 +233,7 @@ pub(crate) fn holder_has_resource_rights(
     })
 }
 
-#[cfg(feature = "m8-linux-image")]
+#[cfg(clean_slate_linux_proc)]
 pub(crate) fn inherit_capabilities_for_fork(
     parent: HolderId,
     child: HolderId,
@@ -274,7 +274,7 @@ pub(crate) fn inherit_capabilities_for_fork(
     Ok(())
 }
 
-#[cfg(feature = "m8-linux-image")]
+#[cfg(clean_slate_linux_proc)]
 fn rollback_fork_inherited(handles: &[Option<CapabilityHandle>]) {
     let table = unsafe { capability_space_mut() };
     for handle in handles.iter().flatten() {

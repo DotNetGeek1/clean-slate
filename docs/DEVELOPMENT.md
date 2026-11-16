@@ -40,39 +40,67 @@ cargo xtask run
 
 This command:
 
-1. builds the release storage, network and init programs and the Rust `#![no_std]` UEFI kernel with no Cargo feature (the default image), which embeds them;
+1. builds the release storage, network and init programs and the Rust `#![no_std]` UEFI kernel with no Cargo feature (the default image), which embeds them and the frozen BusyBox root filesystem;
 2. creates an EFI boot directory at `target/esp/EFI/BOOT/BOOTX64.EFI`;
 3. creates `target/system-data.img` (64 MiB, zeroed) if it does not exist and attaches it as the data disk on every run (`cargo clean` deletes it);
 4. launches QEMU with OVMF firmware and `-cpu qemu64,+rdrand`;
-5. connects serial output to the host terminal for a normal interactive boot.
+5. connects COM1 to the host terminal both ways (`-serial stdio`): kernel and shell output appear in the terminal, and what you type goes to the shell on the serial console.
 
 `cargo xtask run --net` also starts the network fixture peer and gives the guest a VirtIO network device connected to it; without `--net` there is no network device. `cargo xtask run-gdb` and `run-gdb-entry` attach the same data disk and take no options.
 
-In the default image the kernel launches userspace init instead of the two kernel demo threads. On a disk that is already formatted, the kernel's `[SVC ]`/`[KERN]` lines and init's `[INIT]` lines of a boot read as follows; other kernel diagnostics (`[TIME]`, `[BLK ]`, `[CAP ]`, `[NET ]`) and the supervisor library's own `[SUP ]`, `[HLTH]` and `[DEP ]` lines from init are interleaved with them. Init may announce storage ready just before or just after starting network, depending on when it picks up storage's ready message.
+In the default image the kernel launches userspace init instead of the two kernel demo threads. On a disk that is already formatted, the kernel's `[SVC ]`/`[KERN]` lines, init's `[INIT]` lines and the shell's first output of a boot read as follows; other kernel diagnostics (`[TIME]`, `[BLK ]`, `[CAP ]`, `[NET ]`, `[LNX ]`) and the supervisor library's own `[SUP ]`, `[HLTH]` and `[DEP ]` lines from init are interleaved with them. Init may announce storage ready just before or just after starting network, and network and the shell start together, so their lines interleave in an order that depends on timing.
 
 ```text
 [SVC ] declared service=20736
 [SVC ] declared service=20992
-[KERN] init launched pid=1 slot=0 declared-services=2
-[KERN] init authority pid=1 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 expected-only-lifecycle-and-console=1
+[SVC ] declared service=21504
+[KERN] serial console input on vector=49
+[KERN] init launched pid=1 slot=0 declared-services=3
+[KERN] init authority pid=1 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1
 [KERN] scheduler initialized
-[IPC ] console pid=1: [INIT] started pid=1 services=2
+[IPC ] console pid=1: [INIT] started pid=1 services=3
 [IPC ] console pid=1: [INIT] SERVICE_READY from init refused: not a service
 [IPC ] console pid=1: [INIT] starting service=20736
-[SVC ] authority service=20736 pid=2 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 matches-manifest=1
+[SVC ] authority service=20736 pid=2 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1
 [SVC ] launch service=20736 pid=2 gen=1
 [SVC ] ready service=20736 pid=2 gen=1 source=live-instance kernel-observed block-write-requests=0 service-reported formatted=0 store-generation=0
 [IPC ] console pid=1: [INIT] service=20736 ready gen=1
 [IPC ] console pid=1: [INIT] service=20736 ready; starting service=20992
-[SVC ] authority service=20992 pid=3 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 matches-manifest=1
+[SVC ] authority service=20992 pid=3 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1
 [SVC ] launch service=20992 pid=3 gen=1
+[IPC ] console pid=1: [INIT] service=20736 ready; starting service=21504
+[SVC ] shell process pid=4 gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1
+[SVC ] console input so far lines=0 eofs=0 deferred=0 edit-overflow=0 refused=0 eof-dropped=0 control-dropped=0 irqs=0 spurious=0 bytes=0 max-drained=0 overruns=0 line-errors=0 rearms=0 stale=0 wakes=0 woken=0 committed=0 deferred-line=0
+[SVC ] authority service=21504 pid=4 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1
+[SVC ] launch service=21504 pid=4 gen=1
 [SVC ] ready service=20992 pid=3 gen=1 source=live-instance kernel-observed raw-backend=loopback service-reported link-up=1
 [IPC ] console pid=1: [INIT] service=20992 ready gen=1
-[IPC ] console pid=1: [INIT] boot settled running=2 down=0; waiting, no deadline
+
+
+# BusyBox v1.37.0 (2026-09-23 09:18:28 UTC) built-in shell (ash)
+
+[SVC ] ready service=21504 pid=4 gen=1 source=live-instance kernel-observed first-console-input-wait
+[IPC ] console pid=1: [INIT] service=21504 ready gen=1
+[IPC ] console pid=1: [INIT] boot settled running=3 down=0; waiting, no deadline
 [KERN] idle thread halted 16 times in a row while init pid=1 waited in LIFECYCLE_WAIT with no deadline
 ```
 
-Service 20736 (0x5100) is storage and 20992 (0x5200) is network. `[KERN]` and `[SVC ]` lines are the kernel's; `[INIT]` lines are init's own console messages, which the kernel prefixes with the sending pid. The `authority` lines are the kernel's count, taken at launch before the process runs, of everything the pid holds: capabilities by class (`other` is any class besides lifecycle control, console, block device, object-service role and network), then the per-process tables outside the capability space (IPC endpoints it owns, service ports and port connections, the display presenter and input consumer bindings, shared-buffer mappings, work sets, the net bridge's raw-link binding, and a Linux personality). In `ready` lines, the fields after `kernel-observed` are counted by the kernel and the fields after `service-reported` are the service's unverified claim. On the first boot of a new disk storage reports `formatted=1`. Without `--net` the network service runs on the kernel's loopback raw link (`raw-backend=loopback`), whose link is always up; with `--net` it is `raw-backend=virtio`. Which builds launch init is one rule, `kernel/build_support/system_init_rule.rs`: init launches exactly when no Cargo feature other than `gdb-entry` is enabled, and every other build that reaches the end of boot runs the demo threads. Init's death is fatal (`[KERN] init pid=N died: …`, then `[FAIL]`). Init's start order and restart policy (storage, then network once storage is ready; up to three restarts per service, the first after 2 s and each later one 2 s further apart) are in `supervisor/src/system_init.rs` and the system manifest (`service-fixtures/src/manifest.rs`).
+Service 20736 (0x5100) is storage, 20992 (0x5200) is network and 21504 (0x5400) is the serial-console shell. `[KERN]` and `[SVC ]` lines are the kernel's; `[INIT]` lines are init's own console messages, which the kernel prefixes with the sending pid. The `authority` lines are the kernel's count, taken at launch before the process runs, of everything the pid holds: capabilities by class (`other` is any class besides lifecycle control, console, block device, object-service role and network), then the per-process tables outside the capability space (IPC endpoints it owns, service ports and port connections, the display presenter and input consumer bindings, shared-buffer mappings, work sets, the net bridge's raw-link binding, a Linux personality, and Linux stdin on the serial console). `tmp-objects` counts the capabilities on the four `/tmp` backing objects. In `ready` lines, the fields after `kernel-observed` are counted by the kernel and the fields after `service-reported` are the service's unverified claim. On the first boot of a new disk storage reports `formatted=1`. Without `--net` the network service runs on the kernel's loopback raw link (`raw-backend=loopback`), whose link is always up; with `--net` it is `raw-backend=virtio`. Which builds launch init is one rule, `kernel/build_support/system_init_rule.rs`: init launches exactly when no Cargo feature other than `gdb-entry` is enabled, and every other build that reaches the end of boot runs the demo threads. Init's death is fatal (`[KERN] init pid=N died: …`, then `[FAIL]`). Init's start order and restart policy (storage first; network and the shell once storage is ready; up to three restarts for storage and network, the first after 2 s and each later one 2 s further apart; the shell's policy is described below) are in `supervisor/src/system_init.rs` and the system manifest (`service-fixtures/src/manifest.rs`).
+
+#### The serial-console shell
+
+The boot ends at BusyBox `ash`, run as `/bin/sh -i` with `PATH=/bin` from the frozen root filesystem, reading the serial console. Type into the terminal that ran `cargo xtask run`. The kernel echoes what you type, Enter runs the line, and Backspace erases. A shell started fresh prints its `# ` prompt just before its banner (`BusyBox v1.37.0 ... built-in shell (ash)`), and the kernel and init lines that follow land after it, so the cursor ends on an empty line; type anyway, or press Enter for a fresh prompt. Kernel lines (`[LNX ] exit pid=N status=0` after each command, for example) keep appearing among the shell's output. `/bin` holds `busybox`, `cat`, `echo`, `env`, `grep`, `ls`, `mkdir`, `nslookup`, `printf`, `pwd`, `sh`, `sleep`, `true`, `uname` and `wget`; `/tmp` is writable, backed by storage objects, and keeps its files across shell restarts but not across reboots. `exit` and Ctrl-D end only the shell. On Windows, QEMU's stdio backend hands Ctrl-C to the guest, so stop QEMU with Ctrl-Break or by closing the terminal; on Linux the backend keeps terminal signals, so Ctrl-C stops QEMU.
+
+`exit` or Ctrl-D on an empty line ends the shell; init starts a new one (one service generation on) 0.5 s later. Init restarts the shell at most three times without a ready report in between, 0.5 s, 1.5 s and 2.5 s after each exit; a shell is ready once it first waits for input at its prompt. If the third restarted shell also ends before its prompt, init prints `[INIT] gave up service=21504 restarts=3; init carries on` and the system runs on without a shell. Every ready report resets the count, so `exit` can be used any number of times. These values are provisional. Init prints `[INIT] boot settled running=3 down=0; waiting, no deadline` again after every restart.
+
+Limits:
+
+- Ctrl-C cannot interrupt a command. The line discipline drops it as an ordinary control byte, and Linux signals are stored but never delivered, so `sleep 100` or a `cat` waiting for input holds the shell until it ends (Ctrl-D on an empty line ends `cat`). Ctrl-Z and Ctrl-\ are dropped the same way.
+- There is no job control: this BusyBox has no `jobs`, `fg` or `bg`, and `cmd &` fails with `/bin/sh: can't open '/dev/null'`, because ash points a background command's stdin at `/dev/null` and the root filesystem has no `/dev`.
+- Every process holding fd 0 reads the same input, and each line goes to whichever reader takes it first. Commands the shell starts inherit fd 0; that is how `cat` with no arguments reads what you type.
+- `ioctl` on any open fd returns `ENOTTY`, so programs see no terminal: no termios, no window size, no raw mode. `ash` therefore has no history or cursor editing; only the kernel's Backspace, Delete and Ctrl-U editing applies.
+- Arrow and function keys send escape sequences: the line discipline drops the ESC byte but keeps the printable rest, so an arrow key puts `[A`, `[C` and so on into the line. Erase them with Backspace.
+- The prompt is always `# `. Output goes to the serial console unchanged, with no LF-to-CRLF translation by the guest; the Windows console and QEMU's stdio backend on Linux return the cursor to the start of the line themselves.
 
 For the bounded M1 memory acceptance path:
 
@@ -331,7 +359,15 @@ cargo test -p clean-slate-supervisor
 cargo xtask test-system-boot
 ```
 
-`test-system-boot` (alias `system-boot`) builds the default image (no Cargo feature) and boots it twice on a data disk of its own, `target/system-boot/system-data.img`, which it deletes and recreates first, with the network fixture peer attached. Each boot must print, in order, the kernel's init launch and authority lines, init's start and its refused `SERVICE_READY`, the authority, launch and ready lines of storage (0x5100) and then network (0x5200), init's settled line and the kernel's idle line, as in the [first development loop](#first-development-loop) output. The host then checks that init holds lifecycle control and the console only, that every `[INIT]` line came through init's own console capability, that each service was launched once, held exactly its manifest row's grants, and reported ready from the pid and generation the kernel launched, and that storage reported `formatted=1` with at least one block write on the first boot and `formatted=0` on the second. Any `[FAIL]` line fails the lane. It prints `[SYS ] PASS`. It is a standalone constituent of the exhaustive suite, not part of a milestone gate.
+`test-system-boot` (alias `system-boot`) builds the default image (no Cargo feature) and boots it twice on a data disk of its own, `target/system-boot/system-data.img`, which it deletes and recreates first, with the network fixture peer attached. Each boot must print, in order, the kernel's serial-console line, the kernel's init launch and authority lines, init's start and its refused `SERVICE_READY`, the authority, launch and ready lines of storage (0x5100), network's (0x5200) authority and launch lines, then in either order the rest of network's lines and the shell's (0x5400) start, authority, launch and ready lines with init's announcements of both, then init's settled line (`running=3`) and the kernel's idle line, as in the [first development loop](#first-development-loop) output. The host then checks that init holds lifecycle control and the console only, that every `[INIT]` line came through init's own console capability, that each service was launched once, held exactly its manifest row's grants, and printed its authority, launch and ready lines in that order, with ready from the pid and generation the kernel launched, before init announced it, that the shell's authority line is exactly console, console input, four `/tmp` objects and the Linux personality, that its process line shows `/bin/sh -i`, `PATH=/bin`, stdin, stdout and `/tmp`, and that it became ready by blocking on stdin, and that storage reported `formatted=1` with at least one block write on the first boot and `formatted=0` on the second. Any `[FAIL]` line fails the lane. It prints `[SYS ] PASS`. It is a standalone constituent of the exhaustive suite, not part of a milestone gate.
+
+For #218 S5, the serial-console shell of the default image:
+
+```bash
+cargo xtask test-system-shell
+```
+
+`test-system-shell` (alias `system-shell`) builds the default image and boots it once on a fresh data disk of its own, `target/system-shell/system-data.img`, with the network fixture peer attached and COM1 on a private loopback socket, as in `test-serial-input` (QEMU's Windows stdio backend cannot take piped input). It waits for the shell's launch, authority, process and ready lines (exactly as `test-system-boot` checks them), a prompt between launch and ready, and init's announcement, then types, each once the step before it has finished: `echo hel''lo-shell`, `ls /bin`, `printf 'pipe-%s\n' yes no | grep yes`, `printf 'obj-%d\n' 7 > /tmp/a; cat /tmp/a`, `echo typo` with four Backspaces and `fix''ed`, `exit`, `echo aga''in; cat /tmp/a` and Ctrl-D. Every check is on output only execution produces, never on the echo of what was typed: `hello-shell`, `fixed` and `again` exist only after the shell removed the quotes or the line discipline erased `typo`, the 15 applet names must appear as consecutive lines in any order (this BusyBox's `ls` does not sort) and nothing else, `pipe-yes` must appear and `pipe-no` must not, `obj-7` must be read back with a kernel `[STOR] write object=` line for a `/tmp` object of 6 bytes, and each output must be followed by a prompt. Kernel log lines and blank lines between output lines are skipped. After `exit` and after Ctrl-D the lane requires `[LNX ] exit pid=<shell> status=0`, then a new launch one service generation on with a new pid, the same authority and process checks, a prompt and a ready report from that instance, and the next commands run in it; `cat /tmp/a` in the second shell shows `/tmp` outlived the first. A step that does not finish within 60 s, a `[FAIL]` line, `[INIT] gave up` or `[INIT] not starting` fails the lane, and the serial transcript is saved to `target/xtask-artifacts/system-shell/serial.log`. It prints `[SHL ] PASS`. It is a standalone constituent of the exhaustive suite.
 
 For M4.2 kernel lifecycle control (host tests + optional QEMU acceptance):
 

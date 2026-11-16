@@ -2,16 +2,16 @@
 
 #![allow(dead_code)]
 
-#[cfg(feature = "m8-linux-image")]
+#[cfg(clean_slate_linux_proc)]
 pub(crate) mod fault;
 pub(crate) mod pipe;
 pub(crate) mod table;
 
-#[cfg(feature = "m8-linux-image")]
+#[cfg(clean_slate_linux_proc)]
 pub(crate) mod exec_resolve;
-#[cfg(feature = "m8-linux-image")]
+#[cfg(clean_slate_linux_proc)]
 pub(crate) mod exit_publish;
-#[cfg(feature = "m8-linux-image")]
+#[cfg(clean_slate_linux_proc)]
 pub(crate) mod fork;
-#[cfg(feature = "m8-linux-image")]
+#[cfg(clean_slate_linux_proc)]
 pub(crate) mod wait;

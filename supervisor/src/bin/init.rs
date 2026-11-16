@@ -24,7 +24,7 @@ use clean_slate_supervisor::{
 const SYSCALL_NR_IPC_SEND: u64 = 3;
 /// The kernel refuses longer IPC messages.
 const IPC_MAX_MESSAGE_BYTES: usize = 64;
-/// Supervisor slots; the system manifest has two rows.
+/// Supervisor slots; the system manifest has three rows.
 const SERVICE_SLOTS: usize = 4;
 
 struct IpcConsoleSink {

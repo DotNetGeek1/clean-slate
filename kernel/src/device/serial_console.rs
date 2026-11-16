@@ -45,6 +45,37 @@ pub(crate) struct ConsoleStats {
     pub(crate) deferred_line: bool,
 }
 
+impl core::fmt::Display for ConsoleStats {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let (line, uart) = (self.line, self.uart);
+        write!(
+            f,
+            "lines={} eofs={} deferred={} edit-overflow={} refused={} eof-dropped={} control-dropped={} \
+             irqs={} spurious={} bytes={} max-drained={} overruns={} line-errors={} rearms={} stale={} \
+             wakes={} woken={} committed={} deferred-line={}",
+            line.lines,
+            line.eofs,
+            line.deferred,
+            line.edit_overflow,
+            line.dropped_while_deferred,
+            line.eof_dropped,
+            line.control_dropped,
+            uart.irqs,
+            uart.spurious,
+            uart.bytes,
+            uart.max_drained,
+            uart.overruns,
+            uart.line_errors,
+            uart.rearms,
+            uart.stale,
+            self.wakes,
+            self.woken,
+            self.committed,
+            u8::from(self.deferred_line),
+        )
+    }
+}
+
 struct ConsoleState {
     discipline: line_discipline::LineDiscipline,
     uart: UartStats,

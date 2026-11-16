@@ -60,6 +60,10 @@ pub(crate) struct SocketRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DescriptorKind {
     Console(ConsoleSinkRef),
+    /// Read-only serial console input (#218 S5): finished lines from the COM1 line
+    /// discipline. Installed at fd 0 only for a launch row with the `ConsoleInput` grant; the
+    /// fd is the only handle to it, as with a pipe end.
+    ConsoleInput,
     File(FileHandleRef),
     Dir(DirHandleRef),
     PipeRead(PipeRef),
@@ -178,6 +182,22 @@ impl OpenDescriptionPool {
             index: index as u16,
             generation,
         })
+    }
+
+    /// A read-only [`DescriptorKind::ConsoleInput`] description with no fd attached yet.
+    pub(crate) fn alloc_console_input(
+        &mut self,
+        owner_pid: u64,
+    ) -> Result<OpenDescriptionId, LinuxErrno> {
+        self.alloc_file_or_dir(
+            owner_pid,
+            DescriptorKind::ConsoleInput,
+            OpenStatus {
+                access: OpenAccess::ReadOnly,
+                nonblock: false,
+                append: false,
+            },
+        )
     }
 
     pub(crate) fn alloc_socket(

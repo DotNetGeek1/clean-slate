@@ -4,7 +4,7 @@ use super::table::LinuxSyscallHandler;
 
 /// Handlers owned by the process family, or `None` if `nr` is not ours.
 pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
-    #[cfg(feature = "m8-linux-image")]
+    #[cfg(clean_slate_linux_proc)]
     {
         return enabled::lookup(nr);
     }
@@ -15,7 +15,7 @@ pub(crate) fn lookup_handler(nr: u64) -> Option<LinuxSyscallHandler> {
     }
 }
 
-#[cfg(feature = "m8-linux-image")]
+#[cfg(clean_slate_linux_proc)]
 mod enabled {
     use super::super::exit::{exit_status_from_linux, switch_after_exit};
     use super::super::table::LinuxSyscallContext;
@@ -168,6 +168,8 @@ mod enabled {
         };
         kernel_log_fmt(format_args!("[LNX ] exit pid={pid} status={status}\n"));
         crate::process::linux_proc::exit_publish::publish_linux_exit(id, status as u32, true);
+        #[cfg(clean_slate_system_init)]
+        crate::service::system_shell::publish_linux_service_exit(pid);
         let allocator = service_lifecycle_syscall_allocator_mut()
             .as_mut()
             .unwrap_or_else(|| fatal_kernel_error("linux exit_group: allocator missing"));

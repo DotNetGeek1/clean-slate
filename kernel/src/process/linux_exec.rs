@@ -2,7 +2,7 @@
 
 #![cfg_attr(
     not(any(
-        feature = "m8-linux-image",
+        clean_slate_linux_proc,
         feature = "m8-linux-hello",
         feature = "m9-linux-exec-self-test",
         feature = "m9-low-va-self-test"
@@ -477,7 +477,7 @@ pub(crate) fn launch_linux_process_with_authority(
         )?;
     }
     if authority.tmp_objects {
-        #[cfg(feature = "m9-rootfs")]
+        #[cfg(clean_slate_linux_rootfs)]
         crate::process::linux_fs::grant_linux_tmp_object_capabilities(launched.pid).map_err(
             |_| LinuxImageError::Registry("linux launch: tmp object capability grant failed"),
         )?;

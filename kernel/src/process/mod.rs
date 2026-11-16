@@ -11,7 +11,7 @@ pub(crate) mod id_allocator;
 )))]
 pub(crate) mod linux_exec;
 pub(crate) mod linux_fd;
-#[cfg(feature = "m9-rootfs")]
+#[cfg(clean_slate_linux_rootfs)]
 pub(crate) mod linux_fs;
 pub(crate) mod linux_image;
 #[cfg(not(any(
@@ -21,7 +21,7 @@ pub(crate) mod linux_image;
 )))]
 pub(crate) mod linux_mem;
 pub(crate) mod linux_proc;
-#[cfg(feature = "m9-rootfs")]
+#[cfg(clean_slate_linux_rootfs)]
 pub(crate) mod linux_rootfs;
 #[cfg(not(any(
     feature = "m1-self-test",

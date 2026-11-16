@@ -250,7 +250,7 @@ pub(crate) fn handle_sys_write(
         return Err(EBADF);
     }
 
-    #[cfg(feature = "m9-rootfs")]
+    #[cfg(clean_slate_linux_rootfs)]
     if matches!(projection, LinuxFdProjection::FileBackend) {
         let n = clamp_write_count(count);
         return super::fs_io::write_file_fd_user(request, ctx, pid, generation, fd, user_ptr, n);

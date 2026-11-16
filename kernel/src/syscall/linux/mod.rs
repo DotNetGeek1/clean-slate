@@ -5,14 +5,16 @@
 //! [`decode`].
 
 pub(crate) mod block;
+#[cfg(clean_slate_serial_console)]
+pub(crate) mod console_input;
 pub(crate) mod decode;
 #[cfg(feature = "m9-linux-exec-self-test")]
 pub(crate) mod execve;
 pub(crate) mod exit;
 pub(crate) mod fd;
-#[cfg(feature = "m9-rootfs")]
+#[cfg(clean_slate_linux_rootfs)]
 pub(crate) mod fs;
-#[cfg(not(feature = "m9-rootfs"))]
+#[cfg(not(clean_slate_linux_rootfs))]
 pub(crate) mod fs {
     use super::table::LinuxSyscallHandler;
 
@@ -20,7 +22,7 @@ pub(crate) mod fs {
         None
     }
 }
-#[cfg(feature = "m9-rootfs")]
+#[cfg(clean_slate_linux_rootfs)]
 pub(crate) mod fs_io;
 pub(crate) mod poll;
 pub(crate) mod process;

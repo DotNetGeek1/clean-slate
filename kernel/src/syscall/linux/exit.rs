@@ -61,7 +61,7 @@ pub(crate) fn handle_sys_exit(
     let pid = ctx.pid;
     kernel_log_fmt(format_args!("[LNX ] exit pid={pid} status={status}\n"));
 
-    #[cfg(feature = "m8-linux-image")]
+    #[cfg(clean_slate_linux_proc)]
     {
         use crate::process::linux_proc::exit_publish::publish_linux_exit;
         use crate::process::linux_proc::table::ProcId;
@@ -71,6 +71,8 @@ pub(crate) fn handle_sys_exit(
         };
         publish_linux_exit(id, status as u32, false);
     }
+    #[cfg(clean_slate_system_init)]
+    crate::service::system_shell::publish_linux_service_exit(pid);
 
     let allocator = service_lifecycle_syscall_allocator_mut()
         .as_mut()

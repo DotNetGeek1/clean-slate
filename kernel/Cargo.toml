@@ -81,7 +81,9 @@ m9-linux-socket-self-test = [
     "stack-high-water-check",
 ]
 m9-linux-proc-self-test = ["m8-linux-image", "m3-entry-self-test", "stack-high-water-check"]
-m9-rootfs = ["dep:clean-slate-rootfs"]
+# The default image also compiles the rootfs (its shell row runs BusyBox), so the crate is not
+# optional; this feature turns the rootfs on in the self-test builds.
+m9-rootfs = []
 m9-rootfs-self-test = ["m9-rootfs", "m3-entry-self-test", "stack-high-water-check"]
 m9-linux-fs-self-test = [
     "m9-rootfs",
@@ -144,7 +146,7 @@ clean-slate-linux-abi = { path = "../linux-abi" }
 clean-slate-native-abi = { path = "../native-abi" }
 clean-slate-port = { path = "../port" }
 clean-slate-raster = { path = "../raster" }
-clean-slate-rootfs = { path = "../rootfs", optional = true }
+clean-slate-rootfs = { path = "../rootfs" }
 clean-slate-service-fixtures = { path = "../service-fixtures" }
 clean-slate-service-lifecycle = { path = "../service-lifecycle" }
 clean-slate-store = { path = "../store", optional = true }

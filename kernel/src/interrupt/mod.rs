@@ -645,7 +645,7 @@ pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> 
             pid
         ));
     }
-    #[cfg(feature = "m8-linux-image")]
+    #[cfg(clean_slate_linux_proc)]
     crate::process::linux_proc::fault::publish_linux_fault_exit(pid, context.vector);
     #[cfg(feature = "m9-userspace-self-test")]
     crate::selftest::m9_userspace::on_checklist_command_fault(pid, context);

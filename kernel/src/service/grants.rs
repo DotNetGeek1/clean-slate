@@ -47,6 +47,8 @@ pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
                 handles.object_service_role = Some(authority.grant_object_service_role(pid)?);
             }
             Grant::BlockDevice | Grant::NetworkService => {}
+            // Applied by the Linux launch path while it builds the process.
+            Grant::Console | Grant::ConsoleInput | Grant::TmpObjects => {}
         }
     }
     Ok(handles)
@@ -62,7 +64,9 @@ pub(crate) fn apply_instance_grants<A: InstanceGrantAuthority>(
         let result = match grant {
             Grant::BlockDevice => authority.grant_block_device(pid),
             Grant::NetworkService => authority.grant_network_service(pid, generation),
-            Grant::ObjectServiceRole => Ok(()),
+            Grant::ObjectServiceRole | Grant::Console | Grant::ConsoleInput | Grant::TmpObjects => {
+                Ok(())
+            }
         };
         result.map_err(|message| GrantFailure { grant, message })?;
     }
@@ -75,6 +79,7 @@ mod tests {
     use clean_slate_service_fixtures::manifest::{grants_for, SYSTEM_MANIFEST};
     use clean_slate_service_fixtures::{
         NETWORK_SERVICE_ID, STORAGE_SERVICE_ID, STORAGE_UNAUTHORIZED_SERVICE_ID,
+        SYSTEM_SHELL_SERVICE_ID,
     };
 
     #[derive(Debug, PartialEq, Eq)]
@@ -193,6 +198,17 @@ mod tests {
             network.calls,
             [Call::NetworkService(7, InstanceGeneration(3))]
         );
+    }
+
+    #[test]
+    fn linux_process_grants_reach_no_native_grant_call() {
+        let mut recorder = Recorder::default();
+        let handles = apply_both(
+            grants_for(SYSTEM_MANIFEST, SYSTEM_SHELL_SERVICE_ID),
+            &mut recorder,
+        );
+        assert!(recorder.calls.is_empty());
+        assert_eq!(handles, BootstrapGrantHandles::default());
     }
 
     #[test]

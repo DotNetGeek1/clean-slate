@@ -15,7 +15,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(clean_slate_system_init)]
-use clean_slate_service_fixtures::manifest::Grant;
+use clean_slate_service_fixtures::manifest::{Grant, ServiceImage, ServiceSpec};
 #[cfg(clean_slate_system_init)]
 use clean_slate_service_lifecycle::ServiceId;
 
@@ -75,8 +75,9 @@ pub(crate) fn on_process_death(pid: u64, death: ProcessDeath) {
 /// kernel table outside it that ties authority or a device binding to a pid: the lifecycle
 /// controller's lifecycle-control and block-device tables, the IPC endpoint table, service
 /// ports and port connections, the display presenter, the input consumer, shared-buffer
-/// mappings, work sets, the network bridge's raw-link binding and the execution personality
-/// (Linux-personality tables only exist for Linux processes). The test
+/// mappings, work sets, the network bridge's raw-link binding, the execution personality
+/// (Linux-personality tables only exist for Linux processes) and console-input fds, which are
+/// held in the Linux fd table rather than as capabilities. The test
 /// `every_per_process_teardown_hook_is_counted_or_derived` keeps this list in step with
 /// process teardown, which must release everything a pid holds.
 #[cfg(clean_slate_system_init)]
@@ -88,6 +89,8 @@ pub(crate) struct HeldAuthority {
     pub(crate) block_device: usize,
     pub(crate) object_service_role: usize,
     pub(crate) network: usize,
+    /// `/tmp` backing-object records (Linux `/tmp` write authority).
+    pub(crate) tmp_objects: usize,
     /// Capability-space records of any other kind. A console grant also records one IPC
     /// endpoint capability there; those are counted as `console_records`.
     pub(crate) console_records: usize,
@@ -111,6 +114,8 @@ pub(crate) struct OutsideCapabilitySpace {
     pub(crate) raw_network_link: usize,
     /// 1 for a Linux-personality process.
     pub(crate) linux_personality: usize,
+    /// Fds whose open description is serial console input.
+    pub(crate) console_input: usize,
 }
 
 #[cfg(clean_slate_system_init)]
@@ -137,6 +142,7 @@ impl OutsideCapabilitySpace {
             linux_personality: usize::from(
                 execution_personality_for_pid(pid) != Ok(ExecutionPersonality::Native),
             ),
+            console_input: crate::process::linux_fd::console_input_fd_count(pid),
         }
     }
 }
@@ -146,7 +152,7 @@ impl fmt::Display for OutsideCapabilitySpace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "owned-endpoints={} ports={} port-connections={} presenter={} input-consumer={} shared-mappings={} work-sets={} raw-net-link={} linux={}",
+            "owned-endpoints={} ports={} port-connections={} presenter={} input-consumer={} shared-mappings={} work-sets={} raw-net-link={} linux={} console-input={}",
             self.owned_endpoints,
             self.ports_served,
             self.port_connections,
@@ -156,6 +162,7 @@ impl fmt::Display for OutsideCapabilitySpace {
             self.work_sets,
             self.raw_network_link,
             self.linux_personality,
+            self.console_input,
         )
     }
 }
@@ -169,6 +176,7 @@ impl HeldAuthority {
         block_device: 0,
         object_service_role: 0,
         network: 0,
+        tmp_objects: 0,
         console_records: 1,
         other: 0,
         outside: OutsideCapabilitySpace {
@@ -181,23 +189,39 @@ impl HeldAuthority {
             work_sets: 0,
             raw_network_link: 0,
             linux_personality: 0,
+            console_input: 0,
         },
     };
 
-    /// What an instance started from a manifest row with `grants` must hold. Services get no
-    /// console and no lifecycle control; the network grant also binds the raw network link.
-    pub(crate) fn for_grants(grants: &[Grant]) -> Self {
+    /// What an instance of `image` started from a manifest row with `grants` must hold. Services
+    /// get no lifecycle control, and a console only through `Grant::Console`; the network grant
+    /// also binds the raw network link. A Linux image is a Linux-personality process.
+    pub(crate) fn for_grants(image: ServiceImage, grants: &[Grant]) -> Self {
+        use crate::process::linux_fs::object_backend::LINUX_TMP_MAX_FILES;
+
         let held = |grant: Grant| usize::from(grants.contains(&grant));
         Self {
+            console: held(Grant::Console),
+            console_records: held(Grant::Console),
             block_device: held(Grant::BlockDevice),
             object_service_role: held(Grant::ObjectServiceRole),
             network: held(Grant::NetworkService),
+            tmp_objects: held(Grant::TmpObjects) * LINUX_TMP_MAX_FILES,
             outside: OutsideCapabilitySpace {
                 raw_network_link: held(Grant::NetworkService),
+                linux_personality: usize::from(image.is_linux()),
+                console_input: held(Grant::ConsoleInput),
                 ..OutsideCapabilitySpace::default()
             },
             ..Self::default()
         }
+    }
+
+    /// [`Self::for_grants`] for `spec`; a service without a row must hold nothing.
+    fn for_row(spec: Option<&ServiceSpec>) -> Self {
+        spec.map_or_else(Self::default, |spec| {
+            Self::for_grants(spec.image, spec.grants)
+        })
     }
 
     /// `held_in_controller` is the lifecycle controller's own count for `pid`:
@@ -226,6 +250,11 @@ impl HeldAuthority {
                     ResourceClass::PersistentObject if resource.id == OBJECT_SERVICE_ROLE_ID => {
                         &mut held.object_service_role
                     }
+                    ResourceClass::PersistentObject
+                        if crate::process::linux_fs::object_backend::is_tmp_object(resource.id) =>
+                    {
+                        &mut held.tmp_objects
+                    }
                     ResourceClass::Network => &mut held.network,
                     ResourceClass::IpcEndpoint => &mut held.console_records,
                     _ => &mut held.other,
@@ -242,12 +271,13 @@ impl fmt::Display for HeldAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "lifecycle-control={} console={} block-device={} object-service={} network={} other={} {}",
+            "lifecycle-control={} console={} block-device={} object-service={} network={} tmp-objects={} other={} {}",
             self.lifecycle_control,
             self.console,
             self.block_device,
             self.object_service_role,
             self.network,
+            self.tmp_objects,
             self.other + self.console_records.saturating_sub(self.console),
             self.outside,
         )
@@ -255,16 +285,16 @@ impl fmt::Display for HeldAuthority {
 }
 
 /// Checks that the instance `pid` of `service` holds exactly the authority its manifest row
-/// `grants` names. Logs the comparison; a mismatch is also a `[FAIL]` line and an error.
+/// `spec` names. Logs the comparison; a mismatch is also a `[FAIL]` line and an error.
 #[cfg(clean_slate_system_init)]
 pub(crate) fn audit_service_authority(
     service: ServiceId,
     pid: u64,
-    grants: &[Grant],
+    spec: Option<&ServiceSpec>,
     held_in_controller: (usize, usize),
 ) -> Result<(), &'static str> {
     let held = HeldAuthority::of(pid, held_in_controller);
-    let matches = held == HeldAuthority::for_grants(grants);
+    let matches = held == HeldAuthority::for_row(spec);
     kernel_log_fmt(format_args!(
         "[SVC ] authority service={} pid={pid} {held} matches-manifest={}\n",
         service.0,
@@ -484,11 +514,12 @@ mod tests {
     #[cfg(clean_slate_system_init)]
     #[test]
     fn services_must_hold_exactly_their_row_and_no_console_or_lifecycle_control() {
-        use clean_slate_service_fixtures::manifest::{grants_for, SYSTEM_MANIFEST};
+        use clean_slate_service_fixtures::manifest::{find_service, SYSTEM_MANIFEST};
         use clean_slate_service_fixtures::{NETWORK_SERVICE_ID, STORAGE_SERVICE_ID};
+        let row = |id| HeldAuthority::for_row(find_service(SYSTEM_MANIFEST, id));
 
         assert_eq!(
-            HeldAuthority::for_grants(grants_for(SYSTEM_MANIFEST, STORAGE_SERVICE_ID)),
+            row(STORAGE_SERVICE_ID),
             HeldAuthority {
                 block_device: 1,
                 object_service_role: 1,
@@ -496,7 +527,7 @@ mod tests {
             }
         );
         assert_eq!(
-            HeldAuthority::for_grants(grants_for(SYSTEM_MANIFEST, NETWORK_SERVICE_ID)),
+            row(NETWORK_SERVICE_ID),
             HeldAuthority {
                 network: 1,
                 outside: OutsideCapabilitySpace {
@@ -506,7 +537,48 @@ mod tests {
                 ..HeldAuthority::default()
             }
         );
-        assert_eq!(HeldAuthority::for_grants(&[]), HeldAuthority::default());
+        assert_eq!(HeldAuthority::for_row(None), HeldAuthority::default());
+        assert_eq!(
+            HeldAuthority::for_grants(ServiceImage::Storage, &[]),
+            HeldAuthority::default()
+        );
+    }
+
+    /// The shell's console capability, its stdin fd, the four `/tmp` object records and the
+    /// Linux personality, and nothing else.
+    #[cfg(clean_slate_system_init)]
+    #[test]
+    fn the_shell_must_hold_console_stdin_tmp_and_linux_only() {
+        use clean_slate_service_fixtures::manifest::{find_service, SYSTEM_MANIFEST};
+        use clean_slate_service_fixtures::SYSTEM_SHELL_SERVICE_ID;
+
+        let shell = HeldAuthority::for_row(find_service(SYSTEM_MANIFEST, SYSTEM_SHELL_SERVICE_ID));
+        assert_eq!(
+            shell,
+            HeldAuthority {
+                console: 1,
+                console_records: 1,
+                tmp_objects: 4,
+                outside: OutsideCapabilitySpace {
+                    linux_personality: 1,
+                    console_input: 1,
+                    ..OutsideCapabilitySpace::default()
+                },
+                ..HeldAuthority::default()
+            }
+        );
+        assert_eq!(
+            std::format!("{shell}"),
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+        );
+        let without_stdin = HeldAuthority::for_grants(
+            ServiceImage::LinuxShell,
+            &[Grant::Console, Grant::TmpObjects],
+        );
+        assert_ne!(without_stdin, shell);
+        assert_eq!(without_stdin.outside.console_input, 0);
+        let native = HeldAuthority::for_grants(ServiceImage::Network, &[]);
+        assert_eq!(native.outside.linux_personality, 0);
     }
 
     #[cfg(clean_slate_system_init)]
@@ -514,7 +586,7 @@ mod tests {
     fn init_is_expected_to_hold_lifecycle_control_and_the_console_only() {
         assert_eq!(
             std::format!("{}", HeldAuthority::INIT),
-            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0"
+            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
         );
         let with_block = HeldAuthority {
             block_device: 1,
@@ -564,7 +636,17 @@ mod tests {
                 linux_personality: 1,
                 ..HeldAuthority::INIT.outside
             },
+            OutsideCapabilitySpace {
+                console_input: 1,
+                ..HeldAuthority::INIT.outside
+            },
         ];
+        let with_tmp = HeldAuthority {
+            tmp_objects: 1,
+            ..HeldAuthority::INIT
+        };
+        assert_ne!(with_tmp, HeldAuthority::INIT);
+        assert!(std::format!("{with_tmp}").contains(" tmp-objects=1 "));
         for outside in outside_extras {
             let held = HeldAuthority {
                 outside,
