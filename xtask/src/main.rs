@@ -27,6 +27,7 @@ mod qmp;
 mod raster_font;
 mod serial_input_lane;
 mod system_boot;
+mod system_shell;
 
 use marker_spec::{unexpected_guest_failure, MarkerSet, MarkerStep, MarkerTracker};
 use ovmf_vars::RuntimeVarsCopy;
@@ -1184,6 +1185,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestM10InputSmoke => run_m10_input_smoke_acceptance(),
         ParsedCommand::TestSerialInput => serial_input_lane::run(),
         ParsedCommand::TestSystemBoot => system_boot::run_lane(),
+        ParsedCommand::TestSystemShell => system_shell::run(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -4959,6 +4961,7 @@ fn print_help() {
     println!("  test-m10        M10 milestone gate: every test-m10-* constituent, clean-slate-ui host tests and test-qmp-smoke, then test-m10-desktop; prints [M10 ] PASS (aliases: m10, m10.119)");
     println!("  test-serial-input #218 S4 serial receive lane: COM1 on a private loopback socket; the host types a script (plain line, backspace/delete, Ctrl-U, an overlong line, a burst, a full committed buffer, Ctrl-D on a non-empty and an empty line) and checks the echo and every committed read byte for byte; prints [TTY ] PASS (aliases: serial-input)");
     println!("  test-system-boot #218 S3b default image: boots it twice on a fresh lane-owned data disk with the network fixture peer; init starts storage then network, the kernel checks every launched pid holds exactly its manifest grants and reports ready from that pid, boot 1 formats and boot 2 mounts, and the idle thread halts while init waits; prints [SYS ] PASS (aliases: system-boot)");
+    println!("  test-system-shell #218 S5 default image to its serial-console shell: COM1 on a private loopback socket, a fresh lane-owned data disk and the network fixture peer; the host types echo, ls /bin, a pipeline, a /tmp write and read and a backspace edit and checks output only execution produces, then exit and Ctrl-D, each followed by a new shell one generation on with a new prompt; prints [SHL ] PASS (aliases: system-shell)");
     println!("  run-m10-desktop [--framebuffer] Boot the supervised M10 desktop in a QEMU window (QEMU_DISPLAY, default gtk; serial on stdout): VirtIO-GPU at Q1, or the -vga std framebuffer at Q0");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
@@ -5108,6 +5111,7 @@ enum ParsedCommand {
     TestM10InputSmoke,
     TestSerialInput,
     TestSystemBoot,
+    TestSystemShell,
     TestM10Desktop,
     TestM10,
     RunM10Desktop,
@@ -5279,6 +5283,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
         }
         Some(cmd) if cmd == "test-system-boot" || cmd == "system-boot" => {
             ParsedCommand::TestSystemBoot
+        }
+        Some(cmd) if cmd == "test-system-shell" || cmd == "system-shell" => {
+            ParsedCommand::TestSystemShell
         }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
@@ -5822,6 +5829,12 @@ mod tests {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
                 ParsedCommand::TestSystemBoot
+            );
+        }
+        for alias in ["test-system-shell", "system-shell"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestSystemShell
             );
         }
         assert_eq!(
@@ -6488,6 +6501,7 @@ mod tests {
         assert_eq!(xtask_lanes, script_lanes, "scripts/run-tests.ps1");
         assert_eq!(xtask_lanes, shell_lanes, "scripts/run-tests.sh");
         assert!(xtask_lanes.contains(&"test-system-boot"));
+        assert!(xtask_lanes.contains(&"test-system-shell"));
 
         registered.extend(script.lines().filter_map(script_entry));
         registered.sort_unstable();

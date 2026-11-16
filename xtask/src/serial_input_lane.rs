@@ -238,7 +238,7 @@ fn split_records(stream: &[u8]) -> (Vec<u8>, Vec<String>) {
     (echo, records)
 }
 
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
@@ -338,13 +338,13 @@ fn validate_boot(before_ready: &[u8]) -> Result<(), String> {
     }
 }
 
-enum SerialEvent {
+pub(crate) enum SerialEvent {
     Bytes(Vec<u8>),
     Closed,
     Failed(std::io::Error),
 }
 
-fn spawn_serial_reader(
+pub(crate) fn spawn_serial_reader(
     mut stream: TcpStream,
     tx: mpsc::Sender<SerialEvent>,
 ) -> thread::JoinHandle<()> {
@@ -374,7 +374,7 @@ fn spawn_serial_reader(
 }
 
 /// QEMU connects to the listener while it starts; it exits if the connection fails.
-fn accept_serial(
+pub(crate) fn accept_serial(
     listener: &TcpListener,
     child: &mut ReapOnDrop,
     deadline: Instant,
@@ -424,7 +424,7 @@ fn wait_for_exit(child: &mut ReapOnDrop) -> Result<ExitStatus, XtaskError> {
     }
 }
 
-fn tail(transcript: &[u8]) -> String {
+pub(crate) fn tail(transcript: &[u8]) -> String {
     let start = transcript.len().saturating_sub(400);
     String::from_utf8_lossy(&transcript[start..]).into_owned()
 }
