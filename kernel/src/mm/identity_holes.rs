@@ -3,9 +3,15 @@
 //! `kernel_bootstrap::install_kernel_owned_root` copies the firmware's lower-half PML4 entries,
 //! so the kernel runs with OVMF's writable identity map of the first 1 TiB. A stray kernel
 //! pointer into that range writes somewhere real instead of faulting. This module removes the
-//! pages where such a write is most damaging, and records them so the page-fault handler can
-//! name a hit:
+//! pages where such a write is most damaging or most likely, and records them so the page-fault
+//! handler can name a hit:
 //!
+//! - **The null page `[0, 0x1000)`.** Nothing uses physical page 0 after ExitBootServices: the
+//!   frame allocator starts at `0x1000`, the physmap never maps frame 0, the kernel calls no UEFI
+//!   runtime service, has no real-mode trampoline and finds ACPI through the UEFI configuration
+//!   table (read before ExitBootServices) rather than the BIOS data area. The rest of the first
+//!   2 MiB is allocator RAM that boot code reaches through the identity map (the kernel root
+//!   itself is usually the frame at `0x1000`), so the hole is one 4 KiB page.
 //! - **The 2 MiB identity window around the local APIC** (`[0xFEE0_0000, 0xFF00_0000)` on QEMU).
 //!   QEMU treats a store into the APIC register page at offset 0 (or any write outside it in its
 //!   1 MiB APIC space) as an MSI whose data is the stored value. A value that encodes INIT
@@ -20,8 +26,9 @@
 //! holes. `address_space::verify_carve_out_attach_at_boot` checks a real process root with
 //! [`verify_identity_holes_in_root`].
 //!
-//! Limits: only these pages fault. The rest of the identity map stays writable, and device MMIO
-//! reached through the identity map (`mm::mmio::with_kernel_identity_mmio`) is not protected.
+//! Limits: only these pages fault. The rest of the identity map stays writable, a null pointer
+//! plus an offset of 4 KiB or more is not caught, and device MMIO reached through the identity
+//! map (`mm::mmio::with_kernel_identity_mmio`) is not protected.
 
 use crate::mm::layout::VaRange;
 use crate::mm::paging::{leaf_page_flags_for_address_in_root, page_table_mut, zero_page};
@@ -37,14 +44,18 @@ const ONE_GIB: u64 = 1024 * 1024 * 1024;
 /// PAT selector bit of a 2 MiB / 1 GiB leaf (bit 12, inside the address field).
 const HUGE_LEAF_PAT_BIT: u64 = 1 << 12;
 
+pub(crate) const NULL_PAGE: VaRange = VaRange::new(0, PAGE_SIZE);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IdentityHole {
+    NullPage,
     LocalApicWindow,
 }
 
 impl IdentityHole {
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::NullPage => "null-page",
             Self::LocalApicWindow => "local-apic-window",
         }
     }
@@ -70,9 +81,12 @@ fn armed() -> Option<ArmedHoles> {
     unsafe { *ARMED.get() }
 }
 
-fn armed_holes() -> Option<[(IdentityHole, VaRange); 1]> {
+fn armed_holes() -> Option<[(IdentityHole, VaRange); 2]> {
     let armed = armed()?;
-    Some([(IdentityHole::LocalApicWindow, armed.local_apic_window)])
+    Some([
+        (IdentityHole::NullPage, NULL_PAGE),
+        (IdentityHole::LocalApicWindow, armed.local_apic_window),
+    ])
 }
 
 /// The armed hole containing `address`, for naming a kernel page fault.
@@ -99,7 +113,10 @@ pub(crate) fn arm_identity_holes(
     let alias = map_device_aperture_uncached(kernel_root, allocator, local_apic_phys, PAGE_SIZE)
         .map_err(|_| "identity holes: the local APIC alias could not be mapped")?;
     let window = local_apic_identity_window(local_apic_phys);
-    let split_tables = unmap_range(kernel_root, window, &mut || allocator.allocate_page())?;
+    let mut split_tables = 0usize;
+    for range in [NULL_PAGE, window] {
+        split_tables += unmap_range(kernel_root, range, &mut || allocator.allocate_page())?;
+    }
     let local_apic_alias = alias.as_mut_ptr() as u64;
     unsafe {
         *ARMED.get() = Some(ArmedHoles {
@@ -110,8 +127,8 @@ pub(crate) fn arm_identity_holes(
     verify_identity_holes_in_root(kernel_root)?;
     install_local_apic_alias(local_apic_phys, local_apic_alias)?;
     serial_write_fmt(format_args!(
-        "[MM  ] identity holes armed local-apic-window=[{:#x},{:#x}) local-apic-alias={:#018x} split_tables={}\n",
-        window.start, window.end, local_apic_alias, split_tables
+        "[MM  ] identity holes armed null-page=[{:#x},{:#x}) local-apic-window=[{:#x},{:#x}) local-apic-alias={:#018x} split_tables={}\n",
+        NULL_PAGE.start, NULL_PAGE.end, window.start, window.end, local_apic_alias, split_tables
     ));
     Ok(())
 }
@@ -493,6 +510,12 @@ mod tests {
         );
 
         arm_for_test();
+        assert_eq!(identity_hole_for_address(0), Some(IdentityHole::NullPage));
+        assert_eq!(
+            identity_hole_for_address(0xfff),
+            Some(IdentityHole::NullPage)
+        );
+        assert_eq!(identity_hole_for_address(0x1000), None);
         assert_eq!(
             identity_hole_for_address(0xFEE0_0000),
             Some(IdentityHole::LocalApicWindow)
@@ -517,6 +540,23 @@ mod tests {
         );
         unmap_range(root, window, &mut || Some(leaked_table())).expect("unmap window");
         assert_eq!(verify_identity_holes_in_root(root), Ok(()));
+    }
+
+    #[test]
+    fn null_page_hole_is_one_page_and_leaves_the_rest_of_the_first_two_mib() {
+        arm_for_test();
+        let (root, _) = root_with_two_mib_leaf(VirtAddr::new(0), 0);
+        map_alias(root, UNCACHED);
+        assert_eq!(
+            verify_identity_holes_in_root(root),
+            Err("identity hole page is mapped")
+        );
+        let splits = unmap_range(root, NULL_PAGE, &mut || Some(leaked_table())).expect("unmap");
+        assert_eq!(splits, 1);
+        assert_eq!(verify_identity_holes_in_root(root), Ok(()));
+        assert!(!mapped(root, 0));
+        assert!(mapped(root, PAGE_SIZE));
+        assert!(mapped(root, TWO_MIB - PAGE_SIZE));
     }
 
     #[test]

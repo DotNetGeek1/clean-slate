@@ -153,7 +153,9 @@ use core::sync::atomic::Ordering;
 use x86_64::registers::control::Cr2;
 use x86_64::registers::control::Cr3;
 
-static mut EXPECTED_PAGE_FAULT_ADDRESS: u64 = 0;
+/// Set only by the M1 self-test. `None` otherwise, so a kernel fault on address 0 (the unmapped
+/// null page) is never mistaken for the expected M1 probe.
+static mut EXPECTED_PAGE_FAULT_ADDRESS: Option<u64> = None;
 
 #[cfg(feature = "m1-self-test")]
 /// Publishes the address the next page fault is expected to report.
@@ -162,7 +164,7 @@ static mut EXPECTED_PAGE_FAULT_ADDRESS: u64 = 0;
 /// Must not race with a page fault that reads the value; the M1 self-test calls
 /// it immediately before probing the address.
 pub(crate) unsafe fn set_expected_page_fault_address(address: u64) {
-    unsafe { EXPECTED_PAGE_FAULT_ADDRESS = address }
+    unsafe { EXPECTED_PAGE_FAULT_ADDRESS = Some(address) }
 }
 
 // Consumed by arch/x86_64/asm.rs (every interrupt stub calls this with the saved frame).
@@ -436,7 +438,7 @@ fn handle_exception(context: &InterruptContext) -> u64 {
             bit(context.error_code, 4),
         ));
 
-        if expected == fault_address {
+        if expected == Some(fault_address) {
             kernel_log_line("[M1  ] PASS");
             qemu_exit(QEMU_EXIT_SUCCESS)
         }
