@@ -531,7 +531,7 @@ Syscalls run with interrupts masked: `IA32_FMASK` is written with `SYSCALL_ENTRY
 
 **Children.** `fork` copies the fd table, so commands the shell runs inherit fd 0 (and fd 1, fd 2 and the `/tmp` capabilities); `exec` keeps it. A pipeline's `dup2` replaces fd 0 with the pipe in the reading command. The authority audit runs once, when the service instance is launched, so children are not audited; they hold no more than the shell did.
 
-**Readiness and restart.** The kernel reports the shell ready (`[SVC ] ready service=21504 … kernel-observed first-console-input-wait`) the first time the live instance blocks reading fd 0, which is after it printed its prompt. Linux `exit` and `exit_group` publish the exit of a live service instance to the lifecycle controller before teardown, as a CPL3 fault already did; a refused publication is fatal. Init restarts the shell after every exit; three exits in a row before reaching readiness make init give up (`RestartSpec::OnExitUntilUnready`). Details and the values in use are in [DEVELOPMENT.md](DEVELOPMENT.md#the-serial-console-shell).
+**Readiness and restart.** The kernel reports the shell ready (`[SVC ] ready service=21504 … kernel-observed first-console-input-wait`) the first time the live instance blocks reading fd 0, which is after it printed its prompt. Linux `exit` and `exit_group` publish the exit of a live service instance to the lifecycle controller before teardown, as a CPL3 fault already did; a refused publication is fatal. Init restarts the shell after every exit, and gives up when three restarts in a row end before a ready report (`RestartSpec::OnExitUntilUnready`). Details and the values in use are in [DEVELOPMENT.md](DEVELOPMENT.md#the-serial-console-shell).
 
 **Limits.**
 

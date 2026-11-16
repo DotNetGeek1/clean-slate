@@ -158,9 +158,9 @@ pub const NETWORK_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     depends_on: &[STORAGE_SERVICE_ID],
 };
 
-/// Provisional (#218 S5): a shell that exits (`exit`, Ctrl-D) is started again 0.5 s later. Three
-/// instances in a row that exit before reporting ready (first read of stdin) make init give up;
-/// the next retries wait 1.5 s and 2.5 s.
+/// Provisional (#218 S5): a shell that exits (`exit`, Ctrl-D) is started again 0.5 s later. At
+/// most three restarts run without a ready report (first read of stdin) in between, after 0.5 s,
+/// 1.5 s and 2.5 s; if the third restarted shell also exits before reporting ready, init gives up.
 const SHELL_RESTART: RestartSpec = RestartSpec::OnExitUntilUnready {
     max_attempts: 3,
     backoff_base_ticks: NANOS_PER_SECOND,
