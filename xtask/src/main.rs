@@ -10,6 +10,7 @@ use std::sync::{mpsc, Once};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+mod guest_reboot;
 mod m10_desktop_lane;
 mod m10_desktop_visual;
 mod m10_framebuffer_validate;
@@ -4105,6 +4106,7 @@ fn run_driven_acceptance_command(
     let stderr_handle = spawn_output_reader(stderr, true, tx.clone());
     let driver = ShutdownOnDrop(driver);
     let mut output = String::new();
+    let mut reboot_detector = guest_reboot::GuestRebootDetector::default();
     if let Err(error) = driver.0.start(DriverWake(tx)) {
         return Err(abort_driven_acceptance(
             &mut child,
@@ -4160,6 +4162,18 @@ fn run_driven_acceptance_command(
                 }
                 output.push_str(&chunk.text);
                 if !authoritative_pass {
+                    if let Some(reboot) = reboot_detector.observe(output.as_bytes()) {
+                        terminate_child(&mut child)?;
+                        let _ = child.wait();
+                        join_output_reader(stdout_handle);
+                        join_output_reader(stderr_handle);
+                        drain_output_events(&rx, &mut output);
+                        let transcript = save_guest_reboot_transcript(&output)?;
+                        return Err(XtaskError::CommandFailed {
+                            command: command_display,
+                            status: format!("{reboot}; transcript: {}", transcript.display()),
+                        });
+                    }
                     if let Some(fail_line) = unexpected_guest_failure(&output, marker_set, false) {
                         terminate_child(&mut child)?;
                         let _ = child.wait();
@@ -4379,6 +4393,18 @@ fn run_driven_acceptance_command(
 
     validate_output_markers(&output, marker_set)?;
     Ok(output)
+}
+
+/// Keeps the whole transcript of a session that rebooted, one file per run.
+fn save_guest_reboot_transcript(output: &str) -> Result<PathBuf, XtaskError> {
+    let dir = xtask_artifact_root().join("guest-reboot");
+    fs::create_dir_all(&dir)?;
+    let stamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis());
+    let path = dir.join(format!("{}-{stamp}.log", std::process::id()));
+    fs::write(&path, output)?;
+    Ok(path)
 }
 
 /// Stops QEMU after a driver error and attaches the output tail, as the

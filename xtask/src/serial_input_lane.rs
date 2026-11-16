@@ -20,6 +20,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::guest_reboot::GuestRebootDetector;
 use crate::{
     announce_qemu_version, prepare_vm, xtask_artifact_root, ReapOnDrop, VmLaunchConfig, XtaskError,
     QEMU_DEBUG_EXIT_SUCCESS,
@@ -457,6 +458,7 @@ pub(crate) fn run() -> Result<(), XtaskError> {
     let reader = spawn_serial_reader(stream, tx);
 
     let mut transcript = Vec::new();
+    let mut reboot_detector = GuestRebootDetector::default();
     let mut ready_end: Option<usize> = None;
     let mut sent = 0usize;
     let result = loop {
@@ -489,6 +491,12 @@ pub(crate) fn run() -> Result<(), XtaskError> {
                     "serial input: serial reader stopped".to_owned(),
                 ))
             }
+        }
+        if let Some(reboot) = reboot_detector.observe(&transcript) {
+            break Err(XtaskError::Validation(format!(
+                "serial input: {reboot}; tail {:?}",
+                tail(&transcript)
+            )));
         }
         if find(&transcript, b"[FAIL]").is_some() {
             break Err(XtaskError::Validation(format!(
