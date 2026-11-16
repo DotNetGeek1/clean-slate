@@ -33,6 +33,13 @@ pub(crate) fn live_network_service_generation() -> Option<InstanceGeneration> {
     live_instance_generation_for_service(NETWORK_LOGICAL_SERVICE)
 }
 
+/// Generation of the network instance that is live right now, if one is. Unlike
+/// [`live_network_service_generation`] this is `None` before the first start and between an
+/// instance's death and its replacement.
+pub(crate) fn live_network_instance_generation() -> Option<InstanceGeneration> {
+    live_service_instance_id(NETWORK_LOGICAL_SERVICE).map(|instance| instance.generation)
+}
+
 /// Builds a [`ServiceInstanceId`] view when the pid is the live instance of `service`.
 #[allow(dead_code)]
 pub(crate) fn live_service_instance_id(service: ServiceId) -> Option<ServiceInstanceId> {

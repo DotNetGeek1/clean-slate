@@ -8,7 +8,10 @@
 //!
 //! - `Console`: one console capability, installed as fd 1 and fd 2;
 //! - `ConsoleInput`: serial console input at fd 0;
-//! - `TmpObjects`: `READ | WRITE` on every `/tmp` backing object.
+//! - `TmpObjects`: `READ | WRITE` on every `/tmp` backing object;
+//! - `NetworkClient`: the network client entitlement, plus a client capability bound to the
+//!   network instance when one is live (see [`crate::capability::network`]). A build without
+//!   the Linux socket layer cannot honour it, so the launch fails.
 //!
 //! Any failure tears the process down, so the controller never records a half-built shell.
 //!
@@ -48,6 +51,7 @@ struct LinuxGrants {
     console: bool,
     console_input: bool,
     tmp_objects: bool,
+    network_client: bool,
 }
 
 impl LinuxGrants {
@@ -58,6 +62,7 @@ impl LinuxGrants {
                 Grant::Console => wanted.console = true,
                 Grant::ConsoleInput => wanted.console_input = true,
                 Grant::TmpObjects => wanted.tmp_objects = true,
+                Grant::NetworkClient => wanted.network_client = true,
                 Grant::BlockDevice | Grant::ObjectServiceRole | Grant::NetworkService => {
                     return Err("system shell: native grant on a Linux row");
                 }
@@ -96,7 +101,23 @@ fn apply_linux_grants(
     if wanted.tmp_objects {
         linux_fs::grant_linux_tmp_object_capabilities(pid)?;
     }
+    if wanted.network_client {
+        grant_network_client(pid)?;
+    }
     Ok(())
+}
+
+#[cfg(clean_slate_linux_socket)]
+fn grant_network_client(pid: u64) -> Result<(), &'static str> {
+    crate::capability::network::grant_network_client_entitlement(clean_slate_capability::HolderId(
+        pid,
+    ))
+    .map_err(|_| "system shell: network client entitlement grant failed")
+}
+
+#[cfg(not(clean_slate_linux_socket))]
+fn grant_network_client(_pid: u64) -> Result<(), &'static str> {
+    Err("system shell: NetworkClient needs the Linux socket layer, which this build does not compile")
 }
 
 /// Builds the shell for `context`'s row on `scheduler_slot`. The process is Ready on return.
@@ -144,12 +165,13 @@ pub(crate) fn launch(
             );
         }
         kernel_log_fmt(format_args!(
-            "[SVC ] shell process pid={} gen={} argv=/bin/sh,-i env=PATH=/bin stdin={} stdout={} tmp={}\n",
+            "[SVC ] shell process pid={} gen={} argv=/bin/sh,-i env=PATH=/bin stdin={} stdout={} tmp={} net-client={}\n",
             launched.pid,
             context.generation.0,
             u8::from(wanted.console_input),
             u8::from(wanted.console),
             u8::from(wanted.tmp_objects),
+            u8::from(wanted.network_client),
         ));
         kernel_log_fmt(format_args!(
             "[SVC ] console input so far {}\n",
@@ -197,13 +219,14 @@ mod tests {
     use clean_slate_service_fixtures::SYSTEM_SHELL_SERVICE_ID;
 
     #[test]
-    fn the_system_row_asks_for_console_stdin_and_tmp() {
+    fn the_system_row_asks_for_console_stdin_tmp_and_network_client() {
         assert_eq!(
             LinuxGrants::from_row(grants_for(SYSTEM_MANIFEST, SYSTEM_SHELL_SERVICE_ID)),
             Ok(LinuxGrants {
                 console: true,
                 console_input: true,
                 tmp_objects: true,
+                network_client: true,
             })
         );
     }
@@ -216,6 +239,7 @@ mod tests {
                 console: true,
                 console_input: false,
                 tmp_objects: true,
+                network_client: false,
             })
         );
     }

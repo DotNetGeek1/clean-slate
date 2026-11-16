@@ -936,10 +936,12 @@ pub(crate) fn recover_net_queue_for_service_holder_exit(service_pid: u64) {
 }
 
 /// #218 S7: the instance behind the bridge is gone. Linux sockets opened against it become
-/// unusable and their waiters are woken. Runs after the bridge has failed or requeued the
-/// instance's requests, so a lost socket's requests can be freed.
+/// unusable and their waiters are woken; client capabilities derived from a `NetworkClient`
+/// entitlement are revoked until the next instance registers. Runs after the bridge has
+/// failed or requeued the instance's requests, so a lost socket's requests can be freed.
 fn on_service_instance_gone() {
     crate::process::linux_socket::on_network_instance_gone();
+    crate::capability::network::on_network_instance_gone();
 }
 
 pub(crate) fn reclaim_net_requests_for_holder(pid: u64) -> usize {

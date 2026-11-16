@@ -33,7 +33,9 @@ pub(crate) fn network_client_handle(holder: HolderId) -> Option<u64> {
             if record.holder != holder || record.resource.class != ResourceClass::Network {
                 continue;
             }
-            if record.rights.contains(Rights::NET_RAW_DEVICE) {
+            if record.rights.contains(Rights::NET_RAW_DEVICE)
+                || crate::capability::network::is_network_client_entitlement(record)
+            {
                 continue;
             }
             return table.handle_at(slot).map(|h| h.encode());
