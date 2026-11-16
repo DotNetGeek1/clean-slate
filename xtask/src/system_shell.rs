@@ -467,9 +467,19 @@ fn drive(
                 transcript.extend_from_slice(&bytes);
             }
             Ok(SerialEvent::Closed) => {
-                return fail(&transcript, "QEMU closed the serial port".to_owned())
+                let qemu = qemu_state(&mut child)?;
+                return fail(
+                    &transcript,
+                    format!("QEMU closed the serial port; QEMU {qemu}"),
+                );
             }
-            Ok(SerialEvent::Failed(error)) => return Err(XtaskError::Io(error)),
+            Ok(SerialEvent::Failed(error)) => {
+                let qemu = qemu_state(&mut child)?;
+                return fail(
+                    &transcript,
+                    format!("reading the serial port failed ({error}); QEMU {qemu}"),
+                );
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return fail(&transcript, "serial reader stopped".to_owned())
@@ -523,6 +533,20 @@ fn drive(
                 }
             }
         }
+    }
+}
+
+/// QEMU's exit status once its serial port has gone, or that it was still running two seconds on.
+fn qemu_state(child: &mut ReapOnDrop) -> Result<String, XtaskError> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(format!("exited with {status}"));
+        }
+        if Instant::now() >= deadline {
+            return Ok("was still running".to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
