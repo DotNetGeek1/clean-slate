@@ -425,7 +425,7 @@ fn detach_pipe_open_description(kind: &DescriptorKind) {
         DescriptorKind::PipeRead(pipe) | DescriptorKind::PipeWrite(pipe) => {
             crate::process::linux_proc::pipe::release_pipe_end(*pipe);
         }
-        #[cfg(feature = "m9-linux-socket")]
+        #[cfg(clean_slate_linux_socket)]
         DescriptorKind::Socket(socket) => {
             crate::process::linux_socket::release_socket(
                 crate::process::linux_socket::socket_ref_to_id(*socket),

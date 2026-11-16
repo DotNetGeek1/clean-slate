@@ -200,7 +200,7 @@ pub(crate) fn handle_sys_write(
 
     linux_fd::ensure_open_fd(pid, generation, fd)?;
 
-    #[cfg(feature = "m9-linux-socket")]
+    #[cfg(clean_slate_linux_socket)]
     if let Ok(linux_fd::LinuxReadKind::Socket(socket)) =
         linux_fd::read_kind_for_fd(pid, generation, fd)
     {
