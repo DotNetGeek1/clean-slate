@@ -13,9 +13,9 @@ use clean_slate_network::session::{SessionGeneration, SessionId};
 use clean_slate_service_lifecycle::ServiceId;
 
 use crate::diagnostics::log::kernel_log_fmt;
-use crate::service::instance_generation::{
-    live_network_instance_generation, live_network_service_generation,
-};
+#[cfg(any(test, clean_slate_linux_socket))]
+use crate::service::instance_generation::live_network_instance_generation;
+use crate::service::instance_generation::live_network_service_generation;
 use crate::sync::global_cell::GlobalCell;
 
 use super::audit::record_decision;
@@ -460,6 +460,7 @@ pub(crate) fn is_instance_bound_network_client(record: &CapabilityRecord) -> boo
         && !record.rights.contains(Rights::NET_RAW_DEVICE)
 }
 
+#[cfg(any(test, clean_slate_linux_socket))]
 fn holds_live_entitlement<const N: usize>(table: &CapabilityTable<N>, holder: HolderId) -> bool {
     (0..N).any(|slot| {
         let record = table.record_at(slot);
@@ -536,6 +537,7 @@ fn issue_client_capability_in<const N: usize>(
 
 /// Installs the entitlement for `holder`, and its client capability when an instance is
 /// live (`live_generation`).
+#[cfg(any(test, clean_slate_linux_socket))]
 fn grant_entitlement_in<const N: usize>(
     table: &mut CapabilityTable<N>,
     holder: HolderId,
@@ -576,7 +578,9 @@ fn revoke_entitled_client_capabilities_in<const N: usize>(table: &mut Capability
         .sum()
 }
 
-/// `NetworkClient` launch grant for `holder`.
+/// `NetworkClient` launch grant for `holder`. Only a build with the Linux socket layer
+/// launches with it (`system_shell::grant_network_client`).
+#[cfg(any(test, clean_slate_linux_socket))]
 pub(crate) fn grant_network_client_entitlement(holder: HolderId) -> Result<(), CapabilityError> {
     let live_generation = live_network_instance_generation().map(|g| u64::from(g.0));
     let table = unsafe { capability_space_mut() };
@@ -593,6 +597,7 @@ pub(crate) fn grant_network_client_entitlement(holder: HolderId) -> Result<(), C
     Ok(())
 }
 
+#[cfg(any(test, clean_slate_linux_socket))]
 fn log_entitlement(holder: HolderId, live_generation: Option<u64>) {
     match live_generation {
         Some(generation) => kernel_log_fmt(format_args!(
