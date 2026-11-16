@@ -4037,6 +4037,12 @@ trait AcceptanceDriver {
     fn pending(&self) -> Option<String> {
         None
     }
+    /// Whether the guest is this kernel, so a pass requires its boot banner
+    /// ([`guest_reboot::GuestRebootDetector::require_kernel_banner`]). Only a non-kernel
+    /// fixture guest returns `false`.
+    fn boots_kernel(&self) -> bool {
+        true
+    }
     /// Releases the driver's connections; runs on every exit path.
     fn shutdown(&mut self) {}
 }
@@ -4389,6 +4395,15 @@ fn run_driven_acceptance_command(
     join_output_reader(stderr_handle);
     drain_output_events(&rx, &mut output);
 
+    if let Some(reboot) = reboot_detector.observe(output.as_bytes()) {
+        let transcript = save_guest_reboot_transcript(&output)?;
+        return Err(XtaskError::CommandFailed {
+            command: command_display,
+            status: format!("{reboot}; transcript: {}", transcript.display()),
+        });
+    }
+    let boots_kernel = driver.0.boots_kernel();
+
     if authoritative_pass {
         if let Some(fail_line) = unexpected_guest_failure(&output, marker_set, true) {
             return Err(XtaskError::CommandFailed {
@@ -4399,6 +4414,7 @@ fn run_driven_acceptance_command(
         if markers_require_verbatim_linux_hello(marker_set) {
             assert_no_ipc_framed_linux_hello(&output)?;
         }
+        require_kernel_banner(&reboot_detector, boots_kernel)?;
         return Ok(output);
     }
 
@@ -4421,7 +4437,21 @@ fn run_driven_acceptance_command(
     }
 
     validate_output_markers(&output, marker_set)?;
+    require_kernel_banner(&reboot_detector, boots_kernel)?;
     Ok(output)
+}
+
+/// A passing session of a kernel guest must have shown the kernel boot banner.
+fn require_kernel_banner(
+    detector: &guest_reboot::GuestRebootDetector,
+    boots_kernel: bool,
+) -> Result<(), XtaskError> {
+    if !boots_kernel {
+        return Ok(());
+    }
+    detector
+        .require_kernel_banner()
+        .map_err(XtaskError::Validation)
 }
 
 /// Keeps the whole transcript of a session that rebooted, one file per run.

@@ -512,6 +512,9 @@ fn drive(
             Ok(next) => {
                 state = Some(next);
                 if boundaries.len() == STEPS.len() {
+                    if let Err(missing) = reboot_detector.require_kernel_banner() {
+                        return fail(&transcript, missing);
+                    }
                     save_transcript(&transcript)?;
                     return Ok((transcript, boundaries));
                 }

@@ -108,6 +108,7 @@ pub(crate) struct QmpScriptDriver {
     version: Option<QemuVersion>,
     keep_peer_probe: bool,
     peer_probe: Option<TcpStream>,
+    boots_fixture: bool,
 }
 
 impl QmpScriptDriver {
@@ -146,6 +147,7 @@ impl QmpScriptDriver {
             version: None,
             keep_peer_probe: false,
             peer_probe: None,
+            boots_fixture: false,
         })
     }
 
@@ -186,6 +188,12 @@ impl QmpScriptDriver {
     /// so [`Self::peer_closed_within`] can prove QEMU's side went away.
     pub(crate) fn keep_peer_probe(&mut self) {
         self.keep_peer_probe = true;
+    }
+
+    /// Marks the guest as a fixture image rather than the kernel, so a pass does not require the
+    /// kernel boot banner.
+    pub(crate) fn boots_fixture(&mut self) {
+        self.boots_fixture = true;
     }
 
     /// Whether QEMU closed its end of the QMP connection within `timeout`.
@@ -560,6 +568,10 @@ impl AcceptanceDriver for QmpScriptDriver {
             }
             _ => format!("QMP script at {}", self.position()),
         })
+    }
+
+    fn boots_kernel(&self) -> bool {
+        !self.boots_fixture
     }
 
     fn shutdown(&mut self) {
