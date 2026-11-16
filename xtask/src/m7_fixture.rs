@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration as StdDuration;
@@ -55,7 +55,23 @@ impl Default for FixtureOptions {
 pub struct M7FixturePeer {
     port: u16,
     stop: Arc<AtomicBool>,
+    seen: Arc<FixtureSeen>,
     handle: Option<JoinHandle<()>>,
+}
+
+/// What the peer has served so far, for lanes that confirm an exchange from the peer's side.
+#[derive(Default)]
+struct FixtureSeen {
+    /// DNS replies sent that carry an A record for `FIXTURE_HOSTNAME`.
+    fixture_a_answers: AtomicU32,
+    /// HTTP responses the M9 HTTP service sent.
+    http_responses: AtomicU32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FixtureCounts {
+    pub fixture_a_answers: u32,
+    pub http_responses: u32,
 }
 
 impl M7FixturePeer {
@@ -68,16 +84,26 @@ impl M7FixturePeer {
         let port = listener.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
-        let handle = thread::spawn(move || run_peer(listener, stop_flag, options));
+        let seen = Arc::new(FixtureSeen::default());
+        let peer_seen = Arc::clone(&seen);
+        let handle = thread::spawn(move || run_peer(listener, stop_flag, peer_seen, options));
         Ok(Self {
             port,
             stop,
+            seen,
             handle: Some(handle),
         })
     }
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    pub fn counts(&self) -> FixtureCounts {
+        FixtureCounts {
+            fixture_a_answers: self.seen.fixture_a_answers.load(Ordering::SeqCst),
+            http_responses: self.seen.http_responses.load(Ordering::SeqCst),
+        }
     }
 
     pub fn shutdown(mut self) {
@@ -88,7 +114,12 @@ impl M7FixturePeer {
     }
 }
 
-fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOptions) {
+fn run_peer(
+    listener: TcpListener,
+    stop: Arc<AtomicBool>,
+    seen: Arc<FixtureSeen>,
+    options: FixtureOptions,
+) {
     listener
         .set_nonblocking(true)
         .expect("fixture listener nonblocking");
@@ -202,6 +233,9 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
                 }
                 if dns_socket.send_slice(&response, endpoint).is_ok() {
                     println!("[FIX ] dns query name={name} rcode={rcode}");
+                    if carries_fixture_a_record(&name, &response) {
+                        seen.fixture_a_answers.fetch_add(1, Ordering::SeqCst);
+                    }
                 }
             }
         }
@@ -210,7 +244,9 @@ fn run_peer(listener: TcpListener, stop: Arc<AtomicBool>, options: FixtureOption
         }
         tls_service.poll(&mut sockets);
         if let Some(http) = m9_http_service.as_mut() {
-            http.poll(&mut sockets);
+            if http.poll(&mut sockets) {
+                seen.http_responses.fetch_add(1, Ordering::SeqCst);
+            }
         }
         if let Some(banner) = m9_banner_service.as_mut() {
             banner.poll(&mut sockets);
@@ -423,6 +459,15 @@ struct QemuTxToken<'a> {
 }
 
 const M9_HTTP_ADDR: [u8; 4] = [10, 77, 0, 50];
+
+/// A reply for `FIXTURE_HOSTNAME` with no error and at least one answer, which
+/// [`build_dns_response`] only sends for an A query.
+fn carries_fixture_a_record(name: &str, response: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(FIXTURE_HOSTNAME)
+        && response.len() >= 8
+        && response[3] & 0x0F == 0
+        && u16::from_be_bytes([response[6], response[7]]) > 0
+}
 
 fn build_dns_response(query: &[u8], m9_profile: bool) -> Option<(String, Vec<u8>)> {
     if query.len() < 12 {

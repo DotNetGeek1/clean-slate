@@ -254,7 +254,8 @@ impl M9HttpService {
         }
     }
 
-    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) {
+    /// Returns whether this poll sent a response.
+    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) -> bool {
         self.pool.relisten_closed(sockets);
         if self.active.is_none() {
             if let Some(handle) = self.pool.accept(sockets) {
@@ -263,18 +264,19 @@ impl M9HttpService {
                 self.closed = false;
                 println!("[FIX ] m9 http connect");
             }
-            return;
+            return false;
         }
         let active = self.active.expect("m9 http active");
         let socket = sockets.get_mut::<tcp::Socket>(active);
         if !socket.is_active() {
             self.release_active();
-            return;
+            return false;
         }
         if socket.may_recv() {
             let mut buf = [0u8; 256];
             let _ = socket.recv_slice(&mut buf);
         }
+        let mut responded = false;
         if !self.sent && socket.may_send() {
             let resp = concat!(
                 "HTTP/1.0 200 OK\r\n",
@@ -284,6 +286,7 @@ impl M9HttpService {
             );
             if socket.send_slice(resp.as_bytes()).is_ok() {
                 self.sent = true;
+                responded = true;
                 println!("[FIX ] m9 http response");
             }
         }
@@ -295,6 +298,7 @@ impl M9HttpService {
             socket.close();
             self.release_active();
         }
+        responded
     }
 
     /// Forgets the served connection; its socket listens again once it reaches CLOSED.
