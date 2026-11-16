@@ -4,9 +4,9 @@
 //!
 //! No lost wake: the authorization, the pending check, the deadline check and the waiter
 //! registration run in one interrupts-disabled section ([`block_current_thread_unless`]).
-//! Messages are queued only by `ServiceLifecycleController::push_pending` and
-//! `push_terminal_pending`, which call [`wake_lifecycle_waiters`] after storing the message
-//! and run with interrupts disabled (native syscall path, CPL3 fault path, or inside
+//! Messages are stored only by `ServiceLifecycleController::push_pending`,
+//! `push_terminal_pending` and `report_ready_from_pid`, which call [`wake_lifecycle_waiters`]
+//! after storing the message and run with interrupts disabled (native syscall path, CPL3 fault path, or inside
 //! `without_interrupts`) on the single CPU. A producer therefore runs wholly before the check,
 //! which then sees its message, or wholly after the registration, and wakes the waiter.
 //!
@@ -117,6 +117,12 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
             args.deadline_ns,
             now_read,
             step,
+        );
+        #[cfg(clean_slate_system_init)]
+        crate::service::system_init::observe_lifecycle_wait(
+            caller_pid,
+            args.deadline_ns,
+            matches!(step, BlockCheck::Block),
         );
         step
     };

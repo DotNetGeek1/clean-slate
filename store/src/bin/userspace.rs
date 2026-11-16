@@ -10,6 +10,8 @@ use clean_slate_block::{
     BlockTransportError, BlockUnsupportedError,
 };
 use clean_slate_capability::syscall_abi::SYSCALL_EINVAL;
+use clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY;
+use clean_slate_service_fixtures::ready_detail::StorageReadyDetail;
 use clean_slate_service_fixtures::{
     BlockTransportOp, BlockTransportRequest, BlockTransportResponse, BlockTransportStatus,
     ObjectServiceRequest, StorageServiceBootstrap, BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES,
@@ -161,14 +163,33 @@ fn run_object_service(bootstrap: &mut StorageServiceBootstrap) -> Result<u64, u6
     if role_handle == 0 {
         return Err(0);
     }
-    let mut store = match ObjectStore::mount(SyscallBlockDevice::attach(bootstrap)?) {
-        Ok(store) => store,
-        Err(StoreError::Incompatible(IncompatibleFormatError::BadMagic)) => {
-            ObjectStore::format(SyscallBlockDevice::attach(bootstrap)?).map_err(store_error_code)?
-        }
+    let (mut store, formatted) = match ObjectStore::mount(SyscallBlockDevice::attach(bootstrap)?) {
+        Ok(store) => (store, false),
+        Err(StoreError::Incompatible(IncompatibleFormatError::BadMagic)) => (
+            ObjectStore::format(SyscallBlockDevice::attach(bootstrap)?)
+                .map_err(store_error_code)?,
+            true,
+        ),
         Err(error) => return Err(store_error_code(error)),
     };
     bootstrap.mounted_generation = store.committed_generation();
+    // Ready once the store is mounted or formatted. A refusal (no supervised instance, or
+    // already reported) changes nothing in the kernel, so the service serves either way.
+    raw_syscall(
+        SYSCALL_NR_SERVICE_READY,
+        [
+            StorageReadyDetail {
+                formatted,
+                generation: bootstrap.mounted_generation,
+            }
+            .encode(),
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+    );
     let mut request_buf = [0u8; OBJECT_SERVICE_REQUEST_BYTES];
     loop {
         // Blocks in the kernel until a request is pending; it never reports an empty queue.

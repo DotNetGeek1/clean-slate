@@ -84,6 +84,14 @@ impl RawBackend {
         Self::Loopback
     }
 
+    const fn name(&self) -> &'static str {
+        match self {
+            Self::Loopback => "loopback",
+            Self::Virtio => "virtio",
+            Self::Failed => "failed",
+        }
+    }
+
     fn reset(
         &mut self,
         loopback: &mut KernelLoopbackLink,
@@ -855,6 +863,11 @@ impl NetBridge {
                 .is_some_and(VirtioNetDevice::rx_completion_pending),
             RawBackend::Failed => false,
         }
+    }
+
+    /// The device behind the network service's raw link: `loopback` when no NIC was found.
+    pub fn raw_backend_name(&self) -> &'static str {
+        self.raw_backend.name()
     }
 
     pub fn raw_geometry(&self, service_pid: u64) -> LinkProperties {

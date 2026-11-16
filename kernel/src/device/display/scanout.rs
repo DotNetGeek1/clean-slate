@@ -195,7 +195,7 @@ impl Presenter {
         (self.holder.is_some(), self.wake.is_some())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, clean_slate_system_init))]
     pub(crate) fn holder(&self) -> Option<HolderId> {
         self.holder
     }

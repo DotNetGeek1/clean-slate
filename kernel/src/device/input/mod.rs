@@ -88,7 +88,7 @@ impl ConsumerSlot {
         true
     }
 
-    #[cfg(any(test, feature = "m10-input-self-test"))]
+    #[cfg(any(test, feature = "m10-input-self-test", clean_slate_system_init))]
     fn bindings_for(&self, holder: HolderId) -> usize {
         usize::from(self.holder == Some(holder))
     }
@@ -339,7 +339,7 @@ pub(crate) fn consumer_bound() -> bool {
     without_interrupts(|| input_mut().consumer.holder.is_some())
 }
 
-#[cfg(any(test, feature = "m10-input-self-test"))]
+#[cfg(any(test, feature = "m10-input-self-test", clean_slate_system_init))]
 pub(crate) fn consumer_bindings_for(holder: HolderId) -> usize {
     without_interrupts(|| input_mut().consumer.bindings_for(holder))
 }

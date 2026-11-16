@@ -156,7 +156,7 @@ jobs:
         env:
           RUSTC_BOOTSTRAP: "1"
         run: |
-          for bin in clean-slate-supervisor-userspace clean-slate-supervisor-restart-policy-userspace clean-slate-supervisor-recovery-userspace clean-slate-m6-fixture-userspace; do
+          for bin in clean-slate-supervisor-userspace clean-slate-supervisor-restart-policy-userspace clean-slate-supervisor-recovery-userspace clean-slate-m6-fixture-userspace clean-slate-supervisor-init; do
             cargo clippy -p clean-slate-supervisor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           done
           for bin in clean-slate-compositor-userspace clean-slate-compositor-client-userspace; do
@@ -181,14 +181,16 @@ jobs:
           cargo build -p clean-slate-compositor --bin clean-slate-compositor-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys
           cargo build -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys
 
-      # Every kernel build embeds these two ELFs (kernel/build.rs), including clippy,
-      # the bare kernel build, and host tests below.
-      - name: Build storage and network userspace images
+      # Every kernel build embeds the storage and network ELFs (kernel/build.rs), including
+      # clippy, the bare kernel build, and host tests below; the featureless build (the default
+      # image, also the host tests) embeds init as well.
+      - name: Build storage, network and init userspace images
         env:
           RUSTC_BOOTSTRAP: "1"
         run: |
           cargo build -p clean-slate-store --bin clean-slate-storage-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release
           cargo build -p clean-slate-net-service --bin clean-slate-network-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release
+          cargo build -p clean-slate-supervisor --bin clean-slate-supervisor-init --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
 
       - name: Clippy (kernel UEFI)
         run: |

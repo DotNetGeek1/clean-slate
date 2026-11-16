@@ -130,6 +130,28 @@ const _: () = assert!(
     STORAGE_SERVICE_MAPPED_PAGES <= crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
 );
 
+#[cfg(clean_slate_system_init)]
+include!(concat!(env!("OUT_DIR"), "/init_userspace_entry.rs"));
+#[cfg(clean_slate_system_init)]
+const INIT_USERSPACE_IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/init_userspace.bin"));
+#[cfg(clean_slate_system_init)]
+const INIT_STACK_ADDRESS: u64 =
+    clean_slate_service_fixtures::init_bootstrap::INIT_BOOTSTRAP_ADDRESS + PAGE_SIZE;
+#[cfg(clean_slate_system_init)]
+const INIT_STACK_PAGES: u64 = 8;
+/// Fixed upper bound on init's PT_LOAD pages, like `STORAGE_SERVICE_MAX_CODE_PAGES`.
+#[cfg(clean_slate_system_init)]
+const INIT_MAX_CODE_PAGES: usize = 64;
+#[cfg(clean_slate_system_init)]
+const _: () = assert!(INIT_USERSPACE_MAPPED_CODE_PAGES <= INIT_MAX_CODE_PAGES);
+#[cfg(clean_slate_system_init)]
+const _: () = assert!(INIT_USERSPACE_RELOCATED_BASE == SERVICE_USER_CODE_ADDRESS);
+#[cfg(clean_slate_system_init)]
+const _: () = assert!(
+    INIT_USERSPACE_MAPPED_CODE_PAGES + (INIT_STACK_PAGES as usize)
+        < crate::mm::address_space::MAX_ADDRESS_SPACE_USER_MAPPINGS
+);
+
 #[cfg(any(
     feature = "m6-object-self-test",
     feature = "m6-process-control-self-test",
@@ -982,6 +1004,94 @@ impl crate::service::grants::BootstrapGrantAuthority for KernelBootstrapGrants {
             .map(|role| role.encode())
             .map_err(|_| "object service role grant failed")
     }
+}
+
+/// Launches userspace init (`clean-slate-supervisor-init`, #218 S3b) directly on
+/// `scheduler_slot`; init is not a supervised service. `bootstrap_for` gets init's pid before the
+/// process can run and returns the page init reads at `INIT_BOOTSTRAP_ADDRESS`, so every
+/// authority init holds is granted there.
+#[cfg(clean_slate_system_init)]
+#[inline(never)]
+pub(crate) fn launch_init_image(
+    allocator: &mut PageAllocator,
+    kernel_stack_top: u64,
+    scheduler_slot: usize,
+    bootstrap_for: impl FnOnce(
+        u64,
+    ) -> Result<
+        clean_slate_service_fixtures::init_bootstrap::InitBootstrap,
+        &'static str,
+    >,
+) -> Result<SpawnedServiceInstance, &'static str> {
+    use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
+    use crate::mm::address_space::map_process_page;
+    use crate::mm::image_loader::map_embedded_segments;
+    use crate::mm::image_loader::map_user_stack_pages;
+    use crate::mm::paging::zero_page;
+    use crate::mm::phys_to_virt;
+    use crate::process::id_allocator::id_allocator_mut;
+    use clean_slate_service_fixtures::init_bootstrap::{InitBootstrap, INIT_BOOTSTRAP_ADDRESS};
+    use core::ptr;
+    use x86_64::structures::paging::PageTableFlags;
+    use x86_64::VirtAddr;
+
+    with_process_address_space(
+        allocator,
+        VirtAddr::new(SERVICE_USER_CODE_ADDRESS),
+        |allocator, slot| {
+            let address_space = slot.as_mut().ok_or("init address space missing")?;
+            let (pid, tid) = {
+                let ids = unsafe { id_allocator_mut() };
+                (ids.allocate_pid()?, ids.allocate_tid()?)
+            };
+            map_embedded_segments(
+                address_space,
+                allocator,
+                SERVICE_USER_CODE_ADDRESS,
+                INIT_USERSPACE_IMAGE,
+                &INIT_USERSPACE_SEGMENTS,
+            )?;
+            map_user_stack_pages(
+                address_space,
+                allocator,
+                INIT_STACK_ADDRESS,
+                INIT_STACK_PAGES,
+            )?;
+            let data_frame = allocator
+                .allocate_page()
+                .ok_or("allocator could not provide the init bootstrap page")?;
+            zero_page(data_frame);
+            let bootstrap = bootstrap_for(pid)?;
+            unsafe {
+                ptr::write(phys_to_virt(data_frame) as *mut InitBootstrap, bootstrap);
+            }
+            map_process_page(
+                address_space,
+                INIT_BOOTSTRAP_ADDRESS,
+                data_frame,
+                PageTableFlags::PRESENT
+                    | PageTableFlags::WRITABLE
+                    | PageTableFlags::NO_EXECUTE
+                    | PageTableFlags::USER_ACCESSIBLE,
+                allocator,
+            )?;
+            let user_stack_pointer = INIT_STACK_ADDRESS + INIT_STACK_PAGES * PAGE_SIZE;
+            let entry_rip = SERVICE_USER_CODE_ADDRESS + INIT_USERSPACE_ENTRY_OFFSET;
+            let saved_stack_pointer =
+                build_userspace_entry_frame(kernel_stack_top, entry_rip, user_stack_pointer)?;
+            let address_space = slot.take().ok_or("init address space missing")?;
+            register_spawned_process_checked(
+                allocator,
+                address_space,
+                pid,
+                tid,
+                kernel_stack_top,
+                saved_stack_pointer,
+                entry_rip,
+                scheduler_slot,
+            )
+        },
+    )
 }
 
 /// Launches the real CPL3 storage-service image (`clean-slate-storage-userspace`).

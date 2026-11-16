@@ -10,10 +10,14 @@ pub enum RestartPolicy {
 }
 
 /// Deterministic bounded retry with linearly increasing backoff ticks.
+///
+/// Attempt `n` (1-based) waits `initial_delay_ticks + backoff_base_ticks * (n - 1)` after the
+/// failure. With the default `initial_delay_ticks` of 0 the first retry is immediate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoundedRestart {
     pub max_attempts: u32,
     pub backoff_base_ticks: u64,
+    pub initial_delay_ticks: u64,
 }
 
 impl BoundedRestart {
@@ -21,6 +25,15 @@ impl BoundedRestart {
         Self {
             max_attempts,
             backoff_base_ticks,
+            initial_delay_ticks: 0,
+        }
+    }
+
+    /// The same policy with every attempt, the first included, delayed by `ticks` more.
+    pub const fn with_initial_delay(self, ticks: u64) -> Self {
+        Self {
+            initial_delay_ticks: ticks,
+            ..self
         }
     }
 }
@@ -100,7 +113,8 @@ impl RecoveryRuntime {
                 let next_attempt = self.attempts.saturating_add(1);
                 let delay = limits
                     .backoff_base_ticks
-                    .saturating_mul(u64::from(next_attempt.saturating_sub(1)));
+                    .saturating_mul(u64::from(next_attempt.saturating_sub(1)))
+                    .saturating_add(limits.initial_delay_ticks);
                 self.not_before = ticks_add(now, delay);
                 self.pending = true;
                 RestartDecision::Scheduled {
@@ -179,6 +193,32 @@ mod tests {
                 attempt: 2,
                 not_before: 15,
             }
+        );
+    }
+
+    #[test]
+    fn initial_delay_postpones_every_attempt_including_the_first() {
+        let limits = BoundedRestart::new(3, 10).with_initial_delay(7);
+        assert_eq!(BoundedRestart::new(3, 10).initial_delay_ticks, 0);
+        let mut runtime = RecoveryRuntime::new(RestartPolicy::OnFailure(limits));
+        let mut not_befores = Vec::new();
+        for attempt in 1..=3 {
+            let RestartDecision::Scheduled {
+                attempt: scheduled,
+                not_before,
+            } = runtime.on_failure(Some(1), 100)
+            else {
+                panic!("attempt {attempt} must be scheduled");
+            };
+            assert_eq!(scheduled, attempt);
+            not_befores.push(not_before);
+            runtime.record_attempt_started(attempt);
+            runtime.clear_pending_after_attempt();
+        }
+        assert_eq!(not_befores, [107, 117, 127]);
+        assert_eq!(
+            runtime.on_failure(Some(1), 100),
+            RestartDecision::Suppressed(RestartSuppressedReason::RetryExhausted)
         );
     }
 

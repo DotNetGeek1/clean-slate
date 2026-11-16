@@ -50,14 +50,16 @@ pub enum Grant {
     NetworkService,
 }
 
-/// What init does when a started service exits or faults. Ticks are the kernel clock ticks the
-/// supervisor already counts in.
+/// What init does when a started service exits or faults. Init counts ticks in monotonic
+/// nanoseconds (`WORK_SET` op `NOW`). Retry `n` waits `initial_delay_ticks +
+/// backoff_base_ticks * (n - 1)` after the failure; after `max_attempts` retries init stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestartSpec {
     Never,
     OnFailure {
         max_attempts: u32,
         backoff_base_ticks: u64,
+        initial_delay_ticks: u64,
     },
 }
 
@@ -87,11 +89,14 @@ impl ServiceSpec {
     }
 }
 
-/// Placeholder until init (#218 S3) consumes it; matches the bound the existing supervisor
-/// binaries use.
+const NANOS_PER_SECOND: u64 = 1_000_000_000;
+
+/// Provisional (#218 S3b open question): three retries, 2 s apart and growing by 2 s, the first
+/// one 2 s after the failure. The count does not reset after a long healthy run.
 const SYSTEM_RESTART: RestartSpec = RestartSpec::OnFailure {
     max_attempts: 3,
-    backoff_base_ticks: 0,
+    backoff_base_ticks: 2 * NANOS_PER_SECOND,
+    initial_delay_ticks: 2 * NANOS_PER_SECOND,
 };
 
 pub const STORAGE_SERVICE_SPEC: ServiceSpec = ServiceSpec {
@@ -103,14 +108,15 @@ pub const STORAGE_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     depends_on: &[],
 };
 
-/// `NETWORK_SERVICE_MODE_ACCEPTANCE` is the network image's request-serving loop.
+/// `NETWORK_SERVICE_MODE_ACCEPTANCE` is the network image's request-serving loop. Init starts it
+/// only once storage has reported ready.
 pub const NETWORK_SERVICE_SPEC: ServiceSpec = ServiceSpec {
     id: NETWORK_SERVICE_ID,
     image: ServiceImage::Network,
     mode: NETWORK_SERVICE_MODE_ACCEPTANCE,
     grants: &[Grant::NetworkService],
     restart: SYSTEM_RESTART,
-    depends_on: &[],
+    depends_on: &[STORAGE_SERVICE_ID],
 };
 
 pub const SYSTEM_MANIFEST: &[ServiceSpec] = &[STORAGE_SERVICE_SPEC, NETWORK_SERVICE_SPEC];
@@ -257,6 +263,22 @@ mod tests {
         assert_eq!(network.image, ServiceImage::Network);
         assert_eq!(network.mode, NETWORK_SERVICE_MODE_ACCEPTANCE);
         assert_eq!(network.grants, [Grant::NetworkService]);
+        assert_eq!(network.depends_on, [STORAGE_SERVICE_ID]);
+        assert!(storage.depends_on.is_empty());
+    }
+
+    #[test]
+    fn system_rows_restart_three_times_two_seconds_apart() {
+        for spec in SYSTEM_MANIFEST {
+            assert_eq!(
+                spec.restart,
+                RestartSpec::OnFailure {
+                    max_attempts: 3,
+                    backoff_base_ticks: 2_000_000_000,
+                    initial_delay_ticks: 2_000_000_000,
+                }
+            );
+        }
     }
 
     #[test]
