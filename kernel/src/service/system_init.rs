@@ -97,6 +97,16 @@ pub(crate) struct HeldAuthority {
     pub(crate) network_client_entitlement: usize,
     /// `/tmp` backing-object records (Linux `/tmp` write authority).
     pub(crate) tmp_objects: usize,
+    /// Graphics-class records with `GFX_SERVE` (the compositor's own port).
+    pub(crate) graphics_serve: usize,
+    /// Graphics-class records with `GFX_SHELL` and without `GFX_SERVE` (the desktop shell).
+    pub(crate) graphics_shell: usize,
+    /// Every other graphics-class record (an app's `GFX_CONNECT`).
+    pub(crate) graphics_client: usize,
+    /// Display-class records.
+    pub(crate) display: usize,
+    /// Input-class records.
+    pub(crate) input: usize,
     /// Capability-space records of any other kind. A console grant also records one IPC
     /// endpoint capability there; those are counted as `console_records`.
     pub(crate) console_records: usize,
@@ -185,6 +195,11 @@ impl HeldAuthority {
         network_client: 0,
         network_client_entitlement: 0,
         tmp_objects: 0,
+        graphics_serve: 0,
+        graphics_shell: 0,
+        graphics_client: 0,
+        display: 0,
+        input: 0,
         console_records: 1,
         other: 0,
         outside: OutsideCapabilitySpace {
@@ -205,7 +220,9 @@ impl HeldAuthority {
     /// get no lifecycle control, and a console only through `Grant::Console`; the network grant
     /// also binds the raw network link. A Linux image is a Linux-personality process.
     /// `Grant::NetworkClient` always means one entitlement, and one instance-bound client
-    /// capability exactly when `network_instance_live`.
+    /// capability exactly when `network_instance_live`. `Grant::GraphicsPort` is one
+    /// registered port as well as its `GFX_SERVE` record. Before the process has run it has
+    /// bound no presenter or input consumer and opened no connection, so those stay 0 here.
     pub(crate) fn for_grants(
         image: ServiceImage,
         grants: &[Grant],
@@ -223,7 +240,13 @@ impl HeldAuthority {
             network_client: held(Grant::NetworkClient) * usize::from(network_instance_live),
             network_client_entitlement: held(Grant::NetworkClient),
             tmp_objects: held(Grant::TmpObjects) * LINUX_TMP_MAX_FILES,
+            graphics_serve: held(Grant::GraphicsPort),
+            graphics_shell: held(Grant::GraphicsShellRole),
+            graphics_client: held(Grant::GraphicsAppRole),
+            display: held(Grant::DisplayPresenter),
+            input: held(Grant::InputSeat),
             outside: OutsideCapabilitySpace {
+                ports_served: held(Grant::GraphicsPort),
                 raw_network_link: held(Grant::NetworkService),
                 linux_personality: usize::from(image.is_linux()),
                 console_input: held(Grant::ConsoleInput),
@@ -246,7 +269,7 @@ impl HeldAuthority {
         use crate::capability::network::{
             is_instance_bound_network_client, is_network_client_entitlement,
         };
-        use clean_slate_capability::{list_holder, HolderId, ResourceClass};
+        use clean_slate_capability::{list_holder, HolderId, ResourceClass, Rights};
         use clean_slate_service_fixtures::object_capability::OBJECT_SERVICE_ROLE_ID;
 
         let (lifecycle_control, block_device) = held_in_controller;
@@ -282,6 +305,15 @@ impl HeldAuthority {
                     }
                     ResourceClass::Network => &mut held.network,
                     ResourceClass::IpcEndpoint => &mut held.console_records,
+                    ResourceClass::Graphics if record.rights.contains(Rights::GFX_SERVE) => {
+                        &mut held.graphics_serve
+                    }
+                    ResourceClass::Graphics if record.rights.contains(Rights::GFX_SHELL) => {
+                        &mut held.graphics_shell
+                    }
+                    ResourceClass::Graphics => &mut held.graphics_client,
+                    ResourceClass::Display => &mut held.display,
+                    ResourceClass::Input => &mut held.input,
                     _ => &mut held.other,
                 };
                 *count += 1;
@@ -296,7 +328,7 @@ impl fmt::Display for HeldAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "lifecycle-control={} console={} block-device={} object-service={} network={} net-client={} net-client-entitlement={} tmp-objects={} other={} {}",
+            "lifecycle-control={} console={} block-device={} object-service={} network={} net-client={} net-client-entitlement={} tmp-objects={} gfx-serve={} gfx-shell={} gfx-client={} display={} input={} other={} {}",
             self.lifecycle_control,
             self.console,
             self.block_device,
@@ -305,6 +337,11 @@ impl fmt::Display for HeldAuthority {
             self.network_client,
             self.network_client_entitlement,
             self.tmp_objects,
+            self.graphics_serve,
+            self.graphics_shell,
+            self.graphics_client,
+            self.display,
+            self.input,
             self.other + self.console_records.saturating_sub(self.console),
             self.outside,
         )
@@ -339,25 +376,49 @@ pub(crate) fn audit_service_authority(
     Err("service authority differs from its manifest row")
 }
 
-/// Declares every system manifest row, then spawns init on scheduler slot 0 and checks the
-/// authority it holds. Returns init's pid. Runs before the scheduler starts, so init cannot
-/// run before its services are declared.
+/// The desktop mode init and the kernel run with: the boot option's, or off when it asks for the
+/// desktop and boot brought up no display output (D4). Logs the fallback.
+#[cfg(clean_slate_system_init)]
+fn effective_desktop_mode(requested: u64, has_display: bool) -> u64 {
+    use clean_slate_service_fixtures::init_bootstrap::DESKTOP_MODE_OFF;
+
+    if requested == DESKTOP_MODE_OFF || has_display {
+        return requested;
+    }
+    kernel_log_fmt(format_args!("{NO_DISPLAY_LINE}\n"));
+    DESKTOP_MODE_OFF
+}
+
+/// D4: `--desktop` on a machine without a usable display boots the base system.
+#[cfg(clean_slate_system_init)]
+pub(crate) const NO_DISPLAY_LINE: &str =
+    "[KERN] boot profile=desktop has no display output; booting base, desktop rows not declared";
+
+/// Selects the manifest for the boot option, installs it in the lifecycle controller and
+/// declares every row, then spawns init on scheduler slot 0 and checks the authority it holds.
+/// Returns init's pid. Runs before the scheduler starts and after display bring-up, so init
+/// cannot run before its services are declared, and the desktop rows are declared only with
+/// a display to present on.
 #[cfg(clean_slate_system_init)]
 pub(crate) fn launch_init(
     allocator: &mut crate::mm::frame_allocator::PageAllocator,
 ) -> Result<u64, &'static str> {
     use clean_slate_service_fixtures::init_bootstrap::InitBootstrap;
-    use clean_slate_service_fixtures::manifest::SYSTEM_MANIFEST;
+    use clean_slate_service_fixtures::manifest::manifest_for;
 
     const INIT_SCHEDULER_SLOT: usize = 0;
 
     let option = crate::boot::boot_options::read_boot_option();
     crate::boot::boot_options::log_boot_option(&option);
-    let desktop_mode = option.mode.word();
+    let has_display = crate::device::display::with_active_display(|display| display.is_some());
+    let desktop_mode = effective_desktop_mode(option.mode.word(), has_display);
+    let manifest = manifest_for(desktop_mode);
+    super::desktop_image::set_row_desktop_mode(desktop_mode);
 
     {
         let controller = unsafe { super::service_lifecycle_controller_mut() };
-        for spec in SYSTEM_MANIFEST {
+        controller.use_scenario_manifest(manifest);
+        for spec in manifest {
             controller.declare_service(spec.id)?;
         }
     }
@@ -383,7 +444,7 @@ pub(crate) fn launch_init(
     INIT_PID.store(pid, Ordering::Release);
     kernel_log_fmt(format_args!(
         "[KERN] init launched pid={pid} slot={INIT_SCHEDULER_SLOT} declared-services={}\n",
-        SYSTEM_MANIFEST.len()
+        manifest.len()
     ));
     let held = HeldAuthority::of(
         pid,
@@ -673,11 +734,11 @@ mod tests {
         );
         assert_eq!(
             std::format!("{shell}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
         );
         assert_eq!(
             std::format!("{without_network}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=1 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
         );
         let without_stdin = HeldAuthority::for_grants(
             ServiceImage::LinuxShell,
@@ -692,12 +753,91 @@ mod tests {
         assert_eq!(native.outside.linux_personality, 0);
     }
 
+    /// At launch the compositor holds its console, one registered port with `GFX_SERVE` on it,
+    /// output 0 and seat 0; the shell and the app hold a console and one graphics record each.
+    #[cfg(clean_slate_system_init)]
+    #[test]
+    fn desktop_rows_must_hold_their_graphics_display_and_input_grants_only() {
+        use clean_slate_service_fixtures::manifest::{find_service, SYSTEM_DESKTOP_MANIFEST};
+        use clean_slate_service_fixtures::{
+            COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
+        };
+
+        let row = |id| HeldAuthority::for_row(find_service(SYSTEM_DESKTOP_MANIFEST, id), true);
+        let console = HeldAuthority {
+            console: 1,
+            console_records: 1,
+            ..HeldAuthority::default()
+        };
+        let compositor = row(COMPOSITOR_SERVICE_ID);
+        assert_eq!(
+            compositor,
+            HeldAuthority {
+                graphics_serve: 1,
+                display: 1,
+                input: 1,
+                outside: OutsideCapabilitySpace {
+                    ports_served: 1,
+                    ..OutsideCapabilitySpace::default()
+                },
+                ..console
+            }
+        );
+        assert_eq!(
+            std::format!("{compositor}"),
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=1 gfx-shell=0 gfx-client=0 display=1 input=1 other=0 owned-endpoints=0 ports=1 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+        );
+        assert_eq!(
+            row(DESKTOP_SHELL_SERVICE_ID),
+            HeldAuthority {
+                graphics_shell: 1,
+                ..console
+            }
+        );
+        let app = row(PLAYGROUND_SERVICE_ID);
+        assert_eq!(
+            app,
+            HeldAuthority {
+                graphics_client: 1,
+                ..console
+            }
+        );
+        // An app that also held the seat (tooth 1) differs from its row, by name.
+        let with_seat = HeldAuthority { input: 1, ..app };
+        assert_ne!(with_seat, app);
+        assert!(std::format!("{with_seat}").contains(" input=1 "));
+        // The base rows hold none of the new authority in either manifest.
+        native_rows_hold_exactly(|id| {
+            HeldAuthority::for_row(find_service(SYSTEM_DESKTOP_MANIFEST, id), true)
+        });
+    }
+
+    #[cfg(clean_slate_system_init)]
+    #[test]
+    fn a_desktop_request_without_a_display_boots_base() {
+        use clean_slate_service_fixtures::init_bootstrap::{
+            DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_VIRTIO_GPU,
+        };
+        for mode in [DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_VIRTIO_GPU] {
+            assert_eq!(effective_desktop_mode(mode, true), mode);
+            assert_eq!(effective_desktop_mode(mode, false), DESKTOP_MODE_OFF);
+        }
+        assert_eq!(
+            effective_desktop_mode(DESKTOP_MODE_OFF, false),
+            DESKTOP_MODE_OFF
+        );
+        assert_eq!(
+            effective_desktop_mode(DESKTOP_MODE_OFF, true),
+            DESKTOP_MODE_OFF
+        );
+    }
+
     #[cfg(clean_slate_system_init)]
     #[test]
     fn init_is_expected_to_hold_lifecycle_control_and_the_console_only() {
         assert_eq!(
             std::format!("{}", HeldAuthority::INIT),
-            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
         );
         for held in [
             HeldAuthority {
@@ -769,6 +909,31 @@ mod tests {
                 ..HeldAuthority::INIT.outside
             },
         ];
+        for held in [
+            HeldAuthority {
+                graphics_serve: 1,
+                ..HeldAuthority::INIT
+            },
+            HeldAuthority {
+                graphics_shell: 1,
+                ..HeldAuthority::INIT
+            },
+            HeldAuthority {
+                graphics_client: 1,
+                ..HeldAuthority::INIT
+            },
+            HeldAuthority {
+                display: 1,
+                ..HeldAuthority::INIT
+            },
+            HeldAuthority {
+                input: 1,
+                ..HeldAuthority::INIT
+            },
+        ] {
+            assert_ne!(held, HeldAuthority::INIT);
+            assert!(!std::format!("{held}").contains(" other=1 "), "{held}");
+        }
         let with_tmp = HeldAuthority {
             tmp_objects: 1,
             ..HeldAuthority::INIT

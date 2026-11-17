@@ -152,10 +152,23 @@ fn linux_rootfs_compiled(system_init: bool) -> bool {
     system_init || any_feature_enabled(&["m9-rootfs"])
 }
 
+/// `clean_slate_desktop` compiles the three desktop images, their launch path, the graphics
+/// port registry and the graphics, display and input grants: in the build that launches init
+/// (for its desktop rows), and in the `m10-desktop` kernels until that policy is deleted.
+fn emit_desktop_cfg(system_init: bool) -> bool {
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_desktop)");
+    let desktop = system_init || any_feature_enabled(&["m10-desktop"]);
+    if desktop {
+        println!("cargo::rustc-cfg=clean_slate_desktop");
+    }
+    desktop
+}
+
 fn main() {
     let system_init = emit_system_init_cfg();
     emit_boot_tail_cfgs(system_init);
     emit_linux_cfgs(system_init);
+    let desktop = emit_desktop_cfg(system_init);
     // Init is embedded only in the build that launches it.
     if system_init {
         embed_userspace_image("init_userspace.bin", "clean-slate-supervisor-init", true);
@@ -205,10 +218,10 @@ fn main() {
     if linux_rootfs_compiled(system_init) {
         embed_m9_rootfs_image();
     }
-    if env::var("CARGO_FEATURE_M10_DESKTOP").is_ok() {
+    if desktop {
         // The self-test kernel embeds the `fault-keys` builds of the compositor and playground
-        // (built into `target/fault-keys`); every other desktop kernel embeds images without
-        // that code.
+        // (built into `target/fault-keys`); every other desktop kernel, including the default
+        // image, embeds images without that code.
         let fault_keys = if env::var("CARGO_FEATURE_M10_DESKTOP_SELF_TEST").is_ok() {
             "target/fault-keys"
         } else {

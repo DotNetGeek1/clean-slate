@@ -1123,26 +1123,6 @@ fn run_inner() -> Result<(), &'static str> {
             not(clean_slate_system_init)
         ))]
         initialize_scheduler()?;
-        #[cfg(clean_slate_system_init)]
-        {
-            // The shell row reads the serial console; receive is on before any service runs.
-            crate::device::serial_console::set_input_notifier(Some(
-                crate::syscall::linux::poll::wake_console_input_pollers,
-            ));
-            let vector = crate::device::serial_console::enable()?;
-            serial_write_fmt(format_args!(
-                "[KERN] serial console input on vector={vector}\n"
-            ));
-            let allocator = crate::syscall::service_lifecycle_syscall_allocator_mut()
-                .as_mut()
-                .ok_or("init: service lifecycle allocator missing")?;
-            if let Err(message) = crate::service::system_init::launch_init(allocator) {
-                serial_write_fmt(format_args!("[KERN] init launch failed: {message}\n"));
-                crate::diagnostics::qemu::fatal_kernel_error(
-                    "init could not be launched; the system cannot continue",
-                );
-            }
-        }
         #[cfg(feature = "m9-stack-guard-self-test")]
         crate::selftest::m9_stack_guard::configure_stack_guard_probe_thread()?;
         #[cfg(all(feature = "m8-linux-hello", not(feature = "m8-linux-hello-self-test")))]
@@ -1169,6 +1149,28 @@ fn run_inner() -> Result<(), &'static str> {
         crate::device::input::begin_init_and_log();
         #[cfg(not(test))]
         crate::device::display::begin_virtio_gpu_and_log();
+        // After display bring-up, so the boot option's desktop rows are declared only with a
+        // display output to present on (D4).
+        #[cfg(clean_slate_system_init)]
+        {
+            // The shell row reads the serial console; receive is on before any service runs.
+            crate::device::serial_console::set_input_notifier(Some(
+                crate::syscall::linux::poll::wake_console_input_pollers,
+            ));
+            let vector = crate::device::serial_console::enable()?;
+            serial_write_fmt(format_args!(
+                "[KERN] serial console input on vector={vector}\n"
+            ));
+            let allocator = crate::syscall::service_lifecycle_syscall_allocator_mut()
+                .as_mut()
+                .ok_or("init: service lifecycle allocator missing")?;
+            if let Err(message) = crate::service::system_init::launch_init(allocator) {
+                serial_write_fmt(format_args!("[KERN] init launch failed: {message}\n"));
+                crate::diagnostics::qemu::fatal_kernel_error(
+                    "init could not be launched; the system cannot continue",
+                );
+            }
+        }
         serial_write_line("[KERN] scheduler initialized");
         start_scheduler()
     }

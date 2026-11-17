@@ -6,11 +6,13 @@ use crate::process::domain::teardown_process_by_id;
 use crate::process::process_registry_mut;
 use crate::service::capability::LifecycleControlCapabilityError;
 use crate::service::capability::{BlockDeviceCapabilityError, BlockDeviceCapabilityTable};
-use crate::service::grants::{apply_instance_grants, InstanceGrantAuthority};
+use crate::service::grants::{apply_instance_grants, GraphicsRole, InstanceGrantAuthority};
 use crate::service::lifecycle_wait::wake_lifecycle_waiters;
 use crate::service::spawn::{launch_builtin_service, LaunchContext};
 use crate::sync::global_cell::GlobalCell;
-use clean_slate_service_fixtures::manifest::{find_service, Grant, ServiceSpec, SYSTEM_MANIFEST};
+use clean_slate_service_fixtures::manifest::{
+    find_service, graphics_port_row, Grant, ServiceSpec, SYSTEM_DESKTOP_MANIFEST, SYSTEM_MANIFEST,
+};
 use clean_slate_service_fixtures::{
     NETWORK_DEVICE_ID, NETWORK_SERVICE_ID, STORAGE_BLOCK_DEVICE_ID,
 };
@@ -37,6 +39,7 @@ const SERVICE_TERMINATE_STATUS: u64 = 0;
 
 // Init declares every system service, so the registry must hold the whole manifest.
 const _: () = assert!(SYSTEM_MANIFEST.len() <= SERVICE_REGISTRY_CAPACITY);
+const _: () = assert!(SYSTEM_DESKTOP_MANIFEST.len() <= SERVICE_REGISTRY_CAPACITY);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LiveServiceInstance {
@@ -737,9 +740,11 @@ impl ServiceLifecycleController {
     where
         F: FnMut(u64) -> Result<(), &'static str>,
     {
+        let live_graphics_port = self.live_graphics_port();
         let mut authority = KernelInstanceGrants {
             block_capabilities: &mut self.block_capabilities,
             service_id,
+            live_graphics_port,
         };
         if let Err(failure) =
             apply_instance_grants(grants, pid, instance_generation, &mut authority)
@@ -752,11 +757,26 @@ impl ServiceLifecycleController {
         Ok(())
     }
 
+    /// The graphics port of the live instance of the active manifest's `Grant::GraphicsPort`
+    /// row, when that instance has registered one: what the graphics role grants name.
+    fn live_graphics_port(&self) -> Option<LiveGraphicsPort> {
+        let row = graphics_port_row(self.manifest)?;
+        let pid = self.live_pid(row.id)?;
+        let generation = crate::process::live_instance_generation(pid)?;
+        let port = crate::service::port::counts_for(clean_slate_capability::HolderId(pid));
+        (port.ports_served > 0).then_some(LiveGraphicsPort {
+            service: row.id,
+            generation,
+        })
+    }
+
     /// Replaces the system manifest until the next [`Self::clear`]. Self-tests whose services need
-    /// rows different from [`SYSTEM_MANIFEST`] install their scenario here.
+    /// rows different from [`SYSTEM_MANIFEST`] install their scenario here. The build that
+    /// launches init installs the manifest its boot option selects.
     #[cfg_attr(
         not(any(
             test,
+            clean_slate_system_init,
             feature = "m5-storage-self-test",
             feature = "m5-persistence-self-test",
             feature = "m5-crash-early-self-test",
@@ -887,10 +907,14 @@ impl ServiceLifecycleController {
         ));
     }
 
+    /// `residue` is the scheduler and IPC ownership still attributed to the pid after teardown,
+    /// which must be 0.
     fn log_reaped(&self, service: ServiceId, pid: u64) {
         kernel_log_fmt(format_args!(
-            "[SVC ] reaped service={} pid={}\n",
-            service.0, pid
+            "[SVC ] reaped service={} pid={} residue={}\n",
+            service.0,
+            pid,
+            crate::process::domain::remaining_owned_resource_count(pid)
         ));
     }
 
@@ -1060,9 +1084,27 @@ impl ServiceLifecycleController {
     }
 }
 
+/// The graphics port `graphics(service, generation)` of a live compositor instance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LiveGraphicsPort {
+    service: ServiceId,
+    generation: InstanceGeneration,
+}
+
 struct KernelInstanceGrants<'a> {
     block_capabilities: &'a mut BlockDeviceCapabilityTable,
     service_id: ServiceId,
+    live_graphics_port: Option<LiveGraphicsPort>,
+}
+
+impl KernelInstanceGrants<'_> {
+    fn grant_failed(&self, pid: u64, what: &str, message: &'static str) -> &'static str {
+        kernel_log_fmt(format_args!(
+            "[FAIL] {what} grant failed pid={pid} service={} err={message}\n",
+            self.service_id.0
+        ));
+        message
+    }
 }
 
 impl InstanceGrantAuthority for KernelInstanceGrants<'_> {
@@ -1117,7 +1159,108 @@ impl InstanceGrantAuthority for KernelInstanceGrants<'_> {
         ));
         Ok(())
     }
+
+    /// `graphics(service id, process instance generation)`: the generation `register_port`
+    /// checks is the process registry's, as for the M10 policy's compositor.
+    #[cfg(clean_slate_desktop)]
+    fn grant_graphics_port(&mut self, pid: u64) -> Result<(), &'static str> {
+        use super::desktop_image::COMPOSITOR_PORT_PARAMS;
+        use crate::capability::graphics::{grant_graphics, COMPOSITOR_GRAPHICS_RIGHTS};
+        use clean_slate_capability::{HolderId, ResourceRef};
+
+        let Some(generation) = crate::process::live_instance_generation(pid) else {
+            return Err(self.grant_failed(pid, "graphics port", "instance has no generation"));
+        };
+        let resource = ResourceRef::graphics(u64::from(self.service_id.0), u64::from(generation.0));
+        if crate::service::port::register_port(
+            resource,
+            HolderId(pid),
+            generation,
+            COMPOSITOR_PORT_PARAMS,
+        )
+        .is_err()
+        {
+            return Err(self.grant_failed(pid, "graphics port", "port registration refused"));
+        }
+        // From here a failure leaves the port registered; the caller's rollback teardown
+        // unregisters it with the process.
+        grant_graphics(HolderId(pid), resource, COMPOSITOR_GRAPHICS_RIGHTS)
+            .map_err(|_| self.grant_failed(pid, "graphics port", "serve capability refused"))?;
+        kernel_log_fmt(format_args!(
+            "[GFX ] authority granted pid={pid} port={}:{} rights=serve registered=1\n",
+            self.service_id.0, generation.0
+        ));
+        Ok(())
+    }
+
+    #[cfg(clean_slate_desktop)]
+    fn grant_display_presenter(&mut self, pid: u64) -> Result<(), &'static str> {
+        crate::capability::graphics::grant_display_presenter(clean_slate_capability::HolderId(pid))
+            .map_err(|_| self.grant_failed(pid, "display presenter", "capability refused"))?;
+        kernel_log_fmt(format_args!(
+            "[DISP] authority granted pid={pid} output=0 rights=present,inspect\n"
+        ));
+        Ok(())
+    }
+
+    #[cfg(clean_slate_desktop)]
+    fn grant_input_seat(&mut self, pid: u64) -> Result<(), &'static str> {
+        crate::capability::graphics::grant_input_seat(clean_slate_capability::HolderId(pid))
+            .map_err(|_| self.grant_failed(pid, "input seat", "capability refused"))?;
+        kernel_log_fmt(format_args!(
+            "[SEAT] authority granted pid={pid} seat=0 rights=consume,inspect\n"
+        ));
+        Ok(())
+    }
+
+    #[cfg(clean_slate_desktop)]
+    fn grant_graphics_role(&mut self, pid: u64, role: GraphicsRole) -> Result<(), &'static str> {
+        use crate::capability::graphics::{
+            grant_graphics, APP_GRAPHICS_RIGHTS, SHELL_GRAPHICS_RIGHTS,
+        };
+        use clean_slate_capability::{HolderId, ResourceRef};
+
+        let Some(port) = self.live_graphics_port else {
+            return Err(self.grant_failed(pid, "graphics role", "no live graphics port"));
+        };
+        let (rights, names) = match role {
+            GraphicsRole::Shell => (SHELL_GRAPHICS_RIGHTS, "connect,shell"),
+            GraphicsRole::App => (APP_GRAPHICS_RIGHTS, "connect"),
+        };
+        let resource =
+            ResourceRef::graphics(u64::from(port.service.0), u64::from(port.generation.0));
+        grant_graphics(HolderId(pid), resource, rights)
+            .map_err(|_| self.grant_failed(pid, "graphics role", "capability refused"))?;
+        kernel_log_fmt(format_args!(
+            "[GFX ] authority granted pid={pid} port={}:{} rights={names}\n",
+            port.service.0, port.generation.0
+        ));
+        Ok(())
+    }
+
+    #[cfg(not(clean_slate_desktop))]
+    fn grant_graphics_port(&mut self, pid: u64) -> Result<(), &'static str> {
+        Err(self.grant_failed(pid, "graphics port", DESKTOP_NOT_COMPILED))
+    }
+
+    #[cfg(not(clean_slate_desktop))]
+    fn grant_display_presenter(&mut self, pid: u64) -> Result<(), &'static str> {
+        Err(self.grant_failed(pid, "display presenter", DESKTOP_NOT_COMPILED))
+    }
+
+    #[cfg(not(clean_slate_desktop))]
+    fn grant_input_seat(&mut self, pid: u64) -> Result<(), &'static str> {
+        Err(self.grant_failed(pid, "input seat", DESKTOP_NOT_COMPILED))
+    }
+
+    #[cfg(not(clean_slate_desktop))]
+    fn grant_graphics_role(&mut self, pid: u64, _role: GraphicsRole) -> Result<(), &'static str> {
+        Err(self.grant_failed(pid, "graphics role", DESKTOP_NOT_COMPILED))
+    }
 }
+
+#[cfg(not(clean_slate_desktop))]
+const DESKTOP_NOT_COMPILED: &str = "desktop grants are not compiled into this kernel";
 
 const fn rollback_failure_message(grant: Grant) -> &'static str {
     match grant {
@@ -1127,6 +1270,11 @@ const fn rollback_failure_message(grant: Grant) -> &'static str {
         Grant::Console | Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
             "linux process grant rollback teardown failed"
         }
+        Grant::GraphicsPort
+        | Grant::DisplayPresenter
+        | Grant::InputSeat
+        | Grant::GraphicsShellRole
+        | Grant::GraphicsAppRole => "desktop grant rollback teardown failed",
     }
 }
 

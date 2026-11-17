@@ -14,6 +14,15 @@ pub(crate) trait BootstrapGrantAuthority {
     fn grant_object_service_role(&mut self, pid: u64) -> Result<u64, &'static str>;
 }
 
+/// Which client role a graphics role grant gives on the live compositor's port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GraphicsRole {
+    /// `Grant::GraphicsShellRole`: `GFX_CONNECT | GFX_SHELL`.
+    Shell,
+    /// `Grant::GraphicsAppRole`: `GFX_CONNECT`.
+    App,
+}
+
 /// Grants applied to a spawned instance before it is recorded live.
 pub(crate) trait InstanceGrantAuthority {
     fn grant_block_device(&mut self, pid: u64) -> Result<(), &'static str>;
@@ -22,6 +31,12 @@ pub(crate) trait InstanceGrantAuthority {
         pid: u64,
         generation: InstanceGeneration,
     ) -> Result<(), &'static str>;
+    /// Registers the instance's graphics port and grants it `GFX_SERVE` there.
+    fn grant_graphics_port(&mut self, pid: u64) -> Result<(), &'static str>;
+    fn grant_display_presenter(&mut self, pid: u64) -> Result<(), &'static str>;
+    fn grant_input_seat(&mut self, pid: u64) -> Result<(), &'static str>;
+    /// `role` on the port of the live `Grant::GraphicsPort` instance; fails when there is none.
+    fn grant_graphics_role(&mut self, pid: u64, role: GraphicsRole) -> Result<(), &'static str>;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,8 +61,15 @@ pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
             Grant::ObjectServiceRole => {
                 handles.object_service_role = Some(authority.grant_object_service_role(pid)?);
             }
-            Grant::BlockDevice | Grant::NetworkService => {}
-            // Applied by the Linux launch path while it builds the process.
+            Grant::BlockDevice
+            | Grant::NetworkService
+            | Grant::GraphicsPort
+            | Grant::DisplayPresenter
+            | Grant::InputSeat
+            | Grant::GraphicsShellRole
+            | Grant::GraphicsAppRole => {}
+            // Applied by the Linux launch path while it builds the process, or written into a
+            // desktop image's launch page.
             Grant::Console | Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {}
         }
     }
@@ -64,6 +86,11 @@ pub(crate) fn apply_instance_grants<A: InstanceGrantAuthority>(
         let result = match grant {
             Grant::BlockDevice => authority.grant_block_device(pid),
             Grant::NetworkService => authority.grant_network_service(pid, generation),
+            Grant::GraphicsPort => authority.grant_graphics_port(pid),
+            Grant::DisplayPresenter => authority.grant_display_presenter(pid),
+            Grant::InputSeat => authority.grant_input_seat(pid),
+            Grant::GraphicsShellRole => authority.grant_graphics_role(pid, GraphicsRole::Shell),
+            Grant::GraphicsAppRole => authority.grant_graphics_role(pid, GraphicsRole::App),
             Grant::ObjectServiceRole
             | Grant::Console
             | Grant::ConsoleInput
@@ -89,6 +116,10 @@ mod tests {
         ObjectServiceRole(u64),
         BlockDevice(u64),
         NetworkService(u64, InstanceGeneration),
+        GraphicsPort(u64),
+        DisplayPresenter(u64),
+        InputSeat(u64),
+        GraphicsRole(u64, GraphicsRole),
     }
 
     #[derive(Default)]
@@ -127,6 +158,33 @@ mod tests {
         ) -> Result<(), &'static str> {
             self.calls.push(Call::NetworkService(pid, generation));
             self.outcome(Grant::NetworkService)
+        }
+
+        fn grant_graphics_port(&mut self, pid: u64) -> Result<(), &'static str> {
+            self.calls.push(Call::GraphicsPort(pid));
+            self.outcome(Grant::GraphicsPort)
+        }
+
+        fn grant_display_presenter(&mut self, pid: u64) -> Result<(), &'static str> {
+            self.calls.push(Call::DisplayPresenter(pid));
+            self.outcome(Grant::DisplayPresenter)
+        }
+
+        fn grant_input_seat(&mut self, pid: u64) -> Result<(), &'static str> {
+            self.calls.push(Call::InputSeat(pid));
+            self.outcome(Grant::InputSeat)
+        }
+
+        fn grant_graphics_role(
+            &mut self,
+            pid: u64,
+            role: GraphicsRole,
+        ) -> Result<(), &'static str> {
+            self.calls.push(Call::GraphicsRole(pid, role));
+            self.outcome(match role {
+                GraphicsRole::Shell => Grant::GraphicsShellRole,
+                GraphicsRole::App => Grant::GraphicsAppRole,
+            })
         }
     }
 
@@ -232,6 +290,78 @@ mod tests {
                 grant: Grant::NetworkService,
                 message: "injected failure",
             }
+        );
+    }
+
+    #[test]
+    fn desktop_rows_reach_one_call_per_grant_in_row_order() {
+        use clean_slate_service_fixtures::manifest::SYSTEM_DESKTOP_MANIFEST;
+        use clean_slate_service_fixtures::{
+            COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
+        };
+
+        let calls = |id| {
+            let mut recorder = Recorder::default();
+            let handles = apply_both(grants_for(SYSTEM_DESKTOP_MANIFEST, id), &mut recorder);
+            assert_eq!(handles, BootstrapGrantHandles::default());
+            recorder.calls
+        };
+        assert_eq!(
+            calls(COMPOSITOR_SERVICE_ID),
+            [
+                Call::GraphicsPort(7),
+                Call::DisplayPresenter(7),
+                Call::InputSeat(7)
+            ]
+        );
+        assert_eq!(
+            calls(DESKTOP_SHELL_SERVICE_ID),
+            [Call::GraphicsRole(7, GraphicsRole::Shell)]
+        );
+        assert_eq!(
+            calls(PLAYGROUND_SERVICE_ID),
+            [Call::GraphicsRole(7, GraphicsRole::App)]
+        );
+    }
+
+    /// The first failing grant stops the row and is named, so the caller rolls the whole
+    /// instance back (teardown revokes the grants before it and unregisters the port).
+    #[test]
+    fn a_failing_desktop_grant_stops_the_row_and_is_named() {
+        use clean_slate_service_fixtures::manifest::COMPOSITOR_SERVICE_SPEC;
+        for (fail, applied) in [
+            (Grant::GraphicsPort, 1),
+            (Grant::DisplayPresenter, 2),
+            (Grant::InputSeat, 3),
+        ] {
+            let mut recorder = Recorder {
+                fail: Some(fail),
+                ..Recorder::default()
+            };
+            let failure = apply_instance_grants(
+                COMPOSITOR_SERVICE_SPEC.grants,
+                7,
+                InstanceGeneration(1),
+                &mut recorder,
+            )
+            .unwrap_err();
+            assert_eq!(failure.grant, fail);
+            assert_eq!(recorder.calls.len(), applied, "{fail:?}");
+        }
+        let mut recorder = Recorder {
+            fail: Some(Grant::GraphicsAppRole),
+            ..Recorder::default()
+        };
+        assert_eq!(
+            apply_instance_grants(
+                &[Grant::Console, Grant::GraphicsAppRole],
+                7,
+                InstanceGeneration(1),
+                &mut recorder,
+            )
+            .unwrap_err()
+            .grant,
+            Grant::GraphicsAppRole
         );
     }
 

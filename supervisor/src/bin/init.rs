@@ -1,6 +1,7 @@
 //! #218 S3b userspace init for the default image.
 //!
-//! Starts the system manifest's services through [`SystemInit`] and then sleeps in
+//! Starts the services of the manifest the boot profile selects (the kernel declared the same
+//! rows) through [`SystemInit`] and then sleeps in
 //! `LIFECYCLE_WAIT` (21): it wakes only for a lifecycle message or for the next ready deadline
 //! or retry, never on a polling timer. The kernel treats init's death as fatal, so any failure
 //! of the wait or the clock ends in `ud2`.
@@ -18,7 +19,7 @@ use clean_slate_service_fixtures::init_bootstrap::{
     InitBootstrap, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_VIRTIO_GPU,
     INIT_BOOTSTRAP_ADDRESS,
 };
-use clean_slate_service_fixtures::manifest::SYSTEM_MANIFEST;
+use clean_slate_service_fixtures::manifest::{manifest_for, SYSTEM_DESKTOP_MANIFEST};
 use clean_slate_service_lifecycle::ServiceId;
 use clean_slate_supervisor::{
     DiagnosticSink, SupervisorError, SyscallLifecycleControl, SystemInit, INIT_READY_TIMEOUT_NS,
@@ -27,8 +28,10 @@ use clean_slate_supervisor::{
 const SYSCALL_NR_IPC_SEND: u64 = 3;
 /// The kernel refuses longer IPC messages.
 const IPC_MAX_MESSAGE_BYTES: usize = 64;
-/// Supervisor slots; the system manifest has three rows.
-const SERVICE_SLOTS: usize = 4;
+/// Supervisor slots; the desktop manifest has six rows, the base one three.
+const SERVICE_SLOTS: usize = 8;
+
+const _: () = assert!(SYSTEM_DESKTOP_MANIFEST.len() <= SERVICE_SLOTS);
 
 struct IpcConsoleSink {
     capability: u64,
@@ -56,7 +59,7 @@ pub extern "C" fn _start() -> ! {
         IpcConsoleSink {
             capability: console,
         },
-        SYSTEM_MANIFEST,
+        manifest_for(bootstrap.desktop_mode),
         INIT_READY_TIMEOUT_NS,
     ) else {
         fail(console, b"[INIT] could not register the system manifest\n");

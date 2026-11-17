@@ -93,3 +93,9 @@ pub const NETWORK_SERVICE_ID: ServiceId = ServiceId(0x0000_5200);
 pub const NETWORK_UNAUTHORIZED_SERVICE_ID: ServiceId = ServiceId(0x0000_5201);
 /// Stable logical identity for the interactive serial-console shell (#218 S5).
 pub const SYSTEM_SHELL_SERVICE_ID: ServiceId = ServiceId(0x0000_5400);
+/// The #118 compositor; its graphics port is `graphics(0x5300, instance generation)`.
+pub const COMPOSITOR_SERVICE_ID: ServiceId = ServiceId(0x0000_5300);
+/// The #118 desktop shell (panel and background).
+pub const DESKTOP_SHELL_SERVICE_ID: ServiceId = ServiceId(0x0000_5301);
+/// The #117 playground app.
+pub const PLAYGROUND_SERVICE_ID: ServiceId = ServiceId(0x0000_5302);

@@ -30,7 +30,6 @@ const MAX_DIRECTORY_FILES: u32 = 64;
 /// is not read.
 const MAX_OPTION_BYTES: usize = 16;
 const FILE_NAME: &[u8] = b"opt/clean-slate/desktop";
-const NOT_BUILT_YET: &str = "[KERN] desktop profile not built yet";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DesktopBackend {
@@ -140,9 +139,6 @@ pub(crate) fn log_boot_option(option: &BootOption) {
         ),
     }
     kernel_log_line(option.mode.profile_line());
-    if matches!(option.mode, DesktopMode::On(_)) {
-        kernel_log_line(NOT_BUILT_YET);
-    }
 }
 
 fn log_not_understood(bytes: &[u8]) {

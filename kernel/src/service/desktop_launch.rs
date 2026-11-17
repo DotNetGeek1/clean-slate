@@ -26,18 +26,16 @@
 use clean_slate_capability::{
     CapabilityHandle, CapabilityState, HolderId, ResourceClass, ResourceRef,
 };
-use clean_slate_graphics::{
-    CLIENT_EVENT_QUEUE_DEPTH, MAX_OUTSTANDING_REQUESTS_PER_CLIENT, SERVER_REQUEST_QUEUE_DEPTH,
-};
 use clean_slate_native_abi::desktop::{
     DesktopLaunchPage, LAUNCH_FLAG_FAULT_KEY, LAUNCH_FLAG_INPUT_TRACE, LAUNCH_TIER_Q0,
     LAUNCH_TIER_Q1, NO_CONSOLE,
 };
 use clean_slate_native_abi::port::PORT_ROLE_CONNECT;
-use clean_slate_native_abi::PortParams;
 use clean_slate_port::{PortError, RegistrationError};
-use clean_slate_service_lifecycle::{ControlRequest, ControlRequestKind, ServiceId};
+use clean_slate_service_lifecycle::{ControlRequest, ControlRequestKind};
 
+pub(crate) use super::desktop_image::DesktopRole;
+use super::desktop_image::{page, COMPOSITOR_PORT_PARAMS, COMPOSITOR_SERVICE_ID};
 use crate::capability::graphics::{grant_desktop_role, GraphicsGrantee};
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::mm::frame_allocator::PageAllocator;
@@ -47,51 +45,13 @@ use crate::process::domain::{
 use crate::service::control::service_lifecycle_controller_mut;
 use crate::sync::global_cell::GlobalCell;
 
-pub(crate) const COMPOSITOR_SERVICE_ID: ServiceId = ServiceId(0x5300);
-pub(crate) const SHELL_SERVICE_ID: ServiceId = ServiceId(0x5301);
-pub(crate) const PLAYGROUND_SERVICE_ID: ServiceId = ServiceId(0x5302);
-
 /// A quiet stretch this long after activity is reported as the idle proof.
 pub(crate) const IDLE_PROOF_NS: u64 = 500_000_000;
 /// Automatic relaunches per role before the policy gives up (a crash loop must not spin).
 const RELAUNCH_BUDGET: u8 = 8;
 
-/// The compositor's service port: one connection per holder, the shell plus a few apps.
-pub(crate) const COMPOSITOR_PORT_PARAMS: PortParams = PortParams {
-    event_depth: CLIENT_EVENT_QUEUE_DEPTH as u16,
-    request_depth: SERVER_REQUEST_QUEUE_DEPTH as u16,
-    max_connections: 4,
-    max_outstanding: MAX_OUTSTANDING_REQUESTS_PER_CLIENT as u16,
-    max_connections_per_holder: 1,
-};
-
-const _: () = assert!(COMPOSITOR_PORT_PARAMS.validate().is_ok());
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DesktopRole {
-    Compositor,
-    Shell,
-    App,
-}
-
 impl DesktopRole {
     const ALL: [Self; 3] = [Self::Compositor, Self::Shell, Self::App];
-
-    pub(crate) const fn service(self) -> ServiceId {
-        match self {
-            Self::Compositor => COMPOSITOR_SERVICE_ID,
-            Self::Shell => SHELL_SERVICE_ID,
-            Self::App => PLAYGROUND_SERVICE_ID,
-        }
-    }
-
-    /// User stack pages (the compositor composes on its stack; clients only paint).
-    pub(crate) const fn stack_pages(self) -> u64 {
-        match self {
-            Self::Compositor => 64,
-            Self::Shell | Self::App => 32,
-        }
-    }
 
     const fn name(self) -> &'static str {
         match self {
@@ -288,17 +248,12 @@ pub(crate) fn launch_page_for(pid: u64) -> DesktopLaunchPage {
     let console_handle = unsafe { crate::ipc::endpoint_table_mut() }
         .grant_console_capability_for_pid(pid)
         .unwrap_or(NO_CONSOLE);
-    DesktopLaunchPage {
-        self_pid: pid,
-        graphics_resource_id: u64::from(COMPOSITOR_SERVICE_ID.0),
-        console_handle,
-        flags: launch_flags(),
-        tier: if cfg!(feature = "m10-desktop-q0") {
-            LAUNCH_TIER_Q0
-        } else {
-            LAUNCH_TIER_Q1
-        },
-    }
+    let tier = if cfg!(feature = "m10-desktop-q0") {
+        LAUNCH_TIER_Q0
+    } else {
+        LAUNCH_TIER_Q1
+    };
+    page(pid, console_handle, tier, launch_flags())
 }
 
 /// Flags written into the launch page.
@@ -672,6 +627,7 @@ fn log_snapshot(label: Option<&str>, s: &DesktopResourceSnapshot) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::desktop_image::{PLAYGROUND_SERVICE_ID, SHELL_SERVICE_ID};
     use super::*;
 
     #[test]

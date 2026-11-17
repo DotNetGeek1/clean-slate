@@ -349,13 +349,17 @@ pub(crate) enum BuiltinServiceImage {
     /// #218 S5 serial-console BusyBox shell launched by `service::system_shell`.
     #[cfg(clean_slate_system_init)]
     LinuxShell,
-    /// #118 desktop images launched by `service::desktop_launch`.
-    #[cfg(feature = "m10-desktop")]
-    Desktop(super::desktop_launch::DesktopRole),
+    /// #118 desktop images: the system build's desktop rows, or the M10 launch policy's services.
+    #[cfg(clean_slate_desktop)]
+    Desktop(super::desktop_image::DesktopRole),
 }
 
 impl BuiltinServiceImage {
     pub(crate) const fn for_service(service: ServiceId) -> Self {
+        #[cfg(clean_slate_desktop)]
+        if let Some(role) = super::desktop_image::DesktopRole::for_service(service) {
+            return Self::Desktop(role);
+        }
         match service.0 {
             #[cfg(any(
                 feature = "m3-address-space-self-test",
@@ -402,18 +406,6 @@ impl BuiltinServiceImage {
             id if id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID.0 => Self::LinuxHello,
             #[cfg(clean_slate_system_init)]
             id if id == clean_slate_service_fixtures::SYSTEM_SHELL_SERVICE_ID.0 => Self::LinuxShell,
-            #[cfg(feature = "m10-desktop")]
-            id if id == super::desktop_launch::COMPOSITOR_SERVICE_ID.0 => {
-                Self::Desktop(super::desktop_launch::DesktopRole::Compositor)
-            }
-            #[cfg(feature = "m10-desktop")]
-            id if id == super::desktop_launch::SHELL_SERVICE_ID.0 => {
-                Self::Desktop(super::desktop_launch::DesktopRole::Shell)
-            }
-            #[cfg(feature = "m10-desktop")]
-            id if id == super::desktop_launch::PLAYGROUND_SERVICE_ID.0 => {
-                Self::Desktop(super::desktop_launch::DesktopRole::App)
-            }
             _ => Self::ImmediateExit,
         }
     }
@@ -550,9 +542,9 @@ pub(crate) fn launch_builtin_service(
         BuiltinServiceImage::LinuxShell => {
             super::system_shell::launch(allocator, kernel_stack_top, scheduler_slot, context)
         }
-        #[cfg(feature = "m10-desktop")]
+        #[cfg(clean_slate_desktop)]
         BuiltinServiceImage::Desktop(role) => {
-            launch_desktop_image(allocator, kernel_stack_top, scheduler_slot, role)
+            launch_desktop_image(allocator, kernel_stack_top, scheduler_slot, role, context)
         }
         _ => launch_single_page_service(allocator, kernel_stack_top, scheduler_slot, image),
     }
@@ -916,7 +908,7 @@ fn launch_single_page_service(
             BuiltinServiceImage::LinuxShell => {
                 return Err("system shell image must use the system_shell path");
             }
-            #[cfg(feature = "m10-desktop")]
+            #[cfg(clean_slate_desktop)]
             BuiltinServiceImage::Desktop(_) => {
                 return Err("desktop image must use the desktop launch path");
             }
@@ -1508,7 +1500,7 @@ fn launch_network_userspace_with_bootstrap(
     )
 }
 
-#[cfg(feature = "m10-desktop")]
+#[cfg(clean_slate_desktop)]
 mod desktop_images {
     include!(concat!(env!("OUT_DIR"), "/compositor_userspace_entry.rs"));
     include!(concat!(
@@ -1526,7 +1518,7 @@ mod desktop_images {
 }
 
 /// One embedded #118 desktop image and its fixed user layout.
-#[cfg(feature = "m10-desktop")]
+#[cfg(clean_slate_desktop)]
 struct DesktopImage {
     bytes: &'static [u8],
     segments: &'static [crate::mm::image_loader::EmbeddedSegment],
@@ -1537,10 +1529,10 @@ struct DesktopImage {
     stack_pages: u64,
 }
 
-#[cfg(feature = "m10-desktop")]
+#[cfg(clean_slate_desktop)]
 impl DesktopImage {
-    const fn for_role(role: super::desktop_launch::DesktopRole) -> Self {
-        use super::desktop_launch::DesktopRole;
+    const fn for_role(role: super::desktop_image::DesktopRole) -> Self {
+        use super::desktop_image::DesktopRole;
         use desktop_images::*;
         match role {
             DesktopRole::Compositor => Self {
@@ -1579,9 +1571,9 @@ impl DesktopImage {
     }
 }
 
-#[cfg(feature = "m10-desktop")]
+#[cfg(clean_slate_desktop)]
 const _: () = {
-    use super::desktop_launch::DesktopRole;
+    use super::desktop_image::DesktopRole;
     use clean_slate_native_abi::desktop::{
         DESKTOP_IMAGE_BASE, DESKTOP_LAUNCH_ADDRESS, DESKTOP_STACK_ADDRESS,
     };
@@ -1602,15 +1594,17 @@ const _: () = {
     assert!(DESKTOP_LAUNCH_ADDRESS >= SERVICE_USER_CODE_ADDRESS);
 };
 
-/// Maps a desktop image at its link address, its stack, and the launch page the desktop launch
-/// policy fills for the new pid, then registers the process Ready.
-#[cfg(feature = "m10-desktop")]
+/// Maps a desktop image at its link address, its stack, and the launch page for the new pid
+/// (from its manifest row, or the M10 policy's when it has none), then registers the process
+/// Ready.
+#[cfg(clean_slate_desktop)]
 #[inline(never)]
 fn launch_desktop_image(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
     scheduler_slot: usize,
-    role: super::desktop_launch::DesktopRole,
+    role: super::desktop_image::DesktopRole,
+    context: LaunchContext,
 ) -> Result<SpawnedServiceInstance, &'static str> {
     use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
     use crate::mm::address_space::map_process_page;
@@ -1650,7 +1644,7 @@ fn launch_desktop_image(
                 DESKTOP_STACK_ADDRESS,
                 image.stack_pages,
             )?;
-            let page = super::desktop_launch::launch_page_for(pid);
+            let page = super::desktop_image::launch_page_for(pid, context.spec)?;
             let data_frame = allocator
                 .allocate_page()
                 .ok_or("allocator could not provide a desktop launch page")?;
