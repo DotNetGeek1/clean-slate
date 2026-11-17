@@ -29,10 +29,12 @@ const LANE_TIMEOUT: Duration = Duration::from_secs(180);
 /// their lines interleave as the two run; [`validate_boot`] checks each service's own order.
 /// Kernel lines (`[KERN]`, `[SVC ]`) are printed by the kernel; `[INIT]` lines reach serial
 /// only through init's console capability, as `[IPC ] console pid=N: …`.
-pub(crate) const MARKERS: [MarkerStep<'static>; 15] = [
+pub(crate) const MARKERS: [MarkerStep<'static>; 17] = [
     MarkerStep::Ordered("[KERN] serial console input on vector="),
+    MarkerStep::Ordered("[KERN] boot profile=base"),
     MarkerStep::Ordered("[KERN] init launched pid="),
     MarkerStep::Ordered("[KERN] init authority pid="),
+    MarkerStep::Ordered("[INIT] boot profile=base"),
     MarkerStep::Ordered("[INIT] started pid="),
     MarkerStep::Ordered("[INIT] SERVICE_READY from init refused: not a service"),
     MarkerStep::Ordered("[INIT] starting service=20736"),
@@ -84,6 +86,22 @@ pub(crate) fn ensure_data_disk(path: &Path) -> Result<bool, XtaskError> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct RunOptions {
     net: bool,
+    desktop: bool,
+    framebuffer: bool,
+}
+
+/// `opt/clean-slate/desktop` plus, for `q1`, the VirtIO-GPU device `run --desktop` adds.
+pub(crate) fn desktop_qemu_args(framebuffer: bool) -> Vec<String> {
+    let value = if framebuffer { "q0" } else { "q1" };
+    let mut args = vec![
+        "-fw_cfg".to_owned(),
+        format!("name=opt/clean-slate/desktop,string={value}"),
+    ];
+    if !framebuffer {
+        args.push("-device".to_owned());
+        args.push("virtio-gpu-pci,disable-legacy=on,xres=1280,yres=800".to_owned());
+    }
+    args
 }
 
 fn parse_run_options(args: &[OsString]) -> Result<RunOptions, XtaskError> {
@@ -93,11 +111,44 @@ fn parse_run_options(args: &[OsString]) -> Result<RunOptions, XtaskError> {
             options.net = true;
             continue;
         }
+        if arg == OsStr::new("--desktop") {
+            options.desktop = true;
+            continue;
+        }
+        if arg == OsStr::new("--framebuffer") {
+            options.framebuffer = true;
+            continue;
+        }
         return Err(XtaskError::InvalidOption(
             arg.to_string_lossy().into_owned(),
         ));
     }
+    if options.framebuffer && !options.desktop {
+        return Err(XtaskError::InvalidCommand(
+            "usage: cargo xtask run [--net] [--desktop] [--framebuffer]".to_owned(),
+        ));
+    }
     Ok(options)
+}
+
+fn desktop_display() -> String {
+    match std::env::var("QEMU_DISPLAY") {
+        Ok(display) if !display.is_empty() => display,
+        _ => "gtk".to_owned(),
+    }
+}
+
+fn launch_config(options: RunOptions, disk: PathBuf, fixture_port: Option<u16>) -> VmLaunchConfig {
+    let mut config = system_vm_config(disk, fixture_port);
+    if options.desktop {
+        config.machine_extra = Some("vmport=off");
+        config.display = Some(desktop_display());
+        if options.framebuffer {
+            config.vga = Some("std");
+        }
+        config.extra_args = desktop_qemu_args(options.framebuffer);
+    }
+    config
 }
 
 pub(crate) fn system_vm_config(data_disk: PathBuf, fixture_port: Option<u16>) -> VmLaunchConfig {
@@ -129,13 +180,19 @@ fn start_peer(m9_profile: bool) -> Result<M7FixturePeer, XtaskError> {
     .map_err(XtaskError::Io)
 }
 
-/// `cargo xtask run [--net]` and `cargo xtask run-gdb[-entry]` (which take no options).
+/// `cargo xtask run [--net] [--desktop] [--framebuffer]`. `run-gdb` and `run-gdb-entry` take
+/// `--net` only; `--desktop` is refused there.
 pub(crate) fn run(
     args: &[OsString],
     wait_for_gdb: bool,
     debug_entry: bool,
 ) -> Result<(), XtaskError> {
     let options = parse_run_options(args)?;
+    if wait_for_gdb && options.desktop {
+        return Err(XtaskError::InvalidCommand(
+            "run-gdb does not take --desktop".to_owned(),
+        ));
+    }
     let disk = system_data_disk_path();
     let created = ensure_data_disk(&disk)?;
     println!(
@@ -151,12 +208,23 @@ pub(crate) fn run(
         println!("[XTSK] no network device (pass --net for the fixture peer)");
         None
     };
+    if options.desktop {
+        println!(
+            "[XTSK] desktop boot option opt/clean-slate/desktop={} ({})",
+            if options.framebuffer { "q0" } else { "q1" },
+            if options.framebuffer {
+                "-vga std"
+            } else {
+                "virtio-gpu-pci"
+            }
+        );
+    }
     let result = run_vm_inner_with_config(
         wait_for_gdb,
         debug_entry,
         &[],
         None,
-        system_vm_config(disk, peer.as_ref().map(M7FixturePeer::port)),
+        launch_config(options, disk, peer.as_ref().map(M7FixturePeer::port)),
     );
     if let Some(peer) = peer {
         peer.shutdown();
@@ -247,6 +315,10 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
     if let Some(line) = output.lines().find(|line| line.contains("[HOOK]")) {
         return Err(format!("a test-hooks line in the default image: {line:?}"));
     }
+    let profile = only_line(output, "[KERN] boot profile=")?;
+    if profile != "[KERN] boot profile=base" {
+        return Err(format!("desktop boot option: {profile:?}"));
+    }
     let launched = only_line(output, "[KERN] init launched pid=")?;
     let init_pid = number(launched, "pid")?;
     let authority = only_line(output, "[KERN] init authority pid=")?;
@@ -264,6 +336,9 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
             ));
         }
     }
+    let init_profile = format!("{console_prefix}boot profile=base");
+    only_line(output, &init_profile)
+        .map_err(|_| format!("desktop boot option: init did not report {init_profile:?}"))?;
     let started = only_line(output, &format!("{console_prefix}started pid="))?;
     if number(&started[console_prefix.len()..], "pid")? != init_pid {
         return Err(format!("init reports a different pid: {started:?}"));
@@ -367,8 +442,10 @@ mod tests {
              [SVC ] declared service=20992\n\
              [SVC ] declared service=21504\n\
              [KERN] serial console input on vector=49\n\
+             [KERN] boot profile=base\n\
              [KERN] init launched pid=3 slot=0 declared-services=3\n\
              [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1\n\
+             [IPC ] console pid=3: [INIT] boot profile=base\n\
              [IPC ] console pid=3: [INIT] started pid=3 services=3\n\
              [IPC ] console pid=3: [INIT] SERVICE_READY from init refused: not a service\n\
              [IPC ] console pid=3: [INIT] starting service=20736\n\
@@ -543,13 +620,52 @@ mod tests {
     }
 
     #[test]
-    fn run_takes_only_net() {
-        assert_eq!(parse_run_options(&[]).unwrap(), RunOptions { net: false });
+    fn run_takes_net_and_desktop() {
+        assert_eq!(parse_run_options(&[]).unwrap(), RunOptions::default());
         assert_eq!(
             parse_run_options(&["--net".into()]).unwrap(),
-            RunOptions { net: true }
+            RunOptions {
+                net: true,
+                ..RunOptions::default()
+            }
+        );
+        assert_eq!(
+            parse_run_options(&["--desktop".into(), "--framebuffer".into(), "--net".into()])
+                .unwrap(),
+            RunOptions {
+                net: true,
+                desktop: true,
+                framebuffer: true,
+            }
         );
         assert!(parse_run_options(&["--disk".into()]).is_err());
+        assert!(parse_run_options(&["--framebuffer".into()]).is_err());
+        let plain = launch_config(RunOptions::default(), PathBuf::from("DISK.img"), None);
+        assert!(plain.extra_args.is_empty());
+        assert_eq!(plain.display, None);
+        assert_eq!(plain.machine_extra, None);
+        let virtio = launch_config(
+            RunOptions {
+                desktop: true,
+                ..RunOptions::default()
+            },
+            PathBuf::from("DISK.img"),
+            None,
+        );
+        assert_eq!(virtio.machine_extra, Some("vmport=off"));
+        assert_eq!(virtio.vga, None);
+        assert_eq!(virtio.extra_args, desktop_qemu_args(false));
+        let framebuffer = launch_config(
+            RunOptions {
+                desktop: true,
+                framebuffer: true,
+                ..RunOptions::default()
+            },
+            PathBuf::from("DISK.img"),
+            None,
+        );
+        assert_eq!(framebuffer.vga, Some("std"));
+        assert_eq!(framebuffer.extra_args, desktop_qemu_args(true));
     }
 
     #[test]

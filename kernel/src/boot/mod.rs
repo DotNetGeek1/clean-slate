@@ -3,6 +3,8 @@
 //! `ExitBootServices`, allocator/IDT/GDT/syscall bring-up and then either
 //! dispatches into the selected milestone self-test or starts the scheduler.
 
+#[cfg(any(test, clean_slate_system_init))]
+pub(crate) mod boot_options;
 pub(crate) mod gop;
 pub(crate) mod uefi;
 

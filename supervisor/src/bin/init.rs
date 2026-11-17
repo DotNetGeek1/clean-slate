@@ -14,7 +14,10 @@ use clean_slate_native_abi::lifecycle::{
 use clean_slate_native_abi::service_ready::{ServiceReadyResult, SYSCALL_NR_SERVICE_READY};
 use clean_slate_native_abi::status::is_status;
 use clean_slate_native_abi::work_set::{SYSCALL_NR_WORK_SET, WORK_SET_OP_NOW};
-use clean_slate_service_fixtures::init_bootstrap::{InitBootstrap, INIT_BOOTSTRAP_ADDRESS};
+use clean_slate_service_fixtures::init_bootstrap::{
+    InitBootstrap, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_VIRTIO_GPU,
+    INIT_BOOTSTRAP_ADDRESS,
+};
 use clean_slate_service_fixtures::manifest::SYSTEM_MANIFEST;
 use clean_slate_service_lifecycle::ServiceId;
 use clean_slate_supervisor::{
@@ -46,6 +49,7 @@ impl DiagnosticSink for IpcConsoleSink {
 pub extern "C" fn _start() -> ! {
     let bootstrap = unsafe { *(INIT_BOOTSTRAP_ADDRESS as *const InitBootstrap) };
     let console = bootstrap.console_capability;
+    log_boot_profile(console, bootstrap.desktop_mode);
     let Ok(mut init) = SystemInit::<_, _, SERVICE_SLOTS>::new(
         bootstrap.self_pid,
         SyscallLifecycleControl::<16>::new(bootstrap.lifecycle_capability),
@@ -92,6 +96,45 @@ fn probe_service_ready_refusal(console: u64) {
             );
         }
         _ => fail(console, b"[INIT] SERVICE_READY from init was not refused\n"),
+    }
+}
+
+/// One line, before any service starts. An unknown word is a boot error and leaves the desktop
+/// off; init still brings up the system manifest.
+fn log_boot_profile(console: u64, mode: u64) {
+    match mode {
+        DESKTOP_MODE_OFF => {
+            let _ = ipc_send(console, b"[INIT] boot profile=base\n");
+        }
+        DESKTOP_MODE_FRAMEBUFFER => {
+            let _ = ipc_send(console, b"[INIT] boot profile=desktop tier=Q0\n");
+        }
+        DESKTOP_MODE_VIRTIO_GPU => {
+            let _ = ipc_send(console, b"[INIT] boot profile=desktop tier=Q1\n");
+        }
+        other => {
+            let mut buffer = [0u8; 80];
+            let prefix = b"[INIT] boot profile word=";
+            let suffix = b" not understood; desktop off\n";
+            buffer[..prefix.len()].copy_from_slice(prefix);
+            let mut digits = [0u8; 20];
+            let mut value = other;
+            let mut index = digits.len();
+            loop {
+                index -= 1;
+                digits[index] = b'0' + (value % 10) as u8;
+                value /= 10;
+                if value == 0 {
+                    break;
+                }
+            }
+            let digits = &digits[index..];
+            let end = prefix.len() + digits.len();
+            buffer[prefix.len()..end].copy_from_slice(digits);
+            let tail = end + suffix.len();
+            buffer[end..tail].copy_from_slice(suffix);
+            let _ = ipc_send(console, &buffer[..tail]);
+        }
     }
 }
 
