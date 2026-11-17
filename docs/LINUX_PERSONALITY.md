@@ -301,7 +301,11 @@ Stack builder: `linux-abi/src/stack.rs` (`build_initial_stack_with_tail`).
 Syscall front-ends live in `kernel/src/syscall/linux/socket.rs` (`socket`, `bind`,
 `connect`, `sendto` only; no `recvfrom`). The data plane is `#147` `read`/`write`/`writev`:
 `SYS_READ` in `table.rs::lookup_core_handler` dispatches `SocketRef` to
-`process::linux_socket::read_socket`. UDP/TCP I/O is brokered through M7
+`process::linux_socket::read_socket`. `write` and `writev` on a socket fd both gather
+at most one page of the request and send it as one `write_socket` call
+(`syscall::linux::write::write_socket_gathered`); socket fds have no console, file or
+pipe write projection. Before #255 `writev` lacked this branch and returned `EBADF`, so
+BusyBox `wget`'s request (musl stdio flushes with `writev`) never left the guest. UDP/TCP I/O is brokered through M7
 `NetworkRequest` frames with at most one in-flight `request_id` per socket row;
 blocking uses `block_linux_syscall` wait keys `0x53 << 56 | index << 32 | generation`.
 
@@ -313,7 +317,9 @@ sockets via `linux_fd` release hooks.
 QEMU: `cargo xtask test-m9-linux-socket` (`m9-linux-socket-self-test`) — host M7
 peer with `FixtureOptions.m9_profile` (DNS A → `10.77.0.50`, HTTP on
 `10.77.0.50:4001`), static probe `fixtures/linux-socket-probe/linux-socket-probe-x86_64`,
-8-cycle socket pool baseline, stale-session `ESTALE` proof; `[M9.L] PASS`.
+8-cycle socket pool baseline, stale-session `ESTALE` proof; `[M9.L] PASS`. The fixture
+answers the probe's `GET /` only after receiving the whole request, and the lane requires
+exactly one answered request and no refused connection (#255).
 
 ## M8.2 — ELF loader and process image (#92)
 

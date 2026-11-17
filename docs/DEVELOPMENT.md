@@ -46,7 +46,7 @@ This command:
 4. launches QEMU with OVMF firmware and `-cpu qemu64,+rdrand`;
 5. connects COM1 to the host terminal both ways (`-serial stdio`): kernel and shell output appear in the terminal, and what you type goes to the shell on the serial console.
 
-`cargo xtask run --net` also starts the network fixture peer and gives the guest a VirtIO network device connected to it; without `--net` there is no network device. `cargo xtask run-gdb` and `run-gdb-entry` attach the same data disk and take no options.
+`cargo xtask run --net` also starts the network fixture peer and gives the guest a VirtIO network device connected to it; without `--net` there is no network device. With `CLEAN_SLATE_FIXTURE_TRACE=1` in the environment, the fixture peer (here and in every lane that starts it) prints each TCP segment it receives or sends; see [NETWORK.md, Fixture peer](NETWORK.md#fixture-peer-xtask). `cargo xtask run-gdb` and `run-gdb-entry` attach the same data disk and take no options.
 
 In the default image the kernel launches userspace init instead of the two kernel demo threads. On a disk that is already formatted, the kernel's `[SVC ]`/`[KERN]` lines, init's `[INIT]` lines and the shell's first output of a boot read as follows; other kernel diagnostics (`[TIME]`, `[BLK ]`, `[CAP ]`, `[NET ]`, `[LNX ]`) and the supervisor library's own `[SUP ]`, `[HLTH]` and `[DEP ]` lines from init are interleaved with them. Init may announce storage ready just before or just after starting network, and network and the shell start together, so their lines interleave in an order that depends on timing.
 
