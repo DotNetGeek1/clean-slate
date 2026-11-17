@@ -306,7 +306,9 @@ Syscall front-ends live in `kernel/src/syscall/linux/socket.rs` (`socket`, `bind
 blocking uses `block_linux_syscall` wait keys `0x53 << 56 | index << 32 | generation`.
 
 Launch: `grant_linux_network_capabilities` from `launch_linux_process_from_spec`
-when feature `m9-linux-socket` is enabled (fail closed on grant failure). Teardown:
+when feature `m9-linux-socket` is enabled (fail closed on grant failure). The socket layer
+itself is compiled under cfg `clean_slate_linux_socket`, which covers that feature and the
+default image ([Network client](#network-client-218-s7a)). Teardown:
 last `SocketRef` release submits `NetworkRequest::Close`; process exit releases all
 sockets via `linux_fd` release hooks.
 
@@ -509,13 +511,14 @@ COM1 receive feeds a canonical-mode line discipline (`kernel/src/device/serial_c
 
 In the default image the system manifest's shell row (`SYSTEM_SHELL_SPEC`, service 0x5400, image `LinuxShell`) starts BusyBox as `/bin/sh -i` with `PATH=/bin` once storage is ready. `kernel/src/service/system_shell.rs` launches it.
 
-**Authority.** The row's grants are `Console`, `ConsoleInput` and `TmpObjects`, and the Linux launcher applies them while it builds the process, before it can run:
+**Authority.** The row's grants are `Console`, `ConsoleInput`, `TmpObjects` and `NetworkClient`, and the Linux launcher applies them while it builds the process, before it can run:
 
 - `Console`: the console capability, installed as fd 1 and fd 2. The shell's prompt, its output and its commands' output go there.
 - `ConsoleInput`: fd 0, a read-only console-input description. This is the grant that makes the shell interactive; it requires `Console` in the same row, and the manifest refuses it anywhere else.
 - `TmpObjects`: read and write capabilities on the four `/tmp` backing objects (`0x4C0000`–`0x4C0003`), so `/tmp` is writable. Storage serves them.
+- `NetworkClient`: the network client entitlement, and through it a client capability for the live network instance (see [Network client](#network-client-218-s7a)).
 
-Being a Linux process adds the Linux personality (`linux=1`). It gets no network, no block device, no object-service role, no lifecycle control and no IPC endpoints. The launch-time authority audit counts all of this; the shell's line must read `console=1 tmp-objects=4 linux=1 console-input=1` with every other count 0, and `for_grants` derives that expectation from the row's image and grants as for every other row.
+Being a Linux process adds the Linux personality (`linux=1`). It gets no other network authority, no block device, no object-service role, no lifecycle control and no IPC endpoints. The launch-time authority audit counts all of this; the shell's line must read `console=1 net-client=1 net-client-entitlement=1 tmp-objects=4 linux=1 console-input=1` with every other count 0 while a network instance is live, and `net-client=0` while none is. `for_grants` derives that expectation from the row's image and grants, and from whether a network instance is live, as for every other row. The process line ends `net-client=1` when the row grants `NetworkClient`, whether or not a client capability was issued.
 
 **fd 0.** Only a launch whose row carries `ConsoleInput` installs it. Every other process, and every other build, keeps fd 0 closed as before. Writing to fd 0 is `EBADF`. `read(0)`:
 
@@ -542,6 +545,25 @@ Syscalls run with interrupts masked: `IA32_FMASK` is written with `SYSCALL_ENTRY
 - The prompt is `# `. A fresh shell prints it just before its banner, so the first prompt of each instance is not on the last line.
 - Output is not translated: the guest writes `\n`, and the host terminal or QEMU's stdio backend moves to the start of the line.
 - Escape sequences from arrow and function keys are not recognised: the ESC byte is dropped and the printable rest enters the line.
+
+## Network client (#218 S7a)
+
+The default image compiles the Linux socket layer (#105) with cfg `clean_slate_linux_socket`, which `kernel/build.rs` emits for the default image and for `m9-linux-socket`. A row with `NetworkClient` in a build without that cfg fails to launch with `system shell: NetworkClient needs the Linux socket layer, which this build does not compile`; the grant is never skipped. The manifest accepts `NetworkClient` on Linux rows only.
+
+**Entitlement.** At launch the kernel records a network client entitlement for the process: a capability record on `ResourceRef::network(0x5200, u64::MAX)`, which names the network service and no instance (instance generations are `u32`, and an M7 grant made before the first network start sits on generation 0), with rights connect, send and receive (`kernel/src/capability/network.rs`). It authorises nothing itself: no live resource matches it, `authorize_network_op` refuses it regardless, and the socket broker never picks it. `fork` copies it into the child as a derived record, and process teardown revokes it with the rest of the holder's records. The authority audit counts it as `net-client-entitlement`, apart from `network`.
+
+**Client capability.** Socket operations need a client capability bound to the live instance, `ResourceRef::network(0x5200, generation)`, as in M7. The kernel derives one from the entitlement:
+
+- at launch, if a network instance is live (`[CAP ] net client entitlement holder=<pid> service=20992 instance-generation=<g>`, or `instance-generation=none`);
+- for every process holding an entitlement each time a network instance registers with the lifecycle controller (`[CAP ] net client reissued holder=<pid> generation=<g>`).
+
+Issuing revokes and releases the holder's earlier instance-bound client records first, so a holder has at most one, and an instance going away (exit, fault, restart or terminate) revokes and releases them all (`[CAP ] net client revoked count=<n> reason=instance-gone`). The table therefore holds at most two records per entitled process whatever the number of restarts; the capability table is fixed at 64 slots. With no instance live the shell still launches and runs, and `socket(2)` fails with `EACCES` (`[NET ] denied`), so `nslookup` and `wget` report an ordinary error.
+
+**Children across a restart.** A child forked before the network restarts holds the inherited entitlement and a derived copy of the parent's client capability. The instance going away revokes that copy with the parent's. On the new instance's registration the child, as an entitlement holder, gets its own client capability for the new generation, independent of the parent's. A child forked afterwards inherits the parent's current one.
+
+**Sockets of a lost instance.** When the instance goes away every open Linux socket is marked lost before the client capabilities are revoked. Its in-flight bridge request is dropped, so the new instance never serves it, and its readers, writers and `poll` waiters are woken. Each restarted syscall then fails: streams with `ECONNRESET`, datagrams with `EIO`. A lost socket polls readable, writable and in error (and hung up for TCP), so `poll` returns rather than sleeping. Lost sockets are never rebound to the new instance: every later operation fails the same way until the fd is closed, and closing one sends nothing to the service. A socket whose open had not completed is closed outright. The log line is `[NET ] linux sockets lost count=<n> reason=instance-gone`.
+
+Host tests in `capability/network.rs` and `process/linux_socket/mod.rs` cover re-issue, 1000 restarts without accumulation, a launch with and without a live instance, a child forked before a restart, and the wake of a blocked reader and a poll waiter. QEMU evidence of a restart under the shell comes with #218 S7b. TLS is not part of S7a; S7b adds it through a native client overlay under test hooks.
 
 ## M8.4 — write and exit (#94)
 

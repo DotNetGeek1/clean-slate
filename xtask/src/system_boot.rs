@@ -110,10 +110,21 @@ pub(crate) fn system_vm_config(data_disk: PathBuf, fixture_port: Option<u16>) ->
 }
 
 pub(crate) fn start_fixture_peer() -> Result<M7FixturePeer, XtaskError> {
+    start_peer(false)
+}
+
+/// The peer the shell's BusyBox applets talk to: the M9 profile answers the A, AAAA and PTR
+/// queries `nslookup` sends (`m7.fixture.test` is 10.77.0.50) and serves HTTP on
+/// 10.77.0.50:4001.
+pub(crate) fn start_shell_fixture_peer() -> Result<M7FixturePeer, XtaskError> {
+    start_peer(true)
+}
+
+fn start_peer(m9_profile: bool) -> Result<M7FixturePeer, XtaskError> {
     M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: Duration::ZERO,
-        m9_profile: false,
+        m9_profile,
     })
     .map_err(XtaskError::Io)
 }
@@ -133,7 +144,7 @@ pub(crate) fn run(
         if created { "created" } else { "persistent" }
     );
     let peer = if options.net {
-        let peer = start_fixture_peer()?;
+        let peer = start_shell_fixture_peer()?;
         println!("[XTSK] network fixture peer on 127.0.0.1:{}", peer.port());
         Some(peer)
     } else {
@@ -228,14 +239,15 @@ fn only_line<'a>(output: &'a str, prefix: &str) -> Result<&'a str, String> {
 /// every `[INIT]` line came from init's pid; each service launched once, held exactly its
 /// manifest grants and reported ready from the pid and generation the kernel launched, in that
 /// order, before init announced it; storage formatted the disk (with block writes) or mounted it,
-/// as `formatted` expects; the shell holds the console, stdin, `/tmp` and the Linux personality
-/// only, and became ready by blocking on stdin.
+/// as `formatted` expects; the shell holds the console, stdin, `/tmp`, the network client
+/// entitlement, a client capability for the network instance (launched before it in the same
+/// init wake, so live) and the Linux personality only, and became ready by blocking on stdin.
 fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, String> {
     let launched = only_line(output, "[KERN] init launched pid=")?;
     let init_pid = number(launched, "pid")?;
     let authority = only_line(output, "[KERN] init authority pid=")?;
     let expected_authority = format!(
-        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1"
+        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1"
     );
     if authority != expected_authority {
         return Err(format!("init authority line {authority:?}"));
@@ -323,14 +335,14 @@ fn check_shell(
     ready: &str,
 ) -> Result<(), String> {
     let expected_audit = format!(
-        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
+        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
     );
     if audit != expected_audit {
         return Err(format!("shell authority {audit:?}"));
     }
     let process = only_line(output, "[SVC ] shell process ")?;
     let expected_process = format!(
-        "[SVC ] shell process pid={pid} gen={generation} argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1"
+        "[SVC ] shell process pid={pid} gen={generation} argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1"
     );
     if process != expected_process {
         return Err(format!("shell process line {process:?}"));
@@ -352,20 +364,20 @@ mod tests {
              [SVC ] declared service=21504\n\
              [KERN] serial console input on vector=49\n\
              [KERN] init launched pid=3 slot=0 declared-services=3\n\
-             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1\n\
+             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1\n\
              [IPC ] console pid=3: [INIT] started pid=3 services=3\n\
              [IPC ] console pid=3: [INIT] SERVICE_READY from init refused: not a service\n\
              [IPC ] console pid=3: [INIT] starting service=20736\n\
-             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
+             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20736 pid=4 gen=1\n\
              [SVC ] ready service=20736 pid=4 gen=1 source=live-instance kernel-observed block-write-requests={writes} service-reported formatted={formatted} store-generation=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready gen=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=20992\n\
-             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1\n\
+             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20992 pid=5 gen=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=21504\n\
-             [SVC ] shell process pid=6 gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1\n\
-             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
+             [SVC ] shell process pid=6 gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
+             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
              [SVC ] launch service=21504 pid=6 gen=1\n\
              [SVC ] ready service=20992 pid=5 gen=1 source=live-instance kernel-observed raw-backend=virtio service-reported link-up=1\n\
              [IPC ] console pid=3: [INIT] service=20992 ready gen=1\n\
@@ -411,6 +423,15 @@ mod tests {
                 "pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0",
                 "pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=1",
             ),
+            (
+                "network=0 net-client=1 net-client-entitlement=1",
+                "network=0 net-client=0 net-client-entitlement=1",
+            ),
+            (
+                "net-client=1 net-client-entitlement=1",
+                "net-client=1 net-client-entitlement=0",
+            ),
+            ("tmp=1 net-client=1", "tmp=1 net-client=0"),
             ("stdin=1", "stdin=0"),
             ("env=PATH=/bin", "env=PATH=/bin:/sbin"),
             (" first-console-input-wait", " service-reported"),

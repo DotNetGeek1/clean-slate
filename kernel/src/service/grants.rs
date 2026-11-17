@@ -48,7 +48,7 @@ pub(crate) fn apply_bootstrap_grants<A: BootstrapGrantAuthority>(
             }
             Grant::BlockDevice | Grant::NetworkService => {}
             // Applied by the Linux launch path while it builds the process.
-            Grant::Console | Grant::ConsoleInput | Grant::TmpObjects => {}
+            Grant::Console | Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {}
         }
     }
     Ok(handles)
@@ -64,9 +64,11 @@ pub(crate) fn apply_instance_grants<A: InstanceGrantAuthority>(
         let result = match grant {
             Grant::BlockDevice => authority.grant_block_device(pid),
             Grant::NetworkService => authority.grant_network_service(pid, generation),
-            Grant::ObjectServiceRole | Grant::Console | Grant::ConsoleInput | Grant::TmpObjects => {
-                Ok(())
-            }
+            Grant::ObjectServiceRole
+            | Grant::Console
+            | Grant::ConsoleInput
+            | Grant::TmpObjects
+            | Grant::NetworkClient => Ok(()),
         };
         result.map_err(|message| GrantFailure { grant, message })?;
     }

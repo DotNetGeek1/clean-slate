@@ -129,11 +129,19 @@ fn emit_system_init_cfg() -> bool {
 /// self-test builds; the build that launches init compiles both for its shell row.
 /// `clean_slate_linux_proc` and `clean_slate_linux_rootfs` say "compiled", so code gated on
 /// them never names the self-test features.
+///
+/// `clean_slate_linux_socket` compiles the Linux socket fd paths and the launch-time
+/// network grant: `m9-linux-socket` for the self-test builds, and the build that launches
+/// init so its shell row's `NetworkClient` grant can be honoured.
 fn emit_linux_cfgs(system_init: bool) {
     println!("cargo::rustc-check-cfg=cfg(clean_slate_linux_proc)");
     println!("cargo::rustc-check-cfg=cfg(clean_slate_linux_rootfs)");
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_linux_socket)");
     if system_init || any_feature_enabled(&["m8-linux-image"]) {
         println!("cargo::rustc-cfg=clean_slate_linux_proc");
+    }
+    if system_init || any_feature_enabled(&["m9-linux-socket"]) {
+        println!("cargo::rustc-cfg=clean_slate_linux_socket");
     }
     if linux_rootfs_compiled(system_init) {
         println!("cargo::rustc-cfg=clean_slate_linux_rootfs");

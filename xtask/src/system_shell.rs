@@ -3,11 +3,13 @@
 //!
 //! COM1 is a loopback socket, as in `test-serial-input` (QEMU's Windows stdio backend drops
 //! `\r` from piped stdin); the boot is otherwise `cargo xtask run`'s: the default image on a
-//! data disk of the lane's own, here with the network fixture peer so every service settles.
+//! data disk of the lane's own, here with the network fixture peer (in the profile BusyBox's
+//! `nslookup` and `wget` need) so every service settles.
 //! Each [`Step`] is typed once the step before it is [`check_step`]-complete, and the same check
 //! is the verdict: a step passes only on output the command's execution produces, never on the
 //! echo of what was typed. `exit` and Ctrl-D must each end the shell and be followed by a new
-//! instance, one generation on, with a new prompt.
+//! instance, one generation on, with a new prompt. The network steps also need the fixture
+//! peer's own report that it answered the query or served the request while the step ran.
 
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
@@ -16,9 +18,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::guest_reboot::GuestRebootDetector;
+use crate::m7_fixture::{FixtureCounts, M7FixturePeer};
 use crate::serial_input_lane::{accept_serial, find, spawn_serial_reader, tail, SerialEvent};
 use crate::system_boot::{
-    ensure_data_disk, field, number, start_fixture_peer, system_vm_config,
+    ensure_data_disk, field, number, start_shell_fixture_peer, system_vm_config,
     SYSTEM_DATA_DISK_FILENAME,
 };
 use crate::{
@@ -59,6 +62,36 @@ enum Expect {
     /// The shell exits with status 0; a new instance one generation on is launched, prints a
     /// prompt and blocks reading stdin.
     Relaunch,
+    /// As `Lines`, and the fixture peer reports having served at least `served` while the step
+    /// ran: the lines can only come from a real exchange with it.
+    Network {
+        lines: &'static [&'static str],
+        served: Served,
+    },
+}
+
+/// What the fixture peer served while one step ran.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Served {
+    /// DNS replies carrying the A record of `m7.fixture.test`.
+    fixture_a_answers: u32,
+    http_responses: u32,
+}
+
+impl Served {
+    fn between(before: FixtureCounts, after: FixtureCounts) -> Self {
+        Self {
+            fixture_a_answers: after
+                .fixture_a_answers
+                .saturating_sub(before.fixture_a_answers),
+            http_responses: after.http_responses.saturating_sub(before.http_responses),
+        }
+    }
+
+    fn covers(self, want: Self) -> bool {
+        self.fixture_a_answers >= want.fixture_a_answers
+            && self.http_responses >= want.http_responses
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -70,7 +103,7 @@ struct Step {
 
 /// The script. Every expected line differs from the command that produces it, so the echo of
 /// a command cannot satisfy its own step.
-const STEPS: [Step; 8] = [
+const STEPS: [Step; 10] = [
     Step {
         name: "echo",
         send: b"echo hel''lo-shell\r",
@@ -125,6 +158,32 @@ const STEPS: [Step; 8] = [
         name: "ctrl-d",
         send: b"\x04",
         expect: Expect::Relaunch,
+    },
+    // The fixture answers `m7.fixture.test` with 10.77.0.50 (`start_shell_fixture_peer`);
+    // BusyBox prints the answer as these two lines, after a spurious "can't resolve '(null)'"
+    // on stderr (`fixtures/busybox/frozen/traces/nslookup-fixture.strace`).
+    Step {
+        name: "nslookup",
+        send: b"nslookup m7.fixture.test\r",
+        expect: Expect::Network {
+            lines: &["Name:      m7.fixture.test", "Address 1: 10.77.0.50"],
+            served: Served {
+                fixture_a_answers: 1,
+                http_responses: 0,
+            },
+        },
+    },
+    // `-q` leaves only the body on the console; wget resolves the name through the fixture too.
+    Step {
+        name: "wget",
+        send: b"wget -q -O - http://m7.fixture.test:4001/\r",
+        expect: Expect::Network {
+            lines: &["M9-FIXTURE-HTTP"],
+            served: Served {
+                fixture_a_answers: 1,
+                http_responses: 1,
+            },
+        },
     },
 ];
 
@@ -219,7 +278,7 @@ fn prompt_after(segment: &str, from: usize) -> Option<usize> {
 /// The kernel's authority line for a shell instance must be exactly the row's grants.
 fn expected_authority(pid: u64) -> String {
     format!(
-        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
+        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
     )
 }
 
@@ -240,7 +299,7 @@ fn check_instance(segment: &str, generation: u64, init_pid: u64) -> Result<Shell
     }
     let process = only_kernel_line(segment, "[SVC ] shell process ")?;
     let want_process = format!(
-        "[SVC ] shell process pid={pid} gen={generation} argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1"
+        "[SVC ] shell process pid={pid} gen={generation} argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1"
     );
     if process != want_process {
         return Err(format!("shell process line {process:?}"));
@@ -287,9 +346,28 @@ fn check_boot(segment: &str) -> Result<(u64, Shell), String> {
 }
 
 /// Whether `step`, typed into `shell`, has completed within `segment` (the output from the
-/// moment it was typed). `Ok` carries the shell the next step runs in.
-fn check_step(step: &Step, segment: &str, shell: Shell, init_pid: u64) -> Result<Shell, String> {
+/// moment it was typed), with the fixture peer having `served` that much meanwhile. `Ok`
+/// carries the shell the next step runs in.
+fn check_step(
+    step: &Step,
+    segment: &str,
+    served: Served,
+    shell: Shell,
+    init_pid: u64,
+) -> Result<Shell, String> {
     match step.expect {
+        Expect::Network {
+            lines: want,
+            served: want_served,
+        } => {
+            check_lines(segment, want)?;
+            if !served.covers(want_served) {
+                return Err(format!(
+                    "the fixture peer served {served:?} while the step ran, not {want_served:?}"
+                ));
+            }
+            Ok(shell)
+        }
         Expect::Lines {
             lines: want,
             absent,
@@ -339,13 +417,16 @@ fn check_lines(segment: &str, want: &[&str]) -> Result<(), String> {
         .ok_or_else(|| format!("no prompt after {want:?}"))
 }
 
-/// The whole run. `segments[0]` is the boot, `segments[i]` the output after step `i` was typed.
-fn validate(segments: &[&str]) -> Result<Vec<Shell>, String> {
-    if segments.len() != STEPS.len() + 1 {
+/// The whole run. `segments[0]` is the boot, `segments[i]` the output after step `i` was typed,
+/// and `served[i - 1]` what the fixture peer served from then until the next step was typed.
+fn validate(segments: &[&str], served: &[Served]) -> Result<Vec<Shell>, String> {
+    if segments.len() != STEPS.len() + 1 || served.len() != STEPS.len() {
         return Err(format!(
-            "expected {} segments, got {}",
+            "expected {} segments and {} fixture reports, got {} and {}",
             STEPS.len() + 1,
-            segments.len()
+            STEPS.len(),
+            segments.len(),
+            served.len()
         ));
     }
     let whole = segments.concat();
@@ -357,8 +438,8 @@ fn validate(segments: &[&str]) -> Result<Vec<Shell>, String> {
     let (init_pid, mut shell) =
         check_boot(segments[0]).map_err(|reason| format!("boot: {reason}"))?;
     let mut shells = vec![shell];
-    for (step, segment) in STEPS.iter().zip(&segments[1..]) {
-        let next = check_step(step, segment, shell, init_pid)
+    for ((step, segment), served) in STEPS.iter().zip(&segments[1..]).zip(served) {
+        let next = check_step(step, segment, *served, shell, init_pid)
             .map_err(|reason| format!("step {:?}: {reason}", step.name))?;
         if next != shell {
             shells.push(next);
@@ -395,25 +476,31 @@ pub(crate) fn run() -> Result<(), XtaskError> {
         std::fs::remove_file(&disk)?;
     }
     ensure_data_disk(&disk)?;
-    let peer = start_fixture_peer()?;
+    let peer = start_shell_fixture_peer()?;
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
     let config = VmLaunchConfig {
         serial_tcp_port: Some(listener.local_addr()?.port()),
         ..system_vm_config(disk, Some(peer.port()))
     };
-    let result = drive(&listener, config);
+    let result = drive(&listener, config, &peer);
     peer.shutdown();
     let (transcript, boundaries) = result?;
-    let segments = split_at(&transcript, &boundaries);
+    let typed_at = &boundaries[..boundaries.len().saturating_sub(1)];
+    let offsets: Vec<usize> = typed_at.iter().map(|(at, _)| *at).collect();
+    let segments = split_at(&transcript, &offsets);
     let borrowed: Vec<&str> = segments.iter().map(String::as_str).collect();
-    let shells = validate(&borrowed)
+    let served: Vec<Served> = boundaries
+        .windows(2)
+        .map(|pair| Served::between(pair[0].1, pair[1].1))
+        .collect();
+    let shells = validate(&borrowed, &served)
         .map_err(|reason| XtaskError::Validation(format!("system shell: {reason}")))?;
     let pids: Vec<String> = shells
         .iter()
         .map(|shell| format!("pid={} gen={}", shell.pid, shell.generation))
         .collect();
     println!(
-        "\n[SHL ] PASS the serial-console shell ran echo, ls /bin, a pipeline, a /tmp object write and read and a backspace edit; exit ended it and its successor read /tmp back; Ctrl-D ended that one; init relaunched it each time: {}",
+        "\n[SHL ] PASS the serial-console shell ran echo, ls /bin, a pipeline, a /tmp object write and read and a backspace edit; exit ended it and its successor read /tmp back; Ctrl-D ended that one; init relaunched it each time; the third shell resolved m7.fixture.test and fetched http://m7.fixture.test:4001/ from the fixture peer, which reported serving both: {}",
         pids.join(", ")
     );
     Ok(())
@@ -433,12 +520,16 @@ fn split_at(transcript: &[u8], boundaries: &[usize]) -> Vec<String> {
     segments
 }
 
-/// Boots QEMU and types the script. Returns the transcript and the byte offsets at which each
-/// step was typed.
+/// A point in the run: the transcript length and what the fixture peer had served by then.
+type Boundary = (usize, FixtureCounts);
+
+/// Boots QEMU and types the script. Returns the transcript and a [`Boundary`] for each step,
+/// taken as it was typed, and one at the end.
 fn drive(
     listener: &TcpListener,
     config: VmLaunchConfig,
-) -> Result<(Vec<u8>, Vec<usize>), XtaskError> {
+    peer: &M7FixturePeer,
+) -> Result<(Vec<u8>, Vec<Boundary>), XtaskError> {
     let mut vm = prepare_vm(false, false, &[], config)?;
     announce_qemu_version(&vm.qemu);
     vm.qemu.stdin(Stdio::null());
@@ -451,7 +542,7 @@ fn drive(
 
     let mut transcript = Vec::new();
     let mut reboot_detector = GuestRebootDetector::default();
-    let mut boundaries: Vec<usize> = Vec::new();
+    let mut boundaries: Vec<Boundary> = Vec::new();
     let mut state: Option<(u64, Shell)> = None;
     let mut step_started = Instant::now();
     let fail = |transcript: &[u8], message: String| {
@@ -498,13 +589,17 @@ fn drive(
                 );
             }
         }
-        let from = boundaries.last().copied().unwrap_or(0);
+        let (from, counts_from) = boundaries
+            .last()
+            .copied()
+            .unwrap_or((0, FixtureCounts::default()));
         let segment = String::from_utf8_lossy(&transcript[from..]);
         let progress = match state {
             None => check_boot(&segment),
             Some((init_pid, shell)) => {
                 let step = &STEPS[boundaries.len() - 1];
-                check_step(step, &segment, shell, init_pid).map(|next| (init_pid, next))
+                let served = Served::between(counts_from, peer.counts());
+                check_step(step, &segment, served, shell, init_pid).map(|next| (init_pid, next))
             }
         };
         let now = Instant::now();
@@ -515,12 +610,13 @@ fn drive(
                     if let Err(missing) = reboot_detector.require_kernel_banner() {
                         return fail(&transcript, missing);
                     }
+                    boundaries.push((transcript.len(), peer.counts()));
                     save_transcript(&transcript)?;
                     return Ok((transcript, boundaries));
                 }
                 let step = &STEPS[boundaries.len()];
                 println!("\n[SHL ] step {:?}", step.name);
-                boundaries.push(transcript.len());
+                boundaries.push((transcript.len(), peer.counts()));
                 writer.write_all(step.send)?;
                 writer.flush()?;
                 step_started = now;
@@ -565,7 +661,7 @@ mod tests {
     fn instance(pid: u64, generation: u64, init_pid: u64) -> String {
         format!(
             "{}\n\
-             [SVC ] shell process pid={pid} gen={generation} argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1\n\
+             [SVC ] shell process pid={pid} gen={generation} argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
              [SVC ] console input so far lines=0 eofs=0\n\
              [SVC ] launch service=21504 pid={pid} gen={generation}\n\
              \n\n# BusyBox v1.37.0 (2026-09-23 09:18:28 UTC) built-in shell (ash)\n\n\
@@ -599,13 +695,101 @@ mod tests {
             format!("exit\r\n[LNX ] exit pid=6 status=0\n{}", instance(9, 2, 3)),
             "echo aga''in; cat /tmp/a\r\nagain\nobj-7\n# ".to_owned(),
             format!("[LNX ] exit pid=9 status=0\n{}", instance(11, 3, 3)),
+            "nslookup m7.fixture.test\r\n\
+             [CAP ] net allow op=connect holder=11\n\
+             nslookup: can't resolve '(null)'\n\n\
+             Name:      m7.fixture.test\nAddress 1: 10.77.0.50\n\n# "
+                .to_owned(),
+            "wget -q -O - http://m7.fixture.test:4001/\r\nM9-FIXTURE-HTTP\n# ".to_owned(),
         ]
     }
 
-    fn run(segments: &[String]) -> Result<Vec<Shell>, String> {
-        let borrowed: Vec<&str> = segments.iter().map(String::as_str).collect();
-        validate(&borrowed)
+    const NSLOOKUP_SEGMENT: usize = 9;
+    const WGET_SEGMENT: usize = 10;
+
+    /// What the fixture reports for a correct run: one A answer during `nslookup`, one more
+    /// and the HTTP response during `wget`, nothing otherwise.
+    fn good_served() -> Vec<Served> {
+        let mut served = vec![Served::default(); STEPS.len()];
+        served[NSLOOKUP_SEGMENT - 1].fixture_a_answers = 1;
+        served[WGET_SEGMENT - 1] = Served {
+            fixture_a_answers: 1,
+            http_responses: 1,
+        };
+        served
     }
+
+    fn run(segments: &[String]) -> Result<Vec<Shell>, String> {
+        run_served(segments, &good_served())
+    }
+
+    fn run_served(segments: &[String], served: &[Served]) -> Result<Vec<Shell>, String> {
+        let borrowed: Vec<&str> = segments.iter().map(String::as_str).collect();
+        validate(&borrowed, served)
+    }
+
+    #[test]
+    fn network_steps_need_their_output_lines() {
+        let mut segments = good_segments();
+        segments[NSLOOKUP_SEGMENT] =
+            "nslookup m7.fixture.test\r\nnslookup: can't resolve 'm7.fixture.test'\n# ".to_owned();
+        assert!(run(&segments).unwrap_err().contains("nslookup"));
+        let mut segments = good_segments();
+        segments[NSLOOKUP_SEGMENT] = segments[NSLOOKUP_SEGMENT].replace("10.77.0.50", "10.77.0.1");
+        assert!(run(&segments).is_err());
+        let mut segments = good_segments();
+        segments[WGET_SEGMENT] = "wget -q -O - http://m7.fixture.test:4001/\r\n\
+             wget: can't connect to remote host: Permission denied\n# "
+            .to_owned();
+        assert!(run(&segments).unwrap_err().contains("wget"));
+    }
+
+    #[test]
+    fn network_steps_need_the_fixture_peer_to_have_served_them() {
+        for (step, field) in [
+            (NSLOOKUP_SEGMENT, "dns"),
+            (WGET_SEGMENT, "dns"),
+            (WGET_SEGMENT, "http"),
+        ] {
+            let mut served = good_served();
+            match field {
+                "dns" => served[step - 1].fixture_a_answers = 0,
+                _ => served[step - 1].http_responses = 0,
+            }
+            let error = run_served(&good_segments(), &served).unwrap_err();
+            assert!(
+                error.contains("fixture peer served"),
+                "{step} {field}: {error}"
+            );
+        }
+        let mut early = good_served();
+        early[NSLOOKUP_SEGMENT - 2].fixture_a_answers = 1;
+        early[NSLOOKUP_SEGMENT - 1].fixture_a_answers = 0;
+        assert!(run_served(&good_segments(), &early).is_err());
+        assert!(run_served(&good_segments(), &good_served()[1..]).is_err());
+    }
+
+    #[test]
+    fn fixture_reports_are_differences_between_step_boundaries() {
+        let at = |dns, http| FixtureCounts {
+            fixture_a_answers: dns,
+            http_responses: http,
+        };
+        assert_eq!(
+            Served::between(at(2, 1), at(4, 1)),
+            Served {
+                fixture_a_answers: 2,
+                http_responses: 0,
+            }
+        );
+        assert!(Served::between(at(2, 1), at(3, 2)).covers(STEP_WGET_SERVED));
+        assert!(!Served::between(at(3, 2), at(3, 2)).covers(STEP_WGET_SERVED));
+    }
+
+    const STEP_WGET_SERVED: Served = Served {
+        fixture_a_answers: 1,
+        http_responses: 1,
+    };
 
     #[test]
     fn a_correct_session_validates_with_three_generations() {
@@ -735,6 +919,8 @@ mod tests {
             ("tmp-objects=4", "tmp-objects=3"),
             ("console-input=1", "console-input=0"),
             ("network=0", "network=1"),
+            ("net-client=1 ", "net-client=0 "),
+            ("net-client-entitlement=1", "net-client-entitlement=0"),
             ("linux=1", "linux=0"),
             ("matches-manifest=1", "matches-manifest=0"),
         ] {
@@ -744,6 +930,9 @@ mod tests {
         }
         let mut segments = good_segments();
         segments[0] = segments[0].replace("stdin=1", "stdin=0");
+        assert!(run(&segments).is_err());
+        let mut segments = good_segments();
+        segments[0] = segments[0].replace("tmp=1 net-client=1", "tmp=1 net-client=0");
         assert!(run(&segments).is_err());
     }
 
@@ -771,7 +960,8 @@ mod tests {
         for step in STEPS {
             if let Expect::Lines { lines, .. }
             | Expect::LineSet(lines)
-            | Expect::TmpWrite { lines, .. } = step.expect
+            | Expect::TmpWrite { lines, .. }
+            | Expect::Network { lines, .. } = step.expect
             {
                 let typed = String::from_utf8_lossy(step.send);
                 for line in lines {

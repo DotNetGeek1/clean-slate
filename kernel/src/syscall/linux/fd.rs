@@ -105,7 +105,7 @@ pub(crate) fn handle_sys_read(
             }
         }
         DescriptorKind::Socket(socket) => {
-            #[cfg(feature = "m9-linux-socket")]
+            #[cfg(clean_slate_linux_socket)]
             {
                 crate::process::linux_socket::read_socket(
                     request,
@@ -117,7 +117,7 @@ pub(crate) fn handle_sys_read(
                     &mut scratch[..want],
                 )
             }
-            #[cfg(not(feature = "m9-linux-socket"))]
+            #[cfg(not(clean_slate_linux_socket))]
             {
                 let _ = (request, ctx, pid, generation, fd, socket);
                 Err(EBADF)
