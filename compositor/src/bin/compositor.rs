@@ -58,6 +58,7 @@ use clean_slate_native_abi::port::{
     PORT_OP_BIND_WAKE, PORT_OP_DISCONNECT, PORT_OP_FIND_HANDLE, PORT_OP_POST, PORT_OP_RECV,
     PORT_RECV_NONBLOCK, PORT_ROLE_SERVE,
 };
+use clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY;
 use clean_slate_native_abi::work_set::{WORK_SET_OP_CREATE, WORK_SET_OP_NOW, WORK_SET_OP_WAIT};
 use clean_slate_native_abi::{
     is_status, ConnectionId, PortRecvRecord, TransferredCap, SHARED_BUFFER_ACCESS_READ,
@@ -422,6 +423,9 @@ impl WorkWaiter for KernelWorkSet {
 }
 
 fn console(boot: &DesktopLaunchPage, line: &ConsoleLine) {
+    if !boot.input_trace() && diag::is_per_input_line(line.as_str()) {
+        return;
+    }
     if let Some(handle) = boot.console() {
         let bytes = line.as_bytes();
         syscall(
@@ -433,6 +437,15 @@ fn console(boot: &DesktopLaunchPage, line: &ConsoleLine) {
             0,
         );
     }
+}
+
+/// Syscall 22, after the port is registered and a frame has been submitted.
+///
+/// The M10 launch policy has already declared this process and left it `Starting`, so the
+/// kernel accepts the report. A refusal (this pid is not a live service instance) changes
+/// nothing in the kernel, and this process keeps presenting either way.
+fn report_service_ready() {
+    syscall(SYSCALL_NR_SERVICE_READY, 0, 0, 0, 0, 0);
 }
 
 fn exit() -> ! {
@@ -575,8 +588,15 @@ pub extern "C" fn _start() -> ! {
         input,
         waiter: &mut waiter,
     };
-    while compositor.iterate(&mut io).is_ok() {
+    let mut reported_ready = false;
+    while let Ok(iteration) = compositor.iterate(&mut io) {
         tracker.observe(compositor, &mut |line| console(&boot, &line));
+        // The kernel registered the graphics port before this process ran. The first
+        // submitted present is the display presenting, which is after `[COMP] started`.
+        if !reported_ready && iteration.presented.is_some() {
+            reported_ready = true;
+            report_service_ready();
+        }
     }
     console(&boot, &diag::exit_line("service-error"));
     exit();

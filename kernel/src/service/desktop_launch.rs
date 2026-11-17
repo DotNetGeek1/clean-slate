@@ -30,7 +30,8 @@ use clean_slate_graphics::{
     CLIENT_EVENT_QUEUE_DEPTH, MAX_OUTSTANDING_REQUESTS_PER_CLIENT, SERVER_REQUEST_QUEUE_DEPTH,
 };
 use clean_slate_native_abi::desktop::{
-    DesktopLaunchPage, LAUNCH_FLAG_FAULT_KEY, LAUNCH_TIER_Q0, LAUNCH_TIER_Q1, NO_CONSOLE,
+    DesktopLaunchPage, LAUNCH_FLAG_FAULT_KEY, LAUNCH_FLAG_INPUT_TRACE, LAUNCH_TIER_Q0,
+    LAUNCH_TIER_Q1, NO_CONSOLE,
 };
 use clean_slate_native_abi::port::PORT_ROLE_CONNECT;
 use clean_slate_native_abi::PortParams;
@@ -291,17 +292,34 @@ pub(crate) fn launch_page_for(pid: u64) -> DesktopLaunchPage {
         self_pid: pid,
         graphics_resource_id: u64::from(COMPOSITOR_SERVICE_ID.0),
         console_handle,
-        flags: if cfg!(feature = "m10-desktop-self-test") {
-            LAUNCH_FLAG_FAULT_KEY
-        } else {
-            0
-        },
+        flags: launch_flags(),
         tier: if cfg!(feature = "m10-desktop-q0") {
             LAUNCH_TIER_Q0
         } else {
             LAUNCH_TIER_Q1
         },
     }
+}
+
+/// Flags written into the launch page.
+///
+/// `LAUNCH_FLAG_FAULT_KEY` stays on the self-test kernel only. `LAUNCH_FLAG_INPUT_TRACE` is
+/// set for that same kernel, because `test-m10-desktop` greps the per-input lines, and for
+/// `system-test-hooks` (D5). This module is compiled only into an `m10-desktop` kernel, so the
+/// hooks arm applies when the two features are combined. A plain `m10-desktop` kernel
+/// (`run-m10-desktop`) leaves the trace flag clear, so moving the pointer prints nothing.
+fn launch_flags() -> u64 {
+    let mut flags = 0;
+    if cfg!(feature = "m10-desktop-self-test") {
+        flags |= LAUNCH_FLAG_FAULT_KEY;
+    }
+    if cfg!(any(
+        feature = "m10-desktop-self-test",
+        feature = "system-test-hooks"
+    )) {
+        flags |= LAUNCH_FLAG_INPUT_TRACE;
+    }
+    flags
 }
 
 /// Boot tail: declares the three services and starts the compositor and the shell.
@@ -655,6 +673,21 @@ fn log_snapshot(label: Option<&str>, s: &DesktopResourceSnapshot) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_flags_follow_the_build() {
+        let flags = launch_flags();
+        let fault = flags & LAUNCH_FLAG_FAULT_KEY != 0;
+        let trace = flags & LAUNCH_FLAG_INPUT_TRACE != 0;
+        assert_eq!(fault, cfg!(feature = "m10-desktop-self-test"));
+        assert_eq!(
+            trace,
+            cfg!(any(
+                feature = "m10-desktop-self-test",
+                feature = "system-test-hooks"
+            ))
+        );
+    }
 
     #[test]
     fn service_ids_and_roles_round_trip() {

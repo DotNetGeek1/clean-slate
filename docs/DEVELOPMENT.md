@@ -931,6 +931,7 @@ Every capture waits for an `[IDLE ] quiet` line first, so the frame is settled.
 
 - the `[DISP] backend=` for the run, and the absence of the other backend;
 - the `[COMP] started`, `[SHELL] ready … dock=none` and `[APP ] ready` lines with the run's tier;
+- the per-input lines the script awaits (`[APP ] input state=changed`, `[WIN ] moved`, `[INPT] focus`, `[APP ] focus`). The lane kernel is `m10-desktop-self-test`, which sets `LAUNCH_FLAG_INPUT_TRACE`; a plain `m10-desktop` boot (`run-m10-desktop`) does not, so those lines are absent there. Each program also calls `SERVICE_READY` at its ready point, which the controller accepts because the desktop policy declared the three services;
 - launch order `compositor, shell, app, app, app, compositor, shell, app`, with distinct pids and a new compositor generation;
 - exits `app/exit/128`, `app/crash/6`, `compositor/crash/6`, and every reaped pid with `residue=0`;
 - three `compare … baseline=match` lines, each preceded by a snapshot equal to the baseline field by field;

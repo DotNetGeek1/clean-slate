@@ -24,6 +24,7 @@ use clean_slate_native_abi::port::{
     PortEventRecord, PORT_OP_CLOSE, PORT_OP_CONNECT, PORT_OP_FIND_HANDLE, PORT_OP_RECV_EVENT,
     PORT_OP_SEND, PORT_ROLE_CONNECT, PORT_SEND_WAIT,
 };
+use clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY;
 use clean_slate_native_abi::{
     is_status, EventKind, SHARED_BUFFER_ACCESS_READ_WRITE, SHARED_BUFFER_SUBOP_ALLOCATE,
     SHARED_BUFFER_SUBOP_MAP, SHARED_BUFFER_SUBOP_RELEASE, SHARED_BUFFER_SUBOP_UNMAP,
@@ -66,6 +67,14 @@ fn exit() -> ! {
     unsafe {
         core::arch::asm!("int 0x80", options(noreturn));
     }
+}
+
+/// Syscall 22, once both shell surfaces are committed (after `[SHELL] ready`).
+///
+/// Accepted when this process is the live `Starting` instance of service `0x5301`. A refusal
+/// changes nothing, and the shell keeps running either way.
+fn report_service_ready() {
+    syscall(SYSCALL_NR_SERVICE_READY, 0, 0, 0, 0, 0, 0);
 }
 
 fn console(boot: &DesktopLaunchPage, line: &ConsoleLine) {
@@ -281,9 +290,10 @@ fn run(boot: &DesktopLaunchPage, session: &mut ShellSession) {
         };
         outcome = session.handle(&event, &mut kernel);
         if !announced && session.is_running() {
-            announced = true;
             if let Some(line) = diag::ready_line(session) {
+                announced = true;
                 console(boot, &line);
+                report_service_ready();
             }
         }
         if let Some(index) = session.take_activation() {

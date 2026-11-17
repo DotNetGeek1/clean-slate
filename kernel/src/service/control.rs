@@ -284,8 +284,10 @@ impl ServiceLifecycleController {
     }
 
     /// `SERVICE_READY` from `pid`. Accepted only from the live instance of a declared service
-    /// that is still starting: the service moves to running, its ready message is stored and
-    /// lifecycle waiters are woken. A refusal changes nothing and wakes nobody.
+    /// that is still starting, whether init launched it or the kernel desktop policy did: the
+    /// service moves to running, its ready message is stored and lifecycle waiters are woken.
+    /// A refusal (no live instance, as with init's own probe, or an instance that has left
+    /// starting) changes nothing and wakes nobody.
     pub(crate) fn report_ready_from_pid(
         &mut self,
         pid: u64,
@@ -1973,6 +1975,43 @@ mod tests {
             controller.pending_count,
             controller.ready_pending,
         )
+    }
+
+    #[test]
+    fn service_ready_from_a_kernel_launched_desktop_service_is_accepted() {
+        // The M10 policy `declare_service`s 0x5300, 0x5301 and 0x5302 and `Start`s them. They
+        // are not init-launched. The report keys only on the live Starting instance, so it is
+        // accepted. Terminate from the resulting Running state is the path that stops a client
+        // when the compositor exits, and it stays valid.
+        for (id, pid) in [(0x5300u32, 80u64), (0x5301, 81), (0x5302, 82)] {
+            let mut controller = ServiceLifecycleController::new();
+            controller.services[0] = starting_record(ServiceId(id), pid, 1);
+            let before_pending = controller.pending_count;
+            let instance = controller
+                .report_ready_from_pid(pid)
+                .expect("desktop service ready is accepted");
+            assert_eq!(instance.service, ServiceId(id));
+            assert_eq!(controller.services[0].state, ServiceLifecycleState::Running);
+            assert_eq!(controller.pending_count, before_pending);
+            assert!(controller.ready_pending[0].is_some());
+            let (next, generation) = apply_transition(
+                ServiceLifecycleState::Running,
+                InstanceGeneration(1),
+                TransitionInput::Control(ControlRequestKind::Terminate),
+                None,
+            )
+            .expect("terminate from running");
+            assert_eq!(next, ServiceLifecycleState::Stopping);
+            assert_eq!(generation, InstanceGeneration(1));
+            let (faulted, _) = apply_transition(
+                ServiceLifecycleState::Running,
+                InstanceGeneration(1),
+                TransitionInput::Event(LifecycleEventKind::Faulted),
+                Some(instance),
+            )
+            .expect("fault from running");
+            assert_eq!(faulted, ServiceLifecycleState::Faulted);
+        }
     }
 
     #[test]
