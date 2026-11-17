@@ -76,7 +76,7 @@ pub(crate) fn with_capability_space<R>(f: impl FnOnce(&CapabilityTable<MAX_SLOTS
     feature = "m9-userspace-self-test",
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test",
-    feature = "m10-desktop"
+    clean_slate_desktop_snapshot
 ))]
 pub(crate) fn live_capability_count() -> usize {
     with_capability_space(|table| {

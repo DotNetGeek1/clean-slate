@@ -702,6 +702,9 @@ pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> 
     crate::selftest::m6_fixture::on_fixture_exiting(pid);
     let teardown = teardown_current_process(allocator, kernel_root_frame(), 1, true)
         .unwrap_or_else(|message| fatal_kernel_error(message));
+    if let Some(event) = maybe_fault_event {
+        unsafe { service_lifecycle_controller_mut() }.log_reaped(event.instance.service, pid);
+    }
     #[cfg(feature = "m9-userspace-self-test")]
     if crate::selftest::m9_userspace::checklist_fault_pending() {
         crate::diagnostics::serial::serial_write_line(

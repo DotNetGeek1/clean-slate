@@ -495,7 +495,7 @@ impl Scheduler {
     }
 
     /// Whether a thread other than the idle thread could be dispatched now.
-    #[cfg(feature = "m10-desktop")]
+    #[cfg(clean_slate_desktop_snapshot)]
     pub(crate) fn has_runnable_threads(&self) -> bool {
         self.next_runnable_from(Some(IDLE_THREAD_INDEX)).is_some()
     }

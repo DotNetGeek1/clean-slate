@@ -164,11 +164,21 @@ fn emit_desktop_cfg(system_init: bool) -> bool {
     desktop
 }
 
+/// `clean_slate_desktop_snapshot` compiles the system-wide desktop resource snapshot the M10
+/// policy and the `system-test-hooks` build compare against a baseline after each restart.
+fn emit_desktop_snapshot_cfg() {
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_desktop_snapshot)");
+    if any_feature_enabled(&["m10-desktop", "system-test-hooks"]) {
+        println!("cargo::rustc-cfg=clean_slate_desktop_snapshot");
+    }
+}
+
 fn main() {
     let system_init = emit_system_init_cfg();
     emit_boot_tail_cfgs(system_init);
     emit_linux_cfgs(system_init);
     let desktop = emit_desktop_cfg(system_init);
+    emit_desktop_snapshot_cfg();
     // Init is embedded only in the build that launches it.
     if system_init {
         embed_userspace_image("init_userspace.bin", "clean-slate-supervisor-init", true);

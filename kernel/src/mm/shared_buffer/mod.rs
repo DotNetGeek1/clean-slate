@@ -220,7 +220,7 @@ pub(crate) fn mapping_count(pid: u64) -> usize {
 }
 
 /// Table-wide buffer, page and mapping totals for the #118 desktop resource snapshot.
-#[cfg(feature = "m10-desktop")]
+#[cfg(clean_slate_desktop_snapshot)]
 pub(crate) fn desktop_stats() -> table::SharedBufferStats {
     crate::arch::x86_64::cpu::without_interrupts(|| state().table.stats())
 }

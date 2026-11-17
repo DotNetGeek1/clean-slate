@@ -585,8 +585,9 @@ mod tests {
         }
     }
 
-    /// The `system-test-hooks` module, its fault byte and its banner exist only in that build:
-    /// every line outside the module that names it sits directly under the feature gate.
+    /// The `system-test-hooks` module, its fault bytes, its desktop residue checks and its
+    /// banner exist only in that build: every line outside the module that names it sits
+    /// directly under the feature gate, and every entry point is reached that way.
     #[test]
     fn the_test_hooks_are_reached_only_from_feature_gated_lines() {
         fn rust_files(dir: &std::path::Path, out: &mut std::vec::Vec<std::path::PathBuf>) {
@@ -606,6 +607,7 @@ mod tests {
         let mut files = std::vec::Vec::new();
         rust_files(&src, &mut files);
         let mut references = 0usize;
+        let mut entry_points = std::collections::BTreeSet::new();
         for file in files {
             if file
                 .file_stem()
@@ -626,9 +628,30 @@ mod tests {
                     file.display(),
                     index + 1
                 );
+                let called = line
+                    .split(needle.as_str())
+                    .nth(1)
+                    .and_then(|rest| rest.strip_prefix("::"))
+                    .map(|rest| rest.split(|c: char| !c.is_ascii_alphanumeric() && c != '_'));
+                if let Some(name) = called.and_then(|mut parts| parts.next()) {
+                    entry_points.insert(std::string::String::from(name));
+                }
             }
         }
-        assert!(references >= 4, "found {references} hook references");
+        // Every entry point the module exports, including S6d's desktop fault and residue hooks,
+        // must be among the gated references checked above.
+        let exported = [
+            "announce",
+            "observe_received_byte",
+            "run_pending",
+            "on_service_launched",
+            "on_service_ready",
+            "on_idle",
+        ];
+        for name in exported {
+            assert!(entry_points.contains(name), "no gated call to {name}");
+        }
+        assert!(references >= 8, "found {references} hook references");
     }
 
     #[test]

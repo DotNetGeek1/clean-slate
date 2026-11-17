@@ -148,7 +148,7 @@ pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'s
 
 /// System-wide counters the #118 desktop compares against its baseline after an app closes or
 /// crashes and after a compositor restart: every M10 resource a desktop process can own.
-#[cfg(feature = "m10-desktop")]
+#[cfg(clean_slate_desktop_snapshot)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DesktopResourceSnapshot {
     pub(crate) processes: usize,
@@ -169,7 +169,7 @@ pub(crate) struct DesktopResourceSnapshot {
     pub(crate) gpu_resources: usize,
 }
 
-#[cfg(feature = "m10-desktop")]
+#[cfg(clean_slate_desktop_snapshot)]
 pub(crate) fn desktop_resource_snapshot() -> DesktopResourceSnapshot {
     let ports = port::global_counts();
     let buffers = crate::mm::shared_buffer::desktop_stats();
