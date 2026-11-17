@@ -36,6 +36,7 @@ use crate::compose::{self, Decor, Footprint, OpaqueCover, Visual};
 use crate::input::{Hit, Seat};
 use crate::present::{DisplayHealth, PresentTracker};
 use crate::scene::{Scene, SurfaceKey};
+use crate::trace::InputTrace;
 use crate::wm::{GrabKind, PlaceRequest, Target, WindowPolicy, Wm, WmHit};
 use clean_slate_graphics::window::WindowTitle;
 use clean_slate_ui::chrome::ChromeState;
@@ -167,6 +168,7 @@ pub struct Compositor<P: WindowPolicy> {
     needs_composite: bool,
     backlog: bool,
     seat: Seat,
+    trace: InputTrace,
     wm: Wm,
     policy: P,
     config: Config,
@@ -184,6 +186,7 @@ impl<P: WindowPolicy> Compositor<P> {
             needs_composite: false,
             backlog: false,
             seat: Seat::new(),
+            trace: InputTrace::new(),
             wm: Wm::new(),
             policy,
             config,
@@ -211,6 +214,11 @@ impl<P: WindowPolicy> Compositor<P> {
 
     pub fn stats(&self) -> Stats {
         self.stats
+    }
+
+    /// Button edges and settled pointer positions since the last call.
+    pub fn take_input_trace(&mut self) -> InputTrace {
+        self.trace.take()
     }
 
     pub fn budget(&self) -> &GlobalBudget {
@@ -956,9 +964,12 @@ impl<P: WindowPolicy> Compositor<P> {
                 self.on_seat_event(*event);
             }
         };
-        match io.input.read_batch(READ_BATCH_MAX_RECORDS, &mut sink) {
+        let read = io.input.read_batch(READ_BATCH_MAX_RECORDS, &mut sink);
+        let left = matches!(read, Ok(n) if n >= READ_BATCH_MAX_RECORDS);
+        self.trace.drained(self.seat.pointer(), left);
+        match read {
             Ok(n) => {
-                if n >= READ_BATCH_MAX_RECORDS {
+                if left {
                     self.backlog = true;
                 }
                 n

@@ -5,12 +5,14 @@
 //! line is produced only when something it reports changed: an idle compositor prints nothing.
 
 use clean_slate_graphics::geometry::Point;
+use clean_slate_graphics::input::PointerButton;
 use clean_slate_graphics::limits::MAX_WINDOWS;
 use clean_slate_graphics::role::SurfaceRole;
 use clean_slate_native_abi::desktop::ConsoleLine;
 
 use crate::compositor::Compositor;
 use crate::scene::SurfaceKey;
+use crate::trace::{InputTrace, TraceEvent};
 use crate::wm::WindowPolicy;
 
 /// Compositor-owned rows the desktop lane compares against its baseline.
@@ -51,7 +53,52 @@ pub fn exit_line(reason: &str) -> ConsoleLine {
 /// page has [`clean_slate_native_abi::desktop::LAUNCH_FLAG_INPUT_TRACE`]. Lifecycle lines
 /// (`started`, `exit`, `[WIN ] created` / `closed`, `[COMP] rows`) are not in this set.
 pub fn is_per_input_line(line: &str) -> bool {
-    line.starts_with("[WIN ] moved") || line.starts_with("[INPT] focus")
+    [
+        "[WIN ] moved",
+        "[INPT] focus",
+        "[INPT] pointer",
+        "[INPT] button",
+        "[INPT] trace",
+    ]
+    .iter()
+    .any(|prefix| line.starts_with(prefix))
+}
+
+/// `[INPT] button left down x= y= hit=`, `[INPT] pointer settled x= y=`, in the order the seat
+/// saw them, then `[INPT] trace dropped=` if some did not fit.
+pub fn input_trace_lines(trace: &InputTrace, emit: &mut dyn FnMut(ConsoleLine)) {
+    for event in trace.events() {
+        emit(match *event {
+            TraceEvent::Button {
+                button,
+                pressed,
+                at,
+                hit,
+            } => ConsoleLine::format(format_args!(
+                "[INPT] button {} {} x={} y={} hit={}",
+                match button {
+                    PointerButton::Left => "left",
+                    PointerButton::Right => "right",
+                    PointerButton::Middle => "middle",
+                    PointerButton::Back => "back",
+                    PointerButton::Forward => "forward",
+                },
+                if pressed { "down" } else { "up" },
+                at.x,
+                at.y,
+                hit.name()
+            )),
+            TraceEvent::Settled { at } => {
+                ConsoleLine::format(format_args!("[INPT] pointer settled x={} y={}", at.x, at.y))
+            }
+        });
+    }
+    if trace.dropped() > 0 {
+        emit(ConsoleLine::format(format_args!(
+            "[INPT] trace dropped={}",
+            trace.dropped()
+        )));
+    }
 }
 
 impl DiagTracker {
@@ -156,6 +203,9 @@ mod tests {
             "[WIN ] moved x=1 y=2",
             "[INPT] focus window x=8 y=9",
             "[INPT] focus none",
+            "[INPT] pointer settled x=3 y=4",
+            "[INPT] button left down x=3 y=4 hit=close",
+            "[INPT] trace dropped=2",
         ];
         let lifecycle = [
             "[COMP] started output=1280x800 tier=Q1",

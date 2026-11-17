@@ -591,6 +591,9 @@ pub extern "C" fn _start() -> ! {
     let mut reported_ready = false;
     while let Ok(iteration) = compositor.iterate(&mut io) {
         tracker.observe(compositor, &mut |line| console(&boot, &line));
+        diag::input_trace_lines(&compositor.take_input_trace(), &mut |line| {
+            console(&boot, &line)
+        });
         // The kernel registered the graphics port before this process ran. The first
         // submitted present is the display presenting, which is after `[COMP] started`.
         if !reported_ready && iteration.presented.is_some() {

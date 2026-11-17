@@ -35,6 +35,7 @@ pub mod fake;
 pub mod input;
 pub mod present;
 pub mod scene;
+pub mod trace;
 pub mod wm;
 
 pub use compositor::{

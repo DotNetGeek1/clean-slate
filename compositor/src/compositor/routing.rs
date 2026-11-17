@@ -15,6 +15,7 @@ use clean_slate_ui::chrome::ChromeControl;
 use super::{send_configure, surface_visible, Compositor, UNSOLICITED_TAG};
 use crate::input::SeatEvent;
 use crate::scene::SurfaceKey;
+use crate::trace::ButtonHit;
 use crate::wm::{self, Anchor, Grab, GrabKind, Target, WindowPolicy, Wm, WmHit};
 
 /// Surface-local coordinate on the wire (24.8), saturated to the representable range.
@@ -539,6 +540,7 @@ impl<P: WindowPolicy> Compositor<P> {
                 }
             }
             SeatEvent::PointerMotion { time_ns, position } => {
+                self.trace.moved();
                 self.move_cursor(position);
                 self.pointer_motion(time_ns, position);
             }
@@ -548,6 +550,12 @@ impl<P: WindowPolicy> Compositor<P> {
                 state,
                 position,
             } => {
+                let hit = self
+                    .window_at(position)
+                    .map(|hit| (hit.target, self.toplevel_of(hit.key).is_some()));
+                let pressed = matches!(state, KeyState::Pressed);
+                self.trace
+                    .button(button, pressed, position, ButtonHit::of(hit));
                 self.move_cursor(position);
                 match state {
                     KeyState::Pressed => self.pointer_press(time_ns, button, position),

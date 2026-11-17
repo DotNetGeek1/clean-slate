@@ -10,6 +10,8 @@ use clean_slate_graphics::abi::input::READ_BATCH_MAX_RECORDS;
 
 use crate::backend::{can_observe_presents, WaitRequest, WorkWaiter, WAKE_INPUT, WAKE_REQUESTS};
 use crate::present::DisplayHealth;
+use crate::trace::{ButtonHit, TraceEvent, TRACE_CAPACITY};
+use clean_slate_graphics::input::{KeyState, PointerButton};
 
 fn idle(h: &mut Harness) {
     let now = h.waiter.now_ns;
@@ -347,6 +349,83 @@ fn raw_input_is_read_only_on_the_input_wake_and_drained_to_empty() {
     assert!(!empty.waited, "a full batch is re-read before waiting");
     assert_eq!(empty.input_records, 0);
     idle(&mut h);
+}
+
+fn traced(h: &mut Harness) -> Vec<TraceEvent> {
+    h.comp.take_input_trace().events().copied().collect()
+}
+
+#[test]
+fn the_pointer_settles_only_once_a_drain_that_moved_it_leaves_nothing_queued() {
+    let mut h = Harness::new();
+    h.pump();
+    let start = h.comp.seat().pointer();
+    traced(&mut h);
+
+    for seq in 0..READ_BATCH_MAX_RECORDS as u64 + 2 {
+        assert!(h.input.push(motion(seq, 1, 0)));
+    }
+    h.waiter.raise(WAKE_INPUT);
+    h.iterate().unwrap();
+    assert_eq!(traced(&mut h), [], "a full batch may have more behind it");
+    h.iterate().unwrap();
+    let at = h.comp.seat().pointer();
+    assert_ne!(at, start);
+    assert_eq!(traced(&mut h), [TraceEvent::Settled { at }]);
+
+    let button = |seq, state| RawInputRecord {
+        seq,
+        time_ns: seq,
+        device: InputDeviceId::new(MOUSE_INDEX, 1).unwrap(),
+        kind: RawInputKind::Button {
+            button: PointerButton::Left,
+            state,
+        },
+    };
+    assert!(h.input.push(button(100, KeyState::Pressed)));
+    assert!(h.input.push(button(101, KeyState::Released)));
+    h.waiter.raise(WAKE_INPUT);
+    h.iterate().unwrap();
+    let edge = |pressed| TraceEvent::Button {
+        button: PointerButton::Left,
+        pressed,
+        at,
+        hit: ButtonHit::Nothing,
+    };
+    assert_eq!(
+        traced(&mut h),
+        [edge(true), edge(false)],
+        "buttons without motion do not settle"
+    );
+    idle(&mut h);
+    assert_eq!(traced(&mut h), [], "an idle desktop traces nothing");
+}
+
+#[test]
+fn trace_records_past_capacity_are_counted_not_kept() {
+    let mut h = Harness::new();
+    h.pump();
+    for seq in 0..TRACE_CAPACITY as u64 + 3 {
+        let state = if seq % 2 == 0 {
+            KeyState::Pressed
+        } else {
+            KeyState::Released
+        };
+        assert!(h.input.push(RawInputRecord {
+            seq,
+            time_ns: seq,
+            device: InputDeviceId::new(MOUSE_INDEX, 1).unwrap(),
+            kind: RawInputKind::Button {
+                button: PointerButton::Left,
+                state,
+            },
+        }));
+    }
+    h.waiter.raise(WAKE_INPUT);
+    h.iterate().unwrap();
+    let trace = h.comp.take_input_trace();
+    assert_eq!(trace.events().count(), TRACE_CAPACITY);
+    assert_eq!(trace.dropped(), 3);
 }
 
 #[test]
