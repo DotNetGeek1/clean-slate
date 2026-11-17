@@ -6854,10 +6854,13 @@ mod tests {
     }
 
     #[test]
-    fn m10_milestone_runs_every_constituent_once_and_the_desktop_last() {
+    fn m10_milestone_runs_every_constituent_once_and_the_desktops_last() {
         let names: Vec<&str> = M10_MILESTONE_STEPS.iter().map(|(name, _)| *name).collect();
         assert_eq!(names.first(), Some(&"test-m10-contract"));
-        assert_eq!(names.last(), Some(&"test-m10-desktop"));
+        assert_eq!(
+            names[names.len() - 2..],
+            ["test-m10-desktop", "test-system-desktop"]
+        );
         assert!(names.contains(&"clean-slate-ui (host)"));
         for constituent in [
             "test-m10-contract",
@@ -6872,6 +6875,7 @@ mod tests {
             "test-m10-compositor",
             "test-m10-app",
             "test-m10-desktop",
+            "test-system-desktop",
         ] {
             assert_eq!(
                 names.iter().filter(|name| **name == constituent).count(),
