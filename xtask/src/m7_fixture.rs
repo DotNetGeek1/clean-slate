@@ -21,7 +21,8 @@ use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::udp;
 
 use crate::m7_fixture_tcp::{
-    FixtureTlsCert, HttpOutcome, M9BannerService, M9HttpService, TcpEchoService, TlsService,
+    FixtureTlsCert, HoldEvent, HttpOutcome, M9BannerService, M9HoldService, M9HttpService,
+    TcpEchoService, TlsService,
 };
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
@@ -68,6 +69,10 @@ struct FixtureSeen {
     http_responses: AtomicU32,
     /// HTTP connections the M9 HTTP service closed unanswered, without a complete request.
     http_refused: AtomicU32,
+    /// Connections the M9 hold service has taken and is not answering.
+    held_connections: AtomicU32,
+    /// Held connections on which a complete HTTP request head has arrived (still unanswered).
+    held_requests: AtomicU32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -75,6 +80,8 @@ pub struct FixtureCounts {
     pub fixture_a_answers: u32,
     pub http_responses: u32,
     pub http_refused: u32,
+    pub held_connections: u32,
+    pub held_requests: u32,
 }
 
 impl FixtureCounts {
@@ -121,6 +128,8 @@ impl M7FixturePeer {
             fixture_a_answers: self.seen.fixture_a_answers.load(Ordering::SeqCst),
             http_responses: self.seen.http_responses.load(Ordering::SeqCst),
             http_refused: self.seen.http_refused.load(Ordering::SeqCst),
+            held_connections: self.seen.held_connections.load(Ordering::SeqCst),
+            held_requests: self.seen.held_requests.load(Ordering::SeqCst),
         }
     }
 
@@ -219,9 +228,11 @@ fn run_peer(
 
     let mut m9_http_service = None;
     let mut m9_banner_service = None;
+    let mut m9_hold_service = None;
     if options.m9_profile {
         m9_http_service = Some(M9HttpService::new(&mut sockets));
         m9_banner_service = Some(M9BannerService::new(&mut sockets));
+        m9_hold_service = Some(M9HoldService::new(&mut sockets));
     }
 
     let mut timestamp = Instant::from_millis(0);
@@ -276,6 +287,17 @@ fn run_peer(
         }
         if let Some(banner) = m9_banner_service.as_mut() {
             banner.poll(&mut sockets);
+        }
+        if let Some(hold) = m9_hold_service.as_mut() {
+            match hold.poll(&mut sockets) {
+                Some(HoldEvent::Held) => {
+                    seen.held_connections.fetch_add(1, Ordering::SeqCst);
+                }
+                Some(HoldEvent::RequestReceived) => {
+                    seen.held_requests.fetch_add(1, Ordering::SeqCst);
+                }
+                None => {}
+            }
         }
         for event in device.drain_events() {
             println!("{event}");
@@ -668,9 +690,9 @@ mod tests {
     #[test]
     fn a_lane_needs_exactly_its_http_requests_and_no_refusals() {
         let report = |http_responses, http_refused| FixtureCounts {
-            fixture_a_answers: 0,
             http_responses,
             http_refused,
+            ..FixtureCounts::default()
         };
         assert!(report(9, 0).require_http_requests("lane", 9).is_ok());
         let missing = report(0, 9).require_http_requests("lane", 9).unwrap_err();

@@ -569,7 +569,17 @@ Issuing revokes and releases the holder's earlier instance-bound client records 
 
 **Sockets of a lost instance.** When the instance goes away every open Linux socket is marked lost before the client capabilities are revoked. Its in-flight bridge request is dropped, so the new instance never serves it, and its readers, writers and `poll` waiters are woken. Each restarted syscall then fails: streams with `ECONNRESET`, datagrams with `EIO`. A lost socket polls readable, writable and in error (and hung up for TCP), so `poll` returns rather than sleeping. Lost sockets are never rebound to the new instance: every later operation fails the same way until the fd is closed, and closing one sends nothing to the service. A socket whose open had not completed is closed outright. The log line is `[NET ] linux sockets lost count=<n> reason=instance-gone`.
 
-Host tests in `capability/network.rs` and `process/linux_socket/mod.rs` cover re-issue, 1000 restarts without accumulation, a launch with and without a live instance, a child forked before a restart, and the wake of a blocked reader and a poll waiter. QEMU evidence of a restart under the shell comes with #218 S7b. TLS is not part of S7a; S7b adds it through a native client overlay under test hooks.
+Host tests in `capability/network.rs` and `process/linux_socket/mod.rs` cover re-issue, 1000 restarts without accumulation, a launch with and without a live instance, a child forked before a restart, and the wake of a blocked reader and a poll waiter.
+
+**Proven in QEMU (#218 S7b).** `cargo xtask test-system` ([DEVELOPMENT.md](DEVELOPMENT.md)) boots the `system-test-hooks` build, the default image plus one kernel hook that faults the network service with a real user-mode page fault when Ctrl-\ arrives on COM1. Under a live shell it shows:
+- the lost-socket path, which until then had host tests only: a BusyBox `wget` blocked in a TCP read of a peer that never answers is woken and fails with `ECONNRESET` (`wget: error getting response: Connection reset by peer`) after `[NET ] linux sockets lost`, and the shell survives and prompts again;
+- the revoke on the instance going away (`[CAP ] net client revoked`);
+- init's restart policy restarting the network service once (`[SUP ] restart service=20992 attempt=1`), the new instance registering as generation 2 with a launch audit that matches its manifest row, and the re-issue to the shell (`[CAP ] net client reissued holder=<shell pid> generation=2`);
+- `nslookup` and `wget` working again from the same shell through generation 2.
+
+Each `wget` is a full exchange: the fixture answers only a request it has received, and the lane requires one answered request per `wget` step and no connection refused for lack of one. The blocked reader's request reaches the fixture's hold port too, which reports it and never answers. A child forked before the restart is covered by host tests only.
+
+TLS is not exercised from the shell: this BusyBox has no TLS and cannot be rebuilt here, and TLS stays covered by the M7 lanes only.
 
 ## M8.4 — write and exit (#94)
 

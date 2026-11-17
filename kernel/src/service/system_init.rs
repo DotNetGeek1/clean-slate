@@ -1,7 +1,8 @@
 //! #218 S3b: userspace init in the default image.
 //!
 //! Which builds launch init is one rule, `build_support/system_init_rule.rs`: a build launches
-//! init exactly when it enables no Cargo feature other than `gdb-entry`. In that build the
+//! init exactly when it enables no Cargo feature other than `gdb-entry` and `system-test-hooks`
+//! (the default image plus the `test-system` fault hook). In that build the
 //! boot tail calls [`launch_init`], which declares every system manifest row and spawns init
 //! directly (not as a supervised service) on scheduler slot 0. Init's bootstrap page holds its
 //! own pid, a console capability and a lifecycle-control capability; the kernel then checks
@@ -486,9 +487,13 @@ mod tests {
     }
 
     #[test]
-    fn every_kernel_feature_except_gdb_entry_keeps_init_out() {
+    fn every_kernel_feature_except_gdb_entry_and_the_test_hooks_keeps_init_out() {
         let declared = declared_features();
         assert!(declared.len() > 1, "parsed {declared:?}");
+        assert_eq!(
+            rule::SYSTEM_INIT_ALLOWED_FEATURES,
+            ["gdb-entry", "system-test-hooks"]
+        );
         for allowed in rule::SYSTEM_INIT_ALLOWED_FEATURES {
             assert!(
                 declared.contains(allowed),
@@ -500,14 +505,64 @@ mod tests {
             assert!(!feature.contains('_'), "{feature} would not round-trip");
             assert_eq!(
                 rule::launches_system_init([*feature]),
-                *feature == "gdb-entry",
+                matches!(*feature, "gdb-entry" | "system-test-hooks"),
                 "{feature}"
             );
         }
         assert!(rule::launches_system_init([]));
+        assert!(rule::launches_system_init([
+            "gdb-entry",
+            "system-test-hooks"
+        ]));
         for feature in features_of_this_build() {
             assert!(declared.contains(&feature), "{feature} is not declared");
         }
+    }
+
+    /// The `system-test-hooks` module, its fault byte and its banner exist only in that build:
+    /// every line outside the module that names it sits directly under the feature gate.
+    #[test]
+    fn the_test_hooks_are_reached_only_from_feature_gated_lines() {
+        fn rust_files(dir: &std::path::Path, out: &mut std::vec::Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read kernel source dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        // Split so this test's own source does not match.
+        let needle = ["system", "_test_hooks"].concat();
+        let gate = r#"#[cfg(feature = "system-test-hooks")]"#;
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = std::vec::Vec::new();
+        rust_files(&src, &mut files);
+        let mut references = 0usize;
+        for file in files {
+            if file
+                .file_stem()
+                .is_some_and(|stem| *stem == *needle.as_str())
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).expect("read kernel source");
+            let lines: std::vec::Vec<&str> = text.lines().map(str::trim).collect();
+            for (index, line) in lines.iter().enumerate() {
+                if !line.contains(needle.as_str()) || line.starts_with("//") {
+                    continue;
+                }
+                references += 1;
+                assert!(
+                    index > 0 && lines[index - 1] == gate,
+                    "{}:{} reaches the test hooks without {gate}",
+                    file.display(),
+                    index + 1
+                );
+            }
+        }
+        assert!(references >= 4, "found {references} hook references");
     }
 
     #[test]

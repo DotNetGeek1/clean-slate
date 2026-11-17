@@ -424,6 +424,82 @@ impl M9HttpService {
     }
 }
 
+const M9_HOLD_PORT: u16 = 4003;
+
+/// What the hold service saw on its connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoldEvent {
+    /// A newly established connection, taken before anything is read from it.
+    Held,
+    /// The held connection's complete HTTP request head arrived. It is still not answered.
+    RequestReceived,
+}
+
+/// #218 S7b: TCP on 10.77.0.50:4003 that accepts and never sends, so a client's read of a
+/// response blocks until something other than this peer ends it. What the client sends is
+/// read, and a complete request head is reported once per connection, but never answered.
+pub struct M9HoldService {
+    pool: ListenerPool,
+    active: Option<SocketHandle>,
+    request: Vec<u8>,
+    request_reported: bool,
+}
+
+impl M9HoldService {
+    pub fn new(sockets: &mut SocketSet<'_>) -> Self {
+        let endpoint = IpListenEndpoint {
+            addr: Some(M9_SERVICE_ADDR),
+            port: M9_HOLD_PORT,
+        };
+        Self {
+            pool: ListenerPool::new(sockets, 4096, endpoint),
+            active: None,
+            request: Vec::new(),
+            request_reported: false,
+        }
+    }
+
+    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) -> Option<HoldEvent> {
+        self.pool.relisten_closed(sockets);
+        let Some(active) = self.active else {
+            let handle = self.pool.accept(sockets)?;
+            if sockets.get::<tcp::Socket>(handle).state() != tcp::State::Established {
+                return None;
+            }
+            self.active = Some(handle);
+            self.request.clear();
+            self.request_reported = false;
+            println!("[FIX ] m9 hold connection held");
+            return Some(HoldEvent::Held);
+        };
+        let socket = sockets.get_mut::<tcp::Socket>(active);
+        if !socket.is_active() {
+            self.active = None;
+            return None;
+        }
+        while socket.can_recv() {
+            let mut buf = [0u8; 256];
+            match socket.recv_slice(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) if self.request.len() < M9_HTTP_MAX_REQUEST_BYTES => {
+                    self.request.extend_from_slice(&buf[..n]);
+                }
+                Ok(_) => {}
+            }
+        }
+        if self.request_reported
+            || parse_http_request_head(&self.request) != HttpRequestHead::Complete
+        {
+            return None;
+        }
+        self.request_reported = true;
+        println!(
+            "[FIX ] m9 hold request received ({} bytes); not answering",
+            self.request.len()
+        );
+        Some(HoldEvent::RequestReceived)
+    }
+}
 const M9_BANNER_PORT: u16 = 4002;
 const M9_BANNER_BYTES: &[u8] = b"M9-BANNER-FIX\n";
 
