@@ -33,7 +33,6 @@ macro_rules! qcodes {
 
 qcodes! {
     A => "a", S => "s", SHIFT => "shift", RET => "ret", RIGHT => "right", ESC => "esc",
-    F11 => "f11", F12 => "f12",
 }
 
 impl QCode {

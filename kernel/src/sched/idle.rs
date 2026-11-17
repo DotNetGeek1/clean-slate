@@ -74,6 +74,8 @@ fn idle_thread_one_wait() {
         Ok(stack_pointer) => {
             #[cfg(feature = "m10-desktop")]
             crate::service::desktop_launch::on_idle_exit();
+            #[cfg(feature = "system-test-hooks")]
+            crate::service::system_test_hooks::on_idle_exit();
             if let Err(message) = prepare_current_scheduler_thread_dispatch() {
                 fatal_kernel_error(message);
             }

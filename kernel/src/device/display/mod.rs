@@ -332,6 +332,18 @@ impl ActiveDisplay {
         }
     }
 
+    /// Whether the output is VirtIO-GPU, the only backend the desktop runs tier Q1 on.
+    #[cfg(clean_slate_system_init)]
+    pub(crate) fn is_virtio_gpu(&self) -> bool {
+        match &self.backend {
+            Backend::Gop(_) => false,
+            #[cfg(any(test, clean_slate_virtio_gpu))]
+            Backend::VirtioGpu(_) => true,
+            #[cfg(test)]
+            Backend::Recording(_) => false,
+        }
+    }
+
     #[cfg(feature = "m10-framebuffer-self-test")]
     pub(crate) fn gop_aperture(&self) -> Option<&aperture::ApertureWriter> {
         match &self.backend {

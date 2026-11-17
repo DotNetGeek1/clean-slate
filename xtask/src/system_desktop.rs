@@ -1,4 +1,4 @@
-//! `test-system`'s two desktop boots (#218 S6c), both headless and on the hooks build.
+//! `test-system`'s three desktop boots (#218 S6c, S6f), all headless and on the hooks build.
 //!
 //! 1. **Desktop.** `opt/clean-slate/desktop=q1` and a modern-only VirtIO-GPU: the kernel declares
 //!    the three base rows and the compositor, desktop shell and app rows, and init launches all
@@ -17,9 +17,14 @@
 //!    a command. No pointer or keyboard input is scripted.
 //! 2. **No display** (D4). The same entry with `-vga none` and no GPU: the kernel says once that
 //!    the desktop has no display output, declares the base rows only, and init boots base.
+//! 3. **Framebuffer alone** (S6f). The same entry with `-vga std` and no GPU: `q1` names
+//!    VirtIO-GPU, so the kernel says once that it runs Q0 on the framebuffer, and init, the
+//!    compositor and the desktop shell all run at Q0.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+use clean_slate_ui::QualityTier;
 
 use crate::system_boot::{
     check_no_desktop_rows, field, number, start_shell_fixture_peer, system_vm_config,
@@ -41,24 +46,63 @@ const SERVICES: [u32; 6] = [STORAGE, NETWORK, SHELL, COMPOSITOR, DESKTOP_SHELL, 
 pub(crate) const DESKTOP_ROWS: [u32; 3] = [COMPOSITOR, DESKTOP_SHELL, APP];
 const BOOT_TIMEOUT: Duration = Duration::from_secs(180);
 const DESKTOP_PROFILE: &str = "[KERN] boot profile=desktop tier=Q1 source=fw_cfg";
+/// `kernel/src/service/system_init.rs` `FRAMEBUFFER_TIER_LINE`.
+const FRAMEBUFFER_TIER: &str =
+    "[KERN] desktop tier=Q1 needs VirtIO-GPU; running tier=Q0 on the framebuffer";
+
+/// A machine the desktop lanes boot the hooks build on, and what the boot must pick on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DesktopMachine {
+    /// Names the run's artifacts and serial log.
+    pub(crate) name: &'static str,
+    pub(crate) tier: QualityTier,
+    /// `-vga std` and no GPU, with `opt/clean-slate/desktop=q0`; otherwise a modern-only
+    /// VirtIO-GPU, `-vga none` and `q1`.
+    pub(crate) framebuffer: bool,
+    /// The `[DISP] backend=` the kernel must install.
+    pub(crate) backend: &'static str,
+}
+
+pub(crate) const VIRTIO_GPU_Q1: DesktopMachine = DesktopMachine {
+    name: "virtio-gpu",
+    tier: QualityTier::Q1,
+    framebuffer: false,
+    backend: "virtio-gpu",
+};
+
+pub(crate) const FRAMEBUFFER_Q0: DesktopMachine = DesktopMachine {
+    name: "framebuffer",
+    tier: QualityTier::Q0,
+    framebuffer: true,
+    backend: "gop",
+};
+
+impl DesktopMachine {
+    pub(crate) fn tier_name(&self) -> &'static str {
+        match self.tier {
+            QualityTier::Q0 => "Q0",
+            QualityTier::Q1 => "Q1",
+            QualityTier::Q2 => "Q2",
+            QualityTier::Q3 => "Q3",
+        }
+    }
+}
 /// `kernel/src/service/system_init.rs` `NO_DISPLAY_LINE`.
 const NO_DISPLAY: &str =
     "[KERN] boot profile=desktop has no display output; booting base, desktop rows not declared";
-const SETTLED_DESKTOP: &str = "[INIT] boot settled running=6 down=0; waiting, no deadline";
+pub(crate) const SETTLED_DESKTOP: &str =
+    "[INIT] boot settled running=6 down=0; waiting, no deadline";
 const SETTLED_BASE: &str = "[INIT] boot settled running=3 down=0; waiting, no deadline";
 /// A desktop row that never reports ready is restarted until init gives up on it.
 pub(crate) const GIVE_UP_LINES: [&str; 2] = ["[INIT] gave up", "[INIT] not starting"];
 
 /// Each desktop row's authority, launch and ready, in the order init must reach them: a row starts
-/// only once every row it depends on is ready.
+/// only once every row it depends on is ready. The tier is checked per machine by
+/// [`check_desktop_boot`].
 const DESKTOP_MARKERS: [MarkerStep<'static>; 13] = [
     MarkerStep::Line {
         prefix: "[KERN] boot profile=",
-        fields: &[
-            ("profile=", "desktop"),
-            ("tier=", "Q1"),
-            ("source=", "fw_cfg"),
-        ],
+        fields: &[("profile=", "desktop"), ("source=", "fw_cfg")],
     },
     MarkerStep::Line {
         prefix: "[KERN] init launched pid=",
@@ -66,7 +110,7 @@ const DESKTOP_MARKERS: [MarkerStep<'static>; 13] = [
     },
     MarkerStep::Line {
         prefix: "[INIT] boot profile=",
-        fields: &[("profile=", "desktop"), ("tier=", "Q1")],
+        fields: &[("profile=", "desktop")],
     },
     MarkerStep::Ordered("[SVC ] authority service=21248 "),
     MarkerStep::Ordered("[SVC ] launch service=21248 "),
@@ -99,6 +143,29 @@ const NO_DISPLAY_MARKERS: [MarkerStep<'static>; 5] = [
         fields: &[("profile=", "base")],
     },
     MarkerStep::Ordered(SETTLED_BASE),
+];
+
+/// `q1` on a machine with only the framebuffer: the kernel says once that it runs Q0, and init
+/// and the desktop rows run at Q0.
+const FRAMEBUFFER_TIER_MARKERS: [MarkerStep<'static>; 5] = [
+    MarkerStep::Line {
+        prefix: "[KERN] boot profile=",
+        fields: &[
+            ("profile=", "desktop"),
+            ("tier=", "Q1"),
+            ("source=", "fw_cfg"),
+        ],
+    },
+    MarkerStep::Ordered(FRAMEBUFFER_TIER),
+    MarkerStep::Line {
+        prefix: "[KERN] init launched pid=",
+        fields: &[("declared-services=", "6")],
+    },
+    MarkerStep::Line {
+        prefix: "[INIT] boot profile=",
+        fields: &[("profile=", "desktop"), ("tier=", "Q0")],
+    },
+    MarkerStep::Ordered(SETTLED_DESKTOP),
 ];
 
 /// Fails the no-display boot as soon as init gives up on a row.
@@ -166,6 +233,34 @@ pub(crate) fn run(features: &[&str], disk: &Path) -> Result<(), XtaskError> {
         XtaskError::Validation(format!("desktop boot with no display: {reason}"))
     })?;
     println!("[STM ] desktop boot with no display: one {NO_DISPLAY:?}, base rows only");
+
+    println!(
+        "[STM ] desktop boot on the framebuffer alone: opt/clean-slate/desktop=q1, -vga std, no GPU"
+    );
+    let args = [
+        "-fw_cfg",
+        "name=opt/clean-slate/desktop,string=q1",
+        "-vga",
+        "std",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let output = boot(
+        features,
+        disk,
+        args,
+        &FRAMEBUFFER_TIER_MARKERS,
+        &mut DesktopWatch::default(),
+    )
+    .map_err(|error| {
+        XtaskError::Validation(format!("desktop boot on the framebuffer alone: {error}"))
+    })?;
+    check_framebuffer_tier_boot(&output).map_err(|reason| {
+        XtaskError::Validation(format!("desktop boot on the framebuffer alone: {reason}"))
+    })?;
+    println!(
+        "[STM ] desktop boot on the framebuffer alone: one {FRAMEBUFFER_TIER:?}, six rows at Q0"
+    );
     Ok(())
 }
 
@@ -280,14 +375,21 @@ fn grant_line<'a>(
     Ok(middle)
 }
 
-fn check_desktop_boot(output: &str) -> Result<DesktopSummary, String> {
+fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopSummary, String> {
     let backend = only(output, "[DISP] backend=")?;
-    if field(backend, "backend") != Some("virtio-gpu") {
-        return Err(format!("expected the VirtIO-GPU display: {backend:?}"));
+    if field(backend, "backend") != Some(machine.backend) {
+        return Err(format!(
+            "expected the {} display: {backend:?}",
+            machine.backend
+        ));
     }
+    let tier = machine.tier_name();
     let profile = only(output, "[KERN] boot profile=")?;
-    if profile != DESKTOP_PROFILE {
+    if profile != format!("[KERN] boot profile=desktop tier={tier} source=fw_cfg") {
         return Err(format!("kernel boot profile {profile:?}"));
+    }
+    if let Some(line) = lines(output).find(|line| line.contains(FRAMEBUFFER_TIER)) {
+        return Err(format!("the requested tier was not run: {line:?}"));
     }
     let launched = only(output, "[KERN] init launched pid=")?;
     let init_pid = number(launched, "pid")?;
@@ -297,7 +399,7 @@ fn check_desktop_boot(output: &str) -> Result<DesktopSummary, String> {
     let console = format!("[IPC ] console pid={init_pid}: ");
     only(
         output,
-        &format!("{console}[INIT] boot profile=desktop tier=Q1"),
+        &format!("{console}[INIT] boot profile=desktop tier={tier}"),
     )?;
     for gave in GIVE_UP_LINES
         .iter()
@@ -401,12 +503,15 @@ fn check_desktop_boot(output: &str) -> Result<DesktopSummary, String> {
         ));
     }
     for (pid, line) in [
-        (compositor, "[COMP] started output=1280x800 tier=Q1"),
+        (
+            compositor,
+            format!("[COMP] started output=1280x800 tier={tier}"),
+        ),
         (
             shell,
-            "[SHELL] ready rail=88x800 surfaces=2 dock=none tier=Q1",
+            format!("[SHELL] ready rail=88x800 surfaces=2 dock=none tier={tier}"),
         ),
-        (app, "[APP ] ready"),
+        (app, "[APP ] ready".to_owned()),
     ] {
         only(output, &format!("[IPC ] console pid={pid}: {line}"))?;
     }
@@ -472,7 +577,7 @@ fn check_desktop_step(
     before: Option<&Desktop>,
 ) -> Result<Desktop, String> {
     match (done, before) {
-        (0, _) => check_baseline_boot(segment),
+        (0, _) => check_baseline_boot(segment, &VIRTIO_GPU_Q1),
         (step, Some(before)) if step <= FAULTED_ROW.len() => {
             check_row_fault(segment, before, FAULTED_ROW[step - 1])
         }
@@ -502,7 +607,10 @@ fn position(segment: &str, needle: &str) -> Result<usize, String> {
 
 /// The boot: the S6c checks, init settled with six rows, and the hooks build's resource
 /// baseline taken with the six rows' desktop pids.
-pub(crate) fn check_baseline_boot(segment: &str) -> Result<Desktop, String> {
+pub(crate) fn check_baseline_boot(
+    segment: &str,
+    machine: &DesktopMachine,
+) -> Result<Desktop, String> {
     let mut tracker = crate::MarkerTracker::from_steps(&DESKTOP_MARKERS);
     if !tracker.consume(segment) {
         return Err(match tracker.mismatch() {
@@ -510,7 +618,7 @@ pub(crate) fn check_baseline_boot(segment: &str) -> Result<Desktop, String> {
             None => format!("boot waiting for {:?}", tracker.pending_label()),
         });
     }
-    let summary = check_desktop_boot(segment)?;
+    let summary = check_desktop_boot(segment, machine)?;
     let init_pid = number(only(segment, "[KERN] init launched pid=")?, "pid")?;
     let mut rows = [Row {
         pid: 0,
@@ -888,6 +996,32 @@ pub(crate) fn report_fault(
     relaunched
 }
 
+fn check_framebuffer_tier_boot(output: &str) -> Result<(), String> {
+    let backend = only(output, "[DISP] backend=")?;
+    if field(backend, "backend") != Some("gop") {
+        return Err(format!("expected the framebuffer: {backend:?}"));
+    }
+    if only(output, "[KERN] boot profile=")? != DESKTOP_PROFILE {
+        return Err(format!("no {DESKTOP_PROFILE:?}"));
+    }
+    let said = lines(output)
+        .filter(|line| line.contains(FRAMEBUFFER_TIER))
+        .count();
+    if said != 1 {
+        return Err(format!("expected one {FRAMEBUFFER_TIER:?}, found {said}"));
+    }
+    for line in [
+        "[COMP] started output=1280x800 tier=Q0",
+        "[SHELL] ready rail=88x800 surfaces=2 dock=none tier=Q0",
+    ] {
+        only(output, line)?;
+    }
+    for service in SERVICES {
+        only(output, &format!("[SVC ] ready service={service} "))?;
+    }
+    Ok(())
+}
+
 fn check_no_display_boot(output: &str) -> Result<(), String> {
     if let Some(line) = lines(output).find(|line| line.contains("[DISP] backend=")) {
         return Err(format!("a display was installed: {line:?}"));
@@ -976,7 +1110,7 @@ mod tests {
         let mut tracker = crate::MarkerTracker::from_steps(&DESKTOP_MARKERS);
         assert!(tracker.consume(&text), "{}", tracker.pending_label());
         assert_eq!(
-            check_desktop_boot(&text),
+            check_desktop_boot(&text, &VIRTIO_GPU_Q1),
             Ok(DesktopSummary {
                 compositor_pid: 5,
                 shell_pid: 6,
@@ -991,13 +1125,13 @@ mod tests {
     fn an_extra_right_on_the_app_fails_its_audit_by_name() {
         let audit = expected_audit(APP, 7);
         let text = desktop_boot().replace(&audit, &audit.replace(" input=0", " input=1"));
-        let error = check_desktop_boot(&text).unwrap_err();
+        let error = check_desktop_boot(&text, &VIRTIO_GPU_Q1).unwrap_err();
         assert!(error.contains("service 21250 launch audit"), "{error}");
         let text = desktop_boot().replace(
             &audit,
             &audit.replace("matches-manifest=1", "matches-manifest=0"),
         );
-        assert!(check_desktop_boot(&text).is_err());
+        assert!(check_desktop_boot(&text, &VIRTIO_GPU_Q1).is_err());
     }
 
     #[test]
@@ -1006,32 +1140,32 @@ mod tests {
             "[SEAT] authority granted pid=5 seat=0 rights=consume,inspect\n",
             "",
         );
-        assert!(check_desktop_boot(&text)
+        assert!(check_desktop_boot(&text, &VIRTIO_GPU_Q1)
             .unwrap_err()
             .contains("[SEAT] authority granted"));
         let text = desktop_boot().replace(
             "port=21248:7 rights=connect\n",
             "port=21248:8 rights=connect\n",
         );
-        assert!(check_desktop_boot(&text)
+        assert!(check_desktop_boot(&text, &VIRTIO_GPU_Q1)
             .unwrap_err()
             .contains("pid=7 port=21248:7"));
         let text = desktop_boot().replace(
             "presenter=1 presents-submitted=2",
             "presenter=0 presents-submitted=2",
         );
-        assert!(check_desktop_boot(&text)
+        assert!(check_desktop_boot(&text, &VIRTIO_GPU_Q1)
             .unwrap_err()
             .contains("presenter=0 instead of 1"));
         let text = desktop_boot().replace("presents-submitted=2", "presents-submitted=0");
-        assert!(check_desktop_boot(&text)
+        assert!(check_desktop_boot(&text, &VIRTIO_GPU_Q1)
             .unwrap_err()
             .contains("before presenting a frame"));
         let text = desktop_boot().replace(
             "[IPC ] console pid=5: [COMP] started",
             "[IPC ] console pid=6: [COMP] started",
         );
-        assert!(check_desktop_boot(&text)
+        assert!(check_desktop_boot(&text, &VIRTIO_GPU_Q1)
             .unwrap_err()
             .contains("[COMP] started"));
     }
@@ -1050,7 +1184,7 @@ mod tests {
             "{}",
             tracker.pending_label()
         );
-        assert!(check_desktop_boot(&text)
+        assert!(check_desktop_boot(&text, &VIRTIO_GPU_Q1)
             .unwrap_err()
             .contains("[SVC ] ready service=21248"));
     }
@@ -1065,7 +1199,9 @@ mod tests {
             "{}[IPC ] console pid=1: [SUP ] restart service=21250 attempt=1\n",
             desktop_boot()
         );
-        assert!(check_desktop_boot(&text).unwrap_err().contains("restart"));
+        assert!(check_desktop_boot(&text, &VIRTIO_GPU_Q1)
+            .unwrap_err()
+            .contains("restart"));
         let text = desktop_boot().replace("running=6", "running=5");
         let mut tracker = crate::MarkerTracker::from_steps(&DESKTOP_MARKERS);
         assert!(!tracker.consume(&text));

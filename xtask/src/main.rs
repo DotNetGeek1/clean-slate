@@ -2432,16 +2432,6 @@ fn run_m10_compositor_acceptance() -> Result<(), XtaskError> {
 
 /// Release CPL3 build of one `userspace`-feature binary (what `kernel/build.rs` embeds).
 fn build_native_userspace_bin(package: &str, bin: &str) -> Result<(), XtaskError> {
-    build_native_userspace_variant(package, bin, "userspace", "target")
-}
-
-/// [`build_native_userspace_bin`] with `features` into the cargo target directory `target_dir`.
-fn build_native_userspace_variant(
-    package: &str,
-    bin: &str,
-    features: &str,
-    target_dir: &str,
-) -> Result<(), XtaskError> {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(workspace_root())
         .arg("build")
@@ -2450,9 +2440,7 @@ fn build_native_userspace_variant(
         .arg("--bin")
         .arg(bin)
         .arg("--features")
-        .arg(features)
-        .arg("--target-dir")
-        .arg(workspace_root().join(target_dir))
+        .arg("userspace")
         .arg("--target")
         .arg("x86_64-unknown-none")
         .arg("-Z")
@@ -2462,8 +2450,8 @@ fn build_native_userspace_variant(
     run_build_command(&mut cmd)
 }
 
-/// The three images an `m10-desktop` kernel embeds.
-const M10_DESKTOP_USERSPACE_BINS: [(&str, &str); 3] = [
+/// The three desktop images the system image embeds for its desktop rows.
+const DESKTOP_USERSPACE_BINS: [(&str, &str); 3] = [
     ("clean-slate-compositor", "clean-slate-compositor-userspace"),
     (
         "clean-slate-desktop-shell",
@@ -2473,36 +2461,13 @@ const M10_DESKTOP_USERSPACE_BINS: [(&str, &str); 3] = [
 ];
 
 fn build_desktop_userspace() -> Result<(), XtaskError> {
-    for (package, bin) in M10_DESKTOP_USERSPACE_BINS {
+    for (package, bin) in DESKTOP_USERSPACE_BINS {
         build_native_userspace_bin(package, bin)?;
     }
     Ok(())
 }
 
-/// The `fault-keys` compositor and playground an `m10-desktop-self-test` kernel embeds instead
-/// of the production ones (`kernel/build.rs` reads them from this target directory).
-const M10_DESKTOP_FAULT_KEY_BINS: [(&str, &str); 2] = [
-    ("clean-slate-compositor", "clean-slate-compositor-userspace"),
-    ("clean-slate-playground", "clean-slate-playground-userspace"),
-];
-const M10_DESKTOP_FAULT_KEY_TARGET_DIR: &str = "target/fault-keys";
-
-/// Production desktop images plus the self-test `fault-keys` variants.
-fn build_desktop_self_test_userspace() -> Result<(), XtaskError> {
-    build_desktop_userspace()?;
-    for (package, bin) in M10_DESKTOP_FAULT_KEY_BINS {
-        build_native_userspace_variant(
-            package,
-            bin,
-            "userspace,fault-keys",
-            M10_DESKTOP_FAULT_KEY_TARGET_DIR,
-        )?;
-    }
-    Ok(())
-}
-
-/// The supervised desktop in a QEMU window (`QEMU_DISPLAY`, default `gtk`) with serial on
-/// stdout; VirtIO-GPU at Q1, or the `-vga std` framebuffer at Q0 with `--framebuffer`.
+/// `cargo xtask run-m10-desktop [--framebuffer]`: `run --desktop [--framebuffer]`.
 fn run_m10_desktop_interactive(args: &[OsString]) -> Result<(), XtaskError> {
     let framebuffer = match args {
         [] => false,
@@ -2513,13 +2478,11 @@ fn run_m10_desktop_interactive(args: &[OsString]) -> Result<(), XtaskError> {
             ))
         }
     };
-    build_desktop_userspace()?;
-    let (features, config, extra_args) = m10_desktop_lane::interactive(framebuffer);
-    let display = env::var("QEMU_DISPLAY").unwrap_or_else(|_| "gtk".to_owned());
-    let mut vm = prepare_vm(false, false, features, config)?;
-    // QEMU keeps the last `-display`, replacing `qemu_command`'s `none`.
-    vm.qemu.args(extra_args).arg("-display").arg(display);
-    run_command(&mut vm.qemu)
+    let mut run_args = vec![OsString::from("--desktop")];
+    if framebuffer {
+        run_args.push(OsString::from("--framebuffer"));
+    }
+    system_boot::run(&run_args, false, false)
 }
 
 /// M10 #117 native app gate: the playground's layout/state/damage/render tests and its session
@@ -5088,13 +5051,13 @@ fn print_help() {
         "  test-m10-shared-buffer  M10 #195 shared buffers: native-abi/service-fixtures/capability and kernel shared-buffer host tests, then the scripted fixture lane (NX, map/read, deny, stale, exhaustion, reuse, kernel-owned, ro-write, shared-exec, owner exit, reader exit, root revoke, port transfer); prints [M10.shared-buffer] PASS (aliases: m10-shared-buffer)"
     );
     println!("  test-m10-input-smoke M10 #113 i8042 input lane: init, IRQ 1/12 routing, raw queue and syscall 19 from CPL3 (controller stimulus), then BIND_WAKE-woken CPL3 consumer checked against keyboard + pointer events injected over a private QMP socket; prints [M10.input] PASS (aliases: m10-input-smoke)");
-    println!("  test-m10-desktop M10 #118 desktop lane: desktop-shell host tests, CPL3 builds of the compositor/shell/playground, then the supervised desktop booted on VirtIO-GPU (Q1) and on the -vga std framebuffer (Q0), driven over private QMP (click, toggle, background click, key, title-bar drag, close, app crash, compositor crash) with serial, resource-baseline and screendump checks; artifacts under target/xtask-artifacts; prints [M10.9] PASS (aliases: m10-desktop, m10.118)");
+    println!("  test-m10-desktop M10 #118 desktop lane on the system image (#218 S6f): desktop-shell host tests, then the system-test-hooks build with fw_cfg opt/clean-slate/desktop=q1 on VirtIO-GPU and =q0 on the -vga std framebuffer; each boot must reach init's six-row settle line, then test-system-desktop's closed-loop driver runs (click, toggle, background click, key, title-bar drag, close, app, desktop shell and compositor faults) with serial, resource-baseline, quiet-stretch and screendump checks; artifacts under target/xtask-artifacts; prints [M10.9] PASS (aliases: m10-desktop, m10.118)");
     println!("  test-m10        M10 milestone gate: every test-m10-* constituent, clean-slate-ui host tests and test-qmp-smoke, then test-m10-desktop; prints [M10 ] PASS (aliases: m10, m10.119)");
     println!("  test-serial-input #218 S4 serial receive lane: COM1 on a private loopback socket; the host types a script (plain line, backspace/delete, Ctrl-U, an overlong line, a burst, a full committed buffer, Ctrl-D on a non-empty and an empty line) and checks the echo and every committed read byte for byte; prints [TTY ] PASS (aliases: serial-input)");
     println!("  test-system-boot #218 S3b default image: boots it twice on a fresh lane-owned data disk with the network fixture peer; init starts storage then network, the kernel checks every launched pid holds exactly its manifest grants and reports ready from that pid, boot 1 formats and boot 2 mounts, and the idle thread halts while init waits; prints [SYS ] PASS (aliases: system-boot)");
     println!("  test-system-shell #218 S5 default image to its serial-console shell: COM1 on a private loopback socket, a fresh lane-owned data disk and the network fixture peer; the host types echo, ls /bin, a pipeline, a /tmp write and read and a backspace edit and checks output only execution produces, then exit and Ctrl-D, each followed by a new shell one generation on with a new prompt; prints [SHL ] PASS (aliases: system-shell)");
-    println!("  test-system       #218 S7b system-test-hooks build (the default image plus a Ctrl-\\ network fault hook) to its shell, as test-system-shell: first a headless boot with fw_cfg opt/clean-slate/desktop=q1 whose init line must say boot profile=desktop tier=Q1, then the shell boot with no entry (boot profile=base): nslookup and wget through network gen 1, a wget left blocked reading from the fixture's hold port, then Ctrl-\\ faults the network service; the blocked read must fail with ECONNRESET and the shell prompt again, init restart network once, gen 2 pass its launch audit and get the shell's client capability re-issued, init settle, and nslookup and wget work again from the same shell; prints [STM ] PASS (aliases: system)");
-    println!("  run-m10-desktop [--framebuffer] Boot the supervised M10 desktop in a QEMU window (QEMU_DISPLAY, default gtk; serial on stdout): VirtIO-GPU at Q1, or the -vga std framebuffer at Q0");
+    println!("  test-system       #218 S7b system-test-hooks build (the default image plus test hooks: COM1 fault bytes for the network service, compositor, desktop shell and app) to its shell, as test-system-shell: first three headless boots with fw_cfg opt/clean-slate/desktop=q1 (VirtIO-GPU, whose init line must say boot profile=desktop tier=Q1; no display, which boots base; the -vga std framebuffer alone, which runs tier=Q0), then the shell boot with no entry (boot profile=base): nslookup and wget through network gen 1, a wget left blocked reading from the fixture's hold port, then Ctrl-\\ faults the network service; the blocked read must fail with ECONNRESET and the shell prompt again, init restart network once, gen 2 pass its launch audit and get the shell's client capability re-issued, init settle, and nslookup and wget work again from the same shell; prints [STM ] PASS (aliases: system)");
+    println!("  run-m10-desktop [--framebuffer] Alias for run --desktop [--framebuffer]: the default image's desktop in a QEMU window, VirtIO-GPU at Q1, or the -vga std framebuffer at Q0");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-resources Build the M3.6 resource-accounting kernel, run QEMU, and validate PASS markers");
