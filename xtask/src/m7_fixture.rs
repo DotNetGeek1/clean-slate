@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration as StdDuration;
@@ -21,7 +21,7 @@ use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::udp;
 
 use crate::m7_fixture_tcp::{
-    FixtureTlsCert, HttpRequestCounters, M9BannerService, M9HttpService, TcpEchoService, TlsService,
+    FixtureTlsCert, HttpOutcome, M9BannerService, M9HttpService, TcpEchoService, TlsService,
 };
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
@@ -55,29 +55,38 @@ impl Default for FixtureOptions {
 pub struct M7FixturePeer {
     port: u16,
     stop: Arc<AtomicBool>,
+    seen: Arc<FixtureSeen>,
     handle: Option<JoinHandle<()>>,
-    http: Arc<HttpRequestCounters>,
 }
 
-/// What the peer observed over its whole run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FixtureReport {
-    /// HTTP requests on 10.77.0.50:4001 that arrived complete and were answered.
-    pub http_answered: u64,
-    /// HTTP connections closed unanswered: malformed, oversized or missing request.
-    pub http_refused: u64,
+/// What the peer has served so far, for lanes that confirm an exchange from the peer's side.
+#[derive(Default)]
+struct FixtureSeen {
+    /// DNS replies sent that carry an A record for `FIXTURE_HOSTNAME`.
+    fixture_a_answers: AtomicU32,
+    /// HTTP responses the M9 HTTP service sent, each to a complete request it received.
+    http_responses: AtomicU32,
+    /// HTTP connections the M9 HTTP service closed unanswered, without a complete request.
+    http_refused: AtomicU32,
 }
 
-impl FixtureReport {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FixtureCounts {
+    pub fixture_a_answers: u32,
+    pub http_responses: u32,
+    pub http_refused: u32,
+}
+
+impl FixtureCounts {
     /// #255: a lane whose evidence is `expected` HTTP exchanges passes only if the
     /// fixture received and answered exactly that many well-formed requests.
-    pub fn require_http_requests(&self, lane: &str, expected: u64) -> Result<(), String> {
-        if self.http_answered == expected && self.http_refused == 0 {
+    pub fn require_http_requests(&self, lane: &str, expected: u32) -> Result<(), String> {
+        if self.http_responses == expected && self.http_refused == 0 {
             return Ok(());
         }
         Err(format!(
             "{lane}: the fixture answered {} of {expected} expected HTTP requests and refused {} connection(s) without a complete request",
-            self.http_answered, self.http_refused
+            self.http_responses, self.http_refused
         ))
     }
 }
@@ -92,14 +101,14 @@ impl M7FixturePeer {
         let port = listener.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
-        let http = Arc::new(HttpRequestCounters::default());
-        let peer_http = Arc::clone(&http);
-        let handle = thread::spawn(move || run_peer(listener, stop_flag, options, peer_http));
+        let seen = Arc::new(FixtureSeen::default());
+        let peer_seen = Arc::clone(&seen);
+        let handle = thread::spawn(move || run_peer(listener, stop_flag, peer_seen, options));
         Ok(Self {
             port,
             stop,
+            seen,
             handle: Some(handle),
-            http,
         })
     }
 
@@ -107,24 +116,29 @@ impl M7FixturePeer {
         self.port
     }
 
-    /// Stops the peer and reports what it observed.
-    pub fn shutdown(mut self) -> FixtureReport {
+    pub fn counts(&self) -> FixtureCounts {
+        FixtureCounts {
+            fixture_a_answers: self.seen.fixture_a_answers.load(Ordering::SeqCst),
+            http_responses: self.seen.http_responses.load(Ordering::SeqCst),
+            http_refused: self.seen.http_refused.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Stops the peer and returns what it served over the whole run.
+    pub fn shutdown(mut self) -> FixtureCounts {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-        FixtureReport {
-            http_answered: self.http.answered.load(Ordering::SeqCst),
-            http_refused: self.http.refused.load(Ordering::SeqCst),
-        }
+        self.counts()
     }
 }
 
 fn run_peer(
     listener: TcpListener,
     stop: Arc<AtomicBool>,
+    seen: Arc<FixtureSeen>,
     options: FixtureOptions,
-    http: Arc<HttpRequestCounters>,
 ) {
     listener
         .set_nonblocking(true)
@@ -206,7 +220,7 @@ fn run_peer(
     let mut m9_http_service = None;
     let mut m9_banner_service = None;
     if options.m9_profile {
-        m9_http_service = Some(M9HttpService::new(&mut sockets, http));
+        m9_http_service = Some(M9HttpService::new(&mut sockets));
         m9_banner_service = Some(M9BannerService::new(&mut sockets));
     }
 
@@ -239,6 +253,9 @@ fn run_peer(
                 }
                 if dns_socket.send_slice(&response, endpoint).is_ok() {
                     println!("[FIX ] dns query name={name} rcode={rcode}");
+                    if carries_fixture_a_record(&name, &response) {
+                        seen.fixture_a_answers.fetch_add(1, Ordering::SeqCst);
+                    }
                 }
             }
         }
@@ -247,7 +264,15 @@ fn run_peer(
         }
         tls_service.poll(&mut sockets);
         if let Some(http) = m9_http_service.as_mut() {
-            http.poll(&mut sockets);
+            match http.poll(&mut sockets) {
+                Some(HttpOutcome::Answered) => {
+                    seen.http_responses.fetch_add(1, Ordering::SeqCst);
+                }
+                Some(HttpOutcome::Refused) => {
+                    seen.http_refused.fetch_add(1, Ordering::SeqCst);
+                }
+                None => {}
+            }
         }
         if let Some(banner) = m9_banner_service.as_mut() {
             banner.poll(&mut sockets);
@@ -497,6 +522,15 @@ struct QemuTxToken<'a> {
 
 const M9_HTTP_ADDR: [u8; 4] = [10, 77, 0, 50];
 
+/// A reply for `FIXTURE_HOSTNAME` with no error and at least one answer, which
+/// [`build_dns_response`] only sends for an A query.
+fn carries_fixture_a_record(name: &str, response: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(FIXTURE_HOSTNAME)
+        && response.len() >= 8
+        && response[3] & 0x0F == 0
+        && u16::from_be_bytes([response[6], response[7]]) > 0
+}
+
 fn build_dns_response(query: &[u8], m9_profile: bool) -> Option<(String, Vec<u8>)> {
     if query.len() < 12 {
         return None;
@@ -629,12 +663,13 @@ impl phy::TxToken for QemuTxToken<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_dns_response, FixtureReport};
+    use super::{build_dns_response, FixtureCounts};
 
     #[test]
     fn a_lane_needs_exactly_its_http_requests_and_no_refusals() {
-        let report = |http_answered, http_refused| FixtureReport {
-            http_answered,
+        let report = |http_responses, http_refused| FixtureCounts {
+            fixture_a_answers: 0,
+            http_responses,
             http_refused,
         };
         assert!(report(9, 0).require_http_requests("lane", 9).is_ok());

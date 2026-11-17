@@ -21,7 +21,6 @@ use x86_64::structures::paging::Translate;
 use x86_64::PhysAddr;
 use x86_64::VirtAddr;
 
-const LOCAL_APIC_MMIO_BASE: u64 = 0xFEE0_0000;
 const TWO_MIB: u64 = 2 * 1024 * 1024;
 
 unsafe fn identity_page_table_mut(frame: u64) -> &'static mut PageTable {
@@ -50,7 +49,8 @@ fn zero_page_identity(frame: u64) {
     }
 }
 
-/// Half-open physical range kept out of the cached direct map (a device aperture).
+/// Half-open physical range kept out of the cached direct map (a device aperture or the local
+/// APIC page).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PhysExclusion {
     pub(crate) start: u64,
@@ -70,9 +70,12 @@ enum PhysmapStep {
     Skip,
 }
 
-fn physmap_step(phys: u64, region_end: u64, excluded: Option<PhysExclusion>) -> PhysmapStep {
-    let overlaps =
-        |len: u64| excluded.is_some_and(|range| range.overlaps(phys, phys.saturating_add(len)));
+fn physmap_step(phys: u64, region_end: u64, excluded: &[PhysExclusion]) -> PhysmapStep {
+    let overlaps = |len: u64| {
+        excluded
+            .iter()
+            .any(|range| range.overlaps(phys, phys.saturating_add(len)))
+    };
     if phys % TWO_MIB == 0 && phys.saturating_add(TWO_MIB) <= region_end && !overlaps(TWO_MIB) {
         PhysmapStep::Map2M
     } else if overlaps(PAGE_SIZE) {
@@ -82,12 +85,12 @@ fn physmap_step(phys: u64, region_end: u64, excluded: Option<PhysExclusion>) -> 
     }
 }
 
-/// `excluded` never receives a write-back physmap alias, even when the firmware reports it inside
-/// a memory-map region.
+/// No `excluded` range receives a write-back physmap alias, even when the firmware reports it
+/// inside a memory-map region.
 pub(crate) fn install_kernel_owned_root(
     allocator: &mut PageAllocator,
     memory_map: &NormalizedMemoryMap,
-    excluded: Option<PhysExclusion>,
+    excluded: &[PhysExclusion],
 ) -> Result<u64, &'static str> {
     let (firmware_root_frame, _) = Cr3::read();
     let firmware_root = firmware_root_frame.start_address().as_u64();
@@ -120,6 +123,9 @@ pub(crate) fn install_kernel_owned_root(
 /// address with 4 KiB leaves, so nothing past the validated range is reachable. The range sits in
 /// PML4 slot 256, which every process root shares, and must already be excluded from the cached
 /// physmap. Page-table frames are permanent.
+///
+/// A range touching the local APIC's 2 MiB window is refused: `identity_holes` unmaps that
+/// window's direct-map image, which would silently take the aperture pages with it.
 #[cfg(not(test))]
 pub(crate) fn map_device_aperture_uncached(
     root_frame: u64,
@@ -133,13 +139,14 @@ pub(crate) fn map_device_aperture_uncached(
     let phys_end = phys_base
         .checked_add(map_len)
         .ok_or("aperture range overflows")?;
+    let local_apic_window = crate::mm::identity_holes::local_apic_identity_window(
+        crate::arch::x86_64::apic::local_apic_physical_base(),
+    );
+    if local_apic_window.overlaps(phys_base, phys_end) {
+        return Err("aperture overlaps the local APIC window");
+    }
     let mut mapper =
         unsafe { OffsetPageTable::new(identity_page_table_mut(root_frame), VirtAddr::new(0)) };
-    let flags = PageTableFlags::PRESENT
-        | PageTableFlags::WRITABLE
-        | PageTableFlags::NO_EXECUTE
-        | PageTableFlags::NO_CACHE
-        | PageTableFlags::WRITE_THROUGH;
     let mut bootstrap = BootstrapFrameAllocator { inner: allocator };
     let mut phys = phys_base;
     while phys < phys_end {
@@ -151,13 +158,59 @@ pub(crate) fn map_device_aperture_uncached(
         if mapper.translate_addr(page.start_address()).is_some() {
             return Err("aperture already has a direct-map alias");
         }
-        let frame = PhysFrame::containing_address(PhysAddr::new(phys));
-        without_write_protect(|| unsafe { mapper.map_to(page, frame, flags, &mut bootstrap) })
-            .map_err(|_| "aperture 4KiB map failed")?
-            .flush();
+        map_uncached_page(&mut mapper, &mut bootstrap, phys, page)
+            .map_err(|_| "aperture 4KiB map failed")?;
         phys += PAGE_SIZE;
     }
     Ok(UncachedAperture { phys_base, map_len })
+}
+
+/// Maps the 4 KiB device page at `phys` uncached at `virt`, which must lie outside the direct map
+/// and be unmapped. Intermediate page-table frames are permanent.
+#[cfg(not(test))]
+pub(crate) fn map_device_page_uncached_at(
+    root_frame: u64,
+    allocator: &mut PageAllocator,
+    phys: u64,
+    virt: u64,
+) -> Result<(), &'static str> {
+    if phys % PAGE_SIZE != 0 || virt % PAGE_SIZE != 0 {
+        return Err("device page not page aligned");
+    }
+    if crate::mm::layout::virt_to_phys_direct_map(virt).is_some() {
+        return Err("device page alias inside the direct map");
+    }
+    let mut mapper =
+        unsafe { OffsetPageTable::new(identity_page_table_mut(root_frame), VirtAddr::new(0)) };
+    let page = Page::<Size4KiB>::containing_address(
+        VirtAddr::try_new(virt).map_err(|_| "device page alias is not canonical")?,
+    );
+    if mapper.translate_addr(page.start_address()).is_some() {
+        return Err("device page alias already mapped");
+    }
+    let mut bootstrap = BootstrapFrameAllocator { inner: allocator };
+    map_uncached_page(&mut mapper, &mut bootstrap, phys, page)
+        .map_err(|_| "device page 4KiB map failed")
+}
+
+/// PCD|PWT (PAT index 3), writable, no-execute: the memory type for device registers.
+#[cfg(not(test))]
+fn map_uncached_page(
+    mapper: &mut OffsetPageTable<'_>,
+    bootstrap: &mut BootstrapFrameAllocator<'_>,
+    phys: u64,
+    page: Page<Size4KiB>,
+) -> Result<(), ()> {
+    let flags = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_EXECUTE
+        | PageTableFlags::NO_CACHE
+        | PageTableFlags::WRITE_THROUGH;
+    let frame = PhysFrame::containing_address(PhysAddr::new(phys));
+    without_write_protect(|| unsafe { mapper.map_to(page, frame, flags, bootstrap) })
+        .map_err(|_| ())?
+        .flush();
+    Ok(())
 }
 
 /// Proof that `map_device_aperture_uncached` mapped this range; only that function creates one.
@@ -186,7 +239,7 @@ fn map_physmap_from_memory_map(
     root_frame: u64,
     memory_map: &NormalizedMemoryMap,
     allocator: &mut PageAllocator,
-    excluded: Option<PhysExclusion>,
+    excluded: &[PhysExclusion],
 ) -> Result<(), &'static str> {
     let mut mapper =
         unsafe { OffsetPageTable::new(identity_page_table_mut(root_frame), VirtAddr::new(0)) };
@@ -215,9 +268,6 @@ fn map_physmap_from_memory_map(
             phys = phys.saturating_add(PAGE_SIZE);
         }
     }
-
-    map_fixed_mmio_page(&mut mapper, &mut bootstrap, LOCAL_APIC_MMIO_BASE, flags)?;
-    let _ = root_frame;
     Ok(())
 }
 
@@ -256,23 +306,6 @@ fn map_physmap_page_4k(
     Ok(())
 }
 
-fn map_fixed_mmio_page(
-    mapper: &mut OffsetPageTable<'_>,
-    bootstrap: &mut BootstrapFrameAllocator<'_>,
-    mmio_base: u64,
-    flags: PageTableFlags,
-) -> Result<(), &'static str> {
-    let virt = Page::<Size4KiB>::containing_address(VirtAddr::new(mmio_base));
-    if mapper.translate_addr(virt.start_address()).is_some() {
-        return Ok(());
-    }
-    let frame = PhysFrame::containing_address(PhysAddr::new(mmio_base));
-    without_write_protect(|| unsafe { mapper.map_to(virt, frame, flags, bootstrap) })
-        .map_err(|_| "MMIO map failed")?
-        .flush();
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,30 +317,30 @@ mod tests {
 
     #[test]
     fn physmap_step_without_exclusion_prefers_2m() {
-        assert_eq!(physmap_step(0x20_0000, 0x40_0000, None), PhysmapStep::Map2M);
-        assert_eq!(physmap_step(0x20_0000, 0x3f_f000, None), PhysmapStep::Map4K);
-        assert_eq!(physmap_step(0x20_1000, 0x40_0000, None), PhysmapStep::Map4K);
+        assert_eq!(physmap_step(0x20_0000, 0x40_0000, &[]), PhysmapStep::Map2M);
+        assert_eq!(physmap_step(0x20_0000, 0x3f_f000, &[]), PhysmapStep::Map4K);
+        assert_eq!(physmap_step(0x20_1000, 0x40_0000, &[]), PhysmapStep::Map4K);
     }
 
     #[test]
     fn physmap_step_2m_chunks_touching_the_aperture_fall_back_to_4k() {
         let region_end = 0x9000_0000;
         assert_eq!(
-            physmap_step(APERTURE.start, region_end, Some(APERTURE)),
+            physmap_step(APERTURE.start, region_end, &[APERTURE]),
             PhysmapStep::Skip
         );
         let last_chunk = APERTURE.end & !(TWO_MIB - 1);
         assert_eq!(
-            physmap_step(last_chunk, region_end, Some(APERTURE)),
+            physmap_step(last_chunk, region_end, &[APERTURE]),
             PhysmapStep::Skip
         );
         assert_eq!(
-            physmap_step(APERTURE.start - TWO_MIB, region_end, Some(APERTURE)),
+            physmap_step(APERTURE.start - TWO_MIB, region_end, &[APERTURE]),
             PhysmapStep::Map2M,
             "the chunk ending exactly at the aperture keeps its 2 MiB leaf"
         );
         assert_eq!(
-            physmap_step(last_chunk + TWO_MIB, region_end, Some(APERTURE)),
+            physmap_step(last_chunk + TWO_MIB, region_end, &[APERTURE]),
             PhysmapStep::Map2M
         );
     }
@@ -319,7 +352,7 @@ mod tests {
         let mut phys = region_start;
         let mut skipped = 0u64;
         while phys < region_end {
-            match physmap_step(phys, region_end, Some(APERTURE)) {
+            match physmap_step(phys, region_end, &[APERTURE]) {
                 PhysmapStep::Map2M => {
                     assert!(!APERTURE.overlaps(phys, phys + TWO_MIB), "{phys:#x}");
                     phys += TWO_MIB;
@@ -334,5 +367,31 @@ mod tests {
             phys += PAGE_SIZE;
         }
         assert_eq!(skipped, 1000);
+    }
+
+    #[test]
+    fn physmap_step_skips_the_local_apic_page_next_to_an_aperture() {
+        let apic = PhysExclusion {
+            start: 0xFEE0_0000,
+            end: 0xFEE0_0000 + PAGE_SIZE,
+        };
+        let excluded = [APERTURE, apic];
+        let region_end = 0x1_0000_0000;
+        assert_eq!(
+            physmap_step(0xFEE0_0000, region_end, &excluded),
+            PhysmapStep::Skip
+        );
+        assert_eq!(
+            physmap_step(0xFEE0_1000, region_end, &excluded),
+            PhysmapStep::Map4K
+        );
+        assert_eq!(
+            physmap_step(0xFEC0_0000, region_end, &excluded),
+            PhysmapStep::Map2M
+        );
+        assert_eq!(
+            physmap_step(APERTURE.start, region_end, &excluded),
+            PhysmapStep::Skip
+        );
     }
 }

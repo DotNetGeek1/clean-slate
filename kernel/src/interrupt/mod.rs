@@ -33,6 +33,7 @@ use crate::diagnostics::qemu::QEMU_EXIT_FAILURE;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::interrupt::timer::increment_kernel_ticks;
 use crate::mm::address_space::kernel_root_frame;
+use crate::mm::identity_holes::{identity_hole_for_address, IdentityHole};
 use crate::mm::paging::current_root_frame_address;
 use crate::mm::stack_guard::guarded_stack_for_fault;
 use crate::mm::stack_guard::{GuardedStackRecord, SlotLabel};
@@ -152,7 +153,9 @@ use core::sync::atomic::Ordering;
 use x86_64::registers::control::Cr2;
 use x86_64::registers::control::Cr3;
 
-static mut EXPECTED_PAGE_FAULT_ADDRESS: u64 = 0;
+/// Set only by the M1 self-test. `None` otherwise, so a kernel fault on address 0 (the unmapped
+/// null page) is never mistaken for the expected M1 probe.
+static mut EXPECTED_PAGE_FAULT_ADDRESS: Option<u64> = None;
 
 #[cfg(feature = "m1-self-test")]
 /// Publishes the address the next page fault is expected to report.
@@ -161,7 +164,7 @@ static mut EXPECTED_PAGE_FAULT_ADDRESS: u64 = 0;
 /// Must not race with a page fault that reads the value; the M1 self-test calls
 /// it immediately before probing the address.
 pub(crate) unsafe fn set_expected_page_fault_address(address: u64) {
-    unsafe { EXPECTED_PAGE_FAULT_ADDRESS = address }
+    unsafe { EXPECTED_PAGE_FAULT_ADDRESS = Some(address) }
 }
 
 // Consumed by arch/x86_64/asm.rs (every interrupt stub calls this with the saved frame).
@@ -435,7 +438,7 @@ fn handle_exception(context: &InterruptContext) -> u64 {
             bit(context.error_code, 4),
         ));
 
-        if expected == fault_address {
+        if expected == Some(fault_address) {
             kernel_log_line("[M1  ] PASS");
             qemu_exit(QEMU_EXIT_SUCCESS)
         }
@@ -446,6 +449,9 @@ fn handle_exception(context: &InterruptContext) -> u64 {
         }
 
         log_unexpected_kernel_fault_context(context);
+        if let Some(hole) = identity_hole_for_address(fault_address) {
+            report_identity_hole_fault(context, hole, fault_address)
+        }
         kernel_log_line("[PF  ] unexpected page fault");
         qemu_exit(QEMU_EXIT_FAILURE)
     }
@@ -593,6 +599,30 @@ fn report_kernel_stack_overflow(
     {
         qemu_exit(QEMU_EXIT_FAILURE)
     }
+}
+
+/// Fail-closed report for a kernel access to a page cut from the identity map (#253); the `[PF  ]`
+/// dump before it carries what is needed to symbolize `rip`.
+fn report_identity_hole_fault(
+    context: &InterruptContext,
+    hole: IdentityHole,
+    fault_address: u64,
+) -> ! {
+    kernel_log_fmt(format_args!(
+        "[FAIL] kernel page fault in identity hole={} cr2={:#018x} rip={:#018x} write={}\n",
+        hole.label(),
+        fault_address,
+        context.rip,
+        bit(context.error_code, 1)
+    ));
+    #[cfg(feature = "m2-identity-guard-self-test")]
+    crate::selftest::m2_identity_guard::on_identity_hole_fault(
+        hole,
+        fault_address,
+        bit(context.error_code, 1) != 0,
+    );
+    #[cfg(not(feature = "m2-identity-guard-self-test"))]
+    qemu_exit(QEMU_EXIT_FAILURE)
 }
 
 pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> u64 {

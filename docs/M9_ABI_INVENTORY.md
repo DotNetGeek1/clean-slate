@@ -322,7 +322,7 @@ Counts and names match `syscall-matrix.toml` only (Phase A table above is histor
 No host `/etc`, no public DNS/Internet. Hermetic reference runs **`--network none`** with **`fixture-responder.py`**:
 
 - UDP **`10.77.0.1:53`**: A `m7.fixture.test` → **`10.77.0.50`**; **AAAA → NOERROR, 0 answers** (wget/nslookup must proceed on A only).
-- TCP **`10.77.0.50:4001`**: `GET /` → body **`M9-FIXTURE-HTTP\n`** (`wget-fixture-http.strace` `read` on connected socket).
+- TCP **`10.77.0.50:4001`**: `GET /` → body **`M9-FIXTURE-HTTP\n`** (`wget-fixture-http.strace` `read` on connected socket), sent only after the whole request head (`writev`, 83 bytes, `wget-fixture-http.strace:146`) has arrived (#255).
 
 ### Blocking / readiness (#145)
 

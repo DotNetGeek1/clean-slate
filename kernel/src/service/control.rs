@@ -710,6 +710,9 @@ impl ServiceLifecycleController {
             generation,
             scheduler_slot,
         });
+        if service_id == NETWORK_SERVICE_ID {
+            crate::capability::network::on_network_instance_registered(u64::from(generation.0));
+        }
         self.log_launch(instance);
         Ok(LifecycleControlResult {
             event: Some(LifecycleEvent::new(
@@ -1119,7 +1122,7 @@ const fn rollback_failure_message(grant: Grant) -> &'static str {
         Grant::BlockDevice => "storage service block-capability rollback teardown failed",
         Grant::NetworkService => "network service capability rollback teardown failed",
         Grant::ObjectServiceRole => "object service role rollback teardown failed",
-        Grant::Console | Grant::ConsoleInput | Grant::TmpObjects => {
+        Grant::Console | Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
             "linux process grant rollback teardown failed"
         }
     }

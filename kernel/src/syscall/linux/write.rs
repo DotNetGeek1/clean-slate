@@ -157,7 +157,7 @@ pub(crate) fn socket_for_fd(
     generation: clean_slate_service_lifecycle::InstanceGeneration,
     fd: u64,
 ) -> Option<SocketRef> {
-    #[cfg(feature = "m9-linux-socket")]
+    #[cfg(clean_slate_linux_socket)]
     if let Ok(linux_fd::LinuxReadKind::Socket(socket)) =
         linux_fd::read_kind_for_fd(pid, generation, fd)
     {

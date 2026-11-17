@@ -471,7 +471,7 @@ pub(crate) fn launch_linux_process_with_authority(
     )
     .map_err(|_| LinuxImageError::Registry("linux launch: brk init failed"))?;
     if authority.network {
-        #[cfg(feature = "m9-linux-socket")]
+        #[cfg(clean_slate_linux_socket)]
         crate::process::linux_socket::grant_linux_network_capabilities(launched.pid).map_err(
             |_| LinuxImageError::Registry("linux launch: network capability grant failed"),
         )?;

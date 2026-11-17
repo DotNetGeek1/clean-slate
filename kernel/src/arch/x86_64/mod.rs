@@ -37,6 +37,9 @@ pub(crate) const IA32_EFER_NXE: u64 = 1 << 11;
 pub(crate) const CPUID_EXTENDED_MAX_LEAF: u32 = 0x8000_0000;
 pub(crate) const CPUID_EXTENDED_FEATURES_LEAF: u32 = 0x8000_0001;
 const CPUID_EXTENDED_FEATURES_EDX_NX: u32 = 1 << 20;
+pub(crate) const CPUID_ADDRESS_SIZES_LEAF: u32 = 0x8000_0008;
+/// Physical-address width the SDM specifies for a CPU without CPUID leaf `0x8000_0008`.
+const DEFAULT_PHYSICAL_ADDRESS_BITS: u32 = 36;
 pub(crate) const RFLAGS_TRAP_FLAG_BIT: u64 = 8;
 pub(crate) const RFLAGS_INTERRUPT_ENABLE_BIT: u64 = 9;
 pub(crate) const RFLAGS_DIRECTION_FLAG_BIT: u64 = 10;
@@ -70,6 +73,19 @@ pub(crate) const fn nx_supported_from_cpuid(max_extended_leaf: u32, ext_edx: u32
         && ext_edx & CPUID_EXTENDED_FEATURES_EDX_NX != 0
 }
 
+/// MAXPHYADDR: no physical address at or above `1 << bits` can exist on this CPU. `address_sizes_eax`
+/// is CPUID `0x8000_0008` EAX, meaningful only when `max_extended_leaf` reaches that leaf.
+pub(crate) const fn physical_address_bits_from_cpuid(
+    max_extended_leaf: u32,
+    address_sizes_eax: u32,
+) -> u32 {
+    if max_extended_leaf >= CPUID_ADDRESS_SIZES_LEAF {
+        address_sizes_eax & 0xff
+    } else {
+        DEFAULT_PHYSICAL_ADDRESS_BITS
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +103,16 @@ mod tests {
             1 << 20
         ));
         assert!(nx_supported_from_cpuid(0x8000_0008, 1 << 20));
+    }
+
+    #[test]
+    fn physical_address_bits_come_from_leaf_8000_0008_or_default_to_36() {
+        assert_eq!(physical_address_bits_from_cpuid(0x8000_0008, 0x3028), 40);
+        assert_eq!(
+            physical_address_bits_from_cpuid(0x8000_0021, 0x0030_302e),
+            46
+        );
+        assert_eq!(physical_address_bits_from_cpuid(0x8000_0007, 0x3028), 36);
     }
 
     #[test]

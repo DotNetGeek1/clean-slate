@@ -1,15 +1,23 @@
 //! Local APIC timer/EOI programming and legacy PIC masking.
 //!
+//! The register page is reached only through the uncached alias that
+//! `mm::identity_holes::arm_identity_holes` maps at `layout::LOCAL_APIC_ALIAS_VA`,
+//! in a PML4 slot of its own that every root shares. The APIC's identity window
+//! and its direct-map window are both unmapped (#253), so a register access
+//! before the alias is installed is a kernel bug and stops the boot rather than
+//! falling back to either address.
+//!
 //! Why unsafe: MMIO writes to the APIC register page and MSR writes to
-//! IA32_APIC_BASE. Callers must have the APIC page identity-mapped (true under
-//! the UEFI-provided page tables) and must only acknowledge interrupts that
-//! were actually delivered to this CPU. No link contracts.
+//! IA32_APIC_BASE. Callers must only acknowledge interrupts that were actually
+//! delivered to this CPU. No link contracts.
 
 use core::ptr;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::x86_64::msr::{read_msr, write_msr};
 use crate::arch::x86_64::port::port_out;
 use crate::arch::x86_64::{SPURIOUS_VECTOR, TIMER_VECTOR};
+use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::time::apic_timer_initial_count;
 
 const APIC_BASE_MSR: u32 = 0x1b;
@@ -18,6 +26,12 @@ const APIC_BASE_ADDRESS_MASK: u64 = 0xffff_f000;
 const APIC_ENABLE: u64 = 1 << 11;
 const APIC_SPURIOUS_INTERRUPT_VECTOR: u32 = 0x100 | (SPURIOUS_VECTOR as u32);
 const APIC_REGISTER_ID: usize = 0x20;
+#[cfg(not(test))]
+const APIC_REGISTER_VERSION: usize = 0x30;
+/// Integrated (xAPIC) local APICs report a version in `0x10..=0x1f`; a missing
+/// or disabled register page reads as all ones.
+#[cfg(not(test))]
+const APIC_INTEGRATED_VERSIONS: core::ops::RangeInclusive<u32> = 0x10..=0x1f;
 const APIC_REGISTER_TPR: usize = 0x80;
 const APIC_REGISTER_EOI: usize = 0xb0;
 const APIC_REGISTER_SVR: usize = 0xf0;
@@ -54,6 +68,9 @@ pub(crate) fn mask_legacy_pic() {
 }
 
 pub(crate) fn enable_local_apic() {
+    if local_apic_physical_base() != LOCAL_APIC_PHYS.load(Ordering::Relaxed) {
+        fatal_kernel_error("IA32_APIC_BASE moved away from the aliased local APIC page");
+    }
     let apic_base = read_msr(APIC_BASE_MSR) | APIC_ENABLE;
     write_msr(APIC_BASE_MSR, apic_base);
     local_apic_write(APIC_REGISTER_TPR, 0);
@@ -172,6 +189,36 @@ fn local_apic_write(offset: usize, value: u32) {
     }
 }
 
-fn local_apic_base() -> u64 {
+/// Virtual address of the register page alias; zero until it is installed.
+static LOCAL_APIC_ALIAS: AtomicU64 = AtomicU64::new(0);
+/// Physical page the alias maps.
+static LOCAL_APIC_PHYS: AtomicU64 = AtomicU64::new(0);
+
+/// The register page IA32_APIC_BASE points at, for mapping the alias at boot.
+pub(crate) fn local_apic_physical_base() -> u64 {
     read_msr(APIC_BASE_MSR) & APIC_BASE_ADDRESS_MASK
+}
+
+/// Points every register access at `alias`, which maps `phys` uncached, after
+/// checking that a local APIC answers there.
+#[cfg(not(test))]
+pub(crate) fn install_local_apic_alias(phys: u64, alias: u64) -> Result<(), &'static str> {
+    if phys == 0 || phys != local_apic_physical_base() {
+        return Err("local APIC alias does not map the IA32_APIC_BASE page");
+    }
+    let version =
+        unsafe { ptr::read_volatile((alias + APIC_REGISTER_VERSION as u64) as *const u32) };
+    if !APIC_INTEGRATED_VERSIONS.contains(&(version & 0xff)) {
+        return Err("local APIC alias did not read an integrated APIC version");
+    }
+    LOCAL_APIC_PHYS.store(phys, Ordering::Relaxed);
+    LOCAL_APIC_ALIAS.store(alias, Ordering::Relaxed);
+    Ok(())
+}
+
+fn local_apic_base() -> u64 {
+    match LOCAL_APIC_ALIAS.load(Ordering::Relaxed) {
+        0 => fatal_kernel_error("local APIC accessed before its alias was mapped"),
+        alias => alias,
+    }
 }

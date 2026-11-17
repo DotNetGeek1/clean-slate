@@ -1,7 +1,6 @@
 //! TCP echo and TLS termination for the M7 hermetic peer.
 
 use std::io::{Cursor, Read, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -245,13 +244,13 @@ const M9_HTTP_RESPONSE: &str = concat!(
     "M9-FIXTURE-HTTP\n"
 );
 
-/// What the HTTP endpoint did with each connection, read by the lanes after the run.
-#[derive(Debug, Default)]
-pub struct HttpRequestCounters {
-    /// Connections that delivered a well-formed `GET /` request head and were answered.
-    pub answered: AtomicU64,
-    /// Connections closed without a response: malformed, oversized or missing request.
-    pub refused: AtomicU64,
+/// What the HTTP endpoint did with a connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpOutcome {
+    /// It delivered a well-formed `GET /` request head and was answered.
+    Answered,
+    /// It was closed without a response: malformed, oversized or missing request.
+    Refused,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -303,11 +302,10 @@ pub struct M9HttpService {
     request: Vec<u8>,
     sent: bool,
     closed: bool,
-    counters: Arc<HttpRequestCounters>,
 }
 
 impl M9HttpService {
-    pub fn new(sockets: &mut SocketSet<'_>, counters: Arc<HttpRequestCounters>) -> Self {
+    pub fn new(sockets: &mut SocketSet<'_>) -> Self {
         let endpoint = IpListenEndpoint {
             addr: Some(M9_SERVICE_ADDR),
             port: M9_HTTP_PORT,
@@ -319,11 +317,11 @@ impl M9HttpService {
             request: Vec::new(),
             sent: false,
             closed: false,
-            counters,
         }
     }
 
-    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) {
+    /// Returns what this poll decided about the active connection, if anything.
+    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) -> Option<HttpOutcome> {
         self.pool.relisten_closed(sockets);
         if self.active.is_none() {
             if let Some(handle) = self.pool.accept(sockets) {
@@ -334,16 +332,15 @@ impl M9HttpService {
                 self.closed = false;
                 println!("[FIX ] m9 http connect");
             }
-            return;
+            return None;
         }
         let active = self.active.expect("m9 http active");
         let socket = sockets.get_mut::<tcp::Socket>(active);
         if !socket.is_active() {
-            if !self.sent && !self.closed {
-                self.refuse(None, "connection ended before a request");
-            }
+            let outcome = (!self.sent && !self.closed)
+                .then(|| self.refuse(None, "connection ended before a request"));
             self.release_active();
-            return;
+            return outcome;
         }
         while socket.can_recv() {
             let mut buf = [0u8; 512];
@@ -352,34 +349,37 @@ impl M9HttpService {
                 Ok(n) => self.request.extend_from_slice(&buf[..n]),
             }
         }
+        let mut outcome = None;
         if !self.sent && !self.closed {
-            match parse_http_request_head(&self.request) {
+            outcome = match parse_http_request_head(&self.request) {
                 HttpRequestHead::Complete if socket.may_send() => {
                     let request_line = self.request_line();
                     if socket.send_slice(M9_HTTP_RESPONSE.as_bytes()).is_ok() {
                         self.sent = true;
-                        let answered = self.counters.answered.fetch_add(1, Ordering::SeqCst) + 1;
                         println!(
-                            "[FIX ] m9 http request {request_line:?} ({} bytes) answered={answered}",
+                            "[FIX ] m9 http request {request_line:?} ({} bytes)",
                             self.request.len()
                         );
                         println!("[FIX ] m9 http response");
+                        Some(HttpOutcome::Answered)
+                    } else {
+                        None
                     }
                 }
                 HttpRequestHead::Complete => {
-                    self.refuse(Some(socket), "client closed its receive side")
+                    Some(self.refuse(Some(socket), "client closed its receive side"))
                 }
-                HttpRequestHead::Malformed(reason) => self.refuse(Some(socket), reason),
+                HttpRequestHead::Malformed(reason) => Some(self.refuse(Some(socket), reason)),
                 HttpRequestHead::Incomplete if socket.state() == tcp::State::CloseWait => {
-                    self.refuse(Some(socket), "client closed before a complete request")
+                    Some(self.refuse(Some(socket), "client closed before a complete request"))
                 }
                 HttpRequestHead::Incomplete
                     if self.connected_at.elapsed() >= M9_HTTP_REQUEST_WAIT =>
                 {
-                    self.refuse(Some(socket), "no complete request within the wait")
+                    Some(self.refuse(Some(socket), "no complete request within the wait"))
                 }
-                HttpRequestHead::Incomplete => {}
-            }
+                HttpRequestHead::Incomplete => None,
+            };
         }
         let socket = sockets.get_mut::<tcp::Socket>(active);
         if self.sent && !self.closed && socket.send_queue() == 0 {
@@ -390,6 +390,7 @@ impl M9HttpService {
             socket.close();
             self.release_active();
         }
+        outcome
     }
 
     fn request_line(&self) -> String {
@@ -401,17 +402,17 @@ impl M9HttpService {
         String::from_utf8_lossy(&self.request[..end]).into_owned()
     }
 
-    /// Closes the connection without a response and counts it.
-    fn refuse(&mut self, socket: Option<&mut tcp::Socket<'_>>, reason: &str) {
-        let refused = self.counters.refused.fetch_add(1, Ordering::SeqCst) + 1;
+    /// Closes the connection without a response.
+    fn refuse(&mut self, socket: Option<&mut tcp::Socket<'_>>, reason: &str) -> HttpOutcome {
         println!(
-            "[FIX ] m9 http refused: {reason} ({} bytes received) refused={refused}",
+            "[FIX ] m9 http refused: {reason} ({} bytes received)",
             self.request.len()
         );
         if let Some(socket) = socket {
             socket.close();
         }
         self.closed = true;
+        HttpOutcome::Refused
     }
 
     /// Forgets the served connection; its socket listens again once it reaches CLOSED.

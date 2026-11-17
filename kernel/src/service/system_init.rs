@@ -88,7 +88,12 @@ pub(crate) struct HeldAuthority {
     pub(crate) console: usize,
     pub(crate) block_device: usize,
     pub(crate) object_service_role: usize,
+    /// Network-class records other than the two below (the network service's own authority).
     pub(crate) network: usize,
+    /// Network client capabilities bound to a network instance.
+    pub(crate) network_client: usize,
+    /// `NetworkClient` entitlement records, which name the network service and no instance.
+    pub(crate) network_client_entitlement: usize,
     /// `/tmp` backing-object records (Linux `/tmp` write authority).
     pub(crate) tmp_objects: usize,
     /// Capability-space records of any other kind. A console grant also records one IPC
@@ -176,6 +181,8 @@ impl HeldAuthority {
         block_device: 0,
         object_service_role: 0,
         network: 0,
+        network_client: 0,
+        network_client_entitlement: 0,
         tmp_objects: 0,
         console_records: 1,
         other: 0,
@@ -196,7 +203,13 @@ impl HeldAuthority {
     /// What an instance of `image` started from a manifest row with `grants` must hold. Services
     /// get no lifecycle control, and a console only through `Grant::Console`; the network grant
     /// also binds the raw network link. A Linux image is a Linux-personality process.
-    pub(crate) fn for_grants(image: ServiceImage, grants: &[Grant]) -> Self {
+    /// `Grant::NetworkClient` always means one entitlement, and one instance-bound client
+    /// capability exactly when `network_instance_live`.
+    pub(crate) fn for_grants(
+        image: ServiceImage,
+        grants: &[Grant],
+        network_instance_live: bool,
+    ) -> Self {
         use crate::process::linux_fs::object_backend::LINUX_TMP_MAX_FILES;
 
         let held = |grant: Grant| usize::from(grants.contains(&grant));
@@ -206,6 +219,8 @@ impl HeldAuthority {
             block_device: held(Grant::BlockDevice),
             object_service_role: held(Grant::ObjectServiceRole),
             network: held(Grant::NetworkService),
+            network_client: held(Grant::NetworkClient) * usize::from(network_instance_live),
+            network_client_entitlement: held(Grant::NetworkClient),
             tmp_objects: held(Grant::TmpObjects) * LINUX_TMP_MAX_FILES,
             outside: OutsideCapabilitySpace {
                 raw_network_link: held(Grant::NetworkService),
@@ -218,15 +233,18 @@ impl HeldAuthority {
     }
 
     /// [`Self::for_grants`] for `spec`; a service without a row must hold nothing.
-    fn for_row(spec: Option<&ServiceSpec>) -> Self {
+    fn for_row(spec: Option<&ServiceSpec>, network_instance_live: bool) -> Self {
         spec.map_or_else(Self::default, |spec| {
-            Self::for_grants(spec.image, spec.grants)
+            Self::for_grants(spec.image, spec.grants, network_instance_live)
         })
     }
 
     /// `held_in_controller` is the lifecycle controller's own count for `pid`:
     /// `(lifecycle_control, block_device)`.
     fn of(pid: u64, held_in_controller: (usize, usize)) -> Self {
+        use crate::capability::network::{
+            is_instance_bound_network_client, is_network_client_entitlement,
+        };
         use clean_slate_capability::{list_holder, HolderId, ResourceClass};
         use clean_slate_service_fixtures::object_capability::OBJECT_SERVICE_ROLE_ID;
 
@@ -255,6 +273,12 @@ impl HeldAuthority {
                     {
                         &mut held.tmp_objects
                     }
+                    ResourceClass::Network if is_network_client_entitlement(&record) => {
+                        &mut held.network_client_entitlement
+                    }
+                    ResourceClass::Network if is_instance_bound_network_client(&record) => {
+                        &mut held.network_client
+                    }
                     ResourceClass::Network => &mut held.network,
                     ResourceClass::IpcEndpoint => &mut held.console_records,
                     _ => &mut held.other,
@@ -271,12 +295,14 @@ impl fmt::Display for HeldAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "lifecycle-control={} console={} block-device={} object-service={} network={} tmp-objects={} other={} {}",
+            "lifecycle-control={} console={} block-device={} object-service={} network={} net-client={} net-client-entitlement={} tmp-objects={} other={} {}",
             self.lifecycle_control,
             self.console,
             self.block_device,
             self.object_service_role,
             self.network,
+            self.network_client,
+            self.network_client_entitlement,
             self.tmp_objects,
             self.other + self.console_records.saturating_sub(self.console),
             self.outside,
@@ -294,7 +320,9 @@ pub(crate) fn audit_service_authority(
     held_in_controller: (usize, usize),
 ) -> Result<(), &'static str> {
     let held = HeldAuthority::of(pid, held_in_controller);
-    let matches = held == HeldAuthority::for_row(spec);
+    let network_instance_live =
+        crate::service::instance_generation::live_network_instance_generation().is_some();
+    let matches = held == HeldAuthority::for_row(spec, network_instance_live);
     kernel_log_fmt(format_args!(
         "[SVC ] authority service={} pid={pid} {held} matches-manifest={}\n",
         service.0,
@@ -515,9 +543,22 @@ mod tests {
     #[test]
     fn services_must_hold_exactly_their_row_and_no_console_or_lifecycle_control() {
         use clean_slate_service_fixtures::manifest::{find_service, SYSTEM_MANIFEST};
-        use clean_slate_service_fixtures::{NETWORK_SERVICE_ID, STORAGE_SERVICE_ID};
-        let row = |id| HeldAuthority::for_row(find_service(SYSTEM_MANIFEST, id));
+        for network_instance_live in [false, true] {
+            let row = |id| {
+                HeldAuthority::for_row(find_service(SYSTEM_MANIFEST, id), network_instance_live)
+            };
+            native_rows_hold_exactly(row);
+        }
+        assert_eq!(HeldAuthority::for_row(None, true), HeldAuthority::default());
+        assert_eq!(
+            HeldAuthority::for_grants(ServiceImage::Storage, &[], true),
+            HeldAuthority::default()
+        );
+    }
 
+    #[cfg(clean_slate_system_init)]
+    fn native_rows_hold_exactly(row: impl Fn(ServiceId) -> HeldAuthority) {
+        use clean_slate_service_fixtures::{NETWORK_SERVICE_ID, STORAGE_SERVICE_ID};
         assert_eq!(
             row(STORAGE_SERVICE_ID),
             HeldAuthority {
@@ -537,47 +578,57 @@ mod tests {
                 ..HeldAuthority::default()
             }
         );
-        assert_eq!(HeldAuthority::for_row(None), HeldAuthority::default());
-        assert_eq!(
-            HeldAuthority::for_grants(ServiceImage::Storage, &[]),
-            HeldAuthority::default()
-        );
     }
 
-    /// The shell's console capability, its stdin fd, the four `/tmp` object records and the
-    /// Linux personality, and nothing else.
+    /// The shell's console capability, its stdin fd, the four `/tmp` object records, the
+    /// network client entitlement and the Linux personality, plus a client capability for the
+    /// network instance when one is live, and nothing else.
     #[cfg(clean_slate_system_init)]
     #[test]
-    fn the_shell_must_hold_console_stdin_tmp_and_linux_only() {
+    fn the_shell_must_hold_console_stdin_tmp_network_client_and_linux_only() {
         use clean_slate_service_fixtures::manifest::{find_service, SYSTEM_MANIFEST};
         use clean_slate_service_fixtures::SYSTEM_SHELL_SERVICE_ID;
 
-        let shell = HeldAuthority::for_row(find_service(SYSTEM_MANIFEST, SYSTEM_SHELL_SERVICE_ID));
+        let spec = find_service(SYSTEM_MANIFEST, SYSTEM_SHELL_SERVICE_ID);
+        let without_network = HeldAuthority {
+            console: 1,
+            console_records: 1,
+            tmp_objects: 4,
+            network_client_entitlement: 1,
+            outside: OutsideCapabilitySpace {
+                linux_personality: 1,
+                console_input: 1,
+                ..OutsideCapabilitySpace::default()
+            },
+            ..HeldAuthority::default()
+        };
+        assert_eq!(HeldAuthority::for_row(spec, false), without_network);
+        let shell = HeldAuthority::for_row(spec, true);
         assert_eq!(
             shell,
             HeldAuthority {
-                console: 1,
-                console_records: 1,
-                tmp_objects: 4,
-                outside: OutsideCapabilitySpace {
-                    linux_personality: 1,
-                    console_input: 1,
-                    ..OutsideCapabilitySpace::default()
-                },
-                ..HeldAuthority::default()
+                network_client: 1,
+                ..without_network
             }
         );
         assert_eq!(
             std::format!("{shell}"),
-            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
+        );
+        assert_eq!(
+            std::format!("{without_network}"),
+            "lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=1 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1"
         );
         let without_stdin = HeldAuthority::for_grants(
             ServiceImage::LinuxShell,
             &[Grant::Console, Grant::TmpObjects],
+            true,
         );
         assert_ne!(without_stdin, shell);
         assert_eq!(without_stdin.outside.console_input, 0);
-        let native = HeldAuthority::for_grants(ServiceImage::Network, &[]);
+        assert_eq!(without_stdin.network_client, 0);
+        assert_eq!(without_stdin.network_client_entitlement, 0);
+        let native = HeldAuthority::for_grants(ServiceImage::Network, &[], true);
         assert_eq!(native.outside.linux_personality, 0);
     }
 
@@ -586,8 +637,25 @@ mod tests {
     fn init_is_expected_to_hold_lifecycle_control_and_the_console_only() {
         assert_eq!(
             std::format!("{}", HeldAuthority::INIT),
-            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
+            "lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0"
         );
+        for held in [
+            HeldAuthority {
+                network_client: 1,
+                ..HeldAuthority::INIT
+            },
+            HeldAuthority {
+                network_client_entitlement: 1,
+                ..HeldAuthority::INIT
+            },
+        ] {
+            assert_ne!(held, HeldAuthority::INIT);
+            let line = std::format!("{held}");
+            assert!(
+                line.contains(" net-client=1 ") || line.contains(" net-client-entitlement=1 "),
+                "{line}"
+            );
+        }
         let with_block = HeldAuthority {
             block_device: 1,
             ..HeldAuthority::INIT

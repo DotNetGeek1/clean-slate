@@ -510,8 +510,8 @@ Enable in consumers: `clean-slate-network` feature `tls` (kernel: `m7-tls-self-t
 
 - TCP echo [`TCP_ECHO_PORT`](../network/src/fixture.rs): `APP_REQUEST_BYTES` → `APP_RESPONSE_BYTES`.
 - TLS [`TLS_PORT`](../network/src/fixture.rs): rustls server, same app contract after handshake.
-- M9 profile only: HTTP on `10.77.0.50:4001` reads the request head first and answers `M9-FIXTURE-HTTP\n` only when it is exactly `GET / HTTP/1.0` or `GET / HTTP/1.1`, then `name: value` header lines, then the blank line, within 2048 bytes and 5 s of the connect. Anything else is closed without a response. The peer counts answered and refused connections, and `test-m9-userspace` and `test-m9-linux-socket` require exactly their number of answered requests (9 and 1) and no refusal (#255), so a request that never leaves the guest fails the lane. Banner on `4002` is sent on accept and needs no request.
-- Markers: `[FIX ] tcp echo`, `[FIX ] tls handshake sni=…`, `[FIX ] tls app bytes`, `[FIX ] m9 http request "GET / HTTP/1.1" (83 bytes) answered=N`, `[FIX ] m9 http refused: <reason>`.
+- M9 profile only: HTTP on `10.77.0.50:4001` reads the request head first and answers `M9-FIXTURE-HTTP\n` only when it is exactly `GET / HTTP/1.0` or `GET / HTTP/1.1`, then `name: value` header lines, then the blank line, within 2048 bytes and 5 s of the connect. Anything else is closed without a response. The peer counts answered and refused connections (`M7FixturePeer::counts`), and `test-m9-userspace`, `test-m9-linux-socket` and `test-system-shell` require exactly their number of answered requests (9, 1 and 1) and no refusal (#255), so a request that never leaves the guest fails the lane. Banner on `4002` is sent on accept and needs no request.
+- Markers: `[FIX ] tcp echo`, `[FIX ] tls handshake sni=…`, `[FIX ] tls app bytes`, `[FIX ] m9 http request "GET / HTTP/1.1" (83 bytes)`, `[FIX ] m9 http refused: <reason> (N bytes received)`.
 - `CLEAN_SLATE_FIXTURE_TRACE=1` makes the peer print every TCP segment it receives or sends (`[FIX ] trace guest|fixture tcp <src> -> <dst> seq= ack= flags= len=`), to see whether guest data reached the wire.
 
 ### QEMU acceptance

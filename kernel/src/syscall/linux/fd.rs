@@ -107,7 +107,7 @@ pub(crate) fn handle_sys_read(
             }
         }
         DescriptorKind::Socket(socket) => {
-            #[cfg(feature = "m9-linux-socket")]
+            #[cfg(clean_slate_linux_socket)]
             {
                 crate::process::linux_socket::read_socket(
                     request,
@@ -119,7 +119,7 @@ pub(crate) fn handle_sys_read(
                     &mut scratch[..want],
                 )
             }
-            #[cfg(not(feature = "m9-linux-socket"))]
+            #[cfg(not(clean_slate_linux_socket))]
             {
                 let _ = (request, ctx, pid, generation, fd, socket);
                 Err(EBADF)
@@ -463,7 +463,7 @@ mod tests {
 
     /// #255: a socket fd has no write projection, so `writev` refused it with `EBADF`
     /// before sending anything; BusyBox `wget` (musl stdio) sends its request this way.
-    #[cfg(feature = "m9-linux-socket")]
+    #[cfg(clean_slate_linux_socket)]
     #[test]
     fn writev_on_a_socket_fd_is_not_refused_as_a_closed_fd() {
         use crate::process::linux_fd::open_description::SocketRef;

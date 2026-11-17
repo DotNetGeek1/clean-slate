@@ -56,13 +56,12 @@ impl ServiceImage {
 
 /// Kernel authority applied to a service instance when its row is started.
 ///
-/// Only grants the kernel can apply at service launch today are listed. `NetworkClient`,
-/// `GraphicsPort` and `GraphicsRole` are added by the stages that give the kernel a launch-time
-/// path for them.
+/// Only grants the kernel can apply at service launch today are listed. `GraphicsPort` and
+/// `GraphicsRole` are added by the stages that give the kernel a launch-time path for them.
 ///
-/// `Console`, `ConsoleInput` and `TmpObjects` are Linux-personality grants: the kernel applies
-/// them while it builds the Linux process, so only a [`ServiceImage::LinuxShell`] row may hold
-/// them.
+/// `Console`, `ConsoleInput`, `TmpObjects` and `NetworkClient` are Linux-personality grants: the
+/// kernel applies them while it builds the Linux process, so only a [`ServiceImage::LinuxShell`]
+/// row may hold them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Grant {
     /// The storage block device (`STORAGE_BLOCK_DEVICE_ID`).
@@ -79,6 +78,11 @@ pub enum Grant {
     ConsoleInput,
     /// `READ | WRITE` on every `/tmp` backing object, so `/tmp` is writable.
     TmpObjects,
+    /// Entitlement to the network service's client authority (Linux sockets). The entitlement
+    /// itself authorises nothing; the kernel derives a client capability bound to the live
+    /// network instance from it, at launch and each time a network instance registers. The
+    /// row does not depend on the network: with no instance live, socket calls fail.
+    NetworkClient,
 }
 
 /// What init does when a started service exits or faults. Init counts ticks in monotonic
@@ -168,12 +172,18 @@ const SHELL_RESTART: RestartSpec = RestartSpec::OnExitUntilUnready {
 };
 
 /// The interactive BusyBox shell on the serial console. Its `/tmp` is backed by storage objects,
-/// so init starts it only once storage is ready; it does not wait for the network.
+/// so init starts it only once storage is ready; it does not wait for the network, and its
+/// network client authority follows whichever network instance is live.
 pub const SYSTEM_SHELL_SPEC: ServiceSpec = ServiceSpec {
     id: SYSTEM_SHELL_SERVICE_ID,
     image: ServiceImage::LinuxShell,
     mode: 0,
-    grants: &[Grant::Console, Grant::ConsoleInput, Grant::TmpObjects],
+    grants: &[
+        Grant::Console,
+        Grant::ConsoleInput,
+        Grant::TmpObjects,
+        Grant::NetworkClient,
+    ],
     restart: SHELL_RESTART,
     depends_on: &[STORAGE_SERVICE_ID],
 };
@@ -302,7 +312,7 @@ const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
     match grant {
         Grant::ObjectServiceRole => matches!(image, ServiceImage::Storage),
         Grant::BlockDevice | Grant::NetworkService => !matches!(image, ServiceImage::LinuxShell),
-        Grant::Console | Grant::ConsoleInput | Grant::TmpObjects => {
+        Grant::Console | Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
             matches!(image, ServiceImage::LinuxShell)
         }
     }
@@ -343,13 +353,18 @@ mod tests {
     }
 
     #[test]
-    fn shell_row_holds_console_stdin_and_tmp_only_and_waits_for_storage() {
+    fn shell_row_holds_console_stdin_tmp_and_network_client_and_waits_for_storage_only() {
         let shell = find_service(SYSTEM_MANIFEST, SYSTEM_SHELL_SERVICE_ID).unwrap();
         assert_eq!(shell.image, ServiceImage::LinuxShell);
         assert_eq!(shell.mode, 0);
         assert_eq!(
             shell.grants,
-            [Grant::Console, Grant::ConsoleInput, Grant::TmpObjects]
+            [
+                Grant::Console,
+                Grant::ConsoleInput,
+                Grant::TmpObjects,
+                Grant::NetworkClient
+            ]
         );
         assert_eq!(shell.depends_on, [STORAGE_SERVICE_ID]);
         assert_eq!(
@@ -364,7 +379,11 @@ mod tests {
 
     #[test]
     fn validation_rejects_linux_grants_outside_linux_rows() {
-        for grants in [&[Grant::Console] as &'static [Grant], &[Grant::TmpObjects]] {
+        for grants in [
+            &[Grant::Console] as &'static [Grant],
+            &[Grant::TmpObjects],
+            &[Grant::NetworkClient],
+        ] {
             let rows = [row(7, ServiceImage::Network, grants)];
             assert_eq!(
                 validate_manifest(&rows),

@@ -80,6 +80,9 @@ pub(crate) struct LinuxSocket {
     pending_rx_req: Option<u64>,
     /// Receive failure reported by the service, returned once to the next reader.
     rx_error: Option<LinuxErrno>,
+    /// Set when the network instance behind the socket went away: every later call on the
+    /// socket fails with it until the socket is closed (see [`on_network_instance_gone`]).
+    lost: Option<LinuxErrno>,
     owner_pid: u64,
     owner_generation: u32,
     generation: u32,
@@ -105,6 +108,7 @@ impl LinuxSocket {
             inflight_request_id: None,
             pending_rx_req: None,
             rx_error: None,
+            lost: None,
             owner_pid: 0,
             owner_generation: 0,
             generation: 1,
@@ -269,25 +273,120 @@ fn alloc_socket(
     })
 }
 
-pub(crate) fn with_socket_mut<R>(
-    id: LinuxSocketId,
-    f: impl FnOnce(&mut LinuxSocket) -> R,
-) -> Result<R, LinuxErrno> {
-    let pool = unsafe { &mut *SOCKET_POOL.get() };
+/// The open socket `id` names, or `EBADF`; a socket whose network instance is gone yields
+/// its lost errno instead, so no call reaches the replacement instance.
+fn usable_slot(pool: &mut SocketPool, id: LinuxSocketId) -> Result<&mut LinuxSocket, LinuxErrno> {
     let slot = pool
         .slots
         .get_mut(id.index as usize)
         .filter(|s| s.state != SocketState::Closed && s.generation == id.generation)
         .ok_or(EBADF)?;
-    Ok(f(slot))
+    match slot.lost {
+        Some(errno) => Err(errno),
+        None => Ok(slot),
+    }
+}
+
+pub(crate) fn with_socket_mut<R>(
+    id: LinuxSocketId,
+    f: impl FnOnce(&mut LinuxSocket) -> R,
+) -> Result<R, LinuxErrno> {
+    let pool = unsafe { &mut *SOCKET_POOL.get() };
+    Ok(f(usable_slot(pool, id)?))
+}
+
+/// What a socket's calls return once its network instance is gone: a stream was reset by
+/// its peer; a datagram socket has no peer to blame, so its calls fail with an I/O error.
+const fn lost_errno(kind: SocketKindLinux) -> LinuxErrno {
+    match kind {
+        SocketKindLinux::Tcp => clean_slate_linux_abi::ECONNRESET,
+        SocketKindLinux::Udp => EIO,
+    }
+}
+
+/// Who must be woken after a socket was marked lost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LostSocketWake {
+    /// Blocked readers wait on [`linux_socket_wait_key`].
+    socket_key: WaitKey,
+    /// Broker waiters wait on [`linux_socket_request_wait_key`] of these requests.
+    requests: [Option<u64>; 2],
+    /// `poll(2)` waiters wait on the owner's poll key.
+    owner_pid: u64,
+}
+
+/// Marks `socket` lost and takes its outstanding bridge requests. A socket whose `Open` never
+/// completed has no fd yet, so it is closed outright: the restarted `socket(2)` then starts
+/// afresh instead of finding it. Returns `None` for a closed or already lost socket.
+fn mark_lost(socket: &mut LinuxSocket, id: LinuxSocketId) -> Option<LostSocketWake> {
+    if socket.state == SocketState::Closed || socket.lost.is_some() {
+        return None;
+    }
+    let wake = LostSocketWake {
+        socket_key: linux_socket_wait_key(id),
+        requests: [
+            socket.pending_rx_req.take(),
+            socket.inflight_request_id.take(),
+        ],
+        owner_pid: socket.owner_pid,
+    };
+    socket.rx_error = None;
+    if socket.session.raw() == 0 {
+        socket.state = SocketState::Closed;
+        socket.generation = socket.generation.saturating_add(1);
+    } else {
+        socket.lost = Some(lost_errno(socket.kind));
+    }
+    Some(wake)
+}
+
+/// #218 S7: the network instance behind every open socket went away (terminated, exited or
+/// faulted). Sockets are not rebound to a replacement: each open one fails its later calls
+/// with [`lost_errno`] until it is closed. Their bridge requests are dropped, and blocked readers,
+/// broker waiters and `poll(2)` waiters are woken; a woken socket syscall restarts from its
+/// entry and fails there. Returns the number of sockets marked lost.
+pub(crate) fn on_network_instance_gone() -> usize {
+    let pool = unsafe { &mut *SOCKET_POOL.get() };
+    let mut lost = 0usize;
+    for (index, slot) in pool.slots.iter_mut().enumerate() {
+        let id = LinuxSocketId {
+            index: index as u16,
+            generation: slot.generation,
+        };
+        let Some(wake) = mark_lost(slot, id) else {
+            continue;
+        };
+        lost += 1;
+        let bridge = crate::service::net_bridge::net_bridge_mut();
+        for request_id in wake.requests.into_iter().flatten() {
+            bridge.drop_request_for_lost_instance(
+                slot.owner_pid,
+                slot.owner_pid,
+                u64::from(slot.owner_generation),
+                request_id,
+            );
+            wake_all(linux_socket_request_wait_key(request_id));
+        }
+        wake_all(wake.socket_key);
+        crate::syscall::linux::poll::wake_poll_waiters_for_pid(wake.owner_pid);
+    }
+    if lost > 0 {
+        crate::diagnostics::log::kernel_log_fmt(format_args!(
+            "[NET ] linux sockets lost count={} reason=instance-gone\n",
+            lost
+        ));
+    }
+    lost
 }
 
 pub(crate) fn release_socket(id: LinuxSocketId) {
     let pool = unsafe { &mut *SOCKET_POOL.get() };
     if let Some(slot) = pool.slots.get_mut(id.index as usize) {
         if slot.generation == id.generation && slot.state != SocketState::Closed {
-            abandon_outstanding_requests(slot);
-            close_m7_session(slot);
+            if slot.lost.is_none() {
+                abandon_outstanding_requests(slot);
+                close_m7_session(slot);
+            }
             slot.state = SocketState::Closed;
             wake_all(linux_socket_wait_key(id));
             slot.generation = slot.generation.saturating_add(1);
@@ -671,21 +770,28 @@ pub(crate) fn readiness_for(id: LinuxSocketId) -> Readiness {
         .slots
         .get(id.index as usize)
         .filter(|s| s.state != SocketState::Closed && s.generation == id.generation);
-    match socket {
-        Some(socket) => {
-            let stream_error = socket.kind == SocketKindLinux::Tcp && socket.rx_error.is_some();
-            let readable =
-                socket.rx_count > 0 || socket.tcp_rx_len > 0 || socket.tcp_eof || stream_error;
-            let writable =
-                socket.state == SocketState::Connected || socket.kind == SocketKindLinux::Udp;
-            Readiness {
-                readable,
-                writable,
-                hangup: socket.tcp_eof,
-                error: false,
-            }
-        }
-        None => Readiness::default(),
+    socket.map(socket_readiness).unwrap_or_default()
+}
+
+/// A lost socket is readable and writable (each call returns its error at once), reports
+/// `POLLERR`, and a lost stream also reports `POLLHUP`.
+fn socket_readiness(socket: &LinuxSocket) -> Readiness {
+    if socket.lost.is_some() {
+        return Readiness {
+            readable: true,
+            writable: true,
+            hangup: socket.kind == SocketKindLinux::Tcp,
+            error: true,
+        };
+    }
+    let stream_error = socket.kind == SocketKindLinux::Tcp && socket.rx_error.is_some();
+    let readable = socket.rx_count > 0 || socket.tcp_rx_len > 0 || socket.tcp_eof || stream_error;
+    let writable = socket.state == SocketState::Connected || socket.kind == SocketKindLinux::Udp;
+    Readiness {
+        readable,
+        writable,
+        hangup: socket.tcp_eof,
+        error: false,
     }
 }
 
@@ -706,5 +812,105 @@ mod tests {
     fn socket_pool_exhaustion_bound() {
         let pool = SocketPool::new();
         assert_eq!(pool.slots.len(), LINUX_SOCKET_MAX);
+    }
+
+    const OWNER: u64 = 4;
+
+    /// A pool whose slot 2 is an opened `kind` socket with a prefetch (request 5) and a
+    /// broker request (request 6) outstanding, like a reader blocked in `read(2)` or a
+    /// `poll(2)` waiter with the prefetch armed.
+    fn pool_with_open_socket(kind: SocketKindLinux) -> (SocketPool, LinuxSocketId) {
+        use clean_slate_network::session::SessionGeneration;
+        let mut pool = SocketPool::new();
+        let slot = &mut pool.slots[2];
+        slot.kind = kind;
+        slot.state = SocketState::Connected;
+        slot.session = SessionId::new(SessionGeneration::new(1), 3);
+        slot.session_generation = 1;
+        slot.pending_rx_req = Some(5);
+        slot.inflight_request_id = Some(6);
+        slot.owner_pid = OWNER;
+        slot.owner_generation = 1;
+        let id = LinuxSocketId {
+            index: 2,
+            generation: slot.generation,
+        };
+        (pool, id)
+    }
+
+    #[test]
+    fn a_lost_stream_fails_with_connection_reset_and_wakes_every_waiter() {
+        let (mut pool, id) = pool_with_open_socket(SocketKindLinux::Tcp);
+        let wake = mark_lost(&mut pool.slots[2], id).expect("open socket is marked");
+        assert_eq!(
+            wake,
+            LostSocketWake {
+                socket_key: linux_socket_wait_key(id),
+                requests: [Some(5), Some(6)],
+                owner_pid: OWNER,
+            }
+        );
+        assert_eq!(
+            usable_slot(&mut pool, id).err(),
+            Some(clean_slate_linux_abi::ECONNRESET)
+        );
+        assert_eq!(
+            socket_readiness(&pool.slots[2]),
+            Readiness {
+                readable: true,
+                writable: true,
+                hangup: true,
+                error: true,
+            }
+        );
+        let slot = &pool.slots[2];
+        assert_eq!(slot.pending_rx_req, None);
+        assert_eq!(slot.inflight_request_id, None);
+        // Still open: only `close` releases it, and it is never handed to a new instance.
+        assert_ne!(slot.state, SocketState::Closed);
+    }
+
+    #[test]
+    fn a_lost_datagram_socket_fails_with_an_io_error_and_is_marked_once() {
+        let (mut pool, id) = pool_with_open_socket(SocketKindLinux::Udp);
+        pool.slots[2].rx_error = Some(clean_slate_linux_abi::EAGAIN);
+        assert!(mark_lost(&mut pool.slots[2], id).is_some());
+        assert_eq!(usable_slot(&mut pool, id).err(), Some(EIO));
+        assert_eq!(
+            socket_readiness(&pool.slots[2]),
+            Readiness {
+                readable: true,
+                writable: true,
+                hangup: false,
+                error: true,
+            }
+        );
+        assert_eq!(pool.slots[2].rx_error, None);
+        assert_eq!(mark_lost(&mut pool.slots[2], id), None);
+    }
+
+    #[test]
+    fn a_socket_lost_before_its_open_completed_is_closed() {
+        let (mut pool, id) = pool_with_open_socket(SocketKindLinux::Udp);
+        pool.slots[2].session = SessionId::from_raw(0);
+        pool.slots[2].state = SocketState::Unbound;
+        pool.slots[2].pending_rx_req = None;
+        let wake = mark_lost(&mut pool.slots[2], id).expect("half-open socket is marked");
+        assert_eq!(wake.requests, [None, Some(6)]);
+        assert_eq!(pool.slots[2].state, SocketState::Closed);
+        assert_eq!(usable_slot(&mut pool, id).err(), Some(EBADF));
+        assert_eq!(pool.live_count(), 0);
+    }
+
+    #[test]
+    fn closed_sockets_are_not_marked_and_open_ones_stay_usable() {
+        let (mut pool, id) = pool_with_open_socket(SocketKindLinux::Tcp);
+        let closed = LinuxSocketId {
+            index: 0,
+            generation: pool.slots[0].generation,
+        };
+        assert_eq!(mark_lost(&mut pool.slots[0], closed), None);
+        assert!(usable_slot(&mut pool, id).is_ok());
+        assert!(!socket_readiness(&pool.slots[2]).error);
     }
 }
