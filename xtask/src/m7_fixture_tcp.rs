@@ -2,6 +2,7 @@
 
 use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use clean_slate_network::fixture::{
     APP_REQUEST_BYTES, APP_RESPONSE_BYTES, TCP_ECHO_PORT, TLS_PORT,
@@ -232,10 +233,73 @@ impl TlsService {
 
 const M9_SERVICE_ADDR: IpAddress = IpAddress::v4(10, 77, 0, 50);
 const M9_HTTP_PORT: u16 = 4001;
+/// Longest request head (request line, headers, blank line) the HTTP endpoint reads.
+const M9_HTTP_MAX_REQUEST_BYTES: usize = 2048;
+/// How long a connection may take to deliver its whole request head.
+const M9_HTTP_REQUEST_WAIT: Duration = Duration::from_secs(5);
+const M9_HTTP_RESPONSE: &str = concat!(
+    "HTTP/1.0 200 OK\r\n",
+    "Content-Length: 16\r\n",
+    "Connection: close\r\n\r\n",
+    "M9-FIXTURE-HTTP\n"
+);
 
+/// What the HTTP endpoint did with a connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpOutcome {
+    /// It delivered a well-formed `GET /` request head and was answered.
+    Answered,
+    /// It was closed without a response: malformed, oversized or missing request.
+    Refused,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpRequestHead {
+    /// No blank line yet, and the head is still within bounds.
+    Incomplete,
+    /// `GET / HTTP/1.x`, then `name: value` header lines, then the blank line.
+    Complete,
+    Malformed(&'static str),
+}
+
+/// Classifies the bytes a client has sent so far. Only a request for `/` is answered.
+pub fn parse_http_request_head(bytes: &[u8]) -> HttpRequestHead {
+    let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return if bytes.len() >= M9_HTTP_MAX_REQUEST_BYTES {
+            HttpRequestHead::Malformed("no blank line within the request bound")
+        } else {
+            HttpRequestHead::Incomplete
+        };
+    };
+    if end + 4 > M9_HTTP_MAX_REQUEST_BYTES {
+        return HttpRequestHead::Malformed("request head over the bound");
+    }
+    let Ok(head) = std::str::from_utf8(&bytes[..end]) else {
+        return HttpRequestHead::Malformed("request head is not UTF-8");
+    };
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next().unwrap_or_default();
+    if request_line != "GET / HTTP/1.0" && request_line != "GET / HTTP/1.1" {
+        return HttpRequestHead::Malformed("request line is not GET / HTTP/1.x");
+    }
+    for header in lines {
+        let well_formed = header.split_once(':').is_some_and(|(name, _)| {
+            !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_graphic())
+        });
+        if !well_formed {
+            return HttpRequestHead::Malformed("header line is not name: value");
+        }
+    }
+    HttpRequestHead::Complete
+}
+
+/// `GET /` on 10.77.0.50:4001. The response goes out only after the client's whole
+/// request head has arrived, so a guest whose request never leaves it gets no body.
 pub struct M9HttpService {
     pool: ListenerPool,
     active: Option<SocketHandle>,
+    connected_at: Instant,
+    request: Vec<u8>,
     sent: bool,
     closed: bool,
 }
@@ -249,61 +313,112 @@ impl M9HttpService {
         Self {
             pool: ListenerPool::new(sockets, 8192, endpoint),
             active: None,
+            connected_at: Instant::now(),
+            request: Vec::new(),
             sent: false,
             closed: false,
         }
     }
 
-    /// Returns whether this poll sent a response.
-    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) -> bool {
+    /// Returns what this poll decided about the active connection, if anything.
+    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) -> Option<HttpOutcome> {
         self.pool.relisten_closed(sockets);
         if self.active.is_none() {
             if let Some(handle) = self.pool.accept(sockets) {
                 self.active = Some(handle);
+                self.connected_at = Instant::now();
+                self.request.clear();
                 self.sent = false;
                 self.closed = false;
                 println!("[FIX ] m9 http connect");
             }
-            return false;
+            return None;
         }
         let active = self.active.expect("m9 http active");
         let socket = sockets.get_mut::<tcp::Socket>(active);
         if !socket.is_active() {
+            let outcome = (!self.sent && !self.closed)
+                .then(|| self.refuse(None, "connection ended before a request"));
             self.release_active();
-            return false;
+            return outcome;
         }
-        if socket.may_recv() {
-            let mut buf = [0u8; 256];
-            let _ = socket.recv_slice(&mut buf);
-        }
-        let mut responded = false;
-        if !self.sent && socket.may_send() {
-            let resp = concat!(
-                "HTTP/1.0 200 OK\r\n",
-                "Content-Length: 16\r\n",
-                "Connection: close\r\n\r\n",
-                "M9-FIXTURE-HTTP\n"
-            );
-            if socket.send_slice(resp.as_bytes()).is_ok() {
-                self.sent = true;
-                responded = true;
-                println!("[FIX ] m9 http response");
+        while socket.can_recv() {
+            let mut buf = [0u8; 512];
+            match socket.recv_slice(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => self.request.extend_from_slice(&buf[..n]),
             }
         }
+        let mut outcome = None;
+        if !self.sent && !self.closed {
+            outcome = match parse_http_request_head(&self.request) {
+                HttpRequestHead::Complete if socket.may_send() => {
+                    let request_line = self.request_line();
+                    if socket.send_slice(M9_HTTP_RESPONSE.as_bytes()).is_ok() {
+                        self.sent = true;
+                        println!(
+                            "[FIX ] m9 http request {request_line:?} ({} bytes)",
+                            self.request.len()
+                        );
+                        println!("[FIX ] m9 http response");
+                        Some(HttpOutcome::Answered)
+                    } else {
+                        None
+                    }
+                }
+                HttpRequestHead::Complete => {
+                    Some(self.refuse(Some(socket), "client closed its receive side"))
+                }
+                HttpRequestHead::Malformed(reason) => Some(self.refuse(Some(socket), reason)),
+                HttpRequestHead::Incomplete if socket.state() == tcp::State::CloseWait => {
+                    Some(self.refuse(Some(socket), "client closed before a complete request"))
+                }
+                HttpRequestHead::Incomplete
+                    if self.connected_at.elapsed() >= M9_HTTP_REQUEST_WAIT =>
+                {
+                    Some(self.refuse(Some(socket), "no complete request within the wait"))
+                }
+                HttpRequestHead::Incomplete => None,
+            };
+        }
+        let socket = sockets.get_mut::<tcp::Socket>(active);
         if self.sent && !self.closed && socket.send_queue() == 0 {
             socket.close();
             self.closed = true;
         }
-        if self.sent && socket.state() == tcp::State::CloseWait {
+        if self.closed && socket.state() == tcp::State::CloseWait {
             socket.close();
             self.release_active();
         }
-        responded
+        outcome
+    }
+
+    fn request_line(&self) -> String {
+        let end = self
+            .request
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .unwrap_or(self.request.len());
+        String::from_utf8_lossy(&self.request[..end]).into_owned()
+    }
+
+    /// Closes the connection without a response.
+    fn refuse(&mut self, socket: Option<&mut tcp::Socket<'_>>, reason: &str) -> HttpOutcome {
+        println!(
+            "[FIX ] m9 http refused: {reason} ({} bytes received)",
+            self.request.len()
+        );
+        if let Some(socket) = socket {
+            socket.close();
+        }
+        self.closed = true;
+        HttpOutcome::Refused
     }
 
     /// Forgets the served connection; its socket listens again once it reaches CLOSED.
     fn release_active(&mut self) {
         self.active = None;
+        self.request.clear();
         self.sent = false;
         self.closed = false;
     }
@@ -311,12 +426,23 @@ impl M9HttpService {
 
 const M9_HOLD_PORT: u16 = 4003;
 
+/// What the hold service saw on its connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoldEvent {
+    /// A newly established connection, taken before anything is read from it.
+    Held,
+    /// The held connection's complete HTTP request head arrived. It is still not answered.
+    RequestReceived,
+}
+
 /// #218 S7b: TCP on 10.77.0.50:4003 that accepts and never sends, so a client's read of a
-/// response blocks until something other than this peer ends it. Whatever the client sends
-/// is read and discarded.
+/// response blocks until something other than this peer ends it. What the client sends is
+/// read, and a complete request head is reported once per connection, but never answered.
 pub struct M9HoldService {
     pool: ListenerPool,
     active: Option<SocketHandle>,
+    request: Vec<u8>,
+    request_reported: bool,
 }
 
 impl M9HoldService {
@@ -328,33 +454,50 @@ impl M9HoldService {
         Self {
             pool: ListenerPool::new(sockets, 4096, endpoint),
             active: None,
+            request: Vec::new(),
+            request_reported: false,
         }
     }
 
-    /// Returns whether this poll took a newly established connection.
-    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) -> bool {
+    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) -> Option<HoldEvent> {
         self.pool.relisten_closed(sockets);
         let Some(active) = self.active else {
-            let Some(handle) = self.pool.accept(sockets) else {
-                return false;
-            };
+            let handle = self.pool.accept(sockets)?;
             if sockets.get::<tcp::Socket>(handle).state() != tcp::State::Established {
-                return false;
+                return None;
             }
             self.active = Some(handle);
+            self.request.clear();
+            self.request_reported = false;
             println!("[FIX ] m9 hold connection held");
-            return true;
+            return Some(HoldEvent::Held);
         };
         let socket = sockets.get_mut::<tcp::Socket>(active);
         if !socket.is_active() {
             self.active = None;
-            return false;
+            return None;
         }
-        if socket.may_recv() {
+        while socket.can_recv() {
             let mut buf = [0u8; 256];
-            let _ = socket.recv_slice(&mut buf);
+            match socket.recv_slice(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) if self.request.len() < M9_HTTP_MAX_REQUEST_BYTES => {
+                    self.request.extend_from_slice(&buf[..n]);
+                }
+                Ok(_) => {}
+            }
         }
-        false
+        if self.request_reported
+            || parse_http_request_head(&self.request) != HttpRequestHead::Complete
+        {
+            return None;
+        }
+        self.request_reported = true;
+        println!(
+            "[FIX ] m9 hold request received ({} bytes); not answering",
+            self.request.len()
+        );
+        Some(HoldEvent::RequestReceived)
     }
 }
 const M9_BANNER_PORT: u16 = 4002;
@@ -433,4 +576,79 @@ fn load_server_config(cert: FixtureTlsCert) -> ServerConfig {
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .expect("server config")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_http_request_head, HttpRequestHead, M9_HTTP_MAX_REQUEST_BYTES};
+
+    /// BusyBox `wget`'s request (`fixtures/busybox/frozen/traces/wget-fixture-http.strace`).
+    const WGET_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: m7.fixture.test:4001\r\nUser-Agent: Wget\r\nConnection: close\r\n\r\n";
+    /// The socket probe's request (`fixtures/linux-socket-probe/probe.S`).
+    const PROBE_REQUEST: &[u8] = b"GET / HTTP/1.0\r\nHost: m7.fixture.test\r\n\r\n";
+
+    #[test]
+    fn the_guest_clients_requests_are_complete() {
+        assert_eq!(
+            parse_http_request_head(WGET_REQUEST),
+            HttpRequestHead::Complete
+        );
+        assert_eq!(
+            parse_http_request_head(PROBE_REQUEST),
+            HttpRequestHead::Complete
+        );
+        assert_eq!(
+            parse_http_request_head(b"GET / HTTP/1.0\r\n\r\n"),
+            HttpRequestHead::Complete
+        );
+    }
+
+    #[test]
+    fn nothing_or_a_partial_head_is_not_a_request() {
+        assert_eq!(parse_http_request_head(b""), HttpRequestHead::Incomplete);
+        for cut in 1..WGET_REQUEST.len() {
+            assert_eq!(
+                parse_http_request_head(&WGET_REQUEST[..cut]),
+                HttpRequestHead::Incomplete,
+                "{cut}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrong_request_line_or_header_is_malformed() {
+        for head in [
+            &b"POST / HTTP/1.1\r\n\r\n"[..],
+            b"GET /other HTTP/1.1\r\n\r\n",
+            b"GET / HTTP/2\r\n\r\n",
+            b"get / http/1.1\r\n\r\n",
+            b"\r\n\r\n",
+            b"GET / HTTP/1.1\r\nno-colon\r\n\r\n",
+            b"GET / HTTP/1.1\r\n: empty-name\r\n\r\n",
+            b"GET / HTTP/1.1\r\nbad name: v\r\n\r\n",
+        ] {
+            assert!(
+                matches!(parse_http_request_head(head), HttpRequestHead::Malformed(_)),
+                "{:?}",
+                String::from_utf8_lossy(head)
+            );
+        }
+    }
+
+    #[test]
+    fn a_head_without_a_blank_line_is_bounded() {
+        let mut endless = b"GET / HTTP/1.1\r\n".to_vec();
+        endless.resize(M9_HTTP_MAX_REQUEST_BYTES, b'a');
+        assert!(matches!(
+            parse_http_request_head(&endless),
+            HttpRequestHead::Malformed(_)
+        ));
+        let mut long = b"GET / HTTP/1.1\r\nX: ".to_vec();
+        long.resize(M9_HTTP_MAX_REQUEST_BYTES, b'a');
+        long.extend_from_slice(b"\r\n\r\n");
+        assert!(matches!(
+            parse_http_request_head(&long),
+            HttpRequestHead::Malformed(_)
+        ));
+    }
 }

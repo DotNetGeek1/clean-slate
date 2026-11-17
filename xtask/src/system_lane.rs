@@ -18,12 +18,12 @@
 //!    launch audit, the shell's client capability is re-issued for it, and init settles again.
 //! 4. `nslookup` and `wget` from the same shell work again, through generation 2.
 //!
-//! What the `wget` steps prove is narrower than "HTTP works": the shell connects through the
-//! network service and receives the fixture's response, which the fixture reports sending. It
-//! sends that response on connect without reading a request, and until #255 is fixed a Linux
-//! TCP send never reaches the peer, so nothing here shows that the request did. The hold port
-//! reads and discards whatever arrives and never answers, so the blocked reader stays blocked
-//! with or without #255's fix.
+//! Each `wget` step proves a full exchange both ways: the fixture answers port 4001 only after
+//! receiving the complete request, and the step requires it to have answered exactly one
+//! request while the step ran and to have refused none (#255). The hold port reads the blocked
+//! reader's request and reports its arrival, but never answers; the held step requires both
+//! the held connection and that request. A connection the fixture refuses for lack of a
+//! complete request fails the lane at once.
 //!
 //! TLS is not exercised here: this BusyBox has no TLS, and TLS stays covered by the M7 lanes.
 
@@ -69,14 +69,15 @@ const SETTLED: &str = "[INIT] boot settled running=3 down=0; waiting, no deadlin
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Expect {
     /// These whole lines, in order and adjacent, then a prompt, with the fixture peer having
-    /// sent at least `fixture_a_answers` A records and `http_responses` responses meanwhile.
+    /// sent at least `fixture_a_answers` A records meanwhile, and answered exactly
+    /// `http_responses` received HTTP requests and refused none.
     Network {
         lines: &'static [&'static str],
         fixture_a_answers: u32,
         http_responses: u32,
     },
-    /// The fixture peer holds the reader's connection unanswered and the shell has printed no
-    /// prompt.
+    /// The fixture peer holds the reader's connection unanswered, has received its request,
+    /// and the shell has printed no prompt.
     Held,
     /// The fault, the woken reader, the restart and generation 2 (see [`check_fault`]).
     Fault,
@@ -98,7 +99,6 @@ const NSLOOKUP: Step = Step {
         http_responses: 0,
     },
 };
-/// Shows the response arrived, not that the request did: the fixture answers on connect (#255).
 const WGET: Step = Step {
     name: "wget",
     send: b"wget -q -O - http://m7.fixture.test:4001/\r",
@@ -323,9 +323,10 @@ fn check_step(
                 .fixture_a_answers
                 .saturating_sub(before.fixture_a_answers);
             let responses = now.http_responses.saturating_sub(before.http_responses);
-            if answers < fixture_a_answers || responses < http_responses {
+            let refused = now.http_refused.saturating_sub(before.http_refused);
+            if answers < fixture_a_answers || responses != http_responses || refused != 0 {
                 return Err(format!(
-                    "the fixture peer sent {answers} A answers and {responses} HTTP responses while the step ran, not {fixture_a_answers} and {http_responses}"
+                    "the fixture peer sent {answers} A answers, answered {responses} received HTTP requests and refused {refused} while the step ran, not {fixture_a_answers}, {http_responses} and 0"
                 ));
             }
             Ok(state)
@@ -333,6 +334,12 @@ fn check_step(
         Expect::Held => {
             if now.held_connections <= before.held_connections {
                 return Err("the fixture peer holds no connection from the reader".to_owned());
+            }
+            if now.held_requests <= before.held_requests {
+                return Err(
+                    "the fixture peer has not received the reader's request on the hold port"
+                        .to_owned(),
+                );
             }
             if prompt_after(segment, 0).is_some() {
                 return Err("the shell prompted: the reader is not blocked".to_owned());
@@ -396,16 +403,33 @@ pub(crate) fn run() -> Result<(), XtaskError> {
         ..system_vm_config(disk, Some(peer.port()))
     };
     let result = drive(&listener, config, &peer);
-    peer.shutdown();
+    let counts = peer.shutdown();
     let (transcript, states) = result?;
     check_whole(&String::from_utf8_lossy(&transcript))
+        .and_then(|()| check_fixture_totals(counts))
         .map_err(|reason| XtaskError::Validation(format!("system: {reason}")))?;
     let before = states[0];
     let after = states[states.len() - 1];
     println!(
-        "\n[STM ] PASS ({HOOKS_FEATURE} build) shell pid={} resolved through the fixture and received its HTTP response through network pid={} gen={}; Ctrl-\\ faulted it, the blocked wget read failed with ECONNRESET and the shell prompted again, init restarted the service as pid={} gen={}, its launch audit matched, the shell's client capability was re-issued for it, init settled, and from the same shell nslookup resolved through the fixture again and wget received the fixture's HTTP response again (wget's request reaching the peer is not checked: #255)",
+        "\n[STM ] PASS ({HOOKS_FEATURE} build) shell pid={} resolved through the fixture and fetched from it through network pid={} gen={}, the fixture answering the request it received; the next wget's request reached the fixture's hold port, which held it unanswered; Ctrl-\\ faulted the network service, the blocked wget read failed with ECONNRESET and the shell prompted again, init restarted the service as pid={} gen={}, its launch audit matched, the shell's client capability was re-issued for it, init settled, and from the same shell nslookup resolved through the fixture again and wget's request reached the fixture and was answered again",
         before.shell.pid, before.network.pid, before.network.generation, after.network.pid, after.network.generation
     );
+    Ok(())
+}
+
+/// The two `wget` steps' requests, one per network generation.
+const SYSTEM_HTTP_REQUESTS: u32 = 2;
+
+/// What the fixture peer served over the whole run: each `wget` step's request answered, no
+/// connection refused, and the one held connection's request received and never answered.
+fn check_fixture_totals(counts: FixtureCounts) -> Result<(), String> {
+    counts.require_http_requests("test-system", SYSTEM_HTTP_REQUESTS)?;
+    if counts.held_connections != 1 || counts.held_requests != 1 {
+        return Err(format!(
+            "the fixture's hold port held {} connection(s) and received {} request(s) on them, expected 1 and 1",
+            counts.held_connections, counts.held_requests
+        ));
+    }
     Ok(())
 }
 
@@ -486,6 +510,15 @@ fn drive(
                 *state,
             ),
         };
+        let refused = peer.counts().http_refused;
+        if refused != 0 {
+            return fail(
+                &transcript,
+                format!(
+                    "the fixture refused {refused} HTTP connection(s) without a complete request in {waiting:?}"
+                ),
+            );
+        }
         for forbidden in [&b"[FAIL]"[..], b"[INIT] gave up"] {
             if let Some(at) = find(&transcript, forbidden) {
                 let line = String::from_utf8_lossy(&transcript[at..]);
@@ -600,11 +633,14 @@ mod tests {
         check_boot_segment(&boot()).expect("boot")
     }
 
+    /// Counts with every held connection's request received and nothing refused.
     fn counts(dns: u32, http: u32, held: u32) -> FixtureCounts {
         FixtureCounts {
             fixture_a_answers: dns,
             http_responses: http,
+            http_refused: 0,
             held_connections: held,
+            held_requests: held,
         }
     }
 
@@ -719,6 +755,33 @@ mod tests {
         let wget = "wget -q -O - http://m7.fixture.test:4001/\r\nM9-FIXTURE-HTTP\n# ";
         assert!(check_step(&WGET, wget, counts(1, 0, 0), counts(2, 1, 0), state).is_ok());
         assert!(check_step(&WGET, wget, counts(1, 0, 0), counts(2, 0, 0), state).is_err());
+        assert!(check_step(&WGET, wget, counts(1, 0, 0), counts(2, 2, 0), state).is_err());
+        let refused = FixtureCounts {
+            http_refused: 1,
+            ..counts(2, 1, 0)
+        };
+        let error = check_step(&WGET, wget, counts(1, 0, 0), refused, state).unwrap_err();
+        assert!(error.contains("refused 1"), "{error}");
+        assert!(check_step(&NSLOOKUP, nslookup, counts(0, 0, 0), counts(1, 1, 0), state).is_err());
+    }
+
+    #[test]
+    fn the_run_needs_both_requests_answered_and_the_held_request_received() {
+        assert_eq!(check_fixture_totals(counts(4, 2, 1)), Ok(()));
+        assert!(check_fixture_totals(counts(4, 1, 1)).is_err());
+        assert!(check_fixture_totals(counts(4, 2, 0)).is_err());
+        let unheard = FixtureCounts {
+            held_requests: 0,
+            ..counts(4, 2, 1)
+        };
+        assert!(check_fixture_totals(unheard)
+            .unwrap_err()
+            .contains("received 0 request"));
+        let refused = FixtureCounts {
+            http_refused: 1,
+            ..counts(4, 2, 1)
+        };
+        assert!(check_fixture_totals(refused).is_err());
     }
 
     #[test]
@@ -733,6 +796,13 @@ mod tests {
                 .unwrap_err()
                 .contains("holds no connection")
         );
+        let unheard = FixtureCounts {
+            held_requests: 0,
+            ..counts(3, 1, 1)
+        };
+        assert!(check_step(held, typed, counts(2, 1, 0), unheard, state)
+            .unwrap_err()
+            .contains("has not received"));
         let prompted = format!("{typed}wget: bad address\n# ");
         assert!(
             check_step(held, &prompted, counts(2, 1, 0), counts(3, 1, 1), state)

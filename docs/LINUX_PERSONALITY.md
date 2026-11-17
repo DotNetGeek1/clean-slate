@@ -301,7 +301,11 @@ Stack builder: `linux-abi/src/stack.rs` (`build_initial_stack_with_tail`).
 Syscall front-ends live in `kernel/src/syscall/linux/socket.rs` (`socket`, `bind`,
 `connect`, `sendto` only; no `recvfrom`). The data plane is `#147` `read`/`write`/`writev`:
 `SYS_READ` in `table.rs::lookup_core_handler` dispatches `SocketRef` to
-`process::linux_socket::read_socket`. UDP/TCP I/O is brokered through M7
+`process::linux_socket::read_socket`. `write` and `writev` on a socket fd both gather
+at most one page of the request and send it as one `write_socket` call
+(`syscall::linux::write::write_socket_gathered`); socket fds have no console, file or
+pipe write projection. Before #255 `writev` lacked this branch and returned `EBADF`, so
+BusyBox `wget`'s request (musl stdio flushes with `writev`) never left the guest. UDP/TCP I/O is brokered through M7
 `NetworkRequest` frames with at most one in-flight `request_id` per socket row;
 blocking uses `block_linux_syscall` wait keys `0x53 << 56 | index << 32 | generation`.
 
@@ -315,7 +319,9 @@ sockets via `linux_fd` release hooks.
 QEMU: `cargo xtask test-m9-linux-socket` (`m9-linux-socket-self-test`) — host M7
 peer with `FixtureOptions.m9_profile` (DNS A → `10.77.0.50`, HTTP on
 `10.77.0.50:4001`), static probe `fixtures/linux-socket-probe/linux-socket-probe-x86_64`,
-8-cycle socket pool baseline, stale-session `ESTALE` proof; `[M9.L] PASS`.
+8-cycle socket pool baseline, stale-session `ESTALE` proof; `[M9.L] PASS`. The fixture
+answers the probe's `GET /` only after receiving the whole request, and the lane requires
+exactly one answered request and no refused connection (#255).
 
 ## M8.2 — ELF loader and process image (#92)
 
@@ -571,7 +577,7 @@ Host tests in `capability/network.rs` and `process/linux_socket/mod.rs` cover re
 - init's restart policy restarting the network service once (`[SUP ] restart service=20992 attempt=1`), the new instance registering as generation 2 with a launch audit that matches its manifest row, and the re-issue to the shell (`[CAP ] net client reissued holder=<shell pid> generation=2`);
 - `nslookup` and `wget` working again from the same shell through generation 2.
 
-The lane does not show that a Linux TCP send reaches the peer. It does not today ([#255](https://github.com/DotNetGeek1/clean-slate/issues/255)): the fixture's HTTP service answers on connect without reading the request, so `wget` succeeding shows the shell connected and received the response, nothing more. The blocked reader does not depend on the send either way. A child forked before the restart is covered by host tests only.
+Each `wget` is a full exchange: the fixture answers only a request it has received, and the lane requires one answered request per `wget` step and no connection refused for lack of one. The blocked reader's request reaches the fixture's hold port too, which reports it and never answers. A child forked before the restart is covered by host tests only.
 
 TLS is not exercised from the shell: this BusyBox has no TLS and cannot be rebuilt here, and TLS stays covered by the M7 lanes only.
 

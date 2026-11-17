@@ -393,6 +393,9 @@ const M9_STACK_GUARD_ACCEPTANCE_MARKERS: [&str; 7] = [
     "[KSTK] PASS",
 ];
 const M9_USERSPACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(300);
+/// `wget-fixture-http` runs once per cycle (`USERSPACE_CYCLES` in
+/// `kernel/src/selftest/m9_userspace.rs`), each a `GET /` the fixture must receive.
+const M9_USERSPACE_HTTP_REQUESTS: u32 = 9;
 const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[M9  ] creating",
     "[M9  ] busybox verified",
@@ -415,6 +418,8 @@ const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[M9.8] PASS",
 ];
 const M9_LINUX_SOCKET_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(120);
+/// The socket probe's one `GET /` (`fixtures/linux-socket-probe/probe.S`).
+const M9_LINUX_SOCKET_HTTP_REQUESTS: u32 = 1;
 const M9_LINUX_SOCKET_ACCEPTANCE_MARKERS: [&str; 9] = [
     "[M9.L] creating linux socket acceptance",
     "[NET ] service started",
@@ -1771,8 +1776,11 @@ fn run_m9_userspace_acceptance() -> Result<(), XtaskError> {
             serial_tcp_port: None,
         },
     );
-    peer.shutdown();
-    run_result
+    let report = peer.shutdown();
+    run_result?;
+    report
+        .require_http_requests("test-m9-userspace", M9_USERSPACE_HTTP_REQUESTS)
+        .map_err(XtaskError::Validation)
 }
 
 fn run_m2_acceptance() -> Result<(), XtaskError> {
@@ -1923,8 +1931,11 @@ fn run_m9_linux_socket_acceptance() -> Result<(), XtaskError> {
             serial_tcp_port: None,
         },
     );
-    peer.shutdown();
-    run_result
+    let report = peer.shutdown();
+    run_result?;
+    report
+        .require_http_requests("test-m9-linux-socket", M9_LINUX_SOCKET_HTTP_REQUESTS)
+        .map_err(XtaskError::Validation)
 }
 
 fn run_m9_fd_core_acceptance() -> Result<(), XtaskError> {
