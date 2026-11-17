@@ -1,6 +1,8 @@
 //! #218 S6a: the desktop boot option from QEMU's fw_cfg, read after `ExitBootServices`.
 //!
 //! Legacy I/O ports `0x510` (selector, 16-bit) and `0x511` (data, one byte per read). The
+//! selector is written only when CPUID leaf 1 ECX bit 31 says a hypervisor is present, because
+//! on real hardware that port is not guaranteed to be unused. The
 //! signature item is checked first. The file directory and the option payload are read in
 //! bounded chunks; a missing device, a missing file or a value other than `q0` or `q1` leaves
 //! the desktop off. Whether a display is actually attached is not decided here: VirtIO-GPU is
@@ -101,15 +103,29 @@ trait FwCfgIo {
 }
 
 /// Reads the option through the legacy ports. Host tests never touch the ports.
+///
+/// The hypervisor bit is decided before `io` is used, so a clear bit never selects a port.
 pub(crate) fn read_boot_option() -> BootOption {
     #[cfg(not(test))]
     {
-        read_from_io(&mut LegacyPorts)
+        let feature_ecx =
+            unsafe { core::arch::x86_64::__cpuid(crate::arch::x86_64::CPUID_FEATURES_LEAF).ecx };
+        read_when_hypervisor(
+            crate::arch::x86_64::hypervisor_present_from_cpuid(feature_ecx),
+            &mut LegacyPorts,
+        )
     }
     #[cfg(test)]
     {
         BootOption::off()
     }
+}
+
+fn read_when_hypervisor(hypervisor_present: bool, io: &mut impl FwCfgIo) -> BootOption {
+    if !hypervisor_present {
+        return BootOption::off();
+    }
+    read_from_io(io)
 }
 
 pub(crate) fn log_boot_option(option: &BootOption) {
@@ -272,6 +288,7 @@ mod tests {
         selected: Vec<u8>,
         offset: usize,
         bytes_read: usize,
+        selects: usize,
     }
 
     impl Fake {
@@ -281,12 +298,14 @@ mod tests {
                 selected: Vec::new(),
                 offset: 0,
                 bytes_read: 0,
+                selects: 0,
             }
         }
     }
 
     impl FwCfgIo for Fake {
         fn select(&mut self, key: u16) {
+            self.selects += 1;
             self.selected = self
                 .items
                 .iter()
@@ -333,6 +352,21 @@ mod tests {
             items.push((*select, payload.to_vec()));
         }
         Fake::new(items)
+    }
+
+    #[test]
+    fn a_clear_hypervisor_bit_does_not_touch_the_ports() {
+        let file = entry(2, 0x21, "opt/clean-slate/desktop");
+        let mut io = device(&[file], &[(0x21, b"q1")]);
+        let option = read_when_hypervisor(false, &mut io);
+        assert_eq!(option, BootOption::off());
+        assert_eq!(io.selects, 0);
+        assert_eq!(io.bytes_read, 0);
+
+        let option = read_when_hypervisor(true, &mut io);
+        assert_eq!(option.mode, DesktopMode::On(DesktopBackend::VirtioGpu));
+        assert!(io.selects > 0);
+        assert!(io.bytes_read > 0);
     }
 
     #[test]
