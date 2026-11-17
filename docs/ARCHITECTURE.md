@@ -458,7 +458,7 @@ Suggested serial diagnostics (`format_health_*_line`, `format_dependency_*_line`
 [SVC ] instance service=<id> pid=<pid> gen=<n>
 [SVC ] launch service=<id> pid=<pid> gen=<n>
 [SVC ] terminate service=<id> pid=<pid>
-[SVC ] reaped service=<id> pid=<pid>
+[SVC ] reaped service=<id> pid=<pid> residue=<owned objects left>
 ```
 
 M4.2 adds kernel-owned lifecycle control:

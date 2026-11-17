@@ -28,6 +28,7 @@ mod qmp;
 mod raster_font;
 mod serial_input_lane;
 mod system_boot;
+mod system_desktop;
 mod system_lane;
 mod system_shell;
 
@@ -3376,6 +3377,7 @@ fn ensure_embedded_service_programs() -> Result<(), XtaskError> {
     build_storage_userspace(true)?;
     build_network_userspace(true)?;
     build_init_userspace(true)?;
+    build_desktop_userspace()?;
     Ok(())
 }
 
@@ -5700,12 +5702,10 @@ mod tests {
         assert!(virtio.windows(2).any(|pair| {
             pair[0] == "-fw_cfg" && pair[1] == "name=opt/clean-slate/desktop,string=q1"
         }));
-        assert!(virtio.windows(2).any(|pair| {
-            pair == [
-                "-device",
-                "virtio-gpu-pci,disable-legacy=on,xres=1280,yres=800",
-            ]
-        }));
+        assert!(virtio
+            .windows(2)
+            .any(|pair| { pair == ["-device", m10_virtio_gpu::GPU_DEVICE] }));
+        assert!(virtio.windows(2).any(|pair| pair == ["-vga", "none"]));
     }
 
     #[test]
