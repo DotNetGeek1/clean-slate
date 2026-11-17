@@ -10,8 +10,10 @@ use crate::service::grants::{apply_instance_grants, GraphicsRole, InstanceGrantA
 use crate::service::lifecycle_wait::wake_lifecycle_waiters;
 use crate::service::spawn::{launch_builtin_service, LaunchContext};
 use crate::sync::global_cell::GlobalCell;
+#[cfg(clean_slate_desktop)]
+use clean_slate_service_fixtures::manifest::graphics_port_row;
 use clean_slate_service_fixtures::manifest::{
-    find_service, graphics_port_row, Grant, ServiceSpec, SYSTEM_DESKTOP_MANIFEST, SYSTEM_MANIFEST,
+    find_service, Grant, ServiceSpec, SYSTEM_DESKTOP_MANIFEST, SYSTEM_MANIFEST,
 };
 use clean_slate_service_fixtures::{
     NETWORK_DEVICE_ID, NETWORK_SERVICE_ID, STORAGE_BLOCK_DEVICE_ID,
@@ -740,10 +742,12 @@ impl ServiceLifecycleController {
     where
         F: FnMut(u64) -> Result<(), &'static str>,
     {
+        #[cfg(clean_slate_desktop)]
         let live_graphics_port = self.live_graphics_port();
         let mut authority = KernelInstanceGrants {
             block_capabilities: &mut self.block_capabilities,
             service_id,
+            #[cfg(clean_slate_desktop)]
             live_graphics_port,
         };
         if let Err(failure) =
@@ -759,6 +763,7 @@ impl ServiceLifecycleController {
 
     /// The graphics port of the live instance of the active manifest's `Grant::GraphicsPort`
     /// row, when that instance has registered one: what the graphics role grants name.
+    #[cfg(clean_slate_desktop)]
     fn live_graphics_port(&self) -> Option<LiveGraphicsPort> {
         let row = graphics_port_row(self.manifest)?;
         let pid = self.live_pid(row.id)?;
@@ -1085,6 +1090,7 @@ impl ServiceLifecycleController {
 }
 
 /// The graphics port `graphics(service, generation)` of a live compositor instance.
+#[cfg(clean_slate_desktop)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LiveGraphicsPort {
     service: ServiceId,
@@ -1094,6 +1100,7 @@ struct LiveGraphicsPort {
 struct KernelInstanceGrants<'a> {
     block_capabilities: &'a mut BlockDeviceCapabilityTable,
     service_id: ServiceId,
+    #[cfg(clean_slate_desktop)]
     live_graphics_port: Option<LiveGraphicsPort>,
 }
 
