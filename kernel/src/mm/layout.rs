@@ -25,6 +25,14 @@ pub(crate) const LINUX_CONVENTIONAL_USER_VA_LO: u64 = 0x10000;
 #[allow(dead_code)]
 pub(crate) const KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE: u64 = 0xffff_a000_0000_0000;
 
+/// PML4 slot 384, holding the kernel's uncached alias of the local APIC page (#253). Every root
+/// shares it: it is mapped in the kernel root at boot, before any process root copies the kernel
+/// half. It lies outside the direct map's slot, and the direct-map conversion `phys_to_virt`
+/// reaches it only from physical address `1 << 46` (64 TiB) upward; boot fails unless the CPU's
+/// MAXPHYADDR puts every frame below that.
+pub(crate) const KERNEL_DEVICE_ALIAS_SLOT_BASE: u64 = 0xffff_c000_0000_0000;
+pub(crate) const LOCAL_APIC_ALIAS_VA: u64 = KERNEL_DEVICE_ALIAS_SLOT_BASE;
+
 const TWO_MIB: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

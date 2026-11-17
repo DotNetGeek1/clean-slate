@@ -15,6 +15,7 @@ use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use crate::guest_reboot::GuestRebootDetector;
 use crate::serial_input_lane::{accept_serial, find, spawn_serial_reader, tail, SerialEvent};
 use crate::system_boot::{
     ensure_data_disk, field, number, start_fixture_peer, system_vm_config,
@@ -449,6 +450,7 @@ fn drive(
     let _reader = spawn_serial_reader(stream, tx);
 
     let mut transcript = Vec::new();
+    let mut reboot_detector = GuestRebootDetector::default();
     let mut boundaries: Vec<usize> = Vec::new();
     let mut state: Option<(u64, Shell)> = None;
     let mut step_started = Instant::now();
@@ -485,6 +487,9 @@ fn drive(
                 return fail(&transcript, "serial reader stopped".to_owned())
             }
         }
+        if let Some(reboot) = reboot_detector.observe(&transcript) {
+            return fail(&transcript, reboot);
+        }
         for forbidden in [&b"[FAIL]"[..], b"[INIT] gave up"] {
             if find(&transcript, forbidden).is_some() {
                 return fail(
@@ -507,6 +512,9 @@ fn drive(
             Ok(next) => {
                 state = Some(next);
                 if boundaries.len() == STEPS.len() {
+                    if let Err(missing) = reboot_detector.require_kernel_banner() {
+                        return fail(&transcript, missing);
+                    }
                     save_transcript(&transcript)?;
                     return Ok((transcript, boundaries));
                 }

@@ -4,6 +4,10 @@ use crate::arch::x86_64::port::{port_in, port_out};
 
 pub(crate) const COM1: u16 = 0x3F8;
 const LSR_TRANSMIT_EMPTY: u8 = 0x20;
+/// Holding register and shift register both empty: every byte written so far has left the UART.
+const LSR_TRANSMITTER_IDLE: u8 = 0x40;
+/// Upper bound on line-status reads while draining, so a wedged UART cannot hang an exit path.
+const DRAIN_POLL_LIMIT: u32 = 50_000_000;
 
 pub(crate) fn serial_init() {
     port_out(COM1 + 1, 0x00);
@@ -40,6 +44,19 @@ pub(crate) fn serial_write_bytes(bytes: &[u8]) {
     });
     #[cfg(test)]
     bytes.iter().for_each(|byte| serial_write_byte(*byte));
+}
+
+/// Waits until COM1 has shifted out every byte written so far. `serial_write_byte` only waits for
+/// room in the FIFO, so the last bytes of a report can still be inside the UART. QEMU keeps a byte
+/// in the shift register, with TEMT clear, until its chardev accepts it, and the debug-exit port
+/// ends QEMU without flushing that byte. Bounded by [`DRAIN_POLL_LIMIT`]; a port with no UART
+/// behind it reads all ones and returns at once.
+pub(crate) fn serial_drain() {
+    for _ in 0..DRAIN_POLL_LIMIT {
+        if line_status() & LSR_TRANSMITTER_IDLE != 0 {
+            return;
+        }
+    }
 }
 
 struct SerialPort;
