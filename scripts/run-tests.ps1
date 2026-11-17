@@ -40,6 +40,7 @@
       serial-input / test-serial-input
       system-boot / test-system-boot
       system-shell / test-system-shell
+      system / test-system
 
 .PARAMETER Exhaustive
     Run every known test (milestone gates plus each individual constituent
@@ -182,6 +183,7 @@ $AllTests = [ordered]@{
     "test-serial-input"         = @{ Aliases = @("serial-input"); Description = "#218 S4 COM1 receive and line discipline over a private loopback socket (echo and committed reads checked byte for byte)"; Role = "Constituent" }
     "test-system-boot"          = @{ Aliases = @("system-boot"); Description = "#218 S3b default image: init starts storage then network on a fresh data disk, twice (format, then mount); the kernel checks every launched grant set and ready report"; Role = "Constituent" }
     "test-system-shell"         = @{ Aliases = @("system-shell"); Description = "#218 S5 default image to its serial-console shell over a private loopback socket: typed commands checked by output only execution produces, then exit and Ctrl-D each relaunch the shell one generation on"; Role = "Constituent" }
+    "test-system"               = @{ Aliases = @("system"); Description = "#218 S7b system-test-hooks build (the default image plus a Ctrl-\ network fault hook): a shell wget blocked in a TCP read wakes with ECONNRESET when the network service faults, init restarts network once, the shell's client capability is re-issued for generation 2 and nslookup and wget work again from the same shell (wget's request reaching the peer is not checked: #255)"; Role = "Constituent" }
 }
 
 function Get-DefaultSuite {
