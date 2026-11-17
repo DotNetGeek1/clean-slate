@@ -494,6 +494,41 @@ pub(crate) fn cancel_waiters_for_process(pid: u64, generation: InstanceGeneratio
     })
 }
 
+/// `system-test-hooks` only (#218 S7b): points the saved syscall frame of one of `pid`'s
+/// threads at `user_rip`, so that thread leaves its syscall by jumping there instead of to
+/// the instruction after `syscall`. Only a user thread that is parked in a syscall (blocked,
+/// or woken but not yet resumed) and completes with [`BlockedResume::NativeOutcome`] is
+/// eligible: that resume leaves `user_rip` untouched, so the redirect lands exactly. Returns
+/// `false` when no thread of `pid` is in that state right now.
+#[cfg(feature = "system-test-hooks")]
+pub(crate) fn redirect_parked_native_syscall(pid: u64, user_rip: u64) -> bool {
+    without_interrupts(|| {
+        let scheduler = unsafe { scheduler_mut() };
+        let current = scheduler.current_thread;
+        for (index, thread) in scheduler.threads.iter().enumerate() {
+            let is_parked = matches!(thread.state, ThreadState::Blocked | ThreadState::Ready)
+                && thread.blocked_syscall_frame != 0
+                && Some(index) != current;
+            if thread.owner_process_id != pid || thread.kind != super::ThreadKind::User {
+                continue;
+            }
+            // Interrupts are off and the slot is not current, so nothing else reads or
+            // writes its resume mode or saved frame until the scheduler picks it again.
+            let is_native = matches!(
+                unsafe { (*BLOCKED_RESUME.get())[index] },
+                BlockedResume::NativeOutcome
+            );
+            if !is_parked || !is_native {
+                continue;
+            }
+            let frame = thread.blocked_syscall_frame as *mut SyscallContext;
+            unsafe { (*frame).user_rip = user_rip };
+            return true;
+        }
+        false
+    })
+}
+
 pub(super) fn waiter_deadline_due(deadline: Option<Deadline>, now_ns: u64) -> bool {
     match deadline {
         Some(Deadline::MonotonicNs(ns)) => now_ns >= ns,

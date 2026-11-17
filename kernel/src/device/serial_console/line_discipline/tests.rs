@@ -96,6 +96,18 @@ fn other_control_bytes_and_non_ascii_are_dropped_without_echo() {
     assert_eq!(discipline.stats().control_dropped, 7);
 }
 
+/// Ctrl-\ is the `system-test-hooks` fault byte. To the line discipline, in every build, it is
+/// an ordinary dropped control byte: no echo, no edit, no signal, no wake.
+#[test]
+fn ctrl_backslash_is_an_ordinary_dropped_control_byte() {
+    let mut discipline = fresh();
+    assert_eq!(feed(&mut discipline, b"\x1c"), b"");
+    assert!(!discipline.take_wake());
+    assert_eq!(feed(&mut discipline, b"o\x1ck\r"), b"ok\r\n");
+    assert_eq!(read(&mut discipline, 64), b"ok\n");
+    assert_eq!(discipline.stats().control_dropped, 2);
+}
+
 #[test]
 fn ctrl_d_on_an_empty_line_gives_one_end_of_file() {
     let mut discipline = fresh();
