@@ -16,8 +16,15 @@
 //!   QEMU treats a store into the APIC register page at offset 0 (or any write outside it in its
 //!   1 MiB APIC space) as an MSI whose data is the stored value. A value that encodes INIT
 //!   resets the CPU without any trace in the guest. The kernel reaches the APIC only through an
-//!   uncached alias at its direct-map address (`arch::x86_64::apic`), which every root shares,
-//!   so nothing legitimate uses the identity window.
+//!   uncached alias in a PML4 slot of its own (`layout::LOCAL_APIC_ALIAS_VA`), which every root
+//!   shares, so nothing legitimate uses the identity window.
+//! - **The same 2 MiB window in the direct map** (`phys_to_virt` of the identity window). After
+//!   boot the kernel turns frame numbers into pointers through the direct map, so a corrupted
+//!   frame number equal to the APIC page would otherwise become a store to the live APIC by the
+//!   kernel's most used route. The cached physmap already skips the APIC page; this hole makes
+//!   sure no page of the window is present there and names a hit. The alias slot is reachable
+//!   from the direct-map conversion only for physical addresses from `1 << 46` up, and
+//!   [`arm_identity_holes`] fails the boot unless the CPU's MAXPHYADDR keeps every frame below.
 //!
 //! The kernel stack guards (`mm::stack_guard`) are holes of the same kind and use the splitting
 //! code below. Every hole is cut once, in the kernel root, before
@@ -30,7 +37,7 @@
 //! plus an offset of 4 KiB or more is not caught, and device MMIO reached through the identity
 //! map (`mm::mmio::with_kernel_identity_mmio`) is not protected.
 
-use crate::mm::layout::VaRange;
+use crate::mm::layout::{VaRange, LOCAL_APIC_ALIAS_VA, PHYSMAP_BASE};
 use crate::mm::paging::{leaf_page_flags_for_address_in_root, page_table_mut, zero_page};
 use crate::mm::{align_down, PAGE_SIZE};
 use crate::sync::global_cell::GlobalCell;
@@ -50,6 +57,7 @@ pub(crate) const NULL_PAGE: VaRange = VaRange::new(0, PAGE_SIZE);
 pub(crate) enum IdentityHole {
     NullPage,
     LocalApicWindow,
+    LocalApicDirectMap,
 }
 
 impl IdentityHole {
@@ -57,6 +65,7 @@ impl IdentityHole {
         match self {
             Self::NullPage => "null-page",
             Self::LocalApicWindow => "local-apic-window",
+            Self::LocalApicDirectMap => "local-apic-direct-map",
         }
     }
 }
@@ -64,7 +73,8 @@ impl IdentityHole {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ArmedHoles {
     local_apic_window: VaRange,
-    /// The uncached alias the kernel uses instead of the window.
+    local_apic_direct_map: VaRange,
+    /// The uncached alias the kernel uses instead of either window.
     local_apic_alias: u64,
 }
 
@@ -81,11 +91,36 @@ fn armed() -> Option<ArmedHoles> {
     unsafe { *ARMED.get() }
 }
 
-fn armed_holes() -> Option<[(IdentityHole, VaRange); 2]> {
+/// The direct-map image of the identity window around `local_apic_phys`.
+pub(crate) fn local_apic_direct_map_window(local_apic_phys: u64) -> VaRange {
+    let window = local_apic_identity_window(local_apic_phys);
+    VaRange::new(
+        PHYSMAP_BASE.wrapping_add(window.start),
+        PHYSMAP_BASE.wrapping_add(window.end),
+    )
+}
+
+/// Fails unless the direct-map conversion of every physical address a CPU with
+/// `physical_address_bits` can have stays below the alias slot.
+fn check_alias_unreachable_from_direct_map(physical_address_bits: u32) -> Result<(), &'static str> {
+    let alias_as_physical = LOCAL_APIC_ALIAS_VA - PHYSMAP_BASE;
+    if physical_address_bits >= u64::BITS || 1u64 << physical_address_bits > alias_as_physical {
+        return Err(
+            "identity holes: MAXPHYADDR lets the direct map reach the local APIC alias slot",
+        );
+    }
+    Ok(())
+}
+
+fn armed_holes() -> Option<[(IdentityHole, VaRange); 3]> {
     let armed = armed()?;
     Some([
         (IdentityHole::NullPage, NULL_PAGE),
         (IdentityHole::LocalApicWindow, armed.local_apic_window),
+        (
+            IdentityHole::LocalApicDirectMap,
+            armed.local_apic_direct_map,
+        ),
     ])
 }
 
@@ -107,28 +142,40 @@ pub(crate) fn arm_identity_holes(
     local_apic_phys: u64,
 ) -> Result<(), &'static str> {
     use crate::arch::x86_64::apic::install_local_apic_alias;
+    use crate::arch::x86_64::cpu::physical_address_bits;
     use crate::diagnostics::serial::serial_write_fmt;
-    use crate::mm::kernel_bootstrap::map_device_aperture_uncached;
+    use crate::mm::kernel_bootstrap::map_device_page_uncached_at;
 
-    let alias = map_device_aperture_uncached(kernel_root, allocator, local_apic_phys, PAGE_SIZE)
+    let physical_address_bits = physical_address_bits();
+    check_alias_unreachable_from_direct_map(physical_address_bits)?;
+    map_device_page_uncached_at(kernel_root, allocator, local_apic_phys, LOCAL_APIC_ALIAS_VA)
         .map_err(|_| "identity holes: the local APIC alias could not be mapped")?;
     let window = local_apic_identity_window(local_apic_phys);
+    let direct_map = local_apic_direct_map_window(local_apic_phys);
     let mut split_tables = 0usize;
-    for range in [NULL_PAGE, window] {
+    for range in [NULL_PAGE, window, direct_map] {
         split_tables += unmap_range(kernel_root, range, &mut || allocator.allocate_page())?;
     }
-    let local_apic_alias = alias.as_mut_ptr() as u64;
     unsafe {
         *ARMED.get() = Some(ArmedHoles {
             local_apic_window: window,
-            local_apic_alias,
+            local_apic_direct_map: direct_map,
+            local_apic_alias: LOCAL_APIC_ALIAS_VA,
         })
     };
     verify_identity_holes_in_root(kernel_root)?;
-    install_local_apic_alias(local_apic_phys, local_apic_alias)?;
+    install_local_apic_alias(local_apic_phys, LOCAL_APIC_ALIAS_VA)?;
     serial_write_fmt(format_args!(
-        "[MM  ] identity holes armed null-page=[{:#x},{:#x}) local-apic-window=[{:#x},{:#x}) local-apic-alias={:#018x} split_tables={}\n",
-        NULL_PAGE.start, NULL_PAGE.end, window.start, window.end, local_apic_alias, split_tables
+        "[MM  ] identity holes armed null-page=[{:#x},{:#x}) local-apic-window=[{:#x},{:#x}) local-apic-direct-map=[{:#x},{:#x}) local-apic-alias={:#018x} maxphyaddr={} split_tables={}\n",
+        NULL_PAGE.start,
+        NULL_PAGE.end,
+        window.start,
+        window.end,
+        direct_map.start,
+        direct_map.end,
+        LOCAL_APIC_ALIAS_VA,
+        physical_address_bits,
+        split_tables
     ));
     Ok(())
 }
@@ -331,7 +378,7 @@ mod tests {
     }
 
     const TEST_LOCAL_APIC_PHYS: u64 = 0xFEE0_0000;
-    const TEST_ALIAS: u64 = crate::mm::layout::PHYSMAP_BASE + TEST_LOCAL_APIC_PHYS;
+    const TEST_ALIAS: u64 = LOCAL_APIC_ALIAS_VA;
     const UNCACHED: PageTableFlags = PageTableFlags::PRESENT
         .union(PageTableFlags::WRITABLE)
         .union(PageTableFlags::NO_EXECUTE)
@@ -342,6 +389,7 @@ mod tests {
         unsafe {
             *ARMED.get() = Some(ArmedHoles {
                 local_apic_window: local_apic_identity_window(TEST_LOCAL_APIC_PHYS),
+                local_apic_direct_map: local_apic_direct_map_window(TEST_LOCAL_APIC_PHYS),
                 local_apic_alias: TEST_ALIAS,
             })
         };
@@ -526,6 +574,66 @@ mod tests {
         );
         assert_eq!(identity_hole_for_address(0xFF00_0000), None);
         assert_eq!(identity_hole_for_address(0xFEDF_FFFF), None);
+        assert_eq!(
+            identity_hole_for_address(PHYSMAP_BASE + 0xFEE0_0000),
+            Some(IdentityHole::LocalApicDirectMap)
+        );
+        assert_eq!(
+            identity_hole_for_address(PHYSMAP_BASE + 0xFEFF_FFFF),
+            Some(IdentityHole::LocalApicDirectMap)
+        );
+        assert_eq!(identity_hole_for_address(PHYSMAP_BASE + 0xFF00_0000), None);
+        assert_eq!(identity_hole_for_address(PHYSMAP_BASE), None);
+        assert_eq!(identity_hole_for_address(TEST_ALIAS), None);
+    }
+
+    #[test]
+    fn direct_map_window_is_the_identity_window_in_the_direct_map() {
+        assert_eq!(
+            local_apic_direct_map_window(0xFEE0_0000),
+            VaRange::new(PHYSMAP_BASE + 0xFEE0_0000, PHYSMAP_BASE + 0xFF00_0000)
+        );
+    }
+
+    #[test]
+    fn alias_slot_is_outside_the_direct_map_and_beyond_every_frame_of_a_46_bit_cpu() {
+        assert_eq!(
+            crate::mm::layout::virt_to_phys_direct_map(LOCAL_APIC_ALIAS_VA),
+            None
+        );
+        assert_eq!(
+            u16::from(VirtAddr::new(LOCAL_APIC_ALIAS_VA).p4_index()),
+            384
+        );
+        assert_ne!(
+            VirtAddr::new(LOCAL_APIC_ALIAS_VA).p4_index(),
+            VirtAddr::new(crate::mm::layout::KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE).p4_index()
+        );
+        assert_eq!(check_alias_unreachable_from_direct_map(36), Ok(()));
+        assert_eq!(check_alias_unreachable_from_direct_map(40), Ok(()));
+        assert_eq!(check_alias_unreachable_from_direct_map(46), Ok(()));
+        for bits in [47, 52, 64] {
+            assert_eq!(
+                check_alias_unreachable_from_direct_map(bits),
+                Err("identity holes: MAXPHYADDR lets the direct map reach the local APIC alias slot"),
+                "{bits}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_rejects_a_root_that_maps_the_apic_page_in_the_direct_map() {
+        arm_for_test();
+        let direct_map = local_apic_direct_map_window(TEST_LOCAL_APIC_PHYS);
+        let (root, _) =
+            root_with_two_mib_leaf(VirtAddr::new(direct_map.start), TEST_LOCAL_APIC_PHYS);
+        map_alias(root, UNCACHED);
+        assert_eq!(
+            verify_identity_holes_in_root(root),
+            Err("identity hole page is mapped")
+        );
+        unmap_range(root, direct_map, &mut || Some(leaked_table())).expect("unmap direct map");
+        assert_eq!(verify_identity_holes_in_root(root), Ok(()));
     }
 
     #[test]

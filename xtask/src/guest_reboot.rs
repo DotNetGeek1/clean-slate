@@ -9,6 +9,11 @@
 //!
 //! No lane boots twice in one QEMU session; lanes that need two boots start QEMU twice, and each
 //! session is checked on its own.
+//!
+//! The detector keys on [`KERNEL_BOOT_BANNER`]; if the kernel stopped printing it, every reboot
+//! would go unseen. So every lane that boots the kernel also refuses to pass a session whose
+//! transcript never showed the banner ([`GuestRebootDetector::require_kernel_banner`]): rewording
+//! or dropping the banner fails every such lane at once instead of quietly disabling the check.
 
 /// Printed by OVMF's boot manager for each boot option it tries.
 pub(crate) const FIRMWARE_BOOT_BANNER: &[u8] = b"BdsDxe: loading Boot";
@@ -63,6 +68,21 @@ impl GuestRebootDetector {
             String::from_utf8_lossy(banner)
         ))
     }
+
+    /// Fails unless an earlier [`observe`](Self::observe) saw the kernel boot banner. Lanes call it
+    /// before reporting a pass, so a kernel that no longer prints the banner cannot blind the
+    /// detector without failing every lane.
+    pub(crate) fn require_kernel_banner(&self) -> Result<(), String> {
+        if self.kernel_banner_end.is_some() {
+            return Ok(());
+        }
+        Err(format!(
+            "the session passed without the kernel boot banner ({:?}): either the guest is not this \
+             kernel or the banner in kernel/src/boot/mod.rs changed, and the guest-reboot check \
+             cannot see a second boot without it",
+            String::from_utf8_lossy(KERNEL_BOOT_BANNER)
+        ))
+    }
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -105,6 +125,32 @@ mod tests {
         assert_eq!(guest_reboot(FIRMWARE.as_bytes()), None);
         let one_boot = format!("{FIRMWARE}{KERNEL}[SYS ] ready\n");
         assert_eq!(guest_reboot(one_boot.as_bytes()), None);
+    }
+
+    #[test]
+    fn a_pass_requires_the_kernel_banner_to_have_been_seen() {
+        let mut detector = GuestRebootDetector::default();
+        assert!(
+            detector.require_kernel_banner().is_err(),
+            "nothing observed"
+        );
+        assert_eq!(detector.observe(FIRMWARE.as_bytes()), None);
+        let reworded = format!("{FIRMWARE}[BOOT] UEFI memory map obtained\n[SYS ] ready\n");
+        assert_eq!(detector.observe(reworded.as_bytes()), None);
+        let message = detector
+            .require_kernel_banner()
+            .expect_err("reworded banner");
+        assert!(
+            message.contains("without the kernel boot banner"),
+            "{message}"
+        );
+
+        let mut detector = GuestRebootDetector::default();
+        let one_boot = format!("{FIRMWARE}{KERNEL}[SYS ] ready\n");
+        for end in 0..=one_boot.len() {
+            assert_eq!(detector.observe(&one_boot.as_bytes()[..end]), None);
+        }
+        assert_eq!(detector.require_kernel_banner(), Ok(()));
     }
 
     #[test]

@@ -232,13 +232,17 @@ const M9_LINUX_FS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(90);
 /// #253: a store to the local APIC identity address and one to the null page each take the
 /// production page-fault report naming the address. The two `[FAIL]` lines are the only ones the
 /// step allows.
-const M2_IDENTITY_GUARD_ACCEPTANCE_MARKERS: [&str; 10] = [
-    "[MM  ] identity holes armed null-page=[0x0,0x1000) local-apic-window=[0xfee00000,0xff000000) ",
+const M2_IDENTITY_GUARD_ACCEPTANCE_MARKERS: [&str; 14] = [
+    "[MM  ] identity holes armed null-page=[0x0,0x1000) local-apic-window=[0xfee00000,0xff000000) local-apic-direct-map=[0xffff8000fee00000,0xffff8000ff000000) local-apic-alias=0xffffc00000000000 ",
     "[IDG ] local APIC reached through its alias id=",
     "[IDG ] probe store hole=local-apic-window addr=0x00000000fee00000",
     "[PF  ] cr2=0x00000000fee00000 ",
     "[FAIL] kernel page fault in identity hole=local-apic-window cr2=0x00000000fee00000 ",
     "[IDG ] local-apic-window store faulted",
+    "[IDG ] probe store hole=local-apic-direct-map addr=0xffff8000fee00000",
+    "[PF  ] cr2=0xffff8000fee00000 ",
+    "[FAIL] kernel page fault in identity hole=local-apic-direct-map cr2=0xffff8000fee00000 ",
+    "[IDG ] local-apic-direct-map store faulted",
     "[IDG ] probe store hole=null-page addr=0x0000000000000000",
     "[PF  ] cr2=0x0000000000000000 ",
     "[FAIL] kernel page fault in identity hole=null-page cr2=0x0000000000000000 ",
@@ -4033,6 +4037,12 @@ trait AcceptanceDriver {
     fn pending(&self) -> Option<String> {
         None
     }
+    /// Whether the guest is this kernel, so a pass requires its boot banner
+    /// ([`guest_reboot::GuestRebootDetector::require_kernel_banner`]). Only a non-kernel
+    /// fixture guest returns `false`.
+    fn boots_kernel(&self) -> bool {
+        true
+    }
     /// Releases the driver's connections; runs on every exit path.
     fn shutdown(&mut self) {}
 }
@@ -4385,6 +4395,15 @@ fn run_driven_acceptance_command(
     join_output_reader(stderr_handle);
     drain_output_events(&rx, &mut output);
 
+    if let Some(reboot) = reboot_detector.observe(output.as_bytes()) {
+        let transcript = save_guest_reboot_transcript(&output)?;
+        return Err(XtaskError::CommandFailed {
+            command: command_display,
+            status: format!("{reboot}; transcript: {}", transcript.display()),
+        });
+    }
+    let boots_kernel = driver.0.boots_kernel();
+
     if authoritative_pass {
         if let Some(fail_line) = unexpected_guest_failure(&output, marker_set, true) {
             return Err(XtaskError::CommandFailed {
@@ -4395,6 +4414,7 @@ fn run_driven_acceptance_command(
         if markers_require_verbatim_linux_hello(marker_set) {
             assert_no_ipc_framed_linux_hello(&output)?;
         }
+        require_kernel_banner(&reboot_detector, boots_kernel)?;
         return Ok(output);
     }
 
@@ -4417,7 +4437,21 @@ fn run_driven_acceptance_command(
     }
 
     validate_output_markers(&output, marker_set)?;
+    require_kernel_banner(&reboot_detector, boots_kernel)?;
     Ok(output)
+}
+
+/// A passing session of a kernel guest must have shown the kernel boot banner.
+fn require_kernel_banner(
+    detector: &guest_reboot::GuestRebootDetector,
+    boots_kernel: bool,
+) -> Result<(), XtaskError> {
+    if !boots_kernel {
+        return Ok(());
+    }
+    detector
+        .require_kernel_banner()
+        .map_err(XtaskError::Validation)
 }
 
 /// Keeps the whole transcript of a session that rebooted, one file per run.
@@ -5602,16 +5636,20 @@ mod tests {
     }
 
     #[test]
-    fn identity_guard_step_allows_only_its_two_named_page_fault_reports() {
+    fn identity_guard_step_allows_only_its_three_named_page_fault_reports() {
         let set = MarkerSet::Ordered(&M2_IDENTITY_GUARD_ACCEPTANCE_MARKERS);
         let passing = "\
-[MM  ] identity holes armed null-page=[0x0,0x1000) local-apic-window=[0xfee00000,0xff000000) local-apic-alias=0xffff8000fee00000 split_tables=2\n\
+[MM  ] identity holes armed null-page=[0x0,0x1000) local-apic-window=[0xfee00000,0xff000000) local-apic-direct-map=[0xffff8000fee00000,0xffff8000ff000000) local-apic-alias=0xffffc00000000000 maxphyaddr=40 split_tables=2\n\
 [IDG ] local APIC reached through its alias id=0\n\
 [IDG ] probe store hole=local-apic-window addr=0x00000000fee00000\n\
 [PF  ] page fault\n\
 [PF  ] cr2=0x00000000fee00000 cr3=0x0000000000001000 err=0x2 present=0 write=1 user=0 instruction_fetch=0\n\
 [FAIL] kernel page fault in identity hole=local-apic-window cr2=0x00000000fee00000 rip=0x000000001d1a2b3c write=1\n\
 [IDG ] local-apic-window store faulted\n\
+[IDG ] probe store hole=local-apic-direct-map addr=0xffff8000fee00000\n\
+[PF  ] cr2=0xffff8000fee00000 cr3=0x0000000000001000 err=0x2 present=0 write=1 user=0 instruction_fetch=0\n\
+[FAIL] kernel page fault in identity hole=local-apic-direct-map cr2=0xffff8000fee00000 rip=0x000000001d1a2b3c write=1\n\
+[IDG ] local-apic-direct-map store faulted\n\
 [IDG ] probe store hole=null-page addr=0x0000000000000000\n\
 [PF  ] cr2=0x0000000000000000 cr3=0x0000000000001000 err=0x2 present=0 write=1 user=0 instruction_fetch=0\n\
 [FAIL] kernel page fault in identity hole=null-page cr2=0x0000000000000000 rip=0x000000001d1a2b3c write=1\n\
@@ -5628,6 +5666,30 @@ mod tests {
         );
         let elsewhere = "[FAIL] kernel page fault in identity hole=local-apic-window cr2=0x00000000fee00030 rip=0x1 write=1\n";
         assert!(unexpected_guest_failure(elsewhere, set, true).is_some());
+        let direct_map_absent = "[FAIL] identity guard absent: store to hole=local-apic-direct-map addr=0xffff8000fee00000 did not fault\n";
+        assert!(unexpected_guest_failure(direct_map_absent, set, true).is_some());
+
+        let allowed: Vec<&str> = M2_IDENTITY_GUARD_ACCEPTANCE_MARKERS
+            .iter()
+            .copied()
+            .filter(|marker| marker.contains("[FAIL]"))
+            .collect();
+        assert_eq!(
+            allowed,
+            [
+                "[FAIL] kernel page fault in identity hole=local-apic-window cr2=0x00000000fee00000 ",
+                "[FAIL] kernel page fault in identity hole=local-apic-direct-map cr2=0xffff8000fee00000 ",
+                "[FAIL] kernel page fault in identity hole=null-page cr2=0x0000000000000000 ",
+            ]
+        );
+
+        let without_direct_map_probe: String = passing
+            .lines()
+            .filter(|line| !line.contains("local-apic-direct-map store faulted"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let mut tracker = MarkerTracker::from_set(set);
+        assert!(!tracker.consume(&without_direct_map_probe));
     }
 
     #[test]

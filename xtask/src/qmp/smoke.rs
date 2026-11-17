@@ -86,6 +86,7 @@ pub(crate) fn run(artifact_root: &Path) -> Result<(), XtaskError> {
 
 fn run_passing_script(artifact_root: &Path) -> Result<QemuVersion, XtaskError> {
     let mut driver = QmpScriptDriver::new(LANE, smoke_steps(), artifact_root)?;
+    driver.boots_fixture();
     let mut qemu = fixture_command(driver.run_dir(), &driver.qemu_args())?;
     let output = run_driven_acceptance_command(
         &mut qemu,
@@ -136,6 +137,7 @@ fn run_passing_script(artifact_root: &Path) -> Result<QemuVersion, XtaskError> {
 fn run_failing_script(artifact_root: &Path) -> Result<(), XtaskError> {
     let mut driver = QmpScriptDriver::new(FAILURE_LANE, failing_steps(), artifact_root)?;
     driver.keep_peer_probe();
+    driver.boots_fixture();
     let mut qemu = fixture_command(driver.run_dir(), &driver.qemu_args())?;
     let result = run_driven_acceptance_command(
         &mut qemu,

@@ -49,6 +49,19 @@ pub(crate) fn enable_and_verify_nxe() -> Result<NxeReport, &'static str> {
     Ok(NxeReport { firmware_had_nxe })
 }
 
+/// This CPU's MAXPHYADDR (CPUID `0x8000_0008` EAX[7:0]).
+#[cfg(not(test))]
+pub(crate) fn physical_address_bits() -> u32 {
+    use crate::arch::x86_64::{physical_address_bits_from_cpuid, CPUID_ADDRESS_SIZES_LEAF};
+    let max_extended_leaf = unsafe { __cpuid(CPUID_EXTENDED_MAX_LEAF) }.eax;
+    let address_sizes_eax = if max_extended_leaf >= CPUID_ADDRESS_SIZES_LEAF {
+        unsafe { __cpuid(CPUID_ADDRESS_SIZES_LEAF) }.eax
+    } else {
+        0
+    };
+    physical_address_bits_from_cpuid(max_extended_leaf, address_sizes_eax)
+}
+
 pub(crate) fn without_interrupts<T>(f: impl FnOnce() -> T) -> T {
     // Host unit tests run in ring 3 where `cli`/`sti` fault
     // (STATUS_PRIVILEGED_INSTRUCTION); interrupt masking is meaningless there,

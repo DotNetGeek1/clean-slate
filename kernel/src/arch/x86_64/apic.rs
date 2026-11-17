@@ -1,11 +1,11 @@
 //! Local APIC timer/EOI programming and legacy PIC masking.
 //!
 //! The register page is reached only through the uncached alias that
-//! `mm::identity_holes::arm_identity_holes` maps at the page's direct-map
-//! address, in the PML4 slot every root shares. The identity window around the
-//! APIC is unmapped (#253), so a register access before the alias is installed
-//! is a kernel bug and stops the boot rather than falling back to the identity
-//! address.
+//! `mm::identity_holes::arm_identity_holes` maps at `layout::LOCAL_APIC_ALIAS_VA`,
+//! in a PML4 slot of its own that every root shares. The APIC's identity window
+//! and its direct-map window are both unmapped (#253), so a register access
+//! before the alias is installed is a kernel bug and stops the boot rather than
+//! falling back to either address.
 //!
 //! Why unsafe: MMIO writes to the APIC register page and MSR writes to
 //! IA32_APIC_BASE. Callers must only acknowledge interrupts that were actually

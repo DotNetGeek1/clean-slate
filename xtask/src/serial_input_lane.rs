@@ -521,6 +521,12 @@ pub(crate) fn run() -> Result<(), XtaskError> {
             sent += 1;
         }
         if records.iter().any(|record| record == DONE) {
+            if let Err(missing) = reboot_detector.require_kernel_banner() {
+                break Err(XtaskError::Validation(format!(
+                    "serial input: {missing}; tail {:?}",
+                    tail(&transcript)
+                )));
+            }
             writer.write_all(&[DONE_ACK])?;
             writer.flush()?;
             break Ok(start);
