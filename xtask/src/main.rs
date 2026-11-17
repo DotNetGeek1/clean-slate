@@ -30,6 +30,7 @@ mod serial_input_lane;
 mod system_boot;
 mod system_desktop;
 mod system_desktop_faults;
+mod system_desktop_lane;
 mod system_lane;
 mod system_shell;
 
@@ -1101,8 +1102,9 @@ const M9_MILESTONE_STEPS: [M9MilestoneStep; 18] = [
 
 /// Authoritative M10 gate (#119): the graphics contract and every M10 constituent (substrate
 /// boots, display backends, input, compositor and app host suites), then the #118 desktop lane
-/// on both display backends. `[M10 ] PASS` is printed only after all of them succeed.
-const M10_MILESTONE_STEPS: [M9MilestoneStep; 13] = [
+/// on both display backends and the system image's desktop (#218 S6e). `[M10 ] PASS` is printed
+/// only after all of them succeed.
+const M10_MILESTONE_STEPS: [M9MilestoneStep; 14] = [
     ("test-m10-contract", run_m10_contract_acceptance),
     ("clean-slate-ui (host)", run_m10_ui_host_tests),
     ("test-m10-nxe", run_m10_nxe_acceptance),
@@ -1116,6 +1118,7 @@ const M10_MILESTONE_STEPS: [M9MilestoneStep; 13] = [
     ("test-m10-compositor", run_m10_compositor_acceptance),
     ("test-m10-app", run_m10_app_acceptance),
     ("test-m10-desktop", m10_desktop_lane::run),
+    ("test-system-desktop", system_desktop_lane::run),
 ];
 
 fn main() -> ExitCode {
@@ -1216,6 +1219,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), XtaskError> {
         ParsedCommand::TestSystemBoot => system_boot::run_lane(),
         ParsedCommand::TestSystemShell => system_shell::run(),
         ParsedCommand::TestSystem => system_lane::run(),
+        ParsedCommand::TestSystemDesktop => system_desktop_lane::run(),
         ParsedCommand::M5DiskCreate => create_m5_data_disk_image(),
         ParsedCommand::M5DiskReset => reset_m5_data_disk_image(),
         ParsedCommand::M5DiskInspect => inspect_m5_data_disk_image(),
@@ -5241,6 +5245,7 @@ enum ParsedCommand {
     TestSystemBoot,
     TestSystemShell,
     TestSystem,
+    TestSystemDesktop,
     TestM10Desktop,
     TestM10,
     RunM10Desktop,
@@ -5417,6 +5422,9 @@ fn parse_command(command: Option<&std::ffi::OsStr>) -> ParsedCommand {
             ParsedCommand::TestSystemShell
         }
         Some(cmd) if cmd == "test-system" || cmd == "system" => ParsedCommand::TestSystem,
+        Some(cmd) if cmd == "test-system-desktop" || cmd == "system-desktop" => {
+            ParsedCommand::TestSystemDesktop
+        }
         Some(cmd) if cmd == "m5-disk-create" => ParsedCommand::M5DiskCreate,
         Some(cmd) if cmd == "m5-disk-reset" => ParsedCommand::M5DiskReset,
         Some(cmd) if cmd == "m5-disk-inspect" => ParsedCommand::M5DiskInspect,
@@ -6068,6 +6076,12 @@ mod tests {
             assert_eq!(
                 parse_command(Some(alias.as_ref())),
                 ParsedCommand::TestSystem
+            );
+        }
+        for alias in ["test-system-desktop", "system-desktop"] {
+            assert_eq!(
+                parse_command(Some(alias.as_ref())),
+                ParsedCommand::TestSystemDesktop
             );
         }
         assert_eq!(

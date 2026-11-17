@@ -131,7 +131,7 @@ impl InputTrace {
     /// The records since the last call, which are then forgotten.
     pub fn take(&mut self) -> Self {
         let moved = self.moved;
-        let taken = core::mem::replace(self, Self::new());
+        let taken = core::mem::take(self);
         self.moved = moved;
         taken
     }

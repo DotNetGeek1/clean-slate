@@ -30,15 +30,15 @@ use crate::{
     run_driven_vm_acceptance, AcceptanceDriver, MarkerSet, MarkerStep, VmLaunchConfig, XtaskError,
 };
 
-const STORAGE: u32 = 0x5100;
-const NETWORK: u32 = 0x5200;
-const SHELL: u32 = 0x5400;
-const COMPOSITOR: u32 = 0x5300;
-const DESKTOP_SHELL: u32 = 0x5301;
-const APP: u32 = 0x5302;
+pub(crate) const STORAGE: u32 = 0x5100;
+pub(crate) const NETWORK: u32 = 0x5200;
+pub(crate) const SHELL: u32 = 0x5400;
+pub(crate) const COMPOSITOR: u32 = 0x5300;
+pub(crate) const DESKTOP_SHELL: u32 = 0x5301;
+pub(crate) const APP: u32 = 0x5302;
 /// In init's start order; network and the shell start with the compositor once storage is ready.
 const SERVICES: [u32; 6] = [STORAGE, NETWORK, SHELL, COMPOSITOR, DESKTOP_SHELL, APP];
-const DESKTOP_ROWS: [u32; 3] = [COMPOSITOR, DESKTOP_SHELL, APP];
+pub(crate) const DESKTOP_ROWS: [u32; 3] = [COMPOSITOR, DESKTOP_SHELL, APP];
 const BOOT_TIMEOUT: Duration = Duration::from_secs(180);
 const DESKTOP_PROFILE: &str = "[KERN] boot profile=desktop tier=Q1 source=fw_cfg";
 /// `kernel/src/service/system_init.rs` `NO_DISPLAY_LINE`.
@@ -47,7 +47,7 @@ const NO_DISPLAY: &str =
 const SETTLED_DESKTOP: &str = "[INIT] boot settled running=6 down=0; waiting, no deadline";
 const SETTLED_BASE: &str = "[INIT] boot settled running=3 down=0; waiting, no deadline";
 /// A desktop row that never reports ready is restarted until init gives up on it.
-const GIVE_UP_LINES: [&str; 2] = ["[INIT] gave up", "[INIT] not starting"];
+pub(crate) const GIVE_UP_LINES: [&str; 2] = ["[INIT] gave up", "[INIT] not starting"];
 
 /// Each desktop row's authority, launch and ready, in the order init must reach them: a row starts
 /// only once every row it depends on is ready.
@@ -204,7 +204,7 @@ struct DesktopSummary {
 }
 
 /// The one line in `output` that contains `prefix`, from `prefix` on.
-fn only<'a>(output: &'a str, prefix: &str) -> Result<&'a str, String> {
+pub(crate) fn only<'a>(output: &'a str, prefix: &str) -> Result<&'a str, String> {
     let mut found = lines(output).filter_map(|line| line.find(prefix).map(|at| &line[at..]));
     let line = found
         .next()
@@ -441,25 +441,25 @@ const DESKTOP_STEPS: [Step; 4] = [
 ];
 /// The desktop row each fault step faults, as an index into [`DESKTOP_ROWS`].
 const FAULTED_ROW: [usize; 3] = [0, 1, 2];
-const ROW_NAMES: [&str; 3] = ["compositor", "desktop-shell", "app"];
-const CLIENT_TAGS: [&str; 3] = ["[COMP]", "[SHELL]", "[APP ]"];
+pub(crate) const ROW_NAMES: [&str; 3] = ["compositor", "desktop-shell", "app"];
+pub(crate) const CLIENT_TAGS: [&str; 3] = ["[COMP]", "[SHELL]", "[APP ]"];
 const RESTART_LABELS: [&str; 3] = ["compositor-restart", "desktop-shell-restart", "app-restart"];
-const SHELL_ANSWER: &str = "hello-desktop";
+pub(crate) const SHELL_ANSWER: &str = "hello-desktop";
 const FORBIDDEN: [&str; 3] = ["[FAIL]", GIVE_UP_LINES[0], GIVE_UP_LINES[1]];
 
 /// One desktop row's live instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Row {
-    pid: u64,
-    generation: u64,
+pub(crate) struct Row {
+    pub(crate) pid: u64,
+    pub(crate) generation: u64,
 }
 
 /// The desktop as the lane knows it after the boot or a step.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Desktop {
-    init_pid: u64,
+pub(crate) struct Desktop {
+    pub(crate) init_pid: u64,
     /// Compositor, desktop shell, app.
-    rows: [Row; 3],
+    pub(crate) rows: [Row; 3],
     /// `21248:<generation>`, as the grant lines name the compositor's port.
     port: String,
     /// The `[RSRC] baseline` counts after its pids.
@@ -489,7 +489,7 @@ fn check_desktop_step(
 
 /// The rest of the newline-terminated line in `segment` that starts with `prefix`, and where
 /// it starts. A line still arriving does not count.
-fn whole_line<'a>(segment: &'a str, prefix: &str) -> Option<(usize, &'a str)> {
+pub(crate) fn whole_line<'a>(segment: &'a str, prefix: &str) -> Option<(usize, &'a str)> {
     let at = segment.find(prefix)?;
     let rest = &segment[at + prefix.len()..];
     let end = rest.find('\n')?;
@@ -502,7 +502,7 @@ fn position(segment: &str, needle: &str) -> Result<usize, String> {
 
 /// The boot: the S6c checks, init settled with six rows, and the hooks build's resource
 /// baseline taken with the six rows' desktop pids.
-fn check_baseline_boot(segment: &str) -> Result<Desktop, String> {
+pub(crate) fn check_baseline_boot(segment: &str) -> Result<Desktop, String> {
     let mut tracker = crate::MarkerTracker::from_steps(&DESKTOP_MARKERS);
     if !tracker.consume(segment) {
         return Err(match tracker.mismatch() {
@@ -586,25 +586,63 @@ fn check_relaunch(
     Ok((now, position(segment, launch)?, ready_at))
 }
 
+/// How a desktop row went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Gone {
+    /// Its hook byte faulted it.
+    Fault,
+    /// The app's window was closed and it exited.
+    Closed,
+}
+
 /// Everything faulting desktop row `row` must cause, in `segment` (the output since its byte
 /// was typed), checked in the order it happens so a failure names the first missing piece.
 fn check_row_fault(segment: &str, before: &Desktop, row: usize) -> Result<Desktop, String> {
+    check_row_gone(segment, before, row, Gone::Fault)
+}
+
+/// [`check_row_fault`], or for [`Gone::Closed`] the same restart after the app's own exit.
+pub(crate) fn check_row_gone(
+    segment: &str,
+    before: &Desktop,
+    row: usize,
+    how: Gone,
+) -> Result<Desktop, String> {
     let name = ROW_NAMES[row];
     let victim = before.rows[row];
     let init = before.init_pid;
-    let armed = format!(
-        "[HOOK] {name} fault armed pid={} gen={} user_rip=0x0 parked-in=restart",
-        victim.pid, victim.generation
-    );
-    if whole_line(segment, &armed).is_none() {
-        return Err(format!(
-            "hook step: the {name} fault did not arm with its restart wait redirected: no {armed:?}"
-        ));
-    }
-    let faulted_at = position(
-        segment,
-        &format!("[PROC] fault pid={} vector=14 ", victim.pid),
-    )?;
+    let faulted_at = match how {
+        Gone::Fault => {
+            let armed = format!(
+                "[HOOK] {name} fault armed pid={} gen={} user_rip=0x0 parked-in=restart",
+                victim.pid, victim.generation
+            );
+            if whole_line(segment, &armed).is_none() {
+                return Err(format!(
+                    "hook step: the {name} fault did not arm with its restart wait redirected: no {armed:?}"
+                ));
+            }
+            position(
+                segment,
+                &format!("[PROC] fault pid={} vector=14 ", victim.pid),
+            )?
+        }
+        Gone::Closed => {
+            let exit = format!(
+                "[IPC ] console pid={}: {} exit reason=closed",
+                victim.pid, CLIENT_TAGS[row]
+            );
+            let at = position(segment, &exit)
+                .map_err(|reason| format!("{name} did not exit closed: {reason}"))?;
+            // A native process exits through `int 0x80`, which the kernel logs as vector 128.
+            if let Some(line) = lines(segment)
+                .find(|line| line.contains("[PROC] fault") && !line.contains(" vector=128 "))
+            {
+                return Err(format!("a closed {name} faulted: {line:?}"));
+            }
+            at
+        }
+    };
     // The faulted row, and on a compositor fault its clients, which must see the port go.
     let gone: &[usize] = if row == 0 { &[0, 1, 2] } else { &[row] };
     // Order first, so a row started early is named even while the rest is still arriving.
@@ -786,12 +824,23 @@ fn check_row_fault(segment: &str, before: &Desktop, row: usize) -> Result<Deskto
     Ok(after)
 }
 
-/// A fault step's restart timing on the guest's clock, from the hooks build's `at-ms` stamps:
-/// each relaunched row's launch and ready, in milliseconds after the fault was armed.
 fn report_step(done: usize, segment: &str, before: &Desktop, after: &Desktop) {
     let Some(&row) = done.checked_sub(1).and_then(|step| FAULTED_ROW.get(step)) else {
         return;
     };
+    let _ = report_fault(DESKTOP_STEPS[done - 1].name, row, segment, before, after);
+}
+
+/// A fault step's restart timing on the guest's clock, from the hooks build's `at-ms` stamps:
+/// each relaunched row's launch and ready, in milliseconds after the fault was armed. Returns
+/// the faulted row's relaunch delay when every stamp was there.
+pub(crate) fn report_fault(
+    step: &str,
+    row: usize,
+    segment: &str,
+    before: &Desktop,
+    after: &Desktop,
+) -> Option<u64> {
     let stamp = |prefix: String| {
         whole_line(segment, &prefix).and_then(|(_, rest)| number(rest, "at-ms").ok())
     };
@@ -799,7 +848,7 @@ fn report_step(done: usize, segment: &str, before: &Desktop, after: &Desktop) {
         "[HOOK] {} fault armed pid={} ",
         ROW_NAMES[row], before.rows[row].pid
     );
-    let Some(armed_at) = stamp(armed) else { return };
+    let armed_at = stamp(armed)?;
     let gone: &[usize] = if row == 0 { &[0, 1, 2] } else { &[row] };
     let since = |at: Option<u64>| at.map_or("?".to_owned(), |at| format!("+{}ms", at - armed_at));
     let timings: Vec<String> = gone
@@ -817,10 +866,14 @@ fn report_step(done: usize, segment: &str, before: &Desktop, after: &Desktop) {
         })
         .collect();
     println!(
-        "\n[STM ] desktop {:?} guest timing from the fault: {}",
-        DESKTOP_STEPS[done - 1].name,
+        "\n[STM ] desktop {step:?} guest timing from the fault: {}",
         timings.join(", ")
     );
+    let relaunched = stamp(format!(
+        "[HOOK] launched service={} pid={} ",
+        DESKTOP_ROWS[row], after.rows[row].pid
+    ))
+    .map(|at| at - armed_at);
     let [compositor, shell, app] = after.rows;
     println!(
         "[STM ] desktop now compositor pid={} gen={} desktop shell pid={} gen={} app pid={} gen={} port {}",
@@ -832,6 +885,7 @@ fn report_step(done: usize, segment: &str, before: &Desktop, after: &Desktop) {
         app.generation,
         after.port
     );
+    relaunched
 }
 
 fn check_no_display_boot(output: &str) -> Result<(), String> {

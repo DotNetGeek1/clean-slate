@@ -229,7 +229,6 @@ impl PendingSession {
 
     /// Blocks until the accept finishes; bounded by the connect deadline plus
     /// the handshake deadlines.
-    #[cfg(test)]
     pub(crate) fn wait(mut self) -> Result<QmpClient, QmpError> {
         let outcome = self.result.recv().unwrap_or_else(|_| {
             Err(QmpError::Protocol {
