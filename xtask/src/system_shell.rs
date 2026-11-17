@@ -43,6 +43,9 @@ const TMP_OBJECT_IDS: std::ops::Range<u64> = 0x004C_0000..0x004C_0004;
 /// Boot to the first prompt plus every step; the kernel build before it is not counted.
 const LANE_TIMEOUT: Duration = Duration::from_secs(240);
 const STEP_TIMEOUT: Duration = Duration::from_secs(60);
+/// The `system-test-hooks` fault bytes the first step types: network, compositor, desktop
+/// shell, app.
+const HOOK_BYTES: u64 = 4;
 /// Lines that fail the run wherever they appear. `[HOOK]` lines come only from the
 /// `system-test-hooks` build, which this default-image lane must never be.
 const FORBIDDEN: [&str; 4] = ["[FAIL]", "[INIT] gave up", "[INIT] not starting", "[HOOK]"];
@@ -107,11 +110,12 @@ struct Step {
 /// The script. Every expected line differs from the command that produces it, so the echo of
 /// a command cannot satisfy its own step.
 const STEPS: [Step; 10] = [
-    // The leading Ctrl-\ is `test-system`'s fault byte. This default image has no hook, so it
-    // must be one dropped control byte and nothing else (see `validate`).
+    // The leading bytes are `test-system`'s fault bytes (Ctrl-\, Ctrl-], Ctrl-^, Ctrl-_). This
+    // default image has no hook, so they must be four dropped control bytes and nothing else
+    // (see `validate`).
     Step {
         name: "echo",
-        send: b"\x1cecho hel''lo-shell\r",
+        send: b"\x1c\x1d\x1e\x1fecho hel''lo-shell\r",
         expect: Expect::Lines {
             lines: &["hello-shell"],
             absent: &[],
@@ -464,13 +468,13 @@ fn validate(segments: &[&str], served: &[Served]) -> Result<Vec<Shell>, String> 
         }
     }
     // Every shell launch reports the console counters so far; the last one comes after the
-    // Ctrl-\ typed with the first step, which only the hooks build acts on.
+    // fault bytes typed with the first step, which only the hooks build acts on.
     let counters = kernel_lines(&whole, "[SVC ] console input so far ")
         .last()
         .ok_or_else(|| "no console input counters".to_owned())?;
-    if number(counters, "control-dropped")? != 1 {
+    if number(counters, "control-dropped")? != HOOK_BYTES {
         return Err(format!(
-            "Ctrl-\\ must be exactly one dropped control byte: {counters:?}"
+            "the {HOOK_BYTES} fault bytes must be exactly {HOOK_BYTES} dropped control bytes: {counters:?}"
         ));
     }
     let (init_pid, mut shell) =
@@ -706,8 +710,9 @@ mod tests {
              [SVC ] ready service=21504 pid={pid} gen={generation} source=live-instance kernel-observed first-console-input-wait\n\
              [IPC ] console pid={init_pid}: [INIT] service=21504 ready gen={generation}\n",
             expected_authority(pid),
-            // Ctrl-\ is typed with the first step, so every later shell has seen it dropped.
-            u8::from(generation > 1)
+            // The fault bytes are typed with the first step, so every later shell has seen
+            // them dropped.
+            if generation > 1 { HOOK_BYTES } else { 0 }
         )
     }
 
@@ -992,14 +997,19 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_backslash_must_be_one_dropped_control_byte_and_nothing_else() {
+    fn the_fault_bytes_must_be_dropped_control_bytes_and_nothing_else() {
         let mut segments = good_segments();
-        segments[8] = segments[8].replace("control-dropped=1", "control-dropped=0");
-        assert!(run(&segments).unwrap_err().contains("Ctrl-\\"));
-        let mut segments = good_segments();
-        segments[1].push_str("[HOOK] network fault armed pid=4 gen=1 user_rip=0x0\n");
-        assert!(run(&segments).unwrap_err().contains("[HOOK]"));
-        assert!(STEPS[0].send.starts_with(b"\x1c"));
+        segments[8] = segments[8].replace("control-dropped=4", "control-dropped=3");
+        assert!(run(&segments).unwrap_err().contains("fault bytes"));
+        for armed in [
+            "[HOOK] network fault armed pid=4 gen=1 user_rip=0x0 parked-in=native\n",
+            "[HOOK] compositor fault armed pid=7 gen=1 user_rip=0x0 parked-in=restart\n",
+        ] {
+            let mut segments = good_segments();
+            segments[1].push_str(armed);
+            assert!(run(&segments).unwrap_err().contains("[HOOK]"));
+        }
+        assert!(STEPS[0].send.starts_with(b"\x1c\x1d\x1e\x1f"));
     }
 
     #[test]
