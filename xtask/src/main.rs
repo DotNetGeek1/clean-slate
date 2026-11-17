@@ -1246,6 +1246,8 @@ fn run_m5_block_acceptance() -> Result<(), XtaskError> {
             cpu_model: None,
             machine_extra: None,
             vga: None,
+            display: None,
+            extra_args: Vec::new(),
             serial_tcp_port: None,
         },
     )
@@ -1319,6 +1321,8 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
             vga: None,
+            display: None,
+            extra_args: Vec::new(),
             serial_tcp_port: None,
         },
     );
@@ -1349,6 +1353,8 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
             vga: None,
+            display: None,
+            extra_args: Vec::new(),
             serial_tcp_port: None,
         },
     );
@@ -1376,6 +1382,8 @@ fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
             cpu_model: None,
             machine_extra: None,
             vga: None,
+            display: None,
+            extra_args: Vec::new(),
             serial_tcp_port: None,
         },
     );
@@ -1408,6 +1416,8 @@ fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
             cpu_model: None,
             machine_extra: None,
             vga: None,
+            display: None,
+            extra_args: Vec::new(),
             serial_tcp_port: None,
         },
     );
@@ -1587,6 +1597,8 @@ fn run_m5_disk_harness(args: &[OsString]) -> Result<(), XtaskError> {
             cpu_model: None,
             machine_extra: None,
             vga: None,
+            display: None,
+            extra_args: Vec::new(),
             serial_tcp_port: None,
         };
 
@@ -1768,6 +1780,8 @@ fn run_m9_userspace_acceptance() -> Result<(), XtaskError> {
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
             vga: None,
+            display: None,
+            extra_args: Vec::new(),
             serial_tcp_port: None,
         },
     );
@@ -1920,6 +1934,8 @@ fn run_m9_linux_socket_acceptance() -> Result<(), XtaskError> {
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
             vga: None,
+            display: None,
+            extra_args: Vec::new(),
             serial_tcp_port: None,
         },
     );
@@ -2679,6 +2695,8 @@ fn run_m7_network_acceptance() -> Result<(), XtaskError> {
             cpu_model: Some("qemu64,+rdrand"),
             machine_extra: None,
             vga: None,
+            display: None,
+            extra_args: Vec::new(),
             serial_tcp_port: None,
         },
     );
@@ -2872,6 +2890,8 @@ fn m5_storage_vm_config() -> VmLaunchConfig {
         cpu_model: None,
         machine_extra: None,
         vga: None,
+        display: None,
+        extra_args: Vec::new(),
         serial_tcp_port: None,
     }
 }
@@ -2967,6 +2987,11 @@ struct VmLaunchConfig {
     machine_extra: Option<&'static str>,
     /// Optional QEMU `-vga` model (M10 GOP framebuffer lane uses `std`).
     vga: Option<&'static str>,
+    /// Replaces `-display none` when set (`run --desktop` uses `QEMU_DISPLAY`, default `gtk`).
+    display: Option<String>,
+    /// Arguments after the standard device set (`-fw_cfg`, a VirtIO-GPU). Empty leaves the
+    /// command unchanged.
+    extra_args: Vec<String>,
     /// COM1 on a loopback socket QEMU connects out to, instead of stdio; only the serial input
     /// lane sets it.
     serial_tcp_port: Option<u16>,
@@ -3103,7 +3128,7 @@ fn qemu_command(
         .arg("-serial")
         .arg(serial)
         .arg("-display")
-        .arg("none")
+        .arg(config.display.as_deref().unwrap_or("none"))
         .arg("-no-reboot")
         .arg("-device")
         .arg("isa-debug-exit,iobase=0xf4,iosize=0x04")
@@ -3134,6 +3159,7 @@ fn qemu_command(
     if let Some((disk, irq)) = &config.m10_virtio_modern {
         append_m10_vmod_args(&mut qemu, disk, *irq);
     }
+    qemu.args(&config.extra_args);
 
     if wait_for_gdb {
         qemu.arg("-S").arg("-s");
@@ -5002,7 +5028,7 @@ fn drain_output_events(receiver: &mpsc::Receiver<OutputEvent>, output: &mut Stri
 
 fn print_help() {
     println!("Usage: cargo xtask <command>");
-    println!("  run [--net]  Build the default image (init starts storage, then network) and boot it in QEMU with the persistent data disk target/system-data.img (created if missing); --net also starts the network fixture peer");
+    println!("  run [--net] [--desktop] [--framebuffer]  Build the default image (init starts storage, then network) and boot it in QEMU with the persistent data disk target/system-data.img (created if missing); --net also starts the network fixture peer; --desktop passes fw_cfg opt/clean-slate/desktop=q1, a VirtIO-GPU and a window (QEMU_DISPLAY, default gtk), and --desktop --framebuffer passes q0 with -vga std");
     println!("  test-m1      Build the M1 self-test kernel, run QEMU, and validate PASS markers");
     println!("  test-m2      Build the M2 self-test kernel, run QEMU, and validate PASS markers");
     println!("  test-m3      M3 milestone gate: run every M3 acceptance boot in order (test-m3-address-space and test-m3-lifecycle as one merged boot), print [M3  ] PASS only if all pass");
@@ -5049,7 +5075,7 @@ fn print_help() {
     println!("  test-serial-input #218 S4 serial receive lane: COM1 on a private loopback socket; the host types a script (plain line, backspace/delete, Ctrl-U, an overlong line, a burst, a full committed buffer, Ctrl-D on a non-empty and an empty line) and checks the echo and every committed read byte for byte; prints [TTY ] PASS (aliases: serial-input)");
     println!("  test-system-boot #218 S3b default image: boots it twice on a fresh lane-owned data disk with the network fixture peer; init starts storage then network, the kernel checks every launched pid holds exactly its manifest grants and reports ready from that pid, boot 1 formats and boot 2 mounts, and the idle thread halts while init waits; prints [SYS ] PASS (aliases: system-boot)");
     println!("  test-system-shell #218 S5 default image to its serial-console shell: COM1 on a private loopback socket, a fresh lane-owned data disk and the network fixture peer; the host types echo, ls /bin, a pipeline, a /tmp write and read and a backspace edit and checks output only execution produces, then exit and Ctrl-D, each followed by a new shell one generation on with a new prompt; prints [SHL ] PASS (aliases: system-shell)");
-    println!("  test-system       #218 S7b system-test-hooks build (the default image plus a Ctrl-\\ network fault hook) to its shell, as test-system-shell: nslookup and wget through network gen 1, a wget left blocked reading from the fixture's hold port, then Ctrl-\\ faults the network service; the blocked read must fail with ECONNRESET and the shell prompt again, init restart network once, gen 2 pass its launch audit and get the shell's client capability re-issued, init settle, and nslookup and wget work again from the same shell; prints [STM ] PASS (aliases: system)");
+    println!("  test-system       #218 S7b system-test-hooks build (the default image plus a Ctrl-\\ network fault hook) to its shell, as test-system-shell: first a headless boot with fw_cfg opt/clean-slate/desktop=q1 whose init line must say boot profile=desktop tier=Q1, then the shell boot with no entry (boot profile=base): nslookup and wget through network gen 1, a wget left blocked reading from the fixture's hold port, then Ctrl-\\ faults the network service; the blocked read must fail with ECONNRESET and the shell prompt again, init restart network once, gen 2 pass its launch audit and get the shell's client capability re-issued, init settle, and nslookup and wget work again from the same shell; prints [STM ] PASS (aliases: system)");
     println!("  run-m10-desktop [--framebuffer] Boot the supervised M10 desktop in a QEMU window (QEMU_DISPLAY, default gtk; serial on stdout): VirtIO-GPU at Q1, or the -vga std framebuffer at Q0");
     println!("  test-m3-lifecycle Build the M3.4 process/thread-lifecycle kernel, run QEMU, and validate PASS markers");
     println!("  test-m3-ipc Build the M3.5 capability-authorized IPC kernel, run QEMU, and validate PASS markers");
@@ -5638,6 +5664,48 @@ mod tests {
         assert_eq!(extended[1], "q35,vmport=off");
         assert_eq!(extended[..1], plain[..1]);
         assert_eq!(extended[2..], plain[2..]);
+    }
+
+    #[test]
+    fn desktop_run_adds_the_fw_cfg_entry_the_gpu_and_a_window() {
+        let plain = qemu_argv(&VmLaunchConfig::default(), false);
+        assert!(plain.windows(2).any(|pair| pair == ["-display", "none"]));
+        assert!(!plain
+            .iter()
+            .any(|arg| arg == "-fw_cfg" || arg.contains("virtio-gpu")));
+        let config = VmLaunchConfig {
+            machine_extra: Some("vmport=off"),
+            display: Some("gtk".to_owned()),
+            vga: Some("std"),
+            extra_args: system_boot::desktop_qemu_args(true),
+            ..VmLaunchConfig::default()
+        };
+        let framebuffer = qemu_argv(&config, false);
+        assert_eq!(framebuffer[1], "q35,vmport=off");
+        assert!(framebuffer
+            .windows(2)
+            .any(|pair| pair == ["-display", "gtk"]));
+        assert!(framebuffer.windows(2).any(|pair| pair == ["-vga", "std"]));
+        assert!(framebuffer.windows(2).any(|pair| {
+            pair[0] == "-fw_cfg" && pair[1] == "name=opt/clean-slate/desktop,string=q0"
+        }));
+        assert!(!framebuffer.iter().any(|arg| arg.contains("virtio-gpu")));
+
+        let config = VmLaunchConfig {
+            display: Some("gtk".to_owned()),
+            extra_args: system_boot::desktop_qemu_args(false),
+            ..VmLaunchConfig::default()
+        };
+        let virtio = qemu_argv(&config, false);
+        assert!(virtio.windows(2).any(|pair| {
+            pair[0] == "-fw_cfg" && pair[1] == "name=opt/clean-slate/desktop,string=q1"
+        }));
+        assert!(virtio.windows(2).any(|pair| {
+            pair == [
+                "-device",
+                "virtio-gpu-pci,disable-legacy=on,xres=1280,yres=800",
+            ]
+        }));
     }
 
     #[test]

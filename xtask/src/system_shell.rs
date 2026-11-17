@@ -346,8 +346,27 @@ pub(crate) fn check_boot(segment: &str) -> Result<(u64, Shell), String> {
     let launched = only_kernel_line(segment, "[KERN] init launched pid=")?;
     let init_pid = number(launched, "pid")?;
     only_kernel_line(segment, "[KERN] serial console input on vector=")?;
+    require_base_profile(segment, init_pid)?;
     let shell = check_instance(segment, 1, init_pid)?;
     Ok((init_pid, shell))
+}
+
+/// No fw_cfg entry: the kernel and init each say the desktop is off, once.
+pub(crate) fn require_base_profile(segment: &str, init_pid: u64) -> Result<(), String> {
+    let kernel = only_kernel_line(segment, "[KERN] boot profile=")?;
+    if kernel != "[KERN] boot profile=base" {
+        return Err(format!(
+            "desktop boot option: no fw_cfg entry must leave the desktop off, got {kernel:?}"
+        ));
+    }
+    let init = format!("[IPC ] console pid={init_pid}: [INIT] boot profile=base");
+    let count = lines(segment).filter(|line| line.contains(&init)).count();
+    if count != 1 {
+        return Err(format!(
+            "desktop boot option: expected one {init:?}, found {count}"
+        ));
+    }
+    Ok(())
 }
 
 /// Whether `step`, typed into `shell`, has completed within `segment` (the output from the
@@ -688,7 +707,9 @@ mod tests {
     fn boot() -> String {
         format!(
             "[KERN] serial console input on vector=0x31\n\
+             [KERN] boot profile=base\n\
              [KERN] init launched pid=3 slot=0 declared-services=3\n\
+             [IPC ] console pid=3: [INIT] boot profile=base\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=21504\n{}",
             instance(6, 1, 3)
         )

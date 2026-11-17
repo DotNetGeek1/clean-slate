@@ -351,6 +351,10 @@ pub(crate) fn launch_init(
 
     const INIT_SCHEDULER_SLOT: usize = 0;
 
+    let option = crate::boot::boot_options::read_boot_option();
+    crate::boot::boot_options::log_boot_option(&option);
+    let desktop_mode = option.mode.word();
+
     {
         let controller = unsafe { super::service_lifecycle_controller_mut() };
         for spec in SYSTEM_MANIFEST {
@@ -372,6 +376,7 @@ pub(crate) fn launch_init(
                 self_pid: pid,
                 console_capability,
                 lifecycle_capability,
+                desktop_mode,
             })
         })?;
     let pid = spawned.pid;

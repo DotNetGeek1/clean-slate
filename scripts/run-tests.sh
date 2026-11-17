@@ -216,7 +216,7 @@ test_description() {
     test-m10) echo "M10 milestone gate (every M10 constituent and the QMP harness smoke, then the desktop lane on both backends)" ;;
     test-serial-input) echo "#218 S4 COM1 receive and line discipline over a private loopback socket (echo and committed reads checked byte for byte)" ;;
     test-system-shell) echo "#218 S5 default image to its serial-console shell over a private loopback socket: typed commands checked by output only execution produces, then exit and Ctrl-D each relaunch the shell one generation on" ;;
-    test-system) echo "#218 S7b system-test-hooks build (the default image plus a Ctrl-\\ network fault hook): a shell wget blocked in a TCP read wakes with ECONNRESET when the network service faults, init restarts network once, the shell's client capability is re-issued for generation 2 and nslookup and wget work again from the same shell (wget's request reaching the peer is not checked: #255)" ;;
+    test-system) echo "#218 S7b system-test-hooks build (the default image plus a Ctrl-\\ network fault hook), plus one short boot with fw_cfg opt/clean-slate/desktop=q1 that requires init's boot profile=desktop tier=Q1 (the shell boot has no entry and requires profile=base): a shell wget blocked in a TCP read wakes with ECONNRESET when the network service faults, init restarts network once, the shell's client capability is re-issued for generation 2 and nslookup and wget work again from the same shell (wget's request reaching the peer is not checked: #255)" ;;
     test-system-boot) echo "#218 S3b default image: init starts storage then network on a fresh data disk, twice (format, then mount); the kernel checks every launched grant set and ready report" ;;
     *) echo "" ;;
   esac

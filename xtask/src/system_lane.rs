@@ -7,8 +7,12 @@
 //! image's own code: the fault report, the Linux socket loss, the client capability revoke,
 //! init's restart policy, the new instance's launch audit and the capability re-issue.
 //!
-//! The boot is `test-system-shell`'s: a fresh lane-owned data disk, the network fixture peer
-//! and COM1 on a loopback socket. Each [`Step`] is typed once the step before it is complete:
+//! Before that boot, one short headless boot of the same kernel passes
+//! `-fw_cfg name=opt/clean-slate/desktop,string=q1` and requires init's
+//! `boot profile=desktop tier=Q1` line. The shell boot passes no entry and requires `profile=base`.
+//!
+//! The shell boot is `test-system-shell`'s: a fresh lane-owned data disk, the network fixture
+//! peer and COM1 on a loopback socket. Each [`Step`] is typed once the step before it is complete:
 //!
 //! 1. `nslookup` and `wget` from the shell reach the fixture through network generation 1.
 //! 2. A foreground `wget` to the fixture's hold port, which accepts and never answers, leaves
@@ -29,6 +33,7 @@
 
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -45,8 +50,8 @@ use crate::system_shell::{
     whole_lines_at, Shell, SHELL_SERVICE,
 };
 use crate::{
-    announce_qemu_version, prepare_vm, workspace_root, xtask_artifact_root, ReapOnDrop,
-    VmLaunchConfig, XtaskError,
+    announce_qemu_version, prepare_vm, run_driven_vm_acceptance, workspace_root,
+    xtask_artifact_root, MarkerSet, NoDriver, ReapOnDrop, VmLaunchConfig, XtaskError,
 };
 
 /// The kernel feature this lane builds; nothing else enables it.
@@ -64,6 +69,23 @@ const RESET_ERROR: &str = "wget: error getting response: Connection reset by pee
 const HOOKS_BANNER: &str =
     "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service";
 const SETTLED: &str = "[INIT] boot settled running=3 down=0; waiting, no deadline";
+const DESKTOP_OPTION_TIMEOUT: Duration = Duration::from_secs(180);
+/// A `profile=base` line fails here at once: the field is not the tier the entry asked for.
+const DESKTOP_OPTION_MARKERS: [crate::MarkerStep<'static>; 3] = [
+    crate::MarkerStep::Line {
+        prefix: "[KERN] boot profile=",
+        fields: &[
+            ("profile=", "desktop"),
+            ("tier=", "Q1"),
+            ("source=", "fw_cfg"),
+        ],
+    },
+    crate::MarkerStep::Ordered("[KERN] desktop profile not built yet"),
+    crate::MarkerStep::Line {
+        prefix: "[INIT] boot profile=",
+        fields: &[("profile=", "desktop"), ("tier=", "Q1")],
+    },
+];
 
 /// What a step must produce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,8 +397,8 @@ fn save_transcript(transcript: &[u8]) -> Result<(), XtaskError> {
     Ok(())
 }
 
-/// `test-system`: one boot of the hooks build on a fresh lane-owned disk; the host types
-/// [`STEPS`] into the shell over a loopback COM1.
+/// `test-system`: a short boot with the desktop fw_cfg entry, then one boot of the hooks build
+/// on a fresh lane-owned disk; the host types [`STEPS`] into the shell over a loopback COM1.
 pub(crate) fn run() -> Result<(), XtaskError> {
     println!(
         "[STM ] test-system boots the {HOOKS_FEATURE} build: the default image plus the Ctrl-\\ network fault hook"
@@ -385,6 +407,11 @@ pub(crate) fn run() -> Result<(), XtaskError> {
         .join("target")
         .join("system")
         .join(SYSTEM_DATA_DISK_FILENAME);
+    if disk.is_file() {
+        std::fs::remove_file(&disk)?;
+    }
+    ensure_data_disk(&disk)?;
+    boot_desktop_option(&disk)?;
     if disk.is_file() {
         std::fs::remove_file(&disk)?;
     }
@@ -406,6 +433,47 @@ pub(crate) fn run() -> Result<(), XtaskError> {
         "\n[STM ] PASS ({HOOKS_FEATURE} build) shell pid={} resolved through the fixture and received its HTTP response through network pid={} gen={}; Ctrl-\\ faulted it, the blocked wget read failed with ECONNRESET and the shell prompted again, init restarted the service as pid={} gen={}, its launch audit matched, the shell's client capability was re-issued for it, init settled, and from the same shell nslookup resolved through the fixture again and wget received the fixture's HTTP response again (wget's request reaching the peer is not checked: #255)",
         before.shell.pid, before.network.pid, before.network.generation, after.network.pid, after.network.generation
     );
+    Ok(())
+}
+
+/// Headless boot with `opt/clean-slate/desktop=q1` and no GPU. Fails named `desktop boot option`
+/// when init does not report tier Q1.
+fn boot_desktop_option(disk: &Path) -> Result<(), XtaskError> {
+    println!("[STM ] desktop boot option: fw_cfg opt/clean-slate/desktop=q1");
+    let config = VmLaunchConfig {
+        extra_args: vec![
+            "-fw_cfg".to_owned(),
+            "name=opt/clean-slate/desktop,string=q1".to_owned(),
+        ],
+        ..system_vm_config(disk.to_path_buf(), None)
+    };
+    let output = run_driven_vm_acceptance(
+        &[HOOKS_FEATURE],
+        config,
+        MarkerSet::Steps(&DESKTOP_OPTION_MARKERS),
+        DESKTOP_OPTION_TIMEOUT,
+        &mut NoDriver,
+    )
+    .map_err(|error| XtaskError::Validation(format!("desktop boot option: {error}")))?;
+    check_desktop_option(&output).map_err(XtaskError::Validation)?;
+    println!("[STM ] desktop boot option: init reported tier=Q1");
+    Ok(())
+}
+
+fn check_desktop_option(output: &str) -> Result<(), String> {
+    let kernel = only_kernel_line(output, "[KERN] boot profile=")?;
+    if kernel != "[KERN] boot profile=desktop tier=Q1 source=fw_cfg" {
+        return Err(format!("desktop boot option: kernel said {kernel:?}"));
+    }
+    if !lines(output).any(|line| line.contains("[KERN] desktop profile not built yet")) {
+        return Err(
+            "desktop boot option: missing `[KERN] desktop profile not built yet`".to_owned(),
+        );
+    }
+    let init = only_kernel_line(output, "[INIT] boot profile=")?;
+    if init != "[INIT] boot profile=desktop tier=Q1" {
+        return Err(format!("desktop boot option: init said {init:?}"));
+    }
     Ok(())
 }
 
@@ -565,7 +633,9 @@ mod tests {
         format!(
             "{HOOKS_BANNER}\n\
              [KERN] serial console input on vector=0x31\n\
+             [KERN] boot profile=base\n\
              [KERN] init launched pid={INIT} slot=0 declared-services=3\n\
+             [IPC ] console pid={INIT}: [INIT] boot profile=base\n\
              {}\
              {}\n\
              [SVC ] shell process pid={SHELL} gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
@@ -598,6 +668,21 @@ mod tests {
 
     fn booted() -> State {
         check_boot_segment(&boot()).expect("boot")
+    }
+
+    #[test]
+    fn the_desktop_option_check_fails_by_name_when_init_stays_on_base() {
+        let err = check_desktop_option(
+            "[KERN] boot profile=base\n[IPC ] console pid=1: [INIT] boot profile=base\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("desktop boot option"), "{err}");
+        let ok = "\
+[KERN] boot profile=desktop tier=Q1 source=fw_cfg
+[KERN] desktop profile not built yet
+[IPC ] console pid=1: [INIT] boot profile=desktop tier=Q1
+";
+        assert_eq!(check_desktop_option(ok), Ok(()));
     }
 
     fn counts(dns: u32, http: u32, held: u32) -> FixtureCounts {
