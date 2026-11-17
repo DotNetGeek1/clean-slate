@@ -774,6 +774,7 @@ mod tests {
         let at = |dns, http| FixtureCounts {
             fixture_a_answers: dns,
             http_responses: http,
+            held_connections: 0,
         };
         assert_eq!(
             Served::between(at(2, 1), at(4, 1)),

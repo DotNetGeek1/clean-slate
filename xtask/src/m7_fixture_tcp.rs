@@ -309,6 +309,54 @@ impl M9HttpService {
     }
 }
 
+const M9_HOLD_PORT: u16 = 4003;
+
+/// #218 S7b: TCP on 10.77.0.50:4003 that accepts and never sends, so a client's read of a
+/// response blocks until something other than this peer ends it. Whatever the client sends
+/// is read and discarded.
+pub struct M9HoldService {
+    pool: ListenerPool,
+    active: Option<SocketHandle>,
+}
+
+impl M9HoldService {
+    pub fn new(sockets: &mut SocketSet<'_>) -> Self {
+        let endpoint = IpListenEndpoint {
+            addr: Some(M9_SERVICE_ADDR),
+            port: M9_HOLD_PORT,
+        };
+        Self {
+            pool: ListenerPool::new(sockets, 4096, endpoint),
+            active: None,
+        }
+    }
+
+    /// Returns whether this poll took a newly established connection.
+    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) -> bool {
+        self.pool.relisten_closed(sockets);
+        let Some(active) = self.active else {
+            let Some(handle) = self.pool.accept(sockets) else {
+                return false;
+            };
+            if sockets.get::<tcp::Socket>(handle).state() != tcp::State::Established {
+                return false;
+            }
+            self.active = Some(handle);
+            println!("[FIX ] m9 hold connection held");
+            return true;
+        };
+        let socket = sockets.get_mut::<tcp::Socket>(active);
+        if !socket.is_active() {
+            self.active = None;
+            return false;
+        }
+        if socket.may_recv() {
+            let mut buf = [0u8; 256];
+            let _ = socket.recv_slice(&mut buf);
+        }
+        false
+    }
+}
 const M9_BANNER_PORT: u16 = 4002;
 const M9_BANNER_BYTES: &[u8] = b"M9-BANNER-FIX\n";
 
