@@ -2,7 +2,9 @@
 
 use super::table::LinuxSyscallContext;
 use super::user_copy::copy_user_bytes;
-use super::write::{ensure_fd_open, write_chunked};
+use super::write::{
+    ensure_fd_open, socket_for_fd, write_chunked, write_socket_gathered, LINUX_WRITE_CHUNK_BYTES,
+};
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::process::linux_fd::{
     self, apply_linux_fl_to_status, ensure_open_fd, open_description::DescriptorKind,
@@ -205,7 +207,10 @@ pub(crate) fn handle_sys_writev(
     let generation = ctx.instance_generation;
 
     let projection = projection_for(pid, generation, fd)?;
-    ensure_fd_open(Ok(projection))?;
+    let socket = socket_for_fd(pid, generation, fd);
+    if socket.is_none() {
+        ensure_fd_open(Ok(projection))?;
+    }
 
     if iovcnt == 0 {
         return Ok(0);
@@ -237,6 +242,19 @@ pub(crate) fn handle_sys_writev(
         }
     }
 
+    let iovecs = &iovecs[..iovcnt];
+    let fetch = |offset: u64, len: usize, dst: &mut [u8; LINUX_WRITE_CHUNK_BYTES]| {
+        gather_iovecs(iovecs, offset, len, dst, |base, out| {
+            let mut chunk = [0u8; super::user_copy::LINUX_USER_COPY_MAX_BYTES];
+            let copied = copy_user_bytes(base, out.len() as u64, &mut chunk)?;
+            out.copy_from_slice(&chunk[..out.len()]);
+            Ok(copied)
+        })
+    };
+    if let Some(socket) = socket {
+        return write_socket_gathered(request, ctx, fd, socket, total_len, fetch);
+    }
+
     let write_chunk = |chunk: &[u8]| -> Result<usize, LinuxErrno> {
         if chunk.is_empty() {
             return Ok(0);
@@ -262,30 +280,36 @@ pub(crate) fn handle_sys_writev(
         linux_fd::write_fd(pid, generation, fd, chunk)
     };
 
-    write_chunked(
-        total_len,
-        |offset, len, dst| {
-            let mut copied = 0usize;
-            let mut pos = offset;
-            for iov in &iovecs[..iovcnt] {
-                if pos >= iov.len {
-                    pos -= iov.len;
-                    continue;
-                }
-                let take = (iov.len - pos).min((len - copied) as u64) as usize;
-                let mut chunk = [0u8; super::user_copy::LINUX_USER_COPY_MAX_BYTES];
-                copy_user_bytes(iov.base + pos, take as u64, &mut chunk)?;
-                dst[copied..copied + take].copy_from_slice(&chunk[..take]);
-                copied += take;
-                pos = 0;
-                if copied >= len {
-                    break;
-                }
-            }
-            Ok(copied)
-        },
-        write_chunk,
-    )
+    write_chunked(total_len, fetch, write_chunk)
+}
+
+/// Copies request bytes `offset..offset + len` of the concatenated `iovecs` into `dst`
+/// (`len <= LINUX_WRITE_CHUNK_BYTES`) with `copy(base, out)`, which fills all of `out` from
+/// user address `base`. Returns the bytes copied, short only when the iovecs end first.
+fn gather_iovecs(
+    iovecs: &[IoVec],
+    offset: u64,
+    len: usize,
+    dst: &mut [u8; LINUX_WRITE_CHUNK_BYTES],
+    mut copy: impl FnMut(u64, &mut [u8]) -> Result<usize, LinuxErrno>,
+) -> Result<usize, LinuxErrno> {
+    let mut copied = 0usize;
+    let mut pos = offset;
+    for iov in iovecs {
+        if copied >= len {
+            break;
+        }
+        if pos >= iov.len {
+            pos -= iov.len;
+            continue;
+        }
+        let take = (iov.len - pos).min((len - copied) as u64) as usize;
+        let base = iov.base.checked_add(pos).ok_or(EFAULT)?;
+        copy(base, &mut dst[copied..copied + take])?;
+        copied += take;
+        pos = 0;
+    }
+    Ok(copied)
 }
 
 #[cfg(test)]
@@ -393,6 +417,81 @@ mod tests {
         ];
         assert_eq!(locate_iov_index(&iovecs, 0), Ok((0, 0)));
         assert_eq!(locate_iov_index(&iovecs, 2), Ok((2, 0)));
+    }
+
+    /// Fake user memory: byte at address `a` is `a as u8`.
+    fn copy_from_address_bytes(base: u64, out: &mut [u8]) -> Result<usize, LinuxErrno> {
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = (base + i as u64) as u8;
+        }
+        Ok(out.len())
+    }
+
+    #[test]
+    fn gather_iovecs_concatenates_across_iovecs_and_skips_empty_ones() {
+        let iovecs = [
+            IoVec { base: 0x10, len: 3 },
+            IoVec { base: 0x80, len: 0 },
+            IoVec { base: 0x40, len: 4 },
+        ];
+        let mut dst = [0u8; LINUX_WRITE_CHUNK_BYTES];
+        assert_eq!(
+            gather_iovecs(&iovecs, 0, 7, &mut dst, copy_from_address_bytes),
+            Ok(7)
+        );
+        assert_eq!(dst[..7], [0x10, 0x11, 0x12, 0x40, 0x41, 0x42, 0x43]);
+        assert_eq!(
+            gather_iovecs(&iovecs, 2, 3, &mut dst, copy_from_address_bytes),
+            Ok(3)
+        );
+        assert_eq!(dst[..3], [0x12, 0x40, 0x41]);
+    }
+
+    #[test]
+    fn gather_iovecs_is_short_only_when_the_iovecs_end_and_reports_a_fault() {
+        let iovecs = [IoVec { base: 0x10, len: 2 }];
+        let mut dst = [0u8; LINUX_WRITE_CHUNK_BYTES];
+        assert_eq!(
+            gather_iovecs(&iovecs, 1, 5, &mut dst, copy_from_address_bytes),
+            Ok(1)
+        );
+        assert_eq!(
+            gather_iovecs(&iovecs, 0, 2, &mut dst, |_, _| Err(EFAULT)),
+            Err(EFAULT)
+        );
+    }
+
+    /// #255: a socket fd has no write projection, so `writev` refused it with `EBADF`
+    /// before sending anything; BusyBox `wget` (musl stdio) sends its request this way.
+    #[cfg(feature = "m9-linux-socket")]
+    #[test]
+    fn writev_on_a_socket_fd_is_not_refused_as_a_closed_fd() {
+        use crate::process::linux_fd::open_description::SocketRef;
+        let pid = 91u64;
+        let generation = InstanceGeneration(5);
+        let mut ipc = IpcEndpointTable::new();
+        ipc.grant_console_capability_for_pid(pid)
+            .expect("console grant");
+        let sink = linux_fd::console_sink_ref_from_table(&ipc).expect("console sink");
+        linux_fd::install_stdio_for_process(pid, generation, sink).expect("install stdio");
+        let socket = SocketRef {
+            index: 0,
+            generation: 1,
+        };
+        let fd = linux_fd::install_socket_fd(pid, generation, socket, false, false)
+            .expect("install socket") as u64;
+        let mut frame = empty_frame();
+        let mut ctx = LinuxSyscallContext {
+            pid,
+            instance_generation: generation,
+            frame: &mut frame,
+        };
+        let request = LinuxSyscallRequest {
+            nr: SYS_WRITEV,
+            args: [fd, 0, 0, 0, 0, 0],
+        };
+        assert_eq!(handle_sys_writev(&request, &mut ctx), Ok(0));
+        linux_fd::release_for_process(pid, generation);
     }
 
     #[test]
