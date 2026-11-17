@@ -364,29 +364,44 @@ impl Lane {
     }
 }
 
-/// Before every app launch but the first, the compositor (the new one, after a compositor
+/// When each app but the first connects, the compositor (the new one, after a compositor
 /// restart) holds the desktop shell's rows alone: the old app's surfaces were released first.
+/// Init launches the app once the desktop shell reports ready, which can precede the
+/// compositor's rows line for the shell's second surface, so the check is anchored on the
+/// app's connection (the first `clients=2` rows line after its launch), not on its launch.
 fn check_rows(transcript: &str) -> Result<(), String> {
     const SHELL_ONLY: &str = "[COMP] rows clients=1 surfaces=2 windows=0";
     let compositor = format!("[SVC ] launch service={} ", DESKTOP_ROWS[0]);
     let app = format!("[SVC ] launch service={} ", DESKTOP_ROWS[2]);
     let mut last_rows: Option<&str> = None;
     let mut app_launches = 0;
+    let mut awaiting_connection = false;
     for line in lines(transcript) {
         if let Some(at) = line.find("[COMP] rows ") {
-            last_rows = Some(line[at..].trim_end());
+            let rows = line[at..].trim_end();
+            if awaiting_connection && number(rows, "clients")? > 1 {
+                if last_rows != Some(SHELL_ONLY) {
+                    return Err(format!(
+                        "app launch {app_launches} connected after compositor rows {last_rows:?}, expected `{SHELL_ONLY}`"
+                    ));
+                }
+                awaiting_connection = false;
+            }
+            last_rows = Some(rows);
         }
         if line.contains(&compositor) {
             last_rows = None;
         }
         if line.contains(&app) {
-            app_launches += 1;
-            if app_launches > 1 && last_rows != Some(SHELL_ONLY) {
-                return Err(format!(
-                    "app launch {app_launches}: compositor rows {last_rows:?}, expected `{SHELL_ONLY}`"
-                ));
+            if awaiting_connection {
+                return Err(format!("app launch {app_launches} never connected"));
             }
+            app_launches += 1;
+            awaiting_connection = app_launches > 1;
         }
+    }
+    if awaiting_connection {
+        return Err(format!("app launch {app_launches} never connected"));
     }
     Ok(())
 }
@@ -654,4 +669,53 @@ pub(crate) fn run() -> Result<(), XtaskError> {
     run_each(&[SYSTEM_DESKTOP_RUN])?;
     println!("[STD ] test-system-desktop PASS");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_rows;
+
+    /// Compositor restart from a soak run: the desktop shell reports ready and init launches
+    /// the app before the compositor logs the shell's second surface; the app connects after.
+    const RESTART: &str = "\
+[SVC ] launch service=21250 pid=5 gen=1
+[IPC ] console pid=3: [COMP] rows clients=2 surfaces=3 windows=1
+[IPC ] console pid=3: [COMP] rows clients=1 surfaces=2 windows=0
+[SVC ] launch service=21250 pid=10 gen=2
+[IPC ] console pid=3: [COMP] rows clients=2 surfaces=3 windows=1
+[SVC ] launch service=21248 pid=12 gen=2
+[IPC ] console pid=12: [COMP] rows clients=0 surfaces=0 windows=0
+[SVC ] launch service=21249 pid=13 gen=3
+[IPC ] console pid=12: [COMP] rows clients=1 surfaces=0 windows=0
+[IPC ] console pid=12: [COMP] rows clients=1 surfaces=1 windows=0
+[IPC ] console pid=13: [SHELL] ready rail=88x800 surfaces=2 dock=none tier=Q1
+[SVC ] launch service=21250 pid=14 gen=3
+[IPC ] console pid=12: [COMP] rows clients=1 surfaces=2 windows=0
+[IPC ] console pid=12: [COMP] rows clients=2 surfaces=2 windows=0
+[IPC ] console pid=12: [COMP] rows clients=2 surfaces=3 windows=1
+";
+
+    #[test]
+    fn rows_are_checked_when_the_app_connects_not_when_it_launches() {
+        check_rows(RESTART).expect("shell-only rows when each relaunched app connected");
+    }
+
+    #[test]
+    fn rows_left_by_the_old_app_or_a_missing_connection_fail() {
+        let residue = RESTART.replacen(
+            "pid=3: [COMP] rows clients=1 surfaces=2 windows=0",
+            "pid=3: [COMP] rows clients=1 surfaces=3 windows=1",
+            1,
+        );
+        let err = check_rows(&residue).unwrap_err();
+        assert!(err.starts_with("app launch 2 connected after"), "{err}");
+
+        let unconnected = RESTART
+            .lines()
+            .filter(|line| !line.contains("pid=12: [COMP] rows clients=2"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let err = check_rows(&unconnected).unwrap_err();
+        assert_eq!(err, "app launch 3 never connected");
+    }
 }
