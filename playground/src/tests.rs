@@ -617,6 +617,17 @@ fn diagnostics_report_only_observable_state_changes() {
         diag::authority_line(false, true).as_str(),
         "[APP ] authority display=granted input=denied"
     );
+    assert!(diag::is_per_input_line(diag::input_line(&app).as_str()));
+    assert!(diag::is_per_input_line(
+        diag::focus_line(diag::Focus::of(&app)).as_str()
+    ));
+    assert!(!diag::is_per_input_line(
+        diag::ready_line(QualityTier::Q1).as_str()
+    ));
+    assert!(!diag::is_per_input_line(diag::exit_line("closed").as_str()));
+    assert!(!diag::is_per_input_line(
+        diag::authority_line(true, true).as_str()
+    ));
     for _ in 0..TEXT_CAPACITY {
         tap(&mut app, KEY_A, none());
     }
