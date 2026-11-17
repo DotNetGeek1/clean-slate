@@ -47,6 +47,13 @@ pub fn exit_line(reason: &str) -> ConsoleLine {
     ConsoleLine::format(format_args!("[COMP] exit reason={reason}"))
 }
 
+/// A line that reports one pointer or focus change. Printed on serial only when the launch
+/// page has [`clean_slate_native_abi::desktop::LAUNCH_FLAG_INPUT_TRACE`]. Lifecycle lines
+/// (`started`, `exit`, `[WIN ] created` / `closed`, `[COMP] rows`) are not in this set.
+pub fn is_per_input_line(line: &str) -> bool {
+    line.starts_with("[WIN ] moved") || line.starts_with("[INPT] focus")
+}
+
 impl DiagTracker {
     pub const fn new() -> Self {
         Self {
@@ -135,6 +142,33 @@ impl DiagTracker {
                 "[COMP] rows clients={} surfaces={} windows={}",
                 rows.clients, rows.surfaces, rows.windows
             )));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_per_input_line;
+
+    #[test]
+    fn only_pointer_and_focus_lines_are_per_input() {
+        let per_input = [
+            "[WIN ] moved x=1 y=2",
+            "[INPT] focus window x=8 y=9",
+            "[INPT] focus none",
+        ];
+        let lifecycle = [
+            "[COMP] started output=1280x800 tier=Q1",
+            "[COMP] exit reason=service-error",
+            "[WIN ] created x=1 y=2 windows=1",
+            "[WIN ] closed windows=0",
+            "[COMP] rows clients=1 surfaces=2 windows=1",
+        ];
+        for line in per_input {
+            assert!(is_per_input_line(line), "{line}");
+        }
+        for line in lifecycle {
+            assert!(!is_per_input_line(line), "{line}");
         }
     }
 }

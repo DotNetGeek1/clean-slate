@@ -24,6 +24,7 @@ use clean_slate_native_abi::port::{
     PortEventRecord, PORT_OP_CLOSE, PORT_OP_CONNECT, PORT_OP_FIND_HANDLE, PORT_OP_RECV_EVENT,
     PORT_OP_SEND, PORT_ROLE_CONNECT, PORT_SEND_WAIT,
 };
+use clean_slate_native_abi::service_ready::SYSCALL_NR_SERVICE_READY;
 use clean_slate_native_abi::{
     is_status, EventKind, SHARED_BUFFER_ACCESS_READ_WRITE, SHARED_BUFFER_SUBOP_ALLOCATE,
     SHARED_BUFFER_SUBOP_MAP, SHARED_BUFFER_SUBOP_RELEASE, SHARED_BUFFER_SUBOP_UNMAP,
@@ -251,7 +252,18 @@ impl Kernel {
     }
 }
 
+/// Syscall 22, once the first window is mapped (after `[APP ] ready`).
+///
+/// Accepted when this process is the live `Starting` instance of service `0x5302`. A refusal
+/// changes nothing, and the app keeps running either way.
+fn report_service_ready() {
+    syscall(SYSCALL_NR_SERVICE_READY, 0, 0, 0, 0, 0, 0);
+}
+
 fn console(boot: &PlaygroundBootstrap, line: &ConsoleLine) {
+    if !boot.input_trace() && diag::is_per_input_line(line.as_str()) {
+        return;
+    }
     if let Some(handle) = boot.console() {
         let bytes = line.as_bytes();
         syscall(
@@ -332,6 +344,7 @@ fn run(boot: &PlaygroundBootstrap, session: &mut Session, tier: QualityTier) {
             if !announced {
                 announced = true;
                 console(boot, &diag::ready_line(tier));
+                report_service_ready();
             }
             let now = diag::Focus::of(session.app());
             if now != focus {
