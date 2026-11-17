@@ -28,6 +28,8 @@ pub(crate) mod spawn;
 pub(crate) mod system_init;
 #[cfg(clean_slate_system_init)]
 pub(crate) mod system_shell;
+#[cfg(feature = "system-test-hooks")]
+pub(crate) mod system_test_hooks;
 
 #[cfg(feature = "m4-recovery-self-test")]
 pub(crate) mod recovery_launch;

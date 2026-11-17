@@ -21,7 +21,7 @@ use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::udp;
 
 use crate::m7_fixture_tcp::{
-    FixtureTlsCert, M9BannerService, M9HttpService, TcpEchoService, TlsService,
+    FixtureTlsCert, M9BannerService, M9HoldService, M9HttpService, TcpEchoService, TlsService,
 };
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
@@ -66,12 +66,15 @@ struct FixtureSeen {
     fixture_a_answers: AtomicU32,
     /// HTTP responses the M9 HTTP service sent.
     http_responses: AtomicU32,
+    /// Connections the M9 hold service has taken and is not answering.
+    held_connections: AtomicU32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FixtureCounts {
     pub fixture_a_answers: u32,
     pub http_responses: u32,
+    pub held_connections: u32,
 }
 
 impl M7FixturePeer {
@@ -103,6 +106,7 @@ impl M7FixturePeer {
         FixtureCounts {
             fixture_a_answers: self.seen.fixture_a_answers.load(Ordering::SeqCst),
             http_responses: self.seen.http_responses.load(Ordering::SeqCst),
+            held_connections: self.seen.held_connections.load(Ordering::SeqCst),
         }
     }
 
@@ -199,9 +203,11 @@ fn run_peer(
 
     let mut m9_http_service = None;
     let mut m9_banner_service = None;
+    let mut m9_hold_service = None;
     if options.m9_profile {
         m9_http_service = Some(M9HttpService::new(&mut sockets));
         m9_banner_service = Some(M9BannerService::new(&mut sockets));
+        m9_hold_service = Some(M9HoldService::new(&mut sockets));
     }
 
     let mut timestamp = Instant::from_millis(0);
@@ -250,6 +256,11 @@ fn run_peer(
         }
         if let Some(banner) = m9_banner_service.as_mut() {
             banner.poll(&mut sockets);
+        }
+        if let Some(hold) = m9_hold_service.as_mut() {
+            if hold.poll(&mut sockets) {
+                seen.held_connections.fetch_add(1, Ordering::SeqCst);
+            }
         }
         for event in device.drain_events() {
             println!("{event}");

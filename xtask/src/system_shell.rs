@@ -29,9 +29,9 @@ use crate::{
     VmLaunchConfig, XtaskError,
 };
 
-const SHELL_SERVICE: u32 = 0x5400;
+pub(crate) const SHELL_SERVICE: u32 = 0x5400;
 /// ash's prompt for uid 0.
-const PROMPT: &str = "# ";
+pub(crate) const PROMPT: &str = "# ";
 /// The applets the rootfs links in `/bin` (`fixtures/busybox/frozen/rootfs.toml`). `ls` prints
 /// one per line when stdout is not a terminal, in directory order: this BusyBox does not sort.
 const BIN_ENTRIES: [&str; 15] = [
@@ -43,6 +43,9 @@ const TMP_OBJECT_IDS: std::ops::Range<u64> = 0x004C_0000..0x004C_0004;
 /// Boot to the first prompt plus every step; the kernel build before it is not counted.
 const LANE_TIMEOUT: Duration = Duration::from_secs(240);
 const STEP_TIMEOUT: Duration = Duration::from_secs(60);
+/// Lines that fail the run wherever they appear. `[HOOK]` lines come only from the
+/// `system-test-hooks` build, which this default-image lane must never be.
+const FORBIDDEN: [&str; 4] = ["[FAIL]", "[INIT] gave up", "[INIT] not starting", "[HOOK]"];
 
 /// What a step must produce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,9 +107,11 @@ struct Step {
 /// The script. Every expected line differs from the command that produces it, so the echo of
 /// a command cannot satisfy its own step.
 const STEPS: [Step; 10] = [
+    // The leading Ctrl-\ is `test-system`'s fault byte. This default image has no hook, so it
+    // must be one dropped control byte and nothing else (see `validate`).
     Step {
         name: "echo",
-        send: b"echo hel''lo-shell\r",
+        send: b"\x1cecho hel''lo-shell\r",
         expect: Expect::Lines {
             lines: &["hello-shell"],
             absent: &[],
@@ -189,22 +194,22 @@ const STEPS: [Step; 10] = [
 
 /// The live shell instance a step runs in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Shell {
-    pid: u64,
-    generation: u64,
+pub(crate) struct Shell {
+    pub(crate) pid: u64,
+    pub(crate) generation: u64,
 }
 
-fn lines(segment: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn lines(segment: &str) -> impl Iterator<Item = &str> {
     segment.lines().map(|line| line.trim_end_matches('\r'))
 }
 
 /// The text from the first occurrence of `prefix` to the end of its line, wherever the line
 /// starts: kernel lines can follow a prompt that has no newline.
-fn kernel_lines<'a>(segment: &'a str, prefix: &'a str) -> impl Iterator<Item = &'a str> {
+pub(crate) fn kernel_lines<'a>(segment: &'a str, prefix: &'a str) -> impl Iterator<Item = &'a str> {
     lines(segment).filter_map(move |line| line.find(prefix).map(|at| &line[at..]))
 }
 
-fn only_kernel_line<'a>(segment: &'a str, prefix: &str) -> Result<&'a str, String> {
+pub(crate) fn only_kernel_line<'a>(segment: &'a str, prefix: &str) -> Result<&'a str, String> {
     let mut found = lines(segment).filter_map(|line| line.find(prefix).map(|at| &line[at..]));
     let line = found
         .next()
@@ -244,7 +249,7 @@ fn output_lines(segment: &str) -> Vec<(usize, &str)> {
 }
 
 /// Where `expected` first appears as consecutive output lines; returns the offset past them.
-fn whole_lines_at(segment: &str, expected: &[&str]) -> Option<usize> {
+pub(crate) fn whole_lines_at(segment: &str, expected: &[&str]) -> Option<usize> {
     output_lines(segment)
         .windows(expected.len())
         .find(|window| window.iter().map(|(_, line)| line).eq(expected))
@@ -267,7 +272,7 @@ fn line_set_at(segment: &str, expected: &[&str]) -> Option<usize> {
 }
 
 /// A prompt at the start of a line after `from`.
-fn prompt_after(segment: &str, from: usize) -> Option<usize> {
+pub(crate) fn prompt_after(segment: &str, from: usize) -> Option<usize> {
     let rest = &segment[from..];
     if rest.starts_with(PROMPT) {
         return Some(from + PROMPT.len());
@@ -276,7 +281,7 @@ fn prompt_after(segment: &str, from: usize) -> Option<usize> {
 }
 
 /// The kernel's authority line for a shell instance must be exactly the row's grants.
-fn expected_authority(pid: u64) -> String {
+pub(crate) fn expected_authority(pid: u64) -> String {
     format!(
         "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
     )
@@ -337,7 +342,7 @@ fn check_instance(segment: &str, generation: u64, init_pid: u64) -> Result<Shell
 }
 
 /// The boot segment: from power-on to the first instance's ready report.
-fn check_boot(segment: &str) -> Result<(u64, Shell), String> {
+pub(crate) fn check_boot(segment: &str) -> Result<(u64, Shell), String> {
     let launched = only_kernel_line(segment, "[KERN] init launched pid=")?;
     let init_pid = number(launched, "pid")?;
     only_kernel_line(segment, "[KERN] serial console input on vector=")?;
@@ -410,7 +415,7 @@ fn check_step(
     }
 }
 
-fn check_lines(segment: &str, want: &[&str]) -> Result<(), String> {
+pub(crate) fn check_lines(segment: &str, want: &[&str]) -> Result<(), String> {
     let end = whole_lines_at(segment, want).ok_or_else(|| format!("no output lines {want:?}"))?;
     prompt_after(segment, end)
         .map(|_| ())
@@ -430,10 +435,20 @@ fn validate(segments: &[&str], served: &[Served]) -> Result<Vec<Shell>, String> 
         ));
     }
     let whole = segments.concat();
-    for forbidden in ["[FAIL]", "[INIT] gave up", "[INIT] not starting"] {
+    for forbidden in FORBIDDEN {
         if let Some(line) = lines(&whole).find(|line| line.contains(forbidden)) {
             return Err(format!("{forbidden:?} in {line:?}"));
         }
+    }
+    // Every shell launch reports the console counters so far; the last one comes after the
+    // Ctrl-\ typed with the first step, which only the hooks build acts on.
+    let counters = kernel_lines(&whole, "[SVC ] console input so far ")
+        .last()
+        .ok_or_else(|| "no console input counters".to_owned())?;
+    if number(counters, "control-dropped")? != 1 {
+        return Err(format!(
+            "Ctrl-\\ must be exactly one dropped control byte: {counters:?}"
+        ));
     }
     let (init_pid, mut shell) =
         check_boot(segments[0]).map_err(|reason| format!("boot: {reason}"))?;
@@ -581,12 +596,9 @@ fn drive(
         if let Some(reboot) = reboot_detector.observe(&transcript) {
             return fail(&transcript, reboot);
         }
-        for forbidden in [&b"[FAIL]"[..], b"[INIT] gave up"] {
-            if find(&transcript, forbidden).is_some() {
-                return fail(
-                    &transcript,
-                    format!("{:?} printed", String::from_utf8_lossy(forbidden)),
-                );
+        for forbidden in FORBIDDEN {
+            if find(&transcript, forbidden.as_bytes()).is_some() {
+                return fail(&transcript, format!("{forbidden:?} printed"));
             }
         }
         let (from, counts_from) = boundaries
@@ -641,7 +653,7 @@ fn drive(
 }
 
 /// QEMU's exit status once its serial port has gone, or that it was still running two seconds on.
-fn qemu_state(child: &mut ReapOnDrop) -> Result<String, XtaskError> {
+pub(crate) fn qemu_state(child: &mut ReapOnDrop) -> Result<String, XtaskError> {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if let Some(status) = child.try_wait()? {
@@ -662,12 +674,14 @@ mod tests {
         format!(
             "{}\n\
              [SVC ] shell process pid={pid} gen={generation} argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
-             [SVC ] console input so far lines=0 eofs=0\n\
+             [SVC ] console input so far lines=0 eofs=0 control-dropped={}\n\
              [SVC ] launch service=21504 pid={pid} gen={generation}\n\
              \n\n# BusyBox v1.37.0 (2026-09-23 09:18:28 UTC) built-in shell (ash)\n\n\
              [SVC ] ready service=21504 pid={pid} gen={generation} source=live-instance kernel-observed first-console-input-wait\n\
              [IPC ] console pid={init_pid}: [INIT] service=21504 ready gen={generation}\n",
-            expected_authority(pid)
+            expected_authority(pid),
+            // Ctrl-\ is typed with the first step, so every later shell has seen it dropped.
+            u8::from(generation > 1)
         )
     }
 
@@ -774,6 +788,7 @@ mod tests {
         let at = |dns, http| FixtureCounts {
             fixture_a_answers: dns,
             http_responses: http,
+            held_connections: 0,
         };
         assert_eq!(
             Served::between(at(2, 1), at(4, 1)),
@@ -946,6 +961,17 @@ mod tests {
             segments[7].push_str(line);
             assert!(run(&segments).is_err(), "{line}");
         }
+    }
+
+    #[test]
+    fn ctrl_backslash_must_be_one_dropped_control_byte_and_nothing_else() {
+        let mut segments = good_segments();
+        segments[8] = segments[8].replace("control-dropped=1", "control-dropped=0");
+        assert!(run(&segments).unwrap_err().contains("Ctrl-\\"));
+        let mut segments = good_segments();
+        segments[1].push_str("[HOOK] network fault armed pid=4 gen=1 user_rip=0x0\n");
+        assert!(run(&segments).unwrap_err().contains("[HOOK]"));
+        assert!(STEPS[0].send.starts_with(b"\x1c"));
     }
 
     #[test]

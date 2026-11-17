@@ -56,7 +56,10 @@ impl UartIo for Com1 {
     }
 
     fn read_rbr(&mut self) -> u8 {
-        port_in(RBR)
+        let byte = port_in(RBR);
+        #[cfg(feature = "system-test-hooks")]
+        crate::service::system_test_hooks::observe_received_byte(byte);
+        byte
     }
 
     fn read_msr(&mut self) -> u8 {
@@ -73,6 +76,8 @@ fn com1_interrupt() {
     if uart::drain(&mut Com1, &mut state.discipline, &mut state.uart).wake {
         state.wake_readers();
     }
+    #[cfg(feature = "system-test-hooks")]
+    crate::service::system_test_hooks::run_pending();
 }
 
 /// Turns COM1 receive on: discards stale input, routes ISA IRQ 4 and sets the receive bits of
@@ -96,6 +101,8 @@ pub(crate) fn enable() -> Result<u8, &'static str> {
         TRANSMIT_SEEN_ERRORS.store(0, Ordering::Relaxed);
         port_out(IER, IER_RECEIVE);
         state.vector = Some(vector);
+        #[cfg(feature = "system-test-hooks")]
+        crate::service::system_test_hooks::announce();
         Ok(vector)
     })
 }

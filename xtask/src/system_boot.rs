@@ -243,6 +243,10 @@ fn only_line<'a>(output: &'a str, prefix: &str) -> Result<&'a str, String> {
 /// entitlement, a client capability for the network instance (launched before it in the same
 /// init wake, so live) and the Linux personality only, and became ready by blocking on stdin.
 fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, String> {
+    // `[HOOK]` lines come only from the `system-test-hooks` build; this is the default image.
+    if let Some(line) = output.lines().find(|line| line.contains("[HOOK]")) {
+        return Err(format!("a test-hooks line in the default image: {line:?}"));
+    }
     let launched = only_line(output, "[KERN] init launched pid=")?;
     let init_pid = number(launched, "pid")?;
     let authority = only_line(output, "[KERN] init authority pid=")?;
@@ -525,6 +529,17 @@ mod tests {
             .contains("not sent by init"));
         let text = format!("{}[INIT] boot settled\n", transcript(1, 9));
         assert!(validate_boot(&text, Formatted::Yes).is_err());
+    }
+
+    #[test]
+    fn a_test_hooks_line_fails_the_default_image() {
+        let text = format!(
+            "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service\n{}",
+            transcript(1, 9)
+        );
+        assert!(validate_boot(&text, Formatted::Yes)
+            .unwrap_err()
+            .contains("test-hooks"));
     }
 
     #[test]

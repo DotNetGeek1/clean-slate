@@ -228,6 +228,8 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
             #[cfg(feature = "m9-linux-runtime-self-test")]
             crate::selftest::m9_linux_runtime_latency::observe_timer_irq();
             crate::sched::wait::expire_deadlines();
+            #[cfg(feature = "system-test-hooks")]
+            crate::service::system_test_hooks::run_pending();
             #[cfg(feature = "m9-block-wake-self-test")]
             crate::selftest::m9_block_wake::observe_timer_while_consumer_blocked();
             let next_stack_pointer =
