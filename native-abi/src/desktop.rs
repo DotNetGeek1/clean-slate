@@ -1,4 +1,4 @@
-//! Desktop launch contract (#118): the launch page the kernel's desktop launch policy writes for
+//! Desktop launch contract (#118): the launch page the kernel writes for
 //! the compositor, the desktop shell and native apps, and the console line every one of them
 //! uses for serial diagnostics.
 //!
@@ -42,12 +42,9 @@ const _: () = assert!(core::mem::offset_of!(DesktopLaunchPage, console_handle) =
 
 /// `console_handle` when the launch policy granted no console.
 pub const NO_CONSOLE: u64 = u64::MAX;
-/// Self-test builds only: the process crashes itself on its fault key (acceptance of crash
-/// containment); never set by the production launch policy.
-pub const LAUNCH_FLAG_FAULT_KEY: u64 = 1 << 0;
 /// Per-input serial lines (`[APP ] input`, `[APP ] focus`, `[INPT] focus`, `[WIN ] moved`).
-/// Set by the desktop lane kernel (`m10-desktop-self-test`) and by `system-test-hooks`.
-/// Lifecycle lines are printed either way (decision D5, #218).
+/// Set only by `system-test-hooks`. Lifecycle lines are printed either way (decision D5, #218).
+/// Bit 0 (the retired self-test fault key) is reserved.
 pub const LAUNCH_FLAG_INPUT_TRACE: u64 = 1 << 1;
 /// Opaque Q0: no translucency.
 pub const LAUNCH_TIER_Q0: u64 = 0;
@@ -55,11 +52,6 @@ pub const LAUNCH_TIER_Q0: u64 = 0;
 pub const LAUNCH_TIER_Q1: u64 = 1;
 
 impl DesktopLaunchPage {
-    /// `true` when the fault key is armed.
-    pub const fn fault_key_armed(&self) -> bool {
-        self.flags & LAUNCH_FLAG_FAULT_KEY != 0
-    }
-
     /// `true` when per-input serial lines should be printed.
     pub const fn input_trace(&self) -> bool {
         self.flags & LAUNCH_FLAG_INPUT_TRACE != 0
@@ -173,28 +165,20 @@ mod tests {
             self_pid: 7,
             graphics_resource_id: 0x5300,
             console_handle: NO_CONSOLE,
-            flags: LAUNCH_FLAG_FAULT_KEY,
+            flags: 1 << 0,
             tier: LAUNCH_TIER_Q0,
         };
-        assert!(page.fault_key_armed());
         assert!(!page.input_trace());
         assert!(page.is_opaque_tier());
         assert_eq!(page.console(), None);
         let page = DesktopLaunchPage {
             console_handle: 4,
-            flags: 0,
+            flags: LAUNCH_FLAG_INPUT_TRACE,
             tier: 9,
             ..page
         };
-        assert!(!page.fault_key_armed());
+        assert!(page.input_trace());
         assert!(!page.is_opaque_tier());
         assert_eq!(page.console(), Some(4));
-        let page = DesktopLaunchPage {
-            flags: LAUNCH_FLAG_INPUT_TRACE,
-            ..page
-        };
-        assert!(page.input_trace());
-        assert!(!page.fault_key_armed());
-        assert_ne!(LAUNCH_FLAG_INPUT_TRACE, LAUNCH_FLAG_FAULT_KEY);
     }
 }

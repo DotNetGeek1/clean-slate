@@ -295,6 +295,6 @@ mod tests {
         assert_eq!(RUNS.map(|run| run.machine), [VIRTIO_GPU_Q1, FRAMEBUFFER_Q0]);
         assert_eq!(VIRTIO_GPU_Q1.tier_name(), "Q1");
         assert_eq!(FRAMEBUFFER_Q0.tier_name(), "Q0");
-        assert!(FRAMEBUFFER_Q0.framebuffer && !VIRTIO_GPU_Q1.framebuffer);
+        assert_eq!(RUNS.map(|run| run.machine.framebuffer), [false, true]);
     }
 }

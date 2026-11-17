@@ -64,7 +64,7 @@ const FORBIDDEN: [&str; 3] = ["[FAIL]", GIVE_UP_LINES[0], GIVE_UP_LINES[1]];
 const SETTLED: &str = "[INPT] pointer settled ";
 /// The hooks build's quiet proof: nothing ran for half a second and nothing was presented.
 const QUIET: &str = "[IDLE ] quiet ";
-/// Where a starting compositor puts the pointer (the M10 policy's `cursor_at_start`). The first
+/// Where a starting compositor puts the pointer (the compositor policy's `cursor_at_start`). The first
 /// move after a start corrects from the guest's report if it is not.
 const START: Point = Point {
     x: OUTPUT.width as i32 / 2,

@@ -153,22 +153,21 @@ fn linux_rootfs_compiled(system_init: bool) -> bool {
 }
 
 /// `clean_slate_desktop` compiles the three desktop images, their launch path, the graphics
-/// port registry and the graphics, display and input grants: in the build that launches init
-/// (for its desktop rows), and in the `m10-desktop` kernels until that policy is deleted.
+/// port registry and the graphics, display and input grants, for the desktop rows of the build
+/// that launches init.
 fn emit_desktop_cfg(system_init: bool) -> bool {
     println!("cargo::rustc-check-cfg=cfg(clean_slate_desktop)");
-    let desktop = system_init || any_feature_enabled(&["m10-desktop"]);
-    if desktop {
+    if system_init {
         println!("cargo::rustc-cfg=clean_slate_desktop");
     }
-    desktop
+    system_init
 }
 
-/// `clean_slate_desktop_snapshot` compiles the system-wide desktop resource snapshot the M10
-/// policy and the `system-test-hooks` build compare against a baseline after each restart.
+/// `clean_slate_desktop_snapshot` compiles the system-wide desktop resource snapshot the
+/// `system-test-hooks` build compares against a baseline after each restart.
 fn emit_desktop_snapshot_cfg() {
     println!("cargo::rustc-check-cfg=cfg(clean_slate_desktop_snapshot)");
-    if any_feature_enabled(&["m10-desktop", "system-test-hooks"]) {
+    if any_feature_enabled(&["system-test-hooks"]) {
         println!("cargo::rustc-cfg=clean_slate_desktop_snapshot");
     }
 }
@@ -229,32 +228,21 @@ fn main() {
         embed_m9_rootfs_image();
     }
     if desktop {
-        // The self-test kernel embeds the `fault-keys` builds of the compositor and playground
-        // (built into `target/fault-keys`); every other desktop kernel, including the default
-        // image, embeds images without that code.
-        let fault_keys = if env::var("CARGO_FEATURE_M10_DESKTOP_SELF_TEST").is_ok() {
-            "target/fault-keys"
-        } else {
-            "target"
-        };
-        for (target_dir, raw_name, bin_name) in [
+        for (raw_name, bin_name) in [
             (
-                fault_keys,
                 "compositor_userspace.bin",
                 "clean-slate-compositor-userspace",
             ),
             (
-                "target",
                 "desktop_shell_userspace.bin",
                 "clean-slate-desktop-shell-userspace",
             ),
             (
-                fault_keys,
                 "playground_userspace.bin",
                 "clean-slate-playground-userspace",
             ),
         ] {
-            embed_userspace_image_from(target_dir, raw_name, bin_name, true);
+            embed_userspace_image(raw_name, bin_name, true);
         }
     }
 }
@@ -466,10 +454,6 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
-fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bool) {
-    embed_userspace_image_from("target", raw_name, bin_name, record_entry_offset);
-}
-
 /// Package and `-Z build-std` set for an embedded userspace bin.
 /// Storage and network are not the supervisor package, and they need `alloc`.
 fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
@@ -493,13 +477,8 @@ fn userspace_embed_recipe(bin_name: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// [`embed_userspace_image`] from the cargo target directory `target_dir` (workspace-relative).
-fn embed_userspace_image_from(
-    target_dir: &str,
-    raw_name: &str,
-    bin_name: &str,
-    record_entry_offset: bool,
-) {
+fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bool) {
+    let target_dir = "target";
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let profile = env::var("PROFILE").expect("PROFILE");
     let elf = userspace_elf(&manifest_dir, target_dir, &profile, bin_name);

@@ -6,8 +6,7 @@
 //! root record for exactly one holder, so process teardown (`revoke_for_holder`) removes it.
 //!
 //! The system build applies them one manifest grant at a time (`grant_graphics`,
-//! `grant_display_presenter`, `grant_input_seat`); the M10 launch policy applies a whole role with
-//! `grant_desktop_role`.
+//! `grant_display_presenter`, `grant_input_seat`).
 
 use clean_slate_capability::{CapabilityError, HolderId, ResourceRef, Rights};
 
@@ -47,68 +46,6 @@ pub(crate) fn grant_input_seat(holder: HolderId) -> Result<(), CapabilityError> 
     grant_input_authority(holder, COMPOSITOR_INPUT_RIGHTS).map(|_| ())
 }
 
-/// Who a desktop grant is for.
-#[cfg(any(test, feature = "m10-desktop"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GraphicsGrantee {
-    Compositor,
-    Shell,
-    App,
-}
-
-/// The grants one role receives, as `(resource, rights)`.
-#[cfg(any(test, feature = "m10-desktop"))]
-pub(crate) const fn grants_for(grantee: GraphicsGrantee) -> &'static [(GrantTarget, Rights)] {
-    match grantee {
-        GraphicsGrantee::Compositor => &[
-            (GrantTarget::Graphics, COMPOSITOR_GRAPHICS_RIGHTS),
-            (GrantTarget::Display, COMPOSITOR_DISPLAY_RIGHTS),
-            (GrantTarget::Input, COMPOSITOR_INPUT_RIGHTS),
-        ],
-        GraphicsGrantee::Shell => &[(GrantTarget::Graphics, SHELL_GRAPHICS_RIGHTS)],
-        GraphicsGrantee::App => &[(GrantTarget::Graphics, APP_GRAPHICS_RIGHTS)],
-    }
-}
-
-/// Resource a grant names; the graphics port resource is per compositor generation.
-#[cfg(any(test, feature = "m10-desktop"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GrantTarget {
-    Graphics,
-    Display,
-    Input,
-}
-
-#[cfg(test)]
-impl GrantTarget {
-    fn resource(self, graphics: ResourceRef) -> ResourceRef {
-        match self {
-            Self::Graphics => graphics,
-            Self::Display => ResourceRef::display(PRIMARY_OUTPUT_INDEX),
-            Self::Input => ResourceRef::input(0),
-        }
-    }
-}
-
-/// Grants `holder` every capability its role gets on the compositor generation `graphics`. On
-/// failure nothing is rolled back here: the caller tears the new process down, which revokes
-/// whatever was granted.
-#[cfg(any(test, feature = "m10-desktop"))]
-pub(crate) fn grant_desktop_role(
-    holder: HolderId,
-    grantee: GraphicsGrantee,
-    graphics: ResourceRef,
-) -> Result<(), CapabilityError> {
-    for &(target, rights) in grants_for(grantee) {
-        match target {
-            GrantTarget::Graphics => grant_graphics(holder, graphics, rights)?,
-            GrantTarget::Display => grant_display_presenter(holder)?,
-            GrantTarget::Input => grant_input_seat(holder)?,
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,31 +59,26 @@ mod tests {
     }
 
     #[test]
-    fn only_the_compositor_gets_serve_display_and_input() {
-        for grantee in [GraphicsGrantee::Shell, GraphicsGrantee::App] {
-            for &(target, rights) in grants_for(grantee) {
-                assert_eq!(target, GrantTarget::Graphics, "{grantee:?}");
-                assert!(!rights.contains(Rights::GFX_SERVE), "{grantee:?}");
-                assert!(!rights.contains(Rights::DELEGATE), "{grantee:?}");
-            }
-        }
-        let compositor = grants_for(GraphicsGrantee::Compositor);
-        assert_eq!(compositor.len(), 3);
-        for &(target, rights) in compositor {
-            let class = target.resource(GRAPHICS).class;
-            assert!(rights.is_subset_of(Rights::valid_for(class)), "{target:?}");
+    fn only_the_compositor_rights_serve_present_or_consume() {
+        for rights in [SHELL_GRAPHICS_RIGHTS, APP_GRAPHICS_RIGHTS] {
+            assert!(!rights.contains(Rights::GFX_SERVE));
             assert!(!rights.contains(Rights::DELEGATE));
         }
+        for (rights, resource) in [
+            (COMPOSITOR_GRAPHICS_RIGHTS, GRAPHICS),
+            (
+                COMPOSITOR_DISPLAY_RIGHTS,
+                ResourceRef::display(PRIMARY_OUTPUT_INDEX),
+            ),
+            (COMPOSITOR_INPUT_RIGHTS, ResourceRef::input(0)),
+        ] {
+            assert!(rights.is_subset_of(Rights::valid_for(resource.class)));
+            assert!(!rights.contains(Rights::DELEGATE));
+        }
+        assert_eq!(APP_GRAPHICS_RIGHTS, Rights::GFX_CONNECT);
         assert_eq!(
-            grants_for(GraphicsGrantee::App),
-            &[(GrantTarget::Graphics, Rights::GFX_CONNECT)]
-        );
-        assert_eq!(
-            grants_for(GraphicsGrantee::Shell),
-            &[(
-                GrantTarget::Graphics,
-                Rights::GFX_CONNECT.union(Rights::GFX_SHELL)
-            )]
+            SHELL_GRAPHICS_RIGHTS,
+            Rights::GFX_CONNECT.union(Rights::GFX_SHELL)
         );
     }
 
@@ -155,9 +87,11 @@ mod tests {
         let compositor = HolderId(91_181);
         let shell = HolderId(91_182);
         let app = HolderId(91_183);
-        grant_desktop_role(compositor, GraphicsGrantee::Compositor, GRAPHICS).expect("compositor");
-        grant_desktop_role(shell, GraphicsGrantee::Shell, GRAPHICS).expect("shell");
-        grant_desktop_role(app, GraphicsGrantee::App, GRAPHICS).expect("app");
+        grant_graphics(compositor, GRAPHICS, COMPOSITOR_GRAPHICS_RIGHTS).expect("compositor");
+        grant_display_presenter(compositor).expect("display");
+        grant_input_seat(compositor).expect("seat");
+        grant_graphics(shell, GRAPHICS, SHELL_GRAPHICS_RIGHTS).expect("shell");
+        grant_graphics(app, GRAPHICS, APP_GRAPHICS_RIGHTS).expect("app");
 
         let display = ResourceRef::display(PRIMARY_OUTPUT_INDEX);
         let seat = ResourceRef::input(0);

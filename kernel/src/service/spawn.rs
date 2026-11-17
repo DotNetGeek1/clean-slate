@@ -349,7 +349,7 @@ pub(crate) enum BuiltinServiceImage {
     /// #218 S5 serial-console BusyBox shell launched by `service::system_shell`.
     #[cfg(clean_slate_system_init)]
     LinuxShell,
-    /// #118 desktop images: the system build's desktop rows, or the M10 launch policy's services.
+    /// #118 desktop images: the system build's desktop rows.
     #[cfg(clean_slate_desktop)]
     Desktop(super::desktop_image::DesktopRole),
 }
@@ -1595,8 +1595,7 @@ const _: () = {
 };
 
 /// Maps a desktop image at its link address, its stack, and the launch page for the new pid
-/// (from its manifest row, or the M10 policy's when it has none), then registers the process
-/// Ready.
+/// (from its manifest row), then registers the process Ready.
 #[cfg(clean_slate_desktop)]
 #[inline(never)]
 fn launch_desktop_image(
@@ -1644,7 +1643,8 @@ fn launch_desktop_image(
                 DESKTOP_STACK_ADDRESS,
                 image.stack_pages,
             )?;
-            let page = super::desktop_image::launch_page_for(pid, context.spec)?;
+            let spec = context.spec.ok_or("desktop service has no manifest row")?;
+            let page = super::desktop_image::launch_page_for(pid, spec)?;
             let data_frame = allocator
                 .allocate_page()
                 .ok_or("allocator could not provide a desktop launch page")?;

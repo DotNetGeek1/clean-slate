@@ -1,10 +1,9 @@
 //! The three #118 desktop images as services: their identities, the compositor's port
 //! parameters and the launch page `spawn` writes for a new instance.
 //!
-//! Shared by the system build's manifest rows (#218 S6c) and the M10 launch policy
-//! ([`super::desktop_launch`]). A row's page carries a console only when the row holds
-//! `Grant::Console`, and the tier the boot option chose; the M10 policy's page always carries a
-//! console and takes the tier from its build features.
+//! The system build's manifest rows (#218 S6c) are the only way they launch: the kernel has no
+//! desktop launch policy of its own (S6f). A row's page carries a console only when the row
+//! holds `Grant::Console`, and the tier of the desktop mode init runs with.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -93,19 +92,13 @@ const fn row_flags() -> u64 {
     }
 }
 
-/// What `spawn` writes at the launch address for the new `pid`. With a row, authority comes from
-/// it alone; without one (the M10 policy's services) the policy's page is used. The graphics,
-/// display and input grants are applied separately, after registration.
+/// What `spawn` writes at the launch address for the new `pid` of `spec`'s row; its authority
+/// comes from the row alone. The graphics, display and input grants are applied separately,
+/// after registration.
 pub(crate) fn launch_page_for(
     pid: u64,
-    spec: Option<&ServiceSpec>,
+    spec: &ServiceSpec,
 ) -> Result<DesktopLaunchPage, &'static str> {
-    let Some(spec) = spec else {
-        #[cfg(feature = "m10-desktop")]
-        return Ok(super::desktop_launch::launch_page_for(pid));
-        #[cfg(not(feature = "m10-desktop"))]
-        return Ok(page(pid, NO_CONSOLE, ROW_TIER.load(Ordering::Relaxed), 0));
-    };
     let console_handle = if spec.grants(Grant::Console) {
         unsafe { crate::ipc::endpoint_table_mut() }
             .grant_console_capability_for_pid(pid)
@@ -121,12 +114,7 @@ pub(crate) fn launch_page_for(
     ))
 }
 
-pub(crate) const fn page(
-    pid: u64,
-    console_handle: u64,
-    tier: u64,
-    flags: u64,
-) -> DesktopLaunchPage {
+const fn page(pid: u64, console_handle: u64, tier: u64, flags: u64) -> DesktopLaunchPage {
     DesktopLaunchPage {
         self_pid: pid,
         graphics_resource_id: COMPOSITOR_SERVICE_ID.0 as u64,

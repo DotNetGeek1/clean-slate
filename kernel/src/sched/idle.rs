@@ -42,18 +42,9 @@ fn idle_thread_one_wait() {
     crate::selftest::m4_lifecycle_wait::on_idle_loop_wake();
     #[cfg(feature = "m9-linux-runtime-self-test")]
     crate::selftest::m9_linux_runtime_latency::observe_idle_halt();
-    #[cfg(feature = "m10-desktop")]
-    // The desktop state is also reached from the CPL3 fault path; masked here so the first
-    // idle entry (whose interrupt flag comes from the bootstrap frame) cannot interleave.
-    let made_ready =
-        without_interrupts(|| crate::service::desktop_launch::on_idle(crate::time::monotonic_ns()));
-    #[cfg(not(feature = "m10-desktop"))]
-    let made_ready = false;
     #[cfg(feature = "system-test-hooks")]
     without_interrupts(crate::service::system_test_hooks::on_idle);
-    if !made_ready {
-        enable_interrupts_and_halt();
-    }
+    enable_interrupts_and_halt();
     // Interrupts stay masked from the scheduler decision through the stack
     // switch. `wake_from_idle_loop` moves `current_thread` to the selected
     // thread; if a timer IRQ landed between that and `restore_task_context`,
@@ -72,8 +63,6 @@ fn idle_thread_one_wait() {
     };
     match next_stack {
         Ok(stack_pointer) => {
-            #[cfg(feature = "m10-desktop")]
-            crate::service::desktop_launch::on_idle_exit();
             #[cfg(feature = "system-test-hooks")]
             crate::service::system_test_hooks::on_idle_exit();
             if let Err(message) = prepare_current_scheduler_thread_dispatch() {

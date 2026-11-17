@@ -2415,7 +2415,7 @@ const M10_COMPOSITOR_USERSPACE_BINS: [&str; 2] = [
 
 /// M10 #112 compositor gate: the host suite drives the compositor core through the shared
 /// `FakePort` / `FakeDisplay` engines; the CPL3 builds prove the kernel adapter compiles.
-/// The QEMU desktop lane needs #111 `MAP_SCANOUT` / `PRESENT` and the P5 launch policy.
+/// The QEMU desktop lanes boot it from init's manifest rows.
 fn run_m10_compositor_acceptance() -> Result<(), XtaskError> {
     let mut test = Command::new("cargo");
     test.current_dir(workspace_root())
@@ -2487,8 +2487,8 @@ fn run_m10_desktop_interactive(args: &[OsString]) -> Result<(), XtaskError> {
 
 /// M10 #117 native app gate: the playground's layout/state/damage/render tests and its session
 /// against the real compositor core over the fake port, shared memory and display; the CPL3
-/// build proves the syscall adapter compiles. The QEMU lane needs #115 window lifecycle and the
-/// #118 launch policy.
+/// build proves the syscall adapter compiles. The QEMU desktop lanes boot it from init's
+/// manifest rows.
 fn run_m10_app_acceptance() -> Result<(), XtaskError> {
     let mut test = Command::new("cargo");
     test.current_dir(workspace_root())
