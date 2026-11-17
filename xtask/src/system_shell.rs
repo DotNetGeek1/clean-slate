@@ -192,6 +192,9 @@ const STEPS: [Step; 10] = [
     },
 ];
 
+/// The `wget` step's one `GET /`; no other step talks HTTP.
+const SHELL_HTTP_REQUESTS: u32 = 1;
+
 /// The live shell instance a step runs in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Shell {
@@ -518,8 +521,11 @@ pub(crate) fn run() -> Result<(), XtaskError> {
         ..system_vm_config(disk, Some(peer.port()))
     };
     let result = drive(&listener, config, &peer);
-    peer.shutdown();
+    let counts = peer.shutdown();
     let (transcript, boundaries) = result?;
+    counts
+        .require_http_requests("test-system-shell", SHELL_HTTP_REQUESTS)
+        .map_err(XtaskError::Validation)?;
     let typed_at = &boundaries[..boundaries.len().saturating_sub(1)];
     let offsets: Vec<usize> = typed_at.iter().map(|(at, _)| *at).collect();
     let segments = split_at(&transcript, &offsets);
@@ -810,7 +816,7 @@ mod tests {
         let at = |dns, http| FixtureCounts {
             fixture_a_answers: dns,
             http_responses: http,
-            held_connections: 0,
+            ..FixtureCounts::default()
         };
         assert_eq!(
             Served::between(at(2, 1), at(4, 1)),

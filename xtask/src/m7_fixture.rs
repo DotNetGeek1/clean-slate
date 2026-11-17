@@ -21,7 +21,8 @@ use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::udp;
 
 use crate::m7_fixture_tcp::{
-    FixtureTlsCert, M9BannerService, M9HoldService, M9HttpService, TcpEchoService, TlsService,
+    FixtureTlsCert, HoldEvent, HttpOutcome, M9BannerService, M9HoldService, M9HttpService,
+    TcpEchoService, TlsService,
 };
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
@@ -64,17 +65,37 @@ pub struct M7FixturePeer {
 struct FixtureSeen {
     /// DNS replies sent that carry an A record for `FIXTURE_HOSTNAME`.
     fixture_a_answers: AtomicU32,
-    /// HTTP responses the M9 HTTP service sent.
+    /// HTTP responses the M9 HTTP service sent, each to a complete request it received.
     http_responses: AtomicU32,
+    /// HTTP connections the M9 HTTP service closed unanswered, without a complete request.
+    http_refused: AtomicU32,
     /// Connections the M9 hold service has taken and is not answering.
     held_connections: AtomicU32,
+    /// Held connections on which a complete HTTP request head has arrived (still unanswered).
+    held_requests: AtomicU32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FixtureCounts {
     pub fixture_a_answers: u32,
     pub http_responses: u32,
+    pub http_refused: u32,
     pub held_connections: u32,
+    pub held_requests: u32,
+}
+
+impl FixtureCounts {
+    /// #255: a lane whose evidence is `expected` HTTP exchanges passes only if the
+    /// fixture received and answered exactly that many well-formed requests.
+    pub fn require_http_requests(&self, lane: &str, expected: u32) -> Result<(), String> {
+        if self.http_responses == expected && self.http_refused == 0 {
+            return Ok(());
+        }
+        Err(format!(
+            "{lane}: the fixture answered {} of {expected} expected HTTP requests and refused {} connection(s) without a complete request",
+            self.http_responses, self.http_refused
+        ))
+    }
 }
 
 impl M7FixturePeer {
@@ -106,15 +127,19 @@ impl M7FixturePeer {
         FixtureCounts {
             fixture_a_answers: self.seen.fixture_a_answers.load(Ordering::SeqCst),
             http_responses: self.seen.http_responses.load(Ordering::SeqCst),
+            http_refused: self.seen.http_refused.load(Ordering::SeqCst),
             held_connections: self.seen.held_connections.load(Ordering::SeqCst),
+            held_requests: self.seen.held_requests.load(Ordering::SeqCst),
         }
     }
 
-    pub fn shutdown(mut self) {
+    /// Stops the peer and returns what it served over the whole run.
+    pub fn shutdown(mut self) -> FixtureCounts {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+        self.counts()
     }
 }
 
@@ -250,16 +275,28 @@ fn run_peer(
         }
         tls_service.poll(&mut sockets);
         if let Some(http) = m9_http_service.as_mut() {
-            if http.poll(&mut sockets) {
-                seen.http_responses.fetch_add(1, Ordering::SeqCst);
+            match http.poll(&mut sockets) {
+                Some(HttpOutcome::Answered) => {
+                    seen.http_responses.fetch_add(1, Ordering::SeqCst);
+                }
+                Some(HttpOutcome::Refused) => {
+                    seen.http_refused.fetch_add(1, Ordering::SeqCst);
+                }
+                None => {}
             }
         }
         if let Some(banner) = m9_banner_service.as_mut() {
             banner.poll(&mut sockets);
         }
         if let Some(hold) = m9_hold_service.as_mut() {
-            if hold.poll(&mut sockets) {
-                seen.held_connections.fetch_add(1, Ordering::SeqCst);
+            match hold.poll(&mut sockets) {
+                Some(HoldEvent::Held) => {
+                    seen.held_connections.fetch_add(1, Ordering::SeqCst);
+                }
+                Some(HoldEvent::RequestReceived) => {
+                    seen.held_requests.fetch_add(1, Ordering::SeqCst);
+                }
+                None => {}
             }
         }
         for event in device.drain_events() {
@@ -271,9 +308,41 @@ fn run_peer(
 
 const M9_REFUSED_PORT: u16 = 0x1339;
 
+/// Set to `1` to log every TCP segment the fixture receives or sends (`[FIX ] trace ...`).
+const FRAME_TRACE_ENV: &str = "CLEAN_SLATE_FIXTURE_TRACE";
+
+fn frame_trace_enabled() -> bool {
+    std::env::var_os(FRAME_TRACE_ENV).is_some_and(|value| value == "1")
+}
+
+/// One-line summary of a TCP-over-IPv4 Ethernet frame, or `None` for anything else.
+fn describe_tcp_frame(direction: &str, frame: &[u8]) -> Option<String> {
+    let (eth, l3) = EthernetHeader::parse(frame).ok()?;
+    if eth.ethertype != EtherType::IPV4 {
+        return None;
+    }
+    let (ip, ip_payload) = Ipv4Header::parse(l3).ok()?;
+    if ip.protocol != IpProtocol::TCP {
+        return None;
+    }
+    let (seg, payload) = parse_tcp_segment(ip.src, ip.dst, ip_payload).ok()?;
+    Some(format!(
+        "[FIX ] trace {direction} tcp {}:{} -> {}:{} seq={} ack={} flags={:#04x} len={}",
+        ip.src,
+        seg.src_port,
+        ip.dst,
+        seg.dst_port,
+        seg.seq,
+        seg.ack,
+        seg.flags.0,
+        payload.len()
+    ))
+}
+
 struct QemuSocketDevice {
     stream: TcpStream,
     m9_profile: bool,
+    trace_frames: bool,
     /// Bytes received from QEMU that do not yet form a complete
     /// length-prefixed frame. The socket is non-blocking, so a read may stop
     /// mid-prefix or mid-frame; buffering keeps the stream in sync.
@@ -287,6 +356,7 @@ impl QemuSocketDevice {
         Self {
             stream,
             m9_profile,
+            trace_frames: frame_trace_enabled(),
             pending: Vec::with_capacity(4 * (4 + MAX_FRAME_BYTES)),
             rx_queue: VecDeque::new(),
             events: Vec::new(),
@@ -409,6 +479,9 @@ impl QemuSocketDevice {
                 let frame = self.pending[start..end].to_vec();
                 if frame.len() >= 14 && u16::from_be_bytes([frame[12], frame[13]]) == 0x0806 {
                     self.events.push("[FIX ] arp request".to_owned());
+                }
+                if self.trace_frames {
+                    self.events.extend(describe_tcp_frame("guest", &frame));
                 }
                 if !(self.m9_profile && self.try_answer_m9_refused_syn(&frame)) {
                     self.rx_queue.push_back(frame);
@@ -600,6 +673,11 @@ impl phy::TxToken for QemuTxToken<'_> {
                 self.device.events.push("[FIX ] icmp echo".to_owned());
             }
         }
+        if self.device.trace_frames {
+            self.device
+                .events
+                .extend(describe_tcp_frame("fixture", &buffer));
+        }
         let _ = self.device.write_frame_to_socket(&buffer);
         result
     }
@@ -607,7 +685,22 @@ impl phy::TxToken for QemuTxToken<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_dns_response;
+    use super::{build_dns_response, FixtureCounts};
+
+    #[test]
+    fn a_lane_needs_exactly_its_http_requests_and_no_refusals() {
+        let report = |http_responses, http_refused| FixtureCounts {
+            http_responses,
+            http_refused,
+            ..FixtureCounts::default()
+        };
+        assert!(report(9, 0).require_http_requests("lane", 9).is_ok());
+        let missing = report(0, 9).require_http_requests("lane", 9).unwrap_err();
+        assert!(missing.contains("answered 0 of 9"), "{missing}");
+        assert!(report(8, 0).require_http_requests("lane", 9).is_err());
+        assert!(report(10, 0).require_http_requests("lane", 9).is_err());
+        assert!(report(9, 1).require_http_requests("lane", 9).is_err());
+    }
 
     /// PTR query/reply bytes from `fixtures/busybox/frozen/traces/nslookup-fixture.strace`.
     const FROZEN_PTR_QUERY: &[u8] =

@@ -389,7 +389,7 @@ Issue #125 adds a **client-only** TCP transport in `network/src/tcp/` over [`L3S
 
 - Active open only (`SynSent` → `Established`); no `LISTEN` / `SYN-RCVD`.
 - In-order delivery: segments must arrive with `seq == rcv_nxt`; out-of-order segments are dropped and counted.
-- **Server-first data:** payload piggybacked on the SYN-ACK is accepted at `IRS + 1`; non-SYN segments in `SynSent` are dropped (RFC 793). Every accepted segment is ACKed even while guest data is unacknowledged, and unacceptable (duplicate / out-of-window) data or FIN segments are answered with an ACK. M9 acceptance adds fixture TCP **4002** (`M9BannerService`): banner on accept, guest `connect` → `nanosleep(100 ms)` → `recv` byte-exact (`[M9.P] banner ok`). HTTP on **4001** sends as soon as `may_send()` (no request gate).
+- **Server-first data:** payload piggybacked on the SYN-ACK is accepted at `IRS + 1`; non-SYN segments in `SynSent` are dropped (RFC 793). Every accepted segment is ACKed even while guest data is unacknowledged, and unacceptable (duplicate / out-of-window) data or FIN segments are answered with an ACK. M9 acceptance adds fixture TCP **4002** (`M9BannerService`): banner on accept, guest `connect` → `nanosleep(100 ms)` → `recv` byte-exact (`[M9.P] banner ok`). HTTP on **4001** (`M9HttpService`) answers only after the guest's whole request head has arrived (see [Fixture peer](#fixture-peer-xtask)).
 - Stop-and-go: at most **one** unacknowledged data segment in flight.
 - Fixed RTO ([`TCP_RTO_TICKS`](../network/src/tcp/conn.rs)); separate connect timeout ([`TCP_CONNECT_TIMEOUT_TICKS`](../network/src/tcp/conn.rs)). Data-phase RTO exhaustion uses [`TCP_MAX_RETRIES`](../network/src/tcp/conn.rs); `SynSent` retries until connect timeout.
 - TCP options on the wire: EOL, NOP, MSS (kind 2, len 4) only; MSS is sent on SYN only.
@@ -510,7 +510,10 @@ Enable in consumers: `clean-slate-network` feature `tls` (kernel: `m7-tls-self-t
 
 - TCP echo [`TCP_ECHO_PORT`](../network/src/fixture.rs): `APP_REQUEST_BYTES` → `APP_RESPONSE_BYTES`.
 - TLS [`TLS_PORT`](../network/src/fixture.rs): rustls server, same app contract after handshake.
-- Markers: `[FIX ] tcp echo`, `[FIX ] tls handshake sni=…`, `[FIX ] tls app bytes`.
+- M9 profile only: HTTP on `10.77.0.50:4001` reads the request head first and answers `M9-FIXTURE-HTTP\n` only when it is exactly `GET / HTTP/1.0` or `GET / HTTP/1.1`, then `name: value` header lines, then the blank line, within 2048 bytes and 5 s of the connect. Anything else is closed without a response. The peer counts answered and refused connections (`M7FixturePeer::counts`), and `test-m9-userspace`, `test-m9-linux-socket`, `test-system-shell` and `test-system` require exactly their number of answered requests (9, 1, 1 and 2) and no refusal (#255), so a request that never leaves the guest fails the lane. Banner on `4002` is sent on accept and needs no request.
+- M9 profile only: the hold port `10.77.0.50:4003` (#218 S7b) accepts and never sends, so a client reading a response blocks. It counts a connection as held once it is established, before reading anything, and separately counts a held connection whose complete request head has arrived; `test-system` requires one of each.
+- Markers: `[FIX ] tcp echo`, `[FIX ] tls handshake sni=…`, `[FIX ] tls app bytes`, `[FIX ] m9 http request "GET / HTTP/1.1" (83 bytes)`, `[FIX ] m9 http refused: <reason> (N bytes received)`, `[FIX ] m9 hold connection held`, `[FIX ] m9 hold request received (N bytes); not answering`.
+- `CLEAN_SLATE_FIXTURE_TRACE=1` makes the peer print every TCP segment it receives or sends (`[FIX ] trace guest|fixture tcp <src> -> <dst> seq= ack= flags= len=`), to see whether guest data reached the wire.
 
 ### QEMU acceptance
 

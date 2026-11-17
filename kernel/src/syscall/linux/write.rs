@@ -34,7 +34,7 @@ use super::table::LinuxSyscallContext;
 use super::user_copy::{copy_user_bytes, LINUX_USER_COPY_MAX_BYTES};
 use crate::ipc::IPC_MAX_MESSAGE_BYTES;
 use crate::mm::PAGE_SIZE;
-use crate::process::linux_fd::{self, LinuxFdProjection};
+use crate::process::linux_fd::{self, open_description::SocketRef, LinuxFdProjection};
 use clean_slate_linux_abi::{
     LinuxErrno, LinuxSyscallRequest, LinuxSyscallResult, EBADF, EFAULT, EINVAL,
 };
@@ -147,6 +147,81 @@ pub(crate) fn write_chunked(
     Ok(written as u64)
 }
 
+/// The socket `fd` names, when this build carries the Linux socket layer.
+///
+/// `write(2)` and `writev(2)` both send through [`write_socket_gathered`] when this
+/// returns a socket; socket fds have no write projection, so missing this check
+/// turns a send into `EBADF`.
+pub(crate) fn socket_for_fd(
+    pid: u64,
+    generation: clean_slate_service_lifecycle::InstanceGeneration,
+    fd: u64,
+) -> Option<SocketRef> {
+    #[cfg(clean_slate_linux_socket)]
+    if let Ok(linux_fd::LinuxReadKind::Socket(socket)) =
+        linux_fd::read_kind_for_fd(pid, generation, fd)
+    {
+        return Some(socket);
+    }
+    let _ = (pid, generation, fd);
+    None
+}
+
+/// Copies the first `min(count, LINUX_WRITE_MAX_BYTES)` request bytes into `buf` with
+/// `fetch` (same contract as in [`write_chunked`]) and returns how many were copied.
+/// A fault after some bytes reports those bytes; a fault on the first chunk is the errno.
+pub(crate) fn gather_write_bytes(
+    count: u64,
+    mut fetch: impl FnMut(u64, usize, &mut [u8; LINUX_WRITE_CHUNK_BYTES]) -> Result<usize, LinuxErrno>,
+    buf: &mut [u8; LINUX_WRITE_MAX_BYTES],
+) -> Result<usize, LinuxErrno> {
+    let total = clamp_write_count(count);
+    let mut gathered = 0usize;
+    let mut chunk = [0u8; LINUX_WRITE_CHUNK_BYTES];
+    for _ in 0..LINUX_WRITE_MAX_CHUNKS {
+        if gathered >= total {
+            break;
+        }
+        let want = (total - gathered).min(LINUX_WRITE_CHUNK_BYTES);
+        match fetch(gathered as u64, want, &mut chunk) {
+            Ok(fetched) if fetched == want => {
+                buf[gathered..gathered + want].copy_from_slice(&chunk[..want]);
+                gathered += want;
+            }
+            Ok(_) => return partial_or_error(gathered, EINVAL).map(|n| n as usize),
+            Err(errno) => return partial_or_error(gathered, errno).map(|n| n as usize),
+        }
+    }
+    Ok(gathered)
+}
+
+/// `write(2)`/`writev(2)` on a socket: the gathered request goes to the socket layer as
+/// one send, so a stream peer receives exactly the bytes the call reports.
+pub(crate) fn write_socket_gathered(
+    request: &LinuxSyscallRequest,
+    ctx: &mut LinuxSyscallContext<'_>,
+    fd: u64,
+    socket: SocketRef,
+    count: u64,
+    fetch: impl FnMut(u64, usize, &mut [u8; LINUX_WRITE_CHUNK_BYTES]) -> Result<usize, LinuxErrno>,
+) -> LinuxSyscallResult {
+    let mut buf = [0u8; LINUX_WRITE_MAX_BYTES];
+    let gathered = gather_write_bytes(count, fetch, &mut buf)?;
+    if gathered == 0 {
+        return Ok(0);
+    }
+    let (pid, generation) = (ctx.pid, ctx.instance_generation);
+    crate::process::linux_socket::write_socket(
+        request,
+        ctx,
+        pid,
+        generation,
+        fd,
+        socket,
+        &buf[..gathered],
+    )
+}
+
 /// Linux partial-write rule: an error after some bytes were delivered reports
 /// the delivered count; an error before any byte reports the errno.
 fn partial_or_error(written: usize, errno: LinuxErrno) -> LinuxSyscallResult {
@@ -200,33 +275,11 @@ pub(crate) fn handle_sys_write(
 
     linux_fd::ensure_open_fd(pid, generation, fd)?;
 
-    #[cfg(clean_slate_linux_socket)]
-    if let Ok(linux_fd::LinuxReadKind::Socket(socket)) =
-        linux_fd::read_kind_for_fd(pid, generation, fd)
-    {
-        let total = clamp_write_count(count);
-        if total == 0 {
-            return Ok(0);
-        }
-        let mut buf = [0u8; LINUX_WRITE_MAX_BYTES];
-        let mut copied = 0usize;
-        let mut scratch = [0u8; LINUX_WRITE_CHUNK_BYTES];
-        while copied < total {
-            let chunk_ptr = user_ptr.checked_add(copied as u64).ok_or(EFAULT)?;
-            let want = (total - copied).min(LINUX_WRITE_CHUNK_BYTES);
-            let n = copy_user_bytes(chunk_ptr, want as u64, &mut scratch)?;
-            buf[copied..copied + n].copy_from_slice(&scratch[..n]);
-            copied += n;
-        }
-        return crate::process::linux_socket::write_socket(
-            request,
-            ctx,
-            pid,
-            generation,
-            fd,
-            socket,
-            &buf[..total],
-        );
+    if let Some(socket) = socket_for_fd(pid, generation, fd) {
+        return write_socket_gathered(request, ctx, fd, socket, count, |offset, len, dst| {
+            let chunk_ptr = user_ptr.checked_add(offset).ok_or(EFAULT)?;
+            copy_user_bytes(chunk_ptr, len as u64, dst)
+        });
     }
 
     let projection = linux_fd::projection_for(pid, generation, fd)?;
@@ -323,6 +376,62 @@ mod tests {
             LINUX_WRITE_MAX_BYTES
         );
         assert_eq!(clamp_write_count(u64::MAX), LINUX_WRITE_MAX_BYTES);
+    }
+
+    fn fetch_from(
+        source: &[u8],
+    ) -> impl FnMut(u64, usize, &mut [u8; LINUX_WRITE_CHUNK_BYTES]) -> Result<usize, LinuxErrno> + '_
+    {
+        move |offset, len, dst| {
+            let start = offset as usize;
+            dst[..len].copy_from_slice(&source[start..start + len]);
+            Ok(len)
+        }
+    }
+
+    #[test]
+    fn gather_collects_the_whole_request_across_chunks() {
+        let source: Vec<u8> = (0..200u32).map(|i| i as u8).collect();
+        let mut buf = [0u8; LINUX_WRITE_MAX_BYTES];
+        assert_eq!(
+            gather_write_bytes(200, fetch_from(&source), &mut buf),
+            Ok(200)
+        );
+        assert_eq!(&buf[..200], &source[..]);
+        assert_eq!(gather_write_bytes(0, fetch_from(&source), &mut buf), Ok(0));
+    }
+
+    #[test]
+    fn gather_is_bounded_by_one_page() {
+        let source = vec![7u8; LINUX_WRITE_MAX_BYTES + 100];
+        let mut buf = [0u8; LINUX_WRITE_MAX_BYTES];
+        assert_eq!(
+            gather_write_bytes(source.len() as u64, fetch_from(&source), &mut buf),
+            Ok(LINUX_WRITE_MAX_BYTES)
+        );
+    }
+
+    #[test]
+    fn gather_fault_reports_bytes_before_it_or_the_errno() {
+        let mut buf = [0u8; LINUX_WRITE_MAX_BYTES];
+        let fault_at = |at: u64| {
+            move |offset: u64, len: usize, dst: &mut [u8; LINUX_WRITE_CHUNK_BYTES]| {
+                if offset >= at {
+                    return Err(EFAULT);
+                }
+                dst[..len].fill(1);
+                Ok(len)
+            }
+        };
+        assert_eq!(gather_write_bytes(200, fault_at(0), &mut buf), Err(EFAULT));
+        assert_eq!(
+            gather_write_bytes(200, fault_at(LINUX_WRITE_CHUNK_BYTES as u64), &mut buf),
+            Ok(LINUX_WRITE_CHUNK_BYTES)
+        );
+        assert_eq!(
+            gather_write_bytes(10, |_, _, _| Ok(3), &mut buf),
+            Err(EINVAL)
+        );
     }
 
     #[test]
