@@ -263,6 +263,8 @@ Each process root that maps shared buffers installs a private PDPT/PD subtree un
 
 **NX enforcement.** Boot calls `enable_and_verify_nxe` immediately after `ExitBootServices` and logs `[CPU ] NXE enabled nx=1 firmware_nxe=<0|1>`. Without `EFER.NXE`, `NO_EXECUTE` PTEs would fault as reserved-bit violations instead of instruction-fetch faults; `cargo xtask test-m10-nxe` locks this down before shared-buffer mappings rely on NX leaves.
 
+**Supervisor guards (#217).** Right after NXE, `enable_kernel_guards` sets `CR0.WP` (OVMF usually leaves it set; boot no longer relies on that) and, when CPUID leaf 7 reports them, `CR4.SMEP` and `CR4.UMIP`, then reads both registers back. It logs `[CPU ] guards wp=on smep=<on|unsupported> smap=<off|unsupported> umip=<on|unsupported> firmware_wp=<0|1>`. With WP set, a supervisor write to a read-only page faults, so the page-table edits that need one go through `without_write_protect`. SMEP makes a CPL0 instruction fetch from a user page fault; UMIP makes `sgdt`/`sidt`/`sldt`/`smsw`/`str` at CPL3 raise `#GP`. `CR4.SMAP` stays off: the kernel still dereferences user pointers directly, and SMAP needs a `stac`/`clac` copy helper first. Every xtask QEMU lane runs a `-cpu` model with `+smep,+smap,+umip`. NMI (IST2) and `#MC` (IST3) have their own guarded IST stacks beside the double-fault one (IST1), because either can arrive between `SYSCALL` and the kernel stack switch. `cargo xtask test-m2` checks all of this in its kernel-guards step.
+
 Syscall-16 ABI, limits, and capability rules: [GRAPHICS.md](GRAPHICS.md#shared-buffers-syscall-16-195).
 
 ## Driver description experiment
@@ -339,7 +341,7 @@ Keep interrupt entry/exit stubs, timer acknowledgement, and context-restore asse
 
 Single-core correctness is the M2 target, but the design should not bake `current task` or timer ownership into a single global scheduling policy forever. The intended SMP shape is:
 
-- **Per-CPU execution state:** each CPU owns its active interrupt stack, double-fault IST stack, GDT/TSS entries, current-task pointer, interrupt-disabled bookkeeping, and local run-queue cursor.
+- **Per-CPU execution state:** each CPU owns its active interrupt stack, double-fault, NMI and machine-check IST stacks, GDT/TSS entries, current-task pointer, interrupt-disabled bookkeeping, and local run-queue cursor.
 - **Shared task metadata:** task identity, saved register context, runnable/blocked/finished state, affinity or migration hints, and wakeup reasons stay in globally visible task records.
 - **Synchronization boundary:** CPU-local fast paths may read/write only their currently owned task without contention; transitions that change runnable ownership, wake a remote CPU, or publish a newly created task cross an atomic/spinlock boundary.
 - **Local APIC access:** every LAPIC register access (`arch/x86_64/apic.rs`: enable, EOI, timer programming and calibration, `send_self_ipi`) goes through the uncached alias described in [M1 virtual memory layout](#m1-virtual-memory-layout). An access before the alias is installed is a fatal kernel error, not a fallback to the identity address. The LAPIC's identity window is unmapped, so a stray store to it faults and names itself instead of reaching the APIC.
