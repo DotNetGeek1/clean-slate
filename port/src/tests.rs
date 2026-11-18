@@ -16,7 +16,8 @@ use clean_slate_native_abi::{
 };
 
 use crate::{
-    Caller, Effect, Effects, PortCore, PortCounts, PortError, PortKey, RegistrationError, Transfer,
+    Caller, Effect, Effects, LimitRejections, PortCore, PortCounts, PortError, PortKey,
+    RegistrationError, Transfer,
 };
 
 type Core = PortCore<2, 8, u32>;
@@ -806,6 +807,38 @@ fn capacity_limits_refuse_deterministically_and_recover() {
     assert_eq!(w.event(B, b).unwrap().frame[0], 2);
     assert_eq!(w.event(B, b).unwrap().frame[0], 3);
     assert_eq!(w.event(B, b), Err(PortError::WouldBlock));
+}
+
+#[test]
+fn every_limit_refusal_is_counted_under_its_bound() {
+    let mut w = World::new(SMALL);
+    let a = w.connect(A);
+    let b = w.connect(B);
+    let c = w.connect(C);
+    assert_eq!(w.core.limit_rejections(), LimitRejections::default());
+    w.send(A, a, 1).unwrap();
+    w.send(A, a, 2).unwrap();
+    assert_eq!(w.send(A, a, 3), Err(PortError::WouldBlock));
+    w.send(B, b, 4).unwrap();
+    w.send(B, b, 5).unwrap();
+    assert_eq!(w.send(C, c, 6), Err(PortError::WouldBlock));
+    w.post(b, 1).unwrap();
+    w.post(b, 2).unwrap();
+    assert_eq!(w.post(b, 3), Err(PortError::WouldBlock));
+    // Nothing pending is not a limit.
+    assert_eq!(w.event(C, c), Err(PortError::WouldBlock));
+    assert_eq!(
+        w.core.limit_rejections(),
+        LimitRejections {
+            outstanding: 1,
+            request_queue: 1,
+            transfers: 0,
+            event_queue: 1,
+        }
+    );
+    while w.recv().is_ok() {}
+    assert_eq!(w.recv().err(), Some(PortError::WouldBlock));
+    assert_eq!(w.core.limit_rejections().request_queue, 1);
 }
 
 #[test]

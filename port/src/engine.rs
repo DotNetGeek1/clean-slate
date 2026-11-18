@@ -70,6 +70,30 @@ pub struct PortCounts {
     pub undelivered_transfers: usize,
 }
 
+/// Sends and posts the engine refused with `WouldBlock` because a bound was reached, counted
+/// since the core was created. Empty-queue `WouldBlock`s from `RECV`/`RECV_EVENT` are not
+/// limits and are not counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LimitRejections {
+    /// A connection already had `max_outstanding` requests queued.
+    pub outstanding: u64,
+    /// The port's request queue held `request_depth` requests.
+    pub request_queue: u64,
+    /// A transfer would exceed the per-connection or per-port transfers in flight.
+    pub transfers: u64,
+    /// The connection's event ring held `event_depth` events.
+    pub event_queue: u64,
+}
+
+impl LimitRejections {
+    const ZERO: Self = Self {
+        outstanding: 0,
+        request_queue: 0,
+        transfers: 0,
+        event_queue: 0,
+    };
+}
+
 #[derive(Clone, Copy)]
 struct Request {
     /// 0 marks a free entry.
@@ -251,6 +275,7 @@ impl<B: Copy> Port<B> {
 pub struct PortCore<const PORTS: usize, const CONNS: usize, B> {
     ports: [Port<B>; PORTS],
     connections: [Connection; CONNS],
+    rejections: LimitRejections,
 }
 
 impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> Default
@@ -270,6 +295,7 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
         Self {
             ports: [Port::EMPTY; PORTS],
             connections: [Connection::EMPTY; CONNS],
+            rejections: LimitRejections::ZERO,
         }
     }
 
@@ -442,9 +468,12 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
 
         let conn = &self.connections[index];
         let port = &self.ports[port_index];
-        if conn.outstanding >= port.params.max_outstanding
-            || port.queued_requests() >= usize::from(port.params.request_depth)
-        {
+        if conn.outstanding >= port.params.max_outstanding {
+            self.rejections.outstanding += 1;
+            return Err(PortError::WouldBlock);
+        }
+        if port.queued_requests() >= usize::from(port.params.request_depth) {
+            self.rejections.request_queue += 1;
             return Err(PortError::WouldBlock);
         }
         if transfer.is_some()
@@ -452,6 +481,7 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
                 >= PORT_MAX_TRANSFERS_IN_FLIGHT_PER_CONNECTION
                 || usize::from(port.transfers_in_flight) >= PORT_MAX_TRANSFERS_IN_FLIGHT)
         {
+            self.rejections.transfers += 1;
             return Err(PortError::WouldBlock);
         }
         let entry = port
@@ -650,6 +680,7 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
             }
         }
         if u16::from(self.connections[index].event_len) >= depth {
+            self.rejections.event_queue += 1;
             return Err(PortError::WouldBlock);
         }
         let seq = self.ports[port_index].next_seq();
@@ -782,6 +813,10 @@ impl<const PORTS: usize, const CONNS: usize, B: Copy + PartialEq> PortCore<PORTS
                 })
                 .count(),
         }
+    }
+
+    pub fn limit_rejections(&self) -> LimitRejections {
+        self.rejections
     }
 
     pub fn global_counts(&self) -> PortCounts {

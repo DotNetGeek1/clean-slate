@@ -689,7 +689,7 @@ const M7_NET_CAPS_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[M7.7] PASS",
 ];
 /// One marker per #200 acceptance item proven in QEMU through syscalls 17/20.
-const M10_PORT_ACCEPTANCE_MARKERS: [&str; 22] = [
+const M10_PORT_ACCEPTANCE_MARKERS: [&str; 23] = [
     "[TIME] timer initialized",
     "[M10.port] registration limits enforced",
     "[M10.port] port registered class=graphics",
@@ -699,6 +699,7 @@ const M10_PORT_ACCEPTANCE_MARKERS: [&str; 22] = [
     "[M10.port] events isolated",
     "[M10.port] connect denied",
     "[M10.port] serve denied",
+    "[M10.port] engine refused outstanding=2 request-queue=1 transfers=0 event-queue=1",
     "[M10.port] capacity limits enforced",
     "[M10.port] transfer attested",
     "[M10.port] transfer denied",
