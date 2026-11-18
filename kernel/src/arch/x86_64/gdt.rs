@@ -18,9 +18,7 @@ use x86_64::VirtAddr;
 
 use crate::arch::x86_64::asm::SYSCALL_KERNEL_STACK_TOP;
 use crate::arch::x86_64::guarded_stack::GuardedStack;
-use crate::arch::x86_64::idt::{
-    DOUBLE_FAULT_IST_INDEX, MACHINE_CHECK_IST_INDEX, NMI_IST_INDEX,
-};
+use crate::arch::x86_64::idt::{DOUBLE_FAULT_IST_INDEX, MACHINE_CHECK_IST_INDEX, NMI_IST_INDEX};
 use crate::sync::global_cell::GlobalCell;
 
 const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;

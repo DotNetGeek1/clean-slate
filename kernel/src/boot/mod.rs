@@ -61,6 +61,7 @@ use crate::interrupt::timer::initialize_timer;
     feature = "m7-dns-self-test"
 )))]
 use crate::interrupt::timer::report_timer_contract;
+use crate::limits::MAX_GUARDED_STACKS;
 use crate::mm::address_space::set_kernel_root_frame;
 use crate::mm::address_space::KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES;
 use crate::mm::carve_out_shared::install_shared_carve_out_page_tables;
@@ -147,7 +148,6 @@ use crate::sched::dispatch::initialize_scheduler;
     feature = "m7-dns-self-test"
 )))]
 use crate::sched::dispatch::start_scheduler;
-use crate::limits::MAX_GUARDED_STACKS;
 use crate::sched::task_stacks_mut;
 use crate::sched::SCHEDULER_THREAD_SLOTS;
 #[cfg(feature = "m10-framebuffer-self-test")]

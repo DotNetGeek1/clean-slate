@@ -77,9 +77,7 @@ fn fail(message: core::fmt::Arguments<'_>) -> ! {
 /// Runs every probe; the last fault hook exits QEMU. Never returns.
 pub(crate) fn run_kernel_guards_self_test(allocator: PageAllocator) -> ! {
     let cr4 = read_cr4();
-    if !Cr0::read().contains(Cr0Flags::WRITE_PROTECT)
-        || cr4 & CR4_SMEP == 0
-        || cr4 & CR4_UMIP == 0
+    if !Cr0::read().contains(Cr0Flags::WRITE_PROTECT) || cr4 & CR4_SMEP == 0 || cr4 & CR4_UMIP == 0
     {
         fail(format_args!(
             "lane needs wp, smep and umip on: cr4={cr4:#x}; run QEMU with -cpu …,+smep,+umip"
@@ -122,7 +120,13 @@ fn map_probe_page(address: u64, flags: PageTableFlags, table_flags: PageTableFla
     let frame_address = allocator
         .allocate_page()
         .unwrap_or_else(|| fail(format_args!("no frame for probe page {address:#x}")));
-    unsafe { core::ptr::write_bytes(phys_to_virt(frame_address) as *mut u8, 0, PAGE_SIZE as usize) };
+    unsafe {
+        core::ptr::write_bytes(
+            phys_to_virt(frame_address) as *mut u8,
+            0,
+            PAGE_SIZE as usize,
+        )
+    };
     let mut mapper = unsafe { current_offset_page_table() };
     let page = Page::<Size4KiB>::containing_address(VirtAddr::new(address));
     let frame = PhysFrame::containing_address(PhysAddr::new(frame_address));
@@ -196,8 +200,7 @@ fn probe_user_page_execute() -> ! {
 }
 
 fn probe_user_sgdt() -> ! {
-    let gdt = userspace_gdt_state()
-        .unwrap_or_else(|message| fail(format_args!("umip: {message}")));
+    let gdt = userspace_gdt_state().unwrap_or_else(|message| fail(format_args!("umip: {message}")));
     let rip = USER_PROBE_CODE_ADDRESS + UMIP_PROBE_OFFSET;
     serial_write_fmt(format_args!("[KGRD] probe cpl3 sgdt rip={rip:#018x}\n"));
     STAGE.store(STAGE_UMIP, Ordering::SeqCst);

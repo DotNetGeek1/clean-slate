@@ -117,7 +117,11 @@ pub(crate) struct GuardSupport {
     pub(crate) umip: bool,
 }
 
-pub(crate) const fn guard_support_from_cpuid(max_basic_leaf: u32, ebx: u32, ecx: u32) -> GuardSupport {
+pub(crate) const fn guard_support_from_cpuid(
+    max_basic_leaf: u32,
+    ebx: u32,
+    ecx: u32,
+) -> GuardSupport {
     if max_basic_leaf < CPUID_STRUCTURED_FEATURES_LEAF {
         return GuardSupport {
             smep: false,
@@ -194,10 +198,7 @@ mod tests {
         assert_eq!(guard_support_from_cpuid(7, 0, 0), none);
         assert_eq!(
             guard_support_from_cpuid(7, 1 << 7, 0),
-            GuardSupport {
-                smep: true,
-                ..none
-            }
+            GuardSupport { smep: true, ..none }
         );
         assert_eq!(
             guard_support_from_cpuid(0xd, 1 << 20, 1 << 2),
