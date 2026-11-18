@@ -83,7 +83,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Workspace path filters
+      - name: Workspace path filters and crate coverage
         run: python3 scripts/check-workflow-paths.py
 
       - uses: dtolnay/rust-toolchain@1.89.0
@@ -118,6 +118,15 @@ jobs:
 
       - name: Clippy (capability)
         run: cargo clippy -p clean-slate-capability --all-targets -- -D warnings
+
+      # scripts/check-workflow-paths.py fails when a workspace member has no clippy or test line.
+      - name: Clippy (native-abi)
+        run: cargo clippy -p clean-slate-native-abi --all-targets -- -D warnings
+
+      - name: Clippy (graphics)
+        run: |
+          cargo clippy -p clean-slate-graphics --all-targets -- -D warnings
+          cargo clippy -p clean-slate-graphics --all-targets --features fake -- -D warnings
 
       - name: Clippy (port)
         run: |
@@ -179,19 +188,59 @@ jobs:
 
       # Every kernel build embeds the storage and network ELFs (kernel/build.rs), including
       # clippy, the bare kernel build, and host tests below; the featureless build (the default
-      # image, also the host tests) embeds init as well.
-      - name: Build storage, network and init userspace images
+      # image, also the host tests) embeds init as well. The M4 supervisor and recovery
+      # self-tests embed their supervisor ELFs, and the M6 fixture self-tests (with
+      # m7-net-caps, m9-linux-fs, m9-userspace, m10-port and m10-shared-buffer) the M6 fixture.
+      - name: Build embedded userspace images
         env:
           RUSTC_BOOTSTRAP: "1"
         run: |
           cargo build -p clean-slate-store --bin clean-slate-storage-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release
           cargo build -p clean-slate-net-service --bin clean-slate-network-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release
-          cargo build -p clean-slate-supervisor --bin clean-slate-supervisor-init --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
+          for bin in clean-slate-supervisor-init clean-slate-supervisor-userspace clean-slate-supervisor-recovery-userspace clean-slate-m6-fixture-userspace; do
+            cargo build -p clean-slate-supervisor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
+          done
 
+      # Every kernel feature set xtask builds needs a line here: `cargo test -p xtask` fails
+      # (ci_coverage) when one is missing.
       - name: Clippy (kernel UEFI)
         run: |
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features gdb-entry -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m1-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m2-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m2-timer-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m2-double-fault-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m2-identity-guard-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m3-entry-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m3-address-space-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m3-syscall-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m3-ipc-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m3-resources-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m4-service-lifecycle-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m4-supervisor-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m4-crash-service-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m4-recovery-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m5-block-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m5-storage-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m5-persistence-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m5-crash-early-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m5-crash-late-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m5-crash-recovery-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m6-fixture-smoke-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m6-object-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m6-process-control-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m6-delegation-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m6-revocation-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m6-audit-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m6-capabilities-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m7-net-device-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m7-net-service-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m7-network-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m7-net-caps-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m7-dns-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m7-tls-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m7-tls-fail-closed-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m8-linux-image -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m8-linux-image-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m8-linux-hello -- -D warnings
@@ -203,8 +252,10 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-fd-core-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-trace -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-trace-self-test -- -D warnings
-          # m9-linux-socket-self-test embeds the linux-socket-probe userspace ELF at
-          # build time; built with RUSTFLAGS=-D warnings by the acceptance job via xtask.
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-socket -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-socket-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-fs-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-userspace-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-low-va-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-exec-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-linux-runtime-self-test -- -D warnings
@@ -212,26 +263,20 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-rootfs -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m9-rootfs-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-nxe-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-shared-buffer-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-port-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-virtio-modern-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-virtio-gpu-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-framebuffer-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-input-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features serial-input-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features system-test-hooks -- -D warnings
-          # m9-linux-fs-self-test implies m6-object-self-test and embeds the storage
-          # userspace ELF at build time; like the M5/M6 self-test features it is
-          # built (with RUSTFLAGS=-D warnings) by the acceptance job via xtask.
-          # m10-shared-buffer-self-test embeds the M6 fixture and storage userspace
-          # ELFs the same way; built (with RUSTFLAGS=-D warnings) via
-          # xtask test-m10-shared-buffer in the acceptance job.
-          # m9-userspace-self-test embeds storage + network userspace ELFs and the
-          # M9 rootfs image; built (with RUSTFLAGS=-D warnings) via xtask test-m9-userspace.
-          # m10-port-self-test embeds the M6 fixture and storage userspace ELFs; built (with
-          # RUSTFLAGS=-D warnings) by the acceptance job via xtask test-m10-port.
 
       - name: Clippy (kernel host tests)
         run: |
           cargo clippy -p clean-slate-kernel --lib --tests -- -D warnings
+          cargo clippy -p clean-slate-kernel --lib --tests --features m4-service-lifecycle-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --lib --tests --features m4-recovery-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --lib --tests --features m9-rootfs,m9-linux-socket,m9-linux-trace -- -D warnings
           cargo clippy -p clean-slate-kernel --lib --tests --features system-test-hooks -- -D warnings
 
@@ -260,6 +305,13 @@ jobs:
           cargo test -p clean-slate-raster
           cargo test -p clean-slate-ui
           cargo test -p clean-slate-capability
+          cargo test -p clean-slate-native-abi
+          cargo test -p clean-slate-graphics
+          cargo test -p clean-slate-graphics --features fake
+          cargo test -p clean-slate-service-fixtures
+          cargo test -p clean-slate-service-lifecycle
+          cargo test -p clean-slate-supervisor
+          cargo test -p clean-slate-net-service
           cargo test -p clean-slate-port
           cargo test -p clean-slate-port --features fake
           cargo test -p clean-slate-compositor
@@ -274,6 +326,8 @@ jobs:
           cargo test -p clean-slate-kernel --features m3-entry-self-test
           cargo test -p clean-slate-kernel --features m3-address-space-self-test
           cargo test -p clean-slate-kernel --features m3-syscall-self-test
+          cargo test -p clean-slate-kernel --lib --features m4-service-lifecycle-self-test
+          cargo test -p clean-slate-kernel --lib --features m4-recovery-self-test
           cargo test -p clean-slate-kernel --features m8-linux-image
           cargo test -p clean-slate-kernel --features m8-linux-hello
           cargo test -p clean-slate-kernel --features system-test-hooks --lib

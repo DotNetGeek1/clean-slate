@@ -930,7 +930,7 @@ fn launch_single_page_service(
         )
         .inspect_err(|&message| {
             kernel_log_fmt(format_args!(
-                "[FAIL] map code image={image:?} va={code_address:#x} err={message}\n"
+                "[SVC ] map code failed image={image:?} va={code_address:#x} err={message}\n"
             ));
         })?;
 

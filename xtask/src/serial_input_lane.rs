@@ -21,6 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::guest_reboot::GuestRebootDetector;
+use crate::marker_spec::first_guest_failure_in_bytes;
 use crate::{
     announce_qemu_version, prepare_vm, xtask_artifact_root, ReapOnDrop, VmLaunchConfig, XtaskError,
     QEMU_DEBUG_EXIT_SUCCESS,
@@ -498,9 +499,9 @@ pub(crate) fn run() -> Result<(), XtaskError> {
                 tail(&transcript)
             )));
         }
-        if find(&transcript, b"[FAIL]").is_some() {
+        if let Some(failure) = first_guest_failure_in_bytes(&transcript, false) {
             break Err(XtaskError::Validation(format!(
-                "serial input: guest failed; tail {:?}",
+                "serial input: guest failed: {failure}; tail {:?}",
                 tail(&transcript)
             )));
         }

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::guest_reboot::GuestRebootDetector;
 use crate::m7_fixture::{FixtureCounts, M7FixturePeer};
+use crate::marker_spec::{first_guest_failure, first_guest_failure_in_bytes};
 use crate::serial_input_lane::{accept_serial, find, spawn_serial_reader, tail, SerialEvent};
 use crate::system_boot::{
     ensure_data_disk, field, number, start_shell_fixture_peer, system_vm_config,
@@ -46,9 +47,9 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(60);
 /// The `system-test-hooks` fault bytes the first step types: network, compositor, desktop
 /// shell, app.
 const HOOK_BYTES: u64 = 4;
-/// Lines that fail the run wherever they appear. `[HOOK]` lines come only from the
-/// `system-test-hooks` build, which this default-image lane must never be.
-const FORBIDDEN: [&str; 4] = ["[FAIL]", "[INIT] gave up", "[INIT] not starting", "[HOOK]"];
+/// Lines that fail the run wherever they appear, besides any guest failure line. `[HOOK]` lines
+/// come only from the `system-test-hooks` build, which this default-image lane must never be.
+const FORBIDDEN: [&str; 3] = ["[INIT] gave up", "[INIT] not starting", "[HOOK]"];
 
 /// What a step must produce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -462,6 +463,9 @@ fn validate(segments: &[&str], served: &[Served]) -> Result<Vec<Shell>, String> 
         ));
     }
     let whole = segments.concat();
+    if let Some(failure) = first_guest_failure(&whole, true) {
+        return Err(format!("guest failure {failure:?}"));
+    }
     for forbidden in FORBIDDEN {
         if let Some(line) = lines(&whole).find(|line| line.contains(forbidden)) {
             return Err(format!("{forbidden:?} in {line:?}"));
@@ -625,6 +629,9 @@ fn drive(
         }
         if let Some(reboot) = reboot_detector.observe(&transcript) {
             return fail(&transcript, reboot);
+        }
+        if let Some(failure) = first_guest_failure_in_bytes(&transcript, false) {
+            return fail(&transcript, format!("{failure:?} printed"));
         }
         for forbidden in FORBIDDEN {
             if find(&transcript, forbidden.as_bytes()).is_some() {
@@ -988,6 +995,7 @@ mod tests {
     fn a_failure_or_give_up_anywhere_fails() {
         for line in [
             "[FAIL] something\n",
+            "[IPC ] console pid=3: [SHL ] FAIL something\n",
             "[IPC ] console pid=3: [INIT] gave up service=21504 restarts=3; init carries on\n",
         ] {
             let mut segments = good_segments();

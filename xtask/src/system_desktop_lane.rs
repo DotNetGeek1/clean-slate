@@ -60,7 +60,7 @@ const CORRECTIONS: usize = 3;
 const EDGE_WAIT: Duration = Duration::from_secs(30);
 /// D2: init restarts a closed or crashed app after 0.5 s; the guest's clock is in whole ms.
 const MIN_APP_RESTART_MS: u64 = 450;
-const FORBIDDEN: [&str; 3] = ["[FAIL]", GIVE_UP_LINES[0], GIVE_UP_LINES[1]];
+const FORBIDDEN: [&str; 2] = [GIVE_UP_LINES[0], GIVE_UP_LINES[1]];
 const SETTLED: &str = "[INPT] pointer settled ";
 /// The hooks build's quiet proof: nothing ran for half a second and nothing was presented.
 const QUIET: &str = "[IDLE ] quiet ";

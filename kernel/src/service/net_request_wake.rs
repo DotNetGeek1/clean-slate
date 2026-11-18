@@ -24,6 +24,8 @@ pub(crate) fn net_tx_space_wait_key() -> WaitKey {
     NET_TX_SPACE_KEY
 }
 
+/// The virtio-net TX interrupt sink; host tests never discover a NIC to install it on.
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn wake_net_tx_space() {
     wake_all(NET_TX_SPACE_KEY);
 }

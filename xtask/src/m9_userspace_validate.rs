@@ -138,7 +138,7 @@ pub fn validate_m9_userspace_serial(serial: &str) -> Result<(), String> {
     let matrix = load_command_matrix()?;
     let lines: Vec<&str> = serial.lines().collect();
     for line in &lines {
-        if line.starts_with("[FAIL]") || line.starts_with("[EXC]") {
+        if crate::marker_spec::guest_failure_start(line) == Some(0) || line.starts_with("[EXC]") {
             return Err(format!("guest reported `{line}`"));
         }
     }

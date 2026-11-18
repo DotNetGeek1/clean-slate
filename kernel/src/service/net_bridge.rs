@@ -71,6 +71,8 @@ pub struct KernelLoopbackLink {
     rx_count: u8,
 }
 
+/// Host tests never discover a NIC (`ensure_virtio_backend`), so they never leave `Loopback`.
+#[cfg_attr(test, allow(dead_code))]
 enum RawBackend {
     Loopback,
     Virtio,
@@ -387,6 +389,7 @@ impl NetBridge {
         self.session_generation
     }
 
+    #[cfg_attr(test, allow(dead_code))]
     pub fn install_virtio_backend(&mut self, device: VirtioNetDevice) {
         let mac = device.link().mac;
         self.virtio = Some(device);

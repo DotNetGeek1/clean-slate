@@ -10,6 +10,8 @@ use std::sync::{mpsc, Once};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(test)]
+mod ci_coverage;
 mod guest_reboot;
 mod m10_desktop_lane;
 mod m10_desktop_visual;
@@ -4496,11 +4498,15 @@ fn abort_driven_acceptance(
     }
 }
 
-/// First guest `[FAIL]` or `[EXC ]` serial line, for reporting a guest that exited
-/// through the debug-exit port with a failure code.
+/// First guest failure (see [`marker_spec::guest_failure_start`]) or `[EXC ]` serial line,
+/// for reporting a guest that exited through the debug-exit port with a failure code.
 fn first_guest_failure_line(output: &str) -> Option<&str> {
     output.lines().find_map(|line| {
-        let start = line.find("[FAIL]").or_else(|| line.find("[EXC "))?;
+        let failure = marker_spec::guest_failure_start(line);
+        let start = match (failure, line.find("[EXC ")) {
+            (Some(failure), Some(exception)) => failure.min(exception),
+            (failure, exception) => failure.or(exception)?,
+        };
         Some(line[start..].trim_end())
     })
 }
@@ -5826,6 +5832,10 @@ mod tests {
         assert_eq!(
             first_guest_failure_line("x[FAIL] virtio block transport failed\n"),
             Some("[FAIL] virtio block transport failed")
+        );
+        assert_eq!(
+            first_guest_failure_line("[M10.port] FAIL fixture pid=4 failed_step=9\n"),
+            Some("[M10.port] FAIL fixture pid=4 failed_step=9")
         );
         assert_eq!(first_guest_failure_line("[M5.2] PASS\n"), None);
     }

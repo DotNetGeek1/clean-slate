@@ -651,7 +651,7 @@ impl ServiceLifecycleController {
                     return LifecycleControlError::SpawnFailed(message);
                 }
                 kernel_log_fmt(format_args!(
-                    "[FAIL] builtin service spawn service={} slot={} err={message}\n",
+                    "[SVC ] builtin service spawn failed service={} slot={} err={message}\n",
                     service_id.0, scheduler_slot
                 ));
                 LifecycleControlError::SpawnFailed(message)
@@ -1086,7 +1086,7 @@ struct KernelInstanceGrants {
 impl KernelInstanceGrants {
     fn grant_failed(&self, pid: u64, what: &str, message: &'static str) -> &'static str {
         kernel_log_fmt(format_args!(
-            "[FAIL] {what} grant failed pid={pid} service={} err={message}\n",
+            "[SVC ] {what} grant failed pid={pid} service={} err={message}\n",
             self.service_id.0
         ));
         message
@@ -1100,7 +1100,7 @@ impl InstanceGrantAuthority for KernelInstanceGrants {
             .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
         {
             kernel_log_fmt(format_args!(
-                "[FAIL] block capability grant failed pid={} service={} err={message}\n",
+                "[BLK ] block capability grant failed pid={} service={} err={message}\n",
                 pid, self.service_id.0
             ));
             return Err(message);
@@ -1129,7 +1129,7 @@ impl InstanceGrantAuthority for KernelInstanceGrants {
         .is_err()
         {
             kernel_log_fmt(format_args!(
-                "[FAIL] network capability grant failed pid={} service={}\n",
+                "[NET ] network capability grant failed pid={} service={}\n",
                 pid, self.service_id.0
             ));
             return Err("network service capability grant failed");
@@ -1280,7 +1280,6 @@ pub(crate) unsafe fn service_lifecycle_controller_mut() -> &'static mut ServiceL
 mod tests {
     use super::*;
     use crate::mm::frame_allocator::PageAllocator;
-    use crate::sched::ThreadKind;
     use clean_slate_service_fixtures::{STORAGE_SERVICE_ID, STORAGE_UNAUTHORIZED_SERVICE_ID};
 
     fn test_allocator() -> PageAllocator {
@@ -1431,6 +1430,7 @@ mod tests {
     #[cfg(not(feature = "m4-recovery-self-test"))]
     #[test]
     fn allocate_scheduler_slot_wraps_and_finds_empty_slot() {
+        use crate::sched::ThreadKind;
         unsafe {
             *crate::sched::scheduler_mut() = crate::sched::Scheduler::new();
             crate::sched::scheduler_mut()
