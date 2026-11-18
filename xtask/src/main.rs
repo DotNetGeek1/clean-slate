@@ -144,6 +144,7 @@ const M4_RECOVERY_ACCEPTANCE_SPEC: &[MarkerStep] = &[
         fields: &[
             ("gen1-fault=", "contained"),
             ("gen2-ready=", "delivered"),
+            ("workload-at-containment=", "1"),
             ("workload-progress=", "2"),
         ],
     },

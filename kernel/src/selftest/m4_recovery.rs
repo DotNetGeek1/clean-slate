@@ -139,7 +139,10 @@ pub(crate) struct RecoverySelfTestState {
     workload: UnrelatedWorkloadFixture,
     gen1_pid: u64,
     gen2_pid: u64,
-    workload_progress_at_fault: u32,
+    /// Workload runs the lane wants in total; the workload is respawned until it reaches this.
+    workload_progress_target: u32,
+    /// The kernel's workload count when gen1's fault was contained.
+    workload_progress_at_containment: Option<u32>,
     supervisor: TrackedProcess,
     workload_process: TrackedProcess,
     service_process: Option<TrackedProcess>,
@@ -162,11 +165,15 @@ fn emit_crash_service_injecting_fault() {
 
 /// The kernel's own record of the recovery, independent of anything the supervisor prints or
 /// writes to its bootstrap page: gen1 faulted and was contained, gen2's Ready reached the
-/// supervisor, and the unrelated workload ran again afterwards.
+/// supervisor, and the unrelated workload ran again after the containment.
 fn recovery_evidence_complete(state: &RecoverySelfTestState) -> bool {
+    let progress = state.workload.progress();
     state.gen1_fault_contained
         && state.gen2_ready_delivered
-        && state.workload.progress() >= state.workload_progress_at_fault
+        && progress >= state.workload_progress_target
+        && state
+            .workload_progress_at_containment
+            .is_some_and(|at_containment| progress > at_containment)
 }
 
 /// Called with every lifecycle event the controller hands to a supervisor's poll.
@@ -641,7 +648,8 @@ pub(crate) fn recovery_complete_and_exit() {
         if state.stage == RecoveryStage::Complete || recovery_evidence_complete(state) {
             state.stage = RecoveryStage::Complete;
             kernel_log_fmt(format_args!(
-                "[M4  ] kernel recovery evidence gen1-fault=contained gen2-ready=delivered workload-progress={}\n",
+                "[M4  ] kernel recovery evidence gen1-fault=contained gen2-ready=delivered workload-at-containment={} workload-progress={}\n",
+                state.workload_progress_at_containment.unwrap_or(0),
                 state.workload.progress()
             ));
             kernel_log_line("[M4  ] PASS");
@@ -737,7 +745,8 @@ pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
             workload: UnrelatedWorkloadFixture::from_launch(workload_launch),
             gen1_pid: 0,
             gen2_pid: 0,
-            workload_progress_at_fault: 2,
+            workload_progress_target: 2,
+            workload_progress_at_containment: None,
             supervisor,
             workload_process: workload,
             service_process: None,
@@ -783,7 +792,7 @@ pub(crate) fn handle_recovery_userspace_entry(
             state.skip_workload_respawn_once = false;
         } else if matches!(state.stage, RecoveryStage::Recovered)
             && state.workload_process.pid == 0
-            && state.workload.progress() < state.workload_progress_at_fault
+            && state.workload.progress() < state.workload_progress_target
         {
             let allocator = recovery_allocator()?;
             let stacks = unsafe { task_stacks_mut() };
@@ -1012,6 +1021,7 @@ pub(crate) fn observe_recovery_fault_after_containment(
     state.harness.on_faulted(fault_event.instance);
     if pid == state.gen1_pid {
         state.gen1_fault_contained = true;
+        state.workload_progress_at_containment = Some(state.workload.progress());
     }
     let resources = remaining_owned_resource_count(pid);
     kernel_log_fmt(format_args!(
