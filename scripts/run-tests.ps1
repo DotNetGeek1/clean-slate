@@ -41,6 +41,7 @@
       system-boot / test-system-boot
       system-shell / test-system-shell
       system / test-system
+      system-desktop / test-system-desktop
 
 .PARAMETER Exhaustive
     Run every known test (milestone gates plus each individual constituent
@@ -136,7 +137,7 @@ $AllTests = [ordered]@{
     "test-m7"                   = @{ Aliases = @("m7", "m7.9"); Description = "M7 milestone gate (net device, net service, converged network-service path, capability broker, DNS, TLS)"; Role = "Aggregate" }
     "test-m8"                   = @{ Aliases = @("m8", "m8.9"); Description = "M8 milestone gate (fixture verify, elf/linux-abi/#92 host tests, Linux image and dispatch boots, Linux hello production path)"; Role = "Aggregate" }
     "test-m9"                   = @{ Aliases = @("m9", "m9.9"); Description = "M9 milestone gate (pinned fixture verify, ABI/ELF/rootfs/kernel host tests, every M9 constituent, BusyBox userspace convergence)"; Role = "Aggregate" }
-    "test-m10"                  = @{ Aliases = @("m10", "m10.119"); Description = "M10 milestone gate (every M10 constituent and the QMP harness smoke, then the desktop lane on both backends)"; Role = "Aggregate" }
+    "test-m10"                  = @{ Aliases = @("m10", "m10.119"); Description = "M10 milestone gate (every M10 constituent and the QMP harness smoke, then the desktop lane on both backends, then the system image's desktop)"; Role = "Aggregate" }
     "test-m6-fixture-smoke"     = @{ Aliases = @("m6-fixture-smoke"); Description = "M6 scripted fixture harness smoke (constituent)"; Role = "Constituent"; CoveredBy = "test-m6" }
     "test-m6-object"            = @{ Aliases = @("m6-object", "m6.3"); Description = "M6.3 object-capability constituent acceptance"; Role = "Constituent"; CoveredBy = "test-m6" }
     "test-m7-net-service"       = @{ Aliases = @("m7-net-service", "m7.3"); Description = "M7.3 network service and driver-domain seam acceptance"; Role = "Constituent"; CoveredBy = "test-m7" }
@@ -183,7 +184,8 @@ $AllTests = [ordered]@{
     "test-serial-input"         = @{ Aliases = @("serial-input"); Description = "#218 S4 COM1 receive and line discipline over a private loopback socket (echo and committed reads checked byte for byte)"; Role = "Constituent" }
     "test-system-boot"          = @{ Aliases = @("system-boot"); Description = "#218 S3b default image: init starts storage then network on a fresh data disk, twice (format, then mount); the kernel checks every launched grant set and ready report"; Role = "Constituent" }
     "test-system-shell"         = @{ Aliases = @("system-shell"); Description = "#218 S5 default image to its serial-console shell over a private loopback socket: typed commands checked by output only execution produces, then exit and Ctrl-D each relaunch the shell one generation on"; Role = "Constituent" }
-    "test-system"               = @{ Aliases = @("system"); Description = "#218 S7b system-test-hooks build (the default image plus a Ctrl-\ network fault hook), plus two short boots with fw_cfg opt/clean-slate/desktop=q1 (one with a VirtIO-GPU, where the compositor, desktop shell and app rows launch, hold exactly their grants and report ready with their bindings and a presented frame; one with no display, which boots base), then the shell boot: a shell wget blocked in a TCP read wakes with ECONNRESET when the network service faults, init restarts network once, the shell's client capability is re-issued for generation 2 and nslookup and wget work again from the same shell, each wget's request received and answered by the fixture"; Role = "Constituent" }
+    "test-system"               = @{ Aliases = @("system"); Description = "#218 S7b system-test-hooks build (the default image plus COM1 fault hooks: Ctrl-\ network, Ctrl-] compositor, Ctrl-^ desktop shell, Ctrl-_ app), plus two short boots with fw_cfg opt/clean-slate/desktop=q1 (one with a VirtIO-GPU, where the compositor, desktop shell and app rows launch, hold exactly their grants and report ready with their bindings and a presented frame, then the compositor, desktop shell and app are each faulted over COM1 and must come back in dependency order, clients exiting compositor-gone, the old port generation refused as stale and resources matching the baseline after each, with no pointer or keyboard input; one with no display, which boots base), then the shell boot: a shell wget blocked in a TCP read wakes with ECONNRESET when the network service faults, init restarts network once, the shell's client capability is re-issued for generation 2 and nslookup and wget work again from the same shell, each wget's request received and answered by the fixture"; Role = "Constituent" }
+    "test-system-desktop"       = @{ Aliases = @("system-desktop"); Description = "#218 S6e system-test-hooks build with fw_cfg opt/clean-slate/desktop=q1 on a VirtIO-GPU, COM1 and QMP: the six-row boot, the serial shell, the M10 click/key/drag/close script driven closed-loop on the compositor's pointer and button lines, app close and fault, desktop shell fault and compositor fault each restarted by init with input working after, then whole-transcript counts and screendump checks (constituent)"; Role = "Constituent"; CoveredBy = "test-m10" }
 }
 
 function Get-DefaultSuite {

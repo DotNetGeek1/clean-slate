@@ -14,6 +14,7 @@ use clean_slate_graphics::role::{GFX_CONNECT_BIT, GFX_SHELL_BIT};
 use clean_slate_graphics::window::{ResizeEdges, WindowStates, WindowTitle};
 
 use crate::backend::{WAKE_INPUT, WAKE_NOTICES};
+use crate::trace::TraceEvent;
 use crate::wm::{DefaultPolicy, Target, WmHit};
 
 const A_AT: Point = Point { x: 6, y: 8 };
@@ -1165,6 +1166,41 @@ fn client_move_and_resize_need_a_live_press_on_that_window() {
 }
 
 // ---- close requests ------------------------------------------------------------------------
+
+#[test]
+fn button_trace_names_the_window_part_under_the_pointer_at_each_edge() {
+    let Pair { mut h, .. } = pair();
+    h.comp.take_input_trace();
+    let close = control_point(A_AT, ChromeControl::Close);
+    let title = title_point(A_AT);
+    for at in [A_ONLY, title, close] {
+        pointer_to(&mut h, at);
+        button(&mut h, KeyState::Pressed);
+        button(&mut h, KeyState::Released);
+    }
+    let edges: Vec<(bool, Point, &str)> = h
+        .comp
+        .take_input_trace()
+        .events()
+        .filter_map(|event| match *event {
+            TraceEvent::Button {
+                pressed, at, hit, ..
+            } => Some((pressed, at, hit.name())),
+            TraceEvent::Settled { .. } => None,
+        })
+        .collect();
+    assert_eq!(
+        edges,
+        [
+            (true, A_ONLY, "content"),
+            (false, A_ONLY, "content"),
+            (true, title, "title"),
+            (false, title, "title"),
+            (true, close, "close"),
+            (false, close, "close"),
+        ]
+    );
+}
 
 #[test]
 fn close_control_requests_close_on_release_over_it() {
