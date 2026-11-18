@@ -400,9 +400,10 @@ impl core::fmt::Display for SnapshotFields<'_> {
         let s = self.0;
         write!(
             f,
-            "procs={} caps={} ws={} ports={} conns={} qreq={} qev={} xfer={} bufs={} pages={} maps={} presenter={} wake={} consumer={} scanout={} gpu={}",
+            "procs={} caps={} lcaps={} ws={} ports={} conns={} qreq={} qev={} xfer={} bufs={} pages={} maps={} presenter={} wake={} consumer={} scanout={} gpu={}",
             s.processes,
             s.capabilities,
+            s.lifecycle_capabilities,
             s.work_sets,
             s.ports,
             s.port_connections,

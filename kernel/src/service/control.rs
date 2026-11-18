@@ -5,7 +5,7 @@ use crate::mm::frame_allocator::PageAllocator;
 use crate::process::domain::teardown_process_by_id;
 use crate::process::process_registry_mut;
 use crate::service::capability::LifecycleControlCapabilityError;
-use crate::service::capability::{BlockDeviceCapabilityError, BlockDeviceCapabilityTable};
+use crate::service::capability::{lifecycle_capabilities_mut, BlockDeviceCapabilityError};
 use crate::service::grants::{apply_instance_grants, GraphicsRole, InstanceGrantAuthority};
 use crate::service::lifecycle_wait::wake_lifecycle_waiters;
 use crate::service::spawn::{launch_builtin_service, LaunchContext};
@@ -101,8 +101,6 @@ pub(crate) enum ServiceReadyRefusal {
 }
 
 pub(crate) struct ServiceLifecycleController {
-    capabilities: super::capability::LifecycleControlCapabilityTable,
-    block_capabilities: BlockDeviceCapabilityTable,
     services: [ServiceRecord; SERVICE_REGISTRY_CAPACITY],
     pending: [Option<LifecycleEvent>; SERVICE_PENDING_EVENTS],
     pending_count: usize,
@@ -121,8 +119,6 @@ pub(crate) struct ServiceLifecycleController {
 impl ServiceLifecycleController {
     const fn new() -> Self {
         Self {
-            capabilities: super::capability::LifecycleControlCapabilityTable::new(),
-            block_capabilities: BlockDeviceCapabilityTable::new(),
             services: [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY],
             pending: [None; SERVICE_PENDING_EVENTS],
             pending_count: 0,
@@ -137,8 +133,7 @@ impl ServiceLifecycleController {
     pub(crate) fn clear(&mut self) {
         self.manifest = SYSTEM_MANIFEST;
         self.scenario_previous_handle = 0;
-        self.capabilities.clear();
-        self.block_capabilities.clear();
+        unsafe { lifecycle_capabilities_mut() }.clear();
         self.services = [ServiceRecord::empty(); SERVICE_REGISTRY_CAPACITY];
         self.pending = [None; SERVICE_PENDING_EVENTS];
         self.pending_count = 0;
@@ -433,8 +428,6 @@ impl ServiceLifecycleController {
         let event = LifecycleEvent::new(instance, LifecycleEventKind::Exited);
         self.push_terminal_pending(event)?;
         self.services[service_index].state = next_state;
-        self.block_capabilities
-            .revoke_capabilities_for_pid(live.pid);
         self.services[service_index].live = None;
         Ok(Some(event))
     }
@@ -466,7 +459,8 @@ impl ServiceLifecycleController {
         &mut self,
         holder_pid: u64,
     ) -> Result<u64, &'static str> {
-        self.capabilities
+        unsafe { lifecycle_capabilities_mut() }
+            .lifecycle_control
             .grant_lifecycle_control_capability(holder_pid)
     }
 
@@ -476,7 +470,8 @@ impl ServiceLifecycleController {
         &mut self,
         holder_pid: u64,
     ) -> Result<u64, &'static str> {
-        self.block_capabilities
+        unsafe { lifecycle_capabilities_mut() }
+            .block_device
             .grant_block_device_capability(holder_pid, STORAGE_BLOCK_DEVICE_ID)
     }
 
@@ -485,7 +480,8 @@ impl ServiceLifecycleController {
         holder_pid: u64,
         device_id: u64,
     ) -> Result<u64, LifecycleControlError> {
-        self.block_capabilities
+        unsafe { lifecycle_capabilities_mut() }
+            .block_device
             .block_device_handle_for(holder_pid, device_id)
             .map_err(|error| match error {
                 BlockDeviceCapabilityError::Unauthorized => LifecycleControlError::Unauthorized,
@@ -501,7 +497,8 @@ impl ServiceLifecycleController {
         capability_handle: u64,
         device_id: u64,
     ) -> Result<(), LifecycleControlError> {
-        self.block_capabilities
+        unsafe { lifecycle_capabilities_mut() }
+            .block_device
             .authorize_block_device_access(holder_pid, capability_handle, device_id)
             .map_err(|error| match error {
                 BlockDeviceCapabilityError::Unauthorized => LifecycleControlError::Unauthorized,
@@ -509,15 +506,6 @@ impl ServiceLifecycleController {
                 BlockDeviceCapabilityError::InvalidHandle
                 | BlockDeviceCapabilityError::WrongDevice => LifecycleControlError::InvalidHandle,
             })
-    }
-
-    /// Lifecycle-control and block-device capabilities `pid` holds, in that order.
-    #[cfg(clean_slate_system_init)]
-    pub(crate) fn capabilities_held_by(&self, pid: u64) -> (usize, usize) {
-        (
-            self.capabilities.held_by(pid),
-            self.block_capabilities.held_by(pid),
-        )
     }
 
     #[allow(dead_code)]
@@ -693,12 +681,9 @@ impl ServiceLifecycleController {
             },
         )?;
         #[cfg(clean_slate_system_init)]
-        if let Err(message) = super::system_init::audit_service_authority(
-            service_id,
-            spawned.pid,
-            context.spec,
-            self.capabilities_held_by(spawned.pid),
-        ) {
+        if let Err(message) =
+            super::system_init::audit_service_authority(service_id, spawned.pid, context.spec)
+        {
             teardown_process_by_id(
                 allocator,
                 kernel_root_frame,
@@ -746,7 +731,6 @@ impl ServiceLifecycleController {
         #[cfg(clean_slate_desktop)]
         let live_graphics_port = self.live_graphics_port();
         let mut authority = KernelInstanceGrants {
-            block_capabilities: &mut self.block_capabilities,
             service_id,
             #[cfg(clean_slate_desktop)]
             live_graphics_port,
@@ -884,8 +868,6 @@ impl ServiceLifecycleController {
         if service_id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID {
             crate::service::linux_launch::clear_linux_hello_live_for_pid(live.pid);
         }
-        self.block_capabilities
-            .revoke_capabilities_for_pid(live.pid);
         self.services[service_index].live = None;
         self.services[service_index].state = ServiceLifecycleState::Exited;
         let instance = ServiceInstanceId::new(
@@ -913,8 +895,8 @@ impl ServiceLifecycleController {
         ));
     }
 
-    /// `residue` is the scheduler and IPC ownership still attributed to the pid after teardown,
-    /// which must be 0.
+    /// `residue` is what `remaining_owned_resource_count` still attributes to the pid after
+    /// teardown, which must be 0.
     pub(crate) fn log_reaped(&self, service: ServiceId, pid: u64) {
         kernel_log_fmt(format_args!(
             "[SVC ] reaped service={} pid={} residue={}\n",
@@ -929,7 +911,8 @@ impl ServiceLifecycleController {
         supervisor_pid: u64,
         capability_handle: u64,
     ) -> Result<(), LifecycleControlError> {
-        self.capabilities
+        unsafe { lifecycle_capabilities_mut() }
+            .lifecycle_control
             .authorize_lifecycle_control(supervisor_pid, capability_handle)
             .map_err(|error| match error {
                 LifecycleControlCapabilityError::Unauthorized => {
@@ -1014,8 +997,6 @@ impl ServiceLifecycleController {
                     if service_id == crate::service::linux_launch::LINUX_HELLO_SERVICE_ID {
                         crate::service::linux_launch::clear_linux_hello_live_for_pid(live.pid);
                     }
-                    self.block_capabilities
-                        .revoke_capabilities_for_pid(live.pid);
                 }
                 self.services[service_index].state = next_state;
                 self.services[service_index].authoritative_generation = next_generation;
@@ -1083,8 +1064,6 @@ impl ServiceLifecycleController {
         event.status_code = status_code;
         self.push_terminal_pending(event)?;
         self.services[service_index].state = next_state;
-        self.block_capabilities
-            .revoke_capabilities_for_pid(live.pid);
         self.services[service_index].live = None;
         Ok(event)
     }
@@ -1098,14 +1077,13 @@ struct LiveGraphicsPort {
     generation: InstanceGeneration,
 }
 
-struct KernelInstanceGrants<'a> {
-    block_capabilities: &'a mut BlockDeviceCapabilityTable,
+struct KernelInstanceGrants {
     service_id: ServiceId,
     #[cfg(clean_slate_desktop)]
     live_graphics_port: Option<LiveGraphicsPort>,
 }
 
-impl KernelInstanceGrants<'_> {
+impl KernelInstanceGrants {
     fn grant_failed(&self, pid: u64, what: &str, message: &'static str) -> &'static str {
         kernel_log_fmt(format_args!(
             "[FAIL] {what} grant failed pid={pid} service={} err={message}\n",
@@ -1115,10 +1093,10 @@ impl KernelInstanceGrants<'_> {
     }
 }
 
-impl InstanceGrantAuthority for KernelInstanceGrants<'_> {
+impl InstanceGrantAuthority for KernelInstanceGrants {
     fn grant_block_device(&mut self, pid: u64) -> Result<(), &'static str> {
-        if let Err(message) = self
-            .block_capabilities
+        if let Err(message) = unsafe { lifecycle_capabilities_mut() }
+            .block_device
             .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
         {
             kernel_log_fmt(format_args!(
@@ -1517,8 +1495,8 @@ mod tests {
         let mut controller = ServiceLifecycleController::new();
         let mut pid = 100_u64;
         loop {
-            if controller
-                .block_capabilities
+            if unsafe { lifecycle_capabilities_mut() }
+                .block_device
                 .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
                 .is_err()
             {
@@ -1551,8 +1529,8 @@ mod tests {
         let mut controller = ServiceLifecycleController::new();
         let mut pid = 100_u64;
         loop {
-            if controller
-                .block_capabilities
+            if unsafe { lifecycle_capabilities_mut() }
+                .block_device
                 .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
                 .is_err()
             {
@@ -1856,8 +1834,9 @@ mod tests {
         assert_eq!(controller.live_pid(ServiceId(14)), None);
     }
 
+    /// The fault notice only retires the live record; the teardown that follows it revokes.
     #[test]
-    fn block_capability_is_revoked_when_live_service_faults() {
+    fn block_capability_is_revoked_by_the_teardown_after_a_fault() {
         let mut controller = ServiceLifecycleController::new();
         controller.services[0] = ServiceRecord {
             service: STORAGE_SERVICE_ID,
@@ -1871,8 +1850,8 @@ mod tests {
                 scheduler_slot: 0,
             }),
         };
-        controller
-            .block_capabilities
+        unsafe { lifecycle_capabilities_mut() }
+            .block_device
             .grant_block_device_capability(77, STORAGE_BLOCK_DEVICE_ID)
             .expect("grant");
         let handle = controller
@@ -1882,6 +1861,11 @@ mod tests {
             .notify_faulted_live_process(77, 0)
             .expect("faulted lookup")
             .expect("event");
+        assert_eq!(
+            controller.authorize_block_device_request(77, handle, STORAGE_BLOCK_DEVICE_ID),
+            Ok(())
+        );
+        assert_eq!(crate::service::capability::on_holder_exit(77), 1);
         assert_eq!(
             controller.authorize_block_device_request(77, handle, STORAGE_BLOCK_DEVICE_ID),
             Err(LifecycleControlError::StaleHandle)
@@ -2077,8 +2061,8 @@ mod tests {
             controller.pending_service_authorized(100, 0xffff),
             Err(LifecycleControlError::InvalidHandle)
         );
-        let block_handle = controller
-            .block_capabilities
+        let block_handle = unsafe { lifecycle_capabilities_mut() }
+            .block_device
             .grant_block_device_capability(101, STORAGE_BLOCK_DEVICE_ID)
             .expect("grant block capability");
         assert_eq!(
@@ -2097,7 +2081,9 @@ mod tests {
             Ok(None)
         );
 
-        controller.capabilities.revoke_capabilities_for_pid(100);
+        unsafe { lifecycle_capabilities_mut() }
+            .lifecycle_control
+            .revoke_capabilities_for_pid(100);
         assert_eq!(
             controller.pending_service_authorized(100, capability),
             Err(LifecycleControlError::StaleHandle)
@@ -2390,12 +2376,12 @@ mod tests {
                 scheduler_slot: 0,
             }),
         };
-        let handle = controller
-            .block_capabilities
+        let handle = unsafe { lifecycle_capabilities_mut() }
+            .block_device
             .grant_block_device_capability(80, STORAGE_BLOCK_DEVICE_ID)
             .expect("grant");
-        controller
-            .block_capabilities
+        unsafe { lifecycle_capabilities_mut() }
+            .block_device
             .revoke_capabilities_for_pid(80);
         controller.services[0].live = Some(LiveServiceInstance {
             pid: 81,
@@ -2404,8 +2390,8 @@ mod tests {
             generation: InstanceGeneration(3),
             scheduler_slot: 1,
         });
-        controller
-            .block_capabilities
+        unsafe { lifecycle_capabilities_mut() }
+            .block_device
             .grant_block_device_capability(81, STORAGE_BLOCK_DEVICE_ID)
             .expect("grant replacement");
         assert_eq!(

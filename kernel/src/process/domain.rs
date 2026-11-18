@@ -27,6 +27,7 @@ use crate::sched::with_scheduler;
 use crate::sched::work_set;
 use crate::sched::ThreadKind;
 use crate::sched::ThreadProcessResources;
+use crate::service::capability as lifecycle_capabilities;
 use crate::service::net_bridge::{
     notify_holder_exit_for_process, reclaim_net_requests_for_holder,
     recover_net_queue_for_service_holder_exit,
@@ -51,9 +52,11 @@ pub(crate) struct ResourceSnapshot {
     /// #195 shared-window rows (Live or orphaned): presenter release removes its scanout
     /// kernel-grant rows and teardown step 5 every other one.
     pub(crate) shared_mappings: usize,
+    /// Lifecycle-control and block-device capabilities held in the lifecycle controller's tables.
+    pub(crate) lifecycle_capabilities: usize,
 }
 
-/// What the M10 teardown slots released; both exit paths compare it with the snapshot.
+/// What the holder teardown slots released; both exit paths compare it with the snapshot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct HolderReleaseCounts {
     work_sets: usize,
@@ -61,12 +64,18 @@ struct HolderReleaseCounts {
     /// Scanout kernel-grant rows the presenter slot unmapped; step 5 removes the rest.
     presenter_grant_rows: usize,
     shared_mappings: usize,
+    lifecycle_capabilities: usize,
 }
 
 impl HolderReleaseCounts {
     fn matches(self, snapshot: &ResourceSnapshot) -> Result<(), &'static str> {
         if self.work_sets != snapshot.work_sets {
             return Err("work-set teardown count diverged from the recorded process snapshot");
+        }
+        if self.lifecycle_capabilities != snapshot.lifecycle_capabilities {
+            return Err(
+                "lifecycle-capability teardown count diverged from the recorded process snapshot",
+            );
         }
         if self.ports.served_ports != snapshot.ports_served
             || self.ports.client_connections != snapshot.port_connections
@@ -112,6 +121,14 @@ pub(crate) fn remaining_owned_resource_count(process_id: u64) -> usize {
         + work_set::count_for(HolderId(process_id))
         + port_resource_count(HolderId(process_id))
         + crate::mm::shared_buffer::mapping_count(process_id)
+        + lifecycle_capability_count(process_id)
+        + usize::from(crate::service::net_bridge::net_bridge_mut().is_live_service(process_id))
+}
+
+fn lifecycle_capability_count(process_id: u64) -> usize {
+    let (lifecycle_control, block_device) =
+        unsafe { lifecycle_capabilities::lifecycle_capabilities_mut() }.held_by(process_id);
+    lifecycle_control + block_device
 }
 
 fn port_resource_count(holder: HolderId) -> usize {
@@ -143,6 +160,7 @@ pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'s
         ports_served: ports.ports_served,
         port_connections: ports.port_connections,
         shared_mappings: crate::mm::shared_buffer::mapping_count(process_id),
+        lifecycle_capabilities: lifecycle_capability_count(process_id),
     })
 }
 
@@ -153,6 +171,8 @@ pub(crate) fn resource_snapshot(process_id: u64) -> Result<ResourceSnapshot, &'s
 pub(crate) struct DesktopResourceSnapshot {
     pub(crate) processes: usize,
     pub(crate) capabilities: usize,
+    /// Lifecycle-control and block-device capabilities, which live outside the capability space.
+    pub(crate) lifecycle_capabilities: usize,
     pub(crate) work_sets: usize,
     pub(crate) ports: usize,
     pub(crate) port_connections: usize,
@@ -180,6 +200,8 @@ pub(crate) fn desktop_resource_snapshot() -> DesktopResourceSnapshot {
     DesktopResourceSnapshot {
         processes: unsafe { process_registry_mut().occupied_slots() },
         capabilities: crate::capability::live_capability_count(),
+        lifecycle_capabilities: unsafe { lifecycle_capabilities::lifecycle_capabilities_mut() }
+            .live_count(),
         work_sets: work_set::live_count(),
         ports: ports.ports,
         port_connections: ports.connections,
@@ -197,7 +219,7 @@ pub(crate) fn desktop_resource_snapshot() -> DesktopResourceSnapshot {
     }
 }
 
-const TEARDOWN_HOOK_COUNT: usize = 15;
+const TEARDOWN_HOOK_COUNT: usize = 16;
 
 /// One step of the teardown sequence shared by every path that dismantles a
 /// registered process, declared in execution order. The port through address
@@ -224,6 +246,8 @@ pub(crate) enum TeardownHook {
     WorkSet,
     /// P4 step 4.
     RevokeHolderCapabilities,
+    /// The lifecycle controller's lifecycle-control and block-device capabilities.
+    LifecycleCapabilities,
     RevokeProcessResource,
     DiscardBootstrapGrants,
     /// P4 step 5: shared-buffer mappings.
@@ -244,6 +268,7 @@ pub(crate) const TEARDOWN_HOOK_ORDER: [TeardownHook; TEARDOWN_HOOK_COUNT] = [
     TeardownHook::InputConsumer,
     TeardownHook::WorkSet,
     TeardownHook::RevokeHolderCapabilities,
+    TeardownHook::LifecycleCapabilities,
     TeardownHook::RevokeProcessResource,
     TeardownHook::DiscardBootstrapGrants,
     TeardownHook::SharedMappings,
@@ -338,10 +363,17 @@ impl TeardownPath {
             | TeardownHook::DisplayPresenter
             | TeardownHook::InputConsumer
             | TeardownHook::WorkSet
+            | TeardownHook::LifecycleCapabilities
             | TeardownHook::SharedMappings
             | TeardownHook::AddressSpace => true,
         }
     }
+}
+
+/// Whether both exit paths run `hook`, so a table it releases cannot outlive an exit.
+#[cfg(all(test, clean_slate_system_init))]
+pub(crate) fn exit_paths_run(hook: TeardownHook) -> bool {
+    CURRENT_TEARDOWN.runs(hook) && EXTERNAL_TEARDOWN.runs(hook)
 }
 
 /// Runs every hook `path` applies, in [`TEARDOWN_HOOK_ORDER`]. The dying
@@ -410,6 +442,9 @@ fn run_teardown_hook(
         TeardownHook::RevokeHolderCapabilities => {
             revoke_for_holder(holder);
         }
+        TeardownHook::LifecycleCapabilities => {
+            released.holder.lifecycle_capabilities = release_lifecycle_capabilities(ctx);
+        }
         TeardownHook::RevokeProcessResource => {
             revoke_for_process_resource(ctx.process_id);
         }
@@ -449,6 +484,10 @@ fn release_input_consumer(ctx: &mut TeardownContext<'_>) {
 
 fn release_work_set(ctx: &mut TeardownContext<'_>) -> usize {
     work_set::on_holder_exit(HolderId(ctx.process_id))
+}
+
+fn release_lifecycle_capabilities(ctx: &mut TeardownContext<'_>) -> usize {
+    lifecycle_capabilities::on_holder_exit(ctx.process_id)
 }
 
 fn release_shared_mappings(ctx: &mut TeardownContext<'_>) -> Result<usize, &'static str> {
@@ -869,6 +908,78 @@ mod tests {
         );
     }
 
+    /// Fills the per-pid tables a host test can reach for a pid that never registered, runs
+    /// every hook that releases authority (all but the thread reap and the address space, which
+    /// need a dispatched process), and checks `HeldAuthority` then counts nothing. With
+    /// `every_counted_table_names_the_teardown_hook_that_releases_it` in `system_init`, a
+    /// table that teardown forgets fails here or does not compile there.
+    #[cfg(clean_slate_system_init)]
+    #[test]
+    fn teardown_releases_every_counted_table() {
+        use crate::service::system_init::{HeldAuthority, OutsideCapabilitySpace};
+        use clean_slate_service_fixtures::STORAGE_BLOCK_DEVICE_ID;
+
+        let pid = 0x151;
+        let tables = unsafe { lifecycle_capabilities::lifecycle_capabilities_mut() };
+        tables
+            .lifecycle_control
+            .grant_lifecycle_control_capability(pid)
+            .expect("grant lifecycle control");
+        tables
+            .block_device
+            .grant_block_device_capability(pid, STORAGE_BLOCK_DEVICE_ID)
+            .expect("grant block device");
+        unsafe { endpoint_table_mut() }
+            .grant_console_capability_for_pid(pid)
+            .expect("grant console");
+        crate::service::net_bridge::net_bridge_mut().register_service_instance(pid, pid, 1);
+        assert_eq!(input::bind_consumer(HolderId(pid)), Ok(()));
+
+        let held = HeldAuthority::of(pid);
+        assert_eq!(
+            (
+                held.lifecycle_control,
+                held.block_device,
+                held.console,
+                held.outside.raw_network_link,
+                held.outside.input_consumer,
+            ),
+            (1, 1, 1, 1, 1),
+            "{held}"
+        );
+
+        let mut allocator = test_allocator();
+        let mut ctx = TeardownContext {
+            process_id: pid,
+            instance_generation: InstanceGeneration(1),
+            address_space_root: 0x20_0000,
+            allocator: &mut allocator,
+        };
+        let mut released = ReleasedResources::default();
+        for hook in TEARDOWN_HOOK_ORDER {
+            if matches!(hook, TeardownHook::ThreadReap | TeardownHook::AddressSpace) {
+                continue;
+            }
+            assert_eq!(
+                run_teardown_hook(hook, &mut ctx, &EXTERNAL_TEARDOWN, &mut released),
+                Ok(()),
+                "{hook:?}"
+            );
+        }
+
+        let held = HeldAuthority::of(pid);
+        // An unregistered pid reads as non-native; the address-space hook reaps the record.
+        let expected = HeldAuthority {
+            outside: OutsideCapabilitySpace {
+                linux_personality: held.outside.linux_personality,
+                ..OutsideCapabilitySpace::default()
+            },
+            ..HeldAuthority::default()
+        };
+        assert_eq!(held, expected, "teardown left authority behind: {held}");
+        assert_eq!(remaining_owned_resource_count(pid), 0);
+    }
+
     #[test]
     fn exit_teardown_stops_at_the_first_failed_hook() {
         let (ran, result) = hooks_run_by(
@@ -899,6 +1010,7 @@ mod tests {
                 TeardownHook::InputConsumer,
                 TeardownHook::WorkSet,
                 TeardownHook::RevokeHolderCapabilities,
+                TeardownHook::LifecycleCapabilities,
                 TeardownHook::SharedMappings,
                 TeardownHook::AddressSpace,
             ]

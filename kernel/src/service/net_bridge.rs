@@ -756,6 +756,12 @@ impl NetBridge {
         failed
     }
 
+    /// Teardown: the raw link is no longer bound to the gone instance's pid. Queued requests
+    /// wait for the next instance's registration.
+    pub fn unbind_service_pid(&mut self) {
+        self.service_pid = 0;
+    }
+
     pub fn requeue_in_service(&mut self) -> usize {
         let mut requeued = 0usize;
         for slot in &mut self.slots {
@@ -932,6 +938,7 @@ pub(crate) fn recover_net_queue_for_service_holder_exit(service_pid: u64) {
             "[NET ] requeued in-service={requeued} service_pid={service_pid}\n"
         ));
     }
+    net_bridge_mut().unbind_service_pid();
     on_service_instance_gone();
 }
 
