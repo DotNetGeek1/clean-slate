@@ -214,6 +214,51 @@ mod tests {
         );
     }
 
+    /// Syscall arguments arrive in these registers; a raw pointer cast of one is a user access
+    /// that bypasses this module and faults under SMAP.
+    #[test]
+    fn no_raw_casts_of_syscall_argument_registers_outside_this_module() {
+        use std::path::Path;
+        const ARGUMENT_REGISTERS: [&str; 7] = ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"];
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut directories = std::vec![root.clone()];
+        let mut offenders = std::vec::Vec::new();
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(&directory).expect("read kernel source directory") {
+                let path = entry.expect("kernel source entry").path();
+                if path.is_dir() {
+                    directories.push(path);
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&root)
+                    .expect("source file under kernel/src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if path.extension().is_none_or(|extension| extension != "rs")
+                    || relative == "mm/user_access.rs"
+                {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read kernel source file");
+                for (index, line) in source.lines().enumerate() {
+                    let code = line.split("//").next().unwrap_or_default();
+                    if ARGUMENT_REGISTERS.iter().any(|register| {
+                        code.contains(&std::format!("frame.{register} as *"))
+                            || code.contains(&std::format!("context.{register} as *"))
+                    }) {
+                        offenders.push(std::format!("{relative}:{}: {}", index + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "raw user pointer casts outside mm/user_access.rs:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     #[test]
     fn zero_length_ranges_are_rejected() {
         assert!(copy_from_user(&mut [], 0x1000).is_err());
