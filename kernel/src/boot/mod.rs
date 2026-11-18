@@ -914,8 +914,7 @@ fn run_inner() -> Result<(), &'static str> {
         start_scheduler()
     }
 
-    // `m9-userspace` diverges in its own starter above. Its Cargo features also enable the
-    // net-service arm, which used to be this function's tail; that arm is no longer selected.
+    // The m9-userspace starter above diverges; this tail only satisfies the return type.
     #[cfg(feature = "m9-userspace-self-test")]
     Ok(())
 }
