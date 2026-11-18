@@ -94,6 +94,8 @@ use crate::selftest::m4_supervisor::observe_supervisor_console_line;
     feature = "m5-crash-recovery-self-test"
 ))]
 use crate::selftest::m5_storage::observe_userspace_block_operation;
+#[cfg(feature = "m5-crash-late-self-test")]
+use crate::selftest::m5_storage::tear_userspace_block_write;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::USER_TEST_CODE_ADDRESS;
 use crate::service::block_bridge::{
@@ -571,6 +573,8 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
     } else {
         unsafe { core::slice::from_raw_parts_mut(frame.r8 as *mut u8, payload_len) }
     };
+    #[cfg(feature = "m5-crash-late-self-test")]
+    let (request, payload) = tear_userspace_block_write(request, payload);
     let response = match step_kernel_block_request(caller, &request, payload) {
         BlockRequestStep::Complete(response) => response,
         BlockRequestStep::Wait { deadline_ns } => {
@@ -599,7 +603,7 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
         feature = "m5-crash-recovery-self-test"
     ))]
     if matches!(response.status, BlockTransportStatus::Ok) {
-        observe_userspace_block_operation(request.operation, request.lba);
+        observe_userspace_block_operation(&request, payload);
     }
     frame.rax = BLOCK_TRANSPORT_RESPONSE_BYTES as u64;
 }

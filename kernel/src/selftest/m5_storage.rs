@@ -40,12 +40,13 @@ use clean_slate_service_fixtures::manifest::{
     validate_manifest, Grant, RestartSpec, ServiceImage, ServiceSpec, STORAGE_SERVICE_SPEC,
 };
 use clean_slate_service_fixtures::{
-    BlockTransportOp, StorageServiceBootstrap, STORAGE_SERVICE_BOOTSTRAP_ADDRESS,
-    STORAGE_SERVICE_ID, STORAGE_SERVICE_MODE_CRASH_ARM_EARLY, STORAGE_SERVICE_MODE_CRASH_ARM_LATE,
-    STORAGE_SERVICE_MODE_CRASH_RECOVERY, STORAGE_SERVICE_MODE_INTEGRATION_INITIAL,
-    STORAGE_SERVICE_MODE_INTEGRATION_RESTART, STORAGE_SERVICE_MODE_PERSISTENCE,
-    STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE, STORAGE_SERVICE_RESULT_OK,
-    STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED, STORAGE_UNAUTHORIZED_SERVICE_ID,
+    BlockTransportOp, BlockTransportRequest, StorageServiceBootstrap,
+    STORAGE_SERVICE_BOOTSTRAP_ADDRESS, STORAGE_SERVICE_ID, STORAGE_SERVICE_MODE_CRASH_ARM_EARLY,
+    STORAGE_SERVICE_MODE_CRASH_ARM_LATE, STORAGE_SERVICE_MODE_CRASH_RECOVERY,
+    STORAGE_SERVICE_MODE_INTEGRATION_INITIAL, STORAGE_SERVICE_MODE_INTEGRATION_RESTART,
+    STORAGE_SERVICE_MODE_PERSISTENCE, STORAGE_SERVICE_MODE_UNAUTHORIZED_PROBE,
+    STORAGE_SERVICE_RESULT_OK, STORAGE_SERVICE_RESULT_UNAUTHORIZED_DENIED,
+    STORAGE_UNAUTHORIZED_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::{
     ControlRequest, ControlRequestKind, LifecycleMessage, ServiceId,
@@ -65,6 +66,14 @@ const PERSISTENCE_ALPHA_V3: [u8; 700] = [0x33; 700];
 const CRASH_AFTER_WRITE_EARLY: u64 = 1;
 const CRASH_AFTER_WRITE_LATE: u64 = 3;
 const SYSCALL_ESTALE: u64 = u64::MAX - 116;
+/// Logical block size of the M5 QEMU disk; the store's superblock is one block.
+const SUPERBLOCK_BYTES: usize = 512;
+const SUPERBLOCK_SLOT_ONE_LBA: u64 = 1;
+/// Start of the superblock's second object-table entry (48-byte header, one 64-byte entry):
+/// the torn copy carries generation 3's header and alpha entry and slot 1's old beta entry.
+const SUPERBLOCK_TEAR_OFFSET: usize = 48 + 64;
+const PAYLOAD_TEAR_WRITE: u64 = 1;
+const PAYLOAD_TEAR_BLOCKS: u32 = 2;
 
 pub(crate) const M5_STORAGE_UNAUTHORIZED_DENIED_MARKER: &str = "[BLK ] unauthorized denied pid=";
 pub(crate) const M5_STORAGE_PASS_MARKER: &str = "[M5.7] PASS";
@@ -75,6 +84,8 @@ enum M5StorageSelfTestMode {
     Persistence,
     CrashArmEarly,
     CrashArmLate,
+    CrashTornSuperblock,
+    CrashTornPayload,
     CrashRecovery,
 }
 
@@ -97,11 +108,30 @@ struct M5StorageSelfTestState {
 struct M5CrashPlan {
     after_write: u64,
     writes_seen: u64,
+    tear: M5Tear,
+}
+
+/// How the crash-arm boot tears one write of the generation-3 commit (alpha's two-block
+/// payload, beta's payload, the superblock into slot 1) before it stops after write 3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum M5Tear {
+    None,
+    /// The superblock write keeps its first `SUPERBLOCK_TEAR_OFFSET` bytes; the rest of
+    /// the sector is what slot 1 held, as read from the device when the service mounted
+    /// (`M5_STALE_SUPERBLOCK_SLOT`).
+    SuperblockSuffix,
+    /// Only the first block of alpha's payload write reaches the device. Beta's payload
+    /// and the superblock then complete, as a write-back cache may persist them, since
+    /// the commit has no flush before its superblock.
+    PayloadPrefix {
+        torn_lba: Option<u64>,
+    },
 }
 
 static M5_STORAGE_SELF_TEST_STATE: GlobalCell<Option<M5StorageSelfTestState>> =
     GlobalCell::new(None);
 static M5_CRASH_PLAN: GlobalCell<Option<M5CrashPlan>> = GlobalCell::new(None);
+static M5_STALE_SUPERBLOCK_SLOT: GlobalCell<Option<[u8; SUPERBLOCK_BYTES]>> = GlobalCell::new(None);
 
 /// M5 runs storage in modes that predate the object service, so the service gets the block device
 /// only and the unauthorized probe gets nothing. Each self-test mode and integration phase runs
@@ -157,7 +187,9 @@ fn m5_scenario(state: &M5StorageSelfTestState) -> &'static [ServiceSpec] {
         },
         M5StorageSelfTestMode::Persistence => M5_PERSISTENCE_SCENARIO,
         M5StorageSelfTestMode::CrashArmEarly => M5_CRASH_ARM_EARLY_SCENARIO,
-        M5StorageSelfTestMode::CrashArmLate => M5_CRASH_ARM_LATE_SCENARIO,
+        M5StorageSelfTestMode::CrashArmLate
+        | M5StorageSelfTestMode::CrashTornSuperblock
+        | M5StorageSelfTestMode::CrashTornPayload => M5_CRASH_ARM_LATE_SCENARIO,
         M5StorageSelfTestMode::CrashRecovery => M5_CRASH_RECOVERY_SCENARIO,
     }
 }
@@ -179,6 +211,7 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
         process_registry_mut().clear();
         *scheduler_mut() = Scheduler::new();
         *M5_CRASH_PLAN.get() = None;
+        *M5_STALE_SUPERBLOCK_SLOT.get() = None;
     }
     let kernel_root = current_root_frame_address();
     install_service_lifecycle_syscall_allocator(allocator);
@@ -207,8 +240,19 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
     };
     set_self_test_state(Some(initial_state));
     match mode {
-        M5StorageSelfTestMode::CrashArmEarly => arm_crash_after_write(CRASH_AFTER_WRITE_EARLY),
-        M5StorageSelfTestMode::CrashArmLate => arm_crash_after_write(CRASH_AFTER_WRITE_LATE),
+        M5StorageSelfTestMode::CrashArmEarly => {
+            arm_crash_after_write(CRASH_AFTER_WRITE_EARLY, M5Tear::None)
+        }
+        M5StorageSelfTestMode::CrashArmLate => {
+            arm_crash_after_write(CRASH_AFTER_WRITE_LATE, M5Tear::None)
+        }
+        M5StorageSelfTestMode::CrashTornSuperblock => {
+            arm_crash_after_write(CRASH_AFTER_WRITE_LATE, M5Tear::SuperblockSuffix)
+        }
+        M5StorageSelfTestMode::CrashTornPayload => arm_crash_after_write(
+            CRASH_AFTER_WRITE_LATE,
+            M5Tear::PayloadPrefix { torn_lba: None },
+        ),
         M5StorageSelfTestMode::Integration
         | M5StorageSelfTestMode::Persistence
         | M5StorageSelfTestMode::CrashRecovery => {}
@@ -234,6 +278,10 @@ fn active_self_test_mode() -> M5StorageSelfTestMode {
         M5StorageSelfTestMode::Persistence
     } else if cfg!(feature = "m5-crash-early-self-test") {
         M5StorageSelfTestMode::CrashArmEarly
+    } else if cfg!(feature = "m5-crash-torn-superblock-self-test") {
+        M5StorageSelfTestMode::CrashTornSuperblock
+    } else if cfg!(feature = "m5-crash-torn-payload-self-test") {
+        M5StorageSelfTestMode::CrashTornPayload
     } else if cfg!(feature = "m5-crash-late-self-test") {
         M5StorageSelfTestMode::CrashArmLate
     } else if cfg!(feature = "m5-crash-recovery-self-test") {
@@ -305,6 +353,8 @@ fn current_service(state: &M5StorageSelfTestState) -> ServiceId {
         M5StorageSelfTestMode::Persistence
         | M5StorageSelfTestMode::CrashArmEarly
         | M5StorageSelfTestMode::CrashArmLate
+        | M5StorageSelfTestMode::CrashTornSuperblock
+        | M5StorageSelfTestMode::CrashTornPayload
         | M5StorageSelfTestMode::CrashRecovery => STORAGE_SERVICE_ID,
     }
 }
@@ -329,7 +379,10 @@ pub(crate) fn handle_userspace_storage_entry() -> u64 {
             validate_persistence(report).unwrap_or_else(|message| fatal_kernel_error(message));
             None
         }
-        M5StorageSelfTestMode::CrashArmEarly | M5StorageSelfTestMode::CrashArmLate => {
+        M5StorageSelfTestMode::CrashArmEarly
+        | M5StorageSelfTestMode::CrashArmLate
+        | M5StorageSelfTestMode::CrashTornSuperblock
+        | M5StorageSelfTestMode::CrashTornPayload => {
             fatal_kernel_error("deterministic crash point did not interrupt commit")
         }
         M5StorageSelfTestMode::CrashRecovery => {
@@ -425,38 +478,131 @@ fn handle_integration_phase(
 
 /// Called after the device completed `operation` for the storage service, still inside
 /// its block syscall, so the service's address space (and its report page) is current.
-pub(crate) fn observe_userspace_block_operation(operation: BlockTransportOp, lba: u64) {
-    match operation {
+/// `payload` holds the bytes the device returned for a read.
+pub(crate) fn observe_userspace_block_operation(request: &BlockTransportRequest, payload: &[u8]) {
+    let lba = request.lba;
+    match request.operation {
         BlockTransportOp::Write => {
             let plan = unsafe { &mut *M5_CRASH_PLAN.get() };
             let Some(crash_plan) = plan.as_mut() else {
                 return;
             };
             crash_plan.writes_seen = crash_plan.writes_seen.saturating_add(1);
+            if let M5Tear::PayloadPrefix {
+                torn_lba: Some(torn_lba),
+            } = crash_plan.tear
+            {
+                if crash_plan.writes_seen == PAYLOAD_TEAR_WRITE {
+                    kernel_log_fmt(format_args!(
+                        "[CRSH] torn payload write={PAYLOAD_TEAR_WRITE} lba={torn_lba} blocks-written={} of={PAYLOAD_TEAR_BLOCKS}\n",
+                        request.blocks
+                    ));
+                }
+            }
             if crash_plan.writes_seen == crash_plan.after_write {
                 let after_write = crash_plan.writes_seen;
+                let tear = crash_plan.tear;
                 *plan = None;
                 log_pre_crash_report();
+                if tear == M5Tear::SuperblockSuffix {
+                    kernel_log_fmt(format_args!(
+                        "[CRSH] torn superblock write={after_write} lba={lba} new-bytes={SUPERBLOCK_TEAR_OFFSET} stale-bytes={}\n",
+                        SUPERBLOCK_BYTES - SUPERBLOCK_TEAR_OFFSET
+                    ));
+                }
                 kernel_log_fmt(format_args!(
                     "[CRSH] inject after-write={after_write} lba={lba}\n"
                 ));
                 halt_loop();
             }
         }
+        BlockTransportOp::Read => {
+            let plan = unsafe { &*M5_CRASH_PLAN.get() };
+            let tears_superblock =
+                matches!(plan, Some(plan) if plan.tear == M5Tear::SuperblockSuffix);
+            if tears_superblock && lba == SUPERBLOCK_SLOT_ONE_LBA && request.blocks == 1 {
+                let bytes: [u8; SUPERBLOCK_BYTES] = payload.try_into().unwrap_or_else(|_| {
+                    fatal_kernel_error("superblock read was not one 512-byte block")
+                });
+                unsafe {
+                    *M5_STALE_SUPERBLOCK_SLOT.get() = Some(bytes);
+                }
+            }
+        }
         BlockTransportOp::Flush => kernel_log_line("[BLK ] flush complete"),
-        BlockTransportOp::Geometry | BlockTransportOp::Read => {}
+        BlockTransportOp::Geometry => {}
     }
 }
 
-fn arm_crash_after_write(after_write: u64) {
+/// Called before a storage-service block request reaches the device. For the write the
+/// armed plan tears, returns the request and payload the device is given instead. A
+/// syscall resumed while its request is in flight gets the same answer again, so the
+/// bridge recognises its own request.
+#[cfg(feature = "m5-crash-late-self-test")]
+pub(crate) fn tear_userspace_block_write(
+    request: BlockTransportRequest,
+    payload: &mut [u8],
+) -> (BlockTransportRequest, &mut [u8]) {
+    if request.operation != BlockTransportOp::Write {
+        return (request, payload);
+    }
+    let plan = unsafe { &mut *M5_CRASH_PLAN.get() };
+    let Some(crash_plan) = plan.as_mut() else {
+        return (request, payload);
+    };
+    let write_index = crash_plan.writes_seen.saturating_add(1);
+    match &mut crash_plan.tear {
+        M5Tear::None => (request, payload),
+        M5Tear::SuperblockSuffix => {
+            if write_index != crash_plan.after_write {
+                return (request, payload);
+            }
+            if request.lba != SUPERBLOCK_SLOT_ONE_LBA
+                || request.blocks != 1
+                || payload.len() != SUPERBLOCK_BYTES
+            {
+                fatal_kernel_error("torn-superblock write was not slot 1's single block");
+            }
+            let stale = unsafe { *M5_STALE_SUPERBLOCK_SLOT.get() }.unwrap_or_else(|| {
+                fatal_kernel_error("superblock slot 1 was not read before the torn write")
+            });
+            payload[SUPERBLOCK_TEAR_OFFSET..].copy_from_slice(&stale[SUPERBLOCK_TEAR_OFFSET..]);
+            (request, payload)
+        }
+        M5Tear::PayloadPrefix { torn_lba } => {
+            if write_index != PAYLOAD_TEAR_WRITE {
+                return (request, payload);
+            }
+            if request.blocks != PAYLOAD_TEAR_BLOCKS {
+                fatal_kernel_error("torn-payload write was not alpha's two-block payload");
+            }
+            let block_bytes = payload.len() / PAYLOAD_TEAR_BLOCKS as usize;
+            *torn_lba = Some(request.lba);
+            let torn = BlockTransportRequest {
+                blocks: 1,
+                buffer_len: block_bytes as u32,
+                ..request
+            };
+            (torn, &mut payload[..block_bytes])
+        }
+    }
+}
+
+fn arm_crash_after_write(after_write: u64, tear: M5Tear) {
     unsafe {
         *M5_CRASH_PLAN.get() = Some(M5CrashPlan {
             after_write,
             writes_seen: 0,
+            tear,
         });
     }
+    let tear_name = match tear {
+        M5Tear::None => "none",
+        M5Tear::SuperblockSuffix => "superblock-suffix",
+        M5Tear::PayloadPrefix { .. } => "payload-prefix",
+    };
     kernel_log_fmt(format_args!(
-        "[CRSH] armed trigger=after-write={after_write}\n"
+        "[CRSH] armed trigger=after-write={after_write} tear={tear_name}\n"
     ));
 }
 

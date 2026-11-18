@@ -90,8 +90,16 @@ fn sub_sector_torn_superblock_falls_back_to_previous_commit() {
     let slot = block_bytes(geometry);
     let image = torn(&before, &after, slot + SUPERBLOCK_TEAR_OFFSET, 2 * slot);
 
-    assert_ne!(image[slot..2 * slot], after[slot..2 * slot], "tear changed nothing");
-    assert_ne!(image[slot..2 * slot], before[slot..2 * slot], "tear wrote nothing");
+    assert_ne!(
+        image[slot..2 * slot],
+        after[slot..2 * slot],
+        "tear changed nothing"
+    );
+    assert_ne!(
+        image[slot..2 * slot],
+        before[slot..2 * slot],
+        "tear wrote nothing"
+    );
     assert_generation_two(geometry, &image, &ALPHA_V2);
 }
 
@@ -154,9 +162,7 @@ fn torn_payload_with_equal_byte_sum_falls_back_to_previous_commit() {
     let block = block_bytes(geometry);
     let table: Vec<u8> = (0..2 * block).map(|index| (index % 251) as u8).collect();
     let mut reversed = table.clone();
-    reversed
-        .chunks_mut(block)
-        .for_each(|chunk| chunk.reverse());
+    reversed.chunks_mut(block).for_each(|chunk| chunk.reverse());
     let (before, after) = generation_three_images(geometry, &table, &ALPHA_V2, &reversed);
     let alpha_second_block = usize::try_from(arena_start(geometry, 1) + 1).unwrap() * block;
     let image = torn(
