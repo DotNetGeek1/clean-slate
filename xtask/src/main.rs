@@ -40,7 +40,7 @@ use marker_spec::{unexpected_guest_failure, MarkerSet, MarkerStep, MarkerTracker
 use ovmf_vars::RuntimeVarsCopy;
 
 use m10_framebuffer_validate::validate_m10_framebuffer_serial;
-use m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
+use m7_fixture::{FixtureCounts, FixtureOptions, M7FixturePeer, WhichCert};
 
 const KERNEL_PACKAGE: &str = "clean-slate-kernel";
 const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
@@ -1356,8 +1356,9 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             serial_tcp_port: None,
         },
     );
-    peer.shutdown();
+    let served = peer.shutdown();
     pass?;
+    require_fixture_served("test-m7-tls", served, M7_TLS_SERVED)?;
 
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::WrongName,
@@ -1388,8 +1389,57 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             serial_tcp_port: None,
         },
     );
-    peer.shutdown();
-    fail_closed
+    let served = peer.shutdown();
+    fail_closed?;
+    require_fixture_served("test-m7-tls fail-closed", served, M7_TLS_FAIL_CLOSED_SERVED)
+}
+
+/// What the fixture must have served for `[TCP ] echo ok`, `[TLS ] authenticated` and
+/// `[TLS ] app bytes ok`: one echo, one connection whose handshake the fixture completed, one
+/// app response.
+const M7_TLS_SERVED: FixtureCounts = FixtureCounts {
+    tcp_echoes: 1,
+    tls_connections: 1,
+    tls_handshakes: 1,
+    tls_app_responses: 1,
+    ..FixtureCounts::ZERO
+};
+
+/// `[TLS ] peer identity rejected`: the client connected and the fixture never saw a
+/// finished handshake or an app request.
+const M7_TLS_FAIL_CLOSED_SERVED: FixtureCounts = FixtureCounts {
+    tls_connections: 1,
+    ..FixtureCounts::ZERO
+};
+
+/// `[DNS ] resolved`, `cache hit` and `nxdomain`: two queries reached the fixture, one A
+/// answer and one NXDOMAIN; the cache hit sent nothing.
+const M7_DNS_SERVED: FixtureCounts = FixtureCounts {
+    dns_replies: 2,
+    fixture_a_answers: 1,
+    nxdomain_answers: 1,
+    ..FixtureCounts::ZERO
+};
+
+/// M7.8: the userspace client's one resolve and two TLS transactions, which the kernel
+/// otherwise knows only from the client's report and the service's `tls_transactions`.
+const M7_NETWORK_SERVED: FixtureCounts = FixtureCounts {
+    dns_replies: 1,
+    fixture_a_answers: 1,
+    tls_connections: 2,
+    tls_handshakes: 2,
+    tls_app_responses: 2,
+    ..FixtureCounts::ZERO
+};
+
+fn require_fixture_served(
+    lane: &str,
+    served: FixtureCounts,
+    expected: FixtureCounts,
+) -> Result<(), XtaskError> {
+    served
+        .require_exactly(lane, expected)
+        .map_err(XtaskError::Validation)
 }
 
 fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
@@ -1451,8 +1501,9 @@ fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
             serial_tcp_port: None,
         },
     );
-    peer.shutdown();
-    run_result
+    let served = peer.shutdown();
+    run_result?;
+    require_fixture_served("test-m7-dns", served, M7_DNS_SERVED)
 }
 
 fn run_m5_persistence_acceptance_default() -> Result<(), XtaskError> {
@@ -2708,8 +2759,9 @@ fn run_m7_network_acceptance() -> Result<(), XtaskError> {
             serial_tcp_port: None,
         },
     );
-    peer.shutdown();
-    run_result
+    let served = peer.shutdown();
+    run_result?;
+    require_fixture_served("test-m7-network", served, M7_NETWORK_SERVED)
 }
 
 fn build_network_userspace(release: bool) -> Result<(), XtaskError> {

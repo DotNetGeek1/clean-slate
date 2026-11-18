@@ -22,7 +22,7 @@ use smoltcp::socket::udp;
 
 use crate::m7_fixture_tcp::{
     FixtureTlsCert, HoldEvent, HttpOutcome, M9BannerService, M9HoldService, M9HttpService,
-    TcpEchoService, TlsService,
+    TcpEchoService, TlsEvent, TlsService,
 };
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
@@ -63,8 +63,20 @@ pub struct M7FixturePeer {
 /// What the peer has served so far, for lanes that confirm an exchange from the peer's side.
 #[derive(Default)]
 struct FixtureSeen {
+    /// DNS replies sent, of any kind.
+    dns_replies: AtomicU32,
     /// DNS replies sent that carry an A record for `FIXTURE_HOSTNAME`.
     fixture_a_answers: AtomicU32,
+    /// DNS replies sent with rcode 3 (NXDOMAIN).
+    nxdomain_answers: AtomicU32,
+    /// TCP echo connections answered with the fixture response.
+    tcp_echoes: AtomicU32,
+    /// TLS connections the TLS service accepted.
+    tls_connections: AtomicU32,
+    /// TLS handshakes the fixture's server side completed.
+    tls_handshakes: AtomicU32,
+    /// TLS connections on which the fixture received the request and sent the app response.
+    tls_app_responses: AtomicU32,
     /// HTTP responses the M9 HTTP service sent, each to a complete request it received.
     http_responses: AtomicU32,
     /// HTTP connections the M9 HTTP service closed unanswered, without a complete request.
@@ -77,7 +89,13 @@ struct FixtureSeen {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FixtureCounts {
+    pub dns_replies: u32,
     pub fixture_a_answers: u32,
+    pub nxdomain_answers: u32,
+    pub tcp_echoes: u32,
+    pub tls_connections: u32,
+    pub tls_handshakes: u32,
+    pub tls_app_responses: u32,
     pub http_responses: u32,
     pub http_refused: u32,
     pub held_connections: u32,
@@ -85,6 +103,31 @@ pub struct FixtureCounts {
 }
 
 impl FixtureCounts {
+    pub const ZERO: Self = Self {
+        dns_replies: 0,
+        fixture_a_answers: 0,
+        nxdomain_answers: 0,
+        tcp_echoes: 0,
+        tls_connections: 0,
+        tls_handshakes: 0,
+        tls_app_responses: 0,
+        http_responses: 0,
+        http_refused: 0,
+        held_connections: 0,
+        held_requests: 0,
+    };
+
+    /// #223: a lane whose guest reports DNS, TCP or TLS exchanges passes only if the fixture
+    /// served exactly those exchanges over the whole run, and nothing else.
+    pub fn require_exactly(&self, lane: &str, expected: FixtureCounts) -> Result<(), String> {
+        if *self == expected {
+            return Ok(());
+        }
+        Err(format!(
+            "{lane}: the fixture served {self:?}, expected {expected:?}"
+        ))
+    }
+
     /// #255: a lane whose evidence is `expected` HTTP exchanges passes only if the
     /// fixture received and answered exactly that many well-formed requests.
     pub fn require_http_requests(&self, lane: &str, expected: u32) -> Result<(), String> {
@@ -124,12 +167,19 @@ impl M7FixturePeer {
     }
 
     pub fn counts(&self) -> FixtureCounts {
+        let load = |counter: &AtomicU32| counter.load(Ordering::SeqCst);
         FixtureCounts {
-            fixture_a_answers: self.seen.fixture_a_answers.load(Ordering::SeqCst),
-            http_responses: self.seen.http_responses.load(Ordering::SeqCst),
-            http_refused: self.seen.http_refused.load(Ordering::SeqCst),
-            held_connections: self.seen.held_connections.load(Ordering::SeqCst),
-            held_requests: self.seen.held_requests.load(Ordering::SeqCst),
+            dns_replies: load(&self.seen.dns_replies),
+            fixture_a_answers: load(&self.seen.fixture_a_answers),
+            nxdomain_answers: load(&self.seen.nxdomain_answers),
+            tcp_echoes: load(&self.seen.tcp_echoes),
+            tls_connections: load(&self.seen.tls_connections),
+            tls_handshakes: load(&self.seen.tls_handshakes),
+            tls_app_responses: load(&self.seen.tls_app_responses),
+            http_responses: load(&self.seen.http_responses),
+            http_refused: load(&self.seen.http_refused),
+            held_connections: load(&self.seen.held_connections),
+            held_requests: load(&self.seen.held_requests),
         }
     }
 
@@ -264,16 +314,29 @@ fn run_peer(
                 }
                 if dns_socket.send_slice(&response, endpoint).is_ok() {
                     println!("[FIX ] dns query name={name} rcode={rcode}");
+                    seen.dns_replies.fetch_add(1, Ordering::SeqCst);
                     if carries_fixture_a_record(&name, &response) {
                         seen.fixture_a_answers.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if rcode == 3 {
+                        seen.nxdomain_answers.fetch_add(1, Ordering::SeqCst);
                     }
                 }
             }
         }
         if let Some(echo) = tcp_echo_service.as_mut() {
-            echo.poll(&mut sockets);
+            if echo.poll(&mut sockets) {
+                seen.tcp_echoes.fetch_add(1, Ordering::SeqCst);
+            }
         }
-        tls_service.poll(&mut sockets);
+        for event in tls_service.poll(&mut sockets) {
+            let counter = match event {
+                TlsEvent::Accepted => &seen.tls_connections,
+                TlsEvent::HandshakeComplete => &seen.tls_handshakes,
+                TlsEvent::AppResponseSent => &seen.tls_app_responses,
+            };
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
         if let Some(http) = m9_http_service.as_mut() {
             match http.poll(&mut sockets) {
                 Some(HttpOutcome::Answered) => {
@@ -685,7 +748,7 @@ impl phy::TxToken for QemuTxToken<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_dns_response, FixtureCounts};
+    use super::{build_dns_response, carries_fixture_a_record, FixtureCounts, FIXTURE_HOSTNAME};
 
     #[test]
     fn a_lane_needs_exactly_its_http_requests_and_no_refusals() {
@@ -700,6 +763,53 @@ mod tests {
         assert!(report(8, 0).require_http_requests("lane", 9).is_err());
         assert!(report(10, 0).require_http_requests("lane", 9).is_err());
         assert!(report(9, 1).require_http_requests("lane", 9).is_err());
+    }
+
+    #[test]
+    fn a_lane_needs_exactly_the_exchanges_it_reports() {
+        let expected = FixtureCounts {
+            dns_replies: 2,
+            fixture_a_answers: 1,
+            nxdomain_answers: 1,
+            ..FixtureCounts::ZERO
+        };
+        assert!(expected.require_exactly("lane", expected).is_ok());
+        let nothing = FixtureCounts::ZERO
+            .require_exactly("lane", expected)
+            .unwrap_err();
+        assert!(nothing.contains("lane: the fixture served"), "{nothing}");
+        // A "cache hit" that queried the fixture again.
+        let requeried = FixtureCounts {
+            dns_replies: 3,
+            fixture_a_answers: 2,
+            ..expected
+        };
+        assert!(requeried.require_exactly("lane", expected).is_err());
+        // Anything extra the lane did not report also fails it.
+        let extra = FixtureCounts {
+            tls_connections: 1,
+            ..expected
+        };
+        assert!(extra.require_exactly("lane", expected).is_err());
+    }
+
+    #[test]
+    fn nxdomain_and_a_answers_are_told_apart() {
+        let query = |name: &str| {
+            let mut query = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+            for label in name.split('.') {
+                query.push(label.len() as u8);
+                query.extend_from_slice(label.as_bytes());
+            }
+            query.extend_from_slice(&[0, 0, 1, 0, 1]);
+            query
+        };
+        let (name, answer) = build_dns_response(&query(FIXTURE_HOSTNAME), false).unwrap();
+        assert!(carries_fixture_a_record(&name, &answer));
+        assert_eq!(answer[3] & 0x0F, 0);
+        let (name, nx) = build_dns_response(&query("nope.fixture.test"), false).unwrap();
+        assert!(!carries_fixture_a_record(&name, &nx));
+        assert_eq!(nx[3] & 0x0F, 3);
     }
 
     /// PTR query/reply bytes from `fixtures/busybox/frozen/traces/nslookup-fixture.strace`.
