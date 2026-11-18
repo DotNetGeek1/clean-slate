@@ -48,6 +48,8 @@ pub(crate) enum KernelStackKind {
     },
     Boot,
     DoubleFaultIst,
+    NmiIst,
+    MachineCheckIst,
 }
 
 impl KernelStackKind {
@@ -56,6 +58,8 @@ impl KernelStackKind {
             Self::Task { .. } => "task",
             Self::Boot => "boot",
             Self::DoubleFaultIst => "double-fault-ist",
+            Self::NmiIst => "nmi-ist",
+            Self::MachineCheckIst => "machine-check-ist",
         }
     }
 }

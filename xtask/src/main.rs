@@ -253,6 +253,23 @@ const M2_IDENTITY_GUARD_ACCEPTANCE_MARKERS: [&str; 14] = [
     "[IDG ] PASS",
 ];
 const M2_IDENTITY_GUARD_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
+/// #217: NMI and #MC each land on their own IST stack, and CR0.WP, CR4.SMEP and CR4.UMIP each
+/// turn the probe access into the exact fault the guard exists for.
+const M2_KERNEL_GUARDS_ACCEPTANCE_MARKERS: [&str; 12] = [
+    "[CPU ] guards wp=on smep=on smap=off umip=on firmware_wp=",
+    "[INT ] double-fault IST initialized",
+    "[INT ] nmi and machine-check IST initialized",
+    "[KGRD] nmi ran on its IST stack",
+    "[KGRD] machine-check gate ran on its IST stack",
+    "[KGRD] probe write read-only addr=0xffffa00000003000 ",
+    "[KGRD] wp write fault err=0x3 OK",
+    "[KGRD] probe exec user page addr=0x0000400000000000",
+    "[KGRD] smep fetch fault err=0x11 OK",
+    "[KGRD] probe cpl3 sgdt rip=0x0000400000000010",
+    "[KGRD] umip sgdt fault vector=13 OK",
+    "[KGRD] PASS",
+];
+const M2_KERNEL_GUARDS_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
 const M2_DOUBLE_FAULT_ACCEPTANCE_MARKERS: [&str; 4] = [
     "[INT ] double-fault IST initialized",
     "[DF  ] double fault",
@@ -1329,7 +1346,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             m7_fixture_port: Some(port),
             m10_virtio_modern: None,
             kernel_release: true,
-            cpu_model: Some("qemu64,+rdrand"),
+            cpu_model: Some(RDRAND_CPU_MODEL),
             machine_extra: None,
             vga: None,
             display: None,
@@ -1361,7 +1378,7 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             m7_fixture_port: Some(port),
             m10_virtio_modern: None,
             kernel_release: true,
-            cpu_model: Some("qemu64,+rdrand"),
+            cpu_model: Some(RDRAND_CPU_MODEL),
             machine_extra: None,
             vga: None,
             display: None,
@@ -1788,7 +1805,7 @@ fn run_m9_userspace_acceptance() -> Result<(), XtaskError> {
             m7_fixture_port: Some(port),
             m10_virtio_modern: None,
             kernel_release: true,
-            cpu_model: Some("qemu64,+rdrand"),
+            cpu_model: Some(RDRAND_CPU_MODEL),
             machine_extra: None,
             vga: None,
             display: None,
@@ -1820,6 +1837,15 @@ fn run_m2_acceptance() -> Result<(), XtaskError> {
         Some((
             MarkerSet::Ordered(&M2_IDENTITY_GUARD_ACCEPTANCE_MARKERS),
             M2_IDENTITY_GUARD_ACCEPTANCE_TIMEOUT,
+        )),
+    )?;
+    run_vm_inner(
+        false,
+        false,
+        &["m2-kernel-guards-self-test"],
+        Some((
+            MarkerSet::Ordered(&M2_KERNEL_GUARDS_ACCEPTANCE_MARKERS),
+            M2_KERNEL_GUARDS_ACCEPTANCE_TIMEOUT,
         )),
     )?;
     run_vm_inner(
@@ -1945,7 +1971,7 @@ fn run_m9_linux_socket_acceptance() -> Result<(), XtaskError> {
             m7_fixture_port: Some(port),
             m10_virtio_modern: None,
             kernel_release: true,
-            cpu_model: Some("qemu64,+rdrand"),
+            cpu_model: Some(RDRAND_CPU_MODEL),
             machine_extra: None,
             vga: None,
             display: None,
@@ -2672,7 +2698,7 @@ fn run_m7_network_acceptance() -> Result<(), XtaskError> {
             m7_fixture_port: Some(port),
             m10_virtio_modern: None,
             kernel_release: true,
-            cpu_model: Some("qemu64,+rdrand"),
+            cpu_model: Some(RDRAND_CPU_MODEL),
             machine_extra: None,
             vga: None,
             display: None,
@@ -2952,6 +2978,11 @@ fn run_m3_acceptance() -> Result<(), XtaskError> {
     Ok(())
 }
 
+/// #217: plain `qemu64` hides SMEP, SMAP and UMIP, so the kernel's CR4 guards would never be
+/// exercised; TCG emulates all three.
+const GUARDED_CPU_MODEL: &str = "qemu64,+smep,+smap,+umip";
+const RDRAND_CPU_MODEL: &str = "qemu64,+rdrand,+smep,+smap,+umip";
+
 #[derive(Clone, Debug, Default)]
 struct VmLaunchConfig {
     m5_data_disk: Option<PathBuf>,
@@ -2960,7 +2991,7 @@ struct VmLaunchConfig {
     m10_virtio_modern: Option<(PathBuf, M10VmodIrq)>,
     /// Work around Windows debug UEFI codegen for AES-GCM (TLS); release builds succeed.
     kernel_release: bool,
-    /// Optional QEMU `-cpu` model (TLS lane needs RDRAND).
+    /// QEMU `-cpu` model; `None` means [`GUARDED_CPU_MODEL`] (TLS lanes need RDRAND).
     cpu_model: Option<&'static str>,
     /// Appended to `-machine q35,`; input lanes pass `vmport=off` so the
     /// PS/2 mouse is the only pointer.
@@ -3124,9 +3155,8 @@ fn qemu_command(
         ))
         .arg("-drive")
         .arg(format!("format=raw,file=fat:rw:{}", esp_dir.display()));
-    if let Some(cpu) = config.cpu_model {
-        qemu.arg("-cpu").arg(cpu);
-    }
+    qemu.arg("-cpu")
+        .arg(config.cpu_model.unwrap_or(GUARDED_CPU_MODEL));
     if let Some(vga) = config.vga {
         qemu.arg("-vga").arg(vga);
     }
@@ -5607,7 +5637,7 @@ mod tests {
     #[test]
     fn qemu_argv_without_qmp_options_is_unchanged() {
         let config = VmLaunchConfig {
-            cpu_model: Some("qemu64,+rdrand"),
+            cpu_model: Some(RDRAND_CPU_MODEL),
             ..VmLaunchConfig::default()
         };
         assert_eq!(
@@ -5631,11 +5661,24 @@ mod tests {
                 "-drive",
                 "format=raw,file=fat:rw:ESP",
                 "-cpu",
-                "qemu64,+rdrand",
+                "qemu64,+rdrand,+smep,+smap,+umip",
                 "-S",
                 "-s",
             ]
         );
+    }
+
+    #[test]
+    fn every_lane_cpu_exposes_the_kernel_guards() {
+        let plain = qemu_argv(&VmLaunchConfig::default(), false);
+        assert!(plain
+            .windows(2)
+            .any(|pair| pair == ["-cpu", "qemu64,+smep,+smap,+umip"]));
+        for model in [GUARDED_CPU_MODEL, RDRAND_CPU_MODEL] {
+            for feature in ["+smep", "+smap", "+umip"] {
+                assert!(model.split(',').any(|part| part == feature), "{model}");
+            }
+        }
     }
 
     #[test]

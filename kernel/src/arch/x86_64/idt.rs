@@ -50,10 +50,13 @@ use crate::arch::x86_64::gdt::initialize_gdt_and_tss;
 ))]
 use crate::arch::x86_64::USER_TEST_VECTOR;
 use crate::arch::x86_64::{
-    DEVICE_VECTOR_COUNT, DEVICE_VECTOR_FIRST, DOUBLE_FAULT_VECTOR, SPURIOUS_VECTOR,
+    DEVICE_VECTOR_COUNT, DEVICE_VECTOR_FIRST, DOUBLE_FAULT_VECTOR, MACHINE_CHECK_VECTOR,
+    NMI_VECTOR, SPURIOUS_VECTOR,
 };
 
 pub(super) const DOUBLE_FAULT_IST_INDEX: u16 = 1;
+pub(super) const NMI_IST_INDEX: u16 = 2;
+pub(super) const MACHINE_CHECK_IST_INDEX: u16 = 3;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -194,6 +197,9 @@ pub(crate) fn install_interrupt_handlers() {
         }
         IDT.entries[DOUBLE_FAULT_VECTOR]
             .set_handler_with_ist(clean_slate_interrupt_8, DOUBLE_FAULT_IST_INDEX);
+        IDT.entries[NMI_VECTOR].set_handler_with_ist(clean_slate_interrupt_2, NMI_IST_INDEX);
+        IDT.entries[MACHINE_CHECK_VECTOR]
+            .set_handler_with_ist(clean_slate_interrupt_18, MACHINE_CHECK_IST_INDEX);
         #[cfg(any(
             feature = "m3-address-space-self-test",
             feature = "m3-resources-self-test",

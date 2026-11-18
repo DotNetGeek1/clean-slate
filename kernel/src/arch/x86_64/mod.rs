@@ -17,9 +17,11 @@ pub(crate) mod ioapic;
 pub(crate) mod msr;
 pub(crate) mod port;
 
+pub(crate) const NMI_VECTOR: usize = 2;
 pub(crate) const DOUBLE_FAULT_VECTOR: usize = 8;
 pub(crate) const PAGE_FAULT_VECTOR: usize = 14;
 pub(crate) const GENERAL_PROTECTION_VECTOR: usize = 13;
+pub(crate) const MACHINE_CHECK_VECTOR: usize = 18;
 pub(crate) const TIMER_VECTOR: usize = 32;
 pub(crate) const SPURIOUS_VECTOR: usize = 33;
 /// Device interrupt vectors `0x30..0x40`; allocation policy lives in `interrupt::irq`.
@@ -46,6 +48,14 @@ const CPUID_EXTENDED_FEATURES_EDX_NX: u32 = 1 << 20;
 pub(crate) const CPUID_ADDRESS_SIZES_LEAF: u32 = 0x8000_0008;
 /// Physical-address width the SDM specifies for a CPU without CPUID leaf `0x8000_0008`.
 const DEFAULT_PHYSICAL_ADDRESS_BITS: u32 = 36;
+/// CPUID leaf 7 subleaf 0: structured extended features.
+pub(crate) const CPUID_STRUCTURED_FEATURES_LEAF: u32 = 7;
+const CPUID_STRUCTURED_EBX_SMEP: u32 = 1 << 7;
+const CPUID_STRUCTURED_EBX_SMAP: u32 = 1 << 20;
+const CPUID_STRUCTURED_ECX_UMIP: u32 = 1 << 2;
+pub(crate) const CR4_UMIP: u64 = 1 << 11;
+pub(crate) const CR4_SMEP: u64 = 1 << 20;
+pub(crate) const CR4_SMAP: u64 = 1 << 21;
 pub(crate) const RFLAGS_TRAP_FLAG_BIT: u64 = 8;
 pub(crate) const RFLAGS_INTERRUPT_ENABLE_BIT: u64 = 9;
 pub(crate) const RFLAGS_DIRECTION_FLAG_BIT: u64 = 10;
@@ -98,6 +108,43 @@ pub(crate) const fn physical_address_bits_from_cpuid(
     }
 }
 
+/// Supervisor guard features CPUID reports. `ebx`/`ecx` are CPUID leaf 7 subleaf 0, meaningful
+/// only when `max_basic_leaf` reaches that leaf.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GuardSupport {
+    pub(crate) smep: bool,
+    pub(crate) smap: bool,
+    pub(crate) umip: bool,
+}
+
+pub(crate) const fn guard_support_from_cpuid(max_basic_leaf: u32, ebx: u32, ecx: u32) -> GuardSupport {
+    if max_basic_leaf < CPUID_STRUCTURED_FEATURES_LEAF {
+        return GuardSupport {
+            smep: false,
+            smap: false,
+            umip: false,
+        };
+    }
+    GuardSupport {
+        smep: ebx & CPUID_STRUCTURED_EBX_SMEP != 0,
+        smap: ebx & CPUID_STRUCTURED_EBX_SMAP != 0,
+        umip: ecx & CPUID_STRUCTURED_ECX_UMIP != 0,
+    }
+}
+
+/// CR4 with SMEP and UMIP set where `support` allows. SMAP stays clear: kernel code still
+/// dereferences user pointers directly (#217 stage B adds the copy helper that SMAP needs).
+pub(crate) const fn cr4_with_guards(cr4: u64, support: GuardSupport) -> u64 {
+    let mut value = cr4;
+    if support.smep {
+        value |= CR4_SMEP;
+    }
+    if support.umip {
+        value |= CR4_UMIP;
+    }
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +181,53 @@ mod tests {
             46
         );
         assert_eq!(physical_address_bits_from_cpuid(0x8000_0007, 0x3028), 36);
+    }
+
+    #[test]
+    fn guard_support_needs_leaf_7_and_the_feature_bits() {
+        let none = GuardSupport {
+            smep: false,
+            smap: false,
+            umip: false,
+        };
+        assert_eq!(guard_support_from_cpuid(6, u32::MAX, u32::MAX), none);
+        assert_eq!(guard_support_from_cpuid(7, 0, 0), none);
+        assert_eq!(
+            guard_support_from_cpuid(7, 1 << 7, 0),
+            GuardSupport {
+                smep: true,
+                ..none
+            }
+        );
+        assert_eq!(
+            guard_support_from_cpuid(0xd, 1 << 20, 1 << 2),
+            GuardSupport {
+                smep: false,
+                smap: true,
+                umip: true
+            }
+        );
+    }
+
+    #[test]
+    fn cr4_guards_set_smep_and_umip_but_never_smap() {
+        let all = GuardSupport {
+            smep: true,
+            smap: true,
+            umip: true,
+        };
+        assert_eq!(CR4_SMEP, 0x10_0000);
+        assert_eq!(CR4_SMAP, 0x20_0000);
+        assert_eq!(CR4_UMIP, 0x800);
+        let base = 0x620;
+        assert_eq!(cr4_with_guards(base, all), base | CR4_SMEP | CR4_UMIP);
+        assert_eq!(cr4_with_guards(base, all) & CR4_SMAP, 0);
+        let only_umip = GuardSupport {
+            smep: false,
+            smap: false,
+            umip: true,
+        };
+        assert_eq!(cr4_with_guards(base, only_umip), base | CR4_UMIP);
     }
 
     #[test]

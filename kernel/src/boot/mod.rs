@@ -11,9 +11,10 @@ pub(crate) mod uefi;
 use crate::arch::x86_64::context_switch::call_on_fresh_stack;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::cpu::enable_and_verify_nxe;
+use crate::arch::x86_64::cpu::enable_kernel_guards;
 use crate::arch::x86_64::gdt::register_gdt_tss_carve_outs;
 use crate::arch::x86_64::gdt::set_privilege_stack;
-use crate::arch::x86_64::gdt::DOUBLE_FAULT_STACK;
+use crate::arch::x86_64::gdt::{DOUBLE_FAULT_STACK, MACHINE_CHECK_STACK, NMI_STACK};
 use crate::arch::x86_64::guarded_stack::GuardedStack;
 use crate::arch::x86_64::idt::install_interrupt_handlers;
 use crate::arch::x86_64::idt::register_idt_carve_out;
@@ -146,6 +147,7 @@ use crate::sched::dispatch::initialize_scheduler;
     feature = "m7-dns-self-test"
 )))]
 use crate::sched::dispatch::start_scheduler;
+use crate::limits::MAX_GUARDED_STACKS;
 use crate::sched::task_stacks_mut;
 use crate::sched::SCHEDULER_THREAD_SLOTS;
 #[cfg(feature = "m10-framebuffer-self-test")]
@@ -296,8 +298,8 @@ extern "C" fn run_on_boot_stack() -> ! {
 
 /// Every kernel stack that gets an unmapped guard page (see `mm::stack_guard`):
 /// each scheduler slot's task stack (also its TSS RSP0 and SYSCALL stack), the
-/// boot stack and the double-fault IST stack.
-fn kernel_guarded_stacks() -> [GuardedStackRecord; SCHEDULER_THREAD_SLOTS + 2] {
+/// boot stack and the double-fault, NMI and machine-check IST stacks.
+fn kernel_guarded_stacks() -> [GuardedStackRecord; MAX_GUARDED_STACKS] {
     fn record<const N: usize>(
         kind: KernelStackKind,
         stack: &GuardedStack<N>,
@@ -312,12 +314,18 @@ fn kernel_guarded_stacks() -> [GuardedStackRecord; SCHEDULER_THREAD_SLOTS + 2] {
     let task_stacks = unsafe { &*task_stacks_mut() };
     let boot_stack = unsafe { &*BOOT_STACK.get() };
     let double_fault_stack = unsafe { &*DOUBLE_FAULT_STACK.get() };
+    let nmi_stack = unsafe { &*NMI_STACK.get() };
+    let machine_check_stack = unsafe { &*MACHINE_CHECK_STACK.get() };
     core::array::from_fn(|index| match index {
         slot if slot < SCHEDULER_THREAD_SLOTS => {
             record(KernelStackKind::Task { slot }, &task_stacks[slot])
         }
         SCHEDULER_THREAD_SLOTS => record(KernelStackKind::Boot, boot_stack),
-        _ => record(KernelStackKind::DoubleFaultIst, double_fault_stack),
+        index if index == SCHEDULER_THREAD_SLOTS + 1 => {
+            record(KernelStackKind::DoubleFaultIst, double_fault_stack)
+        }
+        index if index == SCHEDULER_THREAD_SLOTS + 2 => record(KernelStackKind::NmiIst, nmi_stack),
+        _ => record(KernelStackKind::MachineCheckIst, machine_check_stack),
     })
 }
 
@@ -390,6 +398,8 @@ fn run_inner() -> Result<(), &'static str> {
         "[CPU ] NXE enabled nx=1 firmware_nxe={}\n",
         nxe.firmware_had_nxe as u8
     ));
+    let guards = enable_kernel_guards()?;
+    serial_write_fmt(format_args!("[CPU ] guards {guards}\n"));
 
     reserved_ranges.push(ReservedRange::from_base_and_size(
         memory_map.buffer().as_ptr() as u64,
@@ -425,6 +435,7 @@ fn run_inner() -> Result<(), &'static str> {
     install_interrupt_handlers();
     serial_write_line("[INT ] IDT initialized");
     serial_write_line("[INT ] double-fault IST initialized");
+    serial_write_line("[INT ] nmi and machine-check IST initialized");
     let local_apic_phys = crate::arch::x86_64::apic::local_apic_physical_base();
     if local_apic_phys == 0 {
         return Err("IA32_APIC_BASE names no local APIC page");
@@ -509,6 +520,11 @@ fn run_inner() -> Result<(), &'static str> {
     #[cfg(feature = "m2-identity-guard-self-test")]
     {
         crate::selftest::m2_identity_guard::run_identity_guard_self_test();
+    }
+
+    #[cfg(feature = "m2-kernel-guards-self-test")]
+    {
+        crate::selftest::m2_kernel_guards::run_kernel_guards_self_test(allocator);
     }
 
     #[cfg(feature = "m2-timer-self-test")]

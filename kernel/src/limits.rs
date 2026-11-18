@@ -16,17 +16,15 @@ pub(crate) const TASK_COUNT: usize = 16;
 /// `TASK_COUNT` application slots plus the idle thread.
 pub(crate) const SCHEDULER_THREAD_SLOTS: usize = TASK_COUNT + 1;
 
-/// Unused guarded-stack table entries for IST stacks that are not armed yet.
-/// Issue #217 adds one for NMI.
-pub(crate) const GUARDED_STACK_FUTURE_IST_RESERVE: usize = 1;
+/// IST stacks: double fault, NMI and machine check (16 KiB each plus a guard).
+pub(crate) const IST_STACK_COUNT: usize = 3;
 
-/// Records the boot can arm: every scheduler slot (including idle), the boot
-/// stack, the double-fault IST stack, and [`GUARDED_STACK_FUTURE_IST_RESERVE`].
+/// Records the boot arms: every scheduler slot (including idle), the boot
+/// stack and the [`IST_STACK_COUNT`] IST stacks.
 ///
 /// The record table itself is a few hundred bytes. The stacks it describes
 /// are the `TASK_COUNT` cost above.
-pub(crate) const MAX_GUARDED_STACKS: usize =
-    SCHEDULER_THREAD_SLOTS + 2 + GUARDED_STACK_FUTURE_IST_RESERVE;
+pub(crate) const MAX_GUARDED_STACKS: usize = SCHEDULER_THREAD_SLOTS + 1 + IST_STACK_COUNT;
 
 /// Process registry slots. The Linux fd-table registry uses the same count.
 ///
