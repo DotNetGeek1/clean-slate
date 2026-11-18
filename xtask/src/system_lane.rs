@@ -7,8 +7,14 @@
 //! image's own code: the fault report, the Linux socket loss, the client capability revoke,
 //! init's restart policy, the new instance's launch audit and the capability re-issue.
 //!
-//! The boot is `test-system-shell`'s: a fresh lane-owned data disk, the network fixture peer
-//! and COM1 on a loopback socket. Each [`Step`] is typed once the step before it is complete:
+//! Before that boot, two short headless boots of the same kernel pass
+//! `-fw_cfg name=opt/clean-slate/desktop,string=q1` ([`crate::system_desktop`]): one with a
+//! VirtIO-GPU, where init launches the compositor, desktop shell and app rows next to the base
+//! rows, and one with no display, which boots base. The shell boot passes no entry and requires
+//! `profile=base` and no desktop row.
+//!
+//! The shell boot is `test-system-shell`'s: a fresh lane-owned data disk, the network fixture
+//! peer and COM1 on a loopback socket. Each [`Step`] is typed once the step before it is complete:
 //!
 //! 1. `nslookup` and `wget` from the shell reach the fixture through network generation 1.
 //! 2. A foreground `wget` to the fixture's hold port, which accepts and never answers, leaves
@@ -64,7 +70,6 @@ const RESET_ERROR: &str = "wget: error getting response: Connection reset by pee
 const HOOKS_BANNER: &str =
     "[HOOK] system-test-hooks build: Ctrl-\\ on COM1 faults the network service";
 const SETTLED: &str = "[INIT] boot settled running=3 down=0; waiting, no deadline";
-
 /// What a step must produce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Expect {
@@ -150,7 +155,7 @@ struct State {
 /// The kernel's launch audit for a network instance must be exactly the row's grants.
 fn expected_network_authority(pid: u64) -> String {
     format!(
-        "[SVC ] authority service={NETWORK_SERVICE} pid={pid} lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1"
+        "[SVC ] authority service={NETWORK_SERVICE} pid={pid} lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1"
     )
 }
 
@@ -382,8 +387,8 @@ fn save_transcript(transcript: &[u8]) -> Result<(), XtaskError> {
     Ok(())
 }
 
-/// `test-system`: one boot of the hooks build on a fresh lane-owned disk; the host types
-/// [`STEPS`] into the shell over a loopback COM1.
+/// `test-system`: the two desktop boots, then one boot of the hooks build
+/// on a fresh lane-owned disk; the host types [`STEPS`] into the shell over a loopback COM1.
 pub(crate) fn run() -> Result<(), XtaskError> {
     println!(
         "[STM ] test-system boots the {HOOKS_FEATURE} build: the default image plus the Ctrl-\\ network fault hook"
@@ -392,6 +397,11 @@ pub(crate) fn run() -> Result<(), XtaskError> {
         .join("target")
         .join("system")
         .join(SYSTEM_DATA_DISK_FILENAME);
+    if disk.is_file() {
+        std::fs::remove_file(&disk)?;
+    }
+    ensure_data_disk(&disk)?;
+    crate::system_desktop::run(&[HOOKS_FEATURE], &disk)?;
     if disk.is_file() {
         std::fs::remove_file(&disk)?;
     }
@@ -598,7 +608,9 @@ mod tests {
         format!(
             "{HOOKS_BANNER}\n\
              [KERN] serial console input on vector=0x31\n\
+             [KERN] boot profile=base\n\
              [KERN] init launched pid={INIT} slot=0 declared-services=3\n\
+             [IPC ] console pid={INIT}: [INIT] boot profile=base\n\
              {}\
              {}\n\
              [SVC ] shell process pid={SHELL} gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\

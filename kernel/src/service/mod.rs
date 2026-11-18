@@ -9,6 +9,8 @@
 pub(crate) mod block_bridge;
 pub(crate) mod capability;
 pub(crate) mod control;
+#[cfg(clean_slate_desktop)]
+pub(crate) mod desktop_image;
 #[cfg(feature = "m10-desktop")]
 pub(crate) mod desktop_launch;
 pub(crate) mod display_syscall;

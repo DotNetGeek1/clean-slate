@@ -96,3 +96,9 @@ pub fn authority_line(display_denied: bool, input_denied: bool) -> ConsoleLine {
 pub fn exit_line(reason: &str) -> ConsoleLine {
     ConsoleLine::format(format_args!("[APP ] exit reason={reason}"))
 }
+
+/// A line that reports one key, click or focus change. Printed on serial only when the launch
+/// page has [`clean_slate_native_abi::desktop::LAUNCH_FLAG_INPUT_TRACE`].
+pub fn is_per_input_line(line: &str) -> bool {
+    line.starts_with("[APP ] input state=changed") || line.starts_with("[APP ] focus")
+}

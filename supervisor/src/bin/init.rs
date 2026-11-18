@@ -1,6 +1,7 @@
 //! #218 S3b userspace init for the default image.
 //!
-//! Starts the system manifest's services through [`SystemInit`] and then sleeps in
+//! Starts the services of the manifest the boot profile selects (the kernel declared the same
+//! rows) through [`SystemInit`] and then sleeps in
 //! `LIFECYCLE_WAIT` (21): it wakes only for a lifecycle message or for the next ready deadline
 //! or retry, never on a polling timer. The kernel treats init's death as fatal, so any failure
 //! of the wait or the clock ends in `ud2`.
@@ -14,8 +15,11 @@ use clean_slate_native_abi::lifecycle::{
 use clean_slate_native_abi::service_ready::{ServiceReadyResult, SYSCALL_NR_SERVICE_READY};
 use clean_slate_native_abi::status::is_status;
 use clean_slate_native_abi::work_set::{SYSCALL_NR_WORK_SET, WORK_SET_OP_NOW};
-use clean_slate_service_fixtures::init_bootstrap::{InitBootstrap, INIT_BOOTSTRAP_ADDRESS};
-use clean_slate_service_fixtures::manifest::SYSTEM_MANIFEST;
+use clean_slate_service_fixtures::init_bootstrap::{
+    InitBootstrap, DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_VIRTIO_GPU,
+    INIT_BOOTSTRAP_ADDRESS,
+};
+use clean_slate_service_fixtures::manifest::{manifest_for, SYSTEM_DESKTOP_MANIFEST};
 use clean_slate_service_lifecycle::ServiceId;
 use clean_slate_supervisor::{
     DiagnosticSink, SupervisorError, SyscallLifecycleControl, SystemInit, INIT_READY_TIMEOUT_NS,
@@ -24,8 +28,10 @@ use clean_slate_supervisor::{
 const SYSCALL_NR_IPC_SEND: u64 = 3;
 /// The kernel refuses longer IPC messages.
 const IPC_MAX_MESSAGE_BYTES: usize = 64;
-/// Supervisor slots; the system manifest has three rows.
-const SERVICE_SLOTS: usize = 4;
+/// Supervisor slots; the desktop manifest has six rows, the base one three.
+const SERVICE_SLOTS: usize = 8;
+
+const _: () = assert!(SYSTEM_DESKTOP_MANIFEST.len() <= SERVICE_SLOTS);
 
 struct IpcConsoleSink {
     capability: u64,
@@ -46,13 +52,14 @@ impl DiagnosticSink for IpcConsoleSink {
 pub extern "C" fn _start() -> ! {
     let bootstrap = unsafe { *(INIT_BOOTSTRAP_ADDRESS as *const InitBootstrap) };
     let console = bootstrap.console_capability;
+    log_boot_profile(console, bootstrap.desktop_mode);
     let Ok(mut init) = SystemInit::<_, _, SERVICE_SLOTS>::new(
         bootstrap.self_pid,
         SyscallLifecycleControl::<16>::new(bootstrap.lifecycle_capability),
         IpcConsoleSink {
             capability: console,
         },
-        SYSTEM_MANIFEST,
+        manifest_for(bootstrap.desktop_mode),
         INIT_READY_TIMEOUT_NS,
     ) else {
         fail(console, b"[INIT] could not register the system manifest\n");
@@ -92,6 +99,45 @@ fn probe_service_ready_refusal(console: u64) {
             );
         }
         _ => fail(console, b"[INIT] SERVICE_READY from init was not refused\n"),
+    }
+}
+
+/// One line, before any service starts. An unknown word is a boot error and leaves the desktop
+/// off; init still brings up the system manifest.
+fn log_boot_profile(console: u64, mode: u64) {
+    match mode {
+        DESKTOP_MODE_OFF => {
+            let _ = ipc_send(console, b"[INIT] boot profile=base\n");
+        }
+        DESKTOP_MODE_FRAMEBUFFER => {
+            let _ = ipc_send(console, b"[INIT] boot profile=desktop tier=Q0\n");
+        }
+        DESKTOP_MODE_VIRTIO_GPU => {
+            let _ = ipc_send(console, b"[INIT] boot profile=desktop tier=Q1\n");
+        }
+        other => {
+            let mut buffer = [0u8; 80];
+            let prefix = b"[INIT] boot profile word=";
+            let suffix = b" not understood; desktop off\n";
+            buffer[..prefix.len()].copy_from_slice(prefix);
+            let mut digits = [0u8; 20];
+            let mut value = other;
+            let mut index = digits.len();
+            loop {
+                index -= 1;
+                digits[index] = b'0' + (value % 10) as u8;
+                value /= 10;
+                if value == 0 {
+                    break;
+                }
+            }
+            let digits = &digits[index..];
+            let end = prefix.len() + digits.len();
+            buffer[prefix.len()..end].copy_from_slice(digits);
+            let tail = end + suffix.len();
+            buffer[end..tail].copy_from_slice(suffix);
+            let _ = ipc_send(console, &buffer[..tail]);
+        }
     }
 }
 

@@ -63,7 +63,14 @@ impl LinuxGrants {
                 Grant::ConsoleInput => wanted.console_input = true,
                 Grant::TmpObjects => wanted.tmp_objects = true,
                 Grant::NetworkClient => wanted.network_client = true,
-                Grant::BlockDevice | Grant::ObjectServiceRole | Grant::NetworkService => {
+                Grant::BlockDevice
+                | Grant::ObjectServiceRole
+                | Grant::NetworkService
+                | Grant::GraphicsPort
+                | Grant::DisplayPresenter
+                | Grant::InputSeat
+                | Grant::GraphicsShellRole
+                | Grant::GraphicsAppRole => {
                     return Err("system shell: native grant on a Linux row");
                 }
             }

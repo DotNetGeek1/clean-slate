@@ -34,6 +34,12 @@ pub(crate) const IA32_EFER_SCE: u64 = 1;
 /// Without it bit 63 of every paging entry is reserved, so any `NO_EXECUTE`
 /// entry takes a reserved-bit #PF instead of enforcing no-execute.
 pub(crate) const IA32_EFER_NXE: u64 = 1 << 11;
+/// CPUID leaf 1: feature bits. ECX bit 31 is set when any hypervisor is present.
+#[cfg(any(test, clean_slate_system_init))]
+pub(crate) const CPUID_FEATURES_LEAF: u32 = 1;
+/// CPUID leaf 1 ECX bit 31. QEMU sets it under TCG and under KVM/WHPX.
+#[cfg(any(test, clean_slate_system_init))]
+pub(crate) const CPUID_FEATURES_ECX_HYPERVISOR: u32 = 1 << 31;
 pub(crate) const CPUID_EXTENDED_MAX_LEAF: u32 = 0x8000_0000;
 pub(crate) const CPUID_EXTENDED_FEATURES_LEAF: u32 = 0x8000_0001;
 const CPUID_EXTENDED_FEATURES_EDX_NX: u32 = 1 << 20;
@@ -66,6 +72,12 @@ pub(crate) const fn bit(value: u64, index: u32) -> u8 {
     ((value >> index) & 1) as u8
 }
 
+/// `feature_ecx` is CPUID leaf 1 ECX. The bit names a hypervisor, not which one.
+#[cfg(any(test, clean_slate_system_init))]
+pub(crate) const fn hypervisor_present_from_cpuid(feature_ecx: u32) -> bool {
+    feature_ecx & CPUID_FEATURES_ECX_HYPERVISOR != 0
+}
+
 /// `ext_edx` is CPUID `0x8000_0001` EDX, meaningful only when
 /// `max_extended_leaf` reaches that leaf.
 pub(crate) const fn nx_supported_from_cpuid(max_extended_leaf: u32, ext_edx: u32) -> bool {
@@ -89,6 +101,15 @@ pub(crate) const fn physical_address_bits_from_cpuid(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hypervisor_present_is_leaf_1_ecx_bit_31() {
+        assert_eq!(CPUID_FEATURES_LEAF, 1);
+        assert!(!hypervisor_present_from_cpuid(0));
+        assert!(!hypervisor_present_from_cpuid(1 << 30));
+        assert!(hypervisor_present_from_cpuid(CPUID_FEATURES_ECX_HYPERVISOR));
+        assert!(hypervisor_present_from_cpuid(u32::MAX));
+    }
 
     #[test]
     fn nx_supported_from_cpuid_requires_leaf_and_bit() {

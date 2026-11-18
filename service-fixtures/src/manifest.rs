@@ -5,8 +5,10 @@
 //! reads row order, `restart` and `depends_on`. A self-test that needs different rows installs its
 //! own scenario manifest in place of [`SYSTEM_MANIFEST`]; it never adds launch code of its own.
 
+use crate::init_bootstrap::{DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_VIRTIO_GPU};
 use crate::{
-    NETWORK_SERVICE_ID, NETWORK_SERVICE_MODE_ACCEPTANCE, STORAGE_SERVICE_ID,
+    COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, NETWORK_SERVICE_ID,
+    NETWORK_SERVICE_MODE_ACCEPTANCE, PLAYGROUND_SERVICE_ID, STORAGE_SERVICE_ID,
     STORAGE_SERVICE_MODE_OBJECT_SERVICE, SYSTEM_SHELL_SERVICE_ID,
 };
 use clean_slate_service_lifecycle::ServiceId;
@@ -31,8 +33,11 @@ pub enum ServiceImage {
     LinuxHello,
     /// BusyBox `ash` from the embedded rootfs, run as `/bin/sh -i` with `PATH=/bin`.
     LinuxShell,
+    /// `clean-slate-compositor-userspace`.
     Compositor,
+    /// `clean-slate-desktop-shell-userspace`.
     DesktopShell,
+    /// `clean-slate-playground-userspace`.
     Playground,
 }
 
@@ -52,16 +57,26 @@ impl ServiceImage {
             | Self::Playground => false,
         }
     }
+
+    /// The three #118 desktop images, which read a `DesktopLaunchPage`.
+    pub const fn is_desktop(self) -> bool {
+        matches!(
+            self,
+            Self::Compositor | Self::DesktopShell | Self::Playground
+        )
+    }
 }
 
 /// Kernel authority applied to a service instance when its row is started.
 ///
-/// Only grants the kernel can apply at service launch today are listed. `GraphicsPort` and
-/// `GraphicsRole` are added by the stages that give the kernel a launch-time path for them.
+/// `ConsoleInput`, `TmpObjects` and `NetworkClient` are Linux-personality grants: the kernel
+/// applies them while it builds the Linux process, so only a [`ServiceImage::LinuxShell`] row
+/// may hold them. `Console` is valid on that row and on the desktop images, whose console
+/// handle is written into their launch page.
 ///
-/// `Console`, `ConsoleInput`, `TmpObjects` and `NetworkClient` are Linux-personality grants: the
-/// kernel applies them while it builds the Linux process, so only a [`ServiceImage::LinuxShell`]
-/// row may hold them.
+/// The graphics, display and input grants are separate variants (not one variant with a role
+/// field) because rows compare grants by `as u8` in `const` code, and so that the launch audit
+/// names each authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Grant {
     /// The storage block device (`STORAGE_BLOCK_DEVICE_ID`).
@@ -71,7 +86,8 @@ pub enum Grant {
     ObjectServiceRole,
     /// Network-service authority over the network device, plus net-bridge registration.
     NetworkService,
-    /// One console capability, installed as fd 1 (stdout) and fd 2 (stderr).
+    /// One console capability: fd 1 (stdout) and fd 2 (stderr) of a Linux row, or the console
+    /// handle in a desktop image's launch page (without it the page says `NO_CONSOLE`).
     Console,
     /// Serial console input, installed as fd 0 (stdin). Requires `Console` earlier in the row,
     /// because fd 0 is added to the fd table `Console` creates.
@@ -83,6 +99,25 @@ pub enum Grant {
     /// network instance from it, at launch and each time a network instance registers. The
     /// row does not depend on the network: with no instance live, socket calls fail.
     NetworkClient,
+    /// Registers the row's graphics port, `graphics(row id, instance generation)`, for the
+    /// instance being started, plus a root `GFX_SERVE` capability on it. Teardown unregisters
+    /// the port (clients see `ServerGone`) and revokes the capability. Compositor rows only;
+    /// at most one row of a manifest.
+    GraphicsPort,
+    /// Root `DISPLAY_PRESENT | INSPECT` on output 0. The presenter is bound by the holder's
+    /// first `MAP_SCANOUT`, not at launch. Compositor rows only.
+    DisplayPresenter,
+    /// Root `INPUT_CONSUME | INSPECT` on seat 0. The consumer is bound by the holder's
+    /// `INPUT_BIND_WAKE`, not at launch. Compositor rows only; at most one row of a manifest.
+    InputSeat,
+    /// Root `GFX_CONNECT | GFX_SHELL` on the graphics port of the live `GraphicsPort` row's
+    /// instance. With no live instance the grant fails, and so does the start. Desktop-shell
+    /// rows only, which must depend on the `GraphicsPort` row.
+    GraphicsShellRole,
+    /// Root `GFX_CONNECT` on the live `GraphicsPort` instance's port, as
+    /// [`Self::GraphicsShellRole`]. Playground rows only, which must depend on the
+    /// `GraphicsPort` row.
+    GraphicsAppRole,
 }
 
 /// What init does when a started service exits or faults. Init counts ticks in monotonic
@@ -196,6 +231,70 @@ pub const SYSTEM_MANIFEST: &[ServiceSpec] = &[
 
 const _: () = assert!(validate_manifest(SYSTEM_MANIFEST).is_ok());
 
+/// Provisional (#218 S6): the serial shell's values. A desktop row that exits is started again
+/// 0.5 s later; three consecutive instances that exit before reporting ready stop the loop.
+const DESKTOP_RESTART: RestartSpec = SHELL_RESTART;
+
+/// The compositor owns the graphics port, output 0 and seat 0. It depends on nothing, so the
+/// screen comes up alongside storage. Ready is its first presented frame.
+pub const COMPOSITOR_SERVICE_SPEC: ServiceSpec = ServiceSpec {
+    id: COMPOSITOR_SERVICE_ID,
+    image: ServiceImage::Compositor,
+    mode: 0,
+    grants: &[
+        Grant::Console,
+        Grant::GraphicsPort,
+        Grant::DisplayPresenter,
+        Grant::InputSeat,
+    ],
+    restart: DESKTOP_RESTART,
+    depends_on: &[],
+};
+
+/// The panel and background. Ready is both surfaces committed.
+pub const DESKTOP_SHELL_SERVICE_SPEC: ServiceSpec = ServiceSpec {
+    id: DESKTOP_SHELL_SERVICE_ID,
+    image: ServiceImage::DesktopShell,
+    mode: 0,
+    grants: &[Grant::Console, Grant::GraphicsShellRole],
+    restart: DESKTOP_RESTART,
+    depends_on: &[COMPOSITOR_SERVICE_ID],
+};
+
+/// The playground app. It depends on the shell so the panel is mapped before the app's first
+/// window takes focus. Ready is that window mapped.
+pub const PLAYGROUND_SERVICE_SPEC: ServiceSpec = ServiceSpec {
+    id: PLAYGROUND_SERVICE_ID,
+    image: ServiceImage::Playground,
+    mode: 0,
+    grants: &[Grant::Console, Grant::GraphicsAppRole],
+    restart: DESKTOP_RESTART,
+    depends_on: &[COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID],
+};
+
+/// The desktop profile: the three system rows followed by the three desktop rows.
+pub const SYSTEM_DESKTOP_MANIFEST: &[ServiceSpec] = &[
+    STORAGE_SERVICE_SPEC,
+    NETWORK_SERVICE_SPEC,
+    SYSTEM_SHELL_SPEC,
+    COMPOSITOR_SERVICE_SPEC,
+    DESKTOP_SHELL_SERVICE_SPEC,
+    PLAYGROUND_SERVICE_SPEC,
+];
+
+const _: () = assert!(validate_manifest(SYSTEM_DESKTOP_MANIFEST).is_ok());
+
+/// The manifest for an `InitBootstrap.desktop_mode` word: [`SYSTEM_DESKTOP_MANIFEST`] for `q0`
+/// or `q1`, else [`SYSTEM_MANIFEST`] (off, or a word init does not understand). The kernel and
+/// init both select with this, so they cannot disagree about the rows.
+pub const fn manifest_for(desktop_mode: u64) -> &'static [ServiceSpec] {
+    if desktop_mode == DESKTOP_MODE_FRAMEBUFFER || desktop_mode == DESKTOP_MODE_VIRTIO_GPU {
+        SYSTEM_DESKTOP_MANIFEST
+    } else {
+        SYSTEM_MANIFEST
+    }
+}
+
 /// The row for `id`, if `manifest` declares it.
 pub const fn find_service(manifest: &[ServiceSpec], id: ServiceId) -> Option<&ServiceSpec> {
     let mut index = 0;
@@ -243,6 +342,15 @@ pub enum ManifestError {
     ConsoleInputWithoutConsole {
         row: usize,
     },
+    /// A second row holds `Grant::GraphicsPort` or `Grant::InputSeat`.
+    DuplicateExclusiveGrant {
+        row: usize,
+    },
+    /// A graphics role holder does not list the `Grant::GraphicsPort` row in `depends_on`
+    /// (or no earlier row holds `GraphicsPort`).
+    GraphicsRoleWithoutPortDependency {
+        row: usize,
+    },
 }
 
 /// Checks the invariants the kernel and init rely on. Kernel scenario manifests call this in a
@@ -278,6 +386,18 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
             {
                 return Err(ManifestError::ConsoleInputWithoutConsole { row });
             }
+            if matches!(spec.grants[grant], Grant::GraphicsPort | Grant::InputSeat)
+                && earlier_row_grants(manifest, row, spec.grants[grant])
+            {
+                return Err(ManifestError::DuplicateExclusiveGrant { row });
+            }
+            if matches!(
+                spec.grants[grant],
+                Grant::GraphicsShellRole | Grant::GraphicsAppRole
+            ) && !depends_on_graphics_port(manifest, row)
+            {
+                return Err(ManifestError::GraphicsRoleWithoutPortDependency { row });
+            }
             grant += 1;
         }
         if matches!(spec.image, ServiceImage::Storage)
@@ -307,15 +427,66 @@ pub const fn validate_manifest(manifest: &[ServiceSpec]) -> Result<(), ManifestE
 }
 
 /// Linux-personality grants go only to Linux rows, and Linux rows hold nothing else: the native
-/// grants are applied through the native bootstrap page or service registration.
+/// grants are applied through the native bootstrap page or service registration. `Console` is
+/// shared with the desktop images; each graphics, display and input grant has one image.
 const fn grant_supported_by_image(grant: Grant, image: ServiceImage) -> bool {
     match grant {
         Grant::ObjectServiceRole => matches!(image, ServiceImage::Storage),
-        Grant::BlockDevice | Grant::NetworkService => !matches!(image, ServiceImage::LinuxShell),
-        Grant::Console | Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
+        Grant::BlockDevice | Grant::NetworkService => {
+            !matches!(image, ServiceImage::LinuxShell) && !image.is_desktop()
+        }
+        Grant::Console => matches!(image, ServiceImage::LinuxShell) || image.is_desktop(),
+        Grant::ConsoleInput | Grant::TmpObjects | Grant::NetworkClient => {
             matches!(image, ServiceImage::LinuxShell)
         }
+        Grant::GraphicsPort | Grant::DisplayPresenter | Grant::InputSeat => {
+            matches!(image, ServiceImage::Compositor)
+        }
+        Grant::GraphicsShellRole => matches!(image, ServiceImage::DesktopShell),
+        Grant::GraphicsAppRole => matches!(image, ServiceImage::Playground),
     }
+}
+
+const fn earlier_row_grants(manifest: &[ServiceSpec], row: usize, wanted: Grant) -> bool {
+    let mut earlier = 0;
+    while earlier < row {
+        if manifest[earlier].grants(wanted) {
+            return true;
+        }
+        earlier += 1;
+    }
+    false
+}
+
+/// Whether row `row` lists, in `depends_on`, an earlier row holding `Grant::GraphicsPort`.
+const fn depends_on_graphics_port(manifest: &[ServiceSpec], row: usize) -> bool {
+    let depends_on = manifest[row].depends_on;
+    let mut dependency = 0;
+    while dependency < depends_on.len() {
+        let mut earlier = 0;
+        while earlier < row {
+            if manifest[earlier].id.0 == depends_on[dependency].0
+                && manifest[earlier].grants(Grant::GraphicsPort)
+            {
+                return true;
+            }
+            earlier += 1;
+        }
+        dependency += 1;
+    }
+    false
+}
+
+/// The row holding `Grant::GraphicsPort`, whose live instance the graphics role grants name.
+pub const fn graphics_port_row(manifest: &[ServiceSpec]) -> Option<&ServiceSpec> {
+    let mut index = 0;
+    while index < manifest.len() {
+        if manifest[index].grants(Grant::GraphicsPort) {
+            return Some(&manifest[index]);
+        }
+        index += 1;
+    }
+    None
 }
 
 const fn grants_before(grants: &[Grant], end: usize, wanted: Grant) -> bool {
@@ -580,5 +751,163 @@ mod tests {
         let rows = [row(7, ServiceImage::Storage, &[])];
         assert_eq!(validate_manifest(&rows), Ok(()));
         assert!(grants_for(&rows, ServiceId(7)).is_empty());
+    }
+
+    #[test]
+    fn desktop_manifest_is_the_system_rows_then_compositor_shell_app() {
+        let ids: Vec<u32> = SYSTEM_DESKTOP_MANIFEST
+            .iter()
+            .map(|spec| spec.id.0)
+            .collect();
+        assert_eq!(ids, [0x5100, 0x5200, 0x5400, 0x5300, 0x5301, 0x5302]);
+        assert_eq!(SYSTEM_DESKTOP_MANIFEST[..3], *SYSTEM_MANIFEST);
+        assert_eq!(validate_manifest(SYSTEM_DESKTOP_MANIFEST), Ok(()));
+    }
+
+    #[test]
+    fn desktop_rows_hold_the_designed_grants_and_order() {
+        let compositor = find_service(SYSTEM_DESKTOP_MANIFEST, COMPOSITOR_SERVICE_ID).unwrap();
+        assert_eq!(compositor.image, ServiceImage::Compositor);
+        assert_eq!(
+            compositor.grants,
+            [
+                Grant::Console,
+                Grant::GraphicsPort,
+                Grant::DisplayPresenter,
+                Grant::InputSeat
+            ]
+        );
+        assert!(compositor.depends_on.is_empty());
+        let shell = find_service(SYSTEM_DESKTOP_MANIFEST, DESKTOP_SHELL_SERVICE_ID).unwrap();
+        assert_eq!(shell.grants, [Grant::Console, Grant::GraphicsShellRole]);
+        assert_eq!(shell.depends_on, [COMPOSITOR_SERVICE_ID]);
+        let app = find_service(SYSTEM_DESKTOP_MANIFEST, PLAYGROUND_SERVICE_ID).unwrap();
+        assert_eq!(app.grants, [Grant::Console, Grant::GraphicsAppRole]);
+        assert_eq!(
+            app.depends_on,
+            [COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID]
+        );
+        for spec in [compositor, shell, app] {
+            assert_eq!(spec.restart, SYSTEM_SHELL_SPEC.restart);
+        }
+        assert_eq!(
+            graphics_port_row(SYSTEM_DESKTOP_MANIFEST).map(|spec| spec.id),
+            Some(COMPOSITOR_SERVICE_ID)
+        );
+        assert_eq!(graphics_port_row(SYSTEM_MANIFEST), None);
+    }
+
+    #[test]
+    fn manifest_for_selects_the_desktop_only_for_q0_and_q1() {
+        use crate::init_bootstrap::DESKTOP_MODE_OFF;
+        assert_eq!(manifest_for(DESKTOP_MODE_OFF), SYSTEM_MANIFEST);
+        assert_eq!(manifest_for(3), SYSTEM_MANIFEST);
+        assert_eq!(
+            manifest_for(DESKTOP_MODE_FRAMEBUFFER),
+            SYSTEM_DESKTOP_MANIFEST
+        );
+        assert_eq!(
+            manifest_for(DESKTOP_MODE_VIRTIO_GPU),
+            SYSTEM_DESKTOP_MANIFEST
+        );
+    }
+
+    #[test]
+    fn validation_keeps_each_desktop_grant_on_its_image() {
+        let images = [
+            ServiceImage::Storage,
+            ServiceImage::Network,
+            ServiceImage::LinuxShell,
+            ServiceImage::Compositor,
+            ServiceImage::DesktopShell,
+            ServiceImage::Playground,
+        ];
+        let owners = [
+            (Grant::GraphicsPort, ServiceImage::Compositor),
+            (Grant::DisplayPresenter, ServiceImage::Compositor),
+            (Grant::InputSeat, ServiceImage::Compositor),
+            (Grant::GraphicsShellRole, ServiceImage::DesktopShell),
+            (Grant::GraphicsAppRole, ServiceImage::Playground),
+        ];
+        for (grant, owner) in owners {
+            for image in images {
+                assert_eq!(
+                    grant_supported_by_image(grant, image),
+                    image == owner,
+                    "{grant:?} on {image:?}"
+                );
+            }
+        }
+        for image in [
+            ServiceImage::Compositor,
+            ServiceImage::DesktopShell,
+            ServiceImage::Playground,
+        ] {
+            assert!(grant_supported_by_image(Grant::Console, image));
+            for grant in [
+                Grant::ConsoleInput,
+                Grant::TmpObjects,
+                Grant::NetworkClient,
+                Grant::BlockDevice,
+                Grant::NetworkService,
+                Grant::ObjectServiceRole,
+            ] {
+                assert!(!grant_supported_by_image(grant, image), "{grant:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn validation_rejects_an_app_holding_seat_or_port_authority() {
+        let mut app = PLAYGROUND_SERVICE_SPEC;
+        app.grants = &[Grant::Console, Grant::GraphicsAppRole, Grant::InputSeat];
+        let rows = [COMPOSITOR_SERVICE_SPEC, DESKTOP_SHELL_SERVICE_SPEC, app];
+        assert_eq!(
+            validate_manifest(&rows),
+            Err(ManifestError::GrantNotSupportedByImage { row: 2 })
+        );
+    }
+
+    #[test]
+    fn validation_allows_one_graphics_port_and_one_input_seat() {
+        let mut second = COMPOSITOR_SERVICE_SPEC;
+        second.id = ServiceId(0x5310);
+        second.grants = &[Grant::GraphicsPort];
+        assert_eq!(
+            validate_manifest(&[COMPOSITOR_SERVICE_SPEC, second]),
+            Err(ManifestError::DuplicateExclusiveGrant { row: 1 })
+        );
+        second.grants = &[Grant::InputSeat];
+        assert_eq!(
+            validate_manifest(&[COMPOSITOR_SERVICE_SPEC, second]),
+            Err(ManifestError::DuplicateExclusiveGrant { row: 1 })
+        );
+        second.grants = &[Grant::DisplayPresenter];
+        assert_eq!(
+            validate_manifest(&[COMPOSITOR_SERVICE_SPEC, second]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validation_requires_role_holders_to_depend_on_the_port_row() {
+        let mut shell = DESKTOP_SHELL_SERVICE_SPEC;
+        shell.depends_on = &[];
+        assert_eq!(
+            validate_manifest(&[COMPOSITOR_SERVICE_SPEC, shell]),
+            Err(ManifestError::GraphicsRoleWithoutPortDependency { row: 1 })
+        );
+        let mut compositor_without_port = COMPOSITOR_SERVICE_SPEC;
+        compositor_without_port.grants = &[Grant::Console];
+        assert_eq!(
+            validate_manifest(&[compositor_without_port, DESKTOP_SHELL_SERVICE_SPEC]),
+            Err(ManifestError::GraphicsRoleWithoutPortDependency { row: 1 })
+        );
+        let mut app = PLAYGROUND_SERVICE_SPEC;
+        app.depends_on = &[DESKTOP_SHELL_SERVICE_ID];
+        assert_eq!(
+            validate_manifest(&[COMPOSITOR_SERVICE_SPEC, DESKTOP_SHELL_SERVICE_SPEC, app]),
+            Err(ManifestError::GraphicsRoleWithoutPortDependency { row: 2 })
+        );
     }
 }

@@ -286,7 +286,7 @@ pub(crate) fn prompt_after(segment: &str, from: usize) -> Option<usize> {
 /// The kernel's authority line for a shell instance must be exactly the row's grants.
 pub(crate) fn expected_authority(pid: u64) -> String {
     format!(
-        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
+        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
     )
 }
 
@@ -349,8 +349,28 @@ pub(crate) fn check_boot(segment: &str) -> Result<(u64, Shell), String> {
     let launched = only_kernel_line(segment, "[KERN] init launched pid=")?;
     let init_pid = number(launched, "pid")?;
     only_kernel_line(segment, "[KERN] serial console input on vector=")?;
+    require_base_profile(segment, init_pid)?;
+    crate::system_boot::check_no_desktop_rows(segment, launched)?;
     let shell = check_instance(segment, 1, init_pid)?;
     Ok((init_pid, shell))
+}
+
+/// No fw_cfg entry: the kernel and init each say the desktop is off, once.
+pub(crate) fn require_base_profile(segment: &str, init_pid: u64) -> Result<(), String> {
+    let kernel = only_kernel_line(segment, "[KERN] boot profile=")?;
+    if kernel != "[KERN] boot profile=base" {
+        return Err(format!(
+            "desktop boot option: no fw_cfg entry must leave the desktop off, got {kernel:?}"
+        ));
+    }
+    let init = format!("[IPC ] console pid={init_pid}: [INIT] boot profile=base");
+    let count = lines(segment).filter(|line| line.contains(&init)).count();
+    if count != 1 {
+        return Err(format!(
+            "desktop boot option: expected one {init:?}, found {count}"
+        ));
+    }
+    Ok(())
 }
 
 /// Whether `step`, typed into `shell`, has completed within `segment` (the output from the
@@ -694,7 +714,9 @@ mod tests {
     fn boot() -> String {
         format!(
             "[KERN] serial console input on vector=0x31\n\
+             [KERN] boot profile=base\n\
              [KERN] init launched pid=3 slot=0 declared-services=3\n\
+             [IPC ] console pid=3: [INIT] boot profile=base\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=21504\n{}",
             instance(6, 1, 3)
         )

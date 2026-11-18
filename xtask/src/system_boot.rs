@@ -22,6 +22,8 @@ const CPU_MODEL: &str = "qemu64,+rdrand";
 const STORAGE_SERVICE: u32 = 0x5100;
 const NETWORK_SERVICE: u32 = 0x5200;
 const SHELL_SERVICE: u32 = 0x5400;
+/// Compositor, desktop shell and app (#218 S6c): declared only with the desktop option.
+pub(crate) const DESKTOP_SERVICES: [u32; 3] = [0x5300, 0x5301, 0x5302];
 /// One boot to init idle, with the network service's DHCP exchange; the build is not counted.
 const LANE_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -29,10 +31,12 @@ const LANE_TIMEOUT: Duration = Duration::from_secs(180);
 /// their lines interleave as the two run; [`validate_boot`] checks each service's own order.
 /// Kernel lines (`[KERN]`, `[SVC ]`) are printed by the kernel; `[INIT]` lines reach serial
 /// only through init's console capability, as `[IPC ] console pid=N: …`.
-pub(crate) const MARKERS: [MarkerStep<'static>; 15] = [
+pub(crate) const MARKERS: [MarkerStep<'static>; 17] = [
     MarkerStep::Ordered("[KERN] serial console input on vector="),
+    MarkerStep::Ordered("[KERN] boot profile=base"),
     MarkerStep::Ordered("[KERN] init launched pid="),
     MarkerStep::Ordered("[KERN] init authority pid="),
+    MarkerStep::Ordered("[INIT] boot profile=base"),
     MarkerStep::Ordered("[INIT] started pid="),
     MarkerStep::Ordered("[INIT] SERVICE_READY from init refused: not a service"),
     MarkerStep::Ordered("[INIT] starting service=20736"),
@@ -84,6 +88,21 @@ pub(crate) fn ensure_data_disk(path: &Path) -> Result<bool, XtaskError> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct RunOptions {
     net: bool,
+    desktop: bool,
+    framebuffer: bool,
+}
+
+/// `opt/clean-slate/desktop` plus, for `q1`, the VirtIO-GPU device `run --desktop` adds.
+pub(crate) fn desktop_qemu_args(framebuffer: bool) -> Vec<String> {
+    let value = if framebuffer { "q0" } else { "q1" };
+    let mut args = vec![
+        "-fw_cfg".to_owned(),
+        format!("name=opt/clean-slate/desktop,string={value}"),
+    ];
+    if !framebuffer {
+        args.extend(crate::m10_virtio_gpu::qemu_args());
+    }
+    args
 }
 
 fn parse_run_options(args: &[OsString]) -> Result<RunOptions, XtaskError> {
@@ -93,11 +112,44 @@ fn parse_run_options(args: &[OsString]) -> Result<RunOptions, XtaskError> {
             options.net = true;
             continue;
         }
+        if arg == OsStr::new("--desktop") {
+            options.desktop = true;
+            continue;
+        }
+        if arg == OsStr::new("--framebuffer") {
+            options.framebuffer = true;
+            continue;
+        }
         return Err(XtaskError::InvalidOption(
             arg.to_string_lossy().into_owned(),
         ));
     }
+    if options.framebuffer && !options.desktop {
+        return Err(XtaskError::InvalidCommand(
+            "usage: cargo xtask run [--net] [--desktop] [--framebuffer]".to_owned(),
+        ));
+    }
     Ok(options)
+}
+
+fn desktop_display() -> String {
+    match std::env::var("QEMU_DISPLAY") {
+        Ok(display) if !display.is_empty() => display,
+        _ => "gtk".to_owned(),
+    }
+}
+
+fn launch_config(options: RunOptions, disk: PathBuf, fixture_port: Option<u16>) -> VmLaunchConfig {
+    let mut config = system_vm_config(disk, fixture_port);
+    if options.desktop {
+        config.machine_extra = Some("vmport=off");
+        config.display = Some(desktop_display());
+        if options.framebuffer {
+            config.vga = Some("std");
+        }
+        config.extra_args = desktop_qemu_args(options.framebuffer);
+    }
+    config
 }
 
 pub(crate) fn system_vm_config(data_disk: PathBuf, fixture_port: Option<u16>) -> VmLaunchConfig {
@@ -129,13 +181,19 @@ fn start_peer(m9_profile: bool) -> Result<M7FixturePeer, XtaskError> {
     .map_err(XtaskError::Io)
 }
 
-/// `cargo xtask run [--net]` and `cargo xtask run-gdb[-entry]` (which take no options).
+/// `cargo xtask run [--net] [--desktop] [--framebuffer]`. `run-gdb` and `run-gdb-entry` take
+/// `--net` only; `--desktop` is refused there.
 pub(crate) fn run(
     args: &[OsString],
     wait_for_gdb: bool,
     debug_entry: bool,
 ) -> Result<(), XtaskError> {
     let options = parse_run_options(args)?;
+    if wait_for_gdb && options.desktop {
+        return Err(XtaskError::InvalidCommand(
+            "run-gdb does not take --desktop".to_owned(),
+        ));
+    }
     let disk = system_data_disk_path();
     let created = ensure_data_disk(&disk)?;
     println!(
@@ -151,12 +209,23 @@ pub(crate) fn run(
         println!("[XTSK] no network device (pass --net for the fixture peer)");
         None
     };
+    if options.desktop {
+        println!(
+            "[XTSK] desktop boot option opt/clean-slate/desktop={} ({})",
+            if options.framebuffer { "q0" } else { "q1" },
+            if options.framebuffer {
+                "-vga std"
+            } else {
+                "virtio-gpu-pci"
+            }
+        );
+    }
     let result = run_vm_inner_with_config(
         wait_for_gdb,
         debug_entry,
         &[],
         None,
-        system_vm_config(disk, peer.as_ref().map(M7FixturePeer::port)),
+        launch_config(options, disk, peer.as_ref().map(M7FixturePeer::port)),
     );
     if let Some(peer) = peer {
         peer.shutdown();
@@ -247,11 +316,16 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
     if let Some(line) = output.lines().find(|line| line.contains("[HOOK]")) {
         return Err(format!("a test-hooks line in the default image: {line:?}"));
     }
+    let profile = only_line(output, "[KERN] boot profile=")?;
+    if profile != "[KERN] boot profile=base" {
+        return Err(format!("desktop boot option: {profile:?}"));
+    }
     let launched = only_line(output, "[KERN] init launched pid=")?;
     let init_pid = number(launched, "pid")?;
+    check_no_desktop_rows(output, launched)?;
     let authority = only_line(output, "[KERN] init authority pid=")?;
     let expected_authority = format!(
-        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1"
+        "[KERN] init authority pid={init_pid} lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1"
     );
     if authority != expected_authority {
         return Err(format!("init authority line {authority:?}"));
@@ -264,6 +338,9 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
             ));
         }
     }
+    let init_profile = format!("{console_prefix}boot profile=base");
+    only_line(output, &init_profile)
+        .map_err(|_| format!("desktop boot option: init did not report {init_profile:?}"))?;
     let started = only_line(output, &format!("{console_prefix}started pid="))?;
     if number(&started[console_prefix.len()..], "pid")? != init_pid {
         return Err(format!("init reports a different pid: {started:?}"));
@@ -331,6 +408,31 @@ fn validate_boot(output: &str, formatted: Formatted) -> Result<BootSummary, Stri
     summary.ok_or_else(|| "storage was not checked".to_owned())
 }
 
+/// With the desktop option off the kernel declares the three base rows and nothing of the
+/// desktop's: no desktop row is declared or launched and no graphics, display or input authority
+/// is granted.
+pub(crate) fn check_no_desktop_rows(output: &str, launched: &str) -> Result<(), String> {
+    if number(launched, "declared-services")? != 3 {
+        return Err(format!("off-mode boot declared desktop rows: {launched:?}"));
+    }
+    let desktop_line = output.lines().find(|line| {
+        DESKTOP_SERVICES.iter().any(|service| {
+            line.contains(&format!("[SVC ] declared service={service}"))
+                || line.contains(&format!("[SVC ] launch service={service} "))
+        }) || [
+            "[GFX ] authority granted",
+            "[DISP] authority granted",
+            "[SEAT] authority granted",
+        ]
+        .iter()
+        .any(|prefix| line.contains(prefix))
+    });
+    match desktop_line {
+        Some(line) => Err(format!("off-mode boot declared desktop rows: {line:?}")),
+        None => Ok(()),
+    }
+}
+
 fn check_shell(
     output: &str,
     pid: u64,
@@ -339,7 +441,7 @@ fn check_shell(
     ready: &str,
 ) -> Result<(), String> {
     let expected_audit = format!(
-        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
+        "[SVC ] authority service={SHELL_SERVICE} pid={pid} lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1"
     );
     if audit != expected_audit {
         return Err(format!("shell authority {audit:?}"));
@@ -367,21 +469,23 @@ mod tests {
              [SVC ] declared service=20992\n\
              [SVC ] declared service=21504\n\
              [KERN] serial console input on vector=49\n\
+             [KERN] boot profile=base\n\
              [KERN] init launched pid=3 slot=0 declared-services=3\n\
-             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1\n\
+             [KERN] init authority pid=3 lifecycle-control=1 console=1 block-device=0 object-service=0 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 expected-only-lifecycle-and-console=1\n\
+             [IPC ] console pid=3: [INIT] boot profile=base\n\
              [IPC ] console pid=3: [INIT] started pid=3 services=3\n\
              [IPC ] console pid=3: [INIT] SERVICE_READY from init refused: not a service\n\
              [IPC ] console pid=3: [INIT] starting service=20736\n\
-             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
+             [SVC ] authority service=20736 pid=4 lifecycle-control=0 console=0 block-device=1 object-service=1 network=0 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20736 pid=4 gen=1\n\
              [SVC ] ready service=20736 pid=4 gen=1 source=live-instance kernel-observed block-write-requests={writes} service-reported formatted={formatted} store-generation=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready gen=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=20992\n\
-             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1\n\
+             [SVC ] authority service=20992 pid=5 lifecycle-control=0 console=0 block-device=0 object-service=0 network=1 net-client=0 net-client-entitlement=0 tmp-objects=0 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=1 linux=0 console-input=0 matches-manifest=1\n\
              [SVC ] launch service=20992 pid=5 gen=1\n\
              [IPC ] console pid=3: [INIT] service=20736 ready; starting service=21504\n\
              [SVC ] shell process pid=6 gen=1 argv=/bin/sh,-i env=PATH=/bin stdin=1 stdout=1 tmp=1 net-client=1\n\
-             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
+             [SVC ] authority service=21504 pid=6 lifecycle-control=0 console=1 block-device=0 object-service=0 network=0 net-client=1 net-client-entitlement=1 tmp-objects=4 gfx-serve=0 gfx-shell=0 gfx-client=0 display=0 input=0 other=0 owned-endpoints=0 ports=0 port-connections=0 presenter=0 input-consumer=0 shared-mappings=0 work-sets=0 raw-net-link=0 linux=1 console-input=1 matches-manifest=1\n\
              [SVC ] launch service=21504 pid=6 gen=1\n\
              [SVC ] ready service=20992 pid=5 gen=1 source=live-instance kernel-observed raw-backend=virtio service-reported link-up=1\n\
              [IPC ] console pid=3: [INIT] service=20992 ready gen=1\n\
@@ -460,6 +564,24 @@ mod tests {
         assert!(validate_boot(&text, Formatted::Yes)
             .unwrap_err()
             .contains("expected authority, launch, ready"));
+    }
+
+    #[test]
+    fn desktop_rows_in_the_off_mode_boot_fail_by_name() {
+        let declared = transcript(1, 9).replace(
+            "[SVC ] declared service=21504\n",
+            "[SVC ] declared service=21504\n[SVC ] declared service=21248\n",
+        );
+        let counted = transcript(1, 9).replace("declared-services=3", "declared-services=6");
+        let granted = transcript(1, 9).replace(
+            "[SVC ] launch service=21504 pid=6 gen=1\n",
+            "[SVC ] launch service=21504 pid=6 gen=1\n[SEAT] authority granted pid=7 seat=0 rights=consume,inspect\n",
+        );
+        for text in [declared, counted, granted] {
+            assert!(validate_boot(&text, Formatted::Yes)
+                .unwrap_err()
+                .contains("off-mode boot declared desktop rows"));
+        }
     }
 
     #[test]
@@ -543,13 +665,60 @@ mod tests {
     }
 
     #[test]
-    fn run_takes_only_net() {
-        assert_eq!(parse_run_options(&[]).unwrap(), RunOptions { net: false });
+    fn run_takes_net_and_desktop() {
+        assert_eq!(parse_run_options(&[]).unwrap(), RunOptions::default());
         assert_eq!(
             parse_run_options(&["--net".into()]).unwrap(),
-            RunOptions { net: true }
+            RunOptions {
+                net: true,
+                ..RunOptions::default()
+            }
+        );
+        assert_eq!(
+            parse_run_options(&["--desktop".into(), "--framebuffer".into(), "--net".into()])
+                .unwrap(),
+            RunOptions {
+                net: true,
+                desktop: true,
+                framebuffer: true,
+            }
         );
         assert!(parse_run_options(&["--disk".into()]).is_err());
+        assert!(parse_run_options(&["--framebuffer".into()]).is_err());
+        let plain = launch_config(RunOptions::default(), PathBuf::from("DISK.img"), None);
+        assert!(plain.extra_args.is_empty());
+        assert_eq!(plain.display, None);
+        assert_eq!(plain.machine_extra, None);
+        let virtio = launch_config(
+            RunOptions {
+                desktop: true,
+                ..RunOptions::default()
+            },
+            PathBuf::from("DISK.img"),
+            None,
+        );
+        assert_eq!(virtio.machine_extra, Some("vmport=off"));
+        assert_eq!(virtio.vga, None);
+        assert_eq!(virtio.extra_args, desktop_qemu_args(false));
+        assert!(virtio
+            .extra_args
+            .windows(2)
+            .any(|pair| pair == ["-vga", "none"]));
+        assert!(virtio
+            .extra_args
+            .iter()
+            .any(|arg| arg.starts_with("name=opt/ovmf/X-PciMmio64Mb")));
+        let framebuffer = launch_config(
+            RunOptions {
+                desktop: true,
+                framebuffer: true,
+                ..RunOptions::default()
+            },
+            PathBuf::from("DISK.img"),
+            None,
+        );
+        assert_eq!(framebuffer.vga, Some("std"));
+        assert_eq!(framebuffer.extra_args, desktop_qemu_args(true));
     }
 
     #[test]

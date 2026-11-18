@@ -72,10 +72,69 @@ fn log_ready(instance: ServiceInstanceId, block_write_requests: u64, detail: u64
             u8::from(claim.link_up)
         ));
     } else {
+        #[cfg(clean_slate_system_init)]
+        if let Some(bindings) = desktop_bindings(instance) {
+            let free_pages = crate::syscall::service_lifecycle_syscall_allocator_mut()
+                .as_ref()
+                .map_or(0, |allocator| allocator.stats().free_pages);
+            kernel_log_fmt(format_args!(
+                "[SVC ] ready service={service} pid={pid} gen={generation} source=live-instance kernel-observed {bindings} free-pages={free_pages} service-reported detail={detail:#x}\n"
+            ));
+            return;
+        }
         kernel_log_fmt(format_args!(
             "[SVC ] ready service={service} pid={pid} gen={generation} source=live-instance kernel-observed block-write-requests={block_write_requests} service-reported detail={detail:#x}\n"
         ));
     }
+}
+
+/// What the kernel sees a desktop row's instance bound to when it reports ready: the port it
+/// serves or the connection it opened, the display presenter, the input consumer and its
+/// shared-buffer mappings. These are bound by the process itself after launch, so the launch
+/// audit cannot show them. The M10 policy's kernels keep the generic line.
+#[cfg(clean_slate_system_init)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DesktopBindings {
+    ports: usize,
+    port_connections: usize,
+    presenter: usize,
+    presents_submitted: u64,
+    input_consumer: usize,
+    shared_mappings: usize,
+}
+
+#[cfg(clean_slate_system_init)]
+impl core::fmt::Display for DesktopBindings {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "ports={} port-connections={} presenter={} presents-submitted={} input-consumer={} shared-mappings={}",
+            self.ports,
+            self.port_connections,
+            self.presenter,
+            self.presents_submitted,
+            self.input_consumer,
+            self.shared_mappings
+        )
+    }
+}
+
+#[cfg(clean_slate_system_init)]
+fn desktop_bindings(instance: ServiceInstanceId) -> Option<DesktopBindings> {
+    use clean_slate_capability::HolderId;
+
+    super::desktop_image::DesktopRole::for_service(instance.service)?;
+    let pid = instance.pid.0;
+    let holder = HolderId(pid);
+    let ports = crate::service::port::counts_for(holder);
+    Some(DesktopBindings {
+        ports: ports.ports_served,
+        port_connections: ports.port_connections,
+        presenter: crate::device::display::presenter_bindings_for(holder),
+        presents_submitted: crate::device::display::presents_submitted_by(holder),
+        input_consumer: crate::device::input::consumer_bindings_for(holder),
+        shared_mappings: crate::mm::shared_buffer::mapping_count(pid),
+    })
 }
 
 #[cfg(test)]
@@ -136,6 +195,23 @@ mod tests {
         handle_syscall(&mut frame);
         assert_eq!(frame.rax, STATUS_EACCES);
         assert_eq!(frame.user_rip, 0x40_1002);
+    }
+
+    #[cfg(clean_slate_system_init)]
+    #[test]
+    fn desktop_bindings_name_every_figure() {
+        let bindings = DesktopBindings {
+            ports: 1,
+            port_connections: 0,
+            presenter: 1,
+            presents_submitted: 3,
+            input_consumer: 1,
+            shared_mappings: 2,
+        };
+        assert_eq!(
+            std::format!("{bindings}"),
+            "ports=1 port-connections=0 presenter=1 presents-submitted=3 input-consumer=1 shared-mappings=2"
+        );
     }
 
     #[test]

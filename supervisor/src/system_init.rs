@@ -612,21 +612,28 @@ mod tests {
         }
     }
 
+    /// Init's `SERVICE_SLOTS`.
+    const SLOTS: usize = 8;
+
     struct Harness {
-        init: SystemInit<SharedKernel, SharedLog, 4>,
+        init: SystemInit<SharedKernel, SharedLog, SLOTS>,
         kernel: SharedKernel,
         log: SharedLog,
     }
 
     impl Harness {
         fn boot() -> Self {
+            Self::boot_manifest(SYSTEM_MANIFEST)
+        }
+
+        fn boot_manifest(manifest: &'static [ServiceSpec]) -> Self {
             let kernel = SharedKernel::default();
             let log = SharedLog::default();
             let mut init = SystemInit::new(
                 INIT_PID,
                 kernel.clone(),
                 log.clone(),
-                SYSTEM_MANIFEST,
+                manifest,
                 INIT_READY_TIMEOUT_NS,
             )
             .expect("init registers the manifest");
@@ -746,6 +753,54 @@ mod tests {
         let shell_start = harness.position_of("[INIT] service=20736 ready; starting service=21504");
         assert!(storage_ready < network_start);
         assert!(network_start < shell_start);
+    }
+
+    /// The compositor starts at boot beside storage; the desktop shell waits for the
+    /// compositor's ready, the app for the shell's; the serial shell still waits for storage only.
+    #[test]
+    fn the_desktop_rows_start_in_dependency_order_and_settle_at_six() {
+        use clean_slate_service_fixtures::manifest::SYSTEM_DESKTOP_MANIFEST;
+        use clean_slate_service_fixtures::{
+            COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
+        };
+
+        let mut harness = Harness::boot_manifest(SYSTEM_DESKTOP_MANIFEST);
+        assert_eq!(
+            harness.requests(),
+            [
+                (STORAGE_SERVICE_ID, ControlRequestKind::Start),
+                (COMPOSITOR_SERVICE_ID, ControlRequestKind::Start),
+            ]
+        );
+        assert_eq!(
+            harness.lines_with("[INIT] started pid=3 services=6").len(),
+            1
+        );
+        harness.report(SECOND, COMPOSITOR_SERVICE_ID, LifecycleEventKind::Ready);
+        assert_eq!(harness.starts_of(DESKTOP_SHELL_SERVICE_ID), 1);
+        assert_eq!(harness.starts_of(PLAYGROUND_SERVICE_ID), 0);
+        assert_eq!(harness.starts_of(SYSTEM_SHELL_SERVICE_ID), 0);
+        harness.report(
+            2 * SECOND,
+            DESKTOP_SHELL_SERVICE_ID,
+            LifecycleEventKind::Ready,
+        );
+        assert_eq!(harness.starts_of(PLAYGROUND_SERVICE_ID), 1);
+        harness
+            .position_of("[INIT] service=21248 ready, service=21249 ready; starting service=21250");
+        for (service, at) in [
+            (PLAYGROUND_SERVICE_ID, 3),
+            (STORAGE_SERVICE_ID, 3),
+            (NETWORK_SERVICE_ID, 4),
+            (SYSTEM_SHELL_SERVICE_ID, 4),
+        ] {
+            harness.report(at * SECOND, service, LifecycleEventKind::Ready);
+        }
+        assert_eq!(
+            harness.lines_with("[INIT] boot settled running=6 down=0; waiting, no deadline"),
+            ["[INIT] boot settled running=6 down=0; waiting, no deadline"]
+        );
+        assert_eq!(harness.init.next_deadline(), None);
     }
 
     #[test]

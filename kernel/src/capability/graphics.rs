@@ -1,9 +1,13 @@
-//! Desktop launch-policy grants (#118, P5): the only root grants of `Graphics`, `Display` and
+//! Desktop grants (#118, P5; #218 S6c): the only root grants of `Graphics`, `Display` and
 //! `Input` authority outside self-tests.
 //!
 //! The live compositor alone serves the graphics port and holds the display and seat; the shell
 //! connects with `GFX_SHELL`; an app connects with `GFX_CONNECT` and nothing else. Every grant is a
 //! root record for exactly one holder, so process teardown (`revoke_for_holder`) removes it.
+//!
+//! The system build applies them one manifest grant at a time (`grant_graphics`,
+//! `grant_display_presenter`, `grant_input_seat`); the M10 launch policy applies a whole role with
+//! `grant_desktop_role`.
 
 use clean_slate_capability::{CapabilityError, HolderId, ResourceRef, Rights};
 
@@ -19,7 +23,32 @@ pub(crate) const COMPOSITOR_INPUT_RIGHTS: Rights = Rights::INPUT_CONSUME.union(R
 pub(crate) const SHELL_GRAPHICS_RIGHTS: Rights = Rights::GFX_CONNECT.union(Rights::GFX_SHELL);
 pub(crate) const APP_GRAPHICS_RIGHTS: Rights = Rights::GFX_CONNECT;
 
+/// Root `rights` on the graphics port `graphics` (one compositor generation).
+pub(crate) fn grant_graphics(
+    holder: HolderId,
+    graphics: ResourceRef,
+    rights: Rights,
+) -> Result<(), CapabilityError> {
+    grant_root(holder, graphics, rights).map(|_| ())
+}
+
+/// Root `DISPLAY_PRESENT | INSPECT` on output 0.
+pub(crate) fn grant_display_presenter(holder: HolderId) -> Result<(), CapabilityError> {
+    grant_root(
+        holder,
+        ResourceRef::display(PRIMARY_OUTPUT_INDEX),
+        COMPOSITOR_DISPLAY_RIGHTS,
+    )
+    .map(|_| ())
+}
+
+/// Root `INPUT_CONSUME | INSPECT` on seat 0.
+pub(crate) fn grant_input_seat(holder: HolderId) -> Result<(), CapabilityError> {
+    grant_input_authority(holder, COMPOSITOR_INPUT_RIGHTS).map(|_| ())
+}
+
 /// Who a desktop grant is for.
+#[cfg(any(test, feature = "m10-desktop"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GraphicsGrantee {
     Compositor,
@@ -28,6 +57,7 @@ pub(crate) enum GraphicsGrantee {
 }
 
 /// The grants one role receives, as `(resource, rights)`.
+#[cfg(any(test, feature = "m10-desktop"))]
 pub(crate) const fn grants_for(grantee: GraphicsGrantee) -> &'static [(GrantTarget, Rights)] {
     match grantee {
         GraphicsGrantee::Compositor => &[
@@ -41,6 +71,7 @@ pub(crate) const fn grants_for(grantee: GraphicsGrantee) -> &'static [(GrantTarg
 }
 
 /// Resource a grant names; the graphics port resource is per compositor generation.
+#[cfg(any(test, feature = "m10-desktop"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GrantTarget {
     Graphics,
@@ -48,6 +79,7 @@ pub(crate) enum GrantTarget {
     Input,
 }
 
+#[cfg(test)]
 impl GrantTarget {
     fn resource(self, graphics: ResourceRef) -> ResourceRef {
         match self {
@@ -61,6 +93,7 @@ impl GrantTarget {
 /// Grants `holder` every capability its role gets on the compositor generation `graphics`. On
 /// failure nothing is rolled back here: the caller tears the new process down, which revokes
 /// whatever was granted.
+#[cfg(any(test, feature = "m10-desktop"))]
 pub(crate) fn grant_desktop_role(
     holder: HolderId,
     grantee: GraphicsGrantee,
@@ -68,8 +101,9 @@ pub(crate) fn grant_desktop_role(
 ) -> Result<(), CapabilityError> {
     for &(target, rights) in grants_for(grantee) {
         match target {
-            GrantTarget::Input => grant_input_authority(holder, rights).map(|_| ())?,
-            other => grant_root(holder, other.resource(graphics), rights).map(|_| ())?,
+            GrantTarget::Graphics => grant_graphics(holder, graphics, rights)?,
+            GrantTarget::Display => grant_display_presenter(holder)?,
+            GrantTarget::Input => grant_input_seat(holder)?,
         }
     }
     Ok(())

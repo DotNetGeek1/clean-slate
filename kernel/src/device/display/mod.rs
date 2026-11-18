@@ -523,6 +523,16 @@ pub(crate) fn presenter_bindings_for(holder: HolderId) -> usize {
     })
 }
 
+/// Presents submitted on the primary output while `holder` is its presenter, else 0.
+#[cfg(clean_slate_system_init)]
+pub(crate) fn presents_submitted_by(holder: HolderId) -> u64 {
+    with_active_display(|display| {
+        display
+            .filter(|display| display.presenter.holder() == Some(holder))
+            .map_or(0, |display| display.state().status().submitted_seq)
+    })
+}
+
 /// Teardown slot 2 of the shared hook block (after the port, before the input consumer): releases
 /// `holder`'s presenter binding and unmaps its scanout grants. Returns the rows unmapped.
 pub(crate) fn release_presenter_for_holder(

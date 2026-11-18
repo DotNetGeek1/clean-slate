@@ -12,7 +12,7 @@
 #[cfg(any(
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test",
-    feature = "m10-desktop"
+    clean_slate_desktop
 ))]
 use clean_slate_capability::ResourceRef;
 use clean_slate_capability::{
@@ -22,20 +22,26 @@ use clean_slate_native_abi::port::{PORT_MAX_CONNECTIONS, PORT_MAX_TRANSFERS_IN_F
 #[cfg(any(
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test",
-    feature = "m10-desktop"
+    clean_slate_desktop
 ))]
 use clean_slate_native_abi::PortParams;
 use clean_slate_native_abi::{ConnectionId, PortEventRecord, PortRecvRecord, SharedBufferId};
-use clean_slate_port::{
-    Caller, Effect, Effects, HolderPortCounts, PortCore, PortError, PortKey, PortReleaseCounts,
-    Transfer, REVOKED_TRANSFERS_CAPACITY,
-};
 #[cfg(any(
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test",
     feature = "m10-desktop"
 ))]
-use clean_slate_port::{PortCounts, RegistrationError};
+use clean_slate_port::PortCounts;
+#[cfg(any(
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test",
+    clean_slate_desktop
+))]
+use clean_slate_port::RegistrationError;
+use clean_slate_port::{
+    Caller, Effect, Effects, HolderPortCounts, PortCore, PortError, PortKey, PortReleaseCounts,
+    Transfer, REVOKED_TRANSFERS_CAPACITY,
+};
 use clean_slate_service_lifecycle::InstanceGeneration;
 
 use crate::arch::x86_64::cpu::without_interrupts;
@@ -153,11 +159,12 @@ fn caller_for(holder: HolderId) -> Result<Caller, PortError> {
 
 // ---- launch policy ----
 
-/// Only launch policy registers a port: after spawning `server` and before it runs.
+/// Only launch policy (or a row's `Grant::GraphicsPort`) registers a port: after spawning
+/// `server` and before it runs.
 #[cfg(any(
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test",
-    feature = "m10-desktop"
+    clean_slate_desktop
 ))]
 pub(crate) fn register_port(
     resource: ResourceRef,
