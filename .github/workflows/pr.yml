@@ -212,6 +212,7 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m2-timer-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m2-double-fault-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m2-identity-guard-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m2-kernel-guards-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m3-entry-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m3-address-space-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m3-syscall-self-test -- -D warnings
@@ -279,10 +280,6 @@ jobs:
           cargo clippy -p clean-slate-kernel --lib --tests --features m4-recovery-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --lib --tests --features m9-rootfs,m9-linux-socket,m9-linux-trace -- -D warnings
           cargo clippy -p clean-slate-kernel --lib --tests --features system-test-hooks -- -D warnings
-
-      # #217: the kernel-guards probes (a step of test-m2) compile only under their feature.
-      - name: Clippy (kernel guards self-test)
-        run: cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m2-kernel-guards-self-test -- -D warnings
 
       - name: Build
         run: |
