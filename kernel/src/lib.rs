@@ -46,45 +46,8 @@ mod service;
 // Milestone self-tests exit QEMU before the normal boot tail runs, so each
 // feature build leaves parts of its own scaffolding unreferenced. The
 // allowance is scoped to this module only; production modules must stay
-// warning-clean in every configuration.
-#[cfg_attr(
-    any(
-        feature = "m1-self-test",
-        feature = "m2-double-fault-self-test",
-        feature = "m2-timer-self-test",
-        feature = "m3-address-space-self-test",
-        feature = "m3-entry-self-test",
-        feature = "m3-resources-self-test",
-        feature = "m4-crash-service-self-test",
-        feature = "m4-recovery-self-test",
-        feature = "m3-syscall-self-test",
-        feature = "m3-ipc-self-test",
-        feature = "m8-linux-dispatch-self-test",
-        feature = "m9-syscall-fail-closed-self-test",
-        feature = "m9-linux-exec-self-test",
-        feature = "m9-fd-core-self-test",
-        feature = "m9-linux-trace-self-test",
-        feature = "m9-block-wake-self-test",
-        feature = "m3-syscall-self-test",
-        feature = "m4-service-lifecycle-self-test",
-        feature = "m5-block-self-test",
-        feature = "m10-framebuffer-self-test",
-        feature = "m7-net-device-self-test",
-        feature = "m10-virtio-modern-self-test",
-        feature = "m10-virtio-gpu-self-test",
-        feature = "m7-tls-self-test",
-        feature = "m7-tls-fail-closed-self-test",
-        feature = "m7-dns-self-test",
-        feature = "m5-storage-self-test",
-        feature = "m5-persistence-self-test",
-        feature = "m5-crash-early-self-test",
-        feature = "m5-crash-late-self-test",
-        feature = "m5-crash-recovery-self-test",
-        feature = "m6-object-self-test",
-        feature = "m6-fixture-smoke-self-test"
-    ),
-    allow(dead_code)
-)]
+// warning-clean in every configuration. `kernel/build.rs` lists the builds.
+#[cfg_attr(clean_slate_selftest_scaffolding, allow(dead_code))]
 mod selftest;
 mod sync;
 mod syscall;
