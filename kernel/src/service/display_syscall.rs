@@ -3,8 +3,6 @@
 //! Every status is the frozen `docs/GRAPHICS.md` mapping; checks run in its order: argument
 //! length/pointer → caller → capability → backend → presenter → the subop's own validation.
 
-use core::ptr;
-
 use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL};
 use clean_slate_capability::{CapabilityError, HolderId};
 use clean_slate_graphics::display::{
@@ -22,7 +20,8 @@ use crate::capability::display::{
 use crate::device::display::engine::DisplayState;
 use crate::device::display::{with_active_display, ActiveDisplay, PRIMARY_OUTPUT_INDEX};
 use crate::mm::shared_buffer::kernel_owned::map_kernel_owned_into;
-use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
+use crate::mm::user_access::{copy_from_user, copy_to_user};
+use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::sched::work_set;
 use crate::syscall::{current_syscall_caller_pid, service_lifecycle_syscall_allocator_mut};
 use crate::time::monotonic_ns;
@@ -125,12 +124,10 @@ fn handle_map_scanout(raw_handle: u64, buffer_index: u64, out_ptr: u64, out_len:
         },
     );
     match mapping {
-        Ok(bytes) => {
-            unsafe {
-                ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr as *mut u8, SCANOUT_MAPPING_BYTES)
-            };
-            0
-        }
+        Ok(bytes) => match copy_to_user(out_ptr, &bytes) {
+            Ok(()) => 0,
+            Err(_) => SYSCALL_EINVAL,
+        },
         Err(status) => status,
     }
 }
@@ -152,11 +149,8 @@ fn handle_present(raw_handle: u64, in_ptr: u64, in_len: u64) -> u64 {
     present(
         in_len,
         || {
-            validate_user_pointer_range(in_ptr, in_len).ok()?;
             let mut bytes = [0u8; PRESENT_REQUEST_BYTES];
-            unsafe {
-                ptr::copy_nonoverlapping(in_ptr as *const u8, bytes.as_mut_ptr(), bytes.len())
-            };
+            copy_from_user(&mut bytes, in_ptr).ok()?;
             Some(bytes)
         },
         current_holder,
@@ -263,10 +257,10 @@ fn copy_out<const N: usize>(
         || with_active_display(|display| display.map(|display| encode(display.state()))),
     );
     match bytes {
-        Ok(bytes) => {
-            unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr as *mut u8, N) };
-            0
-        }
+        Ok(bytes) => match copy_to_user(out_ptr, &bytes) {
+            Ok(()) => 0,
+            Err(_) => SYSCALL_EINVAL,
+        },
         Err(status) => status,
     }
 }

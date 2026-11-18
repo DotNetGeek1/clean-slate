@@ -1,7 +1,6 @@
 //! M6.4 process/domain control capability surface (`SYSCALL_NR_CAP_PROCESS_CONTROL`).
 
 use core::mem;
-use core::ptr;
 
 use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ESTALE};
 use clean_slate_capability::{
@@ -12,6 +11,7 @@ use clean_slate_capability::{
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::mm::address_space::kernel_root_frame;
+use crate::mm::user_access::{write_user, UserPod};
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::process::domain::{remaining_owned_resource_count, teardown_process_by_id};
 use crate::process::process_registry_mut;
@@ -38,6 +38,9 @@ pub(crate) struct ProcessObservation {
 }
 
 const _: () = assert!(mem::size_of::<ProcessObservation>() == 32);
+
+// SAFETY: `repr(C)`, four `u64` fields, no padding.
+unsafe impl UserPod for ProcessObservation {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LiveTarget {
@@ -279,10 +282,10 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
                 return;
             }
             log_allowed(holder, target_pid, op);
-            unsafe {
-                ptr::write_unaligned(frame.rdx as *mut ProcessObservation, observation);
-            }
-            frame.rax = 0;
+            frame.rax = match write_user(frame.rdx, &observation) {
+                Ok(()) => 0,
+                Err(_) => SYSCALL_EINVAL,
+            };
         }
         Ok(Decision::Terminate { target_pid }) => {
             let allocator = match service_lifecycle_syscall_allocator_mut().as_mut() {

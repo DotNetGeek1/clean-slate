@@ -17,6 +17,7 @@ use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS}
 use crate::interrupt::timer::{initialize_timer, kernel_ticks};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
+use crate::mm::user_access::read_user;
 use crate::mm::PAGE_SIZE;
 use crate::process::domain::DomainTeardownResult;
 use crate::process::id_allocator::{id_allocator_mut, IdAllocator};
@@ -64,6 +65,7 @@ use clean_slate_service_fixtures::{
 use clean_slate_service_lifecycle::{
     ControlRequest, ControlRequestKind, InstanceGeneration, LifecycleMessage,
 };
+use core::mem::offset_of;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 include!(concat!(env!("OUT_DIR"), "/m9_fixture_pins.rs"));
@@ -940,10 +942,10 @@ pub(crate) fn on_net_service_idle() {
         return;
     };
     // Called from the service's own `WAIT_WORK`, so its bootstrap page is mapped.
-    let occupancy = unsafe {
-        let bootstrap = NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *const NetworkServiceBootstrap;
-        core::ptr::addr_of!((*bootstrap).occupancy).read_volatile()
-    };
+    let occupancy: NetworkServiceOccupancy = read_user(
+        NETWORK_SERVICE_BOOTSTRAP_ADDRESS + offset_of!(NetworkServiceBootstrap, occupancy) as u64,
+    )
+    .unwrap_or_else(|message| fatal_kernel_error(message));
     if occupancy.publications <= LAST_NET_PUBLICATION.load(Ordering::Relaxed) {
         fatal_kernel_error("m9 userspace network-service occupancy was not republished");
     }

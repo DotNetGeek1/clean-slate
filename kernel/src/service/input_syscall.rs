@@ -3,8 +3,6 @@
 //! `BIND_WAKE` binds one bit of the consumer's own work set (syscall 20); the IRQ path sets it
 //! on the queue's empty-to-non-empty edge, so the consumer blocks in `WAIT` instead of polling.
 
-use core::ptr;
-
 use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL};
 use clean_slate_capability::{CapabilityHandle, CapabilityState, HolderId, ResourceClass, Rights};
 use clean_slate_graphics::abi::input::{
@@ -16,6 +14,7 @@ use clean_slate_graphics::raw_input::RAW_INPUT_RECORD_BYTES;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::{authorize_current_class, with_capability_space};
 use crate::device::input;
+use crate::mm::user_access::copy_to_user;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::sched::work_set;
 use crate::syscall::current_syscall_caller_pid;
@@ -77,11 +76,10 @@ fn query_devices(raw_handle: u64, out: u64, len: u64) -> u64 {
         return error.syscall_status();
     }
     let info = input::device_info().encode();
-    // SAFETY: `validate_user_writable_pointer_range` confirmed all `len` bytes at `out` are
-    // mapped user-writable in the caller's address space, which stays current for this syscall;
-    // `len` equals `info.len()`, and a user page cannot overlap the kernel-stack source.
-    unsafe { ptr::copy_nonoverlapping(info.as_ptr(), out as *mut u8, info.len()) };
-    0
+    match copy_to_user(out, &info) {
+        Ok(()) => 0,
+        Err(_) => SYSCALL_EINVAL,
+    }
 }
 
 fn read_batch(raw_handle: u64, out: u64, max_count: u64) -> u64 {
@@ -108,10 +106,10 @@ fn read_batch(raw_handle: u64, out: u64, max_count: u64) -> u64 {
         };
         let wire = record.encode();
         let dest = out + (copied * RAW_INPUT_RECORD_BYTES) as u64;
-        // SAFETY: the whole `count * RAW_INPUT_RECORD_BYTES` range at `out` was validated
-        // user-writable before the first pop, `copied < count` keeps `dest..dest + 32` inside
-        // it, and nothing between here and that check unmaps caller pages.
-        unsafe { ptr::copy_nonoverlapping(wire.as_ptr(), dest as *mut u8, wire.len()) };
+        // The whole range was validated before the first pop, so this cannot fail.
+        if copy_to_user(dest, &wire).is_err() {
+            break;
+        }
         copied += 1;
     }
     copied as u64

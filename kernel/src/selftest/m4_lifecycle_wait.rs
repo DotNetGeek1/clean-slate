@@ -23,7 +23,7 @@ use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::interrupt::timer::initialize_timer;
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::user_mapping::validate_user_pointer_range;
+use crate::mm::user_access::read_user;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::task_stacks_mut;
 use crate::sched::wait::has_waiter_where;
@@ -397,11 +397,9 @@ fn check_woken_and_pass(result: u64, poll_bytes: u64, buffer: u64) -> ! {
     if poll_bytes != LIFECYCLE_WIRE_MAX_BYTES as u64 {
         fatal_kernel_error("lifecycle poll after the wake returned no message");
     }
-    validate_user_pointer_range(buffer, poll_bytes)
-        .unwrap_or_else(|message| fatal_kernel_error(message));
-    let bytes =
-        unsafe { core::slice::from_raw_parts(buffer as *const u8, LIFECYCLE_WIRE_MAX_BYTES) };
-    match LifecycleMessage::decode(bytes) {
+    let bytes: [u8; LIFECYCLE_WIRE_MAX_BYTES] =
+        read_user(buffer).unwrap_or_else(|message| fatal_kernel_error(message));
+    match LifecycleMessage::decode(&bytes) {
         Ok((LifecycleMessage::LifecycleEvent(event), _)) if event == expected => {}
         _ => fatal_kernel_error("lifecycle poll after the wake returned a different message"),
     }

@@ -2,6 +2,7 @@
 
 use super::table::{LinuxSyscallContext, LinuxSyscallHandler};
 use super::user_copy::copy_user_path_cstring;
+use crate::mm::user_access::copy_to_user;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::process::linux_fd::{
     self,
@@ -166,19 +167,12 @@ pub(crate) fn handle_sys_getcwd(
     if size < 2 {
         return Err(clean_slate_linux_abi::ERANGE);
     }
-    let cwd = b"/";
-    if size < cwd.len() as u64 + 1 {
+    let cwd = b"/\0";
+    if size < cwd.len() as u64 {
         return Err(clean_slate_linux_abi::ERANGE);
     }
-    if validate_user_writable_pointer_range(buf, cwd.len() as u64 + 1).is_err() {
-        return Err(EFAULT);
-    }
-    let dst = buf as *mut u8;
-    unsafe {
-        core::ptr::copy_nonoverlapping(cwd.as_ptr(), dst, cwd.len());
-        *dst.add(cwd.len()) = 0;
-    }
-    Ok(cwd.len() as u64 + 1)
+    copy_to_user(buf, cwd).map_err(|_| EFAULT)?;
+    Ok(cwd.len() as u64)
 }
 
 pub(crate) fn handle_sys_mkdir(
@@ -249,10 +243,7 @@ pub(crate) fn handle_sys_getdents64(
             }
             break;
         }
-        let dst = buf_ptr + wrote;
-        unsafe {
-            core::ptr::copy_nonoverlapping(scratch.as_ptr(), dst as *mut u8, n);
-        }
+        copy_to_user(buf_ptr + wrote, &scratch[..n]).map_err(|_| EFAULT)?;
         wrote += n as u64;
         offset += 1;
     }
@@ -275,10 +266,7 @@ fn write_stat(stat_ptr: u64, node: NodeId, lstat: bool) -> Result<(), LinuxErrno
     if !encode_stat144(&mut buf, &fields) {
         return Err(EINVAL);
     }
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), stat_ptr as *mut u8, 144);
-    }
-    Ok(())
+    copy_to_user(stat_ptr, &buf).map_err(|_| EFAULT)
 }
 
 struct UserPathBuf {

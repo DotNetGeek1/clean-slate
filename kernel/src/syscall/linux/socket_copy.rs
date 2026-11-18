@@ -1,6 +1,6 @@
 //! Bounded user copies for the socket family (#105).
 
-use crate::mm::user_mapping::validate_user_pointer_range;
+use crate::mm::user_access::copy_from_user;
 use clean_slate_linux_abi::{LinuxErrno, EFAULT};
 
 pub(crate) fn copy_user_socket_bytes(
@@ -14,11 +14,5 @@ pub(crate) fn copy_user_socket_bytes(
     if length > dst.len() {
         return Err(clean_slate_linux_abi::EINVAL);
     }
-    if validate_user_pointer_range(user_ptr, length as u64).is_err() {
-        return Err(EFAULT);
-    }
-    unsafe {
-        core::ptr::copy_nonoverlapping(user_ptr as *const u8, dst.as_mut_ptr(), length);
-    }
-    Ok(())
+    copy_from_user(&mut dst[..length], user_ptr).map_err(|_| EFAULT)
 }

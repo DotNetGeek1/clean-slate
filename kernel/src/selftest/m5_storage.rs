@@ -23,6 +23,7 @@ use crate::interrupt::timer::initialize_timer;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
+use crate::mm::user_access::read_user;
 use crate::process::domain::teardown_current_process;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
@@ -319,9 +320,15 @@ fn current_userspace_pid() -> Result<u64, &'static str> {
 /// Returns the kernel stack pointer to restore, which is always the freshly
 /// launched next-phase thread selected by `teardown_current_process`. When no
 /// phase remains the self-test exits QEMU instead of returning.
+/// The storage service's bootstrap page, read in its own address space.
+fn storage_service_report() -> StorageServiceBootstrap {
+    read_user(STORAGE_SERVICE_BOOTSTRAP_ADDRESS)
+        .unwrap_or_else(|message| fatal_kernel_error(message))
+}
+
 pub(crate) fn handle_userspace_storage_entry() -> u64 {
     let pid = current_userspace_pid().unwrap_or_else(|message| fatal_kernel_error(message));
-    let report = unsafe { &*(STORAGE_SERVICE_BOOTSTRAP_ADDRESS as *const StorageServiceBootstrap) };
+    let report = &storage_service_report();
     let state = self_test_state().unwrap_or_else(|message| fatal_kernel_error(message));
     let next_state = match state.mode {
         M5StorageSelfTestMode::Integration => handle_integration_phase(state, pid, report),
@@ -463,7 +470,7 @@ fn arm_crash_after_write(after_write: u64) {
 /// What the crash-arm service reported before the injected stop: the generation it
 /// mounted, the objects it read back, and the write it was committing.
 fn log_pre_crash_report() {
-    let report = unsafe { &*(STORAGE_SERVICE_BOOTSTRAP_ADDRESS as *const StorageServiceBootstrap) };
+    let report = &storage_service_report();
     kernel_log_fmt(format_args!(
         "[STOR] recovered generation={}\n",
         report.mounted_generation

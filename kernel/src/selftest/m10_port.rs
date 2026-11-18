@@ -11,8 +11,6 @@
 //! buffers) and print one marker each; any mismatch prints `[M10.port] FAIL <reason>` and exits
 //! QEMU with failure.
 
-use core::ptr;
-
 use clean_slate_capability::syscall_abi::{
     SYSCALL_NR_CAP_DELEGATE, SYSCALL_NR_CAP_GRANT, SYSCALL_NR_CAP_REVOKE, SYSCALL_NR_SERVICE_PORT,
     SYSCALL_NR_WORK_SET,
@@ -56,7 +54,8 @@ use crate::interrupt::timer::initialize_timer;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
-use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
+use crate::mm::user_access::{copy_from_user, copy_to_user, read_user};
+use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::process::current_process_id;
 use crate::process::domain::{teardown_process_by_id, TeardownHook, TEARDOWN_HOOK_ORDER};
 use crate::process::id_allocator::{id_allocator_mut, IdAllocator};
@@ -1319,11 +1318,10 @@ fn kernel_client_send(caller: u64, frame: &SyscallContext) -> u64 {
         Ok(connection) => connection,
         Err(status) => return status,
     };
-    if validate_user_pointer_range(frame.rdx, FRAME as u64).is_err() {
+    let mut bytes = [0u8; FRAME];
+    if copy_from_user(&mut bytes, frame.rdx).is_err() {
         return STATUS_EINVAL;
     }
-    let mut bytes = [0u8; FRAME];
-    unsafe { ptr::copy_nonoverlapping(frame.rdx as *const u8, bytes.as_mut_ptr(), FRAME) };
     let transfer = match frame.r10 {
         0 => None,
         raw => match CapabilityHandle::decode(raw) {
@@ -1348,11 +1346,10 @@ fn kernel_client_recv(caller: u64, frame: &mut SyscallContext) -> u64 {
     let key = port::connection_wait_key(connection);
     block_harness_caller(frame, key, || {
         match port::kernel_client_try_recv_event(HolderId(caller), connection) {
-            Ok(record) => {
-                let bytes = record.encode();
-                unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len()) };
-                BlockCheck::Ready(u64::from(record.kind as u32))
-            }
+            Ok(record) => match copy_to_user(out, &record.encode()) {
+                Ok(()) => BlockCheck::Ready(u64::from(record.kind as u32)),
+                Err(_) => BlockCheck::Ready(STATUS_EINVAL),
+            },
             Err(PortError::WouldBlock) => {
                 on_port_block();
                 BlockCheck::Block
@@ -1434,8 +1431,8 @@ fn relaunch_server() {
 
 // ---- checkpoints ----
 
-fn caller_bootstrap() -> &'static M6FixtureBootstrap {
-    unsafe { &*(M6_FIXTURE_BOOTSTRAP_ADDRESS as *const M6FixtureBootstrap) }
+fn caller_bootstrap() -> M6FixtureBootstrap {
+    read_user(M6_FIXTURE_BOOTSTRAP_ADDRESS).unwrap_or_else(|_| fail("caller bootstrap unmapped"))
 }
 
 fn recv_record(bootstrap: &M6FixtureBootstrap, offset: usize) -> PortRecvRecord {
@@ -1476,7 +1473,7 @@ fn ensure_request_from(record: &PortRecvRecord, pid: u64, conn: u64, reason: &st
 }
 
 fn run_check(caller: u64, checkpoint: u64) {
-    let bootstrap = caller_bootstrap();
+    let bootstrap = &caller_bootstrap();
     let lane = state();
     let expected_caller = match checkpoint {
         CHECK_ENVELOPES

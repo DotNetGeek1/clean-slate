@@ -9,7 +9,8 @@ use super::poll::{
 };
 use super::table::{LinuxSyscallContext, LinuxSyscallHandler};
 use super::user_copy::{copy_user_bytes, LINUX_USER_COPY_MAX_BYTES};
-use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
+use crate::mm::user_access::{copy_to_user, read_user};
+use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::process::linux_fd::{self, readiness::Readiness};
 use crate::process::linux_mem;
 use crate::process::linux_signal;
@@ -201,7 +202,6 @@ fn handle_sys_rt_sigprocmask(
     let old_ptr = request.args[2];
     let sigsetsize = request.args[3];
     let set = if set_ptr != 0 {
-        validate_user_pointer_range(set_ptr, 8).map_err(|_| EFAULT)?;
         Some(read_u64(set_ptr)?)
     } else {
         None
@@ -470,19 +470,11 @@ fn write_pollfds(ptr: u64, pollfds: &[PollFd]) -> Result<(), LinuxErrno> {
 }
 
 fn write_user(ptr: u64, bytes: &[u8]) -> Result<(), LinuxErrno> {
-    validate_user_writable_pointer_range(ptr, bytes.len() as u64).map_err(|_| EFAULT)?;
-    for (offset, byte) in bytes.iter().enumerate() {
-        let addr = ptr.checked_add(offset as u64).ok_or(EFAULT)?;
-        unsafe {
-            *(addr as *mut u8) = *byte;
-        }
-    }
-    Ok(())
+    copy_to_user(ptr, bytes).map_err(|_| EFAULT)
 }
 
 fn read_u64(ptr: u64) -> Result<u64, LinuxErrno> {
-    validate_user_pointer_range(ptr, 8).map_err(|_| EFAULT)?;
-    Ok(unsafe { *(ptr as *const u64) })
+    read_user::<u64>(ptr).map_err(|_| EFAULT)
 }
 
 fn write_zero_timespec(ptr: u64) -> Result<(), LinuxErrno> {

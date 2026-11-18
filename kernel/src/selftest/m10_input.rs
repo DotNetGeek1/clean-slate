@@ -41,7 +41,6 @@ use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS}
 use crate::diagnostics::serial::serial_write_line;
 use crate::interrupt::timer::kernel_ticks;
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::user_mapping::validate_user_pointer_range;
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::task_stacks_mut;
 use crate::sched::timeout;
@@ -691,10 +690,7 @@ const fn read_batch(handle: u64) -> Next {
 }
 
 fn read_user<const N: usize>(address: u64) -> Result<[u8; N], &'static str> {
-    validate_user_pointer_range(address, N as u64)?;
-    let mut bytes = [0u8; N];
-    unsafe { core::ptr::copy_nonoverlapping(address as *const u8, bytes.as_mut_ptr(), N) };
-    Ok(bytes)
+    crate::mm::user_access::read_user(address)
 }
 
 fn consumer_step(lane: &mut Lane, step: u32, result: u64) -> Result<Next, &'static str> {
