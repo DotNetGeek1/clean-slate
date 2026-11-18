@@ -1,41 +1,60 @@
 //! M7.3 network service constituent self-test (CPL3 service + syscall path).
 
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
-#[cfg(feature = "m7-network-self-test")]
+#[cfg(all(
+    clean_slate_userspace_selftest = "m7-net-service",
+    feature = "m7-network-self-test"
+))]
 use crate::capability::network::set_network_audit_serial_echo;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::log::kernel_log_line;
 use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 use crate::interrupt::timer::initialize_timer;
+#[cfg(feature = "m7-network-self-test")]
 use crate::mm::address_space::activate_address_space_root;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::domain::teardown_current_process;
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 use crate::process::id_allocator::id_allocator_mut;
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 use crate::process::id_allocator::IdAllocator;
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 use crate::process::process_registry_mut;
+#[cfg(feature = "m7-network-self-test")]
 use crate::process::userspace_process_root_frame;
+#[cfg(any(
+    clean_slate_userspace_selftest = "m7-net-service",
+    feature = "m9-linux-socket-self-test"
+))]
 use crate::sched::dispatch::start_current_scheduler_thread;
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 use crate::sched::Scheduler;
 use crate::service::control::ServiceLifecycleController;
 use crate::service::service_lifecycle_controller_mut;
 use crate::service::spawn::launch_network_aux_process;
 use crate::sync::global_cell::GlobalCell;
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 use clean_slate_network::limits::MAX_SESSIONS;
 #[cfg(feature = "m9-linux-socket-self-test")]
 use clean_slate_service_fixtures::NETWORK_SERVICE_MODE_ACCEPTANCE;
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
+use clean_slate_service_fixtures::NETWORK_UNAUTHORIZED_SERVICE_ID;
 use clean_slate_service_fixtures::{
     NetworkServiceBootstrap, NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_ID,
     NETWORK_SERVICE_MODE_CAPACITY_LOOP, NETWORK_SERVICE_MODE_INFLIGHT_ARM,
     NETWORK_SERVICE_MODE_STALE_CLOSE, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
-    NETWORK_SERVICE_RESULT_OK, NETWORK_UNAUTHORIZED_SERVICE_ID,
+    NETWORK_SERVICE_RESULT_OK,
 };
 use clean_slate_service_lifecycle::{
     ControlRequest, ControlRequestKind, LifecycleMessage, ServiceId,
@@ -52,6 +71,7 @@ const PRIMARY_CLIENT_MODE: u64 =
 const PRIMARY_CLIENT_MODE: u64 = clean_slate_service_fixtures::NETWORK_SERVICE_MODE_CLIENT;
 const SUPERVISOR_TEST_PID: u64 = 70;
 
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 const CLIENT_SLOT: usize = 1;
 const UNAUTHORIZED_SLOT: usize = 2;
 const INFLIGHT_SLOT: usize = 3;
@@ -100,6 +120,7 @@ fn state() -> M7NetSelfTestState {
     unsafe { (*M7_NET_SELF_TEST_STATE.get()).expect("m7 net self-test state was not initialized") }
 }
 
+#[cfg(feature = "m7-network-self-test")]
 fn read_fixture_bootstrap(pid: u64, kernel_root: u64) -> NetworkServiceBootstrap {
     let root =
         userspace_process_root_frame(pid).unwrap_or_else(|message| fatal_kernel_error(message));
@@ -207,6 +228,7 @@ pub(crate) fn init_minimal_state_for_m9_socket(lifecycle_capability: u64) {
     }));
 }
 
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
     #[cfg(feature = "m7-network-self-test")]
     set_network_audit_serial_echo(true);
@@ -274,6 +296,7 @@ pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
     unsafe { restore_task_context(frame_pointer) }
 }
 
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 fn log_service_started(controller: &ServiceLifecycleController, generation: u64) {
     let pid = controller.live_pid(NETWORK_SERVICE_ID).unwrap_or(0);
     kernel_log_fmt(format_args!(
@@ -303,6 +326,7 @@ fn launch_network_service(
 
 /// Only the primary client starts with the service; the phase fixtures are spawned as
 /// their phase begins (see `spawn_phase_fixture` and `handle_userspace_network_entry`).
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 fn spawn_primary_client(
     controller: &mut ServiceLifecycleController,
     allocator: &mut PageAllocator,

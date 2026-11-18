@@ -1,68 +1,175 @@
 //! M6.3 object-capability constituent self-test (storage service + scripted fixtures).
 
+#[cfg(any(
+    clean_slate_userspace_selftest = "m6-object",
+    all(
+        feature = "m6-object-self-test",
+        not(feature = "m9-userspace-self-test"),
+        not(any(
+            feature = "m6-fixture-smoke-self-test",
+            feature = "m6-revocation-self-test"
+        ))
+    )
+))]
 use crate::arch::x86_64::context_switch::restore_task_context;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::arch::x86_64::context_switch::task_stack_top;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::capability::object::register_pending_bootstrap_grant;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::diagnostics::log::kernel_log_fmt;
+#[cfg(any(
+    clean_slate_userspace_selftest = "m6-object",
+    all(
+        feature = "m6-object-self-test",
+        not(feature = "m9-userspace-self-test"),
+        not(any(
+            feature = "m6-fixture-smoke-self-test",
+            feature = "m6-revocation-self-test"
+        ))
+    )
+))]
 use crate::diagnostics::qemu::fatal_kernel_error;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::interrupt::timer::initialize_timer;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::mm::frame_allocator::PageAllocator;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::mm::paging::current_root_frame_address;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::process::id_allocator::id_allocator_mut;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::process::id_allocator::IdAllocator;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::process::process_registry_mut;
+#[cfg(any(
+    clean_slate_userspace_selftest = "m6-object",
+    all(
+        feature = "m6-object-self-test",
+        not(feature = "m9-userspace-self-test"),
+        not(any(
+            feature = "m6-fixture-smoke-self-test",
+            feature = "m6-revocation-self-test"
+        ))
+    )
+))]
 use crate::sched::dispatch::start_current_scheduler_thread;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::sched::scheduler_mut;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::sched::task_stacks_mut;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::sched::Scheduler;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::selftest::m6_fixture::{
     end_turn_step, fixture_service, set_report_handler, spawn_fixture, wait_exit_step,
     wait_turn_step, FixtureReportAction,
 };
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::service::control::ServiceLifecycleController;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::service::service_lifecycle_controller_mut;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::syscall::install_service_lifecycle_syscall_allocator;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_NR_CAP_OBJECT};
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use clean_slate_capability::{HolderId, Rights};
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use clean_slate_service_fixtures::m6_fixture::{
     M6FixtureBootstrap, M6FixtureStep, ARG_DATA_PTR, ARG_RESULT_OF, FIXTURE_STATUS_DONE,
 };
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use clean_slate_service_fixtures::{
     OBJECT_OP_READ, OBJECT_OP_WRITE, OBJECT_STATUS_NOT_FOUND, OBJECT_SUBOP_CLAIM_BOOTSTRAP_GRANT,
     OBJECT_SUBOP_POLL, OBJECT_SUBOP_SUBMIT, STORAGE_SERVICE_ID,
 };
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use clean_slate_service_lifecycle::{ControlRequest, ControlRequestKind, LifecycleMessage};
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const SUPERVISOR_TEST_PID: u64 = 60;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const TEST_OBJECT_ID: u64 = 7;
 /// Never written by M5/M6 fixtures; used to force NOT_FOUND without depending on disk state.
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const TEST_MISSING_OBJECT_ID: u64 = 9_001;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const ALPHA_V1: &[u8] = b"alpha-v1";
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const PASS_MARKER: &str = "[M6.3] PASS";
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const FIXTURE_LEAKER: u64 = 0;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const FIXTURE_OWNER: u64 = 1;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const FIXTURE_UNRELATED: u64 = 2;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const FIXTURE_READONLY: u64 = 3;
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const FIXTURE_SPAWN_INDEX_LEAKER: usize = 0;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const FIXTURE_SPAWN_INDEX_OWNER: usize = 1;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const FIXTURE_SPAWN_INDEX_READONLY: usize = 2;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const FIXTURE_SPAWN_INDEX_UNRELATED: usize = 3;
 
+#[cfg(any(
+    clean_slate_userspace_selftest = "m6-object",
+    all(
+        feature = "m6-object-self-test",
+        not(feature = "m9-userspace-self-test"),
+        not(any(
+            feature = "m6-fixture-smoke-self-test",
+            feature = "m6-revocation-self-test"
+        ))
+    )
+))]
 struct ObjectSelfTestState {
     leaker_pid: u64,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
     owner_pid: u64,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
     unrelated_pid: u64,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
     readonly_pid: u64,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
     owner_reported: bool,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
     unrelated_reported: bool,
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
     readonly_reported: bool,
 }
 
+#[cfg(any(
+    clean_slate_userspace_selftest = "m6-object",
+    all(
+        feature = "m6-object-self-test",
+        not(feature = "m9-userspace-self-test"),
+        not(any(
+            feature = "m6-fixture-smoke-self-test",
+            feature = "m6-revocation-self-test"
+        ))
+    )
+))]
 static mut OBJECT_SELF_TEST_STATE: Option<ObjectSelfTestState> = None;
 
+#[cfg(any(
+    clean_slate_userspace_selftest = "m6-object",
+    all(
+        feature = "m6-object-self-test",
+        not(feature = "m9-userspace-self-test"),
+        not(any(
+            feature = "m6-fixture-smoke-self-test",
+            feature = "m6-revocation-self-test"
+        ))
+    )
+))]
 #[allow(static_mut_refs)]
 fn state_mut() -> &'static mut ObjectSelfTestState {
     unsafe {
@@ -72,14 +179,17 @@ fn state_mut() -> &'static mut ObjectSelfTestState {
     }
 }
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn arg_data(offset: usize) -> u64 {
     ARG_DATA_PTR | (offset as u64 & 0xffff)
 }
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn arg_result(step_index: usize) -> u64 {
     ARG_RESULT_OF | (step_index as u64 & 0xff)
 }
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn claim_object_grant_step() -> M6FixtureStep {
     M6FixtureStep::syscall(
         SYSCALL_NR_CAP_OBJECT,
@@ -88,6 +198,7 @@ fn claim_object_grant_step() -> M6FixtureStep {
     .expect_ne(SYSCALL_EINVAL)
 }
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn build_leaker_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     let claim = program.push(claim_object_grant_step()).unwrap();
@@ -109,6 +220,7 @@ fn build_leaker_program() -> M6FixtureBootstrap {
     program
 }
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn build_owner_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     let write_data_offset = 0usize;
@@ -204,9 +316,12 @@ fn build_owner_program() -> M6FixtureBootstrap {
 
 /// The readonly holder's turn ends after its `missing-right` denial, so the
 /// unrelated holder's `no-authority` follows it (acceptance marker order).
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const TURN_READONLY_DENY: u64 = 0;
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 const TURN_UNRELATED_DENY: u64 = 1;
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn build_unrelated_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     program.push(wait_turn_step(TURN_UNRELATED_DENY)).unwrap();
@@ -225,6 +340,7 @@ fn build_unrelated_program() -> M6FixtureBootstrap {
 
 /// Runs once the leaker's fault teardown has logged its queue reclaim (acceptance
 /// marker order), then hands over to the unrelated holder.
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn build_readonly_program(leaker_pid: u64) -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
     program.push(wait_exit_step(leaker_pid)).unwrap();
@@ -251,6 +367,7 @@ fn build_readonly_program(leaker_pid: u64) -> M6FixtureBootstrap {
     program
 }
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn validate_owner_report(report: &M6FixtureBootstrap) -> Result<(), &'static str> {
     if report.status != FIXTURE_STATUS_DONE {
         return Err("owner fixture did not complete (see failed_step in serial)");
@@ -262,10 +379,12 @@ fn validate_owner_report(report: &M6FixtureBootstrap) -> Result<(), &'static str
     Ok(())
 }
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn leaker_teardown_complete(leaker_pid: u64) -> bool {
     unsafe { process_registry_mut().get(leaker_pid).is_none() }
 }
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn validate_readonly_report(report: &M6FixtureBootstrap) -> Result<(), &'static str> {
     if report.status != FIXTURE_STATUS_DONE {
         return Err("readonly fixture did not complete");
@@ -273,6 +392,7 @@ fn validate_readonly_report(report: &M6FixtureBootstrap) -> Result<(), &'static 
     Ok(())
 }
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn object_report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReportAction {
     let state = state_mut();
     if report.status != FIXTURE_STATUS_DONE {
@@ -309,6 +429,7 @@ fn object_report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReport
     FixtureReportAction::Continue
 }
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 fn launch_storage_service(
     controller: &mut ServiceLifecycleController,
     allocator: &mut PageAllocator,
@@ -333,6 +454,7 @@ fn launch_storage_service(
     kernel_log_fmt(format_args!("[STOR] object-service started pid={pid}\n"));
 }
 
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
     unsafe {
         *id_allocator_mut() = IdAllocator::new();
@@ -420,6 +542,17 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
 }
 
 /// Resumes scheduling when the leaker fixture faults with no other runnable thread.
+#[cfg(any(
+    clean_slate_userspace_selftest = "m6-object",
+    all(
+        feature = "m6-object-self-test",
+        not(feature = "m9-userspace-self-test"),
+        not(any(
+            feature = "m6-fixture-smoke-self-test",
+            feature = "m6-revocation-self-test"
+        ))
+    )
+))]
 pub(crate) fn maybe_continue_after_fixture_fault(pid: u64) -> ! {
     let state = state_mut();
     if pid != state.leaker_pid {

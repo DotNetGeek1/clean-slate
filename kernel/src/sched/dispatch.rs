@@ -17,7 +17,7 @@ use crate::sched::with_scheduler;
 use crate::sched::Thread;
 use crate::sched::ThreadKind;
 
-// Boot-tail entry point: self-test builds exit QEMU before reaching it.
+// Boot-tail entry point: those self-test builds compile the boot tail out.
 #[cfg_attr(
     any(
         feature = "m1-self-test",
@@ -81,7 +81,7 @@ pub(crate) fn initialize_scheduler() -> Result<(), &'static str> {
     Ok(())
 }
 
-// Boot-tail entry point: self-test builds exit QEMU before reaching it.
+// Boot-tail entry point: those self-test builds compile the boot tail out.
 #[cfg_attr(
     any(
         feature = "m1-self-test",
@@ -212,7 +212,6 @@ pub(crate) fn schedule_next_thread(current_stack_pointer: u64) -> Result<u64, &'
     feature = "m6-revocation-self-test",
     feature = "m6-audit-self-test",
     feature = "m6-capabilities-self-test",
-    feature = "m7-net-caps-self-test",
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test",
     feature = "m7-net-service-self-test",

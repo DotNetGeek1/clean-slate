@@ -83,7 +83,9 @@ const USER_TEST_PROCESS_TWO_VALUE: u64 = 0x5052_4f43_4553_5332;
 #[cfg(feature = "m3-address-space-self-test")]
 const ADDRESS_SPACE_SWITCH_OK_MARKER: &str = "[MM  ] address-space switch OK";
 
+/// Copied into the userspace data page. The payload reads the fields; rustc does not.
 #[cfg(feature = "m3-address-space-self-test")]
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct UserspaceAddressSpaceTestPage {
     observed_value: u64,

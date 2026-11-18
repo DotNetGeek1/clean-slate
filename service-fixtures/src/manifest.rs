@@ -121,23 +121,23 @@ pub enum Grant {
 }
 
 /// What init does when a started service exits or faults. Init counts ticks in monotonic
-/// nanoseconds (`WORK_SET` op `NOW`). Retry `n` waits `initial_delay_ticks +
-/// backoff_base_ticks * (n - 1)` after the failure; after `max_attempts` retries init stops.
+/// nanoseconds (`WORK_SET` op `NOW`). Retry `n` waits `initial_delay_ns +
+/// backoff_base_ns * (n - 1)` after the failure; after `max_attempts` retries init stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestartSpec {
     Never,
     OnFailure {
         max_attempts: u32,
-        backoff_base_ticks: u64,
-        initial_delay_ticks: u64,
+        backoff_base_ns: u64,
+        initial_delay_ns: u64,
     },
     /// As `OnFailure`, but every exit is followed by a restart, and the retry count goes back to
     /// zero each time an instance reports ready. `max_attempts` therefore bounds consecutive
     /// instances that exit or fault before reporting ready.
     OnExitUntilUnready {
         max_attempts: u32,
-        backoff_base_ticks: u64,
-        initial_delay_ticks: u64,
+        backoff_base_ns: u64,
+        initial_delay_ns: u64,
     },
 }
 
@@ -173,8 +173,8 @@ const NANOS_PER_SECOND: u64 = 1_000_000_000;
 /// one 2 s after the failure. The count does not reset after a long healthy run.
 const SYSTEM_RESTART: RestartSpec = RestartSpec::OnFailure {
     max_attempts: 3,
-    backoff_base_ticks: 2 * NANOS_PER_SECOND,
-    initial_delay_ticks: 2 * NANOS_PER_SECOND,
+    backoff_base_ns: 2 * NANOS_PER_SECOND,
+    initial_delay_ns: 2 * NANOS_PER_SECOND,
 };
 
 pub const STORAGE_SERVICE_SPEC: ServiceSpec = ServiceSpec {
@@ -202,8 +202,8 @@ pub const NETWORK_SERVICE_SPEC: ServiceSpec = ServiceSpec {
 /// 1.5 s and 2.5 s; if the third restarted shell also exits before reporting ready, init gives up.
 const SHELL_RESTART: RestartSpec = RestartSpec::OnExitUntilUnready {
     max_attempts: 3,
-    backoff_base_ticks: NANOS_PER_SECOND,
-    initial_delay_ticks: NANOS_PER_SECOND / 2,
+    backoff_base_ns: NANOS_PER_SECOND,
+    initial_delay_ns: NANOS_PER_SECOND / 2,
 };
 
 /// The interactive BusyBox shell on the serial console. Its `/tmp` is backed by storage objects,
@@ -542,8 +542,8 @@ mod tests {
             shell.restart,
             RestartSpec::OnExitUntilUnready {
                 max_attempts: 3,
-                backoff_base_ticks: 1_000_000_000,
-                initial_delay_ticks: 500_000_000,
+                backoff_base_ns: 1_000_000_000,
+                initial_delay_ns: 500_000_000,
             }
         );
     }
@@ -644,8 +644,8 @@ mod tests {
                 spec.restart,
                 RestartSpec::OnFailure {
                     max_attempts: 3,
-                    backoff_base_ticks: 2_000_000_000,
-                    initial_delay_ticks: 2_000_000_000,
+                    backoff_base_ns: 2_000_000_000,
+                    initial_delay_ns: 2_000_000_000,
                 }
             );
         }

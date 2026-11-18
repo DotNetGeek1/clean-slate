@@ -39,7 +39,6 @@ pub(crate) const SYSCALL_DF_SANITIZED_MARKER: &str = "[SYSC] entry flag mask OK"
 #[derive(Clone, Copy)]
 pub(crate) struct UserspaceSyscallTestState {
     pub(crate) user_stack_pointer: u64,
-    user_stack_segment: u64,
 }
 
 #[cfg(feature = "m3-syscall-self-test")]
@@ -94,11 +93,11 @@ fn install_userspace_syscall_payload(allocator: &mut PageAllocator) -> Result<()
     )?;
     configure_scheduler_thread_slot(0, &spawned.thread)?;
 
-    let gdt_state = userspace_gdt_state()?;
+    // Confirm a userspace GDT exists before the entry frame is resumed.
+    let _gdt_state = userspace_gdt_state()?;
     unsafe {
         *USERSPACE_SYSCALL_TEST_STATE.get() = Some(UserspaceSyscallTestState {
             user_stack_pointer: spawned.user_stack_pointer,
-            user_stack_segment: gdt_state.user_data_selector.0 as u64,
         });
     }
     SYSCALL_CALL_COUNT.store(0, Ordering::Relaxed);

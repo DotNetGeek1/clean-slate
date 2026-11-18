@@ -56,6 +56,128 @@ const VIRTIO_GPU_WITHOUT_BOOT_TAIL_FEATURES: &[&str] = &["m10-virtio-gpu-self-te
 /// other build leaves COM1 output-only, so input on the line is never echoed.
 const SERIAL_CONSOLE_FEATURES: &[&str] = &["serial-input-self-test"];
 
+/// Self-tests whose boot-path dispatch arm runs instead of the userspace dispatch block, which
+/// `m3-entry-self-test` (a dependency of most userspace self-tests) otherwise selects. Without
+/// any of these, `m3-entry-self-test` builds select an arm of that block.
+const USERSPACE_DISPATCH_OVERRIDE_FEATURES: &[&str] = &[
+    "m10-nxe-self-test",
+    "m10-shared-buffer-self-test",
+    "m8-linux-dispatch-self-test",
+    "m8-linux-hello-self-test",
+    "m9-syscall-fail-closed-self-test",
+    "m9-block-wake-self-test",
+    "m9-low-va-self-test",
+    "m9-linux-exec-self-test",
+    "m9-linux-runtime-self-test",
+    "m9-linux-socket-self-test",
+    "m9-linux-proc-self-test",
+    "m9-linux-trace-self-test",
+    "m9-rootfs-self-test",
+    "m9-linux-fs-self-test",
+    "m9-userspace-self-test",
+    "m9-fd-core-self-test",
+    "m10-input-self-test",
+];
+
+/// The arms of the userspace dispatch block, in priority order. Lanes enable several of these
+/// features through Cargo dependencies, so the most specific arm must come first;
+/// `m3-entry-self-test` is the fallback. [`USERSPACE_DISPATCH_OVERRIDE_FEATURES`] (including
+/// `m9-linux-fs-self-test` and `m9-userspace-self-test`) are tested before this list. In an
+/// `m3-entry-self-test` build without one of those, the first arm with one of its features sets
+/// `clean_slate_userspace_selftest="<arm>"`, and that arm alone is compiled. A new arm in the
+/// block is a row here and its own `cfg`.
+const USERSPACE_DISPATCH_ARMS: &[(&str, &[&str])] = &[
+    ("m7-net-service", &["m7-net-service-self-test"]),
+    ("m4-service-lifecycle", &["m4-service-lifecycle-self-test"]),
+    ("m4-supervisor", &["m4-supervisor-self-test"]),
+    (
+        "m5-storage",
+        &[
+            "m5-storage-self-test",
+            "m5-persistence-self-test",
+            "m5-crash-early-self-test",
+            "m5-crash-late-self-test",
+            "m5-crash-recovery-self-test",
+        ],
+    ),
+    ("m7-net-caps", &["m7-net-caps-self-test"]),
+    ("m10-port", &["m10-port-self-test"]),
+    ("m6-revocation", &["m6-revocation-self-test"]),
+    ("m6-capabilities", &["m6-capabilities-self-test"]),
+    ("m6-object", &["m6-object-self-test"]),
+    ("m6-delegation", &["m6-delegation-self-test"]),
+    ("m6-process-control", &["m6-process-control-self-test"]),
+    ("m6-audit", &["m6-audit-self-test"]),
+    ("m6-fixture-smoke", &["m6-fixture-smoke-self-test"]),
+    ("m8-linux-image", &["m8-linux-image-self-test"]),
+    ("m3-ipc", &["m3-ipc-self-test"]),
+    ("m3-syscall", &["m3-syscall-self-test"]),
+    ("m3-entry", &["m3-entry-self-test"]),
+];
+
+/// Self-tests with a boot-path arm outside the userspace dispatch block that runs instead of
+/// its M3 arms (`m3-ipc`, `m3-syscall`, `m3-entry`).
+const M3_ARM_OVERRIDE_FEATURES: &[&str] = &[
+    "m7-dns-self-test",
+    "m7-net-device-self-test",
+    "m10-virtio-modern-self-test",
+    "m10-virtio-gpu-self-test",
+];
+/// Boot-context device self-tests whose halted timer path expires deadlines (`expire_deadlines`)
+/// instead of scheduling. Any one of them sets `clean_slate_selftest_timer_wait`.
+const SELFTEST_TIMER_WAIT_FEATURES: &[&str] = &[
+    "m10-virtio-modern-self-test",
+    "m10-virtio-gpu-self-test",
+    "m10-input-self-test",
+];
+
+fn emit_selftest_timer_wait_cfg() {
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_selftest_timer_wait)");
+    if any_feature_enabled(SELFTEST_TIMER_WAIT_FEATURES) {
+        println!("cargo::rustc-cfg=clean_slate_selftest_timer_wait");
+    }
+}
+
+/// Self-tests that link the kernel bump allocator in `lib.rs` (storage and the two M6 lanes
+/// whose fixtures allocate). Any one of them sets `clean_slate_bump_allocator`.
+const BUMP_ALLOCATOR_FEATURES: &[&str] = &[
+    "m5-storage-self-test",
+    "m5-persistence-self-test",
+    "m5-crash-early-self-test",
+    "m5-crash-late-self-test",
+    "m5-crash-recovery-self-test",
+    "m6-object-self-test",
+    "m6-capabilities-self-test",
+];
+
+fn emit_bump_allocator_cfg() {
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_bump_allocator)");
+    if any_feature_enabled(BUMP_ALLOCATOR_FEATURES) {
+        println!("cargo::rustc-cfg=clean_slate_bump_allocator");
+    }
+}
+
+/// Lanes that construct [`crate::selftest::userspace_process::SpawnedUserspaceProcess`].
+/// Socket and proc reset the scheduler world and do not spawn through this helper.
+const USERSPACE_SPAWN_FEATURES: &[&str] = &[
+    "m3-syscall-self-test",
+    "m4-service-lifecycle-self-test",
+    "m9-block-wake-self-test",
+    "m9-fd-core-self-test",
+    "m9-linux-fs-self-test",
+    "m9-linux-trace-self-test",
+    "m9-syscall-fail-closed-self-test",
+    "m9-userspace-self-test",
+    "m10-input-self-test",
+];
+
+fn emit_userspace_spawn_cfg() {
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_userspace_spawn)");
+    if any_feature_enabled(USERSPACE_SPAWN_FEATURES) {
+        println!("cargo::rustc-cfg=clean_slate_userspace_spawn");
+    }
+}
+
 fn any_feature_enabled(features: &[&str]) -> bool {
     features.iter().any(|feature| {
         let var = format!(
@@ -87,6 +209,54 @@ fn emit_boot_tail_cfgs(system_init: bool) {
     }
 }
 
+fn emit_userspace_dispatch_cfgs() -> Option<&'static str> {
+    let arms: Vec<String> = USERSPACE_DISPATCH_ARMS
+        .iter()
+        .map(|(arm, _)| format!("\"{arm}\""))
+        .collect();
+    println!(
+        "cargo::rustc-check-cfg=cfg(clean_slate_userspace_selftest, values({}))",
+        arms.join(", ")
+    );
+    if !any_feature_enabled(&["m3-entry-self-test"])
+        || any_feature_enabled(USERSPACE_DISPATCH_OVERRIDE_FEATURES)
+    {
+        return None;
+    }
+    let selected = USERSPACE_DISPATCH_ARMS
+        .iter()
+        .find(|(_, features)| any_feature_enabled(features))
+        .map(|(arm, _)| *arm);
+    if let Some(arm) = selected {
+        if arm.starts_with("m3-") && any_feature_enabled(M3_ARM_OVERRIDE_FEATURES) {
+            return None;
+        }
+        println!("cargo::rustc-cfg=clean_slate_userspace_selftest=\"{arm}\"");
+    }
+    selected
+}
+
+/// Lanes that spawn an M6 fixture program. The object lane is included only when it is the
+/// selected userspace arm: `m9-linux-fs` and `m9-userspace` enable the object feature without
+/// running that arm.
+const FIXTURE_SPAWN_FEATURES: &[&str] = &[
+    "m6-revocation-self-test",
+    "m6-process-control-self-test",
+    "m6-delegation-self-test",
+    "m6-audit-self-test",
+    "m6-capabilities-self-test",
+    "m6-fixture-smoke-self-test",
+    "m7-net-caps-self-test",
+    "m10-port-self-test",
+    "m10-shared-buffer-self-test",
+];
+
+fn emit_fixture_spawn_cfg(userspace_arm: Option<&str>) {
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_fixture_spawn)");
+    if userspace_arm == Some("m6-object") || any_feature_enabled(FIXTURE_SPAWN_FEATURES) {
+        println!("cargo::rustc-cfg=clean_slate_fixture_spawn");
+    }
+}
 /// Every enabled Cargo feature of this build, by its `Cargo.toml` name (the kernel's feature
 /// names use `-`, never `_`).
 fn enabled_features() -> Vec<String> {
@@ -178,6 +348,11 @@ fn main() {
     emit_linux_cfgs(system_init);
     let desktop = emit_desktop_cfg(system_init);
     emit_desktop_snapshot_cfg();
+    let userspace_arm = emit_userspace_dispatch_cfgs();
+    emit_fixture_spawn_cfg(userspace_arm);
+    emit_selftest_timer_wait_cfg();
+    emit_bump_allocator_cfg();
+    emit_userspace_spawn_cfg();
     // Init is embedded only in the build that launches it.
     if system_init {
         embed_userspace_image("init_userspace.bin", "clean-slate-supervisor-init", true);
@@ -561,20 +736,13 @@ fn embed_userspace_image(raw_name: &str, bin_name: &str, record_entry_offset: bo
     );
 }
 
-/// Storage, network and init launches map with `RELOCATED_BASE` and the segment array.
-/// `IMAGE_BASE` and `SEGMENT_COUNT` are still emitted so every image's metadata has
-/// the same fields. The two M4 builds deny `dead_code` in `service` and compile those
-/// launches without reading the two fields, so only those items are allowed.
-fn metadata_item(prefix: &str, field: &str, item: &str) -> String {
-    let unused_by_launch = matches!(
+/// Only the desktop launches read `IMAGE_BASE`, so only their metadata has it. Every launch
+/// takes the segment count from `SEGMENTS`.
+fn emits_image_base(prefix: &str) -> bool {
+    matches!(
         prefix,
-        "STORAGE_USERSPACE" | "NETWORK_USERSPACE" | "INIT_USERSPACE"
-    ) && matches!(field, "IMAGE_BASE" | "SEGMENT_COUNT");
-    if unused_by_launch {
-        format!("#[allow(dead_code)]\n{item}")
-    } else {
-        item.to_string()
-    }
+        "COMPOSITOR_USERSPACE" | "DESKTOP_SHELL_USERSPACE" | "PLAYGROUND_USERSPACE"
+    )
 }
 
 fn format_segment_metadata(
@@ -592,21 +760,13 @@ fn format_segment_metadata(
     out.push_str(&format!(
         "pub(super) const {prefix}_MAPPED_CODE_PAGES: usize = {mapped_pages};\n"
     ));
-    out.push_str(&metadata_item(
-        prefix,
-        "IMAGE_BASE",
-        &format!("pub(super) const {prefix}_IMAGE_BASE: u64 = {image_base:#x};\n"),
-    ));
+    if emits_image_base(prefix) {
+        out.push_str(&format!(
+            "pub(super) const {prefix}_IMAGE_BASE: u64 = {image_base:#x};\n"
+        ));
+    }
     out.push_str(&format!(
         "pub(super) const {prefix}_RELOCATED_BASE: u64 = {load_base:#x};\n"
-    ));
-    out.push_str(&metadata_item(
-        prefix,
-        "SEGMENT_COUNT",
-        &format!(
-            "pub(super) const {prefix}_SEGMENT_COUNT: usize = {};\n",
-            plan.segment_count
-        ),
     ));
     out.push_str(&format!(
         "pub(super) static {prefix}_SEGMENTS: [crate::mm::image_loader::EmbeddedSegment; {}] = [\n",

@@ -441,7 +441,11 @@ pub(crate) fn grant_object_service_role(
 }
 
 #[cfg_attr(
-    not(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test")),
+    not(any(
+        clean_slate_userspace_selftest = "m6-object",
+        feature = "m6-capabilities-self-test",
+        test
+    )),
     allow(dead_code)
 )] // Launch-policy API; exercised by M6 self-tests and the M6.8 integration path.
 pub(crate) fn register_pending_bootstrap_grant(

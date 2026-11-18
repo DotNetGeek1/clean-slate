@@ -7,16 +7,22 @@ use core::task::{Context, Poll, Waker};
 
 use clean_slate_network::addr::SocketAddrV4;
 use clean_slate_network::device::NetworkLink;
+#[cfg(not(feature = "m7-tls-fail-closed-self-test"))]
 use clean_slate_network::error::NetworkError;
+#[cfg(not(feature = "m7-tls-fail-closed-self-test"))]
+use clean_slate_network::fixture::TCP_ECHO_PORT;
 use clean_slate_network::fixture::{
-    APP_REQUEST_BYTES, APP_RESPONSE_BYTES, GUEST_IPV4, PEER_IPV4, PEER_MAC, TCP_ECHO_PORT,
-    TLS_PORT, TLS_SERVER_NAME,
+    APP_REQUEST_BYTES, APP_RESPONSE_BYTES, GUEST_IPV4, PEER_IPV4, PEER_MAC, TLS_PORT,
+    TLS_SERVER_NAME,
 };
 use clean_slate_network::protocol::TrustedCaller;
 use clean_slate_network::session::SessionGeneration;
+#[cfg(not(feature = "m7-tls-fail-closed-self-test"))]
 use clean_slate_network::session::SessionId;
 use clean_slate_network::stack::L3Stack;
-use clean_slate_network::tcp::{TcpState, TcpTransport};
+#[cfg(not(feature = "m7-tls-fail-closed-self-test"))]
+use clean_slate_network::tcp::TcpState;
+use clean_slate_network::tcp::TcpTransport;
 use clean_slate_network::tls::HANDSHAKE_MARKER;
 use clean_slate_network::tls::{
     tls_transaction, TlsConfig, TlsError, TlsTransactionBudget, TlsTransactionClock,
@@ -33,6 +39,7 @@ const OWNER: TrustedCaller = TrustedCaller::new(1, 0, 1);
 /// The stack clock is calibrated TSC milliseconds ([`now_ms`]).
 const ARP_TTL_MS: u64 = 50_000;
 /// Echo phase: connect, response and connection release, each.
+#[cfg(not(feature = "m7-tls-fail-closed-self-test"))]
 const TCP_ECHO_BUDGET_MS: u64 = 2_000;
 /// Same budgets as the network service's TLS job.
 const TLS_BUDGET: TlsTransactionBudget = TlsTransactionBudget {
@@ -130,6 +137,7 @@ fn install_tls_handshake_trace() {
     }
 }
 
+#[cfg(not(feature = "m7-tls-fail-closed-self-test"))]
 pub(crate) fn run_m7_tls_self_test() -> Result<(), &'static str> {
     boot_wait::init_clock()?;
     install_tls_handshake_trace();
@@ -138,6 +146,7 @@ pub(crate) fn run_m7_tls_self_test() -> Result<(), &'static str> {
     run_tls_phase(tcp, false)
 }
 
+#[cfg(feature = "m7-tls-fail-closed-self-test")]
 pub(crate) fn run_m7_tls_fail_closed_self_test() -> Result<(), &'static str> {
     boot_wait::init_clock()?;
     install_tls_handshake_trace();
@@ -165,6 +174,7 @@ fn tcp_transport() -> Result<&'static mut TcpTransport<VirtioNetDevice>, &'stati
 }
 
 #[inline(never)]
+#[cfg(not(feature = "m7-tls-fail-closed-self-test"))]
 fn run_tcp_echo_phase(tcp: &mut TcpTransport<VirtioNetDevice>) -> Result<(), &'static str> {
     let remote_echo = SocketAddrV4::new(PEER_IPV4, TCP_ECHO_PORT);
     let echo_id = tcp
@@ -202,6 +212,7 @@ fn run_tcp_echo_phase(tcp: &mut TcpTransport<VirtioNetDevice>) -> Result<(), &'s
     })
 }
 
+#[cfg(not(feature = "m7-tls-fail-closed-self-test"))]
 fn receive_all(
     tcp: &mut TcpTransport<VirtioNetDevice>,
     id: SessionId,

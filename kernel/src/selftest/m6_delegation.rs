@@ -49,15 +49,12 @@ const FIXTURE_OWNER: u64 = 0;
 const FIXTURE_READER: u64 = 1;
 const PREDICTED_READER_PID: u64 = 2;
 
-const LISTING_BYTES: usize = 32;
-
 const DELEGATION_READER_BOOTSTRAP_KEY: crate::sched::wait::WaitKey =
     crate::sched::wait::WaitKey(0x652);
 const DELEGATION_CHILD_READY_KEY: crate::sched::wait::WaitKey = crate::sched::wait::WaitKey(0x651);
 const INVALID_RIGHTS_BIT: u64 = 1 << 31;
 
 struct DelegationSelfTestState {
-    owner_pid: u64,
     reader_pid: u64,
     owner_root_handle: u64,
 }
@@ -149,19 +146,6 @@ fn arg_data(offset: usize) -> u64 {
 
 fn arg_result(step_index: usize) -> u64 {
     ARG_RESULT_OF | (step_index as u64 & 0xff)
-}
-
-fn parse_listing(bytes: &[u8]) -> Result<(u64, u64, u64, u64), &'static str> {
-    if bytes.len() < LISTING_BYTES {
-        return Err("listing buffer too short");
-    }
-    let read_u64 = |offset: usize| {
-        let chunk = bytes[offset..offset + 8]
-            .try_into()
-            .map_err(|_| "listing slice")?;
-        Ok(u64::from_le_bytes(chunk))
-    };
-    Ok((read_u64(0)?, read_u64(8)?, read_u64(16)?, read_u64(24)?))
 }
 
 fn build_owner_program(reader_pid: u64) -> M6FixtureBootstrap {
@@ -380,7 +364,6 @@ pub(crate) fn start_m6_delegation_self_test(allocator: PageAllocator) -> ! {
 
     unsafe {
         DELEGATION_SELF_TEST_STATE = Some(DelegationSelfTestState {
-            owner_pid,
             reader_pid,
             owner_root_handle: owner_handle.encode(),
         });

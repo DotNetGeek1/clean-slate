@@ -170,38 +170,6 @@ fn copy_userspace_payload(frame_address: u64) {
     }
 }
 
-fn initialize_crash_service_page(frame_address: u64, config: &CrashServiceLaunchConfig) {
-    zero_page(frame_address);
-    let page = CrashServiceUserPage {
-        observed_value: config.stack_evidence,
-        probe_address: config.fault_probe_address,
-        heartbeat: 0,
-        stack_evidence: config.stack_evidence,
-    };
-    unsafe {
-        ptr::write(
-            (phys_to_virt(frame_address)) as *mut CrashServiceUserPage,
-            page,
-        );
-    }
-}
-
-fn initialize_workload_page(frame_address: u64, token: u64, probe_address: u64) {
-    zero_page(frame_address);
-    let page = CrashServiceUserPage {
-        observed_value: token,
-        probe_address,
-        heartbeat: 0,
-        stack_evidence: 0,
-    };
-    unsafe {
-        ptr::write(
-            (phys_to_virt(frame_address)) as *mut CrashServiceUserPage,
-            page,
-        );
-    }
-}
-
 fn create_userspace_process(
     allocator: &mut PageAllocator,
     scheduler_slot: usize,

@@ -152,7 +152,7 @@ use crate::sched::SCHEDULER_THREAD_SLOTS;
 use crate::selftest::m10_framebuffer::run_m10_framebuffer_self_test;
 #[cfg(feature = "m10-input-self-test")]
 use crate::selftest::m10_input::start_m10_input_self_test;
-#[cfg(feature = "m10-port-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m10-port")]
 use crate::selftest::m10_port::start_m10_port_self_test;
 #[cfg(feature = "m10-virtio-gpu-self-test")]
 use crate::selftest::m10_virtio_gpu::run_m10_virtio_gpu_self_test;
@@ -168,103 +168,47 @@ use crate::selftest::m2_double_fault::trigger_double_fault_self_test;
 use crate::selftest::m2_timer::start_timer_self_test_task;
 #[cfg(feature = "m3-address-space-self-test")]
 use crate::selftest::m3_address_space::start_userspace_address_space_self_test;
-#[cfg(all(
-    feature = "m3-entry-self-test",
-    not(feature = "m10-nxe-self-test"),
-    not(feature = "m10-shared-buffer-self-test"),
-    not(feature = "m3-ipc-self-test"),
-    not(feature = "m3-syscall-self-test"),
-    not(feature = "m8-linux-dispatch-self-test"),
-    not(feature = "m9-syscall-fail-closed-self-test"),
-    not(feature = "m9-block-wake-self-test"),
-    not(feature = "m4-service-lifecycle-self-test"),
-    not(feature = "m4-supervisor-self-test"),
-    not(any(
-        feature = "m5-storage-self-test",
-        feature = "m5-persistence-self-test",
-        feature = "m5-crash-early-self-test",
-        feature = "m5-crash-late-self-test",
-        feature = "m5-crash-recovery-self-test"
-    )),
-    not(feature = "m6-fixture-smoke-self-test"),
-    not(feature = "m6-object-self-test"),
-    not(feature = "m6-process-control-self-test"),
-    not(feature = "m6-delegation-self-test"),
-    not(feature = "m6-revocation-self-test"),
-    not(feature = "m6-audit-self-test"),
-    not(feature = "m6-capabilities-self-test"),
-    not(feature = "m7-net-service-self-test"),
-    not(feature = "m7-net-caps-self-test"),
-    not(feature = "m10-port-self-test"),
-    not(feature = "m10-shared-buffer-self-test"),
-    not(feature = "m7-dns-self-test"),
-    not(feature = "m7-net-device-self-test"),
-    not(feature = "m10-virtio-modern-self-test"),
-    not(feature = "m10-virtio-gpu-self-test"),
-    not(feature = "m8-linux-image-self-test"),
-    not(feature = "m8-linux-hello-self-test"),
-    not(feature = "m9-low-va-self-test"),
-    not(feature = "m9-linux-exec-self-test"),
-    not(feature = "m9-linux-runtime-self-test"),
-    not(feature = "m9-linux-proc-self-test"),
-    not(feature = "m9-linux-trace-self-test"),
-    not(feature = "m9-rootfs-self-test"),
-    not(feature = "m9-linux-fs-self-test"),
-    not(feature = "m9-fd-core-self-test"),
-    not(feature = "m10-input-self-test")
-))]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::selftest::m3_entry::start_userspace_entry_self_test;
-#[cfg(feature = "m3-ipc-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-ipc")]
 use crate::selftest::m3_ipc::start_userspace_ipc_self_test;
 #[cfg(feature = "m3-resources-self-test")]
 use crate::selftest::m3_resources::start_userspace_resources_self_test;
-#[cfg(feature = "m3-syscall-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-syscall")]
 use crate::selftest::m3_syscall::start_userspace_syscall_self_test;
 #[cfg(feature = "m4-crash-service-self-test")]
 use crate::selftest::m4_crash_service::start_crash_service_self_test;
 #[cfg(feature = "m4-recovery-self-test")]
 use crate::selftest::m4_recovery::start_recovery_self_test;
-#[cfg(feature = "m4-service-lifecycle-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m4-service-lifecycle")]
 use crate::selftest::m4_service_lifecycle::start_service_lifecycle_self_test;
-#[cfg(feature = "m4-supervisor-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m4-supervisor")]
 use crate::selftest::m4_supervisor::start_userspace_supervisor_self_test;
 #[cfg(feature = "m5-block-self-test")]
 use crate::selftest::m5_block::run_m5_block_self_test;
-#[cfg(any(
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
-))]
+#[cfg(clean_slate_userspace_selftest = "m5-storage")]
 use crate::selftest::m5_storage::start_m5_storage_self_test;
-#[cfg(feature = "m6-audit-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m6-audit")]
 use crate::selftest::m6_audit::start_m6_audit_self_test;
-#[cfg(feature = "m6-capabilities-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m6-capabilities")]
 use crate::selftest::m6_capabilities::start_m6_capabilities_self_test;
-#[cfg(feature = "m6-delegation-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m6-delegation")]
 use crate::selftest::m6_delegation::start_m6_delegation_self_test;
-#[cfg(feature = "m6-fixture-smoke-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m6-fixture-smoke")]
 use crate::selftest::m6_fixture_smoke::start_m6_fixture_smoke_self_test;
-#[cfg(all(
-    feature = "m6-object-self-test",
-    not(feature = "m9-linux-fs-self-test")
-))]
+#[cfg(clean_slate_userspace_selftest = "m6-object")]
 use crate::selftest::m6_object::start_m6_object_self_test;
-#[cfg(feature = "m6-process-control-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m6-process-control")]
 use crate::selftest::m6_process_control::start_m6_process_control_self_test;
-#[cfg(feature = "m6-revocation-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m6-revocation")]
 use crate::selftest::m6_revocation::start_m6_revocation_self_test;
 #[cfg(feature = "m7-dns-self-test")]
 use crate::selftest::m7_dns::run_m7_dns_self_test;
-#[cfg(feature = "m7-net-caps-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m7-net-caps")]
 use crate::selftest::m7_net_caps::start_m7_net_caps_self_test;
 #[cfg(feature = "m7-net-device-self-test")]
 use crate::selftest::m7_net_device::run_m7_net_device_self_test;
-#[cfg(all(
-    feature = "m7-net-service-self-test",
-    not(feature = "m9-linux-socket-self-test")
-))]
+#[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 use crate::selftest::m7_net_service::start_m7_net_service_self_test;
 #[cfg(feature = "m7-tls-fail-closed-self-test")]
 use crate::selftest::m7_tls::run_m7_tls_fail_closed_self_test;
@@ -280,7 +224,7 @@ use crate::selftest::m7_tls::run_m7_tls_self_test;
 use crate::selftest::m8_linux_dispatch::start_m8_linux_dispatch_self_test;
 #[cfg(feature = "m8-linux-hello-self-test")]
 use crate::selftest::m8_linux_hello::start_m8_linux_hello_self_test;
-#[cfg(feature = "m8-linux-image-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m8-linux-image")]
 use crate::selftest::m8_linux_image::start_m8_linux_image_self_test;
 #[cfg(feature = "m9-block-wake-self-test")]
 use crate::selftest::m9_block_wake::start_m9_block_wake_self_test;
@@ -756,290 +700,94 @@ fn run_inner() -> Result<(), &'static str> {
         start_m10_input_self_test(allocator)
     }
 
-    #[cfg(all(
-        feature = "m3-entry-self-test",
-        not(feature = "m10-nxe-self-test"),
-        not(feature = "m10-shared-buffer-self-test"),
-        not(feature = "m8-linux-dispatch-self-test"),
-        not(feature = "m8-linux-hello-self-test"),
-        not(feature = "m9-syscall-fail-closed-self-test"),
-        not(feature = "m9-block-wake-self-test"),
-        not(feature = "m9-low-va-self-test"),
-        not(feature = "m9-linux-exec-self-test"),
-        not(feature = "m9-linux-runtime-self-test"),
-        not(feature = "m9-linux-socket-self-test"),
-        not(feature = "m9-linux-proc-self-test"),
-        not(feature = "m9-linux-trace-self-test"),
-        not(feature = "m9-rootfs-self-test"),
-        not(feature = "m9-linux-fs-self-test"),
-        not(feature = "m9-fd-core-self-test"),
-        not(feature = "m10-input-self-test")
-    ))]
+    // The userspace dispatch block: `kernel/build.rs` selects at most one arm.
+    #[cfg(clean_slate_userspace_selftest = "m7-net-service")]
     {
-        #[cfg(feature = "m7-net-service-self-test")]
-        {
-            start_m7_net_service_self_test(allocator)
-        }
-        #[cfg(all(
-            not(feature = "m7-net-service-self-test"),
-            feature = "m4-service-lifecycle-self-test"
-        ))]
-        {
-            start_service_lifecycle_self_test(allocator)
-        }
-        #[cfg(all(
-            not(feature = "m7-net-service-self-test"),
-            not(feature = "m4-service-lifecycle-self-test"),
-            feature = "m4-supervisor-self-test"
-        ))]
-        {
-            let mut allocator = allocator;
-            start_userspace_supervisor_self_test(&mut allocator)
-        }
-        #[cfg(all(
-            not(feature = "m7-net-service-self-test"),
-            not(feature = "m4-service-lifecycle-self-test"),
-            not(feature = "m4-supervisor-self-test"),
-            any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            )
-        ))]
-        {
-            start_m5_storage_self_test(allocator)
-        }
-        #[cfg(all(
-            not(feature = "m4-service-lifecycle-self-test"),
-            not(feature = "m4-supervisor-self-test"),
-            not(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            )),
-            feature = "m7-net-caps-self-test",
-            not(feature = "m10-shared-buffer-self-test")
-        ))]
-        {
-            start_m7_net_caps_self_test(allocator)
-        }
-        #[cfg(all(
-            not(feature = "m4-service-lifecycle-self-test"),
-            not(feature = "m4-supervisor-self-test"),
-            not(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            )),
-            not(feature = "m7-net-caps-self-test"),
-            feature = "m10-port-self-test"
-        ))]
-        {
-            start_m10_port_self_test(allocator)
-        }
-        #[cfg(all(
-            not(feature = "m4-service-lifecycle-self-test"),
-            not(feature = "m4-supervisor-self-test"),
-            not(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            )),
-            not(feature = "m7-net-caps-self-test"),
-            not(feature = "m10-port-self-test"),
-            feature = "m6-revocation-self-test"
-        ))]
-        {
-            start_m6_revocation_self_test(allocator)
-        }
-        #[cfg(all(
-            not(feature = "m4-service-lifecycle-self-test"),
-            not(feature = "m4-supervisor-self-test"),
-            not(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            )),
-            not(feature = "m6-revocation-self-test"),
-            feature = "m6-capabilities-self-test"
-        ))]
-        {
-            start_m6_capabilities_self_test(allocator)
-        }
-        #[cfg(all(
-            not(feature = "m4-service-lifecycle-self-test"),
-            not(feature = "m4-supervisor-self-test"),
-            not(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            )),
-            not(feature = "m6-revocation-self-test"),
-            not(feature = "m6-capabilities-self-test"),
-            not(feature = "m9-linux-fs-self-test"),
-            feature = "m6-object-self-test"
-        ))]
-        {
-            start_m6_object_self_test(allocator)
-        }
-        #[cfg(all(
-            not(feature = "m4-service-lifecycle-self-test"),
-            not(feature = "m4-supervisor-self-test"),
-            not(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            )),
-            not(feature = "m6-revocation-self-test"),
-            not(feature = "m6-object-self-test"),
-            not(feature = "m6-process-control-self-test"),
-            feature = "m6-delegation-self-test"
-        ))]
-        {
-            start_m6_delegation_self_test(allocator)
-        }
-        #[cfg(all(
-            not(feature = "m4-service-lifecycle-self-test"),
-            not(feature = "m4-supervisor-self-test"),
-            not(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            )),
-            not(feature = "m6-object-self-test"),
-            not(feature = "m6-delegation-self-test"),
-            not(feature = "m6-audit-self-test"),
-            feature = "m6-process-control-self-test"
-        ))]
-        {
-            start_m6_process_control_self_test(allocator)
-        }
-        #[cfg(all(
-            not(feature = "m4-service-lifecycle-self-test"),
-            not(feature = "m4-supervisor-self-test"),
-            not(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            )),
-            not(feature = "m6-object-self-test"),
-            not(feature = "m6-process-control-self-test"),
-            not(feature = "m6-delegation-self-test"),
-            feature = "m6-audit-self-test"
-        ))]
-        {
-            start_m6_audit_self_test(allocator)
-        }
-        #[cfg(all(
-            not(feature = "m4-service-lifecycle-self-test"),
-            not(feature = "m4-supervisor-self-test"),
-            not(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            )),
-            not(feature = "m6-object-self-test"),
-            not(feature = "m6-process-control-self-test"),
-            not(feature = "m6-delegation-self-test"),
-            not(feature = "m6-audit-self-test"),
-            feature = "m6-fixture-smoke-self-test"
-        ))]
-        {
-            start_m6_fixture_smoke_self_test(allocator)
-        }
-        #[cfg(all(
-            not(feature = "m4-service-lifecycle-self-test"),
-            not(feature = "m4-supervisor-self-test"),
-            not(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            )),
-            not(feature = "m6-fixture-smoke-self-test"),
-            not(feature = "m6-object-self-test"),
-            not(feature = "m6-process-control-self-test"),
-            not(feature = "m6-delegation-self-test"),
-            not(feature = "m6-audit-self-test"),
-            not(feature = "m6-revocation-self-test"),
-            not(feature = "m6-capabilities-self-test"),
-            not(feature = "m7-net-caps-self-test"),
-            not(feature = "m10-port-self-test"),
-            not(feature = "m7-net-service-self-test"),
-            feature = "m8-linux-image-self-test"
-        ))]
-        {
-            start_m8_linux_image_self_test(allocator)
-        }
-        #[cfg(all(
-            not(feature = "m7-net-service-self-test"),
-            not(feature = "m7-dns-self-test"),
-            not(feature = "m7-net-device-self-test"),
-            not(feature = "m10-virtio-modern-self-test"),
-            not(feature = "m10-virtio-gpu-self-test"),
-            not(feature = "m8-linux-image-self-test"),
-            not(feature = "m4-service-lifecycle-self-test"),
-            not(feature = "m4-supervisor-self-test"),
-            not(any(
-                feature = "m5-storage-self-test",
-                feature = "m5-persistence-self-test",
-                feature = "m5-crash-early-self-test",
-                feature = "m5-crash-late-self-test",
-                feature = "m5-crash-recovery-self-test"
-            )),
-            not(feature = "m6-fixture-smoke-self-test"),
-            not(feature = "m6-object-self-test"),
-            not(feature = "m6-process-control-self-test"),
-            not(feature = "m6-delegation-self-test"),
-            not(feature = "m6-audit-self-test"),
-            not(feature = "m6-revocation-self-test"),
-            not(feature = "m6-capabilities-self-test"),
-            not(feature = "m7-net-caps-self-test"),
-            not(feature = "m10-port-self-test"),
-            not(feature = "m9-low-va-self-test"),
-            not(feature = "m9-linux-exec-self-test"),
-            not(feature = "m9-rootfs-self-test"),
-            not(feature = "m9-linux-fs-self-test")
-        ))]
-        {
-            let mut allocator = allocator;
-            #[cfg(feature = "m3-ipc-self-test")]
-            {
-                start_userspace_ipc_self_test(&mut allocator)
-            }
-            #[cfg(all(not(feature = "m3-ipc-self-test"), feature = "m3-syscall-self-test"))]
-            {
-                start_userspace_syscall_self_test(&mut allocator)
-            }
-            #[cfg(all(
-                not(feature = "m3-ipc-self-test"),
-                not(feature = "m3-syscall-self-test")
-            ))]
-            {
-                start_userspace_entry_self_test(&mut allocator)
-            }
-        }
+        start_m7_net_service_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m4-service-lifecycle")]
+    {
+        start_service_lifecycle_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m4-supervisor")]
+    {
+        let mut allocator = allocator;
+        start_userspace_supervisor_self_test(&mut allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m5-storage")]
+    {
+        start_m5_storage_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m7-net-caps")]
+    {
+        start_m7_net_caps_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m10-port")]
+    {
+        start_m10_port_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m6-revocation")]
+    {
+        start_m6_revocation_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m6-capabilities")]
+    {
+        start_m6_capabilities_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m6-object")]
+    {
+        start_m6_object_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m6-delegation")]
+    {
+        start_m6_delegation_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m6-process-control")]
+    {
+        start_m6_process_control_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m6-audit")]
+    {
+        start_m6_audit_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m6-fixture-smoke")]
+    {
+        start_m6_fixture_smoke_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m8-linux-image")]
+    {
+        start_m8_linux_image_self_test(allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m3-ipc")]
+    {
+        let mut allocator = allocator;
+        start_userspace_ipc_self_test(&mut allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m3-syscall")]
+    {
+        let mut allocator = allocator;
+        start_userspace_syscall_self_test(&mut allocator)
+    }
+
+    #[cfg(clean_slate_userspace_selftest = "m3-entry")]
+    {
+        let mut allocator = allocator;
+        start_userspace_entry_self_test(&mut allocator)
     }
 
     #[cfg(feature = "m3-address-space-self-test")]
@@ -1165,4 +913,8 @@ fn run_inner() -> Result<(), &'static str> {
         serial_write_line("[KERN] scheduler initialized");
         start_scheduler()
     }
+
+    // The m9-userspace starter above diverges; this tail only satisfies the return type.
+    #[cfg(feature = "m9-userspace-self-test")]
+    Ok(())
 }

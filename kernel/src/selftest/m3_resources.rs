@@ -65,6 +65,8 @@ const NORMAL_RESOURCE_CYCLES: usize = 8;
 const TOTAL_EXPECTED_PROCESS_CREATIONS: u64 = 10;
 const LIVE_RESOURCE_MARKER: &str = "[RES ] pid=";
 
+/// Copied into the userspace data page. The payload reads the fields; rustc does not.
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct UserspaceResourceTestPage {
     observed_value: u64,

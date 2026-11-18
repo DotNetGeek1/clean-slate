@@ -205,11 +205,7 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
         }
 
         // Boot-context device timeouts (W3) expire here; there are no waiters to wake.
-        #[cfg(any(
-            feature = "m10-virtio-modern-self-test",
-            feature = "m10-virtio-gpu-self-test",
-            feature = "m10-input-self-test"
-        ))]
+        #[cfg(clean_slate_selftest_timer_wait)]
         if crate::selftest::boot_wait::is_halted() {
             increment_kernel_ticks();
             crate::sched::wait::expire_deadlines();
