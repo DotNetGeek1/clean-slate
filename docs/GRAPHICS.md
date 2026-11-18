@@ -883,6 +883,8 @@ On success it prints `[M10.contract] PASS`. It is a runner constituent (`scripts
 5. `build_m6_fixture_userspace` and `build_storage_userspace`, since the feature embeds both ELFs;
 6. QEMU with feature `m10-port-self-test`, ordered `[M10.port]` markers and a 60 s timeout.
 
+The fixtures check each status they get back, but the capacity step does not rest on them: the port engine counts every send or post it refuses at a bound (`PortCore::limit_rejections`: per-connection outstanding, port request queue, transfers in flight, event ring), and at the capacity checkpoint the kernel prints `[M10.port] engine refused outstanding=2 request-queue=1 transfers=0 event-queue=1` and fails unless those are the counts (#223). The two outstanding refusals are A's third send and the first attempt of its blocking send.
+
 On success it prints `[M10.port] PASS` (not `[M10 ] PASS`, which belongs to #119). It is a runner constituent and runs under `--exhaustive`.
 
 The `fake` feature enables `graphics::fake`: `FakeDisplay`, a model of the display ABI with R8 copy semantics, a single present in flight, timeouts, reset and poisoning. It is for host tests only; production code must not enable it. `clean-slate-port` exposes `FakePort` / `FakeConnection` behind feature `fake` for the same port semantics in host tests (#112).
