@@ -213,7 +213,7 @@ test_description() {
     test-m10-framebuffer) echo "M10 #111 GOP framebuffer lane: present, damage-only copy and guest readback (constituent)" ;;
     test-m10-shared-buffer) echo "M10 #195 shared-buffer acceptance (constituent)" ;;
     test-m10-input-smoke) echo "M10 #113 i8042 input QEMU lane (controller stimulus, then QMP-injected keyboard/pointer, headless)" ;;
-    test-m10-desktop) echo "M10 #118 supervised desktop on VirtIO-GPU (Q1) and the GOP framebuffer (Q0), QMP-driven, with screendump checks (constituent)" ;;
+    test-m10-desktop) echo "M10 #118 desktop on the system image (init's desktop rows), VirtIO-GPU at Q1 and the GOP framebuffer at Q0, QMP-driven, with screendump checks (constituent)" ;;
     test-m10) echo "M10 milestone gate (every M10 constituent and the QMP harness smoke, then the desktop lane on both backends, then the system image's desktop)" ;;
     test-system-desktop) echo "#218 S6e system-test-hooks build with fw_cfg opt/clean-slate/desktop=q1 on a VirtIO-GPU, COM1 and QMP: the six-row boot, the serial shell, the M10 click/key/drag/close script driven closed-loop on the compositor's pointer and button lines, app close and fault, desktop shell fault and compositor fault each restarted by init with input working after, then whole-transcript counts and screendump checks (constituent)" ;;
     test-serial-input) echo "#218 S4 COM1 receive and line discipline over a private loopback socket (echo and committed reads checked byte for byte)" ;;

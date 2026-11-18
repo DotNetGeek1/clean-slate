@@ -5,7 +5,7 @@
 //! `RECV_EVENT` and hands each event to the session. It never wakes on its own; every frame is
 //! the result of an event that changed what the panel shows.
 //!
-//! Authority is exactly the `Graphics{GFX_CONNECT}` capability the launch policy granted plus
+//! Authority is exactly the `Graphics{GFX_CONNECT}` capability its manifest row grants plus
 //! the buffers this process allocates. There is no framebuffer, display or input access.
 
 #![no_std]
@@ -16,8 +16,6 @@ use core::ptr::addr_of_mut;
 use clean_slate_capability::ResourceClass;
 use clean_slate_graphics::abi::display::{DISPLAY_ABI_VERSION, DISPLAY_SUBOP_FIND_HANDLE};
 use clean_slate_graphics::abi::input::{INPUT_ABI_VERSION, INPUT_SUBOP_FIND_HANDLE};
-#[cfg(feature = "fault-keys")]
-use clean_slate_graphics::input::{KeyState, KeyUsage};
 use clean_slate_graphics::protocol::{Event, Request};
 use clean_slate_native_abi::desktop::{ConsoleLine, SYSCALL_NR_IPC_SEND};
 use clean_slate_native_abi::port::{
@@ -37,9 +35,6 @@ use clean_slate_ui::QualityTier;
 
 const SYSCALL_NR_DISPLAY: u64 = 18;
 const SYSCALL_NR_INPUT: u64 = 19;
-/// HID usage of F12 (the self-test fault key).
-#[cfg(feature = "fault-keys")]
-const KEY_F12: KeyUsage = KeyUsage(0x45);
 
 /// Kept out of the user stack, whose size is the launch policy's choice.
 static mut SESSION: Session = Session::new(QualityTier::Q1);
@@ -278,21 +273,6 @@ fn console(boot: &PlaygroundBootstrap, line: &ConsoleLine) {
     }
 }
 
-/// Self-test launches only: the fault key makes the app crash (an invalid opcode) so the
-/// desktop lane can prove crash containment. Keys arrive only while the app has focus.
-#[cfg(feature = "fault-keys")]
-fn is_fault_key(boot: &PlaygroundBootstrap, event: &Event) -> bool {
-    boot.fault_key_armed()
-        && matches!(
-            event,
-            Event::Key {
-                usage: KEY_F12,
-                state: KeyState::Pressed,
-                ..
-            }
-        )
-}
-
 /// Asks for the scanout and raw-input handles a compositor would use; an app must get neither.
 fn probe_authority() -> ConsoleLine {
     let display = syscall(
@@ -331,12 +311,6 @@ fn run(boot: &PlaygroundBootstrap, session: &mut Session, tier: QualityTier) {
             let Some(event) = kernel.next_event() else {
                 break;
             };
-            #[cfg(feature = "fault-keys")]
-            if is_fault_key(boot, &event) {
-                console(boot, &diag::exit_line("fault-key"));
-                // SAFETY: deliberately raises #UD; the kernel tears this process down.
-                unsafe { core::arch::asm!("ud2", options(noreturn)) };
-            }
             outcome = session.handle(&event, &mut kernel);
             if !session.is_running() {
                 continue;

@@ -376,23 +376,60 @@ pub(crate) fn audit_service_authority(
     Err("service authority differs from its manifest row")
 }
 
-/// The desktop mode init and the kernel run with: the boot option's, or off when it asks for the
-/// desktop and boot brought up no display output (D4). Logs the fallback.
+/// The display output boot brought up, as far as the desktop's mode is concerned.
 #[cfg(clean_slate_system_init)]
-fn effective_desktop_mode(requested: u64, has_display: bool) -> u64 {
-    use clean_slate_service_fixtures::init_bootstrap::DESKTOP_MODE_OFF;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InstalledDisplay {
+    None,
+    Framebuffer,
+    VirtioGpu,
+}
 
-    if requested == DESKTOP_MODE_OFF || has_display {
+#[cfg(clean_slate_system_init)]
+impl InstalledDisplay {
+    fn active() -> Self {
+        crate::device::display::with_active_display(|display| match display {
+            None => Self::None,
+            Some(display) if display.is_virtio_gpu() => Self::VirtioGpu,
+            Some(_) => Self::Framebuffer,
+        })
+    }
+}
+
+/// The desktop mode init and the kernel run with: the boot option's, off when it asks for the
+/// desktop and boot brought up no display output (D4), and the framebuffer's tier Q0 when it
+/// asks for VirtIO-GPU's tier Q1 and only the framebuffer is there. Logs each fallback.
+#[cfg(clean_slate_system_init)]
+fn effective_desktop_mode(requested: u64, display: InstalledDisplay) -> u64 {
+    use clean_slate_service_fixtures::init_bootstrap::{
+        DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_VIRTIO_GPU,
+    };
+
+    if requested == DESKTOP_MODE_OFF {
         return requested;
     }
-    kernel_log_fmt(format_args!("{NO_DISPLAY_LINE}\n"));
-    DESKTOP_MODE_OFF
+    match display {
+        InstalledDisplay::None => {
+            kernel_log_fmt(format_args!("{NO_DISPLAY_LINE}\n"));
+            DESKTOP_MODE_OFF
+        }
+        InstalledDisplay::Framebuffer if requested == DESKTOP_MODE_VIRTIO_GPU => {
+            kernel_log_fmt(format_args!("{FRAMEBUFFER_TIER_LINE}\n"));
+            DESKTOP_MODE_FRAMEBUFFER
+        }
+        InstalledDisplay::Framebuffer | InstalledDisplay::VirtioGpu => requested,
+    }
 }
 
 /// D4: `--desktop` on a machine without a usable display boots the base system.
 #[cfg(clean_slate_system_init)]
 pub(crate) const NO_DISPLAY_LINE: &str =
     "[KERN] boot profile=desktop has no display output; booting base, desktop rows not declared";
+
+/// `q1` names VirtIO-GPU; on the framebuffer alone the desktop runs at the framebuffer's tier.
+#[cfg(clean_slate_system_init)]
+pub(crate) const FRAMEBUFFER_TIER_LINE: &str =
+    "[KERN] desktop tier=Q1 needs VirtIO-GPU; running tier=Q0 on the framebuffer";
 
 /// Selects the manifest for the boot option, installs it in the lifecycle controller and
 /// declares every row, then spawns init on scheduler slot 0 and checks the authority it holds.
@@ -410,8 +447,7 @@ pub(crate) fn launch_init(
 
     let option = crate::boot::boot_options::read_boot_option();
     crate::boot::boot_options::log_boot_option(&option);
-    let has_display = crate::device::display::with_active_display(|display| display.is_some());
-    let desktop_mode = effective_desktop_mode(option.mode.word(), has_display);
+    let desktop_mode = effective_desktop_mode(option.mode.word(), InstalledDisplay::active());
     let manifest = manifest_for(desktop_mode);
     super::desktop_image::set_row_desktop_mode(desktop_mode);
 
@@ -842,17 +878,45 @@ mod tests {
             DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_OFF, DESKTOP_MODE_VIRTIO_GPU,
         };
         for mode in [DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_VIRTIO_GPU] {
-            assert_eq!(effective_desktop_mode(mode, true), mode);
-            assert_eq!(effective_desktop_mode(mode, false), DESKTOP_MODE_OFF);
+            assert_eq!(
+                effective_desktop_mode(mode, InstalledDisplay::None),
+                DESKTOP_MODE_OFF
+            );
         }
+        for display in [
+            InstalledDisplay::None,
+            InstalledDisplay::Framebuffer,
+            InstalledDisplay::VirtioGpu,
+        ] {
+            assert_eq!(
+                effective_desktop_mode(DESKTOP_MODE_OFF, display),
+                DESKTOP_MODE_OFF
+            );
+        }
+    }
+
+    #[cfg(clean_slate_system_init)]
+    #[test]
+    fn the_desktop_tier_follows_the_installed_display() {
+        use clean_slate_service_fixtures::init_bootstrap::{
+            DESKTOP_MODE_FRAMEBUFFER, DESKTOP_MODE_VIRTIO_GPU,
+        };
         assert_eq!(
-            effective_desktop_mode(DESKTOP_MODE_OFF, false),
-            DESKTOP_MODE_OFF
+            effective_desktop_mode(DESKTOP_MODE_VIRTIO_GPU, InstalledDisplay::VirtioGpu),
+            DESKTOP_MODE_VIRTIO_GPU
         );
         assert_eq!(
-            effective_desktop_mode(DESKTOP_MODE_OFF, true),
-            DESKTOP_MODE_OFF
+            effective_desktop_mode(DESKTOP_MODE_VIRTIO_GPU, InstalledDisplay::Framebuffer),
+            DESKTOP_MODE_FRAMEBUFFER,
+            "q1 without VirtIO-GPU must fall back to the framebuffer's Q0"
         );
+        for display in [InstalledDisplay::Framebuffer, InstalledDisplay::VirtioGpu] {
+            assert_eq!(
+                effective_desktop_mode(DESKTOP_MODE_FRAMEBUFFER, display),
+                DESKTOP_MODE_FRAMEBUFFER,
+                "q0 is honoured on either backend"
+            );
+        }
     }
 
     #[cfg(clean_slate_system_init)]

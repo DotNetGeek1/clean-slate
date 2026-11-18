@@ -14,11 +14,14 @@
 //! (fault report, teardown, init's restart policy, the clients' `ServerGone`) is the
 //! production path the default image runs.
 //!
-//! **Desktop evidence.** Two checks need a kernel-chosen moment and are lane evidence rather
+//! **Desktop evidence.** Three checks need a kernel-chosen moment and are lane evidence rather
 //! than system behaviour:
 //! - the desktop resource snapshot, taken at the first quiescence (no runnable thread, no
 //!   present in flight) once the compositor, desktop shell and app instances that are live have
 //!   all reported ready: the first is `[RSRC] baseline`, each later one is compared with it;
+//! - after the baseline, `[IDLE ] quiet ... presents=N` once per stretch of at least half a
+//!   second in which nothing ran, so a lane can require that an untouched desktop does not
+//!   present;
 //! - the stale-generation probe: a desktop client launched after a compositor restart is given a
 //!   probe record naming the previous compositor generation's port, which must be refused as
 //!   stale by the live port and is then revoked.
@@ -155,6 +158,9 @@ struct DesktopEvidence {
     /// The live compositor's port generation, and the one before it once it has restarted.
     port_generation: Option<u32>,
     retired_port_generation: Option<u32>,
+    /// The quiet stretch in progress: when it began and the display's submitted sequence then.
+    quiet_since: Option<(u64, u64)>,
+    quiet_reported: bool,
 }
 
 static EVIDENCE: GlobalCell<DesktopEvidence> = GlobalCell::new(DesktopEvidence {
@@ -163,7 +169,12 @@ static EVIDENCE: GlobalCell<DesktopEvidence> = GlobalCell::new(DesktopEvidence {
     baseline: None,
     port_generation: None,
     retired_port_generation: None,
+    quiet_since: None,
+    quiet_reported: false,
 });
+
+/// How long nothing may run before a quiet stretch is reported.
+const QUIET_PROOF_NS: u64 = 500_000_000;
 
 fn evidence() -> &'static mut DesktopEvidence {
     unsafe { &mut *EVIDENCE.get() }
@@ -264,10 +275,57 @@ fn connect_outcome_name(outcome: Result<(), PortError>) -> &'static str {
     }
 }
 
-/// The idle thread is about to halt (interrupts off). Takes the desktop resource snapshot once
-/// every live desktop row has reported ready under a set of pids not yet snapshotted, and the
-/// system is quiescent.
+/// The idle thread is about to halt (interrupts off): the resource snapshot and the quiet proof.
 pub(crate) fn on_idle() {
+    snapshot_at_quiescence();
+    observe_quiet();
+}
+
+/// The idle thread is about to dispatch a thread: the quiet stretch, if any, ends.
+pub(crate) fn on_idle_exit() {
+    let state = evidence();
+    state.quiet_since = None;
+    state.quiet_reported = false;
+}
+
+/// Once the desktop baseline is taken, each stretch of [`QUIET_PROOF_NS`] in which no thread ran
+/// and no present was in flight logs `[IDLE ] quiet` once, with the presents submitted during
+/// it: a desktop nobody touches must not present.
+fn observe_quiet() {
+    let state = evidence();
+    if state.baseline.is_none() {
+        return;
+    }
+    let status = crate::device::display::with_active_display(|display| {
+        display.map(|display| display.state().status())
+    });
+    if unsafe { crate::sched::scheduler_mut() }.has_runnable_threads()
+        || status.is_some_and(|status| status.in_flight_index.is_some())
+    {
+        state.quiet_since = None;
+        return;
+    }
+    let submitted_seq = status.map_or(0, |status| status.submitted_seq);
+    let now_ns = crate::time::monotonic_ns();
+    match state.quiet_since {
+        None => state.quiet_since = Some((now_ns, submitted_seq)),
+        Some((since_ns, since_seq))
+            if !state.quiet_reported && now_ns.saturating_sub(since_ns) >= QUIET_PROOF_NS =>
+        {
+            state.quiet_reported = true;
+            kernel_log_fmt(format_args!(
+                "[IDLE ] quiet ms={} presents={} seq={submitted_seq}\n",
+                now_ns.saturating_sub(since_ns) / 1_000_000,
+                submitted_seq.saturating_sub(since_seq)
+            ));
+        }
+        Some(_) => {}
+    }
+}
+
+/// Takes the desktop resource snapshot once every live desktop row has reported ready under a
+/// set of pids not yet snapshotted, and the system is quiescent.
+fn snapshot_at_quiescence() {
     let controller = unsafe { service_lifecycle_controller_mut() };
     let state = evidence();
     let mut pids = [0u64; 3];

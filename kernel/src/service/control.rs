@@ -289,8 +289,7 @@ impl ServiceLifecycleController {
     }
 
     /// `SERVICE_READY` from `pid`. Accepted only from the live instance of a declared service
-    /// that is still starting, whether init launched it or the kernel desktop policy did: the
-    /// service moves to running, its ready message is stored and lifecycle waiters are woken.
+    /// that is still starting: the service moves to running, its ready message is stored and lifecycle waiters are woken.
     /// A refusal (no live instance, as with init's own probe, or an instance that has left
     /// starting) changes nothing and wakes nobody.
     pub(crate) fn report_ready_from_pid(
@@ -1170,7 +1169,7 @@ impl InstanceGrantAuthority for KernelInstanceGrants<'_> {
     }
 
     /// `graphics(service id, process instance generation)`: the generation `register_port`
-    /// checks is the process registry's, as for the M10 policy's compositor.
+    /// checks is the process registry's.
     #[cfg(clean_slate_desktop)]
     fn grant_graphics_port(&mut self, pid: u64) -> Result<(), &'static str> {
         use super::desktop_image::COMPOSITOR_PORT_PARAMS;
@@ -2135,10 +2134,9 @@ mod tests {
     }
 
     #[test]
-    fn service_ready_from_a_kernel_launched_desktop_service_is_accepted() {
-        // The M10 policy `declare_service`s 0x5300, 0x5301 and 0x5302 and `Start`s them. They
-        // are not init-launched. The report keys only on the live Starting instance, so it is
-        // accepted. Terminate from the resulting Running state is the path that stops a client
+    fn service_ready_from_a_starting_desktop_service_is_accepted() {
+        // The report keys only on the live Starting instance of 0x5300, 0x5301 or 0x5302, so it
+        // is accepted. Terminate from the resulting Running state is the path that stops a client
         // when the compositor exits, and it stays valid.
         for (id, pid) in [(0x5300u32, 80u64), (0x5301, 81), (0x5302, 82)] {
             let mut controller = ServiceLifecycleController::new();

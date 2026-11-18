@@ -93,7 +93,7 @@ fn log_ready(instance: ServiceInstanceId, block_write_requests: u64, detail: u64
 /// What the kernel sees a desktop row's instance bound to when it reports ready: the port it
 /// serves or the connection it opened, the display presenter, the input consumer and its
 /// shared-buffer mappings. These are bound by the process itself after launch, so the launch
-/// audit cannot show them. The M10 policy's kernels keep the generic line.
+/// audit cannot show them.
 #[cfg(clean_slate_system_init)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DesktopBindings {

@@ -163,14 +163,12 @@ jobs:
             cargo clippy -p clean-slate-compositor --bin "$bin" --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           done
           cargo clippy -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
-          cargo clippy -p clean-slate-compositor --bin clean-slate-compositor-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys -- -D warnings
-          cargo clippy -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys -- -D warnings
           cargo clippy -p clean-slate-desktop-shell --bin clean-slate-desktop-shell-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-store --bin clean-slate-storage-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
           cargo clippy -p clean-slate-net-service --bin clean-slate-network-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,alloc,compiler_builtins --release -- -D warnings
 
-      # The m10-desktop kernel features embed these three ELFs (kernel/build.rs);
-      # m10-desktop-self-test swaps in the fault-keys compositor and playground from target/fault-keys.
+      # The default image (and the system-test-hooks build) embeds these three ELFs for init's
+      # desktop rows (kernel/build.rs).
       - name: Build M10 desktop userspace images
         env:
           RUSTC_BOOTSTRAP: "1"
@@ -178,8 +176,6 @@ jobs:
           cargo build -p clean-slate-compositor --bin clean-slate-compositor-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
           cargo build -p clean-slate-desktop-shell --bin clean-slate-desktop-shell-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
           cargo build -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release
-          cargo build -p clean-slate-compositor --bin clean-slate-compositor-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys
-          cargo build -p clean-slate-playground --bin clean-slate-playground-userspace --features userspace,fault-keys --target x86_64-unknown-none -Z build-std=core,compiler_builtins --release --target-dir target/fault-keys
 
       # Every kernel build embeds the storage and network ELFs (kernel/build.rs), including
       # clippy, the bare kernel build, and host tests below; the featureless build (the default
@@ -220,9 +216,6 @@ jobs:
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-virtio-gpu-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-framebuffer-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-input-self-test -- -D warnings
-          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-desktop -- -D warnings
-          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-desktop-self-test -- -D warnings
-          cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features m10-desktop-self-test,m10-desktop-q0 -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features serial-input-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features system-test-hooks -- -D warnings
           # m9-linux-fs-self-test implies m6-object-self-test and embeds the storage
@@ -240,7 +233,7 @@ jobs:
         run: |
           cargo clippy -p clean-slate-kernel --lib --tests -- -D warnings
           cargo clippy -p clean-slate-kernel --lib --tests --features m9-rootfs,m9-linux-socket,m9-linux-trace -- -D warnings
-          cargo clippy -p clean-slate-kernel --lib --tests --features m10-desktop -- -D warnings
+          cargo clippy -p clean-slate-kernel --lib --tests --features system-test-hooks -- -D warnings
 
       - name: Build
         run: |
@@ -283,7 +276,7 @@ jobs:
           cargo test -p clean-slate-kernel --features m3-syscall-self-test
           cargo test -p clean-slate-kernel --features m8-linux-image
           cargo test -p clean-slate-kernel --features m8-linux-hello
-          cargo test -p clean-slate-kernel --features m10-desktop --lib
+          cargo test -p clean-slate-kernel --features system-test-hooks --lib
 
   acceptance:
     name: acceptance

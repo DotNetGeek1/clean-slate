@@ -207,8 +207,6 @@ mod tests {
             "ret" => 0x28,
             "right" => 0x4F,
             "esc" => 0x29,
-            "f11" => 0x44,
-            "f12" => 0x45,
             other => panic!("no usage for qcode `{other}`"),
         }
     }

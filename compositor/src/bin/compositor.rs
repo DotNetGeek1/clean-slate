@@ -4,9 +4,8 @@
 //! ABI (syscalls 16–20); the core never issues a syscall. The adapter names no device: the
 //! display is reached only through syscall 18, identical for every scanout backend.
 //!
-//! Startup reads the [`DesktopLaunchPage`] (resource id, console, quality tier and, in
-//! `fault-keys` builds only, the self-test fault key) the #118 launch policy writes, finds its
-//! `Graphics{GFX_SERVE}`,
+//! Startup reads the [`DesktopLaunchPage`] (resource id, console, quality tier and flags) the
+//! kernel writes for the compositor's manifest row, finds its `Graphics{GFX_SERVE}`,
 //! `Display` and (optional) `Input` capabilities, creates its work set and binds every wake
 //! source it can. Display `BIND_WAKE` follows the first `MAP_SCANOUT`, which makes the compositor
 //! the presenter; if either fails, completion falls back to a bounded deadline while a present is
@@ -44,12 +43,8 @@ use clean_slate_graphics::abi::input::{
     INPUT_ABI_VERSION, INPUT_SUBOP_BIND_WAKE, INPUT_SUBOP_FIND_HANDLE, INPUT_SUBOP_READ_BATCH,
     READ_BATCH_MAX_RECORDS,
 };
-#[cfg(feature = "fault-keys")]
-use clean_slate_graphics::input::{KeyState, KeyUsage};
 use clean_slate_graphics::limits::SCANOUT_BUFFER_COUNT;
 use clean_slate_graphics::protocol::DisconnectReason;
-#[cfg(feature = "fault-keys")]
-use clean_slate_graphics::raw_input::RawInputKind;
 use clean_slate_graphics::raw_input::{RawInputRecord, RAW_INPUT_RECORD_BYTES};
 use clean_slate_native_abi::desktop::{
     ConsoleLine, DesktopLaunchPage, DESKTOP_LAUNCH_ADDRESS, SYSCALL_NR_IPC_SEND,
@@ -71,9 +66,6 @@ use clean_slate_ui::{QualityTier, CLEAN_SLATE_DARK};
 
 const SYSCALL_NR_DISPLAY: u64 = 18;
 const SYSCALL_NR_INPUT: u64 = 19;
-/// HID usage of F11, the compositor's self-test fault key.
-#[cfg(feature = "fault-keys")]
-const KEY_F11: u16 = 0x44;
 
 static mut COMPOSITOR: Compositor<DefaultPolicy> =
     Compositor::new(DefaultPolicy::new(), Config::DEFAULT);
@@ -344,10 +336,6 @@ impl DisplayBackend for KernelDisplay {
 
 struct KernelInput {
     handle: u64,
-    /// Self-test launches only: F11 makes the compositor crash (an invalid opcode) so the
-    /// desktop lane can prove compositor restart.
-    #[cfg(feature = "fault-keys")]
-    fault_key_armed: bool,
 }
 
 impl InputSource for KernelInput {
@@ -370,18 +358,6 @@ impl InputSource for KernelInput {
         let count = count.min(max);
         for chunk in out[..count * RAW_INPUT_RECORD_BYTES].chunks_exact(RAW_INPUT_RECORD_BYTES) {
             if let Ok(record) = RawInputRecord::decode(chunk) {
-                #[cfg(feature = "fault-keys")]
-                if self.fault_key_armed
-                    && matches!(
-                        record.kind,
-                        RawInputKind::Key {
-                            usage: KeyUsage(KEY_F11),
-                            state: KeyState::Pressed,
-                        }
-                    )
-                {
-                    unsafe { core::arch::asm!("ud2", options(noreturn)) };
-                }
                 sink(record);
             }
         }
@@ -441,7 +417,7 @@ fn console(boot: &DesktopLaunchPage, line: &ConsoleLine) {
 
 /// Syscall 22, after the port is registered and a frame has been submitted.
 ///
-/// The M10 launch policy has already declared this process and left it `Starting`, so the
+/// Init has already declared this process's manifest row and left it `Starting`, so the
 /// kernel accepts the report. A refusal (this pid is not a live service instance) changes
 /// nothing in the kernel, and this process keeps presenting either way.
 fn report_service_ready() {
@@ -537,11 +513,7 @@ pub extern "C" fn _start() -> ! {
 
     let mut port = KernelPort { serve };
     let mut buffers = KernelSharedBuffers;
-    let mut kernel_input = input_handle.map(|handle| KernelInput {
-        handle,
-        #[cfg(feature = "fault-keys")]
-        fault_key_armed: boot.fault_key_armed(),
-    });
+    let mut kernel_input = input_handle.map(|handle| KernelInput { handle });
     let mut no_input = NoInput;
     let mut waiter = KernelWorkSet {
         id: work_set,

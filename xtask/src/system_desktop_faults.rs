@@ -1,5 +1,5 @@
-//! The hooks build booted with the desktop entry and a VirtIO-GPU, driven over COM1 (#218 S6d)
-//! and, for `test-system-desktop`, over QMP too (S6e). [`Session`] owns QEMU, the serial
+//! The hooks build booted with the desktop entry, driven over COM1 (#218 S6d) and, for
+//! `test-system-desktop` and `test-m10-desktop`, over QMP too (S6e, S6f). [`Session`] owns QEMU, the serial
 //! transcript and the QMP client; every wait fails at once on a reboot, a forbidden line or QEMU
 //! going away, and names what it was waiting for.
 
@@ -16,6 +16,7 @@ use crate::qmp::image::Screenshot;
 use crate::qmp::{InputAction, QmpClient, QmpEndpoint, QmpError, QmpTimeouts};
 use crate::serial_input_lane::{accept_serial, find, spawn_serial_reader, tail, SerialEvent};
 use crate::system_boot::{desktop_qemu_args, start_shell_fixture_peer, system_vm_config};
+use crate::system_desktop::{DesktopMachine, VIRTIO_GPU_Q1};
 use crate::system_shell::qemu_state;
 use crate::{
     announce_qemu_version, prepare_vm, xtask_artifact_root, ReapOnDrop, VmLaunchConfig, XtaskError,
@@ -282,12 +283,17 @@ impl Session {
     }
 }
 
-/// The hooks build with the desktop entry, a modern-only VirtIO-GPU and `test-system`'s fixture
-/// peer, on `disk`.
-pub(crate) fn desktop_config(disk: &Path, fixture_port: u16) -> VmLaunchConfig {
+/// The hooks build with the desktop entry on `machine` (a modern-only VirtIO-GPU, or the
+/// `-vga std` framebuffer) and `test-system`'s fixture peer, on `disk`.
+pub(crate) fn desktop_config(
+    disk: &Path,
+    fixture_port: u16,
+    machine: &DesktopMachine,
+) -> VmLaunchConfig {
     VmLaunchConfig {
         machine_extra: Some("vmport=off"),
-        extra_args: desktop_qemu_args(false),
+        vga: machine.framebuffer.then_some("std"),
+        extra_args: desktop_qemu_args(machine.framebuffer),
         ..system_vm_config(disk.to_path_buf(), Some(fixture_port))
     }
 }
@@ -305,7 +311,7 @@ pub(crate) fn drive<S: Clone>(
     let result = (|| {
         let mut session = Session::start(
             features,
-            desktop_config(disk, peer.port()),
+            desktop_config(disk, peer.port(), &VIRTIO_GPU_Q1),
             false,
             forbidden,
             Duration::from_secs(300),

@@ -20,7 +20,7 @@ The milestone gates are separate kernels, each checking the markers named by `ca
 - `test-m7` checks the network service against the hermetic fixture, whose TLS trust anchor is the committed test CA.
 - `test-m8` runs one static Linux hello ELF.
 - `test-m9` runs the 18 BusyBox commands in `fixtures/busybox/frozen/commands.toml`. `install_stdio_entries` opens file descriptors 1 and 2 only, so that gate has no stdin and is not an interactive shell.
-- `test-m10` runs every `test-m10-*` constituent, the `clean-slate-ui` host tests, and `test-qmp-smoke`, then `test-m10-desktop`. The compositor, desktop shell, and playground are in this tree. `cargo xtask run` does not enable `m10-desktop`, so it does not launch them.
+- `test-m10` runs every `test-m10-*` constituent, the `clean-slate-ui` host tests, and `test-qmp-smoke`, then `test-m10-desktop`. The compositor, desktop shell, and playground are in this tree. `cargo xtask run --desktop` boots the default image with them as init's desktop rows; plain `cargo xtask run` does not launch them.
 
 ## Design principles
 

@@ -1,17 +1,18 @@
 //! `test-system` (#218 S7b): the network service faults under a live shell, and init restarts
 //! it.
 //!
-//! This lane tests the **`system-test-hooks` build**: the default image plus one kernel hook,
-//! Ctrl-\ on COM1 faulting the live network service with a real user-mode page fault
-//! (`kernel/src/service/system_test_hooks.rs`). Everything from the fault on is the default
-//! image's own code: the fault report, the Linux socket loss, the client capability revoke,
-//! init's restart policy, the new instance's launch audit and the capability re-issue.
+//! This lane tests the **`system-test-hooks` build**: the default image plus the test hooks in
+//! `kernel/src/service/system_test_hooks.rs`. Here Ctrl-\ on COM1 faults the live network
+//! service with a real user-mode page fault. Everything from the fault on is the default image's
+//! own code: the fault report, the Linux socket loss, the client capability revoke, init's
+//! restart policy, the new instance's launch audit and the capability re-issue.
 //!
-//! Before that boot, two short headless boots of the same kernel pass
+//! Before that boot, three short headless boots of the same kernel pass
 //! `-fw_cfg name=opt/clean-slate/desktop,string=q1` ([`crate::system_desktop`]): one with a
 //! VirtIO-GPU, where init launches the compositor, desktop shell and app rows next to the base
-//! rows, and one with no display, which boots base. The shell boot passes no entry and requires
-//! `profile=base` and no desktop row.
+//! rows; one with no display, which boots base; and one with only the `-vga std` framebuffer,
+//! which runs the desktop at Q0. The shell boot passes no entry and requires `profile=base` and
+//! no desktop row.
 //!
 //! The shell boot is `test-system-shell`'s: a fresh lane-owned data disk, the network fixture
 //! peer and COM1 on a loopback socket. Each [`Step`] is typed once the step before it is complete:
@@ -389,11 +390,11 @@ fn save_transcript(transcript: &[u8]) -> Result<(), XtaskError> {
     Ok(())
 }
 
-/// `test-system`: the two desktop boots, then one boot of the hooks build
+/// `test-system`: the three desktop boots, then one boot of the hooks build
 /// on a fresh lane-owned disk; the host types [`STEPS`] into the shell over a loopback COM1.
 pub(crate) fn run() -> Result<(), XtaskError> {
     println!(
-        "[STM ] test-system boots the {HOOKS_FEATURE} build: the default image plus the Ctrl-\\ network fault hook"
+        "[STM ] test-system boots the {HOOKS_FEATURE} build: the default image plus test hooks (COM1 fault bytes for the network service, compositor, desktop shell and app; desktop resource, quiet and stale-generation evidence; per-input trace lines)"
     );
     let disk = workspace_root()
         .join("target")

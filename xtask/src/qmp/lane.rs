@@ -2,7 +2,6 @@
 //! [`QmpScriptDriver`] on a private loopback endpoint, and returns the serial output for the
 //! lane's own host-side checks. #113's input lane is the first user; #119's aggregate reuses it.
 
-use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -25,12 +24,6 @@ pub(crate) struct KernelLane {
     pub(crate) extra_args: Vec<String>,
 }
 
-/// What a lane run leaves for its host-side checks.
-pub(crate) struct LaneRun {
-    pub(crate) output: String,
-    pub(crate) captures: Vec<Capture>,
-}
-
 /// Launch config for lanes that inject input: `vmport=off` leaves QEMU's PS/2 mouse as the
 /// only relative pointer, so `input-send-event` motion reaches the i8042 aux port.
 pub(crate) fn input_lane_config() -> VmLaunchConfig {
@@ -46,32 +39,11 @@ pub(crate) fn run_kernel_lane(
     lane: KernelLane,
     steps: Vec<ScriptStep>,
 ) -> Result<String, XtaskError> {
-    run_kernel_lane_in(lane, steps, &xtask_artifact_root()).map(|run| run.output)
-}
-
-/// [`run_kernel_lane`], also returning the screendumps the script captured.
-pub(crate) fn run_kernel_lane_capturing(
-    lane: KernelLane,
-    steps: Vec<ScriptStep>,
-) -> Result<LaneRun, XtaskError> {
-    run_kernel_lane_in(lane, steps, &xtask_artifact_root())
-}
-
-fn run_kernel_lane_in(
-    lane: KernelLane,
-    steps: Vec<ScriptStep>,
-    artifact_root: &Path,
-) -> Result<LaneRun, XtaskError> {
     let mut vm = prepare_vm(false, false, lane.features, lane.config)?;
     vm.qemu.args(&lane.extra_args);
-    let mut driver = QmpScriptDriver::new(lane.lane, steps, artifact_root)?;
+    let mut driver = QmpScriptDriver::new(lane.lane, steps, &xtask_artifact_root())?;
     attach_driver(&mut vm.qemu, &driver);
-    let output =
-        run_driven_acceptance_command(&mut vm.qemu, lane.markers, lane.timeout, &mut driver)?;
-    Ok(LaneRun {
-        output,
-        captures: driver.into_captures(),
-    })
+    run_driven_acceptance_command(&mut vm.qemu, lane.markers, lane.timeout, &mut driver)
 }
 
 fn attach_driver(qemu: &mut Command, driver: &dyn AcceptanceDriver) {
@@ -80,7 +52,7 @@ fn attach_driver(qemu: &mut Command, driver: &dyn AcceptanceDriver) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::*;
     use crate::{qemu_command, OvmfPaths};
