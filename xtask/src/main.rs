@@ -113,6 +113,12 @@ const M4_RECOVERY_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[SUP ] started pid=1"),
     MarkerStep::Ordered("[DEP ] service=16640 ready"),
     MarkerStep::Ordered("[SVC ] launch service=16640 pid="),
+    // #223: the kernel's record that gen1's Ready reached the supervisor; the `[HLTH]` lines are
+    // the supervisor's own account and stay as output only.
+    MarkerStep::Line {
+        prefix: "[TEST] supervisor received ready service=16640 pid=",
+        fields: &[("gen=", "1")],
+    },
     MarkerStep::Ordered("[HLTH] service=16640 healthy gen=1"),
     MarkerStep::Ordered("[TEST] crash-service injecting fault"),
     MarkerStep::Ordered("[PROC] fault pid="),
@@ -123,9 +129,24 @@ const M4_RECOVERY_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[SUP ] failure service=16640 pid="),
     MarkerStep::Ordered("[SUP ] restart service=16640 attempt=1"),
     MarkerStep::Ordered("[SVC ] launch service=16640 pid="),
+    MarkerStep::Ordered("[TEST] crash-service replacement healthy pid="),
+    MarkerStep::Line {
+        prefix: "[TEST] supervisor received ready service=16640 pid=",
+        fields: &[("gen=", "2")],
+    },
     MarkerStep::Ordered("[HLTH] service=16640 healthy gen=2"),
     MarkerStep::Ordered("[TEST] unrelated workload progress="),
     MarkerStep::Ordered("[SUP ] stale-instance ignored"),
+    // The supervisor prints its own `[M4  ] PASS` before this line; only the kernel's, after
+    // its evidence, matches the last step.
+    MarkerStep::Line {
+        prefix: "[M4  ] kernel recovery evidence",
+        fields: &[
+            ("gen1-fault=", "contained"),
+            ("gen2-ready=", "delivered"),
+            ("workload-progress=", "2"),
+        ],
+    },
     MarkerStep::Ordered("[M4  ] PASS"),
 ];
 const M1_ACCEPTANCE_MARKERS: [&str; 8] = [

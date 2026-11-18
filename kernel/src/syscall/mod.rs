@@ -44,7 +44,7 @@ use crate::ipc::IPC_MAX_MESSAGE_BYTES;
 use crate::ipc::USERSPACE_IPC_TEST_PID;
 #[cfg(feature = "m3-ipc-self-test")]
 use crate::ipc::USERSPACE_IPC_UNAUTHORIZED_TEST_PID;
-#[cfg(any(feature = "m4-supervisor-self-test", feature = "m4-recovery-self-test"))]
+#[cfg(feature = "m4-supervisor-self-test")]
 use crate::ipc::USERSPACE_SUPERVISOR_TEST_PID;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
@@ -80,8 +80,6 @@ use crate::selftest::m3_syscall::SYSCALL_DF_SANITIZED_OBSERVED;
 use crate::selftest::m3_syscall::SYSCALL_PASS_MARKER;
 #[cfg(feature = "m3-syscall-self-test")]
 use crate::selftest::m3_syscall::SYSCALL_TEST_REQUIRED_CALLS;
-#[cfg(feature = "m4-recovery-self-test")]
-use crate::selftest::m4_recovery::observe_recovery_supervisor_line;
 #[cfg(feature = "m4-recovery-self-test")]
 use crate::selftest::m4_recovery::recovery_complete_and_exit;
 #[cfg(feature = "m4-supervisor-self-test")]
@@ -228,10 +226,6 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
                 #[cfg(feature = "m4-supervisor-self-test")]
                 if sender_pid == USERSPACE_SUPERVISOR_TEST_PID {
                     observe_supervisor_console_line(sender_pid, message.trim_end());
-                }
-                #[cfg(feature = "m4-recovery-self-test")]
-                if sender_pid == USERSPACE_SUPERVISOR_TEST_PID {
-                    observe_recovery_supervisor_line(sender_pid, message.trim_end());
                 }
             }
             #[cfg(feature = "m3-ipc-self-test")]
