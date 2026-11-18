@@ -212,8 +212,8 @@ pub(crate) fn run_acceptance() -> Result<(), XtaskError> {
 /// bytes, the reset produced a new transport generation, and no other display backend or guest
 /// failure appeared.
 pub(crate) fn validate_serial(serial: &str) -> Result<(), String> {
-    if let Some(line) = serial.lines().find(|line| line.contains("[FAIL]")) {
-        return Err(format!("guest failure: {}", line.trim_end()));
+    if let Some(failure) = crate::marker_spec::first_guest_failure(serial, true) {
+        return Err(format!("guest failure: {failure}"));
     }
     if serial.contains("[DISP] backend=gop") {
         return Err("a GOP display was installed; the lane needs the VirtIO-GPU backend".into());

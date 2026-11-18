@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use clean_slate_ui::QualityTier;
 
+use crate::marker_spec::first_guest_failure;
 use crate::system_boot::{
     check_no_desktop_rows, field, number, start_shell_fixture_peer, system_vm_config,
 };
@@ -401,10 +402,10 @@ fn check_desktop_boot(output: &str, machine: &DesktopMachine) -> Result<DesktopS
         output,
         &format!("{console}[INIT] boot profile=desktop tier={tier}"),
     )?;
-    for gave in GIVE_UP_LINES
-        .iter()
-        .chain(&["[FAIL]", "[SUP ] restart service="])
-    {
+    if let Some(failure) = first_guest_failure(output, true) {
+        return Err(format!("guest failure {failure:?}"));
+    }
+    for gave in GIVE_UP_LINES.iter().chain(&["[SUP ] restart service="]) {
         if let Some(line) = lines(output).find(|line| line.contains(gave)) {
             return Err(format!("{gave:?} in {line:?}"));
         }
@@ -550,7 +551,7 @@ pub(crate) const ROW_NAMES: [&str; 3] = ["compositor", "desktop-shell", "app"];
 pub(crate) const CLIENT_TAGS: [&str; 3] = ["[COMP]", "[SHELL]", "[APP ]"];
 const RESTART_LABELS: [&str; 3] = ["compositor-restart", "desktop-shell-restart", "app-restart"];
 pub(crate) const SHELL_ANSWER: &str = "hello-desktop";
-const FORBIDDEN: [&str; 3] = ["[FAIL]", GIVE_UP_LINES[0], GIVE_UP_LINES[1]];
+const FORBIDDEN: [&str; 2] = [GIVE_UP_LINES[0], GIVE_UP_LINES[1]];
 
 /// One desktop row's live instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

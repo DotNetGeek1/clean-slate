@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use crate::guest_reboot::GuestRebootDetector;
 use crate::m7_fixture::{FixtureCounts, M7FixturePeer};
+use crate::marker_spec::{first_guest_failure, first_guest_failure_in_bytes};
 use crate::serial_input_lane::{accept_serial, find, spawn_serial_reader, tail, SerialEvent};
 use crate::system_boot::{
     ensure_data_disk, field, number, start_shell_fixture_peer, system_vm_config,
@@ -375,7 +376,10 @@ fn check_step(
 
 /// Whole-run checks once every step has passed.
 fn check_whole(transcript: &str) -> Result<(), String> {
-    for forbidden in ["[FAIL]", "[INIT] gave up", "[INIT] not starting"] {
+    if let Some(failure) = first_guest_failure(transcript, true) {
+        return Err(format!("guest failure {failure:?}"));
+    }
+    for forbidden in ["[INIT] gave up", "[INIT] not starting"] {
         if let Some(line) = lines(transcript).find(|line| line.contains(forbidden)) {
             return Err(format!("{forbidden:?} in {line:?}"));
         }
@@ -547,7 +551,14 @@ fn drive(
                 ),
             );
         }
-        for forbidden in [&b"[FAIL]"[..], b"[INIT] gave up"] {
+        if let Some(failure) = first_guest_failure_in_bytes(&transcript, false) {
+            let reason = progress.as_ref().err().cloned().unwrap_or_default();
+            return fail(
+                &transcript,
+                format!("{failure:?} printed in {waiting:?} ({reason})"),
+            );
+        }
+        for forbidden in [&b"[INIT] gave up"[..]] {
             if let Some(at) = find(&transcript, forbidden) {
                 let line = String::from_utf8_lossy(&transcript[at..]);
                 let line = line.lines().next().unwrap_or_default();
@@ -856,6 +867,7 @@ mod tests {
         assert_eq!(check_whole(&whole), Ok(()));
         for extra in [
             "[FAIL] something\n",
+            "[NET ] FAIL something\n",
             "[IPC ] console pid=1: [INIT] gave up service=20992 restarts=3; init carries on\n",
             "[PROC] fault pid=4 vector=14 err=0x4\n",
             "[IPC ] console pid=1: [SUP ] restart service=20992 attempt=2\n",

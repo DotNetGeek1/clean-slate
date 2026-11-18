@@ -152,7 +152,7 @@ impl KernelBlockBackend {
             }
             Err(message) => {
                 kernel_log_fmt(format_args!(
-                    "[FAIL] virtio block discovery failed: {message}\n"
+                    "[BLK ] virtio block discovery failed: {message}\n"
                 ));
             }
         }
@@ -204,7 +204,7 @@ pub(crate) fn step_kernel_block_request(
         if !backend.reported_uncalibrated_clock {
             backend.reported_uncalibrated_clock = true;
             kernel_log_fmt(format_args!(
-                "[FAIL] block completion deadlines require a calibrated TSC\n"
+                "[BLK ] block completion deadlines require a calibrated TSC\n"
             ));
         }
         let geometry = publish_contract_geometry(device.geometry());

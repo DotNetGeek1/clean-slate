@@ -12,6 +12,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::guest_reboot::GuestRebootDetector;
+use crate::marker_spec::first_guest_failure_in_bytes;
 use crate::qmp::image::Screenshot;
 use crate::qmp::{InputAction, QmpClient, QmpEndpoint, QmpError, QmpTimeouts};
 use crate::serial_input_lane::{accept_serial, find, spawn_serial_reader, tail, SerialEvent};
@@ -184,8 +185,8 @@ impl Session {
         Ok(())
     }
 
-    /// Takes in serial output for at most `wait`; fails on a reboot, a forbidden line, or QEMU
-    /// closing the port.
+    /// Takes in serial output for at most `wait`; fails on a reboot, a guest failure line, a
+    /// forbidden line, or QEMU closing the port.
     fn receive(&mut self, wait: Duration, waiting: &str) -> Result<(), XtaskError> {
         match self.rx.recv_timeout(wait) {
             Ok(SerialEvent::Bytes(bytes)) => {
@@ -210,6 +211,9 @@ impl Session {
         }
         if let Some(reboot) = self.reboot.observe(&self.transcript) {
             return self.fail(reboot);
+        }
+        if let Some(failure) = first_guest_failure_in_bytes(&self.transcript, false) {
+            return self.fail(format!("{failure:?} printed in {waiting:?}"));
         }
         for forbidden in self.forbidden {
             if let Some(at) = find(&self.transcript, forbidden.as_bytes()) {

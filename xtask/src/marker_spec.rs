@@ -210,34 +210,80 @@ impl<'a> MarkerSet<'a> {
     }
 }
 
-/// First guest `[FAIL]` line in `output` that the lane did not ask for. A `[FAIL]` line is
-/// expected only when it contains one of the set's own required texts that itself contains
-/// `[FAIL]`, so each lane's allow-list is exactly the failure markers it requires. An
-/// unterminated last line is checked only with `include_tail`, so a required failure marker is
-/// not judged before it has fully arrived.
+/// Where the guest failure report on `line` starts, if `line` is one. A failure is either the
+/// `[FAIL]` tag anywhere on the line, or a bracketed tag followed by the word `FAIL`
+/// (`[DNS ] FAIL reason=…`, `[M10.port] FAIL …`, `[M9.J] FAIL brk`). `FAIL` must end at
+/// whitespace or at the end of the line, so `[M7.6] FAIL-CLOSED OK` is not a failure. This is
+/// the one rule every lane uses to recognise a guest failure.
+pub fn guest_failure_start(line: &str) -> Option<usize> {
+    const FAIL_TAG: &str = "[FAIL]";
+    const FAIL_WORD: &str = "] FAIL";
+    let tagged = line.find(FAIL_TAG);
+    let worded = line.match_indices(FAIL_WORD).find_map(|(close, _)| {
+        let after = &line[close + FAIL_WORD.len()..];
+        if !after.chars().next().is_none_or(char::is_whitespace) {
+            return None;
+        }
+        let open = line[..close].rfind('[')?;
+        (!line[open + 1..close].contains(']')).then_some(open)
+    });
+    match (tagged, worded) {
+        (Some(tagged), Some(worded)) => Some(tagged.min(worded)),
+        (tagged, worded) => tagged.or(worded),
+    }
+}
+
+/// The failure report on `line`, from its tag to the end of the line.
+pub fn guest_failure(line: &str) -> Option<&str> {
+    guest_failure_start(line).map(|start| line[start..].trim_end())
+}
+
+/// First guest failure line in `output`. An unterminated last line is checked only with
+/// `include_tail`: a partial `[TAG] FAIL` could still turn out to be `[TAG] FAIL-CLOSED`.
+pub fn first_guest_failure(output: &str, include_tail: bool) -> Option<&str> {
+    complete_lines(output, include_tail)
+        .lines()
+        .find_map(guest_failure)
+}
+
+/// [`first_guest_failure`] over a raw serial transcript.
+pub fn first_guest_failure_in_bytes(transcript: &[u8], include_tail: bool) -> Option<String> {
+    let text = String::from_utf8_lossy(transcript);
+    first_guest_failure(&text, include_tail).map(str::to_owned)
+}
+
+fn complete_lines(output: &str, include_tail: bool) -> &str {
+    match output.rfind('\n') {
+        _ if include_tail => output,
+        Some(end) => &output[..=end],
+        None => "",
+    }
+}
+
+/// First guest failure line in `output` that the lane did not ask for (see
+/// [`guest_failure_start`]). A failure line is expected only when it contains one of the set's
+/// own required texts that is itself a failure line, so each lane's allow-list is exactly the
+/// failure markers it requires. An unterminated last line is checked only with `include_tail`,
+/// so a required failure marker is not judged before it has fully arrived.
 pub fn unexpected_guest_failure(
     output: &str,
     set: MarkerSet<'_>,
     include_tail: bool,
 ) -> Option<String> {
-    const FAIL_TAG: &str = "[FAIL]";
     let expected: Vec<&str> = set
         .required_texts()
         .into_iter()
-        .filter(|text| text.contains(FAIL_TAG))
+        .filter(|text| guest_failure_start(text).is_some())
         .collect();
-    let complete = match output.rfind('\n') {
-        _ if include_tail => output,
-        Some(end) => &output[..=end],
-        None => "",
-    };
-    complete.lines().find_map(|line| {
-        let start = line.find(FAIL_TAG)?;
-        if expected.iter().any(|text| line.contains(text)) {
-            return None;
-        }
-        Some(line[start..].trim_end().to_owned())
-    })
+    complete_lines(output, include_tail)
+        .lines()
+        .find_map(|line| {
+            let failure = guest_failure(line)?;
+            if expected.iter().any(|text| line.contains(text)) {
+                return None;
+            }
+            Some(failure.to_owned())
+        })
 }
 
 fn line_label(prefix: &str, fields: &[(&str, &str)]) -> String {
@@ -281,6 +327,73 @@ mod tests {
         assert_eq!(
             unexpected_guest_failure("[BOOT] ok\nx[FAIL] injected\r\n[M1  ] PASS\n", set, false),
             Some("[FAIL] injected".to_owned())
+        );
+    }
+
+    #[test]
+    fn every_guest_failure_tag_is_a_failure() {
+        for (line, failure) in [
+            ("[FAIL] boom", "[FAIL] boom"),
+            ("[IPC ] console pid=3: [FAIL] boom\r", "[FAIL] boom"),
+            ("[DNS ] FAIL reason=timeout", "[DNS ] FAIL reason=timeout"),
+            (
+                "[TLS ] FAIL reason=rdrand-unavailable",
+                "[TLS ] FAIL reason=rdrand-unavailable",
+            ),
+            ("[VMOD] FAIL Timeout", "[VMOD] FAIL Timeout"),
+            (
+                "[M10.port] FAIL fixture pid=4 failed_step=9",
+                "[M10.port] FAIL fixture pid=4 failed_step=9",
+            ),
+            ("[M9.J] FAIL brk", "[M9.J] FAIL brk"),
+            ("x[DNS ] FAIL", "[DNS ] FAIL"),
+        ] {
+            assert_eq!(guest_failure(line), Some(failure), "{line:?}");
+        }
+        for line in [
+            "[M7.6] FAIL-CLOSED OK",
+            "[DNS ] FAILED",
+            "[M1  ] PASS",
+            "[SVC ] launch service=2 note=FAIL",
+            "] FAIL without an opening tag",
+        ] {
+            assert_eq!(guest_failure(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_partial_worded_failure_waits_for_its_line_to_end() {
+        assert_eq!(first_guest_failure("[M7.6] FAIL", false), None);
+        assert_eq!(first_guest_failure("[M7.6] FAIL-CLOSED OK\n", false), None);
+        assert_eq!(
+            first_guest_failure("[DNS ] FAIL", true),
+            Some("[DNS ] FAIL")
+        );
+        assert_eq!(
+            first_guest_failure_in_bytes(b"[BOOT] ok\n[VMOD] FAIL Timeout\r\n", false).as_deref(),
+            Some("[VMOD] FAIL Timeout")
+        );
+    }
+
+    #[test]
+    fn unexpected_guest_failure_reports_tagged_failures_the_lane_did_not_require() {
+        let set = MarkerSet::Ordered(&["[DNS ] virtio ready mac=", "[M7.5] PASS"]);
+        assert_eq!(
+            unexpected_guest_failure(
+                "[DNS ] virtio ready mac=x\n[DNS ] FAIL reason=timeout\n",
+                set,
+                false
+            ),
+            Some("[DNS ] FAIL reason=timeout".to_owned())
+        );
+        let tls = MarkerSet::Ordered(&["[TLS ] peer identity rejected", "[M7.6] FAIL-CLOSED OK"]);
+        assert_eq!(
+            unexpected_guest_failure(
+                "[TLS ] peer identity rejected\n[M7.6] FAIL-CLOSED OK\n",
+                tls,
+                true
+            ),
+            None
         );
     }
 
