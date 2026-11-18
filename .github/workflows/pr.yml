@@ -276,6 +276,7 @@ jobs:
         run: |
           cargo clippy -p clean-slate-kernel --lib --tests -- -D warnings
           cargo clippy -p clean-slate-kernel --lib --tests --features m4-service-lifecycle-self-test -- -D warnings
+          cargo clippy -p clean-slate-kernel --lib --tests --features m4-recovery-self-test -- -D warnings
           cargo clippy -p clean-slate-kernel --lib --tests --features m9-rootfs,m9-linux-socket,m9-linux-trace -- -D warnings
           cargo clippy -p clean-slate-kernel --lib --tests --features system-test-hooks -- -D warnings
 
@@ -326,6 +327,7 @@ jobs:
           cargo test -p clean-slate-kernel --features m3-address-space-self-test
           cargo test -p clean-slate-kernel --features m3-syscall-self-test
           cargo test -p clean-slate-kernel --lib --features m4-service-lifecycle-self-test
+          cargo test -p clean-slate-kernel --lib --features m4-recovery-self-test
           cargo test -p clean-slate-kernel --features m8-linux-image
           cargo test -p clean-slate-kernel --features m8-linux-hello
           cargo test -p clean-slate-kernel --features system-test-hooks --lib

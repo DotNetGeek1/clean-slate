@@ -1280,7 +1280,6 @@ pub(crate) unsafe fn service_lifecycle_controller_mut() -> &'static mut ServiceL
 mod tests {
     use super::*;
     use crate::mm::frame_allocator::PageAllocator;
-    use crate::sched::ThreadKind;
     use clean_slate_service_fixtures::{STORAGE_SERVICE_ID, STORAGE_UNAUTHORIZED_SERVICE_ID};
 
     fn test_allocator() -> PageAllocator {
@@ -1431,6 +1430,7 @@ mod tests {
     #[cfg(not(feature = "m4-recovery-self-test"))]
     #[test]
     fn allocate_scheduler_slot_wraps_and_finds_empty_slot() {
+        use crate::sched::ThreadKind;
         unsafe {
             *crate::sched::scheduler_mut() = crate::sched::Scheduler::new();
             crate::sched::scheduler_mut()
