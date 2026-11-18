@@ -5242,7 +5242,7 @@ fn print_help() {
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
     println!("  test-m5-persistence Two-boot persistent-disk M5 acceptance using the production storage path");
-    println!("  test-m5-crash-recovery Six-boot abrupt-stop crash-recovery M5 acceptance");
+    println!("  test-m5-crash-recovery Ten-boot abrupt-stop and torn-write crash-recovery M5 acceptance");
     println!("                 Pass --keep-disk to preserve target/m5/m5-data.img for debugging");
     println!("  test-m5-disk-harness Two-boot M5 disk harness with host-side sentinel validation");
     println!(
