@@ -247,7 +247,17 @@ pub(super) const USER_TEST_DATA_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZ
     feature = "m8-linux-hello-self-test",
     feature = "m8-linux-image-self-test",
     feature = "m9-low-va-self-test",
-    feature = "m10-nxe-self-test"
+    feature = "m10-nxe-self-test",
+    all(
+        test,
+        any(
+            feature = "m3-address-space-self-test",
+            feature = "m3-resources-self-test",
+            feature = "m4-crash-service-self-test",
+            feature = "m4-recovery-self-test",
+            feature = "m3-entry-self-test"
+        )
+    )
 ))]
 pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE;
 #[cfg(any(

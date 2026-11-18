@@ -326,10 +326,25 @@ pub(crate) fn handle_userspace_privileged_fault(context: &InterruptContext) -> !
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(any(
+        clean_slate_userspace_selftest = "m3-entry",
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
+        feature = "m3-entry-self-test"
+    ))]
     use crate::mm::PAGE_SIZE;
+    #[cfg(any(
+        feature = "m3-address-space-self-test",
+        feature = "m3-resources-self-test",
+        feature = "m4-crash-service-self-test",
+        feature = "m4-recovery-self-test",
+        feature = "m3-entry-self-test"
+    ))]
     use crate::selftest::USER_TEST_STACK_ADDRESS;
 
-    #[cfg(feature = "m3-entry-self-test")]
+    #[cfg(clean_slate_userspace_selftest = "m3-entry")]
     #[test]
     fn userspace_test_payload_stays_within_one_page() {
         assert!(userspace_test_size() <= PAGE_SIZE as usize);
