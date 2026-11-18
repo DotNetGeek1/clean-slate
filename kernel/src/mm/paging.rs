@@ -143,12 +143,12 @@ pub(super) fn walk_page_flags(address: VirtAddr) -> Result<PageWalkFlags, &'stat
     walk_page_flags_in_root(current_root_frame_address(), address)
 }
 
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 pub(super) fn page_flags_for_address(address: VirtAddr) -> Result<PageTableFlags, &'static str> {
     Ok(walk_page_flags(address)?.path)
 }
 
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 pub(super) fn leaf_page_flags_for_address(
     address: VirtAddr,
 ) -> Result<PageTableFlags, &'static str> {

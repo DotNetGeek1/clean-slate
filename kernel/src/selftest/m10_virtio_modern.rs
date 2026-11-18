@@ -95,6 +95,8 @@ pub(crate) fn run_m10_virtio_modern_self_test() -> Result<(), &'static str> {
     })
 }
 
+/// Formatted with `Debug` on failure. A derived `Debug` impl is not a read.
+#[allow(dead_code)]
 #[derive(Debug)]
 enum ProbeError {
     Transport(TransportError),

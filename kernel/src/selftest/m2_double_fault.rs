@@ -20,7 +20,6 @@ use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering;
 
 #[cfg(feature = "m2-double-fault-self-test")]
-#[cfg(feature = "m2-double-fault-self-test")]
 use crate::mm::layout::KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE;
 
 #[cfg(feature = "m2-double-fault-self-test")]

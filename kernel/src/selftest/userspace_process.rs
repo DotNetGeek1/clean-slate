@@ -2,36 +2,78 @@
 //! `clean_slate_syscall_dispatch` with a registered Native process and scheduler
 //! current thread (#143).
 
+#[cfg(clean_slate_userspace_spawn)]
 use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::arch::x86_64::gdt::userspace_gdt_state;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::mm::address_space::create_process_address_space;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::mm::address_space::map_process_page;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::mm::frame_allocator::free_frame;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::mm::frame_allocator::PageAllocator;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::mm::paging::zero_page;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::mm::phys_to_virt;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::mm::PAGE_SIZE;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
-use crate::process::personality::{set_execution_personality, ExecutionPersonality};
+#[cfg(any(
+    feature = "m9-syscall-fail-closed-self-test",
+    feature = "m9-linux-trace-self-test",
+    feature = "m9-linux-fs-self-test",
+    feature = "m9-fd-core-self-test"
+))]
+use crate::process::personality::set_execution_personality;
+#[cfg(clean_slate_userspace_spawn)]
+use crate::process::personality::ExecutionPersonality;
 use crate::process::process_registry_mut;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::process::Process;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::process::ProcessState;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::process::ResourceDomain;
 use crate::sched::scheduler_mut;
 use crate::sched::Scheduler;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::sched::Thread;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::sched::ThreadKind;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::sched::ThreadState;
+#[cfg(clean_slate_userspace_spawn)]
 use crate::selftest::USER_TEST_CODE_ADDRESS;
+#[cfg(clean_slate_userspace_spawn)]
 use clean_slate_service_lifecycle::InstanceGeneration;
+#[cfg(clean_slate_userspace_spawn)]
 use core::ptr;
+#[cfg(clean_slate_userspace_spawn)]
 use x86_64::structures::paging::PageTableFlags;
+#[cfg(clean_slate_userspace_spawn)]
 use x86_64::VirtAddr;
 
+#[cfg(clean_slate_userspace_spawn)]
 pub(crate) struct SpawnedUserspaceProcess {
+    #[cfg(any(
+        feature = "m4-service-lifecycle-self-test",
+        feature = "m8-linux-dispatch-self-test",
+        feature = "m8-linux-image-self-test",
+        feature = "m9-syscall-fail-closed-self-test",
+        feature = "m9-low-va-self-test",
+        feature = "m9-fd-core-self-test",
+        feature = "m9-linux-fs-self-test",
+        feature = "m9-linux-trace-self-test",
+        feature = "m10-input-self-test"
+    ))]
     pub(crate) process_id: u64,
     pub(crate) thread: Thread,
+    /// Read by the m3 syscall lane when it checks the entry frame.
+    #[cfg(feature = "m3-syscall-self-test")]
     pub(crate) user_stack_pointer: u64,
 }
 
@@ -47,6 +89,7 @@ pub(crate) fn reset_process_scheduler_world() {
 /// and build a scheduler thread entry frame. `stack_virtual_address` is the user
 /// VA of the stack page (typically `USER_TEST_STACK_ADDRESS` or
 /// `USER_TEST_PROCESS_STACK_ADDRESS`).
+#[cfg(clean_slate_userspace_spawn)]
 pub(crate) fn spawn_native_userspace_process_with_code(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
@@ -140,13 +183,31 @@ pub(crate) fn spawn_native_userspace_process_with_code(
             .expect("fresh self-test userspace process should fit in the registry");
     }
     Ok(SpawnedUserspaceProcess {
+        #[cfg(any(
+            feature = "m4-service-lifecycle-self-test",
+            feature = "m8-linux-dispatch-self-test",
+            feature = "m8-linux-image-self-test",
+            feature = "m9-syscall-fail-closed-self-test",
+            feature = "m9-low-va-self-test",
+            feature = "m9-fd-core-self-test",
+            feature = "m9-linux-fs-self-test",
+            feature = "m9-linux-trace-self-test",
+            feature = "m10-input-self-test"
+        ))]
         process_id: pid,
         thread,
+        #[cfg(feature = "m3-syscall-self-test")]
         user_stack_pointer,
     })
 }
 
 /// Same as [`spawn_native_userspace_process_with_code`] but tags Linux personality.
+#[cfg(any(
+    feature = "m9-syscall-fail-closed-self-test",
+    feature = "m9-linux-trace-self-test",
+    feature = "m9-linux-fs-self-test",
+    feature = "m9-fd-core-self-test"
+))]
 pub(crate) fn spawn_linux_userspace_process_with_code(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
@@ -176,6 +237,7 @@ pub(crate) fn spawn_linux_userspace_process_with_code(
     Ok(spawned)
 }
 
+#[cfg(clean_slate_userspace_spawn)]
 pub(crate) fn configure_scheduler_thread_slot(
     slot: usize,
     thread: &Thread,

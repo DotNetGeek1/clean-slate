@@ -46,7 +46,6 @@ struct TestState {
     linux_pid: u64,
     output: [u8; OUTPUT_CAP],
     output_len: usize,
-    pool_baseline: usize,
 }
 
 static TEST_STATE: GlobalCell<Option<TestState>> = GlobalCell::new(None);
@@ -282,7 +281,6 @@ pub(crate) fn start_m9_linux_socket_self_test(page_allocator: PageAllocator) -> 
             linux_pid,
             output: [0; OUTPUT_CAP],
             output_len: 0,
-            pool_baseline: pool_live_count(),
         });
     }
     initialize_timer();

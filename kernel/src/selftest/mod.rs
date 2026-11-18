@@ -6,13 +6,7 @@
 
 #[cfg(feature = "m1-self-test")]
 pub(crate) mod m1_memory;
-#[cfg(any(
-    feature = "m2-double-fault-self-test",
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m3-entry-self-test"
-))]
+#[cfg(feature = "m2-double-fault-self-test")]
 pub(crate) mod m2_double_fault;
 #[cfg(feature = "m2-identity-guard-self-test")]
 pub(crate) mod m2_identity_guard;
@@ -191,38 +185,52 @@ pub(crate) mod serial_input;
 ))]
 pub(crate) mod userspace_process;
 #[cfg(any(
+    clean_slate_userspace_selftest = "m3-entry",
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
+    feature = "m3-ipc-self-test",
+    feature = "m3-syscall-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test",
+    feature = "m4-supervisor-self-test",
+    feature = "m4-service-lifecycle-self-test",
     feature = "m8-linux-dispatch-self-test",
     feature = "m8-linux-hello-self-test",
+    feature = "m8-linux-image-self-test",
     feature = "m9-syscall-fail-closed-self-test",
     feature = "m9-block-wake-self-test",
-    feature = "m9-userspace-self-test"
+    feature = "m9-low-va-self-test",
+    feature = "m9-fd-core-self-test",
+    feature = "m9-linux-fs-self-test",
+    feature = "m9-userspace-self-test",
+    feature = "m9-linux-trace-self-test",
+    feature = "m10-nxe-self-test",
+    feature = "m10-input-self-test"
 ))]
 use crate::mm::PAGE_SIZE;
 
 #[cfg(any(
+    clean_slate_userspace_selftest = "m3-entry",
     feature = "m3-address-space-self-test",
     feature = "m3-resources-self-test",
+    feature = "m3-ipc-self-test",
+    feature = "m3-syscall-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
+    feature = "m4-supervisor-self-test",
+    feature = "m4-service-lifecycle-self-test",
     feature = "m8-linux-dispatch-self-test",
     feature = "m8-linux-hello-self-test",
+    feature = "m8-linux-image-self-test",
     feature = "m9-syscall-fail-closed-self-test",
-    feature = "m9-linux-exec-self-test",
+    feature = "m9-block-wake-self-test",
+    feature = "m9-low-va-self-test",
     feature = "m9-fd-core-self-test",
     feature = "m9-linux-fs-self-test",
     feature = "m9-userspace-self-test",
-    feature = "m9-linux-trace-self-test"
+    feature = "m9-linux-trace-self-test",
+    feature = "m10-nxe-self-test",
+    feature = "m10-input-self-test"
 ))]
 pub(super) const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
 #[cfg(any(
@@ -230,22 +238,16 @@ pub(super) const USER_TEST_CODE_ADDRESS: u64 = 0x0000_4000_0000_0000;
     feature = "m3-resources-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m4-service-lifecycle-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test"
+    feature = "m3-ipc-self-test"
 ))]
 pub(super) const USER_TEST_DATA_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE;
 #[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m3-entry-self-test",
+    clean_slate_userspace_selftest = "m3-entry",
+    feature = "m3-syscall-self-test",
     feature = "m8-linux-hello-self-test",
-    feature = "m9-linux-exec-self-test"
+    feature = "m8-linux-image-self-test",
+    feature = "m9-low-va-self-test",
+    feature = "m10-nxe-self-test"
 ))]
 pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SIZE;
 #[cfg(any(
@@ -256,11 +258,6 @@ pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SI
     feature = "m4-service-lifecycle-self-test",
     feature = "m4-supervisor-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m5-storage-self-test",
-    feature = "m5-persistence-self-test",
-    feature = "m5-crash-early-self-test",
-    feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
     feature = "m8-linux-dispatch-self-test",
     feature = "m9-syscall-fail-closed-self-test",
     feature = "m9-block-wake-self-test",

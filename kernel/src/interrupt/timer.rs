@@ -48,7 +48,7 @@ pub(super) fn increment_kernel_ticks() -> u64 {
     KERNEL_TICKS.fetch_add(1, Ordering::Relaxed)
 }
 
-// Boot-tail entry point: self-test builds exit QEMU before reaching it.
+// Boot-tail entry point: those self-test builds compile the boot tail out.
 #[cfg_attr(
     any(
         feature = "m1-self-test",
@@ -100,7 +100,7 @@ pub(crate) fn initialize_timer() {
     }
 }
 
-// Boot-tail entry point: self-test builds exit QEMU before reaching it.
+// Boot-tail entry point: those self-test builds compile the boot tail out.
 #[cfg_attr(
     any(
         feature = "m1-self-test",

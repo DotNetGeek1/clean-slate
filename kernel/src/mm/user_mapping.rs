@@ -5,44 +5,18 @@ use crate::arch::x86_64::cpu::without_write_protect;
 use crate::mm::align_down;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::layout::va_overlaps_kernel_low_reserved;
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m3-syscall-self-test"
-))]
-#[cfg(not(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m4-recovery-self-test"
-)))]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::mm::paging::leaf_page_flags_for_address;
-#[cfg(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test",
-    feature = "m3-syscall-self-test"
-))]
-#[cfg(not(any(
-    feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m4-recovery-self-test"
-)))]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::mm::paging::page_flags_for_address;
 use crate::mm::paging::walk_page_flags;
 use crate::mm::PAGE_SIZE;
 use crate::mm::USER_CANONICAL_TOP_EXCLUSIVE;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::run;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::selftest::USER_TEST_CODE_ADDRESS;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::selftest::USER_TEST_STACK_ADDRESS;
 use x86_64::structures::paging::Mapper;
 use x86_64::structures::paging::OffsetPageTable;
@@ -80,19 +54,8 @@ pub(crate) fn unmap_userspace_page(
 
 #[cfg(any(
     feature = "m3-address-space-self-test",
-    feature = "m3-resources-self-test",
-    feature = "m4-crash-service-self-test",
-    feature = "m4-recovery-self-test",
-    feature = "m3-entry-self-test"
+    clean_slate_userspace_selftest = "m3-entry"
 ))]
-#[cfg_attr(
-    any(
-        feature = "m3-resources-self-test",
-        feature = "m4-crash-service-self-test",
-        feature = "m4-recovery-self-test"
-    ),
-    allow(dead_code)
-)]
 pub(crate) fn relevant_userspace_leaf_flags(flags: PageTableFlags) -> PageTableFlags {
     flags
         & (PageTableFlags::PRESENT
@@ -101,7 +64,7 @@ pub(crate) fn relevant_userspace_leaf_flags(flags: PageTableFlags) -> PageTableF
             | PageTableFlags::USER_ACCESSIBLE)
 }
 
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 pub(crate) fn validate_userspace_mappings() -> Result<(), &'static str> {
     let code_path_flags = page_flags_for_address(VirtAddr::new(USER_TEST_CODE_ADDRESS))?;
     let code_leaf_flags = leaf_page_flags_for_address(VirtAddr::new(USER_TEST_CODE_ADDRESS))?;

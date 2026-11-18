@@ -48,11 +48,9 @@ pub(crate) const M9_LINUX_TRACE_PASS_MARKER: &str = "[M9.T] PASS";
 /// `exit_group` hook result: resume scheduling or terminate QEMU acceptance.
 pub(crate) enum TraceExitHook {
     NotApplicable,
-    Continue(u64),
     Pass,
 }
 
-const M9_TRACE_CYCLES: u32 = 2;
 const LINUX_SLOT: usize = 0;
 /// Enough unsupported syscalls to exhaust the budget installed below
 /// (32 global tokens, 16 per process, no refill).
@@ -109,13 +107,6 @@ impl ProbeBuilder {
 
     fn emit_syscall(&mut self) -> Result<(), &'static str> {
         self.emit(&[0x0F, 0x05])
-    }
-
-    fn emit_exit(&mut self, code: u8) -> Result<(), &'static str> {
-        self.emit_mov_eax(SYS_EXIT as u32)?;
-        self.emit_mov_edi(code as u32)?;
-        self.emit_syscall()?;
-        self.emit(&[0x0F, 0x0B])
     }
 }
 

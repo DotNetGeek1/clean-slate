@@ -5,24 +5,24 @@
 //! `validate_userspace_entry_trap` and `userspace_frame` are also used by the
 //! address-space self-test.
 
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::arch::x86_64::asm::clean_slate_user_test_end;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::arch::x86_64::asm::clean_slate_user_test_privileged_instruction;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::arch::x86_64::asm::clean_slate_user_test_start;
 #[cfg(feature = "m3-entry-self-test")]
 use crate::arch::x86_64::bit;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::arch::x86_64::context_switch::build_userspace_entry_frame;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::arch::x86_64::context_switch::restore_task_context;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::arch::x86_64::gdt::selector_rpl;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::arch::x86_64::gdt::set_privilege_stack;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::arch::x86_64::gdt::GDT_STATE;
 use crate::arch::x86_64::interrupt_context::InterruptContext;
 use crate::arch::x86_64::interrupt_context::UserspaceEntryFrame;
@@ -36,49 +36,49 @@ use crate::diagnostics::qemu::fatal_kernel_error;
 use crate::diagnostics::qemu::qemu_exit;
 #[cfg(feature = "m3-entry-self-test")]
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::mm::frame_allocator::free_frame;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::mm::frame_allocator::PageAllocator;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::mm::paging::current_offset_page_table;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::mm::paging::zero_page;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::mm::phys_to_virt;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::mm::user_mapping::map_userspace_page;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::mm::user_mapping::unmap_userspace_page;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::mm::user_mapping::validate_userspace_mappings;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::mm::PAGE_SIZE;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::sched::task_stacks_mut;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::selftest::USER_TEST_CODE_ADDRESS;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use crate::selftest::USER_TEST_STACK_ADDRESS;
 #[cfg(feature = "m3-entry-self-test")]
 use crate::sync::global_cell::GlobalCell;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use core::ptr;
 #[cfg(feature = "m3-entry-self-test")]
 use core::sync::atomic::AtomicBool;
 #[cfg(feature = "m3-entry-self-test")]
 use core::sync::atomic::Ordering;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use x86_64::structures::paging::Page;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use x86_64::structures::paging::PageTableFlags;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use x86_64::structures::paging::PhysFrame;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use x86_64::structures::paging::Size4KiB;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use x86_64::PhysAddr;
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 use x86_64::VirtAddr;
 
 #[cfg(feature = "m3-entry-self-test")]
@@ -94,13 +94,13 @@ static USERSPACE_TEST_STATE: GlobalCell<Option<UserspaceTestState>> = GlobalCell
 #[cfg(feature = "m3-entry-self-test")]
 static USERSPACE_ENTRY_OBSERVED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 fn userspace_test_size() -> usize {
     (&raw const clean_slate_user_test_end as usize)
         .saturating_sub(&raw const clean_slate_user_test_start as usize)
 }
 
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 fn userspace_test_privileged_instruction_offset() -> u64 {
     ((&raw const clean_slate_user_test_privileged_instruction as usize)
         .saturating_sub(&raw const clean_slate_user_test_start as usize)) as u64
@@ -115,7 +115,7 @@ fn userspace_test_state() -> Result<&'static UserspaceTestState, &'static str> {
     }
 }
 
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 fn install_userspace_payload(allocator: &mut PageAllocator) -> Result<(), &'static str> {
     let mut mapper = unsafe { current_offset_page_table() };
     let payload_size = userspace_test_size();
@@ -203,7 +203,7 @@ fn install_userspace_payload(allocator: &mut PageAllocator) -> Result<(), &'stat
     Ok(())
 }
 
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 pub(crate) fn start_userspace_entry_self_test(allocator: &mut PageAllocator) -> ! {
     if let Err(message) = install_userspace_payload(allocator) {
         fatal_kernel_error(message);

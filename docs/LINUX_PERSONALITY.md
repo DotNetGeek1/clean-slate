@@ -515,7 +515,7 @@ COM1 receive feeds a canonical-mode line discipline (`kernel/src/device/serial_c
 
 ## Serial-console stdin (#218 S5)
 
-In the default image the system manifest's shell row (`SYSTEM_SHELL_SPEC`, service 0x5400, image `LinuxShell`) starts BusyBox as `/bin/sh -i` with `PATH=/bin` once storage is ready. `kernel/src/service/system_shell.rs` launches it.
+In the default image the system manifest's shell row (`SYSTEM_SHELL_SPEC`, service 0x5400, image `LinuxShell`) is BusyBox as `/bin/sh -i` with `PATH=/bin`. Init starts that row once storage is ready. `kernel/src/service/system_shell.rs` builds the process and applies the row's grants before the new thread can run; it does not decide when the shell starts.
 
 **Authority.** The row's grants are `Console`, `ConsoleInput`, `TmpObjects` and `NetworkClient`, and the Linux launcher applies them while it builds the process, before it can run:
 

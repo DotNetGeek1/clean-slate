@@ -121,7 +121,7 @@ unsafe extern "C" {
     pub(crate) static clean_slate_user_address_space_test_end: u8;
 }
 
-#[cfg(feature = "m3-entry-self-test")]
+#[cfg(clean_slate_userspace_selftest = "m3-entry")]
 unsafe extern "C" {
     pub(crate) static clean_slate_user_test_start: u8;
     pub(crate) static clean_slate_user_test_privileged_instruction: u8;

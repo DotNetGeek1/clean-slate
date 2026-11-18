@@ -200,9 +200,6 @@ mod enabled {
             allocator,
         ) {
             crate::selftest::m9_linux_trace::TraceExitHook::NotApplicable => {}
-            crate::selftest::m9_linux_trace::TraceExitHook::Continue(next_frame) => {
-                switch_after_exit(Some(next_frame));
-            }
             crate::selftest::m9_linux_trace::TraceExitHook::Pass => {
                 crate::selftest::m9_linux_trace::finish_pass();
             }
