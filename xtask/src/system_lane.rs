@@ -287,6 +287,21 @@ fn check_fault(segment: &str, state: State) -> Result<State, String> {
             "waiting for network generation 2: init has not restarted it ({restart:?})"
         ));
     }
+    let reaped = format!(
+        "[SVC ] reaped service={NETWORK_SERVICE} pid={} ",
+        network.pid
+    );
+    match crate::system_desktop::whole_line(after_fault, &reaped) {
+        Some((_, "residue=0")) => {}
+        Some((_, residue)) => {
+            return Err(format!("network pid={} reaped with {residue}", network.pid));
+        }
+        None => {
+            return Err(format!(
+                "the faulted network service was not reaped: no {reaped:?}"
+            ))
+        }
+    }
     let (next, announced_end) =
         check_network_instance(after_fault, network.generation + 1, init_pid)
             .map_err(|reason| format!("waiting for network generation 2: {reason}"))?;
@@ -636,6 +651,7 @@ mod tests {
              [CAP ] net client revoked count=2 reason=instance-gone\n\
              {RESET_ERROR}\n\
              [LNX ] exit pid=7 status=1\n\
+             [SVC ] reaped service=20992 pid={NET1} residue=0\n\
              # [IPC ] console pid={INIT}: [SUP ] restart service=20992 attempt=1\n\
              [CAP ] net client reissued holder={SHELL} generation=2\n\
              {}\
@@ -727,6 +743,14 @@ mod tests {
                 .contains("unexpected")
         );
         assert!(fault_error(&fault().replace("[CAP ] net client revoked", "")).contains("revoked"));
+    }
+
+    #[test]
+    fn the_faulted_instance_is_reaped_with_no_residue() {
+        let error = fault_error(&fault().replace("residue=0", "residue=1"));
+        assert!(error.contains("reaped with residue=1"), "{error}");
+        let error = fault_error(&fault().replace("[SVC ] reaped service=20992", "[SVC ] gone"));
+        assert!(error.contains("was not reaped"), "{error}");
     }
 
     #[test]

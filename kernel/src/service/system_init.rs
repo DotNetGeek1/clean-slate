@@ -78,9 +78,11 @@ pub(crate) fn on_process_death(pid: u64, death: ProcessDeath) {
 /// ports and port connections, the display presenter, the input consumer, shared-buffer
 /// mappings, work sets, the network bridge's raw-link binding, the execution personality
 /// (Linux-personality tables only exist for Linux processes) and console-input fds, which are
-/// held in the Linux fd table rather than as capabilities. The test
-/// `every_per_process_teardown_hook_is_counted_or_derived` keeps this list in step with
-/// process teardown, which must release everything a pid holds.
+/// held in the Linux fd table rather than as capabilities. Process teardown must release
+/// everything a pid holds, so the tests keep this list and the teardown hooks in step both
+/// ways: `every_per_process_teardown_hook_is_counted_or_derived` and
+/// `every_counted_table_names_the_teardown_hook_that_releases_it` here, and
+/// `teardown_releases_every_counted_table` in `process/domain.rs`.
 #[cfg(clean_slate_system_init)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct HeldAuthority {
@@ -263,16 +265,15 @@ impl HeldAuthority {
         })
     }
 
-    /// `held_in_controller` is the lifecycle controller's own count for `pid`:
-    /// `(lifecycle_control, block_device)`.
-    fn of(pid: u64, held_in_controller: (usize, usize)) -> Self {
+    pub(crate) fn of(pid: u64) -> Self {
         use crate::capability::network::{
             is_instance_bound_network_client, is_network_client_entitlement,
         };
         use clean_slate_capability::{list_holder, HolderId, ResourceClass, Rights};
         use clean_slate_service_fixtures::object_capability::OBJECT_SERVICE_ROLE_ID;
 
-        let (lifecycle_control, block_device) = held_in_controller;
+        let (lifecycle_control, block_device) =
+            unsafe { super::capability::lifecycle_capabilities_mut() }.held_by(pid);
         let console = unsafe { crate::ipc::endpoint_table_mut() }
             .resources_for_pid(pid)
             .held_capabilities;
@@ -355,9 +356,8 @@ pub(crate) fn audit_service_authority(
     service: ServiceId,
     pid: u64,
     spec: Option<&ServiceSpec>,
-    held_in_controller: (usize, usize),
 ) -> Result<(), &'static str> {
-    let held = HeldAuthority::of(pid, held_in_controller);
+    let held = HeldAuthority::of(pid);
     let network_instance_live =
         crate::service::instance_generation::live_network_instance_generation().is_some();
     let matches = held == HeldAuthority::for_row(spec, network_instance_live);
@@ -482,10 +482,7 @@ pub(crate) fn launch_init(
         "[KERN] init launched pid={pid} slot={INIT_SCHEDULER_SLOT} declared-services={}\n",
         manifest.len()
     ));
-    let held = HeldAuthority::of(
-        pid,
-        unsafe { super::service_lifecycle_controller_mut() }.capabilities_held_by(pid),
-    );
+    let held = HeldAuthority::of(pid);
     let matches = held == HeldAuthority::INIT;
     kernel_log_fmt(format_args!(
         "[KERN] init authority pid={pid} {held} expected-only-lifecycle-and-console={}\n",
@@ -1051,7 +1048,9 @@ mod tests {
                 TeardownHook::ObjectQueues => {
                     "object-service: requests served under the role record"
                 }
-                TeardownHook::NetQueues => "network: requests served under the network record",
+                TeardownHook::NetQueues => {
+                    "raw-net-link; network: requests served under the network record"
+                }
                 TeardownHook::NetworkCapabilities => {
                     "network: sessions opened with the network record"
                 }
@@ -1063,6 +1062,7 @@ mod tests {
                 TeardownHook::InputConsumer => "input-consumer",
                 TeardownHook::WorkSet => "work-sets",
                 TeardownHook::RevokeHolderCapabilities => "the capability space, by class",
+                TeardownHook::LifecycleCapabilities => "lifecycle-control, block-device",
                 TeardownHook::RevokeProcessResource => {
                     "not held by the pid: records other holders have over it"
                 }
@@ -1074,6 +1074,116 @@ mod tests {
                 TeardownHook::AddressSpace => "not authority: the pid's own memory and record",
             };
             assert!(!counted_as.is_empty());
+        }
+    }
+
+    /// The other direction: every per-pid table `HeldAuthority` counts names what releases it
+    /// at exit. Each field is bound by name with no `..` and used only below, so a newly
+    /// counted table does not compile until it is placed here. `teardown_releases_every_
+    /// counted_table` in `process/domain.rs` checks the hooks release what they are named for.
+    #[cfg(clean_slate_system_init)]
+    #[test]
+    fn every_counted_table_names_the_teardown_hook_that_releases_it() {
+        use crate::process::domain::{exit_paths_run, TeardownHook as Hook};
+
+        /// What releases a table when its pid exits.
+        #[derive(Debug)]
+        enum ReleasedBy {
+            Hook(Hook),
+            /// `linux_fd::release_for_process`, which both exit paths run before the hooks.
+            LinuxFdRelease,
+        }
+
+        let HeldAuthority {
+            lifecycle_control,
+            console,
+            block_device,
+            object_service_role,
+            network,
+            network_client,
+            network_client_entitlement,
+            tmp_objects,
+            graphics_serve,
+            graphics_shell,
+            graphics_client,
+            display,
+            input,
+            console_records,
+            other,
+            outside,
+        } = HeldAuthority::default();
+        let OutsideCapabilitySpace {
+            owned_endpoints,
+            ports_served,
+            port_connections,
+            display_presenter,
+            input_consumer,
+            shared_mappings,
+            work_sets,
+            raw_network_link,
+            linux_personality,
+            console_input,
+        } = outside;
+        let released_by = [
+            (
+                lifecycle_control,
+                ReleasedBy::Hook(Hook::LifecycleCapabilities),
+            ),
+            (block_device, ReleasedBy::Hook(Hook::LifecycleCapabilities)),
+            (console, ReleasedBy::Hook(Hook::IpcEndpoints)),
+            (owned_endpoints, ReleasedBy::Hook(Hook::IpcEndpoints)),
+            (
+                object_service_role,
+                ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
+            ),
+            (network, ReleasedBy::Hook(Hook::RevokeHolderCapabilities)),
+            (
+                network_client,
+                ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
+            ),
+            (
+                network_client_entitlement,
+                ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
+            ),
+            (
+                tmp_objects,
+                ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
+            ),
+            (
+                graphics_serve,
+                ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
+            ),
+            (
+                graphics_shell,
+                ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
+            ),
+            (
+                graphics_client,
+                ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
+            ),
+            (display, ReleasedBy::Hook(Hook::RevokeHolderCapabilities)),
+            (input, ReleasedBy::Hook(Hook::RevokeHolderCapabilities)),
+            (
+                console_records,
+                ReleasedBy::Hook(Hook::RevokeHolderCapabilities),
+            ),
+            (other, ReleasedBy::Hook(Hook::RevokeHolderCapabilities)),
+            (ports_served, ReleasedBy::Hook(Hook::Port)),
+            (port_connections, ReleasedBy::Hook(Hook::Port)),
+            (display_presenter, ReleasedBy::Hook(Hook::DisplayPresenter)),
+            (input_consumer, ReleasedBy::Hook(Hook::InputConsumer)),
+            (shared_mappings, ReleasedBy::Hook(Hook::SharedMappings)),
+            (work_sets, ReleasedBy::Hook(Hook::WorkSet)),
+            (raw_network_link, ReleasedBy::Hook(Hook::NetQueues)),
+            // The personality is read from the process record, which this hook reaps.
+            (linux_personality, ReleasedBy::Hook(Hook::AddressSpace)),
+            (console_input, ReleasedBy::LinuxFdRelease),
+        ];
+        for (count, released) in released_by {
+            assert_eq!(count, 0);
+            if let ReleasedBy::Hook(hook) = released {
+                assert!(exit_paths_run(hook), "{hook:?} is skipped by an exit path");
+            }
         }
     }
 }

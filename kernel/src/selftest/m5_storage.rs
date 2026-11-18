@@ -342,9 +342,10 @@ pub(crate) fn handle_userspace_storage_entry() -> u64 {
         .as_mut()
         .unwrap_or_else(|| fatal_kernel_error("service lifecycle allocator was unavailable"));
     let controller = unsafe { service_lifecycle_controller_mut() };
-    // Publish the intentional exit first: this revokes the instance's block
-    // authority and clears the live record so the same service can be
-    // relaunched below while this process is still the current thread.
+    // Publish the intentional exit first: this clears the live record so the
+    // same service can be relaunched below while this process is still the
+    // current thread. The teardown below revokes its block authority before
+    // the relaunched instance runs.
     controller
         .notify_exited_live_process(pid)
         .unwrap_or_else(|error| match error {

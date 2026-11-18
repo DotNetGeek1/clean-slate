@@ -1,5 +1,7 @@
 //! Explicit supervisor lifecycle-control capability handles (separate from IPC send caps).
 
+use crate::sync::global_cell::GlobalCell;
+
 const LIFECYCLE_CONTROL_CAPABILITY_CAPACITY: usize = 4;
 const BLOCK_DEVICE_CAPABILITY_CAPACITY: usize = 4;
 
@@ -211,16 +213,19 @@ impl BlockDeviceCapabilityTable {
         Ok(())
     }
 
-    pub(crate) fn revoke_capabilities_for_pid(&mut self, pid: u64) {
+    /// Retires every capability `pid` holds; returns how many.
+    pub(crate) fn revoke_capabilities_for_pid(&mut self, pid: u64) -> usize {
+        let mut revoked = 0;
         for capability in &mut self.capabilities {
             if capability.active && capability.holder_pid == pid {
                 Self::retire_capability(capability);
+                revoked += 1;
             }
         }
+        revoked
     }
 
     /// Active block-device capabilities `pid` holds, on any device.
-    #[cfg(clean_slate_system_init)]
     pub(crate) fn held_by(&self, pid: u64) -> usize {
         self.capabilities
             .iter()
@@ -231,7 +236,6 @@ impl BlockDeviceCapabilityTable {
 
 impl LifecycleControlCapabilityTable {
     /// Active lifecycle-control capabilities `pid` holds.
-    #[cfg(clean_slate_system_init)]
     pub(crate) fn held_by(&self, pid: u64) -> usize {
         self.capabilities
             .iter()
@@ -258,7 +262,6 @@ impl LifecycleControlCapabilityTable {
         }
     }
 
-    #[allow(dead_code)]
     fn retire_capability(capability: &mut LifecycleControlCapability) {
         capability.active = false;
         capability.holder_pid = 0;
@@ -322,19 +325,129 @@ impl LifecycleControlCapabilityTable {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn revoke_capabilities_for_pid(&mut self, pid: u64) {
+    /// Retires every capability `pid` holds; returns how many.
+    pub(crate) fn revoke_capabilities_for_pid(&mut self, pid: u64) -> usize {
+        let mut revoked = 0;
         for capability in &mut self.capabilities {
             if capability.active && capability.holder_pid == pid {
                 Self::retire_capability(capability);
+                revoked += 1;
             }
         }
+        revoked
     }
+}
+
+/// The lifecycle controller's per-pid authority. It lives outside the controller because
+/// process teardown releases it, and a controller method that tears an instance down holds
+/// the controller while the teardown hooks run.
+pub(crate) struct LifecycleCapabilities {
+    pub(crate) lifecycle_control: LifecycleControlCapabilityTable,
+    pub(crate) block_device: BlockDeviceCapabilityTable,
+}
+
+impl LifecycleCapabilities {
+    const fn new() -> Self {
+        Self {
+            lifecycle_control: LifecycleControlCapabilityTable::new(),
+            block_device: BlockDeviceCapabilityTable::new(),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.lifecycle_control.clear();
+        self.block_device.clear();
+    }
+
+    /// Lifecycle-control and block-device capabilities `pid` holds, in that order.
+    pub(crate) fn held_by(&self, pid: u64) -> (usize, usize) {
+        (
+            self.lifecycle_control.held_by(pid),
+            self.block_device.held_by(pid),
+        )
+    }
+
+    /// Active capabilities in both tables, over every holder.
+    #[cfg(clean_slate_desktop_snapshot)]
+    pub(crate) fn live_count(&self) -> usize {
+        self.lifecycle_control
+            .capabilities
+            .iter()
+            .filter(|capability| capability.active)
+            .count()
+            + self
+                .block_device
+                .capabilities
+                .iter()
+                .filter(|capability| capability.active)
+                .count()
+    }
+
+    /// Revokes every lifecycle-control and block-device capability `pid` holds; returns how
+    /// many.
+    pub(crate) fn revoke_for_pid(&mut self, pid: u64) -> usize {
+        self.lifecycle_control.revoke_capabilities_for_pid(pid)
+            + self.block_device.revoke_capabilities_for_pid(pid)
+    }
+}
+
+static LIFECYCLE_CAPABILITIES: GlobalCell<LifecycleCapabilities> =
+    GlobalCell::new(LifecycleCapabilities::new());
+
+/// Returns the lifecycle-control and block-device capability tables.
+///
+/// # Safety
+/// The caller must ensure no other live reference to the tables exists for the lifetime of the
+/// returned reference.
+pub(crate) unsafe fn lifecycle_capabilities_mut() -> &'static mut LifecycleCapabilities {
+    unsafe { &mut *LIFECYCLE_CAPABILITIES.get() }
+}
+
+/// Teardown: revokes everything `pid` holds in the lifecycle capability tables.
+pub(crate) fn on_holder_exit(pid: u64) -> usize {
+    unsafe { lifecycle_capabilities_mut() }.revoke_for_pid(pid)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn holder_exit_revokes_both_tables_and_only_that_pid() {
+        let tables = unsafe { lifecycle_capabilities_mut() };
+        tables.clear();
+        let lifecycle = tables
+            .lifecycle_control
+            .grant_lifecycle_control_capability(7)
+            .expect("grant lifecycle control");
+        let block = tables
+            .block_device
+            .grant_block_device_capability(7, 1)
+            .expect("grant block device");
+        tables
+            .block_device
+            .grant_block_device_capability(8, 1)
+            .expect("grant another holder");
+        assert_eq!(tables.held_by(7), (1, 1));
+
+        assert_eq!(on_holder_exit(7), 2);
+        let tables = unsafe { lifecycle_capabilities_mut() };
+        assert_eq!(tables.held_by(7), (0, 0));
+        assert_eq!(tables.held_by(8), (0, 1));
+        assert_eq!(
+            tables
+                .lifecycle_control
+                .authorize_lifecycle_control(7, lifecycle),
+            Err(LifecycleControlCapabilityError::StaleHandle)
+        );
+        assert_eq!(
+            tables
+                .block_device
+                .authorize_block_device_access(7, block, 1),
+            Err(BlockDeviceCapabilityError::StaleHandle)
+        );
+        assert_eq!(on_holder_exit(7), 0, "a second release finds nothing");
+    }
 
     #[test]
     fn lifecycle_control_capability_authorizes_only_granted_process() {
