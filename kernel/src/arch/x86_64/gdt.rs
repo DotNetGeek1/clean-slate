@@ -1,4 +1,5 @@
-//! Global descriptor table, task-state segment and the double-fault stack.
+//! Global descriptor table, task-state segment and the IST stacks (double fault, NMI,
+//! machine check).
 //!
 //! Why unsafe: loading the GDT/TSS and reloading segment registers changes the
 //! privilege model of the running CPU; `GDT_STATE`/`TSS_STATE` are global cells
@@ -17,12 +18,16 @@ use x86_64::VirtAddr;
 
 use crate::arch::x86_64::asm::SYSCALL_KERNEL_STACK_TOP;
 use crate::arch::x86_64::guarded_stack::GuardedStack;
-use crate::arch::x86_64::idt::DOUBLE_FAULT_IST_INDEX;
+use crate::arch::x86_64::idt::{DOUBLE_FAULT_IST_INDEX, MACHINE_CHECK_IST_INDEX, NMI_IST_INDEX};
 use crate::sync::global_cell::GlobalCell;
 
 const DOUBLE_FAULT_STACK_SIZE: usize = 16 * 1024;
+const IST_STACK_SIZE: usize = 16 * 1024;
 
 pub(crate) type DoubleFaultStack = GuardedStack<DOUBLE_FAULT_STACK_SIZE>;
+/// NMI and #MC can arrive between SYSCALL's stack switch and `sysretq`, where RSP is the user
+/// stack at CPL0, so they always switch to a stack of their own.
+pub(crate) type IstStack = GuardedStack<IST_STACK_SIZE>;
 
 pub(crate) struct GdtState {
     table: GlobalDescriptorTable,
@@ -36,18 +41,25 @@ pub(crate) struct GdtState {
 
 pub(crate) static DOUBLE_FAULT_STACK: GlobalCell<DoubleFaultStack> =
     GlobalCell::new(DoubleFaultStack::new());
+pub(crate) static NMI_STACK: GlobalCell<IstStack> = GlobalCell::new(IstStack::new());
+pub(crate) static MACHINE_CHECK_STACK: GlobalCell<IstStack> = GlobalCell::new(IstStack::new());
 pub(crate) static GDT_STATE: GlobalCell<Option<GdtState>> = GlobalCell::new(None);
 static TSS_STATE: GlobalCell<Option<TaskStateSegment>> = GlobalCell::new(None);
 
 pub(super) fn initialize_gdt_and_tss() {
-    let double_fault_stack_top = {
-        let stack = unsafe { &*DOUBLE_FAULT_STACK.get() };
-        VirtAddr::new(stack.top())
+    let (double_fault_stack_top, nmi_stack_top, machine_check_stack_top) = unsafe {
+        (
+            VirtAddr::new((*DOUBLE_FAULT_STACK.get()).top()),
+            VirtAddr::new((*NMI_STACK.get()).top()),
+            VirtAddr::new((*MACHINE_CHECK_STACK.get()).top()),
+        )
     };
 
     let tss_slot = unsafe { &mut *TSS_STATE.get() };
     let mut tss = TaskStateSegment::new();
     tss.interrupt_stack_table[(DOUBLE_FAULT_IST_INDEX - 1) as usize] = double_fault_stack_top;
+    tss.interrupt_stack_table[(NMI_IST_INDEX - 1) as usize] = nmi_stack_top;
+    tss.interrupt_stack_table[(MACHINE_CHECK_IST_INDEX - 1) as usize] = machine_check_stack_top;
     *tss_slot = Some(tss);
 
     let tss_ref = unsafe {
@@ -124,6 +136,10 @@ pub(crate) fn register_gdt_tss_carve_outs() -> Result<(), &'static str> {
     let df = unsafe { &*DOUBLE_FAULT_STACK.get() };
     let df_start = df.guard_start();
     register_kernel_low_carve_out(df_start, df_start + size_of::<DoubleFaultStack>() as u64)?;
+    for stack in [&NMI_STACK, &MACHINE_CHECK_STACK] {
+        let start = unsafe { &*stack.get() }.guard_start();
+        register_kernel_low_carve_out(start, start + size_of::<IstStack>() as u64)?;
+    }
     let gdt_start = GDT_STATE.get() as *const _ as u64;
     register_kernel_low_carve_out(gdt_start, gdt_start + size_of::<GdtState>() as u64)?;
     let tss_start = TSS_STATE.get() as *const _ as u64;

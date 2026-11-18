@@ -144,6 +144,21 @@ pub(crate) fn send_self_ipi(vector: u8) {
     );
 }
 
+/// NMI to this CPU by physical destination: the SDM allows only fixed delivery with the
+/// self shorthand.
+#[cfg(feature = "m2-kernel-guards-self-test")]
+pub(crate) fn send_nmi_to_self() {
+    const APIC_REGISTER_ICR_HIGH: usize = 0x310;
+    const APIC_REGISTER_ICR_LOW: usize = 0x300;
+    const APIC_ICR_DELIVERY_NMI: u32 = 0b100 << 8;
+    const APIC_ICR_LEVEL_ASSERT: u32 = 1 << 14;
+    local_apic_write(APIC_REGISTER_ICR_HIGH, u32::from(local_apic_id()) << 24);
+    local_apic_write(
+        APIC_REGISTER_ICR_LOW,
+        APIC_ICR_DELIVERY_NMI | APIC_ICR_LEVEL_ASSERT,
+    );
+}
+
 /// This CPU's local APIC ID: the physical destination for MSI and I/O APIC routes.
 pub(crate) fn local_apic_id() -> u8 {
     (local_apic_read(APIC_REGISTER_ID) >> 24) as u8

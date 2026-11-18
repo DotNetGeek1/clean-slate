@@ -363,6 +363,11 @@ extern "C" fn clean_slate_interrupt_dispatch(context: *mut InterruptContext) -> 
 }
 
 fn handle_exception(context: &InterruptContext) -> u64 {
+    #[cfg(feature = "m2-kernel-guards-self-test")]
+    if let Some(resume_frame) = crate::selftest::m2_kernel_guards::on_exception(context) {
+        return resume_frame;
+    }
+
     if context.vector as usize == DOUBLE_FAULT_VECTOR {
         handle_double_fault(context)
     }

@@ -14,11 +14,10 @@ use std::time::Duration;
 use crate::m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
 use crate::{
     run_driven_vm_acceptance, run_vm_inner_with_config, workspace_root, MarkerSet, MarkerStep,
-    NoDriver, VmLaunchConfig, XtaskError, M5_DATA_DISK_SIZE_BYTES,
+    NoDriver, VmLaunchConfig, XtaskError, M5_DATA_DISK_SIZE_BYTES, RDRAND_CPU_MODEL,
 };
 
 pub(crate) const SYSTEM_DATA_DISK_FILENAME: &str = "system-data.img";
-const CPU_MODEL: &str = "qemu64,+rdrand";
 const STORAGE_SERVICE: u32 = 0x5100;
 const NETWORK_SERVICE: u32 = 0x5200;
 const SHELL_SERVICE: u32 = 0x5400;
@@ -156,7 +155,7 @@ pub(crate) fn system_vm_config(data_disk: PathBuf, fixture_port: Option<u16>) ->
     VmLaunchConfig {
         m5_data_disk: Some(data_disk),
         m7_fixture_port: fixture_port,
-        cpu_model: Some(CPU_MODEL),
+        cpu_model: Some(RDRAND_CPU_MODEL),
         ..VmLaunchConfig::default()
     }
 }
@@ -726,7 +725,7 @@ mod tests {
         let disk = PathBuf::from("DISK.img");
         let without = system_vm_config(disk.clone(), None);
         assert_eq!(without.m5_data_disk.as_deref(), Some(disk.as_path()));
-        assert_eq!(without.cpu_model, Some("qemu64,+rdrand"));
+        assert_eq!(without.cpu_model, Some("qemu64,+rdrand,+smep,+smap,+umip"));
         assert_eq!(without.m7_fixture_port, None);
         assert!(!without.kernel_release);
         assert_eq!(system_vm_config(disk, Some(9)).m7_fixture_port, Some(9));

@@ -1,22 +1,25 @@
 //! CPU-local register helpers: interrupt flag control, RFLAGS/CS/RSP reads,
-//! the CR0.WP toggle used while editing live page tables and the boot-time
-//! EFER.NXE enable.
+//! the CR0.WP toggle used while editing live page tables, the boot-time
+//! EFER.NXE enable and the boot-time supervisor guards (CR0.WP, CR4.SMEP,
+//! CR4.UMIP).
 //!
-//! Why unsafe: `sti`/`cli` and CR0 writes change global CPU state. Callers of
+//! Why unsafe: `sti`/`cli`, CR0 and CR4 writes change global CPU state. Callers of
 //! `without_interrupts` must not block or yield inside the closure; callers of
 //! `without_write_protect` must finish all page-table writes before the guard
 //! restores CR0. `__cpuid` only reads identification leaves. No link contracts.
 
 use core::arch::asm;
-use core::arch::x86_64::__cpuid;
+use core::arch::x86_64::{__cpuid, __cpuid_count};
+use core::fmt;
 use core::mem::MaybeUninit;
 
 use x86_64::registers::control::{Cr0, Cr0Flags};
 
 use crate::arch::x86_64::msr::{read_msr, write_msr};
 use crate::arch::x86_64::{
-    bit, nx_supported_from_cpuid, CPUID_EXTENDED_FEATURES_LEAF, CPUID_EXTENDED_MAX_LEAF,
-    IA32_EFER_MSR, IA32_EFER_NXE, RFLAGS_INTERRUPT_ENABLE_BIT,
+    bit, cr4_with_guards, guard_support_from_cpuid, nx_supported_from_cpuid, GuardSupport,
+    CPUID_EXTENDED_FEATURES_LEAF, CPUID_EXTENDED_MAX_LEAF, CPUID_STRUCTURED_FEATURES_LEAF,
+    CR4_SMAP, CR4_SMEP, CR4_UMIP, IA32_EFER_MSR, IA32_EFER_NXE, RFLAGS_INTERRUPT_ENABLE_BIT,
 };
 
 pub(crate) struct NxeReport {
@@ -47,6 +50,87 @@ pub(crate) fn enable_and_verify_nxe() -> Result<NxeReport, &'static str> {
         return Err("EFER.NXE did not latch");
     }
     Ok(NxeReport { firmware_had_nxe })
+}
+
+/// What [`enable_kernel_guards`] found and left set; its `Display` is the boot line's fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GuardReport {
+    pub(crate) support: GuardSupport,
+    pub(crate) firmware_wp: bool,
+    pub(crate) smep: bool,
+    pub(crate) smap: bool,
+    pub(crate) umip: bool,
+}
+
+fn guard_state(supported: bool, enabled: bool) -> &'static str {
+    match (supported, enabled) {
+        (_, true) => "on",
+        (true, false) => "off",
+        (false, false) => "unsupported",
+    }
+}
+
+impl fmt::Display for GuardReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "wp=on smep={} smap={} umip={} firmware_wp={}",
+            guard_state(self.support.smep, self.smep),
+            guard_state(self.support.smap, self.smap),
+            guard_state(self.support.umip, self.umip),
+            self.firmware_wp as u8
+        )
+    }
+}
+
+/// Sets CR0.WP, so a supervisor write to a read-only page faults, and CR4.SMEP and CR4.UMIP
+/// when CPUID reports them. Fails if a bit does not latch. CR0 and CR4 are per CPU: every
+/// additional core must call this before running kernel code that relies on the guards.
+pub(crate) fn enable_kernel_guards() -> Result<GuardReport, &'static str> {
+    let max_basic_leaf = unsafe { __cpuid(0) }.eax;
+    let (ebx, ecx) = if max_basic_leaf >= CPUID_STRUCTURED_FEATURES_LEAF {
+        let leaf = unsafe { __cpuid_count(CPUID_STRUCTURED_FEATURES_LEAF, 0) };
+        (leaf.ebx, leaf.ecx)
+    } else {
+        (0, 0)
+    };
+    let support = guard_support_from_cpuid(max_basic_leaf, ebx, ecx);
+
+    let cr0 = Cr0::read();
+    let firmware_wp = cr0.contains(Cr0Flags::WRITE_PROTECT);
+    if !firmware_wp {
+        unsafe { Cr0::write(cr0 | Cr0Flags::WRITE_PROTECT) };
+    }
+    if !Cr0::read().contains(Cr0Flags::WRITE_PROTECT) {
+        return Err("CR0.WP did not latch");
+    }
+
+    let cr4 = read_cr4();
+    let desired = cr4_with_guards(cr4, support);
+    if desired != cr4 {
+        unsafe {
+            asm!("mov cr4, {}", in(reg) desired, options(nostack, preserves_flags));
+        }
+    }
+    let cr4 = read_cr4();
+    if cr4 & desired != desired {
+        return Err("CR4 guard bits did not latch");
+    }
+    Ok(GuardReport {
+        support,
+        firmware_wp,
+        smep: cr4 & CR4_SMEP != 0,
+        smap: cr4 & CR4_SMAP != 0,
+        umip: cr4 & CR4_UMIP != 0,
+    })
+}
+
+pub(crate) fn read_cr4() -> u64 {
+    let value: u64;
+    unsafe {
+        asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags));
+    }
+    value
 }
 
 /// This CPU's MAXPHYADDR (CPUID `0x8000_0008` EAX[7:0]).
@@ -152,5 +236,29 @@ impl Drop for Cr0RestoreGuard {
         unsafe {
             Cr0::write(self.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_report_names_each_guard_on_off_or_unsupported() {
+        let report = GuardReport {
+            support: GuardSupport {
+                smep: true,
+                smap: true,
+                umip: false,
+            },
+            firmware_wp: true,
+            smep: true,
+            smap: false,
+            umip: false,
+        };
+        assert_eq!(
+            format!("{report}"),
+            "wp=on smep=on smap=off umip=unsupported firmware_wp=1"
+        );
     }
 }
