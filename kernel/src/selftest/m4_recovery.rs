@@ -113,9 +113,7 @@ struct TrackedProcess {
     expected_entry_rip: u64,
     user_stack_pointer: u64,
     user_stack_segment: u64,
-    stack_evidence: u64,
     probe_address: u64,
-    observed_value: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -381,9 +379,7 @@ fn map_fixture_process(
         expected_entry_rip: USER_TEST_CODE_ADDRESS + userspace_after_entry_offset(),
         user_stack_pointer,
         user_stack_segment: gdt_state.user_data_selector.0 as u64,
-        stack_evidence: page.stack_evidence,
         probe_address: page.probe_address,
-        observed_value: page.observed_value,
     })
 }
 
@@ -499,9 +495,7 @@ fn map_supervisor_process(
             expected_entry_rip: entry_rip,
             user_stack_pointer,
             user_stack_segment: gdt_state.user_data_selector.0 as u64,
-            stack_evidence: 0,
             probe_address: 0,
-            observed_value: 0,
         },
         data_frame,
     ))
