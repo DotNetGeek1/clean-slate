@@ -245,10 +245,12 @@ fn check_fault(segment: &str, state: State) -> Result<State, String> {
         network,
     } = state;
     let armed = format!(
-        "[HOOK] network fault armed pid={} gen={} user_rip=0x0",
+        "[HOOK] network fault armed pid={} gen={} user_rip=0x0 parked-in=native",
         network.pid, network.generation
     );
-    if only_kernel_line(segment, "[HOOK] network fault armed ")? != armed {
+    let line = only_kernel_line(segment, "[HOOK] network fault armed ")?;
+    // The trailing ` at-ms=` stamp is for the desktop lane's timing report.
+    if line.split(" at-ms=").next() != Some(armed.as_str()) {
         return Err(format!("expected {armed:?}"));
     }
     let fault_prefix = format!("[PROC] fault pid={} vector=14 ", network.pid);
@@ -626,7 +628,7 @@ mod tests {
 
     fn fault() -> String {
         format!(
-            "[HOOK] network fault armed pid={NET1} gen=1 user_rip=0x0\n\
+            "[HOOK] network fault armed pid={NET1} gen=1 user_rip=0x0 parked-in=native\n\
              [PROC] fault pid={NET1} vector=14 err=0x14\n\
              [PROC] fault rip=0x0000000000000000 cr2=0x0000000000000000 instruction_fetch=1\n\
              [NET ] linux sockets lost count=1 reason=instance-gone\n\

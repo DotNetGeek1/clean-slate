@@ -49,6 +49,8 @@ fn idle_thread_one_wait() {
         without_interrupts(|| crate::service::desktop_launch::on_idle(crate::time::monotonic_ns()));
     #[cfg(not(feature = "m10-desktop"))]
     let made_ready = false;
+    #[cfg(feature = "system-test-hooks")]
+    without_interrupts(crate::service::system_test_hooks::on_idle);
     if !made_ready {
         enable_interrupts_and_halt();
     }

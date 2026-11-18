@@ -5,7 +5,16 @@
 //!    six. Each desktop row must hold exactly its manifest grants (the kernel's `[GFX ]`, `[DISP]`
 //!    and `[SEAT]` grant lines, then a launch audit that matches the row), report ready from its
 //!    launched pid with the bindings the kernel observes, and the compositor must have submitted a
-//!    frame before it reports ready. Init settles with six rows running. No input is scripted.
+//!    frame before it reports ready. Init settles with six rows running and the hooks build
+//!    prints its desktop resource baseline. Then, over COM1 (S6d), the host faults the
+//!    compositor, the desktop shell and the app in turn ([`check_row_fault`]): each faulted row is reaped
+//!    with no residue; on a compositor fault the shell and app see the port go and exit with
+//!    `reason=compositor-gone`, nothing kills them; init relaunches every row that went, at a
+//!    new pid and generation, each only once the row it depends on is ready again; rows that did
+//!    not go keep their pids; a new compositor serves a new port generation, the clients'
+//!    grants name it and a record for the old generation is refused as stale; the resource
+//!    counts return to the baseline and init settles again. Last, the serial shell must answer
+//!    a command. No pointer or keyboard input is scripted.
 //! 2. **No display** (D4). The same entry with `-vga none` and no GPU: the kernel says once that
 //!    the desktop has no display output, declares the base rows only, and init boots base.
 
@@ -13,9 +22,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::system_boot::{
-    check_no_desktop_rows, desktop_qemu_args, field, number, start_shell_fixture_peer,
-    system_vm_config,
+    check_no_desktop_rows, field, number, start_shell_fixture_peer, system_vm_config,
 };
+use crate::system_desktop_faults::Step;
 use crate::system_shell::{expected_authority as expected_shell_authority, lines};
 use crate::{
     run_driven_vm_acceptance, AcceptanceDriver, MarkerSet, MarkerStep, VmLaunchConfig, XtaskError,
@@ -92,48 +101,15 @@ const NO_DISPLAY_MARKERS: [MarkerStep<'static>; 5] = [
     MarkerStep::Ordered(SETTLED_BASE),
 ];
 
-/// Fails the boot as soon as init gives up on a row, and times each desktop row from its launch
-/// line to its ready line as the host receives them.
+/// Fails the no-display boot as soon as init gives up on a row.
 #[derive(Default)]
 struct DesktopWatch {
     serial: String,
-    launched: [Option<Instant>; 3],
-    ready: [Option<Instant>; 3],
-}
-
-impl DesktopWatch {
-    fn report(&self) {
-        for (index, service) in DESKTOP_ROWS.iter().enumerate() {
-            if let (Some(launched), Some(ready)) = (self.launched[index], self.ready[index]) {
-                println!(
-                    "[STM ] desktop row service={service} launch-to-ready={} ms (init's ready timeout is 10000 ms)",
-                    ready.duration_since(launched).as_millis()
-                );
-            }
-        }
-    }
 }
 
 impl AcceptanceDriver for DesktopWatch {
     fn on_serial(&mut self, text: &str, _deadline: Instant) -> Result<(), XtaskError> {
         self.serial.push_str(text);
-        let now = Instant::now();
-        for (index, service) in DESKTOP_ROWS.iter().enumerate() {
-            if self.launched[index].is_none()
-                && self
-                    .serial
-                    .contains(&format!("[SVC ] launch service={service} "))
-            {
-                self.launched[index] = Some(now);
-            }
-            if self.ready[index].is_none()
-                && self
-                    .serial
-                    .contains(&format!("[SVC ] ready service={service} "))
-            {
-                self.ready[index] = Some(now);
-            }
-        }
         match lines(&self.serial).find(|line| GIVE_UP_LINES.iter().any(|gave| line.contains(gave)))
         {
             Some(line) => Err(XtaskError::Validation(format!(
@@ -146,22 +122,27 @@ impl AcceptanceDriver for DesktopWatch {
 
 /// Both boots, on `disk`; the shell boot that follows gets a fresh disk.
 pub(crate) fn run(features: &[&str], disk: &Path) -> Result<(), XtaskError> {
-    println!("[STM ] desktop boot: fw_cfg opt/clean-slate/desktop=q1 with virtio-gpu-pci");
-    let mut watch = DesktopWatch::default();
-    let output = boot(
+    println!(
+        "[STM ] desktop boot: fw_cfg opt/clean-slate/desktop=q1 with virtio-gpu-pci, COM1 driven"
+    );
+    let mut check = |done: usize, segment: &str, before: Option<&Desktop>| {
+        let result = check_desktop_step(done, segment, before);
+        if let (Ok(after), Some(before)) = (&result, before) {
+            report_step(done, segment, before, after);
+        }
+        result
+    };
+    let (_, states) = crate::system_desktop_faults::drive(
         features,
         disk,
-        desktop_qemu_args(false),
-        &DESKTOP_MARKERS,
-        &mut watch,
-    )
-    .map_err(|error| XtaskError::Validation(format!("desktop boot: {error}")))?;
-    watch.report();
-    let summary = check_desktop_boot(&output)
-        .map_err(|reason| XtaskError::Validation(format!("desktop boot: {reason}")))?;
+        &DESKTOP_STEPS,
+        &FORBIDDEN,
+        &mut check,
+    )?;
+    let (first, last) = (&states[0], &states[states.len() - 1]);
     println!(
-        "[STM ] desktop boot: six rows running; compositor pid={} serves port {} and submitted {} presents before ready, desktop shell pid={} and app pid={} connected to it",
-        summary.compositor_pid, summary.port, summary.presents, summary.shell_pid, summary.app_pid
+        "[STM ] desktop boot: six rows running, compositor port {}; the compositor, the desktop shell and the app each faulted and came back in dependency order (compositor pid={} gen={} port {} at the end), resources matched the baseline after each, and the serial shell answered",
+        first.port, last.rows[0].pid, last.rows[0].generation, last.port
     );
 
     println!("[STM ] desktop boot with no display: opt/clean-slate/desktop=q1, -vga none, no GPU");
@@ -436,6 +417,421 @@ fn check_desktop_boot(output: &str) -> Result<DesktopSummary, String> {
         port,
         presents,
     })
+}
+
+/// What the desktop boot types: each desktop row's fault byte (`system-test-hooks`), the row
+/// the others depend on first, then a command the serial shell must answer.
+const DESKTOP_STEPS: [Step; 4] = [
+    Step {
+        name: "compositor fault",
+        send: b"\x1d",
+    },
+    Step {
+        name: "desktop shell fault",
+        send: b"\x1e",
+    },
+    Step {
+        name: "app fault",
+        send: b"\x1f",
+    },
+    Step {
+        name: "serial shell",
+        send: b"echo hel''lo-desktop\r",
+    },
+];
+/// The desktop row each fault step faults, as an index into [`DESKTOP_ROWS`].
+const FAULTED_ROW: [usize; 3] = [0, 1, 2];
+const ROW_NAMES: [&str; 3] = ["compositor", "desktop-shell", "app"];
+const CLIENT_TAGS: [&str; 3] = ["[COMP]", "[SHELL]", "[APP ]"];
+const RESTART_LABELS: [&str; 3] = ["compositor-restart", "desktop-shell-restart", "app-restart"];
+const SHELL_ANSWER: &str = "hello-desktop";
+const FORBIDDEN: [&str; 3] = ["[FAIL]", GIVE_UP_LINES[0], GIVE_UP_LINES[1]];
+
+/// One desktop row's live instance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Row {
+    pid: u64,
+    generation: u64,
+}
+
+/// The desktop as the lane knows it after the boot or a step.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Desktop {
+    init_pid: u64,
+    /// Compositor, desktop shell, app.
+    rows: [Row; 3],
+    /// `21248:<generation>`, as the grant lines name the compositor's port.
+    port: String,
+    /// The `[RSRC] baseline` counts after its pids.
+    baseline: String,
+}
+
+fn check_desktop_step(
+    done: usize,
+    segment: &str,
+    before: Option<&Desktop>,
+) -> Result<Desktop, String> {
+    match (done, before) {
+        (0, _) => check_baseline_boot(segment),
+        (step, Some(before)) if step <= FAULTED_ROW.len() => {
+            check_row_fault(segment, before, FAULTED_ROW[step - 1])
+        }
+        (_, Some(before)) => {
+            if lines(segment).any(|line| line == SHELL_ANSWER) {
+                Ok(before.clone())
+            } else {
+                Err(format!("the serial shell has not printed {SHELL_ANSWER:?}"))
+            }
+        }
+        (_, None) => Err("no state before a step".to_owned()),
+    }
+}
+
+/// The rest of the newline-terminated line in `segment` that starts with `prefix`, and where
+/// it starts. A line still arriving does not count.
+fn whole_line<'a>(segment: &'a str, prefix: &str) -> Option<(usize, &'a str)> {
+    let at = segment.find(prefix)?;
+    let rest = &segment[at + prefix.len()..];
+    let end = rest.find('\n')?;
+    Some((at, rest[..end].trim_end_matches('\r')))
+}
+
+fn position(segment: &str, needle: &str) -> Result<usize, String> {
+    segment.find(needle).ok_or_else(|| format!("no {needle:?}"))
+}
+
+/// The boot: the S6c checks, init settled with six rows, and the hooks build's resource
+/// baseline taken with the six rows' desktop pids.
+fn check_baseline_boot(segment: &str) -> Result<Desktop, String> {
+    let mut tracker = crate::MarkerTracker::from_steps(&DESKTOP_MARKERS);
+    if !tracker.consume(segment) {
+        return Err(match tracker.mismatch() {
+            Some(mismatch) => format!("boot marker mismatch: {mismatch}"),
+            None => format!("boot waiting for {:?}", tracker.pending_label()),
+        });
+    }
+    let summary = check_desktop_boot(segment)?;
+    let init_pid = number(only(segment, "[KERN] init launched pid=")?, "pid")?;
+    let mut rows = [Row {
+        pid: 0,
+        generation: 0,
+    }; 3];
+    for (row, service) in rows.iter_mut().zip(DESKTOP_ROWS) {
+        let launch = only(segment, &format!("[SVC ] launch service={service} "))?;
+        *row = Row {
+            pid: number(launch, "pid")?,
+            generation: number(launch, "gen")?,
+        };
+    }
+    let pids = format!(
+        "compositor={} desktop-shell={} app={} ",
+        summary.compositor_pid, summary.shell_pid, summary.app_pid
+    );
+    let (_, baseline) = whole_line(segment, &format!("[RSRC] baseline {pids}"))
+        .ok_or_else(|| format!("no complete \"[RSRC] baseline {pids}...\" line"))?;
+    Ok(Desktop {
+        init_pid,
+        rows,
+        port: summary.port,
+        baseline: baseline.to_owned(),
+    })
+}
+
+/// A restarted row's new instance in `segment`: one launch with a new pid at the next
+/// generation, its launch audit, its ready line from that pid, and init's announcement.
+/// Returns it with the offsets of its launch and ready lines.
+fn check_relaunch(
+    segment: &str,
+    row: usize,
+    before: Row,
+    init_pid: u64,
+) -> Result<(Row, usize, usize), String> {
+    let service = DESKTOP_ROWS[row];
+    let name = ROW_NAMES[row];
+    let launch = only(segment, &format!("[SVC ] launch service={service} "))
+        .map_err(|reason| format!("{name} was not relaunched: {reason}"))?;
+    let now = Row {
+        pid: number(launch, "pid")?,
+        generation: number(launch, "gen")?,
+    };
+    if now.pid == before.pid || now.generation != before.generation + 1 {
+        return Err(format!(
+            "{name} relaunched as pid={} gen={}, expected a new pid at gen={}",
+            now.pid,
+            now.generation,
+            before.generation + 1
+        ));
+    }
+    let audit = only(segment, &format!("[SVC ] authority service={service} "))?;
+    if audit != expected_audit(service, now.pid) {
+        return Err(format!("{name} relaunch audit {audit:?}"));
+    }
+    let (ready_at, ready) = whole_line(segment, &format!("[SVC ] ready service={service} "))
+        .ok_or_else(|| format!("{name} pid={} has not reported ready", now.pid))?;
+    if number(ready, "pid")? != now.pid
+        || number(ready, "gen")? != now.generation
+        || field(ready, "source") != Some("live-instance")
+    {
+        return Err(format!(
+            "{name} relaunched as pid={} but ready says {ready:?}",
+            now.pid
+        ));
+    }
+    check_bindings(service, ready)?;
+    let announced = format!(
+        "[IPC ] console pid={init_pid}: [INIT] service={service} ready gen={}",
+        now.generation
+    );
+    position(segment, &announced)?;
+    Ok((now, position(segment, launch)?, ready_at))
+}
+
+/// Everything faulting desktop row `row` must cause, in `segment` (the output since its byte
+/// was typed), checked in the order it happens so a failure names the first missing piece.
+fn check_row_fault(segment: &str, before: &Desktop, row: usize) -> Result<Desktop, String> {
+    let name = ROW_NAMES[row];
+    let victim = before.rows[row];
+    let init = before.init_pid;
+    let armed = format!(
+        "[HOOK] {name} fault armed pid={} gen={} user_rip=0x0 parked-in=restart",
+        victim.pid, victim.generation
+    );
+    if whole_line(segment, &armed).is_none() {
+        return Err(format!(
+            "hook step: the {name} fault did not arm with its restart wait redirected: no {armed:?}"
+        ));
+    }
+    let faulted_at = position(
+        segment,
+        &format!("[PROC] fault pid={} vector=14 ", victim.pid),
+    )?;
+    // The faulted row, and on a compositor fault its clients, which must see the port go.
+    let gone: &[usize] = if row == 0 { &[0, 1, 2] } else { &[row] };
+    // Order first, so a row started early is named even while the rest is still arriving.
+    for pair in gone.windows(2) {
+        let (dependency, dependent) = (pair[0], pair[1]);
+        let restart = format!("[SUP ] restart service={} ", DESKTOP_ROWS[dependent]);
+        let ready = format!("[SVC ] ready service={} ", DESKTOP_ROWS[dependency]);
+        if let Some(restart_at) = segment.find(&restart) {
+            if segment
+                .find(&ready)
+                .is_none_or(|ready_at| ready_at > restart_at)
+            {
+                return Err(format!(
+                    "order: init restarted {} before the new {} was ready",
+                    ROW_NAMES[dependent], ROW_NAMES[dependency]
+                ));
+            }
+        }
+    }
+    for &index in gone {
+        let pid = before.rows[index].pid;
+        if index != row {
+            let exit = format!(
+                "[IPC ] console pid={pid}: {} exit reason=compositor-gone",
+                CLIENT_TAGS[index]
+            );
+            if !segment.contains(&exit) {
+                return Err(format!(
+                    "{} pid={pid} did not exit with reason=compositor-gone: no {exit:?}",
+                    ROW_NAMES[index]
+                ));
+            }
+        }
+        let prefix = format!("[SVC ] reaped service={} pid={pid} ", DESKTOP_ROWS[index]);
+        let (_, reaped) = whole_line(segment, &prefix).ok_or_else(|| {
+            format!(
+                "{} pid={pid} was not reaped: no {prefix:?}",
+                ROW_NAMES[index]
+            )
+        })?;
+        if reaped != "residue=0" {
+            return Err(format!(
+                "{} pid={pid} reaped with {reaped:?}",
+                ROW_NAMES[index]
+            ));
+        }
+    }
+    if let Some(line) = lines(segment).find(|line| line.contains("[SVC ] terminate")) {
+        return Err(format!("the kernel terminated a process: {line:?}"));
+    }
+
+    // Relaunches, each only once the row before it in dependency order is ready again.
+    let mut after = before.clone();
+    let mut ready_before = faulted_at;
+    let mut previous = "the fault";
+    for &index in gone {
+        let restart = format!(
+            "[IPC ] console pid={init}: [SUP ] restart service={} attempt=1",
+            DESKTOP_ROWS[index]
+        );
+        let restart_at = position(segment, &restart)
+            .map_err(|reason| format!("init did not restart {}: {reason}", ROW_NAMES[index]))?;
+        let order = || {
+            format!(
+                "order: init restarted {} before {previous}",
+                ROW_NAMES[index]
+            )
+        };
+        if restart_at < ready_before {
+            return Err(order());
+        }
+        let (now, launch_at, ready_at) = check_relaunch(segment, index, before.rows[index], init)?;
+        if launch_at < ready_before {
+            return Err(order());
+        }
+        ready_before = ready_at;
+        previous = match index {
+            0 => "the new compositor was ready",
+            _ => "the new desktop shell was ready",
+        };
+        after.rows[index] = now;
+    }
+    let restarts = lines(segment)
+        .filter(|line| line.contains("[SUP ] restart service="))
+        .count();
+    if restarts != gone.len() {
+        return Err(format!("{restarts} restarts, expected {}", gone.len()));
+    }
+    for (index, service) in DESKTOP_ROWS.iter().enumerate() {
+        if gone.contains(&index) {
+            continue;
+        }
+        let pid = before.rows[index].pid;
+        if segment.contains(&format!("[SVC ] launch service={service} "))
+            || segment.contains(&format!(
+                "[IPC ] console pid={pid}: {} exit",
+                CLIENT_TAGS[index]
+            ))
+        {
+            return Err(format!(
+                "{} pid={pid} should have kept running through the {name} restart",
+                ROW_NAMES[index]
+            ));
+        }
+    }
+
+    // Grants name the live port; after a compositor restart the old generation is refused.
+    if row == 0 {
+        let prefix = format!(
+            "[GFX ] authority granted pid={} port={COMPOSITOR}:",
+            after.rows[0].pid
+        );
+        let (_, rest) = whole_line(segment, &prefix).ok_or_else(|| format!("no {prefix:?}"))?;
+        let generation = rest
+            .strip_suffix(" rights=serve registered=1")
+            .ok_or_else(|| format!("unexpected compositor grant {rest:?}"))?;
+        after.port = format!("{COMPOSITOR}:{generation}");
+        if after.port == before.port {
+            return Err(format!(
+                "the new compositor serves the old port {}",
+                before.port
+            ));
+        }
+    }
+    for (index, rights) in [(1, "connect,shell"), (2, "connect")] {
+        if !gone.contains(&index) {
+            continue;
+        }
+        let grant = format!(
+            "[GFX ] authority granted pid={} port={} rights={rights}",
+            after.rows[index].pid, after.port
+        );
+        if whole_line(segment, &grant).is_none_or(|(_, rest)| !rest.is_empty()) {
+            return Err(format!("{} grant: expected {grant:?}", ROW_NAMES[index]));
+        }
+        if row == 0 {
+            let probe = format!(
+                "[HOOK] stale generation probe service={} pid={} port={} live={} result=stale revoked=1",
+                DESKTOP_ROWS[index], after.rows[index].pid, before.port, after.port
+            );
+            if whole_line(segment, &probe).is_none() {
+                return Err(format!("stale generation: expected {probe:?}"));
+            }
+        }
+    }
+    // A client relaunched later still probes the compositor's retired generation; it must
+    // still be refused.
+    if let Some(line) = lines(segment).find(|line| {
+        line.contains("[HOOK] stale generation") && !line.ends_with(" result=stale revoked=1")
+    }) {
+        return Err(format!(
+            "stale generation: the retired port was not refused: {line:?}"
+        ));
+    }
+
+    // Back to the baseline once the desktop is quiet, and init settled again.
+    let [compositor, shell, app] = after.rows.map(|row| row.pid);
+    let prefix =
+        format!("[RSRC] snapshot compositor={compositor} desktop-shell={shell} app={app} ");
+    let (_, counts) = whole_line(segment, &prefix)
+        .ok_or_else(|| format!("residue: no complete {prefix:?} line"))?;
+    if counts != before.baseline {
+        return Err(format!(
+            "residue after the {name} restart: {counts:?}, baseline {:?}",
+            before.baseline
+        ));
+    }
+    let compare = format!(
+        "[RSRC] compare after={} baseline=match",
+        RESTART_LABELS[row]
+    );
+    if whole_line(segment, &compare).is_none() {
+        return Err(format!("residue: no {compare:?}"));
+    }
+    let settled = format!("[IPC ] console pid={init}: {SETTLED_DESKTOP}");
+    if segment.rfind(&settled).is_none_or(|at| at < ready_before) {
+        return Err(format!("init has not settled again: no {settled:?}"));
+    }
+    Ok(after)
+}
+
+/// A fault step's restart timing on the guest's clock, from the hooks build's `at-ms` stamps:
+/// each relaunched row's launch and ready, in milliseconds after the fault was armed.
+fn report_step(done: usize, segment: &str, before: &Desktop, after: &Desktop) {
+    let Some(&row) = done.checked_sub(1).and_then(|step| FAULTED_ROW.get(step)) else {
+        return;
+    };
+    let stamp = |prefix: String| {
+        whole_line(segment, &prefix).and_then(|(_, rest)| number(rest, "at-ms").ok())
+    };
+    let armed = format!(
+        "[HOOK] {} fault armed pid={} ",
+        ROW_NAMES[row], before.rows[row].pid
+    );
+    let Some(armed_at) = stamp(armed) else { return };
+    let gone: &[usize] = if row == 0 { &[0, 1, 2] } else { &[row] };
+    let since = |at: Option<u64>| at.map_or("?".to_owned(), |at| format!("+{}ms", at - armed_at));
+    let timings: Vec<String> = gone
+        .iter()
+        .map(|&index| {
+            let (service, pid) = (DESKTOP_ROWS[index], after.rows[index].pid);
+            format!(
+                "{} launched {} ready {}",
+                ROW_NAMES[index],
+                since(stamp(format!(
+                    "[HOOK] launched service={service} pid={pid} "
+                ))),
+                since(stamp(format!("[HOOK] ready service={service} pid={pid} ")))
+            )
+        })
+        .collect();
+    println!(
+        "\n[STM ] desktop {:?} guest timing from the fault: {}",
+        DESKTOP_STEPS[done - 1].name,
+        timings.join(", ")
+    );
+    let [compositor, shell, app] = after.rows;
+    println!(
+        "[STM ] desktop now compositor pid={} gen={} desktop shell pid={} gen={} app pid={} gen={} port {}",
+        compositor.pid,
+        compositor.generation,
+        shell.pid,
+        shell.generation,
+        app.pid,
+        app.generation,
+        after.port
+    );
 }
 
 fn check_no_display_boot(output: &str) -> Result<(), String> {

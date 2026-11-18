@@ -29,7 +29,7 @@ use clean_slate_native_abi::{ConnectionId, PortEventRecord, PortRecvRecord, Shar
 #[cfg(any(
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test",
-    feature = "m10-desktop"
+    clean_slate_desktop_snapshot
 ))]
 use clean_slate_port::PortCounts;
 #[cfg(any(
@@ -408,7 +408,7 @@ pub(crate) fn counts_for(holder: HolderId) -> HolderPortCounts {
 #[cfg(any(
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test",
-    feature = "m10-desktop"
+    clean_slate_desktop_snapshot
 ))]
 pub(crate) fn global_counts() -> PortCounts {
     with_ports(|core, _, _| core.global_counts())

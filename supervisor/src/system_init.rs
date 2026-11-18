@@ -1218,4 +1218,204 @@ mod tests {
         assert!(harness.lines_with("[INIT] gave up").is_empty());
         assert_eq!(harness.starts_of(SYSTEM_SHELL_SERVICE_ID), 6);
     }
+
+    use clean_slate_service_fixtures::{
+        COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID, PLAYGROUND_SERVICE_ID,
+    };
+
+    const SETTLED_SIX: &str = "[INIT] boot settled running=6 down=0; waiting, no deadline";
+
+    impl Harness {
+        /// The desktop manifest booted with all six rows ready and init settled, at 4 s.
+        fn boot_desktop_settled() -> Self {
+            use clean_slate_service_fixtures::manifest::SYSTEM_DESKTOP_MANIFEST;
+            let mut harness = Self::boot_manifest(SYSTEM_DESKTOP_MANIFEST);
+            for (service, at) in [
+                (COMPOSITOR_SERVICE_ID, 1),
+                (DESKTOP_SHELL_SERVICE_ID, 2),
+                (PLAYGROUND_SERVICE_ID, 3),
+                (STORAGE_SERVICE_ID, 3),
+                (NETWORK_SERVICE_ID, 4),
+                (SYSTEM_SHELL_SERVICE_ID, 4),
+            ] {
+                harness.report(at * SECOND, service, LifecycleEventKind::Ready);
+            }
+            assert_eq!(harness.lines_with(SETTLED_SIX).len(), 1);
+            harness
+        }
+
+        /// The services init asked the kernel to start since request `from`, in order.
+        fn starts_since(&self, from: usize) -> Vec<ServiceId> {
+            self.requests()[from..]
+                .iter()
+                .filter(|(_, kind)| *kind == ControlRequestKind::Start)
+                .map(|(service, _)| *service)
+                .collect()
+        }
+
+        /// Wakes init at every due deadline up to and including `until`.
+        fn run_until(&mut self, until: u64) {
+            while let Some(deadline) = self.init.next_deadline().filter(|at| *at <= until) {
+                self.init.on_wake(deadline, None);
+            }
+            self.init.on_wake(until, None);
+        }
+
+        fn assert_terminated_nothing(&self) {
+            assert!(
+                !self
+                    .requests()
+                    .iter()
+                    .any(|(_, kind)| *kind == ControlRequestKind::Terminate),
+                "init terminated a service"
+            );
+        }
+    }
+
+    /// S6d: the compositor dies and its clients exit with `compositor-gone`. Init relaunches the
+    /// compositor after the half-second delay, the desktop shell only once the new compositor
+    /// is ready, and the app only once the new shell is ready, however long readiness takes.
+    #[test]
+    fn after_a_compositor_fault_the_desktop_restarts_in_dependency_order() {
+        let mut harness = Harness::boot_desktop_settled();
+        let from = harness.requests().len();
+        let fault = 10 * SECOND;
+        harness.report(fault, COMPOSITOR_SERVICE_ID, LifecycleEventKind::Faulted);
+        harness.report(fault, DESKTOP_SHELL_SERVICE_ID, LifecycleEventKind::Exited);
+        harness.report(fault, PLAYGROUND_SERVICE_ID, LifecycleEventKind::Exited);
+        harness.run_until(fault + SECOND / 2 - 1);
+        assert!(harness.starts_since(from).is_empty(), "restarted early");
+        harness.run_until(fault + SECOND / 2);
+        assert_eq!(harness.starts_since(from), [COMPOSITOR_SERVICE_ID]);
+
+        // The new compositor is slow to report ready; its clients' delays pass meanwhile.
+        harness.run_until(fault + 5 * SECOND);
+        assert_eq!(
+            harness.starts_since(from),
+            [COMPOSITOR_SERVICE_ID],
+            "a client started before the new compositor was ready"
+        );
+        harness.report(
+            fault + 5 * SECOND,
+            COMPOSITOR_SERVICE_ID,
+            LifecycleEventKind::Ready,
+        );
+        assert_eq!(
+            harness.starts_since(from),
+            [COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID]
+        );
+        harness.run_until(fault + 9 * SECOND);
+        assert_eq!(
+            harness.starts_since(from),
+            [COMPOSITOR_SERVICE_ID, DESKTOP_SHELL_SERVICE_ID],
+            "the app started before the new desktop shell was ready"
+        );
+        harness.report(
+            fault + 9 * SECOND,
+            DESKTOP_SHELL_SERVICE_ID,
+            LifecycleEventKind::Ready,
+        );
+        assert_eq!(
+            harness.starts_since(from),
+            [
+                COMPOSITOR_SERVICE_ID,
+                DESKTOP_SHELL_SERVICE_ID,
+                PLAYGROUND_SERVICE_ID
+            ]
+        );
+        harness.report(
+            fault + 10 * SECOND,
+            PLAYGROUND_SERVICE_ID,
+            LifecycleEventKind::Ready,
+        );
+        for generation_line in [
+            "[INIT] service=21248 ready gen=2",
+            "[INIT] service=21249 ready gen=2",
+            "[INIT] service=21250 ready gen=2",
+        ] {
+            assert_eq!(
+                harness.lines_with(generation_line).len(),
+                1,
+                "{generation_line}"
+            );
+        }
+        assert_eq!(harness.lines_with(SETTLED_SIX).len(), 2);
+        assert_terminated_nothing_and_base_untouched(&harness);
+    }
+
+    /// S6d: a desktop shell crash restarts the shell only; the app keeps its instance.
+    #[test]
+    fn a_desktop_shell_fault_restarts_the_shell_and_leaves_the_app_running() {
+        let mut harness = Harness::boot_desktop_settled();
+        let from = harness.requests().len();
+        let fault = 10 * SECOND;
+        harness.report(fault, DESKTOP_SHELL_SERVICE_ID, LifecycleEventKind::Faulted);
+        harness.run_until(fault + SECOND / 2);
+        assert_eq!(harness.starts_since(from), [DESKTOP_SHELL_SERVICE_ID]);
+        harness.report(
+            fault + SECOND,
+            DESKTOP_SHELL_SERVICE_ID,
+            LifecycleEventKind::Ready,
+        );
+        harness.run_until(fault + 10 * SECOND);
+        assert_eq!(harness.starts_since(from), [DESKTOP_SHELL_SERVICE_ID]);
+        assert_eq!(
+            harness.state(PLAYGROUND_SERVICE_ID),
+            ServiceLifecycleState::Running
+        );
+        assert_eq!(harness.lines_with(SETTLED_SIX).len(), 2);
+        assert_terminated_nothing_and_base_untouched(&harness);
+    }
+
+    /// S6d: a compositor that keeps dying before it is ready is given up after its three
+    /// restarts; its clients are given up with it, and the base rows carry on untouched.
+    #[test]
+    fn a_crash_looping_compositor_is_given_up_and_the_rest_of_the_system_carries_on() {
+        let mut harness = Harness::boot_desktop_settled();
+        let from = harness.requests().len();
+        let mut now = 10 * SECOND;
+        harness.report(now, COMPOSITOR_SERVICE_ID, LifecycleEventKind::Faulted);
+        harness.report(now, DESKTOP_SHELL_SERVICE_ID, LifecycleEventKind::Exited);
+        harness.report(now, PLAYGROUND_SERVICE_ID, LifecycleEventKind::Exited);
+        for restart in 1..=3 {
+            now += 10 * SECOND;
+            harness.run_until(now);
+            assert_eq!(harness.starts_of(COMPOSITOR_SERVICE_ID), 1 + restart);
+            harness.report(now, COMPOSITOR_SERVICE_ID, LifecycleEventKind::Faulted);
+        }
+        harness.run_until(now + 60 * SECOND);
+        assert_eq!(
+            harness.starts_since(from),
+            [COMPOSITOR_SERVICE_ID; 3],
+            "no fourth restart, and no client started"
+        );
+        assert_eq!(
+            harness.lines_with("[INIT] gave up service=21248"),
+            ["[INIT] gave up service=21248 restarts=3; init carries on"]
+        );
+        for client in ["21249", "21250"] {
+            assert_eq!(
+                harness
+                    .lines_with(&std::format!(
+                        "[INIT] gave up service={client}: service=21248 is down"
+                    ))
+                    .len(),
+                1,
+                "{client}"
+            );
+        }
+        assert_terminated_nothing_and_base_untouched(&harness);
+    }
+
+    fn assert_terminated_nothing_and_base_untouched(harness: &Harness) {
+        harness.assert_terminated_nothing();
+        for service in [
+            STORAGE_SERVICE_ID,
+            NETWORK_SERVICE_ID,
+            SYSTEM_SHELL_SERVICE_ID,
+        ] {
+            assert_eq!(harness.starts_of(service), 1);
+            assert_eq!(harness.state(service), ServiceLifecycleState::Running);
+        }
+    }
 }

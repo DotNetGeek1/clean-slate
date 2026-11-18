@@ -44,6 +44,8 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
     let controller = unsafe { service_lifecycle_controller_mut() };
     frame.rax = match controller.report_ready_from_pid(caller_pid) {
         Ok(instance) => {
+            #[cfg(feature = "system-test-hooks")]
+            crate::service::system_test_hooks::on_service_ready(instance.service, instance.pid.0);
             log_ready(
                 instance,
                 crate::service::block_bridge::write_requests_from(caller_pid),

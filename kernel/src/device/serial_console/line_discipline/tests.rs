@@ -96,16 +96,17 @@ fn other_control_bytes_and_non_ascii_are_dropped_without_echo() {
     assert_eq!(discipline.stats().control_dropped, 7);
 }
 
-/// Ctrl-\ is the `system-test-hooks` fault byte. To the line discipline, in every build, it is
-/// an ordinary dropped control byte: no echo, no edit, no signal, no wake.
+/// Ctrl-\, Ctrl-], Ctrl-^ and Ctrl-_ are the `system-test-hooks` fault bytes. To the line
+/// discipline, in every build, each is an ordinary dropped control byte: no echo, no edit, no
+/// signal, no wake.
 #[test]
-fn ctrl_backslash_is_an_ordinary_dropped_control_byte() {
+fn the_fault_bytes_are_ordinary_dropped_control_bytes() {
     let mut discipline = fresh();
-    assert_eq!(feed(&mut discipline, b"\x1c"), b"");
+    assert_eq!(feed(&mut discipline, b"\x1c\x1d\x1e\x1f"), b"");
     assert!(!discipline.take_wake());
-    assert_eq!(feed(&mut discipline, b"o\x1ck\r"), b"ok\r\n");
+    assert_eq!(feed(&mut discipline, b"o\x1c\x1dk\x1e\x1f\r"), b"ok\r\n");
     assert_eq!(read(&mut discipline, 64), b"ok\n");
-    assert_eq!(discipline.stats().control_dropped, 2);
+    assert_eq!(discipline.stats().control_dropped, 8);
 }
 
 #[test]

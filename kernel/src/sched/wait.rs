@@ -494,14 +494,52 @@ pub(crate) fn cancel_waiters_for_process(pid: u64, generation: InstanceGeneratio
     })
 }
 
-/// `system-test-hooks` only (#218 S7b): points the saved syscall frame of one of `pid`'s
-/// threads at `user_rip`, so that thread leaves its syscall by jumping there instead of to
-/// the instruction after `syscall`. Only a user thread that is parked in a syscall (blocked,
-/// or woken but not yet resumed) and completes with [`BlockedResume::NativeOutcome`] is
-/// eligible: that resume leaves `user_rip` untouched, so the redirect lands exactly. Returns
-/// `false` when no thread of `pid` is in that state right now.
+/// The kind of wait [`redirect_parked_syscall`] took a thread out of.
+#[cfg(any(test, feature = "system-test-hooks"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RedirectedWait {
+    /// [`BlockedResume::NativeOutcome`]: the network service's waits.
+    Native,
+    /// [`BlockedResume::RestartSyscall`]: `WORK_SET` and port waits, where the desktop
+    /// processes park.
+    Restart,
+}
+
+#[cfg(any(test, feature = "system-test-hooks"))]
+impl RedirectedWait {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Restart => "restart",
+        }
+    }
+}
+
+/// The resume a redirected thread completes its syscall with, and the wait it was in; `None`
+/// when `resume` cannot be redirected. A restart resume would back `user_rip` up over the
+/// `syscall` instruction, so it becomes [`BlockedResume::NativeOutcome`], which leaves
+/// `user_rip` where the redirect put it. A retry resume is never redirected: its handler must
+/// run again to fail its in-flight block request closed.
+#[cfg(any(test, feature = "system-test-hooks"))]
+const fn redirected_resume(resume: BlockedResume) -> Option<(BlockedResume, RedirectedWait)> {
+    match resume {
+        BlockedResume::NativeOutcome => {
+            Some((BlockedResume::NativeOutcome, RedirectedWait::Native))
+        }
+        BlockedResume::RestartSyscall { .. } => {
+            Some((BlockedResume::NativeOutcome, RedirectedWait::Restart))
+        }
+        BlockedResume::RetrySyscall { .. } => None,
+    }
+}
+
+/// `system-test-hooks` only (#218 S7b, S6d): points the saved syscall frame of one of `pid`'s
+/// threads at `user_rip`, so that thread leaves its syscall by jumping there instead of
+/// returning from it. Only a user thread that is parked in a syscall (blocked, or woken but
+/// not yet resumed) is eligible, with the resume [`redirected_resume`] accepts. Returns the
+/// kind of wait it was parked in, or `None` when no thread of `pid` is in that state right now.
 #[cfg(feature = "system-test-hooks")]
-pub(crate) fn redirect_parked_native_syscall(pid: u64, user_rip: u64) -> bool {
+pub(crate) fn redirect_parked_syscall(pid: u64, user_rip: u64) -> Option<RedirectedWait> {
     without_interrupts(|| {
         let scheduler = unsafe { scheduler_mut() };
         let current = scheduler.current_thread;
@@ -512,20 +550,21 @@ pub(crate) fn redirect_parked_native_syscall(pid: u64, user_rip: u64) -> bool {
             if thread.owner_process_id != pid || thread.kind != super::ThreadKind::User {
                 continue;
             }
-            // Interrupts are off and the slot is not current, so nothing else reads or
-            // writes its resume mode or saved frame until the scheduler picks it again.
-            let is_native = matches!(
-                unsafe { (*BLOCKED_RESUME.get())[index] },
-                BlockedResume::NativeOutcome
-            );
-            if !is_parked || !is_native {
+            if !is_parked {
                 continue;
             }
+            // Interrupts are off and the slot is not current, so nothing else reads or
+            // writes its resume mode or saved frame until the scheduler picks it again.
+            let slot = unsafe { &mut (*BLOCKED_RESUME.get())[index] };
+            let Some((resume, parked_in)) = redirected_resume(*slot) else {
+                continue;
+            };
+            *slot = resume;
             let frame = thread.blocked_syscall_frame as *mut SyscallContext;
             unsafe { (*frame).user_rip = user_rip };
-            return true;
+            return Some(parked_in);
         }
-        false
+        None
     })
 }
 
@@ -750,6 +789,41 @@ mod tests {
             assert_eq!(frame.rax, 7);
             assert_eq!((frame.rdi, frame.rsi, frame.rdx), (1, 2, 3));
         }
+    }
+
+    /// A redirected thread must fetch from exactly the redirect address whatever wakes it,
+    /// including a thread parked in a `RestartSyscall` wait (#218 S6d desktop processes).
+    #[test]
+    fn a_redirected_restart_wait_resumes_at_the_redirect_address() {
+        const REDIRECT: u64 = 0;
+        let restart = BlockedResume::RestartSyscall {
+            nr: 9,
+            timeout_rax: u64::MAX,
+        };
+        for (parked, wait) in [
+            (BlockedResume::NativeOutcome, RedirectedWait::Native),
+            (restart, RedirectedWait::Restart),
+        ] {
+            let (resume, parked_in) = redirected_resume(parked).expect("redirectable");
+            assert_eq!(parked_in, wait);
+            for outcome in [
+                WaitOutcome::Woken,
+                WaitOutcome::TimedOut,
+                WaitOutcome::Cancelled,
+            ] {
+                let mut frame = frame_at(0x40_1002);
+                frame.user_rip = REDIRECT;
+                apply_blocked_resume(&mut frame, resume, outcome);
+                assert_eq!(frame.user_rip, REDIRECT, "{wait:?} {outcome:?}");
+            }
+        }
+        assert_eq!(
+            redirected_resume(BlockedResume::RetrySyscall { nr: 7 }),
+            None,
+            "a retry must re-enter its handler"
+        );
+        assert_eq!(RedirectedWait::Native.name(), "native");
+        assert_eq!(RedirectedWait::Restart.name(), "restart");
     }
 
     #[test]

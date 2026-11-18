@@ -721,6 +721,8 @@ impl ServiceLifecycleController {
             crate::capability::network::on_network_instance_registered(u64::from(generation.0));
         }
         self.log_launch(instance);
+        #[cfg(feature = "system-test-hooks")]
+        super::system_test_hooks::on_service_launched(service_id, spawned.pid);
         Ok(LifecycleControlResult {
             event: Some(LifecycleEvent::new(
                 instance,
@@ -914,7 +916,7 @@ impl ServiceLifecycleController {
 
     /// `residue` is the scheduler and IPC ownership still attributed to the pid after teardown,
     /// which must be 0.
-    fn log_reaped(&self, service: ServiceId, pid: u64) {
+    pub(crate) fn log_reaped(&self, service: ServiceId, pid: u64) {
         kernel_log_fmt(format_args!(
             "[SVC ] reaped service={} pid={} residue={}\n",
             service.0,

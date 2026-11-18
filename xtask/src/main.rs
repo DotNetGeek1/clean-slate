@@ -29,6 +29,7 @@ mod raster_font;
 mod serial_input_lane;
 mod system_boot;
 mod system_desktop;
+mod system_desktop_faults;
 mod system_lane;
 mod system_shell;
 

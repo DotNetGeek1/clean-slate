@@ -100,7 +100,7 @@ impl Backend {
     }
 }
 
-#[cfg(feature = "m10-desktop")]
+#[cfg(clean_slate_desktop_snapshot)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DisplayCounters {
     pub(crate) presenter: bool,
@@ -313,7 +313,7 @@ impl ActiveDisplay {
 
     /// #118 resource snapshot: presenter and wake bindings, plus the scanout buffers bound to the
     /// backend (each one a VirtIO-GPU resource on that backend).
-    #[cfg(feature = "m10-desktop")]
+    #[cfg(clean_slate_desktop_snapshot)]
     pub(crate) fn desktop_counters(&self) -> DisplayCounters {
         let (presenter, wake) = self.presenter.bindings();
         let bound = self.buffers.iter().flatten().count();
