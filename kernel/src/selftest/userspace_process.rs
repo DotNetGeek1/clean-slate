@@ -20,7 +20,24 @@ use crate::mm::paging::zero_page;
 use crate::mm::phys_to_virt;
 #[cfg(clean_slate_userspace_spawn)]
 use crate::mm::PAGE_SIZE;
+#[cfg(any(
+    clean_slate_userspace_spawn,
+    feature = "m9-linux-proc-self-test",
+    feature = "m9-linux-socket-self-test"
+))]
 use crate::process::id_allocator::id_allocator_mut;
+#[cfg(any(
+    feature = "m3-syscall-self-test",
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m9-block-wake-self-test",
+    feature = "m9-fd-core-self-test",
+    feature = "m9-linux-proc-self-test",
+    feature = "m9-linux-socket-self-test",
+    feature = "m9-linux-trace-self-test",
+    feature = "m9-syscall-fail-closed-self-test",
+    feature = "m9-userspace-self-test",
+    feature = "m10-input-self-test"
+))]
 use crate::process::id_allocator::IdAllocator;
 #[cfg(any(
     feature = "m9-syscall-fail-closed-self-test",
@@ -39,6 +56,18 @@ use crate::process::ProcessState;
 #[cfg(clean_slate_userspace_spawn)]
 use crate::process::ResourceDomain;
 use crate::sched::scheduler_mut;
+#[cfg(any(
+    feature = "m3-syscall-self-test",
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m9-block-wake-self-test",
+    feature = "m9-fd-core-self-test",
+    feature = "m9-linux-proc-self-test",
+    feature = "m9-linux-socket-self-test",
+    feature = "m9-linux-trace-self-test",
+    feature = "m9-syscall-fail-closed-self-test",
+    feature = "m9-userspace-self-test",
+    feature = "m10-input-self-test"
+))]
 use crate::sched::Scheduler;
 #[cfg(clean_slate_userspace_spawn)]
 use crate::sched::Thread;
@@ -77,6 +106,18 @@ pub(crate) struct SpawnedUserspaceProcess {
     pub(crate) user_stack_pointer: u64,
 }
 
+#[cfg(any(
+    feature = "m3-syscall-self-test",
+    feature = "m4-service-lifecycle-self-test",
+    feature = "m9-block-wake-self-test",
+    feature = "m9-fd-core-self-test",
+    feature = "m9-linux-proc-self-test",
+    feature = "m9-linux-socket-self-test",
+    feature = "m9-linux-trace-self-test",
+    feature = "m9-syscall-fail-closed-self-test",
+    feature = "m9-userspace-self-test",
+    feature = "m10-input-self-test"
+))]
 pub(crate) fn reset_process_scheduler_world() {
     unsafe {
         process_registry_mut().clear();

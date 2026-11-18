@@ -205,7 +205,7 @@ fn emit_boot_tail_cfgs(system_init: bool) {
     }
 }
 
-fn emit_userspace_dispatch_cfgs() {
+fn emit_userspace_dispatch_cfgs() -> Option<&'static str> {
     let arms: Vec<String> = USERSPACE_DISPATCH_ARMS
         .iter()
         .map(|(arm, _)| format!("\"{arm}\""))
@@ -217,7 +217,7 @@ fn emit_userspace_dispatch_cfgs() {
     if !any_feature_enabled(&["m3-entry-self-test"])
         || any_feature_enabled(USERSPACE_DISPATCH_OVERRIDE_FEATURES)
     {
-        return;
+        return None;
     }
     let selected = USERSPACE_DISPATCH_ARMS
         .iter()
@@ -225,9 +225,32 @@ fn emit_userspace_dispatch_cfgs() {
         .map(|(arm, _)| *arm);
     if let Some(arm) = selected {
         if arm.starts_with("m3-") && any_feature_enabled(M3_ARM_OVERRIDE_FEATURES) {
-            return;
+            return None;
         }
         println!("cargo::rustc-cfg=clean_slate_userspace_selftest=\"{arm}\"");
+    }
+    selected
+}
+
+/// Lanes that spawn an M6 fixture program. The object lane is included only when it is the
+/// selected userspace arm: `m9-linux-fs` and `m9-userspace` enable the object feature without
+/// running that arm.
+const FIXTURE_SPAWN_FEATURES: &[&str] = &[
+    "m6-revocation-self-test",
+    "m6-process-control-self-test",
+    "m6-delegation-self-test",
+    "m6-audit-self-test",
+    "m6-capabilities-self-test",
+    "m6-fixture-smoke-self-test",
+    "m7-net-caps-self-test",
+    "m10-port-self-test",
+    "m10-shared-buffer-self-test",
+];
+
+fn emit_fixture_spawn_cfg(userspace_arm: Option<&str>) {
+    println!("cargo::rustc-check-cfg=cfg(clean_slate_fixture_spawn)");
+    if userspace_arm == Some("m6-object") || any_feature_enabled(FIXTURE_SPAWN_FEATURES) {
+        println!("cargo::rustc-cfg=clean_slate_fixture_spawn");
     }
 }
 /// Every enabled Cargo feature of this build, by its `Cargo.toml` name (the kernel's feature
@@ -321,7 +344,8 @@ fn main() {
     emit_linux_cfgs(system_init);
     let desktop = emit_desktop_cfg(system_init);
     emit_desktop_snapshot_cfg();
-    emit_userspace_dispatch_cfgs();
+    let userspace_arm = emit_userspace_dispatch_cfgs();
+    emit_fixture_spawn_cfg(userspace_arm);
     emit_selftest_timer_wait_cfg();
     emit_bump_allocator_cfg();
     emit_userspace_spawn_cfg();

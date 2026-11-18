@@ -17,17 +17,31 @@ use crate::process::domain::teardown_current_process;
 use crate::sched::idle::idle_handoff_while_threads_blocked;
 use crate::sched::wait::{block_current_thread_with_resume, wake_all, BlockedResume, WaitKey};
 use crate::selftest::m6_fixture_exits::{ExitWait, FixtureExitLog};
+#[cfg(clean_slate_fixture_spawn)]
 use crate::service::spawn::launch_builtin_service;
+#[cfg(clean_slate_fixture_spawn)]
 use crate::service::spawn::LaunchContext;
+#[cfg(clean_slate_fixture_spawn)]
 use crate::service::spawn::SpawnedServiceInstance;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_capability::syscall_abi::{SYSCALL_EINVAL, SYSCALL_NR_CAP_GRANT};
+#[cfg(any(
+    feature = "m6-revocation-self-test",
+    clean_slate_userspace_selftest = "m6-object",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m7-net-caps-self-test",
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
+use clean_slate_service_fixtures::m6_fixture::M6FixtureStep;
 use clean_slate_service_fixtures::m6_fixture::{
-    M6FixtureBootstrap, M6FixtureStep, FIXTURE_STATUS_MISMATCH, M6_FIXTURE_BOOTSTRAP_ADDRESS,
-    M6_FIXTURE_MAGIC,
+    M6FixtureBootstrap, FIXTURE_STATUS_MISMATCH, M6_FIXTURE_BOOTSTRAP_ADDRESS, M6_FIXTURE_MAGIC,
 };
 use clean_slate_service_lifecycle::ServiceId;
 
+#[cfg(clean_slate_fixture_spawn)]
 pub(crate) const M6_FIXTURE_SERVICE_ID_BASE: u64 = 0x6000;
 
 /// Self-test builds only: `rsi = n` blocks until the harness turn is `n`
@@ -59,6 +73,7 @@ const MAX_FIXTURE_REPORTS: usize = 24;
 const MAX_FIXTURE_EXITS: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum FixtureReportAction {
     Continue,
     PassAndExit(&'static str),
@@ -74,6 +89,8 @@ struct FixtureProgramSlot {
 #[derive(Clone, Copy)]
 struct FixtureReportSlot {
     pid: u64,
+    /// Retained for [`take_report`]. No lane calls that yet; the serial line is the live record.
+    #[allow(dead_code)]
     report: M6FixtureBootstrap,
 }
 
@@ -96,10 +113,12 @@ static FIXTURE_LANE_CHECK_HANDLER: GlobalCell<Option<FixtureLaneCheckHandler>> =
 static FIXTURE_ALL_EXITED_HANDLER: GlobalCell<Option<FixtureAllExitedHandler>> =
     GlobalCell::new(None);
 
+#[cfg(clean_slate_fixture_spawn)]
 pub(crate) const fn fixture_service(n: u64) -> ServiceId {
     ServiceId((M6_FIXTURE_SERVICE_ID_BASE + n) as u32)
 }
 
+#[cfg(clean_slate_fixture_spawn)]
 pub(crate) fn is_fixture_service(service: ServiceId) -> bool {
     let id = u64::from(service.0);
     (M6_FIXTURE_SERVICE_ID_BASE..=M6_FIXTURE_SERVICE_ID_BASE + 0xff).contains(&id)
@@ -112,6 +131,7 @@ pub(crate) fn is_fixture_pid(pid: u64) -> bool {
     }
 }
 
+#[cfg(clean_slate_fixture_spawn)]
 fn register_fixture_pid(pid: u64) -> Result<(), &'static str> {
     unsafe {
         let count = *FIXTURE_PID_COUNT.get();
@@ -140,6 +160,7 @@ fn unregister_fixture_pid(pid: u64) {
     }
 }
 
+#[cfg(clean_slate_fixture_spawn)]
 pub(crate) fn set_fixture_program(
     service: ServiceId,
     program: &M6FixtureBootstrap,
@@ -191,6 +212,7 @@ pub(crate) fn consume_fixture_program(
     }
 }
 
+#[cfg(clean_slate_fixture_spawn)]
 pub(crate) fn spawn_fixture(
     allocator: &mut PageAllocator,
     kernel_stack_top: u64,
@@ -211,49 +233,98 @@ pub(crate) fn spawn_fixture(
     Ok(spawned)
 }
 
+#[cfg(any(
+    clean_slate_userspace_selftest = "m6-object",
+    feature = "m6-process-control-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-revocation-self-test",
+    feature = "m6-audit-self-test",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-fixture-smoke-self-test",
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 pub(crate) fn set_report_handler(handler: fn(u64, &M6FixtureBootstrap) -> FixtureReportAction) {
     unsafe {
         *FIXTURE_REPORT_HANDLER.get() = Some(handler);
     }
 }
 
+#[cfg(feature = "m10-shared-buffer-self-test")]
 pub(crate) fn set_lane_check_handler(handler: FixtureLaneCheckHandler) {
     unsafe {
         *FIXTURE_LANE_CHECK_HANDLER.get() = Some(handler);
     }
 }
 
+#[cfg(feature = "m10-shared-buffer-self-test")]
 pub(crate) fn set_all_exited_handler(handler: FixtureAllExitedHandler) {
     unsafe {
         *FIXTURE_ALL_EXITED_HANDLER.get() = Some(handler);
     }
 }
 
+#[cfg(any(
+    feature = "m6-revocation-self-test",
+    clean_slate_userspace_selftest = "m6-object",
+    feature = "m6-capabilities-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m7-net-caps-self-test",
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 fn harness_step(subop: u64, arg: u64) -> M6FixtureStep {
     M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [subop, arg, 0, 0, 0, 0])
 }
 
 /// Blocks the fixture until the harness turn reaches `turn`.
+#[cfg(any(
+    feature = "m6-revocation-self-test",
+    clean_slate_userspace_selftest = "m6-object",
+    feature = "m6-capabilities-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 pub(crate) fn wait_turn_step(turn: u64) -> M6FixtureStep {
     harness_step(FIXTURE_SUBOP_WAIT_TURN, turn).expect_eq(0)
 }
 
 /// Hands the harness turn from `turn` to `turn + 1`.
+#[cfg(any(
+    feature = "m6-revocation-self-test",
+    clean_slate_userspace_selftest = "m6-object",
+    feature = "m6-capabilities-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 pub(crate) fn end_turn_step(turn: u64) -> M6FixtureStep {
     harness_step(FIXTURE_SUBOP_END_TURN, turn).expect_eq(0)
 }
 
 /// Blocks the fixture until fixture `pid` has been torn down.
+#[cfg(any(
+    feature = "m6-revocation-self-test",
+    clean_slate_userspace_selftest = "m6-object",
+    feature = "m6-capabilities-self-test",
+    feature = "m10-port-self-test",
+    feature = "m10-shared-buffer-self-test"
+))]
 pub(crate) fn wait_exit_step(pid: u64) -> M6FixtureStep {
     harness_step(FIXTURE_SUBOP_WAIT_EXIT, pid).expect_eq(0)
 }
 
 /// Keeps the fixture alive, blocked, until it is terminated or the test exits.
+#[cfg(any(
+    feature = "m6-capabilities-self-test",
+    feature = "m6-delegation-self-test",
+    feature = "m6-process-control-self-test",
+    feature = "m7-net-caps-self-test"
+))]
 pub(crate) fn park_step() -> M6FixtureStep {
     harness_step(FIXTURE_SUBOP_PARK, 0)
 }
 
 /// Lane-specific kernel assertion invoked from a fixture (`expect_eq(0)`).
+#[cfg(feature = "m10-shared-buffer-self-test")]
 pub(crate) fn lane_check_step(check: u64, arg: u64) -> M6FixtureStep {
     M6FixtureStep::syscall(
         SYSCALL_NR_CAP_GRANT,
@@ -380,6 +451,7 @@ fn store_report(pid: u64, report: M6FixtureBootstrap) -> Result<(), &'static str
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn take_report(pid: u64) -> Option<M6FixtureBootstrap> {
     unsafe {
         let slots = &mut *FIXTURE_REPORTS.get();
@@ -390,6 +462,7 @@ pub(crate) fn take_report(pid: u64) -> Option<M6FixtureBootstrap> {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn fixture_report_count() -> usize {
     unsafe {
         (*FIXTURE_REPORTS.get())

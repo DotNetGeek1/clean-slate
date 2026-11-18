@@ -71,16 +71,7 @@ pub(crate) mod m5_block;
     feature = "m5-persistence-self-test",
     feature = "m5-crash-early-self-test",
     feature = "m5-crash-late-self-test",
-    feature = "m5-crash-recovery-self-test",
-    feature = "m6-object-self-test",
-    feature = "m6-process-control-self-test",
-    feature = "m6-delegation-self-test",
-    feature = "m6-revocation-self-test",
-    feature = "m6-audit-self-test",
-    feature = "m6-capabilities-self-test",
-    feature = "m6-fixture-smoke-self-test",
-    feature = "m7-net-caps-self-test",
-    feature = "m10-port-self-test"
+    feature = "m5-crash-recovery-self-test"
 ))]
 pub(crate) mod m5_storage;
 #[cfg(feature = "m6-audit-self-test")]
@@ -118,7 +109,17 @@ pub(crate) mod m6_fixture;
 pub(crate) mod m6_fixture_exits;
 #[cfg(feature = "m6-fixture-smoke-self-test")]
 pub(crate) mod m6_fixture_smoke;
-#[cfg(any(feature = "m6-object-self-test", feature = "m6-capabilities-self-test"))]
+#[cfg(any(
+    clean_slate_userspace_selftest = "m6-object",
+    all(
+        feature = "m6-object-self-test",
+        not(feature = "m9-userspace-self-test"),
+        not(any(
+            feature = "m6-fixture-smoke-self-test",
+            feature = "m6-revocation-self-test"
+        ))
+    )
+))]
 pub(crate) mod m6_object;
 #[cfg(feature = "m6-process-control-self-test")]
 pub(crate) mod m6_process_control;
@@ -192,7 +193,6 @@ pub(crate) mod userspace_process;
     feature = "m3-syscall-self-test",
     feature = "m4-crash-service-self-test",
     feature = "m4-recovery-self-test",
-    feature = "m4-supervisor-self-test",
     feature = "m4-service-lifecycle-self-test",
     feature = "m8-linux-dispatch-self-test",
     feature = "m8-linux-hello-self-test",
@@ -202,7 +202,6 @@ pub(crate) mod userspace_process;
     feature = "m9-low-va-self-test",
     feature = "m9-fd-core-self-test",
     feature = "m9-linux-fs-self-test",
-    feature = "m9-userspace-self-test",
     feature = "m9-linux-trace-self-test",
     feature = "m10-nxe-self-test",
     feature = "m10-input-self-test"
@@ -266,14 +265,12 @@ pub(super) const USER_TEST_STACK_ADDRESS: u64 = USER_TEST_CODE_ADDRESS + PAGE_SI
     feature = "m4-crash-service-self-test",
     feature = "m3-ipc-self-test",
     feature = "m4-service-lifecycle-self-test",
-    feature = "m4-supervisor-self-test",
     feature = "m4-recovery-self-test",
     feature = "m8-linux-dispatch-self-test",
     feature = "m9-syscall-fail-closed-self-test",
     feature = "m9-block-wake-self-test",
     feature = "m9-fd-core-self-test",
     feature = "m9-linux-fs-self-test",
-    feature = "m9-userspace-self-test",
     feature = "m9-linux-trace-self-test",
     feature = "m10-input-self-test"
 ))]
