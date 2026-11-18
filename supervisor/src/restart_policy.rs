@@ -9,30 +9,31 @@ pub enum RestartPolicy {
     OnFailure(BoundedRestart),
 }
 
-/// Deterministic bounded retry with linearly increasing backoff ticks.
+/// Deterministic bounded retry with linearly increasing backoff.
 ///
-/// Attempt `n` (1-based) waits `initial_delay_ticks + backoff_base_ticks * (n - 1)` after the
-/// failure. With the default `initial_delay_ticks` of 0 the first retry is immediate.
+/// Attempt `n` (1-based) waits `initial_delay + backoff_base * (n - 1)` after the
+/// failure. With the default `initial_delay` of 0 the first retry is immediate. Both are in
+/// the unit of the clock the supervisor advances with: nanoseconds for init.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoundedRestart {
     pub max_attempts: u32,
-    pub backoff_base_ticks: u64,
-    pub initial_delay_ticks: u64,
+    pub backoff_base: u64,
+    pub initial_delay: u64,
 }
 
 impl BoundedRestart {
-    pub const fn new(max_attempts: u32, backoff_base_ticks: u64) -> Self {
+    pub const fn new(max_attempts: u32, backoff_base: u64) -> Self {
         Self {
             max_attempts,
-            backoff_base_ticks,
-            initial_delay_ticks: 0,
+            backoff_base,
+            initial_delay: 0,
         }
     }
 
-    /// The same policy with every attempt, the first included, delayed by `ticks` more.
-    pub const fn with_initial_delay(self, ticks: u64) -> Self {
+    /// The same policy with every attempt, the first included, delayed by `delay` more.
+    pub const fn with_initial_delay(self, delay: u64) -> Self {
         Self {
-            initial_delay_ticks: ticks,
+            initial_delay: delay,
             ..self
         }
     }
@@ -112,9 +113,9 @@ impl RecoveryRuntime {
                 }
                 let next_attempt = self.attempts.saturating_add(1);
                 let delay = limits
-                    .backoff_base_ticks
+                    .backoff_base
                     .saturating_mul(u64::from(next_attempt.saturating_sub(1)))
-                    .saturating_add(limits.initial_delay_ticks);
+                    .saturating_add(limits.initial_delay);
                 self.not_before = ticks_add(now, delay);
                 self.pending = true;
                 RestartDecision::Scheduled {
@@ -199,7 +200,7 @@ mod tests {
     #[test]
     fn initial_delay_postpones_every_attempt_including_the_first() {
         let limits = BoundedRestart::new(3, 10).with_initial_delay(7);
-        assert_eq!(BoundedRestart::new(3, 10).initial_delay_ticks, 0);
+        assert_eq!(BoundedRestart::new(3, 10).initial_delay, 0);
         let mut runtime = RecoveryRuntime::new(RestartPolicy::OnFailure(limits));
         let mut not_befores = Vec::new();
         for attempt in 1..=3 {

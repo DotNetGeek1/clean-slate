@@ -35,24 +35,22 @@ const LIVENESS_OFF: LivenessConfig = LivenessConfig::new(u64::MAX);
 /// Messages handled per wake at most, so one wake cannot turn into a loop.
 const MAX_EVENTS_PER_WAKE: usize = 16;
 
-/// The supervisor policy for a manifest row's restart spec. Despite the `_ticks` field names on
-/// both sides, init's unit is nanoseconds on the `WORK_SET` `NOW` clock, the clock it passes to
-/// [`SystemInit::on_wake`].
+/// The supervisor policy for a manifest row's restart spec. Init's unit is nanoseconds on the
+/// `WORK_SET` `NOW` clock, the clock it passes to [`SystemInit::on_wake`].
 pub const fn restart_policy(spec: RestartSpec) -> RestartPolicy {
     match spec {
         RestartSpec::Never => RestartPolicy::Never,
         RestartSpec::OnFailure {
             max_attempts,
-            backoff_base_ticks,
-            initial_delay_ticks,
+            backoff_base_ns,
+            initial_delay_ns,
         }
         | RestartSpec::OnExitUntilUnready {
             max_attempts,
-            backoff_base_ticks,
-            initial_delay_ticks,
+            backoff_base_ns,
+            initial_delay_ns,
         } => RestartPolicy::OnFailure(
-            BoundedRestart::new(max_attempts, backoff_base_ticks)
-                .with_initial_delay(initial_delay_ticks),
+            BoundedRestart::new(max_attempts, backoff_base_ns).with_initial_delay(initial_delay_ns),
         ),
     }
 }
@@ -1107,8 +1105,8 @@ mod tests {
         assert_eq!(
             restart_policy(RestartSpec::OnFailure {
                 max_attempts: 3,
-                backoff_base_ticks: 2 * SECOND,
-                initial_delay_ticks: 2 * SECOND,
+                backoff_base_ns: 2 * SECOND,
+                initial_delay_ns: 2 * SECOND,
             }),
             RestartPolicy::OnFailure(
                 BoundedRestart::new(3, 2 * SECOND).with_initial_delay(2 * SECOND)
@@ -1117,8 +1115,8 @@ mod tests {
         assert_eq!(
             restart_policy(RestartSpec::OnExitUntilUnready {
                 max_attempts: 3,
-                backoff_base_ticks: SECOND,
-                initial_delay_ticks: SECOND / 2,
+                backoff_base_ns: SECOND,
+                initial_delay_ns: SECOND / 2,
             }),
             RestartPolicy::OnFailure(BoundedRestart::new(3, SECOND).with_initial_delay(SECOND / 2))
         );
