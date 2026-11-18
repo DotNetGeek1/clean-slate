@@ -28,6 +28,10 @@ use crate::process::id_allocator::IdAllocator;
 use crate::process::process_registry_mut;
 #[cfg(feature = "m7-network-self-test")]
 use crate::process::userspace_process_root_frame;
+#[cfg(any(
+    clean_slate_userspace_selftest = "m7-net-service",
+    feature = "m9-linux-socket-self-test"
+))]
 use crate::sched::dispatch::start_current_scheduler_thread;
 #[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 use crate::sched::scheduler_mut;

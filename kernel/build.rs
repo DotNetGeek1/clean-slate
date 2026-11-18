@@ -74,12 +74,16 @@ const USERSPACE_DISPATCH_OVERRIDE_FEATURES: &[&str] = &[
     "m9-linux-trace-self-test",
     "m9-rootfs-self-test",
     "m9-linux-fs-self-test",
+    "m9-userspace-self-test",
     "m9-fd-core-self-test",
     "m10-input-self-test",
 ];
 
-/// The arms of the userspace dispatch block, in priority order: in an `m3-entry-self-test` build
-/// without [`USERSPACE_DISPATCH_OVERRIDE_FEATURES`], the first arm with one of its features sets
+/// The arms of the userspace dispatch block, in priority order. Lanes enable several of these
+/// features through Cargo dependencies, so the most specific arm must come first;
+/// `m3-entry-self-test` is the fallback. [`USERSPACE_DISPATCH_OVERRIDE_FEATURES`] (including
+/// `m9-linux-fs-self-test` and `m9-userspace-self-test`) are tested before this list. In an
+/// `m3-entry-self-test` build without one of those, the first arm with one of its features sets
 /// `clean_slate_userspace_selftest="<arm>"`, and that arm alone is compiled. A new arm in the
 /// block is a row here and its own `cfg`.
 const USERSPACE_DISPATCH_ARMS: &[(&str, &[&str])] = &[

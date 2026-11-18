@@ -913,4 +913,9 @@ fn run_inner() -> Result<(), &'static str> {
         serial_write_line("[KERN] scheduler initialized");
         start_scheduler()
     }
+
+    // `m9-userspace` diverges in its own starter above. Its Cargo features also enable the
+    // net-service arm, which used to be this function's tail; that arm is no longer selected.
+    #[cfg(feature = "m9-userspace-self-test")]
+    Ok(())
 }
