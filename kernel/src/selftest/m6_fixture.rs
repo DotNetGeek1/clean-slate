@@ -286,6 +286,7 @@ fn harness_step(subop: u64, arg: u64) -> M6FixtureStep {
     feature = "m6-revocation-self-test",
     clean_slate_userspace_selftest = "m6-object",
     feature = "m6-capabilities-self-test",
+    feature = "m6-audit-self-test",
     feature = "m10-shared-buffer-self-test"
 ))]
 pub(crate) fn wait_turn_step(turn: u64) -> M6FixtureStep {
@@ -297,6 +298,7 @@ pub(crate) fn wait_turn_step(turn: u64) -> M6FixtureStep {
     feature = "m6-revocation-self-test",
     clean_slate_userspace_selftest = "m6-object",
     feature = "m6-capabilities-self-test",
+    feature = "m6-audit-self-test",
     feature = "m10-shared-buffer-self-test"
 ))]
 pub(crate) fn end_turn_step(turn: u64) -> M6FixtureStep {
