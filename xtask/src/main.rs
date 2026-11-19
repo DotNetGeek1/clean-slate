@@ -23,6 +23,7 @@ mod m7_certs;
 mod m7_fixture;
 mod m7_fixture_impair;
 mod m7_fixture_tcp;
+mod m7_guest_values;
 mod m8_fixture;
 mod m9_fixture;
 mod m9_userspace_validate;
@@ -44,6 +45,7 @@ use ovmf_vars::RuntimeVarsCopy;
 use m10_framebuffer_validate::validate_m10_framebuffer_serial;
 use m7_fixture::{FixtureCounts, FixtureOptions, M7FixturePeer, WhichCert};
 use m7_fixture_impair::ImpairCounts;
+use m7_guest_values::{GuestExchanges, GuestValues, LegacyValues};
 
 const KERNEL_PACKAGE: &str = "clean-slate-kernel";
 const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
@@ -1414,13 +1416,15 @@ fn run_m10_framebuffer_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
-    for impaired in [false, true] {
-        run_m7_tls_pass_boot(impaired)?;
-    }
+    let boots = [false, true]
+        .into_iter()
+        .map(run_m7_tls_pass_boot)
+        .collect::<Result<Vec<_>, _>>()?;
+    require_unpredictable_guest("test-m7-tls", &boots, M7_TLS_EXCHANGES, M7_TLS_LEGACY)?;
     run_m7_tls_fail_closed_boot()
 }
 
-fn run_m7_tls_pass_boot(impaired: bool) -> Result<(), XtaskError> {
+fn run_m7_tls_pass_boot(impaired: bool) -> Result<GuestValues, XtaskError> {
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::ZERO,
@@ -1451,13 +1455,14 @@ fn run_m7_tls_pass_boot(impaired: bool) -> Result<(), XtaskError> {
             serial_tcp_port: None,
         },
     );
-    let served = peer.shutdown();
+    let (served, guest) = peer.shutdown_with_guest_values();
     pass?;
     require_fixture_served(
         m7_wire_lane("test-m7-tls", impaired),
         served,
         on_m7_wire(M7_TLS_SERVED, impaired, M7_TLS_IMPAIRED),
-    )
+    )?;
+    Ok(guest)
 }
 
 fn run_m7_tls_fail_closed_boot() -> Result<(), XtaskError> {
@@ -1584,6 +1589,55 @@ const M7_NETWORK_IMPAIRED: ImpairCounts = ImpairCounts {
     ..tcp_script_on(2)
 };
 
+/// The TLS pass boot's TCP echo and TLS connections.
+const M7_TLS_EXCHANGES: GuestExchanges = GuestExchanges {
+    tcp_syns: 2,
+    dns_queries: 0,
+};
+
+/// The DNS boot's A and NXDOMAIN queries (the cache hit sends nothing).
+const M7_DNS_EXCHANGES: GuestExchanges = GuestExchanges {
+    tcp_syns: 0,
+    dns_queries: 2,
+};
+
+/// M7.8's one resolve and two TLS connections.
+const M7_NETWORK_EXCHANGES: GuestExchanges = GuestExchanges {
+    tcp_syns: 2,
+    dns_queries: 1,
+};
+
+/// The kernel TLS self-test's echo and TLS connections: slot 0 twice, ISS `1 ^ counter * k`.
+const M7_TLS_LEGACY: LegacyValues = LegacyValues {
+    tcp_syns: &[(50_000, 0x0000_0001), (50_000, 0x85eb_ca6a)],
+    dns_queries: &[],
+};
+
+/// The kernel DNS self-test's two queries: UDP slot 0, IDs `n ^ generation`.
+const M7_DNS_LEGACY: LegacyValues = LegacyValues {
+    tcp_syns: &[],
+    dns_queries: &[(49_152, 0x0000), (49_152, 0x0003)],
+};
+
+/// The network service's resolve and two TLS connections.
+const M7_NETWORK_LEGACY: LegacyValues = LegacyValues {
+    tcp_syns: &[(50_000, 0x0000_0001), (50_001, 0x1bdc_b3d3)],
+    dns_queries: &[(49_152, 0x0000)],
+};
+
+/// #221: the fixture saw `expected` from every boot, and the guest's ISSs, source ports and DNS
+/// IDs changed from boot to boot and were never the old deterministic values.
+fn require_unpredictable_guest(
+    lane: &str,
+    boots: &[GuestValues],
+    expected: GuestExchanges,
+    legacy: LegacyValues,
+) -> Result<(), XtaskError> {
+    m7_guest_values::report(lane, boots);
+    m7_guest_values::require_unpredictable(lane, boots, expected, legacy)
+        .map_err(XtaskError::Validation)
+}
+
 /// What the fixture must have served on the clean or the impaired wire: the same exchanges,
 /// plus exactly the impairments the impaired wire applies to them.
 fn on_m7_wire(served: FixtureCounts, impaired: bool, script: ImpairCounts) -> FixtureCounts {
@@ -1641,13 +1695,14 @@ fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
-    for impaired in [false, true] {
-        run_m7_dns_boot(impaired)?;
-    }
-    Ok(())
+    let boots = [false, true]
+        .into_iter()
+        .map(run_m7_dns_boot)
+        .collect::<Result<Vec<_>, _>>()?;
+    require_unpredictable_guest("test-m7-dns", &boots, M7_DNS_EXCHANGES, M7_DNS_LEGACY)
 }
 
-fn run_m7_dns_boot(impaired: bool) -> Result<(), XtaskError> {
+fn run_m7_dns_boot(impaired: bool) -> Result<GuestValues, XtaskError> {
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::from_millis(5),
@@ -1678,13 +1733,14 @@ fn run_m7_dns_boot(impaired: bool) -> Result<(), XtaskError> {
             serial_tcp_port: None,
         },
     );
-    let served = peer.shutdown();
+    let (served, guest) = peer.shutdown_with_guest_values();
     run_result?;
     require_fixture_served(
         m7_wire_lane("test-m7-dns", impaired),
         served,
         on_m7_wire(M7_DNS_SERVED, impaired, M7_DNS_IMPAIRED),
-    )
+    )?;
+    Ok(guest)
 }
 
 fn run_m5_persistence_acceptance_default() -> Result<(), XtaskError> {
@@ -2989,13 +3045,19 @@ fn run_m7_net_service_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m7_network_acceptance() -> Result<(), XtaskError> {
-    for impaired in [false, true] {
-        run_m7_network_boot(impaired)?;
-    }
-    Ok(())
+    let boots = [false, true]
+        .into_iter()
+        .map(run_m7_network_boot)
+        .collect::<Result<Vec<_>, _>>()?;
+    require_unpredictable_guest(
+        "test-m7-network",
+        &boots,
+        M7_NETWORK_EXCHANGES,
+        M7_NETWORK_LEGACY,
+    )
 }
 
-fn run_m7_network_boot(impaired: bool) -> Result<(), XtaskError> {
+fn run_m7_network_boot(impaired: bool) -> Result<GuestValues, XtaskError> {
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::from_millis(5),
@@ -3026,13 +3088,14 @@ fn run_m7_network_boot(impaired: bool) -> Result<(), XtaskError> {
             serial_tcp_port: None,
         },
     );
-    let served = peer.shutdown();
+    let (served, guest) = peer.shutdown_with_guest_values();
     run_result?;
     require_fixture_served(
         m7_wire_lane("test-m7-network", impaired),
         served,
         on_m7_wire(M7_NETWORK_SERVED, impaired, M7_NETWORK_IMPAIRED),
-    )
+    )?;
+    Ok(guest)
 }
 
 fn build_network_userspace(release: bool) -> Result<(), XtaskError> {

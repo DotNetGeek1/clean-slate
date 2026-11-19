@@ -24,6 +24,7 @@ use crate::m7_fixture_impair::{
     destined_to_poison_mac, forged_dns_replies, tcp_frame, ArpImpairer, DnsImpairer, GuestArp,
     ImpairCounts, TcpImpairer, TcpImpairment, DNS_FORGERY_PORT,
 };
+use crate::m7_guest_values::GuestValues;
 use crate::m7_fixture_tcp::{
     FixtureTlsCert, HoldEvent, HttpOutcome, M9BannerService, M9HoldService, M9HttpService,
     TcpEchoService, TlsEvent, TlsService,
@@ -98,6 +99,8 @@ struct FixtureSeen {
     held_requests: AtomicU32,
     /// What the impaired wire did to the guest.
     impaired: Mutex<ImpairCounts>,
+    /// The ISSs, source ports and DNS IDs the guest chose (#221).
+    guest: Mutex<GuestValues>,
 }
 
 impl FixtureSeen {
@@ -206,12 +209,18 @@ impl M7FixturePeer {
     }
 
     /// Stops the peer and returns what it served over the whole run.
-    pub fn shutdown(mut self) -> FixtureCounts {
+    pub fn shutdown(self) -> FixtureCounts {
+        self.shutdown_with_guest_values().0
+    }
+
+    /// [`Self::shutdown`], plus the values the guest chose on the wire.
+    pub fn shutdown_with_guest_values(mut self) -> (FixtureCounts, GuestValues) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-        self.counts()
+        let guest = self.seen.guest.lock().expect("guest values").clone();
+        (self.counts(), guest)
     }
 }
 
@@ -615,6 +624,7 @@ impl QemuSocketDevice {
             let end = start + frame_len;
             if frame_len != 0 && frame_len <= MAX_FRAME_BYTES {
                 let frame = self.pending[start..end].to_vec();
+                self.seen.guest.lock().expect("guest values").observe(&frame);
                 if frame.len() >= 14 && u16::from_be_bytes([frame[12], frame[13]]) == 0x0806 {
                     self.events.push("[FIX ] arp request".to_owned());
                 }
