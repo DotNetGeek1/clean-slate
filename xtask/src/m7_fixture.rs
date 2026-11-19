@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration as StdDuration;
 
@@ -15,11 +15,15 @@ use clean_slate_network::fixture::{
     UDP_ECHO_PORT,
 };
 use clean_slate_network::ipv4::Ipv4Header;
-use clean_slate_network::tcp::{parse_tcp_segment, write_tcp_segment, TcpFlags, TcpSegment};
+use clean_slate_network::tcp::{parse_tcp_segment, TcpFlags, TcpSegment};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::udp;
 
+use crate::m7_fixture_impair::{
+    forged_dns_replies, tcp_frame, DnsImpairer, ImpairCounts, TcpImpairer, TcpImpairment,
+    DNS_FORGERY_PORT,
+};
 use crate::m7_fixture_tcp::{
     FixtureTlsCert, HoldEvent, HttpOutcome, M9BannerService, M9HoldService, M9HttpService,
     TcpEchoService, TlsEvent, TlsService,
@@ -41,6 +45,8 @@ pub struct FixtureOptions {
     pub dns_reply_delay: StdDuration,
     /// M9 #105: DNS A → 10.77.0.50, HTTP on 10.77.0.50:4001 (M7 tests keep default false).
     pub m9_profile: bool,
+    /// #221: drop, forge, split, reorder and duplicate on the wire (`m7_fixture_impair`).
+    pub impaired: bool,
 }
 
 impl Default for FixtureOptions {
@@ -49,9 +55,14 @@ impl Default for FixtureOptions {
             tls_cert: WhichCert::Correct,
             dns_reply_delay: StdDuration::ZERO,
             m9_profile: false,
+            impaired: false,
         }
     }
 }
+
+/// How long a real DNS answer is held back after its forgeries, so every forgery reaches the
+/// guest first.
+const DNS_FORGERY_LEAD: StdDuration = StdDuration::from_millis(20);
 
 pub struct M7FixturePeer {
     port: u16,
@@ -85,6 +96,14 @@ struct FixtureSeen {
     held_connections: AtomicU32,
     /// Held connections on which a complete HTTP request head has arrived (still unanswered).
     held_requests: AtomicU32,
+    /// What the impaired wire did to the guest.
+    impaired: Mutex<ImpairCounts>,
+}
+
+impl FixtureSeen {
+    fn record(&self, update: impl FnOnce(&mut ImpairCounts)) {
+        update(&mut self.impaired.lock().expect("impairment counters"));
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -100,10 +119,12 @@ pub struct FixtureCounts {
     pub http_refused: u32,
     pub held_connections: u32,
     pub held_requests: u32,
+    pub impaired: ImpairCounts,
 }
 
 impl FixtureCounts {
     pub const ZERO: Self = Self {
+        impaired: ImpairCounts::ZERO,
         dns_replies: 0,
         fixture_a_answers: 0,
         nxdomain_answers: 0,
@@ -180,6 +201,7 @@ impl M7FixturePeer {
             http_refused: load(&self.seen.http_refused),
             held_connections: load(&self.seen.held_connections),
             held_requests: load(&self.seen.held_requests),
+            impaired: *self.seen.impaired.lock().expect("impairment counters"),
         }
     }
 
@@ -226,7 +248,9 @@ fn run_peer(
         return;
     }
 
-    let mut device = QemuSocketDevice::new(stream, options.m9_profile);
+    let tcp_impairer = options.impaired.then(TcpImpairer::default);
+    let mut device =
+        QemuSocketDevice::new(stream, options.m9_profile, tcp_impairer, Arc::clone(&seen));
     let peer_octets = PEER_IPV4.octets();
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(
         PEER_MAC.octets(),
@@ -263,6 +287,12 @@ fn run_peer(
         udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
     );
     let dns_handle = sockets.add(udp_dns);
+    let forgery_handle = sockets.add(udp::Socket::new(
+        udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
+        udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
+    ));
+    let mut dns_impairer = options.impaired.then(DnsImpairer::default);
+    let mut held_dns_answers: VecDeque<HeldDnsAnswer> = VecDeque::new();
 
     let mut tcp_echo_service = if options.m9_profile {
         None
@@ -307,20 +337,67 @@ fn run_peer(
             dns_socket.bind(DNS_SERVER_PORT).expect("bind udp dns");
         }
         if let Ok((payload, endpoint)) = dns_socket.recv() {
-            if let Some((name, response)) = build_dns_response(payload, options.m9_profile) {
-                let rcode = (response[3] & 0x0F) as u32;
+            let query = payload.to_vec();
+            if dns_impairer
+                .as_mut()
+                .is_some_and(|dns| dns.drop_first_copy(&query))
+            {
+                println!(
+                    "[FIX ] impair dns query dropped id={:#06x}",
+                    u16::from_be_bytes([query[0], query[1]])
+                );
+                seen.record(|counts| counts.dns_queries_dropped += 1);
+            } else if let Some((name, response)) = build_dns_response(&query, options.m9_profile) {
                 if !options.dns_reply_delay.is_zero() {
                     thread::sleep(options.dns_reply_delay);
                 }
-                if dns_socket.send_slice(&response, endpoint).is_ok() {
-                    println!("[FIX ] dns query name={name} rcode={rcode}");
-                    seen.dns_replies.fetch_add(1, Ordering::SeqCst);
-                    if carries_fixture_a_record(&name, &response) {
-                        seen.fixture_a_answers.fetch_add(1, Ordering::SeqCst);
+                let mut release_at = std::time::Instant::now();
+                if dns_impairer.is_some() {
+                    if let Some(forged) = forged_dns_replies(&query) {
+                        let sent_53 = forged
+                            .from_port_53
+                            .iter()
+                            .filter(|reply| dns_socket.send_slice(reply, endpoint).is_ok())
+                            .count() as u32;
+                        let forgery_socket = sockets.get_mut::<udp::Socket>(forgery_handle);
+                        if !forgery_socket.is_open() {
+                            forgery_socket
+                                .bind(DNS_FORGERY_PORT)
+                                .expect("bind dns forgery port");
+                        }
+                        let sent_other = u32::from(
+                            forgery_socket
+                                .send_slice(&forged.from_other_port, endpoint)
+                                .is_ok(),
+                        );
+                        println!("[FIX ] impair dns forged replies={}", sent_53 + sent_other);
+                        seen.record(|counts| counts.dns_forged_replies += sent_53 + sent_other);
+                        release_at += DNS_FORGERY_LEAD;
                     }
-                    if rcode == 3 {
-                        seen.nxdomain_answers.fetch_add(1, Ordering::SeqCst);
-                    }
+                }
+                held_dns_answers.push_back(HeldDnsAnswer {
+                    name,
+                    response,
+                    endpoint,
+                    release_at,
+                });
+            }
+        }
+        while held_dns_answers
+            .front()
+            .is_some_and(|held| held.release_at <= std::time::Instant::now())
+        {
+            let held = held_dns_answers.pop_front().expect("front checked");
+            let dns_socket = sockets.get_mut::<udp::Socket>(dns_handle);
+            let rcode = (held.response[3] & 0x0F) as u32;
+            if dns_socket.send_slice(&held.response, held.endpoint).is_ok() {
+                println!("[FIX ] dns query name={} rcode={rcode}", held.name);
+                seen.dns_replies.fetch_add(1, Ordering::SeqCst);
+                if carries_fixture_a_record(&held.name, &held.response) {
+                    seen.fixture_a_answers.fetch_add(1, Ordering::SeqCst);
+                }
+                if rcode == 3 {
+                    seen.nxdomain_answers.fetch_add(1, Ordering::SeqCst);
                 }
             }
         }
@@ -369,6 +446,14 @@ fn run_peer(
     }
 }
 
+/// A DNS answer waiting until `release_at`, so the forgeries sent for it reach the guest first.
+struct HeldDnsAnswer {
+    name: String,
+    response: Vec<u8>,
+    endpoint: udp::UdpMetadata,
+    release_at: std::time::Instant,
+}
+
 const M9_REFUSED_PORT: u16 = 0x1339;
 
 /// Set to `1` to log every TCP segment the fixture receives or sends (`[FIX ] trace ...`).
@@ -406,6 +491,8 @@ struct QemuSocketDevice {
     stream: TcpStream,
     m9_profile: bool,
     trace_frames: bool,
+    tcp_impairer: Option<TcpImpairer>,
+    seen: Arc<FixtureSeen>,
     /// Bytes received from QEMU that do not yet form a complete
     /// length-prefixed frame. The socket is non-blocking, so a read may stop
     /// mid-prefix or mid-frame; buffering keeps the stream in sync.
@@ -415,11 +502,18 @@ struct QemuSocketDevice {
 }
 
 impl QemuSocketDevice {
-    fn new(stream: TcpStream, m9_profile: bool) -> Self {
+    fn new(
+        stream: TcpStream,
+        m9_profile: bool,
+        tcp_impairer: Option<TcpImpairer>,
+        seen: Arc<FixtureSeen>,
+    ) -> Self {
         Self {
             stream,
             m9_profile,
             trace_frames: frame_trace_enabled(),
+            tcp_impairer,
+            seen,
             pending: Vec::with_capacity(4 * (4 + MAX_FRAME_BYTES)),
             rx_queue: VecDeque::new(),
             events: Vec::new(),
@@ -456,32 +550,11 @@ impl QemuSocketDevice {
         {
             return false;
         }
-        let mut reply = vec![0u8; MAX_FRAME_BYTES];
-        let eth_len = match (EthernetHeader {
+        let reply_eth = EthernetHeader {
             dst: eth.src,
             src: eth.dst,
             ethertype: EtherType::IPV4,
-        })
-        .write(&mut reply)
-        {
-            Ok(len) => len,
-            Err(_) => return false,
         };
-        let ip_off = eth_len;
-        let ip_hdr = Ipv4Header {
-            src: ip.dst,
-            dst: ip.src,
-            protocol: IpProtocol::TCP,
-            ttl: 64,
-            identification: 0,
-            flags: 0,
-            fragment_offset: 0,
-            header_len: 20,
-            total_len: 0,
-            dscp: 0,
-            ecn: 0,
-        };
-        let tcp_off = ip_off + 20;
         let rst = TcpSegment {
             src_port: seg.dst_port,
             dst_port: seg.src_port,
@@ -494,15 +567,8 @@ impl QemuSocketDevice {
             urgent: 0,
             mss_option: None,
         };
-        let tcp_len = match write_tcp_segment(ip.dst, ip.src, &rst, &[], &mut reply[tcp_off..]) {
-            Ok(len) => len,
-            Err(_) => return false,
-        };
-        if ip_hdr.write(&mut reply[ip_off..], tcp_len).is_err() {
-            return false;
-        }
-        reply.truncate(ip_off + 20 + tcp_len);
-        self.write_frame_to_socket(&reply).is_ok()
+        tcp_frame(reply_eth, ip.dst, ip.src, &rst, &[])
+            .is_some_and(|reply| self.write_frame_to_socket(&reply).is_ok())
     }
 
     fn read_frames_from_socket(&mut self) {
@@ -546,7 +612,13 @@ impl QemuSocketDevice {
                 if self.trace_frames {
                     self.events.extend(describe_tcp_frame("guest", &frame));
                 }
-                if !(self.m9_profile && self.try_answer_m9_refused_syn(&frame)) {
+                let dropped = self
+                    .tcp_impairer
+                    .as_mut()
+                    .and_then(|wire| wire.guest_frame(&frame));
+                if let Some(impairment) = dropped {
+                    self.record_tcp_impairment(impairment);
+                } else if !(self.m9_profile && self.try_answer_m9_refused_syn(&frame)) {
                     self.rx_queue.push_back(frame);
                 }
             } else {
@@ -556,6 +628,35 @@ impl QemuSocketDevice {
             offset = end;
         }
         self.pending.drain(..offset);
+    }
+
+    fn record_tcp_impairment(&mut self, impairment: TcpImpairment) {
+        self.events
+            .push(format!("[FIX ] impair tcp {impairment:?}"));
+        self.seen.record(|counts| match impairment {
+            TcpImpairment::SynDropped => counts.tcp_syns_dropped += 1,
+            TcpImpairment::GuestDataDropped => counts.tcp_guest_data_dropped += 1,
+            TcpImpairment::FixtureDataScripted => {
+                counts.tcp_blind_rsts += 1;
+                counts.tcp_reordered += 1;
+                counts.tcp_stale_duplicates += 1;
+            }
+        });
+    }
+
+    /// Writes a fixture frame to QEMU, or the impaired wire's replacement frames for it.
+    fn send_fixture_frame(&mut self, frame: &[u8]) {
+        let Some(wire) = self.tcp_impairer.as_mut() else {
+            let _ = self.write_frame_to_socket(frame);
+            return;
+        };
+        let (frames, impairment) = wire.fixture_frame(frame);
+        if let Some(impairment) = impairment {
+            self.record_tcp_impairment(impairment);
+        }
+        for frame in frames {
+            let _ = self.write_frame_to_socket(&frame);
+        }
     }
 
     fn write_frame_to_socket(&mut self, frame: &[u8]) -> std::io::Result<()> {
@@ -741,7 +842,7 @@ impl phy::TxToken for QemuTxToken<'_> {
                 .events
                 .extend(describe_tcp_frame("fixture", &buffer));
         }
-        let _ = self.device.write_frame_to_socket(&buffer);
+        self.device.send_fixture_frame(&buffer);
         result
     }
 }
