@@ -21,6 +21,7 @@ mod m10_virtio_gpu;
 mod m5_torn;
 mod m7_certs;
 mod m7_fixture;
+mod m7_fixture_impair;
 mod m7_fixture_tcp;
 mod m8_fixture;
 mod m9_fixture;
@@ -42,6 +43,7 @@ use ovmf_vars::RuntimeVarsCopy;
 
 use m10_framebuffer_validate::validate_m10_framebuffer_serial;
 use m7_fixture::{FixtureCounts, FixtureOptions, M7FixturePeer, WhichCert};
+use m7_fixture_impair::ImpairCounts;
 
 const KERNEL_PACKAGE: &str = "clean-slate-kernel";
 const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
@@ -1412,10 +1414,18 @@ fn run_m10_framebuffer_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
+    for impaired in [false, true] {
+        run_m7_tls_pass_boot(impaired)?;
+    }
+    run_m7_tls_fail_closed_boot()
+}
+
+fn run_m7_tls_pass_boot(impaired: bool) -> Result<(), XtaskError> {
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::ZERO,
         m9_profile: false,
+        impaired,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -1443,12 +1453,19 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
     );
     let served = peer.shutdown();
     pass?;
-    require_fixture_served("test-m7-tls", served, M7_TLS_SERVED)?;
+    require_fixture_served(
+        m7_wire_lane("test-m7-tls", impaired),
+        served,
+        on_m7_wire(M7_TLS_SERVED, impaired, M7_TLS_IMPAIRED),
+    )
+}
 
+fn run_m7_tls_fail_closed_boot() -> Result<(), XtaskError> {
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::WrongName,
         dns_reply_delay: std::time::Duration::ZERO,
         m9_profile: false,
+        impaired: false,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -1517,13 +1534,65 @@ const M7_NETWORK_SERVED: FixtureCounts = FixtureCounts {
     ..FixtureCounts::ZERO
 };
 
+/// #221: the fixture's first data segment on each connection arrives behind a blind RST, split,
+/// reordered and duplicated; each connection's first SYN and first guest data segment are lost.
+const fn tcp_script_on(connections: u32) -> ImpairCounts {
+    ImpairCounts {
+        tcp_syns_dropped: connections,
+        tcp_guest_data_dropped: connections,
+        tcp_blind_rsts: connections,
+        tcp_reordered: connections,
+        tcp_stale_duplicates: connections,
+        ..ImpairCounts::ZERO
+    }
+}
+
+/// Each query's first copy is lost and four forgeries precede its answer.
+const fn dns_script_on(queries: u32) -> ImpairCounts {
+    ImpairCounts {
+        dns_queries_dropped: queries,
+        dns_forged_replies: 4 * queries,
+        ..ImpairCounts::ZERO
+    }
+}
+
+/// The DNS boot's two queries (A answer and NXDOMAIN).
+const M7_DNS_IMPAIRED: ImpairCounts = dns_script_on(2);
+
+/// The TLS pass boot's two connections (TCP echo, TLS).
+const M7_TLS_IMPAIRED: ImpairCounts = tcp_script_on(2);
+
+/// M7.8's one resolve and two TLS connections.
+const M7_NETWORK_IMPAIRED: ImpairCounts = ImpairCounts {
+    dns_queries_dropped: dns_script_on(1).dns_queries_dropped,
+    dns_forged_replies: dns_script_on(1).dns_forged_replies,
+    ..tcp_script_on(2)
+};
+
+/// What the fixture must have served on the clean or the impaired wire: the same exchanges,
+/// plus exactly the impairments the impaired wire applies to them.
+fn on_m7_wire(served: FixtureCounts, impaired: bool, script: ImpairCounts) -> FixtureCounts {
+    FixtureCounts {
+        impaired: if impaired { script } else { ImpairCounts::ZERO },
+        ..served
+    }
+}
+
+fn m7_wire_lane(lane: &'static str, impaired: bool) -> String {
+    if impaired {
+        format!("{lane} (impaired wire)")
+    } else {
+        lane.to_owned()
+    }
+}
+
 fn require_fixture_served(
-    lane: &str,
+    lane: impl AsRef<str>,
     served: FixtureCounts,
     expected: FixtureCounts,
 ) -> Result<(), XtaskError> {
     served
-        .require_exactly(lane, expected)
+        .require_exactly(lane.as_ref(), expected)
         .map_err(XtaskError::Validation)
 }
 
@@ -1557,10 +1626,18 @@ fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
+    for impaired in [false, true] {
+        run_m7_dns_boot(impaired)?;
+    }
+    Ok(())
+}
+
+fn run_m7_dns_boot(impaired: bool) -> Result<(), XtaskError> {
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::from_millis(5),
         m9_profile: false,
+        impaired,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -1588,7 +1665,11 @@ fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
     );
     let served = peer.shutdown();
     run_result?;
-    require_fixture_served("test-m7-dns", served, M7_DNS_SERVED)
+    require_fixture_served(
+        m7_wire_lane("test-m7-dns", impaired),
+        served,
+        on_m7_wire(M7_DNS_SERVED, impaired, M7_DNS_IMPAIRED),
+    )
 }
 
 fn run_m5_persistence_acceptance_default() -> Result<(), XtaskError> {
@@ -2002,6 +2083,7 @@ fn run_m9_userspace_acceptance() -> Result<(), XtaskError> {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::from_millis(5),
         m9_profile: true,
+        impaired: false,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -2168,6 +2250,7 @@ fn run_m9_linux_socket_acceptance() -> Result<(), XtaskError> {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::from_millis(5),
         m9_profile: true,
+        impaired: false,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -2891,10 +2974,18 @@ fn run_m7_net_service_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m7_network_acceptance() -> Result<(), XtaskError> {
+    for impaired in [false, true] {
+        run_m7_network_boot(impaired)?;
+    }
+    Ok(())
+}
+
+fn run_m7_network_boot(impaired: bool) -> Result<(), XtaskError> {
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: std::time::Duration::from_millis(5),
         m9_profile: false,
+        impaired,
     })
     .map_err(XtaskError::Io)?;
     let port = peer.port();
@@ -2922,7 +3013,11 @@ fn run_m7_network_acceptance() -> Result<(), XtaskError> {
     );
     let served = peer.shutdown();
     run_result?;
-    require_fixture_served("test-m7-network", served, M7_NETWORK_SERVED)
+    require_fixture_served(
+        m7_wire_lane("test-m7-network", impaired),
+        served,
+        on_m7_wire(M7_NETWORK_SERVED, impaired, M7_NETWORK_IMPAIRED),
+    )
 }
 
 fn build_network_userspace(release: bool) -> Result<(), XtaskError> {
