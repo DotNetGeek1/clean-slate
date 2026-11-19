@@ -513,8 +513,8 @@ fn run_inner() -> Result<(), &'static str> {
         "[MM  ] carve-out private tables per process: {}\n",
         KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES
     ));
-    crate::mm::address_space::verify_carve_out_attach_at_boot(&mut allocator)?;
     report_kernel_write_xor_execute(&installed)?;
+    crate::mm::address_space::verify_carve_out_attach_at_boot(&mut allocator)?;
     crate::mm::shared_buffer::init(&mut allocator)?;
 
     let inspected = inspect_current_mapping()?;
