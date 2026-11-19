@@ -623,7 +623,7 @@ cargo xtask test-m5-persistence
 
 This command resets `target/m5/m5-data.img` by default, boots the `m5-persistence-self-test` kernel twice with fresh copied OVMF vars, preserves the exact same VirtIO disk image across the reboot, and requires ordered markers proving: fresh mount/format, deterministic writes of `alpha` and `beta`, a durable commit with `[BLK ] flush complete`, reboot on the same image, exact recovery of both objects, and a post-reboot overwrite where `beta` remains intact. Pass `--keep-disk` to preserve `target/m5/m5-data.img` after the run and to reuse that kept image instead of resetting it on the next debugging invocation.
 
-For the six-boot M5 abrupt-stop crash-recovery acceptance:
+For the ten-boot M5 abrupt-stop and torn-write crash-recovery acceptance:
 
 ```bash
 cargo xtask test-m5-crash-recovery
@@ -634,7 +634,18 @@ This command also resets `target/m5/m5-data.img` by default, rebuilds the known 
 - The early arm stops after write 1, before the superblock. Recovery must report `[STOR] recovered generation=2`, both objects as generation 2 wrote them (`bytes=` and `checksum=`), and `[CRSH] recovery outcome=previous-commit`.
 - The late arm stops after write 3, once the device has completed the generation-3 superblock but before the flush. Recovery must report `generation=3`, alpha's 700-byte third version, and `outcome=new-commit`.
 
-Any other generation, object length, checksum or outcome fails the lane at once with `marker value mismatch`. Pass `--keep-disk` to retain the image and reuse that kept disk on the next debugging invocation instead of recreating it.
+Any other generation, object length, checksum or outcome fails the lane at once with `marker value mismatch`.
+
+Boots 7 to 10 are two torn-write pairs (#223). Before each, `xtask` writes back the disk image it saved after the baseline (generations 1 and 2). The crash boot is the late arm with one write of the generation-3 commit torn by the kernel in the block syscall path, before the request reaches the device:
+
+- `m5-crash-torn-superblock-self-test` tears the superblock write. The device receives the first 112 bytes of generation 3's superblock (header and alpha's entry), and slot 1's previous bytes after them, which the kernel kept from the device's reply when the service mounted. The kernel logs `[CRSH] torn superblock write=3 lba=1 new-bytes=112 stale-bytes=400`.
+- `m5-crash-torn-payload-self-test` tears alpha's two-block payload write to its first block (`[CRSH] torn payload write=1 lba=L blocks-written=1 of=2`). Beta's payload and the full superblock then complete before the stop. The commit has no flush between payload and superblock, so a write-back cache can persist them in that state, and only the payload checksum can reject it.
+
+After each crash boot the host reads the disk image itself (`xtask/src/m5_torn.rs`). It checks that slot 0 is unchanged and that the tear is on the disk: for the superblock, a generation-3 header with slot 1's old bytes from offset 112; for the payload, alpha's first block new and its second block unchanged. It then runs the store's `ObjectStore::mount` over the image, which must select generation 2 with both objects' generation-2 bytes. The recovery boot must report generation 2 and `outcome=previous-commit`, must leave the disk byte-for-byte unchanged, and the host repeats the mount check. The host checks do not rely on anything the storage service reports.
+
+A superblock is one 512-byte block and all its meaningful bytes (48-byte header, seven 64-byte entries) lie in its first sector, so a tear at sector boundaries cannot leave a mixed superblock; the lane tears inside the sector. `store/tests/torn_write.rs` covers the same tears on the host, the sector-granular case on a 4 KiB block, and, as an ignored test, a torn payload whose stale block has the same additive byte sum, which recovery currently accepts (#224).
+
+Pass `--keep-disk` to retain the image and reuse that kept disk on the next debugging invocation instead of recreating it.
 
 For the aggregate M5 milestone gate:
 
@@ -642,7 +653,7 @@ For the aggregate M5 milestone gate:
 cargo xtask test-m5
 ```
 
-The aggregate runs `test-m5-disk-harness`, `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, and `test-m5-crash-recovery` in order, then prints `[M5  ] PASS`. The host emits `[TEST] rebooting with persistent disk` between QEMU phases; the recovery boot emits `[CRSH] recovery outcome=<previous-commit|new-commit>` once it has validated that no torn object/metadata state was accepted, and the lane requires `previous-commit` after the early arm and `new-commit` after the late arm.
+The aggregate runs `test-m5-disk-harness`, `test-m5-block`, `test-m5-storage`, `test-m5-crash-matrix`, `test-m5-persistence`, and `test-m5-crash-recovery` in order, then prints `[M5  ] PASS`. The host emits `[TEST] rebooting with persistent disk` between QEMU phases; the recovery boot emits `[CRSH] recovery outcome=<previous-commit|new-commit>` once it has validated that no torn object/metadata state was accepted, and the lane requires `previous-commit` after the early arm, `new-commit` after the late arm, and `previous-commit` after both torn-write arms.
 
 For M5.5 persistent block-harness plumbing (QEMU fixture + host sentinel):
 

@@ -18,6 +18,7 @@ mod m10_desktop_visual;
 mod m10_framebuffer_validate;
 mod m10_input_lane;
 mod m10_virtio_gpu;
+mod m5_torn;
 mod m7_certs;
 mod m7_fixture;
 mod m7_fixture_tcp;
@@ -963,6 +964,52 @@ const M5_CRASH_ARM_LATE_SPEC: &[MarkerStep] = &[
         fields: &[("after-write=", "3"), ("lba=", "1")],
     },
 ];
+/// The late crash arm with the superblock write torn by the kernel: the device gets the
+/// first `SUPERBLOCK_TEAR_OFFSET` bytes of generation 3's superblock and slot 1's old
+/// bytes after them. The host then checks the disk itself (`m5_torn`).
+const M5_CRASH_TORN_SUPERBLOCK_SPEC: &[MarkerStep] = &[
+    MarkerStep::Line {
+        prefix: "[CRSH] armed trigger=",
+        fields: &[("after-write=", "3"), ("tear=", "superblock-suffix")],
+    },
+    M5_PRE_CRASH_REPORT[0],
+    M5_PRE_CRASH_REPORT[1],
+    M5_PRE_CRASH_REPORT[2],
+    M5_PRE_CRASH_REPORT[3],
+    MarkerStep::Line {
+        prefix: "[CRSH] torn superblock write=",
+        fields: &[
+            ("write=", "3"),
+            ("lba=", "1"),
+            ("new-bytes=", "112"),
+            ("stale-bytes=", "400"),
+        ],
+    },
+    MarkerStep::Line {
+        prefix: "[CRSH] inject after-write=",
+        fields: &[("after-write=", "3"), ("lba=", "1")],
+    },
+];
+/// The late crash arm with alpha's two-block payload write torn to its first block;
+/// beta's payload and the superblock then complete before the stop.
+const M5_CRASH_TORN_PAYLOAD_SPEC: &[MarkerStep] = &[
+    MarkerStep::Line {
+        prefix: "[CRSH] armed trigger=",
+        fields: &[("after-write=", "3"), ("tear=", "payload-prefix")],
+    },
+    MarkerStep::Line {
+        prefix: "[CRSH] torn payload write=",
+        fields: &[("write=", "1"), ("blocks-written=", "1"), ("of=", "2")],
+    },
+    M5_PRE_CRASH_REPORT[0],
+    M5_PRE_CRASH_REPORT[1],
+    M5_PRE_CRASH_REPORT[2],
+    M5_PRE_CRASH_REPORT[3],
+    MarkerStep::Line {
+        prefix: "[CRSH] inject after-write=",
+        fields: &[("after-write=", "3"), ("lba=", "1")],
+    },
+];
 /// Read-back evidence for `beta`, which no crash phase rewrites.
 const M5_BETA_V1_READ_FIELDS: &[(&str, &str)] = &[
     ("bytes=", "11"),
@@ -1588,7 +1635,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
     let run_result = (|| -> Result<(), XtaskError> {
         prepare_m5_data_disk_image(options.reuse_disk)?;
         let config = m5_storage_vm_config();
-        println!("[M5.C] baseline boot 1/4");
+        println!("[M5.C] baseline boot 1/10");
         run_vm_inner_with_config(
             false,
             false,
@@ -1604,7 +1651,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             reason: error.to_string(),
         })?;
         println!("[TEST] rebooting with persistent disk");
-        println!("[M5.C] baseline boot 2/4");
+        println!("[M5.C] baseline boot 2/10");
         run_vm_inner_with_config(
             false,
             false,
@@ -1619,7 +1666,8 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             phase: "crash baseline boot 2".to_owned(),
             reason: error.to_string(),
         })?;
-        println!("[M5.C] abrupt-stop early boot 3/6");
+        let baseline = fs::read(m5_data_disk_path())?;
+        println!("[M5.C] abrupt-stop early boot 3/10");
         run_vm_inner_with_config(
             false,
             false,
@@ -1635,7 +1683,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             reason: error.to_string(),
         })?;
         println!("[TEST] rebooting with persistent disk");
-        println!("[M5.C] early recovery boot 4/6");
+        println!("[M5.C] early recovery boot 4/10");
         run_vm_inner_with_config(
             false,
             false,
@@ -1650,7 +1698,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             phase: "early crash recovery boot".to_owned(),
             reason: error.to_string(),
         })?;
-        println!("[M5.C] abrupt-stop late boot 5/6");
+        println!("[M5.C] abrupt-stop late boot 5/10");
         run_vm_inner_with_config(
             false,
             false,
@@ -1666,7 +1714,7 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
             reason: error.to_string(),
         })?;
         println!("[TEST] rebooting with persistent disk");
-        println!("[M5.C] late recovery boot 6/6");
+        println!("[M5.C] late recovery boot 6/10");
         run_vm_inner_with_config(
             false,
             false,
@@ -1675,16 +1723,91 @@ fn run_m5_crash_recovery_acceptance(args: &[OsString]) -> Result<(), XtaskError>
                 MarkerSet::Steps(M5_CRASH_RECOVERY_LATE_SPEC),
                 M5_CRASH_RECOVERY_TIMEOUT,
             )),
-            config,
+            config.clone(),
         )
         .map_err(|error| XtaskError::M5PhaseFailed {
             phase: "late crash recovery boot".to_owned(),
             reason: error.to_string(),
         })?;
+        for (boot, torn, feature, spec, label) in [
+            (
+                7,
+                m5_torn::TornWrite::SuperblockSuffix,
+                "m5-crash-torn-superblock-self-test",
+                M5_CRASH_TORN_SUPERBLOCK_SPEC,
+                "torn superblock",
+            ),
+            (
+                9,
+                m5_torn::TornWrite::PayloadPrefix,
+                "m5-crash-torn-payload-self-test",
+                M5_CRASH_TORN_PAYLOAD_SPEC,
+                "torn payload",
+            ),
+        ] {
+            run_m5_torn_write_phases(&baseline, &config, boot, torn, feature, spec, label)?;
+        }
         println!("[M5.C] PASS");
         Ok(())
     })();
     finalize_m5_disk_lifecycle(run_result, options.keep_disk)
+}
+
+/// Boots `boot` and `boot + 1` of `test-m5-crash-recovery`: the disk is put back to the
+/// generation-2 `baseline`, the kernel tears one write of the generation-3 commit and
+/// stops, the host checks the torn disk, and a recovery boot must mount generation 2
+/// without changing the disk.
+fn run_m5_torn_write_phases(
+    baseline: &[u8],
+    config: &VmLaunchConfig,
+    boot: u32,
+    torn: m5_torn::TornWrite,
+    feature: &str,
+    spec: &'static [MarkerStep],
+    label: &str,
+) -> Result<(), XtaskError> {
+    let disk = m5_data_disk_path();
+    let phase_failed = |phase: &str, reason: String| XtaskError::M5PhaseFailed {
+        phase: format!("{label} {phase}"),
+        reason,
+    };
+    fs::write(&disk, baseline)?;
+    println!("[M5.C] {label} crash boot {boot}/10");
+    run_vm_inner_with_config(
+        false,
+        false,
+        &[feature],
+        Some((MarkerSet::Steps(spec), M5_PERSISTENCE_BOOT_TIMEOUT)),
+        config.clone(),
+    )
+    .map_err(|error| phase_failed("crash boot", error.to_string()))?;
+    let torn_image = fs::read(&disk)?;
+    m5_torn::check_torn_image(baseline, &torn_image, torn)
+        .map_err(|reason| phase_failed("host disk check", reason))?;
+    println!("[M5.C] host: {label} on disk; store mount over the image selects generation 2");
+    println!("[TEST] rebooting with persistent disk");
+    println!("[M5.C] {label} recovery boot {}/10", boot + 1);
+    run_vm_inner_with_config(
+        false,
+        false,
+        &["m5-crash-recovery-self-test"],
+        Some((
+            MarkerSet::Steps(M5_CRASH_RECOVERY_EARLY_SPEC),
+            M5_CRASH_RECOVERY_TIMEOUT,
+        )),
+        config.clone(),
+    )
+    .map_err(|error| phase_failed("recovery boot", error.to_string()))?;
+    let recovered_image = fs::read(&disk)?;
+    if recovered_image != torn_image {
+        return Err(phase_failed(
+            "host disk check",
+            "the read-only recovery boot changed the disk".to_owned(),
+        ));
+    }
+    m5_torn::check_recovers_generation_two(&recovered_image)
+        .map_err(|reason| phase_failed("host disk check", reason))?;
+    Ok(())
 }
 
 fn run_m5_disk_harness_default() -> Result<(), XtaskError> {
@@ -5198,7 +5321,9 @@ fn print_help() {
     println!("  test-m5-storage Build the M5.7 integrated storage-path acceptance boot");
     println!("  test-m5-crash-matrix Run the host-side M5.6 crash-consistency matrix");
     println!("  test-m5-persistence Two-boot persistent-disk M5 acceptance using the production storage path");
-    println!("  test-m5-crash-recovery Six-boot abrupt-stop crash-recovery M5 acceptance");
+    println!(
+        "  test-m5-crash-recovery Ten-boot abrupt-stop and torn-write crash-recovery M5 acceptance"
+    );
     println!("                 Pass --keep-disk to preserve target/m5/m5-data.img for debugging");
     println!("  test-m5-disk-harness Two-boot M5 disk harness with host-side sentinel validation");
     println!(
