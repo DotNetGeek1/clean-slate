@@ -7,17 +7,21 @@
 //! 2. `int 18` (the #MC gate): the hook checks the saved frame is on that vector's IST stack and
 //!    resumes;
 //! 3. CR0.WP: a write to a kernel page mapped present and not writable must #PF with `0x3`;
-//! 4. CR4.SMEP: a CPL0 jump to a user-accessible page must #PF with `0x11` at that page;
-//! 5. CR4.SMAP: `mm::user_access::read_user` must read a user page, and a plain CPL0 read of the
+//! 4. kernel W^X: a write to kernel `.text` and one to `.rdata` must #PF with `0x3`, and a CPL0
+//!    jump to a `jmp rcx` in kernel `.data` and to one on the (`.bss`) boot stack must #PF with
+//!    `0x11` at that address;
+//! 5. CR4.SMEP: a CPL0 jump to a user-accessible page must #PF with `0x11` at that page;
+//! 6. CR4.SMAP: `mm::user_access::read_user` must read a user page, and a plain CPL0 read of the
 //!    same address must #PF with `0x1`;
-//! 6. CR4.UMIP: `sgdt` at CPL3 must #GP with error code 0.
+//! 7. CR4.UMIP: `sgdt` at CPL3 must #GP with error code 0.
 //!
-//! Probes 3-6 follow the identity-guard pattern (`m2_identity_guard`): the fault hook validates
+//! Probes 3-7 follow the identity-guard pattern (`m2_identity_guard`): the fault hook validates
 //! the fault and starts the next probe from inside the handler, and the last one exits QEMU. A
 //! probe that does not fault falls through to a `[KGRD] … did not fault` line and a failing
-//! exit; without SMEP the user page's `jmp rcx` returns to the probe, without SMAP the raw read
-//! completes, and without UMIP the `sgdt` completes and the following `ud2` raises #UD instead of
-//! #GP.
+//! exit; without W^X the text write lands (it stores the byte already there) and the data or
+//! stack `jmp rcx` returns to the probe, without SMEP the user page's `jmp rcx` returns to the
+//! probe, without SMAP the raw read completes, and without UMIP the `sgdt` completes and the
+//! following `ud2` raises #UD instead of #GP.
 
 use crate::arch::x86_64::apic::{enable_local_apic, send_nmi_to_self};
 use crate::arch::x86_64::cpu::{read_cr4, without_write_protect};
@@ -36,7 +40,7 @@ use crate::mm::user_access::read_user;
 use crate::mm::{phys_to_virt, PAGE_SIZE};
 use crate::sync::global_cell::GlobalCell;
 use core::arch::asm;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use x86_64::registers::control::{Cr0, Cr0Flags, Cr2};
 use x86_64::structures::paging::{Mapper, Page, PageTableFlags, PhysFrame, Size4KiB};
 use x86_64::{PhysAddr, VirtAddr};
@@ -58,6 +62,13 @@ const EXPECTED_WP_ERROR: u64 = 0x3;
 const EXPECTED_SMEP_ERROR: u64 = 0x11;
 /// P=1, W=0, U=0, I/D=0.
 const EXPECTED_SMAP_ERROR: u64 = 0x1;
+/// P=1, W=0, U=0, I/D=1: a CPL0 fetch from a present no-execute page.
+const EXPECTED_NX_FETCH_ERROR: u64 = 0x11;
+const INSTRUCTION_FETCH_ERROR_BIT: u64 = 0x10;
+/// Lands in `.rdata`: immutable, no interior mutability.
+static RODATA_PROBE: [u8; 8] = *b"w^x-ro\0\0";
+/// Lands in `.data`: a non-zero initializer behind an `UnsafeCell`.
+static DATA_EXEC_PROBE: GlobalCell<[u8; 2]> = GlobalCell::new(JMP_RCX);
 /// Written through the physmap into the user stack page for the SMAP probe.
 const SMAP_PROBE_VALUE: u64 = 0x5341_504d_5f4f_4b21;
 const USER_RFLAGS: u64 = 0x2;
@@ -71,8 +82,15 @@ const STAGE_WP: u8 = 3;
 const STAGE_SMEP: u8 = 4;
 const STAGE_SMAP: u8 = 5;
 const STAGE_UMIP: u8 = 6;
+const STAGE_TEXT_WRITE: u8 = 7;
+const STAGE_RODATA_WRITE: u8 = 8;
+const STAGE_DATA_EXEC: u8 = 9;
+const STAGE_STACK_EXEC: u8 = 10;
 
 static STAGE: AtomicU8 = AtomicU8::new(STAGE_IDLE);
+/// CR2 and error code the active #PF probe must produce.
+static EXPECTED_FAULT_ADDRESS: AtomicU64 = AtomicU64::new(0);
+static EXPECTED_FAULT_ERROR: AtomicU64 = AtomicU64::new(0);
 /// Bumped by the hook for each IST vector it accepts.
 static IST_HITS: AtomicU8 = AtomicU8::new(0);
 static ALLOCATOR: GlobalCell<Option<PageAllocator>> = GlobalCell::new(None);
@@ -160,7 +178,7 @@ fn probe_read_only_write() -> ! {
     serial_write_fmt(format_args!(
         "[KGRD] probe write read-only addr={READ_ONLY_PROBE_ADDRESS:#018x} value={before:#x}\n"
     ));
-    STAGE.store(STAGE_WP, Ordering::SeqCst);
+    expect_page_fault(STAGE_WP, READ_ONLY_PROBE_ADDRESS, EXPECTED_WP_ERROR);
     unsafe {
         asm!(
             "mov qword ptr [{address}], {value}",
@@ -172,6 +190,79 @@ fn probe_read_only_write() -> ! {
     fail(format_args!(
         "wp: supervisor write to read-only page {READ_ONLY_PROBE_ADDRESS:#018x} did not fault"
     ))
+}
+
+fn expect_page_fault(stage: u8, address: u64, error: u64) {
+    EXPECTED_FAULT_ADDRESS.store(address, Ordering::SeqCst);
+    EXPECTED_FAULT_ERROR.store(error, Ordering::SeqCst);
+    STAGE.store(stage, Ordering::SeqCst);
+}
+
+/// Stores the byte already at `address`, so a missing W^X leaves the image unchanged.
+fn probe_kernel_write(stage: u8, section: &str, address: u64) -> ! {
+    let original = unsafe { core::ptr::read_volatile(address as *const u8) };
+    serial_write_fmt(format_args!(
+        "[KGRD] probe write kernel {section} addr={address:#018x}\n"
+    ));
+    expect_page_fault(stage, address, EXPECTED_WP_ERROR);
+    unsafe {
+        asm!(
+            "mov byte ptr [{address}], {value}",
+            address = in(reg) address,
+            value = in(reg_byte) original,
+            options(nostack, preserves_flags)
+        );
+    }
+    fail(format_args!(
+        "w^x: write to kernel {section} {address:#018x} did not fault"
+    ))
+}
+
+/// Jumps to `target` with the return address in `rcx`; a `jmp rcx` there comes straight back.
+fn jump_with_return_in_rcx(target: u64) {
+    unsafe {
+        asm!(
+            "lea rcx, [rip + 2f]",
+            "jmp {target}",
+            "2:",
+            target = in(reg) target,
+            out("rcx") _,
+            options(nostack)
+        );
+    }
+}
+
+fn probe_kernel_execute(stage: u8, region: &str, address: u64) -> ! {
+    serial_write_fmt(format_args!(
+        "[KGRD] probe exec kernel {region} addr={address:#018x}\n"
+    ));
+    expect_page_fault(stage, address, EXPECTED_NX_FETCH_ERROR);
+    jump_with_return_in_rcx(address);
+    fail(format_args!(
+        "w^x: CPL0 executed kernel {region} {address:#018x} without a fault"
+    ))
+}
+
+fn probe_text_write() -> ! {
+    probe_kernel_write(STAGE_TEXT_WRITE, "text", probe_text_write as usize as u64)
+}
+
+fn probe_rodata_write() -> ! {
+    probe_kernel_write(STAGE_RODATA_WRITE, "rodata", RODATA_PROBE.as_ptr() as u64)
+}
+
+fn probe_data_execute() -> ! {
+    probe_kernel_execute(STAGE_DATA_EXEC, "data", DATA_EXEC_PROBE.get() as u64)
+}
+
+/// The probe chain runs on the boot stack, which lives in the image's `.bss`.
+fn probe_stack_execute() -> ! {
+    let code = core::hint::black_box(JMP_RCX);
+    probe_kernel_execute(
+        STAGE_STACK_EXEC,
+        "stack",
+        core::hint::black_box(core::ptr::addr_of!(code)) as u64,
+    )
 }
 
 fn probe_user_page_execute() -> ! {
@@ -196,17 +287,8 @@ fn probe_user_page_execute() -> ! {
     serial_write_fmt(format_args!(
         "[KGRD] probe exec user page addr={USER_PROBE_CODE_ADDRESS:#018x}\n"
     ));
-    STAGE.store(STAGE_SMEP, Ordering::SeqCst);
-    unsafe {
-        asm!(
-            "lea rcx, [rip + 2f]",
-            "jmp {target}",
-            "2:",
-            target = in(reg) USER_PROBE_CODE_ADDRESS,
-            out("rcx") _,
-            options(nostack)
-        );
-    }
+    expect_page_fault(STAGE_SMEP, USER_PROBE_CODE_ADDRESS, EXPECTED_SMEP_ERROR);
+    jump_with_return_in_rcx(USER_PROBE_CODE_ADDRESS);
     fail(format_args!(
         "smep: CPL0 executed user page {USER_PROBE_CODE_ADDRESS:#018x} without a fault"
     ))
@@ -228,7 +310,7 @@ fn probe_user_page_read() -> ! {
     serial_write_fmt(format_args!(
         "[KGRD] probe raw read user page addr={address:#018x}\n"
     ));
-    STAGE.store(STAGE_SMAP, Ordering::SeqCst);
+    expect_page_fault(STAGE_SMAP, address, EXPECTED_SMAP_ERROR);
     let value = unsafe { core::ptr::read_volatile(address as *const u64) };
     fail(format_args!(
         "smap: CPL0 read {value:#x} from user page {address:#018x} without a fault"
@@ -294,36 +376,7 @@ pub(crate) fn on_exception(context: &InterruptContext) -> Option<u64> {
             IST_HITS.fetch_add(1, Ordering::SeqCst);
             Some(frame)
         }
-        STAGE_WP | STAGE_SMEP | STAGE_SMAP => {
-            let cr2 = Cr2::read().map(VirtAddr::as_u64).unwrap_or(0);
-            let (address, error, name) = match stage {
-                STAGE_WP => (READ_ONLY_PROBE_ADDRESS, EXPECTED_WP_ERROR, "wp"),
-                STAGE_SMEP => (USER_PROBE_CODE_ADDRESS, EXPECTED_SMEP_ERROR, "smep"),
-                _ => (USER_PROBE_STACK_ADDRESS, EXPECTED_SMAP_ERROR, "smap"),
-            };
-            if vector != PAGE_FAULT_VECTOR as u64
-                || cr2 != address
-                || context.error_code != error
-                || (stage == STAGE_SMEP && context.rip != address)
-                || context.cs & 0x3 != 0
-            {
-                fail(format_args!(
-                    "{name} probe fault did not match: vector={vector} err={:#x} cr2={cr2:#x} rip={:#x}",
-                    context.error_code, context.rip
-                ));
-            }
-            if stage == STAGE_WP {
-                serial_write_fmt(format_args!("[KGRD] wp write fault err={error:#x} OK\n"));
-                probe_user_page_execute()
-            }
-            if stage == STAGE_SMEP {
-                serial_write_fmt(format_args!("[KGRD] smep fetch fault err={error:#x} OK\n"));
-                probe_user_page_read()
-            }
-            serial_write_fmt(format_args!("[KGRD] smap read fault err={error:#x} OK\n"));
-            probe_user_sgdt()
-        }
-        _ => {
+        STAGE_UMIP => {
             let sgdt_rip = USER_PROBE_CODE_ADDRESS + UMIP_PROBE_OFFSET;
             if vector == INVALID_OPCODE_VECTOR && context.rip == sgdt_rip + 5 {
                 fail(format_args!(
@@ -344,5 +397,45 @@ pub(crate) fn on_exception(context: &InterruptContext) -> Option<u64> {
             serial_write_line("[KGRD] PASS");
             qemu_exit(QEMU_EXIT_SUCCESS)
         }
+        _ => on_probe_page_fault(stage, context),
+    }
+}
+
+/// Validates the #PF of a CR0.WP, W^X, SMEP or SMAP probe and starts the next probe.
+fn on_probe_page_fault(stage: u8, context: &InterruptContext) -> ! {
+    let name = match stage {
+        STAGE_WP => "wp write",
+        STAGE_TEXT_WRITE => "w^x text write",
+        STAGE_RODATA_WRITE => "w^x rodata write",
+        STAGE_DATA_EXEC => "w^x data exec",
+        STAGE_STACK_EXEC => "w^x stack exec",
+        STAGE_SMEP => "smep fetch",
+        _ => "smap read",
+    };
+    let vector = context.vector;
+    let cr2 = Cr2::read().map(VirtAddr::as_u64).unwrap_or(0);
+    let address = EXPECTED_FAULT_ADDRESS.load(Ordering::SeqCst);
+    let error = EXPECTED_FAULT_ERROR.load(Ordering::SeqCst);
+    let is_fetch = error & INSTRUCTION_FETCH_ERROR_BIT != 0;
+    if vector != PAGE_FAULT_VECTOR as u64
+        || cr2 != address
+        || context.error_code != error
+        || (is_fetch && context.rip != address)
+        || context.cs & 0x3 != 0
+    {
+        fail(format_args!(
+            "{name} probe fault did not match: vector={vector} err={:#x} cr2={cr2:#x} rip={:#x}",
+            context.error_code, context.rip
+        ));
+    }
+    serial_write_fmt(format_args!("[KGRD] {name} fault err={error:#x} OK\n"));
+    match stage {
+        STAGE_WP => probe_text_write(),
+        STAGE_TEXT_WRITE => probe_rodata_write(),
+        STAGE_RODATA_WRITE => probe_data_execute(),
+        STAGE_DATA_EXEC => probe_stack_execute(),
+        STAGE_STACK_EXEC => probe_user_page_execute(),
+        STAGE_SMEP => probe_user_page_read(),
+        _ => probe_user_sgdt(),
     }
 }

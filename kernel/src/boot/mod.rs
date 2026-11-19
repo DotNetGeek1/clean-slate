@@ -65,9 +65,8 @@ use crate::limits::MAX_GUARDED_STACKS;
 use crate::mm::address_space::set_kernel_root_frame;
 use crate::mm::address_space::KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES;
 use crate::mm::carve_out_shared::install_shared_carve_out_page_tables;
-use crate::mm::frame_allocator::set_kernel_direct_map_ready;
 use crate::mm::frame_allocator::PageAllocator;
-use crate::mm::kernel_bootstrap::{install_kernel_owned_root, PhysExclusion};
+use crate::mm::kernel_bootstrap::{install_kernel_owned_root, KernelRootInstall, PhysExclusion};
 use crate::mm::layout::{
     assert_conventional_linux_window_clear, init_kernel_low_carve_outs_from_reserved,
     log_kernel_low_carve_outs, register_kernel_low_carve_out,
@@ -383,6 +382,30 @@ fn install_display_backend(
     }
 }
 
+/// Logs the kernel root's W^X result and fails the boot unless no firmware page table is still
+/// linked and no leaf is both writable and executable (#217).
+fn report_kernel_write_xor_execute(installed: &KernelRootInstall) -> Result<(), &'static str> {
+    let pages = installed.image.page_counts();
+    let wx_leaves = crate::mm::paging::count_writable_executable_leaves(installed.root);
+    serial_write_fmt(format_args!(
+        "[MM  ] kernel w^x text=RX rodata=R+NX data=RW+NX image=[{:#x},{:#x}) pages rx={} r={} rw={} inherited={} wx_leaves={}\n",
+        installed.image.base(),
+        installed.image.base() + installed.image.size(),
+        pages.executable,
+        pages.read_only,
+        pages.writable,
+        installed.inherited,
+        wx_leaves
+    ));
+    if installed.inherited != 0 {
+        return Err("kernel w^x: kernel root still links firmware page tables");
+    }
+    if wx_leaves != 0 {
+        return Err("kernel w^x: kernel root has writable and executable leaves");
+    }
+    Ok(())
+}
+
 #[allow(unreachable_code)]
 fn run_inner() -> Result<(), &'static str> {
     let mut reserved_ranges = collect_reserved_ranges_from_firmware()?;
@@ -467,11 +490,13 @@ fn run_inner() -> Result<(), &'static str> {
         };
         physmap_exclusion_count = 2;
     }
-    let kernel_root = install_kernel_owned_root(
+    let installed = install_kernel_owned_root(
         &mut allocator,
         normalized,
+        reserved_ranges.kernel_image(),
         &physmap_exclusions[..physmap_exclusion_count],
     )?;
+    let kernel_root = installed.root;
     serial_write_fmt(format_args!(
         "[MM  ] kernel-owned root installed: {:#018x}\n",
         kernel_root
@@ -479,7 +504,7 @@ fn run_inner() -> Result<(), &'static str> {
     #[cfg(not(test))]
     install_display_backend(kernel_root, &mut allocator, boot_framebuffer);
     set_kernel_root_frame(kernel_root);
-    set_kernel_direct_map_ready();
+    crate::mm::mmio::init_device_identity_map(&mut allocator, normalized)?;
     arm_kernel_stack_guards(kernel_root, &mut allocator, &kernel_guarded_stacks())?;
     #[cfg(not(test))]
     crate::mm::identity_holes::arm_identity_holes(kernel_root, &mut allocator, local_apic_phys)?;
@@ -488,6 +513,7 @@ fn run_inner() -> Result<(), &'static str> {
         "[MM  ] carve-out private tables per process: {}\n",
         KERNEL_CARVE_OUT_PRIVATE_TABLE_FRAMES
     ));
+    report_kernel_write_xor_execute(&installed)?;
     crate::mm::address_space::verify_carve_out_attach_at_boot(&mut allocator)?;
     crate::mm::shared_buffer::init(&mut allocator)?;
 

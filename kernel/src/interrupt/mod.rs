@@ -456,6 +456,10 @@ fn handle_exception(context: &InterruptContext) -> u64 {
             report_identity_hole_fault(context, hole, fault_address)
         }
         kernel_log_line("[PF  ] unexpected page fault");
+        kernel_log_fmt(format_args!(
+            "[FAIL] kernel page fault cr2={:#018x} rip={:#018x} err={:#x}\n",
+            fault_address, context.rip, context.error_code
+        ));
         qemu_exit(QEMU_EXIT_FAILURE)
     }
 
@@ -497,8 +501,12 @@ fn handle_exception(context: &InterruptContext) -> u64 {
         ));
         crate::sched::log_task_stack_high_water();
         let image_window = anchor.saturating_sub(0x40_0000)..anchor.saturating_add(0x40_0000);
+        let scan_end = crate::mm::stack_guard::stack_scan_end(interrupted_rsp);
         for index in 0..STACK_SCAN_QWORDS {
             let slot = interrupted_rsp.wrapping_add((index * 8) as u64);
+            if slot.saturating_add(8) > scan_end {
+                break;
+            }
             let value = unsafe { core::ptr::read_volatile(slot as *const u64) };
             if image_window.contains(&value) {
                 kernel_log_fmt(format_args!(
