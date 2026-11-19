@@ -35,6 +35,7 @@ pub mod dns;
 pub mod ethernet;
 pub mod icmp;
 pub mod ipv4;
+pub mod rng;
 pub mod stack;
 pub mod tcp;
 pub mod udp;
