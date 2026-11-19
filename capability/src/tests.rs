@@ -111,6 +111,7 @@ fn error_names_and_syscall_status_distinct() {
         CapabilityError::CapacityExhausted,
         CapabilityError::GenerationExhausted,
         CapabilityError::NotDelegable,
+        CapabilityError::QuotaExceeded,
     ];
     let mut names = alloc::collections::BTreeSet::new();
     for error in variants {
@@ -129,7 +130,8 @@ fn error_names_and_syscall_status_distinct() {
             | CapabilityError::NotDelegable => assert_eq!(error.syscall_status(), SYSCALL_EACCES),
             CapabilityError::CapacityExhausted
             | CapabilityError::GenerationExhausted
-            | CapabilityError::DelegationDepthExceeded => {
+            | CapabilityError::DelegationDepthExceeded
+            | CapabilityError::QuotaExceeded => {
                 assert_eq!(error.syscall_status(), SYSCALL_ENOSPC)
             }
         }

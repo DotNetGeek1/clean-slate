@@ -2,8 +2,12 @@
 
 use crate::error::CapabilityError;
 
-/// Default slot-table capacity hint for M6.2 implementations.
-pub const MAX_SLOTS: usize = 64;
+/// Slots in the kernel's capability table.
+pub const MAX_SLOTS: usize = 128;
+
+/// Occupied slots (live or revoked) one holder may be charged for; [`crate::HolderId::KERNEL`]
+/// is exempt. With [`MAX_SLOTS`], no single holder can fill more than an eighth of the table.
+pub const HOLDER_SLOT_QUOTA: usize = 16;
 
 /// Maximum delegation chain depth (root grant is depth 0).
 pub const MAX_DELEGATION_DEPTH: u8 = 4;
