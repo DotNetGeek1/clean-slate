@@ -174,3 +174,117 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
     }
     frame.rax = count as u64;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::capability::lifecycle_capabilities_mut;
+
+    fn newest() -> AuditEvent {
+        with_audit_log(|log| {
+            log.get(log.newest_sequence().expect("a record"))
+                .expect("newest record")
+        })
+    }
+
+    fn next_sequence() -> u64 {
+        with_audit_log(|log| log.next_sequence())
+    }
+
+    #[test]
+    fn a_root_grant_records_the_kernel_granting_to_the_holder() {
+        let holder = HolderId(41);
+        let handle = grant_root(holder, AUDIT_RESOURCE, Rights::AUDIT_READ).expect("grant");
+
+        let event = newest();
+        assert_eq!(event.kind, AuditKind::Grant);
+        assert_eq!(event.actor, HolderId::KERNEL);
+        assert_eq!(event.subject, holder);
+        assert_eq!(event.handle, handle.encode());
+        assert!(event.is_allowed());
+    }
+
+    #[test]
+    fn teardown_records_how_many_capabilities_the_holder_lost() {
+        let holder = HolderId(42);
+        grant_root(holder, AUDIT_RESOURCE, Rights::AUDIT_READ).expect("first grant");
+        grant_root(holder, AUDIT_RESOURCE, Rights::AUDIT_READ).expect("second grant");
+
+        assert_eq!(super::super::revoke_for_holder(holder), 2);
+        let event = newest();
+        assert_eq!(event.kind, AuditKind::Revoke);
+        assert_eq!(event.actor, HolderId::KERNEL);
+        assert_eq!(event.subject, holder);
+        assert_eq!(event.count, 2);
+    }
+
+    #[test]
+    fn teardown_of_a_holder_with_nothing_records_nothing() {
+        let before = next_sequence();
+        assert_eq!(super::super::revoke_for_holder(HolderId(43)), 0);
+        assert_eq!(next_sequence(), before);
+    }
+
+    #[test]
+    fn a_kernel_rights_check_records_its_refusal() {
+        let holder = HolderId(44);
+        assert!(!super::super::holder_has_resource_rights(
+            holder,
+            AUDIT_RESOURCE,
+            Rights::AUDIT_READ
+        ));
+        let event = newest();
+        assert_eq!(event.kind, AuditKind::Authorize);
+        assert_eq!(event.actor, holder);
+        assert!(!event.is_allowed());
+    }
+
+    #[test]
+    fn lifecycle_table_grants_and_refusals_are_recorded() {
+        let tables = unsafe { lifecycle_capabilities_mut() };
+        tables.clear();
+        let handle = tables
+            .block_device
+            .grant_block_device_capability(45, 1)
+            .expect("grant block device");
+        let grant = newest();
+        assert_eq!(grant.kind, AuditKind::Grant);
+        assert_eq!(grant.subject, HolderId(45));
+        assert!(grant.is_allowed());
+
+        assert!(tables
+            .block_device
+            .authorize_block_device_access(46, handle, 1)
+            .is_err());
+        let refusal = newest();
+        assert_eq!(refusal.kind, AuditKind::Authorize);
+        assert_eq!(refusal.actor, HolderId(46));
+        assert!(!refusal.is_allowed());
+    }
+
+    #[test]
+    fn a_full_ring_tells_a_late_reader_exactly_what_it_missed() {
+        let first = next_sequence();
+        let total = AUDIT_RING_CAPACITY as u64 + 37;
+        for _ in 0..total {
+            record_decision(
+                HolderId(47),
+                AUDIT_RESOURCE,
+                Rights::AUDIT_READ,
+                CapabilityHandle::INVALID,
+                0,
+                Err(CapabilityError::InvalidHandle),
+            );
+        }
+
+        let mut out = [AuditEvent::EMPTY; 2];
+        let (count, _) = with_audit_log(|log| log.read_from(first, &mut out));
+        assert_eq!(count, 2);
+        assert_eq!(out[0].kind, AuditKind::Lost);
+        assert_eq!(out[0].sequence, first);
+        assert_eq!(out[0].resource_id, 37);
+        assert_eq!(out[1].sequence, first + 37);
+        assert_eq!(out[1].kind, AuditKind::Authorize);
+        assert!(with_audit_log(|log| log.dropped()) >= 37);
+    }
+}

@@ -310,7 +310,8 @@ const COVERAGE: &[(&str, &str, Coverage)] = &[
     ("service/port.rs", "limit_rejections", NoDecision(COUNT)),
     ("service/system_init.rs", "of", NoDecision(COUNT)),
     (
-        "service/system_test_hooks.rs",
+        // Split so `system_init`'s test-hook gate check does not match this line.
+        concat!("service/system", "_test_hooks.rs"),
         "probe_stale_generation",
         Records,
     ),

@@ -222,10 +222,6 @@ pub(crate) fn revoke_for_holder(holder: HolderId) -> usize {
     revoked
 }
 
-/// Duplicates every live capability held by `parent` onto `child` for Linux `fork(2)`.
-///
-/// Unlike userspace [`clean_slate_capability::delegate`], this kernel-only path does not
-/// require `Rights::DELEGATE` on the parent caps — fork is not a delegation syscall.
 /// Returns whether `holder` holds any live capability for `resource` with `required` rights.
 pub(crate) fn holder_has_resource_rights(
     holder: HolderId,
@@ -254,6 +250,10 @@ pub(crate) fn holder_has_resource_rights(
     found.is_some()
 }
 
+/// Duplicates every live capability held by `parent` onto `child` for Linux `fork(2)`.
+///
+/// Unlike userspace [`clean_slate_capability::delegate`], this kernel-only path does not
+/// require `Rights::DELEGATE` on the parent caps — fork is not a delegation syscall.
 #[cfg(clean_slate_linux_proc)]
 pub(crate) fn inherit_capabilities_for_fork(
     parent: HolderId,
