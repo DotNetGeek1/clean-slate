@@ -345,7 +345,7 @@ Each queued datagram stores `SocketAddrV4` + length + 1472-byte fixed buffer (14
 ### Port allocation
 
 - Explicit bind: `UdpTable::open(owner, Some(port))` — collision → `NetworkError::InvalidRequest`.
-- Ephemeral: `open(owner, None)` chooses the lowest free port in `49152 ..= 49152 + MAX_UDP_ENDPOINTS - 1` ([`EPHEMERAL_PORT_BASE`](../network/src/udp.rs)).
+- Ephemeral: `open(owner, None)` chooses a random free port in `49152..=65535` from the table's `NetRng` ([Randomness](#randomness-221)).
 - Table full → `NetworkError::SessionExhausted`.
 
 ### Drop and error policy
@@ -406,9 +406,9 @@ Issue #125 adds a **client-only** TCP transport in `network/src/tcp/` over [`L3S
 | `TCP_RTO_TICKS` | 50 | Retransmission interval (ticks) |
 | `TCP_TIME_WAIT_TICKS` | 200 | TIME-WAIT before slot free |
 | `TCP_CONNECT_TIMEOUT_TICKS` | 500 | Active-open timeout |
-| Ephemeral ports | 50000–50031 | `50000 + slot_index` |
+| Ephemeral ports | 49152–65535 | Random start, next free ([Randomness](#randomness-221)) |
 
-**ISS:** `deterministic_iss(generation, index, counter)` — no randomness.
+**ISS:** RFC 6528 from the transport's `NetRng` ([Randomness](#randomness-221)).
 
 ### Client state diagram (text)
 
@@ -496,8 +496,19 @@ Enable in consumers: `clean-slate-network` feature `tls` (kernel: `m7-tls-self-t
 
 ### RNG policy
 
-- Production/acceptance: **RDRAND** only (`RdrandRng` in kernel self-test), no constant fallback.
-- Host unit tests: `SeededRng` (`#[cfg(test)]` only, documented insecure).
+TLS draws from the same generator as the rest of the stack (see [Randomness](#randomness-221)): the service forks a stream for each TLS job from its TCP transport (`TcpTransport::fork_rng`), so TLS no longer executes `RDRAND` itself. Host tests build a `NetRng` from a fixed seed.
+
+### Randomness (#221)
+
+[`rng`](../network/src/rng.rs) is the stack's one CSPRNG, `NetRng`: the ChaCha20 block function (RFC 8439, written out in the module; no crate in `Cargo.lock` provides it) run as a keystream with a 256-bit key and a 64-bit block counter.
+
+- **Seeding:** `NetRng::from_hardware` reads four 64-bit words from RDSEED, or from RDRAND when CPUID reports no RDSEED or RDSEED keeps returning no data. RDRAND gets 10 tries per word (Intel's guidance), RDSEED 128 with a pause between them. Every word is health-checked: all zeros, all ones, or a repeat of the previous word fails seeding (`SeedError::Unhealthy`), and a health failure does not fall back to the other instruction. There is no software fallback.
+- **Fail closed:** the network service seeds once, first thing, before it takes the NIC or reports ready. On `SeedError` it exits with `result_code = ERROR` and `aux_status = NETWORK_SERVICE_AUX_NO_ENTROPY | code`, and the kernel logs one line: `[NET ] FAIL no hardware entropy: <reason>; network service failed closed and did not start`. Every lane that starts the service passes `+rdrand`; `test-m7-network` also boots once on a vCPU without RDRAND/RDSEED and requires that line, no guest frame at the fixture and nothing served.
+- **Streams:** the service forks the root into the DNS resolver's UDP table and the TCP transport; each TLS job forks from the transport. A fork is keyed from its parent's output, so streams never overlap.
+- **TCP ISS (RFC 6528):** `ISS = 250 * now_ticks + ChaCha20(secret)(local ip, remote ip, local port, remote port)`, with a per-transport secret drawn from the generator. A fresh tuple therefore gets an unpredictable ISS that still advances with the clock for a reused tuple.
+- **Ephemeral ports (RFC 6056 algorithm 1):** a uniformly random start in `49152..=65535`, then the next port not in use (TCP: any slot's local port; UDP: any open endpoint).
+- **DNS IDs:** uniformly random 16-bit IDs, redrawn while a live query uses the same ID. Each query also opens its own UDP endpoint, so it has a random source port.
+- **Evidence:** the M7 fixture records each guest SYN's (source port, ISS) and each DNS query's (source port, ID). `test-m7-tls`, `test-m7-dns` and `test-m7-network` boot twice and require the expected number of each per boot, values that differ from the previous boot, no repeated ISS, and none of the values the pre-#221 stack sent on every boot (`xtask/src/m7_guest_values.rs`).
 
 ### Public API (network service)
 
@@ -544,7 +555,7 @@ Log lines: `[FIX ] impair dns query dropped id=…`, `[FIX ] impair dns forged r
 
 UEFI builds set `--cfg aes_force_soft` in [`.cargo/config.toml`](../.cargo/config.toml) for portable AES. On Windows hosts, **debug** UEFI codegen for GCM (`polyval`/`aes`) can still trigger an LLVM split error; `cargo xtask test-m7-tls` therefore builds the kernel **release** profile (`kernel_release: true`) while other M7 lanes stay debug.
 
-**QEMU vCPU:** The TLS self-test RNG is hardware-only (`RDRAND` via CPUID.1:ECX[30] and `_rdrand64_step`). Default QEMU TCG `qemu64` does not expose RDRAND, so executing `RDRAND` raises `#UD` (often visible as `[EXC ] vector=6 name=Invalid Opcode` on serial). Lanes that need it (`test-m7-tls`, `test-m7-network`, `test-m9-userspace`, `test-m9-linux-socket`, the system lanes and `cargo xtask run`) pass `-cpu qemu64,+rdrand,+smep,+smap,+umip`; every other xtask QEMU lane passes `-cpu qemu64,+smep,+smap,+umip`, which has no RDRAND (#217). The kernel prints `[TLS ] rng=rdrand` after validation, or `[TLS ] FAIL reason=rdrand-unavailable` and exits without a weak RNG fallback.
+**QEMU vCPU:** The network stack seeds only from hardware ([Randomness](#randomness-221)). Default QEMU TCG `qemu64` exposes neither RDRAND nor RDSEED. Lanes that start the network stack (`test-m7-tls`, `test-m7-dns`, `test-m7-net-service`, `test-m7-network`, `test-m9-userspace`, `test-m9-linux-socket`, the system lanes and `cargo xtask run`) pass `-cpu qemu64,+rdrand,+smep,+smap,+umip`; every other xtask QEMU lane passes `-cpu qemu64,+smep,+smap,+umip` (#217). The TLS and DNS self-tests print `[TLS ] rng=chacha20 seed=hardware` once seeded, or `[TLS ] FAIL entropy: <reason>` / `[DNS ] FAIL entropy: <reason>` and exit without a weak fallback.
 
 ### Error mapping (`TlsError` → `NetworkError`)
 
@@ -598,7 +609,7 @@ Issue #85 adds [`dns`](../network/src/dns.rs): a bounded RFC 1035 subset codec, 
 ### Resolver behaviour
 
 - **Capability:** `NET_RESOLVE` is enforced by the network service (#87) before calling `resolve`; the resolver assumes the caller is already authorized.
-- **IDs:** DNS wire IDs are `dns_id_counter XOR session_generation` (deterministic, not cryptographically unpredictable — acceptable only on the hermetic lab network).
+- **IDs:** DNS wire IDs are random and unique among live queries, and each query has its own random source port ([Randomness](#randomness-221)).
 - **Foreign source:** Replies not sourced from the configured `server` socket are dropped (`dropped_foreign_source`).
 - **Pending:** `resolve` → `ResolveOutcome::Cached` or `Pending { query_id }`; `poll` drives UDP/ARP, retries query send after `Unreachable`, applies timeouts, fills the cache; `take_result(query_id, owner)` is owner-checked.
 - **Retransmission (#221):** a query with no acceptable reply is sent again, with the same ID, every `DNS_RETRANSMIT_TICKS` until its deadline, so one lost datagram no longer fails the resolve. Replies are read before the resend check, so a queued answer is never followed by a needless resend. `next_deadline()` includes the next resend once the first send has succeeded (an ARP-pending first send is retried on the next ingress poll), so the network service wakes for it. Wrong-ID, malformed, wrong-owner, `TC=1` and foreign-source replies are ignored and the query keeps waiting; `TC=1` therefore ends in `Timeout` (no DNS-over-TCP).
