@@ -3372,8 +3372,14 @@ fn xtask_artifact_root() -> PathBuf {
     workspace_root().join("target").join("xtask-artifacts")
 }
 
-/// A ready-to-spawn QEMU command. The runtime vars copy is dropped with it,
-/// after the caller has reaped QEMU.
+/// A ready-to-spawn QEMU command plus the runtime vars copy it opens.
+///
+/// The copy is deleted when this value drops. Callers that spawn QEMU must
+/// keep it until the child has exited: [`ReapOnDrop`] first, then this.
+/// A local does that when the child is declared later (locals drop in reverse
+/// order). A value returned while QEMU is still running, such as
+/// [`system_desktop_faults::Session`], must store this in a field declared
+/// after the child (fields drop in declaration order).
 struct PreparedVm {
     qemu: Command,
     _runtime_vars: Option<RuntimeVarsCopy>,
