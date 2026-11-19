@@ -1,6 +1,41 @@
 //! Explicit supervisor lifecycle-control capability handles (separate from IPC send caps).
 
+use clean_slate_capability::{
+    AuditEvent, AuditKind, CapabilityError, HolderId, ResourceClass, ResourceRef, Rights,
+};
+
+use crate::capability::audit::{self, record_kernel_revoke};
 use crate::sync::global_cell::GlobalCell;
+
+const LIFECYCLE_CONTROL_RESOURCE: ResourceRef = ResourceRef {
+    class: ResourceClass::LifecycleControl,
+    id: 0,
+    instance_generation: 0,
+};
+
+const fn block_device_resource(device_id: u64) -> ResourceRef {
+    ResourceRef {
+        class: ResourceClass::BlockDevice,
+        id: device_id,
+        instance_generation: 0,
+    }
+}
+
+/// These tables keep their own handle encoding, so the record carries the raw handle.
+fn record_lifecycle_decision(
+    kind: AuditKind,
+    actor: HolderId,
+    subject_pid: u64,
+    resource: ResourceRef,
+    raw_handle: u64,
+    result: Result<(), CapabilityError>,
+) {
+    let mut event = AuditEvent::new(kind, actor, resource, Rights::empty())
+        .with_subject(HolderId(subject_pid))
+        .with_result(result);
+    event.handle = raw_handle;
+    audit::record(event);
+}
 
 const LIFECYCLE_CONTROL_CAPABILITY_CAPACITY: usize = 4;
 const BLOCK_DEVICE_CAPABILITY_CAPACITY: usize = 4;
@@ -133,6 +168,25 @@ impl BlockDeviceCapabilityTable {
         holder_pid: u64,
         device_id: u64,
     ) -> Result<u64, &'static str> {
+        let result = self.install_block_device_capability(holder_pid, device_id);
+        record_lifecycle_decision(
+            AuditKind::Grant,
+            HolderId::KERNEL,
+            holder_pid,
+            block_device_resource(device_id),
+            *result.as_ref().unwrap_or(&0),
+            result
+                .map(|_| ())
+                .map_err(|_| CapabilityError::CapacityExhausted),
+        );
+        result
+    }
+
+    fn install_block_device_capability(
+        &mut self,
+        holder_pid: u64,
+        device_id: u64,
+    ) -> Result<u64, &'static str> {
         for (slot, capability) in self.capabilities.iter_mut().enumerate() {
             if capability.active || capability.retired {
                 continue;
@@ -185,6 +239,29 @@ impl BlockDeviceCapabilityTable {
     }
 
     pub(crate) fn authorize_block_device_access(
+        &self,
+        holder_pid: u64,
+        raw_handle: u64,
+        device_id: u64,
+    ) -> Result<(), BlockDeviceCapabilityError> {
+        let result = self.check_block_device_access(holder_pid, raw_handle, device_id);
+        record_lifecycle_decision(
+            AuditKind::Authorize,
+            HolderId(holder_pid),
+            holder_pid,
+            block_device_resource(device_id),
+            raw_handle,
+            result.map_err(|error| match error {
+                BlockDeviceCapabilityError::InvalidHandle => CapabilityError::InvalidHandle,
+                BlockDeviceCapabilityError::StaleHandle => CapabilityError::StaleHandle,
+                BlockDeviceCapabilityError::Unauthorized => CapabilityError::UnauthorizedHolder,
+                BlockDeviceCapabilityError::WrongDevice => CapabilityError::WrongResource,
+            }),
+        );
+        result
+    }
+
+    fn check_block_device_access(
         &self,
         holder_pid: u64,
         raw_handle: u64,
@@ -276,6 +353,24 @@ impl LifecycleControlCapabilityTable {
         &mut self,
         holder_pid: u64,
     ) -> Result<u64, &'static str> {
+        let result = self.install_lifecycle_control_capability(holder_pid);
+        record_lifecycle_decision(
+            AuditKind::Grant,
+            HolderId::KERNEL,
+            holder_pid,
+            LIFECYCLE_CONTROL_RESOURCE,
+            *result.as_ref().unwrap_or(&0),
+            result
+                .map(|_| ())
+                .map_err(|_| CapabilityError::CapacityExhausted),
+        );
+        result
+    }
+
+    fn install_lifecycle_control_capability(
+        &mut self,
+        holder_pid: u64,
+    ) -> Result<u64, &'static str> {
         for (slot, capability) in self.capabilities.iter_mut().enumerate() {
             if capability.active || capability.retired {
                 continue;
@@ -301,6 +396,29 @@ impl LifecycleControlCapabilityTable {
     }
 
     pub(crate) fn authorize_lifecycle_control(
+        &self,
+        holder_pid: u64,
+        raw_handle: u64,
+    ) -> Result<(), LifecycleControlCapabilityError> {
+        let result = self.check_lifecycle_control(holder_pid, raw_handle);
+        record_lifecycle_decision(
+            AuditKind::Authorize,
+            HolderId(holder_pid),
+            holder_pid,
+            LIFECYCLE_CONTROL_RESOURCE,
+            raw_handle,
+            result.map_err(|error| match error {
+                LifecycleControlCapabilityError::InvalidHandle => CapabilityError::InvalidHandle,
+                LifecycleControlCapabilityError::StaleHandle => CapabilityError::StaleHandle,
+                LifecycleControlCapabilityError::Unauthorized => {
+                    CapabilityError::UnauthorizedHolder
+                }
+            }),
+        );
+        result
+    }
+
+    fn check_lifecycle_control(
         &self,
         holder_pid: u64,
         raw_handle: u64,
@@ -386,8 +504,15 @@ impl LifecycleCapabilities {
     /// Revokes every lifecycle-control and block-device capability `pid` holds; returns how
     /// many.
     pub(crate) fn revoke_for_pid(&mut self, pid: u64) -> usize {
-        self.lifecycle_control.revoke_capabilities_for_pid(pid)
-            + self.block_device.revoke_capabilities_for_pid(pid)
+        let lifecycle_control = self.lifecycle_control.revoke_capabilities_for_pid(pid);
+        if lifecycle_control > 0 {
+            record_kernel_revoke(HolderId(pid), LIFECYCLE_CONTROL_RESOURCE, lifecycle_control);
+        }
+        let block_device = self.block_device.revoke_capabilities_for_pid(pid);
+        if block_device > 0 {
+            record_kernel_revoke(HolderId(pid), block_device_resource(0), block_device);
+        }
+        lifecycle_control + block_device
     }
 }
 

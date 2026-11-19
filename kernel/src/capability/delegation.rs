@@ -7,15 +7,17 @@ use crate::diagnostics::log::kernel_log_fmt;
 use crate::mm::user_access::{write_user, UserPod};
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::process::process_registry_mut;
-use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSPC};
+use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL};
 use clean_slate_capability::{
-    delegate, delegation_depth, list_holder, CapabilityError, CapabilityHandle, HolderId, Rights,
+    delegate, delegation_depth, list_holder, AuditEvent, AuditKind, CapabilityError,
+    CapabilityHandle, HolderId, PolicyRefusal, ResourceRef, Rights,
 };
 
 use crate::mm::shared_buffer;
 
+use super::audit;
 use super::bootstrap_grant::register_bootstrap_grant;
-use super::{capability_space_mut, current_holder};
+use super::{capability_space_mut, current_holder, with_capability_space};
 
 pub(crate) const DELEGATE_OP_DELEGATE: u64 = 1;
 pub(crate) const DELEGATE_OP_LIST: u64 = 2;
@@ -120,26 +122,57 @@ fn handle_delegate(frame: &mut SyscallContext) {
             return;
         }
     };
-    let parent = match CapabilityHandle::decode(frame.rsi) {
-        Ok(handle) => handle,
-        Err(error) => {
+    let target = HolderId(frame.rdx);
+    let requested = Rights::from_bits(frame.r10 as u32);
+    // With no parent record to name, the record names the delegating process.
+    let parent_resource = CapabilityHandle::decode(frame.rsi)
+        .and_then(|parent| with_capability_space(|table| table.record(parent)))
+        .map_or(ResourceRef::process(source.0, 0), |record| record.resource);
+    let event = AuditEvent::new(
+        AuditKind::Delegate,
+        source,
+        parent_resource,
+        requested.unwrap_or(Rights::empty()),
+    )
+    .with_subject(target);
+    match delegate_checked(source, frame.rsi, target, requested) {
+        Ok((child, depth)) => {
+            audit::record(event.with_handle(child).with_depth(depth));
+            frame.rax = child.encode();
+        }
+        Err(DelegateRefusal::Capability(error)) => {
+            audit::record(event.with_result(Err(error)));
             frame.rax = error.syscall_status();
-            return;
         }
-    };
-    let target_pid = frame.rdx;
-    let target = HolderId(target_pid);
-    if !is_live_userspace_process(target_pid) {
-        frame.rax = SYSCALL_EINVAL;
-        return;
+        Err(DelegateRefusal::Policy(reason, status)) => {
+            audit::record(event.refused(reason));
+            frame.rax = status;
+        }
     }
-    let rights = match Rights::from_bits(frame.r10 as u32) {
-        Some(rights) => rights,
-        None => {
-            frame.rax = SYSCALL_EINVAL;
-            return;
-        }
-    };
+}
+
+enum DelegateRefusal {
+    Capability(CapabilityError),
+    Policy(PolicyRefusal, u64),
+}
+
+fn delegate_checked(
+    source: HolderId,
+    raw_parent: u64,
+    target: HolderId,
+    requested: Option<Rights>,
+) -> Result<(CapabilityHandle, u8), DelegateRefusal> {
+    let parent = CapabilityHandle::decode(raw_parent).map_err(DelegateRefusal::Capability)?;
+    if !is_live_userspace_process(target.0) {
+        return Err(DelegateRefusal::Policy(
+            PolicyRefusal::TargetNotLive,
+            SYSCALL_EINVAL,
+        ));
+    }
+    let rights = requested.ok_or(DelegateRefusal::Policy(
+        PolicyRefusal::InvalidRequest,
+        SYSCALL_EINVAL,
+    ))?;
     let child = match delegate(
         unsafe { capability_space_mut() },
         source,
@@ -150,8 +183,7 @@ fn handle_delegate(frame: &mut SyscallContext) {
         Ok(handle) => handle,
         Err(error) => {
             log_delegate_denied(source, target, error);
-            frame.rax = error.syscall_status();
-            return;
+            return Err(DelegateRefusal::Capability(error));
         }
     };
     let depth = match delegation_depth(unsafe { &*capability_space_mut() }, child) {
@@ -159,19 +191,19 @@ fn handle_delegate(frame: &mut SyscallContext) {
         Err(error) => {
             rollback_installed_child(child);
             log_delegate_denied(source, target, error);
-            frame.rax = error.syscall_status();
-            return;
+            return Err(DelegateRefusal::Capability(error));
         }
     };
     if register_bootstrap_grant(target, child).is_err() {
         rollback_installed_child(child);
-        frame.rax = SYSCALL_ENOSPC;
-        return;
+        return Err(DelegateRefusal::Capability(
+            CapabilityError::CapacityExhausted,
+        ));
     }
     log_delegate_success(source, target, rights, depth);
     #[cfg(feature = "m6-delegation-self-test")]
     crate::selftest::m6_delegation::record_delegated_child_for_self_test(child);
-    frame.rax = child.encode();
+    Ok((child, depth))
 }
 
 fn handle_list(frame: &mut SyscallContext) {

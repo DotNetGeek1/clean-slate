@@ -20,9 +20,9 @@ pub(crate) mod revocation;
 use core::fmt::{self, Write};
 
 use clean_slate_capability::{
-    list_holder, release_revoked, revoke_holder_tree_visiting, revoke_resource_tree,
-    CapabilityError, CapabilityHandle, CapabilityRecord, CapabilityTable, HolderId, Provenance,
-    ResourceClass, ResourceRef, Rights, MAX_SLOTS,
+    list_holder, release_revoked, revoke_holder_tree_visiting, revoke_resource_tree, AuditEvent,
+    AuditKind, CapabilityError, CapabilityHandle, CapabilityRecord, CapabilityTable, HolderId,
+    Provenance, ResourceClass, ResourceRef, Rights, MAX_SLOTS,
 };
 
 use crate::mm::shared_buffer::{reconcile_resource, RevokedBuffers};
@@ -189,14 +189,21 @@ pub(crate) fn grant_root(
 ) -> Result<CapabilityHandle, CapabilityError> {
     let table = unsafe { capability_space_mut() };
     let provenance = Provenance::root(holder);
-    match table.grant(holder, resource, rights, provenance) {
+    let result = match table.grant(holder, resource, rights, provenance) {
         Ok(handle) => Ok(handle),
         Err(CapabilityError::CapacityExhausted) => {
             let _ = release_revoked(table);
             table.grant(holder, resource, rights, provenance)
         }
         Err(error) => Err(error),
-    }
+    };
+    audit::record(
+        AuditEvent::new(AuditKind::Grant, HolderId::KERNEL, resource, rights)
+            .with_subject(holder)
+            .with_handle(*result.as_ref().unwrap_or(&CapabilityHandle::INVALID))
+            .with_result(result.map(|_| ())),
+    );
+    result
 }
 
 pub(crate) fn revoke_for_holder(holder: HolderId) -> usize {
@@ -206,6 +213,10 @@ pub(crate) fn revoke_for_holder(holder: HolderId) -> usize {
             revoked_buffers.note(resource)
         });
     revoked_buffers.reconcile();
+    if revoked > 0 {
+        // Names the process whose whole capability tree went, not one of its resources.
+        audit::record_kernel_revoke(holder, ResourceRef::process(holder.0, 0), revoked);
+    }
     revoked
 }
 
@@ -219,18 +230,26 @@ pub(crate) fn holder_has_resource_rights(
     resource: ResourceRef,
     required: Rights,
 ) -> bool {
-    with_capability_space(|table| {
+    let found = with_capability_space(|table| {
         let mut cursor = 0usize;
         loop {
-            let Some((next_cursor, handle, _record)) = list_holder(table, holder, cursor) else {
-                return false;
-            };
+            let (next_cursor, handle, record) = list_holder(table, holder, cursor)?;
             cursor = next_cursor;
             if table.authorize(holder, handle, resource, required).is_ok() {
-                return true;
+                return Some((handle, record.provenance.depth));
             }
         }
-    })
+    });
+    let (handle, depth) = found.unwrap_or((CapabilityHandle::INVALID, 0));
+    audit::record_decision(
+        holder,
+        resource,
+        required,
+        handle,
+        depth,
+        found.map(|_| ()).ok_or(CapabilityError::MissingRight),
+    );
+    found.is_some()
 }
 
 #[cfg(clean_slate_linux_proc)]
@@ -238,6 +257,29 @@ pub(crate) fn inherit_capabilities_for_fork(
     parent: HolderId,
     child: HolderId,
 ) -> Result<(), CapabilityError> {
+    let result = copy_capabilities_for_fork(parent, child);
+    let inherited = match result {
+        Ok(count) => count,
+        Err(_) => 0,
+    };
+    let result = result.map(|_| ());
+    audit::record(
+        AuditEvent::new(
+            AuditKind::Inherit,
+            parent,
+            ResourceRef::process(child.0, 0),
+            Rights::empty(),
+        )
+        .with_subject(child)
+        .with_count(inherited)
+        .with_result(result),
+    );
+    result
+}
+
+/// Returns how many capabilities `child` received; on error none remain installed.
+#[cfg(clean_slate_linux_proc)]
+fn copy_capabilities_for_fork(parent: HolderId, child: HolderId) -> Result<usize, CapabilityError> {
     let mut cursor = 0usize;
     let mut installed = [None; MAX_SLOTS];
     let mut count = 0usize;
@@ -247,7 +289,13 @@ pub(crate) fn inherit_capabilities_for_fork(
             break;
         };
         cursor = next_cursor;
-        let provenance = Provenance::child_of(handle, &record.provenance)?;
+        let provenance = match Provenance::child_of(handle, &record.provenance) {
+            Ok(provenance) => provenance,
+            Err(error) => {
+                rollback_fork_inherited(&installed[..count]);
+                return Err(error);
+            }
+        };
         let child_record = CapabilityRecord {
             state: clean_slate_capability::CapabilityState::Live,
             holder: child,
@@ -271,7 +319,7 @@ pub(crate) fn inherit_capabilities_for_fork(
             }
         }
     }
-    Ok(())
+    Ok(count)
 }
 
 #[cfg(clean_slate_linux_proc)]
@@ -289,17 +337,28 @@ pub(crate) fn revoke_for_resource(resource: ResourceRef) -> usize {
         resource.id,
     );
     reconcile_resource(resource);
+    if revoked > 0 {
+        audit::record_kernel_revoke(HolderId::KERNEL, resource, revoked);
+    }
     revoked
 }
 
 /// Revokes `ProcessControl` capabilities only, which never name a shared buffer, so
 /// there is nothing to reconcile.
 pub(crate) fn revoke_for_process_resource(process_id: u64) -> usize {
-    revoke_resource_tree(
+    let revoked = revoke_resource_tree(
         unsafe { capability_space_mut() },
         ResourceClass::ProcessControl,
         process_id,
-    )
+    );
+    if revoked > 0 {
+        audit::record_kernel_revoke(
+            HolderId::KERNEL,
+            ResourceRef::process(process_id, 0),
+            revoked,
+        );
+    }
+    revoked
 }
 
 #[cfg(test)]

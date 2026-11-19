@@ -58,6 +58,8 @@ pub enum PolicyRefusal {
     AuthorityMismatch = 4,
     /// A kernel facility the operation needs is not installed.
     Unavailable = 5,
+    /// The capability is in use (a live delegated child, a live mapping) and must stay.
+    Busy = 6,
 }
 
 impl PolicyRefusal {
@@ -69,6 +71,7 @@ impl PolicyRefusal {
             3 => Some(Self::InvalidRequest),
             4 => Some(Self::AuthorityMismatch),
             5 => Some(Self::Unavailable),
+            6 => Some(Self::Busy),
             _ => None,
         }
     }
@@ -81,6 +84,7 @@ impl PolicyRefusal {
             Self::InvalidRequest => "invalid-request",
             Self::AuthorityMismatch => "authority-mismatch",
             Self::Unavailable => "unavailable",
+            Self::Busy => "busy",
         }
     }
 }

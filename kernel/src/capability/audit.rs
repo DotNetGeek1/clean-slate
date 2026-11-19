@@ -9,8 +9,9 @@ use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_capability::syscall_abi::SYSCALL_NR_CAP_AUDIT_READ;
 use clean_slate_capability::{
-    event_for, format_audit_line, AuditSink, BoundedAuditLog, CapabilityError, CapabilityHandle,
-    HolderId, ResourceClass, ResourceRef, Rights, AUDIT_EVENT_SIZE_BYTES,
+    event_for, format_audit_line, AuditEvent, AuditKind, AuditSink, BoundedAuditLog,
+    CapabilityError, CapabilityHandle, HolderId, ResourceClass, ResourceRef, Rights,
+    AUDIT_EVENT_SIZE_BYTES,
 };
 
 use super::{authorize_current, grant_root};
@@ -66,22 +67,23 @@ pub(crate) fn set_audit_serial_echo(enabled: bool) {
     }
 }
 
-/// Records an authorization decision after it has been made (never affects the outcome).
-pub(crate) fn record_decision(
-    actor: HolderId,
-    resource: ResourceRef,
-    requested: Rights,
-    handle: CapabilityHandle,
-    depth: u8,
-    result: Result<(), CapabilityError>,
-) {
-    let event = event_for(0, actor, resource, requested, handle, depth, result);
+/// Monotonic time for a record; 0 before the TSC is calibrated.
+fn audit_timestamp_ns() -> u64 {
+    crate::time::tsc_hz().map_or(0, |_| crate::time::monotonic_ns())
+}
+
+/// Records one security decision after it has been made (never affects the outcome).
+/// Every path that grants, derives, revokes, inherits or checks authority calls this
+/// (or [`record_decision`]); `audit_coverage` tests hold that.
+pub(crate) fn record(mut event: AuditEvent) {
+    event.timestamp_ns = audit_timestamp_ns();
+    let class = event.class;
     let log = unsafe { audit_log_mut() };
     log.record(event);
     let echo = unsafe { *AUDIT_SERIAL_ECHO.get() };
     // Serial `[AUD ]` lines are for attribution proof (M6.7/M6.8 gates), not every
     // capability check — object-service polls would otherwise flood the log.
-    if echo && resource.class == ResourceClass::Audit {
+    if echo && class == ResourceClass::Audit {
         let sequence = log
             .newest_sequence()
             .expect("audit record should exist after insert");
@@ -99,6 +101,31 @@ pub(crate) fn record_decision(
     }
 }
 
+/// Records an [`AuditKind::Authorize`] decision.
+pub(crate) fn record_decision(
+    actor: HolderId,
+    resource: ResourceRef,
+    requested: Rights,
+    handle: CapabilityHandle,
+    depth: u8,
+    result: Result<(), CapabilityError>,
+) {
+    record(event_for(0, actor, resource, requested, handle, depth, result));
+}
+
+/// Records `count` capabilities of `subject` revoked by the kernel (teardown, instance gone).
+pub(crate) fn record_kernel_revoke(subject: HolderId, resource: ResourceRef, count: usize) {
+    record(
+        AuditEvent::new(
+            AuditKind::Revoke,
+            HolderId::KERNEL,
+            resource,
+            Rights::empty(),
+        )
+        .with_subject(subject)
+        .with_count(count),
+    );
+}
 #[cfg_attr(not(feature = "m6-audit-self-test"), allow(dead_code))] // Launch-policy API; exercised by M6 self-tests and the M6.8 integration path.
 pub(crate) fn grant_audit_reader(holder: HolderId) -> Result<CapabilityHandle, CapabilityError> {
     grant_root(holder, AUDIT_RESOURCE, Rights::AUDIT_READ)
@@ -126,19 +153,8 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
     }
 
     let log = unsafe { &*AUDIT_LOG.get() };
-    let mut scratch = [clean_slate_capability::AuditEvent {
-        sequence: 0,
-        actor: HolderId(0),
-        class: ResourceClass::Audit,
-        _pad_class: [0; 7],
-        resource_id: 0,
-        requested: Rights::empty(),
-        _pad_rights: 0,
-        handle: 0,
-        outcome: clean_slate_capability::AuditOutcome::allowed(),
-        depth: 0,
-        _pad_tail: [0; 7],
-    }; MAX_AUDIT_READ_EVENTS];
+    let mut scratch = [AuditEvent::EMPTY; MAX_AUDIT_READ_EVENTS];
+    // Gaps in what the reader asked for come back as `AuditKind::Lost` records.
     let (count, _) = log.read_from(since, &mut scratch[..max_events]);
     if count > 0 {
         // SAFETY: `AuditEvent` is `repr(C)` with its padding spelled out as zeroed fields, so all
