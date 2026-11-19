@@ -515,6 +515,7 @@ impl LifecycleControlCapabilityTable {
     }
 
     /// The scope of the first active lifecycle-control capability `pid` holds.
+    #[cfg(clean_slate_system_init)]
     pub(crate) fn scope_of(&self, pid: u64) -> Option<LifecycleScope> {
         self.capabilities
             .iter()
