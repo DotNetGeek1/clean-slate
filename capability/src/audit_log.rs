@@ -247,7 +247,9 @@ mod tests {
             }
             let (count, next) = log.read_from(cursor, &mut buf);
             assert_eq!(count, 3);
-            assert!(buf[..count].iter().all(|event| event.kind != AuditKind::Lost));
+            assert!(buf[..count]
+                .iter()
+                .all(|event| event.kind != AuditKind::Lost));
             assert_eq!(buf[0].sequence, cursor);
             cursor = next;
         }
@@ -291,7 +293,11 @@ mod tests {
         assert_eq!(next, 8);
 
         let (count, next) = log.read_from(1, &mut buf[..2]);
-        assert_eq!((count, next), (2, 5), "a full buffer stops after the lost record");
+        assert_eq!(
+            (count, next),
+            (2, 5),
+            "a full buffer stops after the lost record"
+        );
     }
 
     #[test]
