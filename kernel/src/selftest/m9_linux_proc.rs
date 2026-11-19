@@ -3,6 +3,7 @@
 use crate::arch::x86_64::context_switch::{restore_task_context, task_stack_top};
 use crate::arch::x86_64::gdt::set_privilege_stack;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
+use crate::capability::{grant_root, with_capability_space};
 use crate::diagnostics::log::{kernel_log_fmt, kernel_log_line};
 use crate::diagnostics::qemu::{fatal_kernel_error, qemu_exit, QEMU_EXIT_SUCCESS};
 use crate::diagnostics::serial::serial_write_line;
@@ -16,6 +17,7 @@ use crate::process::linux_fd::{self, console_sink_render_style, ConsoleSinkRende
 use crate::process::linux_image::{
     LINUX_CONVENTIONAL_LOAD_POLICY, LINUX_PROC_PROBE_FIXTURE, LINUX_STACK_PAGES,
 };
+use crate::process::linux_proc::table::ProcId;
 use crate::process::linux_proc::{pipe::pool, table::table};
 use crate::process::live_instance_generation;
 use crate::process::personality::execution_personality_for_pid;
@@ -27,9 +29,10 @@ use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::linux::user_copy::copy_user_bytes;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 use crate::syscall::{current_syscall_caller_pid, initialize_syscall_abi};
+use clean_slate_capability::{list_holder, HolderId, ResourceRef, Rights};
 use clean_slate_linux_abi::SYS_WRITE;
 use clean_slate_service_lifecycle::InstanceGeneration;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 pub(crate) const M9_LINUX_PROC_PASS_MARKER: &str = "[M9.I] PASS";
 const M9_PROC_CYCLES: u32 = 8;
@@ -111,6 +114,67 @@ fn install_linux_stdio(pid: u64) -> Result<(), &'static str> {
         .map_err(|_| "m9 linux proc: stdio install failed")
 }
 
+/// #203: the first cycle's probe holds two records on this graphics resource: a plain
+/// `GFX_CONNECT`, which its fork children inherit, and a root-only `GFX_SERVE`, which they
+/// must not.
+const FORK_PROBE_RESOURCE: ResourceRef = ResourceRef::graphics(0x5300, 1);
+static FORK_INHERITANCE_CHECKED: AtomicBool = AtomicBool::new(false);
+
+fn grant_fork_inheritance_probe(pid: u64) -> Result<(), &'static str> {
+    let holder = HolderId(pid);
+    grant_root(holder, FORK_PROBE_RESOURCE, Rights::GFX_CONNECT)
+        .map_err(|_| "m9 linux proc: fork probe connect grant failed")?;
+    grant_root(
+        holder,
+        FORK_PROBE_RESOURCE,
+        Rights::GFX_CONNECT.union(Rights::GFX_SERVE),
+    )
+    .map_err(|_| "m9 linux proc: fork probe serve grant failed")?;
+    Ok(())
+}
+
+/// The first syscall of a first-cycle fork child of the probe: what it inherited.
+fn check_fork_child_inheritance(pid: u64) {
+    if FORK_INHERITANCE_CHECKED.load(Ordering::Relaxed)
+        || M9_CYCLE.load(Ordering::Relaxed) != 0
+        || is_probe(pid)
+    {
+        return;
+    }
+    let Some(generation) = live_instance_generation(pid) else {
+        return;
+    };
+    let parent = table().parent_of(ProcId { pid, generation });
+    if parent.map(|parent| parent.pid) != Some(M9_LINUX_PID.load(Ordering::Relaxed)) {
+        return;
+    }
+    let (connect, serve) = with_capability_space(|caps| {
+        let (mut connect, mut serve, mut cursor) = (0usize, 0usize, 0usize);
+        while let Some((next, _, record)) = list_holder(caps, HolderId(pid), cursor) {
+            cursor = next;
+            if record.resource != FORK_PROBE_RESOURCE {
+                continue;
+            }
+            if record.rights.contains(Rights::GFX_SERVE) {
+                serve += 1;
+            } else if record.rights == Rights::GFX_CONNECT {
+                connect += 1;
+            }
+        }
+        (connect, serve)
+    });
+    kernel_log_fmt(format_args!(
+        "[M9.I] fork inheritance child={pid} gfx-connect={connect} gfx-serve={serve}\n"
+    ));
+    if serve != 0 {
+        fatal_kernel_error("m9 linux proc: fork child inherited a root-only capability");
+    }
+    if connect != 1 {
+        fatal_kernel_error("m9 linux proc: fork child did not inherit its parent's capability");
+    }
+    FORK_INHERITANCE_CHECKED.store(true, Ordering::Relaxed);
+}
+
 fn launch_cycle(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'static str> {
     log_cycle_metrics(cycle, "start");
     crate::process::linux_exec::reset_prepare_linux_image_scratch();
@@ -134,6 +198,9 @@ fn launch_cycle(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'stati
             "m9 linux proc launch failed"
         })?;
     install_linux_stdio(launched.pid)?;
+    if cycle == 0 {
+        grant_fork_inheritance_probe(launched.pid)?;
+    }
     M9_LINUX_PID.store(launched.pid, Ordering::Relaxed);
     M9_LINUX_GENERATION.store(launched.instance_generation.0, Ordering::Relaxed);
     Ok(())
@@ -141,6 +208,7 @@ fn launch_cycle(allocator: &mut PageAllocator, cycle: u32) -> Result<(), &'stati
 
 pub(crate) fn observe_syscall(frame: &SyscallContext) {
     let pid = current_syscall_caller_pid().unwrap_or(0);
+    check_fork_child_inheritance(pid);
     if !is_probe(pid) || frame.rax != SYS_WRITE || frame.rdi != 1 {
         return;
     }
@@ -189,6 +257,9 @@ pub(crate) fn after_probe_exit_group(
     }
 
     let cycle = M9_CYCLE.load(Ordering::Relaxed);
+    if cycle == 0 && !FORK_INHERITANCE_CHECKED.load(Ordering::Relaxed) {
+        fatal_kernel_error("m9 linux proc: no fork child's inheritance was observed");
+    }
     log_cycle_metrics(cycle, "end");
     assert_baseline(cycle);
 

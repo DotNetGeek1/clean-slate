@@ -909,8 +909,9 @@ mod tests {
             .count()
     }
 
-    /// What `fork(2)` does (`inherit_capabilities_for_fork`): every live record of `parent`
-    /// copied to `child`, derived from the parent's.
+    /// What `fork(2)` does (`inherit_capabilities_for_fork`) for network records, which carry
+    /// no root-only right: every live record of `parent` copied to `child`, derived from the
+    /// parent's.
     fn fork<const N: usize>(table: &mut CapabilityTable<N>, parent: HolderId, child: HolderId) {
         for slot in 0..N {
             let record = *table.record_at(slot);

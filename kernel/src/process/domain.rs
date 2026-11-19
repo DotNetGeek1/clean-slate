@@ -923,7 +923,7 @@ mod tests {
         let tables = unsafe { lifecycle_capabilities::lifecycle_capabilities_mut() };
         tables
             .lifecycle_control
-            .grant_lifecycle_control_capability(pid)
+            .grant_lifecycle_control_capability(pid, lifecycle_capabilities::LifecycleScope::EMPTY)
             .expect("grant lifecycle control");
         tables
             .block_device

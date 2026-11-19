@@ -263,7 +263,7 @@ pub(crate) fn start_m9_linux_socket_self_test(page_allocator: PageAllocator) -> 
         .declare_service(NETWORK_SERVICE_ID)
         .unwrap_or_else(|m| fatal_kernel_error(m));
     let lifecycle_capability = controller
-        .grant_lifecycle_control_capability(SUPERVISOR_PID)
+        .grant_lifecycle_control_capability(SUPERVISOR_PID, &[NETWORK_SERVICE_ID])
         .unwrap_or_else(|m| fatal_kernel_error(m));
     let allocator = allocator();
     crate::selftest::m7_net_service::init_minimal_state_for_m9_socket(lifecycle_capability);

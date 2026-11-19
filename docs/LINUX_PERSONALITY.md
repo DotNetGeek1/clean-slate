@@ -159,7 +159,10 @@ bytes use `linux_proc/pipe::read_fd`. `fork` copies each parent user page into a
 and no-execute bits (`user_copy_flags`). Capability inheritance is
 `inherit_capabilities_for_fork`: it walks the parent with `list_holder` and
 installs a child record with the same rights. It does not call `delegate` and
-does not require `Rights::DELEGATE` (`kernel/src/capability/mod.rs`). `fork`
+does not require `Rights::DELEGATE` (`kernel/src/capability/mod.rs`), but it
+withholds a record carrying any `Rights::root_only_for` bit of its class
+(`fork_inheritable`), as delegation would refuse it, and audits each withheld
+record as `NotDelegable` (#203). `fork`
 returns `EAGAIN` when `LINUX_MAX_PROC_ENTRIES` (6) is full. Fault exits publish
 a signalled wait status (`SIGSEGV` for page fault and general protection,
 `SIGILL` for invalid opcode) through `linux_proc/fault.rs` before teardown.

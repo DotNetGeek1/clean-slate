@@ -4,8 +4,8 @@ use crate::diagnostics::log::kernel_log_fmt;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::domain::teardown_process_by_id;
 use crate::process::process_registry_mut;
-use crate::service::capability::LifecycleControlCapabilityError;
 use crate::service::capability::{lifecycle_capabilities_mut, BlockDeviceCapabilityError};
+use crate::service::capability::{LifecycleControlCapabilityError, LifecycleScope};
 use crate::service::grants::{apply_instance_grants, GraphicsRole, InstanceGrantAuthority};
 use crate::service::lifecycle_wait::wake_lifecycle_waiters;
 use crate::service::spawn::{launch_builtin_service, LaunchContext};
@@ -262,7 +262,7 @@ impl ServiceLifecycleController {
         capability_handle: u64,
         service: ServiceId,
     ) -> Result<Option<LifecycleEvent>, LifecycleControlError> {
-        self.authorize_lifecycle_control(supervisor_pid, capability_handle)?;
+        self.authorize_lifecycle_control(supervisor_pid, capability_handle, Some(service))?;
         let event = self.poll_pending_event(service)?;
         #[cfg(feature = "m4-recovery-self-test")]
         if let Some(event) = event {
@@ -274,21 +274,21 @@ impl ServiceLifecycleController {
         Ok(event)
     }
 
-    /// The service of some pending message, left queued for [`Self::poll_pending_event`].
-    /// Authorized exactly as a poll is.
+    /// The service of some pending message within the capability's scope, left queued for
+    /// [`Self::poll_pending_event`]. Messages for services outside the scope are not seen.
     pub(crate) fn pending_service_authorized(
         &self,
         supervisor_pid: u64,
         capability_handle: u64,
     ) -> Result<Option<ServiceId>, LifecycleControlError> {
-        self.authorize_lifecycle_control(supervisor_pid, capability_handle)?;
+        let scope = self.authorize_lifecycle_control(supervisor_pid, capability_handle, None)?;
         Ok(self
             .pending
             .iter()
             .chain(self.ready_pending.iter())
             .flatten()
             .map(|event| event.instance.service)
-            .find(|service| service.0 != 0))
+            .find(|service| service.0 != 0 && scope.covers(*service)))
     }
 
     /// `SERVICE_READY` from `pid`. Accepted only from the live instance of a declared service
@@ -463,13 +463,16 @@ impl ServiceLifecycleController {
         Ok(())
     }
 
-    pub(crate) fn grant_lifecycle_control_capability(
+    /// Grants `holder_pid` lifecycle control of `services` and of no other service.
+    pub(crate) fn grant_lifecycle_control_capability<'a>(
         &mut self,
         holder_pid: u64,
+        services: impl IntoIterator<Item = &'a ServiceId>,
     ) -> Result<u64, &'static str> {
+        let scope = LifecycleScope::of(services)?;
         unsafe { lifecycle_capabilities_mut() }
             .lifecycle_control
-            .grant_lifecycle_control_capability(holder_pid)
+            .grant_lifecycle_control_capability(holder_pid, scope)
     }
 
     /// A capability of another kind for the lifecycle-wait refusal check.
@@ -918,12 +921,14 @@ impl ServiceLifecycleController {
         &self,
         supervisor_pid: u64,
         capability_handle: u64,
-    ) -> Result<(), LifecycleControlError> {
+        service: Option<ServiceId>,
+    ) -> Result<LifecycleScope, LifecycleControlError> {
         unsafe { lifecycle_capabilities_mut() }
             .lifecycle_control
-            .authorize_lifecycle_control(supervisor_pid, capability_handle)
+            .authorize_lifecycle_control(supervisor_pid, capability_handle, service)
             .map_err(|error| match error {
-                LifecycleControlCapabilityError::Unauthorized => {
+                LifecycleControlCapabilityError::Unauthorized
+                | LifecycleControlCapabilityError::OutOfScope => {
                     LifecycleControlError::Unauthorized
                 }
                 LifecycleControlCapabilityError::StaleHandle => LifecycleControlError::StaleHandle,
@@ -940,9 +945,13 @@ impl ServiceLifecycleController {
         capability_handle: u64,
         message: &[u8],
     ) -> Result<LifecycleControlResult, LifecycleControlError> {
-        self.authorize_lifecycle_control(supervisor_pid, capability_handle)?;
-        let (decoded, _) =
-            LifecycleMessage::decode(message).map_err(LifecycleControlError::InvalidMessage)?;
+        let decoded = LifecycleMessage::decode(message);
+        let service = match &decoded {
+            Ok((LifecycleMessage::ControlRequest(request), _)) => Some(request.service),
+            _ => None,
+        };
+        self.authorize_lifecycle_control(supervisor_pid, capability_handle, service)?;
+        let (decoded, _) = decoded.map_err(LifecycleControlError::InvalidMessage)?;
         let LifecycleMessage::ControlRequest(request) = decoded else {
             return Err(LifecycleControlError::InvalidMessage(
                 DecodeError::UnknownMessageKind(0),
@@ -1316,7 +1325,7 @@ mod tests {
             .declare_service(ServiceId(7))
             .expect("declare service");
         let capability = controller
-            .grant_lifecycle_control_capability(100)
+            .grant_lifecycle_control_capability(100, &[ServiceId(7)])
             .expect("grant capability");
         let mut allocator = test_allocator();
         controller.configure_launch_context(0x1000);
@@ -1328,9 +1337,70 @@ mod tests {
         assert_eq!(err, LifecycleControlError::Unauthorized);
     }
 
-    /// Init holds the lifecycle-control capability. A control request names a service and an
-    /// action only, so the grants of a started instance are the manifest row's; and a request
-    /// for an id the kernel has not declared changes nothing.
+    /// #220: a lifecycle-control capability for service A starts, stops, polls and peeks at A
+    /// only. Requests for B, declared and live-able, are refused and change nothing.
+    #[test]
+    fn lifecycle_control_for_one_service_is_refused_for_another() {
+        const SERVICE_A: ServiceId = ServiceId(7);
+        const SERVICE_B: ServiceId = ServiceId(8);
+        let mut controller = ServiceLifecycleController::new();
+        controller.declare_service(SERVICE_A).expect("declare A");
+        controller.declare_service(SERVICE_B).expect("declare B");
+        let capability = controller
+            .grant_lifecycle_control_capability(100, &[SERVICE_A])
+            .expect("grant capability");
+        let mut allocator = test_allocator();
+        controller.configure_launch_context(0x1000);
+        let services_before = controller.services;
+        for kind in [
+            ControlRequestKind::Start,
+            ControlRequestKind::Stop,
+            ControlRequestKind::Terminate,
+            ControlRequestKind::Restart,
+        ] {
+            let message =
+                LifecycleMessage::ControlRequest(ControlRequest::new(SERVICE_B, kind)).encode();
+            assert_eq!(
+                controller
+                    .handle_control_message(&mut allocator, 100, capability, &message)
+                    .unwrap_err(),
+                LifecycleControlError::Unauthorized,
+                "{kind:?}"
+            );
+        }
+        assert_eq!(controller.services, services_before);
+
+        controller
+            .replay_pending_lifecycle_event(event_for(SERVICE_B, 66, LifecycleEventKind::Exited))
+            .unwrap();
+        assert_eq!(
+            controller.pending_service_authorized(100, capability),
+            Ok(None),
+            "the peek does not see an out-of-scope service's message"
+        );
+        assert_eq!(
+            controller.poll_pending_event_authorized(100, capability, SERVICE_B),
+            Err(LifecycleControlError::Unauthorized)
+        );
+        controller
+            .replay_pending_lifecycle_event(event_for(SERVICE_A, 65, LifecycleEventKind::Exited))
+            .unwrap();
+        assert_eq!(
+            controller.pending_service_authorized(100, capability),
+            Ok(Some(SERVICE_A))
+        );
+        assert_eq!(
+            controller
+                .poll_pending_event_authorized(100, capability, SERVICE_A)
+                .expect("poll A")
+                .map(|event| event.instance.service),
+            Some(SERVICE_A)
+        );
+    }
+
+    /// Init holds the lifecycle-control capability for its manifest rows. A control request
+    /// names a service and an action only, so the grants of a started instance are the
+    /// manifest row's; and a request for an id outside the manifest changes nothing.
     #[test]
     fn init_cannot_start_an_undeclared_service_or_choose_its_grants() {
         use clean_slate_service_fixtures::manifest::SYSTEM_MANIFEST;
@@ -1341,7 +1411,10 @@ mod tests {
             controller.declare_service(spec.id).expect("declare row");
         }
         let capability = controller
-            .grant_lifecycle_control_capability(INIT_PID)
+            .grant_lifecycle_control_capability(
+                INIT_PID,
+                SYSTEM_MANIFEST.iter().map(|spec| &spec.id),
+            )
             .expect("grant capability");
         let mut allocator = test_allocator();
         controller.configure_launch_context(0x1000);
@@ -1360,7 +1433,7 @@ mod tests {
                     controller
                         .handle_control_message(&mut allocator, INIT_PID, capability, &message)
                         .unwrap_err(),
-                    LifecycleControlError::UnknownService,
+                    LifecycleControlError::Unauthorized,
                     "{undeclared:?} {kind:?}"
                 );
             }
@@ -2025,7 +2098,7 @@ mod tests {
     fn pending_service_peek_is_authorized_like_a_poll_and_consumes_nothing() {
         let mut controller = ServiceLifecycleController::new();
         let capability = controller
-            .grant_lifecycle_control_capability(100)
+            .grant_lifecycle_control_capability(100, &[ServiceId(25)])
             .expect("grant capability");
         assert_eq!(
             controller.pending_service_authorized(100, capability),
@@ -2207,7 +2280,7 @@ mod tests {
         controller.services[0] = starting_record(STORAGE_SERVICE_ID, 70, 1);
         // A lifecycle-control holder (init), and pids with no live instance at all.
         controller
-            .grant_lifecycle_control_capability(100)
+            .grant_lifecycle_control_capability(100, &[STORAGE_SERVICE_ID])
             .expect("grant capability");
         // A faulted instance keeps its record but has no live pid.
         controller.services[1] = ServiceRecord {
@@ -2353,7 +2426,7 @@ mod tests {
     fn a_pending_ready_message_is_visible_to_an_authorized_peek_and_cleared_with_the_registry() {
         let mut controller = ServiceLifecycleController::new();
         let capability = controller
-            .grant_lifecycle_control_capability(100)
+            .grant_lifecycle_control_capability(100, &[NETWORK_SERVICE_ID])
             .expect("grant capability");
         controller.services[2] = starting_record(NETWORK_SERVICE_ID, 72, 1);
         controller.report_ready_from_pid(72).expect("ready");
