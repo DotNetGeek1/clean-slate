@@ -1,7 +1,7 @@
 //! CPU-local register helpers: interrupt flag control, RFLAGS/CS/RSP reads,
 //! the CR0.WP toggle used while editing live page tables, the boot-time
 //! EFER.NXE enable and the boot-time supervisor guards (CR0.WP, CR4.SMEP,
-//! CR4.UMIP).
+//! CR4.SMAP, CR4.UMIP).
 //!
 //! Why unsafe: `sti`/`cli`, CR0 and CR4 writes change global CPU state. Callers of
 //! `without_interrupts` must not block or yield inside the closure; callers of
@@ -83,8 +83,8 @@ impl fmt::Display for GuardReport {
     }
 }
 
-/// Sets CR0.WP, so a supervisor write to a read-only page faults, and CR4.SMEP and CR4.UMIP
-/// when CPUID reports them. Fails if a bit does not latch. CR0 and CR4 are per CPU: every
+/// Sets CR0.WP, so a supervisor write to a read-only page faults, and CR4.SMEP, CR4.SMAP and
+/// CR4.UMIP when CPUID reports them; records the SMAP decision for `mm::user_access`. Fails if a bit does not latch. CR0 and CR4 are per CPU: every
 /// additional core must call this before running kernel code that relies on the guards.
 pub(crate) fn enable_kernel_guards() -> Result<GuardReport, &'static str> {
     let max_basic_leaf = unsafe { __cpuid(0) }.eax;
@@ -113,6 +113,7 @@ pub(crate) fn enable_kernel_guards() -> Result<GuardReport, &'static str> {
         }
     }
     let cr4 = read_cr4();
+    crate::mm::user_access::record_smap_enabled(cr4 & CR4_SMAP != 0);
     if cr4 & desired != desired {
         return Err("CR4 guard bits did not latch");
     }
@@ -259,6 +260,21 @@ mod tests {
         assert_eq!(
             format!("{report}"),
             "wp=on smep=on smap=off umip=unsupported firmware_wp=1"
+        );
+        let all_on = GuardReport {
+            support: GuardSupport {
+                smep: true,
+                smap: true,
+                umip: true,
+            },
+            firmware_wp: false,
+            smep: true,
+            smap: true,
+            umip: true,
+        };
+        assert_eq!(
+            format!("{all_on}"),
+            "wp=on smep=on smap=on umip=on firmware_wp=0"
         );
     }
 }

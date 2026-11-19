@@ -13,6 +13,7 @@ use clean_slate_network::error::NetworkError;
 use clean_slate_network::protocol::{NetworkRequest, NetworkResponse};
 use clean_slate_service_fixtures::NETWORK_MAX_PAYLOAD_BYTES;
 
+use crate::mm::user_access::{copy_to_user, read_user};
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::service::net_bridge::{net_bridge_mut, NetBridgeError};
 use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
@@ -327,16 +328,11 @@ pub(crate) fn write_datagram(
 }
 
 fn read_user_u64(address: u64) -> Result<u64, LinuxErrno> {
-    validate_user_pointer_range(address, 8).map_err(|_| EFAULT)?;
-    Ok(unsafe { core::ptr::read_unaligned(address as *const u64) })
+    read_user::<u64>(address).map_err(|_| EFAULT)
 }
 
 fn write_user_bytes(address: u64, bytes: &[u8]) -> Result<(), LinuxErrno> {
-    validate_user_writable_pointer_range(address, bytes.len() as u64).map_err(|_| EFAULT)?;
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len());
-    }
-    Ok(())
+    copy_to_user(address, bytes).map_err(|_| EFAULT)
 }
 
 /// `recvmsg(2)` on a UDP socket: scatters one datagram across the iovecs, reports the

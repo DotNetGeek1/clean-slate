@@ -136,12 +136,15 @@ pub(crate) const fn guard_support_from_cpuid(
     }
 }
 
-/// CR4 with SMEP and UMIP set where `support` allows. SMAP stays clear: kernel code still
-/// dereferences user pointers directly (#217 stage B adds the copy helper that SMAP needs).
+/// CR4 with SMEP, SMAP and UMIP set where `support` allows. SMAP relies on every kernel access
+/// to user memory going through `mm::user_access`.
 pub(crate) const fn cr4_with_guards(cr4: u64, support: GuardSupport) -> u64 {
     let mut value = cr4;
     if support.smep {
         value |= CR4_SMEP;
+    }
+    if support.smap {
+        value |= CR4_SMAP;
     }
     if support.umip {
         value |= CR4_UMIP;
@@ -211,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn cr4_guards_set_smep_and_umip_but_never_smap() {
+    fn cr4_guards_set_each_supported_guard() {
         let all = GuardSupport {
             smep: true,
             smap: true,
@@ -221,14 +224,28 @@ mod tests {
         assert_eq!(CR4_SMAP, 0x20_0000);
         assert_eq!(CR4_UMIP, 0x800);
         let base = 0x620;
-        assert_eq!(cr4_with_guards(base, all), base | CR4_SMEP | CR4_UMIP);
-        assert_eq!(cr4_with_guards(base, all) & CR4_SMAP, 0);
+        assert_eq!(
+            cr4_with_guards(base, all),
+            base | CR4_SMEP | CR4_SMAP | CR4_UMIP
+        );
         let only_umip = GuardSupport {
             smep: false,
             smap: false,
             umip: true,
         };
         assert_eq!(cr4_with_guards(base, only_umip), base | CR4_UMIP);
+        let only_smap = GuardSupport {
+            smep: false,
+            smap: true,
+            umip: false,
+        };
+        assert_eq!(cr4_with_guards(base, only_smap), base | CR4_SMAP);
+        let none = GuardSupport {
+            smep: false,
+            smap: false,
+            umip: false,
+        };
+        assert_eq!(cr4_with_guards(base, none), base);
     }
 
     #[test]

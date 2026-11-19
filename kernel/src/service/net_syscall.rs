@@ -1,7 +1,5 @@
 //! Network capability and bridge syscall wiring (M7.3 service path).
 
-use core::ptr;
-
 use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSPC, SYSCALL_ESTALE,
 };
@@ -25,6 +23,7 @@ use crate::arch::x86_64::cpu::without_interrupts;
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::network::{authorize_network_op, NetworkOp};
 use crate::capability::with_capability_space;
+use crate::mm::user_access::{copy_from_user, copy_to_user};
 use crate::mm::user_mapping::validate_user_pointer_range;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::sched::wait::{
@@ -233,12 +232,9 @@ fn handle_submit(frame: &mut SyscallContext) {
         }
     };
     let mut request_wire = [0u8; NETWORK_REQUEST_BYTES];
-    unsafe {
-        ptr::copy_nonoverlapping(
-            frame.rdx as *const u8,
-            request_wire.as_mut_ptr(),
-            request_wire.len(),
-        );
+    if copy_from_user(&mut request_wire, frame.rdx).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
     }
     let request = match NetworkRequest::decode(&request_wire) {
         Ok(request) => request,
@@ -258,10 +254,9 @@ fn handle_submit(frame: &mut SyscallContext) {
         return;
     }
     let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-    if payload_len > 0 {
-        unsafe {
-            ptr::copy_nonoverlapping(frame.r10 as *const u8, payload.as_mut_ptr(), payload_len);
-        }
+    if payload_len > 0 && copy_from_user(&mut payload[..payload_len], frame.r10).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
     }
     let generation = match caller_instance_generation(holder) {
         Ok(generation) => generation,
@@ -335,16 +330,14 @@ fn handle_poll(frame: &mut SyscallContext) {
     ) {
         Ok(response) => {
             let wire = response.encode();
-            unsafe {
-                ptr::copy_nonoverlapping(wire.as_ptr(), frame.r10 as *mut u8, wire.len());
-            }
-            if out_len > 0 {
-                let written = out_payload.len().min(out_len);
-                unsafe {
-                    ptr::copy_nonoverlapping(out_payload.as_ptr(), frame.r8 as *mut u8, written);
-                }
-            }
-            frame.rax = 0;
+            let written = out_payload.len().min(out_len);
+            frame.rax = if copy_to_user(frame.r10, &wire).is_err()
+                || (out_len > 0 && copy_to_user(frame.r8, &out_payload[..written]).is_err())
+            {
+                SYSCALL_EINVAL
+            } else {
+                0
+            };
         }
         Err(NetBridgeError::Pending) => block_net_syscall_restart(
             frame,
@@ -384,8 +377,9 @@ fn handle_service_next(frame: &mut SyscallContext) {
         None => frame.rax = 0,
         Some((request_id, request, payload_len, caller)) => {
             let wire = request.encode();
-            unsafe {
-                ptr::copy_nonoverlapping(wire.as_ptr(), frame.rdx as *mut u8, wire.len());
+            if copy_to_user(frame.rdx, &wire).is_err() {
+                frame.rax = SYSCALL_EINVAL;
+                return;
             }
             let mut meta = [0u8; 28];
             meta[0..8].copy_from_slice(&caller.pid.to_le_bytes());
@@ -397,17 +391,16 @@ fn handle_service_next(frame: &mut SyscallContext) {
                 return;
             }
             meta[24..28].copy_from_slice(&(payload_len_usize as u32).to_le_bytes());
-            unsafe {
-                ptr::copy_nonoverlapping(meta.as_ptr(), frame.r10 as *mut u8, meta.len());
+            if copy_to_user(frame.r10, &meta).is_err() {
+                frame.rax = SYSCALL_EINVAL;
+                return;
             }
             if let Some(payload) = net_bridge_mut().service_payload(request_id) {
-                unsafe {
-                    let dest = (frame.r10 as *mut u8).add(NETWORK_SERVICE_NEXT_METADATA_BYTES);
-                    ptr::copy_nonoverlapping(
-                        payload.as_ptr(),
-                        dest,
-                        payload.len().min(payload_len_usize),
-                    );
+                let payload = &payload[..payload.len().min(payload_len_usize)];
+                let dest = frame.r10 + NETWORK_SERVICE_NEXT_METADATA_BYTES as u64;
+                if !payload.is_empty() && copy_to_user(dest, payload).is_err() {
+                    frame.rax = SYSCALL_EINVAL;
+                    return;
                 }
             }
             frame.rax = request_id;
@@ -451,12 +444,9 @@ fn handle_service_complete(frame: &mut SyscallContext) {
         return;
     }
     let mut response_wire = [0u8; NETWORK_RESPONSE_BYTES];
-    unsafe {
-        ptr::copy_nonoverlapping(
-            frame.r10 as *const u8,
-            response_wire.as_mut_ptr(),
-            response_wire.len(),
-        );
+    if copy_from_user(&mut response_wire, frame.r10).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
     }
     let response = match NetworkResponse::decode(&response_wire) {
         Ok(response) => response,
@@ -466,10 +456,9 @@ fn handle_service_complete(frame: &mut SyscallContext) {
         }
     };
     let mut payload = [0u8; NETWORK_MAX_PAYLOAD_BYTES];
-    if payload_len > 0 {
-        unsafe {
-            ptr::copy_nonoverlapping(frame.r8 as *const u8, payload.as_mut_ptr(), payload_len);
-        }
+    if payload_len > 0 && copy_from_user(&mut payload[..payload_len], frame.r8).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
     }
     let request_id = frame.rdx;
     match net_bridge_mut().service_complete(request_id, response, &payload[..payload_len]) {
@@ -499,12 +488,9 @@ fn handle_raw_geometry(frame: &mut SyscallContext) {
         return;
     }
     let props = net_bridge_mut().raw_geometry(holder.0);
-    unsafe {
-        ptr::copy_nonoverlapping(
-            props.mac.0.as_ptr(),
-            frame.rdx as *mut u8,
-            props.mac.0.len(),
-        );
+    if copy_to_user(frame.rdx, &props.mac.0).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
     }
     frame.rax = if props.link_up { 1 } else { 0 };
 }
@@ -535,8 +521,9 @@ fn handle_raw_transmit(frame: &mut SyscallContext) {
         return;
     }
     let mut bytes = [0u8; clean_slate_network::limits::MAX_ETHERNET_FRAME_BYTES];
-    unsafe {
-        ptr::copy_nonoverlapping(frame.rdx as *const u8, bytes.as_mut_ptr(), len);
+    if len > 0 && copy_from_user(&mut bytes[..len], frame.rdx).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
     }
     let frame_buf = match clean_slate_network::buffer::FrameBuf::from_slice(&bytes[..len]) {
         Ok(frame_buf) => frame_buf,
@@ -598,10 +585,11 @@ fn handle_raw_receive(frame: &mut SyscallContext) {
         Ok(None) => frame.rax = u64::MAX,
         Ok(Some(frame_buf)) => {
             let bytes = frame_buf.as_slice();
-            unsafe {
-                ptr::copy_nonoverlapping(bytes.as_ptr(), frame.rdx as *mut u8, bytes.len());
-            }
-            frame.rax = bytes.len() as u64;
+            frame.rax = if bytes.is_empty() || copy_to_user(frame.rdx, bytes).is_ok() {
+                bytes.len() as u64
+            } else {
+                SYSCALL_EINVAL
+            };
         }
         Err(_) => frame.rax = SYSCALL_EINVAL,
     }
@@ -629,10 +617,10 @@ fn handle_pop_holder_exit(frame: &mut SyscallContext) {
             buf[0..8].copy_from_slice(&caller.pid.to_le_bytes());
             buf[8..16].copy_from_slice(&caller.domain.to_le_bytes());
             buf[16..24].copy_from_slice(&caller.instance_generation.to_le_bytes());
-            unsafe {
-                ptr::copy_nonoverlapping(buf.as_ptr(), frame.rdx as *mut u8, buf.len());
-            }
-            frame.rax = 1;
+            frame.rax = match copy_to_user(frame.rdx, &buf) {
+                Ok(()) => 1,
+                Err(_) => SYSCALL_EINVAL,
+            };
         }
         None => frame.rax = 0,
     }

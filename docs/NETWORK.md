@@ -511,6 +511,7 @@ Enable in consumers: `clean-slate-network` feature `tls` (kernel: `m7-tls-self-t
 - TCP echo [`TCP_ECHO_PORT`](../network/src/fixture.rs): `APP_REQUEST_BYTES` → `APP_RESPONSE_BYTES`.
 - TLS [`TLS_PORT`](../network/src/fixture.rs): rustls server, same app contract after handshake.
 - M9 profile only: HTTP on `10.77.0.50:4001` reads the request head first and answers `M9-FIXTURE-HTTP\n` only when it is exactly `GET / HTTP/1.0` or `GET / HTTP/1.1`, then `name: value` header lines, then the blank line, within 2048 bytes and 5 s of the connect. Anything else is closed without a response. The peer counts answered and refused connections (`M7FixturePeer::counts`), and `test-m9-userspace`, `test-m9-linux-socket`, `test-system-shell` and `test-system` require exactly their number of answered requests (9, 1, 1 and 2) and no refusal (#255), so a request that never leaves the guest fails the lane. Banner on `4002` is sent on accept and needs no request.
+- The peer also counts what it serves on the M7 ports: DNS replies, A answers for `m7.fixture.test`, NXDOMAIN answers, TCP echoes, TLS connections accepted, TLS handshakes its server side completed, and TLS app responses (one per connection). `test-m7-dns`, `test-m7-tls` and `test-m7-network` compare the whole set with an exact expected value after the run (#223), so a guest that prints `[DNS ]`, `[TCP ]`, `[TLS ]` or `[NET ] converged` success lines without the exchange reaching the peer fails the lane.
 - M9 profile only: the hold port `10.77.0.50:4003` (#218 S7b) accepts and never sends, so a client reading a response blocks. It counts a connection as held once it is established, before reading anything, and separately counts a held connection whose complete request head has arrived; `test-system` requires one of each.
 - Markers: `[FIX ] tcp echo`, `[FIX ] tls handshake sni=…`, `[FIX ] tls app bytes`, `[FIX ] m9 http request "GET / HTTP/1.1" (83 bytes)`, `[FIX ] m9 http refused: <reason> (N bytes received)`, `[FIX ] m9 hold connection held`, `[FIX ] m9 hold request received (N bytes); not answering`.
 - `CLEAN_SLATE_FIXTURE_TRACE=1` makes the peer print every TCP segment it receives or sends (`[FIX ] trace guest|fixture tcp <src> -> <dst> seq= ack= flags= len=`), to see whether guest data reached the wire.
@@ -524,6 +525,8 @@ cargo xtask test-m7-tls
 Pass boot markers (order): `[TCP ] connected peer=10.77.0.1:4001`, `[TCP ] echo ok len=`, `[TLS ] authenticated peer=m7.fixture.test`, `[TLS ] app bytes ok len=`, `[TLS ] closed`, `[M7.6] PASS`.
 
 Fail-closed boot: `[TLS ] peer identity rejected name=m7.fixture.test`, `[M7.6] FAIL-CLOSED OK`.
+
+The peer must have served exactly one TCP echo, one TLS connection, one completed handshake and one app response in the pass boot, and in the fail-closed boot one TLS connection with no completed handshake and no app response.
 
 UEFI builds set `--cfg aes_force_soft` in [`.cargo/config.toml`](../.cargo/config.toml) for portable AES. On Windows hosts, **debug** UEFI codegen for GCM (`polyval`/`aes`) can still trigger an LLVM split error; `cargo xtask test-m7-tls` therefore builds the kernel **release** profile (`kernel_release: true`) while other M7 lanes stay debug.
 
@@ -603,6 +606,6 @@ Unauthorized DNS denial is proven in #87/#88, not in this lane.
 cargo xtask test-m7-dns
 ```
 
-**Serial markers (ordered):** `[DNS ] virtio ready mac=…`, `[DNS ] resolved name=m7.fixture.test addr=10.77.0.50 ttl=300`, `[DNS ] cache hit name=m7.fixture.test`, `[DNS ] nxdomain name=nope.fixture.test`, `[M7.5] PASS` (host peer also emits `[FIX ] dns query name=m7.fixture.test rcode=0`).
+**Serial markers (ordered):** `[DNS ] virtio ready mac=…`, `[DNS ] resolved name=m7.fixture.test addr=10.77.0.50 ttl=300`, `[DNS ] cache hit name=m7.fixture.test`, `[DNS ] nxdomain name=nope.fixture.test`, `[M7.5] PASS` (host peer also emits `[FIX ] dns query name=m7.fixture.test rcode=0`). The peer must have sent exactly two DNS replies, one A answer and one NXDOMAIN, so the cache hit is proven to have sent no query.
 
 Regression: `cargo xtask test-m7-net-device` (echo lane unchanged).

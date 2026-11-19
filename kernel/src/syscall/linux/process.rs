@@ -24,9 +24,8 @@ mod enabled {
     use crate::diagnostics::log::kernel_log_fmt;
     use crate::diagnostics::qemu::fatal_kernel_error;
     use crate::mm::address_space::kernel_root_frame;
-    use crate::mm::user_mapping::{
-        validate_user_pointer_range, validate_user_writable_pointer_range,
-    };
+    use crate::mm::user_access::{copy_cstring_from_user, read_user, write_user, UserStringError};
+    use crate::mm::user_mapping::validate_user_writable_pointer_range;
     use crate::process::domain::teardown_current_process;
     use crate::process::linux_exec::{
         commit_exec, linux_errno_for_exec_error, prepare_linux_image, LinuxExecSpec,
@@ -103,9 +102,7 @@ mod enabled {
         validate_user_writable_pointer_range(user_ptr, 8).map_err(|_| EFAULT)?;
         let [read_fd, write_fd] = linux_fd::open_pipe(ctx.pid, ctx.instance_generation)?;
         let pair = [read_fd as u32, write_fd as u32];
-        unsafe {
-            core::ptr::copy_nonoverlapping(pair.as_ptr(), user_ptr as *mut u32, 2);
-        }
+        write_user(user_ptr, &pair).map_err(|_| EFAULT)?;
         Ok(0)
     }
 
@@ -320,18 +317,12 @@ mod enabled {
         if ptr == 0 {
             return Err(EFAULT);
         }
-        for (index, slot) in out.iter_mut().enumerate() {
-            validate_user_pointer_range(ptr + index as u64, 1).map_err(|_| EFAULT)?;
-            let byte = unsafe { *((ptr + index as u64) as *const u8) };
-            if byte == 0 {
-                if index == 0 {
-                    return Err(EINVAL);
-                }
-                return Ok(index);
-            }
-            *slot = byte;
+        match copy_cstring_from_user(ptr, out) {
+            Ok(0) => Err(EINVAL),
+            Ok(len) => Ok(len),
+            Err(UserStringError::Fault) => Err(EFAULT),
+            Err(UserStringError::TooLong) => Err(E2BIG),
         }
-        Err(E2BIG)
     }
 
     fn copy_user_string_array(
@@ -350,8 +341,7 @@ mod enabled {
         }
         let mut count = 0usize;
         while count < max_entries {
-            validate_user_pointer_range(ptr + count as u64 * 8, 8).map_err(|_| EFAULT)?;
-            let entry_ptr = unsafe { *((ptr + count as u64 * 8) as *const u64) };
+            let entry_ptr = read_user::<u64>(ptr + count as u64 * 8).map_err(|_| EFAULT)?;
             if entry_ptr == 0 {
                 break;
             }

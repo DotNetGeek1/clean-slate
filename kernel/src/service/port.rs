@@ -414,6 +414,11 @@ pub(crate) fn global_counts() -> PortCounts {
     with_ports(|core, _, _| core.global_counts())
 }
 
+#[cfg(feature = "m10-port-self-test")]
+pub(crate) fn limit_rejections() -> clean_slate_port::LimitRejections {
+    with_ports(|core, _, _| core.limit_rejections())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

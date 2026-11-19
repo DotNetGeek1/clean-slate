@@ -5,6 +5,7 @@ use super::user_copy::copy_user_bytes;
 use super::write::{
     ensure_fd_open, socket_for_fd, write_chunked, write_socket_gathered, LINUX_WRITE_CHUNK_BYTES,
 };
+use crate::mm::user_access::{copy_to_user, read_user, UserPod};
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::process::linux_fd::{
     self, apply_linux_fl_to_status, ensure_open_fd, open_description::DescriptorKind,
@@ -33,6 +34,9 @@ struct IoVec {
     base: u64,
     len: u64,
 }
+
+// SAFETY: `repr(C)`, two `u64` fields, no padding; every bit pattern is a valid `IoVec`.
+unsafe impl UserPod for IoVec {}
 
 pub(crate) fn handle_sys_read(
     request: &LinuxSyscallRequest,
@@ -129,9 +133,7 @@ pub(crate) fn handle_sys_read(
     };
     if let Ok(n) = result {
         if n > 0 {
-            unsafe {
-                core::ptr::copy_nonoverlapping(scratch.as_ptr(), buf_ptr as *mut u8, n as usize);
-            }
+            copy_to_user(buf_ptr, &scratch[..(n as usize).min(want)]).map_err(|_| EFAULT)?;
         }
     }
     result
@@ -227,11 +229,9 @@ pub(crate) fn handle_sys_writev(
     }
 
     let mut iovecs = [IoVec { base: 0, len: 0 }; LINUX_IOV_MAX];
-    let src = iov_ptr as *const u8;
-    let dst = iovecs.as_mut_ptr() as *mut u8;
-    let bytes = iovec_bytes as usize;
-    unsafe {
-        core::ptr::copy_nonoverlapping(src, dst, bytes);
+    for (index, iov) in iovecs[..iovcnt].iter_mut().enumerate() {
+        let address = iov_ptr + (index * core::mem::size_of::<IoVec>()) as u64;
+        *iov = read_user::<IoVec>(address).map_err(|_| EFAULT)?;
     }
 
     let mut total_len = 0u64;

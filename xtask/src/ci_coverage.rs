@@ -163,7 +163,11 @@ fn lane_feature_sets(source: &str, features: &BTreeMap<String, Vec<String>>) -> 
 fn linted_feature_sets(workflow: &str) -> Vec<FeatureSet> {
     workflow
         .lines()
-        .filter_map(|line| line.trim().strip_prefix(KERNEL_CLIPPY))
+        .filter_map(|line| {
+            let line = line.trim();
+            let command = line.strip_prefix("run:").map_or(line, str::trim_start);
+            command.strip_prefix(KERNEL_CLIPPY)
+        })
         .map(|rest| {
             let mut words = rest.split_whitespace();
             let mut set = FeatureSet::new();
@@ -273,4 +277,8 @@ fn feature_sets_expand_through_cargo_implications() {
         missing,
         vec![("lane.rs".to_owned(), FeatureSet::from(["c".to_owned()]))]
     );
+    let single_step = format!(
+        "{workflow}      - name: c\n        run: cargo clippy -p clean-slate-kernel --target x86_64-unknown-uefi --features c -- -D warnings\n"
+    );
+    assert!(unlinted(manifest, &single_step, &sources).is_empty());
 }

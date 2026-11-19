@@ -17,6 +17,7 @@ use crate::mm::shared_buffer::kernel_owned::{
     allocate_kernel_owned, extents, map_kernel_owned_into, pin, release_kernel_owned,
     unmap_kernel_grants_for, unpin, with_kernel_bytes_mut, PinToken,
 };
+use crate::mm::user_access::read_user;
 use crate::process::id_allocator::{id_allocator_mut, IdAllocator};
 use crate::process::process_registry_mut;
 use crate::sched::dispatch::start_current_scheduler_thread;
@@ -56,6 +57,7 @@ use clean_slate_service_fixtures::m6_fixture::{
     pattern_byte, M6FixtureBootstrap, M6FixtureStep, ARG_DATA_PTR, ARG_RESULT_OF,
     FIXTURE_STATUS_MISMATCH, M6_FIXTURE_BOOTSTRAP_ADDRESS, PATTERN_CONSTANT, PATTERN_INCREMENTING,
 };
+use core::mem::offset_of;
 use x86_64::registers::control::Cr2;
 
 const CHECK_PHASE_DONE: u64 = 0;
@@ -438,6 +440,12 @@ fn record_owner_handle(pid: u64, raw_handle: u64) {
     state.owner_root_handle = raw_handle;
 }
 
+/// The first `N` bytes of the calling fixture's bootstrap `data`.
+fn bootstrap_data<const N: usize>() -> [u8; N] {
+    let address = M6_FIXTURE_BOOTSTRAP_ADDRESS + offset_of!(M6FixtureBootstrap, data) as u64;
+    read_user(address).unwrap_or_else(|_| fatal_kernel_error("[M10.SB] bootstrap unmapped"))
+}
+
 /// Runs in R's syscall context, so R's bootstrap page (and its QUERY output at data
 /// offset 0) is mapped at `M6_FIXTURE_BOOTSTRAP_ADDRESS`.
 fn check_map_phase(pid_w: u64, pid_r: u64, id: SharedBufferId) {
@@ -472,8 +480,8 @@ fn check_map_phase(pid_w: u64, pid_r: u64, id: SharedBufferId) {
             }
         }
     }
-    let report = unsafe { &*(M6_FIXTURE_BOOTSTRAP_ADDRESS as *const M6FixtureBootstrap) };
-    let info = SharedBufferInfo::decode(&report.data[..SHARED_BUFFER_INFO_BYTES])
+    let data: [u8; SHARED_BUFFER_INFO_BYTES] = bootstrap_data();
+    let info = SharedBufferInfo::decode(&data)
         .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] query output malformed"));
     if info.id != id
         || info.byte_len != MIB
@@ -1721,12 +1729,8 @@ fn lane_check_handler(pid: u64, check: u64, arg: u64) -> u64 {
             if pid != state.peer_pids[ROLE_R as usize] {
                 fatal_kernel_error("[M10.SB] transfer receive checked by the wrong fixture");
             }
-            let bootstrap =
-                unsafe { &*(M6_FIXTURE_BOOTSTRAP_ADDRESS as *const M6FixtureBootstrap) };
-            let bytes: &[u8; PortRecvRecord::BYTES] = bootstrap.data[..PortRecvRecord::BYTES]
-                .try_into()
-                .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] transfer record bounds"));
-            let record = PortRecvRecord::decode(bytes)
+            let bytes: [u8; PortRecvRecord::BYTES] = bootstrap_data();
+            let record = PortRecvRecord::decode(&bytes)
                 .unwrap_or_else(|_| fatal_kernel_error("[M10.SB] transfer record malformed"));
             let transfer = record
                 .envelope

@@ -14,7 +14,7 @@
 //!   and `clean_slate_timer_self_test_task` (`selftest::m2_timer`).
 //! - statics `NEXT_TASK_STACK_POINTER`, `NEXT_TASK_ENTRY_POINT`
 //!   (`context_switch`), `SYSCALL_KERNEL_STACK_TOP`, `SYSCALL_SCRATCH_USER_RSP`
-//!   (this file).
+//!   (this file), `CLEAN_SLATE_SMAP_ACTIVE` (`mm::user_access`).
 //!
 //! The block is assembled unconditionally; feature-gated Rust only decides
 //! which payload labels are referenced.
@@ -165,6 +165,12 @@ clean_slate_interrupt_\vector:
 
     .global clean_slate_interrupt_common
 clean_slate_interrupt_common:
+    # Gate delivery keeps RFLAGS.AC; clear it so no handler runs with SMAP overridden (the
+    # interrupted AC comes back with iretq). `clac` is #UD without SMAP.
+    test byte ptr [rip + CLEAN_SLATE_SMAP_ACTIVE], 1
+    jz 1f
+    clac
+1:
     push rax
     push rcx
     push rdx

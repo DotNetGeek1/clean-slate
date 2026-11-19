@@ -8,20 +8,23 @@
 //!    resumes;
 //! 3. CR0.WP: a write to a kernel page mapped present and not writable must #PF with `0x3`;
 //! 4. CR4.SMEP: a CPL0 jump to a user-accessible page must #PF with `0x11` at that page;
-//! 5. CR4.UMIP: `sgdt` at CPL3 must #GP with error code 0.
+//! 5. CR4.SMAP: `mm::user_access::read_user` must read a user page, and a plain CPL0 read of the
+//!    same address must #PF with `0x1`;
+//! 6. CR4.UMIP: `sgdt` at CPL3 must #GP with error code 0.
 //!
-//! Probes 3-5 follow the identity-guard pattern (`m2_identity_guard`): the fault hook validates
+//! Probes 3-6 follow the identity-guard pattern (`m2_identity_guard`): the fault hook validates
 //! the fault and starts the next probe from inside the handler, and the last one exits QEMU. A
 //! probe that does not fault falls through to a `[KGRD] … did not fault` line and a failing
-//! exit; without SMEP the user page's `jmp rcx` returns to the probe, and without UMIP the
-//! `sgdt` completes and the following `ud2` raises #UD instead of #GP.
+//! exit; without SMEP the user page's `jmp rcx` returns to the probe, without SMAP the raw read
+//! completes, and without UMIP the `sgdt` completes and the following `ud2` raises #UD instead of
+//! #GP.
 
 use crate::arch::x86_64::apic::{enable_local_apic, send_nmi_to_self};
 use crate::arch::x86_64::cpu::{read_cr4, without_write_protect};
 use crate::arch::x86_64::gdt::{userspace_gdt_state, IstStack, MACHINE_CHECK_STACK, NMI_STACK};
 use crate::arch::x86_64::interrupt_context::InterruptContext;
 use crate::arch::x86_64::{
-    CR4_SMEP, CR4_UMIP, GENERAL_PROTECTION_VECTOR, MACHINE_CHECK_VECTOR, NMI_VECTOR,
+    CR4_SMAP, CR4_SMEP, CR4_UMIP, GENERAL_PROTECTION_VECTOR, MACHINE_CHECK_VECTOR, NMI_VECTOR,
     PAGE_FAULT_VECTOR,
 };
 use crate::diagnostics::qemu::{qemu_exit, QEMU_EXIT_FAILURE, QEMU_EXIT_SUCCESS};
@@ -29,6 +32,7 @@ use crate::diagnostics::serial::{serial_write_fmt, serial_write_line};
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::layout::KERNEL_RESERVED_FAULT_PROBE_SLOT_BASE;
 use crate::mm::paging::current_offset_page_table;
+use crate::mm::user_access::read_user;
 use crate::mm::{phys_to_virt, PAGE_SIZE};
 use crate::sync::global_cell::GlobalCell;
 use core::arch::asm;
@@ -52,6 +56,10 @@ const INVALID_OPCODE_VECTOR: u64 = 6;
 const EXPECTED_WP_ERROR: u64 = 0x3;
 /// P=1, W=0, U=0, I/D=1.
 const EXPECTED_SMEP_ERROR: u64 = 0x11;
+/// P=1, W=0, U=0, I/D=0.
+const EXPECTED_SMAP_ERROR: u64 = 0x1;
+/// Written through the physmap into the user stack page for the SMAP probe.
+const SMAP_PROBE_VALUE: u64 = 0x5341_504d_5f4f_4b21;
 const USER_RFLAGS: u64 = 0x2;
 /// Spins waiting for the self-NMI; QEMU delivers it at the next instruction boundary.
 const NMI_WAIT_SPINS: u64 = 100_000_000;
@@ -61,7 +69,8 @@ const STAGE_NMI: u8 = 1;
 const STAGE_MACHINE_CHECK: u8 = 2;
 const STAGE_WP: u8 = 3;
 const STAGE_SMEP: u8 = 4;
-const STAGE_UMIP: u8 = 5;
+const STAGE_SMAP: u8 = 5;
+const STAGE_UMIP: u8 = 6;
 
 static STAGE: AtomicU8 = AtomicU8::new(STAGE_IDLE);
 /// Bumped by the hook for each IST vector it accepts.
@@ -77,10 +86,13 @@ fn fail(message: core::fmt::Arguments<'_>) -> ! {
 /// Runs every probe; the last fault hook exits QEMU. Never returns.
 pub(crate) fn run_kernel_guards_self_test(allocator: PageAllocator) -> ! {
     let cr4 = read_cr4();
-    if !Cr0::read().contains(Cr0Flags::WRITE_PROTECT) || cr4 & CR4_SMEP == 0 || cr4 & CR4_UMIP == 0
+    if !Cr0::read().contains(Cr0Flags::WRITE_PROTECT)
+        || cr4 & CR4_SMEP == 0
+        || cr4 & CR4_SMAP == 0
+        || cr4 & CR4_UMIP == 0
     {
         fail(format_args!(
-            "lane needs wp, smep and umip on: cr4={cr4:#x}; run QEMU with -cpu …,+smep,+umip"
+            "lane needs wp, smep, smap and umip on: cr4={cr4:#x}; run QEMU with -cpu …,+smep,+smap,+umip"
         ));
     }
     unsafe { *ALLOCATOR.get() = Some(allocator) };
@@ -166,13 +178,14 @@ fn probe_user_page_execute() -> ! {
     let user = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
     let tables = user | PageTableFlags::WRITABLE;
     let code_frame = map_probe_page(USER_PROBE_CODE_ADDRESS, user, tables);
-    map_probe_page(
+    let stack_frame = map_probe_page(
         USER_PROBE_STACK_ADDRESS,
         user | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE,
         tables,
     );
     let code = phys_to_virt(code_frame) as *mut u8;
     unsafe {
+        core::ptr::write_volatile(phys_to_virt(stack_frame) as *mut u64, SMAP_PROBE_VALUE);
         core::ptr::copy_nonoverlapping(JMP_RCX.as_ptr(), code, JMP_RCX.len());
         core::ptr::copy_nonoverlapping(
             SGDT_THEN_UD2.as_ptr(),
@@ -196,6 +209,29 @@ fn probe_user_page_execute() -> ! {
     }
     fail(format_args!(
         "smep: CPL0 executed user page {USER_PROBE_CODE_ADDRESS:#018x} without a fault"
+    ))
+}
+
+fn probe_user_page_read() -> ! {
+    let address = USER_PROBE_STACK_ADDRESS;
+    match read_user::<u64>(address) {
+        Ok(SMAP_PROBE_VALUE) => serial_write_fmt(format_args!(
+            "[KGRD] helper read user page addr={address:#018x} value={SMAP_PROBE_VALUE:#x} OK\n"
+        )),
+        Ok(value) => fail(format_args!(
+            "smap: helper read {value:#x} from {address:#018x}, expected {SMAP_PROBE_VALUE:#x}"
+        )),
+        Err(message) => fail(format_args!(
+            "smap: helper read of {address:#018x} failed: {message}"
+        )),
+    }
+    serial_write_fmt(format_args!(
+        "[KGRD] probe raw read user page addr={address:#018x}\n"
+    ));
+    STAGE.store(STAGE_SMAP, Ordering::SeqCst);
+    let value = unsafe { core::ptr::read_volatile(address as *const u64) };
+    fail(format_args!(
+        "smap: CPL0 read {value:#x} from user page {address:#018x} without a fault"
     ))
 }
 
@@ -258,17 +294,18 @@ pub(crate) fn on_exception(context: &InterruptContext) -> Option<u64> {
             IST_HITS.fetch_add(1, Ordering::SeqCst);
             Some(frame)
         }
-        STAGE_WP | STAGE_SMEP => {
+        STAGE_WP | STAGE_SMEP | STAGE_SMAP => {
             let cr2 = Cr2::read().map(VirtAddr::as_u64).unwrap_or(0);
-            let (address, error, name) = if stage == STAGE_WP {
-                (READ_ONLY_PROBE_ADDRESS, EXPECTED_WP_ERROR, "wp")
-            } else {
-                (USER_PROBE_CODE_ADDRESS, EXPECTED_SMEP_ERROR, "smep")
+            let (address, error, name) = match stage {
+                STAGE_WP => (READ_ONLY_PROBE_ADDRESS, EXPECTED_WP_ERROR, "wp"),
+                STAGE_SMEP => (USER_PROBE_CODE_ADDRESS, EXPECTED_SMEP_ERROR, "smep"),
+                _ => (USER_PROBE_STACK_ADDRESS, EXPECTED_SMAP_ERROR, "smap"),
             };
             if vector != PAGE_FAULT_VECTOR as u64
                 || cr2 != address
                 || context.error_code != error
                 || (stage == STAGE_SMEP && context.rip != address)
+                || context.cs & 0x3 != 0
             {
                 fail(format_args!(
                     "{name} probe fault did not match: vector={vector} err={:#x} cr2={cr2:#x} rip={:#x}",
@@ -279,7 +316,11 @@ pub(crate) fn on_exception(context: &InterruptContext) -> Option<u64> {
                 serial_write_fmt(format_args!("[KGRD] wp write fault err={error:#x} OK\n"));
                 probe_user_page_execute()
             }
-            serial_write_fmt(format_args!("[KGRD] smep fetch fault err={error:#x} OK\n"));
+            if stage == STAGE_SMEP {
+                serial_write_fmt(format_args!("[KGRD] smep fetch fault err={error:#x} OK\n"));
+                probe_user_page_read()
+            }
+            serial_write_fmt(format_args!("[KGRD] smap read fault err={error:#x} OK\n"));
             probe_user_sgdt()
         }
         _ => {

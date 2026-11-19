@@ -5,8 +5,6 @@
 //! the waiter, so a wake between the attempt and the block cannot be lost. A wake re-executes
 //! the whole syscall; the absolute deadline survives the restart unchanged.
 
-use core::ptr;
-
 use clean_slate_capability::{CapabilityHandle, HolderId, ResourceClass};
 use clean_slate_native_abi::port::{
     PORT_FRAME_BYTES, PORT_OP_BIND_WAKE, PORT_OP_CLOSE, PORT_OP_CONNECT, PORT_OP_DISCONNECT,
@@ -18,7 +16,8 @@ use clean_slate_native_abi::{ConnectionId, PortEventRecord, PortRecvRecord};
 use clean_slate_port::PortError;
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
-use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
+use crate::mm::user_access::{copy_from_user, copy_to_user};
+use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::sched::wait::{
     block_current_thread_unless, BlockCheck, BlockedResume, Deadline, WaitKey,
 };
@@ -91,15 +90,8 @@ fn deadline(raw: u64, is_blocking: bool) -> Result<Option<u64>, PortError> {
 }
 
 fn read_frame(pointer: u64) -> Result<Frame, PortError> {
-    validate_user_pointer_range(pointer, PORT_FRAME_BYTES as u64)
-        .map_err(|_| PortError::Invalid)?;
     let mut frame = [0u8; PORT_FRAME_BYTES];
-    // SAFETY: the range was just validated as user-mapped in the caller's active address space,
-    // and nothing unmaps it before the copy: the syscall runs with interrupts disabled on the
-    // only CPU. `frame` is a distinct kernel stack buffer of the same length.
-    unsafe {
-        ptr::copy_nonoverlapping(pointer as *const u8, frame.as_mut_ptr(), frame.len());
-    }
+    copy_from_user(&mut frame, pointer).map_err(|_| PortError::Invalid)?;
     Ok(frame)
 }
 
@@ -114,13 +106,9 @@ fn writable_out(pointer: u64, length: u64, expected: usize) -> Result<u64, PortE
 
 /// `pointer` must come from [`writable_out`] for `bytes.len()` in the same syscall attempt.
 fn write_out(pointer: u64, bytes: &[u8]) {
-    // SAFETY: `writable_out` validated `pointer..pointer + bytes.len()` as user-writable in the
-    // caller's active address space during this attempt. A blocked call restarts the syscall
-    // and validates again, and with interrupts disabled on the only CPU nothing unmaps the
-    // range in between. User memory never aliases the kernel-owned `bytes`.
-    unsafe {
-        ptr::copy_nonoverlapping(bytes.as_ptr(), pointer as *mut u8, bytes.len());
-    }
+    // `writable_out` validated this range during this attempt (a blocked call restarts the
+    // syscall and validates again), and nothing unmaps it in between, so this cannot fail.
+    let _ = copy_to_user(pointer, bytes);
 }
 
 // ---- blocking ----

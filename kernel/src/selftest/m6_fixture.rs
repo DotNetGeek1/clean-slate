@@ -12,6 +12,7 @@ use crate::diagnostics::qemu::qemu_exit;
 use crate::diagnostics::qemu::QEMU_EXIT_SUCCESS;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::user_access::read_user;
 use crate::process::current_process_id;
 use crate::process::domain::teardown_current_process;
 use crate::sched::idle::idle_handoff_while_threads_blocked;
@@ -477,7 +478,8 @@ pub(crate) fn handle_fixture_report(allocator: &mut PageAllocator) -> u64 {
     if !is_fixture_pid(pid) {
         fatal_kernel_error("fixture report from non-fixture process");
     }
-    let report = unsafe { *(M6_FIXTURE_BOOTSTRAP_ADDRESS as *const M6FixtureBootstrap) };
+    let report: M6FixtureBootstrap = read_user(M6_FIXTURE_BOOTSTRAP_ADDRESS)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
     if report.magic != M6_FIXTURE_MAGIC {
         fatal_kernel_error("fixture bootstrap magic missing at report trap");
     }
