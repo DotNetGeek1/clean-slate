@@ -645,6 +645,9 @@ impl QemuSocketDevice {
                 let answered_here =
                     suppress_request || (self.m9_profile && self.try_answer_m9_refused_syn(&frame));
                 if destined_to_poison_mac(&frame) {
+                    if let Some(arp) = self.arp_impairer.as_mut() {
+                        arp.note_poisoned_destination();
+                    }
                     self.events
                         .push("[FIX ] impair arp poisoned destination dropped".to_owned());
                 } else if let Some(impairment) = dropped {
@@ -711,6 +714,13 @@ impl Device for QemuSocketDevice {
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         self.read_frames_from_socket();
+        if let Some(frame) = self
+            .arp_impairer
+            .as_mut()
+            .and_then(|arp| arp.take_released_request())
+        {
+            self.rx_queue.push_back(frame);
+        }
         let frame = self.rx_queue.pop_front()?;
         Some((QemuRxToken { frame }, QemuTxToken { device: self }))
     }

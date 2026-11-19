@@ -171,12 +171,17 @@ pub enum GuestArp {
     Hold,
 }
 
-/// One gratuitous ARP poison per requested IP. Further requests for that IP are
-/// held until [`ARP_POISON_HOLD`] has elapsed, so a guest that cached the poison
-/// never receives a later real reply, while a guest that ignored it still does.
+/// One gratuitous ARP poison per requested IP. The request that triggered it is
+/// kept off the peer until [`ARP_POISON_HOLD`] has elapsed, then delivered once,
+/// unless the guest has already sent a frame to [`ARP_POISON_MAC`]. A guest that
+/// cached the poison therefore never receives a real reply; a guest that ignored
+/// it does, without having to ask again.
 #[derive(Default)]
 pub struct ArpImpairer {
     hold_until: HashMap<Ipv4Addr, std::time::Instant>,
+    saved: HashMap<Ipv4Addr, Vec<u8>>,
+    released: HashSet<Ipv4Addr>,
+    accepted: HashSet<Ipv4Addr>,
 }
 
 impl ArpImpairer {
@@ -187,19 +192,42 @@ impl ArpImpairer {
         if arp.op != ArpOp::Request {
             return GuestArp::Forward;
         }
-        let now = std::time::Instant::now();
-        if let Some(until) = self.hold_until.get(&arp.target_ip) {
-            return if now < *until {
-                GuestArp::Hold
-            } else {
-                GuestArp::Forward
-            };
+        if self.accepted.contains(&arp.target_ip) {
+            return GuestArp::Hold;
+        }
+        if self.released.contains(&arp.target_ip) {
+            return GuestArp::Forward;
+        }
+        if self.hold_until.contains_key(&arp.target_ip) {
+            return GuestArp::Hold;
         }
         let Ok((eth, _)) = EthernetHeader::parse(frame) else {
             return GuestArp::Forward;
         };
-        self.hold_until.insert(arp.target_ip, now + ARP_POISON_HOLD);
+        self.hold_until
+            .insert(arp.target_ip, std::time::Instant::now() + ARP_POISON_HOLD);
+        self.saved.insert(arp.target_ip, frame.to_vec());
         GuestArp::Poison(gratuitous_arp(eth.src, arp.target_ip))
+    }
+
+    /// The guest addressed a frame to the poison MAC, so it kept the gratuitous reply.
+    pub fn note_poisoned_destination(&mut self) {
+        for ip in self.hold_until.keys().copied() {
+            self.accepted.insert(ip);
+        }
+        self.saved.clear();
+    }
+
+    /// The saved request, once the hold has elapsed and the guest did not use the poison MAC.
+    pub fn take_released_request(&mut self) -> Option<Vec<u8>> {
+        let now = std::time::Instant::now();
+        let ready = self.saved.keys().copied().find(|ip| {
+            self.hold_until.get(ip).is_some_and(|until| now >= *until)
+                && !self.accepted.contains(ip)
+                && !self.released.contains(ip)
+        })?;
+        self.released.insert(ready);
+        self.saved.remove(&ready)
     }
 }
 
@@ -574,6 +602,7 @@ mod tests {
             matches!(arp.on_guest_request(&asking), GuestArp::Hold),
             "a retry during the hold does not reach the peer"
         );
+        assert!(arp.take_released_request().is_none());
         let parsed = arp_packet(&poison).unwrap();
         assert_eq!(parsed.op, ArpOp::Reply);
         assert_eq!(parsed.sender_ip, PEER_IPV4);
@@ -589,9 +618,22 @@ mod tests {
         }));
 
         std::thread::sleep(ARP_POISON_HOLD + std::time::Duration::from_millis(20));
+        let released = arp.take_released_request().expect("the saved request");
+        assert_eq!(released, asking);
+        assert!(arp.take_released_request().is_none(), "released once");
+        assert!(matches!(arp.on_guest_request(&asking), GuestArp::Forward));
+
+        let mut accepted = ArpImpairer::default();
+        assert!(matches!(
+            accepted.on_guest_request(&asking),
+            GuestArp::Poison(_)
+        ));
+        accepted.note_poisoned_destination();
+        std::thread::sleep(ARP_POISON_HOLD + std::time::Duration::from_millis(20));
         assert!(
-            matches!(arp.on_guest_request(&asking), GuestArp::Forward),
-            "after the hold, a retry reaches the peer"
+            accepted.take_released_request().is_none(),
+            "a guest that used the poison MAC gets no real reply"
         );
+        assert!(matches!(accepted.on_guest_request(&asking), GuestArp::Hold));
     }
 }
