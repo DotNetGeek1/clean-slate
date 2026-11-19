@@ -253,6 +253,9 @@ fn probe_stale_generation(service: ServiceId, pid: u64, retired: u32, live: u32)
             .revoke(handle)
             .is_ok(),
     );
+    if revoked == 1 {
+        crate::capability::audit::record_kernel_revoke(holder, retired_port, 1);
+    }
     let outcome = outcome.map(|_| ());
     kernel_log_fmt(format_args!(
         "[HOOK] stale generation probe service={} pid={pid} port={}:{retired} live={}:{live} result={} revoked={revoked}\n",

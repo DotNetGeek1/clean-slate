@@ -8,41 +8,130 @@ use crate::record::CapabilityRecord;
 use crate::resource::{ResourceClass, ResourceRef};
 use crate::rights::Rights;
 
+/// What kind of security decision a record describes.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuditKind {
+    /// Use of a capability (or of an authority check standing in for one).
+    Authorize = 0,
+    /// Kernel installs a root capability for `subject`.
+    Grant = 1,
+    /// `actor` derives a capability for `subject` (delegation, port transfer).
+    Delegate = 2,
+    /// Capabilities of `subject` (or naming the resource) revoked; `count` records.
+    Revoke = 3,
+    /// `actor` gives up its own capability.
+    Drop = 4,
+    /// `count` capabilities of `actor` copied onto `subject` (Linux `fork`).
+    Inherit = 5,
+    /// Synthetic, produced only by a read: sequences `sequence ..` are gone and
+    /// `resource_id` says how many. Never stored in the ring.
+    Lost = 6,
+}
+
+impl AuditKind {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Authorize => "authorize",
+            Self::Grant => "grant",
+            Self::Delegate => "delegate",
+            Self::Revoke => "revoke",
+            Self::Drop => "drop",
+            Self::Inherit => "inherit",
+            Self::Lost => "lost",
+        }
+    }
+}
+
+/// Refusals made by kernel policy rather than by the capability check itself.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PolicyRefusal {
+    /// The capability is valid but the instance it names is gone or was replaced.
+    StaleTarget = 0,
+    SelfTerminate = 1,
+    /// Delegation target is not a live userspace process.
+    TargetNotLive = 2,
+    /// Malformed operation or argument (unknown op, bad rights bits, bad buffer).
+    InvalidRequest = 3,
+    /// A launched instance holds authority other than its manifest row names.
+    AuthorityMismatch = 4,
+    /// A kernel facility the operation needs is not installed.
+    Unavailable = 5,
+    /// The capability is in use (a live delegated child, a live mapping) and must stay.
+    Busy = 6,
+}
+
+impl PolicyRefusal {
+    pub fn from_u8(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::StaleTarget),
+            1 => Some(Self::SelfTerminate),
+            2 => Some(Self::TargetNotLive),
+            3 => Some(Self::InvalidRequest),
+            4 => Some(Self::AuthorityMismatch),
+            5 => Some(Self::Unavailable),
+            6 => Some(Self::Busy),
+            _ => None,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::StaleTarget => "stale-target",
+            Self::SelfTerminate => "self-terminate",
+            Self::TargetNotLive => "target-not-live",
+            Self::InvalidRequest => "invalid-request",
+            Self::AuthorityMismatch => "authority-mismatch",
+            Self::Unavailable => "unavailable",
+            Self::Busy => "busy",
+        }
+    }
+}
+
 /// Fixed-size audit record (`repr(C)`, 64 bytes — see `AUDIT_EVENT_SIZE_BYTES`).
+///
+/// `sequence` is assigned by the ring, contiguous from 1. `timestamp_ns` is kernel
+/// monotonic time, 0 before the clock is calibrated. `subject` is the holder the decision
+/// affects (the receiver of a grant or delegation, the holder whose capabilities were
+/// revoked); for a use it is the actor. `count` is the number of capabilities a revoke or
+/// inherit touched, otherwise 0.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuditEvent {
     pub sequence: u64,
+    pub timestamp_ns: u64,
     pub actor: HolderId,
-    pub class: ResourceClass,
-    pub _pad_class: [u8; 7],
+    pub subject: HolderId,
     pub resource_id: u64,
-    pub requested: Rights,
-    pub _pad_rights: u32,
     pub handle: u64,
-    pub outcome: AuditOutcome,
+    pub requested: Rights,
+    pub class: ResourceClass,
+    pub kind: AuditKind,
     pub depth: u8,
-    pub _pad_tail: [u8; 7],
+    pub outcome: AuditOutcome,
+    pub _pad: [u8; 3],
+    pub count: u32,
 }
 
-/// On-wire audit result (denied errors stored as stable `CapabilityError` code).
+/// On-wire audit result: a `CapabilityError` code when denied, a [`PolicyRefusal`] code
+/// when refused.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuditOutcome {
     pub tag: u8,
     pub error_code: u8,
-    pub _pad: [u8; 6],
 }
 
 impl AuditOutcome {
     pub const TAG_ALLOWED: u8 = 0;
     pub const TAG_DENIED: u8 = 1;
+    pub const TAG_REFUSED: u8 = 2;
 
     pub const fn allowed() -> Self {
         Self {
             tag: Self::TAG_ALLOWED,
             error_code: 0,
-            _pad: [0; 6],
         }
     }
 
@@ -50,17 +139,32 @@ impl AuditOutcome {
         Self {
             tag: Self::TAG_DENIED,
             error_code: error.as_u8(),
-            _pad: [0; 6],
+        }
+    }
+
+    pub const fn refused(reason: PolicyRefusal) -> Self {
+        Self {
+            tag: Self::TAG_REFUSED,
+            error_code: reason as u8,
+        }
+    }
+
+    pub const fn from_result(result: Result<(), CapabilityError>) -> Self {
+        match result {
+            Ok(()) => Self::allowed(),
+            Err(error) => Self::denied(error),
         }
     }
 
     pub fn error_name(self) -> &'static str {
-        if self.tag == Self::TAG_ALLOWED {
-            "allowed"
-        } else {
-            CapabilityError::from_u8(self.error_code)
+        match self.tag {
+            Self::TAG_ALLOWED => "allowed",
+            Self::TAG_DENIED => CapabilityError::from_u8(self.error_code)
                 .map(|e| e.error_name())
-                .unwrap_or("unknown")
+                .unwrap_or("unknown"),
+            _ => PolicyRefusal::from_u8(self.error_code)
+                .map(PolicyRefusal::name)
+                .unwrap_or("unknown"),
         }
     }
 }
@@ -69,6 +173,87 @@ impl AuditOutcome {
 pub const AUDIT_EVENT_SIZE_BYTES: usize = core::mem::size_of::<AuditEvent>();
 
 const _: () = assert!(AUDIT_EVENT_SIZE_BYTES == 64);
+
+impl AuditEvent {
+    /// Placeholder with sequence 0, which no real record has.
+    pub const EMPTY: Self = Self::lost(0, 0);
+
+    /// An allowed `kind` decision by `actor` on `resource`, with `subject = actor`.
+    pub const fn new(
+        kind: AuditKind,
+        actor: HolderId,
+        resource: ResourceRef,
+        requested: Rights,
+    ) -> Self {
+        Self {
+            sequence: 0,
+            timestamp_ns: 0,
+            actor,
+            subject: actor,
+            resource_id: resource.id,
+            handle: 0,
+            requested,
+            class: resource.class,
+            kind,
+            depth: 0,
+            outcome: AuditOutcome::allowed(),
+            _pad: [0; 3],
+            count: 0,
+        }
+    }
+
+    /// The synthetic record a read returns in place of `missing` sequences from `first`.
+    pub const fn lost(first: u64, missing: u64) -> Self {
+        let mut event = Self::new(
+            AuditKind::Lost,
+            HolderId::KERNEL,
+            ResourceRef {
+                class: ResourceClass::Audit,
+                id: 0,
+                instance_generation: 0,
+            },
+            Rights::empty(),
+        );
+        event.sequence = first;
+        event.resource_id = missing;
+        event
+    }
+
+    pub fn with_subject(mut self, subject: HolderId) -> Self {
+        self.subject = subject;
+        self
+    }
+
+    pub fn with_handle(mut self, handle: CapabilityHandle) -> Self {
+        self.handle = handle.encode();
+        self
+    }
+
+    pub fn with_depth(mut self, depth: u8) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    /// Saturates at `u32::MAX`.
+    pub fn with_count(mut self, count: usize) -> Self {
+        self.count = u32::try_from(count).unwrap_or(u32::MAX);
+        self
+    }
+
+    pub fn with_result(mut self, result: Result<(), CapabilityError>) -> Self {
+        self.outcome = AuditOutcome::from_result(result);
+        self
+    }
+
+    pub fn refused(mut self, reason: PolicyRefusal) -> Self {
+        self.outcome = AuditOutcome::refused(reason);
+        self
+    }
+
+    pub fn is_allowed(&self) -> bool {
+        self.outcome.tag == AuditOutcome::TAG_ALLOWED
+    }
+}
 
 pub trait AuditSink {
     fn record(&mut self, event: AuditEvent);
@@ -92,24 +277,15 @@ pub fn authorize_audited(
     required: Rights,
 ) -> Result<(), CapabilityError> {
     let result = authorize(record, handle, holder, resource, required);
-    let outcome = match result {
-        Ok(()) => AuditOutcome::allowed(),
-        Err(error) => AuditOutcome::denied(error),
-    };
-    let event = AuditEvent {
+    sink.record(event_for(
         sequence,
-        actor: holder,
-        class: resource.class,
-        _pad_class: [0; 7],
-        resource_id: resource.id,
-        requested: required,
-        _pad_rights: 0,
-        handle: handle.encode(),
-        outcome,
-        depth: record.provenance.depth,
-        _pad_tail: [0; 7],
-    };
-    sink.record(event);
+        holder,
+        resource,
+        required,
+        handle,
+        record.provenance.depth,
+        result,
+    ));
     result
 }
 
@@ -129,7 +305,7 @@ fn resource_class_name(class: ResourceClass) -> &'static str {
     }
 }
 
-/// Builds an audit event from an authorization decision (sequence may be overwritten by the sink).
+/// Builds an [`AuditKind::Authorize`] event (sequence may be overwritten by the sink).
 pub fn event_for(
     sequence: u64,
     actor: HolderId,
@@ -139,29 +315,24 @@ pub fn event_for(
     depth: u8,
     result: Result<(), CapabilityError>,
 ) -> AuditEvent {
-    let outcome = match result {
-        Ok(()) => AuditOutcome::allowed(),
-        Err(error) => AuditOutcome::denied(error),
-    };
-    AuditEvent {
-        sequence,
-        actor,
-        class: resource.class,
-        _pad_class: [0; 7],
-        resource_id: resource.id,
-        requested,
-        _pad_rights: 0,
-        handle: handle.encode(),
-        outcome,
-        depth,
-        _pad_tail: [0; 7],
-    }
+    let mut event = AuditEvent::new(AuditKind::Authorize, actor, resource, requested)
+        .with_handle(handle)
+        .with_depth(depth)
+        .with_result(result);
+    event.sequence = sequence;
+    event
 }
 
 /// Serializes one audit record for kernel logging (no secrets/payloads).
 pub fn format_audit_line(event: &AuditEvent, f: &mut impl core::fmt::Write) -> core::fmt::Result {
     f.write_str("[AUD ] seq=")?;
     write_u64(event.sequence, f)?;
+    f.write_str(" kind=")?;
+    f.write_str(event.kind.name())?;
+    if event.kind == AuditKind::Lost {
+        f.write_str(" missing=")?;
+        return write_u64(event.resource_id, f);
+    }
     f.write_str(" actor=")?;
     write_u64(event.actor.0, f)?;
     f.write_str(" class=")?;
@@ -178,7 +349,16 @@ pub fn format_audit_line(event: &AuditEvent, f: &mut impl core::fmt::Write) -> c
     f.write_str(event.outcome.error_name())?;
     f.write_str(" depth=")?;
     write_u64(u64::from(event.depth), f)?;
-    Ok(())
+    if event.subject != event.actor {
+        f.write_str(" subject=")?;
+        write_u64(event.subject.0, f)?;
+    }
+    if event.count != 0 {
+        f.write_str(" count=")?;
+        write_u64(u64::from(event.count), f)?;
+    }
+    f.write_str(" t=")?;
+    write_u64(event.timestamp_ns, f)
 }
 
 fn write_u64(value: u64, f: &mut impl core::fmt::Write) -> core::fmt::Result {

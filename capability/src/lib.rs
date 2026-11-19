@@ -24,8 +24,8 @@ mod state;
 mod table;
 
 pub use audit::{
-    authorize_audited, event_for, format_audit_line, AuditEvent, AuditOutcome, AuditSink,
-    NullAuditSink, AUDIT_EVENT_SIZE_BYTES,
+    authorize_audited, event_for, format_audit_line, AuditEvent, AuditKind, AuditOutcome,
+    AuditSink, NullAuditSink, PolicyRefusal, AUDIT_EVENT_SIZE_BYTES,
 };
 pub use audit_log::BoundedAuditLog;
 pub use authorize::{authorize, validate_delegation};

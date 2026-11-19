@@ -4,8 +4,8 @@ use core::mem;
 
 use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ESTALE};
 use clean_slate_capability::{
-    CapabilityError, CapabilityHandle, CapabilityState, CapabilityTable, HolderId, ResourceClass,
-    ResourceRef, Rights,
+    AuditEvent, AuditKind, CapabilityError, CapabilityHandle, CapabilityState, CapabilityTable,
+    HolderId, PolicyRefusal, ResourceClass, ResourceRef, Rights,
 };
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
@@ -18,7 +18,7 @@ use crate::process::process_registry_mut;
 use crate::process::ProcessState;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 
-use super::{current_holder, grant_root};
+use super::{audit, current_holder, grant_root};
 
 pub(crate) const PROCESS_OP_OBSERVE: u64 = 1;
 pub(crate) const PROCESS_OP_TERMINATE: u64 = 2;
@@ -101,7 +101,23 @@ fn log_grant(holder: HolderId, target_pid: u64, rights: Rights) {
     ));
 }
 
-fn log_allowed(holder: HolderId, target_pid: u64, op: u64) {
+fn decision_event(holder: HolderId, target: Option<u64>, op: u64, raw_handle: u64) -> AuditEvent {
+    let required = match op {
+        PROCESS_OP_OBSERVE => Rights::OBSERVE,
+        PROCESS_OP_TERMINATE => Rights::TERMINATE,
+        _ => Rights::empty(),
+    };
+    AuditEvent::new(
+        AuditKind::Authorize,
+        holder,
+        ResourceRef::process(target.unwrap_or(0), 0),
+        required,
+    )
+    .with_handle(CapabilityHandle::decode(raw_handle).unwrap_or(CapabilityHandle::INVALID))
+}
+
+fn record_allowed(holder: HolderId, target_pid: u64, op: u64, raw_handle: u64) {
+    audit::record(decision_event(holder, Some(target_pid), op, raw_handle));
     kernel_log_fmt(format_args!(
         "[CAP ] process-control allowed holder={} target={} op={}\n",
         holder.0,
@@ -110,7 +126,21 @@ fn log_allowed(holder: HolderId, target_pid: u64, op: u64) {
     ));
 }
 
-fn log_denied(holder: HolderId, target: Option<u64>, op: u64, reason: DenyReason) {
+fn record_denied(
+    holder: HolderId,
+    target: Option<u64>,
+    op: u64,
+    raw_handle: u64,
+    reason: DenyReason,
+) {
+    let event = decision_event(holder, target, op, raw_handle);
+    audit::record(match reason {
+        DenyReason::Capability(error) => event.with_result(Err(error)),
+        DenyReason::StaleTarget => event.refused(PolicyRefusal::StaleTarget),
+        DenyReason::SelfTerminate => event.refused(PolicyRefusal::SelfTerminate),
+        DenyReason::InvalidOp => event.refused(PolicyRefusal::InvalidRequest),
+        DenyReason::NoAllocator => event.refused(PolicyRefusal::Unavailable),
+    });
     match target {
         Some(pid) => kernel_log_fmt(format_args!(
             "[CAP ] process-control denied holder={} target={} op={} reason={}\n",
@@ -272,16 +302,17 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
             )
             .is_err()
             {
-                log_denied(
+                record_denied(
                     holder,
                     Some(target_pid),
                     op,
+                    raw_handle,
                     DenyReason::Capability(CapabilityError::InvalidHandle),
                 );
                 frame.rax = SYSCALL_EINVAL;
                 return;
             }
-            log_allowed(holder, target_pid, op);
+            record_allowed(holder, target_pid, op, raw_handle);
             frame.rax = match write_user(frame.rdx, &observation) {
                 Ok(()) => 0,
                 Err(_) => SYSCALL_EINVAL,
@@ -291,12 +322,18 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
             let allocator = match service_lifecycle_syscall_allocator_mut().as_mut() {
                 Some(allocator) => allocator,
                 None => {
-                    log_denied(holder, Some(target_pid), op, DenyReason::NoAllocator);
+                    record_denied(
+                        holder,
+                        Some(target_pid),
+                        op,
+                        raw_handle,
+                        DenyReason::NoAllocator,
+                    );
                     frame.rax = SYSCALL_EINVAL;
                     return;
                 }
             };
-            log_allowed(holder, target_pid, op);
+            record_allowed(holder, target_pid, op, raw_handle);
             match teardown_process_by_id(allocator, kernel_root_frame(), target_pid, 0, false) {
                 Ok(_result) => {
                     #[cfg(any(
@@ -329,7 +366,7 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
         }
         Err(reason) => {
             let target = target_for_denied_log(raw_handle);
-            log_denied(holder, target, op, reason);
+            record_denied(holder, target, op, raw_handle, reason);
             frame.rax = deny_to_syscall_status(reason);
         }
     }

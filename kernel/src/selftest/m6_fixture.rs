@@ -31,6 +31,7 @@ use clean_slate_capability::syscall_abi::{SYSCALL_EINVAL, SYSCALL_NR_CAP_GRANT};
     clean_slate_userspace_selftest = "m6-object",
     feature = "m6-capabilities-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m6-audit-self-test",
     feature = "m6-process-control-self-test",
     feature = "m7-net-caps-self-test",
     feature = "m10-port-self-test",
@@ -270,6 +271,7 @@ pub(crate) fn set_all_exited_handler(handler: FixtureAllExitedHandler) {
     clean_slate_userspace_selftest = "m6-object",
     feature = "m6-capabilities-self-test",
     feature = "m6-delegation-self-test",
+    feature = "m6-audit-self-test",
     feature = "m6-process-control-self-test",
     feature = "m7-net-caps-self-test",
     feature = "m10-port-self-test",
@@ -306,6 +308,7 @@ pub(crate) fn end_turn_step(turn: u64) -> M6FixtureStep {
     feature = "m6-revocation-self-test",
     clean_slate_userspace_selftest = "m6-object",
     feature = "m6-capabilities-self-test",
+    feature = "m6-audit-self-test",
     feature = "m10-port-self-test",
     feature = "m10-shared-buffer-self-test"
 ))]
