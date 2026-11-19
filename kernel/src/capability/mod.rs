@@ -260,10 +260,7 @@ pub(crate) fn inherit_capabilities_for_fork(
     child: HolderId,
 ) -> Result<(), CapabilityError> {
     let result = copy_capabilities_for_fork(parent, child);
-    let inherited = match result {
-        Ok(count) => count,
-        Err(_) => 0,
-    };
+    let inherited = result.as_ref().copied().unwrap_or_default();
     let result = result.map(|_| ());
     audit::record(
         AuditEvent::new(

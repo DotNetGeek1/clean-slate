@@ -16,7 +16,7 @@ use clean_slate_capability::{
 
 use super::{authorize_current, grant_root};
 
-const AUDIT_RING_CAPACITY: usize = 64;
+pub(crate) const AUDIT_RING_CAPACITY: usize = 64;
 const MAX_AUDIT_READ_EVENTS: usize = 8;
 
 static AUDIT_LOG: GlobalCell<BoundedAuditLog<AUDIT_RING_CAPACITY>> =
