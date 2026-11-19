@@ -110,7 +110,9 @@ pub(crate) fn record_decision(
     depth: u8,
     result: Result<(), CapabilityError>,
 ) {
-    record(event_for(0, actor, resource, requested, handle, depth, result));
+    record(event_for(
+        0, actor, resource, requested, handle, depth, result,
+    ));
 }
 
 /// Records `count` capabilities of `subject` revoked by the kernel (teardown, instance gone).

@@ -5,6 +5,8 @@
 //! `audit` (M6.7). Syscall dispatch arms for them live in `syscall/mod.rs`.
 
 pub(crate) mod audit;
+#[cfg(test)]
+mod audit_coverage;
 pub(crate) mod bootstrap_grant;
 pub(crate) mod delegation;
 pub(crate) mod display;

@@ -414,14 +414,14 @@ pub(crate) fn find_handle(
     let result = caller_for(holder).and_then(|caller| {
         with_ports(|core, table, _| core.find_handle(table, caller, class, id, role))
     });
-    let resource = ResourceClass::from_u8(class as u8).map_or(
-        ResourceRef::process(holder.0, 0),
-        |class| ResourceRef {
-            class,
-            id,
-            instance_generation: 0,
-        },
-    );
+    let resource =
+        ResourceClass::from_u8(class as u8).map_or(ResourceRef::process(holder.0, 0), |class| {
+            ResourceRef {
+                class,
+                id,
+                instance_generation: 0,
+            }
+        });
     let event = AuditEvent::new(AuditKind::Authorize, holder, resource, Rights::empty())
         .with_handle(
             result

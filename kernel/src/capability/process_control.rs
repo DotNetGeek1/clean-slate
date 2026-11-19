@@ -322,7 +322,13 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
             let allocator = match service_lifecycle_syscall_allocator_mut().as_mut() {
                 Some(allocator) => allocator,
                 None => {
-                    record_denied(holder, Some(target_pid), op, raw_handle, DenyReason::NoAllocator);
+                    record_denied(
+                        holder,
+                        Some(target_pid),
+                        op,
+                        raw_handle,
+                        DenyReason::NoAllocator,
+                    );
                     frame.rax = SYSCALL_EINVAL;
                     return;
                 }
