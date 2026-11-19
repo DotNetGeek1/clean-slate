@@ -9,6 +9,7 @@
 
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
+use crate::capability::audit::with_audit_log;
 use crate::capability::bootstrap_grant::register_bootstrap_grant;
 use crate::capability::grant_root;
 use crate::capability::with_capability_space;
@@ -29,9 +30,12 @@ use crate::selftest::m6_fixture::{
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 use clean_slate_capability::syscall_abi::{
-    SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_NR_CAP_DELEGATE, SYSCALL_NR_CAP_GRANT,
+    SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSPC, SYSCALL_NR_CAP_DELEGATE, SYSCALL_NR_CAP_GRANT,
 };
-use clean_slate_capability::{CapabilityHandle, HolderId, ResourceClass, ResourceRef, Rights};
+use clean_slate_capability::{
+    AuditKind, AuditOutcome, CapabilityError, CapabilityHandle, HolderId, ResourceClass,
+    ResourceRef, Rights, HOLDER_SLOT_QUOTA, MAX_SLOTS,
+};
 use clean_slate_service_fixtures::m6_fixture::{
     M6FixtureBootstrap, M6FixtureStep, ARG_DATA_PTR, ARG_RESULT_OF, FIXTURE_STATUS_DONE,
     FIXTURE_STATUS_RUNNING,
@@ -47,7 +51,12 @@ const PASS_MARKER: &str = "[M6.5] PASS";
 
 const FIXTURE_OWNER: u64 = 0;
 const FIXTURE_READER: u64 = 1;
+// Fresh `IdAllocator` assigns PIDs 1, 2, … in spawn order (owner before reader).
+const PREDICTED_OWNER_PID: u64 = 1;
 const PREDICTED_READER_PID: u64 = 2;
+/// Self-delegations the owner attempts: more than the whole table, so without the
+/// per-holder quota the flood would leave no slot for the reader's delegation.
+const FLOOD_PASSES: u64 = (MAX_SLOTS + MAX_SLOTS / 4) as u64;
 
 const DELEGATION_READER_BOOTSTRAP_KEY: crate::sched::wait::WaitKey =
     crate::sched::wait::WaitKey(0x652);
@@ -179,6 +188,30 @@ fn build_owner_program(reader_pid: u64) -> M6FixtureBootstrap {
             .expect_eq(SYSCALL_EACCES),
         )
         .unwrap();
+    // Flood: delegate to itself until refused, claiming each child so the shared
+    // bootstrap-grant table never fills first.
+    let flood = program
+        .push(M6FixtureStep::syscall(
+            SYSCALL_NR_CAP_DELEGATE,
+            [
+                DELEGATE_OP_DELEGATE,
+                parent,
+                PREDICTED_OWNER_PID,
+                Rights::READ.bits() as u64,
+                0,
+                0,
+            ],
+        ))
+        .unwrap();
+    program
+        .push(M6FixtureStep::syscall(
+            SYSCALL_NR_CAP_GRANT,
+            [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0],
+        ))
+        .unwrap();
+    program
+        .push(M6FixtureStep::repeat(flood as u64, FLOOD_PASSES))
+        .unwrap();
     program
         .push(
             M6FixtureStep::syscall(
@@ -192,7 +225,7 @@ fn build_owner_program(reader_pid: u64) -> M6FixtureBootstrap {
                     0,
                 ],
             )
-            .expect_ne(0),
+            .expect_ne(SYSCALL_ENOSPC),
         )
         .unwrap();
     program
@@ -307,7 +340,50 @@ fn delegation_report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureRe
     if validate_reader_report(report).is_err() {
         return FixtureReportAction::Fail("reader fixture validation failed");
     }
+    if let Err(message) = validate_owner_quota() {
+        return FixtureReportAction::Fail(message);
+    }
     FixtureReportAction::PassAndExit(PASS_MARKER)
+}
+
+/// The owner's flood stopped at its quota, each refusal it still has in the audit ring
+/// names the quota, and the reader was granted afterwards (checked by
+/// [`validate_reader_report`]).
+fn validate_owner_quota() -> Result<(), &'static str> {
+    let owner = HolderId(PREDICTED_OWNER_PID);
+    let held = with_capability_space(|table| table.charged_to(owner));
+    if held != HOLDER_SLOT_QUOTA {
+        return Err("owner flood was not stopped at its quota");
+    }
+    let quota = AuditOutcome::denied(CapabilityError::QuotaExceeded);
+    let (refusals, other_owner_denials) = with_audit_log(|log| {
+        let newest = log.newest_sequence().unwrap_or(0);
+        let oldest = log.oldest_sequence().unwrap_or(1);
+        let mut refusals = 0usize;
+        let mut other = 0usize;
+        for sequence in oldest..=newest {
+            let Some(event) = log.get(sequence) else {
+                continue;
+            };
+            if event.kind != AuditKind::Delegate || event.actor != owner || event.subject != owner {
+                continue;
+            }
+            if event.outcome == quota {
+                refusals += 1;
+            } else if event.outcome != AuditOutcome::allowed() {
+                other += 1;
+            }
+        }
+        (refusals, other)
+    });
+    if refusals == 0 || other_owner_denials != 0 {
+        return Err("owner flood refusals were not audited as quota");
+    }
+    kernel_log_fmt(format_args!(
+        "[M6.5] quota holder={} held={held} quota={HOLDER_SLOT_QUOTA} table_slots={MAX_SLOTS} flood_attempts={FLOOD_PASSES} quota_refusals_in_audit={refusals} other_holder_granted=1\n",
+        owner.0
+    ));
+    Ok(())
 }
 
 pub(crate) fn start_m6_delegation_self_test(allocator: PageAllocator) -> ! {
@@ -322,9 +398,6 @@ pub(crate) fn start_m6_delegation_self_test(allocator: PageAllocator) -> ! {
         .as_mut()
         .expect("m6 delegation self-test allocator missing");
     let stacks = unsafe { &*task_stacks_mut() };
-
-    // Fresh `IdAllocator` assigns PIDs 1, 2, … in spawn order (owner before reader).
-    const PREDICTED_OWNER_PID: u64 = 1;
 
     let owner_service = fixture_service(FIXTURE_OWNER);
     let owner_program = build_owner_program(PREDICTED_READER_PID);

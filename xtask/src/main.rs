@@ -676,14 +676,17 @@ const M7_NETWORK_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[NET ] capacity baseline ok",
     "[M7.8] PASS",
 ];
-const M6_DELEGATION_ACCEPTANCE_MARKERS: [&str; 8] = [
+const M6_DELEGATION_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[CAP ] delegate denied from=",
     "reason=rights-widening",
     "[CAP ] delegate from=",
     "rights=read",
     "depth=1",
+    "[CAP ] delegate denied from=1 to=1",
+    "reason=quota",
     "[CAP ] delegate denied from=",
     "reason=missing-right",
+    "[M6.5] quota holder=1 held=16 quota=16 table_slots=128 ",
     "[M6.5] PASS",
 ];
 /// The lane makes 124 records into the 64-slot ring (`kernel/src/selftest/m6_audit.rs`), so a

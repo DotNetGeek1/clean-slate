@@ -17,6 +17,9 @@ pub const STEP_KIND_REPORT: u64 = 4;
 pub const STEP_KIND_FILL: u64 = 5;
 pub const STEP_KIND_VERIFY: u64 = 6;
 pub const STEP_KIND_EXEC: u64 = 7;
+/// Jumps back to step `args[0]` until the steps from there up to this one have run
+/// `args[1]` times; `result` counts the passes completed.
+pub const STEP_KIND_REPEAT: u64 = 8;
 
 pub const PATTERN_INCREMENTING: u64 = 0;
 pub const PATTERN_CONSTANT: u64 = 1;
@@ -136,6 +139,17 @@ impl M6FixtureStep {
             kind: STEP_KIND_EXEC,
             nr: 0,
             args: [addr, 0, 0, 0, 0, 0],
+            expect_mode: EXPECT_IGNORE,
+            expect: 0,
+            result: 0,
+        }
+    }
+
+    pub const fn repeat(body_start: u64, passes: u64) -> Self {
+        Self {
+            kind: STEP_KIND_REPEAT,
+            nr: 0,
+            args: [body_start, passes, 0, 0, 0, 0],
             expect_mode: EXPECT_IGNORE,
             expect: 0,
             result: 0,
@@ -349,6 +363,10 @@ mod tests {
         let fault = M6FixtureStep::fault_at(0x4000);
         assert_eq!(fault.kind, STEP_KIND_FAULT);
         assert_eq!(fault.args[0], 0x4000);
+
+        let repeat = M6FixtureStep::repeat(2, 150);
+        assert_eq!(repeat.kind, STEP_KIND_REPEAT);
+        assert_eq!(repeat.args, [2, 150, 0, 0, 0, 0]);
 
         assert_eq!(core::mem::size_of::<M6FixtureStep>(), EXPECTED_STEP_BYTES);
         assert_eq!(
