@@ -11,6 +11,7 @@ pub(crate) mod paging;
 pub(crate) mod region;
 pub(crate) mod shared_buffer;
 pub(crate) mod stack_guard;
+pub(crate) mod user_access;
 pub(crate) mod user_mapping;
 
 pub(crate) use layout::{kernel_map_ptr, phys_to_virt, PHYSICAL_MEMORY_OFFSET};

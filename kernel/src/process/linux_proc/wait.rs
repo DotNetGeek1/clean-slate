@@ -2,7 +2,7 @@
 
 use super::pipe::wait_key_for_parent;
 use super::table::{table_mut, ProcId};
-use crate::mm::user_mapping::validate_user_writable_pointer_range;
+use crate::mm::user_access::{copy_to_user, write_user};
 use crate::syscall::linux::block::{block_linux_syscall, LinuxTimeoutResult};
 use crate::syscall::linux::table::LinuxSyscallContext;
 use clean_slate_linux_abi::{LinuxSyscallRequest, LinuxSyscallResult, ECHILD, EFAULT, EINVAL};
@@ -41,20 +41,12 @@ pub(crate) fn linux_wait4(
     }
 
     if rusage != 0 {
-        validate_user_writable_pointer_range(rusage, 144).map_err(|_| EFAULT)?;
-        unsafe {
-            core::ptr::write_bytes(rusage as *mut u8, 0, 144);
-        }
+        copy_to_user(rusage, &[0u8; 144]).map_err(|_| EFAULT)?;
     }
 
     if let Some((child, status)) = table.find_zombie_child(parent, wait_pid) {
         if wstatus_ptr != 0 {
-            let bytes = (status as u32).to_le_bytes();
-            validate_user_writable_pointer_range(wstatus_ptr, bytes.len() as u64)
-                .map_err(|_| EFAULT)?;
-            unsafe {
-                core::ptr::copy_nonoverlapping(bytes.as_ptr(), wstatus_ptr as *mut u8, bytes.len());
-            }
+            write_user(wstatus_ptr, &(status as u32).to_le_bytes()).map_err(|_| EFAULT)?;
         }
         table.reap_zombie(child);
         return Ok(child.pid);

@@ -4,6 +4,7 @@ use core::fmt::{self, Write};
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
+use crate::mm::user_access::copy_to_user;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_capability::syscall_abi::SYSCALL_NR_CAP_AUDIT_READ;
@@ -140,12 +141,17 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
     }; MAX_AUDIT_READ_EVENTS];
     let (count, _) = log.read_from(since, &mut scratch[..max_events]);
     if count > 0 {
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                scratch.as_ptr() as *const u8,
-                frame.rdx as *mut u8,
+        // SAFETY: `AuditEvent` is `repr(C)` with its padding spelled out as zeroed fields, so all
+        // `count * AUDIT_EVENT_SIZE_BYTES` bytes of the kernel scratch are initialised.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                scratch.as_ptr().cast::<u8>(),
                 count * AUDIT_EVENT_SIZE_BYTES,
-            );
+            )
+        };
+        if copy_to_user(frame.rdx, bytes).is_err() {
+            frame.rax = CapabilityError::InvalidHandle.syscall_status();
+            return;
         }
     }
     frame.rax = count as u64;

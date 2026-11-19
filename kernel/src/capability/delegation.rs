@@ -4,6 +4,7 @@ use core::fmt::{self, Write};
 
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
+use crate::mm::user_access::{write_user, UserPod};
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::process::process_registry_mut;
 use clean_slate_capability::syscall_abi::{SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSPC};
@@ -25,12 +26,16 @@ pub(crate) const DELEGATE_OP_POLL_CHILD: u64 = 3;
 const LISTING_BYTES: u64 = 32;
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct CapabilityListing {
     handle: u64,
     class: u64,
     rights: u64,
     depth: u64,
 }
+
+// SAFETY: `repr(C)`, four `u64` fields, no padding.
+unsafe impl UserPod for CapabilityListing {}
 
 struct RightsNameBuf {
     bytes: [u8; 64],
@@ -197,10 +202,10 @@ fn handle_list(frame: &mut SyscallContext) {
                 rights: u64::from(record.rights.bits()),
                 depth: u64::from(record.provenance.depth),
             };
-            unsafe {
-                core::ptr::write(frame.rdx as *mut CapabilityListing, listing);
-            }
-            frame.rax = next_cursor as u64;
+            frame.rax = match write_user(frame.rdx, &listing) {
+                Ok(()) => next_cursor as u64,
+                Err(_) => SYSCALL_EINVAL,
+            };
         }
         None => frame.rax = 0,
     }

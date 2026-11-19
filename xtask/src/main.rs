@@ -277,10 +277,11 @@ const M2_IDENTITY_GUARD_ACCEPTANCE_MARKERS: [&str; 14] = [
     "[IDG ] PASS",
 ];
 const M2_IDENTITY_GUARD_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(20);
-/// #217: NMI and #MC each land on their own IST stack, and CR0.WP, CR4.SMEP and CR4.UMIP each
-/// turn the probe access into the exact fault the guard exists for.
-const M2_KERNEL_GUARDS_ACCEPTANCE_MARKERS: [&str; 12] = [
-    "[CPU ] guards wp=on smep=on smap=off umip=on firmware_wp=",
+/// #217: NMI and #MC each land on their own IST stack, and CR0.WP, CR4.SMEP, CR4.SMAP and
+/// CR4.UMIP each turn the probe access into the exact fault the guard exists for; the
+/// `mm::user_access` helper reads the page SMAP blocks for a raw read.
+const M2_KERNEL_GUARDS_ACCEPTANCE_MARKERS: [&str; 15] = [
+    "[CPU ] guards wp=on smep=on smap=on umip=on firmware_wp=",
     "[INT ] double-fault IST initialized",
     "[INT ] nmi and machine-check IST initialized",
     "[KGRD] nmi ran on its IST stack",
@@ -289,6 +290,9 @@ const M2_KERNEL_GUARDS_ACCEPTANCE_MARKERS: [&str; 12] = [
     "[KGRD] wp write fault err=0x3 OK",
     "[KGRD] probe exec user page addr=0x0000400000000000",
     "[KGRD] smep fetch fault err=0x11 OK",
+    "[KGRD] helper read user page addr=0x0000400000001000 value=0x5341504d5f4f4b21 OK",
+    "[KGRD] probe raw read user page addr=0x0000400000001000",
+    "[KGRD] smap read fault err=0x1 OK",
     "[KGRD] probe cpl3 sgdt rip=0x0000400000000010",
     "[KGRD] umip sgdt fault vector=13 OK",
     "[KGRD] PASS",

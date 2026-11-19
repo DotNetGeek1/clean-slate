@@ -1,12 +1,13 @@
 //! Bounded copy-in from userspace for Linux personality handlers.
 
-use crate::mm::user_mapping::validate_user_pointer_range;
+use crate::mm::user_access::copy_from_user;
+#[cfg(clean_slate_linux_rootfs)]
+use crate::mm::user_access::{copy_cstring_from_user, UserStringError};
 #[cfg(clean_slate_linux_rootfs)]
 use crate::process::linux_fs::path::LINUX_PATH_MAX;
 use clean_slate_linux_abi::{LinuxErrno, EFAULT};
 #[cfg(clean_slate_linux_rootfs)]
 use clean_slate_linux_abi::{EINVAL, ENAMETOOLONG};
-use core::ptr;
 
 /// Soft upper bound for a single Linux copy-in (IPC message size; justified by
 /// the existing capability-controlled console path).
@@ -41,17 +42,12 @@ pub(crate) fn copy_user_bytes(
         Err(_) => LINUX_USER_COPY_MAX_BYTES,
     };
     let copy_len = requested.min(LINUX_USER_COPY_MAX_BYTES);
-    let copy_len_u64 = copy_len as u64;
-    if validate_user_pointer_range(user_ptr, copy_len_u64).is_err() {
-        return Err(EFAULT);
-    }
-    unsafe {
-        ptr::copy_nonoverlapping(user_ptr as *const u8, dst.as_mut_ptr(), copy_len);
-    }
+    copy_from_user(&mut dst[..copy_len], user_ptr).map_err(|_| EFAULT)?;
     Ok(copy_len)
 }
 
-/// Copy a NUL-terminated path from userspace (one byte per validated read).
+/// Copy a NUL-terminated path from userspace (page by page, each page validated before it is
+/// read, so a path ending just before an unmapped page succeeds).
 ///
 /// Returns the byte length excluding the terminator. Empty paths are `EINVAL`.
 /// If no NUL appears within `LINUX_PATH_MAX` bytes, returns `ENAMETOOLONG`.
@@ -63,18 +59,12 @@ pub(crate) fn copy_user_path_cstring(
     if user_ptr == 0 {
         return Err(EFAULT);
     }
-    for (index, slot) in out.iter_mut().enumerate() {
-        validate_user_pointer_range(user_ptr + index as u64, 1).map_err(|_| EFAULT)?;
-        let byte = unsafe { *((user_ptr + index as u64) as *const u8) };
-        if byte == 0 {
-            if index == 0 {
-                return Err(EINVAL);
-            }
-            return Ok(index);
-        }
-        *slot = byte;
+    match copy_cstring_from_user(user_ptr, out) {
+        Ok(0) => Err(EINVAL),
+        Ok(len) => Ok(len),
+        Err(UserStringError::Fault) => Err(EFAULT),
+        Err(UserStringError::TooLong) => Err(ENAMETOOLONG),
     }
-    Err(ENAMETOOLONG)
 }
 
 #[cfg(test)]

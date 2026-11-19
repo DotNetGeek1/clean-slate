@@ -19,6 +19,7 @@ use crate::interrupt::timer::initialize_timer;
 use crate::mm::address_space::activate_address_space_root;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::user_access::read_user;
 use crate::process::domain::teardown_current_process;
 #[cfg(clean_slate_userspace_selftest = "m7-net-service")]
 use crate::process::id_allocator::id_allocator_mut;
@@ -125,47 +126,9 @@ fn read_fixture_bootstrap(pid: u64, kernel_root: u64) -> NetworkServiceBootstrap
     let root =
         userspace_process_root_frame(pid).unwrap_or_else(|message| fatal_kernel_error(message));
     activate_address_space_root(root);
-    let bootstrap_ptr = NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *const NetworkServiceBootstrap;
-    let mode = unsafe { core::ptr::addr_of!((*bootstrap_ptr).mode).read_volatile() };
-    let service_generation =
-        unsafe { core::ptr::addr_of!((*bootstrap_ptr).service_generation).read_volatile() };
-    let result_code = unsafe { core::ptr::addr_of!((*bootstrap_ptr).result_code).read_volatile() };
-    let aux_status = unsafe { core::ptr::addr_of!((*bootstrap_ptr).aux_status).read_volatile() };
-    let net_role_handle =
-        unsafe { core::ptr::addr_of!((*bootstrap_ptr).net_role_handle).read_volatile() };
-    let session_id_raw =
-        unsafe { core::ptr::addr_of!((*bootstrap_ptr).session_id_raw).read_volatile() };
-    let echo_len = unsafe { core::ptr::addr_of!((*bootstrap_ptr).echo_len).read_volatile() };
-    let reclaimed_sessions =
-        unsafe { core::ptr::addr_of!((*bootstrap_ptr).reclaimed_sessions).read_volatile() };
-    let reclaimed_pending =
-        unsafe { core::ptr::addr_of!((*bootstrap_ptr).reclaimed_pending).read_volatile() };
-    let inflight_failed =
-        unsafe { core::ptr::addr_of!((*bootstrap_ptr).inflight_failed).read_volatile() };
-    let tls_transactions =
-        unsafe { core::ptr::addr_of!((*bootstrap_ptr).tls_transactions).read_volatile() };
-    let tls_heap_checkpoint =
-        unsafe { core::ptr::addr_of!((*bootstrap_ptr).tls_heap_checkpoint).read_volatile() };
-    let tls_heap_after_last =
-        unsafe { core::ptr::addr_of!((*bootstrap_ptr).tls_heap_after_last).read_volatile() };
-    let occupancy = unsafe { core::ptr::addr_of!((*bootstrap_ptr).occupancy).read_volatile() };
+    let bootstrap = read_user(NETWORK_SERVICE_BOOTSTRAP_ADDRESS);
     activate_address_space_root(kernel_root);
-    NetworkServiceBootstrap {
-        mode,
-        service_generation,
-        result_code,
-        aux_status,
-        net_role_handle,
-        session_id_raw,
-        echo_len,
-        reclaimed_sessions,
-        reclaimed_pending,
-        inflight_failed,
-        tls_transactions,
-        tls_heap_checkpoint,
-        tls_heap_after_last,
-        occupancy,
-    }
+    bootstrap.unwrap_or_else(|message| fatal_kernel_error(message))
 }
 
 /// Starts the fixture for the next phase. Each fixture is spawned only when its phase
@@ -387,11 +350,8 @@ fn terminate_network_service(
 pub(crate) fn handle_userspace_network_entry() -> u64 {
     let _pid =
         crate::process::current_process_id().unwrap_or_else(|message| fatal_kernel_error(message));
-    let report = unsafe {
-        core::ptr::read_volatile(
-            NETWORK_SERVICE_BOOTSTRAP_ADDRESS as *const NetworkServiceBootstrap,
-        )
-    };
+    let report: NetworkServiceBootstrap = read_user(NETWORK_SERVICE_BOOTSTRAP_ADDRESS)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
     #[cfg(feature = "m9-linux-socket-self-test")]
     if report.mode == NETWORK_SERVICE_MODE_ACCEPTANCE {
         if report.result_code != NETWORK_SERVICE_RESULT_OK {

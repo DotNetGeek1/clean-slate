@@ -1,7 +1,5 @@
 //! M6.3 persistent object/file capability surface (kernel side of SYSCALL_NR_CAP_OBJECT).
 
-use core::ptr;
-
 use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSPC, SYSCALL_ENOSYS, SYSCALL_NR_CAP_OBJECT,
 };
@@ -19,6 +17,7 @@ use clean_slate_service_fixtures::{
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::diagnostics::log::kernel_log_fmt;
 use crate::diagnostics::qemu::fatal_kernel_error;
+use crate::mm::user_access::{copy_from_user, copy_to_user};
 use crate::mm::user_mapping::{validate_user_pointer_range, validate_user_writable_pointer_range};
 use crate::sched::wait::{
     block_current_thread_with_resume, wake_all, wake_one, BlockedResume, WaitKey,
@@ -542,10 +541,9 @@ fn handle_submit(frame: &mut SyscallContext) {
         return;
     }
     let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
-    if len > 0 {
-        unsafe {
-            ptr::copy_nonoverlapping(frame.r8 as *const u8, payload.as_mut_ptr(), len);
-        }
+    if len > 0 && copy_from_user(&mut payload[..len], frame.r8).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
     }
     match queue_mut().submit(holder, op, object_id, &payload[..len]) {
         Ok(request_id) => frame.rax = request_id,
@@ -578,10 +576,12 @@ fn handle_poll(frame: &mut SyscallContext) {
     match queue_mut().poll(holder, request_id, out) {
         Ok(OBJECT_STATUS_PENDING) => block_until_request_completes(frame, request_id),
         Ok(written) => {
-            unsafe {
-                ptr::copy_nonoverlapping(out.as_ptr(), frame.r10 as *mut u8, written as usize);
-            }
-            frame.rax = written;
+            let copied = &out[..(written as usize).min(out.len())];
+            frame.rax = if copied.is_empty() || copy_to_user(frame.r10, copied).is_ok() {
+                written
+            } else {
+                SYSCALL_EINVAL
+            };
         }
         Err(error) => frame.rax = error.syscall_status(),
     }
@@ -626,11 +626,10 @@ fn handle_service_next(frame: &mut SyscallContext) {
     }
     match queue_mut().service_next() {
         Some(request) => {
-            let bytes = request.encode();
-            unsafe {
-                ptr::copy_nonoverlapping(bytes.as_ptr(), frame.rdx as *mut u8, bytes.len());
-            }
-            frame.rax = 1;
+            frame.rax = match copy_to_user(frame.rdx, &request.encode()) {
+                Ok(()) => 1,
+                Err(_) => SYSCALL_EINVAL,
+            };
         }
         None => block_until_service_work(frame),
     }
@@ -686,10 +685,9 @@ fn handle_service_complete(frame: &mut SyscallContext) {
         return;
     }
     let mut payload = [0u8; OBJECT_MAX_PAYLOAD_BYTES];
-    if len > 0 {
-        unsafe {
-            ptr::copy_nonoverlapping(frame.r8 as *const u8, payload.as_mut_ptr(), len);
-        }
+    if len > 0 && copy_from_user(&mut payload[..len], frame.r8).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
     }
     match queue_mut().service_complete(request_id, status, &payload[..len]) {
         Ok(()) => frame.rax = 0,

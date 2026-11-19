@@ -6,7 +6,7 @@ use crate::mm::address_space::{
 };
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::zero_page;
-use crate::mm::user_mapping::validate_user_writable_pointer_range;
+use crate::mm::user_access::{copy_to_user, write_user};
 use crate::mm::{align_down, align_up, PAGE_SIZE, USER_CANONICAL_TOP_EXCLUSIVE};
 use crate::process::linux_image::LinuxImageLayout;
 use crate::process::process_registry_mut;
@@ -482,15 +482,12 @@ pub(crate) fn sys_arch_prctl(
             Ok(0)
         }
         clean_slate_linux_abi::ARCH_GET_FS => {
-            validate_user_writable_pointer_range(addr, 8).map_err(|_| EINVAL)?;
             let fs = registry_mut().slots[index]
                 .as_ref()
                 .expect("slot")
                 .state
                 .fs_base;
-            unsafe {
-                *(addr as *mut u64) = fs;
-            }
+            write_user(addr, &fs).map_err(|_| EINVAL)?;
             Ok(0)
         }
         _ => Err(EINVAL),
@@ -826,8 +823,6 @@ pub(crate) fn copy_utsname_to_user(
     _pid: u64,
     _generation: InstanceGeneration,
 ) -> Result<(), LinuxErrno> {
-    validate_user_writable_pointer_range(out, clean_slate_linux_abi::UTSNAME_SIZE as u64)
-        .map_err(|_| EFAULT)?;
     let image = clean_slate_linux_abi::encode_utsname_fields(
         b"Linux",
         b"m9-fixture",
@@ -836,13 +831,10 @@ pub(crate) fn copy_utsname_to_user(
         b"x86_64",
         b"",
     );
-    for (offset, byte) in image.iter().enumerate() {
-        let addr = out.checked_add(offset as u64).ok_or(EINVAL)?;
-        unsafe {
-            *(addr as *mut u8) = *byte;
-        }
-    }
-    Ok(())
+    let image = image
+        .get(..clean_slate_linux_abi::UTSNAME_SIZE)
+        .ok_or(EINVAL)?;
+    copy_to_user(out, image).map_err(|_| EFAULT)
 }
 
 #[allow(dead_code)]

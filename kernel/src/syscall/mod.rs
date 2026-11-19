@@ -49,6 +49,9 @@ use crate::ipc::USERSPACE_SUPERVISOR_TEST_PID;
 use crate::mm::address_space::kernel_root_frame;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::mm::paging::current_root_frame_address;
+#[cfg(feature = "m3-syscall-self-test")]
+use crate::mm::user_access::read_user;
+use crate::mm::user_access::{copy_from_user, copy_to_user};
 use crate::mm::user_mapping::validate_user_pointer_range;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 #[cfg(feature = "m3-syscall-self-test")]
@@ -118,9 +121,13 @@ use clean_slate_service_lifecycle::InstanceGeneration;
 use clean_slate_service_lifecycle::LifecycleMessage;
 use clean_slate_service_lifecycle::ServiceId;
 use clean_slate_service_lifecycle::LIFECYCLE_WIRE_MAX_BYTES;
-use core::ptr;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
+
+/// Kernel copy of a block request's payload (one CPU, syscalls run with IF clear).
+static BLOCK_PAYLOAD_BOUNCE: GlobalCell<[u8; BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES]> =
+    GlobalCell::new([0; BLOCK_TRANSPORT_MAX_PAYLOAD_BYTES]);
+
 const SYSCALL_ENTRY_RFLAGS_MASK: u64 = (1u64 << RFLAGS_TRAP_FLAG_BIT)
     | (1u64 << RFLAGS_INTERRUPT_ENABLE_BIT)
     | (1u64 << RFLAGS_DIRECTION_FLAG_BIT)
@@ -182,11 +189,13 @@ fn handle_syscall_read_u64(frame: &mut SyscallContext) {
         frame.rax = SYSCALL_EINVAL;
         return;
     }
-    if validate_user_pointer_range(frame.rdi, frame.rsi).is_err() {
-        frame.rax = SYSCALL_EINVAL;
-        return;
+    match read_user::<u64>(frame.rdi) {
+        Ok(value) => frame.rax = value,
+        Err(_) => {
+            frame.rax = SYSCALL_EINVAL;
+            return;
+        }
     }
-    frame.rax = unsafe { ptr::read_unaligned(frame.rdi as *const u64) };
     SYSCALL_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -202,13 +211,10 @@ fn handle_syscall_ipc_send(frame: &mut SyscallContext) {
         frame.rax = SYSCALL_EINVAL;
         return;
     }
-    if validate_user_pointer_range(frame.rsi, frame.rdx).is_err() {
+    let mut copied = [0u8; IPC_MAX_MESSAGE_BYTES];
+    if copy_from_user(&mut copied[..length], frame.rsi).is_err() {
         frame.rax = SYSCALL_EINVAL;
         return;
-    }
-    let mut copied = [0u8; IPC_MAX_MESSAGE_BYTES];
-    unsafe {
-        ptr::copy_nonoverlapping(frame.rsi as *const u8, copied.as_mut_ptr(), length);
     }
     let sender_pid = match current_syscall_caller_pid() {
         Ok(sender_pid) => sender_pid,
@@ -300,8 +306,9 @@ fn copy_lifecycle_reply_to_user(frame: &mut SyscallContext, event: LifecycleMess
         frame.rax = SYSCALL_EINVAL;
         return false;
     }
-    unsafe {
-        ptr::copy_nonoverlapping(encoded.as_ptr(), frame.r10 as *mut u8, encoded.len());
+    if copy_to_user(frame.r10, &encoded).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return false;
     }
     frame.rax = encoded.len() as u64;
     true
@@ -351,8 +358,9 @@ fn handle_syscall_lifecycle_control(frame: &mut SyscallContext) {
         }
     };
     let mut message = [0u8; LIFECYCLE_WIRE_MAX_BYTES];
-    unsafe {
-        ptr::copy_nonoverlapping(frame.rsi as *const u8, message.as_mut_ptr(), message_length);
+    if copy_from_user(&mut message[..message_length], frame.rsi).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
     }
     let allocator = unsafe { (&mut *SERVICE_LIFECYCLE_SYSCALL_ALLOCATOR.get()).as_mut() };
     let Some(allocator) = allocator else {
@@ -474,12 +482,9 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
         return;
     }
     let mut request_bytes = [0u8; BLOCK_TRANSPORT_REQUEST_BYTES];
-    unsafe {
-        ptr::copy_nonoverlapping(
-            frame.rsi as *const u8,
-            request_bytes.as_mut_ptr(),
-            request_bytes.len(),
-        );
+    if copy_from_user(&mut request_bytes, frame.rsi).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
     }
     let request = match BlockTransportRequest::decode(&request_bytes) {
         Ok(request) => request,
@@ -494,10 +499,10 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
                 max_transfer_blocks: 0,
             }
             .encode();
-            unsafe {
-                ptr::copy_nonoverlapping(response.as_ptr(), frame.r10 as *mut u8, response.len());
-            }
-            frame.rax = BLOCK_TRANSPORT_RESPONSE_BYTES as u64;
+            frame.rax = match copy_to_user(frame.r10, &response) {
+                Ok(()) => BLOCK_TRANSPORT_RESPONSE_BYTES as u64,
+                Err(_) => SYSCALL_EINVAL,
+            };
             return;
         }
     };
@@ -558,13 +563,16 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
         pid: caller_pid,
         generation,
     };
-    // The pointer ranges were validated above for the caller's address space,
-    // which stays current across a restart of this syscall.
-    let payload: &mut [u8] = if payload_len == 0 {
-        &mut []
-    } else {
-        unsafe { core::slice::from_raw_parts_mut(frame.r8 as *mut u8, payload_len) }
-    };
+    // The bounce buffer only lives for this entry: a write's data is copied in before the
+    // bridge submits it, and a read's data is copied out as soon as the bridge harvests it.
+    let payload = unsafe { &mut (&mut *BLOCK_PAYLOAD_BOUNCE.get())[..payload_len] };
+    if request.operation == BlockTransportOp::Write
+        && payload_len > 0
+        && copy_from_user(payload, frame.r8).is_err()
+    {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
     let response = match step_kernel_block_request(caller, &request, payload) {
         BlockRequestStep::Complete(response) => response,
         BlockRequestStep::Wait { deadline_ns } => {
@@ -572,13 +580,18 @@ fn handle_syscall_block_request(frame: &mut SyscallContext) {
             return;
         }
     };
+    if request.operation == BlockTransportOp::Read
+        && payload_len > 0
+        && matches!(response.status, BlockTransportStatus::Ok)
+        && copy_to_user(frame.r8, payload).is_err()
+    {
+        frame.rax = SYSCALL_EINVAL;
+        return;
+    }
     let response_wire = response.encode();
-    unsafe {
-        ptr::copy_nonoverlapping(
-            response_wire.as_ptr(),
-            frame.r10 as *mut u8,
-            response_wire.len(),
-        );
+    if copy_to_user(frame.r10, &response_wire).is_err() {
+        frame.rax = SYSCALL_EINVAL;
+        return;
     }
     kernel_log_fmt(format_args!(
         "[BLK ] completion id={} status={}\n",

@@ -18,6 +18,7 @@ use super::{
 use crate::arch::x86_64::interrupt_context::SyscallContext;
 use crate::capability::{authorize_current_class, revoke_for_resource};
 use crate::mm::frame_allocator::PageAllocator;
+use crate::mm::user_access::copy_to_user;
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::syscall::{current_syscall_caller_pid, service_lifecycle_syscall_allocator_mut};
 
@@ -110,10 +111,7 @@ fn query(pid: u64, raw_handle: u64, out: u64, out_len: u64) -> Result<u64, u64> 
         flags,
         mapped_va,
     };
-    let bytes = info.encode();
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len());
-    }
+    copy_to_user(out, &info.encode()).map_err(|_| STATUS_EINVAL)?;
     Ok(0)
 }
 
