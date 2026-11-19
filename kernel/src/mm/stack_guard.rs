@@ -2,11 +2,10 @@
 //!
 //! Kernel stacks stay where the linker put them (the identity-mapped `.bss` of
 //! the UEFI image), but each one is an `arch::x86_64::guarded_stack::GuardedStack`
-//! whose lowest page is unmapped here, once, in the kernel root. Firmware maps
-//! that range with 2 MiB (or 1 GiB) leaves, so the leaf covering a guard is
-//! split into 4 KiB entries with the same frames and flags and only the guard
-//! entry is cleared (`mm::identity_holes::unmap_kernel_page`, which also cuts the
-//! null-page and local APIC holes). This must run before `install_shared_carve_out_page_tables`:
+//! whose lowest page is unmapped here, once, in the kernel root. The kernel root
+//! maps the image with 4 KiB leaves (#217), so only the guard entry is cleared
+//! (`mm::identity_holes::unmap_kernel_page`, which would also split a huge leaf
+//! and cuts the null-page and local APIC holes). This must run before `install_shared_carve_out_page_tables`:
 //! process roots reach kernel low memory only through those shared 4 KiB
 //! tables, which are copied leaf by leaf from the kernel root and therefore
 //! inherit the holes. Nothing changes at runtime; there is no check on any hot
