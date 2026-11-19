@@ -382,6 +382,7 @@ fn storage_service_report() -> StorageServiceBootstrap {
 pub(crate) fn handle_userspace_storage_entry() -> u64 {
     let pid = current_userspace_pid().unwrap_or_else(|message| fatal_kernel_error(message));
     let report = &storage_service_report();
+    crate::service::storage_refusal::log_refusal(report);
     let state = self_test_state().unwrap_or_else(|message| fatal_kernel_error(message));
     let next_state = match state.mode {
         M5StorageSelfTestMode::Integration => handle_integration_phase(state, pid, report),

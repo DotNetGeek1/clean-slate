@@ -22,8 +22,11 @@
 //!
 //! Version 1 differed only in using an additive byte sum for both checksums.
 //! It is not migrated: a version-1 image is refused with
-//! [`IncompatibleFormatError::UnsupportedVersion`], and the magic is unchanged
-//! so callers that format a blank (`BadMagic`) device never reformat it.
+//! [`IncompatibleFormatError::UnsupportedVersion`] and never reformatted.
+//!
+//! [`probe`] decides what may be done with a device: only a blank one (both
+//! superblock slots entirely zero) may be formatted, and [`ObjectStore::open`]
+//! refuses every other unmountable device rather than reformatting it.
 //!
 //! Commits never need in-place multi-block metadata mutation: object data is
 //! written first and flushed, then a complete next-generation superblock is
@@ -63,6 +66,85 @@ pub fn superblock_format_version(block: &[u8]) -> Option<u16> {
         return None;
     }
     Some(read_u16(block, 4))
+}
+
+pub use clean_slate_service_fixtures::DiskRefusal as Refusal;
+
+/// What a device holds, as far as deciding between mount, format, and refusal goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Probe {
+    /// Both superblock slots are entirely zero: nothing to lose, safe to format.
+    Blank,
+    /// [`ObjectStore::mount`] succeeds.
+    Mountable,
+    /// Neither mountable nor blank. Formatting would destroy whatever is there.
+    Refused(Refusal),
+}
+
+/// Classifies `device` without writing to it. Errors are only block I/O failures and
+/// unsupported geometry: a device that cannot be read gives no basis for any decision.
+pub fn probe<D: BlockDevice>(device: &mut D) -> Result<Probe, StoreError> {
+    let geometry = validate_geometry(device.geometry())?;
+    let mut slots = [
+        vec![0; block_size_bytes(geometry)],
+        vec![0; block_size_bytes(geometry)],
+    ];
+    for (lba, bytes) in (0..SUPERBLOCK_SLOTS).zip(slots.iter_mut()) {
+        device.read_blocks(lba, 1, bytes)?;
+    }
+    if slots
+        .iter()
+        .all(|bytes| bytes.iter().all(|&byte| byte == 0))
+    {
+        return Ok(Probe::Blank);
+    }
+
+    match select_committed_state(device, geometry) {
+        Ok(_) => return Ok(Probe::Mountable),
+        Err(StoreError::Block(error)) => return Err(StoreError::Block(error)),
+        Err(_) => {}
+    }
+
+    // A slot that still decodes makes this a damaged store of this version, whatever the other
+    // slot holds. Version 0 was never written, so a slot claiming it is damaged, not foreign.
+    let versions = slots.iter().map(|bytes| superblock_format_version(bytes));
+    let refusal = if (0..SUPERBLOCK_SLOTS)
+        .zip(slots.iter())
+        .any(|(slot, bytes)| decode_superblock(geometry, slot, bytes).is_ok())
+    {
+        Refusal::PayloadInvalid
+    } else if let Some(version) = versions
+        .clone()
+        .flatten()
+        .find(|&version| version != STORE_VERSION && version != 0)
+    {
+        Refusal::UnsupportedVersion(version)
+    } else if versions.clone().all(|version| version.is_none()) {
+        Refusal::NotAStore
+    } else {
+        Refusal::SuperblocksInvalid
+    };
+    Ok(Probe::Refused(refusal))
+}
+
+/// How [`ObjectStore::open`] obtained its store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opened {
+    Mounted,
+    Formatted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenError {
+    /// The device was left exactly as it was found.
+    Refused(Refusal),
+    Store(StoreError),
+}
+
+impl From<StoreError> for OpenError {
+    fn from(value: StoreError) -> Self {
+        Self::Store(value)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,6 +270,15 @@ impl<D: BlockDevice> ObjectStore<D> {
             active_slot,
             objects,
         })
+    }
+
+    /// Mounts the store on `device`, formatting it only when [`probe`] finds it blank.
+    pub fn open(mut device: D) -> Result<(Self, Opened), OpenError> {
+        match probe(&mut device)? {
+            Probe::Blank => Ok((Self::format(device)?, Opened::Formatted)),
+            Probe::Mountable => Ok((Self::mount(device)?, Opened::Mounted)),
+            Probe::Refused(refusal) => Err(OpenError::Refused(refusal)),
+        }
     }
 
     pub fn geometry(&self) -> BlockGeometry {
@@ -1114,6 +1205,95 @@ mod tests {
             ObjectStore::mount(device).unwrap_err(),
             StoreError::Incompatible(IncompatibleFormatError::UnsupportedVersion(1))
         );
+    }
+
+    fn device_holding_one_object() -> FakeBlockDevice {
+        let mut store = ObjectStore::format(FakeBlockDevice::new(geometry()).unwrap()).unwrap();
+        store.write_object(1, "alpha", b"keep me").unwrap();
+        store.commit().unwrap();
+        store.into_inner()
+    }
+
+    fn assert_open_refuses(mut device: FakeBlockDevice, expected: Refusal) {
+        let before = device.durable_bytes().to_vec();
+        assert_eq!(probe(&mut device), Ok(Probe::Refused(expected)));
+        assert_eq!(
+            ObjectStore::open(device.clone()).unwrap_err(),
+            OpenError::Refused(expected)
+        );
+        assert_eq!(device.durable_bytes(), before.as_slice());
+    }
+
+    #[test]
+    fn open_formats_a_blank_device() {
+        let mut device = FakeBlockDevice::new(geometry()).unwrap();
+        assert_eq!(probe(&mut device), Ok(Probe::Blank));
+
+        let (store, opened) = ObjectStore::open(device).unwrap();
+        assert_eq!(opened, Opened::Formatted);
+        let mut device = reboot(store).into_inner();
+        assert_eq!(probe(&mut device), Ok(Probe::Mountable));
+    }
+
+    #[test]
+    fn open_mounts_an_existing_store_without_formatting() {
+        let mut device = device_holding_one_object();
+        assert_eq!(probe(&mut device), Ok(Probe::Mountable));
+
+        let (store, opened) = ObjectStore::open(device).unwrap();
+        assert_eq!(opened, Opened::Mounted);
+        assert_eq!(store.read_object_by_id(1).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn open_refuses_a_corrupt_device_and_leaves_its_bytes_unchanged() {
+        let mut device = device_holding_one_object();
+        let mut slot_a = durable_slot(&mut device, 0);
+        slot_a[0] ^= 0x01;
+        let mut slot_b = durable_slot(&mut device, 1);
+        slot_b[HEADER_BYTES] ^= 0x80;
+        device.write_blocks(0, 1, &slot_a).unwrap();
+        device.write_blocks(1, 1, &slot_b).unwrap();
+        device.flush().unwrap();
+        assert_eq!(
+            ObjectStore::mount(device.clone()).unwrap_err(),
+            StoreError::Incompatible(IncompatibleFormatError::BadMagic)
+        );
+
+        assert_open_refuses(device, Refusal::SuperblocksInvalid);
+    }
+
+    #[test]
+    fn open_refuses_an_old_version_device() {
+        let mut device = device_holding_one_object();
+        for slot_lba in 0..SUPERBLOCK_SLOTS {
+            let mut slot = durable_slot(&mut device, slot_lba);
+            downgrade_to_version_one(&mut slot);
+            device.write_blocks(slot_lba, 1, &slot).unwrap();
+        }
+        device.flush().unwrap();
+
+        assert_open_refuses(device, Refusal::UnsupportedVersion(1));
+    }
+
+    #[test]
+    fn open_refuses_foreign_bytes_and_unreadable_payloads() {
+        let mut device = FakeBlockDevice::new(geometry()).unwrap();
+        device.write_blocks(1, 1, &[0xee; 512]).unwrap();
+        device.flush().unwrap();
+        assert_open_refuses(device, Refusal::NotAStore);
+
+        let mut device = device_holding_one_object();
+        let mut slot = durable_slot(&mut device, 1);
+        let start_lba = read_u64(&slot, HEADER_BYTES + 8);
+        let mut payload = vec![0; 512];
+        device.read_blocks(start_lba, 1, &mut payload).unwrap();
+        payload[0] ^= 0xff;
+        device.write_blocks(start_lba, 1, &payload).unwrap();
+        slot.fill(0);
+        device.write_blocks(0, 1, &slot).unwrap();
+        device.flush().unwrap();
+        assert_open_refuses(device, Refusal::PayloadInvalid);
     }
 
     #[test]

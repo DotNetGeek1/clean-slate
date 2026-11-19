@@ -3,16 +3,21 @@
 //! The default image is the kernel built with no feature: the kernel launches userspace init,
 //! which starts storage, then network and the serial-console shell (#218 S5), and waits. `run` always attaches the persistent data
 //! disk `target/system-data.img` (created when missing) and starts the network fixture peer
-//! only with `--net`. The lane boots the same image twice on a disk of its own: the first boot
-//! formats it, the second mounts it.
+//! only with `--net`. The lane boots the same image three times on a disk of its own: the first
+//! boot formats it, the second mounts it, and the third finds it corrupted and must refuse it
+//! without writing to it.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clean_slate_store::{superblock_format_version, STORE_VERSION};
+use clean_slate_block::{
+    BlockDevice, BlockDeviceId, BlockGeometry, BlockIoError, BlockTransportError,
+    BlockUnsupportedError,
+};
+use clean_slate_store::{probe, Probe, Refusal, STORE_VERSION};
 
 use crate::m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
 use crate::{
@@ -91,25 +96,100 @@ pub(crate) fn ensure_data_disk(path: &Path) -> Result<bool, XtaskError> {
     Ok(true)
 }
 
-/// Refuses a reused data disk whose superblock slots (LBA 0 and 1, 512-byte blocks) carry
-/// a store format version other than this build's: the storage service would refuse it with
-/// error 19. A blank disk has no store magic and is accepted; the service formats it.
+/// Refuses a reused data disk that the storage service would refuse, using the store's own
+/// [`probe`]: only a blank disk (the service formats it) or a mountable one is accepted.
 pub(crate) fn check_data_disk_store_format(path: &Path) -> Result<(), XtaskError> {
-    let mut header = [0u8; 2 * DATA_DISK_BLOCK_BYTES];
-    fs::File::open(path)?.read_exact(&mut header)?;
-    for slot in header.chunks_exact(DATA_DISK_BLOCK_BYTES) {
-        match superblock_format_version(slot) {
-            Some(found) if found != STORE_VERSION => {
-                return Err(XtaskError::StaleDataDisk {
-                    path: path.to_path_buf(),
-                    found,
-                    expected: STORE_VERSION,
-                });
-            }
-            _ => {}
-        }
+    let mut disk = DiskImage::open(path)?;
+    let probed = probe(&mut disk).map_err(|error| {
+        XtaskError::Validation(format!(
+            "data disk {} could not be probed: {error:?}",
+            path.display()
+        ))
+    })?;
+    match probed {
+        Probe::Blank | Probe::Mountable => Ok(()),
+        Probe::Refused(Refusal::UnsupportedVersion(found)) => Err(XtaskError::StaleDataDisk {
+            path: path.to_path_buf(),
+            found,
+            expected: STORE_VERSION,
+        }),
+        Probe::Refused(refusal) => Err(XtaskError::UnusableDataDisk {
+            path: path.to_path_buf(),
+            reason: refusal.to_string(),
+        }),
     }
-    Ok(())
+}
+
+/// A data disk image as a read-only block device with the geometry QEMU gives the guest.
+struct DiskImage {
+    file: fs::File,
+    geometry: BlockGeometry,
+}
+
+impl DiskImage {
+    fn open(path: &Path) -> Result<Self, XtaskError> {
+        Self::open_with(path, true)
+    }
+
+    fn open_with(path: &Path, read_only: bool) -> Result<Self, XtaskError> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(!read_only)
+            .open(path)?;
+        let block_count = file.metadata()?.len() / DATA_DISK_BLOCK_BYTES as u64;
+        let geometry = BlockGeometry::new(
+            BlockDeviceId::new(1),
+            DATA_DISK_BLOCK_BYTES as u32,
+            block_count,
+            8,
+            read_only,
+        )
+        .map_err(|error| {
+            XtaskError::Validation(format!(
+                "data disk {} has no usable geometry: {error:?}",
+                path.display()
+            ))
+        })?;
+        Ok(Self { file, geometry })
+    }
+}
+
+impl BlockDevice for DiskImage {
+    fn geometry(&self) -> BlockGeometry {
+        self.geometry
+    }
+
+    fn read_blocks(
+        &mut self,
+        lba: u64,
+        blocks: u32,
+        buffer: &mut [u8],
+    ) -> Result<(), BlockIoError> {
+        let bytes = self.geometry.validate_read(lba, blocks, buffer.len())?;
+        self.file
+            .seek(SeekFrom::Start(bytes.start as u64))
+            .and_then(|_| self.file.read_exact(buffer))
+            .map_err(|_| BlockIoError::Transport(BlockTransportError::DeviceFault))
+    }
+
+    fn write_blocks(&mut self, lba: u64, blocks: u32, buffer: &[u8]) -> Result<(), BlockIoError> {
+        let bytes = self.geometry.validate_write(lba, blocks, buffer.len())?;
+        self.file
+            .seek(SeekFrom::Start(bytes.start as u64))
+            .and_then(|_| self.file.write_all(buffer))
+            .map_err(|_| BlockIoError::Transport(BlockTransportError::DeviceFault))
+    }
+
+    fn flush(&mut self) -> Result<(), BlockIoError> {
+        if self.geometry.is_read_only() {
+            return Err(BlockIoError::Unsupported(
+                BlockUnsupportedError::WriteProtected,
+            ));
+        }
+        self.file
+            .sync_all()
+            .map_err(|_| BlockIoError::Transport(BlockTransportError::DeviceFault))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -273,11 +353,122 @@ pub(crate) fn run_lane() -> Result<(), XtaskError> {
     ensure_data_disk(&disk)?;
     let first = boot_once(&disk, Formatted::Yes)?;
     let second = boot_once(&disk, Formatted::No)?;
+    let refusals = boot_on_corrupt_disk(&disk)?;
     println!(
-        "\n[SYS ] PASS boot 1 formatted the disk (storage pid={} block-writes={}), boot 2 mounted it (storage pid={}); every service held exactly its manifest grants and reported ready from its launched pid",
+        "\n[SYS ] PASS boot 1 formatted the disk (storage pid={} block-writes={}), boot 2 mounted it (storage pid={}); every service held exactly its manifest grants and reported ready from its launched pid; boot 3 on the corrupted disk refused it {refusals} times and left every byte unchanged",
         first.storage_pid, first.storage_block_writes, second.storage_pid
     );
     Ok(())
+}
+
+const REFUSAL_LINE: &str = "[STOR] refusing data disk: corrupt (both superblock slots invalid)";
+
+/// Storage is launched once and restarted [`STORAGE_RESTARTS`] times, refusing the disk each
+/// time; init then gives up on it and on the two services that depend on it.
+const REFUSED_DISK_MARKERS: [MarkerStep<'static>; 7] = [
+    MarkerStep::Ordered("[KERN] init launched pid="),
+    MarkerStep::Ordered("[INIT] starting service=20736"),
+    MarkerStep::Ordered("[SVC ] launch service=20736 "),
+    MarkerStep::Ordered(REFUSAL_LINE),
+    MarkerStep::Ordered("[INIT] gave up service=20736 restarts=3; init carries on"),
+    MarkerStep::UnorderedGroup(&[
+        "[INIT] not starting service=20992: service=20736 is down",
+        "[INIT] not starting service=21504: service=20736 is down",
+    ]),
+    MarkerStep::Ordered("[INIT] boot settled running=0 down=3; waiting, no deadline"),
+];
+const STORAGE_RESTARTS: usize = 3;
+
+/// Makes both superblock slots of the store on `path` unusable without zeroing them: slot A
+/// loses a magic bit, and slot B a generation bit, so its checksum no longer matches.
+pub(crate) fn corrupt_both_superblocks(path: &Path) -> Result<(), XtaskError> {
+    let mut file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+    for (offset, mask) in [(0, 0x01u8), (DATA_DISK_BLOCK_BYTES as u64 + 12, 0x01)] {
+        let mut byte = [0u8];
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut byte)?;
+        byte[0] ^= mask;
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(&byte)?;
+    }
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Boot 3: the store the first two boots built, corrupted. Storage must refuse it, say why,
+/// and write nothing to it. Returns how many instances refused it.
+fn boot_on_corrupt_disk(disk: &Path) -> Result<usize, XtaskError> {
+    corrupt_both_superblocks(disk)?;
+    let before = fs::read(disk)?;
+    let peer = start_fixture_peer()?;
+    let output = run_driven_vm_acceptance(
+        &[],
+        system_vm_config(disk.to_path_buf(), Some(peer.port())),
+        MarkerSet::Steps(&REFUSED_DISK_MARKERS),
+        LANE_TIMEOUT,
+        &mut NoDriver,
+    );
+    peer.shutdown();
+    let refusals = validate_refused_boot(&output?).map_err(|reason| {
+        XtaskError::Validation(format!("system boot on a corrupt disk: {reason}"))
+    })?;
+    if fs::read(disk)? != before {
+        return Err(XtaskError::Validation(
+            "system boot on a corrupt disk: the refused disk's bytes changed".to_owned(),
+        ));
+    }
+    Ok(refusals)
+}
+
+/// Every storage instance printed the refusal as it exited, straight after the kernel's exit
+/// line for its own pid; none reported ready, and neither dependent was launched.
+fn validate_refused_boot(output: &str) -> Result<usize, String> {
+    let lines: Vec<&str> = output.lines().map(str::trim_end).collect();
+    let launches: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| line.starts_with("[SVC ] launch service=20736 "))
+        .collect();
+    if launches.len() != 1 + STORAGE_RESTARTS {
+        return Err(format!(
+            "expected {} storage launches, found {}",
+            1 + STORAGE_RESTARTS,
+            launches.len()
+        ));
+    }
+    for launch in &launches {
+        let exit = format!("[PROC] fault pid={} vector=128 ", number(launch, "pid")?);
+        let at = lines
+            .iter()
+            .position(|line| line.starts_with(&exit))
+            .ok_or_else(|| format!("no exit line {exit:?}"))?;
+        if lines.get(at + 1) != Some(&REFUSAL_LINE) {
+            return Err(format!(
+                "{exit:?} is not followed by {REFUSAL_LINE:?}: {:?}",
+                lines.get(at + 1)
+            ));
+        }
+    }
+    let refusals = lines
+        .iter()
+        .filter(|line| line.contains("[STOR] refusing data disk: "))
+        .count();
+    if refusals != launches.len() {
+        return Err(format!(
+            "{refusals} refusal lines for {} storage launches",
+            launches.len()
+        ));
+    }
+    for absent in [
+        "[SVC ] ready service=20736 ",
+        "[SVC ] launch service=20992 ",
+        "[SVC ] launch service=21504 ",
+    ] {
+        if let Some(line) = lines.iter().find(|line| line.starts_with(absent)) {
+            return Err(format!("unexpected {line:?} on a refused disk"));
+        }
+    }
+    Ok(refusals)
 }
 
 fn boot_once(disk: &Path, formatted: Formatted) -> Result<BootSummary, XtaskError> {
@@ -780,14 +971,13 @@ mod tests {
         fs::write(path, image).unwrap();
     }
 
-    /// Both superblock slots of a store this build formatted.
-    fn current_format_header() -> Vec<u8> {
-        use clean_slate_block::fake::FakeBlockDevice;
-        use clean_slate_block::{BlockDeviceId, BlockGeometry};
-        let geometry = BlockGeometry::new(BlockDeviceId::new(1), 512, 64, 8, false).unwrap();
-        let store = clean_slate_store::ObjectStore::format(FakeBlockDevice::new(geometry).unwrap())
-            .unwrap();
-        store.into_inner().durable_bytes()[..2 * DATA_DISK_BLOCK_BYTES].to_vec()
+    /// A full-size disk image holding one committed object in this build's store format.
+    fn current_format_disk(path: &Path) {
+        disk_with_header(path, &[]);
+        let disk = DiskImage::open_with(path, false).unwrap();
+        let mut store = clean_slate_store::ObjectStore::format(disk).unwrap();
+        store.write_object(1, "alpha", b"kept").unwrap();
+        store.commit().unwrap();
     }
 
     #[test]
@@ -800,18 +990,21 @@ mod tests {
         disk_with_header(&path, &[]);
         assert!(!ensure_data_disk(&path).unwrap(), "blank disk is reused");
 
-        let current = current_format_header();
-        disk_with_header(&path, &current);
+        current_format_disk(&path);
         assert!(
             !ensure_data_disk(&path).unwrap(),
             "v{STORE_VERSION} disk is reused"
         );
 
-        let mut version_one = current;
-        for slot in version_one.chunks_exact_mut(DATA_DISK_BLOCK_BYTES) {
+        let mut header = vec![0u8; 2 * DATA_DISK_BLOCK_BYTES];
+        fs::File::open(&path)
+            .unwrap()
+            .read_exact(&mut header)
+            .unwrap();
+        for slot in header.chunks_exact_mut(DATA_DISK_BLOCK_BYTES) {
             slot[4..6].copy_from_slice(&1u16.to_le_bytes());
         }
-        disk_with_header(&path, &version_one);
+        disk_with_header(&path, &header);
         let error = ensure_data_disk(&path).unwrap_err();
         assert!(matches!(
             error,
@@ -828,6 +1021,51 @@ mod tests {
                 path.display()
             )
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn refused_transcript(pids: &[u64]) -> String {
+        let mut text = String::new();
+        for pid in pids {
+            text += &format!("[SVC ] launch service=20736 pid={pid} gen=1\n");
+            text += &format!("[PROC] fault pid={pid} vector=128 err=0x0\n{REFUSAL_LINE}\n");
+        }
+        text
+    }
+
+    #[test]
+    fn a_refused_boot_needs_one_refusal_per_storage_exit_and_nothing_started() {
+        assert_eq!(
+            validate_refused_boot(&refused_transcript(&[5, 6, 7, 8])),
+            Ok(4)
+        );
+        assert!(validate_refused_boot(&refused_transcript(&[5, 6, 7])).is_err());
+
+        let text = refused_transcript(&[5, 6, 7, 8]);
+        let unexplained = text.replacen(&format!("{REFUSAL_LINE}\n"), "", 1);
+        assert!(validate_refused_boot(&unexplained).is_err());
+        let formatted = format!("{text}[SVC ] ready service=20736 pid=8 gen=1\n");
+        assert!(validate_refused_boot(&formatted).is_err());
+        let started = format!("{text}[SVC ] launch service=20992 pid=9 gen=1\n");
+        assert!(validate_refused_boot(&started).is_err());
+    }
+
+    #[test]
+    fn a_reused_corrupt_data_disk_is_refused_and_left_unchanged() {
+        let dir = std::env::temp_dir().join(format!("cs-system-corrupt-{}", std::process::id()));
+        let path = dir.join("d.img");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        current_format_disk(&path);
+        corrupt_both_superblocks(&path).unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let error = ensure_data_disk(&path).unwrap_err();
+        assert!(matches!(error, XtaskError::UnusableDataDisk { .. }));
+        assert!(error
+            .to_string()
+            .contains(": corrupt (both superblock slots invalid);"));
+        assert_eq!(fs::read(&path).unwrap(), before);
         let _ = fs::remove_dir_all(&dir);
     }
 }

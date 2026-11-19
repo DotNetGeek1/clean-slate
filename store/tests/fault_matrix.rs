@@ -6,7 +6,9 @@
 //! is mounted. Every case must satisfy the store's promise for devices that may
 //! lie: the mount yields exactly one generation that some `commit` wrote (its
 //! generation number and every object byte), or a clean `Corrupt` /
-//! `Incompatible` error. Never a mix, and never data no commit wrote.
+//! `Incompatible` error. Never a mix, and never data no commit wrote. An
+//! unmountable image must probe as `Refused`, so the storage service leaves it
+//! alone, unless both superblock slots are all zero; only then is it `Blank`.
 //!
 //! Stronger checks where the device allows them:
 //! - unless writes are misdirected, every superblock on disk sits in the slot
@@ -27,7 +29,7 @@ use std::time::Instant;
 use clean_slate_block::fake::FakeBlockDevice;
 use clean_slate_block::{BlockDeviceId, BlockGeometry};
 use clean_slate_store::{
-    IncompatibleFormatError, ObjectStore, StoreError, MAX_OBJECTS, SUPERBLOCK_SLOTS,
+    probe, ObjectStore, Probe, Refusal, StoreError, MAX_OBJECTS, SUPERBLOCK_SLOTS,
 };
 use support::fault_device::{CrashStep, FaultConfig, FaultDevice, OpKind, OpOutcome};
 
@@ -327,13 +329,11 @@ enum Outcome {
     LastAcked,
     /// A generation older than the last acknowledged commit.
     RolledBack,
-    Corrupt,
-    /// `Incompatible`, other than `BadMagic` after an acknowledged format.
-    Incompatible,
-    /// `Incompatible(BadMagic)` although `format` was acknowledged. The
-    /// storage service formats a `BadMagic` device, so this outcome erases
-    /// whatever survived.
-    BadMagicAfterFormat,
+    /// Unmountable, so the storage service refuses the disk and leaves it as is.
+    Refused(Refusal),
+    /// Unmountable with both superblock slots still all zero: no format or
+    /// commit reached them, so the service formats a disk that holds nothing.
+    Blank,
 }
 
 fn describe(snapshot: &Snapshot) -> String {
@@ -398,13 +398,27 @@ fn check(mode: Mode, run: &Run, image: &[u8]) -> Result<Outcome, String> {
         }
     }
 
+    let mut device = FakeBlockDevice::from_durable_bytes(geometry(), image).unwrap();
+    let probed = probe(&mut device).map_err(|error| format!("probe failed: {error:?}"))?;
+    let blank = image[..SUPERBLOCK_SLOTS as usize * BLOCK]
+        .iter()
+        .all(|&byte| byte == 0);
+    let decision_holds = match probed {
+        Probe::Mountable => generation.is_some(),
+        Probe::Blank => generation.is_none() && blank,
+        Probe::Refused(_) => generation.is_none() && !blank,
+    };
+    if !decision_holds {
+        return Err(format!(
+            "mounted {shown} with superblock slots {}, but the service would decide {probed:?}",
+            if blank { "all zero" } else { "not all zero" }
+        ));
+    }
+
     Ok(match (generation, run.last_acked) {
-        (None, acked) => match &mounted {
-            Err(StoreError::Incompatible(IncompatibleFormatError::BadMagic)) if acked.is_some() => {
-                Outcome::BadMagicAfterFormat
-            }
-            Err(StoreError::Incompatible(_)) => Outcome::Incompatible,
-            _ => Outcome::Corrupt,
+        (None, _) => match probed {
+            Probe::Refused(refusal) => Outcome::Refused(refusal),
+            _ => Outcome::Blank,
         },
         (Some(generation), Some(acked)) if generation < acked => Outcome::RolledBack,
         (Some(generation), Some(acked)) if generation == acked => Outcome::LastAcked,
@@ -714,7 +728,10 @@ fn torn_write_at_every_prefix_never_mixes_generations() {
 fn dropped_flush_at_every_prefix_never_mixes_generations() {
     let report = crash_matrix(Mode::DroppedFlush);
     assert_holds(&report);
-    assert!(report.outcomes.contains_key("RolledBack") || report.outcomes.contains_key("Corrupt"));
+    assert!(
+        report.outcomes.contains_key("RolledBack")
+            || report.outcomes.keys().any(|key| key.starts_with("Refused"))
+    );
 }
 
 #[test]

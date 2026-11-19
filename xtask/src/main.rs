@@ -5852,6 +5852,11 @@ enum XtaskError {
         found: u16,
         expected: u16,
     },
+    /// A reused data disk is neither blank nor mountable; the storage service refuses it.
+    UnusableDataDisk {
+        path: PathBuf,
+        reason: String,
+    },
     M5PhaseFailed {
         phase: String,
         reason: String,
@@ -5911,6 +5916,12 @@ impl Display for XtaskError {
             } => write!(
                 f,
                 "data disk {} holds object-store format v{found}, but this build's storage service expects v{expected} and would refuse it; delete {} to start from a blank disk",
+                path.display(),
+                path.display()
+            ),
+            XtaskError::UnusableDataDisk { path, reason } => write!(
+                f,
+                "data disk {} is not blank and cannot be mounted: {reason}; the storage service refuses it rather than reformat it, so delete {} to start from a blank disk",
                 path.display(),
                 path.display()
             ),
@@ -7300,18 +7311,34 @@ mod tests {
         let _guard = m5_disk_test_guard();
         reset_m5_data_disk_image().expect("reset disk");
         let disk = m5_data_disk_path();
+        let past_superblocks = 2 * 512;
         let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&disk)
             .expect("open disk");
-        file.write_all(&[0x5a; 16]).expect("overwrite prefix");
-        file.flush().expect("flush disk prefix");
+        file.seek(SeekFrom::Start(past_superblocks))
+            .expect("seek past superblocks");
+        file.write_all(&[0x5a; 16]).expect("overwrite data blocks");
+        file.flush().expect("flush disk");
         prepare_m5_data_disk_image(true).expect("reuse should succeed");
         let mut file = fs::File::open(&disk).expect("open disk");
-        let mut prefix = [0u8; 16];
-        file.read_exact(&mut prefix).expect("read disk prefix");
-        assert_eq!(prefix, [0x5a; 16]);
+        let mut kept = [0u8; 16];
+        file.seek(SeekFrom::Start(past_superblocks))
+            .expect("seek past superblocks");
+        file.read_exact(&mut kept).expect("read data blocks");
+        assert_eq!(kept, [0x5a; 16]);
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&disk)
+            .expect("open disk");
+        file.write_all(&[0x5a; 16]).expect("overwrite superblock");
+        drop(file);
+        assert!(matches!(
+            prepare_m5_data_disk_image(true),
+            Err(XtaskError::UnusableDataDisk { .. })
+        ));
         remove_m5_data_disk_image().expect("cleanup after test");
     }
 
