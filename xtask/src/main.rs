@@ -447,7 +447,7 @@ const M9_USERSPACE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(300);
 /// `wget-fixture-http` runs once per cycle (`USERSPACE_CYCLES` in
 /// `kernel/src/selftest/m9_userspace.rs`), each a `GET /` the fixture must receive.
 const M9_USERSPACE_HTTP_REQUESTS: u32 = 9;
-const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 19] = [
+const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 20] = [
     "[M9  ] creating",
     "[M9  ] busybox verified",
     "[M9  ] matrix commands=",
@@ -463,6 +463,7 @@ const M9_USERSPACE_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[M9  ] deny fs ok",
     "[M9  ] deny net ok",
     "[M9  ] timeout PASS",
+    "[M9  ] fanout PASS",
     "[M9  ] cycle=9",
     "[M9  ] busybox intact",
     "[M9  ] denial PASS",

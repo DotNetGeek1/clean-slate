@@ -122,7 +122,17 @@ enum ProbeEvidence {
     /// deadline-driven SYN retransmission gives up and wakes the blocked caller with
     /// `ETIMEDOUT` (checked by the host from BusyBox's stderr).
     ConnectTimeout,
+    /// [`FANOUT_LINUX_PROCS`] Linux processes alive at once, each charged for the
+    /// shell's records it inherited, so the capability table holds more live records
+    /// than its pre-#220 size of [`PRE_QUOTA_TABLE_SLOTS`].
+    ConcurrentProcesses,
 }
+
+/// The `fanout` probe's shell plus its three inner shells and their nine `sleep`s. Three
+/// pipelines of three use the 8-pipe pool exactly; `&` is not an option because BusyBox
+/// ash reopens a background job's stdin on `/dev/null`, which the namespace lacks.
+const FANOUT_LINUX_PROCS: usize = 13;
+const PRE_QUOTA_TABLE_SLOTS: usize = 64;
 
 struct Probe {
     name: &'static str,
@@ -176,6 +186,13 @@ const PROBES: &[Probe] = &[
         authority: LinuxLaunchAuthority::FULL,
         exit_status: 1,
         evidence: ProbeEvidence::ConnectTimeout,
+    },
+    Probe {
+        name: "fanout",
+        invocation: b"export PATH=/bin; sh -c 'sleep 1|sleep 1|sleep 1' | sh -c 'sleep 1|sleep 1|sleep 1' | sh -c 'sleep 1|sleep 1|sleep 1'",
+        authority: LinuxLaunchAuthority::FULL,
+        exit_status: 0,
+        evidence: ProbeEvidence::ConcurrentProcesses,
     },
 ];
 
@@ -253,6 +270,10 @@ static SLEEP_TICKS_AT_BLOCK: [AtomicU64; SCHEDULER_THREAD_SLOTS] =
 static OBJECT_READ_DENIALS: AtomicU32 = AtomicU32::new(0);
 static OBJECT_WRITE_DENIALS: AtomicU32 = AtomicU32::new(0);
 static NETWORK_DENIALS: AtomicU32 = AtomicU32::new(0);
+/// Most Linux processes and live capability records seen at once during the current
+/// command, sampled whenever a Linux thread blocks.
+static PEAK_LINUX_PROCS: AtomicUsize = AtomicUsize::new(0);
+static PEAK_CAPABILITIES: AtomicUsize = AtomicUsize::new(0);
 
 fn allocator() -> &'static mut PageAllocator {
     service_lifecycle_syscall_allocator_mut()
@@ -336,6 +357,8 @@ fn reset_command_evidence() {
     }
     SLEEP.native_steps_while_blocked.store(0, Ordering::Relaxed);
     SLEEP.max_blocked_ticks.store(0, Ordering::Relaxed);
+    PEAK_LINUX_PROCS.store(0, Ordering::Relaxed);
+    PEAK_CAPABILITIES.store(0, Ordering::Relaxed);
 }
 
 fn launch_shell(
@@ -422,6 +445,11 @@ pub(crate) fn on_thread_blocked(thread_index: usize, pid: u64) {
     SLEEP_TICKS_AT_BLOCK[thread_index].store(kernel_ticks(), Ordering::Relaxed);
     SLEEP_ARMED[thread_index].store(true, Ordering::Relaxed);
     SLEEP.blocks.fetch_add(1, Ordering::Relaxed);
+    PEAK_LINUX_PROCS.fetch_max(table().occupied(), Ordering::Relaxed);
+    PEAK_CAPABILITIES.fetch_max(
+        crate::capability::live_capability_count(),
+        Ordering::Relaxed,
+    );
 }
 
 /// A blocked thread became Ready (wake, deadline expiry, or cancel). Runs in IRQ or
@@ -794,10 +822,12 @@ fn finish_probe(index: usize, pid: u64, status: u64) {
     let write_denials = OBJECT_WRITE_DENIALS.load(Ordering::Relaxed);
     let net_denials = NETWORK_DENIALS.load(Ordering::Relaxed);
     kernel_log_fmt(format_args!(
-        "[M9  ] probe={} cycle={} pid={pid} status={status} object_read_denials={read_denials} object_write_denials={write_denials} network_denials={net_denials} stdout_len={}\n",
+        "[M9  ] probe={} cycle={} pid={pid} status={status} object_read_denials={read_denials} object_write_denials={write_denials} network_denials={net_denials} stdout_len={} linux_procs_peak={} capabilities_peak={}\n",
         probe.name,
         cycle(),
-        stdout_slice().len()
+        stdout_slice().len(),
+        PEAK_LINUX_PROCS.load(Ordering::Relaxed),
+        PEAK_CAPABILITIES.load(Ordering::Relaxed)
     ));
     log_sleep_stats(probe.name);
     if status != probe.exit_status {
@@ -818,6 +848,10 @@ fn finish_probe(index: usize, pid: u64, status: u64) {
                 && SLEEP.max_blocked_ticks.load(Ordering::Relaxed)
                     >= CONNECT_TIMEOUT_MIN_BLOCKED_TICKS
         }
+        ProbeEvidence::ConcurrentProcesses => {
+            PEAK_LINUX_PROCS.load(Ordering::Relaxed) >= FANOUT_LINUX_PROCS
+                && PEAK_CAPABILITIES.load(Ordering::Relaxed) > PRE_QUOTA_TABLE_SLOTS
+        }
     };
     if !proven {
         fatal_kernel_error("m9 userspace probe evidence missing");
@@ -832,6 +866,14 @@ fn finish_probe(index: usize, pid: u64, status: u64) {
                 SLEEP.woken_with_native_progress.load(Ordering::Relaxed),
                 SLEEP.native_steps_while_blocked.load(Ordering::Relaxed),
                 SLEEP.max_blocked_ticks.load(Ordering::Relaxed)
+            ));
+        }
+        ProbeEvidence::ConcurrentProcesses if cycle() == 1 => {
+            kernel_log_fmt(format_args!(
+                "[M9  ] fanout PASS linux_procs_peak={} capabilities_peak={} table_slots={}\n",
+                PEAK_LINUX_PROCS.load(Ordering::Relaxed),
+                PEAK_CAPABILITIES.load(Ordering::Relaxed),
+                clean_slate_capability::MAX_SLOTS
             ));
         }
         _ => {}
