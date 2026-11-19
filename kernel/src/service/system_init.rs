@@ -357,6 +357,10 @@ pub(crate) fn audit_service_authority(
     pid: u64,
     spec: Option<&ServiceSpec>,
 ) -> Result<(), &'static str> {
+    use clean_slate_capability::{
+        AuditEvent, AuditKind, HolderId, PolicyRefusal, ResourceRef, Rights,
+    };
+
     let held = HeldAuthority::of(pid);
     let network_instance_live =
         crate::service::instance_generation::live_network_instance_generation().is_some();
@@ -366,9 +370,18 @@ pub(crate) fn audit_service_authority(
         service.0,
         u8::from(matches)
     ));
+    let launch = AuditEvent::new(
+        AuditKind::Grant,
+        HolderId::KERNEL,
+        ResourceRef::process(pid, 0),
+        Rights::empty(),
+    )
+    .with_subject(HolderId(pid));
     if matches {
+        crate::capability::audit::record(launch);
         return Ok(());
     }
+    crate::capability::audit::record(launch.refused(PolicyRefusal::AuthorityMismatch));
     kernel_log_fmt(format_args!(
         "[FAIL] service={} pid={pid} authority differs from its manifest row\n",
         service.0

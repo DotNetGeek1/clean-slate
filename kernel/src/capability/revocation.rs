@@ -6,11 +6,12 @@ use clean_slate_capability::syscall_abi::{
     CAP_REVOKE_OP_DROP, CAP_REVOKE_OP_PROBE, CAP_REVOKE_OP_REVOKE, SYSCALL_EINVAL,
 };
 use clean_slate_capability::{
-    authorize_revoke, drop_own, revoke_subtree, CapabilityError, CapabilityHandle, DropRefusal,
-    HolderId, ResourceClass, Rights,
+    authorize_revoke, drop_own, revoke_subtree, AuditEvent, AuditKind, CapabilityError,
+    CapabilityHandle, DropRefusal, HolderId, PolicyRefusal, ResourceClass, ResourceRef, Rights,
 };
 use clean_slate_native_abi::STATUS_EAGAIN;
 
+use super::audit;
 use super::{authorize_current_class, capability_space_mut, current_holder, with_capability_space};
 use crate::mm::shared_buffer::{
     capability_backs_live_row, drain_pending_in_syscall, reconcile_resource,
@@ -55,13 +56,34 @@ fn handle_revoke(frame: &mut SyscallContext) {
             return;
         }
     };
-    let handle = match CapabilityHandle::decode(frame.rsi) {
-        Ok(handle) => handle,
-        Err(error) => {
-            frame.rax = error.syscall_status();
-            return;
-        }
+    let handle = CapabilityHandle::decode(frame.rsi);
+    let record = handle.and_then(|handle| with_capability_space(|table| table.record(handle)));
+    let mut event = AuditEvent::new(
+        AuditKind::Revoke,
+        actor,
+        record.map_or(ResourceRef::process(actor.0, 0), |record| record.resource),
+        Rights::REVOKE,
+    );
+    if let Ok(record) = record {
+        event = event
+            .with_subject(record.holder)
+            .with_depth(record.provenance.depth);
+    }
+    if let Ok(handle) = handle {
+        event = event.with_handle(handle);
+    }
+    let result = handle.and_then(|handle| revoke_branch(actor, handle));
+    match result {
+        Ok(count) => audit::record(event.with_count(count)),
+        Err(error) => audit::record(event.with_result(Err(error))),
+    }
+    frame.rax = match result {
+        Ok(count) => count as u64,
+        Err(error) => error.syscall_status(),
     };
+}
+
+fn revoke_branch(actor: HolderId, handle: CapabilityHandle) -> Result<usize, CapabilityError> {
     let auth = with_capability_space(|table| authorize_revoke(table, actor, handle));
     if let Err(error) = auth {
         kernel_log_fmt(format_args!(
@@ -69,8 +91,7 @@ fn handle_revoke(frame: &mut SyscallContext) {
             actor.0,
             error.error_name(),
         ));
-        frame.rax = error.syscall_status();
-        return;
+        return Err(error);
     }
     let resource =
         with_capability_space(|table| table.record(handle)).map(|record| record.resource);
@@ -79,18 +100,13 @@ fn handle_revoke(frame: &mut SyscallContext) {
         reconcile_resource(resource);
         drain_pending_in_syscall();
     }
-    match result {
-        Ok(count) => {
-            kernel_log_fmt(format_args!(
-                "[CAP ] revoke branch={}:{} actor={} count={}\n",
-                handle.slot, handle.generation, actor.0, count,
-            ));
-            frame.rax = count as u64;
-        }
-        Err(error) => {
-            frame.rax = error.syscall_status();
-        }
+    if let Ok(count) = result {
+        kernel_log_fmt(format_args!(
+            "[CAP ] revoke branch={}:{} actor={} count={}\n",
+            handle.slot, handle.generation, actor.0, count,
+        ));
     }
+    result
 }
 
 fn handle_drop(frame: &mut SyscallContext) {
@@ -115,21 +131,54 @@ fn handle_drop(frame: &mut SyscallContext) {
 /// first). Holder checks run before the busy checks, so a non-holder learns nothing about
 /// another holder's mappings or delegations.
 pub(crate) fn drop_for(actor: HolderId, raw_handle: u64) -> Result<(), u64> {
-    let handle = CapabilityHandle::decode(raw_handle).map_err(|error| error.syscall_status())?;
-    let record = with_capability_space(|table| table.record(handle))
-        .map_err(|error| error.syscall_status())?;
+    let record = CapabilityHandle::decode(raw_handle)
+        .and_then(|handle| with_capability_space(|table| table.record(handle)));
+    let mut event = AuditEvent::new(
+        AuditKind::Drop,
+        actor,
+        record.map_or(ResourceRef::process(actor.0, 0), |record| record.resource),
+        Rights::empty(),
+    );
+    if let Ok(record) = record {
+        event = event.with_subject(record.holder);
+    }
+    if let Ok(handle) = CapabilityHandle::decode(raw_handle) {
+        event = event.with_handle(handle);
+    }
+    let result = drop_checked(actor, raw_handle);
+    audit::record(match result {
+        Ok(()) => event,
+        Err(DropDenial::Capability(error)) => event.with_result(Err(error)),
+        Err(DropDenial::Busy) => event.refused(PolicyRefusal::Busy),
+    });
+    result.map_err(|denial| match denial {
+        DropDenial::Capability(error) => error.syscall_status(),
+        DropDenial::Busy => STATUS_EAGAIN,
+    })
+}
+
+enum DropDenial {
+    Capability(CapabilityError),
+    /// A live child was delegated from it, or it backs a live shared-window row.
+    Busy,
+}
+
+fn drop_checked(actor: HolderId, raw_handle: u64) -> Result<(), DropDenial> {
+    let handle = CapabilityHandle::decode(raw_handle).map_err(DropDenial::Capability)?;
+    let record =
+        with_capability_space(|table| table.record(handle)).map_err(DropDenial::Capability)?;
     if record.holder != actor {
-        return Err(CapabilityError::UnauthorizedHolder.syscall_status());
+        return Err(DropDenial::Capability(CapabilityError::UnauthorizedHolder));
     }
     if record.resource.class == ResourceClass::SharedBuffer
         && capability_backs_live_row(actor.0, handle)
     {
-        return Err(STATUS_EAGAIN);
+        return Err(DropDenial::Busy);
     }
     let resource = drop_own(unsafe { capability_space_mut() }, actor, handle).map_err(
         |refusal| match refusal {
-            DropRefusal::Capability(error) => error.syscall_status(),
-            DropRefusal::Delegated => STATUS_EAGAIN,
+            DropRefusal::Capability(error) => DropDenial::Capability(error),
+            DropRefusal::Delegated => DropDenial::Busy,
         },
     )?;
     reconcile_resource(resource);

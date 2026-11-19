@@ -9,13 +9,14 @@ use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::sync::global_cell::GlobalCell;
 use clean_slate_capability::syscall_abi::SYSCALL_NR_CAP_AUDIT_READ;
 use clean_slate_capability::{
-    event_for, format_audit_line, AuditSink, BoundedAuditLog, CapabilityError, CapabilityHandle,
-    HolderId, ResourceClass, ResourceRef, Rights, AUDIT_EVENT_SIZE_BYTES,
+    event_for, format_audit_line, AuditEvent, AuditKind, AuditSink, BoundedAuditLog,
+    CapabilityError, CapabilityHandle, HolderId, ResourceClass, ResourceRef, Rights,
+    AUDIT_EVENT_SIZE_BYTES,
 };
 
 use super::{authorize_current, grant_root};
 
-const AUDIT_RING_CAPACITY: usize = 64;
+pub(crate) const AUDIT_RING_CAPACITY: usize = 64;
 const MAX_AUDIT_READ_EVENTS: usize = 8;
 
 static AUDIT_LOG: GlobalCell<BoundedAuditLog<AUDIT_RING_CAPACITY>> =
@@ -66,22 +67,23 @@ pub(crate) fn set_audit_serial_echo(enabled: bool) {
     }
 }
 
-/// Records an authorization decision after it has been made (never affects the outcome).
-pub(crate) fn record_decision(
-    actor: HolderId,
-    resource: ResourceRef,
-    requested: Rights,
-    handle: CapabilityHandle,
-    depth: u8,
-    result: Result<(), CapabilityError>,
-) {
-    let event = event_for(0, actor, resource, requested, handle, depth, result);
+/// Monotonic time for a record; 0 before the TSC is calibrated.
+fn audit_timestamp_ns() -> u64 {
+    crate::time::tsc_hz().map_or(0, |_| crate::time::monotonic_ns())
+}
+
+/// Records one security decision after it has been made (never affects the outcome).
+/// Every path that grants, derives, revokes, inherits or checks authority calls this
+/// (or [`record_decision`]); `audit_coverage` tests hold that.
+pub(crate) fn record(mut event: AuditEvent) {
+    event.timestamp_ns = audit_timestamp_ns();
+    let class = event.class;
     let log = unsafe { audit_log_mut() };
     log.record(event);
     let echo = unsafe { *AUDIT_SERIAL_ECHO.get() };
     // Serial `[AUD ]` lines are for attribution proof (M6.7/M6.8 gates), not every
     // capability check — object-service polls would otherwise flood the log.
-    if echo && resource.class == ResourceClass::Audit {
+    if echo && class == ResourceClass::Audit {
         let sequence = log
             .newest_sequence()
             .expect("audit record should exist after insert");
@@ -99,6 +101,33 @@ pub(crate) fn record_decision(
     }
 }
 
+/// Records an [`AuditKind::Authorize`] decision.
+pub(crate) fn record_decision(
+    actor: HolderId,
+    resource: ResourceRef,
+    requested: Rights,
+    handle: CapabilityHandle,
+    depth: u8,
+    result: Result<(), CapabilityError>,
+) {
+    record(event_for(
+        0, actor, resource, requested, handle, depth, result,
+    ));
+}
+
+/// Records `count` capabilities of `subject` revoked by the kernel (teardown, instance gone).
+pub(crate) fn record_kernel_revoke(subject: HolderId, resource: ResourceRef, count: usize) {
+    record(
+        AuditEvent::new(
+            AuditKind::Revoke,
+            HolderId::KERNEL,
+            resource,
+            Rights::empty(),
+        )
+        .with_subject(subject)
+        .with_count(count),
+    );
+}
 #[cfg_attr(not(feature = "m6-audit-self-test"), allow(dead_code))] // Launch-policy API; exercised by M6 self-tests and the M6.8 integration path.
 pub(crate) fn grant_audit_reader(holder: HolderId) -> Result<CapabilityHandle, CapabilityError> {
     grant_root(holder, AUDIT_RESOURCE, Rights::AUDIT_READ)
@@ -126,19 +155,8 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
     }
 
     let log = unsafe { &*AUDIT_LOG.get() };
-    let mut scratch = [clean_slate_capability::AuditEvent {
-        sequence: 0,
-        actor: HolderId(0),
-        class: ResourceClass::Audit,
-        _pad_class: [0; 7],
-        resource_id: 0,
-        requested: Rights::empty(),
-        _pad_rights: 0,
-        handle: 0,
-        outcome: clean_slate_capability::AuditOutcome::allowed(),
-        depth: 0,
-        _pad_tail: [0; 7],
-    }; MAX_AUDIT_READ_EVENTS];
+    let mut scratch = [AuditEvent::EMPTY; MAX_AUDIT_READ_EVENTS];
+    // Gaps in what the reader asked for come back as `AuditKind::Lost` records.
     let (count, _) = log.read_from(since, &mut scratch[..max_events]);
     if count > 0 {
         // SAFETY: `AuditEvent` is `repr(C)` with its padding spelled out as zeroed fields, so all
@@ -155,4 +173,118 @@ pub(crate) fn handle_syscall(frame: &mut SyscallContext) {
         }
     }
     frame.rax = count as u64;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::capability::lifecycle_capabilities_mut;
+
+    fn newest() -> AuditEvent {
+        with_audit_log(|log| {
+            log.get(log.newest_sequence().expect("a record"))
+                .expect("newest record")
+        })
+    }
+
+    fn next_sequence() -> u64 {
+        with_audit_log(|log| log.next_sequence())
+    }
+
+    #[test]
+    fn a_root_grant_records_the_kernel_granting_to_the_holder() {
+        let holder = HolderId(41);
+        let handle = grant_root(holder, AUDIT_RESOURCE, Rights::AUDIT_READ).expect("grant");
+
+        let event = newest();
+        assert_eq!(event.kind, AuditKind::Grant);
+        assert_eq!(event.actor, HolderId::KERNEL);
+        assert_eq!(event.subject, holder);
+        assert_eq!(event.handle, handle.encode());
+        assert!(event.is_allowed());
+    }
+
+    #[test]
+    fn teardown_records_how_many_capabilities_the_holder_lost() {
+        let holder = HolderId(42);
+        grant_root(holder, AUDIT_RESOURCE, Rights::AUDIT_READ).expect("first grant");
+        grant_root(holder, AUDIT_RESOURCE, Rights::AUDIT_READ).expect("second grant");
+
+        assert_eq!(super::super::revoke_for_holder(holder), 2);
+        let event = newest();
+        assert_eq!(event.kind, AuditKind::Revoke);
+        assert_eq!(event.actor, HolderId::KERNEL);
+        assert_eq!(event.subject, holder);
+        assert_eq!(event.count, 2);
+    }
+
+    #[test]
+    fn teardown_of_a_holder_with_nothing_records_nothing() {
+        let before = next_sequence();
+        assert_eq!(super::super::revoke_for_holder(HolderId(43)), 0);
+        assert_eq!(next_sequence(), before);
+    }
+
+    #[test]
+    fn a_kernel_rights_check_records_its_refusal() {
+        let holder = HolderId(44);
+        assert!(!super::super::holder_has_resource_rights(
+            holder,
+            AUDIT_RESOURCE,
+            Rights::AUDIT_READ
+        ));
+        let event = newest();
+        assert_eq!(event.kind, AuditKind::Authorize);
+        assert_eq!(event.actor, holder);
+        assert!(!event.is_allowed());
+    }
+
+    #[test]
+    fn lifecycle_table_grants_and_refusals_are_recorded() {
+        let tables = unsafe { lifecycle_capabilities_mut() };
+        tables.clear();
+        let handle = tables
+            .block_device
+            .grant_block_device_capability(45, 1)
+            .expect("grant block device");
+        let grant = newest();
+        assert_eq!(grant.kind, AuditKind::Grant);
+        assert_eq!(grant.subject, HolderId(45));
+        assert!(grant.is_allowed());
+
+        assert!(tables
+            .block_device
+            .authorize_block_device_access(46, handle, 1)
+            .is_err());
+        let refusal = newest();
+        assert_eq!(refusal.kind, AuditKind::Authorize);
+        assert_eq!(refusal.actor, HolderId(46));
+        assert!(!refusal.is_allowed());
+    }
+
+    #[test]
+    fn a_full_ring_tells_a_late_reader_exactly_what_it_missed() {
+        let first = next_sequence();
+        let total = AUDIT_RING_CAPACITY as u64 + 37;
+        for _ in 0..total {
+            record_decision(
+                HolderId(47),
+                AUDIT_RESOURCE,
+                Rights::AUDIT_READ,
+                CapabilityHandle::INVALID,
+                0,
+                Err(CapabilityError::InvalidHandle),
+            );
+        }
+
+        let mut out = [AuditEvent::EMPTY; 2];
+        let (count, _) = with_audit_log(|log| log.read_from(first, &mut out));
+        assert_eq!(count, 2);
+        assert_eq!(out[0].kind, AuditKind::Lost);
+        assert_eq!(out[0].sequence, first);
+        assert_eq!(out[0].resource_id, 37);
+        assert_eq!(out[1].sequence, first + 37);
+        assert_eq!(out[1].kind, AuditKind::Authorize);
+        assert!(with_audit_log(|log| log.dropped()) >= 37);
+    }
 }

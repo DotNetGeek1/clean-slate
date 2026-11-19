@@ -532,7 +532,7 @@ cargo test -p clean-slate-kernel capability
 cargo xtask test-m6-audit
 ```
 
-`test-m6-audit` builds the M6 fixture userspace image and requires ordered `[AUD ] seq=` … `outcome=allowed`, `[AUD ] seq=` … `outcome=` (a denial such as `invalid-handle` or `wrong-holder`), then `[M6.7] PASS` (90s timeout). Aliases: `m6-audit`, `m6.7`.
+`test-m6-audit` builds the M6 fixture userspace image. The auditor reads from sequence 1, makes 59 denied reads, waits for the intruder (62 denied reads) to exit, and reads from sequence 1 again: 124 records have gone into the 64-record ring, so the reader must be told exactly 60 are lost. The lane requires, in order, the record-time echo `[AUD ] seq=1 kind=grant`, `outcome=allowed`, the echoes of `seq=60` (the last lost record) and `seq=124` (the late read), `[M6.7] reader told lost first=1 missing=60 next=61` (what the CPL3 reader received), then `[M6.7] PASS` (90s timeout). Aliases: `m6-audit`, `m6.7`.
 
 For M6.8 capability convergence acceptance (constituent QEMU boot):
 

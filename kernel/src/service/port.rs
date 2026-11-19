@@ -9,14 +9,9 @@
 //! The syscall layer (`port_syscall.rs`) and the in-kernel client entries share these functions,
 //! so a CPL3 client and the M11 Linux-personality shim take one code path.
 
-#[cfg(any(
-    feature = "m10-port-self-test",
-    feature = "m10-shared-buffer-self-test",
-    clean_slate_desktop
-))]
-use clean_slate_capability::ResourceRef;
 use clean_slate_capability::{
-    CapabilityHandle, CapabilityTable, HolderId, ResourceClass, MAX_SLOTS,
+    AuditEvent, AuditKind, CapabilityError, CapabilityHandle, CapabilityTable, HolderId,
+    ResourceClass, ResourceRef, Rights, MAX_SLOTS,
 };
 use clean_slate_native_abi::port::{PORT_MAX_CONNECTIONS, PORT_MAX_TRANSFERS_IN_FLIGHT};
 #[cfg(any(
@@ -45,7 +40,8 @@ use clean_slate_port::{
 use clean_slate_service_lifecycle::InstanceGeneration;
 
 use crate::arch::x86_64::cpu::without_interrupts;
-use crate::capability::capability_space_mut;
+use crate::capability::audit::{self, record_kernel_revoke};
+use crate::capability::{capability_space_mut, with_capability_space};
 use crate::mm::shared_buffer::reconcile_resource;
 use crate::sched::wait::{wake_all_registered, WaitKey};
 use crate::sched::work_set::{self, WorkSetBinding};
@@ -108,11 +104,62 @@ fn with_ports<R>(
             crate::diagnostics::qemu::fatal_kernel_error("service port effects overflowed");
         }
         for resource in effects.revoked_transfers() {
+            record_kernel_revoke(HolderId::KERNEL, resource, 1);
             reconcile_resource(resource);
         }
         apply(&effects);
         result
     })
+}
+
+/// The capability error an engine refusal stands for; `None` for outcomes that are not
+/// authority decisions (would block, peer closed).
+fn port_denial(error: PortError) -> Option<Result<(), CapabilityError>> {
+    match error {
+        PortError::Invalid => Some(Err(CapabilityError::InvalidHandle)),
+        PortError::Denied => Some(Err(CapabilityError::MissingRight)),
+        PortError::Stale => Some(Err(CapabilityError::StaleHandle)),
+        PortError::NoSpace => Some(Err(CapabilityError::CapacityExhausted)),
+        PortError::Refused => Some(Err(CapabilityError::WrongResource)),
+        PortError::WouldBlock | PortError::PeerClosed => None,
+    }
+}
+
+/// Records a port decision. A use of an established connection or serve handle
+/// (`record_allowed == false`) records refusals only: the connect or grant that conferred it
+/// was recorded, and those calls run once per message.
+fn record_port_decision<T>(
+    event: AuditEvent,
+    record_allowed: bool,
+    result: Result<T, PortError>,
+) -> Result<T, PortError> {
+    let outcome = match &result {
+        Ok(_) if record_allowed => Some(Ok(())),
+        Ok(_) => None,
+        Err(error) => port_denial(*error),
+    };
+    if let Some(outcome) = outcome {
+        audit::record(event.with_result(outcome));
+    }
+    result
+}
+
+fn serve_event(holder: HolderId, serve: u64) -> AuditEvent {
+    let resource = CapabilityHandle::decode(serve)
+        .and_then(|handle| with_capability_space(|table| table.record(handle)))
+        .map_or(ResourceRef::process(holder.0, 0), |record| record.resource);
+    AuditEvent::new(AuditKind::Authorize, holder, resource, Rights::empty())
+        .with_handle(CapabilityHandle::decode(serve).unwrap_or(CapabilityHandle::INVALID))
+}
+
+/// Connection ids are not capabilities; the record names the calling process.
+fn connection_event(holder: HolderId) -> AuditEvent {
+    AuditEvent::new(
+        AuditKind::Authorize,
+        holder,
+        ResourceRef::process(holder.0, 0),
+        Rights::empty(),
+    )
 }
 
 /// Host tests have no live process registry, so they drive the core with explicit callers.
@@ -270,10 +317,21 @@ pub(crate) fn kernel_client_connect(
     class: ResourceClass,
     id: u64,
 ) -> Result<ConnectionId, PortError> {
-    let caller = caller_for(holder)?;
-    with_ports(|core, table, _| {
-        core.connect(table, caller, cap.encode(), u64::from(class.as_u8()), id)
-    })
+    let result = caller_for(holder).and_then(|caller| {
+        with_ports(|core, table, _| {
+            core.connect(table, caller, cap.encode(), u64::from(class.as_u8()), id)
+        })
+    });
+    let resource = ResourceRef {
+        class,
+        id,
+        instance_generation: 0,
+    };
+    record_port_decision(
+        AuditEvent::new(AuditKind::Authorize, holder, resource, Rights::empty()).with_handle(cap),
+        true,
+        result,
+    )
 }
 
 /// The attestation runs before the engine borrows the capability table (#195 reads it too), in
@@ -284,16 +342,37 @@ pub(crate) fn kernel_client_send(
     frame: &[u8; 64],
     transfer: Option<CapabilityHandle>,
 ) -> Result<(), PortError> {
-    let caller = caller_for(holder)?;
-    without_interrupts(|| {
-        let transfer = transfer.map(|handle| Transfer {
-            handle,
-            attestation: attest_for_transfer(holder, handle),
-        });
-        with_ports(|core, table, effects| {
-            core.send(table, caller, connection.encode(), frame, transfer, effects)
+    let transfer_resource = transfer.and_then(|handle| {
+        with_capability_space(|table| table.record(handle))
+            .ok()
+            .map(|record| record.resource)
+    });
+    let result = caller_for(holder).and_then(|caller| {
+        without_interrupts(|| {
+            let transfer = transfer.map(|handle| Transfer {
+                handle,
+                attestation: attest_for_transfer(holder, handle),
+            });
+            with_ports(|core, table, effects| {
+                core.send(table, caller, connection.encode(), frame, transfer, effects)
+            })
         })
-    })
+    });
+    match transfer {
+        // The child lands with the port's server; the engine does not report which holder.
+        Some(handle) => record_port_decision(
+            AuditEvent::new(
+                AuditKind::Delegate,
+                holder,
+                transfer_resource.unwrap_or(ResourceRef::process(holder.0, 0)),
+                Rights::READ,
+            )
+            .with_handle(handle),
+            true,
+            result,
+        ),
+        None => record_port_decision(connection_event(holder), false, result),
+    }
 }
 
 /// `WouldBlock` when nothing is pending; the caller decides whether to block.
@@ -301,8 +380,12 @@ pub(crate) fn kernel_client_try_recv_event(
     holder: HolderId,
     connection: ConnectionId,
 ) -> Result<PortEventRecord, PortError> {
-    let caller = caller_for(holder)?;
-    with_ports(|core, table, effects| core.recv_event(table, caller, connection.encode(), effects))
+    let result = caller_for(holder).and_then(|caller| {
+        with_ports(|core, table, effects| {
+            core.recv_event(table, caller, connection.encode(), effects)
+        })
+    });
+    record_port_decision(connection_event(holder), false, result)
 }
 
 pub(crate) fn kernel_client_close(
@@ -310,10 +393,12 @@ pub(crate) fn kernel_client_close(
     connection: ConnectionId,
     reason: u32,
 ) -> Result<(), PortError> {
-    let caller = caller_for(holder)?;
-    with_ports(|core, table, effects| {
-        core.close(table, caller, connection.encode(), reason, effects)
-    })
+    let result = caller_for(holder).and_then(|caller| {
+        with_ports(|core, table, effects| {
+            core.close(table, caller, connection.encode(), reason, effects)
+        })
+    });
+    record_port_decision(connection_event(holder), false, result)
 }
 
 pub(crate) fn connection_port_key(connection: ConnectionId) -> Result<PortKey, PortError> {
@@ -326,20 +411,40 @@ pub(crate) fn find_handle(
     id: u64,
     role: u64,
 ) -> Result<u64, PortError> {
-    let caller = caller_for(holder)?;
-    with_ports(|core, table, _| core.find_handle(table, caller, class, id, role))
+    let result = caller_for(holder).and_then(|caller| {
+        with_ports(|core, table, _| core.find_handle(table, caller, class, id, role))
+    });
+    let resource =
+        ResourceClass::from_u8(class as u8).map_or(ResourceRef::process(holder.0, 0), |class| {
+            ResourceRef {
+                class,
+                id,
+                instance_generation: 0,
+            }
+        });
+    let event = AuditEvent::new(AuditKind::Authorize, holder, resource, Rights::empty())
+        .with_handle(
+            result
+                .ok()
+                .and_then(|raw| CapabilityHandle::decode(raw).ok())
+                .unwrap_or(CapabilityHandle::INVALID),
+        );
+    record_port_decision(event, true, result)
 }
 
 // ---- server entries ----
 
 pub(crate) fn serve_port_key(holder: HolderId, serve: u64) -> Result<PortKey, PortError> {
-    let caller = caller_for(holder)?;
-    with_ports(|core, table, _| core.serve_port_key(table, caller, serve))
+    let result = caller_for(holder)
+        .and_then(|caller| with_ports(|core, table, _| core.serve_port_key(table, caller, serve)));
+    record_port_decision(serve_event(holder, serve), false, result)
 }
 
 pub(crate) fn server_recv(holder: HolderId, serve: u64) -> Result<PortRecvRecord, PortError> {
-    let caller = caller_for(holder)?;
-    with_ports(|core, table, effects| core.recv(table, caller, serve, effects))
+    let result = caller_for(holder).and_then(|caller| {
+        with_ports(|core, table, effects| core.recv(table, caller, serve, effects))
+    });
+    record_port_decision(serve_event(holder, serve), false, result)
 }
 
 pub(crate) fn server_post(
@@ -348,10 +453,12 @@ pub(crate) fn server_post(
     connection: ConnectionId,
     frame: &[u8; 64],
 ) -> Result<(), PortError> {
-    let caller = caller_for(holder)?;
-    with_ports(|core, table, effects| {
-        core.post(table, caller, serve, connection.encode(), frame, effects)
-    })
+    let result = caller_for(holder).and_then(|caller| {
+        with_ports(|core, table, effects| {
+            core.post(table, caller, serve, connection.encode(), frame, effects)
+        })
+    });
+    record_port_decision(serve_event(holder, serve), false, result)
 }
 
 pub(crate) fn server_disconnect(
@@ -360,10 +467,12 @@ pub(crate) fn server_disconnect(
     connection: ConnectionId,
     reason: u32,
 ) -> Result<(), PortError> {
-    let caller = caller_for(holder)?;
-    with_ports(|core, table, effects| {
-        core.disconnect(table, caller, serve, connection.encode(), reason, effects)
-    })
+    let result = caller_for(holder).and_then(|caller| {
+        with_ports(|core, table, effects| {
+            core.disconnect(table, caller, serve, connection.encode(), reason, effects)
+        })
+    });
+    record_port_decision(serve_event(holder, serve), false, result)
 }
 
 pub(crate) fn server_bind_wake(
@@ -373,18 +482,20 @@ pub(crate) fn server_bind_wake(
     request_bit: u32,
     notice_bit: u32,
 ) -> Result<(), PortError> {
-    let caller = caller_for(holder)?;
-    with_ports(|core, table, effects| {
-        core.bind_wake(
-            table,
-            caller,
-            serve,
-            target,
-            request_bit,
-            notice_bit,
-            effects,
-        )
-    })
+    let result = caller_for(holder).and_then(|caller| {
+        with_ports(|core, table, effects| {
+            core.bind_wake(
+                table,
+                caller,
+                serve,
+                target,
+                request_bit,
+                notice_bit,
+                effects,
+            )
+        })
+    });
+    record_port_decision(serve_event(holder, serve), false, result)
 }
 
 // ---- P4 teardown and accounting ----

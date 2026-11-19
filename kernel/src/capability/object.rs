@@ -324,8 +324,12 @@ fn holder_holds_object_service_role(holder: HolderId) -> bool {
 fn rollback_installed_capability(handle: CapabilityHandle) {
     let table = unsafe { capability_space_mut() };
     let slot = usize::from(handle.slot);
+    let record = table.record(handle);
     if table.revoke(handle).is_ok() {
         table.release_slot(slot);
+        if let Ok(record) = record {
+            super::audit::record_kernel_revoke(record.holder, record.resource, 1);
+        }
     }
 }
 

@@ -2,7 +2,7 @@
 
 ## Security posture
 
-**Status: partial.** `revoke_for_holder` in `kernel/src/capability/mod.rs` revokes a holder's capability tree. `record_decision` in `kernel/src/capability/audit.rs` records some authorization decisions. Making compromise local, visible, and recoverable, as this section describes, is not what the running system does. Gaps: [#217](https://github.com/DotNetGeek1/clean-slate/issues/217), [#218](https://github.com/DotNetGeek1/clean-slate/issues/218), [#219](https://github.com/DotNetGeek1/clean-slate/issues/219).
+**Status: partial.** `revoke_for_holder` in `kernel/src/capability/mod.rs` revokes a holder's capability tree. `record` in `kernel/src/capability/audit.rs` records every grant, delegation, revocation, drop, fork inheritance and refusal the kernel makes, and every allowed authorization except per-message use of an established port connection (the `audit_coverage` host test holds that), with contiguous sequence numbers and an in-band record of any it lost. Making compromise local, visible, and recoverable, as this section describes, is not what the running system does. Gaps: [#217](https://github.com/DotNetGeek1/clean-slate/issues/217), [#218](https://github.com/DotNetGeek1/clean-slate/issues/218), [#219](https://github.com/DotNetGeek1/clean-slate/issues/219).
 
 Clean-Slate assumes that applications, drivers, compatibility runtimes, and even first-party services can eventually contain exploitable bugs.
 
@@ -58,7 +58,7 @@ Raw packet access, LAN discovery, listening sockets, and ordinary outbound conne
 
 ## Privacy ledger
 
-**Status: planned.** `AUDIT_RING_CAPACITY` and `record_decision` in `kernel/src/capability/audit.rs` store capability decisions. `record_decision` passes timestamp `0` to `event_for`. That ring does not answer the camera, file, location, connection, blocked, or update questions below. Gap: [#219](https://github.com/DotNetGeek1/clean-slate/issues/219).
+**Status: planned.** `AUDIT_RING_CAPACITY` and `record` in `kernel/src/capability/audit.rs` keep the last 64 capability decisions in RAM, stamped with monotonic time since boot (0 before the TSC is calibrated) and readable only with `Rights::AUDIT_READ`; a reader is told how many it missed. Nothing persists them, and nothing makes them tamper-evident. That ring does not answer the camera, file, location, connection, blocked, or update questions below. Gap: [#219](https://github.com/DotNetGeek1/clean-slate/issues/219).
 
 The user should have a system-level privacy ledger capable of answering:
 

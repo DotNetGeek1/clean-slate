@@ -683,11 +683,16 @@ const M6_DELEGATION_ACCEPTANCE_MARKERS: [&str; 8] = [
     "reason=missing-right",
     "[M6.5] PASS",
 ];
-const M6_AUDIT_ACCEPTANCE_MARKERS: [&str; 5] = [
-    "[AUD ] seq=",
+/// The lane makes 124 records into the 64-slot ring (`kernel/src/selftest/m6_audit.rs`), so a
+/// reader starting at 1 must be told exactly 60 are lost. Seq 60 and 124 are the kernel's
+/// record-time echoes of the last lost record and the late read itself; the `reader told` line
+/// is what the CPL3 reader received.
+const M6_AUDIT_ACCEPTANCE_MARKERS: [&str; 6] = [
+    "[AUD ] seq=1 kind=grant ",
     "outcome=allowed",
-    "[AUD ] seq=",
-    "outcome=",
+    "[AUD ] seq=60 kind=authorize ",
+    "[AUD ] seq=124 kind=authorize ",
+    "[M6.7] reader told lost first=1 missing=60 next=61 ",
     "[M6.7] PASS",
 ];
 /// Workload progress=1 is logged before any fixture is spawned. The owner revokes

@@ -3,7 +3,7 @@
 use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::capability::audit::{
-    grant_audit_reader, set_audit_serial_echo, with_audit_log, AUDIT_RESOURCE,
+    grant_audit_reader, set_audit_serial_echo, with_audit_log, AUDIT_RESOURCE, AUDIT_RING_CAPACITY,
 };
 use crate::capability::bootstrap_grant::register_bootstrap_grant;
 use crate::diagnostics::log::kernel_log_fmt;
@@ -17,7 +17,7 @@ use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
 use crate::sched::Scheduler;
 use crate::selftest::m6_fixture::{
-    fixture_service, set_report_handler, spawn_fixture, FixtureReportAction,
+    fixture_service, set_report_handler, spawn_fixture, wait_exit_step, FixtureReportAction,
 };
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
@@ -25,7 +25,7 @@ use clean_slate_capability::syscall_abi::{
     SYSCALL_EINVAL, SYSCALL_NR_CAP_AUDIT_READ, SYSCALL_NR_CAP_GRANT,
 };
 use clean_slate_capability::{
-    AuditEvent, AuditOutcome, HolderId, ResourceClass, AUDIT_EVENT_SIZE_BYTES,
+    AuditEvent, AuditKind, AuditOutcome, HolderId, ResourceClass, AUDIT_EVENT_SIZE_BYTES,
 };
 use clean_slate_service_fixtures::m6_fixture::{
     M6FixtureBootstrap, M6FixtureStep, ARG_DATA_PTR, ARG_RESULT_OF, FIXTURE_STATUS_MISMATCH,
@@ -38,7 +38,16 @@ const PASS_MARKER: &str = "[M6.7] PASS";
 const FIXTURE_AUDITOR: u64 = 0;
 const FIXTURE_INTRUDER: u64 = 1;
 
-const AUDIT_DATA_BYTES: usize = AUDIT_EVENT_SIZE_BYTES * 8;
+const AUDIT_READ_EVENTS: u64 = 8;
+const AUDIT_DATA_BYTES: usize = AUDIT_EVENT_SIZE_BYTES * AUDIT_READ_EVENTS as usize;
+const PREDICTED_INTRUDER_PID: u64 = 2;
+
+/// Fixture steps hold 64 entries; the denied reads fill what the others leave.
+const AUDITOR_DENIED_READS: usize = 59;
+const INTRUDER_DENIED_READS: usize = 62;
+/// Every record the lane makes: the reader grant, the auditor's two reads, and the denials.
+const LANE_RECORDS: u64 = 1 + 2 + (AUDITOR_DENIED_READS + INTRUDER_DENIED_READS) as u64;
+const EXPECTED_MISSING: u64 = LANE_RECORDS - AUDIT_RING_CAPACITY as u64;
 
 struct AuditSelfTestState {
     auditor_pid: u64,
@@ -66,9 +75,17 @@ fn arg_result(step_index: usize) -> u64 {
     ARG_RESULT_OF | (step_index as u64 & 0xff)
 }
 
+fn read_step(handle: u64, out_offset: usize) -> M6FixtureStep {
+    M6FixtureStep::syscall(
+        SYSCALL_NR_CAP_AUDIT_READ,
+        [handle, 1, arg_data(out_offset), AUDIT_READ_EVENTS, 0, 0],
+    )
+}
+
+/// Reads from sequence 1 before and after the ring overflows; the second read lands at
+/// `AUDIT_DATA_BYTES` and must open with the record of what it missed.
 fn build_auditor_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
-    let out_offset = 0usize;
     let claim = program
         .push(
             M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0])
@@ -76,23 +93,17 @@ fn build_auditor_program() -> M6FixtureBootstrap {
         )
         .unwrap();
     let handle = arg_result(claim);
+    program.push(read_step(handle, 0).expect_ne(0)).unwrap();
+    for _ in 0..AUDITOR_DENIED_READS {
+        program
+            .push(read_step(0, 0).expect_eq(SYSCALL_EINVAL))
+            .unwrap();
+    }
     program
-        .push(
-            M6FixtureStep::syscall(
-                SYSCALL_NR_CAP_AUDIT_READ,
-                [handle, 1, arg_data(out_offset), 8, 0, 0],
-            )
-            .expect_ne(0),
-        )
+        .push(wait_exit_step(PREDICTED_INTRUDER_PID))
         .unwrap();
     program
-        .push(
-            M6FixtureStep::syscall(
-                SYSCALL_NR_CAP_AUDIT_READ,
-                [handle, 1, arg_data(out_offset), 8, 0, 0],
-            )
-            .expect_ne(0),
-        )
+        .push(read_step(handle, AUDIT_DATA_BYTES).expect_eq(AUDIT_READ_EVENTS))
         .unwrap();
     program.push(M6FixtureStep::report()).unwrap();
     program
@@ -100,25 +111,12 @@ fn build_auditor_program() -> M6FixtureBootstrap {
 
 fn build_intruder_program() -> M6FixtureBootstrap {
     let mut program = M6FixtureBootstrap::new();
-    let out_offset = 0usize;
     program
-        .push(
-            M6FixtureStep::syscall(
-                SYSCALL_NR_CAP_AUDIT_READ,
-                [0, 1, arg_data(out_offset), 8, 0, 0],
-            )
-            .expect_eq(SYSCALL_EINVAL),
-        )
+        .push(read_step(0, 0).expect_eq(SYSCALL_EINVAL))
         .unwrap();
-    program
-        .push(
-            M6FixtureStep::syscall(
-                SYSCALL_NR_CAP_AUDIT_READ,
-                [1 << 16, 1, arg_data(out_offset), 8, 0, 0],
-            )
-            .expect_ne(0),
-        )
-        .unwrap();
+    for _ in 1..INTRUDER_DENIED_READS {
+        program.push(read_step(1 << 16, 0).expect_ne(0)).unwrap();
+    }
     program.push(M6FixtureStep::report()).unwrap();
     program
 }
@@ -167,52 +165,50 @@ fn validate_auditor_report(report: &M6FixtureBootstrap) -> Result<(), &'static s
     if !sequences_monotonic(events) {
         return Err("auditor event sequences not monotonic");
     }
+    let late = parse_events(report.data_at(AUDIT_DATA_BYTES, AUDIT_DATA_BYTES)?)?;
+    let (lost, retained) = late
+        .split_first()
+        .ok_or("auditor's late read returned nothing")?;
+    if lost.kind != AuditKind::Lost {
+        return Err("auditor's late read did not open with a lost record");
+    }
+    let missing = lost.resource_id;
+    let next = retained.first().map_or(0, |event| event.sequence);
+    // What the CPL3 reader received, for the lane to compare with the record-time echo.
+    kernel_log_fmt(format_args!(
+        "[M6.7] reader told lost first={} missing={missing} next={next} records={}\n",
+        lost.sequence,
+        late.len()
+    ));
+    if lost.sequence != 1 || missing != EXPECTED_MISSING || next != 1 + missing {
+        return Err("auditor's lost record does not match the overwritten records");
+    }
+    if !sequences_monotonic(late) {
+        return Err("auditor's late read sequences not monotonic");
+    }
     Ok(())
 }
 
+/// Every retained record and the loss record ahead of them.
+fn read_whole_log(buf: &mut [AuditEvent; AUDIT_RING_CAPACITY + 1]) -> usize {
+    with_audit_log(|log| log.read_from(1, buf).0)
+}
+
 fn log_contains_allowed_auditor(auditor_pid: u64) -> bool {
-    with_audit_log(|log| {
-        let mut buf = [AuditEvent {
-            sequence: 0,
-            actor: HolderId(0),
-            class: ResourceClass::Audit,
-            _pad_class: [0; 7],
-            resource_id: 0,
-            requested: clean_slate_capability::Rights::empty(),
-            _pad_rights: 0,
-            handle: 0,
-            outcome: AuditOutcome::allowed(),
-            depth: 0,
-            _pad_tail: [0; 7],
-        }; 64];
-        let (count, _) = log.read_from(1, &mut buf);
-        buf[..count].iter().any(|event| {
-            event.outcome.tag == AuditOutcome::TAG_ALLOWED
-                && event.actor == HolderId(auditor_pid)
-                && event.class == ResourceClass::Audit
-        })
+    let mut buf = [AuditEvent::EMPTY; AUDIT_RING_CAPACITY + 1];
+    let count = read_whole_log(&mut buf);
+    buf[..count].iter().any(|event| {
+        event.outcome.tag == AuditOutcome::TAG_ALLOWED
+            && event.actor == HolderId(auditor_pid)
+            && event.class == ResourceClass::Audit
     })
 }
 
 fn log_contains_denied_intruder(intruder_pid: u64) -> bool {
-    with_audit_log(|log| {
-        let mut buf = [AuditEvent {
-            sequence: 0,
-            actor: HolderId(0),
-            class: ResourceClass::Audit,
-            _pad_class: [0; 7],
-            resource_id: 0,
-            requested: clean_slate_capability::Rights::empty(),
-            _pad_rights: 0,
-            handle: 0,
-            outcome: AuditOutcome::allowed(),
-            depth: 0,
-            _pad_tail: [0; 7],
-        }; 64];
-        let (count, _) = log.read_from(1, &mut buf);
-        buf[..count].iter().any(|event| {
-            event.outcome.tag == AuditOutcome::TAG_DENIED && event.actor == HolderId(intruder_pid)
-        })
+    let mut buf = [AuditEvent::EMPTY; AUDIT_RING_CAPACITY + 1];
+    let count = read_whole_log(&mut buf);
+    buf[..count].iter().any(|event| {
+        event.outcome.tag == AuditOutcome::TAG_DENIED && event.actor == HolderId(intruder_pid)
     })
 }
 
@@ -257,8 +253,6 @@ pub(crate) fn start_m6_audit_self_test(allocator: PageAllocator) -> ! {
         .as_mut()
         .expect("m6 audit self-test allocator missing");
     let stacks = unsafe { &*task_stacks_mut() };
-
-    const PREDICTED_INTRUDER_PID: u64 = 2;
 
     let auditor_service = fixture_service(FIXTURE_AUDITOR);
     let auditor_program = build_auditor_program();

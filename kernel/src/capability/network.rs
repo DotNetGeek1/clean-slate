@@ -5,8 +5,9 @@
 use core::fmt::{self, Write};
 
 use clean_slate_capability::{
-    revoke_subtree, CapabilityError, CapabilityHandle, CapabilityRecord, CapabilityState,
-    CapabilityTable, HolderId, Provenance, ResourceClass, ResourceRef, Rights,
+    revoke_subtree, AuditEvent, AuditKind, CapabilityError, CapabilityHandle, CapabilityRecord,
+    CapabilityState, CapabilityTable, HolderId, PolicyRefusal, Provenance, ResourceClass,
+    ResourceRef, Rights,
 };
 use clean_slate_network::error::DenialReason;
 use clean_slate_network::session::{SessionGeneration, SessionId};
@@ -18,7 +19,7 @@ use crate::service::instance_generation::live_network_instance_generation;
 use crate::service::instance_generation::live_network_service_generation;
 use crate::sync::global_cell::GlobalCell;
 
-use super::audit::record_decision;
+use super::audit::{self, record_decision, record_kernel_revoke};
 use super::{capability_space_mut, grant_root, with_capability_space};
 
 /// Logical network service id for `ResourceClass::Network` capability records.
@@ -185,14 +186,26 @@ pub(crate) fn grant_network_authority(
     instance_generation: Option<u64>,
 ) -> Result<CapabilityHandle, CapabilityError> {
     let effective = match policy {
-        NetworkGrantPolicy::Application => sanitize_application_rights(rights)?,
-        NetworkGrantPolicy::NetworkService => {
-            if !rights.is_subset_of(Rights::valid_for(ResourceClass::Network)) {
-                return Err(CapabilityError::InvalidRights);
-            }
-            rights
+        NetworkGrantPolicy::Application => sanitize_application_rights(rights),
+        NetworkGrantPolicy::NetworkService
+            if !rights.is_subset_of(Rights::valid_for(ResourceClass::Network)) =>
+        {
+            Err(CapabilityError::InvalidRights)
         }
+        NetworkGrantPolicy::NetworkService => Ok(rights),
     };
+    let effective = effective.inspect_err(|error| {
+        audit::record(
+            AuditEvent::new(
+                AuditKind::Grant,
+                HolderId::KERNEL,
+                network_service_any_instance(),
+                rights,
+            )
+            .with_subject(target_holder)
+            .with_result(Err(*error)),
+        );
+    })?;
     let resource = match instance_generation {
         Some(generation) => ResourceRef::network(u64::from(NETWORK_SERVICE_ID.0), generation),
         None => network_service_resource()?,
@@ -313,6 +326,18 @@ pub(crate) fn authorize_network_op(
     };
     if let Some(session_gen) = session_generation {
         if session_gen.get() != live_resource.instance_generation {
+            audit::record(
+                AuditEvent::new(
+                    AuditKind::Authorize,
+                    trusted_holder,
+                    live_resource,
+                    op.required_right(),
+                )
+                .with_handle(
+                    CapabilityHandle::decode(raw_handle).unwrap_or(CapabilityHandle::INVALID),
+                )
+                .refused(PolicyRefusal::StaleTarget),
+            );
             log_stale_session(session_gen.get());
             return Err(DenialReason::StaleGeneration);
         }
@@ -384,7 +409,10 @@ pub(crate) fn register_network_session(
 pub(crate) fn on_revoked(handle: CapabilityHandle) -> [SessionId; MAX_TRACKED_SESSIONS] {
     let impacted = unsafe { (*NETWORK_SESSIONS.get()).sessions_for_handle(handle) };
     let table = unsafe { capability_space_mut() };
-    let _ = revoke_subtree(table, handle);
+    let record = table.record(handle);
+    if let (Ok(record), Ok(count)) = (record, revoke_subtree(table, handle)) {
+        record_kernel_revoke(record.holder, record.resource, count);
+    }
     impacted
 }
 
@@ -522,7 +550,33 @@ fn revoke_client_capabilities_in<const N: usize>(
             table.release_slot(slot);
         }
     }
+    if revoked > 0 {
+        record_kernel_revoke(holder, network_service_any_instance(), revoked);
+    }
     revoked
+}
+
+/// Names the network service across instances, for records about client capabilities.
+const fn network_service_any_instance() -> ResourceRef {
+    ResourceRef::network(NETWORK_SERVICE_ID.0 as u64, 0)
+}
+
+fn record_client_grant(
+    holder: HolderId,
+    resource: ResourceRef,
+    result: Result<CapabilityHandle, CapabilityError>,
+) {
+    audit::record(
+        AuditEvent::new(
+            AuditKind::Grant,
+            HolderId::KERNEL,
+            resource,
+            NETWORK_CLIENT_RIGHTS,
+        )
+        .with_subject(holder)
+        .with_handle(*result.as_ref().unwrap_or(&CapabilityHandle::INVALID))
+        .with_result(result.map(|_| ())),
+    );
 }
 
 /// Replaces `holder`'s client capability with one bound to instance `generation`.
@@ -531,16 +585,20 @@ fn issue_client_capability_in<const N: usize>(
     holder: HolderId,
     generation: u64,
 ) -> Result<CapabilityHandle, CapabilityError> {
-    if !is_started_instance_generation(generation) {
-        return Err(CapabilityError::WrongResource);
-    }
-    revoke_client_capabilities_in(table, holder);
-    table.grant(
-        holder,
-        ResourceRef::network(u64::from(NETWORK_SERVICE_ID.0), generation),
-        NETWORK_CLIENT_RIGHTS,
-        Provenance::root(holder),
-    )
+    let resource = ResourceRef::network(u64::from(NETWORK_SERVICE_ID.0), generation);
+    let result = if is_started_instance_generation(generation) {
+        revoke_client_capabilities_in(table, holder);
+        table.grant(
+            holder,
+            resource,
+            NETWORK_CLIENT_RIGHTS,
+            Provenance::root(holder),
+        )
+    } else {
+        Err(CapabilityError::WrongResource)
+    };
+    record_client_grant(holder, resource, result);
+    result
 }
 
 /// Installs the entitlement for `holder`, and its client capability when an instance is
@@ -551,12 +609,14 @@ fn grant_entitlement_in<const N: usize>(
     holder: HolderId,
     live_generation: Option<u64>,
 ) -> Result<(), CapabilityError> {
-    table.grant(
+    let entitlement = table.grant(
         holder,
         network_client_entitlement_resource(),
         NETWORK_CLIENT_RIGHTS,
         Provenance::root(holder),
-    )?;
+    );
+    record_client_grant(holder, network_client_entitlement_resource(), entitlement);
+    entitlement?;
     if let Some(generation) = live_generation {
         issue_client_capability_in(table, holder, generation)?;
     }

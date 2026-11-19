@@ -1245,6 +1245,16 @@ mod tests {
             "root_grant_carries_exactly_the_requested_seat_zero_rights",
             "revoke_for_holder",
         ),
+        (
+            "capability/audit.rs",
+            "teardown_records_how_many_capabilities_the_holder_lost",
+            "revoke_for_holder",
+        ),
+        (
+            "capability/audit.rs",
+            "teardown_of_a_holder_with_nothing_records_nothing",
+            "revoke_for_holder",
+        ),
         // Shared-buffer host tests replay step 4 on a bare capability table.
         (
             "mm/shared_buffer/tests.rs",
