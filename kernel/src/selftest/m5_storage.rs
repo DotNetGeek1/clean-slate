@@ -230,7 +230,10 @@ pub(crate) fn start_m5_storage_self_test(allocator: PageAllocator) -> ! {
                 .unwrap_or_else(|message| fatal_kernel_error(message));
         }
         controller
-            .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID)
+            .grant_lifecycle_control_capability(
+                SUPERVISOR_TEST_PID,
+                &[STORAGE_SERVICE_ID, STORAGE_UNAUTHORIZED_SERVICE_ID],
+            )
             .unwrap_or_else(|message| fatal_kernel_error(message))
     };
     let initial_state = M5StorageSelfTestState {

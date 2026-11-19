@@ -1055,7 +1055,10 @@ pub(crate) fn start_m9_userspace_self_test(page_allocator: PageAllocator) -> ! {
         .declare_service(NETWORK_SERVICE_ID)
         .unwrap_or_else(|m| fatal_kernel_error(m));
     let lifecycle_capability = controller
-        .grant_lifecycle_control_capability(supervisor_holder())
+        .grant_lifecycle_control_capability(
+            supervisor_holder(),
+            &[STORAGE_SERVICE_ID, NETWORK_SERVICE_ID],
+        )
         .unwrap_or_else(|m| fatal_kernel_error(m));
 
     launch_storage_service(controller, allocator, lifecycle_capability);

@@ -60,7 +60,7 @@ pub(crate) fn start_service_lifecycle_self_test(allocator: PageAllocator) -> ! {
         .declare_service(ServiceId(2))
         .unwrap_or_else(|message| fatal_kernel_error(message));
     let lifecycle_capability = controller
-        .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID)
+        .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID, &[ServiceId(2)])
         .unwrap_or_else(|message| fatal_kernel_error(message));
     let allocator = match crate::syscall::service_lifecycle_syscall_allocator_mut().as_mut() {
         Some(allocator) => allocator,

@@ -163,6 +163,8 @@ impl Rights {
             }
             // A delegated shared buffer is read-only and cannot be passed on or revoked.
             ResourceClass::SharedBuffer => Self(Self::WRITE.0 | Self::DELEGATE.0 | Self::REVOKE.0),
+            // Raw NIC authority is granted by the kernel to the live network service only.
+            ResourceClass::Network => Self::NET_RAW_DEVICE,
             _ => Self::empty(),
         }
     }

@@ -481,7 +481,7 @@ pub(crate) fn launch_init(
             let console_capability = unsafe { crate::ipc::endpoint_table_mut() }
                 .grant_console_capability_for_pid(pid)?;
             let lifecycle_capability = unsafe { super::service_lifecycle_controller_mut() }
-                .grant_lifecycle_control_capability(pid)?;
+                .grant_lifecycle_control_capability(pid, manifest.iter().map(|spec| &spec.id))?;
             Ok(InitBootstrap {
                 self_pid: pid,
                 console_capability,
@@ -504,7 +504,31 @@ pub(crate) fn launch_init(
     if !matches {
         return Err("init holds authority beyond lifecycle control and the console");
     }
+    let scope_matches = init_lifecycle_scope_is(pid, manifest);
+    kernel_log_fmt(format_args!(
+        "[KERN] init lifecycle scope pid={pid} services={} matches-manifest={}\n",
+        manifest.len(),
+        u8::from(scope_matches)
+    ));
+    if !scope_matches {
+        return Err("init's lifecycle control scope is not its manifest rows");
+    }
     Ok(pid)
+}
+
+/// #220: init's lifecycle-control capability covers exactly its manifest's services.
+#[cfg(clean_slate_system_init)]
+fn init_lifecycle_scope_is(
+    pid: u64,
+    manifest: &[clean_slate_service_fixtures::manifest::ServiceSpec],
+) -> bool {
+    let Some(scope) = unsafe { super::capability::lifecycle_capabilities_mut() }
+        .lifecycle_control
+        .scope_of(pid)
+    else {
+        return false;
+    };
+    scope.services().len() == manifest.len() && manifest.iter().all(|spec| scope.covers(spec.id))
 }
 
 /// Idle halts in a row, while init waits in `LIFECYCLE_WAIT` with no deadline, before the

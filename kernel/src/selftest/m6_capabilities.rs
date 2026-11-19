@@ -651,13 +651,12 @@ fn register_controller_grants(controller_pid: u64, target_pid: u64) {
     let full = grant_process_control(
         controller,
         target_pid,
-        0,
         Rights::OBSERVE.union(Rights::TERMINATE),
     )
     .unwrap_or_else(|_| fatal_kernel_error("m6.8 process-control full grant failed"));
     register_bootstrap_grant(controller, full)
         .unwrap_or_else(|message| fatal_kernel_error(message));
-    let observe_only = grant_process_control(controller, target_pid, 0, Rights::OBSERVE)
+    let observe_only = grant_process_control(controller, target_pid, Rights::OBSERVE)
         .unwrap_or_else(|_| fatal_kernel_error("m6.8 process-control observe grant failed"));
     register_bootstrap_grant(controller, observe_only)
         .unwrap_or_else(|message| fatal_kernel_error(message));
@@ -680,7 +679,7 @@ pub(crate) fn start_m6_capabilities_self_test(allocator: PageAllocator) -> ! {
             .declare_service(STORAGE_SERVICE_ID)
             .unwrap_or_else(|message| fatal_kernel_error(message));
         controller
-            .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID)
+            .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID, &[STORAGE_SERVICE_ID])
             .unwrap_or_else(|message| fatal_kernel_error(message))
     };
     set_report_handler(capabilities_report_handler);

@@ -213,7 +213,10 @@ pub(crate) fn start_m7_net_service_self_test(allocator: PageAllocator) -> ! {
             .declare_service(NETWORK_UNAUTHORIZED_SERVICE_ID)
             .unwrap_or_else(|message| fatal_kernel_error(message));
         controller
-            .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID)
+            .grant_lifecycle_control_capability(
+                SUPERVISOR_TEST_PID,
+                &[NETWORK_SERVICE_ID, NETWORK_UNAUTHORIZED_SERVICE_ID],
+            )
             .unwrap_or_else(|message| fatal_kernel_error(message))
     };
     set_state(Some(M7NetSelfTestState {

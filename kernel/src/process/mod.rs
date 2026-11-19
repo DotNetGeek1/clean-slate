@@ -595,6 +595,72 @@ mod tests {
         assert!(replacement_generation.0 > first_generation.0);
     }
 
+    /// #220: a process-control record minted for one incarnation of a pid is refused once the
+    /// pid names a later process.
+    #[test]
+    fn process_control_for_a_recycled_pid_is_stale() {
+        use crate::capability::process_control::{
+            decide, live_target_in, DenyReason, PROCESS_OP_OBSERVE,
+        };
+        use clean_slate_capability::{CapabilityTable, HolderId, Provenance, ResourceRef, Rights};
+
+        fn live_process(id: u64) -> Process {
+            Process {
+                id,
+                instance_generation: InstanceGeneration(0),
+                state: ProcessState::Ready,
+                resource_domain: ResourceDomain::with_root_frame(id, 0x9000),
+                live_threads: 1,
+                exit_status: None,
+                execution_personality: ExecutionPersonality::Native,
+            }
+        }
+
+        let mut registry = ProcessRegistry::new();
+        registry.insert(live_process(17)).expect("insert first");
+        let first = registry.instance_generation(17).expect("first generation");
+        assert_ne!(first.0, 0, "a live process has a real generation");
+        assert_eq!(
+            live_target_in(&registry, 17).map(|live| live.instance_generation),
+            Some(u64::from(first.0))
+        );
+
+        let controller = HolderId(3);
+        let mut table = CapabilityTable::<8>::new();
+        let handle = table
+            .grant(
+                controller,
+                ResourceRef::process(17, u64::from(first.0)),
+                Rights::OBSERVE,
+                Provenance::root(controller),
+            )
+            .expect("grant")
+            .encode();
+        assert!(
+            decide(&table, controller, handle, PROCESS_OP_OBSERVE, |pid| {
+                live_target_in(&registry, pid)
+            })
+            .is_ok()
+        );
+
+        let process = registry.get_mut(17).expect("first process");
+        process.state = ProcessState::Exited;
+        process.live_threads = 0;
+        process.exit_status = Some(0);
+        reap_process_record(process).expect("reap first");
+        registry.release_reaped(17).expect("release first slot");
+        registry
+            .insert(live_process(17))
+            .expect("insert replacement");
+
+        assert_eq!(
+            decide(&table, controller, handle, PROCESS_OP_OBSERVE, |pid| {
+                live_target_in(&registry, pid)
+            }),
+            Err(DenyReason::StaleTarget)
+        );
+    }
+
     #[test]
     fn process_registry_rejects_instance_generation_overflow() {
         let mut registry = ProcessRegistry::new();

@@ -253,7 +253,9 @@ pub(crate) fn holder_has_resource_rights(
 /// Duplicates every live capability held by `parent` onto `child` for Linux `fork(2)`.
 ///
 /// Unlike userspace [`clean_slate_capability::delegate`], this kernel-only path does not
-/// require `Rights::DELEGATE` on the parent caps — fork is not a delegation syscall.
+/// require `Rights::DELEGATE` on the parent caps — fork is not a delegation syscall. A record
+/// with root-only rights ([`clean_slate_capability::fork_inheritable`]) is withheld, with a
+/// `NotDelegable` record per withheld capability.
 #[cfg(clean_slate_linux_proc)]
 pub(crate) fn inherit_capabilities_for_fork(
     parent: HolderId,
@@ -288,6 +290,15 @@ fn copy_capabilities_for_fork(parent: HolderId, child: HolderId) -> Result<usize
             break;
         };
         cursor = next_cursor;
+        if !clean_slate_capability::fork_inheritable(&record) {
+            audit::record(
+                AuditEvent::new(AuditKind::Inherit, parent, record.resource, record.rights)
+                    .with_subject(child)
+                    .with_handle(handle)
+                    .with_result(Err(CapabilityError::NotDelegable)),
+            );
+            continue;
+        }
         let provenance = match Provenance::child_of(handle, &record.provenance) {
             Ok(provenance) => provenance,
             Err(error) => {

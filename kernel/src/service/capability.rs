@@ -4,7 +4,10 @@ use clean_slate_capability::{
     AuditEvent, AuditKind, CapabilityError, HolderId, ResourceClass, ResourceRef, Rights,
 };
 
+use clean_slate_service_lifecycle::ServiceId;
+
 use crate::capability::audit::{self, record_kernel_revoke};
+use crate::limits::SERVICE_REGISTRY_CAPACITY;
 use crate::sync::global_cell::GlobalCell;
 
 const LIFECYCLE_CONTROL_RESOURCE: ResourceRef = ResourceRef {
@@ -40,12 +43,64 @@ fn record_lifecycle_decision(
 const LIFECYCLE_CONTROL_CAPABILITY_CAPACITY: usize = 4;
 const BLOCK_DEVICE_CAPABILITY_CAPACITY: usize = 4;
 
+const fn lifecycle_control_resource(service: Option<ServiceId>) -> ResourceRef {
+    match service {
+        Some(service) => ResourceRef {
+            class: ResourceClass::LifecycleControl,
+            id: service.0 as u64,
+            instance_generation: 0,
+        },
+        None => LIFECYCLE_CONTROL_RESOURCE,
+    }
+}
+
+/// The services one lifecycle-control capability may start, stop, restart and poll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LifecycleScope {
+    services: [ServiceId; SERVICE_REGISTRY_CAPACITY],
+    len: usize,
+}
+
+impl LifecycleScope {
+    pub(crate) const EMPTY: Self = Self {
+        services: [ServiceId(0); SERVICE_REGISTRY_CAPACITY],
+        len: 0,
+    };
+
+    /// No more services than the registry can declare; duplicates are kept once.
+    pub(crate) fn of<'a>(
+        services: impl IntoIterator<Item = &'a ServiceId>,
+    ) -> Result<Self, &'static str> {
+        let mut scope = Self::EMPTY;
+        for &service in services {
+            if scope.covers(service) {
+                continue;
+            }
+            if scope.len == SERVICE_REGISTRY_CAPACITY {
+                return Err("lifecycle control scope exceeds the service registry");
+            }
+            scope.services[scope.len] = service;
+            scope.len += 1;
+        }
+        Ok(scope)
+    }
+
+    pub(crate) fn covers(&self, service: ServiceId) -> bool {
+        self.services().contains(&service)
+    }
+
+    pub(crate) fn services(&self) -> &[ServiceId] {
+        &self.services[..self.len]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LifecycleControlCapability {
     holder_pid: u64,
     generation: u16,
     active: bool,
     retired: bool,
+    scope: LifecycleScope,
 }
 
 impl LifecycleControlCapability {
@@ -54,6 +109,7 @@ impl LifecycleControlCapability {
         generation: 0,
         active: false,
         retired: false,
+        scope: LifecycleScope::EMPTY,
     };
 }
 
@@ -81,6 +137,8 @@ pub(crate) enum LifecycleControlCapabilityError {
     InvalidHandle,
     StaleHandle,
     Unauthorized,
+    /// The handle is valid but names a service outside its scope.
+    OutOfScope,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,6 +400,7 @@ impl LifecycleControlCapabilityTable {
     fn retire_capability(capability: &mut LifecycleControlCapability) {
         capability.active = false;
         capability.holder_pid = 0;
+        capability.scope = LifecycleScope::EMPTY;
         if let Some(next_generation) = Self::next_generation(capability.generation) {
             capability.generation = next_generation;
         } else {
@@ -349,11 +408,13 @@ impl LifecycleControlCapabilityTable {
         }
     }
 
+    /// Grants `holder_pid` control of the services in `scope`, and of no other.
     pub(crate) fn grant_lifecycle_control_capability(
         &mut self,
         holder_pid: u64,
+        scope: LifecycleScope,
     ) -> Result<u64, &'static str> {
-        let result = self.install_lifecycle_control_capability(holder_pid);
+        let result = self.install_lifecycle_control_capability(holder_pid, scope);
         record_lifecycle_decision(
             AuditKind::Grant,
             HolderId::KERNEL,
@@ -370,6 +431,7 @@ impl LifecycleControlCapabilityTable {
     fn install_lifecycle_control_capability(
         &mut self,
         holder_pid: u64,
+        scope: LifecycleScope,
     ) -> Result<u64, &'static str> {
         for (slot, capability) in self.capabilities.iter_mut().enumerate() {
             if capability.active || capability.retired {
@@ -385,6 +447,7 @@ impl LifecycleControlCapabilityTable {
             capability.holder_pid = holder_pid;
             capability.generation = next_generation;
             capability.active = true;
+            capability.scope = scope;
             return Ok(LifecycleControlHandleParts {
                 capability_slot: u16::try_from(slot)
                     .map_err(|_| "lifecycle control capability slot exceeded u16 handle field")?,
@@ -395,24 +458,28 @@ impl LifecycleControlCapabilityTable {
         Err("lifecycle control capability table capacity exceeded or generation exhausted")
     }
 
+    /// Authorizes `raw_handle` for `service`, or, with `None`, for whichever services its scope
+    /// covers (the pending-event peek). Returns the scope.
     pub(crate) fn authorize_lifecycle_control(
         &self,
         holder_pid: u64,
         raw_handle: u64,
-    ) -> Result<(), LifecycleControlCapabilityError> {
-        let result = self.check_lifecycle_control(holder_pid, raw_handle);
+        service: Option<ServiceId>,
+    ) -> Result<LifecycleScope, LifecycleControlCapabilityError> {
+        let result = self.check_lifecycle_control(holder_pid, raw_handle, service);
         record_lifecycle_decision(
             AuditKind::Authorize,
             HolderId(holder_pid),
             holder_pid,
-            LIFECYCLE_CONTROL_RESOURCE,
+            lifecycle_control_resource(service),
             raw_handle,
-            result.map_err(|error| match error {
+            result.map(|_| ()).map_err(|error| match error {
                 LifecycleControlCapabilityError::InvalidHandle => CapabilityError::InvalidHandle,
                 LifecycleControlCapabilityError::StaleHandle => CapabilityError::StaleHandle,
                 LifecycleControlCapabilityError::Unauthorized => {
                     CapabilityError::UnauthorizedHolder
                 }
+                LifecycleControlCapabilityError::OutOfScope => CapabilityError::WrongResource,
             }),
         );
         result
@@ -422,7 +489,8 @@ impl LifecycleControlCapabilityTable {
         &self,
         holder_pid: u64,
         raw_handle: u64,
-    ) -> Result<(), LifecycleControlCapabilityError> {
+        service: Option<ServiceId>,
+    ) -> Result<LifecycleScope, LifecycleControlCapabilityError> {
         let handle = LifecycleControlHandleParts::decode(raw_handle);
         let capability = match self.capabilities.get(handle.capability_slot as usize) {
             Some(capability) => capability,
@@ -440,7 +508,19 @@ impl LifecycleControlCapabilityTable {
         if capability.holder_pid != holder_pid {
             return Err(LifecycleControlCapabilityError::Unauthorized);
         }
-        Ok(())
+        if service.is_some_and(|service| !capability.scope.covers(service)) {
+            return Err(LifecycleControlCapabilityError::OutOfScope);
+        }
+        Ok(capability.scope)
+    }
+
+    /// The scope of the first active lifecycle-control capability `pid` holds.
+    #[cfg(clean_slate_system_init)]
+    pub(crate) fn scope_of(&self, pid: u64) -> Option<LifecycleScope> {
+        self.capabilities
+            .iter()
+            .find(|capability| capability.active && capability.holder_pid == pid)
+            .map(|capability| capability.scope)
     }
 
     /// Retires every capability `pid` holds; returns how many.
@@ -543,7 +623,7 @@ mod tests {
         tables.clear();
         let lifecycle = tables
             .lifecycle_control
-            .grant_lifecycle_control_capability(7)
+            .grant_lifecycle_control_capability(7, scope(&[SERVICE_A]))
             .expect("grant lifecycle control");
         let block = tables
             .block_device
@@ -562,7 +642,7 @@ mod tests {
         assert_eq!(
             tables
                 .lifecycle_control
-                .authorize_lifecycle_control(7, lifecycle),
+                .authorize_lifecycle_control(7, lifecycle, None),
             Err(LifecycleControlCapabilityError::StaleHandle)
         );
         assert_eq!(
@@ -574,16 +654,70 @@ mod tests {
         assert_eq!(on_holder_exit(7), 0, "a second release finds nothing");
     }
 
+    const SERVICE_A: ServiceId = ServiceId(0x5100);
+    const SERVICE_B: ServiceId = ServiceId(0x5200);
+
+    fn scope(services: &[ServiceId]) -> LifecycleScope {
+        LifecycleScope::of(services).expect("scope")
+    }
+
     #[test]
     fn lifecycle_control_capability_authorizes_only_granted_process() {
         let mut table = LifecycleControlCapabilityTable::new();
         let handle = table
-            .grant_lifecycle_control_capability(10)
+            .grant_lifecycle_control_capability(10, scope(&[SERVICE_A]))
             .expect("grant capability");
-        assert!(table.authorize_lifecycle_control(10, handle).is_ok());
+        assert!(table
+            .authorize_lifecycle_control(10, handle, Some(SERVICE_A))
+            .is_ok());
         assert_eq!(
-            table.authorize_lifecycle_control(11, handle),
+            table.authorize_lifecycle_control(11, handle, Some(SERVICE_A)),
             Err(LifecycleControlCapabilityError::Unauthorized)
+        );
+    }
+
+    #[test]
+    fn lifecycle_control_for_service_a_is_refused_for_service_b() {
+        let mut table = LifecycleControlCapabilityTable::new();
+        let handle = table
+            .grant_lifecycle_control_capability(10, scope(&[SERVICE_A]))
+            .expect("grant capability");
+        assert_eq!(
+            table.authorize_lifecycle_control(10, handle, Some(SERVICE_B)),
+            Err(LifecycleControlCapabilityError::OutOfScope)
+        );
+        assert_eq!(
+            table.authorize_lifecycle_control(10, handle, None),
+            Ok(scope(&[SERVICE_A]))
+        );
+        let both = table
+            .grant_lifecycle_control_capability(12, scope(&[SERVICE_A, SERVICE_B]))
+            .expect("grant capability");
+        for service in [SERVICE_A, SERVICE_B] {
+            assert!(table
+                .authorize_lifecycle_control(12, both, Some(service))
+                .is_ok());
+        }
+        let empty = table
+            .grant_lifecycle_control_capability(13, LifecycleScope::EMPTY)
+            .expect("grant capability");
+        assert_eq!(
+            table.authorize_lifecycle_control(13, empty, Some(SERVICE_A)),
+            Err(LifecycleControlCapabilityError::OutOfScope)
+        );
+    }
+
+    #[test]
+    fn lifecycle_scope_is_bounded_by_the_service_registry_and_deduplicated() {
+        let mut services = [ServiceId(0); SERVICE_REGISTRY_CAPACITY + 1];
+        for (index, service) in services.iter_mut().enumerate() {
+            *service = ServiceId(index as u32 + 1);
+        }
+        assert!(LifecycleScope::of(&services).is_err());
+        assert!(LifecycleScope::of(&services[..SERVICE_REGISTRY_CAPACITY]).is_ok());
+        assert_eq!(
+            scope(&[SERVICE_A, SERVICE_A, SERVICE_B]).services(),
+            &[SERVICE_A, SERVICE_B]
         );
     }
 
@@ -591,12 +725,20 @@ mod tests {
     fn lifecycle_control_stale_handle_fails_after_revoke() {
         let mut table = LifecycleControlCapabilityTable::new();
         let handle = table
-            .grant_lifecycle_control_capability(3)
+            .grant_lifecycle_control_capability(3, scope(&[SERVICE_A]))
             .expect("grant capability");
         table.revoke_capabilities_for_pid(3);
         assert_eq!(
-            table.authorize_lifecycle_control(3, handle),
+            table.authorize_lifecycle_control(3, handle, Some(SERVICE_A)),
             Err(LifecycleControlCapabilityError::StaleHandle)
+        );
+        let reissued = table
+            .grant_lifecycle_control_capability(4, scope(&[SERVICE_B]))
+            .expect("grant capability");
+        assert_eq!(
+            table.authorize_lifecycle_control(4, reissued, Some(SERVICE_A)),
+            Err(LifecycleControlCapabilityError::OutOfScope),
+            "a reused slot does not keep the previous holder's scope"
         );
     }
 

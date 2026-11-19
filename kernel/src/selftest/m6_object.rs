@@ -471,7 +471,7 @@ pub(crate) fn start_m6_object_self_test(allocator: PageAllocator) -> ! {
             .declare_service(STORAGE_SERVICE_ID)
             .unwrap_or_else(|message| fatal_kernel_error(message));
         controller
-            .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID)
+            .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID, &[STORAGE_SERVICE_ID])
             .unwrap_or_else(|message| fatal_kernel_error(message))
     };
     set_report_handler(object_report_handler);

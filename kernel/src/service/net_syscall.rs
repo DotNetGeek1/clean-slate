@@ -483,6 +483,10 @@ fn handle_raw_geometry(frame: &mut SyscallContext) {
             return;
         }
     };
+    if live_network_service_pid() != Some(holder.0) {
+        frame.rax = SYSCALL_EACCES;
+        return;
+    }
     if let Err(reason) = authorize_network_op(holder, frame.rsi, NetworkOp::RawDevice, None) {
         frame.rax = denial_status(reason);
         return;
@@ -516,6 +520,10 @@ fn handle_raw_transmit(frame: &mut SyscallContext) {
             return;
         }
     };
+    if live_network_service_pid() != Some(holder.0) {
+        frame.rax = SYSCALL_EACCES;
+        return;
+    }
     if let Err(reason) = authorize_network_op(holder, frame.rsi, NetworkOp::RawDevice, None) {
         frame.rax = denial_status(reason);
         return;
@@ -577,6 +585,10 @@ fn handle_raw_receive(frame: &mut SyscallContext) {
             return;
         }
     };
+    if live_network_service_pid() != Some(holder.0) {
+        frame.rax = SYSCALL_EACCES;
+        return;
+    }
     if let Err(reason) = authorize_network_op(holder, frame.rsi, NetworkOp::RawDevice, None) {
         frame.rax = denial_status(reason);
         return;

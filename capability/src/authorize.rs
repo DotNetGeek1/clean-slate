@@ -82,3 +82,14 @@ pub fn validate_delegation(
     }
     Ok(requested)
 }
+
+/// Whether a Linux `fork(2)` child may inherit `record` unchanged.
+///
+/// Fork is not a delegation request, so the parent needs no [`Rights::DELEGATE`]; but a record
+/// carrying any [`Rights::root_only_for`] bit of its class is withheld, so fork cannot launder
+/// authority that delegation refuses with [`CapabilityError::NotDelegable`].
+pub fn fork_inheritable(record: &CapabilityRecord) -> bool {
+    !record
+        .rights
+        .intersects(Rights::root_only_for(record.resource.class))
+}

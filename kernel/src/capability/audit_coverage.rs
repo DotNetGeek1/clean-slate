@@ -310,6 +310,11 @@ const COVERAGE: &[(&str, &str, Coverage)] = &[
     ("service/port.rs", "limit_rejections", NoDecision(COUNT)),
     ("service/system_init.rs", "of", NoDecision(COUNT)),
     (
+        "service/system_init.rs",
+        "init_lifecycle_scope_is",
+        NoDecision("reads the scope launch_init checks against the manifest"),
+    ),
+    (
         // Split so `system_init`'s test-hook gate check does not match this line.
         concat!("service/system", "_test_hooks.rs"),
         "probe_stale_generation",

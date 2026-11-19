@@ -4,6 +4,7 @@ use crate::arch::x86_64::context_switch::restore_task_context;
 use crate::arch::x86_64::context_switch::task_stack_top;
 use crate::capability::bootstrap_grant::register_bootstrap_grant;
 use crate::capability::bootstrap_grant::GRANT_SUBOP_CLAIM;
+use crate::capability::grant_root;
 use crate::capability::process_control::{
     grant_process_control, ProcessObservation, PROCESS_OP_OBSERVE, PROCESS_OP_TERMINATE,
 };
@@ -13,7 +14,7 @@ use crate::interrupt::timer::initialize_timer;
 use crate::mm::frame_allocator::PageAllocator;
 use crate::process::id_allocator::id_allocator_mut;
 use crate::process::id_allocator::IdAllocator;
-use crate::process::process_registry_mut;
+use crate::process::{live_instance_generation, process_registry_mut};
 use crate::sched::dispatch::start_current_scheduler_thread;
 use crate::sched::scheduler_mut;
 use crate::sched::task_stacks_mut;
@@ -27,7 +28,7 @@ use clean_slate_capability::syscall_abi::{
     SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ESTALE, SYSCALL_NR_CAP_GRANT,
     SYSCALL_NR_CAP_PROCESS_CONTROL,
 };
-use clean_slate_capability::{HolderId, Rights};
+use clean_slate_capability::{HolderId, ResourceRef, Rights};
 use clean_slate_service_fixtures::m6_fixture::{
     M6FixtureBootstrap, M6FixtureStep, ARG_DATA_PTR, ARG_RESULT_OF, FIXTURE_STATUS_DONE,
 };
@@ -93,6 +94,28 @@ fn build_controller_program() -> M6FixtureBootstrap {
         .push(
             M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0])
                 .expect_ne(0),
+        )
+        .unwrap();
+    let claim_other_incarnation = program
+        .push(
+            M6FixtureStep::syscall(SYSCALL_NR_CAP_GRANT, [GRANT_SUBOP_CLAIM, 0, 0, 0, 0, 0])
+                .expect_ne(0),
+        )
+        .unwrap();
+    program
+        .push(
+            M6FixtureStep::syscall(
+                SYSCALL_NR_CAP_PROCESS_CONTROL,
+                [
+                    PROCESS_OP_OBSERVE,
+                    arg_result(claim_other_incarnation),
+                    arg_data(observe_out),
+                    0,
+                    0,
+                    0,
+                ],
+            )
+            .expect_eq(SYSCALL_ESTALE),
         )
         .unwrap();
     let observe_only_handle = arg_result(claim_observe_only);
@@ -220,12 +243,11 @@ fn build_wrong_target_program() -> M6FixtureBootstrap {
     program
 }
 
-fn read_observation_pid(report: &M6FixtureBootstrap) -> Option<u64> {
+fn read_observation(report: &M6FixtureBootstrap) -> Option<ProcessObservation> {
     let bytes = report
         .data_at(0, mem::size_of::<ProcessObservation>())
         .ok()?;
-    let observation = unsafe { (bytes.as_ptr() as *const ProcessObservation).read_unaligned() };
-    Some(observation.pid)
+    Some(unsafe { (bytes.as_ptr() as *const ProcessObservation).read_unaligned() })
 }
 
 fn report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReportAction {
@@ -236,15 +258,27 @@ fn report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureReportAction 
     if pid == state.controller_pid {
         state.controller_reported = true;
     } else if pid == state.wrong_target_pid {
-        let observed = match read_observation_pid(report) {
-            Some(pid) => pid,
+        let observed = match read_observation(report) {
+            Some(observation) => observation,
             None => return FixtureReportAction::Fail("wrong-target observation missing"),
         };
-        if observed != state.unrelated_pid {
+        if observed.pid != state.unrelated_pid {
             return FixtureReportAction::Fail(
                 "process-control cap reported unexpected pid (must match bound target)",
             );
         }
+        let live_generation = live_instance_generation(state.unrelated_pid).map(|g| u64::from(g.0));
+        if observed.instance_generation == 0
+            || Some(observed.instance_generation) != live_generation
+        {
+            return FixtureReportAction::Fail(
+                "process-control observation must report the target's live instance generation",
+            );
+        }
+        kernel_log_fmt(format_args!(
+            "[M6.4] observation generation={} matches live target\n",
+            observed.instance_generation
+        ));
         state.wrong_target_reported = true;
         state.unrelated_reported = true;
     } else {
@@ -270,21 +304,32 @@ fn register_controller_grants(controller_pid: u64, target_pid: u64) {
     let full = grant_process_control(
         controller,
         target_pid,
-        0,
         Rights::OBSERVE.union(Rights::TERMINATE),
     )
     .unwrap_or_else(|_| fatal_kernel_error("process-control full grant failed"));
     register_bootstrap_grant(controller, full)
         .unwrap_or_else(|message| fatal_kernel_error(message));
-    let observe_only = grant_process_control(controller, target_pid, 0, Rights::OBSERVE)
+    let observe_only = grant_process_control(controller, target_pid, Rights::OBSERVE)
         .unwrap_or_else(|_| fatal_kernel_error("process-control observe grant failed"));
     register_bootstrap_grant(controller, observe_only)
+        .unwrap_or_else(|message| fatal_kernel_error(message));
+    // #220: a record for another incarnation of the target's pid, as a holder of a record for
+    // an earlier process with a recycled pid would have; observing through it must be stale.
+    let live_generation = live_instance_generation(target_pid)
+        .unwrap_or_else(|| fatal_kernel_error("process-control target has no generation"));
+    let other_incarnation = grant_root(
+        controller,
+        ResourceRef::process(target_pid, u64::from(live_generation.0) + 1),
+        Rights::OBSERVE,
+    )
+    .unwrap_or_else(|_| fatal_kernel_error("process-control stale-generation grant failed"));
+    register_bootstrap_grant(controller, other_incarnation)
         .unwrap_or_else(|message| fatal_kernel_error(message));
 }
 
 fn register_wrong_target_grant(holder_pid: u64, unrelated_pid: u64) {
     let holder = HolderId(holder_pid);
-    let handle = grant_process_control(holder, unrelated_pid, 0, Rights::OBSERVE)
+    let handle = grant_process_control(holder, unrelated_pid, Rights::OBSERVE)
         .unwrap_or_else(|_| fatal_kernel_error("wrong-target observe grant failed"));
     register_bootstrap_grant(holder, handle).unwrap_or_else(|message| fatal_kernel_error(message));
 }

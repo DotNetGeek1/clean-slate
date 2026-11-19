@@ -232,7 +232,7 @@ pub(super) fn start_lifecycle_wait_self_test(
         .unwrap_or_else(|message| fatal_kernel_error(message));
 
     let waiter_capability = controller
-        .grant_lifecycle_control_capability(waiter.process_id)
+        .grant_lifecycle_control_capability(waiter.process_id, &[event.instance.service])
         .unwrap_or_else(|message| fatal_kernel_error(message));
     let refused_block_capability = controller
         .grant_block_device_capability_for_self_test(refused.process_id)

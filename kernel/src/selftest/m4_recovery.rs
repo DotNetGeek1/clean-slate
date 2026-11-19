@@ -686,7 +686,10 @@ pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
         .declare_service(CRASH_SERVICE_ID)
         .unwrap_or_else(|message| fatal_kernel_error(message));
     let lifecycle_capability = controller
-        .grant_lifecycle_control_capability(USERSPACE_SUPERVISOR_TEST_PID)
+        .grant_lifecycle_control_capability(
+            USERSPACE_SUPERVISOR_TEST_PID,
+            &[DEPENDENCY_SERVICE_ID, CRASH_SERVICE_ID],
+        )
         .unwrap_or_else(|message| fatal_kernel_error(message));
     let table = unsafe { endpoint_table_mut() };
     let console_slot = table

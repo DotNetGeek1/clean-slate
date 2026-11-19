@@ -84,7 +84,7 @@ pub(crate) fn start_m9_linux_fs_self_test(page_allocator: PageAllocator) -> ! {
             .declare_service(STORAGE_SERVICE_ID)
             .unwrap_or_else(|message| fatal_kernel_error(message));
         controller
-            .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID)
+            .grant_lifecycle_control_capability(SUPERVISOR_TEST_PID, &[STORAGE_SERVICE_ID])
             .unwrap_or_else(|message| fatal_kernel_error(message))
     };
     launch_storage_service(
