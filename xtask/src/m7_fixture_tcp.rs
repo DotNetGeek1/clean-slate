@@ -85,11 +85,12 @@ impl TcpEchoService {
         }
     }
 
-    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) {
+    /// Returns whether this poll sent the response to a complete request.
+    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) -> bool {
         self.pool.relisten_closed(sockets);
         if self.active.is_none() {
             let Some(handle) = self.pool.accept(sockets) else {
-                return;
+                return false;
             };
             println!("[FIX ] tcp echo connect");
             self.active = Some(handle);
@@ -100,8 +101,9 @@ impl TcpEchoService {
         let socket = sockets.get_mut::<tcp::Socket>(active);
         if !socket.is_active() {
             self.release_active();
-            return;
+            return false;
         }
+        let mut echoed_now = false;
         if socket.may_recv() {
             let mut buf = [0u8; 256];
             if let Ok(n) = socket.recv_slice(&mut buf) {
@@ -112,6 +114,7 @@ impl TcpEchoService {
                     && socket.send_slice(APP_RESPONSE_BYTES).is_ok()
                 {
                     self.echoed = true;
+                    echoed_now = true;
                     println!("[FIX ] tcp echo");
                 }
             }
@@ -120,6 +123,7 @@ impl TcpEchoService {
             socket.close();
             self.release_active();
         }
+        echoed_now
     }
 
     /// Forgets the served connection; its socket listens again once it reaches CLOSED.
@@ -130,6 +134,16 @@ impl TcpEchoService {
     }
 }
 
+/// What the TLS service did with a connection during one poll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TlsEvent {
+    Accepted,
+    /// The server side finished the handshake: the client sent a valid Finished.
+    HandshakeComplete,
+    /// A complete app request arrived and the app response was written (once per connection).
+    AppResponseSent,
+}
+
 pub struct TlsService {
     pool: ListenerPool,
     active: Option<SocketHandle>,
@@ -137,6 +151,7 @@ pub struct TlsService {
     connection: Option<ServerConnection>,
     recv_acc: Vec<u8>,
     sni_logged: bool,
+    app_answered: bool,
 }
 
 impl TlsService {
@@ -148,10 +163,12 @@ impl TlsService {
             connection: None,
             recv_acc: Vec::new(),
             sni_logged: false,
+            app_answered: false,
         }
     }
 
-    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) {
+    pub fn poll(&mut self, sockets: &mut SocketSet<'_>) -> Vec<TlsEvent> {
+        let mut events = Vec::new();
         self.pool.relisten_closed(sockets);
         if self.active.is_none() {
             if let Some(handle) = self.pool.accept(sockets) {
@@ -162,17 +179,19 @@ impl TlsService {
                 );
                 self.recv_acc.clear();
                 self.sni_logged = false;
+                self.app_answered = false;
+                events.push(TlsEvent::Accepted);
             }
-            return;
+            return events;
         }
         let active = self.active.expect("tls active");
         let socket = sockets.get_mut::<tcp::Socket>(active);
         if !socket.is_active() {
             self.release_active();
-            return;
+            return events;
         }
         let Some(conn) = self.connection.as_mut() else {
-            return;
+            return events;
         };
         while socket.may_recv() {
             let mut buf = [0u8; 2048];
@@ -189,6 +208,7 @@ impl TlsService {
         if !self.sni_logged && !conn.is_handshaking() {
             println!("[FIX ] tls handshake sni=m7.fixture.test");
             self.sni_logged = true;
+            events.push(TlsEvent::HandshakeComplete);
         }
         while conn.wants_write() {
             let mut tls_out = [0u8; 2048];
@@ -208,9 +228,13 @@ impl TlsService {
                 Ok(n) if n > 0 => {
                     self.recv_acc.extend_from_slice(&app[..n]);
                     if self.recv_acc.len() >= APP_REQUEST_BYTES.len() {
-                        let _ = conn.writer().write_all(APP_RESPONSE_BYTES);
+                        let written = conn.writer().write_all(APP_RESPONSE_BYTES).is_ok();
                         conn.writer().flush().ok();
                         println!("[FIX ] tls app bytes");
+                        if written && !self.app_answered {
+                            self.app_answered = true;
+                            events.push(TlsEvent::AppResponseSent);
+                        }
                     }
                 }
                 _ => {}
@@ -220,6 +244,7 @@ impl TlsService {
             socket.close();
             self.release_active();
         }
+        events
     }
 
     /// Forgets the served connection; its socket listens again once it reaches CLOSED.
@@ -228,6 +253,7 @@ impl TlsService {
         self.connection = None;
         self.recv_acc.clear();
         self.sni_logged = false;
+        self.app_answered = false;
     }
 }
 

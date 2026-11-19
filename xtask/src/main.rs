@@ -40,7 +40,7 @@ use marker_spec::{unexpected_guest_failure, MarkerSet, MarkerStep, MarkerTracker
 use ovmf_vars::RuntimeVarsCopy;
 
 use m10_framebuffer_validate::validate_m10_framebuffer_serial;
-use m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
+use m7_fixture::{FixtureCounts, FixtureOptions, M7FixturePeer, WhichCert};
 
 const KERNEL_PACKAGE: &str = "clean-slate-kernel";
 const KERNEL_TARGET: &str = "x86_64-unknown-uefi";
@@ -113,6 +113,12 @@ const M4_RECOVERY_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[SUP ] started pid=1"),
     MarkerStep::Ordered("[DEP ] service=16640 ready"),
     MarkerStep::Ordered("[SVC ] launch service=16640 pid="),
+    // #223: the kernel's record that gen1's Ready reached the supervisor; the `[HLTH]` lines are
+    // the supervisor's own account and stay as output only.
+    MarkerStep::Line {
+        prefix: "[TEST] supervisor received ready service=16640 pid=",
+        fields: &[("gen=", "1")],
+    },
     MarkerStep::Ordered("[HLTH] service=16640 healthy gen=1"),
     MarkerStep::Ordered("[TEST] crash-service injecting fault"),
     MarkerStep::Ordered("[PROC] fault pid="),
@@ -123,9 +129,25 @@ const M4_RECOVERY_ACCEPTANCE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[SUP ] failure service=16640 pid="),
     MarkerStep::Ordered("[SUP ] restart service=16640 attempt=1"),
     MarkerStep::Ordered("[SVC ] launch service=16640 pid="),
+    MarkerStep::Ordered("[TEST] crash-service replacement healthy pid="),
+    MarkerStep::Line {
+        prefix: "[TEST] supervisor received ready service=16640 pid=",
+        fields: &[("gen=", "2")],
+    },
     MarkerStep::Ordered("[HLTH] service=16640 healthy gen=2"),
     MarkerStep::Ordered("[TEST] unrelated workload progress="),
     MarkerStep::Ordered("[SUP ] stale-instance ignored"),
+    // The supervisor prints its own `[M4  ] PASS` before this line; only the kernel's, after
+    // its evidence, matches the last step.
+    MarkerStep::Line {
+        prefix: "[M4  ] kernel recovery evidence",
+        fields: &[
+            ("gen1-fault=", "contained"),
+            ("gen2-ready=", "delivered"),
+            ("workload-at-containment=", "1"),
+            ("workload-progress=", "2"),
+        ],
+    },
     MarkerStep::Ordered("[M4  ] PASS"),
 ];
 const M1_ACCEPTANCE_MARKERS: [&str; 8] = [
@@ -689,7 +711,7 @@ const M7_NET_CAPS_ACCEPTANCE_MARKERS: [&str; 11] = [
     "[M7.7] PASS",
 ];
 /// One marker per #200 acceptance item proven in QEMU through syscalls 17/20.
-const M10_PORT_ACCEPTANCE_MARKERS: [&str; 22] = [
+const M10_PORT_ACCEPTANCE_MARKERS: [&str; 23] = [
     "[TIME] timer initialized",
     "[M10.port] registration limits enforced",
     "[M10.port] port registered class=graphics",
@@ -699,6 +721,7 @@ const M10_PORT_ACCEPTANCE_MARKERS: [&str; 22] = [
     "[M10.port] events isolated",
     "[M10.port] connect denied",
     "[M10.port] serve denied",
+    "[M10.port] engine refused outstanding=2 request-queue=1 transfers=0 event-queue=1",
     "[M10.port] capacity limits enforced",
     "[M10.port] transfer attested",
     "[M10.port] transfer denied",
@@ -1356,8 +1379,9 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             serial_tcp_port: None,
         },
     );
-    peer.shutdown();
+    let served = peer.shutdown();
     pass?;
+    require_fixture_served("test-m7-tls", served, M7_TLS_SERVED)?;
 
     let peer = M7FixturePeer::start_with(FixtureOptions {
         tls_cert: WhichCert::WrongName,
@@ -1388,8 +1412,57 @@ fn run_m7_tls_acceptance() -> Result<(), XtaskError> {
             serial_tcp_port: None,
         },
     );
-    peer.shutdown();
-    fail_closed
+    let served = peer.shutdown();
+    fail_closed?;
+    require_fixture_served("test-m7-tls fail-closed", served, M7_TLS_FAIL_CLOSED_SERVED)
+}
+
+/// What the fixture must have served for `[TCP ] echo ok`, `[TLS ] authenticated` and
+/// `[TLS ] app bytes ok`: one echo, one connection whose handshake the fixture completed, one
+/// app response.
+const M7_TLS_SERVED: FixtureCounts = FixtureCounts {
+    tcp_echoes: 1,
+    tls_connections: 1,
+    tls_handshakes: 1,
+    tls_app_responses: 1,
+    ..FixtureCounts::ZERO
+};
+
+/// `[TLS ] peer identity rejected`: the client connected and the fixture never saw a
+/// finished handshake or an app request.
+const M7_TLS_FAIL_CLOSED_SERVED: FixtureCounts = FixtureCounts {
+    tls_connections: 1,
+    ..FixtureCounts::ZERO
+};
+
+/// `[DNS ] resolved`, `cache hit` and `nxdomain`: two queries reached the fixture, one A
+/// answer and one NXDOMAIN; the cache hit sent nothing.
+const M7_DNS_SERVED: FixtureCounts = FixtureCounts {
+    dns_replies: 2,
+    fixture_a_answers: 1,
+    nxdomain_answers: 1,
+    ..FixtureCounts::ZERO
+};
+
+/// M7.8: the userspace client's one resolve and two TLS transactions, which the kernel
+/// otherwise knows only from the client's report and the service's `tls_transactions`.
+const M7_NETWORK_SERVED: FixtureCounts = FixtureCounts {
+    dns_replies: 1,
+    fixture_a_answers: 1,
+    tls_connections: 2,
+    tls_handshakes: 2,
+    tls_app_responses: 2,
+    ..FixtureCounts::ZERO
+};
+
+fn require_fixture_served(
+    lane: &str,
+    served: FixtureCounts,
+    expected: FixtureCounts,
+) -> Result<(), XtaskError> {
+    served
+        .require_exactly(lane, expected)
+        .map_err(XtaskError::Validation)
 }
 
 fn run_m7_net_device_acceptance() -> Result<(), XtaskError> {
@@ -1451,8 +1524,9 @@ fn run_m7_dns_acceptance() -> Result<(), XtaskError> {
             serial_tcp_port: None,
         },
     );
-    peer.shutdown();
-    run_result
+    let served = peer.shutdown();
+    run_result?;
+    require_fixture_served("test-m7-dns", served, M7_DNS_SERVED)
 }
 
 fn run_m5_persistence_acceptance_default() -> Result<(), XtaskError> {
@@ -2708,8 +2782,9 @@ fn run_m7_network_acceptance() -> Result<(), XtaskError> {
             serial_tcp_port: None,
         },
     );
-    peer.shutdown();
-    run_result
+    let served = peer.shutdown();
+    run_result?;
+    require_fixture_served("test-m7-network", served, M7_NETWORK_SERVED)
 }
 
 fn build_network_userspace(release: bool) -> Result<(), XtaskError> {

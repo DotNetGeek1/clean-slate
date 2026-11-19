@@ -139,29 +139,85 @@ pub(crate) struct RecoverySelfTestState {
     workload: UnrelatedWorkloadFixture,
     gen1_pid: u64,
     gen2_pid: u64,
-    workload_progress_at_fault: u32,
+    /// Workload runs the lane wants in total; the workload is respawned until it reaches this.
+    workload_progress_target: u32,
+    /// The kernel's workload count when gen1's fault was contained.
+    workload_progress_at_containment: Option<u32>,
     supervisor: TrackedProcess,
     workload_process: TrackedProcess,
     service_process: Option<TrackedProcess>,
     bootstrap_frame: u64,
     skip_workload_respawn_once: bool,
     gen2_ready_poll_pending: Option<ServiceInstanceId>,
-    gen1_health_observed: bool,
+    /// The kernel handed gen1's / gen2's Ready to the supervisor through the lifecycle poll.
+    gen1_ready_delivered: bool,
+    gen2_ready_delivered: bool,
+    /// Gen1 may fault: its Ready was delivered and the supervisor has since yielded.
+    gen1_released: bool,
     gen1_fault_inject_blocked: bool,
     gen1_inject_logged: bool,
+    gen1_fault_contained: bool,
 }
-
-const GEN1_HEALTH_MARKER: &str = "[HLTH] service=16640 healthy gen=1";
 
 fn emit_crash_service_injecting_fault() {
     kernel_log_line("[TEST] crash-service injecting fault");
 }
 
-fn recovery_note_gen1_health_emitted(state: &mut RecoverySelfTestState) {
-    if state.gen1_health_observed {
+/// The kernel's own record of the recovery, independent of anything the supervisor prints or
+/// writes to its bootstrap page: gen1 faulted and was contained, gen2's Ready reached the
+/// supervisor, and the unrelated workload ran again after the containment.
+fn recovery_evidence_complete(state: &RecoverySelfTestState) -> bool {
+    let progress = state.workload.progress();
+    state.gen1_fault_contained
+        && state.gen2_ready_delivered
+        && progress >= state.workload_progress_target
+        && state
+            .workload_progress_at_containment
+            .is_some_and(|at_containment| progress > at_containment)
+}
+
+/// Called with every lifecycle event the controller hands to a supervisor's poll.
+pub(crate) fn observe_recovery_lifecycle_delivery(supervisor_pid: u64, event: LifecycleEvent) {
+    if supervisor_pid != USERSPACE_SUPERVISOR_TEST_PID
+        || event.kind != LifecycleEventKind::Ready
+        || event.instance.service != CRASH_SERVICE_ID
+    {
         return;
     }
-    state.gen1_health_observed = true;
+    let Ok(state) = recovery_state() else {
+        return;
+    };
+    let pid = event.instance.pid.0;
+    let delivered = if pid == state.gen1_pid {
+        &mut state.gen1_ready_delivered
+    } else if pid == state.gen2_pid {
+        &mut state.gen2_ready_delivered
+    } else {
+        return;
+    };
+    if !*delivered {
+        *delivered = true;
+        kernel_log_fmt(format_args!(
+            "[TEST] supervisor received ready service={} pid={} gen={}\n",
+            CRASH_SERVICE_ID.0, pid, event.instance.generation.0
+        ));
+    }
+    publish_completion_if_evidenced(state);
+}
+
+/// Tells the supervisor to finish only once the kernel's evidence is complete.
+fn publish_completion_if_evidenced(state: &RecoverySelfTestState) {
+    if recovery_evidence_complete(state) {
+        publish_recovery_bootstrap(|bootstrap| bootstrap.complete = 1);
+    }
+}
+
+/// At a supervisor yield after gen1's Ready was delivered, so the supervisor has handled it.
+fn release_gen1_for_fault(state: &mut RecoverySelfTestState) {
+    if state.gen1_released || !state.gen1_ready_delivered {
+        return;
+    }
+    state.gen1_released = true;
     if !state.gen1_fault_inject_blocked || state.gen1_inject_logged {
         return;
     }
@@ -184,10 +240,9 @@ static RECOVERY_STATE: GlobalCell<Option<RecoverySelfTestState>> = GlobalCell::n
 pub(crate) static RECOVERY_BOOTSTRAP: GlobalCell<Option<RecoveryBootstrap>> = GlobalCell::new(None);
 
 pub(crate) fn recovery_acceptance_complete() -> bool {
-    recovery_state()
-        .ok()
-        .is_some_and(|state| state.stage == RecoveryStage::Complete)
-        || read_published_bootstrap().is_some_and(|bootstrap| bootstrap.complete != 0)
+    recovery_state().is_ok_and(|state| {
+        state.stage == RecoveryStage::Complete || recovery_evidence_complete(state)
+    })
 }
 
 pub(crate) fn recovery_state() -> Result<&'static mut RecoverySelfTestState, &'static str> {
@@ -233,14 +288,6 @@ pub(crate) fn publish_recovery_bootstrap(update: impl FnOnce(&mut RecoveryBootst
             }
         }
     }
-}
-
-fn read_published_bootstrap() -> Option<RecoveryBootstrap> {
-    let state = recovery_state().ok()?;
-    if state.bootstrap_frame == 0 {
-        return None;
-    }
-    Some(unsafe { ptr::read((phys_to_virt(state.bootstrap_frame)) as *const RecoveryBootstrap) })
 }
 
 fn recovery_allocator() -> Result<&'static mut PageAllocator, &'static str> {
@@ -576,12 +623,7 @@ fn emit_workload_progress(progress: u32) {
         "[TEST] unrelated workload progress={}\n",
         progress
     ));
-    publish_recovery_bootstrap(|bootstrap| {
-        bootstrap.workload_progress = progress;
-        if progress >= 2 {
-            bootstrap.complete = 1;
-        }
-    });
+    publish_recovery_bootstrap(|bootstrap| bootstrap.workload_progress = progress);
 }
 
 pub(crate) fn take_recovery_gen2_ready_poll(
@@ -596,29 +638,20 @@ pub(crate) fn take_recovery_gen2_ready_poll(
         return None;
     }
     let instance = state.gen2_ready_poll_pending.take()?;
-    Some(LifecycleEvent::new(instance, LifecycleEventKind::Ready))
-}
-
-pub(crate) fn observe_recovery_supervisor_line(sender_pid: u64, message: &str) {
-    if sender_pid != USERSPACE_SUPERVISOR_TEST_PID {
-        return;
-    }
-    if let Ok(state) = recovery_state() {
-        if message.contains(GEN1_HEALTH_MARKER) {
-            recovery_note_gen1_health_emitted(state);
-        }
-        if message.contains("[M4  ] PASS") {
-            state.stage = RecoveryStage::Complete;
-        }
-    }
+    let event = LifecycleEvent::new(instance, LifecycleEventKind::Ready);
+    observe_recovery_lifecycle_delivery(caller_pid, event);
+    Some(event)
 }
 
 pub(crate) fn recovery_complete_and_exit() {
     if let Ok(state) = recovery_state() {
-        let bootstrap_done =
-            read_published_bootstrap().is_some_and(|bootstrap| bootstrap.complete != 0);
-        if state.stage == RecoveryStage::Complete || bootstrap_done {
+        if state.stage == RecoveryStage::Complete || recovery_evidence_complete(state) {
             state.stage = RecoveryStage::Complete;
+            kernel_log_fmt(format_args!(
+                "[M4  ] kernel recovery evidence gen1-fault=contained gen2-ready=delivered workload-at-containment={} workload-progress={}\n",
+                state.workload_progress_at_containment.unwrap_or(0),
+                state.workload.progress()
+            ));
             kernel_log_line("[M4  ] PASS");
             unsafe {
                 *RECOVERY_STATE.get() = None;
@@ -712,16 +745,20 @@ pub(crate) fn start_recovery_self_test(allocator: PageAllocator) -> ! {
             workload: UnrelatedWorkloadFixture::from_launch(workload_launch),
             gen1_pid: 0,
             gen2_pid: 0,
-            workload_progress_at_fault: 2,
+            workload_progress_target: 2,
+            workload_progress_at_containment: None,
             supervisor,
             workload_process: workload,
             service_process: None,
             bootstrap_frame,
             skip_workload_respawn_once: false,
             gen2_ready_poll_pending: None,
-            gen1_health_observed: false,
+            gen1_ready_delivered: false,
+            gen2_ready_delivered: false,
+            gen1_released: false,
             gen1_fault_inject_blocked: false,
             gen1_inject_logged: false,
+            gen1_fault_contained: false,
         });
     }
     if let Err(message) = set_privilege_stack(kernel_stack_top) {
@@ -749,12 +786,13 @@ pub(crate) fn handle_recovery_userspace_entry(
         if state.stage == RecoveryStage::Complete {
             recovery_complete_and_exit();
         }
+        release_gen1_for_fault(state);
         publish_recovery_bootstrap(|bootstrap| bootstrap.kernel_ticks = recovery_clock_ticks());
         if state.skip_workload_respawn_once {
             state.skip_workload_respawn_once = false;
         } else if matches!(state.stage, RecoveryStage::Recovered)
             && state.workload_process.pid == 0
-            && state.workload.progress() < state.workload_progress_at_fault
+            && state.workload.progress() < state.workload_progress_target
         {
             let allocator = recovery_allocator()?;
             let stacks = unsafe { task_stacks_mut() };
@@ -830,6 +868,7 @@ pub(crate) fn handle_recovery_userspace_entry(
         ProcessRole::Workload => {
             let progress = state.workload.tick();
             emit_workload_progress(progress);
+            publish_completion_if_evidenced(state);
             let teardown = teardown_current_process(allocator, kernel_root_frame, 0, false)?;
             state.workload_process.pid = 0;
             if let Some(next) = teardown.next_stack_pointer {
@@ -886,7 +925,7 @@ pub(crate) fn handle_recovery_userspace_entry(
                         )
                         .map_err(|_| "failed to persist crash inject stack")?;
                     if process.pid == state.gen1_pid {
-                        if state.gen1_health_observed {
+                        if state.gen1_released {
                             resume_for_fault = true;
                         } else {
                             scheduler.threads[current].state = ThreadState::Blocked;
@@ -980,6 +1019,10 @@ pub(crate) fn observe_recovery_fault_after_containment(
         return Err("recovery fault event pid diverged from faulted process");
     }
     state.harness.on_faulted(fault_event.instance);
+    if pid == state.gen1_pid {
+        state.gen1_fault_contained = true;
+        state.workload_progress_at_containment = Some(state.workload.progress());
+    }
     let resources = remaining_owned_resource_count(pid);
     kernel_log_fmt(format_args!(
         "[PROC] teardown pid={pid} resources={resources}\n"

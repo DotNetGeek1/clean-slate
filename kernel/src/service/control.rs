@@ -263,7 +263,15 @@ impl ServiceLifecycleController {
         service: ServiceId,
     ) -> Result<Option<LifecycleEvent>, LifecycleControlError> {
         self.authorize_lifecycle_control(supervisor_pid, capability_handle)?;
-        self.poll_pending_event(service)
+        let event = self.poll_pending_event(service)?;
+        #[cfg(feature = "m4-recovery-self-test")]
+        if let Some(event) = event {
+            crate::selftest::m4_recovery::observe_recovery_lifecycle_delivery(
+                supervisor_pid,
+                event,
+            );
+        }
+        Ok(event)
     }
 
     /// The service of some pending message, left queued for [`Self::poll_pending_event`].

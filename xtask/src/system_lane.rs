@@ -683,6 +683,7 @@ mod tests {
             http_refused: 0,
             held_connections: held,
             held_requests: held,
+            ..FixtureCounts::ZERO
         }
     }
 

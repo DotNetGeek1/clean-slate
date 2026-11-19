@@ -36,7 +36,7 @@ use clean_slate_native_abi::{
     ConnectionId, EventKind, PortEventRecord, PortParamError, PortParams, PortRecvRecord, RecvKind,
     SharedBufferId,
 };
-use clean_slate_port::{PortCounts, PortError, RegistrationError};
+use clean_slate_port::{LimitRejections, PortCounts, PortError, RegistrationError};
 use clean_slate_service_fixtures::m6_fixture::{
     M6FixtureBootstrap, M6FixtureStep, ARG_DATA_PTR, ARG_RESULT_OF, FIXTURE_STATUS_DONE,
     M6_FIXTURE_BOOTSTRAP_ADDRESS,
@@ -1562,6 +1562,24 @@ fn run_check(caller: u64, checkpoint: u64) {
             ensure(
                 counts.connections == 3 && counts.queued_requests == 0 && counts.queued_events == 2,
                 "port counts after capacity phase",
+            );
+            // The fixtures' own status checks are not the evidence: the engine must have
+            // refused A's third send and the first attempt of its blocking send (outstanding),
+            // K's send into the full request queue, and S's third post (event ring).
+            let refused = port::limit_rejections();
+            kernel_log_fmt(format_args!(
+                "[M10.port] engine refused outstanding={} request-queue={} transfers={} event-queue={}\n",
+                refused.outstanding, refused.request_queue, refused.transfers, refused.event_queue
+            ));
+            ensure(
+                refused
+                    == (LimitRejections {
+                        outstanding: 2,
+                        request_queue: 1,
+                        transfers: 0,
+                        event_queue: 1,
+                    }),
+                "engine limit refusals after capacity phase",
             );
             marker("capacity limits enforced");
         }
