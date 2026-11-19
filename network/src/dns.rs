@@ -1,7 +1,9 @@
 //! Bounded DNS codec (RFC 1035 subset), cache, and resolver over [`UdpTransport`].
 //!
-//! Supported subset: A/IN queries over UDP with RD=1, single question, first A answer.
-//! CNAME chasing, DNS-over-TCP, and DNSSEC are deferred.
+//! Supported subset: A/IN queries over UDP with RD=1, single question. An A record counts
+//! only when its owner is the queried name, or the name reached by following CNAMEs from
+//! that question in the same reply (at most [`MAX_CNAME_CHAIN`] names, question included).
+//! DNS-over-TCP and DNSSEC are deferred.
 //!
 //! Capability checks (`NET_RESOLVE`) are performed by the network service **above** this
 //! layer; [`DnsResolver::resolve`] assumes the caller is already authorized.
@@ -42,7 +44,11 @@ const DNS_HEADER_LEN: usize = 12;
 const QTYPE_A: u16 = 1;
 const QCLASS_IN: u16 = 1;
 const RR_TYPE_A: u16 = 1;
+const RR_TYPE_CNAME: u16 = 5;
 const RR_CLASS_IN: u16 = 1;
+
+/// Names allowed in one CNAME chain, counting the queried name. One more CNAME is rejected.
+pub const MAX_CNAME_CHAIN: usize = 8;
 
 const FLAG_QR: u16 = 0x8000;
 const FLAG_OPCODE_MASK: u16 = 0x7800;
@@ -334,7 +340,11 @@ fn skip_rr(msg: &[u8], offset: usize, current_pos: usize) -> Result<(usize, u16,
     Ok((data_end, rtype, rclass))
 }
 
-/// Parses a DNS response and returns the first A record for `expected_name`.
+/// Parses a DNS response and returns the A record for `expected_name`.
+///
+/// The owner of that record must be `expected_name`, or the name at the end of a CNAME
+/// chain followed from it inside this reply. A loop, a chain of more than
+/// [`MAX_CNAME_CHAIN`] names, or an A record for any other name does not resolve.
 pub fn parse_response(
     bytes: &[u8],
     expected_id: u16,
@@ -390,43 +400,230 @@ pub fn parse_response(
         return Err(DnsError::Malformed);
     }
 
-    let mut found: Option<DnsAnswer> = None;
-    for _ in 0..hdr.ancount {
-        let (rr_end, rtype, rclass) = skip_rr(bytes, offset, offset)?;
-        if rtype == RR_TYPE_A && rclass == RR_CLASS_IN {
-            let name_end = skip_name(bytes, offset, offset)?;
-            let ttl = u32::from_be_bytes([
-                bytes[name_end + 4],
-                bytes[name_end + 5],
-                bytes[name_end + 6],
-                bytes[name_end + 7],
-            ]);
-            let rdlen = u16::from_be_bytes([bytes[name_end + 8], bytes[name_end + 9]]) as usize;
-            if rdlen != 4 {
+    let answer_at = offset;
+    let mut current = [0u8; MAX_DNS_NAME_LEN];
+    current[..qname_len].copy_from_slice(qname_buf.get(..qname_len).ok_or(DnsError::Malformed)?);
+    let (current_len, followed) =
+        follow_cnames(bytes, answer_at, hdr.ancount, &mut current, qname_len)?;
+    let (found, foreign_address) = find_address(
+        bytes,
+        answer_at,
+        hdr.ancount,
+        current.get(..current_len).ok_or(DnsError::Malformed)?,
+    )?;
+
+    offset = skip_records(bytes, answer_at, hdr.ancount)?;
+    offset = skip_records(bytes, offset, hdr.nscount)?;
+    let _end = skip_records(bytes, offset, hdr.arcount)?;
+
+    match found {
+        Some(answer) => Ok(answer),
+        // An A record for some other name is not an answer; the query keeps waiting.
+        None if foreign_address && followed == 0 => Err(DnsError::Malformed),
+        None => Err(DnsError::NoAddress),
+    }
+}
+
+fn dns_name_eq(left: &[u8], right: &[u8]) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+struct AnswerRr {
+    owner_len: usize,
+    rtype: u16,
+    rclass: u16,
+    ttl: u32,
+    data_start: usize,
+    data_end: usize,
+    next: usize,
+}
+
+fn read_answer_rr(msg: &[u8], offset: usize, owner: &mut [u8]) -> Result<AnswerRr, DnsError> {
+    let mut hops = 0usize;
+    let (owner_len, name_end) = read_name_at_no_alloc(msg, offset, offset, &mut hops, owner)?;
+    if name_end + 10 > msg.len() {
+        return Err(DnsError::Truncated);
+    }
+    let rtype = u16::from_be_bytes([msg[name_end], msg[name_end + 1]]);
+    let rclass = u16::from_be_bytes([msg[name_end + 2], msg[name_end + 3]]);
+    let ttl = u32::from_be_bytes([
+        msg[name_end + 4],
+        msg[name_end + 5],
+        msg[name_end + 6],
+        msg[name_end + 7],
+    ]);
+    let rdlen = u16::from_be_bytes([msg[name_end + 8], msg[name_end + 9]]) as usize;
+    let data_start = name_end + 10;
+    let data_end = data_start.checked_add(rdlen).ok_or(DnsError::Malformed)?;
+    if data_end > msg.len() {
+        return Err(DnsError::Truncated);
+    }
+    Ok(AnswerRr {
+        owner_len,
+        rtype,
+        rclass,
+        ttl,
+        data_start,
+        data_end,
+        next: data_end,
+    })
+}
+
+/// Decodes the name stored as the whole of `start..end`.
+fn rdata_name(msg: &[u8], start: usize, end: usize, out: &mut [u8]) -> Result<usize, DnsError> {
+    let mut hops = 0usize;
+    let (len, name_end) = read_name_at_no_alloc(msg, start, start, &mut hops, out)?;
+    if name_end != end {
+        return Err(DnsError::Malformed);
+    }
+    Ok(len)
+}
+
+fn skip_records(msg: &[u8], mut offset: usize, count: u16) -> Result<usize, DnsError> {
+    for _ in 0..count {
+        let (end, _, _) = skip_rr(msg, offset, offset)?;
+        offset = end;
+    }
+    Ok(offset)
+}
+
+/// Follows CNAMEs from the name already in `current` (length `current_len`).
+/// Returns the final name's length and how many CNAMEs were followed.
+fn follow_cnames(
+    msg: &[u8],
+    answer_at: usize,
+    ancount: u16,
+    current: &mut [u8],
+    mut current_len: usize,
+) -> Result<(usize, usize), DnsError> {
+    let mut origin = [0u8; MAX_DNS_NAME_LEN];
+    origin
+        .get_mut(..current_len)
+        .ok_or(DnsError::Malformed)?
+        .copy_from_slice(current.get(..current_len).ok_or(DnsError::Malformed)?);
+    let origin_len = current_len;
+    let mut prev_rdata = [(0usize, 0usize); MAX_CNAME_CHAIN];
+    let mut followed = 0usize;
+    loop {
+        let mut target = [0u8; MAX_DNS_NAME_LEN];
+        let Some(CnameTarget {
+            len: target_len,
+            rdata,
+        }) = find_cname(
+            msg,
+            answer_at,
+            ancount,
+            current.get(..current_len).ok_or(DnsError::Malformed)?,
+            &mut target,
+        )?
+        else {
+            break;
+        };
+        if followed + 1 >= MAX_CNAME_CHAIN {
+            return Err(DnsError::Malformed);
+        }
+        let target_bytes = target.get(..target_len).ok_or(DnsError::Malformed)?;
+        if dns_name_eq(
+            target_bytes,
+            current.get(..current_len).ok_or(DnsError::Malformed)?,
+        ) || dns_name_eq(
+            target_bytes,
+            origin.get(..origin_len).ok_or(DnsError::Malformed)?,
+        ) || previous_name_is(msg, &prev_rdata[..followed], target_bytes)?
+        {
+            return Err(DnsError::Malformed);
+        }
+        prev_rdata[followed] = rdata;
+        followed += 1;
+        current
+            .get_mut(..target_len)
+            .ok_or(DnsError::Malformed)?
+            .copy_from_slice(target_bytes);
+        current_len = target_len;
+    }
+    Ok((current_len, followed))
+}
+
+fn previous_name_is(msg: &[u8], prev: &[(usize, usize)], target: &[u8]) -> Result<bool, DnsError> {
+    let mut scratch = [0u8; MAX_DNS_NAME_LEN];
+    for &(start, end) in prev {
+        let len = rdata_name(msg, start, end, &mut scratch)?;
+        if dns_name_eq(scratch.get(..len).ok_or(DnsError::Malformed)?, target) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+struct CnameTarget {
+    len: usize,
+    rdata: (usize, usize),
+}
+
+/// The first IN CNAME for `owner`.
+fn find_cname(
+    msg: &[u8],
+    mut offset: usize,
+    ancount: u16,
+    owner_want: &[u8],
+    target: &mut [u8],
+) -> Result<Option<CnameTarget>, DnsError> {
+    let mut owner = [0u8; MAX_DNS_NAME_LEN];
+    for _ in 0..ancount {
+        let rr = read_answer_rr(msg, offset, &mut owner)?;
+        if rr.rtype == RR_TYPE_CNAME
+            && rr.rclass == RR_CLASS_IN
+            && dns_name_eq(
+                owner.get(..rr.owner_len).ok_or(DnsError::Malformed)?,
+                owner_want,
+            )
+        {
+            let len = rdata_name(msg, rr.data_start, rr.data_end, target)?;
+            return Ok(Some(CnameTarget {
+                len,
+                rdata: (rr.data_start, rr.data_end),
+            }));
+        }
+        offset = rr.next;
+    }
+    Ok(None)
+}
+
+/// The first IN A record for `owner`, and whether some other IN A record is present.
+fn find_address(
+    msg: &[u8],
+    mut offset: usize,
+    ancount: u16,
+    owner_want: &[u8],
+) -> Result<(Option<DnsAnswer>, bool), DnsError> {
+    let mut owner = [0u8; MAX_DNS_NAME_LEN];
+    let mut found = None;
+    let mut foreign_address = false;
+    for _ in 0..ancount {
+        let rr = read_answer_rr(msg, offset, &mut owner)?;
+        if rr.rtype == RR_TYPE_A && rr.rclass == RR_CLASS_IN {
+            if rr.data_end - rr.data_start != 4 {
                 return Err(DnsError::Malformed);
             }
-            let data_start = name_end + 10;
-            let octets = bytes
-                .get(data_start..data_start + 4)
-                .ok_or(DnsError::Truncated)?;
-            let addr = Ipv4Addr::new([octets[0], octets[1], octets[2], octets[3]]);
-            if found.is_none() {
-                found = Some(DnsAnswer { ttl, addr });
+            let matches = dns_name_eq(
+                owner.get(..rr.owner_len).ok_or(DnsError::Malformed)?,
+                owner_want,
+            );
+            if matches && found.is_none() {
+                let octets = msg
+                    .get(rr.data_start..rr.data_end)
+                    .ok_or(DnsError::Truncated)?;
+                found = Some(DnsAnswer {
+                    ttl: rr.ttl,
+                    addr: Ipv4Addr::new([octets[0], octets[1], octets[2], octets[3]]),
+                });
+            } else if !matches {
+                foreign_address = true;
             }
         }
-        offset = rr_end;
+        offset = rr.next;
     }
-
-    for _ in 0..hdr.nscount {
-        let (end, _, _) = skip_rr(bytes, offset, offset)?;
-        offset = end;
-    }
-    for _ in 0..hdr.arcount {
-        let (end, _, _) = skip_rr(bytes, offset, offset)?;
-        offset = end;
-    }
-
-    found.ok_or(DnsError::NoAddress)
+    Ok((found, foreign_address))
 }
 
 #[derive(Clone, Copy)]
@@ -1084,6 +1281,141 @@ mod tests {
         let ans = parse_response(&resp, id, FIXTURE_HOSTNAME).unwrap();
         assert_eq!(ans.addr, FIXTURE_A_RECORD);
         assert_eq!(ans.ttl, FIXTURE_A_TTL_SECS);
+    }
+
+    fn push_name(msg: &mut Vec<u8>, name: &str) {
+        for label in name.split('.') {
+            msg.push(label.len() as u8);
+            msg.extend_from_slice(label.as_bytes());
+        }
+        msg.push(0);
+    }
+
+    fn push_rr(msg: &mut Vec<u8>, owner: &str, rtype: u16, rdata: &[u8]) {
+        push_name(msg, owner);
+        msg.extend_from_slice(&rtype.to_be_bytes());
+        msg.extend_from_slice(&RR_CLASS_IN.to_be_bytes());
+        msg.extend_from_slice(&300u32.to_be_bytes());
+        msg.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        msg.extend_from_slice(rdata);
+    }
+
+    fn message(id: u16, qname: &str, ancount: u16, records: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+        let hdr = DnsHeader {
+            id,
+            flags: 0x8480,
+            qdcount: 1,
+            ancount,
+            nscount: 0,
+            arcount: 0,
+        };
+        let mut msg = vec![0u8; DNS_HEADER_LEN];
+        hdr.write(&mut msg).unwrap();
+        push_name(&mut msg, qname);
+        msg.extend_from_slice(&QTYPE_A.to_be_bytes());
+        msg.extend_from_slice(&QCLASS_IN.to_be_bytes());
+        records(&mut msg);
+        msg
+    }
+
+    #[test]
+    fn mismatched_owner_name_is_rejected() {
+        let id = 42;
+        let decoy = Ipv4Addr::new([10, 77, 0, 66]);
+        let msg = message(id, FIXTURE_HOSTNAME, 1, |msg| {
+            push_rr(msg, "forged.fixture.test", RR_TYPE_A, &decoy.octets());
+        });
+        assert_eq!(
+            parse_response(&msg, id, FIXTURE_HOSTNAME),
+            Err(DnsError::Malformed)
+        );
+        let different_case = message(id, FIXTURE_HOSTNAME, 1, |msg| {
+            push_rr(
+                msg,
+                "M7.FIXTURE.TEST",
+                RR_TYPE_A,
+                &FIXTURE_A_RECORD.octets(),
+            );
+        });
+        let ans = parse_response(&different_case, id, FIXTURE_HOSTNAME).unwrap();
+        assert_eq!(ans.addr, FIXTURE_A_RECORD);
+    }
+
+    #[test]
+    fn cname_chain_is_followed_past_a_decoy_address() {
+        let id = 7;
+        let qname = "www.example";
+        let decoy = Ipv4Addr::new([10, 77, 0, 66]);
+        let msg = message(id, qname, 4, |msg| {
+            push_rr(msg, "forged.example", RR_TYPE_A, &decoy.octets());
+            let mut cname_a = Vec::new();
+            push_name(&mut cname_a, "a.example");
+            push_rr(msg, qname, RR_TYPE_CNAME, &cname_a);
+            let mut cname_b = Vec::new();
+            push_name(&mut cname_b, "b.example");
+            push_rr(msg, "a.example", RR_TYPE_CNAME, &cname_b);
+            push_rr(msg, "b.example", RR_TYPE_A, &FIXTURE_A_RECORD.octets());
+        });
+        let ans = parse_response(&msg, id, qname).unwrap();
+        assert_eq!(ans.addr, FIXTURE_A_RECORD);
+    }
+
+    #[test]
+    fn cname_loop_or_too_long_chain_is_rejected() {
+        let id = 9;
+        let qname = "www.example";
+        let decoy = Ipv4Addr::new([10, 77, 0, 66]);
+        let looped = message(id, qname, 3, |msg| {
+            push_rr(msg, "forged.example", RR_TYPE_A, &decoy.octets());
+            let mut to_a = Vec::new();
+            push_name(&mut to_a, "a.example");
+            push_rr(msg, qname, RR_TYPE_CNAME, &to_a);
+            let mut back = Vec::new();
+            push_name(&mut back, qname);
+            push_rr(msg, "a.example", RR_TYPE_CNAME, &back);
+        });
+        assert_eq!(parse_response(&looped, id, qname), Err(DnsError::Malformed));
+
+        // Eight names (the question plus seven CNAMEs) is the maximum that still resolves.
+        let mut names = vec![qname.to_owned()];
+        for hop in 1..MAX_CNAME_CHAIN {
+            names.push(format!("n{hop}.example"));
+        }
+        let at_bound = message(id, qname, MAX_CNAME_CHAIN as u16, |msg| {
+            for hop in 0..MAX_CNAME_CHAIN - 1 {
+                let mut next = Vec::new();
+                push_name(&mut next, &names[hop + 1]);
+                push_rr(msg, &names[hop], RR_TYPE_CNAME, &next);
+            }
+            push_rr(
+                msg,
+                names.last().expect("chain"),
+                RR_TYPE_A,
+                &FIXTURE_A_RECORD.octets(),
+            );
+        });
+        assert_eq!(
+            parse_response(&at_bound, id, qname).unwrap().addr,
+            FIXTURE_A_RECORD
+        );
+
+        // One more CNAME does not fit in the answer-section cap, so the too-long chain is
+        // eight CNAME hops with no terminal address: the chain itself is malformed.
+        let mut long_names = vec!["q.example".to_owned()];
+        for hop in 1..=MAX_CNAME_CHAIN {
+            long_names.push(format!("n{hop}.example"));
+        }
+        let too_long = message(id, "q.example", MAX_CNAME_CHAIN as u16, |msg| {
+            for hop in 0..MAX_CNAME_CHAIN {
+                let mut next = Vec::new();
+                push_name(&mut next, &long_names[hop + 1]);
+                push_rr(msg, &long_names[hop], RR_TYPE_CNAME, &next);
+            }
+        });
+        assert_eq!(
+            parse_response(&too_long, id, "q.example"),
+            Err(DnsError::Malformed)
+        );
     }
 
     #[test]

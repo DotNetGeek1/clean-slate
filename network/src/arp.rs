@@ -246,6 +246,11 @@ impl ArpCache {
         self.pending.iter().filter(|p| p.is_some()).count()
     }
 
+    /// True when an ARP request for `ip` has been sent and not yet answered.
+    pub fn is_pending(&self, ip: Ipv4Addr) -> bool {
+        self.pending.contains(&Some(ip))
+    }
+
     fn find_slot(&self, ip: Ipv4Addr) -> Option<usize> {
         self.entries
             .iter()

@@ -253,6 +253,7 @@ Any IPv4 datagram with the MF flag set or a non-zero fragment offset is rejected
 - [`ARP_CACHE_CAPACITY`](../network/src/arp.rs) = 16 entries; TTL in monotonic ticks via `ArpCache::new(ttl_ticks)`.
 - On insert when full, the **oldest-inserted** entry (minimum `inserted_at`) is evicted.
 - At most [`MAX_PENDING_ARP_REQUESTS`](../network/src/arp.rs) = 4 distinct unresolved IPs may have outstanding ARP requests; further lookups fail until cache space frees.
+- A reply is cached only when it answers one of those requests: the sender protocol address is the IP we asked for, the target protocol address is ours, and the reply is not gratuitous (sender and target protocol addresses differ). Unsolicited replies are ignored. Gratuitous ARP does not create or overwrite an entry. IPv4 packets do not update the cache.
 - `ArpCache::clear()` and `L3Stack::reset()` drop cache and pending state.
 
 ### `L3Stack` API
@@ -528,17 +529,18 @@ Fail-closed boot: `[TLS ] peer identity rejected name=m7.fixture.test`, `[M7.6] 
 
 The peer must have served exactly one TCP echo, one TLS connection, one completed handshake and one app response in the pass boot, and in the fail-closed boot one TLS connection with no completed handshake and no app response.
 
-The pass boot runs twice, the second time on the [impaired wire](#impaired-wire-221), where the peer must also have applied the TCP script to exactly two connections (echo and TLS). `test-m7-network` likewise boots a second time on the impaired wire and requires the DNS script for its one query and the TCP script for its two TLS connections.
+The pass boot runs twice, the second time on the [impaired wire](#impaired-wire-221), where the peer must also have applied the TCP script to exactly two connections (echo and TLS) and the ARP poison once. `test-m7-network` likewise boots a second time on the impaired wire and requires the DNS script for its one query, the TCP script for its two TLS connections, and the ARP poison once.
 
 ### Impaired wire (#221)
 
 `FixtureOptions::impaired` (`xtask/src/m7_fixture_impair.rs`) puts a deterministic adversarial wire between QEMU and the peer. Every impairment is a one-shot per DNS query ID or per TCP connection (ports + guest ISS), and the peer counts each one (`FixtureCounts::impaired`), so a lane requires exact counts: an impairment that did not fire fails the lane, and so does a guest that did not recover.
 
-- DNS: the first copy of each query ID is dropped unanswered. Before the answer to the resend, the peer sends four forgeries carrying the decoy address `10.77.0.66`: wrong ID, `TC=1`, cut two bytes short (all from port 53), and a well-formed answer from port 5353. The real answer is held back 20 ms so every forgery reaches the guest first.
+- DNS: the first copy of each query ID is dropped unanswered. Before the answer to the resend, the peer sends five forgeries carrying the decoy address `10.77.0.66`: wrong ID, `TC=1`, cut two bytes short, and a well-formed answer whose A owner is `forged.fixture.test` (all from port 53), plus a well-formed answer from port 5353. The real answer is held back 20 ms so every forgery reaches the guest first. A guest that prints `10.77.0.66` accepted a forgery.
+- ARP: on the guest's request for the peer, the wire sends one gratuitous ARP reply for that IP from `02:21:00:00:00:66` and holds that request for 100 ms. If the guest addresses any frame to that MAC, the request is dropped and no real reply is ever sent. Otherwise the held request is delivered once, so a guest that ignored the poison still learns the peer. Count: one poison per impaired boot.
 - TCP, guest → peer: the first SYN and the first data segment of each connection are dropped.
 - TCP, peer → guest: the peer's first data segment on each connection is replaced by a blind RST (sequence one past the expected value), then the segment split in two and delivered second half first, then the first half, the second half again, and a stale copy of the first half. The re-delivery is part of the script, so recovery does not depend on the peer's own retransmission timer (≥ 1 s in smoltcp, longer than the guest's 2 s TLS phase budget allows for safely). This proves out-of-order segments are dropped and the in-order copy accepted; there is still no reassembly.
 
-Log lines: `[FIX ] impair dns query dropped id=…`, `[FIX ] impair dns forged replies=4`, `[FIX ] impair tcp SynDropped|GuestDataDropped|FixtureDataScripted`.
+Log lines: `[FIX ] impair dns query dropped id=…`, `[FIX ] impair dns forged replies=5`, `[FIX ] impair arp poison reply`, `[FIX ] impair tcp SynDropped|GuestDataDropped|FixtureDataScripted`.
 
 UEFI builds set `--cfg aes_force_soft` in [`.cargo/config.toml`](../.cargo/config.toml) for portable AES. On Windows hosts, **debug** UEFI codegen for GCM (`polyval`/`aes`) can still trigger an LLVM split error; `cargo xtask test-m7-tls` therefore builds the kernel **release** profile (`kernel_release: true`) while other M7 lanes stay debug.
 
@@ -566,8 +568,9 @@ Issue #85 adds [`dns`](../network/src/dns.rs): a bounded RFC 1035 subset codec, 
 
 ### Supported subset
 
-- UDP only; `RD=1` queries; QTYPE A / QCLASS IN; single question; first A answer returned.
-- No CNAME chasing, no DNS-over-TCP, no DNSSEC, no EDNS0.
+- UDP only; `RD=1` queries; QTYPE A / QCLASS IN; single question. The A record that is returned has an owner equal to the queried name, or to the name at the end of a CNAME chain followed from that question in the same reply.
+- A chain may contain at most [`MAX_CNAME_CHAIN`](../network/src/dns.rs) = 8 names, including the question. A loop or a longer chain is rejected. An A record for any other name is not an answer (the query keeps waiting).
+- No DNS-over-TCP, no DNSSEC, no EDNS0.
 - Wire names validated per label (1..=63), total <= [`MAX_DNS_NAME_LEN`](../network/src/limits.rs) (253).
 - Compression pointers: follow with hop limit [`DNS_COMPRESSION_HOP_LIMIT`](../network/src/dns.rs) (16); pointers must target strictly earlier offsets (loop/forward rejection).
 
@@ -598,7 +601,7 @@ Issue #85 adds [`dns`](../network/src/dns.rs): a bounded RFC 1035 subset codec, 
 - **IDs:** DNS wire IDs are `dns_id_counter XOR session_generation` (deterministic, not cryptographically unpredictable — acceptable only on the hermetic lab network).
 - **Foreign source:** Replies not sourced from the configured `server` socket are dropped (`dropped_foreign_source`).
 - **Pending:** `resolve` → `ResolveOutcome::Cached` or `Pending { query_id }`; `poll` drives UDP/ARP, retries query send after `Unreachable`, applies timeouts, fills the cache; `take_result(query_id, owner)` is owner-checked.
-- **Retransmission (#221):** a query with no acceptable reply is sent again, with the same ID, every `DNS_RETRANSMIT_TICKS` until its deadline, so one lost datagram no longer fails the resolve. Replies are read before the resend check, so a queued answer is never followed by a needless resend. `next_deadline()` includes the next resend once the first send has succeeded (an ARP-pending first send is retried on the next ingress poll), so the network service wakes for it. Wrong-ID, malformed, `TC=1` and foreign-source replies are ignored and the query keeps waiting; `TC=1` therefore ends in `Timeout` (no DNS-over-TCP).
+- **Retransmission (#221):** a query with no acceptable reply is sent again, with the same ID, every `DNS_RETRANSMIT_TICKS` until its deadline, so one lost datagram no longer fails the resolve. Replies are read before the resend check, so a queued answer is never followed by a needless resend. `next_deadline()` includes the next resend once the first send has succeeded (an ARP-pending first send is retried on the next ingress poll), so the network service wakes for it. Wrong-ID, malformed, wrong-owner, `TC=1` and foreign-source replies are ignored and the query keeps waiting; `TC=1` therefore ends in `Timeout` (no DNS-over-TCP).
 - **Teardown:** `on_holder_exit(owner)` drops that holder's pending queries and UDP endpoints; `reset()` clears cache, pending, and UDP/L3 state.
 
 ### Network service API (after #87 authorization)
@@ -622,6 +625,6 @@ cargo xtask test-m7-dns
 
 **Serial markers (ordered):** `[DNS ] virtio ready mac=…`, `[DNS ] resolved name=m7.fixture.test addr=10.77.0.1 ttl=300`, `[DNS ] cache hit name=m7.fixture.test`, `[DNS ] nxdomain name=nope.fixture.test`, `[M7.5] PASS` (host peer also emits `[FIX ] dns query name=m7.fixture.test rcode=0`). The peer must have sent exactly two DNS replies, one A answer and one NXDOMAIN, so the cache hit is proven to have sent no query.
 
-The lane then boots again on the [impaired wire](#impaired-wire-221): same markers and replies, and the peer must also have dropped exactly two query copies and sent exactly eight forged replies.
+The lane then boots again on the [impaired wire](#impaired-wire-221): same markers and replies, and the peer must also have dropped exactly two query copies, sent exactly ten forged replies, and applied the ARP poison once.
 
 Regression: `cargo xtask test-m7-net-device` (echo lane unchanged).

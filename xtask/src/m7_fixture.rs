@@ -21,8 +21,8 @@ use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::udp;
 
 use crate::m7_fixture_impair::{
-    forged_dns_replies, tcp_frame, DnsImpairer, ImpairCounts, TcpImpairer, TcpImpairment,
-    DNS_FORGERY_PORT,
+    destined_to_poison_mac, forged_dns_replies, tcp_frame, ArpImpairer, DnsImpairer, GuestArp,
+    ImpairCounts, TcpImpairer, TcpImpairment, DNS_FORGERY_PORT,
 };
 use crate::m7_fixture_tcp::{
     FixtureTlsCert, HoldEvent, HttpOutcome, M9BannerService, M9HoldService, M9HttpService,
@@ -249,8 +249,14 @@ fn run_peer(
     }
 
     let tcp_impairer = options.impaired.then(TcpImpairer::default);
-    let mut device =
-        QemuSocketDevice::new(stream, options.m9_profile, tcp_impairer, Arc::clone(&seen));
+    let arp_impairer = options.impaired.then(ArpImpairer::default);
+    let mut device = QemuSocketDevice::new(
+        stream,
+        options.m9_profile,
+        tcp_impairer,
+        arp_impairer,
+        Arc::clone(&seen),
+    );
     let peer_octets = PEER_IPV4.octets();
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(
         PEER_MAC.octets(),
@@ -492,6 +498,7 @@ struct QemuSocketDevice {
     m9_profile: bool,
     trace_frames: bool,
     tcp_impairer: Option<TcpImpairer>,
+    arp_impairer: Option<ArpImpairer>,
     seen: Arc<FixtureSeen>,
     /// Bytes received from QEMU that do not yet form a complete
     /// length-prefixed frame. The socket is non-blocking, so a read may stop
@@ -506,6 +513,7 @@ impl QemuSocketDevice {
         stream: TcpStream,
         m9_profile: bool,
         tcp_impairer: Option<TcpImpairer>,
+        arp_impairer: Option<ArpImpairer>,
         seen: Arc<FixtureSeen>,
     ) -> Self {
         Self {
@@ -513,6 +521,7 @@ impl QemuSocketDevice {
             m9_profile,
             trace_frames: frame_trace_enabled(),
             tcp_impairer,
+            arp_impairer,
             seen,
             pending: Vec::with_capacity(4 * (4 + MAX_FRAME_BYTES)),
             rx_queue: VecDeque::new(),
@@ -612,13 +621,38 @@ impl QemuSocketDevice {
                 if self.trace_frames {
                     self.events.extend(describe_tcp_frame("guest", &frame));
                 }
+                let arp_action = self
+                    .arp_impairer
+                    .as_mut()
+                    .map(|arp| arp.on_guest_request(&frame))
+                    .unwrap_or(GuestArp::Forward);
+                let suppress_request = match arp_action {
+                    GuestArp::Poison(poison) => {
+                        if self.write_frame_to_socket(&poison).is_ok() {
+                            self.events
+                                .push("[FIX ] impair arp poison reply".to_owned());
+                            self.seen.record(|counts| counts.arp_poison_replies += 1);
+                        }
+                        true
+                    }
+                    GuestArp::Hold => true,
+                    GuestArp::Forward => false,
+                };
                 let dropped = self
                     .tcp_impairer
                     .as_mut()
                     .and_then(|wire| wire.guest_frame(&frame));
-                if let Some(impairment) = dropped {
+                let answered_here =
+                    suppress_request || (self.m9_profile && self.try_answer_m9_refused_syn(&frame));
+                if destined_to_poison_mac(&frame) {
+                    if let Some(arp) = self.arp_impairer.as_mut() {
+                        arp.note_poisoned_destination();
+                    }
+                    self.events
+                        .push("[FIX ] impair arp poisoned destination dropped".to_owned());
+                } else if let Some(impairment) = dropped {
                     self.record_tcp_impairment(impairment);
-                } else if !(self.m9_profile && self.try_answer_m9_refused_syn(&frame)) {
+                } else if !answered_here {
                     self.rx_queue.push_back(frame);
                 }
             } else {
@@ -680,6 +714,13 @@ impl Device for QemuSocketDevice {
 
     fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         self.read_frames_from_socket();
+        if let Some(frame) = self
+            .arp_impairer
+            .as_mut()
+            .and_then(|arp| arp.take_released_request())
+        {
+            self.rx_queue.push_back(frame);
+        }
         let frame = self.rx_queue.pop_front()?;
         Some((QemuRxToken { frame }, QemuTxToken { device: self }))
     }
