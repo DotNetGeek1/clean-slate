@@ -347,8 +347,12 @@ mod hardware {
         let mut rdseed = has_rdseed().then_some(Rdseed(()));
         let mut rdrand = has_rdrand().then_some(Rdrand(()));
         seed_with_fallback(
-            rdseed.as_mut().map(|source| source as &mut dyn EntropySource),
-            rdrand.as_mut().map(|source| source as &mut dyn EntropySource),
+            rdseed
+                .as_mut()
+                .map(|source| source as &mut dyn EntropySource),
+            rdrand
+                .as_mut()
+                .map(|source| source as &mut dyn EntropySource),
         )
     }
 }
@@ -389,7 +393,10 @@ mod tests {
             .filter(u8::is_ascii_hexdigit)
             .map(|digit| (digit as char).to_digit(16).unwrap() as u8)
             .collect();
-        digits.chunks(2).map(|pair| (pair[0] << 4) | pair[1]).collect()
+        digits
+            .chunks(2)
+            .map(|pair| (pair[0] << 4) | pair[1])
+            .collect()
     }
 
     fn serialize(block: &[u32; BLOCK_WORDS]) -> Vec<u8> {
@@ -405,12 +412,10 @@ mod tests {
         }
         let nonce = [0x0900_0000, 0x4a00_0000, 0];
         let block = chacha20_block(&key_words(&seed), 1, &nonce);
-        let expected = hex(
-            "10 f1 e7 e4 d1 3b 59 15 50 0f dd 1f a3 20 71 c4
+        let expected = hex("10 f1 e7 e4 d1 3b 59 15 50 0f dd 1f a3 20 71 c4
              c7 d1 f4 c7 33 c0 68 03 04 22 aa 9a c3 d4 6c 4e
              d2 82 64 46 07 9f aa 09 14 c2 d7 05 d9 8b 02 a2
-             b5 12 9c d1 de 16 4e b9 cb d0 83 e8 a2 50 3c 4e",
-        );
+             b5 12 9c d1 de 16 4e b9 cb d0 83 e8 a2 50 3c 4e");
         assert_eq!(serialize(&block), expected);
     }
 
@@ -420,16 +425,14 @@ mod tests {
         let mut rng = NetRng::from_seed([0; SEED_BYTES]);
         let mut stream = [0u8; 128];
         rng.fill_bytes(&mut stream);
-        let expected = hex(
-            "76 b8 e0 ad a0 f1 3d 90 40 5d 6a e5 53 86 bd 28
+        let expected = hex("76 b8 e0 ad a0 f1 3d 90 40 5d 6a e5 53 86 bd 28
              bd d2 19 b8 a0 8d ed 1a a8 36 ef cc 8b 77 0d c7
              da 41 59 7c 51 57 48 8d 77 24 e0 3f b8 d8 4a 37
              6a 43 b8 f4 15 18 a1 1c c3 87 b6 69 b2 ee 65 86
              9f 07 e7 be 55 51 38 7a 98 ba 97 7c 73 2d 08 0d
              cb 0f 29 a0 48 e3 65 69 12 c6 53 3e 32 ee 7a ed
              29 b7 21 76 9c e6 4e 43 d5 71 33 b0 74 d8 39 d5
-             31 ed 1f 28 51 0a fb 45 ac e1 0a 1f 4b 79 4d 6f",
-        );
+             31 ed 1f 28 51 0a fb 45 ac e1 0a 1f 4b 79 4d 6f");
         assert_eq!(stream.to_vec(), expected);
     }
 
@@ -487,13 +490,19 @@ mod tests {
             .collect();
         assert!(ports.iter().all(|&port| port >= EPHEMERAL_PORT_FIRST));
         assert_spread(
-            ports.iter().map(|&port| u32::from(port - EPHEMERAL_PORT_FIRST)),
+            ports
+                .iter()
+                .map(|&port| u32::from(port - EPHEMERAL_PORT_FIRST)),
             EPHEMERAL_PORT_COUNT,
             16,
             64_000,
         );
         let distinct: HashSet<u16> = ports.iter().copied().take(64).collect();
-        assert!(distinct.len() > 60, "64 draws gave only {} ports", distinct.len());
+        assert!(
+            distinct.len() > 60,
+            "64 draws gave only {} ports",
+            distinct.len()
+        );
     }
 
     #[test]
@@ -574,7 +583,15 @@ mod tests {
 
     #[test]
     fn transient_underflow_is_retried_within_the_budget() {
-        let mut source = Scripted(std::vec![None, Some(1), None, None, Some(2), Some(3), Some(4)]);
+        let mut source = Scripted(std::vec![
+            None,
+            Some(1),
+            None,
+            None,
+            Some(2),
+            Some(3),
+            Some(4)
+        ]);
         assert!(seed_from(&mut source, 3).is_ok());
         let mut source = Scripted(std::vec![None, None, None, Some(1)]);
         assert_eq!(seed_from(&mut source, 3), Err(SeedError::Exhausted));

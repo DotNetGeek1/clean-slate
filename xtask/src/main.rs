@@ -677,6 +677,12 @@ const M7_NETWORK_ACCEPTANCE_MARKERS: [&str; 19] = [
     "[NET ] capacity baseline ok",
     "[M7.8] PASS",
 ];
+/// #221: the network service on a vCPU without RDSEED/RDRAND. It exits before it takes the
+/// NIC, so the fixture must see no frame at all.
+const M7_NETWORK_NO_ENTROPY_MARKERS: [&str; 2] = [
+    "[NET ] service started pid=",
+    "[NET ] FAIL no hardware entropy: no RDSEED or RDRAND; network service failed closed and did not start",
+];
 const M6_DELEGATION_ACCEPTANCE_MARKERS: [&str; 8] = [
     "[CAP ] delegate denied from=",
     "reason=rights-widening",
@@ -1725,7 +1731,7 @@ fn run_m7_dns_boot(impaired: bool) -> Result<GuestValues, XtaskError> {
             m7_fixture_port: Some(port),
             m10_virtio_modern: None,
             kernel_release: false,
-            cpu_model: None,
+            cpu_model: Some(RDRAND_CPU_MODEL),
             machine_extra: None,
             vga: None,
             display: None,
@@ -3033,7 +3039,7 @@ fn run_m6_object_acceptance() -> Result<(), XtaskError> {
 }
 
 fn run_m7_net_service_acceptance() -> Result<(), XtaskError> {
-    run_vm_inner(
+    run_vm_inner_with_config(
         false,
         false,
         &["m7-net-service-self-test"],
@@ -3041,6 +3047,10 @@ fn run_m7_net_service_acceptance() -> Result<(), XtaskError> {
             MarkerSet::Ordered(&M7_NET_SERVICE_ACCEPTANCE_MARKERS),
             M7_NET_SERVICE_ACCEPTANCE_TIMEOUT,
         )),
+        VmLaunchConfig {
+            cpu_model: Some(RDRAND_CPU_MODEL),
+            ..VmLaunchConfig::default()
+        },
     )
 }
 
@@ -3054,7 +3064,42 @@ fn run_m7_network_acceptance() -> Result<(), XtaskError> {
         &boots,
         M7_NETWORK_EXCHANGES,
         M7_NETWORK_LEGACY,
-    )
+    )?;
+    run_m7_network_no_entropy_boot()
+}
+
+/// The service fails closed when the vCPU has neither RDSEED nor RDRAND: one clear line, and
+/// nothing on the wire.
+fn run_m7_network_no_entropy_boot() -> Result<(), XtaskError> {
+    let lane = "test-m7-network (no RDRAND/RDSEED)";
+    let peer = M7FixturePeer::start().map_err(XtaskError::Io)?;
+    let port = peer.port();
+    let run_result = run_vm_inner_with_config(
+        false,
+        false,
+        &["m7-network-self-test"],
+        Some((
+            MarkerSet::Ordered(&M7_NETWORK_NO_ENTROPY_MARKERS),
+            M7_NET_SERVICE_ACCEPTANCE_TIMEOUT,
+        )),
+        VmLaunchConfig {
+            m7_fixture_port: Some(port),
+            kernel_release: true,
+            cpu_model: Some(GUARDED_CPU_MODEL),
+            ..VmLaunchConfig::default()
+        },
+    );
+    let (served, guest) = peer.shutdown_with_guest_values();
+    run_result?;
+    require_fixture_served(lane, served, FixtureCounts::ZERO)?;
+    if guest.frames != 0 {
+        return Err(XtaskError::Validation(format!(
+            "{lane}: fixture saw {} guest frame(s); a service without entropy must send none",
+            guest.frames
+        )));
+    }
+    println!("[FIX ] {lane} failed closed: no guest frames, fixture served nothing");
+    Ok(())
 }
 
 fn run_m7_network_boot(impaired: bool) -> Result<GuestValues, XtaskError> {

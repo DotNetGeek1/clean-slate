@@ -656,6 +656,9 @@ pub(crate) fn handle_faulted_userspace_exception(context: &InterruptContext) -> 
             bit(context.error_code, 4)
         ));
     }
+    if context.vector as usize == crate::arch::x86_64::USER_TEST_VECTOR {
+        crate::service::net_bridge::on_exit_trap(pid);
+    }
     crate::service::system_init::on_process_death(
         pid,
         if context.vector as usize == crate::arch::x86_64::USER_TEST_VECTOR {

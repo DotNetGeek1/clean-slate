@@ -56,7 +56,10 @@ impl GuestValues {
                 return;
             }
             let dns = &ip_payload[UDP_HEADER_BYTES..];
-            push_distinct(&mut self.dns_queries, (src_port, u16::from_be_bytes([dns[0], dns[1]])));
+            push_distinct(
+                &mut self.dns_queries,
+                (src_port, u16::from_be_bytes([dns[0], dns[1]])),
+            );
         }
     }
 

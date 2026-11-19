@@ -863,8 +863,7 @@ mod tests {
     #[test]
     fn ephemeral_ports_differ_between_generators() {
         let ports = |seed: u8| {
-            let mut table =
-                heap_table_with(GEN, NetRng::from_seed([seed; crate::rng::SEED_BYTES]));
+            let mut table = heap_table_with(GEN, NetRng::from_seed([seed; crate::rng::SEED_BYTES]));
             (0..4)
                 .map(|_| {
                     let id = table.open(OWNER_A, None).unwrap();

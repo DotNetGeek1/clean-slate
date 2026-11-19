@@ -24,11 +24,11 @@ use crate::m7_fixture_impair::{
     destined_to_poison_mac, forged_dns_replies, tcp_frame, ArpImpairer, DnsImpairer, GuestArp,
     ImpairCounts, TcpImpairer, TcpImpairment, DNS_FORGERY_PORT,
 };
-use crate::m7_guest_values::GuestValues;
 use crate::m7_fixture_tcp::{
     FixtureTlsCert, HoldEvent, HttpOutcome, M9BannerService, M9HoldService, M9HttpService,
     TcpEchoService, TlsEvent, TlsService,
 };
+use crate::m7_guest_values::GuestValues;
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 
@@ -624,7 +624,11 @@ impl QemuSocketDevice {
             let end = start + frame_len;
             if frame_len != 0 && frame_len <= MAX_FRAME_BYTES {
                 let frame = self.pending[start..end].to_vec();
-                self.seen.guest.lock().expect("guest values").observe(&frame);
+                self.seen
+                    .guest
+                    .lock()
+                    .expect("guest values")
+                    .observe(&frame);
                 if frame.len() >= 14 && u16::from_be_bytes([frame[12], frame[13]]) == 0x0806 {
                     self.events.push("[FIX ] arp request".to_owned());
                 }

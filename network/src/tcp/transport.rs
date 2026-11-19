@@ -80,7 +80,6 @@ impl TcpTable {
         Ok(index)
     }
 
-
     fn check_id(&self, id: SessionId, owner: TrustedCaller) -> Result<usize, NetworkError> {
         if !id.matches_generation(self.generation) {
             return Err(NetworkError::Denied(DenialReason::StaleGeneration));

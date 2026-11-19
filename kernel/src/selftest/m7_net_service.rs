@@ -355,6 +355,9 @@ pub(crate) fn handle_userspace_network_entry() -> u64 {
         crate::process::current_process_id().unwrap_or_else(|message| fatal_kernel_error(message));
     let report: NetworkServiceBootstrap = read_user(NETWORK_SERVICE_BOOTSTRAP_ADDRESS)
         .unwrap_or_else(|message| fatal_kernel_error(message));
+    if crate::service::net_bridge::log_entropy_failure(&report) {
+        crate::diagnostics::qemu::qemu_exit_failure();
+    }
     #[cfg(feature = "m9-linux-socket-self-test")]
     if report.mode == NETWORK_SERVICE_MODE_ACCEPTANCE {
         if report.result_code != NETWORK_SERVICE_RESULT_OK {

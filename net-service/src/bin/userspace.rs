@@ -24,6 +24,7 @@ use clean_slate_network::limits::MAX_SESSIONS;
 use clean_slate_network::protocol::{
     NetworkRequest, NetworkResponse, NETWORK_REQUEST_BYTES, NETWORK_RESPONSE_BYTES,
 };
+use clean_slate_network::rng::NetRng;
 use clean_slate_network::session::{SessionGeneration, SessionId, SocketKind};
 use clean_slate_network::stack::L3Stack;
 use clean_slate_network::tcp::TcpState;
@@ -36,26 +37,24 @@ use clean_slate_service_fixtures::ready_detail::NetworkReadyDetail;
 use clean_slate_service_fixtures::{
     AllowAllAuthorizer, NetworkService, NetworkServiceBootstrap, NETWORK_CAPABILITY_VERSION,
     NETWORK_CLIENT_DEVICE_ID, NETWORK_DEVICE_ID, NETWORK_MAX_PAYLOAD_BYTES,
-    NETWORK_SERVICE_BOOTSTRAP_ADDRESS, NETWORK_SERVICE_MODE_ACCEPTANCE,
-    NETWORK_SERVICE_MODE_CAPACITY_LOOP, NETWORK_SERVICE_MODE_CLIENT,
-    NETWORK_SERVICE_MODE_CONVERGED_CLIENT, NETWORK_SERVICE_MODE_INFLIGHT_ARM,
-    NETWORK_SERVICE_MODE_STALE_CLOSE, NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE,
-    NETWORK_SERVICE_NEXT_METADATA_BYTES, NETWORK_SERVICE_NEXT_WIRE_BYTES,
-    NETWORK_SERVICE_RESULT_ERROR, NETWORK_SERVICE_RESULT_OK, NETWORK_STATUS_PENDING,
-    NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
+    NETWORK_SERVICE_AUX_NO_ENTROPY, NETWORK_SERVICE_BOOTSTRAP_ADDRESS,
+    NETWORK_SERVICE_MODE_ACCEPTANCE, NETWORK_SERVICE_MODE_CAPACITY_LOOP,
+    NETWORK_SERVICE_MODE_CLIENT, NETWORK_SERVICE_MODE_CONVERGED_CLIENT,
+    NETWORK_SERVICE_MODE_INFLIGHT_ARM, NETWORK_SERVICE_MODE_STALE_CLOSE,
+    NETWORK_SERVICE_MODE_UNAUTHORIZED_PROBE, NETWORK_SERVICE_NEXT_METADATA_BYTES,
+    NETWORK_SERVICE_NEXT_WIRE_BYTES, NETWORK_SERVICE_RESULT_ERROR, NETWORK_SERVICE_RESULT_OK,
+    NETWORK_STATUS_PENDING, NET_SUBOP_ACK_HOLDER_EXIT, NET_SUBOP_MONOTONIC_TICKS, NET_SUBOP_POLL,
     NET_SUBOP_POP_HOLDER_EXIT, NET_SUBOP_RAW_GEOMETRY, NET_SUBOP_RAW_RECEIVE,
     NET_SUBOP_RAW_TRANSMIT, NET_SUBOP_SERVICE_COMPLETE, NET_SUBOP_SERVICE_NEXT, NET_SUBOP_SUBMIT,
     NET_SUBOP_TICK_PERIOD_NS, NET_SUBOP_WAIT_WORK, NET_WAIT_WORK_REQUESTS, NET_WAIT_WORK_RX,
 };
 use core::alloc::{GlobalAlloc, Layout};
-use core::arch::x86_64::{__cpuid, _rdrand64_step};
 use core::future::Future;
 use core::mem::{size_of, MaybeUninit};
 use core::pin::{pin, Pin};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
-use rand_core::{CryptoRng, RngCore};
 
 /// ARP cache TTL (~40 s wall time at production 1 ms LAPIC tick).
 const ARP_TTL_MS: u64 = 40_000;
@@ -65,9 +64,6 @@ const TLS_HANDSHAKE_TIMEOUT_MS: u64 = 8_192;
 const TLS_IO_TIMEOUT_MS: u64 = 2_000;
 /// Active-open timeout while waiting for SYN-ACK (matches `TCP_CONNECT_TIMEOUT_TICKS` at 1 ms/tick).
 const TCP_CONNECT_TIMEOUT_MS: u64 = 500;
-/// Consecutive RDRAND underflows tolerated before the service fails closed (Intel SDM
-/// guidance: ten retries make exhaustion vanishingly unlikely on healthy hardware).
-const RDRAND_RETRIES: usize = 10;
 
 struct BumpAllocator;
 
@@ -765,7 +761,7 @@ struct TlsJobInput {
     remote: SocketAddrV4,
     owner: clean_slate_network::protocol::TrustedCaller,
     budget: TlsTransactionBudget,
-    rng: RdrandRng,
+    rng: NetRng,
     request: [u8; NETWORK_MAX_PAYLOAD_BYTES],
     request_len: usize,
 }
@@ -869,6 +865,16 @@ unsafe fn service_response_payload_ptr() -> *mut [u8; NETWORK_MAX_PAYLOAD_BYTES]
 }
 
 fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
+    // #221: no hardware entropy, no service. Nothing below runs, so no capability is taken,
+    // no frame is sent and readiness is never reported.
+    let mut rng = match NetRng::from_hardware() {
+        Ok(rng) => rng,
+        Err(error) => {
+            bootstrap.result_code = NETWORK_SERVICE_RESULT_ERROR;
+            bootstrap.aux_status = NETWORK_SERVICE_AUX_NO_ENTROPY | error.code();
+            finish()
+        }
+    };
     let raw_handle = match network_capability(NETWORK_DEVICE_ID) {
         Ok(handle) => handle,
         Err(_) => finish(),
@@ -895,6 +901,7 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
             generation,
             DNS_SERVER_ADDR,
             DnsResolver::<ServiceLink>::DEFAULT_TICKS_PER_SEC,
+            rng.fork(),
         ));
         TcpTransport::init_in_place(
             service_tls_transport_ptr(),
@@ -905,6 +912,7 @@ fn run_service_loop(bootstrap: &mut NetworkServiceBootstrap) -> ! {
                 ms_to_irq_ticks(ARP_TTL_MS),
             ),
             generation,
+            rng.fork(),
         );
         let heap_checkpoint = current_heap_offset();
         TLS_HEAP_CHECKPOINT.store(heap_checkpoint, Ordering::SeqCst);
@@ -1808,9 +1816,7 @@ fn start_service_tls_send<F: Future<Output = TlsJobOutput>>(
     let now = monotonic_ticks().map_err(|_| NetworkResponse::Error {
         code: NetworkError::Timeout.code(),
     })?;
-    let rng = RdrandRng::new().map_err(|_| NetworkResponse::Error {
-        code: NetworkError::Protocol.code(),
-    })?;
+    let rng = shared_tcp_transport_mut().fork_rng();
     shared_tcp_transport_mut()
         .stack_mut()
         .arp_cache_mut()
@@ -2099,59 +2105,6 @@ fn receive_session(handle: u64, session: SessionId, out: &mut [u8]) -> Result<us
         NetworkResponse::Receive { payload_len } => Ok(payload_len as usize),
         NetworkResponse::Error { code } => Err(code as u64),
         _ => Err(0),
-    }
-}
-
-struct RdrandRng;
-
-impl RdrandRng {
-    fn new() -> Result<Self, u64> {
-        let leaf1 = unsafe { __cpuid(1) };
-        if leaf1.ecx & (1 << 30) == 0 {
-            return Err(0);
-        }
-        let mut word = 0u64;
-        if unsafe { _rdrand64_step(&mut word) } == 0 {
-            return Err(0);
-        }
-        Ok(Self)
-    }
-}
-
-/// One RDRAND word. `RngCore` cannot report failure, so persistent underflow ends the
-/// process through the panic handler (result `ERROR`) instead of spinning.
-fn rdrand_word() -> u64 {
-    for _ in 0..RDRAND_RETRIES {
-        let mut word = 0u64;
-        if unsafe { _rdrand64_step(&mut word) } != 0 {
-            return word;
-        }
-    }
-    panic!("rdrand exhausted");
-}
-
-impl CryptoRng for RdrandRng {}
-
-impl RngCore for RdrandRng {
-    fn next_u32(&mut self) -> u32 {
-        let mut buf = [0u8; 4];
-        self.fill_bytes(&mut buf);
-        u32::from_le_bytes(buf)
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        rdrand_word()
-    }
-
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        for chunk in dest.chunks_mut(8) {
-            chunk.copy_from_slice(&rdrand_word().to_le_bytes()[..chunk.len()]);
-        }
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        self.fill_bytes(dest);
-        Ok(())
     }
 }
 

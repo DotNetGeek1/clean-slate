@@ -62,7 +62,12 @@ mod integration {
 
     /// `(source port, ISS)` of two connections opened at tick 7 by a transport seeded `seed`.
     fn first_syns(seed: u8) -> [(u16, u32); 2] {
-        let stack = L3Stack::new(FakeLink::new(GUEST_MAC, true), GUEST_MAC, GUEST_IPV4, ARP_TTL);
+        let stack = L3Stack::new(
+            FakeLink::new(GUEST_MAC, true),
+            GUEST_MAC,
+            GUEST_IPV4,
+            ARP_TTL,
+        );
         let mut guest = TcpTransport::alloc_boxed(
             stack,
             SessionGeneration::new(1),
