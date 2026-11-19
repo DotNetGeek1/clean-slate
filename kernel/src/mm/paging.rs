@@ -302,6 +302,32 @@ pub(crate) fn assert_carve_out_directory_path_has_no_nx(
     Ok(())
 }
 
+/// Leaves of `root_frame` that are writable and executable through the whole walk (W on every
+/// level, NX on none), user or supervisor. Kernel W^X (#217) requires 0 in every root.
+pub(crate) fn count_writable_executable_leaves(root_frame: u64) -> usize {
+    fn walk(table_frame: u64, level: u8) -> usize {
+        let table = unsafe { page_table_ref(table_frame) };
+        let mut count = 0;
+        for entry in table.iter() {
+            let flags = entry.flags();
+            if !flags.contains(PageTableFlags::PRESENT)
+                || !flags.contains(PageTableFlags::WRITABLE)
+                || flags.contains(PageTableFlags::NO_EXECUTE)
+            {
+                continue;
+            }
+            let is_leaf = level == 1 || (level < 4 && flags.contains(PageTableFlags::HUGE_PAGE));
+            count += if is_leaf {
+                1
+            } else {
+                walk(entry.addr().as_u64(), level - 1)
+            };
+        }
+        count
+    }
+    walk(root_frame, 4)
+}
+
 pub(crate) unsafe fn current_offset_page_table() -> OffsetPageTable<'static> {
     unsafe { offset_page_table_for_root(current_root_frame_address()) }
 }
@@ -369,6 +395,58 @@ pub(crate) fn inspect_current_mapping() -> Result<(u64, u64), &'static str> {
 pub(crate) fn zero_page(frame: u64) {
     unsafe {
         ptr::write_bytes(page_table_virt(frame) as *mut u8, 0, PAGE_SIZE as usize);
+    }
+}
+
+#[cfg(test)]
+mod wx_tests {
+    use super::*;
+    use std::boxed::Box;
+    use x86_64::PhysAddr;
+
+    fn table() -> &'static mut PageTable {
+        Box::leak(Box::new(PageTable::new()))
+    }
+
+    fn frame(table: &PageTable) -> PhysAddr {
+        PhysAddr::new(table as *const PageTable as u64)
+    }
+
+    const DIRECTORY: PageTableFlags = PageTableFlags::PRESENT.union(PageTableFlags::WRITABLE);
+
+    #[test]
+    fn counts_only_leaves_writable_and_executable_on_every_level() {
+        let root = table();
+        let pdpt = table();
+        let pd = table();
+        let pt = table();
+        root[0].set_addr(frame(pdpt), DIRECTORY);
+        pdpt[0].set_addr(frame(pd), DIRECTORY);
+        pd[0].set_addr(frame(pt), DIRECTORY);
+        let rx = PageTableFlags::PRESENT;
+        let rw_nx = DIRECTORY | PageTableFlags::NO_EXECUTE;
+        pt[0].set_addr(PhysAddr::new(0x1000), rx);
+        pt[1].set_addr(PhysAddr::new(0x2000), rw_nx);
+        pd[1].set_addr(PhysAddr::new(0x20_0000), rw_nx | PageTableFlags::HUGE_PAGE);
+        let root_frame = frame(root).as_u64();
+        assert_eq!(count_writable_executable_leaves(root_frame), 0);
+
+        pt[2].set_addr(PhysAddr::new(0x3000), DIRECTORY);
+        pd[2].set_addr(
+            PhysAddr::new(0x40_0000),
+            DIRECTORY | PageTableFlags::HUGE_PAGE,
+        );
+        pdpt[1].set_addr(
+            PhysAddr::new(0x4000_0000),
+            DIRECTORY | PageTableFlags::HUGE_PAGE,
+        );
+        assert_eq!(count_writable_executable_leaves(root_frame), 3);
+
+        // A read-only or NX directory above a W+X leaf makes the effective mapping safe.
+        pd[0].set_addr(frame(pt), PageTableFlags::PRESENT);
+        assert_eq!(count_writable_executable_leaves(root_frame), 2);
+        pdpt[0].set_addr(frame(pd), DIRECTORY | PageTableFlags::NO_EXECUTE);
+        assert_eq!(count_writable_executable_leaves(root_frame), 1);
     }
 }
 

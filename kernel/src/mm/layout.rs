@@ -7,8 +7,7 @@ use crate::sync::global_cell::GlobalCell;
 
 /// Start of the supervisor-only direct physical map (512 GiB window at PML4 slot 256, shared by
 /// every process root). Write-back, except a device aperture, which is excluded from the write-back
-/// map and mapped uncached at its direct-map address. The inherited firmware identity map below
-/// slot 256 still aliases the aperture; OVMF's MTRRs keep that alias uncached.
+/// map and mapped uncached at its direct-map address.
 pub(crate) const PHYSMAP_BASE: u64 = 0xffff_8000_0000_0000;
 pub(crate) const PHYSMAP_SPAN: u64 = 512 * 1024 * 1024 * 1024;
 pub(crate) const PHYSMAP_END: u64 = PHYSMAP_BASE + PHYSMAP_SPAN;

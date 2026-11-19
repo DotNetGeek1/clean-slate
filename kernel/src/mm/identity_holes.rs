@@ -1,17 +1,15 @@
-//! Holes in the firmware identity map that the kernel root inherits (#253).
+//! Holes in the kernel's identity and direct maps (#253).
 //!
-//! `kernel_bootstrap::install_kernel_owned_root` copies the firmware's lower-half PML4 entries,
-//! so the kernel runs with OVMF's writable identity map of the first 1 TiB. A stray kernel
-//! pointer into that range writes somewhere real instead of faulting. This module removes the
-//! pages where such a write is most damaging or most likely, and records them so the page-fault
-//! handler can name a hit:
+//! These holes were cut from OVMF's writable identity map when the kernel root inherited it.
+//! Since #217 the kernel root maps only the kernel image and explicitly requested device pages
+//! in the low half (`kernel_bootstrap::install_kernel_owned_root`, `mm::mmio`), so the identity
+//! holes are unmapped by construction; arming still unmaps and verifies them, so a later mapping
+//! change cannot reopen one silently, and records them so the page-fault handler can name a hit:
 //!
 //! - **The null page `[0, 0x1000)`.** Nothing uses physical page 0 after ExitBootServices: the
 //!   frame allocator starts at `0x1000`, the physmap never maps frame 0, the kernel calls no UEFI
 //!   runtime service, has no real-mode trampoline and finds ACPI through the UEFI configuration
-//!   table (read before ExitBootServices) rather than the BIOS data area. The rest of the first
-//!   2 MiB is allocator RAM that boot code reaches through the identity map (the kernel root
-//!   itself is usually the frame at `0x1000`), so the hole is one 4 KiB page.
+//!   table (read before ExitBootServices) rather than the BIOS data area.
 //! - **The 2 MiB identity window around the local APIC** (`[0xFEE0_0000, 0xFF00_0000)` on QEMU).
 //!   QEMU treats a store into the APIC register page at offset 0 (or any write outside it in its
 //!   1 MiB APIC space) as an MSI whose data is the stored value. A value that encodes INIT
@@ -33,9 +31,8 @@
 //! holes. `address_space::verify_carve_out_attach_at_boot` checks a real process root with
 //! [`verify_identity_holes_in_root`].
 //!
-//! Limits: only these pages fault. The rest of the identity map stays writable, a null pointer
-//! plus an offset of 4 KiB or more is not caught, and device MMIO reached through the identity
-//! map (`mm::mmio::with_kernel_identity_mmio`) is not protected.
+//! Limits: the direct map stays writable outside its hole, and device pages that
+//! `mm::mmio::with_kernel_identity_mmio` has mapped stay mapped in the kernel root.
 
 use crate::mm::layout::{VaRange, LOCAL_APIC_ALIAS_VA, PHYSMAP_BASE};
 use crate::mm::paging::{leaf_page_flags_for_address_in_root, page_table_mut, zero_page};

@@ -16,6 +16,7 @@ const EARLY_STACK_RESERVE_SIZE: u64 = 64 * 1024;
 pub(crate) struct BootReservedRanges {
     ranges: [ReservedRange; MAX_BOOT_RESERVED_RANGES],
     count: usize,
+    kernel_image: ReservedRange,
 }
 
 impl BootReservedRanges {
@@ -23,7 +24,13 @@ impl BootReservedRanges {
         Self {
             ranges: [ReservedRange::EMPTY; MAX_BOOT_RESERVED_RANGES],
             count: 0,
+            kernel_image: ReservedRange::EMPTY,
         }
+    }
+
+    /// The loaded kernel image as `LoadedImage` reports it (identity-mapped, VA == PA).
+    pub(crate) fn kernel_image(&self) -> ReservedRange {
+        self.kernel_image
     }
 
     pub(crate) fn push(&mut self, range: ReservedRange) -> Result<(), &'static str> {
@@ -267,6 +274,7 @@ pub(crate) fn collect_reserved_ranges_from_firmware() -> Result<BootReservedRang
         stack_pointer.saturating_sub(EARLY_STACK_RESERVE_SIZE),
         EARLY_STACK_RESERVE_SIZE,
     );
+    ranges.kernel_image = kernel_range;
     ranges.push(kernel_range)?;
     ranges.push(stack_range)?;
     reserve_mapping_page_tables(&mut ranges, kernel_base)?;
