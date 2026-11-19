@@ -24,7 +24,7 @@ use crate::selftest::m6_fixture::{fixture_service, park_step, spawn_fixture};
 use crate::service::service_lifecycle_controller_mut;
 use crate::syscall::install_service_lifecycle_syscall_allocator;
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
-use clean_slate_capability::{delegate, HolderId, Rights};
+use clean_slate_capability::{delegate, CapabilityError, HolderId, Rights};
 use clean_slate_network::error::DenialReason;
 use clean_slate_network::session::{SessionGeneration, SessionId};
 use clean_slate_service_fixtures::m6_fixture::M6FixtureBootstrap;
@@ -115,13 +115,26 @@ pub(crate) fn start_m7_net_caps_self_test(allocator: PageAllocator) -> ! {
     }
     let raw_handle = grant_network_authority(
         holder,
-        Rights::NET_RAW_DEVICE,
+        Rights::NET_RAW_DEVICE.union(Rights::DELEGATE),
         NetworkGrantPolicy::NetworkService,
         None,
     )
     .unwrap_or_else(|_| fatal_kernel_error("service raw-device grant failed"));
     authorize_network_op(holder, raw_handle.encode(), NetworkOp::RawDevice, None)
         .unwrap_or_else(|_| fatal_kernel_error("raw-device op should be allowed"));
+    // #220: even a raw record carrying DELEGATE cannot pass raw NIC authority on.
+    match delegate(
+        unsafe { capability_space_mut() },
+        holder,
+        raw_handle,
+        unrelated,
+        Rights::NET_RAW_DEVICE,
+    ) {
+        Err(CapabilityError::NotDelegable) => kernel_log_fmt(format_args!(
+            "[M7.7] raw-device delegation refused reason=not-delegable\n"
+        )),
+        _ => fatal_kernel_error("raw-device delegation must be refused as not delegable"),
+    }
 
     authorize_network_op(holder, handle.encode(), NetworkOp::Connect, None)
         .unwrap_or_else(|_| fatal_kernel_error("connect should be allowed"));

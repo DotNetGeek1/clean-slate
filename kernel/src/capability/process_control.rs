@@ -14,8 +14,8 @@ use crate::mm::address_space::kernel_root_frame;
 use crate::mm::user_access::{write_user, UserPod};
 use crate::mm::user_mapping::validate_user_writable_pointer_range;
 use crate::process::domain::{remaining_owned_resource_count, teardown_process_by_id};
-use crate::process::process_registry_mut;
 use crate::process::ProcessState;
+use crate::process::{process_registry_mut, ProcessRegistry};
 use crate::syscall::service_lifecycle_syscall_allocator_mut;
 
 use super::{audit, current_holder, grant_root};
@@ -158,16 +158,20 @@ fn record_denied(
     }
 }
 
+/// Grants `holder` control of the live incarnation of `target_pid`: the record names the
+/// target's current process instance generation, so it never authorizes a later process that
+/// reuses the pid.
 #[cfg_attr(not(feature = "m6-process-control-self-test"), allow(dead_code))] // Launch-policy API; exercised by M6 self-tests and the M6.8 integration path.
 pub(crate) fn grant_process_control(
     holder: HolderId,
     target_pid: u64,
-    instance_generation: u64,
     rights: Rights,
 ) -> Result<CapabilityHandle, CapabilityError> {
+    let instance_generation = crate::process::live_instance_generation(target_pid)
+        .ok_or(CapabilityError::WrongResource)?;
     let handle = grant_root(
         holder,
-        ResourceRef::process(target_pid, instance_generation),
+        ResourceRef::process(target_pid, u64::from(instance_generation.0)),
         rights,
     )?;
     log_grant(holder, target_pid, rights);
@@ -194,9 +198,7 @@ pub(crate) fn decide<const N: usize>(
     let target_pid = record.resource.id;
 
     let live = lookup(target_pid).ok_or(DenyReason::StaleTarget)?;
-    if record.resource.instance_generation != 0
-        && record.resource.instance_generation != live.instance_generation
-    {
+    if record.resource.instance_generation != live.instance_generation {
         return Err(DenyReason::StaleTarget);
     }
 
@@ -248,12 +250,16 @@ fn observation_state(state: &ProcessState) -> u64 {
 }
 
 fn lookup_live_target(pid: u64) -> Option<LiveTarget> {
-    let process = unsafe { process_registry_mut().get(pid) }?;
+    live_target_in(unsafe { process_registry_mut() }, pid)
+}
+
+pub(crate) fn live_target_in(registry: &ProcessRegistry, pid: u64) -> Option<LiveTarget> {
+    let process = registry.get(pid)?;
     if !process_is_live(&process.state) {
         return None;
     }
     Some(LiveTarget {
-        instance_generation: 0,
+        instance_generation: u64::from(process.instance_generation.0),
         state: observation_state(&process.state),
         thread_count: u64::from(process.live_threads),
     })
@@ -458,6 +464,48 @@ mod tests {
             ))),
             Err(DenyReason::StaleTarget)
         );
+    }
+
+    #[test]
+    fn capability_bound_to_generation_n_is_stale_against_n_plus_one() {
+        let mut table = CapabilityTable::<8>::new();
+        let holder = HolderId(4);
+        let handle = grant_process(&mut table, holder, 50, 7, Rights::OBSERVE);
+        let decision = decide(&table, holder, handle, PROCESS_OP_OBSERVE, |_| {
+            Some(live(7))
+        })
+        .expect("generation N observes N");
+        match decision {
+            Decision::Observe { observation, .. } => {
+                assert_eq!(observation.instance_generation, 7)
+            }
+            Decision::Terminate { .. } => panic!("unexpected terminate"),
+        }
+        assert_eq!(
+            decide(&table, holder, handle, PROCESS_OP_OBSERVE, |_| Some(live(
+                8
+            ))),
+            Err(DenyReason::StaleTarget)
+        );
+    }
+
+    #[test]
+    fn unbound_generation_zero_is_not_a_wildcard() {
+        let mut table = CapabilityTable::<8>::new();
+        let holder = HolderId(4);
+        let handle = grant_process(
+            &mut table,
+            holder,
+            50,
+            0,
+            Rights::OBSERVE.union(Rights::TERMINATE),
+        );
+        for op in [PROCESS_OP_OBSERVE, PROCESS_OP_TERMINATE] {
+            assert_eq!(
+                decide(&table, holder, handle, op, |_| Some(live(1))),
+                Err(DenyReason::StaleTarget)
+            );
+        }
     }
 
     #[test]

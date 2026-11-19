@@ -4,10 +4,10 @@ use crate::error::syscall_abi::{
     self, SYSCALL_EACCES, SYSCALL_EINVAL, SYSCALL_ENOSPC, SYSCALL_ESTALE,
 };
 use crate::{
-    authorize, authorize_audited, validate_delegation, AuditEvent, AuditOutcome, AuditSink,
-    CapabilityError, CapabilityHandle, CapabilityRecord, CapabilityState, CapabilityTable,
-    Generation, HolderId, Provenance, ResourceClass, ResourceRef, Rights, AUDIT_EVENT_SIZE_BYTES,
-    MAX_DELEGATION_DEPTH,
+    authorize, authorize_audited, fork_inheritable, validate_delegation, AuditEvent, AuditOutcome,
+    AuditSink, CapabilityError, CapabilityHandle, CapabilityRecord, CapabilityState,
+    CapabilityTable, Generation, HolderId, Provenance, ResourceClass, ResourceRef, Rights,
+    AUDIT_EVENT_SIZE_BYTES, MAX_DELEGATION_DEPTH,
 };
 
 struct VecSink {
@@ -517,6 +517,94 @@ fn shared_buffer_delegation_allows_only_read_children() {
         assert_eq!(
             validate_delegation(&parent, handle, holder, Rights::READ.union(right)),
             Err(CapabilityError::NotDelegable)
+        );
+    }
+}
+
+#[test]
+fn network_raw_device_is_not_delegable() {
+    let holder = HolderId(2);
+    let handle = CapabilityHandle::new(0, 1);
+    let parent = live_record(
+        holder,
+        ResourceRef::network(0x5200, 1),
+        Rights::valid_for(ResourceClass::Network),
+        1,
+    );
+    assert_eq!(
+        validate_delegation(&parent, handle, holder, Rights::NET_RAW_DEVICE),
+        Err(CapabilityError::NotDelegable)
+    );
+    assert_eq!(
+        validate_delegation(
+            &parent,
+            handle,
+            holder,
+            Rights::NET_CONNECT.union(Rights::NET_RAW_DEVICE)
+        ),
+        Err(CapabilityError::NotDelegable)
+    );
+    assert_eq!(
+        validate_delegation(&parent, handle, holder, Rights::NET_CONNECT),
+        Ok(Rights::NET_CONNECT)
+    );
+
+    let mut table = CapabilityTable::<4>::new();
+    let parent_handle = table
+        .grant(
+            holder,
+            ResourceRef::network(0x5200, 1),
+            Rights::NET_RAW_DEVICE.union(Rights::DELEGATE),
+            Provenance::root(holder),
+        )
+        .unwrap();
+    assert_eq!(
+        crate::delegate(
+            &mut table,
+            holder,
+            parent_handle,
+            HolderId(3),
+            Rights::NET_RAW_DEVICE
+        ),
+        Err(CapabilityError::NotDelegable)
+    );
+}
+
+#[test]
+fn fork_withholds_records_with_root_only_rights() {
+    let holder = HolderId(4);
+    let graphics = ResourceRef::graphics(0x5300, 1);
+    let shared_buffer = ResourceRef::shared_buffer(shared_buffer_id_raw(3, 1));
+    let network = ResourceRef::network(0x5200, 1);
+    let withheld = [
+        (graphics, Rights::GFX_CONNECT.union(Rights::GFX_SERVE)),
+        (graphics, Rights::GFX_SHELL),
+        (graphics, Rights::GFX_OVERLAY),
+        (
+            shared_buffer,
+            Rights::valid_for(ResourceClass::SharedBuffer),
+        ),
+        (shared_buffer, Rights::READ.union(Rights::WRITE)),
+        (network, Rights::valid_for(ResourceClass::Network)),
+    ];
+    for (resource, rights) in withheld {
+        assert!(
+            !fork_inheritable(&live_record(holder, resource, rights, 1)),
+            "{resource:?} {rights:?} must not be inherited"
+        );
+    }
+    let inherited = [
+        (graphics, Rights::GFX_CONNECT.union(Rights::DELEGATE)),
+        (shared_buffer, Rights::READ),
+        (network, Rights::NET_CONNECT.union(Rights::NET_SEND)),
+        // Fork needs no DELEGATE, and classes without root-only rights are unaffected.
+        (ResourceRef::object(9), Rights::READ.union(Rights::WRITE)),
+        (ResourceRef::process(5, 1), Rights::OBSERVE),
+    ];
+    for (resource, rights) in inherited {
+        assert!(
+            fork_inheritable(&live_record(holder, resource, rights, 1)),
+            "{resource:?} {rights:?} must be inherited"
         );
     }
 }
