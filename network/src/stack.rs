@@ -226,7 +226,6 @@ impl<L: NetworkLink> L3Stack<L> {
         if ipv4.dst != self.our_ip {
             return Ok(None);
         }
-        self.arp.insert(ipv4.src, eth.src, now);
         if ipv4.protocol == IpProtocol::ICMP {
             match IcmpMessage::parse(payload) {
                 Ok(IcmpMessage::EchoRequest {
@@ -269,6 +268,14 @@ impl<L: NetworkLink> L3Stack<L> {
         Ok(None)
     }
 
+    /// A reply is accepted only when it answers a request we still have outstanding:
+    /// it names the IP we asked for, it is addressed to us, and it is not gratuitous.
+    fn arp_reply_answers_pending(&self, arp: ArpPacket) -> bool {
+        arp.sender_ip != arp.target_ip
+            && arp.target_ip == self.our_ip
+            && self.arp.is_pending(arp.sender_ip)
+    }
+
     fn handle_arp(
         &mut self,
         eth: EthernetHeader,
@@ -288,7 +295,7 @@ impl<L: NetworkLink> L3Stack<L> {
                 self.transmit_arp(reply, eth.src)?;
                 self.stats.arp_replies_sent += 1;
             }
-            crate::arp::ArpOp::Reply => {
+            crate::arp::ArpOp::Reply if self.arp_reply_answers_pending(arp) => {
                 self.arp.insert(arp.sender_ip, arp.sender_mac, now);
             }
             _ => {}
@@ -433,6 +440,7 @@ impl From<crate::device::NetworkDeviceError> for NetworkError {
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
+    use crate::arp::ArpOp;
     use crate::fake::FakeLink;
     use crate::fixture::{GUEST_IPV4, PEER_IPV4};
 
@@ -492,5 +500,136 @@ mod tests {
         stack.reset().unwrap();
         assert!(stack.arp_cache().lookup(PEER_IPV4, 0).is_none());
         assert_eq!(stack.stats().dropped_malformed, 0);
+    }
+
+    fn arp_frame(dst: MacAddr, src: MacAddr, packet: ArpPacket) -> FrameBuf {
+        let mut body = [0u8; crate::arp::ARP_PACKET_LEN];
+        packet.write(&mut body).unwrap();
+        let header = EthernetHeader {
+            dst,
+            src,
+            ethertype: EtherType::ARP,
+        };
+        EthernetFrame::build(header, &body).unwrap()
+    }
+
+    fn solicit(stack: &mut L3Stack<FakeLink>, mac: MacAddr) {
+        let err = stack
+            .send_ipv4(0, PEER_IPV4, IpProtocol::ICMP, 0, |_| Ok(()))
+            .unwrap_err();
+        assert!(matches!(err, NetworkError::Unreachable));
+        assert!(stack.arp_cache().is_pending(PEER_IPV4));
+        let reply = ArpPacket {
+            op: ArpOp::Reply,
+            sender_mac: MacAddr::new([0x52, 0x54, 0x00, 0xab, 0xcd, 0xef]),
+            sender_ip: PEER_IPV4,
+            target_mac: mac,
+            target_ip: GUEST_IPV4,
+        };
+        stack
+            .link()
+            .inject_rx(arp_frame(mac, reply.sender_mac, reply))
+            .unwrap();
+        assert!(stack.poll(1).unwrap().is_none());
+    }
+
+    #[test]
+    fn unsolicited_arp_reply_is_ignored() {
+        let mac = MacAddr::new([0x02, 0, 0, 0, 0, 2]);
+        let link = FakeLink::new(mac, true);
+        let mut stack = L3Stack::new(link, mac, GUEST_IPV4, 1000);
+        let reply = ArpPacket {
+            op: ArpOp::Reply,
+            sender_mac: MacAddr::new([0x02, 0x21, 0, 0, 0, 0x66]),
+            sender_ip: PEER_IPV4,
+            target_mac: mac,
+            target_ip: GUEST_IPV4,
+        };
+        stack
+            .link()
+            .inject_rx(arp_frame(mac, reply.sender_mac, reply))
+            .unwrap();
+        assert!(stack.poll(0).unwrap().is_none());
+        assert!(stack.arp_cache().lookup(PEER_IPV4, 0).is_none());
+    }
+
+    #[test]
+    fn arp_reply_for_a_different_ip_is_ignored() {
+        let mac = MacAddr::new([0x02, 0, 0, 0, 0, 2]);
+        let link = FakeLink::new(mac, true);
+        let mut stack = L3Stack::new(link, mac, GUEST_IPV4, 1000);
+        let err = stack
+            .send_ipv4(0, PEER_IPV4, IpProtocol::ICMP, 0, |_| Ok(()))
+            .unwrap_err();
+        assert!(matches!(err, NetworkError::Unreachable));
+        let other = Ipv4Addr::new([10, 77, 0, 9]);
+        let reply = ArpPacket {
+            op: ArpOp::Reply,
+            sender_mac: MacAddr::new([0x02, 0x21, 0, 0, 0, 0x66]),
+            sender_ip: other,
+            target_mac: mac,
+            target_ip: GUEST_IPV4,
+        };
+        stack
+            .link()
+            .inject_rx(arp_frame(mac, reply.sender_mac, reply))
+            .unwrap();
+        assert!(stack.poll(1).unwrap().is_none());
+        assert!(stack.arp_cache().lookup(PEER_IPV4, 1).is_none());
+        assert!(stack.arp_cache().lookup(other, 1).is_none());
+        assert!(stack.arp_cache().is_pending(PEER_IPV4));
+    }
+
+    #[test]
+    fn gratuitous_arp_does_not_overwrite_an_entry() {
+        let mac = MacAddr::new([0x02, 0, 0, 0, 0, 2]);
+        let real = MacAddr::new([0x52, 0x54, 0x00, 0xab, 0xcd, 0xef]);
+        let link = FakeLink::new(mac, true);
+        let mut stack = L3Stack::new(link, mac, GUEST_IPV4, 1000);
+        solicit(&mut stack, mac);
+        assert_eq!(stack.arp_cache().lookup(PEER_IPV4, 1), Some(real));
+        let poison = MacAddr::new([0x02, 0x21, 0, 0, 0, 0x66]);
+        let gratuitous = ArpPacket {
+            op: ArpOp::Reply,
+            sender_mac: poison,
+            sender_ip: PEER_IPV4,
+            target_mac: poison,
+            target_ip: PEER_IPV4,
+        };
+        stack
+            .link()
+            .inject_rx(arp_frame(mac, poison, gratuitous))
+            .unwrap();
+        assert!(stack.poll(2).unwrap().is_none());
+        assert_eq!(stack.arp_cache().lookup(PEER_IPV4, 2), Some(real));
+    }
+
+    #[test]
+    fn ipv4_packets_do_not_create_or_overwrite_arp_entries() {
+        let mac = MacAddr::new([0x02, 0, 0, 0, 0, 2]);
+        let real = MacAddr::new([0x52, 0x54, 0x00, 0xab, 0xcd, 0xef]);
+        let poison = MacAddr::new([0x02, 0x21, 0, 0, 0, 0x66]);
+        let link = FakeLink::new(mac, true);
+        let mut stack = L3Stack::new(link, mac, GUEST_IPV4, 1000);
+        stack.link().inject_rx(ipv4_frame(poison, mac)).unwrap();
+        assert!(stack.poll(0).unwrap().is_none());
+        assert!(stack.arp_cache().lookup(PEER_IPV4, 0).is_none());
+        solicit(&mut stack, mac);
+        stack.link().inject_rx(ipv4_frame(poison, mac)).unwrap();
+        assert!(stack.poll(2).unwrap().is_none());
+        assert_eq!(stack.arp_cache().lookup(PEER_IPV4, 2), Some(real));
+    }
+
+    fn ipv4_frame(src_mac: MacAddr, dst_mac: MacAddr) -> FrameBuf {
+        let mut payload = [0u8; 20];
+        Ipv4Header::new_template(PEER_IPV4, GUEST_IPV4, IpProtocol::ICMP)
+            .write(&mut payload, 0)
+            .unwrap();
+        let header = EthernetHeader {
+            dst: dst_mac,
+            src: src_mac,
+            ethertype: EtherType::IPV4,
+        };
+        EthernetFrame::build(header, &payload).unwrap()
     }
 }

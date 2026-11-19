@@ -21,8 +21,8 @@ use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::udp;
 
 use crate::m7_fixture_impair::{
-    forged_dns_replies, tcp_frame, DnsImpairer, ImpairCounts, TcpImpairer, TcpImpairment,
-    DNS_FORGERY_PORT,
+    destined_to_poison_mac, forged_dns_replies, tcp_frame, ArpImpairer, DnsImpairer, ImpairCounts,
+    TcpImpairer, TcpImpairment, DNS_FORGERY_PORT,
 };
 use crate::m7_fixture_tcp::{
     FixtureTlsCert, HoldEvent, HttpOutcome, M9BannerService, M9HoldService, M9HttpService,
@@ -249,8 +249,14 @@ fn run_peer(
     }
 
     let tcp_impairer = options.impaired.then(TcpImpairer::default);
-    let mut device =
-        QemuSocketDevice::new(stream, options.m9_profile, tcp_impairer, Arc::clone(&seen));
+    let arp_impairer = options.impaired.then(ArpImpairer::default);
+    let mut device = QemuSocketDevice::new(
+        stream,
+        options.m9_profile,
+        tcp_impairer,
+        arp_impairer,
+        Arc::clone(&seen),
+    );
     let peer_octets = PEER_IPV4.octets();
     let mut config = Config::new(HardwareAddress::Ethernet(EthernetAddress(
         PEER_MAC.octets(),
@@ -492,6 +498,7 @@ struct QemuSocketDevice {
     m9_profile: bool,
     trace_frames: bool,
     tcp_impairer: Option<TcpImpairer>,
+    arp_impairer: Option<ArpImpairer>,
     seen: Arc<FixtureSeen>,
     /// Bytes received from QEMU that do not yet form a complete
     /// length-prefixed frame. The socket is non-blocking, so a read may stop
@@ -506,6 +513,7 @@ impl QemuSocketDevice {
         stream: TcpStream,
         m9_profile: bool,
         tcp_impairer: Option<TcpImpairer>,
+        arp_impairer: Option<ArpImpairer>,
         seen: Arc<FixtureSeen>,
     ) -> Self {
         Self {
@@ -513,6 +521,7 @@ impl QemuSocketDevice {
             m9_profile,
             trace_frames: frame_trace_enabled(),
             tcp_impairer,
+            arp_impairer,
             seen,
             pending: Vec::with_capacity(4 * (4 + MAX_FRAME_BYTES)),
             rx_queue: VecDeque::new(),
@@ -612,11 +621,25 @@ impl QemuSocketDevice {
                 if self.trace_frames {
                     self.events.extend(describe_tcp_frame("guest", &frame));
                 }
+                let poison = self
+                    .arp_impairer
+                    .as_mut()
+                    .and_then(|arp| arp.poison_for_request(&frame));
+                if let Some(poison) = poison {
+                    if self.write_frame_to_socket(&poison).is_ok() {
+                        self.events
+                            .push("[FIX ] impair arp poison reply".to_owned());
+                        self.seen.record(|counts| counts.arp_poison_replies += 1);
+                    }
+                }
                 let dropped = self
                     .tcp_impairer
                     .as_mut()
                     .and_then(|wire| wire.guest_frame(&frame));
-                if let Some(impairment) = dropped {
+                if destined_to_poison_mac(&frame) {
+                    self.events
+                        .push("[FIX ] impair arp poisoned destination dropped".to_owned());
+                } else if let Some(impairment) = dropped {
                     self.record_tcp_impairment(impairment);
                 } else if !(self.m9_profile && self.try_answer_m9_refused_syn(&frame)) {
                     self.rx_queue.push_back(frame);
@@ -646,6 +669,16 @@ impl QemuSocketDevice {
 
     /// Writes a fixture frame to QEMU, or the impaired wire's replacement frames for it.
     fn send_fixture_frame(&mut self, frame: &[u8]) {
+        if self
+            .arp_impairer
+            .as_mut()
+            .is_some_and(|arp| arp.withhold_real_reply(frame))
+        {
+            self.events
+                .push("[FIX ] impair arp real reply withheld".to_owned());
+            self.seen.record(|counts| counts.arp_replies_withheld += 1);
+            return;
+        }
         let Some(wire) = self.tcp_impairer.as_mut() else {
             let _ = self.write_frame_to_socket(frame);
             return;

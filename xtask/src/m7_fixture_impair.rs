@@ -1,12 +1,13 @@
 //! #221 stage A: a deterministic adversarial wire between QEMU and the M7 fixture.
 //!
-//! Every impairment is a one-shot per DNS query ID or per TCP connection, so a lane can require
-//! exact counts of what the fixture did to the guest (#223): an impairment that silently did
-//! not fire fails the lane, and so does a guest that did not recover from one.
+//! Every impairment is a one-shot per DNS query ID, per ARP target, or per TCP connection, so a
+//! lane can require exact counts of what the fixture did to the guest (#223): an impairment that
+//! silently did not fire fails the lane, and so does a guest that did not recover from one.
 
 use std::collections::{HashMap, HashSet};
 
-use clean_slate_network::addr::{EtherType, IpProtocol, Ipv4Addr};
+use clean_slate_network::addr::{EtherType, IpProtocol, Ipv4Addr, MacAddr};
+use clean_slate_network::arp::{ArpOp, ArpPacket, ARP_PACKET_LEN};
 use clean_slate_network::ethernet::EthernetHeader;
 use clean_slate_network::fixture::PEER_IPV4;
 use clean_slate_network::ipv4::Ipv4Header;
@@ -18,6 +19,9 @@ pub const DNS_DECOY_ADDR: [u8; 4] = [10, 77, 0, 66];
 /// Source port of the forged DNS reply that tests the guest's server-port check.
 pub const DNS_FORGERY_PORT: u16 = 5353;
 
+/// Source MAC of the gratuitous ARP reply. Frames the guest sends here do not reach the peer.
+pub const ARP_POISON_MAC: [u8; 6] = [0x02, 0x21, 0x00, 0x00, 0x00, 0x66];
+
 /// What the impaired wire did, one counter per kind of impairment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ImpairCounts {
@@ -25,6 +29,10 @@ pub struct ImpairCounts {
     pub dns_queries_dropped: u32,
     /// Forged DNS replies sent ahead of a real one.
     pub dns_forged_replies: u32,
+    /// Gratuitous ARP replies sent ahead of the real answer to a request.
+    pub arp_poison_replies: u32,
+    /// First real ARP reply for a poisoned IP, withheld so it cannot correct a poisoned cache.
+    pub arp_replies_withheld: u32,
     /// First SYN of each guest connection, dropped.
     pub tcp_syns_dropped: u32,
     /// First guest data segment of each connection, dropped.
@@ -41,6 +49,8 @@ impl ImpairCounts {
     pub const ZERO: Self = Self {
         dns_queries_dropped: 0,
         dns_forged_replies: 0,
+        arp_poison_replies: 0,
+        arp_replies_withheld: 0,
         tcp_syns_dropped: 0,
         tcp_guest_data_dropped: 0,
         tcp_blind_rsts: 0,
@@ -68,8 +78,11 @@ impl DnsImpairer {
 /// Forged replies to `query`, each carrying [`DNS_DECOY_ADDR`], that the guest must ignore.
 /// `from_port_53` are sent from the DNS server's own socket, `from_other_port` from
 /// [`DNS_FORGERY_PORT`]. Returns `None` for anything that is not a single-question query.
+///
+/// The last port-53 forgery is a well-formed answer whose A owner is not the question.
 pub fn forged_dns_replies(query: &[u8]) -> Option<ForgedDnsReplies> {
     let answer = decoy_a_answer(query)?;
+    let wrong_owner = wrong_owner_decoy(query)?;
     let mut wrong_id = answer.clone();
     wrong_id[0] ^= 0x80;
     let mut truncated_flag = answer.clone();
@@ -77,7 +90,7 @@ pub fn forged_dns_replies(query: &[u8]) -> Option<ForgedDnsReplies> {
     let mut cut_short = answer.clone();
     cut_short.truncate(answer.len() - 2);
     Some(ForgedDnsReplies {
-        from_port_53: vec![wrong_id, truncated_flag, cut_short],
+        from_port_53: vec![wrong_id, truncated_flag, cut_short, wrong_owner],
         from_other_port: answer,
     })
 }
@@ -90,6 +103,40 @@ pub struct ForgedDnsReplies {
 /// A well-formed answer to `query`'s question with the query's ID and one A record for the
 /// decoy address.
 fn decoy_a_answer(query: &[u8]) -> Option<Vec<u8>> {
+    let question = question_section(query)?;
+    let mut answer = Vec::with_capacity(question.len() + 28);
+    answer.extend_from_slice(&query[..2]);
+    answer.extend_from_slice(&0x8180u16.to_be_bytes());
+    answer.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0]);
+    answer.extend_from_slice(question);
+    answer.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1]);
+    answer.extend_from_slice(&300u32.to_be_bytes());
+    answer.extend_from_slice(&4u16.to_be_bytes());
+    answer.extend_from_slice(&DNS_DECOY_ADDR);
+    Some(answer)
+}
+
+/// Same ID and question as `query`, but the A record is owned by `forged.fixture.test`.
+fn wrong_owner_decoy(query: &[u8]) -> Option<Vec<u8>> {
+    let question = question_section(query)?;
+    let mut answer = Vec::with_capacity(question.len() + 48);
+    answer.extend_from_slice(&query[..2]);
+    answer.extend_from_slice(&0x8180u16.to_be_bytes());
+    answer.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0]);
+    answer.extend_from_slice(question);
+    for label in ["forged", "fixture", "test"] {
+        answer.push(label.len() as u8);
+        answer.extend_from_slice(label.as_bytes());
+    }
+    answer.push(0);
+    answer.extend_from_slice(&[0, 1, 0, 1]);
+    answer.extend_from_slice(&300u32.to_be_bytes());
+    answer.extend_from_slice(&4u16.to_be_bytes());
+    answer.extend_from_slice(&DNS_DECOY_ADDR);
+    Some(answer)
+}
+
+fn question_section(query: &[u8]) -> Option<&[u8]> {
     if query.len() < 12 || u16::from_be_bytes([query[4], query[5]]) != 1 {
         return None;
     }
@@ -105,17 +152,73 @@ fn decoy_a_answer(query: &[u8]) -> Option<Vec<u8>> {
         }
         offset += len;
     }
-    let question = query.get(12..offset + 4)?;
-    let mut answer = Vec::with_capacity(question.len() + 28);
-    answer.extend_from_slice(&query[..2]);
-    answer.extend_from_slice(&0x8180u16.to_be_bytes());
-    answer.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0]);
-    answer.extend_from_slice(question);
-    answer.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1]);
-    answer.extend_from_slice(&300u32.to_be_bytes());
-    answer.extend_from_slice(&4u16.to_be_bytes());
-    answer.extend_from_slice(&DNS_DECOY_ADDR);
-    Some(answer)
+    query.get(12..offset + 4)
+}
+
+/// True when `frame` is Ethernet-addressed to [`ARP_POISON_MAC`].
+pub fn destined_to_poison_mac(frame: &[u8]) -> bool {
+    frame.len() >= 6 && frame[..6] == ARP_POISON_MAC
+}
+
+/// One gratuitous ARP poison per requested IP, then the first real reply for that IP withheld.
+#[derive(Default)]
+pub struct ArpImpairer {
+    poisoned: HashSet<Ipv4Addr>,
+    withheld: HashSet<Ipv4Addr>,
+}
+
+impl ArpImpairer {
+    /// A gratuitous reply for the IP this request asks about, once per IP.
+    pub fn poison_for_request(&mut self, frame: &[u8]) -> Option<Vec<u8>> {
+        let arp = arp_packet(frame)?;
+        if arp.op != ArpOp::Request || !self.poisoned.insert(arp.target_ip) {
+            return None;
+        }
+        let guest = EthernetHeader::parse(frame).ok()?.0.src;
+        Some(gratuitous_arp(guest, arp.target_ip))
+    }
+
+    /// The first real reply for an IP we poisoned, which must not reach the guest.
+    pub fn withhold_real_reply(&mut self, frame: &[u8]) -> bool {
+        let arp = match arp_packet(frame) {
+            Some(arp) if arp.op == ArpOp::Reply && self.poisoned.contains(&arp.sender_ip) => arp,
+            _ => return false,
+        };
+        self.withheld.insert(arp.sender_ip)
+    }
+}
+
+fn arp_packet(frame: &[u8]) -> Option<ArpPacket> {
+    let (eth, payload) = EthernetHeader::parse(frame).ok()?;
+    if eth.ethertype != EtherType::ARP {
+        return None;
+    }
+    ArpPacket::parse(payload).ok()
+}
+
+/// Gratuitous reply: sender and target protocol addresses are both `ip`, so it does not
+/// answer a request for `ip` addressed to the guest.
+fn gratuitous_arp(guest: MacAddr, ip: Ipv4Addr) -> Vec<u8> {
+    let poison = MacAddr::new(ARP_POISON_MAC);
+    let arp = ArpPacket {
+        op: ArpOp::Reply,
+        sender_mac: poison,
+        sender_ip: ip,
+        target_mac: guest,
+        target_ip: ip,
+    };
+    let mut body = [0u8; ARP_PACKET_LEN];
+    arp.write(&mut body).expect("arp reply buffer");
+    let mut frame = vec![0u8; 60];
+    EthernetHeader {
+        dst: guest,
+        src: poison,
+        ethertype: EtherType::ARP,
+    }
+    .write(&mut frame)
+    .expect("ethernet header");
+    frame[EthernetHeader::LEN..EthernetHeader::LEN + ARP_PACKET_LEN].copy_from_slice(&body);
+    frame
 }
 
 /// Per-connection TCP impairment state, keyed by (guest port, fixture port).
@@ -414,13 +517,70 @@ mod tests {
         assert!(dns.drop_first_copy(&query));
         assert!(!dns.drop_first_copy(&query));
         let forged = forged_dns_replies(&query).unwrap();
-        let [wrong_id, tc, cut] = forged.from_port_53.as_slice() else {
-            panic!("three forgeries from port 53");
+        let [wrong_id, tc, cut, wrong_owner] = forged.from_port_53.as_slice() else {
+            panic!("four forgeries from port 53");
         };
         assert_ne!(wrong_id[..2], query[..2]);
         assert_eq!(tc[..2], query[..2]);
         assert_ne!(tc[2] & 0x02, 0);
         assert_eq!(cut.len(), forged.from_other_port.len() - 2);
         assert!(forged.from_other_port.ends_with(&DNS_DECOY_ADDR));
+        assert_eq!(wrong_owner[..2], query[..2]);
+        assert!(wrong_owner.ends_with(&DNS_DECOY_ADDR));
+        assert!(wrong_owner.windows(6).any(|window| window == b"forged"));
+        assert_eq!(
+            clean_slate_network::dns::parse_response(wrong_owner, 0x1234, "m7.fixture.test"),
+            Err(clean_slate_network::dns::DnsError::Malformed)
+        );
+    }
+
+    #[test]
+    fn arp_poison_is_gratuitous_and_the_first_real_reply_is_withheld() {
+        let guest = MacAddr::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        let peer = MacAddr::new(clean_slate_network::fixture::PEER_MAC.octets());
+        let request =
+            ArpPacket::request(guest, clean_slate_network::fixture::GUEST_IPV4, PEER_IPV4);
+        let mut body = [0u8; ARP_PACKET_LEN];
+        request.write(&mut body).unwrap();
+        let mut asking = vec![0u8; 60];
+        EthernetHeader {
+            dst: MacAddr::new([0xff; 6]),
+            src: guest,
+            ethertype: EtherType::ARP,
+        }
+        .write(&mut asking)
+        .unwrap();
+        asking[14..14 + ARP_PACKET_LEN].copy_from_slice(&body);
+
+        let mut arp = ArpImpairer::default();
+        let poison = arp.poison_for_request(&asking).unwrap();
+        assert!(
+            arp.poison_for_request(&asking).is_none(),
+            "one poison per IP"
+        );
+        let parsed = arp_packet(&poison).unwrap();
+        assert_eq!(parsed.op, ArpOp::Reply);
+        assert_eq!(parsed.sender_ip, PEER_IPV4);
+        assert_eq!(
+            parsed.target_ip, PEER_IPV4,
+            "gratuitous: not addressed to the guest"
+        );
+        assert_eq!(parsed.sender_mac.octets(), ARP_POISON_MAC);
+        assert!(destined_to_poison_mac(&{
+            let mut from_guest = poison.clone();
+            from_guest[..6].copy_from_slice(&ARP_POISON_MAC);
+            from_guest
+        }));
+
+        let real = ArpPacket::reply_to(request, peer, PEER_IPV4);
+        real.write(&mut body).unwrap();
+        let mut reply = asking.clone();
+        reply[6..12].copy_from_slice(&peer.octets());
+        reply[14..14 + ARP_PACKET_LEN].copy_from_slice(&body);
+        assert!(arp.withhold_real_reply(&reply));
+        assert!(
+            !arp.withhold_real_reply(&reply),
+            "only the first real reply"
+        );
     }
 }
