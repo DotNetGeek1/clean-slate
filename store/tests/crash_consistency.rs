@@ -1,8 +1,9 @@
 //! Crash-consistency tests for the canonical `clean-slate-store` object store.
 //!
-//! The commit protocol is: object data into the inactive arena, then the
-//! next-generation superblock into the inactive slot, then `flush`. The commit
-//! point is the successful return from that `flush`. These tests inject a
+//! The commit protocol is: object data into the inactive arena, `flush`, then
+//! the next-generation superblock into the inactive slot, then `flush`. The
+//! commit point is the successful return from the second `flush`. These tests
+//! inject a
 //! deterministic power loss or I/O error at every counted write/flush boundary,
 //! model legal partial pre-flush persistence, then reboot from the durable
 //! image and assert that recovery exposes exactly the previous generation or
@@ -23,6 +24,8 @@ const BETA_BYTES: &[u8] = b"beta-stable";
 
 /// Byte range of the superblock checksum field (see `clean-slate-store` docs).
 const SUPERBLOCK_CHECKSUM_OFFSET: usize = 8;
+/// The payload flush, then the commit flush after the superblock write.
+const COMMIT_FLUSHES: u64 = 2;
 
 type FaultStore = ObjectStore<FaultInjectingBlockDevice>;
 
@@ -87,7 +90,7 @@ fn count_commit_writes(include_alpha: bool) -> u64 {
     let before = controller.write_count();
     store.commit().unwrap();
     let writes = controller.write_count() - before;
-    assert_eq!(controller.flush_count(), 1);
+    assert_eq!(controller.flush_count(), COMMIT_FLUSHES);
     writes
 }
 
@@ -166,23 +169,36 @@ fn crash_matrix(include_alpha: bool) {
         assert_previous_generation(&store, include_alpha);
     }
 
-    // Flush rejected: nothing became durable, previous generation.
+    // Either flush rejected: the superblock is not durable, previous generation.
+    for flush_index in 1..=COMMIT_FLUSHES {
+        let store = commit_under_fault(
+            include_alpha,
+            FaultPlan {
+                trigger: FaultTrigger::AfterFlush(flush_index),
+                action: FaultAction::IoError(device_fault()),
+            },
+        );
+        assert_previous_generation(&store, include_alpha);
+    }
+
+    // Power loss right after the payload flush: the payload is durable but no
+    // superblock references it yet, previous generation.
     let store = commit_under_fault(
         include_alpha,
         FaultPlan {
             trigger: FaultTrigger::AfterFlush(1),
-            action: FaultAction::IoError(device_fault()),
+            action: FaultAction::PowerLoss,
         },
     );
     assert_previous_generation(&store, include_alpha);
 
-    // Power loss immediately after the flush completed: the commit point has
-    // passed, so the new generation is the only valid recovery target even
-    // though the caller observed an error.
+    // Power loss immediately after the commit flush completed: the commit
+    // point has passed, so the new generation is the only valid recovery
+    // target even though the caller observed an error.
     let store = commit_under_fault(
         include_alpha,
         FaultPlan {
-            trigger: FaultTrigger::AfterFlush(1),
+            trigger: FaultTrigger::AfterFlush(COMMIT_FLUSHES),
             action: FaultAction::PowerLoss,
         },
     );
@@ -252,8 +268,14 @@ fn partial_preflush_payload_persistence_without_metadata_keeps_previous_generati
     assert_previous_generation(&store, true);
 }
 
+/// The device persists the superblock write early and then loses power before
+/// the commit flush, having persisted only the first payload chunk on its
+/// own. The payload flush already made every payload chunk durable, so the
+/// superblock never references a partial payload and the new generation is
+/// recovered. Without that flush this would fall back on the payload checksum
+/// (see `torn_write.rs`).
 #[test]
-fn newer_metadata_with_incomplete_persisted_payload_falls_back_to_previous_generation() {
+fn superblock_persisted_early_references_payload_made_durable_by_payload_flush() {
     let commit_writes = count_commit_writes(true);
     let store = commit_under_fault_with_early_persistence(
         true,
@@ -264,7 +286,7 @@ fn newer_metadata_with_incomplete_persisted_payload_falls_back_to_previous_gener
         },
     );
 
-    assert_previous_generation(&store, true);
+    assert_new_generation(&store);
 }
 
 #[test]

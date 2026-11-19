@@ -8,8 +8,11 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use clean_slate_store::{superblock_format_version, STORE_VERSION};
 
 use crate::m7_fixture::{FixtureOptions, M7FixturePeer, WhichCert};
 use crate::{
@@ -18,6 +21,8 @@ use crate::{
 };
 
 pub(crate) const SYSTEM_DATA_DISK_FILENAME: &str = "system-data.img";
+/// Logical block size of every QEMU data disk xtask attaches; one store superblock each.
+const DATA_DISK_BLOCK_BYTES: usize = 512;
 const STORAGE_SERVICE: u32 = 0x5100;
 const NETWORK_SERVICE: u32 = 0x5200;
 const SHELL_SERVICE: u32 = 0x5400;
@@ -65,6 +70,7 @@ pub(crate) fn system_data_disk_path() -> PathBuf {
 }
 
 /// Creates a zeroed data disk at `path` when there is none. Returns whether it was created.
+/// An existing disk is reused only if it is blank or holds this build's store format.
 pub(crate) fn ensure_data_disk(path: &Path) -> Result<bool, XtaskError> {
     if path.is_file() {
         let actual = fs::metadata(path)?.len();
@@ -75,6 +81,7 @@ pub(crate) fn ensure_data_disk(path: &Path) -> Result<bool, XtaskError> {
                 actual,
             });
         }
+        check_data_disk_store_format(path)?;
         return Ok(false);
     }
     if let Some(parent) = path.parent() {
@@ -82,6 +89,27 @@ pub(crate) fn ensure_data_disk(path: &Path) -> Result<bool, XtaskError> {
     }
     fs::File::create(path)?.set_len(M5_DATA_DISK_SIZE_BYTES)?;
     Ok(true)
+}
+
+/// Refuses a reused data disk whose superblock slots (LBA 0 and 1, 512-byte blocks) carry
+/// a store format version other than this build's: the storage service would refuse it with
+/// error 19. A blank disk has no store magic and is accepted; the service formats it.
+pub(crate) fn check_data_disk_store_format(path: &Path) -> Result<(), XtaskError> {
+    let mut header = [0u8; 2 * DATA_DISK_BLOCK_BYTES];
+    fs::File::open(path)?.read_exact(&mut header)?;
+    for slot in header.chunks_exact(DATA_DISK_BLOCK_BYTES) {
+        match superblock_format_version(slot) {
+            Some(found) if found != STORE_VERSION => {
+                return Err(XtaskError::StaleDataDisk {
+                    path: path.to_path_buf(),
+                    found,
+                    expected: STORE_VERSION,
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -742,6 +770,64 @@ mod tests {
         assert_eq!(fs::metadata(&path).unwrap().len(), M5_DATA_DISK_SIZE_BYTES);
         fs::File::create(&path).unwrap().set_len(1).unwrap();
         assert!(ensure_data_disk(&path).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A full-size disk image whose first two blocks are `header`.
+    fn disk_with_header(path: &Path, header: &[u8]) {
+        let mut image = vec![0u8; M5_DATA_DISK_SIZE_BYTES as usize];
+        image[..header.len()].copy_from_slice(header);
+        fs::write(path, image).unwrap();
+    }
+
+    /// Both superblock slots of a store this build formatted.
+    fn current_format_header() -> Vec<u8> {
+        use clean_slate_block::fake::FakeBlockDevice;
+        use clean_slate_block::{BlockDeviceId, BlockGeometry};
+        let geometry = BlockGeometry::new(BlockDeviceId::new(1), 512, 64, 8, false).unwrap();
+        let store = clean_slate_store::ObjectStore::format(FakeBlockDevice::new(geometry).unwrap())
+            .unwrap();
+        store.into_inner().durable_bytes()[..2 * DATA_DISK_BLOCK_BYTES].to_vec()
+    }
+
+    #[test]
+    fn a_reused_data_disk_must_be_blank_or_this_builds_store_format() {
+        let dir = std::env::temp_dir().join(format!("cs-system-format-{}", std::process::id()));
+        let path = dir.join("d.img");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        disk_with_header(&path, &[]);
+        assert!(!ensure_data_disk(&path).unwrap(), "blank disk is reused");
+
+        let current = current_format_header();
+        disk_with_header(&path, &current);
+        assert!(
+            !ensure_data_disk(&path).unwrap(),
+            "v{STORE_VERSION} disk is reused"
+        );
+
+        let mut version_one = current;
+        for slot in version_one.chunks_exact_mut(DATA_DISK_BLOCK_BYTES) {
+            slot[4..6].copy_from_slice(&1u16.to_le_bytes());
+        }
+        disk_with_header(&path, &version_one);
+        let error = ensure_data_disk(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            XtaskError::StaleDataDisk {
+                found: 1,
+                expected: STORE_VERSION,
+                ..
+            }
+        ));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "data disk {0} holds object-store format v1, but this build's storage service expects v{STORE_VERSION} and would refuse it; delete {0} to start from a blank disk",
+                path.display()
+            )
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

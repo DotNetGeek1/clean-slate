@@ -941,6 +941,9 @@ const M5_PRE_CRASH_REPORT: [MarkerStep; 4] = [
         fields: &[("bytes=", "700"), ("checksum=", "00008b74")],
     },
 ];
+/// The generation-3 commit flushes its payload before the superblock write (#224); a
+/// boot stopped at write 3 must have logged that flush after arming.
+const M5_PAYLOAD_FLUSH: MarkerStep = MarkerStep::Ordered("[BLK ] flush complete");
 const M5_CRASH_ARM_EARLY_SPEC: &[MarkerStep] = &[
     MarkerStep::Line {
         prefix: "[CRSH] armed trigger=",
@@ -962,6 +965,7 @@ const M5_CRASH_ARM_LATE_SPEC: &[MarkerStep] = &[
         prefix: "[CRSH] armed trigger=",
         fields: &[("after-write=", "3")],
     },
+    M5_PAYLOAD_FLUSH,
     M5_PRE_CRASH_REPORT[0],
     M5_PRE_CRASH_REPORT[1],
     M5_PRE_CRASH_REPORT[2],
@@ -979,6 +983,7 @@ const M5_CRASH_TORN_SUPERBLOCK_SPEC: &[MarkerStep] = &[
         prefix: "[CRSH] armed trigger=",
         fields: &[("after-write=", "3"), ("tear=", "superblock-suffix")],
     },
+    M5_PAYLOAD_FLUSH,
     M5_PRE_CRASH_REPORT[0],
     M5_PRE_CRASH_REPORT[1],
     M5_PRE_CRASH_REPORT[2],
@@ -1008,6 +1013,7 @@ const M5_CRASH_TORN_PAYLOAD_SPEC: &[MarkerStep] = &[
         prefix: "[CRSH] torn payload write=",
         fields: &[("write=", "1"), ("blocks-written=", "1"), ("of=", "2")],
     },
+    M5_PAYLOAD_FLUSH,
     M5_PRE_CRASH_REPORT[0],
     M5_PRE_CRASH_REPORT[1],
     M5_PRE_CRASH_REPORT[2],
@@ -1050,8 +1056,8 @@ const M5_CRASH_RECOVERY_EARLY_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[TEST] crash recovery PASS"),
 ];
 /// The third write of the generation-3 commit is its superblock (alpha data, beta data,
-/// superblock, then flush). The device completed it before the crash, so recovery must
-/// mount the new commit even though the flush never ran.
+/// flush, superblock, flush). The device completed it before the crash, so recovery must
+/// mount the new commit even though the final flush never ran.
 const M5_CRASH_RECOVERY_LATE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[BLK ] virtio-block ready blocks="),
     MarkerStep::Line {
@@ -3606,6 +3612,7 @@ fn prepare_m5_data_disk_image(reuse_existing: bool) -> Result<(), XtaskError> {
                 actual,
             });
         }
+        system_boot::check_data_disk_store_format(&disk)?;
         println!(
             "[M5.H] reusing data disk {} ({} bytes)",
             disk.display(),
@@ -5818,6 +5825,12 @@ enum XtaskError {
         expected: u64,
         actual: u64,
     },
+    /// A reused data disk holds another object-store format version.
+    StaleDataDisk {
+        path: PathBuf,
+        found: u16,
+        expected: u16,
+    },
     M5PhaseFailed {
         phase: String,
         reason: String,
@@ -5869,6 +5882,16 @@ impl Display for XtaskError {
                 path.display(),
                 actual,
                 expected
+            ),
+            XtaskError::StaleDataDisk {
+                path,
+                found,
+                expected,
+            } => write!(
+                f,
+                "data disk {} holds object-store format v{found}, but this build's storage service expects v{expected} and would refuse it; delete {} to start from a blank disk",
+                path.display(),
+                path.display()
             ),
             XtaskError::M5PhaseFailed { phase, reason } => {
                 write!(f, "M5 phase `{phase}` failed: {reason}")
