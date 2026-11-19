@@ -3612,6 +3612,7 @@ fn prepare_m5_data_disk_image(reuse_existing: bool) -> Result<(), XtaskError> {
                 actual,
             });
         }
+        system_boot::check_data_disk_store_format(&disk)?;
         println!(
             "[M5.H] reusing data disk {} ({} bytes)",
             disk.display(),
@@ -5824,6 +5825,12 @@ enum XtaskError {
         expected: u64,
         actual: u64,
     },
+    /// A reused data disk holds another object-store format version.
+    StaleDataDisk {
+        path: PathBuf,
+        found: u16,
+        expected: u16,
+    },
     M5PhaseFailed {
         phase: String,
         reason: String,
@@ -5875,6 +5882,16 @@ impl Display for XtaskError {
                 path.display(),
                 actual,
                 expected
+            ),
+            XtaskError::StaleDataDisk {
+                path,
+                found,
+                expected,
+            } => write!(
+                f,
+                "data disk {} holds object-store format v{found}, but this build's storage service expects v{expected} and would refuse it; delete {} to start from a blank disk",
+                path.display(),
+                path.display()
             ),
             XtaskError::M5PhaseFailed { phase, reason } => {
                 write!(f, "M5 phase `{phase}` failed: {reason}")

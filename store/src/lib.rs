@@ -56,6 +56,15 @@ const ENTRY_BYTES: usize = 64;
 const CHECKSUM_RANGE: core::ops::Range<usize> = 8..12;
 const ENTRY_PRESENT_FLAG: u8 = 0x01;
 
+/// Format version recorded in a superblock block written by any store version, or `None`
+/// when the block does not start with the store magic (for example a blank disk).
+pub fn superblock_format_version(block: &[u8]) -> Option<u16> {
+    if block.len() < 6 || read_u32(block, 0) != STORE_MAGIC {
+        return None;
+    }
+    Some(read_u16(block, 4))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredObject {
     id: u64,
