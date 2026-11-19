@@ -427,16 +427,19 @@ mod wx_tests {
         let rw_nx = DIRECTORY | PageTableFlags::NO_EXECUTE;
         pt[0].set_addr(PhysAddr::new(0x1000), rx);
         pt[1].set_addr(PhysAddr::new(0x2000), rw_nx);
-        pd[1].set_addr(
-            PhysAddr::new(0x20_0000),
-            rw_nx | PageTableFlags::HUGE_PAGE,
-        );
+        pd[1].set_addr(PhysAddr::new(0x20_0000), rw_nx | PageTableFlags::HUGE_PAGE);
         let root_frame = frame(root).as_u64();
         assert_eq!(count_writable_executable_leaves(root_frame), 0);
 
         pt[2].set_addr(PhysAddr::new(0x3000), DIRECTORY);
-        pd[2].set_addr(PhysAddr::new(0x40_0000), DIRECTORY | PageTableFlags::HUGE_PAGE);
-        pdpt[1].set_addr(PhysAddr::new(0x4000_0000), DIRECTORY | PageTableFlags::HUGE_PAGE);
+        pd[2].set_addr(
+            PhysAddr::new(0x40_0000),
+            DIRECTORY | PageTableFlags::HUGE_PAGE,
+        );
+        pdpt[1].set_addr(
+            PhysAddr::new(0x4000_0000),
+            DIRECTORY | PageTableFlags::HUGE_PAGE,
+        );
         assert_eq!(count_writable_executable_leaves(root_frame), 3);
 
         // A read-only or NX directory above a W+X leaf makes the effective mapping safe.

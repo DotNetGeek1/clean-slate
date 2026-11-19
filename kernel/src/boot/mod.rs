@@ -391,9 +391,9 @@ fn report_kernel_write_xor_execute(installed: &KernelRootInstall) -> Result<(), 
         "[MM  ] kernel w^x text=RX rodata=R+NX data=RW+NX image=[{:#x},{:#x}) pages rx={} r={} rw={} inherited={} wx_leaves={}\n",
         installed.image.base(),
         installed.image.base() + installed.image.size(),
-        pages.read_execute,
+        pages.executable,
         pages.read_only,
-        pages.read_write,
+        pages.writable,
         installed.inherited,
         wx_leaves
     ));

@@ -30,17 +30,17 @@ const SCN_MEM_WRITE: u32 = 0x8000_0000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImageAccess {
-    ReadExecute,
+    Executable,
     ReadOnly,
-    ReadWrite,
+    Writable,
 }
 
 impl ImageAccess {
     pub(crate) fn leaf_flags(self) -> PageTableFlags {
         match self {
-            Self::ReadExecute => PageTableFlags::PRESENT,
+            Self::Executable => PageTableFlags::PRESENT,
             Self::ReadOnly => PageTableFlags::PRESENT | PageTableFlags::NO_EXECUTE,
-            Self::ReadWrite => {
+            Self::Writable => {
                 PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE
             }
         }
@@ -63,9 +63,9 @@ const EMPTY_SPAN: SectionSpan = SectionSpan {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ImagePageCounts {
-    pub(crate) read_execute: usize,
+    pub(crate) executable: usize,
     pub(crate) read_only: usize,
-    pub(crate) read_write: usize,
+    pub(crate) writable: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,8 +154,8 @@ impl KernelImageLayout {
             let writable = characteristics & SCN_MEM_WRITE != 0;
             let access = match (executable, writable) {
                 (true, true) => return Err("kernel image: section is writable and executable"),
-                (true, false) => ImageAccess::ReadExecute,
-                (false, true) => ImageAccess::ReadWrite,
+                (true, false) => ImageAccess::Executable,
+                (false, true) => ImageAccess::Writable,
                 (false, false) => ImageAccess::ReadOnly,
             };
             layout.sections[layout.count] = SectionSpan {
@@ -167,7 +167,7 @@ impl KernelImageLayout {
         }
         if !layout.sections[..layout.count]
             .iter()
-            .any(|section| section.access == ImageAccess::ReadExecute)
+            .any(|section| section.access == ImageAccess::Executable)
         {
             return Err("kernel image: no executable section");
         }
@@ -195,9 +195,9 @@ impl KernelImageLayout {
         let mut rva = 0;
         while rva < self.size {
             match self.access_at(rva) {
-                ImageAccess::ReadExecute => counts.read_execute += 1,
+                ImageAccess::Executable => counts.executable += 1,
                 ImageAccess::ReadOnly => counts.read_only += 1,
-                ImageAccess::ReadWrite => counts.read_write += 1,
+                ImageAccess::Writable => counts.writable += 1,
             }
             rva += PAGE_SIZE;
         }
@@ -261,19 +261,23 @@ mod tests {
     fn kernel_sections_map_to_rx_r_and_rw() {
         let layout = KernelImageLayout::parse(0x1d5a_0000, 0x6a5000, &kernel_like()).unwrap();
         assert_eq!(layout.access_at(0), ImageAccess::ReadOnly, "PE headers");
-        assert_eq!(layout.access_at(0x1000), ImageAccess::ReadExecute);
-        assert_eq!(layout.access_at(0x18b000), ImageAccess::ReadExecute);
+        assert_eq!(layout.access_at(0x1000), ImageAccess::Executable);
+        assert_eq!(layout.access_at(0x18b000), ImageAccess::Executable);
         assert_eq!(layout.access_at(0x18c000), ImageAccess::ReadOnly);
         assert_eq!(layout.access_at(0x2ca000), ImageAccess::ReadOnly);
-        assert_eq!(layout.access_at(0x2cb000), ImageAccess::ReadWrite);
-        assert_eq!(layout.access_at(0x6a0000), ImageAccess::ReadWrite, ".bss tail");
+        assert_eq!(layout.access_at(0x2cb000), ImageAccess::Writable);
+        assert_eq!(
+            layout.access_at(0x6a0000),
+            ImageAccess::Writable,
+            ".bss tail"
+        );
         assert_eq!(layout.access_at(0x6a1000), ImageAccess::ReadOnly);
         assert_eq!(layout.access_at(0x6a4000), ImageAccess::ReadOnly);
         let counts = layout.page_counts();
-        assert_eq!(counts.read_execute, 0x18b);
-        assert_eq!(counts.read_write, 0x3d6);
+        assert_eq!(counts.executable, 0x18b);
+        assert_eq!(counts.writable, 0x3d6);
         assert_eq!(
-            counts.read_execute + counts.read_only + counts.read_write,
+            counts.executable + counts.read_only + counts.writable,
             0x6a5
         );
     }
@@ -281,9 +285,9 @@ mod tests {
     #[test]
     fn leaf_flags_are_never_writable_and_executable() {
         for access in [
-            ImageAccess::ReadExecute,
+            ImageAccess::Executable,
             ImageAccess::ReadOnly,
-            ImageAccess::ReadWrite,
+            ImageAccess::Writable,
         ] {
             let flags = access.leaf_flags();
             assert!(flags.contains(PageTableFlags::PRESENT));
@@ -292,14 +296,18 @@ mod tests {
                     || flags.contains(PageTableFlags::NO_EXECUTE)
             );
         }
-        assert!(!ImageAccess::ReadExecute
+        assert!(!ImageAccess::Executable
             .leaf_flags()
             .contains(PageTableFlags::NO_EXECUTE));
     }
 
     #[test]
     fn rejects_writable_executable_section() {
-        let bytes = headers(0x1000, 0x3000, &[(".text", 0x1000, 0x10, TEXT | 0x8000_0000)]);
+        let bytes = headers(
+            0x1000,
+            0x3000,
+            &[(".text", 0x1000, 0x10, TEXT | 0x8000_0000)],
+        );
         assert_eq!(
             KernelImageLayout::parse(0, 0x3000, &bytes),
             Err("kernel image: section is writable and executable")
@@ -325,7 +333,10 @@ mod tests {
         let overlapping = headers(
             0x1000,
             0x4000,
-            &[(".text", 0x1000, 0x1800, TEXT), (".data", 0x2000, 0x10, DATA)],
+            &[
+                (".text", 0x1000, 0x1800, TEXT),
+                (".data", 0x2000, 0x10, DATA),
+            ],
         );
         assert_eq!(
             KernelImageLayout::parse(0, 0x4000, &overlapping),

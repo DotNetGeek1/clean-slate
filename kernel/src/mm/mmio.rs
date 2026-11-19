@@ -107,10 +107,9 @@ pub(crate) fn with_kernel_identity_mmio<T>(
 }
 
 fn overlaps_usable_ram(memory_map: &NormalizedMemoryMap, start: u64, end: u64) -> bool {
-    memory_map
-        .regions()
-        .iter()
-        .any(|region| region.kind == MemoryRegionKind::Usable && region.start < end && start < region.end)
+    memory_map.regions().iter().any(|region| {
+        region.kind == MemoryRegionKind::Usable && region.start < end && start < region.end
+    })
 }
 
 fn map_device_window(root: u64, start: u64, end: u64) -> Result<(), &'static str> {
