@@ -1550,11 +1550,10 @@ const fn dns_script_on(queries: u32) -> ImpairCounts {
     }
 }
 
-/// One gratuitous ARP poison for the peer, and the first real reply withheld.
+/// One gratuitous ARP poison for the peer. Real replies wait out the hold.
 const fn arp_script() -> ImpairCounts {
     ImpairCounts {
         arp_poison_replies: 1,
-        arp_replies_withheld: 1,
         ..ImpairCounts::ZERO
     }
 }
@@ -1562,14 +1561,12 @@ const fn arp_script() -> ImpairCounts {
 /// The DNS boot's two queries (A answer and NXDOMAIN), plus the ARP poison.
 const M7_DNS_IMPAIRED: ImpairCounts = ImpairCounts {
     arp_poison_replies: arp_script().arp_poison_replies,
-    arp_replies_withheld: arp_script().arp_replies_withheld,
     ..dns_script_on(2)
 };
 
 /// The TLS pass boot's two connections (TCP echo, TLS), plus the ARP poison.
 const M7_TLS_IMPAIRED: ImpairCounts = ImpairCounts {
     arp_poison_replies: arp_script().arp_poison_replies,
-    arp_replies_withheld: arp_script().arp_replies_withheld,
     ..tcp_script_on(2)
 };
 
@@ -1578,7 +1575,6 @@ const M7_NETWORK_IMPAIRED: ImpairCounts = ImpairCounts {
     dns_queries_dropped: dns_script_on(1).dns_queries_dropped,
     dns_forged_replies: dns_script_on(1).dns_forged_replies,
     arp_poison_replies: arp_script().arp_poison_replies,
-    arp_replies_withheld: arp_script().arp_replies_withheld,
     ..tcp_script_on(2)
 };
 

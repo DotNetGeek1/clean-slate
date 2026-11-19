@@ -21,8 +21,8 @@ use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::udp;
 
 use crate::m7_fixture_impair::{
-    destined_to_poison_mac, forged_dns_replies, tcp_frame, ArpImpairer, DnsImpairer, ImpairCounts,
-    TcpImpairer, TcpImpairment, DNS_FORGERY_PORT,
+    destined_to_poison_mac, forged_dns_replies, tcp_frame, ArpImpairer, DnsImpairer, GuestArp,
+    ImpairCounts, TcpImpairer, TcpImpairment, DNS_FORGERY_PORT,
 };
 use crate::m7_fixture_tcp::{
     FixtureTlsCert, HoldEvent, HttpOutcome, M9BannerService, M9HoldService, M9HttpService,
@@ -621,27 +621,35 @@ impl QemuSocketDevice {
                 if self.trace_frames {
                     self.events.extend(describe_tcp_frame("guest", &frame));
                 }
-                let poison = self
+                let arp_action = self
                     .arp_impairer
                     .as_mut()
-                    .and_then(|arp| arp.poison_for_request(&frame));
-                if let Some(poison) = poison {
-                    if self.write_frame_to_socket(&poison).is_ok() {
-                        self.events
-                            .push("[FIX ] impair arp poison reply".to_owned());
-                        self.seen.record(|counts| counts.arp_poison_replies += 1);
+                    .map(|arp| arp.on_guest_request(&frame))
+                    .unwrap_or(GuestArp::Forward);
+                let suppress_request = match arp_action {
+                    GuestArp::Poison(poison) => {
+                        if self.write_frame_to_socket(&poison).is_ok() {
+                            self.events
+                                .push("[FIX ] impair arp poison reply".to_owned());
+                            self.seen.record(|counts| counts.arp_poison_replies += 1);
+                        }
+                        true
                     }
-                }
+                    GuestArp::Hold => true,
+                    GuestArp::Forward => false,
+                };
                 let dropped = self
                     .tcp_impairer
                     .as_mut()
                     .and_then(|wire| wire.guest_frame(&frame));
+                let answered_here =
+                    suppress_request || (self.m9_profile && self.try_answer_m9_refused_syn(&frame));
                 if destined_to_poison_mac(&frame) {
                     self.events
                         .push("[FIX ] impair arp poisoned destination dropped".to_owned());
                 } else if let Some(impairment) = dropped {
                     self.record_tcp_impairment(impairment);
-                } else if !(self.m9_profile && self.try_answer_m9_refused_syn(&frame)) {
+                } else if !answered_here {
                     self.rx_queue.push_back(frame);
                 }
             } else {
@@ -669,16 +677,6 @@ impl QemuSocketDevice {
 
     /// Writes a fixture frame to QEMU, or the impaired wire's replacement frames for it.
     fn send_fixture_frame(&mut self, frame: &[u8]) {
-        if self
-            .arp_impairer
-            .as_mut()
-            .is_some_and(|arp| arp.withhold_real_reply(frame))
-        {
-            self.events
-                .push("[FIX ] impair arp real reply withheld".to_owned());
-            self.seen.record(|counts| counts.arp_replies_withheld += 1);
-            return;
-        }
         let Some(wire) = self.tcp_impairer.as_mut() else {
             let _ = self.write_frame_to_socket(frame);
             return;

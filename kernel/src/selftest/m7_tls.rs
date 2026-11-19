@@ -12,8 +12,7 @@ use clean_slate_network::error::NetworkError;
 #[cfg(not(feature = "m7-tls-fail-closed-self-test"))]
 use clean_slate_network::fixture::TCP_ECHO_PORT;
 use clean_slate_network::fixture::{
-    APP_REQUEST_BYTES, APP_RESPONSE_BYTES, GUEST_IPV4, PEER_IPV4, TLS_PORT,
-    TLS_SERVER_NAME,
+    APP_REQUEST_BYTES, APP_RESPONSE_BYTES, GUEST_IPV4, PEER_IPV4, TLS_PORT, TLS_SERVER_NAME,
 };
 use clean_slate_network::protocol::TrustedCaller;
 use clean_slate_network::session::SessionGeneration;

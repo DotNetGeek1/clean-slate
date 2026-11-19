@@ -31,8 +31,6 @@ pub struct ImpairCounts {
     pub dns_forged_replies: u32,
     /// Gratuitous ARP replies sent ahead of the real answer to a request.
     pub arp_poison_replies: u32,
-    /// First real ARP reply for a poisoned IP, withheld so it cannot correct a poisoned cache.
-    pub arp_replies_withheld: u32,
     /// First SYN of each guest connection, dropped.
     pub tcp_syns_dropped: u32,
     /// First guest data segment of each connection, dropped.
@@ -50,7 +48,6 @@ impl ImpairCounts {
         dns_queries_dropped: 0,
         dns_forged_replies: 0,
         arp_poison_replies: 0,
-        arp_replies_withheld: 0,
         tcp_syns_dropped: 0,
         tcp_guest_data_dropped: 0,
         tcp_blind_rsts: 0,
@@ -160,31 +157,49 @@ pub fn destined_to_poison_mac(frame: &[u8]) -> bool {
     frame.len() >= 6 && frame[..6] == ARP_POISON_MAC
 }
 
-/// One gratuitous ARP poison per requested IP, then the first real reply for that IP withheld.
+/// How long requests for a poisoned IP stay off the peer, so the guest sees the
+/// gratuitous reply before any real one is generated.
+const ARP_POISON_HOLD: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// What to do with a guest ARP request on the impaired wire.
+pub enum GuestArp {
+    /// Not a request this impairer is holding.
+    Forward,
+    /// Send this gratuitous reply and do not deliver the request.
+    Poison(Vec<u8>),
+    /// The poison is still in flight; do not let the peer answer yet.
+    Hold,
+}
+
+/// One gratuitous ARP poison per requested IP. Further requests for that IP are
+/// held until [`ARP_POISON_HOLD`] has elapsed, so a guest that cached the poison
+/// never receives a later real reply, while a guest that ignored it still does.
 #[derive(Default)]
 pub struct ArpImpairer {
-    poisoned: HashSet<Ipv4Addr>,
-    withheld: HashSet<Ipv4Addr>,
+    hold_until: HashMap<Ipv4Addr, std::time::Instant>,
 }
 
 impl ArpImpairer {
-    /// A gratuitous reply for the IP this request asks about, once per IP.
-    pub fn poison_for_request(&mut self, frame: &[u8]) -> Option<Vec<u8>> {
-        let arp = arp_packet(frame)?;
-        if arp.op != ArpOp::Request || !self.poisoned.insert(arp.target_ip) {
-            return None;
-        }
-        let guest = EthernetHeader::parse(frame).ok()?.0.src;
-        Some(gratuitous_arp(guest, arp.target_ip))
-    }
-
-    /// The first real reply for an IP we poisoned, which must not reach the guest.
-    pub fn withhold_real_reply(&mut self, frame: &[u8]) -> bool {
-        let arp = match arp_packet(frame) {
-            Some(arp) if arp.op == ArpOp::Reply && self.poisoned.contains(&arp.sender_ip) => arp,
-            _ => return false,
+    pub fn on_guest_request(&mut self, frame: &[u8]) -> GuestArp {
+        let Some(arp) = arp_packet(frame) else {
+            return GuestArp::Forward;
         };
-        self.withheld.insert(arp.sender_ip)
+        if arp.op != ArpOp::Request {
+            return GuestArp::Forward;
+        }
+        let now = std::time::Instant::now();
+        if let Some(until) = self.hold_until.get(&arp.target_ip) {
+            return if now < *until {
+                GuestArp::Hold
+            } else {
+                GuestArp::Forward
+            };
+        }
+        let Ok((eth, _)) = EthernetHeader::parse(frame) else {
+            return GuestArp::Forward;
+        };
+        self.hold_until.insert(arp.target_ip, now + ARP_POISON_HOLD);
+        GuestArp::Poison(gratuitous_arp(eth.src, arp.target_ip))
     }
 }
 
@@ -535,9 +550,8 @@ mod tests {
     }
 
     #[test]
-    fn arp_poison_is_gratuitous_and_the_first_real_reply_is_withheld() {
+    fn arp_poison_is_gratuitous_and_requests_wait_out_the_hold() {
         let guest = MacAddr::new([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
-        let peer = MacAddr::new(clean_slate_network::fixture::PEER_MAC.octets());
         let request =
             ArpPacket::request(guest, clean_slate_network::fixture::GUEST_IPV4, PEER_IPV4);
         let mut body = [0u8; ARP_PACKET_LEN];
@@ -553,10 +567,12 @@ mod tests {
         asking[14..14 + ARP_PACKET_LEN].copy_from_slice(&body);
 
         let mut arp = ArpImpairer::default();
-        let poison = arp.poison_for_request(&asking).unwrap();
+        let GuestArp::Poison(poison) = arp.on_guest_request(&asking) else {
+            panic!("the first request is poisoned");
+        };
         assert!(
-            arp.poison_for_request(&asking).is_none(),
-            "one poison per IP"
+            matches!(arp.on_guest_request(&asking), GuestArp::Hold),
+            "a retry during the hold does not reach the peer"
         );
         let parsed = arp_packet(&poison).unwrap();
         assert_eq!(parsed.op, ArpOp::Reply);
@@ -572,15 +588,10 @@ mod tests {
             from_guest
         }));
 
-        let real = ArpPacket::reply_to(request, peer, PEER_IPV4);
-        real.write(&mut body).unwrap();
-        let mut reply = asking.clone();
-        reply[6..12].copy_from_slice(&peer.octets());
-        reply[14..14 + ARP_PACKET_LEN].copy_from_slice(&body);
-        assert!(arp.withhold_real_reply(&reply));
+        std::thread::sleep(ARP_POISON_HOLD + std::time::Duration::from_millis(20));
         assert!(
-            !arp.withhold_real_reply(&reply),
-            "only the first real reply"
+            matches!(arp.on_guest_request(&asking), GuestArp::Forward),
+            "after the hold, a retry reaches the peer"
         );
     }
 }
