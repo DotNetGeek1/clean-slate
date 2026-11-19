@@ -130,9 +130,10 @@ fn sector_granular_torn_superblock_recovers_old_or_new_commit() {
     }
 }
 
-/// The commit has no flush between the payload writes and the superblock
-/// write, so a write-back cache may persist the superblock while a payload
-/// write is torn. The payload checksum is what rejects that commit.
+/// The commit flushes its payload before writing the superblock, so this image
+/// needs a device that acknowledged that flush without persisting a payload
+/// write in full, or a misdirected write. The payload checksum is what rejects
+/// that commit.
 #[test]
 fn torn_payload_under_landed_superblock_falls_back_to_previous_commit() {
     let geometry = geometry(512);
@@ -153,10 +154,9 @@ fn torn_payload_under_landed_superblock_falls_back_to_previous_commit() {
 
 /// `alpha` is a sorted table rewritten with each block's records in reverse
 /// order. Both blocks differ between versions, but each holds the same bytes
-/// in another order, so tearing the second block leaves the additive byte-sum
-/// checksum unchanged and recovery accepts a payload no commit ever wrote.
+/// in another order, so tearing the second block leaves an additive byte sum
+/// unchanged; the payload CRC-32C must still reject the mixed payload.
 #[test]
-#[ignore = "the store's byte-sum checksum cannot detect this tear (#224)"]
 fn torn_payload_with_equal_byte_sum_falls_back_to_previous_commit() {
     let geometry = geometry(512);
     let block = block_bytes(geometry);

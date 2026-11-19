@@ -1,6 +1,6 @@
 //! M5 minimal persistent object store.
 //!
-//! Version 1 uses a fixed, host-testable on-disk layout encoded explicitly in
+//! Version 2 uses a fixed, host-testable on-disk layout encoded explicitly in
 //! little-endian bytes:
 //!
 //! - LBA 0: superblock slot A
@@ -11,32 +11,41 @@
 //! Each superblock occupies exactly one logical block and contains:
 //!
 //! - magic (`CSO1`);
-//! - format version (`1`);
-//! - checksum over the full superblock block with the checksum field zeroed;
+//! - format version (`2`);
+//! - CRC-32C over the full superblock block with the checksum field zeroed;
 //! - expected logical block size and device block count;
 //! - generation number for slot selection;
 //! - fixed table capacity and active object count;
 //! - a fixed object table whose entries store object id, UTF-8 name, exact byte
-//!   length, validated data extent, and a payload checksum used to reject a
+//!   length, validated data extent, and a payload CRC-32C used to reject a
 //!   superblock whose referenced data is only partially durable.
 //!
+//! Version 1 differed only in using an additive byte sum for both checksums.
+//! It is not migrated: a version-1 image is refused with
+//! [`IncompatibleFormatError::UnsupportedVersion`], and the magic is unchanged
+//! so callers that format a blank (`BadMagic`) device never reformat it.
+//!
 //! Commits never need in-place multi-block metadata mutation: object data is
-//! written first, then a complete next-generation superblock is written to the
-//! alternate metadata slot, and finally the block backend `flush` boundary is
-//! invoked.
+//! written first and flushed, then a complete next-generation superblock is
+//! written to the alternate metadata slot and flushed. The first flush keeps a
+//! write-back cache from persisting the superblock ahead of the payload it
+//! references.
 
 #![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
+
+mod crc32c;
 
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use clean_slate_block::{BlockDevice, BlockGeometry, BlockIoError};
 use core::cmp::Ordering;
+use crc32c::{crc32c, Crc32c};
 
 pub const STORE_MAGIC: u32 = 0x4353_4F31; // "CSO1"
-pub const STORE_VERSION: u16 = 1;
+pub const STORE_VERSION: u16 = 2;
 pub const SUPERBLOCK_SLOTS: u64 = 2;
 pub const DATA_START_LBA: u64 = SUPERBLOCK_SLOTS;
 pub const MAX_OBJECTS: usize = 7;
@@ -259,6 +268,7 @@ impl<D: BlockDevice> ObjectStore<D> {
         for object in &object_layout {
             write_object_data(&mut self.device, self.geometry, object)?;
         }
+        self.device.flush()?;
 
         let superblock = Superblock {
             generation: next_generation,
@@ -427,7 +437,7 @@ fn decode_superblock(
         ));
     }
 
-    if checksum(bytes) != read_u32(bytes, CHECKSUM_RANGE.start) {
+    if superblock_checksum(bytes) != read_u32(bytes, CHECKSUM_RANGE.start) {
         return Err(SlotDecodeError::Corrupt(
             CorruptFormatError::ChecksumMismatch,
         ));
@@ -631,7 +641,7 @@ fn build_object_layout(
             data_len: data_len_u32,
             start_lba: object_start,
             block_count,
-            data_checksum: checksum(object.data.as_slice()),
+            data_checksum: crc32c(object.data.as_slice()),
         });
     }
 
@@ -693,8 +703,8 @@ fn encode_superblock(
         bytes[(start + 32)..(start + 32 + name_bytes.len())].copy_from_slice(name_bytes);
     }
 
-    let superblock_checksum = checksum(&bytes);
-    write_u32(&mut bytes, CHECKSUM_RANGE.start, superblock_checksum);
+    let checksum = superblock_checksum(&bytes);
+    write_u32(&mut bytes, CHECKSUM_RANGE.start, checksum);
     Ok(bytes)
 }
 
@@ -767,7 +777,7 @@ fn read_object_data<D: BlockDevice>(
         &mut bytes,
     )?;
     bytes.truncate(usize::try_from(object.data_len).expect("data length fits"));
-    if checksum(bytes.as_slice()) != object.data_checksum {
+    if crc32c(bytes.as_slice()) != object.data_checksum {
         return Err(StoreError::Corrupt(
             CorruptFormatError::ObjectChecksumMismatch,
         ));
@@ -801,15 +811,13 @@ fn read_blocks_chunked<D: BlockDevice>(
     Ok(())
 }
 
-fn checksum(bytes: &[u8]) -> u32 {
-    let mut sum = 0u32;
-    for (index, byte) in bytes.iter().enumerate() {
-        if CHECKSUM_RANGE.contains(&index) {
-            continue;
-        }
-        sum = sum.wrapping_add(u32::from(*byte));
-    }
-    sum
+/// CRC-32C of a superblock block, computed as if its checksum field were zero.
+fn superblock_checksum(bytes: &[u8]) -> u32 {
+    let mut crc = Crc32c::new();
+    crc.update(&bytes[..CHECKSUM_RANGE.start]);
+    crc.update(&[0; CHECKSUM_RANGE.end - CHECKSUM_RANGE.start]);
+    crc.update(&bytes[CHECKSUM_RANGE.end..]);
+    crc.finish()
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
@@ -1055,7 +1063,7 @@ mod tests {
         device.read_blocks(0, 1, &mut slot).unwrap();
         slot[4..6].copy_from_slice(&99u16.to_le_bytes());
         slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&0u32.to_le_bytes());
-        let sum = checksum(&slot);
+        let sum = superblock_checksum(&slot);
         slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&sum.to_le_bytes());
         device.write_blocks(0, 1, &slot).unwrap();
         device.write_blocks(1, 1, &slot).unwrap();
@@ -1065,6 +1073,43 @@ mod tests {
             ObjectStore::mount(device).unwrap_err(),
             StoreError::Incompatible(IncompatibleFormatError::UnsupportedVersion(99))
         );
+    }
+
+    /// Rewrite a superblock as format version 1 wrote it: version field 1 and
+    /// an additive byte sum over the block with the checksum field skipped.
+    fn downgrade_to_version_one(slot: &mut [u8]) {
+        slot[4..6].copy_from_slice(&1u16.to_le_bytes());
+        let byte_sum = slot
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !CHECKSUM_RANGE.contains(index))
+            .fold(0u32, |sum, (_, byte)| sum.wrapping_add(u32::from(*byte)));
+        slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&byte_sum.to_le_bytes());
+    }
+
+    #[test]
+    fn version_one_image_is_refused_as_unsupported_version() {
+        let device = FakeBlockDevice::new(geometry()).unwrap();
+        let mut store = ObjectStore::format(device).unwrap();
+        store.write_object(1, "alpha", b"v1-era payload").unwrap();
+        store.commit().unwrap();
+        let mut device = store.into_inner();
+        for slot_lba in 0..SUPERBLOCK_SLOTS {
+            let mut slot = durable_slot(&mut device, slot_lba);
+            downgrade_to_version_one(&mut slot);
+            device.write_blocks(slot_lba, 1, &slot).unwrap();
+        }
+        device.flush().unwrap();
+
+        assert_eq!(
+            ObjectStore::mount(device).unwrap_err(),
+            StoreError::Incompatible(IncompatibleFormatError::UnsupportedVersion(1))
+        );
+    }
+
+    #[test]
+    fn all_zero_superblock_does_not_carry_a_valid_checksum() {
+        assert_ne!(superblock_checksum(&[0; 512]), 0);
     }
 
     #[test]
@@ -1086,7 +1131,7 @@ mod tests {
         slot[(entry_start + 24)..(entry_start + 32)].copy_from_slice(&7u64.to_le_bytes());
         slot[(entry_start + 32)..(entry_start + 37)].copy_from_slice(b"alpha");
         slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&0u32.to_le_bytes());
-        let sum = checksum(&slot);
+        let sum = superblock_checksum(&slot);
         slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&sum.to_le_bytes());
         device.write_blocks(0, 1, &slot).unwrap();
         device.write_blocks(1, 1, &slot).unwrap();
@@ -1116,7 +1161,7 @@ mod tests {
         slot[(entry_start + 24)..(entry_start + 32)].copy_from_slice(&9u64.to_le_bytes());
         slot[(entry_start + 32)..(entry_start + 37)].copy_from_slice(b"alpha");
         slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&0u32.to_le_bytes());
-        let sum = checksum(&slot);
+        let sum = superblock_checksum(&slot);
         slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&sum.to_le_bytes());
         device.write_blocks(0, 1, &slot).unwrap();
         device.write_blocks(1, 1, &slot).unwrap();
@@ -1140,7 +1185,7 @@ mod tests {
         device.read_blocks(0, 1, &mut stale_slot).unwrap();
         stale_slot[0..4].copy_from_slice(b"BAD!");
         stale_slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&0u32.to_le_bytes());
-        let sum = checksum(&stale_slot);
+        let sum = superblock_checksum(&stale_slot);
         stale_slot[CHECKSUM_RANGE.start..CHECKSUM_RANGE.end].copy_from_slice(&sum.to_le_bytes());
         device.write_blocks(0, 1, &stale_slot).unwrap();
         device.flush().unwrap();
