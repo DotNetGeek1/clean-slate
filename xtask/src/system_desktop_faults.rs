@@ -20,7 +20,8 @@ use crate::system_boot::{desktop_qemu_args, start_shell_fixture_peer, system_vm_
 use crate::system_desktop::{DesktopMachine, VIRTIO_GPU_Q1};
 use crate::system_shell::qemu_state;
 use crate::{
-    announce_qemu_version, prepare_vm, xtask_artifact_root, ReapOnDrop, VmLaunchConfig, XtaskError,
+    announce_qemu_version, prepare_vm, xtask_artifact_root, PreparedVm, ReapOnDrop, VmLaunchConfig,
+    XtaskError,
 };
 
 const STEP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -38,6 +39,11 @@ pub(crate) type Check<'a, S> = dyn FnMut(usize, &str, Option<&S>) -> Result<S, S
 /// One boot of the hooks build with the desktop entry on a modern-only VirtIO-GPU.
 pub(crate) struct Session {
     child: ReapOnDrop,
+    /// OVMF vars copy [`prepare_vm`] built for this boot. Declared after
+    /// `child` so it drops only once [`ReapOnDrop`] has killed and reaped QEMU
+    /// (fields drop in declaration order). Dropping it from [`Session::start`]
+    /// deleted the `.fd` while QEMU was still opening it.
+    _prepared: PreparedVm,
     writer: TcpStream,
     rx: mpsc::Receiver<SerialEvent>,
     _reader: JoinHandle<()>,
@@ -94,6 +100,7 @@ impl Session {
         let reader = spawn_serial_reader(stream, tx);
         Ok(Self {
             child,
+            _prepared: vm,
             writer,
             rx,
             _reader: reader,
@@ -342,4 +349,89 @@ pub(crate) fn drive<S: Clone>(
     })();
     peer.shutdown();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::process::Command;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use super::Session;
+    use crate::guest_reboot::GuestRebootDetector;
+    use crate::ovmf_vars::RuntimeVarsCopy;
+    use crate::{PreparedVm, ReapOnDrop};
+
+    /// A process that exits at once. [`ReapOnDrop`] still owns it, and it does not
+    /// hold the vars file, so the copy can be deleted as soon as the session drops.
+    fn helper_child() -> std::process::Child {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/c", "exit", "0"]);
+            command
+        } else {
+            Command::new("true")
+        };
+        command.spawn().expect("helper process")
+    }
+
+    #[test]
+    fn session_owns_the_ovmf_vars_copy_until_it_drops() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "clean-slate-session-ovmf-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let template = dir.join("template.fd");
+        fs::write(&template, b"pristine").expect("template");
+        let copy = RuntimeVarsCopy::create(&dir, &template).expect("vars copy");
+        let vars = copy.path().to_path_buf();
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+        let writer = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let _accepted = listener.accept().expect("accept");
+        let (_tx, rx) = mpsc::channel();
+
+        let session = Session {
+            child: ReapOnDrop(helper_child()),
+            _prepared: PreparedVm {
+                qemu: Command::new("qemu-system-x86_64"),
+                _runtime_vars: Some(copy),
+            },
+            writer,
+            rx,
+            _reader: thread::spawn(|| {}),
+            qmp: None,
+            transcript: Vec::new(),
+            mark: 0,
+            reboot: GuestRebootDetector::default(),
+            forbidden: &[],
+            deadline: Instant::now() + Duration::from_secs(1),
+            transcript_path: "system/session-guard-test.log",
+        };
+
+        assert_eq!(
+            session
+                ._prepared
+                ._runtime_vars
+                .as_ref()
+                .map(RuntimeVarsCopy::path),
+            Some(vars.as_path()),
+            "the session must own the vars copy prepared for its QEMU"
+        );
+        assert!(vars.is_file());
+        drop(session);
+        assert!(
+            !vars.exists(),
+            "the vars copy is deleted only when the session drops"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
