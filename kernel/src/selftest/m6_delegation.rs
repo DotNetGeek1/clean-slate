@@ -334,6 +334,9 @@ fn delegation_report_handler(pid: u64, report: &M6FixtureBootstrap) -> FixtureRe
         return FixtureReportAction::Continue;
     }
     let state = state_mut();
+    if pid == PREDICTED_OWNER_PID {
+        return FixtureReportAction::Fail("owner fixture step failed");
+    }
     if pid != state.reader_pid {
         return FixtureReportAction::Fail("unexpected fixture report pid");
     }
