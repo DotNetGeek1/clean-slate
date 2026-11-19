@@ -12,7 +12,7 @@ use clean_slate_network::error::NetworkError;
 #[cfg(not(feature = "m7-tls-fail-closed-self-test"))]
 use clean_slate_network::fixture::TCP_ECHO_PORT;
 use clean_slate_network::fixture::{
-    APP_REQUEST_BYTES, APP_RESPONSE_BYTES, GUEST_IPV4, PEER_IPV4, PEER_MAC, TLS_PORT,
+    APP_REQUEST_BYTES, APP_RESPONSE_BYTES, GUEST_IPV4, PEER_IPV4, TLS_PORT,
     TLS_SERVER_NAME,
 };
 use clean_slate_network::protocol::TrustedCaller;
@@ -163,10 +163,6 @@ fn tcp_transport() -> Result<&'static mut TcpTransport<VirtioNetDevice>, &'stati
             let stack = L3Stack::new(device, mac, GUEST_IPV4, ARP_TTL_MS);
             let slot = TCP_TRANSPORT.as_mut_ptr();
             TcpTransport::init_in_place(slot, stack, SessionGeneration::new(1));
-            (*TCP_TRANSPORT.as_mut_ptr())
-                .stack_mut()
-                .arp_cache_mut()
-                .insert(PEER_IPV4, PEER_MAC, now_ms());
             TCP_TRANSPORT_READY = true;
         }
         Ok(&mut *TCP_TRANSPORT.as_mut_ptr())
