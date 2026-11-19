@@ -67,7 +67,7 @@ Every `NetworkRequest` / `NetworkResponse` is one fixed 64-byte frame so it fits
 
 - `Resolve` names are bounded by `MAX_REQUEST_HOSTNAME_LEN` (55 bytes). DNS wire names up to `MAX_DNS_NAME_LEN` are parsed by the resolver lane only.
 - `Send` / `Receive` frames carry byte counts only; payload bytes move through the bounded payload region owned by the network-service transport (#83), never inside the IPC frame.
-- `NET_RAW_DEVICE` is a valid `Network`-class bit but the broker must never include it in an application grant; it exists so the driver/service side can hold explicit raw-NIC authority distinct from application network authority.
+- `NET_RAW_DEVICE` is a valid `Network`-class bit but the broker must never include it in an application grant; it exists so the driver/service side can hold explicit raw-NIC authority distinct from application network authority. It is `root_only_for(Network)` (#220): delegation refuses it with `NotDelegable` and fork does not copy it, so only the kernel's grant to the live network service carries it. The raw geometry/transmit/receive handlers also require the caller to be the live network service, as `SERVICE_NEXT`/`SERVICE_COMPLETE` do.
 
 ## Hermetic fixture
 
