@@ -723,6 +723,10 @@ fn bit_flip_at_every_prefix_never_mixes_generations() {
     assert_holds(&report);
 }
 
+/// Holds before checksums bind object id and location (stage E of #224): a
+/// superblock needs a valid CRC-32C and extents inside its own slot's arena,
+/// and each payload must match the CRC-32C in its entry, so a misdirected
+/// write can roll the mount back or fail it, but not mix generations.
 #[test]
 fn misdirected_write_at_every_prefix_never_mixes_generations() {
     let report = crash_matrix(Mode::Misdirected);
