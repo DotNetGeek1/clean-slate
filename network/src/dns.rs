@@ -31,6 +31,10 @@ pub const DNS_QUERY_TIMEOUT_MS: u64 = 500;
 /// Resolver query timeout at 1 ms/tick production (`DNS_QUERY_TIMEOUT_MS`).
 pub const DNS_QUERY_TIMEOUT_TICKS: u64 = DNS_QUERY_TIMEOUT_MS;
 
+/// Interval (ms, = ticks at 1 ms/tick) after which an unanswered query is sent again with the
+/// same ID, until [`DNS_QUERY_TIMEOUT_TICKS`] expires: four sends within the deadline.
+pub const DNS_RETRANSMIT_TICKS: u64 = DNS_QUERY_TIMEOUT_TICKS / 4;
+
 /// Compression pointer follow hop limit.
 pub const DNS_COMPRESSION_HOP_LIMIT: usize = 16;
 
@@ -590,7 +594,10 @@ struct PendingQuery {
     name: [u8; MAX_DNS_NAME_LEN],
     endpoint: SessionId,
     deadline: u64,
-    query_sent: bool,
+    /// Tick at which the query is (re)sent: the resolve tick until a send succeeds, then
+    /// [`DNS_RETRANSMIT_TICKS`] after each successful send.
+    next_send: u64,
+    sends: u8,
     state: PendingState,
 }
 
@@ -605,7 +612,8 @@ impl PendingQuery {
             name: [0; MAX_DNS_NAME_LEN],
             endpoint: SessionId::new(SessionGeneration::new(0), 0),
             deadline: 0,
-            query_sent: false,
+            next_send: 0,
+            sends: 0,
             state: PendingState::InFlight,
         }
     }
@@ -617,6 +625,8 @@ pub struct DnsResolverStats {
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub queries_sent: u64,
+    /// Sends of a query after its first, because no acceptable reply arrived in time.
+    pub retransmits: u64,
     pub responses_ok: u64,
     pub dropped_mismatch: u64,
     pub dropped_foreign_source: u64,
@@ -777,7 +787,8 @@ impl<L: NetworkLink> DnsResolver<L> {
         let (name_buf, name_len) = Self::store_name(name)?;
 
         let deadline = now.saturating_add(DNS_QUERY_TIMEOUT_TICKS);
-        let mut query_sent = false;
+        let mut next_send = now;
+        let mut sends = 0;
         let mut payload = [0u8; 512];
         let plen = encode_query(dns_id, name, &mut payload)?;
         match self
@@ -786,7 +797,8 @@ impl<L: NetworkLink> DnsResolver<L> {
         {
             Ok(_) => {
                 self.stats.queries_sent += 1;
-                query_sent = true;
+                next_send = now.saturating_add(DNS_RETRANSMIT_TICKS);
+                sends = 1;
             }
             Err(NetworkError::Unreachable) => {}
             Err(e) => {
@@ -804,7 +816,8 @@ impl<L: NetworkLink> DnsResolver<L> {
             name: name_buf,
             endpoint,
             deadline,
-            query_sent,
+            next_send,
+            sends,
             state: PendingState::InFlight,
         };
         Ok(ResolveOutcome::Pending { query_id })
@@ -840,23 +853,6 @@ impl<L: NetworkLink> DnsResolver<L> {
         for i in 0..PENDING_SLOTS {
             if !self.pending[i].live || !matches!(self.pending[i].state, PendingState::InFlight) {
                 continue;
-            }
-            if !self.pending[i].query_sent {
-                let owner = self.pending[i].owner;
-                let endpoint = self.pending[i].endpoint;
-                let dns_id = self.pending[i].dns_id;
-                let name = Self::pending_name(&self.pending[i]);
-                let mut payload = [0u8; 512];
-                if let Ok(plen) = encode_query(dns_id, name, &mut payload) {
-                    if self
-                        .udp
-                        .send(now, endpoint, owner, Some(self.server), &payload[..plen])
-                        .is_ok()
-                    {
-                        self.stats.queries_sent += 1;
-                        self.pending[i].query_sent = true;
-                    }
-                }
             }
             let owner = self.pending[i].owner;
             let endpoint = self.pending[i].endpoint;
@@ -907,17 +903,47 @@ impl<L: NetworkLink> DnsResolver<L> {
                     }
                 }
             }
+            let pending = &self.pending[i];
+            if !matches!(pending.state, PendingState::InFlight) || now < pending.next_send {
+                continue;
+            }
+            let mut payload = [0u8; 512];
+            let Ok(plen) = encode_query(dns_id, Self::pending_name(pending), &mut payload) else {
+                continue;
+            };
+            if self
+                .udp
+                .send(now, endpoint, owner, Some(self.server), &payload[..plen])
+                .is_ok()
+            {
+                self.stats.queries_sent += 1;
+                if self.pending[i].sends > 0 {
+                    self.stats.retransmits += 1;
+                }
+                self.pending[i].sends = self.pending[i].sends.saturating_add(1);
+                self.pending[i].next_send = now.saturating_add(DNS_RETRANSMIT_TICKS);
+            }
         }
         Ok(())
     }
 
-    /// Earliest tick at which [`Self::poll`] times out an in-flight query (`poll` expires a
-    /// query once `now` passes its deadline), or `None` with nothing in flight.
+    /// Earliest tick at which [`Self::poll`] retransmits or times out an in-flight query (`poll`
+    /// expires a query once `now` passes its deadline), or `None` with nothing in flight.
+    ///
+    /// A query whose first send has not succeeded yet (ARP miss) is retried on the next poll
+    /// that ingress triggers, so it contributes only its timeout here.
     pub fn next_deadline(&self) -> Option<u64> {
         self.pending
             .iter()
             .filter(|p| p.live && matches!(p.state, PendingState::InFlight))
-            .map(|p| p.deadline.saturating_add(1))
+            .map(|p| {
+                let expiry = p.deadline.saturating_add(1);
+                if p.sends > 0 {
+                    expiry.min(p.next_send)
+                } else {
+                    expiry
+                }
+            })
             .min()
     }
 
@@ -1170,6 +1196,10 @@ mod tests {
             transport: std::boxed::Box<UdpTransport<FakeLink>>,
             owner: TrustedCaller,
             listen: Option<SessionId>,
+            /// Queries still to be received and dropped unanswered.
+            ignore_queries: u32,
+            ignored_ids: Vec<u16>,
+            answered_ids: Vec<u16>,
         }
 
         impl TestDnsServer {
@@ -1185,6 +1215,9 @@ mod tests {
                     transport,
                     owner,
                     listen: None,
+                    ignore_queries: 0,
+                    ignored_ids: Vec::new(),
+                    answered_ids: Vec::new(),
                 }
             }
 
@@ -1208,6 +1241,12 @@ mod tests {
                 if let Ok(Some((from, len))) = self.transport.receive(id, self.owner, &mut buf) {
                     let slice = &buf[..len];
                     let hdr = DnsHeader::parse(slice).unwrap();
+                    if self.ignore_queries > 0 {
+                        self.ignore_queries -= 1;
+                        self.ignored_ids.push(hdr.id);
+                        return;
+                    }
+                    self.answered_ids.push(hdr.id);
                     let mut hops = 0;
                     let mut qbuf = [0u8; MAX_DNS_NAME_LEN];
                     let (qlen, qend) = read_name_at_no_alloc(
@@ -1315,16 +1354,57 @@ mod tests {
                     ResolveOutcome::Pending { query_id } => query_id,
                     _ => panic!("expected pending"),
                 };
-                let deadline = resolver.next_deadline().expect("query in flight");
-                assert_eq!(deadline, 5 + DNS_QUERY_TIMEOUT_TICKS + 1);
-                resolver.poll(deadline - 1).unwrap();
+                let expiry = 5 + DNS_QUERY_TIMEOUT_TICKS + 1;
+                let mut retransmit_at = 5 + DNS_RETRANSMIT_TICKS;
+                while retransmit_at < expiry {
+                    assert_eq!(resolver.next_deadline(), Some(retransmit_at));
+                    resolver.poll(retransmit_at - 1).unwrap();
+                    let before = resolver.stats().retransmits;
+                    resolver.poll(retransmit_at).unwrap();
+                    assert_eq!(resolver.stats().retransmits, before + 1);
+                    retransmit_at += DNS_RETRANSMIT_TICKS;
+                }
+                assert_eq!(resolver.next_deadline(), Some(expiry));
+                resolver.poll(expiry - 1).unwrap();
                 assert_eq!(resolver.take_result(qid, OWNER), None);
-                resolver.poll(deadline).unwrap();
+                resolver.poll(expiry).unwrap();
                 assert_eq!(
                     resolver.take_result(qid, OWNER).unwrap(),
                     Err(DnsError::Timeout)
                 );
                 assert_eq!(resolver.next_deadline(), None);
+                assert_eq!(
+                    resolver.stats().retransmits,
+                    DNS_QUERY_TIMEOUT_TICKS / DNS_RETRANSMIT_TICKS
+                );
+            });
+        }
+
+        #[test]
+        fn a_lost_query_is_sent_again_with_the_same_id() {
+            run_on_large_stack(|| {
+                let (a, b) = FakeLink::pair();
+                let mut server = TestDnsServer::new(b);
+                server.ensure_bind53();
+                server.ignore_queries = 1;
+                let mut resolver = make_resolver(a);
+                let qid = match resolver.resolve(0, OWNER, FIXTURE_HOSTNAME).unwrap() {
+                    ResolveOutcome::Pending { query_id } => query_id,
+                    _ => panic!("expected pending"),
+                };
+                pump_both(&mut resolver, &mut server, 0, DNS_RETRANSMIT_TICKS - 1);
+                assert_eq!(resolver.take_result(qid, OWNER), None);
+                assert_eq!(server.ignored_ids.len(), 1);
+                pump_both(
+                    &mut resolver,
+                    &mut server,
+                    DNS_RETRANSMIT_TICKS - 1,
+                    DNS_RETRANSMIT_TICKS,
+                );
+                let (addr, _) = resolver.take_result(qid, OWNER).unwrap().unwrap();
+                assert_eq!(addr, FIXTURE_A_RECORD);
+                assert_eq!(server.answered_ids, server.ignored_ids);
+                assert_eq!(resolver.stats().retransmits, 1);
             });
         }
 
