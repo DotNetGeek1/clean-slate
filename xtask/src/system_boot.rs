@@ -176,6 +176,7 @@ fn start_peer(m9_profile: bool) -> Result<M7FixturePeer, XtaskError> {
         tls_cert: WhichCert::Correct,
         dns_reply_delay: Duration::ZERO,
         m9_profile,
+        impaired: false,
     })
     .map_err(XtaskError::Io)
 }
