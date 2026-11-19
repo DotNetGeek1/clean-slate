@@ -132,6 +132,25 @@ pub(crate) fn guarded_stack_for_fault(
         .or_else(|| guarded_stack_records().find(|stack| stack.guard_contains(stack_pointer)))
 }
 
+/// Exclusive end of what a fault dump may read upward from `stack_pointer`: the top of the
+/// guarded stack holding it, else the end of its page. Task stacks are adjacent, so a scan past
+/// one stack's top reads the next stack's guard page and faults inside the dump.
+pub(crate) fn stack_scan_end(stack_pointer: u64) -> u64 {
+    stack_scan_end_in(guarded_stack_records(), stack_pointer)
+}
+
+fn stack_scan_end_in(
+    mut stacks: impl Iterator<Item = GuardedStackRecord>,
+    stack_pointer: u64,
+) -> u64 {
+    stacks
+        .find(|stack| stack_pointer >= stack.base && stack_pointer <= stack.top)
+        .map_or_else(
+            || (stack_pointer | (PAGE_SIZE - 1)).saturating_add(1),
+            |stack| stack.top,
+        )
+}
+
 /// Unmaps the guard page of every stack in `stacks` from `kernel_root` and
 /// records them for fault classification. Boot-only; must run after the
 /// kernel root and direct map are live and before any process root or shared
@@ -254,6 +273,29 @@ mod tests {
         assert_eq!(guarded_stack_for_fault(0x10_1000, 0x10_1008), None);
         assert_eq!(format!("{}", SlotLabel(task.kind)), "1");
         assert_eq!(format!("{}", SlotLabel(boot.kind)), "boot");
+    }
+
+    #[test]
+    fn stack_scan_stops_at_the_top_of_the_stack_holding_the_pointer() {
+        let slot0 = GuardedStackRecord {
+            kind: KernelStackKind::Task { slot: 0 },
+            guard_start: 0x10_0000,
+            base: 0x10_1000,
+            top: 0x12_1000,
+        };
+        let slot1 = GuardedStackRecord {
+            kind: KernelStackKind::Task { slot: 1 },
+            guard_start: 0x12_1000,
+            base: 0x12_2000,
+            top: 0x14_2000,
+        };
+        let stacks = [slot0, slot1];
+        // The #217 report: a syscall fault near the top of slot 0 scanned into slot 1's guard.
+        assert_eq!(stack_scan_end_in(stacks.into_iter(), 0x12_0e48), 0x12_1000);
+        assert_eq!(stack_scan_end_in(stacks.into_iter(), 0x12_1000), 0x12_1000);
+        assert_eq!(stack_scan_end_in(stacks.into_iter(), 0x12_2008), 0x14_2000);
+        assert_eq!(stack_scan_end_in(stacks.into_iter(), 0x30_0010), 0x30_1000);
+        assert_eq!(stack_scan_end_in(stacks.into_iter(), 0x30_0fff), 0x30_1000);
     }
 
     #[test]
