@@ -939,6 +939,9 @@ const M5_PRE_CRASH_REPORT: [MarkerStep; 4] = [
         fields: &[("bytes=", "700"), ("checksum=", "00008b74")],
     },
 ];
+/// The generation-3 commit flushes its payload before the superblock write (#224); a
+/// boot stopped at write 3 must have logged that flush after arming.
+const M5_PAYLOAD_FLUSH: MarkerStep = MarkerStep::Ordered("[BLK ] flush complete");
 const M5_CRASH_ARM_EARLY_SPEC: &[MarkerStep] = &[
     MarkerStep::Line {
         prefix: "[CRSH] armed trigger=",
@@ -960,6 +963,7 @@ const M5_CRASH_ARM_LATE_SPEC: &[MarkerStep] = &[
         prefix: "[CRSH] armed trigger=",
         fields: &[("after-write=", "3")],
     },
+    M5_PAYLOAD_FLUSH,
     M5_PRE_CRASH_REPORT[0],
     M5_PRE_CRASH_REPORT[1],
     M5_PRE_CRASH_REPORT[2],
@@ -977,6 +981,7 @@ const M5_CRASH_TORN_SUPERBLOCK_SPEC: &[MarkerStep] = &[
         prefix: "[CRSH] armed trigger=",
         fields: &[("after-write=", "3"), ("tear=", "superblock-suffix")],
     },
+    M5_PAYLOAD_FLUSH,
     M5_PRE_CRASH_REPORT[0],
     M5_PRE_CRASH_REPORT[1],
     M5_PRE_CRASH_REPORT[2],
@@ -1006,6 +1011,7 @@ const M5_CRASH_TORN_PAYLOAD_SPEC: &[MarkerStep] = &[
         prefix: "[CRSH] torn payload write=",
         fields: &[("write=", "1"), ("blocks-written=", "1"), ("of=", "2")],
     },
+    M5_PAYLOAD_FLUSH,
     M5_PRE_CRASH_REPORT[0],
     M5_PRE_CRASH_REPORT[1],
     M5_PRE_CRASH_REPORT[2],
@@ -1048,8 +1054,8 @@ const M5_CRASH_RECOVERY_EARLY_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[TEST] crash recovery PASS"),
 ];
 /// The third write of the generation-3 commit is its superblock (alpha data, beta data,
-/// superblock, then flush). The device completed it before the crash, so recovery must
-/// mount the new commit even though the flush never ran.
+/// flush, superblock, flush). The device completed it before the crash, so recovery must
+/// mount the new commit even though the final flush never ran.
 const M5_CRASH_RECOVERY_LATE_SPEC: &[MarkerStep] = &[
     MarkerStep::Ordered("[BLK ] virtio-block ready blocks="),
     MarkerStep::Line {

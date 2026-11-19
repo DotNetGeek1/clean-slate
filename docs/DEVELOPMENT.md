@@ -870,7 +870,7 @@ For M5 storage, keep the layering narrow and split:
 The host crash-consistency contract is explicit:
 
 - writes become durable only after `flush` succeeds;
-- `clean-slate-store` commits by writing object data into the inactive copy-on-write arena, then the next-generation superblock into the inactive superblock slot, then `flush`;
+- `clean-slate-store` commits by writing object data into the inactive copy-on-write arena, then `flush`, then the next-generation superblock into the inactive superblock slot, then `flush` (`store/tests/commit_order.rs` pins this order);
 - the exact commit point is the successful return from that final `flush`;
 - recovery must choose either the last previously committed generation or the fully committed new generation, never a mixed/torn combination.
 

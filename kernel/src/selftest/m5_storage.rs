@@ -121,9 +121,9 @@ enum M5Tear {
     /// the sector is what slot 1 held, as read from the device when the service mounted
     /// (`M5_STALE_SUPERBLOCK_SLOT`).
     SuperblockSuffix,
-    /// Only the first block of alpha's payload write reaches the device. Beta's payload
-    /// and the superblock then complete, as a write-back cache may persist them, since
-    /// the commit has no flush before its superblock.
+    /// Only the first block of alpha's payload write reaches the device, yet the write
+    /// reports success, so the payload flush cannot repair it. Beta's payload and the
+    /// superblock then complete, as on a device that loses or misdirects a write.
     PayloadPrefix {
         torn_lba: Option<u64>,
     },
