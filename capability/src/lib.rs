@@ -34,6 +34,7 @@ pub use error::syscall_abi;
 pub use error::CapabilityError;
 pub use handle::{
     CapabilityHandle, Generation, HOLDER_SLOT_QUOTA, MAX_DELEGATION_DEPTH, MAX_SLOTS,
+    MAX_SLOT_ALLOWANCE, MAX_SLOT_ALLOWANCES,
 };
 pub use holder::HolderId;
 pub use provenance::Provenance;

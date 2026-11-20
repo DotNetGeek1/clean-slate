@@ -1,6 +1,7 @@
 use clean_slate_capability::{
     revoke_holder_tree, validate_delegation, CapabilityError, CapabilityHandle, CapabilityRecord,
     CapabilityState, CapabilityTable, HolderId, Provenance, ResourceClass, ResourceRef, Rights,
+    HOLDER_SLOT_QUOTA,
 };
 use clean_slate_native_abi::port::{
     PORT_MAX_CONNECTIONS, PORT_MAX_EVENT_QUEUE_DEPTH, PORT_MAX_OUTSTANDING_PER_CONNECTION,
@@ -1343,8 +1344,10 @@ fn a_full_table_reclaims_revoked_slots_and_otherwise_fails_exactly() {
     let transfer = w.buffer(A, 1, 64);
     let mut fillers = Vec::new();
     while w.table.live_count() < CAPS {
+        // Spread over holders so the table fills before any one holder's quota does.
+        let filler = HolderId(100 + (fillers.len() / HOLDER_SLOT_QUOTA) as u64);
         fillers.push(w.grant(
-            C.holder,
+            filler,
             ResourceRef::object(fillers.len() as u64),
             Rights::READ,
         ));
@@ -1629,7 +1632,10 @@ fn run_property(seed: u64, steps: usize) {
         let pick = |rng: &mut Lcg, list: &[ConnectionId]| -> Option<ConnectionId> {
             (!list.is_empty()).then(|| list[rng.below(list.len())])
         };
+        // A client holds no more than its slot quota; past it the harness stops granting to it.
+        let under_quota = w.table.charged_to(client.holder) < w.table.quota_for(client.holder);
         match rng.below(10) {
+            0 if !under_quota => {}
             0 => {
                 let cap = w.client_cap(client);
                 if let Ok(id) = w.connect_with(client, cap) {
@@ -1639,8 +1645,10 @@ fn run_property(seed: u64, steps: usize) {
             }
             1 | 2 => {
                 if let Some(id) = pick(&mut rng, &conns[who]) {
-                    let transfer =
-                        (rng.below(3) == 0 && w.table.live_count() < CAPS - 2).then(|| {
+                    let transfer = (rng.below(3) == 0
+                        && under_quota
+                        && w.table.live_count() < CAPS - 2)
+                        .then(|| {
                             buffers += 1;
                             w.buffer(client, buffers, 64)
                         });
